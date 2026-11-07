@@ -1,6 +1,7 @@
 package dupes
 
 import (
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -32,7 +33,14 @@ func TestPlanSuppression_OffAndInconclusiveSuppressNothing(t *testing.T) {
 	}
 }
 
-func TestPlanSuppression_SameFormatServesExactlyOneWinner(t *testing.T) {
+// TestPlanSuppression_EveryUnitServesOneWinnerOrNoneWhenItsCopiesAreGone pins
+// PlanSuppression's unit invariant: every suppression unit serves exactly one
+// member, its winner, or none when every member's file is gone and a found
+// unit of its domain serves (round 4 of backlog B489; until then, exactly
+// one). A same-format group is one unit and serves its largest copy; over
+// every group of the gated pool (eachPlannedGroup), each unit gateUnits makes
+// serves one, or none on those terms.
+func TestPlanSuppression_EveryUnitServesOneWinnerOrNoneWhenItsCopiesAreGone(t *testing.T) {
 	members := []Row{
 		flacRow("A/B/x.flac", 44100, 16, 263.73, 26_634_341),
 		flacRow("C/B/x.flac", 44100, 16, 263.73, 26_817_127), // larger → wins
@@ -48,6 +56,51 @@ func TestPlanSuppression_SameFormatServesExactlyOneWinner(t *testing.T) {
 				t.Fatalf("mode %s: the largest same-format copy must be the served winner", mode)
 			}
 		}
+	}
+
+	units, failed := 0, 0
+	eachPlannedGroup(func(members []Row, tier Tier, mode FilterMode, suppressed []string) {
+		for _, dsd := range []bool{false, true} {
+			var domain []Row
+			found := false
+			for _, m := range members {
+				if m.IsDSD == dsd {
+					domain = append(domain, m)
+					found = found || !m.Missing
+				}
+			}
+			if len(domain) == 0 {
+				continue
+			}
+			for _, unit := range gateUnits(domain) {
+				units++
+				served, allGone := 0, true
+				for _, m := range unit {
+					if !slices.Contains(suppressed, m.Path) {
+						served++
+					}
+					allGone = allGone && m.Missing
+				}
+				want := 1
+				if allGone && found {
+					want = 0
+				}
+				if served == want {
+					continue
+				}
+				failed++
+				if failed <= 10 {
+					t.Errorf("%s under %s, %s: the unit %s serves %d, want %d",
+						tier, mode, describeMembers(members), describeMembers(unit), served, want)
+				}
+			}
+		}
+	})
+	if units == 0 {
+		t.Fatal("no unit was checked")
+	}
+	if failed > 0 {
+		t.Errorf("%d of %d units broke the invariant", failed, units)
 	}
 }
 

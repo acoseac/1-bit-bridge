@@ -80,6 +80,7 @@ func TestExtCoversDispatcher(t *testing.T) {
 		".dsf", ".dff",
 		".aif", ".aiff", ".aifc",
 		".wav",
+		".wv", ".ape",
 		".m4a", ".mp4", ".m4b", ".m4p",
 		".mp3",
 		".ogg", ".oga",

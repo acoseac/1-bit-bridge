@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/formatgate"
 )
 
 // The request side of the playlist-file index (backlog B431): how the feed
@@ -56,7 +58,7 @@ func stampDuplicates(t *testing.T, s *Store, group string, suppressed bool, path
 
 func TestThePlaylistFeedOfAnEmptyIndexIsAnEmptyList(t *testing.T) {
 	s := newFeedStore(t)
-	page, err := s.PlaylistFilesPage(context.Background(), "", "")
+	page, err := s.PlaylistFilesPage(context.Background(), "", "", formatgate.All())
 	if err != nil || page.Files == nil || len(page.Files) != 0 || page.Next != "" || page.Version == "" {
 		t.Fatalf("PlaylistFilesPage = %+v, %v; want one page, an empty, non-nil list, a version", page, err)
 	}
@@ -92,6 +94,55 @@ func TestASuppressedDuplicateMemberIsServedAsItsServedCopy(t *testing.T) {
 	storePlaylist(t, s, "Playlists/mix.m3u", "../MP3/a.mp3", "../Copy/b.dsf", "../Gone/c.flac", "../FLAC/a.flac")
 	wantPlaylist(t, playlistFeed(t, s), "Playlists/mix.m3u",
 		[]string{"FLAC/a.flac", "FLAC/a.flac"}, []string{"../Copy/b.dsf", "../Gone/c.flac"})
+}
+
+// TestASuppressedDuplicateIsServedAsItsOneServedCopyInTheView: the copy a
+// line naming a suppressed duplicate is served as is chosen among the served
+// copies of its group that the request's view takes, whatever the suppressed
+// copy's own format (round 5 of backlog B489): exactly one is the member, and
+// none, or several, leaves the line unresolved. A gone FLAC beside a found
+// WavPack and Monkey's Audio copy (round 4 suppresses the FLAC) is the WavPack
+// copy to a client declaring WavPack alone; a gone WavPack copy beside a FLAC
+// and an APE is the FLAC to a client declaring nothing. Until round 5 a group
+// with two served copies mapped to none in every view, and a line naming a
+// copy of a format the view does not declare was unresolved before its group
+// was asked.
+func TestASuppressedDuplicateIsServedAsItsOneServedCopyInTheView(t *testing.T) {
+	s := newFeedStore(t,
+		"Gone/x.flac", "WV/x.wv", "APE/x.ape",
+		"Gone/y.wv", "FLAC/y.flac", "APE/y.ape")
+	stampDuplicates(t, s, "gx", true, "Gone/x.flac")
+	stampDuplicates(t, s, "gx", false, "WV/x.wv", "APE/x.ape")
+	stampDuplicates(t, s, "gy", true, "Gone/y.wv")
+	stampDuplicates(t, s, "gy", false, "FLAC/y.flac", "APE/y.ape")
+	storePlaylist(t, s, "Playlists/mix.m3u", "../Gone/x.flac", "../Gone/y.wv")
+	for _, c := range []struct {
+		name                string
+		view                formatgate.Set
+		members, unresolved []string
+	}{
+		{"nothing", formatgate.Set{}, []string{"FLAC/y.flac"}, []string{"../Gone/x.flac"}},
+		{"WavPack", formatgate.SetOf(formatgate.WavPack), []string{"WV/x.wv", "FLAC/y.flac"}, []string{}},
+		{"APE", formatgate.SetOf(formatgate.APE), []string{"APE/x.ape"}, []string{"../Gone/y.wv"}},
+		{"both", formatgate.All(), []string{}, []string{"../Gone/x.flac", "../Gone/y.wv"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			page, err := s.PlaylistFilesPage(context.Background(), "", "", c.view)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, pf := range page.Files {
+				if pf.Path != "Playlists/mix.m3u" {
+					continue
+				}
+				if fmt.Sprint(pf.Members) != fmt.Sprint(c.members) || fmt.Sprint(pf.Unresolved) != fmt.Sprint(c.unresolved) {
+					t.Errorf("members %q, unresolved %q; want %q, %q", pf.Members, pf.Unresolved, c.members, c.unresolved)
+				}
+				return
+			}
+			t.Fatalf("the playlist is not in the page %+v", page.Files)
+		})
+	}
 }
 
 func TestTheAlbumFolderRuleTermByTerm(t *testing.T) {
@@ -216,7 +267,7 @@ func TestThePlaylistFeedAnswersTheSameInAnyBatchSize(t *testing.T) {
 	}
 	answer := func(batchBytes int) string {
 		t.Helper()
-		page, err := s.playlistFilesPage(context.Background(), "", "", math.MaxInt, batchBytes)
+		page, err := s.playlistFilesPage(context.Background(), "", "", math.MaxInt, batchBytes, formatgate.All())
 		if err != nil {
 			t.Fatal(err)
 		}

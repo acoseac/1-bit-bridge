@@ -33,6 +33,7 @@ var analysisSweepLabels = map[string]string{
 	"alreadyQueued": "already queued",
 	"upToDate":      "up to date",
 	"dsdExcluded":   "DSD",
+	"wavpackApe":    "WavPack or Monkey's Audio",
 	"zeroByte":      "zero-byte",
 	"missing":       "unresolvable",
 	"unreadable":    "unreadable",

@@ -682,6 +682,28 @@ func TestLoopbackRouteServesNoVariantAndNoRoutedTrack(t *testing.T) {
 	assertRefusal(t, rec, http.StatusNotFound, "not_found")
 }
 
+// TestLoopbackRouteServesNoCorrectionFile: MPD's WavPack plugin asks for a
+// hybrid stream's correction file at the stream's URI with "c" appended. The
+// route serves a track's own file by its id alone, so that URI names no
+// track and is refused, and the correction file beside the .wv is never
+// served: MPD decodes the hybrid stream lossy, as the output reading says
+// (internal/api's TestAHybridMPDFetchesThroughTheLoopbackRouteIsLossy; round
+// 2 of backlog B489).
+func TestLoopbackRouteServesNoCorrectionFile(t *testing.T) {
+	f := newLoopbackFixture(t)
+	wv := filepath.Join(f.root, "Artist", "Album", "02.wv")
+	correction := []byte("THE-CORRECTION-FILE")
+	mustWrite(t, wv, f.track)
+	mustWrite(t, wv+"c", correction)
+	f.add("hybrid", wv, ".wv")
+
+	if rec := loopbackGet(f.h, http.MethodGet, "/dlna/file/hybrid", "127.0.0.1:1", nil); rec.Code != http.StatusOK {
+		t.Fatalf("the hybrid stream itself: status %d, want 200", rec.Code)
+	}
+	rec := loopbackGet(f.h, http.MethodGet, "/dlna/file/hybridc", "127.0.0.1:1", nil)
+	assertRefusal(t, rec, http.StatusNotFound, "not_found", correction)
+}
+
 // TestLoopbackRouteRefusesOtherMethods: GET and HEAD only.
 func TestLoopbackRouteRefusesOtherMethods(t *testing.T) {
 	f := newLoopbackFixture(t)

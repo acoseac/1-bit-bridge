@@ -78,6 +78,9 @@ const optimizeEligibleSQL = `(
 // PCM target); the explicit is_dsd arm is belt-and-braces for exotic
 // rows. A NULL/empty codec is NOT lossy (legacy pre-codec rows with
 // valid geometry stay eligible — IsLossyCodec's documented fail-open).
+// Never a WavPack or Monkey's Audio file, by its path as
+// formatgate.Gated reads it (ungatedPathSQLT, backlog B489): the bridge
+// serves those as they are and decodes nothing of theirs.
 //
 // The NOT IN set is the SQL mirror of manifest.IsLossyCodec — change
 // the two together; TestEligibilitySQLAgreesWithUpscaleSubmitGate
@@ -89,7 +92,8 @@ const optimizeEligibleSQL = `(
 // degrades to covered-only, which is the safe rendering.
 const upscaleEligibleSQL = `(
 	COALESCE(t.is_dsd,0) != 1
-	AND UPPER(TRIM(COALESCE(t.codec,''))) NOT IN ('MP3','AAC','OGG','OPUS','WMA','ULAW','ALAW','IMA4','ADPCM','GSM','MP2')
+	AND UPPER(TRIM(COALESCE(t.codec,''))) NOT IN ('MP3','AAC','OGG','OPUS','WMA','ULAW','ALAW','IMA4','ADPCM','GSM','MP2','WAVPACK-LOSSY')
+	AND ` + ungatedPathSQLT + `
 	AND COALESCE(t.sample_rate,0) > 0 AND COALESCE(t.bits_per_sample,0) > 0
 	AND NOT (t.sample_rate > ? OR t.bits_per_sample > ?)
 	AND NOT (t.sample_rate = ? AND t.bits_per_sample = ?)

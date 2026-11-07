@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/formatgate"
 )
 
 // The paged playlist-file feed (backlog B442): pages that add up to the
@@ -31,7 +33,7 @@ func walkPlaylistPages(t *testing.T, s *Store, budget, batchBytes int) playlistW
 	var w playlistWalk
 	version, after := "", ""
 	for {
-		page, err := s.playlistFilesPage(context.Background(), version, after, budget, batchBytes)
+		page, err := s.playlistFilesPage(context.Background(), version, after, budget, batchBytes, formatgate.All())
 		if err != nil {
 			t.Fatalf("page after %q: %v", after, err)
 		}
@@ -292,7 +294,7 @@ func execSQL(t *testing.T, s *Store, query string) {
 // feedVersion is the feed's version now.
 func feedVersion(t *testing.T, s *Store) string {
 	t.Helper()
-	page, err := s.PlaylistFilesPage(context.Background(), "", "")
+	page, err := s.PlaylistFilesPage(context.Background(), "", "", formatgate.All())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -305,14 +307,14 @@ func TestAPageAskedForAtAnotherVersionIsRefused(t *testing.T) {
 		storePlaylist(t, s, p, "A/01.flac")
 	}
 	ctx := context.Background()
-	first, err := s.playlistFilesPage(ctx, "", "", 1, playlistFeedBatchBytes)
+	first, err := s.playlistFilesPage(ctx, "", "", 1, playlistFeedBatchBytes, formatgate.All())
 	if err != nil || first.Next != "a.m3u" {
 		t.Fatalf("first page %+v, %v", first, err)
 	}
 	if err := s.UpsertTrack(ctx, &Track{Path: "B/01.flac", Size: 1, ModTime: time.Unix(1, 0)}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.playlistFilesPage(ctx, first.Version, first.Next, 1, playlistFeedBatchBytes); !errors.Is(err, ErrPlaylistFilesChanged) {
+	if _, err := s.playlistFilesPage(ctx, first.Version, first.Next, 1, playlistFeedBatchBytes, formatgate.All()); !errors.Is(err, ErrPlaylistFilesChanged) {
 		t.Fatalf("the second page at the first page's version after a change: %v, want ErrPlaylistFilesChanged", err)
 	}
 	again := walkPlaylistPages(t, s, 1, playlistFeedBatchBytes)

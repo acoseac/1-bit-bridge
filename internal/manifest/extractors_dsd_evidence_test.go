@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/formatgate"
 )
 
 func TestDFFCompressionEvidence(t *testing.T) {
@@ -111,7 +113,7 @@ func TestDSDEvidenceBackfillFullDelta(t *testing.T) {
 	}
 	scanOnce(t, sc, "DSD evidence backfill")
 	for _, since := range []time.Time{{}, time.Unix(0, before)} {
-		m, e := BuildManifest(context.Background(), store, []string{root}, since)
+		m, e := BuildManifest(context.Background(), store, []string{root}, since, formatgate.All())
 		if e != nil {
 			t.Fatal(e)
 		}
@@ -134,7 +136,7 @@ func TestDSDEvidenceBackfillFullDelta(t *testing.T) {
 			}
 		}
 		var wire bytes.Buffer
-		if e := WriteManifest(context.Background(), &wire, store, []string{root}, since); e != nil {
+		if e := WriteManifest(context.Background(), &wire, store, []string{root}, since, formatgate.All()); e != nil {
 			t.Fatal(e)
 		}
 		var decoded Manifest
@@ -160,7 +162,7 @@ func TestDSDEvidenceBackfillFullDelta(t *testing.T) {
 		t.Fatal(e)
 	}
 	scanOnce(t, sc, "unchanged")
-	m, e := BuildManifest(context.Background(), store, []string{root}, time.Unix(0, after))
+	m, e := BuildManifest(context.Background(), store, []string{root}, time.Unix(0, after), formatgate.All())
 	if e != nil {
 		t.Fatal(e)
 	}

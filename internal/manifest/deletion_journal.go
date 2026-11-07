@@ -43,6 +43,8 @@ import (
 	"database/sql"
 	"strconv"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/formatgate"
 )
 
 // deletionJournalCoverageKey is the scan_state key holding the UnixNano
@@ -229,15 +231,22 @@ func (s *Store) PruneDeletionJournal(ctx context.Context) (int64, error) {
 // carries it — a delta response must never name a path in BOTH `tracks`
 // and `deleted` (the upsert-side tombstone clear makes overlap
 // structurally rare; this makes the wire contract airtight regardless).
-func (s *Store) DeletedSince(ctx context.Context, since time.Time) ([]string, bool, error) {
+//
+// The list is a client's view's (format_view.go): a tombstone of a format
+// the view does not declare names a row that client was never sent, and it
+// is left out before the cap, so such tombstones cannot make another view's
+// list overflow.
+func (s *Store) DeletedSince(ctx context.Context, since time.Time, view formatgate.Set) ([]string, bool, error) {
+	args := append([]any{since.UnixNano()}, formatViewArgs(view)...)
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT path FROM manifest_deletions
 		 WHERE deleted_at > ?
+		   AND `+formatViewSQL+`
 		   AND NOT EXISTS (SELECT 1 FROM tracks
 		                    WHERE tracks.path = manifest_deletions.path
 		                      AND tracks.dupe_suppressed = 0)
 		 ORDER BY path
-		 LIMIT ?`, since.UnixNano(), manifestDeltaDeletedCap+1)
+		 LIMIT ?`, append(args, manifestDeltaDeletedCap+1)...)
 	if err != nil {
 		return nil, false, err
 	}
@@ -286,8 +295,9 @@ func (s *Store) DeltaSinceCovered(ctx context.Context, since time.Time) (bool, e
 // Failure direction: any read error answers `deltaIncomplete: true`
 // with no list. A client escalating to a full sync on a transient DB
 // blip is expensive but SAFE; silently omitting deletions is the exact
-// divergence the journal exists to close.
-func deltaDeletionFields(ctx context.Context, store *Store, since time.Time) ([]string, bool) {
+// divergence the journal exists to close. The list is view's
+// (DeletedSince).
+func deltaDeletionFields(ctx context.Context, store *Store, since time.Time, view formatgate.Set) ([]string, bool) {
 	covered, err := store.DeltaSinceCovered(ctx, since)
 	if err != nil {
 		logger.Warn("delta coverage probe failed", "err", err)
@@ -296,7 +306,7 @@ func deltaDeletionFields(ctx context.Context, store *Store, since time.Time) ([]
 	if !covered {
 		return nil, true
 	}
-	deleted, overflow, err := store.DeletedSince(ctx, since)
+	deleted, overflow, err := store.DeletedSince(ctx, since, view)
 	if err != nil {
 		logger.Warn("delta deleted-since query failed", "err", err)
 		return nil, true

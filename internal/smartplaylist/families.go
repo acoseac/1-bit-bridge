@@ -5,6 +5,9 @@ import (
 	"math"
 	"sort"
 	"strings"
+
+	"github.com/acoseac/1-bit-bridge/internal/formatgate"
+	"github.com/acoseac/1-bit-bridge/internal/smartplaylist/season"
 )
 
 // --- shared item helpers ---
@@ -622,35 +625,35 @@ const christmasSlug = "christmas"
 // Every other shelf may hold its tracks, and what they showed takes
 // nothing away from it.
 //
-// The floor is two rules: MinChristmas emitted tracks, and 3 distinct
-// albums or 3 distinct artists among the qualifying tracks (the track's
-// artist, so a Various Artists compilation counts by its performers). A
-// single album by a single artist gets no family, even a 40-track box set:
-// that is an album, which can be played as one. The spread is judged on the
-// qualifying tracks and the cap keeps min(qualifying, MaxChristmasItems), so
-// the cap can never undo the floor.
+// The floor is season.MeetsFloor, the owner's rule: season.MinTracks tracks,
+// from 3 distinct albums or 3 distinct artists (the track's artist, so a
+// Various Artists compilation counts by its performers). A single album by a
+// single artist gets no family, even a 40-track box set: that is an album,
+// which can be played as one. It is asked of what each request is sent, the
+// pick of its view (season.Pick), never of the qualifying tracks as a whole
+// (round 5 of backlog B489, two reviewers: a pool that cleared it could be
+// capped into a family no view cleared, and one selection could not suit four
+// views). So the family is stored as the material every view is picked from
+// (storeChristmas, up to season.MaxTracks of each format), and it is stored
+// when the pick of one of the four views a client can declare (nothing,
+// WavPack, Monkey's Audio, both) clears the floor; the API picks each
+// request's view from the same items with the same function
+// (buildSmartPlaylistDTO).
+//
+// Each item stores its album (Item.Album) for the pick's floor alone: nothing
+// puts it on the wire.
 func buildChristmas(in Inputs, opts Options) (GeneratedPlaylist, bool) {
-	// Zero is the production value (the buildFavorites convention), so a
-	// caller that sets none of these cannot let a 1-track family through.
-	minN := opts.MinChristmas
-	if minN <= 0 {
-		minN = 15
-	}
-	capN := opts.MaxChristmasItems
-	if capN <= 0 {
-		capN = 100
-	}
 	perArtist := opts.ChristmasPerArtistCap
 	if perArtist <= 0 {
 		perArtist = 8
 	}
-	if len(in.Christmas) < minN || !christmasSpread(in.Christmas) {
+	stored := storeChristmas(in.Christmas, in.ChristmasSeed, perArtist)
+	if !someChristmasView(stored) {
 		return GeneratedPlaylist{}, false
 	}
-	ordered := spreadByArtist(shuffleFeaturesBySeason(in.Christmas, in.ChristmasSeed), perArtist, capN)
-	items := itemsFromFeatures(ordered, capN)
-	if len(items) < minN {
-		return GeneratedPlaylist{}, false
+	items := itemsFromFeatures(stored, len(stored))
+	for i := range items {
+		items[i].Album = stored[i].Album
 	}
 	return GeneratedPlaylist{
 		Slug: christmasSlug, Kind: KindChristmas,
@@ -659,24 +662,71 @@ func buildChristmas(in Inputs, opts Options) (GeneratedPlaylist, bool) {
 	}, true
 }
 
-// christmasSpread reports whether feats come from 3 distinct albums or 3
-// distinct artists, each named as the diversity caps name them (case and
-// surrounding space aside). An empty album or artist names nothing.
-func christmasSpread(feats []TrackFeature) bool {
-	albums := map[string]struct{}{}
-	artists := map[string]struct{}{}
-	for _, f := range feats {
-		if k := diversityKey(f.Album); k != "" {
-			albums[k] = struct{}{}
-		}
-		if k := diversityKey(f.Artist); k != "" {
-			artists[k] = struct{}{}
-		}
-		if len(albums) >= 3 || len(artists) >= 3 {
+// featurePath, featureAlbum and featureArtist are what season.Pick,
+// season.KeepSpread and season.MeetsFloor read of a track.
+func featurePath(f TrackFeature) string   { return f.Path }
+func featureAlbum(f TrackFeature) string  { return f.Album }
+func featureArtist(f TrackFeature) string { return f.Artist }
+
+// christmasViews are the four views a client can declare: nothing, WavPack,
+// Monkey's Audio, both.
+var christmasViews = []formatgate.Set{
+	{}, formatgate.SetOf(formatgate.WavPack), formatgate.SetOf(formatgate.APE), formatgate.All(),
+}
+
+// someChristmasView reports whether the pick of one of the four views clears
+// the floor, which is whether some client would be sent the family.
+func someChristmasView(stored []TrackFeature) bool {
+	for _, view := range christmasViews {
+		if _, ok := season.Pick(stored, featurePath, featureAlbum, featureArtist, view); ok {
 			return true
 		}
 	}
 	return false
+}
+
+// storeChristmas is the family as the regenerator stores it: the material
+// every request's view is picked from at the response (season.Pick). Each
+// format on its own, the tracks every client is served (no gated format:
+// formatgate.Of), then the WavPack ones, then the Monkey's Audio ones, in the
+// order the family takes it in (ChristmasOrder) and kept by season.KeepSpread:
+// the first track of each of its first three albums and of its first three
+// artists ahead of its cut at season.MaxTracks, so the cut keeps every spread
+// a view's pick may need of it (round 5 of backlog B489: one choir's album of
+// 110 tracks beside one track each of two more lost the third album to a cut
+// over the season's order, in a season that put it past the cap). A format
+// has the cap to itself: a thousand .wv files cannot crowd out fifteen .ape
+// files or the FLACs a client that declares neither can play (round 4). The
+// season's order of a format is the order its tracks have in the whole pool
+// (shuffleFeaturesBySeason hashes each path alone), so a library with no
+// gated file is ordered as before but for the spread moved to its front.
+func storeChristmas(pool []TrackFeature, seed uint64, perArtist int) []TrackFeature {
+	var served, wavpack, ape []TrackFeature
+	for _, f := range pool {
+		switch formatgate.Of(f.Path) {
+		case formatgate.WavPack:
+			wavpack = append(wavpack, f)
+		case formatgate.APE:
+			ape = append(ape, f)
+		default:
+			served = append(served, f)
+		}
+	}
+	var out []TrackFeature
+	for _, format := range [][]TrackFeature{served, wavpack, ape} {
+		out = append(out, season.KeepSpread(ChristmasOrder(format, seed, perArtist), featureAlbum, featureArtist)...)
+	}
+	return out
+}
+
+// ChristmasOrder is the order the Christmas family takes one format's tracks
+// in, before season.KeepSpread moves the floor's spread to its front and cuts
+// it: the season's (shuffleFeaturesBySeason, so one season is one order
+// whatever order the tracks arrive in), spread by artist with perArtist
+// tracks of each before the rest (spreadByArtist), uncapped. A test that pins
+// a season by where a track falls asks it.
+func ChristmasOrder(pool []TrackFeature, seed uint64, perArtist int) []TrackFeature {
+	return spreadByArtist(shuffleFeaturesBySeason(pool, seed), perArtist, len(pool))
 }
 
 // spreadByArtist walks ordered taking at most perArtist tracks of each

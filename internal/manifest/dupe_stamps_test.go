@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/dupes"
+	"github.com/acoseac/1-bit-bridge/internal/formatgate"
 )
 
 // TestMigrationV31IsIdempotent re-opens the same DB so the v31 post()
@@ -86,7 +87,7 @@ func TestApplyDupeStamps_BumpSemantics(t *testing.T) {
 	}
 	// And the served delta actually carries the row.
 	since := time.Unix(0, before).UTC()
-	rows, err := s.ListServedTracks(ctx, &since)
+	rows, err := s.ListServedTracks(ctx, &since, formatgate.All())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,7 +120,7 @@ func TestServedReadersExcludeSuppressed(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	served, err := s.ListServedTracks(ctx, nil)
+	served, err := s.ListServedTracks(ctx, nil, formatgate.All())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,7 +136,7 @@ func TestServedReadersExcludeSuppressed(t *testing.T) {
 	}
 
 	var streamed []string
-	if err := s.StreamServedTracks(ctx, nil, func(tr *Track) error {
+	if err := s.StreamServedTracks(ctx, nil, formatgate.All(), func(tr *Track) error {
 		streamed = append(streamed, tr.Path)
 		return nil
 	}); err != nil {
@@ -145,7 +146,7 @@ func TestServedReadersExcludeSuppressed(t *testing.T) {
 		t.Fatalf("StreamServedTracks = %v", streamed)
 	}
 
-	page, err := s.ListServedTracksPage(ctx, "", 10)
+	page, err := s.ListServedTracksPage(ctx, "", 10, formatgate.All())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -153,7 +154,7 @@ func TestServedReadersExcludeSuppressed(t *testing.T) {
 		t.Fatalf("ListServedTracksPage = %+v", page)
 	}
 
-	nServed, err := s.CountServedTracks(ctx)
+	nServed, err := s.CountServedTracks(ctx, formatgate.All())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -191,7 +192,7 @@ func TestEnrichmentCountsScopedToServed(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	enriched, last, err := s.EnrichmentCounts(ctx)
+	enriched, last, err := s.EnrichmentCounts(ctx, formatgate.All())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -201,7 +202,7 @@ func TestEnrichmentCountsScopedToServed(t *testing.T) {
 	if last == nil {
 		t.Fatal("lastEnrichedAt stays a freshness stamp (unscoped) and must be set")
 	}
-	total, err := s.CountServedTracks(ctx)
+	total, err := s.CountServedTracks(ctx, formatgate.All())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -330,13 +331,17 @@ func TestDupesLossyCodecsMirrorIsLossyCodec(t *testing.T) {
 		"FLAC", "ALAC", "WAV", "AIFF", "AIFC", "DSF", "DFF",
 		"MP3", "AAC", "OGG", "OPUS", "WMA",
 		"ULAW", "ALAW", "IMA4", "ADPCM", "GSM", "MP2",
+		CodecWavPack, CodecWavPackLossy, CodecWavPackDSD, CodecAPE,
 	}
 	for _, c := range stamped {
 		if IsLossyCodec(c) && !ranked[c] {
 			t.Errorf("manifest.IsLossyCodec(%q) is true but dupes does not rank it lossy", c)
 		}
 	}
-	for _, c := range []string{"FLAC", "ALAC", "WAV", "AIFF", "AIFC", "DSF", "DFF"} {
+	if !IsLossyCodec(CodecWavPackLossy) {
+		t.Errorf("manifest.IsLossyCodec(%q) is false: a hybrid file with no correction file is lossy", CodecWavPackLossy)
+	}
+	for _, c := range []string{"FLAC", "ALAC", "WAV", "AIFF", "AIFC", "DSF", "DFF", CodecWavPack, CodecWavPackDSD, CodecAPE} {
 		if IsLossyCodec(c) {
 			t.Errorf("sanity: manifest.IsLossyCodec(%q) unexpectedly true", c)
 		}

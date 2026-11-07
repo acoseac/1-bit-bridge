@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/formatgate"
 )
 
 func searchStore(t *testing.T) *Store {
@@ -68,7 +70,7 @@ func TestSearchServedTracksExcludesSuppressedCopies(t *testing.T) {
 			len(all))
 	}
 
-	served, err := s.SearchServedTracks(ctx, "Xtal", 50)
+	served, err := s.SearchServedTracks(ctx, "Xtal", 50, formatgate.All())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +94,8 @@ func TestSearchServedTracksUsesTheIndexedPlan(t *testing.T) {
 		addSearchTrack(t, s, fmt.Sprintf("A%03d/Track.flac", i), fmt.Sprintf("Song Title Number %d", i))
 	}
 
-	rows, err := s.db.Query("EXPLAIN QUERY PLAN "+servedSearchSQL, `"song"*`, 50)
+	rows, err := s.db.Query("EXPLAIN QUERY PLAN "+servedSearchSQL, append(append([]any{`"song"*`},
+		formatViewArgs(formatgate.Set{})...), 50)...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +134,7 @@ func TestSearchServedTracksPreservesRankOrder(t *testing.T) {
 	addSearchTrack(t, s, "A/Ambient.flac", "Ambient")
 	addSearchTrack(t, s, "B/Other.flac", "Ambient Ambient Ambient")
 
-	hits, err := s.SearchServedTracks(ctx, "Ambient", 50)
+	hits, err := s.SearchServedTracks(ctx, "Ambient", 50, formatgate.All())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,13 +166,13 @@ func TestSearchServedTracksSanitisesAndBounds(t *testing.T) {
 	for _, q := range []string{
 		`"`, `NEAR(a b)`, `a OR b`, `a AND b`, `a NOT b`, `*`, `^a`, `a:b`, `((((`, `"unclosed`,
 	} {
-		if _, err := s.SearchServedTracks(ctx, q, 10); err != nil {
+		if _, err := s.SearchServedTracks(ctx, q, 10, formatgate.All()); err != nil {
 			t.Errorf("SearchServedTracks(%q) errored: %v — sanitisation should make this impossible", q, err)
 		}
 	}
 
 	// Empty after sanitisation is neither an error nor a hit.
-	hits, err := s.SearchServedTracks(ctx, "!!!", 10)
+	hits, err := s.SearchServedTracks(ctx, "!!!", 10, formatgate.All())
 	if err != nil || hits != nil {
 		t.Errorf("punctuation-only query: hits=%v err=%v; want (nil, nil)", hits, err)
 	}
@@ -178,7 +181,7 @@ func TestSearchServedTracksSanitisesAndBounds(t *testing.T) {
 	for i := 0; i < 20; i++ {
 		addSearchTrack(t, s, fmt.Sprintf("Z%03d/Hello.flac", i), "Hello There")
 	}
-	got, err := s.SearchServedTracks(ctx, "Hello", 1_000_000)
+	got, err := s.SearchServedTracks(ctx, "Hello", 1_000_000, formatgate.All())
 	if err != nil {
 		t.Fatal(err)
 	}

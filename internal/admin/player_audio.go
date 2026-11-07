@@ -85,7 +85,10 @@ const (
 	// when it can decode the file), so the client attempts playback
 	// and treats MEDIA_ERR_SRC_NOT_SUPPORTED as the answer.
 	playEngineDependent = "engine-dependent"
-	// playNone — structurally impossible. DSD only.
+	// playNone — structurally impossible: DSD, and WavPack and Monkey's
+	// Audio (backlog B489), which no browser engine decodes. The client
+	// words it "Not playable in a browser" ("DSD — …" for DSD), and the
+	// row still offers its download.
 	playNone = "none"
 )
 
@@ -122,6 +125,12 @@ func playabilityKind(codec, ext string, isDSD bool) string {
 	case ".aif", ".aiff", ".aifc":
 		return playEngineDependent
 	case ".dsf", ".dff":
+		return playNone
+	case ".wv", ".ape":
+		// WavPack and Monkey's Audio: no browser engine decodes either, so
+		// trying would only fetch the whole file to fail. The extension is
+		// the client format gate's (formatgate.Of, in any case); the
+		// bridge renders neither, so no sidecar stands in.
 		return playNone
 	default:
 		return playEngineDependent

@@ -1162,6 +1162,34 @@
   `TestABatchRendersARenditionThatARetagAndAScanMadeStale`,
   `TestTheCoverageBarsDropForAStaleRenditionUntilItIsRenderedAgain`.
 
+- **A WavPack or Monkey's Audio file is never a rendition's source or an
+  analysis's** (2026-11-06, backlog B489). The bridge serves both formats as
+  they are and decodes neither, and no decoder of these pools is proven on
+  them: none of `ffmpeg`, `sox`, `wavpack` or `mac` is on the host the change
+  was built on, and FFmpeg decodes a hybrid WavPack stream without its
+  correction file, so a render or an analysis would take lossy audio for the
+  file's. Both are judged by `formatgate.Gated`, the path as the client format
+  gate reads it, so a row its reader refused (no codec) is held back too.
+  **Upscale**: the CLI's classifier (`classifyUpscaleTrack`, `notPCM`), the
+  batch's candidates (`buildUpscaleCandidates`) and the per-track enqueue for
+  every kind (`resolveAndLookupTrack`, `ErrUpscaleIneligible`) refuse such a
+  file, and the gate's SQL mirror, `upscaleEligibleSQL`, carries
+  `ungatedPathSQLT` and `WAVPACK-LOSSY` among the lossy codecs, held to the Go
+  gate by `TestEligibilitySQLAgreesWithUpscaleSubmitGate` (its rows
+  `wavpack-cd`, `wavpack-hires`, `ape-cd`, `ape-hires`, `codec-empty-wv-ext` and
+  `codec-empty-ape-ext`). The optimize and PCM-render allowlists name neither
+  codec. The console's projection gives such a file the skip reason
+  `wavpack_ape` ("served as it is, variants not possible";
+  `TestAWavPackOrMonkeysAudioFileSaysItIsServedAsItIs`). **Analysis**:
+  `collectAnalysisCandidates` skips one after the DSD switch and before any
+  resolve, so a library of them costs no decode and no strike on any sweep,
+  and counts it apart (`wavpackApeSkipped`); `Store.AnalysisCoverage` counts
+  the same rows apart in the same order (`WavPackAPEExcluded`,
+  `analysisGatedSQL`), held to the collector by
+  `TestAnalysisCoverageLockstepWithCollector`; `bridge analyze` and the
+  console's coverage and sweep lines say how many. **Don't decode one for a
+  job, or count one as eligible, failed or unreadable.**
+
 - **Every reaper fails closed on an EMPTY referenced set, and the CLI ones offer
   a way past it.** A query that succeeds and returns no rows is not a fault, and
   the routes to it are ordinary: `rm -f bridge.db*` + restart (the reset this

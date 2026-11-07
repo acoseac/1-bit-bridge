@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/formatgate"
 	"github.com/acoseac/1-bit-bridge/internal/lyrics"
 	"modernc.org/sqlite"
 )
@@ -93,7 +94,7 @@ func TestADeletionOutsideAScanPublishesLibraryChanged(t *testing.T) {
 	if !ok || wm <= 0 {
 		t.Fatalf("watermark ok %v ns %d", ok, wm)
 	}
-	gone, _, err := s.DeletedSince(ctx, time.Time{})
+	gone, _, err := s.DeletedSince(ctx, time.Time{}, formatgate.All())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -170,7 +171,7 @@ func TestASuppressionOutsideAScanPublishesLibraryChanged(t *testing.T) {
 		t.Fatalf("stamped %d err %v", n, err)
 	}
 	expectLibraryNote(t, notes, "suppression")
-	gone, _, err := s.DeletedSince(ctx, time.Time{})
+	gone, _, err := s.DeletedSince(ctx, time.Time{}, formatgate.All())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -400,7 +401,7 @@ func TestDeletingEveryTrackPublishesLibraryChanged(t *testing.T) {
 	if err := s.DeleteTracksBatch(ctx, []string{"A/1.flac", "A/2.flac"}); err != nil {
 		t.Fatal(err)
 	}
-	m, err := BuildManifest(ctx, s, nil, cursor)
+	m, err := BuildManifest(ctx, s, nil, cursor, formatgate.All())
 	if err != nil {
 		t.Fatal(err)
 	}

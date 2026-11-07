@@ -1723,7 +1723,9 @@
   text is ISO-8859-1 (`latin1String`, the same reading as `diinText`) and a
   RIFF INFO value is Windows-1252 (`windows1252Text`); valid UTF-8 is kept
   in both, so a file that already stored UTF-8 does not change. A DSDIFF
-  DIIN chunk was already decoded. An APE tag is not read. Every other text
+  DIIN chunk was already decoded. An APEv2 tag (a WavPack or Monkey's Audio
+  file's, read since B489; this said "An APE tag is not read" until then)
+  is UTF-8 by its definition and is coerced as below. Every other text
   field is `strings.ToValidUTF8` before it is stored (`coerceStoredUTF8`,
   on the track a scan writes and again on `marshalForStorage`'s clone).
   The path column stays the bytes on disk; only the clone's path is
@@ -2360,8 +2362,10 @@
   nil, and a tag with no raw map keeps its accessors' answers. Embedded
   ID3v2 in WAV, AIFF, DSF and DFF takes the same populate. **Not changed**:
   MP4's `trkn` and `disk` are binary atoms, which no form reaches;
-  `containerText` (DIIN, LIST/INFO) carries no numbering; WavPack and APE
-  are not scanner extensions; the UPnP ingest reads
+  `containerText` (DIIN, LIST/INFO) carries no numbering; WavPack and
+  Monkey's Audio, scanner extensions since B489 (this said they were not
+  until then), read an APEv2 tag's Track and Disc by this rule
+  (`applyAPEv2Tags`) and an ID3v1 tag through the populate; the UPnP ingest reads
   `upnp:originalTrackNumber` with its own `atoiTrackNumber`, which takes
   "N/M" already. **Don't re-read a raw value under any key but the one the
   accessor read, replace an ID3v2 answer that is not 0, count an ID3v1
@@ -2380,6 +2384,244 @@
   `TestATagWithNoRawMapKeepsItsAccessorsAnswers` pins the fallback. Round
   2's rows (`3 / 12` and `3 OF 10` reading 3, Vorbis comments named `TRK`
   and `TPA` staying absent) are in the table and the Vorbis and ID3 tests.
+
+- **WavPack (`.wv`) and Monkey's Audio (`.ape`) are indexed from their own
+  headers and their APEv2 tag, decoding nothing, and a length a file holds is
+  checked against the file and a cap of its own before anything is read or
+  allocated on its account** (ExtractorVersion 32, 2026-11-06, backlog B489,
+  and its rounds 2 and 5).
+  The bridge serves both formats as they are and decodes neither, so the
+  extractors read what the files state and no more. **WavPack**
+  (`wavpack.go`, after WavPack5FileFormat.pdf and wavpack.h): the first block
+  with audio, found as the reference decoder's `read_next_header` finds one
+  ("wvpk", an even ckSize of at least 24 and under 16 MiB, a stream version
+  from 0x402 to 0x410, fewer than 196,608 samples a block), searched 64 KiB at
+  a time up to 1 MiB, past at most 16 leading blocks with no samples; the rate
+  from the header's table or, at index 15, `ID_SAMPLE_RATE`; the bytes stored
+  less the bits shifted out; mono, stereo or `ID_CHANNEL_INFO`'s count; float;
+  hybrid; and WavPack 5's DSD, whose samples are bytes of eight DSD bits at the
+  table's rate shifted left by `ID_DSD_BLOCK`'s power (at most 10), so the
+  row's rate is eight times that byte rate, the bit rate a DSF row carries.
+  The length is the 40-bit total (`GET_TOTAL_SAMPLES`), and none for the
+  unknown length a streaming encoder writes, which leaves the duration nil.
+  **That block must lie inside the file** (`errWVBlockCut`, a file cut as it
+  was written, which is a refusal): round 2 (Codex's review) found a 34-byte
+  file, a header claiming a 36-byte block and an `ID_WV_BITSTREAM` the file
+  ends before, indexed as a second of lossless audio. **And a read that ends
+  short of the size the file's stat gave is the file shrinking while it is
+  read** (`statBoundReader`: `errFileShrank`, noted as a read that did not
+  complete, B134), never a block cut as it was written, a header or a missing
+  tag: round 5 (CodeRabbit) found the end inside a block the stat held whole
+  taken for `errWVBlockCut`, so a changed `.wv` that shrank while it was read
+  had its good row replaced by its name, under the new size and mtime the skip
+  gate then kept, and an end inside an APEv2 tag dropped the tags the same
+  way; the WavPack and Monkey's Audio extractors read their file through it. **And its bitstreams must be ones
+  the reference decoder opens**: a main or correction bitstream that is empty
+  or of odd length, and an extended one of its 4-byte CRC alone or of odd
+  length, are refused, as `init_wv_bitstream`, `init_wvc_bitstream` and
+  `init_wvx_bitstream` refuse them (the same point by another byte, found in
+  round 2 writing its controls: a block that declares its bitstream empty
+  was a second of lossless audio, and a `.wvc` whose bitstream is empty
+  matched). **Its sub-blocks are walked a 64 KiB
+  window at a time** (`wvWindow`), never a read each, as libwavpack's
+  `read_metadata_buff` walks them in memory: a block of a megabyte of empty
+  sub-blocks cost 524,292 reads (round 2, Claude's review) and costs 18.
+  **A stream whose samples need an extended bitstream is lossless only with
+  it** (round 2, Codex's review): libwavpack's `unpack_init` counts a block
+  lossy when its integer data sends the bits it shifts out
+  (`ID_INT32_INFO`'s sent bits, under INT32_DATA) or its float data sends
+  exponents, zeros or exceptions (`ID_FLOAT_INFO`'s flags 0x02, 0x04, 0x08,
+  0x20) and no extended bitstream carries them past its 4-byte CRC, so such a
+  stream is `WAVPACK-LOSSY`, with no correction file on the wire, unless its
+  block or its matching correction file's first block carries one
+  (`wvStream.needsExtended`): `ID_WVX_BITSTREAM`, or its optional form
+  (0x2c, `ID_OPTIONAL_DATA` with `ID_WVX_BITSTREAM`'s function), which a
+  decoder that does not know it passes over, so it counts and refuses
+  nothing (not seen in a reference file here: no encoder runs on this host);
+  an `ID_INT32_INFO` or `ID_FLOAT_INFO` of any length but 4 is refused, as
+  `read_int32_info` and `read_float_info` refuse it.
+  **Monkey's Audio** (`ape.go`): "MAC " at the start or after an ID3v2 tag's
+  junk, within 1 MB, as MACLib's `FindDescriptor` looks; versions 3800 to 3990,
+  FFmpeg's range; from 3.98 the descriptor and the header, before it the old
+  header, whose bits come from its flags and whose blocks per frame from the
+  version and the level, as MACLib derives them. **What the header says lies
+  ahead of the frames must end inside the file with frame data after it, and
+  the seek table must name every frame** (`apeFrames.fits`), as FFmpeg's reader
+  refuses a file with no seek table, fewer entries than frames, or one cut
+  inside it: from 3.98 the descriptor, the header, the seek table and the WAV
+  header the descriptor sizes; before, the old header with its peak level and
+  seek count where its flags say, the WAV header unless the flags say the
+  decoder makes one, the seek table and, before 3.81, a byte a frame (round 2,
+  Codex's review: a 76-byte file of a descriptor and a header claiming 4 GiB
+  was indexed with a 15-second duration). **Refused** by the path a
+  broken file takes (B145: indexed by its name, with no codec and no format
+  facts), before any division: no block a decoder takes, a rate of 0, an APE
+  with no frames or no channels, a depth or a compression level Monkey's Audio
+  does not write, a version outside the range, lengths that do not fit.
+  **Tags** (`apev2.go`): an APEv2 tag of version 2000 at the end or before an
+  ID3v1 tag, its header form too, read within caps of its own (the tag 64 MiB,
+  1,024 items, a key 2 to 255 printable ASCII characters, a text value 64 KiB,
+  lyrics theirs, the front cover `maxArtworkBytes`), one item at a time and a
+  value only when it is kept, and **at most `apeTagMaxValues` values (64K,
+  `maxVorbisCommentTags`'s count) for all the text items together**, split a
+  value at a time, a text item passed over unread once they are spent, and
+  said once (`msgAPETagValuesCapped`): a value costs its string headers
+  wherever it is kept, whatever its length, so caps on bytes alone bounded
+  nothing for one-byte values (round 2, Codex's review: 1,023 Artist items of
+  64 KiB of "a" and a NUL were 33.5 million strings; 64 such items, a
+  4,195,480-byte file, allocated 589,147,856 bytes against a bound of
+  34,612,416, and allocate 13,217,432 since). The keys go through the Vorbis reader's names
+  (`namedValueOf`, `explicitFieldName`) without regard to case; NUL-separated
+  values and repeated items are joined with "; " where the other formats join
+  them (B328); Track and Disc are read by `leadingTagNumber` (B743);
+  `Cover Art (Front)` takes the embedded cover's path, and a folder cover still
+  applies; external and locator items are ignored; an APEv1 tag (version 1000,
+  whose text is not defined as UTF-8) reads as none. **The fallback is the
+  ID3v1 tag in the last 128 bytes alone** (`tag.ReadID3v1Tags`, by offset,
+  through a `newDhowdenReadBuffer` page as every dhowden read is), read only where
+  the file holds no APEv2 tag: a minute of `FuzzExtractAPE` found a 603-byte
+  file allocating 1.35 MB when the whole file went to dhowden, whose dispatcher
+  reads an ID3v2 tag ahead of the stream and sizes a buffer by its header (the
+  input is a seed, `testdata/fuzz/FuzzExtractAPE/8d8278f5530fa1a8`). A leading
+  ID3v2 tag in either format is passed over, never read. **The codecs**:
+  `WAVPACK` (lossless), `WAVPACK-LOSSY` (a hybrid stream without its matching
+  correction file, the next bullet: lossy for every purpose, in
+  `IsLossyCodec`, with no bit depth and no sample kind), `WAVPACK-DSD` (one
+  bit, `isDSD`, no kind) and `APE`, the three lossless ones in
+  `canSetBitsPerSample`. A sample kind is stated only for established lossless
+  PCM: WavPack's float flag, else integer; Monkey's Audio below 32 bits
+  integer, and none at 32, whose float flag (version 10's) is not read. Every
+  read goes through `openAudioFile`, so a read that did not complete is the
+  scanner's unread file (B134) and never a row. **Don't read a header past
+  what the reference decoders take, take a first block or an APE header the
+  file does not hold, a bitstream the reference decoder refuses or a seek
+  table that names fewer entries than frames, call a stream lossless without
+  the extended bits its samples need, trust a
+  length for an allocation, keep more than `apeTagMaxValues` of a tag's
+  values, walk a block's sub-blocks a read each, hand dhowden more than the
+  last 128 bytes, take a read that ends short of the stat's size for a file
+  cut as it was written, give a lossy hybrid or a DSD stream a sample kind, or
+  a lossy hybrid a bit depth.**
+  `TestTheScanIndexesAWavPackAndAnAPEFile` (red first on main),
+  `TestScanner_AFileThatShrinksWhileItIsReadKeepsItsRow` (round 5),
+  `TestTheWavPackHeaderStatesItsFormat`, `TestTheAPEHeaderStatesItsFormat`
+  (every compression level in both layouts),
+  `TestAWavPackFileItsReaderRefusesIsRefused`,
+  `TestAnAPEFileItsReaderRefusesIsRefused`,
+  `TestAStreamWhoseExtendedBitsAreMissingIsLossy`,
+  `TestABlockOfManyTinySubBlocksIsReadInAFewReads`,
+  `TestManyTinyAPEv2ValuesAllocateWithinTheBound`,
+  `TestTheAPEv2TagIsFoundWhereTaggersPutIt`,
+  `TestTheAPEv2TagNamesEveryFieldItHolds`, `TestTheAPEv2TagJoinsWhatItRepeats`,
+  `TestTheAPEv2FrontCoverIsTheTracksArtwork`,
+  `TestAnAPEv2LyricsItemIsALyricsDocument`,
+  `TestTheFallbackIsTheID3v1TagAlone`,
+  `TestAFewKilobytesClaimingFourGibibytesAllocateUnderAMebibyte` (a few
+  kilobytes whose every length claims 0xFFFFFFFF allocate under a mebibyte, in
+  bytes) and the three fuzz targets, `FuzzExtractWavPack`, `FuzzExtractAPE` and
+  `FuzzAPEv2` (History-Build.md's census), pin it.
+
+- **A `.wvc` is never a track; a hybrid `.wv`'s row depends on it in five
+  states kept apart, recorded in `tracks.correction_key` (v61), and the skip
+  gate asks it again with the walk's own stat comparison** (2026-11-06, backlog
+  B489, and its rounds 2 and 5). A hybrid WavPack stream is lossy alone; its correction file, the
+  `.wv`'s name with `.wvc` (in any case) in the same folder, is what makes its
+  decode lossless. Beside a lossless or a DSD stream a `.wvc` is an orphan and
+  never read. `openAudioFile` records a failed open, absence included, as the
+  scanner's read that did not complete, so an optional file cannot go through
+  it blindly: `observeCorrection` (`correction.go`) tells five observations
+  apart. **Confirmed absence**, the folder listed whole and no file under the
+  name (a directory there is no correction file, as a directory called
+  cover.jpg is no cover): `WAVPACK-LOSSY`. **A matching file**: its first audio
+  block is a correction block of this stream (`wvpk`, the block index, the
+  sample counts and the flags, which libwavpack's `match_wvc_header` compares
+  too: round 2, Codex's review, found a 24-bit or a mono stream's `.wvc`
+  matching beside a 16-bit stereo `.wv`), with a total that is the `.wv`'s, or
+  unknown beside a `.wv` that states one (round 5, CodeRabbit:
+  `correctionTotalAgrees`; the pair an encode that learned the stream's length
+  only at its end leaves when its rewrite of the `.wvc`'s first block fails,
+  which the reference decoder takes, since it reads the length from the `.wv`
+  alone, `WavpackOpenFileInputEx64` and `seek_eof_information`, and takes a
+  correction block by its index, samples and flags, `read_wvc_block` and
+  `match_wvc_header`; cited from libwavpack 5's source as published, which
+  was not on the host this was written on: a total in the `.wvc` alone, and
+  two totals that differ, stay refused), and the block that ends it ends the
+  file at the stream's last
+  sample, found as libwavpack's `seek_eof_information` finds a stream's length (the
+  last 1 MiB, a window at a time from the end; the last block with samples,
+  which must be final, passing over at most 16 blocks with no samples after
+  it, the encoder's MD5 sum or RIFF trailer, written with their flags and
+  index cleared: round 5, CodeRabbit, found a `.wv` whose header states no
+  length and that ends with its MD5 sum matching no correction file; blocks
+  with no samples that fill the whole last 1 MiB leave the end unknown here,
+  where `seek_eof_information` would step back another 1 MiB, and nothing
+  matches, the cautious answer), so a copy cut short does not match. Where the `.wv`'s header states no usable length (a total the
+  encoder could not write, or a first audio block past index 0), that last
+  sample is the `.wv`'s own last block's, found the same way before its tags
+  (`wvStreamFinal`: an ID3v1 tag, then an APEv2 tag with its header), and a
+  `.wv` whose end that look does not find matches nothing (round 2, both
+  reviews: such a stream matched a `.wvc` cut at any block's end). A match is
+  `WAVPACK`, with `Track.Correction` on the wire (`correction`: its
+  path, size and mtime, `omitempty`). **An invalid or mismatched file**
+  (another stream's, cut short, not WavPack, the `.wv` itself):
+  `WAVPACK-LOSSY` with no `correction`, said once for each of its stats
+  (`msgCorrectionMismatch`). **A file the bridge may not open or read**
+  (`fs.ErrPermission`: another owner's file of mode 0600 on a NAS share):
+  an answer, `WAVPACK-LOSSY` with no `correction`, said once for each of its
+  stats (`msgCorrectionUnreadable`), recorded as the state '?' with its stat,
+  which the skip gate asks again at every scan with an open and a one-byte read
+  (`correctionReadableNow`), so the first scan that may read it matches it
+  (round 2, Claude's review: taken for a look that did not complete, it left a
+  new `.wv` with no row, read again and counted unread at every scan). A file
+  matched before and refused since keeps its row, since a chmod moves no
+  mtime: an open of every matched file at every scan was declined, and
+  PROTOCOL.md calls any answer for the path but the file the row describes a
+  refusal of the lossless decode. **An observation that did not complete** (a folder
+  that could not be listed, a stat or a read that failed otherwise, a file replaced while
+  it was read): the extraction is the `.wv`'s read that did not complete
+  (B134), so the row keeps what it had and a new file gets none until a scan
+  sees the correction file whole; a `.wvc` gone while the `.wv` itself cannot
+  be read keeps the row too, and a client that meets a `correction` path gone
+  since gets a 404, which PROTOCOL.md calls a refusal of the lossless decode.
+  **The key** (column-only, never in `tags_json`, on both write legs and
+  `GetTrackStat`) is "" for no dependency, "-" for confirmed absence, and for a
+  file the state, the size, the mtime in nanoseconds and the name, the name
+  last since it may hold a colon; a key this build never writes reads as
+  drifted, so the row is read again. **The skip gate** (`correctionDrifted`)
+  asks a row that recorded one whether it still holds, with `statUnchanged`,
+  the walk's own comparison for an audio file (the size, and the mtime to the
+  nanosecond as the filesystem reports it), never a looser one: a correction
+  file added, rewritten, replaced or removed beside an unchanged `.wv` re-reads
+  it and moves its row's `indexed_at`, so a delta carries the new codec; an
+  unchanged one is read no more; and a folder that cannot be seen answers no,
+  so the row stays and the next scan asks again. v61 gives every row '': the
+  walk wrote no `.wv`'s row before it, and a routed row whose URL names a
+  `.wv` is never extracted, so nothing is read again for it (v61 restarts the
+  deletion journal's coverage over such a routed row instead: the gate's
+  bullet in `wire.md`). **Don't index
+  a `.wvc`, read one beside a lossless or DSD stream, call a `.wvc` matching
+  from its first block alone, without the stream's flags, or without the
+  stream's own last sample where its header states no usable length, take a
+  total the `.wvc` states and the `.wv` does not, or two that differ, stop the
+  look for a stream's end at a block with no samples, take a
+  look that did not complete for absence or a refused open or read for a look
+  that did not complete, compare its stat more loosely than the walk compares
+  an audio file's, or put the key in `tags_json`.**
+  `TestAHybridWavPacksCorrectionFileDecidesItsCodec`
+  (each first observation: none, its own, the extension in capitals, another
+  stream's, of other bits or of other channels, cut inside a block or at one's
+  end, the same with the length unknown or the stream from past its first
+  sample, not WavPack, the `.wv` itself,
+  a directory of its name, another stem, the stem in another case, an orphan
+  beside a lossless or a DSD stream), `TestACorrectionFileTheBridgeMayNotReadIsLossy`,
+  `TestACorrectionFilesChangesReachItsRow`
+  (added, rewritten, replaced, changed again and removed, each reaching the
+  row once and settling), `TestALookAtACorrectionFileThatDidNotCompleteConcludesNothing`,
+  `TestACorrectionFileGoneWhileItsWVCannotBeReadKeepsTheRow`,
+  `TestTheCorrectionKeyReadsBackWhatItRecords`,
+  `TestTheCorrectionKeyRidesEveryTrackWrite`,
+  `TestMigrationV61AddsTheCorrectionKeyIdempotently` and
+  `TestTheCorrectionFileOnTheWire` pin it.
 
 - **Explicit content reaches the wire as `explicit`**
   (ExtractorVersion 23). Any signal wins. An MP4 `rtng` of 1 or 4, which

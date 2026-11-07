@@ -29,11 +29,18 @@ import (
 // (consumer). Path is the library-relative track path the iOS client
 // resolves to a local Track row; Title/Artist are render fallbacks
 // (mirrors playlistItemDTO).
+//
+// Album is stored on the Christmas family's items alone, for the handler's
+// floor in each request's view (season.MeetsFloor; round 4 of backlog
+// B489), and is never on the wire: the handler's item DTO has no album. A
+// blob cached before it has none, so its family is judged on its artists
+// alone until the next build stores the albums.
 type SmartPlaylistItem struct {
 	Position int    `json:"position"`
 	Path     string `json:"path"`
 	Title    string `json:"title,omitempty"`
 	Artist   string `json:"artist,omitempty"`
+	Album    string `json:"album,omitempty"`
 }
 
 // SmartPlaylistHourlyBlob is the items_json shape for the time-of-day family:
