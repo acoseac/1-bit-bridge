@@ -44,10 +44,12 @@ func watchInstall(t *testing.T, r *refusedInstall) watchedFiles {
 // with the service stopped and a start the next day. This build's real serve
 // starts over an install of it armed 30 hours ago and a store one migration
 // behind: its admission records that it opened the data dir, its store's open
-// migrates, and its housekeeping confirms the install, keeping the record and
-// the backup. The console's Roll back then refuses, both binaries as they
-// are, since the backup's version does not read the store as it is now; and
-// the start after it removes the backup, as after any confirmed install.
+// migrates, its housekeeping puts the install on probation whatever its age,
+// and the start confirms it once it has answered and stayed up (backlog B660:
+// until B660 the housekeeping confirmed it), keeping the record and the
+// backup. The console's Roll back then refuses, both binaries as they are,
+// since the backup's version does not read the store as it is now; and the
+// start after it removes the backup, as after any confirmed install.
 func TestALateFirstStartOfTheInstalledVersionCompletesItsInstall(t *testing.T) {
 	r := newRefusedInstall(t, "")
 	r.marker.AttemptedAt = time.Now().UTC().Add(-30 * time.Hour)
@@ -56,7 +58,14 @@ func TestALateFirstStartOfTheInstalledVersionCompletesItsInstall(t *testing.T) {
 	requireTheLatestSchema(t, r.dataDir, false)
 	binaries := watch(t, r.bin, r.bak)
 
-	stderr := r.bootAndStop(t)
+	events, seams := newProbationWatch(shortProbation)
+	sb := r.bootWith(t, serveOpts{probation: seams})
+	if st := markerOf(t, r.dataDir); st.Status != "installing" || st.DataDirOpenedBy != version.ServerVersion {
+		t.Errorf("the marker once the late start listens = %+v, want the install on probation, whatever its age", st)
+	}
+	events.waitFor(t, probationConfirmed)
+	stopServed(t, sb)
+	stderr := sb.stderr.String()
 	binaries.requireUnchanged(t)
 	if v := storeVersion(t, r.dataDir); v != latest {
 		t.Errorf("the store after the late start is at %d, want %d", v, latest)
@@ -150,10 +159,13 @@ func TestAStartOfAnotherVersionKeepsTheRecordOfALateStartThatDied(t *testing.T) 
 			r := newRefusedInstall(t, "")
 			r.marker.AttemptedAt = time.Now().UTC().Add(-tc.age)
 			r.withAnOlderStore(t)
-			if res, err := updater.AdmitBoot(t.Context(), r.dataDir, version.ServerVersion, nil); err != nil || !res.Recorded {
+			res, err := updater.AdmitBoot(t.Context(), r.dataDir, version.ServerVersion, nil)
+			if err != nil || !res.Recorded {
 				t.Fatalf("the admission of the version installed = %+v, %v; want its record", res, err)
 			}
-			s, err := manifest.OpenStore(manifest.DefaultDBPath(r.dataDir))
+			// Serve's own open, with its admission's permission (B660's
+			// second round).
+			s, err := manifest.OpenStoreAdmitted(manifest.DefaultDBPath(r.dataDir), res.Permit)
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"sync"
 
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
@@ -29,6 +30,77 @@ type DisarmResult struct {
 	// VetoLifted says serve's admission lifted the marker's veto of this
 	// version's store migrations (State.MigrationVeto).
 	VetoLifted bool
+	// StoreRecorded says a migrating store open recorded that this version
+	// began a migration of the store (State.StoreMigratedBy; backlog B660).
+	StoreRecorded bool
+	// Counted says serve's admission added this start to the install's count
+	// of starts that did not end cleanly (State.FailedStarts; backlog B660).
+	Counted bool
+	// CountTried is the count the admission tried to write, 0 where it did
+	// not try one. A start that tried takes its count back when it ends
+	// cleanly (TakeBackFailedStart), whether or not its write answered,
+	// since SaveState publishes the marker before its barrier can fail.
+	CountTried int
+	// CountMissed is why the count was not written, where the count was the
+	// admission's only write (its lock not taken, or its save failed): a line
+	// for the caller to say, never a refusal, since a missed count errs
+	// toward not rolling back.
+	CountMissed error
+	// Permit is serve's admission's permission to migrate the store at its
+	// own start (MigrationPermit), the zero value but from AdmitBoot.
+	Permit MigrationPermit
+	// Start is the counted start's hold on its own lock, whose token the
+	// count's write carried (StartHold, State.RunningStart; backlog B660's
+	// third round): nil where the admission counted nothing, or could not
+	// take one, which leaves the start read as not running. The start lets
+	// go of it as it returns, once its token is cleared (EndStart).
+	Start *StartHold
+	// State is the marker as the disarm left it: as it wrote it, or as it
+	// read it where it wrote nothing.
+	State State
+}
+
+// MigrationPermit is the permission serve's admission (AdmitBoot) gives its
+// own start to migrate the store whatever the install's count (backlog B660's
+// second round): serve passes it through its store's open
+// (manifest.OpenStoreAdmitted), where MigrationHeld would otherwise refuse
+// the migration to a command of the same version. It names the data dir and
+// the version it was admitted as, so it admits nothing else, and only
+// AdmitBoot makes one: the zero value admits nothing.
+type MigrationPermit struct {
+	dataDir, version string
+}
+
+// admits reports whether the permission is for a store open of current in
+// dataDir.
+func (p MigrationPermit) admits(dataDir, current string) bool {
+	return p.version != "" && SameVersion(p.version, current) && p.dataDir == filepath.Clean(dataDir)
+}
+
+// ErrMigrationHeld is what a migrating store open's refusal matches where a
+// command other than serve's start would migrate the store while the
+// install awaits its confirmation after a start that did not end cleanly
+// (MigrationHeld; backlog B660's second round).
+var ErrMigrationHeld = errors.New("this command does not migrate the store")
+
+// migrationGate is what a migrating store open asks before its migration
+// (MigrationHeld): whether it must, its open having no admission's
+// permission.
+type migrationGate struct {
+	ask bool
+}
+
+// holds says why the open must not migrate the store in dataDir under the
+// marker st, "" where it may: the start a serve running now counts read of st
+// itself (MigrationHeldIn), so under the install marker's lock the count and
+// the running start's token are read together (backlog B660's third round:
+// the second round read the running start before its wait for that lock, so a
+// take-back that landed in the wait was taken off twice).
+func (g migrationGate) holds(dataDir string, st State, current string) string {
+	if !g.ask {
+		return ""
+	}
+	return MigrationHeldIn(dataDir, st, current)
 }
 
 // ErrMigrationVetoed is what a migrating store open's refusal matches
@@ -79,6 +151,21 @@ func MigrationVetoed(st State, current string) bool {
 // serve's (round 4). VetoLifted says it did. A veto of another version is no
 // concern of this start's, and stays.
 //
+// And it counts this start against the install (backlog B660): where current
+// is the install's target (an install marker, or a rollback's record of one,
+// InstallArmed), it adds one to State.FailedStarts and clears NotReady, in
+// its one write with its record where it makes one (Counted, CountTried).
+// The start takes its count back when it ends cleanly (TakeBackFailedStart);
+// a crash, a kill or a panic leaves it, and ProbationFailedStarts of them roll
+// the install back at the next start where CrashRollback allows it. Where the
+// count is all it has to write, the barrier still runs first and still
+// refuses, and the count's own write failing, or its lock not taken, is a
+// line for the caller (CountMissed), never a refusal: a missed count errs
+// toward not rolling back. A crash before the admission is not counted: a
+// candidate that never runs is what the settings check before the swap sees
+// (CheckConfig), and a start refused for its settings has the early
+// rollback (EarlyRollback).
+//
 // It does nothing where no install is armed or a version is recorded
 // already, but for the barrier: it fsyncs the data dir first (syncMarkerDir),
 // so that a record or a removal an earlier start made, whose barrier then
@@ -102,8 +189,16 @@ func MigrationVetoed(st State, current string) bool {
 // goes on, saying so in NoLocks. Its wait for the lock ends with ctx, serve's
 // own: a stop there returns ctx's error and writes nothing, never the answer
 // of a disarm that could not take the lock (round 4).
+//
+// Where it answers with no error it gives its start the permission to
+// migrate the store whatever the count (DisarmResult.Permit; MigrationPermit,
+// B660's second round).
 func AdmitBoot(ctx context.Context, dataDir, current string, save func(dataDir string, st State) error) (DisarmResult, error) {
-	return disarm(ctx, dataDir, current, save, false)
+	res, err := disarm(ctx, dataDir, current, save, false, MigrationPermit{})
+	if err == nil {
+		res.Permit = MigrationPermit{dataDir: filepath.Clean(dataDir), version: current}
+	}
+	return res, err
 }
 
 // DisarmBeforeMigrating is AdmitBoot for a store's open with a migration step
@@ -117,58 +212,123 @@ func AdmitBoot(ctx context.Context, dataDir, current string, save func(dataDir s
 // (MigrationVetoed), whether or not it holds the lock, and never lifts the
 // veto: a command's settings loading says nothing of serve's, and the binary
 // on disk may be the backup's version already (rounds 3 and 4).
+//
+// It also records, in the same write, that current began a migration of the
+// store (State.StoreMigratedBy; backlog B660), wherever an install is armed
+// and current is not the backup's version, whether or not a version is
+// recorded as having opened the data dir already, so after serve's admission
+// too, and a record it cannot write (its save, its barrier or its lock)
+// refuses the open: no step runs unrecorded. Begun is changed: the ladder is
+// not one transaction, so a step that failed may have landed some of its
+// statements with user_version unmoved, and no crash rollback restores the
+// backup once this is recorded. It is asked once, before the first step.
+//
+// And it refuses, with ErrMigrationHeld, writing nothing, where the install
+// of current awaits its confirmation after a start that did not end cleanly
+// and the crash rollback could still put the backup back (MigrationHeld;
+// B660's second round), unless the open is serve's own start's
+// (DisarmBeforeMigratingAdmitted).
 func DisarmBeforeMigrating(dataDir, current string) (DisarmResult, error) {
-	return disarm(context.Background(), dataDir, current, nil, true)
+	return DisarmBeforeMigratingAdmitted(dataDir, current, MigrationPermit{})
+}
+
+// DisarmBeforeMigratingAdmitted is DisarmBeforeMigrating for a store's open
+// that carries permit: serve's own start's, whose admission gave it
+// (AdmitBoot), migrates the store whatever the install's count.
+func DisarmBeforeMigratingAdmitted(dataDir, current string, permit MigrationPermit) (DisarmResult, error) {
+	return disarm(context.Background(), dataDir, current, nil, true, permit)
 }
 
 // disarm takes the install marker's lock and runs the disarm under it
 // (disarmHeld), or without it where it cannot be taken (disarmUnlocked). A
 // wait that ctx ended is the caller's stop, returned as it is: only a
-// *StateLockError is a lock that could not be taken.
-func disarm(ctx context.Context, dataDir, current string, save func(dataDir string, st State) error, migrating bool) (DisarmResult, error) {
+// *StateLockError is a lock that could not be taken. A migration that has no
+// permission for its open asks, of the marker it reads under that lock,
+// whether the count holds a serve's start running now (migrationGate).
+func disarm(ctx context.Context, dataDir, current string, save func(dataDir string, st State) error, migrating bool,
+	permit MigrationPermit) (DisarmResult, error) {
+	gate := migrationGate{ask: migrating && !permit.admits(dataDir, current)}
 	lock, err := LockState(ctx, dataDir)
 	if err != nil {
 		var refused *StateLockError
 		if !errors.As(err, &refused) {
 			return DisarmResult{}, err
 		}
-		return disarmUnlocked(dataDir, current, migrating, err)
+		return disarmUnlocked(dataDir, current, migrating, gate, err)
 	}
 	defer lock.Release()
-	res, err := disarmHeld(dataDir, current, save, migrating)
+	res, err := disarmHeld(dataDir, current, save, migrating, gate)
 	res.NoLocks = lock.Unheld()
 	return res, err
+}
+
+// migrationHeldError is a migration's refusal under MigrationHeld's why.
+func migrationHeldError(why string) error {
+	return fmt.Errorf("%w: %s", ErrMigrationHeld, why)
 }
 
 // disarmUnlocked is a disarm that could not take the install marker's lock,
 // lockErr why: it reads the marker, and goes on only where it has nothing to
 // write, after the barrier; it refuses where it would record over an armed
-// install, lift a veto of current's migrations, or remove a marker it cannot
-// read, and a migration refuses under that veto as it does with the lock.
-func disarmUnlocked(dataDir, current string, migrating bool, lockErr error) (DisarmResult, error) {
+// install, record a migration begun, lift a veto of current's migrations, or
+// remove a marker it cannot read, and a migration refuses under that veto as
+// it does with the lock. An admission's count is the one write it goes on
+// without: a line (CountMissed), since a missed count errs toward not rolling
+// back.
+func disarmUnlocked(dataDir, current string, migrating bool, gate migrationGate, lockErr error) (DisarmResult, error) {
 	st, err := LoadState(dataDir)
+	held := ""
+	if err == nil && migrating {
+		held = gate.holds(dataDir, st, current)
+	}
 	switch {
 	case err != nil:
 		return DisarmResult{}, fmt.Errorf("the install marker cannot be read (%w), nor removed without its lock: %w", markerIOError{err}, lockErr)
 	case migrating && MigrationVetoed(st, current):
 		return DisarmResult{}, migrationVetoedError(st, current)
+	case held != "":
+		return DisarmResult{}, migrationHeldError(held)
 	case MigrationVetoed(st, current):
 		return DisarmResult{}, fmt.Errorf("could not lift the install marker's veto of %s's store migrations, "+
 			"since its lock cannot be taken: %w", current, lockErr)
 	case ArmsDataDirRecord(st, current):
 		return DisarmResult{}, fmt.Errorf("could not record in the install marker that %s opened the data dir, "+
 			"since its lock cannot be taken: %w", current, lockErr)
+	case migrating && armsStoreRecord(st, current):
+		return DisarmResult{}, fmt.Errorf("could not record in the install marker that %s began a migration of the store, "+
+			"since its lock cannot be taken, so no step is run: %w", current, lockErr)
 	}
 	if err := syncMarkerDir(dataDir); err != nil {
 		return DisarmResult{}, fmt.Errorf("the install marker as it stands may not outlive a power loss: %w", err)
 	}
-	return DisarmResult{}, nil
+	res := DisarmResult{State: st}
+	if !migrating && countsStart(st, current) {
+		res.CountMissed = fmt.Errorf("this start of %s was not counted against its install, since the install marker's lock cannot be taken: %w",
+			current, lockErr)
+	}
+	return res, nil
+}
+
+// armsStoreRecord reports whether a store open of current that is about to
+// migrate must first record that it began a migration (State.StoreMigratedBy;
+// backlog B660): an install is armed, none is recorded yet, and current is
+// not the backup's version, whose own migrations a restore of the backup does
+// not pass. DataDirOpenedBy plays no part: serve's admission records it first.
+func armsStoreRecord(st State, current string) bool {
+	return InstallArmed(st) && st.StoreMigratedBy == "" && !SameVersion(st.PreviousVersion, current)
+}
+
+// countsStart reports whether serve's admission of current counts its start
+// against the install st describes (State.FailedStarts; backlog B660):
+// current is the install's target.
+func countsStart(st State, current string) bool {
+	return InstallArmed(st) && SameVersion(st.TargetVersion, current)
 }
 
 // disarmHeld is the disarm itself, with the install marker's lock held:
 // AdmitBoot's when migrating is false, DisarmBeforeMigrating's when it is
 // true. It takes no lock.
-func disarmHeld(dataDir, current string, save func(dataDir string, st State) error, migrating bool) (DisarmResult, error) {
+func disarmHeld(dataDir, current string, save func(dataDir string, st State) error, migrating bool, gate migrationGate) (DisarmResult, error) {
 	st, err := LoadState(dataDir)
 	if err != nil {
 		if rmErr := ClearStateDurably(dataDir); rmErr != nil {
@@ -179,19 +339,51 @@ func disarmHeld(dataDir, current string, save func(dataDir string, st State) err
 	if migrating && MigrationVetoed(st, current) {
 		return DisarmResult{}, migrationVetoedError(st, current)
 	}
+	if migrating {
+		if why := gate.holds(dataDir, st, current); why != "" {
+			return DisarmResult{}, migrationHeldError(why)
+		}
+	}
 	// Serve's admission of a version whose migrations a rollback vetoed lifts
 	// the veto, in the one write with its record where it makes one; a
-	// migration never does (round 4).
+	// migration never does (round 4). A migration records that it began
+	// (backlog B660), and the admission counts its start, each in that write.
 	record, lift := ArmsDataDirRecord(st, current), !migrating && MigrationVetoed(st, current)
-	if !record && !lift {
-		// Nothing to write, which this start may take only once what an
-		// earlier start wrote here is durable: a record whose barrier failed
-		// after its rename, or a removal whose barrier failed after its
-		// unlink, is live and may not outlive a power loss.
+	storeRecord := migrating && armsStoreRecord(st, current)
+	count := !migrating && countsStart(st, current)
+	if save == nil {
+		save = SaveState
+	}
+	if !record && !lift && !storeRecord {
+		// Nothing to write but perhaps the count, which this start may write
+		// only once what an earlier start wrote here is durable: a record whose
+		// barrier failed after its rename, or a removal whose barrier failed
+		// after its unlink, is live and may not outlive a power loss.
 		if err := syncMarkerDir(dataDir); err != nil {
 			return DisarmResult{}, fmt.Errorf("the install marker as it stands may not outlive a power loss: %w", err)
 		}
-		return DisarmResult{}, nil
+		if !count {
+			return DisarmResult{State: st}, nil
+		}
+		// The count alone: its failure is a line, never a refusal.
+		next := st
+		next.FailedStarts++
+		next.NotReady = false
+		hold := takeStartHold(dataDir)
+		next.RunningStart = hold.Token()
+		callBeforeDisarmRecord(dataDir)
+		res := DisarmResult{CountTried: next.FailedStarts, State: st}
+		if err := save(dataDir, next); err != nil {
+			hold.Release()
+			res.CountMissed = fmt.Errorf("this start of %s was not counted against its install: %w", current, markerIOError{err})
+			return res, nil
+		}
+		res.Counted, res.State, res.Start = true, next, hold
+		return res, nil
+	}
+	var hold *StartHold
+	if count {
+		hold = takeStartHold(dataDir)
 	}
 	callBeforeDisarmRecord(dataDir)
 	if record {
@@ -200,16 +392,47 @@ func disarmHeld(dataDir, current string, save func(dataDir string, st State) err
 	if lift {
 		st.MigrationVeto = ""
 	}
-	if save == nil {
-		save = SaveState
+	if storeRecord {
+		st.StoreMigratedBy = current
+	}
+	res := DisarmResult{Recorded: record, VetoLifted: lift, StoreRecorded: storeRecord}
+	if count {
+		st.FailedStarts++
+		st.NotReady = false
+		st.RunningStart = hold.Token()
+		res.Counted, res.CountTried = true, st.FailedStarts
 	}
 	if err := save(dataDir, st); err != nil {
-		if !record {
-			return DisarmResult{}, fmt.Errorf("could not lift the install marker's veto of %s's store migrations: %w", current, err)
+		hold.Release()
+		switch {
+		case record && storeRecord:
+			return DisarmResult{}, fmt.Errorf("could not record in the install marker that %s opened the data dir and began a migration of the store, "+
+				"so no step is run: %w", current, err)
+		case storeRecord:
+			return DisarmResult{}, fmt.Errorf("could not record in the install marker that %s began a migration of the store, so no step is run: %w",
+				current, err)
+		case record:
+			return DisarmResult{}, fmt.Errorf("could not record in the install marker that %s opened the data dir: %w", current, err)
 		}
-		return DisarmResult{}, fmt.Errorf("could not record in the install marker that %s opened the data dir: %w", current, err)
+		return DisarmResult{}, fmt.Errorf("could not lift the install marker's veto of %s's store migrations: %w", current, err)
 	}
-	return DisarmResult{Recorded: record, VetoLifted: lift}, nil
+	res.State, res.Start = st, hold
+	return res, nil
+}
+
+// takeStartHold is a counted start's hold on a lock of its own (StartHold),
+// taken before its token is written, so no reader of the marker meets the
+// token before its lock is held; the lock files of starts that hold theirs no
+// more go first. Nil where none can be taken: the count is then written with
+// no token, and the start reads as not running, which holds a command's
+// migration back rather than let it through.
+func takeStartHold(dataDir string) *StartHold {
+	sweepStartLocks(dataDir)
+	hold, err := newStartHold(dataDir)
+	if err != nil {
+		return nil
+	}
+	return hold
 }
 
 // migrationVetoedError is a migration's refusal under st's veto of current's
@@ -223,7 +446,7 @@ func migrationVetoedError(st State, current string) error {
 	if st.RollbackStarted && SameVersion(st.TargetVersion, current) {
 		return fmt.Errorf("%w: a rollback of the install of %s to %s was started and no start has gone on past it, "+
 			"so the store is not migrated: start bridge serve, which finishes the rollback where %s still refuses the settings "+
-			"and confirms the install where it loads them", ErrMigrationVetoed, st.TargetVersion, st.PreviousVersion, st.TargetVersion)
+			"and goes on with the install where it loads them", ErrMigrationVetoed, st.TargetVersion, st.PreviousVersion, st.TargetVersion)
 	}
 	return fmt.Errorf("%w: %s was rolled back on this host, and a command of it still running from its own binary must not "+
 		"migrate the store past the version put back: install %s again once the settings are fixed, or start its bridge serve "+

@@ -15,6 +15,12 @@ func tryLock(f *os.File) error {
 	})
 }
 
+func tryLockShared(f *os.File) error {
+	return controlFD(f, "flock", func(fd uintptr) error {
+		return lockedErr(flockRetryingEINTR(fd, unix.LOCK_SH|unix.LOCK_NB))
+	})
+}
+
 // lockedErr is TryLock's reading of what flock(2) answered: EWOULDBLOCK, what
 // it answers for a held lock, is ErrLocked, and anything else is itself. On
 // every GOOS this file builds for EWOULDBLOCK is the same Errno as EAGAIN
