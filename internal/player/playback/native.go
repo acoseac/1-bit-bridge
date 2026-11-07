@@ -56,6 +56,14 @@ func (b *Backend) openNativeContent(ctx context.Context, o *occ, d decode.DSDDec
 		}
 		return
 	}
+	if o.converts() {
+		// A rate the effective set converts to PCM (B728 B11) has no native
+		// or DoP plan, which nativeLogicalRate and nativeTransport would
+		// refuse: it opens through the PCM output path, its converter made
+		// where its open ends.
+		b.openConversion(ctx, o, d)
+		return
+	}
 	plan.Edges = slices.Clone(plan.Edges)
 	o.plan = &plan
 	// The decoders take DSD512, which neither native DSD nor DoP carries
@@ -248,6 +256,14 @@ func (s *session) openNativeOutput(ctx context.Context, o *occ) (*output, error)
 }
 func (s *session) activateOutput(ctx context.Context, o *occ, out *output) error {
 	if out.native == nil {
+		if o.converts() {
+			// A converted occurrence's activation reads the effective policy
+			// again too (B728 B11): one its change did not keep is refused
+			// before a frame, never played another way.
+			if err := s.checkDSDActivation(o); err != nil {
+				return err
+			}
+		}
 		s.b.rememberEdge(out.transport, nil, nil)
 		s.installed(o, out, true)
 		return nil
@@ -265,7 +281,7 @@ func (s *session) activateOutput(ctx context.Context, o *occ, out *output) error
 			return err
 		}
 	}
-	if out.admitted != nil {
+	if out.dsdAdmitted() != nil {
 		// Every activation reads the effective policy again (B728 B7): an
 		// occurrence its change did not keep is refused, never played another
 		// way.
@@ -407,6 +423,11 @@ func (b *Backend) EscalateNative(r engine.ReleaseRequest) {
 
 // Revoke fences DSD occurrences, including retiring tails, while preserving PCM.
 // A late callback never recreates a retired session or starts a successor.
+// DSD converted to PCM is the policy's as native and DoP are (B728 B11): a
+// prepared converted occurrence is dropped with the native ones, and a PCM
+// sink holding a converted occurrence's frames that it has not played is
+// dropped at once, as a native sink is released, the session faulting; a PCM
+// sink holds no such frames while it plays PCM alone, and plays on.
 func (b *Backend) Revoke(r engine.RevokeInput) {
 	s := b.known(r.Session)
 	if s == nil {
@@ -425,10 +446,20 @@ func (b *Backend) Revoke(r engine.RevokeInput) {
 			sinks = append(sinks, out.native)
 		}
 	}
+	var pcm []*output
 	for _, o := range s.chain {
-		if o.opened() && o.plan != nil && o.out == nil {
+		if !o.opened() || o.dropped || (o.plan == nil && o.conv == nil) {
+			continue
+		}
+		if o.out == nil {
 			o.dropped = true
 			o.refused = &engine.Unplayable{Reason: "native_revoked", Detail: r.Reason}
+			continue
+		}
+		if out := o.out; o.conv != nil && out.native == nil && !out.closed && !out.drained && !slices.Contains(pcm, out) &&
+			!(o.eof && out.sink.Position().Played >= o.start+o.written) {
+			active = true
+			pcm = append(pcm, out)
 		}
 	}
 	if active && s.fault == nil {
@@ -439,8 +470,13 @@ func (b *Backend) Revoke(r engine.RevokeInput) {
 		sink.Revoke()
 		sink.BeginRelease(alsapcm.Immediate)
 	}
+	for _, out := range pcm {
+		// Dropped on a goroutine of its own: a sink whose writer the kernel
+		// holds answers no command, and Revoke never waits for one.
+		s.b.spawn(func() { _ = s.call(s.ctx, out.sink.Drop) })
+	}
 	b.policyMu.Lock()
-	if active && b.liveFacts != nil && b.liveFacts.Session == r.Session && b.liveFacts.LogicalRate > 0 && b.liveFacts.State == "open" {
+	if active && b.liveFacts != nil && b.liveFacts.Session == r.Session && (b.liveFacts.LogicalRate > 0 || b.liveFacts.Transport == TransportConverted) && b.liveFacts.State == "open" {
 		b.liveFacts.State = "revoked"
 		b.liveFacts.ObservedAt = time.Now()
 	}

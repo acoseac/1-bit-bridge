@@ -437,7 +437,7 @@ func (b *Backend) copyPolicyLocked() PlayerPolicy {
 		// selection admits by, with the bound unit's model and firmware and no
 		// record's revision or date, since none is read.
 		d := b.dsd.Load()
-		return PlayerPolicy{BootID: b.policy.BootID, Generation: d.gen, Reason: d.reason(), Tuples: d.tuples(), Model: d.model, BCDDevice: d.bcd()}
+		return PlayerPolicy{BootID: b.policy.BootID, Generation: d.gen, Reason: d.reason(), Tuples: d.tuples(), Converted: d.converted(), Model: d.model, BCDDevice: d.bcd()}
 	}
 	p := b.policy
 	p.Tuples = slices.Clone(p.Tuples)

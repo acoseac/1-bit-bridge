@@ -164,7 +164,8 @@ func (b *bridgeOutput) facts(ctx context.Context) (api.BridgeOutputFacts, engine
 			policy, live := be.Facts()
 			facts.DSDPlayback, facts.Playback = bridgeDSDFacts(policy, live)
 			facts.DSDPlayback.Model = playerModelText(facts.DSDPlayback.Model, b.p.device)
-			if len(policy.Tuples) > 0 {
+			if policy.PlaysDSD() {
+				// A tuple, or a rate the player converts to PCM (B728 B11).
 				facts.Codecs = append(facts.Codecs, "dsf", "dff")
 			}
 		}
@@ -176,7 +177,10 @@ func (b *bridgeOutput) facts(ctx context.Context) (api.BridgeOutputFacts, engine
 // the backend's facts (playback.Backend.Facts): the published epoch with the
 // owner qualification its record states, each tuple naming its transport
 // (absent, native DSD), and the current occurrence's observation, nil
-// before one is installed.
+// before one is installed. A converted occurrence's observation, and the
+// set's converted rates, are B8's to publish (the design's section 7.1):
+// until then the element sends no observation while the occurrence observed
+// is one the player converts, rather than call it PCM or native DSD.
 func bridgeDSDFacts(policy playback.PlayerPolicy, live *playback.PlaybackFacts) (*api.OutputDSDPlayback, *api.OutputPlayback) {
 	dsd := &api.OutputDSDPlayback{BootID: policy.BootID, PolicyGeneration: policy.Generation, QualificationRevision: policy.Revision, Reason: policy.Reason, Tuples: []api.OutputDSDTuple{},
 		Model: policy.Model, BCDDevice: policy.BCDDevice, QualifiedOn: policy.QualifiedOn}
@@ -184,7 +188,7 @@ func bridgeDSDFacts(policy playback.PlayerPolicy, live *playback.PlaybackFacts) 
 		dsd.Tuples = append(dsd.Tuples, api.OutputDSDTuple{Format: p.Tuple.Format, BitRate: p.Tuple.BitRate, Channels: 2, PolicyID: p.PolicyID, Pause: p.Pause, TailMS: p.Tail.Milliseconds(), PrefillMS: p.Prefill.Milliseconds(),
 			Transport: playback.TupleTransport(p.Tuple)})
 	}
-	if live == nil {
+	if live == nil || live.Transport == playback.TransportConverted {
 		return dsd, nil
 	}
 	out := &api.OutputPlayback{BootID: live.BootID, PolicyGeneration: live.PolicyGeneration, Session: uint64(live.Session), Occurrence: uint64(live.Occurrence), State: live.State, Format: live.Format, RateHz: live.RateHz, LogicalRate: live.LogicalRate, Channels: live.Channels, ValidBits: live.ValidBits, PolicyID: live.PolicyID,

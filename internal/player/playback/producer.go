@@ -7,6 +7,7 @@ import (
 	"io"
 
 	"github.com/acoseac/1-bit-bridge/internal/alsapcm"
+	"github.com/acoseac/1-bit-bridge/internal/player/dsdconv"
 	"github.com/acoseac/1-bit-bridge/internal/player/engine"
 	"github.com/acoseac/1-bit-bridge/internal/player/format"
 )
@@ -24,6 +25,10 @@ const (
 
 type step struct {
 	install bool
+	// decided is a converted occurrence's join window decided (holdLocked):
+	// what follows was settled, or the window ends, and the producer reads the
+	// window next.
+	decided bool
 	kind    stepKind
 	o       *occ
 	wait    <-chan struct{}
@@ -48,6 +53,9 @@ func (s *session) produce() {
 		case stepWrite:
 			if st.install {
 				s.installed(st.o, st.o.out, false)
+			}
+			if st.decided {
+				s.b.converting("decided", st.o.id)
 			}
 			if !s.writeChunk(st.o, samples, packed) {
 				return
@@ -97,6 +105,11 @@ func (s *session) next() step {
 				// Being handed off again (B728 B7): the engine's replacement
 				// drops it, and wakes the producer.
 				return step{kind: stepWait}
+			}
+			if w.holding {
+				// A converted occurrence at its window point (B728 B11): its
+				// last frames wait for what follows.
+				return s.holdLocked(w)
 			}
 			return step{kind: stepWrite, o: w}
 		}
@@ -160,6 +173,11 @@ func (s *session) next() step {
 			}
 		}
 		s.b.rememberEdge(o.transport, o.plan, o.permission)
+		if o.conv != nil {
+			// A converted occurrence in a sink opened for PCM (B728 B11): the
+			// sink's reopens check the node as the DAC its set was computed for.
+			c.carryDSD(o.admitted)
+		}
 		// Gapless: its frames follow the last ones in the same sink.
 		o.out, o.start = c, c.submitted
 		s.writing = o
@@ -179,13 +197,28 @@ func (s *session) toWriteLocked() *occ {
 	return nil
 }
 
-// serveLocked makes the cuts asked of the producer, which is in no Write.
+// serveLocked makes the cuts asked of the producer, which is in no Write and
+// no converter's read: a cut through a converted occurrence's join window
+// (windowCutLocked) is made here alone, the producer's goroutine being the
+// one that calls a converter, unless the producer is done, when the window
+// can be submitted no more.
 func (s *session) serveLocked() {
 	for len(s.reqs) > 0 {
 		r := s.reqs[0]
 		s.reqs[0] = nil
 		s.reqs = s.reqs[1:]
-		ok, err := s.sinkCutLocked(r.o)
+		var ok bool
+		var err error
+		switch {
+		case r.o.dropped:
+			ok = true
+		case r.o.crossed:
+		case r.o.inWindowLocked() && s.producerDone:
+		case r.o.inWindowLocked():
+			ok, err = s.windowCutLocked(r.o.contPred, r.o)
+		default:
+			ok, err = s.sinkCutLocked(r.o)
+		}
 		r.done <- cutAnswer{ok: ok, err: err}
 	}
 }
@@ -210,6 +243,9 @@ func (s *session) writeChunk(o *occ, samples []int32, packed []byte) bool {
 	if o.plan != nil {
 		return s.writeNativeChunk(o)
 	}
+	if o.conv != nil {
+		return s.writeConvertedChunk(o, samples, packed)
+	}
 	buf, err := o.first, o.firstErr
 	o.first, o.firstErr = nil, nil
 	if buf == nil {
@@ -223,7 +259,7 @@ func (s *session) writeChunk(o *occ, samples []int32, packed []byte) bool {
 			s.failDecode(o, perr)
 			return true
 		}
-		if !s.writeAll(o, packed[:n]) {
+		if !s.writeAll(o, packed[:n], o.epoch) {
 			return false
 		}
 	}
@@ -261,18 +297,83 @@ func (s *session) failDecode(o *occ, err error) {
 	s.closeOcc(o)
 }
 
-// writeAll hands b, o's packed frames, to o's sink. A cut that needs the
-// producer ends the Write under way, and is served before the next one; a
-// cut that drops o drops the rest of b with it. It reports false when the
-// sink stops taking frames (an xrun, an end) or the session ends.
-func (s *session) writeAll(o *occ, b []byte) bool {
+// writeConvertedChunk is writeChunk for a converted occurrence (B728 B11):
+// its converter's next frames, packed in its transport's format and written.
+// The converter stops at its window point (dsdconv.ErrWindow), its frames
+// before the window in the sink: the occurrence holds, and the producer's
+// next step decides its window (holdLocked). At its end, its window's frames
+// in the sink, it is closed, unless a successor's first bits are in its
+// window (cont), which a cut of that successor needs its converter's snapshot
+// for: it is then let go of once that successor is heard (retireLocked), cut
+// or the session ends. What it read under an earlier epoch, before it went
+// back to its window point (windowCutLocked), is not written, and neither is
+// the rest of a chunk of an occurrence cut meanwhile.
+func (s *session) writeConvertedChunk(o *occ, samples []int32, packed []byte) bool {
+	l := s.hold()
+	defer l.release()
+	l.lock()
+	epoch := o.epoch
+	l.unlock()
+	n, err := o.conv.ReadFrames(s.ctx, samples)
+	o.clipped.Store(o.conv.Clipped())
+	if n > 0 {
+		m, perr := format.Pack(packed, samples[:n], o.pcm.ValidBits, o.out.transport.Format)
+		if perr != nil {
+			s.failDecode(o, perr)
+			return true
+		}
+		if !s.writeAll(o, packed[:m], epoch) {
+			return false
+		}
+	}
+	l.lock()
+	if o.epoch != epoch || o.dropped || s.writing != o {
+		l.unlock()
+		return true
+	}
+	switch {
+	case err == nil:
+		l.unlock()
+		return true
+	case errors.Is(err, dsdconv.ErrWindow):
+		o.holding, o.window = true, o.written
+		l.unlock()
+		s.b.converting("holding", o.id)
+		return true
+	case errors.Is(err, io.EOF):
+		o.eof = true
+		s.writing = nil
+		if o.cont == nil {
+			s.closeOcc(o)
+		}
+		l.unlock()
+		s.saidClipping(o)
+		wake(s.wakeR)
+		s.b.converting("ended", o.id)
+		return true
+	case s.ctx.Err() != nil:
+		l.unlock()
+		return false
+	}
+	l.unlock()
+	s.failDecode(o, err)
+	return true
+}
+
+// writeAll hands b, o's packed frames read under its epoch, to o's sink. A
+// cut that needs the producer ends the Write under way, and is served before
+// the next one; a cut that drops o drops the rest of b with it, and so does
+// o's return to its window point (a converted occurrence's, windowCutLocked),
+// which moves its epoch. It reports false when the sink stops taking frames
+// (an xrun, an end) or the session ends.
+func (s *session) writeAll(o *occ, b []byte, epoch uint64) bool {
 	fb := int64(format.PackedBytes(alsapcm.Channels, o.out.transport.Format))
 	l := s.hold()
 	defer l.release()
 	for len(b) > 0 {
 		l.lock()
 		s.serveLocked()
-		if o.dropped || s.writing != o {
+		if o.dropped || s.writing != o || o.epoch != epoch {
 			l.unlock()
 			return true
 		}

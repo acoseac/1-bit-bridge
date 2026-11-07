@@ -65,6 +65,13 @@ func (b *Backend) Facts() (PlayerPolicy, *PlaybackFacts) {
 		return p, nil
 	}
 	v := *b.liveFacts
+	if c := v.Converted; c != nil {
+		cp := *c
+		if b.liveClipped != nil {
+			cp.ClippedSamples = b.liveClipped.Load()
+		}
+		v.Converted = &cp
+	}
 	if v.State != "revoked" && b.liveOutput != nil && b.liveOutput.sink != nil {
 		switch b.liveOutput.sink.Position().State {
 		case alsapcm.SinkReleased, alsapcm.SinkStopped, alsapcm.SinkEnded:
@@ -79,6 +86,7 @@ func (s *session) observeOccurrence(o *occ, out *output) {
 	// reconciliation repoints under the session's lock (B728 B7).
 	s.mu.Lock()
 	admitted := o.admitted
+	converts, plan, from := o.conv != nil, o.convPlan, o.nativeFormat.BitRateHz
 	s.mu.Unlock()
 	b.policyMu.Lock()
 	defer b.policyMu.Unlock()
@@ -108,9 +116,19 @@ func (s *session) observeOccurrence(o *occ, out *output) {
 	if o.plan != nil && o.permission != nil {
 		revision = o.permission.record.Body.Revision
 	}
+	var converted *ConvertedPlayback
+	b.liveClipped = nil
+	if converts {
+		// Its claims are its plan's (B728 B11), read from the plan, never
+		// from the 176.4 kHz / 24-bit case: the PCM's format, rate and valid
+		// bits are the transport's, which are the plan's.
+		transport = TransportConverted
+		converted = &ConvertedPlayback{FromBitRate: from, Filter: plan.Filter(), PassbandHz: plan.PassbandHz(), Dither: plan.Dither(), GainDB: plan.GainDB()}
+		b.liveClipped = &o.clipped
+	}
 	b.liveOutput = out
 	b.liveFacts = &PlaybackFacts{BootID: b.policy.BootID, PolicyGeneration: generation, Session: s.id, Occurrence: o.id, State: state, Format: string(out.transport.Format), RateHz: out.transport.RateHz, LogicalRate: out.transport.LogicalRate, Channels: out.transport.Channels, ValidBits: out.transport.ValidBits, PolicyID: out.policyID,
-		Transport: transport, PackingVersion: out.transport.PackingVersion, ObservedAt: time.Now(), QualificationRevision: revision}
+		Transport: transport, PackingVersion: out.transport.PackingVersion, ObservedAt: time.Now(), QualificationRevision: revision, Converted: converted}
 }
 func (b *Backend) observeNote(n Note) {
 	b.policyMu.Lock()

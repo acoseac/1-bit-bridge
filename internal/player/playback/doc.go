@@ -16,17 +16,16 @@
 // altsets, the silent probe's answers and the DoP gain check's reading of
 // the card) is published under a generation, and selection admits a DSD
 // occurrence by that same set, its plan at the content's rate or the rate's
-// refusal by the policy's word; a rate the policy converts to PCM is refused
-// as dsd_not_in_this_release until the player converts (B11), and no set
-// (a stale reading of the box, no unit, an identity that did not read)
-// refuses every rate (ReasonDACUnread). The set is read again at a
-// session's first occurrence and at any DSD occurrence's admission it was
-// read more than 100 ms before, at each native activation, on a 100 ms
-// monitor while a session holds DSD, and at the supervisor's refresh
-// (RefreshDSD), never on the audio path; a change is swapped in one step and
-// reconciled per occurrence (policy.Reconcile): kept, handed off again
-// through the engine (engine.ReplanEvents) while no frame of it is the
-// kernel's, or revoked. The check after open requires the opened node to be
+// refusal by the policy's word; a rate the policy converts to PCM plays
+// converted (B728 B11, below), and no set (a stale reading of the box, no
+// unit, an identity that did not read) refuses every rate
+// (ReasonDACUnread). The set is read again at a session's first occurrence
+// and at any DSD occurrence's admission it was read more than 100 ms before,
+// at each native activation, on a 100 ms monitor while a session holds DSD,
+// and at the supervisor's refresh (RefreshDSD), never on the audio path; a
+// change is swapped in one step and reconciled per occurrence
+// (policy.Reconcile): kept, handed off again through the engine
+// (engine.ReplanEvents) while no frame of it is the kernel's, or revoked. The check after open requires the opened node to be
 // the DAC the set was computed for, and for DoP the gain check read afresh.
 // There is never a fallback to another transport at run time. Playback
 // records in the state what it observed: a real open's driver_accepted, a
@@ -34,6 +33,36 @@
 // fault its tuple's streaming_observed and its transport's first use
 // observed. The silent probe runs when one is due (ProbeDSD), on the device
 // slot a session holds, never beside one.
+//
+// # DSD converted to PCM (B728 B11)
+//
+// A rate the effective set converts opens through the PCM output path: the
+// occurrence's decoder is internal/player/dsdconv's converter over its DSD
+// source, made where its open ends for the plan it is admitted under then,
+// and its transport the plan's rate and valid bits in the target's packing
+// (policy.Target.Packing, the first of the table's the DAC takes with those
+// bits significant), never a packing a PCM track took or the one the sink
+// before it holds. Its policy ownership (the set and plan it was admitted
+// under) is a DSD occurrence's, apart from its transport: readmission at the
+// open's end, the check after open of its node at every open and reopen, its
+// activation, reconciliation and revocation judge it as native and DoP, and
+// Revoke drops a PCM sink that holds its unplayed frames. A join of two
+// converted occurrences is classified by dsdconv.Continuous alone: a
+// continuous successor shares the predecessor's converter chain, whose last
+// H frames, its join window, wait at its window point until the successor
+// settles or the sink's lookahead falls to 100 ms; any other successor of
+// the same PCM transport abuts in the same sink, the window zero-padded; one
+// of another transport reopens. A cut of a successor whose first bits went
+// into its predecessor's window, whether or not it submitted a frame, is the
+// producer's alone: before the window reached the sink the predecessor goes
+// back to its window point (Rewind); after, the sink's marker goes to the
+// window's first frame, the window and what follows are dropped and the
+// window submitted again, computed for what follows now; once a frame from
+// there is the kernel's, or the window cannot be submitted again, the cut is
+// late. Such a predecessor's converter is kept past its end until its
+// successor is heard. A converted occurrence's Details are its plan's PCM
+// (codec DSD, never lossless), its observation's transport converted with
+// the plan, and seeking it stays unsupported.
 //
 // # Content and packing
 //
@@ -62,7 +91,9 @@
 // bits as S24_3LE, S24_LE (four bytes, the low 24 significant) or S32_LE
 // (shifted left eight, the low byte zero); each depth's offered in that
 // order, the one the DAC took kept until Discard; 32 bits as S32_LE. Nothing
-// converts a value: no resampling, no dither, no gain.
+// after the decoder converts a value: no resampling, no dither, no gain. A
+// converted occurrence's decoder is the converter, whose samples are packed
+// by the same table.
 //
 // # The contract, term by term
 //

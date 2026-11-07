@@ -254,10 +254,14 @@ type Backend struct {
 	dsdFenceOnce sync.Once
 	probeState   dsdProbe
 
-	policyMu            sync.Mutex
-	policy              PlayerPolicy
-	liveFacts           *PlaybackFacts
-	liveOutput          *output
+	policyMu   sync.Mutex
+	policy     PlayerPolicy
+	liveFacts  *PlaybackFacts
+	liveOutput *output
+	// liveClipped is the current converted occurrence's count of saturated
+	// samples, which its observation reads as the producer counts (B728 B11);
+	// nil for every other occurrence.
+	liveClipped         *atomic.Int64
 	publishedPermission *permission
 	cliCandidate        bool
 	transitions         *TransitionPlans

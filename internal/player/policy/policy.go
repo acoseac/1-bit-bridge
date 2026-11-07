@@ -671,7 +671,7 @@ var (
 
 // conversion is the DAC's conversion target, nil when it takes none: the
 // best rate it takes at 24 bits or more in a 24-bit packing, else the best
-// it takes at 16.
+// it takes at 16, in the first of the depth's packings that carries them.
 func (rd *reading) conversion() *Target {
 	for _, bits := range []int{24, 16} {
 		packings := packings24
@@ -681,7 +681,7 @@ func (rd *reading) conversion() *Target {
 		for _, rate := range conversionRates {
 			for _, f := range packings {
 				if rd.pcmTaken(f, rate, bits) {
-					return &Target{RateHz: rate, ValidBits: bits}
+					return &Target{RateHz: rate, ValidBits: bits, Packing: f}
 				}
 			}
 		}

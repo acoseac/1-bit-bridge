@@ -14,6 +14,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/alsapcm"
 	"github.com/acoseac/1-bit-bridge/internal/player/binding"
 	"github.com/acoseac/1-bit-bridge/internal/player/engine"
+	"github.com/acoseac/1-bit-bridge/internal/player/format"
 	"github.com/acoseac/1-bit-bridge/internal/player/policy"
 )
 
@@ -133,16 +134,38 @@ type output struct {
 	drained   bool  // a drain played everything submitted
 	closed    bool  // its Close was called
 
-	// admitted is the effective DSD set its occurrence was admitted under
-	// (B728 B7), whose identity the check after open requires of every node
-	// the sink opens; nil for PCM and the harness's admission.
-	admitted *dsdSet
-
 	umu  sync.Mutex
 	unit Unit // where it is open: Locate moves it at a reopen
+	// admitted is the effective DSD set its DSD occurrence was admitted under
+	// (B728 B7), whose identity the check after open requires of every node
+	// the sink opens; nil for PCM and the harness's admission. A PCM sink a
+	// converted occurrence joins takes that occurrence's set (carryDSD, B728
+	// B11), so its reopens after a pause's release check the node as the
+	// DAC that set was computed for: read through dsdAdmitted, under umu,
+	// once the sink exists.
+	admitted *dsdSet
 	// opened is the identity the sink last opened (checkDSDNode), kept across
 	// a pause's release: what reconciliation compares with the new set's.
 	opened *policy.Identity
+}
+
+// dsdAdmitted is the set the sink's DSD was admitted under, nil for a sink
+// that carries none.
+func (o *output) dsdAdmitted() *dsdSet {
+	o.umu.Lock()
+	defer o.umu.Unlock()
+	return o.admitted
+}
+
+// carryDSD records that a converted occurrence admitted under d joins the
+// sink (B728 B11): a PCM sink opened for PCM checks its reopens as the DAC d
+// was computed for from then on.
+func (o *output) carryDSD(d *dsdSet) {
+	o.umu.Lock()
+	defer o.umu.Unlock()
+	if o.admitted == nil {
+		o.admitted = d
+	}
 }
 
 // openedIdentity is the identity the sink last opened, nil before it opened
@@ -184,8 +207,8 @@ func (o *output) admit(n alsapcm.NodeInfo) error {
 }
 
 // check is the unit's check of the node opened, and the DSD admission's: the
-// effective policy's for a native or DoP occurrence (checkDSDNode), the
-// harness's approval's for one the approval admitted.
+// effective policy's for a native, DoP or converted occurrence
+// (checkDSDNode), the harness's approval's for one the approval admitted.
 func (o *output) check(n alsapcm.NodeInfo) error {
 	o.umu.Lock()
 	u := o.unit
@@ -195,8 +218,8 @@ func (o *output) check(n alsapcm.NodeInfo) error {
 			return e
 		}
 	}
-	if o.admitted != nil {
-		return o.checkDSDNode(n)
+	if a := o.dsdAdmitted(); a != nil {
+		return o.checkDSDNode(n, a)
 	}
 	if o.permission != nil {
 		if err := o.s.b.checkPermission(o.s.ctx, o.permission, &n, edgeKey(o.transport, o.plan)); err != nil {
@@ -491,6 +514,7 @@ func (s *session) start(ctx context.Context, req engine.StartRequest) (err error
 	// and the open's refusal is read in that step too (round 3).
 	s.mu.Lock()
 	s.readmitDSDLocked(first)
+	s.makeConverterLocked(first)
 	close(first.done)
 	monitor, refused := first.admitted != nil, first.refused
 	if refused != nil {
@@ -510,11 +534,15 @@ func (s *session) start(ctx context.Context, req engine.StartRequest) (err error
 		return fmt.Errorf("player backend: the session could not start its occurrence at frame %d: %w", first.from, first.fromErr)
 	}
 	if first.plan == nil {
-		first.transport = transportFor(first.pcm.RateHz, first.pcm.ValidBits, s.b.preferred(first.pcm.RateHz, first.pcm.ValidBits))
+		if first.conv == nil {
+			// PCM's packing: the one the unit took last, or the table's first.
+			// A converted occurrence's is its plan's (makeConverterLocked).
+			first.transport = transportFor(first.pcm.RateHz, first.pcm.ValidBits, s.b.preferred(first.pcm.RateHz, first.pcm.ValidBits))
+		}
 		// The first occurrence's Details, before Start answers, so a seek
 		// that comes while the session starts knows the content's rate and
-		// length (engine.DetailsEvents, B674); the reporter reports them no
-		// more.
+		// length, and that DSD converted to PCM is DSD (engine.DetailsEvents,
+		// B674; B728 B11); the reporter reports them no more.
 		if de, ok := s.ev.(engine.DetailsEvents); ok {
 			s.mu.Lock()
 			first.repDetails = true
@@ -649,7 +677,19 @@ func (s *session) openOutput(ctx context.Context, o *occ) (*output, error) {
 	}
 	rate, bits := o.pcm.RateHz, o.pcm.ValidBits
 	te := &transportError{rate: rate, bits: bits}
-	for _, f := range s.b.formatsFor(rate, bits) {
+	formats := s.b.formatsFor(rate, bits)
+	var admitted *dsdSet
+	if o.conv != nil {
+		// A converted occurrence opens in its plan's packing alone (B728 B11;
+		// the design's section 4.3), never one the cache offers first or
+		// another of the table's, and its node is checked as the DAC the set
+		// was computed for (checkDSDNode), at the open and at every reopen.
+		formats = []format.ALSAFormat{o.transport.Format}
+		s.mu.Lock()
+		admitted = o.admitted
+		s.mu.Unlock()
+	}
+	for _, f := range formats {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
@@ -665,7 +705,7 @@ func (s *session) openOutput(ctx context.Context, o *occ) (*output, error) {
 		if err := s.b.checkEdge(transport, nil, nil); err != nil {
 			return nil, err
 		}
-		out := &output{occurrence: o.id, s: s, transport: transport, unit: u}
+		out := &output{occurrence: o.id, s: s, transport: transport, unit: u, admitted: admitted}
 		sink, err := s.b.cfg.OpenSink(s.ctx, alsapcm.SinkConfig{
 			Endpoint: u.Endpoint, Transport: out.transport, Pause: alsapcm.PauseAuto,
 			ReleaseAfter: s.opts.PauseRelease, Admit: out.admit, Locate: out.locate, Log: s.b.log,
@@ -677,13 +717,19 @@ func (s *session) openOutput(ctx context.Context, o *occ) (*output, error) {
 			s.mu.Lock()
 			s.outs = append(s.outs, out)
 			s.mu.Unlock()
-			s.b.remember(rate, bits, f)
+			if o.conv == nil {
+				// The packings a PCM track took are PCM's to offer first; a
+				// conversion's is its plan's, never remembered for PCM.
+				s.b.remember(rate, bits, f)
+			}
 			s.b.notify(Note{Session: s.id, Occurrence: out.occurrence, output: out, Kind: NoteOpened, Params: sink.Params(), Transport: out.transport, Unit: u.Label})
 			return out, nil
 		}
 		switch alsapcm.ReasonOf(err) {
 		case alsapcm.ReasonNotSupported, alsapcm.ReasonMismatch:
-			s.b.forget(rate, bits, f)
+			if o.conv == nil {
+				s.b.forget(rate, bits, f)
+			}
 			te.formats, te.err = append(te.formats, string(f)), err
 			continue
 		}
@@ -839,9 +885,11 @@ func (s *session) openSuccessor(ctx context.Context, o *occ) {
 	}()
 	// Admitted under a set a refresh has replaced since, which no
 	// reconciliation reaches while the open is under way: admitted again under
-	// the set published now, before its Prepared is reported (B728 B7).
+	// the set published now, before its Prepared is reported (B728 B7), and
+	// its converter made for the plan it is admitted under (B11).
 	s.readmitDSDLocked(o)
-	if s.nativeRevoked && o.plan != nil {
+	s.makeConverterLocked(o)
+	if s.nativeRevoked && (o.plan != nil || o.converts()) && o.refused == nil {
 		o.refused = &engine.Unplayable{Reason: "native_revoked", Detail: "DSD permission revoked"}
 	}
 	if o.dropped {
@@ -865,7 +913,11 @@ func (s *session) openSuccessor(ctx context.Context, o *occ) {
 			before = p.out.transport
 		}
 	}
-	if o.plan == nil {
+	if o.plan == nil && o.conv == nil {
+		// PCM takes the packing of the sink before it at its rate and depth,
+		// so it follows gaplessly, or the one the unit took last. A converted
+		// occurrence's transport is its plan's packing, whatever the sink
+		// before it holds (B728 B11).
 		f := s.b.preferred(rate, bits)
 		if before.RateHz == rate && before.ValidBits == bits {
 			f = before.Format
@@ -931,14 +983,27 @@ func (s *session) cut(ctx context.Context, from engine.OccurrenceID) (ok bool, e
 // of o has been or will be played. Frames in the sink are cut at o's first
 // frame (alsapcm.Sink.Cut), which only the producer side may do: here when
 // the producer is not in a Write, and otherwise by the producer, whose Write
-// the request ends, at once. s.mu is held, and let go while the producer
-// answers.
+// the request ends, at once. An o whose first bits went into its
+// predecessor's join window (B728 B11) is cut by the producer alone, through
+// that window (windowCutLocked), whether or not any frame of its own is in a
+// sink: the engine replaces such a successor through Prepare while it has
+// submitted nothing, and its onset is in the window all the same. s.mu is
+// held, and let go while the producer answers.
 func (s *session) cutFromLocked(ctx context.Context, o *occ) (bool, error) {
 	switch {
 	case o.dropped:
 		return true, nil
 	case o.crossed:
 		return false, nil
+	case o.inWindowLocked():
+		// Its first bits are in its predecessor's join window (B728 B11),
+		// whatever its own frames: the window is taken back and computed
+		// again, which the producer alone can do, between two of its steps
+		// (serveLocked). Not while it plays out the last content or once it
+		// is done: the window can be submitted no more, and the cut is late.
+		if s.producerDone || s.ending {
+			return false, nil
+		}
 	case o.written == 0 && (s.writing != o || !s.inWrite):
 		s.dropLocked(o)
 		return true, nil
@@ -950,8 +1015,12 @@ func (s *session) cutFromLocked(ctx context.Context, o *occ) (bool, error) {
 	if s.wcancel != nil {
 		s.wcancel()
 	}
+	window := o.inWindowLocked()
 	s.mu.Unlock()
 	wake(s.wakeP)
+	if window {
+		s.b.converting("cut", o.id)
+	}
 	var a cutAnswer
 	select {
 	case a = <-r.done:
@@ -1052,6 +1121,14 @@ func (s *session) retireLocked(heard *occ) {
 	kept := 0
 	for i, o := range s.chain {
 		if i < n && o.opened() {
+			// A converted occurrence kept open past its end for its join
+			// window (B728 B11) is let go of here, the successor in its window
+			// heard: no cut of it can reach the window now. Every other one is
+			// closed already.
+			s.closeOcc(o)
+			if c := o.cont; c != nil {
+				c.contPred, o.cont = nil, nil
+			}
 			o.reservation.ReleaseBackend()
 			continue
 		}

@@ -8,6 +8,7 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/alsapcm"
 	"github.com/acoseac/1-bit-bridge/internal/player/decode"
+	"github.com/acoseac/1-bit-bridge/internal/player/dsdconv"
 	"github.com/acoseac/1-bit-bridge/internal/player/engine"
 	"github.com/acoseac/1-bit-bridge/internal/player/format"
 	"github.com/acoseac/1-bit-bridge/internal/player/policy"
@@ -20,10 +21,10 @@ import (
 // open.
 const (
 	// ReasonDSD is DSD content a backend plays no way: one built with no
-	// DSD admission (no Config.DSD and no harness Authorization), and, until
-	// the player converts (B728 B11), a rate the effective policy converts to
-	// PCM (B7). The effective set's other refusals name why
-	// (internal/player/policy's words); the harness's approval its own.
+	// DSD admission (no Config.DSD and no harness Authorization). A rate the
+	// effective policy converts to PCM plays converted since B728's B11; the
+	// effective set's refusals name why (internal/player/policy's words), and
+	// the harness's approval its own.
 	ReasonDSD engine.Reason = "dsd_not_in_this_release"
 	// ReasonRate is a rate the ALSA backend does not open
 	// (alsapcm.MinRateHz to MaxRateHz), which the decoders take from 1 Hz,
@@ -62,20 +63,23 @@ type occ struct {
 	// dsdRefusal is the session's DSD refusal while its approval did not
 	// read: DSD content of the occurrence is refused with it.
 	dsdRefusal *engine.Unplayable
-	// admitted and policyPlan are the effective DSD set a native or DoP
-	// occurrence was admitted under and its plan there (B728 B7): what the
-	// check after open compares the opened node with, what its activation and
+	// admitted and policyPlan are the effective DSD set a DSD occurrence was
+	// admitted under and its plan there (B728 B7; B11 for a converted one):
+	// the policy's ownership of it, apart from its transport, which plan
+	// below holds for native and DoP alone. They are what the check after
+	// open compares the opened node with, what its activation and
 	// reconciliation judge it by; nil for PCM and for the harness's
 	// admission. admitted is repointed to each set reconciliation keeps it
 	// under, under the session's lock. leading is a session's first
 	// occurrence, whose admission reads the policy afresh; stale is one
 	// reconciliation is handing off again, which the producer holds back from
 	// the sink; and observed is one whose streaming_observed was recorded.
-	admitted    *dsdSet
-	policyPlan  policy.Plan
-	leading     bool
-	stale       bool
-	observed    bool
+	admitted   *dsdSet
+	policyPlan policy.Plan
+	leading    bool
+	stale      bool
+	observed   bool
+	conversion
 	reservation *engine.OccurrenceReservation
 	id          engine.OccurrenceID
 	entry       uint32
@@ -178,12 +182,12 @@ func (b *Backend) open(ctx context.Context, o *occ) {
 		b.openNativeContent(ctx, o, d)
 		return
 	}
-	// DSD, whatever the mode: content of a container Plays does not take
-	// (PlayedContainers, what GET /v1/outputs lists the player plays).
+	// Content of a container Plays does not take (PlayedContainers, what GET
+	// /v1/outputs lists the player plays): DSD comes as a DSDDecoder, above.
 	d, ok := src.(decode.Decoder)
 	if !ok || !Plays(d.Format().Container) {
 		_ = src.Close()
-		refuse(ReasonDSD, "native DSD and DoP are later releases, and DSD is never converted to PCM")
+		refuse(ReasonDSD, "the player plays no content of this container")
 		return
 	}
 	o.dec = d
@@ -234,15 +238,20 @@ func (b *Backend) open(ctx context.Context, o *occ) {
 // detailsOf is what the session reports of an occurrence's content as it is
 // heard (engine.Details, B470 PR 5a3): the decoder's own length (its total
 // frames, 0 when the container declares none) and format, never a tag's,
-// and lossless, as everything this backend plays is.
+// and lossless, as everything this backend plays is but DSD it converts to
+// PCM (B728 B11): a converted occurrence's format is its plan's, the plan's
+// rate, valid bits and frames (dsdconv.Converter's Format), its codec DSD,
+// and it is never lossless.
 func detailsOf(p format.PCM) engine.Details {
 	return engine.Details{Frames: p.Frames, RateHz: p.RateHz, Bits: p.ValidBits, Channels: p.Channels,
-		Codec: codecName(p.Container), Lossless: true}
+		Codec: codecName(p.Container), Lossless: p.Container != dsdconv.ContainerConverted}
 }
 
 // codecName names the decoder of a container content inspection chose, as
 // OpenHome's Info:1 names a codec (CodecName): FLAC, WAV, AIFF (AIFF-C
-// included) or ALAC; "" for a container no session plays.
+// included) or ALAC, and DSD for DSD the player converts to PCM, whose
+// decoder is the converter (dsdconv.ContainerConverted, B728 B11); "" for a
+// container no session plays.
 func codecName(c format.Container) string {
 	switch c {
 	case format.ContainerFLAC:
@@ -253,6 +262,8 @@ func codecName(c format.Container) string {
 		return "AIFF"
 	case format.ContainerALAC:
 		return "ALAC"
+	case dsdconv.ContainerConverted:
+		return "DSD"
 	}
 	return ""
 }
