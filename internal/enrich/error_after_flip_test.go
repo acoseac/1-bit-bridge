@@ -153,6 +153,34 @@ func TestEveryClientsErrorAnswerCompletedAfterTheFlipIsNoAnswer(t *testing.T) {
 	}
 }
 
+// TestAPremiumCoverCompletedAfterTheFlipCountsNoCover: the premium fetch's
+// TryCache, which answers only whether a cover was cached, so an error
+// status reads false whatever its switch says, asks it again at its return
+// after a 200 too: a cover whose body completed after the switch-off counts
+// as none, on a context that carries no switch. What it wrote stays.
+func TestAPremiumCoverCompletedAfterTheFlipCountsNoCover(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(premiumJPEG)
+	}))
+	t.Cleanup(srv.Close)
+	s := newFlipSwitch(true)
+	hc := barrierClient(t, s, func(*http.Request) bool { return true })
+	dir := t.TempDir()
+	f := NewAtlasPremiumFetcher(fakeCred{token: "tok", base: srv.URL, ok: true}, "t", hc, dir,
+		enrichgate.Enrichment(s.get).Every(time.Hour))
+	path := ArtworkCachePath(dir, clientMBID, 500)
+	cached := f.TryCache(context.Background(), path, clientMBID, 500)
+	if s.on.Load() {
+		t.Fatal("the answer's body was never read: the case tests nothing")
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("the cover was not written, so the return asked nothing a written cover tests: %v", err)
+	}
+	if cached {
+		t.Error("a cover whose answer completed after the switch-off counted as cached")
+	}
+}
+
 // TestAnErrorAnswerCompletedAfterTheFlipFillsNoNegativeCache: through the
 // callers that keep a MusicBrainz failure, an error status whose body
 // completes after the switch-off fills no cache, on a pass's context and on
