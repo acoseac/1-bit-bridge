@@ -85761,3 +85761,30 @@ resolves them with both sides' words. Their long forms are in this commit.
 
 `TestAChoiceWrittenBesideAProbeDropsNothingAndStaysAsked` and
 `TestAChoiceWriteIsAWriteOfTheDSDState` pin the probe and the gate.
+
+The merge's gates, on its commit a8c46473 at legion0 (Linux 7.0, Go 1.27.3), each
+through the build slot: `make fmt` left the tree clean; `make vet` passed for
+linux/amd64, `GOOS=windows`, `GOOS=darwin` and `GOOS=linux GOARCH=386`; `go test
+-race` on the packages the merge touched (playback, alsapcm, dsdstate, policy, api,
+qualification, cmd/bridge) passed (1,251 s); B762's suite (the 16 tests of the five
+test files it added) and B9's (the 87 of the test files it added or changed, the
+merge's among them) passed three times each under `-race`; the native overlay's two
+runs passed, each case CI names among them; `make test` passed, 89 packages ok and
+none failing (2,041 s), the Linux-only tests run here; `make build-all` and `make
+docs-check` passed, docs-check again on a copy of the merge with the rules patch
+applied (CLAUDE.md 83.2 %, `player.md` 99.3 %), where the guards that read the
+tracked docs passed too (`TestEveryCitedTestNameExists`,
+`TestEveryBridgeWordIsInTheProtocol`, `TestNoDocblockNamesAnotherDeclaration`, the
+endpoint and error-table guards, `TestDSDOutputProtocolTokens` and
+`TestQualificationRunbookVersion`). The qualification check against
+main, the merge base CI takes (98edead3), passed at 46; against the branch's own
+head before the merge it reports B762's guarded test
+(`playback_dsd_writes_test.go`), which main's 45 covers. The merge's negative
+controls, predicted first, went red where predicted: M1 (`settled` by the
+generation) the run begun before a write; M2 (`oweProbe` moving the generation) the
+probe under way; M3 (`oweProbe` setting `forced` alone) the owed probe in three
+tests; M4 (the write past the gate) both of the gate's cases; M5 (the gate not
+counting) the write under way. M1's first run did not build, so it counted for
+nothing, and it went red once rebuilt. Round 2's C14 and C29, whose text the merge
+moved into `dsdWrite`, went red as before; the other 27 mutate nothing the merge
+changed.
