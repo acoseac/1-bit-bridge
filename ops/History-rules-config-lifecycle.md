@@ -2490,7 +2490,7 @@ record is in `ops/engineering-log.md`, 2026-11-04, B707.
 
 ## An install counted healthy only once it has answered and stayed up (backlog B660, 2026-11-06)
 
-- **An install counts as healthy only once one start of its version has answered as ready and stayed up for `updater.ProbationWindow`, and three of its starts that did not end cleanly make the next start try to roll it back, before it writes anything, which a migration of the store begun, or a backup that cannot be shown to run here, prevents** (2026-11-06, backlog B660; its rounds 2 and 3, 2026-11-07). **Don't confirm on a version match, don't let a scan, a root or a certificate decide readiness, or dial an IPv6 wildcard on IPv4's loopback alone, don't count a stop (take its count back as the stop arrives once the start has answered as ready and once the teardown has run before that, so a start killed before it is ready stays counted; ask whether an end is a stop of the caller's context and the restart request once the teardown has run, never of serve's own context or of the stop's notice; ask for the marker's lock again within one budget for the teardown and the take-back, inside the shortest stop wait of systemd, launchd and the SCM; and join it before the data dir's lock goes), a port another process holds or an address the host does not have, don't take back a permission refusal the backup would not meet (file capabilities the binary lacks) or an end of the tailnet listener serve did not begin, don't read a start as running from the data dir's lock, a command's too, or from a marker read before the install marker's lock (a start runs only where the marker's token names a lock that start holds, its token cleared at every return), don't roll back once a migration step has begun or where the backup refuses the settings, does not answer their check or predates it, don't let a command but serve's own start migrate the store while the install awaits its confirmation after a start that did not end cleanly, don't hold the auto-installer for a backup the crash rollback would not put back, don't promise a put-back, and don't compare `user_version` to excuse a failed step.** → History-rules-config-lifecycle.md
+- **An install counts as healthy only once one start of its version has answered as ready and stayed up for `updater.ProbationWindow`, and three of its starts that did not end cleanly make the next start try to roll it back, before it writes anything, which a migration of the store begun, or a backup that cannot be shown to run here, prevents** (2026-11-06, backlog B660; its rounds 2 and 3, 2026-11-07). **Don't confirm on a version match, don't let a scan, a root or a certificate decide readiness, or dial an IPv6 wildcard on IPv4's loopback alone, don't count a stop (take its count back as the stop arrives once the start has answered as ready and once the teardown has run before that, so a start killed before it is ready stays counted; ask whether an end is a stop of the caller's context and the restart request once the teardown has run, never of serve's own context or of the stop's notice; ask for the marker's lock again within one budget for the teardown and the take-back, inside the shortest stop wait of systemd, launchd and the SCM, a take-back begun once a teardown past the budget has run two seconds still, below the SCM's wait; and join it before the data dir's lock goes), a port another process holds or an address the host does not have, don't take back a permission refusal the backup would not meet (file capabilities the binary lacks) or an end of the tailnet listener serve did not begin, don't read a start as running from the data dir's lock, a command's too, from a marker read before the install marker's lock, or from an exclusive try, which another probe's hold refuses (a start runs only where the marker's token names a lock that start holds exclusively, which every probe tries shared, its token cleared at every return), don't roll back once a migration step has begun or where the backup refuses the settings, does not answer their check or predates it, don't let a command but serve's own start migrate the store while the install awaits its confirmation after a start that did not end cleanly, don't hold the auto-installer for a backup the crash rollback would not put back, don't promise a put-back, and don't compare `user_version` to excuse a failed step.** → History-rules-config-lifecycle.md
 
 *The defect* (the self-healing study of 2026-11-02, read from the code;
 B613's "Not here" above; B198's scenario). `DecideBootAction` answered
@@ -2944,9 +2944,48 @@ process), `TestAStopBeforeAnErrorIsAStop`,
 pin it, with the second round's early take-back tests, which wait for the
 confirmation's window first.
 
+*The fourth round* (2026-11-07, PR #1424's third review):
+
+- *A probe takes a start's lock shared.* `startRunning` took the lock a
+  start's token names exclusively and read a refusal as the start running,
+  so a probe held between its try and its release (a `bridge doctor`'s,
+  descheduled there) read, to a migrating open's probe beside it, as a
+  crashed start running: the open took the sole failure off the count and
+  migrated, refusing the crash rollback for good. Every probe now tries the
+  lock shared (`fsutil.TryLockShared`: flock's `LOCK_SH` on unix, and on
+  Windows `LockFileEx` without `LOCKFILE_EXCLUSIVE_LOCK` over every byte, the
+  range the exclusive lock takes), which the start's exclusive hold refuses
+  and another probe's shared hold does not, and the sweep of stale start
+  locks tries the same way; only the start's own hold is exclusive.
+- *A take-back begun once the teardown has run has a floor.* Its deadline
+  was the budget's from the stop's arrival, past where the teardown outlasted
+  the budget, so `LockState`'s one try before it looks at its context was all
+  it had, and a lock held at that try left a clean stop before ready counted.
+  It asks now for `finishTakeBackFloor` (2 s) at least, never past
+  `updater.SCMStopWait` less `stopExitMargin` (1 s) from the stop's arrival
+  (`finishTakeBackDeadline`); one begun as the stop arrives keeps the budget.
+- *The tailnet's closed answer.* The review read the flag that answer sets
+  as latching while serve went on. Serve's select reads the tailnet
+  listener's end once, and both outcomes of that case end the start there
+  (an error returns 1, the closed answer falls through to the select's
+  `return 0`), so no later end of that start comes for the flag to be read
+  at; and the answer reaches the select only once serve's own stop of its
+  tailnet side has begun, which follows the select. Nothing changed: setting
+  the flag in the error branch alone would count that answer, which the third
+  round's review asked not to.
+
+`TestAProbeHeldBeforeItsUnlockIsNoRunningStart` and
+`TestATakeBackPastItsDeadlineStillTriesTheLockOnce` (internal/updater),
+`TestASharedTryMeetsOnlyAnExclusiveHold` (internal/fsutil, on every
+platform), `TestADoctorsProbeHeldBeforeItsUnlockLetsNoScanMigrate`,
+`TestATailnetServerClosedAnswerEndsTheStart`,
+`TestAPreReadyStopWhoseTeardownOutlastsTheBudgetIsTakenBack` and
+`TestATakeBackBegunOnceTheTeardownHasRunHasAFloorBelowTheSCMsWait`
+(cmd/bridge) pin it.
+
 *Left.* What B660 leaves uncovered is filed as backlog B760. The records
 are in `ops/engineering-log.md`, 2026-11-06, B660, and 2026-11-07, its
-second and third rounds.
+second, third and fourth rounds.
 
 ## Config, settings and process lifecycle
 

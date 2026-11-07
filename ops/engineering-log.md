@@ -81299,3 +81299,86 @@ an `installing` marker as the updater leaves them.
 - PROTOCOL.md's "Boot-time rollback" paragraph is worded to the code in this
   tree; its iOS mirror (`docs/BridgeProtocol.md`) is owed with it.
 - What this round leaves is backlog B760.
+
+## 2026-11-07 — B660's fourth round: a probe that cannot pass for a start, a floor for a take-back after a long teardown
+
+The third review of PR #1424 (three points). Worker b660 on the Linux worker
+host, the branch as the third round left it (c9bedda1; the rules patches and
+the merge of main are on the pushed branch, and the round's wording is
+`rules-b660-r4.patch` over the rules files as the first three patches left
+them). Commits: the reproduction 14c339f4 (red, with a probe seam nil in
+production), the change 21007a28, then this record. Points 1 and 3 were
+confirmed red first on 14c339f4, the predictions written to a file before
+the run; point 2 does not hold, by the code below.
+
+**1. A liveness probe could pass for the crashed start** (confirmed).
+`startRunning` took the start's lock exclusively (`fsutil.TryLock`) and read
+`ErrLocked` as the start running, so one probe's hold answered another. On
+14c339f4 `TestAProbeHeldBeforeItsUnlockIsNoRunningStart` (a crashed start:
+one start counted, its token, its lock file held by nobody; a probe held
+between its try and its release, `updater.SetStartProbeHeldForTest`) had
+the migrating open beside it answer `<nil>`, `StoreMigratedBy:0.2.4`
+recorded, and `TestADoctorsProbeHeldBeforeItsUnlockLetsNoScanMigrate` had a
+`bridge scan` beside a `bridge doctor` held there exit 0, the store at 60,
+want 59, unmigrated. The change: every probe tries the lock shared
+(`fsutil.TryLockShared`: flock's `LOCK_SH|LOCK_NB` on unix; on Windows
+`LockFileEx` with `LOCKFILE_FAIL_IMMEDIATELY` and without
+`LOCKFILE_EXCLUSIVE_LOCK` over every byte, the range `TryLock` takes, which
+an exclusive lock of it refuses with `ERROR_LOCK_VIOLATION` and a shared
+one does not; unsupported elsewhere, as `TryLock` is), the sweep of stale
+start locks included, and only the start's own hold is exclusive.
+`TestASharedTryMeetsOnlyAnExclusiveHold` pins the primitive on every
+platform; Windows is vetted and cross-compiled here and run by CI's Windows
+leg. The two probe tests first held their first probe inside a `sync.Once`,
+which held the fixed open's probe, now taking the lock too, inside `Do`
+behind it (the updater package's run timed out at 10 minutes); an atomic
+flag holds the first alone now. Under round 3's exclusive try that probe
+never reached the hook, so the red run stood.
+
+**2. `notAFailedStart` latching on the tailnet's closed answer** (does not
+hold). The select (main.go:6812 here; main c7192a6f's at :6616) reads the
+tailnet listener's end once: an error returns 1 in that case, and the
+closed answer falls through to the select's `return 0`, so either outcome
+ends the start, and no later end of it comes for the flag to be read at. The
+answer itself reaches the select only once serve's own stop of its tailnet
+side has begun: `http.Server.Serve` answers `http.ErrServerClosed` only after
+its `Shutdown` or `Close`, the tailnet's HTTPS server is published once a
+run (`publishHTTPS`, refused once the stop began) and shut down by
+`tsnetFront.stop` alone, which runs after the select.
+`TestATailnetServerClosedAnswerEndsTheStart` (the fake listener gives the
+answer) pins it, green on 14c339f4 and after: serve returns 0 at once, the
+count taken back, as the third round has it for that answer. The review's
+test, the answer and then an error return of the same start, cannot be
+made, since the start has ended; and setting the flag in the error branch
+alone would count that answer, which the third round's review asked not
+to. Nothing changed.
+
+**3. A clean stop before ready whose teardown outlasted the budget stayed
+counted** (confirmed, where the install marker's lock is held at that
+moment). The take-back begun once the teardown has run had the budget's
+deadline from the stop's arrival, past after such a teardown. `LockState`
+still tries once before it looks at its context
+(`TestATakeBackPastItsDeadlineStillTriesTheLockOnce`, a guard, green on
+both: it lands where the lock is free), so only a lock held at that try
+made it give up at once. On 14c339f4
+`TestAPreReadyStopWhoseTeardownOutlastsTheBudgetIsTakenBack` (its teardown
+held 10.5 s from the stop, the marker's lock held across the teardown's end
+and let go a second after) left the count at 1. The change
+(`finishTakeBackDeadline`): the budget from the arrival, but at least
+`finishTakeBackFloor` (2 s) from the teardown's end, and never past
+`updater.SCMStopWait` less `stopExitMargin` (1 s) from the arrival; with no
+arrival told, the budget from the teardown's end, as before.
+`TestATakeBackBegunOnceTheTeardownHasRunHasAFloorBelowTheSCMsWait` pins the
+formula and that a teardown ending with the budget keeps the whole floor.
+
+**Negative controls**, each alone on 21007a28, every listed test run with
+`-test.v`, the bytes put back from memory, predicted in a file before the
+run; every one as predicted:
+
+| control | mutation | red | green beside it |
+|---|---|---|---|
+| (1a) | the probe exclusive again, as the third round | `TestAProbeHeldBeforeItsUnlockIsNoRunningStart`, `TestADoctorsProbeHeldBeforeItsUnlockLetsNoScanMigrate` | `TestARunningStartIsTheLockItsTokenNames`, `TestAMigrationReadsTheRunningStartUnderTheMarkersLock` |
+| (1b) | fsutil's shared try exclusive on unix | `TestASharedTryMeetsOnlyAnExclusiveHold`, `TestAProbeHeldBeforeItsUnlockIsNoRunningStart` | `TestTryLockRefusesASecondOpenOfTheFile`, `TestARunningStartIsTheLockItsTokenNames` |
+| (2) | the tailnet's closed answer serving on until a stop, the review's reading | `TestATailnetServerClosedAnswerEndsTheStart` | `TestATailnetListenerThatFailsIsAFailedStart`, `TestOnlyACloseServeBeganEndsItsTailnetListenerCleanly` |
+| (3a) | no floor, as the third round | `TestAPreReadyStopWhoseTeardownOutlastsTheBudgetIsTakenBack`, `TestATakeBackBegunOnceTheTeardownHasRunHasAFloorBelowTheSCMsWait` | `TestAStopsTakeBackWaitsForTheMarkersLockWithinItsBudget`, `TestAStopBeforeReadyStaysCountedUntilItsTeardownHasRun`, `TestTheStopBudgetIsInsideEveryServiceManagersWait` |
+| (3b) | no ceiling below the SCM's wait | `TestATakeBackBegunOnceTheTeardownHasRunHasAFloorBelowTheSCMsWait` | `TestAPreReadyStopWhoseTeardownOutlastsTheBudgetIsTakenBack` |

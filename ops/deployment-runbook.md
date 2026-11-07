@@ -931,7 +931,9 @@ reached.
   the stop's budget ends: 10 s from the stop's arrival for the teardown and
   the take-back together, inside the SCM's 15 s (the updater's wait for a
   service to stop), launchd's 20 s and systemd's 90 s, neither of which the
-  plist or the unit changes; one that never has it leaves the count
+  plist or the unit changes, a take-back begun once a teardown longer than
+  that has run asking for 2 s more, never past 14 s from the stop's arrival;
+  one that never has it leaves the count
   (`updater: this start ended cleanly and its count … was not taken back
   within 10s …`). Once one start has not ended cleanly,
   each start after it says how many came before it. A start that ends before
@@ -973,7 +975,9 @@ reached.
   questions, only where the marker's `"runningStart"` names a start whose own
   lock is held: `serve-start-<token>.lock` in the data dir, which a counted
   start takes before it writes its token with its count, holds while it runs
-  and lets go as it returns, its token cleared; never `server.lock`, which
+  and lets go as it returns, its token cleared, and which every question asks
+  with a shared lock, so one question (a `bridge doctor` beside a `bridge
+  scan`) cannot pass for the start to another; never `server.lock`, which
   `bridge reset-player`, `restore`, `manifest clear-missing` and `output dac
   bind` hold too, and never a killed start's, whose lock dies with it. The
   file a killed start leaves is removed by the next counted start (one left
