@@ -66,7 +66,12 @@ Run "bridge token <subcommand> -h" for subcommand-specific flags.
 // return exitCode immediately and `store` is nil. Extracted to
 // eliminate the four-way duplicate the SonarCloud per-PR duplication
 // gate flagged.
-func openTokenStoreFromCfg(configPath string, stderr io.Writer) (*auth.Store, int) {
+//
+// writer names the subcommand when it writes the token store (rotate,
+// expire, revoke), which then asks the record of the data dir first
+// (refuseDataDirAway, backlog B727): a write would make the data dir and its
+// tokens.json where its volume is not mounted. "" for list, a read.
+func openTokenStoreFromCfg(configPath, writer string, stderr io.Writer) (*auth.Store, int) {
 	// loadCLIConfig, not config.Load: the flag's default is the EMPTY
 	// string, so config.Load received "" and every `bridge token`
 	// subcommand died with `read config "": open : no such file or
@@ -77,10 +82,13 @@ func openTokenStoreFromCfg(configPath string, stderr io.Writer) (*auth.Store, in
 	// documented recovery path for an orphaned token, so this was the
 	// one command an operator reaches for when something is already
 	// wrong.
-	cfg, _, err := loadCLIConfig(configPath)
+	cfg, cfgPath, err := loadCLIConfig(configPath)
 	if err != nil {
 		fmt.Fprintf(stderr, configLoadFailedFormat, err)
 		return nil, 2
+	}
+	if writer != "" && refuseDataDirAway(writer, cfgPath, cfg.DataDir, stderr) {
+		return nil, 1
 	}
 	store, err := auth.OpenStore(filepath.Join(cfg.DataDir, tokensFileName))
 	if err != nil {
@@ -97,7 +105,7 @@ func tokenListCmd(args []string, stdout, stderr io.Writer) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	store, exit := openTokenStoreFromCfg(*configPath, stderr)
+	store, exit := openTokenStoreFromCfg(*configPath, "", stderr)
 	if exit != 0 {
 		return exit
 	}
@@ -147,7 +155,7 @@ func tokenRotateCmd(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	id := fs.Arg(0)
-	store, exit := openTokenStoreFromCfg(*configPath, stderr)
+	store, exit := openTokenStoreFromCfg(*configPath, "token rotate", stderr)
 	if exit != 0 {
 		return exit
 	}
@@ -188,7 +196,7 @@ func tokenExpireCmd(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	id := fs.Arg(0)
-	store, exit := openTokenStoreFromCfg(*configPath, stderr)
+	store, exit := openTokenStoreFromCfg(*configPath, "token expire", stderr)
 	if exit != 0 {
 		return exit
 	}
@@ -224,7 +232,7 @@ func tokenRevokeCmd(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	id := fs.Arg(0)
-	store, exit := openTokenStoreFromCfg(*configPath, stderr)
+	store, exit := openTokenStoreFromCfg(*configPath, "token revoke", stderr)
 	if exit != 0 {
 		return exit
 	}

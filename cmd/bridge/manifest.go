@@ -102,7 +102,7 @@ func manifestClearMissingCmd(ctx context.Context, args []string, stdin io.Reader
 	// contention holds none. An ephemeral admin port cannot be probed; the
 	// lock alone decides. When the lock cannot be taken, the probe runs
 	// either way.
-	releaseLock, fallback, refused := holdDataDirForMutation(cfg.DataDir, cmdNameManifestClearMissing, stderr)
+	releaseLock, fallback, refused := holdDataDirForMutation(resolvedCfgPath, cfg.DataDir, cmdNameManifestClearMissing, stderr)
 	defer releaseLock()
 	if refused {
 		return 1

@@ -881,7 +881,8 @@ approval admission reads a record of version 41 alone and converts nothing; the
 migration reads an owner's record of 35 to 41 (`LegacyVersion` stays 35). For
 owners: a migrated native or DoP setup plays as before; a DAC the database does not
 know, and a known one whose first use is not acknowledged, now plays its DSD
-converted to PCM under `auto`, never bit-exact, where it was refused; an explicit
+converted to PCM under `auto` where it takes a conversion target
+(`conversion_not_offered` otherwise), never bit-exact, where it was refused; an explicit
 `off` migrated stays off. Every earlier version's harness evidence is stale to the
 harness, as at every bump.
 
