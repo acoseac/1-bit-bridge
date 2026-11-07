@@ -6783,7 +6783,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		handler: httpSrv.Handler,
 		current: version.ServerVersion,
 		store: func(ctx context.Context) error {
-			_, err := manifestStore.CountServedTracks(ctx)
+			_, err := manifestStore.CountServedTracks(ctx, formatgate.All())
 			return err
 		},
 	}, opts.probation, stderr); probation != nil {
