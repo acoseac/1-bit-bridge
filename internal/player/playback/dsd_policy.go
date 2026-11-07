@@ -991,10 +991,11 @@ var probeSlotSkips = []ProbeSkip{ProbeSessionHolds, ProbeSessionPaused, ProbeRel
 // dsdProbe is the probe's bookkeeping: the unit last probed, and a probe
 // asked for anew (ForgetDSDProbe).
 type dsdProbe struct {
-	mu     sync.Mutex
-	probed alsapcm.ProbeUnit
-	done   bool
-	forced bool
+	mu      sync.Mutex
+	probed  alsapcm.ProbeUnit
+	done    bool
+	forced  bool
+	pending bool
 }
 
 // ProbeDSD runs the silent probe of the bound DAC when one is due (the
