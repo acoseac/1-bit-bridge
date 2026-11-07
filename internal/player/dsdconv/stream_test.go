@@ -502,20 +502,32 @@ func TestTheFirstReadOfARealSourceAllocatesOnlyInTheDemuxer(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			src, err := decode.Open(bytes.NewReader(raw))
-			if err != nil {
-				t.Fatal(err)
-			}
-			c, err := New(src.(decode.DSDDecoder), Plan{176400, 24}, Options{})
-			if err != nil {
-				t.Fatal(err)
-			}
+			// A first read happens once per converter, and one MemStats
+			// reading also counts whatever else the process allocated
+			// meanwhile (4 on a busy macOS runner, B765). So a count over
+			// the bound repeats with a fresh converter: stray allocations
+			// come and go, the demuxer's own would exceed it every time.
+			var c *Converter
+			var allocs uint64
 			buf := make([]int32, 2*1024)
-			allocs := allocsOnce(func() {
-				if _, err := c.ReadFrames(context.Background(), buf); err != nil {
+			for attempt := 0; attempt < 3; attempt++ {
+				src, err := decode.Open(bytes.NewReader(raw))
+				if err != nil {
 					t.Fatal(err)
 				}
-			})
+				c, err = New(src.(decode.DSDDecoder), Plan{176400, 24}, Options{})
+				if err != nil {
+					t.Fatal(err)
+				}
+				allocs = allocsOnce(func() {
+					if _, err := c.ReadFrames(context.Background(), buf); err != nil {
+						t.Fatal(err)
+					}
+				})
+				if allocs <= 2 {
+					break
+				}
+			}
 			later := testing.AllocsPerRun(5, func() {
 				if _, err := c.ReadFrames(context.Background(), buf); err != nil && !errors.Is(err, io.EOF) {
 					t.Fatal(err)

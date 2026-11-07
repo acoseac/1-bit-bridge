@@ -238,7 +238,7 @@ func doctorOutputChecklist(cfg *config.Config, seam func(*api.LocalOutputsConfig
 				if _, err := os.Stat(dbPath); err != nil {
 					return nil, err
 				}
-				st, err := manifest.OpenStore(dbPath)
+				st, err := doctorOpenStore(dbPath)
 				if err != nil {
 					return nil, err
 				}

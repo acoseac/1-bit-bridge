@@ -25,15 +25,24 @@ import (
 //     binary and triggering restart.
 //  2. On restart, the new binary's startup housekeeping reads the
 //     marker and compares version.ServerVersion to TargetVersion:
-//     - match → install succeeded → mark Status=installed (kept for
-//     one more boot so a second botched startup can still see why
-//     the .bak is there) and retain bridge.bak. Whatever the
-//     marker's age (backlog B705).
+//     - match → the install is on probation (BootInstallProbation),
+//     whatever the marker's age (backlog B705): Status stays
+//     installing and bridge.bak stays. A version match proves only
+//     that the binary started, and the housekeeping runs before
+//     anything listens (backlog B660).
 //     - mismatch → install failed (the new binary didn't actually
 //     come up, or the swap landed something wrong) → restore .bak
 //     and clear the marker. Service manager respawns into the
 //     restored old binary.
-//  3. On the boot AFTER a successful install (Status=installed,
+//  3. Each start of TargetVersion counts itself (FailedStarts, at its
+//     admission) and takes its count back when it ends cleanly. The
+//     start that has answered as ready and stayed up for ProbationWindow
+//     confirms the install (ConfirmInstall: Status=installed,
+//     InstalledAt=now, kept for one more boot so a second botched start
+//     can still see why the .bak is there). After ProbationFailedStarts
+//     starts that did not end cleanly, the next one puts .bak back where
+//     CrashRollback allows it (cmd/bridge's recoverCrashedInstall).
+//  4. On the boot AFTER a confirmed install (Status=installed,
 //     installedAt > 0), startup deletes bridge.bak so disk doesn't
 //     accumulate stale spares.
 //
@@ -42,9 +51,10 @@ import (
 // never happened, and a version other than TargetVersion booting)
 // from triggering rollback hours later when the user finally
 // restarts: such a marker is treated as abandoned and cleared, with
-// no restore. The window bounds the rollbacks alone: TargetVersion
-// booting is the install working however late it comes, and is
-// confirmed at any age (backlog B705; DecideBootAction says why).
+// no restore. The window bounds the boot's and the early rollbacks
+// alone: TargetVersion booting is put on probation however late it
+// comes (backlog B705; DecideBootAction says why), and the crash
+// rollback reads a count, which has no clock.
 type State struct {
 	// Status is one of "" / "installing" / "installed". An empty
 	// string means no marker is present; the helpers below normalise
@@ -72,13 +82,15 @@ type State struct {
 	// was armed for, so neither the boot rollback of a restart that does
 	// not come up as TargetVersion nor the early rollback of one whose
 	// settings TargetVersion refuses would put .bak back. TargetVersion's
-	// own boot confirms the install whatever this says (backlog B705);
-	// until B705 it read such a marker as abandoned too, skipping both
-	// the success stamp and the .bak cleanup.
+	// own boot puts the install on probation whatever this says (backlog
+	// B705, B660); until B705 it read such a marker as abandoned too,
+	// skipping both the success stamp and the .bak cleanup.
 	AttemptedAt time.Time `json:"attemptedAt,omitempty"`
 
-	// InstalledAt is set on the first successful boot after an
-	// install, when Status transitions installing → installed. The
+	// InstalledAt is set when the install is confirmed, by the start of
+	// TargetVersion that has answered as ready and stayed up for
+	// ProbationWindow (ConfirmInstall, backlog B660; until B660 by its
+	// first boot's housekeeping), when Status transitions installing → installed. The
 	// boot AFTER that uses InstalledAt to decide whether to delete
 	// the now-stale .bak.
 	InstalledAt time.Time `json:"installedAt,omitempty"`
@@ -144,27 +156,35 @@ type State struct {
 	// of .bak may be a downgrade past what that version's store migrations
 	// wrote, and neither the early rollback (EarlyRollback) nor the boot
 	// rollback (BootInstallFailed) restores it, nor an operator's
-	// (RollbackRefusal). It outlives the install where a clear at boot
-	// leaves .bak where it is (ClearInstall, beside PreviousVersion), and
-	// goes with the backup's removal after a confirmed install (backlog
-	// B705).
+	// (RollbackRefusal). The crash rollback is the one exception (backlog
+	// B660): it restores over the record of the install's own version, since
+	// a migration of it records StoreMigratedBy before its first step, which
+	// refuses that rollback; a record ClearInstall kept from before B660
+	// carries no StoreMigratedBy, so the other three keep reading this one.
+	// It outlives the install where a clear at boot leaves .bak where it is
+	// (ClearInstall, beside PreviousVersion), and goes with the backup's
+	// removal after a confirmed install (backlog B705).
 	DataDirOpenedBy string `json:"dataDirOpenedBy,omitempty"`
 
 	// RollbackStarted says a rollback wrote this marker just before it put
 	// the backup back, and may not have put it back: RejectedVersion's hold,
 	// beside the install it was undoing (TargetVersion over PreviousVersion,
 	// at AttemptedAt, SwapStarted). The early rollback (cmd/bridge) writes it
-	// and leaves it; an operator's (Rollback, since backlog B692's round 2)
-	// writes it and clears it once its rename has landed. Status is "", so
+	// and leaves it, and so does the crash rollback (CrashRollbackRecord,
+	// backlog B660), whose record alone keeps FailedStarts; an operator's
+	// (Rollback, since backlog B692's round 2) writes it and clears it once
+	// its rename has landed. Status is "", so
 	// the binary the backup restores, whatever its version, takes the marker
 	// for no install and keeps the hold, where 0.2.1's and 0.2.2's boot
 	// clears an install marker it cannot finish and the hold with it. Until
 	// it is cleared the record is the install still (InstallArmed), and the
 	// version that runs finishes it: a start of TargetVersion stopped before
 	// the backup was back finishes the rollback where its settings are still
-	// refused (EarlyRollback), and where they load records that it opened the
-	// data dir (AdmitBoot), after which no rollback restores and its
-	// housekeeping confirms the install (BootRollbackOvertaken); a start of
+	// refused (EarlyRollback), or, for the crash rollback's record, where that
+	// rollback's checks hold again (cmd/bridge's recoverCrashedInstall), and
+	// otherwise records that it opened the data dir (AdmitBoot), after which
+	// none of the other rollbacks restores, and its housekeeping puts the
+	// install back on probation (BootRollbackOvertaken); a start of
 	// PreviousVersion, the backup back, ends the record as a rollback done
 	// (BootRollbackFinished).
 	RollbackStarted bool `json:"rollbackStarted,omitempty"`
@@ -183,7 +203,64 @@ type State struct {
 	// once its settings loaded (AdmitBoot), lifts it, and a new install's
 	// marker, a fresh one, carries none.
 	MigrationVeto string `json:"migrationVeto,omitempty"`
+
+	// FailedStarts counts the starts of TargetVersion since its install that
+	// have not ended cleanly (backlog B660): serve's admission adds one where
+	// this version is the install's target, in its one write with its record
+	// (AdmitBoot), and the start takes its own back when it ends in serve's
+	// stop, a restart request, or a listener's bind the host refused
+	// (TakeBackFailedStart). So the count includes a start still running, and
+	// a crash, a kill, a panic or an error return leaves its one. At
+	// ProbationFailedStarts, the next start puts the backup back where
+	// CrashRollback allows it. The confirmation clears it (ConfirmInstall), and
+	// a crash rollback's record keeps it, which is what tells that record from
+	// the other rollbacks' (CrashRollbackRecord).
+	FailedStarts int `json:"failedStarts,omitempty"`
+
+	// StoreMigratedBy names the version, other than PreviousVersion, that began
+	// a migration of the store while an install was armed (backlog B660): a
+	// store open with a step pending records it before its first step
+	// (DisarmBeforeMigrating), whether or not DataDirOpenedBy is there, and
+	// refuses the open where it cannot. Begun is changed: a step that failed
+	// may have landed some of its statements with user_version unmoved, so no
+	// crash rollback restores the backup over the store once it is set
+	// (CrashRollback), whether or not the migration finished.
+	StoreMigratedBy string `json:"storeMigratedBy,omitempty"`
+
+	// RollbackRefused says why the last start that asked for a crash rollback
+	// (cmd/bridge's recoverCrashedInstall) left the backup where it is, in
+	// words that name no path, no value and no error's text (backlog B660).
+	// The doctor and the console's Updates panel show it; the start that
+	// finds the rollback's checks hold again clears it, and so does the
+	// confirmation.
+	RollbackRefused string `json:"rollbackRefused,omitempty"`
+
+	// NotReady says a start of TargetVersion did not answer as ready (its API
+	// listener, /v1/health and its store) within ProbationWindow of beginning
+	// to serve, so the install is not confirmed (backlog B660). Recorded once
+	// a start; the next start's admission and the confirmation clear it. Not
+	// ready is not proof of a broken version, so it rolls nothing back.
+	NotReady bool `json:"notReady,omitempty"`
+
+	// RunningStart is the token of the start of TargetVersion whose count
+	// FailedStarts holds while it runs (backlog B660's third round): serve's
+	// admission writes it with the count, and a start counts as running only
+	// while the lock its token names is held.
+	RunningStart string `json:"runningStart,omitempty"`
 }
+
+// ProbationWindow is how long one start of an install's version stays up,
+// once it has answered as ready, before the install is confirmed (backlog
+// B660). Measured on the monotonic clock of the process that serves: a box
+// with no clock that keeps time across a power cut boots with a stale date.
+const ProbationWindow = 10 * time.Minute
+
+// ProbationFailedStarts is how many starts of an install's version that did
+// not end cleanly the next start rolls back over (backlog B660): three, so
+// that one power cut or one kill of an out-of-memory host does not, and the
+// fourth start at systemd's RestartSec=2 comes inside its default limit of
+// five starts in ten seconds.
+const ProbationFailedStarts = 3
 
 // stateFileName is the basename under <dataDir>. Constant so tests
 // can hardcode it; callers always go through StatePath.
@@ -372,25 +449,31 @@ const (
 	// BootNoop means no marker is present, or one that asks nothing of
 	// a boot (a hold alone, an "installed" one without InstalledAt) —
 	// nothing for boot to do. A stale install marker is not one: it is
-	// BootClearAbandoned, or BootInstallSucceeded where its version boots.
+	// BootClearAbandoned, or BootInstallProbation where its version boots.
 	BootNoop BootAction = iota
 
-	// BootInstallSucceeded means the marker says we installed X.Y.Z and
+	// BootInstallProbation means the marker says we installed X.Y.Z and
 	// ServerVersion matches, however long ago the install was (backlog
-	// B705). Caller should mark installed=now, keeping the rest of the
-	// marker (DataDirOpenedBy above all), and retain .bak for one more
-	// boot.
-	BootInstallSucceeded
+	// B705): the install is on probation, and the boot writes nothing and
+	// asks for no lock. A version match proves only that the binary
+	// started, and the housekeeping runs before anything listens, so the
+	// install is confirmed by the start that has answered as ready and
+	// stayed up for ProbationWindow (ConfirmInstall), and .bak stays until
+	// the boot after that (backlog B660; until B660 this was
+	// BootInstallSucceeded, which stamped installed at once, so the next
+	// start removed .bak whatever the first one did after its
+	// housekeeping).
+	BootInstallProbation
 
 	// BootInstallFailed means the marker says we just installed
 	// X.Y.Z but ServerVersion doesn't match. Caller should restore
 	// .bak.
 	BootInstallFailed
 
-	// BootCleanupBak means a previous boot already marked installed
-	// successfully; this boot is the "one more" that retains .bak.
-	// Caller should delete .bak (we've now had a known-good run on
-	// the new binary) and clear the marker.
+	// BootCleanupBak means the install was confirmed (by a start that
+	// answered and stayed up, ConfirmInstall); this boot is the "one
+	// more" that retained .bak. Caller should delete .bak (we've now had
+	// a known-good run on the new binary) and clear the marker.
 	BootCleanupBak
 
 	// BootClearAbandoned means the marker is older than the recency
@@ -417,11 +500,15 @@ const (
 	// operator's rollback stopped before its rename (backlog B692's round 2),
 	// and this boot is of that version: the housekeeping runs only once serve
 	// got past its settings, so the rollback will not be finished. Caller
-	// confirms the install as for BootInstallSucceeded, whatever the record's
-	// age, on the record its admission made of this version opening the data
-	// dir and on no less (ConfirmOverRollback: installed now, RollbackStarted
-	// and a hold and a veto of this version cleared), and retains .bak for
-	// one more boot.
+	// puts the install back on probation, as BootInstallProbation finds one,
+	// whatever the record's age, on the record its admission made of this
+	// version opening the data dir and on no less (ProbationOverRollback:
+	// installing again, RollbackStarted and a hold and a veto of this version
+	// cleared, the count kept), and retains .bak until the install is
+	// confirmed (backlog B660; until B660 the install was stamped installed
+	// here). A crash rollback's record left by a start whose rename did not
+	// land is finished first, before the admission, where that rollback's
+	// checks hold again (cmd/bridge's recoverCrashedInstall).
 	BootRollbackOvertaken
 
 	// BootRollbackFinished means the marker is that record and the version
@@ -438,15 +525,16 @@ const (
 func DecideBootAction(st State, currentServerVersion string, now time.Time) BootAction {
 	switch st.Status {
 	case "":
-		// A rollback's own record (the early rollback's, or an operator's
-		// still under way) is its own case, never an install marker and never
-		// a hold alone (backlog B613's round 3, B692's round 2). Read before
-		// any window: the housekeeping runs only once serve got past its
-		// settings, so the install's version booting is the install working,
-		// however old the record, and an expired one is confirmed, as an
-		// install marker past the window is since B705; the backup's version
-		// booting is the rollback done. Any other version, and a hold with no
-		// rollback, is nothing to do.
+		// A rollback's own record (the early rollback's, the crash
+		// rollback's, or an operator's still under way) is its own case,
+		// never an install marker and never a hold alone (backlog B613's
+		// round 3, B692's round 2). Read before any window: the housekeeping
+		// runs only once serve got past its settings, so the install's
+		// version booting is the rollback overtaken, however old the record,
+		// and the install goes back on probation, as an install marker past
+		// the window does since B705; the backup's version booting is the
+		// rollback done. Any other version, and a hold with no rollback, is
+		// nothing to do.
 		if !st.RollbackStarted {
 			return BootNoop
 		}
@@ -462,20 +550,28 @@ func DecideBootAction(st State, currentServerVersion string, now time.Time) Boot
 		// as a rollback's record's does above: the housekeeping runs only
 		// once serve got past its settings, after its admission recorded
 		// that it opened the data dir, so the install's version booting is
-		// the install working however late it comes (`bridge update` with
-		// the service stopped and a start the next day, a crash between the
-		// swap and the restart). Read as abandoned until B705, such an
+		// the install on probation however late it comes (`bridge update`
+		// with the service stopped and a start the next day, a crash between
+		// the swap and the restart). Read as abandoned until B705, such an
 		// install was never stamped installed, its .bak never cleaned up,
 		// and the clear dropped the admission's record, so an operator's
 		// rollback put .bak back over the store that version had migrated.
 		//
+		// On probation, never confirmed here (backlog B660): this runs before
+		// anything listens, so a version match says the binary started and
+		// nothing more. Stamped installed here until B660, a version that
+		// crashed after this point had its .bak removed by its own next
+		// start. The start that has answered and stayed up confirms it
+		// (ConfirmInstall), and three starts that did not end cleanly roll
+		// it back where nothing forbids it (CrashRollback).
+		//
 		// And BEFORE the SwapStarted check on purpose: we are demonstrably
 		// running TargetVersion, so the swap obviously happened, and a
 		// marker written by a pre-SwapStarted binary (flag absent → false
-		// after unmarshal) must still be stamped installed across the
+		// after unmarshal) must still be put on probation across the
 		// upgrade boundary.
 		if normalizeTag(currentServerVersion) == normalizeTag(st.TargetVersion) {
-			return BootInstallSucceeded
+			return BootInstallProbation
 		}
 		// Another version booting: no restore past the window, whatever
 		// the swap.
@@ -490,8 +586,8 @@ func DecideBootAction(st State, currentServerVersion string, now time.Time) Boot
 		}
 		return BootInstallFailed
 	case "installed":
-		// One-more-boot retention. installedAt is set on the first
-		// post-install boot; this is the second.
+		// One-more-boot retention. installedAt is set by the confirmation
+		// (ConfirmInstall); this is the boot after it.
 		if !st.InstalledAt.IsZero() {
 			return BootCleanupBak
 		}
@@ -504,27 +600,30 @@ func DecideBootAction(st State, currentServerVersion string, now time.Time) Boot
 	}
 }
 
-// ConfirmOverRollback is the marker BootRollbackOvertaken writes over st, a
+// ProbationOverRollback is the marker BootRollbackOvertaken writes over st, a
 // rollback's record of an install of current that was stopped before the
-// backup was back (the early rollback's, or an operator's): the install
-// confirmed as BootInstallSucceeded
-// confirms one (installed at now, so the boot after it removes the backup),
-// the rollback's mark gone, and its hold and its veto gone only where they
-// name current, a refusal of another version recorded since staying. The
-// install and the record of the start that went on past it stay as they are.
+// backup was back (the early rollback's, the crash rollback's, or an
+// operator's): the install back on probation, as BootInstallProbation finds
+// one (Status installing, so the start that answers and stays up confirms it,
+// ConfirmInstall), the rollback's mark gone, and its hold and its veto gone
+// only where they name current, a refusal of another version recorded since
+// staying. The rest stays as it is: the install, the record of the start that
+// went on past it, and the count of the starts that did not end cleanly, since
+// that install has not been confirmed yet (backlog B660; until B660 the
+// install was stamped installed here).
 //
-// It confirms only on that record: st must name the install's version as the
-// one that opened the data dir (State.DataDirOpenedBy), which serve's
-// admission writes before the store opens (AdmitBoot), and current must be
-// that version (backlog B613's round 4). Otherwise it returns an error and st
-// as it was, for the caller to leave the marker as it is: a start that cannot
-// show its own admission has not shown that the rollback is over.
-func ConfirmOverRollback(st State, current string, now time.Time) (State, error) {
+// It acts only on that record: st must name the install's version as the one
+// that opened the data dir (State.DataDirOpenedBy), which serve's admission
+// writes before the store opens (AdmitBoot), and current must be that version
+// (backlog B613's round 4). Otherwise it returns an error and st as it was,
+// for the caller to leave the marker as it is: a start that cannot show its
+// own admission has not shown that the rollback is over.
+func ProbationOverRollback(st State, current string) (State, error) {
 	if st.DataDirOpenedBy == "" || !SameVersion(current, st.TargetVersion) || !SameVersion(st.DataDirOpenedBy, st.TargetVersion) {
 		return st, fmt.Errorf("the record does not name %s as the version that opened the data dir, as its admission records before the store opens",
 			current)
 	}
-	st.Status, st.InstalledAt, st.RollbackStarted = "installed", now, false
+	st.Status, st.InstalledAt, st.RollbackStarted = "installing", time.Time{}, false
 	if SameVersion(st.RejectedVersion, current) {
 		st.RejectedVersion, st.RejectedReason, st.RejectedConfigDigest = "", "", ""
 	}
@@ -532,6 +631,13 @@ func ConfirmOverRollback(st State, current string, now time.Time) (State, error)
 		st.MigrationVeto = ""
 	}
 	return st, nil
+}
+
+// AwaitsConfirmation reports whether st is an install of current that has not
+// been confirmed yet: Status installing, current its target (backlog B660).
+// A start of current on such a marker is on probation.
+func AwaitsConfirmation(st State, current string) bool {
+	return st.Status == "installing" && SameVersion(st.TargetVersion, current)
 }
 
 // RollbackRefusal says why an operator's rollback (Rollback) must not put the

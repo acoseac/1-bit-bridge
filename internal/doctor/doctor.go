@@ -315,6 +315,17 @@ type Deps struct {
 	// holds by default.
 	DataDirPreparation func(ctx context.Context) Check
 
+	// InstallProbation is the line on an install of this version that awaits
+	// its confirmation, named install-probation (cmd/bridge's
+	// doctorInstallProbation over updater.ProbationStatus, backlog B660, one
+	// source for the CLI and the console's doctor): none where no install
+	// awaits it, ok on probation, a warn from two starts counted that have not
+	// ended cleanly, a fail at updater.ProbationFailedStarts, beside a crash
+	// rollback that was refused, or where a start did not answer as ready. It
+	// is the surface that works while serve cannot start. A nil func skips
+	// it. Run places it right after the data-dir line.
+	InstallProbation func(ctx context.Context) []Check
+
 	// PlayerStorage is the line on the storage under the data directory of
 	// the bridge's own player (B470), from the medium check its strict
 	// writer makes as the player starts (cmd/bridge's doctorPlayerStorage,
@@ -470,6 +481,9 @@ func Run(ctx context.Context, d Deps) Report {
 	}
 	if d.DataDirPreparation != nil {
 		out = append(out, d.DataDirPreparation(ctx))
+	}
+	if d.InstallProbation != nil {
+		out = append(out, d.InstallProbation(ctx)...)
 	}
 	for _, fn := range checks {
 		out = append(out, fn(ctx, d))
@@ -1178,7 +1192,7 @@ func bindVerdict(name string, port int) (Check, bool) {
 	v4err := probeBind(net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
 	v6err := probeBind(net.JoinHostPort("::1", strconv.Itoa(port)))
 
-	inUse := isAddrInUse(v4err) || isAddrInUse(v6err)
+	inUse := IsAddrInUse(v4err) || IsAddrInUse(v6err)
 	if !inUse && (v4err == nil || v6err == nil) {
 		// At least one family bound cleanly and neither reported a
 		// conflict. The other family failing is an environment fact, not
@@ -1200,7 +1214,7 @@ func bindVerdict(name string, port int) (Check, bool) {
 	// the hard "another process owns this port" Fail would be wrong and would
 	// block `bridge init`; degrade to a Warn that names the real cause.
 	//
-	// isAddrInUse is platform-split rather than a bare
+	// IsAddrInUse is platform-split rather than a bare
 	// errors.Is(err, syscall.EADDRINUSE): on Windows that constant is an
 	// INVENTED value (syscall.APPLICATION_ERROR + iota, per
 	// zerrors_windows.go's "Invented values to support what package os and

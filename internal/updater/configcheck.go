@@ -472,8 +472,11 @@ const futureMarkerSlack = time.Minute
 // back. why is "" when the marker is no install of current, which is nothing
 // to explain.
 //
-// DecideBootAction's rule is left as it is: its version match counts as the
-// install's success, where this asks about an install that could not start.
+// This asks about an install whose version could not get past its settings.
+// One that got past them is on probation (DecideBootAction's version match,
+// backlog B660): it is confirmed once a start of it has answered and stayed
+// up (ConfirmInstall), and CrashRollback asks about one whose starts did not
+// end cleanly.
 func EarlyRollback(st State, current string, now time.Time) (ok bool, why string) {
 	if !InstallArmed(st) || normalizeTag(st.TargetVersion) != normalizeTag(current) {
 		return false, ""

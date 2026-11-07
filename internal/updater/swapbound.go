@@ -16,7 +16,15 @@ import "time"
 // (a migrating store open, a start's admission and housekeeping) waits
 // defaultStateLockWait for it, so the stop may take at most half of that
 // wait, leaving the rest for the marker's writes and the swap's renames
-// (TestAnSCMStopFitsInsideTheMarkersLockWait). Serve's stop takes no part of
-// the lock, so the service the swap stops never waits on it
+// (TestAnSCMStopFitsInsideTheMarkersLockWait). Serve's stop waits for the
+// lock only to take back its start's count of an install, and to clear the
+// start's token (backlog B660), within its stop's budget from the stop's
+// arrival (cmd/bridge's stopBudget, 10 s since the third round), so the
+// service the swap stops ends inside this wait; a serve with no count to take
+// back takes no part of the lock
 // (TestServeStopsWhileAnotherProcessHoldsTheMarkersLock, cmd/bridge).
 const scmStopWait = 15 * time.Second
+
+// SCMStopWait is scmStopWait, for serve's stop budget to be held inside it
+// (cmd/bridge's TestTheStopBudgetIsInsideEveryServiceManagersWait).
+const SCMStopWait = scmStopWait

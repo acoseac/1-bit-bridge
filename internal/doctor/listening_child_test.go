@@ -241,7 +241,7 @@ func requirePortHeld(t *testing.T, port int) {
 		_ = l.Close()
 		t.Fatalf("port %d binds again: the child's listener was closed by the collection it ran before it said it was ready", port)
 	}
-	if !isAddrInUse(err) {
+	if !IsAddrInUse(err) {
 		t.Fatalf("binding port %d: %v; want it refused as in use", port, err)
 	}
 }

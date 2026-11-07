@@ -810,7 +810,7 @@
         </dd>
         <dt>Last check</dt>
         <dd id="update-last-check">{{timeAgoPtr .Data.Update.LastCheck}}</dd>
-        {{- /* These three rows are toggled in place by app.js, which
+        {{- /* These four rows are toggled in place by app.js, which
                resolves each dd by id and then hides or reveals it
                together with its previousElementSibling dt. So each
                must exist on every first paint, and each id must be
@@ -831,6 +831,8 @@
         <dd id="update-deferred"{{if not .Data.Update.DeferredReason}} hidden{{end}}>{{if .Data.Update.DeferredReason}}<span class="badge running">deferred</span> {{.Data.Update.DeferredReason}}{{end}}</dd>
         <dt{{if not .Data.Update.RollbackRefusal}} hidden{{end}}>Rollback</dt>
         <dd id="update-rollback-refused"{{if not .Data.Update.RollbackRefusal}} hidden{{end}}>{{if .Data.Update.RollbackRefusal}}<span class="badge idle">unavailable</span> {{.Data.Update.RollbackRefusal}}{{end}}</dd>
+        <dt{{if not .Data.Update.Probation}} hidden{{end}}>Probation</dt>
+        <dd id="update-probation"{{if not .Data.Update.Probation}} hidden{{end}}>{{if .Data.Update.Probation}}<span class="badge {{if eq .Data.Update.ProbationLevel "ok"}}idle{{else}}warn{{end}}">{{if eq .Data.Update.ProbationLevel "ok"}}on probation{{else}}{{.Data.Update.ProbationLevel}}{{end}}</span> {{.Data.Update.Probation}}{{end}}</dd>
       </dl>
       <p class="panel-note">Install downloads the release archive, verifies the SHA-256 from <code>checksums.txt</code>, swaps the binary, and arms a rollback marker. {{if .Data.IsSupervised}}The bridge restarts automatically to load the new version.{{else}}The bridge stops after install — start it again manually to load the new version.{{end}} Active downloads block install (use the override only when nothing critical is in flight).</p>
     </div>

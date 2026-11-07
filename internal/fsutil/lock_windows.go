@@ -24,6 +24,16 @@ func tryLock(f *os.File) error {
 	})
 }
 
+// tryLockShared is tryLock without LOCKFILE_EXCLUSIVE_LOCK: a shared lock of
+// the same range, which an exclusive lock of it refuses with
+// ERROR_LOCK_VIOLATION and another shared one does not.
+func tryLockShared(f *os.File) error {
+	return controlFD(f, "LockFileEx", func(fd uintptr) error {
+		return lockedErr(windows.LockFileEx(windows.Handle(fd), windows.LOCKFILE_FAIL_IMMEDIATELY,
+			0, lockAllBytes, lockAllBytes, new(windows.Overlapped)))
+	})
+}
+
 // lockedErr is TryLock's reading of what LockFileEx answered: with
 // LOCKFILE_FAIL_IMMEDIATELY a range another handle holds is
 // ERROR_LOCK_VIOLATION, which is ErrLocked, and anything else is itself.

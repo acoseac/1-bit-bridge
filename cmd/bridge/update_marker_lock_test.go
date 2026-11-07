@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"strings"
@@ -34,11 +35,14 @@ func rollBackFromTheConsole(t *testing.T, r *refusedInstall, hold func(), unhold
 
 // TestAManualRollbackThatHoldsTheMarkersLockFirstLeavesTheBootNothingToDo:
 // the operator's rollback holds the install marker's lock from its read of
-// the marker through its record and the backup's rename, and the
-// housekeeping of a start of the version installed, arriving after that read
-// and before the record, waits for it, then reads the rollback's record and
-// does nothing: no install confirmed over the backup put back, the hold and
-// the veto as the rollback recorded them.
+// the marker through its record and the backup's rename. The housekeeping of
+// a start of the version installed, arriving after that read and before the
+// record, has nothing to do and asks for no lock (the install is on
+// probation: backlog B660), and the confirmation of that install (until B660
+// the housekeeping confirmed it here, after the same wait) waits for the
+// lock, then reads the rollback's record and does nothing: no install
+// confirmed over the backup put back, the hold and the veto as the rollback
+// recorded them.
 func TestAManualRollbackThatHoldsTheMarkersLockFirstLeavesTheBootNothingToDo(t *testing.T) {
 	r := newRefusedInstall(t, "")
 	atRecord, release := newOnceCloser(), newOnceCloser()
@@ -55,27 +59,40 @@ func TestAManualRollbackThatHoldsTheMarkersLockFirstLeavesTheBootNothingToDo(t *
 		t.Fatal("the rollback never reached its record")
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	var stderr safeBuffer
-	housekept, housekeepingDone := make(chan error, 1), make(chan struct{})
-	go func() {
-		defer close(housekeepingDone)
-		housekept <- bootHousekeeping(ctx, &stderr, r.dataDir, r.bin, version.ServerVersion, nil)
-	}()
-	drainLoopOnCleanup(t, cancel, housekeepingDone, "the boot's housekeeping")
+	var housekeeping bytes.Buffer
+	if err := bootHousekeeping(t.Context(), &housekeeping, r.dataDir, r.bin, version.ServerVersion, nil); err != nil {
+		t.Fatalf("the housekeeping = %v; stderr=%s", err, housekeeping.String())
+	}
 	select {
 	case <-waits:
-	case <-housekeepingDone:
-		t.Fatalf("the housekeeping did not wait for the rollback that held the marker's lock (%v); stderr=%s", <-housekept, stderr.String())
+		t.Fatal("the housekeeping of an install on probation waited for the marker's lock")
+	default:
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	confirmed, confirmationDone := make(chan error, 1), make(chan struct{})
+	go func() {
+		defer close(confirmationDone)
+		ok, err := updater.ConfirmInstall(ctx, r.dataDir, version.ServerVersion, time.Now().UTC())
+		if ok {
+			err = errors.New("the install was confirmed")
+		}
+		confirmed <- err
+	}()
+	drainLoopOnCleanup(t, cancel, confirmationDone, "the install's confirmation")
+	select {
+	case <-waits:
+	case <-confirmationDone:
+		t.Fatalf("the confirmation did not wait for the rollback that held the marker's lock (%v)", <-confirmed)
 	case <-time.After(withinTheTest):
-		t.Fatalf("the housekeeping never waited for the marker's lock; stderr=%s", stderr.String())
+		t.Fatal("the confirmation never waited for the marker's lock")
 	}
 	release.close()
 	if err := <-rolledBack; err != nil {
 		t.Fatalf("the rollback = %v", err)
 	}
-	if err := <-housekept; err != nil {
-		t.Fatalf("the housekeeping = %v; stderr=%s", err, stderr.String())
+	if err := <-confirmed; err != nil {
+		t.Fatalf("the confirmation over the rollback's record = %v, want nothing done", err)
 	}
 	if got := reportedVersion(t, r.bin); !strings.Contains(got, previousVersion) {
 		t.Errorf("the binary reports %q, want %s put back", got, previousVersion)
@@ -84,8 +101,8 @@ func TestAManualRollbackThatHoldsTheMarkersLockFirstLeavesTheBootNothingToDo(t *
 	if err != nil || st.Status != "" || st.RejectedVersion != version.ServerVersion || st.MigrationVeto != version.ServerVersion {
 		t.Errorf("the marker = %+v (%v), want the rollback's record: no install, the hold and the veto of %s", st, err, version.ServerVersion)
 	}
-	if lines := updaterLines(stderr.String()); lines != "" {
-		t.Errorf("the housekeeping acted on the rollback's record: %s", lines)
+	if lines := updaterLines(housekeeping.String()); lines != "" {
+		t.Errorf("the housekeeping acted on the install: %s", lines)
 	}
 }
 
@@ -150,10 +167,13 @@ func TestABootThatHoldsTheMarkersLockFirstLeavesTheManualRollbackNothingToPutBac
 	}
 }
 
-// TestServeStopsWhileAnotherProcessHoldsTheMarkersLock: nothing in serve's
-// stop takes the install marker's lock, so a `bridge update` that holds it
-// while it stops the service (on Windows, through the SCM, for up to
-// scmStopWait) is never waiting on the serve it stops.
+// TestServeStopsWhileAnotherProcessHoldsTheMarkersLock: with no install
+// counting its start, nothing in serve's stop takes the install marker's
+// lock, so a `bridge update` that holds it while it stops the service (on
+// Windows, through the SCM, for up to scmStopWait) is never waiting on the
+// serve it stops; a start an install counts waits for it to take its count
+// back within its stop's budget, stopBudget from the stop's arrival (backlog
+// B660).
 func TestServeStopsWhileAnotherProcessHoldsTheMarkersLock(t *testing.T) {
 	r := newRefusedInstall(t, "")
 	if err := updater.ClearState(r.dataDir); err != nil {
