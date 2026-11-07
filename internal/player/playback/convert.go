@@ -229,15 +229,19 @@ func (s *session) holdLocked(a *occ) step {
 }
 
 // floorLocked reports whether the sink a plays in has at most windowFloor of
-// lookahead left: what was handed to it and is not played. A sink that is
-// gone has none. s.mu is held.
-func (s *session) floorLocked(a *occ) bool {
-	out := a.out
+// lookahead left. s.mu is held.
+func (s *session) floorLocked(a *occ) bool { return outFloorLocked(a.out) }
+
+// outFloorLocked reports whether out has at most windowFloor of lookahead
+// left: what was handed to it and is not played, in its own positions'
+// unit (a native sink's count logical bits). A sink that is gone has none.
+// s.mu is held.
+func outFloorLocked(out *output) bool {
 	if out == nil || out.closed || out.drained {
 		return true
 	}
 	p := out.sink.Position()
-	return p.Submitted-p.Played <= int64(out.transport.RateHz)*int64(windowFloor)/int64(time.Second)
+	return p.Submitted-p.Played <= int64(out.logicalRate())*int64(windowFloor)/int64(time.Second)
 }
 
 // holdingLocked reports whether the producer holds a converted occurrence's

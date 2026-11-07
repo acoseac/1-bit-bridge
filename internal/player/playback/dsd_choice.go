@@ -502,6 +502,33 @@ func (s *session) lockSettled(ctx context.Context, o *occ) {
 	}
 }
 
+// awaitWrite waits, its session's lock let go, while a choice's write
+// pending plays o's rate otherwise than the set published (B728 B9 round 2,
+// point 1): the activation of o's sink (checkDSDActivation) then judges o
+// under what the write left published. The write settles at every end of
+// it, so the wait is bounded by the write's (its state's fsync and its
+// publish); it ends too with ctx or the session's life, which a release ends.
+// It returns with s.mu not held.
+func (s *session) awaitWrite(ctx context.Context, o *occ) {
+	for {
+		s.mu.Lock()
+		p := s.b.pendingFor(o)
+		s.mu.Unlock()
+		if p == nil {
+			return
+		}
+		s.b.choiceAwaited(o.id)
+		select {
+		case <-p.done:
+			s.b.choiceWoke(o.id)
+		case <-ctx.Done():
+			return
+		case <-s.ctx.Done():
+			return
+		}
+	}
+}
+
 // writeInterrupts reports whether publishing next in cur's place would
 // interrupt what plays (the design's sections 3.5 and 7.2, check 8): an
 // occurrence of a session's that the classification reconciliation acts by

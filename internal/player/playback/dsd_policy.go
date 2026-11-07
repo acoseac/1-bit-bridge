@@ -795,9 +795,10 @@ type dsdJudgement struct {
 // already, or played out (its sink drained or closed, or its every frame
 // played with its end in its sink) is not judged. A re-plan interrupts where
 // policy.Reconcile says so, frames of it in a sink, and also for the
-// occurrence the producer writes and one whose first bits are in its
-// predecessor's join window, whose frames may reach the sink before a write
-// publishes. s.mu is held.
+// occurrence the producer writes, one whose first bits are in its
+// predecessor's join window, and one whose own sink an open under way will
+// adopt (claimed, B728 B9 round 2), whose frames may reach the sink before a
+// write publishes. s.mu is held.
 func (s *session) judgeDSDLocked(o *occ, next *dsdSet, replans bool) dsdJudgement {
 	if !o.opened() || o.admitted == nil || o.dropped || o.admitted == next {
 		return dsdJudgement{}
@@ -816,7 +817,7 @@ func (s *session) judgeDSDLocked(o *occ, next *dsdSet, replans bool) dsdJudgemen
 		case !replans:
 			return dsdJudgement{stale: true, revoke: "an occurrence's DSD plan left the effective set, and the engine hands nothing off again", interrupts: true}
 		}
-		return dsdJudgement{stale: true, interrupts: v.Interrupts || s.writing == o || o.inWindowLocked()}
+		return dsdJudgement{stale: true, interrupts: v.Interrupts || s.writing == o || o.inWindowLocked() || o.claimed}
 	}
 	return dsdJudgement{revoke: fmt.Sprintf("occurrence %d's DSD plan left the effective set, or its DAC changed, while it played", o.id), interrupts: true}
 }
@@ -879,6 +880,11 @@ func (s *session) reconcileDSD(next *dsdSet) {
 	wake(s.wakeR)
 }
 
+// errReplanned is an activation's check finding its occurrence being handed
+// off again (checkDSDActivation): its sink is taken back unwritten
+// (unadopt), never a fault.
+var errReplanned = errors.New("player backend: the occurrence is being handed off again")
+
 // checkDSDActivation is a native, DoP or converted occurrence's check as its
 // sink is about to write to the DAC (the design's section 3.5: every
 // activation reads the policy): the policy read afresh, which reconciles a
@@ -893,13 +899,21 @@ func (s *session) reconcileDSD(next *dsdSet) {
 // to the DAC (round 4). A refresh that publishes after the check judges the
 // occurrence as reconciliation judges any. Never a fallback: an occurrence
 // the set published now does not keep is refused, never played another way.
-func (s *session) checkDSDActivation(o *occ) error {
+// A choice's write pending that plays its rate otherwise is waited for
+// first, no lock held (awaitWrite, B728 B9 round 2, point 1), so the check
+// judges it under what the write left published; a successor being handed
+// off again by then (the write landed, or a refresh changed the set) is
+// errReplanned, which its sink's adoption takes back, never written to.
+func (s *session) checkDSDActivation(ctx context.Context, o *occ) error {
+	s.awaitWrite(ctx, o)
 	s.b.refreshDSD()
 	s.b.activating()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	cur := s.b.dsd.Load()
 	switch {
+	case o.stale && !o.leading && !o.dropped:
+		return errReplanned
 	case o.stale || o.dropped || o.admitted == nil:
 	case o.admitted == cur:
 		return nil

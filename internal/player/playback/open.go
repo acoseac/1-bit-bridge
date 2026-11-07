@@ -84,6 +84,13 @@ type occ struct {
 	// its open asks again where a choice's write would lift the refusal, or
 	// a set published since does (settleOpen). nil for any other refusal.
 	refusedUnder *dsdSet
+	// claimed, under the session's lock, is an open of the occurrence's own
+	// sink under way, from the step that found no choice's write pending
+	// that plays its rate otherwise (the producer's transition, a resume
+	// between transports) to the end of its sink's activation, or of an open
+	// that failed (B728 B9 round 2, point 1): a write's classification counts
+	// it as reaching its sink (judgeDSDLocked).
+	claimed bool
 	conversion
 	reservation *engine.OccurrenceReservation
 	id          engine.OccurrenceID

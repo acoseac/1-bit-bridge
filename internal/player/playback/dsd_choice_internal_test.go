@@ -440,11 +440,16 @@ func TestAnOccurrenceWhoseRateTheWriteChangesWaitsAtTheEndOfItsOpen(t *testing.T
 	}
 }
 
-// TestTheProducerHoldsAnOccurrenceAPendingWriteWouldReplan (binding note 3): an
-// opened occurrence not yet in a sink, at a rate a pending write would change,
-// is held back from the sink until the write settles, so the write's
-// classification (a re-plan, which interrupts nothing) still holds when it
-// publishes.
+// TestTheProducerHoldsAnOccurrenceAPendingWriteWouldReplan (binding note 3;
+// B728 B9 round 2): an opened occurrence not yet in a sink, at a rate a
+// pending write would change, is held back from every sink until the write
+// settles, so the write's classification (a re-plan, which interrupts
+// nothing) still holds when it publishes. With no sink to join, the producer
+// takes the transport's step (transition), which drains the sink before it
+// and opens none for the occurrence until the write settles; out of the sink
+// it would join it waits, the reporter waking it, while that sink holds more
+// than its floor of lookahead, and at the floor takes the transport's step,
+// so the sink plays out rather than run dry; once the write settled it joins.
 func TestTheProducerHoldsAnOccurrenceAPendingWriteWouldReplan(t *testing.T) {
 	b, store := choiceSessionBackend(t)
 	s := b.session(1)
@@ -455,14 +460,29 @@ func TestTheProducerHoldsAnOccurrenceAPendingWriteWouldReplan(t *testing.T) {
 	b.pending.Store(p)
 	o := openedOcc(b, 2)
 	o.plan = &engine.NativePlan{Tuple: engine.NativeTuple{Format: "DSD_U32_BE", BitRate: dsdstate.DSD64}, PolicyID: "n"}
+	o.transport = nativeTransport(*o.plan)
 	s.chain = []*occ{o}
-	if st := s.next(); st.kind != stepWait || st.wait != p.done {
-		t.Fatalf("the producer's step beside the pending write: %+v, want a wait for the write", st)
+	if st := s.next(); st.kind != stepTransition {
+		t.Fatalf("the producer's step for an occurrence with no sink to join, beside the pending write: %+v, want the transport's", st)
 	}
+	// The sink it would join, DSD64's 88,200 frames a second, holding lookahead
+	// of it: its floor is 100 ms, 8,820 frames.
+	ahead := func(frames int64) {
+		s.cur = &output{sink: choiceSink{pos: alsapcm.Position{Submitted: 88200, Played: 88200 - frames}}, transport: o.transport, policyID: "n"}
+	}
+	ahead(88200)
+	if st := s.next(); st.kind != stepWait || st.wait != p.done || !s.awaitingWrite {
+		t.Fatalf("the producer's step above the sink's floor: %+v (the reporter wakes it: %v), want a wait for the write", st, s.awaitingWrite)
+	}
+	ahead(8820)
+	if st := s.next(); st.kind != stepTransition || s.awaitingWrite {
+		t.Fatalf("the producer's step at the sink's floor: %+v, want the transport's", st)
+	}
+	ahead(88200)
 	b.pending.CompareAndSwap(p, nil)
 	close(p.done)
-	if st := s.next(); st.kind == stepWait {
-		t.Fatalf("the producer still waits once the write settled: %+v", st)
+	if st := s.next(); st.kind != stepWrite || st.o != o {
+		t.Fatalf("the producer's step once the write settled: %+v, want the occurrence joining its sink", st)
 	}
 }
 

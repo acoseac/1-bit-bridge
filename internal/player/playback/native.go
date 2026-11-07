@@ -268,7 +268,7 @@ func (s *session) activateOutput(ctx context.Context, o *occ, out *output) error
 			// them turns a converted occurrence into another kind. Its set and
 			// plan are read in checkDSDActivation alone, under s.mu: read here
 			// they raced a reconciliation's Keep (round 2).
-			if err := s.checkDSDActivation(o); err != nil {
+			if err := s.checkDSDActivation(ctx, o); err != nil {
 				return err
 			}
 		}
@@ -292,8 +292,9 @@ func (s *session) activateOutput(ctx context.Context, o *occ, out *output) error
 	if out.dsdAdmitted() != nil {
 		// Every activation reads the effective policy again (B728 B7): an
 		// occurrence its change did not keep is refused, never played another
-		// way.
-		if err := s.checkDSDActivation(o); err != nil {
+		// way; one a choice's write pending would change waits for it first
+		// (B728 B9 round 2).
+		if err := s.checkDSDActivation(ctx, o); err != nil {
 			out.native.Revoke()
 			return err
 		}

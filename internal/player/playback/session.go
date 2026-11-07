@@ -58,6 +58,11 @@ type session struct {
 
 	chain   []*occ
 	writing *occ // the occurrence the producer writes, nil between occurrences
+	// awaitingWrite is the producer holding a successor out of its sink
+	// while a choice's write pending plays its rate otherwise (next, B728 B9
+	// round 2): the reporter wakes it at each measurement, so the sink's
+	// lookahead is read as the sink plays and the wait ends at its floor.
+	awaitingWrite bool
 	// endAfter is the occurrence nothing follows (a Prepare with no
 	// successor), 0 for none.
 	endAfter engine.OccurrenceID
@@ -1471,16 +1476,21 @@ func (s *session) resume(ctx context.Context) (how engine.ResumeResult, err erro
 	// and leaves the session paused. The open is the session's while it
 	// runs (s.wg), joined by its release, which is never acknowledged while
 	// a node this open holds is open: until the check after open answers no
-	// sink exists to close the node with the session's life. A choice's write
-	// pending that plays its rate otherwise is waited for first (B728 B9), and
-	// an occurrence it left being handed off again opens nothing here: the
-	// producer waits for its replacement, which opens its own sink.
+	// sink exists to close the node with the session's life. Every choice's
+	// write pending that plays its rate otherwise is waited for first, asked
+	// again under the session's lock each time one settles (B728 B9 round 2,
+	// point 1: another may be pending by then), until the call's context or
+	// the session's release ends the wait; in the step that finds none the
+	// open is claimed, so a write that classifies beside it counts the
+	// occurrence as reaching its sink. An occurrence a write left being
+	// handed off again opens nothing here: the producer waits for its
+	// replacement, which opens its own sink.
 	l.lock()
 	if err := s.callableLocked(); err != nil {
 		l.unlock()
 		return 0, err
 	}
-	if p := s.b.pendingFor(between); p != nil {
+	for p := s.b.pendingFor(between); p != nil; p = s.b.pendingFor(between) {
 		l.unlock()
 		s.b.choiceAwaited(between.id)
 		select {
@@ -1488,6 +1498,8 @@ func (s *session) resume(ctx context.Context) (how engine.ResumeResult, err erro
 			s.b.choiceWoke(between.id)
 		case <-ctx.Done():
 			return 0, ctx.Err()
+		case <-s.ctx.Done():
+			return 0, errReleased
 		}
 		l.lock()
 		if err := s.callableLocked(); err != nil {
@@ -1504,6 +1516,7 @@ func (s *session) resume(ctx context.Context) (how engine.ResumeResult, err erro
 		wake(s.wakeR)
 		return engine.ResumeContinued, nil
 	}
+	between.claimed = true
 	s.wg.Add(1)
 	l.unlock()
 	defer s.wg.Done()
@@ -1516,6 +1529,11 @@ func (s *session) resume(ctx context.Context) (how engine.ResumeResult, err erro
 		}
 		var te *transportError
 		if !errors.As(err, &te) {
+			// Refused, the session left paused: nothing opens for it until a
+			// resume claims it again.
+			l.lock()
+			between.claimed = false
+			l.unlock()
 			return 0, resumeError(err)
 		}
 		l.lock()
@@ -1542,6 +1560,7 @@ func (s *session) resume(ctx context.Context) (how engine.ResumeResult, err erro
 		return 0, errReleased
 	}
 	if s.between != between || between.dropped {
+		between.claimed = false
 		l.unlock()
 		s.closeOutput(next)
 		l.lock()
@@ -1555,6 +1574,8 @@ func (s *session) resume(ctx context.Context) (how engine.ResumeResult, err erro
 	if err := s.unpausedLocked(); err != nil {
 		return 0, err
 	}
+	// The claim stays with the sink handed to the producer, whose adoption and
+	// activation of it give it up (transition).
 	s.handed = next
 	l.unlock()
 	wake(s.wakeP)

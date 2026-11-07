@@ -102,6 +102,7 @@ func (s *session) next() step {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.serveLocked()
+	s.awaitingWrite = false
 	if s.ctx.Err() != nil || s.fault != nil {
 		return step{kind: stepStop}
 	}
@@ -139,18 +140,29 @@ func (s *session) next() step {
 	if o.stale {
 		return step{kind: stepWait}
 	}
-	if p := s.b.pendingFor(o); p != nil {
-		// A choice's write pending would play its rate otherwise (B728 B9): it
-		// waits out of any sink until the write settles, so the write's
-		// classification of it (a re-plan, which interrupts nothing) still holds
-		// when the write publishes.
-		return step{kind: stepWait, wait: p.done, awaits: o}
-	}
 	// One answer decides a join, Prepared's and this: Transport.Join, which
 	// tells same-carrier PCM from DoP by kind, valid bits, logical rate and
 	// packing version, never by format and rate alone; a DSD successor
 	// joins only under its sink's policy too.
-	if c := s.cur; c != nil && !c.drained && !c.closed && c.transport.Join(o.transport).Gapless && (o.plan == nil || c.policyID == o.plan.PolicyID) {
+	c := s.cur
+	gapless := c != nil && !c.drained && !c.closed && c.transport.Join(o.transport).Gapless && (o.plan == nil || c.policyID == o.plan.PolicyID)
+	if p := s.b.pendingFor(o); p != nil {
+		// A choice's write pending would play its rate otherwise (B728 B9): it
+		// stays out of every sink until the write settles, so the write's
+		// classification of it (a re-plan, which interrupts nothing) still
+		// holds when the write publishes. Out of a sink it would join, it waits
+		// only while that sink holds more than its floor of lookahead (round
+		// 2): past it the sink would run dry, so the sink drains and plays out
+		// what it holds, an honest gap, and the successor's own sink opens
+		// once the write settles (transition), as one of another transport's
+		// does, its sink before it drained first.
+		if gapless && !outFloorLocked(c) {
+			s.awaitingWrite = true
+			return step{kind: stepWait, wait: p.done, awaits: o}
+		}
+		return step{kind: stepTransition, o: o}
+	}
+	if gapless {
 		if err := s.b.checkEdge(o.transport, o.plan, o.permission); err != nil {
 			o.refused = &engine.Unplayable{Reason: "transition_unapproved", Detail: err.Error()}
 			o.dropped = true
@@ -184,6 +196,11 @@ func (s *session) next() step {
 			if o.dropped || s.cur != c {
 				return step{kind: stepWait}
 			}
+			if s.b.pendingFor(o) != nil {
+				// A choice's write became pending while the lock was let go:
+				// the next step decides with it, at once.
+				return step{kind: stepWait, wait: ready}
+			}
 		}
 		s.b.rememberEdge(o.transport, o.plan, o.permission)
 		if o.conv != nil {
@@ -198,6 +215,14 @@ func (s *session) next() step {
 	}
 	return step{kind: stepTransition, o: o}
 }
+
+// ready is a wait that is over: the producer's next step decides again at
+// once.
+var ready = func() <-chan struct{} {
+	c := make(chan struct{})
+	close(c)
+	return c
+}()
 
 // toWriteLocked is the first occurrence still to be written: not dropped
 // and not all in its sink.
@@ -508,10 +533,17 @@ func (s *session) transition(o *occ) bool {
 				return false
 			}
 		default:
-			s.between = nil
+			// The claim, in the step that found no choice's write pending that
+			// plays o's rate otherwise (B728 B9 round 2, point 1): a write that
+			// classifies what it would interrupt while the sink opens counts o
+			// as reaching it, and its adoption and activation wait for the write.
+			s.between, o.claimed = nil, true
 			l.unlock()
 			var err error
 			if out, err = s.openOutput(s.ctx, o); err != nil {
+				l.lock()
+				o.claimed = false
+				l.unlock()
 				return s.openFailed(o, err)
 			}
 		}
@@ -525,10 +557,14 @@ func (s *session) transition(o *occ) bool {
 	// under the session's lock: a sink whose writer the kernel holds answers
 	// no command, and a Release must not wait on it. Until the sink is
 	// current, a pause or a resume meanwhile is one with no device, which the
-	// next turn follows.
+	// next turn follows. A choice's write pending that plays o's rate
+	// otherwise is waited for before the sink is adopted, and one o was handed
+	// off again for meanwhile leaves the sink closed unwritten (B728 B9 round
+	// 2, point 1).
 	l.lock()
 	sinkPaused := false
 	for {
+		pend := s.b.pendingFor(o)
 		switch {
 		case s.ctx.Err() != nil:
 			l.unlock()
@@ -545,10 +581,36 @@ func (s *session) transition(o *occ) bool {
 			s.closeOutput(out)
 			s.b.fenced("adopt")
 			return false
+		case o.stale:
+			// Handed off again while its sink opened (a choice's write landed,
+			// or a refresh changed the set): the sink is closed unwritten, and
+			// the producer's next step waits for the replacement.
+			o.claimed = false
+			l.unlock()
+			s.closeOutput(out)
+			return true
+		case pend != nil:
+			l.unlock()
+			s.b.choiceAwaited(o.id)
+			select {
+			case <-pend.done:
+				s.b.choiceWoke(o.id)
+			case <-s.ctx.Done():
+				return false
+			}
+			l.lock()
+			continue
 		case s.paused == sinkPaused:
 			s.currentLocked(o, out, sinkPaused)
 			l.unlock()
-			if err := s.activateOutput(s.ctx, o, out); err != nil {
+			err := s.activateOutput(s.ctx, o, out)
+			if errors.Is(err, errReplanned) {
+				return s.unadopt(o, out)
+			}
+			l.lock()
+			o.claimed = false
+			l.unlock()
+			if err != nil {
 				return s.openFailed(o, err)
 			}
 			return true
@@ -568,11 +630,37 @@ func (s *session) transition(o *occ) bool {
 			// The sink took neither (it ended: the reporter reads why from its
 			// state). It is current as it is.
 			s.currentLocked(o, out, false)
+			o.claimed = false
 			l.unlock()
 			return true
 		}
 		sinkPaused = !sinkPaused
 	}
+}
+
+// unadopt takes back out, the sink just opened and made current for o,
+// once o's activation found it handed off again while a choice's write it
+// waited for settled (errReplanned): no frame of o reached the sink, so it is
+// closed unwritten, nothing is current, and the producer's next step waits
+// for o's replacement. A session paused meanwhile is paused holding no
+// device, its release reported as such a pause's is.
+func (s *session) unadopt(o *occ, out *output) bool {
+	s.mu.Lock()
+	if s.cur == out {
+		s.cur, s.currentNative = nil, false
+	}
+	if s.writing == o {
+		s.writing = nil
+	}
+	o.out, o.claimed = nil, false
+	if s.paused {
+		_ = s.pausedLocked(true)
+	}
+	s.mu.Unlock()
+	s.closeOutput(out)
+	wake(s.wakeP)
+	wake(s.wakeR)
+	return true
 }
 
 // currentLocked makes out, the sink just opened for o, the current one,
