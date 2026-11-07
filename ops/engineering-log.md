@@ -85516,3 +85516,24 @@ And where node is installed, red with ce3cd800 reverted, green at the head:
 
 On Windows (CI's leg): the link tests through a directory junction, and the
 linked-root fixture's skip.
+
+### The gates
+
+At 8f17452e, the branch's code as it ships (the commit after it adds this
+section alone), through the shared build lock in one run
+(`.tmp/_b77x/gate.sh`), on go1.27.3, go.mod's: `make fmt` rewrote nothing;
+`make vet` clean, and so with `GOOS=windows`, `GOOS=darwin` and
+`GOOS=linux GOARCH=386`; `make test` (`-race`, `-timeout 30m`) green, 89
+packages, among them cmd/bridge in 1303 s, internal/admin in 1041 s,
+internal/manifest in 1625 s, internal/upload in 12 s, internal/trash in 2 s
+and internal/fsutil in 3 s, and the packages that test Linux alone run here
+for real (internal/alsa, internal/alsapcm on this host's ALSA,
+internal/atomicwrite, internal/player/hotplug; internal/usbid's result cached
+from an identical run); `make build-all`, its build-tag census included, and
+`make docs-check` clean; `git status` clean after. The qualification check
+against main (`scripts/qualification-version -base 994e21ba -head HEAD`)
+answers OK. `rules-b77x-r2.patch` applies to the tree (`git apply --check`),
+and on a copy with it applied the budgets hold (scanner.md 39,137 bytes,
+admin-console.md 78,529; the worst load 67.2%) and the 14 tests it cites are
+declared. Not run here: the node console tests, the darwin and kqueue runs
+above, and the Windows link tests through a junction.
