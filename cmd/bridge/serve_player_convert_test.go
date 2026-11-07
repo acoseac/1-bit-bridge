@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"runtime"
 	"slices"
 	"testing"
 
@@ -18,6 +19,9 @@ import (
 // observation of a converted occurrence: the element sends none rather than
 // call it PCM or native DSD.
 func TestTheElementListsDSDWhileThePlayerConverts(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the player's identity is written durably, which Windows cannot do, and the player whose element this is runs on Linux alone")
+	}
 	off := dsdstate.Defaults()
 	off.DefaultMode = dsdstate.ModeOff
 	for _, tc := range []struct {
