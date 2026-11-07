@@ -167,9 +167,10 @@ func WithReclaimable(fn func(root string) int64) Option {
 // WithRootGuard refuses a write into a library root that reads as a volume
 // not mounted (backlog B776): fn is asked, before anything is written, for
 // every path a request would write (a create's staging and its declared
-// destinations, a commit's destinations), and for every root when a session
-// is in none, and an answer that is not nil refuses the whole request with
-// it. cmd/bridge passes the scanner's (manifest.Scanner.WriteGuard).
+// destinations, a chunk's staging, a commit's destinations), and for every
+// root when a session is in none, and an answer that is not nil refuses the
+// whole request with it. cmd/bridge passes the scanner's
+// (manifest.Scanner.WriteGuard).
 func WithRootGuard(fn func(paths []string) error) Option {
 	return func(m *Manager) { m.rootGuard = fn }
 }
@@ -597,6 +598,14 @@ func (m *Manager) WriteChunk(sid, fid string, offset int64, r io.Reader, chunkDi
 	}
 	if fd == nil {
 		return 0, ErrNotFound
+	}
+	// A session found is no proof its root reads as it did: a root that kept
+	// its staging folder while its library content went, and an old session's
+	// staging left on a bare mount point, both read as a volume not mounted.
+	// Every chunk asks the root its staging is in before it writes, and the
+	// answer is never kept: a look a chunk (backlog B776's round 2).
+	if err := m.guard([]string{m.sessionDir(doc.Root, sid)}); err != nil {
+		return 0, err
 	}
 
 	unlock := m.locks.lock(sid + "/" + fid)
