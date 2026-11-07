@@ -82904,7 +82904,18 @@ cmd/bridge's four) green unmutated.
 
 ### Gates
 
-To be filled in from the gate run.
+At 163162b4, inside the build slot, on Go 1.27.3: `make fmt` changed nothing; `make vet` and its
+windows, darwin and linux/386 legs passed; `make docs-check` passed (CLAUDE.md 81.6 %, player.md
+99.4 %, the worst load 66.7 %), and on a copy with `rules-b762.patch` applied (CLAUDE.md 81.9 %,
+player.md 99.6 %, 99,600 bytes, the worst load 66.7 %), where `TestEveryCitedTestNameExists`
+passed and a ghost citation planted in the copy's History file failed it;
+`scripts/qualification-version` passed against b6541a02 and against main's 49071fbf (43 at HEAD,
+40 on main: B8's and B11's moves, none of B762's); `go test -race` of the touched packages
+(playback, alsapcm, cmd/bridge) passed (1,199 s); both native-integration overlays passed, every
+case CI names (13 and 29); `make test` passed, 88 packages ok (2,070 s), its TMPDIR under
+`.tmp/_b762`, the Linux-only tests (ALSA, alsapcm, the durable writer, the identity paths) run
+here; `make build-all` passed. alsa-abi did not run: no ABI definition or `scripts/alsa-abi`
+file changed.
 
 Two follow-ups found beside this change go to the backlog, which the orchestrator files (legion0
 has no backlog file); they are not described here.
