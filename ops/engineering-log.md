@@ -80671,3 +80671,90 @@ c7192a6f and against 9dd51ae4; `make test` passed, 87 packages ok (1,848 s), the
 (ALSA, alsapcm, the durable writer, the identity paths) run here, not vetted alone; `make
 build-all` passed. alsa-abi did not run: B8 touches neither `internal/alsapcm` nor
 `scripts/alsa-abi`.
+
+## 2026-11-07 — B728 B8 round 2: three review points on #1430
+
+Worker b728-b8, legion0, the same branch, the orchestrator's application of round 1's rules
+patch (5bfec662) under it. Commits: ef371fbc (point 1, red), 6d7ccd4d (its fix), 0aded1fb
+(point 2, red), 5cf0c64f (its fix, with PROTOCOL.md), b64c7dda and fc713d32 (point 3 and its
+sibling in B543's labels, red), 411f7628 (their fix), 04b60f79 (qualificationVersion 42), then
+this record and the gates'. The rule text changes through `rules-b728-b8-r2.patch`. Each point
+was the reviewer's reading of the code; each was confirmed red before its fix.
+
+### 1. A view-only refresh stranded the occurrences admitted under the set it replaced
+
+Confirmed. Round 1's `refreshDSD`, for a reading that played what the published set played and
+said another thing of the DAC, stored the new `*dsdSet` under the generation it had and
+reconciled nothing. Every occurrence admitted under the old pointer stayed there: what is
+compared with the published set by pointer is the gapless join (`producer.go`, a successor
+admitted under a set a refresh has replaced waits for that refresh's reconciliation) and a
+converted join window's successor (`holdLocked`'s settled check); the activation's check and
+the readmission at an open's end take a stale pointer through `policy.Reconcile` or a fresh
+selection, so the occurrence playing plays on. Its successor, admitted before the change, never
+joined: on every first DSD playback of a transport, whose first use is observed at its fifth
+second, while the next track is already prepared. The red test,
+`TestAFirstUseObservedWhileDSDPlaysKeepsTheProducerWriting` (`internal/alsapcm`), holds the
+producer inside the first track's content (`files.stall`), lets the successor be prepared,
+publishes the change through the session's monitor and lets the producer go: on the old tree
+both cases, a native successor and a converted one in its predecessor's join window, hung to
+the one-minute watchdog, the producer in `waitWake` with no channel. The fix keeps the set's
+pointer, as the reviewer preferred: a reading that plays the same stores no set, and the read
+side is published beside the set in one pair (`dsdPublished`), which GET /v1/outputs reads, so
+no reader sees one set's tuples beside a view made for another; a change of what plays stores
+the set, then the pair. Repointing under each session's lock was not taken: it would run a
+reconciliation's walk for a change that plays nothing new, and a pointer kept means there is
+nothing to repoint.
+
+### 2. A retained observation took another DAC's evidence
+
+Confirmed. `bridgePlayback` replaced an observation's evidence with its tuple's in the set
+published now whenever a tuple had its policy ID, which names the tuple's transport, format,
+rate and timing and not the DAC, its firmware or the set. The red test,
+`TestARetainedObservationKeepsItsOwnDACsEvidence`, keeps the observation of a native DSD64
+occurrence on the test DAC (driver_accepted, 2026-11-06), then publishes the set of another
+model the port binding finds in the port, and of the same model on another firmware, each
+with its DSD64 tuple of that policy ID at listener_confirmed: the old tree published
+listener_confirmed and 2026-11-02 for the first DAC's occurrence, both cases. The fix
+substitutes only while the set published is the one the occurrence was admitted under, its
+boot and generation the observation's: since point 1's fix a generation names one stored set,
+and so the unit and the firmware it was computed for. Otherwise the observation keeps the
+evidence its admission gave it. PROTOCOL.md's sentence on an observation's evidence says so,
+and that a `policyId` names neither the DAC nor its firmware.
+
+### 3. The port alone, in a USB string, reached the key
+
+Confirmed, and its sibling with it. sysfs gives a unit's port path with its configuration and
+interface after the port (`platform-xhci-hcd.0/usb2-1:1.0`), a binding names the port alone,
+and `unitText` replaced the sysfs form alone: a product string holding the port alone kept it
+in the model, `wireKey` hashed it, and under a model binding serve has no port to redact by.
+`TestNoDACKeyOrModelCarriesASerialOrAPort`'s fixture had an interface-free port, which hid it;
+its new case (the sysfs port with its interface, the USB strings holding the port alone, a
+model binding) was red: the model carried the port and two units at two ports published two
+keys. B543's `playerDACText`, the same element's `dac` labels, had the same one-form
+replacement, and `TestBridgeDACRedactsIdentityInsideNameAndID`'s new port-alone cases were red
+for the name and the id. `playback.PortForms` names every spelling (as given, canonical, the
+port alone, `usbid.Port.Place`), the longest first; `unitText`, serve's `playerText` and
+`playerDACText` take each out.
+
+### The qualification version
+
+The point-1 test is under the guarded `internal/alsapcm/` prefix, so `qualificationVersion`
+moves from 41 to 42, the next free one past main's 40 and B11's 41; the runbook's five
+references follow, with a paragraph on what 42 covers: the guarded prefix's tests alone, no
+sink, packer, plan or harness reader. `scripts/qualification-version` passes against main's
+merge base (c7192a6f), 9dd51ae4 and 5bfec662.
+
+### Negative controls
+
+Each an exact-once mutation of the committed tree at 04b60f79, predicted by name in
+`.tmp/_b728-b8/controls_r2.predictions.txt` before any ran, the binaries built with it and the
+source restored from memory at once, `git status` empty after each; the sets (alsapcm's five
+DSD policy and conversion tests, playback's five read-side and publication tests, cmd/bridge's
+seven read-side and `dac` tests) green unmutated.
+
+| | mutation | red |
+|---|---|---|
+| r1 | `refreshDSD` stores the next set, under the generation it had, for a change that moves no plan | as predicted: both cases of `TestAFirstUseObservedWhileDSDPlaysKeepsTheProducerWriting`, each a hang to the watchdog |
+| r2 | `bridgePlayback` substitutes whenever the boot is the observation's, the generation not asked | as predicted: both cases of `TestARetainedObservationKeepsItsOwnDACsEvidence` |
+| r3a | `unitText` takes out the longest spelling of the port alone | as predicted: `TestNoDACKeyOrModelCarriesASerialOrAPort`'s model-binding case; the `dac` labels' test green |
+| r3b | `PortForms` adds the canonical form alone, never the port alone | as predicted: that case and both port-alone cases of `TestBridgeDACRedactsIdentityInsideNameAndID` |
