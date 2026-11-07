@@ -79548,3 +79548,204 @@ running here on Linux); and `make test TEST_PKGS="./internal/manifest/...
 since round 2's race run). `git status --ignored` showed nothing but `.tmp/`
 after. Not run here: macOS and Windows natively, CI's runners, `make
 build-all`, and the iOS app, whose repo is not on this host.
+
+## 2026-11-07 — B728 B10: the DSD to PCM converter, not wired
+
+Worker b728-b10, legion0 (Ubuntu 26.04, linux/amd64, an AMD Ryzen 9 6900HX, Go 1.27.3), branch
+`feat/b728-b10-dsdconv` from main 1a101716. Commits: 0f23fe03 (the tests, red against the API),
+d34f5953 (the converter), 68d8e288 (an unaligned predecessor never holds), 89665083 (an input
+with no bytes left fails at once), 8efd6f1f and fdf27288 (the source check skips where there is
+no source; gofmt's import order), 15784f70 (CLAUDE.md's rows), then this record. The rules,
+`ops/plan-b728-dsd-capability-design.md` §9.1's items 3 and 4 and the converter's section with
+their long forms, change through `rules-b728-b10.patch`, which also moves `player.md`'s
+WAVE_FORMAT_EXTENSIBLE entry to its History file verbatim (`move_entry.py --line 33`;
+`verify_moves.py` passes) to leave room: B7's three rules patches take `player.md` from 97,286
+to 98,628 bytes, this one with them to 98,021, against its 100,000. Nothing calls the package:
+B11 wires it, so what plays does not change.
+
+### What it is
+
+`internal/player/dsdconv` is a `decode.Decoder` over a `decode.DSDDecoder`. Its `Plan` is the
+target B11 chooses from the DAC: 176.4, 88.2 or 44.1 kHz at 24 valid bits, or the same at 16;
+every claim made of a converted occurrence (rate, valid bits, passband 30 or 20 kHz, dither
+`none` or `tpdf`, filter `dsdconv-1`, gain 0) is a method of it, and the filter design reads its
+band edges from it, so the numbers have one home. `Format` is the plan's PCM with
+`ContainerConverted` (`"dsd-converted"`): `IsDSD` is false, so the occurrence plays down the PCM
+path, and `format.Containers` does not list it, so `playback.Plays` and `PlayedContainers` are
+unchanged. `format/pcm.go`, a guarded file, is not touched. DSD64, DSD128 and DSD256 alone:
+DSD512 and a rate outside the 44.1 kHz family (3.072 MHz) are a `*RateError` at `New`, tested
+through a stub source, since `NativeDSD.Validate` lets no real demuxer reach them.
+
+The chain, every stage sized by Kaiser's estimate for 110 dB (`kaiserTaps`, `attenuationDB`):
+
+| stage | rate | taps | §4.2's starting size |
+|---|---|---|---|
+| 1, byte tables | one bit → 352.8 kHz | 79, 159, 303 (T = 10, 20, 38 tables) | 96, 160, 320 |
+| 2, half-band | 352.8 → 176.4 kHz | 31 | about 31 |
+| 3, 30 / 40 kHz | 176.4 kHz, every 1 or 2 frames | 127 | about 127 |
+| 3, 20 / 22.05 kHz | 176.4 kHz, every 4 frames | 613 | 125 (the brief: about 600) |
+
+Stage 1 is 8T − 1 taps, an odd count, placed in slots 1 to 8T − 1 of a T-byte window, so its
+centre is a slot (4T) and, with T even, the window starts on a byte: output frame k is centred
+on input bit k·D exactly, never between two bits. That costs §4.2's halving of the tables by
+symmetry, which needs an even count: DSD256's 38 tables take 38 KiB as int32, over a Cortex-A72's
+32 KiB L1 data cache (a Cortex-A76 has 64). The 44.1 kHz plan's stage 3, 613 taps, costs 307
+multiplies a frame and channel against the 30 kHz plans' 64, at a quarter of the rate. H, the
+window, is the composite's reach in output frames, read from the taps: 72, 36 and 78 frames at
+176.4, 88.2 and 44.1 kHz, at every DSD rate.
+
+`TestTheResponseMeetsItsMask` reads the composite from the coefficients (the three stages are one
+filter at the one-bit rate and one decimation, so a tone at any frequency up to the one-bit
+Nyquist leaves at the product of the stages' responses, folded): within 0.00013 dB to every
+plan's passband edge, and at worst 108.73 dB down from its stopband's start (DSD256 at
+328.6 kHz, stage 1's sidelobe; DSD64 109.59 dB at 344.5 kHz; the 44.1 kHz plan 109.76 dB at
+22.09 kHz).
+
+### Determinism across architectures: decided integer
+
+The kernels are integer from the bits to the samples: stage 1's tables are int32 partial sums,
+stages 2 and 3 multiply-add in int64 at 2^30 for 1.0 (stage 3's sum at 2^60, at worst
+4.6 x 2^60 for any bits, `TestNoSumCanOverflow`), the rounding is integer shifts. The
+coefficients are designed once at run time in `kaiser.go`, the only file with floating point:
+every product is converted to float64 where it is formed (the spec lets Go fuse an unconverted
+product into an add, across statements too, and arm64 does), the sine is the file's own series,
+and the only math functions are Sqrt, Floor, Round and Abs, which IEEE 754 defines exactly; then
+each stage is quantized to sum to exactly 2^30. `TestTheDesignIsTheSameOnEveryArchitecture`
+holds the source to that (it skips where no source is, the cross-compiled binary's case);
+`TestTheOutputIsDeterministic` holds the samples, whatever the reads' sizes, to the chain's
+definition written plainly in the test, and prints a SHA-256 of each output of a fixed input
+(xorshift bits, the same on every machine) for the orchestrator to compare with a Pi's: no digest
+is committed. The cross-compiled binary is `~/onebit/jobs/b728-b10/dsdconv-linux-arm64.test`
+(and `-amd64.test` beside it), built at fdf27288.
+
+### Fixtures: the 5th-order modulator, and libm
+
+The modulator of `internal/transcode/testdata/gen/dsd_fixtures.py` is ported to the tests
+(`ciff`), every product converted as CPython rounds it, and held to the Python tool's own output:
+the generator's `modulate`, loaded by path and driven with a rotation recurrence (two products
+and a sum per step, no libm), gives SHA-256
+c164f2ef37c9eb01d8c07404b4e81f3297f80e3009f0e7e13e137dbd4f804154 over one second at DSD64 under CPython 3.14.4 here, and the port the same. The
+generator's own tones go through libm's sin, and a 1-bit loop is chaotic: the committed fixtures
+(made on a Mac) and this host's run of the same script agree for the first 37,038 samples of the
+1 kHz tone (23,434 of the 50 kHz probe), then differ in 443,142 (476,710) of 2,822,400. So the
+spectral fixtures are this modulator's, alike in spectrum on every host and not in bits, and the
+bit-exact checks use xorshift bits. Each DSD rate is modulated at its own rate.
+
+### Measured
+
+- Unity gain (`TestUnityGainLevels`, dsdtone's first-order -20 dBFS sine): -20.0077, -20.0020 and
+  -20.0004 dBFS at DSD64, DSD128 and DSD256, under every plan.
+- Rounding (`TestTheRoundingErrorIsFlat`, the 5th-order 1 kHz tone): mean under 0.005 LSB, power
+  0.0826 to 0.0837 LSB² (1/12 is 0.0833), 16 bands within -0.56 to +0.49 dB of their mean.
+- DSD silence (`TestDelayLinesStartAtNumericZero`): settled at 4, 1 and 1 LSB at 176.4 kHz/24
+  (DSD64 -126 dBFS); its first frames peak at 418, 54 and 7 LSB, its last at 314, 39 and 6, where
+  one Kaiser filter at the one-bit rate with 160 dB of stopband gives 382, 52 and 7 and 315, 39
+  and 5: the pattern's own switch-on and switch-off. Zero bits before it put the first frame at
+  -6.2 dBFS.
+- Aliasing (`TestAliasingIsADifferential`, 50 kHz plus a probe that folds in at the plan's last
+  decimation): at DSD64 and DSD128 the converter's in-band peak and energy are those of a 160 dB
+  reference filter at the one-bit rate to 0.03 dB. At DSD256 the 160 kHz probe folds to 16.4 kHz
+  at -137.7 dBFS, 125.7 dB under it and inside the mask's 100, over a fixture whose own band
+  peaks at -153.0 dBFS, so there the differential is bounded by the mask's allowance (100 dB
+  under the probes) instead.
+- Allocations: none in `ReadFrames` once made, nor in the window's End, reads and Rewind; the
+  real DSF and DFF demuxers' first read allocates once (their buffer), every rate.
+
+### The bars set from measurement
+
+Three of the red-first tests' bars were wrong in the red commit and were corrected with the
+implementation, each from a measurement: the overflow bound was 2^62, and the worst case is
+4.6 x 2^60, under 2^63 with the dither's room; DSD silence's "rest" held the end flush, and the
+start and end transients are the signal's own, so the bar became the 160 dB reference's level
+plus 2 dB and under -80 dBFS, with the settled frames under -100 dBFS; the aliasing differential
+at DSD256 and the coarse pin (-80 to -60 dBFS: two probes raise DSD64's own floor near 20 kHz to
+-76.7 dBFS, the reference's as much).
+
+### The join window, and what B11 calls
+
+`New(src, plan, Options{Hold, First})`. With `Hold`, an occurrence that can be continued (Frames a
+multiple of D, at least H frames) stops at its window point: `ReadFrames` answers `ErrWindow`
+once its frames but the last H are out, every byte of it read and a snapshot of the whole chain
+taken, before any successor bit enters (the staged bytes, the delay lines, the phases, the
+pending error, the counts, the dither; preallocated at `New`). `Continue(next)` takes a successor
+`Continuous` accepts and that nothing has read: the window is computed from next's bits, read
+through next's own input, then next carries the chain on from its frame 0, with a clip count of
+its own and its dither seeded again (both per occurrence; the window's frames are the
+predecessor's in every count). `End` pads the window with numeric zeros. `Rewind` goes back to
+the snapshot, as often as asked, and detaches the successor named before (`ErrDetached`). A
+successor the backend's open prefetched hands its bytes to `New` as `Options.First`; the
+converter copies them and owns the source from then on, closing it once.
+
+B11's open builds the converter in `native.go`'s DSD branch, where a plan converts, after reading
+the first DSD chunk as `openNativeContent` does, and the occurrence then plays on the PCM path; its
+producer stops at `ErrWindow`, waits for the successor to settle or the lookahead's floor, calls
+`Continue` or `End`, and on a cut or a replacement `Rewind` and again. The `Seek` calls in
+`session.go` and `open.go`: one, `open.go`'s `d.Seek(ctx, o.from)`, for a decoder `decode.Open`
+returned, when a seek's target is not 0; `session.go` makes none. B11 avoids it: `o.from != 0`
+fails a DSD open before anything is made (`open.go`'s DSD branch), so a converter is never
+sought, and its `Seek` refuses every frame but 0 before the first read (`ErrSeek`), which
+`decode.Decoder`'s comment now says. B11's `codecName` must name `ContainerConverted` "DSD" and
+its Details say lossless false.
+
+### Benchmarks (amd64, here)
+
+`BenchmarkConvert{DSD64,DSD128,DSD256}`, ns per output frame (both channels) and the share of
+one core the plan's real time takes, 0 allocations each:
+
+| | 176.4 kHz | 88.2 kHz | 44.1 kHz |
+|---|---|---|---|
+| DSD64 | 112.8 ns, 1.99 % | 155.0 ns, 1.37 % | 462.8 ns, 2.04 % |
+| DSD128 | 127.9 ns, 2.26 % | 188.6 ns, 1.66 % | 524.7 ns, 2.31 % |
+| DSD256 | 154.6 ns, 2.73 % | 247.3 ns, 2.18 % | 638.9 ns, 2.82 % |
+
+(the 16-bit plans within 1 % of the 24-bit ones). Stage 3's multiply-adds are most of it: by the
+difference between the rates, a stage-1 lookup costs about 0.37 ns here, some 15 ns of DSD64's
+113 at 176.4 kHz. A Pi 4 core is perhaps six to eight times slower
+at this, which would put DSD256 near 16 to 22 % of the 25 % §4.6 allows; the orchestrator's run of
+the arm64 binary on a Pi 400 decides. If it misses, the first step is §4.6's: unroll stages 2 and
+3 over fixed-size windows (no bounds checks) and, at DSD256, tables a nibble wide (two 16-entry
+lookups a byte, 4.9 KiB in all) so stage 1 fits the A72's L1; then DSD256 refused as
+`conversion_not_offered`.
+
+### Negative controls
+
+Each an exact-once mutation of the committed tree, its red tests predicted by name in a file
+before any ran (`.tmp/_b728-b10/controls.predictions.txt`), the package's tests run under it and
+the source put back from memory; run at 68d8e288 and again at 89665083. All eight are red:
+
+1. A delay line primed with zero bits (the primed stage outputs -1.0, a byte before the stream
+   read as 0x00): 13 tests, `TestDelayLinesStartAtNumericZero` among them, as predicted, and
+   every comparison with the definition.
+2. A bit past `Frames` read (the partial byte's mask all ones): 7, `TestPaddingPastFramesIsNotRead`
+   first, as predicted.
+3. A snapshot taken after a successor's bit entered (`Continue` reads the successor's first bytes
+   and saves again): `TestTheJoinWindowRecomputesFromTheSnapshot`, as predicted. At 68d8e288 it
+   hung instead, to the test binary's timeout: the snapshot held a successor's cursor whose own
+   state it did not, and `fill` read nothing from an exhausted cursor for ever; 89665083 makes
+   that `errLost` at once (a state no whole snapshot makes), and the control then fails fast.
+4. A snapshot without the clip count, and (4b) without the dither state:
+   `TestTheJoinWindowRecomputesFromTheSnapshot` each, the dither only in its 16-bit plan, as
+   predicted.
+5. Saturation with no count: `TestOvermodulationSaturatesAndCounts` and
+   `TestTheJoinWindowRecomputesFromTheSnapshot`, as predicted.
+6. A stage 3 of half the taps: `TestTheResponseMeetsItsMask`, as predicted. Predicted too, and
+   wrong: `TestAliasingIsADifferential` stays green, since Kaiser's window at the same beta keeps
+   the halved stage's 110 dB and widens its transition, and every probe lies past it; the mask is
+   what sees it.
+7. float32 accumulation in stage 3: 13 tests, `TestTheOutputIsDeterministic` and
+   `TestTheDesignIsTheSameOnEveryArchitecture` among them, as predicted.
+8. A continuous join allowed on an unaligned boundary (`Continuous` and the hold rule without
+   "Frames a multiple of D"): `TestAContinuousJoinNeedsTheSamePlanAlignmentAndLength`,
+   `TestAnAbuttingJoinIsZeroPadded` (68d8e288's case of an unaligned predecessor), as predicted,
+   and `TestTheJoinWindowRecomputesFromTheSnapshot`, whose unaligned B then holds.
+
+### Gates
+
+At 15784f70, inside one build slot: `make fmt` changed nothing, `make vet` and the vets for
+windows, darwin and linux/386 passed, `go test -race` of the package passed (43 s), `make test`
+passed, 87 packages ok (1,853 s), `make build-all` passed, `make docs-check` passed on the tree
+and on a copy with the rules patch applied (the largest rules file there dlna-upnp.md at 97.0 %),
+`verify_moves.py` passed on that copy, and `scripts/qualification-version` against main's
+1a101716 says the version stays: no guarded path changed (`decode/decoder.go`, whose comment
+changed, is not one). ffmpeg and sox are not on this host, so `TestTheOfflineChainAgrees`, the
+differential against the offline chain's level and response, skipped and showed nothing here.
