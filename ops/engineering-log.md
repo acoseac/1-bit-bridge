@@ -80536,3 +80536,99 @@ alone (one block, 1,743 bytes, no citation broken) and, with the other edits dec
 for every block but the four no-transcoding entries the design retitles (CLAUDE.md's, AGENTS.md's,
 `History-Cross-Repo.md`'s and `jobs.md`'s), each beside its successor among the new. The
 conversion tests and B7's revoking test then passed four times more under `-race` (122 s).
+
+## 2026-11-07 — B728 B11 round 2: the review's four points
+
+Worker b728-b11, legion0, branch `feat/b728-b11-convert` at 9dd51ae4 (round 1's
+`rules-b728-b11.patch` applied by the orchestrator). Commits: e54b2909 (point 1's test, red under
+`-race`), 04dbb7f3 (point 1's fix), 08eeabfd (point 2's pin), 85a2c465 (point 3's migrated pin),
+ca8d0719 (point 4's test), 16319805 (QualificationVersion 42), then this record. The rule wording
+changes through `rules-b728-b11-r2.patch`: B11's ownership entry in `player.md` (its Don't gains
+"read its set or plan off the session's lock") and its long form.
+
+### 1. A converted activation raced a refresh's reconciliation: confirmed
+
+`activateOutput` decided whether a PCM output's occurrence converts by `o.converts()`, which reads
+`o.admitted` and `o.policyPlan` without the session's lock, while `reconcileDSD`'s Keep repoints
+`o.admitted` under it. What can change: nothing that decides the kind. `o.conv` is set once, in the
+step that ends the open; a Keep repoints the set alone, the plan the same (`policy.Plan.Same`); a
+Replan marks the occurrence stale and the engine hands it off again as another occurrence; a
+revocation ends the session's DSD. A withdrawal and a retarget are each of those, so `o.conv != nil`
+and `converts()` never disagree after the open and the decision cannot flip: the read was a data
+race on the pointer, not a wrong decision. Red at e54b2909,
+`TestAConvertedActivationBesideARefreshThatKeepsIt`: the activation held at its first step (a new
+seam, `Seams.Activation`), a refresh held where it has published a set that keeps the occurrence
+and not reconciled it (`Seams.Published`; the choice's cap lowered from DSD128 to DSD64, which
+takes DSD128 from native to converted while DSD256 converts under both), and both let go at once:
+the race detector reported convert.go:86 (from native.go:260) against dsd_policy.go:697, in five
+separate processes of five. 04dbb7f3 decides by `o.conv` and reads the set and plan in
+`checkDSDActivation` alone, under the lock: five of five green under `-race`. The other reads of
+`o.admitted` outside the lock are the open's own, before its `done` closes, which no
+reconciliation reaches (it skips an occurrence not opened).
+
+### 2. The revocation's Drop of a converted sink: pinned
+
+`TestAConversionWithdrawnOrRetargetedIsReconciled`'s two cases that revoke while playing passed
+with `Revoke`'s Drop loop deleted: the engine's release drops every sink too. 08eeabfd holds the
+engine's release short of the backend (`holdNextRelease`), awaits the revocation's Drop (a drop
+handed to the PCM sink's writer, `FakeKernel.OnCommand`, and the device let go), grants the DAC a
+second more and checks it is given nothing more while the release is held, then lets it go.
+
+### 3. A migrated DoP rate under auto converts, by the design; an explicit choice never does
+
+Section 3.2's auto row converts what neither transport plays, so `MigratedState(auto, allowDoP,
+native DSD64, DoP DSD128)` with an unverifiable gain stage converts DSD128, as
+`TestANativeRateIsUnaffectedByAnUnverifiableDoPGain` has it. The other side of the table:
+`TestTheEffectivePolicyTable` runs every clause of the explicit rows' cells failing in every way it
+knows, each refusing with its word, and `TestTheRefusalsComeInTheirOrder` the eleven words in their
+order (native: `native_not_offered`, `listener_rejected`, `dsd_rate_above_choice`,
+`first_use_pending`; dop: `dop_not_offered`, `listener_rejected`, `dop_gain_unverifiable`,
+`dop_gain_not_unity`, `dop_confirmation_required`, `dsd_rate_above_choice`, `first_use_pending`),
+both on a written choice. 85a2c465 adds
+`TestAnExplicitChoiceNeverConvertsWrittenOrMigrated`, the same cells on the entry `dsdstate.Migrate`
+writes from dsdMode native or dop with allowDoP and a record approving the transport at every rate,
+and the migration of no record, the choice alone, refusing every rate as `first_use_pending`.
+
+Until B8 lands, by design and as PROTOCOL.md says: `dsdPlayback` publishes no converted rate and no
+tuple for one, and its `reason` is empty while any rate plays, so the app, which grants DSD from the
+tuples alone, sends the bridge's player no DSD while the element's codecs list dsf and dff; and the
+element sends no `playback` while a converted occurrence plays, so the app shows no observation of
+it. An OpenHome controller sees DSF and DFF in ProtocolInfo and plays DSD converted, its Info
+reading codec DSD, the plan's rate and bits and lossless false, which is right. The console's Player
+page says nothing of conversion until B13.
+
+### 4. A deletion at a join behind a read that hangs: backlog B768, named
+
+`TestADeletionAtAJoinBehindAHangingReadStopsAtTheEnginesDeadline` (ca8d0719) pins what happens and
+that nothing waits past the engine's deadlines: the engine's call (a Prepare, its successor having
+nothing submitted, or a Cut) ends at its deadline and playback stops with `backend_timeout`; the
+release is unconfirmed past its own while the read hangs, nothing closed under it, and is
+acknowledged late once the read returns. B768 is not built.
+
+### Negative controls
+
+Each an exact-once mutation of 16319805, predicted by name in
+`.tmp/_b728-b11/controls_r2.predictions.txt` before it ran, the package's test binary built with
+it and the source restored from memory at once; `git status` empty after the run. All red as
+predicted:
+
+| | mutation | red |
+|---|---|---|
+| r2a | `activateOutput` by `o.converts()` again | `TestAConvertedActivationBesideARefreshThatKeepsIt`, race detected, three runs of three |
+| r2b | `Revoke`'s Drop loop removed | the two revoked-while-playing cases, at the wait for the revocation's Drop |
+| r2c | an explicit native with no native offered converts | `TestAnExplicitChoiceNeverConvertsWrittenOrMigrated/native`, `TestTheEffectivePolicyTable/native`, `TestTheRefusalsComeInTheirOrder` |
+| r2d | an explicit dop whose gain cannot be read converts | the same three, dop |
+
+### Gates
+
+At 16319805, inside one build slot (queued 3,325 s behind two other workers): `make fmt` changed
+nothing; `make vet` and its windows, darwin and linux/386 legs passed; `go test -race` of alsapcm,
+playback, policy and qualification passed (75 s); both native-integration overlays passed, every case
+they name; `scripts/qualification-version` against the merge base, c7192a6f, passed at 42; alsa-abi
+passed; `make build-all` and `make docs-check` passed. `make test`: 86 packages of 87 ok, and
+cmd/bridge failed once in `TestARefusedHandedUDPSocketLeavesTheLANPortFree/mismatched_address`, at
+its fixture's own guard before serve runs: the kernel gave its UDP socket the number of the TCP port
+the test had just closed, a coincidence of two allocators no change here touches. Twenty reruns of it
+passed, and cmd/bridge whole under `-race` passed (1,033 s). The round-2 rules patch: `git apply
+--check` at 16319805, the budgets on a patched copy (player.md 99.3 %), and `verify_moves.py --base
+HEAD` with its two edits declared, all passed.
