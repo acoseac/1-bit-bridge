@@ -69,19 +69,28 @@ func withinFor[T any](t *testing.T, ch <-chan T, d time.Duration, what string) T
 // each call counted, its number sent on came as it comes, a call the test
 // holds waiting there with the node open until let go, and each answering
 // DSD_U32_BE accepted at the frame rate rates gives it (the last for the calls
-// past them), every other candidate refused.
+// past them), every other candidate refused; a call the test makes busy
+// finds the node another's (EBUSY), opens nothing and asks nothing.
 type heldProbe struct {
 	came  chan int
 	rates []int
 
 	mu    sync.Mutex
 	gates map[int]chan struct{}
+	busy  map[int]bool
 	calls int
 	open  int // calls under way: the node open
 }
 
 func newHeldProbe(rates ...int) *heldProbe {
-	return &heldProbe{came: make(chan int, 16), rates: rates, gates: map[int]chan struct{}{}}
+	return &heldProbe{came: make(chan int, 16), rates: rates, gates: map[int]chan struct{}{}, busy: map[int]bool{}}
+}
+
+// busyAt makes call n find the node busy.
+func (h *heldProbe) busyAt(n int) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.busy[n] = true
 }
 
 // hold has call n wait until let.
@@ -99,7 +108,7 @@ func (h *heldProbe) probe(ep alsapcm.Endpoint, c alsapcm.ProbeConfig) (alsapcm.P
 	n := h.calls
 	h.calls++
 	h.open++
-	g := h.gates[n]
+	g, busy := h.gates[n], h.busy[n]
 	h.mu.Unlock()
 	defer func() {
 		h.mu.Lock()
@@ -109,6 +118,13 @@ func (h *heldProbe) probe(ep alsapcm.Endpoint, c alsapcm.ProbeConfig) (alsapcm.P
 	h.came <- n
 	if g != nil {
 		<-g
+	}
+	if busy {
+		rep := alsapcm.ProbeReport{Endpoint: ep, Results: make([]alsapcm.ProbeResult, len(c.Candidates))}
+		for i, cand := range c.Candidates {
+			rep.Results[i] = alsapcm.ProbeResult{Candidate: cand, Answer: alsapcm.ProbeNotProbed}
+		}
+		return rep, &alsapcm.Error{Reason: alsapcm.ReasonBusy, Op: "probe", Endpoint: ep, Detail: "the test's node is another's"}
 	}
 	rate := h.rates[min(n, len(h.rates)-1)]
 	rep := alsapcm.ProbeReport{Endpoint: ep, Opened: true, Results: make([]alsapcm.ProbeResult, len(c.Candidates))}
@@ -378,18 +394,25 @@ func (r *probeRig) ask(t *testing.T, ctx context.Context, cond playback.ProbeCon
 // DAC enumerated anew, drops them, so the probe's cache keeps nothing under
 // the unit it probed, no driver_accepted is written into the player's DSD
 // state, and the probe is still owed; the next ask runs it, and keeps its
-// answers.
+// answers. A probe that met a busy node (MPD's) answers nothing for the cache
+// to refuse, so a choice written while it ran is known by the probe's
+// generation alone: it leaves the probe asked anew, which runs.
 func TestAStaleProbeKeepsNothingAndStaysOwed(t *testing.T) {
 	for _, c := range []struct {
 		name   string
+		busy   bool // the held call meets a busy node
 		during func(r *probeRig)
 		now    int // the enumeration the next ask probes
 	}{
-		{"a choice written for the DAC while it ran", func(r *probeRig) { r.b.ForgetDSDProbe(playbacktest.DACKey()) }, 2},
-		{"the DAC enumerated anew while it ran", func(r *probeRig) { r.bound.replug(r.box, 3) }, 3},
+		{"a choice written for the DAC while it ran", false, func(r *probeRig) { r.b.ForgetDSDProbe(playbacktest.DACKey()) }, 2},
+		{"a choice written while a probe that met a busy node ran", true, func(r *probeRig) { r.b.ForgetDSDProbe(playbacktest.DACKey()) }, 2},
+		{"the DAC enumerated anew while it ran", false, func(r *probeRig) { r.bound.replug(r.box, 3) }, 3},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			probe := newHeldProbe(dsd64Frames, dsd128Frames)
+			if c.busy {
+				probe.busyAt(0)
+			}
 			let := probe.hold(0)
 			defer let()
 			r := newProbeRig(t, probe)
