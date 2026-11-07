@@ -1103,9 +1103,13 @@ bridge does about it:
   serve says it once: at the first start it refuses, again a day later, and
   at every start from a terminal (`bridge serve` by hand), keeping when it
   was said in a note beside the record, `.bridge.yaml.datadir.refused`; the
-  first start that finds the data dir again removes the note and says `the
-  data directory serve refused while its volume was away holds its database
-  or its lock file again: serve starts on it` (Info). `bridge
+  first start after it that gets past the data dir's preparation and its
+  lock removes the note and says how the refusal ended (Info): `the data
+  directory serve refused while its volume was away holds its database or
+  its lock file again: serve starts on it` where the volume is back, and
+  `serve's refusal of a data directory whose volume was away no longer
+  applies: serve starts on the data directory its config names` where
+  `dataDir` was set to another directory or the record was removed. `bridge
   doctor`'s `data-dir` line fails the same state, and since B727 every other
   command that makes, opens or writes the data dir (scan, the render
   commands, analyze, variants, artwork, enrichment, duplicates, library,
