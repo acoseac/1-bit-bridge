@@ -1019,12 +1019,16 @@ func TestPriorInstallReadsWhatLoadReads(t *testing.T) {
 
 // TestPriorInstallTagsAreConfigs checks every field readPriorInstall decodes
 // against the config.Config field of the same name: the same type and the
-// same yaml key.
+// same yaml key. An unexported field is none the decoder reads (priorEnrich's
+// notKept is its UnmarshalYAML's record), so it is not checked.
 func TestPriorInstallTagsAreConfigs(t *testing.T) {
 	var check func(prior, cfg reflect.Type, path string)
 	check = func(prior, cfg reflect.Type, path string) {
 		for i := 0; i < prior.NumField(); i++ {
 			pf := prior.Field(i)
+			if !pf.IsExported() {
+				continue
+			}
 			cf, ok := cfg.FieldByName(pf.Name)
 			if !ok {
 				t.Errorf("%s%s: config.Config has no such field", path, pf.Name)

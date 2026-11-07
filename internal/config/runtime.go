@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
+
+	"gopkg.in/yaml.v3"
 )
 
 // RuntimeConfig is the process-wide holder for the live config
@@ -235,18 +237,66 @@ func (r *RuntimeConfig) UpdateChecked(path string, fn func(next *Config, check f
 	if r.fileKnown && (l.target != r.target || !ok || !bytes.Equal(found, r.file)) {
 		return &ChangedOutsideError{Path: path}
 	}
-	next := Clone(r.Load())
+	before := r.Load()
+	next := Clone(before)
 	check := func() error { return changedOutside(path, l.Check()) }
 	if err := fn(next, check); err != nil {
 		return err
 	}
-	written, err := next.save(l, nil)
+	// The snapshot, with the two opt-outs as the file is to hold them; the
+	// live values are what is published.
+	saved := *next
+	filedSwitches(&saved, before, found)
+	written, err := saved.save(l, nil)
 	if err != nil {
 		return changedOutside(path, err)
 	}
 	r.file, r.fileKnown, r.target = written, true, l.target
 	r.Store(next)
 	return nil
+}
+
+// filedSwitches sets, in saved, a copy of an Update's next, the two opt-outs
+// (switchEnvPaths: enrich.enabled, enrich.deezerEnabled) as the file is to
+// hold them, where next holds the live values, BRIDGE_ENRICH_ENABLED's or
+// BRIDGE_ENRICH_DEEZER_ENABLED's where set (backlog B617). A switch the
+// update left as it was in before, the snapshot it cloned, is written as the
+// file holds it (file, the bytes the turn read), so a save of any other
+// setting writes no variable's value into the file, and a start without the
+// variable finds what the operator chose; a switch the update changed is
+// written as the change, off as false and on as no key. The snapshot
+// published is next, the live values. Other variables are written as they
+// are (B761). Only these two fields of saved are set: what is saved is the
+// snapshot the holder compared with the turn's bytes.
+func filedSwitches(saved, before *Config, file []byte) {
+	var own struct {
+		Enrich struct {
+			Enabled       *bool `yaml:"enabled"`
+			DeezerEnabled *bool `yaml:"deezerEnabled"`
+		} `yaml:"enrich"`
+	}
+	if err := yaml.Unmarshal(file, &own); err != nil {
+		// The bytes loaded once (the holder's own read or write, or a file
+		// it was told nothing of); one that does not decode keeps what the
+		// update holds.
+		return
+	}
+	saved.Enrich.Enabled = filedSwitch(saved.Enrich.EffectiveEnabled(), before.Enrich.EffectiveEnabled(), own.Enrich.Enabled)
+	saved.Enrich.DeezerEnabled = filedSwitch(saved.Enrich.EffectiveDeezerEnabled(), before.Enrich.EffectiveDeezerEnabled(), own.Enrich.DeezerEnabled)
+}
+
+// filedSwitch is one opt-out as an Update writes it: the file's own value
+// where the update left the live one as it was, else the change, off as
+// false and on as no key.
+func filedSwitch(now, was bool, filed *bool) *bool {
+	if now == was {
+		return filed
+	}
+	if now {
+		return nil
+	}
+	off := false
+	return &off
 }
 
 // changedOutside is err, a turn's answer to the holder's save of the config
@@ -343,6 +393,14 @@ func Clone(cfg *Config) *Config {
 	if cfg.SmartPlaylists.Enabled != nil {
 		v := *cfg.SmartPlaylists.Enabled
 		out.SmartPlaylists.Enabled = &v
+	}
+	if cfg.Enrich.Enabled != nil {
+		v := *cfg.Enrich.Enabled
+		out.Enrich.Enabled = &v
+	}
+	if cfg.Enrich.DeezerEnabled != nil {
+		v := *cfg.Enrich.DeezerEnabled
+		out.Enrich.DeezerEnabled = &v
 	}
 	if cfg.Output.LoopbackPort != nil {
 		v := *cfg.Output.LoopbackPort

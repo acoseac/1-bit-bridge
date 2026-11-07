@@ -616,16 +616,21 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   want-set keeps the name, so turning mDNS off or on makes no certificate
   stale, and an ASCII name is advertised and paired at as on main
   whatever the setting. **A configured
-  name (`customEndpoints`, the public domain) never goes through the
-  helper**: one the certificate cannot carry still refuses the mint, naming
-  it (`TestAConfiguredNameTheCertificateCannotCarryStillRefuses`, which
-  passes on main's code too), since leaving it out would advertise an
-  endpoint the certificate does not cover. A pair that is there is loaded
+  name (`customEndpoints`, the public domain) is not converted at the
+  mint**: it reaches the mint in the form its load or its typed check gave
+  it (`hostname.Configured`, the next bullet, B744), and one the
+  certificate cannot carry still refuses the mint, naming it
+  (`TestAConfiguredNameTheCertificateCannotCarryStillRefuses`, a config
+  built in memory and never loaded, which passes on main's code too),
+  since leaving it out would advertise an endpoint the certificate does
+  not cover. A pair that is there is loaded
   and never minted again (the sticky-cert bullet above); one minted now
   covers its host, so the startup warning and `tls-cert-sans` stay quiet.
   The library's default name is not a certified name: `firstInstallName`
   reads the host through a seam of its own (`installHostname`), keeps a
-  Unicode name readable, removes its control characters, and is
+  Unicode name readable, removes its control characters
+  (`config.WithoutControlCharacters`, every library name's strip since
+  B744), and is
   `DefaultLibraryName` when nothing else is left. **Don't put a host name
   the system reported into a certificate, an endpoint, a pairing URL or an
   mDNS record but through `hostname.ASCII`, run an ASCII name through
@@ -633,8 +638,8 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   (whose fallback is localhost), advertise or pair at a converted name
   while mDNS is off, make the want-set follow the mDNS setting, publish
   `localhost.local` for a host with no name, offer a walk address before
-  the listener's own or a custom endpoint, send a configured name through
-  the helper, or convert the library's name.**
+  the listener's own or a custom endpoint, convert a configured name at
+  the mint, or convert the library's name.**
   (`TestEachReportedNameBecomesOneName`,
   `FuzzASCIIGivesANameEveryConsumerTakes`,
   `TestEveryNameTheBridgeAdvertisesIsOneItCertifies`,
@@ -649,6 +654,45 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   `TestThePairingURLLineSaysWhyItIsNotTheHostsName`,
   `TestTheSRVTargetIsTheHostsNameOrANameOfItsAddress`,
   `TestAHostWithNoNameIsAnsweredForByANameOfItsOwn`.)
+- **…and a host name the operator configures (a `customEndpoints` entry's
+  host, `autocert.domain`) is certified and published in the form
+  `hostname.Configured` gives it, decided where it loads and where it is
+  typed, never at the mint** (2026-11-07, backlog B744). Kept as written,
+  one that is not ASCII reached the want-set and every mint refused the
+  config (`x509: "münchen.de" cannot be encoded as an IA5String`): `bridge
+  init --public --domain münchen.de` failed at its mint, and a hand edit of
+  `customEndpoints` made `bridge cert rotate` refuse. `Configured` returns
+  an ASCII host byte for byte, its case and an underscore included (the
+  URL parse and the checks before it decide it, as before), and gives one
+  with a byte outside ASCII the conversion `hostname.ASCII` gives the
+  host's own name, idna.Lookup's ToASCII held to 63 bytes a label and 253
+  a name, which maps case (`münchen.de` and `MÜNCHEN.DE` are both
+  `xn--mnchen-3ya.de`); one Lookup refuses (an underscore or a leading
+  hyphen beside a character that is not ASCII), or whose form passes
+  those bounds, has none. **Repair what loads, refuse only what is typed
+  and has no form** (the library name's rule, in `config-lifecycle.md`):
+  `ValidateCustomEndpoints` publishes a loaded entry's host in that form,
+  its port and place kept, said once at Info (nothing was wrong with it),
+  and prunes one with none with the prune's warning; `Normalize` serves a
+  domain in that form, or as `config.InvalidAutocertDomain` with a warning
+  where it has none. Neither refuses to start, and Normalize stays
+  all-or-nothing and idempotent, a converted value being a fixed point.
+  The settings save takes a typed entry with a form, which it stores
+  converted, and refuses one with none (`config.CheckCustomEndpoints`, 400
+  `validate`, nothing written); `bridge init --public --domain` writes the
+  domain in that form and says so, and refuses one with none (exit 2,
+  nothing written). **Don't convert a configured name at the mint
+  (`tls.dnsNames` converts the reported name alone), refuse to load a
+  value the conversion or the prune repairs, store a typed value in
+  another form than the load would serve, or send an ASCII configured
+  host through idna.Lookup.**
+  (`TestALoadedCustomEndpointThatIsNotASCIITakesItsIDNAForm`,
+  `TestALoadedAutocertDomainThatIsNotASCIITakesItsIDNAForm`,
+  `TestATypedCustomEndpointIsConvertedOrRefused`,
+  `TestNormalizeServesAutocertDomainAsItsHost`,
+  `TestTheSettingsPatchConvertsACustomEndpointHostThatIsNotASCII`,
+  `TestInitConvertsADomainThatIsNotASCII`,
+  `TestAConfiguredNameThatIsNotASCIIIsCertifiedInItsIDNAForm`.)
 - **The pairing QR advertises the SERVED cert**, resolved by SNI —
   `FingerprintForServerName` mirrors `Get`'s routing rather than delegating, so
   **every freshness and validity gate in `Get` must be restated there**; losing

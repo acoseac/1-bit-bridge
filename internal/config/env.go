@@ -227,7 +227,9 @@ func envBindings() []envBinding {
 // typo like `yes` or `on` to false would silently turn a feature off,
 // and a bridge that quietly stopped doing something is much harder to
 // notice than one that ignored an override and said so. The warning names
-// the variable alone (unparseableBoolEnv, unparseableIntEnv).
+// the variable alone (unparseableBoolEnv, unparseableIntEnv). The opt-outs
+// (switchEnvPaths) read the other way: off is what they are for, so they
+// take the file's spellings of on and off, and anything else as off.
 func (c *Config) applyEnvOverrides() {
 	byPath := make(map[string]envBinding, 128)
 	for _, b := range envBindings() {
@@ -261,7 +263,63 @@ func (c *Config) applyEnvOverrides() {
 const (
 	unparseableBoolEnv = "ignoring unparseable boolean env var"
 	unparseableIntEnv  = "ignoring unparseable integer env var"
+	// unreadableSwitchEnv is an opt-out's (switchEnvPaths): its value is
+	// taken as off, never ignored.
+	unreadableSwitchEnv = "an opt-out env var that reads as neither on nor off is taken as off"
 )
+
+// switchEnvPaths are the opt-outs whose variables read as the file reads
+// their keys, and as off where they read as neither (backlog B617):
+// enrich.enabled and enrich.deezerEnabled stop requests to services the
+// operator chose not to ask. Read as every other boolean variable is, by
+// strconv.ParseBool with a refusal ignored, `off` and `no` left them on, and
+// the bridge went on sending what the operator had asked it to stop.
+var switchEnvPaths = map[string]bool{
+	"enrich.enabled":       true,
+	"enrich.deezerEnabled": true,
+}
+
+// parseSwitchEnv reads an opt-out's variable as yaml.v3 reads a bool key,
+// without regard to case, and as strconv.ParseBool reads one: on for y, yes,
+// on, true, t and 1; off for n, no, off, false, f and 0; white space around
+// the word ignored. ok is false for anything else.
+func parseSwitchEnv(raw string) (on, ok bool) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "y", "yes", "on", "true", "t", "1":
+		return true, true
+	case "n", "no", "off", "false", "f", "0":
+		return false, true
+	}
+	return false, false
+}
+
+// readSwitchEnv is an opt-out's variable as the overrides take it: unset for
+// a value of white space alone, which says nothing, as an empty one does; on
+// or off as parseSwitchEnv reads it; and off, with unreadableSwitchEnv
+// naming the variable and never its value, for anything else.
+func readSwitchEnv(name, raw string) (on, set bool) {
+	if strings.TrimSpace(raw) == "" {
+		return false, false
+	}
+	if on, ok := parseSwitchEnv(raw); ok {
+		return on, true
+	}
+	validateLogger.Warn(unreadableSwitchEnv, "var", name)
+	return false, true
+}
+
+// EnrichEnabledFromEnv is enrich.enabled as BRIDGE_ENRICH_ENABLED alone sets
+// it, read as Load reads it (readSwitchEnv); set is false where the variable
+// is absent or says nothing. For a command that reads the switch where there
+// may be no config file to load (bridge fingerprint).
+func EnrichEnabledFromEnv() (on, set bool) {
+	name := envName("enrich.enabled")
+	v, ok := os.LookupEnv(name)
+	if !ok {
+		return false, false
+	}
+	return readSwitchEnv(name, v)
+}
 
 func (c *Config) applyEnvValue(b envBinding, name, raw string) {
 	fv := reflect.ValueOf(c).Elem()
@@ -284,6 +342,12 @@ func (c *Config) applyEnvValue(b envBinding, name, raw string) {
 	case reflect.Pointer:
 		switch b.elemKind {
 		case reflect.Bool:
+			if switchEnvPaths[b.YAMLPath] {
+				if on, set := readSwitchEnv(name, raw); set {
+					fv.Set(reflect.ValueOf(&on))
+				}
+				return
+			}
 			v, err := strconv.ParseBool(raw)
 			if err != nil {
 				validateLogger.Warn(unparseableBoolEnv, "var", name)

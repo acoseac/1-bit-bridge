@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	bridgemdns "github.com/acoseac/1-bit-bridge/internal/mdns"
 )
 
 // fixedName returns a constant nameSource closure for tests.
@@ -76,6 +78,48 @@ func TestMDNSLifecycleSetReportsViaStdout(t *testing.T) {
 	m.Set(false)
 	if !strings.Contains(stdout.String(), "stopped") {
 		t.Errorf("Set(false) didn't log; stdout=%q", stdout.String())
+	}
+}
+
+// TestAFailedResponderSaysTheConvertedLocalNameWillNotResolve is B744's item
+// 3. With mdns.enabled on, /v1/health, the pairing QR and the doctor publish
+// the `.local` endpoint of a host whose name is converted to its IDNA ASCII
+// form, which no responder but the bridge's own answers (B739's second
+// round), from the setting, whether or not the responder started. When it
+// fails to start, the failure's line says that address will not resolve
+// while mDNS is down, read from the host-name probe the endpoints read, with
+// no state of its own. An ASCII name, which the system's responder answers,
+// and a host with no name, which publishes no `.local` endpoint, get the
+// failure's line alone.
+func TestAFailedResponderSaysTheConvertedLocalNameWillNotResolve(t *testing.T) {
+	for _, tc := range []struct{ host, says string }{
+		{hostCyrillic, "https://xn--f1ai0a.local:17791"},
+		{"musicbox", ""},
+		{hostMacBytes, ""},
+	} {
+		t.Run(tc.host, func(t *testing.T) {
+			reportHostName(t, tc.host)
+			stdout, stderr := &bytes.Buffer{}, &bytes.Buffer{}
+			m := newMDNSLifecycle(17791, 1, fixedName("Forced"), stdout, stderr)
+			m.start = func(bridgemdns.Config) (*bridgemdns.Advertiser, error) {
+				return nil, errors.New("forced startup failure")
+			}
+			m.Set(true)
+			if m.advertiser != nil {
+				t.Fatal("a responder that failed to start was kept")
+			}
+			out := stderr.String()
+			if !strings.Contains(out, "mDNS advertise failed (non-fatal): forced startup failure") {
+				t.Errorf("the failure was not said: %q", out)
+			}
+			if tc.says != "" {
+				if !strings.Contains(out, tc.says) || !strings.Contains(out, "will not resolve while mDNS is down") {
+					t.Errorf("the failure does not say the advertised %s will not resolve while mDNS is down: %q", tc.says, out)
+				}
+			} else if strings.Contains(out, ".local") {
+				t.Errorf("the failure names a .local address for a host whose name is not converted: %q", out)
+			}
+		})
 	}
 }
 

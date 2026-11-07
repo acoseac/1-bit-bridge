@@ -22,7 +22,7 @@ func TestPacingFollowsTheLiveBase(t *testing.T) {
 		base := "https://atlas.example.test/ws/2"
 		// Constructed against the PUBLIC default, so a pass cannot come
 		// from the captured value happening to be right.
-		c := NewMusicBrainzClient("", "ua", nil).
+		c := NewMusicBrainzClient("", "ua", nil, onSwitches).
 			WithLiveBase(func() string { return base })
 
 		if got := c.MinInterval(); got != SelfHostedMinInterval {
@@ -43,7 +43,7 @@ func TestPacingFollowsTheLiveBase(t *testing.T) {
 
 	t.Run("coverart", func(t *testing.T) {
 		base := "https://atlas.example.test"
-		c := NewCoverArtClient("", "ua", nil).
+		c := NewCoverArtClient("", "ua", nil, onSwitches).
 			WithLiveBase(func() string { return base })
 
 		if got := c.MinInterval(); got != SelfHostedMinInterval {
@@ -62,7 +62,7 @@ func TestPacingFollowsTheLiveBase(t *testing.T) {
 // default rather than building `"/release/…"` against no host at all.
 func TestLiveBaseFallsBackToTheConstructedValue(t *testing.T) {
 	live := ""
-	c := NewMusicBrainzClient("", "ua", nil).WithLiveBase(func() string { return live })
+	c := NewMusicBrainzClient("", "ua", nil, onSwitches).WithLiveBase(func() string { return live })
 	if got := c.resolveBase().root; got != DefaultMusicBrainzBase {
 		t.Errorf("empty live base resolved to %q, want the constructed default %q",
 			got, DefaultMusicBrainzBase)
@@ -87,11 +87,11 @@ func TestLiveBaseFallsBackToTheConstructedValue(t *testing.T) {
 // serve path leaves the provider nil and must be byte-identical to
 // before, including the pacing.
 func TestNilLiveBaseKeepsConstructedPacing(t *testing.T) {
-	mirror := NewMusicBrainzClient("https://atlas.example.test/ws/2", "ua", nil)
+	mirror := NewMusicBrainzClient("https://atlas.example.test/ws/2", "ua", nil, onSwitches)
 	if got := mirror.MinInterval(); got != SelfHostedMinInterval {
 		t.Errorf("mirror: %v, want %v", got, SelfHostedMinInterval)
 	}
-	public := NewMusicBrainzClient("", "ua", nil)
+	public := NewMusicBrainzClient("", "ua", nil, onSwitches)
 	if got := public.MinInterval(); got != PublicMBMinInterval {
 		t.Errorf("public: %v, want %v", got, PublicMBMinInterval)
 	}
@@ -105,9 +105,9 @@ func TestNilLiveBaseKeepsConstructedPacing(t *testing.T) {
 // not have been enough: the sleeps read the enricher's copy.
 func TestEnricherPacingFollowsTheClient(t *testing.T) {
 	base := "https://atlas.example.test/ws/2"
-	mb := NewMusicBrainzClient("", "ua", nil).WithLiveBase(func() string { return base })
+	mb := NewMusicBrainzClient("", "ua", nil, onSwitches).WithLiveBase(func() string { return base })
 	caaBase := "https://atlas.example.test"
-	caa := NewCoverArtClient("", "ua", nil).WithLiveBase(func() string { return caaBase })
+	caa := NewCoverArtClient("", "ua", nil, onSwitches).WithLiveBase(func() string { return caaBase })
 	e := &Enricher{mb: mb, caa: caa,
 		MBMinInterval: PublicMBMinInterval, CAAMinInterval: PublicCAAMinInterval}
 
@@ -132,8 +132,8 @@ func TestEnricherPacingFollowsTheClient(t *testing.T) {
 // override them.
 func TestEnricherKeepsTheFieldWithoutALiveBase(t *testing.T) {
 	e := &Enricher{
-		mb:             NewMusicBrainzClient("", "ua", nil),
-		caa:            NewCoverArtClient("", "ua", nil),
+		mb:             NewMusicBrainzClient("", "ua", nil, onSwitches),
+		caa:            NewCoverArtClient("", "ua", nil, onSwitches),
 		MBMinInterval:  7 * time.Millisecond,
 		CAAMinInterval: 9 * time.Millisecond,
 	}

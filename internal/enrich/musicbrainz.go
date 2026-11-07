@@ -33,6 +33,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/enrichgate"
 )
 
 // DefaultMusicBrainzBase is the public MusicBrainz API root. Overridable
@@ -49,6 +51,9 @@ type MusicBrainzClient struct {
 	base      baseEndpoint
 	userAgent string
 	http      *http.Client
+	// sw is the client's own switches, which its transport asks (backlog
+	// B617).
+	sw enrichgate.Switches
 
 	// minInterval is the politeness pacing the ENRICHER must apply before
 	// each call, derived from base at construction. It lives here rather
@@ -65,8 +70,11 @@ type MusicBrainzClient struct {
 }
 
 // NewMusicBrainzClient constructs a client. userAgent MUST be set to
-// something identifying the caller (MB requires this).
-func NewMusicBrainzClient(base, userAgent string, httpClient *http.Client) *MusicBrainzClient {
+// something identifying the caller (MB requires this). sw is enrich.enabled
+// as the client asks it (enrichgate.Enrichment; backlog B617): a request is
+// sent, and its answer taken, only while it is on, whatever context the
+// request carries; zero switches are off, and send nothing.
+func NewMusicBrainzClient(base, userAgent string, httpClient *http.Client, sw enrichgate.Switches) *MusicBrainzClient {
 	if base == "" {
 		base = DefaultMusicBrainzBase
 	}
@@ -77,11 +85,13 @@ func NewMusicBrainzClient(base, userAgent string, httpClient *http.Client) *Musi
 	}
 	ep := parseBaseEndpoint(base)
 	// The client is a copy that never carries the credential from an https
-	// request onto a hop that is not https (guardRedirects).
+	// request onto a hop that is not https (guardRedirects), and sends only
+	// while its switches are on (sw.Client).
 	return &MusicBrainzClient{
 		base:        ep,
 		userAgent:   userAgent,
-		http:        guardRedirects(httpClient),
+		http:        guardRedirects(sw.Client(httpClient)),
+		sw:          sw,
 		minInterval: minIntervalForBase(ep.root, PublicMBMinInterval, publicMBHosts),
 	}
 }
@@ -208,7 +218,7 @@ func (c *MusicBrainzClient) SearchArtist(ctx context.Context, artist string) (*S
 // which the caller resolved once for the whole request: ep carries the
 // credential written on THAT base, so a live base changing between two reads
 // can never pair one mirror's credential with another's host.
-func (c *MusicBrainzClient) get(ctx context.Context, ep baseEndpoint, path string, out any) error {
+func (c *MusicBrainzClient) get(ctx context.Context, ep baseEndpoint, path string, out any) (err error) {
 	req, err := ep.newRequest(ctx, path)
 	if err != nil {
 		return err
@@ -220,6 +230,17 @@ func (c *MusicBrainzClient) get(ctx context.Context, ep baseEndpoint, path strin
 		return err
 	}
 	defer resp.Body.Close()
+	// Every return from here is an answer, or what the client made of one: a
+	// 404, an error status's body and a decoded one alike, any of which can
+	// finish after a switch-off the headers' admission did not see. So each
+	// return asks the client's own switches, and those ctx carries, again
+	// (backlog B617), before a caller can keep what it says as a miss; a
+	// refusal stands for the answer and its error.
+	defer func() {
+		if r := c.sw.Answer(ctx); r != nil {
+			err = r
+		}
+	}()
 	// A 429 or a 5xx is the upstream still busy. Every other status,
 	// including a later decode error, means it answered.
 	noteSettledAnswer(c.noteAnswered, resp.StatusCode)

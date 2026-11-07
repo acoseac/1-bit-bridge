@@ -378,7 +378,8 @@ func crashRollbackStoppedBeforeItsRename(t *testing.T, r *refusedInstall) {
 		defer func() { killed = recover() != nil }()
 		var out, errs bytes.Buffer
 		runServe(t.Context(), serveOpts{configPath: r.cfg, binaryPath: r.bin,
-			restoreBackup: func(string, string) error { panic("the process ended before the rename") }}, &out, &errs)
+			backupProbeTimeout: testBackupProbeTimeout,
+			restoreBackup:      func(string, string) error { panic("the process ended before the rename") }}, &out, &errs)
 	}()
 	if !killed {
 		t.Fatal("the crash rollback never reached its rename")

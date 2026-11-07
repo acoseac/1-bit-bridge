@@ -148,6 +148,51 @@ type Params struct {
 	HeldBack func(net.IP)
 }
 
+// localEndpoint is the `.local` endpoint Endpoints publishes on port for a
+// host whose name reads as host: the name in the form hostname.ASCII gives it
+// (backlog B739), cut to its first label, while it has one and is not a
+// detected container's generated id, and, for a converted name (the IDNA
+// ASCII form of one that is not ASCII, converted), only while the bridge's
+// own responder is on (mdns), since it alone answers that form (B739's
+// second round). ok is false where none is published.
+func localEndpoint(host string, port int, mdns bool) (url string, converted, ok bool) {
+	name, valid := hostname.ASCII(host)
+	if !valid || OmitContainerHostname(name, inDocker()) {
+		return "", false, false
+	}
+	converted = name != host
+	if converted && !mdns {
+		return "", true, false
+	}
+	if i := strings.IndexByte(name, '.'); i > 0 {
+		name = name[:i]
+	}
+	return fmt.Sprintf("https://%s.local:%d", name, port), converted, true
+}
+
+// OwnResponderEndpoint returns the `.local` endpoint Endpoints publishes on
+// port while mdns.enabled is on that no responder but the bridge's own
+// answers (the host's name converted to its IDNA ASCII form), or "" where it
+// publishes no such endpoint: an ASCII name, which the system's responder
+// answers, no name, or a container's generated one. The mDNS lifecycle names
+// it when its responder fails to start (backlog B744): /v1/health, the
+// pairing QR and the doctor keep publishing it from the setting, and nothing
+// answers it while the responder is down. It reads the host's name through
+// the probe Endpoints reads, at the call, and keeps no state.
+func OwnResponderEndpoint(port int) string {
+	if port <= 0 {
+		port = 7788
+	}
+	host, err := hostnameFunc()
+	if err != nil {
+		return ""
+	}
+	if url, converted, ok := localEndpoint(host, port, true); ok && converted {
+		return url
+	}
+	return ""
+}
+
 // Endpoints returns every reachable `https://<host>:<port>` URL for
 // the bridge, ordered by the Class ranking above. Deduplicates on URL
 // string so a dual-addressed interface doesn't produce two identical
@@ -202,14 +247,8 @@ func Endpoints(p Params) []Endpoint {
 	if host == "" {
 		host, _ = hostnameFunc()
 	}
-	if name, ok := hostname.ASCII(host); ok && (p.MDNS || name == host) && !OmitContainerHostname(name, inDocker()) {
-		if i := strings.IndexByte(name, '.'); i > 0 {
-			name = name[:i]
-		}
-		out = append(out, Endpoint{
-			URL:   fmt.Sprintf("https://%s.local:%d", name, port),
-			Class: ClassMDNSHost,
-		})
+	if url, _, ok := localEndpoint(host, port, p.MDNS); ok {
+		out = append(out, Endpoint{URL: url, Class: ClassMDNSHost})
 	}
 
 	// Tailscale MagicDNS advertising moved to `internal/api`'s
