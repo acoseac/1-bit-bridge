@@ -581,7 +581,7 @@ func TestALandedWriteIsUncertainAndPublishesWhatBothStatesPlay(t *testing.T) {
 	store.Land(landedError)
 	res := b.ChooseDSD(bg, choiceOf(t, b, dsdstate.ModeNative, 1, func(r *playback.ChoiceRequest) { r.Choice.MaxBitRate = playbacktest.DSD128 }))
 	wantChoice(t, res, playback.ChoicePersistUncertain)
-	if landed, ok := store.Landed(); !ok || landed.DACs[0].Choice.MaxBitRate != playbacktest.DSD128 {
+	if landed, ok := store.LandedState(); !ok || landed.DACs[0].Choice.MaxBitRate != playbacktest.DSD128 {
 		t.Fatalf("the file holds %+v, want the capped choice", landed)
 	}
 	check := func(p playback.PlayerPolicy) {

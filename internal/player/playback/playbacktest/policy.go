@@ -248,21 +248,33 @@ func (m *MemStore) Update(fn func(*dsdstate.State) error) error {
 // Land makes the next Update answer err, which wraps atomicwrite.ErrLanded,
 // once its change is made, as a write whose rename landed and whose barrier
 // failed: the store keeps the state as it was, the change is what the file
-// holds (Landed), and every Update after it is fenced.
+// holds (LandedState), and every Update after it is fenced (Landed).
 func (m *MemStore) Land(err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.land = err
 }
 
-// Landed is the state a landed write left in the file, false while none did.
-func (m *MemStore) Landed() (dsdstate.State, bool) {
+// LandedState is the state a landed write left in the file, false while
+// none did.
+func (m *MemStore) LandedState() (dsdstate.State, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.landed == nil {
 		return dsdstate.State{}, false
 	}
 	return m.landed.Clone(), true
+}
+
+// Landed is the fence a landed write left, as dsdstate.Store.Landed says it:
+// dsdstate.ErrLandedNotHeld once a write landed, nil while none did.
+func (m *MemStore) Landed() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.landed == nil {
+		return nil
+	}
+	return dsdstate.ErrLandedNotHeld
 }
 
 // Set replaces the state, as another writer's write does.

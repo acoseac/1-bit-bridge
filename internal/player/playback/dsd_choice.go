@@ -16,10 +16,27 @@ import (
 //
 // One write at a time, end to end (the writes' turn, choiceTurn): its
 // reading of the box and of the state, the set it would publish, what that
-// set would interrupt, the state's write and the publish. So a write that
-// finds the revision moved answers stale only once the write that moved it
-// has published, and the revision a stale answer carries is the one the
-// next write compares with (binding note 2).
+// set would interrupt, the state's write, the publish, and the epoch its
+// answer carries, read before the turn is given back. So a write that finds
+// the revision moved answers stale only once the write that moved it has
+// published, and the revision a stale answer carries is the one the next
+// write compares with, which no other write can have moved past (binding
+// note 2; round 2, point 4).
+//
+// Its checks are answered in the design's order, and what the write would
+// interrupt last of them (round 2, point 3): an earlier write that landed and
+// is not known to be durable fences every write until the next start, which is
+// answered once the DAC is known and before anything of the state's is read;
+// what the set would interrupt is classified before the state's write, with no
+// lock of the store's held, and answered inside it, after the state's own
+// checks and only where the state the write is made from gives the sets that
+// classification read. And a write is judged against the set published (round
+// 2, point 5): where its reading of the DAC gives another set than the one
+// published, a reading that glitched or the box's change, that reading is
+// published and reconciled first, a refresh of the write's own, and the write
+// reads again, so what it is told it would interrupt is what reconciliation
+// does with what plays then. A write that goes round maxChoiceRounds times,
+// the state or the box moving under it each time, is not made.
 //
 // The write between its reading and its publish is pending (Backend.pending):
 // the set it would publish, stored before what it would interrupt is
@@ -40,9 +57,9 @@ import (
 // Lock order: the writes' turn, then the refreshes' (dsdMu), then the
 // backend's (b.mu), then each session's (s.mu), then a sink's. The state's
 // store is taken alone: its Update runs with no lock of the backend's held,
-// and its closure is pure, so no fsync is ever waited for under a lock an
-// occurrence's admission takes. Playback calls Store.Update only on goroutines
-// of its own (recordDSD), under no lock.
+// and its closure is pure, no lock taken inside it, so no fsync is ever
+// waited for under a lock an occurrence's admission takes. Playback calls
+// Store.Update only on goroutines of its own (recordDSD), under no lock.
 
 // ChoiceOutcome is how a write of the bound DAC's DSD choice ended (B728 B9;
 // the design's section 7.2): written, or the word it was refused with.
@@ -82,15 +99,19 @@ type ChoiceRequest struct {
 
 // ChoiceResult is a write's outcome and the epoch published once it ended:
 // the set and its read side a written choice published, read as GET
-// /v1/outputs reads them afterwards (Policy).
+// /v1/outputs reads them afterwards (Policy), inside the writes' turn.
 type ChoiceResult struct {
 	Outcome ChoiceOutcome
 	Policy  PlayerPolicy
 }
 
-// maxChoiceRounds bounds the rounds a write takes when another writer moves
-// what it would publish between its reading and its write (errChoiceRound):
-// past it the write answers stale, and the client writes again.
+// maxChoiceRounds bounds the rounds a write takes when what it would publish,
+// or what the state gives without it, moves between its reading and its write
+// (errChoiceRound: another writer's change of the state, its answers or its
+// evidence), or when its reading of the DAC gives another set than the one
+// published (a refresh of the write's own, then a round): past it the write
+// is not made, persist_failed, nothing changed, and the client writes again,
+// its revision not behind, so never stale.
 const maxChoiceRounds = 8
 
 // errChoiceRound is a write's closure finding the state moved since the
@@ -99,53 +120,80 @@ const maxChoiceRounds = 8
 // again.
 var errChoiceRound = errors.New("player backend: what the choice's write would publish moved since it was read")
 
+// errWouldInterrupt is a write's closure answering what its classification
+// found, once the state's own checks passed on the state the write is made
+// from: the set it would publish interrupts what plays, without the go-ahead.
+var errWouldInterrupt = errors.New("player backend: the choice's write would interrupt what plays")
+
 // ChooseDSD writes the bound DAC's DSD choice (the design's section 7.2), and
-// answers how it ended with the epoch published then. Its checks, each
-// answered with its word, nothing written and nothing published: the words
-// of the choice (bad_request); a bound DAC read fresh (dac_unavailable);
-// req.DACKey its key as the read side publishes it (wireKey: dac_changed);
-// the policy's, inside the state's one write, on the state that write is made
-// from (policy.Choose: stale, mode_not_offered, dop_confirmation_required,
-// first_use_unacknowledged); and, without req.Interrupt, nothing the set the
-// write would publish interrupts (writeInterrupts: would_interrupt). Then the
-// state is written, durably (persist_failed before it lands, nothing changed;
-// persist_uncertain once it lands and its sync fails, or where an earlier
-// landed write fences it; state_unreadable where the file is refused in
-// memory), a probe is made due (ProbeDSDPending), the set the state gives is
-// published and reconciled (refreshDSD), and the write is answered from that
-// epoch. A stale answer reads the policy again first, so the revision it
-// carries is the state's. ctx bounds the wait for another write's turn alone:
-// once the state's write begins nothing interrupts it.
+// answers how it ended with the epoch published then, read inside the writes'
+// turn. Its checks, each answered with its word, nothing written and nothing
+// published: the words of the choice (bad_request); a bound DAC read fresh
+// (dac_unavailable); req.DACKey its key as the read side publishes it
+// (wireKey: dac_changed); no earlier write landed and not known to be durable
+// (persist_uncertain, the fence, answered before the state is read); the
+// policy's, inside the state's one write, on the state that write is made from
+// (policy.Choose: stale, mode_not_offered, dop_confirmation_required,
+// first_use_unacknowledged); and then, without req.Interrupt, nothing the set
+// the write would publish interrupts, against the set published
+// (writeInterrupts, classified before the state's write: would_interrupt).
+// Then the state is written, durably (persist_failed before it lands, nothing
+// changed; persist_uncertain once it lands and its sync fails; state_unreadable
+// where the file is refused in memory), a probe is made due (ProbeDSDPending),
+// the set the state gives is published and reconciled (refreshDSD), and the
+// write is answered from that epoch. A stale answer reads the policy again
+// first, so the revision it carries is the state's. A write that cannot be made
+// within maxChoiceRounds rounds, the state or the box moving under it, is
+// persist_failed too: nothing changed either way, and the client writes again
+// from the revision GET /v1/outputs publishes; its line says which. ctx bounds
+// the wait for another write's turn alone (persist_failed where it ends
+// first): once the state's write begins nothing interrupts it.
 func (b *Backend) ChooseDSD(ctx context.Context, req ChoiceRequest) ChoiceResult {
 	j := choiceJournal{}
-	out := b.chooseDSD(ctx, req, &j)
-	attrs := []any{"dac", j.dac, "from", j.from, "to", j.to, "outcome", string(out)}
-	if out == ChoicePersistFailed || out == ChoicePersistUncertain || out == ChoiceStateUnreadable {
-		b.dsdLog().Warn("player: a write of the bound DAC's DSD choice was not made durable", attrs...)
-	} else {
+	res := b.chooseDSD(ctx, req, &j)
+	attrs := []any{"dac", j.dac, "from", j.from, "to", j.to, "outcome", string(res.Outcome)}
+	switch {
+	case j.why != "":
+		b.dsdLog().Warn("player: a write of the bound DAC's DSD choice was not made", append(attrs, "why", j.why)...)
+	case res.Outcome == ChoicePersistUncertain:
+		b.dsdLog().Warn("player: a write of the bound DAC's DSD choice reached the state's file and is not known to be durable", attrs...)
+	default:
 		b.dsdLog().Info("player: a write of the bound DAC's DSD choice", attrs...)
 	}
-	return ChoiceResult{Outcome: out, Policy: b.Policy()}
+	return res
 }
 
 // choiceJournal is what a write's line says: the bound DAC's key as the wire
-// names it, the mode that applied before the write and the one it asks; each
-// "" where the write did not come to it.
-type choiceJournal struct{ dac, from, to string }
+// names it, the mode that applied before the write and the one it asks, each
+// "" where the write did not come to it; and why a write the state's store,
+// its fence or its rounds refused was not made.
+type choiceJournal struct{ dac, from, to, why string }
 
-func (b *Backend) chooseDSD(ctx context.Context, req ChoiceRequest, j *choiceJournal) ChoiceOutcome {
+// answerNow is a write's answer made outside the writes' turn, nothing read
+// or written: the epoch published now.
+func (b *Backend) answerNow(o ChoiceOutcome) ChoiceResult {
+	return ChoiceResult{Outcome: o, Policy: b.Policy()}
+}
+
+func (b *Backend) chooseDSD(ctx context.Context, req ChoiceRequest, j *choiceJournal) (res ChoiceResult) {
 	if err := req.Choice.Check(); err != nil {
-		return ChoiceBadRequest
+		return b.answerNow(ChoiceBadRequest)
 	}
 	j.to = req.Choice.Mode
 	p := b.cfg.DSD
 	if p == nil {
-		return ChoiceDACUnavailable
+		return b.answerNow(ChoiceDACUnavailable)
 	}
 	if !b.takeChoiceTurn(ctx) {
-		return ChoicePersistFailed
+		j.why = "it could not begin within the request's time: another write held the turn"
+		return b.answerNow(ChoicePersistFailed)
 	}
 	defer b.giveChoiceTurn()
+	// The epoch the answer carries, read at every return inside the turn,
+	// before the turn is given back (round 2, point 4): read after it, the
+	// next write could have published, and a stale answer carry a revision
+	// that write moved past.
+	defer func() { res.Policy = b.Policy() }()
 	// The round's pending set, settled at every end of the write, before its
 	// turn is given back: a write that panics (the API's recoverer answers
 	// it) leaves nothing pending, so no occurrence waits for a write that will
@@ -153,16 +201,28 @@ func (b *Backend) chooseDSD(ctx context.Context, req ChoiceRequest, j *choiceJou
 	var pend *pendingChoice
 	defer func() { b.settleChoice(pend) }()
 	for round := 0; ; round++ {
+		if round == maxChoiceRounds {
+			j.why = "what it would publish, or the DAC as it read it, moved under it in every one of its rounds"
+			return ChoiceResult{Outcome: ChoicePersistFailed}
+		}
 		r, _ := b.readBox()
 		if r == nil {
-			return ChoiceDACUnavailable
+			return ChoiceResult{Outcome: ChoiceDACUnavailable}
 		}
 		j.dac = wireKey(r.key, r.m.USB)
 		if j.dac != req.DACKey {
-			return ChoiceDACChanged
+			return ChoiceResult{Outcome: ChoiceDACChanged}
 		}
 		if p.Store == nil {
-			return ChoiceStateUnreadable
+			j.why = "the player's DSD state did not open"
+			return ChoiceResult{Outcome: ChoiceStateUnreadable}
+		}
+		if b.choiceFenced() {
+			// No write is made until the next start reads the file: answered
+			// first, before any of the state's checks, which a write that
+			// cannot be made does not make.
+			j.why = "an earlier write reached the state's file and is not known to be durable"
+			return ChoiceResult{Outcome: ChoicePersistUncertain}
 		}
 		now := b.dsdNow()
 		st := p.Store.State()
@@ -177,17 +237,21 @@ func (b *Backend) chooseDSD(ctx context.Context, req ChoiceRequest, j *choiceJou
 		// decides on the state the write is made from.
 		pend = nil
 		var cur, want *dsdSet
+		interrupts := false
 		if next, err := policy.Choose(r.inputs(st), req.Choice, now); err == nil {
 			cur, _ = b.setOver(r, st)
+			if !cur.same(b.dsd.Load()) {
+				// The write's reading gives another set than the one published:
+				// published and reconciled first, so the write is judged against
+				// what plays then, and read again (round 2, point 5).
+				b.refreshDSD()
+				continue
+			}
 			want, _ = b.setOver(r, next)
 			pend = &pendingChoice{set: want, done: make(chan struct{})}
 			b.pending.Store(pend)
-			interrupts := b.writeInterrupts(cur, want)
+			interrupts = b.writeInterrupts(cur, want)
 			b.choicePending()
-			if interrupts && !req.Interrupt {
-				b.settleChoice(pend)
-				return ChoiceWouldInterrupt
-			}
 		}
 		var wrote dsdstate.State
 		err := p.Store.Update(func(s *dsdstate.State) error {
@@ -204,34 +268,39 @@ func (b *Backend) chooseDSD(ctx context.Context, req ChoiceRequest, j *choiceJou
 			if n, _ := b.setOver(r, next); !n.same(want) {
 				return errChoiceRound
 			}
+			// What the write would interrupt, the last of its checks, after the
+			// state's own on the state it is made from (round 2, point 3): its
+			// classification was made before, under the pending set and no lock
+			// of the store's, of the two sets this state gives.
+			if interrupts && !req.Interrupt {
+				return errWouldInterrupt
+			}
 			*s, wrote = next, next.Clone()
 			return nil
 		})
 		b.choiceWritten(err)
 		var refusal *policy.ChoiceRefusal
 		switch {
+		case errors.Is(err, errWouldInterrupt):
+			return ChoiceResult{Outcome: ChoiceWouldInterrupt}
 		case errors.Is(err, errChoiceRound):
 			b.settleChoice(pend)
-			if round+1 < maxChoiceRounds {
-				continue
-			}
-			b.refreshDSD()
-			return ChoiceStale
+			continue
 		case errors.As(err, &refusal):
 			b.settleChoice(pend)
 			if refusal.Reason == policy.ChoiceStale {
 				b.refreshDSD()
 			}
 			if out, ok := refusalOutcomes[refusal.Reason]; ok {
-				return out
+				return ChoiceResult{Outcome: out}
 			}
-			return ChoiceBadRequest
+			return ChoiceResult{Outcome: ChoiceBadRequest}
 		case errors.Is(err, dsdstate.ErrNotWritable):
-			b.settleChoice(pend)
-			return ChoiceStateUnreadable
+			j.why = "the player's DSD state file is refused in memory"
+			return ChoiceResult{Outcome: ChoiceStateUnreadable}
 		case errors.Is(err, dsdstate.ErrLandedNotHeld):
-			b.settleChoice(pend)
-			return ChoicePersistUncertain
+			j.why = "an earlier write reached the state's file and is not known to be durable"
+			return ChoiceResult{Outcome: ChoicePersistUncertain}
 		case errors.Is(err, atomicwrite.ErrLanded):
 			// The file holds the write's state, not known to be durable, and the
 			// store the state as it was: until the next start reads the file, a
@@ -239,16 +308,29 @@ func (b *Backend) chooseDSD(ctx context.Context, req ChoiceRequest, j *choiceJou
 			b.landedChoice.Store(&wrote)
 			b.refreshDSD()
 			b.settleChoice(pend)
-			return ChoicePersistUncertain
+			return ChoiceResult{Outcome: ChoicePersistUncertain}
 		case err != nil:
-			b.settleChoice(pend)
-			return ChoicePersistFailed
+			j.why = "the state's write failed before it replaced the file"
+			return ChoiceResult{Outcome: ChoicePersistFailed}
 		}
 		b.oweProbe()
 		b.refreshDSD()
 		b.settleChoice(pend)
-		return ChoiceWritten
+		return ChoiceResult{Outcome: ChoiceWritten}
 	}
+}
+
+// choiceFenced reports whether an earlier write landed and is not known to
+// be durable, which fences every write of the state until the next start:
+// one of the backend's own choices (landedChoice), or any write of the
+// store's, an evidence write's included, where the store says so
+// (dsdstate.Store's Landed).
+func (b *Backend) choiceFenced() bool {
+	if b.landedChoice.Load() != nil {
+		return true
+	}
+	l, ok := b.cfg.DSD.Store.(interface{ Landed() error })
+	return ok && l.Landed() != nil
 }
 
 // takeChoiceTurn takes the writes' turn, waiting for a write under way at
