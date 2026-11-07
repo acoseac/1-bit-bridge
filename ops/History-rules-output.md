@@ -508,6 +508,13 @@ is now denied, as it should be), and in serve by
 leave openhome's playable-extension list alone (an extension is not a
 container: `.m4a` is ALAC or AAC).**
 
+**Beside them, list dsf and dff while the effective set plays a DSD rate, a
+native or DoP tuple or a rate it converts to PCM (`PlayerPolicy.PlaysDSD`,
+B728 B11; until B11 a tuple alone listed them), the predicate OpenHome's
+ProtocolInfo lists DSF and DFF by too, and never while it plays none.** A
+converted rate publishes no tuple, so a client grants DSD from the tuples
+alone, as before (`TestTheElementListsDSDWhileThePlayerConverts`).
+
 `format.Containers` is every container the decoders reconstruct from and
 `Container.IsDSD` the DSD ones, each pinned to the source and cross-checked on
 every golden against the decoder the content opens

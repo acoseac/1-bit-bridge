@@ -247,8 +247,11 @@ mode). iOS never talks to the admin listener.
 
 ## Cross-cutting invariants — do not regress
 
-- **No server-side transcoding, ever.** The bridge delivers bytes; iOS
-  pre-caches full files before playback (DSD/DoP lock).
+- **No server-side transcoding on the wire, ever.** The bridge delivers
+  bytes; iOS pre-caches full files before playback (DSD/DoP lock). The
+  bridge's own player converting DSD to PCM for its own DAC (B728) is
+  playback, not transcoding, only where the DAC's effective policy converts:
+  never serve what it converted, or call it bit-exact.
 - **Rate limits respect the services**: MusicBrainz anon 1 req/s (paced at
   1.1s), Cover Art Archive 500ms, Deezer ~50 req/5s (paced at 120ms).
   User-Agent identifies the app per MB's TOS. Negative-cache MB errors so one
