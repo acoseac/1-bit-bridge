@@ -903,7 +903,7 @@ func (b *Backend) recordDSD(what string, key dacprofile.Key, mutate func(d *dsds
 	if p == nil || p.Store == nil {
 		return
 	}
-	b.spawnWrite(func() {
+	b.spawnWrite(what, func() {
 		defer func() {
 			if r := recover(); r != nil {
 				b.logPanic("a write of the player's DSD state", r)
@@ -1105,6 +1105,7 @@ func (b *Backend) probeDSD(ctx context.Context, cond ProbeConditions) (pending, 
 		ps.owe()
 		return true, false
 	}
+	b.probed()
 	if ctx.Err() != nil {
 		return false, false
 	}

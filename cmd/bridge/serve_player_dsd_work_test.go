@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -12,6 +14,7 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/alsactl"
 	"github.com/acoseac/1-bit-bridge/internal/alsapcm"
+	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/logging/loggingtest"
 	"github.com/acoseac/1-bit-bridge/internal/player/binding"
@@ -186,34 +189,71 @@ func TestTheSupervisorAnswersWhileTheSilentProbeIsHeld(t *testing.T) {
 	}
 }
 
-// heldStateWrites holds every write playback makes of the player's DSD state
-// (DSDPolicy.Store's Update: what it observed of the DAC) until the test lets
-// them go, as a write whose fsync does not return.
-type heldStateWrites struct {
+// The lines serve's player's stop says of what its backend left running past
+// its bound: a write of the player's DSD state, which keeps the player's share
+// of the data directory's lock, and anything else, which may keep the device.
+const (
+	keptLockLine   = "player: a write of the player's DSD state did not finish within the stop's bound: the player keeps its share of the data directory's lock until it ends"
+	heldDeviceLine = "player: the backend did not finish within its bound: a call to the device is held in the kernel, and the device may still be held until the process exits"
+)
+
+// heldStateWrite holds the first write of the player's DSD state whose bytes
+// carry a driver_accepted inside the store's own lock (dsdstate.Store.Update
+// holds it through its durable write): at the fsync of the file the write
+// stages, as a write whose fsync does not return, until the test lets it go
+// (round 2: round 1's hold stood in front of the store and missed its lock).
+// Every other fsync is the file's own.
+type heldStateWrite struct {
 	came, gate    chan struct{}
 	once, letOnce sync.Once
 }
 
-func (h *heldStateWrites) let() { h.letOnce.Do(func() { close(h.gate) }) }
-
-// heldStore is the policy's store with its writes held.
-type heldStore struct {
-	playback.DSDStore
-	h *heldStateWrites
+// holdStateWrite puts the hold in place before serve boots: its restore,
+// registered first, runs after serve's drain, once no writer reads the seam.
+func holdStateWrite(t *testing.T) *heldStateWrite {
+	t.Helper()
+	h := &heldStateWrite{came: make(chan struct{}), gate: make(chan struct{})}
+	t.Cleanup(atomicwrite.SetSyncFileForTest(func(f *os.File) error {
+		if strings.HasPrefix(filepath.Base(f.Name()), ".player-dsd-") {
+			if b, err := os.ReadFile(f.Name()); err == nil && bytes.Contains(b, []byte(`"driverAcceptedAt"`)) {
+				first := false
+				h.once.Do(func() {
+					first = true
+					close(h.came)
+				})
+				if first {
+					<-h.gate
+				}
+			}
+		}
+		return f.Sync()
+	}))
+	return h
 }
 
-func (s heldStore) Update(fn func(*dsdstate.State) error) error {
-	s.h.once.Do(func() { close(s.h.came) })
-	<-s.h.gate
-	return s.DSDStore.Update(fn)
+func (h *heldStateWrite) let() { h.letOnce.Do(func() { close(h.gate) }) }
+
+// await waits until the write is held, until the test's deadline.
+func (h *heldStateWrite) await(t *testing.T) {
+	t.Helper()
+	select {
+	case <-h.came:
+	case <-serveGiveUp(t):
+		t.Fatal("the probe's driver_accepted never reached the player's DSD state")
+	}
 }
 
 // TestServeKeepsTheDataDirLockWhileTheProbesEvidenceIsWritten (B762): what
 // a probe kept is written into the player's DSD state by a write of the
-// backend's, counted among its writes (DSDWrites): a write that has not
-// returned when serve stops, past the backend's bound, keeps the player's
-// share of the data directory's lock, said once, so no other serve takes the
-// directory while it may still land; once it lands the share is let go.
+// backend's, counted among its writes (DSDWrites), the store's own lock held
+// through its durable write. While it is held the supervisor answers (round
+// 2): a snapshot's handling reads the state without the store's lock
+// (dsdstate.Store.State), so an unplug the watcher reads reaches the engine. A
+// write that has not returned when serve stops, past the backend's bound,
+// keeps the player's share of the data directory's lock, said once, so no
+// other serve takes the directory while it may still land, and nothing more
+// is said of the backend, of which nothing else runs; the player's stop is
+// done all the same. Once the write lands the share is let go.
 func TestServeKeepsTheDataDirLockWhileTheProbesEvidenceIsWritten(t *testing.T) {
 	needsDirectorySync(t)
 	persistentMedium(t)
@@ -221,28 +261,27 @@ func TestServeKeepsTheDataDirLockWhileTheProbesEvidenceIsWritten(t *testing.T) {
 	box := newDSDBox(t)
 	goBarDSD(t, box.trees)
 	kernelReleaseIn(t, box.trees)
-	writes := &heldStateWrites{came: make(chan struct{}), gate: make(chan struct{})}
-	seams := noControlNodes()
-	controls := seams.dsdPolicy
-	seams.dsdPolicy = func(p *playback.DSDPolicy) {
-		controls(p)
-		p.Store = heldStore{DSDStore: p.Store, h: writes}
-	}
+	write := holdStateWrite(t)
 	probe := newHeldDACProbe(false)
-	ps := bootPlayerServe(t, playerServeCase{player: goBarPlayer, seams: seams, bounds: servePlayerBounds{backend: 200 * time.Millisecond},
+	ps := bootPlayerServe(t, playerServeCase{player: goBarPlayer, seams: noControlNodes(), bounds: servePlayerBounds{backend: 200 * time.Millisecond},
 		with: func(o *serveOpts) {
 			box.with(o)
 			o.playerBackend = probe.backend
 		}})
 	// Registered after the boot, so it runs before serve's drain.
-	t.Cleanup(writes.let)
-	availableOutput(t, ps.runningEngine(t))
-	select {
-	case <-writes.came:
-	case <-serveGiveUp(t):
-		t.Fatal("the probe's driver_accepted never reached the player's DSD state")
-	}
+	t.Cleanup(write.let)
+	eng := ps.runningEngine(t)
+	availableOutput(t, eng)
+	write.await(t)
+	box.unplug(t)
+	box.wake()
+	awaitEngine(t, eng, "the unplug, reported while a write of the player's DSD state holds the store's lock", func(s *engine.Snapshot) bool {
+		return s.Output().Known && !s.Output().Available
+	})
 	stopped(t, ps)
+	if !closedNow(ps.player.done) {
+		t.Error("the player's stop has not finished, a write of its DSD state held")
+	}
 	release, err := lockServeDataDir(ps.dataDir)
 	release()
 	var held *serveDataDirHeldError
@@ -252,10 +291,13 @@ func TestServeKeepsTheDataDirLockWhileTheProbesEvidenceIsWritten(t *testing.T) {
 	if closedNow(ps.player.settled) {
 		t.Error("the player settled with a write of its DSD state under way")
 	}
-	if lines := rec.Failures("player: a write of the player's DSD state did not finish within the stop's bound: the player keeps its share of the data directory's lock until it ends"); len(lines) != 1 {
+	if lines := rec.Failures(keptLockLine); len(lines) != 1 {
 		t.Errorf("the kept lock was said %q, want once", lines)
 	}
-	writes.let()
+	if lines := rec.Failures(heldDeviceLine); len(lines) != 0 {
+		t.Errorf("the device was said held (%q) with nothing of the backend's but a write of the player's DSD state running", lines)
+	}
+	write.let()
 	select {
 	case <-ps.player.settled:
 	case <-serveGiveUp(t):
@@ -266,6 +308,84 @@ func TestServeKeepsTheDataDirLockWhileTheProbesEvidenceIsWritten(t *testing.T) {
 		t.Fatalf("the data directory's lock once the write landed: %v", err)
 	}
 	release()
+	if goBarProbeEvidence(t, ps.dataDir) == nil {
+		t.Error("the probe's driver_accepted did not land once let go")
+	}
+}
+
+// TestAStopBesideAHeldWriteAndAHeldReadingSaysBoth (B762 round 2): a stop
+// that finds, past the backend's bound, a write of the player's DSD state and
+// another goroutine of the backend's still running, here a refresh held
+// reading the bound card's controls, says both: the player keeps its share of
+// the data directory's lock until the write ends, and the device may be held
+// until the process exits. Round 1 said the first alone, as if the write were
+// all that ran. The share is let go once the write lands, the refresh, which
+// writes nothing, still held.
+func TestAStopBesideAHeldWriteAndAHeldReadingSaysBoth(t *testing.T) {
+	needsDirectorySync(t)
+	persistentMedium(t)
+	rec := loggingtest.Record(t)
+	box := newDSDBox(t)
+	goBarDSD(t, box.trees)
+	kernelReleaseIn(t, box.trees)
+	write := holdStateWrite(t)
+	node := &heldControlNode{came: make(chan struct{}), gate: make(chan struct{})}
+	seams := &servePlayerSeams{dsdPolicy: func(p *playback.DSDPolicy) {
+		hb, ok := p.Box.(playback.HostBox)
+		if !ok {
+			return
+		}
+		hb.Controls = alsactl.Reader{Open: node.open}
+		p.Box = hb
+	}}
+	probe := newHeldDACProbe(true)
+	ps := bootPlayerServe(t, playerServeCase{player: goBarPlayer, seams: seams, bounds: servePlayerBounds{backend: 200 * time.Millisecond},
+		with: func(o *serveOpts) {
+			box.with(o)
+			o.playerBackend = probe.backend
+		}})
+	// Registered after the boot, so they run before serve's drain.
+	t.Cleanup(probe.let)
+	t.Cleanup(node.let)
+	t.Cleanup(write.let)
+	availableOutput(t, ps.runningEngine(t))
+	probe.await(t)
+	// A refresh held reading the controls first; then the probe let go, whose
+	// driver_accepted is written, the write held in the store.
+	node.armed.Store(true)
+	select {
+	case <-node.came:
+	case <-serveGiveUp(t):
+		t.Fatal("no refresh read the bound card's controls")
+	}
+	probe.let()
+	write.await(t)
+	stopped(t, ps)
+	if lines := rec.Failures(keptLockLine); len(lines) != 1 {
+		t.Errorf("the kept lock was said %q, want once", lines)
+	}
+	if lines := rec.Failures(heldDeviceLine); len(lines) != 1 {
+		t.Errorf("the device was said held %q, want once beside the kept lock: a refresh still reads the card", lines)
+	}
+	if closedNow(ps.player.settled) {
+		t.Error("the player settled with a write of its DSD state under way")
+	}
+	write.let()
+	select {
+	case <-ps.player.settled:
+	case <-serveGiveUp(t):
+		t.Fatal("the player kept its share of the data directory's lock once the write landed, for a refresh that writes nothing")
+	}
+	node.let()
+	be, ok := ps.player.be.(*playback.Backend)
+	if !ok {
+		t.Fatalf("serve's player runs %T, want the backend production builds", ps.player.be)
+	}
+	wctx, cancel := context.WithDeadline(context.Background(), serveGiveUpTime(t))
+	defer cancel()
+	if err := be.Wait(wctx); err != nil {
+		t.Fatal(err)
+	}
 	if goBarProbeEvidence(t, ps.dataDir) == nil {
 		t.Error("the probe's driver_accepted did not land once let go")
 	}

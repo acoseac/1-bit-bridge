@@ -134,6 +134,18 @@ type Seams struct {
 	// the occurrence (B728 B11 round 2): a test holds it there while a
 	// refresh reconciles the occurrence. It may block.
 	Activation func(o engine.OccurrenceID)
+	// Probed runs on the silent probe's goroutine once its call has
+	// returned and before its answers are taken (publishProbe): a test holds
+	// it there while a Start takes the slot the probe let go of (B762 round
+	// 2). It may block, and must not call the backend.
+	Probed func()
+}
+
+// probed is the Probed seam.
+func (b *Backend) probed() {
+	if sm := b.cfg.Seams; sm != nil && sm.Probed != nil {
+		sm.Probed()
+	}
 }
 
 // activation is the Activation seam.
@@ -454,8 +466,9 @@ func (b *Backend) logPanic(where string, r any) {
 
 // spawnWrite runs f as spawn does, counted among the writes of the player's
 // DSD state too (DSDWrites) until it returns: a write (recordDSD), or the
-// silent probe's goroutine, which may start one (RequestProbeDSD).
-func (b *Backend) spawnWrite(f func()) {
+// silent probe's goroutine, which may start one (RequestProbeDSD). It
+// reports whether f runs; what names the write.
+func (b *Backend) spawnWrite(what string, f func()) bool {
 	b.wmu.Lock()
 	if b.writes == 0 {
 		b.wzero = make(chan struct{})
@@ -473,6 +486,20 @@ func (b *Backend) spawnWrite(f func()) {
 		}()
 		f()
 	})
+	return true
+}
+
+// Running is how many of the goroutines the backend started have not
+// returned, and how many of those are writes of the player's DSD state or
+// may start one (spawnWrite).
+func (b *Backend) Running() (goroutines, writes int) {
+	b.gmu.Lock()
+	goroutines = b.live
+	b.gmu.Unlock()
+	b.wmu.Lock()
+	writes = b.writes
+	b.wmu.Unlock()
+	return goroutines, writes
 }
 
 // spawn runs f on a goroutine the backend counts until it returns. Each f

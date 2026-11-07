@@ -76,7 +76,8 @@ func (b *Backend) RequestProbeDSD(ctx context.Context, cond ProbeConditions) {
 	if p := b.cfg.DSD; p == nil || p.Probes == nil {
 		return
 	}
-	b.probeState.run.ask(b.spawnWrite, func(r any) { b.logPanic("the silent probe's goroutine", r) }, func() {
+	spawn := func(f func()) { b.spawnWrite("the silent probe", f) }
+	b.probeState.run.ask(spawn, func(r any) { b.logPanic("the silent probe's goroutine", r) }, func() {
 		if ctx.Err() != nil {
 			return
 		}
@@ -126,3 +127,10 @@ func (b *Backend) DSDWrites() <-chan struct{} {
 	defer b.wmu.Unlock()
 	return b.wzero
 }
+
+// dsdWriteRefused is the line that says a write of the player's DSD state
+// came after the writes were closed.
+const dsdWriteRefused = "player: a write of the player's DSD state came after the player's stop closed them, and is not made"
+
+// CloseDSDWrites returns DSDWrites.
+func (b *Backend) CloseDSDWrites() <-chan struct{} { return b.DSDWrites() }
