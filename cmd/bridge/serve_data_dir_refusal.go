@@ -7,12 +7,14 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"time"
 
 	"golang.org/x/term"
 
 	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
+	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
 // Serve's refusal of a data dir whose volume is away, said once per state
@@ -28,14 +30,16 @@ import (
 // refusal or the first since a start found its data dir; another data dir) or
 // was written a day or more ago (the variant watcher's latch's rule, so a
 // journal read later has a line of the day), and always to a terminal (a
-// start by hand); the first start that finds its data dir again removes the
-// note and says so. A note that cannot be written leaves the next start to
-// say the refusal again; what serve refuses, and how, is the same either way.
-// The one write whose failure quiets a refusal is that removal: a note the
-// start that found its data dir cannot remove (its directory made read-only
-// since it was written, a handle another process holds on Windows) keeps the
-// next refusal quiet until a day after the last was said, which that start
-// says at Warn.
+// start by hand); the first start after it that gets past the data dir's
+// preparation and its lock removes the note and says how the refusal ended:
+// the data dir back with its database or its lock file, or the refusal no
+// longer applying (dataDir set to another directory, the record removed). A
+// note that cannot be written leaves the next start to say the refusal
+// again; what serve refuses, and how, is the same either way. The one write
+// whose failure quiets a refusal is that removal: a note that start cannot
+// remove (its directory made read-only since it was written, a handle
+// another process holds on Windows) keeps the next refusal quiet until a day
+// after the last was said, which that start says at Warn.
 
 // dataDirRefusalSuffix names the note beside the record.
 const dataDirRefusalSuffix = ".refused"
@@ -97,10 +101,33 @@ func sayServeRefusal(gone *dataDirGoneError, stderr io.Writer, now time.Time) {
 	}
 }
 
-// endServeRefusal removes the note beside the record at record, the first
-// time a start finds its data dir after a refusal, and says once that the
-// refusal is over. Nothing where the note is not there.
-func endServeRefusal(record, dataDir string) {
+// dataDirBack reports whether the data dir dataDir, which the record at
+// record names, holds its database or its lock file, by an Lstat that finds
+// one: a data dir serve refused while its volume was away that is back.
+// Asked before serve prepares the data dir and takes its lock, which make
+// the data dir and its lock file, so that a start calls back only a data dir
+// that held them before it made any (endServeRefusal).
+func dataDirBack(record, dataDir string) bool {
+	if record == "" || !readDataDirRecord(record).names(dataDir) {
+		return false
+	}
+	for _, p := range []string{manifest.DefaultDBPath(dataDir), filepath.Join(dataDir, serveLockFileName)} {
+		if _, err := os.Lstat(p); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// endServeRefusal removes the note beside the record at record, at the first
+// start after a refusal that gets past the data dir's preparation and its
+// lock, and says once how the refusal ended: that the data dir is back, where
+// it was (back, dataDirBack's answer before the preparation) and the note
+// names dataDir, the data dir this start's config names; and otherwise that
+// the refusal no longer applies (dataDir set to another directory, or the
+// record removed with the volume still away, where serve makes the data dir
+// anew). Nothing where the note is not there.
+func endServeRefusal(record, dataDir string, back bool) {
 	if record == "" {
 		return
 	}
@@ -113,7 +140,12 @@ func endServeRefusal(record, dataDir string) {
 		}
 		return
 	}
-	logger.Info("the data directory serve refused while its volume was away holds its database or its lock file again: serve starts on it",
+	if back && note.DataDir == dataDir {
+		logger.Info("the data directory serve refused while its volume was away holds its database or its lock file again: serve starts on it",
+			"dataDir", dataDir, "lastSaid", note.SaidAt)
+		return
+	}
+	logger.Info("serve's refusal of a data directory whose volume was away no longer applies: serve starts on the data directory its config names",
 		"dataDir", dataDir, "refusedDataDir", note.DataDir, "lastSaid", note.SaidAt)
 }
 

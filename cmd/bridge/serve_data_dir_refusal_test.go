@@ -292,7 +292,7 @@ func TestAStartThatCannotRemoveTheNoteSaysSo(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
 	rec := loggingtest.Record(t)
-	endServeRefusal(record, "/mnt/usb/bridge")
+	endServeRefusal(record, "/mnt/usb/bridge", true)
 	if lines := rec.Carrying("could not remove the note that serve refused its data directory"); len(lines) != 1 || !strings.HasPrefix(lines[0], "WARN") {
 		t.Errorf("a start that could not remove the note said so %d time(s), want once at Warn:\n%s", len(lines), strings.Join(rec.All(), "\n"))
 	}

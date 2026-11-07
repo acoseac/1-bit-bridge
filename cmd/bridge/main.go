@@ -3516,7 +3516,9 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		}
 		return 1
 	}
-	endServeRefusal(dataDirRecord, cfg.DataDir)
+	// Read before the preparation and the lock make the data dir and its lock
+	// file: a start calls back only a data dir that held them before it.
+	refusedIsBack := dataDirBack(dataDirRecord, cfg.DataDir)
 	if err := prepareServeDataDir(cfg.DataDir); err != nil {
 		fmt.Fprintf(stderr, "serve: %v; bridge serve starts only on a data directory it can make or use: "+
 			"move what stands in its way, or set dataDir in bridge.yaml to a directory\n", err)
@@ -3549,6 +3551,11 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		// Said once, where the pid file's own non-fatal failure is said.
 		fmt.Fprintf(stderr, "serve: %v; serving without the check that no other bridge serve runs on this data dir\n", lockErr)
 	}
+	// A refusal an earlier start said is over once the data dir is prepared
+	// and its lock taken, or serve goes on without it: said here, never at
+	// the record's check, which the preparation and the lock can still
+	// overrule (B727's round 2).
+	endServeRefusal(dataDirRecord, cfg.DataDir, refusedIsBack)
 	// Shared with the player, which lets go of its share once nothing it
 	// started may still write the data dir: an engine's state write that
 	// outlived its stop keeps the lock past this return (dataDirHold).
