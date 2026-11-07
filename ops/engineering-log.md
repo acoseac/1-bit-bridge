@@ -84940,3 +84940,340 @@ On a Pi 400 (Cortex-A72, 1.8 GHz at most, four cores) with an AURALiC ALTAIR G1 
 No xrun or fault in any run; the lowest buffer delay sampled at about 8 Hz in the sustained run was 18,785 frames of about 36,000. "Varied bytes" is each random byte followed by its complement: every table entry is touched and the audio band stays near silent, so nothing is played aloud. Busy-loop processes kept every core oversubscribed in the runs marked so: a leftover three beside the four the sustained run started, so seven on four cores.
 
 **Against the gate:** the converter alone is 18.3 % of a 1.5 GHz core by B10's benchmark, inside 25 %. The whole process is about 37.6 % of a 1.5 GHz core (31.3 % scaled by clock, which is an extrapolation: no 1.5 GHz Pi 4 was run). That misses the 25 % §4.6 first wrote, read as the whole process, and meets the amended 40 %. Argon and Codex both recommended merging and landing the optimization separately, bit-identical (B779); neither saw a case for refusing DSD256 on these numbers.
+
+## 2026-11-07 — B762: the silent probe and the refresh off the player's supervisor loop
+
+Worker b762, legion0, branch `fix/b762-probe-off-supervisor`, from b6541a02 (B8's head, #1430 on
+#1427). Commits: 15a80961 (the tests, red, over a seam that keeps the synchronous behaviour),
+c5041e98 (the fix), ea2c2f91 (a busy probe's subtest), e27cf990 (one probe at a time pinned by
+the goroutines an ask starts), then this record and the gates'. The rule text changes through
+`rules-b762.patch`: `player.md`'s silent-probe bullet, `cli-serve.md`'s bullet on serve's player
+and the data directory's lock, their long forms in `History-rules-player.md` and
+`History-rules-cli-serve.md`, and CLAUDE.md's playback row.
+
+### What changes
+
+Serve's player's supervisor (`watch`) called `Backend.ProbeDSD` and `RefreshDSD` on its own
+goroutine. The probe opens the bound node and refines each candidate; the refresh holds `dsdMu`
+across its reading of the box, the card's control node opened and read with it; and the tick's
+refresh took that lock to ask whether one was due, behind a probe's or a session's refresh. An
+open, an ioctl or a control read the kernel held (a USB DAC stalling in a control request,
+bounded only by USB's own timeouts) kept the supervisor from a live disable, a new snapshot, and
+the engine's end. The supervisor now asks (`RequestProbeDSD`, `RequestRefreshDSD`) and the
+backend runs each on a goroutine of its own, one at a time; whether a probe is owed is the
+backend's (`ProbeDSDPending`), which the tick asks. Output play's watch asks the same way.
+
+### As built
+
+`coalesced` (`dsd_work.go`) runs the work it is asked for on one goroutine at a time: an ask made
+while one runs is kept, the latest replacing any kept before it, and run on the same goroutine
+once that one returns; a panic in the work is recovered and said, and the next work kept still
+runs. The refresh's ask joins its force with every force asked meanwhile (`refreshForced`), and
+the refreshes still publish one at a time under `dsdMu`, in the order their readings were taken.
+`ProbeDSD` keeps its synchronous form for the fake-kernel rigs and the harness, over the same
+run (`probeDSD`), which returns the refresh its answers call for: `ProbeDSD` makes it inline, the
+probe's goroutine asks it of the refresh's.
+
+A probe's answers are taken in one step under the probe's lock (`publishProbe`), which
+`ForgetDSDProbe` takes too, and only while current: the asker's context alive; the probe's
+generation unmoved, which `ForgetDSDProbe` moves in the step that drops the cache's answers; no
+Start come to the device slot since the probe began (`Backend.starts`, which `hold` counts on
+entry); the binding's latest resolution (`DSDPolicy.Bound`, the watcher's snapshot in memory)
+still the card, enumeration and unit probed; and the cache taking the report
+(`ProbeCache.Record`, whose rejection `ProbeDSD` ignored). Otherwise nothing of it is kept, in the
+cache or the durable evidence, and the probe is owed; a completion that is dropped never clears
+what a replacement made owed. Before, `ProbeDSD` marked the probe done, cleared `forced`, recorded
+the cache's answers and scheduled the evidence whatever had happened meanwhile.
+
+A session and a probe: a Start that comes while a probe holds the device slot waits for it, at
+most `ProbeWait`, as since B4, so the DAC is opened only once the probe's node is closed; the
+probe's answers, a Start having come beside it, are dropped, and the probe runs once the session
+has let the device go. `reserveProbe` still refuses a probe while a session holds the slot
+(playing, opening, paused, releasing), a Start waits for it, or a release is unconfirmed.
+Cancelling the probe instead was not taken: its kernel call cannot be interrupted, so the Start
+would wait for the node's close all the same.
+
+Shutdown: the supervisor asks on a context of its own (`work`), cancelled on every way out of
+`watch`, a panic included, before its shutdown's bounded `Backend.Wait`; a run asked for an ended
+context is not made, and a probe whose context ended asks the DAC nothing and keeps nothing.
+Each goroutine is counted from the ask (`spawn` before the ask returns), and the probe's
+goroutine and every write of the player's DSD state count among the writes too (`spawnWrite`,
+`DSDWrites`). `settle` lets go of the player's share of the data directory's lock only once
+`Run` has returned and those writes have, and the shutdown says once that a write past the
+stop's bound keeps it. A probe held in the kernel after its supervisor has left writes nothing
+and keeps no share; a backend call held in the kernel still takes none.
+
+The qualification guard is untouched: no file under `version_gate.go`'s prefixes or among its
+paths changed (the tests are in `internal/player/playback` and `cmd/bridge`), so
+`qualificationVersion` stays 43.
+
+### Red first
+
+At 15a80961, the tests over the seam: in playback, `TestAStaleProbeKeepsNothingAndStaysOwed` (a
+choice written during the probe: driver_accepted written, nothing owed, the replacement never
+run; the DAC enumerated anew: 23 answers kept under the old enumeration, its evidence written),
+`TestAStartBesideAHeldProbeOpensOnlyOnceItEndsAndVoidsItsAnswers` (the answers kept, evidence
+written, nothing owed; the DAC was opened once, after the probe's close, already),
+`TestOneProbeAtATimeAndAReplugIsProbedOnceTheHeldOneEnds` (the ask held by the probe, each
+subtest), `TestTheProbesGoroutineIsCountedFromItsAsk` and
+`TestARefreshAskedWhileOneIsHeldRunsOnceItEnds` (the ask held), and
+`TestAPanicInTheProbesWorkIsRecoveredAndTheNextAskRuns` (the panic reached the asker and ended
+the binary); in cmd/bridge, `TestTheSupervisorAnswersWhileTheSilentProbeIsHeld` (the player
+turned off live never reached the engine; with a panic in the supervisor the player never
+stopped), `TestServeKeepsTheDataDirLockWhileTheProbesEvidenceIsWritten` (a second lock taken once
+serve stopped, the write held) and
+`TestTheSupervisorAnswersWhileARefreshIsHeldReadingTheControls` (the unplug never reached the
+engine). The busy probe's subtest (ea2c2f91) and the goroutine count of e27cf990 came after the
+fix: controls C1a and C5b below are their red.
+
+### Negative controls
+
+Each an exact-once mutation of the committed tree, predicted by name in
+`.tmp/_b762/controls.predictions.txt` before it ran, the test binaries built with it and the
+source restored from memory, `git status` empty after; the sets (playback's ten B762 cases,
+cmd/bridge's four) green unmutated.
+
+| | mutation | red |
+|---|---|---|
+| C1a | `publishProbe`'s generation check off | as predicted: the busy probe's subtest alone; an opened probe's case stays green, the cache's epoch a second layer |
+| C1b | its binding check off | as predicted: the enumerated-anew subtest, and the replugged DAC's free and gone subtests |
+| C1c | `Record`'s refusal ignored | none, as predicted: a second layer behind the generation and the binding, which no test reaches alone |
+| C1d | a dropped completion clears the owed flag | as predicted: the three stale subtests and the Start beside a probe |
+| C2a | `watch` asks on the player's context, not one it cancels | as predicted: the held probe's panic subtest (the lock kept for the uncancelled probe); serve's stop cancels anyway |
+| C2b | the probe's goroutine started uncounted | as predicted: `TestTheProbesGoroutineIsCountedFromItsAsk` |
+| C2c | `settle` lets go without the DSD state's writes | as predicted: `TestServeKeepsTheDataDirLockWhileTheProbesEvidenceIsWritten` |
+| C2d | the runner without its recover | as predicted: `TestAPanicInTheProbesWorkIsRecoveredAndTheNextAskRuns`, the binary ended by the panic |
+| C2e | `recordDSD` on `spawn`, uncounted as a write | as predicted: the lock test |
+| C3a | `watch`'s refresh calls `RefreshDSD` | as predicted: the held control read's test |
+| C3b | `RequestRefreshDSD` refreshes on the asker's goroutine | as predicted: the held control read's test and `TestARefreshAskedWhileOneIsHeldRunsOnceItEnds` |
+| C4a | a Start's coming does not void a probe's answers | as predicted: the Start-beside-a-probe test |
+| C4b | `hold` sees no probe holding the slot | as predicted: that test, the replug's session subtest, and B728 B4's `TestAStartWaitsForTheProbeThatHoldsTheSlot` and `TestAStartThatWaitedTakesTheSlotBeforeAnotherProbe` |
+| C5a | an ask made while one runs is dropped | as predicted: the replugged DAC's free and gone subtests and the refresh test |
+| C5b | no single flight, each ask on a goroutine of its own | first run: none, a miss (the replug's goroutine ran its probe after the held one ended, by its scheduling); with e27cf990's count, as predicted, the free subtest |
+
+### Gates
+
+At 163162b4, inside the build slot, on Go 1.27.3: `make fmt` changed nothing; `make vet` and its
+windows, darwin and linux/386 legs passed; `make docs-check` passed (CLAUDE.md 81.6 %, player.md
+99.4 %, the worst load 66.7 %), and on a copy with `rules-b762.patch` applied (CLAUDE.md 81.9 %,
+player.md 99.6 %, 99,600 bytes, the worst load 66.7 %), where `TestEveryCitedTestNameExists`
+passed and a ghost citation planted in the copy's History file failed it;
+`scripts/qualification-version` passed against b6541a02 and against main's 49071fbf (43 at HEAD,
+40 on main: B8's and B11's moves, none of B762's); `go test -race` of the touched packages
+(playback, alsapcm, cmd/bridge) passed (1,199 s); both native-integration overlays passed, every
+case CI names (13 and 29); `make test` passed, 88 packages ok (2,070 s), its TMPDIR under
+`.tmp/_b762`, the Linux-only tests (ALSA, alsapcm, the durable writer, the identity paths) run
+here; `make build-all` passed. alsa-abi did not run: no ABI definition or `scripts/alsa-abi`
+file changed.
+
+Two follow-ups found beside this change go to the backlog, which the orchestrator files (legion0
+has no backlog file); they are not described here.
+
+## 2026-11-07 — B762 round 2: the review's points on the probe off the supervisor loop
+
+Worker b762, legion0, branch `fix/b762-probe-off-supervisor` (#1433, stacked on B8's #1430), after
+round 1's rules patch was applied and B8 merged in (4ac62f63). Commits: ccee2e3d (the tests, red,
+over seams), 5f072c13 (the fixes), 0c6ba77b (qualificationVersion 45), f007201e (two pins written
+after the fixes, red by their controls), then this record and the gates'. The rule text changes
+through `rules-b762-r2.patch`, which first moves one entry of `player.md`, then at 99.6 % of its
+budget, to `History-rules-player.md`. Point 1 closes backlog B780; point 3 narrows B781, whose
+remainder stays in the backlog.
+
+### The points, each confirmed
+
+1. **A write after the fence.** `settle` read `DSDWrites` once and waited on that channel. A write
+   that a goroutine the stop abandoned asked for afterwards, a session's native open the kernel
+   held past the stop recording its driver_accepted once it landed, made a channel nobody waited
+   on, and could land once the player's share of the data directory's lock was let go. The backend
+   now counts its goroutines, its writes of the DSD state and a gate on them under one lock (`gmu`;
+   round 1 had a second, `wmu`). `CloseDSDWrites` closes the writes for good, in the step that reads
+   those under way, and returns the channel closed once they have returned, never replaced since
+   none starts after it. `spawnWrite` runs nothing after the gate and says so once
+   (`dsdWriteRefused`), and the coalesced runner keeps nothing a refused spawn did not start.
+   `settle` closes the gate once the engine's Run has returned and waits on what it returns.
+2. **The Start's count.** `hold` counted a Start on entry (`starts`), so a Start that gave its wait
+   up (busy past `ProbeWait`), or that its context or its release ended, voided the probe's answers
+   and left a probe owed: a DAC whose probe outlasts `ProbeWait` would lose its answers to each
+   Start in turn. `hold` now counts the Start in the step that takes the slot, directly or once a
+   probe let it go; answers taken before that step are kept.
+3. **The store's lock on the supervisor.** `Store.State` took the store's mutex, which `Update`
+   holds through its durable write, and the supervisor reads the state at each snapshot
+   (`playerDSD.resolve`, through `waits`), as the policy's refresh does at each reading: a write
+   whose fsync stalled held the supervisor. Round 1's test held the writes in front of the store,
+   before its lock, and missed it. `State` now reads a copy published each time the store holds a
+   new state (`Store.hold`, an `atomic.Pointer`), after its write is durable, as before; no reader
+   takes the lock, so the read is off the snapshot's path whatever the migration's state.
+4. **The cache's epoch alone.** Every stale case moved the probe's generation or the binding, so
+   `Record`'s refusal was never what dropped a report, and round 1's control C1c stayed green. A
+   case that moves the epoch alone (`ProbeCache.Forget` while the probe runs) now requires the
+   answers dropped, no evidence written and the probe owed. No code changed.
+5. **Both lines at the stop.** The stop's switch said the kept lock whenever a write ran, and then
+   never the device. `Backend.Running` reads both counts in one step, and the stop says the lock
+   line whenever a write runs and the device line whenever any other goroutine of the backend's
+   does; a backend that counts nothing (a stand-in) gets the device line, as before.
+
+### Red first
+
+At ccee2e3d, before the fixes, each predicted in `.tmp/_b762/r2-red.predictions.txt` before the
+run: `TestAWriteAfterTheGateIsNeverMade` (two writes after the gate admitted and run, nothing
+said); `TestAnOpenHeldPastTheGateWritesNothingOfTheDSDState` (the held open's driver_accepted
+written after the gate); the second subtest of
+`TestAStartBesideAHeldProbeOpensOnlyOnceItEndsAndVoidsItsAnswers` (answers taken before the Start
+took the slot dropped) and `TestAStartRefusedBusyBesideAProbeLeavesItsAnswers` (answers dropped,
+a probe owed, the DAC probed twice); `TestServeKeepsTheDataDirLockWhileTheProbesEvidenceIsWritten`
+(an unplug while the write held the store's real lock, at the staged file's fsync, never reached
+the engine: the give-up wait); `TestAStopBesideAHeldWriteAndAHeldReadingSaysBoth` (the device line
+not said beside the lock's). The first subtest of the Start test and the epoch case passed, as
+predicted: regression pins, the epoch case's red is control C1c.
+
+### Negative controls
+
+Each an exact-once mutation of the committed tree (f007201e), predicted by name in
+`.tmp/_b762/r2-controls.predictions.txt` before it ran, the test binaries built with it and the
+source restored from memory, `git status` empty after each.
+
+| | mutation | red |
+|---|---|---|
+| CR1a | `spawnWrite` ignores the gate | as predicted: the gate's unit test, the held open's, and the serve lock test's ask after the player settled |
+| CR1b | `settle` waits on `DSDWrites`, the gate never closed | as predicted: the serve lock test alone |
+| CR2a | the Start counted at `hold`'s entry again | as predicted: the answers-before-the-Start subtest and the Start refused busy |
+| CR2b | the Start never counted | as predicted: the Start-takes-the-slot-first subtest |
+| CR3 | `State` takes the store's lock again | as predicted: `TestTheStateIsReadWithoutWaitingOnAWrite` and the serve lock test (the unplug) |
+| CR5a | the device line only where no write runs | as predicted: `TestAStopBesideAHeldWriteAndAHeldReadingSaysBoth` |
+| CR5b | the writes counted among the others | as predicted: the serve lock test (the device line beside the write alone) |
+| C1c | `Record`'s refusal ignored (round 1's, rerun) | as predicted: the epoch case alone, where round 1 had none |
+
+### Qualification
+
+The red commit added a test under `internal/alsapcm/`, a guarded prefix. B9 holds 44 on its
+branch, so this takes 45; the runbook's five current references move with it, and its record says
+what 45 covers.
+
+### Gates (round 2)
+
+At 9564bd78, inside the build slot, on Go 1.27.3: `make fmt` changed nothing; `make vet` and its
+windows, darwin and linux/386 legs passed; `make docs-check` on the tree failed as it does at the
+round's base (player.md at 100,041 bytes since 4ac62f63), and passed on a copy with
+`rules-b762-r2.patch` applied (CLAUDE.md 82.1 %, player.md 98.9 %, the worst load 66.9 %), where
+`verify_moves.py --base 9564bd78` passed with the move and the declared edits, and
+`TestEveryCitedTestNameExists` passed and failed a ghost citation planted in the copy's History
+file; `scripts/qualification-version` passed against the round's base (4ac62f63, 43) and main's
+2a1b4319 (40), 45 at HEAD; `go test -race` of the touched packages (playback, dsdstate,
+qualification, alsapcm, cmd/bridge) passed (1,225 s); both native-integration overlays passed,
+every case CI names (13 and 29); `make test` passed, 89 packages ok (2,042 s), its TMPDIR under
+`.tmp/_b762`, the Linux-only tests run here; `make build-all` passed. alsa-abi did not run: no ABI
+definition or `scripts/alsa-abi` file changed.
+
+## 2026-11-07 — B762 round 3: a Start and the probe's answers, one step
+
+Worker b762, legion0, branch `fix/b762-probe-off-supervisor` (#1433, stacked on B8's #1430),
+after round 2's rules patch was applied and B8's newest merged in (39da4b77). Commits:
+22ecfe04 (the test, red, over a seam between the two comparisons), 6ea18e5c (the step), then
+this record and the gates'. The rule's words change through `rules-b762-r3.patch`: the silent
+probe's line in `player.md` and its long form in `History-rules-player.md`. Nothing a client or a
+listener gets changes.
+
+### The point, confirmed
+
+Both reviews of round 2 found one order: the probe holds the slot and a Start S waits
+(`ProbeWait`); `endProbe` lets the slot go, which wakes S; the probe's goroutine enters
+`publishProbe` and passes `b.starts.Load() == starts`, since S has not counted; S runs
+`b.holder = s; b.starts.Add(1)` and opens the DAC; the goroutine reaches
+`p.Probes.Record(epoch, rep)` and returns "", the answers kept beside S's open. Round 2 opened
+it by counting a Start where it takes the slot, rather than at its coming, while the comparison
+and the Record stayed two steps under the probe's lock alone.
+
+### As built
+
+`takeProbe` is `publishProbe`'s decision on the Starts, the binding and the cache, one step under
+`b.mu`, the lock `hold` counts a Start under in the step that takes the slot and `reserveProbe`
+reads the slot under: a Start that took the slot by then voids the answers, the cache recording
+nothing; one that takes it after finds them recorded before it opens the DAC. The context and
+the probe's generation are still compared first, under `ps.mu` alone. The locks go in one
+order, `ps.mu`, `b.mu`, the probe cache's; nothing under any of them blocks: they compare memory,
+and `Record` writes the cache's map. `DSDPolicy.Bound` is read before `b.mu`, under `ps.mu` as
+before: in serve it takes the hotplug feed's own lock (`Feed.Latest`), held there for in-memory
+work alone, never for I/O, but another package's lock, so it stays out of the step.
+`noteProbed` follows the decision outside every lock (`recordDSD` goes through `spawnWrite`,
+which takes `gmu`), so it may run beside a Start that took the slot after the decision: a write
+of the state, never a call to the device, recording answers the probe got while it alone held
+the device. Kept now means decided before the Start counted.
+
+The slot's lifecycle does not change: `endProbe`, `ProbeWait` and its comment, cancellation, a
+panic in `Probe`'s inner goroutine, and direct `Backend.Probe` callers are as they were. Not
+taken: keeping the probe's reservation of the slot until the decision. The inner goroutine gives
+the slot back in `Probe`'s defer, once and with the node closed, and when the context ends
+`Probe` returns while that goroutine still holds the node, so a release at the decision could
+open the DAC beside a probe, and a panic after `Probe` returned would leak the slot.
+
+Not taken either, round 2's finding that a probe held in the kernel at a stop reads as a write:
+`Probe`'s inner goroutine is started by `spawn`, so it counts in `Running`'s goroutines and not in
+its writes, and the stop says the device line; nothing to do. Left, by its id: B781.
+
+### Lock order, by grep
+
+A read-only survey of `internal/player/playback` (`.tmp/_b762/r3_locks2.py`): every region from
+a `b.mu.Lock()` to the last unlock in its function, an over-approximation of what runs under
+`b.mu`, in `hold`, `reserveProbe`, `endProbe`, `letGo`, `session`, `known`, `Stats`,
+`ReleaseAll`, `Discard`, `reconcileDSD`, `RefreshAuthorization`, `formatsFor`, `remember`,
+`forget` and `teardown`, takes no other lock: what they call there is `b.log.Error`,
+`b.starts.Add`, `newSession`, a session's `ctx.Err`, `pausedFlag.Load` and `releaseTaken` (a
+channel select that never waits), none of which takes `ps.mu`, a session's lock or `gmu`.
+`takeProbe` is the one region under `b.mu` that takes another lock, the cache's, through
+`Record`. Under `ps.mu`: `publishProbe` takes `b.mu` (through `takeProbe`) and the cache's, and
+`ForgetDSDProbe` the cache's (`Forget`); `settled`, `owe` and `ProbeDSDPending` take nothing
+more. The cache's `Begin`, `Record`, `Answer` and `Forget` (`internal/alsapcm/probe_cache.go`)
+call nothing but their own lock, so none takes `b.mu`; `Running` takes `gmu` alone, under no
+other lock.
+
+### Red first, and the seam moves
+
+At 22ecfe04, `TestAStartAndTheProbesAnswersAreOrderedByOneStep`'s first case held the probe's
+goroutine at a seam between the comparison and the Record (`Seams.ProbeDeciding`) while S, held
+once woken (`StartWoke`) until then, took the slot through the real `hold` and opened the DAC:
+the cache kept 23 answers (DSD_U32_BE at 88,200), the DSD64 driver_accepted was written and no
+probe was owed, red as predicted in `.tmp/_b762/r3-red.predictions.txt`. The draft's first run
+failed otherwise: without the `StartWoke` hold the woken Start took the slot before the goroutine
+reached the comparison, which dropped the answers and never reached the seam; the test was
+corrected before the red commit. With the fix that moment is gone: `ProbeDeciding` runs just
+before the step and `ProbeDecided`, added, just after it. Before the step, S's slot voids the
+answers (no `Record`, no driver_accepted, a probe owed); after it, they stand, recorded before S
+opens the DAC (the case reads the cache inside the open). `TestAStartAStopAndThePublishTogether`
+lets a Start, its session's Release (in every other run; in the runs between, the stop comes
+once the Start has answered) and the publish go together, 40 runs under `-race`: the answers
+kept whole or dropped whole, and kept answers recorded before a Start that opened the DAC (25 or
+26 runs kept them, 20 opened the DAC).
+
+### Negative control
+
+Committed first (6ea18e5c), predicted by name in `.tmp/_b762/r3-controls.predictions.txt`, the
+source restored from memory, `git status` empty after. CR3, the step split again (the Starts and
+the binding compared under `b.mu`, the lock let go, `ProbeDeciding` in the gap, `Record` outside
+`b.mu`): red as predicted, the first case alone, the answers kept beside the Start's open; the
+after-step case, the race test and the rest of the probe set green.
+
+### Qualification
+
+No guarded path changed (`dsd_policy.go`, `backend.go` and `dsd_work_test.go` in
+`internal/player/playback`, outside `version_gate.go`'s paths and prefixes):
+`qualificationVersion` stays 45.
+
+### Gates (round 3)
+
+At 7edb419e, inside the build slot, on Go 1.27.3: `make fmt` changed nothing; `make vet` and its
+windows, darwin and linux/386 legs passed; `make docs-check` passed on the tree (player.md 98.9 %),
+and on a copy with `rules-b762-r3.patch` applied (CLAUDE.md 82.1 %, player.md 99.2 %, the worst
+load 67.0 %), where `verify_moves.py --base HEAD` passed with the line and its long form declared
+as edits, and `TestEveryCitedTestNameExists` passed and failed a ghost citation planted in the
+copy's History file; `scripts/qualification-version` passed against B8's head (e2c7b36d, 43) and
+main's c9876026 (42), 45 at HEAD; `go test -race` of playback, alsapcm and cmd/bridge passed
+(1,247 s); both native-integration overlays passed, every case CI names (13 and 29); `make
+build-all` passed. The first `make test` failed in one subtest outside the player,
+`TestAMatchWhoseReQueueDidNotLandIsReQueuedByTheNextSweep/cancelled_inside_the_reset_by_a_switch-off`
+("the first sweep's re-queue landed: the case tests nothing", a timing precondition of the
+fingerprint sweep's test), 88 packages ok; alone under `-race` it failed 1 of 10 and 1 of 40 runs
+at HEAD, and 1 of 40 (0 of 20 before) at the round's base 39da4b77, which this round's commits
+leave untouched outside `internal/player/playback` and this log, so it predates the round; it
+passed in the cmd/bridge race run above. `make test` run again in the slot passed, 89 packages
+ok (2,060 s), the Linux-only tests run here. alsa-abi did not run: no ABI definition or
+`scripts/alsa-abi` file changed.
