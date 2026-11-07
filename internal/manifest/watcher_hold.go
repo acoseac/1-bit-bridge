@@ -62,8 +62,11 @@ import (
 // found (and again when that changes), and watched again, at Info. A look that
 // finds what the last one found says nothing. A root the start could not watch
 // (it went between the start's look and its walk, or its own Add failed) is
-// held where it reads as a volume not mounted, and is otherwise recorded, so
-// the check finds its own watch missing and tries again (B777).
+// held where it reads as a volume not mounted (B777); one that is there whose
+// own watch fsnotify would not add, at the start or at a check, is tried again
+// on a backoff of its own, the hold's timing, with one scan as it gets there
+// and none at a try, said once each way (unwatchRoot, retryUnwatched; B777's
+// round 2).
 //
 // A root the index holds nothing of (a fresh install whose volume is not
 // mounted yet) reads as it is and is watched; a mount over it puts another
@@ -224,10 +227,9 @@ func (wt *Watcher) confirmRootWatches(ctx context.Context, roots []string, ids m
 // failure and goes on, and kqueue's counts the folder held). A root that reads
 // as a volume not mounted is held, as holdAbsentRoots holds one, unless the
 // watcher has stopped for good (fds.off, as resumeRoot does). Any other is
-// said as a walk that could not start is, where that was not said already
-// (said), and recorded, so checkRootWatches finds its own watch missing and
-// adds it again: an Add can fail on a root that is there (a permission, the
-// watch limit).
+// recorded and tried again on a backoff of its own (unwatchRoot), said as a
+// walk that could not start is, where that was not said already (said): an
+// Add can fail on a root that is there (a permission, the watch limit).
 func (wt *Watcher) rootWatchMissing(ctx context.Context, root string, said bool) {
 	look := wt.scanner.lookAtRoot(ctx, root)
 	if ctx.Err() != nil {
@@ -239,10 +241,96 @@ func (wt *Watcher) rootWatchMissing(ctx context.Context, root string, said bool)
 		}
 		return
 	}
-	if !said {
-		watcherLogger.Warn(msgInitialWatchFailed, "root", root, "err", errRootWatchMissing)
-	}
 	wt.noteRootWatch(root, nil, nil)
+	msg := msgInitialWatchFailed
+	if said {
+		msg = ""
+	}
+	wt.unwatchRoot(ctx, root, msg)
+}
+
+// unwatchRoot puts a root that is there, whose own watch fsnotify would not
+// add, among the roots tried again on a backoff of their own (unwatched,
+// retryUnwatched; B777's round 2), saying so with msg ("" when it was said
+// already) and asking once for a scan of it, which reads what changed while
+// nothing watched it; a root already there is left as it is, nothing said and
+// no scan asked. Not the hold, which lets a root's watches go and drops its
+// scans and its events, which a root that is there keeps: with the watch
+// limit spent, every check looked at the root again, walked its tree, asked
+// for a scan of it and said the limit again, for as long as the limit held,
+// which on a NAS is not an outage. The periodic scan (scanIntervalSec, 6 h by
+// default, which config cannot turn off) still covers it.
+func (wt *Watcher) unwatchRoot(ctx context.Context, root, msg string) {
+	if wt.unwatched[root] {
+		return
+	}
+	wt.unwatched[root] = true
+	wt.addRetryDelay, wt.addRearm = wt.recheckFirst, true
+	if msg != "" {
+		watcherLogger.Warn(msg, "root", root, "err", errRootWatchMissing)
+	}
+	wt.scheduleScan(ctx, root)
+}
+
+// retryUnwatched tries each root among unwatched again. Where fsnotify keeps
+// no open file per watch (fds is nil: inotify, ReadDirectoryChangesW), the
+// root's own folder is asked for alone first, saying nothing of a refusal
+// (tryAdd), so a limit still spent costs one Add and no line; where fsnotify
+// does (kqueue), the tree is walked as watchAgain walks it, its account kept.
+// A root that takes its watch is looked at and watched again where it is now
+// (watchAgain, which lets the folder's own watch go first, takes its identity
+// around the walk and asks for a scan), said once (msgRootWatchAdded); one that
+// reads as a volume not mounted meanwhile goes to the hold. A root no longer
+// configured is let go.
+func (wt *Watcher) retryUnwatched(ctx context.Context) {
+	roots := wt.scanner.Roots()
+	for _, root := range slices.Sorted(maps.Keys(wt.unwatched)) {
+		if !slices.Contains(roots, root) {
+			delete(wt.unwatched, root)
+			continue
+		}
+		if wt.fds == nil && wt.tryAdd(wt.rootWatchPath(root)) != nil {
+			continue
+		}
+		look := wt.scanner.lookAtRoot(ctx, root)
+		if ctx.Err() != nil {
+			return
+		}
+		if look.absent {
+			wt.holdRoot(root, look)
+			continue
+		}
+		if err := wt.watchAgain(ctx, root); err != nil {
+			delete(wt.unwatched, root)
+			if wt.fds == nil || !wt.fds.off {
+				wt.holdRoot(root, rootLook{absent: true, reason: rootAbsentUnreachable, err: err})
+			}
+			continue
+		}
+		if !wt.unwatched[root] {
+			watcherLogger.Info(msgRootWatchAdded, "root", root)
+		}
+	}
+}
+
+// unwatchedRetried notes a try of the unwatched roots that left some: the next
+// is due twice as long after it, recheckMax at most.
+func (wt *Watcher) unwatchedRetried() {
+	if len(wt.unwatched) == 0 {
+		return
+	}
+	wt.addRetryDelay = min(max(2*wt.addRetryDelay, wt.recheckFirst), wt.recheckMax)
+	wt.addRearm = true
+}
+
+// rearmAddRetry arms the unwatched roots' try when an entry or a try asked for
+// it (addRearm), addRetryDelay from now.
+func (wt *Watcher) rearmAddRetry(t *time.Timer) {
+	if !wt.addRearm {
+		return
+	}
+	wt.addRearm = false
+	t.Reset(wt.addRetryDelay)
 }
 
 // rootWatchPath is the path a configured root's own watch is registered as:
@@ -273,6 +361,7 @@ func (wt *Watcher) watchSet() map[string]struct{} {
 // what the last one found says nothing. It reports whether root was newly
 // held.
 func (wt *Watcher) holdRoot(root string, look rootLook) bool {
+	delete(wt.unwatched, root)
 	prev, was := wt.held[root]
 	wt.held[root] = look
 	if was && prev.reason == look.reason {
@@ -380,14 +469,18 @@ func (wt *Watcher) dropScansUnder(root string) {
 // root, which asks for a scan of that folder. The identity of the folder at the
 // root's path is taken just before the walk and recorded with the root's own
 // watch (noteRootWatch), so a later change of it is found too; where it changed
-// while the walk ran, the watch is added once more (backlog B777). It answers
-// the error of a root whose tree could not be added after all (it went again
-// between the look and the walk, or, on kqueue, took the watcher past its
-// budget, which stops the watcher for good).
+// while the walk ran, the watch is added once more (backlog B777). A root
+// whose own watch fsnotify would not add after all (the watch limit spent, a
+// permission) is tried again on a backoff of its own (unwatchRoot, which asks
+// for the scan the first time alone, and B777's round 2), and one that takes
+// its watch leaves it. It answers the error of a root whose tree could not be
+// added after all (it went again between the look and the walk, or, on
+// kqueue, took the watcher past its budget, which stops the watcher for good).
 func (wt *Watcher) watchAgain(ctx context.Context, root string) error {
 	if wt.fds != nil && wt.fds.off {
 		return errWatchBudget
 	}
+	var live map[string]struct{}
 	for attempt := 1; ; attempt++ {
 		wt.releaseRoot(root)
 		wt.aliases = slices.DeleteFunc(wt.aliases, func(a rootAlias) bool { return a.configured == root })
@@ -395,10 +488,16 @@ func (wt *Watcher) watchAgain(ctx context.Context, root string) error {
 		if err := wt.addTree(root, true); err != nil {
 			return err
 		}
-		if wt.noteRootWatch(root, pre, wt.watchSet()) || attempt == 2 {
+		live = wt.watchSet()
+		if wt.noteRootWatch(root, pre, live) || attempt == 2 {
 			break
 		}
 	}
+	if _, installed := live[wt.rootWatchPath(root)]; !installed {
+		wt.unwatchRoot(ctx, root, msgRootWatchNotAdded)
+		return nil
+	}
+	delete(wt.unwatched, root)
 	wt.scheduleScan(ctx, root)
 	return nil
 }
@@ -414,7 +513,10 @@ func (wt *Watcher) resumeRoot(ctx context.Context, root string) {
 		return
 	}
 	delete(wt.held, root)
-	watcherLogger.Info(msgWatchRootResumed, "root", root)
+	// A root whose own watch could not be added was said so (unwatchRoot).
+	if !wt.unwatched[root] {
+		watcherLogger.Info(msgWatchRootResumed, "root", root)
+	}
 	if hook := wt.afterResumeForTests; hook != nil {
 		hook(root)
 	}
@@ -476,7 +578,9 @@ func (wt *Watcher) checkRootWatches(ctx context.Context) {
 		}
 	}
 	for _, root := range slices.Sorted(maps.Keys(wt.rootWatches)) {
-		if wt.fds.lookWaits(root) {
+		// A root whose own watch could not be added is its retry's
+		// (retryUnwatched), on a backoff of its own, never a check's.
+		if wt.fds.lookWaits(root) || wt.unwatched[root] {
 			continue
 		}
 		if !held[wt.rootWatches[root]] {
@@ -557,7 +661,10 @@ func (wt *Watcher) lookAgain(ctx context.Context, root, msg string) {
 		}
 		return
 	}
-	watcherLogger.Info(msg, "root", root)
+	// A root whose own watch could not be added was said so (unwatchRoot).
+	if !wt.unwatched[root] {
+		watcherLogger.Info(msg, "root", root)
+	}
 }
 
 // lookAgainAfterCreate is the look a Create of root asked for while root's own

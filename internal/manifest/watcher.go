@@ -173,6 +173,14 @@ type Watcher struct {
 	// compares with the folder at the root's path now (backlog B777). Run's
 	// goroutine alone.
 	rootIDs map[string]os.FileInfo
+	// unwatched are the roots that are there whose own watch fsnotify would
+	// not add (the watch limit spent, a permission), tried again on a backoff
+	// of their own (retryUnwatched): addRetryDelay after the last try, and
+	// addRearm says the try's timer is to be armed for it, as recheckDelay and
+	// rearm are the held roots' (B777's round 2). Run's goroutine alone.
+	unwatched     map[string]bool
+	addRetryDelay time.Duration
+	addRearm      bool
 	// holdAsks are the roots a debounced dispatch found absent, for Run's
 	// goroutine to hold, under mu; holdWake wakes Run's loop to take them.
 	holdAsks map[string]rootLook
@@ -232,6 +240,7 @@ func NewWatcher(scanner *Scanner, debounce time.Duration) (*Watcher, error) {
 		held:            make(map[string]rootLook),
 		rootWatches:     make(map[string]string),
 		rootIDs:         make(map[string]os.FileInfo),
+		unwatched:       make(map[string]bool),
 		holdWake:        make(chan struct{}, 1),
 		recheckFirst:    heldRecheckFirst,
 		recheckMax:      heldRecheckMax,
@@ -366,8 +375,14 @@ func (wt *Watcher) loop(ctx context.Context) error {
 	defer recheck.Stop()
 	rootCheck := time.NewTicker(wt.rootCheckEvery)
 	defer rootCheck.Stop()
-	holdWake, recheckC, rootCheckC := wt.holdWake, recheck.C, rootCheck.C
+	// The try of the roots whose own watch fsnotify would not add, armed only
+	// while one is waiting for it (rearmAddRetry).
+	addRetry := time.NewTimer(wt.recheckFirst)
+	addRetry.Stop()
+	defer addRetry.Stop()
+	holdWake, recheckC, rootCheckC, addRetryC := wt.holdWake, recheck.C, rootCheck.C, addRetry.C
 	wt.rearmRecheck(recheck)
+	wt.rearmAddRetry(addRetry)
 	// flushAsked is set when the quiet timer has written the signal and the
 	// event that watches the waiting folders has not been read yet. Arming
 	// the timer again before that event would write on every tick.
@@ -386,6 +401,10 @@ func (wt *Watcher) loop(ctx context.Context) error {
 		case <-rootCheckC:
 			wt.loopGate.enter()
 			wt.checkRootWatches(ctx)
+		case <-addRetryC:
+			wt.loopGate.enter()
+			wt.retryUnwatched(ctx)
+			wt.unwatchedRetried()
 		case ev, ok := <-events:
 			if !ok {
 				return nil
@@ -419,13 +438,16 @@ func (wt *Watcher) loop(ctx context.Context) error {
 		case wt.fds == nil:
 		case wt.fds.off:
 			events, errs, quiet, reconcile = nil, nil, nil, nil
-			holdWake, recheckC, rootCheckC = nil, nil, nil
+			holdWake, recheckC, rootCheckC, addRetryC = nil, nil, nil, nil
 		case quiet == nil && !flushAsked && wt.fds.waiting():
 			wait.Reset(wt.deferredAddWait)
 			quiet = wait.C
 		}
 		if recheckC != nil {
 			wt.rearmRecheck(recheck)
+		}
+		if addRetryC != nil {
+			wt.rearmAddRetry(addRetry)
 		}
 	}
 }
@@ -1016,6 +1038,17 @@ const (
 	watchOutOfFiles
 )
 
+// tryAdd asks fsnotify to watch one directory, through addForTests, at the
+// actual Add boundary, and says nothing of its answer.
+func (wt *Watcher) tryAdd(path string) error {
+	if hook := wt.addForTests; hook != nil {
+		if err := hook(path); err != nil {
+			return err
+		}
+	}
+	return wt.w.Add(path)
+}
+
 // msgWatchLimitReached is the line an Add that meets inotify's watch limit is
 // said with, once a walk: the walk stops there.
 const msgWatchLimitReached = "watch limit reached — periodic scan covers the gap; raise fs.inotify.max_user_watches to fix"
@@ -1023,13 +1056,7 @@ const msgWatchLimitReached = "watch limit reached — periodic scan covers the g
 // addWatch registers one directory's watch, and says how it went, with the
 // error that answered a failure.
 func (wt *Watcher) addWatch(path string) (watchAddResult, error) {
-	var addErr error
-	if hook := wt.addForTests; hook != nil {
-		addErr = hook(path)
-	}
-	if addErr == nil {
-		addErr = wt.w.Add(path)
-	}
+	addErr := wt.tryAdd(path)
 	switch {
 	case addErr == nil:
 		return watchAdded, nil
