@@ -122,7 +122,7 @@ type DeezerArtist struct {
 
 // SearchArtist queries Deezer for the best artist image URL. Returns
 // ("", nil) if no match, errNotFound if the API 404s.
-func (c *DeezerClient) SearchArtist(ctx context.Context, name string) (string, error) {
+func (c *DeezerClient) SearchArtist(ctx context.Context, name string) (imageURL string, err error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return "", nil
@@ -140,11 +140,26 @@ func (c *DeezerClient) SearchArtist(ctx context.Context, name string) (string, e
 		return "", err
 	}
 	defer resp.Body.Close()
+	// Every return from here asks the client's switches again, as
+	// MusicBrainzClient.get's do (backlog B617): a no-match whose body
+	// finished after a switch-off would reach deezerNegCache, which outlives
+	// the switch, and a 404 or an error status read then is no answer either.
+	defer func() {
+		if r := c.sw.Answer(ctx); r != nil {
+			imageURL, err = "", r
+		}
+	}()
 	noteSettledAnswer(c.noteAnswered, resp.StatusCode)
+	// An error status's body is drained before the return, as
+	// MusicBrainzClient.get's is: the deferred Close then returns the
+	// connection to the idle pool, and the answer is whole by the time the
+	// return asks the switches again.
 	if resp.StatusCode == http.StatusNotFound {
+		drainBody(resp.Body)
 		return "", errNotFound
 	}
 	if resp.StatusCode != http.StatusOK {
+		drainBody(resp.Body)
 		return "", carryTransientStatus(resp.StatusCode, fmt.Errorf("deezer: HTTP %d", resp.StatusCode))
 	}
 
@@ -156,12 +171,6 @@ func (c *DeezerClient) SearchArtist(ctx context.Context, name string) (string, e
 	// returns the keep-alive connection to the idle pool — json.Decoder
 	// stops at the closing token, not EOF. Mirrors MusicBrainzClient.get.
 	drainBody(resp.Body)
-	// Asked again once the answer is complete, as MusicBrainzClient.get
-	// does: a no-match whose body finished after a switch-off would reach
-	// deezerNegCache, which outlives the switch (backlog B617).
-	if r := c.sw.Answer(ctx); r != nil {
-		return "", r
-	}
 	if err != nil {
 		return "", err
 	}
@@ -188,7 +197,7 @@ var deezerAllowedHosts = []string{".dzcdn.net", ".deezer.com"}
 
 // FetchImage downloads the JPEG at url (which must be a Deezer-hosted
 // picture URL returned by SearchArtist). Cap at maxDeezerImageBytes.
-func (c *DeezerClient) FetchImage(ctx context.Context, u string) ([]byte, error) {
+func (c *DeezerClient) FetchImage(ctx context.Context, u string) (buf []byte, err error) {
 	if u == "" {
 		return nil, errors.New("deezer: empty image URL")
 	}
@@ -209,16 +218,26 @@ func (c *DeezerClient) FetchImage(ctx context.Context, u string) ([]byte, error)
 		return nil, err
 	}
 	defer resp.Body.Close()
+	// Every return from here asks the client's switches again, as
+	// SearchArtist's do (backlog B617).
+	defer func() {
+		if r := c.sw.Answer(ctx); r != nil {
+			buf, err = nil, r
+		}
+	}()
 	noteSettledAnswer(c.noteAnswered, resp.StatusCode)
+	// Drained before the return, as SearchArtist's are.
 	if resp.StatusCode == http.StatusNotFound {
+		drainBody(resp.Body)
 		return nil, errNotFound
 	}
 	if resp.StatusCode != http.StatusOK {
+		drainBody(resp.Body)
 		return nil, carryTransientStatus(resp.StatusCode, fmt.Errorf("deezer: image HTTP %d", resp.StatusCode))
 	}
 	// Read one byte past the cap so an over-sized body surfaces as an
 	// explicit error rather than silently truncating mid-JPEG.
-	buf, err := io.ReadAll(io.LimitReader(resp.Body, maxDeezerImageBytes+1))
+	buf, err = io.ReadAll(io.LimitReader(resp.Body, maxDeezerImageBytes+1))
 	if err != nil {
 		return nil, err
 	}

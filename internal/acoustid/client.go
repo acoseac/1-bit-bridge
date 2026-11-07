@@ -428,7 +428,7 @@ func (c *Client) Lookup(ctx context.Context, fp Fingerprint) ([]Result, error) {
 //
 // The URL is NEVER logged or embedded in an error: it carries `client=<key>`
 // and a multi-kilobyte fingerprint. Errors name the endpoint's status only.
-func (c *Client) get(ctx context.Context, endpoint string) ([]byte, error) {
+func (c *Client) get(ctx context.Context, endpoint string) (body []byte, err error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		// err from NewRequest embeds the URL — replace it wholesale rather
@@ -449,6 +449,17 @@ func (c *Client) get(ctx context.Context, endpoint string) ([]byte, error) {
 		return nil, err
 	}
 	defer resp.Body.Close()
+	// Every return from here is an answer, or what the client made of one:
+	// an error status's body and a no-match alike can finish after a
+	// switch-off its headers' admission did not see, and a no-match is what
+	// a sweep persists. So each return asks the client's own switch, and
+	// those ctx carries, again (backlog B617); a refusal stands for the
+	// answer and its error.
+	defer func() {
+		if r := c.sw.Answer(ctx); r != nil {
+			body, err = nil, r
+		}
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
@@ -462,16 +473,8 @@ func (c *Client) get(ctx context.Context, endpoint string) ([]byte, error) {
 		return nil, herr
 	}
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
+	body, err = io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	drainBody(resp.Body)
-	// The answer is complete only here. Its body can finish after a
-	// switch-off its headers' admission did not see, and a no-match read
-	// from it is what a sweep persists. So the client's own switch, and
-	// those ctx carries, are asked again (backlog B617); a refusal stands
-	// for the answer and its error.
-	if r := c.sw.Answer(ctx); r != nil {
-		return nil, r
-	}
 	if err != nil {
 		return nil, fmt.Errorf("acoustid: reading response: %w", err)
 	}

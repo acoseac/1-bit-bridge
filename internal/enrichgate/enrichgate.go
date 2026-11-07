@@ -301,11 +301,12 @@ func (s Switches) refusal() error {
 }
 
 // Answer asks s and the switches ctx carries whether what a client is about
-// to take may be taken: a request at its send, an answer as it arrives, and a
-// completed answer before a caller keeps it (a decoded body, which a negative
-// cache would otherwise take). A refusal ends the switch contexts ctx carries
-// that it reaches, so the pass on ctx stops, and is returned, ErrOff before
-// ErrDeezerOff; nil when every switch is on.
+// to take may be taken: a request at its send, an answer as it arrives, and
+// whatever a client returns once its answer began (a decoded body, a 404, an
+// error status's body), which a caller could otherwise keep as a miss. A
+// refusal ends the switch contexts ctx carries that it reaches, so the pass
+// on ctx stops, and is returned, ErrOff before ErrDeezerOff; nil when every
+// switch is on.
 func (s Switches) Answer(ctx context.Context) error {
 	r := strongest(admitCtx(ctx, s.scope), s.refusal())
 	if r != nil {

@@ -36,6 +36,9 @@ type CoverArtClient struct {
 	base      baseEndpoint
 	userAgent string
 	http      *http.Client
+	// sw is the client's own switch, enrich.enabled, which its transport
+	// asks and every answer's return asks again (backlog B617).
+	sw enrichgate.Switches
 
 	// minInterval is the politeness pacing the ENRICHER must apply before
 	// each call, derived from base at construction — see pacing.go.
@@ -72,6 +75,7 @@ func NewCoverArtClient(base, userAgent string, httpClient *http.Client, sw enric
 		base:        ep,
 		userAgent:   userAgent,
 		http:        guardRedirects(sw.Client(httpClient)),
+		sw:          sw,
 		minInterval: minIntervalForBase(ep.root, PublicCAAMinInterval, publicCAAHosts),
 	}
 }
@@ -167,7 +171,7 @@ func (c *CoverArtClient) fetch(ctx context.Context, ep baseEndpoint, path string
 // FetchStream paths surface the same error semantics. ep is the base the
 // caller resolved for this one request, credential and all (see
 // MusicBrainzClient.get), and path is what follows its root.
-func (c *CoverArtClient) fetchStream(ctx context.Context, ep baseEndpoint, path string) (io.ReadCloser, error) {
+func (c *CoverArtClient) fetchStream(ctx context.Context, ep baseEndpoint, path string) (body io.ReadCloser, err error) {
 	req, err := ep.newRequest(ctx, path)
 	if err != nil {
 		return nil, err
@@ -177,6 +181,18 @@ func (c *CoverArtClient) fetchStream(ctx context.Context, ep baseEndpoint, path 
 	if err != nil {
 		return nil, err
 	}
+	// Every return from here asks the client's switches again, as
+	// MusicBrainzClient.get's do (backlog B617): a 404 or an error status
+	// read after a switch-off is no answer, and a refusal closes a body it
+	// would have handed over.
+	defer func() {
+		if r := c.sw.Answer(ctx); r != nil {
+			if body != nil {
+				_ = body.Close()
+			}
+			body, err = nil, r
+		}
+	}()
 	noteSettledAnswer(c.noteAnswered, resp.StatusCode)
 	if resp.StatusCode == http.StatusNotFound {
 		drainBody(resp.Body)

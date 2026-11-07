@@ -26,7 +26,8 @@ import (
 // refuse it, and only the client's asking once the answer is complete can.
 
 // bodyBarrier is a base transport whose answers call before as their body's
-// first Read begins, which the client's answer admission has passed by then.
+// first Read or its Close begins, which the client's answer admission has
+// passed by then.
 type bodyBarrier struct {
 	base   http.RoundTripper
 	before func(r *http.Request)
@@ -41,7 +42,8 @@ func (b bodyBarrier) RoundTrip(req *http.Request) (*http.Response, error) {
 	return resp, nil
 }
 
-// barrierBody calls before once, as its first Read begins.
+// barrierBody calls before once, as its first Read or its Close begins: an
+// error branch can close a body it never reads.
 type barrierBody struct {
 	io.ReadCloser
 	once   sync.Once
@@ -51,6 +53,11 @@ type barrierBody struct {
 func (b *barrierBody) Read(p []byte) (int, error) {
 	b.once.Do(b.before)
 	return b.ReadCloser.Read(p)
+}
+
+func (b *barrierBody) Close() error {
+	b.once.Do(b.before)
+	return b.ReadCloser.Close()
 }
 
 // TestAnITunesAnswerCompletedAfterTheFlipIsNoAnswer: iTunes' no-match, its

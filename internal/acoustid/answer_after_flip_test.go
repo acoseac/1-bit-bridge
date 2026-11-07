@@ -20,7 +20,8 @@ import (
 // context the lookup carries.
 
 // bodyBarrier is a base transport whose answers call before as their body's
-// first Read begins, which the client's answer admission has passed by then.
+// first Read or its Close begins, which the client's answer admission has
+// passed by then.
 type bodyBarrier struct {
 	base   http.RoundTripper
 	before func()
@@ -35,7 +36,8 @@ func (b bodyBarrier) RoundTrip(req *http.Request) (*http.Response, error) {
 	return resp, nil
 }
 
-// barrierBody calls before once, as its first Read begins.
+// barrierBody calls before once, as its first Read or its Close begins: an
+// error branch can close a body it never reads.
 type barrierBody struct {
 	io.ReadCloser
 	once   sync.Once
@@ -45,6 +47,11 @@ type barrierBody struct {
 func (b *barrierBody) Read(p []byte) (int, error) {
 	b.once.Do(b.before)
 	return b.ReadCloser.Read(p)
+}
+
+func (b *barrierBody) Close() error {
+	b.once.Do(b.before)
+	return b.ReadCloser.Close()
 }
 
 // TestANoMatchCompletedAfterTheFlipIsNoAnswer: AcoustID's no-match, its body
@@ -81,6 +88,46 @@ func TestANoMatchCompletedAfterTheFlipIsNoAnswer(t *testing.T) {
 			}
 			if !errors.Is(err, enrichgate.ErrOff) || errors.Is(err, ErrNoMatch) {
 				t.Errorf("Lookup = %v, want ErrOff: a no-match completed after the switch-off was taken", err)
+			}
+		})
+	}
+}
+
+// TestAnErrorAnswerCompletedAfterTheFlipIsNoAnswer: an error status whose
+// body the client reads after the switch turned off comes back as ErrOff,
+// never the status's error, on a pass's context and on one that carries no
+// switch (backlog B617, round 4).
+func TestAnErrorAnswerCompletedAfterTheFlipIsNoAnswer(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, "an error answer")
+	}))
+	t.Cleanup(srv.Close)
+	for _, gated := range []bool{true, false} {
+		kind := "a context that carries no switch"
+		if gated {
+			kind = "a pass's context"
+		}
+		t.Run(kind, func(t *testing.T) {
+			var on atomic.Bool
+			on.Store(true)
+			tr := &http.Transport{}
+			t.Cleanup(tr.CloseIdleConnections)
+			hc := &http.Client{Timeout: 10 * time.Second, Transport: bodyBarrier{base: tr, before: func() { on.Store(false) }}}
+			c := NewClient(srv.URL, testKey, "ua", hc, enrichgate.Enrichment(on.Load).Every(time.Hour))
+			ctx := context.Background()
+			if gated {
+				var release context.CancelFunc
+				ctx, release = enrichgate.CancelWhenOff(ctx, on.Load, time.Hour)
+				defer release()
+			}
+			_, err := c.Lookup(ctx, testFP())
+			if on.Load() {
+				t.Fatal("the error answer's body was never read: the case tests nothing")
+			}
+			var herr *httpError
+			if !errors.Is(err, enrichgate.ErrOff) || errors.As(err, &herr) {
+				t.Errorf("Lookup = %v, want ErrOff: an error answer completed after the switch-off was taken", err)
 			}
 		})
 	}

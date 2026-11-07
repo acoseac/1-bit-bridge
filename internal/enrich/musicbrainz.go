@@ -218,7 +218,7 @@ func (c *MusicBrainzClient) SearchArtist(ctx context.Context, artist string) (*S
 // which the caller resolved once for the whole request: ep carries the
 // credential written on THAT base, so a live base changing between two reads
 // can never pair one mirror's credential with another's host.
-func (c *MusicBrainzClient) get(ctx context.Context, ep baseEndpoint, path string, out any) error {
+func (c *MusicBrainzClient) get(ctx context.Context, ep baseEndpoint, path string, out any) (err error) {
 	req, err := ep.newRequest(ctx, path)
 	if err != nil {
 		return err
@@ -230,6 +230,17 @@ func (c *MusicBrainzClient) get(ctx context.Context, ep baseEndpoint, path strin
 		return err
 	}
 	defer resp.Body.Close()
+	// Every return from here is an answer, or what the client made of one: a
+	// 404, an error status's body and a decoded one alike, any of which can
+	// finish after a switch-off the headers' admission did not see. So each
+	// return asks the client's own switches, and those ctx carries, again
+	// (backlog B617), before a caller can keep what it says as a miss; a
+	// refusal stands for the answer and its error.
+	defer func() {
+		if r := c.sw.Answer(ctx); r != nil {
+			err = r
+		}
+	}()
 	// A 429 or a 5xx is the upstream still busy. Every other status,
 	// including a later decode error, means it answered.
 	noteSettledAnswer(c.noteAnswered, resp.StatusCode)
@@ -276,14 +287,6 @@ func (c *MusicBrainzClient) get(ctx context.Context, ep baseEndpoint, path strin
 	// costly during a cold-cache pass against the same handful of hosts.
 	// Matches the drain the 404 / non-200 branches above already do.
 	drainBody(resp.Body)
-	// The answer is complete only here. Its body can finish after a
-	// switch-off its headers' admission did not see, and what it decodes to,
-	// a no-match or a decode error, would reach a negative cache as an
-	// answer. So the client's own switches, and those ctx carries, are asked
-	// again (backlog B617); a refusal stands for the answer and its error.
-	if r := c.sw.Answer(ctx); r != nil {
-		return r
-	}
 	return err
 }
 

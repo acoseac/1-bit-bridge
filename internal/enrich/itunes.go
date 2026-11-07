@@ -197,7 +197,7 @@ func (c *ITunesClient) SearchAlbum(ctx context.Context, artist, album string) (*
 // 5<<20))`, which protected against multi-GB OOM but still allocated
 // up to 5 MB in RAM per fetch and lived inconsistently next to the
 // CAA streaming path.
-func (c *ITunesClient) FetchArtwork(ctx context.Context, a *ITunesAlbum) (io.ReadCloser, error) {
+func (c *ITunesClient) FetchArtwork(ctx context.Context, a *ITunesAlbum) (body io.ReadCloser, err error) {
 	if a == nil || a.ArtworkURL100 == "" {
 		return nil, errNotFound
 	}
@@ -211,6 +211,16 @@ func (c *ITunesClient) FetchArtwork(ctx context.Context, a *ITunesAlbum) (io.Rea
 	if err != nil {
 		return nil, err
 	}
+	// Every return from here asks the client's switches again, as get's do
+	// (backlog B617); a refusal closes a body it would have handed over.
+	defer func() {
+		if r := c.sw.Answer(ctx); r != nil {
+			if body != nil {
+				_ = body.Close()
+			}
+			body, err = nil, r
+		}
+	}()
 	noteSettledAnswer(c.noteAnswered, resp.StatusCode)
 	if resp.StatusCode == http.StatusNotFound {
 		resp.Body.Close()
@@ -242,7 +252,7 @@ func (c *ITunesClient) FetchArtwork(ctx context.Context, a *ITunesAlbum) (io.Rea
 // 429 / 503, mirroring `MusicBrainzClient.get`. iTunes rarely 429s in
 // practice but Apple has been known to quietly throttle abusive
 // callers, so honoring the advisory header keeps us well-behaved.
-func (c *ITunesClient) get(ctx context.Context, u string, out any) error {
+func (c *ITunesClient) get(ctx context.Context, u string, out any) (err error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
 	if err != nil {
 		return err
@@ -254,6 +264,13 @@ func (c *ITunesClient) get(ctx context.Context, u string, out any) error {
 		return err
 	}
 	defer resp.Body.Close()
+	// Every return from here asks the client's switches again, as
+	// MusicBrainzClient.get's do (backlog B617).
+	defer func() {
+		if r := c.sw.Answer(ctx); r != nil {
+			err = r
+		}
+	}()
 	noteSettledAnswer(c.noteAnswered, resp.StatusCode)
 	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable {
 		if delay := parseRetryAfter(resp.Header.Get("Retry-After"), time.Now()); delay > 0 {
@@ -274,11 +291,6 @@ func (c *ITunesClient) get(ctx context.Context, u string, out any) error {
 	// returns the keep-alive connection to the idle pool — json.Decoder
 	// stops at the closing token, not EOF. Mirrors MusicBrainzClient.get.
 	drainBody(resp.Body)
-	// Asked again once the answer is complete, as MusicBrainzClient.get
-	// does (backlog B617).
-	if r := c.sw.Answer(ctx); r != nil {
-		return r
-	}
 	return err
 }
 
