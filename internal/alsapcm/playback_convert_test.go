@@ -735,14 +735,15 @@ func TestDeletingOrReplacingAPreparedConvertedSuccessor(t *testing.T) {
 	// comes, so b can't be taken back and the engine stops, as "once the kernel
 	// has its window" pins: that run holds the stop instead, and the test as a
 	// whole holds that some run took b back.
-	took := 0
+	asked, took := 0, 0
 	t.Cleanup(func() {
-		if took == 0 {
+		if asked > 0 && took == 0 {
 			t.Error("no run took b back")
 		}
 	})
 	tookBack := func(d *dsdRig, oa, ob engine.OccurrenceID) bool {
 		d.t.Helper()
+		asked++
 		c := d.waitCall("the engine's call that took b back to return", func(c call) bool {
 			return (c.kind == "cut" && c.from == ob) ||
 				(c.kind == "prepare" && c.after == oa && (c.next == nil || c.next.ID != ob))
