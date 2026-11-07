@@ -82569,8 +82569,25 @@ At PR #1427's head 9dd51ae4, on a Raspberry Pi 5 held at 1.5 GHz by its conserva
 | A5: the silent probe | pass: opened 1, closed 1, `HW_REFINE` 23, `INFO` 1, `PVERSION` 1; one at the start and none in a session. A replug wasn't run |
 | A6: PCM across the refresh | pass: a 34 s WAV, one stream open, no refresh noise; two sub-millisecond opens before `HW_PARAMS` |
 | B1: conversion | pass: S32_LE at 176400, 24 valid bits, one open per run |
-| B2: CPU of a core, from `/proc`, with the Pi at 1.5 GHz | DSD64 14.7 %, DSD128 15.8 %, DSD256 17.4 %. §4.6's gate names a Pi 4: see below |
+| B2: CPU of a core, from `/proc`, with the Pi at 1.5 GHz | DSD64 14.7 %, DSD128 15.8 %, DSD256 17.4 % |
 | B3: xruns | none; the lowest `minLead` 19338 of 35280 frames |
 | B4: joins and Stop | a continuous pair and DSD64 to DSD128: one open, one close; Stop 31 ms, OpenHome's Stop about 56 ms |
 
-Named from the run: B773 (the DAC's two identical configurations), B774 (the control node's opens). `output play`'s banner claimed bit-exactness for every play; fixed here. **Owed:** §4.6's Pi 4 run, and the owner's listening pass and replug.
+Named from the run: B773 (the DAC's two identical configurations), B774 (the control node's opens). `output play`'s banner claimed bit-exactness for every play; fixed here. **Owed:** the owner's listening pass and replug.
+
+### The Pi 4 class run (§4.6)
+
+On a Pi 400 (Cortex-A72, 1.8 GHz at most, four cores) with an AURALiC ALTAIR G1 over USB, a DAC the policy converts for, at S32_LE 176.4 kHz, 24 valid bits, through `bridge output play`. The files, the binary and the player's state were all in RAM, since this box's SD card is too slow to write test files to, which took a measurement build allowing the state on tmpfs and otherwise this PR's code at a0a26228. CPU is the whole process's `/proc` utime and stime.
+
+| Playing | CPU of a core | At |
+|---|---|---|
+| PCM, 176.4 kHz, 24-bit, silent | 15.1 % | about 770 MHz, ondemand |
+| DSD64, silent | 44.2 % | about 870 MHz, ondemand |
+| DSD128, silent | 43.1 % | about 930 MHz, ondemand |
+| DSD256, silent | 52.6 % | about 990 MHz, ondemand |
+| DSD256, silent, every core oversubscribed | 28.5-28.9 % | 1.8 GHz held, 20 s |
+| **DSD256, varied bytes, every core oversubscribed** | **31.3 %** | **1.8 GHz held, 164 s, 49 to 54 °C, no throttling** |
+
+No xrun or fault in any run; the lowest buffer delay sampled at about 8 Hz in the sustained run was 18,785 frames of about 36,000. "Varied bytes" is each random byte followed by its complement: every table entry is touched and the audio band stays near silent, so nothing is played aloud. Busy-loop processes kept every core oversubscribed in the runs marked so: a leftover three beside the four the sustained run started, so seven on four cores.
+
+**Against the gate:** the converter alone is 18.3 % of a 1.5 GHz core by B10's benchmark, inside 25 %. The whole process is about 37.6 % of a 1.5 GHz core (31.3 % scaled by clock, which is an extrapolation: no 1.5 GHz Pi 4 was run). That misses the 25 % §4.6 first wrote, read as the whole process, and meets the amended 40 %. Argon and Codex both recommended merging and landing the optimization separately, bit-identical (B779); neither saw a case for refusing DSD256 on these numbers.

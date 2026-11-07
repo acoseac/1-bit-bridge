@@ -942,12 +942,17 @@ These figures are estimates. B11 measures them before it merges.
   per second of DSD64, DSD128 and DSD256 audio on a fast Mac (`ops/engineering-log.md:5584-5586`,
   PR #863). A Pi 4 core is roughly 6 to 8 times slower single-threaded, which puts that chain at
   5–18 % of a Pi 4 core.
-- **The gate:** B11's hardware tier runs `BenchmarkConvert` and real playback on a Pi 4 and a Pi 5,
-  at DSD64, DSD128 and DSD256, watching CPU and xruns.
-  - The budget is at most 25 % of one Pi 4 core at DSD256.
-  - A miss gets int32 tables and an unrolled stage 3 first.
-  - If it still misses, B11 ships conversion for DSD64 and DSD128 only, and DSD256 is refused
-    (`conversion_not_offered`) until a faster converter lands. It never xruns by design.
+- **The gate, amended 2026-11-07 once it was measured (the engineering log's B11 CPU run):** B11's
+  hardware tier runs `BenchmarkConvert` and real playback on a Pi 4 class box and a Pi 5, at DSD64,
+  DSD128 and DSD256, watching CPU and xruns.
+  - The converter alone is at most 25 % of one 1.5 GHz Cortex-A72 core at DSD256.
+  - The whole process is at most 40 % of one, with no xrun in sustained, thermally settled playback
+    with every core busy. This was first written as 25 % for the whole, before anything was
+    measured; it's a revised engineering budget, chosen on Argon's and Codex's advice with the
+    measurement in hand, not a pass of the original reading.
+  - A miss gets an unrolled stage 3 first (int32 tables are in), then tables a nibble wide at DSD256.
+  - If it still misses, conversion ships for DSD64 and DSD128 only, and DSD256 is refused
+    (`conversion_not_offered`) until a faster converter lands.
 
 ### 4.7 Gapless, Stop, pause and seek
 
