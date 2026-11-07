@@ -80153,8 +80153,12 @@ store open, which takes it out of the crash rollback's reach.
   back is the operator's (a snapshot from before the update, with `.bak`).
 - The count has no clock and no cause: three starts that end uncleanly for
   any reason (a power cut, an OOM kill, `kill -9`, a service manager's
-  SIGKILL after its stop timeout) before a start is confirmed roll a working
-  install back. A confirmation needs one start up for 10 minutes; a host that
+  SIGKILL after its stop timeout) before a start is confirmed make the next
+  start try to roll a working install back, an attempt that a migration of
+  the store begun under the install, or a check that fails (another version
+  opened the data dir, the backup's version, its settings check), prevents,
+  saying why (qualified in the third round, after CodeRabbit's thread on
+  #1424). A confirmation needs one start up for 10 minutes; a host that
   restarts the bridge more often than that never confirms, and is counted.
 - Not ready is never proof: a start that serves but never answers is not
   confirmed, keeps running, says so once and records `NotReady`; nothing
@@ -80707,3 +80711,211 @@ marker), on loopback, mDNS off.
 - The 1-bit.app updater page is owed at release (the orchestrator's), with
   the note on a binary given file capabilities.
 - What this round leaves is backlog B760.
+
+## 2026-11-07 — B660's third round: a stop taken back early only once ready, a running start by its own lock, the tailnet's end serve's own, one stop budget, both loopbacks
+
+The second review of PR #1424 (seven points). Worker b660 on the Linux
+worker host, the branch as the second round left it (cb0b0f2b; the rules
+patches the orchestrator applied and its merge of main are on the pushed
+branch, not in this tree, and the round's wording is `rules-b660-r3.patch`
+over the rules files as the first two patches left them). Commits: the
+reproduction 0fdfd391 (red, with the seams its tests need, read by nothing
+or nil in production), the change 65d2c3a8, one test strengthened
+ed8eeeda (point 1, below), then this record. Each point was a reviewer's
+reading of the code. Points 1 to 6 were confirmed red first on 0fdfd391,
+the predictions written to a file before the run, and every guard beside
+them green; point 7 by reading.
+
+**1. A start that hangs before it is ready was never counted** (confirmed;
+a regression of the second round's early take-back). The take-back was
+armed at the admission, so a version that hung past its admission, stopped
+with SIGTERM, took its count back as the stop arrived, its supervisor killed
+it, and the count never reached three. On 0fdfd391
+`TestAStopBeforeReadyStaysCountedUntilItsTeardownHasRun` read the count
+taken back while the teardown of a stop before ready was held, and
+`TestAStopBeforeReadyIsNotArmedByAReadyAnswerInItsTeardown` failed at its
+20 s wait (`the confirmation's first ready answer never came to count the
+start as ready; it did [{kind:1 ready:true why:} {kind:2 ready:false
+why:}]`): the round had answered and the window begun, with no point at
+which the start became ready. By hand (below) round 2's build, hung after
+its admission, took its count back at each SIGTERM and served again at the
+fourth start. The change: the confirmation's first yes arms the take-back
+(`serveProbation.onReady`, `stopTakeBack.arm`, asking serve's own context,
+which a stop and a restart request both end, and whether a stop's arrival
+was already told, a restart request telling it before it cancels), only
+where no stop came first; armed, a stop's take-back begins as the stop
+arrives; otherwise only once the teardown has run, so a stop before ready
+whose teardown hangs and is killed stays counted. The start says that it
+has answered (`updater: this start of … has answered as ready (its API
+listener, /v1/health and its store): its install is confirmed once it has
+stayed up for 10m0s`). A slow but healthy start killed in a slow teardown
+before it was ready counts too, the cost the review accepted; it is said in
+PROTOCOL.md, the runbook and the long form. The second round's three early
+take-back tests wait for the window first, the stop-while-starting test that
+waited for an early take-back is removed, replaced by the two above, the
+subprocess kill test waits for the readiness line (the copy asks every
+20 ms through `CMDBRIDGE_TEST_RUN_AS_BRIDGE_PROBATION_ASK`, read by the test
+binary's re-exec alone), and its twin
+`TestAServeKilledInItsTeardownBeforeReadyStaysCounted` stops and kills a
+start before ready and finds it counted. The ready-after-the-stop test was
+strengthened after the change (ed8eeeda): it holds the stop's own notice
+too, since with the notice through, the arrival it records refused the
+arming as well, and the context's check went unexercised (control 1b).
+
+**2. A stop during startup followed by an error read as a failure**
+(confirmed). `finish()` had no context: the stop's `AfterFunc` runs on a
+goroutine of its own, and an error at once after the stop (its TLS pair)
+reached `finish()` first, whose `sync.Once` then ended the take-back unbegun.
+On 0fdfd391, with the stop's notice held (`serveOpts.stopArriving`, as that
+goroutine can be), `TestAStopBeforeAnErrorIsAStop/its_teardown_runs` read
+the count left at 1, and `/its_teardown_hangs` (a hold at the teardown's
+end, `serveOpts.teardownHold`) read it taken back while the teardown hung.
+The change: once the teardown has run, the end is asked of the caller's own
+context and the restart request as they stand then (`finish(takeBack)`),
+which after ready also keeps the clean-up from losing that race to a
+callback that has not run.
+
+**3. A held `server.lock` did not prove the count held a running start**
+(confirmed). A command holds the lock too, and the in-process registry of
+the second round answered only this process's holds. On 0fdfd391
+`TestTheDoctorBesideACommandHoldingTheDataDirsLockCountsEveryStart` (one
+failed start before a pending migration, the lock held as another process's
+command holds it; and the same with a killed start's token left) read the
+doctor's line `ok … is on probation` and `the store after bridge doctor is
+at 60, want 59, unmigrated`, with `StoreMigratedBy` recorded;
+`TestTheDoctorAfterAStopsTakeBackCountsTheStartsBeforeIt` (a stop's count
+taken back while its serve tears down, holding the lock) read `ok` over the
+start before it; `TestACountedStartCarriesItsTokenUntilItReturns` found no
+token; `TestARunningStartIsTheLockItsTokenNames` read the command's lock,
+another start's and a released one as a start running; and
+`TestAMigrationReadsTheRunningStartUnderTheMarkersLock`, the ordering
+forced (the open waiting for the install marker's lock, a take-back's write
+of two to one and its token cleared landing in the wait, the serve still
+holding both its locks), answered `<nil>`, the migration recorded, where it
+must be held: `disarm` read the running start before its wait.
+`TestTheTakeBackClearsItsStartsToken` found the token left. The change: a
+random per-start token, no process liveness. The admission sweeps the lock
+files of starts that hold theirs no more, makes a token, takes the lock it
+names on a file made for it (`serve-start-<token>.lock`,
+`updater.StartHold`), and only then writes the token with the count
+(`State.RunningStart`), so no reader meets the token before its lock is
+held; `RunningServeCounted` needs the token and that lock held, tried
+without waiting, and a command never takes such a lock, so `server.lock`
+is not read at all, nor the registry, which goes. The take-back clears the
+token in its decrement's write; every return of `runServe` clears it where
+the marker still names it, keeping the count where it was not taken back
+(`updater.EndStart`, within the stop's budget: the launcher's serve returns
+to its menu with the process alive), and lets the lock go; the confirmation
+clears it. A migrating open reads the running start of the marker it reads
+under the install marker's lock (`migrationGate.holds`), so the count and
+the token are read together, and the try of the start's lock never waits,
+so nothing is waited for against the lock order. 0.2.3's reader (`git show
+0ddb8c72:internal/updater/state.go`: a plain `json.Unmarshal`, which drops a
+field it does not know) takes a marker with the token
+(`TestThePreviousReleaseReadsAMarkerWithARunningStart`, a guard, green on
+both commits), and by hand 0.2.3 put back over one served and dropped it.
+
+**4. The tailnet classifier took back nearly everything** (confirmed). Any
+`*net.OpError` and any `net.ErrClosed` read as a failure of the tailnet's
+network. On 0fdfd391 `TestATailnetListenerThatFailsIsAFailedStart` read the
+count taken back for tsnet's own closed error and for an accept error, and
+`TestOnlyACloseServeBeganEndsItsTailnetListenerCleanly` took a closed
+listener with no close of serve's for a clean end and the server's closed
+answer for none. The change (`tailnetEndIsServes`): only a close serve began
+(`tsnetFront.closeBegun`, the flag its stop sets before it shuts a server
+down or closes the node) or `http.ErrServerClosed` is no failed start, set
+before the line's guard so the closed answer falls through as one; every
+other end counts, closed or not. What is left of the classification: tsnet's
+listener without a TUN answers `net.ErrClosed` only once closed and blocks
+while the tailnet is down (tsnet.go's `listener.Accept`, `closeLocked`), and
+serve's select reads the listener's end only before its own stop of the
+tailnet side, which comes after it, so today every end it reads but the
+server's closed answer counts; the begun close answers an end that races it.
+
+**5. The take-back after the teardown had a fixed 2 s on every path**
+(confirmed). On 0fdfd391
+`TestAStopsTakeBackWaitsForTheMarkersLockWithinItsBudget` (the marker's
+lock held from before the stop to two seconds and a half past the
+teardown's end, which the pid file's removal marks) left the count at 1. The
+change: one named budget, `stopBudget`, 10 s from the stop's arrival, or from
+the teardown's end where no stop arrived, for the teardown and the take-back
+together, the take-back asking again as `stopTakeBack.run` did until it
+lands or the budget ends, and `takeBackWait` goes. It is inside the shortest
+of systemd's `TimeoutStopSec` (90 s by default; the unit sets none),
+launchd's `ExitTimeOut` (20 s by default; the plist sets none) and the
+Windows updater's wait for the SCM to stop the service (15 s, exported as
+`updater.SCMStopWait`, which it waits out holding the install marker's
+lock): `TestTheStopBudgetIsInsideEveryServiceManagersWait` reads the two
+templates for either key.
+
+**6. The probe of `::` dialled 127.0.0.1 alone** (confirmed). On 0fdfd391
+`TestTheReadinessProbeTriesTheIPv6LoopbackForAWildcard` (the bridge's
+listener IPv6-only on `[::1]`, reported as the wildcard, another listener on
+the port's IPv4 loopback) answered `a connect to the API listener's address
+was not taken by this process's accept loop` at the round's 5 s, and
+`TestBridgeHealthTriesTheIPv6LoopbackForAWildcard` exited 1 (`health: API
+listener 127.0.0.1:39875 not accepting connections: … connection refused`).
+The change: `probeHosts`, 127.0.0.1 and then ::1 for `::` and an empty host,
+127.0.0.1 for `0.0.0.0`, a specific IP as it is, for the probe and `bridge
+health`; the probe gives each connect but the last its share of what is
+left of the round. Gemini's status-0 thread stays declined (the
+orchestrator's answer).
+
+**7. What was said** (by reading). PROTOCOL.md's paragraph said the next
+start puts the backup back, that the auto-installer's hold followed an
+unclean start and lasted at most 20 minutes, of the install by its words,
+and that `.bak` was "one the rollback would put back"; the code holds from
+the first start (`ProbationHolds` asks `AwaitsConfirmation`), for 20 minutes
+of the process's uptime, which each restart starts again, and asks the
+marker and `.bak`'s presence alone. It says so now, with point 1's rule and
+point 4's; its iOS mirror is owed. The trade-off line in the first round's
+record on what three unclean starts do now says they make the next start
+try, an attempt a migration begun or a failed check prevents (CodeRabbit's
+thread).
+
+**Negative controls**, each alone on ed8eeeda, every listed test run with
+`-test.v`, the bytes put back from memory, predicted in a file before the
+run; every one as predicted:
+
+| control | mutation | red | green beside it |
+|---|---|---|---|
+| (1a) | the take-back armed from the admission, as the second round | `TestAStopBeforeReadyStaysCountedUntilItsTeardownHasRun`, `TestAStopBeforeReadyIsNotArmedByAReadyAnswerInItsTeardown`, `TestAStopBeforeAnErrorIsAStop` (its teardown hangs), `TestAServeKilledInItsTeardownBeforeReadyStaysCounted` | the ready case: `TestAStopTakesItsCountBackAsItArrives`, `TestARestartRequestTakesItsCountBackAsItArrives`, `TestAServeKilledWhileItDrainsHasTakenItsCountBack`; its teardown runs; `TestAStopIsNotAFailedStart` |
+| (1b) | the arming deaf to serve's own context | `TestAStopBeforeReadyIsNotArmedByAReadyAnswerInItsTeardown` | the other two |
+| (1c) | no take-back as a stop arrives | `TestAStopTakesItsCountBackAsItArrives`, `TestARestartRequestTakesItsCountBackAsItArrives`, `TestAStopThatFindsTheMarkersLockHeldTakesItsCountBackOnceItIsFree`, `TestAServeKilledWhileItDrainsHasTakenItsCountBack`, `TestTheDoctorAfterAStopsTakeBackCountsTheStartsBeforeIt` | the stops after their teardown, the budget's |
+| (2a) | a stop told by its notice alone | `TestAStopBeforeAnErrorIsAStop` (its teardown runs) | its teardown hangs; `TestAStopIsNotAFailedStart`; `TestARestartRequestIsNotAFailedStart` |
+| (3a) | the data dir's lock read as a counted start | `TestARunningStartIsTheLockItsTokenNames`, `TestAMigrationReadsTheRunningStartUnderTheMarkersLock`, `TestARunningServeIsAskedForOnlyWhereAStartIsCounted`, `TestTheAdmissionWritesItsStartsTokenWithItsCount`, `TestTheDoctorBesideACommandHoldingTheDataDirsLockCountsEveryStart` (both), `TestTheDoctorAfterAStopsTakeBackCountsTheStartsBeforeIt` | `TestACountedStartCarriesItsTokenUntilItReturns`, `TestACommandBesideAStartingServe`, `TestTheDoctorBesideARunningServeTakesItsStartOff` |
+| (3b) | the running start read before the marker's lock | `TestAMigrationReadsTheRunningStartUnderTheMarkersLock` | the open's own, the token's, `TestACommandBesideAStartingServe` |
+| (3c) | the take-back leaves the token | `TestTheTakeBackClearsItsStartsToken`, `TestTheDoctorAfterAStopsTakeBackCountsTheStartsBeforeIt` | the return's, the stop's |
+| (3d) | a return keeps the token | `TestACountedStartCarriesItsTokenUntilItReturns` | the stop's, the doctor's |
+| (3e) | a return keeps its lock | `TestACountedStartCarriesItsTokenUntilItReturns` | the stop's, the doctor's |
+| (4a) | the second round's classifier | `TestATailnetListenerThatFailsIsAFailedStart` (closed, accept), `TestOnlyACloseServeBeganEndsItsTailnetListenerCleanly` | another failure |
+| (4b) | a close serve began not asked | `TestOnlyACloseServeBeganEndsItsTailnetListenerCleanly` | the listener's three |
+| (4c) | the server's closed answer counted | `TestOnlyACloseServeBeganEndsItsTailnetListenerCleanly` | the listener's three |
+| (5a) | a fixed 2 s | `TestAStopsTakeBackWaitsForTheMarkersLockWithinItsBudget` | the bound's, the lock retry's, the confirmation's wait |
+| (5b) | one ask for the lock | `TestAStopThatFindsTheMarkersLockHeldTakesItsCountBackOnceItIsFree` | the budget's |
+| (5c) | a budget of 16 s | `TestTheStopBudgetIsInsideEveryServiceManagersWait` | the budget's |
+| (6a) | the IPv6 wildcard on 127.0.0.1 alone | `TestTheReadinessProbeTriesTheIPv6LoopbackForAWildcard`, `TestBridgeHealthTriesTheIPv6LoopbackForAWildcard` | `TestAnInstallListeningOnTheWildcardIsConfirmed` |
+| (6b) | no share of the round for the IPv4 connect | `TestTheReadinessProbeTriesTheIPv6LoopbackForAWildcard` | health's, the wildcard's |
+
+**By hand, with real builds**: a real 0.2.3 (`git archive 0ddb8c72`) as the
+backup, served first; this round's build (ed8eeeda) and the second round's
+(cb0b0f2b), each as 0.2.4-b660 with the line after its admission patched to
+sleep for good where `B660_HANG_AFTER_ADMISSION` is set, a version that
+deadlocks before it is ready; each installed by hand over 0.2.3, `.bak` and
+an `installing` marker as the updater leaves them.
+- This round's, hung: three starts, each counted and never listening,
+  SIGTERM, still alive three seconds later, SIGKILL; the count 1, 2 and 3,
+  each start's token in the marker and its lock file swept by the next. The
+  fourth start exited 75 (`updater: 3 starts of 0.2.4-b660 since its install
+  did not end cleanly, so the install is rolled back: 0.2.3 is back at …`),
+  the binary reported 0.2.3, and 0.2.3 served and ended the record as a
+  rollback done, the hold and the veto kept.
+- The second round's, hung, the same three starts: each SIGTERM took the
+  count back (none in the marker, the process still hung), and the fourth
+  start served the hung version again, no rollback.
+- This round's, without the hang: a start that answered as ready (after
+  5.0 s, production's first ask), stopped with a held connection keeping its
+  drain going, had its count back 0.058 s after SIGTERM and was killed in
+  the drain (exit -9); a start stopped before it was ready exited 0 once its
+  teardown had run, its count back, its token cleared and the dead start's
+  lock file swept.

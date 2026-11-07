@@ -894,30 +894,50 @@ the backup of … is removed at the next start`, and the marker shows
 `"status": "installed"`. A start that never answers as ready says so once
 (`updater: … has not answered as ready within 10m0s of serving (…)`, the
 missing answer in the brackets), records `"notReady": true`, and keeps
-serving: not ready rolls nothing back.
+serving: not ready rolls nothing back. A start that has answered says so as it
+does (`updater: this start of … has answered as ready (its API listener,
+/v1/health and its store): its install is confirmed once it has stayed up for
+10m0s`), the moment from which a stop takes its count back as it arrives (the
+next bullet). The probe of a listener on the IPv6 wildcard (`[::]:7788`)
+dials 127.0.0.1 and then ::1, and so does `bridge health`, so a bridge bound
+IPv6-only beside another process on the port's IPv4 loopback is still
+reached.
 - **Each start of the new version counts itself** (`"failedStarts"`) before
   it writes anything, and takes its count back when it ends cleanly. A stop
   (`systemctl stop` or restart, `docker stop`, Ctrl-C, the SCM's Stop) or a
   restart request (the console's Restart, the auto-installer's) takes it back
-  as soon as it arrives, so a stop the service manager has to finish with
-  SIGKILL (past systemd's `TimeoutStopSec`, launchd's `ExitTimeOut`) is taken
-  back already, and a crash in the teardown after it is not counted. An API
-  or console address another process holds, one the host does not have (a
-  static address not up yet after a reboot), a bind refused for a permission
-  the previous binary would meet too (not where `.bak` carries file
-  capabilities the new binary does not: below), and a failure of the
-  tailnet's network take it back after the teardown. A crash, a `kill -9`
-  with no stop before it, an OOM kill, a power cut, a panic, an error exit (a
-  store that will not open) and a tailnet listener's failure that is not the
-  network's stay counted (the journal's `tsnet listener: …` line says which).
-  A stop's take-back that cannot hold the marker's lock keeps asking for it
-  until the teardown ends, and the one after it gives the lock 2 s more; one
-  that never has it leaves the count (`updater: this start ended cleanly and
-  its count … was not taken back …`). Once one start has not ended cleanly,
+  as soon as it arrives once the start has answered as ready, so a stop the
+  service manager has to finish with SIGKILL (past systemd's
+  `TimeoutStopSec`, launchd's `ExitTimeOut`) is taken back already, and a
+  crash in the teardown after it is not counted. Before the start has
+  answered, a stop takes it back only once its teardown has run: a version
+  that hangs before it is ready, which the service manager stops and then
+  kills, counts, and the third such start's successor tries the rollback
+  below (by hand with real builds: three hung starts, each killed three
+  seconds after its SIGTERM, then exit 75 and 0.2.3 back). The cost, taken
+  on purpose: a slow but healthy start killed in a slow teardown before it
+  was ready counts too. Whether an end is a stop is asked of the stop itself
+  once the teardown has run, so a stop followed at once by an error (a TLS
+  pair that will not load) is a stop. An API or console address another
+  process holds, one the host does not have (a static address not up yet
+  after a reboot), a bind refused for a permission the previous binary would
+  meet too (not where `.bak` carries file capabilities the new binary does
+  not: below), and a close of the tailnet listener that serve itself began
+  take it back after the teardown. A crash, a `kill -9` with no stop before
+  it, an OOM kill, a power cut, a panic, an error exit (a store that will not
+  open) and any other end of the tailnet listener, closed or not, stay
+  counted (the journal's `tsnet listener: …` line says which). A take-back
+  that cannot hold the marker's lock keeps asking for it until it lands or
+  the stop's budget ends: 10 s from the stop's arrival for the teardown and
+  the take-back together, inside the SCM's 15 s (the updater's wait for a
+  service to stop), launchd's 20 s and systemd's 90 s, neither of which the
+  plist or the unit changes; one that never has it leaves the count
+  (`updater: this start ended cleanly and its count … was not taken back
+  within 10s …`). Once one start has not ended cleanly,
   each start after it says how many came before it. A start that ends before
   it counts itself (its settings refused, say) is not counted: the early
   rollback above answers that case.
-- **At three, the next start puts `.bak` back before it writes anything**,
+- **At three, the next start tries to put `.bak` back before it writes anything**,
   holding the data dir's lock and the marker's, where the marker shows the
   install reached its swap and names the previous version, no version but the
   new one opened the data dir, and no migration of the store began; `.bak`
@@ -949,7 +969,15 @@ serving: not ready rolls nothing back.
   anything, and `bridge doctor` runs none, says `N migrations pending` on its
   `store-migrations` line and leaves the checks that read the store. With no
   start before it that did not end cleanly (the one a running serve counts
-  left out), a command migrates as before. Past that the
+  left out), a command migrates as before. A serve runs, for these
+  questions, only where the marker's `"runningStart"` names a start whose own
+  lock is held: `serve-start-<token>.lock` in the data dir, which a counted
+  start takes before it writes its token with its count, holds while it runs
+  and lets go as it returns, its token cleared; never `server.lock`, which
+  `bridge reset-player`, `restore`, `manifest clear-missing` and `output dac
+  bind` hold too, and never a killed start's, whose lock dies with it. The
+  file a killed start leaves is removed by the next counted start (one left
+  where 0.2.3 is put back is harmless). Past that the
   way back is the operator's: a snapshot from before the update
   (`bridge restore`) with `.bak`, by hand. This is the design's plainest
   cost: the ladder's top moved in 6 of the last 7 releases (0.1.7 23, 0.1.8
@@ -964,13 +992,15 @@ serving: not ready rolls nothing back.
   where it does not know a field, turns its player off, never serve; rows
   extracted by a newer extractor are served as indexed until their file
   changes.
-- **The auto-installer waits** while the running version's install is
-  unconfirmed, the process has been up for less than 20 minutes, and the
-  crash rollback would put `.bak` back: no rollback of it refused, `.bak`
-  beside the binary, no migration begun, the swap reached, no other version
-  over the data dir (the Updates panel's deferred reason: `… awaits its
+- **The auto-installer waits** from the first start of the new version
+  while its install is unconfirmed, for at most 20 minutes of that process's
+  uptime (each restart starts the 20 minutes again), where `.bak` is beside
+  the binary and the marker would not refuse the crash rollback: no rollback
+  of it refused, no migration begun, the swap reached, no other version over
+  the data dir (the Updates panel's deferred reason: `… awaits its
   confirmation …`), so it does not replace `.bak` with a version not yet
-  known to run. A manual install (`bridge update`, the console's Install) is
+  known to run. It asks neither the backup's version nor its settings check:
+  those only the start that rolls back runs. A manual install (`bridge update`, the console's Install) is
   not held, and its `.bak` is the unconfirmed version. An automatic install
   over a release staged and not yet restarted makes that staged release
   `.bak` while the marker names the running one, and a crash rollback then
@@ -982,8 +1012,8 @@ serving: not ready rolls nothing back.
   put `.bak` back, if the backup can run these settings, or why it does not),
   its `store-migrations` line, the Updates panel's **Probation** row (graded
   on the starts before the one running), and `"failedStarts"`,
-  `"storeMigratedBy"`, `"rollbackRefused"` and `"notReady"` in
-  `update-state.json`. On a filesystem that keeps no locks an install is
+  `"storeMigratedBy"`, `"rollbackRefused"`, `"notReady"` and `"runningStart"`
+  in `update-state.json`. On a filesystem that keeps no locks an install is
   counted but never confirmed and never rolled back (the next paragraph).
   On Windows the crash rollback renames the running exe aside as the boot
   rollback does (B202); that path has been checked by cross-compiling and by

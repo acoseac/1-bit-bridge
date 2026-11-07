@@ -2490,7 +2490,7 @@ record is in `ops/engineering-log.md`, 2026-11-04, B707.
 
 ## An install counted healthy only once it has answered and stayed up (backlog B660, 2026-11-06)
 
-- **An install counts as healthy only once one start of its version has answered as ready and stayed up for `updater.ProbationWindow`, and three of its starts that did not end cleanly roll it back at the next start, before it writes anything, unless a migration of the store has begun or the backup cannot be shown to run here** (2026-11-06, backlog B660; its second round, 2026-11-07). **Don't confirm on a version match, don't let a scan, a root or a certificate decide readiness, don't count a stop (take its count back as the stop arrives, on the caller's context or a restart request, never serve's own context, and join that take-back before the data dir's lock goes), a port another process holds or an address the host does not have, don't take back a permission refusal the backup would not meet (file capabilities the binary lacks) or a tailnet failure that is not the network's, don't roll back once a migration step has begun or where the backup refuses the settings, does not answer their check or predates it, don't let a command but serve's own start migrate the store while the install awaits its confirmation after a start that did not end cleanly, don't hold the auto-installer for a backup the crash rollback would not put back, don't promise a put-back, and don't compare `user_version` to excuse a failed step.** → History-rules-config-lifecycle.md
+- **An install counts as healthy only once one start of its version has answered as ready and stayed up for `updater.ProbationWindow`, and three of its starts that did not end cleanly make the next start try to roll it back, before it writes anything, which a migration of the store begun, or a backup that cannot be shown to run here, prevents** (2026-11-06, backlog B660; its rounds 2 and 3, 2026-11-07). **Don't confirm on a version match, don't let a scan, a root or a certificate decide readiness, or dial an IPv6 wildcard on IPv4's loopback alone, don't count a stop (take its count back as the stop arrives once the start has answered as ready and once the teardown has run before that, so a start killed before it is ready stays counted; ask whether an end is a stop of the caller's context and the restart request once the teardown has run, never of serve's own context or of the stop's notice; ask for the marker's lock again within one budget for the teardown and the take-back, inside the shortest stop wait of systemd, launchd and the SCM; and join it before the data dir's lock goes), a port another process holds or an address the host does not have, don't take back a permission refusal the backup would not meet (file capabilities the binary lacks) or an end of the tailnet listener serve did not begin, don't read a start as running from the data dir's lock, a command's too, or from a marker read before the install marker's lock (a start runs only where the marker's token names a lock that start holds, its token cleared at every return), don't roll back once a migration step has begun or where the backup refuses the settings, does not answer their check or predates it, don't let a command but serve's own start migrate the store while the install awaits its confirmation after a start that did not end cleanly, don't hold the auto-installer for a backup the crash rollback would not put back, don't promise a put-back, and don't compare `user_version` to excuse a failed step.** → History-rules-config-lifecycle.md
 
 *The defect* (the self-healing study of 2026-11-02, read from the code;
 B613's "Not here" above; B198's scenario). `DecideBootAction` answered
@@ -2533,8 +2533,10 @@ install is confirmed, as the housekeeping confirmed none there before.
 (`ProbationOverRollback`), its count kept, rather than stamping it.
 
 *Ready* is three answers in one round, each of this process: a connect to
-the API listener's bound address (a wildcard dialled on loopback,
-`probeHost`, as `bridge health` dials) that this process's accept loop took,
+the API listener's bound address (a wildcard dialled on loopback, IPv4's
+and then, for IPv6's wildcard, IPv6's, each connect but the last given its
+share of the round, `probeHosts`, as `bridge health` dials: the third round)
+that this process's accept loop took,
 read from `acceptWatch`, the listener as serve hands it to `ServeTLS`, which
 keeps the remote address of each connection it accepts while a probe is
 under way, matched with the probe's own local address (a connect alone
@@ -2568,20 +2570,28 @@ refusal: a missed count errs toward not rolling back. A crash before the
 admission is not counted: a candidate that never runs is what the settings
 check before the swap sees, and a start refused for its settings has the
 early rollback. The take-back is registered right after the admission, so
-it is joined while the data dir's lock is held. A stop's begins as the stop
-arrives (`stopTakeBack`, the second round): `context.AfterFunc` on the
-context runServe's caller gave it, which only a stop cancels (main's signal
-context for SIGINT and SIGTERM, the SCM's Stop, the launcher's, a test's),
-and the restart request's own hook (`serveRestart.onRequest`), never
-runServe's own context, which it cancels on every exit; it asks for the
-marker's lock again, a wait at a time, until the teardown ends, and is then
-unregistered and joined. Until the second round the stop's take-back ran
-after the whole teardown, which a supervisor that kills a slow stop
-(launchd's `ExitTimeOut`, systemd's `TimeoutStopSec`, the SCM's wait) cut
-short, leaving a clean stop counted. A crash in the teardown after a stop is
-not counted, by the same rule: the stop came first. The other clean ends are
-taken back after the teardown, reading a local flag (`notAFailedStart`) that
-exactly they set: a bind refused for an address another process holds, one
+it is joined while the data dir's lock is held. Once the start has answered
+as ready, a stop's begins as the stop arrives (`stopTakeBack`, the second
+round; armed at the confirmation's first yes since the third,
+`stopTakeBack.arm`): `context.AfterFunc` on the context runServe's caller gave
+it, which only a stop cancels (main's signal context for SIGINT and SIGTERM,
+the SCM's Stop, the launcher's, a test's), and the restart request's own hook
+(`serveRestart.onRequest`), never runServe's own context, which it cancels on
+every exit. Until the second round the stop's take-back ran after the whole
+teardown, which a supervisor that kills a slow stop (launchd's
+`ExitTimeOut`, systemd's `TimeoutStopSec`, the SCM's wait) cut short, leaving
+a clean stop counted; the second began it as any stop arrived, ready or not,
+so a version that hung past its admission, stopped and killed, took its
+count back every time and never reached its rollback (the third round). A
+stop before ready takes its count back once the teardown has run, and a
+start killed in that teardown stays counted, a slow but healthy start
+included. A crash in the teardown after a stop is not counted, by the same
+rule: the stop came first. Whether an end is a stop is asked once the
+teardown has run, of the caller's context and the restart request as they
+stand then, never of the stop's notice, which an error at once after the
+stop can beat (the AfterFunc runs on a goroutine of its own; the third
+round). The other clean ends are taken back after the teardown, reading a
+local flag (`notAFailedStart`) that exactly they set: a bind refused for an address another process holds, one
 the host does not have (`doctor.IsAddrNotAvail`, the second round: a static
 address not up yet after a reboot made four counted starts in a row, and
 the fourth put back a backup that met the same refusal), or a permission the
@@ -2589,15 +2599,22 @@ backup would meet too (`bindRefusalIsTheHosts`: not where `.bak` carries
 file capabilities the binary does not), the API's or the console's
 (`doctor.IsAddrInUse`, `IsAddrNotAvail` and `IsBindPermission`, exported,
 the Windows arms reading Winsock's `WSAEADDRINUSE`, `WSAEADDRNOTAVAIL` and
-`WSAEACCES`, since syscall's alone are always false there); and a failure of
-the tailnet's network (`tailnetNetworkFailure`: a `*net.OpError` or
-`net.ErrClosed`, which the line names; any other failure of the listener
-counts, the second round). Never `code`: `runServe` does not recover, and a
-panic on serve's goroutine runs the defers with `code` still 0. The
-take-back after the teardown gives the marker's lock 2 s (`takeBackWait`),
-and is also the last try of a stop's that never had its answer; each goes on
-where the filesystem keeps none, as a disarm does, and writes only where the
-marker is still an armed
+`WSAEACCES`, since syscall's alone are always false there); and an end of
+the tailnet listener that serve itself began (`tailnetEndIsServes`: its stop
+of the tailnet side marked begun, `tsnetFront.closeBegun`, or
+`http.ErrServerClosed`; the third round: the second took a `*net.OpError` or
+`net.ErrClosed` for a failure of the tailnet's network, but tsnet's listener
+answers `net.ErrClosed` once anything closes it and blocks while the tailnet
+is down, so every other end of it counts, which the line names). Never
+`code`: `runServe` does not recover, and a panic on serve's goroutine runs
+the defers with `code` still 0. Every take-back asks for the marker's lock
+again, a wait at a time, until it lands or the stop's budget ends
+(`stopBudget`, 10 s from the stop's arrival, or from the teardown's end
+where no stop arrived: the teardown and the take-back together, inside the
+Windows updater's 15 s wait for the SCM, launchd's 20 s and systemd's 90 s;
+the second round gave the take-back after the teardown a fixed 2 s); each
+goes on where the filesystem keeps none, as a disarm does, and writes only
+where the marker is still an armed
 install of this version holding the count this start wrote (`FailedStarts
 == CountTried`): a stop after the confirmation and a restart into a newer
 install touch nothing, and no earlier start's count goes with this one. A
@@ -2714,9 +2731,11 @@ refuses it at its second check.
 
 *The report* has one source, `updater.ProbationStatus(st, current,
 running)`, in words that name no path or value: `Says`, the starts that did
-not end cleanly, less the one a serve holding the data dir's lock counts
-until it stops cleanly (`running`, `updater.ServeHoldsDataDir`; the second
-round: until then one was taken off whether or not a serve ran), graded by
+not end cleanly, less the one a serve running now counts until it stops
+cleanly (`running`, `updater.RunningServeCounted`; the second round: until
+then one was taken off whether or not a serve ran; the third: a start runs
+only where the marker's token names a lock that start holds, never by the
+data dir's lock), graded by
 `Level`, for `bridge doctor`'s `install-probation` line, one builder for the
 CLI and the console's doctor (none where no install awaits; ok with none,
 warn from one, fail at the limit, beside a refused rollback, or with
@@ -2786,7 +2805,8 @@ the backup that predates the check, the hold's arms and the report's words
   a start of an install of this version awaiting its confirmation
   (`RunningServeCounted`, `MigrationHeldIn`, which the doctor's line, its
   store probes and restore's check ask too), so a command or a doctor with no
-  count to read tries no lock. `ServeHoldsDataDir` answers this process's
+  count to read tries no lock (replaced in the third round by the start's
+  own lock, below). `ServeHoldsDataDir` answered this process's
   own holds from what it noted (`NoteDataDirLock`: serve's as a serve's,
   restore's, reset-player's, clear-missing's and the DAC bind's as a
   command's), since a try of the lock cannot tell this process's serve from
@@ -2861,9 +2881,72 @@ killed with SIGKILL while a held connection keeps its drain going),
 and `TestIsBindPermissionMatchesWhatTheHostAnswersARefusedBind`
 (internal/doctor) pin it.
 
+*The third round* (2026-11-07, PR #1424's second review). Besides the
+arming at ready, the stop asked of itself, the tailnet's end, the budget and
+the probe's second loopback (each in its paragraph above):
+
+- *A running start is the lock its own token names.* The second round read a
+  serve's start in the count wherever `server.lock` was held, which a
+  command holds too (`bridge reset-player`, `restore`, `manifest
+  clear-missing`, `output dac bind`): one failed start, the service stopped,
+  a command holding the lock, and a `bridge doctor` beside it took the
+  command for the counted serve, took the failure off, and migrated the
+  store; and a stop whose count was taken back while its serve still held
+  the lock had the one left taken off again. The admission now makes a
+  random token, takes the lock it names (`serve-start-<token>.lock`, a file
+  made for it, `updater.StartHold`) and writes the token with the count
+  (`State.RunningStart`); `RunningServeCounted` needs the marker's token and
+  that lock held, tried without waiting. Only a counted start takes such a
+  lock, and the kernel lets it go with a killed process, so a start killed
+  with its token left reads as none, with no process liveness read. The
+  take-back clears the token in its decrement's write, every return of
+  `runServe` clears it where the marker still names it, keeping the count
+  where it was not taken back (`updater.EndStart`: the launcher returns to
+  its menu with the process alive), and lets the lock go, and the
+  confirmation clears it; the next counted start sweeps the files of starts
+  that hold theirs no more. The in-process registry the second round added
+  (`NoteDataDirLock`, `ServeHoldsDataDir`) goes. A migrating open reads the
+  running start of the marker it reads under the install marker's lock (the
+  second round read it before its wait for that lock, so a take-back that
+  landed in the wait, two counted to one and the token cleared, was taken
+  off twice), and the try of the start's lock never waits, so no lock is
+  waited for against the order (server.lock, the ladder,
+  update-state.lock). 0.2.3 reads a marker with the token as a plain
+  `json.Unmarshal`, which drops a field it does not know.
+- *The words follow the code.* PROTOCOL.md's paragraph said three unclean
+  starts put the backup back, the auto-installer's hold applied after an
+  unclean start and lasted at most 20 minutes of the install, and that
+  `.bak` was one the rollback would put back; it says now that the next
+  start tries, that the hold applies from the first start for at most 20
+  minutes of the process's uptime, which each restart starts again, and
+  that it asks the marker and `.bak`'s presence alone (its iOS mirror is
+  owed). The log's trade-off line on the count is qualified the same way.
+
+`TestAStopBeforeReadyStaysCountedUntilItsTeardownHasRun`,
+`TestAStopBeforeReadyIsNotArmedByAReadyAnswerInItsTeardown`,
+`TestAServeKilledInItsTeardownBeforeReadyStaysCounted` (a real serve
+process), `TestAStopBeforeAnErrorIsAStop`,
+`TestTheDoctorBesideACommandHoldingTheDataDirsLockCountsEveryStart`,
+`TestTheDoctorAfterAStopsTakeBackCountsTheStartsBeforeIt`,
+`TestACountedStartCarriesItsTokenUntilItReturns`,
+`TestATailnetListenerThatFailsIsAFailedStart`,
+`TestOnlyACloseServeBeganEndsItsTailnetListenerCleanly`,
+`TestAStopsTakeBackWaitsForTheMarkersLockWithinItsBudget`,
+`TestTheStopBudgetIsInsideEveryServiceManagersWait`,
+`TestTheReadinessProbeTriesTheIPv6LoopbackForAWildcard` and
+`TestBridgeHealthTriesTheIPv6LoopbackForAWildcard` (cmd/bridge);
+`TestARunningStartIsTheLockItsTokenNames`,
+`TestAMigrationReadsTheRunningStartUnderTheMarkersLock`,
+`TestTheTakeBackClearsItsStartsToken`,
+`TestTheAdmissionWritesItsStartsTokenWithItsCount`,
+`TestEndStartClearsOnlyItsOwnToken` and
+`TestThePreviousReleaseReadsAMarkerWithARunningStart` (internal/updater)
+pin it, with the second round's early take-back tests, which wait for the
+confirmation's window first.
+
 *Left.* What B660 leaves uncovered is filed as backlog B760. The records
 are in `ops/engineering-log.md`, 2026-11-06, B660, and 2026-11-07, its
-second round.
+second and third rounds.
 
 ## Config, settings and process lifecycle
 
