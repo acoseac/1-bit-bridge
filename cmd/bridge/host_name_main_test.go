@@ -1,7 +1,6 @@
 package main
 
 import (
-	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -72,47 +71,40 @@ func TestAnASCIIHostNameIsCertifiedAndAdvertisedAsOnMain(t *testing.T) {
 }
 
 // TestAConfiguredNameTheCertificateCannotCarryStillRefuses: B739 changes only
-// what the host's reported name becomes. A name the operator configured (a
-// customEndpoints entry, here one whose host is not ASCII) is a name the
-// bridge advertises as written, so it still refuses the certificate, as on
-// main: leaving it out would publish an endpoint the certificate does not
-// cover. The refusal names the configured host. This test passes on main's
-// code too; TestAConfiguredNameStillRefusesBesideAConvertedHostName is the
-// same on a host whose own name B739 converts.
+// what the host's reported name becomes, and the mint converts nothing
+// configured (tls.dnsNames converts the reported name alone). A configured
+// name reaches it in the form the load gives it: since B744 every
+// customEndpoints entry and autocert.domain loads in its IDNA ASCII form or
+// not at all (TestAConfiguredNameThatIsNotASCIIIsCertifiedInItsIDNAForm). So
+// a config never loaded, built in memory, whose customEndpoints hold a host
+// that is not ASCII still refuses the mint, naming the host, with no
+// certificate left behind: certifying another name than the one the bridge
+// advertises would publish an endpoint the certificate does not cover. This
+// test passes on main's code too;
+// TestAConfiguredNameStillRefusesBesideAConvertedHostName is the same on a
+// host whose own name B739 converts.
 func TestAConfiguredNameTheCertificateCannotCarryStillRefuses(t *testing.T) {
 	assertAConfiguredNameRefuses(t, "musicbox")
 }
 
-// assertAConfiguredNameRefuses fails unless, on a host named host, a
-// customEndpoints entry whose host is not ASCII loads, reaches the
-// certificate's want-set as written, and makes `bridge cert rotate` refuse,
-// naming it, with no certificate left behind.
+// assertAConfiguredNameRefuses fails unless, on a host named host, a config
+// never loaded whose customEndpoints hold a host that is not ASCII hands the
+// certificate's want-set that host as written, and the mint refuses it, naming
+// it, with no certificate left behind.
 func assertAConfiguredNameRefuses(t *testing.T, host string) {
 	t.Helper()
 	reportHostName(t, host)
-	dir := t.TempDir()
-	cfgPath := writeInstallAt(t, dir, "Artist/Album/01.flac")
-	appendYAML(t, cfgPath, "customEndpoints:\n  - https://café.example:7788\n")
-	cfg, err := config.Load(cfgPath)
-	if err != nil {
-		t.Fatal(err)
+	cfg := &config.Config{CustomEndpoints: []string{"https://café.example:7788"}}
+	opts := certSANOptions(cfg)
+	if !slices.Contains(opts.ExtraDNSNames, "café.example") {
+		t.Fatalf("the certificate's want-set does not take the configured name as written: %q", opts.ExtraDNSNames)
 	}
-	if !slices.Contains(cfg.CustomEndpoints, "https://café.example:7788") {
-		t.Fatalf("premise: the config keeps the configured endpoint: %q", cfg.CustomEndpoints)
+	certPath, keyPath := servertls.DefaultPaths(t.TempDir())
+	err := servertls.GenerateWithOptions(certPath, keyPath, opts)
+	if err == nil || !strings.Contains(err.Error(), "café.example") {
+		t.Fatalf("the mint of a name it cannot carry answered %v, want a refusal naming café.example", err)
 	}
-	if !slices.Contains(certSANOptions(cfg).ExtraDNSNames, "café.example") {
-		t.Fatalf("the certificate's want-set does not take the configured name as written: %q",
-			certSANOptions(cfg).ExtraDNSNames)
-	}
-
-	var stdout, stderr strings.Builder
-	if code := certRotateCmd([]string{"--config", cfgPath, "--yes"}, nil, &stdout, &stderr); code != 1 {
-		t.Fatalf("bridge cert rotate exited %d, want 1; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
-	}
-	if !strings.Contains(stderr.String(), "café.example") {
-		t.Errorf("the refusal does not name the configured host: %q", stderr.String())
-	}
-	if _, err := servertls.Inspect(filepath.Join(dir, "data", servertls.CertFileName)); err == nil {
+	if _, err := servertls.Inspect(certPath); err == nil {
 		t.Error("a refused mint left a certificate behind")
 	}
 }

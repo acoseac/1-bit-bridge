@@ -83563,6 +83563,570 @@ reported); and `TestEveryCitedTestNameExists` on a `git archive` copy of
 the tree with the patch applied, ok. Not run here: Windows and macOS
 natively (the Windows fix is for CI's `test (windows-latest)` to show),
 `make build-all`, and the iOS app.
+
+## 2026-11-07 — B740: the build-site census skips make test's TMPDIR
+
+Backlog B740, the first of four small follow-ups on
+`fix/b74x-small-followups` from main c7192a6f, worker b74x on legion0
+(Linux, amd64, go1.27.3, `GOTOOLCHAIN=local`, `GOPROXY=off`). Commits: the
+red test 350c405a, the fix 98c1f871, then this record. The rule's line goes
+into `.claude/rules/build-ci-tests.md` through `rules-b74x.patch`, its long
+form under B740 in `ops/History-rules-build-ci-tests.md`.
+
+**What happened.** The build-site census (`discoverBuildSites`, shared by
+`TestBuildTagsAgree`, `TestRealTreeBuildSiteCensus` and
+`-check-build-tags`) walks every operational file the walk reaches, and it
+reached `.tmp`, which `make test` and `make test-fast` give every package's
+tests as TMPDIR when the caller sets none (B544). Those tests make and remove
+temporary files there while the suite runs: `scripts/install-test`'s
+`TestTheUserManagerIsFoundOrNothingChanges` puts a link at
+`run/user/1000/bus` in its rig's root, an extensionless name whose mode reads
+executable on Unix, and the census failed "build site must not be a symlink"
+on it (B739's last record: the merged head's only failure on one host). It
+could as well meet a test's stub that runs `go`, or a file removed between
+its listing and its read.
+
+**Red first.** With a link planted in this worktree at
+`.tmp/b740-planted/run/user/1000/bus`, leading nowhere as install-test's does
+once its socket goes, at 350c405a: a bare `go test ./scripts/third-party-licenses/`
+(TMPDIR unset, so `/tmp`) and `make test-fast TEST_PKGS=./scripts/third-party-licenses/`
+(TMPDIR the worktree's `.tmp`) both failed `TestBuildTagsAgree` and
+`TestRealTreeBuildSiteCensus` with "build site must not be a symlink:
+.tmp/b740-planted/run/user/1000/bus": the census reads the repository's
+`.tmp` wherever the environment's TMPDIR is. The committed red,
+`TestTheCensusSkipsTheMakefilesTMPDIRAtTheRoot`, plants in a fixture's `.tmp`
+(the directory read from the Makefile, never the environment) install-test's
+link, a link named as a build site, a stub that runs `go build` and a note
+holding a command, and failed on the first; its rows elsewhere (a link at the
+root, in `docs/.tmp`, in a look-alike `.tmp.old`, install-test's link under
+`scripts/`, and a note in a `.tmp` below the root) failed the census as they
+must, then and after.
+
+**The fix.** The census skips `makeTestTmpDir`, ".tmp", at the root alone,
+by its name before it lists it, where the `_` rule is, for the tests and
+`-check-build-tags` alike: a `make build` beside a running `make test`, or a
+`make build-all` after a killed test binary left its trees there, met the
+same files. `TestTheCensusSkipsTheMakefilesTMPDIR` reads the Makefile's
+TMPDIR line (the `$(CURDIR)/<dir>` of the lines that assign TMPDIR, recipe
+lines and comments excluded) and fails when it and the constant diverge, so
+a rename of either alone cannot put the census back in the suite's files.
+Rejected: skipping the environment's TMPDIR, which a bare `go test` sets
+elsewhere (control C740-3: green under make test-fast's, red under a bare
+run's), and skipping every dot-directory as the Go-file sweeps do (`.github`
+and `.claude` hold sites the census reads). Those sweeps
+(`TestEveryCitedTestNameExists`, the hash-cost, flac-handle and blank-keeper
+guards) already skip every name the go tool ignores, `.tmp` among them, so
+the census was the one sweep that read it.
+
+**Negative controls**, at 98c1f871 with the link still planted
+(`.tmp/_b74x/ctl.py`: exact-once replacements, the test binary built, each
+test run alone, the bytes put back from memory), predicted by name in
+`.tmp/_b74x/controls-b740.predictions.txt` before the run; every one as
+predicted, the baseline green and `git status` unchanged after. A is
+`TestTheCensusSkipsTheMakefilesTMPDIRAtTheRoot`, M
+`TestTheCensusSkipsTheMakefilesTMPDIR`, G `TestBuildTagsAgree`, R
+`TestRealTreeBuildSiteCensus`, X `TestCensusExcludedTreesAndRecords`.
+
+| Mutation | Red | Green |
+|---|---|---|
+| C740-1 the skip removed | A's TMPDIR row, G, R | M, X |
+| C740-2 skipped by its base name at any depth | A's three rows below the root | G, R, M, X |
+| C740-3 the environment's TMPDIR skipped, a bare run's (`.tmp/_b74x/gotmp`) | A's TMPDIR row, G, R | M, X |
+| C740-3 again, make test-fast's TMPDIR (the worktree's `.tmp`) | A's TMPDIR row | G, R, M, X |
+| C740-4 the Makefile's default renamed `.scratch` | M, A's TMPDIR row | G, R, X |
+| C740-5 the constant renamed `.cache` | M, A's TMPDIR row, G, R | X |
+
+**After**, with the link planted: the package's whole suite under a bare
+`go test` (TMPDIR unset), ok; `make test-fast` with the default TMPDIR is
+among the branch's gates (B745's record).
+
+## 2026-11-07 — B742: the watcher's hint for a root holding only links to directories
+
+Backlog B742, the second item on `fix/b74x-small-followups`, worker b74x, as
+for B740. Commits: the red tests a1384d59, the fix f123833e, then this
+record. The rule's line goes into `.claude/rules/scanner.md` through
+`rules-b74x.patch`, its long form after B74's in
+`ops/History-rules-scanner.md`.
+
+**What happened.** `lookAtRoot`, the look by which the library watcher
+holds a root (B651) and `protectNestedRoots` spares a nested one, read a
+root holding nothing but links to directories, over tracks the index holds,
+as `rootAbsentEmpty`, an emptied mount point, while the scan's
+`emptyRootMustBeSpared` tells that case apart (`msgRootOnlyDirLinks`, B74: a
+link stat'ed through to a directory says the volume holding the root is
+there). So the watcher held such a root and said "check that its volume is
+mounted". Nothing was lost (the root is held as its rows are spared); the
+hint was wrong. The owning-root audit had a third copy of the distinction.
+
+**Red first.** At a1384d59, the fix's tests on main's code:
+`TestTheWatchersHoldAndHintReadARootAsTheScanDoes`, a table of seven shapes
+of a root after a scan indexed it, each through the watcher's
+`holdAbsentRoots` (what Run does before any watch) and a full scan at a
+threshold of one, failed in one row alone, "only directory links, with
+indexed rows": `reads="empty"`, want `only-dir-links`, and the hint "check
+that its volume is mounted: …", want the scan's message. The other six rows
+held as they hold now and the scan spared or pruned as it does:
+
+| Shape | Held, reads= | Hint | The scan's line | Rows after |
+|---|---|---|---|---|
+| absent (the root moved away) | yes, `unreachable` | check the volume | root unreachable | kept |
+| empty | yes, `empty` | check the volume | suspected clean-empty mount failure | kept |
+| only directory links, indexed rows | yes, `only-dir-links` (was `empty`) | `msgRootOnlyDirLinks` (was check the volume) | `msgRootOnlyDirLinks` | kept |
+| only directory links, no indexed rows | no | | none | none |
+| a directory link and a file link | no | | none | the file link's; the rows under the directory link pruned |
+| a dangling directory link | yes, `empty` | check the volume | suspected clean-empty mount failure | kept |
+| real content | no | | none | the content's; the gone folder's pruned |
+
+`TestAParentScanSparesANestedRootHoldingOnlyLinksToDirectories`, green at
+a1384d59 and after: a root nested in another, holding only a link to a
+directory over its tracks, is spared by four subtree scans of the outer root
+and four full scans at the production threshold: the outer root's row under
+its folder, its own row, and both folder rows stay, no missed scan counted.
+
+**The fix.** `lookAtContentlessRoot(ctx, store, root, multiRoot, dirLinks)`
+is the one reading of a root holding no content and no sentinel: a count
+that fails is `rootAbsentUncounted`, none `rootLook{}`, tracks with a link to
+a directory `rootOnlyDirLinks` ("only-dir-links"), tracks without one
+`rootAbsentEmpty`, every absent case `absent: true` as before. The scan's
+guard logs by its reason (the same lines as before), the audit refuses by it
+(the same errors), and the look passes the links its listing holds
+(`dirHoldsLibraryContent` counts them through `listingContent`, which
+`holdsLibraryContent` wraps). The watcher's held line keeps its message and
+its attributes; its hint is `heldHint(look)`, the scan's existing message
+(`msgRootOnlyDirLinks`) for the links case and `heldRootHint` for every
+other. `absent` is unchanged in every case, so the watcher holds and the
+parent scans spare exactly what they did.
+
+**Negative controls**, at f123833e (`.tmp/_b74x/ctl.py`), predicted by name
+in `.tmp/_b74x/controls-b742.predictions.txt` before the run; every one as
+predicted, the baseline green and `git status` clean after. T is the table,
+P the parent-scan test, L `TestScanner_ARootHoldingOnlyLinksToDirectoriesNamesThem`,
+N `TestScanner_ALinkToADirectoryNamedLikeATrackIsNotContent`, S
+`TestScanner_ASubtreeMissBesideOnlyLinksNamesThem`, E
+`TestScannerSparesRowsOnCleanEmptyMount`, U
+`TestAuditOwningRootOnSubtreeMissReturnTypes`, W
+`TestTheWatcherWaitsForAnUnmountedRootAndWatchesWhatIsMountedThere`.
+
+| Mutation | Red | Green |
+|---|---|---|
+| C742-1 the shared reading without its links case | T (the links row: reads, hint, and the scan's clean-empty line), L (all four), N, S (both): the look, the guard and the audit together | P, E, U, W |
+| C742-2 the links case not absent | T (not held, rows pruned), P (the nested root unspared), L (rows gone by the third scan), N | S (the audit refuses by the reason), E, U, W |
+| C742-3 the hint not chosen by the reason | T (the hint alone) | the rest |
+| C742-4 the look counts no links | T (reads `empty`, the mount hint) | the rest |
+| C742-5 the audit counts no links | S ("suspected mount drop") | the rest |
+
+C742-1 is the shared classifier's control: one mutation of it reaches the
+watcher's look, the scan's guard and the subtree audit at once. C742-2 shows
+the hold and the sparing pinned by the table and the parent-scan test, the
+words staying.
+
+## 2026-11-07 — B744: configured hosts in their IDNA form, a library name without its controls, and the mDNS responder's name
+
+Backlog B744, the third item on `fix/b74x-small-followups`, worker b74x, as
+for B740: four follow-ups to B739, each with a red commit and its fix. The
+rules go into `.claude/rules/auth-tls.md` and `wire.md` (part 1),
+`config-lifecycle.md` (part 2) and `cli-serve.md` (parts 3 and 4) through
+`rules-b74x.patch`; the long forms of the last two files' lines are in
+`ops/History-rules-config-lifecycle.md` and `ops/History-rules-cli-serve.md`
+under B744.
+
+**Part 1, a configured host that is not ASCII** (red 76dd31b9, fix
+3059c845). B739 left a configured name as written: a `customEndpoints`
+entry or `autocert.domain` whose host is not ASCII loaded, reached the
+certificate's want-set, and every mint refused it, since x509 takes an
+ASCII DNS name alone. At the red, `bridge init --public --domain
+münchen.de` exited 1 with "TLS cert: generate TLS material: create cert:
+x509: "münchen.de" cannot be encoded as an IA5String", after making its
+config dir, and a hand edit of `customEndpoints` made `bridge cert rotate`
+refuse (B739's own test of it). Red there:
+`TestALoadedCustomEndpointThatIsNotASCIITakesItsIDNAForm` (the file and
+`BRIDGE_CUSTOM_ENDPOINTS`: kept as written, nothing said),
+`TestALoadedAutocertDomainThatIsNotASCIITakesItsIDNAForm`,
+`TestATypedCustomEndpointIsConvertedOrRefused` (a host with no form not
+refused), `TestNormalizeServesAutocertDomainAsItsHost`'s internationalized
+row, `TestTheSettingsPatchConvertsACustomEndpointHostThatIsNotASCII` (200
+for a host with no form, want 400), `TestInitConvertsADomainThatIsNotASCII`
+(exit 1 for each spelling) and
+`TestAConfiguredNameThatIsNotASCIIIsCertifiedInItsIDNAForm`. The fix:
+`hostname.Configured` keeps an ASCII host byte for byte (its case, an
+underscore) and gives one that is not ASCII the conversion `hostname.ASCII`
+gives the host's own name, idna.Lookup's ToASCII (case mapped: `münchen.de`
+and `MÜNCHEN.DE` are both `xn--mnchen-3ya.de`) held to 63 bytes a label and
+253 a name. Where it loads, by the field's existing policy:
+`ValidateCustomEndpoints` publishes an entry's host in that form, its port
+and place kept, said once at Info, and drops one with no form with the
+prune's warning; Normalize serves the domain in that form, or as
+`InvalidAutocertDomain` with a warning where it has none. Both are
+infallible after Normalize's one fallible step, so its all-or-nothing
+contract holds and no config refuses to start over a host. Where it is
+typed: the settings save takes an entry with a form (Normalize stores the
+form) and refuses one with none (`CheckCustomEndpoints`, 400 `validate`,
+the file untouched), and `bridge init --domain` writes the form, says so,
+and refuses a domain with none, exit 2, before anything is written
+(`a_ü.example`, `-ü.example` and a label of 58 `ж`, whose form is 64 bytes,
+have none). The mint
+converts no configured name: `TestAConfiguredNameTheCertificateCannotCarryStillRefuses`
+and its twin now hand the mint a config built in memory, never loaded, and
+still pass on main's code and after. `golang.org/x/net` is already a direct
+dependency (internal/tls and internal/hostname import idna): go.mod and the
+licence census are unchanged.
+
+**Part 2, a library name's control characters** (red 6391c6d4, fix
+cd8394aa, the rows past the cap 86581cdd). A library name kept the runes
+U+0000 to U+001F, U+007F and U+0080 to U+009F wherever it was set but the
+host's name (`firstInstallName`, B739): init's `--name` and its prompt, the
+console's save, and what loads (bridge.yaml, `BRIDGE_LIBRARY_NAME`, a prior
+install's name, which the prompt offers and `--yes` keeps); and
+`sanitizeInstance` kept the C1 ones in the Bonjour instance. Red at
+6391c6d4: `TestInitTypedNameLosesItsControlCharacters`,
+`TestInitPromptedNameLosesItsControlCharacters`,
+`TestInitOffersAnInstallsNameWithoutItsControlCharacters`,
+`TestTheSettingsSaveStripsControlCharactersFromTheName`,
+`TestALoadedLibraryNameLosesItsControlCharacters`,
+`TestALibraryNameInTheFileLosesItsControlCharacters` and
+`TestSanitizeInstanceStripsEveryControlRune`; green there, as they must
+stay, `--name`'s refusal of bytes that are not UTF-8 beside a control, and
+the rows of runes whose second byte is a C1 number (`Ā` C4 80, `š` C5 A1).
+The fix: `config.WithoutControlCharacters`, the one strip, of runes after
+decoding; `CleanTypedLibraryName` for every typed entry (trim, the UTF-8
+refusal first, strip, trim, then the entry's blank and length policy) and
+`RepairLibraryName` for what loads (U+FFFD, trim, strip, trim, cut, with
+the repair's WARN); `firstInstallName` and `sanitizeInstance` through the
+same function, init.go's copy gone. Each typed test reloads the file it
+saved and compares the live name with the reloaded one.
+
+Negative controls (`.tmp/_b74x/ctl2.py`, as `ctl.py` for B740 with the
+output read as bytes), predicted by name in
+`.tmp/_b74x/controls-b744-2.predictions.txt` before the first run, at
+cd8394aa, and in `controls-b744-2b.predictions.txt` before the second, at
+86581cdd; the baseline green and `git status` clean after each. TI, TP and
+TO are the three init tests above in order, TR
+`TestInitRefusesANameAPairingCodeCannotCarry`, TA
+`TestInitAsksAgainForANameAPairingCodeCannotCarry`, TK
+`TestInitKeepsTheNameAnInstallIsServedUnder`, TD
+`TestTheDefaultLibraryNameIsTheHostsNameAsItReads` (cmd/bridge); CL and CF
+the two config tests; AS the admin test; MS
+`TestSanitizeInstanceStripsEveryControlRune` and MD
+`TestSanitizeInstanceStripsDotsAndControlChars` (mdns).
+
+| Mutation | Red | Green |
+|---|---|---|
+| C744-2a the strip before the UTF-8 refusal | TI ("not UTF-8, with a control"), TP (asked once, `Caf` and U+FFFD saved), TR (both "not UTF-8" rows) | TO, TA, TK, TD, CL, CF, AS, MS, MD |
+| C744-2b the strip by bytes | TI, TP, TO, TD (`Жук`, `DESKTOP-日本`, the test Mac's bytes mangled), CL, CF, AS, MS | TR, TA, TK, MD |
+| C744-2c `sanitizeInstance`'s own strip back (C0 and DEL) | MS | the rest |
+| C744-2d `RepairLibraryName` without the strip | TO, CL, CF | the rest |
+| C744-2e `CleanTypedLibraryName` without the strip | TI, TP, AS (each "nothing but controls" row alone) | the rest |
+| C744-2e again, at 86581cdd | TI and AS ("nothing but controls", "controls past the cap"), TP ("nothing but controls") | the rest |
+| C744-2de both strips gone | TI, TP, TO, CL, CF, AS (every row with a control) | TR, TA, TK, TD, MS, MD |
+
+Every test went red or green as predicted; in the first run the rows of
+two mutations did not. Under C744-2b the rows with controls between spaces at a name's ends
+stayed green: the trim before the strip takes U+0085 for white space, so
+the byte strip never met it. Under C744-2e only the rows of a name that is
+nothing but controls went red: the save runs Normalize, whose repair
+strips the rest, so the stored bytes are guarded twice. The rows past the
+cap (86581cdd: 260 runes typed, 250 once the controls are gone, stored)
+are what the typed strip alone decides with that one; the second run
+predicted them, and C744-2de, both layers gone, every row with a control.
+
+**Part 3, a failed responder's line** (red 2e955761, fix 4ebdbe22). With
+`mdns.enabled` on, /v1/health, the pairing QR and the doctor list the
+`.local` endpoint of a host whose name is converted (B739's second round)
+from the setting, whether or not the responder started, and only that
+responder answers it; a failure said only "mDNS advertise failed
+(non-fatal)". `TestAFailedResponderSaysTheConvertedLocalNameWillNotResolve`
+forces the failure through `mdnsLifecycle.start` (a per-instance seam, nil
+`bridgemdns.Advertise`): red for `Жук` at 2e955761, green for an ASCII name
+and a name with no valid form, which get the failure's line alone, then and
+after. The fix says, beside it, that `https://xn--f1ai0a.local:<port>` will
+not resolve while mDNS is down, from `advertise.OwnResponderEndpoint`
+(`Endpoints`' own helper, `localEndpoint`, through the same host-name
+probe); no state is kept and what is published is unchanged.
+
+**Part 4, the started responder asked** (red b5b147cc, fix 415a141d).
+`TestServeOnAHostWhoseNameIsNotASCII`'s mDNS-on row pinned the responder
+to loopback and asked it nothing. It now asks the started responder, as a
+LAN client asks, from a querier bound to the interface the responder is
+pinned to, multicast loopback on (`mdns_query_test.go`); the interface is
+chosen, and the skip decided and recorded as a skipped subtest saying why,
+before the responder starts, and a question unanswered for 10 s after it
+is a failure. Red at b5b147cc on enp4s0: "the started responder left the A
+question for xn--f1ai0a.local. unanswered on enp4s0 for 10 s". The
+transport answered: the same row asking for `legion0.local`, the name the
+system reports, passed (`.tmp/_b74x/b744_4_redcheck.py`, the test's bytes
+put back from memory), so the responder published `os.Hostname`'s name,
+not the probe's. The fix: `mdns.Config.HostnameSource`, read at each
+rebuild (nil is `os.Hostname`), which the lifecycle sets to
+`advertise.ReportedHostname`, the probe the endpoints and the certificate
+read. In production both read `os.Hostname`, so nothing changes there; the
+row passes on enp4s0 in under half a second.
+
+**Part 4's cross-talk** (ee885b74, found before the gates ran). The fix
+made two tests publish `xn--f1ai0a.local` from a live responder: the serve
+row on enp4s0, and internal/mdns's
+`TestAClientResolvesTheASCIINameThroughTheBridgesResponder` on loopback
+with 127.0.0.1. On Linux a socket joined to the mDNS group on one
+interface also takes the group's datagrams arriving on another where a
+socket joined (`IP_MULTICAST_ALL`, which hashicorp/mdns leaves on; the
+DLNA rules record the same for SSDP), and each test took the first answer
+naming the host, so under a parallel `make test` either could take the
+other responder's answer and fail. Measured with a probe
+(`.tmp/_b74x/xtalkprobe`, hashicorp/mdns v1.0.7, a socket joined on the
+asking interface): a responder pinned to lo answered a question asked on
+enp4s0 with A 127.0.0.1, and one pinned to enp4s0 answered a question
+asked on lo with A 192.168.0.139, the reply's source address being the
+host's either way. Each question now takes only an answer carrying the
+address it asks for, and keeps asking until its deadline; both tests pass
+alone.
+
+**Process.** Every multi-package run went through the build lock but one: a
+two-package `go test ./internal/config/ ./internal/hostname/` at part 1's
+green, 9 s, outside it (`.tmp/_b74x/b744-1-green-config.log`). The
+branch's gates are in B745's record.
+
+## 2026-11-07 — B745: the player's DSD state in the CLI's rules, and a Windows restore of the player's files
+
+Backlog B745, the last item on `fix/b74x-small-followups`, worker b74x, as
+for B740. Commits: the red f416a082, the fix 93ba1e34, the rule's long form
+fc6aab6a (under B745 in `ops/History-rules-cli-serve.md`), then this
+record; the rule's line in `.claude/rules/cli-serve.md` ships in
+`rules-b74x.patch`.
+
+**What happened.** `cli-serve.md`, which loads with `internal/backup`, had
+no bullet for the snapshot's newest file, `player-dsd.json`: the DSD
+state's backup and restore rules (B728 B3) are in `player.md`, which loads
+with the player's packages, so a session changing the backup met no rule
+for it. And a snapshot a Linux box takes once its player has run holds
+both of the player's files, the identity (`player-uuid`, with
+`player-ids.json`) and the DSD state. Restored on Windows, where no
+directory can be synced (`atomicwrite.ErrNoDirectoryBarrier`) and the
+player does not run, each is refused, the DSD state as the identity is:
+the owner's decision in B728, kept. The DSD state's refusal named the way
+through, removing it from a copy of the snapshot; the identity's, "restore
+player reservation: atomicwrite: this platform cannot fsync a directory,
+so no write here is made durable: unsupported operation", named none.
+
+**Red first.** At f416a082,
+`TestARestoreWhereNoDirectoryCanBeSyncedRefusesThePlayersFilesNamingTheWay`
+takes a snapshot where directories sync and restores it with the barrier
+taken away (`atomicwrite.SetSyncDirForTest(nil)`, the existing seam, so it
+runs natively on every OS), for the identity, the DSD state and both: red
+for the identity and for both (the refusal said neither that nothing was
+restored nor the way through), green for the DSD state alone, whose
+refusal said both already.
+
+**The fix** (93ba1e34). `RestoreWithOptions` asks once, after reading both
+files from the snapshot and comparing the config and before its first
+write, whether a directory can be synced (`atomicwrite.HasDirectoryBarrier`,
+which reads the barrier the strict writer reads), and refuses a snapshot
+holding either file through `playerFilesNeedABarrier`:
+`ErrNoDirectoryBarrier` wrapped, every one of those files the snapshot
+holds named (`player-uuid`, `player-ids.json` where the manifest lists it,
+`player-dsd.json`), nothing restored, and the way through, removing them
+from a copy of the snapshot, which then restores the rest while this box
+keeps its own. The test's last step takes that way: the copy restores
+`tokens.json` and writes neither of the player's files.
+`restorePlayerDSD`'s own refusal stays behind the check.
+
+**Negative controls** (`.tmp/_b74x/ctl2.py`, `spec_b745.py`), predicted by
+name in `.tmp/_b74x/controls-b745.predictions.txt` before the run, at
+93ba1e34; the baseline green and `git status` clean after each. N is the
+new test, D `TestARestoreThatCannotWriteTheDSDStateDurablyRestoresNothing`,
+L `TestARestoreWhoseBarrierFailsOnceTheStateLandedSaysItChanged`, U
+`TestSnapshotCarriesThePlayerUUIDAndRestoreWritesItAsTheIdentityFile`.
+
+| Mutation | Red | Green |
+|---|---|---|
+| C745-1 the check removed | N (the identity, and both) | N's DSD-state row, D, L, U |
+| C745-2 the check removed and the DSD state's writer not durable (`atomicwrite.WriteBytes`) | N (all three rows), D, L | U |
+
+C745-2's first run did not build ("path/filepath" imported and not used),
+which is no verdict, as the predictions file records; it was run again
+with the path cleaned through `filepath`, its prediction unchanged, and
+went as predicted. C745-1 is the brief's control, the check removed: the
+test fails for the identity, and for the DSD state once its writer's own
+refusal, the second layer, is gone too.
+
+**The branch's gates**, at fc6aab6a (the code as it ships; only this
+record follows it):
+
+- `make test-fast` through the build lock (`buildslot.py b74x`), TMPDIR
+  unset, so the Makefile's default, the worktree's `.tmp`, with B740's
+  planted link in it: 87 packages ok and 14 with no test files, none
+  failed, in about eight minutes once the slot was taken. Among them the
+  Linux-only paths, run here and not only vetted: `internal/alsa`,
+  `internal/alsapcm` (42.6 s), the durable writer `internal/atomicwrite`
+  (14.9 s), the identity's `internal/backup` (366 s), and
+  `scripts/third-party-licenses` (21.6 s), the census B740 fixed, beside the
+  planted link.
+- `make vet` through the lock, native, `GOOS=windows`, `GOOS=darwin` and
+  `GOOS=linux GOARCH=386` (the vet job's portability leg): clean.
+- gofmt: go1.27.3's `gofmt -l` (go.mod's toolchain, from the module cache)
+  over the 30 Go files the branch changes lists none.
+- `make docs-check` on the tree: ok. `rules-b74x.patch`: `git apply --check`
+  clean against fc6aab6a; applied to a copy of CLAUDE.md, the rules files
+  and the skills, every budget holds (config-lifecycle.md at 96.7%, the
+  fullest file it touches; player.md, untouched, 98.2%), and each of the 12
+  test names its added lines cite is declared. It carries, beside the four
+  items' lines, a test-discipline line in build-ci-tests.md for B744's
+  cross-talk. It is built with one line of context, so no hunk holds a
+  blank or whitespace-only line: the tool that wrote it to the job
+  directory drops a line's lone space (a first copy lost four blank context
+  lines' spaces), and the job directory's copy was compared with the checked
+  one byte for byte (`.tmp/_b74x/cmppatch.py`).
+- The qualification guard (`internal/player/qualification/version_gate.go`):
+  the branch touches no guarded prefix or path, so `qualificationVersion`
+  stays.
+
+The planted link of B740's red (`.tmp/b740-planted/run/user/1000/bus`, a
+link to nothing) was in place for the test run and was removed after it.
+## 2026-11-07 — B773: a DAC with two identical USB configurations plays DoP
+
+Worker b773, legion0 (Ubuntu 26.04, linux/amd64, Linux 7.0.0-38, Go 1.27.3), branch
+`fix/b773-duplicate-configuration` from main 49071fbf. Commits: 69927023 (the Mytek's captured
+descriptors and a red test), 2a2d1165 (the fix and its table test), then this record. The rule
+and its long form change through `~/onebit/jobs/b773/rules-b773.patch` (a new bullet in
+`player.md`'s B728 section, 441 bytes, taking the file to 98,773 of its 100,000). The
+qualification check takes no bump: `internal/player/policy/` is not guarded, and nothing guarded
+changed.
+
+### The finding
+
+The orchestrator's hardware run on a Mytek Brooklyn DAC+ (25ce:0025, bcdDevice 0100),
+2026-11-07: `bNumConfigurations` 2, and the sysfs `descriptors` attribute 970 bytes holding two
+byte-identical configurations of 476 bytes, both headed `0902dc01040100c001`, value 1.
+`policy.configuration` refused any two configurations of one value, so every DoP rate was
+refused: `dop_gain_unverifiable: the playback path of interface 2, altset 1 does not resolve:
+the descriptors do not resolve: two configurations hold the value 1`. It failed closed: native
+was unaffected and `auto` converted those rates, but DoP could never play on that DAC. A
+diagnostic build that kept the first configuration resolved the path, played DoP at DSD64 and
+DSD128, and a volume move stopped it in 56 to 62 ms.
+
+The capture is the fixture `internal/player/policy/testdata/mytek-brooklyn-dac-plus.descriptors.bin`
+(SHA-256 02400f69dc719bfbc53b54fa74d990ee4bdce797be688942dd7be7c2f9eebece; `binary` in
+`.gitattributes`, since `internal/alsa/testdata/**` is `text eol=lf` and the file would not
+survive that). Its descriptors are the device (type 1), two configurations (2), two interface
+associations (0x0b), 20 interfaces (4), 42 class-specific interface (0x24), 20 endpoint (5) and
+12 class-specific endpoint (0x25) descriptors and two HID (0x21): no string descriptor (3), no
+printable run of four characters in ASCII or UTF-16 either byte order, and `iSerialNumber` is the
+index 3. No serial. Its playback path: interface 2 (altset 1 S32_LE at 32 bits, altset 2 raw data,
+the native DSD one) linked to input terminal 3 (USB streaming), through feature unit 4 (mute and
+volume on the master channel) to output terminal 5 (0x0602), in control interface 0's function;
+interface 1 is its capture (input terminal 1 to USB streaming output terminal 2), interface 3 a
+HID.
+
+### What the kernel does with two configurations of one value
+
+What this host holds: the `linux-headers-7.0.0-38` and `-42` packages, headers, Kconfig and
+Makefiles alone; no `drivers/usb/core/*.c`, no kernel source tree, no Documentation/ABI, and the
+Go module cache holds none either. From `include/linux/usb.h` (7.0.0-38):
+`usb_get_descriptor(struct usb_device *dev, unsigned char desctype, unsigned char descindex,
+void *buf, int size)` asks a descriptor by its index, never by a value; `struct usb_device` keeps
+`config` ("all of the device's configs"), one `actconfig` ("the active configuration") and
+`rawdescriptors` ("raw descriptors for each config"); and `struct usb_host_config`'s comment has
+one configuration active at a time, their number in `bNumConfigurations`.
+
+What could not be read here, stated from upstream's `drivers/usb/core` as this worker knows it
+and unverified on the box: `usb_get_configuration` (`config.c`) reads configuration index 0 to
+`bNumConfigurations` − 1, each by `usb_get_descriptor(dev, USB_DT_CONFIG, cfgno, …)`, first its
+9 bytes and then its `wTotalLength`, keeps each in `rawdescriptors[cfgno]`, and leaves
+`bNumConfigurations` at the number it read (the capture's device descriptor says 2, so both
+copies were read and parsed); `usb_choose_configuration` (`generic.c`) chooses, for an audio
+device with no UAC3 configuration, the first configuration, and returns its
+`bConfigurationValue`; `usb_set_configuration` (`message.c`) takes the first `config[i]` holding
+that value (it breaks at the first match) as `actconfig`, whose interfaces snd-usb-audio parses;
+and sysfs's `descriptors` (`sysfs.c`, `read_descriptors`) writes the device descriptor, then each
+`rawdescriptors[i]` for `config[i].desc.wTotalLength` bytes, in index order. So the Mytek's
+firmware answered index 1 with index 0's bytes, the kernel set the first copy, and the second is
+never active. A unit whose copies differed would get the first index's too, by that code; but the
+bridge cannot see the index (the card's interface name, `<bus>-<port>:<config>.<interface>`, and
+sysfs's `bConfigurationValue` carry the value), so a pair that differs stays refused, and the
+gain check leans on nothing it cannot read on the box.
+
+### The change
+
+`configuration` takes configurations of the selected value as one when they are the same bytes,
+the whole of each by its `wTotalLength`, its configuration descriptor included
+(`bytes.Equal(rest[:total], found)`), and returns the first's body. Two that differ anywhere are
+refused with the sentence a duplicate always had, "two configurations hold the value N", so the
+gain check's reason stays `dop_gain_unverifiable` and its detail the same words. A configuration
+that runs past the stream is still refused before any comparison, whichever copy it is ("a
+configuration's total length runs past its descriptors"; a first copy cut short shifts the walk,
+which then refuses at the next, "a configuration descriptor is cut short or missing"). Another
+value's duplicates are not the selected configuration's. `ParsePlayback`'s doc says "held once
+or as copies byte for byte the same".
+
+### The other readers of the descriptors
+
+- The topology (`policy.ParsePlayback`, under `CheckGain`, which serve's player calls through
+  `readMixer` at admission, at the check after open and on the monitor): changed.
+- `alsa.SysfsReader.QualificationGain` (`descriptorGain`, the harness's DoP admission, in guarded
+  `internal/alsa/`): walks every descriptor of every configuration by bLength, true when any
+  audio control interface holds a feature unit; it reads no value and no `wTotalLength`, and
+  never refused a duplicate. The Mytek reads true with one copy or two (unit 4). Unchanged.
+- The silent probe (`alsapcm.Probe`): reads no descriptor; the kernel answers its HW_REFINEs
+  from the active configuration's altsets.
+- `bridge output dac inspect` and the migration (`dacModelReader`, `playerDSD.boundOf`): read the
+  unit's strings and firmware through `alsa.SysfsReader.Qualification`, never the descriptors
+  attribute (the "descriptors" they name are the string descriptors' values).
+- The profile database's keys (`dsdstate.KeyOf`, `dacprofile.NewKey`): idVendor and idProduct,
+  the card's interface from its sysfs name, the product string; no descriptor.
+- `alsa.SysfsReader.UnitModel`: reads the attribute's bytes, bounded at 256 KiB, and parses
+  nothing; its `Config` is the value the interface name carries.
+
+So no reader resolves the Mytek while another refuses it.
+
+### Evidence
+
+Red first: 69927023's `TestTheMyteksCapturedDescriptorsGiveItsDoPPath` failed every assertion
+on 49071fbf's parse, with the finding's words (both altsets' paths, the gain at and off 0 dB,
+DoP at DSD64 and DSD128), and is green on 2a2d1165. It checks the capture is the finding's (970
+bytes, two copies of configuration 1 in 476 bytes each, no string descriptor); interface 2's
+path at altsets 1 and 2 (input terminal 3, feature unit 4's master volume, output terminal 5);
+the gain check over the S32_LE altset with unit 4's volume at 0 dB (unity) and at -64 dB
+(`dop_gain_not_unity`), through the usbmixer table and altsets its box's /proc gave (replacing a synthetic table on review); and `Effective` planning DoP at DSD64 and DSD128 at 0 dB and refusing DSD64 off it.
+
+`TestByteIdenticalConfigurationsAreOne`: one, two and three the same; two the same with another
+value's between them; two under one header with different bodies, in both orders (a mute alone
+against a volume, one length); two of different lengths; two differing in their configuration
+descriptors alone (bMaxPower); three, the third differing; another value's differing pair, at
+the other value (resolves) and at its own (refused, "the value 2"); two the same with the second
+cut short and with the first; and the Mytek's capture with its second copy cut short by a byte,
+and with its second copy's feature unit 4 a mute alone (byte 605, 0x0f to 0x03). A refused row
+asserts the exact sentence and `dop_gain_unverifiable`; a resolving row the one configuration's
+path and unity at 0 dB.
+
+Negative controls, predicted in a file before any ran, each one exact-once replacement in
+`topology.go` on the committed 2a2d1165, the policy package's test binary run whole, the bytes
+put back from memory; every one went red exactly as predicted and nowhere else, and the tree was
+clean after:
+
+| control | mutation | red |
+|---|---|---|
+| A, comparing only the headers | `bytes.Equal(rest[:rest[0]], found[:found[0]])` | the two rows under one header, "three, the third differing", the Mytek's changed copy |
+| B, accepting differing bytes | `bytes.Equal(rest[:total], rest[:total])` | all six differing rows, the Mytek's changed copy |
+| C (extra), comparing only the bodies | `bytes.Equal(rest[rest[0]:total], found[found[0]:])` | "two differing in their configuration descriptors alone" |
+| D (extra), the first copy taken, the walk ended | `return rest[rest[0]:total], nil` at the first match | all six differing rows, both cut-short rows, the Mytek's cut and changed copies |
+
+**Checks.**
+- The red run above: 69927023's test against 49071fbf's parse, every assertion red with the
+  finding's words; the policy package (`go test -count=1`) ok on 2a2d1165.
+- The rules patch: `git apply --check -v` clean on the worktree; a strict applier of this
+  worker's own gives the generated files byte for byte; on a `git archive` copy of 2a2d1165 with
+  both patched files in, `check-doc-budgets.py` (and its self-test), `rules-for.py --self-test`
+  and `move_entry.py --self-test` pass: `player.md` 98,773 bytes (98.8%, which the script calls
+  close to its budget), the worst load 66.3%.
+- `make fmt vet test build-all` through the shared build lock on 08ee0224 (the slot taken after
+  44 minutes behind two other workers): `go fmt` changed nothing, `make vet` ok, `make test`
+  (race, TMPDIR under `.tmp/_b773`) ok in 34 minutes, 88 packages and 14 without tests, the
+  Linux-only ones run (internal/alsa, internal/alsapcm, internal/atomicwrite, internal/backup,
+  the player's, scripts/install-test); `make build-all` ok.
+- `make vet` with `GOOS=windows` and with `GOOS=darwin`: ok; `go vet` of the policy package for
+  linux/386 and linux/arm64 too, and its tests run as a linux/386 build: ok.
+- `go test -race -count=1 ./internal/player/policy/`: ok.
+- The qualification check against main (`scripts/qualification-version -base main -head HEAD`):
+  "qualification version OK: main..HEAD", no guarded path touched, so no bump.
+- `make docs-check` on the tree as it stands: ok.
 ## 2026-11-07 — B727: late-mounting volumes, the rest of B651
 
 Backlog B727, on `fix/b72v-late-volumes` from main 49071fbf; worker b72v on

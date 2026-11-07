@@ -213,19 +213,15 @@ func TestAClientResolvesTheASCIINameThroughTheBridgesResponder(t *testing.T) {
 		t.Errorf("the TXT record is %q, want host=%s", txt, strings.TrimSuffix(host, "."))
 	}
 
-	addr := q.ask(t, host, dns.TypeA, func(rr dns.RR) bool {
+	// The answer is taken by its address too: another responder on the host
+	// may answer for the same name with an address of its own (cmd/bridge's
+	// serve test publishes xn--f1ai0a.local on a LAN interface, B744, and
+	// Linux hands a group's datagrams to every socket that joined the group,
+	// on any interface), and ask takes the first response its match takes.
+	q.ask(t, host, dns.TypeA, func(rr dns.RR) bool {
 		a, ok := rr.(*dns.A)
-		return ok && a.Hdr.Name == host
+		return ok && a.Hdr.Name == host && a.A.Equal(net.ParseIP("127.0.0.1"))
 	})
-	found := false
-	for _, rr := range addr {
-		if a, ok := rr.(*dns.A); ok && a.Hdr.Name == host && a.A.Equal(net.ParseIP("127.0.0.1")) {
-			found = true
-		}
-	}
-	if !found {
-		t.Errorf("no answer named %s carries 127.0.0.1: %v", host, addr)
-	}
 }
 
 // loopbackQuerier asks multicast DNS questions on the loopback interface from
@@ -259,8 +255,8 @@ func newLoopbackQuerier(t *testing.T, loopback *net.Interface) *loopbackQuerier 
 // ask sends one question for name of type qtype to the mDNS group and returns
 // the answer records of the first response holding a record match takes,
 // failing the test when none comes within the deadline. Other responders on
-// the host may answer too, about names of their own, so a response is taken
-// only by match.
+// the host may answer too, about names of their own or about the same name
+// with an address of their own, so a response is taken only by match.
 func (q *loopbackQuerier) ask(t *testing.T, name string, qtype uint16, match func(dns.RR) bool) []dns.RR {
 	t.Helper()
 	msg := new(dns.Msg)
@@ -293,7 +289,7 @@ func (q *loopbackQuerier) ask(t *testing.T, name string, qtype uint16, match fun
 			}
 		}
 	}
-	t.Fatalf("no answer to the %s question for %s came back", dns.TypeToString[qtype], name)
+	t.Fatalf("no answer to the %s question for %s that its match takes came back", dns.TypeToString[qtype], name)
 	return nil
 }
 

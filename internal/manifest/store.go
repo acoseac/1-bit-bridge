@@ -10125,10 +10125,8 @@ func (s *Store) VariantRecordedUnder(ctx context.Context, dir string) (bool, err
 }
 
 // volumesFoldCase is whether this platform's volumes compare names without
-// regard to case by default: NTFS on Windows, APFS and HFS+ on macOS. A volume
-// there that compares them exactly (a case-sensitive APFS volume, a Windows
-// folder set case-sensitive) is folded all the same, which can only have the
-// guard refuse a render where it would have taken one, never the reverse.
+// regard to case by default: NTFS on Windows, APFS and HFS+ on macOS. Its
+// limits are backlog B784.
 var volumesFoldCase = runtime.GOOS == "windows" || runtime.GOOS == "darwin"
 
 // variantRecordedUnder is VariantRecordedUnder on a platform whose separator

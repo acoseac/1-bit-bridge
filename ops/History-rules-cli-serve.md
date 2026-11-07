@@ -3585,6 +3585,114 @@ checks joining, stale process groups, and a CLI login whose groups are newer
 than the running bridge's, preserving FAIL/WARN and asking for a new login
 without a systemd command or manager claim. These cases bind no sockets.
 
+## B744 — serve's mDNS responder and the host's converted name (2026-11-07)
+
+- **Serve's mDNS lifecycle says, when its responder fails to start, that the `.local` endpoint only the bridge's own responder answers will not resolve while mDNS is down (`advertise.OwnResponderEndpoint`: the host's name in its IDNA ASCII form, which /v1/health, the pairing QR and the doctor keep listing from the setting), and hands the responder the host-name probe the endpoints and the certificate read (`advertise.ReportedHostname`, `mdns.Config.HostnameSource`)** (2026-11-07, backlog B744). **Don't keep a state of the responder's failure, change what is published over it, or let the responder read the host's name but through that probe.**
+
+*The failure's line.* Since B739's second round a host name that is not
+ASCII is advertised in its IDNA ASCII form (`xn--f1ai0a.local` for `Жук`),
+which no responder on the LAN publishes but the bridge's own, so its
+`.local` endpoint is listed only while `mdns.enabled` is on
+(`advertise.Params.MDNS`). That is the setting, not the responder: one that
+fails to start leaves the endpoint listed in /v1/health, the pairing QR and
+the doctor's `pairing-url`, and nothing answers it. The owner asked for a
+diagnostic and no new state: `mdnsLifecycle.Set` prints, after "mDNS
+advertise failed (non-fatal)", that the advertised
+`https://<name>.local:<port>` will not resolve while mDNS is down, that only
+the bridge's own responder answers it, and that /v1/health and the pairing
+QR keep listing it while `mdns.enabled` is on. `advertise.OwnResponderEndpoint`
+is that endpoint, or "" where none is published that the bridge alone
+answers (an ASCII name, which the system's responder answers; no name; a
+container's generated one): one helper with `Endpoints`' own
+(`localEndpoint`), read through the same host-name probe at the call,
+keeping nothing. What is published is unchanged. `mdnsLifecycle.start` is a
+per-instance seam (nil is `bridgemdns.Advertise`), through which
+`TestAFailedResponderSaysTheConvertedLocalNameWillNotResolve` forces the
+failure: the line for `Жук`, and the failure's line alone for an ASCII name
+and for a name with no valid form.
+
+*The responder's name.* The responder took its SRV target and `host=` from
+`os.Hostname` (`mdns.Config.advertisedHost`), while /v1/health's `.local`
+endpoint and the certificate read the name through `advertise`'s host-name
+probe, which `SetHostProbeForTest` moves. In production both are
+`os.Hostname`; under a test's probe they differed, and no test asked the
+responder: `TestServeOnAHostWhoseNameIsNotASCII`'s mDNS-on row pinned it to
+loopback and asked nothing. Asked (below), the started responder left
+`xn--f1ai0a.local` unanswered and answered the name the system reports
+(checked at the red commit). `mdns.Config.HostnameSource`, read at each
+rebuild where `Hostname` is empty (nil is `os.Hostname`), is the probe the
+lifecycle hands it (`advertise.ReportedHostname`), so the responder
+publishes, and answers for, the name the bridge advertises. It is read only
+in a rebuild, under the lock Close takes, so nothing reads the probe once
+serve stops.
+
+*The question.* `mdns_query_test.go`'s querier asks the started responder
+as a LAN client asks: an A question for the `.local` name /v1/health lists,
+from a UDP socket bound to one selected interface's IPv4 address, sent to
+224.0.0.251:5353 out of that interface (`SetMulticastInterface`) with
+multicast loopback on, so the responder, pinned to the same interface
+(`pick`), hears it on this host. hashicorp/mdns answers every question by
+unicast to the address that asked (`Server.sendResponse`), which the socket
+reads, so neither side depends on the host's default multicast route (a
+Docker bridge, a VPN). The interface is chosen before the responder starts
+(`newMDNSQuerier`): up, able to multicast, no loopback or point-to-point
+one, holding an IPv4 address, on which a socket joined to the group hears a
+question the querier sends there (a probe with a nonce, within 2 s). Where
+none qualifies, and on Windows as internal/mdns's live tests, the row pins
+loopback as before and records a skipped subtest, "the responder answers
+the name it advertises", saying why. Once the responder has started, no
+answer carrying the interface's address within 10 s (the question asked
+again every half second) is a failure, never a skip, and says what came
+back instead. An answer is taken by its address because another responder
+on the host may answer for the same name: internal/mdns's live test
+publishes `xn--f1ai0a.local` on loopback, and on Linux a socket joined to
+the group on one interface also takes the group's datagrams arriving on
+another where a socket joined (`IP_MULTICAST_ALL`, which hashicorp/mdns
+leaves on). A probe measured it both ways on legion0, and that test's own
+question takes its answer by its address too (ee885b74). On legion0 the
+responder is pinned to enp4s0 and answered at once.
+
+## B745 — the player's DSD state in a snapshot, and a restore where no directory can be synced (2026-11-07)
+
+- **A snapshot carries the player's DSD state (`player-dsd.json`) as its bytes beside the player's identity, and a restore writes both durably, ahead of the snapshot's other files; where no directory can be synced (Windows), a restore of a snapshot holding either refuses before anything is written, naming each of the player's files it holds and the way through, removing them from a copy of the snapshot, which then restores the rest while the box keeps its own** (2026-11-07, backlog B745; the owner's decision to refuse the DSD state as the identity is refused, kept). **Don't restore the DSD state or the identity where its write cannot be made durable, refuse them without naming the way through, or write anything before that refusal.**
+
+*Why a bullet here.* The DSD state's backup and restore rules are in
+`player.md`'s DSD-state bullet (B728 B3), which loads with the player's
+packages. `internal/backup`, which carries the file, loads `cli-serve.md`
+and `config-lifecycle.md`, and neither named it, so a session changing the
+backup met no rule for its newest file.
+
+*The refusal.* Both of the player's files are written through the strict
+writer (`atomicwrite.WriteBytesDurable`), which refuses where the platform
+has no directory barrier (`ErrNoDirectoryBarrier`: Windows, where the
+player does not run). A Linux box's snapshot holds both once its player has
+run, so its restore on Windows was refused, and the identity's refusal
+("restore player reservation: atomicwrite: this platform cannot fsync a
+directory, so no write here is made durable: unsupported operation") named
+no way through; the DSD state's own refusal did (`restorePlayerDSD`). The
+owner decided in B728 that the DSD state is refused as the identity is, not
+skipped, and that stands. `RestoreWithOptions` now asks once, after it has
+read both files from the snapshot and compared the config, before the first
+write (`atomicwrite.HasDirectoryBarrier`, which reads the barrier the
+strict writer reads, so a test's `SetSyncDirForTest(nil)` moves both), and
+refuses through `playerFilesNeedABarrier`: wrapping `ErrNoDirectoryBarrier`,
+naming every one of those files the snapshot holds (`player-uuid`, with
+`player-ids.json` where the manifest lists it, and `player-dsd.json`),
+saying nothing was restored, and giving the way through, removing them from
+a copy of the snapshot, which then restores the rest while this box keeps
+its own. `restorePlayerDSD`'s refusal stays behind it.
+
+*Pinned natively.*
+`TestARestoreWhereNoDirectoryCanBeSyncedRefusesThePlayersFilesNamingTheWay`
+takes a snapshot where directories sync and restores it with the barrier
+taken away (the existing seam, so it runs on every OS), for the identity,
+the DSD state and both: the refusal matches `ErrNoDirectoryBarrier`, says
+nothing was restored and names each file in the way through, nothing is in
+the box, and a copy of the snapshot without those files restores the rest
+and writes neither of the player's files. With the check removed (control
+C745-1) the identity's rows go red, and with the DSD state's writer made
+non-durable as well (C745-2) every row does, with the DSD state's own
+refusal tests. The record is in `ops/engineering-log.md`, 2026-11-07, B745.
 ## B727 — every command asks the data dir's record, and serve says its refusal once (2026-11-07)
 
 - **Every command but serve that makes, opens or writes the data dir asks the check serve makes of the record beside its config, right after its config loads (`refuseDataDirAway`: the record beside the file the config's name opens, as bridge doctor reads it, and `checkServeDataDirRecord`), and refuses a data dir the record names that holds neither `bridge.db` nor `server.lock`, exit 1, in serve's first sentence under its own name, saying that it makes and writes nothing there, to mount the volume and run it again, and how to go on from a data dir moved on purpose (set `dataDir` to where it is now, which the record does not name) or removed on purpose (remove the record): scan, the render commands, analyze, variants move, artwork, enrichment misses and retry, duplicates, library add and remove, pair, token rotate, expire and revoke, admin reset-password, sign-out-everywhere and login-link, cert rotate, backup, tsnet auth, status and logout, update but under `--check`, init's rewrite before its preflight, and, through `holdDataDirForMutation` before it prepares and locks, restore, reset-player, manifest clear-missing and the DAC bind; and serve says its own refusal once per state: a note beside the record (`.bridge.yaml.datadir.refused`), written only into the directory the record was read from (`atomicwrite.WriteBytesInExisting`), names the data dir refused and when it was said, a start says the refusal where the note names another data dir or none or is a day old, and always to a terminal, and the first start after it that gets past the data dir's preparation and its lock removes the note and says at Info how the refusal ended: that the data dir holds its database or its lock file again where the note names the data dir its config names and that data dir held one of them before the preparation (`dataDirBack`), and otherwise that the refusal no longer applies** (2026-11-07, backlog B727 items 2 and 5, and its round 2). **Don't let a command make, open or write the data dir before the check, ask it of a read (doctor, status, logs, token list, cert info, update --check, init keeping the config), ask it in `manifest.OpenStore`, tell the operator of a data dir moved on purpose to remove the record, keep the note in the data dir or write it through a writer that makes its directory, let the note's write decide what serve refuses or how it exits, say how a refusal ended before the data dir is prepared and its lock taken, or say a data dir is back that the note does not name or that held neither file before the preparation.** `TestEveryCommandThatWritesTheDataDirRefusesItWhileItsVolumeIsAway` (tsnet auth and status run whole, their tsnet server stood in for: `tsnetCommandServer`), `TestTheDiagnosticsStayAvailableWhileTheDataDirsVolumeIsAway`, `TestACommandOverAnInstallWithNoRecordMakesItsDataDirAsBefore`, `TestUpdateAsksTheRecordBeforeItAsksForARelease`, `TestServeSaysItsRefusalOncePerState`, `TestServeSaysTheRefusalOfADataDirItsNoteDoesNotName`, `TestServeSaysItsRefusalToATerminalAtEveryStart` (Linux), `TestAStartThatCannotRemoveTheNoteSaysSo`, `TestServeSaysItsRefusalAtEveryStartWhereItCannotKeepTheNote`, `TestTheRefusalsNoteMakesNoDirectory`, `TestTheEndOfARefusalIsSaidAsItIs` and `TestTheEndOfARefusalCallsBackOnlyTheDataDirItRefused` pin it.
