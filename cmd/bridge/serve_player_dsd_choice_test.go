@@ -79,12 +79,12 @@ type choiceRig struct {
 }
 
 // newChoiceRig is a rig over a backend whose DSD is the effective policy over
-// box and store, the test DAC bound at card 5, its lines recorded; wrap, when
-// set, wraps the API's handler.
-func newChoiceRig(t *testing.T, box *playbacktest.Box, store playback.DSDStore, device config.PlayerDevice, wrap func(http.Handler) http.Handler) *choiceRig {
+// box and store, the test DAC bound at card 5, its lines recorded, edit
+// applied to the policy; wrap, when set, wraps the API's handler.
+func newChoiceRig(t *testing.T, box *playbacktest.Box, store playback.DSDStore, device config.PlayerDevice, wrap func(http.Handler) http.Handler, edit ...func(*playback.DSDPolicy)) *choiceRig {
 	t.Helper()
 	lines := &choiceLines{}
-	b := readSideBackend(t, box, store, func(p *playback.DSDPolicy) { p.Log = lines })
+	b := readSideBackend(t, box, store, append([]func(*playback.DSDPolicy){func(p *playback.DSDPolicy) { p.Log = lines }}, edit...)...)
 	view := readSideOutput(t, b, device, true)
 	tokens, err := auth.OpenStore(filepath.Join(t.TempDir(), tokensFileName))
 	if err != nil {
@@ -451,25 +451,33 @@ func TestEachCheckRefusesInItsOrder(t *testing.T) {
 // TestAKeyRoundTripsWhateverTheUnitsStringsHold (binding note 12): the key a
 // write names is compared with the one GET publishes, which the unit's own
 // serial and port are taken out of first, so a product string that holds the
-// serial, or the port in any of the spellings a USB string holds it in, makes
-// a key GET publishes and a write takes; the write lands on the DAC's own
-// entry, keyed by its product string as the unit reports it, and neither the
-// answer nor the log names the serial or the port.
+// serial, or the port in any of the spellings a USB string holds it in (as
+// sysfs gives it, with its configuration and interface, and the port alone),
+// makes a key GET publishes and a write takes; the write lands on the DAC's
+// own entry, keyed by its product string as the unit reports it, and neither
+// the answer nor the log names the serial or the port.
 func TestAKeyRoundTripsWhateverTheUnitsStringsHold(t *testing.T) {
 	const serial = "TESTDAC-0001"
-	port := playbacktest.DACUSB(0).Port
+	port := playbacktest.DACUSB(0).Port + ":1.0"
 	products := []string{"Test DAC " + serial}
 	for _, form := range playback.PortForms(port) {
 		products = append(products, "Test DAC "+form)
+	}
+	if len(products) < 3 {
+		t.Fatalf("the port %s has the spellings %v, want it as sysfs gives it and alone", port, playback.PortForms(port))
 	}
 	for _, product := range products {
 		t.Run(product, func(t *testing.T) {
 			box := playbacktest.NewBox(5)
 			m := playbacktest.DACUnit()
-			m.Product = product
+			m.Product, m.USB.Port = product, port
 			box.SetUnit(5, m)
 			store := playbacktest.NewMemStore(dsdstate.Defaults())
-			r := newChoiceRig(t, box, store, config.PlayerDevice{}, nil)
+			r := newChoiceRig(t, box, store, config.PlayerDevice{}, nil, func(p *playback.DSDPolicy) {
+				p.Bound = func() (playback.BoundDAC, bool) {
+					return playback.BoundDAC{Card: 5, Identity: m.USB, Enumeration: "test/2"}, true
+				}
+			})
 			key, rev := r.choice(t)
 			if !dacKeyForm.MatchString(key) {
 				t.Fatalf("GET publishes the key %q", key)
