@@ -1121,27 +1121,71 @@ func TestAConvertedTrackIsNotLossless(t *testing.T) {
 // section 3.5; binding note 1a): a converted occurrence is the effective
 // policy's as native and DoP are, apart from its transport. Conversion
 // withdrawn (an off written) while one plays revokes it at once, its PCM sink
-// dropped and the session faulting; while one is prepared, the session playing
-// PCM, it is handed off again and refused by the set's word, the PCM playing
-// on. Its target changed (the DAC's altsets now stop at 88.2 kHz) while one
-// plays revokes it; while one is prepared it is handed off again and plays at
-// the new target, in a sink of its own.
+// dropped by the revocation itself and the session faulting; while one is
+// prepared, the session playing PCM, it is handed off again and refused by the
+// set's word, the PCM playing on. Its target changed (the DAC's altsets now
+// stop at 88.2 kHz) while one plays revokes it the same way; while one is
+// prepared it is handed off again and plays at the new target, in a sink of
+// its own.
 func TestAConversionWithdrawnOrRetargetedIsReconciled(t *testing.T) {
 	off := dsdstate.Defaults()
 	off.DefaultMode = dsdstate.ModeOff
 	retarget := func(d *dsdRig) {
 		d.box.SetAltsets(card, 0, pcmAltset(format.S243LE, 24, 44100, 88200))
 	}
-	t.Run("withdrawn while it plays", func(t *testing.T) {
+	// revokedWhilePlaying plays a, two seconds converted, and makes change
+	// once a is heard, which revokes it. The engine's release is held short
+	// of the backend (round 2), so the session's teardown, which drops every
+	// sink too, cannot stand in for the revocation: the revocation's own Drop
+	// reaches the PCM sink, its writer handed a drop and the device let go,
+	// and the DAC, granted a second more, is given nothing more while the
+	// release is still held. Then the release goes on.
+	revokedWhilePlaying := func(t *testing.T, change func(*dsdRig)) (*dsdRig, *engine.Snapshot) {
+		t.Helper()
 		d := newConvRig(t)
 		d.files.add("a", track(playbacktest.DSD64, 2, noise(1)))
 		d.insert("a")
 		d.playedOut(100*time.Millisecond, "a")
 		d.tick()
 		d.waitSnap("a heard", func(s *engine.Snapshot) bool { _, ok := s.Track(); return ok })
-		d.store.Set(off)
+		dropped := make(chan struct{})
+		var dropOnce sync.Once
+		var drops atomic.Int32
+		d.k.OnCommand(func(_ alsapcm.SinkConfig, op string) {
+			if op == "drop" {
+				drops.Add(1)
+				dropOnce.Do(func() { close(dropped) })
+			}
+		})
+		held, letGo := d.rec.holdNextRelease()
+		t.Cleanup(letGo)
+		change(d)
 		d.monitorTickThatRevokes()
-		s := d.tickUntilStopped(engine.ReasonFault)
+		waitFor := func(what string, c <-chan struct{}) {
+			t.Helper()
+			select {
+			case <-c:
+			case <-time.After(alsapcm.Watchdog()):
+				alsapcm.LogGoroutines(t)
+				t.Fatalf("%s did not come within %v", what, alsapcm.Watchdog())
+			}
+		}
+		waitFor("the revocation's Drop of the converted occurrence's PCM sink", dropped)
+		d.k.Await(t, "the dropped sink's device let go", func(v alsapcm.KernelView) bool { return !v.Open })
+		waitFor("the engine's release, held short of the backend", held)
+		given := d.k.View().GivenBytes
+		d.k.Grant(time.Second)
+		if v := d.k.View(); v.GivenBytes != given || v.Open {
+			t.Fatalf("with the engine's release held, the DAC was given %d bytes more and the device is open %v: the revocation did not stop the sink", v.GivenBytes-given, v.Open)
+		}
+		if n := drops.Load(); n < 1 {
+			t.Fatalf("%d drops before the release", n)
+		}
+		letGo()
+		return d, d.tickUntilStopped(engine.ReasonFault)
+	}
+	t.Run("withdrawn while it plays", func(t *testing.T) {
+		d, s := revokedWhilePlaying(t, func(d *dsdRig) { d.store.Set(off) })
 		if f := s.Faults(); len(f) != 1 || f[0].Reason != "native_revoked" {
 			t.Errorf("the faults %+v, want the converted occurrence revoked", f)
 		}
@@ -1150,15 +1194,7 @@ func TestAConversionWithdrawnOrRetargetedIsReconciled(t *testing.T) {
 		}
 	})
 	t.Run("retargeted while it plays", func(t *testing.T) {
-		d := newConvRig(t)
-		d.files.add("a", track(playbacktest.DSD64, 2, noise(1)))
-		d.insert("a")
-		d.playedOut(100*time.Millisecond, "a")
-		d.tick()
-		d.waitSnap("a heard", func(s *engine.Snapshot) bool { _, ok := s.Track(); return ok })
-		retarget(d)
-		d.monitorTickThatRevokes()
-		s := d.tickUntilStopped(engine.ReasonFault)
+		_, s := revokedWhilePlaying(t, retarget)
 		if f := s.Faults(); len(f) != 1 || f[0].Reason != "native_revoked" {
 			t.Errorf("the faults %+v, want the converted occurrence revoked", f)
 		}
