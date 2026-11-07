@@ -81544,6 +81544,32 @@ and U2 `TestProbeVersionNamesTheVersionTheBinarySays`.
 NC7b reproduces the Windows failure on Linux, with a backup slower than
 production's bound, and NC7a shows the tests' bound carrying it.
 
+### Checks
+
+On legion0 at 73d74a2d, through the shared build lock (`.tmp/_b70x/gate.sh`).
+B722's commit after it touches only `ops/`.
+
+- `make fmt`: no file changed. go1.27.3's gofmt (`go run cmd/gofmt -l`) on
+  every changed Go file: clean.
+- `make vet` and `GOOS=windows make vet`: clean.
+- `make test`, under race, `-timeout 30m`, `-p 4`, TMPDIR under
+  `.tmp/_b70x`: 88 packages ok, none failed and none cached, in 2,002 s.
+  cmd/bridge took 1,082 s, internal/admin 998 s, internal/manifest 1,585 s
+  and internal/updater 28 s. Of the Linux-only packages, internal/alsapcm
+  took 48 s, internal/alsa 2 s and internal/atomicwrite 20 s.
+- `make build-all`: the six targets.
+- The qualification check, `go run ./scripts/qualification-version -base main
+  -head HEAD` with the tags: "qualification version OK: main..HEAD".
+- Run alone under race: the two cmd/bridge pins,
+  `TestServeRollsBackAnInstallWhoseVersionRefusesItsSettings` (17.0 s; the
+  race-built copy takes about a second for each start) and
+  `TestARollbackThatHoldsTheMarkersLockFirstStopsTheMigration` (5.2 s).
+- `TestEveryCitedTestNameExists` passes over this record, and fails on a ghost
+  name planted in the log (the planted bytes restored).
+- Not run here: Windows and macOS natively, nor CI's runners. What this record
+  says of the SCM, of Defender and of CreateProcess is read from the code and
+  the docs, not measured.
+
 ## 2026-11-07 — B722: dlna-upnp.md relieved: four long forms moved verbatim, each pointer keeping its binding sentences
 
 Worker b70x, legion0, the same branch as B706 (`fix/b70x-rollback-probe-rules`).
@@ -81630,3 +81656,26 @@ From main, unverified against B728 B11's patch (#1427, which brings player.md to
   - L109 (1,449 B): disabling publishes `disabled`, and nothing in a snapshot
     means play.
 - All of this is a first read, not a dry run.
+
+### Checks
+
+- On a fresh copy of 715ac544, the commit holding the long forms, with
+  `rules-b70x.patch` applied by `git apply` (`--check`, then the apply, both
+  clean):
+  - The rules file is 87,127 bytes, the same bytes the moves made.
+  - The History file is the committed one.
+  - `make docs-check`: ok ("CLAUDE.md 79.6%; player.md 98.3%; worst load,
+    player_openhome_test.go 65.6%"). The line on stderr that git listed no
+    tracked files is the self-test's, by design.
+  - `verify_moves.py --base main`, git pointed at this worktree's index:
+    PASS, 4 blocks and 12,267 bytes moved, 35 cited phrases, 0 broken.
+  - `TestEveryCitedTestNameExists`: ok.
+- In the worktree, without the patch: `TestEveryCitedTestNameExists` ok, and it
+  fails on a ghost name planted in the History file (the planted bytes
+  restored). The budgets are ok, with dlna-upnp.md at 97.3% until the patch
+  lands.
+- The patch is 19,936 bytes. A strict applier of its own reproduces the moved
+  file, and the job's copy is byte for byte the one checked. It has no blank
+  context lines: the four hunks fall inside the file's one list.
+- The rest of the gate is B706's above, which ran at 73d74a2d. This commit
+  touches only `ops/`.
