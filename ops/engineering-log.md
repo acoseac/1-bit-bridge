@@ -80270,3 +80270,147 @@ and on a copy with the rules patch applied (the largest rules file there dlna-up
 1a101716 says the version stays: no guarded path changed (`decode/decoder.go`, whose comment
 changed, is not one). ffmpeg and sox are not on this host, so `TestTheOfflineChainAgrees`, the
 differential against the offline chain's level and response, skipped and showed nothing here.
+
+## 2026-11-07 — B728 B10 round 2: the review's five points
+
+Worker b728-b10, legion0, branch `feat/b728-b10-dsdconv`, fast-forwarded to `pr/1426` (d39e998e:
+main's B7 cutover merged at fc07f4a1, and `rules-b728-b10.patch` applied by the orchestrator).
+Commits: a7f41993 (the tests, red), 5b0c401c (points 1 to 3), 34fa5cef (point 5's tests),
+5adcb8dd (point 4's golden), then this record. The rule text changes through
+`rules-b728-b10-r2.patch`: the converter's line in `player.md` and its long form, and
+`player.md`'s paths taking the golden tool, so the rule loads where the tool is edited
+(`player.md` 98,021 to 98,212 bytes). Nothing calls the package yet, so what plays does not
+change.
+
+The Pi 400's run, the orchestrator's (round 2's brief), of the arm64 binary built at fdf27288:
+DSD256 to 176.4 kHz at 864.8 ns a frame, 15.3 % of a core, 18.3 % scaled to a Pi 4, inside
+§4.6's 25 %; 44.1 kHz 16.5 %; all 18 digests `TestTheOutputIsDeterministic` logs match amd64's.
+Nothing changes for cost.
+
+### 1. A detached converter reached the chain: confirmed
+
+A successor its predecessor's `Rewind` detached may still hold the chain's engine, which is the
+predecessor's again. Red at a7f41993, `TestADetachedConverterTouchesNothingOfTheChain` (A
+continued into B and B into C, C adopted and held at its own window, then A rewound): `B.End`
+answered `ErrJoin` and `C.End` nil, marking A's chain ended at A's boundary, so the D that A then
+continued into played none of its 32,768 frames; `C.Continue(E)` answered nil and queued E's
+bytes into A's window, whose samples then differed from sample 21, E read once; and C still said
+it held. 5b0c401c: `Continue` and `End` answer `ErrDetached` on a detached converter, as a read
+and a `Rewind` did, and `detach` reaches every occurrence after it first, then clears `holding`
+and `next`. D then plays every frame, A's window ended alone is A's zero-padded with nothing read
+of E, and `Close` on B or C closes its own source once and leaves A's window as it was.
+
+### 2. A played predecessor stayed reachable: confirmed
+
+`finish` handed the chain on and left the successor's `pred` pointing back, so a chain kept every
+occurrence it had played, each with its snapshot (a copy of the engine's buffers) and its source.
+Red at a7f41993, `TestAPredecessorIsReleasedAtTheHandOver`: a weak pointer to a closed
+predecessor, the successor kept alive explicitly (`runtime.KeepAlive`), no finalizer, still
+reachable after eight collections. 5b0c401c releases `next.pred` at the hand-over, not at
+`Close`: a predecessor closed after `Continue` and before its window was read never hands over,
+and its successor keeps answering `ErrJoin` rather than play its primed delay lines as a fresh
+track, which `TestAClosedPredecessorStillGuardsItsSuccessor` holds (green before and after; P2c
+below, the release moved to `Close`, turns it red).
+
+### 3. Truncation took the last real byte for the declared partial one: confirmed
+
+`truncate` left the cut cursor not done, so the next `fill` ran `cursorEnd`, which marked the last
+real byte as the declared partial one, its low bits masked as padding, and ended the chain 8 - r
+bits short. Red at a7f41993, `TestATruncatedSourceKeepsItsLastByte`: Frames 8,003, the source cut
+after 600 bytes, whose 4,800 bits are 300 frames at D = 16, gave 299, in each of its six read
+shapes (reads of 0, 7 and 600 bytes, each with an early io.EOF and with a refusal). 5b0c401c: a
+cursor cut short of what it declares is done at the cut, the chain's bits the cut's (8 x 600),
+with no partial byte; one that gave every byte, an error beside them, keeps the end `cursorEnd`
+marked.
+
+### 4. An independent golden: added
+
+The tests held the converter to a reference that shares its coefficients, so a design that strays
+from the written one showed only where the mask did.
+`internal/transcode/testdata/gen/dsdconv_golden.py`, beside the fixtures' generator, is written
+from the design, whose arithmetic its docstring sets out (Kaiser's estimate and window, I0 and the
+sine by their series, the normalization and its rounding, each stage's size and cutoff, the
+chain's definition, the dither), and shares no code with the package: floats with + - * / and
+sqrt alone, fractions for the roundings, and the chain a sum for each value, with no table or
+delay line. Its input is libm-free: the generator's `modulate()` over rotations from hex
+constants (1 kHz on the left, 15 kHz on the right), with frames 750 to 1124 the byte 0x1C and
+its complement, whose stage-1 sums are -268,432,960 and +268,432,960, 64 mod 128, so the 24-bit
+plan rounds an exact tie in 464 samples (the left's, which half away from zero would move, and the
+right's, which half up would), and frames 1500 to 1749 all ones and all zeros, which saturate
+(367 samples at 176.4 kHz / 24, 338 at 44.1 kHz / 16); no stage-2 value is a tie. It runs in
+0.7 s under CPython 3.14.4 here. Its digests (the taps of g1 at each rate, g2 and both g3, as
+int64 little-endian; the two inputs; the two outputs, int32 little-endian interleaved left,
+right) and its clip counts are constants of `TestTheChainIsTheIndependentToolsGolden`, so the
+binary for the Pi checks them where no file is. They agreed with the package on the first run:
+the design is unchanged, and so are the 18 digests.
+
+### 5. Tests that could not see their defect: confirmed, and strengthened
+
+`TestTwoSeventeenBitTracksAtD16Abut`'s tracks are one frame each, under H (72), which alone keeps
+them from holding and their join from being continuous: reverting either alignment check left it
+green (round 1's control 8 reverted both at once, and other tests caught that). It now also has
+two tracks of H·D + 1 = 1,153 bits, H frames each: not continuous, and read under Hold to io.EOF,
+never `ErrWindow`. `TestPaddingPastFramesIsNotRead` already compared sources with the same sample
+bits and their padding all zero (0x00), all one (0x1F, the 0xFF case, the last byte holding three
+samples) and mixed, but its sources held exactly the declared bytes, so a read past the byte that
+holds sample Frames - 1 could not show. Each source now comes again with 8,193 bytes after the
+declared ones, and the test checks the samples and that the source was read to that byte and no
+further.
+
+### Negative controls
+
+Fourteen, each an exact-once mutation of 5adcb8dd, its red tests predicted by name in a file
+before it ran (`.tmp/_b728-b10/controls-r2.predictions.txt`; P4d was added after the first run of
+thirteen, and predicted before its own), the source put back from memory:
+
+| | mutation | red |
+|---|---|---|
+| P1 | `Continue` and `End` without their `ErrDetached` case, `detach` leaving `holding` and `next` | `TestADetachedConverterTouchesNothingOfTheChain`, as predicted |
+| P1h | `detach` leaving `holding` and `next` alone | the same, as predicted |
+| P2 | `finish` not releasing `next.pred` | `TestAPredecessorIsReleasedAtTheHandOver`, as predicted |
+| P2c | the release in `Close` instead | `TestAClosedPredecessorStillGuardsItsSuccessor`, as predicted |
+| P3 | `truncate` not marking the cut cursor done | `TestATruncatedSourceKeepsItsLastByte`, as predicted |
+| P4a | one g3 tap, the one after the centre, up one LSB | 12 tests: the golden and `TestTheResponseMeetsItsMask`, as predicted, and every test against the reference, which was not: the converter evaluates stage 3 by its right half, mirrored, and the reference sums every tap, so an asymmetric tap shows to each |
+| P4b | g3's taps c3 - 5 and c3 + 5 up one LSB, the centre down two: symmetric, summing to 2^30 | the golden alone, as predicted |
+| P4c | ties rounded up (`roundShift`) | the golden alone, its 24-bit output, as predicted |
+| P4d | the dither's seed off by one, which the reference shares | the golden alone, its 16-bit output and clip count (345), as predicted |
+| P5a | the hold rule without "Frames a multiple of D" | `TestTwoSeventeenBitTracksAtD16Abut` and the four predicted beside it, whose unaligned successors now hold |
+| P5b | `Continuous` without it | `TestTwoSeventeenBitTracksAtD16Abut` and `TestAContinuousJoinNeedsTheSamePlanAlignmentAndLength`, as predicted |
+| P5c | reads uncapped at the declared length (`pull`'s cap and `fill`'s) | `TestPaddingPastFramesIsNotRead`, as predicted, and `TestTheFirstReadOfARealSourceAllocatesOnlyInTheDemuxer`, which was not: asked past their declared length, the real demuxers allocate |
+| P5d, P5e | either cap alone | nothing, as predicted: `fill`'s room is the cursor's remainder, so each cap is the other's equivalent; both stay |
+
+### The design text's corrections
+
+`ops/plan-b728-dsd-capability-design.md` stands as decided. Where its §4.2 and the built chain
+differ, the record is here:
+
+1. Stage 1's sizes. §4.2's table gives 96, 160 and 320 taps (12, 20 and 40 tables) and its
+   estimate 74, 147 and 294. Built: 79, 159 and 303 (T = 10, 20 and 38 tables of eight, 8T - 1
+   taps with T even, so a frame's centre is a slot and its window starts on a byte), from
+   Kaiser's estimate for 110 dB, N - 1 = (A - 7.95) / (2.285 Δω): 75, 149 and 296 taps before
+   the rounding up to tables. Stage 3 at 44.1 kHz is 613 taps; the table's 125 is the 30 / 40 kHz
+   stage, built as 127.
+2. "40 tables halved by symmetry give 20 × 256 × 4 bytes = 20 KiB". Built: 38 tables, not halved.
+   The odd tap count that centres a frame on a bit pairs no two whole tables by symmetry (the
+   mirror of table j's slots is offset by one from table T - 1 - j's), so DSD256's tables take
+   38 × 256 × 4 = 38,912 bytes as int32, over a Cortex-A72's 32 KiB L1 data cache (a
+   Cortex-A76 has 64 KiB). The Pi 400's measurement is inside the budget with them.
+3. "Accumulation is float64". Built: integer from the bits to the samples, int32 tables and
+   int64 sums at 2^30 for 1.0 (stage 3's at 2^60), with integer shifts; floating point is only in
+   the coefficients' design (`kaiser.go`), so every architecture gives the same samples.
+
+### Gates
+
+At 5adcb8dd, inside one build slot (queued 1,750 s for it): `make fmt` changed nothing and
+`gofmt -l` of the package is clean; `make vet` and the vets for windows, darwin and linux/386
+passed; `go test -race` of the package passed (42 s); `make test-fast` passed, 87 packages ok
+(488 s); `make docs-check` passed on the tree (`player.md` at 98.0 %) and on a copy with the r2
+patch applied (98.2 %), where `TestEveryCitedTestNameExists` passed too and `rules-for.py`
+names `player.md` for the golden tool; and `scripts/qualification-version` against the merged
+main's fc07f4a1 says the version stays, no guarded path having changed.
+
+### The binary
+
+`~/onebit/jobs/b728-b10/dsdconv-linux-arm64.test`, and `-amd64.test` beside it, rebuilt at
+5adcb8dd at round 1's paths. The amd64 one passes run where no source is, the golden among its
+tests, every digest a constant of it.
