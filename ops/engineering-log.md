@@ -82339,6 +82339,1647 @@ run; every one as predicted:
 
 **For the owner.** What this round leaves is backlog B760.
 
+## 2026-11-07 — B706: the early rollback's backup probe keeps production's 10 s, and the tests give their backup longer
+
+Worker b70x, legion0 (Ubuntu 26.04, linux/amd64, Go 1.27.3), branch
+`fix/b70x-rollback-probe-rules` from main 123a80fa. Commits: d09f0762 (the seam,
+and the tests' longer bound), 2e3c6b2b (the pinning tests), then this record.
+Production's behaviour is unchanged, so no test went red first.
+
+On windows-latest, on two PRs on 2026-11-03, two subtests of
+`TestServeRollsBackAnInstallWhoseVersionRefusesItsSettings` and
+`TestARollbackThatHoldsTheMarkersLockFirstStopsTheMigration` failed. Each time
+serve exited 2 with `the backup at …\bridge.exe.bak did not say its version: it
+did not answer within 10s`, the early rollback's ask of its backup
+(`updater.ProbeVersion`, 10 s). The same PRs' earlier runs had passed.
+
+### What an operator sees when the probe times out
+
+Read from the code. Windows was not run here.
+
+- **Serve exits 2 and writes nothing but its two lock files, which earlier
+  starts made already.** `recoverRefusedInstall` returns `acted == false`, and
+  runServe returns the settings' refusal as it did before B613. The binary,
+  `.bak` and `update-state.json` are left as they were. No store, token file,
+  pid file or certificate is written: the load's refusal returns before
+  runServe's own boot begins. Both locks (`server.lock` and
+  `update-state.lock`) are released as the function returns. The log has the
+  refusal, `config load failed: …` (or `serveConfigRefusal`'s line), then
+  `updater: not rolling back the install of <version>: the backup at <path>
+  did not say its version: it did not answer within 10s`. On Windows, stderr is
+  the service log (`%PROGRAMDATA%\1-bit-bridge\bridge.log`), and
+  `serviceExitCode` adds `bridge service exited: subcommand exited with code 2`.
+- **The service manager starts it again, into the same refusal, and that start
+  asks the backup again.** systemd: the unit's `Restart=always` with
+  `RestartSec=2` and no start-limit override. A start that waits out the
+  probe takes more than 10 s, so the default five starts in ten seconds are
+  never reached. The SCM: exit 2 becomes the service-specific code 1
+  (`serviceServeResult`, `serviceExitCode`). `FailureActionsOnNonCrashFailures`
+  then runs the recovery actions: a restart after 2 s, 2 s, then 30 s for
+  every later failure, with the count reset after an hour. The handler reports
+  Running before serve runs, so no SCM start timeout applies, and the service
+  is a delayed auto-start. launchd: `KeepAlive {SuccessfulExit: false}`
+  restarts an exit 2 too. Each restart finds the same marker and the same
+  backup, its pages now warm, and the 6 h recency window
+  (`recencyWindow`) leaves hundreds of tries. Past the window the start says
+  `the install is older than 6h0m0s` and refuses as it did before B613. The
+  bridge then stays down until the operator fixes the settings or rolls back
+  by hand. A run from a terminal shows the same lines and exits 2, and running
+  it again asks the backup again.
+
+### What the probe protects, and why a slow answer is the cheap one
+
+The rename that puts the backup back is one way. On Unix the backup is renamed
+over the binary. On Windows the running image is moved aside and the backup is
+renamed into its place. Either way the binary that refused its settings is no
+longer at the path. The probe is the one check that `.bak` is the version the
+marker says the install replaced: a version check of the file, not a proof of
+its bytes. Without it a stale `.bak` from an earlier install, a damaged file or
+a non-program would be put back. The result would be a service that cannot
+start at all, or a downgrade past the store.
+
+So a slow answer costs one restart cycle (the bound, the restart delay and
+one start), with the install as it was. A wrong answer, taking a backup that
+said nothing for the version, would put back an unknown binary, and no
+restart undoes that. The timeout fails safe.
+
+### Whether 10 s suits a cold start
+
+Measured here, with goreleaser's flags (`CGO_ENABLED=0 -trimpath -ldflags "-s
+-w"`, the release tags), `.tmp/_b70x/measure.py`:
+
+| binary | size | `version` warm (median of 20) | cold (median of 10) | read from disk, cold |
+|---|---|---|---|---|
+| linux/amd64 release | 52.7 MB | 7.3 ms | 8.3 ms | 0.5 MB |
+| windows/amd64 release | 53.0 MB | (not runnable here) | | |
+| cmd/bridge test binary, no race (CI's Windows leg builds it so) | 89.5 MB (88.6 MB for Windows) | 8.7 ms | 10.8 ms | 1.3 MB |
+| cmd/bridge test binary, race (make test) | 119.3 MB | 1,036 ms | 1,094 ms | 48.0 MB |
+
+"Cold" is the file fsynced and its page cache dropped (`posix_fadvise(DONTNEED)`)
+before each run, read back from this host's NVMe, with `mincore` counting what
+the run brought in. `bridge version` runs the package inits and prints one
+line: it touches 0.5 MB of the release binary, which even an SD card reads in
+well under a second. 10 s is three orders of magnitude above the program's own
+cost here.
+
+What 10 s must also cover on Windows is CreateProcess, where an antivirus scans
+a new or changed executable. A context cannot cut that short: os/exec starts
+`watchCtx` only once `StartProcess` returns, so a scan longer than the bound
+ends in a kill the moment the start returns, whatever the program would have
+answered (`TestAHungFpcalcDoesNotHoldTheSweep`'s record above met the same with
+a copied stand-in). The usual backup is the image the previous service process ran
+until moments before: on Windows the swap moves the running exe aside as
+`.bak`, so it has been scanned and its pages are likely still in memory. The
+cold case is a first start after a reboot: a power loss between the swap and
+the restart, or a rollback stopped before its rename and finished at the next
+boot. Even then the delayed auto-start puts the service about two minutes
+after the boot's other services. Not measured on Windows here.
+
+**No longer bound and no retry for production.** The retry exists already: it
+is the service manager's restart, over an unchanged marker, with a warm and
+scanned backup. A longer bound changes no outcome. It moves time from a restart
+cycle into one start, and in a true hang (a backup that never answers) it costs
+its whole length on every start. The early rollback also holds
+`update-state.lock` across the probe, and `LockState`'s other takers wait 30 s
+for it (`defaultStateLockWait`, whose comment counts the probe's 10 s): a store
+open that migrates, the console's rollback, the boot's housekeeping. A bound
+near 30 s would turn their waits into refusals. An in-process retry would
+double the hang's cost for what the restart already gives. Production keeps
+`updater.VersionProbeTimeout`, 10 s, which is now exported and pinned.
+
+### Why CI was slow, and the seam
+
+The tests' backup is a copy of the running test binary (`installBridgeCopy`: a
+hard link where the host makes one, a fresh copy on Windows), 88.6 MB as CI's
+Windows leg builds it, made anew for each case and started for the first time
+inside the probe, while other packages' tests run beside it (`go test ./...`
+runs as many test binaries at once as the runner has CPUs).
+gate.yml excludes Go's temp tree from Defender in a step that may fail
+(`continue-on-error`), and CI's logs could not be read here (`gh` is refused),
+so whether the exclusion took on those runs is not known. Under the race
+detector the copy takes a second to answer on this idle 16-core host.
+
+- `updater.ProbeVersionWithin(ctx, binary, within)` is ProbeVersion under
+  another bound. `ProbeVersion` is ProbeVersionWithin at `VersionProbeTimeout`,
+  as before.
+- `serveOpts.backupProbeTimeout` is zero in production. `backupProbeBound`
+  resolves zero to `updater.VersionProbeTimeout`, and the early rollback asks
+  within it.
+- `refusedInstall.serve`, and the one direct runServe that reaches the probe
+  (`TestARollbackThatHoldsTheMarkersLockFirstStopsTheMigration`), give the
+  backup `testBackupProbeTimeout`, 2 minutes. No test asserts how long a probe
+  took.
+
+**Why the longer bound does not hide the production path.** Only the number
+differs: the run, the kill at the bound, the refusal past it and every check
+after it are production's code. Production's number is pinned
+(`TestTheEarlyRollbackGivesItsBackupTenSecondsInProduction`). What a backup
+silent past its bound comes to is pinned through the seam
+(`TestABackupSilentPastItsBoundIsAskedAgainAtTheNextStart`, a 1 s bound and a
+backup silent for a minute). A release binary answers `version` in
+milliseconds, so the 2 minutes cover only the test's own copy.
+
+### Who else asks a binary its version
+
+On main, `updater.ProbeVersion` had one caller, the early rollback. B660 (#1424,
+not merged; read on the local branch `fix/b660-install-probation`, since this
+clone has no `origin/fix/b660-install-probation`) adds a second:
+`recoverCrashedInstall` (`cmd/bridge/serve_crashed_install.go`) asks the
+backup's version before its settings check, and `CrashRollback`'s doc names
+it. B660 relies on `ProbeVersion`'s signature, its 10 s, its words and its
+return of the caller's context error, and all four are unchanged. B706's seam
+does not reach B660's crash rollback, whose real-subprocess tests meet the same
+bound on CI's Windows leg. Once B660 merges, `recoverCrashedInstall` can ask
+`updater.ProbeVersionWithin(ctx, backup, backupProbeBound(opts))`, a one-line
+change, named in the report for the orchestrator. B660 also touches
+`serve_refused_install.go`, `run_as_bridge_test.go` and
+`serve_refused_install_r3_test.go`, in hunks clear of this branch's. Neither
+the console's rollback nor the boot rollback asks a version. `CheckConfig`'s
+30 s bound on a candidate's settings check is its own and is unchanged.
+`configCheckTimeout`'s comment no longer claims a 30 MiB binary, and
+`defaultStateLockWait`'s names `VersionProbeTimeout`.
+
+### The tests
+
+- `TestTheEarlyRollbackGivesItsBackupTenSecondsInProduction` (pinning):
+  `backupProbeBound(serveOpts{})` is 10 s, and a test's bound is its own.
+- `TestABackupSilentPastItsBoundIsAskedAgainAtTheNextStart` (pinning): the
+  backup silent for a minute, the bound a second. Serve exits 2, the binary,
+  the backup and the marker are byte for byte as they were, nothing of serve's
+  is written, and the updater line says `did not say its version: it did not
+  answer within 1s`. Then the next start, with the backup answering, exits 75
+  with the backup back and the rollback's record holding this version back.
+- `TestProbeVersionWithinAsksWithinTheBoundItIsGiven` (internal/updater): a
+  stand-in silent for an hour answers `it did not answer within 1s` within the
+  test's 20 s, and one silent for 200 ms is taken within a minute.
+- The silent backup is the copy run with `CMDBRIDGE_TEST_RUN_AS_BRIDGE_SILENT`,
+  a duration (`holdIfSilent`, first in `runAsBridge`). The updater's stand-in
+  takes a `silent` script file. Each ends by itself when its pause is over.
+
+### Negative controls
+
+Predicted in `.tmp/_b70x/controls.predictions.txt` before any ran, each alone
+on 2e3c6b2b, the bytes restored from memory (`git status` clean after them all).
+T1 to T5 are the first two tests above, the two CI failures, and
+`TestServeLeavesAnInstallItCannotProveAsItIs`. U1 is the updater test above,
+and U2 `TestProbeVersionNamesTheVersionTheBinarySays`.
+
+| # | Mutation | Predicted red | Observed |
+|---|---|---|---|
+| BASE | none | none | all green |
+| NC1 | backupProbeBound's production value 30 s | T1 | T1 alone: "gives its backup 30s in production, want 10s" |
+| NC2 | the early rollback calls `ProbeVersion`, the seam unused | T2 | T2 alone, at 10.2 s, "within 10s" |
+| NC3 | a "did not answer" error taken for the marker's version | T2 | T2 alone: exit 75 at the first start |
+| NC4 | ProbeVersionWithin runs and words VersionProbeTimeout | U1, T2 | U1 (its silent case) and T2, each "within 10s"; U2, T1, T3, T4, T5 green |
+| NC5 | the copy's silence removed | T2 | T2 alone: exit 75 at the first start |
+| NC6 | the stand-in's silence removed | U1 | U1 alone: it answered 0.2.1 |
+| NC7a | none; every backup answers after 11 s (the variable set for the whole test binary) | none | T3's first case (22.1 s) and T5 (23.7 s) green |
+| NC7b | as NC7a, with the tests' long bound removed (the test side before B706) | T3's case, T5 | both, in CI's words: "serve = 2, want 75 … did not answer within 10s" and "serve = 2 before its rename" |
+
+NC7b reproduces the Windows failure on Linux, with a backup slower than
+production's bound, and NC7a shows the tests' bound carrying it.
+
+### Checks
+
+On legion0 at 73d74a2d, through the shared build lock (`.tmp/_b70x/gate.sh`).
+B722's commit after it touches only `ops/`.
+
+- `make fmt`: no file changed. go1.27.3's gofmt (`go run cmd/gofmt -l`) on
+  every changed Go file: clean.
+- `make vet` and `GOOS=windows make vet`: clean.
+- `make test`, under race, `-timeout 30m`, `-p 4`, TMPDIR under
+  `.tmp/_b70x`: 88 packages ok, none failed and none cached, in 2,002 s.
+  cmd/bridge took 1,082 s, internal/admin 998 s, internal/manifest 1,585 s
+  and internal/updater 28 s. Of the Linux-only packages, internal/alsapcm
+  took 48 s, internal/alsa 2 s and internal/atomicwrite 20 s.
+- `make build-all`: the six targets.
+- The qualification check, `go run ./scripts/qualification-version -base main
+  -head HEAD` with the tags: "qualification version OK: main..HEAD".
+- Run alone under race: the two cmd/bridge pins,
+  `TestServeRollsBackAnInstallWhoseVersionRefusesItsSettings` (17.0 s; the
+  race-built copy takes about a second for each start) and
+  `TestARollbackThatHoldsTheMarkersLockFirstStopsTheMigration` (5.2 s).
+- `TestEveryCitedTestNameExists` passes over this record, and fails on a ghost
+  name planted in the log (the planted bytes restored).
+- Not run here: Windows and macOS natively, nor CI's runners. What this record
+  says of the SCM, of Defender and of CreateProcess is read from the code and
+  the docs, not measured.
+
+## 2026-11-07 — B722: dlna-upnp.md relieved: four long forms moved verbatim, each pointer keeping its binding sentences
+
+Worker b70x, legion0, the same branch as B706 (`fix/b70x-rollback-probe-rules`).
+The rules half ships as `rules-b70x.patch` (this worker cannot write
+`.claude/`): four hunks of `.claude/rules/dlna-upnp.md`, `git apply --check`
+clean, and a strict applier reproduces the moved file byte for byte. The long
+forms are committed here, in `ops/History-rules-dlna-upnp.md`, under its
+`## DLNA, UPnP and discovery`, since that History file is not under `.claude/`.
+
+### The figure
+
+`make docs-check` today: "ok — CLAUDE.md 79.6%; player.md 98.3%; worst load,
+player_openhome_test.go 65.6%". It prints only the largest rules file, so
+dlna-upnp.md's share comes from the same script's `measure`: 97,334 bytes,
+97.3% of its 100,000 (97.0% on 2026-11-04). With the patch it is 87,127 bytes,
+87.1%.
+
+### What moved, and each pointer against its long form
+
+Each candidate came from `move_entry.py --largest 25` and was dry-run first.
+Each pointer was built from exact pieces of its own entry, with whitespace runs
+collapsed as a one-line pointer has them, and checked by `move_entry.plan` with
+`--text`'s checks. The default pointer, which keeps the bold title and the
+bolded Don't/Never sentences, would have dropped sentences that state rules in
+other words. Mechanism, measurements, history, residuals and test lists go to
+the long form. The moves, highest line first:
+
+| entry | bytes | pointer | what the pointer keeps besides the title and its Don'ts |
+|---|---|---|---|
+| L1152, eligibility and selection | 2,900 | 415 | `PickAllLANEligibleInterfaces`' rule that a point-to-point interface whose only addresses are link-local is left out whenever anything else is eligible, cut at its colon (the measurement follows). The ranking (`lanPreference`) is the title's "prefers a real LAN", and goes to the long form. |
+| L854, each SSDP advertiser on its own interface | 4,420 | 591 | `IP_MULTICAST_ALL = 0` set in the Control, **before the bind**, cut at its colon (the window it closes follows); a kernel that refuses the option keeps the old listener with one Warn, never a refusal that takes DLNA down; the unconnected sender, pinned before anything is sent (`openNotifySender`). |
+| L816, a test's advertiser on loopback | 2,699 | 509 | a new test does the same; the skip decided by the pin, not only by Start's error; the production fallback stays; measuring what leaves a Linux host from another namespace, never a listener in the same one. |
+| L217, a malformed host | 2,248 | 545 | never stripped so the remainder can be classified; an ASCII space in an IPv6 zone whose head parses is kept; fullwidth digits and a literal `%25` are not this kind; "Do not drop that dial check", which is not bold and starts with no Don't word, so the default pointer would have left it out. "A control or any other space in that zone is still malformed" is not kept: the title and the zone exception's narrow wording say it. |
+
+12,267 bytes moved for 2,060 bytes of pointers. `verify_moves.py --base main`,
+on a copy of the tree with the patch applied (git pointed at this worktree's
+index): "moved: 4 blocks, 12267 bytes", "citations: 35 phrases cited in
+instruction files, 0 broken", the four pointers listed as the new blocks
+(2,060 bytes), "RESULT: PASS". `make docs-check` on that copy: ok. The worst
+load is unchanged, and the heaviest load with dlna-upnp.md is now
+`internal/baseurl/baseurl_test.go`'s, 256,004 bytes, 53.3%.
+
+### What stays, and why
+
+The larger entries hold more sentences worded as rules than a 600-byte pointer
+can keep verbatim, so they stay whole.
+
+- **L1050** (7,065 B, the listener and SSDP serving only LAN addresses). Its
+  default pointer (588 B) drops "It warns and starts; don't make it refuse" and
+  "and don't name the peer in a refusal", whose bold starts with no Don't word.
+  With them, the warning of a pin to an address not served, `dlna.allowTsnet`'s
+  "reserved and has no effect", and the exception "(only a listener that
+  cannot be armed answers as before, with one Warn)", it is 771 bytes, and its
+  suffix must keep "· doc: docker.md".
+- **L513** (5,031 B, the listener's bounds). The five bolded bounds and the
+  rules worded "stays" (the initial NOTIFY best-effort, `TotalMatches` and
+  `UpdateID`, `WriteTimeout` unset) come to 807 bytes.
+- **Read, not built.** L374, L699, L162, L459, L116, L292, L250 and L589 each
+  carry five to ten more rule sentences (a dial approval's source, a cache's
+  refusals, an approval kept beside its URL, a list that is the one list, a
+  route's shape). L338, L762 and L636 come to an estimated 650 to 700 bytes.
+  L762's "Don't give a client its own copy of the policy" is not bold, so its
+  default pointer would drop it.
+
+### player.md (not touched)
+
+From main, unverified against B728 B11's patch (#1427, which brings player.md to
+99.3%), `move_entry.py --largest 8` lists these:
+
+- L96 (5,481 B): refused by move_entry, since its bolded Don't is 658
+  characters.
+- L91 (1,481 B): its default pointer keeps what its rule sentences say. Its
+  bold "The reason is the process's, so every test that asserts the line calls
+  `forgetPlayerOffReason` first" is its last Don't in other words.
+- Each of these needs `--text` for rule sentences its default pointer drops:
+  - L138 (2,004 B): a successor at the sink's rate and depth takes that sink's
+    packing.
+  - L115 (1,743 B): a command whose context ended does not run, and Stop never
+    waits.
+  - L93 (1,607 B): a binding's interface suffix is only a preference.
+  - L117 (1,556 B): a call's deadline and what a derived context answers.
+  - L79 (1,539 B): a pause by zeros reserves two segments, a refused reopen
+    comes back typed, and the sink ends rather than skip frames.
+  - L109 (1,449 B): disabling publishes `disabled`, and nothing in a snapshot
+    means play.
+- All of this is a first read, not a dry run.
+
+### Checks
+
+- On a fresh copy of 715ac544, the commit holding the long forms, with
+  `rules-b70x.patch` applied by `git apply` (`--check`, then the apply, both
+  clean):
+  - The rules file is 87,127 bytes, the same bytes the moves made.
+  - The History file is the committed one.
+  - `make docs-check`: ok ("CLAUDE.md 79.6%; player.md 98.3%; worst load,
+    player_openhome_test.go 65.6%"). The line on stderr that git listed no
+    tracked files is the self-test's, by design.
+  - `verify_moves.py --base main`, git pointed at this worktree's index:
+    PASS, 4 blocks and 12,267 bytes moved, 35 cited phrases, 0 broken.
+  - `TestEveryCitedTestNameExists`: ok.
+- In the worktree, without the patch: `TestEveryCitedTestNameExists` ok, and it
+  fails on a ghost name planted in the History file (the planted bytes
+  restored). The budgets are ok, with dlna-upnp.md at 97.3% until the patch
+  lands.
+- The patch is 19,936 bytes. A strict applier of its own reproduces the moved
+  file, and the job's copy is byte for byte the one checked. It has no blank
+  context lines: the four hunks fall inside the file's one list.
+- The rest of the gate is B706's above, which ran at 73d74a2d. This commit
+  touches only `ops/`.
+## 2026-11-06 — B617: enrichment gets an off switch, and says what it stops
+
+Backlog B617, from the site's privacy review of 2026-10-31: the bridge sends
+the artist and album names a library's files carry to MusicBrainz, the
+release IDs it finds to the Cover Art Archive and artist names to Deezer, and
+nothing turned that off; a self-hosted mirror redirects the first two and
+never Deezer, though `config.go` said a mirror keeps "enrichment on your own
+network". Worker b617 (Ubuntu 26.04, linux/amd64, go1.27.3,
+`GOTOOLCHAIN=local`, `GOPROXY=off`), branch `feat/b617-enrichment-off` from
+main 4880f8a4, the orchestrator's brief. Commits: red first 4dc53b9c, the
+switch and the enricher's gate 4009e834, the wire b195f7cc, serve's wiring
+and fingerprinting b8a8c92d, the console 030dbf7a, the CLI's retry a1076ba2,
+the rewrite f337a7f0, the docs and `PROTOCOL.md` a19ad6f7, the serve test's
+manifest and artwork legs e1a71eb4, then this record.
+The rule's line in `.claude/rules/enrichment.md` goes in through a checked
+patch (`rules-b617.patch`; this worker cannot write `.claude/`).
+
+### The design, and what it trades
+
+- **Two keys, both on when absent.** `enrich.enabled` stops the enricher
+  wherever it points, a mirror included; `enrich.deezerEnabled` stops Deezer
+  alone, the one lookup a mirror cannot take over. No switch per service for
+  the other two: the Cover Art Archive is asked for the release IDs
+  MusicBrainz answers, and both have a mirror. Both are `*bool` read through
+  `EffectiveEnabled` and `EffectiveDeezerEnabled`, nil on, as the smart mixes'
+  switch. The default is today's behaviour exactly, pinned against main's
+  own requests (below). The environment names derive from the struct
+  (`BRIDGE_ENRICH_ENABLED`, `BRIDGE_ENRICH_DEEZER_ENABLED`), read through the
+  real `Load`. The console writes only off: a save of on clears the key, so
+  the file goes back to one an older binary loads.
+- **Always construct, never stop.** The clients and the goroutine stay; the
+  enricher asks `WithEnabled`'s predicate, a closure over the live holder,
+  before each batch, and parks without touching the store while it is off.
+  Each batch runs on `enrich.CancelWhenOff`'s context, which asks the
+  predicate every second and is cancelled when it answers off, so a request
+  held at an upstream aborts and `stampEnriched` and `markSkipped` take the
+  path a shutdown takes: no stamp, no skip count, no line. A second stop path
+  in `enrichOne` was the alternative and was not taken: the shutdown's path
+  is the one already proven to record nothing. `CancelWhenOff` takes the
+  predicate the gates share, a plain `func() bool`, so neither the enricher
+  nor the sweep imports the config or follows the holder's `Changed`
+  channel, which would answer sooner; asked once a second, it costs one load
+  of the live config's pointer a second while a batch runs, and that second
+  is the switch's promise: off stops within it. Turned on, the next poll
+  (15 s) resumes. One Info line at a boot where it is off, and one at each
+  flip.
+- **Off never stamps, and nothing fetched is touched.** A row the enricher
+  has not processed stays at `enriched_at = 0`, so turning it on resumes the
+  backlog with nothing lost; a row whose art needs no network (`local-`)
+  waits with the rest, since off means the enricher takes no turn. The IDs in
+  `tags_json`, the covers and portraits in the artwork cache and the cached
+  verdicts stay and are served; the cap's eviction runs as ever.
+- **Deezer off is a narrower promise.** `ensureArtistImageCached` asks the
+  predicate after its cached-file checks and before each of its two requests
+  and answers `errDeezerOff`, which neither caller negative-caches (the cache
+  lives as long as the process, and would outlive the switch) or logs. The
+  row stamps without a portrait: holding it back would re-run the whole
+  `enrichOne` for every row while Deezer is off, covers and IDs included. The
+  repair is "Retry missing", whose artist-image facet re-queues each
+  portrait-less row once Deezer is on. A Deezer request already sent when the
+  switch goes off ends by itself, within the client's 10 s: the name has left
+  by then, and cancelling it would need a second context for little. The
+  console's hint does not say "within a second" for it.
+- **Fingerprints stop too.** A fingerprint's answer feeds the enricher alone,
+  so `fingerprintGates` (serve's `fingerprintReady` and the Jobs card's
+  reason) asks `enrich.enabled` first and says `enrichment_off`, and a sweep
+  runs on the same cancelled-when-off context: the decode is killed, the
+  pacing and a lookup end, and nothing is re-queued.
+- **What off does not stop.** The Atlas harvest and lyrics, their cover
+  refresh included (`atlasCoverRefetcher`, their own opt-ins, which never ask
+  the three); the update check, which has a cadence and no switch; Let's
+  Encrypt. The config's doc, the hints, the example and the docs say so, and
+  none of them is called "off". The config's doc and the settings hint first
+  said the update check had a switch of its own; it does not, and both were
+  corrected in a19ad6f7.
+- **On the wire, additive.** While off, a miss on a MusicBrainz key is
+  terminal: `classifyArtworkMiss` reads pending as false, so `/v1/artwork`
+  and `/v1/artist-image` answer `404 no_image` where they answered `202
+  pending` for a turn that would not come. `local-` keys, probe faults and
+  bytes on disk answer as before. The iOS app asks again for imageless keys
+  at every sync, so the 404 is not sticky: on again, the next request
+  answers 202. `enrichmentProgress` is absent while off from all three
+  builders through one predicate (`Provider.SetEnrichmentEnabledSource`), the
+  `since` leg included, a delta with no row too, so an operator's off never
+  reads as "Enrichment in progress" on a phone. No field, no
+  `ProtocolVersion` bump; `PROTOCOL.md` says it at each place.
+- **The console** has the two switches at the top of the Enrichment tab, both
+  `live` in the matrix; the enrichment card and the Jobs card say Off with a
+  link where they said what is queued, with no ETA, through `off` on
+  `enrichmentResponse` and `jobsEnrichment`. Where the environment sets a
+  switch, GET shows the value the environment set at the last start, and a
+  console save writes the live config, environment values included, into the
+  file: as for every `BRIDGE_*` leaf before this change, which the hints
+  state for these two ("it sets this switch at every start").
+- **Retry while off** runs what can run. The facets that feed only the
+  enricher (the resets, the artist-image facet, the fingerprint clear) are
+  skipped ahead of any write, the harvest's and the scoped route's booklets
+  run, and the answer says `enrichmentOff`; where nothing else can run, 409
+  `enrichment-off`, before the path is read or the rate guard stamped. With
+  Deezer off the artist-image facet is skipped (`deezerOff`). The button is
+  offered only for gaps a facet that can run fills, which also stops it
+  counting bios and descriptions where the harvest does not run, the facet
+  that fills them. `bridge enrichment retry` relays a running bridge's
+  answer whatever its own environment says, and offline refuses before it
+  opens the store, since the harvest has no offline facet.
+- **A rewrite keeps the opt-outs.** `bridge init --force` keeps each switch
+  the file writes off, for the reason it keeps `output.mpd: off`, and lists
+  it among what it kept. `priorEnrich` reads each switch on its own and never
+  fails the file's decode: one that does not read is named after the save,
+  by its line and never its value. The file is read, not the environment.
+  `TestPriorInstallTagsAreConfigs` now checks exported fields alone: an
+  unexported one is no key the decoder reads. One follow-up is named in the
+  report as B617.
+
+### Red first
+
+4dc53b9c, over stubs that change nothing: `TestTheOffSwitchLoads` failed
+because a config writing either key did not load ("that key is not a field of
+type config.EnrichConfig") and the environment set nothing, and
+`TestAnEnricherSwitchedOffAsksNoUpstream` because an enricher handed a gate
+answering off sent 3 requests and listed the store's unenriched tracks.
+
+### Main's requests
+
+Before the change, the switch fixture's enricher (two seeded tracks, fake
+MusicBrainz, Cover Art Archive, Deezer and Atlas) was run on main three times
+and sent the same eight requests each time: two to MusicBrainz (a release
+search, an artist search), two to the Cover Art Archive and two to Atlas
+(each release's cover), two to Deezer (the artist search and the picture).
+`TestEnrichmentIsOnWhereTheConfigSaysNothing` loads a config that says
+nothing through `Load`, wires the gates as serve does, and requires exactly
+those requests, service by service in that order; a load-and-save through
+`config.Edit` writes neither key.
+
+### The tests
+
+- `internal/config`: `TestTheOffSwitchLoads` (the file, the environment, the
+  environment over the file).
+- `internal/enrich`: `TestAnEnricherSwitchedOffAsksNoUpstream`,
+  `TestEnrichmentIsOnWhereTheConfigSaysNothing`,
+  `TestASwitchOffStopsAnEnrichmentInFlightAndStampsNothing` (a MusicBrainz
+  request held at the fake is abandoned within 5 s of the flip, no stamp, no
+  skip count, no further request),
+  `TestASwitchOnResumesTheQueuedRows`,
+  `TestDeezerOffAsksDeezerNothingAndStillFetchesCovers`,
+  `TestAPortraitComesBackAfterDeezerOnAndRetryMissing` (one enricher through
+  off, on and the retry, on the text path and the fingerprint path),
+  `TestDeezerOffAfterASearchSendsNoFetch` (a flip during a held search),
+  `TestCancelWhenOffCancelsOnceItsSwitchIsOff`,
+  `TestTheEnricherSaysWhenItsSwitchesFlip`. No test sleeps a fixed time in
+  place of an event: the fakes hold a request on a seam, and the tests wait
+  for what they assert, under a deadline.
+- `internal/api`: `TestAnImageMissIsTerminalWhileEnrichmentIsOff` (through
+  the real routes: 404 off, 202 for `local-` and on a probe fault, 202 on
+  again), `TestAFetchedCoverAndPortraitAreStillServedWhileOff`.
+- `internal/manifest`: `TestTheManifestOmitsEnrichmentProgressWhileOff` (the
+  stream, a `since` delta with rows and one without, the paginated first page,
+  the buffered build, each present again when on).
+- `cmd/bridge`: `TestFingerprintingStopsWithEnrichment`,
+  `TestASweepInFlightStopsWithEnrichment` (a held fpcalc, a held lookup),
+  `TestServeWiresTheEnrichmentGate` (`runServe` with `enrich.enabled: false`,
+  with `BRIDGE_ENRICH_ENABLED=false`, with `enrich.deezerEnabled: false` and
+  with both on, the mirror bases at a counting server and Deezer's base
+  through a `serveOpts` seam; with enrichment off a paired device's
+  `/v1/manifest` has no `enrichmentProgress` and the portrait of an artist
+  whose track waits answers `404 no_image`, from a row seeded before the
+  boot whose file is gone, which the boot's scan counts missing once: a serve
+  that handed the switch to the enricher alone passed every package test
+  until e1a71eb4), `TestTheHarvestRunsWithEnrichmentOff` (a pending premium
+  cover is refetched, a submit and a poll run, the mirror sees nothing),
+  `TestTheCLIRetryWhileOff`, `TestTheCLIRetrySaysWhatTheRunningBridgeSkipped`,
+  `TestARewriteKeepsTheEnrichmentOptOuts`.
+- `internal/admin`: `TestTheEnrichmentSwitchesSaveLiveAndWriteOnlyOff` (the
+  real PATCH: `live`, the file holds false, no key after on, a managed field
+  refused whole), `TestRetryWhileOffResetsNothing`,
+  `TestTheScopedRetryKeepsItsBookletsWhileOff`,
+  `TestRetryWithDeezerOffSkipsTheArtistImageFacet`,
+  `TestTheEnrichmentCardsSayOffWhereTheSwitchIs`,
+  `TestTheSettingsPayloadSendsBothEnrichmentSwitchesAsTheirCheckboxes` (the
+  payload's two expressions, read from `app.js`'s source), and
+  `TestRetryMissingIsOfferedOnlyForWhatCanRunAndSaysWhatRan`, which runs the
+  shipped functions under node and skips without it.
+
+The console's JavaScript was not driven here: the host has no node and no
+browser. The payload is pinned by the source test above; the button's two
+functions run under node where node is installed.
+
+### Negative controls (each on the committed tree, restored after)
+
+A runner applied each mutation once, ran the package's B617 tests and put the
+file's bytes back from memory; the predictions were written down first, and
+the tree was clean after. (a) to (j) and (g2) ran on a19ad6f7, (g3) and
+(g4) on e1a71eb4, whose serve test is (g) and (g2)'s with two more checks.
+
+| Mutation | Predicted | Red |
+|---|---|---|
+| (a) the gate asked per batch only (no `CancelWhenOff`) | the in-flight test | it alone ("the request held at MusicBrainz was not cancelled within 5s") |
+| (b) off stamps the unenriched rows | the resume test | it, the off test and the in-flight test (rows stamped while off) |
+| (c) the pending probe not gated | the image-miss test | it (202 with Retry-After for both keys) |
+| (d) the paginated builder always builds the block | the manifest test | its paginated leg |
+| (e) `fingerprintReady` not asking `enrich.enabled` | the fingerprint test | it (ready, and the card active, with enrichment off) |
+| (f) a nil pointer read as off | the on-by-default test | it |
+| (g) serve not giving the enricher `WithEnabled` | the serve wiring test | its three legs and the harvest test (the enricher's turns never asked) |
+| (g2) serve's predicate asked and its answer ignored | the serve wiring test | its two enrichment-off legs (the mirror and Deezer asked), the harvest test; the Deezer leg green |
+| (g3) serve not handing the provider the switch | the serve wiring test | its two enrichment-off legs (`enrichmentProgress` served) |
+| (g4) serve not handing the API the switch | the serve wiring test | its two enrichment-off legs (the waiting portrait 202) |
+| (h) the rewrite keeping no switch | the rewrite test | four of its subtests |
+| (i) `errDeezerOff` negative-cached on the text path | the portrait test | it, and the Deezer-off test ("negative-cached although Deezer was never asked") |
+| (i2) the same on the fingerprint path | the portrait test | it |
+| (j) the sweep's gate asked before a pass only | the sweep test | both its subtests ("not stopped within 5s of the switch-off") |
+
+Every control built; none stayed green; each prediction held.
+
+### Gates
+
+On e1a71eb4: gofmt (go1.27.3's) over the 33 Go files the branch changes,
+clean; `make docs-check`, ok, on the tree and on a copy with
+`rules-b617.patch` applied, which `git apply --check` takes; the
+qualification check (`scripts/qualification-version`, 4880f8a4..HEAD), ok.
+Through the build lock: `make vet` native and with `GOOS=windows`,
+`GOOS=darwin`, `GOOS=linux GOARCH=386` and `GOOS=linux GOARCH=arm`, ok;
+`make test-fast`, ok, 85 packages, the Linux-only ones (ALSA, alsapcm, the
+durable writer, the identity) among them, run rather than vetted (cmd/bridge 458 s,
+internal/admin 253 s, internal/manifest 264 s); `make test` over
+`./internal/enrich/... ./internal/config/... ./internal/api/...
+./internal/admin/... ./internal/manifest/... ./cmd/bridge/...` (race, the
+Makefile's tags and `-timeout 30m`), ok (internal/admin 1,024 s,
+internal/manifest 1,495 s, cmd/bridge 1,156 s); `make build-all`, ok. Not
+run here: macOS and Windows natively, CI's runners, the console in a
+browser, and the iOS app.
+
+### Not done here
+
+The iOS app's side of the two wire changes is the brief's reading of the app
+(`LibraryScanner.swift`, `BridgeSourceClient.swift`); its clone is not on this
+host, so what a sync that delivers no row does there was not read again. The
+privacy pages are the owner's follow-up and are unchanged. `PROTOCOL.md`'s
+iOS mirror copies the file.
+
+## 2026-11-07 — B617, round 2: the switch is asked at the send and at the write
+
+The review of PR #1425 read ten points in the round above, each a reading of
+the code to confirm red first or answer with evidence. Worker b617, the same
+host and toolchain. New commits on 3f5e2f6d: the send gate (points 1 and 2)
+a012dd32 and its write tests a29f63e7, the harvest's premium covers (3)
+c7917f29, the variables (6) 1fec230c, `bridge fingerprint` (4) 8fffc57e, the
+value-free warning test 1fec230c broke 570e38a8, the console save (5)
+f6f00b98, `PROTOCOL.md`, iTunes and the builders (7 to 10) 6b976472, what
+two tree-wide guards found b07dff2f, then this record. The rule's wording
+goes in `rules-b617-r2.patch`, over round 1's.
+
+### The points
+
+1. **Confirmed.** `CancelWhenOff` asked the switch once a second, and in
+   that second a request went out, an answer was taken and what the pass
+   wrote of it was kept: on 3f5e2f6d a release search held at the fake and
+   answered after the flip was cached and its track stamped (a no-match
+   stamped skipped, `no_mb_match`, so the album was not asked again once
+   on), the next artist rung was sent, and the sweep cached and persisted
+   an AcoustID no-match or match and re-queued both files. The fix is
+   `internal/enrichgate`: the switch rides the context, and every client of
+   the services (MusicBrainz, the Cover Art Archive, Deezer, iTunes, the
+   Atlas premium fetcher, AcoustID; a mirror is the same client) sends
+   through `enrichgate.Client`, which asks it at the send and again at the
+   answer. A refusal is `enrichgate.ErrOff`, wrapping `context.Canceled`,
+   and cancels the switch's context with itself as the cause, so every
+   error path that asks the context first, which the enricher's and the
+   sweep's all do, takes it for a stop: nothing negative-cached, persisted,
+   logged or stamped. A request on the wire is still cut off by the
+   context's tick, within `enrichgate.Interval`, a second. The writes ask
+   again at the write (`stampAdmitted`: `stampEnriched`, `markSkipped`, the
+   fingerprint veto; `admitted`: the sweep's no-match, match, cached
+   outcomes and re-queue), for an answer taken while on that reaches its
+   write after the flip with nothing sent in between. One more defect
+   turned up writing the test the review asked for (the same fingerprint
+   after off then on): a sweep the switch stopped kept the matches it had
+   cached and not re-queued, and the candidate scan skips a cached file, so
+   those files were never offered again before a restart. A stopped pass
+   forgets them (`forgetUnqueued`); their provenance stays.
+2. **Confirmed.** A Deezer flip reached no Deezer request under way: on
+   3f5e2f6d the held search ran to the client's timeout. Each Deezer request
+   runs on a context of its own (`deezerCall`, `CancelWhenDeezerOff`, scope
+   Deezer), whose refusal is `errDeezerOff` (`enrichgate.ErrDeezerOff`) and
+   leaves the batch's context, and a MusicBrainz request on it, running;
+   Deezer's client asks both switches at its send.
+3. **Confirmed, and the owner decided: off stops every premium cover
+   request.** On a29f63e7 the harvest fetched a pending premium cover with
+   enrichment off. Serve's adapter asks the switch before each refetch and
+   runs it on the switch's context; the premium fetcher's own client copy
+   carries the gate, so the harvest's client, its other legs and lyrics
+   never see it. A refetch the switch stopped, refused or cut off, or a CAA
+   answer that meets the switch off, is `atlasharvest.ErrCoversPaused`,
+   which ends the cover leg for the tick, settles what came before it,
+   logs nothing, and burns no attempt: control (3b) answered the pause as
+   the review read it would be, a miss, and the boot test's pending cover
+   was dropped within its eight ticks.
+4. **Confirmed.** `bridge fingerprint` looked up with enrichment off. A
+   lookup run reads `BRIDGE_ENRICH_ENABLED` as serve does, else
+   `enrich.enabled` in the config at the default path (`./bridge.yaml`, then
+   the platform's; the command has no `--config`), else on, once as it
+   starts, and refuses before the key, the probe or a decode (exit 1); a
+   config there that does not load refuses too. `--no-lookup` is not
+   refused. No other command outside serve builds a client of these
+   services: the constructors are called in `runServe` and in
+   `prepareFingerprintRun` alone.
+5. **Confirmed.** With `BRIDGE_ENRICH_ENABLED=false` over a file that said
+   nothing, a console save of the library name wrote `enabled: false`, and
+   with it `on` over the file's `false` wrote `true`; a start without the
+   variable then read the variable's value. The holder's save writes each
+   switch as the file holds it (read in the save's turn) where the update
+   left the live value as it was, the change otherwise (off as false, on as
+   no key), and publishes the live values (`filedSwitches`). The other
+   variables are still written back (B761).
+6. **Confirmed.** `off`, `no`, `n` and every typo read as on: the variables
+   were read by `strconv.ParseBool`, and a refusal was ignored. They now
+   read as the keys do, without regard to case, white space or an empty
+   value saying nothing, and any other value is off with one Warn naming
+   the variable (`switchEnvPaths`, `readSwitchEnv`). Its commit did not run
+   the whole config package; `TestNoEnvironmentOverrideWarningCarriesAValue`
+   looked for the generic warning for these two and failed, which 570e38a8
+   corrected.
+7. **Corrected.** The footer clears at the next sync the app does not run
+   silently; a silent delta (an event's, a gap probe's) leaves it. The
+   app's condition (`!silent && !enrichmentSeen`) is the brief's reading:
+   the iOS clone is not on this host.
+8. **Corrected.** The error table and the artwork section say the `no_image`
+   of a miss while off is not terminal and must not be cached for good; the
+   coverage sweep the section names is the brief's reading of the app.
+9. **Corrected.** iTunes left the derived-state row and the `no_image`
+   paragraph: no production path calls `WithITunes`
+   (`TestNoProductionPathAsksITunes`).
+10. **Production reaches the builders through the Provider alone**: the
+    API calls its `ManifestProvider`, and the package-level `BuildManifest`,
+    `WriteManifest` and `BuildManifestPage` have no production caller
+    (`TestTheWireManifestIsTheProvidersAlone`). The rule names the
+    Provider's two builders; the test's buffered leg and the private twin of
+    `BuildManifest` it called are gone.
+
+### Red first
+
+Each new test ran on the head before its fix, in a copy of that tree, the
+switch-interval seam taken out and round 1's `CancelWhenOff` in its place
+where needed: on 3f5e2f6d, `TestAnAnswerAfterTheFlipIsNotTaken` (6 and 4
+requests where one was held; the answer cached; the track stamped),
+`TestARequestAfterTheFlipIsRefusedAtItsSend` (two artist rungs, Deezer
+asked, the artist cached), `TestADeezerFlipCancelsDeezersRequestAndNotMusicBrainzs`
+and `TestDeezerOffAfterASearchSendsNoFetch` (the held search not cut off),
+`TestALookupTheSwitchRefusesIsNotAMiss` (sent, and taken as a no-match),
+`TestTheEnrichersSendsRunOnTheSwitchsContext` and
+`TestEveryClientSendsThroughTheSwitchsGate`,
+`TestAnAcoustIDAnswerAfterTheFlipIsNotKept`,
+`TestALookupAfterTheFlipIsRefusedAtItsSend`,
+`TestAReQueueAfterTheFlipIsNotMade`, `TestAFingerprintPassRunsOnTheSwitchsContext`
+and `TestAWriteAfterTheFlipIsNotMade` (every write made with the switch
+off); on a29f63e7 with the harvest's poll seam alone,
+`TestTheHarvestRunsWithEnrichmentOff` (the premium cover fetched, the
+pending entry gone); on c7917f29, `TestTheOffSwitchLoads` (60 subtests); on
+1fec230c, `TestBridgeFingerprintRefusesALookupWhileEnrichmentIsOff` (every
+subtest reached the probe); on 8fffc57e,
+`TestAConsoleSaveKeepsTheFilesOwnSwitches` (all four).
+
+### What the tree-wide guards found
+
+The first gate run, on 6b976472, failed two guards in `cmd/bridge` that no
+package run of the round's own tests reaches.
+`TestNoSubcommandTailBypassesLoadCLIConfig`: `bridge fingerprint` loaded the
+config it had resolved with `config.Load`; it loads through `loadCLIConfig`,
+as every subcommand tail does. `TestEveryConfigWriterTakesTheConfigLock`: the
+holder saved `filedSwitches(next, before, found)`, and the sweep takes a
+call handed the turn's bytes for a value made from the turn whatever else it
+is handed (its documented blind spot, `pick(stale, found)`), so it no longer
+held the save to the holder's `bytes.Equal` refusal and asked for the
+`comparedSaves` entry to go. Taking the entry out would have let a later
+change drop that refusal unseen; instead the holder saves a copy of its
+snapshot whose two opt-outs `filedSwitches` sets through a pointer, which
+the sweep reads as the snapshot the refusal guards. The fixes landed while
+that run's race leg was under way, so its results are not counted; the
+gates below are the second run, on b07dff2f.
+
+### Negative controls (each on the committed tree, restored after)
+
+Predictions written first; the tree was clean after each batch. Points 4
+and 5 ran again on b07dff2f, whose holder and CLI load had changed: (5a) and
+(5d) as (5a2), the call left out, and (5d2), the copy published; every
+prediction held as before, and (4b) missed again.
+
+| Mutation | Predicted red | Held |
+|---|---|---|
+| (1a) the transport's admit at the send removed | the request-after-the-flip test | yes |
+| (1b) its admit at the answer removed | the answer-after-the-flip test; in `acoustid`, the lookup test | yes, both |
+| (1c) `stampAdmitted` always true | the write test | yes, its three off subtests |
+| (1e) the sweep's no-match written without asking | the AcoustID answer test | yes, its no-match taken subtest |
+| (1f) its match written without asking | the same | yes, its match taken subtest |
+| (1g) `forgetUnqueued` forgets nothing | the lookup and re-queue tests | yes |
+| (1h) the re-queue made without asking | the re-queue test | yes |
+| (1i) AcoustID's client built without the gate | the lookup test | yes |
+| (1j) the batch on a context with no switch | the wiring pin and three gate tests | yes |
+| (1l) the fingerprint pass on a context with no switch | the pass pin and four sweeper tests | yes |
+| (2a) `deezerCall` on the batch's context | the two Deezer tests and the wiring pin | yes |
+| (2c) admit asks every switch whatever its scope | `enrichgate`'s two scope tests | yes |
+| (2d) Deezer's context of enrich.enabled's kind | the two Deezer tests and the wiring pin | yes |
+| (3a) the harvest takes the pause for a transient failure | the two pause tests | yes |
+| (3b) the adapter answers off as a miss | the boot test and the adapter's off test | yes (the cover dropped in eight ticks) |
+| (3c) the adapter's fetch on a context with no switch | three adapter tests | yes |
+| (3d) the adapter asks whether the switch ended the fetch, not the switch | the answer test | yes, its read subtest |
+| (3e) serve wires the adapter without the switch | the boot test | yes |
+| (4a) the lookup run asks no switch | the refusal test | yes |
+| (4b) the variable not read, the config alone | both CLI tests | no: only the refusal test's two variable subtests; `config.Load` applies the variable over the file itself, so with a config there the mutation changes nothing, and the variable's own read is pinned by the cases with no config |
+| (4c) a config that does not load taken as on | its subtest | yes |
+| (5a) the holder saves the live config whole | the save test | yes |
+| (5b) an unchanged switch written as its live value | the save test | yes |
+| (5c) a changed switch written as the file held it | the save test; in `admin`, round 1's save test | yes, both |
+| (5d) the holder publishes the filed values | the save test | yes |
+| (6a) an unreadable value says nothing | the load table, the env reader's test | yes |
+| (6b) the spellings read with regard to case | both | yes |
+| (6c) the two read as every other boolean | the load table | yes |
+| (6d) the warning carries the value | the load table | yes |
+| (9a) serve wires `WithITunes` | the iTunes pin | yes |
+| (10a) a production call of `manifest.BuildManifest` | the builders pin | yes |
+
+Every control built; one prediction missed, (4b), for the reason given.
+
+### Gates
+
+On b07dff2f: gofmt (go1.27.3's) over the Go files the branch changes, clean;
+`make docs-check`, ok, on the tree, and on a copy with both rounds' rules
+patches applied, which `git apply --check` takes over round 1's rules.
+Through the build lock: `make vet` native and with `GOOS=windows`,
+`GOOS=darwin`, `GOOS=linux GOARCH=386` and `GOOS=linux GOARCH=arm`, ok;
+`make test-fast`, ok, 86 packages, the Linux-only ones (alsapcm, the durable
+writer, the identity's backup) run rather than vetted (cmd/bridge 458 s,
+internal/admin 253 s, internal/manifest 259 s); `make test` over
+`./internal/enrich/... ./internal/enrichgate/... ./internal/acoustid/...
+./internal/atlasharvest/... ./internal/config/... ./internal/admin/...
+./internal/manifest/... ./cmd/bridge/...` (race, the Makefile's tags and
+`-timeout 30m`), ok (internal/admin 1,004 s, internal/manifest 1,447 s,
+cmd/bridge 1,089 s); `make build-all`, ok. Not run here: macOS and Windows
+natively, CI's runners, the console in a browser, and the iOS app.
+
+### Not done here
+
+The iOS citations (the footer's condition, the coverage sweep) are the
+brief's reading; the clone is not on this host. The app's half of the
+footer and Deezer's reset on its own when it is switched on again are the
+orchestrator's to file. a29f63e7's message says it keeps round 1's test
+name for the gate's own test; that rename was in a012dd32.
+
+## 2026-11-07 — B617, round 3: every client asks its own switches
+
+The review of PR #1425 read four more points, each to confirm red first or
+answer with evidence. Worker b617, the same host and toolchain. New commits on
+1336238a: the clients' own switches (point 1) 0ab920a8, serve's wiring pin
+dbddd024, the nil switch's test d497db9c, two of point 1's tests made able to
+fail b8ea6d9e and f3a7e80d, a completed answer re-admitted (point 3)
+c1109da0, `bridge fingerprint --config` and its live switch (point 2)
+6e9a58e8, a race in its test 80ec7a86, the re-queue's transaction (point 4)
+541e0d6f, a round 2 test that asserted what point 4 removed 26b1a788, then
+this record. The rule's wording goes in `rules-b617-r3.patch`, over rounds 1
+and 2's.
+
+### The points
+
+1. **Confirmed.** The gate rode the context alone: a client called with a
+   context that carried no switch sent with the switch off. On 1336238a,
+   with the enricher's switch and Deezer's off, `SearchArtist` on a bare
+   context asked MusicBrainz once and Deezer once. Every client is now built
+   with switches of its own (`enrichgate.Switches`: `Enrichment(on)`, and
+   Deezer's `Deezer(on, deezer)`), a required constructor argument, so a
+   client built without them does not compile; a nil predicate, and the
+   zero value, are off, as every switch in `enrichgate` is now
+   (`CancelWhenOff` with a nil switch included; round 2 read it as on). The
+   transport asks the client's switches, and those the request's context
+   carries, at the send and at the answer (`Switches.Answer`; with
+   `enrich.enabled` off a Deezer client answers `ErrOff`, never
+   `ErrDeezerOff`), and a watch of its own, derived from the client's
+   switches, cuts a request on the wire off within `Interval` and is
+   released at the body's `Close` or the error. A refusal by the client's
+   switches ends the switch contexts its request carries, so the pass on
+   them stops. `Admit(ctx, own)` asks the writer's own switch beside the
+   context's. Serve builds every client over the live predicates
+   (`TestServeBuildsEveryClientOverTheLiveSwitches` reads `runServe`, since
+   the batch's, the pass's and the adapter's contexts carry the switch too
+   and no behavioural test can see a client built over a switch always on);
+   the fingerprint sweep's `enrichmentOn` and the cover adapter's are off
+   when nil. Writing "no miss recorded" through the callers found more: with
+   a bare context the enricher read the clients' refusal as a persistent
+   failure, since its callers asked the context alone (`ErrOff` wraps
+   `context.Canceled`, which `IsTransient` calls persistent):
+   `artistCache` and `releaseGroupCache` took `""`, `albumCache` an empty
+   resolution and the track a skip, a cover's refusal was the release-level
+   miss the caller stamps, and each logged at Error. The callers read a
+   refusal from the error now (`enrichgate.Refused`), and the premium fetch
+   reports none.
+2. **Confirmed.** On 0ab920a8 with the lookup base a test can point
+   (`fingerprintLookupBase`) and nothing else: `--config` was an unknown
+   flag (exit 2); switched off between two tracks, the run sent the second
+   track's lookup once its decode, held 8 s by the fpcalc stand-in, was done
+   (two lookups, exit 0); switched off in the middle of a lookup, the held
+   lookup ended only at the client's 20 s timeout; a config found at the
+   start that went away, or stopped loading, changed nothing. The switch
+   (`fingerprintSwitch`) is the variable, then the file `--config` names (one
+   that is not there refuses the lookup, never reads as on), then the file
+   at the default path, kept once found, then on. It is read as a lookup run
+   starts and then once a second by one goroutine (`follow`), which ends the
+   run's context, with `ErrOff`, at the read that finds it off or finds a
+   config it read gone or no longer loading; the client's switch and the
+   context's are that read's answer (`get`), so nothing else reads the
+   config. The run then exits 1 with the refusal's words after its reports,
+   and says on stderr what decided the switch as it starts and when that
+   changes. Measured under -race: the run stopped 0.96 to 0.97 s after the
+   config changed, in each of the five cases. The first version gave the
+   run's context `refresh` itself as its switch, which every admission asks,
+   so it read the config at each send and answer; the between-tracks cases
+   passed in 20 ms on that. `TestTheFingerprintSwitchIsReadAtMostOnceASecond`
+   counts the reads now: three in 2.5 s while the switch is asked thousands
+   of times.
+3. **Confirmed.** On f3a7e80d, the clients' switches in: a test's base
+   transport held each answer's body at its first read, after the answer's
+   admission, turned the switch off there, then let the body go, with every
+   switch asked once an hour. Each of five callers kept a miss, on a pass's
+   context and on a bare one: `resolveArtist` and
+   `fetchRecoveredArtistImage` put Deezer's no-match in `deezerNegCache`,
+   `resolveArtist` took a malformed MusicBrainz body for a persistent
+   failure and cached `""`, `enrichOne` cached a release no-match, and
+   `resolveReleaseGroupMBID` a release with no release group; AcoustID's
+   no-match came back as `ErrNoMatch`, which a sweep persists. MusicBrainz's
+   `get`, Deezer's `SearchArtist`, iTunes' `get` and AcoustID's `get` ask
+   the client's switches, and the context's, again once the answer is read
+   and decoded; a refusal stands for the answer and its decode error. It is
+   asked after the decode, never at the body's EOF, which `json.Decoder`
+   does not read to. The sweep's writes already asked the client's switch
+   (`admitted` asks `Client.Admit` since point 1).
+4. **Confirmed, and transactional.** On c1109da0, with the store's seam
+   inside the reset: a row with a text-derived artist MBID and no album
+   MBID, matched, whose re-queue a switch-off cancelled inside it, or which
+   failed on a live context, kept the match's provenance, written at the
+   acceptance, and the next sweep never offered the file (its wait ran out
+   at 10 s): the candidate scan reads provenance and an artist MBID as
+   settled, so the match was never applied, across a restart too.
+   `ResetEnrichedByPaths`, still the sanctioned writer, takes the matches
+   and writes their provenance and the re-queue in one transaction, so one
+   that does not commit records neither; `fingerprintOne` returns the match
+   rather than writing it; and every exit that does not re-queue, a failed
+   re-queue included, forgets the matches in memory (`forgetUnqueued`), so
+   the next sweep matches the file and re-queues it. The provenance writer
+   alone is a fixture's now (`SetAcoustIDMatchForTest`), and
+   `SetResetEnrichedBeforeCommitForTest` holds the re-queue inside its
+   transaction. The first gate run's `make test-fast` found a round 2 test
+   that asserted the provenance a stopped pass kept
+   (`TestALookupAfterTheFlipIsRefusedAtItsSend`); the package runs of this
+   round's own tests had not selected it. It asserts none now, and both
+   files' provenance once they are re-queued.
+
+### Red first
+
+Each new test ran on the tree before its fix: point 1's on 1336238a in a
+copy, as a test of its own over the constructors' old signatures, which
+the new per-client tests do not build against (each client's
+`SearchArtist` on a bare context with the switches off asked its upstream);
+point 2's on
+0ab920a8 plus the lookup-base seam (all five of
+`TestBridgeFingerprintReadsTheConfigItIsGiven`'s subtests and all five of
+`TestBridgeFingerprintFollowsItsSwitchWhileItRuns`'s); point 3's on f3a7e80d
+(`TestAnAnswerCompletedAfterTheFlipFillsNoNegativeCache`, ten of ten, and
+`TestANoMatchCompletedAfterTheFlipIsNoAnswer`, two of two); point 4's on
+c1109da0 plus the store's seam
+(`TestAMatchWhoseReQueueDidNotLandIsReQueuedByTheNextSweep`, both).
+
+### What the controls found in the tests
+
+Three tests could not fail as written, and a fourth raced. The watch's
+release at `Close` (1c) stayed green: `http.Client` ends a request's context
+itself when its body closes, but only when it has a deadline to stop, and
+the test's client had a `Timeout`; it takes a client with none now. The
+body-cut subtest flipped the switch inside the handler, so the answer's
+admission could see it off first and the subtest passed on that path
+without reading a body; the switch turns off once the answer is admitted
+now. Control 2b showed the live switch's middle-of-a-lookup case reading the
+held handler's report before the handler saw its connection close; it waits
+for it, bounded.
+
+### Negative controls (each on the committed tree, restored after)
+
+Predictions written first, in `controls_r3.predictions.txt` beside the
+runner; the tree was clean after each batch.
+
+| Mutation | Predicted red | Held |
+|---|---|---|
+| (1a) `Answer` asks the context's switches alone | `enrichgate`'s five own-switch tests; each client's off test; AcoustID's | yes, all three packages |
+| (1b) the transport runs no watch | `enrichgate`'s cut, pass and watch tests; each client's cut test and the no-miss test; AcoustID's cut test | yes (the body cut after f3a7e80d) |
+| (1c) `Close` does not release the watch | the watch test | no at first (the client's `Timeout`); yes on b8ea6d9e |
+| (1c-err) the error path does not release it | the watch test's error subtest | yes |
+| (1d) a nil switch reads as on | five `enrichgate` tests | yes |
+| (1e) Deezer's switch asked before `enrich.enabled`'s | the two Deezer tests | yes |
+| (1f) `Refused` answers nil | the no-miss test, five of five | yes |
+| (1f-artist) `resolveArtist` does not ask it | the no-miss test's artist subtest alone | yes |
+| (1g) MusicBrainz's client over a switch always on | the source pin, its off, cut and no-miss cases | yes |
+| (1h) serve builds MusicBrainz's that way | the serve pin | yes |
+| (1j) the cover adapter reads nil as on | the nil test's adapter subtest | yes |
+| (1k) the sweep reads nil as on | the nil test's sweep subtest, the pass pin | yes |
+| (3a) MusicBrainz's `get` does not re-admit | the six MusicBrainz subtests | yes |
+| (3b) Deezer's `SearchArtist` does not | the four Deezer subtests | yes |
+| (3c) iTunes' `get` does not | the iTunes test | yes |
+| (3d) AcoustID's `get` does not | the AcoustID test | yes |
+| (3e) MusicBrainz's re-admits by the context alone | the three bare-context MusicBrainz subtests alone | yes |
+| (2a) `--config` never read | the flag test's three, the flag's live case | yes |
+| (2b) a config not there reads as on | its subtest, the gone case | yes (on 80ec7a86, exactly those) |
+| (2c) no follower | the five live cases | yes |
+| (2d) the found config not kept | the gone case | yes |
+| (2e) a config that does not load reads as on | the no-longer-loading case, round 2's refusal | yes |
+| (2f) the follower's read ends nothing | the three between-tracks cases alone | yes |
+| (2g) `get` reads the config | the read-rate test | yes |
+| (4a) provenance written at the acceptance | the end-state test, both | yes |
+| (4b) a failed re-queue forgets nothing | the same | yes |
+| (4c) provenance outside the transaction | the store's test, its two subtests; the end-state test | yes, both packages |
+
+Every control built; one prediction missed, (1c), for the reason above.
+
+### Gates
+
+On 541e0d6f: gofmt (go1.27.3's) over the Go files the branch changes,
+clean; `make docs-check`, ok, on the tree, and on a copy with all three
+rounds' rules patches applied, which `git apply --check` takes over round
+2's rules. Through the build lock: `make vet` native and with
+`GOOS=windows`, `GOOS=darwin`, `GOOS=linux GOARCH=386` and `GOOS=linux
+GOARCH=arm`, ok; `make test-fast`, 85 of 86 packages ok, the Linux-only
+ones run rather than vetted (alsapcm 35 s, the durable writer 15 s, the
+identity's backup 367 s), and `cmd/bridge` failed on the round 2 test above;
+`make test` (race, the Makefile's tags, `-timeout 30m`) over
+`./internal/enrich/... ./internal/enrichgate/... ./internal/atlasharvest/...
+./internal/acoustid/... ./internal/manifest/... ./cmd/bridge/...`, ok but
+`cmd/bridge`, on the same test (internal/manifest 1,412 s); `make
+build-all`, ok. On 26b1a788, whose one change is that test: gofmt,
+docs-check and the five vets again, ok; `make test-fast` and `make test`
+over `./cmd/bridge/...`, ok (348 s and 1,026 s). Not run here: macOS and
+Windows natively, CI's runners, the console in a browser, and the iOS app.
+
+## 2026-11-07 — B617, round 4: every return asks, and `bridge fingerprint` follows from its first read
+
+The review of PR #1425 read two more points, each to confirm red first or
+answer with evidence. Worker b617, the same host and toolchain. New commits on
+29662033: every return from a client once its answer began asks its switches
+(point 1) ce03f3fe, `bridge fingerprint` follows its switch from its first
+read (point 2) 492db044, the premium fetch's check at its return pinned
+5aa0b0b3, then this record. The rule's wording goes in
+`rules-b617-r4.patch`, over rounds 1 to 3's. The review's three other
+readings were left as it said; the public record names them under B761.
+
+### The points
+
+1. **Confirmed.** Round 3 asked a client's switches again only once a 200's
+   body was decoded, and only in MusicBrainz's, Deezer's search, iTunes'
+   search and AcoustID's calls. A 404, or an error status whose body the
+   client read or drained, came back as the status's error, or as the
+   upstream's miss, without asking. Round 3's barrier, which turns the switch
+   off at the body's first read or, now, at its close, after the answer's
+   admission, with every switch asked once an hour, showed it on 29662033
+   with this round's tests: each client took the error answer, MusicBrainz's
+   artist search (400) and release-group lookup (404), the Cover Art
+   Archive's front cover, Deezer's search and image, iTunes' search (400)
+   and artwork, and the Atlas premium refetch (404, the `(false, nil)` that
+   settles a pending cover), the other 404s answering `errNotFound`;
+   AcoustID's 400 came back as its HTTP error. Through the callers, on a
+   pass's context and on a bare one: `enrichOne` cached an empty album
+   resolution for a 400 to the release search and, the switch on again,
+   stamped the track against it with no release; `resolveArtist` cached `""`
+   for a 400 to the artist search and told its caller nil; and
+   `resolveReleaseGroupMBID` cached a 404 as no release group. Each client
+   now asks its switches, and those its context carries, at every return
+   once `Do` gave it a response, through one deferred check over named
+   results: a refusal stands for the answer and its error, and closes a body
+   the client would have handed over (the Cover Art Archive's and iTunes'
+   artwork streams). That covered the premium fetch's `TryCache` too, which
+   answers only whether a cover was cached, so an error status reads false
+   whatever the switch says: a 200 whose body completed after the flip
+   counted as no cover, the bytes it wrote kept, and its test, written after
+   the fix, had control r4-1j below for its red. Round 5 undid that half: a
+   cover the write has committed is cached, and the check applies only to a
+   return that wrote nothing (its record, and the test renamed for what is
+   true). Deezer's search and image returned
+   an error status without reading its body, which the deferred `Close`
+   alone touched, after the check, so the barrier could not reach that
+   check: they drain the body first now, as MusicBrainz, the Cover Art
+   Archive and the premium fetch do, which also gives the connection back to
+   the pool. `Switches.Answer`'s doc says what a client asks it at.
+2. **Confirmed.** A lookup run read its switch as it started, probed fpcalc,
+   and only then started the goroutine that follows the switch. On ce03f3fe
+   plus the probe's seam (`fingerprintProbe`), with a probe that turned the
+   config off as it began and took 1.6 s, the first lookup went out on the
+   start's answer (AcoustID asked once), and only then did the follower end
+   the run, exit 1 (the test took 2.61 s). `prepareFingerprintRun` now
+   starts the follower right after the read that admits a lookup run, before
+   the key check and the probe, and returns the run's context and its stop.
+   The probe runs on that context, so a switch-off during it cuts the probe
+   short, and the run, which then stops at its first file, exits 1 in the
+   refusal's words rather than as a failed fpcalc. The follower may write to
+   stderr while the run does, so the two share one lock (`syncWriter`). The
+   test passes in 1.00 s, and the live switch's five cases stopped 0.93 s
+   after the config changed.
+
+### Red first
+
+Each test ran on the tree before its fix: point 1's on 29662033
+(`TestEveryClientsErrorAnswerCompletedAfterTheFlipIsNoAnswer`, eight of
+eight; `TestAnErrorAnswerCompletedAfterTheFlipFillsNoNegativeCache`, six of
+six; AcoustID's `TestAnErrorAnswerCompletedAfterTheFlipIsNoAnswer`, two of
+two); point 2's on ce03f3fe plus the probe's seam
+(`TestBridgeFingerprintFollowsItsSwitchFromItsFirstRead`). The premium
+fetch's test came after its fix, so its control, the fix taken out, is its
+red.
+
+### Negative controls (each on the committed tree, restored after)
+
+Predictions written first, in `controls_r3.predictions.txt` beside the
+runner; the tree was clean after each.
+
+| Mutation | Predicted red | Held |
+|---|---|---|
+| (r4-1a) MusicBrainz's `get` asks nothing at its returns | its two error subtests; the cache test's six; round 3's six MusicBrainz subtests | yes |
+| (r4-1b) the Cover Art Archive's `fetchStream` asks nothing | its error subtest | yes |
+| (r4-1c) Deezer's `SearchArtist` asks nothing | its error subtest; round 3's four Deezer subtests | yes |
+| (r4-1d) Deezer's search returns its 404 undrained | its error subtest alone | yes |
+| (r4-1e) Deezer's `FetchImage` asks nothing | its error subtest | yes |
+| (r4-1f) iTunes' `get` asks nothing | its error subtest; round 3's iTunes test | yes |
+| (r4-1g) iTunes' `FetchArtwork` asks nothing | its error subtest | yes |
+| (r4-1h) AcoustID's `get` asks nothing | the error test; round 3's no-match test | yes |
+| (r4-1i) the premium `RefetchPremium` asks nothing | its error subtest | yes |
+| (r4-1j) the premium `TryCache` asks nothing | the premium cover test alone | yes |
+| (r4-2a) the follower started after the probe, as round 3 had it | the first-read test alone | yes |
+
+Every control built, and every prediction held. Not controlled: the probe on
+the run's context rather than the caller's (on the caller's, a switch-off
+during a slow probe still ends the run when the probe returns, inside the
+test's bound), and `syncWriter` (no test reaches the two writers at once).
+
+### Gates
+
+On 5aa0b0b3: gofmt (go1.27.3's) over the Go files the branch changes,
+clean; `make docs-check`, ok, and the doc budgets, ok, on a copy with all
+four rounds' rules patches applied, which `git apply --check` takes over
+round 3's rules. Through the build lock: `make vet` native and with
+`GOOS=windows`, `GOOS=darwin`, `GOOS=linux GOARCH=386` and `GOOS=linux
+GOARCH=arm`, ok; `make test-fast`, 86 packages ok, 34 of them from Go's
+test cache, their inputs unchanged since round 3's run (alsapcm ran, 36 s,
+and the identity's backup, 359 s); `make test` (race, the Makefile's tags,
+`-timeout 30m`) over `./internal/enrich/... ./internal/enrichgate/...
+./internal/acoustid/... ./cmd/bridge/...`, ok (`cmd/bridge` 1,024 s). Not
+run here: `make build-all`, macOS and Windows natively, CI's runners, and
+the iOS app.
+
+## 2026-11-07 — B617, round 5: the rule as kept, a written cover is final, one warm stand-in
+
+The review of PR #1425 asked for three things: the rule said as the code
+keeps it, the one defect that rule left, and the windows-latest failure of
+the live switch's test. Worker b617, the same host and toolchain, on the
+orchestrator's merge of main, 8a49f1ad (B489's format view now rides through
+`enrichmentProgressBlock` beside B617's `on`). New commits: a written premium
+cover is final (point 2) 7b0a5cf8, the live-switch test's one warm stand-in
+(point 3) 9772f37d, the rule in the comments and docs (point 1) cbe27be0,
+then this record. The rules' wording goes in `rules-b617-r5.patch`, over the
+tree's.
+
+### The points
+
+1. **The rule, as kept (the owner's decision).** Round 4's reviewers found
+   windows against "Don't … take or write what a pass learns after the
+   flip, an answer completed after it included": a cover whose body finishes
+   inside the second after the flip lands in the cache. Closing all of them
+   would put the switch in the shared atomic writer, its rename retries,
+   every stream's terminal errors and every caller that persists a buffered
+   answer, and nothing goes out in those windows: the request was sent
+   already, and the switch exists to stop outbound lookups. So the rule
+   changed and the code did not grow: off stops every request from being
+   sent and cuts one in flight within `enrichgate.Interval`; what an answer
+   that finished inside that interval gives may be written locally, and
+   nothing further goes out; a refusal is `ErrOff`, the upstream not asked,
+   never a terminal miss, so nothing is lost when the switch comes back.
+   `enrichgate`'s package doc, its Transport and Answer docs, the enricher's
+   switch notes and `Run`, the Cover Art Archive's, iTunes' and the premium
+   fetcher's constructors, the cover adapter, the fingerprint sweep, the
+   docker doc's `BRIDGE_ENRICH_ENABLED` row and the settings matrix's
+   `enrichEnabled` row say so now, and round 4's record says what round 5
+   changed of it. No gate was added, and round 4's checks at the returns
+   that wrote nothing stay. The B617 bullet has no long form: no
+   `ops/History-*` file holds it. `PROTOCOL.md` describes the off state, not
+   the second after the flip, and needed no change.
+2. **Confirmed: a file and a return that disagreed.** Round 4's deferred
+   check in the premium fetcher ran after its cache write. On 8a49f1ad, with
+   round 4's barrier turning the switch off as the 200's body was first
+   read: `TryCache` answered false with the cover whole on disk, so the
+   enricher went on to fetch it again, and `RefetchPremium` answered
+   `(false, ErrOff)` with the premium bytes already over the old cover, so
+   the cover adapter answered a pause, kept the stale tiers, and the harvest
+   kept the cover pending to fetch again. Once `writeArtworkAtomicStream`
+   returns nil the cover is at its path (`RenameWithRetry` never fails once
+   its rename has landed; a refused rename onto the same bytes is taken), so
+   that success is final: the deferred check applies only while nothing is
+   written (`written`). The test that pinned the old result is
+   `TestAPremiumCoverWrittenAfterTheFlipIsCached` now (true, and the cover
+   whole), beside `TestAPremiumUpgradeWrittenAfterTheFlipIsGot`. No other
+   client writes before it returns: Deezer's portrait is read whole by
+   `FetchImage` and written by `ensureArtistImageCached` after the client
+   returned, the Cover Art Archive's and iTunes' streams by
+   `ensureArtworkCached`, and nothing asks the switch after those writes,
+   so a committed write there was final already; AcoustID's sweep asks the
+   switch before each write (`admitted`) and none after; the lyrics tier
+   asks no switch (nothing in it imports `enrichgate`). Those are left
+   alone.
+3. **The Windows fake, and its fix.** The fake fpcalc was a copy of the
+   running test binary, `fpcalc.exe` on Windows (`standintest.Install`; a
+   hard link where one can be made), re-exec'd through `TestMain`
+   (`BRIDGE_FPCALC_STAND_IN`), no shell wrapper, so no child keeps its
+   output open past its exit. `newLookupRun` wrote it into a new
+   `t.TempDir` made the whole of `PATH`, once per case: five copies for the
+   test's five cases. Windows scans a new executable's first start, and the
+   probe gives `fpcalc -version` 2 s (`probeTimeout`): three cases stopped
+   at the real precheck and sent no lookup, and the test, which saw no
+   flip, said "the switch was never changed" (`:247`), or, in the middle
+   cases, waited ten seconds for a cut that never came (`:244`). Reproduced
+   on Linux by giving each copy's first `-version` start 3 s: the old test
+   failed all five cases, with those lines and words. The test installs one
+   copy now and starts it once as the probe does, under two minutes it must
+   finish within (`installWarmFpcalcStandIn`); every run keeps the real
+   precheck, and a case whose run stopped there fails first, by the probe's
+   name and in its words (`requireTheProbePassed`). Under the same
+   simulation the new test passed, its warm-up taking the 3 s. Measured on
+   the way: a stand-in built with `-race` slept a second as it exited (the
+   race runtime's `atexit_sleep_ms`) at every start, half the probe's bound
+   (1.036 s a start; 0.033 s with the sleep off; 0.010 s built without
+   `-race`): `installFpcalcStandIn` turns that off for the stand-in, and
+   the live-switch test went from 16 s to 5 s under `-race`. The Windows leg
+   runs without `-race` (gate.yml), so there the cold start was the whole
+   of it. The probe's 2 s is unchanged: for an operator it is right for a
+   warm fpcalc, a native binary that answers `-version` in milliseconds;
+   a first run an antivirus scan holds past it fails that one run with the
+   precheck's own words, and a rerun passes, which is B706's question for
+   the backup probe, where a change would be decided. In CI, the
+   `test (windows-latest)` log for
+   `TestBridgeFingerprintFollowsItsSwitchWhileItRuns` should show the
+   warm-up's line ("the stand-in's first start answered -version in …",
+   the cold start's cost, once) and five cases passing; a case that fails
+   there says `fpcalc precheck:` first, never "the switch was never
+   changed".
+
+### Red first
+
+Point 2's tests ran on 8a49f1ad first:
+`TestAPremiumCoverWrittenAfterTheFlipIsCached` red ("a cover written after
+the switch-off answered not cached") and
+`TestAPremiumUpgradeWrittenAfterTheFlipIsGot` red (`RefetchPremium = (false,
+enrichment is switched off (enrich.enabled): context canceled)`). Point 3's
+red is the simulation above, on the same tree. Point 1 changes no behaviour.
+
+### Negative controls (each on the committed tree, restored after)
+
+Predictions written first, in `controls_r3.predictions.txt` beside the
+runners; the tree was clean after each.
+
+| Mutation | Predicted red | Held |
+|---|---|---|
+| (r5-2a) `TryCache`'s check put back over a committed write | the cached test alone | yes |
+| (r5-2b) `RefetchPremium`'s check put back over a committed write | the upgrade test alone | yes |
+| (r5-2c) `RefetchPremium` asks nothing at the returns that wrote nothing | the error test's Atlas subtest alone | yes |
+| (r5-3a) the stand-in shared but not warmed, under the simulation | the first case alone, by the probe's name | yes |
+| (r5-3b) a stand-in per case again, under the simulation | all five cases by the probe's name, none "never changed" | yes |
+| (r5-3c) every `-version` start slow | all five cases by the probe's name; the first-read test green | yes |
+
+The fix under the simulation passed (its warm-up 3.0 s). Every control built,
+and every prediction held.
+
+### Gates
+
+On cbe27be0: `make fmt` changed nothing, and gofmt (go1.27.3's) over the Go
+files the branch changes is clean; `make docs-check`, ok, and the doc
+budgets, ok, on a copy with `rules-b617-r5.patch` applied over the tree's
+rules, which `git apply --check` takes; the qualification check against
+main (`scripts/qualification-version` from the merge base, 123a80fa), ok.
+Through the build lock: `make vet` native and with `GOOS=windows`,
+`GOOS=darwin`, `GOOS=linux GOARCH=386` and `GOOS=linux GOARCH=arm`, ok;
+`make test-fast`, 88 packages ok (24 from Go's test cache), and `cmd/bridge`
+failed on one test alone, `TestEveryCitedTestNameExists`, on the renamed
+premium test the tree's `.claude/rules/enrichment.md` still cites until the
+patch is applied; `make test` (race, `-timeout 30m`) over
+`./internal/enrich/... ./internal/enrichgate/... ./cmd/bridge/...`, ok but
+for that same test (`cmd/bridge` 1,049 s, `internal/enrich` 105 s, no race
+reported); and `TestEveryCitedTestNameExists` on a `git archive` copy of
+the tree with the patch applied, ok. Not run here: Windows and macOS
+natively (the Windows fix is for CI's `test (windows-latest)` to show),
+`make build-all`, and the iOS app.
+
+## 2026-11-07 — B740: the build-site census skips make test's TMPDIR
+
+Backlog B740, the first of four small follow-ups on
+`fix/b74x-small-followups` from main c7192a6f, worker b74x on legion0
+(Linux, amd64, go1.27.3, `GOTOOLCHAIN=local`, `GOPROXY=off`). Commits: the
+red test 350c405a, the fix 98c1f871, then this record. The rule's line goes
+into `.claude/rules/build-ci-tests.md` through `rules-b74x.patch`, its long
+form under B740 in `ops/History-rules-build-ci-tests.md`.
+
+**What happened.** The build-site census (`discoverBuildSites`, shared by
+`TestBuildTagsAgree`, `TestRealTreeBuildSiteCensus` and
+`-check-build-tags`) walks every operational file the walk reaches, and it
+reached `.tmp`, which `make test` and `make test-fast` give every package's
+tests as TMPDIR when the caller sets none (B544). Those tests make and remove
+temporary files there while the suite runs: `scripts/install-test`'s
+`TestTheUserManagerIsFoundOrNothingChanges` puts a link at
+`run/user/1000/bus` in its rig's root, an extensionless name whose mode reads
+executable on Unix, and the census failed "build site must not be a symlink"
+on it (B739's last record: the merged head's only failure on one host). It
+could as well meet a test's stub that runs `go`, or a file removed between
+its listing and its read.
+
+**Red first.** With a link planted in this worktree at
+`.tmp/b740-planted/run/user/1000/bus`, leading nowhere as install-test's does
+once its socket goes, at 350c405a: a bare `go test ./scripts/third-party-licenses/`
+(TMPDIR unset, so `/tmp`) and `make test-fast TEST_PKGS=./scripts/third-party-licenses/`
+(TMPDIR the worktree's `.tmp`) both failed `TestBuildTagsAgree` and
+`TestRealTreeBuildSiteCensus` with "build site must not be a symlink:
+.tmp/b740-planted/run/user/1000/bus": the census reads the repository's
+`.tmp` wherever the environment's TMPDIR is. The committed red,
+`TestTheCensusSkipsTheMakefilesTMPDIRAtTheRoot`, plants in a fixture's `.tmp`
+(the directory read from the Makefile, never the environment) install-test's
+link, a link named as a build site, a stub that runs `go build` and a note
+holding a command, and failed on the first; its rows elsewhere (a link at the
+root, in `docs/.tmp`, in a look-alike `.tmp.old`, install-test's link under
+`scripts/`, and a note in a `.tmp` below the root) failed the census as they
+must, then and after.
+
+**The fix.** The census skips `makeTestTmpDir`, ".tmp", at the root alone,
+by its name before it lists it, where the `_` rule is, for the tests and
+`-check-build-tags` alike: a `make build` beside a running `make test`, or a
+`make build-all` after a killed test binary left its trees there, met the
+same files. `TestTheCensusSkipsTheMakefilesTMPDIR` reads the Makefile's
+TMPDIR line (the `$(CURDIR)/<dir>` of the lines that assign TMPDIR, recipe
+lines and comments excluded) and fails when it and the constant diverge, so
+a rename of either alone cannot put the census back in the suite's files.
+Rejected: skipping the environment's TMPDIR, which a bare `go test` sets
+elsewhere (control C740-3: green under make test-fast's, red under a bare
+run's), and skipping every dot-directory as the Go-file sweeps do (`.github`
+and `.claude` hold sites the census reads). Those sweeps
+(`TestEveryCitedTestNameExists`, the hash-cost, flac-handle and blank-keeper
+guards) already skip every name the go tool ignores, `.tmp` among them, so
+the census was the one sweep that read it.
+
+**Negative controls**, at 98c1f871 with the link still planted
+(`.tmp/_b74x/ctl.py`: exact-once replacements, the test binary built, each
+test run alone, the bytes put back from memory), predicted by name in
+`.tmp/_b74x/controls-b740.predictions.txt` before the run; every one as
+predicted, the baseline green and `git status` unchanged after. A is
+`TestTheCensusSkipsTheMakefilesTMPDIRAtTheRoot`, M
+`TestTheCensusSkipsTheMakefilesTMPDIR`, G `TestBuildTagsAgree`, R
+`TestRealTreeBuildSiteCensus`, X `TestCensusExcludedTreesAndRecords`.
+
+| Mutation | Red | Green |
+|---|---|---|
+| C740-1 the skip removed | A's TMPDIR row, G, R | M, X |
+| C740-2 skipped by its base name at any depth | A's three rows below the root | G, R, M, X |
+| C740-3 the environment's TMPDIR skipped, a bare run's (`.tmp/_b74x/gotmp`) | A's TMPDIR row, G, R | M, X |
+| C740-3 again, make test-fast's TMPDIR (the worktree's `.tmp`) | A's TMPDIR row | G, R, M, X |
+| C740-4 the Makefile's default renamed `.scratch` | M, A's TMPDIR row | G, R, X |
+| C740-5 the constant renamed `.cache` | M, A's TMPDIR row, G, R | X |
+
+**After**, with the link planted: the package's whole suite under a bare
+`go test` (TMPDIR unset), ok; `make test-fast` with the default TMPDIR is
+among the branch's gates (B745's record).
+
+## 2026-11-07 — B742: the watcher's hint for a root holding only links to directories
+
+Backlog B742, the second item on `fix/b74x-small-followups`, worker b74x, as
+for B740. Commits: the red tests a1384d59, the fix f123833e, then this
+record. The rule's line goes into `.claude/rules/scanner.md` through
+`rules-b74x.patch`, its long form after B74's in
+`ops/History-rules-scanner.md`.
+
+**What happened.** `lookAtRoot`, the look by which the library watcher
+holds a root (B651) and `protectNestedRoots` spares a nested one, read a
+root holding nothing but links to directories, over tracks the index holds,
+as `rootAbsentEmpty`, an emptied mount point, while the scan's
+`emptyRootMustBeSpared` tells that case apart (`msgRootOnlyDirLinks`, B74: a
+link stat'ed through to a directory says the volume holding the root is
+there). So the watcher held such a root and said "check that its volume is
+mounted". Nothing was lost (the root is held as its rows are spared); the
+hint was wrong. The owning-root audit had a third copy of the distinction.
+
+**Red first.** At a1384d59, the fix's tests on main's code:
+`TestTheWatchersHoldAndHintReadARootAsTheScanDoes`, a table of seven shapes
+of a root after a scan indexed it, each through the watcher's
+`holdAbsentRoots` (what Run does before any watch) and a full scan at a
+threshold of one, failed in one row alone, "only directory links, with
+indexed rows": `reads="empty"`, want `only-dir-links`, and the hint "check
+that its volume is mounted: …", want the scan's message. The other six rows
+held as they hold now and the scan spared or pruned as it does:
+
+| Shape | Held, reads= | Hint | The scan's line | Rows after |
+|---|---|---|---|---|
+| absent (the root moved away) | yes, `unreachable` | check the volume | root unreachable | kept |
+| empty | yes, `empty` | check the volume | suspected clean-empty mount failure | kept |
+| only directory links, indexed rows | yes, `only-dir-links` (was `empty`) | `msgRootOnlyDirLinks` (was check the volume) | `msgRootOnlyDirLinks` | kept |
+| only directory links, no indexed rows | no | | none | none |
+| a directory link and a file link | no | | none | the file link's; the rows under the directory link pruned |
+| a dangling directory link | yes, `empty` | check the volume | suspected clean-empty mount failure | kept |
+| real content | no | | none | the content's; the gone folder's pruned |
+
+`TestAParentScanSparesANestedRootHoldingOnlyLinksToDirectories`, green at
+a1384d59 and after: a root nested in another, holding only a link to a
+directory over its tracks, is spared by four subtree scans of the outer root
+and four full scans at the production threshold: the outer root's row under
+its folder, its own row, and both folder rows stay, no missed scan counted.
+
+**The fix.** `lookAtContentlessRoot(ctx, store, root, multiRoot, dirLinks)`
+is the one reading of a root holding no content and no sentinel: a count
+that fails is `rootAbsentUncounted`, none `rootLook{}`, tracks with a link to
+a directory `rootOnlyDirLinks` ("only-dir-links"), tracks without one
+`rootAbsentEmpty`, every absent case `absent: true` as before. The scan's
+guard logs by its reason (the same lines as before), the audit refuses by it
+(the same errors), and the look passes the links its listing holds
+(`dirHoldsLibraryContent` counts them through `listingContent`, which
+`holdsLibraryContent` wraps). The watcher's held line keeps its message and
+its attributes; its hint is `heldHint(look)`, the scan's existing message
+(`msgRootOnlyDirLinks`) for the links case and `heldRootHint` for every
+other. `absent` is unchanged in every case, so the watcher holds and the
+parent scans spare exactly what they did.
+
+**Negative controls**, at f123833e (`.tmp/_b74x/ctl.py`), predicted by name
+in `.tmp/_b74x/controls-b742.predictions.txt` before the run; every one as
+predicted, the baseline green and `git status` clean after. T is the table,
+P the parent-scan test, L `TestScanner_ARootHoldingOnlyLinksToDirectoriesNamesThem`,
+N `TestScanner_ALinkToADirectoryNamedLikeATrackIsNotContent`, S
+`TestScanner_ASubtreeMissBesideOnlyLinksNamesThem`, E
+`TestScannerSparesRowsOnCleanEmptyMount`, U
+`TestAuditOwningRootOnSubtreeMissReturnTypes`, W
+`TestTheWatcherWaitsForAnUnmountedRootAndWatchesWhatIsMountedThere`.
+
+| Mutation | Red | Green |
+|---|---|---|
+| C742-1 the shared reading without its links case | T (the links row: reads, hint, and the scan's clean-empty line), L (all four), N, S (both): the look, the guard and the audit together | P, E, U, W |
+| C742-2 the links case not absent | T (not held, rows pruned), P (the nested root unspared), L (rows gone by the third scan), N | S (the audit refuses by the reason), E, U, W |
+| C742-3 the hint not chosen by the reason | T (the hint alone) | the rest |
+| C742-4 the look counts no links | T (reads `empty`, the mount hint) | the rest |
+| C742-5 the audit counts no links | S ("suspected mount drop") | the rest |
+
+C742-1 is the shared classifier's control: one mutation of it reaches the
+watcher's look, the scan's guard and the subtree audit at once. C742-2 shows
+the hold and the sparing pinned by the table and the parent-scan test, the
+words staying.
+
+## 2026-11-07 — B744: configured hosts in their IDNA form, a library name without its controls, and the mDNS responder's name
+
+Backlog B744, the third item on `fix/b74x-small-followups`, worker b74x, as
+for B740: four follow-ups to B739, each with a red commit and its fix. The
+rules go into `.claude/rules/auth-tls.md` and `wire.md` (part 1),
+`config-lifecycle.md` (part 2) and `cli-serve.md` (parts 3 and 4) through
+`rules-b74x.patch`; the long forms of the last two files' lines are in
+`ops/History-rules-config-lifecycle.md` and `ops/History-rules-cli-serve.md`
+under B744.
+
+**Part 1, a configured host that is not ASCII** (red 76dd31b9, fix
+3059c845). B739 left a configured name as written: a `customEndpoints`
+entry or `autocert.domain` whose host is not ASCII loaded, reached the
+certificate's want-set, and every mint refused it, since x509 takes an
+ASCII DNS name alone. At the red, `bridge init --public --domain
+münchen.de` exited 1 with "TLS cert: generate TLS material: create cert:
+x509: "münchen.de" cannot be encoded as an IA5String", after making its
+config dir, and a hand edit of `customEndpoints` made `bridge cert rotate`
+refuse (B739's own test of it). Red there:
+`TestALoadedCustomEndpointThatIsNotASCIITakesItsIDNAForm` (the file and
+`BRIDGE_CUSTOM_ENDPOINTS`: kept as written, nothing said),
+`TestALoadedAutocertDomainThatIsNotASCIITakesItsIDNAForm`,
+`TestATypedCustomEndpointIsConvertedOrRefused` (a host with no form not
+refused), `TestNormalizeServesAutocertDomainAsItsHost`'s internationalized
+row, `TestTheSettingsPatchConvertsACustomEndpointHostThatIsNotASCII` (200
+for a host with no form, want 400), `TestInitConvertsADomainThatIsNotASCII`
+(exit 1 for each spelling) and
+`TestAConfiguredNameThatIsNotASCIIIsCertifiedInItsIDNAForm`. The fix:
+`hostname.Configured` keeps an ASCII host byte for byte (its case, an
+underscore) and gives one that is not ASCII the conversion `hostname.ASCII`
+gives the host's own name, idna.Lookup's ToASCII (case mapped: `münchen.de`
+and `MÜNCHEN.DE` are both `xn--mnchen-3ya.de`) held to 63 bytes a label and
+253 a name. Where it loads, by the field's existing policy:
+`ValidateCustomEndpoints` publishes an entry's host in that form, its port
+and place kept, said once at Info, and drops one with no form with the
+prune's warning; Normalize serves the domain in that form, or as
+`InvalidAutocertDomain` with a warning where it has none. Both are
+infallible after Normalize's one fallible step, so its all-or-nothing
+contract holds and no config refuses to start over a host. Where it is
+typed: the settings save takes an entry with a form (Normalize stores the
+form) and refuses one with none (`CheckCustomEndpoints`, 400 `validate`,
+the file untouched), and `bridge init --domain` writes the form, says so,
+and refuses a domain with none, exit 2, before anything is written
+(`a_ü.example`, `-ü.example` and a label of 58 `ж`, whose form is 64 bytes,
+have none). The mint
+converts no configured name: `TestAConfiguredNameTheCertificateCannotCarryStillRefuses`
+and its twin now hand the mint a config built in memory, never loaded, and
+still pass on main's code and after. `golang.org/x/net` is already a direct
+dependency (internal/tls and internal/hostname import idna): go.mod and the
+licence census are unchanged.
+
+**Part 2, a library name's control characters** (red 6391c6d4, fix
+cd8394aa, the rows past the cap 86581cdd). A library name kept the runes
+U+0000 to U+001F, U+007F and U+0080 to U+009F wherever it was set but the
+host's name (`firstInstallName`, B739): init's `--name` and its prompt, the
+console's save, and what loads (bridge.yaml, `BRIDGE_LIBRARY_NAME`, a prior
+install's name, which the prompt offers and `--yes` keeps); and
+`sanitizeInstance` kept the C1 ones in the Bonjour instance. Red at
+6391c6d4: `TestInitTypedNameLosesItsControlCharacters`,
+`TestInitPromptedNameLosesItsControlCharacters`,
+`TestInitOffersAnInstallsNameWithoutItsControlCharacters`,
+`TestTheSettingsSaveStripsControlCharactersFromTheName`,
+`TestALoadedLibraryNameLosesItsControlCharacters`,
+`TestALibraryNameInTheFileLosesItsControlCharacters` and
+`TestSanitizeInstanceStripsEveryControlRune`; green there, as they must
+stay, `--name`'s refusal of bytes that are not UTF-8 beside a control, and
+the rows of runes whose second byte is a C1 number (`Ā` C4 80, `š` C5 A1).
+The fix: `config.WithoutControlCharacters`, the one strip, of runes after
+decoding; `CleanTypedLibraryName` for every typed entry (trim, the UTF-8
+refusal first, strip, trim, then the entry's blank and length policy) and
+`RepairLibraryName` for what loads (U+FFFD, trim, strip, trim, cut, with
+the repair's WARN); `firstInstallName` and `sanitizeInstance` through the
+same function, init.go's copy gone. Each typed test reloads the file it
+saved and compares the live name with the reloaded one.
+
+Negative controls (`.tmp/_b74x/ctl2.py`, as `ctl.py` for B740 with the
+output read as bytes), predicted by name in
+`.tmp/_b74x/controls-b744-2.predictions.txt` before the first run, at
+cd8394aa, and in `controls-b744-2b.predictions.txt` before the second, at
+86581cdd; the baseline green and `git status` clean after each. TI, TP and
+TO are the three init tests above in order, TR
+`TestInitRefusesANameAPairingCodeCannotCarry`, TA
+`TestInitAsksAgainForANameAPairingCodeCannotCarry`, TK
+`TestInitKeepsTheNameAnInstallIsServedUnder`, TD
+`TestTheDefaultLibraryNameIsTheHostsNameAsItReads` (cmd/bridge); CL and CF
+the two config tests; AS the admin test; MS
+`TestSanitizeInstanceStripsEveryControlRune` and MD
+`TestSanitizeInstanceStripsDotsAndControlChars` (mdns).
+
+| Mutation | Red | Green |
+|---|---|---|
+| C744-2a the strip before the UTF-8 refusal | TI ("not UTF-8, with a control"), TP (asked once, `Caf` and U+FFFD saved), TR (both "not UTF-8" rows) | TO, TA, TK, TD, CL, CF, AS, MS, MD |
+| C744-2b the strip by bytes | TI, TP, TO, TD (`Жук`, `DESKTOP-日本`, the test Mac's bytes mangled), CL, CF, AS, MS | TR, TA, TK, MD |
+| C744-2c `sanitizeInstance`'s own strip back (C0 and DEL) | MS | the rest |
+| C744-2d `RepairLibraryName` without the strip | TO, CL, CF | the rest |
+| C744-2e `CleanTypedLibraryName` without the strip | TI, TP, AS (each "nothing but controls" row alone) | the rest |
+| C744-2e again, at 86581cdd | TI and AS ("nothing but controls", "controls past the cap"), TP ("nothing but controls") | the rest |
+| C744-2de both strips gone | TI, TP, TO, CL, CF, AS (every row with a control) | TR, TA, TK, TD, MS, MD |
+
+Every test went red or green as predicted; in the first run the rows of
+two mutations did not. Under C744-2b the rows with controls between spaces at a name's ends
+stayed green: the trim before the strip takes U+0085 for white space, so
+the byte strip never met it. Under C744-2e only the rows of a name that is
+nothing but controls went red: the save runs Normalize, whose repair
+strips the rest, so the stored bytes are guarded twice. The rows past the
+cap (86581cdd: 260 runes typed, 250 once the controls are gone, stored)
+are what the typed strip alone decides with that one; the second run
+predicted them, and C744-2de, both layers gone, every row with a control.
+
+**Part 3, a failed responder's line** (red 2e955761, fix 4ebdbe22). With
+`mdns.enabled` on, /v1/health, the pairing QR and the doctor list the
+`.local` endpoint of a host whose name is converted (B739's second round)
+from the setting, whether or not the responder started, and only that
+responder answers it; a failure said only "mDNS advertise failed
+(non-fatal)". `TestAFailedResponderSaysTheConvertedLocalNameWillNotResolve`
+forces the failure through `mdnsLifecycle.start` (a per-instance seam, nil
+`bridgemdns.Advertise`): red for `Жук` at 2e955761, green for an ASCII name
+and a name with no valid form, which get the failure's line alone, then and
+after. The fix says, beside it, that `https://xn--f1ai0a.local:<port>` will
+not resolve while mDNS is down, from `advertise.OwnResponderEndpoint`
+(`Endpoints`' own helper, `localEndpoint`, through the same host-name
+probe); no state is kept and what is published is unchanged.
+
+**Part 4, the started responder asked** (red b5b147cc, fix 415a141d).
+`TestServeOnAHostWhoseNameIsNotASCII`'s mDNS-on row pinned the responder
+to loopback and asked it nothing. It now asks the started responder, as a
+LAN client asks, from a querier bound to the interface the responder is
+pinned to, multicast loopback on (`mdns_query_test.go`); the interface is
+chosen, and the skip decided and recorded as a skipped subtest saying why,
+before the responder starts, and a question unanswered for 10 s after it
+is a failure. Red at b5b147cc on enp4s0: "the started responder left the A
+question for xn--f1ai0a.local. unanswered on enp4s0 for 10 s". The
+transport answered: the same row asking for `legion0.local`, the name the
+system reports, passed (`.tmp/_b74x/b744_4_redcheck.py`, the test's bytes
+put back from memory), so the responder published `os.Hostname`'s name,
+not the probe's. The fix: `mdns.Config.HostnameSource`, read at each
+rebuild (nil is `os.Hostname`), which the lifecycle sets to
+`advertise.ReportedHostname`, the probe the endpoints and the certificate
+read. In production both read `os.Hostname`, so nothing changes there; the
+row passes on enp4s0 in under half a second.
+
+**Part 4's cross-talk** (ee885b74, found before the gates ran). The fix
+made two tests publish `xn--f1ai0a.local` from a live responder: the serve
+row on enp4s0, and internal/mdns's
+`TestAClientResolvesTheASCIINameThroughTheBridgesResponder` on loopback
+with 127.0.0.1. On Linux a socket joined to the mDNS group on one
+interface also takes the group's datagrams arriving on another where a
+socket joined (`IP_MULTICAST_ALL`, which hashicorp/mdns leaves on; the
+DLNA rules record the same for SSDP), and each test took the first answer
+naming the host, so under a parallel `make test` either could take the
+other responder's answer and fail. Measured with a probe
+(`.tmp/_b74x/xtalkprobe`, hashicorp/mdns v1.0.7, a socket joined on the
+asking interface): a responder pinned to lo answered a question asked on
+enp4s0 with A 127.0.0.1, and one pinned to enp4s0 answered a question
+asked on lo with A 192.168.0.139, the reply's source address being the
+host's either way. Each question now takes only an answer carrying the
+address it asks for, and keeps asking until its deadline; both tests pass
+alone.
+
+**Process.** Every multi-package run went through the build lock but one: a
+two-package `go test ./internal/config/ ./internal/hostname/` at part 1's
+green, 9 s, outside it (`.tmp/_b74x/b744-1-green-config.log`). The
+branch's gates are in B745's record.
+
+## 2026-11-07 — B745: the player's DSD state in the CLI's rules, and a Windows restore of the player's files
+
+Backlog B745, the last item on `fix/b74x-small-followups`, worker b74x, as
+for B740. Commits: the red f416a082, the fix 93ba1e34, the rule's long form
+fc6aab6a (under B745 in `ops/History-rules-cli-serve.md`), then this
+record; the rule's line in `.claude/rules/cli-serve.md` ships in
+`rules-b74x.patch`.
+
+**What happened.** `cli-serve.md`, which loads with `internal/backup`, had
+no bullet for the snapshot's newest file, `player-dsd.json`: the DSD
+state's backup and restore rules (B728 B3) are in `player.md`, which loads
+with the player's packages, so a session changing the backup met no rule
+for it. And a snapshot a Linux box takes once its player has run holds
+both of the player's files, the identity (`player-uuid`, with
+`player-ids.json`) and the DSD state. Restored on Windows, where no
+directory can be synced (`atomicwrite.ErrNoDirectoryBarrier`) and the
+player does not run, each is refused, the DSD state as the identity is:
+the owner's decision in B728, kept. The DSD state's refusal named the way
+through, removing it from a copy of the snapshot; the identity's, "restore
+player reservation: atomicwrite: this platform cannot fsync a directory,
+so no write here is made durable: unsupported operation", named none.
+
+**Red first.** At f416a082,
+`TestARestoreWhereNoDirectoryCanBeSyncedRefusesThePlayersFilesNamingTheWay`
+takes a snapshot where directories sync and restores it with the barrier
+taken away (`atomicwrite.SetSyncDirForTest(nil)`, the existing seam, so it
+runs natively on every OS), for the identity, the DSD state and both: red
+for the identity and for both (the refusal said neither that nothing was
+restored nor the way through), green for the DSD state alone, whose
+refusal said both already.
+
+**The fix** (93ba1e34). `RestoreWithOptions` asks once, after reading both
+files from the snapshot and comparing the config and before its first
+write, whether a directory can be synced (`atomicwrite.HasDirectoryBarrier`,
+which reads the barrier the strict writer reads), and refuses a snapshot
+holding either file through `playerFilesNeedABarrier`:
+`ErrNoDirectoryBarrier` wrapped, every one of those files the snapshot
+holds named (`player-uuid`, `player-ids.json` where the manifest lists it,
+`player-dsd.json`), nothing restored, and the way through, removing them
+from a copy of the snapshot, which then restores the rest while this box
+keeps its own. The test's last step takes that way: the copy restores
+`tokens.json` and writes neither of the player's files.
+`restorePlayerDSD`'s own refusal stays behind the check.
+
+**Negative controls** (`.tmp/_b74x/ctl2.py`, `spec_b745.py`), predicted by
+name in `.tmp/_b74x/controls-b745.predictions.txt` before the run, at
+93ba1e34; the baseline green and `git status` clean after each. N is the
+new test, D `TestARestoreThatCannotWriteTheDSDStateDurablyRestoresNothing`,
+L `TestARestoreWhoseBarrierFailsOnceTheStateLandedSaysItChanged`, U
+`TestSnapshotCarriesThePlayerUUIDAndRestoreWritesItAsTheIdentityFile`.
+
+| Mutation | Red | Green |
+|---|---|---|
+| C745-1 the check removed | N (the identity, and both) | N's DSD-state row, D, L, U |
+| C745-2 the check removed and the DSD state's writer not durable (`atomicwrite.WriteBytes`) | N (all three rows), D, L | U |
+
+C745-2's first run did not build ("path/filepath" imported and not used),
+which is no verdict, as the predictions file records; it was run again
+with the path cleaned through `filepath`, its prediction unchanged, and
+went as predicted. C745-1 is the brief's control, the check removed: the
+test fails for the identity, and for the DSD state once its writer's own
+refusal, the second layer, is gone too.
+
+**The branch's gates**, at fc6aab6a (the code as it ships; only this
+record follows it):
+
+- `make test-fast` through the build lock (`buildslot.py b74x`), TMPDIR
+  unset, so the Makefile's default, the worktree's `.tmp`, with B740's
+  planted link in it: 87 packages ok and 14 with no test files, none
+  failed, in about eight minutes once the slot was taken. Among them the
+  Linux-only paths, run here and not only vetted: `internal/alsa`,
+  `internal/alsapcm` (42.6 s), the durable writer `internal/atomicwrite`
+  (14.9 s), the identity's `internal/backup` (366 s), and
+  `scripts/third-party-licenses` (21.6 s), the census B740 fixed, beside the
+  planted link.
+- `make vet` through the lock, native, `GOOS=windows`, `GOOS=darwin` and
+  `GOOS=linux GOARCH=386` (the vet job's portability leg): clean.
+- gofmt: go1.27.3's `gofmt -l` (go.mod's toolchain, from the module cache)
+  over the 30 Go files the branch changes lists none.
+- `make docs-check` on the tree: ok. `rules-b74x.patch`: `git apply --check`
+  clean against fc6aab6a; applied to a copy of CLAUDE.md, the rules files
+  and the skills, every budget holds (config-lifecycle.md at 96.7%, the
+  fullest file it touches; player.md, untouched, 98.2%), and each of the 12
+  test names its added lines cite is declared. It carries, beside the four
+  items' lines, a test-discipline line in build-ci-tests.md for B744's
+  cross-talk. It is built with one line of context, so no hunk holds a
+  blank or whitespace-only line: the tool that wrote it to the job
+  directory drops a line's lone space (a first copy lost four blank context
+  lines' spaces), and the job directory's copy was compared with the checked
+  one byte for byte (`.tmp/_b74x/cmppatch.py`).
+- The qualification guard (`internal/player/qualification/version_gate.go`):
+  the branch touches no guarded prefix or path, so `qualificationVersion`
+  stays.
+
+The planted link of B740's red (`.tmp/b740-planted/run/user/1000/bus`, a
+link to nothing) was in place for the test run and was removed after it.
 ## 2026-11-07 — B728 B11: the player converts DSD
 
 Worker b728-b11, legion0, branch `feat/b728-b11-convert` from main's c7192a6f. Commits:
@@ -82791,6 +84432,40 @@ passed, every case CI names (13 and 29); `scripts/qualification-version` passed 
 c7192a6f, 9dd51ae4 and 5bfec662; `make test` passed, 87 packages ok (1,825 s); `make build-all`
 passed. alsa-abi did not run: no ABI definition or `scripts/alsa-abi` file changed, only a test
 of the backend under `internal/alsapcm/`.
+## 2026-11-07 — B728 B11: the hardware run on the Pi 5 with the Mytek
+
+At PR #1427's head 9dd51ae4, on a Raspberry Pi 5 held at 1.5 GHz by its conservative governor, the Mytek Brooklyn DAC+ over USB. The box's service was stopped for 13 min 23 s and came back on its release, its files unchanged and its mixer where it was. The box has no file capabilities and no approval record, so section A ran on minted records.
+
+| Case | Result |
+|---|---|
+| A1, A2: migrated native at DSD64, 128 and 256 through `output play` and serve | pass: one open per rate, `DSD_U32_BE` at 88200, 176400 and 352800; `driverAcceptedAt`, `streamingObservedAt` and first use's `observedAt` written |
+| A3: DoP | **refused on this build:** every rate `dop_gain_unverifiable` (B773). With a diagnostic build keeping the first of the DAC's two identical configurations: DoP64 and 128 play S32_LE at 176400 and 352800; a volume change to -1 dB stops in 56-62 ms; off 0 dB at the open is `dop_gain_not_unity`, with no PCM open |
+| A4: the first-use gate | pass: `first_use_pending`, OpenHome's Play answers fault 501, `/v1/outputs` carries the reason only when no rate plays |
+| A5: the silent probe | pass: opened 1, closed 1, `HW_REFINE` 23, `INFO` 1, `PVERSION` 1; one at the start and none in a session. A replug wasn't run |
+| A6: PCM across the refresh | pass: a 34 s WAV, one stream open, no refresh noise; two sub-millisecond opens before `HW_PARAMS` |
+| B1: conversion | pass: S32_LE at 176400, 24 valid bits, one open per run |
+| B2: CPU of a core, from `/proc`, with the Pi at 1.5 GHz | DSD64 14.7 %, DSD128 15.8 %, DSD256 17.4 % |
+| B3: xruns | none; the lowest `minLead` 19338 of 35280 frames |
+| B4: joins and Stop | a continuous pair and DSD64 to DSD128: one open, one close; Stop 31 ms, OpenHome's Stop about 56 ms |
+
+Named from the run: B773 (the DAC's two identical configurations), B774 (the control node's opens). `output play`'s banner claimed bit-exactness for every play; fixed here. **Owed:** the owner's listening pass and replug.
+
+### The Pi 4 class run (§4.6)
+
+On a Pi 400 (Cortex-A72, 1.8 GHz at most, four cores) with an AURALiC ALTAIR G1 over USB, a DAC the policy converts for, at S32_LE 176.4 kHz, 24 valid bits, through `bridge output play`. The files, the binary and the player's state were all in RAM, since this box's SD card is too slow to write test files to, which took a measurement build allowing the state on tmpfs and otherwise this PR's code at a0a26228. CPU is the whole process's `/proc` utime and stime.
+
+| Playing | CPU of a core | At |
+|---|---|---|
+| PCM, 176.4 kHz, 24-bit, silent | 15.1 % | about 770 MHz, ondemand |
+| DSD64, silent | 44.2 % | about 870 MHz, ondemand |
+| DSD128, silent | 43.1 % | about 930 MHz, ondemand |
+| DSD256, silent | 52.6 % | about 990 MHz, ondemand |
+| DSD256, silent, every core oversubscribed | 28.5-28.9 % | 1.8 GHz held, 20 s |
+| **DSD256, varied bytes, every core oversubscribed** | **31.3 %** | **1.8 GHz held, 164 s, 49 to 54 °C, no throttling** |
+
+No xrun or fault in any run; the lowest buffer delay sampled at about 8 Hz in the sustained run was 18,785 frames of about 36,000. "Varied bytes" is each random byte followed by its complement: every table entry is touched and the audio band stays near silent, so nothing is played aloud. Busy-loop processes kept every core oversubscribed in the runs marked so: a leftover three beside the four the sustained run started, so seven on four cores.
+
+**Against the gate:** the converter alone is 18.3 % of a 1.5 GHz core by B10's benchmark, inside 25 %. The whole process is about 37.6 % of a 1.5 GHz core (31.3 % scaled by clock, which is an extrapolation: no 1.5 GHz Pi 4 was run). That misses the 25 % §4.6 first wrote, read as the whole process, and meets the amended 40 %. Argon and Codex both recommended merging and landing the optimization separately, bit-identical (B779); neither saw a case for refusing DSD256 on these numbers.
 
 ## 2026-11-07 — B762: the silent probe and the refresh off the player's supervisor loop
 

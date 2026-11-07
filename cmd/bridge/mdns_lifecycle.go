@@ -6,6 +6,7 @@ import (
 	"net"
 	"sync"
 
+	"github.com/acoseac/1-bit-bridge/internal/advertise"
 	"github.com/acoseac/1-bit-bridge/internal/dlna"
 	bridgemdns "github.com/acoseac/1-bit-bridge/internal/mdns"
 )
@@ -46,6 +47,9 @@ type mdnsLifecycle struct {
 	// (serveOpts.mdnsPick), so a responder it starts answers nothing on the
 	// LAN.
 	pick func() (*net.Interface, error)
+	// start starts the responder; nil is bridgemdns.Advertise. A test forces
+	// a startup failure with it.
+	start func(bridgemdns.Config) (*bridgemdns.Advertiser, error)
 
 	mu         sync.Mutex
 	advertiser *bridgemdns.Advertiser
@@ -102,15 +106,33 @@ func (m *mdnsLifecycle) Set(enabled bool) {
 				return dlna.PickLANEligibleInterface(dlna.EligibilityOpts{})
 			}
 		}
-		a, err := bridgemdns.Advertise(bridgemdns.Config{
+		start := m.start
+		if start == nil {
+			start = bridgemdns.Advertise
+		}
+		a, err := start(bridgemdns.Config{
 			InstanceName:    name,
 			Port:            m.port,
 			ProtocolVersion: m.protocolVersion,
 			LibraryName:     name,
 			InterfaceSource: lanInterfaceSource(pick, m.stderr),
+			// The host's name through the probe /v1/health's `.local`
+			// endpoint and the certificate read it through (backlog B744),
+			// so the responder publishes the name they advertise.
+			HostnameSource: advertise.ReportedHostname,
 		})
 		if err != nil {
 			fmt.Fprintf(m.stderr, "mDNS advertise failed (non-fatal): %v\n", err)
+			// A converted host name's `.local` endpoint is published from
+			// the setting, which says on, whether or not the responder
+			// started, and nothing but this responder answers it (backlog
+			// B744). Said here, read from the probe the endpoints read,
+			// with no state of its own: publication stays as it is.
+			if local := advertise.OwnResponderEndpoint(m.port); local != "" {
+				fmt.Fprintf(m.stderr, "mDNS: the advertised %s will not resolve while mDNS is down: it is the host's "+
+					"name in its IDNA ASCII form, which only the bridge's own responder answers, and /v1/health "+
+					"and the pairing QR keep listing it while mdns.enabled is on\n", local)
+			}
 			return
 		}
 		m.advertiser = a

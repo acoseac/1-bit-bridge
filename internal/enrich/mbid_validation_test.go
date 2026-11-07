@@ -54,8 +54,8 @@ func TestSearchResultMBIDTraversalDoesNotEscapeCacheDir(t *testing.T) {
 
 	artDir := filepath.Join(dir, "artwork")
 	e := NewEnricher(store,
-		NewMusicBrainzClient(mbSrv.URL, "t", nil),
-		NewCoverArtClient(caaSrv.URL, "t", nil),
+		NewMusicBrainzClient(mbSrv.URL, "t", nil, onSwitches),
+		NewCoverArtClient(caaSrv.URL, "t", nil, onSwitches),
 		nil, artDir)
 	stop := startEnricherForTest(e, 3*time.Second)
 	deadline := time.Now().Add(2 * time.Second)

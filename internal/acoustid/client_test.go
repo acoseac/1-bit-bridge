@@ -15,9 +15,16 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/enrichgate"
 )
 
 const testKey = "test-api-key-do-not-use"
+
+// onSwitches are a client's switches, always on: what a test hands a client
+// it builds when enrich.enabled is not what it tests, since a client built
+// without its switches sends nothing (enrichgate.Switches; backlog B617).
+var onSwitches = enrichgate.Enrichment(func() bool { return true })
 
 func testFP() Fingerprint {
 	return Fingerprint{Value: "AQABz0mUaEkSRZEG", Duration: 243.55, DistinctB64: 40}
@@ -29,7 +36,7 @@ func newTestClient(t *testing.T, handler http.HandlerFunc) *Client {
 	t.Helper()
 	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)
-	return NewClient(srv.URL, testKey, "test-agent", srv.Client())
+	return NewClient(srv.URL, testKey, "test-agent", srv.Client(), onSwitches)
 }
 
 // TestLookupRequestsItsMetadata is the regression pin for a gap that would
@@ -224,7 +231,7 @@ func TestLookupRateLimitCarriesRetryAfter(t *testing.T) {
 func TestLookupNeverLeaksTheAPIKey(t *testing.T) {
 	t.Run("transport failure", func(t *testing.T) {
 		// No listener can own port zero, unlike a released ephemeral port.
-		c := NewClient("http://127.0.0.1:0", testKey, "test-agent", nil)
+		c := NewClient("http://127.0.0.1:0", testKey, "test-agent", nil, onSwitches)
 
 		_, err := c.Lookup(context.Background(), testFP())
 		if err == nil {
@@ -318,7 +325,7 @@ func TestLookupRedirectGuard(t *testing.T) {
 		// to every redirect in the process (the trap enrich.NewDeezerClient
 		// copies to avoid).
 		shared := &http.Client{}
-		_ = NewClient("https://api.acoustid.org/v2", testKey, "ua", shared)
+		_ = NewClient("https://api.acoustid.org/v2", testKey, "ua", shared, onSwitches)
 		if shared.CheckRedirect != nil {
 			t.Error("NewClient installed its redirect guard on the caller's client")
 		}
@@ -326,7 +333,7 @@ func TestLookupRedirectGuard(t *testing.T) {
 }
 
 func TestLookupRefusesWithoutAKey(t *testing.T) {
-	c := NewClient("", "", "test-agent", http.DefaultClient)
+	c := NewClient("", "", "test-agent", http.DefaultClient, onSwitches)
 	if _, err := c.Lookup(context.Background(), testFP()); err == nil {
 		t.Fatal("expected an error when no API key is configured")
 	}
@@ -501,7 +508,7 @@ func TestMinIntervalForBase(t *testing.T) {
 	}
 	// An empty base means the public service, so the constructed client must
 	// pace at the public interval.
-	if got := NewClient("", testKey, "ua", http.DefaultClient).MinInterval(); got != PublicMinInterval {
+	if got := NewClient("", testKey, "ua", http.DefaultClient, onSwitches).MinInterval(); got != PublicMinInterval {
 		t.Errorf("default client MinInterval = %v, want %v", got, PublicMinInterval)
 	}
 }
@@ -514,7 +521,7 @@ func TestNewClientTrimsBaseURL(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewClient(srv.URL+"/v2/", testKey, "ua", srv.Client())
+	c := NewClient(srv.URL+"/v2/", testKey, "ua", srv.Client(), onSwitches)
 	_, _ = c.Lookup(context.Background(), testFP())
 	if gotPath != "/v2/lookup" {
 		t.Errorf("path = %q, want /v2/lookup — a trailing slash must not double up", gotPath)
@@ -551,7 +558,7 @@ func TestRateLimitErrorIsNilSafe(t *testing.T) {
 // either way until the moment the two disagree.
 func TestLookupReadsTheLiveKeyOnce(t *testing.T) {
 	var reads int
-	c := NewClient("", "", "ua", nil).WithLiveAPIKey(func() string {
+	c := NewClient("", "", "ua", nil, onSwitches).WithLiveAPIKey(func() string {
 		reads++
 		return "k"
 	})
@@ -569,7 +576,7 @@ func TestLookupReadsTheLiveKeyOnce(t *testing.T) {
 // not the (empty) constructed one, in both directions.
 func TestLookupRefusesAnEmptyLiveKey(t *testing.T) {
 	key := ""
-	c := NewClient("", "constructed-key", "ua", nil).
+	c := NewClient("", "constructed-key", "ua", nil, onSwitches).
 		WithLiveAPIKey(func() string { return key })
 	_, err := c.Lookup(t.Context(), Fingerprint{Value: "AQAA", Duration: 30})
 	if err == nil || !strings.Contains(err.Error(), "no API key") {

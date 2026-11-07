@@ -16,9 +16,13 @@
 // against the name it dials, so the name the bridge advertises and the name
 // it certifies have to be one name, decided here once.
 //
-// The names an operator configures (customEndpoints, the public domain)
-// are not reported host names and do not come here: one that cannot be
-// encoded still refuses the certificate.
+// The names an operator configures (customEndpoints, the public domain) are
+// not reported host names, and take Configured instead (backlog B744): an
+// ASCII one is kept as the operator wrote it, and one that is not takes the
+// same IDNA ASCII form, where it loads (config.Normalize) and where it is
+// typed (`bridge init --domain`, the console's settings save). The mint
+// converts no configured name, so one that reaches it without going through
+// either still refuses the certificate.
 package hostname
 
 import (
@@ -76,6 +80,25 @@ func ASCII(reported string) (string, bool) {
 		return "", false
 	}
 	return name, true
+}
+
+// Configured returns the form a host name the operator configured (a
+// customEndpoints entry's host, autocert.domain) is certified and published
+// in, and false when it has none (backlog B744). A host of ASCII alone is
+// returned as it is, byte for byte, its case included: the URL parse and the
+// checks that took it before decide it, as before. One with a byte outside
+// ASCII takes the conversion ASCII gives a reported name: idna.Lookup's
+// ToASCII, the lookup profile, which maps case (münchen.de and MÜNCHEN.DE are
+// both xn--mnchen-3ya.de), held to a label's 63 bytes and a name's 253, which
+// Lookup does not check. One Lookup refuses (an underscore or a leading
+// hyphen beside a character that is not ASCII), or whose form passes those
+// bounds, has none: x509 would refuse it as written, so every mint failed
+// while it was configured.
+func Configured(host string) (string, bool) {
+	if isASCII(host) {
+		return host, true
+	}
+	return ASCII(host)
 }
 
 // isASCII reports whether s holds no byte outside ASCII.

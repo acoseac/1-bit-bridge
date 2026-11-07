@@ -45,13 +45,17 @@
     <div class="panel job-card" id="enrichment-panel">
       <div class="panel-head">
         <h2>Enrichment</h2>
-        <button type="button" id="enrich-retry" class="btn" hidden>Retry missing</button>
+        <span class="panel-actions">
+          <span class="badge" id="job-enrich-state">—</span>
+          <button type="button" id="enrich-retry" class="btn" hidden>Retry missing</button>
+        </span>
       </div>
       <dl>
         <dt id="enrich-source-dt" hidden>Source</dt>
         <dd id="enrich-source" hidden></dd>
         <dt>Pending</dt>
-        <dd><span id="enrich-pending">0</span> tracks in the queue <span id="enrich-eta" class="hint"></span></dd>
+        <dd id="enrich-pending-dd"><span id="enrich-pending">0</span> tracks in the queue <span id="enrich-eta" class="hint"></span></dd>
+        <dd id="enrich-off-dd" hidden>Off: nothing is looked up. <a href="/settings?tab=enrichment">Turn it on in Settings</a></dd>
         <dt>Matched</dt>
         <dd><span id="enrich-matched">0</span> tracks fully resolved</dd>
         <dt>Missing</dt>
@@ -62,11 +66,11 @@
         <dd id="job-harvest-state">—</dd>
       </dl>
       <p class="hint">
-        Always-on: fills covers, artist and release IDs after every
-        scan, paced to respect the enrichment source. Runs
-        automatically — <em>Retry missing</em> re-queues the tracks
-        still short of something.
-        <a href="/settings?tab=enrichment">Source settings</a>
+        Fills covers, artist and release IDs after every scan, paced to
+        respect the enrichment source, while it is switched on.
+        <em>Retry missing</em> re-queues the tracks still short of
+        something.
+        <a href="/settings?tab=enrichment">Enrichment settings</a>
       </p>
     </div>
 

@@ -159,11 +159,52 @@
     <div id="settings-panel-enrichment" class="tab-pane" data-tab="enrichment">
       <h2 class="section-head">Enrichment</h2>
       <p class="hint">
-        The background enricher fills in cover art + MusicBrainz IDs. Choose
-        where it looks: the public MusicBrainz + Cover Art Archive services,
-        or a self-hosted <a href="https://github.com/acoseac/1-bit-atlas">Atlas</a>
+        The background enricher fills in cover art, MusicBrainz IDs and artist
+        photos: it sends the artist and album names your files carry to
+        MusicBrainz, the release IDs it finds to the Cover Art Archive, and
+        artist names to Deezer. Choose whether it runs, and where it looks for
+        the first two: the public MusicBrainz + Cover Art Archive services, or
+        a self-hosted <a href="https://github.com/acoseac/1-bit-atlas">Atlas</a>
         mirror on your own network.
       </p>
+
+      {{/* enrich.enabled and enrich.deezerEnabled (backlog B617). Both apply
+           at once, and only off is written to bridge.yaml. */}}
+      <div class="field">
+        <label class="checkbox">
+          <input name="enrichEnabled" type="checkbox" role="switch" {{if .Data.EnrichEnabled}}checked{{end}}>
+          Look up covers, artist and release IDs
+        </label>
+        <small class="hint">
+          Off, nothing is sent to MusicBrainz, the Cover Art Archive, Deezer or
+          AcoustID, to a mirror set below, or to Atlas for a premium cover; a
+          lookup under way is cut off within a second. Covers and IDs already
+          fetched stay, and the bridge still serves them. The rest of the Atlas
+          harvest and its lyrics, the update check and certificate renewal are
+          separate, and go on. Applies at once; turned back on, the tracks that
+          waited are looked up. Where the
+          <code>BRIDGE_ENRICH_ENABLED</code> environment variable is set, it
+          sets this switch at every start; a save here writes the switch to
+          bridge.yaml only when you change it.
+        </small>
+      </div>
+
+      <div class="field">
+        <label class="checkbox">
+          <input name="enrichDeezerEnabled" type="checkbox" role="switch" {{if .Data.EnrichDeezerEnabled}}checked{{end}}>
+          Artist photos from Deezer
+        </label>
+        <small class="hint">
+          Artist names go to Deezer for portraits whatever the source below: no
+          mirror stands in for it. Off, Deezer is asked nothing new, and a request
+          under way is cut off within a second. An artist enriched while this is
+          off gets no photo until it is on again and <em>Retry missing</em> on the
+          Jobs page fetches the missing ones. Where the
+          <code>BRIDGE_ENRICH_DEEZER_ENABLED</code> environment variable is set,
+          it sets this switch at every start; a save here writes the switch to
+          bridge.yaml only when you change it.
+        </small>
+      </div>
 
       {{/* `data-managed-with` because this picker has no server field of
            its own — it RESOLVES into enrichMusicBrainzBaseURL and
