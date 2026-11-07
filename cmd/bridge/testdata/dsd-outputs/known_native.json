@@ -1,0 +1,161 @@
+{
+  "outputs": [
+    {
+      "id": "bridge:7d444840-9dc0-11d1-b245-5ffdce74fb01",
+      "kind": "bridge",
+      "player": {
+        "software": "bridge",
+        "version": "0.0.1"
+      },
+      "dac": null,
+      "pathRules": [],
+      "bridge": {
+        "dsdPlayback": {
+          "bootId": "golden-boot",
+          "policyGeneration": 2,
+          "tuples": [
+            {
+              "format": "DSD_U32_BE",
+              "bitRate": 2822400,
+              "channels": 2,
+              "policyId": "native/DSD_U32_BE/2822400/silence/100/400",
+              "pause": "silence",
+              "tailMs": 100,
+              "prefillMs": 400,
+              "evidence": "streaming_observed",
+              "evidenceOn": "2026-11-06"
+            },
+            {
+              "format": "DSD_U32_BE",
+              "bitRate": 5644800,
+              "channels": 2,
+              "policyId": "native/DSD_U32_BE/5644800/silence/100/400",
+              "pause": "silence",
+              "tailMs": 100,
+              "prefillMs": 400,
+              "evidence": "listener_confirmed",
+              "evidenceOn": "2026-11-05"
+            },
+            {
+              "format": "DSD_U32_BE",
+              "bitRate": 11289600,
+              "channels": 2,
+              "policyId": "native/DSD_U32_BE/11289600/silence/100/400",
+              "pause": "silence",
+              "tailMs": 100,
+              "prefillMs": 400,
+              "evidence": "reported"
+            }
+          ],
+          "converted": [],
+          "refused": [],
+          "warnings": [],
+          "model": "Test Test DAC",
+          "bcdDevice": "0100"
+        },
+        "dsdDAC": {
+          "dacKey": "d1-29e725b72bbce9ac",
+          "profile": {
+            "id": "test.dac",
+            "name": "Test DAC",
+            "caveats": [
+              {
+                "code": "transition_clicks",
+                "transport": "dop",
+                "note": "This DAC clicks at a transition into DSD128 or DSD256."
+              }
+            ]
+          },
+          "choice": {
+            "mode": "auto",
+            "maxBitRate": 0,
+            "revision": 1,
+            "dopConfirmed": true
+          },
+          "options": [
+            {
+              "mode": "native",
+              "offered": true,
+              "rates": [
+                {
+                  "bitRate": 2822400,
+                  "evidence": "streaming_observed",
+                  "evidenceOn": "2026-11-06"
+                },
+                {
+                  "bitRate": 5644800,
+                  "evidence": "listener_confirmed",
+                  "evidenceOn": "2026-11-05"
+                },
+                {
+                  "bitRate": 11289600,
+                  "evidence": "reported"
+                }
+              ]
+            },
+            {
+              "mode": "dop",
+              "offered": true,
+              "rates": [
+                {
+                  "bitRate": 2822400,
+                  "evidence": "reported"
+                },
+                {
+                  "bitRate": 5644800,
+                  "evidence": "reported"
+                },
+                {
+                  "bitRate": 11289600
+                }
+              ],
+              "needsConfirmation": false
+            },
+            {
+              "mode": "convert",
+              "offered": true,
+              "rateHz": 176400,
+              "validBits": 24,
+              "passbandHz": 30000,
+              "dither": "none"
+            },
+            {
+              "mode": "off",
+              "offered": true
+            }
+          ],
+          "firstUse": [
+            {
+              "transport": "native",
+              "state": "observed"
+            },
+            {
+              "transport": "dop",
+              "state": "acknowledged"
+            }
+          ]
+        },
+        "openHome": null,
+        "state": "stopped",
+        "reason": null,
+        "lastError": null,
+        "libraryScope": "self",
+        "fixedVolume": true,
+        "codecs": [
+          "flac",
+          "wav",
+          "aiff",
+          "alac",
+          "dsf",
+          "dff"
+        ],
+        "dsdMode": "auto",
+        "allowDoP": true,
+        "timeSeek": {
+          "pcm": "supported",
+          "dsd": "unsupported"
+        }
+      }
+    }
+  ]
+}

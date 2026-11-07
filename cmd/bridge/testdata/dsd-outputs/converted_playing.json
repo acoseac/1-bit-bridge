@@ -1,0 +1,157 @@
+{
+  "outputs": [
+    {
+      "id": "bridge:7d444840-9dc0-11d1-b245-5ffdce74fb06",
+      "kind": "bridge",
+      "player": {
+        "software": "bridge",
+        "version": "0.0.1"
+      },
+      "dac": null,
+      "pathRules": [],
+      "bridge": {
+        "dsdPlayback": {
+          "bootId": "golden-boot",
+          "policyGeneration": 2,
+          "tuples": [],
+          "converted": [
+            {
+              "bitRate": 2822400,
+              "rateHz": 176400,
+              "validBits": 24,
+              "passbandHz": 30000,
+              "dither": "none",
+              "filter": "dsdconv-1"
+            },
+            {
+              "bitRate": 5644800,
+              "rateHz": 176400,
+              "validBits": 24,
+              "passbandHz": 30000,
+              "dither": "none",
+              "filter": "dsdconv-1"
+            },
+            {
+              "bitRate": 11289600,
+              "rateHz": 176400,
+              "validBits": 24,
+              "passbandHz": 30000,
+              "dither": "none",
+              "filter": "dsdconv-1"
+            }
+          ],
+          "refused": [],
+          "warnings": [],
+          "model": "Test Test DAC",
+          "bcdDevice": "0100"
+        },
+        "dsdDAC": {
+          "dacKey": "d1-29e725b72bbce9ac",
+          "choice": {
+            "mode": "auto",
+            "maxBitRate": 0,
+            "revision": 0,
+            "dopConfirmed": false
+          },
+          "options": [
+            {
+              "mode": "native",
+              "offered": true,
+              "rates": [
+                {
+                  "bitRate": 2822400
+                },
+                {
+                  "bitRate": 5644800
+                },
+                {
+                  "bitRate": 11289600
+                }
+              ]
+            },
+            {
+              "mode": "dop",
+              "offered": true,
+              "rates": [
+                {
+                  "bitRate": 2822400
+                },
+                {
+                  "bitRate": 5644800
+                },
+                {
+                  "bitRate": 11289600
+                }
+              ],
+              "needsConfirmation": true
+            },
+            {
+              "mode": "convert",
+              "offered": true,
+              "rateHz": 176400,
+              "validBits": 24,
+              "passbandHz": 30000,
+              "dither": "none"
+            },
+            {
+              "mode": "off",
+              "offered": true
+            }
+          ],
+          "firstUse": [
+            {
+              "transport": "native",
+              "state": "pending"
+            },
+            {
+              "transport": "dop",
+              "state": "pending"
+            }
+          ]
+        },
+        "playback": {
+          "bootId": "golden-boot",
+          "policyGeneration": 2,
+          "session": 3,
+          "occurrence": 7,
+          "state": "open",
+          "format": "S24_3LE",
+          "rateHz": 176400,
+          "logicalRate": 0,
+          "channels": 2,
+          "validBits": 24,
+          "transport": "converted",
+          "observedAt": "2026-11-07T12:00:00Z",
+          "converted": {
+            "fromBitRate": 5644800,
+            "filter": "dsdconv-1",
+            "passbandHz": 30000,
+            "dither": "none",
+            "gainDB": 0,
+            "clippedSamples": 3
+          }
+        },
+        "openHome": null,
+        "state": "playing",
+        "reason": null,
+        "lastError": null,
+        "libraryScope": "self",
+        "fixedVolume": true,
+        "codecs": [
+          "flac",
+          "wav",
+          "aiff",
+          "alac",
+          "dsf",
+          "dff"
+        ],
+        "dsdMode": "auto",
+        "allowDoP": false,
+        "timeSeek": {
+          "pcm": "supported",
+          "dsd": "unsupported"
+        }
+      }
+    }
+  ]
+}

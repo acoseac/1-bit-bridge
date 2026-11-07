@@ -382,8 +382,10 @@ captured from 9e7b2675). Its keys are every one present: `openHome`, `state`,
 `reason` (null outside `unavailable`, which the handler enforces), `lastError`,
 `libraryScope` `self`, `fixedVolume` (the boot snapshot's `EffectiveMixer` is
 `none`), `codecs` (never null), `dsdMode` and `allowDoP` (the boot snapshot's
-`EffectiveDSDMode` and `AllowsDoP`). `TestTheBridgesOwnElement` pins every key
-and value.
+`EffectiveDSDMode` and `AllowsDoP` until B728's B8, and since then the bound
+DAC's, from the set the backend published: "One read of the backend's facts,
+the set's own view" below). `TestTheBridgesOwnElement` pins every key and
+value.
 
 ### One composer, a fresh slice, the MPD half as it was
 
@@ -512,8 +514,10 @@ container: `.m4a` is ALAC or AAC).**
 native or DoP tuple or a rate it converts to PCM (`PlayerPolicy.PlaysDSD`,
 B728 B11; until B11 a tuple alone listed them), the predicate OpenHome's
 ProtocolInfo lists DSF and DFF by too, and never while it plays none.** A
-converted rate publishes no tuple, so a client grants DSD from the tuples
-alone, as before (`TestTheElementListsDSDWhileThePlayerConverts`).
+converted rate publishes no tuple: until B8 it published nothing, and a client
+granted DSD from the tuples alone; since B8 it is a `converted` entry, which a
+client grants DSD from as it does from a tuple
+(`TestTheElementListsDSDWhileThePlayerConverts`).
 
 `format.Containers` is every container the decoders reconstruct from and
 `Container.IsDSD` the DSD ones, each pinned to the source and cross-checked on
@@ -560,8 +564,9 @@ dial or write anything.**
 `newBridgeOutput(plan, player, cfg)` is installed with
 `api.Server.WithBridgeOutput` right after `startServePlayer` returns, long
 before the listeners. It holds the boot plan, the `bridgePlayer` and the boot
-snapshot's fixed fields (`EffectiveMixer` `none`, `EffectiveDSDMode`,
-`AllowsDoP`); `Enabled` is `plan.lists`. `bridgePlayer.id` is set with `eng`
+snapshot's fixed fields (`EffectiveMixer` `none`, and `EffectiveDSDMode` and
+`AllowsDoP`, which since B728's B8 the console's Player page alone reads, until
+B13 replaces it); `Enabled` is `plan.lists`. `bridgePlayer.id` is set with `eng`
 and `be` before `ready` closes, so once `ready` reads closed both are the
 start's own; before that the view reads neither, and with no engine after it
 reads the file. `playerOutput` (`p.out`) is the supervisor's alone, as its
@@ -609,7 +614,11 @@ Only the bound PCM device's whole playback altsets are projected. Empty
 `pcmBitDepths`, `nativeDSDRates` and `dsdFormats` are normalized to `[]` in the
 projection even though the ALSA helper currently already returns non-nil
 slices. No identity or longname crosses the seam. The bridge's `name` and `id`
-replace known serial and anchored port substrings with `[redacted]`:
+replace known serial and anchored port substrings with `[redacted]`, the port
+in each spelling, as sysfs gives it (its configuration and interface after the
+port), its canonical form, and the port alone, as a binding names it
+(`playback.PortForms`, since B728 B8 round 2, which found a label holding the
+port alone kept it):
 `Serial.Redact` does the serial replacement without exposing its raw value.
 MPD's projection remains unchanged; `isMPDsOutput` stays null for bridge.
 
@@ -633,3 +642,205 @@ availability again immediately before making the snapshot stale.
 independent caller deadlines; the stalled test counts one reader after fifty
 callers exhaust their bounds. Tests use `testing/synctest` for deterministic
 holds and virtual deadlines, without wall-clock sleeps or sockets.
+
+## B728 B8 — the read side of the player's DSD (2026-11-07)
+
+The record is in `ops/engineering-log.md`, 2026-11-07, B728 B8. The heading
+below is the long form of `output.md`'s bullet on the element's DSD read side;
+`wire.md`'s bullets on DSD capability, `logicalRate` and the fixture exporters
+have theirs in `History-b470-native.md`, under "The read side (B728 B8)".
+`output.md` loads with the read side's tests and goldens
+(`cmd/bridge/serve_player_dsd_read*.go`, `serve_player_dsd_golden*.go`,
+`testdata/dsd-outputs`) since this change.
+
+### One read of the backend's facts, the set's own view
+
+**Never build `dsdDAC`, `dsdMode` or `allowDoP` from another read (the
+element's `dac`, the store's `State`, a refresh, the box), store a new set or
+move `policyGeneration` for a change that leaves what plays as it was (an
+occurrence admitted under a set is compared with the one published by its
+pointer, and only a reconciliation repoints it), leave such a change
+unpublished, give an observation the current set's evidence unless it was
+admitted under that set (its boot and generation: a `policyId` names no DAC,
+firmware or set), put a serial or a port, in any of the port's spellings
+(`playback.PortForms`), in a key, a model, a profile's name or a caveat's
+note, or give a converted occurrence native or DoP evidence.**
+
+What the element says. Until B8 it said of the player's DSD what B7
+published, the tuples under the boot and the epoch, the reason, the model and
+the firmware, and the boot snapshot's `dsdMode` and `allowDoP`, which since
+B7 are the migration's input alone: a client read what played and nothing of
+why, or of the DAC's choice. B8 publishes the rest of the design's section
+7.1. On `dsdPlayback`: `converted`, each rate the set converts with its plan
+(`rateHz`, `validBits`, `passbandHz`, `dither`, `filter`); `refused`, each
+rate from DSD64 to DSD256 the set plays neither way, with its word;
+`warnings`, the state's, the bridge's and the bound DAC's own; and each
+tuple's `evidence` and `evidenceOn`. `dsdDAC`, the bound DAC: its `dacKey`,
+its profile (ID, name, caveats), the choice that applies (`mode`,
+`maxBitRate`, `revision`, `dopConfirmed`), each mode's option and each
+transport's first use. An option is listed for `native`, `dop`, `convert` and
+`off`, never `auto`, which is no explicit choice and resolves to what the set
+plays (`optionModes`): native's and DoP's with their rates and each rate's
+evidence (`[]` for none), DoP's `needsConfirmation` (a rate it is offered at
+that the profile neither heard nor states DoP at) and `blocked` (the gain
+check's word, where it refuses DoP at every rate DoP is offered at),
+convert's plan while it is offered, and off always offered; DoP is not
+offered at a rate the profile refuses it at, but for this box's own clean
+answer there. First use is one entry a transport, `pending` (not
+acknowledged under the unit's firmware), `acknowledged` or `observed` (an
+occurrence of it has since played 5 s of its content with no fault), with
+`bitRates` the rates a migrated acknowledgement covers, absent for every
+rate. On `playback`: `evidence` and `evidenceOn`, a native or DoP
+occurrence's, and `converted`, a converted one's plan and its count of
+samples saturated. The section's `check` member is B12's, and the write route
+and its health flag (`bridgeDSDChoice`) are B9's: `/v1/health` advertises no
+flag before its route (`TestNoHealthFlagBeforeItsRoute`). Every word is in a
+closed list of PROTOCOL.md's, and the source-derived token guard reads each
+from its definitions (`TestDSDOutputProtocolTokens`).
+
+The view is published with the set it describes. `readDSD` reads the DSD
+state once (`b.dsdState()`, the store's state in memory) before it computes
+the set, hands that state to `policy.Effective` and to `viewOf`, and
+`refreshDSD` publishes the view beside the set in one pair (`dsdPublished`),
+swapped as one, so no reader sees one set's tuples beside a view made for
+another (round 1 carried it in the set, `dsdSet.view`, which round 2's fix
+below took out); `copyPolicyLocked` clones the pair's view into
+`PlayerPolicy.DSD` beside the tuples and converted rates of the pair's set,
+and `Backend.Facts` returns the copy and the live observation under one lock. Serve's view of its player (`bridgeOutput.facts`) calls `Facts`
+once a request and builds `dsdPlayback`, `dsdDAC`, `dsdMode`, `allowDoP` and
+`playback` from what it returned (`bridgeDSDFacts`). A second read could
+show one reading's tuples beside another's choice or first use, and the
+store's `State` waits on the store's lock, which a write holds across its
+fsync; the read side's read takes neither and opens no file. It waits on
+two locks alone: the backend's `policyMu`, held for copies and for the observation's
+updates, and the current sink's, which `Position` takes and no kernel call
+holds; never `dsdMu`, which a refresh holds across its reading of the box.
+`dsdMode` is the mode that applies to the bound DAC, its own choice's or the
+state's `defaultMode`, and `allowDoP` whether DoP may play at some rate it is
+offered at, by the profile (a heard or stated rate it does not refuse) or the
+user's confirmation under the unit's firmware, neither the gain check nor
+first use, which the DoP option and first use say: it describes and permits
+nothing. Both are `off` and false where no view was read (the backend not
+ready, no player, the harness's backend, which publishes none) and where the
+set was computed for no DAC (`noView`: none available, its model or its
+stream file unread, every rate refused as `dsd_dac_unread`), and a state
+that does not read is `off` too. `dsdDAC` is omitted while the view names no
+DAC, which the set decides (`DSDView.DAC`), never the element's `dac`, B543's
+reading of the box, or another read; `dsdPlayback`, its `refused` and
+`warnings` with it, is published whenever the backend is ready, so a state
+that does not read shows as `state_unreadable` with no DAC available
+(`TestADamagedStateIsPublishedWithNoDAC`, through serve too, the state file
+damaged and the DAC unplugged), and a migration's refusal as the bound DAC's
+`migration_record_refused` (`TestAMigrationFailureIsPublished`, through
+serve with a stale legacy record). The console's Player page keeps the boot
+snapshot's legacy words (`bootDSDMode`, `bootAllowDoP`) until B13 replaces
+it. `TestTheReadSideIsTheSetsOwn` holds the view to the set it was made
+with, for a known DAC whose own choice is native, an unknown DAC with no
+choice, no DAC available and a state that does not read;
+`TestTheBridgeElementCarriesTheDACChoice` the element's members with no
+choice recorded, a choice in a seeded state file, a migrated choice, the
+backend not ready, no DAC bound and no DAC available.
+
+A change that moves no plan is published in its epoch. `dsdSet.same`
+compares what plays (the unit, the endpoint, the identity, each rate's plan
+and refusal), and until B8 a set the same as the one published was dropped,
+so a transport's first use observed, an evidence step, a choice's revision
+or a warning reached the wire only with the next change that moved a plan.
+`refreshDSD` now publishes its view when it differs (`reflect.DeepEqual`),
+in a new pair beside the set as it was: it stores no set, the pointer and the
+generation stay, and it reconciles and logs nothing, since nothing plays
+otherwise; a client's grant, keyed on `bootId` and `policyGeneration`,
+stands. The set's pointer must stay: an occurrence admitted under a set is
+compared with the one published by that pointer, at a gapless join and at a
+converted join window's successor, and only a reconciliation repoints it.
+Round 1 stored a new set for such a change, under the generation it had,
+which no reconciliation followed, so on every first DSD playback of a
+transport (its first use observed at 5 s) the successor admitted before it
+was never under the set published again and the producer waited at the join
+for good (round 2; `TestAFirstUseObservedWhileDSDPlaysKeepsTheProducerWriting`
+holds the producer inside the first track until the monitor has published
+the change, then lets it go: a native successor and a converted one in its
+predecessor's join window, each must join as it was admitted). The policy is the design's sections 7.1 and
+2.5: `policyGeneration` is the epoch of what plays, which section 7.1
+publishes the tuples and converted rates under ("under its boot and
+epoch"), and section 2.5's records (a first use, the evidence, a choice's
+revision, the warnings) describe the DAC without changing what it plays,
+while a write that does change it moves a plan and the generation with it.
+It reaches the wire at the next refresh: once a second, sooner after a state
+write, a probe's answers or a watcher snapshot, and every 100 ms while a
+session plays DSD. `TestAChangeThatMovesNoPlanIsPublishedInItsEpoch` drives
+each on a backend that has published, and
+`TestTheBridgeElementCarriesTheDACChoice`'s "a first use observed on a
+published backend" through serve's view.
+
+Evidence is the policy's. A tuple's `evidence` is the rung and date
+`policy.Effective` computed for it (`Plan.Evidence`, `EvidenceOn`), never a
+field of the state read again, so a probe's acceptance this run holds in its
+cache alone is `driver_accepted` with no date, and a durable acceptance under
+another kernel or another firmware is no rung of this box's
+(`TestTheEvidenceIsThePolicysRung`). An observation's is its tuple's in the
+set published now, by its policy ID, while that set is the one it was
+admitted under (the observation's boot and generation the set's: since round
+2 a generation names one stored set, and so the unit and the firmware it was
+computed for), else the one its admission gave it. A policy ID names a
+tuple's transport, format, rate and timing, never the DAC, its firmware or
+the set, so another DAC's tuple, or the same DAC's on another firmware, can
+share it, and round 1 gave a retained observation the next DAC's rung and
+date (round 2; `TestARetainedObservationKeepsItsOwnDACsEvidence`, another
+model in the bound port and the same model on another firmware). A PCM and a
+converted occurrence carry none, since neither plays a native or DoP path. Its words are the ladder's alone
+(`reported`, `driver_accepted`, `streaming_observed`, `listener_confirmed`),
+none of which says a DAC decodes DSD.
+
+No serial and no port. The key on the wire (`wireKey`) is the model key's
+`DACKey` with the unit's own serial and port, the port in each of its
+spellings (`playback.PortForms`: as sysfs gives it, with the configuration
+and interface after the port, its canonical form, and the port alone, as a
+binding names it), taken out of its product string first (`unitText`): a product string that holds the serial would make the
+key a hash of it, and the model published beside it, the serial redacted,
+gives every other byte of that hash's input, so a short serial could be
+found by trying each; taken out, two units of a model share the key. The
+free text, the model, a profile's name and its caveats' notes, goes out with
+the unit's own serial and port taken out (the backend's `unitText`) and the
+boot binding's (serve's `playerText`), since a port binding holds no serial
+and a USB string may hold either; the words of closed lists, the hashes, the
+dates and the firmware's hexadecimal digits are not redacted, which taking
+out a short serial would mangle. `TestNoDACKeyOrModelCarriesASerialOrAPort`
+reads every string of the response under a port binding, which holds no
+serial, its unit's product string holding the serial and its manufacturer
+string the port, two units of the model publishing one key, and through
+serve with the GO bar bound by its port, its product string holding its
+serial. Round 2 added a unit whose sysfs port carries its interface
+(`usb2-1:1.0`) and whose USB strings hold the port alone (`usb2-1`), under a
+model binding, which names no port for serve to redact by: neither form is
+published, and two such units at two ports publish one key, where round 1,
+taking out the sysfs form alone, put the port in the model and hashed it into
+the key. Serve's `playerText` takes every spelling of the binding's port out,
+and B543's `playerDACText` every spelling of the unit's out of the `dac`
+element's labels (`TestBridgeDACRedactsIdentityInsideNameAndID`'s port-alone
+cases), by the same helper.
+
+A converted occurrence's observation is its plan's: transport `converted`,
+its PCM's format, rate and valid bits, `logicalRate` 0, and `converted` with
+the source's DSD rate, the plan's filter, passband and dither, gain 0, and
+`clippedSamples`. That count is the converter's (`occ.clipped`, an atomic the
+producer stores after each read of at most 4,096 frames, 23 ms at 176.4
+kHz), loaded at each request (`Backend.Facts`, `liveClipped`): it runs ahead
+of what the DAC has played by what the player holds, its lookahead of about
+two seconds and the hardware's buffer, and costs the audio path nothing, no
+lock and no allocation there (`TestAConvertedEntryCarriesItsPlan`).
+
+The goldens, `cmd/bridge/testdata/dsd-outputs`, are one whole GET
+/v1/outputs response a kind of DAC: a known DAC playing native at every
+rate, its evidence on each rung but driver acceptance (`known_native`); an
+unknown DAC converting every rate (`unknown_converted`); a known DAC whose
+explicit DoP waits for its first use and its confirmation (`dop_pending`);
+DSD migrated off (`off`); no DAC available, the state damaged
+(`no_dac_damaged_state`); a converted occurrence playing
+(`converted_playing`). Each is built from the real backend's published set
+through serve's view and the API's route, twice alike, with no host, serial
+or port in it; the backend's boot ID, random, stands as `golden-boot`, and
+nothing else is normalized. `BRIDGE_WRITE_DSD_GOLDENS` alone rewrites them
+(`TestEachKindOfDACsWholeResponseIsItsGolden`), and the iOS mirror's
+`dsd_dac_outputs.json` is exported from the same cases (wire.md's exporter
+bullet).
