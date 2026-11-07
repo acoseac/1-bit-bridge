@@ -167,7 +167,15 @@ func logProbeFault(ctx context.Context, msg, mbid string, err error) {
 // `mbidPattern` admits strict UUIDs only; it lives here rather than in
 // the artwork handler so that a future relaxation of that pattern
 // inherits the correct behaviour instead of silently regressing.
-func classifyArtworkMiss(ctx context.Context, mbid string, hasTrack, pending mbidPredicate) artworkMissOutcome {
+//
+// enrichmentOn is enrich.enabled as the request found it (backlog B617).
+// Off, a row waiting for the enricher is no promise, since the turn that
+// would cache its image is not coming, so pending reads as false and the
+// miss is the terminal `no_image`; once the switch is on again, the next
+// request answers 202. The two fail-open branches above and the `local-`
+// one answer as they do with the switch on: none of them waits on the
+// enricher's turn.
+func classifyArtworkMiss(ctx context.Context, mbid string, hasTrack, pending mbidPredicate, enrichmentOn bool) artworkMissOutcome {
 	if hasTrack == nil || pending == nil {
 		// No probe wired (tests, legacy) — pre-v1.1 behaviour: every
 		// cache miss is a flat 404.
@@ -189,7 +197,7 @@ func classifyArtworkMiss(ctx context.Context, mbid string, hasTrack, pending mbi
 		logProbeFault(ctx, "mbid enrichment-pending probe failed", mbid, err)
 		return missPending
 	}
-	if stillPending {
+	if stillPending && enrichmentOn {
 		return missPending
 	}
 	return missNoImage
@@ -252,7 +260,7 @@ func (s *Server) artistImage(w http.ResponseWriter, r *http.Request) {
 				pending = s.mbidProbe.ArtistMBIDEnrichmentPending
 			}
 			writeArtworkMiss(w,
-				classifyArtworkMiss(r.Context(), mbid, hasTrack, pending),
+				classifyArtworkMiss(r.Context(), mbid, hasTrack, pending, s.enrichmentOn()),
 				"artist image")
 			return
 		}
@@ -382,7 +390,7 @@ func (s *Server) ServeArtwork(w http.ResponseWriter, r *http.Request, key string
 			pending = s.mbidProbe.ArtworkMBIDEnrichmentPending
 		}
 		writeArtworkMiss(w,
-			classifyArtworkMiss(r.Context(), mbid, hasTrack, pending),
+			classifyArtworkMiss(r.Context(), mbid, hasTrack, pending, s.enrichmentOn()),
 			"artwork")
 		return
 	}

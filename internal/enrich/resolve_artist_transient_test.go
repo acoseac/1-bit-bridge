@@ -52,8 +52,8 @@ func newArtistErrEnricher(t *testing.T, artistStatus int) (*Enricher, *manifest.
 		t.Fatalf("UpsertTrack: %v", err)
 	}
 
-	e := NewEnricher(store, NewMusicBrainzClient(mbSrv.URL, "t", nil),
-		NewCoverArtClient(caaSrv.URL, "t", nil), nil, filepath.Join(dir, "artwork"))
+	e := NewEnricher(store, NewMusicBrainzClient(mbSrv.URL, "t", nil, onSwitches),
+		NewCoverArtClient(caaSrv.URL, "t", nil, onSwitches), nil, filepath.Join(dir, "artwork"))
 	e.MBMinInterval = 0
 	e.DeezerMinInterval = 0
 	return e, store, tr

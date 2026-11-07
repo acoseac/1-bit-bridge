@@ -13,6 +13,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/enrichgate"
 )
 
 // DefaultBaseURL is the public AcoustID web service root.
@@ -206,6 +208,9 @@ type Client struct {
 	liveAPIKey func() string
 	userAgent  string
 	http       *http.Client
+	// sw is the client's own switch, enrich.enabled, which its transport
+	// asks and Admit answers (backlog B617).
+	sw enrichgate.Switches
 
 	// minInterval is the politeness pacing the CALLER must apply before each
 	// request. It lives here, derived from base at construction, so it can
@@ -220,7 +225,12 @@ type Client struct {
 // The 20s timeout covers the whole exchange including the body read, which is
 // safe here because responses are small and bounded — unlike a binary
 // download, where a whole-exchange timeout is the trap that PR #374 fixed.
-func NewClient(baseURL, apiKey, userAgent string, httpClient *http.Client) *Client {
+//
+// sw is enrich.enabled as the client asks it (enrichgate.Enrichment; backlog
+// B617): a lookup is sent, and its answer taken, only while it is on,
+// whatever context the lookup carries; zero switches are off, and send
+// nothing.
+func NewClient(baseURL, apiKey, userAgent string, httpClient *http.Client, sw enrichgate.Switches) *Client {
 	if baseURL == "" {
 		baseURL = DefaultBaseURL
 	}
@@ -237,17 +247,28 @@ func NewClient(baseURL, apiKey, userAgent string, httpClient *http.Client) *Clie
 	// field on the client, *http.Client instances are routinely shared across
 	// services in Go, and a caller passing http.DefaultClient must not find this
 	// package's origin restriction applied to every redirect in the process. Same
-	// reasoning as enrich.NewDeezerClient's copy.
-	clientCopy := *httpClient
+	// reasoning as enrich.NewDeezerClient's copy. sw.Client is that copy, and
+	// the lookup it sends goes out only while sw is on.
 	c := &Client{
 		base:        baseURL,
 		apiKey:      apiKey,
 		userAgent:   userAgent,
-		http:        &clientCopy,
+		http:        sw.Client(httpClient),
+		sw:          sw,
 		minInterval: minIntervalForBase(baseURL),
 	}
 	c.installRedirectGuard()
 	return c
+}
+
+// Admit asks the client's switch, and those ctx carries, before a write of
+// what a lookup learnt (enrichgate.Switches.Answer): ErrOff while one is off,
+// nil while all are on. A nil client is off.
+func (c *Client) Admit(ctx context.Context) error {
+	if c == nil {
+		return enrichgate.ErrOff
+	}
+	return c.sw.Answer(ctx)
 }
 
 // installRedirectGuard refuses any redirect that would leave the configured
@@ -407,7 +428,7 @@ func (c *Client) Lookup(ctx context.Context, fp Fingerprint) ([]Result, error) {
 //
 // The URL is NEVER logged or embedded in an error: it carries `client=<key>`
 // and a multi-kilobyte fingerprint. Errors name the endpoint's status only.
-func (c *Client) get(ctx context.Context, endpoint string) ([]byte, error) {
+func (c *Client) get(ctx context.Context, endpoint string) (body []byte, err error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		// err from NewRequest embeds the URL — replace it wholesale rather
@@ -428,6 +449,17 @@ func (c *Client) get(ctx context.Context, endpoint string) ([]byte, error) {
 		return nil, err
 	}
 	defer resp.Body.Close()
+	// Every return from here is an answer, or what the client made of one:
+	// an error status's body and a no-match alike can finish after a
+	// switch-off its headers' admission did not see, and a no-match is what
+	// a sweep persists. So each return asks the client's own switch, and
+	// those ctx carries, again (backlog B617); a refusal stands for the
+	// answer and its error.
+	defer func() {
+		if r := c.sw.Answer(ctx); r != nil {
+			body, err = nil, r
+		}
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
@@ -441,7 +473,7 @@ func (c *Client) get(ctx context.Context, endpoint string) ([]byte, error) {
 		return nil, herr
 	}
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
+	body, err = io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	drainBody(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("acoustid: reading response: %w", err)

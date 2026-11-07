@@ -66,7 +66,9 @@ type MBIDSource interface {
 // Error contract: (false, nil) is a genuine "premium not ready yet" miss (it
 // counts toward the attempt cap). A non-nil error is transient (the cover stays
 // pending, attempt NOT burned) — the adapter MUST return ErrNoCredential when no
-// usable credential is available so the sweep stops the whole tick.
+// usable credential is available so the sweep stops the whole tick, and
+// ErrCoversPaused when it asked Atlas nothing, or took no answer, because the
+// premium covers are switched off.
 type CoverRefetcher interface {
 	RefetchPremium(ctx context.Context, releaseMBID string) (bool, error)
 }
@@ -75,6 +77,16 @@ type CoverRefetcher interface {
 // refresh sweep stops the tick on it (every remaining release would fail the
 // same way) rather than spamming the log.
 var ErrNoCredential = errors.New("atlasharvest: refetcher has no usable credential")
+
+// ErrCoversPaused signals a CoverRefetcher asked Atlas for no premium cover,
+// or took no answer about one, because enrichment is switched off
+// (enrich.enabled, backlog B617). It is no answer, so neither a miss nor a
+// failure: the sweep ends its cover leg for the tick, settles what it had
+// already learnt, says nothing, and leaves every other pending cover and its
+// attempt count as they are, however many ticks the switch stays off. A miss
+// would count toward maxCoverRefetchAttempts and drop the cover. The tick's
+// other legs run.
+var ErrCoversPaused = errors.New("atlasharvest: premium covers are paused while enrichment is off")
 
 // MetaSink caches a harvested (or tombstoned) artist bio. manifest.Store
 // satisfies this via a thin adapter in the wiring.
@@ -405,9 +417,10 @@ func (c *Client) refreshCovers(ctx context.Context) {
 		if err != nil {
 			// Transient: leave the cover pending WITHOUT burning an attempt. No
 			// credential means every remaining release fails the same way, so
-			// stop the tick rather than spam; other errors (5xx) just skip this
+			// stop the tick rather than spam; so does a pause (enrichment off),
+			// silently, since nothing failed; other errors (5xx) just skip this
 			// one and try the rest.
-			if errors.Is(err, ErrNoCredential) {
+			if errors.Is(err, ErrNoCredential) || errors.Is(err, ErrCoversPaused) {
 				break
 			}
 			// A refetch the shutdown stopped is not reported; the loop

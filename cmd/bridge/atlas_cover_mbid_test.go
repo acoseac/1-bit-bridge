@@ -52,7 +52,7 @@ func TestRefetchPremiumRefusesAMalformedReleaseMBID(t *testing.T) {
 	}
 
 	fetcher := &recordingPremiumFetcher{returnGot: true}
-	a := atlasCoverRefetcher{premium: fetcher, artworkDir: artworkDir, coverSize: 500}
+	a := atlasCoverRefetcher{premium: fetcher, artworkDir: artworkDir, coverSize: 500, enrichmentOn: alwaysOn}
 
 	got, err := a.RefetchPremium(context.Background(), "../victim/owned")
 	if err != nil {
@@ -81,7 +81,7 @@ func TestRefetchPremiumRefusesAMalformedReleaseMBID(t *testing.T) {
 func TestRefetchPremiumAcceptsAWellFormedReleaseMBID(t *testing.T) {
 	artworkDir := t.TempDir()
 	fetcher := &recordingPremiumFetcher{}
-	a := atlasCoverRefetcher{premium: fetcher, artworkDir: artworkDir, coverSize: 500}
+	a := atlasCoverRefetcher{premium: fetcher, artworkDir: artworkDir, coverSize: 500, enrichmentOn: alwaysOn}
 
 	if _, err := a.RefetchPremium(context.Background(), "9f9e9d9c-9b9a-4998-9796-959493929190"); err != nil {
 		t.Fatalf("RefetchPremium: %v", err)

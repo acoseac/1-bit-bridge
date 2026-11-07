@@ -125,7 +125,8 @@ func TestAnArtworkVersionStoppedByShutdownLeavesTheCoverPending(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	store := openServeCancelStore(t)
-	a := atlasCoverRefetcher{premium: landingFetcher{cancel: cancel}, artworkDir: t.TempDir(), store: store, coverSize: 500}
+	a := atlasCoverRefetcher{premium: landingFetcher{cancel: cancel}, artworkDir: t.TempDir(), store: store, coverSize: 500,
+		enrichmentOn: alwaysOn}
 
 	rec := loggingtest.Record(t)
 	got, err := a.RefetchPremium(ctx, cancelReleaseMBID)
@@ -142,7 +143,8 @@ func TestAnArtworkVersionStoppedByShutdownLeavesTheCoverPending(t *testing.T) {
 func TestAnArtworkVersionThatFailsIsStillReported(t *testing.T) {
 	store := openServeCancelStore(t)
 	_ = store.Close()
-	a := atlasCoverRefetcher{premium: landingFetcher{}, artworkDir: t.TempDir(), store: store, coverSize: 500}
+	a := atlasCoverRefetcher{premium: landingFetcher{}, artworkDir: t.TempDir(), store: store, coverSize: 500,
+		enrichmentOn: alwaysOn}
 
 	rec := loggingtest.Record(t)
 	got, err := a.RefetchPremium(context.Background(), cancelReleaseMBID)

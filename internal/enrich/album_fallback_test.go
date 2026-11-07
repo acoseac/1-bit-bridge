@@ -146,7 +146,7 @@ func TestSearchReleaseWithFallbacks(t *testing.T) {
 			srv := &mbFallbackServer{wantArtist: tc.mbArtist, wantAlbum: tc.mbAlbum}
 			s := httptest.NewServer(srv.handler())
 			defer s.Close()
-			e := NewEnricher(nil, NewMusicBrainzClient(s.URL, "t", nil), nil, nil, t.TempDir())
+			e := NewEnricher(nil, NewMusicBrainzClient(s.URL, "t", nil, onSwitches), nil, nil, t.TempDir())
 			e.MBMinInterval = 0 // no need to pace a local test server
 
 			trk := tc.track
@@ -179,7 +179,7 @@ func TestSearchReleaseWithFallbacks(t *testing.T) {
 			io.WriteString(w, `{"artists":[]}`)
 		}))
 		defer s.Close()
-		e := NewEnricher(nil, NewMusicBrainzClient(s.URL, "t", nil), nil, nil, t.TempDir())
+		e := NewEnricher(nil, NewMusicBrainzClient(s.URL, "t", nil, onSwitches), nil, nil, t.TempDir())
 		e.MBMinInterval = 0
 		res, err := e.searchReleaseWithFallbacks(ctx, &manifest.Track{
 			Path: "a.flac", Artist: "A", Album: "B (Deluxe)", AlbumArtist: "C",

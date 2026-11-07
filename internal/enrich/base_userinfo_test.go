@@ -131,14 +131,14 @@ func TestABaseURLsCredentialReachesTheMirrorAsBasicAuth(t *testing.T) {
 				t.Fatalf("reference request carried Authorization %q, want a Basic header", want)
 			}
 
-			if _, err := NewMusicBrainzClient(base+"/ws/2", "t", nil).SearchRelease(ctx, "Artist", "Album"); err != nil {
+			if _, err := NewMusicBrainzClient(base+"/ws/2", "t", nil, onSwitches).SearchRelease(ctx, "Artist", "Album"); err != nil {
 				t.Fatalf("MusicBrainz search: %v", err)
 			}
 			if got := mirror.last(); got != want {
 				t.Errorf("MusicBrainz request: Authorization = %q, want %q (what net/http sends for the URL)", got, want)
 			}
 
-			live := NewMusicBrainzClient("", "t", nil).WithLiveBase(func() string { return base + "/ws/2" })
+			live := NewMusicBrainzClient("", "t", nil, onSwitches).WithLiveBase(func() string { return base + "/ws/2" })
 			if _, err := live.SearchArtist(ctx, "Artist"); err != nil {
 				t.Fatalf("MusicBrainz search on a live base: %v", err)
 			}
@@ -146,7 +146,7 @@ func TestABaseURLsCredentialReachesTheMirrorAsBasicAuth(t *testing.T) {
 				t.Errorf("live MusicBrainz request: Authorization = %q, want %q", got, want)
 			}
 
-			cover := NewCoverArtClient(base, "t", nil)
+			cover := NewCoverArtClient(base, "t", nil, onSwitches)
 			for name, fetch := range map[string]func() (io.ReadCloser, error){
 				"release": func() (io.ReadCloser, error) {
 					return cover.FetchReleaseFrontStream(ctx, cancelReleaseMBID, 500)
@@ -222,12 +222,12 @@ func TestNoRequestErrorNamesABaseURLsCredential(t *testing.T) {
 	type call func(ctx context.Context, base string) error
 	mb := func(f func(ctx context.Context, c *MusicBrainzClient) error) call {
 		return func(ctx context.Context, base string) error {
-			return f(ctx, NewMusicBrainzClient(base+"/ws/2", "t", nil))
+			return f(ctx, NewMusicBrainzClient(base+"/ws/2", "t", nil, onSwitches))
 		}
 	}
 	cover := func(f func(ctx context.Context, c *CoverArtClient) error) call {
 		return func(ctx context.Context, base string) error {
-			return f(ctx, NewCoverArtClient(base, "t", nil))
+			return f(ctx, NewCoverArtClient(base, "t", nil, onSwitches))
 		}
 	}
 	calls := []struct {
@@ -247,7 +247,7 @@ func TestNoRequestErrorNamesABaseURLsCredential(t *testing.T) {
 			return err
 		})},
 		{"MusicBrainz search on a live base", func(ctx context.Context, base string) error {
-			c := NewMusicBrainzClient("", "t", nil).WithLiveBase(func() string { return base + "/ws/2" })
+			c := NewMusicBrainzClient("", "t", nil, onSwitches).WithLiveBase(func() string { return base + "/ws/2" })
 			_, err := c.SearchRelease(ctx, "Artist", "Album")
 			return err
 		}},
@@ -268,7 +268,7 @@ func TestNoRequestErrorNamesABaseURLsCredential(t *testing.T) {
 			return err
 		})},
 		{"Cover Art fetch on a live base", func(ctx context.Context, base string) error {
-			c := NewCoverArtClient("", "t", nil).WithLiveBase(func() string { return base })
+			c := NewCoverArtClient("", "t", nil, onSwitches).WithLiveBase(func() string { return base })
 			_, err := c.FetchReleaseFront(ctx, mbid, 500)
 			return err
 		}},
@@ -310,8 +310,8 @@ func enricherOverBases(t *testing.T, mbBase, caaBase string) (*Enricher, *manife
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	e := NewEnricher(store, NewMusicBrainzClient(mbBase, "t", nil),
-		NewCoverArtClient(caaBase, "t", nil), nil, filepath.Join(dir, "artwork"))
+	e := NewEnricher(store, NewMusicBrainzClient(mbBase, "t", nil, onSwitches),
+		NewCoverArtClient(caaBase, "t", nil, onSwitches), nil, filepath.Join(dir, "artwork"))
 	e.MBMinInterval, e.CAAMinInterval = 0, 0
 	return e, store
 }
@@ -400,8 +400,8 @@ func TestALiveBasesCredentialFollowsTheBaseItWasWrittenOn(t *testing.T) {
 		defer mu.Unlock()
 		return live
 	}
-	c := NewMusicBrainzClient("", "t", nil).WithLiveBase(func() string { return current() + "/ws/2" })
-	cover := NewCoverArtClient("", "t", nil).WithLiveBase(current)
+	c := NewMusicBrainzClient("", "t", nil, onSwitches).WithLiveBase(func() string { return current() + "/ws/2" })
+	cover := NewCoverArtClient("", "t", nil, onSwitches).WithLiveBase(current)
 	ctx := context.Background()
 
 	if _, err := c.SearchRelease(ctx, "Artist", "Album"); err != nil {
@@ -445,8 +445,8 @@ func TestALiveBaseThatChangesBetweenReadsNeverPairsACredentialWithAnotherHost(t 
 		calls++
 		return bases[calls%2]
 	}
-	c := NewMusicBrainzClient("", "t", nil).WithLiveBase(func() string { return alternating() + "/ws/2" })
-	cover := NewCoverArtClient("", "t", nil).WithLiveBase(alternating)
+	c := NewMusicBrainzClient("", "t", nil, onSwitches).WithLiveBase(func() string { return alternating() + "/ws/2" })
+	cover := NewCoverArtClient("", "t", nil, onSwitches).WithLiveBase(alternating)
 	ctx := context.Background()
 
 	for i := 0; i < 4; i++ {
@@ -505,7 +505,7 @@ func TestABaseURLsCredentialFollowsARedirectOnlyWhereNetHTTPSendsAnAuthorization
 			http.Redirect(w, r, "/moved"+r.URL.Path, http.StatusFound)
 		}))
 		defer srv.Close()
-		c := NewMusicBrainzClient(withUserinfo(t, srv.URL, "tok"), "t", nil)
+		c := NewMusicBrainzClient(withUserinfo(t, srv.URL, "tok"), "t", nil, onSwitches)
 		if _, err := c.SearchRelease(ctx, "Artist", "Album"); err != nil {
 			t.Fatal(err)
 		}
@@ -521,7 +521,7 @@ func TestABaseURLsCredentialFollowsARedirectOnlyWhereNetHTTPSendsAnAuthorization
 		// localhost and 127.0.0.1 are two names, so two domains to net/http.
 		otherURL := strings.Replace(other.URL, "127.0.0.1", "localhost", 1)
 		mirror := newRedirector(t, otherURL)
-		c := NewCoverArtClient(withUserinfo(t, mirror.URL, "tok"), "t", nil)
+		c := NewCoverArtClient(withUserinfo(t, mirror.URL, "tok"), "t", nil, onSwitches)
 		body, err := c.FetchReleaseFrontStream(ctx, cancelReleaseMBID, 500)
 		if err != nil {
 			t.Fatal(err)
@@ -633,10 +633,10 @@ func TestABaseWithTrailingSlashesRequestsNoDoubleSlashPath(t *testing.T) {
 	requests := 0
 	for _, base := range []string{srv.URL, withUserinfo(t, srv.URL, "tok")} {
 		for _, slashes := range []string{"", "/", "//"} {
-			if _, err := NewMusicBrainzClient(base+"/ws/2"+slashes, "t", nil).SearchRelease(ctx, "Artist", "Album"); err != nil {
+			if _, err := NewMusicBrainzClient(base+"/ws/2"+slashes, "t", nil, onSwitches).SearchRelease(ctx, "Artist", "Album"); err != nil {
 				t.Fatal(err)
 			}
-			body, err := NewCoverArtClient(base+slashes, "t", nil).FetchReleaseFrontStream(ctx, cancelReleaseMBID, 500)
+			body, err := NewCoverArtClient(base+slashes, "t", nil, onSwitches).FetchReleaseFrontStream(ctx, cancelReleaseMBID, 500)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -672,7 +672,7 @@ func TestAStoredPremiumBaseWithUserInformationLeavesItOutOfTheRequestURL(t *test
 
 	t.Run("the request", func(t *testing.T) {
 		mirror := newAuthRecorder(t, http.StatusOK)
-		f := NewAtlasPremiumFetcher(fakeCred{token: "tok123", base: withUserinfo(t, mirror.URL, secret), ok: true}, "ua", nil, "")
+		f := NewAtlasPremiumFetcher(fakeCred{token: "tok123", base: withUserinfo(t, mirror.URL, secret), ok: true}, "ua", nil, "", onSwitches)
 		if _, err := f.RefetchPremium(ctx, filepath.Join(t.TempDir(), "x.jpg"), mbid, 500); err != nil {
 			t.Fatal(err)
 		}
@@ -683,7 +683,7 @@ func TestAStoredPremiumBaseWithUserInformationLeavesItOutOfTheRequestURL(t *test
 
 	t.Run("its errors", func(t *testing.T) {
 		u := failingMirrors[1].start(t) // a certificate this process does not trust
-		f := NewAtlasPremiumFetcher(fakeCred{token: "tok123", base: withUserinfo(t, u, secret), ok: true}, "ua", nil, "")
+		f := NewAtlasPremiumFetcher(fakeCred{token: "tok123", base: withUserinfo(t, u, secret), ok: true}, "ua", nil, "", onSwitches)
 		rec := loggingtest.Record(t)
 		_, err := f.RefetchPremium(ctx, filepath.Join(t.TempDir(), "x.jpg"), mbid, 500)
 		if err == nil || !strings.Contains(err.Error(), strings.TrimPrefix(u, "https://")) {
