@@ -3527,75 +3527,87 @@
   nothing written, in the hold's words, but for a root whose path is not there
   at all and that the index holds no rows under, whose first write makes its
   folder (`Scanner.RefuseWritesUnder`, `RootAwayError`,
-  `firstWriteMakesRoot`)** (2026-11-07, backlog B776, and its review's round
-  2; the console's half is `admin-console.md`'s B776 bullet). Where the bare
-  mount point a volume leaves is the service user's to write, an upload or a
-  restore while the volume was away left library content there, which the
-  scans then read as the root's: the clean-empty guard no longer spared the
-  root, and the rows of the volume's files went missing and were reaped at the
-  threshold; and the volume, mounted again, hid what was written. Only rows
-  were at stake: nothing the console writes deletes a file. The upload and
-  trash managers hand the paths a request would write to a guard
-  (`upload.WithRootGuard`, `trash.WithRootGuard`; serve builds it from its
-  scanner, `WriteGuard` on `scanCtx`), and `RefuseWritesUnder` takes each
-  path's owners, looks at each once (`lookAtRoot`: a stat, one batch of its
-  listing and, for a root holding nothing, one count of its rows), and answers
-  a `*RootAwayError` for the first that reads as absent: one it cannot see,
-  whose listing fails, that holds no library content and no
-  `.bridge-allow-empty` under rows the index holds or cannot count, or that
-  holds nothing but links to directories over them (`rootOnlyDirLinks`, whose
-  rows the scan spares too, and which a file written beside the links would
-  let it reap). A path's first owner is which root a path is decides
-  (`rootIn`, so `deepestRootOf` and `caseLook.under`: a root nested in the one
-  a request names owns the paths below its folder). Its second, since round 2,
-  is the deepest root that holds where the write lands: `rootIn` resolves no
-  link, while a write's `MkdirAll` and rename follow one in its folders and
-  the upload's and the trash's own containment checks resolve it, so a link in
-  a healthy root to the folder of a root whose volume was away took an upload,
-  its commit and a restore into that bare mount point. The path's folder is
-  resolved through its nearest ancestor that exists
-  (`fsutil.EvalSymlinksOrClean`; on Windows a directory junction, which needs
-  no privilege to make, resolves as a link does, through
+  `firstWriteMakesRoot`)** (2026-11-07, backlog B776, and its review's rounds
+  2 and 3, the last closing backlog B794; the console's half is
+  `admin-console.md`'s B776 bullet). Where the bare mount point a volume
+  leaves is the service user's to write, an upload or a restore while the
+  volume was away left library content there, which the scans then read as the
+  root's: the clean-empty guard no longer spared the root, and the rows of the
+  volume's files went missing and were reaped at the threshold; and the
+  volume, mounted again, hid what was written. Only rows were at stake:
+  nothing the console writes deletes a file. The upload and trash managers
+  hand the paths a request would write to a guard (`upload.WithRootGuard`,
+  `trash.WithRootGuard`; serve builds it from its scanner, `WriteGuard` on
+  `scanCtx`), and `RefuseWritesUnder` takes each path's owners, looks at each
+  once (`lookAtRoot`: a stat, one batch of its listing and, for a root holding
+  nothing, one count of its rows), and answers a `*RootAwayError` for the
+  first that reads as absent: one it cannot see, whose listing fails, that
+  holds no library content and no `.bridge-allow-empty` under rows the index
+  holds or cannot count, or that holds nothing but links to directories over
+  them (`rootOnlyDirLinks`, whose rows the scan spares too, and which a file
+  written beside the links would let it reap). A path's first owner is which
+  root a path is decides (`rootIn`, so `deepestRootOf` and `caseLook.under`: a
+  root nested in the one a request names owns the paths below its folder). Its
+  second, since round 2, is the deepest root that holds where the write lands:
+  `rootIn` resolves no link, while a write's `MkdirAll` and rename follow one
+  in its folders and the upload's and the trash's own containment checks
+  resolve it, so a link in a healthy root to the folder of a root whose volume
+  was away took an upload, its commit and a restore into that bare mount
+  point. The path's folder is resolved through its nearest ancestor that
+  exists (`fsutil.EvalSymlinksOrClean`; on Windows a directory junction, which
+  needs no privilege to make, resolves as a link does, through
   `fsutil.ResolveLinks`), its own name kept, since a rename replaces a link at
   that name, and compared element by element as `rootIn` compares with each
-  root as it resolves (`landingRoots`), so a root configured through a link is
-  found, and with a root that does not resolve as configured, so a write that
+  root resolved as the folder is (`landingRoots`,
+  `fsutil.EvalSymlinksOrClean`): one that resolves as it resolves, so a root
+  configured through a link is found, and one whose path is not there through
+  its nearest ancestor that exists, its missing names kept, so a write that
   would make the folder of a root whose path went with its volume is found
-  under it; the look counts the rows by the configured name. The roots are
-  resolved only once a path's folder is found to resolve elsewhere, once a
-  request: resolved at every write, each chunk included, a root on a network
-  mount that hangs would stall uploads into the healthy roots, which no write
-  did before, each containment check resolving its own root alone
-  (`resolveRootHook`, `TestAWriteWithNoLinkOnItsWayResolvesNoOtherRoot`);
-  where nothing on the way is a link, the owner is `rootIn`'s, which is the
-  scans' (`nestedRootsUnder` compares the roots as configured too). `rootIn`
-  is left as it is: a subtree scan's owning root and the watcher's events take
-  it, and the scans do not change. It matches `ErrRootNotMounted`, and its
-  `Message` is the console's, built from the words the hold's line is made of
-  (`readsAsNotMounted`, `hintVolumeMounted`, `hintContainerRestart`,
-  `holdsOnlyDirLinks`), naming the root by its folder's name and no path. A
-  root the index holds nothing of reads as it is, so the first write into a
-  fresh, empty root is never refused; a root never mounted on a fresh install,
-  a bare mount point the index holds nothing of, reads as it is too, and a
-  write there lands on the mount point, which the mount then hides. A root
-  whose path is not there at all reads as unreachable, and since round 2 a
-  write may make its folder where nothing at all is at the path (`os.Lstat`
-  answers that it does not exist) and the index's count of the root's rows
-  answers none, in the write's admission alone (`firstWriteMakesRoot`;
-  `lookAtRoot` is the scans' and the watcher's as before): the first upload
-  into a root configured before its folder was made, which a public serve
-  starts over, a loopback one refusing an inaccessible root at its start. One
-  the index holds rows under is refused (a removed mount point, a renamed
-  folder: made anew, its folder would hold the upload alone, and the scans
-  would reap its rows), and so is one unreachable but for its absence (a
-  permission refused on its way, a link to nothing) and one whose count fails.
-  One case stays open: backlog B776, item 7. **Don't ask any root but the
-  deepest that owns each path and the deepest that owns where it lands,
-  resolve a link in `rootIn`, resolve the roots for a write with no link on
-  its way, read a root holding no content as absent without asking the index,
-  or let a write make the folder of a root the index holds rows under, or of
-  one unreachable but for its absence.** Tests: `admin-console.md`'s B776
-  bullet's.
+  under it. Kept as configured, such a root was compared in another form than
+  the write wherever a link or another spelling leads to its parent (round 3,
+  backlog B794): a root nested in a library root configured through a link,
+  its volume gone, took the commit of an upload through a link inside that
+  root, which the upload's own containment check passes, and its folder was
+  made anew with the upload alone; and on CI's macOS and Windows legs every
+  root a test makes has such a parent, macOS's temporary folder reached
+  through /var, a link to /private/var, and a Windows runner's named by its
+  short name (RUNNER~1), which `ResolveLinks` spells long. The look counts the
+  rows by the configured name. The roots are resolved only once a path's
+  folder is found to resolve elsewhere, once a request: resolved at every
+  write, each chunk included, a root on a network mount that hangs would stall
+  uploads into the healthy roots, which no write did before, each containment
+  check resolving its own root alone (`resolveRootHook`,
+  `TestAWriteWithNoLinkOnItsWayResolvesNoOtherRoot`); where nothing on the way
+  is a link, the owner is `rootIn`'s, which is the scans' (`nestedRootsUnder`
+  compares the roots as configured too). `rootIn` is left as it is: a subtree
+  scan's owning root and the watcher's events take it, and the scans do not
+  change. It matches `ErrRootNotMounted`, and its `Message` is the console's,
+  built from the words the hold's line is made of (`readsAsNotMounted`,
+  `hintVolumeMounted`, `hintContainerRestart`, `holdsOnlyDirLinks`), naming
+  the root by its folder's name and no path. A root the index holds nothing of
+  reads as it is, so the first write into a fresh, empty root is never
+  refused; a root never mounted on a fresh install, a bare mount point the
+  index holds nothing of, reads as it is too, and a write there lands on the
+  mount point, which the mount then hides. A root whose path is not there at
+  all reads as unreachable, and since round 2 a write may make its folder
+  where nothing at all is at the path (`os.Lstat` answers that it does not
+  exist) and the index's count of the root's rows answers none, in the write's
+  admission alone (`firstWriteMakesRoot`; `lookAtRoot` is the scans' and the
+  watcher's as before): the first upload into a root configured before its
+  folder was made, which a public serve starts over, a loopback one refusing
+  an inaccessible root at its start. One the index holds rows under is refused
+  (a removed mount point, a renamed folder: made anew, its folder would hold
+  the upload alone, and the scans would reap its rows), and so is one
+  unreachable but for its absence (a permission refused on its way, a link to
+  nothing) and one whose count fails. One case stays open: backlog B776, item
+  7. **Don't ask any root but the deepest that owns each path and the deepest
+  that owns where it lands, resolve a link in `rootIn`, resolve the roots for
+  a write with no link on its way, compare a root in another form than where
+  the write lands (one whose path is not there resolved through its nearest
+  ancestor that exists, as the write's folder is), read a root holding no
+  content as absent without asking the index, or let a write make the folder
+  of a root the index holds rows under, or of one unreachable but for its
+  absence.** Tests: `admin-console.md`'s B776 bullet's.
 
 - **A watched root whose folder changes under its own watch is watched again:
   every check of the roots' own watches compares, where that watch is still
@@ -3605,7 +3617,7 @@
   identity takes one once its folder reads, its watch added again around the
   read, and a root that is there whose own watch fsnotify would not add is
   tried again on a backoff of its own, never held** (2026-11-07, backlog B777,
-  and its review's round 2). fsnotify says nothing when the folder at a
+  and its review's rounds 2 and 3). fsnotify says nothing when the folder at a
   watched root's path becomes another folder while the watch stays where it
   was: a volume mounted over the bare mount point the root was watched on (a
   fresh install, which the index holds nothing of, reads as it is and is
@@ -3629,18 +3641,21 @@
   too. Windows' `os.Stat` leaves a plain folder's file ID to the first
   `os.SameFile`, which reads it from whatever folder the path names then, so
   the identity's read compares the stat with itself at once (`rootIdentity`),
-  or the identity taken before a walk would be of the folder there after it.
-  At each check (`checkRootIdentity`) a root found another folder is looked at
-  again: held where it reads as a volume not mounted, as `holdAbsentRoots`
-  holds one, so an outage goes to the hold's retry and is never watched again
-  at every check; otherwise watched where it is now, with a scan, its new
-  folder's identity recorded. An identity that cannot be read is no change:
-  the root is held where it reads as a volume not mounted, and otherwise left
-  as it is until the next check. A root recorded with no identity, its folder
-  unreadable as its watch was added, was never compared again, though the
-  reads answered (round 2): it takes one at the first check where its folder
-  reads, looked at again and its watch added again around the read
-  (`takeRootIdentity`, `lookAgain`, `watchAgain`), with a scan, said once
+  or the identity taken before a walk would be of the folder there after it:
+  `os.SameFile` reads each side's ID before it compares them, one `FileInfo`
+  given twice included (go1.27.3's `sameFile`, in `os/types_windows.go`,
+  through `loadFileId`; round 3, where a review read it as answering such a
+  pair at once). At each check (`checkRootIdentity`) a root found another
+  folder is looked at again: held where it reads as a volume not mounted, as
+  `holdAbsentRoots` holds one, so an outage goes to the hold's retry and is
+  never watched again at every check; otherwise watched where it is now, with
+  a scan, its new folder's identity recorded. An identity that cannot be read
+  is no change: the root is held where it reads as a volume not mounted, and
+  otherwise left as it is until the next check. A root recorded with no
+  identity, its folder unreadable as its watch was added, was never compared
+  again, though the reads answered (round 2): it takes one at the first check
+  where its folder reads, looked at again and its watch added again around the
+  read (`takeRootIdentity`, `lookAgain`, `watchAgain`), with a scan, said once
   (`msgWatchRootIdentityTaken`), never an identity read at the check recorded
   against the watch it had, which a volume mounted or a link repointed while
   the reads failed leaves on the folder covered. The start confirms each
@@ -3679,12 +3694,14 @@
   Add boundary (`addForTests`), and a linked root's link repointed leaves a
   real stale watch, which no backend sees. **Don't take a root's identity
   after the walk that adds its watch, keep it past a watch added again, take
-  an identity that cannot be read for a change, record one at a check without
-  adding its watch again, watch a root that reads as a volume not mounted
-  again at every check (it goes to the hold), leave a root whose own watch the
-  start could not add unrecorded or hold it without a look, hold a root that
-  is there whose own watch could not be added, or try it at every check, or
-  walk its tree, scan it or say its refusal at a try.** Tests:
+  an identity that cannot be read for a change, drop `rootIdentity`'s
+  comparison of the stat with itself (on Windows it reads the file ID as the
+  identity is taken), record one at a check without adding its watch again,
+  watch a root that reads as a volume not mounted again at every check (it
+  goes to the hold), leave a root whose own watch the start could not add
+  unrecorded or hold it without a look, hold a root that is there whose own
+  watch could not be added, or try it at every check, or walk its tree, scan
+  it or say its refusal at a try.** Tests:
   `TestTheWatcherWatchesAgainARootWhoseFolderIsNoLongerTheOneItWatches`,
   `TestTheWatcherAddsARootsWatchAgainWhenItsFolderChangedWhileTheWatchWasAdded`,
   `TestTheWatcherWatchesALinkedRootAgainWhereItsLinkLeadsNow`,
