@@ -55,18 +55,20 @@ func TestSettingsUpdateRowsRenderOnceAndKeepDTAdjacency(t *testing.T) {
 	// verified by pointing update-deferred at LastError, which the shared
 	// form accepted and this form rejects.
 	cases := []struct {
-		name              string
-		st                UpdateStatus
-		wantErrorHidden   bool
-		wantDeferalHidden bool
-		wantRefusalHidden bool
+		name                string
+		st                  UpdateStatus
+		wantErrorHidden     bool
+		wantDeferalHidden   bool
+		wantRefusalHidden   bool
+		wantProbationHidden bool
 	}{
 		{
-			name:              "nothing to report",
-			st:                UpdateStatus{CurrentVersion: "v0.1.9", Channel: "stable"},
-			wantErrorHidden:   true,
-			wantDeferalHidden: true,
-			wantRefusalHidden: true,
+			name:                "nothing to report",
+			st:                  UpdateStatus{CurrentVersion: "v0.1.9", Channel: "stable"},
+			wantErrorHidden:     true,
+			wantDeferalHidden:   true,
+			wantRefusalHidden:   true,
+			wantProbationHidden: true,
 		},
 		{
 			name: "every row present",
@@ -76,10 +78,13 @@ func TestSettingsUpdateRowsRenderOnceAndKeepDTAdjacency(t *testing.T) {
 				LastError:       "dial tcp: connection refused",
 				DeferredReason:  "outside quiet hours",
 				RollbackRefusal: reasonOpened,
+				Probation:       probationWords,
+				ProbationLevel:  "warn",
 			},
-			wantErrorHidden:   false,
-			wantDeferalHidden: false,
-			wantRefusalHidden: false,
+			wantErrorHidden:     false,
+			wantDeferalHidden:   false,
+			wantRefusalHidden:   false,
+			wantProbationHidden: false,
 		},
 		{
 			// Discriminates the rows: only an error.
@@ -89,9 +94,10 @@ func TestSettingsUpdateRowsRenderOnceAndKeepDTAdjacency(t *testing.T) {
 				Channel:        "stable",
 				LastError:      "dial tcp: connection refused",
 			},
-			wantErrorHidden:   false,
-			wantDeferalHidden: true,
-			wantRefusalHidden: true,
+			wantErrorHidden:     false,
+			wantDeferalHidden:   true,
+			wantRefusalHidden:   true,
+			wantProbationHidden: true,
 		},
 		{
 			// Only a deferral.
@@ -101,9 +107,10 @@ func TestSettingsUpdateRowsRenderOnceAndKeepDTAdjacency(t *testing.T) {
 				Channel:        "stable",
 				DeferredReason: "outside quiet hours",
 			},
-			wantErrorHidden:   true,
-			wantDeferalHidden: false,
-			wantRefusalHidden: true,
+			wantErrorHidden:     true,
+			wantDeferalHidden:   false,
+			wantRefusalHidden:   true,
+			wantProbationHidden: true,
 		},
 		{
 			// Only a rollback the status refuses, beside a backup.
@@ -113,9 +120,24 @@ func TestSettingsUpdateRowsRenderOnceAndKeepDTAdjacency(t *testing.T) {
 				Channel:         "stable",
 				RollbackRefusal: reasonOpened,
 			},
-			wantErrorHidden:   true,
-			wantDeferalHidden: true,
-			wantRefusalHidden: false,
+			wantErrorHidden:     true,
+			wantDeferalHidden:   true,
+			wantRefusalHidden:   false,
+			wantProbationHidden: true,
+		},
+		{
+			// Only an install on probation (backlog B660).
+			name: "probation only",
+			st: UpdateStatus{
+				CurrentVersion: "v0.1.9",
+				Channel:        "stable",
+				Probation:      probationWords,
+				ProbationLevel: "ok",
+			},
+			wantErrorHidden:     true,
+			wantDeferalHidden:   true,
+			wantRefusalHidden:   true,
+			wantProbationHidden: false,
 		},
 	}
 
@@ -137,6 +159,7 @@ func TestSettingsUpdateRowsRenderOnceAndKeepDTAdjacency(t *testing.T) {
 			assertUpdateRow(t, body, "update-last-error", tc.wantErrorHidden)
 			assertUpdateRow(t, body, "update-deferred", tc.wantDeferalHidden)
 			assertUpdateRow(t, body, "update-rollback-refused", tc.wantRefusalHidden)
+			assertUpdateRow(t, body, "update-probation", tc.wantProbationHidden)
 		})
 	}
 }

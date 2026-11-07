@@ -155,8 +155,16 @@ func updateCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stde
 		fmt.Fprintf(stderr, "warning: %s\n", st.InstallWarning)
 	}
 	fmt.Fprintf(stdout, "Installed %s.\n", st.LatestVersion)
-	fmt.Fprintf(stdout, "A backup of the previous binary is at %s.bak — startup housekeeping will roll back automatically if the new bridge fails to come up at version %s within %s of restart.\n",
-		binaryPath, st.LatestVersion, updater.RecencyWindow())
+	// What is checked (backlog B660): the version installed is confirmed
+	// only once one start of it has answered as ready and stayed up, the
+	// backup kept until then; a crash loop is rolled back by its count, but
+	// not past a migration of the store; and a restart that comes up as
+	// another version restores the backup within the boot window.
+	fmt.Fprintf(stdout, "A backup of the previous binary is at %s.bak. %s is confirmed once one start of it has answered as ready "+
+		"(its API listener, /v1/health and its store) and stayed up for %s, and the backup is kept until then. After %d starts of it "+
+		"that do not end cleanly, the next start puts the backup back, unless a migration of the store has begun, which `bridge doctor` "+
+		"then reports; and a restart that does not come up as version %s within %s puts the backup back too.\n",
+		binaryPath, st.LatestVersion, updater.ProbationWindow, updater.ProbationFailedStarts, st.LatestVersion, updater.RecencyWindow())
 
 	// Post-install restart hand-off. Three branches:
 	//   --yes / non-interactive (CI / scripts / piped stdin):

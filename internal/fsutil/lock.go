@@ -42,6 +42,23 @@ func TryLock(f *os.File) error {
 	return tryLock(f)
 }
 
+// TryLockShared takes a shared lock on f without waiting for it: what a
+// question of whether another open holds the file's lock EXCLUSIVELY asks,
+// since it answers ErrLocked where an exclusive hold (TryLock's) is there and
+// nil beside any number of other shared holds, so two questions asked at once
+// never answer each other (backlog B660's fourth round: an exclusive try
+// asked as the question took another question's hold for the holder's).
+// flock's LOCK_SH on unix, and on Windows LockFileEx without
+// LOCKFILE_EXCLUSIVE_LOCK over the range TryLock locks, every byte, which an
+// exclusive lock of that range refuses and a shared one does not. Its other
+// answers, its release (Unlock) and its scope (the open file) are TryLock's.
+func TryLockShared(f *os.File) error {
+	if f == nil {
+		return &os.PathError{Op: "lock", Err: os.ErrInvalid}
+	}
+	return tryLockShared(f)
+}
+
 // KeepsNoLocks reports whether err, what TryLock answered, says no lock can
 // be taken on that file at all: its filesystem keeps none (ENOLCK, EOPNOTSUPP
 // or ENOTSUP from flock; ERROR_NOT_SUPPORTED or ERROR_INVALID_FUNCTION from

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"time"
 )
 
@@ -55,22 +56,39 @@ func healthCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		fmt.Fprintf(stderr, "health: bad listenAddress %q: %v\n", cfg.ListenAddress, err)
 		return 1
 	}
-	// A wildcard bind doesn't listen on a routable host — dial loopback. A
-	// specific bound IP is dialed as-is so the probe follows the operator's
-	// networking intent.
-	switch host {
-	case "", "0.0.0.0", "::":
-		host = "127.0.0.1"
-	}
-	addr := net.JoinHostPort(host, port)
 
 	d := net.Dialer{Timeout: 3 * time.Second}
-	conn, err := d.DialContext(ctx, "tcp", addr)
-	if err != nil {
-		fmt.Fprintf(stderr, "health: API listener %s not accepting connections: %v\n", addr, err)
-		return 1
+	var refused []string
+	for _, h := range probeHosts(host) {
+		addr := net.JoinHostPort(h, port)
+		conn, err := d.DialContext(ctx, "tcp", addr)
+		if err != nil {
+			refused = append(refused, fmt.Sprintf("%s: %v", addr, err))
+			continue
+		}
+		_ = conn.Close()
+		fmt.Fprintln(stdout, "ok")
+		return 0
 	}
-	_ = conn.Close()
-	fmt.Fprintln(stdout, "ok")
-	return 0
+	fmt.Fprintf(stderr, "health: API listener not accepting connections (%s)\n", strings.Join(refused, "; "))
+	return 1
+}
+
+// probeHosts is what a probe on this host dials, in turn, for a listener bound
+// at host: a wildcard bind doesn't listen on a routable host, so loopback,
+// IPv4's for the IPv4 wildcard, and IPv4's and then IPv6's for the IPv6
+// wildcard and an empty host, which Go binds on both families where the host
+// lets it and on IPv6's alone where it does not (backlog B660's third round:
+// IPv4's alone left a listener on IPv6's wildcard alone unreached); a specific
+// bound IP is dialed as-is so the probe follows the operator's networking
+// intent. `bridge health` dials them, and so does serve's readiness probe of
+// its own API listener (acceptWatch.probe; backlog B660).
+func probeHosts(host string) []string {
+	switch host {
+	case "0.0.0.0":
+		return []string{"127.0.0.1"}
+	case "", "::":
+		return []string{"127.0.0.1", "::1"}
+	}
+	return []string{host}
 }

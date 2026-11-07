@@ -52,7 +52,11 @@ func TestEveryStoreTheBridgeOpensIsItsDataDirsDatabase(t *testing.T) {
 			}
 			ast.Inspect(fn.Body, func(n ast.Node) bool {
 				call, ok := n.(*ast.CallExpr)
-				if !ok || !callsIn(sf, call, manifestImport, "OpenStore") || len(call.Args) != 1 {
+				// Serve's own open carries its admission's permission
+				// (OpenStoreAdmitted, backlog B660's second round), the path
+				// first as OpenStore's.
+				if !ok || !(callsIn(sf, call, manifestImport, "OpenStore") && len(call.Args) == 1 ||
+					callsIn(sf, call, manifestImport, "OpenStoreAdmitted") && len(call.Args) == 2) {
 					return true
 				}
 				opens++
