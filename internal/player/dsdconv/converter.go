@@ -22,8 +22,10 @@ var (
 	ErrWindow = errors.New("dsdconv: the occurrence's last frames wait for what follows it")
 	// ErrClosed is every call's answer after Close.
 	ErrClosed = errors.New("dsdconv: the converter is closed")
-	// ErrDetached is a successor's answer once its predecessor went back to
-	// its window (Rewind): it follows nothing now, and plays no more.
+	// ErrDetached is a successor's answer to a read, a Continue, an End or a
+	// Rewind once its predecessor went back to its window (Rewind), and that
+	// of every occurrence after it: it follows nothing now, and plays no
+	// more.
 	ErrDetached = errors.New("dsdconv: the occurrence before this one went back to its window")
 	// ErrJoin refuses a Continue that is not a continuous join or comes in a
 	// state that cannot take one (no window point, already decided, a
@@ -376,12 +378,14 @@ func (c *Converter) limit() int64 {
 }
 
 // finish ends the occurrence: a continued one hands the chain to its
-// successor, whose frame 0 is the chain's next; the last of a chain reports
-// what ended its input early, if anything did.
+// successor, whose frame 0 is the chain's next, and the successor lets go of
+// it, so a chain keeps none of the occurrences it has played; the last of a
+// chain reports what ended its input early, if anything did.
 func (c *Converter) finish() error {
 	if c.next != nil {
 		if !c.handed {
 			c.next.e, c.next.base, c.next.adopted = c.e, c.e.frame, true
+			c.next.pred = nil
 			c.handed = true
 		}
 		return io.EOF
@@ -423,6 +427,8 @@ func (c *Converter) Continue(next *Converter) error {
 	switch {
 	case c.closed:
 		return ErrClosed
+	case c.detached:
+		return ErrDetached
 	case next == nil || next == c || !c.holding || c.decided:
 		return ErrJoin
 	case next.started || next.adopted || next.pred != nil || next.closed || next.detached:
@@ -442,6 +448,8 @@ func (c *Converter) End() error {
 	switch {
 	case c.closed:
 		return ErrClosed
+	case c.detached:
+		return ErrDetached
 	case !c.holding || c.decided:
 		return ErrJoin
 	}
@@ -474,6 +482,9 @@ func (c *Converter) Rewind() error {
 	return nil
 }
 
+// detach cuts c and every occurrence after it off the chain: each may still
+// hold a reference to the chain's state, which is the predecessor's again,
+// so none of them reads, holds, continues or ends any more (ErrDetached).
 func (c *Converter) detach() {
 	if c.detached {
 		return
@@ -482,6 +493,7 @@ func (c *Converter) detach() {
 	if c.next != nil {
 		c.next.detach()
 	}
+	c.holding, c.next = false, nil
 }
 
 // Seek refuses every frame but 0 before the first read, which positions
@@ -679,12 +691,21 @@ func (e *engine) cursorEnd() {
 	}
 }
 
-// truncate ends the input at the bytes that came, with err pending.
+// truncate ends the input at the bytes that came, with err pending. A cursor
+// cut short of what it declares is done there, at a whole byte that is real
+// however its declared last byte was padded: the chain's bits are the cut's,
+// with no partial byte. One that gave every byte keeps the end cursorEnd
+// marked.
 func (e *engine) truncate(err error) {
-	e.inEnd = e.base + int64(e.hi)
-	e.ended, e.endBits = true, 8*e.inEnd
-	if e.partialAt >= e.inEnd {
-		e.partialAt = -1
+	if !e.cur.done {
+		e.cur.done = true
+		e.inEnd = e.base + int64(e.hi)
+		e.ended, e.endBits = true, 8*e.inEnd
+		if e.partialAt >= e.inEnd {
+			e.partialAt = -1
+		}
+	} else if !e.ended {
+		e.ended, e.endBits = true, 8*e.inEnd
 	}
 	e.queued, e.pending = nil, err
 }
