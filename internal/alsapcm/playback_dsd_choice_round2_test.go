@@ -260,23 +260,6 @@ func (d *dsdRig) preparedOrRefused(o engine.OccurrenceID, why string) {
 	}
 }
 
-// tickUntilKernel has every session's reporter measure until the fake
-// kernel shows what cond, named what, asks.
-func (d *dsdRig) tickUntilKernel(what string, cond func(alsapcm.KernelView) bool) {
-	d.t.Helper()
-	timer := time.NewTimer(alsapcm.Watchdog())
-	defer timer.Stop()
-	for !cond(d.k.View()) {
-		select {
-		case <-d.k.When(cond):
-		case d.ticks <- time.Time{}:
-		case <-timer.C:
-			alsapcm.LogGoroutines(d.t)
-			d.t.Fatalf("waited %v for %s: the fake kernel is %+v", alsapcm.Watchdog(), what, d.k.View())
-		}
-	}
-}
-
 // waitAwaitedOr waits until steps of o's waited for a write n times, or the
 // fake kernel shows what cond, named what, asks, whichever comes first.
 func (w *writeSeams) waitAwaitedOr(t *testing.T, d *dsdRig, o engine.OccurrenceID, n int, what string, cond func(alsapcm.KernelView) bool) {

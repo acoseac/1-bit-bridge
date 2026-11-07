@@ -43,8 +43,14 @@ import (
 // classified. Every step that ends a DSD occurrence's open reads it under the
 // session's lock (lockSettled), and one whose rate the pending set plays
 // otherwise than the set published waits for the write to settle, its lock
-// let go; the producer holds back from a sink an opened occurrence at such a
-// rate (next, transition, holdLocked). So each occurrence the write could
+// let go, a refusal of the policy's the write lifts among them, asked again
+// once it settles (settleOpen, round 2); the producer holds back from a sink
+// an opened occurrence at such a rate (next, transition, holdLocked), a
+// gapless one only while its sink holds more than its floor; and an open of
+// an occurrence's own sink, which the step that found no write pending
+// claims (occ.claimed), is counted by the classification as reaching its
+// sink, its adoption and activation waiting for the write (transition,
+// resume, checkDSDActivation; round 2). So each occurrence the write could
 // interrupt was either classified, under its session's lock, or is admitted
 // under what the write leaves published, and what the answer promised holds
 // across the publish (binding note 3). A write that fails before it lands

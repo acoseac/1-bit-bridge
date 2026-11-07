@@ -84978,7 +84978,8 @@ a write that finds the revision moved answers `stale` once the write that
 moved it has published, and reads the policy again first, so the revision a
 stale answer carries is the state's and the next write's
 (`TestTwoWritesOfOneRevisionLandOnce`: eight writes of one revision, one
-lands; `TestAStaleAnswerNeverCarriesARevisionTheStateHasMovedPast`). A `GET`
+lands; `TestAStaleAnswerNeverCarriesARevisionAnotherWriteHasPassed`, so
+named in round 2, below). A `GET`
 between another write's durable write and its publish reads the old
 revision; a write from it waits for the write in flight and answers `stale`
 with the durable revision, which a write-back then takes
@@ -85198,3 +85199,152 @@ of B9's rules are in `output.md` and `wire.md`, for player.md's budget),
 tracked docs pass on it (`TestEveryCitedTestNameExists`,
 `TestEveryBridgeWordIsInTheProtocol`, the endpoint and error-table guards,
 `TestDSDOutputProtocolTokens` and `TestQualificationRunbookVersion`).
+
+## 2026-11-07 — B728 B9 round 2: the write beside what plays
+
+Worker b728-b9, legion0, branch `feat/b728-b9-choice` (PR #1434) from
+aafeb06d, which holds main (994e21ba, B8). Commits: 20686eda (the round's
+tests, red), c0a06b7e (point 6), d10d2eca (points 3 to 5), c238660b (point 2),
+da5e4216 and 463e98a6 (point 1), 07442dce (the case a control asked for), and
+this record. The rules changes are a patch the orchestrator applies
+(`output.md`, `wire.md` and their long forms). Each of the reviewer's seven
+points was confirmed red through the real paths (the engine's Run, the
+backend, the sinks over the fake kernel) before its fix.
+
+### Point 1: an open beside a write
+
+The producer's transition and a resume between transports opened the next
+occurrence's own sink outside the session's lock, and a write that classified
+meanwhile saw an occurrence opened and in no sink, a re-plan that interrupts
+nothing, while the open went on to adopt and activate its sink before the
+publish. Red: two cases of `TestASuccessorsOpenBesideAWriteIsCountedAndWaitsForIt`
+written where `would_interrupt` was due, and its go-ahead case with b's frames
+on its node before the publish, the engine's replacement then refused;
+`TestAResumesOpenBetweenTransportsBesideAWriteIsCounted` written. The step that
+finds no write pending now claims the occurrence in that lock (`occ.claimed`),
+kept through the open, the adoption and the activation, and the
+classification counts a claimed occurrence as reaching its sink. The adoption
+waits while a write is pending and closes the sink unwritten where the
+occurrence is being handed off again; the activation waits too
+(`checkDSDActivation`'s `awaitWrite`, no lock held), and an occurrence handed
+off again by then, or dropped for its replacement (a cut of a successor with
+no frame written drops it at once, which the check took for a refusal and
+faulted the session on), is `errReplanned`, its sink taken back unwritten
+(`unadopt`; `TestAnActivationBesideAWriteWaitsForIt`, the write pending
+between the two). The resume waits in a loop, asking again under the lock
+each time a write settles (red: `TestAResumeWaitsForEveryWriteThatChangesWhatItOpens`,
+the resume, woken by a write A that failed, opened b's node while B was
+pending). What bounds each wait: the write settles at every end of it, so a
+wait is its fsync and its publish at most, and every wait ends with the
+session's life, which a release ends, the resume's with the call's context
+too. B792 is left. The resume shortcut's error return is no finding
+(`defer l.release()`).
+
+### Point 2: a refusal a write lifts
+
+A successor the set refused by its word (DSD128 under a cap at DSD64) was
+refused for good, though a write pending as the refusal was made, or published
+before the open ended, plays its rate (red: four cases of
+`TestAPolicyRefusalAWriteLiftsIsAskedAgain`). Such a refusal now keeps the set
+it was made under (`refusedUnder`), the pending fence counts it where the
+write plays the rate otherwise than the set published, and the step that ends
+the open (`settleOpen`) asks again, outside the lock, an admission refused
+under a set that is no longer the one published: `openNativeContent` again, so
+the content's own checks are made with it (an empty content refused as that);
+a decoder's refusal is never asked again; a successor's DSD monitor starts
+once it is admitted (a PCM session's first DSD successor). The marker compares
+with the set published, never the one the write was made from: a session's
+start that reads the durable state before the write's own publish has
+published what the write would, and the first try, comparing with the write's
+`from`, made such an occurrence wait for a publish
+(`TestAnOccurrenceBesideAWriteIsNotRevoked` hung).
+
+### Point 3: the answers' order
+
+Red: `TestTheWritesChecksAreAnsweredInTheirOrder`, `would_interrupt` where the
+revision had moved in the write's window and beside a landed write's fence;
+`TestAWriteTheStateKeepsMovingUnderIsNotMade`, `stale` after eight rounds.
+`would_interrupt` is now decided inside the store's closure, after the
+policy's checks and the two sets' consistency, by the classification made
+before it with no lock of the store's held (`TestTheChoiceWritesLockOrderHolds`
+now holds a reader that takes the store's lock under a session's, so a session's
+lock taken inside the closure deadlocks it). The fence of an earlier landed
+write, the backend's own or the store's (`Landed`), is answered first,
+`persist_uncertain`, which keeps a fenced write whose reading of the DAC
+drifts from going round to its bound (07442dce). Past eight rounds a write is
+`persist_failed`: nothing changed, and the client writes again from the
+revision `GET` publishes, which is not behind. The app need not tell it from
+a failed write, the action being the same; the line, a warning that the write
+was not made with its `why` (never "was not made durable", which says it
+landed), tells the operator which. `maxChoiceRounds`' comment, `ChooseDSD`'s
+doc and PROTOCOL.md say it.
+
+### Point 4: the answer's epoch
+
+Red: a stale answer carried revision 2, the next write's. The epoch is read by
+a defer registered after the turn's, at every return inside the turn; the line
+is written after it. Renamed `TestAStaleAnswerNeverCarriesARevisionAnotherWriteHasPassed`.
+Beside a migration, stale says the base was not the state's revision at the
+compare-and-set, and carries the state's revision as the turn ended; the
+migration's part for a DAC takes no turn and can move it after, which the next
+write's compare-and-set answers stale with the newer one.
+
+### Point 5: judged on one reading, published from another
+
+Red: `TestAWriteIsJudgedAgainstTheSetPublished/a_reading_that_glitches_beside_the_write`,
+a gain read that glitched in the write's reading alone made the DoP occurrence
+heard look revoked anyway, so the write was written and its publish revoked
+DoP. Chosen: where the write's reading gives another set than the one
+published, the write publishes and reconciles it first, a refresh of its own
+that reads the box again, and goes another round, sharing the bound, and
+`persist_failed` at it (`TestAWriteWhoseReadingNeverAgreesWithTheSetPublishedIsNotMade`:
+eight rounds, sixteen reads). A change of the box that persists is published
+by that refresh, and the write lands in its next round.
+
+### Point 6: explicit nulls
+
+Red: the four optional members' nulls answered 200. They are kept as their
+bytes and a null is `400` `bad_request`; nothing of the kind reaches a
+response.
+
+### Point 7: tests that passed with their fix reverted
+
+Each wait and check is pinned through its real path, and its control is red: a
+successor's open's end (`TestASuccessorWhoseOpenEndsBesideAWriteWaitsForIt`),
+a transport's open (`TestNoSinkOpensForASuccessorWhileAWriteChangesItsRate`), a
+converted join window's hold (`TestAConvertedJoinWindowWaitsForAWriteThatChangesItsSuccessor`:
+the window holds while the write is pending, as for a successor that has not
+settled, and at the sink's floor ends zero-padded, no xrun), the resume's
+(point 1), an engine without `ReplanEvents`
+(`TestAWriteBesideAnEngineThatHandsNothingOffAgainIsTold`, the rig's
+`noReplan`), a session being released
+(`TestAWriteBesideASessionBeingReleasedIsTold`, held at the `Releasing` seam),
+the body's bound (white space past 4 KiB before a valid object) and the lock
+order. Found on the way: the producer held a successor at a rate a write
+changes in `next()` with no bound, past the sink's lookahead; a gapless one now
+waits only while the sink it would join holds more than 100 ms, and at the
+floor, like any other, takes the transport's step, which drains first
+(`TestAGaplessSuccessorWaitsForAWriteNoLongerThanTheSinksLookahead`;
+`TestTheProducerHoldsAnOccurrenceAPendingWriteWouldReplan` takes the new
+shape). Residual: a successor whose open is still under way when the sink
+before it runs out was waited for without a bound before this round, and the
+end of its open can now wait for a write.
+
+### The qualification version
+
+46: `native.go` (the activation's context) and `internal/alsapcm/`'s tests;
+B9 held 44, and B762 takes 45. `scripts/qualification-version` passed against
+main (994e21ba) and against round 1's head (aafeb06d).
+
+### Negative controls
+
+Twenty-nine, predicted by name in `.tmp/_b728-b9/r2-controls.predictions.txt`
+before they ran, each on a committed tree, the bytes restored and the tracked
+tree clean after each; each red as predicted, but: C7 (the adoption's wait
+alone removed) green, as predicted, the activation's wait covering every
+observable; C8 (a dropped successor not `errReplanned`) red in 4 of 5 runs,
+the drop winning its race most times; C11 (every refusal asked again) red on
+its case and on an empty content asked again for ever; and C15 (no fence
+answered first) green at first, the store's fence answering first once
+`would_interrupt` was in the closure, so 07442dce adds the case where the
+early answer matters, and C15 is red on it.
