@@ -1060,9 +1060,12 @@ On `playback`, `transport` is `dop` for a DoP occurrence, `pcm` for a PCM one,
 `packingVersion` is the DSD packer's version (1), absent for PCM and a converted
 occurrence. `observedAt` is when the backend last observed the occurrence's sink
 (installed, released, reopened or revoked), an RFC 3339 UTC time. A native or DoP
-occurrence's `evidence` and `evidenceOn` are its tuple's in the set published now,
-or, its tuple gone from that set, the ones it was admitted with; a PCM and a
-converted occurrence carry none. A converted occurrence's `format`, `rateHz` and
+occurrence's `evidence` and `evidenceOn` are its tuple's as the set published now
+says them while that set is the one it was admitted under (its `bootId` and
+`policyGeneration` the observation's), and otherwise the ones it was admitted with:
+a `policyId` does not name the DAC or its firmware, so another DAC's tuple, or the
+same DAC's on another firmware, can share it. A PCM and a converted occurrence
+carry none. A converted occurrence's `format`, `rateHz` and
 `validBits` are its PCM's, its plan's actual values, `logicalRate` is 0, and
 `converted` is its plan: `fromBitRate`, the source's DSD bits/s; `filter`,
 `passbandHz` and `dither`, as a converted entry's; `gainDB`, 0, unity; and

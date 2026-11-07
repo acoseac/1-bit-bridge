@@ -275,8 +275,14 @@ func bridgeDSDDAC(d *playback.DSDDAC, device config.PlayerDevice) *api.OutputDSD
 // format, rate and valid bits its PCM's and its plan its own, each read from
 // the observation; a native or DoP one's evidence its tuple's in the set
 // published now, by its policy ID, the rung that set computes as playback
-// observes the tuple (an evidence step moves no generation), else the one
-// the set it was admitted under gave it; PCM's and a converted one's none.
+// observes the tuple (an evidence step publishes no new set), while that set
+// is the one it was admitted under, its boot and generation the
+// observation's, else the one its admission gave it; PCM's and a converted
+// one's none. A policy ID names a tuple's transport, format, rate and timing,
+// never the DAC, its firmware or the set, so another DAC's tuple, or the same
+// DAC's on another firmware, can have it (B728 B8 round 2: a retained
+// observation took the next DAC's evidence); a generation names one set, and
+// so the unit and the firmware it was computed for.
 func bridgePlayback(policy playback.PlayerPolicy, live *playback.PlaybackFacts) *api.OutputPlayback {
 	if live == nil {
 		return nil
@@ -284,7 +290,8 @@ func bridgePlayback(policy playback.PlayerPolicy, live *playback.PlaybackFacts) 
 	out := &api.OutputPlayback{BootID: live.BootID, PolicyGeneration: live.PolicyGeneration, Session: uint64(live.Session), Occurrence: uint64(live.Occurrence), State: live.State, Format: live.Format, RateHz: live.RateHz, LogicalRate: live.LogicalRate, Channels: live.Channels, ValidBits: live.ValidBits, PolicyID: live.PolicyID,
 		Transport: live.Transport, PackingVersion: live.PackingVersion}
 	ev := live.Evidence
-	if v := policy.DSD; v != nil && live.Transport != playback.TransportConverted && live.PolicyID != "" {
+	underItsSet := live.BootID == policy.BootID && live.PolicyGeneration == policy.Generation
+	if v := policy.DSD; v != nil && underItsSet && live.Transport != playback.TransportConverted && live.PolicyID != "" {
 		for i, p := range policy.Tuples {
 			if p.PolicyID == live.PolicyID && i < len(v.Evidence) {
 				ev = v.Evidence[i]
