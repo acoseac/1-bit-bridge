@@ -401,17 +401,19 @@ func (p nestedPass) has(abs string) bool {
 
 // protectNestedRoots decides, before a walk of root, which of the roots nested
 // in it read as a volume not mounted (Scanner.lookAtRoot, the look the
-// watcher's hold and their own scans' guards read), whether or not a walk
-// could reach their folders: an unmount above a nested root takes its folder
-// with it, and a walk that only spared what it reached spared nothing then
-// (B651's sixth round, Codex on round 5). Each one's prefix below root is
-// recorded as a subtree the walk could not see, so the deletion pass leaves
-// every row under it as it is, its missing count untouched, and so is every
-// spelling of that prefix the index holds that may be the same folder, each
-// element judged by its own folder (spareFolds): the walks wrote the rows as
-// the volume spells its folders, which the configured spelling may not be. It
-// returns their folders, for the walk to pass over where it reaches them in
-// any such spelling. A nested root that reads as it is is walked, as before.
+// watcher's hold and their own scans' guards read; one holding nothing but
+// links to directories over its tracks reads as absent too, B742), whether or
+// not a walk could reach their folders: an unmount above a nested root takes
+// its folder with it, and a walk that only spared what it reached spared
+// nothing then (B651's sixth round, Codex on round 5). Each one's prefix
+// below root is recorded as a subtree the walk could not see, so the deletion
+// pass leaves every row under it as it is, its missing count untouched, and
+// so is every spelling of that prefix the index holds that may be the same
+// folder, each element judged by its own folder (spareFolds): the walks wrote
+// the rows as the volume spells its folders, which the configured spelling
+// may not be. It returns their folders, for the walk to pass over where it
+// reaches them in any such spelling. A nested root that reads as it is is
+// walked, as before.
 func (s *Scanner) protectNestedRoots(ctx context.Context, root string, nested []nestedRoot, multiRoot bool, rows []map[string]struct{}, errorSubtrees map[string]struct{}) nestedPass {
 	var pass nestedPass
 	if len(nested) == 0 {

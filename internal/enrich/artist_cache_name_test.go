@@ -101,13 +101,13 @@ func TestArtistCacheHitUsesCanonicalNameForDeezer(t *testing.T) {
 		}
 	}
 
-	deezerClient := NewDeezerClient(deezerSrv.URL, "t", nil)
+	deezerClient := NewDeezerClient(deezerSrv.URL, "t", nil, onDeezerSwitches)
 	deezerClient.http.Transport = rewritingTransport{base: deezerSrv.URL, tr: http.DefaultTransport}
 	deezerClient.SetAllowedImageHostsForTest([]string{"127.0.0.1"})
 
 	e := NewEnricher(store,
-		NewMusicBrainzClient(mbSrv.URL, "t", nil),
-		NewCoverArtClient(caaSrv.URL, "t", nil),
+		NewMusicBrainzClient(mbSrv.URL, "t", nil, onSwitches),
+		NewCoverArtClient(caaSrv.URL, "t", nil, onSwitches),
 		deezerClient,
 		filepath.Join(dir, "artwork"))
 	e.DeezerMinInterval = 0

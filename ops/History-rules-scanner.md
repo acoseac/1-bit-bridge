@@ -770,6 +770,30 @@
   `TestScanner_ASubtreeMissBesideOnlyLinksNamesThem`,
   `TestDirLinkEntryTellsALinkToADirectoryByTheStatThroughIt`).
 
+- **…and the watcher's look reads a root holding only links to directories
+  as the scan's guard does, through the one reading they and the
+  owning-root audit share (`lookAtContentlessRoot`)** (2026-11-07, backlog
+  B742). `lookAtRoot`, by which the library watcher holds a root (B651) and
+  `protectNestedRoots` spares a nested one, read a root whose listing held
+  nothing but links to directories, over tracks the index holds, as an
+  emptied mount point (`reads=empty`), so the watcher held it with the hint
+  to check that its volume is mounted, while the guard's line says the links
+  show the volume is there (`msgRootOnlyDirLinks`). Nothing was lost: the
+  hold and the sparing were right, the hint was wrong. `lookAtContentlessRoot`
+  is now the one reading of a root holding no content and no sentinel, by
+  the count of its tracks and the links its walk or listing passed over:
+  `emptyRootMustBeSpared`, `auditOwningRootOnSubtreeMiss` and `lookAtRoot`
+  (whose listing counts the links, `listingContent`) all read through it, so
+  one mutation of it reddens all three (the record's C742-1). The case reads
+  `only-dir-links` with `absent` still true, so the watcher holds every root
+  it held and the parent scans spare every nested root they spared; only
+  the held line's hint changes (`heldHint`: the scan's existing message).
+  **Don't classify a root holding no content anywhere but
+  `lookAtContentlessRoot`, or clear `absent` for the links case: the parent
+  scans read it.** (`TestTheWatchersHoldAndHintReadARootAsTheScanDoes`, a
+  table of seven shapes asserting the hold, the hint and the scan's sparing
+  or pruning, and `TestAParentScanSparesANestedRootHoldingOnlyLinksToDirectories`.)
+
 - **A configured root that is a link is WATCHED at the directory it
   resolves to, and every event under it is named back under the configured
   root** (2026-09-29, backlog B51). fsnotify's kqueue backend (macOS, the

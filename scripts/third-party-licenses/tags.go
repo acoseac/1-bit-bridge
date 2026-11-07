@@ -436,6 +436,17 @@ func checkBuildSites(root, tags string) error {
 	return nil
 }
 
+// makeTestTmpDir is the directory below the root that make test and make
+// test-fast give go test as TMPDIR when the caller sets none (the Makefile's
+// TMPDIR line, which TestTheCensusSkipsTheMakefilesTMPDIR holds to this
+// name; never the environment's TMPDIR, which a bare go test sets elsewhere).
+// Every package's tests make and remove their temporary files there while the
+// suite runs, so the census walking it met scripts/install-test's link at
+// run/user/1000/bus mid-run and failed (B740). Nothing there is the
+// repository's: the census skips it at the root alone, by its name, before
+// listing it.
+const makeTestTmpDir = ".tmp"
+
 // discoverBuildSites retains even files with no sites so an audit can account
 // for every in-scope Markdown file, not just files with a matched command.
 func discoverBuildSites(root string) (map[string][]string, error) {
@@ -457,7 +468,7 @@ func discoverBuildSites(root string) (map[string][]string, error) {
 			case ".git", "bin", "dist", "vendor", "node_modules":
 				return filepath.SkipDir
 			}
-			if strings.HasPrefix(d.Name(), "_") {
+			if name == makeTestTmpDir || strings.HasPrefix(d.Name(), "_") {
 				return filepath.SkipDir
 			}
 			if _, err := os.Lstat(filepath.Join(path, ".git")); err == nil {

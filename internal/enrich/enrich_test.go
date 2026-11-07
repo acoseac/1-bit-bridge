@@ -105,7 +105,7 @@ func TestMusicBrainzSearchReleaseHappyPath(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewMusicBrainzClient(srv.URL, "test-agent", nil)
+	c := NewMusicBrainzClient(srv.URL, "test-agent", nil, onSwitches)
 	res, err := c.SearchRelease(context.Background(), "John Coltrane", "Blue Train")
 	if err != nil {
 		t.Fatal(err)
@@ -154,7 +154,7 @@ func TestMusicBrainzDecodeRealResponseShape(t *testing.T) {
 		}`)
 	}))
 	defer srv.Close()
-	c := NewMusicBrainzClient(srv.URL, "test", nil)
+	c := NewMusicBrainzClient(srv.URL, "test", nil, onSwitches)
 	res, err := c.SearchRelease(context.Background(), "John Coltrane", "Blue Train")
 	if err != nil {
 		t.Fatalf("decode real MB response: %v", err)
@@ -169,7 +169,7 @@ func TestMusicBrainzSearchReleaseNoMatch(t *testing.T) {
 		io.WriteString(w, `{"releases": []}`)
 	}))
 	defer srv.Close()
-	c := NewMusicBrainzClient(srv.URL, "test", nil)
+	c := NewMusicBrainzClient(srv.URL, "test", nil, onSwitches)
 	res, err := c.SearchRelease(context.Background(), "Unknown", "Artist")
 	if err != nil {
 		t.Fatal(err)
@@ -184,7 +184,7 @@ func TestMusicBrainzSearchReleaseScoreThreshold(t *testing.T) {
 		io.WriteString(w, `{"releases":[{"id":"x","score":50,"title":"Blue Train","artist-credit":[{"name":"John Coltrane"}]}]}`)
 	}))
 	defer srv.Close()
-	c := NewMusicBrainzClient(srv.URL, "test", nil)
+	c := NewMusicBrainzClient(srv.URL, "test", nil, onSwitches)
 	res, _ := c.SearchRelease(context.Background(), "John Coltrane", "Blue Train")
 	if res != nil {
 		t.Errorf("low-score release was not filtered: %+v", res)
@@ -196,7 +196,7 @@ func TestMusicBrainzSearchReleaseIgnoresTitleMismatch(t *testing.T) {
 		io.WriteString(w, `{"releases":[{"id":"x","score":100,"title":"Totally Different Album","artist-credit":[{"name":"John Coltrane"}]}]}`)
 	}))
 	defer srv.Close()
-	c := NewMusicBrainzClient(srv.URL, "test", nil)
+	c := NewMusicBrainzClient(srv.URL, "test", nil, onSwitches)
 	res, _ := c.SearchRelease(context.Background(), "John Coltrane", "Blue Train")
 	if res != nil {
 		t.Errorf("title-mismatch release leaked through: %+v", res)
@@ -210,7 +210,7 @@ func TestMusicBrainzSendsUserAgent(t *testing.T) {
 		io.WriteString(w, `{"releases":[]}`)
 	}))
 	defer srv.Close()
-	c := NewMusicBrainzClient(srv.URL, "1-bit-bridge/0.0.1 (+https://example.com)", nil)
+	c := NewMusicBrainzClient(srv.URL, "1-bit-bridge/0.0.1 (+https://example.com)", nil, onSwitches)
 	c.SearchRelease(context.Background(), "A", "B")
 	if !strings.Contains(gotUA, "1-bit-bridge") {
 		t.Errorf("UA not set: %q", gotUA)
@@ -359,7 +359,7 @@ func TestMusicBrainz429HonorsRetryAfter(t *testing.T) {
 		io.WriteString(w, `{"error":"too many requests"}`)
 	}))
 	defer srv.Close()
-	c := NewMusicBrainzClient(srv.URL, "test", nil)
+	c := NewMusicBrainzClient(srv.URL, "test", nil, onSwitches)
 	start := time.Now()
 	_, err := c.SearchRelease(context.Background(), "John Coltrane", "Blue Train")
 	elapsed := time.Since(start)
@@ -380,7 +380,7 @@ func TestMusicBrainz429RespectsContextCancellation(t *testing.T) {
 		w.WriteHeader(http.StatusTooManyRequests)
 	}))
 	defer srv.Close()
-	c := NewMusicBrainzClient(srv.URL, "test", nil)
+	c := NewMusicBrainzClient(srv.URL, "test", nil, onSwitches)
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
 		time.Sleep(50 * time.Millisecond)
@@ -405,7 +405,7 @@ func TestMusicBrainzSearchArtistPrefersExactMatch(t *testing.T) {
 		]}`)
 	}))
 	defer srv.Close()
-	c := NewMusicBrainzClient(srv.URL, "test", nil)
+	c := NewMusicBrainzClient(srv.URL, "test", nil, onSwitches)
 	res, _ := c.SearchArtist(context.Background(), "John Coltrane")
 	if res == nil || res.MBID != "exact" {
 		t.Errorf("picked %+v, wanted exact name match", res)
@@ -434,7 +434,7 @@ func TestITunesSearchAlbumHappyPath(t *testing.T) {
 		}`)
 	}))
 	defer srv.Close()
-	c := NewITunesClient(srv.URL, "test", nil)
+	c := NewITunesClient(srv.URL, "test", nil, onSwitches)
 	hit, err := c.SearchAlbum(context.Background(), "John Coltrane", "Blue Train")
 	if err != nil {
 		t.Fatal(err)
@@ -455,7 +455,7 @@ func TestITunesSearchAlbumZeroResultsIsNotFound(t *testing.T) {
 		io.WriteString(w, `{"resultCount": 0, "results": []}`)
 	}))
 	defer srv.Close()
-	c := NewITunesClient(srv.URL, "test", nil)
+	c := NewITunesClient(srv.URL, "test", nil, onSwitches)
 	hit, err := c.SearchAlbum(context.Background(), "Nobody", "Nothing")
 	if !IsNotFound(err) {
 		t.Errorf("expected IsNotFound, got hit=%v err=%v", hit, err)
@@ -478,7 +478,7 @@ func TestITunesSearchAlbumRejectsObviousMisses(t *testing.T) {
 		}`)
 	}))
 	defer srv.Close()
-	c := NewITunesClient(srv.URL, "test", nil)
+	c := NewITunesClient(srv.URL, "test", nil, onSwitches)
 	hit, _ := c.SearchAlbum(context.Background(), "John Coltrane", "Blue Train")
 	if hit != nil {
 		t.Errorf("hard mismatch leaked through: %+v", hit)
@@ -501,7 +501,7 @@ func TestITunesSearchAlbumAcceptsDeluxeSuffix(t *testing.T) {
 		}`)
 	}))
 	defer srv.Close()
-	c := NewITunesClient(srv.URL, "test", nil)
+	c := NewITunesClient(srv.URL, "test", nil, onSwitches)
 	hit, err := c.SearchAlbum(context.Background(), "John Coltrane", "Blue Train")
 	if err != nil || hit == nil {
 		t.Fatalf("deluxe-suffix should still match: %v / %v", hit, err)
@@ -516,7 +516,7 @@ func TestITunesFetchArtworkUpscalesURL(t *testing.T) {
 		w.Write([]byte{0xFF, 0xD8, 0xFF})
 	}))
 	defer srv.Close()
-	c := NewITunesClient("unused", "test", nil)
+	c := NewITunesClient("unused", "test", nil, onSwitches)
 	a := &ITunesAlbum{
 		CollectionID:  1,
 		ArtworkURL100: srv.URL + "/path/to/100x100bb.jpg",
@@ -543,7 +543,7 @@ func TestITunesFetchArtwork404ReturnsNotFound(t *testing.T) {
 		http.NotFound(w, r)
 	}))
 	defer srv.Close()
-	c := NewITunesClient("unused", "test", nil)
+	c := NewITunesClient("unused", "test", nil, onSwitches)
 	_, err := c.FetchArtwork(context.Background(), &ITunesAlbum{
 		CollectionID:  1,
 		ArtworkURL100: srv.URL + "/100x100bb.jpg",
@@ -563,7 +563,7 @@ func TestITunesFetchArtworkHonorsRetryAfter(t *testing.T) {
 		w.WriteHeader(http.StatusTooManyRequests)
 	}))
 	defer srv.Close()
-	c := NewITunesClient("unused", "test", nil)
+	c := NewITunesClient("unused", "test", nil, onSwitches)
 	a := &ITunesAlbum{
 		CollectionID:  1,
 		ArtworkURL100: srv.URL + "/100x100bb.jpg",
@@ -586,7 +586,7 @@ func TestITunesHonorsRetryAfter(t *testing.T) {
 		io.WriteString(w, `{"error":"rate limited"}`)
 	}))
 	defer srv.Close()
-	c := NewITunesClient(srv.URL, "test", nil)
+	c := NewITunesClient(srv.URL, "test", nil, onSwitches)
 	start := time.Now()
 	_, err := c.SearchAlbum(context.Background(), "John Coltrane", "Blue Train")
 	elapsed := time.Since(start)
@@ -607,7 +607,7 @@ func TestCoverArtFetchFrontReturnsBytes(t *testing.T) {
 		w.Write(want)
 	}))
 	defer srv.Close()
-	c := NewCoverArtClient(srv.URL, "test", nil)
+	c := NewCoverArtClient(srv.URL, "test", nil, onSwitches)
 	got, err := c.FetchReleaseFront(context.Background(), "11111111-1111-4111-8111-111111111111", 500)
 	if err != nil {
 		t.Fatal(err)
@@ -622,7 +622,7 @@ func TestCoverArtFetchFront404ReturnsNotFound(t *testing.T) {
 		http.NotFound(w, r)
 	}))
 	defer srv.Close()
-	c := NewCoverArtClient(srv.URL, "test", nil)
+	c := NewCoverArtClient(srv.URL, "test", nil, onSwitches)
 	_, err := c.FetchReleaseFront(context.Background(), "11111111-1111-4111-8111-111111111111", 500)
 	if !IsNotFound(err) {
 		t.Errorf("want IsNotFound, got %v", err)
@@ -630,7 +630,7 @@ func TestCoverArtFetchFront404ReturnsNotFound(t *testing.T) {
 }
 
 func TestCoverArtSizeValidation(t *testing.T) {
-	c := NewCoverArtClient("http://unused", "test", nil)
+	c := NewCoverArtClient("http://unused", "test", nil, onSwitches)
 	_, err := c.FetchReleaseFront(context.Background(), "valid-mbid", 42)
 	if err == nil || !strings.Contains(err.Error(), "unsupported size") {
 		t.Errorf("bad-size error = %v", err)
@@ -695,8 +695,8 @@ func TestEnricherProcessesTracksEndToEnd(t *testing.T) {
 
 	e := NewEnricher(
 		store,
-		NewMusicBrainzClient(mbSrv.URL, "test", nil),
-		NewCoverArtClient(caaSrv.URL, "test", nil),
+		NewMusicBrainzClient(mbSrv.URL, "test", nil, onSwitches),
+		NewCoverArtClient(caaSrv.URL, "test", nil, onSwitches),
 		nil, // no Deezer in this test — artist-image fallback path tested separately
 		filepath.Join(dir, "artwork"),
 	)
@@ -776,8 +776,8 @@ func TestEnrichOneRejectsNonUUIDEmbeddedAlbumMBID(t *testing.T) {
 	})
 
 	e := NewEnricher(store,
-		NewMusicBrainzClient(mbSrv.URL, "test", nil),
-		NewCoverArtClient(caaSrv.URL, "test", nil),
+		NewMusicBrainzClient(mbSrv.URL, "test", nil, onSwitches),
+		NewCoverArtClient(caaSrv.URL, "test", nil, onSwitches),
 		nil, cacheDir)
 	defer startEnricherForTest(e, 3*time.Second)()
 
@@ -838,8 +838,8 @@ func TestEnricherDeduplicatesAlbumLookups(t *testing.T) {
 		})
 	}
 
-	e := NewEnricher(store, NewMusicBrainzClient(mbSrv.URL, "t", nil),
-		NewCoverArtClient(caaSrv.URL, "t", nil), nil, filepath.Join(dir, "artwork"))
+	e := NewEnricher(store, NewMusicBrainzClient(mbSrv.URL, "t", nil, onSwitches),
+		NewCoverArtClient(caaSrv.URL, "t", nil, onSwitches), nil, filepath.Join(dir, "artwork"))
 	defer startEnricherForTest(e, 3*time.Second)()
 
 	if got := waitEnricherDone(e, 3, 2*time.Second); got < 3 {
@@ -866,8 +866,8 @@ func TestEnricherSkipsUnsearchableTracks(t *testing.T) {
 	// Track with no artist/album → can't be searched.
 	store.UpsertTrack(context.Background(), &manifest.Track{Path: "orphan.flac", Size: 1, ModTime: time.Now()})
 
-	e := NewEnricher(store, NewMusicBrainzClient(mbSrv.URL, "t", nil),
-		NewCoverArtClient(caaSrv.URL, "t", nil), nil, filepath.Join(dir, "artwork"))
+	e := NewEnricher(store, NewMusicBrainzClient(mbSrv.URL, "t", nil, onSwitches),
+		NewCoverArtClient(caaSrv.URL, "t", nil, onSwitches), nil, filepath.Join(dir, "artwork"))
 	defer startEnricherForTest(e, 2*time.Second)()
 
 	deadline := time.Now().Add(1500 * time.Millisecond)
@@ -908,8 +908,8 @@ func TestEnricherSkipsNetworkCallIfCoverAlreadyCached(t *testing.T) {
 	defer store.Close()
 	store.UpsertTrack(context.Background(), &manifest.Track{Path: "x.flac", Size: 1, ModTime: time.Now(), Artist: "Artist", Album: "Album"})
 
-	e := NewEnricher(store, NewMusicBrainzClient(mbSrv.URL, "t", nil),
-		NewCoverArtClient(caaSrv.URL, "t", nil), nil, artDir)
+	e := NewEnricher(store, NewMusicBrainzClient(mbSrv.URL, "t", nil, onSwitches),
+		NewCoverArtClient(caaSrv.URL, "t", nil, onSwitches), nil, artDir)
 	defer startEnricherForTest(e, 2*time.Second)()
 
 	if waitEnricherDone(e, 1, 1500*time.Millisecond) == 0 {
@@ -994,10 +994,10 @@ func TestEnricherSkipsArtworkFetchForLocalMBID(t *testing.T) {
 	}
 
 	e := NewEnricher(store,
-		NewMusicBrainzClient(mbSrv.URL, "t", nil),
-		NewCoverArtClient(caaSrv.URL, "t", nil),
+		NewMusicBrainzClient(mbSrv.URL, "t", nil, onSwitches),
+		NewCoverArtClient(caaSrv.URL, "t", nil, onSwitches),
 		nil, artDir,
-	).WithITunes(NewITunesClient(itunesSrv.URL, "t", nil))
+	).WithITunes(NewITunesClient(itunesSrv.URL, "t", nil, onSwitches))
 	defer startEnricherForTest(e, 2*time.Second)()
 
 	if waitEnricherDone(e, 1, 1500*time.Millisecond) == 0 {
@@ -1065,8 +1065,8 @@ func TestEnricherFallthroughForLocalPrefixWithoutMBMatch(t *testing.T) {
 	}
 
 	e := NewEnricher(store,
-		NewMusicBrainzClient(mbSrv.URL, "t", nil),
-		NewCoverArtClient(caaSrv.URL, "t", nil),
+		NewMusicBrainzClient(mbSrv.URL, "t", nil, onSwitches),
+		NewCoverArtClient(caaSrv.URL, "t", nil, onSwitches),
 		nil, artDir,
 	)
 	defer startEnricherForTest(e, 2*time.Second)()
@@ -1163,7 +1163,7 @@ func TestMusicBrainzReleaseGroupMBIDLookup(t *testing.T) {
 		io.WriteString(w, `{"id":"rel","release-group":{"id":"rg-xyz","title":"Whatever","primary-type":"Album"}}`)
 	}))
 	defer srv.Close()
-	c := NewMusicBrainzClient(srv.URL, "test", nil)
+	c := NewMusicBrainzClient(srv.URL, "test", nil, onSwitches)
 	got, err := c.ReleaseGroupMBID(context.Background(), "11111111-1111-4111-8111-111111111111")
 	if err != nil {
 		t.Fatal(err)
@@ -1248,11 +1248,11 @@ func TestITunesFallbackStreamingCapsOversizedBody(t *testing.T) {
 	}
 	defer store.Close()
 
-	itunesClient := NewITunesClient(itunesSrv.URL, "test", nil)
+	itunesClient := NewITunesClient(itunesSrv.URL, "test", nil, onSwitches)
 	e := NewEnricher(
 		store,
-		NewMusicBrainzClient(mbSrv.URL, "test", nil),
-		NewCoverArtClient(caaSrv.URL, "test", nil),
+		NewMusicBrainzClient(mbSrv.URL, "test", nil, onSwitches),
+		NewCoverArtClient(caaSrv.URL, "test", nil, onSwitches),
 		nil,
 		filepath.Join(dir, "artwork"),
 	).WithITunes(itunesClient)
@@ -1308,8 +1308,8 @@ func TestEnricherRespectsContextCancelMidPacing(t *testing.T) {
 
 	e := NewEnricher(
 		store,
-		NewMusicBrainzClient(mbSrv.URL, "test", nil),
-		NewCoverArtClient("http://unused", "test", nil),
+		NewMusicBrainzClient(mbSrv.URL, "test", nil, onSwitches),
+		NewCoverArtClient("http://unused", "test", nil, onSwitches),
 		nil,
 		filepath.Join(dir, "artwork"),
 	)
@@ -1387,8 +1387,8 @@ func TestResolveReleaseGroupMBIDNegativeCachesPersistentErrors(t *testing.T) {
 
 			e := NewEnricher(
 				store,
-				NewMusicBrainzClient(mbSrv.URL, "test", nil),
-				NewCoverArtClient("http://unused", "test", nil),
+				NewMusicBrainzClient(mbSrv.URL, "test", nil, onSwitches),
+				NewCoverArtClient("http://unused", "test", nil, onSwitches),
 				nil,
 				filepath.Join(dir, "artwork"),
 			)
@@ -1460,7 +1460,7 @@ func TestMusicBrainzGetReusesConnectionAfterSuccess(t *testing.T) {
 
 	// A dedicated keep-alive transport isolates the idle-conn pool from the
 	// package-global sharedHTTPTransport so the count is deterministic.
-	c := NewMusicBrainzClient(srv.URL, "test", &http.Client{Transport: &http.Transport{}})
+	c := NewMusicBrainzClient(srv.URL, "test", &http.Client{Transport: &http.Transport{}}, onSwitches)
 	for i := 0; i < 2; i++ {
 		if _, err := c.SearchRelease(context.Background(), "John Coltrane", "Blue Train"); err != nil {
 			t.Fatalf("SearchRelease #%d: %v", i+1, err)
@@ -1507,8 +1507,8 @@ func newOfflineEnricher(t *testing.T, mbHandler http.HandlerFunc) (*Enricher, *m
 	}
 	t.Cleanup(func() { _ = store.Close() })
 
-	e := NewEnricher(store, NewMusicBrainzClient(mbSrv.URL, "t", nil),
-		NewCoverArtClient(caaSrv.URL, "t", nil), nil, filepath.Join(dir, "artwork"))
+	e := NewEnricher(store, NewMusicBrainzClient(mbSrv.URL, "t", nil, onSwitches),
+		NewCoverArtClient(caaSrv.URL, "t", nil, onSwitches), nil, filepath.Join(dir, "artwork"))
 	return e, store
 }
 
@@ -1543,7 +1543,7 @@ func TestEnsureArtworkCachedCountsAnySupportedTier(t *testing.T) {
 		w.Write([]byte{0xFF, 0xD8, 0xFF})
 	}))
 	defer caaSrv.Close()
-	e := NewEnricher(nil, nil, NewCoverArtClient(caaSrv.URL, "t", nil), nil, artDir)
+	e := NewEnricher(nil, nil, NewCoverArtClient(caaSrv.URL, "t", nil, onSwitches), nil, artDir)
 	e.CAAMinInterval = 0
 
 	cached, err := e.ensureArtworkCached(context.Background(), mbid, "", "A", "B", e.coverSize())

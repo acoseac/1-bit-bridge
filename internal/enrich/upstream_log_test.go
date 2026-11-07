@@ -81,8 +81,8 @@ func newLogTestRig(t *testing.T, mb, caa *httptest.Server, mbClient, caaClient *
 	}
 	t.Cleanup(func() { store.Close() })
 	e := NewEnricher(store,
-		NewMusicBrainzClient(mb.URL, "upstream-log-test", mbClient),
-		NewCoverArtClient(caa.URL, "upstream-log-test", caaClient),
+		NewMusicBrainzClient(mb.URL, "upstream-log-test", mbClient, onSwitches),
+		NewCoverArtClient(caa.URL, "upstream-log-test", caaClient, onSwitches),
 		nil, filepath.Join(dir, "art"))
 	tuneForTest(e)
 	return logTestRig{store: store, e: e}
@@ -218,7 +218,7 @@ func TestARunOfTransientStatusesWarnsOnce(t *testing.T) {
 	}))
 	defer dz.Close()
 	rig := newLogTestRig(t, mb, caa, nil, nil)
-	rig.e.deezer = NewDeezerClient(dz.URL, "upstream-log-test", dz.Client())
+	rig.e.deezer = NewDeezerClient(dz.URL, "upstream-log-test", dz.Client(), onDeezerSwitches)
 	rig.e.watchUpstreamAnswers()
 
 	rec := loggingtest.Record(t)
@@ -329,7 +329,7 @@ func TestAtlasBusyWarnsOnceThenAnswers(t *testing.T) {
 	}))
 	defer srv.Close()
 	dir := t.TempDir()
-	f := NewAtlasPremiumFetcher(fakeCred{token: "tok", base: srv.URL, ok: true}, "ua", nil, dir)
+	f := NewAtlasPremiumFetcher(fakeCred{token: "tok", base: srv.URL, ok: true}, "ua", nil, dir, onSwitches)
 	rec := loggingtest.Record(t)
 	ctx := context.Background()
 	for i := 0; i < 2; i++ {

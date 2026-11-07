@@ -259,6 +259,8 @@ func TestARefusalOfAKeyWrittenTwiceNamesTheSecondKeysOwnLine(t *testing.T) {
 // TestNoEnvironmentOverrideWarningCarriesAValue: a BRIDGE_* variable whose
 // value does not read as its setting is ignored, and the warning names the
 // variable alone: the value, and strconv's error, which repeats it, stay out.
+// The two opt-outs take such a value as off instead, under a warning of their
+// own that names the variable alone too (unreadableSwitchEnv, backlog B617).
 func TestNoEnvironmentOverrideWarningCarriesAValue(t *testing.T) {
 	for _, b := range envBindings() {
 		if b.kind == reflect.String || b.kind == reflect.Slice {
@@ -277,6 +279,9 @@ func TestNoEnvironmentOverrideWarningCarriesAValue(t *testing.T) {
 			want := "ignoring unparseable integer env var"
 			if b.kind == reflect.Bool || b.elemKind == reflect.Bool {
 				want = "ignoring unparseable boolean env var"
+			}
+			if switchEnvPaths[b.YAMLPath] {
+				want = unreadableSwitchEnv
 			}
 			var named bool
 			for _, l := range rec.Lines(want) {

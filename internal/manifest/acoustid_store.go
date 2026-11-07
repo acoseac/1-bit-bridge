@@ -6,7 +6,16 @@ import (
 	"fmt"
 )
 
-// ResetEnrichedByPaths re-queues the given tracks for enrichment.
+// AcoustIDMatch is one fingerprint verdict the sweeper accepted: the track,
+// and the AcoustID cluster accepted for it.
+type AcoustIDMatch struct {
+	Path     string
+	AcoustID string
+}
+
+// ResetEnrichedByPaths re-queues the given tracks for enrichment, and records
+// beside each the AcoustID cluster accepted for it (acoustid_match), in one
+// transaction.
 //
 // # A new sanctioned enriched_at writer
 //
@@ -29,68 +38,119 @@ import (
 // iOS device. That is the PR #369 wipe-loop class on a timer. The scoped form
 // keeps the delta proportional to what actually changed.
 //
+// # Why the provenance travels with the re-queue
+//
+// The match's provenance is what the sweeper's candidate scan reads as
+// settled once the row has its artist MBID (AcoustIDMatchedPaths), and a row
+// can reach the sweeper with a text-derived one, since a candidate needs only
+// one of its two MBIDs missing. Written apart, at the acceptance, a re-queue
+// that a switch-off or a shutdown then cancelled, or one that failed, left the
+// provenance with no re-queue behind it: the row was never offered again,
+// and the match was never applied (backlog B617). One transaction leaves
+// both or neither, so a match whose re-queue did not commit is no
+// acceptance, and the next sweep offers its file again.
+//
 // # Contract
 //
-//   - resets enriched_at ONLY; indexed_at is untouched here, and is advanced
-//     later by MarkEnriched when the re-enrichment commits real data
-//   - only rows already marked enriched are touched, so it cannot disturb work
-//     the enricher has queued
-//   - the path set travels as ONE bound JSON array consumed via json_each: a
-//     single static statement, no placeholder construction (no go:S2077
-//     surface) and no bind-variable-ceiling chunking
+//   - resets enriched_at and writes acoustid_match, and nothing else;
+//     indexed_at is untouched here, and is advanced later by MarkEnriched
+//     when the re-enrichment commits real data
+//   - only rows already marked enriched are re-queued, so it cannot disturb
+//     work the enricher has queued; a row already queued still gets its
+//     provenance, since the enricher will consume its verdict
+//   - the set travels as ONE bound JSON array consumed via json_each: static
+//     statements, no placeholder construction (no go:S2077 surface) and no
+//     bind-variable-ceiling chunking
+//   - it answers how many rows it re-queued
 //
 // Holds s.mu, like every other writer.
-func (s *Store) ResetEnrichedByPaths(ctx context.Context, paths []string) (int64, error) {
-	if len(paths) == 0 {
+func (s *Store) ResetEnrichedByPaths(ctx context.Context, matches []AcoustIDMatch) (int64, error) {
+	if len(matches) == 0 {
 		return 0, nil
 	}
-	blob, err := json.Marshal(paths)
+	type match struct {
+		Path     string `json:"path"`
+		AcoustID string `json:"acoustid"`
+	}
+	set := make([]match, len(matches))
+	for i, m := range matches {
+		set[i] = match(m)
+	}
+	raw, err := json.Marshal(set)
 	if err != nil {
 		return 0, err
 	}
+	blob := string(raw)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	res, err := s.db.ExecContext(ctx, `
-		UPDATE tracks SET enriched_at = 0
-		 WHERE enriched_at > 0
-		   AND path IN (SELECT value FROM json_each(?))
-	`, string(blob))
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
 	}
-	return res.RowsAffected()
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE tracks
+		   SET acoustid_match = (SELECT json_extract(m.value, '$.acoustid')
+		                           FROM json_each(?) AS m
+		                          WHERE json_extract(m.value, '$.path') = tracks.path)
+		 WHERE path IN (SELECT json_extract(value, '$.path') FROM json_each(?)
+		                 WHERE json_extract(value, '$.acoustid') != '')
+	`, blob, blob); err != nil {
+		return 0, err
+	}
+	res, err := tx.ExecContext(ctx, `
+		UPDATE tracks SET enriched_at = 0
+		 WHERE enriched_at > 0
+		   AND path IN (SELECT json_extract(value, '$.path') FROM json_each(?))
+	`, blob)
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	if s.resetEnrichedBeforeCommit != nil {
+		if err := s.resetEnrichedBeforeCommit(ctx); err != nil {
+			return 0, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	committed = true
+	return n, nil
 }
 
-// SetAcoustIDMatch records which AcoustID cluster the sweeper ACCEPTED for a
-// track, as provenance for the fingerprint fallback.
+// The acoustid_match column records which AcoustID cluster the sweeper
+// ACCEPTED for a track, as provenance for the fingerprint fallback, and
+// ResetEnrichedByPaths writes it with the re-queue that hands the verdict to
+// the enricher.
 //
-// Read the verb precisely, because the obvious undo depends on it. This is
-// written when the gate accepts, which is before the enricher has applied
-// anything — and the enricher can still refuse at apply time, where the
-// local-tag veto runs against the row's own tags. A row can also reach the
-// sweeper already holding a text-derived ArtistMBID, since a candidate only
-// needs ONE of the two MBIDs missing. So presence means "a fingerprint answer
-// was accepted for this path", NOT "every MBID on this row came from audio".
-// An undo may therefore use this column to SELECT rows, but must not blindly
-// clear their MBIDs — some of those are text-derived and predate the match.
+// Read the verb precisely, because the obvious undo depends on it. It is
+// written when the accepted match is re-queued, which is before the enricher
+// has applied anything — and the enricher can still refuse at apply time,
+// where the local-tag veto runs against the row's own tags. A row can also
+// reach the sweeper already holding a text-derived ArtistMBID, since a
+// candidate only needs ONE of the two MBIDs missing. So presence means "a
+// fingerprint answer was accepted for this path", NOT "every MBID on this row
+// came from audio". An undo may therefore use this column to SELECT rows, but
+// must not blindly clear their MBIDs — some of those are text-derived and
+// predate the match.
 //
 // Column-only: it never reaches tags_json and never reaches the wire, so it
 // costs no ProtocolVersion bump and no iOS mirror. See the v28 migration for
 // why the feature needs provenance at all — briefly, a fingerprint match
 // carries a residual error rate that text matching does not, and without this
 // an MBID written from audio is indistinguishable from one written from tags
-// forever.
-//
-// Deliberately does NOT touch enriched_at or indexed_at. It is a record of how
-// a row was resolved, not a change to what the row says, and the enrichment
-// write that accompanies it already advances indexed_at on its own.
-func (s *Store) SetAcoustIDMatch(ctx context.Context, path, acoustID string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	_, err := s.db.ExecContext(ctx,
-		`UPDATE tracks SET acoustid_match = ? WHERE path = ?`, acoustID, path)
-	return err
-}
+// forever. Writing it touches neither enriched_at's queue beyond the re-queue
+// nor indexed_at: it is a record of how a row was resolved, not a change to
+// what the row says.
 
 // AcoustIDMatch returns the recorded provenance for a track, or "" when the
 // row was not resolved by fingerprinting. Read-only, so no mutex — WAL handles
@@ -110,8 +170,9 @@ func (s *Store) AcoustIDMatch(ctx context.Context, path string) (string, error) 
 // cannot carry it; the sweep fetches this set once up front instead (the
 // routedPathSet shape from the scanner's missing passes).
 //
-// Membership still means exactly what SetAcoustIDMatch's docblock says: a
-// fingerprint answer was ACCEPTED for this path, not that it was applied. The
+// Membership still means exactly what the column's docblock (above
+// AcoustIDMatch) says: a fingerprint answer was ACCEPTED for this path, and
+// re-queued with it, not that it was applied. The
 // apply-time veto can refuse the verdict, and a restart can lose the re-queue
 // before the enricher consumes it. Whether the answer actually LANDED is
 // therefore not this column's to say — the caller combines membership with row
@@ -269,9 +330,10 @@ type TagVetoRecord struct {
 // matching size+mtime pair. Comparing both inputs cannot disagree with the veto
 // it describes.
 //
-// Deliberately touches NEITHER enriched_at NOR indexed_at, for the reason
-// SetAcoustIDMatch gives: this records how a row was judged, not a change to
-// what it says, and a bump would push a delta for columns no client receives.
+// Deliberately touches NEITHER enriched_at NOR indexed_at, for the reason the
+// provenance column's docblock gives: this records how a row was judged, not
+// a change to what it says, and a bump would push a delta for columns no
+// client receives.
 func (s *Store) SetAcoustIDTagVeto(ctx context.Context, path string, size, mtimeNS int64, artist string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

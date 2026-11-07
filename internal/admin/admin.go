@@ -1197,9 +1197,9 @@ type AutoOptimizeSweepCounts struct {
 
 // FingerprintJobState is the acoustic-fingerprint card's snapshot on
 // /api/jobs. Enabled is the config flag; Active the runtime verdict
-// (flag AND fpcalc AND AcoustID key, read live); DegradedReason the
-// bounded key explaining an Enabled-but-inactive state
-// ("fpcalc_missing" / "no_api_key"). Lifecycle fields follow
+// (flag AND enrich.enabled AND fpcalc AND AcoustID key, read live);
+// DegradedReason the bounded key explaining an Enabled-but-inactive state
+// ("enrichment_off" / "fpcalc_missing" / "no_api_key"). Lifecycle fields follow
 // AnalysisSweepState's shape and rules (pointer timestamps, no ticking
 // countdowns).
 type FingerprintJobState struct {

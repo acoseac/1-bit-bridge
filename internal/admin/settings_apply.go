@@ -208,6 +208,8 @@ func fingerprintDegradedMessage(reason string) string {
 		return "saved, but fpcalc is not installed on this bridge, so no fingerprinting will run"
 	case "no_api_key":
 		return "saved, but no AcoustID API key is configured, so no fingerprinting will run"
+	case "enrichment_off":
+		return "saved, but enrichment is off (enrich.enabled), so no fingerprinting will run"
 	default:
 		return "saved, but the fingerprint toolchain is unavailable, so no fingerprinting will run"
 	}

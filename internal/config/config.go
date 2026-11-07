@@ -28,6 +28,7 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/baseurl"
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
+	"github.com/acoseac/1-bit-bridge/internal/hostname"
 	"github.com/acoseac/1-bit-bridge/internal/logging"
 )
 
@@ -464,14 +465,32 @@ func (u UPnPUpstreamConfig) Validate() error {
 	return nil
 }
 
-// EnrichConfig overrides the upstream sources the background enricher
-// queries. Empty fields fall back to the public services (MusicBrainz /
-// Cover Art Archive). Point them at a self-hosted 1-bit-atlas mirror to
-// keep enrichment on your own network: set musicbrainzBaseURL to
-// "https://<atlas-host>/ws/2" and coverArtBaseURL to "https://<atlas-host>"
-// — atlas implements exactly the release/artist search + lookup and the
-// /release/{mbid}/front-{250,500,1200} cover endpoints the enricher uses,
-// so no other change is needed. Env: BRIDGE_MUSICBRAINZ_BASE_URL /
+// EnrichConfig governs the background enricher: whether it runs, and where
+// it looks. It sends the artist and album names a library's files carry to
+// MusicBrainz, the release IDs it finds to the Cover Art Archive, and artist
+// names to Deezer for portraits.
+//
+// enabled is the off switch for all of it (backlog B617): false, and the
+// enricher asks none of the three, nor a mirror set below, nor Atlas for a
+// premium cover, the Atlas harvest's premium covers included, and acoustic
+// fingerprinting stops with it, since its answers feed nothing else.
+// deezerEnabled stops the Deezer portrait lookups alone, the one lookup a
+// mirror cannot redirect. Both are on when absent, both apply while the
+// bridge runs, and only an explicit false is written: the console's save of
+// on writes no key. What was fetched before stays and is served: the IDs in
+// the rows, the covers and portraits in the artwork cache. The rest of the
+// Atlas harvest (which still submits the library's artist and release IDs)
+// and its lyrics tier, the update check and certificate renewal are separate,
+// and these stop none of them.
+//
+// The base URLs point MusicBrainz and the Cover Art Archive at a self-hosted
+// 1-bit-atlas mirror; empty fields fall back to the public services. Set
+// musicbrainzBaseURL to "https://<atlas-host>/ws/2" and coverArtBaseURL to
+// "https://<atlas-host>": atlas implements exactly the release/artist search
+// + lookup and the /release/{mbid}/front-{250,500,1200} cover endpoints the
+// enricher uses, so no other change is needed. A mirror keeps those two
+// lookups on your own network; the Deezer portrait lookups still go to
+// Deezer unless deezerEnabled is false. Env: BRIDGE_MUSICBRAINZ_BASE_URL /
 // BRIDGE_COVERART_BASE_URL.
 //
 // A base URL may carry a mirror's credential, `https://user:password@host/ws/2`
@@ -480,6 +499,16 @@ func (u UPnPUpstreamConfig) Validate() error {
 // no log line, error or skip detail names it (backlog B69). Only the settings
 // console shows it, as the value it edits.
 type EnrichConfig struct {
+	// Enabled turns the enricher on or off. Nil (the default) and true are
+	// on; only an explicit false stops it. A pointer so an absent key is
+	// told apart from an explicit false, the shape SmartPlaylistsConfig.Enabled
+	// has. Read through EffectiveEnabled, never directly.
+	Enabled *bool `yaml:"enabled,omitempty"`
+	// DeezerEnabled turns the Deezer artist-portrait lookups on or off, the
+	// same way. Off, a track enriched meanwhile is stamped with no portrait,
+	// and keeps none once Deezer is on again until "Retry missing" queues
+	// it. Read through EffectiveDeezerEnabled, never directly.
+	DeezerEnabled *bool `yaml:"deezerEnabled,omitempty"`
 	// MusicBrainzBaseURL overrides the MusicBrainz ws/2 API root.
 	// Default (empty): https://musicbrainz.org/ws/2.
 	MusicBrainzBaseURL string `yaml:"musicbrainzBaseURL,omitempty"`
@@ -506,6 +535,17 @@ func (e EnrichConfig) EffectiveCoverSize() int {
 		return 1200
 	}
 	return e.CoverSize
+}
+
+// EffectiveEnabled resolves Enabled's nil-means-on default: whether the
+// enricher runs. Every reader goes through it, since a bare nil check would
+// read a config that says nothing as off.
+func (e EnrichConfig) EffectiveEnabled() bool { return e.Enabled == nil || *e.Enabled }
+
+// EffectiveDeezerEnabled resolves DeezerEnabled's nil-means-on default:
+// whether the enricher asks Deezer for artist portraits.
+func (e EnrichConfig) EffectiveDeezerEnabled() bool {
+	return e.DeezerEnabled == nil || *e.DeezerEnabled
 }
 
 // LibraryConfig governs operations that MUTATE library content.
@@ -1552,7 +1592,9 @@ type AutocertConfig struct {
 	//
 	// A host name alone. Normalize serves any other value as the host it
 	// names (AutocertHost), and one that names none as
-	// InvalidAutocertDomain, with a warning either way (backlog B66).
+	// InvalidAutocertDomain, with a warning either way (backlog B66); and a
+	// host that is not ASCII in its IDNA ASCII form, or as
+	// InvalidAutocertDomain where it has none (backlog B744).
 	//
 	// Consumed by:
 	//   - Admin Origin allowlist (PR 2)
@@ -1617,6 +1659,15 @@ const (
 	autocertDomainNamesNoHost = "autocert.domain names no host that can be read; served as " +
 		InvalidAutocertDomain + ", a name that resolves nowhere, until it is set to the host name " +
 		"clients dial; a save stores it that way"
+	// autocertDomainHasNoIDNAForm and autocertDomainServedInIDNAForm are what
+	// Normalize logs for a host that is not ASCII (backlog B744): one with
+	// no IDNA ASCII form, served as InvalidAutocertDomain, and, below Warn,
+	// one served in that form.
+	autocertDomainHasNoIDNAForm = "autocert.domain names a host that is not ASCII and has no IDNA ASCII form, " +
+		"which no certificate can carry; served as " + InvalidAutocertDomain + ", a name that resolves nowhere, " +
+		"until it is set to the host name clients dial; a save stores it that way"
+	autocertDomainServedInIDNAForm = "autocert.domain is served in its IDNA ASCII form, the form a certificate " +
+		"carries; a save stores it that way"
 )
 
 // AutocertHost returns the host name an autocert.domain value names, or ""
@@ -3273,15 +3324,20 @@ func CheckLibraryName(name string) error {
 
 // RepairLibraryName returns name as Normalize stores and serves it, but for
 // the default: valid UTF-8, with U+FFFD for each run of bytes that are not;
-// trimmed (TrimLibraryName); and, when longer than MaxLibraryNameLength runes,
-// cut to that many and trimmed again, since a cut can end on a space. "" is a
-// name that is blank once trimmed, which Normalize serves as
-// DefaultLibraryName and `bridge init` treats as no name at all.
+// trimmed (TrimLibraryName); without its control characters
+// (WithoutControlCharacters, backlog B744: a hand edit, BRIDGE_LIBRARY_NAME or
+// a prior installation's name could hold them) and trimmed again; and, when
+// longer than MaxLibraryNameLength runes, cut to that many and trimmed again,
+// since a cut can end on a space. "" is a name that is blank once trimmed,
+// which Normalize serves as DefaultLibraryName and `bridge init` treats as no
+// name at all.
 //
 // What CheckLibraryName refuses a typed name for, this repairs in a name that
 // is already stored, so what it returns always passes CheckLibraryName.
 func RepairLibraryName(name string) string {
 	name = TrimLibraryName(strings.ToValidUTF8(name, "\ufffd"))
+	// Valid UTF-8 now, so the strip reads runes and replaces nothing.
+	name = TrimLibraryName(WithoutControlCharacters(name))
 	runes := 0
 	for i := range name {
 		if runes == MaxLibraryNameLength {
@@ -3292,13 +3348,66 @@ func RepairLibraryName(name string) string {
 	return name
 }
 
+// WithoutControlCharacters is s without its control characters: the runes
+// U+0000 to U+001F, U+007F and U+0080 to U+009F (backlog B744). They are read
+// as runes, after decoding, never as bytes: "Ā" is the bytes C4 80 and "š"
+// C5 A1, whose second bytes are the numbers of C1 controls and are none. A
+// byte that is not UTF-8 decodes as U+FFFD (strings.Map), which is kept, so a
+// caller that refuses such a name asks before it strips
+// (CleanTypedLibraryName): stripped first, the name would be taken.
+//
+// The one definition every entry of the library name strips by (init's
+// --name and its prompt, the console's settings save, RepairLibraryName for
+// what loads, firstInstallName for the host's name) and the Bonjour instance
+// too (mdns's sanitizeInstance).
+func WithoutControlCharacters(s string) string {
+	return strings.Map(func(r rune) rune {
+		if isControlRune(r) {
+			return -1
+		}
+		return r
+	}, s)
+}
+
+// isControlRune reports whether r is one of the runes WithoutControlCharacters
+// removes: C0, DEL and C1.
+func isControlRune(r rune) bool {
+	return r <= 0x1f || r == 0x7f || (r >= 0x80 && r <= 0x9f)
+}
+
+// CleanTypedLibraryName returns a library name the operator typed (init's
+// --name and its prompt, the console's settings save) as it is stored, or why
+// it is refused (backlog B744): trimmed (TrimLibraryName); refused when it is
+// not UTF-8, first, since the strip maps runes and would take those bytes as
+// U+FFFD; without its control characters (WithoutControlCharacters) and
+// trimmed again; and refused when it is past MaxLibraryNameLength runes
+// (CheckLibraryName). "" is a name blank once its controls are gone, which
+// each entry answers by its own blank policy: init takes it for no name, the
+// settings save refuses it. What it returns, RepairLibraryName returns
+// unchanged, so a typed name is served after a restart as it was live.
+func CleanTypedLibraryName(name string) (string, error) {
+	name = TrimLibraryName(name)
+	if !utf8.ValidString(name) {
+		return "", CheckLibraryName(name)
+	}
+	name = TrimLibraryName(WithoutControlCharacters(name))
+	if name == "" {
+		return "", nil
+	}
+	if err := CheckLibraryName(name); err != nil {
+		return "", err
+	}
+	return name, nil
+}
+
 // Normalize rewrites the fields whose canonical on-disk form differs from
 // what an operator might reasonably type: the two enrich base URLs (trim
 // whitespace + trailing slash), the autocert domain (the host it names,
 // AutocertHost, in public mode and wherever autocert is enabled),
 // customEndpoints (prune-and-warn to the entries that survive
 // ValidateCustomEndpoints, each without a user name, password, path, query
-// or fragment it carried), and the library name (RepairLibraryName, and
+// or fragment it carried, and a host that is not ASCII in its IDNA ASCII
+// form, backlog B744), and the library name (RepairLibraryName, and
 // DefaultLibraryName for a blank one). Idempotent — running it twice
 // produces the same Config as running it once.
 //
@@ -3384,21 +3493,39 @@ func (c *Config) normalize(warn bool) error {
 	// config with autocert off never reads the field, so its value is left
 	// as written and not warned about. A typo'd deployment.mode reports
 	// non-public here and Validate surfaces the mode error separately.
+	//
+	// And a host that is not ASCII is served in its IDNA ASCII form, the form
+	// a certificate carries (hostname.Configured, backlog B744): as written,
+	// every mint refused it, the ACME manager's included. One with no such
+	// form is served as InvalidAutocertDomain, warned about as a value that
+	// names no host is. An ASCII host is kept as written.
 	if c.IsPublic() || c.Autocert.Enabled {
 		d := strings.TrimSpace(c.Autocert.Domain)
 		if d != "" {
-			switch host := AutocertHost(d); {
+			host := AutocertHost(d)
+			ascii, hasForm := hostname.Configured(host)
+			switch {
 			case host == "":
 				if warn {
 					validateLogger.Warn(autocertDomainNamesNoHost, "field", "autocert.domain")
 				}
 				d = InvalidAutocertDomain
-			case host != d:
+			case !hasForm:
 				if warn {
-					validateLogger.Warn(autocertDomainServedAsItsHost,
+					validateLogger.Warn(autocertDomainHasNoIDNAForm,
 						"field", urlFieldForLog("autocert.domain", "https://"+hostForURL(host)))
 				}
-				d = host
+				d = InvalidAutocertDomain
+			default:
+				if host != d && warn {
+					validateLogger.Warn(autocertDomainServedAsItsHost,
+						"field", urlFieldForLog("autocert.domain", "https://"+hostForURL(ascii)))
+				}
+				if ascii != host && warn {
+					validateLogger.Info(autocertDomainServedInIDNAForm,
+						"field", urlFieldForLog("autocert.domain", "https://"+hostForURL(ascii)))
+				}
+				d = ascii
 			}
 		}
 		c.Autocert.Domain = d
@@ -3428,11 +3555,18 @@ func (c *Config) normalize(warn bool) error {
 	// here, refusing would stop a bridge from starting over a display name,
 	// so the name is cut or its bytes replaced, and the log says so, since
 	// the operator did not choose the result.
+	//
+	// And without its control characters, since 2026-11-07 (backlog B744):
+	// the runes WithoutControlCharacters removes, which a typed name loses
+	// too (CleanTypedLibraryName), so a name served live is the name served
+	// after a restart.
 	name := RepairLibraryName(c.LibraryName)
 	if warn && name != TrimLibraryName(c.LibraryName) {
-		validateLogger.Warn("libraryName is longer than a pairing code carries, or not UTF-8; serving it repaired",
+		validateLogger.Warn("libraryName is longer than a pairing code carries, not UTF-8, or holds control "+
+			"characters; serving it repaired",
 			"served", name, "runes", utf8.RuneCountInString(c.LibraryName),
-			"validUTF8", utf8.ValidString(c.LibraryName), "max", MaxLibraryNameLength)
+			"validUTF8", utf8.ValidString(c.LibraryName),
+			"controls", strings.ContainsFunc(c.LibraryName, isControlRune), "max", MaxLibraryNameLength)
 	}
 	if name == "" {
 		name = DefaultLibraryName
@@ -3463,6 +3597,10 @@ func (c *Config) normalize(warn bool) error {
 		}
 		if errors.Is(w, errCustomEndpointCredentials) {
 			validateLogger.Warn(customEndpointPublishedWithoutCredentials, "err", w)
+			continue
+		}
+		if errors.Is(w, errCustomEndpointIDNAForm) {
+			validateLogger.Info(customEndpointPublishedInIDNAForm, "err", w)
 			continue
 		}
 		validateLogger.Warn("dropped invalid custom endpoint", "err", w)
@@ -4040,6 +4178,23 @@ var errCustomEndpointCredentials = errors.New("carries a user name, password, pa
 const customEndpointPublishedWithoutCredentials = "custom endpoint published without its user name, " +
 	"password, path, query or fragment; a save stores it that way"
 
+// errCustomEndpointNoIDNAForm is what a custom endpoint whose host is not
+// ASCII and has no IDNA ASCII form (hostname.Configured) is dropped for where
+// it loads, and refused for where it is typed (backlog B744).
+var errCustomEndpointNoIDNAForm = errors.New("its host is not ASCII and has no IDNA ASCII form, " +
+	"so no certificate can carry it (x509 takes an ASCII DNS name alone)")
+
+// errCustomEndpointIDNAForm marks a custom endpoint ValidateCustomEndpoints
+// kept with its host in its IDNA ASCII form (backlog B744), which Normalize
+// logs under customEndpointPublishedInIDNAForm.
+var errCustomEndpointIDNAForm = errors.New("its host is published in its IDNA ASCII form")
+
+// customEndpointPublishedInIDNAForm is what Normalize logs, once per entry
+// and below Warn, for a custom endpoint whose host it publishes in its IDNA
+// ASCII form: nothing was wrong with the name, and nothing was dropped.
+const customEndpointPublishedInIDNAForm = "custom endpoint published with its host in its IDNA ASCII form, " +
+	"the form a certificate carries; a save stores it that way"
+
 // HasCredentialParts reports whether raw parses as a URL with a part that
 // can carry a credential: a user name or a password (an empty one included,
 // `https://@host`), a path other than the root (backlog B66), a query (`?`,
@@ -4092,14 +4247,25 @@ func withoutCredentialParts(u *url.URL) *url.URL {
 // without those parts (ValidateCustomEndpoints, in Normalize): refusing it
 // would stop a bridge that started before. Storing the repaired entry for a
 // typed one would store a URL nobody typed, which is why the typed list is
-// refused (the library name's rule, #1042 / #1046). Entries that are invalid
-// for another reason are left to the prune, as they always were.
+// refused (the library name's rule, #1042 / #1046). So is an entry whose host
+// is not ASCII and has no IDNA ASCII form (backlog B744): the prune would
+// drop it. One whose host has a form is taken, and Normalize stores that
+// form, the one a certificate carries, as it does for a loaded entry. Entries
+// that are invalid for another reason are left to the prune, as they always
+// were.
 func CheckCustomEndpoints(in []string) error {
 	for i, raw := range in {
 		raw = strings.TrimSpace(raw)
-		if raw != "" && HasCredentialParts(raw) {
+		if raw == "" {
+			continue
+		}
+		if HasCredentialParts(raw) {
 			return fmt.Errorf("%s: %w; write it without them",
 				urlFieldForLog(fmt.Sprintf("customEndpoints[%d]", i), raw), errCustomEndpointCredentials)
+		}
+		if typedHostHasNoIDNAForm(raw) {
+			return fmt.Errorf("%s: %w; write a host name a certificate can carry",
+				urlFieldForLog(fmt.Sprintf("customEndpoints[%d]", i), raw), errCustomEndpointNoIDNAForm)
 		}
 	}
 	return nil
@@ -4167,6 +4333,23 @@ func ValidateCustomEndpoints(in []string) (kept []string, warnings []error) {
 			warnings = append(warnings, fmt.Errorf("%s: missing host", entry(i, raw)))
 			continue
 		}
+		// A host that is not ASCII is published in its IDNA ASCII form,
+		// the form a certificate carries (hostname.Configured, backlog
+		// B744): kept as written, it reached the want-set, and every mint
+		// refused the config. One with no such form is dropped, as any
+		// entry the bridge cannot publish is. An ASCII host is kept as
+		// written.
+		converted := false
+		if host := u.Hostname(); !isASCII(host) {
+			ascii, ok := hostname.Configured(host)
+			if !ok {
+				warnings = append(warnings, fmt.Errorf("%s: %w", entry(i, raw), errCustomEndpointNoIDNAForm))
+				continue
+			}
+			u = withHost(u, ascii)
+			raw = u.String()
+			converted = true
+		}
 		if hostLen := len(u.Hostname()); hostLen > maxCustomEndpointHostLen {
 			warnings = append(warnings, fmt.Errorf("customEndpoints[%d]: hostname is %d characters, exceeds %d-character limit", i, hostLen, maxCustomEndpointHostLen))
 			continue
@@ -4201,9 +4384,44 @@ func ValidateCustomEndpoints(in []string) (kept []string, warnings []error) {
 		if strip {
 			warnings = append(warnings, fmt.Errorf("%s: %w", entry(i, raw), errCustomEndpointCredentials))
 		}
+		if converted {
+			warnings = append(warnings, fmt.Errorf("%s: %w", entry(i, raw), errCustomEndpointIDNAForm))
+		}
 		kept = append(kept, raw)
 	}
 	return kept, warnings
+}
+
+// withHost returns u with its host replaced by host, its port kept.
+func withHost(u *url.URL, host string) *url.URL {
+	out := *u
+	out.Host = host
+	if port := u.Port(); port != "" {
+		out.Host = net.JoinHostPort(host, port)
+	}
+	return &out
+}
+
+// isASCII reports whether s holds no byte outside ASCII.
+func isASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= utf8.RuneSelf {
+			return false
+		}
+	}
+	return true
+}
+
+// typedHostHasNoIDNAForm reports whether raw is a custom endpoint the prune
+// would keep, an https URL with a host, but for its host, which is not ASCII
+// and has no IDNA ASCII form (hostname.Configured).
+func typedHostHasNoIDNAForm(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "https" || u.Hostname() == "" {
+		return false
+	}
+	_, ok := hostname.Configured(u.Hostname())
+	return !ok
 }
 
 // ParseQuietHours parses a "HH:MM-HH:MM" window into start and end

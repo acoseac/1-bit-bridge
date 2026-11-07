@@ -139,11 +139,25 @@ func withoutSoxOnPath(t *testing.T) {
 }
 
 // writeHiResFLACFixture writes a FLAC file the scanner indexes as 96 kHz,
-// 24-bit stereo, five seconds long: a STREAMINFO block and a Vorbis
-// comment, and no audio frames, since nothing here decodes it. Bytes by
-// hand rather than through mewkiz/flac, whose top-level constructors leak
-// the file handle (TestNoLeakyFlacConstructors).
+// 24-bit stereo, five seconds long, by Artist, on Album, titled after its
+// file (writeFLACFixture).
 func writeHiResFLACFixture(t *testing.T, path string) {
+	t.Helper()
+	writeFLACFixture(t, path, "ARTIST=Artist", "ALBUM=Album", "TITLE="+strings.TrimSuffix(filepath.Base(path), ".flac"))
+}
+
+// writeFLACFixture writes a FLAC file the scanner indexes as 96 kHz, 24-bit
+// stereo, five seconds long, with comments as its Vorbis comments: a
+// STREAMINFO block and a Vorbis comment, and no audio frames, since nothing
+// here decodes it. Bytes by hand rather than through mewkiz/flac, whose
+// top-level constructors leak the file handle (TestNoLeakyFlacConstructors).
+func writeFLACFixture(t *testing.T, path string, comments ...string) {
+	t.Helper()
+	writeFLACFixtureLasting(t, path, 5, comments...)
+}
+
+// writeFLACFixtureLasting is writeFLACFixture for a file seconds long.
+func writeFLACFixtureLasting(t *testing.T, path string, seconds int, comments ...string) {
 	t.Helper()
 	const rate, bits, channels = 96000, 24, 2
 	var buf bytes.Buffer
@@ -156,7 +170,7 @@ func writeHiResFLACFixture(t *testing.T, path string) {
 	binary.BigEndian.PutUint16(si[2:4], 4096) // max block size
 	// Bytes 4-9, the frame sizes, stay zero ("unknown"). Then 20 bits of
 	// sample rate, 3 of channels-1, 5 of bits-1 and 36 of total samples.
-	packed := uint64(rate)<<44 | uint64(channels-1)<<41 | uint64(bits-1)<<36 | uint64(rate*5)
+	packed := uint64(rate)<<44 | uint64(channels-1)<<41 | uint64(bits-1)<<36 | uint64(rate)*uint64(seconds)
 	binary.BigEndian.PutUint64(si[10:18], packed)
 	buf.Write(si[:]) // bytes 18-33, the audio MD5, stay zero ("not computed")
 
@@ -167,7 +181,6 @@ func writeHiResFLACFixture(t *testing.T, path string) {
 		vc.WriteString(s)
 	}
 	putString("1-bit-bridge test fixture")
-	comments := []string{"ARTIST=Artist", "ALBUM=Album", "TITLE=" + strings.TrimSuffix(filepath.Base(path), ".flac")}
 	_ = binary.Write(&vc, binary.LittleEndian, uint32(len(comments)))
 	for _, c := range comments {
 		putString(c)

@@ -31,8 +31,10 @@ import (
 // listed and it pairs at the LAN address too (B739's second round: the
 // pairing link dialled https://xn--f1ai0a.local, which nothing answered).
 // With mDNS on, the `.local` endpoint is listed and the pairing link dials
-// it: the responder publishes that name (internal/mdns's tests resolve it
-// through one), here pinned to loopback so it answers nothing on the LAN.
+// it, and the responder serve started answers an address question for that
+// name, asked from an interface both are pinned to (B744's item 4: before,
+// it was pinned to loopback and never asked, and it published the name the
+// system reported, not the one the host-name probe reports).
 // Neither start logs the stale-SAN warning, the second presents the
 // fingerprint the first did, since an existing pair is loaded and never
 // minted again, and bridge doctor's certificate and pairing lines are quiet,
@@ -61,16 +63,35 @@ func TestServeOnAHostWhoseNameIsNotASCII(t *testing.T) {
 				t.Fatalf("bridge init exited %d:\n%s", code, out)
 			}
 			appendToConfig(t, cfgDir, fmt.Sprintf("mdns:\n  enabled: %t\n", tc.mdns))
+			// With mDNS on, the started responder is asked for the `.local`
+			// name /v1/health advertises (B744's item 4), from an interface
+			// both are pinned to, decided before the responder starts
+			// (newMDNSQuerier); where none can be, the responder is pinned
+			// to loopback, as before, and the question is skipped, saying
+			// why.
 			var pick func() (*net.Interface, error)
+			var q *mdnsQuerier
 			if tc.mdns {
-				pick = loopbackPick(t)
+				var why string
+				if q, why = newMDNSQuerier(t); q != nil {
+					pick = q.pick
+				} else {
+					pick = loopbackPick(t)
+					t.Run("the responder answers the name it advertises", func(t *testing.T) { t.Skip(why) })
+				}
 			}
 
 			first := serveInstall(t, cfgDir, pick)
 			first.assertAdvertisesWhatItCertifies(t, tc.local, tc.primary, tc.library)
+			if q != nil {
+				q.assertAnswersFor(t, tc.local)
+			}
 			first.stop()
 			second := serveInstall(t, cfgDir, pick)
 			second.assertAdvertisesWhatItCertifies(t, tc.local, tc.primary, tc.library)
+			if q != nil {
+				q.assertAnswersFor(t, tc.local)
+			}
 			if second.fingerprint != first.fingerprint {
 				t.Errorf("the second start presents %s, the first %s: the pair was minted again",
 					second.fingerprint, first.fingerprint)
