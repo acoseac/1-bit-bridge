@@ -317,6 +317,16 @@ var (
 	makefileCurdirPath       = regexp.MustCompile(`\$[({]CURDIR[)}]/([^)}\s,]+)`)
 )
 
+// TestTheCensusSkipsTheMakefilesTMPDIR: the directory the census skips at the
+// root (makeTestTmpDir) is the one the Makefile's TMPDIR line gives make test
+// and make test-fast, so a rename of either alone fails here rather than send
+// the census back into the suite's temporary files (B740).
+func TestTheCensusSkipsTheMakefilesTMPDIR(t *testing.T) {
+	if got := makefileTestTmpDir(t); got != makeTestTmpDir {
+		t.Fatalf("the Makefile gives make test TMPDIR=$(CURDIR)/%s, and the census skips %s at the root", got, makeTestTmpDir)
+	}
+}
+
 // TestTheCensusSkipsTheMakefilesTMPDIRAtTheRoot: make test and make
 // test-fast give every package's tests the Makefile's TMPDIR, a directory
 // below the root, and the census walking it met another package's temporary
