@@ -3,9 +3,11 @@ package policy
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"testing"
 
 	"github.com/acoseac/1-bit-bridge/internal/alsa"
@@ -112,4 +114,109 @@ func TestTheMyteksCapturedDescriptorsGiveItsDoPPath(t *testing.T) {
 	wantOutcome(t, "DoP at DSD128 on the Mytek at 0 dB", r.plan(dsd128), OutcomeDoP)
 	r.mixer = mytekMixer(t, 64)
 	wantOutcome(t, "DoP at DSD64 on the Mytek off 0 dB", r.plan(dsd64), OutcomeRefused, ReasonGainNotUnity)
+}
+
+// withConfigurations is a unit's descriptors holding descs' configurations in
+// turn, after the first's device descriptor, its bNumConfigurations their
+// count.
+func withConfigurations(descs ...[]byte) []byte {
+	out := slices.Clone(descs[0][:18])
+	out[17] = byte(len(descs))
+	for _, d := range descs {
+		out = append(out, d[18:]...)
+	}
+	return out
+}
+
+// withConfigByte is desc with its configuration descriptor's byte at off set
+// to v: its value at 5, its maximum power at 8.
+func withConfigByte(desc []byte, off int, v byte) []byte {
+	d := slices.Clone(desc)
+	d[18+off] = v
+	return d
+}
+
+// TestByteIdenticalConfigurationsAreOne (B773): configurations that hold the
+// value the unit's interfaces carry are one when they are the same bytes, the
+// whole of each by its wTotalLength, however many and whatever lies between
+// them, and the path is the one configuration's; two that differ anywhere
+// (their bodies under one header, their lengths, their configuration
+// descriptors alone) are refused with the word a duplicate always had, and
+// the gain check refuses DoP as unverifiable; another value's duplicates are
+// not the selected configuration's; and a configuration cut short is refused
+// as before, whichever copy it is.
+func TestByteIdenticalConfigurationsAreOne(t *testing.T) {
+	const (
+		dupOf1   = "the descriptors do not resolve: two configurations hold the value 1"
+		dupOf2   = "the descriptors do not resolve: two configurations hold the value 2"
+		cutShort = "the descriptors do not resolve: a configuration's total length runs past its descriptors"
+		missing  = "the descriptors do not resolve: a configuration descriptor is cut short or missing"
+	)
+	staged := dac2(uac2IT(2, usbStreaming), uac2FU(10, 2, 0x0f, 0, 0), uac2OT(20, speaker, 10))
+	// muted is staged's header over another body: its feature unit a mute
+	// alone, its length the same.
+	muted := dac2(uac2IT(2, usbStreaming), uac2FU(10, 2, 0x03, 0, 0), uac2OT(20, speaker, 10))
+	longer := dac2(uac2IT(2, usbStreaming), uac2FU(10, 2, 0x0f, 0, 0), uac2FU(11, 10, 0x0f, 0, 0), uac2OT(20, speaker, 11))
+	if !bytes.Equal(muted[:27], staged[:27]) || bytes.Equal(muted, staged) {
+		t.Fatal("the muted configuration is not staged's header over another body")
+	}
+	two := withConfigurations(staged, staged)
+	others := withConfigurations(staged, withConfigByte(muted, 5, 2), withConfigByte(longer, 5, 2))
+	path := parse(t, staged)
+	for _, c := range []struct {
+		name  string
+		desc  []byte
+		value int
+		// refused is the parse's refusal, "" where the path resolves.
+		refused string
+	}{
+		{"one configuration", staged, 1, ""},
+		{"two the same", two, 1, ""},
+		{"three the same", withConfigurations(staged, staged, staged), 1, ""},
+		{"two the same, another value's between them", withConfigurations(staged, withConfigByte(muted, 5, 2), staged), 1, ""},
+		{"two under one header, their bodies differing", withConfigurations(muted, staged), 1, dupOf1},
+		{"two under one header, their bodies differing, the other way", withConfigurations(staged, muted), 1, dupOf1},
+		{"two of different lengths", withConfigurations(staged, longer), 1, dupOf1},
+		{"two differing in their configuration descriptors alone", withConfigurations(staged, withConfigByte(staged, 8, 100)), 1, dupOf1},
+		{"three, the third differing", withConfigurations(staged, staged, muted), 1, dupOf1},
+		{"another value's two, differing", others, 1, ""},
+		{"the value of the two differing", others, 2, dupOf2},
+		{"two the same, the second cut short", two[:len(two)-1], 1, cutShort},
+		{"two the same, the first cut short", withConfigurations(staged[:len(staged)-1], staged), 1, missing},
+	} {
+		p, err := ParsePlayback(c.desc, Selection{Config: c.value, Interface: 1, Altset: 1})
+		m := withVolumeUnit(cleanMixer(), volume("PCM Playback Volume", 255), switchControl("PCM Playback Switch"))
+		m.Descriptors, m.Config = c.desc, c.value
+		g := CheckGain(m, []alsa.Altset{s32Altset()}, nil, bcd)
+		if c.refused == "" {
+			if err != nil || !reflect.DeepEqual(p, path) {
+				t.Errorf("%s: %+v, %v; want the one configuration's path %+v", c.name, p, err, path)
+			}
+			wantGain(t, c.name+", its volume at 0 dB", g, "")
+			continue
+		}
+		if !errors.Is(err, errTopology) || err.Error() != c.refused {
+			t.Errorf("%s: %+v, %v; want %q", c.name, p, err, c.refused)
+		}
+		wantGain(t, c.name+", its volume at 0 dB", g, ReasonGainUnverifiable)
+	}
+	// The Mytek's own: its second copy cut short by a byte, and its second
+	// copy's feature unit 4 a mute alone.
+	mytek := mytekDescriptors(t)
+	mytekAt := func(desc []byte) error {
+		_, err := ParsePlayback(desc, Selection{Config: 1, Interface: 2, Altset: 1})
+		return err
+	}
+	if err := mytekAt(mytek[:len(mytek)-1]); !errors.Is(err, errTopology) || err.Error() != cutShort {
+		t.Errorf("the Mytek's, its second copy cut short: %v; want %q", err, cutShort)
+	}
+	changed := slices.Clone(mytek)
+	const unit4Master = 18 + 476 + 106 + 5
+	if changed[unit4Master] != 0x0f {
+		t.Fatalf("byte %d of the Mytek's is %#x, not its second copy's feature unit 4's master controls", unit4Master, changed[unit4Master])
+	}
+	changed[unit4Master] = 0x03
+	if err := mytekAt(changed); !errors.Is(err, errTopology) || err.Error() != dupOf1 {
+		t.Errorf("the Mytek's, its second copy's feature unit a mute alone: %v; want %q", err, dupOf1)
+	}
 }
