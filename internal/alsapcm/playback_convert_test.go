@@ -340,7 +340,8 @@ func (d *dsdRig) firstOcc() engine.OccurrenceID {
 // the DAC given exactly the converter's samples; the set publishes no tuple
 // and no reason, every rate converted. A known DAC whose first use is not
 // acknowledged converts as well; a migrated explicit off refuses every rate,
-// before any open.
+// before any open, and so does a DAC that takes no conversion target, by the
+// policy's word, conversion_not_offered.
 func TestAnUnknownDACPlaysDSDConverted(t *testing.T) {
 	for _, rate := range []int{playbacktest.DSD64, playbacktest.DSD128, playbacktest.DSD256} {
 		t.Run(rateName(rate), func(t *testing.T) {
@@ -400,6 +401,24 @@ func TestAnUnknownDACPlaysDSDConverted(t *testing.T) {
 		}
 		if v := d.k.View(); v.Opens != 0 || d.pcmOpens() != 0 {
 			t.Errorf("an explicit off opened the DAC: %d opens, %d PCM opens asked", v.Opens, d.pcmOpens())
+		}
+	})
+	t.Run("a DAC that takes no conversion target", func(t *testing.T) {
+		d := newConvRig(t)
+		// The 48 kHz family alone: no 176.4, 88.2 or 44.1 kHz PCM.
+		d.box.SetAltsets(card, 0, pcmAltset(format.S243LE, 24, 48000, 96000, 192000))
+		d.files.add("a", track(playbacktest.DSD64, 0.25, noise(1)))
+		ids := d.insert("a")
+		_ = d.eng.Play(bg)
+		s := d.waitEnded()
+		if sk, ok := s.Skipped(ids[0]); !ok || sk.Reason != "conversion_not_offered" {
+			t.Errorf("a DAC with no conversion target: the entry was %+v (skipped %v), want refused as conversion_not_offered", sk, ok)
+		}
+		if v := d.k.View(); v.Opens != 0 || d.pcmOpens() != 0 {
+			t.Errorf("a DAC with no conversion target was opened: %d opens, %d PCM opens asked", v.Opens, d.pcmOpens())
+		}
+		if p := d.be.Policy(); p.PlaysDSD() || p.Reason != "conversion_not_offered" {
+			t.Errorf("a DAC with no conversion target published %+v (%q), want nothing playing, conversion_not_offered", p, p.Reason)
 		}
 	})
 }
@@ -1066,4 +1085,69 @@ func TestAConversionWithdrawnOrRetargetedIsReconciled(t *testing.T) {
 		want, _ := converted(t, a, dsdconv.Plan{RateHz: 88200, ValidBits: 24})
 		same(t, "the converted occurrence's open was given", unpack(t, given[v.OpenAt[1]:], format.S243LE, 24), want)
 	})
+}
+
+// TestAConvertedPausesReopenChecksTheDACItWasConvertedFor (B728 B11; binding
+// note 1a): the PCM sink a converted occurrence plays in checks every node it
+// opens as the DAC the set the occurrence was admitted under was computed
+// for, as a native sink does, the reopen after its pause's release included,
+// whether the sink was opened for it or for the PCM track it joined. Another
+// firmware in the bound unit by then is refused before a frame
+// (wrong_device), the session left paused with its frames; once the DAC the
+// set was computed for is back, the resume reopens and the DAC is given every
+// frame once.
+func TestAConvertedPausesReopenChecksTheDACItWasConvertedFor(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		pcm  []int32
+	}{{"in a sink opened for it", nil}, {"in the sink of the PCM track it joined", pattern(1, 4410, 24)}} {
+		t.Run(c.name, func(t *testing.T) {
+			d := newConvRig(t, func(o *rigOptions) { o.pauseRelease = time.Second })
+			a := track(playbacktest.DSD64, 1, noise(1))
+			d.files.add("a", a)
+			refs := []string{"a"}
+			if c.pcm != nil {
+				d.files.add("p", wav(176400, 24, c.pcm))
+				refs = []string{"p", "a"}
+			}
+			ids := d.insert(refs...)
+			d.play()
+			d.k.Await(t, "the writer to fill the hardware buffer and wait on the DAC", runningAndWaiting)
+			d.k.Play(t, 100*time.Millisecond)
+			d.tick()
+			d.waitSnap("a heard", func(s *engine.Snapshot) bool { tr, ok := s.Track(); return ok && tr.Entry == ids[len(ids)-1] })
+			if err := d.eng.Pause(bg); err != nil {
+				t.Fatalf("pause: %v", err)
+			}
+			d.waitSnap("paused", func(s *engine.Snapshot) bool { return s.State() == engine.Paused })
+			d.releaseDevice()
+			other := playbacktest.DACUnit()
+			other.BCDDevice = "0200"
+			d.box.SetUnit(card, other)
+			before := d.k.View()
+			err := d.eng.Play(bg)
+			var re *playback.ResumeError
+			if !errors.As(err, &re) || re.Code != "wrong_device" {
+				t.Fatalf("a resume onto another firmware: %v; want a ResumeError, wrong_device", err)
+			}
+			if v := d.k.View(); v.Open || v.Opens != before.Opens+1 || v.GivenBytes != before.GivenBytes {
+				t.Fatalf("the refused node: open %v, %d opens (had %d), %d bytes given (had %d); want opened, closed, never written to",
+					v.Open, v.Opens, before.Opens, v.GivenBytes, before.GivenBytes)
+			}
+			if s := d.eng.Snapshot(); s.State() != engine.Paused {
+				t.Fatalf("after the refused reopen: %s, want paused", s.State())
+			}
+			d.box.SetUnit(card, playbacktest.DACUnit())
+			if err := d.eng.Play(bg); err != nil {
+				t.Fatalf("resume on the DAC the set was computed for: %v", err)
+			}
+			d.k.Free()
+			d.waitStopped(engine.ReasonEndOfQueue)
+			want, _ := converted(t, a, convPlan)
+			same(t, "the DAC was given", unpack(t, d.k.Heard(), format.S243LE, 24), cat(c.pcm, want))
+			if v := d.k.View(); v.Opens != 3 {
+				t.Errorf("%d opens; want one, the refused reopen and the resume's", v.Opens)
+			}
+		})
+	}
 }
