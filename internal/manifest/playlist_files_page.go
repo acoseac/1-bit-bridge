@@ -141,8 +141,10 @@ var ErrPlaylistFilesChanged = errors.New("manifest: the playlist files changed s
 // encoder writes for it, three bytes from Go 1.27 (B452). 3: a line naming a
 // track of a format the request's view does not declare is unresolved in
 // that view, and the album-folder rule counts the view's tracks alone
-// (backlog B489).
-const playlistFeedRulesVersion = 3
+// (backlog B489). 4: a line naming a suppressed duplicate is the one served
+// copy of its group the view takes, whatever its own format (servedCopyIn;
+// round 5 of backlog B489).
+const playlistFeedRulesVersion = 4
 
 // playlistFeedVersion is the feed's version in a client's view: a hash of
 // the rules, the encoder's cost of a byte of invalid UTF-8

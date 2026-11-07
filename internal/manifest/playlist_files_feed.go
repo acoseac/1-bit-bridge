@@ -161,12 +161,13 @@ func (f *storedPlaylistFile) place(distinct map[string]struct{}) {
 }
 
 // resolve is f resolved: each placed line that names a served track (or a
-// suppressed one with one served copy) a member, every other line
-// unresolved, and what the entry costs a page (PlaylistFilePageBudget).
-// album reports an album-folder playlist, which no page lists. A track of a
-// format view does not declare is no track of view's (format_view.go).
+// suppressed one whose group has one served copy view takes) a member, every
+// other line unresolved, and what the entry costs a page
+// (PlaylistFilePageBudget). album reports an album-folder playlist, which no
+// page lists. A track of a format view does not declare is no track of
+// view's (format_view.go).
 func (f *storedPlaylistFile) resolve(ctx context.Context, folders *playlistFolderTracks, matches map[string]playlistTrackMatch,
-	served map[string]string, view formatgate.Set) (resolvedPlaylistFile, error) {
+	served map[string][]string, view formatgate.Set) (resolvedPlaylistFile, error) {
 	pf := PlaylistFile{
 		Path: f.path, Name: playlistFileDisplayName(f.path),
 		ModTime: time.Unix(0, f.mtimeNs).UTC(),
@@ -210,7 +211,7 @@ type resolvedPlaylistLines struct {
 }
 
 // add resolves one line and files it as a member or an unresolved line.
-func (r *resolvedPlaylistLines) add(pl placedPlaylistLine, matches map[string]playlistTrackMatch, served map[string]string) {
+func (r *resolvedPlaylistLines) add(pl placedPlaylistLine, matches map[string]playlistTrackMatch, served map[string][]string) {
 	if member, ok := r.member(pl, matches, served); ok {
 		r.members = append(r.members, member)
 		return
@@ -219,24 +220,47 @@ func (r *resolvedPlaylistLines) add(pl placedPlaylistLine, matches map[string]pl
 }
 
 // member is the member a placed line names, if any, and records the line
-// for the album-folder rule.
-func (r *resolvedPlaylistLines) member(pl placedPlaylistLine, matches map[string]playlistTrackMatch, served map[string]string) (string, bool) {
+// for the album-folder rule, which reads the tracks the lines name before
+// the duplicate mapping, a track of a format the view does not declare being
+// none of the view's. A line naming a suppressed duplicate is its group's
+// served copy in the view (servedCopyIn), whatever the suppressed copy's own
+// format.
+func (r *resolvedPlaylistLines) member(pl placedPlaylistLine, matches map[string]playlistTrackMatch, served map[string][]string) (string, bool) {
 	if !pl.ok {
 		return "", false
 	}
 	r.entries++
 	m, hit := matches[pl.path]
-	hit = hit && r.view.Takes(m.path)
-	if hit && m.path == pl.path {
+	inView := hit && r.view.Takes(m.path)
+	if inView && m.path == pl.path {
 		r.named = append(r.named, m.path)
 	} else {
 		r.allExact = false
 	}
 	if hit && m.suppressed {
-		copyPath, ok := served[m.groupID]
-		return copyPath, ok && r.view.Takes(copyPath)
+		return servedCopyIn(served[m.groupID], r.view)
 	}
-	return m.path, hit
+	return m.path, inView
+}
+
+// servedCopyIn is the one served copy of a group that view takes, and false
+// when it takes none or several (a DSD and a PCM edition each keep one, a
+// .wv and an .ape beside a gone ungated copy each keep one): the duplicate
+// mapping is decided among the copies the request can be served (round 5 of
+// backlog B489). A gone FLAC beside a found .wv and .ape is then the .wv to
+// a client that declares WavPack alone, where both copies counted before the
+// view left its line unresolved for every client; and a gone .wv beside a
+// FLAC and an .ape is the FLAC to a client that declares nothing.
+func servedCopyIn(copies []string, view formatgate.Set) (string, bool) {
+	var found string
+	n := 0
+	for _, p := range copies {
+		if view.Takes(p) {
+			found = p
+			n++
+		}
+	}
+	return found, n == 1
 }
 
 // loadPlaylistBatch reads the lines of batch, a run of rows in path order,
@@ -416,10 +440,11 @@ func scanPlaylistMatches(ctx context.Context, stmt *sql.Stmt, arg string, fn fun
 }
 
 // servedCopies maps the duplicate group of each suppressed match to its
-// one served row. A group with no served row, or with several (a DSD and a
-// PCM edition each keep one), maps to nothing, so its line is unresolved:
-// with one served row, that row is every suppressed member's winner.
-func servedCopies(ctx context.Context, tx *sql.Tx, matches map[string]playlistTrackMatch) (map[string]string, error) {
+// served rows, every one of them: which of them a line naming a suppressed
+// member is served as is the request's view's to decide (servedCopyIn), so
+// the rows are read once for every view. A group with no served row maps to
+// nothing.
+func servedCopies(ctx context.Context, tx *sql.Tx, matches map[string]playlistTrackMatch) (map[string][]string, error) {
 	var groups []string
 	listed := map[string]bool{}
 	for _, m := range matches {
@@ -428,7 +453,7 @@ func servedCopies(ctx context.Context, tx *sql.Tx, matches map[string]playlistTr
 			groups = append(groups, m.groupID)
 		}
 	}
-	out := map[string]string{}
+	out := map[string][]string{}
 	if len(groups) == 0 {
 		return out, nil
 	}
@@ -440,27 +465,21 @@ func servedCopies(ctx context.Context, tx *sql.Tx, matches map[string]playlistTr
 		return nil, fmt.Errorf("served copies: %w", err)
 	}
 	defer stmt.Close()
-	count := map[string]int{}
 	for start := 0; start < len(groups); start += playlistLookupChunk {
 		blob, err := json.Marshal(groups[start:min(start+playlistLookupChunk, len(groups))])
 		if err != nil {
 			return nil, err
 		}
-		if err := servedCopiesChunk(ctx, stmt, string(blob), out, count); err != nil {
+		if err := servedCopiesChunk(ctx, stmt, string(blob), out); err != nil {
 			return nil, fmt.Errorf("served copies: %w", err)
-		}
-	}
-	for g, n := range count {
-		if n != 1 {
-			delete(out, g)
 		}
 	}
 	return out, nil
 }
 
-// servedCopiesChunk reads one chunk of groups' served rows into out, and
-// counts them by group.
-func servedCopiesChunk(ctx context.Context, stmt *sql.Stmt, blob string, out map[string]string, count map[string]int) error {
+// servedCopiesChunk reads one chunk of groups' served rows into out, by
+// group.
+func servedCopiesChunk(ctx context.Context, stmt *sql.Stmt, blob string, out map[string][]string) error {
 	rows, err := stmt.QueryContext(ctx, blob)
 	if err != nil {
 		return err
@@ -471,8 +490,7 @@ func servedCopiesChunk(ctx context.Context, stmt *sql.Stmt, blob string, out map
 		if err := rows.Scan(&g, &p); err != nil {
 			return err
 		}
-		count[g]++
-		out[g] = p
+		out[g] = append(out[g], p)
 	}
 	return rows.Err()
 }
