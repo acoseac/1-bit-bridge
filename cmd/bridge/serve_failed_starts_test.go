@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"net/http"
 	"os"
@@ -160,8 +161,9 @@ func TestAStopAfterConfirmationWritesNothing(t *testing.T) {
 // TestAPortAnotherProcessHoldsIsNotAFailedStart: a listener's address that
 // another process holds is the host's trouble, which the backup would meet
 // too, so the start that cannot bind it, the API's or the console's, takes
-// back its count; a bind the host refuses for another reason, an address it
-// does not have, stays counted.
+// back its count; so is an address the host does not have, a static address
+// not up yet after a reboot (B660's second round: four such starts in a row
+// counted, and the fourth put back a backup that met the same refusal).
 func TestAPortAnotherProcessHoldsIsNotAFailedStart(t *testing.T) {
 	t.Run("the API's", func(t *testing.T) {
 		r := newRefusedInstall(t, "")
@@ -193,10 +195,18 @@ func TestAPortAnotherProcessHoldsIsNotAFailedStart(t *testing.T) {
 		}
 		r := newRefusedInstall(t, "")
 		r.writeListeners(t, absent, "127.0.0.1:0")
-		if code, stderr := r.serve(t, serveOpts{}); code != 1 {
-			t.Fatalf("serve over an address the host does not have = %d, want 1; stderr=%s", code, stderr)
+		binaries := watch(t, r.bin, r.bak)
+		// Four starts in a row, as Restart=always makes of an address that
+		// comes up only later: none counts, so the fourth puts nothing back.
+		for start := 1; start <= updater.ProbationFailedStarts+1; start++ {
+			code, stderr, served := serveToItsEnd(t, serveOpts{configPath: r.cfg, binaryPath: r.bin})
+			if served || code != 1 || !strings.Contains(stderr, "listen "+absent) {
+				t.Fatalf("start %d over an address the host does not have = %d (served %v), want 1 at its listen; stderr=%s",
+					start, code, served, stderr)
+			}
+			r.requireCount(t, 0, fmt.Sprintf("after start %d's bind refused for an address the host does not have", start))
 		}
-		r.requireCount(t, 1, "after a bind refused for an address the host does not have")
+		binaries.requireUnchanged(t)
 	})
 }
 

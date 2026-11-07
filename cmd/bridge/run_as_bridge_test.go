@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"slices"
+	"syscall"
 	"testing"
 
 	"github.com/acoseac/1-bit-bridge/internal/updater"
@@ -53,7 +55,11 @@ func runAsBridge() int {
 			return updater.ConfigCheckFailedExit
 		}
 	}
-	return run(context.Background(), os.Args[1:], os.Stdout, os.Stderr)
+	// A stop by SIGINT or SIGTERM, as main gives the bridge one, so that a
+	// serve the test runs as a process drains as the bridge's does.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	return run(ctx, os.Args[1:], os.Stdout, os.Stderr)
 }
 
 // installBridgeCopy puts a copy of the running test binary at path, which

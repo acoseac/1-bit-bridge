@@ -2985,6 +2985,12 @@ type serveOpts struct {
 	// is ever restored over the test binary. Per invocation for
 	// tailscaleCLI's reason.
 	binaryPath string
+	// fileCapability stands in for the read of a file's capabilities (its
+	// security.capability attribute) that a bind refused for a permission
+	// asks of the binary and its backup (backlog B660's second round). Nil
+	// in production, which reads the attribute; a boot test says what each
+	// carries, since only root can set one.
+	fileCapability func(path string) ([]byte, error)
 	// restoreBackup and saveUpdateState stand in for updater.RollbackBinary
 	// and updater.SaveState in the early rollback and its disarm, so a
 	// boot test can make either fail. Nil (the updater's) in production.

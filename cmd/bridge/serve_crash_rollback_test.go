@@ -268,26 +268,18 @@ func TestNoBackupIsPutBackWhereThereIsNone(t *testing.T) {
 	}, "there is no backup to put back", "there is no backup beside the binary to put back")
 }
 
-// TestABackupThatPredatesTheCheckIsPutBack: a backup from before the
-// settings check cannot say whether it loads the settings; the rollback puts
-// it back all the same, warning, since it is the version the install
-// replaced and a refusal of the settings stops it at its load.
-func TestABackupThatPredatesTheCheckIsPutBack(t *testing.T) {
+// TestABackupThatPredatesTheCheckIsNotPutBack: a backup from before the
+// settings check (0.2.2 and older) cannot say whether it loads the settings,
+// and one that does not cannot start after it is put back, with the newer
+// version held back: from 0.2.1 an `output:` block is a key its strict
+// decoder refuses. So it is not put back, and the start records that the
+// backup predates the check (B660's second round; until then it was put back
+// with a warning).
+func TestABackupThatPredatesTheCheckIsNotPutBack(t *testing.T) {
 	r := newRefusedInstall(t, "")
-	for start := 1; start <= updater.ProbationFailedStarts; start++ {
-		r.startThatPanics(t)
-	}
-	t.Setenv(runAsBridgeCheckEnv, "predates")
-	code, stderr, served := serveToItsEnd(t, serveOpts{configPath: r.cfg, binaryPath: r.bin})
-	if served || code != supervision.RestartExitCode {
-		t.Fatalf("the fourth start = %d (served %v), want %d before it served; stderr=%s", code, served, supervision.RestartExitCode, stderr)
-	}
-	if !strings.Contains(stderr, "predates the settings check") {
-		t.Errorf("the rollback did not warn that the backup predates the check; stderr=%s", stderr)
-	}
-	if got := reportedVersion(t, r.bin); !strings.Contains(got, previousVersion) {
-		t.Errorf("the binary reports %q after the rollback, want %s", got, previousVersion)
-	}
+	refusedCrashRollback(t, r, func() { t.Setenv(runAsBridgeCheckEnv, "predates") },
+		"predates the settings check", "the backup predates the settings check")
+	requireBackupThere(t, r)
 }
 
 // TestACrashRollbackNeedsBothLocks: the backup is put back only by the data

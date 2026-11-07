@@ -78531,7 +78531,8 @@ store open, which takes it out of the crash rollback's reach.
   unchecked (the History section lists each file and what the backup does
   with it); none of it stops the backup starting, so none is a refusal.
 - A backup that predates the settings check is put back with a warning,
-  unchecked, as the early rollback does.
+  unchecked, as the early rollback does. (Reversed in the second round: it
+  is refused, below.)
 - A crash before the admission is not counted: the settings check before the
   swap saw the candidate run, and a start refused for its settings has the
   early rollback. That is the boundary.
@@ -78611,7 +78612,8 @@ columns and fails at its index, `user_version` unmoved),
 `TestABackupOfAnotherVersionIsNotPutBack`,
 `TestAnAutomaticInstallOverAStagedVersionCannotRollBackPastIt`,
 `TestNoBackupIsPutBackWhereThereIsNone`,
-`TestABackupThatPredatesTheCheckIsPutBack`, `TestACrashRollbackNeedsBothLocks`
+`TestABackupThatPredatesTheCheckIsNotPutBack` (which required the put-back
+under another name until the second round), `TestACrashRollbackNeedsBothLocks`
 (the data dir's lock failing, a filesystem that keeps none for it, and none
 for the marker's), `TestATransientRefusalAtTheFourthStartRollsBackAtTheFifth`,
 `TestAStartFinishesACrashRollbackStoppedBeforeItsRename`,
@@ -78675,7 +78677,7 @@ as predicted:
 | (c) | serve's stop branch no longer marks the start clean | `TestAStopIsNotAFailedStart` (both: once it serves, while it starts), `TestARestartRequestIsNotAFailedStart` | `TestAPortAnotherProcessHoldsIsNotAFailedStart` |
 | (d) | the take-back reads `code == 0` | `TestAPanicInServeIsAFailedStart` (taken back after a panic), `TestAPortAnotherProcessHoldsIsNotAFailedStart` (the API's, the console's) | `TestAStopIsNotAFailedStart`, `TestAStoreThatWillNotOpenIsAFailedStart` |
 | (e) | `StoreMigratedBy` written only where `DataDirOpenedBy` is empty | `TestARollbackIsRefusedAndReportedOnceAMigrationBegan`, `TestAMigrationThatFailsStillRefusesTheRollback`, `TestAMigrationRecordsThatItBeganThoughTheDataDirIsRecorded` (3 of 8 cases) | `TestACommandsMigrationRefusesTheRollbackToo` (a command's open comes before any admission) |
-| (f) | no `CheckConfig` (the backup taken as loading the settings) | `TestABackupThatRefusesTheSettingsIsNotPutBack` and `TestABackupThatCannotAnswerIsNotPutBack` (exit 75 before serving), `TestABackupThatPredatesTheCheckIsPutBack` (no warning) | `TestThreeFailedStartsRollBackAnInstallThatMigratedNothing` |
+| (f) | no `CheckConfig` (the backup taken as loading the settings) | `TestABackupThatRefusesTheSettingsIsNotPutBack` and `TestABackupThatCannotAnswerIsNotPutBack` (exit 75 before serving), `TestABackupThatPredatesTheCheckIsNotPutBack` (no warning; it required the put-back then) | `TestThreeFailedStartsRollBackAnInstallThatMigratedNothing` |
 | (g) | the bind's check not asked at all (both sites) | `TestAPortAnotherProcessHoldsIsNotAFailedStart` (the API's, the console's; the absent address green) | `TestAStopIsNotAFailedStart` |
 | (h) | the confirmation decides on its read before the lock | `TestAConfirmationReadsTheMarkerUnderItsLock` (the newer install's marker stamped over), `TestAConfirmationThatWaitsReadsTheMarkerAgain` | `TestAnInstallIsConfirmedOnlyOnceItAnsweredAndStayedUp` |
 | (i) | `==` for the limit | `TestATransientRefusalAtTheFourthStartRollsBackAtTheFifth` (the fifth start served), `TestCrashRollbackDecidesOnTheMarkerAlone` ("past the limit") | `TestThreeFailedStartsRollBackAnInstallThatMigratedNothing` |

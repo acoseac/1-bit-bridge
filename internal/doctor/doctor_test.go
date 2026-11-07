@@ -179,12 +179,15 @@ func TestIsAddrInUseMatchesRealBindConflict(t *testing.T) {
 	}
 }
 
-// TestIsBindPermissionMatchesWhatTheHostAnswersARefusedBind: the errno a
-// refused bind carries, wrapped as net.Listen wraps it, reads as a
-// permission, on this platform's spelling (backlog B660); a port conflict and
-// an unrelated error do not. Windows' arm, WSAEACCES, is pinned by its source
-// on every other host (TestTheWindowsBindChecksNameTheWinsockErrnos) and runs
-// here on Windows' CI leg.
+// TestIsBindPermissionMatchesWhatTheHostAnswersARefusedBind: a bind the host
+// refuses for a permission reads as one (backlog B660): the host's own
+// answer, a bind of port 1 below its unprivileged floor, where it refuses one
+// (B660's second round: until then the test made the errno up), and the
+// errno this platform spells it with, wrapped as net.Listen wraps it,
+// everywhere; a port conflict and an unrelated error do not. Windows' arm,
+// WSAEACCES, is pinned by its source on every other host
+// (TestTheWindowsBindChecksNameTheWinsockErrnos) and runs here on Windows' CI
+// leg.
 func TestIsBindPermissionMatchesWhatTheHostAnswersARefusedBind(t *testing.T) {
 	refused := &net.OpError{Op: "listen", Net: "tcp", Err: os.NewSyscallError("bind", bindPermissionErrno)}
 	if !IsBindPermission(refused) {
@@ -195,6 +198,15 @@ func TestIsBindPermissionMatchesWhatTheHostAnswersARefusedBind(t *testing.T) {
 	}
 	if IsBindPermission(errors.New("some unrelated failure")) {
 		t.Error("IsBindPermission matched an unrelated error")
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:1")
+	if err == nil {
+		_ = ln.Close()
+		t.Skip("this host lets this process bind port 1, so it refuses no bind for a permission here")
+	}
+	if !IsBindPermission(err) || IsAddrInUse(err) {
+		t.Errorf("the host's refusal of a bind of port 1, %#v: IsBindPermission = %v, IsAddrInUse = %v; want a permission alone",
+			err, IsBindPermission(err), IsAddrInUse(err))
 	}
 }
 
