@@ -116,6 +116,10 @@ func (m *mdnsLifecycle) Set(enabled bool) {
 			ProtocolVersion: m.protocolVersion,
 			LibraryName:     name,
 			InterfaceSource: lanInterfaceSource(pick, m.stderr),
+			// The host's name through the probe /v1/health's `.local`
+			// endpoint and the certificate read it through (backlog B744),
+			// so the responder publishes the name they advertise.
+			HostnameSource: advertise.ReportedHostname,
 		})
 		if err != nil {
 			fmt.Fprintf(m.stderr, "mDNS advertise failed (non-fatal): %v\n", err)

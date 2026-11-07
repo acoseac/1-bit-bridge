@@ -98,6 +98,13 @@ type Config struct {
 	// target made of its address (srvTarget).
 	Hostname string
 
+	// HostnameSource yields the host's name where Hostname is empty, read at
+	// each rebuild; nil is os.Hostname. cmd/bridge hands it the probe every
+	// name the bridge certifies and advertises is read through
+	// (advertise.ReportedHostname, backlog B744), so the responder publishes
+	// the `.local` name /v1/health lists from the same read.
+	HostnameSource func() (string, error)
+
 	// ProtocolVersion is advertised in the TXT record as "pv=<N>" so
 	// clients can version-gate at discovery time.
 	ProtocolVersion int
@@ -665,7 +672,8 @@ func addressName(ips []net.IP) string {
 }
 
 // advertisedHost returns the hostname that the SRV record and host= will
-// use, re-deriving it from `cfg.Hostname` (or os.Hostname when blank) and
+// use, re-deriving it from `cfg.Hostname` (or cfg.HostnameSource, else
+// os.Hostname, when blank) and
 // applying the same first-label + ".local." normalization Advertise
 // uses internally. Kept as a method on Config so the TXT-record
 // builder doesn't have to duplicate the logic.
@@ -687,7 +695,11 @@ func addressName(ips []net.IP) string {
 func (cfg Config) advertisedHost() (host string, named bool) {
 	host = strings.TrimSuffix(cfg.Hostname, ".")
 	if host == "" {
-		if h, err := os.Hostname(); err == nil {
+		read := os.Hostname
+		if cfg.HostnameSource != nil {
+			read = cfg.HostnameSource
+		}
+		if h, err := read(); err == nil {
 			host = strings.TrimSuffix(h, ".")
 		}
 	}
