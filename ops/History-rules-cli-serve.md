@@ -3637,3 +3637,45 @@ another where a socket joined (`IP_MULTICAST_ALL`, which hashicorp/mdns
 leaves on). A probe measured it both ways on legion0, and that test's own
 question takes its answer by its address too (ee885b74). On legion0 the
 responder is pinned to enp4s0 and answered at once.
+
+## B745 — the player's DSD state in a snapshot, and a restore where no directory can be synced (2026-11-07)
+
+- **A snapshot carries the player's DSD state (`player-dsd.json`) as its bytes beside the player's identity, and a restore writes both durably, ahead of the snapshot's other files; where no directory can be synced (Windows), a restore of a snapshot holding either refuses before anything is written, naming each of the player's files it holds and the way through, removing them from a copy of the snapshot, which then restores the rest while the box keeps its own** (2026-11-07, backlog B745; the owner's decision to refuse the DSD state as the identity is refused, kept). **Don't restore the DSD state or the identity where its write cannot be made durable, refuse them without naming the way through, or write anything before that refusal.**
+
+*Why a bullet here.* The DSD state's backup and restore rules are in
+`player.md`'s DSD-state bullet (B728 B3), which loads with the player's
+packages. `internal/backup`, which carries the file, loads `cli-serve.md`
+and `config-lifecycle.md`, and neither named it, so a session changing the
+backup met no rule for its newest file.
+
+*The refusal.* Both of the player's files are written through the strict
+writer (`atomicwrite.WriteBytesDurable`), which refuses where the platform
+has no directory barrier (`ErrNoDirectoryBarrier`: Windows, where the
+player does not run). A Linux box's snapshot holds both once its player has
+run, so its restore on Windows was refused, and the identity's refusal
+("restore player reservation: atomicwrite: this platform cannot fsync a
+directory, so no write here is made durable: unsupported operation") named
+no way through; the DSD state's own refusal did (`restorePlayerDSD`). The
+owner decided in B728 that the DSD state is refused as the identity is, not
+skipped, and that stands. `RestoreWithOptions` now asks once, after it has
+read both files from the snapshot and compared the config, before the first
+write (`atomicwrite.HasDirectoryBarrier`, which reads the barrier the
+strict writer reads, so a test's `SetSyncDirForTest(nil)` moves both), and
+refuses through `playerFilesNeedABarrier`: wrapping `ErrNoDirectoryBarrier`,
+naming every one of those files the snapshot holds (`player-uuid`, with
+`player-ids.json` where the manifest lists it, and `player-dsd.json`),
+saying nothing was restored, and giving the way through, removing them from
+a copy of the snapshot, which then restores the rest while this box keeps
+its own. `restorePlayerDSD`'s refusal stays behind it.
+
+*Pinned natively.*
+`TestARestoreWhereNoDirectoryCanBeSyncedRefusesThePlayersFilesNamingTheWay`
+takes a snapshot where directories sync and restores it with the barrier
+taken away (the existing seam, so it runs on every OS), for the identity,
+the DSD state and both: the refusal matches `ErrNoDirectoryBarrier`, says
+nothing was restored and names each file in the way through, nothing is in
+the box, and a copy of the snapshot without those files restores the rest
+and writes neither of the player's files. With the check removed (control
+C745-1) the identity's rows go red, and with the DSD state's writer made
+non-durable as well (C745-2) every row does, with the DSD state's own
+refusal tests. The record is in `ops/engineering-log.md`, 2026-11-07, B745.
