@@ -182,6 +182,45 @@ func (f *linkedRootFixture) hooks() (held, resumed <-chan string) {
 	return h, r
 }
 
+// TestARootsIdentityIsTheFolderAtItsPathWhenItIsRead: the identity the
+// watcher records is of the folder at the root's path when it is read, never
+// of whatever folder the path names when it is first compared. Windows'
+// os.Stat of a plain folder keeps its path and reads the folder's file ID only
+// when os.SameFile first asks, so an identity taken before a walk would be of
+// the folder there after it, the order B777 depends on lost; elsewhere the
+// stat's device and inode are the identity already. Red on Windows alone
+// without the read's own comparison (rootIdentity).
+func TestARootsIdentityIsTheFolderAtItsPathWhenItIsRead(t *testing.T) {
+	dir := t.TempDir()
+	root := filepath.Join(dir, "music")
+	if err := os.Mkdir(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	w, err := NewWatcher(NewScanner([]string{root}, openStoreIn(t, dir), ""), time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = w.w.Close() })
+	was, err := w.rootIdentity(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Another folder put at the path, as a mount or a repointed link puts one.
+	if err := os.Rename(root, filepath.Join(dir, "was")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	now, err := os.Stat(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if os.SameFile(was, now) {
+		t.Error("the identity read before another folder was put at the root's path is that folder's")
+	}
+}
+
 // TestTheWatcherWatchesAgainARootWhoseFolderIsNoLongerTheOneItWatches pins the
 // check's comparison (B777 item 1): a root watched while its path was one
 // folder, whose path is another folder now (a volume mounted over the bare
