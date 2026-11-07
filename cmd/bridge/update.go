@@ -18,6 +18,11 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/updater"
 )
 
+// updateReleases is the client the release check asks, nil for the GitHub
+// releases API's own (updater.New's default): a test points one at a server of
+// its own, so that `bridge update --check` asks nothing of the network.
+var updateReleases *updater.Client
+
 // updateCmd implements `bridge update [--check] [--yes]`.
 //
 // `--check` polls GitHub once and prints the result without
@@ -59,6 +64,11 @@ func updateCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stde
 		fmt.Fprintf(stderr, "config load failed: %v\n", err)
 		return 2
 	}
+	// An install writes its marker in the data dir, which would be made in
+	// its place where its volume is not mounted (backlog B727); --check reads.
+	if !*check && refuseDataDirAway("update", cfgPath, cfg.DataDir, stderr) {
+		return 1
+	}
 	// The candidate is checked against this file before its swap (backlog
 	// B613), and runs from another directory: an absolute path names the
 	// same file there.
@@ -80,6 +90,7 @@ func updateCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stde
 
 	upd := updater.New(updater.Options{
 		TokenSnapshot: tokenSnapshot,
+		Client:        updateReleases,
 	})
 	st := upd.CheckNow(ctx)
 

@@ -3504,11 +3504,21 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	// serve again until the volume is there. The record is the one beside the
 	// file the boot read was of, here and where serve writes it below, never
 	// beside the file the config's name opens by then (serveDataDirRecord).
+	// The refusal is said once per state, not at every start of the service
+	// manager's retries (serve_data_dir_refusal.go, backlog B727).
 	dataDirRecord := serveDataDirRecord(cfgBootFile)
 	if err := checkServeDataDirRecord(dataDirRecord, cfg.DataDir); err != nil {
-		fmt.Fprintf(stderr, "serve: %v\n", err)
+		var gone *dataDirGoneError
+		if errors.As(err, &gone) {
+			sayServeRefusal(gone, stderr, time.Now())
+		} else {
+			fmt.Fprintf(stderr, "serve: %v\n", err)
+		}
 		return 1
 	}
+	// Read before the preparation and the lock make the data dir and its lock
+	// file: a start calls back only a data dir that held them before it.
+	refusedIsBack := dataDirBack(cfg.DataDir)
 	if err := prepareServeDataDir(cfg.DataDir); err != nil {
 		fmt.Fprintf(stderr, "serve: %v; bridge serve starts only on a data directory it can make or use: "+
 			"move what stands in its way, or set dataDir in bridge.yaml to a directory\n", err)
@@ -3541,6 +3551,11 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		// Said once, where the pid file's own non-fatal failure is said.
 		fmt.Fprintf(stderr, "serve: %v; serving without the check that no other bridge serve runs on this data dir\n", lockErr)
 	}
+	// A refusal an earlier start said is over once the data dir is prepared
+	// and its lock taken, or serve goes on without it: said here, never at
+	// the record's check, which the preparation and the lock can still
+	// overrule (B727's round 2).
+	endServeRefusal(dataDirRecord, cfg.DataDir, refusedIsBack)
 	// Shared with the player, which lets go of its share once nothing it
 	// started may still write the data dir: an engine's state write that
 	// outlived its stop keeps the lock past this return (dataDirHold).
@@ -5357,6 +5372,10 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		// the stale-rendition heal below reads the same ones.
 		kindGates := renditionGates{upscale: upscaleActiveFn, optimize: carPlayOptimizeActiveFn, pcm: dsdRenderActiveFn}
 		upscalePool.SetLiveGate(kindGates.admits)
+		// Every job the pool runs asks before it writes into its variants
+		// directory, refused while it reads as a volume not mounted and the
+		// catalog records renditions there (backlog B727).
+		upscalePool.SetOutputGuard(renditionOutputGuard{store: manifestStore})
 		// v1.3 Coordinator wraps the Pool with per-batch tracking.
 		// `RecoverInterruptedBatches` runs synchronously inside
 		// NewCoordinator — any rows left in pending/running from a
@@ -7031,10 +7050,13 @@ func pairCmd(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "pair: --name is required")
 		return 2
 	}
-	cfg, _, err := loadCLIConfig(*configPath)
+	cfg, cfgPath, err := loadCLIConfig(*configPath)
 	if err != nil {
 		fmt.Fprintf(stderr, configLoadFailedFormat, err)
 		return 2
+	}
+	if refuseDataDirAway("pair", cfgPath, cfg.DataDir, stderr) {
+		return 1
 	}
 	store, err := auth.OpenStore(filepath.Join(cfg.DataDir, tokensFileName))
 	if err != nil {
@@ -7061,10 +7083,13 @@ func scanCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	cfg, _, err := loadCLIConfig(*configPath)
+	cfg, cfgPath, err := loadCLIConfig(*configPath)
 	if err != nil {
 		fmt.Fprintf(stderr, configLoadFailedFormat, err)
 		return 2
+	}
+	if refuseDataDirAway("scan", cfgPath, cfg.DataDir, stderr) {
+		return 1
 	}
 	store, err := manifest.OpenStore(manifest.DefaultDBPath(cfg.DataDir))
 	if err != nil {

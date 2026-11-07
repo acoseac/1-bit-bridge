@@ -79,6 +79,10 @@ type VariantsDirBlock struct {
 	// MISSING directory is not Empty: the two are different facts and a
 	// caller acting on one must not act on the other.
 	Empty bool
+	// Missing is true only when nothing is at the path (the stat's
+	// fs.ErrNotExist), which a render's guard words apart from Empty
+	// (cmd/bridge's renditionOutputGuard, backlog B727).
+	Missing bool
 	// Info is the directory whose entries the probe read, from the
 	// handle it read them with, so it and Empty (or a healthy
 	// Reason) are about one directory: set when Reason is "" or Empty
@@ -95,7 +99,7 @@ func VariantsDirSweepBlock(dir string) VariantsDirBlock {
 	info, err := os.Stat(dir)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
-		return VariantsDirBlock{Reason: "variants directory is missing"}
+		return VariantsDirBlock{Reason: "variants directory is missing", Missing: true}
 	case err != nil:
 		return VariantsDirBlock{Reason: fmt.Sprintf("cannot stat variants directory: %v", err)}
 	case !info.IsDir():

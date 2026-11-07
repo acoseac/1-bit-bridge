@@ -3120,11 +3120,13 @@
   rows of a root it cannot see or that holds no library content while the
   index holds its tracks; the library watcher holds such a root
   (`Scanner.lookAtRoot`, read as the scan's guards read it) and watches it
-  again, with a scan of it, only once a look finds it as it was; and serve
-  refuses, before it makes or writes anything there, a data dir the record
-  beside the config names (`.bridge.yaml.datadir`) that holds neither
-  `bridge.db` nor `server.lock`** (2026-11-04, backlog B651; Codex's and
-  Argon's notes on the brief). On a NAS reboot systemd or Docker can start the
+  again, with a scan of it, only once a look finds it as it was; and serve,
+  and every other command that makes, opens or writes the data dir
+  (`refuseDataDirAway`), refuses, before it makes or writes anything there, a
+  data dir the record beside the config names (`.bridge.yaml.datadir`) that
+  holds neither `bridge.db` nor `server.lock`** (2026-11-04, backlog B651;
+  Codex's and Argon's notes on the brief; B727, 2026-11-07). Its limits are
+  backlog B776 and B777. On a NAS reboot systemd or Docker can start the
   bridge before a USB, RAID or network volume is mounted, so a path on it is
   not there (a directory on the volume) or reads as the bare mount point,
   empty. **The scan** needed nothing new: walkRoot's upfront
@@ -3376,8 +3378,11 @@
   `rm bridge.db*` reset) starts as before. A first run has no record, so a
   fresh install, and `bridge init` (the data dir and its TLS pair, no
   database and no record), start as before, the first serve writing the
-  record. A data dir removed or moved on purpose is refused with what to do:
-  remove the record. The record is plain file I/O, so Windows behaves alike,
+  record. A data dir removed on purpose is refused with what to do: remove
+  the record; one moved on purpose, set `dataDir` to where it is now, which
+  the record does not name (B727: this said to remove the record for a move
+  as well, which has the next command make an empty data dir at the old
+  path). The record is plain file I/O, so Windows behaves alike,
   a record that does not read names nothing, and a config directory serve
   cannot write keeps none, said once a start. `bridge doctor`'s data-dir line
   fails the same state in the refusal's words (cli-serve.md, B659's line).
@@ -3481,3 +3486,33 @@
   `TestTheRecordIsBesideTheFileTheConfigsNameOpens` and
   `TestBothDoctorsFailADataDirItsRecordNamesWhileItsVolumeIsAway`.
  The timer's check of the roots' own watches leaves a root whose look waits to the flush too, since it would otherwise make the Add the wait avoids (Codex and the Claude API reviewer on round 12; `TestTheCheckOfTheRootsWatchesLeavesAWaitingLookToTheFlush`).
+
+  **B727** (2026-11-07) took up seven questions B651 left, each answered at
+  its head before anything changed. **A render** made a variants directory
+  that read as away into one rendition under the bare mount point, which
+  then read as mounted to the variant watcher and to a download's reap:
+  renders ask the probe first now (jobs.md, B727's bullet). **The commands
+  but serve**: a scan, a render, analyze, a pair, a token or credential
+  write, cert rotate, init's rewrite, backup or a command that takes the
+  data dir's lock made a `bridge.db`, a `server.lock`, a `tokens.json`, an
+  `adminauth.json`, a TLS pair or a snapshot under the bare mount point, and
+  the next serve took it for the data dir it served from; each asks the
+  record's check first now (cli-serve.md, B727's bullet), and the advice for
+  a data dir moved on purpose is to set `dataDir` to where it is now.
+  **Serve says its refusal once per state**, in a note beside the record,
+  never in the data dir (the same bullet). Its items 3, 4 and 6 are the
+  limits above, backlog B776 and B777 (round 2, the review of #1431, named
+  them by their ids). **CI's Windows leg** skips the two tests that rename
+  a watched folder,
+  `TestTheWatcherDispatchesNoScanForARootWhoseContentWent` and
+  `TestTheWatcherHoldsARootThatWentAndWatchesWhatComesBack` (round 4:
+  Windows refuses that rename under the watcher's ReadDirectoryChangesW
+  handles, Access is denied). What stands in for them there holds:
+  `TestTheWatcherHoldsARootWhoseWatchesWentWithoutAWord` renames once every
+  watch is removed, which fsnotify's Windows `Remove` closes on its I/O
+  thread before it answers (`remWatch`, then `startRead`'s CancelIo and
+  CloseHandle once the watch's mask is 0, in the fork the replace pins), so
+  a release that deferred that close would fail it the same way; and
+  `TestTheWatcherDispatchesNoScanForARootWhoseOnlyFileWent` deletes a file,
+  which Windows allows under a watch. The record is in
+  `ops/engineering-log.md`, 2026-11-07, B727.

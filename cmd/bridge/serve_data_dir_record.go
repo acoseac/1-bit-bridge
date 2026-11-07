@@ -45,12 +45,20 @@ import (
 // the data dir and its TLS pair and no database, start as they did, and the
 // first serve writes the record. A database removed on purpose with the lock
 // file kept (the local fixture's reset) is the data dir serve served from,
-// and is made again as before. A data dir removed whole, or moved without the
-// config being told, is refused, saying to remove the record. A config
-// directory serve cannot write keeps no record, said once a start, and serve
-// goes on as before. The record is plain file I/O, the same on Windows. In a
-// container whose config and data dir are on one volume (the image's /data),
-// the record is on that volume too, and a missing volume is a missing config.
+// and is made again as before. A data dir removed whole is refused, saying to
+// remove the record; one moved without the config being told, saying to set
+// dataDir where it is now, which the record does not name (onPurpose). A
+// config directory serve cannot write keeps no record, said once a start, and
+// serve goes on as before. The record is plain file I/O, the same on Windows.
+// In a container whose config and data dir are on one volume (the image's
+// /data), the record is on that volume too, and a missing volume is a missing
+// config.
+//
+// Every other command that makes, opens or writes the data dir asks the same
+// check first (refuseDataDirAway, backlog B727): a store open makes the data
+// dir and an empty database, and a command that takes the data dir's lock its
+// lock file, and either has the next serve take the bare mount point for the
+// data dir it served from.
 const dataDirRecordSuffix = ".datadir"
 
 // dataDirRecordMax is the most of a record readDataDirRecord reads.
@@ -152,7 +160,18 @@ type dataDirGoneError struct {
 func (e *dataDirGoneError) Error() string {
 	return e.what() + ": when it is on a volume that is mounted at boot, the volume is not mounted yet. " +
 		"bridge serve does not make an empty data directory in its place, and its service manager starts it again; " +
-		"if the data directory was removed or moved on purpose, remove " + e.record + " and start bridge serve again"
+		e.onPurpose("start bridge serve again")
+}
+
+// onPurpose is how to go on from a data dir that was moved or removed on
+// purpose, then doing what then says: a data dir moved is named where it is
+// now, which the record does not name, so nothing is refused and the next
+// serve records it; one removed takes the record with it (backlog B727).
+// Removing the record of a data dir that was moved would have the next
+// command make an empty one in its place.
+func (e *dataDirGoneError) onPurpose(then string) string {
+	return "if the data directory was moved on purpose, set dataDir in bridge.yaml to where it is now; " +
+		"if it was removed on purpose, remove " + e.record + " and " + then
 }
 
 // what is the refusal's first sentence, which bridge doctor's data-dir line
@@ -165,7 +184,57 @@ func (e *dataDirGoneError) what() string {
 // fix is the data-dir line's hint for the refusal.
 func (e *dataDirGoneError) fix() string {
 	return "mount the volume it is on (serve's service manager starts it again until it is there); " +
-		"if the data directory was removed or moved on purpose, remove " + e.record
+		"if the data directory was moved on purpose, set dataDir in bridge.yaml to where it is now; " +
+		"if it was removed on purpose, remove " + e.record
+}
+
+// commandRefusal is the refusal of bridge cmd, a command other than serve, of
+// the data dir its record names (dataDirAway): serve's first sentence, and how
+// to go on.
+func (e *dataDirGoneError) commandRefusal(cmd string) string {
+	return e.what() + ": when it is on a volume that is mounted at boot, the volume is not mounted yet. " +
+		"bridge " + cmd + " makes and writes nothing there: mount the volume and run it again; " +
+		e.onPurpose("run bridge "+cmd+" again")
+}
+
+// dataDirAway is the check serve makes before it prepares its data dir
+// (checkServeDataDirRecord), for a command other than serve, which asks it
+// before anything that makes, opens or writes the data dir (backlog B727's
+// second item): every command that writes the data dir, and every one whose
+// open of the store would make it (manifest.OpenStore makes the directory
+// and an empty database, which serve's own check then takes for the data dir
+// it served from). It answers the refusal of the data dir dataDir, which the
+// config at cfgFile names, where the record beside the file that name opens
+// (dataDirRecordPath, as bridge doctor reads it) names it and it holds neither
+// its database nor its lock file, and nil otherwise: no record (a fresh
+// install, init's first run), a record naming another data dir (dataDir moved
+// on purpose and set where it is now), the data dir holding either file, or a
+// config name that does not resolve, which bridge doctor's data-dir line does
+// not refuse either.
+func dataDirAway(cfgFile, dataDir string) *dataDirGoneError {
+	record, err := dataDirRecordPath(cfgFile)
+	if err != nil {
+		return nil
+	}
+	var gone *dataDirGoneError
+	if errors.As(checkServeDataDirRecord(record, dataDir), &gone) {
+		return gone
+	}
+	return nil
+}
+
+// refuseDataDirAway answers true, having said on stderr why bridge cmd stops
+// and how to go on, when dataDirAway refuses the data dir dataDir of the
+// config at cfgFile: the command then makes, opens and writes nothing there.
+// A diagnostic that only reads (bridge doctor, status, logs, token list, cert
+// info) does not ask it.
+func refuseDataDirAway(cmd, cfgFile, dataDir string, stderr io.Writer) bool {
+	gone := dataDirAway(cfgFile, dataDir)
+	if gone == nil {
+		return false
+	}
+	fmt.Fprintf(stderr, "%s: %s\n", cmd, gone.commandRefusal(cmd))
+	return true
 }
 
 // checkServeDataDirRecord refuses the data dir dataDir, with a

@@ -144,16 +144,22 @@ func refusePositionalScope(fs *flag.FlagSet, cmd, scopeFlag string, stderr io.Wr
 // `(nil, exitCode)` on any failure (caller `return exitCode`s).
 //
 // `gcMode == true` skips the sox precheck — GC sweeps only consult
-// the DB and the filesystem, no sox required.
-func bootstrapTranscodeCmd(ctx context.Context, stderr io.Writer, configPath, qualityFlag string, gcMode bool) (*transcodeBootstrapResult, int) {
+// the DB and the filesystem, no sox required. cmd names the command in a
+// refusal of its data dir (refuseDataDirAway).
+func bootstrapTranscodeCmd(ctx context.Context, stderr io.Writer, cmd, configPath, qualityFlag string, gcMode bool) (*transcodeBootstrapResult, int) {
 	// loadCLIConfig, not config.Load — see openTokenStoreFromCfg for the
 	// same fix. This tail is shared by `bridge upscale` and
 	// `bridge optimize`, so both were unusable without an explicit
 	// --config.
-	cfg, _, err := loadCLIConfig(configPath)
+	cfg, cfgPath, err := loadCLIConfig(configPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "config load: %v\n", err)
 		return nil, 2
+	}
+	// Before the store's open, which would make the data dir and an empty
+	// database where its volume is not mounted (backlog B727).
+	if refuseDataDirAway(cmd, cfgPath, cfg.DataDir, stderr) {
+		return nil, 1
 	}
 
 	// Feature flag gate. Disabled bridges refuse to run the CLI
@@ -234,7 +240,7 @@ func upscaleCmd(ctx context.Context, args []string, stdout, stderr io.Writer) in
 		return 2
 	}
 
-	r, exitCode := bootstrapTranscodeCmd(ctx, stderr, *configPath, *quality, *gc)
+	r, exitCode := bootstrapTranscodeCmd(ctx, stderr, "upscale", *configPath, *quality, *gc)
 	if r == nil {
 		return exitCode
 	}
@@ -632,6 +638,11 @@ func runUpscaleWorker(
 		if ctx.Err() != nil {
 			return
 		}
+		// The guard on the variants directory rides the job as the pool
+		// would have set it, whoever built the spec (backlog B727).
+		if c.spec.OutputGuard == nil {
+			c.spec.OutputGuard = renditionOutputGuard{store: store}
+		}
 		res, err := transcode.Run(ctx, c.spec)
 		if err != nil {
 			if ctx.Err() == nil {
@@ -758,6 +769,13 @@ func runUpscaleBatch(ctx context.Context, stdout, stderr io.Writer, store *manif
 
 	if toRun == 0 {
 		return 0
+	}
+	// A variants directory that reads as a volume not mounted while the
+	// catalog records renditions in it is refused once, before any job, and
+	// every job's own guard asks again as it runs (backlog B727).
+	if err := (renditionOutputGuard{store: store}).CheckOutput(ctx, p.outputDir); err != nil {
+		fmt.Fprintf(stderr, "Not rendering: %v\n", err)
+		return 1
 	}
 
 	// The album-level gain, exactly as the serve pool applies it: every DSD
