@@ -82338,3 +82338,183 @@ run; every one as predicted:
   rules files as the first three patches left them.
 
 **For the owner.** What this round leaves is backlog B760.
+
+## 2026-11-07 — B727: late-mounting volumes, the rest of B651
+
+Backlog B727, on `fix/b72v-late-volumes` from main 49071fbf; worker b72v on
+the Linux worker host. Seven questions B651 left about a NAS or USB volume
+that mounts after the service starts, each first checked at this head.
+Commits, each item's red test first: item 1, 8abc3658 and b3475e94; item 2,
+14888772 and 69300f79, and 4c7646ee for its update check; item 5, ef0ed0f6
+and ac4f0361, and 3809e9ce, three tests of what decides whether a start
+says it;
+40bd5dc5 the runbook; then this record. The rules are `rules-b72v.patch`
+(scanner.md's B651 line, a bullet each in cli-serve.md and jobs.md, and
+their long forms). Red runs were on a copy of the tree with the changed
+files put back at 49071fbf.
+
+**1. A render into a bare mount point's variants directory** (real; fixed).
+With the variants directory on a volume whose mount point is bare, the
+CLI's worker rendered a track through `transcode.Run` and a stand-in sox:
+on 49071fbf it made the variants directory under the bare mount point and
+published a rendition there (`done=1 failed=0`), the mount-loss probe then
+read it as mounted, serve's variant watcher deleted the three rows of
+renditions on the volume (`Rows:4 Present:1 Deleted:3`; with twelve the
+relocation guard refused), and a download of one of them reaped its row at
+three rows and at twelve (the download's reap has no floor). A render now
+asks a guard first (`OutputGuard`, cmd/bridge's `renditionOutputGuard`):
+the probe, then `Store.VariantRecordedUnder`; a directory that reads as away
+while the catalog records a rendition under it is written nothing, and the
+refusal is an output fault, one Warn per outage, no strike. A catalog that
+records nothing there (a fresh install, a variants directory just set to a
+new place) and a directory that reads as mounted render as before. Likely
+where the folder a variants directory sits in is the service user's to
+write while its volume is away (a mount point chowned to it, a bridge run
+as root): a render runs at the auto-optimize sweep and at a client's
+request.
+
+**2. Commands that made a data dir and a database during an outage** (real;
+fixed). An install whose record names its data dir, the volume's mount
+point bare: of the 28 commands that make, open or write the data dir, run
+through `run`'s dispatch, every one went on at 49071fbf, and 22 made a
+`bridge.db` or a `server.lock` under the bare mount point (the store's open
+makes the data dir and an empty database; a command that takes the data
+dir's lock, its lock file); pair made `tokens.json`, admin reset-password
+`adminauth.json`, cert rotate and init's rewrite a TLS pair, backup a
+snapshot. Either file has the next serve take the bare mount point for the
+data dir it served from and start on an empty database with a new TLS pair.
+Each asks the record's check now, right after its config loads
+(`refuseDataDirAway`, the record beside the file the config's name opens,
+as bridge doctor reads it); the reads (doctor, status, logs, token list,
+cert info, update --check, init keeping the config) ask nothing; no record
+is no check; `manifest.OpenStore` asks nothing, since it knows no config.
+Init's first install, its rewrite and its run that keeps the config are
+kept apart (only the rewrite asks, before its preflight). A data dir moved
+on purpose goes on by setting `dataDir` to where it is now, which the
+record does not name: serve's refusal and the doctor's fix said to remove
+the record, which over a moved data dir has the next command make an empty
+one at the old path; both say to set `dataDir` now. Likely: an operator who finds
+the library empty runs `bridge scan` or a render by hand, as root, before
+the volume is back.
+
+**3. A mount point holding library content of its own** (real; a limit in
+the rule). It reads as it is to the scan's guards and to the watcher. No
+check of it is cheap: a mount check is what B651's Don't forbids, and a
+share of the index's rows the walk did not find is the second
+mass-deletion guard B651 declined. It needs a write into the bare mount
+point while the volume is away, and a bare mount point is commonly root's.
+scanner.md's B651 line names the limit, which its long form already stated.
+
+**4. A fresh install's root watched before its volume mounts** (real;
+open). `lookAtRoot` reads an empty root with no rows as it is, rightly, an
+empty library; the mount then covers the folder the watch is on while
+fsnotify still lists the watch, so `checkRootWatches` never looks again,
+and only the periodic scan (6 h by default) indexes the volume. The fix, a
+check of each watched root's identity at the root check, is small, and its
+test needs a real mount (`build-ci-tests.md`), which this host cannot make:
+an unprivileged user namespace is created and refused its maps
+(`/proc/sys/kernel/apparmor_restrict_unprivileged_userns` is 1: writing
+`setgroups` is denied), no FUSE filesystem is installed, and the disk image
+B651 mounts needs macOS. Open, as B727's fourth item.
+
+**5. Serve's refusal said at every retry** (real; fixed). Three starts in a
+row on 49071fbf, as a service manager's retries, said the refusal three
+times (`[true true true]`) and kept nothing. Serve keeps a note beside the
+record now, `.bridge.yaml.datadir.refused`, never in the data dir: the data
+dir refused and when it was said. A start says the refusal where the note
+names another data dir or none, or was written a day or more ago, and
+always to a terminal; the first start that finds its data dir again removes
+the note and says so at Info. A note that cannot be written leaves the
+next start to say it again, and what serve refuses is the same either way;
+a note that cannot be removed keeps the next refusal quiet until a day
+after the last was said, which that start says at Warn.
+
+**6. The window between a look and the walk** stays open, as B727's sixth
+item: its coverage needs a real mount, which this host cannot make (item 4).
+
+**7. CI's Windows leg and round 1's two tests that rename a watched
+folder.** `TestTheWatcherDispatchesNoScanForARootWhoseContentWent` and
+`TestTheWatcherHoldsARootThatWentAndWatchesWhatComesBack` skip on Windows
+since B651's fourth round: Windows refuses to rename a folder while a
+ReadDirectoryChangesW handle is open under it, and both failed there at
+their first rename with "Access is denied" (that round's Windows host), so
+on Windows a rename under a watch cannot stand in for an unmount at all.
+What could still fail there is what stands in for them:
+`TestTheWatcherHoldsARootWhoseWatchesWentWithoutAWord` renames the root
+once it has removed every watch, which works because fsnotify's Windows
+`Remove` closes each directory handle on its I/O thread before it answers
+(`remWatch`, then `startRead`'s CancelIo and CloseHandle once the watch's
+mask is 0, in the fork the replace pins, read in the module cache); a
+release that deferred that close would fail it with the same words, so a
+bump of the replace is when to look. None of B727's tests renames a watched
+folder: item 1's move a variants volume no watch is on, and do not build on
+Windows (the stand-in sox is a shell script); item 5's move a data dir once
+serve has stopped.
+
+**Negative controls**, each on a frozen copy of the tree at its fix (item
+1 at b3475e94, items 2 and 5 at 3809e9ce, the update check at 4c7646ee),
+one mutation, each test alone with `-test.v`, the bytes put back from
+memory, predicted in a file before the run:
+
+| control | mutation | red | as predicted |
+|---|---|---|---|
+| N1a | Run asks no guard | the render, the watcher at 3 rows, the download (both), the pool's | yes |
+| N1b | the pool injects no guard | the pool's alone | yes |
+| N1c | the CLI's worker sets no guard | the render, the watcher at 3 rows, the download | yes |
+| N1d | the CLI batch's pre-flight removed | the batch refusal alone | yes |
+| N1e | the guard refuses without the catalog's evidence | both of `TestARenderMakesTheVariantsDirectoryOfACatalogThatRecordsNoneThere` | yes |
+| N1f | `VariantRecordedUnder` asks for any row | its 3-rows-elsewhere case alone | yes |
+| N1g | the guard asks the catalog without the probe | the volume back, in the batch test and its own | yes |
+| N1h | `VariantsDirSweepBlock` sets no `Missing` | integrity's `TestVariantsDirSweepBlockReason` alone | yes |
+| N1i | the refusal not an output fault | the pool's (a strike, a sox Warn) | yes |
+| N2a | `refuseDataDirAway` never refuses | all 28 subtests | yes |
+| N2b | scan asks no record | scan alone | yes |
+| N2c | `holdDataDirForMutation` asks no record | restore, reset-player, clear-missing, the DAC bind | yes |
+| N2d | token list asks it too | the token list read alone | yes |
+| N2e | init asks it keeping the config | that read alone | yes |
+| N2f | update asks it under `--check` | the update check | red, but said "asks no record": the check read the call only as a guard's right side; 4c7646ee reads it in any condition |
+| N2f' | the same, at 4c7646ee | the update check, "guarded by \"\"" | yes |
+| N2g, N2g' | update asks no record | the update check, "asks no record" | yes |
+| N2n | update asks it after the release check | the update check, the order | yes |
+| N2h | the refusal does not say to mount and run again | all 28 | yes |
+| N2i | nothing on a data dir moved on purpose | all 28, serve's two refusal tests | yes |
+| N2j | the doctor's fix says nothing on it | the doctors' test alone | yes |
+| N2k | tsnet's config load asks no record | tsnet alone | yes |
+| N2l | `bootstrapTranscodeCmd` asks no record | upscale, optimize, render | yes |
+| N5a | a note never keeps a refusal quiet | the once-per-state and other-data-dir tests | yes |
+| N5b | a note of any age keeps it quiet | once-per-state, a day later | yes |
+| N5c | the note's data dir not compared | the other-data-dir test alone | yes |
+| N5d | a terminal is quiet like any writer | the terminal test alone | yes |
+| N5e | the start that finds its data dir removes no note | once-per-state, the unremoved-note test | yes |
+| N5f | serve never ends the refusal | once-per-state alone | yes |
+| N5g | the note kept in the data dir | once-per-state, the other-data-dir, terminal and unremoved-note tests, serve's two refusal tests in both shapes, the no-note control | more than predicted: the note's write makes its parent (`atomicwrite.WriteBytes`), so it made the data dir itself, which both shapes of serve's tests and the control refuse; predicted green for the not-there shapes and the control |
+
+**Checks.**
+- The red runs, each on its copy at 49071fbf, the predictions in a file
+  beforehand: item 1's render, its batch refusal, the watcher at 3 rows and
+  the download at 3 and 12 red, and the watcher at 12 (the relocation
+  guard's) and the two controls green; item 2's 28 subtests and the update
+  check red, the four reads and both no-record cases green; item 5's first
+  test red (`[true true true]`), its control green.
+- Through the shared build lock, on 4c7646ee: `make fmt` left the tree as
+  it was; `make vet` natively and with `GOOS=windows`, `GOOS=darwin`,
+  `GOOS=linux GOARCH=386` and `GOOS=linux GOARCH=arm`: ok; `make test`
+  (`go test -race -timeout 30m` over every package, `-count=1`, TMPDIR under
+  `.tmp/_b72v`): ok, 88 packages and 14 without tests in 1,998 s (cmd/bridge
+  1,255 s, internal/manifest 1,592 s, internal/admin 1,002 s,
+  internal/transcode 206 s, internal/integrity 5 s), the Linux-only packages
+  run (internal/alsa, internal/alsapcm, internal/atomicwrite,
+  internal/backup and the player's); that run is the race run of the
+  touched packages; `make build-all`: ok.
+- `make docs-check`: ok as the tree stands; with `rules-b72v.patch` applied
+  to a copy: ok, by check-doc-budgets.py's own measure (scanner.md 36,550
+  bytes, cli-serve.md 44,596, jobs.md 19,467), `git apply --check` takes the
+  patch, and `TestEveryCitedTestNameExists` passes there.
+- The qualification check against 49071fbf: ok; no guarded prefix changed,
+  so no version is taken.
+- The Windows leg is vetted and cross-compiled here, not run: item 2's and
+  item 5's tests build and run on every platform but the two that need a
+  mode refusing this user a write (skipped on Windows and as root) and the
+  terminal test (Linux).
+
+**For the owner.** What B727 leaves open is its items 4 and 6.
