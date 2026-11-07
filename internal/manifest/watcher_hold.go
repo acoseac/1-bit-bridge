@@ -89,7 +89,10 @@ const (
 	msgWatchRootResumed   = "library root reads as it did again; the watcher watches it"
 	msgWatchRootRewatched = "library root's own watch went while the root reads as it did; the watcher watches it again where it is now"
 	msgWatchRootReplaced  = "library root is another folder than the one its watch was added on (a volume mounted over it, a remount, a link repointed); the watcher watches it again where it is now"
-	heldRootHint          = hintVolumeMounted + ": the scan keeps the tracks indexed under it, and the watcher looks at it again until it reads as it did; " +
+	// msgWatchRootIdentityTaken: a root whose folder could not be read as its
+	// watch was added, read since (B777's round 2).
+	msgWatchRootIdentityTaken = "library root's folder reads again; the watcher watches it again where it is now, to tell when another folder takes its place"
+	heldRootHint              = hintVolumeMounted + ": the scan keeps the tracks indexed under it, and the watcher looks at it again until it reads as it did; " +
 		hintContainerRestart
 )
 
