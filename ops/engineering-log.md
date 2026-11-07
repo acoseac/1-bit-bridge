@@ -80490,3 +80490,83 @@ predicted, the baseline green and `git status` unchanged after. A is
 **After**, with the link planted: the package's whole suite under a bare
 `go test` (TMPDIR unset), ok; `make test-fast` with the default TMPDIR is
 among the branch's gates (B745's record).
+
+## 2026-11-07 — B742: the watcher's hint for a root holding only links to directories
+
+Backlog B742, the second item on `fix/b74x-small-followups`, worker b74x, as
+for B740. Commits: the red tests a1384d59, the fix f123833e, then this
+record. The rule's line goes into `.claude/rules/scanner.md` through
+`rules-b74x.patch`, its long form after B74's in
+`ops/History-rules-scanner.md`.
+
+**What happened.** `lookAtRoot`, the look by which the library watcher
+holds a root (B651) and `protectNestedRoots` spares a nested one, read a
+root holding nothing but links to directories, over tracks the index holds,
+as `rootAbsentEmpty`, an emptied mount point, while the scan's
+`emptyRootMustBeSpared` tells that case apart (`msgRootOnlyDirLinks`, B74: a
+link stat'ed through to a directory says the volume holding the root is
+there). So the watcher held such a root and said "check that its volume is
+mounted". Nothing was lost (the root is held as its rows are spared); the
+hint was wrong. The owning-root audit had a third copy of the distinction.
+
+**Red first.** At a1384d59, the fix's tests on main's code:
+`TestTheWatchersHoldAndHintReadARootAsTheScanDoes`, a table of seven shapes
+of a root after a scan indexed it, each through the watcher's
+`holdAbsentRoots` (what Run does before any watch) and a full scan at a
+threshold of one, failed in one row alone, "only directory links, with
+indexed rows": `reads="empty"`, want `only-dir-links`, and the hint "check
+that its volume is mounted: …", want the scan's message. The other six rows
+held as they hold now and the scan spared or pruned as it does:
+
+| Shape | Held, reads= | Hint | The scan's line | Rows after |
+|---|---|---|---|---|
+| absent (the root moved away) | yes, `unreachable` | check the volume | root unreachable | kept |
+| empty | yes, `empty` | check the volume | suspected clean-empty mount failure | kept |
+| only directory links, indexed rows | yes, `only-dir-links` (was `empty`) | `msgRootOnlyDirLinks` (was check the volume) | `msgRootOnlyDirLinks` | kept |
+| only directory links, no indexed rows | no | | none | none |
+| a directory link and a file link | no | | none | the file link's; the rows under the directory link pruned |
+| a dangling directory link | yes, `empty` | check the volume | suspected clean-empty mount failure | kept |
+| real content | no | | none | the content's; the gone folder's pruned |
+
+`TestAParentScanSparesANestedRootHoldingOnlyLinksToDirectories`, green at
+a1384d59 and after: a root nested in another, holding only a link to a
+directory over its tracks, is spared by four subtree scans of the outer root
+and four full scans at the production threshold: the outer root's row under
+its folder, its own row, and both folder rows stay, no missed scan counted.
+
+**The fix.** `lookAtContentlessRoot(ctx, store, root, multiRoot, dirLinks)`
+is the one reading of a root holding no content and no sentinel: a count
+that fails is `rootAbsentUncounted`, none `rootLook{}`, tracks with a link to
+a directory `rootOnlyDirLinks` ("only-dir-links"), tracks without one
+`rootAbsentEmpty`, every absent case `absent: true` as before. The scan's
+guard logs by its reason (the same lines as before), the audit refuses by it
+(the same errors), and the look passes the links its listing holds
+(`dirHoldsLibraryContent` counts them through `listingContent`, which
+`holdsLibraryContent` wraps). The watcher's held line keeps its message and
+its attributes; its hint is `heldHint(look)`, the scan's existing message
+(`msgRootOnlyDirLinks`) for the links case and `heldRootHint` for every
+other. `absent` is unchanged in every case, so the watcher holds and the
+parent scans spare exactly what they did.
+
+**Negative controls**, at f123833e (`.tmp/_b74x/ctl.py`), predicted by name
+in `.tmp/_b74x/controls-b742.predictions.txt` before the run; every one as
+predicted, the baseline green and `git status` clean after. T is the table,
+P the parent-scan test, L `TestScanner_ARootHoldingOnlyLinksToDirectoriesNamesThem`,
+N `TestScanner_ALinkToADirectoryNamedLikeATrackIsNotContent`, S
+`TestScanner_ASubtreeMissBesideOnlyLinksNamesThem`, E
+`TestScannerSparesRowsOnCleanEmptyMount`, U
+`TestAuditOwningRootOnSubtreeMissReturnTypes`, W
+`TestTheWatcherWaitsForAnUnmountedRootAndWatchesWhatIsMountedThere`.
+
+| Mutation | Red | Green |
+|---|---|---|
+| C742-1 the shared reading without its links case | T (the links row: reads, hint, and the scan's clean-empty line), L (all four), N, S (both): the look, the guard and the audit together | P, E, U, W |
+| C742-2 the links case not absent | T (not held, rows pruned), P (the nested root unspared), L (rows gone by the third scan), N | S (the audit refuses by the reason), E, U, W |
+| C742-3 the hint not chosen by the reason | T (the hint alone) | the rest |
+| C742-4 the look counts no links | T (reads `empty`, the mount hint) | the rest |
+| C742-5 the audit counts no links | S ("suspected mount drop") | the rest |
+
+C742-1 is the shared classifier's control: one mutation of it reaches the
+watcher's look, the scan's guard and the subtree audit at once. C742-2 shows
+the hold and the sparing pinned by the table and the parent-scan test, the
+words staying.
