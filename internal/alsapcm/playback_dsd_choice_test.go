@@ -39,7 +39,7 @@ func choiceReq(t *testing.T, d *dsdRig, mode string, base uint64, edit ...func(*
 	return r
 }
 
-// written fails t unless res is the write landed.
+// wantOutcome fails t unless res's outcome is want.
 func wantOutcome(t *testing.T, res playback.ChoiceResult, want playback.ChoiceOutcome) {
 	t.Helper()
 	if res.Outcome != want {

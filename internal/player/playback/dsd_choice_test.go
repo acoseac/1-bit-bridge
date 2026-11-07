@@ -127,7 +127,7 @@ func acknowledged(r *playback.ChoiceRequest) { r.Choice.FirstUseAcknowledged = t
 func confirmed(r *playback.ChoiceRequest)    { r.Choice.ConfirmDoP = true }
 func interrupting(r *playback.ChoiceRequest) { r.Interrupt = true }
 
-// wantOutcome fails t unless res's outcome is want.
+// wantChoice fails t unless res's outcome is want.
 func wantChoice(t *testing.T, res playback.ChoiceResult, want playback.ChoiceOutcome) {
 	t.Helper()
 	if res.Outcome != want {
