@@ -85163,3 +85163,97 @@ qualification, alsapcm, cmd/bridge) passed (1,225 s); both native-integration ov
 every case CI names (13 and 29); `make test` passed, 89 packages ok (2,042 s), its TMPDIR under
 `.tmp/_b762`, the Linux-only tests run here; `make build-all` passed. alsa-abi did not run: no ABI
 definition or `scripts/alsa-abi` file changed.
+
+## 2026-11-07 — B762 round 3: a Start and the probe's answers, one step
+
+Worker b762, legion0, branch `fix/b762-probe-off-supervisor` (#1433, stacked on B8's #1430),
+after round 2's rules patch was applied and B8's newest merged in (39da4b77). Commits:
+22ecfe04 (the test, red, over a seam between the two comparisons), 6ea18e5c (the step), then
+this record and the gates'. The rule's words change through `rules-b762-r3.patch`: the silent
+probe's line in `player.md` and its long form in `History-rules-player.md`. Nothing a client or a
+listener gets changes.
+
+### The point, confirmed
+
+Both reviews of round 2 found one order: the probe holds the slot and a Start S waits
+(`ProbeWait`); `endProbe` lets the slot go, which wakes S; the probe's goroutine enters
+`publishProbe` and passes `b.starts.Load() == starts`, since S has not counted; S runs
+`b.holder = s; b.starts.Add(1)` and opens the DAC; the goroutine reaches
+`p.Probes.Record(epoch, rep)` and returns "", the answers kept beside S's open. Round 2 opened
+it by counting a Start where it takes the slot, rather than at its coming, while the comparison
+and the Record stayed two steps under the probe's lock alone.
+
+### As built
+
+`takeProbe` is `publishProbe`'s decision on the Starts, the binding and the cache, one step under
+`b.mu`, the lock `hold` counts a Start under in the step that takes the slot and `reserveProbe`
+reads the slot under: a Start that took the slot by then voids the answers, the cache recording
+nothing; one that takes it after finds them recorded before it opens the DAC. The context and
+the probe's generation are still compared first, under `ps.mu` alone. The locks go in one
+order, `ps.mu`, `b.mu`, the probe cache's; nothing under any of them blocks: they compare memory,
+and `Record` writes the cache's map. `DSDPolicy.Bound` is read before `b.mu`, under `ps.mu` as
+before: in serve it takes the hotplug feed's own lock (`Feed.Latest`), held there for in-memory
+work alone, never for I/O, but another package's lock, so it stays out of the step.
+`noteProbed` follows the decision outside every lock (`recordDSD` goes through `spawnWrite`,
+which takes `gmu`), so it may run beside a Start that took the slot after the decision: a write
+of the state, never a call to the device, recording answers the probe got while it alone held
+the device. Kept now means decided before the Start counted.
+
+The slot's lifecycle does not change: `endProbe`, `ProbeWait` and its comment, cancellation, a
+panic in `Probe`'s inner goroutine, and direct `Backend.Probe` callers are as they were. Not
+taken: keeping the probe's reservation of the slot until the decision. The inner goroutine gives
+the slot back in `Probe`'s defer, once and with the node closed, and when the context ends
+`Probe` returns while that goroutine still holds the node, so a release at the decision could
+open the DAC beside a probe, and a panic after `Probe` returned would leak the slot.
+
+Not taken either, round 2's finding that a probe held in the kernel at a stop reads as a write:
+`Probe`'s inner goroutine is started by `spawn`, so it counts in `Running`'s goroutines and not in
+its writes, and the stop says the device line; nothing to do. Left, by its id: B781.
+
+### Lock order, by grep
+
+A read-only survey of `internal/player/playback` (`.tmp/_b762/r3_locks2.py`): every region from
+a `b.mu.Lock()` to the last unlock in its function, an over-approximation of what runs under
+`b.mu`, in `hold`, `reserveProbe`, `endProbe`, `letGo`, `session`, `known`, `Stats`,
+`ReleaseAll`, `Discard`, `reconcileDSD`, `RefreshAuthorization`, `formatsFor`, `remember`,
+`forget` and `teardown`, takes no other lock: what they call there is `b.log.Error`,
+`b.starts.Add`, `newSession`, a session's `ctx.Err`, `pausedFlag.Load` and `releaseTaken` (a
+channel select that never waits), none of which takes `ps.mu`, a session's lock or `gmu`.
+`takeProbe` is the one region under `b.mu` that takes another lock, the cache's, through
+`Record`. Under `ps.mu`: `publishProbe` takes `b.mu` (through `takeProbe`) and the cache's, and
+`ForgetDSDProbe` the cache's (`Forget`); `settled`, `owe` and `ProbeDSDPending` take nothing
+more. The cache's `Begin`, `Record`, `Answer` and `Forget` (`internal/alsapcm/probe_cache.go`)
+call nothing but their own lock, so none takes `b.mu`; `Running` takes `gmu` alone, under no
+other lock.
+
+### Red first, and the seam moves
+
+At 22ecfe04, `TestAStartAndTheProbesAnswersAreOrderedByOneStep`'s first case held the probe's
+goroutine at a seam between the comparison and the Record (`Seams.ProbeDeciding`) while S, held
+once woken (`StartWoke`) until then, took the slot through the real `hold` and opened the DAC:
+the cache kept 23 answers (DSD_U32_BE at 88,200), the DSD64 driver_accepted was written and no
+probe was owed, red as predicted in `.tmp/_b762/r3-red.predictions.txt`. The draft's first run
+failed otherwise: without the `StartWoke` hold the woken Start took the slot before the goroutine
+reached the comparison, which dropped the answers and never reached the seam; the test was
+corrected before the red commit. With the fix that moment is gone: `ProbeDeciding` runs just
+before the step and `ProbeDecided`, added, just after it. Before the step, S's slot voids the
+answers (no `Record`, no driver_accepted, a probe owed); after it, they stand, recorded before S
+opens the DAC (the case reads the cache inside the open). `TestAStartAStopAndThePublishTogether`
+lets a Start, its session's Release (in every other run; in the runs between, the stop comes
+once the Start has answered) and the publish go together, 40 runs under `-race`: the answers
+kept whole or dropped whole, and kept answers recorded before a Start that opened the DAC (25 or
+26 runs kept them, 20 opened the DAC).
+
+### Negative control
+
+Committed first (6ea18e5c), predicted by name in `.tmp/_b762/r3-controls.predictions.txt`, the
+source restored from memory, `git status` empty after. CR3, the step split again (the Starts and
+the binding compared under `b.mu`, the lock let go, `ProbeDeciding` in the gap, `Record` outside
+`b.mu`): red as predicted, the first case alone, the answers kept beside the Start's open; the
+after-step case, the race test and the rest of the probe set green.
+
+### Qualification
+
+No guarded path changed (`dsd_policy.go`, `backend.go` and `dsd_work_test.go` in
+`internal/player/playback`, outside `version_gate.go`'s paths and prefixes):
+`qualificationVersion` stays 45.
