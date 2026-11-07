@@ -684,3 +684,120 @@ func TestNoDACKeyOrModelCarriesASerialOrAPort(t *testing.T) {
 		stopped(t, ps)
 	})
 }
+
+// TestARetainedObservationKeepsItsOwnDACsEvidence (B728 B8 round 2; the
+// design's section 7.1): the observation of a native occurrence that played
+// on one DAC, retained once its session ended, keeps the evidence it was
+// admitted with once the set published is another DAC's, whose tuple at its
+// rate has its policy ID: another model the port binding found in the port,
+// or the same model on another firmware. A policy ID names a tuple's
+// transport, format, rate and timing, never the DAC, its firmware or the set,
+// and the other DAC's tuple at listener_confirmed says nothing of what the
+// first DAC played. Under the set it was admitted under, the observation
+// takes its tuple's evidence as that set says it now: an evidence step
+// publishes no new set.
+func TestARetainedObservationKeepsItsOwnDACsEvidence(t *testing.T) {
+	native, dsd64 := dsdstate.TransportNative, playbacktest.DSD64
+	listened := func(bcd string) dsdstate.Answer {
+		return dsdstate.Answer{Transport: native, BitRate: dsd64, BCDDevice: bcd, Answer: dsdstate.AnswerClean, On: "2026-11-02"}
+	}
+	otherModel := playbacktest.DACUnit()
+	otherModel.USB.ID.Product, otherModel.Product = 0x5679, "Other DAC"
+	otherFirmware := playbacktest.DACUnit()
+	otherFirmware.BCDDevice = "0200"
+	for _, c := range []struct {
+		name string
+		next alsa.UnitModel
+		// state is the state once the next unit is bound: its own choice,
+		// first use and a listener's clean answer at DSD64 under its firmware.
+		state func(st dsdstate.State, key dacprofile.Key) dsdstate.State
+	}{
+		{"another DAC in the bound port", otherModel, func(st dsdstate.State, key dacprofile.Key) dsdstate.State {
+			st.DACs = append(st.DACs, dsdstate.DAC{Key: key, Choice: &dsdstate.Choice{Mode: native, Revision: 1, SetAt: playbacktest.T0, SetBy: dsdstate.ByApp},
+				FirstUse: []dsdstate.FirstUse{{Transport: native, BCDDevice: playbacktest.DACBCD, AcknowledgedAt: playbacktest.T0}},
+				Listener: []dsdstate.Answer{listened(playbacktest.DACBCD)}})
+			return st
+		}},
+		{"the same DAC on another firmware", otherFirmware, func(st dsdstate.State, _ dacprofile.Key) dsdstate.State {
+			st.DACs[0].FirstUse = []dsdstate.FirstUse{{Transport: native, BCDDevice: "0200", AcknowledgedAt: playbacktest.T0}}
+			st.DACs[0].Listener = []dsdstate.Answer{listened("0200")}
+			return st
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			profiles := playbacktest.KnownProfiles(nil)
+			other := profiles.Profiles[0]
+			iface, product := 0, "Other DAC"
+			other.ID, other.Match = "test.other", []dacprofile.Match{{VendorID: "1234", ProductID: "5679", Interface: &iface, Product: &product}}
+			profiles.Profiles = append(profiles.Profiles, other)
+			// The first DAC's DSD64 accepted by the driver under the running
+			// kernel, before its occurrence played.
+			st := playbacktest.ChoiceState(native)
+			st.DACs[0].Evidence = []dsdstate.Evidence{{Transport: native, Format: string(format.DSDU32BE), BitRate: dsd64, BCDDevice: playbacktest.DACBCD,
+				DriverAcceptedAt: playbacktest.T0, Kernel: playbacktest.Kernel}}
+			store := playbacktest.NewMemStore(st)
+			box := playbacktest.NewBox(5)
+			bound := playbacktest.DACUnit()
+			b := readSideBackend(t, box, store, func(p *playback.DSDPolicy) {
+				p.Profiles = profiles
+				p.Bound = func() (playback.BoundDAC, bool) {
+					return playback.BoundDAC{Card: 5, Identity: bound.USB, Enumeration: "test/2"}, true
+				}
+			})
+			first, _ := b.Facts()
+			at := -1
+			for i, tu := range first.Tuples {
+				if tu.Tuple.BitRate == dsd64 && tu.Tuple.Transport == "" {
+					at = i
+				}
+			}
+			if at < 0 || first.DSD == nil || first.DSD.Evidence[at] != (playback.DSDEvidence{Rung: "driver_accepted", On: "2026-11-06"}) {
+				t.Fatalf("the first DAC's set %+v (read side %+v): want a native DSD64 tuple, driver_accepted", first.Tuples, first.DSD)
+			}
+			// The observation the backend made of the occurrence that played
+			// there, its session over.
+			live := playback.PlaybackFacts{BootID: first.BootID, PolicyGeneration: first.Generation, Session: 1, Occurrence: 2, State: "released",
+				Format: string(format.DSDU32BE), RateHz: dsd64 / 32, LogicalRate: dsd64, Channels: 2, ValidBits: 1, PolicyID: first.Tuples[at].PolicyID,
+				PackingVersion: 1, ObservedAt: playbacktest.T0, Evidence: first.DSD.Evidence[at]}
+			device := config.PlayerDevice{Transport: "usb", Binding: config.BindingPort, Port: "platform-xhci-hcd.0/usb2-1"}
+
+			// An evidence step under the set it was admitted under: the
+			// observation takes its tuple's rung as that set says it now.
+			stepped := store.State()
+			stepped.DACs[0].Evidence[0].StreamingObservedAt = playbacktest.T0
+			store.Set(stepped)
+			b.RefreshDSD(true)
+			now, _ := b.Facts()
+			if _, _, out := bridgeDSDFacts(now, &live, device); now.Generation != first.Generation || out.Evidence != "streaming_observed" || out.EvidenceOn != "2026-11-06" {
+				t.Errorf("under its own set (generation %d, published %d) the observation says %q on %q, want streaming_observed, as the set says now",
+					first.Generation, now.Generation, out.Evidence, out.EvidenceOn)
+			}
+
+			// The next unit bound, its own set published.
+			key, err := dsdstate.KeyOf(c.next.USB, c.next.Product)
+			if err != nil {
+				t.Fatal(err)
+			}
+			store.Set(c.state(store.State(), key))
+			box.SetUnit(5, c.next)
+			bound = c.next
+			b.RefreshDSD(true)
+			next, _ := b.Facts()
+			shared := false
+			for i, tu := range next.Tuples {
+				if tu.PolicyID == live.PolicyID {
+					shared = next.DSD.Evidence[i] == (playback.DSDEvidence{Rung: "listener_confirmed", On: "2026-11-02"})
+				}
+			}
+			if next.Generation == first.Generation || !shared {
+				t.Fatalf("the next unit's set (generation %d after %d) %+v, read side %+v: want a tuple of the observation's policy ID, listener_confirmed",
+					next.Generation, first.Generation, next.Tuples, next.DSD)
+			}
+			_, _, out := bridgeDSDFacts(next, &live, device)
+			if out.Evidence != "driver_accepted" || out.EvidenceOn != "2026-11-06" {
+				t.Errorf("the retained observation of the first DAC's occurrence says %q on %q under the next unit's set, want its own, driver_accepted",
+					out.Evidence, out.EvidenceOn)
+			}
+		})
+	}
+}
