@@ -25,7 +25,7 @@ const storeMigrationsCheckName = "store-migrations"
 // doctor, which both build their Deps through buildDoctorDepsWith, as the
 // player-dac line is: updater.ProbationStatus's words for a reader beside the
 // bridge, for this binary's version, the start of a serve that holds the data
-// dir's lock now taken off the count (updater.ServeHoldsDataDir; the second
+// dir's lock now taken off the count (updater.RunningServeCounted; the second
 // round: until then one start was taken off whether or not a serve ran). No
 // line where no install of this version awaits its confirmation; ok on
 // probation, a warn from one start that did not end cleanly, a fail at
@@ -48,7 +48,7 @@ func doctorInstallProbation(dataDir string) func(context.Context) []doctor.Check
 				Summary: fmt.Sprintf("not checked: the install marker cannot be read (%s)", fsutil.ErrorWithoutPath(err)),
 				Hint:    "a start of bridge serve removes an install marker it cannot read, and says so"}}
 		}
-		running := updater.ServeHoldsDataDir(dataDir)
+		running := updater.RunningServeCounted(dataDir, st, version.ServerVersion)
 		var out []doctor.Check
 		p := updater.ProbationStatus(st, version.ServerVersion, running)
 		switch p.Level {
@@ -116,7 +116,7 @@ func storeMigrationsLine(dbPath, why string) (doctor.Check, bool) {
 func doctorOpenStore(dbPath string) (*manifest.Store, error) {
 	dataDir := filepath.Dir(dbPath)
 	if st, err := updater.LoadState(dataDir); err == nil {
-		if why := updater.MigrationHeld(st, version.ServerVersion, updater.ServeHoldsDataDir(dataDir)); why != "" {
+		if why := updater.MigrationHeldIn(dataDir, st, version.ServerVersion); why != "" {
 			if n, err := manifest.PendingMigrations(dbPath); err == nil && n > 0 {
 				return nil, fmt.Errorf("the store has %s, which bridge doctor does not run while the install awaits its confirmation "+
 					"(the %s line)", migrationsPending(n), storeMigrationsCheckName)

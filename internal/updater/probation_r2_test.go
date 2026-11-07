@@ -80,6 +80,33 @@ func TestServeHoldsDataDirReadsTheLockAndThisProcesssHolds(t *testing.T) {
 	}
 }
 
+// TestARunningServeIsAskedForOnlyWhereAStartIsCounted: the count holds a
+// serve's start running now only where an install of this version awaits its
+// confirmation with a start counted, and a serve holds the lock; with
+// nothing counted no serve's start is read in it, whoever holds the lock.
+func TestARunningServeIsAskedForOnlyWhereAStartIsCounted(t *testing.T) {
+	dir := t.TempDir()
+	holdServeLock(t, dir)
+	for _, tc := range []struct {
+		name    string
+		st      State
+		current string
+		counted bool
+	}{
+		{"no start counted", probationMarker(0), "0.2.4", false},
+		{"a start counted", probationMarker(1), "0.2.4", true},
+		{"another version's install", probationMarker(1), "0.2.9", false},
+		{"a confirmed install", State{Status: "installed", TargetVersion: "0.2.4", FailedStarts: 1}, "0.2.4", false},
+	} {
+		if got := RunningServeCounted(dir, tc.st, tc.current); got != tc.counted {
+			t.Errorf("%s: RunningServeCounted = %v, want %v", tc.name, got, tc.counted)
+		}
+	}
+	if RunningServeCounted(t.TempDir(), probationMarker(1), "0.2.4") {
+		t.Error("a data dir no serve holds reads as holding one")
+	}
+}
+
 // TestMigrationHeldAsksTheStartsBeforeNow: a command's migration is held
 // only where the install of its version awaits its confirmation, the crash
 // rollback's checks at the limit would put the backup back, and a start

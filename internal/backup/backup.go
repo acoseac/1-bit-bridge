@@ -689,7 +689,7 @@ func restoreMigrationHeld(snapshotDir, dbTarget string, files []string) error {
 	if err != nil {
 		return nil
 	}
-	if why := updater.MigrationHeld(st, version.ServerVersion, updater.ServeHoldsDataDir(dataDir)); why != "" {
+	if why := updater.MigrationHeldIn(dataDir, st, version.ServerVersion); why != "" {
 		return fmt.Errorf("the snapshot's store is %d migration(s) behind this version, which the restore would run, and %w: %s; "+
 			"nothing was restored", pending, updater.ErrMigrationHeld, why)
 	}

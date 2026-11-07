@@ -235,15 +235,15 @@ func DisarmBeforeMigratingAdmitted(dataDir, current string, permit MigrationPerm
 // wait that ctx ended is the caller's stop, returned as it is: only a
 // *StateLockError is a lock that could not be taken. A migration that has no
 // permission for its open asks first, before the install marker's lock,
-// whether a serve holds the data dir's lock, where the answer can matter (one
-// start counted: MigrationHeld).
+// whether the count holds a serve's start running now, where it holds one
+// (RunningServeCounted, for MigrationHeld).
 func disarm(ctx context.Context, dataDir, current string, save func(dataDir string, st State) error, migrating bool,
 	permit MigrationPermit) (DisarmResult, error) {
 	var gate migrationGate
 	if migrating && !permit.admits(dataDir, current) {
 		gate.ask = true
-		if st, err := LoadState(dataDir); err == nil && st.FailedStarts == 1 && AwaitsConfirmation(st, current) {
-			gate.serveRunning = ServeHoldsDataDir(dataDir)
+		if st, err := LoadState(dataDir); err == nil {
+			gate.serveRunning = RunningServeCounted(dataDir, st, current)
 		}
 	}
 	lock, err := LockState(ctx, dataDir)

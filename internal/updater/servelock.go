@@ -49,6 +49,22 @@ func NoteDataDirLock(dataDir string, serve bool) (release func()) {
 	}
 }
 
+// RunningServeCounted reports whether the marker st in dataDir counts the
+// start of a serve running now (backlog B660's second round): an install of
+// current awaiting its confirmation, a start counted, and a serve holding the
+// data dir's lock (ServeHoldsDataDir), which is asked only then, so a command
+// or a doctor that has no count to read tries no lock.
+func RunningServeCounted(dataDir string, st State, current string) bool {
+	return st.FailedStarts > 0 && AwaitsConfirmation(st, current) && ServeHoldsDataDir(dataDir)
+}
+
+// MigrationHeldIn is MigrationHeld for a store open of current in dataDir
+// over the marker st, the start of a serve running now told by
+// RunningServeCounted.
+func MigrationHeldIn(dataDir string, st State, current string) string {
+	return MigrationHeld(st, current, RunningServeCounted(dataDir, st, current))
+}
+
 // ServeHoldsDataDir reports whether a `bridge serve` holds dataDir's lock now
 // (backlog B660's second round): this process's own, by what it noted
 // (NoteDataDirLock), and another process's by a try of the lock, which finds
