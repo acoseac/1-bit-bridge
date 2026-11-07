@@ -1265,6 +1265,11 @@ func TestAConversionWithdrawnOrRetargetedIsReconciled(t *testing.T) {
 		d.store.Set(off)
 		d.be.RefreshDSD(true)
 		d.waitEvents("a handed off again", func(evs []event) bool { return count(evs, "replan", oa) > 0 })
+		// The engine's new hand-off, before the PCM may end: an activation
+		// that reached a in the moment before it would be refused (B782).
+		d.waitCall("a handed off again", func(c call) bool {
+			return c.kind == "prepare" && c.next != nil && c.next.Entry == ids[1] && c.next.ID != oa
+		})
 		d.k.Free()
 		s := d.waitEnded()
 		if sk, ok := s.Skipped(ids[1]); !ok || sk.Reason != "dsd_off_by_choice" {
@@ -1287,6 +1292,11 @@ func TestAConversionWithdrawnOrRetargetedIsReconciled(t *testing.T) {
 		retarget(d)
 		d.be.RefreshDSD(true)
 		d.waitEvents("a handed off again", func(evs []event) bool { return count(evs, "replan", oa) > 0 })
+		// The engine's new hand-off, before the PCM may end: an activation
+		// that reached a in the moment before it would be refused (B782).
+		d.waitCall("a handed off again", func(c call) bool {
+			return c.kind == "prepare" && c.next != nil && c.next.Entry == ids[1] && c.next.ID != oa
+		})
 		d.k.Free()
 		s := d.waitStopped(engine.ReasonEndOfQueue)
 		if len(s.Skips()) != 0 || len(s.Faults()) != 0 {

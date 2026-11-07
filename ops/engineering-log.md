@@ -83980,6 +83980,153 @@ record follows it):
 
 The planted link of B740's red (`.tmp/b740-planted/run/user/1000/bus`, a
 link to nothing) was in place for the test run and was removed after it.
+## 2026-11-07 — B773: a DAC with two identical USB configurations plays DoP
+
+Worker b773, legion0 (Ubuntu 26.04, linux/amd64, Linux 7.0.0-38, Go 1.27.3), branch
+`fix/b773-duplicate-configuration` from main 49071fbf. Commits: 69927023 (the Mytek's captured
+descriptors and a red test), 2a2d1165 (the fix and its table test), then this record. The rule
+and its long form change through `~/onebit/jobs/b773/rules-b773.patch` (a new bullet in
+`player.md`'s B728 section, 441 bytes, taking the file to 98,773 of its 100,000). The
+qualification check takes no bump: `internal/player/policy/` is not guarded, and nothing guarded
+changed.
+
+### The finding
+
+The orchestrator's hardware run on a Mytek Brooklyn DAC+ (25ce:0025, bcdDevice 0100),
+2026-11-07: `bNumConfigurations` 2, and the sysfs `descriptors` attribute 970 bytes holding two
+byte-identical configurations of 476 bytes, both headed `0902dc01040100c001`, value 1.
+`policy.configuration` refused any two configurations of one value, so every DoP rate was
+refused: `dop_gain_unverifiable: the playback path of interface 2, altset 1 does not resolve:
+the descriptors do not resolve: two configurations hold the value 1`. It failed closed: native
+was unaffected and `auto` converted those rates, but DoP could never play on that DAC. A
+diagnostic build that kept the first configuration resolved the path, played DoP at DSD64 and
+DSD128, and a volume move stopped it in 56 to 62 ms.
+
+The capture is the fixture `internal/player/policy/testdata/mytek-brooklyn-dac-plus.descriptors.bin`
+(SHA-256 02400f69dc719bfbc53b54fa74d990ee4bdce797be688942dd7be7c2f9eebece; `binary` in
+`.gitattributes`, since `internal/alsa/testdata/**` is `text eol=lf` and the file would not
+survive that). Its descriptors are the device (type 1), two configurations (2), two interface
+associations (0x0b), 20 interfaces (4), 42 class-specific interface (0x24), 20 endpoint (5) and
+12 class-specific endpoint (0x25) descriptors and two HID (0x21): no string descriptor (3), no
+printable run of four characters in ASCII or UTF-16 either byte order, and `iSerialNumber` is the
+index 3. No serial. Its playback path: interface 2 (altset 1 S32_LE at 32 bits, altset 2 raw data,
+the native DSD one) linked to input terminal 3 (USB streaming), through feature unit 4 (mute and
+volume on the master channel) to output terminal 5 (0x0602), in control interface 0's function;
+interface 1 is its capture (input terminal 1 to USB streaming output terminal 2), interface 3 a
+HID.
+
+### What the kernel does with two configurations of one value
+
+What this host holds: the `linux-headers-7.0.0-38` and `-42` packages, headers, Kconfig and
+Makefiles alone; no `drivers/usb/core/*.c`, no kernel source tree, no Documentation/ABI, and the
+Go module cache holds none either. From `include/linux/usb.h` (7.0.0-38):
+`usb_get_descriptor(struct usb_device *dev, unsigned char desctype, unsigned char descindex,
+void *buf, int size)` asks a descriptor by its index, never by a value; `struct usb_device` keeps
+`config` ("all of the device's configs"), one `actconfig` ("the active configuration") and
+`rawdescriptors` ("raw descriptors for each config"); and `struct usb_host_config`'s comment has
+one configuration active at a time, their number in `bNumConfigurations`.
+
+What could not be read here, stated from upstream's `drivers/usb/core` as this worker knows it
+and unverified on the box: `usb_get_configuration` (`config.c`) reads configuration index 0 to
+`bNumConfigurations` − 1, each by `usb_get_descriptor(dev, USB_DT_CONFIG, cfgno, …)`, first its
+9 bytes and then its `wTotalLength`, keeps each in `rawdescriptors[cfgno]`, and leaves
+`bNumConfigurations` at the number it read (the capture's device descriptor says 2, so both
+copies were read and parsed); `usb_choose_configuration` (`generic.c`) chooses, for an audio
+device with no UAC3 configuration, the first configuration, and returns its
+`bConfigurationValue`; `usb_set_configuration` (`message.c`) takes the first `config[i]` holding
+that value (it breaks at the first match) as `actconfig`, whose interfaces snd-usb-audio parses;
+and sysfs's `descriptors` (`sysfs.c`, `read_descriptors`) writes the device descriptor, then each
+`rawdescriptors[i]` for `config[i].desc.wTotalLength` bytes, in index order. So the Mytek's
+firmware answered index 1 with index 0's bytes, the kernel set the first copy, and the second is
+never active. A unit whose copies differed would get the first index's too, by that code; but the
+bridge cannot see the index (the card's interface name, `<bus>-<port>:<config>.<interface>`, and
+sysfs's `bConfigurationValue` carry the value), so a pair that differs stays refused, and the
+gain check leans on nothing it cannot read on the box.
+
+### The change
+
+`configuration` takes configurations of the selected value as one when they are the same bytes,
+the whole of each by its `wTotalLength`, its configuration descriptor included
+(`bytes.Equal(rest[:total], found)`), and returns the first's body. Two that differ anywhere are
+refused with the sentence a duplicate always had, "two configurations hold the value N", so the
+gain check's reason stays `dop_gain_unverifiable` and its detail the same words. A configuration
+that runs past the stream is still refused before any comparison, whichever copy it is ("a
+configuration's total length runs past its descriptors"; a first copy cut short shifts the walk,
+which then refuses at the next, "a configuration descriptor is cut short or missing"). Another
+value's duplicates are not the selected configuration's. `ParsePlayback`'s doc says "held once
+or as copies byte for byte the same".
+
+### The other readers of the descriptors
+
+- The topology (`policy.ParsePlayback`, under `CheckGain`, which serve's player calls through
+  `readMixer` at admission, at the check after open and on the monitor): changed.
+- `alsa.SysfsReader.QualificationGain` (`descriptorGain`, the harness's DoP admission, in guarded
+  `internal/alsa/`): walks every descriptor of every configuration by bLength, true when any
+  audio control interface holds a feature unit; it reads no value and no `wTotalLength`, and
+  never refused a duplicate. The Mytek reads true with one copy or two (unit 4). Unchanged.
+- The silent probe (`alsapcm.Probe`): reads no descriptor; the kernel answers its HW_REFINEs
+  from the active configuration's altsets.
+- `bridge output dac inspect` and the migration (`dacModelReader`, `playerDSD.boundOf`): read the
+  unit's strings and firmware through `alsa.SysfsReader.Qualification`, never the descriptors
+  attribute (the "descriptors" they name are the string descriptors' values).
+- The profile database's keys (`dsdstate.KeyOf`, `dacprofile.NewKey`): idVendor and idProduct,
+  the card's interface from its sysfs name, the product string; no descriptor.
+- `alsa.SysfsReader.UnitModel`: reads the attribute's bytes, bounded at 256 KiB, and parses
+  nothing; its `Config` is the value the interface name carries.
+
+So no reader resolves the Mytek while another refuses it.
+
+### Evidence
+
+Red first: 69927023's `TestTheMyteksCapturedDescriptorsGiveItsDoPPath` failed every assertion
+on 49071fbf's parse, with the finding's words (both altsets' paths, the gain at and off 0 dB,
+DoP at DSD64 and DSD128), and is green on 2a2d1165. It checks the capture is the finding's (970
+bytes, two copies of configuration 1 in 476 bytes each, no string descriptor); interface 2's
+path at altsets 1 and 2 (input terminal 3, feature unit 4's master volume, output terminal 5);
+the gain check over the S32_LE altset with unit 4's volume at 0 dB (unity) and at -64 dB
+(`dop_gain_not_unity`), through the usbmixer table and altsets its box's /proc gave (replacing a synthetic table on review); and `Effective` planning DoP at DSD64 and DSD128 at 0 dB and refusing DSD64 off it.
+
+`TestByteIdenticalConfigurationsAreOne`: one, two and three the same; two the same with another
+value's between them; two under one header with different bodies, in both orders (a mute alone
+against a volume, one length); two of different lengths; two differing in their configuration
+descriptors alone (bMaxPower); three, the third differing; another value's differing pair, at
+the other value (resolves) and at its own (refused, "the value 2"); two the same with the second
+cut short and with the first; and the Mytek's capture with its second copy cut short by a byte,
+and with its second copy's feature unit 4 a mute alone (byte 605, 0x0f to 0x03). A refused row
+asserts the exact sentence and `dop_gain_unverifiable`; a resolving row the one configuration's
+path and unity at 0 dB.
+
+Negative controls, predicted in a file before any ran, each one exact-once replacement in
+`topology.go` on the committed 2a2d1165, the policy package's test binary run whole, the bytes
+put back from memory; every one went red exactly as predicted and nowhere else, and the tree was
+clean after:
+
+| control | mutation | red |
+|---|---|---|
+| A, comparing only the headers | `bytes.Equal(rest[:rest[0]], found[:found[0]])` | the two rows under one header, "three, the third differing", the Mytek's changed copy |
+| B, accepting differing bytes | `bytes.Equal(rest[:total], rest[:total])` | all six differing rows, the Mytek's changed copy |
+| C (extra), comparing only the bodies | `bytes.Equal(rest[rest[0]:total], found[found[0]:])` | "two differing in their configuration descriptors alone" |
+| D (extra), the first copy taken, the walk ended | `return rest[rest[0]:total], nil` at the first match | all six differing rows, both cut-short rows, the Mytek's cut and changed copies |
+
+**Checks.**
+- The red run above: 69927023's test against 49071fbf's parse, every assertion red with the
+  finding's words; the policy package (`go test -count=1`) ok on 2a2d1165.
+- The rules patch: `git apply --check -v` clean on the worktree; a strict applier of this
+  worker's own gives the generated files byte for byte; on a `git archive` copy of 2a2d1165 with
+  both patched files in, `check-doc-budgets.py` (and its self-test), `rules-for.py --self-test`
+  and `move_entry.py --self-test` pass: `player.md` 98,773 bytes (98.8%, which the script calls
+  close to its budget), the worst load 66.3%.
+- `make fmt vet test build-all` through the shared build lock on 08ee0224 (the slot taken after
+  44 minutes behind two other workers): `go fmt` changed nothing, `make vet` ok, `make test`
+  (race, TMPDIR under `.tmp/_b773`) ok in 34 minutes, 88 packages and 14 without tests, the
+  Linux-only ones run (internal/alsa, internal/alsapcm, internal/atomicwrite, internal/backup,
+  the player's, scripts/install-test); `make build-all` ok.
+- `make vet` with `GOOS=windows` and with `GOOS=darwin`: ok; `go vet` of the policy package for
+  linux/386 and linux/arm64 too, and its tests run as a linux/386 build: ok.
+- `go test -race -count=1 ./internal/player/policy/`: ok.
+- The qualification check against main (`scripts/qualification-version -base main -head HEAD`):
+  "qualification version OK: main..HEAD", no guarded path touched, so no bump.
+- `make docs-check` on the tree as it stands: ok.
 ## 2026-11-07 — B728 B11: the player converts DSD
 
 Worker b728-b11, legion0, branch `feat/b728-b11-convert` from main's c7192a6f. Commits:

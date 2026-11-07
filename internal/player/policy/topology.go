@@ -1,6 +1,7 @@
 package policy
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -155,21 +156,22 @@ func unresolved(format string, a ...any) error {
 
 // ParsePlayback is the playback path of the streaming interface sel names,
 // from the unit's USB descriptors as sysfs gives them, read strictly: the
-// configuration sel names, held once; the streaming interface's alternate
-// setting, held once, with one class-specific general descriptor and an
-// isochronous endpoint toward the device; the audio control interface whose
-// collection holds it (an audio class 1 header's interface list, an audio
-// class 2 interface association), held once, of the same class version
-// (UAC1 or UAC2; UAC3 is refused). The streaming interface's terminal link
-// must name an input terminal; every output terminal but a USB streaming
-// one, which only returns samples to the host, is followed upstream through
-// its units' sources, and every unit on the way from that input terminal is
-// on the path. A source that names no entity, or a clock entity, an output
-// terminal named as a source, a cycle, an entity of a subtype the class
-// does not define on the way, a descriptor cut short, and an input terminal
-// that reaches no output terminal are refused: what the parse cannot
-// follow it never takes for clean. Capture paths (an input terminal of
-// another kind toward a USB streaming output) are not the playback path.
+// configuration sel names, held once or as copies byte for byte the same
+// (configuration); the streaming interface's alternate setting, held once,
+// with one class-specific general descriptor and an isochronous endpoint
+// toward the device; the audio control interface whose collection holds it
+// (an audio class 1 header's interface list, an audio class 2 interface
+// association), held once, of the same class version (UAC1 or UAC2; UAC3 is
+// refused). The streaming interface's terminal link must name an input
+// terminal; every output terminal but a USB streaming one, which only
+// returns samples to the host, is followed upstream through its units'
+// sources, and every unit on the way from that input terminal is on the
+// path. A source that names no entity, or a clock entity, an output terminal
+// named as a source, a cycle, an entity of a subtype the class does not
+// define on the way, a descriptor cut short, and an input terminal that
+// reaches no output terminal are refused: what the parse cannot follow it
+// never takes for clean. Capture paths (an input terminal of another kind
+// toward a USB streaming output) are not the playback path.
 func ParsePlayback(desc []byte, sel Selection) (Path, error) {
 	cfg, err := configuration(desc, sel.Config)
 	if err != nil {
@@ -222,7 +224,14 @@ type association struct {
 // configuration is the descriptors of the configuration whose value is
 // value, after its configuration descriptor. The stream is the device
 // descriptor, then each configuration's descriptors, as long as its
-// wTotalLength says.
+// wTotalLength says; one cut short is refused. Configurations that hold the
+// value are one when they are the same bytes, the whole of each by its
+// wTotalLength, its configuration descriptor included: the kernel reads a
+// configuration by its index, so a unit that answers two indexes with one
+// configuration's bytes holds two copies of it (a Mytek Brooklyn DAC+,
+// B773), and whichever the kernel set, the path is the same. Two that differ
+// are refused: the value the unit's interfaces carry does not say which the
+// kernel set, and the check does not guess.
 func configuration(desc []byte, value int) ([]byte, error) {
 	if len(desc) < 18 || desc[0] != 18 || desc[1] != descDevice {
 		return nil, unresolved("they do not begin with a device descriptor")
@@ -238,17 +247,19 @@ func configuration(desc []byte, value int) ([]byte, error) {
 			return nil, unresolved("a configuration's total length runs past its descriptors")
 		}
 		if int(rest[5]) == value {
-			if found != nil {
+			switch {
+			case found == nil:
+				found = rest[:total]
+			case !bytes.Equal(rest[:total], found):
 				return nil, unresolved("two configurations hold the value %d", value)
 			}
-			found = rest[rest[0]:total]
 		}
 		off += total
 	}
 	if found == nil {
 		return nil, unresolved("no configuration holds the value %d", value)
 	}
-	return found, nil
+	return found[found[0]:], nil
 }
 
 // interfaces are the configuration's interfaces' alternate settings, each
