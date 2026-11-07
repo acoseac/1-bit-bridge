@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -17,7 +18,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/packaging"
+	"github.com/acoseac/1-bit-bridge/internal/tsnet"
 	"github.com/acoseac/1-bit-bridge/internal/updater"
 )
 
@@ -158,17 +161,31 @@ func awayCommands(snap, dacRoot string) []awayCommand {
 			return code, out + errOut
 		}},
 		{name: "tsnet logout", extra: "tailscale:\n    mode: tsnet\n", run: cli("tsnet", "logout", "CFG", "--force")},
-		{name: "tsnet", extra: "tailscale:\n    mode: tsnet\n", run: func(t *testing.T, a awayDataDir) (int, string) {
-			// The gate tsnet auth and status take before they build a tsnet
-			// server, whose state dir is in the data dir: run whole, either
-			// would bring a node up on the tailnet.
-			var stderr bytes.Buffer
-			if _, err := loadConfigAndRequireTsnetMode([]string{"--config", a.cfg}, &stderr); err != nil {
-				return 1, stderr.String()
-			}
-			return 0, stderr.String()
-		}},
+		{name: "tsnet auth", extra: "tailscale:\n    mode: tsnet\n", run: tsnetWithoutItsServer("auth")},
+		{name: "tsnet status", extra: "tailscale:\n    mode: tsnet\n", run: tsnetWithoutItsServer("status")},
 		{name: "init", run: cli("init", "--dir", "BASE", "--yes", "--force", "--library", "LIB", "--no-service", "--skip-doctor")},
+	}
+}
+
+// tsnetWithoutItsServer runs `bridge tsnet sub --config <cfg>` through run's
+// dispatch, its exit code the command's own, with the tsnet server the
+// command builds past its gate stood in for (tsnetCommandServer): a gate
+// that let it through brings no node up on the tailnet and makes no state
+// dir in the data dir, and fails the test.
+func tsnetWithoutItsServer(sub string) func(t *testing.T, a awayDataDir) (int, string) {
+	return func(t *testing.T, a awayDataDir) (int, string) {
+		built := false
+		prev := tsnetCommandServer
+		tsnetCommandServer = func(*config.Config, io.Writer) (*tsnet.Server, error) {
+			built = true
+			return nil, errors.New("the test's stand-in for the tsnet server")
+		}
+		t.Cleanup(func() { tsnetCommandServer = prev })
+		code, out := runCLI(t, "tsnet", sub, "--config", a.cfg)
+		if built {
+			t.Errorf("bridge tsnet %s went past its gate to build its tsnet server over a data dir whose volume is away", sub)
+		}
+		return code, out
 	}
 }
 
