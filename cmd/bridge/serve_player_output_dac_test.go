@@ -536,9 +536,13 @@ func TestBridgeDACIdentityStableAcrossProc(t *testing.T) {
 	}
 }
 
+// TestBridgeDACRedactsIdentityInsideNameAndID: the unit's serial and its
+// port, as sysfs gives it (its configuration and interface after the port)
+// and as a binding names it (the port alone; B728 B8 round 2), are taken out
+// of the dac element's name and id.
 func TestBridgeDACRedactsIdentityInsideNameAndID(t *testing.T) {
 	for _, field := range []string{"name", "id"} {
-		for _, private := range []struct{ name, value string }{{"serial", outputDACSerial}, {"port", dacPort}} {
+		for _, private := range []struct{ name, value string }{{"serial", outputDACSerial}, {"port", dacPort}, {"port alone", strings.TrimSuffix(dacPort, ":1.0")}} {
 			t.Run(field+"/"+private.name, func(t *testing.T) {
 				root, trees := outputDACTree(t)
 				b, _ := dacView(t, trees, dacBinding(config.BindingSerial))

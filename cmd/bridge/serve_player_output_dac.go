@@ -10,6 +10,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/player/binding"
 	"github.com/acoseac/1-bit-bridge/internal/player/hotplug"
+	"github.com/acoseac/1-bit-bridge/internal/player/playback"
 )
 
 // dac projects the boot binding only while the player and the watcher's
@@ -139,10 +140,12 @@ func readPlayerDACObserved(ctx context.Context, observer binding.Observer, devic
 }
 
 // playerDACText removes known identity substrings from the bridge's public
-// labels. MPD's projection is separate and unchanged.
+// labels: the unit's serial, and its port in each of its spellings, as sysfs
+// gives it and as a binding names it (playback.PortForms; B728 B8 round 2).
+// MPD's projection is separate and unchanged.
 func playerDACText(text string, identity alsa.USBIdentity) string {
-	if identity.Port != "" {
-		text = strings.ReplaceAll(text, identity.Port, "[redacted]")
+	for _, p := range playback.PortForms(identity.Port) {
+		text = strings.ReplaceAll(text, p, "[redacted]")
 	}
 	return identity.Serial.Redact(text)
 }

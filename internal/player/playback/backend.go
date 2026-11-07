@@ -255,12 +255,15 @@ func (n Note) StatusPath() string {
 // package documentation's contract, term by term.
 type Backend struct {
 	// dsd is the effective DSD set published now (B728 B7), which selection
-	// admits by and publication reads, swapped in one step: never nil once
-	// New has returned, for a backend with a DSD policy. dsdMu serializes the
-	// refreshes that swap it, dsdRead is when the last one read the policy,
-	// dsdFenceOnce says once that the state's writes are fenced, and
-	// probeState is the silent probe's bookkeeping (ProbeDSD).
+	// admits by, swapped in one step, and dsdPub the pair publication reads:
+	// that set and its read side (B728 B8), swapped right after it, and alone
+	// when the read side alone changes. Neither is nil once New has returned,
+	// for a backend with a DSD policy. dsdMu serializes the refreshes that swap
+	// them, dsdRead is when the last one read the policy, dsdFenceOnce says once
+	// that the state's writes are fenced, and probeState is the silent probe's
+	// bookkeeping (ProbeDSD).
 	dsd          atomic.Pointer[dsdSet]
+	dsdPub       atomic.Pointer[dsdPublished]
 	dsdMu        sync.Mutex
 	dsdRead      time.Time
 	dsdFenceOnce sync.Once
@@ -346,7 +349,12 @@ func New(cfg Config) (*Backend, error) {
 	}
 	b := &Backend{policy: PlayerPolicy{BootID: fmt.Sprintf("%x", randomBoot()), Generation: 1, Reason: reason}, cfg: cfg, log: cfg.Log, sessions: map[engine.SessionID]*session{}, took: map[packKey]format.ALSAFormat{}, zero: zero}
 	if cfg.DSD != nil {
-		b.dsd.Store(&dsdSet{gen: 1, why: "the effective DSD set has not been computed yet"})
+		// Its read side the state's warnings of the bridge's already, a state
+		// that did not read among them, before the first refresh reads the box.
+		set, view := noSet("the effective DSD set has not been computed yet", b.dsdState())
+		set.gen = 1
+		b.dsd.Store(set)
+		b.dsdPub.Store(&dsdPublished{set: set, view: view})
 	}
 	return b, nil
 }

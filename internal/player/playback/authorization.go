@@ -57,6 +57,10 @@ type PlayerPolicy struct {
 	// strings), its descriptor firmware code and the qualification date,
 	// never its port or serial.
 	Model, BCDDevice, QualifiedOn string
+	// DSD is the read side of the set published (B728 B8): what it says of
+	// the bound DAC's DSD beside its tuples, from the same set. Nil for the
+	// harness's admission, which states its record's epoch alone.
+	DSD *DSDView
 }
 
 // ConvertedRate is a DSD rate the effective set converts to PCM (B728 B11):
@@ -433,11 +437,15 @@ func (b *Backend) Policy() PlayerPolicy {
 }
 func (b *Backend) copyPolicyLocked() PlayerPolicy {
 	if b.cfg.DSD != nil {
-		// Production (B728 B7): the effective set published now, the one
+		// Production (B728 B7): the effective set published, the one
 		// selection admits by, with the bound unit's model and firmware and no
-		// record's revision or date, since none is read.
-		d := b.dsd.Load()
-		return PlayerPolicy{BootID: b.policy.BootID, Generation: d.gen, Reason: d.reason(), Tuples: d.tuples(), Converted: d.converted(), Model: d.model, BCDDevice: d.bcd()}
+		// record's revision or date, since none is read; and its read side
+		// (B8), from the pair that holds the two, so one is never read beside
+		// another's.
+		pub := b.dsdPub.Load()
+		d := pub.set
+		view := pub.view.clone()
+		return PlayerPolicy{BootID: b.policy.BootID, Generation: d.gen, Reason: d.reason(), Tuples: d.tuples(), Converted: d.converted(), Model: d.model, BCDDevice: d.bcd(), DSD: &view}
 	}
 	p := b.policy
 	p.Tuples = slices.Clone(p.Tuples)

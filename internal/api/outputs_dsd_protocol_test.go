@@ -208,24 +208,17 @@ func TestDSDOutputProtocolTokens(t *testing.T) {
 			dop[value] = true
 		}
 	}
-	// A converted occurrence's observation is withheld from /v1/outputs until
-	// B728's B8 publishes it: bridgeDSDFacts sends no playback object for one
-	// (TestTheElementListsDSDWhileThePlayerConverts), so its word is no
-	// emitting definition of playback.transport yet. B8 drops this exclusion
-	// and documents the word.
-	if _, ok := transports["TransportConverted"]; !ok {
-		t.Fatal("playback names no TransportConverted: the withheld observation's exclusion is stale")
-	}
+	// Every Transport word an observation names, converted's included (B728
+	// B8 publishes a converted occurrence's observation).
 	observed := map[string]bool{}
-	for name, value := range transports {
-		if name != "TransportConverted" {
-			observed[value] = true
-		}
+	for _, value := range transports {
+		observed[value] = true
 	}
 	tupleTransport := map[string]bool{}
 	if value, ok := transports["TransportDoP"]; ok {
 		tupleTransport[value] = true
 	}
+	read := dsdReadSideTokens(t, root)
 	for _, tc := range []struct {
 		name, field string
 		values      map[string]bool
@@ -233,11 +226,30 @@ func TestDSDOutputProtocolTokens(t *testing.T) {
 		{"tuple_format", "dsdPlayback.tuples[].format", approvedFormats},
 		{"tuple_transport", "dsdPlayback.tuples[].transport", tupleTransport},
 		{"pause", "dsdPlayback.tuples[].pause", pause},
+		{"tuple_evidence", "dsdPlayback.tuples[].evidence", read.rungs},
+		{"converted_dither", "dsdPlayback.converted[].dither", read.dithers},
+		{"converted_filter", "dsdPlayback.converted[].filter", read.filters},
+		{"refused_reason", "dsdPlayback.refused[].reason", read.refusals},
+		{"warning_code", "dsdPlayback.warnings[].code", read.warningCodes},
+		{"warning_reason", "dsdPlayback.warnings[].reason", read.warningReasons},
 		{"state", "playback.state", states},
 		{"transport", "playback.transport", observed},
 		{"pcm_format", "playback.format` (PCM)", pcm},
 		{"dsd_format", "playback.format` (native DSD)", native},
 		{"dop_format", "playback.format` (DoP)", dop},
+		{"playback_evidence", "playback.evidence", read.rungs},
+		{"playback_dither", "playback.converted.dither", read.dithers},
+		{"playback_filter", "playback.converted.filter", read.filters},
+		{"dsd_mode", "dsdMode", read.modes},
+		{"caveat_code", "dsdDAC.profile.caveats[].code", read.caveatCodes},
+		{"caveat_transport", "dsdDAC.profile.caveats[].transport", read.caveatTransports},
+		{"choice_mode", "dsdDAC.choice.mode", read.modes},
+		{"option_mode", "dsdDAC.options[].mode", read.optionModes},
+		{"option_evidence", "dsdDAC.options[].rates[].evidence", read.rungs},
+		{"option_blocked", "dsdDAC.options[].blocked", read.blocked},
+		{"option_dither", "dsdDAC.options[].dither", read.dithers},
+		{"first_use_transport", "dsdDAC.firstUse[].transport", read.transports},
+		{"first_use_state", "dsdDAC.firstUse[].state", read.firstUse},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			prefix := "| `" + tc.field

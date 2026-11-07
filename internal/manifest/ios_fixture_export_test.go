@@ -185,15 +185,18 @@ func TestExportIOSManifestFixtures(t *testing.T) {
 		if err := os.MkdirAll(dir, 0700); err != nil {
 			t.Fatal(err)
 		}
-		// Export packages sequentially (-p=1); preserve the other exporter's section.
+		// Export packages sequentially (-p=1); preserve the other exporters'
+		// sections: the API's outputRecords and cmd/bridge's dacRecords.
 		path := filepath.Join(dir, "fixtures-info.json")
 		if b, e := os.ReadFile(path); e == nil {
 			var old map[string]json.RawMessage
 			if e = json.Unmarshal(b, &old); e != nil {
 				t.Fatal(e)
 			}
-			if v, ok := old["outputRecords"]; ok {
-				info["outputRecords"] = v
+			for _, key := range []string{"outputRecords", "dacRecords"} {
+				if v, ok := old[key]; ok {
+					info[key] = v
+				}
 			}
 		} else if !os.IsNotExist(e) {
 			t.Fatal(e)

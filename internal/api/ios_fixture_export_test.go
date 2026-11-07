@@ -33,11 +33,12 @@ func TestExportIOSOutputFixtures(t *testing.T) {
 		f := listedPlayer()
 		f.UUID = fmt.Sprintf("7d444840-9dc0-11d1-b245-%012d", i+1)
 		f.DSDMode = "native"
-		f.DSDPlayback = &OutputDSDPlayback{BootID: "fixture-boot", PolicyGeneration: 9, QualificationRevision: "fixture-revision", Reason: "fixture display reason", Tuples: []OutputDSDTuple{
-			{Format: "DSD_U32_BE", BitRate: 2822400, Channels: 2, PolicyID: "native-be", Pause: "kernel", TailMS: 10, PrefillMS: 20},
-			{Format: "DSD_U32_LE", BitRate: 5644800, Channels: 2, PolicyID: "native-le", Pause: "silence", TailMS: 0, PrefillMS: 0},
-			{Format: "DSD_U16_LE", BitRate: 2822400, Channels: 2, PolicyID: "native-16", Pause: "kernel", TailMS: 5, PrefillMS: 10},
-		}}
+		f.DSDPlayback = &OutputDSDPlayback{BootID: "fixture-boot", PolicyGeneration: 9, Reason: "fixture display reason",
+			Converted: []OutputDSDConverted{}, Refused: []OutputDSDRefused{}, Warnings: []OutputDSDWarning{}, Tuples: []OutputDSDTuple{
+				{Format: "DSD_U32_BE", BitRate: 2822400, Channels: 2, PolicyID: "native-be", Pause: "kernel", TailMS: 10, PrefillMS: 20},
+				{Format: "DSD_U32_LE", BitRate: 5644800, Channels: 2, PolicyID: "native-le", Pause: "silence", TailMS: 0, PrefillMS: 0},
+				{Format: "DSD_U16_LE", BitRate: 2822400, Channels: 2, PolicyID: "native-16", Pause: "kernel", TailMS: 5, PrefillMS: 10},
+			}}
 		f.Codecs = append(f.Codecs, "dsf", "dff")
 		f.Playback = &OutputPlayback{BootID: "fixture-boot", PolicyGeneration: 8, Session: 41, Occurrence: 51, State: "open", Format: "DSD_U32_BE", RateHz: 88200, LogicalRate: 2822400, Channels: 2, ValidBits: 1, PolicyID: "native-be"}
 		// What a seek within a track takes (B674), which this bridge states in
@@ -53,7 +54,6 @@ func TestExportIOSOutputFixtures(t *testing.T) {
 			f.Playback.State = "revoked"
 			f.DSDPlayback.Tuples = []OutputDSDTuple{}
 			f.DSDPlayback.Reason = "approval_unavailable"
-			f.DSDPlayback.QualificationRevision = ""
 			f.Codecs = listedPlayer().Codecs
 		case "pcm_open":
 			f.State = "playing"
@@ -67,7 +67,6 @@ func TestExportIOSOutputFixtures(t *testing.T) {
 		case "empty_tuples":
 			f.Playback = nil
 			f.DSDPlayback.Tuples = []OutputDSDTuple{}
-			f.DSDPlayback.QualificationRevision = ""
 			f.DSDPlayback.Reason = ""
 			f.Codecs = listedPlayer().Codecs
 		case "no_backend":
@@ -78,19 +77,18 @@ func TestExportIOSOutputFixtures(t *testing.T) {
 			f.Reason = "starting"
 			f.TimeSeekPCM, f.TimeSeekDSD = "", ""
 		case "dop_open":
-			// dsdMode auto with allowDoP (B470 2d.2): DoP where the record
-			// holds no native policy, the epoch's qualification, and a DoP
-			// occurrence's observation.
+			// DoP where native is not played (B470 2d.2), the bound DAC's
+			// model and firmware, and a DoP occurrence's observation.
 			observed := time.Date(2026, 10, 28, 12, 0, 0, 0, time.UTC)
 			f.State, f.DSDMode, f.AllowDoP = "playing", "auto", true
-			f.DSDPlayback.Model, f.DSDPlayback.BCDDevice, f.DSDPlayback.QualifiedOn = "iFi GO bar", "0123", "2026-10-28"
+			f.DSDPlayback.Model, f.DSDPlayback.BCDDevice = "iFi GO bar", "0123"
 			f.DSDPlayback.Tuples = []OutputDSDTuple{
 				{Format: "S32_LE", BitRate: 2822400, Channels: 2, PolicyID: "dop-64", Pause: "kernel", TailMS: 10, PrefillMS: 0, Transport: "dop"},
 				{Format: "DSD_U32_LE", BitRate: 5644800, Channels: 2, PolicyID: "native-le", Pause: "silence", TailMS: 0, PrefillMS: 0},
 				{Format: "S32_LE", BitRate: 11289600, Channels: 2, PolicyID: "dop-256", Pause: "kernel", TailMS: 25, PrefillMS: 10, Transport: "dop"},
 			}
 			f.Playback.Format, f.Playback.RateHz, f.Playback.PolicyID = "S32_LE", 176400, "dop-64"
-			f.Playback.Transport, f.Playback.PackingVersion, f.Playback.ObservedAt, f.Playback.QualificationRevision = "dop", 1, &observed, "fixture-revision"
+			f.Playback.Transport, f.Playback.PackingVersion, f.Playback.ObservedAt = "dop", 1, &observed
 		}
 		fake.set(f)
 		request := httptest.NewRequest(http.MethodGet, "/v1/outputs", nil)
@@ -138,12 +136,16 @@ func TestExportIOSOutputFixtures(t *testing.T) {
 			if string(cap["policyGeneration"]) != "9" {
 				t.Fatal("capability generation lost")
 			}
+			// No record stands behind an owner's qualification since the
+			// cutover: neither member is sent (B728 B8).
+			for _, key := range []string{"qualificationRevision", "qualifiedOn"} {
+				if _, ok := cap[key]; ok {
+					t.Fatalf("%s: dsdPlayback carries %s", name, key)
+				}
+			}
 			if name == "empty_tuples" || name == "dsd_revoked" {
 				if string(cap["tuples"]) != "[]" {
 					t.Fatal("empty tuples must be []")
-				}
-				if _, ok := cap["qualificationRevision"]; ok {
-					t.Fatal("empty revision emitted")
 				}
 			} else {
 				var tuples []OutputDSDTuple

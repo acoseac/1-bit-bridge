@@ -84672,6 +84672,240 @@ passed, and cmd/bridge whole under `-race` passed (1,033 s). The round-2 rules p
 --check` at 16319805, the budgets on a patched copy (player.md 99.3 %), and `verify_moves.py --base
 HEAD` with its two edits declared, all passed.
 
+## 2026-11-07 — B728 B8: the read side of the player's DSD
+
+Worker b728-b8, legion0, branch `feat/b728-b8-read-side`, stacked on B11's head 9dd51ae4 (#1427,
+its rules commit included). Commits: f76f4985 (the tests, red, over declaration stubs), 693217f0
+(the read side on GET /v1/outputs), 38f5109e (PROTOCOL.md), f118310f (PROTOCOL.md's clip count),
+then this record and the gates'. The rule text changes through `rules-b728-b8.patch`: `wire.md`'s
+DSD capability bullet (the design's section 9.1 item 12, B8's half: B9 adds the write route), its
+`logicalRate` and exporter bullets and its GET /v1/outputs bullet; a bullet of `output.md`'s on the
+element's DSD read side, which loads with the read side's tests and goldens by three new globs;
+CLAUDE.md's two rows; and the long forms in `History-rules-output.md`, `History-rules-player.md`
+and `History-b470-native.md`, with the sentences of each that B8 made false.
+
+### What changes
+
+A client reads everything the design's section 7.1 says of the bound DAC's DSD but the check
+(B12's). Beside the tuples, `dsdPlayback` carries the rates the set converts with their plans,
+the rates it refuses with their words and the warnings the app must explain (the bridge's and
+the bound DAC's own), and each tuple its evidence rung and date; `dsdDAC` carries the DAC's key,
+its profile and caveats, the choice that applies with its revision, each mode's option (native's
+and DoP's rates with their evidence, DoP's need of a confirmation and what blocks it, convert's
+plan) and each transport's first use, with the rates a migrated acknowledgement covers;
+`playback` carries a native or DoP occurrence's evidence, and a converted occurrence's plan and
+live clip count; `dsdMode` and `allowDoP` describe the bound DAC's choice, `off` and false with
+none. Absent: the write route and its health flag (B9), the check (B12), and any probe on GET.
+B11's three exclusions are gone: serve's `bridgeDSDFacts` sends `converted`,
+`TestDSDOutputProtocolTokens` no longer excludes `TransportConverted` from `playback.transport`,
+and PROTOCOL.md's row lists `converted`.
+
+Two members went, `qualificationRevision` (on `dsdPlayback` and `playback`) and `qualifiedOn`
+(on `dsdPlayback`). They carried an owner's approved record's revision and qualification date;
+production has read no record since B7's cutover, so serve had sent neither (B7's
+`TestOutputsPublishTheEffectiveSet` held their absence on `dsdPlayback`, and serve's observation
+had no record to name), and only the harness's admission, on no route, fills them in memory.
+What a released iOS app does with them absent, as the brief's citations into the iOS repo give
+it (not read here: legion0 has no iOS checkout): it decodes both as optional
+(`BridgeOutputsResponse.swift` near lines 383 and 396), its epoch comparison
+(`BridgeOutputPlayerEvidence.swift` near 122) compares an absent revision with an absent one, and
+Signal Path's owner-qualification line (`BridgeOutputPlayerSignalInfo.swift` near 423 to 436) is
+not shown. `ProtocolVersion` stays 1.
+
+### As built
+
+`playback.DSDView` (`dsd_view.go`) is made by `readDSD` from the reading and the one read of the
+DSD state it computes the set from, carried in the published set (`dsdSet.view`) and cloned into
+`PlayerPolicy.DSD` by `copyPolicyLocked`; `Backend.Facts` returns it beside the set's tuples and
+converted rates and the live observation, under `policyMu`, and serve's `bridgeOutput.facts`
+calls `Facts` once a request (`bridgeDSDFacts`). That read opens no file and takes neither the
+store's lock, which a write holds across its fsync, nor `dsdMu`, which a refresh holds across its
+reading of the box: it waits on `policyMu`, held for copies and the observation's updates, and
+on the current sink's lock, which `Position` takes and no kernel call holds. (The route's other
+reads are as before: the identity file until the engine runs, and B543's bounded reading for the
+element's `dac`.) `dsdDAC` is the
+view's DAC, omitted while the set was computed for none, and never decided by the element's `dac`
+(B543's own reading of the box).
+
+`refreshDSD` stores a set that plays what the published one plays but says another thing of the
+DAC under the generation it had (`reflect.DeepEqual` of the two views), reconciling and logging
+nothing. The policy for `policyGeneration`: the design's section 7.1 publishes the tuples and the
+converted rates under the boot and the epoch, which a client's grant keys on, and section 2.5's
+records (a first use, the evidence, a choice's revision, the warnings) change what is said of
+the DAC, never what plays; a write that changes what plays moves a plan, and the generation with
+it. Such a change reaches the wire at the next refresh: once a second, sooner after a state
+write, a probe's answers or a watcher snapshot, and every 100 ms while a session plays DSD.
+
+Evidence is the rung and date the policy computed (`Plan.Evidence`, `EvidenceOn`), never rebuilt
+from the state, so a probe's acceptance held in the cache alone is `driver_accepted` with no date
+and a durable acceptance under another kernel or firmware is no rung of this box's; an
+observation's is its tuple's in the set published now, by policy ID, else the one it was
+admitted with; a PCM and a converted occurrence carry none. The key on the wire is the model
+key's `DACKey` with the unit's own serial and port taken out of the product string first
+(`wireKey`), so two units of a model share it; the free text (the model, a profile's name, its
+caveats' notes) goes out with the unit's and the boot binding's serial and port taken out, and
+the words of closed lists are not redacted, which taking out a short serial would mangle. The
+clip count is the converter's (`occ.clipped`, an atomic the producer stores after each read of at
+most 4,096 frames) loaded at each request, ahead of what the DAC has played by the player's
+lookahead and the hardware's buffer, at no cost on the audio path; 38f5109e's sentence on it said
+"at each 4,096 frames" and "at most the player's buffer", which f118310f corrects. Options list
+native, DoP, convert and off, never auto, which is no explicit choice. The console's Player page
+keeps the boot snapshot's legacy words (`bootDSDMode`, `bootAllowDoP`) until B13 replaces it.
+The goldens, `cmd/bridge/testdata/dsd-outputs`, are the whole response for six kinds of DAC from
+the real backend through serve's view and the route, deterministic, with no host, serial or port,
+rewritten only with `BRIDGE_WRITE_DSD_GOLDENS`; `TestExportIOSBridgeDSDFixtures` exports the same
+cases to the iOS mirror's `dsd_dac_outputs.json` after the manifest's and the API's exporters
+(`-p=1`), its records under `dacRecords`.
+
+No guarded path changed (`version_gate.go`'s prefixes and paths), so the qualification version
+stays 41; `scripts/qualification-version` passed against main's merge base, c7192a6f, and against
+9dd51ae4.
+
+### Red first
+
+At f76f4985, over stubs that declare what the tests read and fill none of it: in playback,
+`TestTheReadSideIsTheSetsOwn` (four cases), `TestAChangeThatMovesNoPlanIsPublishedInItsEpoch` and
+`TestTheEvidenceIsThePolicysRung` (eight cases); in api, `TestDSDOutputProtocolMembers` and
+`TestDSDOutputProtocolTokens` (twenty rows); in cmd/bridge,
+`TestTheBridgeElementCarriesTheDACChoice` (five of its seven cases; the backend not ready and no
+DAC bound read off already), `TestAConvertedEntryCarriesItsPlan` (both cases),
+`TestAMigrationFailureIsPublished` (its serve case too), `TestADamagedStateIsPublishedWithNoDAC`,
+`TestNoDACKeyOrModelCarriesASerialOrAPort`, `TestEachKindOfDACsWholeResponseIsItsGolden` (no
+goldens yet), and B11's `TestTheElementListsDSDWhileThePlayerConverts`,
+`TestPlaybackFactsTransport` and `TestOutputsQualificationFacts`, whose expectations B8 changes.
+`TestNoHealthFlagBeforeItsRoute` and the exporters were green before and after: they pin what B8
+must not add, and what it must keep building.
+
+### Negative controls
+
+Each an exact-once mutation of the committed tree at f118310f, predicted by name in
+`.tmp/_b728-b8/controls.predictions.txt` before any ran, the test binaries built with it and the
+source restored from memory at once, `git status` empty after each. The tests run: playback's B8
+and B7 publication tests (five), cmd/bridge's read-side and B11 publication tests (twelve) and
+api's health and protocol tests (eight), all green unmutated.
+
+| | mutation | red |
+|---|---|---|
+| a | `unitText` keeps the unit's serial: the model under a port-only binding | as predicted: `TestThePublishedModelNamesNoSerialOrPort`, `TestNoDACKeyOrModelCarriesASerialOrAPort` and its serve case |
+| b | `/v1/health` advertises `bridgeDSDChoice` beside `bridgeOutput` | as predicted, `TestNoHealthFlagBeforeItsRoute` and `TestHealthFeaturesCompleteSet`; `TestHealthFeatureCapacityCoversEveryKey`, predicted red, stayed green, since it parses `api.go` at run time and the runner had restored it: run with the mutation in place it went red (40 keys, a capacity of 39) |
+| c | the view's DAC rebuilt from a fresh read of the store at every copy | as predicted: `TestTheBridgeElementCarriesTheDACChoice`'s seeded state file (the route read the state), `TestNoDACKeyOrModelCarriesASerialOrAPort`'s in-memory half (no unit to redact by: the key a hash of the serial) |
+| d | `refreshDSD` keeps the published set whenever the next plays the same | as predicted: `TestAChangeThatMovesNoPlanIsPublishedInItsEpoch`'s four steps, `TestTheBridgeElementCarriesTheDACChoice`'s first use observed on a published backend |
+| e | a converted occurrence's observation takes the native option's evidence at its source rate | as predicted: `TestAConvertedEntryCarriesItsPlan`'s 176.4 kHz case (`streaming_observed`); its 44.1 kHz case, where native is not offered, and the goldens stayed green |
+
+### Gates
+
+At 99c66d91, inside the build slot, on Go 1.27.3: `make fmt` changed nothing; `make vet` and its
+windows, darwin and linux/386 legs passed; `make docs-check` passed (CLAUDE.md 80.9 %, player.md
+99.3 %, the worst load 66.0 %), and on a copy with the rules patch applied (CLAUDE.md 81.4 %,
+`output.md` 69,771 bytes, `wire.md` 55,334, the worst load 66.0 %), where
+`TestEveryCitedTestNameExists` and `TestEveryBridgeWordIsInTheProtocol` passed and `rules-for.py`
+names `output.md` for the read side's tests and goldens; `go test -race` of the touched packages
+(playback, manifest, api, cmd/bridge) passed (1,468 s); both native-integration overlays passed,
+every case CI names (13 and 29 cases); `scripts/qualification-version` passed at 41 against
+c7192a6f and against 9dd51ae4; `make test` passed, 87 packages ok (1,848 s), the Linux-only tests
+(ALSA, alsapcm, the durable writer, the identity paths) run here, not vetted alone; `make
+build-all` passed. alsa-abi did not run: B8 touches neither `internal/alsapcm` nor
+`scripts/alsa-abi`.
+
+## 2026-11-07 — B728 B8 round 2: three review points on #1430
+
+Worker b728-b8, legion0, the same branch, the orchestrator's application of round 1's rules
+patch (5bfec662) under it. Commits: ef371fbc (point 1, red), 6d7ccd4d (its fix), 0aded1fb
+(point 2, red), 5cf0c64f (its fix, with PROTOCOL.md), b64c7dda and fc713d32 (point 3 and its
+sibling in B543's labels, red), 411f7628 (their fix), 04b60f79 (qualificationVersion 42), then
+this record and the gates'. The rule text changes through `rules-b728-b8-r2.patch`. Each point
+was the reviewer's reading of the code; each was confirmed red before its fix.
+
+### 1. A view-only refresh stranded the occurrences admitted under the set it replaced
+
+Confirmed. Round 1's `refreshDSD`, for a reading that played what the published set played and
+said another thing of the DAC, stored the new `*dsdSet` under the generation it had and
+reconciled nothing. Every occurrence admitted under the old pointer stayed there: what is
+compared with the published set by pointer is the gapless join (`producer.go`, a successor
+admitted under a set a refresh has replaced waits for that refresh's reconciliation) and a
+converted join window's successor (`holdLocked`'s settled check); the activation's check and
+the readmission at an open's end take a stale pointer through `policy.Reconcile` or a fresh
+selection, so the occurrence playing plays on. Its successor, admitted before the change, never
+joined: on every first DSD playback of a transport, whose first use is observed at its fifth
+second, while the next track is already prepared. The red test,
+`TestAFirstUseObservedWhileDSDPlaysKeepsTheProducerWriting` (`internal/alsapcm`), holds the
+producer inside the first track's content (`files.stall`), lets the successor be prepared,
+publishes the change through the session's monitor and lets the producer go: on the old tree
+both cases, a native successor and a converted one in its predecessor's join window, hung to
+the one-minute watchdog, the producer in `waitWake` with no channel. The fix keeps the set's
+pointer, as the reviewer preferred: a reading that plays the same stores no set, and the read
+side is published beside the set in one pair (`dsdPublished`), which GET /v1/outputs reads, so
+no reader sees one set's tuples beside a view made for another; a change of what plays stores
+the set, then the pair. Repointing under each session's lock was not taken: it would run a
+reconciliation's walk for a change that plays nothing new, and a pointer kept means there is
+nothing to repoint.
+
+### 2. A retained observation took another DAC's evidence
+
+Confirmed. `bridgePlayback` replaced an observation's evidence with its tuple's in the set
+published now whenever a tuple had its policy ID, which names the tuple's transport, format,
+rate and timing and not the DAC, its firmware or the set. The red test,
+`TestARetainedObservationKeepsItsOwnDACsEvidence`, keeps the observation of a native DSD64
+occurrence on the test DAC (driver_accepted, 2026-11-06), then publishes the set of another
+model the port binding finds in the port, and of the same model on another firmware, each
+with its DSD64 tuple of that policy ID at listener_confirmed: the old tree published
+listener_confirmed and 2026-11-02 for the first DAC's occurrence, both cases. The fix
+substitutes only while the set published is the one the occurrence was admitted under, its
+boot and generation the observation's: since point 1's fix a generation names one stored set,
+and so the unit and the firmware it was computed for. Otherwise the observation keeps the
+evidence its admission gave it. PROTOCOL.md's sentence on an observation's evidence says so,
+and that a `policyId` names neither the DAC nor its firmware.
+
+### 3. The port alone, in a USB string, reached the key
+
+Confirmed, and its sibling with it. sysfs gives a unit's port path with its configuration and
+interface after the port (`platform-xhci-hcd.0/usb2-1:1.0`), a binding names the port alone,
+and `unitText` replaced the sysfs form alone: a product string holding the port alone kept it
+in the model, `wireKey` hashed it, and under a model binding serve has no port to redact by.
+`TestNoDACKeyOrModelCarriesASerialOrAPort`'s fixture had an interface-free port, which hid it;
+its new case (the sysfs port with its interface, the USB strings holding the port alone, a
+model binding) was red: the model carried the port and two units at two ports published two
+keys. B543's `playerDACText`, the same element's `dac` labels, had the same one-form
+replacement, and `TestBridgeDACRedactsIdentityInsideNameAndID`'s new port-alone cases were red
+for the name and the id. `playback.PortForms` names every spelling (as given, canonical, the
+port alone, `usbid.Port.Place`), the longest first; `unitText`, serve's `playerText` and
+`playerDACText` take each out.
+
+### The qualification version
+
+The point-1 test is under the guarded `internal/alsapcm/` prefix, so `qualificationVersion`
+moves from 41 to 42, the next free one past main's 40 and B11's 41; the runbook's five
+references follow, with a paragraph on what 42 covers: the guarded prefix's tests alone, no
+sink, packer, plan or harness reader. `scripts/qualification-version` passes against main's
+merge base (c7192a6f), 9dd51ae4 and 5bfec662.
+
+### Negative controls
+
+Each an exact-once mutation of the committed tree at 04b60f79, predicted by name in
+`.tmp/_b728-b8/controls_r2.predictions.txt` before any ran, the binaries built with it and the
+source restored from memory at once, `git status` empty after each; the sets (alsapcm's five
+DSD policy and conversion tests, playback's five read-side and publication tests, cmd/bridge's
+seven read-side and `dac` tests) green unmutated.
+
+| | mutation | red |
+|---|---|---|
+| r1 | `refreshDSD` stores the next set, under the generation it had, for a change that moves no plan | as predicted: both cases of `TestAFirstUseObservedWhileDSDPlaysKeepsTheProducerWriting`, each a hang to the watchdog |
+| r2 | `bridgePlayback` substitutes whenever the boot is the observation's, the generation not asked | as predicted: both cases of `TestARetainedObservationKeepsItsOwnDACsEvidence` |
+| r3a | `unitText` takes out the longest spelling of the port alone | as predicted: `TestNoDACKeyOrModelCarriesASerialOrAPort`'s model-binding case; the `dac` labels' test green |
+| r3b | `PortForms` adds the canonical form alone, never the port alone | as predicted: that case and both port-alone cases of `TestBridgeDACRedactsIdentityInsideNameAndID` |
+
+### Gates
+
+At d1bc3b43, inside the build slot, on Go 1.27.3: `make fmt` changed nothing; `make vet` and its
+windows, darwin and linux/386 legs passed; `make docs-check` passed, and on a copy with
+`rules-b728-b8-r2.patch` applied (CLAUDE.md 81.5 %, `output.md` 70,418 bytes, player.md 99.3 %,
+the worst load 66.1 %), where `TestEveryCitedTestNameExists` and
+`TestEveryBridgeWordIsInTheProtocol` passed; `go test -race` of the touched packages (playback,
+alsapcm, api, qualification, cmd/bridge) passed (1,051 s); both native-integration overlays
+passed, every case CI names (13 and 29); `scripts/qualification-version` passed at 42 against
+c7192a6f, 9dd51ae4 and 5bfec662; `make test` passed, 87 packages ok (1,825 s); `make build-all`
+passed. alsa-abi did not run: no ABI definition or `scripts/alsa-abi` file changed, only a test
+of the backend under `internal/alsapcm/`.
 ## 2026-11-07 — B728 B11: the hardware run on the Pi 5 with the Mytek
 
 At PR #1427's head 9dd51ae4, on a Raspberry Pi 5 held at 1.5 GHz by its conservative governor, the Mytek Brooklyn DAC+ over USB. The box's service was stopped for 13 min 23 s and came back on its release, its files unchanged and its mixer where it was. The box has no file capabilities and no approval record, so section A ran on minted records.
