@@ -79695,8 +79695,8 @@ word by `TestEveryDSDRefusalWordIsInTheProtocol`, and moves
 `ReasonDACUnread` beside the other refusals there, so the guard maps it too.
 
 **Tests**, new: `TestSelectionAndPublicationReadOneSet` (also under a race
-of refreshes and admissions), `TestAConvertedRateIsRefusedUntilThePlayerConverts`,
-`TestAnUnknownDACsDSDStaysRefused`, `TestAMigratedChoiceRefusesARateItsRecordDidNotApprove`,
+of refreshes and admissions), `…AConvertedRateIsRefusedUntilThePlayerConverts`,
+`…AnUnknownDACsDSDStaysRefused`, `TestAMigratedChoiceRefusesARateItsRecordDidNotApprove`,
 `TestAMigratedDoPSetupWithUnverifiableGainRefuses`,
 `TestThePublishedReasonIsTheLowestRatesWordOnlyWhenNoRatePlays`,
 `TestAStateThatDoesNotReadRefusesEveryRate`, `TestNoSetComesFromAReadingThatIsNotFresh`
@@ -79752,8 +79752,8 @@ C2 a stale set after a change, a refresh reconciling nothing
 (`TestAGainChangeRevokesDoPWithoutConsent`); C4 the monitor never started
 (the same); C5 streaming_observed early, at 4 s (its 4.9 s case); C6
 streaming_observed beside a failed decode (its decode case); C7 a converted
-rate played (`TestAConvertedRateIsRefusedUntilThePlayerConverts`,
-`TestAnUnknownDACsDSDStaysRefused`); C8 the opened node's identity unchecked
+rate played (`…AConvertedRateIsRefusedUntilThePlayerConverts`,
+`…AnUnknownDACsDSDStaysRefused`); C8 the opened node's identity unchecked
 (`TestTheOpenedNodeMustBeTheIdentityThePolicyWasComputedFor`, both cases:
 the activation's refresh refuses as a second layer, after the open recorded
 a driver acceptance for the wrong unit); C9 the DoP gain check at the open
