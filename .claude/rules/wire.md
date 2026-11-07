@@ -73,7 +73,8 @@ Audited PR-by-PR; verified clean at the time of this section's introduction. Re-
   `pendingDeletions` counts (each cached per view; the folders are every
   view's), search, the
   smart mixes (an item left out, the positions after it closed up, an emptied
-  family not sent, the Christmas family in its window among them) and the
+  family not sent, the Christmas family in its window among them, sent only
+  to a view whose items clear its floor: `smart-mixes.md`) and the
   playlist feed (a gated line unresolved, the album
   rule over the view's tracks, the version naming the view:
   `playlistFeedRulesVersion` 3, so one view's ETag is never another's 304).
@@ -112,6 +113,7 @@ Audited PR-by-PR; verified clean at the time of this section's introduction. Re-
   `TestPendingDeletionsAreEachViewsRows`,
   `TestAnUpgradeOverAGatedRowSendsEveryDeltaCursorToAFullSync`,
   `TestTheChristmasFamilyServesEachViewItsItems`,
+  `TestAViewLeftBelowTheChristmasFloorIsNotSentTheFamily`,
   `TestTheFilesystemViewsAreNotHeldBack`,
   `TestAnAllWavPackLibraryIsAnHonestEmptyFeedToAClientThatDeclaresNothing` and
   `TestTheGoldenManifestOfEachView` (its goldens in

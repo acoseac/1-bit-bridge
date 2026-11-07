@@ -149,9 +149,21 @@ The record behind each rule is in `ops/engineering-log.md` (backlog B451, 2026-1
   (what follows the rightmost dash of any style; no title another song
   shares, so no bare `Silent Night`), or one of four title words. The
   artist's name never qualifies a track, and `jul` and `natal` count only
-  as a genre segment. The floor is 15 emitted tracks and 3 albums or 3
-  artists among the qualifying tracks, the cap 100, 8 an artist before the
-  rest fill in the same order, seeded by the season's year
+  as a genre segment. The floor is one predicate, `season.MeetsFloor`, the
+  owner's rule: 15 tracks from 3 albums or 3 artists, asked of the
+  qualifying tracks at generation (a client that declares every gated
+  format may be sent all of them) and of each request's view at the
+  response, which leaves the family out of a view the format gate leaves
+  below it (round 4 of backlog B489). The cap is 100, filled first from
+  the tracks every client is served, 8 an artist before the rest fill in
+  the same order, then from the WavPack and Monkey's Audio tracks, each
+  format spread the same way, the two in turn (`selectChristmas`):
+  shuffled as one pool, a thousand `.wv` files took the cap from the
+  fifteen FLACs an app that declares neither can play, all season. Each
+  item stores its album for the response's floor
+  (`SmartPlaylistItem.Album`, never on the wire), and a blob cached before
+  it is judged on its artists until the next build. The order is seeded
+  by the season's year
   (`season.Year`: 1 to 5 January is the previous December's, and it turns
   on 6 January, a day nothing is served). It is no
   discovery shelf and reads no exclusion. `GET /v1/smart-playlists`
@@ -162,8 +174,11 @@ The record behind each rule is in `ops/engineering-log.md` (backlog B451, 2026-1
   that is a name too without its guards, don't put in the carol table a
   title another song shares, don't filter in SQL before matching, don't
   filter only at generation (a cache built on 5 January would serve it on
-  the 6th, and one built in November would miss 1 December), and don't
-  seed its order by the calendar year.** Tests:
+  the 6th, and one built in November would miss 1 December), don't
+  seed its order by the calendar year, don't let a gated track take the
+  cap ahead of one every client is served or one gated format crowd out
+  the other, don't hold the floor at generation and the response in two
+  places, and don't put the album on the wire.** Tests:
   `TestMatchChristmasExclusions`,
   `TestEveryChristmasFixtureThroughTheStoresRead`,
   `TestMatchingTrackFeaturesHandsEveryServedRowToItsMatch`,
@@ -174,4 +189,12 @@ The record behind each rule is in `ops/engineering-log.md` (backlog B451, 2026-1
   `TestTheSeasonsYearTurnsOnlyAsAWindowCloses`,
   `TestTheChristmasFamilyIsServedOnlyInItsWindow`,
   `TestAChristmasCacheIsServedByTheClockAtTheRequest`,
-  `TestTheConsoleMarksTheChristmasMixOutOfSeason`.
+  `TestTheConsoleMarksTheChristmasMixOutOfSeason`,
+  `TestMeetsFloorIsTheOwnersRule`,
+  `TestRegenerate_ChristmasStoresWhatEveryClientCanPlayFirst`,
+  `TestRegenerate_ChristmasSharesTheGatedRoomBetweenTheFormatsInTurn`,
+  `TestTheChristmasFamilyFillsFromWhatEveryViewCanPlayFirst`,
+  `TestAViewLeftBelowTheChristmasFloorIsNotSentTheFamily`,
+  `TestAChristmasFamilyOfOneArtistOrOneAlbumClearsTheFloorInEveryView`,
+  `TestAThousandWavPackFilesLeaveTheAPEViewItsFifteen`,
+  `TestAChristmasFamilyCachedWithoutAlbumsIsJudgedOnItsArtists`.
