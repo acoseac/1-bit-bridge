@@ -31,6 +31,11 @@ import (
 // start by hand); the first start that finds its data dir again removes the
 // note and says so. A note that cannot be written leaves the next start to
 // say the refusal again; what serve refuses, and how, is the same either way.
+// The one write whose failure quiets a refusal is that removal: a note the
+// start that found its data dir cannot remove (its directory made read-only
+// since it was written, a handle another process holds on Windows) keeps the
+// next refusal quiet until a day after the last was said, which that start
+// says at Warn.
 
 // dataDirRefusalSuffix names the note beside the record.
 const dataDirRefusalSuffix = ".refused"
@@ -100,7 +105,7 @@ func endServeRefusal(record, dataDir string) {
 	note := readDataDirRefusalNote(path)
 	if err := os.Remove(path); err != nil {
 		if !errors.Is(err, fs.ErrNotExist) {
-			logger.Warn("could not remove the note that serve refused its data directory: the next start refused there may not say why",
+			logger.Warn("could not remove the note that serve refused its data directory: if its volume goes again within a day of the last refusal, the starts it refuses may not say why",
 				"note", path, "err", err)
 		}
 		return

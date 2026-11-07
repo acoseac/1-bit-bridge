@@ -3,10 +3,12 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -130,6 +132,50 @@ func TestServeSaysItsRefusalOncePerState(t *testing.T) {
 	}
 	if said := refuseTimes(t, cfg, dataDir, 2); !said[0] || said[1] {
 		t.Errorf("after the volume went again, starts said the refusal %v, want the first alone", said)
+	}
+}
+
+// TestServeSaysTheRefusalOfADataDirItsNoteDoesNotName: the note is of one
+// state, the refusal of the data dir it names, so a refusal of another data
+// dir is said, with the note just written, and the start after it is quiet.
+func TestServeSaysTheRefusalOfADataDirItsNoteDoesNotName(t *testing.T) {
+	record := filepath.Join(t.TempDir(), ".bridge.yaml.datadir")
+	now := time.Now()
+	var said []bool
+	for i, dataDir := range []string{"/mnt/usb/bridge", "/mnt/usb/bridge", "/mnt/nas/bridge", "/mnt/nas/bridge"} {
+		var out strings.Builder
+		sayServeRefusal(&dataDirGoneError{dataDir: dataDir, record: record}, &out, now.Add(time.Duration(i)*2*time.Second))
+		said = append(said, strings.Contains(out.String(), "serve: the data directory "+dataDir+" held this bridge's database"))
+	}
+	if !slices.Equal(said, []bool{true, false, true, false}) {
+		t.Errorf("starts refusing two data dirs in turn said the refusal %v, want [true false true false]", said)
+	}
+}
+
+// TestAStartThatCannotRemoveTheNoteSaysSo: the start that finds its data dir
+// again and cannot remove the note (its directory made read-only since) says
+// at Warn that a refusal soon after may not be said, and leaves the note.
+func TestAStartThatCannotRemoveTheNoteSaysSo(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs a directory whose mode refuses this user a removal")
+	}
+	dir := t.TempDir()
+	record := filepath.Join(dir, ".bridge.yaml.datadir")
+	sayServeRefusal(&dataDirGoneError{dataDir: "/mnt/usb/bridge", record: record}, io.Discard, time.Now())
+	if err := os.Chmod(dir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+	rec := loggingtest.Record(t)
+	endServeRefusal(record, "/mnt/usb/bridge")
+	if lines := rec.Carrying("could not remove the note that serve refused its data directory"); len(lines) != 1 || !strings.HasPrefix(lines[0], "WARN") {
+		t.Errorf("a start that could not remove the note said so %d time(s), want once at Warn:\n%s", len(lines), strings.Join(rec.All(), "\n"))
+	}
+	if lines := rec.Carrying("holds its database or its lock file again"); len(lines) != 0 {
+		t.Errorf("a start that could not remove the note said the refusal was over:\n%s", strings.Join(lines, "\n"))
+	}
+	if _, err := os.Stat(record + dataDirRefusalSuffix); err != nil {
+		t.Errorf("the note that could not be removed is not there: %v", err)
 	}
 }
 
