@@ -84821,3 +84821,18 @@ source restored from memory, `git status` empty after each.
 The red commit added a test under `internal/alsapcm/`, a guarded prefix. B9 holds 44 on its
 branch, so this takes 45; the runbook's five current references move with it, and its record says
 what 45 covers.
+
+### Gates (round 2)
+
+At 9564bd78, inside the build slot, on Go 1.27.3: `make fmt` changed nothing; `make vet` and its
+windows, darwin and linux/386 legs passed; `make docs-check` on the tree failed as it does at the
+round's base (player.md at 100,041 bytes since 4ac62f63), and passed on a copy with
+`rules-b762-r2.patch` applied (CLAUDE.md 82.1 %, player.md 98.9 %, the worst load 66.9 %), where
+`verify_moves.py --base 9564bd78` passed with the move and the declared edits, and
+`TestEveryCitedTestNameExists` passed and failed a ghost citation planted in the copy's History
+file; `scripts/qualification-version` passed against the round's base (4ac62f63, 43) and main's
+2a1b4319 (40), 45 at HEAD; `go test -race` of the touched packages (playback, dsdstate,
+qualification, alsapcm, cmd/bridge) passed (1,225 s); both native-integration overlays passed,
+every case CI names (13 and 29); `make test` passed, 89 packages ok (2,042 s), its TMPDIR under
+`.tmp/_b762`, the Linux-only tests run here; `make build-all` passed. alsa-abi did not run: no ABI
+definition or `scripts/alsa-abi` file changed.
