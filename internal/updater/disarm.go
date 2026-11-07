@@ -49,6 +49,12 @@ type DisarmResult struct {
 	// Permit is serve's admission's permission to migrate the store at its
 	// own start (MigrationPermit), the zero value but from AdmitBoot.
 	Permit MigrationPermit
+	// Start is the counted start's hold on its own lock, whose token the
+	// count's write carried (StartHold, State.RunningStart; backlog B660's
+	// third round): nil where the admission counted nothing, or could not
+	// take one, which leaves the start read as not running. The start lets
+	// go of it as it returns, once its token is cleared (EndStart).
+	Start *StartHold
 	// State is the marker as the disarm left it: as it wrote it, or as it
 	// read it where it wrote nothing.
 	State State
@@ -79,19 +85,22 @@ var ErrMigrationHeld = errors.New("this command does not migrate the store")
 
 // migrationGate is what a migrating store open asks before its migration
 // (MigrationHeld): whether it must, its open having no admission's
-// permission, and whether a serve holds the data dir's lock, asked before the
-// install marker's lock is taken.
+// permission.
 type migrationGate struct {
-	ask, serveRunning bool
+	ask bool
 }
 
-// holds says why the open must not migrate the store under the marker st, ""
-// where it may.
-func (g migrationGate) holds(st State, current string) string {
+// holds says why the open must not migrate the store in dataDir under the
+// marker st, "" where it may: the start a serve running now counts read of st
+// itself (MigrationHeldIn), so under the install marker's lock the count and
+// the running start's token are read together (backlog B660's third round:
+// the second round read the running start before its wait for that lock, so a
+// take-back that landed in the wait was taken off twice).
+func (g migrationGate) holds(dataDir string, st State, current string) string {
 	if !g.ask {
 		return ""
 	}
-	return MigrationHeld(st, current, g.serveRunning)
+	return MigrationHeldIn(dataDir, st, current)
 }
 
 // ErrMigrationVetoed is what a migrating store open's refusal matches
@@ -234,18 +243,11 @@ func DisarmBeforeMigratingAdmitted(dataDir, current string, permit MigrationPerm
 // (disarmHeld), or without it where it cannot be taken (disarmUnlocked). A
 // wait that ctx ended is the caller's stop, returned as it is: only a
 // *StateLockError is a lock that could not be taken. A migration that has no
-// permission for its open asks first, before the install marker's lock,
-// whether the count holds a serve's start running now, where it holds one
-// (RunningServeCounted, for MigrationHeld).
+// permission for its open asks, of the marker it reads under that lock,
+// whether the count holds a serve's start running now (migrationGate).
 func disarm(ctx context.Context, dataDir, current string, save func(dataDir string, st State) error, migrating bool,
 	permit MigrationPermit) (DisarmResult, error) {
-	var gate migrationGate
-	if migrating && !permit.admits(dataDir, current) {
-		gate.ask = true
-		if st, err := LoadState(dataDir); err == nil {
-			gate.serveRunning = RunningServeCounted(dataDir, st, current)
-		}
-	}
+	gate := migrationGate{ask: migrating && !permit.admits(dataDir, current)}
 	lock, err := LockState(ctx, dataDir)
 	if err != nil {
 		var refused *StateLockError
@@ -277,7 +279,7 @@ func disarmUnlocked(dataDir, current string, migrating bool, gate migrationGate,
 	st, err := LoadState(dataDir)
 	held := ""
 	if err == nil && migrating {
-		held = gate.holds(st, current)
+		held = gate.holds(dataDir, st, current)
 	}
 	switch {
 	case err != nil:
@@ -338,7 +340,7 @@ func disarmHeld(dataDir, current string, save func(dataDir string, st State) err
 		return DisarmResult{}, migrationVetoedError(st, current)
 	}
 	if migrating {
-		if why := gate.holds(st, current); why != "" {
+		if why := gate.holds(dataDir, st, current); why != "" {
 			return DisarmResult{}, migrationHeldError(why)
 		}
 	}
@@ -367,14 +369,21 @@ func disarmHeld(dataDir, current string, save func(dataDir string, st State) err
 		next := st
 		next.FailedStarts++
 		next.NotReady = false
+		hold := takeStartHold(dataDir)
+		next.RunningStart = hold.Token()
 		callBeforeDisarmRecord(dataDir)
 		res := DisarmResult{CountTried: next.FailedStarts, State: st}
 		if err := save(dataDir, next); err != nil {
+			hold.Release()
 			res.CountMissed = fmt.Errorf("this start of %s was not counted against its install: %w", current, markerIOError{err})
 			return res, nil
 		}
-		res.Counted, res.State = true, next
+		res.Counted, res.State, res.Start = true, next, hold
 		return res, nil
+	}
+	var hold *StartHold
+	if count {
+		hold = takeStartHold(dataDir)
 	}
 	callBeforeDisarmRecord(dataDir)
 	if record {
@@ -390,9 +399,11 @@ func disarmHeld(dataDir, current string, save func(dataDir string, st State) err
 	if count {
 		st.FailedStarts++
 		st.NotReady = false
+		st.RunningStart = hold.Token()
 		res.Counted, res.CountTried = true, st.FailedStarts
 	}
 	if err := save(dataDir, st); err != nil {
+		hold.Release()
 		switch {
 		case record && storeRecord:
 			return DisarmResult{}, fmt.Errorf("could not record in the install marker that %s opened the data dir and began a migration of the store, "+
@@ -405,8 +416,23 @@ func disarmHeld(dataDir, current string, save func(dataDir string, st State) err
 		}
 		return DisarmResult{}, fmt.Errorf("could not lift the install marker's veto of %s's store migrations: %w", current, err)
 	}
-	res.State = st
+	res.State, res.Start = st, hold
 	return res, nil
+}
+
+// takeStartHold is a counted start's hold on a lock of its own (StartHold),
+// taken before its token is written, so no reader of the marker meets the
+// token before its lock is held; the lock files of starts that hold theirs no
+// more go first. Nil where none can be taken: the count is then written with
+// no token, and the start reads as not running, which holds a command's
+// migration back rather than let it through.
+func takeStartHold(dataDir string) *StartHold {
+	sweepStartLocks(dataDir)
+	hold, err := newStartHold(dataDir)
+	if err != nil {
+		return nil
+	}
+	return hold
 }
 
 // migrationVetoedError is a migration's refusal under st's veto of current's

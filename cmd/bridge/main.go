@@ -3470,17 +3470,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	}
 	// Shared with the player, which lets go of its share once nothing it
 	// started may still write the data dir: an engine's state write that
-	// outlived its stop keeps the lock past this return (dataDirHold). Noted
-	// as a serve's while it is held, for a command of this process that asks
-	// whether a serve holds it (updater.ServeHoldsDataDir; backlog B660's
-	// second round).
-	if lockErr == nil {
-		unnote, release := updater.NoteDataDirLock(cfg.DataDir, true), releaseDataDir
-		releaseDataDir = func() {
-			unnote()
-			release()
-		}
-	}
+	// outlived its stop keeps the lock past this return (dataDirHold).
 	dataDirLock := newDataDirHold(releaseDataDir)
 	defer dataDirLock.done()
 	// The crash rollback (backlog B660), right after the data dir's lock and
@@ -3515,27 +3505,35 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	}
 	// A start counts as failed unless it ends clean (backlog B660): the
 	// admission counted it, and it takes its count back where it ends in a
-	// stop, serve's (the caller's context, stopped) or a restart request, as
-	// soon as the stop arrives (stopTakeBack; the second round: until then it
-	// waited for the teardown, which a supervisor may kill); or where a
-	// listener's bind was refused for an address in use or not there, or for a
-	// permission the backup would meet too, or the tailnet's network failed, a
-	// host's trouble the backup would meet too, after the teardown. Every
-	// other exit stays counted: an error return, a kill before a stop, a panic.
-	// A panic on serve's own goroutine runs these defers with code still 0,
-	// and runServe does not recover, so the take-back after the teardown reads
-	// notAFailedStart, which exactly those paths set, and never code. The
-	// stop's take-back is keyed on the stop itself, never on serve's own
-	// context, which runServe cancels on every exit. Registered here, right
-	// after the admission, so it runs after every teardown and while the data
-	// dir's lock is held: the stop's take-back is unregistered and joined
-	// there, before the lock is let go, and the take-back after the teardown,
-	// which then finds nothing to take, is the last chance of a stop's that
-	// never had its answer. A start that tried to count tries to take back,
-	// since the marker's write publishes before its barrier can fail.
+	// stop, serve's (the caller's context, stopped) or a restart request; or
+	// where a listener's bind was refused for an address in use or not there,
+	// or for a permission the backup would meet too, or serve itself began
+	// closing the tailnet side. Every other exit stays counted: an error
+	// return, a kill before a stop, a panic. Once the start has answered as
+	// ready (the confirmation's first yes, which arms it: stopTakeBack.arm) a
+	// stop's take-back begins as the stop arrives, since a supervisor may kill
+	// a teardown it finds too slow (the second round); before that, and for
+	// the other clean ends, once the teardown has run, so a start that hangs
+	// before it is ready, stopped and killed, stays counted (the third round).
+	// Whether the end is a stop is asked of the caller's context and the
+	// restart request as they stand once the teardown has run, never of
+	// serve's own context, which runServe cancels on every exit, nor of the
+	// stop's notice, which an error at once after the stop can beat (the third
+	// round). A panic on serve's own goroutine runs these defers with code
+	// still 0, and runServe does not recover, so the take-back reads
+	// notAFailedStart, which exactly the host's paths set, and never code.
+	// Registered here, right after the admission, so it runs after every
+	// teardown and while the data dir's lock is held: the take-back is joined
+	// there, within the stop's budget (stopBudget), before the lock is let go.
+	// A start that tried to count tries to take back, since the marker's write
+	// publishes before its barrier can fail. On every return the start's token
+	// is cleared, its count kept where it is not taken back, and its own lock
+	// let go (updater.StartHold; the third round), so a start that returned,
+	// the launcher's own included, is never read as running.
 	notAFailedStart := false
+	var takeBack *stopTakeBack
 	if admission.CountTried > 0 {
-		takeBack := newStopTakeBack(cfg.DataDir, admission.CountTried)
+		takeBack = newStopTakeBack(cfg.DataDir, admission.CountTried)
 		arrived := takeBack.arrived
 		if opts.stopArriving != nil {
 			arrived = func() {
@@ -3547,10 +3545,18 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		restart.onRequest(arrived)
 		defer func() {
 			unregister()
-			arrived, settled := takeBack.finish()
-			if (arrived || notAFailedStart) && !settled {
-				takeBackFailedStart(cfg.DataDir, admission.CountTried, stderr)
+			end := stopped.Err() != nil || restart.requested.Load() || notAFailedStart
+			answered, missed, deadline := takeBack.finish(end)
+			if end && !answered {
+				fmt.Fprintf(stderr, "updater: this start ended cleanly and its count of the install's starts was not taken back "+
+					"within %s (%v): it counts as one that did not\n", stopBudget, missed)
 			}
+			if !answered {
+				endCtx, cancel := context.WithDeadline(context.Background(), deadline)
+				_, _ = updater.EndStart(endCtx, cfg.DataDir, admission.Start.Token())
+				cancel()
+			}
+			admission.Start.Release()
 		}()
 		if opts.teardownHold != nil {
 			defer opts.teardownHold()
@@ -6751,8 +6757,10 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	// ServeTLS is running and only where the marker awaits it: confirmed
 	// once this start has answered as ready (this process's accept loop,
 	// /v1/health through this handler, this store) and stayed up for
-	// updater.ProbationWindow. Joined through bgWriters on scanCtx; a round
-	// still out at the stop is not waited for (serve_probation.go).
+	// updater.ProbationWindow. Its first ready answer arms the take-back of
+	// this start's count as a stop arrives, on serve's own context, where no
+	// stop came first (the third round). Joined through bgWriters on scanCtx;
+	// a round still out at the stop is not waited for (serve_probation.go).
 	if probation := newServeProbation(cfg.DataDir, version.ServerVersion, readiness{
 		accepts: accepts,
 		handler: httpSrv.Handler,
@@ -6762,6 +6770,9 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 			return err
 		},
 	}, opts.probation, stderr); probation != nil {
+		if takeBack != nil {
+			probation.onReady = func() bool { return takeBack.arm(ctx) }
+		}
 		bgWriters.Add(1)
 		go func() {
 			defer bgWriters.Done()
@@ -6833,15 +6844,16 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		// running, but a dead tsnet listener means *.ts.net iOS
 		// clients are silently failing — surface and exit so the
 		// operator notices.
+		// Only an end serve itself began (its close of the tailnet side, or
+		// the server's closed answer) is no failed start of an install; any
+		// other end of the listener is, closed or not (backlog B660's third
+		// round: the second took a closed listener and any accept error for a
+		// failure of the tailnet's network). The line says which.
+		notAFailedStart = tailnetEndIsServes(tsFront, err)
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			// A failure of the tailnet's network, which the backup would meet
-			// too, is no failed start of an install; any other failure of the
-			// listener is (backlog B660's second round: until then every one
-			// was taken back). The line says which.
-			notAFailedStart = tailnetEndIsServes(tsFront, err)
-			class := "not a failure of the tailnet's network: it counts as a start of this install that did not end cleanly"
+			class := "it counts as a start of this install that did not end cleanly"
 			if notAFailedStart {
-				class = "a failure of the tailnet's network, which the backup would meet too: not counted against this install"
+				class = "serve had begun closing the tailnet side: not counted against this install"
 			}
 			fmt.Fprintf(stderr, "tsnet listener: %v (%s)\n", err, class)
 			shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownGrace)

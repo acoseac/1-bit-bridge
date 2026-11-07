@@ -364,6 +364,41 @@ func TestAStopsTakeBackWaitsForTheMarkersLockWithinItsBudget(t *testing.T) {
 	r.requireCount(t, 0, "once the marker's lock was free within the stop's budget")
 }
 
+// TestTheStopBudgetIsInsideEveryServiceManagersWait: serve's stop budget, its
+// teardown and the take-back of its count together, ends inside the shortest
+// wait each service manager gives a stop before it kills the process or gives
+// up on it: systemd's TimeoutStopSec (90 s by default) and launchd's
+// ExitTimeOut (20 s by default), which the unit and the plist `bridge init`
+// writes leave at their defaults, and the Windows updater's wait for the SCM
+// to stop the service (updater.SCMStopWait), which it waits out holding the
+// install marker's lock.
+func TestTheStopBudgetIsInsideEveryServiceManagersWait(t *testing.T) {
+	for _, tc := range []struct {
+		template  string
+		keys      []string
+		byDefault time.Duration
+	}{
+		{"systemd.service.tmpl", []string{"TimeoutStopSec", "TimeoutSec"}, 90 * time.Second},
+		{"launchd.plist.tmpl", []string{"ExitTimeOut"}, 20 * time.Second},
+	} {
+		raw, err := os.ReadFile(filepath.Join("..", "..", "internal", "packaging", tc.template))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, key := range tc.keys {
+			if strings.Contains(string(raw), key) {
+				t.Errorf("%s sets %s: the stop budget is held against the default alone", tc.template, key)
+			}
+		}
+		if stopBudget >= tc.byDefault {
+			t.Errorf("the stop budget %s is not inside %s's default stop wait %s", stopBudget, tc.template, tc.byDefault)
+		}
+	}
+	if stopBudget >= updater.SCMStopWait {
+		t.Errorf("the stop budget %s is not inside the updater's wait for the SCM %s", stopBudget, updater.SCMStopWait)
+	}
+}
+
 // TestTheReadinessProbeTriesTheIPv6LoopbackForAWildcard: a listener bound to
 // the IPv6 wildcard alone (IPv6-only), whose port's IPv4 loopback is another
 // listener's, is reached all the same: the probe dials 127.0.0.1, gives that

@@ -80638,7 +80638,7 @@ one came out as predicted, and the tree after them held only the docs):
 | (5a) | `MigrationHeld` holding nothing | `TestACommandDoesNotMigrateTheStoreWhileTheInstallAwaitsItsConfirmation`, `TestTheDoctorLeavesThePendingMigrationsAndSaysSo`, `TestACommandBesideAStartingServe` (one start before), `TestMigrationHeldAsksTheStartsBeforeNow` (its held cases), `TestAMigratingOpenIsHeldWhileTheInstallAwaitsItsConfirmation` (a command's, with the lock and without), `TestThePermitAdmitsOnlyItsOwnStart`, `TestARestoreThatWouldMigrateIsRefusedWhileTheInstallAwaitsItsConfirmation` | the cases that hold nothing, serve's own |
 | (5b) | serve's own open without its permission | `TestServeMigratesTheStoreAfterAFailedStart` | `TestACommandBesideAStartingServe` (it does not ask serve's exit) |
 | (5c) | the start a running serve counts not taken off | `TestACommandBesideAStartingServe` (none before), `TestMigrationHeldAsksTheStartsBeforeNow` (a serve's own) | |
-| (5d) | this process's command hold read as a serve's | `TestServeHoldsDataDirReadsTheLockAndThisProcesssHolds` | |
+| (5d) | this process's command hold read as a serve's | the registry's own test (removed in the third round with the registry) | |
 | (6a) | a permission refusal taken back whatever `.bak` carries | `TestAPermissionRefusalTheBackupWouldNotMeetIsAFailedStart` (the backup's capability) | both carry it, neither does |
 | (6b) | the swap carries no capabilities | `TestTheSwapCarriesTheBinarysFileCapabilities`, `TestASwapThatCannotSetTheCapabilitiesStillSwaps` | |
 | (6c) | every tailnet failure taken back, as the first round | the tailnet test (another failure; renamed in the third round) | the network's two |

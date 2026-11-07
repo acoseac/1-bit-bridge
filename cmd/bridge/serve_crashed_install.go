@@ -6,23 +6,16 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/doctor"
 	"github.com/acoseac/1-bit-bridge/internal/supervision"
 	"github.com/acoseac/1-bit-bridge/internal/updater"
 	"github.com/acoseac/1-bit-bridge/internal/version"
 )
-
-// takeBackWait is how long a start that ended cleanly gives the install
-// marker's lock before it leaves its count where it is (backlog B660): a stop
-// is not held up for the lock, and a count left behind errs toward a rollback
-// of an install whose starts did end cleanly, which the confirmation clears.
-const takeBackWait = 2 * time.Second
 
 // recoverCrashedInstall is serve's answer to an install of this version whose
 // starts have not ended cleanly (backlog B660): at
@@ -315,37 +308,20 @@ func bindRefusalIsTheHosts(err error, opts serveOpts, stderr io.Writer) bool {
 	return false
 }
 
-// tailnetNetworkFailure reports whether err, what the tailnet listener's
-// Serve returned, is a failure of the tailnet's network (backlog B660's
-// second round): an operation of the net package's that failed (its accept,
-// tsnet's netstack answering a closed or reset endpoint as a *net.OpError),
-// or the listener closed under it, which tsnet answers once its node stops
-// (net.ErrClosed). Those the backup would meet too. Anything else the
-// listener answers is not the network's, and counts.
-func tailnetNetworkFailure(err error) bool {
-	var op *net.OpError
-	return errors.As(err, &op) || errors.Is(err, net.ErrClosed)
-}
-
 // tailnetEndIsServes reports whether err, what the tailnet listener's Serve
-// returned on f, ends this start as no failed start of an install.
+// returned on f, ends this start as no failed start of an install (backlog
+// B660's third round): only where serve itself began closing its tailnet side
+// (f's stop, which marks itself begun before it shuts a server down or closes
+// the node: closeBegun) or the server answers that it was closed
+// (http.ErrServerClosed). The second round took any *net.OpError and
+// net.ErrClosed for a failure of the tailnet's network the backup would meet
+// too, but tsnet's listener (no TUN) answers net.ErrClosed once anything
+// closes it and blocks while the tailnet is down, and an accept error is the
+// listener's, so either can be this version's own fault, and both count. What
+// is left of the classification: serve's select reads the listener's end only
+// before its own stop of the tailnet side, which comes after it, so there
+// every end but the server's closed answer counts today, and the begun close
+// answers an end that races it.
 func tailnetEndIsServes(f *tsnetFront, err error) bool {
-	return tailnetNetworkFailure(err)
-}
-
-// takeBackFailedStart takes back this start's count of the install's starts
-// that did not end cleanly (updater.TakeBackFailedStart), counted being what
-// its admission tried to write: serve's defer calls it after every teardown,
-// holding the data dir's lock, where the start ended in a listener's bind the
-// host refused or a failure of the tailnet's network, and where a stop's own
-// take-back (stopTakeBack) did not have its answer before the teardown ended.
-// It gives the install marker's lock takeBackWait. A take-back that does not
-// land leaves one count, said on one line.
-func takeBackFailedStart(dataDir string, counted int, stderr io.Writer) {
-	ctx, cancel := context.WithTimeout(context.Background(), takeBackWait)
-	defer cancel()
-	if _, err := updater.TakeBackFailedStart(ctx, dataDir, version.ServerVersion, counted); err != nil {
-		fmt.Fprintf(stderr, "updater: this start ended cleanly and its count of the install's starts was not taken back (%v): "+
-			"it counts as one that did not\n", err)
-	}
+	return errors.Is(err, http.ErrServerClosed) || (f != nil && f.closeBegun())
 }

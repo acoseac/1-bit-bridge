@@ -176,10 +176,15 @@ func addrKey(addr net.Addr) (netip.AddrPort, bool) {
 }
 
 // probe dials the listener's own address, a wildcard on loopback as `bridge
-// health` dials it (probeHost), and waits until this process's accept loop has
-// taken that connection or ctx ends. The connection is closed without a byte,
-// which the API listener's error log drops for a peer on this host
-// (internal/handshakelog).
+// health` dials it (probeHosts), and waits until this process's accept loop
+// has taken that connection or ctx ends. Where the wildcard is the IPv6 one it
+// dials the IPv4 loopback first and the IPv6 loopback after it, each connect
+// but the last bounded by its share of what is left of ctx (backlog B660's
+// third round: a listener on the IPv6 wildcard alone, beside another
+// process's listener on the port's IPv4 loopback, took the probe's one IPv4
+// connect for that process's, and the round waited out its bound). The
+// connection is closed without a byte, which the API listener's error log
+// drops for a peer on this host (internal/handshakelog).
 func (w *acceptWatch) probe(ctx context.Context) error {
 	w.mu.Lock()
 	if w.probing == 0 {
@@ -198,15 +203,38 @@ func (w *acceptWatch) probe(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("the API listener's address does not read: %w", err)
 	}
+	hosts := probeHosts(host)
+	for i, h := range hosts {
+		err = w.probeAt(ctx, net.JoinHostPort(h, port), len(hosts)-i)
+		if err == nil || ctx.Err() != nil {
+			return err
+		}
+	}
+	return err
+}
+
+// probeAt is probe's connect to addr, one of left the probe has still to try:
+// all but the last get their share of what is left of ctx, and with no
+// deadline on ctx, of a round's.
+func (w *acceptWatch) probeAt(ctx context.Context, addr string, left int) error {
+	if left > 1 {
+		share := productionProbation.round / time.Duration(left)
+		if deadline, ok := ctx.Deadline(); ok {
+			share = time.Until(deadline) / time.Duration(left)
+		}
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, share)
+		defer cancel()
+	}
 	var d net.Dialer
-	conn, err := d.DialContext(ctx, "tcp", net.JoinHostPort(probeHost(host), port))
+	conn, err := d.DialContext(ctx, "tcp", addr)
 	if err != nil {
-		return fmt.Errorf("a connect to the API listener's address failed: %w", err)
+		return fmt.Errorf("a connect to the API listener at %s failed: %w", addr, err)
 	}
 	defer conn.Close()
 	mine, ok := addrKey(conn.LocalAddr())
 	if !ok {
-		return errors.New("a connect to the API listener's address has no TCP address of its own")
+		return fmt.Errorf("a connect to the API listener at %s has no TCP address of its own", addr)
 	}
 	for {
 		w.mu.Lock()
@@ -219,7 +247,7 @@ func (w *acceptWatch) probe(ctx context.Context) error {
 		select {
 		case <-changed:
 		case <-ctx.Done():
-			return errors.New("a connect to the API listener's address was not taken by this process's accept loop")
+			return fmt.Errorf("a connect to the API listener at %s was not taken by this process's accept loop", addr)
 		}
 	}
 }
@@ -313,7 +341,14 @@ type serveProbation struct {
 	ready                      readiness
 	timing                     probationTiming
 	observe                    func(probationEvent)
+	beforeReady                func()
 	stderr                     io.Writer
+	// onReady is told this start's first ready answer, which arms the
+	// take-back of its count as a stop arrives (stopTakeBack.arm; backlog
+	// B660's third round), and reports whether it did: false where a stop came
+	// first, which ends the confirmation there. Nil where the start has no
+	// count to take back.
+	onReady func() bool
 	// out is the round still out past its bound, nil when none: no round
 	// starts beside it, and its late answer counts for nothing.
 	out chan error
@@ -332,7 +367,7 @@ func newServeProbation(dataDir, current string, ready readiness, seams *probatio
 		timing: productionProbation, stderr: stderr}
 	if seams != nil {
 		p.timing = seams.timing.orProduction()
-		p.observe = seams.observe
+		p.observe, p.beforeReady = seams.observe, seams.beforeReady
 		if seams.storeRead != nil {
 			p.ready.store = seams.storeRead
 		}
@@ -346,14 +381,17 @@ func (p *serveProbation) note(e probationEvent) {
 	}
 }
 
-// run asks every timing.ask until the first ready answer, which starts the
-// window; asks once more at the window's end, and every timing.retry after a
-// no, and confirms the install at the first yes past the window. A window
-// that lapses with no confirmation is said once and recorded (State.NotReady),
-// and past that lapse the asks before a first yes come every timing.retry. It
-// returns once the install is confirmed, the marker awaits no confirmation of
-// this version any more, the filesystem keeps no locks, or ctx ends (serve's
-// stop), which a wait and a round's bound both answer at once.
+// run asks every timing.ask until the first ready answer, which makes this
+// start ready (onReady: from then on a stop takes its count back as it
+// arrives; backlog B660's third round) and starts the window; asks once more
+// at the window's end, and every timing.retry after a no, and confirms the
+// install at the first yes past the window. A window that lapses with no
+// confirmation is said once and recorded (State.NotReady), and past that lapse
+// the asks before a first yes come every timing.retry. It returns once the
+// install is confirmed, the marker awaits no confirmation of this version any
+// more, the filesystem keeps no locks, or ctx ends (serve's stop), which a wait
+// and a round's bound both answer at once, a stop that came before the ready
+// answer was counted included.
 func (p *serveProbation) run(ctx context.Context) {
 	defer p.note(probationEvent{kind: probationEnded})
 	began := time.Now()
@@ -376,6 +414,21 @@ func (p *serveProbation) run(ctx context.Context) {
 			wait = p.timing.retry
 		}
 	}
+	// The first yes: this start is ready, where no stop came first, and the
+	// take-back of its count is armed (stopTakeBack.arm, which asks serve's
+	// own context itself, so a stop that lands between the round's answer and
+	// here is told apart).
+	if p.beforeReady != nil {
+		p.beforeReady()
+	}
+	if p.onReady != nil && !p.onReady() {
+		return
+	}
+	if ctx.Err() != nil {
+		return
+	}
+	fmt.Fprintf(p.stderr, "updater: this start of %s has answered as ready (its API listener, /v1/health and its store): "+
+		"its install is confirmed once it has stayed up for %s\n", p.current, p.timing.window)
 	p.note(probationEvent{kind: probationWindow})
 	if !sleepUnlessStopped(ctx, p.timing.window) {
 		return

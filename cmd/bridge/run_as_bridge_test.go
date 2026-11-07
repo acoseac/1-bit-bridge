@@ -11,6 +11,7 @@ import (
 	"slices"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/updater"
 	"github.com/acoseac/1-bit-bridge/internal/version"
@@ -35,12 +36,20 @@ const (
 	// package's own words and exit 2; "fails" exits 1, a check that did not
 	// answer. Empty is the code that ships.
 	runAsBridgeCheckEnv = "CMDBRIDGE_TEST_RUN_AS_BRIDGE_CHECK"
+	// runAsBridgeProbationAskEnv, a duration, is how often the copy's serve
+	// asks whether its start is ready before its first yes (probationTiming's
+	// ask), in place of production's five seconds, so a test of a real serve
+	// process waits that long for its readiness (backlog B660's third round).
+	runAsBridgeProbationAskEnv = "CMDBRIDGE_TEST_RUN_AS_BRIDGE_PROBATION_ASK"
 )
 
 // runAsBridge is the re-exec'd test binary's whole run.
 func runAsBridge() int {
 	if v := os.Getenv(runAsBridgeVersionEnv); v != "" {
 		version.ServerVersion = v
+	}
+	if ask, err := time.ParseDuration(os.Getenv(runAsBridgeProbationAskEnv)); err == nil && ask > 0 {
+		productionProbation.ask = ask
 	}
 	if mode := os.Getenv(runAsBridgeCheckEnv); mode != "" && slices.Contains(os.Args[1:], "--"+updater.ConfigCheckFlag) {
 		switch mode {

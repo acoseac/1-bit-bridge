@@ -2846,7 +2846,6 @@ killed with SIGKILL while a held connection keeps its drain going),
 `TestTheDoctorSaysTheBackupIsTriedNotPromised`,
 `TestTheDoctorPromisesNoPutBackTheMarkerRefuses` and
 `TestTheDoctorBesideARunningServeTakesItsStartOff` (cmd/bridge);
-`TestServeHoldsDataDirReadsTheLockAndThisProcesssHolds`,
 `TestMigrationHeldAsksTheStartsBeforeNow`,
 `TestAMigratingOpenIsHeldWhileTheInstallAwaitsItsConfirmation`,
 `TestThePermitAdmitsOnlyItsOwnStart`,

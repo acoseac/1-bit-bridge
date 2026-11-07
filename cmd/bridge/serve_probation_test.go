@@ -765,7 +765,8 @@ func holdTheMarkersLock(t *testing.T, dataDir string) (*updater.StateLock, <-cha
 // TestAStopWhileAConfirmationWaitsWritesNothing: a stop that lands while the
 // confirmation waits for the install marker's lock ends it, and serve, with
 // nothing written: the marker byte for byte as it was, since the take-back,
-// given the lock two seconds, finds it held too, and says so.
+// which asks for the lock for the rest of the stop's budget (stopBudget),
+// finds it held throughout, and says so.
 func TestAStopWhileAConfirmationWaitsWritesNothing(t *testing.T) {
 	r := newRefusedInstall(t, "")
 	events, seams := newProbationWatch(probationTiming{window: 200 * time.Millisecond, ask: 20 * time.Millisecond,

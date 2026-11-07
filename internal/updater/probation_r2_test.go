@@ -41,69 +41,95 @@ func holdServeLock(t *testing.T, dir string) (release func()) {
 	return release
 }
 
-// TestServeHoldsDataDirReadsTheLockAndThisProcesssHolds: a serve holds the
-// data dir's lock where the lock is held by another open, unless this process
-// holds it as a command; a hold this process noted as a serve's answers
-// without the lock file; no lock file, and a lock that is free, are none.
-func TestServeHoldsDataDirReadsTheLockAndThisProcesssHolds(t *testing.T) {
-	dir := t.TempDir()
-	if ServeHoldsDataDir(dir) {
-		t.Fatal("a data dir with no lock file reads as held by a serve")
-	}
-	if _, err := os.Stat(filepath.Join(dir, ServeLockFileName)); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("the question made the lock file (%v): it must make nothing", err)
-	}
-	release := holdServeLock(t, dir)
-	if !ServeHoldsDataDir(dir) {
-		t.Error("a data dir whose lock another open holds does not read as held by a serve")
-	}
-	unnote := NoteDataDirLock(dir, false)
-	if ServeHoldsDataDir(dir) {
-		t.Error("the lock this process holds as a command reads as a serve's")
-	}
-	unnote()
-	unnote()
-	if !ServeHoldsDataDir(dir) {
-		t.Error("the lock still held, once the command's note is gone, does not read as held")
-	}
-	release()
-	if ServeHoldsDataDir(dir) {
-		t.Error("a free lock reads as held by a serve")
-	}
-	unnoteServe := NoteDataDirLock(dir+string(filepath.Separator), true)
-	if !ServeHoldsDataDir(dir) {
-		t.Error("a hold this process noted as a serve's, under another spelling of the data dir, does not read as one")
-	}
-	unnoteServe()
-	if ServeHoldsDataDir(dir) {
-		t.Error("a serve's note let go still reads as held")
-	}
-}
-
 // TestARunningServeIsAskedForOnlyWhereAStartIsCounted: the count holds a
 // serve's start running now only where an install of this version awaits its
-// confirmation with a start counted, and a serve holds the lock; with
-// nothing counted no serve's start is read in it, whoever holds the lock.
+// confirmation with a start counted, and the start the marker's token names
+// holds its lock; with nothing counted no start is read in it, whoever holds a
+// lock. The questions make no lock file.
 func TestARunningServeIsAskedForOnlyWhereAStartIsCounted(t *testing.T) {
 	dir := t.TempDir()
-	holdServeLock(t, dir)
+	holdStartsLock(t, dir, aStartsToken)
+	confirmed := State{Status: "installed", TargetVersion: "0.2.4", FailedStarts: 1, RunningStart: aStartsToken}
 	for _, tc := range []struct {
 		name    string
 		st      State
 		current string
 		counted bool
 	}{
-		{"no start counted", probationMarker(0), "0.2.4", false},
-		{"a start counted", probationMarker(1), "0.2.4", true},
-		{"another version's install", probationMarker(1), "0.2.9", false},
-		{"a confirmed install", State{Status: "installed", TargetVersion: "0.2.4", FailedStarts: 1}, "0.2.4", false},
+		{"no start counted", withToken(probationMarker(0), aStartsToken), "0.2.4", false},
+		{"a start counted", withToken(probationMarker(1), aStartsToken), "0.2.4", true},
+		{"another version's install", withToken(probationMarker(1), aStartsToken), "0.2.9", false},
+		{"a confirmed install", confirmed, "0.2.4", false},
 	} {
 		if got := RunningServeCounted(dir, tc.st, tc.current); got != tc.counted {
 			t.Errorf("%s: RunningServeCounted = %v, want %v", tc.name, got, tc.counted)
 		}
 	}
-	if RunningServeCounted(t.TempDir(), probationMarker(1), "0.2.4") {
-		t.Error("a data dir no serve holds reads as holding one")
+	other := t.TempDir()
+	if RunningServeCounted(other, withToken(probationMarker(1), aStartsToken), "0.2.4") {
+		t.Error("a data dir no start holds a lock in reads as holding one")
+	}
+	if entries, err := os.ReadDir(other); err != nil || len(entries) != 0 {
+		t.Errorf("the question made %v (%v): it must make nothing", entries, err)
+	}
+}
+
+// TestTheAdmissionWritesItsStartsTokenWithItsCount: a counted start's
+// admission takes a lock of its own, writes its token in the count's write,
+// and reads as running until it lets go; a lock file a killed start left is
+// swept, and a start that is not counted takes nothing.
+func TestTheAdmissionWritesItsStartsTokenWithItsCount(t *testing.T) {
+	dir := t.TempDir()
+	mustSave(t, dir, probationMarker(0))
+	stale := filepath.Join(dir, "serve-start-"+anotherStartsToken+".lock")
+	if err := os.WriteFile(stale, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	res, err := AdmitBoot(t.Context(), dir, "0.2.4", nil)
+	if err != nil || !res.Counted || res.Start == nil {
+		t.Fatalf("the admission = %+v, %v; want its start counted, with a hold", res, err)
+	}
+	st := mustLoad(t, dir)
+	if st.FailedStarts != 1 || st.RunningStart == "" || st.RunningStart != res.Start.Token() || !RunningServeCounted(dir, st, "0.2.4") {
+		t.Errorf("the marker after the admission = %+v (its hold's token %q), want the count and the token together, read as running",
+			st, res.Start.Token())
+	}
+	if _, err := os.Stat(stale); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the lock file a killed start left = %v, want it swept", err)
+	}
+	res.Start.Release()
+	if RunningServeCounted(dir, st, "0.2.4") {
+		t.Error("the start's hold let go still reads as running")
+	}
+	if left, _ := filepath.Glob(filepath.Join(dir, "serve-start-*")); len(left) != 0 {
+		t.Errorf("the hold let go leaves %v", left)
+	}
+	res.Start.Release()
+	// No install of this version: nothing counted, nothing held.
+	other := t.TempDir()
+	mustSave(t, other, probationMarker(0))
+	if res, err := AdmitBoot(t.Context(), other, "0.2.9", nil); err != nil || res.Counted || res.Start != nil {
+		t.Errorf("the admission of another version = %+v, %v; want nothing counted or held", res, err)
+	}
+}
+
+// TestEndStartClearsOnlyItsOwnToken: a start's end clears its own token and
+// keeps its count; a token the marker no longer names, another start's, is
+// left, and an empty one asks nothing.
+func TestEndStartClearsOnlyItsOwnToken(t *testing.T) {
+	dir := t.TempDir()
+	mustSave(t, dir, withToken(probationMarker(2), aStartsToken))
+	if wrote, err := EndStart(t.Context(), dir, anotherStartsToken); err != nil || wrote {
+		t.Errorf("the end of another start = %v, %v; want nothing written", wrote, err)
+	}
+	if wrote, err := EndStart(t.Context(), dir, ""); err != nil || wrote {
+		t.Errorf("the end of a start with no token = %v, %v; want nothing written", wrote, err)
+	}
+	if wrote, err := EndStart(t.Context(), dir, aStartsToken); err != nil || !wrote {
+		t.Fatalf("the end of the marker's start = %v, %v; want its token cleared", wrote, err)
+	}
+	if st := mustLoad(t, dir); st.FailedStarts != 2 || st.RunningStart != "" {
+		t.Errorf("the marker after the start's end = %+v, want its count kept and its token gone", st)
 	}
 }
 

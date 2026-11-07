@@ -56,7 +56,7 @@ func ConfirmInstall(ctx context.Context, dataDir, current string, now time.Time)
 		return false, nil
 	}
 	st.Status, st.InstalledAt = "installed", now
-	st.FailedStarts, st.RollbackRefused, st.NotReady = 0, "", false
+	st.FailedStarts, st.RollbackRefused, st.NotReady, st.RunningStart = 0, "", false, ""
 	if err := SaveState(dataDir, st); err != nil {
 		return false, fmt.Errorf("the install was not confirmed: %w", markerIOError{err})
 	}
@@ -104,18 +104,22 @@ func KeepsNoLocks(err error) bool {
 // TakeBackFailedStart takes back the count a start of current added at its
 // admission, counted being what the admission tried to write
 // (DisarmResult.CountTried): serve calls it once that start has ended
-// cleanly, in serve's stop, a restart request, or a listener's bind the host
-// refused, after every teardown, holding the data dir's lock. ctx bounds the
-// wait for the install marker's lock (serve gives it two seconds); on a
-// filesystem that keeps none it goes on without it, as a disarm does. It
+// cleanly, as its stop arrives once it has answered as ready, and otherwise
+// once its teardown has run after a stop, a restart request, or a listener's
+// bind the host refused, holding the data dir's lock. ctx bounds the wait for
+// the install marker's lock (serve's stop budget, from the stop's arrival); on
+// a filesystem that keeps none it goes on without it, as a disarm does. It
 // reads the marker again and writes only where the marker is still the
 // install of current that the start counted against (countsStart) and holds
 // the count that start wrote: a stop after the confirmation, a restart into a
 // newer install, and a count that never landed take nothing back, so no
-// earlier start's count goes with this one. It reports whether it wrote. A
-// take-back that does not land leaves one count, which errs toward a rollback
-// of an install whose starts did end cleanly; the next start that ends
-// cleanly does not take it back, and the confirmation clears it.
+// earlier start's count goes with this one. The same write clears the start's
+// token (State.RunningStart, which the count's write carried; backlog B660's
+// third round), so no reader after it takes the start, still tearing down, for
+// one running. It reports whether it wrote. A take-back that does not land
+// leaves one count, which errs toward a rollback of an install whose starts
+// did end cleanly; the next start that ends cleanly does not take it back, and
+// the confirmation clears it.
 func TakeBackFailedStart(ctx context.Context, dataDir, current string, counted int) (bool, error) {
 	if counted <= 0 {
 		return false, nil
@@ -133,6 +137,7 @@ func TakeBackFailedStart(ctx context.Context, dataDir, current string, counted i
 		return false, nil
 	}
 	st.FailedStarts--
+	st.RunningStart = ""
 	if err := SaveState(dataDir, st); err != nil {
 		return false, markerIOError{err}
 	}
@@ -282,11 +287,12 @@ func probationLevel(failed int, st State) ProbationLevel {
 // counted; a warning from one that did not end cleanly; a failure at
 // ProbationFailedStarts, where a crash rollback was refused
 // (State.RollbackRefused), or where a start did not answer as ready
-// (State.NotReady). running says a serve of current holds the data dir's
-// lock now (ServeHoldsDataDir): its start is in the count until it stops
-// cleanly, and Says takes it off; with none running every start counted is
-// one that did not end cleanly (B660's second round: until then the doctor
-// took one off whatever ran). ThisStart is the running start's own, and
+// (State.NotReady). running says the count holds a start of current running
+// now (RunningServeCounted: the start the marker's token names holds its own
+// lock): its start is in the count until it stops cleanly, and Says takes it
+// off; with none running every start counted is one that did not end cleanly
+// (B660's second round: until then the doctor took one off whatever ran; the
+// third: a held data dir lock, a command's too, is no running start). ThisStart is the running start's own, and
 // takes it off always. Neither promises a put-back: the words follow the
 // crash rollback's own checks of the marker at the limit
 // (CrashRollbackAtLimit), saying why not where those refuse, and otherwise
@@ -420,8 +426,8 @@ func backupBeside(binaryPath string) bool {
 // refuses that rollback for good, so a command run to see what is wrong (a
 // `bridge doctor`, a scan) would take the backup away from the starts it is
 // for. The starts before now are State.FailedStarts less the start a serve
-// holding the data dir's lock counts until it stops cleanly (serveRunning;
-// ServeHoldsDataDir), so none before now is as it was before the round.
+// running now counts until it stops cleanly (serveRunning;
+// RunningServeCounted), so none before now is as it was before the round.
 // Serve's own start migrates the store with its admission's permission
 // (MigrationPermit), whatever the count.
 func MigrationHeld(st State, current string, serveRunning bool) string {

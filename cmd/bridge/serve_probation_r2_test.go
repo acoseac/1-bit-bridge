@@ -436,7 +436,7 @@ func (l wildcardListener) Addr() net.Addr {
 
 // TestAnInstallListeningOnTheWildcardIsConfirmed: the default listenAddress
 // is the wildcard, which the confirmation's round dials on loopback
-// (probeHost) and names as the Host of its in-process GET /v1/health,
+// (probeHosts) and names as the Host of its in-process GET /v1/health,
 // "[::]:port": both answer, and the install is confirmed.
 func TestAnInstallListeningOnTheWildcardIsConfirmed(t *testing.T) {
 	r := newRefusedInstall(t, "")
