@@ -85873,3 +85873,108 @@ and on a copy with it applied the budgets hold (scanner.md 39,137 bytes,
 admin-console.md 78,529; the worst load 67.2%) and the 14 tests it cites are
 declared. Not run here: the node console tests, the darwin and kqueue runs
 above, and the Windows link tests through a junction.
+
+## 2026-11-07 — B776, B777 round 3: CI on macOS and Windows, and Windows' file identity
+
+Round 3 of backlog B776 and B777 on `fix/b77x-away-roots`, PR #1435, after the
+orchestrator applied round 2's rules patch (7959ea6f) and merged main (B762,
+903b9a1b); worker b77x on legion0 (Ubuntu 26.04, linux/amd64, go1.27.3,
+`GOTOOLCHAIN=local`, `GOPROXY=off`). Commits, oldest first: fb73c07f (red) and
+ca3db275, backlog B794; 31c67e46, the identity's comment; then this record.
+The rules go through `rules-b77x-r3.patch` (scanner.md's B776 and B777 lines
+and their long forms).
+
+### 1. A root whose path is gone, and CI's macOS and Windows legs (B794)
+
+CI's macOS and Windows legs answered 201 for
+`TestAWriteThroughALinkIsAskedOfTheRootItLandsIn`'s gone root reached through a
+link to its parent, which Linux's refused. The guard compared where a write
+lands, its folder resolved through its nearest ancestor that exists
+(`fsutil.EvalSymlinksOrClean`), with each root as `fsutil.ResolveLinks`
+resolves it and, for a root whose path is not there, as configured: two forms
+wherever a link or another spelling leads to that root's parent. Every root a
+test makes is in its temporary folder, which on macOS is reached through
+`/var`, a link to `/private/var`, and on a Windows runner is named by its short
+name (`%TEMP%` is `C:\Users\RUNNER~1\…`, `.github/scripts/printtmpdir`; the
+handle's final path that `ResolveLinks` reads spells it long,
+`TestResolveLinksAgreesWithEvalSymlinksWhereThereIsNoLink`). So the gone root
+kept `/var/…` or `RUNNER~1` while the write resolved to `/private/var/…` or the
+long name, and no root held the write. Linux's temporary folder has neither,
+and the two forms agreed there. That subtest's link leads outside the request's
+root, where the upload's own containment check refuses the commit anyway; the
+shape that loses rows is a link inside it. Red on Linux at fb73c07f, through
+the console's real handlers: a library root configured through a link, a root
+nested in it whose volume went, and an upload through a link inside the library
+root to the nested root's parent, which the containment check passes. Its
+commit answered 200, one committed, and the nested root's folder was made anew
+with the upload alone, for the scans to reap the rows under it. The forms are
+`EvalSymlinksOrClean`'s now (ca3db275), the resolution the write's own folder
+gets: a root that resolves as before, and one whose path is not there through
+its nearest folder that is, its missing names kept. The commit is refused (409
+`root_not_mounted`), nothing made; the same root holding no rows still takes
+its first upload, which makes its folder (green before and after).
+`resolveRootHook` stands in for `EvalSymlinksOrClean`. Closes backlog B794.
+
+### 2. Windows' file identity (B777)
+
+A review read `rootIdentity`'s `os.SameFile(info, info)` as answering true at
+once, reading no file ID, which would leave the identity to its first
+comparison, after the walk. go1.27.3 has no such shortcut: `os.SameFile`
+(`os/types.go`) calls `sameFile` (`os/types_windows.go`), which reads each
+side's ID through `loadFileId` before it compares them. `os.Stat` of a plain
+folder (`GetFileAttributesEx`, then `saveInfoFromPath`) leaves the ID to that
+read, which opens the path then and keeps the ID; the second read of the same
+`FileInfo` finds it done. So the comparison of the stat with itself reads the
+ID as the identity is taken. Nothing changed but the comment, which now says
+this (31c67e46), and the rules add a Don't against dropping the comparison.
+`TestARootsIdentityIsTheFolderAtItsPathWhenItIsRead` (round 1) takes the
+identity, puts another folder at the path and requires the two to differ:
+without the comparison the identity's ID is read from the new folder, red on
+Windows alone, since a stat on Linux and macOS carries the device and inode
+already.
+
+### 3. A root whose own Add keeps failing (B777)
+
+CodeRabbit read `rootWatchMissing` → `noteRootWatch(root, nil, nil)` →
+`checkRootWatches` → `lookAgain` → `watchAgain` → `scheduleScan` as a scan and
+a line at every check while the root's own Add keeps failing. That is round
+1's code. Since round 2 (5e53ba5b) `rootWatchMissing` hands such a root to
+`unwatchRoot`, which marks it, says so once and asks for one scan;
+`checkRootWatches` passes over a marked root before anything else, so no check
+reaches `lookAgain`; and a try whose walk fails again finds the root marked,
+saying nothing and scanning nothing. `TestTheWatcherTriesAgainARootWhoseOwnWatchCouldNotBeAdded`
+(R1) fails the root's own Add from the start, at the Add boundary, and asserts
+one scan over twelve checks, the limit said once and the tries on the backoff.
+C2-5a again, on 31c67e46 (the check not passing over a marked root): R1 red,
+the Add tried 18 times over twelve checks and not on the backoff, the limit
+said 13 times, and the root's watch never said as added again once the limit
+lifted (each check's look took it first). Nothing to fix.
+
+### Negative controls
+
+Predicted in `.tmp/_b77x/controls-r3.predictions.txt` before the run, each on
+31c67e46, exact-once edits, the package's test binary built, each test run
+alone, the bytes put back from memory (`.tmp/_b77x/controls_r3.py`); the
+baselines green, `git status` clean after. L2
+`TestAWriteThroughALinkIsAskedOfTheRootItLandsIn`, W1
+`TestAWriteWithNoLinkOnItsWayResolvesNoOtherRoot`, R1
+`TestTheWatcherTriesAgainARootWhoseOwnWatchCouldNotBeAdded`, beside the rest
+of the guard's tests.
+
+| Control | Red | Green |
+|---|---|---|
+| C3-1a a root whose path is not there kept as configured | L2, the gone root configured under a linked parent | the rest, L2's other three subtests among them |
+| C2-5a the check does not pass over a root whose own watch could not be added | R1 | W1 |
+
+Both as predicted. Not a control here: `rootIdentity`'s comparison of the stat
+with itself, whose removal is red on Windows alone.
+
+### What CI's macOS and Windows legs must show
+
+`TestAWriteThroughALinkIsAskedOfTheRootItLandsIn` green on both, its four
+subtests passing: the gone root through a link to its parent, red there before
+ca3db275, refused. On Windows the link tests run through directory junctions,
+and `TestARootsIdentityIsTheFolderAtItsPathWhenItIsRead` passes; with
+`rootIdentity`'s comparison taken out it goes red there, which a Windows host
+can run as that control. On macOS `TestAWriteWithNoLinkOnItsWayResolvesNoOtherRoot`
+passes too, its folders resolved through `/private/var` first.
