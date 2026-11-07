@@ -3,6 +3,7 @@ package dsdconv
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"testing"
 
@@ -229,25 +230,36 @@ func TestAnAbuttingJoinIsZeroPadded(t *testing.T) {
 // TestTwoSeventeenBitTracksAtD16Abut: a predecessor whose Frames is not a
 // multiple of D has no phase that keeps both its own k·D and the continuous
 // stream's, so its join is abutting: two 17-bit tracks at D = 16 are one
-// frame each, each what it is alone, and the first does not hold.
+// frame each, each what it is alone, and the first does not hold. A 17-bit
+// track is shorter than H frames too, which alone keeps it from holding and
+// its join from being continuous, so two tracks of H·D + 1 bits, H frames
+// each, show the alignment rule by itself: they are not continuous, and the
+// first, read under Hold, ends with io.EOF, what it is alone, never
+// ErrWindow.
 func TestTwoSeventeenBitTracksAtD16Abut(t *testing.T) {
 	p, rate := Plan{176400, 24}, format.DSD64RateHz
-	f := format.NativeDSD{BitRateHz: rate, Channels: 2, Container: format.ContainerDSF, Frames: 17}
-	if Continuous(f, p, f, p) {
-		t.Fatal("two 17-bit tracks at D = 16 are continuous")
+	d, _ := p.Decimation(rate)
+	h, _ := p.Window(rate)
+	if d != 16 {
+		t.Fatalf("D = %d at %s %s, want 16", d, rateName(rate), p)
 	}
-	for seed := uint64(1); seed <= 2; seed++ {
-		ch := [2][]byte{randomBits(90+seed, 17), randomBits(92+seed, 17)}
-		want, _ := reference(t, ch, rate, p)
-		c, err := New(stubOf(rate, ch), p, Options{Hold: true})
-		if err != nil {
-			t.Fatal(err)
+	for _, n := range []int{17, h*d + 1} {
+		f := format.NativeDSD{BitRateHz: rate, Channels: 2, Container: format.ContainerDSF, Frames: int64(n)}
+		if Continuous(f, p, f, p) {
+			t.Errorf("two tracks of %d bits at D = 16 are continuous", n)
 		}
-		got, err := drain(t, c, 4)
-		if !errors.Is(err, io.EOF) || len(got) != 2 {
-			t.Fatalf("a 17-bit track gives %d samples and %v, want one frame and io.EOF (it cannot hold)", len(got), err)
+		for seed := uint64(1); seed <= 2; seed++ {
+			ch := [2][]byte{randomBits(90+seed, n), randomBits(92+seed, n)}
+			want, _ := reference(t, ch, rate, p)
+			c := mustNew(t, stubOf(rate, ch), p, Options{Hold: true})
+			got, err := drain(t, c, 4)
+			if !errors.Is(err, io.EOF) || c.Holding() || len(got) != 2*(n/d) {
+				t.Errorf("a track of %d bits under Hold gives %d frames and %v, holding %v; want %d and io.EOF (it cannot hold)",
+					n, len(got)/2, err, c.Holding(), n/d)
+				continue
+			}
+			eq(t, fmt.Sprintf("a track of %d bits", n), got, want)
 		}
-		eq(t, "a 17-bit track", got, want)
 	}
 }
 

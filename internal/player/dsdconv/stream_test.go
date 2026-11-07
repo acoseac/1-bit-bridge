@@ -20,9 +20,12 @@ import (
 
 // TestPaddingPastFramesIsNotRead: a stream's Frames counts one-bit
 // samples, and a DSF's last byte carries padding past them, which the
-// demuxer reads and the filter must not (B728 §4.2). Sources that differ in
-// those bits alone give the same samples, the definition's, which never
-// reads past Frames; through the real DSF demuxer too.
+// demuxer reads and the filter must not (B728 §4.2). Sources whose sample
+// bits are the same give the same samples, the definition's, which never
+// reads past Frames, whether the last byte's padding bits are all zero
+// (0x00), all one (0xFF's) or mixed; the converter never asks its source
+// for a byte past the one that holds sample Frames-1, which a source with
+// bytes after it would give; and so through the real DSF demuxer too.
 func TestPaddingPastFramesIsNotRead(t *testing.T) {
 	for _, rate := range dsdRates {
 		for _, p := range []Plan{{176400, 24}, {44100, 16}} {
@@ -31,18 +34,28 @@ func TestPaddingPastFramesIsNotRead(t *testing.T) {
 			n := (3*h+2)*d + 3 // the last byte holds 3 bits of the stream and 5 of padding
 			ch := [2][]byte{randomBits(1, n), randomBits(2, n)}
 			want, _ := reference(t, ch, rate, p)
-			for _, pad := range []byte{0x00, 0x1F, 0x15} {
-				planes := [2][]byte{planeOf(ch[0], false), planeOf(ch[1], false)}
-				for c := range planes {
-					planes[c][len(planes[c])-1] |= pad
-				}
-				c, err := New(newStub(rate, int64(n), planes), p, Options{})
-				if err != nil {
-					t.Fatal(err)
-				}
-				got, err := drain(t, c, 333)
-				if !errors.Is(err, io.EOF) || !equal32(got, want) {
-					t.Errorf("%s %s: padding %#02x gives %d samples (%v), the definition's %d, or other samples", rateName(rate), p, pad, len(got), err, len(want))
+			last := (n+7)/8 - 1 // the byte that holds sample n-1
+			for _, pad := range []byte{0x00, 0xFF, 0x15} {
+				for _, after := range []int{0, 2*chunkBytes + 1} {
+					planes := [2][]byte{planeOf(ch[0], false), planeOf(ch[1], false)}
+					for c := range planes {
+						planes[c][last] |= pad & (0xFF >> (n % 8))
+						planes[c] = append(planes[c], bytes.Repeat([]byte{pad ^ 0xA5}, after)...)
+					}
+					s := newStub(rate, int64(n), planes)
+					c, err := New(s, p, Options{})
+					if err != nil {
+						t.Fatal(err)
+					}
+					got, err := drain(t, c, 333)
+					if !errors.Is(err, io.EOF) || !equal32(got, want) {
+						t.Errorf("%s %s: padding %#02x, %d bytes after, gives %d samples (%v), the definition's %d, or other samples",
+							rateName(rate), p, pad, after, len(got), err, len(want))
+					}
+					if s.pos != last+1 {
+						t.Errorf("%s %s: padding %#02x, %d bytes after: the source was read to byte %d, want %d, which holds sample %d",
+							rateName(rate), p, pad, after, s.pos-1, last, n-1)
+					}
 				}
 			}
 			// The real demuxer: a DSF whose last byte's padding bits are set.
