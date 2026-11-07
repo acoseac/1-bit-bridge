@@ -81343,3 +81343,203 @@ cache (its inputs unchanged since round 4's run), internal/smartplaylist 3 s,
 its season 1 s, internal/smartplaylistgen 37 s, internal/api 143 s,
 internal/manifest 1,515 s; `make build-all`, the six targets. Not run here:
 macOS and Windows natively, CI's runners, and the iOS app.
+
+## 2026-11-07 — B706: the early rollback's backup probe keeps production's 10 s, and the tests give their backup longer
+
+Worker b70x, legion0 (Ubuntu 26.04, linux/amd64, Go 1.27.3), branch
+`fix/b70x-rollback-probe-rules` from main 123a80fa. Commits: d09f0762 (the seam,
+and the tests' longer bound), 2e3c6b2b (the pinning tests), then this record.
+Production's behaviour is unchanged, so no test went red first.
+
+On windows-latest, on two PRs on 2026-11-03, two subtests of
+`TestServeRollsBackAnInstallWhoseVersionRefusesItsSettings` and
+`TestARollbackThatHoldsTheMarkersLockFirstStopsTheMigration` failed. Each time
+serve exited 2 with `the backup at …\bridge.exe.bak did not say its version: it
+did not answer within 10s`, the early rollback's ask of its backup
+(`updater.ProbeVersion`, 10 s). The same PRs' earlier runs had passed.
+
+### What an operator sees when the probe times out
+
+Read from the code. Windows was not run here.
+
+- **Serve exits 2 and writes nothing but its two lock files, which earlier
+  starts made already.** `recoverRefusedInstall` returns `acted == false`, and
+  runServe returns the settings' refusal as it did before B613. The binary,
+  `.bak` and `update-state.json` are left as they were. No store, token file,
+  pid file or certificate is written: the load's refusal returns before
+  runServe's own boot begins. Both locks (`server.lock` and
+  `update-state.lock`) are released as the function returns. The log has the
+  refusal, `config load failed: …` (or `serveConfigRefusal`'s line), then
+  `updater: not rolling back the install of <version>: the backup at <path>
+  did not say its version: it did not answer within 10s`. On Windows, stderr is
+  the service log (`%PROGRAMDATA%\1-bit-bridge\bridge.log`), and
+  `serviceExitCode` adds `bridge service exited: subcommand exited with code 2`.
+- **The service manager starts it again, into the same refusal, and that start
+  asks the backup again.** systemd: the unit's `Restart=always` with
+  `RestartSec=2` and no start-limit override. A start that waits out the
+  probe takes more than 10 s, so the default five starts in ten seconds are
+  never reached. The SCM: exit 2 becomes the service-specific code 1
+  (`serviceServeResult`, `serviceExitCode`). `FailureActionsOnNonCrashFailures`
+  then runs the recovery actions: a restart after 2 s, 2 s, then 30 s for
+  every later failure, with the count reset after an hour. The handler reports
+  Running before serve runs, so no SCM start timeout applies, and the service
+  is a delayed auto-start. launchd: `KeepAlive {SuccessfulExit: false}`
+  restarts an exit 2 too. Each restart finds the same marker and the same
+  backup, its pages now warm, and the 6 h recency window
+  (`recencyWindow`) leaves hundreds of tries. Past the window the start says
+  `the install is older than 6h0m0s` and refuses as it did before B613. The
+  bridge then stays down until the operator fixes the settings or rolls back
+  by hand. A run from a terminal shows the same lines and exits 2, and running
+  it again asks the backup again.
+
+### What the probe protects, and why a slow answer is the cheap one
+
+The rename that puts the backup back is one way. On Unix the backup is renamed
+over the binary. On Windows the running image is moved aside and the backup is
+renamed into its place. Either way the binary that refused its settings is no
+longer at the path. The probe is the one check that `.bak` is the version the
+marker says the install replaced: a version check of the file, not a proof of
+its bytes. Without it a stale `.bak` from an earlier install, a damaged file or
+a non-program would be put back. The result would be a service that cannot
+start at all, or a downgrade past the store.
+
+So a slow answer costs one restart cycle (the bound, the restart delay and
+one start), with the install as it was. A wrong answer, taking a backup that
+said nothing for the version, would put back an unknown binary, and no
+restart undoes that. The timeout fails safe.
+
+### Whether 10 s suits a cold start
+
+Measured here, with goreleaser's flags (`CGO_ENABLED=0 -trimpath -ldflags "-s
+-w"`, the release tags), `.tmp/_b70x/measure.py`:
+
+| binary | size | `version` warm (median of 20) | cold (median of 10) | read from disk, cold |
+|---|---|---|---|---|
+| linux/amd64 release | 52.7 MB | 7.3 ms | 8.3 ms | 0.5 MB |
+| windows/amd64 release | 53.0 MB | (not runnable here) | | |
+| cmd/bridge test binary, no race (CI's Windows leg builds it so) | 89.5 MB (88.6 MB for Windows) | 8.7 ms | 10.8 ms | 1.3 MB |
+| cmd/bridge test binary, race (make test) | 119.3 MB | 1,036 ms | 1,094 ms | 48.0 MB |
+
+"Cold" is the file fsynced and its page cache dropped (`posix_fadvise(DONTNEED)`)
+before each run, read back from this host's NVMe, with `mincore` counting what
+the run brought in. `bridge version` runs the package inits and prints one
+line: it touches 0.5 MB of the release binary, which even an SD card reads in
+well under a second. 10 s is three orders of magnitude above the program's own
+cost here.
+
+What 10 s must also cover on Windows is CreateProcess, where an antivirus scans
+a new or changed executable. A context cannot cut that short: os/exec starts
+`watchCtx` only once `StartProcess` returns, so a scan longer than the bound
+ends in a kill the moment the start returns, whatever the program would have
+answered (`TestAHungFpcalcDoesNotHoldTheSweep`'s record above met the same with
+a copied stand-in). The usual backup is the image the previous service process ran
+until moments before: on Windows the swap moves the running exe aside as
+`.bak`, so it has been scanned and its pages are likely still in memory. The
+cold case is a first start after a reboot: a power loss between the swap and
+the restart, or a rollback stopped before its rename and finished at the next
+boot. Even then the delayed auto-start puts the service about two minutes
+after the boot's other services. Not measured on Windows here.
+
+**No longer bound and no retry for production.** The retry exists already: it
+is the service manager's restart, over an unchanged marker, with a warm and
+scanned backup. A longer bound changes no outcome. It moves time from a restart
+cycle into one start, and in a true hang (a backup that never answers) it costs
+its whole length on every start. The early rollback also holds
+`update-state.lock` across the probe, and `LockState`'s other takers wait 30 s
+for it (`defaultStateLockWait`, whose comment counts the probe's 10 s): a store
+open that migrates, the console's rollback, the boot's housekeeping. A bound
+near 30 s would turn their waits into refusals. An in-process retry would
+double the hang's cost for what the restart already gives. Production keeps
+`updater.VersionProbeTimeout`, 10 s, which is now exported and pinned.
+
+### Why CI was slow, and the seam
+
+The tests' backup is a copy of the running test binary (`installBridgeCopy`: a
+hard link where the host makes one, a fresh copy on Windows), 88.6 MB as CI's
+Windows leg builds it, made anew for each case and started for the first time
+inside the probe, while other packages' tests run beside it (`go test ./...`
+runs as many test binaries at once as the runner has CPUs).
+gate.yml excludes Go's temp tree from Defender in a step that may fail
+(`continue-on-error`), and CI's logs could not be read here (`gh` is refused),
+so whether the exclusion took on those runs is not known. Under the race
+detector the copy takes a second to answer on this idle 16-core host.
+
+- `updater.ProbeVersionWithin(ctx, binary, within)` is ProbeVersion under
+  another bound. `ProbeVersion` is ProbeVersionWithin at `VersionProbeTimeout`,
+  as before.
+- `serveOpts.backupProbeTimeout` is zero in production. `backupProbeBound`
+  resolves zero to `updater.VersionProbeTimeout`, and the early rollback asks
+  within it.
+- `refusedInstall.serve`, and the one direct runServe that reaches the probe
+  (`TestARollbackThatHoldsTheMarkersLockFirstStopsTheMigration`), give the
+  backup `testBackupProbeTimeout`, 2 minutes. No test asserts how long a probe
+  took.
+
+**Why the longer bound does not hide the production path.** Only the number
+differs: the run, the kill at the bound, the refusal past it and every check
+after it are production's code. Production's number is pinned
+(`TestTheEarlyRollbackGivesItsBackupTenSecondsInProduction`). What a backup
+silent past its bound comes to is pinned through the seam
+(`TestABackupSilentPastItsBoundIsAskedAgainAtTheNextStart`, a 1 s bound and a
+backup silent for a minute). A release binary answers `version` in
+milliseconds, so the 2 minutes cover only the test's own copy.
+
+### Who else asks a binary its version
+
+On main, `updater.ProbeVersion` had one caller, the early rollback. B660 (#1424,
+not merged; read on the local branch `fix/b660-install-probation`, since this
+clone has no `origin/fix/b660-install-probation`) adds a second:
+`recoverCrashedInstall` (`cmd/bridge/serve_crashed_install.go`) asks the
+backup's version before its settings check, and `CrashRollback`'s doc names
+it. B660 relies on `ProbeVersion`'s signature, its 10 s, its words and its
+return of the caller's context error, and all four are unchanged. B706's seam
+does not reach B660's crash rollback, whose real-subprocess tests meet the same
+bound on CI's Windows leg. Once B660 merges, `recoverCrashedInstall` can ask
+`updater.ProbeVersionWithin(ctx, backup, backupProbeBound(opts))`, a one-line
+change, named in the report for the orchestrator. B660 also touches
+`serve_refused_install.go`, `run_as_bridge_test.go` and
+`serve_refused_install_r3_test.go`, in hunks clear of this branch's. Neither
+the console's rollback nor the boot rollback asks a version. `CheckConfig`'s
+30 s bound on a candidate's settings check is its own and is unchanged.
+`configCheckTimeout`'s comment no longer claims a 30 MiB binary, and
+`defaultStateLockWait`'s names `VersionProbeTimeout`.
+
+### The tests
+
+- `TestTheEarlyRollbackGivesItsBackupTenSecondsInProduction` (pinning):
+  `backupProbeBound(serveOpts{})` is 10 s, and a test's bound is its own.
+- `TestABackupSilentPastItsBoundIsAskedAgainAtTheNextStart` (pinning): the
+  backup silent for a minute, the bound a second. Serve exits 2, the binary,
+  the backup and the marker are byte for byte as they were, nothing of serve's
+  is written, and the updater line says `did not say its version: it did not
+  answer within 1s`. Then the next start, with the backup answering, exits 75
+  with the backup back and the rollback's record holding this version back.
+- `TestProbeVersionWithinAsksWithinTheBoundItIsGiven` (internal/updater): a
+  stand-in silent for an hour answers `it did not answer within 1s` within the
+  test's 20 s, and one silent for 200 ms is taken within a minute.
+- The silent backup is the copy run with `CMDBRIDGE_TEST_RUN_AS_BRIDGE_SILENT`,
+  a duration (`holdIfSilent`, first in `runAsBridge`). The updater's stand-in
+  takes a `silent` script file. Each ends by itself when its pause is over.
+
+### Negative controls
+
+Predicted in `.tmp/_b70x/controls.predictions.txt` before any ran, each alone
+on 2e3c6b2b, the bytes restored from memory (`git status` clean after them all).
+T1 to T5 are the first two tests above, the two CI failures, and
+`TestServeLeavesAnInstallItCannotProveAsItIs`. U1 is the updater test above,
+and U2 `TestProbeVersionNamesTheVersionTheBinarySays`.
+
+| # | Mutation | Predicted red | Observed |
+|---|---|---|---|
+| BASE | none | none | all green |
+| NC1 | backupProbeBound's production value 30 s | T1 | T1 alone: "gives its backup 30s in production, want 10s" |
+| NC2 | the early rollback calls `ProbeVersion`, the seam unused | T2 | T2 alone, at 10.2 s, "within 10s" |
+| NC3 | a "did not answer" error taken for the marker's version | T2 | T2 alone: exit 75 at the first start |
+| NC4 | ProbeVersionWithin runs and words VersionProbeTimeout | U1, T2 | U1 (its silent case) and T2, each "within 10s"; U2, T1, T3, T4, T5 green |
+| NC5 | the copy's silence removed | T2 | T2 alone: exit 75 at the first start |
+| NC6 | the stand-in's silence removed | U1 | U1 alone: it answered 0.2.1 |
+| NC7a | none; every backup answers after 11 s (the variable set for the whole test binary) | none | T3's first case (22.1 s) and T5 (23.7 s) green |
+| NC7b | as NC7a, with the tests' long bound removed (the test side before B706) | T3's case, T5 | both, in CI's words: "serve = 2, want 75 … did not answer within 10s" and "serve = 2 before its rename" |
+
+NC7b reproduces the Windows failure on Linux, with a backup slower than
+production's bound, and NC7a shows the tests' bound carrying it.
