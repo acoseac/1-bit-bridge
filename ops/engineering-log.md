@@ -83987,9 +83987,11 @@ Backlog B776 and B777, the last two late-mount items, on `fix/b77x-away-roots`
 from main 14aa6290, worker b77x on legion0 (Ubuntu 26.04, linux/amd64,
 go1.27.3, `GOTOOLCHAIN=local`, `GOPROXY=off`). Commits: B776's red tests
 452310a4 and its fix c98b66fe; B777's red tests 100e9adc and its fix
-466119c5; then this record and the runbook's paragraph. The rules go into
-`.claude/rules/scanner.md`, `admin-console.md` and `build-ci-tests.md`, with
-the long forms in `ops/History-rules-scanner.md`, through `rules-b77x.patch`
+466119c5; this record and the runbook's paragraph 7aac47a9; B777's identity
+read on Windows, its test f564c322 and its fix 3013cebd; then the gates'
+results, added here. The rules go into `.claude/rules/scanner.md`,
+`admin-console.md` and `build-ci-tests.md`, with the long forms in
+`ops/History-rules-scanner.md`, through `rules-b77x.patch`
 (this worker cannot write `.claude/`). Both items stay small: only rows are
 at stake, never a file, and a scan or a healthy upload pays nothing but a few
 looks (a stat, one batch of a root's listing, at most one count).
@@ -84172,7 +84174,17 @@ walks are done (`confirmRootWatches`, `noteRootWatch`); where the two differ,
 the root is looked at again and its watch added again, after what is held at
 its path is let go (`lookAgain`, `watchAgain`'s `releaseRoot`), since an Add
 over a path fsnotify holds keeps what it holds. `watchAgain` takes and records
-the identity the same way, so a later change is found too. The check
+the identity the same way, so a later change is found too. Windows' `os.Stat`
+of a plain folder keeps its path and reads the folder's file ID only when
+`os.SameFile` first asks, from whatever folder the path names then, so an
+identity taken before a walk would be that of the folder at the path after
+it; the identity's read compares the stat with itself at once (`rootIdentity`,
+3013cebd). `TestARootsIdentityIsTheFolderAtItsPathWhenItIsRead` reads an
+identity, puts another folder at the path and requires the two to differ:
+green here and on macOS at f564c322, where the stat's device and inode are
+the identity at once, and red on Windows alone without the fix, which this
+host cannot run (found reading go1.27.3's `os/stat_windows.go` and
+`types_windows.go`, `saveInfoFromPath` and `loadFileId`). The check
 (`checkRootIdentity`, every `rootWatchCheckEvery`, 30 s) compares, where a
 root's own watch is still listed, the recorded identity with the folder at
 its path now (`os.SameFile`): a root found another folder goes through
@@ -84267,7 +84279,9 @@ every new ask puts back, so the scan the resume asked for never ran.
 ### What the orchestrator runs on a Mac
 
 On the Mac, each test alone (a red wait gives up at the deadline less 30 s),
-red with 466119c5 (B777's fix) reverted and green with it:
+red with B777's fix reverted, 3013cebd, f564c322 and 466119c5, newest first
+(f564c322's test calls what 466119c5 adds; or the tree at 100e9adc for
+`internal/manifest`), and green at the branch's head:
 
     go test ./internal/manifest/ -count=1 -v -timeout 120s -run '^TestTheWatcherWatchesTheVolumeMountedOverARootItWatchedBare$'
     go test ./internal/manifest/ -count=1 -v -timeout 120s -run '^TestTheWatcherWatchesTheVolumeMountedOverANestedRootItWatchedBare$'
@@ -84282,3 +84296,23 @@ with it, where node is installed:
     go test ./internal/admin/ -count=1 -v -timeout 300s -run '^TestTheConsoleRetriesARefusedCommitWithItsSessionOnceTheVolumeIsBack$'
 
 CI's macOS leg runs all four in the package suites.
+
+### The gates
+
+At 3013cebd, through the shared build lock in one run (`.tmp/_b77x/gate.sh`),
+on go1.27.3, go.mod's: `make fmt` rewrote nothing; `make vet` clean, and so
+with `GOOS=windows`, `GOOS=darwin` and `GOOS=linux GOARCH=386`; `make test`
+(`-race`, `-timeout 30m`) green, 89 packages, among them cmd/bridge in
+1278 s, internal/admin in 1033 s, internal/manifest in 1606 s,
+internal/upload in 11 s and internal/trash in 2 s, and the packages that test
+Linux alone run here for real (internal/alsa, internal/alsapcm on this
+host's ALSA, internal/atomicwrite, internal/usbid, internal/player/hotplug
+and the rest); `make build-all`, its build-tag census included, and
+`make docs-check` clean; `git status` clean after. The qualification check
+against main (`scripts/qualification-version -base 14aa6290 -head HEAD`)
+answers OK. `rules-b77x.patch` applies to the tree (`git apply --check`),
+and on a copy with it applied the budgets hold (scanner.md 37,976 bytes,
+admin-console.md 76,435, build-ci-tests.md 29,155; the worst load 66.5%)
+and the 23 tests it cites are declared. Not run here: the darwin mount tests
+and the node console test above, and the red of
+`TestARootsIdentityIsTheFolderAtItsPathWhenItIsRead`, which is Windows' alone.
