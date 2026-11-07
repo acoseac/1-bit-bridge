@@ -417,8 +417,10 @@ func TestTheRefusalsComeInTheirOrder(t *testing.T) {
 
 // TestTheConversionTargetIsTheDACsBest: a conversion's target is 176.4 kHz
 // where the DAC takes it at 24 bits or more, else 88.2 kHz, else 44.1 kHz,
-// and 16 bits only for a DAC that takes no 24-bit target; what the probe
-// refuses is not taken, and a DAC that takes none converts nothing.
+// and 16 bits only for a DAC that takes no 24-bit target, in the first
+// packing of the table that carries the bits (B728 B11: the packing a
+// converted occurrence opens as is the plan's); what the probe refuses is not
+// taken, and a DAC that takes none converts nothing.
 func TestTheConversionTargetIsTheDACsBest(t *testing.T) {
 	pcm := func(f string, bits *int, rates ...int) alsa.Altset {
 		return alsa.Altset{Interface: ptr(1), Altset: ptr(4), Formats: []string{f}, Channels: ptr(2), Rates: rates, Bits: bits}
@@ -429,17 +431,19 @@ func TestTheConversionTargetIsTheDACsBest(t *testing.T) {
 		refuse  []alsapcm.ProbeCandidate
 		want    *Target
 	}{
-		{"24 bits to 176.4 kHz", []alsa.Altset{pcm("S24_3LE", ptr(24), 44100, 88200, 176400)}, nil, &Target{176400, 24}},
-		{"24 bits to 88.2 kHz", []alsa.Altset{pcm("S24_LE", ptr(24), 44100, 88200)}, nil, &Target{88200, 24}},
-		{"24 bits at 44.1 kHz beside 16 at 176.4", []alsa.Altset{pcm("S16_LE", ptr(16), 176400), pcm("S32_LE", ptr(24), 44100)}, nil, &Target{44100, 24}},
-		{"16 bits alone", []alsa.Altset{pcm("S16_LE", ptr(16), 44100, 88200, 176400)}, nil, &Target{176400, 16}},
-		{"a 32-bit container of 16 significant bits", []alsa.Altset{pcm("S32_LE", ptr(16), 88200)}, nil, &Target{88200, 16}},
-		{"no Bits line, S24_3LE", []alsa.Altset{pcm("S24_3LE", nil, 176400)}, nil, &Target{176400, 24}},
+		{"24 bits to 176.4 kHz", []alsa.Altset{pcm("S24_3LE", ptr(24), 44100, 88200, 176400)}, nil, &Target{176400, 24, format.S243LE}},
+		{"24 bits to 88.2 kHz", []alsa.Altset{pcm("S24_LE", ptr(24), 44100, 88200)}, nil, &Target{88200, 24, format.S24LE}},
+		{"24 bits at 44.1 kHz beside 16 at 176.4", []alsa.Altset{pcm("S16_LE", ptr(16), 176400), pcm("S32_LE", ptr(24), 44100)}, nil, &Target{44100, 24, format.S32LE}},
+		{"16 bits alone", []alsa.Altset{pcm("S16_LE", ptr(16), 44100, 88200, 176400)}, nil, &Target{176400, 16, format.S16LE}},
+		{"a 32-bit container of 16 significant bits", []alsa.Altset{pcm("S32_LE", ptr(16), 88200)}, nil, &Target{88200, 16, format.S32LE}},
+		{"no Bits line, S24_3LE", []alsa.Altset{pcm("S24_3LE", nil, 176400)}, nil, &Target{176400, 24, format.S243LE}},
 		{"the probe refuses 176.4 kHz", []alsa.Altset{pcm("S24_3LE", ptr(24), 88200, 176400)},
-			[]alsapcm.ProbeCandidate{{Format: format.S243LE, RateHz: 176400}}, &Target{88200, 24}},
+			[]alsapcm.ProbeCandidate{{Format: format.S243LE, RateHz: 176400}}, &Target{88200, 24, format.S243LE}},
+		{"the table's first packing that carries 24 bits", []alsa.Altset{pcm("S32_LE", ptr(24), 176400), pcm("S24_LE", ptr(24), 176400)}, nil, &Target{176400, 24, format.S24LE}},
+		{"a packing of fewer significant bits than its depth is passed over", []alsa.Altset{pcm("S24_3LE", ptr(20), 176400), pcm("S32_LE", ptr(24), 176400)}, nil, &Target{176400, 24, format.S32LE}},
 		{"the 48 kHz family alone", []alsa.Altset{pcm("S24_3LE", ptr(24), 48000, 96000, 192000)}, nil, nil},
 		{"mono", []alsa.Altset{{Interface: ptr(1), Altset: ptr(4), Formats: []string{"S24_3LE"}, Channels: ptr(1), Rates: []int{176400}}}, nil, nil},
-		{"a continuous range", []alsa.Altset{{Interface: ptr(1), Altset: ptr(4), Formats: []string{"S24_3LE"}, Channels: ptr(2), RateRange: &alsa.RateRange{Min: 8000, Max: 192000}, Bits: ptr(24)}}, nil, &Target{176400, 24}},
+		{"a continuous range", []alsa.Altset{{Interface: ptr(1), Altset: ptr(4), Formats: []string{"S24_3LE"}, Channels: ptr(2), RateRange: &alsa.RateRange{Min: 8000, Max: 192000}, Bits: ptr(24)}}, nil, &Target{176400, 24, format.S243LE}},
 	}
 	for _, c := range cases {
 		r := newRig(t).everything(dsdstate.ModeConvert)
@@ -469,10 +473,10 @@ func TestTheConversionTargetIsTheDACsBest(t *testing.T) {
 		msbits int
 		want   Target
 	}{
-		{"an accepted 16 bits under the altset's 24", ptr(24), 16, Target{176400, 16}},
-		{"an accepted 24 bits with no Bits line", nil, 24, Target{176400, 24}},
-		{"an accepted 32 bits over the altset's 24", ptr(24), 32, Target{176400, 24}},
-		{"an accepted refine whose bits are unknown", ptr(24), 0, Target{176400, 24}},
+		{"an accepted 16 bits under the altset's 24", ptr(24), 16, Target{176400, 16, format.S32LE}},
+		{"an accepted 24 bits with no Bits line", nil, 24, Target{176400, 24, format.S32LE}},
+		{"an accepted 32 bits over the altset's 24", ptr(24), 32, Target{176400, 24, format.S32LE}},
+		{"an accepted refine whose bits are unknown", ptr(24), 0, Target{176400, 24, format.S32LE}},
 	} {
 		r := newRig(t).everything(dsdstate.ModeConvert)
 		r.altsets = []alsa.Altset{pcm("S32_LE", c.bits, 176400)}

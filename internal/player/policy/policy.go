@@ -135,10 +135,16 @@ type Tuple struct {
 // Target is a conversion's PCM (the design's section 4.3): 176.4 kHz where
 // the DAC takes it at 24 bits or more, else 88.2 kHz, else 44.1 kHz, at 24
 // valid bits; 16 only for a DAC that takes no 24-bit target, at the best of
-// those rates it takes 16 bits at.
+// those rates it takes 16 bits at. Packing is the first packing of the
+// player's table at that depth (S24_3LE, S24_LE, S32_LE for 24 bits; S16_LE
+// first for 16) that the DAC takes at the rate with the bits significant:
+// what the converted occurrence opens and joins a sink as, and nothing else
+// (B728 B11), so the cache of packings a PCM track took and a predecessor's
+// transport never choose it.
 type Target struct {
 	RateHz    int
 	ValidBits int
+	Packing   format.ALSAFormat
 }
 
 // Plan is what plays at one rate under a set, or why nothing does.

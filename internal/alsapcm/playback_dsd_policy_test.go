@@ -55,10 +55,20 @@ var card = alsapcm.FakeEndpoint().Card
 
 func newDSDRig(t *testing.T, st dsdstate.State, opts ...func(*rigOptions)) *dsdRig {
 	t.Helper()
+	return newDSDRigWith(t, st, nil, opts...)
+}
+
+// newDSDRigWith is newDSDRig with edit applied to the policy before the rig
+// starts (B728 B11: a DAC no profile knows).
+func newDSDRigWith(t *testing.T, st dsdstate.State, edit func(*playback.DSDPolicy), opts ...func(*rigOptions)) *dsdRig {
+	t.Helper()
 	d := &dsdRig{box: playbacktest.NewBox(card), store: playbacktest.NewMemStore(st), monitor: make(chan time.Time)}
 	d.pol = playbacktest.Policy(card, d.box, d.store)
 	d.pol.Profiles = playbacktest.KnownProfiles(&dacprofile.Timing{DSDPrefillMs: 1})
 	d.pol.Tick = func() (<-chan time.Time, func()) { return d.monitor, func() {} }
+	if edit != nil {
+		edit(d.pol)
+	}
 	opts = append(opts, func(o *rigOptions) {
 		o.native = true
 		o.edit = func(r *rig, cfg *playback.Config) {
