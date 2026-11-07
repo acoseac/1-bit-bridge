@@ -367,6 +367,19 @@ func takes(a alsa.Altset, f format.ALSAFormat, rateHz int) bool {
 	return a.RateRange != nil && a.RateRange.Min <= rateHz && rateHz <= a.RateRange.Max
 }
 
+// DoPAltsets are the altsets of alts that list DoP's carrier at bitRate,
+// S32_LE at bitRate over 16 in two channels: the ones the gain check reads at
+// that rate (CheckGain), since the kernel chooses among them at the open.
+func DoPAltsets(alts []alsa.Altset, bitRate int) []alsa.Altset {
+	var out []alsa.Altset
+	for _, a := range alts {
+		if takes(a, format.S32LE, bitRate/16) {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
 // listed reports whether an altset of the bound PCM device lists f at
 // rateHz in two channels.
 func (rd *reading) listed(f format.ALSAFormat, rateHz int) bool {
@@ -529,13 +542,7 @@ func (rd *reading) dop(bitRate int) DoP {
 			return takes(a, format.S32LE, carrier.RateHz) && a.Bits != nil && *a.Bits >= 24 && *a.Bits <= 32
 		})
 	}
-	var sels []alsa.Altset
-	for _, a := range rd.in.Altsets {
-		if takes(a, format.S32LE, carrier.RateHz) {
-			sels = append(sels, a)
-		}
-	}
-	if len(sels) > 0 {
+	if sels := DoPAltsets(rd.in.Altsets, bitRate); len(sels) > 0 {
 		d.Gain = rd.gain.at(sels)
 	}
 	if d.Offered {

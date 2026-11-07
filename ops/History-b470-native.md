@@ -191,6 +191,8 @@ a suffix appended to a path, reordered paths and misplaced entries fail.
 
 ## Owner approval (2c.2b)
 
+- **Owner approval (2c.2b) is the harness's alone since B728; production rechecks the effective policy, the opened identity and DSD-only revocation as it rechecked approval.** Since B728's B7 (the cutover) this section is the engineering harness's admission alone: production (serve, and `bridge output play` without `--report`) decides DSD by the effective policy over the player's DSD state and reads no record or candidate. It rechecks the policy as this section rechecks the record, at a session's first DSD occurrence, every activation and on a 100 ms monitor, the opened node's identity at every open, and revokes DSD alone, never PCM. **Don't read an approval record in serve.** `TestServeReadsNoApprovalRecord`, `TestProductionConfiguresNoApprovalBesideItsPolicy` and `TestDoPCandidateRefusedByServeAndOutputPlay` pin it.
+
 Native admission now requires owner-controlled state-directory records and complete matching
 matrix/lifecycle reports, each hashed, qualificationVersion 9, exact sysfs identity and
 semantic read-only mixer constraints. The exact typed owner phrase is local approval,

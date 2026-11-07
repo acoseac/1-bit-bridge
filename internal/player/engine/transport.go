@@ -63,6 +63,11 @@ type occ struct {
 	// it when an edit makes it follow again; heard while it is set, it stops
 	// playback.
 	unwanted string
+	// replan is why the backend asked that it be handed off again
+	// (ReplanEvents, B728 B7): its plan left the player's effective DSD set.
+	// reconcile replaces it as it replaces an unwanted one, and no edit
+	// clears it: the occurrence that replaces it is a new one.
+	replan string
 	// late is a Cut that answered it could not: some of its frames have
 	// been or will be played, so no Cut is asked of it again.
 	late bool
@@ -940,7 +945,7 @@ func (e *Engine) reconcile(s *session) {
 	for i := 1; i < len(s.chain); i++ {
 		prev, cur := s.chain[i-1], s.chain[i]
 		switch {
-		case cur.unwanted == "":
+		case cur.unwanted == "" && cur.replan == "":
 			continue
 		case cur.late:
 		case cur.stage < stageSubmitted:
@@ -1454,6 +1459,11 @@ func (e *Engine) onAudible(id SessionID, oid OccurrenceID) {
 			e.releaseSession(s, IntentStop, StopInfo{Reason: ReasonRemovedAudible, Detail: crossed.unwanted + ", and it became audible"})
 			return
 		}
+		if crossed.replan != "" {
+			e.releaseSession(s, IntentStop, StopInfo{Reason: ReasonRemovedAudible,
+				Detail: fmt.Sprintf("occurrence %d was to be handed off again (%s), and it became audible", crossed.id, crossed.replan)})
+			return
+		}
 	}
 	oc := s.chain[i]
 	if !o.q.has(oc.entry) {
@@ -1560,6 +1570,29 @@ func (e *Engine) onRefused(id SessionID, oid OccurrenceID, u Unplayable) {
 	releaseOccurrences(s.chain[i:])
 	s.chain = s.chain[:i]
 	s.endSent = false
+	e.reconcile(s)
+}
+
+// onReplan is a backend's request to hand occurrence oid off again
+// (ReplanEvents): marked, and replaced as an edit after hand-off replaces an
+// occurrence (reconcile), a new Prepare naming the same entry; a session's
+// first occurrence, one heard, one the session no longer holds, and a session
+// not current or not live are passed over. A replacement already under way
+// (a Prepare or a Cut) takes it when it answers, since reconcile runs then.
+func (e *Engine) onReplan(id SessionID, oid OccurrenceID, why string) {
+	s := e.current(id)
+	if s == nil || s.phase != sessLive {
+		return
+	}
+	i := s.index(oid)
+	if i <= 0 || s.chain[i].stage >= stageAudible || s.chain[i].replan != "" {
+		return
+	}
+	if why == "" {
+		why = "its plan left the effective set"
+	}
+	s.chain[i].replan = why
+	e.log.Info("player: the backend asked that an occurrence be handed off again", "session", uint64(id), "occurrence", uint64(oid), "why", why)
 	e.reconcile(s)
 }
 

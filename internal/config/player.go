@@ -91,10 +91,11 @@ func logPlayerOff(why error) {
 //
 // dsdMode, allowDoP and dsdQualification are the legacy DSD keys (B728):
 // still taken, since the reader refuses a key it does not know and an unread
-// block turns the player off, and still in effect until the player's DSD
-// cutover, which the player authorizes DSD by through the owner's record
-// until then; serve's player migrates them once into its DSD state at its
-// start (LegacyDSDKeys, LegacyDSDWarnings).
+// block turns the player off, and since the player's DSD cutover (B7) read
+// by nothing but their migration: serve's player migrates them once into its
+// DSD state at its start, and bridge output play into its own, and the
+// player decides DSD by that state's effective policy, never by a key here
+// (LegacyDSDKeys, LegacyDSDWarnings).
 //
 // A block that does not read, or reads and is refused (Problem), turns the
 // player off with a logged reason and stops nothing else: MPD, the library
@@ -118,17 +119,18 @@ type PlayerConfig struct {
 	Device PlayerDevice `yaml:"device,omitempty"`
 	// DSDMode is auto, native, dop or off, a legacy key (the type's doc):
 	// "" where unset, which EffectiveDSDMode reads as off, and which the
-	// migration tells from an explicit off. Until the cutover every mode but
-	// off plays DSD only under a local owner-approved policy: native its
-	// native ones, dop its DoP ones, auto native first and DoP only at a rate
-	// the record holds no native policy for (B470 2d.2).
+	// migration tells from an explicit off. Since the cutover (B728 B7) it
+	// decides nothing itself: the migration takes an explicit off, and dop
+	// without allowDoP, for the DSD state's defaultMode off, and native, dop
+	// and auto for the bound DAC's choice, with what the owner's record
+	// approved (dsdstate.Migrate).
 	DSDMode string `yaml:"dsdMode,omitempty"`
 	// DSDQualification names an owner-approved record within the bridge
-	// state directory, a legacy key.
+	// state directory, a legacy key: read once, by the migration.
 	DSDQualification string `yaml:"dsdQualification,omitempty"`
-	// AllowDoP lets dop and auto play an approved DoP policy, a legacy key.
-	// Nil is false: the block still loads, and DoP-only DSD is refused as
-	// dop_not_allowed while PCM plays.
+	// AllowDoP is a legacy key the migration reads: under dop or auto with
+	// it, the record's DoP rates are acknowledged and DoP confirmed for the
+	// DAC. Nil is false, and the block still loads.
 	AllowDoP *bool `yaml:"allowDoP,omitempty"`
 	// Mixer is the hardware volume control, and this release takes type
 	// none alone: the output is fixed.
@@ -229,10 +231,11 @@ func (p PlayerConfig) PauseRelease() time.Duration {
 	return time.Duration(*p.PauseReleaseSeconds) * time.Second
 }
 
-// EffectiveDSDMode is dsdMode, off when it is not set: what the player
-// authorizes DSD by until the cutover, under which an unset and an explicit
-// off alike refuse a DSD track. It maps the two together, so the migration
-// reads DSDMode itself, where "" is unset and "off" was written (B728: an
+// EffectiveDSDMode is dsdMode, off when it is not set: what GET /v1/outputs
+// publishes as the player's dsdMode, the key as the config holds it, which
+// since the cutover (B728 B7) decides nothing, the player deciding DSD by
+// its DSD state. It maps an unset key and an explicit off together, so the
+// migration reads DSDMode itself, where "" is unset and "off" was written (an
 // explicit off becomes the DSD state's defaultMode off, and an unset key
 // migrates nothing).
 func (p PlayerConfig) EffectiveDSDMode() string {
@@ -279,9 +282,9 @@ func (p PlayerConfig) LegacyDSDKeys() []string {
 
 // legacyDSDMessage is the warning a start of bridge serve logs once for each
 // legacy DSD key its config sets (LegacyDSDWarnings), the key an attribute and
-// its value never: transitional words, true until the cutover, which claim no
+// its value never: words true since the cutover (B728 B7), which claim no
 // migration made (the player's start says what it migrated).
-const legacyDSDMessage = "output.player: a legacy DSD key is set; it stays in effect until the player's DSD cutover, " +
+const legacyDSDMessage = "output.player: a legacy DSD key is set; since the player's DSD cutover it decides nothing itself, " +
 	"and the player's start migrates it once into the player's DSD state"
 
 // LegacyDSDWarnings is one start's warnings of the legacy DSD keys (B728 B6):

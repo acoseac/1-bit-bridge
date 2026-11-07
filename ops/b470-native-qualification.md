@@ -1,12 +1,13 @@
 # B470 native qualification — owner approval and provisional evidence
 
-QualificationVersion is **39**. All older evidence must be rerun for the harness, native included. The
-harness never creates approval. Production reads an approval record only through the legacy reader,
-which takes versions from 35 to this build's own and none past it, until B728's cutover (`ops/plan-b728-dsd-capability-design.md`).
-This runbook's evidence binds `qualificationVersion`, whose guard covers the DSD byte path and the
-harness alone. Production native DSD requires a matching approved record;
-DoP S32_LE auditions are provisional and require both acknowledgements; production DoP plays only
-an approved DoP policy, under `dsdMode: dop` or `auto` with `allowDoP: true` (2d.2, below). Real-ref and Linux hardware gates remain reviewer/owner work.
+QualificationVersion is **40**. All older evidence must be rerun for the harness, native included. The
+harness never creates approval. Since B728 no production path reads an approval record or a candidate:
+the player plays DSD by its effective policy (`ops/plan-b728-dsd-capability-design.md`). This runbook
+is the engineering harness's. Its evidence binds `qualificationVersion`, whose guard covers the DSD byte
+path and the harness alone. An owner's record is read by the migration of the legacy keys into the
+player's DSD state, once (versions 35 to this build's), and by `bridge output play --report` (this
+build's version alone). DoP S32_LE auditions are provisional and require both acknowledgements. Real-ref
+and Linux hardware gates remain reviewer/owner work.
 
 Use a candidate built from the reviewed tree. No hardware qualification was run during implementation.
 Keep every failure, including unsupported formats. The release must eventually have at least one
@@ -248,7 +249,7 @@ GOTOOLCHAIN=go1.27.3 go test -race -tags ts_omit_webclient,ts_omit_debugeventbus
 
 ## Round 3 evidence rules
 
-Historical round 3 used qualificationVersion 4; current version is **39**. A native contact's
+Historical round 3 used qualificationVersion 4; current version is **40**. A native contact's
 Contact.SchemaVersion remains **2**; a DoP contact's is **3**. All older
 contacts are invalid; repeat contact on this build. Required Device and Subdevice
 fields bind the configured PCM endpoint, including a nonzero subdevice, before
@@ -337,7 +338,7 @@ still resolve inside it). `dsdMode: native` or `auto` enables only approved nati
 
 The Go contracts are `qualification.Approval`, `ApprovalBody`, `ApprovedPolicy`, `Edge`
 and `Evidence` in `internal/player/qualification/approval.go`. JSON uses those exact
-exported field names. SchemaVersion=1, or 2 with Transitions and QualifiedOn (2d.2, below); QualificationVersion=39; Revision is the owner's
+exported field names. SchemaVersion=1, or 2 with Transitions and QualifiedOn (2d.2, below); QualificationVersion=40; Revision is the owner's
 revision; Identity is the observed VID/ProductID/manufacturer/product/bcdDevice,
 anchored controller/port, interface, device and subdevice. No serial or card number is
 persistent identity. Unchanged descriptors may retain approval after replug/restart;
@@ -385,7 +386,7 @@ At least one native fixture must finish with measured playback of that tuple.
 NativeTuple and NativeCompleted record that execution; PCM-only lists or completion
 cannot qualify it. LifecycleActions count observed native outcomes: pause/resume,
 release/reopen, navigation between native occurrences, Stop, and natural completion.
-An admitted command alone is insufficient. Version 39 invalidates older evidence.
+An admitted command alone is insufficient. Version 40 invalidates older evidence.
 List all candidate directional edges explicitly. No command generates that record.
 
 ```sh
@@ -424,7 +425,7 @@ or evidence names resolving to the state directory itself before any ancestor
 walk. Native monitoring remains fail-closed without a grace period. The overlay
 generator requires both integration suites before publishing its overlay.
 Guarded API, config, extractor, output-play and approval paths changed; rerun
-qualification with version 39. ExtractorVersion 30 retains the first parsed DFF
+qualification with version 40. ExtractorVersion 30 retains the first parsed DFF
 PROP's known format facts when a later PROP makes compression unsupported.
 
 Version 13 also covers the deterministic PCM trace capture test. It changes no
@@ -665,6 +666,17 @@ S="$Q/auto.yaml"
 capture && "$B" serve --config "$S"
 ```
 
+Since B728's B7 (version 40) the DSD keys of these configs are the migration's
+alone. `output play --report` reads the record `dsdQualification` names at this
+build's version, as the harness does, so the commands above still check an approved
+record; output play without `--report`, and serve, play by the effective policy over
+a DSD state of their own (output play's in its state directory, serve's
+`player-dsd.json` in its data directory), which the keys migrate into once, the
+record read through the legacy reader. Serve's `GET /v1/outputs` then shows each
+tuple's `transport`, the observation's `transport`, `packingVersion` and `observedAt`,
+and the set's `model` and `bcdDevice`, and sends no `qualificationRevision` or
+`qualifiedOn`.
+
 ### 6. Pruning edges from subset records
 
 A subset record (`native-approved.json`, `auto-fallback-approved.json`) keeps only
@@ -831,3 +843,25 @@ and no approval record's shape. Production still reads an owner's approval
 of version 35 to this build's through the legacy reader (`LegacyVersion`
 stays 35), so no approval needs a new qualification; the harness's own
 evidence of an earlier version is stale to the harness, as at every bump.
+
+Version 40 covers B728's B7, the cutover, under the guarded
+`internal/player/playback/native.go` and `edges.go` and the `internal/alsapcm/`,
+`internal/alsa/` and `internal/player/qualification/` prefixes. Production (serve,
+and `bridge output play` without `--report`) decides DSD by the effective policy over
+the player's DSD state and the box and reads no approval record or candidate: a
+native or DoP occurrence is admitted at its rate by the set published now, its node
+after open must be the DAC that set was computed for (its model's key and its
+firmware), DoP's after the gain check read afresh, and a change of the set is kept,
+handed off again or revoked per occurrence. `alsapcm`'s DSD sink takes a prefill of
+up to 5 s (`MaxDSDPrefill`), a profile's `dsdPrefillMs` (the Chord Hugo 2's 700 ms)
+where it held 500 ms; `internal/alsa` reads what the policy takes of a card (its
+unit's model and descriptors, its usbmixer table, its PCM device's playback
+altsets: `unit_model.go`, and a capped attribute read in `sysfs.go`). The harness's
+approval admission (`bridge output dsd-test`, `output play --report`) reads a record
+of version 40 alone; the migration reads an owner's record of 35 to 40
+(`LegacyVersion` stays 35). For owners: a setup the migration took from a record
+plays native or DoP at the record's rates with no new prompt, but DoP through a gain
+stage whose level the bridge cannot read is refused (`dop_gain_unverifiable`); a rate
+the record did not approve waits for its first use to be acknowledged in the app; a
+DAC the database does not know plays no DSD unless a migrated choice names it. Every
+earlier version's harness evidence is stale to the harness, as at every bump.

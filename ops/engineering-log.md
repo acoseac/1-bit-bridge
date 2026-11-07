@@ -73188,7 +73188,7 @@ found missing (a nil comparison; the exported harness checks' version);
 this record.
 
 **Red first** (71cd5e19, on 0aedd16a):
-- `TestProductionStillPlaysAVersion35RecordAfterTheBump`: "production
+- `…ProductionStillPlaysAVersion35RecordAfterTheBump`: "production
   refused an owner's record of version 35 after the bump to 36: stale
   approval version", the design's red. In the playback overlay,
   `TestNativeIntegrationApprovedConstructor/legacy_version`: "unplayable:
@@ -73222,7 +73222,7 @@ would turn red: fd0afd6b and 9dfbaffa added them before the runs.
 
 | # | Mutation | Red |
 |---|---|---|
-| C1 | production back on `ReadApproval` | `TestProductionStillPlaysAVersion35RecordAfterTheBump` ("stale approval version"); the overlay's `TestNativeIntegrationApprovedConstructor/legacy_version` |
+| C1 | production back on `ReadApproval` | `…ProductionStillPlaysAVersion35RecordAfterTheBump` ("stale approval version"); the overlay's `TestNativeIntegrationApprovedConstructor/legacy_version` |
 | C2 | the transition backend on the legacy reader | `TestTheHarnessBackendsReadOnlyTheCurrentVersion/transition` (read, `<nil>`) |
 | C3 | the candidate backend on the legacy reader | `TestTheHarnessBackendsReadOnlyTheCurrentVersion/candidate` ("owner approval incomplete") |
 | C4 | the floor `v > LegacyVersion` | the rows at 35 of the three kinds and each report below 35; the production test |
@@ -73410,7 +73410,7 @@ versions from 35 to the build's own").
 - `TestTheLegacyReaderRefusesAVersionNewerThanThisBuild`: the record, a
   matrix, lifecycle or transition report, an experiment and a contact at
   37, each in a record otherwise valid at 36, all six read ("got <nil>").
-- `TestProductionRefusesARecordNewerThanThisBuild/version_37`: "1 tuples
+- `…ProductionRefusesARecordNewerThanThisBuild/version_37`: "1 tuples
   published"; its rows at 35 and 36 green. In the playback overlay,
   `TestNativeIntegrationApprovedConstructor/newer_version`: "start=<nil>".
 - `TestAChangeOutsideTheDSDBytePathNeedsNoBump`, which no longer lists
@@ -73423,8 +73423,8 @@ red:
 | # | Mutation | Red |
 |---|---|---|
 | G1 to G9 | each of the nine new paths dropped from `GuardedPaths`, one at a time | its own row of `TestQualificationDependencyGate` ("dependency changed without version bump"), and no other |
-| U1 | the upper bound removed (`LegacyVersion <= v`) | all six rows of `TestTheLegacyReaderRefusesAVersionNewerThanThisBuild`; the rows at 37 of `TestTheLegacyReaderRefusesBelowVersion35`; `TestProductionRefusesARecordNewerThanThisBuild/version_37`; the overlay's `newer_version` |
-| U2 | the bound one short (`v < Version`) | the rows at 36 of `TestTheLegacyReaderRefusesBelowVersion35`; `TestProductionRefusesARecordNewerThanThisBuild/version_36` |
+| U1 | the upper bound removed (`LegacyVersion <= v`) | all six rows of `TestTheLegacyReaderRefusesAVersionNewerThanThisBuild`; the rows at 37 of `TestTheLegacyReaderRefusesBelowVersion35`; `…ProductionRefusesARecordNewerThanThisBuild/version_37`; the overlay's `newer_version` |
+| U2 | the bound one short (`v < Version`) | the rows at 36 of `TestTheLegacyReaderRefusesBelowVersion35`; `…ProductionRefusesARecordNewerThanThisBuild/version_36` |
 
 **Checks**, on legion0 through the shared build lock with TMPDIR under
 `.tmp/_b728-b1`, at b1fff479:
@@ -74127,7 +74127,7 @@ guarded, their tests included: `qualificationVersion` 36 to 37, the runbook's
 five mentions (`TestQualificationRunbookVersion`) and its "Version 37 covers
 backlog B735" entry. `LegacyVersion` stays 35, so production still reads an
 owner's approval of versions 35 to 37 through `ReadLegacyApproval`
-(`TestProductionStillPlaysAVersion35RecordAfterTheBump` and the legacy tests,
+(`…ProductionStillPlaysAVersion35RecordAfterTheBump` and the legacy tests,
 which take the versions as parameters, pass at 37): no owner re-qualifies,
 while the harness's own evidence of version 36 (contacts, matrix and
 lifecycle reports, candidates) is stale to the harness, as at every bump.
@@ -79549,6 +79549,527 @@ since round 2's race run). `git status --ignored` showed nothing but `.tmp/`
 after. Not run here: macOS and Windows natively, CI's runners, `make
 build-all`, and the iOS app, whose repo is not on this host.
 
+## 2026-11-06 — B728 B7: the cutover
+
+B728's B7 (`ops/plan-b728-dsd-capability-design.md`, sections 3.1, 3.4, 3.5,
+6.2, 9.1 items 6, 9, 10 and 14, and B7's row in 11), worker b728-b7 on
+`feat/b728-b7-cutover` from main 0d5cb33b, commits ceb8e67b, fe621791 and
+8467b07a.
+Serve and `bridge output play` decide DSD by the player's effective policy
+(B5's `policy.Effective`) over the player's DSD state (B3, migrated by B6),
+the profile database (B2), and what the box establishes of the bound DAC
+now, the silent probe (B4) among it, and read no approval record or
+candidate. `playback.Config.DSD` (a `*playback.DSDPolicy`) is production's
+admission; `Config.Authorization`, the approval's, is the harness's alone
+(the candidate and transition backends, `output play --report`), at the
+harness's version, and `New` refuses the two together.
+
+**One set.** `internal/player/playback/dsd_policy.go`. The backend keeps one
+effective set (`dsdSet`) behind an atomic pointer: what a DSD occurrence is
+admitted by (`admitDSD`, `selectFor`: the plan at the content's rate, or the
+rate's refusal by the policy's word) and what `GET /v1/outputs` publishes
+(`Policy`), under a generation that moves only when the set publishes or
+admits another way (`same`: the card and endpoint, the identity, each rate's
+plan and refusal; evidence moves none, B8 publishing it). A refresh
+(`refreshDSD`, one at a time under `dsdMu`, so generations publish in the
+order their readings were taken) runs at a session's first occurrence, at
+any DSD admission whose set was read more than 100 ms before (`dsdStale`:
+found red-first, a PCM session's prepared DSD successor admitted by the
+never-computed boot set), at each native activation (`checkDSDActivation`),
+on a 100 ms monitor started once a session holds DSD (`startDSDMonitor`),
+and at the supervisor's refresh (`RefreshDSD`, forced by a watcher snapshot,
+a state write or a probe's answers, else once a second). `readDSD` reads the
+bound DAC only from a fresh, available watcher snapshot of the boot binding
+(`boundFromFeed`), and its card only while the card is that unit at that
+enumeration, the reads (the unit's model and descriptors,
+`alsa.SysfsReader.UnitModel`, 256 KiB at most; its PCM device's playback
+altsets; its usbmixer table, `policy.ParseUSBMixer`, the kernel's
+`snd_usb_mixer_proc_read` format at the alsa-abi tag; its controls through
+`alsactl.Reader` with `AllowUnreadable`) bracketed by a second look at the
+unit. The unit's model or its stream file not reading is no set, every rate
+refused as `dsd_dac_unread`; the DoP gain check's own inputs (the
+descriptors, the controls, the usbmixer table) not reading leave the set
+computed, `readMixer` handing them on as not read, and the gain check fails
+closed for DoP alone (`dop_gain_unverifiable` under an explicit dop; auto
+converts that rate), native unaffected (corrected in round 2: this record
+said no set; CodeRabbit). A rate the set converts is refused as
+`dsd_not_in_this_release` until B11.
+
+**Reconciliation.** A new set is judged for every DSD occurrence of every
+session (`policy.Reconcile` over `occurrenceFactsLocked`): Keep repoints it;
+Replan marks it stale, which the producer holds back from the sink (and a
+gapless DSD successor joins only under the set published now, an atomic
+load), and asks the engine to hand it off again through a new optional
+interface, `engine.ReplanEvents` (`Replan`): the engine takes it as an edit
+after hand-off, a successor not submitted replaced by a Prepare, a submitted
+one cut first, a Cut too late stopping playback when it is heard
+(`ReasonRemovedAudible`), as an edit's does; a session's first occurrence
+and one a releasing session holds are revoked instead; Revoke stops the
+session's DSD at once (`Backend.Revoke`). The rig's events and output
+play's pass `Replan` on.
+
+**The check after open.** `checkDSDNode`, at the open and every reopen: the
+node's unit keys to the set's `policy.Identity` (the model's key and the
+firmware, never the port), else `wrong_device` before a frame; for DoP the
+gain check read afresh at the node's card (`policy.CheckGain` over
+`policy.DoPAltsets`); the identity it opened is what reconciliation compares.
+
+**Evidence.** On a goroutine of the backend's, never the audio path
+(`recordDSD`, one `Store.Update`, an unchanged state writing nothing): a real
+open's `driver_accepted` of the exact tuple under the running kernel
+(`noteDriverAccepted`, after the open answered, `kernelRelease` reading
+`/proc/sys/kernel/osrelease` through the trees); the tuple's
+`streaming_observed` and its transport's first use `observedAt` once an
+occurrence heard played 5 s of its own content, the kernel establishing it,
+with no fault and no failed decode in the session (`noteStreamingObserved`,
+from the reporter's step); each native format and DoP carrier the probe
+accepted (`noteProbed`). `dsdstate.Store` fences every write once one landed
+without its barrier (`ErrLandedNotHeld`, `Store.Landed`; B6's migration had
+fenced only its own steps), and the backend says it once.
+
+**The probe.** `ProbeDSD`: due at the player's start once the output is
+available, when the unit's model, firmware, kernel or enumeration changes,
+and after a choice is written (`ForgetDSDProbe`, which serve calls when the
+migration changed a DAC's state), never on a timer. One the device slot
+refuses (a session that plays, opens, is paused or releasing; a release
+unconfirmed; another probe) opens nothing, waits for nothing and stays due:
+serve's supervisor asks again at its next 100 ms tick, so it runs once the
+slot is free, B4's preconditions unchanged. One that ran, met a busy node or
+found no unit is done for that unit.
+
+**The answers the brief asked for.** (1) Each kind of user: an owner whose
+record B6 migrated keeps native or DoP at the record's rates with no new
+prompt, the timing now the policy's (the probe's pause, a 100 ms tail, the
+profile's prefill or 400 ms) and the native format the first the DAC offers
+in the player's order; but DoP through a gain stage whose level cannot be
+read is refused (`dop_gain_unverifiable`, `TestAMigratedDoPSetupWithUnverifiableGainRefuses`);
+a rate the record did not approve waits for first use (`first_use_pending`)
+until B9's write; an owner whose record was refused or missing has the
+fallback (native or dop, nothing acknowledged: `first_use_pending`,
+`dop_confirmation_required`); an explicit off, or dop without allowDoP, is
+`dsd_off_by_choice`; a new install, unknown DAC or known, converts under
+auto and is refused as `dsd_not_in_this_release` until B11 or B9; PCM is
+unchanged, and a session that plays PCM alone reads nothing of the policy
+(`TestPCMOnlyPlaysAsItDidAndReadsNoBox`); `output play` plays by its own
+migrated state. (2) One set per occurrence, no run-time fallback, the opened
+node the set's identity, an unused cap revoking nothing. (3) The gain check
+at the open and on the monitor, a change revoking DoP with no consent. (4)
+Mixed access, the probe above. (5) The render path: nothing on it reads a
+file or takes a lock but the session's; the producer's checks are an atomic
+load and fields under its own lock. (6) Qualification version 40 (guarded
+`native.go`, `edges.go`, `sink_dsd.go`, `internal/alsa/` and the
+qualification package's docs): every earlier harness evidence is stale to
+the harness, as at every bump; `LegacyVersion` stays 35 and is the
+migration's alone, so an owner's record still migrates. (7) player.md: the
+content refusal's long form moved out first (`move_entry.py --line 136`).
+(8) The wire within today's shape: `dsdPlayback.reason` only when no rate
+plays, the lowest rate's word (`TestThePublishedReasonIsTheLowestRatesWordOnlyWhenNoRatePlays`);
+PROTOCOL.md lists the words (`TestEveryDSDRefusalWordIsInTheProtocol`);
+`qualifiedOn` and `qualificationRevision` are not sent; `model` and
+`bcdDevice` are the bound unit's; the field was always free text, so the
+shipped app shows an unknown word as text and grants nothing by it; the iOS
+mirror of PROTOCOL.md is owed. (9) `output play` keeps its own state
+directory and migration, reading the record in serve's data directory and
+never serve's state (`TestOutputPlayKeepsItsOwnDSDState`, beside a serve
+holding its lock and its own state, and beside one that never migrated).
+(10) The fence covers every write (`TestALandedMigrationFencesWhatPlaybackRecords`:
+the migration's write lands and its barrier fails; a real open's and the
+probe's records are refused, the file keeps what landed, said once). (11)
+`TestServeReadsNoApprovalRecord` removes the record and its reports after the
+migration and the set is the same; B6's first-start, delayed-DAC and
+deleted-state tests stay green.
+
+**Beside it.** `alsapcm.MaxDSDPrefill` is 5 s (B5's note: the Hugo 2's
+700 ms profile prefill was past the DSD sink's 500 ms bound;
+`TestEveryPrefillAProfileMayGiveTheSinkTakes`, `dacprofile.MaxTimingMs`
+exported). The config's legacy keys' docs and the start's warning say they
+decide nothing since the cutover. Serve's engine passes no DSD mode
+(`SessionOptions.DSD` decides nothing). `productionNativeAdmission` is
+`noNativeAdmission`, the harness's refusal. The protocol token guard reads
+the policy's pause words and native formats beside the approval's. The
+first `make test` failed in `internal/player/openhome` alone: its fault
+table's guard (`TestEveryEngineReasonHasItsFault`) parses `playback/open.go`'s
+Reason constants as literals, and ceb8e67b had made `ReasonRate` the
+policy's constant; 8467b07a gives it its literal again, held to the policy's
+word by `TestEveryDSDRefusalWordIsInTheProtocol`, and moves
+`ReasonDACUnread` beside the other refusals there, so the guard maps it too.
+
+**Tests**, new: `TestSelectionAndPublicationReadOneSet` (also under a race
+of refreshes and admissions), `TestAConvertedRateIsRefusedUntilThePlayerConverts`,
+`TestAnUnknownDACsDSDStaysRefused`, `TestAMigratedChoiceRefusesARateItsRecordDidNotApprove`,
+`TestAMigratedDoPSetupWithUnverifiableGainRefuses`,
+`TestThePublishedReasonIsTheLowestRatesWordOnlyWhenNoRatePlays`,
+`TestAStateThatDoesNotReadRefusesEveryRate`, `TestNoSetComesFromAReadingThatIsNotFresh`
+and `TestEveryDSDRefusalWordIsInTheProtocol` in playback; through the
+engine's Run, the backend and the real native and DoP sinks over the fake
+kernel, `TestDriverAcceptedComesFromARealOpen`,
+`TestStreamingObservedNeedsFiveSecondsWithoutAFault` (5.1 s, 4.9 s, a decode
+failed before its 5 s played out),
+`TestTheOpenedNodeMustBeTheIdentityThePolicyWasComputedFor` (another model,
+another firmware), `TestAnUnusedRateCapChangeRevokesNothing`,
+`TestAChangedChoiceReplansThePreparedSuccessorAndSkipsNothing`,
+`TestNoTransportFallsBackAtRunTime`, `TestAGainChangeRevokesDoPWithoutConsent`,
+`TestAGainOffUnityAtTheOpenRefusesDoP`, `TestAMigratedOwnerSetupPlaysAsBefore`
+(native, its DAC given exactly the content's native words, and DoP),
+`TestPCMOnlyPlaysAsItDidAndReadsNoBox`, `TestAProbeDueWhileTheDeviceIsHeldWaits`
+and `TestALandedMigrationFencesWhatPlaybackRecords` in alsapcm (a 1 ms
+profile prefill, which the kernel's buffer holds, lets a native start answer
+with no DAC time, so a test fills the sink before it grants exact play);
+`TestAReplanHandsTheSuccessorOffAgainAndSkipsNothing` in the engine;
+`TestServeReadsNoApprovalRecord`, `TestOutputPlayKeepsItsOwnDSDState` and
+`TestOutputsPublishTheEffectiveSet` in cmd/bridge; the usbmixer parser's,
+`UnitModel`'s and the fence's own. Rewritten for the cutover, their claims
+B7's: `TestServeOutputPlayAllowDoP` (the keys reach the backend through the
+migration alone: dop without allowDoP `dsd_off_by_choice`, auto without it
+`dsd_not_in_this_release`, with it DoP), `TestAnExplicitOffSurvivesAsTheDefault`,
+`TestAMigratedApprovalCoversOnlyItsRates`, `TestAVersion35RecordOnAnotherPortMigrates`
+(its rates now play), `TestDoPCandidateRefusedByServeAndOutputPlay` (through
+the real wiring), `TestNativeProductionConstructorsRefuse`,
+`TestLegacyDSDKeysStillLoadAndAreWarnedOnce`'s words,
+`TestServeStartsThePlayerOnlyWhenEveryGateHolds`'s DSD mode, and the overlay's
+`TestNativeIntegrationApprovedConstructor` (`legacy_version` is refused now).
+B1's two production tests are retired, cited elided:
+`…ProductionStillPlaysAVersion35RecordAfterTheBump` and
+`…ProductionRefusesARecordNewerThanThisBuild` became
+`TestTheApprovalAdmissionTakesTheHarnesssVersionAlone` and
+`TestProductionConfiguresNoApprovalBesideItsPolicy`.
+
+**Red first.** The new tests use `Config.DSD` and the policy fixtures
+(`playbacktest/policy.go`), which main does not have, so red was established
+on this tree, each mechanism reverted by one exact-once edit
+(`.tmp/_b728-b7/controls.py`: the bytes restored from memory in a `finally`,
+each test run alone from a compiled binary); C0 is main's own wiring. One
+red came first by itself: the PCM session's DSD successor refused as
+`dsd_dac_unread` (above, `dsdStale`).
+
+**Negative controls**, on fe621791, eighteen red: C0 readPermission
+consulted, serve wiring the approval admission as main did
+(`TestServeReadsNoApprovalRecord`, `TestAMigratedApprovalCoversOnlyItsRates`);
+C1 a fallback to DoP when the native open fails (`TestNoTransportFallsBackAtRunTime`);
+C2 a stale set after a change, a refresh reconciling nothing
+(`TestAChangedChoiceReplansThePreparedSuccessorAndSkipsNothing`,
+`TestAGainChangeRevokesDoPWithoutConsent`); C3 DoP kept through a gain change
+(`TestAGainChangeRevokesDoPWithoutConsent`); C4 the monitor never started
+(the same); C5 streaming_observed early, at 4 s (its 4.9 s case); C6
+streaming_observed beside a failed decode (its decode case); C7 a converted
+rate played (`TestAConvertedRateIsRefusedUntilThePlayerConverts`,
+`TestAnUnknownDACsDSDStaysRefused`); C8 the opened node's identity unchecked
+(`TestTheOpenedNodeMustBeTheIdentityThePolicyWasComputedFor`, both cases:
+the activation's refresh refuses as a second layer, after the open recorded
+a driver acceptance for the wrong unit); C9 the DoP gain check at the open
+skipped (`TestAGainOffUnityAtTheOpenRefusesDoP`); C10 an unused cap revoking
+(`TestAnUnusedRateCapChangeRevokesNothing`); C11 a re-plan revoked
+(`TestAChangedChoiceReplansThePreparedSuccessorAndSkipsNothing`); C12
+driver_accepted recorded before the open answers (its refused case); C13 the
+landed fence removed (`TestALandedMigrationFencesWhatPlaybackRecords`); C14 a
+PCM session reading the policy (`TestPCMOnlyPlaysAsItDidAndReadsNoBox`); C15
+selection reading the state beside the published set
+(`TestSelectionAndPublicationReadOneSet`); C16 a migrated acknowledgement
+widened (`TestAMigratedChoiceRefusesARateItsRecordDidNotApprove`); C17 the
+engine ignoring a re-plan (`TestAReplanHandsTheSuccessorOffAgainAndSkipsNothing`).
+The tree was clean after each.
+
+**Checks**, on legion0, each run in one call through the shared build lock
+(`.tmp/_b728-b7/gates.py`). On 8467b07a: `make fmt`, which rewrote nothing;
+`make vet`, and with `GOOS=windows`, `GOOS=darwin` and `GOOS=linux
+GOARCH=386`, each clean; `make build-all`; `go test -race -count=1` of
+`./cmd/bridge/` (977 s), `./internal/player/playback/`, `./internal/alsapcm/`,
+`./internal/player/engine/`, `./internal/player/policy/`,
+`./internal/player/dsdstate/`, `./internal/alsa/`, `./internal/api/`,
+`./internal/config/`, `./internal/player/qualification/` and
+`./internal/player/dacprofile/`, each ok, the ALSA, alsapcm, durable-writer and
+identity tests running here on Linux; both native-integration overlays (13
+`TestNativeIntegration` passes in cmd/bridge, the six CI names among them, and
+29 in playback, the four among them); `scripts/alsa-abi/check.sh` on amd64
+against Ubuntu's `/usr/include/sound/asound.h`, compared as v6.12's (curl is
+denied here), `TestUAPIMatchesTheKernelHeader` over 252 facts; `make
+docs-check`; the qualification check, "qualification version OK:
+0d5cb33b..HEAD"; the tree clean after. `make test`: on fe621791, 84 packages
+ok and `internal/player/openhome` failed (above, fixed in 8467b07a); on
+8467b07a, 84 ok and `scripts/install-test` failed, one subtest of
+`TestTheInstallerSaysWhatLetsThePlayerOpenTheDAC` ("sudo: Text file busy":
+a stub one parallel test wrote, executed while another's fork held it open,
+code this change does not touch, which passed in the run before); again on
+8467b07a, alone, 85 packages ok and none failed, in 1,737 s, the tree clean
+after.
+The rules patch: `make docs-check` ok on a copy of the tree with it applied
+(CLAUDE.md 78.1 %, player.md 98.0 %, the worst load 65.3 %), and the
+cited-test-names guard green there.
+
+The rules patch (`rules-b728-b7.patch`; `.claude/rules/player.md`, CLAUDE.md,
+`ops/History-rules-player.md`, `ops/History-b470-native.md`): the content
+refusal's long form moved out first (`move_entry.py --line 136`, 97,286 to
+95,976 bytes), then section 9.1 item 6's words for it, item 9's for the
+native hand-off, owner approval and DoP bullets, B1's bullet past tense, and
+item 10's B7 bullet, the DoP topology, with B7's Don'ts; their long forms say
+what B7 changed beside 2c.2's, 2c.2b's and 2d.2's records; CLAUDE.md's rows
+for format, alsapcm, playback, dacprofile, dsdstate and policy no longer say
+the policy is uncalled or that production plays only under approval. With it
+player.md is 97,984 bytes (98.0 %); it applies under `git apply --check`.
+
+**Owed.** The iOS mirror of PROTOCOL.md (`docs/BridgeProtocol.md`, byte for
+byte). The hardware run on the Pi with the Mytek Brooklyn DAC+, on a box
+whose owner's record B6 migrated: serve plays native DSD at the record's
+rates with no prompt, `player-dsd.json` gaining the tuple's
+`driverAcceptedAt` under the running kernel and, after 5 s, its
+`streamingObservedAt` and native's first use `observedAt`; native DSD64 to
+DSD256 by the policy; DoP where the migrated record approved it, at DSD64 and
+DSD128 (the Mytek's profile refuses DoP at DSD256), where the gain check
+passes, and a volume moved off 0 dB stopping it at once; the probe's run at
+the player's start, and again only after a replug; no DSD while the state
+refuses it.
+
+## 2026-11-06 — B728 B7 round 2: the review's points, CI and the bots
+
+Worker b728-b7, `feat/b728-b7-cutover` (PR #1415), commits 85f535e0,
+00e8f89c, 388b35e5, d2e7bfb1, d4de2688 and e7a93fb5, and this record's.
+Each point was run red on the code before its fix, or is shown not to hold;
+each fix has a control (`.tmp/_b728-b7/controls_r2.py`: exact-once
+replacements, the bytes restored from memory in a `finally`, each test from
+a compiled binary; the tree clean after each).
+
+**1. A played-out DoP occurrence revoked its native successor** (holds).
+During a DoP→native transition the drained, closed DoP occurrence stayed in
+the chain until the native one was heard; the volume leaving 0 dB while the
+native node was checked had reconciliation revoke the played-out occurrence
+and with it the session's DSD. Red: `TestAPlayedOutDoPOccurrenceStopsNothingAfterIt`
+(auto as the migration leaves DoP at DSD64 and native at DSD128; the check
+after open of the native node held while the controls change): the successor
+refused `native_revoked`. Fix: `reconcileDSD` does not judge an occurrence
+whose output drained or closed, since nothing of it can reach the DAC again.
+Controls: the skip removed (red); every occurrence whose frames are all in
+its sink left alone (`TestAGainChangeRevokesDoPWithoutConsent` red: a DoP
+occurrence still sounding stops).
+
+**2. The probe's answers attributed to another unit** (holds). `ProbeDSD`
+captured the unit, then `Backend.Probe` located and admitted on its own, a
+port binding's check naming a place. Red: `TestAProbeRecordsNothingOfAUnitSwappedInBeforeItsOpen`
+(the probe's check after open held, another model swapped in): 23
+candidates asked of it, its answers kept in the cache and recorded as the
+captured model's `driver_accepted`. Fix: `ProbeRequest.Check`, asked after
+the binding's check; `ProbeDSD` passes `probedUnit`, the captured unit's
+place and enumeration (`binding.SameUnit`, the device number), model key and
+firmware. Controls: no check (both cases red: another model, the same model
+enumerated anew); the check without the enumeration (the second red).
+
+**3. The serial on the wire** (holds). `readDSD`'s model was the raw sysfs
+strings; serve's `playerModelText` took out the boot binding's serial and
+port, which a binding by model or by port does not hold. Red:
+`TestThePublishedModelNamesNoSerialOrPort` published "Test at
+platform-xhci-hcd.0/usb2-1 Test DAC TESTDAC-0001". Fix: `unitText`, the
+reading's own port path and serial taken out. Control: the model raw (red).
+
+**4. A refresh during the first content read** (holds). The first occurrence
+was admitted as its open began; a refresh while it read its first chunk
+published the next set, which reconciliation skipped (not opened), and the
+activation's pointer comparison refused it. Red:
+`TestAChangeWhileTheFirstOccurrenceReadsItsFirstChunk` (the first read past
+the DSF header stalled): a cap above its rate failed the start ("the effective
+DSD set no longer plays this occurrence's plan"); DSD off opened the node
+before refusing. Fix: `start` readmits it under the session's lock and closes
+its done in that step (`readmitDSDLocked`, as `openSuccessor` does), so a set
+published before that step admits it and one after it judges it. Control:
+the readmission removed (both cases red).
+
+**5. `--report` panics** (does not hold). `playerDSD.resolve` and `retry`
+return at once on a nil receiver (their first lines, serve_player_dsd.go).
+`TestOutputPlayWithAReportRunsPastItsFirstSnapshot` runs `--report` past the
+first snapshot's report and a track heard, and calls both on a nil state;
+a control taking `retry`'s nil check out panics it.
+
+**6. A cwd-relative kernel release** (holds where an env names no trees;
+production's names `hostTrees`). Red: `TestOutputPlayReadsTheHostsTreesWhereNoneIsNamed`
+(a zero env and a working directory holding `sys/kernel/osrelease`): the
+release "a-stray-release", the policy's box and the locator at "". Fix:
+`runOutputPlay` takes `env.trees.or(hostTrees)` once, before anything reads
+the box, as serve does. Control: removed (red).
+
+**7. A forced probe left undone** (holds). Red:
+`TestAProbeTheMigrationForcesOnTheTickRuns` (B6's delayed model read: the
+manufacturer string restored after the first try, the part made on the
+tick): the probe asked once in 150 s. Fix: `dsdPartChanged`, which serve's
+supervisor and output play's watch share, marks the probe due for the next
+tick. Control: the mark removed (red).
+
+**8. Native unaffected had no test** (holds, a gap: the control gating native
+on the DoP gain left playback's and the rig's B7 tests green).
+`TestANativeRateIsUnaffectedByAnUnverifiableDoPGain`: a feature unit and an
+unread table; a migrated mixed setup under auto, on a DAC the profile
+database knows and on one it does not, and a migrated native setup; native
+at its rates, published. The review expected DSD128 under auto to be
+`dop_gain_unverifiable`; the design's section 3.2 has auto convert a rate
+neither transport plays, refused as `dsd_not_in_this_release` until B11, and
+only an explicit dop names `dop_gain_unverifiable`
+(`TestAMigratedDoPSetupWithUnverifiableGainRefuses`). Controls: native gated
+on the gain under native, under auto's known branch and its unknown branch,
+each red (the first auto control survived while the test had no profile
+database: the unknown branch, which it had not touched).
+
+**9. CI's `/dev/snd/pcmC5D0p`** (holds). `TestServesPlayerRefusesWhatItCannotPlayBeforeTheDevice`
+is serve's one boot on the real backend; its player probes the GO bar at
+card 5 once the output is available, through the backend's own prober. Here
+its Play usually held the device first and serve stopped before the next
+tick (five `-race` runs passed); an experiment with a stand-in prober showed
+the probe asked of card 5 device 0. Reproduced red by waiting for the
+probe's line: the guard's report. Fix: the test probes through
+`probeStandIn` (serve's backend with its `Probe` replaced) and reads no
+control node (`noControlNodes`), and waits for the stand-in's ask. Control:
+the stand-in removed (red, the guard's line).
+
+**10. Windows** (holds, a fixture's): `dsdFactsOf` seeds the player's UUID
+through the durable writer, which refuses a platform with no directory fsync.
+Production writes neither on Windows: the player is Linux only
+(`config.PlayerEnabled` refuses it there, output play too), and every write
+of the DSD state (the store's, and restore's `WriteRestored`) goes through
+`WriteBytesDurable`, refused there. Skipped there with that reason, as
+`TestBridgeDSDTupleTransport` already was through `ApprovedWith`. Not run
+here; `make vet` for windows clean.
+
+**11. macOS's race** (holds). Reproduced with `-cpu 1`: twice in 40 the race
+compared nothing. The writer now waits, on a condition, until the reader and
+the admitter have both seen its generation, so every generation is compared,
+and their loops yield. Control: the wait removed (red under `-cpu 1`, one
+generation compared).
+
+**12. Gemini on `reportStep`** (does not hold). `reportStep` holds the
+session's lock from `l.lock()` to the `l.unlock()` before its sends, with no
+unlock between but the early return; `posOf` reads the sink's position
+under it, and the sink takes no session lock; `reconcileDSD` writes under
+the same lock. `TestReconciliationAndTheReporterTakeOneLock` runs refreshes
+that keep the heard occurrence through a change of the set as fast as they
+run, beside the reporter taking ticks as fast: `-race` clean. A control
+moving the reporter's loop outside the lock is a DATA RACE there. A first
+version, driving refreshes by the monitor's ticks, stayed green under that
+control: reconciliation wakes the reporter, which orders each write before
+the next step, so only refreshes that frequent land inside one.
+
+**13. The record's cleanup** (holds): its `p…json` filter also deleted
+`player-dsd.json` and `player-queue.json`. Red with an assertion that serve's
+DSD state stays; the test now removes the record and the reports it names.
+Control: the prefix filter back (red).
+
+**14. This log's sentence on `readMixer`** (holds): corrected in place in
+round 1's record, and in the B7 bullet's long form, which repeated it.
+
+**15, 16. PROTOCOL.md.** The design's section 3.2 has `auto` try DoP once
+native is out at a rate, so the set may publish the other transport: the
+no-fallback sentence now holds of an occurrence (it plays the transport it
+was admitted under or stops), and says what the set publishes. The
+reconciliation paragraph: a re-planned successor is admitted under the new
+set as any entry is (plays, or is refused with the new set's word); a
+session's first occurrence once its content opened and before it reaches the
+DAC, and any occurrence of a releasing session, are stopped rather than
+handed off again; a played-out one is not judged. The iOS mirror copies it.
+
+**Rules** (`rules-b728-b7-r2.patch`, against the pushed branch with round 1's
+patch): player.md's serve-tests bullet (the probe and controls through
+stand-ins), the probe bullet (a node not the unit the probe was begun for; a
+probe a migration's part made due), the B7 bullet (a played-out occurrence
+not judged; an open not ended under a replaced set; no serial or port in a
+USB string), output.md's `hostTrees` bullet (output play), and their long
+forms, the B7 one's no-set sentence and the probe's "nothing in serve calls
+it" corrected. player.md 98,456 bytes (98.5 %); on a copy with both patches,
+`make docs-check` and the cited-test-names guard green.
+
+**Checks**, on legion0 through the shared build lock
+(`.tmp/_b728-b7/gates_r2.py`), on e7a93fb5: `make fmt`, which rewrote
+nothing; `make vet`, and with `GOOS=windows`, `GOOS=darwin` and
+`GOOS=linux GOARCH=386`, each clean; `make test-fast`, 85 packages ok
+(479 s); `go test -race -count=1` of `./internal/player/...`,
+`./cmd/bridge/...` and `./internal/alsapcm/...`, 16 packages ok (1,051 s;
+cmd/bridge 1,029 s, the suite's guard silent); `make docs-check`; the
+qualification check from 0d5cb33b and from main (4880f8a4), each OK: the
+branch's version is 40 and main's 39, and this round changes guarded
+`internal/alsapcm/` tests; the tree clean after.
+
+**Owed.** The iOS mirror of PROTOCOL.md, changed again here. The hardware run
+round 1 listed, and beside it the probe asked again once a migration's part
+for the DAC is made without a replug.
+
+**Round 3** (commit 0b2ac814). Once `first.done` closed, `start` read
+`first.admitted` (whether to start the DSD monitor) and `first.refused` after
+its unlock, while reconciliation repoints the one (Keep) and `Revoke` sets the
+other, both under the session's lock. Both are now read in the critical
+section that closes done, `first.dropped` set there too.
+`TestRefreshesAcrossTheFirstOpensEndTakeTheSessionsLock` runs refreshes,
+keeping the plan (a cap above its rate) or taking it away (DSD off),
+concurrently with the stalled first read's release, over twenty fresh
+sessions each: -race clean, the kept plan playing every time. Control: round
+2's unlocked reads restored, red under -race in three runs of three, a DATA
+RACE between `Revoke`'s write and the refusal's read; the monitor's read,
+between the unlock and `startDSDMonitor`'s own lock, has a window this test's
+scheduling does not reach, and is fixed in the same statement. Checks, on
+0b2ac814 through the shared build lock (`.tmp/_b728-b7/gates_r3.py`): `make
+fmt`, which rewrote nothing; `make vet`, and with `GOOS=windows`,
+`GOOS=darwin` and `GOOS=linux GOARCH=386`, each clean; `go test -race
+-count=1` of `./internal/player/...`, `./cmd/bridge/...` and
+`./internal/alsapcm/...`, 16 packages ok (994 s; cmd/bridge 975 s, the
+suite's guard silent); `make docs-check`; the qualification check from
+0d5cb33b and from main, each OK; the tree clean after.
+
+**Round 3, two more points** (commits 4234662e and 65d4f7a1). CodeRabbit: a
+devnum sysfs could not read is 0, which `UnitModel` still returns and
+`binding.SameUnit` does not compare, so two zeros matched in `ProbeDSD` and in
+`probedUnit`, and a re-enumerated unit's answers could land under the captured
+model and firmware. `ProbeDSD` probes no unit whose device number did not
+read, and `probedUnit` refuses one. Red before: `TestAProbeAsksNothingOfAUnitWhoseEnumerationDoesNotRead`
+(23 candidates asked, the model's `driver_accepted` recorded) and
+`TestTheProbesCheckRefusesAnEnumerationThatDoesNotRead` (the check passed two
+zeros). CodeQL (high): the usbmixer table's control index, read with
+`strconv.Atoi`, was converted to `uint32` with no upper bound, so 2^32 wrapped
+to index 0 and named the volume control at 0 dB, and DoP played
+(`TestAControlIndexPastAUint32LeavesDoPUnverifiable`, red before). The index is
+parsed with `strconv.ParseUint(…, 10, 32)` into a `uint32` field; one past it
+does not read, the table with it, and DoP is refused as
+`dop_gain_unverifiable` (`TestAControlIndexIsAUint32`: 4294967295 reads,
+4294967296 does not). Controls, each red as predicted: `ProbeDSD` without the
+positive device number (its node opened once), `probedUnit` without it, and
+the index parsed to 64 bits (both index tests). Checks, on 65d4f7a1 through
+the shared build lock: `make fmt`, nothing rewritten; `make vet`, and with
+`GOOS=windows`, `GOOS=darwin` and `GOOS=linux GOARCH=386`, each clean; `go
+test -race -count=1` of `./internal/player/...`, `./cmd/bridge/...` and
+`./internal/alsapcm/...`, 16 packages ok (1,025 s); `make docs-check`; the
+qualification check from 0d5cb33b and from main, each OK; the tree clean.
+
+**Round 4** (commit c02b757c). CI's `test -race (rest)` failed
+`TestRefreshesAcrossTheFirstOpensEndTakeTheSessionsLock`'s "refreshes that keep
+its plan": a `backend_error` fault on the first occurrence, "the effective DSD
+set no longer plays this occurrence's plan". A production defect, not the
+test's: `checkDSDActivation` compared the occurrence's set with the one its own
+`refreshDSD` returned, outside the session's lock, so a refresh beside it (the
+session's own 100 ms monitor, started before the activation, or the
+supervisor's) that published the next set and reconciled the occurrence Keep
+between the two repointed `o.admitted`, and the check refused a plan the set
+published now plays; the other way round, a refresh that had published a set
+taking the plan away and had not yet reconciled the occurrence let the
+activation write to the DAC before its revocation. Both windows are held at
+their exact points by two test seams, `playback.Seams.Activating` (between the
+activation's read and its check) and `Published` (between a refresh's
+publication and its reconciliation, under the refreshes' lock), in
+`TestAnActivationJudgesThePlanByTheSetPublishedNow`: red on the old check in
+its first case (CI's fault, word for word) and its third (8,904 bytes given to
+the DAC, then `native_revoked`). The check now reads the set published now
+under the session's lock and judges the occurrence by `policy.Reconcile`,
+repointing one it keeps; a refresh after it judges the occurrence as
+reconciliation judges any. Controls, each as predicted
+(`.tmp/_b728-b7/predictions-r4.txt`): the old check restored, red in the first
+and third cases; the set published now compared alone, without `Reconcile`, red
+in the second; the kept occurrence not repointed at the check, green, since the
+publishing refresh's reconciliation repoints it after (the repoint is
+consistency, not load-bearing). Stress under -race on legion0 (16 cores), the
+CI test and the new one together: 300 runs at `-cpu 1` and 300 at `-cpu 16`,
+every one passing, no DATA RACE (12,000 sessions of the CI test at each
+setting). The CI test alone, on a binary built with the old check: 0 of 100
+runs failed at `-cpu 1` and 2 of 100 at `-cpu 16`, each with CI's fault, so the
+test finds the defect on this host too and the fix removes it. Rules: the job's
+`rules-b728-b7-r4.patch`, on rounds 1 and 2's, adds the activation to the
+reconciliation entry's Don't list and its long form. Checks, on c02b757c
+through the shared build lock (`.tmp/_b728-b7/gates_r4.py`): `make fmt`,
+nothing rewritten; `make vet`, and with `GOOS=windows`, `GOOS=darwin` and
+`GOOS=linux GOARCH=386`, each clean; `go test -race -count=1` of
+`./internal/player/...`, `./cmd/bridge/...` and `./internal/alsapcm/...`, 16
+packages ok (1,039 s; cmd/bridge 1,021 s); `make docs-check`; the qualification
+check from 0d5cb33b and from main, each OK; the tree clean.
 ## 2026-11-07 — B728 B10: the DSD to PCM converter, not wired
 
 Worker b728-b10, legion0 (Ubuntu 26.04, linux/amd64, an AMD Ryzen 9 6900HX, Go 1.27.3), branch

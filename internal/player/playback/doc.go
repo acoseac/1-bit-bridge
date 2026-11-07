@@ -1,10 +1,39 @@
 // Package playback is the bridge player's backend (B470 PR 4b2): it
 // implements engine.Backend over internal/player/decode, alsapcm.Sink for
-// PCM and alsapcm.DSDSink for DSD an owner-approved policy plays (native,
-// or DoP in S32_LE: B470 2c.2 and 2d.2), through one DAC the binding names
-// (internal/player/binding), opened exclusively. The engine
-// (internal/player/engine) owns the state and decides; this package plays
-// what it is handed and reports what the hardware did.
+// PCM and alsapcm.DSDSink for the DSD the player's effective DSD policy
+// plays (native, or DoP in S32_LE; B728 B7, the cutover, in place of B470
+// 2c.2 and 2d.2's owner-approved policy, which is the harness's alone),
+// through one DAC the binding names (internal/player/binding), opened
+// exclusively. The engine (internal/player/engine) owns the state and
+// decides; this package plays what it is handed and reports what the
+// hardware did.
+//
+// # DSD by the effective policy (B728 B7)
+//
+// Production (Config.DSD, serve's and bridge output play's backend) reads no
+// approval record. One effective set (internal/player/policy's Effective,
+// over the player's DSD state, the profile database, the bound DAC's
+// altsets, the silent probe's answers and the DoP gain check's reading of
+// the card) is published under a generation, and selection admits a DSD
+// occurrence by that same set, its plan at the content's rate or the rate's
+// refusal by the policy's word; a rate the policy converts to PCM is refused
+// as dsd_not_in_this_release until the player converts (B11), and no set
+// (a stale reading of the box, no unit, an identity that did not read)
+// refuses every rate (ReasonDACUnread). The set is read again at a
+// session's first occurrence and at any DSD occurrence's admission it was
+// read more than 100 ms before, at each native activation, on a 100 ms
+// monitor while a session holds DSD, and at the supervisor's refresh
+// (RefreshDSD), never on the audio path; a change is swapped in one step and
+// reconciled per occurrence (policy.Reconcile): kept, handed off again
+// through the engine (engine.ReplanEvents) while no frame of it is the
+// kernel's, or revoked. The check after open requires the opened node to be
+// the DAC the set was computed for, and for DoP the gain check read afresh.
+// There is never a fallback to another transport at run time. Playback
+// records in the state what it observed: a real open's driver_accepted, a
+// probe's, and once an occurrence played five seconds of content with no
+// fault its tuple's streaming_observed and its transport's first use
+// observed. The silent probe runs when one is due (ProbeDSD), on the device
+// slot a session holds, never beside one.
 //
 // # Content and packing
 //
@@ -13,9 +42,9 @@
 // release 5a's over the library index with its URI confinement. The backend
 // opens nothing a resolver did not hand it. Content inspection chooses the
 // decoder (decode.Open), and everything but stereo integer PCM at a rate the
-// ALSA backend opens, or DSD an approved policy plays, is refused before any
-// of it plays, by its kind: DSD no policy of the effective set plays, with
-// its named reason (ReasonDSD while DSD is not configured); floating-point
+// ALSA backend opens, or DSD the effective set plays, is refused before any
+// of it plays, by its kind: DSD the effective set does not play, with its
+// named reason (ReasonDSD by a backend with no DSD admission); floating-point
 // PCM and every other decoder refusal by the decoder's own reason
 // (float_pcm_refused, unknown_container, lossy_refused, …); content the
 // resolver could not open

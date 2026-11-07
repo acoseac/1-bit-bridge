@@ -10,7 +10,8 @@ import (
 // The transports a published tuple and a playback observation name (B470
 // 2d.2): native DSD, the default, is named by none.
 const (
-	// TransportDoP is DSD over PCM, an approved DoP policy's transport.
+	// TransportDoP is DSD over PCM, a DoP plan's transport: the effective
+	// DSD policy's (B728 B7), or an approved DoP policy's in the harness.
 	TransportDoP = "dop"
 	// TransportPCM is a PCM occurrence's, which a playback observation
 	// names; a tuple is never PCM.
@@ -48,8 +49,11 @@ func (b *Backend) checkEdge(t alsapcm.Transport, p *engine.NativePlan, permissio
 	if b.lastEdge == "" {
 		return nil
 	}
-	// Inert test admissions predate owner approval. Production's only admission
-	// carries a permission, including when the outgoing occurrence was DSD.
+	// Edges gate the harness's approval admission alone (a plan admitted with
+	// a permission, the outgoing one remembered with its own): production's
+	// effective DSD policy (B728 B7) admits with no permission, and needs no
+	// edge, since no transition between transports needs a report in
+	// production, as the tests' inert admissions need none.
 	if p == nil || (permission == nil && b.lastPlan == nil) {
 		return nil
 	}

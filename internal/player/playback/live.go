@@ -51,10 +51,20 @@ func (b *Backend) Facts() (PlayerPolicy, *PlaybackFacts) {
 }
 func (s *session) observeOccurrence(o *occ, out *output) {
 	b := s.b
+	// The set a native or DoP occurrence was admitted under, which a refresh's
+	// reconciliation repoints under the session's lock (B728 B7).
+	s.mu.Lock()
+	admitted := o.admitted
+	s.mu.Unlock()
 	b.policyMu.Lock()
 	defer b.policyMu.Unlock()
 	generation := b.policy.Generation
-	if o.permission != nil {
+	switch {
+	case admitted != nil:
+		generation = admitted.gen
+	case b.cfg.DSD != nil:
+		generation = b.dsd.Load().gen
+	case o.permission != nil:
 		generation = o.permission.generation
 	}
 	state := "open"
