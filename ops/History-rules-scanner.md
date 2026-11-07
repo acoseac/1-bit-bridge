@@ -3101,11 +3101,8 @@
   (`refuseDataDirAway`), refuses, before it makes or writes anything there, a
   data dir the record beside the config names (`.bridge.yaml.datadir`) that
   holds neither `bridge.db` nor `server.lock`** (2026-11-04, backlog B651;
-  Codex's and Argon's notes on the brief; B727, 2026-11-07). Two limits
-  stand: a mount point that holds library content of its own while its
-  volume is away reads as it is, to the scan and to the watcher alike, and a
-  root the index holds nothing of (a fresh install) is watched as it is, so a
-  mount over it hides that watch until the next start. On a NAS reboot systemd or Docker can start the
+  Codex's and Argon's notes on the brief; B727, 2026-11-07). Its limits are
+  backlog B776 and B777. On a NAS reboot systemd or Docker can start the
   bridge before a USB, RAID or network volume is mounted, so a path on it is
   not there (a directory on the volume) or reads as the bare mount point,
   empty. **The scan** needed nothing new: walkRoot's upfront
@@ -3479,21 +3476,10 @@
   record's check first now (cli-serve.md, B727's bullet), and the advice for
   a data dir moved on purpose is to set `dataDir` to where it is now.
   **Serve says its refusal once per state**, in a note beside the record,
-  never in the data dir (the same bullet). **A mount point that holds
-  library content of its own** while its volume is away, the first limit
-  above, has no cheap check: a mount check is what the Don't above forbids
-  (a device number, the immediate parent), and a share of the index's rows
-  the walk did not find is the second mass-deletion guard B651 declined,
-  since a percentage would refuse a legitimate removal. A bare mount point
-  is commonly root's, and not the service user's to write. **A root the
-  index holds nothing of**, the second: `lookAtRoot` reads an empty root
-  with no rows as it is (an empty library), the mount then covers the folder
-  the watch is on while fsnotify still lists the watch, so
-  `checkRootWatches` never looks again, and the periodic scan still indexes
-  the volume. Its fix, a check of each watched root's identity at the root
-  check, needs a real mount to be tested (build-ci-tests.md), which the
-  Linux worker host cannot make: B727's item 4 is open, and so is its item
-  6. **CI's Windows leg** skips the two tests that rename a watched folder,
+  never in the data dir (the same bullet). Its items 3, 4 and 6 are the
+  limits above, backlog B776 and B777 (round 2, the review of #1431, named
+  them by their ids). **CI's Windows leg** skips the two tests that rename
+  a watched folder,
   `TestTheWatcherDispatchesNoScanForARootWhoseContentWent` and
   `TestTheWatcherHoldsARootThatWentAndWatchesWhatComesBack` (round 4:
   Windows refuses that rename under the watcher's ReadDirectoryChangesW

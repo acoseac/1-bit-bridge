@@ -620,6 +620,7 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   `TestReplaceDurable_ABarrierThatFailsLeavesTheWriteNotDurable` and
   `TestReplaceDurable_RefusesBeforeItStages` pin it.
   → History-rules-config-lifecycle.md
+- **`atomicwrite.WriteBytesInExisting` makes no directory: into one that is not there it fails, `fs.ErrNotExist`, having written nothing** (2026-11-07, B727's round 2; serve's refusal note, cli-serve.md). **Don't give it a `MkdirAll`.** `TestWriteBytesInExistingMakesNoDirectory` pins it.
 - **`auth.Store.FlushLastUsed` reloads before persisting** — the shutdown flush
   rewrote `tokens.json` from a stale in-memory slice and deleted a sibling
   `bridge pair` mint. A reload failure ABORTS the flush.

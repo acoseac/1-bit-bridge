@@ -2312,7 +2312,7 @@
 
 ## B727 — a render into a variants directory that reads as away (2026-11-07)
 
-- **…and a render writes nothing into a variants directory that reads as away while the catalog records a rendition under it: `transcode.Run` asks the job's `OutputGuard` first, before a decoder probe, a scratch or a claim (cmd/bridge's `renditionOutputGuard`: the probe, `integrity.VariantsDirSweepBlock`, then `Store.VariantRecordedUnder`), which the pool injects into each job (`Pool.SetOutputGuard`) and the CLI's worker sets, the CLI's batch asking it once before any job; the refusal (`transcode.VariantsDirAwayError`) names the directory by its role, says to mount the volume and how to drop the rows of renditions removed on purpose, and is a fault of the output (`outputAway`): no strike, said once per outage** (2026-11-07, backlog B727 item 1). **Don't render into a variants directory the probe reads as away while the catalog records renditions under it, ask the catalog of one that reads as mounted, strike a source for the refusal, or name the directory by its path in its text.** `TestARenderWritesNothingIntoAVariantsVolumeThatIsAway`, `TestTheRenderCommandsRefuseAVariantsVolumeThatIsAwayBeforeAnyJob`, `TestTheWatcherKeepsTheRowsOfAVariantsVolumeThatIsAwayAfterARender`, `TestADownloadKeepsTheRowOfARenditionOnAVariantsVolumeThatIsAway`, `TestARenderMakesTheVariantsDirectoryOfACatalogThatRecordsNoneThere`, `TestARenderIntoAVariantsVolumeThatIsBackPublishes` and transcode's `TestThePoolAsksItsOutputGuardBeforeAJobWrites` pin it.
+- **…and a render writes nothing into a variants directory that reads as away while the catalog records a rendition under it: `transcode.Run` asks the job's `OutputGuard` first, before a decoder probe, a scratch or a claim, and again just before it makes the sidecar's directory, in the PCM path and the DSD chain alike (cmd/bridge's `renditionOutputGuard`: the probe, `integrity.VariantsDirSweepBlock`, then `Store.VariantRecordedUnder`, a range on the recorded paths below the directory, never LIKE, compared byte for byte on Linux and through `unicode_lower` on both sides on Windows and macOS, whose volumes compare names without regard to case), which the pool injects into each job (`Pool.SetOutputGuard`, serve's pool included) and the CLI's worker sets, the CLI's batch asking it once before any job; the refusal (`transcode.VariantsDirAwayError`) names the directory by its role, says to mount the volume and how to drop the rows of renditions removed on purpose, and is a fault of the output (`outputAway`): no strike, said once per outage** (2026-11-07, backlog B727 item 1, and its round 2). **Don't render into a variants directory the probe reads as away while the catalog records renditions under it, ask the guard only before the probes and the scratch, compare the recorded paths exactly where the volumes fold case, ask the catalog of one that reads as mounted, strike a source for the refusal, or name the directory by its path in its text.** `TestARenderWritesNothingIntoAVariantsVolumeThatIsAway`, `TestTheRenderCommandsRefuseAVariantsVolumeThatIsAwayBeforeAnyJob`, `TestTheWatcherKeepsTheRowsOfAVariantsVolumeThatIsAwayAfterARender`, `TestADownloadKeepsTheRowOfARenditionOnAVariantsVolumeThatIsAway`, `TestARenderMakesTheVariantsDirectoryOfACatalogThatRecordsNoneThere`, `TestARenderIntoAVariantsVolumeThatIsBackPublishes`, `TestServesOwnPoolWritesNothingIntoAVariantsVolumeThatIsAway`, transcode's `TestThePoolAsksItsOutputGuardBeforeAJobWrites` and `TestTheGuardIsAskedAgainJustBeforeTheSidecarDirectoryIsMade`, and manifest's `TestTheVariantsGuardHoldsOnlyWhatIsRecordedBelowItsDirectory`, `TestTheVariantsGuardFindsADirectoryRespelledWhereTheVolumeFoldsCase` and `TestTheVariantsGuardComparesAsThisPlatformsVolumesDo` pin it.
 
 *The gap* (B727's first item). Every reaper asks the mount-loss probe
 (`integrity.VariantsDirSweepBlock`) before it deletes, and no writer did.
@@ -2334,8 +2334,9 @@ CLI's batch asks it once before any job, refusing the run (exit 1). The
 probe first: a directory that reads as mounted renders without a read of
 the catalog. Then the catalog: a directory that reads as away (not there,
 holding no rendition, or not readable) is refused only while the catalog
-records a rendition under it (`Store.VariantRecordedUnder`, a byte range on
-the recorded sidecar path), so a fresh install, or a variants directory just
+records a rendition under it (`Store.VariantRecordedUnder`, a range on the
+recorded sidecar path, folded where the volumes fold case since round 2),
+so a fresh install, or a variants directory just
 set to a new place, renders as before. The refusal
 (`transcode.VariantsDirAwayError`) names the directory by its role, says
 what the probe found (`VariantsDirBlock.Missing`, new, tells not there from
@@ -2346,3 +2347,44 @@ serve's pool says it once per outage (`pool: rendition output unavailable`)
 and proves the outage over at the next job that writes there (`pool:
 rendition output available again`). The record is in
 `ops/engineering-log.md`, 2026-11-07, B727.
+
+*Round 2* (the review of #1431, 2026-11-07), each point confirmed red first.
+
+*Folded where the volumes fold case.* `VariantRecordedUnder` compared the
+recorded paths with the directory byte for byte (`COLLATE BINARY`), and on
+Windows and macOS, whose volumes compare names without regard to case by
+default (NTFS, APFS and HFS+), a variants directory spelled in another case
+since its renditions were recorded is the same directory: the guard read its
+renditions as none and let a render into it through. On those two platforms
+(`volumesFoldCase`) both sides go through the fold `unicode_lower` applies
+(`pathFold`: NFC and Unicode lower case, which keeps both separators and the
+character after each), and on Linux the comparison stays exact. A
+case-sensitive APFS volume, or a Windows folder set case-sensitive, is folded
+all the same, which can only have the guard refuse a render it would have let
+through, never the reverse. `TestTheVariantsGuardHoldsOnlyWhatIsRecordedBelowItsDirectory`
+(the siblings `Variants2`, `Variants-old`, `Variants.bak`, `Variants0`,
+`Variants]` and the directory's own path, a trailing separator, both
+separators, compared both ways),
+`TestTheVariantsGuardFindsADirectoryRespelledWhereTheVolumeFoldsCase` (a
+fold of ASCII alone misses `MÜSIK`) and
+`TestTheVariantsGuardComparesAsThisPlatformsVolumesDo` (the exported
+method, by the platform it runs on).
+
+*Asked again before the sidecar's directory.* Run asked the guard at its
+start alone, before the decoder probes, the scratch and the render; a volume
+that went in that time had the sidecar's directory made under the bare mount
+point and the rendition published there.
+`TestTheGuardIsAskedAgainJustBeforeTheSidecarDirectoryIsMade` parks the
+guard at its first ask, takes the volume away and lets it go: red in the PCM
+path and the DSD chain alike. Both ask again just before the `MkdirAll` of
+the sidecar's directory, which costs the probe alone while the directory
+reads as mounted.
+
+*Serve's pool, pinned.* No test failed with serve's
+`upscalePool.SetOutputGuard` line removed: the render tests run the CLI's
+worker. `TestServesOwnPoolWritesNothingIntoAVariantsVolumeThatIsAway` runs a
+render through serve's own pool (the auto-optimize sweep, a stand-in sox)
+into a variants directory on a volume that is away, its rows recorded:
+nothing is made at the mount point, one Warn says the output is away, and
+the rows survive. The record is in `ops/engineering-log.md`, 2026-11-07,
+B727's round 2.

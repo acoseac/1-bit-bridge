@@ -3587,7 +3587,7 @@ without a systemd command or manager claim. These cases bind no sockets.
 
 ## B727 — every command asks the data dir's record, and serve says its refusal once (2026-11-07)
 
-- **Every command but serve that makes, opens or writes the data dir asks the check serve makes of the record beside its config, right after its config loads (`refuseDataDirAway`: the record beside the file the config's name opens, as bridge doctor reads it, and `checkServeDataDirRecord`), and refuses a data dir the record names that holds neither `bridge.db` nor `server.lock`, exit 1, in serve's first sentence under its own name, saying that it makes and writes nothing there, to mount the volume and run it again, and how to go on from a data dir moved on purpose (set `dataDir` to where it is now, which the record does not name) or removed on purpose (remove the record): scan, the render commands, analyze, variants move, artwork, enrichment misses and retry, duplicates, library add and remove, pair, token rotate, expire and revoke, admin reset-password, sign-out-everywhere and login-link, cert rotate, backup, tsnet, update but under `--check`, init's rewrite before its preflight, and, through `holdDataDirForMutation` before it prepares and locks, restore, reset-player, manifest clear-missing and the DAC bind; and serve says its own refusal once per state: a note beside the record (`.bridge.yaml.datadir.refused`) names the data dir refused and when it was said, a start says the refusal where the note names another data dir or none or is a day old, and always to a terminal, and the first start that finds its data dir again removes the note and says so at Info** (2026-11-07, backlog B727 items 2 and 5). **Don't let a command make, open or write the data dir before the check, ask it of a read (doctor, status, logs, token list, cert info, update --check, init keeping the config), ask it in `manifest.OpenStore`, tell the operator of a data dir moved on purpose to remove the record, keep the note in the data dir, or let the note's write decide what serve refuses or how it exits.** `TestEveryCommandThatWritesTheDataDirRefusesItWhileItsVolumeIsAway`, `TestTheDiagnosticsStayAvailableWhileTheDataDirsVolumeIsAway`, `TestACommandOverAnInstallWithNoRecordMakesItsDataDirAsBefore`, `TestUpdateAsksTheRecordBeforeItAsksForARelease`, `TestServeSaysItsRefusalOncePerState`, `TestServeSaysTheRefusalOfADataDirItsNoteDoesNotName`, `TestServeSaysItsRefusalToATerminalAtEveryStart` (Linux), `TestAStartThatCannotRemoveTheNoteSaysSo` and `TestServeSaysItsRefusalAtEveryStartWhereItCannotKeepTheNote` pin it.
+- **Every command but serve that makes, opens or writes the data dir asks the check serve makes of the record beside its config, right after its config loads (`refuseDataDirAway`: the record beside the file the config's name opens, as bridge doctor reads it, and `checkServeDataDirRecord`), and refuses a data dir the record names that holds neither `bridge.db` nor `server.lock`, exit 1, in serve's first sentence under its own name, saying that it makes and writes nothing there, to mount the volume and run it again, and how to go on from a data dir moved on purpose (set `dataDir` to where it is now, which the record does not name) or removed on purpose (remove the record): scan, the render commands, analyze, variants move, artwork, enrichment misses and retry, duplicates, library add and remove, pair, token rotate, expire and revoke, admin reset-password, sign-out-everywhere and login-link, cert rotate, backup, tsnet auth, status and logout, update but under `--check`, init's rewrite before its preflight, and, through `holdDataDirForMutation` before it prepares and locks, restore, reset-player, manifest clear-missing and the DAC bind; and serve says its own refusal once per state: a note beside the record (`.bridge.yaml.datadir.refused`), written only into the directory the record was read from (`atomicwrite.WriteBytesInExisting`), names the data dir refused and when it was said, a start says the refusal where the note names another data dir or none or is a day old, and always to a terminal, and the first start after it that gets past the data dir's preparation and its lock removes the note and says at Info how the refusal ended: that the data dir holds its database or its lock file again where the note names the data dir its config names and that data dir held one of them before the preparation (`dataDirBack`), and otherwise that the refusal no longer applies** (2026-11-07, backlog B727 items 2 and 5, and its round 2). **Don't let a command make, open or write the data dir before the check, ask it of a read (doctor, status, logs, token list, cert info, update --check, init keeping the config), ask it in `manifest.OpenStore`, tell the operator of a data dir moved on purpose to remove the record, keep the note in the data dir or write it through a writer that makes its directory, let the note's write decide what serve refuses or how it exits, say how a refusal ended before the data dir is prepared and its lock taken, or say a data dir is back that the note does not name or that held neither file before the preparation.** `TestEveryCommandThatWritesTheDataDirRefusesItWhileItsVolumeIsAway` (tsnet auth and status run whole, their tsnet server stood in for: `tsnetCommandServer`), `TestTheDiagnosticsStayAvailableWhileTheDataDirsVolumeIsAway`, `TestACommandOverAnInstallWithNoRecordMakesItsDataDirAsBefore`, `TestUpdateAsksTheRecordBeforeItAsksForARelease`, `TestServeSaysItsRefusalOncePerState`, `TestServeSaysTheRefusalOfADataDirItsNoteDoesNotName`, `TestServeSaysItsRefusalToATerminalAtEveryStart` (Linux), `TestAStartThatCannotRemoveTheNoteSaysSo`, `TestServeSaysItsRefusalAtEveryStartWhereItCannotKeepTheNote`, `TestTheRefusalsNoteMakesNoDirectory`, `TestTheEndOfARefusalIsSaidAsItIs` and `TestTheEndOfARefusalCallsBackOnlyTheDataDirItRefused` pin it.
 
 *The gap* (B727's second item). B651 gave serve the refusal and left every
 other command as it was. Over an install whose record names its data dir,
@@ -3646,8 +3646,9 @@ config gives it and when the refusal was said (`sayServeRefusal`). A start
 says the refusal where the note names another data dir or none, or was
 written a day or more ago (the variant watcher's latch's rule, so a journal
 read later has a line of the day), and always to a terminal, a start by hand
-(`writesToATerminal`); then it writes the note. The first start that finds
-its data dir again removes the note and says so at Info (`endServeRefusal`).
+(`writesToATerminal`); then it writes the note. The first start after it
+that gets past the data dir's preparation and its lock removes the note
+and says at Info how the refusal ended (`endServeRefusal`; round 2, below).
 A note that cannot be written leaves the next start to say the refusal again
 (`TestServeSaysItsRefusalAtEveryStartWhereItCannotKeepTheNote`); what serve
 refuses, and its exit, are the same either way. The one write whose failure
@@ -3655,3 +3656,56 @@ quiets a refusal is the removal: a note the start that found its data dir
 cannot remove keeps the next refusal quiet until a day after the last was
 said, which that start says at Warn (`TestAStartThatCannotRemoveTheNoteSaysSo`).
 The record is in `ops/engineering-log.md`, 2026-11-07, B727.
+
+*Round 2* (the review of #1431, 2026-11-07), each point confirmed red first.
+
+*The note makes no directory.* `sayServeRefusal` wrote the note through
+`atomicwrite.WriteBytes`, which makes the file's directory first: a config
+directory inside the data dir, on the volume that went after the record was
+read, was made again for the note, and with it the data dir being refused,
+in the bare mount point (`TestTheRefusalsNoteMakesNoDirectory`, red with
+`bridge/config/.bridge.yaml.datadir.refused` made there). The note goes
+through `atomicwrite.WriteBytesInExisting` now (config-lifecycle.md), which
+makes no directory and fails as its staging's create does, writing nothing;
+a note it cannot write leaves the next start to say the refusal again, as
+before.
+
+*How a refusal ended, said after the lock and only as it is.*
+`endServeRefusal` ran at the record's check and said the data dir "holds
+its database or its lock file again" wherever the check passed: with
+`dataDir` set to another directory, with the record removed and the volume
+still away (serve then makes the data dir anew), and before the preparation
+and the lock, either of which can still refuse the start (another serve
+holding the lock, a regular file where the data dir goes), whose note it
+had removed. It runs once the data dir is prepared and its lock taken, or
+serve goes on without it, and says the data dir is back only where the note
+names the data dir this start's config names and that data dir held its
+database or its lock file before the preparation (`dataDirBack`, read before
+the preparation and the lock make the data dir and the lock file); and
+otherwise that the refusal no longer applies, naming both data dirs. The
+record is not asked there: the line is about what the data dir holds, which
+no record changes. A note naming another data dir than the config's, one a
+start that could not remove it left, ends in the second line.
+`TestTheEndOfARefusalIsSaidAsItIs` (five starts after a refusal) and
+`TestTheEndOfARefusalCallsBackOnlyTheDataDirItRefused` (the two conditions).
+
+*The reads, pinned.* bridge doctor, `--fix` or not, logs (a log of the
+test's own at `packaging.DefaultLogPath`'s path under a home of the test's)
+and update --check (its release check asked of a server of the test's own,
+`updateReleases`, so that it asks nothing of GitHub) are rows of
+`TestTheDiagnosticsStayAvailableWhileTheDataDirsVolumeIsAway`: each refuses
+nothing, exits as it would, and makes nothing under the bare mount point.
+The doctor reaches no store open in the refused state, so its open needs no
+gate on the data-dir line: every open asks first whether `bridge.db` is
+there, and the refusal is of a data dir that holds none.
+
+*tsnet auth and status as they exit.* The table's tsnet row called the gate
+the two share and mapped its error to exit 1 itself, so it could not see
+either command's own mapping: with either exiting 0 past its gate's
+refusal, the row stayed green. Its rows run `bridge tsnet auth` and `bridge
+tsnet status` whole, through `run`'s dispatch, with the tsnet server each
+builds past its gate stood in for (`tsnetCommandServer`, `newTsnetServer`
+in production), so a gate that let one through brings no node up on the
+tailnet, makes no state dir in the data dir, and fails its row. The refusal
+names the subcommand, since bare `bridge tsnet` is no command to run again.
+The record is in `ops/engineering-log.md`, 2026-11-07, B727's round 2.
