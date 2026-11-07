@@ -83725,3 +83725,168 @@ memory, predicted in a file before the run:
   terminal test (Linux).
 
 **For the owner.** What B727 leaves: backlog B776 and B777.
+
+## 2026-11-07 — B727 round 2: the review of #1431
+
+Backlog B727's second round, on `fix/b72v-late-volumes` (#1431) from
+5883baf5 (round 1 with main at c2e9d40a merged); worker b72v on the Linux
+worker host. Nine review points, each confirmed before anything changed: a
+red test committed first, a negative control on the old test where the point
+was about a test, or evidence where it did not hold. Commits: point 1,
+0fde2859 and 267ab6ca; point 2, e6c396ab; point 3, 8145ea98 and c7a38c6c;
+point 4, 2960b4f1; point 5, 2cd98e26 and 055ecb3c; point 6, 50a503db,
+9e272b49, 7217847d (c3730153, its gofmt) and 73ba90cb, the runbook; point 7,
+ff4300f1; point 9, 8db072a7; then this record. The rules are
+`rules-b72v-r2.patch`: scanner.md's B651 line names its limits by their ids,
+cli-serve.md's and jobs.md's B727 bullets take round 2, config-lifecycle.md
+takes a bullet for the writer that makes no directory, and the long forms
+follow.
+
+**1. The variants guard's evidence where the volume folds case** (confirmed;
+fixed). `VariantRecordedUnder` compared each recorded sidecar path with the
+directory byte for byte, so on Windows and macOS a variants directory
+spelled in another case since its renditions were recorded, the same
+directory on NTFS or APFS, read as recording nothing, and with its volume
+away a render made it on the bare mount point. Red at 0fde2859:
+`TestTheVariantsGuardFindsADirectoryRespelledWhereTheVolumeFoldsCase`, every
+respelled shape where the fold is asked (`/`, `\` with its `]` bound, and
+`MÜSIK`). It folds on Windows and macOS now (`volumesFoldCase`: `pathFold`
+for the bounds, `unicode_lower` for the column) and stays exact on Linux.
+The range's siblings (`Variants2`, `Variants-old`, `Variants.bak`,
+`Variants0`, `Variants]`, the directory's own path), the trailing separator
+and both separators are
+`TestTheVariantsGuardHoldsOnlyWhatIsRecordedBelowItsDirectory`'s, and the
+exported method's choice by platform
+`TestTheVariantsGuardComparesAsThisPlatformsVolumesDo`'s.
+
+**2. Serve's pool's guard, pinned** (confirmed). With
+`upscalePool.SetOutputGuard` deleted from runServe, every test round 1 cited
+passed: the render tests run the CLI's worker.
+`TestServesOwnPoolWritesNothingIntoAVariantsVolumeThatIsAway` boots serve
+with a stand-in sox and asks the pre-generation sweep from the console, so
+serve's own pool is offered a render into a variants directory on a volume
+that is away while the catalog records a rendition there: nothing at the
+mount point, one output Warn, the row kept. Red with the line removed
+(C2a): the pool published `variants/Artist/Album/01.flac.optimized-v2-48000-16.flac`
+under the bare mount point and said nothing.
+
+**3. Asked again before the sidecar's directory** (confirmed; fixed). Run
+asked its guard at its start alone. Red at 8145ea98:
+`TestTheGuardIsAskedAgainJustBeforeTheSidecarDirectoryIsMade` parks the
+guard at that ask, takes the volume away and lets Run go on, and both paths
+asked once and published there (`01.flac.upscaled-v2-176400-24.flac`,
+`01.dsf.pcm-v2-176400-24.flac`). Run's PCM path and renderDSD ask again
+just before the `MkdirAll` of the sidecar's directory.
+
+**4. The reads, pinned** (confirmed for the rows; the open did not hold).
+doctor, doctor --fix, logs (a log of the test's own, under a home of the
+test's) and update --check (its release check asked of a server of the
+test's own, `updateReleases`) are rows of
+`TestTheDiagnosticsStayAvailableWhileTheDataDirsVolumeIsAway`: each refuses
+nothing and makes nothing under the bare mount point. The doctor reaches no
+store open while its data-dir line fails: each of its five opens asks first
+whether `bridge.db` is there, and the refusal is of a data dir that holds
+none, so no gate was added. C4c, the variants-index probe opening a store
+that is not there, made `bridge/bridge.db` there and both doctor rows went
+red.
+
+**5. The note that makes its directory** (confirmed; fixed). Red at
+2cd98e26: `TestTheRefusalsNoteMakesNoDirectory`, the note made
+`bridge/config/.bridge.yaml.datadir.refused` under the bare mount point:
+`atomicwrite.WriteBytes` makes the file's directory, as round 1's N5g found.
+The note goes through `atomicwrite.WriteBytesInExisting` now, which makes
+none (`TestWriteBytesInExistingMakesNoDirectory`).
+
+**6. The line that ends a refusal** (confirmed; fixed). Red at 50a503db:
+`TestTheEndOfARefusalIsSaidAsItIs`, four of five starts after a refusal
+(`dataDir` set elsewhere, the record removed with the volume still away,
+another serve holding the lock, a regular file where the data dir goes)
+said the data dir held its files again, and the two refused starts removed
+the note. `endServeRefusal` runs once the data dir is prepared and its lock
+taken now, and says the data dir is back only where the note names the data
+dir the config names and that data dir held its database or its lock file
+before the preparation; otherwise, that the refusal no longer applies. The
+brief's `note.DataDir == cfg.DataDir` alone does not cover the record
+removed with the volume away (the same data dir, made anew), hence the
+files read before the preparation (`dataDirBack`). 7217847d dropped a check
+of the record there that no case could make matter, and
+`TestTheEndOfARefusalCallsBackOnlyTheDataDirItRefused` pins the two
+conditions.
+
+**7. tsnet's exit, as its commands map it** (confirmed). With either
+command's return after its gate made 0, at 9e272b49, the old row stayed
+green (R7a, R7b). The rows run `bridge tsnet auth` and `bridge tsnet status`
+whole, through `run`'s dispatch, the tsnet server each builds past its gate
+stood in for (`tsnetCommandServer`), so a gate that let one through brings
+no node up and makes nothing in the data dir; the refusal names the
+subcommand.
+
+**8.** Confirmed on a scratch copy of the tree. Not a small change, so not
+made here: backlog B777.
+
+**9. Open items in public text** (confirmed). This branch's prose on items
+3, 4 and 6 (this file's B727 record, scanner.md's B651 line and its long
+form) names them by their ids alone: B776, the limit the line names, and
+B777. Lines that predate this branch stay as they are on main.
+
+**Negative controls**, on a frozen copy of the tree at c3730153 (R7a and
+R7b at 9e272b49, before point 7's change), one mutation each, each test
+alone with `-test.v`, the bytes put back from memory, predicted in a file
+before the run; every one came out as predicted:
+
+| control | mutation | red |
+|---|---|---|
+| C1a | the fold never applied | the respelled test, its three shapes |
+| C1b | Linux's volumes taken to fold | the platform's own test alone |
+| C1c | the column folded by SQLite's ASCII `lower()` | the non-ASCII shape, folded, in the range and the respelled tests |
+| C1d | the upper bound one character on | the `/` and `\` shapes of the range and respelled tests (`Variants0`, `Variants]`) |
+| C1e | a trailing separator kept | every shape of the range and respelled tests |
+| C2a | serve's pool sets no guard | serve's pool test; the CLI's render test green |
+| C3a | the PCM path asks once | the second-ask test's PCM case, the pool test's count |
+| C3b | renderDSD asks once | the second-ask test's DSD case alone |
+| C4a | update --check asks the record | its row, and the update order test |
+| C4b | logs exits 1 before it prints | its row alone |
+| C4c | the doctor's variants-index probe opens a store that is not there | both doctor rows |
+| C5a | the note through `WriteBytes` | the note test alone |
+| C5b | `WriteBytesInExisting` makes the directory | atomicwrite's test and the note test |
+| C6a | the end said at the check | the lock and regular-file starts |
+| C6b | back whatever the data dir held | the record-removed start, and the holding-neither case |
+| C6c | back whatever data dir the note names | the other-data-dir case alone |
+| C6d | back read after the preparation and the lock | the record-removed start alone |
+| C7a | tsnet auth exits 0 past its gate | its row alone |
+| C7b | tsnet status exits 0 past its gate | its row alone |
+| C7c | the tsnet gate asks no record | both rows (the stand-in server reached); logout's green |
+| R7a, R7b | either command's gate return 0, at 9e272b49 | none: the old row stayed green, the point's reading |
+
+**Checks.**
+- The red runs, each test committed before its fix and run at that commit
+  (points 1, 3, 5 and 6), point 2's at its control (C2a), point 7's on the
+  old row at 9e272b49 (R7a, R7b), and point 8's on a scratch copy of
+  ff4300f1.
+- Through the shared build lock, on c3730153: `make fmt` left the tree as
+  it was; `make vet` natively and with `GOOS=windows`, `GOOS=darwin`,
+  `GOOS=linux GOARCH=386` and `GOOS=linux GOARCH=arm`: ok; `make test`
+  (`go test -race -timeout 30m` over every package, `-count=1`, TMPDIR under
+  `.tmp/_b72v`): ok, 89 packages and 14 without tests in 2,055 s
+  (cmd/bridge 1,317 s, internal/manifest 1,609 s, internal/admin 1,019 s,
+  internal/backup 276 s, internal/transcode 206 s, internal/atomicwrite
+  20 s), the Linux-only packages run (internal/alsa, internal/alsapcm,
+  internal/atomicwrite, internal/backup and the player's); that run is the
+  race run of the touched packages; `make build-all`: ok; `make
+  docs-check`: ok; the qualification check against c2e9d40a: ok.
+- With `rules-b72v-r2.patch` applied to a copy: `git apply --check` takes
+  it, docs-check's four commands pass (config-lifecycle.md at 99.5% of its
+  budget, 99.2% on main), and `TestEveryCitedTestNameExists` passes there
+  and fails on a name planted in the patched jobs.md, so it read the
+  patched files.
+- The Windows and macOS legs are vetted here, not run. Points 2's and 3's
+  tests are `!windows` (shell stand-ins, as their packages' other unix
+  tests); the rest build and run everywhere: point 1's compare strings and
+  expect the fold where `runtime.GOOS` is windows or darwin, point 4's logs
+  row sets HOME, USERPROFILE and LOCALAPPDATA to the test's own and its
+  update row asks a loopback server, point 6's lock case is the
+  `dataDirTryLock` seam, and its regular-file case may be refused at the
+  record's check on Windows instead (a lookup through a file can answer
+  there as an absence), its assertions holding either way.
+
+**For the owner.** What B727 leaves after round 2: backlog B776 and B777.
