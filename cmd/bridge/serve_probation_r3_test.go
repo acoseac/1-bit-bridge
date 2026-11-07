@@ -58,17 +58,20 @@ func TestAStopBeforeReadyStaysCountedUntilItsTeardownHasRun(t *testing.T) {
 // TestAStopBeforeReadyIsNotArmedByAReadyAnswerInItsTeardown: a round that
 // answered ready before the stop, and comes to count this start as ready only
 // after it, arms nothing: the stop came first, and its count goes back once
-// the teardown has run.
+// the teardown has run. The stop's own notice to the take-back is held until
+// then, so only serve's own context, ended by the stop, tells the arming that
+// the stop came first.
 func TestAStopBeforeReadyIsNotArmedByAReadyAnswerInItsTeardown(t *testing.T) {
 	r := newRefusedInstall(t, "")
 	teardown := newParkedTeardown()
-	atReady, ready := newOnceCloser(), newOnceCloser()
+	atReady, ready, notice := newOnceCloser(), newOnceCloser(), newOnceCloser()
 	events, seams := newProbationWatch(longProbation)
 	seams.beforeReady = func() {
 		atReady.close()
 		<-ready.ch
 	}
-	sb := r.bootWith(t, serveOpts{probation: seams, upnpStopping: teardown.seam})
+	sb := r.bootWith(t, serveOpts{probation: seams, upnpStopping: teardown.seam, stopArriving: func() { <-notice.ch }})
+	t.Cleanup(notice.close)
 	t.Cleanup(ready.close)
 	teardown.releaseFirst(t)
 	select {
@@ -80,6 +83,7 @@ func TestAStopBeforeReadyIsNotArmedByAReadyAnswerInItsTeardown(t *testing.T) {
 	teardown.waitParked(t)
 	ready.close()
 	events.waitFor(t, probationEnded)
+	notice.close()
 	if r.waitForCountWithin(t, 0, time.Second) {
 		t.Errorf("the marker while the teardown of a stop before ready is held = %+v, want the count to stand: "+
 			"a ready answer that comes after the stop arms nothing", markerOf(t, r.dataDir))
