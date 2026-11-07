@@ -561,23 +561,28 @@ func (p *bridgePlayer) watch(ctx context.Context) {
 	// The effective DSD policy's supervisor (B728 B7): its refresh, forced
 	// where an input changed (a snapshot, a migration's part for a DAC) and
 	// otherwise at most once a dsdIdle; and the silent probe, at a snapshot
-	// that resolves the boot binding, at the tick after a migration's part for
-	// a DAC changed the state (dsdPartChanged), and while one is due and the
-	// device slot refused it, at each tick until the slot is free.
+	// that resolves the boot binding, and while one is owed (a migration's
+	// part for a DAC changed the state, the device slot refused it, its
+	// answers were dropped) at each tick until it runs. Both run on the
+	// backend's goroutines, and this loop only asks (B762): a read of the box
+	// or an open the kernel holds never holds a report, the live config or the
+	// engine's end. What it asked ends with it, whichever way it leaves (work),
+	// a panic in it included, before its shutdown waits for the backend.
 	be, _ := p.be.(*playback.Backend)
-	probePending := false
+	work, endWork := context.WithCancel(ctx)
+	defer endWork()
 	refresh := func(force bool) {
 		if be != nil {
-			be.RefreshDSD(force)
+			be.RequestRefreshDSD(work, force)
 		}
 	}
 	probe := func(snap hotplug.Snapshot) {
 		if be != nil {
-			probePending = be.ProbeDSD(ctx, probeConditions(snap, p.device))
+			be.RequestProbeDSD(work, probeConditions(snap, p.device))
 		}
 	}
 	if be != nil {
-		p.dsd.changed = dsdPartChanged(be, &probePending)
+		p.dsd.changed = dsdPartChanged(work, be)
 	}
 	refresh(true)
 	run := p.run
@@ -597,7 +602,7 @@ func (p *bridgePlayer) watch(ctx context.Context) {
 		case <-policyTick.C:
 			refresh(false)
 			p.dsd.retry(ctx)
-			if probePending {
+			if be != nil && be.ProbeDSDPending() {
 				if snap, ok := p.feed.Latest(); ok {
 					probe(snap)
 				}
@@ -764,8 +769,10 @@ func (p *bridgePlayer) send(rp engine.OutputReport) {
 // the engine as it stops (the surface refuses, shuts down within its grace,
 // and closes what is open); then it stops the engine and waits for it, then
 // for the backend's goroutines, each within its bound, and says what it
-// left: an engine whose state write did not return, a device call held in
-// the kernel, a release never confirmed. An engine whose Run a panic ended
+// left: an engine whose state write did not return, a write of the player's
+// DSD state (which keeps the lock's share) and any other goroutine of the
+// backend's (a device call held in the kernel), each that runs, a release
+// never confirmed. An engine whose Run a panic ended
 // never ran its own shutdown, which releases the session it plays, so the
 // backend lets go of every session it holds first, within the backend's
 // bound (releaseAll). Then it waits for the index's build within a bound of
@@ -806,8 +813,18 @@ func (p *bridgePlayer) shutdown() {
 	err := run.be.Wait(wctx)
 	cancel()
 	if err != nil {
-		playerLog.Warn("player: the backend did not finish within its bound: a call to the device is held in the kernel, and the device may still be held until the process exits",
-			"err", err)
+		// Each kind of goroutine still running is said for what it holds, both
+		// where both run (B762 round 2): a write of the player's DSD state the
+		// lock's share, any other the device.
+		writes, others := stillRunning(run.be)
+		if writes {
+			playerLog.Warn("player: a write of the player's DSD state did not finish within the stop's bound: the player keeps its share of the data directory's lock until it ends",
+				"err", err)
+		}
+		if others {
+			playerLog.Warn("player: the backend did not finish within its bound: a call to the device is held in the kernel, and the device may still be held until the process exits",
+				"err", err)
+		}
 	}
 	if u, ok := run.eng.Snapshot().ReleaseUnconfirmed(); ok {
 		playerLog.Warn("player: a session's release was never confirmed: the device may still be held until the process exits",
@@ -836,12 +853,17 @@ func releaseAll(ctx context.Context, be playBackend) {
 }
 
 // settle lets go of the player's share of the data directory's lock and
-// closes settled, once the engine's Run has returned too: at once when it
-// has, and when it does for one the stop abandoned. A Run a panic ended is
-// abandoned for good: the panic skipped Run's own shutdown, which waits for
-// the engine's reservation writes and its queue writer, so they may still
-// write in the data directory, and the player keeps its share of the lock
-// until the process exits, saying so; settled never closes.
+// closes settled, once the engine's Run has returned, and then, the writes of
+// the player's DSD state closed to any asked from then on (closeDSDWrites,
+// B762 round 2), once every one the backend started before has returned: at
+// once when they have, and when they do for those the stop abandoned. A
+// write a goroutine the stop abandoned asks for after that is never made, so
+// none lands in the data directory once its lock is let go. A Run a panic
+// ended is abandoned for good: the panic skipped Run's own shutdown, which
+// waits for the engine's reservation writes and its queue writer, so they may
+// still write in the data directory, and the player keeps its share of the
+// lock until the process exits, saying so; settled never closes. It runs once
+// the supervisor, the only one that asks the backend for a probe, has left.
 func (p *bridgePlayer) settle() {
 	finish := func() {
 		if p.run != nil && p.run.panicked {
@@ -855,15 +877,56 @@ func (p *bridgePlayer) settle() {
 		finish()
 		return
 	}
-	select {
-	case <-p.run.done:
+	runDone, be := p.run.done, p.run.be
+	if closed(runDone) && closed(closeDSDWrites(be)) {
 		finish()
+		return
+	}
+	go func() {
+		<-runDone
+		<-closeDSDWrites(be)
+		finish()
+	}()
+}
+
+// closeDSDWrites closes the writes of the player's DSD state the backend
+// makes to any asked from now on (playback.Backend.CloseDSDWrites) and
+// returns the channel closed once those under way have returned: at once for
+// a backend that makes none.
+func closeDSDWrites(be playBackend) <-chan struct{} {
+	if w, ok := be.(interface{ CloseDSDWrites() <-chan struct{} }); ok {
+		return w.CloseDSDWrites()
+	}
+	return noWrites
+}
+
+// stillRunning says what of the goroutines be started still runs, once its
+// wait has given up: writes of the player's DSD state, or the probe's
+// goroutine, which may start one (playback.Backend.Running), and any other,
+// a session's or a reading's that a call into the kernel holds. A backend
+// that does not count them may run any other.
+func stillRunning(be playBackend) (writes, others bool) {
+	if c, ok := be.(interface{ Running() (int, int) }); ok {
+		n, w := c.Running()
+		return w > 0, n > w
+	}
+	return false, true
+}
+
+// noWrites is the writes of a backend that makes none.
+var noWrites = func() <-chan struct{} {
+	c := make(chan struct{})
+	close(c)
+	return c
+}()
+
+// closed reports whether ch is closed.
+func closed(ch <-chan struct{}) bool {
+	select {
+	case <-ch:
+		return true
 	default:
-		runDone := p.run.done
-		go func() {
-			<-runDone
-			finish()
-		}()
+		return false
 	}
 }
 

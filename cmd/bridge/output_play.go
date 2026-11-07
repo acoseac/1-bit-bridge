@@ -512,23 +512,24 @@ func (r *playRun) run(ctx context.Context, dir string, dev config.PlayerDevice) 
 func (r *playRun) watch(ctx context.Context, svc *hotplug.Service, dev config.PlayerDevice) <-chan struct{} {
 	sub := svc.Feed().Subscribe()
 	b, _ := r.be.(*playback.Backend)
-	probePending := false
+	// The effective policy's refresh and probe run on the backend's goroutines,
+	// as serve's supervisor asks them (B762), and end with ctx, the run's.
 	refresh := func(force bool) {
 		switch {
 		case b == nil:
 		case r.authorization != nil:
 			b.RefreshAuthorization(ctx)
 		default:
-			b.RefreshDSD(force)
+			b.RequestRefreshDSD(ctx, force)
 		}
 	}
 	probe := func(snap hotplug.Snapshot) {
 		if b != nil && r.authorization == nil {
-			probePending = b.ProbeDSD(ctx, probeConditions(snap, dev))
+			b.RequestProbeDSD(ctx, probeConditions(snap, dev))
 		}
 	}
 	if b != nil && r.dsdState != nil {
-		r.dsdState.changed = dsdPartChanged(b, &probePending)
+		r.dsdState.changed = dsdPartChanged(ctx, b)
 	}
 	done := make(chan struct{})
 	var wg sync.WaitGroup
@@ -550,7 +551,7 @@ func (r *playRun) watch(ctx context.Context, svc *hotplug.Service, dev config.Pl
 			case <-tick.C:
 				refresh(false)
 				r.dsdState.retry(ctx)
-				if probePending {
+				if b != nil && r.authorization == nil && b.ProbeDSDPending() {
 					if snap, ok := svc.Feed().Latest(); ok {
 						probe(snap)
 					}
