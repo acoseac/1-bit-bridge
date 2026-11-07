@@ -84084,9 +84084,7 @@ DoP at DSD64 and DSD128), and is green on 2a2d1165. It checks the capture is the
 bytes, two copies of configuration 1 in 476 bytes each, no string descriptor); interface 2's
 path at altsets 1 and 2 (input terminal 3, feature unit 4's master volume, output terminal 5);
 the gain check over the S32_LE altset with unit 4's volume at 0 dB (unity) and at -64 dB
-(`dop_gain_not_unity`), through a usbmixer table in v6.12's shape, synthetic, since no capture
-of the Mytek's table is kept; and `Effective` planning DoP at DSD64 and DSD128 at 0 dB and
-refusing DSD64 off it.
+(`dop_gain_not_unity`), through the usbmixer table and altsets its box's /proc gave (replacing a synthetic table on review).
 
 `TestByteIdenticalConfigurationsAreOne`: one, two and three the same; two the same with another
 value's between them; two under one header with different bodies, in both orders (a mute alone
