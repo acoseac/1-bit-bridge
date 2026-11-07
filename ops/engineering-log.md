@@ -85348,3 +85348,21 @@ its case and on an empty content asked again for ever; and C15 (no fence
 answered first) green at first, the store's fence answering first once
 `would_interrupt` was in the closure, so 07442dce adds the case where the
 early answer matters, and C15 is red on it.
+
+### Gates
+
+At 95eb20dd, through the shared build slot: `make fmt` left the tree as it
+was; `make vet` clean, and with `GOOS=windows`, `GOOS=darwin` and
+`GOOS=linux GOARCH=386`; `go test -race -count=5` over the write's tests in
+`internal/player/policy`, `internal/player/playback`, `internal/alsapcm` and
+`internal/api` green (alsapcm 89 s, api 79 s); the native-integration overlay,
+`cmd/bridge`'s 13 and playback's 29 `TestNativeIntegration` tests green under
+`-race`; `make test` green (89 packages, 2,083 s; `cmd/bridge` 1,326 s,
+`internal/api` 152 s, `internal/alsapcm` 91 s); `make build-all` built the six
+targets; `make docs-check` clean. The rules patch applies to HEAD and, on a
+copy of HEAD with it applied, the doc budgets pass (`output.md` 75.7 KB),
+`rules-for` names `output.md` and `player.md` for
+`internal/player/playback/dsd_choice.go`, and the guards that read the tracked
+docs pass (`TestEveryCitedTestNameExists`, `TestEveryBridgeWordIsInTheProtocol`,
+the endpoint and error-table guards, `TestDSDOutputProtocolTokens` and
+`TestQualificationRunbookVersion`).
