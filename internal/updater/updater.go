@@ -534,10 +534,10 @@ func (u *Updater) maybeAutoInstall(ctx context.Context) {
 	// The running install's probation (backlog B660): while the running
 	// version awaits its confirmation, the backup beside it is the last
 	// version known to run here, and a swap now would replace it with the
-	// unconfirmed one. Waits at most twice the window, and not where a
-	// migration of the store began (ProbationHolds). Asked again under the
-	// install marker's lock (decideUnderLock), as the hold is.
-	if why := u.probationHolds(u.autoInstallOpts.DataDir, st.CurrentVersion); why != "" {
+	// unconfirmed one. Waits at most twice the window, and only where the
+	// crash rollback would put that backup back (ProbationHolds). Asked again
+	// under the install marker's lock (decideUnderLock), as the hold is.
+	if why := u.probationHolds(u.autoInstallOpts.DataDir, u.autoInstallOpts.BinaryPath, st.CurrentVersion); why != "" {
 		u.recordDeferredReason(why)
 		logger.Info(autoInstallDeferredMessage, "reason", "the running install awaits its confirmation", "version", st.CurrentVersion)
 		return
@@ -629,11 +629,11 @@ func (u *Updater) heldBack(candidate string) Hold {
 }
 
 // probationHolds is ProbationHolds over the marker in dataDir, for the
-// running version current at this process's uptime: why the automatic install
-// waits for the running install's confirmation, "" where it does not (backlog
-// B660). A marker that cannot be read holds nothing back, as HeldBack's does
-// not.
-func (u *Updater) probationHolds(dataDir, current string) string {
+// running version current serving as binaryPath, at this process's uptime:
+// why the automatic install waits for the running install's confirmation, ""
+// where it does not (backlog B660). A marker that cannot be read holds
+// nothing back, as HeldBack's does not.
+func (u *Updater) probationHolds(dataDir, binaryPath, current string) string {
 	if dataDir == "" {
 		return ""
 	}
@@ -641,7 +641,7 @@ func (u *Updater) probationHolds(dataDir, current string) string {
 	if err != nil {
 		return ""
 	}
-	return ProbationHolds(st, current, u.uptime())
+	return ProbationHolds(st, current, binaryPath, u.uptime())
 }
 
 // rejectionBlocks reports whether an operator rollback of `rejected`

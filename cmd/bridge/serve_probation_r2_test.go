@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
+	"github.com/acoseac/1-bit-bridge/internal/supervision"
 	"github.com/acoseac/1-bit-bridge/internal/updater"
 	"github.com/acoseac/1-bit-bridge/internal/version"
 )
@@ -42,6 +43,24 @@ func (r *refusedInstall) waitForCountWithin(t *testing.T, count int, within time
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+}
+
+// withACurrentStore puts a store at the ladder's top in r's data dir, made
+// with no install armed, and arms r's marker again: a start over it
+// migrates nothing.
+func (r *refusedInstall) withACurrentStore(t *testing.T) {
+	t.Helper()
+	if err := updater.ClearState(r.dataDir); err != nil {
+		t.Fatal(err)
+	}
+	s, err := manifest.OpenStore(manifest.DefaultDBPath(r.dataDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	r.saveMarker(t, r.dataDir)
 }
 
 // parkedTeardown is a seam that parks serve's teardown where it stops the
@@ -98,6 +117,26 @@ func TestAStopTakesItsCountBackAsItArrives(t *testing.T) {
 	teardown.release.close()
 	waitForExit(t, sb, 0)
 	r.requireCount(t, 0, "after the stop")
+}
+
+// TestARestartRequestTakesItsCountBackAsItArrives: the console's restart is a
+// stop of its own, which runServe's own context alone carries: its count goes
+// back as the request arrives, while the teardown still runs, as a stop's
+// does.
+func TestARestartRequestTakesItsCountBackAsItArrives(t *testing.T) {
+	r := newRefusedInstall(t, "")
+	teardown := newParkedTeardown()
+	_, seams := newProbationWatch(longProbation)
+	sb, admin := r.bootConsole(t, serveOpts{probation: seams, upnpStopping: teardown.seam})
+	teardown.releaseFirst(t)
+	r.requireCount(t, 1, "while serve runs")
+	requestRestart(t, admin)
+	teardown.waitParked(t)
+	if !r.waitForCountWithin(t, 0, withinTheTest) {
+		t.Errorf("the marker while the restart's teardown runs = %+v, want the count taken back already", markerOf(t, r.dataDir))
+	}
+	teardown.release.close()
+	waitForExit(t, sb, supervision.RestartExitCode)
 }
 
 // TestAStopWhileServeStartsTakesItsCountBackAsItArrives: a stop that lands
@@ -445,7 +484,9 @@ func TestATailnetFailureIsTheNetworksOnlyWhenItSaysSo(t *testing.T) {
 			node.listen = func() (net.Listener, error) {
 				return &refusingTailnetListener{err: tc.err, closed: make(chan struct{})}, nil
 			}
-			code, stderr, _ := serveToItsEnd(t, serveOpts{configPath: r.cfg, binaryPath: r.bin, tsnetNode: node})
+			// To its own end: a stop on its banner, as serveToItsEnd makes,
+			// would race the listener's failure, and take the count back.
+			code, stderr := r.serve(t, serveOpts{tsnetNode: node})
 			if code != 1 || !strings.Contains(stderr, "tsnet listener:") {
 				t.Fatalf("serve over a tailnet listener that fails = %d, want 1 at it; stderr=%s", code, stderr)
 			}
@@ -489,7 +530,9 @@ func TestAnInstallListeningOnTheWildcardIsConfirmed(t *testing.T) {
 func TestTheConsoleGradesTheStartsBeforeTheRunningOne(t *testing.T) {
 	r := newRefusedInstall(t, "")
 	r.marker.FailedStarts = 2
-	r.saveMarker(t, r.dataDir)
+	// The store as the version before left it, at the ladder's top, so this
+	// start migrates nothing: a migration would refuse the rollback.
+	r.withACurrentStore(t)
 	_, seams := newProbationWatch(longProbation)
 	sb, admin := r.bootConsole(t, serveOpts{probation: seams})
 	panel := probationPanel(t, admin)

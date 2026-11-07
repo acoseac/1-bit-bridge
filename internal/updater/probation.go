@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"time"
 )
 
@@ -187,6 +189,19 @@ func CrashRollback(st State, current string) (ok bool, why string) {
 	return true, ""
 }
 
+// CrashRollbackAtLimit is CrashRollback asked of a copy of st whose count is
+// at least ProbationFailedStarts: whether the crash rollback's own checks of
+// the marker would put the backup back once the count gets there, and why
+// not (backlog B660's second round). The probation's words, its hold on the
+// auto-installer and its hold on a command's migration all ask it, so none
+// of them keeps or promises a backup the marker alone rules out. It reads no
+// backup: the crash rollback's two other checks (the backup's version, its
+// settings check) run a process, and only the start that acts runs them.
+func CrashRollbackAtLimit(st State, current string) (ok bool, why string) {
+	st.FailedStarts = max(st.FailedStarts, ProbationFailedStarts)
+	return CrashRollback(st, current)
+}
+
 // CrashRollbackRecord is the marker the crash rollback writes, durably, just
 // before it puts the backup back over the install of current st describes
 // (cmd/bridge's recoverCrashedInstall; backlog B660): a copy of st with
@@ -221,40 +236,65 @@ const (
 	// ProbationNone: no install of the version that reads it awaits its
 	// confirmation, so there is nothing to say.
 	ProbationNone ProbationLevel = iota
-	// ProbationOK: on probation, no start of it but one still running has
-	// failed to end cleanly.
+	// ProbationOK: on probation, and no start of it has failed to end
+	// cleanly but one still running, which counts until it stops cleanly.
 	ProbationOK
 	// ProbationWarn: a start of it besides one still running did not end
 	// cleanly.
 	ProbationWarn
-	// ProbationFail: the count is at the limit, a crash rollback was refused,
-	// or a start did not answer as ready.
+	// ProbationFail: the starts that did not end cleanly are at the limit, a
+	// crash rollback was refused, or a start did not answer as ready.
 	ProbationFail
 )
 
 // Probation is ProbationStatus's answer: where an install of the version
 // that reads it stands, in words that name no path and no value.
 type Probation struct {
+	// Level grades Says.
 	Level ProbationLevel
-	// Says is for a reader beside the bridge (`bridge doctor`): the count as
-	// the marker holds it, a start still running among it, since a start
-	// counts itself until it ends cleanly.
+	// Says is for a reader beside the bridge (`bridge doctor`): the starts
+	// that did not end cleanly, less the one a serve running now counts until
+	// it stops cleanly.
 	Says string
+	// ThisStartLevel grades ThisStart, on the starts before the running one.
+	ThisStartLevel ProbationLevel
 	// ThisStart is for the start of the version that is running (its stderr
 	// line, the console's Updates panel): its own start taken off the count,
 	// so the words are of the starts before it.
 	ThisStart string
 }
 
+// probationLevel grades an install whose starts that did not end cleanly,
+// the running one left out, are failed.
+func probationLevel(failed int, st State) ProbationLevel {
+	switch {
+	case failed >= ProbationFailedStarts || st.RollbackRefused != "" || st.NotReady:
+		return ProbationFail
+	case failed >= 1:
+		return ProbationWarn
+	}
+	return ProbationOK
+}
+
 // ProbationStatus says where the install st describes stands for a start of
 // version current (backlog B660): nothing where no install of current awaits
-// its confirmation; OK on probation with at most one start counted (the one
-// running, whose take-back comes at its end, so a healthy install reads 1);
-// a warning from two; a failure at ProbationFailedStarts, where a crash
-// rollback was refused (State.RollbackRefused), or where a start did not
-// answer as ready (State.NotReady). It is the one source of the words serve
-// prints, `bridge doctor` prints and the console's Updates panel shows.
-func ProbationStatus(st State, current string) Probation {
+// its confirmation; OK on probation where no start but a running one is
+// counted; a warning from one that did not end cleanly; a failure at
+// ProbationFailedStarts, where a crash rollback was refused
+// (State.RollbackRefused), or where a start did not answer as ready
+// (State.NotReady). running says a serve of current holds the data dir's
+// lock now (ServeHoldsDataDir): its start is in the count until it stops
+// cleanly, and Says takes it off; with none running every start counted is
+// one that did not end cleanly (B660's second round: until then the doctor
+// took one off whatever ran). ThisStart is the running start's own, and
+// takes it off always. Neither promises a put-back: the words follow the
+// crash rollback's own checks of the marker at the limit
+// (CrashRollbackAtLimit), saying why not where those refuse, and otherwise
+// that the next start tries to put the backup back, if the backup can run
+// these settings, since its version and its settings check are asked only by
+// the start that acts. It is the one source of the words serve prints,
+// `bridge doctor` prints and the console's Updates panel shows.
+func ProbationStatus(st State, current string, running bool) Probation {
 	if !AwaitsConfirmation(st, current) {
 		return Probation{}
 	}
@@ -262,52 +302,65 @@ func ProbationStatus(st State, current string) Probation {
 	if back == "" {
 		back = "the backup's version"
 	}
-	earlier := max(n-1, 0)
-	p := Probation{Level: ProbationOK}
-	switch {
-	case n >= ProbationFailedStarts || st.RollbackRefused != "" || st.NotReady:
-		p.Level = ProbationFail
-	case n >= 2:
-		p.Level = ProbationWarn
+	failed, earlier := n, max(n-1, 0)
+	if running {
+		failed = earlier
 	}
-	confirmed := fmt.Sprintf("a start of it is confirmed once it has answered as ready and stayed up for %s", ProbationWindow)
-	// A crash rollback refused promises no put-back: the refusal's clause,
-	// added below, says why the backup stays where it is.
-	refused := st.RollbackRefused != ""
+	p := Probation{Level: probationLevel(failed, st), ThisStartLevel: probationLevel(earlier, st)}
+	// Why the backup is not put back, where the marker says it is not: a
+	// crash rollback refused, or the crash rollback's own checks at the limit.
+	notPutBack := st.RollbackRefused
+	if notPutBack == "" {
+		if ok, why := CrashRollbackAtLimit(st, current); !ok {
+			notPutBack = why
+		}
+	}
+	tries := fmt.Sprintf("the next start tries to put %s back, if the backup can run these settings", back)
+	once := fmt.Sprintf(": once %d have not, %s", ProbationFailedStarts, tries)
 	switch {
-	case n <= 1:
-		p.Says = fmt.Sprintf("%s is on probation since its install: %s", st.TargetVersion, confirmed)
-	case refused:
-		p.Says = fmt.Sprintf("%d of %s's starts since its install have not ended cleanly, one running now among them "+
-			"(a start counts until it stops cleanly)", n, st.TargetVersion)
-	case n < ProbationFailedStarts:
-		p.Says = fmt.Sprintf("%s is on probation since its install, and %d of its starts have not ended cleanly, "+
-			"one running now among them (a start counts until it stops cleanly): once %d have not, the next start puts %s back",
-			st.TargetVersion, n, ProbationFailedStarts, back)
+	case failed == 0:
+		p.Says = fmt.Sprintf("%s is on probation since its install: a start of it is confirmed once it has answered as ready "+
+			"and stayed up for %s", st.TargetVersion, ProbationWindow)
 	default:
-		p.Says = fmt.Sprintf("%d of %s's starts since its install have not ended cleanly, one running now among them "+
-			"(a start counts until it stops cleanly), so the next start puts %s back unless one stops cleanly first",
-			n, st.TargetVersion, back)
+		p.Says = fmt.Sprintf("%d of %s's starts since its install did not end cleanly", failed, st.TargetVersion)
+		if running {
+			p.Says += ", besides the one running now, which counts until it stops cleanly"
+		}
+		switch {
+		case notPutBack != "":
+			p.Says += "; the backup is not put back: " + notPutBack
+		case n >= ProbationFailedStarts && running:
+			p.Says += ": if the one running does not end cleanly either, " + tries
+		case n >= ProbationFailedStarts:
+			p.Says += ", so " + tries
+		default:
+			p.Says += once
+		}
 	}
 	switch {
 	case earlier == 0:
 		p.ThisStart = fmt.Sprintf("%s is on probation since its install: this start is confirmed once it has answered as ready "+
 			"and stayed up for %s", st.TargetVersion, ProbationWindow)
-	case refused:
-		p.ThisStart = fmt.Sprintf("%d of %s's starts before this one did not end cleanly", earlier, st.TargetVersion)
-	case earlier < ProbationFailedStarts-1:
-		p.ThisStart = fmt.Sprintf("%s is on probation since its install, and %d of its starts before this one did not end cleanly: "+
-			"once %d have not, the next start puts %s back", st.TargetVersion, earlier, ProbationFailedStarts, back)
-	case earlier == ProbationFailedStarts-1:
-		p.ThisStart = fmt.Sprintf("%d of %s's starts before this one did not end cleanly: if this one does not either, "+
-			"the next start puts %s back", earlier, st.TargetVersion, back)
 	default:
 		p.ThisStart = fmt.Sprintf("%d of %s's starts before this one did not end cleanly", earlier, st.TargetVersion)
+		switch {
+		case notPutBack != "":
+			p.ThisStart += "; the backup is not put back: " + notPutBack
+		case n >= ProbationFailedStarts:
+			p.ThisStart += ": if this one does not end cleanly either, " + tries
+		default:
+			p.ThisStart += once
+		}
 	}
-	if refused {
-		why := fmt.Sprintf("; the backup is not put back: %s", st.RollbackRefused)
-		p.Says += why
-		p.ThisStart += why
+	// A refusal recorded with nothing counted is still said, as it was.
+	if st.RollbackRefused != "" {
+		why := "; the backup is not put back: " + st.RollbackRefused
+		if failed == 0 {
+			p.Says += why
+		}
+		if earlier == 0 {
+			p.ThisStart += why
+		}
 	}
 	if st.NotReady {
 		notReady := fmt.Sprintf("; a start of it did not answer as ready (its API listener, /v1/health and its store) within %s, "+
@@ -320,20 +373,72 @@ func ProbationStatus(st State, current string) Probation {
 
 // ProbationHolds says why the automatic install of another version waits,
 // "" where it does not (backlog B660): the marker st is an unconfirmed install
-// of the running version current with no migration of the store begun, and
-// this process has been up for less than twice ProbationWindow. Until the
-// install is confirmed, the backup beside the binary is the last version
-// known to run here, which the crash rollback puts back; an install now would
-// replace it with current, which has not shown it runs. Past that bound an
-// install that never answered does not wait on itself, since a newer release
-// may be its fix; and where a migration began the backup cannot be put back
-// anyway, so nothing is held. A manual install is never held, and replaces
-// the backup with the unconfirmed version.
-func ProbationHolds(st State, current string, uptime time.Duration) string {
-	if !AwaitsConfirmation(st, current) || st.StoreMigratedBy != "" || uptime >= 2*ProbationWindow {
+// of the running version current, this process has been up for less than
+// twice ProbationWindow, and the crash rollback would put back the backup
+// beside binaryPath, the binary serve runs as: no rollback of it was refused
+// (State.RollbackRefused), the backup is there (a regular file at
+// binaryPath+".bak"), and the crash rollback's own checks of the marker would
+// pass at the limit (CrashRollbackAtLimit: a migration of the store begun, an
+// install that never reached its swap, a data dir another version opened since
+// all refuse it). B660's second round added the first two, and the third
+// beside the migration it asked alone: a hold kept for a backup no rollback
+// would put back held a newer release, perhaps the fix, for nothing. Until
+// the install is confirmed, that backup is the last version known to run
+// here; an install now would replace it with current, which has not shown it
+// runs. Past the bound an install that never answered does not wait on
+// itself, since a newer release may be its fix. A manual install is never
+// held, and replaces the backup with the unconfirmed version.
+func ProbationHolds(st State, current, binaryPath string, uptime time.Duration) string {
+	if !AwaitsConfirmation(st, current) || uptime >= 2*ProbationWindow || st.RollbackRefused != "" {
+		return ""
+	}
+	if ok, _ := CrashRollbackAtLimit(st, current); !ok || !backupBeside(binaryPath) {
 		return ""
 	}
 	return fmt.Sprintf("%s awaits its confirmation (answered and up for %s), and the backup beside it, which a crash rollback "+
-		"puts back, would be replaced by an install now: auto-install waits until it is confirmed, or for at most %s",
+		"would put back, would be replaced by an install now: auto-install waits until it is confirmed, or for at most %s",
 		current, ProbationWindow, 2*ProbationWindow)
+}
+
+// backupBeside reports whether a backup a crash rollback could put back
+// stands beside binaryPath: a regular file at binaryPath+".bak", as the crash
+// rollback requires it. A path that is not absolute names no backup.
+func backupBeside(binaryPath string) bool {
+	if !filepath.IsAbs(binaryPath) {
+		return false
+	}
+	fi, err := os.Lstat(binaryPath + ".bak")
+	return err == nil && fi.Mode().IsRegular()
+}
+
+// MigrationHeld says why a store open of current other than serve's own
+// start does not migrate the store in dataDir, "" where it may (backlog
+// B660's second round): the marker st is an install of current awaiting its
+// confirmation, a start of it before now did not end cleanly, and the crash
+// rollback's own checks would put the backup back at their limit
+// (CrashRollbackAtLimit). The migration's record (State.StoreMigratedBy)
+// refuses that rollback for good, so a command run to see what is wrong (a
+// `bridge doctor`, a scan) would take the backup away from the starts it is
+// for. The starts before now are State.FailedStarts less the start a serve
+// holding the data dir's lock counts until it stops cleanly (serveRunning;
+// ServeHoldsDataDir), so none before now is as it was before the round.
+// Serve's own start migrates the store with its admission's permission
+// (MigrationPermit), whatever the count.
+func MigrationHeld(st State, current string, serveRunning bool) string {
+	if !AwaitsConfirmation(st, current) {
+		return ""
+	}
+	if ok, _ := CrashRollbackAtLimit(st, current); !ok {
+		return ""
+	}
+	prior := st.FailedStarts
+	if serveRunning {
+		prior--
+	}
+	if prior <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("the install of %s awaits its confirmation, and %d of its starts did not end cleanly: a migration of the store "+
+		"now would keep a crash rollback from ever putting %s back, so only a start of bridge serve migrates it until the install "+
+		"is confirmed", st.TargetVersion, prior, st.PreviousVersion)
 }

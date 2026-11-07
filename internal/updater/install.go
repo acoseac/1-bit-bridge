@@ -835,8 +835,9 @@ func (u *Updater) swapAwaitingRestart(dataDir, target string) bool {
 // hold of target recorded since its gate read the marker refuses too
 // (HeldBack), as the gate would have, and so does the running install's
 // probation (ProbationHolds; backlog B660): the swap would replace the backup
-// a crash rollback puts back with the unconfirmed running version. A manual
-// install is not held by it. The lock is the caller's.
+// beside opts.BinaryPath, which a crash rollback would put back, with the
+// unconfirmed running version. A manual install is not held by it. The lock
+// is the caller's.
 func (u *Updater) decideUnderLock(opts InstallOptions, target string) error {
 	if u.swapAwaitingRestart(opts.DataDir, target) {
 		return fmt.Errorf("%w: %s is already staged on disk", ErrInstallPendingRestart, target)
@@ -845,7 +846,7 @@ func (u *Updater) decideUnderLock(opts InstallOptions, target string) error {
 		if hold := HeldBack(opts.DataDir, opts.ConfigPath, target); hold.Version != "" {
 			return &holdError{sentinel: ErrInstallHeldBack, reason: hold.Reason}
 		}
-		if why := u.probationHolds(opts.DataDir, u.Status().CurrentVersion); why != "" {
+		if why := u.probationHolds(opts.DataDir, opts.BinaryPath, u.Status().CurrentVersion); why != "" {
 			return &holdError{sentinel: ErrInstallAwaitsConfirmation, reason: why}
 		}
 	}

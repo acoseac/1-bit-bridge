@@ -237,38 +237,65 @@ func mustLoad(t *testing.T, dir string) State {
 }
 
 // TestProbationStatusSaysWhereAnInstallStands: nothing where no install of
-// the version reading it awaits its confirmation; ok at 0 and 1, a start
-// running counting itself; a warning from 2; a failure at the limit, with a
-// refused crash rollback, or with a start that did not answer as ready. The
-// doctor's words count the marker as it is, the running start's take itself
-// off; neither names a path.
+// the version reading it awaits its confirmation; for a reader beside the
+// bridge, every start counted is one that did not end cleanly but the one a
+// serve running now counts until it stops cleanly (B660's second round), ok
+// with none, a warning from one, a failure at the limit, with a refused crash
+// rollback, or with a start that did not answer as ready; the running start's
+// own words and level take itself off. No words promise a put-back: they say
+// the next start tries, if the backup can run these settings, or why the
+// backup is not put back, the crash rollback's own checks at the limit
+// refusing; none names a path.
 func TestProbationStatusSaysWhereAnInstallStands(t *testing.T) {
-	refused, notReady := probationMarker(4), probationMarker(1)
-	refused.RollbackRefused = "0.2.4 began a migration of the store, which may have changed it"
+	refused, notReady, migrated := probationMarker(4), probationMarker(1), probationMarker(2)
+	refused.RollbackRefused = "the backup, 0.2.3, refuses this bridge's settings, so it would not start on them: line 3"
 	notReady.NotReady = true
+	migrated.StoreMigratedBy = "0.2.4"
+	refusedAtOne := probationMarker(1)
+	refusedAtOne.RollbackRefused = refused.RollbackRefused
+	const tries = "the next start tries to put 0.2.3 back, if the backup can run these settings"
 	for _, tc := range []struct {
 		name               string
 		st                 State
 		current            string
-		level              ProbationLevel
-		says, thisStart    string
-		saysNot, thisStNot string
+		running            bool
+		level, thisLevel   ProbationLevel
+		says, saysNot      string
+		thisStart, thisNot string
 	}{
-		{"no marker", State{}, "0.2.4", ProbationNone, "", "", "", ""},
-		{"another version's install", probationMarker(1), "0.2.9", ProbationNone, "", "", "", ""},
-		{"a confirmed install", State{Status: "installed", TargetVersion: "0.2.4", InstalledAt: time.Now()}, "0.2.4", ProbationNone, "", "", "", ""},
-		{"no start yet", probationMarker(0), "0.2.4", ProbationOK, "on probation", "this start is confirmed", "not ended cleanly", "did not end cleanly"},
-		{"a healthy start running", probationMarker(1), "0.2.4", ProbationOK, "on probation", "this start is confirmed", "not ended cleanly", "did not end cleanly"},
-		{"one start before this one", probationMarker(2), "0.2.4", ProbationWarn, "2 of its starts", "1 of its starts before this one", "", ""},
-		{"at the limit", probationMarker(3), "0.2.4", ProbationFail, "the next start puts 0.2.3 back", "if this one does not either", "", ""},
-		{"a crash rollback refused", refused, "0.2.4", ProbationFail, "the backup is not put back: " + refused.RollbackRefused,
-			"the backup is not put back: " + refused.RollbackRefused, "puts 0.2.3 back", "puts 0.2.3 back"},
-		{"a start that did not answer", notReady, "0.2.4", ProbationFail, "did not answer as ready", "did not answer as ready", "", ""},
+		{name: "no marker", st: State{}, current: "0.2.4"},
+		{name: "another version's install", st: probationMarker(1), current: "0.2.9", running: true},
+		{name: "a confirmed install", st: State{Status: "installed", TargetVersion: "0.2.4", InstalledAt: time.Now()}, current: "0.2.4"},
+		{"no start yet", probationMarker(0), "0.2.4", false, ProbationOK, ProbationOK,
+			"on probation", "did not end cleanly", "this start is confirmed", "did not end cleanly"},
+		{"a healthy start running", probationMarker(1), "0.2.4", true, ProbationOK, ProbationOK,
+			"on probation", "did not end cleanly", "this start is confirmed", "did not end cleanly"},
+		{"a start that crashed, none running", probationMarker(1), "0.2.4", false, ProbationWarn, ProbationOK,
+			"1 of 0.2.4's starts since its install did not end cleanly: once 3 have not, " + tries, "running now",
+			"this start is confirmed", ""},
+		{"one start before the running one", probationMarker(2), "0.2.4", true, ProbationWarn, ProbationWarn,
+			"1 of 0.2.4's starts since its install did not end cleanly, besides the one running now", "puts 0.2.3 back",
+			"1 of 0.2.4's starts before this one did not end cleanly: once 3 have not, " + tries, "puts 0.2.3 back"},
+		{"two before the running one", probationMarker(3), "0.2.4", true, ProbationWarn, ProbationWarn,
+			"if the one running does not end cleanly either, " + tries, "puts 0.2.3 back",
+			"2 of 0.2.4's starts before this one did not end cleanly: if this one does not end cleanly either, " + tries, "puts 0.2.3 back"},
+		{"at the limit, none running", probationMarker(3), "0.2.4", false, ProbationFail, ProbationWarn,
+			"3 of 0.2.4's starts since its install did not end cleanly, so " + tries, "puts 0.2.3 back", "", ""},
+		{"a crash rollback refused", refused, "0.2.4", true, ProbationFail, ProbationFail,
+			"the backup is not put back: " + refused.RollbackRefused, "tries to put",
+			"the backup is not put back: " + refused.RollbackRefused, "tries to put"},
+		{"a refusal recorded with no start counted", refusedAtOne, "0.2.4", true, ProbationFail, ProbationFail,
+			"the backup is not put back: " + refused.RollbackRefused, "", "the backup is not put back: " + refused.RollbackRefused, ""},
+		{"a marker the crash rollback refuses", migrated, "0.2.4", false, ProbationWarn, ProbationWarn,
+			"the backup is not put back: 0.2.4 began a migration of the store", "tries to put",
+			"the backup is not put back: 0.2.4 began a migration of the store", "tries to put"},
+		{"a start that did not answer", notReady, "0.2.4", true, ProbationFail, ProbationFail,
+			"did not answer as ready", "", "did not answer as ready", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			p := ProbationStatus(tc.st, tc.current)
-			if p.Level != tc.level {
-				t.Fatalf("ProbationStatus = %+v, want level %v", p, tc.level)
+			p := ProbationStatus(tc.st, tc.current, tc.running)
+			if p.Level != tc.level || p.ThisStartLevel != tc.thisLevel {
+				t.Fatalf("ProbationStatus = %+v, want level %v and the running start's %v", p, tc.level, tc.thisLevel)
 			}
 			if tc.level == ProbationNone {
 				if p.Says != "" || p.ThisStart != "" {
@@ -279,10 +306,13 @@ func TestProbationStatusSaysWhereAnInstallStands(t *testing.T) {
 			if !strings.Contains(p.Says, tc.says) || (tc.saysNot != "" && strings.Contains(p.Says, tc.saysNot)) {
 				t.Errorf("the doctor's words = %q, want them to say %q and not %q", p.Says, tc.says, tc.saysNot)
 			}
-			if !strings.Contains(p.ThisStart, tc.thisStart) || (tc.thisStNot != "" && strings.Contains(p.ThisStart, tc.thisStNot)) {
-				t.Errorf("the running start's words = %q, want them to say %q and not %q", p.ThisStart, tc.thisStart, tc.thisStNot)
+			if !strings.Contains(p.ThisStart, tc.thisStart) || (tc.thisNot != "" && strings.Contains(p.ThisStart, tc.thisNot)) {
+				t.Errorf("the running start's words = %q, want them to say %q and not %q", p.ThisStart, tc.thisStart, tc.thisNot)
 			}
 			for _, words := range []string{p.Says, p.ThisStart} {
+				if strings.Contains(words, "the next start puts") {
+					t.Errorf("the words %q promise a put-back", words)
+				}
 				if strings.ContainsAny(words, `\`) || strings.Contains(words, "/dev") || strings.Contains(words, "/home") {
 					t.Errorf("the words %q name a path", words)
 				}
@@ -374,40 +404,54 @@ func mustSave(t *testing.T, dir string, st State) {
 
 // TestAMigrationRecordsThatItBeganThoughTheDataDirIsRecorded: a store open
 // with a step pending records that its version began a migration wherever an
-// install is armed and it is not the backup's, after serve's admission
-// recorded the data dir too, and refuses where the record cannot be written.
+// install is armed and it is not the backup's, serve's own after its
+// admission recorded the data dir too (with the admission's permission, B660's
+// second round), and refuses where the record cannot be written.
 func TestAMigrationRecordsThatItBeganThoughTheDataDirIsRecorded(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		st      State
 		current string
-		records bool
+		// admitted opens the store as serve's start does, after its
+		// admission and with its permission.
+		admitted bool
+		records  bool
 	}{
-		{"after the admission", probationMarker(1), "0.2.4", true},
-		{"before any admission", func() State { s := probationMarker(0); s.DataDirOpenedBy = ""; return s }(), "0.2.4", true},
-		{"of a third version", probationMarker(1), "0.2.9", true},
-		{"of the backup's version", probationMarker(1), "0.2.3", false},
-		{"with no install armed", State{RejectedVersion: "0.2.5"}, "0.2.4", false},
-		{"over a confirmed install", State{Status: "installed", TargetVersion: "0.2.4", PreviousVersion: "0.2.3", InstalledAt: time.Now()}, "0.2.4", false},
+		{"after serve's admission", func() State { s := probationMarker(0); s.DataDirOpenedBy = ""; return s }(), "0.2.4", true, true},
+		{"before any admission", func() State { s := probationMarker(0); s.DataDirOpenedBy = ""; return s }(), "0.2.4", false, true},
+		{"of a third version", probationMarker(1), "0.2.9", false, true},
+		{"of the backup's version", probationMarker(1), "0.2.3", false, false},
+		{"with no install armed", State{RejectedVersion: "0.2.5"}, "0.2.4", false, false},
+		{"over a confirmed install", State{Status: "installed", TargetVersion: "0.2.4", PreviousVersion: "0.2.3", InstalledAt: time.Now()},
+			"0.2.4", false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
 			mustSave(t, dir, tc.st)
-			res, err := DisarmBeforeMigrating(dir, tc.current)
+			var permit MigrationPermit
+			if tc.admitted {
+				admission, err := AdmitBoot(t.Context(), dir, tc.current, nil)
+				if err != nil || !admission.Counted {
+					t.Fatalf("the admission = %+v, %v; want this start counted", admission, err)
+				}
+				permit = admission.Permit
+			}
+			counted := mustLoad(t, dir).FailedStarts
+			res, err := DisarmBeforeMigratingAdmitted(dir, tc.current, permit)
 			if err != nil || res.StoreRecorded != tc.records {
 				t.Fatalf("the migrating open = %+v, %v; want it recorded: %v", res, err, tc.records)
 			}
 			if got := mustLoad(t, dir); (got.StoreMigratedBy == tc.current) != tc.records {
 				t.Errorf("the marker = %+v, want StoreMigratedBy %s: %v", got, tc.current, tc.records)
 			}
-			if res.Counted || mustLoad(t, dir).FailedStarts != tc.st.FailedStarts {
+			if res.Counted || mustLoad(t, dir).FailedStarts != counted {
 				t.Error("a migration counted a start")
 			}
 		})
 	}
 	t.Run("a record that cannot be written", func(t *testing.T) {
 		dir := t.TempDir()
-		mustSave(t, dir, probationMarker(1))
+		mustSave(t, dir, probationMarker(0))
 		t.Cleanup(SetMarkerBarrierForTest(func(string) error { return syscall.EIO }))
 		if _, err := DisarmBeforeMigrating(dir, "0.2.4"); err == nil {
 			t.Fatal("a migrating open whose record's barrier fails = nil, want its refusal")
@@ -415,7 +459,7 @@ func TestAMigrationRecordsThatItBeganThoughTheDataDirIsRecorded(t *testing.T) {
 	})
 	t.Run("a lock that cannot be taken", func(t *testing.T) {
 		dir := t.TempDir()
-		mustSave(t, dir, probationMarker(1))
+		mustSave(t, dir, probationMarker(0))
 		t.Cleanup(SetStateTryLockForTest(func(*os.File) error { return syscall.EIO }))
 		if _, err := DisarmBeforeMigrating(dir, "0.2.4"); err == nil || !strings.Contains(err.Error(), "began a migration") {
 			t.Fatalf("a migrating open without the lock = %v, want its refusal, saying what it could not record", err)

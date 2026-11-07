@@ -29,7 +29,7 @@ func TestAnAutomaticInstallOverAStagedVersionLeavesTheStagedOneAsTheBackup(t *te
 	}
 	next := newInstallFixture(t, "0.3.0")
 	upd := installingUpdater(t, next, "0.1.0")
-	if why := upd.probationHolds(dataDir, "0.1.0"); why != "" {
+	if why := upd.probationHolds(dataDir, live, "0.1.0"); why != "" {
 		t.Fatalf("the auto-installer waits (%q) on an install of another version than the one running", why)
 	}
 	if _, err := upd.Install(context.Background(), InstallOptions{

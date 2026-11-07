@@ -8,3 +8,7 @@ import "golang.org/x/sys/windows"
 // permission: WSAEACCES, for a port another process holds exclusively or one
 // in an excluded range.
 var bindPermissionErrno = windows.WSAEACCES
+
+// addrNotAvailErrno is what Windows answers a bind of an address no
+// interface holds: WSAEADDRNOTAVAIL.
+var addrNotAvailErrno = windows.WSAEADDRNOTAVAIL

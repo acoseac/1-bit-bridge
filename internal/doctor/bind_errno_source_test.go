@@ -13,12 +13,14 @@ import (
 
 // TestTheWindowsBindChecksNameTheWinsockErrnos pins, on every host, the
 // Windows arm of serve's bind checks (backlog B660): IsAddrInUse must ask
-// windows.WSAEADDRINUSE and IsBindPermission windows.WSAEACCES, since a
-// bare syscall.EADDRINUSE or syscall.EACCES is never what a Winsock bind
-// answers, and a start refused by a port another process holds would then
-// count as a failed start of its install. The behaviour is run on Windows'
-// CI leg (TestIsAddrInUseMatchesRealBindConflict,
-// TestIsBindPermissionMatchesWhatTheHostAnswersARefusedBind); this reads the
+// windows.WSAEADDRINUSE, IsBindPermission windows.WSAEACCES and
+// IsAddrNotAvail windows.WSAEADDRNOTAVAIL (B660's second round), since a
+// bare syscall errno is never what a Winsock bind answers, and a start
+// refused by a port another process holds, or by an address the host does
+// not have, would then count as a failed start of its install. The
+// behaviour is run on Windows' CI leg (TestIsAddrInUseMatchesRealBindConflict,
+// TestIsBindPermissionMatchesWhatTheHostAnswersARefusedBind,
+// TestIsAddrNotAvailMatchesWhatTheHostAnswersAnAbsentAddress); this reads the
 // source, which every host can.
 func TestTheWindowsBindChecksNameTheWinsockErrnos(t *testing.T) {
 	_, thisFile, _, ok := runtime.Caller(0)
@@ -34,7 +36,7 @@ func TestTheWindowsBindChecksNameTheWinsockErrnos(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := map[string]string{"IsAddrInUse": "WSAEADDRINUSE", "IsBindPermission": "WSAEACCES"}
+	want := map[string]string{"IsAddrInUse": "WSAEADDRINUSE", "IsBindPermission": "WSAEACCES", "IsAddrNotAvail": "WSAEADDRNOTAVAIL"}
 	for _, decl := range f.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
 		if !ok || fn.Body == nil || want[fn.Name.Name] == "" {

@@ -432,7 +432,7 @@ func buildDoctorDepsWith(cfgPath string, absentIsPreSetup bool, dacHost dacAcces
 				if _, err := os.Stat(dbPath); err != nil {
 					return false, err
 				}
-				st, err := manifest.OpenStore(dbPath)
+				st, err := doctorOpenStore(dbPath)
 				if err != nil {
 					return false, err
 				}
@@ -553,7 +553,7 @@ func relocatedSidecarCounts(ctx context.Context, dbPath, variantsDir, waveformDi
 	if _, err := os.Stat(dbPath); err != nil {
 		return doctor.RelocatedSidecars{}, err
 	}
-	st, err := manifest.OpenStore(dbPath)
+	st, err := doctorOpenStore(dbPath)
 	if err != nil {
 		return doctor.RelocatedSidecars{}, err
 	}
@@ -612,7 +612,7 @@ func variantsIndexCounts(ctx context.Context, dbPath, variantsDir string, maxOrp
 	if _, err := os.Stat(dbPath); err != nil {
 		return doctor.VariantsIndex{}, err
 	}
-	st, err := manifest.OpenStore(dbPath)
+	st, err := doctorOpenStore(dbPath)
 	if err != nil {
 		return doctor.VariantsIndex{}, err
 	}
@@ -687,7 +687,7 @@ func nameCollisionGroups(ctx context.Context, dbPath string, maxGroups int) (doc
 	if _, err := os.Stat(dbPath); err != nil {
 		return doctor.NameCollisions{}, err
 	}
-	st, err := manifest.OpenStore(dbPath)
+	st, err := doctorOpenStore(dbPath)
 	if err != nil {
 		return doctor.NameCollisions{}, err
 	}

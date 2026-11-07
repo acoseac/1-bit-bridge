@@ -29,8 +29,14 @@ import (
 // TestEveryStoreTheBridgeOpensIsItsDataDirsDatabase (cmd/bridge) holds every
 // production open of the store to that path. A store opened anywhere else
 // would record in a marker no rollback reads.
-func disarmBeforeMigrating(dbPath string, from int) error {
-	res, err := updater.DisarmBeforeMigrating(filepath.Dir(dbPath), version.ServerVersion)
+//
+// permit is serve's own start's permission to migrate whatever the install's
+// count (OpenStoreAdmitted); every other open carries none, and refuses,
+// running no step, while the install awaits its confirmation after a start
+// that did not end cleanly (updater.MigrationHeld, updater.ErrMigrationHeld;
+// B660's second round).
+func disarmBeforeMigrating(dbPath string, from int, permit updater.MigrationPermit) error {
+	res, err := updater.DisarmBeforeMigratingAdmitted(filepath.Dir(dbPath), version.ServerVersion, permit)
 	if err != nil {
 		return fmt.Errorf("record in the install marker that the store is migrated from version %d: %w", from, err)
 	}

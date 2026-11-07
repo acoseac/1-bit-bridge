@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -50,10 +52,13 @@ const takeBackWait = 2 * time.Second
 // backup's version (updater.ProbeVersion), and the backup's settings check
 // (updater.CheckConfig), so that a rollback does not trade one crash loop for
 // another over a setting this version saved that the backup refuses. A
-// backup that predates that check (ConfigCheckUnsupported) is put back with a
-// warning: it cannot say whether it loads the settings, and one it refuses
-// stops it at its load, before its own early rollback, if it has one, and the
-// operator then fixes the settings or puts this version back by hand.
+// backup that predates that check (ConfigCheckUnsupported: 0.2.2 and older)
+// is not put back, and the start records why (B660's second round; until
+// then it was put back with a warning): it cannot say whether it loads the
+// settings, one that does not stops at its load with this version held back
+// from the auto-installer, and its strict decoder refuses any key it does not
+// know, which a later version's settings may name. The operator puts it back
+// by hand where it loads them.
 //
 // A crash before the admission is not counted: a candidate that never runs
 // is what the settings check before the swap sees, and a start refused for
@@ -131,8 +136,10 @@ func recoverCrashedInstall(ctx context.Context, dataDir, configPath string, opts
 	switch check.Verdict {
 	case updater.ConfigValid:
 	case updater.ConfigCheckUnsupported:
-		fmt.Fprintf(stderr, "updater: the backup, %s, predates the settings check, so it cannot say whether it loads this bridge's settings: "+
-			"it is put back all the same, and if it refuses them it stops at its load, and they are what to fix\n", st.PreviousVersion)
+		refuse(fmt.Sprintf("the backup, %s, predates the settings check, so it cannot say whether it loads this bridge's settings, "+
+			"and one that does not would not start once put back", st.PreviousVersion),
+			"the backup predates the settings check")
+		return 0, false
 	case updater.ConfigRefused:
 		why := fmt.Sprintf("the backup, %s, refuses this bridge's settings, so it would not start on them: %s",
 			st.PreviousVersion, strings.Join(check.Reasons, "; "))
@@ -255,28 +262,79 @@ func sayTheAdmissionsCount(res updater.DisarmResult, stderr io.Writer) {
 	if !res.Counted || res.State.FailedStarts < 2 {
 		return
 	}
-	if p := updater.ProbationStatus(res.State, version.ServerVersion); p.ThisStart != "" {
+	if p := updater.ProbationStatus(res.State, version.ServerVersion, true); p.ThisStart != "" {
 		fmt.Fprintf(stderr, "updater: %s\n", p.ThisStart)
 	}
 }
 
 // bindRefusedByTheHost reports whether a listener's bind failed for an
-// address another process holds or a permission the host refuses (backlog
-// B660): the host's trouble, which the backup would meet too, so the start
-// takes back its count. Asked through doctor's checks, whose Windows arm reads
-// Winsock's errnos: syscall.EADDRINUSE and syscall.EACCES alone are never
-// what a bind answers there.
+// address another process holds, an address the host does not have (a static
+// address not up yet after a reboot; B660's second round, where four such
+// starts in a row had counted and the fourth put back a backup that met the
+// same refusal), or a permission the host refuses (backlog B660): the host's
+// trouble, which the backup would meet too, so the start takes back its
+// count; a permission only where bindRefusalIsTheHosts says so. Asked
+// through doctor's checks, whose Windows arm reads Winsock's errnos:
+// syscall.EADDRINUSE, syscall.EADDRNOTAVAIL and syscall.EACCES alone are
+// never what a bind answers there.
 func bindRefusedByTheHost(err error) bool {
-	return doctor.IsAddrInUse(err) || doctor.IsBindPermission(err)
+	return doctor.IsAddrInUse(err) || doctor.IsAddrNotAvail(err) || doctor.IsBindPermission(err)
+}
+
+// bindRefusalIsTheHosts reports whether a listener's bind that failed with err
+// takes back the start's count (backlog B660): a refusal bindRefusedByTheHost
+// reads as the host's, and for a permission one the backup would meet too. A
+// permission is not the host's alone where the backup carries file
+// capabilities this binary does not (the operator's setcap for a port below
+// 1024, which a swap run by a user that may not set them does not carry,
+// updater's carryCapabilities; B660's second round): the backup would bind,
+// so the refusal stays counted, and the start says why. A capability that
+// cannot be read, either side's, leaves the refusal the host's.
+func bindRefusalIsTheHosts(err error, opts serveOpts, stderr io.Writer) bool {
+	if !bindRefusedByTheHost(err) {
+		return false
+	}
+	if !doctor.IsBindPermission(err) || doctor.IsAddrInUse(err) || doctor.IsAddrNotAvail(err) {
+		return true
+	}
+	read := opts.fileCapability
+	if read == nil {
+		read = updater.FileCapabilities
+	}
+	binary := servingBinaryPath(opts, stderr)
+	backup, berr := read(binary + ".bak")
+	if berr != nil || len(backup) == 0 {
+		return true
+	}
+	own, oerr := read(binary)
+	if oerr != nil || bytes.Equal(own, backup) {
+		return true
+	}
+	fmt.Fprintf(stderr, "updater: the backup beside this binary carries file capabilities this binary does not (a setcap the "+
+		"update could not carry), and would bind where this one may not: this start counts as one that did not end cleanly\n")
+	return false
+}
+
+// tailnetNetworkFailure reports whether err, what the tailnet listener's
+// Serve returned, is a failure of the tailnet's network (backlog B660's
+// second round): an operation of the net package's that failed (its accept,
+// tsnet's netstack answering a closed or reset endpoint as a *net.OpError),
+// or the listener closed under it, which tsnet answers once its node stops
+// (net.ErrClosed). Those the backup would meet too. Anything else the
+// listener answers is not the network's, and counts.
+func tailnetNetworkFailure(err error) bool {
+	var op *net.OpError
+	return errors.As(err, &op) || errors.Is(err, net.ErrClosed)
 }
 
 // takeBackFailedStart takes back this start's count of the install's starts
 // that did not end cleanly (updater.TakeBackFailedStart), counted being what
 // its admission tried to write: serve's defer calls it after every teardown,
-// holding the data dir's lock, where the start ended in serve's stop, a
-// restart request, or a listener's bind the host refused. It gives the
-// install marker's lock takeBackWait. A take-back that does not land leaves
-// one count, said on one line.
+// holding the data dir's lock, where the start ended in a listener's bind the
+// host refused or a failure of the tailnet's network, and where a stop's own
+// take-back (stopTakeBack) did not have its answer before the teardown ended.
+// It gives the install marker's lock takeBackWait. A take-back that does not
+// land leaves one count, said on one line.
 func takeBackFailedStart(dataDir string, counted int, stderr io.Writer) {
 	ctx, cancel := context.WithTimeout(context.Background(), takeBackWait)
 	defer cancel()

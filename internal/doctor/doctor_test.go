@@ -210,6 +210,36 @@ func TestIsBindPermissionMatchesWhatTheHostAnswersARefusedBind(t *testing.T) {
 	}
 }
 
+// TestIsAddrNotAvailMatchesWhatTheHostAnswersAnAbsentAddress: a bind of an
+// address the host does not have reads as one (backlog B660's second round):
+// the errno this platform spells it with, wrapped as net.Listen wraps it,
+// everywhere, and the host's own answer to a bind of a TEST-NET-1 address
+// (RFC 5737), which no host holds, where it refuses one; a permission and an
+// unrelated error do not.
+func TestIsAddrNotAvailMatchesWhatTheHostAnswersAnAbsentAddress(t *testing.T) {
+	absent := &net.OpError{Op: "listen", Net: "tcp", Err: os.NewSyscallError("bind", addrNotAvailErrno)}
+	if !IsAddrNotAvail(absent) || IsAddrInUse(absent) || IsBindPermission(absent) {
+		t.Errorf("%#v: IsAddrNotAvail = %v, IsAddrInUse = %v, IsBindPermission = %v; want an absent address alone",
+			absent, IsAddrNotAvail(absent), IsAddrInUse(absent), IsBindPermission(absent))
+	}
+	for _, other := range []error{
+		&net.OpError{Op: "listen", Net: "tcp", Err: os.NewSyscallError("bind", bindPermissionErrno)},
+		errors.New("some unrelated failure"),
+	} {
+		if IsAddrNotAvail(other) {
+			t.Errorf("IsAddrNotAvail(%#v) = true", other)
+		}
+	}
+	ln, err := net.Listen("tcp", "192.0.2.1:0")
+	if err == nil {
+		_ = ln.Close()
+		t.Skip("this host binds 192.0.2.1, an address it does not hold, so it refuses no such bind here")
+	}
+	if !IsAddrNotAvail(err) {
+		t.Errorf("the host's refusal of a bind of 192.0.2.1, %#v: IsAddrNotAvail = false", err)
+	}
+}
+
 // B51 branch: an EADDRINUSE bind error is still classified as "port in use"
 // and routed through the owner-probe path — with no OwnPIDFile, that stays
 // the pre-existing Fail (not the new not-bindable Warn).

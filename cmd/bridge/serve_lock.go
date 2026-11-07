@@ -14,6 +14,7 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/backup"
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
+	"github.com/acoseac/1-bit-bridge/internal/updater"
 )
 
 // serveLockFileName is the file under DataDir on which a running `bridge
@@ -328,7 +329,14 @@ func holdDataDirForMutation(dataDir, cmd string, stderr io.Writer) (release func
 	}
 	release, err := lockServeDataDir(dataDir)
 	if err == nil {
-		return release, false, false
+		// Noted as a command's, so this process's own question of whether a
+		// serve holds the lock (updater.ServeHoldsDataDir) is not answered
+		// by this hold (backlog B660's second round).
+		unnote, unlock := updater.NoteDataDirLock(dataDir, false), release
+		return func() {
+			unnote()
+			unlock()
+		}, false, false
 	}
 	var held *serveDataDirHeldError
 	if errors.As(err, &held) {

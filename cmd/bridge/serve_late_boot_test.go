@@ -159,10 +159,13 @@ func TestAStartOfAnotherVersionKeepsTheRecordOfALateStartThatDied(t *testing.T) 
 			r := newRefusedInstall(t, "")
 			r.marker.AttemptedAt = time.Now().UTC().Add(-tc.age)
 			r.withAnOlderStore(t)
-			if res, err := updater.AdmitBoot(t.Context(), r.dataDir, version.ServerVersion, nil); err != nil || !res.Recorded {
+			res, err := updater.AdmitBoot(t.Context(), r.dataDir, version.ServerVersion, nil)
+			if err != nil || !res.Recorded {
 				t.Fatalf("the admission of the version installed = %+v, %v; want its record", res, err)
 			}
-			s, err := manifest.OpenStore(manifest.DefaultDBPath(r.dataDir))
+			// Serve's own open, with its admission's permission (B660's
+			// second round).
+			s, err := manifest.OpenStoreAdmitted(manifest.DefaultDBPath(r.dataDir), res.Permit)
 			if err != nil {
 				t.Fatal(err)
 			}

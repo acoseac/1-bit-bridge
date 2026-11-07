@@ -63,6 +63,15 @@ func IsBindPermission(err error) bool {
 		errors.Is(err, syscall.EACCES) || errors.Is(err, syscall.EPERM)
 }
 
+// IsAddrNotAvail reports whether a listen error is an address the host does
+// not have (backlog B660's second round): WSAEADDRNOTAVAIL, what Winsock
+// answers a bind of an address no interface holds, which, as for
+// IsAddrInUse, syscall.EADDRNOTAVAIL does not match here; that one is kept
+// beside it for an error some layer has normalised.
+func IsAddrNotAvail(err error) bool {
+	return errors.Is(err, windows.WSAEADDRNOTAVAIL) || errors.Is(err, syscall.EADDRNOTAVAIL)
+}
+
 // pidAlive reports whether a process with this PID currently exists.
 //
 // Unlike unix, os.FindProcess DOES return an error for a dead PID here —

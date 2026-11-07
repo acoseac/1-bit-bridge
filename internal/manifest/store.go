@@ -26,6 +26,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/logging"
 	"github.com/acoseac/1-bit-bridge/internal/lyrics"
 	"github.com/acoseac/1-bit-bridge/internal/metrics"
+	"github.com/acoseac/1-bit-bridge/internal/updater"
 	"github.com/google/uuid"
 	_ "modernc.org/sqlite" // register "sqlite" driver (pure-Go, no cgo)
 )
@@ -95,6 +96,11 @@ type Store struct {
 	// syncHooks publishes user-data change events after commit. Nil
 	// publishes nothing. See sync_notify.go.
 	syncHooks *SyncHooks
+
+	// migrationPermit is serve's admission's permission its own store's open
+	// carries into the ladder (OpenStoreAdmitted; backlog B660's second
+	// round); the zero value, every other open's, has none.
+	migrationPermit updater.MigrationPermit
 
 	// ftsAvailable caches whether the `tracks_fts` virtual table exists,
 	// probed once in OpenStore after migrate(). The FTS5 module is either
@@ -285,8 +291,19 @@ func symlinkAtStore(path string) (string, bool) {
 // path's directory is taken for the data dir: an open with a migration step
 // pending records it in the install marker there (disarmBeforeMigrating), so
 // the bridge opens its store at DefaultDBPath(dataDir) and nowhere else
-// (backlog B613's round 3).
+// (backlog B613's round 3). Such an open refuses, migrating nothing, while
+// the install awaits its confirmation after a start that did not end cleanly
+// (updater.MigrationHeld; B660's second round), but for serve's own start's
+// (OpenStoreAdmitted).
 func OpenStore(path string) (*Store, error) {
+	return OpenStoreAdmitted(path, updater.MigrationPermit{})
+}
+
+// OpenStoreAdmitted is OpenStore for serve's own start, carrying the
+// permission its admission gave it (updater.AdmitBoot, DisarmResult.Permit):
+// it migrates the store whatever the install's count, since the start the
+// count is for is this one.
+func OpenStoreAdmitted(path string, permit updater.MigrationPermit) (*Store, error) {
 	if err := fsutil.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("mkdir store dir: %w", err)
 	}
@@ -327,7 +344,7 @@ func OpenStore(path string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Store{db: db, now: time.Now, path: path}
+	s := &Store{db: db, now: time.Now, path: path, migrationPermit: permit}
 	if err := s.migrate(); err != nil {
 		db.Close()
 		return nil, storeOpenErr(path, "", err)
@@ -2884,7 +2901,7 @@ func (s *Store) migrate() error {
 		return fmt.Errorf("read user_version: %w", err)
 	}
 	if current < migrations[len(migrations)-1].version {
-		if err := disarmBeforeMigrating(s.path, current); err != nil {
+		if err := disarmBeforeMigrating(s.path, current, s.migrationPermit); err != nil {
 			return err
 		}
 	}

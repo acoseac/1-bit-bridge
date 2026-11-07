@@ -271,10 +271,10 @@ func TestNoBackupIsPutBackWhereThereIsNone(t *testing.T) {
 // TestABackupThatPredatesTheCheckIsNotPutBack: a backup from before the
 // settings check (0.2.2 and older) cannot say whether it loads the settings,
 // and one that does not cannot start after it is put back, with the newer
-// version held back: from 0.2.1 an `output:` block is a key its strict
-// decoder refuses. So it is not put back, and the start records that the
-// backup predates the check (B660's second round; until then it was put back
-// with a warning).
+// version held back: its strict decoder refuses a key it does not know, which
+// a later version's settings may name. So it is not put back, and the start
+// records that the backup predates the check (B660's second round; until then
+// it was put back with a warning).
 func TestABackupThatPredatesTheCheckIsNotPutBack(t *testing.T) {
 	r := newRefusedInstall(t, "")
 	refusedCrashRollback(t, r, func() { t.Setenv(runAsBridgeCheckEnv, "predates") },
