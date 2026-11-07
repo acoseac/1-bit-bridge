@@ -559,7 +559,8 @@ pin it.
 starts the player; read `ready` before `eng` and `id`, the surface's pointer
 under `p.mu`, and the identity file afresh until the engine runs. Never read
 `playerOutput`, make or cache the identity, or let the view start, probe MPD,
-dial or write anything.**
+dial or write anything but the bound DAC's DSD choice, which its PUT writes
+through the player's backend (B728 B9).**
 
 `newBridgeOutput(plan, player, cfg)` is installed with
 `api.Server.WithBridgeOutput` right after `startServePlayer` returns, long
@@ -584,6 +585,15 @@ B17 removes the wiring).
 
 B543 adds a bounded hardware read for the boot binding's DAC, with at most
 one in flight per view; it reads neither MPD nor the supervisor's state.
+
+B728's B9 makes the view the choice's route's chooser too
+(`api.BridgeDSDChooser`, `serve_player_dsd_choice.go`): `OwnsOutput` reads the
+identity as the element does, and `ChooseDSD` writes the bound DAC's choice,
+the app's, through the player's backend (`playback.Backend.ChooseDSD`) and
+answers from the epoch the backend published once the write ended, read as
+GET reads it (`bridgeDSDFacts`); a player not running yet, or a backend that
+is not the bridge's, has no bound DAC to write for (`dac_unavailable`). GET's
+path writes nothing, as before.
 
 ### What stays MPD's
 
@@ -692,9 +702,10 @@ occurrence of it has since played 5 s of its content with no fault), with
 `bitRates` the rates a migrated acknowledgement covers, absent for every
 rate. On `playback`: `evidence` and `evidenceOn`, a native or DoP
 occurrence's, and `converted`, a converted one's plan and its count of
-samples saturated. The section's `check` member is B12's, and the write route
-and its health flag (`bridgeDSDChoice`) are B9's: `/v1/health` advertises no
-flag before its route (`TestNoHealthFlagBeforeItsRoute`). Every word is in a
+samples saturated. The section's `check` member is B12's; the write route and
+its health flag (`bridgeDSDChoice`) are B9's, which advertises the flag with its
+route (`TestTheChoiceFlagArrivesWithItsRoute`), and no flag comes before its
+route (`TestNoHealthFlagBeforeItsRoute`). Every word is in a
 closed list of PROTOCOL.md's, and the source-derived token guard reads each
 from its definitions (`TestDSDOutputProtocolTokens`).
 
@@ -844,3 +855,119 @@ nothing else is normalized. `BRIDGE_WRITE_DSD_GOLDENS` alone rewrites them
 (`TestEachKindOfDACsWholeResponseIsItsGolden`), and the iOS mirror's
 `dsd_dac_outputs.json` is exported from the same cases (wire.md's exporter
 bullet).
+
+## B728 B9 — the write of the bound DAC's DSD choice (2026-11-07)
+
+The long form of `output.md`'s bullet under "The player's DSD choice: its
+write (B728 B9)"; the record is in `ops/engineering-log.md` under that date,
+and the route's wire half is `wire.md`'s bullet on `PUT /v1/outputs/{id}/dsd`,
+whose long form is `History-b470-native.md`'s "The write side (B728 B9)".
+
+**A choice's write (`playback.Backend.ChooseDSD`) checks the state inside the
+store's one write, one write at a time, and asks first, by the classification
+reconciliation acts by, what the set it would publish interrupts; that set is
+pending from before the question until the write settles, and an occurrence
+whose open ends, or that the producer would hand a sink, at a rate the pending
+set plays otherwise waits for it; a write that landed and is not known to be
+durable holds the set to what both states play alike until the next start; a
+written choice owes a probe and drops none of its answers. Don't read the
+compare-and-set, the confirmation, first use or a rejection outside
+`dsdstate.Store.Update`'s closure, decide `would_interrupt` but by
+`judgeDSDLocked` against the set the write would publish and the one the state
+gives without it, take a session's lock under the store's or the store's under
+a lock of the backend's, hold a lock an admission takes across the fsync,
+publish before the state is durable or answer before the publish, let an
+evidence write move a choice's revision, roll a landed write back, drop the
+probe's answers at a choice's write, or leave a set pending past the write's
+end, a panic's included.**
+
+The checks that read the state, the compare-and-set, the mode offered, DoP's
+confirmation and first use (a listener's rejection re-arming it), are
+`policy.Choose`, pure, and `ChooseDSD` runs them inside the store's one write,
+on the state that write is made from, so no other writer of the state (the
+migration's part for a DAC, which writes a choice; playback's evidence) comes
+between the check and the write: a negative control that read the
+compare-and-set before the store's write let a write land over a revision the
+migration had moved with what plays as it was. Writes are one at a time, end
+to end (the writes' turn, `choiceTurn`, its wait bounded by the request's
+context): a write that finds the revision moved answers `stale` only once the
+write that moved it has published, a stale answer reads the policy again
+first, and the revision it carries is the one the next write compares with, a
+revision a client read from `GET` between another write's durable write and
+its publish included (`TestAWriteBackOfARevisionReadInTheWindowIsAnsweredWithTheDurableOne`).
+A state that does not read publishes revision 0: a write-back of 0 over the
+fresh state that replaced a damaged file lands and clears its refusal, and one
+over a file refused in memory answers `state_unreadable` and writes nothing.
+
+`would_interrupt` is decided before the write, from one reading of the box:
+the set the write would publish and the one the state gives without it, and an
+occurrence interrupts where `judgeDSDLocked`, the one classification
+`reconcileDSD` acts by too, says it interrupts against the first and not
+against the second, so what a change of the box does anyway is no interruption
+of the write's. The judgement is `policy.Reconcile` and the backend's rest: a
+re-plan of a session's first occurrence, or of an occurrence of a session
+being released, is a revocation, and so is one where the engine hands nothing
+off again; a re-plan interrupts where frames of the occurrence are in a sink,
+and also for the occurrence the producer writes and one whose first bits are
+in its predecessor's join window, whose frames can reach the sink before the
+write publishes; an occurrence played out, still opening, dropped or PCM is
+not judged. The store's closure makes the two sets again from its own state
+and sends the write round again where either moved (`errChoiceRound`, at most
+eight rounds, then `stale`), so the decision holds at the commit.
+
+The set the write would publish is pending (`Backend.pending`) from before the
+classification until the write settles. The step that ends an occurrence's
+open, start's and `openSuccessor`'s, takes its session's lock through
+`lockSettled`, which waits, the lock let go, while the pending set plays the
+occurrence's rate otherwise than the set published; the producer holds back
+from a sink an opened occurrence at such a rate (`next`, `transition` before
+its open, a converted join's window in `holdLocked`), and a resume between two
+transports waits as well and opens nothing for an occurrence the write left
+being handed off again. The pending set is stored before the classification
+takes each session's lock, so an occurrence either ended its open before it,
+and was judged, or sees the pending set. The brief suggested admitting only
+what both sets play while a write is pending; waiting was chosen instead: the
+intersection would refuse, and skip, a track at a rate the write changes that
+starts in the window, where the wait, bounded by the write's fsync, admits it
+under what the write leaves. A write that fails clears the pending set and
+leaves the set as it was. One that landed and whose sync failed
+(`atomicwrite.ErrLanded`) keeps the state it left in the file
+(`landedChoice`), and every refresh holds the set to what the two states play
+alike (`policy.Intersect`, the rest refused as `dsd_choice_uncertain`) until
+the next start reads the file; the store's fence refuses every later write
+(`dsdstate.ErrLandedNotHeld`, `persist_uncertain`). Nothing is rolled back. A
+session whose release begins between the classification and the publish has
+its DSD revoked by the publish, as reconciliation revokes a releasing
+session's, which the write did not count: the session was ending already.
+Every end of a write settles what it left pending, once, before the writes'
+turn is given back, a panic's included (the API's recoverer answers it): a
+negative control that removed the deferred settle left the set pending after
+a panic, where an occurrence at a rate the write changes waits for a write
+that will never publish (the producer's until its session ends); what a
+panic after the state's write left in the state the next refresh publishes
+(`TestAWriteThatPanicsLeavesNothingPending`).
+
+Lock order: the writes' turn, then the refreshes' (`dsdMu`), then the
+backend's, then each session's, then a sink's; the store's lock is taken
+alone and its closure is pure, so no lock an admission takes spans the fsync,
+and playback's own writes of the state (`recordDSD`) run on goroutines of
+their own, under no lock. A written choice owes the silent probe (`oweProbe`,
+`ProbeDSDPending`), which serve's supervisor asks at its next policy tick and
+which runs once the device slot is free, never inside the request; it drops
+none of the probe's answers (`player.md`'s bullet on the silent probe), so a
+write that changes the choice and nothing that plays publishes no new set.
+What playback observes (a driver's acceptance, streaming observed, first use
+observed) never moves a choice's revision: a negative control that moved it
+at each such write made every write of a session's base stale.
+`TestTwoWritesOfOneRevisionLandOnce`,
+`TestARevisionMovedBeforeTheStoresWriteIsStale`,
+`TestAWriteBackOfARevisionReadInTheWindowIsAnsweredWithTheDurableOne`,
+`TestTheWriteAsksWhatReconciliationDoes`,
+`TestAnOccurrenceWhoseRateTheWriteChangesWaitsAtTheEndOfItsOpen`,
+`TestTheProducerHoldsAnOccurrenceAPendingWriteWouldReplan`,
+`TestTheChoiceWritesLockOrderHolds`,
+`TestALandedWriteIsUncertainAndPublishesWhatBothStatesPlay`,
+`TestAWrittenChoiceOwesAProbeAndKeepsTheProbesAnswers`,
+`TestOnlyAWriteThatInterruptsNeedsTheGoAhead`,
+`TestAnOccurrenceBesideAWriteIsNotRevoked` and
+`TestAWriteThatPanicsLeavesNothingPending` pin it.

@@ -383,8 +383,68 @@ directory, no Git and no HEAD). The token guard (`dsdReadSideTokens`) reads
 each new vocabulary from the definitions that emit it, never a second list:
 the evidence ladder (`policy.Rung`), the dither words and the filter name
 (`dsdconv`), the refusal words (the policy's, from the functions that decide
-a rate, and the backend's for a set it could not compute), the warning codes
+a rate and from `Intersect`, B9's, and the backend's for a set it could not
+compute), the warning codes
 and reasons, the modes and the transports (`dsdstate`), the modes an option
 is listed for (`optionModes`), the caveat codes and the transports the lint
 lets a caveat name (`dacprofile`), the gain check's words that block DoP and
 first use's states.
+
+### The write side (B728 B9)
+
+The long form of `wire.md`'s bullet on `PUT /v1/outputs/{id}/dsd`, and of the
+DSD capability bullet as B728's B9 (2026-11-07) completed it, the design's
+section 9.1 item 12; the record is in `ops/engineering-log.md` under that
+date, and the backend's half is `output.md`'s bullet on the player's write of
+a DAC's choice, whose long form is in `History-rules-output.md`, "B728 B9".
+
+**DSD capability is `bridge.dsdPlayback`'s effective set, its native and DoP
+tuples and its `converted` rates, under its boot and epoch, never passive DAC
+arrays; `bridge.dsdDAC` is the bound DAC's choice and evidence, and
+`PUT /v1/outputs/{id}/dsd` is the one way to change it; `bridge.playback` is
+the distinct current occurrence observation.** B9 adds the write the read
+side named: a client changes a DAC's choice only by the route, and what it
+reads back, the answer and `GET` afterwards, is the effective choice the
+player publishes, never the request.
+
+**`PUT /v1/outputs/{id}/dsd` is additive, behind `bridgeDSDChoice`, and
+`ProtocolVersion` stays 1. Don't mount the route on a public bridge, advertise
+the flag without the route or a player that takes a choice, parse a body past
+its bound, compare a key but with the one GET publishes, carry `dsdDAC` on a
+refusal but `stale`, or answer a written choice from anything but the
+published epoch.** The route is mounted on every bridge that is not public, so
+it answers the gates' 404s while they are shut, as `GET /v1/outputs` does; a
+public bridge never runs the player (`config.PlayerEnabled`) and never mounts
+it, and a request there gets the plain 404 of a path no route serves. Off
+Linux the player's gate never holds, so on Windows and macOS the route
+answers the gates' 404 and asks the player nothing
+(`TestTheChoiceRouteAnswers404WhereThePlayerDoesNotRun`); where no directory
+can be synced, Windows, the state's store refuses every write and writes
+nothing (`TestAChoiceWriteOnWindowsIsRefusedAndWritesNothing`). The
+flag arrives with the route and a player that takes a choice
+(`TestTheChoiceFlagArrivesWithItsRoute`); B8's `TestNoHealthFlagBeforeItsRoute`
+now lets the choice's route be registered and still wants no flag where no
+player writes. The body is read whole within its bound before it is parsed,
+so a slow or a large one costs a bounded read, and it takes the route's seven
+members alone, so a member a later bridge adds is a change of the protocol,
+never one an older bridge ignores. The key is compared with the one `GET`
+publishes (`wireKey`: the product string with the unit's serial and port taken
+out, every spelling of the port), since a stored key's hash differs from it
+for a product string that holds either, and a write of the key `GET` published
+would be refused as another DAC's
+(`TestAKeyRoundTripsWhateverTheUnitsStringsHold`, the serial and both
+spellings of the port). `stale` alone carries `dsdDAC`: its revision is the
+one to write from, read once any write in flight before it has published; the
+other refusals are about the request. The answer is read from the epoch the
+player published once the write ended, as `GET` reads it, so a mode the DAC
+does not play at a rate answers with that rate refused
+(`TestTheAnswerIsTheEffectiveChoice`: native, on a DAC offering it at DSD64
+alone, answers with DSD128 and DSD256 refused as `native_not_offered`). The
+write's own failures are three words: `persist_failed` (500), before the
+write replaced the state's file or before it could begin within the
+request's time, nothing changed; `persist_uncertain` (500), a write that
+replaced the file and whose sync failed, and every write the store's fence
+refuses after it, until the next start; `state_unreadable` (409), the state's
+file refused in memory, which nothing writes over until it is moved. Each
+word and row is PROTOCOL.md's, held there by the error table's guards; the
+iOS mirror copies PROTOCOL.md, and its DTOs and the mode UI are I4's.
