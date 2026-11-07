@@ -83988,8 +83988,9 @@ from main 14aa6290, worker b77x on legion0 (Ubuntu 26.04, linux/amd64,
 go1.27.3, `GOTOOLCHAIN=local`, `GOPROXY=off`). Commits: B776's red tests
 452310a4 and its fix c98b66fe; B777's red tests 100e9adc and its fix
 466119c5; this record and the runbook's paragraph 7aac47a9; B777's identity
-read on Windows, its test f564c322 and its fix 3013cebd; then the gates'
-results, added here. The rules go into `.claude/rules/scanner.md`,
+read on Windows, its test f564c322 and its fix 3013cebd; what stays open
+named by its backlog id alone, 1c554c9b; then the gates' results, added
+here. The rules go into `.claude/rules/scanner.md`,
 `admin-console.md` and `build-ci-tests.md`, with the long forms in
 `ops/History-rules-scanner.md`, through `rules-b77x.patch`
 (this worker cannot write `.claude/`). Both items stay small: only rows are
@@ -84298,12 +84299,14 @@ CI's macOS leg runs all four in the package suites.
 
 ### The gates
 
-At 3013cebd, through the shared build lock in one run (`.tmp/_b77x/gate.sh`),
-on go1.27.3, go.mod's: `make fmt` rewrote nothing; `make vet` clean, and so
+At 1c554c9b, the branch's code as it ships, through the shared build lock in
+one run (`.tmp/_b77x/gate.sh`), on go1.27.3, go.mod's, and so at 3013cebd
+before it, which differs from it in comments, a test's skip and this record
+alone: `make fmt` rewrote nothing; `make vet` clean, and so
 with `GOOS=windows`, `GOOS=darwin` and `GOOS=linux GOARCH=386`; `make test`
 (`-race`, `-timeout 30m`) green, 89 packages, among them cmd/bridge in
-1278 s, internal/admin in 1033 s, internal/manifest in 1606 s,
-internal/upload in 11 s and internal/trash in 2 s, and the packages that test
+1283 s, internal/admin in 1039 s, internal/manifest in 1607 s,
+internal/upload in 12 s and internal/trash in 2 s, and the packages that test
 Linux alone run here for real (internal/alsa, internal/alsapcm on this
 host's ALSA, internal/atomicwrite, internal/usbid, internal/player/hotplug
 and the rest); `make build-all`, its build-tag census included, and
