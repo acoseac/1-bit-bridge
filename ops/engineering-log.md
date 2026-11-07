@@ -80981,3 +80981,21 @@ fresh copy, equal to the builder's result, every blank context line with its
 leading space, every test it names declared, and the budgets over it
 (`admin-console.md` 72.6%, `scanner.md` 34.4%, `smart-mixes.md` 14.3%,
 `wire.md` 59.5%, the worst load 65.5%).
+
+### Gates
+
+On legion0 at bde89a96, through the shared build lock, against main as
+`pr/1423` merged it (fc07f4a1): go1.27.3's gofmt on every Go file changed
+since main, clean; `make docs-check`, ok; the qualification check,
+"qualification version OK: fc07f4a1..HEAD" (after 3,805 s waiting for the
+build slot); `make vet` native and with `GOOS=windows`, `GOOS=darwin`,
+`GOOS=linux GOARCH=386` and `GOOS=linux GOARCH=arm`, each clean; `make
+test-fast`, 87 packages ok, the Linux-only ones run here (cmd/bridge 450 s,
+internal/admin 250 s, internal/alsapcm 42 s, internal/atomicwrite 15 s); `go
+test -race` over `./internal/dupes/... ./internal/smartplaylist/...
+./internal/smartplaylistgen/... ./internal/api/... ./internal/manifest/...`,
+with the Makefile's tags and `-timeout 60m`, ok: internal/dupes from Go's test
+cache (its inputs unchanged since round 4's run), internal/smartplaylist 3 s,
+its season 1 s, internal/smartplaylistgen 37 s, internal/api 143 s,
+internal/manifest 1,515 s; `make build-all`, the six targets. Not run here:
+macOS and Windows natively, CI's runners, and the iOS app.
