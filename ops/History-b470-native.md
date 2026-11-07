@@ -295,7 +295,8 @@ with the real OutputsResponse serializer into one response fixture (a live
 bridge lists only its own player). Both build and assert their documents on ordinary test runs; only writes
 to the export directory require BRIDGE_EXPORT_IOS_FIXTURES. Export manifest then
 API with -p=1: the manifest creates fixtures-info.json and the API adds its input
-hashes and output-index cases. BRIDGE_FIXTURE_COMMIT supplies provenance only
+hashes and output-index cases (since B728's B8, `cmd/bridge`'s exporter third:
+"The read side (B728 B8)" below). BRIDGE_FIXTURE_COMMIT supplies provenance only
 when git rev-parse HEAD is unavailable. The commit is the base revision; the
 protocol hash and explicit working-tree label avoid claiming uncommitted changes
 belong to it. Fixture files are consumer artifacts, not hardware qualification.
@@ -316,3 +317,74 @@ Qualification version 12 supersedes 11 because manifest/qualification tests matc
 the path guard. TestQualificationRunbookVersion pins all five current runbook
 version references to Version; historical evidence records retain their versions.
 No playback/extraction implementation or wire contract changed.
+
+### The read side (B728 B8)
+
+The long form of `wire.md`'s bullets on DSD capability, `logicalRate` and the
+fixture exporters as B728's B8 (2026-11-07) changed them; the record is in
+`ops/engineering-log.md` under that date, and the element's read side is
+`output.md`'s bullet on it, whose long form is in `History-rules-output.md`,
+"One read of the backend's facts, the set's own view".
+
+**DSD capability is `bridge.dsdPlayback`'s effective set, its native and DoP
+tuples and its `converted` rates, under its boot and epoch, never passive DAC
+arrays; `bridge.dsdDAC` is the bound DAC's choice and evidence;
+`bridge.playback` is the distinct current occurrence observation. Don't
+publish a rate the player would not play, grant from `dsdDAC`, `dsdMode` or
+`allowDoP`, or put a serial or a port in a DAC key.** The design's section
+9.1 item 12, B8's half: its write route, `PUT /v1/outputs/{id}/dsd`, the one
+way to change the choice, is B9's, which completes the bullet. A client
+grants DSD at a rate from a stereo tuple or a converted entry of the
+published set at that rate (PROTOCOL.md's eligibility), the set being what
+selection admits by. B11 converted and published no converted rate, and
+three exclusions kept it so, which B8 removes: `bridgeDSDFacts` sent no
+`converted`, `TestDSDOutputProtocolTokens` excluded `TransportConverted` from
+`playback.transport`'s words, and PROTOCOL.md's `playback.transport` row did
+not list `converted`. `dsdDAC`, `dsdMode` and `allowDoP` describe the DAC
+(its choice, what each mode offers, the evidence and the first use), which
+the app shows and B9's write changes; they grant nothing, and a client reads
+none of them to decide what to send. A `dacKey` names a model, never a unit:
+the model key's `DACKey`, its product string with the unit's serial and port
+taken out first (`wireKey`). Two members went: `qualificationRevision`, on
+`dsdPlayback` and `playback`, and `qualifiedOn`, on `dsdPlayback`, carried an
+owner's approved record's revision and qualification date, which no
+production path reads since B7's cutover: serve had sent neither since (B7's
+`TestOutputsPublishTheEffectiveSet` held their absence on `dsdPlayback`, and
+production's observation had no record to name), and only the harness's
+admission, on no route, stated them. B8 takes them out of the DTOs,
+PROTOCOL.md's member table and the fixtures, and the member table's guard
+asserts each absent (`TestDSDOutputProtocolMembers`'s removal rows); in every
+other way the change is additive, `ProtocolVersion` 1. The iOS mirror removes
+them with its copy of PROTOCOL.md and its DTOs. `TestDSDOutputProtocolMembers`,
+`TestDSDOutputProtocolTokens`, `TestTheBridgeElementCarriesTheDACChoice`,
+`TestAConvertedEntryCarriesItsPlan`, `TestNoDACKeyOrModelCarriesASerialOrAPort`
+and `TestEachKindOfDACsWholeResponseIsItsGolden` pin it.
+
+**`bridge.playback.logicalRate` is always present: zero for PCM and for DSD
+the player converts, logical bits/s for native DSD and DoP.** A converted
+occurrence's `format`, `rateHz` and `validBits` are its PCM's, its plan's,
+and `converted.fromBitRate` carries its DSD rate, never `logicalRate`
+(`TestAConvertedEntryCarriesItsPlan`, the golden `converted_playing`).
+
+**Export the manifest, the API and then `cmd/bridge` packages sequentially
+(`-p=1`) with `BRIDGE_EXPORT_IOS_FIXTURES`; never hand-author their JSON, and
+rewrite the read side's goldens only with `BRIDGE_WRITE_DSD_GOLDENS`.** The
+manifest's exporter (`TestExportIOSManifestFixtures`) makes
+`fixtures-info.json`, keeping from an earlier run the sections the others
+write (`outputRecords`, `dacRecords`); the API's
+(`TestExportIOSOutputFixtures`) writes `dsd_outputs.json` and
+`outputRecords`; `cmd/bridge`'s (`TestExportIOSBridgeDSDFixtures`) writes
+`dsd_dac_outputs.json`, the read side's six kinds of DAC from the real
+backend through serve's view and the route, the goldens' cases, and
+`dacRecords`, each kind's facts with their hash and its golden's path. Each
+builds and asserts its documents on every run, and only publication waits on
+the variable (`TestIOSBridgeDSDFixturesWithoutProvenance`, with no export
+directory, no Git and no HEAD). The token guard (`dsdReadSideTokens`) reads
+each new vocabulary from the definitions that emit it, never a second list:
+the evidence ladder (`policy.Rung`), the dither words and the filter name
+(`dsdconv`), the refusal words (the policy's, from the functions that decide
+a rate, and the backend's for a set it could not compute), the warning codes
+and reasons, the modes and the transports (`dsdstate`), the modes an option
+is listed for (`optionModes`), the caveat codes and the transports the lint
+lets a caveat name (`dacprofile`), the gain check's words that block DoP and
+first use's states.
