@@ -148,6 +148,12 @@ type linkedRootFixture struct {
 
 func newLinkedRootFixture(t *testing.T, debounce time.Duration) *linkedRootFixture {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		// repoint renames a new link over the root's, which Windows refuses
+		// for a directory symlink (B777's round 2): a host that can make
+		// symbolic links would stop every test of this fixture there.
+		t.Skip("Windows refuses to rename a directory symlink over another, which repoint does")
+	}
 	dir := t.TempDir()
 	f := &linkedRootFixture{
 		root:  filepath.Join(dir, "music"),
