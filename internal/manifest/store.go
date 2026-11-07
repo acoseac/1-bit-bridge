@@ -10115,15 +10115,22 @@ func (s *Store) AnyVariantExists(ctx context.Context) (bool, error) {
 // read; no index serves sidecar_path, and the one caller asks only once the
 // directory has read as away. Read-only; no s.mu.
 func (s *Store) VariantRecordedUnder(ctx context.Context, dir string) (bool, error) {
+	return s.variantRecordedUnder(ctx, dir, filepath.Separator, false)
+}
+
+// variantRecordedUnder is VariantRecordedUnder on a platform whose separator
+// is sep, and whose volumes compare names without regard to case where fold
+// is set, so a test asks either shape on every platform.
+func (s *Store) variantRecordedUnder(ctx context.Context, dir string, sep rune, fold bool) (bool, error) {
 	if dir == "" {
 		return false, nil
 	}
-	base := strings.TrimRight(dir, string(filepath.Separator))
+	base := strings.TrimRight(dir, string(sep))
 	var held bool
 	row := s.db.QueryRowContext(ctx, `
 		SELECT EXISTS(SELECT 1 FROM track_variants
 		 WHERE sidecar_path COLLATE BINARY >= ? AND sidecar_path COLLATE BINARY < ?)`,
-		base+string(filepath.Separator), base+string(rune(filepath.Separator+1)))
+		base+string(sep), base+string(sep+1))
 	if err := row.Scan(&held); err != nil {
 		return false, fmt.Errorf("variants recorded under the variants directory: %w", err)
 	}
