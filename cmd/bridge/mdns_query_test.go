@@ -148,14 +148,24 @@ func mdnsQuestion(t *testing.T, name string, qtype uint16) []byte {
 	return out
 }
 
-// askA asks the A question for name, again every half second, and returns
-// the addresses the first answer naming it carries. The responder has
-// started, so a question unanswered for 10 s fails the test, and so does one
-// that cannot be sent.
-func (q *mdnsQuerier) askA(t *testing.T, name string) []net.IP {
+// assertAnswersFor fails unless the started responder answers the A question
+// for local (a `.local` host /v1/health advertises) with the selected
+// interface's address: the name the bridge advertises is the name its own
+// responder publishes. It asks again every half second and takes only an
+// answer naming local that carries that address. Another responder on the
+// host may answer for the same name with an address of its own:
+// internal/mdns's live test publishes xn--f1ai0a.local on loopback, and Linux
+// hands a group's datagrams to every socket that joined the group, on any
+// interface, so under a parallel run that responder hears this question and
+// answers it. The responder has started, so no such answer within 10 s fails
+// the test, saying what came back instead, and so does a question that
+// cannot be sent.
+func (q *mdnsQuerier) assertAnswersFor(t *testing.T, local string) {
 	t.Helper()
+	name := local + "."
 	out := mdnsQuestion(t, name, dns.TypeA)
 	buf := make([]byte, 65536)
+	var other []net.IP
 	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); {
 		if _, err := q.conn.WriteToUDP(out, mdnsGroup); err != nil {
 			t.Fatalf("the A question for %s could not be sent on %s: %v", name, q.iface.Name, err)
@@ -170,32 +180,19 @@ func (q *mdnsQuerier) askA(t *testing.T, name string) []net.IP {
 			if resp.Unpack(buf[:n]) != nil {
 				continue
 			}
-			var ips []net.IP
 			for _, rr := range append(append([]dns.RR(nil), resp.Answer...), resp.Extra...) {
 				if a, ok := rr.(*dns.A); ok && strings.EqualFold(a.Hdr.Name, name) {
-					ips = append(ips, a.A)
+					if a.A.Equal(q.ip) {
+						return
+					}
+					other = append(other, a.A)
 				}
 			}
-			if len(ips) > 0 {
-				return ips
-			}
 		}
 	}
-	t.Fatalf("the started responder left the A question for %s unanswered on %s for 10 s", name, q.iface.Name)
-	return nil
-}
-
-// assertAnswersFor fails unless the started responder answers the A question
-// for local (a `.local` host /v1/health advertises) with the selected
-// interface's address: the name the bridge advertises is the name its own
-// responder publishes.
-func (q *mdnsQuerier) assertAnswersFor(t *testing.T, local string) {
-	t.Helper()
-	ips := q.askA(t, local+".")
-	for _, ip := range ips {
-		if ip.Equal(q.ip) {
-			return
-		}
+	if len(other) == 0 {
+		t.Fatalf("the started responder left the A question for %s unanswered on %s for 10 s", name, q.iface.Name)
 	}
-	t.Errorf("the responder answers %s with %v, want %s, the address of %s", local, ips, q.ip, q.iface.Name)
+	t.Fatalf("the A question for %s was answered on %s only with %v, want %s, the address of %s",
+		name, q.iface.Name, other, q.ip, q.iface.Name)
 }
