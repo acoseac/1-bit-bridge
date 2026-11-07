@@ -118,11 +118,11 @@ type smartPlaylistsResponse struct {
 // Each family's items, the Christmas family's in its window among them, are
 // the view the request declared (formats.go): an item of a format the view
 // does not declare is left out and the positions after it close up, and a
-// family the gate leaves with no item is not sent. The Christmas family is
-// sent only while what the view leaves of it clears its floor
-// (season.MeetsFloor, the predicate the engine asks of the whole pool), so a
-// client is never sent a mix below the owner's floor because the gate
-// thinned it.
+// family the gate leaves with no item is not sent. The Christmas family's
+// items are this request's view picked from what the regenerator stored
+// (season.Pick, which the regenerator asks of the four views too), and it is
+// sent only while that pick clears its floor, so a client is never sent a
+// mix below the owner's floor, and a view whose pool clears it is sent one.
 func (s *Server) smartPlaylists(w http.ResponseWriter, r *http.Request) {
 	if !s.smartPlaylistsActive() {
 		writeError(w, http.StatusNotFound, "smart_playlists_not_supported",
@@ -202,21 +202,30 @@ func buildSmartPlaylistDTO(row manifest.StoredSmartPlaylist, nowUTCHour, localHo
 	if err := json.Unmarshal(row.ItemsJSON, &stored); err != nil {
 		return smartPlaylistDTO{}, false
 	}
-	inView := make([]manifest.SmartPlaylistItem, 0, len(stored))
-	for _, it := range stored {
-		if view.Takes(it.Path) {
-			inView = append(inView, it)
+	var inView []manifest.SmartPlaylistItem
+	if row.Kind == christmasKind {
+		// The Christmas family is picked for this request's view from what
+		// the regenerator stored, each format up to its cap, by the one
+		// function the regenerator asks of the four views (season.Pick;
+		// round 5 of backlog B489): what every client is served first, then
+		// the declared gated formats in turn, the floor's spread moved ahead
+		// of the cap, and the floor asked of the result. A view below it is
+		// not sent the family: the gate can leave a view fourteen tracks, or
+		// two artists on two albums, of a family another view clears.
+		var ok bool
+		if inView, ok = season.Pick(stored, storedItemPath, storedItemAlbum, storedItemArtist, view); !ok {
+			return smartPlaylistDTO{}, false
 		}
-	}
-	if len(stored) > 0 && len(inView) == 0 {
-		return smartPlaylistDTO{}, false
-	}
-	// The Christmas family's floor holds for what this request is sent, by
-	// the one predicate generation asks of the whole pool (round 4 of
-	// backlog B489): the gate can leave a view fourteen tracks, or two
-	// artists on two albums, of a family the whole pool built.
-	if row.Kind == christmasKind && !season.MeetsFloor(inView, storedItemAlbum, storedItemArtist) {
-		return smartPlaylistDTO{}, false
+	} else {
+		inView = make([]manifest.SmartPlaylistItem, 0, len(stored))
+		for _, it := range stored {
+			if view.Takes(it.Path) {
+				inView = append(inView, it)
+			}
+		}
+		if len(stored) > 0 && len(inView) == 0 {
+			return smartPlaylistDTO{}, false
+		}
 	}
 	dto.Items = make([]smartPlaylistItemDTO, 0, len(inView))
 	for _, it := range inView {
@@ -227,9 +236,10 @@ func buildSmartPlaylistDTO(row manifest.StoredSmartPlaylist, nowUTCHour, localHo
 	return dto, true
 }
 
-// storedItemAlbum and storedItemArtist are what season.MeetsFloor reads of a
-// cached item. A blob cached before items stored their album has none, and
-// its family is judged on its artists alone until the next build.
+// storedItemPath, storedItemAlbum and storedItemArtist are what season.Pick
+// reads of a cached item. A blob cached before items stored their album has
+// none, and its family is judged on its artists alone until the next build.
+func storedItemPath(it manifest.SmartPlaylistItem) string   { return it.Path }
 func storedItemAlbum(it manifest.SmartPlaylistItem) string  { return it.Album }
 func storedItemArtist(it manifest.SmartPlaylistItem) string { return it.Artist }
 

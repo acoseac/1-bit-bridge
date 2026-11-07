@@ -1,13 +1,16 @@
 package smartplaylistgen
 
-// The Christmas family fills from what every client can play first (round 4
-// of backlog B489). Its pool is every served track the match accepts, WavPack
-// and Monkey's Audio files among them, and its cap is 100: shuffled and
-// capped as one pool, a thousand .wv files left the fifteen FLACs a client
-// that declares neither format can play out of the family. So the tracks
-// every client is served are spread and capped first, and the two gated
-// formats take what is left of the cap in turn. Each item stores its album
-// too, for the response's floor (not on the wire).
+// The Christmas family as the regenerator stores it (backlog B489). Its pool
+// is every served track the match accepts, WavPack and Monkey's Audio files
+// among them, and its cap is 100: shuffled and capped as one pool, a
+// thousand .wv files left the fifteen FLACs a client that declares neither
+// format can play out of the family (round 4), and a cap over the tracks
+// every client is served could cut away the album or artist that qualified a
+// view's pool (round 5). So each format is stored up to the cap on its own,
+// in the season's order spread by artist, the first track of each of its
+// first three albums and of its first three artists ahead of the cut, and
+// the response picks each request's view from what is stored. Each item
+// stores its album too, for the response's floor (not on the wire).
 
 import (
 	"context"
@@ -19,6 +22,7 @@ import (
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
+	"github.com/acoseac/1-bit-bridge/internal/smartplaylist"
 )
 
 // storedXmasItem is a cached Christmas item as the blob holds it, its album
@@ -83,7 +87,12 @@ func wavpackSingles(t *testing.T, s *manifest.Store, n int) []string {
 // and returns the cached Christmas family, failing when there is none.
 func regenerateXmas(t *testing.T, s *manifest.Store) *manifest.StoredSmartPlaylist {
 	t.Helper()
-	now := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
+	return regenerateXmasAt(t, s, time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC))
+}
+
+// regenerateXmasAt is regenerateXmas at now.
+func regenerateXmasAt(t *testing.T, s *manifest.Store, now time.Time) *manifest.StoredSmartPlaylist {
+	t.Helper()
 	if _, err := Regenerate(context.Background(), s, DefaultOptions(now.UnixNano(), false)); err != nil {
 		t.Fatalf("Regenerate: %v", err)
 	}
@@ -96,8 +105,9 @@ func regenerateXmas(t *testing.T, s *manifest.Store) *manifest.StoredSmartPlayli
 }
 
 // The review's library: fifteen FLACs, five each by three choirs on three
-// albums, beside a thousand WavPack singles. The family holds the fifteen
-// FLACs first, then 85 of the WavPack files, and every item stores its album.
+// albums, beside a thousand WavPack singles. The family stores each format up
+// to the cap on its own (round 5): the fifteen FLACs first, then 100 of the
+// WavPack files, and every item stores its album.
 func TestRegenerate_ChristmasStoresWhatEveryClientCanPlayFirst(t *testing.T) {
 	s := openGenStore(t)
 	var flacs []string
@@ -106,8 +116,8 @@ func TestRegenerate_ChristmasStoresWhatEveryClientCanPlayFirst(t *testing.T) {
 	}
 	wavpackSingles(t, s, 1000)
 	items := storedXmasItems(t, regenerateXmas(t, s))
-	if len(items) != 100 {
-		t.Fatalf("the family holds %d items, want the cap, 100", len(items))
+	if len(items) != 115 {
+		t.Fatalf("the family stores %d items, want the 15 FLACs and 100 of the WavPack files", len(items))
 	}
 	var head []string
 	for _, it := range items[:15] {
@@ -139,9 +149,10 @@ func TestRegenerate_ChristmasStoresWhatEveryClientCanPlayFirst(t *testing.T) {
 }
 
 // A thousand WavPack singles cannot crowd fifteen Monkey's Audio files out:
-// with no FLAC, the two formats take the cap in turn, so all fifteen .ape
-// files are in the family and, while both last, no two neighbours share a
-// format.
+// each format is stored up to the cap on its own (round 5), so all fifteen
+// .ape files are in the family beside 100 of the WavPack files, and a view
+// that declares both takes the two in turn at the response
+// (TestAThousandWavPackFilesLeaveTheAPEViewItsFifteen).
 func TestRegenerate_ChristmasSharesTheGatedRoomBetweenTheFormatsInTurn(t *testing.T) {
 	s := openGenStore(t)
 	var apes []string
@@ -150,23 +161,150 @@ func TestRegenerate_ChristmasSharesTheGatedRoomBetweenTheFormatsInTurn(t *testin
 	}
 	wavpackSingles(t, s, 1000)
 	items := storedXmasItems(t, regenerateXmas(t, s))
-	if len(items) != 100 {
-		t.Fatalf("the family holds %d items, want the cap, 100", len(items))
-	}
 	var got []string
+	wv := 0
 	for _, it := range items {
-		if path.Ext(it.Path) == ".ape" {
+		switch path.Ext(it.Path) {
+		case ".ape":
 			got = append(got, it.Path)
+		case ".wv":
+			wv++
 		}
 	}
 	slices.Sort(got)
 	if want := slices.Sorted(slices.Values(apes)); !slices.Equal(got, want) {
-		t.Fatalf("the family holds the .ape files %v, want all 15 %v", got, want)
+		t.Fatalf("the family stores the .ape files %v, want all 15 %v", got, want)
 	}
-	for i := 1; i < 30; i++ {
-		if path.Ext(items[i].Path) == path.Ext(items[i-1].Path) {
-			t.Fatalf("items %d and %d are both %s files, want the formats in turn while both last: %v",
-				i-1, i, path.Ext(items[i].Path), items[:30])
+	if wv != 100 {
+		t.Fatalf("the family stores %d WavPack files, want the cap, 100, of the thousand", wv)
+	}
+}
+
+// oneChoirFixture is the first review's library (round 5 of backlog B489):
+// one choir's 110 tracks of one album, one of a second and one of a third,
+// all FLAC, the paths the season order is pinned by.
+func oneChoirFixture() []*manifest.Track {
+	var out []*manifest.Track
+	add := func(p, album string) {
+		out = append(out, &manifest.Track{Path: p, Size: 1, ModTime: time.Unix(1, 0),
+			Title: "Carol " + p, Artist: "The Choir", Album: album, Genre: "Christmas", Duration: fp(180)})
+	}
+	for i := 1; i <= 110; i++ {
+		add(fmt.Sprintf("Choir/A/%03d.flac", i), "Album A")
+	}
+	add("Choir/B/001.flac", "Album B")
+	add("Choir/C/001.flac", "Album C")
+	return out
+}
+
+// oneChoirSeason is a season whose order puts the second or the third album's
+// one track past the cap, which the test asks of the engine's own order
+// (requireOneChoirPrecondition): most seasons leave both inside it.
+const oneChoirSeason = 2029
+
+// requireOneChoirPrecondition fails the test unless, in the season's order
+// the family takes the FLACs in, Choir/B/001.flac or Choir/C/001.flac falls
+// past position 100: a cap over that order alone loses an album.
+func requireOneChoirPrecondition(t *testing.T, tracks []*manifest.Track) {
+	t.Helper()
+	pool := make([]smartplaylist.TrackFeature, 0, len(tracks))
+	for _, tr := range tracks {
+		pool = append(pool, smartplaylist.TrackFeature{Path: tr.Path, Artist: tr.Artist, Album: tr.Album})
+	}
+	order := smartplaylist.ChristmasOrder(pool, smartplaylist.SeedFromSeason(oneChoirSeason),
+		smartplaylist.DefaultOptions(false).ChristmasPerArtistCap)
+	at := map[string]int{}
+	for i, f := range order {
+		at[f.Path] = i
+	}
+	if at["Choir/B/001.flac"] < 100 && at["Choir/C/001.flac"] < 100 {
+		t.Fatalf("precondition: in the %d season the second album's track is at %d and the third's at %d, "+
+			"both inside the cap: pin another season", oneChoirSeason, at["Choir/B/001.flac"], at["Choir/C/001.flac"])
+	}
+}
+
+// TestRegenerate_ChristmasStoresWhatEachViewNeedsToClearTheFloor (round 5 of
+// backlog B489, two reviewers): the cap must not erase the spread that
+// qualified a view's pool. Each format is stored up to the cap with the first
+// track of each of its first three albums and of its first three artists
+// moved ahead of the cut, so the response can pick each view's floor from
+// what is stored: the one choir's second and third albums though the season
+// puts one past the cap; ten WavPack singles beside 120 FLACs of two artists;
+// the one WavPack and the one Monkey's Audio file beside 99 FLACs.
+func TestRegenerate_ChristmasStoresWhatEachViewNeedsToClearTheFloor(t *testing.T) {
+	stored := func(t *testing.T, tracks []*manifest.Track, season int) map[string]bool {
+		t.Helper()
+		s := openGenStore(t)
+		if err := s.UpsertTrackBatch(context.Background(), tracks); err != nil {
+			t.Fatal(err)
 		}
+		items := storedXmasItems(t, regenerateXmasAt(t, s, time.Date(season, 11, 20, 12, 0, 0, 0, time.UTC)))
+		out := map[string]bool{}
+		for _, it := range items {
+			out[it.Path] = true
+		}
+		return out
 	}
+	t.Run("one choir, three albums, the second or third past the cap", func(t *testing.T) {
+		tracks := oneChoirFixture()
+		requireOneChoirPrecondition(t, tracks)
+		got := stored(t, tracks, oneChoirSeason)
+		for _, p := range []string{"Choir/B/001.flac", "Choir/C/001.flac"} {
+			if !got[p] {
+				t.Errorf("the family does not store %s, the only track of its album", p)
+			}
+		}
+	})
+	t.Run("120 FLACs by two artists on two albums beside ten WavPack singles", func(t *testing.T) {
+		tracks := twoArtistFLACs(120)
+		tracks = append(tracks, wavpackSingleTracks(10)...)
+		got := stored(t, tracks, 2026)
+		for _, tr := range tracks[120:] {
+			if !got[tr.Path] {
+				t.Errorf("the family does not store %s, one of the WavPack view's other artists", tr.Path)
+			}
+		}
+	})
+	t.Run("99 FLACs by two artists, one WavPack file, one Monkey's Audio file", func(t *testing.T) {
+		tracks := twoArtistFLACs(99)
+		tracks = append(tracks, singleTrack("Gated/one.wv", "WavPack Singer", "WavPack Album"),
+			singleTrack("Gated/one.ape", "APE Singer", "APE Album"))
+		got := stored(t, tracks, 2026)
+		for _, p := range []string{"Gated/one.wv", "Gated/one.ape"} {
+			if !got[p] {
+				t.Errorf("the family does not store %s", p)
+			}
+		}
+	})
+}
+
+// twoArtistFLACs is n Christmas FLACs, the first half by one artist on one
+// album, the rest by another on another.
+func twoArtistFLACs(n int) []*manifest.Track {
+	var out []*manifest.Track
+	for i := 0; i < n; i++ {
+		artist, album := "Duo One", "Duo Album One"
+		if i >= n/2 {
+			artist, album = "Duo Two", "Duo Album Two"
+		}
+		out = append(out, &manifest.Track{Path: fmt.Sprintf("Duo/%03d.flac", i), Size: 1, ModTime: time.Unix(1, 0),
+			Title: fmt.Sprintf("Duo %d", i), Artist: artist, Album: album, Genre: "Christmas", Duration: fp(180)})
+	}
+	return out
+}
+
+// wavpackSingleTracks is n WavPack Christmas files, each a single of its own
+// by a singer of its own.
+func wavpackSingleTracks(n int) []*manifest.Track {
+	var out []*manifest.Track
+	for i := 0; i < n; i++ {
+		out = append(out, singleTrack(fmt.Sprintf("Singles/%02d.wv", i), fmt.Sprintf("Single Singer %02d", i), fmt.Sprintf("Single %02d", i)))
+	}
+	return out
+}
+
+// singleTrack is one Christmas track at p by artist on album.
+func singleTrack(p, artist, album string) *manifest.Track {
+	return &manifest.Track{Path: p, Size: 1, ModTime: time.Unix(1, 0), Title: "Song " + p,
+		Artist: artist, Album: album, Genre: "Christmas", Duration: fp(180)}
 }

@@ -1,14 +1,16 @@
 // Package season says when the Christmas smart mix is served, which season
-// an instant belongs to, and the floor a mix must clear to be served
-// (floor.go).
+// an instant belongs to, the floor a mix must clear to be served (floor.go),
+// and what each request is sent of it (pick.go).
 //
 // It is a leaf that both layers import: the API leaves the family out of a
-// response outside the window, or below the floor in the request's view,
-// the console marks it out of season there, the regenerator seeds the
-// family's order with the season's year, and the engine asks the same floor
-// of the whole pool. The API deliberately does not import the engine
-// (internal/smartplaylist; see timeOfDayKind in internal/api), so neither
-// the window nor the floor can live in the engine.
+// response outside the window, and picks each request's view of it,
+// leaving it out below the floor; the console marks it out of season
+// there; the regenerator seeds the family's order with the season's year;
+// and the engine stores each format through KeepSpread and asks the same
+// pick of the four views a client can declare. The API deliberately does not
+// import the engine (internal/smartplaylist; see timeOfDayKind in
+// internal/api), so neither the window, the floor nor the pick can live in
+// the engine.
 //
 // Every answer is taken in UTC, which each function reads from the instant
 // itself, so a caller's location cannot move an edge.

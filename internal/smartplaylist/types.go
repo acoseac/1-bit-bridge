@@ -159,8 +159,9 @@ type Inputs struct {
 	// whole library's tags (the manifest's MatchingTrackFeatures), so a
 	// track needs no play, heart or analysis to be here: an unheard album
 	// is what the family is for. Suppressed duplicates never enter. WavPack
-	// and Monkey's Audio tracks are here too, and the family takes them
-	// after the tracks every client is served (selectChristmas).
+	// and Monkey's Audio tracks are here too, each format stored on its own
+	// (storeChristmas) and picked for the views that declare it at the
+	// response (season.Pick).
 	Christmas []TrackFeature
 
 	// ChristmasSeed orders the Christmas family: SeedFromSeason of the
@@ -263,13 +264,12 @@ type Options struct {
 	MinFavorites      int
 	MaxFavoritesItems int
 
-	// Christmas thresholds. MaxChristmasItems is the cap,
-	// ChristmasPerArtistCap how many tracks one artist takes before the
-	// others have had theirs; a value <= 0 is the production one, as
-	// MinFavorites' is. The floor is no option: it is season.MeetsFloor,
-	// which the API asks of each request's view too, so generation and the
-	// response cannot hold two floors (round 4 of backlog B489).
-	MaxChristmasItems     int
+	// Christmas threshold: ChristmasPerArtistCap is how many tracks one
+	// artist takes before the others have had theirs; a value <= 0 is the
+	// production one, as MinFavorites' is. Neither the floor nor the cap is
+	// an option: they are season.MeetsFloor and season.MaxTracks, which the
+	// API's pick of each request's view asks too, so generation and the
+	// response cannot hold two of either (backlog B489, rounds 4 and 5).
 	ChristmasPerArtistCap int
 }
 
@@ -307,10 +307,9 @@ func DefaultOptions(analysisEnabled bool) Options {
 		// Favorites (explicit curation — low floor, high cap).
 		MinFavorites:      5,
 		MaxFavoritesItems: 100,
-		// Christmas: 100 at most, 8 an artist before the others are heard;
-		// its floor, 15 tracks at least (an 18-minute mix looks broken), is
-		// season.MinTracks.
-		MaxChristmasItems:     100,
+		// Christmas: 8 an artist before the others are heard; its floor, 15
+		// tracks at least (an 18-minute mix looks broken), is
+		// season.MinTracks, and its cap, 100, season.MaxTracks.
 		ChristmasPerArtistCap: 8,
 	}
 }

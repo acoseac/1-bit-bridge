@@ -574,7 +574,10 @@ func TestTheChristmasFamilyServesEachViewItsItems(t *testing.T) {
 					want = append(want, p)
 				}
 			}
-			if got, sent := served(t, v); !sent || !slices.Equal(got, want) {
+			// The items in the view, in the order the pick gives them (round
+			// 5: what every client is served first, the floor's spread ahead
+			// of the cap), so compared as a set.
+			if got, sent := served(t, v); !sent || !slices.Equal(slices.Sorted(slices.Values(got)), slices.Sorted(slices.Values(want))) {
 				t.Errorf("christmas sent %v with %q, want %q", sent, got, want)
 			}
 		})
