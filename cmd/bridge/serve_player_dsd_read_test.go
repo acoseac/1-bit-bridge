@@ -647,6 +647,55 @@ func TestNoDACKeyOrModelCarriesASerialOrAPort(t *testing.T) {
 		t.Errorf("a unit whose strings hold neither: dsdDAC %+v, want the model key's %s", f.DSDDAC, playbacktest.DACKey().DACKey())
 	}
 
+	// B728 B8 round 2: sysfs gives a unit's port path with its configuration
+	// and interface after it, a binding names the port alone, and a USB
+	// string can hold the port in that form: under a model binding, which
+	// names no port to redact by, neither form reaches the key, the model or
+	// any other string, and two units of the model at two ports publish one
+	// key.
+	t.Run("a sysfs port with its interface, the product string holding the port alone, under a model binding", func(t *testing.T) {
+		byModel := config.PlayerDevice{Transport: "usb", Binding: config.BindingUniqueModel, VendorID: "1234", ProductID: "5678"}
+		keyAt := func(at string) string {
+			m := playbacktest.DACUnit()
+			m.USB.Port = at + ":1.0"
+			m.Product = "Test DAC " + at
+			m.Manufacturer = "Test " + at
+			box := playbacktest.NewBox(5)
+			box.SetUnit(5, m)
+			key, err := dsdstate.KeyOf(m.USB, m.Product)
+			if err != nil {
+				t.Fatal(err)
+			}
+			st := playbacktest.ChoiceState(dsdstate.ModeNative)
+			st.DACs[0].Key = key
+			b := readSideBackend(t, box, playbacktest.NewMemStore(st), func(p *playback.DSDPolicy) {
+				p.Profiles = profiles
+				p.Bound = func() (playback.BoundDAC, bool) {
+					return playback.BoundDAC{Card: 5, Identity: m.USB, Enumeration: "test/2"}, true
+				}
+			})
+			f := readSideFacts(t, b, byModel)
+			for _, s := range stringsIn(t, outputsBodyOf(t, f)) {
+				if strings.Contains(s, at) {
+					t.Errorf("GET /v1/outputs carries %q, which holds the unit's port %s", s, at)
+				}
+			}
+			if f.DSDPlayback == nil || f.DSDPlayback.Model != "Test [redacted] Test DAC [redacted]" {
+				t.Errorf("the model %+v, want the unit's strings with its port redacted", f.DSDPlayback)
+			}
+			if f.DSDDAC == nil || !dacKeyForm.MatchString(f.DSDDAC.DACKey) {
+				t.Fatalf("dsdDAC %+v, want a key of the form d1-<16 hex>", f.DSDDAC)
+			}
+			if f.DSDDAC.DACKey == key.DACKey() {
+				t.Errorf("the key %s is the hash of a product string holding the port", f.DSDDAC.DACKey)
+			}
+			return f.DSDDAC.DACKey
+		}
+		if a, b := keyAt(port), keyAt("platform-xhci-hcd.0/usb3-2"); a != b {
+			t.Errorf("two units of one model, each with its port in its product string, publish the keys %s and %s: the key is a function of the port", a, b)
+		}
+	})
+
 	t.Run("through serve, the GO bar bound by its port", func(t *testing.T) {
 		needsDirectorySync(t)
 		persistentMedium(t)
