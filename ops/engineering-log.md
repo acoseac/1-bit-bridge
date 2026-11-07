@@ -81543,3 +81543,90 @@ and U2 `TestProbeVersionNamesTheVersionTheBinarySays`.
 
 NC7b reproduces the Windows failure on Linux, with a backup slower than
 production's bound, and NC7a shows the tests' bound carrying it.
+
+## 2026-11-07 — B722: dlna-upnp.md relieved: four long forms moved verbatim, each pointer keeping its binding sentences
+
+Worker b70x, legion0, the same branch as B706 (`fix/b70x-rollback-probe-rules`).
+The rules half ships as `rules-b70x.patch` (this worker cannot write
+`.claude/`): four hunks of `.claude/rules/dlna-upnp.md`, `git apply --check`
+clean, and a strict applier reproduces the moved file byte for byte. The long
+forms are committed here, in `ops/History-rules-dlna-upnp.md`, under its
+`## DLNA, UPnP and discovery`, since that History file is not under `.claude/`.
+
+### The figure
+
+`make docs-check` today: "ok — CLAUDE.md 79.6%; player.md 98.3%; worst load,
+player_openhome_test.go 65.6%". It prints only the largest rules file, so
+dlna-upnp.md's share comes from the same script's `measure`: 97,334 bytes,
+97.3% of its 100,000 (97.0% on 2026-11-04). With the patch it is 87,127 bytes,
+87.1%.
+
+### What moved, and each pointer against its long form
+
+Each candidate came from `move_entry.py --largest 25` and was dry-run first.
+Each pointer was built from exact pieces of its own entry, with whitespace runs
+collapsed as a one-line pointer has them, and checked by `move_entry.plan` with
+`--text`'s checks. The default pointer, which keeps the bold title and the
+bolded Don't/Never sentences, would have dropped sentences that state rules in
+other words. Mechanism, measurements, history, residuals and test lists go to
+the long form. The moves, highest line first:
+
+| entry | bytes | pointer | what the pointer keeps besides the title and its Don'ts |
+|---|---|---|---|
+| L1152, eligibility and selection | 2,900 | 415 | `PickAllLANEligibleInterfaces`' rule that a point-to-point interface whose only addresses are link-local is left out whenever anything else is eligible, cut at its colon (the measurement follows). The ranking (`lanPreference`) is the title's "prefers a real LAN", and goes to the long form. |
+| L854, each SSDP advertiser on its own interface | 4,420 | 591 | `IP_MULTICAST_ALL = 0` set in the Control, **before the bind**, cut at its colon (the window it closes follows); a kernel that refuses the option keeps the old listener with one Warn, never a refusal that takes DLNA down; the unconnected sender, pinned before anything is sent (`openNotifySender`). |
+| L816, a test's advertiser on loopback | 2,699 | 509 | a new test does the same; the skip decided by the pin, not only by Start's error; the production fallback stays; measuring what leaves a Linux host from another namespace, never a listener in the same one. |
+| L217, a malformed host | 2,248 | 545 | never stripped so the remainder can be classified; an ASCII space in an IPv6 zone whose head parses is kept; fullwidth digits and a literal `%25` are not this kind; "Do not drop that dial check", which is not bold and starts with no Don't word, so the default pointer would have left it out. "A control or any other space in that zone is still malformed" is not kept: the title and the zone exception's narrow wording say it. |
+
+12,267 bytes moved for 2,060 bytes of pointers. `verify_moves.py --base main`,
+on a copy of the tree with the patch applied (git pointed at this worktree's
+index): "moved: 4 blocks, 12267 bytes", "citations: 35 phrases cited in
+instruction files, 0 broken", the four pointers listed as the new blocks
+(2,060 bytes), "RESULT: PASS". `make docs-check` on that copy: ok. The worst
+load is unchanged, and the heaviest load with dlna-upnp.md is now
+`internal/baseurl/baseurl_test.go`'s, 256,004 bytes, 53.3%.
+
+### What stays, and why
+
+The larger entries hold more sentences worded as rules than a 600-byte pointer
+can keep verbatim, so they stay whole.
+
+- **L1050** (7,065 B, the listener and SSDP serving only LAN addresses). Its
+  default pointer (588 B) drops "It warns and starts; don't make it refuse" and
+  "and don't name the peer in a refusal", whose bold starts with no Don't word.
+  With them, the warning of a pin to an address not served, `dlna.allowTsnet`'s
+  "reserved and has no effect", and the exception "(only a listener that
+  cannot be armed answers as before, with one Warn)", it is 771 bytes, and its
+  suffix must keep "· doc: docker.md".
+- **L513** (5,031 B, the listener's bounds). The five bolded bounds and the
+  rules worded "stays" (the initial NOTIFY best-effort, `TotalMatches` and
+  `UpdateID`, `WriteTimeout` unset) come to 807 bytes.
+- **Read, not built.** L374, L699, L162, L459, L116, L292, L250 and L589 each
+  carry five to ten more rule sentences (a dial approval's source, a cache's
+  refusals, an approval kept beside its URL, a list that is the one list, a
+  route's shape). L338, L762 and L636 come to an estimated 650 to 700 bytes.
+  L762's "Don't give a client its own copy of the policy" is not bold, so its
+  default pointer would drop it.
+
+### player.md (not touched)
+
+From main, unverified against B728 B11's patch (#1427, which brings player.md to
+99.3%), `move_entry.py --largest 8` lists these:
+
+- L96 (5,481 B): refused by move_entry, since its bolded Don't is 658
+  characters.
+- L91 (1,481 B): its default pointer keeps what its rule sentences say. Its
+  bold "The reason is the process's, so every test that asserts the line calls
+  `forgetPlayerOffReason` first" is its last Don't in other words.
+- Each of these needs `--text` for rule sentences its default pointer drops:
+  - L138 (2,004 B): a successor at the sink's rate and depth takes that sink's
+    packing.
+  - L115 (1,743 B): a command whose context ended does not run, and Stop never
+    waits.
+  - L93 (1,607 B): a binding's interface suffix is only a preference.
+  - L117 (1,556 B): a call's deadline and what a derived context answers.
+  - L79 (1,539 B): a pause by zeros reserves two segments, a refused reopen
+    comes back typed, and the sink ends rather than skip frames.
+  - L109 (1,449 B): disabling publishes `disabled`, and nothing in a snapshot
+    means play.
+- All of this is a first read, not a dry run.
