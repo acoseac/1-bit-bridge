@@ -139,12 +139,19 @@ type Seams struct {
 	// it there while a Start takes the slot the probe let go of (B762 round
 	// 2). It may block, and must not call the backend.
 	Probed func()
-	// ProbeDeciding runs on the silent probe's goroutine in the step that
-	// takes its answers (publishProbe), once that step has compared the
-	// Starts that took the device slot and before the cache records the
-	// report: a test takes the slot there through a Start (B762 round 3). It
-	// may block, and must not call the backend.
+	// ProbeDeciding runs on the silent probe's goroutine just before the step
+	// that decides its answers (takeProbe: the Starts that took the device
+	// slot compared and the cache's Record, one step under the backend's
+	// lock), with the probe's lock held: a test takes the slot there through
+	// a Start, which voids the answers (B762 round 3). It may block, and must
+	// not call the backend.
 	ProbeDeciding func()
+	// ProbeDecided runs on the silent probe's goroutine just after that
+	// step, the backend's lock let go and the probe's still held, before what
+	// the probe accepted is written (noteProbed): a test takes the slot there
+	// through a Start, which finds the answers recorded (B762 round 3). It may
+	// block, and must not call the backend.
+	ProbeDecided func()
 }
 
 // probed is the Probed seam.
@@ -158,6 +165,13 @@ func (b *Backend) probed() {
 func (b *Backend) probeDeciding() {
 	if sm := b.cfg.Seams; sm != nil && sm.ProbeDeciding != nil {
 		sm.ProbeDeciding()
+	}
+}
+
+// probeDecided is the ProbeDecided seam.
+func (b *Backend) probeDecided() {
+	if sm := b.cfg.Seams; sm != nil && sm.ProbeDecided != nil {
+		sm.ProbeDecided()
 	}
 }
 
@@ -332,7 +346,8 @@ type Backend struct {
 	// once a probe let it go: a probe a Start took the slot from keeps nothing
 	// of what it asked (publishProbe, B762). A Start that gave its wait up, or
 	// that its context or its release ended first, took nothing and is not
-	// counted (round 2).
+	// counted (round 2). It moves under mu, which the probe's answers are
+	// decided under too (takeProbe, round 3).
 	starts atomic.Uint64
 
 	// The supervisor's refresh (RequestRefreshDSD, B762): its goroutine, and a
@@ -602,9 +617,10 @@ var errReleased = errors.New("player backend: the session's release came first: 
 // Start counts among the waiters, whom reserveProbe refuses a probe for, so
 // no second probe takes the slot between the first's end and this Start's
 // taking it (B728 B4 round 2). It counts the Start (starts) in the step that
-// takes the slot: a probe whose answers are taken after it keeps nothing of
-// what it asked (B762), and one whose answers were taken before, or beside a
-// Start that gave its wait up, keeps them (round 2).
+// takes the slot, under the lock the probe's answers are decided under
+// (takeProbe): a probe whose answers are decided after it keeps nothing of
+// what it asked (B762), and one whose answers were decided before, or beside
+// a Start that gave its wait up, keeps them (rounds 2 and 3).
 func (b *Backend) hold(ctx context.Context, s *session) error {
 	var expired chan struct{}
 	stop := func() bool { return false }

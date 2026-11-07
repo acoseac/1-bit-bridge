@@ -652,15 +652,20 @@ func TestAStartRefusedBusyBesideAProbeLeavesItsAnswers(t *testing.T) {
 }
 
 // TestAStartAndTheProbesAnswersAreOrderedByOneStep (B762 round 3): a Start
-// that waited for the probe, held once woken (StartWoke) until the probe's
-// goroutine is at the step that takes its answers, held there by the
-// ProbeDeciding seam, takes the device slot through the real hold (b.holder,
-// b.starts). A Start that has taken the slot by the time the step decides
-// voids the answers: no Record in the probe's cache, no driver_accepted
-// written, and a probe owed. Round 2 counted the Start where it takes the
-// slot, and compared that count apart from the cache's Record, so a Start
+// that waited for the probe, held once woken (StartWoke), takes the device
+// slot through the real hold (b.holder, b.starts) while the probe's goroutine
+// is held at one side of the step that decides its answers (takeProbe: the
+// Starts compared and the cache's Record, one step under the backend's lock).
+// A Start that has taken the slot by the time the step decides, the
+// goroutine held just before it (ProbeDeciding), voids the answers: no
+// Record in the probe's cache, no driver_accepted written, and a probe owed.
+// One that takes the slot after it, the goroutine held just after
+// (ProbeDecided), finds the answers recorded before it opens the DAC, and
+// they stand. Round 2 compared the Starts apart from the Record, so a Start
 // that took the slot between the two left the answers kept beside its open
-// of the DAC (both reviews of round 2).
+// of the DAC (both reviews of round 2): the red test held the goroutine
+// between them, a moment the step no longer has, and the seam moved to just
+// before it.
 func TestAStartAndTheProbesAnswersAreOrderedByOneStep(t *testing.T) {
 	t.Run("the Start takes the slot just before the step decides", func(t *testing.T) {
 		probe := newHeldProbe(dsd64Frames, dsd128Frames)
@@ -705,6 +710,146 @@ func TestAStartAndTheProbesAnswersAreOrderedByOneStep(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
+	t.Run("the Start takes the slot just after the step decides", func(t *testing.T) {
+		probe := newHeldProbe(dsd64Frames, dsd128Frames)
+		let := probe.hold(0)
+		defer let()
+		woke, decided := newHeldOnce(), newHeldOnce()
+		defer woke.let()
+		defer decided.let()
+		// What the probe's cache keeps as the Start opens the DAC.
+		var rig *probeRig
+		var atOpen []int
+		r := newProbeRig(t, probe, func(c *playback.Config) {
+			c.Seams = &playback.Seams{StartWoke: woke.reach, ProbeDecided: decided.reach}
+			open := c.OpenSink
+			c.OpenSink = func(ctx context.Context, sc alsapcm.SinkConfig) (*alsapcm.Sink, error) {
+				atOpen, _ = accepted(rig.pol, probedAt(2))
+				return open(ctx, sc)
+			}
+		})
+		rig = r
+		ctx := context.Background()
+		r.ask(t, ctx, ready)
+		within(t, probe.came, "the probe's call")
+		started := make(chan error, 1)
+		go func() { started <- r.b.Start(ctx, startOf(t, 1)) }()
+		within(t, r.timer.armed, "the Start's wait for the probe")
+		let()
+		within(t, decided.came, "the probe's goroutine past the step that decided its answers")
+		woke.let()
+		if err := within(t, started, "the Start"); err == nil {
+			t.Fatal("the Start answered nil: the test's DAC refuses every open")
+		}
+		if !slices.Equal(atOpen, []int{dsd64Frames}) {
+			t.Errorf("as the Start opened the DAC the probe's cache kept DSD_U32_BE accepted at %v, want the probe's %d recorded before", atOpen, dsd64Frames)
+		}
+		decided.let()
+		r.idle(t)
+		if opens, beside := r.sinks.counts(); opens != 1 || beside != 0 {
+			t.Errorf("the DAC was opened %d times, %d of them while the probe had its node open; want once, after it", opens, beside)
+		}
+		if rates, _ := accepted(r.pol, probedAt(2)); !slices.Equal(rates, []int{dsd64Frames}) {
+			t.Errorf("the cache keeps DSD_U32_BE accepted at %v, want the probe's %d: answers decided before the Start took the slot", rates, dsd64Frames)
+		}
+		if probeEvidence(r.store.State(), playbacktest.DSD64) == nil {
+			t.Error("the probe's driver_accepted was not written: answers decided before the Start took the slot stand")
+		}
+		if r.b.ProbeDSDPending() {
+			t.Error("a probe is owed after one whose answers were decided before the Start took the slot")
+		}
+		if err := r.b.Release(ctx, 1); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+// TestAStartAStopAndThePublishTogether (B762 round 3): a Start that waits for
+// the probe holding the device slot and the probe's publish once its call
+// returns, and in every other run the Start's session's Release (the
+// engine's stop), let go together with no seam ordering them, many times,
+// under -race; in the runs between, the stop comes once the Start has
+// answered, so the Start meets the publish alone and opens the DAC.
+// Whichever order they fall in, the DAC is opened only once the probe has
+// closed its node; the answers are kept whole or dropped whole (the probe's
+// cache, the state's driver_accepted and the probe owed agree); and answers
+// kept were decided before the Start took the slot, so a Start that opened
+// the DAC found them already recorded.
+func TestAStartAStopAndThePublishTogether(t *testing.T) {
+	const runs = 40
+	var keptRuns, openedRuns int
+	defer func() { t.Logf("of %d runs, %d kept the answers and %d opened the DAC", runs, keptRuns, openedRuns) }()
+	for i := range runs {
+		stopTogether := i%2 == 1
+		probe := newHeldProbe(dsd64Frames)
+		let := probe.hold(0)
+		defer let()
+		var rig *probeRig
+		var mu sync.Mutex
+		var atOpen []int
+		opened := false
+		r := newProbeRig(t, probe, func(c *playback.Config) {
+			open := c.OpenSink
+			c.OpenSink = func(ctx context.Context, sc alsapcm.SinkConfig) (*alsapcm.Sink, error) {
+				rates, _ := accepted(rig.pol, probedAt(2))
+				mu.Lock()
+				atOpen, opened = rates, true
+				mu.Unlock()
+				return open(ctx, sc)
+			}
+		})
+		rig = r
+		ctx := context.Background()
+		r.ask(t, ctx, ready)
+		within(t, probe.came, "the probe's call")
+		started := make(chan error, 1)
+		go func() { started <- r.b.Start(ctx, startOf(t, 1)) }()
+		within(t, r.timer.armed, "the Start's wait for the probe")
+		gate := make(chan struct{})
+		released := make(chan error, 1)
+		go func() {
+			<-gate
+			let()
+		}()
+		if stopTogether {
+			go func() {
+				<-gate
+				released <- r.b.Release(ctx, 1)
+			}()
+		}
+		close(gate)
+		if err := within(t, started, "the Start"); err == nil {
+			t.Fatal("the Start answered nil: the test's DAC refuses every open")
+		}
+		if !stopTogether {
+			released <- r.b.Release(ctx, 1)
+		}
+		if err := within(t, released, "the session's Release"); err != nil {
+			t.Fatal(err)
+		}
+		r.idle(t)
+		rates, _ := accepted(r.pol, probedAt(2))
+		kept := slices.Equal(rates, []int{dsd64Frames})
+		written := probeEvidence(r.store.State(), playbacktest.DSD64) != nil
+		owed := r.b.ProbeDSDPending()
+		if kept != written || kept == owed || (!kept && len(rates) != 0) {
+			t.Fatalf("run %d: the cache keeps %v, driver_accepted written %v, a probe owed %v: want the answers kept whole or dropped whole", i, rates, written, owed)
+		}
+		if _, beside := r.sinks.counts(); beside != 0 {
+			t.Fatalf("run %d: the DAC was opened %d times while the probe had its node open", i, beside)
+		}
+		mu.Lock()
+		if kept && opened && !slices.Equal(atOpen, []int{dsd64Frames}) {
+			t.Errorf("run %d: the Start opened the DAC with the cache keeping %v, and the answers stand: they were decided after it took the slot", i, atOpen)
+		}
+		if kept {
+			keptRuns++
+		}
+		if opened {
+			openedRuns++
+		}
+		mu.Unlock()
+	}
 }
 
 // TestOneProbeAtATimeAndAReplugIsProbedOnceTheHeldOneEnds (B762): the

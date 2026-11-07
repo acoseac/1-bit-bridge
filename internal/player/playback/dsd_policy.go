@@ -1113,6 +1113,12 @@ func (b *Backend) probeDSD(ctx context.Context, cond ProbeConditions) (pending, 
 		b.dsdLog().Info("player: the silent probe's answers are dropped, and a probe is owed", "why", why)
 		return true, false
 	}
+	// Kept means decided before any Start counted (publishProbe's step). What
+	// the probe accepted is written into the player's DSD state after that
+	// decision and outside every lock, through spawnWrite, which takes gmu: so
+	// the write may run beside a Start that took the slot after the decision,
+	// a write of the state and never a call to the device, recording answers
+	// the probe got while it alone held the device.
 	if rep.Opened {
 		b.noteProbed(key, m.BCDDevice, rep)
 	}
@@ -1126,11 +1132,21 @@ func (b *Backend) probeDSD(ctx context.Context, cond ProbeConditions) (pending, 
 // once it has taken them, and otherwise why they are dropped, nothing of them
 // kept and a probe owed: its context ended (its supervisor has gone); a
 // choice was written for the DAC since it began (gen, ForgetDSDProbe), whose
-// probe is owed; a Start took the device slot since (starts), which a session
-// holds or held; the binding no longer resolves to the unit it probed (bd: a
-// replug, a reset, the DAC gone, a reading gone stale); or the cache refused
-// the report, its model's epoch moved. Nothing reads the box here: the
-// binding's resolution is the watcher's latest, in memory (DSDPolicy.Bound).
+// probe is owed; or, decided in one step under the backend's lock (takeProbe),
+// a Start took the device slot since (starts), which a session holds or held,
+// the binding no longer resolves to the unit it probed (bd: a replug, a
+// reset, the DAC gone, a reading gone stale), or the cache refused the
+// report, its model's epoch moved. Nothing reads the box here: the binding's
+// resolution is the watcher's latest, in memory (DSDPolicy.Bound), read before
+// the backend's lock: in serve it reads the hotplug feed's latest snapshot
+// under the feed's own lock, which is held for in-memory work alone and never
+// for I/O, but which is another package's, so it stays out of that step.
+//
+// The locks, in the one order they are taken in: the probe's (ps.mu), then
+// the backend's (b.mu), then the probe cache's own. Nothing takes ps.mu, a
+// session's lock or gmu under b.mu, and nothing takes b.mu under the cache's
+// lock (the cache calls nothing back); nothing under any of them blocks: they
+// compare what is in memory, and Record writes the cache's map.
 func (b *Backend) publishProbe(ctx context.Context, gen, starts uint64, bd BoundDAC, unit alsapcm.ProbeUnit, epoch alsapcm.ProbeEpoch, rep alsapcm.ProbeReport) string {
 	p := b.cfg.DSD
 	ps := &b.probeState
@@ -1143,21 +1159,41 @@ func (b *Backend) publishProbe(ctx context.Context, gen, starts uint64, bd Bound
 		why = "its supervisor has gone"
 	case ps.gen != gen:
 		why = "a choice was written for the DAC while it ran"
-	case b.starts.Load() != starts:
-		why = "a session took the device while it ran"
-	case !ok || now.Card != bd.Card || now.Enumeration != bd.Enumeration || !binding.SameUnit(now.Identity, bd.Identity) || now.Identity.DevNum != bd.Identity.DevNum:
-		why = "the binding no longer resolves to the unit it probed"
 	default:
-		b.probeDeciding()
-		if rep.Opened && !p.Probes.Record(epoch, rep) {
-			why = "its model's answers moved on while it ran"
-		}
+		why = b.takeProbe(starts, bd, now, ok, epoch, rep)
 	}
 	if why != "" {
 		ps.pending = true
 		return why
 	}
 	ps.probed, ps.done, ps.forced, ps.pending = unit, true, false, false
+	return ""
+}
+
+// takeProbe is publishProbe's decision on the Starts, the binding and the
+// cache, in one step under the backend's lock, the lock hold counts a Start
+// under in the step that takes the device slot (b.holder, b.starts) and
+// reserveProbe reads the slot under (B762 round 3). A Start that has taken
+// the slot by then voids the answers, the cache recording nothing; one that
+// takes it after finds them recorded, and opens the DAC after the decision.
+// Round 2 compared the Starts apart from the Record, so a Start could take
+// the slot between the two and open the DAC beside answers kept. The device
+// slot itself stays the probe's alone until its node is closed (endProbe):
+// this step holds the backend's lock, never the slot. ProbeDeciding runs just
+// before the step and ProbeDecided just after it, the backend's lock let go.
+func (b *Backend) takeProbe(starts uint64, bd, now BoundDAC, bound bool, epoch alsapcm.ProbeEpoch, rep alsapcm.ProbeReport) string {
+	b.probeDeciding()
+	defer b.probeDecided()
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	switch {
+	case b.starts.Load() != starts:
+		return "a session took the device while it ran"
+	case !bound || now.Card != bd.Card || now.Enumeration != bd.Enumeration || !binding.SameUnit(now.Identity, bd.Identity) || now.Identity.DevNum != bd.Identity.DevNum:
+		return "the binding no longer resolves to the unit it probed"
+	case rep.Opened && !b.cfg.DSD.Probes.Record(epoch, rep):
+		return "its model's answers moved on while it ran"
+	}
 	return ""
 }
 
