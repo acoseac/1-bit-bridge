@@ -82556,3 +82556,21 @@ the test had just closed, a coincidence of two allocators no change here touches
 passed, and cmd/bridge whole under `-race` passed (1,033 s). The round-2 rules patch: `git apply
 --check` at 16319805, the budgets on a patched copy (player.md 99.3 %), and `verify_moves.py --base
 HEAD` with its two edits declared, all passed.
+
+## 2026-11-07 — B728 B11: the hardware run on the Pi 5 with the Mytek
+
+At PR #1427's head 9dd51ae4, on a Raspberry Pi 5 held at 1.5 GHz by its conservative governor, the Mytek Brooklyn DAC+ over USB. The box's service was stopped for 13 min 23 s and came back on its release, its files unchanged and its mixer where it was. The box has no file capabilities and no approval record, so section A ran on minted records.
+
+| Case | Result |
+|---|---|
+| A1, A2: migrated native at DSD64, 128 and 256 through `output play` and serve | pass: one open per rate, `DSD_U32_BE` at 88200, 176400 and 352800; `driverAcceptedAt`, `streamingObservedAt` and first use's `observedAt` written |
+| A3: DoP | **refused on this build:** every rate `dop_gain_unverifiable` (B773). With a diagnostic build keeping the first of the DAC's two identical configurations: DoP64 and 128 play S32_LE at 176400 and 352800; a volume change to -1 dB stops in 56-62 ms; off 0 dB at the open is `dop_gain_not_unity`, with no PCM open |
+| A4: the first-use gate | pass: `first_use_pending`, OpenHome's Play answers fault 501, `/v1/outputs` carries the reason only when no rate plays |
+| A5: the silent probe | pass: opened 1, closed 1, `HW_REFINE` 23, `INFO` 1, `PVERSION` 1; one at the start and none in a session. A replug wasn't run |
+| A6: PCM across the refresh | pass: a 34 s WAV, one stream open, no refresh noise; two sub-millisecond opens before `HW_PARAMS` |
+| B1: conversion | pass: S32_LE at 176400, 24 valid bits, one open per run |
+| B2: CPU of a core, from `/proc`, with the Pi at 1.5 GHz | DSD64 14.7 %, DSD128 15.8 %, DSD256 17.4 %. §4.6's gate names a Pi 4: see below |
+| B3: xruns | none; the lowest `minLead` 19338 of 35280 frames |
+| B4: joins and Stop | a continuous pair and DSD64 to DSD128: one open, one close; Stop 31 ms, OpenHome's Stop about 56 ms |
+
+Named from the run: B773 (the DAC's two identical configurations), B774 (the control node's opens). `output play`'s banner claimed bit-exactness for every play; fixed here. **Owed:** §4.6's Pi 4 run, and the owner's listening pass and replug.
