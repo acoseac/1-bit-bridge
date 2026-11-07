@@ -15,6 +15,7 @@ paths:
   - "scripts/player-pcm-goldens/**"
   - "scripts/player-dsd-goldens/**"
   - "scripts/player-alac-goldens/**"
+  - "internal/transcode/testdata/gen/dsdconv_golden.py"
   - "scripts/qualification/**"
 
   - "scripts/dac-profiles/**"
@@ -213,4 +214,4 @@ The bit-exact OpenHome player inside the bridge (B470), PR by PR. These sections
 
 ## Player DSD to PCM (B728 B10)
 
-- **`dsdconv` is linear phase and unity gain, 30 kHz pass / 40 kHz stop at 100 dB or more (20 kHz at 44.1 kHz), starts and ends at numeric zero, saturates and counts, and rounds 24-bit output with no added dither (TPDF at 16 bits).** **Don't add gain the stream was not measured for, limit or compress, prime a delay line with zero bits, read past `Frames`, let an architecture's rounding reach a coefficient or a sample, take a window's snapshot after a successor's bit entered, or join continuously what `Continuous` refuses.** → History-rules-player.md
+- **`dsdconv` is linear phase and unity gain, 30 kHz pass / 40 kHz stop at 100 dB or more (20 kHz at 44.1 kHz), starts and ends at numeric zero, saturates and counts, and rounds 24-bit output with no added dither (TPDF at 16 bits).** **Don't add gain the stream was not measured for, limit or compress, prime a delay line with zero bits, read past `Frames`, let an architecture's rounding reach a coefficient or a sample, take a window's snapshot after a successor's bit entered, join continuously what `Continuous` refuses, let an occurrence a `Rewind` detached touch the chain, or take the golden's digests from the package instead of from `dsdconv_golden.py`.** → History-rules-player.md
