@@ -46,6 +46,9 @@ type mdnsLifecycle struct {
 	// (serveOpts.mdnsPick), so a responder it starts answers nothing on the
 	// LAN.
 	pick func() (*net.Interface, error)
+	// start starts the responder; nil is bridgemdns.Advertise. A test forces
+	// a startup failure with it.
+	start func(bridgemdns.Config) (*bridgemdns.Advertiser, error)
 
 	mu         sync.Mutex
 	advertiser *bridgemdns.Advertiser
@@ -102,7 +105,11 @@ func (m *mdnsLifecycle) Set(enabled bool) {
 				return dlna.PickLANEligibleInterface(dlna.EligibilityOpts{})
 			}
 		}
-		a, err := bridgemdns.Advertise(bridgemdns.Config{
+		start := m.start
+		if start == nil {
+			start = bridgemdns.Advertise
+		}
+		a, err := start(bridgemdns.Config{
 			InstanceName:    name,
 			Port:            m.port,
 			ProtocolVersion: m.protocolVersion,
