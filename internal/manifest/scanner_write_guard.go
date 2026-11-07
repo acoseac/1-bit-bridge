@@ -89,9 +89,10 @@ func (e *RootAwayError) Message() string {
 // into that bare mount point (B776's round 2). A path under no configured
 // root asks nothing: the caller's own containment refuses it. A look is a
 // stat, one batch of the root's listing and, for a root holding nothing, one
-// count of its rows, and where a write lands a few lstats, so a healthy write
-// pays a few of each and a scan none: rootIn is the scans' and the watcher's,
-// and is left as it is.
+// count of its rows, and where a write lands a few lstats, the other roots
+// resolved only where a link is on its way, so a healthy write pays a few of
+// each and a scan none: rootIn is the scans' and the watcher's, and is left as
+// it is.
 func (s *Scanner) RefuseWritesUnder(ctx context.Context, paths []string) error {
 	roots := s.Roots()
 	landing := newLandingRoots(roots)
@@ -143,23 +144,41 @@ func (s *Scanner) firstWriteMakesRoot(ctx context.Context, root string, look roo
 // resolve (its path is not there) as configured, made absolute, so a write
 // that would make that root's folder is found under it. The configured roots
 // a form stands for keep their names for the look, which counts the rows by
-// them; the folders a request names are resolved once.
+// them. The forms are made only once a path's folder is found to resolve
+// elsewhere, so a write with no link on its way waits on no other root's
+// volume (a network mount that hangs); the folders a request names are
+// resolved once each.
 type landingRoots struct {
-	forms []string
-	roots map[string][]string
-	dirs  map[string]string
+	configured []string
+	resolved   bool
+	forms      []string
+	roots      map[string][]string
+	dirs       map[string]string
 }
 
-// newLandingRoots is roots in the forms where a write lands is compared with.
+// newLandingRoots is roots, to be compared with where a write lands.
 func newLandingRoots(roots []string) *landingRoots {
-	l := &landingRoots{roots: make(map[string][]string), dirs: make(map[string]string)}
-	for _, r := range roots {
+	return &landingRoots{configured: roots, dirs: make(map[string]string)}
+}
+
+// resolve makes the forms, once.
+func (l *landingRoots) resolve(s *Scanner) {
+	if l.resolved {
+		return
+	}
+	l.resolved = true
+	l.roots = make(map[string][]string)
+	resolveRoot := fsutil.ResolveLinks
+	if h := s.resolveRootHook; h != nil {
+		resolveRoot = h
+	}
+	for _, r := range l.configured {
 		abs, err := filepath.Abs(r)
 		if err != nil {
 			continue
 		}
 		form := abs
-		if resolved, err := fsutil.ResolveLinks(abs); err == nil {
+		if resolved, err := resolveRoot(abs); err == nil {
 			form = resolved
 		}
 		if _, seen := l.roots[form]; !seen {
@@ -167,7 +186,6 @@ func newLandingRoots(roots []string) *landingRoots {
 		}
 		l.roots[form] = append(l.roots[form], r)
 	}
-	return l
 }
 
 // owners is the configured roots that hold p where a write to it lands: its
@@ -175,7 +193,11 @@ func newLandingRoots(roots []string) *landingRoots {
 // (fsutil.EvalSymlinksOrClean), its own name kept, since a rename replaces a
 // link at that name rather than follow it; the deepest form that holds that,
 // compared element by element as which root a path is compares
-// (deepestRootOf), and nil for none.
+// (deepestRootOf), and nil for none. Where the folder resolves to itself,
+// nothing on the way is a link, the write lands where p's elements say, and
+// rootIn has answered: nil. A root configured through a link to a folder that
+// another root's path reaches with no link is not looked for there, as the
+// scans do not take it for nested either.
 func (l *landingRoots) owners(s *Scanner, p string) []string {
 	abs, err := filepath.Abs(p)
 	if err != nil {
@@ -187,6 +209,10 @@ func (l *landingRoots) owners(s *Scanner, p string) []string {
 		resolved = fsutil.EvalSymlinksOrClean(dir)
 		l.dirs[dir] = resolved
 	}
+	if resolved == dir {
+		return nil
+	}
+	l.resolve(s)
 	form, _, _ := s.deepestRootOf(l.forms, filepath.Join(resolved, filepath.Base(abs)))
 	return l.roots[form]
 }

@@ -239,6 +239,12 @@ type Scanner struct {
 	// neither (B651's ninth round). A test sets the two together; per
 	// instance, nil in production, read as foldingHook is.
 	lookupHook func(name string) (fs.FileInfo, error)
+	// resolveRootHook, when set, answers in fsutil.ResolveLinks' place for
+	// what a configured root resolves to where a console write lands is
+	// compared (landingRoots.resolve), so that a test counts the roots a write
+	// resolves. Per instance, nil in production; read on the writer's
+	// goroutine, so a test sets it before the write.
+	resolveRootHook func(root string) (string, error)
 
 	// postScanHook, when set, fires after every successful full Scan —
 	// see SetPostScanHook. atomic.Pointer so the boot-time SetPostScanHook
