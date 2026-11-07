@@ -162,6 +162,11 @@ func TestServeRefusesTheDataDirItServedFromWhileItsVolumeIsAway(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
+			// Each shape from a state no start has said yet: a refusal is said
+			// once per state (TestServeSaysItsRefusalOncePerState).
+			if err := os.Remove(refusalNoteFile(cfg)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+				t.Fatal(err)
+			}
 			var preflights atomic.Int32
 			code, served, stdout, stderr := runServeWith(t, serveOpts{configPath: cfg,
 				playerStatePreflight: func(string, bool) error { preflights.Add(1); return nil }})

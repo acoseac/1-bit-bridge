@@ -3442,11 +3442,19 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	// serve again until the volume is there. The record is the one beside the
 	// file the boot read was of, here and where serve writes it below, never
 	// beside the file the config's name opens by then (serveDataDirRecord).
+	// The refusal is said once per state, not at every start of the service
+	// manager's retries (serve_data_dir_refusal.go, backlog B727).
 	dataDirRecord := serveDataDirRecord(cfgBootFile)
 	if err := checkServeDataDirRecord(dataDirRecord, cfg.DataDir); err != nil {
-		fmt.Fprintf(stderr, "serve: %v\n", err)
+		var gone *dataDirGoneError
+		if errors.As(err, &gone) {
+			sayServeRefusal(gone, stderr, time.Now())
+		} else {
+			fmt.Fprintf(stderr, "serve: %v\n", err)
+		}
 		return 1
 	}
+	endServeRefusal(dataDirRecord, cfg.DataDir)
 	if err := prepareServeDataDir(cfg.DataDir); err != nil {
 		fmt.Fprintf(stderr, "serve: %v; bridge serve starts only on a data directory it can make or use: "+
 			"move what stands in its way, or set dataDir in bridge.yaml to a directory\n", err)
