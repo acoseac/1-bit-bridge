@@ -82477,3 +82477,14 @@ clean after:
   both patched files in, `check-doc-budgets.py` (and its self-test), `rules-for.py --self-test`
   and `move_entry.py --self-test` pass: `player.md` 98,773 bytes (98.8%, which the script calls
   close to its budget), the worst load 66.3%.
+- `make fmt vet test build-all` through the shared build lock on 08ee0224 (the slot taken after
+  44 minutes behind two other workers): `go fmt` changed nothing, `make vet` ok, `make test`
+  (race, TMPDIR under `.tmp/_b773`) ok in 34 minutes, 88 packages and 14 without tests, the
+  Linux-only ones run (internal/alsa, internal/alsapcm, internal/atomicwrite, internal/backup,
+  the player's, scripts/install-test); `make build-all` ok.
+- `make vet` with `GOOS=windows` and with `GOOS=darwin`: ok; `go vet` of the policy package for
+  linux/386 and linux/arm64 too, and its tests run as a linux/386 build: ok.
+- `go test -race -count=1 ./internal/player/policy/`: ok.
+- The qualification check against main (`scripts/qualification-version -base main -head HEAD`):
+  "qualification version OK: main..HEAD", no guarded path touched, so no bump.
+- `make docs-check` on the tree as it stands: ok.
