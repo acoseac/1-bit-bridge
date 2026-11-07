@@ -80556,3 +80556,165 @@ touched (race, 30 min a package), ok: internal/dupes 1 s, internal/api
 internal/smartplaylist 3 s, its season 1 s, internal/smartplaylistgen 27 s,
 cmd/bridge 1,061 s; `make build-all`, the six targets. Not run here: macOS
 and Windows natively, CI's runners, and the iOS app.
+
+## 2026-11-07 — B489 PR 1, round 4: the Christmas mix fills from what every client can play, and a gone copy is no unit of its own beside found gated ones
+
+The orchestrator's round 4 for worker b489b: two points a reviewer read on the
+merge, each confirmed red first. The orchestrator had taken round 3's merge
+and rules patch and merged main again (B728 B7's cutover) on the pushed
+branch, `pr/1423` here (9ff1f13f). `git merge` needs approval on legion0, so
+the fast-forward was made by hand, as round 3's merge was: the 77 paths that
+differ (16 added, 61 modified, none deleted) taken with `git checkout pr/1423
+--pathspec-from-file`, the branch's loose ref written with 9ff1f13f, and the
+tree checked clean and equal to `pr/1423`. Nothing was applied from `.claude`
+beyond what `pr/1423` holds. Commits: 30656fc8 (point 2), 4596fcb6 (point
+1), this record, the gates' results.
+
+### Point 2: a gone ungated copy stayed served beside found gated ones
+
+Confirmed. Round 3's `gateUnits` split a domain that held no found ungated
+copy and two gated formats into one unit per format, a gone ungated copy a
+unit of its own: in `A/x.flac` (gone), `B/x.wv` and `C/x.ape` the gone `.flac`
+won its unit of one, so until the deletion pass reaped its row (three full
+scans by default) a WavPack-only app listed a dead row beside its copy and an
+app declaring both listed three rows, one dead. With one gated format the
+domain stayed whole and `Missing` suppressed the `.flac`, so the two cases
+disagreed, and `TestTheGateAndTheMissingTermHoldBesideEachOther` pinned the
+wrong one (`want nil`). Through the real scanner
+(`TestAGoneFLACBesideAWavPackAndAnAPECopyIsServedToNoView`: real `.flac`,
+`.wv` and `.ape` files, the `.flac` removed, one full scan inside the grace)
+the red run served `[A/x.flac]` to an app declaring nothing, `[A/x.flac
+B/x.wv]` to WavPack, `[A/x.flac C/x.ape]` to APE and all three to both, as
+predicted in a file before the run (`policy.go` put back to 9ff1f13f's bytes
+for that run and restored from memory after).
+
+The fix is inside `planDomainWinners`, one DSD or PCM domain at a time: a
+unit whose every member is gone (`Row.Missing`) is suppressed whole while
+another unit of the same domain holds a found copy. The split per format for
+the found gated copies stays; a unit holding a gone copy and a found one
+suppresses the gone one as before (`Missing` first in `outranks`); a domain
+whose every copy is gone keeps each unit's winner, the resolution as it was,
+since the restated invariant allows none only beside a found unit; and the
+rule never crosses domains: a gone DSD edition beside found PCM copies is its
+domain's one member and is served
+(`TestAFoundPCMCopyNeverSuppressesAGoneDSDEdition`). `FilterOff`,
+`TierInconclusive`, `TierDifferentAudio`, `TierDifferentFormat` under
+`FilterSameFormat` and a self-nested group's non-twins never reach the
+election and are unchanged (`TestTheGoneUnitRuleChangesNoOtherTierOrMode`).
+No client loses a playable copy: the rows the rule suppresses were unplayable.
+
+This supersedes round 3's choice (a gone ungated copy a unit of its own,
+suppressing nothing) and restates `PlanSuppression`'s documented invariant,
+"every suppression unit serves exactly one member", as "exactly one, or none
+when every member is gone and a found unit in its domain serves": its doc,
+`gateUnits`' paragraph and `RestampDuplicates`' doc say so. The test that
+pinned exactly one, named for the same-format group's one served winner, is
+`TestPlanSuppression_EveryUnitServesOneWinnerOrNoneWhenItsCopiesAreGone`
+now: its same-format case as before, and every unit `gateUnits` makes over a
+pool of nine copies of one track (two FLACs, an MP3, two WavPack, two Monkey's
+Audio, a DSF and a WavPack DSD file), every group of two or more with each
+member found or gone (19,664 groups), under the five tier and mode routes that
+reach the election: each unit serves one member, or none when it is all gone
+and its domain holds a found copy. The view check the review asked for,
+`TestNoViewIsServedAGoneCopyBesideAFoundOne`, runs over the same 98,320 plans:
+no view is served a gone copy while a found copy of the track is in it in that
+domain, and each view keeps a found copy per domain where it held one. Red
+first: 18,675 plans failed the view check and 28,125 of 228,960 units the
+invariant. The view check also found a shape no subtest named, a gone `.wv`
+beside a found `.ape` with no ungated copy at all (the same defect: a client
+declaring both was served the dead `.wv`); it became a named case, red before
+the fix too, its prediction written before its own run. The three-copy case
+wants `[A/x.flac]`, with six more cases beside it.
+
+One consumer moves with it: the playlist feed maps a line naming a suppressed
+duplicate to its group's one served row, and a group with several leaves the
+line unresolved (`servedCopies`). A line naming that group's gone `.flac`
+resolved to the dead row before; with the `.wv` and the `.ape` served it is
+unresolved, as a line naming a suppressed copy in a group with a DSD and a PCM
+edition already was.
+
+| Control | Mutation | Red |
+|---|---|---|
+| p2a | the gone-unit rule off | as predicted: the six gone-unit subtests, the view check, the invariant, and the scanner test in its four views |
+| p2b | the rule asks the whole group for a found copy, not the domain | as predicted: the DSD test's three subtests under highest-quality, and the invariant; the view check stays green (a domain with no found copy is vacuous for it, which is why the DSD test exists) |
+| p2c | the rule suppresses every all-gone unit, found copy or not | as predicted: "a gone FLAC beside a gone WavPack", "every copy gone, of three formats", the DSD test and the invariant |
+
+### Point 1: the Christmas mix threw the playable tracks away before the filter
+
+Confirmed, exactly: at the 2026 season's seed, fifteen FLACs by three choirs
+beside a thousand `.wv` singles gave a cached family of 100 `.wv` files and no
+FLAC (`TestRegenerate_ChristmasStoresWhatEveryClientCanPlayFirst`, red), so a
+client declaring neither format was not sent the family at all
+(`TestTheChristmasFamilyFillsFromWhatEveryViewCanPlayFirst`, red in every
+view), and an APE client beside the same thousand was sent a family of one
+`.ape` (`TestAThousandWavPackFilesLeaveTheAPEViewItsFifteen`). One prediction
+file covered every red test; the `-run` pattern of the first HTTP run missed
+the last of them (no "Christmas" in its name), which was run alone at the same
+tree under the same prediction.
+
+The selection, `selectChristmas`, fills from what every client can play
+first: the tracks every client is served (no gated format by `formatgate.Of`)
+are ordered by the season and spread by artist up to the cap, and the WavPack
+and the Monkey's Audio tracks, each format ordered and spread the same way,
+take what is left of the cap in turn, so a thousand `.wv` files cannot crowd
+fifteen `.ape` files out
+(`TestRegenerate_ChristmasSharesTheGatedRoomBetweenTheFormatsInTurn`). The
+season's order of a subset is the order those tracks have in the whole pool
+(each path is hashed alone), so a library with no gated file is ordered as
+before, and every earlier Christmas test passes unchanged.
+
+The floor is one predicate, `season.MeetsFloor`, in the leaf the engine and
+the API both import (the API does not import the engine): the owner's rule,
+15 tracks from 3 albums or 3 artists, each named as the diversity caps name
+them, an empty one naming nothing (`TestMeetsFloorIsTheOwnersRule`).
+Generation asks it of the whole qualifying pool, since a client declaring
+every gated format may be sent all of it; `GET /v1/smart-playlists` asks it of
+each request's view of the cached family and leaves the family out of that
+response when the view falls below it (other families are still left out only
+when the gate empties them). `Options.MinChristmas` is gone, so the two cannot
+hold two floors; no test or caller set it. Each Christmas item stores its
+album for that check (`smartplaylist.Item.Album`,
+`manifest.SmartPlaylistItem.Album`, `album` in the blob, never on the wire:
+the item DTO has none). A blob cached before it has none and is judged on its
+artists until the next build
+(`TestAChristmasFamilyCachedWithoutAlbumsIsJudgedOnItsArtists`: fifteen items
+by one artist across three albums are left out without their albums and sent
+with them; fifteen by three artists are sent either way).
+
+Tests, through the real regenerator and router, for apps declaring nothing,
+WavPack, APE and both: the review's library; fourteen FLACs beside `.wv` (no
+family to nothing or APE, a family to WavPack and both); fifteen FLACs by one
+artist across three albums, and on one album by three artists, both sent to
+every view; fifteen FLACs by two artists on two albums beside `.wv` by others
+(no family to nothing or APE); a thousand `.wv` beside fifteen `.ape` (the APE
+view its fifteen, WavPack the 85 the cap leaves, nothing no family, both the
+whole cap). Two older API tests stored Christmas families of one to four items
+with no artist, which no view is sent now; their fixtures clear the floor
+(fifteen items by three choirs), and they test the window and the gate they
+were written for. `PROTOCOL.md` says what each request is sent, in its Client
+formats list, its Smart playlists paragraph and the `christmas` paragraph; the
+iOS mirror copies it.
+
+| Control | Mutation | Red |
+|---|---|---|
+| p1a | the response's floor reverted | as predicted: the fourteen-FLAC case in views nothing and APE (the brief's), the two-artist case in the same views, and the albumless blob of one artist in every view |
+| p1b | the selection back to one pool | as predicted: both regeneration tests, the review's library in every view, the thousand-`.wv` case in APE, WavPack and both |
+| p1c | the gated formats one after the other, WavPack first | as predicted: the in-turn regeneration test, and the thousand-`.wv` case in APE, WavPack and both |
+| p1d | no album stored | as predicted: the stored album, and one artist across three albums in view nothing alone (the gated views hold the singles' artists) |
+| p1e | the generation floor asked of the ungated tracks alone | as predicted: both below-the-floor cases in views WavPack and both, the thousand-`.wv` case, and the in-turn regeneration test (no family) |
+
+The other families were not changed here, as the brief scoped; which of them
+could thin a view later is in the round's report, for the orchestrator to
+file.
+
+### The rules
+
+`rules-b489b-r4.patch` is over `pr/1423`'s rules (round 3's applied):
+`enrichment.md`'s dupe bullet takes the gone-unit rule, its restated
+invariant, a "Don't" and five tests; `wire.md`'s B489 bullet sends the
+Christmas family only to a view whose items clear its floor; `smart-mixes.md`'s
+Christmas bullet takes the one floor, the selection order, the stored album
+and the albumless blob, a "Don't" and eight tests. Checked with `git apply` on
+a fresh copy, equal to the builder's result, every blank context line with its
+leading space, and the budgets over it (`enrichment.md` 35.2%,
+`smart-mixes.md` 12.8%, `wire.md` 58.8%, the worst load 65.5%).
