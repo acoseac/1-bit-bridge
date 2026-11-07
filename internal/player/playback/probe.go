@@ -77,6 +77,13 @@ type ProbeRequest struct {
 	// Candidates are what the kernel is asked (alsapcm.ProbeCandidates for
 	// the design's set).
 	Candidates []alsapcm.ProbeCandidate
+	// Check, when set, is asked of the node the probe opened, after the
+	// binding's own check after open and before any candidate: the effective
+	// policy's check that the node is the unit the probe's answers will be
+	// recorded for (ProbeDSD). A port binding's check names a place, which
+	// another unit swapped in passes; this one refuses it, and the probe asks
+	// it nothing (B728 B7, round 2).
+	Check func(alsapcm.NodeInfo) error
 }
 
 // probeHold is a probe that holds the device slot: done is closed once it
@@ -96,8 +103,8 @@ type probeHold struct{ done chan struct{} }
 // probe runs on a goroutine the backend counts, and gives the slot back only
 // once its node is closed: when ctx ends first Probe answers ctx's error, and
 // a probe the kernel holds in a call keeps the slot until the kernel lets it
-// go. Nothing calls it on a timer, and nothing in serve calls it before
-// B728's B7.
+// go. Nothing calls it on a timer: since B728's B7 the effective policy's
+// ProbeDSD calls it, when a probe is due.
 func (b *Backend) Probe(ctx context.Context, req ProbeRequest) (alsapcm.ProbeReport, error) {
 	skip := func(why ProbeSkip, err error) (alsapcm.ProbeReport, error) {
 		return notProbed(req.Candidates), &ProbeSkipped{Reason: why, Err: err}
@@ -134,7 +141,18 @@ func (b *Backend) Probe(ctx context.Context, req ProbeRequest) (alsapcm.ProbeRep
 			a.err = &ProbeSkipped{Reason: ProbeNotLocated, Err: err}
 			return
 		}
-		a.rep, a.err = b.cfg.Probe(u.Endpoint, alsapcm.ProbeConfig{Candidates: req.Candidates, Admit: u.Admit})
+		admit := u.Admit
+		if check := req.Check; check != nil {
+			admit = func(n alsapcm.NodeInfo) error {
+				if u.Admit != nil {
+					if err := u.Admit(n); err != nil {
+						return err
+					}
+				}
+				return check(n)
+			}
+		}
+		a.rep, a.err = b.cfg.Probe(u.Endpoint, alsapcm.ProbeConfig{Candidates: req.Candidates, Admit: admit})
 	})
 	select {
 	case a := <-reply:

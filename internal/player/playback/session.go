@@ -14,6 +14,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/alsapcm"
 	"github.com/acoseac/1-bit-bridge/internal/player/binding"
 	"github.com/acoseac/1-bit-bridge/internal/player/engine"
+	"github.com/acoseac/1-bit-bridge/internal/player/policy"
 )
 
 // session is one playback session: the occurrences the engine handed it, in
@@ -76,6 +77,10 @@ type session struct {
 	wcancel context.CancelFunc // which a cut that needs the producer ends
 	reqs    []*cutRequest
 
+	// dsdMonitor is the session's monitor of the effective DSD policy
+	// started (startDSDMonitor), once it holds a DSD occurrence.
+	dsdMonitor bool
+
 	paused bool
 	// pausedFlag is paused as a reader that may not take the session's lock
 	// sees it: the probe's gate (Backend.reserveProbe), under the backend's
@@ -128,8 +133,35 @@ type output struct {
 	drained   bool  // a drain played everything submitted
 	closed    bool  // its Close was called
 
+	// admitted is the effective DSD set its occurrence was admitted under
+	// (B728 B7), whose identity the check after open requires of every node
+	// the sink opens; nil for PCM and the harness's admission.
+	admitted *dsdSet
+
 	umu  sync.Mutex
 	unit Unit // where it is open: Locate moves it at a reopen
+	// opened is the identity the sink last opened (checkDSDNode), kept across
+	// a pause's release: what reconciliation compares with the new set's.
+	opened *policy.Identity
+}
+
+// openedIdentity is the identity the sink last opened, nil before it opened
+// one.
+func (o *output) openedIdentity() *policy.Identity {
+	o.umu.Lock()
+	defer o.umu.Unlock()
+	if o.opened == nil {
+		return nil
+	}
+	id := *o.opened
+	return &id
+}
+
+// setOpenedIdentity records the identity the sink opened.
+func (o *output) setOpenedIdentity(id policy.Identity) {
+	o.umu.Lock()
+	o.opened = &id
+	o.umu.Unlock()
 }
 
 // admit is the sink's check after open: the check of the unit the sink is
@@ -151,7 +183,9 @@ func (o *output) admit(n alsapcm.NodeInfo) error {
 	return nil
 }
 
-// check is the unit's check of the node opened, and the DSD permission's.
+// check is the unit's check of the node opened, and the DSD admission's: the
+// effective policy's for a native or DoP occurrence (checkDSDNode), the
+// harness's approval's for one the approval admitted.
 func (o *output) check(n alsapcm.NodeInfo) error {
 	o.umu.Lock()
 	u := o.unit
@@ -160,6 +194,9 @@ func (o *output) check(n alsapcm.NodeInfo) error {
 		if e := u.Admit(n); e != nil {
 			return e
 		}
+	}
+	if o.admitted != nil {
+		return o.checkDSDNode(n)
 	}
 	if o.permission != nil {
 		if err := o.s.b.checkPermission(o.s.ctx, o.permission, &n, edgeKey(o.transport, o.plan)); err != nil {
@@ -414,6 +451,7 @@ func (s *session) start(ctx context.Context, req engine.StartRequest) (err error
 	}
 	first := s.newOccLocked(req.First)
 	first.from = req.From
+	first.leading = true
 	s.mu.Unlock()
 	defer close(s.startDone)
 	if err := s.b.hold(ctx, s); err != nil {
@@ -443,12 +481,27 @@ func (s *session) start(ctx context.Context, req engine.StartRequest) (err error
 		s.monitorPermission()
 	}
 	s.b.open(cctx, first)
+	// Admitted under a set a refresh may have replaced while its first chunk
+	// was read, which no reconciliation reaches while the open is under way:
+	// admitted again under the set published now, in the step that ends the
+	// open, as a successor is (openSuccessor), so the activation's check finds
+	// it under that set and a reconciliation after it judges it (B728 B7, round
+	// 2). Once its done is closed, reconciliation repoints its set and a
+	// revocation refuses it, under this lock, so what decides the DSD monitor
+	// and the open's refusal is read in that step too (round 3).
+	s.mu.Lock()
+	s.readmitDSDLocked(first)
 	close(first.done)
-	if first.refused != nil {
-		s.mu.Lock()
+	monitor, refused := first.admitted != nil, first.refused
+	if refused != nil {
 		first.dropped = true
-		s.mu.Unlock()
-		u := *first.refused
+	}
+	s.mu.Unlock()
+	if monitor {
+		s.startDSDMonitor()
+	}
+	if refused != nil {
+		u := *refused
 		return &u
 	}
 	if first.fromErr != nil {
@@ -774,6 +827,9 @@ func (s *session) callableLocked() error {
 func (s *session) openSuccessor(ctx context.Context, o *occ) {
 	defer o.cancel()
 	s.b.open(ctx, o)
+	if o.admitted != nil {
+		s.startDSDMonitor()
+	}
 	s.mu.Lock()
 	defer func() {
 		close(o.done)
@@ -781,6 +837,10 @@ func (s *session) openSuccessor(ctx context.Context, o *occ) {
 		wake(s.wakeP)
 		wake(s.wakeR)
 	}()
+	// Admitted under a set a refresh has replaced since, which no
+	// reconciliation reaches while the open is under way: admitted again under
+	// the set published now, before its Prepared is reported (B728 B7).
+	s.readmitDSDLocked(o)
 	if s.nativeRevoked && o.plan != nil {
 		o.refused = &engine.Unplayable{Reason: "native_revoked", Detail: "DSD permission revoked"}
 	}

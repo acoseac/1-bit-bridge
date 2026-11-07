@@ -34,6 +34,11 @@ package dupes
 // AudioMD5 is always "" until the FLAC STREAMINFO capture lands (PR D of
 // the duplicates program); it is declared now so adding the evidence
 // requires no plumbing change.
+//
+// Missing says the last scan did not find the row's file (the store's
+// missing_count, for the deletion pass's grace). It is no part of the key or
+// the tier, which mirror the client: it only keeps such a row from winning
+// the bridge's own election (outranks).
 type Row struct {
 	Path          string
 	Title         string
@@ -52,6 +57,7 @@ type Row struct {
 	IsDSD         bool
 	Codec         string
 	AudioMD5      string
+	Missing       bool
 }
 
 // Key is the mirror of the iOS ContentKey (CrossSourceTrackDedup.swift:264

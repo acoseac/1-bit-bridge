@@ -1468,6 +1468,12 @@ type Server struct {
 	// server serves anything, as the two fields above are.
 	testPlayerWriteWaits func()
 
+	// testNow, when set, is the clock the smart mixes' views read to mark
+	// the Christmas family out of season (now). Tests only: nil in
+	// production, where it is time.Now, and set before the server serves
+	// anything, as the fields above are.
+	testNow func() time.Time
+
 	// pageTmpls is one template bundle per page. Each bundle pre-parses
 	// layout.html + the page's own .html file so rendering is a single
 	// ExecuteTemplate("layout", …) call.

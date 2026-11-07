@@ -134,6 +134,16 @@ func (v *playEvents) Details(s engine.SessionID, o engine.OccurrenceID, d engine
 	}
 }
 
+// Replan prints the backend's request to hand an occurrence off again, its
+// DSD plan having left the effective set before any of it reached the
+// kernel, and passes it on to the engine (engine.ReplanEvents, B728 B7).
+func (v *playEvents) Replan(s engine.SessionID, o engine.OccurrenceID, why string) {
+	v.r.out.line("session %d: %s is handed off again: %s", s, v.r.name(o), why)
+	if re, ok := v.next.(engine.ReplanEvents); ok {
+		re.Replan(s, o, why)
+	}
+}
+
 func (v *playEvents) Position(s engine.SessionID, p engine.Position) {
 	v.mu.Lock()
 	print := p.Measured.Sub(v.printed) >= time.Second || p.Measured.Before(v.printed)

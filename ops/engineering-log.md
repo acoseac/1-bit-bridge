@@ -73188,7 +73188,7 @@ found missing (a nil comparison; the exported harness checks' version);
 this record.
 
 **Red first** (71cd5e19, on 0aedd16a):
-- `TestProductionStillPlaysAVersion35RecordAfterTheBump`: "production
+- `…ProductionStillPlaysAVersion35RecordAfterTheBump`: "production
   refused an owner's record of version 35 after the bump to 36: stale
   approval version", the design's red. In the playback overlay,
   `TestNativeIntegrationApprovedConstructor/legacy_version`: "unplayable:
@@ -73222,7 +73222,7 @@ would turn red: fd0afd6b and 9dfbaffa added them before the runs.
 
 | # | Mutation | Red |
 |---|---|---|
-| C1 | production back on `ReadApproval` | `TestProductionStillPlaysAVersion35RecordAfterTheBump` ("stale approval version"); the overlay's `TestNativeIntegrationApprovedConstructor/legacy_version` |
+| C1 | production back on `ReadApproval` | `…ProductionStillPlaysAVersion35RecordAfterTheBump` ("stale approval version"); the overlay's `TestNativeIntegrationApprovedConstructor/legacy_version` |
 | C2 | the transition backend on the legacy reader | `TestTheHarnessBackendsReadOnlyTheCurrentVersion/transition` (read, `<nil>`) |
 | C3 | the candidate backend on the legacy reader | `TestTheHarnessBackendsReadOnlyTheCurrentVersion/candidate` ("owner approval incomplete") |
 | C4 | the floor `v > LegacyVersion` | the rows at 35 of the three kinds and each report below 35; the production test |
@@ -73410,7 +73410,7 @@ versions from 35 to the build's own").
 - `TestTheLegacyReaderRefusesAVersionNewerThanThisBuild`: the record, a
   matrix, lifecycle or transition report, an experiment and a contact at
   37, each in a record otherwise valid at 36, all six read ("got <nil>").
-- `TestProductionRefusesARecordNewerThanThisBuild/version_37`: "1 tuples
+- `…ProductionRefusesARecordNewerThanThisBuild/version_37`: "1 tuples
   published"; its rows at 35 and 36 green. In the playback overlay,
   `TestNativeIntegrationApprovedConstructor/newer_version`: "start=<nil>".
 - `TestAChangeOutsideTheDSDBytePathNeedsNoBump`, which no longer lists
@@ -73423,8 +73423,8 @@ red:
 | # | Mutation | Red |
 |---|---|---|
 | G1 to G9 | each of the nine new paths dropped from `GuardedPaths`, one at a time | its own row of `TestQualificationDependencyGate` ("dependency changed without version bump"), and no other |
-| U1 | the upper bound removed (`LegacyVersion <= v`) | all six rows of `TestTheLegacyReaderRefusesAVersionNewerThanThisBuild`; the rows at 37 of `TestTheLegacyReaderRefusesBelowVersion35`; `TestProductionRefusesARecordNewerThanThisBuild/version_37`; the overlay's `newer_version` |
-| U2 | the bound one short (`v < Version`) | the rows at 36 of `TestTheLegacyReaderRefusesBelowVersion35`; `TestProductionRefusesARecordNewerThanThisBuild/version_36` |
+| U1 | the upper bound removed (`LegacyVersion <= v`) | all six rows of `TestTheLegacyReaderRefusesAVersionNewerThanThisBuild`; the rows at 37 of `TestTheLegacyReaderRefusesBelowVersion35`; `…ProductionRefusesARecordNewerThanThisBuild/version_37`; the overlay's `newer_version` |
+| U2 | the bound one short (`v < Version`) | the rows at 36 of `TestTheLegacyReaderRefusesBelowVersion35`; `…ProductionRefusesARecordNewerThanThisBuild/version_36` |
 
 **Checks**, on legion0 through the shared build lock with TMPDIR under
 `.tmp/_b728-b1`, at b1fff479:
@@ -74127,7 +74127,7 @@ guarded, their tests included: `qualificationVersion` 36 to 37, the runbook's
 five mentions (`TestQualificationRunbookVersion`) and its "Version 37 covers
 backlog B735" entry. `LegacyVersion` stays 35, so production still reads an
 owner's approval of versions 35 to 37 through `ReadLegacyApproval`
-(`TestProductionStillPlaysAVersion35RecordAfterTheBump` and the legacy tests,
+(`…ProductionStillPlaysAVersion35RecordAfterTheBump` and the legacy tests,
 which take the versions as parameters, pass at 37): no owner re-qualifies,
 while the harness's own evidence of version 36 (contacts, matrix and
 lifecycle reports, candidates) is stale to the harness, as at every bump.
@@ -78436,6 +78436,1640 @@ packages ok and none failed, in 1,744 s; `make build-all`; `go test -race
 "qualification version OK: main..HEAD"; `make docs-check`, ok, and again
 with the round-1 rules patch applied. The tree is clean after.
 
+## 2026-11-06 — B750: a Christmas smart mix, from the library's tags, served 1 December to 5 January
+
+Backlog B750, the owner's request of 2026-11-06: a holiday mix named
+"Christmas" in bridge 0.2.4 (about 28 November), since an additive family
+needs no app release; off for anyone without real Christmas music in the
+library, and gone by itself after the season. Worker b750 on legion0
+(Ubuntu 26.04, linux/amd64, AMD Ryzen 9 6900HX, 16 threads, go1.27.3,
+`GOTOOLCHAIN=local`, `GOPROXY=off`), branch `feat/b750-christmas-mix` from
+main 4880f8a4, the orchestrator's brief, whose design was settled with
+Codex and Argon. Commits: red first 8dc0cd96, the family 664ae4f7, the
+window at response time f23685f5, PROTOCOL.md and the runbook 1c64a552,
+then this record. The rule's bullet in `.claude/rules/smart-mixes.md`, and
+two globs that load it with the handler and the console's mix views, go in
+through a checked patch (`rules-b750.patch`; this worker cannot write
+`.claude/`).
+
+### Why a new input, and red first
+
+Every family's candidates follow a play, a heart or an analysis row
+(`assembleInputs`), so a filter over them could never see the unheard,
+unanalyzed Christmas album the mix is for. The family reads the whole
+served library instead. Red first:
+`TestRegenerate_AnUnheardUnanalyzedChristmasAlbumMakesTheFamily` (a
+16-track album by four performers, `GENRE=Christmas`, no plays, hearts or
+analysis, analysis off) at 8dc0cd96 against main's code: "no christmas
+family ... cached kinds map[]".
+
+### The read and what it costs
+
+`Store.MatchingTrackFeatures` runs `trackFeatureSelect` (so
+`dupe_suppressed = 0`) and hands each row to a match the regenerator gives
+it, keeping only what matches; a read path, no `s.mu`. No text filter and
+no `LIMIT` before the match: SQLite's `LIKE` folds ASCII case alone and
+knows nothing of NFKD. The negative control below put a 30-term `LIKE`
+prefilter in front of the match, and the fixture read lost 35 positive
+fixtures: `Noël Acadien`, `Cantique de Noël`, the genre `Noël`, every
+`Kolędy` and `Crăciun` form, `X-Mas`, `Rock X-Mas`, fullwidth
+`ＣＨＲＩＳＴＭＡＳ` and the fi ligature among them.
+
+Measured with a throwaway probe (a test package in the worker's scratch
+directory, not committed; `…MeasureTheChristmasRead`): 100,000 tracks on
+disk (the worktree's ext4), 1% Christmas by genre, album or title in
+turn, half with a ReplayGain tag, 2,000 analysis rows; medians of 5.
+
+| What | Median |
+|---|---|
+| the read, every row kept | 969 ms |
+| the read, nothing kept | 949 ms |
+| the read with `MatchChristmas` (what `assembleInputs` runs), 1,000 kept | 1.108 s |
+| `MatchChristmas` alone over the 100,000 rows in memory | 142 ms (1.4 µs a row) |
+| a whole `Regenerate`, analysis on, no history (3 families) | 1.717 s |
+| a narrower read (path and the four text tags, no join), the match, then the 1,000 matches hydrated by path | 645 ms |
+
+The same store and a probe that compiles against both trees
+(`…RegenerateOn100k`): a whole `Regenerate` takes 570 ms at main (2
+families) and 1.626 s on the branch (3), so the read adds about 1.06 s a
+regeneration at 100,000 tracks. Acceptable for a pass that runs daily, 120
+s after a start and on the console's Regenerate (synchronous there), so no
+index was proposed and the one-pass read was kept. If a Pi-class host with
+a large library finds it slow, the narrower read is the next step: it
+loses no recall (every served row still reaches the match) and cut the
+read by 42% here, at the cost of a second, chunked query by path and a
+match that sees four fields of a partly filled row. Not an index: an index
+on a computed verdict would need a migration and an `ExtractorVersion`
+bump whenever a list changes.
+
+### The match
+
+`MatchChristmas(title, artist, album, genre)`, pure, in
+`internal/smartplaylist/christmas.go`, over `christmasFold`: NFKD with
+its marks dropped, lower case, `ł ø ß đ æ œ` spelled out, every rune that
+is not a letter or a digit a space. Rules in order, the first that holds:
+a genre segment equal to a Christmas genre (or two words pairing `holiday`
+with one), a Christmas word of the album (`noel` not beside an artist
+holding `noel` as a word or after a credit), a carol of `christmasTitles`
+equal to the title less its trailing version suffixes, one of the title
+words. Comparison only: never stored, hashed, keyed or put in SQL, and not
+unified with the other folds (`matchfold.go` lists them).
+
+What this adds to the brief's lists, each a spelling or a form of what the
+lists name:
+
+- A colon splits a genre too: the iTunes Store writes its genres "Christmas:
+  Pop", "Christmas: Classical", "Holiday: Other". Without it every such
+  file missed by genre.
+- `x-mas` with a hyphen or a dash, inside a word too (`Rock-X-Mas`), is
+  the word `xmas`; with a space it stays two words, so Spanish `X Más`
+  (ten, "more") is not Christmas.
+- An album or title word beginning `christmas` counts as one beginning
+  `weihnacht` does: `Christmastime`, `Christmastide`.
+- `navidades`, the plural, beside `navidad` (album and title).
+- `featuring` beside `feat`, `ft` and `with` before `noel`.
+- The carol table's second spellings: Silent Night, Holy Night; Stille
+  Nacht, heilige Nacht; Oh Holy Night; Oh Come All Ye Faithful; Oh Little
+  Town of Bethlehem; God Rest You Merry Gentlemen; The First Nowell; We
+  Three Kings of Orient Are; Deck the Hall; Santa Claus Is Comin' to Town;
+  Vom Himmel hoch, da komm ich her.
+- A version suffix after ` - ` (or an en or em dash) is one holding a
+  version word (live, vivo, remaster, remastered, instrumental, acoustic,
+  unplugged, version, edit, mix, remix, mono, stereo, demo, take, single,
+  bonus, reprise, karaoke, cappella, acapella, recorded, recording,
+  session, sessions, from, and the credits) or only digits (a year), so
+  `Silent Night - Deadly Night` is not Silent Night. Up to 8 suffixes come
+  off, so a title of a thousand parentheticals costs a few scans.
+
+What the lists, run against the fixtures, do not catch or catch
+unexpectedly, reported and left as the design has it: a genre segment that
+names Christmas inside it (`Christmas Pop`, written with a space) is no
+segment of the list, while the iTunes form `Christmas: Pop` is; `Jingle
+Bell Rock`, `Santa Baby`, `Winter Wonderland` and the other songs outside
+the table and without a title word need their album or genre; `Crăciun
+fericit` as a title misses (`craciun` is a surname, so never a title
+word); a singer named Noël's self-titled album `Noël` misses (the artist
+holds `noel`); a title's parenthetical counts for the title words, so
+`Hallelujah (Christmas Version)` qualifies; and the album words leave out
+`villancicos`, Dutch `kerst`, Finnish `joulu` and Danish and Norwegian
+`julesange` and `julesanger`, which only a genre then catches. A Cyrillic
+`С` in `Сhristmas` is no C, which is right.
+
+`FuzzMatchChristmas` (no panic, the same answer twice, an idempotent fold,
+the artist deciding nothing unless the album holds `noel`, ASCII case
+deciding nothing) found within two seconds that `norm.NFKD` leaves a
+letter composed after an invalid UTF-8 byte: `"\xf3Ǚ"` folded to `ǚ` once
+and to `u` the next time. Invalid UTF-8 is a space before NFKD now (a row
+read back from `tags_json` is valid already), the input is in the corpus,
+and three more minutes of fuzzing (23.6 million inputs) found nothing.
+
+### The floor, the cap, the order, the place
+
+The floor is two rules: 15 emitted tracks (`MinChristmas`), and 3
+distinct albums or 3 distinct artists among the qualifying tracks, each
+named as the diversity caps name them, an empty one naming nothing; the
+artist is the track's, so a Various Artists compilation counts by its
+performers, and a single album by a single artist, a 40-track box set
+included, gets no family. The spread is judged on the qualifying tracks
+rather than the emitted ones, so the cap can never undo the floor. The cap
+(`MaxChristmasItems` 100, `ChristmasPerArtistCap` 8) walks the seeded
+order taking 8 an artist, an empty artist one artist, then fills from the
+tracks it passed over in the same order, so the family holds
+min(qualifying, 100). A zero option is the production value.
+
+The order is the season's: `Inputs.ChristmasSeed` is `SeedFromSeason`
+of `season.Year`, which the regenerator computes, and
+`shuffleFeaturesBySeason` is `shuffleFeaturesByWeek`'s sibling.
+`season.Year` names a season by the December that opens it: 1 December
+through 5 January is that December's year, and from 6 January the coming
+December's. The brief said "in January it's the previous year"; every
+instant the family is served gets the same year either way, and with the
+rollover on 6 January a cache built before the window already holds the
+order the window opens with.
+
+Christmas sits after Favorites and before Drive Mix. On a bridge with no
+history (the demo's) nothing comes before it, so it is the first shelf and
+the app's hero in December; where Daily Mix exists, Daily Mix leads. It is
+no `DiscoveryShelf`, so `recordDiscoveryServed` writes none of its items
+to `smart_playlist_served`, and it calls no `discoveryExclusions`, which
+does not include its items: what the discovery shelves showed takes
+nothing from it, and they may hold its tracks. Its rows go into
+`Inputs.Features` as Favorites' do, so `signEnergy` finds a tag's
+ReplayGain and rate with analysis off; a track with no loudness is the
+midpoint.
+
+### The window, at response time
+
+`season.InWindow`, in a leaf package both layers import (the API imports
+no engine and mirrors the kind as `christmasKind`), is 1 December 00:00:00
+through 5 January 23:59:59.999999999, read in UTC from the instant itself.
+`GET /v1/smart-playlists` reads one injected clock (`Server.clockNow`,
+`time.Now` in production) for the window and the time-of-day hour, and
+skips the family before anything is counted, so the top-level
+`refreshedAt` moves with what is served alone. The family is generated all
+year: a cache built on 20 November serves it at 1 December 00:00 UTC, and
+one built on 5 January does not on the 6th
+(`TestAChristmasCacheIsServedByTheClockAtTheRequest`). A demo bridge
+behaves the same.
+
+Every reader of the cache, out of season:
+
+- `GET /v1/smart-playlists`: leaves it out.
+- `assembleInputs`' hysteresis map (`PreviouslyVisible`): holds `christmas`
+  all year; only On Repeat reads the map, so nothing changes.
+- The console's grid and detail (`GET /api/player/mixes`,
+  `/api/player/mixes/{slug}`) and the inspection list (`GET
+  /api/smart-playlists`): listed and marked `outOfSeason` by
+  `smartMixOutOfSeason`, over the same predicate and a per-server test
+  clock; the grid draws a chip and the detail a line saying when the app
+  shows it. Playback in the console, Regenerate, a cover and Save as
+  playlist all work out of season; a saved copy is an ordinary playlist,
+  which devices then see through the playlist backup all year.
+- No CLI, export or DLNA reader. `bridge backup` copies the database and
+  the cache with it; a restored cache is filtered the same way at response
+  time.
+
+What the bridge can promise, as PROTOCOL.md now says: it stops serving the
+family on 6 January; a client offline or inside its own refresh throttle
+keeps what it last fetched until its next successful refresh, and nothing
+in the family's shape tells a client when it ends. The iOS side was not
+read here: the app's clone is not on legion0 (no `~/dev`, no match for
+`SmartPlaylistService.swift` or `HomeView.swift` under the home
+directory) and `gh` and curl are refused. The brief's reading of the
+client (no key on `refreshedAt`, a 30-minute persisted throttle, an
+unknown kind rendered generically, the per-mix hide by slug) is therefore
+unconfirmed by this worker.
+
+### The demo
+
+The regenerator runs on a demo bridge as on any other (`smartPlaylists`
+defaults on, and nothing in serve gates it on demo mode), and
+`assembleInputs` short-circuits nothing before the new read with analysis
+or history off. On the demo's shape, three Christmas albums tagged
+`GENRE=Christmas` beside keyed classical albums, no history and no hearts,
+the family holds every track of the three, 8 by each performer ahead of
+the rest, and is the first shelf (`TestRegenerate_TheDemosShape`, 30
+tracks by two performers). The runbook's demo section says what the tags
+need.
+
+### Negative controls
+
+Each mutation was applied exact-once, each listed test run alone on a
+fresh test binary, the bytes restored from memory; every listed test
+passed unmutated first, and every one went red under its mutation; the
+tree was clean after.
+
+| Mutation | Red |
+|---|---|
+| the artist read as an album | `TestMatchChristmasExclusions` (Noel Gallagher), `TestEveryChristmasFixtureThroughTheStoresRead` |
+| bare `holiday` a Christmas genre | `TestMatchChristmasExclusions`, `TestNoChristmasMusicIsNoChristmasFamilyInSeason` |
+| the window read at generation only (no handler filter; no family built outside the window) | `TestAChristmasCacheIsServedByTheClockAtTheRequest`, `TestTheChristmasFamilyIsServedOnlyInItsWindow` |
+| a suppressed duplicate counted (the read without `dupe_suppressed = 0`) | `TestRegenerate_ChristmasCountsNoSuppressedDuplicate`, `TestEveryChristmasFixtureThroughTheStoresRead`, `TestMatchingTrackFeaturesHandsEveryServedRowToItsMatch` |
+| a `LIKE` filter before the match | `TestEveryChristmasFixtureThroughTheStoresRead` (35 positives lost, Noël among them), `TestMatchingTrackFeaturesHandsEveryServedRowToItsMatch` |
+| the calendar year as the seed | `TestRegenerate_OneSeasonIsOneOrder` (31 December to 1 January reshuffled) |
+| `season.Year` the calendar's | `TestTheSeasonsYearIsTheDecemberThatOpensIt`, `TestOneWindowIsOneSeason`, `TestRegenerate_OneSeasonIsOneOrder` |
+| the rows kept out of `Features` | `TestRegenerate_ChristmasEnergyFromItsTagsWithAnalysisOff`, `TestRegenerate_ChristmasEnergyFromAnalysis` |
+| christmas a discovery shelf | `TestChristmasStaysOutOfTheDiscoveryExclusion`, `TestRegenerate_ChristmasRecordsNothingServed` |
+| christmas fed into the discovery exclusion | `TestChristmasStaysOutOfTheDiscoveryExclusion` (Wind Down relaxed) |
+| invalid UTF-8 handed to NFKD | `FuzzMatchChristmas` (its corpus) |
+| no spread floor | `TestBuildChristmasTheFloorBySpread`, `TestBuildChristmasTheFourLibraries` |
+| no per-artist cap | `TestBuildChristmasTheCapSpreadsAndFills`, `TestRegenerate_TheDemosShape` |
+| the time-of-day hour from the wall clock | `TestTheChristmasFamilyIsServedOnlyInItsWindow` |
+| the console never marking it | `TestTheConsoleMarksTheChristmasMixOutOfSeason` |
+| `x-mas` not joined | `TestChristmasFold`, `TestMatchChristmasByEachRule` |
+| `noel` after a credit counted | `TestMatchChristmasExclusions` |
+| `noel` beside an artist named Noel counted | `TestMatchChristmasExclusions` |
+| a carol matched by its beginning | `TestMatchChristmasExclusions` (Silent Nightmare) |
+| `jul` counted in an album | `TestMatchChristmasExclusions` |
+| Christmas placed ahead of Favorites | `TestGenerateChristmasSitsAfterFavoritesAndBeforeDriveMix` |
+
+### Tests
+
+`internal/smartplaylist/season`: `TestTheWindowIsTheFirstOfDecemberToTheFifthOfJanuaryInUTC`,
+`TestTheSeasonsYearIsTheDecemberThatOpensIt`, `TestOneWindowIsOneSeason`.
+`internal/smartplaylist`: `TestChristmasFold`, `TestMatchChristmasByEachRule`,
+`TestEveryCarolInTheTableQualifiesByItsTitle`, `TestMatchChristmasExclusions`,
+`TestMatchChristmasAcrossScriptsAndForms`, `TestMatchChristmasOnAVeryLongTitle`,
+`FuzzMatchChristmas`, `TestEveryChristmasFixtureThroughTheStoresRead` (every
+fixture of the match's tables through the store's real read too),
+`TestBuildChristmasTheFloorByEmittedTracks`, `TestBuildChristmasTheFloorBySpread`,
+`TestBuildChristmasTheFourLibraries`, `TestBuildChristmasTheCapSpreadsAndFills`,
+`TestBuildChristmasOrdersBySeasonSeed`, `TestBuildChristmasNeedsNoHistoryHeartsOrAnalysis`,
+`TestGenerateChristmasSitsAfterFavoritesAndBeforeDriveMix`,
+`TestChristmasStaysOutOfTheDiscoveryExclusion`, `TestChristmasEnergyAndRateFromItsOwnTags`.
+`internal/manifest`: `TestMatchingTrackFeaturesHandsEveryServedRowToItsMatch`.
+`internal/smartplaylistgen`: `TestRegenerate_AnUnheardUnanalyzedChristmasAlbumMakesTheFamily`,
+`TestRegenerate_ChristmasCountsNoSuppressedDuplicate`,
+`TestRegenerate_ChristmasEnergyFromItsTagsWithAnalysisOff`,
+`TestRegenerate_ChristmasEnergyFromAnalysis`, `TestRegenerate_NoChristmasMusicNoFamily`,
+`TestRegenerate_OneSeasonIsOneOrder`, `TestRegenerate_ChristmasRecordsNothingServed`,
+`TestRegenerate_TheDemosShape`.
+`internal/api`: `TestTheChristmasFamilyIsServedOnlyInItsWindow`,
+`TestAChristmasCacheIsServedByTheClockAtTheRequest`,
+`TestAnUnheardLibraryServesTheChristmasFamilyInSeasonAlone` (no history,
+analysis off, through `Regenerate` and the real handler),
+`TestNoChristmasMusicIsNoChristmasFamilyInSeason`, `TestTheAPIsChristmasKindIsTheEngines`.
+`internal/admin`: `TestTheConsoleMarksTheChristmasMixOutOfSeason`,
+`TestTheMixViewsWordTheOutOfSeasonMark`, and
+`TestThePlayersMixGridDrawsTheOutOfSeasonChip` (under node, which legion0
+lacks, so it ran on no host here).
+
+### Trade-offs
+
+- Recall against precision: genres match a whole segment and titles a
+  closed carol table and four words, so some Christmas music misses (the
+  surprises above) and no artist's name, travel playlist or Hanukkah
+  album gets in.
+- The whole served library is read every regeneration (about 1.1 s at
+  100,000 tracks) rather than a stored verdict, which would need a
+  migration and an `ExtractorVersion` bump whenever a list changes.
+- The window is filtered at response time, so the cache holds the family
+  all year and a stale cache cannot prolong or delay it; the console shows
+  it marked rather than hidden.
+- The season's year turns on 6 January rather than with the calendar.
+- The spread floor is judged on the qualifying tracks, not the emitted
+  ones, so the cap cannot undo it.
+
+## 2026-11-06 — B750 round 2: natale and craciun guarded, bare Silent Night out, the rightmost dash
+
+A review of the entry above raised three points about the match and decided
+the word gaps it reported. Each point was confirmed red first: aac1d9d7's
+fixtures failed against 1289bc17's matcher; the fix is 5c680a7f. The rule's
+wording goes in through `rules-b750-r2.patch`, made against
+`smart-mixes.md` as `rules-b750.patch` left it on the pushed branch.
+
+1. **`natale` and `craciun` in an album had no guard.** `christmasAlbum`
+   returned on any `christmasAlbumWords` hit before `noel`'s credit and
+   artist checks, so Terre, Ville, Terra, Città, Paese and Casa natale
+   (French and Italian for a birthplace), `Sessions feat. Natale`, `Johnny
+   Natale Live` by Johnny Natale, `Mihai Crăciun` by Mihai Crăciun and `Live
+   with Crăciun` all answered album, where the same `noel` fixtures were
+   refused. `natale`, `craciun` and the new `kerst` now share `noel`'s branch
+   (`guardedAlbumWords`: no credit word before it, and an artist not holding
+   it), and `natale` is refused right after `terre`, `terra`, `ville`,
+   `citta`, `paese` or `casa` (`birthplaceWords`). `Natale con Noi`, `Crăciun
+   fericit`, `Colinde de Crăciun` and `Babbo Natale` stay positive.
+2. **Bare `Silent Night` admitted another song**: Bon Jovi's `Silent Night`,
+   on *7800° Fahrenheit*, answered title. The table's criterion is a title
+   no other song shares, which is why `Joy to the World` is not on it, and
+   bare `Silent Night` leaves it the same way. `Silent Night, Holy Night`,
+   `Stille Nacht` (and its first line whole), `Cicha noc` and `Stilla natt`
+   stay, and the carol on a Christmas album or in a Christmas genre
+   qualifies by those rules. The other 31 rows were checked against the
+   same criterion and kept, from what is known of them rather than a
+   catalogue (this host has no network). Rule 3's fixtures moved to `O Holy
+   Night`.
+3. **Mixed dash styles bypassed the title exclusion.** `stripTitleSuffix`
+   tried the styles in turn, the ASCII hyphen first, so in `Silent Night -
+   Deadly Night – Live` the hyphen's suffix, `Deadly Night – Live`, held
+   `live` and came off whole. The suffix is now what follows the rightmost
+   dash of any style (`titleDashes`). `O Holy Night - Deadly Night – Live` and
+   its em-dash twin are refused; `O Holy Night – Live - Remastered` and `O
+   Holy Night - Live – Remastered`, a version behind each dash, qualify.
+
+**The word gaps, as decided.** `villancicos`, `joulu`, `julesange` and
+`julesanger` are album words, and `kerst` a guarded one (Dutch for
+Christmas, and a rare surname). A genre segment whose first word is
+`christmas` or `xmas` counts (`Christmas Pop`, `Xmas Rock`, `X-Mas Pop`);
+bare `Pop`, and `Pop Christmas`, do not. `Jingle Bell Rock`, `Santa Baby`
+and `Winter Wonderland` stay out: a Christmas album or genre brings them
+in.
+
+**The season's year turns on 6 January**, the first day after a window, when
+nothing is served, so the seed's move there is harmless, and it moves
+nothing inside a season: `TestTheSeasonsYearTurnsOnlyAsAWindowCloses` walks
+every hour from November 2025 to February 2028 and finds the year turning
+three times, each at 6 January 00:00 UTC, with the hour before it a
+window's last.
+
+`FuzzMatchChristmas`'s artist property allows the artist to decide where
+the album holds any guarded word, not `noel` alone; two more minutes of
+fuzzing (3.6 million inputs) found nothing.
+
+### Controls, predicted by name
+
+Each mutation exact-once on a fresh test binary, the bytes restored from
+memory, every named test passing unmutated first; all eight went as
+predicted, and the tree was clean after.
+
+| Mutation | Predicted red | Predicted green |
+|---|---|---|
+| `natale` and `craciun` back among the unguarded album words | `TestMatchChristmasExclusions`, `TestEveryChristmasFixtureThroughTheStoresRead` | `TestMatchChristmasByEachRule` |
+| `natale` counted after a birthplace word | the same two | `TestMatchChristmasByEachRule` |
+| the artist guard for `noel` alone | the same two | `TestMatchChristmasByEachRule` |
+| the credit guard for `noel` alone | the same two | `TestMatchChristmasByEachRule` |
+| the dash styles taken in turn (round 1's loop) | the same two | `TestMatchChristmasByEachRule` (its mixed-dash titles qualify under the old loop as well) |
+| bare `Silent Night` back in the table | the same two (Bon Jovi) | `TestMatchChristmasByEachRule` |
+| no genre by its first word | `TestMatchChristmasByEachRule`, `TestEveryChristmasFixtureThroughTheStoresRead` | `TestMatchChristmasExclusions` |
+| the season's year turning on 1 February | `TestTheSeasonsYearTurnsOnlyAsAWindowCloses`, `TestTheSeasonsYearIsTheDecemberThatOpensIt` | `TestOneWindowIsOneSeason`, `TestTheWindowIsTheFirstOfDecemberToTheFifthOfJanuaryInUTC` |
+
+Under round 1's dash loop, `Silent Night - Deadly Night – Live` stays
+refused only because bare `Silent Night` has left the table; its `O Holy
+Night` twin is the fixture that pins the dash.
+
+## 2026-11-06 — B756: one physical album has one year
+
+Backlog B756, the owner's report of 2026-11-06: in Albums, one album showed
+as several. Worker b756b on legion0 (Ubuntu 26.04, linux/amd64, go1.27.3,
+`GOTOOLCHAIN=local`, `GOPROXY=off`), branch `fix/b756-album-one-year` from
+main 4880f8a4, the orchestrator's brief. Commits: the fix with its tests
+8094dc89, the rule's long form in `ops/History-rules-scanner.md` 127d9888,
+then this record. The rule's line in `.claude/rules/scanner.md` goes in
+through a checked patch (`rules-b756b.patch`; this worker cannot write
+`.claude/`).
+
+### What the owner hit
+
+The app's album identity is `normalize(albumArtist)|normalize(album)|year`,
+and `reconcileYears` filled only a missing year: a year of 1877 or later
+stayed as tagged ("1974 beside 2022 stays a split", B342's entry). Measured
+by the orchestrator on the owner's library, 20,916 tracks in 1,991 album
+folders: 18 folders hold two or more recording years under one album title,
+and every one is a single album shown as two or more: The Beatles
+(Remastered), 1968 and 2011; Buena Vista Social Club, 1997 and 2021; Billie
+Holiday's Body and Soul, 1957 and 2011; O, Yeah! Ultimate Aerosmith Hits,
+2002 and 2006; Work From Home with Blossom Dearie, 100 tracks, 2009 and
+2020. Each has one album artist, and 17 of the 18 one MusicBrainz release.
+Separately, 32 titles exist in two or more folders with different years:
+real editions, which must stay apart. Of 103 disc-folder albums, 1 (Nina
+Simone's Remixed) has discs whose dominant years differ.
+
+### The rule
+
+In a group `groupByAlbumKey` defines (one directory, one album title
+trimmed and lower-cased), when the group has a recording year, every track
+whose year is not the dominant one takes it: a missing year (nil, 0 or
+negative), a composition date, and a recording year the vote did not pick.
+The vote is `yearFill`'s, unchanged: `dominantYear` over the recording years
+(`yearsThatVote`), the most common, a tie going to the larger. A group with
+no recording year behaves as before: its missing years take the dominant
+present year and its early years stay. `yearTakesFill(y, dominant,
+recording)` is the one changed predicate (`recording && *y != dominant`
+where it was `fillEarly && *y < firstPhonographYear`), and
+`albumYearFixes` (was `fillMissingYears`) returns only the tracks whose year
+moves: 7 × 2011 beside 5 × 1968 is exactly 5 targets, so the 7 get no
+`indexed_at` bump, no revision and no delta entry. No ceiling: 2011 beside
+9999 is 9999, the vote as it is (the owner's library holds no year past
+2027). Extraction is unchanged and `ExtractorVersion` stays 31;
+`ProtocolVersion` stays 1, and `PROTOCOL.md` is unchanged: it speaks of the
+year as a track's field, as the favorites' key and as the DSD album gain's
+grouping ("resolved from the manifest the way the app resolves them"), all
+still true, and never of the reconciliation.
+
+The shared truth table is `internal/manifest/testdata/album-one-year-cases.json`
+(25 cases: two years, three, a two-track tie, every track a different year
+(the demo's old Julvisor shape, 1949 to 1962, and 1965/1970/1975), the typo,
+a composition date, nil, 0 and a negative year beside recording years, the
+1876/1877 boundary in the vote, a group with no recording year, none at
+all, agreeing years, lone tracks, an empty title, case and outer
+whitespace, two folders holding one title with and without inner
+disagreement, disc folders, two albums in one folder).
+`TestAnAlbumTakesOneYear` reads it with unknown fields refused, and checks
+each track's year and that the pass returns exactly the tracks whose year
+moves. The iOS app's mirror (`LibraryCompositionYears`, for its SMB and
+on-device sources) comes as a separate PR from the orchestrator with a
+byte-identical copy. The group key trims and lower-cases only (an inner
+double space is another album); the table holds no such case, so it binds
+neither side there.
+
+The existing tests that pinned the old rule were changed, not added to:
+`TestReconcileYears`' "present-but-different year LEFT ALONE" and "fills
+missing AND leaves present-different alone" (now the minority year moves),
+its tie case (the 2002 takes 2003 too), and
+`TestReconcileYearsTreatsACompositionDateAsMissing`'s two-plausible-years,
+two-recording-years and recording-year-tie (the minority recording years
+move); its two boundary cases now pin who votes (two 1876s beside one 2022
+are 2022, two 1877s beside one 2022 are 1877). The routed-row guard
+(`TestReconciliationPasses_SpareUPnPRoutedRows`) gained a minority recording
+year on both albums: the filesystem one moves, the routed one stays 2001 (a
+rewritten routed year would differ at the next UPnP walk, which re-upserts
+and resets `enriched_at`: the #369 loop).
+
+### The year pass runs again after the MBID fill
+
+`reconcileYearsByMBID` stays fill-only and runs after the directory pass, so
+two yearless tracks of one folder with different release ids can borrow
+different years (1990 and 2000): on main that split never healed, since the
+pass left a present recording year alone, and with the new rule it would
+heal at the next scan's year pass. `yearAfterMBIDStep` runs `reconcileYears`
+again right after the MBID step, in `reconcileSteps`, so the tail and the
+held settlement (`runReconcileStepsInMemory`) both converge in one scan
+(`TestScanner_StraysOfOneFolderThatBorrowDifferentYearsTakeOneInOneScan`,
+whose second half is a version-stale re-read of the two that only stamps).
+It changes nothing in a group the MBID fill did not touch: the first run
+leaves every group as the pass would. Moving the MBID step before the
+directory pass instead was rejected: it fills a folder's missing years from
+other folders' votes before the folder's own, so a folder holding one track
+of 2011 and two yearless tracks of a release whose other folder holds five
+of 1968 would have the two filled 1968 first, and the directory pass would
+then give the folder 1968 over its own 2011: a vote across a directory.
+Cost, measured on legion0 with a throwaway test
+(not committed) over 21,901 synthetic rows in 1,991 folders: every step costs
+about 110 ms, 108 ms of it the stream of the library and 4.5 ms the decision;
+the in-memory replay of all six steps 16 to 18 ms. One more stream per full
+scan (every 6 h by default) is no real cost. The labels and the cancel test's
+list of passes (`reconciliationMessages`) carry the second run as
+"year reconciliation (after mbid)".
+
+### The residuals, named
+
+- **The vote read stored rows: no longer a residual, replaced in round 2**
+  (the record below). Round 1's vote read the database's years
+  (`streamReconcileTargets`), so after 12 × 2011 was stored, retagging 3
+  files to 1968 voted 9 to 3 and the 3 were written back, though a fresh
+  index sees 8 × 1968 and 4 × 2011 and gives 1968; an album moved only when
+  the files a scan re-read outvoted its stored year, or at an
+  ExtractorVersion bump. The review showed the same history deciding an
+  album whose majority was deleted, and one retagged across two scans. Each
+  row now votes what its tag said, through the year pass's record
+  (`TestScanner_ARetagOfSomeFilesIsJudgedOnTheTags`, round 1's test of this
+  residual, renamed and turned around;
+  `TestScanner_ATagEditThatOutvotesTheStoredYearMovesTheAlbum`).
+- **A subtree scan restores a changed file's own year until the next full
+  scan.** A changed file takes the ordinary upsert, and
+  `settleSubtreeHeldReconciles` runs no pass over it, so a watcher scan
+  stores a minority file's 1968 until the next full scan, at most
+  `ScanIntervalSec` (6 h by default) or an operator's scan, as the album-title,
+  album-artist and missing-year fills always waited
+  (`TestScanner_ASubtreeScanOfAChangedFileSplitsItsAlbumUntilTheNextFullScan`).
+  Healing it there is a small change in code (the steps over the subtree's
+  groups) and was rejected for what it does: a tagger that rewrites an album
+  one file at a time, each followed by a watcher scan, would have each edit
+  voted back by the rows the retag had not reached, so the album would never
+  move. Without that vote the rows follow the files and the next full scan
+  finds the new year
+  (`TestScanner_AnAlbumRetaggedOneSubtreeScanAtATimeMovesAtTheNextFullScan`;
+  control (f) below runs the year pass in the subtree tail and turns it red).
+- **Disc folders.** An album in CD1 and CD2 folders takes a year per folder,
+  and the fill-only MBID pass does not join them: 1 of the owner's 103
+  disc-folder albums (`TestScanner_DiscFoldersOfOneReleaseKeepAYearEach`,
+  three tracks a disc sharing one release id).
+- **Past the hold limit.** `maxHeldReconciles` (10,000) counts only the
+  re-reads that differ from their rows in the four fields (`mayHoldAnother`
+  is asked after `reconciledFieldsDiffer`), not the library's 20,916 rows;
+  the owner's 18 groups' minority tracks are far below it. Past it a re-read
+  of a rewritten row is written as its file reads (its enrichment
+  re-queued) and the tail gives it the album's year again: one churn per
+  ExtractorVersion bump, accepted as B188 accepted it, and nothing is
+  re-queued (`TestScanner_ReReadsOfAnAlbumGivenOneYearPastTheHoldLimitSettleInOneScan`:
+  limit 2, five differing re-reads, three moved, the scan after moves
+  nothing). In a subtree scan past the limit the same rows keep the file's
+  year until the next full scan.
+
+### The held settlement, proved
+
+An unchanged second scan takes the skip gate, and a changed file is not a
+version-stale re-read, so the only way in is a stale `extractor_version`
+with size and mtime kept (`rewindAll`). Through a full scan and a subtree
+scan of the album: the five tagged 1968 differ from their rows and are held,
+judged with every held re-read in place, and stamped; the year, `indexed_at`
+and `enriched_at` stay, `extractor_version` advances, and no pass writes a
+row after the settlement (`beforeApplyReconciledHookForTests` sees none):
+`TestScanner_AVersionStaleReReadOfAnAlbumGivenOneYearOnlyStamps`.
+
+### Rows already indexed, and the release upgrade
+
+No ExtractorVersion bump: `Scan`'s tail streams every non-routed row
+(`streamReconcileTargets`) and the year pass rewrites the stored minority
+years at the first full scan after the upgrade
+(`TestScanner_AnAlbumIndexedBeforeTheRuleTakesOneYearAtTheNextFullScan`:
+the five rows set back to 1968 as main stored them; one scan; the delta from
+before it holds exactly the five, at 2011; `enriched_at` and
+`extractor_version` as they were). That scan comes at serve's start:
+`RunPeriodic` runs an initial full scan before its first wait
+(`cmd/bridge/main.go`'s `scanner.RunPeriodic`), so a release upgrade, which
+restarts serve, rewrites them within that scan's tail. Each rewritten row
+moves once (`applyReconciledTracks`: `indexed_at` through
+`indexedAtAdvanceSQL`, `enriched_at` untouched), so a paired device's next
+delta carries it, and the scan ends with one `library.changed`.
+
+### Duplicates
+
+`dupes.KeyFor` leaves the directory out (`clientkey.go`'s `AlbumIDOf`:
+album artist, album, year), so a minority track that takes its album's year
+can now share its key with another folder's copy, as two same-year copies
+always have. Through the real stamping pass (`SetDupePolicy` highest
+quality, the scan's deferred restamp) and the real delta (`BuildManifest`
+since a cursor taken before the scan), from a store set to what main left
+(the five at 1968, restamped):
+`TestScanner_AnotherFoldersCopyOfARewrittenTrackIsSuppressedNotLost`. With
+the rewritten copy outranking (equal size, the shorter path), the five
+rewritten rows are the delta's tracks and the other folder's five copies its
+deletions; with the other folder's copy outranking (a longer tag, so the
+larger file), the delta holds no track and the five rewritten rows are its
+deletions. Either way every one of the twelve titles is served exactly once,
+at 2011, and the store keeps all 24 rows.
+
+### What else reads the year
+
+Surveyed by a read-only agent and checked at the sites named here:
+
+- `/v1/manifest` sends the stored `tags_json` year; a rewritten track that
+  stays served reaches a delta client by its `indexed_at`, as every fill
+  does, and the app regroups it under its one album identity.
+- `catalog_refs.go` (`COALESCE(json_extract(tags_json, '$.year'), 0)`) is a
+  stream, never a stored copy. It feeds the console's catalog
+  (`internal/librarycat`), whose album id hashes `dupes.AlbumIDOf`: the
+  split album becomes one, the 1968 album's id goes away (a browser link to
+  it, or a queue entry's `albumId`, answers 404 `not_found`), and the
+  catalog is rebuilt after the scan (the post-scan nudge invalidates it,
+  `cmd/bridge/player_wiring.go`). It also
+  feeds the DSD album gain (`internal/albumgain`), whose album is the same
+  identity: new renders guard the whole album, and a rendition rendered for
+  one half keeps its baked gain until it is rendered again, which the album
+  gain plan accepts ("existing renditions keep theirs until deliberately
+  re-rendered", D3); a render never clips, since each also guards its own
+  peak.
+- `dupe_refs.go` reads `$.year` into `dupes.Row`, the duplicates above.
+- DLNA serves a track's year as its item's `dc:date`, display only; it has
+  no year container and its update ids are static, so a renderer's cache
+  shows the old date until it browses again.
+- The console's player shows an album's year (the catalog's), never a
+  track's (`playerTrackDTO` has none).
+- Not keyed on year: the enricher (its queries and caches carry no year,
+  and `enriched_at` is untouched, so nothing is re-enriched), the Atlas
+  harvest (MBIDs only), the smart mixes, the FTS index (its update trigger
+  compares the path, title, artist and album only), SACD virtual rows (one
+  TOC year a disc, in a folder of their own), and the UPnP-routed rows
+  (excluded from every pass).
+- **The per-track year is lost from the row**: a minority track's own
+  tagged year is no longer stored, so what a client shows as the track's
+  year is the album's. `OriginalYear` is untouched (no pass writes it). Which
+  of the two years each screen of the app shows was not readable here: the
+  iOS repo is not on this host (owed to the mirror PR).
+
+### Favorites
+
+`favorite_albums (album_artist, album, year)` and its tombstones are the
+app's document: the pass writes nothing there
+(`TestTheYearPassLeavesTheFavoriteAlbumsAsTheyAre`: both halves hearted,
+the document, its revision and its epoch field for field the same after the
+rewrite). The intended outcome is the app's re-key, which carries the heart
+to the album's one year and writes the new tuple back at its next favorites
+sync (`library-carries.md` in the iOS repo; not changed here). Both split
+albums hearted leaves two tuples until that write-back, and the old year's
+tuple names no album meanwhile: the console's player counts it among its
+unresolved albums (`favoriteAlbumID`, which has no year-blind fallback on
+purpose). What a device restoring from the document does with a tuple whose
+year no longer exists could not be read here (the iOS repo is not on this
+host): owed.
+
+### Red first
+
+On a copy of the branch's tree with main's `reconcile.go` and
+`reconcile_held.go` (and a one-line stub, `yearAfterMBIDStep = yearStep`, so
+the routed test compiles): `reconcileYears` on 7 × 2011 and 5 × 1968
+returns nothing, so the five stay 1968 (`TestAnAlbumTakesOneYear`'s first
+case: each of the five "year 1968, want 2011" and "returned false, want
+true"); 16 of the table's 25 cases fail, the 9 green being the shapes main
+already handled (agreeing years, lone tracks, an empty title, a group with no
+recording year or no year at all, one folder's B342 shape, the two editions
+with no inner disagreement, the 1876 boundary); and every new scan fixture
+fails but two, which hold for main as well and pin what the rule must keep
+(`TestScanner_ATagEditThatOutvotesTheStoredYearMovesTheAlbum`,
+`TestScanner_AnAlbumRetaggedOneSubtreeScanAtATimeMovesAtTheNextFullScan`).
+On main the MBID strays stay split for good (1990 after a bump too).
+
+### Negative controls
+
+A runner (`.tmp/_b756b/controls.py`) applied each mutation to the committed
+fix, each anchor found exactly once, built the package's test binary, ran
+24 tests one at a time, and restored the bytes from memory; the baseline
+(no mutation) is green, every control built, and `git status` was empty
+after.
+
+| Mutation | Red |
+|---|---|
+| (a) the year pass groups by album title alone, across directories | `TestAnAlbumTakesOneYear` (the editions, the disc folders), `TestScanner_EditionsInTwoFoldersKeepTheirOwnYears` (the 1990 edition at 2004), `TestScanner_DiscFoldersOfOneReleaseKeepAYearEach`, and the older cross-directory cases of `TestReconcileYears` and B342's other-folder |
+| (b) a tie goes to the smaller year | `TestAnAlbumTakesOneYear` (1968 and 2011 stay 1968), `TestScanner_StraysOfOneFolderThatBorrowDifferentYearsTakeOneInOneScan`, `TestReconcileYears`' tie, B342's recording-year-tie |
+| (c) under a stale stamp, `settleHeldReconciles` replaced by `settleHeldUnreconciled` (full and subtree) | `TestScanner_AVersionStaleReReadOfAnAlbumGivenOneYearOnlyStamps`: the five rewritten rows move twice in one scan (written whole as their files read, `enriched_at` 0, then rewritten by the year pass, which the hook sees); the past-the-limit test (five moved, not three), the strays' bump, and B342's and B188's no-churn tests |
+| (d) a disagreeing group's agreeing members returned too | `TestAnAlbumTakesOneYear` (returned, not moved), `TestScanner_AnAlbumIndexedBeforeTheRuleTakesOneYearAtTheNextFullScan` (the 7 in the delta), the duplicates test (the 7 in its delta), the past-the-limit test, `TestReconcileYears`, B342's Ellipses |
+| (e) no second year run after the MBID fill | `TestScanner_StraysOfOneFolderThatBorrowDifferentYearsTakeOneInOneScan` (1990 beside 2000 after one scan; the bump moves a stray) |
+| (f) a subtree scan runs the year pass (the heal rejected above) | `TestScanner_AnAlbumRetaggedOneSubtreeScanAtATimeMovesAtTheNextFullScan` (every row voted back to 2011), `TestScanner_ASubtreeScanOfAChangedFileSplitsItsAlbumUntilTheNextFullScan` |
+
+### Gates
+
+On legion0 at a4b62598, in one call through the shared build lock
+(`.tmp/_b756b/gates.py`): `make vet` native and with `GOOS=windows`,
+`GOOS=darwin` and `GOOS=linux GOARCH=386`, each clean; gofmt (go1.27.3's) on
+the changed Go files, clean; `make docs-check`, ok, and again on a copy of
+the tree with `rules-b756b.patch` applied, which `git apply --check` takes
+and a strict applier reproduces; the qualification check, "qualification
+version OK: 4880f8a4..HEAD" (B756 changes no guarded path); `make test-fast`
+(TMPDIR under `.tmp/_b756b`), 85 packages ok and none failed, in 480 s, the
+ALSA, alsapcm, durable-writer and backup identity tests running here on
+Linux; `make test TEST_PKGS="./internal/manifest/... ./internal/dupes/...
+./internal/api/..."` (race, the Makefile's tags and 30-minute timeout), ok,
+in 1,398 s (internal/manifest 1,386 s); `make build-all`, ok, its `dist/`
+removed after. `git status --ignored` showed nothing but `.tmp/` after. Not
+run here: macOS and Windows natively, CI's runners, and the iOS app, whose
+repo is not on this host.
+
+## 2026-11-06 — B756 round 2: each row votes its tag, a missing copy never wins
+
+Worker b756b, the same host, toolchain and branch, from the orchestrator's
+review of round 1: five points, each a reviewer's reading of the code, after
+the orchestrator applied round 1's rules patch on the pushed branch. Commits:
+58f47fc8 (points 1, 3, 4 and 5 with their tests), aef75b90 (a bump keeps the
+record of a tag that gave no year), 62cdb78e (a row stored with no record
+keeps none at a bump, found by this round's controls), bb7fa90f (the pin of
+that fix's year condition), then the rule's long form and this record. The
+rule's line and the duplicates bullet in `enrichment.md` change through
+`rules-b756b-r2.patch`. `testdata/album-one-year-cases.json` is unchanged: no
+case's expectation changed, since the table is what a fresh index gives, and
+this round changes what a history gives.
+
+### Point 1: a stored year outvoted the tags it replaced — confirmed, fixed
+
+Both of the review's scenarios were red on round 1 (8a7c50ca's production
+files, with inert stubs so this round's tests compile, `.tmp/_b756b/red2.py`
+on a copy of the tree outside git). Seven files of 2011 and five of 1968,
+the seven deleted: the five stayed at 2011 once the seven were reaped ("once
+the seven are reaped: Band/Remastered/08 Track.flac year 2011, want 1968"),
+the test running the deletion pass's real grace
+(`config.DefaultDeleteAfterMissingScans`), so the tail judged the group
+again after a real deletion and voted the stored years. Track 1, then tracks
+2 to 7, retagged 1968 across two scans: all twelve stayed at 2011 ("after
+the retag of tracks 2 to 7: Band/Remastered/01 Track.flac year 2011, want
+1968"), the second scan's stored rows voting six to six and the tie going to
+2011. A fresh index of the same files gives 1968 in both.
+
+The fix is the review's design. `Track.taggedYear` (unexported, a
+`*yearRecord`) is the year pass's record of what a row's tag said: `yearMove`
+sets it the first time the pass moves a row's year, to the year the row
+held, and drops it when the pass moves the year back to it. `votingYear` is
+the record's year where there is one and the stored year otherwise, and
+`albumYearFixes` votes with it and writes the answer to `Year`. A lone or
+untitled row with a record goes back to its tag. A tag with no year is a
+record of nil, told apart from no record: `tags_json` holds the record as an
+object under `taggedYear`, `{"year":1968}` or `{}`, which `marshalForStorage`
+splices in after `json.Marshal` and `decodeStoredTrack` reads at every
+stored decode (`GetTrack`, `GetTrackWithStat`, `UnenrichedTracks`, the
+case-folding lookup, the listed-row scan the streams and pages share, and
+the UPnP routing list; no package outside `internal/manifest` decodes
+`tags_json` itself). Extraction never sets it, so a changed file's row is
+written afresh and votes its new tag (`TestScanner_AReExtractClearsTheRecord`).
+A version-stale re-read keeps the album's year and the record where its tag
+reads as the record says, a tag with no year included (`mergeYear`;
+`TestANilTagIsRecordedAndRestored` bumps over one), and otherwise keeps its
+own reading and no record, and is held (B188). The MBID fill writes no
+record, so a year it borrowed votes as stored; when the year pass after it
+then moves the row, the record holds the borrowed year, which is what a
+fresh index's MBID fill gives it too.
+
+What reads `tags_json`, and the wire. The record is unexported, so a `Track`
+encodes without it, and `/v1/manifest`, full and delta, decodes each row into
+a `Track` and encodes that: no client sees the key
+(`TestTheTaggedYearIsStoredAndNeverServed` reads the stored bytes, both
+manifests and `json.Marshal`). PROTOCOL.md has a client ignore a field it
+does not know, so a leak would not break the app, but nothing is sent, and
+`ProtocolVersion` stays 1. The other readers (`dupe_refs.go`,
+`catalog_refs.go`, the console's extracts) read named paths, never the
+record. The enricher writes back the whole row it read, and the record with
+it (`TestTheRecordSurvivesTheEnrichersStamp`). A record never changes alone:
+the pass returns a row only when its year moves, so a record moves no
+`indexed_at`, no revision and no delta entry, and the duplicate stamps never
+see it (`TestTheYearPassNeverWritesTheRecordAlone`, over a row whose record
+equals its year, set by hand). A write of the record alone was rejected both
+ways: with no `indexed_at` advance it breaks the premise of B187's
+compare-and-set (every write of `tags_json` advances `indexed_at`, so a
+writer holding an older read can tell), and with one it is a delta entry to
+every paired device for nothing a client sees.
+
+A fresh index and two histories agree on every shape of the shared table
+(`TestAnIncrementalHistoryAgreesWithAFreshIndexOnTheTablesShapes`, in
+memory: every track tagged 2099 and given that year, then retagged to the
+case's years one file a scan; and every track outvoted by three of 2099
+beside it, which a scan then deletes). Round 1's tests of the stored vote
+were turned around: its test of that residual is now
+`TestScanner_ARetagOfSomeFilesIsJudgedOnTheTags` (three of the seven 2011
+files retagged 1968 give the album 1968, as a fresh index does, and a bump
+after moves nothing); `TestScanner_AVersionStaleReReadOfAnAlbumGivenOneYearOnlyStamps`
+finds the five stamped at the merge, with their records, where round 1 held
+them to the tail; and
+`TestScanner_ReReadsOfAnAlbumGivenOneYearPastTheHoldLimitSettleInOneScan`
+seeds a record of 1950 (an older extractor's reading of the DATE that now
+reads 1968), so the five differ from their rows and are held, three past a
+limit of two.
+
+**Found in this round: a row stored with no record churned at the first
+bump.** Control (1b) below makes every stored record unreadable, which is
+how every row an older bridge wrote looks, and under it the B188 and B342
+no-churn tests went red. `TestScanner_ABumpOverRowsStoredWithNoRecordOnlyStampsThem`
+(an album whose composition date, `0000` date and empty date took its 2011,
+the records then removed as an older bridge stores rows) was red on
+aef75b90, through a full scan and a subtree scan alike: "rows the bump
+moved: [Band/Filled/04 Track.flac Band/Filled/05 Track.flac], want none",
+each with `enriched_at` 0. The two re-reads whose tags read a year differ
+from their rows and are held; the settlement's passes give each the album's
+year and the record of its tag; and the record alone made each differ from
+its row, which was then written whole and re-enriched. That is the churn
+B188 exists to prevent, at the first ExtractorVersion bump after the
+upgrade, for every such row a library holds. `heldRecord` (62cdb78e) gives a
+held re-read no record where its row holds none and the passes leave its
+year as the row holds it, so it is stamped and votes its stored year, as it
+did: the review's rule for rows written before it ("legacy rows count as
+stored"). Where the passes move such a row's year it takes the record
+(`TestScanner_ABumpThatMovesAnAlbumRecordsTheTagsOfTheRowsItMoves`: twelve
+rows an older bridge stored at 1999 are read as seven of 2011 and five of
+1968, all twelve are rewritten at 2011, the five with records of 1968, and
+the five take 1968 once the seven are reaped; green before the fix as well,
+it pins the year condition, and control (12b) shows that it does).
+
+What a row with no record still does, named: it votes its stored year until
+the pass moves it. That covers the years an older bridge filled (a
+composition date and a missing year, which a fresh index would not count),
+and a row the pass never moved whose tag an extractor change reads otherwise
+while its album's year stays (the settlement stamps it). When the tail moves
+such a row, its record is the year it held, which for a filled row is not
+its tag, and a later bump that reads the tag otherwise writes the row whole
+once. Each needs an edit after the upgrade (a retag, a deletion, an
+extractor change) before it shows at all.
+
+### Point 2: the DSD album gain within a merged album — confirmed, not built
+
+How a membership change reaches renditions: a render takes its album's boost
+from `internal/albumgain`'s index of the album by `dupes.AlbumIDOf`, which
+the post-scan hook drops (`Resolver.Invalidate`) and the next render
+rebuilds, so every render after the merge guards the merged album. A
+rendition already made keeps the gain it was rendered with: its row records
+`applied_gain_db`, and its settings blob `gainScope` and `trackGainDB`, never
+the album identity or the members the gain was computed over. It stays
+fresh, since a DSD rendition's freshness is its source file's stamp and the
+current DSD schema (`v2`), so neither the auto-optimize sweeper nor `bridge
+optimize` or `bridge render` (whose skip check is the exact current id)
+renders it again. And a re-render under the same id is unsafe: a phone
+applies a rendition's `appliedGainDB`, read from the manifest by id, to the
+bytes of its downloaded copy, which is why `v2` minted new ids and why no
+reaper may come before the app records the gain with its downloaded copy
+(the album gain entry in `jobs.md`). So there is no existing path to
+invalidate or queue through, and building one is a subsystem: each
+rendition's album identity and boost recorded at render time; a staleness
+term comparing them with the album's boost now (the peaks are on record in
+`dsd_peaks`, so the comparison needs no decode); and a rendition id that
+changes with its gain, or the app's record of the gain beside its downloaded
+copy (the album gain plan's M2), before any rendition is replaced. Stopped
+there, as the brief says. The effect: a merged album's renditions keep the
+balance of the half each was rendered with, none clips (each render also
+guards its own peak), and only the merged albums that are DSD and have
+renditions are touched; how many of the owner's 18 are could not be measured
+here.
+
+### Point 3: a year rewrite could suppress the only playable copy — confirmed, fixed
+
+The duplicates test's copy-wins shape, with `copies[7]`'s file removed just
+before the first scan after the upgrade
+(`TestScanner_ACopyKnownMissingNeverWinsItsGroup`). On round 1 the copy's
+row, inside the deletion grace (`missing_count` 1 of 3), won its group on its
+stored size once the rewrite gave the original its key, so the reachable
+original was tombstoned ("Band/Remastered/08 Track.flac, the reachable
+original, is suppressed in favour of a copy whose file is gone"; the delta
+deleted it, and the served set held the gone copy) until the row was reaped,
+two more full scans later: 12 h at the default `ScanIntervalSec`, longer
+under a raised `deleteAfterMissingScans`. The election can exclude a row
+known missing with a small change, so it does: `dupeRefSelect` reads
+`COALESCE(t.missing_count, 0) > 0` into `dupes.Row.Missing`, and `outranks`
+and `nestShallower` put a file the scan found before one it did not, ahead
+of every other term (`TestAFileTheScanFoundOutranksOneItDidNot`, in
+`internal/dupes`, covers both). The term moves only when a file goes or
+comes back: the count is the deletion pass's own, which a walk that could
+not read a folder leaves as it was, so a flapping mount does not move the
+election or churn `indexed_at`. It knows nothing of an upstream's
+reachability: routed rows stay out of the duplicates pass, and the
+2026-08-31 record of the parked cross-source suppression stands. The
+duplicates bullet in `enrichment.md` that said `outranks` has no
+availability term is corrected through the patch.
+
+### Point 4: a literal backslash split a name — confirmed, fixed by platform
+
+On Linux and macOS a backslash is a character of a file name, and the
+passes split on both separators everywhere: `Band/Live\01 Track.flac`, a
+file of `Band`, joined `Band/Live`'s album and took its 1968
+(`TestScanner_ABackslashInANameIsNoFolder` on round 1: "the pass moved
+map[Band/Live\01 Track.flac:1968], want map[]", and through a real scan "the
+file named with a backslash: Band/Live\01 Track.flac year 1968, want 2011").
+Stored paths are slash-separated on every platform (`relPath` writes them
+through `filepath.ToSlash`), so the fix is small: `trackDir`, `pathBase` and
+`pathStem` split on `pathSeparators`, which is "/" but on Windows "/" and
+"\" (`pathSeparatorsFor(runtime.GOOS)`; no Windows name holds a backslash,
+so the split there is as it was). The shared table holds no backslash and is
+unchanged. Round 1's tests that fed Windows-shaped paths on every platform
+(`TestTrackDir`, `TestPathStem`, `TestReconcileAlbumArtistsWindowsPaths`,
+`TestBackfillTrackNumbersFromPath`) run them under Windows' separators
+through a seam (`underSeparatorsOf`), with the POSIX answer beside them.
+Owed to the mirror PR: whether the app's copy splits on a backslash (the iOS
+repo is not on this host).
+
+### Point 5: the table's digest — pinned
+
+`TestTheSharedYearTableIsTheMirroredBytes` pins the table's SHA-256,
+`c1f74e97537468f7d7a0f0b33aa9071797f9b85ae72069469cac433bcef681af` (12,450
+bytes), and fails on a CR byte. `.gitattributes` keeps the file LF (`text
+eol=lf`), so a Windows checkout hashes the same bytes. The iOS mirror pins
+the same digest.
+
+### Red first
+
+On round 1's production code with inert stubs (`.tmp/_b756b/red2.py`): red
+on behaviour were `TestScanner_AnAlbumWhoseMajorityIsDeletedTakesWhatItsTagsSay`,
+`TestScanner_AnAlbumRetaggedAcrossTwoScansFollowsItsFiles`,
+`TestScanner_ARetagOfSomeFilesIsJudgedOnTheTags`,
+`TestAnIncrementalHistoryAgreesWithAFreshIndexOnTheTablesShapes`,
+`TestScanner_ACopyKnownMissingNeverWinsItsGroup`,
+`TestScanner_ABackslashInANameIsNoFolder`, `TestTrackDir`, `TestPathStem`
+and `TestAFileTheScanFoundOutranksOneItDidNot`; red by construction, round 1
+having no record, were `TestANilTagIsRecordedAndRestored`,
+`TestScanner_AReExtractClearsTheRecord`,
+`TestTheTaggedYearIsStoredAndNeverServed`,
+`TestTheRecordSurvivesTheEnrichersStamp`,
+`TestTheYearPassNeverWritesTheRecordAlone` and the record checks of the
+version-stale and past-the-limit tests. Green there, as they should be:
+`TestAnAlbumTakesOneYear` (the table is unchanged),
+`TestTheSharedYearTableIsTheMirroredBytes` (the bytes are round 1's), the
+two Windows-path tests under Windows' separators, and
+`TestScanner_AnAlbumRetaggedOneSubtreeScanAtATimeMovesAtTheNextFullScan` (a
+subtree scan writes the edited row alone either way).
+`TestScanner_ABumpOverRowsStoredWithNoRecordOnlyStampsThem` was red on
+aef75b90, before its fix (above).
+
+### Negative controls
+
+Three runs on the committed code, each through a runner that applies a
+mutation (its anchor found exactly once), builds the test binaries, runs
+each named test alone and restores the bytes from memory: each baseline
+green, every control built, and `git status` empty after each. The first
+run's predictions were made before it but not written down where this record
+can show them; the second and third runs were predicted by name in files
+written before them (`.tmp/_b756b/controls3.predictions.txt` and
+`controls4.predictions.txt`), and every prediction held, the tests predicted
+to stay green included.
+
+| Mutation | Red |
+|---|---|
+| (1a) the vote ignores the record (`votingYear` returns the stored year) | the history test, the deletion and two-scan retag tests, `TestScanner_ARetagOfSomeFilesIsJudgedOnTheTags`, `TestANilTagIsRecordedAndRestored` |
+| (1b) no stored record is read (`decodeStoredTrack`) | 12: every scan test that reads a record back through the store (not the one that reads the stored bytes), and the B188 and B342 no-churn tests and the strays' bump, each moving rows: the shape of every row an older bridge wrote, which led to `heldRecord` |
+| (1c) `mergeYear` without its record branch | `TestANilTagIsRecordedAndRestored` (the bump moves the untagged row) |
+| (1d) a move back to the tag's year keeps the record | the deletion and two-scan retag tests, `TestANilTagIsRecordedAndRestored` |
+| (1e) `marshalForStorage` never writes the record | 9, as predicted: the deletion, two-scan and three-file retag tests, the nil-tag, re-extract, stored-not-served and enricher tests, and the record checks of the version-stale and past-the-limit tests; green, as predicted: `TestTheYearPassNeverWritesTheRecordAlone`, the strays', B342's and B188's no-churn tests (the stamp comparison marshals both sides without the record) and the history test |
+| (1f) `yearMove` records the year it moves to | 10, as predicted: the history test and the nine above, `TestANilTagIsRecordedAndRestored` in memory as well |
+| (12a) `heldRecord` always returns the settled record | `TestScanner_ABumpOverRowsStoredWithNoRecordOnlyStampsThem` alone, both scopes, as predicted |
+| (12b) `heldRecord` without its year condition | `TestScanner_ABumpThatMovesAnAlbumRecordsTheTagsOfTheRowsItMoves` alone, as predicted |
+| (3a) `outranks` without its Missing term | `TestScanner_ACopyKnownMissingNeverWinsItsGroup`, `TestAFileTheScanFoundOutranksOneItDidNot` |
+| (3b) the refs stream never sets `Row.Missing` | `TestScanner_ACopyKnownMissingNeverWinsItsGroup` |
+| (3c) `nestShallower` without its Missing term | `TestAFileTheScanFoundOutranksOneItDidNot` alone (its nest-twin case), as predicted |
+| (3d) the refs stream reads `missing_count > 1` | `TestScanner_ACopyKnownMissingNeverWinsItsGroup` alone, as predicted |
+| (4a) a backslash separates on every platform | `TestScanner_ABackslashInANameIsNoFolder`, `TestTrackDir`, `TestPathStem` |
+| (5a) one space added to the shared table | `TestTheSharedYearTableIsTheMirroredBytes` (the digest 44cc71ee… where c1f74e97… is pinned) |
+| (c) round 1's settlement control, again | the strays' bump, B188's no-churn test and its past-the-limit test; no longer the version-stale test, whose five are stamped at the merge now |
+
+### Gates
+
+On legion0 at ac7e7abf, in one call through the shared build lock
+(`.tmp/_b756b/gates2.py`): `make vet` native and with `GOOS=windows`,
+`GOOS=darwin` and `GOOS=linux GOARCH=386`, each clean; go1.27.3's gofmt over
+the 16 Go files the branch changes, clean; `make docs-check`, ok, and again on
+a copy of the tree with both rules patches applied, each file by a strict
+applier (`git apply --check` takes `rules-b756b-r2.patch` over round 1's
+`scanner.md` and today's `enrichment.md`); the qualification check,
+"qualification version OK: 4880f8a4..HEAD"; `make test
+TEST_PKGS="./internal/manifest/... ./internal/dupes/... ./internal/api/..."`
+(race, the Makefile's tags and 30-minute timeout), ok, in 1,397 s
+(internal/manifest 1,385 s, internal/api 109 s); and `make test-fast`, where
+84 packages were ok and `cmd/bridge` failed one test,
+`TestEveryCitedTestNameExists`, on a test comment of this round that cited a
+test no file defines. 16630a65 fixed the comment (it cites `TestPathStem`):
+the sweep then passed, a ghost citation planted in turn in this file and in
+`ops/History-rules-scanner.md` was reported in each (so the sweep reads both),
+and at 16630a65, through the build lock again, `make vet` was clean and `make
+test-fast` passed, 85 packages ok and none failed, in 455 s (TMPDIR under
+`.tmp/_b756b`; the ALSA, alsapcm, durable-writer and backup identity tests
+running here on Linux). `git status --ignored` showed nothing but `.tmp/`
+after each. Not run here: macOS and Windows natively, CI's runners, `make
+build-all` (not among this round's gates), and the iOS app, whose repo is not
+on this host.
+
+## 2026-11-06 — B756 round 3: a missing count elects again, a record alone is no revision
+
+Worker b756b, the same host, toolchain and branch, from the orchestrator's
+review of round 2: three points, after the orchestrator applied round 2's
+rules patch on the pushed branch and merged main there (not into this tree,
+whose base stays 4880f8a4). Commits: 4fc49363 (point 1), ecd86492 (point 3),
+84476b1e (point 2), then the rule's long form and this record. The rule's
+line and the duplicates bullet in `enrichment.md` change through
+`rules-b756b-r3.patch`. `testdata/album-one-year-cases.json` is unchanged.
+
+### Point 1: a missing count did not restamp a subtree scan — confirmed, fixed
+
+Red on 0d9787de, through `ScanSubtree` with the default grace (three scans):
+`TestScanner_ASubtreeScanElectsAgainWhenACopyGoesOrComesBack`, an album in
+two folders whose copy wins every group (a longer tag, the larger files).
+Its copy's file removed and its folder scanned, the copy's row at
+`missing_count` 1, nothing written or deleted: "the subtree scan after the
+copy went: Band/Remastered/08 Track.flac is suppressed, want it served", the
+copy served. And after a full scan elected the original, the copy's file put
+back unchanged (same bytes and mtime) and its folder scanned, the skip gate
+clearing its count: "the subtree scan after the copy came back: Band/Remastered
+(Copy)/08 Track.flac is suppressed, want it served". The review's reading
+holds: since round 2 the election reads the missing count
+(`dupes.Row.Missing`), and the subtree gate opened only on an upsert, a
+settle, a delete, a rename or a stamped row deleted elsewhere. The wait was
+bounded only by the next full scan (`ScanIntervalSec`, 6 h by default), all
+of it with the one playable copy hidden from every client, so the fix is a
+restamp, not a statement of the bound.
+
+`IncrementMissingTracks` reads each row's new count back (`UPDATE … RETURNING
+missing_count`) and reports the rows it counted missing for the first time
+(`MissingTracksPass.NewlyMissing`, the count at 1) beside the rows it
+deleted; `IncrementMissingTracksAndDeleteAtThreshold` is its wrapper, so the
+console's trash, the full scan's pass and the tests call it unchanged.
+`ResetTrackMissingCount` and `ResetTrackMissingCountsUnder` say whether they
+cleared a count (a driver that cannot say answers yes: a pass too many costs
+two streams of the library, one too few hides a copy), and the scanner counts
+those (`missingCleared`, zeroed at each `ScanSubtree`'s start) at the skip
+gate, an unread file and an SACD container's rows. The gate opens on either.
+A row already missing that stays missing moves nothing, so a gone file costs
+one pass when it is first counted and one when it comes back; its reap opens
+the gate as it did. `TestIncrementMissingTracksCountsTheRowsItMakesMissing`
+pins the counts at the store, and the SACD reset's test the cleared answer.
+
+### Point 2: a change in the record alone made a revision — confirmed, fixed
+
+Red on ecd86492: `TestScanner_AChangeInTheRecordAloneIsWrittenWithoutARevision`,
+the review's case (served 2011, a recorded tag of 1950, a re-read giving
+1968), "rows moved: [Band/Remastered/08 … 12]" and each "enriched_at = 0",
+through a full scan and a subtree scan alike;
+`TestScanner_ABumpThatDropsARecordAloneWritesNoRevision`, the same on the
+path a re-read takes when it is not held (a hand-left record of 1999 on a row
+of 2011, dropped by a re-read giving 2011: one row moved and re-enriched);
+and `TestARecordWrittenAloneSurvivesAWriteBackOfAnEarlierRead`, the
+enricher's stamp of a row it read before the bump answering "track changed
+since it was read", since the bump's upsert had moved the version.
+
+The design, and B187. B187's rule is that every `tags_json` writer moves
+`indexed_at`, which is what lets a write-back of an earlier read
+(`MarkEnriched`, `applyReconciledTracks`) compare-and-set on it, and round 2
+rejected a record written with no move for that reason. The review asks for
+exactly that write, so round 3 makes it safe. `markStampIfUnchanged` marks a
+re-read whose bytes differ from its row's only in the record (both marshalled
+with the record taken out compare equal, and the records differ)
+`versionStampOnly` and `yearRecordOnly`, at the stored row's version. The
+stamp leg writes its `tags_json` first, `UPDATE tracks SET tags_json = ? WHERE
+path = ? AND indexed_at = ?`, a write at the version read as a write-back's
+is, and on a miss leaves the row unstamped, so the next scan reads it again.
+`MarkEnriched` is the one write-back that can fall between a scan's read and
+its write (the enricher runs beside the scanner; the passes run inside a
+scan, under the scanner's lock, after the settlement, so the reconciliation
+writer never meets a record written after its read): it reads the row's
+record at its version (`storedYearRecordAt`) and writes that one, never the
+one it read. Nothing a client reads moves: `indexed_at` does not, so no delta
+entry and no `library.changed`; `enriched_at` is not touched; the FTS update
+trigger fires on `tags_json` and its `WHEN` compares the path, title, artist
+and album only, and the playlist feed's generation triggers ignore
+`tags_json` (both read in round 2). Rejected: moving the record into a column
+of its own, where a record-only write would be no `tags_json` write at all
+and B187 would stand untouched. It costs a migration (main, merged into the
+pushed branch, may hold v61 already), every stored reader's `SELECT`, and a
+stat guard so an older binary's rewrite of a changed file cannot leave a
+stale record, which `tags_json` gives for nothing: an older build's rewrite
+drops the key.
+
+`heldRecord`, round 2's case for a row with no record, goes. It kept such a
+row from gaining a record at a bump, the only way then to keep it stamped;
+the row now gains the record of its tag with no revision, and votes its tag
+as a fresh index would (`TestScanner_ABumpOverRowsStoredWithNoRecordOnlyStampsThem`
+expects the records of 1720 and 0 now, with nothing moved and nothing
+re-enriched). The past-the-limit test expects only the three re-reads past
+the limit of two to move (written as their files read, re-enriched, and
+given the album's year by the tail: B188's accepted churn), and the two held
+ones stamped with their records, enrichment kept.
+`TestARecordOnlyStampWritesOnlyTheRowItWasMergedWith` pins the marking (a
+title changed too is no stamp) and the compare-and-set over a row the
+enricher changed since: neither the record nor the stamp is written, and
+the enricher's release id stays.
+
+### Point 3: CodeQL at store.go:3204 — fixed at its cause
+
+The brief names the alert on the PR's diff (thread PRRT_kwDOSKfTNc60oIVa);
+`gh` is refused on this host, so the alert itself was not read here. The line
+is `out := make([]byte, 0, len(raw)+len(taggedYearKey)+len(b)+4)` in
+`appendTaggedYear`, round 2's hand splice of the record into the marshalled
+bytes, which is `go/allocation-size-overflow`'s shape: a capacity computed
+from the length of a value that can be large, here `json.Marshal`'s output.
+The sum cannot overflow an int in practice (a row's `tags_json` past 2^31
+bytes, on a 32-bit build), but the cause is the splice, so it goes:
+`marshalForStorage` marshals `storedTrackWithRecord`, which embeds the Track
+and adds the record as its last field, and encoding/json writes the bytes;
+nothing is computed from a length and nothing is cut.
+`TestTheRecordIsStoredLastAfterTheTracksOwnBytes` pins the layout (the
+Track's own bytes, the record last, `{}` for a tag that gave no year) and
+passes over the old splice too, on a copy of the tree with 4fc49363's
+`store.go` (`.tmp/_b756b/samebytes.py`), so the bytes a row is stored as are
+the same.
+
+### Negative controls
+
+One run on 84476b1e (`.tmp/_b756b/controls5.py`), predicted by name in
+`.tmp/_b756b/controls5.predictions.txt` before it: each mutation's anchor
+found once, the package's test binary built, 19 tests run one at a time, the
+bytes restored from memory; the baseline green, every control built, `git
+status` empty after, and every prediction held, the tests predicted to stay
+green included.
+
+| Mutation | Red |
+|---|---|
+| (r3-1a) the subtree gate without its `NewlyMissing` term | the subtree test's "a copy that goes" half alone |
+| (r3-1b) the subtree gate without its `missingCleared` term | its "a copy that comes back" half alone |
+| (r3-1c) every increment counted as newly missing | `TestIncrementMissingTracksCountsTheRowsItMakesMissing` alone (a pass too many is harmless to the scan test) |
+| (r3-1d) `ResetTrackMissingCount` never reports a cleared count | that test and the "comes back" half |
+| (r3-2a) `markStampIfUnchanged` without its record-only leg | the three red-first tests, the compare-and-set test, the past-the-limit test and the no-record test; green, as predicted: the version-stale, strays', B342's and B188's no-churn tests |
+| (r3-2b) the record write without its version check | the compare-and-set test's "a row changed since" half alone (the record overwritten, the release id gone, the row stamped) |
+| (r3-2c) `MarkEnriched` without carrying the row's record | `TestARecordWrittenAloneSurvivesAWriteBackOfAnEarlierRead` alone ("records its tag as 1950, want 1968") |
+
+A slip, said here: one `go test ./internal/manifest/ ./internal/dupes/` ran
+outside the shared build lock, which the brief asks of every multi-package
+run; it passed, and every gate below ran through the lock.
+
+### Gates
+
+On legion0 at 5e58c52a, in one call through the shared build lock
+(`.tmp/_b756b/gates3r.py`): `make vet` native and with `GOOS=windows`,
+`GOOS=darwin` and `GOOS=linux GOARCH=386`, each clean; go1.27.3's gofmt over
+the 19 Go files the branch changes, clean; `make docs-check`, ok, and again on
+a copy of the tree with the three rules patches applied in turn by a strict
+applier (`git apply --check` takes `rules-b756b-r3.patch` over the two files
+as rounds 1 and 2 leave them); the qualification check, "qualification
+version OK: 4880f8a4..HEAD"; `TestEveryCitedTestNameExists`, ok; `make
+test-fast`, 85 packages ok and none failed, in 461 s (TMPDIR under
+`.tmp/_b756b`; the ALSA, alsapcm, durable-writer and backup identity tests
+running here on Linux); and `make test TEST_PKGS="./internal/manifest/...
+./internal/dupes/... ./internal/api/..."` (race, the Makefile's tags and
+30-minute timeout), ok, in 1,413 s (internal/manifest 1,401 s, internal/api
+109 s, internal/dupes from the test cache, its code and tests unchanged
+since round 2's race run). `git status --ignored` showed nothing but `.tmp/`
+after. Not run here: macOS and Windows natively, CI's runners, `make
+build-all`, and the iOS app, whose repo is not on this host.
+
+## 2026-11-06 — B728 B7: the cutover
+
+B728's B7 (`ops/plan-b728-dsd-capability-design.md`, sections 3.1, 3.4, 3.5,
+6.2, 9.1 items 6, 9, 10 and 14, and B7's row in 11), worker b728-b7 on
+`feat/b728-b7-cutover` from main 0d5cb33b, commits ceb8e67b, fe621791 and
+8467b07a.
+Serve and `bridge output play` decide DSD by the player's effective policy
+(B5's `policy.Effective`) over the player's DSD state (B3, migrated by B6),
+the profile database (B2), and what the box establishes of the bound DAC
+now, the silent probe (B4) among it, and read no approval record or
+candidate. `playback.Config.DSD` (a `*playback.DSDPolicy`) is production's
+admission; `Config.Authorization`, the approval's, is the harness's alone
+(the candidate and transition backends, `output play --report`), at the
+harness's version, and `New` refuses the two together.
+
+**One set.** `internal/player/playback/dsd_policy.go`. The backend keeps one
+effective set (`dsdSet`) behind an atomic pointer: what a DSD occurrence is
+admitted by (`admitDSD`, `selectFor`: the plan at the content's rate, or the
+rate's refusal by the policy's word) and what `GET /v1/outputs` publishes
+(`Policy`), under a generation that moves only when the set publishes or
+admits another way (`same`: the card and endpoint, the identity, each rate's
+plan and refusal; evidence moves none, B8 publishing it). A refresh
+(`refreshDSD`, one at a time under `dsdMu`, so generations publish in the
+order their readings were taken) runs at a session's first occurrence, at
+any DSD admission whose set was read more than 100 ms before (`dsdStale`:
+found red-first, a PCM session's prepared DSD successor admitted by the
+never-computed boot set), at each native activation (`checkDSDActivation`),
+on a 100 ms monitor started once a session holds DSD (`startDSDMonitor`),
+and at the supervisor's refresh (`RefreshDSD`, forced by a watcher snapshot,
+a state write or a probe's answers, else once a second). `readDSD` reads the
+bound DAC only from a fresh, available watcher snapshot of the boot binding
+(`boundFromFeed`), and its card only while the card is that unit at that
+enumeration, the reads (the unit's model and descriptors,
+`alsa.SysfsReader.UnitModel`, 256 KiB at most; its PCM device's playback
+altsets; its usbmixer table, `policy.ParseUSBMixer`, the kernel's
+`snd_usb_mixer_proc_read` format at the alsa-abi tag; its controls through
+`alsactl.Reader` with `AllowUnreadable`) bracketed by a second look at the
+unit. The unit's model or its stream file not reading is no set, every rate
+refused as `dsd_dac_unread`; the DoP gain check's own inputs (the
+descriptors, the controls, the usbmixer table) not reading leave the set
+computed, `readMixer` handing them on as not read, and the gain check fails
+closed for DoP alone (`dop_gain_unverifiable` under an explicit dop; auto
+converts that rate), native unaffected (corrected in round 2: this record
+said no set; CodeRabbit). A rate the set converts is refused as
+`dsd_not_in_this_release` until B11.
+
+**Reconciliation.** A new set is judged for every DSD occurrence of every
+session (`policy.Reconcile` over `occurrenceFactsLocked`): Keep repoints it;
+Replan marks it stale, which the producer holds back from the sink (and a
+gapless DSD successor joins only under the set published now, an atomic
+load), and asks the engine to hand it off again through a new optional
+interface, `engine.ReplanEvents` (`Replan`): the engine takes it as an edit
+after hand-off, a successor not submitted replaced by a Prepare, a submitted
+one cut first, a Cut too late stopping playback when it is heard
+(`ReasonRemovedAudible`), as an edit's does; a session's first occurrence
+and one a releasing session holds are revoked instead; Revoke stops the
+session's DSD at once (`Backend.Revoke`). The rig's events and output
+play's pass `Replan` on.
+
+**The check after open.** `checkDSDNode`, at the open and every reopen: the
+node's unit keys to the set's `policy.Identity` (the model's key and the
+firmware, never the port), else `wrong_device` before a frame; for DoP the
+gain check read afresh at the node's card (`policy.CheckGain` over
+`policy.DoPAltsets`); the identity it opened is what reconciliation compares.
+
+**Evidence.** On a goroutine of the backend's, never the audio path
+(`recordDSD`, one `Store.Update`, an unchanged state writing nothing): a real
+open's `driver_accepted` of the exact tuple under the running kernel
+(`noteDriverAccepted`, after the open answered, `kernelRelease` reading
+`/proc/sys/kernel/osrelease` through the trees); the tuple's
+`streaming_observed` and its transport's first use `observedAt` once an
+occurrence heard played 5 s of its own content, the kernel establishing it,
+with no fault and no failed decode in the session (`noteStreamingObserved`,
+from the reporter's step); each native format and DoP carrier the probe
+accepted (`noteProbed`). `dsdstate.Store` fences every write once one landed
+without its barrier (`ErrLandedNotHeld`, `Store.Landed`; B6's migration had
+fenced only its own steps), and the backend says it once.
+
+**The probe.** `ProbeDSD`: due at the player's start once the output is
+available, when the unit's model, firmware, kernel or enumeration changes,
+and after a choice is written (`ForgetDSDProbe`, which serve calls when the
+migration changed a DAC's state), never on a timer. One the device slot
+refuses (a session that plays, opens, is paused or releasing; a release
+unconfirmed; another probe) opens nothing, waits for nothing and stays due:
+serve's supervisor asks again at its next 100 ms tick, so it runs once the
+slot is free, B4's preconditions unchanged. One that ran, met a busy node or
+found no unit is done for that unit.
+
+**The answers the brief asked for.** (1) Each kind of user: an owner whose
+record B6 migrated keeps native or DoP at the record's rates with no new
+prompt, the timing now the policy's (the probe's pause, a 100 ms tail, the
+profile's prefill or 400 ms) and the native format the first the DAC offers
+in the player's order; but DoP through a gain stage whose level cannot be
+read is refused (`dop_gain_unverifiable`, `TestAMigratedDoPSetupWithUnverifiableGainRefuses`);
+a rate the record did not approve waits for first use (`first_use_pending`)
+until B9's write; an owner whose record was refused or missing has the
+fallback (native or dop, nothing acknowledged: `first_use_pending`,
+`dop_confirmation_required`); an explicit off, or dop without allowDoP, is
+`dsd_off_by_choice`; a new install, unknown DAC or known, converts under
+auto and is refused as `dsd_not_in_this_release` until B11 or B9; PCM is
+unchanged, and a session that plays PCM alone reads nothing of the policy
+(`TestPCMOnlyPlaysAsItDidAndReadsNoBox`); `output play` plays by its own
+migrated state. (2) One set per occurrence, no run-time fallback, the opened
+node the set's identity, an unused cap revoking nothing. (3) The gain check
+at the open and on the monitor, a change revoking DoP with no consent. (4)
+Mixed access, the probe above. (5) The render path: nothing on it reads a
+file or takes a lock but the session's; the producer's checks are an atomic
+load and fields under its own lock. (6) Qualification version 40 (guarded
+`native.go`, `edges.go`, `sink_dsd.go`, `internal/alsa/` and the
+qualification package's docs): every earlier harness evidence is stale to
+the harness, as at every bump; `LegacyVersion` stays 35 and is the
+migration's alone, so an owner's record still migrates. (7) player.md: the
+content refusal's long form moved out first (`move_entry.py --line 136`).
+(8) The wire within today's shape: `dsdPlayback.reason` only when no rate
+plays, the lowest rate's word (`TestThePublishedReasonIsTheLowestRatesWordOnlyWhenNoRatePlays`);
+PROTOCOL.md lists the words (`TestEveryDSDRefusalWordIsInTheProtocol`);
+`qualifiedOn` and `qualificationRevision` are not sent; `model` and
+`bcdDevice` are the bound unit's; the field was always free text, so the
+shipped app shows an unknown word as text and grants nothing by it; the iOS
+mirror of PROTOCOL.md is owed. (9) `output play` keeps its own state
+directory and migration, reading the record in serve's data directory and
+never serve's state (`TestOutputPlayKeepsItsOwnDSDState`, beside a serve
+holding its lock and its own state, and beside one that never migrated).
+(10) The fence covers every write (`TestALandedMigrationFencesWhatPlaybackRecords`:
+the migration's write lands and its barrier fails; a real open's and the
+probe's records are refused, the file keeps what landed, said once). (11)
+`TestServeReadsNoApprovalRecord` removes the record and its reports after the
+migration and the set is the same; B6's first-start, delayed-DAC and
+deleted-state tests stay green.
+
+**Beside it.** `alsapcm.MaxDSDPrefill` is 5 s (B5's note: the Hugo 2's
+700 ms profile prefill was past the DSD sink's 500 ms bound;
+`TestEveryPrefillAProfileMayGiveTheSinkTakes`, `dacprofile.MaxTimingMs`
+exported). The config's legacy keys' docs and the start's warning say they
+decide nothing since the cutover. Serve's engine passes no DSD mode
+(`SessionOptions.DSD` decides nothing). `productionNativeAdmission` is
+`noNativeAdmission`, the harness's refusal. The protocol token guard reads
+the policy's pause words and native formats beside the approval's. The
+first `make test` failed in `internal/player/openhome` alone: its fault
+table's guard (`TestEveryEngineReasonHasItsFault`) parses `playback/open.go`'s
+Reason constants as literals, and ceb8e67b had made `ReasonRate` the
+policy's constant; 8467b07a gives it its literal again, held to the policy's
+word by `TestEveryDSDRefusalWordIsInTheProtocol`, and moves
+`ReasonDACUnread` beside the other refusals there, so the guard maps it too.
+
+**Tests**, new: `TestSelectionAndPublicationReadOneSet` (also under a race
+of refreshes and admissions), `TestAConvertedRateIsRefusedUntilThePlayerConverts`,
+`TestAnUnknownDACsDSDStaysRefused`, `TestAMigratedChoiceRefusesARateItsRecordDidNotApprove`,
+`TestAMigratedDoPSetupWithUnverifiableGainRefuses`,
+`TestThePublishedReasonIsTheLowestRatesWordOnlyWhenNoRatePlays`,
+`TestAStateThatDoesNotReadRefusesEveryRate`, `TestNoSetComesFromAReadingThatIsNotFresh`
+and `TestEveryDSDRefusalWordIsInTheProtocol` in playback; through the
+engine's Run, the backend and the real native and DoP sinks over the fake
+kernel, `TestDriverAcceptedComesFromARealOpen`,
+`TestStreamingObservedNeedsFiveSecondsWithoutAFault` (5.1 s, 4.9 s, a decode
+failed before its 5 s played out),
+`TestTheOpenedNodeMustBeTheIdentityThePolicyWasComputedFor` (another model,
+another firmware), `TestAnUnusedRateCapChangeRevokesNothing`,
+`TestAChangedChoiceReplansThePreparedSuccessorAndSkipsNothing`,
+`TestNoTransportFallsBackAtRunTime`, `TestAGainChangeRevokesDoPWithoutConsent`,
+`TestAGainOffUnityAtTheOpenRefusesDoP`, `TestAMigratedOwnerSetupPlaysAsBefore`
+(native, its DAC given exactly the content's native words, and DoP),
+`TestPCMOnlyPlaysAsItDidAndReadsNoBox`, `TestAProbeDueWhileTheDeviceIsHeldWaits`
+and `TestALandedMigrationFencesWhatPlaybackRecords` in alsapcm (a 1 ms
+profile prefill, which the kernel's buffer holds, lets a native start answer
+with no DAC time, so a test fills the sink before it grants exact play);
+`TestAReplanHandsTheSuccessorOffAgainAndSkipsNothing` in the engine;
+`TestServeReadsNoApprovalRecord`, `TestOutputPlayKeepsItsOwnDSDState` and
+`TestOutputsPublishTheEffectiveSet` in cmd/bridge; the usbmixer parser's,
+`UnitModel`'s and the fence's own. Rewritten for the cutover, their claims
+B7's: `TestServeOutputPlayAllowDoP` (the keys reach the backend through the
+migration alone: dop without allowDoP `dsd_off_by_choice`, auto without it
+`dsd_not_in_this_release`, with it DoP), `TestAnExplicitOffSurvivesAsTheDefault`,
+`TestAMigratedApprovalCoversOnlyItsRates`, `TestAVersion35RecordOnAnotherPortMigrates`
+(its rates now play), `TestDoPCandidateRefusedByServeAndOutputPlay` (through
+the real wiring), `TestNativeProductionConstructorsRefuse`,
+`TestLegacyDSDKeysStillLoadAndAreWarnedOnce`'s words,
+`TestServeStartsThePlayerOnlyWhenEveryGateHolds`'s DSD mode, and the overlay's
+`TestNativeIntegrationApprovedConstructor` (`legacy_version` is refused now).
+B1's two production tests are retired, cited elided:
+`…ProductionStillPlaysAVersion35RecordAfterTheBump` and
+`…ProductionRefusesARecordNewerThanThisBuild` became
+`TestTheApprovalAdmissionTakesTheHarnesssVersionAlone` and
+`TestProductionConfiguresNoApprovalBesideItsPolicy`.
+
+**Red first.** The new tests use `Config.DSD` and the policy fixtures
+(`playbacktest/policy.go`), which main does not have, so red was established
+on this tree, each mechanism reverted by one exact-once edit
+(`.tmp/_b728-b7/controls.py`: the bytes restored from memory in a `finally`,
+each test run alone from a compiled binary); C0 is main's own wiring. One
+red came first by itself: the PCM session's DSD successor refused as
+`dsd_dac_unread` (above, `dsdStale`).
+
+**Negative controls**, on fe621791, eighteen red: C0 readPermission
+consulted, serve wiring the approval admission as main did
+(`TestServeReadsNoApprovalRecord`, `TestAMigratedApprovalCoversOnlyItsRates`);
+C1 a fallback to DoP when the native open fails (`TestNoTransportFallsBackAtRunTime`);
+C2 a stale set after a change, a refresh reconciling nothing
+(`TestAChangedChoiceReplansThePreparedSuccessorAndSkipsNothing`,
+`TestAGainChangeRevokesDoPWithoutConsent`); C3 DoP kept through a gain change
+(`TestAGainChangeRevokesDoPWithoutConsent`); C4 the monitor never started
+(the same); C5 streaming_observed early, at 4 s (its 4.9 s case); C6
+streaming_observed beside a failed decode (its decode case); C7 a converted
+rate played (`TestAConvertedRateIsRefusedUntilThePlayerConverts`,
+`TestAnUnknownDACsDSDStaysRefused`); C8 the opened node's identity unchecked
+(`TestTheOpenedNodeMustBeTheIdentityThePolicyWasComputedFor`, both cases:
+the activation's refresh refuses as a second layer, after the open recorded
+a driver acceptance for the wrong unit); C9 the DoP gain check at the open
+skipped (`TestAGainOffUnityAtTheOpenRefusesDoP`); C10 an unused cap revoking
+(`TestAnUnusedRateCapChangeRevokesNothing`); C11 a re-plan revoked
+(`TestAChangedChoiceReplansThePreparedSuccessorAndSkipsNothing`); C12
+driver_accepted recorded before the open answers (its refused case); C13 the
+landed fence removed (`TestALandedMigrationFencesWhatPlaybackRecords`); C14 a
+PCM session reading the policy (`TestPCMOnlyPlaysAsItDidAndReadsNoBox`); C15
+selection reading the state beside the published set
+(`TestSelectionAndPublicationReadOneSet`); C16 a migrated acknowledgement
+widened (`TestAMigratedChoiceRefusesARateItsRecordDidNotApprove`); C17 the
+engine ignoring a re-plan (`TestAReplanHandsTheSuccessorOffAgainAndSkipsNothing`).
+The tree was clean after each.
+
+**Checks**, on legion0, each run in one call through the shared build lock
+(`.tmp/_b728-b7/gates.py`). On 8467b07a: `make fmt`, which rewrote nothing;
+`make vet`, and with `GOOS=windows`, `GOOS=darwin` and `GOOS=linux
+GOARCH=386`, each clean; `make build-all`; `go test -race -count=1` of
+`./cmd/bridge/` (977 s), `./internal/player/playback/`, `./internal/alsapcm/`,
+`./internal/player/engine/`, `./internal/player/policy/`,
+`./internal/player/dsdstate/`, `./internal/alsa/`, `./internal/api/`,
+`./internal/config/`, `./internal/player/qualification/` and
+`./internal/player/dacprofile/`, each ok, the ALSA, alsapcm, durable-writer and
+identity tests running here on Linux; both native-integration overlays (13
+`TestNativeIntegration` passes in cmd/bridge, the six CI names among them, and
+29 in playback, the four among them); `scripts/alsa-abi/check.sh` on amd64
+against Ubuntu's `/usr/include/sound/asound.h`, compared as v6.12's (curl is
+denied here), `TestUAPIMatchesTheKernelHeader` over 252 facts; `make
+docs-check`; the qualification check, "qualification version OK:
+0d5cb33b..HEAD"; the tree clean after. `make test`: on fe621791, 84 packages
+ok and `internal/player/openhome` failed (above, fixed in 8467b07a); on
+8467b07a, 84 ok and `scripts/install-test` failed, one subtest of
+`TestTheInstallerSaysWhatLetsThePlayerOpenTheDAC` ("sudo: Text file busy":
+a stub one parallel test wrote, executed while another's fork held it open,
+code this change does not touch, which passed in the run before); again on
+8467b07a, alone, 85 packages ok and none failed, in 1,737 s, the tree clean
+after.
+The rules patch: `make docs-check` ok on a copy of the tree with it applied
+(CLAUDE.md 78.1 %, player.md 98.0 %, the worst load 65.3 %), and the
+cited-test-names guard green there.
+
+The rules patch (`rules-b728-b7.patch`; `.claude/rules/player.md`, CLAUDE.md,
+`ops/History-rules-player.md`, `ops/History-b470-native.md`): the content
+refusal's long form moved out first (`move_entry.py --line 136`, 97,286 to
+95,976 bytes), then section 9.1 item 6's words for it, item 9's for the
+native hand-off, owner approval and DoP bullets, B1's bullet past tense, and
+item 10's B7 bullet, the DoP topology, with B7's Don'ts; their long forms say
+what B7 changed beside 2c.2's, 2c.2b's and 2d.2's records; CLAUDE.md's rows
+for format, alsapcm, playback, dacprofile, dsdstate and policy no longer say
+the policy is uncalled or that production plays only under approval. With it
+player.md is 97,984 bytes (98.0 %); it applies under `git apply --check`.
+
+**Owed.** The iOS mirror of PROTOCOL.md (`docs/BridgeProtocol.md`, byte for
+byte). The hardware run on the Pi with the Mytek Brooklyn DAC+, on a box
+whose owner's record B6 migrated: serve plays native DSD at the record's
+rates with no prompt, `player-dsd.json` gaining the tuple's
+`driverAcceptedAt` under the running kernel and, after 5 s, its
+`streamingObservedAt` and native's first use `observedAt`; native DSD64 to
+DSD256 by the policy; DoP where the migrated record approved it, at DSD64 and
+DSD128 (the Mytek's profile refuses DoP at DSD256), where the gain check
+passes, and a volume moved off 0 dB stopping it at once; the probe's run at
+the player's start, and again only after a replug; no DSD while the state
+refuses it.
+
+## 2026-11-06 — B728 B7 round 2: the review's points, CI and the bots
+
+Worker b728-b7, `feat/b728-b7-cutover` (PR #1415), commits 85f535e0,
+00e8f89c, 388b35e5, d2e7bfb1, d4de2688 and e7a93fb5, and this record's.
+Each point was run red on the code before its fix, or is shown not to hold;
+each fix has a control (`.tmp/_b728-b7/controls_r2.py`: exact-once
+replacements, the bytes restored from memory in a `finally`, each test from
+a compiled binary; the tree clean after each).
+
+**1. A played-out DoP occurrence revoked its native successor** (holds).
+During a DoP→native transition the drained, closed DoP occurrence stayed in
+the chain until the native one was heard; the volume leaving 0 dB while the
+native node was checked had reconciliation revoke the played-out occurrence
+and with it the session's DSD. Red: `TestAPlayedOutDoPOccurrenceStopsNothingAfterIt`
+(auto as the migration leaves DoP at DSD64 and native at DSD128; the check
+after open of the native node held while the controls change): the successor
+refused `native_revoked`. Fix: `reconcileDSD` does not judge an occurrence
+whose output drained or closed, since nothing of it can reach the DAC again.
+Controls: the skip removed (red); every occurrence whose frames are all in
+its sink left alone (`TestAGainChangeRevokesDoPWithoutConsent` red: a DoP
+occurrence still sounding stops).
+
+**2. The probe's answers attributed to another unit** (holds). `ProbeDSD`
+captured the unit, then `Backend.Probe` located and admitted on its own, a
+port binding's check naming a place. Red: `TestAProbeRecordsNothingOfAUnitSwappedInBeforeItsOpen`
+(the probe's check after open held, another model swapped in): 23
+candidates asked of it, its answers kept in the cache and recorded as the
+captured model's `driver_accepted`. Fix: `ProbeRequest.Check`, asked after
+the binding's check; `ProbeDSD` passes `probedUnit`, the captured unit's
+place and enumeration (`binding.SameUnit`, the device number), model key and
+firmware. Controls: no check (both cases red: another model, the same model
+enumerated anew); the check without the enumeration (the second red).
+
+**3. The serial on the wire** (holds). `readDSD`'s model was the raw sysfs
+strings; serve's `playerModelText` took out the boot binding's serial and
+port, which a binding by model or by port does not hold. Red:
+`TestThePublishedModelNamesNoSerialOrPort` published "Test at
+platform-xhci-hcd.0/usb2-1 Test DAC TESTDAC-0001". Fix: `unitText`, the
+reading's own port path and serial taken out. Control: the model raw (red).
+
+**4. A refresh during the first content read** (holds). The first occurrence
+was admitted as its open began; a refresh while it read its first chunk
+published the next set, which reconciliation skipped (not opened), and the
+activation's pointer comparison refused it. Red:
+`TestAChangeWhileTheFirstOccurrenceReadsItsFirstChunk` (the first read past
+the DSF header stalled): a cap above its rate failed the start ("the effective
+DSD set no longer plays this occurrence's plan"); DSD off opened the node
+before refusing. Fix: `start` readmits it under the session's lock and closes
+its done in that step (`readmitDSDLocked`, as `openSuccessor` does), so a set
+published before that step admits it and one after it judges it. Control:
+the readmission removed (both cases red).
+
+**5. `--report` panics** (does not hold). `playerDSD.resolve` and `retry`
+return at once on a nil receiver (their first lines, serve_player_dsd.go).
+`TestOutputPlayWithAReportRunsPastItsFirstSnapshot` runs `--report` past the
+first snapshot's report and a track heard, and calls both on a nil state;
+a control taking `retry`'s nil check out panics it.
+
+**6. A cwd-relative kernel release** (holds where an env names no trees;
+production's names `hostTrees`). Red: `TestOutputPlayReadsTheHostsTreesWhereNoneIsNamed`
+(a zero env and a working directory holding `sys/kernel/osrelease`): the
+release "a-stray-release", the policy's box and the locator at "". Fix:
+`runOutputPlay` takes `env.trees.or(hostTrees)` once, before anything reads
+the box, as serve does. Control: removed (red).
+
+**7. A forced probe left undone** (holds). Red:
+`TestAProbeTheMigrationForcesOnTheTickRuns` (B6's delayed model read: the
+manufacturer string restored after the first try, the part made on the
+tick): the probe asked once in 150 s. Fix: `dsdPartChanged`, which serve's
+supervisor and output play's watch share, marks the probe due for the next
+tick. Control: the mark removed (red).
+
+**8. Native unaffected had no test** (holds, a gap: the control gating native
+on the DoP gain left playback's and the rig's B7 tests green).
+`TestANativeRateIsUnaffectedByAnUnverifiableDoPGain`: a feature unit and an
+unread table; a migrated mixed setup under auto, on a DAC the profile
+database knows and on one it does not, and a migrated native setup; native
+at its rates, published. The review expected DSD128 under auto to be
+`dop_gain_unverifiable`; the design's section 3.2 has auto convert a rate
+neither transport plays, refused as `dsd_not_in_this_release` until B11, and
+only an explicit dop names `dop_gain_unverifiable`
+(`TestAMigratedDoPSetupWithUnverifiableGainRefuses`). Controls: native gated
+on the gain under native, under auto's known branch and its unknown branch,
+each red (the first auto control survived while the test had no profile
+database: the unknown branch, which it had not touched).
+
+**9. CI's `/dev/snd/pcmC5D0p`** (holds). `TestServesPlayerRefusesWhatItCannotPlayBeforeTheDevice`
+is serve's one boot on the real backend; its player probes the GO bar at
+card 5 once the output is available, through the backend's own prober. Here
+its Play usually held the device first and serve stopped before the next
+tick (five `-race` runs passed); an experiment with a stand-in prober showed
+the probe asked of card 5 device 0. Reproduced red by waiting for the
+probe's line: the guard's report. Fix: the test probes through
+`probeStandIn` (serve's backend with its `Probe` replaced) and reads no
+control node (`noControlNodes`), and waits for the stand-in's ask. Control:
+the stand-in removed (red, the guard's line).
+
+**10. Windows** (holds, a fixture's): `dsdFactsOf` seeds the player's UUID
+through the durable writer, which refuses a platform with no directory fsync.
+Production writes neither on Windows: the player is Linux only
+(`config.PlayerEnabled` refuses it there, output play too), and every write
+of the DSD state (the store's, and restore's `WriteRestored`) goes through
+`WriteBytesDurable`, refused there. Skipped there with that reason, as
+`TestBridgeDSDTupleTransport` already was through `ApprovedWith`. Not run
+here; `make vet` for windows clean.
+
+**11. macOS's race** (holds). Reproduced with `-cpu 1`: twice in 40 the race
+compared nothing. The writer now waits, on a condition, until the reader and
+the admitter have both seen its generation, so every generation is compared,
+and their loops yield. Control: the wait removed (red under `-cpu 1`, one
+generation compared).
+
+**12. Gemini on `reportStep`** (does not hold). `reportStep` holds the
+session's lock from `l.lock()` to the `l.unlock()` before its sends, with no
+unlock between but the early return; `posOf` reads the sink's position
+under it, and the sink takes no session lock; `reconcileDSD` writes under
+the same lock. `TestReconciliationAndTheReporterTakeOneLock` runs refreshes
+that keep the heard occurrence through a change of the set as fast as they
+run, beside the reporter taking ticks as fast: `-race` clean. A control
+moving the reporter's loop outside the lock is a DATA RACE there. A first
+version, driving refreshes by the monitor's ticks, stayed green under that
+control: reconciliation wakes the reporter, which orders each write before
+the next step, so only refreshes that frequent land inside one.
+
+**13. The record's cleanup** (holds): its `p…json` filter also deleted
+`player-dsd.json` and `player-queue.json`. Red with an assertion that serve's
+DSD state stays; the test now removes the record and the reports it names.
+Control: the prefix filter back (red).
+
+**14. This log's sentence on `readMixer`** (holds): corrected in place in
+round 1's record, and in the B7 bullet's long form, which repeated it.
+
+**15, 16. PROTOCOL.md.** The design's section 3.2 has `auto` try DoP once
+native is out at a rate, so the set may publish the other transport: the
+no-fallback sentence now holds of an occurrence (it plays the transport it
+was admitted under or stops), and says what the set publishes. The
+reconciliation paragraph: a re-planned successor is admitted under the new
+set as any entry is (plays, or is refused with the new set's word); a
+session's first occurrence once its content opened and before it reaches the
+DAC, and any occurrence of a releasing session, are stopped rather than
+handed off again; a played-out one is not judged. The iOS mirror copies it.
+
+**Rules** (`rules-b728-b7-r2.patch`, against the pushed branch with round 1's
+patch): player.md's serve-tests bullet (the probe and controls through
+stand-ins), the probe bullet (a node not the unit the probe was begun for; a
+probe a migration's part made due), the B7 bullet (a played-out occurrence
+not judged; an open not ended under a replaced set; no serial or port in a
+USB string), output.md's `hostTrees` bullet (output play), and their long
+forms, the B7 one's no-set sentence and the probe's "nothing in serve calls
+it" corrected. player.md 98,456 bytes (98.5 %); on a copy with both patches,
+`make docs-check` and the cited-test-names guard green.
+
+**Checks**, on legion0 through the shared build lock
+(`.tmp/_b728-b7/gates_r2.py`), on e7a93fb5: `make fmt`, which rewrote
+nothing; `make vet`, and with `GOOS=windows`, `GOOS=darwin` and
+`GOOS=linux GOARCH=386`, each clean; `make test-fast`, 85 packages ok
+(479 s); `go test -race -count=1` of `./internal/player/...`,
+`./cmd/bridge/...` and `./internal/alsapcm/...`, 16 packages ok (1,051 s;
+cmd/bridge 1,029 s, the suite's guard silent); `make docs-check`; the
+qualification check from 0d5cb33b and from main (4880f8a4), each OK: the
+branch's version is 40 and main's 39, and this round changes guarded
+`internal/alsapcm/` tests; the tree clean after.
+
+**Owed.** The iOS mirror of PROTOCOL.md, changed again here. The hardware run
+round 1 listed, and beside it the probe asked again once a migration's part
+for the DAC is made without a replug.
+
+**Round 3** (commit 0b2ac814). Once `first.done` closed, `start` read
+`first.admitted` (whether to start the DSD monitor) and `first.refused` after
+its unlock, while reconciliation repoints the one (Keep) and `Revoke` sets the
+other, both under the session's lock. Both are now read in the critical
+section that closes done, `first.dropped` set there too.
+`TestRefreshesAcrossTheFirstOpensEndTakeTheSessionsLock` runs refreshes,
+keeping the plan (a cap above its rate) or taking it away (DSD off),
+concurrently with the stalled first read's release, over twenty fresh
+sessions each: -race clean, the kept plan playing every time. Control: round
+2's unlocked reads restored, red under -race in three runs of three, a DATA
+RACE between `Revoke`'s write and the refusal's read; the monitor's read,
+between the unlock and `startDSDMonitor`'s own lock, has a window this test's
+scheduling does not reach, and is fixed in the same statement. Checks, on
+0b2ac814 through the shared build lock (`.tmp/_b728-b7/gates_r3.py`): `make
+fmt`, which rewrote nothing; `make vet`, and with `GOOS=windows`,
+`GOOS=darwin` and `GOOS=linux GOARCH=386`, each clean; `go test -race
+-count=1` of `./internal/player/...`, `./cmd/bridge/...` and
+`./internal/alsapcm/...`, 16 packages ok (994 s; cmd/bridge 975 s, the
+suite's guard silent); `make docs-check`; the qualification check from
+0d5cb33b and from main, each OK; the tree clean after.
+
+**Round 3, two more points** (commits 4234662e and 65d4f7a1). CodeRabbit: a
+devnum sysfs could not read is 0, which `UnitModel` still returns and
+`binding.SameUnit` does not compare, so two zeros matched in `ProbeDSD` and in
+`probedUnit`, and a re-enumerated unit's answers could land under the captured
+model and firmware. `ProbeDSD` probes no unit whose device number did not
+read, and `probedUnit` refuses one. Red before: `TestAProbeAsksNothingOfAUnitWhoseEnumerationDoesNotRead`
+(23 candidates asked, the model's `driver_accepted` recorded) and
+`TestTheProbesCheckRefusesAnEnumerationThatDoesNotRead` (the check passed two
+zeros). CodeQL (high): the usbmixer table's control index, read with
+`strconv.Atoi`, was converted to `uint32` with no upper bound, so 2^32 wrapped
+to index 0 and named the volume control at 0 dB, and DoP played
+(`TestAControlIndexPastAUint32LeavesDoPUnverifiable`, red before). The index is
+parsed with `strconv.ParseUint(…, 10, 32)` into a `uint32` field; one past it
+does not read, the table with it, and DoP is refused as
+`dop_gain_unverifiable` (`TestAControlIndexIsAUint32`: 4294967295 reads,
+4294967296 does not). Controls, each red as predicted: `ProbeDSD` without the
+positive device number (its node opened once), `probedUnit` without it, and
+the index parsed to 64 bits (both index tests). Checks, on 65d4f7a1 through
+the shared build lock: `make fmt`, nothing rewritten; `make vet`, and with
+`GOOS=windows`, `GOOS=darwin` and `GOOS=linux GOARCH=386`, each clean; `go
+test -race -count=1` of `./internal/player/...`, `./cmd/bridge/...` and
+`./internal/alsapcm/...`, 16 packages ok (1,025 s); `make docs-check`; the
+qualification check from 0d5cb33b and from main, each OK; the tree clean.
+
+**Round 4** (commit c02b757c). CI's `test -race (rest)` failed
+`TestRefreshesAcrossTheFirstOpensEndTakeTheSessionsLock`'s "refreshes that keep
+its plan": a `backend_error` fault on the first occurrence, "the effective DSD
+set no longer plays this occurrence's plan". A production defect, not the
+test's: `checkDSDActivation` compared the occurrence's set with the one its own
+`refreshDSD` returned, outside the session's lock, so a refresh beside it (the
+session's own 100 ms monitor, started before the activation, or the
+supervisor's) that published the next set and reconciled the occurrence Keep
+between the two repointed `o.admitted`, and the check refused a plan the set
+published now plays; the other way round, a refresh that had published a set
+taking the plan away and had not yet reconciled the occurrence let the
+activation write to the DAC before its revocation. Both windows are held at
+their exact points by two test seams, `playback.Seams.Activating` (between the
+activation's read and its check) and `Published` (between a refresh's
+publication and its reconciliation, under the refreshes' lock), in
+`TestAnActivationJudgesThePlanByTheSetPublishedNow`: red on the old check in
+its first case (CI's fault, word for word) and its third (8,904 bytes given to
+the DAC, then `native_revoked`). The check now reads the set published now
+under the session's lock and judges the occurrence by `policy.Reconcile`,
+repointing one it keeps; a refresh after it judges the occurrence as
+reconciliation judges any. Controls, each as predicted
+(`.tmp/_b728-b7/predictions-r4.txt`): the old check restored, red in the first
+and third cases; the set published now compared alone, without `Reconcile`, red
+in the second; the kept occurrence not repointed at the check, green, since the
+publishing refresh's reconciliation repoints it after (the repoint is
+consistency, not load-bearing). Stress under -race on legion0 (16 cores), the
+CI test and the new one together: 300 runs at `-cpu 1` and 300 at `-cpu 16`,
+every one passing, no DATA RACE (12,000 sessions of the CI test at each
+setting). The CI test alone, on a binary built with the old check: 0 of 100
+runs failed at `-cpu 1` and 2 of 100 at `-cpu 16`, each with CI's fault, so the
+test finds the defect on this host too and the fix removes it. Rules: the job's
+`rules-b728-b7-r4.patch`, on rounds 1 and 2's, adds the activation to the
+reconciliation entry's Don't list and its long form. Checks, on c02b757c
+through the shared build lock (`.tmp/_b728-b7/gates_r4.py`): `make fmt`,
+nothing rewritten; `make vet`, and with `GOOS=windows`, `GOOS=darwin` and
+`GOOS=linux GOARCH=386`, each clean; `go test -race -count=1` of
+`./internal/player/...`, `./cmd/bridge/...` and `./internal/alsapcm/...`, 16
+packages ok (1,039 s; cmd/bridge 1,021 s); `make docs-check`; the qualification
+check from 0d5cb33b and from main, each OK; the tree clean.
 ## 2026-11-06 — B660: an install counts as healthy only once it has answered and stayed up
 
 Backlog B660, from the self-healing study of 2026-11-02 (read from the code:

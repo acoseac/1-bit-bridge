@@ -54,28 +54,54 @@ var albumArtistStep = reconcileStep{
 	apply:  (*Store).ApplyAlbumArtistReconciliation,
 }
 
-// yearStep fills a MISSING album year from the album's dominant year
-// (reconcileYears), so a single untagged track doesn't split off into its own
-// album row on iOS. Fill-missing only: a present year is left alone.
+// yearStep gives each physical album one year (reconcileYears): when a
+// directory's album has a recording year, every track whose year is not the
+// dominant one takes it, so neither an untagged track nor a track carrying
+// another recording year splits off into an album row of its own on iOS.
 var yearStep = reconcileStep{
 	label:  "year reconciliation",
-	fixed:  "year reconciliation filled missing album years",
+	fixed:  "year reconciliation gave each album one year",
 	decide: reconcileYears,
-	take:   func(dst *ReconcileTarget, c ReconcileTarget) { dst.Year = c.Year },
-	set:    func(t *Track, c ReconcileTarget) { t.Year = c.Year },
+	take:   takeAlbumYear,
+	set:    setAlbumYear,
 	apply:  (*Store).ApplyYearReconciliation,
+}
+
+// takeAlbumYear copies the year pass's answer onto a target: the year and the
+// record of what the tag said (reconcileYears writes the two together).
+func takeAlbumYear(dst *ReconcileTarget, c ReconcileTarget) {
+	dst.Year, dst.taggedYear = c.Year, c.taggedYear
+}
+
+// setAlbumYear is takeAlbumYear onto the Track the writer writes.
+func setAlbumYear(t *Track, c ReconcileTarget) {
+	t.Year, t.taggedYear = c.Year, c.taggedYear
 }
 
 // yearByMBIDStep fills a year-0 stray (a few loose tracks in their own
 // folder) from a same-MBID sibling (reconcileYearsByMBID), bounded to genuine
 // strays so it cannot merge two full copies or editions. It complements the
-// within-folder year pass before it.
+// within-folder year pass before it, and leaves every present year alone.
 var yearByMBIDStep = reconcileStep{
 	label:  "year reconciliation (mbid)",
 	fixed:  "year reconciliation (mbid) filled stray years",
 	decide: reconcileYearsByMBID,
 	take:   func(dst *ReconcileTarget, c ReconcileTarget) { dst.Year = c.Year },
 	set:    func(t *Track, c ReconcileTarget) { t.Year = c.Year },
+	apply:  (*Store).ApplyYearReconciliation,
+}
+
+// yearAfterMBIDStep is the year pass again, after the MBID fill: two strays of
+// one folder that borrow different years from their release ids take the
+// folder's one year in the same scan, where only the next scan's year pass
+// gave it to them (backlog B756). It changes nothing in a group the MBID fill
+// did not touch: yearStep leaves every group as the pass would leave it.
+var yearAfterMBIDStep = reconcileStep{
+	label:  "year reconciliation (after mbid)",
+	fixed:  "year reconciliation (after mbid) gave each album one year",
+	decide: reconcileYears,
+	take:   takeAlbumYear,
+	set:    setAlbumYear,
 	apply:  (*Store).ApplyYearReconciliation,
 }
 
@@ -93,9 +119,10 @@ var trackNumberStep = reconcileStep{
 }
 
 // reconcileSteps are the reconciliation passes in the order the scan's tail
-// runs them, and settleHeldReconciles replays them. One list, so the two
-// cannot come to disagree about the order.
-var reconcileSteps = []reconcileStep{albumTitleStep, albumArtistStep, yearStep, yearByMBIDStep, trackNumberStep}
+// runs them, and settleHeldReconciles replays them: five passes, the year
+// pass run again after the MBID fill. One list, so the two cannot come to
+// disagree about the order.
+var reconcileSteps = []reconcileStep{albumTitleStep, albumArtistStep, yearStep, yearByMBIDStep, yearAfterMBIDStep, trackNumberStep}
 
 // reconcileTargetOf is t's projection for the passes: every field any of
 // them reads. The integers are copied, never shared: StreamTracks reuses one
@@ -108,7 +135,16 @@ func reconcileTargetOf(t *Track) ReconcileTarget {
 		Year:               copyIntPtr(t.Year),
 		TrackNumber:        copyIntPtr(t.TrackNumber),
 		MusicBrainzAlbumID: t.MusicBrainzAlbumID,
+		taggedYear:         copyYearRecord(t.taggedYear),
 	}
+}
+
+// copyYearRecord returns a copy of rec, or nil.
+func copyYearRecord(rec *yearRecord) *yearRecord {
+	if rec == nil {
+		return nil
+	}
+	return &yearRecord{year: copyIntPtr(rec.year)}
 }
 
 // copyIntPtr returns a pointer to a copy of *p, or nil.
@@ -224,8 +260,10 @@ func (s *Scanner) takeHeldReconciles() []*Track {
 // (mergePostScanFields), and the passes run in memory (runReconcileStepsInMemory)
 // over the library's rows with EVERY held re-read's values in place of its
 // row's: the inputs the tail's passes would read had the scan written those
-// rows as they stand. A re-read then takes the values the passes give it: one
-// that marshals as its stored row is stamped (versionStampOnly), any other is
+// rows as they stand. A re-read then takes the values the passes give it, the
+// year pass's record of its tag included: one that marshals as its stored row
+// is stamped (versionStampOnly), one that differs from it in that record alone
+// is stamped with the record (yearRecordOnly, no revision), and any other is
 // written whole, with those values, so the passes after it find nothing left
 // to change. The held values stand in for all the held rows at once, and
 // that is what keeps a bump's extractor change from being voted down: a
@@ -265,6 +303,7 @@ func (s *Scanner) settleHeldReconciles(ctx context.Context, routedSet map[string
 		if t, ok := overlay[targets[i].Path]; ok {
 			t.Album, t.AlbumArtist = targets[i].Album, targets[i].AlbumArtist
 			t.Year, t.TrackNumber = targets[i].Year, targets[i].TrackNumber
+			t.taggedYear = targets[i].taggedYear
 		}
 	}
 	written, stamped, rewritten := s.writeHeld(ctx, live, stored)

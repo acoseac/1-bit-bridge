@@ -150,6 +150,16 @@
 // it. A failure after content played is a fault: recorded
 // (Snapshot.Faults), playback stopped, never restarted.
 //
+// A backend may ask that an occurrence it holds be handed off again
+// (ReplanEvents, B728 B7: the player's effective DSD set no longer plays
+// its plan, and no frame of it is the kernel's yet). The owner takes it as
+// an edit after hand-off: a successor not yet submitted is replaced by a
+// new Prepare naming the same entry, a submitted one is cut first, and
+// nothing is skipped for it, the queue and the selection untouched; a cut
+// that answers false keeps it, and once it is heard playback stops
+// (ReasonRemovedAudible). A session's first occurrence, one heard, and an
+// event of a session that is not current are passed over.
+//
 // The output's availability is an input (ReportOutput, OutputReport). It
 // starts unknown. Its going away, or the bound unit changing, stops
 // playback and freezes the position; while nothing plays it drops a pending

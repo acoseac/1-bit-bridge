@@ -163,6 +163,38 @@ func TestOutranks_TotalOrderPins(t *testing.T) {
 	}
 }
 
+// TestAFileTheScanFoundOutranksOneItDidNot: a row whose file the last scan
+// did not find (Row.Missing) never wins its unit while a member's file is
+// there, however much larger it is, in the same-format election and among
+// nest-twins alike (backlog B756 round 2): a missing winner suppresses the
+// one copy a client can play. Among missing members the rank is as before.
+func TestAFileTheScanFoundOutranksOneItDidNot(t *testing.T) {
+	present := flacRow("A/B/x.flac", 44100, 16, 200, 1000)
+	gone := flacRow("C/B/x.flac", 44100, 16, 200, 9000)
+	gone.Missing = true
+	if !outranks(present, gone) || outranks(gone, present) {
+		t.Fatal("a file the scan found must outrank a larger one it did not")
+	}
+	got := planFor(t, []Row{gone, present}, FilterHighestQuality)
+	if len(got) != 1 || got[0] != gone.Path {
+		t.Fatalf("suppressed %v, want the missing copy %s alone", got, gone.Path)
+	}
+
+	alsoGone := flacRow("D/B/x.flac", 44100, 16, 200, 5000)
+	alsoGone.Missing = true
+	if !outranks(gone, alsoGone) {
+		t.Fatal("between two missing copies the larger still wins")
+	}
+
+	shallowGone := flacRow("Chicago/CD 01/x.flac", 44100, 16, 200, 1000)
+	shallowGone.Missing = true
+	deepHere := flacRow("Chicago/CD 01/CD 01/x.flac", 44100, 16, 200, 1000)
+	g := Group{Key: KeyFor(shallowGone), Tier: TierSelfNested, Members: []Row{shallowGone, deepHere}}
+	if got := PlanSuppression(g, Policy{Mode: FilterHighestQuality}); len(got) != 1 || got[0] != shallowGone.Path {
+		t.Fatalf("nest suppression = %v, want the missing shallow twin %s", got, shallowGone.Path)
+	}
+}
+
 func TestKeyID_StableAndInjectiveOnBoundaries(t *testing.T) {
 	k := Key{AlbumID: "a|b|2020", Disc: 1, Track: 2, NormTitle: "song"}
 	// A GOLDEN value, not `k.ID() != k.ID()`.
