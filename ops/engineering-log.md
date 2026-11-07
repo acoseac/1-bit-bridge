@@ -81050,3 +81050,114 @@ build-all`, ok. On 26b1a788, whose one change is that test: gofmt,
 docs-check and the five vets again, ok; `make test-fast` and `make test`
 over `./cmd/bridge/...`, ok (348 s and 1,026 s). Not run here: macOS and
 Windows natively, CI's runners, the console in a browser, and the iOS app.
+
+## 2026-11-07 — B617, round 4: every return asks, and `bridge fingerprint` follows from its first read
+
+The review of PR #1425 read two more points, each to confirm red first or
+answer with evidence. Worker b617, the same host and toolchain. New commits on
+29662033: every return from a client once its answer began asks its switches
+(point 1) ce03f3fe, `bridge fingerprint` follows its switch from its first
+read (point 2) 492db044, the premium fetch's check at its return pinned
+5aa0b0b3, then this record. The rule's wording goes in
+`rules-b617-r4.patch`, over rounds 1 to 3's. The review's three other
+readings were left as it said; the public record names them under B761.
+
+### The points
+
+1. **Confirmed.** Round 3 asked a client's switches again only once a 200's
+   body was decoded, and only in MusicBrainz's, Deezer's search, iTunes'
+   search and AcoustID's calls. A 404, or an error status whose body the
+   client read or drained, came back as the status's error, or as the
+   upstream's miss, without asking. Round 3's barrier, which turns the switch
+   off at the body's first read or, now, at its close, after the answer's
+   admission, with every switch asked once an hour, showed it on 29662033
+   with this round's tests: each client took the error answer, MusicBrainz's
+   artist search (400) and release-group lookup (404), the Cover Art
+   Archive's front cover, Deezer's search and image, iTunes' search (400)
+   and artwork, and the Atlas premium refetch (404, the `(false, nil)` that
+   settles a pending cover), the other 404s answering `errNotFound`;
+   AcoustID's 400 came back as its HTTP error. Through the callers, on a
+   pass's context and on a bare one: `enrichOne` cached an empty album
+   resolution for a 400 to the release search and, the switch on again,
+   stamped the track against it with no release; `resolveArtist` cached `""`
+   for a 400 to the artist search and told its caller nil; and
+   `resolveReleaseGroupMBID` cached a 404 as no release group. Each client
+   now asks its switches, and those its context carries, at every return
+   once `Do` gave it a response, through one deferred check over named
+   results: a refusal stands for the answer and its error, and closes a body
+   the client would have handed over (the Cover Art Archive's and iTunes'
+   artwork streams). That covers the premium fetch's `TryCache` too, which
+   answers only whether a cover was cached, so an error status reads false
+   whatever the switch says: a 200 whose body completes after the flip counts
+   as no cover now, and the bytes it wrote stay
+   (`TestAPremiumCoverCompletedAfterTheFlipCountsNoCover`, written after the
+   fix; its red is control r4-1j below). Deezer's search and image returned
+   an error status without reading its body, which the deferred `Close`
+   alone touched, after the check, so the barrier could not reach that
+   check: they drain the body first now, as MusicBrainz, the Cover Art
+   Archive and the premium fetch do, which also gives the connection back to
+   the pool. `Switches.Answer`'s doc says what a client asks it at.
+2. **Confirmed.** A lookup run read its switch as it started, probed fpcalc,
+   and only then started the goroutine that follows the switch. On ce03f3fe
+   plus the probe's seam (`fingerprintProbe`), with a probe that turned the
+   config off as it began and took 1.6 s, the first lookup went out on the
+   start's answer (AcoustID asked once), and only then did the follower end
+   the run, exit 1 (the test took 2.61 s). `prepareFingerprintRun` now
+   starts the follower right after the read that admits a lookup run, before
+   the key check and the probe, and returns the run's context and its stop.
+   The probe runs on that context, so a switch-off during it cuts the probe
+   short, and the run, which then stops at its first file, exits 1 in the
+   refusal's words rather than as a failed fpcalc. The follower may write to
+   stderr while the run does, so the two share one lock (`syncWriter`). The
+   test passes in 1.00 s, and the live switch's five cases stopped 0.93 s
+   after the config changed.
+
+### Red first
+
+Each test ran on the tree before its fix: point 1's on 29662033
+(`TestEveryClientsErrorAnswerCompletedAfterTheFlipIsNoAnswer`, eight of
+eight; `TestAnErrorAnswerCompletedAfterTheFlipFillsNoNegativeCache`, six of
+six; AcoustID's `TestAnErrorAnswerCompletedAfterTheFlipIsNoAnswer`, two of
+two); point 2's on ce03f3fe plus the probe's seam
+(`TestBridgeFingerprintFollowsItsSwitchFromItsFirstRead`). The premium
+fetch's test came after its fix, so its control, the fix taken out, is its
+red.
+
+### Negative controls (each on the committed tree, restored after)
+
+Predictions written first, in `controls_r3.predictions.txt` beside the
+runner; the tree was clean after each.
+
+| Mutation | Predicted red | Held |
+|---|---|---|
+| (r4-1a) MusicBrainz's `get` asks nothing at its returns | its two error subtests; the cache test's six; round 3's six MusicBrainz subtests | yes |
+| (r4-1b) the Cover Art Archive's `fetchStream` asks nothing | its error subtest | yes |
+| (r4-1c) Deezer's `SearchArtist` asks nothing | its error subtest; round 3's four Deezer subtests | yes |
+| (r4-1d) Deezer's search returns its 404 undrained | its error subtest alone | yes |
+| (r4-1e) Deezer's `FetchImage` asks nothing | its error subtest | yes |
+| (r4-1f) iTunes' `get` asks nothing | its error subtest; round 3's iTunes test | yes |
+| (r4-1g) iTunes' `FetchArtwork` asks nothing | its error subtest | yes |
+| (r4-1h) AcoustID's `get` asks nothing | the error test; round 3's no-match test | yes |
+| (r4-1i) the premium `RefetchPremium` asks nothing | its error subtest | yes |
+| (r4-1j) the premium `TryCache` asks nothing | the premium cover test alone | yes |
+| (r4-2a) the follower started after the probe, as round 3 had it | the first-read test alone | yes |
+
+Every control built, and every prediction held. Not controlled: the probe on
+the run's context rather than the caller's (on the caller's, a switch-off
+during a slow probe still ends the run when the probe returns, inside the
+test's bound), and `syncWriter` (no test reaches the two writers at once).
+
+### Gates
+
+On 5aa0b0b3: gofmt (go1.27.3's) over the Go files the branch changes,
+clean; `make docs-check`, ok, and the doc budgets, ok, on a copy with all
+four rounds' rules patches applied, which `git apply --check` takes over
+round 3's rules. Through the build lock: `make vet` native and with
+`GOOS=windows`, `GOOS=darwin`, `GOOS=linux GOARCH=386` and `GOOS=linux
+GOARCH=arm`, ok; `make test-fast`, 86 packages ok, 34 of them from Go's
+test cache, their inputs unchanged since round 3's run (alsapcm ran, 36 s,
+and the identity's backup, 359 s); `make test` (race, the Makefile's tags,
+`-timeout 30m`) over `./internal/enrich/... ./internal/enrichgate/...
+./internal/acoustid/... ./cmd/bridge/...`, ok (`cmd/bridge` 1,024 s). Not
+run here: `make build-all`, macOS and Windows natively, CI's runners, and
+the iOS app.
