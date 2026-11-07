@@ -80414,3 +80414,79 @@ main's fc07f4a1 says the version stays, no guarded path having changed.
 `~/onebit/jobs/b728-b10/dsdconv-linux-arm64.test`, and `-amd64.test` beside it, rebuilt at
 5adcb8dd at round 1's paths. The amd64 one passes run where no source is, the golden among its
 tests, every digest a constant of it.
+
+## 2026-11-07 — B740: the build-site census skips make test's TMPDIR
+
+Backlog B740, the first of four small follow-ups on
+`fix/b74x-small-followups` from main c7192a6f, worker b74x on legion0
+(Linux, amd64, go1.27.3, `GOTOOLCHAIN=local`, `GOPROXY=off`). Commits: the
+red test 350c405a, the fix 98c1f871, then this record. The rule's line goes
+into `.claude/rules/build-ci-tests.md` through `rules-b74x.patch`, its long
+form under B740 in `ops/History-rules-build-ci-tests.md`.
+
+**What happened.** The build-site census (`discoverBuildSites`, shared by
+`TestBuildTagsAgree`, `TestRealTreeBuildSiteCensus` and
+`-check-build-tags`) walks every operational file the walk reaches, and it
+reached `.tmp`, which `make test` and `make test-fast` give every package's
+tests as TMPDIR when the caller sets none (B544). Those tests make and remove
+temporary files there while the suite runs: `scripts/install-test`'s
+`TestTheUserManagerIsFoundOrNothingChanges` puts a link at
+`run/user/1000/bus` in its rig's root, an extensionless name whose mode reads
+executable on Unix, and the census failed "build site must not be a symlink"
+on it (B739's last record: the merged head's only failure on one host). It
+could as well meet a test's stub that runs `go`, or a file removed between
+its listing and its read.
+
+**Red first.** With a link planted in this worktree at
+`.tmp/b740-planted/run/user/1000/bus`, leading nowhere as install-test's does
+once its socket goes, at 350c405a: a bare `go test ./scripts/third-party-licenses/`
+(TMPDIR unset, so `/tmp`) and `make test-fast TEST_PKGS=./scripts/third-party-licenses/`
+(TMPDIR the worktree's `.tmp`) both failed `TestBuildTagsAgree` and
+`TestRealTreeBuildSiteCensus` with "build site must not be a symlink:
+.tmp/b740-planted/run/user/1000/bus": the census reads the repository's
+`.tmp` wherever the environment's TMPDIR is. The committed red,
+`TestTheCensusSkipsTheMakefilesTMPDIRAtTheRoot`, plants in a fixture's `.tmp`
+(the directory read from the Makefile, never the environment) install-test's
+link, a link named as a build site, a stub that runs `go build` and a note
+holding a command, and failed on the first; its rows elsewhere (a link at the
+root, in `docs/.tmp`, in a look-alike `.tmp.old`, install-test's link under
+`scripts/`, and a note in a `.tmp` below the root) failed the census as they
+must, then and after.
+
+**The fix.** The census skips `makeTestTmpDir`, ".tmp", at the root alone,
+by its name before it lists it, where the `_` rule is, for the tests and
+`-check-build-tags` alike: a `make build` beside a running `make test`, or a
+`make build-all` after a killed test binary left its trees there, met the
+same files. `TestTheCensusSkipsTheMakefilesTMPDIR` reads the Makefile's
+TMPDIR line (the `$(CURDIR)/<dir>` of the lines that assign TMPDIR, recipe
+lines and comments excluded) and fails when it and the constant diverge, so
+a rename of either alone cannot put the census back in the suite's files.
+Rejected: skipping the environment's TMPDIR, which a bare `go test` sets
+elsewhere (control C740-3: green under make test-fast's, red under a bare
+run's), and skipping every dot-directory as the Go-file sweeps do (`.github`
+and `.claude` hold sites the census reads). Those sweeps
+(`TestEveryCitedTestNameExists`, the hash-cost, flac-handle and blank-keeper
+guards) already skip every name the go tool ignores, `.tmp` among them, so
+the census was the one sweep that read it.
+
+**Negative controls**, at 98c1f871 with the link still planted
+(`.tmp/_b74x/ctl.py`: exact-once replacements, the test binary built, each
+test run alone, the bytes put back from memory), predicted by name in
+`.tmp/_b74x/controls-b740.predictions.txt` before the run; every one as
+predicted, the baseline green and `git status` unchanged after. A is
+`TestTheCensusSkipsTheMakefilesTMPDIRAtTheRoot`, M
+`TestTheCensusSkipsTheMakefilesTMPDIR`, G `TestBuildTagsAgree`, R
+`TestRealTreeBuildSiteCensus`, X `TestCensusExcludedTreesAndRecords`.
+
+| Mutation | Red | Green |
+|---|---|---|
+| C740-1 the skip removed | A's TMPDIR row, G, R | M, X |
+| C740-2 skipped by its base name at any depth | A's three rows below the root | G, R, M, X |
+| C740-3 the environment's TMPDIR skipped, a bare run's (`.tmp/_b74x/gotmp`) | A's TMPDIR row, G, R | M, X |
+| C740-3 again, make test-fast's TMPDIR (the worktree's `.tmp`) | A's TMPDIR row | G, R, M, X |
+| C740-4 the Makefile's default renamed `.scratch` | M, A's TMPDIR row | G, R, X |
+| C740-5 the constant renamed `.cache` | M, A's TMPDIR row, G, R | X |
+
+**After**, with the link planted: the package's whole suite under a bare
+`go test` (TMPDIR unset), ok; `make test-fast` with the default TMPDIR is
+among the branch's gates (B745's record).

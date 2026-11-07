@@ -1287,6 +1287,33 @@ dry runs for unset, empty, caller-set and space-containing values showed
 the correct quoted paths. This is a default location, not a claim that
 every checkout is on persistent storage.
 
+### B740 — the census skips make test's TMPDIR (2026-11-07)
+
+- **…and the build-site census skips that `.tmp` at the root, by its name (`makeTestTmpDir`), never by the environment's TMPDIR, which a bare `go test` sets elsewhere; `TestTheCensusSkipsTheMakefilesTMPDIR` holds the name to the Makefile's TMPDIR line** (2026-11-07, backlog B740). **Don't rename the Makefile's default or the constant alone, skip a `.tmp` below the root, or skip the environment's TMPDIR.**
+
+The census (`discoverBuildSites`, which `TestBuildTagsAgree`,
+`TestRealTreeBuildSiteCensus` and `-check-build-tags` share) reads every
+operational file the walk reaches, and it reached `.tmp` while every
+package's tests made and removed their temporary files there: it failed
+"build site must not be a symlink" on `scripts/install-test`'s link at
+`run/user/1000/bus` (an extensionless name, whose mode reads executable on
+Unix), and could as well meet a test's stub that runs `go` or a file removed
+between the listing and its read. Nothing in `.tmp` is the repository's
+(both ignore files exclude it). The skip is decided at the root by the
+name, before the directory is listed, as the `_` rule is, and holds for
+`-check-build-tags` too: a `make build` beside a running `make test`, or a
+`make build-all` after a killed test binary left its trees there, met the
+same files. The name is a constant, not the environment's TMPDIR: a bare
+`go test` has TMPDIR elsewhere (`/tmp`) and still walks the repository's
+`.tmp`, and a skip of the environment's directory passed under
+`make test-fast` and failed under a bare run (the record's control C740-3).
+Not every dot-directory: `.github` and `.claude` hold sites the census must
+read, where the Go-file sweeps skip every name the go tool ignores.
+`TestTheCensusSkipsTheMakefilesTMPDIRAtTheRoot` plants in a fixture's
+`.tmp`, read from the Makefile, what the suite leaves there, and keeps a
+link at the root, in a `.tmp` below it and in a look-alike `.tmp.old`
+failing the census. Record: `ops/engineering-log.md`, B740.
+
 ### B520 — self-dial candidate search (2026-10-26)
 
 - **A host-address test must establish self-dialability, not just bindability, without switching to loopback or an unspecified address when the specific-IP branch is its subject.** B520 tries every non-loopback IPv4 candidate with a bounded bind/dial and source-IP check, listing failures when none works; skip locally, fail when `CI` is set. Preserve the logging negative control in the engineering log.
