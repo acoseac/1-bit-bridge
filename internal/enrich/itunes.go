@@ -39,6 +39,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/enrichgate"
 )
 
 // DefaultITunesBase is the public iTunes Search API root. Overridable
@@ -52,6 +54,9 @@ type ITunesClient struct {
 	base      string
 	userAgent string
 	http      *http.Client
+	// sw is the client's own switch, enrich.enabled, which its transport
+	// asks (backlog B617).
+	sw enrichgate.Switches
 	// noteAnswered ends the iTunes failure streak when a request is
 	// answered, including a 404. A 429 or a 5xx keeps the streak. A
 	// transport error does not call it. Nil when the client is built
@@ -60,8 +65,13 @@ type ITunesClient struct {
 }
 
 // NewITunesClient constructs a client. userAgent must identify the
-// caller (Apple's recommended courtesy; not enforced).
-func NewITunesClient(base, userAgent string, httpClient *http.Client) *ITunesClient {
+// caller (Apple's recommended courtesy; not enforced). sw is enrich.enabled
+// as the client asks it (enrichgate.Enrichment; backlog B617): a request is
+// sent, and its answer taken or handed over, only while it is on, whatever
+// context the request carries, and an artwork body it hands over is cut off
+// within enrichgate.Interval of a switch-off (what its reader wrote of it by
+// then stays); zero switches are off, and send nothing.
+func NewITunesClient(base, userAgent string, httpClient *http.Client, sw enrichgate.Switches) *ITunesClient {
 	if base == "" {
 		base = DefaultITunesBase
 	}
@@ -73,7 +83,9 @@ func NewITunesClient(base, userAgent string, httpClient *http.Client) *ITunesCli
 		// churn during enrichment passes.
 		httpClient = &http.Client{Timeout: 10 * time.Second, Transport: sharedHTTPTransport}
 	}
-	return &ITunesClient{base: base, userAgent: userAgent, http: httpClient}
+	// A copy that sends only while sw is on (sw.Client), though no
+	// production path builds this client.
+	return &ITunesClient{base: base, userAgent: userAgent, http: sw.Client(httpClient), sw: sw}
 }
 
 // ITunesAlbum is the trimmed-down iTunes album result the enricher
@@ -187,7 +199,7 @@ func (c *ITunesClient) SearchAlbum(ctx context.Context, artist, album string) (*
 // 5<<20))`, which protected against multi-GB OOM but still allocated
 // up to 5 MB in RAM per fetch and lived inconsistently next to the
 // CAA streaming path.
-func (c *ITunesClient) FetchArtwork(ctx context.Context, a *ITunesAlbum) (io.ReadCloser, error) {
+func (c *ITunesClient) FetchArtwork(ctx context.Context, a *ITunesAlbum) (body io.ReadCloser, err error) {
 	if a == nil || a.ArtworkURL100 == "" {
 		return nil, errNotFound
 	}
@@ -201,6 +213,16 @@ func (c *ITunesClient) FetchArtwork(ctx context.Context, a *ITunesAlbum) (io.Rea
 	if err != nil {
 		return nil, err
 	}
+	// Every return from here asks the client's switches again, as get's do
+	// (backlog B617); a refusal closes a body it would have handed over.
+	defer func() {
+		if r := c.sw.Answer(ctx); r != nil {
+			if body != nil {
+				_ = body.Close()
+			}
+			body, err = nil, r
+		}
+	}()
 	noteSettledAnswer(c.noteAnswered, resp.StatusCode)
 	if resp.StatusCode == http.StatusNotFound {
 		resp.Body.Close()
@@ -232,7 +254,7 @@ func (c *ITunesClient) FetchArtwork(ctx context.Context, a *ITunesAlbum) (io.Rea
 // 429 / 503, mirroring `MusicBrainzClient.get`. iTunes rarely 429s in
 // practice but Apple has been known to quietly throttle abusive
 // callers, so honoring the advisory header keeps us well-behaved.
-func (c *ITunesClient) get(ctx context.Context, u string, out any) error {
+func (c *ITunesClient) get(ctx context.Context, u string, out any) (err error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
 	if err != nil {
 		return err
@@ -244,6 +266,13 @@ func (c *ITunesClient) get(ctx context.Context, u string, out any) error {
 		return err
 	}
 	defer resp.Body.Close()
+	// Every return from here asks the client's switches again, as
+	// MusicBrainzClient.get's do (backlog B617).
+	defer func() {
+		if r := c.sw.Answer(ctx); r != nil {
+			err = r
+		}
+	}()
 	noteSettledAnswer(c.noteAnswered, resp.StatusCode)
 	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable {
 		if delay := parseRetryAfter(resp.Header.Get("Retry-After"), time.Now()); delay > 0 {

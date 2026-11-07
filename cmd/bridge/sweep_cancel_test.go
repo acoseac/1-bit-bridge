@@ -118,7 +118,7 @@ func runOneFingerprintPass(t *testing.T, store *manifest.Store, stop bool) bool 
 	go func() {
 		defer close(done)
 		runFingerprintSweeper(ctx, &fingerprintSweeper{store: store, maxPerRun: 10, workers: 1},
-			enabled, staticInterval(time.Hour), nil, nil, status)
+			enabled, alwaysOn, staticInterval(time.Hour), nil, nil, status)
 	}()
 	drainLoopOnCleanup(t, cancel, done, "the fingerprint sweeper")
 	return awaitOnePass(t, asked, status.snapshot)

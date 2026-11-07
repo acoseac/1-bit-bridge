@@ -79,7 +79,7 @@ func TestFetchImage_RefusesRedirectToDisallowedHost(t *testing.T) {
 	}))
 	defer attacker.Close()
 
-	c := NewDeezerClient("", "test-agent", &http.Client{Timeout: 2 * time.Second})
+	c := NewDeezerClient("", "test-agent", &http.Client{Timeout: 2 * time.Second}, onDeezerSwitches)
 	// httptest servers live on 127.0.0.1:<ephemeral>; the allowlist is
 	// matched against Hostname() which strips the port, so the bare IP
 	// literal is what we whitelist for first-hop to reach httptest.
@@ -114,7 +114,7 @@ func TestFetchImage_FollowsRedirectWithinAllowlist(t *testing.T) {
 	}))
 	defer hop.Close()
 
-	c := NewDeezerClient("", "test-agent", &http.Client{Timeout: 2 * time.Second})
+	c := NewDeezerClient("", "test-agent", &http.Client{Timeout: 2 * time.Second}, onDeezerSwitches)
 	// Both httptest servers bind 127.0.0.1 with different ephemeral
 	// ports; Hostname() strips the port, so a single IP allowlist entry
 	// covers the full hop chain.
@@ -149,7 +149,7 @@ func TestFetchImage_RejectsEmptyBody(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewDeezerClient("", "test-agent", &http.Client{Timeout: 2 * time.Second, Transport: srv.Client().Transport})
+	c := NewDeezerClient("", "test-agent", &http.Client{Timeout: 2 * time.Second, Transport: srv.Client().Transport}, onDeezerSwitches)
 	c.SetAllowedImageHostsForTest([]string{"127.0.0.1"})
 
 	ctx, fetched := siblingCloseInTheIdleWindow(context.Background())
@@ -222,7 +222,7 @@ func TestNewDeezerClient_DoesNotMutateSharedHTTPClient(t *testing.T) {
 		t.Fatalf("precondition: shared.CheckRedirect should be nil before NewDeezerClient")
 	}
 
-	_ = NewDeezerClient("", "test-agent", shared)
+	_ = NewDeezerClient("", "test-agent", shared, onDeezerSwitches)
 
 	if shared.CheckRedirect != nil {
 		t.Fatalf("NewDeezerClient mutated the caller's *http.Client.CheckRedirect; the deezer guard leaked into the shared client")

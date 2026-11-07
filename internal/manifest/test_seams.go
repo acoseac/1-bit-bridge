@@ -1,6 +1,7 @@
 package manifest
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 
@@ -58,4 +59,27 @@ func SetBeforeMigrationLockForTest(fn func(dbPath string)) (restore func()) {
 // shared; production code never calls it with a non-nil fn.
 func (s *Store) SetUpscaleTargetBeforeCommitForTest(fn func(*sql.Tx) error) {
 	s.upscaleTargetBeforeCommit = fn
+}
+
+// SetAcoustIDMatchForTest records acoustid_match for path alone, with no
+// re-queue: a test's fixture of a row the sweeper matched. The sweeper writes
+// it only with its re-queue (ResetEnrichedByPaths), never apart from it.
+func (s *Store) SetAcoustIDMatchForTest(ctx context.Context, path, acoustID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE tracks SET acoustid_match = ? WHERE path = ?`, acoustID, path)
+	return err
+}
+
+// SetResetEnrichedBeforeCommitForTest makes fn run in every
+// ResetEnrichedByPaths of s once its statements are written and before its
+// transaction commits, under the store's writer lock, with the reset's
+// context: a test's hold on the fingerprint sweep's re-queue, where a cancel
+// of that context rolls the transaction back (backlog B617). An error fn
+// returns is the reset's, and the transaction rolls back. On the store it
+// serves, never a package variable. Call it before s is shared; production
+// code never calls it with a non-nil fn.
+func (s *Store) SetResetEnrichedBeforeCommitForTest(fn func(ctx context.Context) error) {
+	s.resetEnrichedBeforeCommit = fn
 }

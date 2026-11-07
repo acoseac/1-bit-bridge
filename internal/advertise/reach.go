@@ -257,6 +257,13 @@ func CertHostname() string {
 	return name
 }
 
+// ReportedHostname is the host's name as the system reports it, read through
+// the probe every name the bridge certifies and advertises is read through
+// (SetHostProbeForTest's), so the bridge's mDNS responder publishes the name
+// /v1/health and the certificate take from the same read (backlog B744):
+// cmd/bridge hands it to the responder as its HostnameSource.
+func ReportedHostname() (string, error) { return hostnameFunc() }
+
 // Host is the host's name as the pairing QR takes it, from one read of the
 // name the system reports (PairingHost).
 type Host struct {

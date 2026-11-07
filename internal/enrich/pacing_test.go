@@ -70,8 +70,8 @@ func TestNewEnricherDerivesPacingFromClients(t *testing.T) {
 
 	t.Run("public defaults unchanged", func(t *testing.T) {
 		e := NewEnricher(nil,
-			NewMusicBrainzClient("", "t", nil),
-			NewCoverArtClient("", "t", nil),
+			NewMusicBrainzClient("", "t", nil, onSwitches),
+			NewCoverArtClient("", "t", nil, onSwitches),
 			nil, filepath.Join(dir, "artwork"))
 		if e.MBMinInterval != PublicMBMinInterval {
 			t.Errorf("MBMinInterval = %v, want %v — the public MB contract is load-bearing",
@@ -84,8 +84,8 @@ func TestNewEnricherDerivesPacingFromClients(t *testing.T) {
 
 	t.Run("self-hosted mirror paces fast", func(t *testing.T) {
 		e := NewEnricher(nil,
-			NewMusicBrainzClient("https://atlas.example.internal/ws/2", "t", nil),
-			NewCoverArtClient("https://atlas.example.internal", "t", nil),
+			NewMusicBrainzClient("https://atlas.example.internal/ws/2", "t", nil, onSwitches),
+			NewCoverArtClient("https://atlas.example.internal", "t", nil, onSwitches),
 			nil, filepath.Join(dir, "artwork"))
 		if e.MBMinInterval != SelfHostedMinInterval {
 			t.Errorf("MBMinInterval = %v, want %v", e.MBMinInterval, SelfHostedMinInterval)
@@ -142,8 +142,8 @@ func TestEnricherResolvesArtistWhenAlbumMisses(t *testing.T) {
 		t.Fatalf("UpsertTrack: %v", err)
 	}
 
-	e := NewEnricher(store, NewMusicBrainzClient(mbSrv.URL, "t", nil),
-		NewCoverArtClient(caaSrv.URL, "t", nil), nil, filepath.Join(dir, "artwork"))
+	e := NewEnricher(store, NewMusicBrainzClient(mbSrv.URL, "t", nil, onSwitches),
+		NewCoverArtClient(caaSrv.URL, "t", nil, onSwitches), nil, filepath.Join(dir, "artwork"))
 	defer startEnricherForTest(e, 5*time.Second)()
 
 	deadline := time.Now().Add(4 * time.Second)

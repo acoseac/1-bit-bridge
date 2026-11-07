@@ -43,11 +43,11 @@ func portraitEnricher(t *testing.T, srv *httptest.Server, artworkDir string) *En
 	if err := os.MkdirAll(artworkDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	deezer := NewDeezerClient(srv.URL, "t", nil)
+	deezer := NewDeezerClient(srv.URL, "t", nil, onDeezerSwitches)
 	deezer.SetAllowedImageHostsForTest([]string{"127.0.0.1"})
 	e := NewEnricher(nil,
-		NewMusicBrainzClient(srv.URL, "t", nil),
-		NewCoverArtClient(srv.URL, "t", nil),
+		NewMusicBrainzClient(srv.URL, "t", nil, onSwitches),
+		NewCoverArtClient(srv.URL, "t", nil, onSwitches),
 		deezer, artworkDir)
 	e.DeezerMinInterval = 0
 	return e
