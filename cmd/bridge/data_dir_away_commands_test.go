@@ -300,6 +300,19 @@ func TestUpdateAsksTheRecordBeforeItAsksForARelease(t *testing.T) {
 	}
 	var refuse, check token.Pos
 	var refuseCond string
+	// refusalIn is the call of refuseDataDirAway in an if's condition.
+	refusalIn := func(cond ast.Expr) *ast.CallExpr {
+		var found *ast.CallExpr
+		ast.Inspect(cond, func(n ast.Node) bool {
+			if call, ok := n.(*ast.CallExpr); ok && found == nil {
+				if id, ok := call.Fun.(*ast.Ident); ok && id.Name == "refuseDataDirAway" {
+					found = call
+				}
+			}
+			return found == nil
+		})
+		return found
+	}
 	ast.Inspect(f, func(n ast.Node) bool {
 		fn, ok := n.(*ast.FuncDecl)
 		if !ok || fn.Name.Name != "updateCmd" {
@@ -308,16 +321,17 @@ func TestUpdateAsksTheRecordBeforeItAsksForARelease(t *testing.T) {
 		ast.Inspect(fn.Body, func(n ast.Node) bool {
 			switch n := n.(type) {
 			case *ast.IfStmt:
-				if b, ok := n.Cond.(*ast.BinaryExpr); ok && refuse == token.NoPos {
-					if call, ok := b.Y.(*ast.CallExpr); ok {
-						if id, ok := call.Fun.(*ast.Ident); ok && id.Name == "refuseDataDirAway" {
-							refuse = call.Pos()
-							if u, ok := b.X.(*ast.UnaryExpr); ok && u.Op == token.NOT {
-								if s, ok := u.X.(*ast.StarExpr); ok {
-									if id, ok := s.X.(*ast.Ident); ok {
-										refuseCond = "!*" + id.Name
-									}
-								}
+				call := refusalIn(n.Cond)
+				if call == nil || refuse != token.NoPos {
+					break
+				}
+				refuse = call.Pos()
+				// The guard: `!*check && refuseDataDirAway(…)`.
+				if b, ok := n.Cond.(*ast.BinaryExpr); ok && b.Op == token.LAND && b.Y == call {
+					if u, ok := b.X.(*ast.UnaryExpr); ok && u.Op == token.NOT {
+						if s, ok := u.X.(*ast.StarExpr); ok {
+							if id, ok := s.X.(*ast.Ident); ok {
+								refuseCond = "!*" + id.Name
 							}
 						}
 					}
