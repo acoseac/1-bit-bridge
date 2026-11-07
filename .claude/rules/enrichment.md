@@ -429,62 +429,93 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   first. Artwork cache keys stay MB-derived so the wire shape is unchanged.
 - **`enrich.enabled` stops every lookup it names and `enrich.deezerEnabled`
   its Deezer lookups alone; both are on when absent, both are live, and only
-  off is ever written** (2026-11-06, backlog B617, two rounds). Off stops,
+  off is ever written** (2026-11-06, backlog B617, three rounds). Off stops,
   with no restart, every MusicBrainz, Cover Art Archive, Deezer, AcoustID
   and Atlas premium-cover request, a mirror's and the harvest's covers
-  included. The switch rides the context (`internal/enrichgate`): the
-  enricher's batch, each fingerprint pass and each harvest cover refetch run
-  on `enrichgate.CancelWhenOff`, and every client of those services sends
-  through `enrichgate.Client`, which asks the switch at the send and again
-  at the answer: a request after the flip is refused before it leaves, an
-  answer after it is not taken, and one on the wire is cut off within
-  `enrichgate.Interval` (a second). A refusal is `enrichgate.ErrOff`, which
-  wraps `context.Canceled` and cancels the pass's context with itself as
-  the cause, so every error path that asks the context first takes it for a
-  stop, never a miss. What a pass writes asks the switch again at the
-  write: `stampEnriched`, `markSkipped` and the fingerprint veto
-  (`stampAdmitted`), and the sweep's no-match, match, cached outcomes and
-  re-queue (`admitted`); a sweep the switch stops forgets the matches it did
-  not re-queue (`forgetUnqueued`), so the same files are looked up again
-  once it is on. Each Deezer request runs on a context of its own
-  (`deezerCall`, `CancelWhenDeezerOff`) that a Deezer flip cancels as
-  `errDeezerOff`, leaving the batch's other requests running. Serve's cover
-  adapter answers a refetch the switch stopped with
-  `atlasharvest.ErrCoversPaused`, which ends the harvest's cover leg for the
-  tick and burns no attempt toward the cap of six; the rest of the harvest
-  (its submit still sends the library's artist and release IDs), its lyrics,
-  the update check and Let's Encrypt go on. `bridge fingerprint`, the one
-  command outside serve that builds such a client, reads
-  `BRIDGE_ENRICH_ENABLED`, else the config at the default path, else on,
-  once as it starts, and refuses a lookup before its probe. The variables
-  read as the keys do, a value that reads as neither being off
-  (`switchEnvPaths`), and the holder's save writes a switch only when it
-  changes it, else the file's own value (`filedSwitches`; the other
-  variables are B761's). AcoustID stops with it: `fingerprintGates` degrades
-  `fingerprintReady` with `enrichment_off`. On the wire while off, a miss
-  on a MusicBrainz key is a `404 no_image` that is not terminal
-  (`classifyArtworkMiss`), and `enrichmentProgress` is absent from the
-  Provider's two builders, the only ones production calls
-  (`Provider.SetEnrichmentEnabledSource`). The two retries skip the facets
-  that feed only the enricher ahead of any write and answer
-  `enrichmentOff`, or 409 `enrichment-off` where no other facet can run;
-  `bridge enrichment retry` relays a running bridge's answer and refuses
-  offline before it opens the store; `bridge init --force` keeps each
-  switch written off (`priorEnrich`). **Don't send what a context's switch
-  refuses, take or write what a pass learns after the flip, classify a
-  refusal before asking the context, rely on the context's tick alone,
-  answer a switched-off cover refetch as a miss, let a fingerprint go out
-  with enrichment off from serve or the CLI, negative-cache an answer
-  Deezer never gave, give `enrichOne` a stop path of its own, read the
-  opt-outs' variables as other booleans are, write a variable's value from
-  a save that did not change the switch, call a manifest builder but the
-  Provider's, delete or hide what was fetched, answer 202 for a turn that
-  won't come, report progress while off, or drop an opt-out in a
-  rewrite.**
+  included. The switches are each client's own (`internal/enrichgate`):
+  every client of those services is built with them
+  (`enrichgate.Enrichment`, Deezer's `enrichgate.Deezer`), serve's over the
+  live config, and a nil predicate, or none, is off, so a client sends
+  nothing while they are off whatever context it is handed. Its transport
+  asks them, and those its request's context carries, at the send, at the
+  answer and once the answer is complete (the decode of MusicBrainz's,
+  Deezer's, iTunes' and AcoustID's), and a watch of its own, released at
+  the body's Close or the error, cuts a request on the wire off within
+  `enrichgate.Interval` (a second): a request after the flip is refused
+  before it leaves, and an answer whose headers or body arrive after it is
+  not taken. The enricher's batch, each fingerprint pass and each harvest
+  cover refetch also run on `enrichgate.CancelWhenOff`. A refusal is
+  `enrichgate.ErrOff`, which wraps `context.Canceled` and ends the pass's
+  context with itself as the cause, and a caller reads it from the error as
+  well (`enrichgate.Refused`), so even on a context that carries no switch
+  nothing is cached, stamped or logged: no answer, never a miss. What a pass
+  writes asks the switch again at the write: `stampEnriched`, `markSkipped`
+  and the fingerprint veto (`stampAdmitted`), and the sweep's no-match,
+  match, cached outcomes and re-queue (`admitted`). The re-queue records
+  each match's provenance in its own transaction (`ResetEnrichedByPaths`
+  takes the matches), so one that does not commit, stopped or failing,
+  records neither, and the sweep forgets its matches (`forgetUnqueued`):
+  the next sweep matches those files again. Each Deezer request runs on a
+  context of its own (`deezerCall`, `CancelWhenDeezerOff`) that a Deezer
+  flip cancels as `errDeezerOff`, leaving the batch's other requests
+  running; with `enrich.enabled` off a Deezer client answers `ErrOff`,
+  never Deezer's refusal. Serve's cover adapter answers a refetch the
+  switch stopped with `atlasharvest.ErrCoversPaused`, which ends the
+  harvest's cover leg for the tick and burns no attempt toward the cap of
+  six; the rest of the harvest (its submit still sends the library's artist
+  and release IDs), its lyrics, the update check and Let's Encrypt go on.
+  `bridge fingerprint`, the one command outside serve that builds such a
+  client, reads `BRIDGE_ENRICH_ENABLED`, else the file `--config` names
+  (one that is not there refuses), else the config at the default path,
+  else on: as it starts, refusing a lookup before its probe, and once a
+  second while it runs (`fingerprintSwitch.follow`), which ends the run,
+  exit 1, within a second of the switch going off or a config it read
+  going away or no longer loading. The variables read as the keys do, a
+  value that reads as neither being off (`switchEnvPaths`), and the
+  holder's save writes a switch only when it changes it, else the file's
+  own value (`filedSwitches`; the other variables are B761's). AcoustID
+  stops with it: `fingerprintGates` degrades `fingerprintReady` with
+  `enrichment_off`. On the wire while off, a miss on a MusicBrainz key is a
+  `404 no_image` that is not terminal (`classifyArtworkMiss`), and
+  `enrichmentProgress` is absent from the Provider's two builders, the only
+  ones production calls (`Provider.SetEnrichmentEnabledSource`). The two
+  retries skip the facets that feed only the enricher ahead of any write
+  and answer `enrichmentOff`, or 409 `enrichment-off` where no other facet
+  can run; `bridge enrichment retry` relays a running bridge's answer and
+  refuses offline before it opens the store; `bridge init --force` keeps
+  each switch written off (`priorEnrich`). **Don't build a client without
+  its switches or read a nil switch as on, send what a client's switches or
+  a context's refuse, take or write what a pass learns after the flip, an
+  answer completed after it included, take a client's error for a miss
+  without asking it for a refusal, rely on a context's tick alone, write a
+  match's provenance apart from its re-queue or keep a match whose re-queue
+  did not land, read `bridge fingerprint`'s switch once or re-read its
+  config at each ask, answer a switched-off cover refetch as a miss, let a
+  fingerprint go out with enrichment off from serve or the CLI,
+  negative-cache an answer Deezer never gave, give `enrichOne` a stop path
+  of its own, read the opt-outs' variables as other booleans are, write a
+  variable's value from a save that did not change the switch, call a
+  manifest builder but the Provider's, delete or hide what was fetched,
+  answer 202 for a turn that won't come, report progress while off, or drop
+  an opt-out in a rewrite.**
   `TestTheSwitchIsAskedOnceASecond`,
   `TestCancelWhenOffCancelsOnceItsSwitchIsOff`,
   `TestTheTransportAdmitsAtTheSendAndAtTheAnswer`,
+  `TestTheClientsOwnSwitchesGovernABareContext`, `TestZeroSwitchesAreOff`,
+  `TestAdmitAsksTheWritersOwnSwitch`,
+  `TestARefusalByTheClientsSwitchesEndsThePassOnItsContext`,
+  `TestTheWatchEndsWithTheBodyOrTheError`,
   `TestDeezersSwitchGovernsDeezersSendsAlone`,
+  `TestEveryClientRefusesABareContextWhileItsSwitchIsOff`,
+  `TestEveryClientCutsOffABareContextsRequestWhenItsSwitchTurnsOff`,
+  `TestARefusalWithABareContextRecordsNoMiss`,
+  `TestAnAnswerCompletedAfterTheFlipFillsNoNegativeCache`,
+  `TestAnITunesAnswerCompletedAfterTheFlipIsNoAnswer`,
+  `TestTheClientRefusesABareContextWhileItsSwitchIsOff`,
+  `TestTheClientCutsOffABareContextsLookupWhenItsSwitchTurnsOff`,
+  `TestANoMatchCompletedAfterTheFlipIsNoAnswer`,
+  `TestServeBuildsEveryClientOverTheLiveSwitches`,
+  `TestNoSwitchIsOffForTheSweepAndTheCoverRefresh`,
   `TestAnAnswerAfterTheFlipIsNotTaken`,
   `TestARequestAfterTheFlipIsRefusedAtItsSend`,
   `TestAWriteAfterTheFlipIsNotMade`,
@@ -495,6 +526,8 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   `TestAnAcoustIDAnswerAfterTheFlipIsNotKept`,
   `TestALookupAfterTheFlipIsRefusedAtItsSend`,
   `TestAReQueueAfterTheFlipIsNotMade`,
+  `TestAMatchWhoseReQueueDidNotLandIsReQueuedByTheNextSweep`,
+  `TestTheReQueueRecordsEachMatchsProvenanceInItsTransaction`,
   `TestAFingerprintPassRunsOnTheSwitchsContext`,
   `TestAPausedCoverLegLeavesThePendingCoversAsTheyAre`,
   `TestAPauseSettlesWhatTheLegLearntBeforeIt`,
@@ -503,6 +536,9 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   `TestACoverAnswerAfterTheFlipIsNoMiss`,
   `TestACoverFetchInFlightAtTheFlipIsCancelledAndKept`,
   `TestBridgeFingerprintRefusesALookupWhileEnrichmentIsOff`,
+  `TestBridgeFingerprintReadsTheConfigItIsGiven`,
+  `TestBridgeFingerprintFollowsItsSwitchWhileItRuns`,
+  `TestTheFingerprintSwitchIsReadAtMostOnceASecond`,
   `TestTheOffSwitchLoads`, `TestAConsoleSaveKeepsTheFilesOwnSwitches`,
   `TestTheWireManifestIsTheProvidersAlone`,
   `TestAnEnricherSwitchedOffAsksNoUpstream`,
