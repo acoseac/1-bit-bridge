@@ -80919,3 +80919,39 @@ an `installing` marker as the updater leaves them.
   the drain (exit -9); a start stopped before it was ready exited 0 once its
   teardown had run, its count back, its token cleared and the dead start's
   lock file swept.
+
+**Checks.**
+- The red run on 0fdfd391 (cmd/bridge and internal/updater, the predictions
+  in a file beforehand): every test predicted red was red, for the reason
+  predicted, and every guard beside them green.
+- The change, before its commit: cmd/bridge's whole suite in five runs split
+  by the names' first letter, one package each, and the whole of
+  internal/updater, internal/manifest, internal/backup and internal/doctor:
+  ok.
+- `make test-fast` through the shared build lock (`buildslot.py b660`, which
+  waited 510 s for another worker's run): ok, 85 packages and 14 without
+  tests (cmd/bridge 510 s, internal/backup 363 s, internal/manifest 260 s);
+  the Linux-only packages ran (internal/alsa, internal/alsapcm,
+  internal/atomicwrite, internal/backup and the player's).
+- `go test -race -count=1 -timeout 30m -p 4` with make's tags over
+  ./cmd/bridge/..., ./internal/updater/..., ./internal/doctor/...,
+  ./internal/manifest/... and ./internal/admin/..., through the lock: ok
+  (1,166 s, 27 s, 7 s, 1,436 s, 955 s).
+- `make vet` natively, with `GOOS=windows`, with `GOOS=darwin` and with
+  `GOOS=linux GOARCH=386`: ok.
+- `make build-all`: ok (its build-tag check, then the six targets).
+- The qualification check (`scripts/qualification-version -base 4880f8a4
+  -head HEAD`): `qualification version OK`.
+- go1.27.3's gofmt on the 20 Go files the round changed: clean.
+- `make docs-check`: ok as the tree stands; with the three rules patches
+  applied to a copy of the rules files, measured by check-doc-budgets.py's
+  own `measure` and `problems` over the tracked files: ok,
+  config-lifecycle.md 98,249 bytes (98.2 %), cli-serve.md 41,956, scanner.md
+  33,039, the worst load 315,027 bytes (65.6 %). `git apply --check` takes
+  `rules-b660-r3.patch` over the rules files as the first two patches left
+  them, and every test its lines cite exists.
+
+**For the owner.**
+- PROTOCOL.md's "Boot-time rollback" paragraph is worded to the code in this
+  tree; its iOS mirror (`docs/BridgeProtocol.md`) is owed with it.
+- What this round leaves is backlog B760.
