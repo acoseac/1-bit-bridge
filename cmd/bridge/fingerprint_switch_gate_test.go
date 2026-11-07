@@ -230,8 +230,10 @@ func TestAReQueueAfterTheFlipIsNotMade(t *testing.T) {
 // was taken and kept) stops the second lookup at AcoustID's client, before
 // anything else has asked the switch. The pass re-queues nothing, and forgets
 // the first file's match it did not hand over, which kept the file out of
-// every later pass in this process; its provenance, recorded while on, stays.
-// Switched on again, both files are looked up and re-queued (backlog B617).
+// every later pass in this process; and it records none of it, since a
+// match's provenance is written only with its re-queue (round 3). Switched on
+// again, both files are looked up and re-queued, each with its provenance
+// (backlog B617).
 func TestALookupAfterTheFlipIsRefusedAtItsSend(t *testing.T) {
 	f := newSweepSwitchFixture(t, "a.flac", "b.flac")
 	f.sweeper.switchEvery = time.Hour
@@ -257,8 +259,8 @@ func TestALookupAfterTheFlipIsRefusedAtItsSend(t *testing.T) {
 	if n := f.sweeper.cache.Len(); n != 0 {
 		t.Errorf("the pass the switch stopped left %d outcome(s) cached", n)
 	}
-	if _, matched := f.verdicts(t); len(matched) != 1 {
-		t.Errorf("the provenance of the match taken while on = %v, want one file", matched)
+	if _, matched := f.verdicts(t); len(matched) != 0 {
+		t.Errorf("the pass the switch stopped recorded the provenance of %v: a match is recorded only with its re-queue", matched)
 	}
 	for _, name := range []string{"a.flac", "b.flac"} {
 		if f.requeued(t, name) {
@@ -273,6 +275,9 @@ func TestALookupAfterTheFlipIsRefusedAtItsSend(t *testing.T) {
 	if got := f.acoustid.count(); got != 3 {
 		t.Errorf("AcoustID was asked %d time(s), want 3: the first file, then both again:\n%s",
 			got, strings.Join(f.acoustid.requests(), "\n"))
+	}
+	if _, matched := f.verdicts(t); len(matched) != 2 {
+		t.Errorf("the provenance once both are re-queued = %v, want both files", matched)
 	}
 }
 
