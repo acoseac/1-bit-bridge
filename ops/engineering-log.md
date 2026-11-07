@@ -83621,25 +83621,9 @@ one at the old path; both say to set `dataDir` now. Likely: an operator who find
 the library empty runs `bridge scan` or a render by hand, as root, before
 the volume is back.
 
-**3. A mount point holding library content of its own** (real; a limit in
-the rule). It reads as it is to the scan's guards and to the watcher. No
-check of it is cheap: a mount check is what B651's Don't forbids, and a
-share of the index's rows the walk did not find is the second
-mass-deletion guard B651 declined. It needs a write into the bare mount
-point while the volume is away, and a bare mount point is commonly root's.
-scanner.md's B651 line names the limit, which its long form already stated.
+**3.** A limit scanner.md's B651 line names by its id: backlog B776.
 
-**4. A fresh install's root watched before its volume mounts** (real;
-open). `lookAtRoot` reads an empty root with no rows as it is, rightly, an
-empty library; the mount then covers the folder the watch is on while
-fsnotify still lists the watch, so `checkRootWatches` never looks again,
-and only the periodic scan (6 h by default) indexes the volume. The fix, a
-check of each watched root's identity at the root check, is small, and its
-test needs a real mount (`build-ci-tests.md`), which this host cannot make:
-an unprivileged user namespace is created and refused its maps
-(`/proc/sys/kernel/apparmor_restrict_unprivileged_userns` is 1: writing
-`setgroups` is denied), no FUSE filesystem is installed, and the disk image
-B651 mounts needs macOS. Open, as B727's fourth item.
+**4.** Open: backlog B777.
 
 **5. Serve's refusal said at every retry** (real; fixed). Three starts in a
 row on 49071fbf, as a service manager's retries, said the refusal three
@@ -83653,8 +83637,7 @@ next start to say it again, and what serve refuses is the same either way;
 a note that cannot be removed keeps the next refusal quiet until a day
 after the last was said, which that start says at Warn.
 
-**6. The window between a look and the walk** stays open, as B727's sixth
-item: its coverage needs a real mount, which this host cannot make (item 4).
+**6.** Open: backlog B777.
 
 **7. CI's Windows leg and round 1's two tests that rename a watched
 folder.** `TestTheWatcherDispatchesNoScanForARootWhoseContentWent` and
@@ -83741,4 +83724,4 @@ memory, predicted in a file before the run:
   mode refusing this user a write (skipped on Windows and as root) and the
   terminal test (Linux).
 
-**For the owner.** What B727 leaves open is its items 4 and 6.
+**For the owner.** What B727 leaves: backlog B776 and B777.
