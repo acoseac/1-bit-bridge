@@ -3120,11 +3120,14 @@
   rows of a root it cannot see or that holds no library content while the
   index holds its tracks; the library watcher holds such a root
   (`Scanner.lookAtRoot`, read as the scan's guards read it) and watches it
-  again, with a scan of it, only once a look finds it as it was; and serve
+  again, with a scan of it, only once a look finds it as it was, and again a
+  watched root whose folder is found another than its watch was added on
+  (B777); the console writes nothing under such a root (B776); and serve
   refuses, before it makes or writes anything there, a data dir the record
   beside the config names (`.bridge.yaml.datadir`) that holds neither
   `bridge.db` nor `server.lock`** (2026-11-04, backlog B651; Codex's and
-  Argon's notes on the brief). On a NAS reboot systemd or Docker can start the
+  Argon's notes on the brief; B776 and B777, 2026-11-07, the two entries after
+  this one). On a NAS reboot systemd or Docker can start the
   bridge before a USB, RAID or network volume is mounted, so a path on it is
   not there (a directory on the volume) or reads as the bare mount point,
   empty. **The scan** needed nothing new: walkRoot's upfront
@@ -3326,7 +3329,8 @@
   saw what changed meanwhile. Each change is said once: held at Warn with
   what the look found, and again when that changes, and watched again at
   Info. A root the index holds nothing of (a fresh install) is watched as it
-  is, and a mount over it hides that watch until the next restart. **The
+  is, and a mount over it puts another folder at its path, which the check of
+  the roots' own watches finds and watches, with a scan (B777's entry). **The
   database**: nothing in the data dir can say it was there before, the whole
   of it may be on the missing volume, and serve may not write bridge.yaml
   (B506's writers), so serve keeps a record beside the config, in the
@@ -3481,3 +3485,117 @@
   `TestTheRecordIsBesideTheFileTheConfigsNameOpens` and
   `TestBothDoctorsFailADataDirItsRecordNamesWhileItsVolumeIsAway`.
  The timer's check of the roots' own watches leaves a root whose look waits to the flush too, since it would otherwise make the Add the wait avoids (Codex and the Claude API reviewer on round 12; `TestTheCheckOfTheRootsWatchesLeavesAWaitingLookToTheFlush`).
+
+- **A console write under a library root asks first, of the deepest configured
+  root that owns each path it would write, the look the watcher holds a root
+  by, and a request one of whose roots reads as absent is refused whole,
+  nothing written, in the hold's words (`Scanner.RefuseWritesUnder`,
+  `RootAwayError`)** (2026-11-07, backlog B776; the console's half is
+  `admin-console.md`'s B776 bullet). Where the bare mount point a volume
+  leaves is the service user's to write, an upload or a restore while the
+  volume was away left library content there, which the scans then read as the
+  root's: the clean-empty guard no longer spared the root, and the rows of the
+  volume's files went missing and were reaped at the threshold; and the
+  volume, mounted again, hid what was written. Only rows were at stake:
+  nothing the console writes deletes a file. The upload and trash managers
+  hand the paths a request would write to a guard (`upload.WithRootGuard`,
+  `trash.WithRootGuard`; serve builds it from its scanner, `WriteGuard` on
+  `scanCtx`), and `RefuseWritesUnder` takes each path's owner as which root a
+  path is decides (`rootIn`, so `deepestRootOf` and `caseLook.under`: a root
+  nested in the one a request names owns the paths below its folder), looks at
+  each such root once (`lookAtRoot`: a stat, one batch of its listing and, for
+  a root holding nothing, one count of its rows), and answers a
+  `*RootAwayError` for the first that reads as absent: one it cannot see,
+  whose listing fails, that holds no library content and no
+  `.bridge-allow-empty` under rows the index holds or cannot count, or that
+  holds nothing but links to directories over them (`rootOnlyDirLinks`, whose
+  rows the scan spares too, and which a file written beside the links would
+  let it reap). It matches `ErrRootNotMounted`, and its `Message` is the
+  console's, built from the words the hold's line is made of
+  (`readsAsNotMounted`, `hintVolumeMounted`, `hintContainerRestart`,
+  `holdsOnlyDirLinks`), naming the root by its folder's name and no path. A
+  root the index holds nothing of reads as it is, so the first write into a
+  fresh, empty root is never refused; a root never mounted on a fresh install,
+  a bare mount point the index holds nothing of, reads as it is too, and a
+  write there lands on the mount point, which the mount then hides. One case
+  stays open: backlog B776, item 7. **Don't ask any root but the deepest that
+  owns each path, or read a root holding no content as absent without asking
+  the index.** Tests: `admin-console.md`'s B776 bullet's.
+
+- **A watched root whose folder changes under its own watch is watched again:
+  every check of the roots' own watches compares, where that watch is still
+  fsnotify's, the identity the root's folder had just before the watch was
+  added with the folder at its path now (`os.SameFile`), and the start
+  confirms each root's own watch once its walks are done** (2026-11-07,
+  backlog B777). fsnotify says nothing when the folder at a watched root's
+  path becomes another folder while the watch stays where it was: a volume
+  mounted over the bare mount point the root was watched on (a fresh install,
+  which the index holds nothing of, reads as it is and is watched there:
+  B651's entry), a volume unmounted and mounted again (inotify drops an
+  unmounted volume's watches, which the check finds missing; kqueue keeps
+  watching, and listing, the first mount's revoked folders), a linked root's
+  link repointed. Each left the root blind until a restart. The identity is
+  taken before any watch is added, every root's before any walk
+  (`rootIdentities`), and read again once the root's walk is done
+  (`noteRootWatch`); where the two differ, the watch is added again, after
+  what is held at the root's path is let go (`lookAgain`, `watchAgain`'s
+  `releaseRoot`), since an Add over a path fsnotify holds keeps what it holds.
+  Taken once the walks are done, it would be the identity of the folder there
+  then, which a volume mounted as the watch was added makes the mounted one,
+  recorded against a watch on the folder it covers, and the two would compare
+  equal for good. On kqueue a nested root's identity comes before the walk of
+  the root it is nested in, which opens the nested root's folder as an entry
+  of the folder above, and fsnotify's Add of the nested root keeps that
+  descriptor (B651's ninth round): every root's is taken before any walk.
+  `watchAgain` takes and records it the same way, so a later change is found
+  too. Windows' `os.Stat` leaves a plain folder's file ID to the first
+  `os.SameFile`, which reads it from whatever folder the path names then, so
+  the identity's read compares the stat with itself at once (`rootIdentity`),
+  or the identity taken before a walk would be of the folder there after it.
+  At each check (`checkRootIdentity`) a root found another folder is looked at
+  again: held where it reads as a volume not mounted, as `holdAbsentRoots`
+  holds one, so an outage goes to the hold's retry and is never watched again
+  at every check; otherwise watched where it is now, with a scan, its new
+  folder's identity recorded. An identity that cannot be read is no change:
+  the root is held where it reads as a volume not mounted, and otherwise left
+  as it is until the next check. A root recorded with no identity (its folder
+  could not be read as its watch was added) is not compared. The start
+  confirms each root's own watch (`confirmRootWatches`): a root whose own
+  watch is not fsnotify's, because it went between the start's look and its
+  walk, or because its own Add failed while the walk went on (the ordinary
+  walker logs an Add's failure and goes on, and kqueue's counts the folder
+  held), is held where it reads as a volume not mounted, unless the watcher
+  has stopped for good (`fds.off`, as `resumeRoot` does), and is otherwise
+  said as a walk that could not start is (`msgInitialWatchFailed`,
+  `errRootWatchMissing`) and recorded, so the check finds its own watch
+  missing and adds it again: an Add can fail on a root that is there (a
+  permission, the watch limit), and a folder below a root that the walk cannot
+  read leaves the root's own watch as it is. A root whose own Add keeps
+  failing is tried again at every check, each try saying the Add's failure
+  again. One case stays open: backlog B777, item 3; the macOS remount test
+  logs the root folder's device and inode on both mounts and skips where the
+  remount changed neither. The tests that mount are darwin's
+  (`watcher_mount_test.go`, a disk image); on every host a stand-in answers
+  the identity read (`identityForTests`), a hook stands at the actual Add
+  boundary (`addForTests`), and a linked root's link repointed leaves a real
+  stale watch, which no backend sees. **Don't take a root's identity after the
+  walk that adds its watch, keep it past a watch added again, take an identity
+  that cannot be read for a change, watch a root that reads as a volume not
+  mounted again at every check (it goes to the hold), or leave a root whose
+  own watch the start could not add unrecorded, or hold it without a look.**
+  Tests:
+  `TestTheWatcherWatchesAgainARootWhoseFolderIsNoLongerTheOneItWatches`,
+  `TestTheWatcherAddsARootsWatchAgainWhenItsFolderChangedWhileTheWatchWasAdded`,
+  `TestTheWatcherWatchesALinkedRootAgainWhereItsLinkLeadsNow`,
+  `TestTheWatcherWatchesARootRemountedInsideTheDebounceOfItsResume`,
+  `TestAVolumeAwayForSeveralChecksIsHeldWithNoScanPerCheck`,
+  `TestAFolderWhoseIdentityCannotBeReadIsNeitherWatchedAgainNorScanned`,
+  `TestAnOrdinaryRenameDoesNotLoopTheWatcher`,
+  `TestTheWatcherHoldsARootThatWentBetweenItsLookAndItsWalk`,
+  `TestTheWatcherTriesAgainARootWhoseOwnWatchCouldNotBeAdded`,
+  `TestARootWithAFolderItCannotReadIsWatchedAndScanned`,
+  `TestARootsIdentityIsTheFolderAtItsPathWhenItIsRead` (red on Windows alone
+  without the read's own comparison), and on macOS
+  `TestTheWatcherWatchesTheVolumeMountedOverARootItWatchedBare`,
+  `TestTheWatcherWatchesTheVolumeMountedOverANestedRootItWatchedBare` and
+  `TestTheWatcherWatchesARootRemountedInsideTheDebounce`.
