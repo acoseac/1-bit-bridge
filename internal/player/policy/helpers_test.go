@@ -75,9 +75,11 @@ type rig struct {
 	profileNative *dacprofile.Native
 	profileDoP    *dacprofile.DoP
 	timing        *dacprofile.Timing
-	// The choice: the DAC's own when mode is set, else defaultMode.
+	// The choice: the DAC's own when mode is set, else defaultMode; by is
+	// who set it, the app when it is empty.
 	mode        string
 	max         int
+	by          string
 	defaultMode string
 	// The live capabilities.
 	altsets []alsa.Altset
@@ -198,7 +200,11 @@ func (r *rig) inputs() Inputs {
 	in.State = dsdstate.State{DefaultMode: r.defaultMode}
 	d := dsdstate.DAC{Key: key, DoPConfirmed: r.confirmed, FirstUse: r.firstUse, Listener: r.listener, Evidence: r.evidence}
 	if r.mode != "" {
-		d.Choice = &dsdstate.Choice{Mode: r.mode, MaxBitRate: r.max, Revision: 1, SetAt: t0, SetBy: dsdstate.ByApp}
+		by := r.by
+		if by == "" {
+			by = dsdstate.ByApp
+		}
+		d.Choice = &dsdstate.Choice{Mode: r.mode, MaxBitRate: r.max, Revision: 1, SetAt: t0, SetBy: by}
 	}
 	in.State.DACs = []dsdstate.DAC{d}
 	if r.unreadable {
