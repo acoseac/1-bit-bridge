@@ -42,9 +42,10 @@ type sidecarStat struct {
 var sidecarLyricsExts = []string{".ttml", ".lrc", ".txt"}
 
 // sidecarListing is one directory's listing for one scan: the lyrics
-// sidecars in it, and the folder-art candidates (folderArtCandidates) with
-// what their stats say (folderArtDirStateOf). One os.ReadDir answers both,
-// once per directory per scan (ExtractContext.SidecarIndex).
+// sidecars in it, the folder-art candidates (folderArtCandidates) with what
+// their stats say (folderArtDirStateOf), and the WavPack correction files.
+// One os.ReadDir answers all three, once per directory per scan
+// (ExtractContext.SidecarIndex).
 type sidecarListing struct {
 	once   sync.Once
 	listed bool              // the directory was read
@@ -52,6 +53,11 @@ type sidecarListing struct {
 	// artNames are the folder-art candidates in the directory, by their
 	// listed names, in listing order (os.ReadDir sorts by name).
 	artNames []string
+	// wvcNames are the WavPack correction files in the directory (the
+	// correction extension in any case), by their listed names, in listing
+	// order: what a hybrid .wv's observation of its correction file and the
+	// skip gate's question about it both read (correction.go).
+	wvcNames []string
 
 	artOnce sync.Once
 	art     folderArtDirState
@@ -82,6 +88,8 @@ func (l *sidecarListing) fill(dir string) {
 		switch strings.ToLower(filepath.Ext(name)) {
 		case ".lrc", ".ttml", ".txt":
 			l.names[strings.ToLower(name)] = name
+		case correctionExt:
+			l.wvcNames = append(l.wvcNames, name)
 		}
 		if isFolderArtCandidate(name) {
 			l.artNames = append(l.artNames, name)

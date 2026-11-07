@@ -240,8 +240,9 @@ func postRollback(t *testing.T, b *consoleBridge) (status int, code, message str
 }
 
 // TestTheConsoleOffersRollBackOnlyWhereTheRollbackWouldRun boots this build's
-// real serve and console. Over its own install, which its start confirms once
-// its admission has recorded that it opened the data dir, the console's
+// real serve and console. Over its own install, on probation once its
+// admission has recorded that it opened the data dir (backlog B660; it was
+// confirmed at the start until B660), the console's
 // rollback refuses (409 rollback-refused), and the Updates panel, read as the
 // page reads it (GET /api/updates, and the Settings page's first paint),
 // offers no Roll back and says why in the rollback's words, naming no path.
@@ -251,8 +252,8 @@ func TestTheConsoleOffersRollBackOnlyWhereTheRollbackWouldRun(t *testing.T) {
 	t.Run("the version installed opened the data dir", func(t *testing.T) {
 		b, bin := startConsoleOverABackup(t, updater.State{Status: "installing", TargetVersion: version.ServerVersion,
 			PreviousVersion: previousVersion, AttemptedAt: time.Now().UTC().Add(-time.Minute), SwapStarted: true})
-		if st, err := updater.LoadState(b.dataDir); err != nil || st.Status != "installed" || st.DataDirOpenedBy != version.ServerVersion {
-			t.Fatalf("the marker after the start = %+v (%v), want the install confirmed with the record that %s opened the data dir; stderr=%s",
+		if st, err := updater.LoadState(b.dataDir); err != nil || st.Status != "installing" || st.DataDirOpenedBy != version.ServerVersion {
+			t.Fatalf("the marker after the start = %+v (%v), want the install on probation with the record that %s opened the data dir; stderr=%s",
 				st, err, version.ServerVersion, b.stderr.String())
 		}
 		panel := readRollbackPanel(t, b)

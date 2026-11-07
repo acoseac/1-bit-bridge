@@ -18,10 +18,12 @@ import (
 // version had migrated.
 
 // TestALateFirstBootOfTheInstalledVersionConfirmsTheInstall: DecideBootAction
-// takes the install's version booting for its success whatever the marker's
-// age, as it already did whatever its swap; a marker that no boot of its
-// version reads keeps its answers: abandoned past the window, whatever its
-// swap, and inside it not swapped (the Windows SCM stop's window) or failed.
+// takes the install's version booting for the install on probation whatever
+// the marker's age, as it already did whatever its swap (backlog B660: until
+// B660, for its success, which stamped it installed at boot; the start that
+// answers and stays up confirms it now); a marker that no boot of its version
+// reads keeps its answers: abandoned past the window, whatever its swap, and
+// inside it not swapped (the Windows SCM stop's window) or failed.
 func TestALateFirstBootOfTheInstalledVersionConfirmsTheInstall(t *testing.T) {
 	now := time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
 	marker := func(target string, age time.Duration, swapped bool) State {
@@ -37,19 +39,19 @@ func TestALateFirstBootOfTheInstalledVersionConfirmsTheInstall(t *testing.T) {
 		current string
 		want    BootAction
 	}{
-		{"swapped, just past the window", marker("0.2.3", late, true), "0.2.3", BootInstallSucceeded},
-		{"never swapped, just past the window", marker("0.2.3", late, false), "0.2.3", BootInstallSucceeded},
-		{"a start the next day", marker("0.2.3", 30*time.Hour, true), "0.2.3", BootInstallSucceeded},
-		{"the install's version spelled with a v", marker("v0.2.3", late, true), "0.2.3", BootInstallSucceeded},
-		{"the running version spelled with a v", marker("0.2.3", late, false), "v0.2.3", BootInstallSucceeded},
-		{"its admission recorded", admitted, "0.2.3", BootInstallSucceeded},
+		{"swapped, just past the window", marker("0.2.3", late, true), "0.2.3", BootInstallProbation},
+		{"never swapped, just past the window", marker("0.2.3", late, false), "0.2.3", BootInstallProbation},
+		{"a start the next day", marker("0.2.3", 30*time.Hour, true), "0.2.3", BootInstallProbation},
+		{"the install's version spelled with a v", marker("v0.2.3", late, true), "0.2.3", BootInstallProbation},
+		{"the running version spelled with a v", marker("0.2.3", late, false), "v0.2.3", BootInstallProbation},
+		{"its admission recorded", admitted, "0.2.3", BootInstallProbation},
 		{"the backup's version, swapped, past the window", marker("0.2.3", late, true), "0.2.1", BootClearAbandoned},
 		{"the backup's version, never swapped, past the window", marker("0.2.3", late, false), "0.2.1", BootClearAbandoned},
 		{"another version, past the window", marker("0.2.3", late, true), "0.2.9", BootClearAbandoned},
 		{"another version spelled with a v, past the window", marker("v0.2.3", late, true), "v0.2.4", BootClearAbandoned},
 		{"the backup's version, never swapped, inside the window", marker("0.2.3", time.Minute, false), "0.2.1", BootClearNotSwapped},
 		{"the backup's version, swapped, inside the window", marker("0.2.3", time.Minute, true), "0.2.1", BootInstallFailed},
-		{"the install's version, inside the window", marker("0.2.3", time.Minute, true), "0.2.3", BootInstallSucceeded},
+		{"the install's version, inside the window", marker("0.2.3", time.Minute, true), "0.2.3", BootInstallProbation},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := DecideBootAction(tc.st, tc.current, now); got != tc.want {

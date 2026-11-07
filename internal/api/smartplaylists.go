@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/formatgate"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/smartplaylist/season"
 )
@@ -113,6 +114,15 @@ type smartPlaylistsResponse struct {
 // ready the moment the window opens, and one built on 5 January cannot keep
 // it served on the 6th. A family left out counts toward nothing, the
 // top-level refreshedAt included.
+//
+// Each family's items, the Christmas family's in its window among them, are
+// the view the request declared (formats.go): an item of a format the view
+// does not declare is left out and the positions after it close up, and a
+// family the gate leaves with no item is not sent. The Christmas family's
+// items are this request's view picked from what the regenerator stored
+// (season.Pick, which the regenerator asks of the four views too), and it is
+// sent only while that pick clears its floor, so a client is never sent a
+// mix below the owner's floor, and a view whose pool clears it is sent one.
 func (s *Server) smartPlaylists(w http.ResponseWriter, r *http.Request) {
 	if !s.smartPlaylistsActive() {
 		writeError(w, http.StatusNotFound, "smart_playlists_not_supported",
@@ -130,6 +140,8 @@ func (s *Server) smartPlaylists(w http.ResponseWriter, r *http.Request) {
 	localHour, hasLocal := parseLocalHour(r.URL.Query().Get("local_hour"))
 	nowUTCHour := now.UTC().Hour()
 	inSeason := season.InWindow(now)
+	view := requestFormats(r)
+	varyOnFormats(w.Header())
 
 	// Operator-uploaded custom covers, keyed by family slug (best-effort).
 	covers := s.coverHashesForScope(r.Context(), manifest.CoverScopeSmartMix)
@@ -139,7 +151,7 @@ func (s *Server) smartPlaylists(w http.ResponseWriter, r *http.Request) {
 		if row.Kind == christmasKind && !inSeason {
 			continue // out of its window: not served, not counted
 		}
-		dto, ok := buildSmartPlaylistDTO(row, nowUTCHour, localHour, hasLocal)
+		dto, ok := buildSmartPlaylistDTO(row, nowUTCHour, localHour, hasLocal, view)
 		if !ok {
 			continue // e.g. time-of-day with no habit at the current hour
 		}
@@ -152,11 +164,13 @@ func (s *Server) smartPlaylists(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// buildSmartPlaylistDTO decodes one cached row into its wire shape. The
-// time-of-day family is special-cased: its blob is per-UTC-hour pools, from
-// which we union the window around nowUTCHour and retitle by the local hour.
-// ok=false drops the family from this response (an empty time-of-day window).
-func buildSmartPlaylistDTO(row manifest.StoredSmartPlaylist, nowUTCHour, localHour int, hasLocal bool) (smartPlaylistDTO, bool) {
+// buildSmartPlaylistDTO decodes one cached row into its wire shape, in view.
+// The time-of-day family is special-cased: its blob is per-UTC-hour pools,
+// from which we union the window around nowUTCHour and retitle by the local
+// hour. ok=false drops the family from this response (an empty time-of-day
+// window, a family whose every item is of a format view does not declare,
+// or a Christmas family view leaves below its floor).
+func buildSmartPlaylistDTO(row manifest.StoredSmartPlaylist, nowUTCHour, localHour int, hasLocal bool, view formatgate.Set) (smartPlaylistDTO, bool) {
 	dto := smartPlaylistDTO{
 		Slug: row.Slug, Kind: row.Kind, Title: row.Title,
 		Subtitle: row.Subtitle, RefreshedAt: row.RefreshedAt,
@@ -173,7 +187,7 @@ func buildSmartPlaylistDTO(row manifest.StoredSmartPlaylist, nowUTCHour, localHo
 		if err := json.Unmarshal(row.ItemsJSON, &blob); err != nil {
 			return smartPlaylistDTO{}, false
 		}
-		items := resolveTimeOfDayItems(blob.Hourly, nowUTCHour, timeOfDayWindow, smartPlaylistResponseMaxItems)
+		items := resolveTimeOfDayItems(blob.Hourly, nowUTCHour, timeOfDayWindow, smartPlaylistResponseMaxItems, view)
 		if len(items) == 0 {
 			return smartPlaylistDTO{}, false
 		}
@@ -188,14 +202,46 @@ func buildSmartPlaylistDTO(row manifest.StoredSmartPlaylist, nowUTCHour, localHo
 	if err := json.Unmarshal(row.ItemsJSON, &stored); err != nil {
 		return smartPlaylistDTO{}, false
 	}
-	dto.Items = make([]smartPlaylistItemDTO, 0, len(stored))
-	for _, it := range stored {
+	var inView []manifest.SmartPlaylistItem
+	if row.Kind == christmasKind {
+		// The Christmas family is picked for this request's view from what
+		// the regenerator stored, each format up to its cap, by the one
+		// function the regenerator asks of the four views (season.Pick;
+		// round 5 of backlog B489): what every client is served first, then
+		// the declared gated formats in turn, the floor's spread moved ahead
+		// of the cap, and the floor asked of the result. A view below it is
+		// not sent the family: the gate can leave a view fourteen tracks, or
+		// two artists on two albums, of a family another view clears.
+		var ok bool
+		if inView, ok = season.Pick(stored, storedItemPath, storedItemAlbum, storedItemArtist, view); !ok {
+			return smartPlaylistDTO{}, false
+		}
+	} else {
+		inView = make([]manifest.SmartPlaylistItem, 0, len(stored))
+		for _, it := range stored {
+			if view.Takes(it.Path) {
+				inView = append(inView, it)
+			}
+		}
+		if len(stored) > 0 && len(inView) == 0 {
+			return smartPlaylistDTO{}, false
+		}
+	}
+	dto.Items = make([]smartPlaylistItemDTO, 0, len(inView))
+	for _, it := range inView {
 		dto.Items = append(dto.Items, smartPlaylistItemDTO{
 			Position: len(dto.Items), Path: it.Path, Title: it.Title, Artist: it.Artist,
 		})
 	}
 	return dto, true
 }
+
+// storedItemPath, storedItemAlbum and storedItemArtist are what season.Pick
+// reads of a cached item. A blob cached before items stored their album has
+// none, and its family is judged on its artists alone until the next build.
+func storedItemPath(it manifest.SmartPlaylistItem) string   { return it.Path }
+func storedItemAlbum(it manifest.SmartPlaylistItem) string  { return it.Album }
+func storedItemArtist(it manifest.SmartPlaylistItem) string { return it.Artist }
 
 // timeOfDayKind mirrors smartplaylist.KindTimeOfDay without importing the
 // engine package into the API layer (the string is the stable wire contract).
@@ -215,8 +261,9 @@ func (s *Server) now() time.Time {
 }
 
 // resolveTimeOfDayItems unions the hour pools in [utcHour-window, utcHour+window]
-// (mod 24), center first then outward, deduping by path and capping at max.
-func resolveTimeOfDayItems(hourly map[int][]manifest.SmartPlaylistItem, utcHour, window, maxItems int) []smartPlaylistItemDTO {
+// (mod 24), center first then outward, deduping by path and capping at max,
+// leaving out an item of a format view does not declare.
+func resolveTimeOfDayItems(hourly map[int][]manifest.SmartPlaylistItem, utcHour, window, maxItems int, view formatgate.Set) []smartPlaylistItemDTO {
 	if len(hourly) == 0 {
 		return nil
 	}
@@ -229,7 +276,7 @@ func resolveTimeOfDayItems(hourly map[int][]manifest.SmartPlaylistItem, utcHour,
 	var out []smartPlaylistItemDTO
 	for _, h := range order {
 		for _, it := range hourly[h] {
-			if it.Path == "" || seen[it.Path] {
+			if it.Path == "" || seen[it.Path] || !view.Takes(it.Path) {
 				continue
 			}
 			seen[it.Path] = true

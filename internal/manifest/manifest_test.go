@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/formatgate"
 )
 
 // --- extractors ---
@@ -467,7 +469,7 @@ func TestEnrichmentCountsCorrectness(t *testing.T) {
 		}
 	}
 
-	enriched, last, err := s.EnrichmentCounts(context.Background())
+	enriched, last, err := s.EnrichmentCounts(context.Background(), formatgate.All())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -493,7 +495,7 @@ func TestEnrichmentCountsEmpty(t *testing.T) {
 	}
 	defer s.Close()
 
-	enriched, last, err := s.EnrichmentCounts(context.Background())
+	enriched, last, err := s.EnrichmentCounts(context.Background(), formatgate.All())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -526,7 +528,7 @@ func TestEnrichmentCountsAllUnenriched(t *testing.T) {
 		}
 	}
 
-	enriched, last, err := s.EnrichmentCounts(context.Background())
+	enriched, last, err := s.EnrichmentCounts(context.Background(), formatgate.All())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -748,7 +750,7 @@ func TestBuildManifestPageSetsNextCursorAndTotal(t *testing.T) {
 	}
 
 	// Page size 2 → first page is full, NextCursor non-nil, Total set.
-	m, err := BuildManifestPage(context.Background(), s, []string{filepath.Join(dir, "Music")}, "", 2)
+	m, err := BuildManifestPage(context.Background(), s, []string{filepath.Join(dir, "Music")}, "", 2, formatgate.Set{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -764,7 +766,7 @@ func TestBuildManifestPageSetsNextCursorAndTotal(t *testing.T) {
 
 	// Second page (cursor=="Music/02.flac") — still mid-run, so
 	// NextCursor non-nil, but Folders + Total absent.
-	m, err = BuildManifestPage(context.Background(), s, []string{filepath.Join(dir, "Music")}, "Music/02.flac", 2)
+	m, err = BuildManifestPage(context.Background(), s, []string{filepath.Join(dir, "Music")}, "Music/02.flac", 2, formatgate.Set{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -780,7 +782,7 @@ func TestBuildManifestPageSetsNextCursorAndTotal(t *testing.T) {
 
 	// Last page (cursor=="Music/04.flac" → only Music/05.flac left).
 	// Short read, NextCursor nil.
-	m, err = BuildManifestPage(context.Background(), s, []string{filepath.Join(dir, "Music")}, "Music/04.flac", 2)
+	m, err = BuildManifestPage(context.Background(), s, []string{filepath.Join(dir, "Music")}, "Music/04.flac", 2, formatgate.Set{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -811,7 +813,7 @@ func TestBuildManifestPageExactMultipleOfLimitStopsAtCorrectPage(t *testing.T) {
 	}
 
 	// Page 1: 2 tracks, NextCursor set to Music/02.flac.
-	p1, _ := BuildManifestPage(context.Background(), s, []string{filepath.Join(dir, "Music")}, "", 2)
+	p1, _ := BuildManifestPage(context.Background(), s, []string{filepath.Join(dir, "Music")}, "", 2, formatgate.Set{})
 	if p1.NextCursor == nil {
 		t.Fatalf("page 1 should have NextCursor")
 	}
@@ -819,7 +821,7 @@ func TestBuildManifestPageExactMultipleOfLimitStopsAtCorrectPage(t *testing.T) {
 	// Page 2: 2 tracks, NextCursor MUST be nil — we've reached the
 	// end. Pre-fix this would have set NextCursor to Music/04.flac
 	// and forced a third empty round-trip.
-	p2, _ := BuildManifestPage(context.Background(), s, []string{filepath.Join(dir, "Music")}, *p1.NextCursor, 2)
+	p2, _ := BuildManifestPage(context.Background(), s, []string{filepath.Join(dir, "Music")}, *p1.NextCursor, 2, formatgate.Set{})
 	if len(p2.Tracks) != 2 {
 		t.Errorf("page 2 tracks = %d, want 2", len(p2.Tracks))
 	}
@@ -1191,7 +1193,7 @@ func TestBuildManifestShape(t *testing.T) {
 	sc := NewScanner([]string{root}, s, "")
 	sc.Scan(context.Background())
 
-	mf, err := BuildManifest(context.Background(), s, []string{root}, time.Time{})
+	mf, err := BuildManifest(context.Background(), s, []string{root}, time.Time{}, formatgate.All())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1223,13 +1225,13 @@ func TestWriteManifestParityWithBuildManifest(t *testing.T) {
 	sc := NewScanner([]string{root}, s, "")
 	sc.Scan(context.Background())
 
-	want, err := BuildManifest(context.Background(), s, []string{root}, time.Time{})
+	want, err := BuildManifest(context.Background(), s, []string{root}, time.Time{}, formatgate.All())
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	var buf bytes.Buffer
-	if err := WriteManifest(context.Background(), &buf, s, []string{root}, time.Time{}); err != nil {
+	if err := WriteManifest(context.Background(), &buf, s, []string{root}, time.Time{}, formatgate.All()); err != nil {
 		t.Fatalf("WriteManifest: %v", err)
 	}
 	var got Manifest
@@ -1306,14 +1308,14 @@ func TestManifestDeltaOmitsFolders(t *testing.T) {
 	since := time.Now().Add(-24 * time.Hour)
 
 	var buf bytes.Buffer
-	if err := WriteManifest(context.Background(), &buf, s, []string{root}, since); err != nil {
+	if err := WriteManifest(context.Background(), &buf, s, []string{root}, since, formatgate.All()); err != nil {
 		t.Fatalf("WriteManifest(since): %v", err)
 	}
 	if bytes.Contains(buf.Bytes(), []byte(`"folders"`)) {
 		t.Errorf("delta stream must omit the folders array; body=%s", buf.String()[:min(400, buf.Len())])
 	}
 
-	built, err := BuildManifest(context.Background(), s, []string{root}, since)
+	built, err := BuildManifest(context.Background(), s, []string{root}, since, formatgate.All())
 	if err != nil {
 		t.Fatalf("BuildManifest(since): %v", err)
 	}
@@ -1323,7 +1325,7 @@ func TestManifestDeltaOmitsFolders(t *testing.T) {
 
 	// The FULL leg still carries them (the negative control for this
 	// test's own gate).
-	full, err := BuildManifest(context.Background(), s, []string{root}, time.Time{})
+	full, err := BuildManifest(context.Background(), s, []string{root}, time.Time{}, formatgate.All())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1355,7 +1357,7 @@ func TestWriteManifestStreamsLargeLibraryWithoutOOM(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	if err := WriteManifest(context.Background(), &buf, s, []string{"/tmp/nope/Music"}, time.Time{}); err != nil {
+	if err := WriteManifest(context.Background(), &buf, s, []string{"/tmp/nope/Music"}, time.Time{}, formatgate.All()); err != nil {
 		t.Fatalf("WriteManifest: %v", err)
 	}
 	var mf Manifest
@@ -1380,7 +1382,7 @@ func TestBuildManifestSinceFilter(t *testing.T) {
 	sc.Scan(context.Background())
 
 	future := time.Now().Add(time.Hour)
-	mf, _ := BuildManifest(context.Background(), s, []string{root}, future)
+	mf, _ := BuildManifest(context.Background(), s, []string{root}, future, formatgate.All())
 	if len(mf.Tracks) != 0 {
 		t.Errorf("since-future: got %d tracks, want 0", len(mf.Tracks))
 	}
@@ -1463,7 +1465,7 @@ func TestProviderWriteManifestReflectsSetRoots(t *testing.T) {
 	}
 
 	var pre bytes.Buffer
-	if err := p.WriteManifest(context.Background(), &pre, time.Time{}); err != nil {
+	if err := p.WriteManifest(context.Background(), &pre, time.Time{}, formatgate.All()); err != nil {
 		t.Fatal(err)
 	}
 	mf := decode(&pre)
@@ -1473,7 +1475,7 @@ func TestProviderWriteManifestReflectsSetRoots(t *testing.T) {
 
 	sc.SetRoots([]string{a, b})
 	var post bytes.Buffer
-	if err := p.WriteManifest(context.Background(), &post, time.Time{}); err != nil {
+	if err := p.WriteManifest(context.Background(), &post, time.Time{}, formatgate.All()); err != nil {
 		t.Fatal(err)
 	}
 	mf = decode(&post)

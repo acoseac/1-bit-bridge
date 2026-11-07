@@ -235,6 +235,12 @@ type Options struct {
 	// Now overrides time.Now for the quiet-hours check. Tests
 	// inject a fixed clock. Nil = real clock.
 	Now func() time.Time
+
+	// Uptime overrides how long this process has been up, which the
+	// auto-installer's wait for the running install's confirmation reads
+	// (ProbationHolds; backlog B660). Nil is the time since New, on the
+	// monotonic clock. Tests inject one.
+	Uptime func() time.Duration
 }
 
 // Updater owns the cached status and the polling goroutine.
@@ -255,6 +261,7 @@ type Updater struct {
 	autoInstallRestart func()
 	tokenSnapshot      func() []auth.Token
 	now                func() time.Time
+	uptime             func() time.Duration
 
 	mu     sync.RWMutex
 	status Status
@@ -343,6 +350,13 @@ func New(opts Options) *Updater {
 	if now == nil {
 		now = time.Now
 	}
+	uptime := opts.Uptime
+	if uptime == nil {
+		// time.Now carries the monotonic clock, and Since reads it: a
+		// clock stepped at boot (a box with no RTC) moves nothing here.
+		started := time.Now()
+		uptime = func() time.Duration { return time.Since(started) }
+	}
 	return &Updater{
 		repo:               repo,
 		interval:           interval,
@@ -359,6 +373,7 @@ func New(opts Options) *Updater {
 		autoInstallRestart: opts.AutoInstallRestart,
 		tokenSnapshot:      opts.TokenSnapshot,
 		now:                now,
+		uptime:             uptime,
 		status: Status{
 			CurrentVersion: version.ServerVersion,
 			Channel:        channel,
@@ -377,8 +392,10 @@ func New(opts Options) *Updater {
 // honours the quiet-hours window and the sessions tracker. A
 // successful auto-install ends with the restart callback firing,
 // which terminates the process; service-manager respawn loads the
-// new binary. The Phase B `maybeRollbackOnBoot` housekeeping then
-// confirms (or rolls back) on the next start.
+// new binary. The Phase B `maybeRollbackOnBoot` housekeeping then puts
+// the install on probation (or rolls back) on the next start, and the
+// start that answers and stays up confirms it (ConfirmInstall; backlog
+// B660).
 //
 // Designed to be invoked as `go updater.Run(scanCtx)` from serveCmd
 // alongside the periodic scanner — same lifetime, same cancellation
@@ -514,6 +531,17 @@ func (u *Updater) maybeAutoInstall(ctx context.Context) {
 		u.restartWhenDrained(ctx)
 		return
 	}
+	// The running install's probation (backlog B660): while the running
+	// version awaits its confirmation, the backup beside it is the last
+	// version known to run here, and a swap now would replace it with the
+	// unconfirmed one. Waits at most twice the window, and only where the
+	// crash rollback would put that backup back (ProbationHolds). Asked again
+	// under the install marker's lock (decideUnderLock), as the hold is.
+	if why := u.probationHolds(u.autoInstallOpts.DataDir, u.autoInstallOpts.BinaryPath, st.CurrentVersion); why != "" {
+		u.recordDeferredReason(why)
+		logger.Info(autoInstallDeferredMessage, "reason", "the running install awaits its confirmation", "version", st.CurrentVersion)
+		return
+	}
 	// Sessions inflight gate: refuse cleanly. The next poll cycle
 	// will try again.
 	if n := u.inflightSessions(); n > 0 {
@@ -598,6 +626,22 @@ func (u *Updater) heldBack(candidate string) Hold {
 		return Hold{}
 	}
 	return HeldBack(u.autoInstallOpts.DataDir, u.autoInstallOpts.ConfigPath, candidate)
+}
+
+// probationHolds is ProbationHolds over the marker in dataDir, for the
+// running version current serving as binaryPath, at this process's uptime:
+// why the automatic install waits for the running install's confirmation, ""
+// where it does not (backlog B660). A marker that cannot be read holds
+// nothing back, as HeldBack's does not.
+func (u *Updater) probationHolds(dataDir, binaryPath, current string) string {
+	if dataDir == "" {
+		return ""
+	}
+	st, err := LoadState(dataDir)
+	if err != nil {
+		return ""
+	}
+	return ProbationHolds(st, current, binaryPath, u.uptime())
 }
 
 // rejectionBlocks reports whether an operator rollback of `rejected`

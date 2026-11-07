@@ -1,6 +1,7 @@
 package policy
 
 import (
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -189,6 +190,113 @@ func TestAdmissionIsPerRateForAMigratedAcknowledgement(t *testing.T) {
 		for _, rate := range dsdRates {
 			wantOutcome(t, "migrated "+mode+" acknowledged since", Effective(in).At(rate).Plan, OutcomeNative)
 		}
+	}
+}
+
+// migratedEntry is the test DAC's entry as a migration of the legacy keys
+// writes it (dsdstate.Migrate): dsdMode mode with allowDoP, and the owner's
+// record approving the mode's transport at every rate, or, with record
+// false, no record, whose migration writes the choice alone.
+func migratedEntry(t *testing.T, mode string, record bool) dsdstate.DAC {
+	t.Helper()
+	allow := true
+	legacy := dsdstate.Legacy{DSDMode: mode, AllowDoP: &allow, DSDQualification: "approved.json"}
+	s, _, err := dsdstate.Migrate(dsdstate.Defaults(), dsdstate.Input{Legacy: legacy, Now: t0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bound := &dsdstate.Bound{Key: dacKey(t), Identity: qualification.Identity{Vendor: "1234", ProductID: "5678", Manufacturer: "Test", Product: "Test DAC", BCDDevice: bcd, Port: "platform-xhci-hcd.0/usb1-1:1.0"}}
+	rec := dsdstate.Record{Outcome: dsdstate.RecordMissing}
+	if record {
+		rec = dsdstate.Record{Outcome: dsdstate.RecordTaken, SHA256: strings.Repeat("ab", 32), BCDDevice: bcd, QualifiedOn: "2026-11-01"}
+		if mode == dsdstate.ModeNative {
+			rec.Native = []int{dsd64, dsd128, dsd256}
+		} else {
+			rec.DoP = []int{dsd64, dsd128, dsd256}
+		}
+	}
+	s, _, err = dsdstate.Migrate(s, dsdstate.Input{Legacy: legacy, Bound: bound, Record: rec, Now: t0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(s.DACs) != 1 || s.DACs[0].Choice == nil || s.DACs[0].Choice.Mode != mode || s.DACs[0].Choice.SetBy != dsdstate.ByMigration {
+		t.Fatalf("the migration of dsdMode %s wrote %+v, want the DAC's migrated choice", mode, s.DACs)
+	}
+	return s.DACs[0]
+}
+
+// TestAnExplicitChoiceNeverConvertsWrittenOrMigrated (B728 B11 round 2;
+// section 3.2's table): an explicit native or dop refuses what it cannot
+// play with the table's word and never converts, on a migrated state as on a
+// written one (TestTheEffectivePolicyTable's base). The table's explicit
+// rows run on the entry a migration of the legacy keys writes (the owner's
+// record approving the row's transport at every rate: the choice, first use
+// acknowledged at the record's rates, clean answers there and, for dop, the
+// confirmation), the profile's claims beside it: with every clause of the
+// row's cell holding its transport plays, and each clause failing in each way
+// TestTheEffectivePolicyTable knows refuses with the word the clause names.
+// The migration of no record, the choice alone, refuses every rate as
+// first_use_pending; neither converts.
+func TestAnExplicitChoiceNeverConvertsWrittenOrMigrated(t *testing.T) {
+	rows := designTable(t)
+	for _, c := range []struct {
+		choice, mode, transport string
+		outcome                 Outcome
+	}{
+		{"`native`", dsdstate.ModeNative, dsdstate.TransportNative, OutcomeNative},
+		{"`dop`", dsdstate.ModeDoP, dsdstate.TransportDoP, OutcomeDoP},
+	} {
+		i := slices.IndexFunc(rows, func(r designRow) bool { return r.choice == c.choice })
+		if i < 0 {
+			t.Fatalf("section 3.2's table holds no %s row", c.choice)
+		}
+		cell := rows[i].native
+		if c.transport == dsdstate.TransportDoP {
+			cell = rows[i].dop
+		}
+		t.Run(c.mode, func(t *testing.T) {
+			base := func(record bool) *rig {
+				r := newRig(t).everything(c.mode)
+				r.max = dsd256
+				d := migratedEntry(t, c.mode, record)
+				r.mode, r.max, r.by = d.Choice.Mode, d.Choice.MaxBitRate, d.Choice.SetBy
+				r.firstUse, r.listener, r.confirmed = d.FirstUse, d.Listener, d.DoPConfirmed
+				if c.transport == dsdstate.TransportNative {
+					r.withoutCarrier()
+				} else {
+					r.withoutNative()
+				}
+				return r
+			}
+			wantOutcome(t, "migrated "+c.mode+" with every clause holding", base(true).plan(testRate), c.outcome)
+			known := conditions(c.transport)
+			failures := 0
+			for _, clause := range strings.Split(cell, "; ") {
+				cond, ok := known[clause]
+				if !ok {
+					t.Fatalf("a clause of the %s cell this test does not know: %q", c.transport, clause)
+				}
+				for _, f := range cond.fail {
+					r := base(true)
+					f.do(r)
+					p := r.plan(testRate)
+					what := "migrated " + c.mode + ", " + clause + " failing: " + f.how
+					if p.Outcome == OutcomeConverted {
+						t.Errorf("%s: converted", what)
+						continue
+					}
+					wantOutcome(t, what, p, OutcomeRefused, f.reason)
+					failures++
+				}
+			}
+			if failures == 0 {
+				t.Fatal("no clause of the cell failed: the test pins nothing")
+			}
+			r := base(false)
+			for _, rate := range dsdRates {
+				wantOutcome(t, "migrated "+c.mode+" with no record", r.plan(rate), OutcomeRefused, ReasonFirstUsePending)
+			}
+		})
 	}
 }
 

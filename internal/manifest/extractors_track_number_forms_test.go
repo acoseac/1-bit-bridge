@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/dhowden/tag"
+
+	"github.com/acoseac/1-bit-bridge/internal/formatgate"
 )
 
 // Tests for backlog B743: a track or disc number written with its total
@@ -389,11 +391,11 @@ func TestScanner_V31_ANumberReadAnewJoinsTheDelta_AnUnchangedOneOnlyStamps(t *te
 
 	scanOnce(t, sc, "v31")
 
-	full, err := BuildManifest(ctx, store, []string{root}, time.Time{})
+	full, err := BuildManifest(ctx, store, []string{root}, time.Time{}, formatgate.All())
 	if err != nil {
 		t.Fatal(err)
 	}
-	delta, err := BuildManifest(ctx, store, []string{root}, since)
+	delta, err := BuildManifest(ctx, store, []string{root}, since, formatgate.All())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -441,7 +443,7 @@ func TestScanner_V31_ANumberReadAnewJoinsTheDelta_AnUnchangedOneOnlyStamps(t *te
 
 	settled := syncedThrough(t, store)
 	scanOnce(t, sc, "after")
-	after, err := BuildManifest(ctx, store, []string{root}, settled)
+	after, err := BuildManifest(ctx, store, []string{root}, settled, formatgate.All())
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -381,6 +381,32 @@ host, beside a private address, on an interface of its own),
 `TestAcceptsOnIsTheListenersServedSet`. The record is in
 `ops/engineering-log.md`, "2026-11-02 — B687".
 
+**The ContentDirectory offers no WavPack or Monkey's Audio track, an upstream
+such item keeps its format's extension and no codec, and a `.wvc` is no item**
+(2026-11-06, backlog B489). Few renderers play either format, the DLNA profiles
+have no entry for them, and a renderer cannot declare a format the way an app
+does (`X-Bridge-Formats`, `wire.md`), so the adapter's rebuild
+(`manifestLibraryAdapter` in `dlna_wiring.go`, its `view` field) reads the
+served set in the view that declares nothing (`ListServedTracks(ctx, nil,
+formatgate.Set{})`), pinned through the real MediaServer wiring. The loopback
+track route, which the MPD beside the bridge fetches from, reads every format
+(`formatgate.All()`) and serves the file as it is, MPD decoding it
+(`output_loopback_test.go` fetches a `.wv` there). **Upstream**: the walk takes
+a `.wvc` for no track (`isWavPackCorrection`: its URL's extension, or a
+protocolInfo naming `wavpack-correction`), and names a WavPack or Monkey's
+Audio item by its protocolInfo's extension whatever its URL's (`audio/x-wavpack`
+and `audio/wavpack` are `wv`; `audio/x-ape`, `audio/ape` and
+`audio/x-monkeys-audio` are `ape`), since the client gate holds a routed row by
+its path alone; and the ingest gives an upstream row of either no codec
+(`codecFromExtension`): it parsed no header, and `WAVPACK` or `APE` would say
+lossless where a hybrid `.wv` may be lossy. An item with neither an audio class
+nor an audio protocolInfo is still not admitted by a `.wv` URL alone
+(`isKnownAudioExt` names neither format). **Don't let the adapter read a
+declared view, or give an upstream row a codec its header was never read for.**
+`TestTheContentDirectoryOffersNoWavPackOrMonkeysAudio`,
+`TestAnUpstreamWavPackOrMonkeysAudioItemCarriesItsExtension` and
+`TestCodecFromExtension_KnownAndUnknown` pin it.
+
 ## Strict aliases and cross-package transport (B470 PR 5a2b)
 
 Strict multicast used to select firstOn and only then ask Source, losing a

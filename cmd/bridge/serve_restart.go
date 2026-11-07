@@ -25,6 +25,15 @@ import (
 type serveRestart struct {
 	requested atomic.Bool
 	cancel    context.CancelFunc
+	// requestedHook, when set, runs as a request arrives, before the cancel:
+	// the stop's take-back of the start's count (backlog B660's second
+	// round), which a restart request is a stop for.
+	requestedHook atomic.Pointer[func()]
+}
+
+// onRequest makes fn run as each request arrives, before serve is cancelled.
+func (r *serveRestart) onRequest(fn func()) {
+	r.requestedHook.Store(&fn)
 }
 
 // newServeRestart returns the restart request for a serve whose cancel is
@@ -37,6 +46,9 @@ func newServeRestart(cancel context.CancelFunc) *serveRestart {
 // goroutine, and more than once.
 func (r *serveRestart) request() {
 	r.requested.Store(true)
+	if fn := r.requestedHook.Load(); fn != nil {
+		(*fn)()
+	}
 	r.cancel()
 }
 

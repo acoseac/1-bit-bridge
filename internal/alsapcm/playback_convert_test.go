@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -797,6 +798,61 @@ func TestDeletingOrReplacingAPreparedConvertedSuccessor(t *testing.T) {
 	}
 }
 
+// TestADeletionAtAJoinBehindAHangingReadStopsAtTheEnginesDeadline (B728 B11
+// round 2; backlog B768, named and not built): a, then b, which
+// dsdconv.Continuous joins to a, b's first bits in a's join window. Past the
+// window the producer converts b and is held in a read of b's content that
+// does not return (a file on a mount that hangs, which no context ends; a
+// cut's wcancel ends a Write alone), none of b's frames returned yet.
+// Deleting b asks the backend to take b back through the window (the
+// engine's Prepare, which replaces a successor with nothing submitted, here;
+// its Cut once a frame is), which the producer alone does, between two of its
+// steps, so the call waits on the read: it ends at its deadline and the
+// engine releases the session, so playback stops (backend_timeout) where the
+// deletion would have skipped b. Nothing waits past the engine's deadlines:
+// Delete answers, the release is unconfirmed past its own while the producer
+// is in the read, the release closing nothing under it, and once the read
+// returns the producer leaves and the release is acknowledged, late, every
+// content closed.
+func TestADeletionAtAJoinBehindAHangingReadStopsAtTheEnginesDeadline(t *testing.T) {
+	d := newConvRig(t)
+	a, b := track(playbacktest.DSD64, 0.25, noise(1)), track(playbacktest.DSD64, 3, noise(2))
+	d.files.add("a", a)
+	d.files.add("b", b)
+	// b's open reads its first block group, the 8192 bytes after the DSF's
+	// 92-byte header; the producer's next read of b hangs.
+	parked, unpark := d.files.stall("b", 92+2*4096)
+	t.Cleanup(unpark)
+	ids := d.insert("a", "b")
+	d.play()
+	// b opened: the read that hangs is the producer's, converting b past
+	// a's window, with none of b's own frames returned yet.
+	d.preparedOcc(ids[1])
+	receiveIn(t, parked, "the producer's read of b past its first block group to hang")
+	if err := d.eng.Delete(bg, ids[1]); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	s := d.waitSnap("the session released past the cut's deadline, its release unconfirmed", func(s *engine.Snapshot) bool {
+		_, unconfirmed := s.ReleaseUnconfirmed()
+		return s.State() == engine.Stopped && s.LastStop().Reason != "" && unconfirmed
+	})
+	if got := s.LastStop(); got.Reason != engine.ReasonTimeout {
+		t.Errorf("playback stopped for %s (%s), want %s", got.Reason, got.Detail, engine.ReasonTimeout)
+	}
+	if d.files.closedUnderARead("b") {
+		t.Fatal("the release closed b's content while the producer was in a read of it")
+	}
+	unpark()
+	d.waitSnap("the late acknowledgement", func(s *engine.Snapshot) bool {
+		_, unconfirmed := s.ReleaseUnconfirmed()
+		return !unconfirmed
+	})
+	if !d.files.isClosed("a") || !d.files.isClosed("b") || d.files.closedUnderARead("b") {
+		t.Errorf("a's content closed %v, b's %v (under a read %v): want both closed once the producer left its read",
+			d.files.isClosed("a"), d.files.isClosed("b"), d.files.closedUnderARead("b"))
+	}
+}
+
 // parkingSource is a DSD source whose reads past after bytes a channel wait
 // for their context's end, which they answer: a source read the converter
 // makes inside ReadFrames, on the session's life.
@@ -981,6 +1037,95 @@ func TestASeekInAConvertedTrackIsUnsupported(t *testing.T) {
 	}
 }
 
+// TestAConvertedActivationBesideARefreshThatKeepsIt (B728 B11 round 2): a
+// refresh that publishes a set which keeps a converted occurrence (another
+// rate's plan changed: the choice's cap lowered from DSD128 to DSD64, which
+// takes DSD128 from native to converted, and DSD256 converted under both)
+// reconciles the occurrence while its output is being activated, rewriting
+// the set it is admitted under as the activation decides how to activate it.
+// The activation decides from what the occurrence's open fixed and judges it
+// under the session's lock, so the two never race: the activation is held at
+// its first step (playback.Seams.Activation), the refresh where it has
+// published and not reconciled (Seams.Published), and both are let go at
+// once, the activation's reads and the refresh's write unordered, which the
+// race detector make test runs under reports. The occurrence plays on, kept
+// under the new set, the DAC given every converted frame once.
+func TestAConvertedActivationBesideARefreshThatKeepsIt(t *testing.T) {
+	capped := func(max int, revision uint64) dsdstate.State {
+		st := playbacktest.ChoiceState(dsdstate.ModeAuto)
+		st.DACs[0].Choice.MaxBitRate, st.DACs[0].Choice.Revision = max, revision
+		return st
+	}
+	activating, letActivate := make(chan struct{}), make(chan struct{})
+	published, letReconcile := make(chan struct{}), make(chan struct{})
+	var actOnce, pubOnce, goActivate, goReconcile sync.Once
+	var armed atomic.Bool
+	d := newDSDRig(t, capped(playbacktest.DSD128, 1), func(o *rigOptions) {
+		if o.seams == nil {
+			o.seams = &playback.Seams{}
+		}
+		o.seams.Activation = func(engine.OccurrenceID) {
+			actOnce.Do(func() {
+				close(activating)
+				<-letActivate
+			})
+		}
+		o.seams.Published = func() {
+			if armed.Load() {
+				pubOnce.Do(func() {
+					close(published)
+					<-letReconcile
+				})
+			}
+		}
+	})
+	activate := func() { goActivate.Do(func() { close(letActivate) }) }
+	reconcile := func() { goReconcile.Do(func() { close(letReconcile) }) }
+	t.Cleanup(func() { activate(); reconcile() })
+	waitFor := func(what string, c <-chan struct{}) {
+		t.Helper()
+		select {
+		case <-c:
+		case <-time.After(alsapcm.Watchdog()):
+			alsapcm.LogGoroutines(t)
+			t.Fatalf("%s did not come within %v", what, alsapcm.Watchdog())
+		}
+	}
+	a := track(playbacktest.DSD256, 0.25, noise(1))
+	d.files.add("a", a)
+	d.insert("a")
+	go func() { _ = d.eng.Play(bg) }()
+	waitFor("the converted occurrence's activation", activating)
+	armed.Store(true)
+	d.store.Set(capped(playbacktest.DSD64, 2))
+	refreshed := make(chan struct{})
+	go func() {
+		defer close(refreshed)
+		d.be.RefreshDSD(true)
+	}()
+	waitFor("the refresh's publication", published)
+	activate()
+	reconcile()
+	waitFor("the refresh's end", refreshed)
+	d.k.Free()
+	s := d.waitStopped(engine.ReasonEndOfQueue)
+	if len(s.Skips()) != 0 || len(s.Faults()) != 0 {
+		t.Fatalf("the kept occurrence skipped %+v or faulted %+v", s.Skips(), s.Faults())
+	}
+	var converts []int
+	for _, c := range d.be.Policy().Converted {
+		converts = append(converts, c.BitRate)
+	}
+	if !slices.Equal(converts, []int{playbacktest.DSD128, playbacktest.DSD256}) {
+		t.Errorf("the new set converts %v, want DSD128 and DSD256", converts)
+	}
+	if v := d.k.View(); v.Opens != 1 || v.Committed != format.S243LE {
+		t.Errorf("%d opens, %s committed; want the one open in S24_3LE", v.Opens, v.Committed)
+	}
+	want, _ := converted(t, a, convPlan)
+	same(t, "the DAC was given", unpack(t, d.k.Heard(), format.S243LE, 24), want)
+}
+
 // lockedWriter is a writer under a mutex, for a log the backend's goroutines
 // write.
 type lockedWriter struct {
@@ -1031,27 +1176,71 @@ func TestAConvertedTrackIsNotLossless(t *testing.T) {
 // section 3.5; binding note 1a): a converted occurrence is the effective
 // policy's as native and DoP are, apart from its transport. Conversion
 // withdrawn (an off written) while one plays revokes it at once, its PCM sink
-// dropped and the session faulting; while one is prepared, the session playing
-// PCM, it is handed off again and refused by the set's word, the PCM playing
-// on. Its target changed (the DAC's altsets now stop at 88.2 kHz) while one
-// plays revokes it; while one is prepared it is handed off again and plays at
-// the new target, in a sink of its own.
+// dropped by the revocation itself and the session faulting; while one is
+// prepared, the session playing PCM, it is handed off again and refused by the
+// set's word, the PCM playing on. Its target changed (the DAC's altsets now
+// stop at 88.2 kHz) while one plays revokes it the same way; while one is
+// prepared it is handed off again and plays at the new target, in a sink of
+// its own.
 func TestAConversionWithdrawnOrRetargetedIsReconciled(t *testing.T) {
 	off := dsdstate.Defaults()
 	off.DefaultMode = dsdstate.ModeOff
 	retarget := func(d *dsdRig) {
 		d.box.SetAltsets(card, 0, pcmAltset(format.S243LE, 24, 44100, 88200))
 	}
-	t.Run("withdrawn while it plays", func(t *testing.T) {
+	// revokedWhilePlaying plays a, two seconds converted, and makes change
+	// once a is heard, which revokes it. The engine's release is held short
+	// of the backend (round 2), so the session's teardown, which drops every
+	// sink too, cannot stand in for the revocation: the revocation's own Drop
+	// reaches the PCM sink, its writer handed a drop and the device let go,
+	// and the DAC, granted a second more, is given nothing more while the
+	// release is still held. Then the release goes on.
+	revokedWhilePlaying := func(t *testing.T, change func(*dsdRig)) (*dsdRig, *engine.Snapshot) {
+		t.Helper()
 		d := newConvRig(t)
 		d.files.add("a", track(playbacktest.DSD64, 2, noise(1)))
 		d.insert("a")
 		d.playedOut(100*time.Millisecond, "a")
 		d.tick()
 		d.waitSnap("a heard", func(s *engine.Snapshot) bool { _, ok := s.Track(); return ok })
-		d.store.Set(off)
+		dropped := make(chan struct{})
+		var dropOnce sync.Once
+		var drops atomic.Int32
+		d.k.OnCommand(func(_ alsapcm.SinkConfig, op string) {
+			if op == "drop" {
+				drops.Add(1)
+				dropOnce.Do(func() { close(dropped) })
+			}
+		})
+		held, letGo := d.rec.holdNextRelease()
+		t.Cleanup(letGo)
+		change(d)
 		d.monitorTickThatRevokes()
-		s := d.tickUntilStopped(engine.ReasonFault)
+		waitFor := func(what string, c <-chan struct{}) {
+			t.Helper()
+			select {
+			case <-c:
+			case <-time.After(alsapcm.Watchdog()):
+				alsapcm.LogGoroutines(t)
+				t.Fatalf("%s did not come within %v", what, alsapcm.Watchdog())
+			}
+		}
+		waitFor("the revocation's Drop of the converted occurrence's PCM sink", dropped)
+		d.k.Await(t, "the dropped sink's device let go", func(v alsapcm.KernelView) bool { return !v.Open })
+		waitFor("the engine's release, held short of the backend", held)
+		given := d.k.View().GivenBytes
+		d.k.Grant(time.Second)
+		if v := d.k.View(); v.GivenBytes != given || v.Open {
+			t.Fatalf("with the engine's release held, the DAC was given %d bytes more and the device is open %v: the revocation did not stop the sink", v.GivenBytes-given, v.Open)
+		}
+		if n := drops.Load(); n < 1 {
+			t.Fatalf("%d drops before the release", n)
+		}
+		letGo()
+		return d, d.tickUntilStopped(engine.ReasonFault)
+	}
+	t.Run("withdrawn while it plays", func(t *testing.T) {
+		d, s := revokedWhilePlaying(t, func(d *dsdRig) { d.store.Set(off) })
 		if f := s.Faults(); len(f) != 1 || f[0].Reason != "native_revoked" {
 			t.Errorf("the faults %+v, want the converted occurrence revoked", f)
 		}
@@ -1060,15 +1249,7 @@ func TestAConversionWithdrawnOrRetargetedIsReconciled(t *testing.T) {
 		}
 	})
 	t.Run("retargeted while it plays", func(t *testing.T) {
-		d := newConvRig(t)
-		d.files.add("a", track(playbacktest.DSD64, 2, noise(1)))
-		d.insert("a")
-		d.playedOut(100*time.Millisecond, "a")
-		d.tick()
-		d.waitSnap("a heard", func(s *engine.Snapshot) bool { _, ok := s.Track(); return ok })
-		retarget(d)
-		d.monitorTickThatRevokes()
-		s := d.tickUntilStopped(engine.ReasonFault)
+		_, s := revokedWhilePlaying(t, retarget)
 		if f := s.Faults(); len(f) != 1 || f[0].Reason != "native_revoked" {
 			t.Errorf("the faults %+v, want the converted occurrence revoked", f)
 		}

@@ -126,7 +126,8 @@ func (s *Scanner) restampDuplicatesNonFatal(ctx context.Context) {
 //  2. Winner election per group under the policy snapshot
 //     (dupes.PlanSuppression — DSD/PCM never cross-suppressed,
 //     inconclusive never suppressed, exactly one served winner per
-//     suppression unit).
+//     suppression unit, or none for a unit whose every file is gone
+//     beside a found unit of its domain).
 //  3. Diff desired stamps against each row's CURRENT stamp state and
 //     write only the changes (ApplyDupeStamps) — a stable library is
 //     zero writes. Rows that fell out of every group (their twin was

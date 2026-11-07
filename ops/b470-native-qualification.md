@@ -885,13 +885,27 @@ converted to PCM under `auto`, never bit-exact, where it was refused; an explici
 `off` migrated stays off. Every earlier version's harness evidence is stale to the
 harness, as at every bump.
 
-Version 42 covers B728's B8 round 2, under the `internal/alsapcm/` prefix alone: the
+Version 42 covers B11's second round, under the same guarded
+`internal/player/playback/native.go` (a converted occurrence's activation decides
+by its converter, which its open fixed, and reads its set and plan under the
+session's lock alone, where it read them without the lock beside a refresh that
+rewrites them; and `Seams.Activation`, a test's hold at the activation's first
+step) and the `internal/alsapcm/` prefix (the backend's tests over the fake
+kernel: the activation beside a refresh that keeps the occurrence, the
+revocation's own Drop of a converted PCM sink with the engine's release held, a
+deletion at a join behind a read that hangs). No native or DoP byte changes, and
+no converted sample. The harness's approval admission reads a record of version
+42 alone; the migration reads an owner's record of 35 to 42 (`LegacyVersion`
+stays 35). For owners nothing changes from 41. Every earlier version's harness
+evidence, 41's included, is stale to the harness, as at every bump.
+
+Version 43 covers B728's B8 round 2, under the `internal/alsapcm/` prefix alone: the
 backend's tests over the fake kernel gain one, a first use observed while DSD plays,
 whose successor must join as it was admitted. No sink, packer, plan or harness
 reader changes, and no DSD byte a native or DoP occurrence sends: the fix is the
 player's backend publishing a change of what it says of the DAC beside the set it
 admits by, the set's pointer kept, in `internal/player/playback`, outside the guard.
-The harness's approval admission reads a record of version 42 alone; the migration
-reads an owner's record of 35 to 42 (`LegacyVersion` stays 35). For owners: nothing
+The harness's approval admission reads a record of version 43 alone; the migration
+reads an owner's record of 35 to 43 (`LegacyVersion` stays 35). For owners: nothing
 the harness runs or records changes, and nothing plays differently from version 41.
 Every earlier version's harness evidence is stale to the harness, as at every bump.

@@ -42,9 +42,10 @@ func rollBackFromTheConsoleUntilStopped(t *testing.T, r *refusedInstall, restore
 // record and before its rename, so the version installed (this build) is
 // still the binary in place. A command of it then refuses to migrate the
 // store; its serve's start records that it opened the data dir and lifts the
-// veto in one write, its store's open migrates and its housekeeping confirms
-// the install; and a second manual rollback refuses, the binaries as they
-// are, where before round 2 it put the backup back over the migrated store.
+// veto in one write, its store's open migrates and its housekeeping puts the
+// install back on probation (backlog B660; it confirmed it until B660); and a
+// second manual rollback refuses, the binaries as they are, where before
+// round 2 it put the backup back over the migrated store.
 func TestAManualRollbackStoppedBeforeItsRenameKeepsTheStoreFromASecondRollback(t *testing.T) {
 	r := newRefusedInstall(t, "")
 	r.withAnOlderStore(t)
@@ -72,8 +73,8 @@ func TestAManualRollbackStoppedBeforeItsRenameKeepsTheStoreFromASecondRollback(t
 		t.Errorf("the store after the restart is at %d, want %d: serve's own open migrates", v, latest)
 	}
 	st, err := updater.LoadState(r.dataDir)
-	if err != nil || st.DataDirOpenedBy != version.ServerVersion || st.RollbackStarted || st.Status != "installed" || st.MigrationVeto != "" {
-		t.Fatalf("the marker after the restart = %+v (%v), want %s recorded as opening the data dir and the install confirmed; stderr=%s",
+	if err != nil || st.DataDirOpenedBy != version.ServerVersion || st.RollbackStarted || st.Status != "installing" || st.MigrationVeto != "" {
+		t.Fatalf("the marker after the restart = %+v (%v), want %s recorded as opening the data dir and the install back on probation; stderr=%s",
 			st, err, version.ServerVersion, updaterLines(stderr))
 	}
 

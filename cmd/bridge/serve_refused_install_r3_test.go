@@ -333,8 +333,11 @@ func TestACommandOfTheVersionRolledBackRefusesToMigrateItsStore(t *testing.T) {
 // the version an early rollback was undoing, stopped before the backup was
 // back, then started again on settings fixed since: its admission records
 // that it opened the data dir before the store's migrations (pending here,
-// the store a step behind), and its housekeeping confirms the install,
-// however old the record, keeping the backup until the boot after it.
+// the store a step behind), its housekeeping puts the install back on
+// probation, however old the record, the rollback's mark, hold and veto gone,
+// and the start confirms it once it has answered and stayed up (backlog B660:
+// the housekeeping confirmed it until B660), keeping the backup until the
+// boot after that.
 func TestATargetWhoseSettingsAreFixedConfirmsAnInterruptedRollback(t *testing.T) {
 	latest := latestStoreVersion(t)
 	for _, tc := range []struct {
@@ -359,19 +362,26 @@ func TestATargetWhoseSettingsAreFixedConfirmsAnInterruptedRollback(t *testing.T)
 			// 4), so the restart runs that migration's own steps.
 			requireTheLatestSchema(t, r.dataDir, false)
 
-			r.bootAndStop(t)
+			events, seams := newProbationWatch(shortProbation)
+			sb := r.bootWith(t, serveOpts{probation: seams})
+			st, err := updater.LoadState(r.dataDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if st.Status != "installing" || st.RollbackStarted || st.DataDirOpenedBy != version.ServerVersion ||
+				st.RejectedVersion != "" || st.RejectedReason != "" || st.RejectedConfigDigest != "" || st.MigrationVeto != "" {
+				t.Fatalf("the marker once the start listens = %+v, want the install back on probation, the rollback's mark, "+
+					"its hold of this version and its veto gone", st)
+			}
+			events.waitFor(t, probationConfirmed)
+			stopServed(t, sb)
 			files.requireUnchanged(t)
 			if v := storeVersion(t, r.dataDir); v != latest {
 				t.Errorf("the store is at %d, want %d", v, latest)
 			}
 			requireTheLatestSchema(t, r.dataDir, true)
-			st, err := updater.LoadState(r.dataDir)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if st.Status != "installed" || st.InstalledAt.IsZero() || st.RollbackStarted || st.DataDirOpenedBy != version.ServerVersion ||
-				st.RejectedVersion != "" || st.RejectedReason != "" || st.RejectedConfigDigest != "" || st.MigrationVeto != "" {
-				t.Fatalf("the marker after the boot = %+v, want the install confirmed, the rollback's mark, its hold of this version and its veto gone", st)
+			if st = markerOf(t, r.dataDir); st.Status != "installed" || st.InstalledAt.IsZero() || st.DataDirOpenedBy != version.ServerVersion {
+				t.Fatalf("the marker after the start answered and stayed up = %+v, want the install confirmed", st)
 			}
 
 			r.bootAndStop(t)

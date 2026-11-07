@@ -21,6 +21,7 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/auth"
 	"github.com/acoseac/1-bit-bridge/internal/config"
+	"github.com/acoseac/1-bit-bridge/internal/formatgate"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
@@ -48,7 +49,7 @@ type fakePlaylistFiles struct {
 	block chan struct{}
 }
 
-func (f *fakePlaylistFiles) PlaylistFilesPage(ctx context.Context, want, after string) (manifest.PlaylistFilePage, error) {
+func (f *fakePlaylistFiles) PlaylistFilesPage(ctx context.Context, want, after string, _ formatgate.Set) (manifest.PlaylistFilePage, error) {
 	f.mu.Lock()
 	f.asked = append(f.asked, [2]string{want, after})
 	current := f.version

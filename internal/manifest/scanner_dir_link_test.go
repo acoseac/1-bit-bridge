@@ -34,6 +34,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/formatgate"
 	"github.com/acoseac/1-bit-bridge/internal/logging/loggingtest"
 )
 
@@ -178,7 +179,7 @@ func (l dirLinkLibrary) rows(t *testing.T) []string {
 // built, sorted: what every paired device was told is gone.
 func (l dirLinkLibrary) tombstones(t *testing.T) []string {
 	t.Helper()
-	deleted, _, err := l.store.DeletedSince(context.Background(), l.since)
+	deleted, _, err := l.store.DeletedSince(context.Background(), l.since, formatgate.All())
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
+	"github.com/acoseac/1-bit-bridge/internal/formatgate"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/smartplaylist"
 	"github.com/acoseac/1-bit-bridge/internal/smartplaylist/season"
@@ -296,7 +297,25 @@ func smartPlaylistItemCount(row manifest.StoredSmartPlaylist) int {
 	if json.Unmarshal(row.ItemsJSON, &items) != nil {
 		return 0
 	}
-	return len(items)
+	return len(consoleMixItems(row.Kind, items))
+}
+
+// consoleMixItems is the cached items of a flat family as the console shows
+// them. The Christmas family is stored as the material each request's view is
+// picked from, up to 100 tracks of each format (round 5 of backlog B489), so
+// the console shows it as the pick of a client that declares every format
+// (season.Pick over formatgate.All()), the family as served, below its floor
+// or not; every other family's items are its items.
+func consoleMixItems(kind string, items []manifest.SmartPlaylistItem) []manifest.SmartPlaylistItem {
+	if kind != string(smartplaylist.KindChristmas) {
+		return items
+	}
+	picked, _ := season.Pick(items,
+		func(it manifest.SmartPlaylistItem) string { return it.Path },
+		func(it manifest.SmartPlaylistItem) string { return it.Album },
+		func(it manifest.SmartPlaylistItem) string { return it.Artist },
+		formatgate.All())
+	return picked
 }
 
 // smartMixTrackView is one decoded member of a cached family.
@@ -368,6 +387,8 @@ func smartMixTracksForView(row manifest.StoredSmartPlaylist) []smartMixTrackView
 		}
 	} else if json.Unmarshal(row.ItemsJSON, &items) != nil {
 		return nil
+	} else {
+		items = consoleMixItems(row.Kind, items)
 	}
 	out := make([]smartMixTrackView, 0, len(items))
 	for _, it := range items {

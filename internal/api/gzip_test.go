@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/formatgate"
 )
 
 func TestAcceptsGzip(t *testing.T) {
@@ -107,7 +109,7 @@ type fakeStreamingProvider struct {
 	body []byte
 }
 
-func (f *fakeStreamingProvider) WriteManifest(ctx context.Context, w io.Writer, since time.Time) error {
+func (f *fakeStreamingProvider) WriteManifest(ctx context.Context, w io.Writer, since time.Time, _ formatgate.Set) error {
 	// Skip the Write entirely when body is empty so the test fake
 	// matches realistic behaviour: a real manifest streamer with an
 	// empty library returns without invoking Write, leaving the
@@ -119,14 +121,16 @@ func (f *fakeStreamingProvider) WriteManifest(ctx context.Context, w io.Writer, 
 	_, err := w.Write(f.body)
 	return err
 }
-func (f *fakeStreamingProvider) BuildManifestPage(ctx context.Context, cursor string, limit int) (*ManifestPage, error) {
+func (f *fakeStreamingProvider) BuildManifestPage(ctx context.Context, cursor string, limit int, _ formatgate.Set) (*ManifestPage, error) {
 	return nil, nil
 }
-func (f *fakeStreamingProvider) IsScanning() bool                           { return false }
-func (f *fakeStreamingProvider) IsScanStalled() bool                        { return false }
-func (f *fakeStreamingProvider) LastFullScan() time.Time                    { return time.Time{} }
-func (f *fakeStreamingProvider) TracksIndexed(ctx context.Context) int      { return 0 }
-func (f *fakeStreamingProvider) PendingDeletions(ctx context.Context) int64 { return 0 }
+func (f *fakeStreamingProvider) IsScanning() bool                                        { return false }
+func (f *fakeStreamingProvider) IsScanStalled() bool                                     { return false }
+func (f *fakeStreamingProvider) LastFullScan() time.Time                                 { return time.Time{} }
+func (f *fakeStreamingProvider) TracksIndexed(ctx context.Context, _ formatgate.Set) int { return 0 }
+func (f *fakeStreamingProvider) PendingDeletions(ctx context.Context, _ formatgate.Set) int64 {
+	return 0
+}
 
 // TestManifestEmitsGzipWhenAcceptEncodingGzip confirms the handler
 // sets Content-Encoding + Vary AND the body is valid gzip that
@@ -158,8 +162,10 @@ func TestManifestEmitsGzipWhenAcceptEncodingGzip(t *testing.T) {
 	if got := resp.Header.Get("Content-Encoding"); got != "gzip" {
 		t.Errorf("Content-Encoding = %q, want gzip", got)
 	}
-	if got := resp.Header.Get("Vary"); got != "Accept-Encoding" {
-		t.Errorf("Vary = %q, want Accept-Encoding", got)
+	// The manifest varies on the formats the request declared too (backlog
+	// B489), whatever its encoding.
+	if got := resp.Header.Get("Vary"); got != "X-Bridge-Formats, Accept-Encoding" {
+		t.Errorf("Vary = %q, want X-Bridge-Formats, Accept-Encoding", got)
 	}
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -301,8 +307,8 @@ func TestManifestEmptyBodyStripsGzipHeaders(t *testing.T) {
 	if got := resp.Header.Get("Content-Encoding"); got != "" {
 		t.Errorf("Content-Encoding = %q, want empty (header stripped on empty body)", got)
 	}
-	if got := resp.Header.Get("Vary"); got != "" {
-		t.Errorf("Vary = %q, want empty (header stripped on empty body)", got)
+	if got := resp.Header.Get("Vary"); got != "X-Bridge-Formats" {
+		t.Errorf("Vary = %q, want X-Bridge-Formats alone (Accept-Encoding stripped on empty body; the declared formats still decide the body)", got)
 	}
 	body, _ := io.ReadAll(resp.Body)
 	if len(body) != 0 {

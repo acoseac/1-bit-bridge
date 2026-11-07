@@ -279,6 +279,45 @@ func TestSynthesizeFilename_FallbacksAndExtensions(t *testing.T) {
 	}
 }
 
+// TestAnUpstreamWavPackOrMonkeysAudioItemCarriesItsExtension: the path the
+// walk synthesizes for a WavPack or Monkey's Audio item ends in its format's
+// extension (backlog B489), from the URL or, where the URL has none or names
+// another, from the protocolInfo, so the client format gate, which holds a
+// routed row by its path's extension alone, holds it; and a correction file
+// is no track.
+func TestAnUpstreamWavPackOrMonkeysAudioItemCarriesItsExtension(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		o    Object
+		want string
+	}{
+		{"wv by URL", Object{Title: "T", Res: "http://h/MediaItems/1.wv"}, "T.wv"},
+		{"WV by URL, any case", Object{Title: "T", Res: "http://h/MediaItems/1.WV"}, "T.wv"},
+		{"ape by URL", Object{Title: "T", Res: "http://h/MediaItems/1.ape"}, "T.ape"},
+		{"wavpack by MIME, no URL extension", Object{Title: "T", Res: "http://h/get?id=1", ProtocolInfo: "http-get:*:audio/x-wavpack:*"}, "T.wv"},
+		{"wavpack by MIME, unprefixed", Object{Title: "T", Res: "http://h/get?id=1", ProtocolInfo: "http-get:*:audio/wavpack:*"}, "T.wv"},
+		{"ape by MIME, no URL extension", Object{Title: "T", Res: "http://h/get?id=1", ProtocolInfo: "http-get:*:audio/x-ape:*"}, "T.ape"},
+		{"monkey's audio by MIME", Object{Title: "T", Res: "http://h/get?id=1", ProtocolInfo: "http-get:*:audio/x-monkeys-audio:*"}, "T.ape"},
+		{"wavpack by MIME over a .dat URL", Object{Title: "T", Res: "http://h/MediaItems/1.dat", ProtocolInfo: "http-get:*:audio/x-wavpack:*"}, "T.wv"},
+		{"ape by MIME over a .flac URL", Object{Title: "T", Res: "http://h/MediaItems/1.flac", ProtocolInfo: "http-get:*:AUDIO/X-APE:*"}, "T.ape"},
+	} {
+		if got := synthesizeFilename(tc.o); got != tc.want {
+			t.Errorf("%s: %q, want %q", tc.name, got, tc.want)
+		}
+	}
+	for _, o := range []Object{
+		{Class: "object.item.audioItem.musicTrack", Title: "T", Res: "http://h/MediaItems/1.wvc"},
+		{Class: "object.item.audioItem.musicTrack", Title: "T", Res: "http://h/get?id=1", ProtocolInfo: "http-get:*:audio/x-wavpack-correction:*"},
+	} {
+		if looksLikeAudioItem(o) {
+			t.Errorf("a correction file (%s, %s) is taken for a track", o.Res, o.ProtocolInfo)
+		}
+	}
+	if !looksLikeAudioItem(Object{Class: "object.item.audioItem.musicTrack", Title: "T", Res: "http://h/MediaItems/1.wv"}) {
+		t.Error("a WavPack item is not taken for a track")
+	}
+}
+
 func TestExtFromURL_StripsQueryAndFragment(t *testing.T) {
 	if e := extFromURL("http://h/get?id=1&fmt=flac"); e != "" {
 		t.Errorf("got %q; want empty (no extension on path)", e)

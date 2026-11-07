@@ -14,6 +14,7 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/auth"
 	"github.com/acoseac/1-bit-bridge/internal/config"
+	"github.com/acoseac/1-bit-bridge/internal/formatgate"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
@@ -47,7 +48,7 @@ func newSlowSearcher() *slowSearcher {
 	}
 }
 
-func (s *slowSearcher) SearchServedTracks(ctx context.Context, _ string, _ int) ([]manifest.TrackHit, error) {
+func (s *slowSearcher) SearchServedTracks(ctx context.Context, _ string, _ int, _ formatgate.Set) ([]manifest.TrackHit, error) {
 	close(s.started)
 	_, hadDeadline := ctx.Deadline()
 	timer := time.NewTimer(slowSearchCap)

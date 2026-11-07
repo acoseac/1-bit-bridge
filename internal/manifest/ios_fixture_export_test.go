@@ -14,6 +14,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/formatgate"
 )
 
 // TestExportIOSManifestFixtures always exercises extraction, SQLite and both
@@ -76,7 +78,7 @@ func TestExportIOSManifestFixtures(t *testing.T) {
 		since time.Time
 	}{{"dsd_full.json", time.Time{}}, {"dsd_delta.json", deltaSince}} {
 		var out bytes.Buffer
-		if err := WriteManifest(context.Background(), &out, store, []string{root}, leg.since); err != nil {
+		if err := WriteManifest(context.Background(), &out, store, []string{root}, leg.since, formatgate.All()); err != nil {
 			t.Fatal(err)
 		}
 		var wire struct {

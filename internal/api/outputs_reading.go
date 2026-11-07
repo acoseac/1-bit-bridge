@@ -180,8 +180,12 @@ type OutputTrack struct {
 	BitsPerSample *int
 	Channels      *int
 	IsDSD         *bool
-	Size          int64
-	MTimeNS       int64
+	// Correction is a hybrid WavPack stream that is lossless beside its
+	// correction file (manifest.Track.Correction, backlog B489), which MPD
+	// finds at the stream's URI with "c" appended.
+	Correction bool
+	Size       int64
+	MTimeNS    int64
 }
 
 // readingState is the reading's cache and its flight, under
@@ -1529,17 +1533,28 @@ func readingFacts(s *readingSnap, pick *dacPick) signalpath.Facts {
 	return f
 }
 
-// sourceFacts is the file's own format, from its row.
+// sourceFacts is the file's own format, from its row, as MPD decodes it. A
+// hybrid WavPack row, lossless only beside its correction file
+// (OutputTrack.Correction), is its lossy stream, WAVPACK-LOSSY as the
+// manifest names a hybrid without one, when MPD fetches it by the loopback
+// track route: MPD's WavPack plugin asks for the correction file at the
+// stream's URI with "c" appended, which the route, serving a track's own
+// file alone, answers 404 (round 2 of backlog B489, Claude's review). By
+// its path MPD opens the correction file beside it.
 func sourceFacts(row *songRow) signalpath.Source {
 	if row == nil {
 		return signalpath.Source{}
 	}
 	t := row.track
+	codec := t.Codec
+	if t.Correction && row.via == "loopback" {
+		codec = manifest.CodecWavPackLossy
+	}
 	src := signalpath.Source{
 		Known:   row.current,
 		Changed: !row.current,
-		Codec:   t.Codec,
-		Lossy:   manifest.IsLossyCodec(t.Codec),
+		Codec:   codec,
+		Lossy:   manifest.IsLossyCodec(codec),
 		DSD:     (t.IsDSD != nil && *t.IsDSD) || strings.EqualFold(t.Codec, "DSF") || strings.EqualFold(t.Codec, "DFF"),
 	}
 	if t.SampleRate != nil && *t.SampleRate > 0 && *t.SampleRate < math.MaxInt32 {

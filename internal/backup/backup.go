@@ -68,6 +68,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/player/dsdstate"
 	"github.com/acoseac/1-bit-bridge/internal/player/engine"
+	"github.com/acoseac/1-bit-bridge/internal/updater"
 	"github.com/acoseac/1-bit-bridge/internal/version"
 )
 
@@ -515,6 +516,9 @@ func RestoreWithOptions(snapshotDir string, dst Targets, opts RestoreOptions) er
 			return err
 		}
 	}
+	if err := restoreMigrationHeld(snapshotDir, dst.ManifestDB, m.Files); err != nil {
+		return err
+	}
 	// restored names what has been written, for a refusal at bridge.yaml's
 	// own write to say.
 	var restored []string
@@ -659,6 +663,35 @@ func RestoreWithOptions(snapshotDir string, dst Targets, opts RestoreOptions) er
 			}
 		}
 		restored = append(restored, name)
+	}
+	return nil
+}
+
+// restoreMigrationHeld refuses, before the restore's first write, a snapshot
+// whose store this version would migrate where a command may not migrate it
+// (backlog B660's second round): the restored database is opened at once to
+// mint its backup epoch (manifest.ResetBackupEpoch), an open that migrates a
+// store from behind the ladder's top, and while the install awaits its
+// confirmation after a start that did not end cleanly, that open refuses
+// (updater.MigrationHeld), which past the database's copy would leave the
+// restore half done. A snapshot whose store cannot be read is left to the
+// copy, as before.
+func restoreMigrationHeld(snapshotDir, dbTarget string, files []string) error {
+	if dbTarget == "" || !slices.Contains(files, ManifestDBFileName) {
+		return nil
+	}
+	pending, err := manifest.PendingMigrations(filepath.Join(snapshotDir, ManifestDBFileName))
+	if err != nil || pending == 0 {
+		return nil
+	}
+	dataDir := filepath.Dir(dbTarget)
+	st, err := updater.LoadState(dataDir)
+	if err != nil {
+		return nil
+	}
+	if why := updater.MigrationHeldIn(dataDir, st, version.ServerVersion); why != "" {
+		return fmt.Errorf("the snapshot's store is %d migration(s) behind this version, which the restore would run, and %w: %s; "+
+			"nothing was restored", pending, updater.ErrMigrationHeld, why)
 	}
 	return nil
 }

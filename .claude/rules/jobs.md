@@ -121,6 +121,7 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
 - **The eligibility SQL and the Go gates are LOCKSTEP MIRRORS** — change one and
   the other in the same commit; a test in `internal/admin` (the only package
   importing both) fails on divergence.
+- **A WavPack or Monkey's Audio file is never a rendition's source or an analysis's, judged by its path as the client format gate reads it (`formatgate.Gated`): the upscale gate refuses it in Go and in its SQL mirror (`ungatedPathSQLT`), and the analysis collector skips it before any resolve, counted apart in the coverage SQL in the same order** (2026-11-06, backlog B489) **Don't decode one for a job, or count one as eligible, failed or unreadable.** → History-rules-jobs.md
 - **`SetPostScanHook` REPLACES.** Append to `postScanNudges` and register one
   fan-out hook; a second registration silently unhooks the previous sweeper.
 - **Every reaper fails closed on an EMPTY referenced set, and the CLI ones offer a way past it.** → History-rules-jobs.md
