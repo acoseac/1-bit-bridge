@@ -74,8 +74,9 @@ func servingBinaryPath(opts serveOpts, stderr io.Writer) string {
 // (updater.EarlyRollback); when the data dir's lock is this process's, so no
 // other serve, restore or clear-missing owns it; and when the backup beside
 // this binary is a regular file whose `version` names the version the
-// marker says the install replaced (updater.ProbeVersion: a version check,
-// not a proof of its bytes); and the install marker's lock is this process's
+// marker says the install replaced, within backupProbeBound (updater's
+// ProbeVersionWithin: a version check, not a proof of its bytes); and the
+// install marker's lock is this process's
 // too, from the marker's read to the rename and any write after it, so that
 // no store open migrates in between (updater.LockState). Then this version
 // is held back from the auto-installer for these settings, recorded durably
@@ -164,7 +165,7 @@ func recoverRefusedInstall(ctx context.Context, configPath string, reasons []str
 		noRollback(stderr, st, fmt.Sprintf("there is no backup to put back, a regular file at %s", backup))
 		return 0, false
 	}
-	got, err := updater.ProbeVersion(ctx, backup)
+	got, err := updater.ProbeVersionWithin(ctx, backup, backupProbeBound(opts))
 	if err != nil {
 		noRollback(stderr, st, fmt.Sprintf("the backup at %s did not say its version: %v", backup, err))
 		return 0, false
@@ -227,6 +228,22 @@ func noRollback(stderr io.Writer, st updater.State, why string) {
 		return
 	}
 	fmt.Fprintf(stderr, "updater: not rolling back the install of %s: %s\n", st.TargetVersion, why)
+}
+
+// backupProbeBound is how long either rollback gives the backup to say its
+// version: production's bound, updater.VersionProbeTimeout, unless a boot test
+// gives one of its own (serveOpts.backupProbeTimeout; backlog B706). A backup
+// that has not answered by then is not put back. In the early rollback,
+// serve refuses its settings as it always has, the binary, the backup and
+// the install marker as they were, and the next start, which the service
+// manager makes, asks it again.
+// The install marker's lock is held across the ask, and LockState's other
+// takers wait 30 s for it, so production's bound stays well under that.
+func backupProbeBound(opts serveOpts) time.Duration {
+	if opts.backupProbeTimeout > 0 {
+		return opts.backupProbeTimeout
+	}
+	return updater.VersionProbeTimeout
 }
 
 // disarmEarlyRollback is the boot's admission: it records, before serve's
