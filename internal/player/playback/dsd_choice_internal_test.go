@@ -372,6 +372,74 @@ func TestTheProducerHoldsAnOccurrenceAPendingWriteWouldReplan(t *testing.T) {
 	}
 }
 
+// TestAWriteThatPanicsLeavesNothingPending (binding note 3): a choice write
+// that panics once its set is pending, which the API's recoverer answers,
+// settles that set all the same and gives the writes' turn back, so no
+// occurrence waits for a write that will not publish and the next write is
+// made: before the state's write nothing is written, and after it the next
+// refresh publishes what was.
+func TestAWriteThatPanicsLeavesNothingPending(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		seams func(panicNow func()) *Seams
+		// wrote is the mode the state holds after the panic.
+		wrote string
+	}{
+		{"before the state's write", func(panicNow func()) *Seams { return &Seams{ChoicePending: panicNow} }, dsdstate.ModeNative},
+		{"after the state's write", func(panicNow func()) *Seams { return &Seams{ChoiceWritten: func(error) { panicNow() }} }, dsdstate.ModeConvert},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b, store := choiceSessionBackend(t)
+			key := b.dsdPub.Load().view.DAC.Key
+			write := func(mode string, base uint64) ChoiceOutcome {
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				return b.ChooseDSD(ctx, ChoiceRequest{DACKey: key, Choice: policy.Choice{BaseRevision: base, Mode: mode, By: dsdstate.ByApp}}).Outcome
+			}
+			var seen *pendingChoice
+			b.cfg.Seams = tc.seams(func() {
+				seen = b.pending.Load()
+				panic("the test's panic inside the write")
+			})
+			func() {
+				defer func() {
+					if recover() == nil {
+						t.Fatal("the write did not panic: the seam did not reach it")
+					}
+				}()
+				write(dsdstate.ModeConvert, 1)
+			}()
+			b.cfg.Seams = nil
+			if seen == nil {
+				t.Fatal("no set was pending when the write panicked")
+			}
+			if b.pending.Load() != nil {
+				t.Error("a set is still pending after the write panicked")
+			}
+			select {
+			case <-seen.done:
+			default:
+				t.Error("what waits for the write that panicked was never woken")
+			}
+			own, err := dsdstate.KeyOf(choiceUSB(), "Test DAC")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if mode, _, _ := store.State().ChoiceFor(own); mode != tc.wrote {
+				t.Fatalf("the state holds %s after the panic, want %s", mode, tc.wrote)
+			}
+			b.RefreshDSD(true)
+			pub := b.Policy().DSD.DAC.Choice
+			if pub.Mode != tc.wrote {
+				t.Errorf("the refresh after the panic publishes %s, want %s", pub.Mode, tc.wrote)
+			}
+			if got := write(dsdstate.ModeOff, pub.Revision); got != ChoiceWritten {
+				t.Errorf("the write after the one that panicked: %s, want written, the turn given back", got)
+			}
+		})
+	}
+}
+
 // TestTheChoiceWritesLockOrderHolds (binding note 3): a choice write takes the
 // writes' turn, then the refreshes' lock, then each session's; a refresh the
 // refreshes' lock, then each session's; the state's store is taken alone, its

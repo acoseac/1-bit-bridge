@@ -3,6 +3,7 @@ package playback
 import (
 	"context"
 	"errors"
+	"sync"
 
 	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
 	"github.com/acoseac/1-bit-bridge/internal/player/dsdstate"
@@ -32,7 +33,9 @@ import (
 // across the publish (binding note 3). A write that fails before it lands
 // leaves the set as it was; one that landed and is not known to be durable
 // is published as the intersection of the two states' sets (landedChoice),
-// until the next start reads the file.
+// until the next start reads the file. Every end of a write settles what it
+// left pending, a panic's included, so nothing waits for a write that will
+// not publish.
 //
 // Lock order: the writes' turn, then the refreshes' (dsdMu), then the
 // backend's (b.mu), then each session's (s.mu), then a sink's. The state's
@@ -143,6 +146,12 @@ func (b *Backend) chooseDSD(ctx context.Context, req ChoiceRequest, j *choiceJou
 		return ChoicePersistFailed
 	}
 	defer b.giveChoiceTurn()
+	// The round's pending set, settled at every end of the write, before its
+	// turn is given back: a write that panics (the API's recoverer answers
+	// it) leaves nothing pending, so no occurrence waits for a write that will
+	// not publish, and what it wrote, if it wrote, the next refresh publishes.
+	var pend *pendingChoice
+	defer func() { b.settleChoice(pend) }()
 	for round := 0; ; round++ {
 		r, _ := b.readBox()
 		if r == nil {
@@ -166,7 +175,7 @@ func (b *Backend) chooseDSD(ctx context.Context, req ChoiceRequest, j *choiceJou
 		// interrupt is classified. A choice the state as read refuses has
 		// none, and goes to the store's write all the same, whose closure
 		// decides on the state the write is made from.
-		var pend *pendingChoice
+		pend = nil
 		var cur, want *dsdSet
 		if next, err := policy.Choose(r.inputs(st), req.Choice, now); err == nil {
 			cur, _ = b.setOver(r, st)
@@ -262,13 +271,16 @@ func (b *Backend) takeChoiceTurn(ctx context.Context) bool {
 func (b *Backend) giveChoiceTurn() { <-b.choiceTurn }
 
 // settleChoice ends p's pending, if p is pending, and wakes whatever waits
-// for it. A nil p, a write the state as read refused, has nothing pending.
+// for it, the first time it is called for p. A nil p, a write the state as
+// read refused, has nothing pending.
 func (b *Backend) settleChoice(p *pendingChoice) {
 	if p == nil {
 		return
 	}
-	b.pending.CompareAndSwap(p, nil)
-	close(p.done)
+	p.once.Do(func() {
+		b.pending.CompareAndSwap(p, nil)
+		close(p.done)
+	})
 }
 
 // oweProbe makes the silent probe due, which the supervisor's next ask runs
@@ -301,11 +313,12 @@ func (b *Backend) ProbeDSDPending() bool {
 }
 
 // pendingChoice is a choice write between its reading and its settle: the
-// set it would publish, and done, closed once the write has published or
-// failed.
+// set it would publish, and done, closed once the write has published,
+// failed or panicked (settleChoice, once).
 type pendingChoice struct {
 	set  *dsdSet
 	done chan struct{}
+	once sync.Once
 }
 
 // planAt is d's plan at bitRate: a set that could not be computed refuses
