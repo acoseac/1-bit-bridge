@@ -81382,3 +81382,30 @@ run; every one as predicted:
 | (2) | the tailnet's closed answer serving on until a stop, the review's reading | `TestATailnetServerClosedAnswerEndsTheStart` | `TestATailnetListenerThatFailsIsAFailedStart`, `TestOnlyACloseServeBeganEndsItsTailnetListenerCleanly` |
 | (3a) | no floor, as the third round | `TestAPreReadyStopWhoseTeardownOutlastsTheBudgetIsTakenBack`, `TestATakeBackBegunOnceTheTeardownHasRunHasAFloorBelowTheSCMsWait` | `TestAStopsTakeBackWaitsForTheMarkersLockWithinItsBudget`, `TestAStopBeforeReadyStaysCountedUntilItsTeardownHasRun`, `TestTheStopBudgetIsInsideEveryServiceManagersWait` |
 | (3b) | no ceiling below the SCM's wait | `TestATakeBackBegunOnceTheTeardownHasRunHasAFloorBelowTheSCMsWait` | `TestAPreReadyStopWhoseTeardownOutlastsTheBudgetIsTakenBack` |
+
+**Checks.**
+- The red run on 14c339f4 (the predictions in a file beforehand): the two
+  tests predicted red were red for the reasons predicted, and every guard
+  beside them green.
+- `make test-fast` through the shared build lock: its first run failed
+  `TestEveryBackgroundGoroutineDrainsOnCleanup` on the new doctor test,
+  which joined its `bridge doctor` by a cleanup of its own; it drains it
+  through `drainLoopOnCleanup` now (9b9759de), and the run again on 9b9759de
+  was ok, 85 packages and 14 without tests (cmd/bridge 525 s,
+  internal/backup 366 s, internal/manifest 264 s), the Linux-only packages
+  run (internal/alsa, internal/alsapcm, internal/atomicwrite,
+  internal/backup and the player's).
+- `go test -race -count=1 -timeout 30m -p 4` with make's tags over
+  ./cmd/bridge/..., ./internal/updater/..., ./internal/doctor/... and
+  ./internal/fsutil/..., through the lock: ok (1,144 s, 28 s, 7 s, 3 s).
+- `make vet` natively, with `GOOS=windows`, with `GOOS=darwin` and with
+  `GOOS=linux GOARCH=386`: ok; `make build-all`: ok; the qualification check
+  against 4880f8a4: ok.
+- go1.27.3's gofmt on the 9 Go files the round changed: clean.
+- `make docs-check`: ok as the tree stands; with the four rules patches
+  applied to a copy, by check-doc-budgets.py's own measure: ok,
+  config-lifecycle.md 98,451 bytes, cli-serve.md 42,144, the worst load
+  315,229 bytes. `git apply --check` takes `rules-b660-r4.patch` over the
+  rules files as the first three patches left them.
+
+**For the owner.** What this round leaves is backlog B760.
