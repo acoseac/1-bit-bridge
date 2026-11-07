@@ -148,8 +148,12 @@ var errIdentityUnread = errors.New("the folder's identity could not be read")
 // its path and reads the folder's file ID only when os.SameFile first asks,
 // from whatever folder the path names then, so the comparison of the stat with
 // itself reads it here: an identity taken before a walk is of the folder there
-// before it. Elsewhere the stat's device and inode are the identity, and the
-// comparison reads nothing.
+// before it. os.SameFile has no shortcut for one FileInfo given twice: it
+// reads each side's ID before comparing them (go1.27.3's sameFile, in
+// os/types_windows.go, through loadFileId), and the first read is the stat's
+// own. Elsewhere the stat's device and inode are the identity, and the
+// comparison reads nothing. TestARootsIdentityIsTheFolderAtItsPathWhenItIsRead
+// is red on Windows without the comparison.
 func (wt *Watcher) rootIdentity(root string) (os.FileInfo, error) {
 	if h := wt.identityForTests; h != nil {
 		return h(root)
