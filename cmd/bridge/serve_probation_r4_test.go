@@ -59,10 +59,7 @@ func TestADoctorsProbeHeldBeforeItsUnlockLetsNoScanMigrate(t *testing.T) {
 		var out, errs bytes.Buffer
 		run(context.Background(), []string{"doctor", "--config", r.cfg}, &out, &errs)
 	}()
-	t.Cleanup(func() {
-		release.close()
-		<-doctored
-	})
+	drainLoopOnCleanup(t, release.close, doctored, "bridge doctor")
 	select {
 	case <-parked.ch:
 	case <-time.After(withinTheTest):
