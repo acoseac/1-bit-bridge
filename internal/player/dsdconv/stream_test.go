@@ -267,6 +267,44 @@ func TestATruncatedRefusalPassesThroughAfterItsFrames(t *testing.T) {
 	}
 }
 
+// TestATruncatedSourceKeepsItsLastByte: a source that declares a partial
+// last byte (Frames = 8·1000 + 3) and ends after 600 whole bytes has given
+// 4,800 real bits, every one a sample: its last byte is no padding, its end
+// is the bytes that came (8 · 600), and at D = 16 that is 300 frames, the
+// definition's over those bits. The declared partial byte is never reached,
+// so its mask applies to nothing, whether the source refuses or says io.EOF
+// early, and whichever read the cut lands in.
+func TestATruncatedSourceKeepsItsLastByte(t *testing.T) {
+	rate, p := format.DSD64RateHz, Plan{176400, 24}
+	d, _ := p.Decimation(rate)
+	const declared, cut = 8*1000 + 3, 600
+	if 8*cut%d != 0 {
+		t.Fatalf("the cut must fall on a frame: 8·%d %% %d", cut, d)
+	}
+	ch := [2][]byte{randomBits(231, declared), randomBits(232, declared)}
+	want, _ := reference(t, [2][]byte{ch[0][:8*cut], ch[1][:8*cut]}, rate, p)
+	refusal := &decode.Refusal{Reason: decode.ReasonTruncated, Message: "the stub's data ends"}
+	for _, read := range []int{0, 7, 600} {
+		for _, early := range []bool{false, true} {
+			s := stubOf(rate, ch)
+			s.maxRead = read
+			if early {
+				s.endAt = cut
+			} else {
+				s.failAt, s.failErr = cut, refusal
+			}
+			c := mustNew(t, s, p, Options{})
+			got, err := drain(t, c, 37)
+			if r, ok := decode.AsRefusal(err); !ok || r.Reason != decode.ReasonTruncated {
+				t.Errorf("reads of %d, early EOF %v: the read ended with %v, want a truncated refusal", read, early, err)
+			}
+			if len(got) != 2*(8*cut/d) || !equal32(got, want) {
+				t.Errorf("reads of %d, early EOF %v: %d frames, want the definition's %d over the %d bits that came", read, early, len(got)/2, 8*cut/d, 8*cut)
+			}
+		}
+	}
+}
+
 // TestSeekIsUnsupported: seeking within converted DSD stays unsupported
 // (B728 §4.7), so every Seek is ErrSeek but Seek to frame 0 before the first
 // read, which positions nothing and succeeds; the source is never sought.
