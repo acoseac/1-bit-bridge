@@ -614,7 +614,11 @@ Only the bound PCM device's whole playback altsets are projected. Empty
 `pcmBitDepths`, `nativeDSDRates` and `dsdFormats` are normalized to `[]` in the
 projection even though the ALSA helper currently already returns non-nil
 slices. No identity or longname crosses the seam. The bridge's `name` and `id`
-replace known serial and anchored port substrings with `[redacted]`:
+replace known serial and anchored port substrings with `[redacted]`, the port
+in each spelling, as sysfs gives it (its configuration and interface after the
+port), its canonical form, and the port alone, as a binding names it
+(`playback.PortForms`, since B728 B8 round 2, which found a label holding the
+port alone kept it):
 `Serial.Redact` does the serial replacement without exposing its raw value.
 MPD's projection remains unchanged; `isMPDsOutput` stays null for bridge.
 
@@ -652,11 +656,15 @@ have theirs in `History-b470-native.md`, under "The read side (B728 B8)".
 ### One read of the backend's facts, the set's own view
 
 **Never build `dsdDAC`, `dsdMode` or `allowDoP` from another read (the
-element's `dac`, the store's `State`, a refresh, the box), move
-`policyGeneration` for a change that leaves what plays as it was or leave
-such a change unpublished, put a serial or a port in a key, a model, a
-profile's name or a caveat's note, or give a converted occurrence native or
-DoP evidence.**
+element's `dac`, the store's `State`, a refresh, the box), store a new set or
+move `policyGeneration` for a change that leaves what plays as it was (an
+occurrence admitted under a set is compared with the one published by its
+pointer, and only a reconciliation repoints it), leave such a change
+unpublished, give an observation the current set's evidence unless it was
+admitted under that set (its boot and generation: a `policyId` names no DAC,
+firmware or set), put a serial or a port, in any of the port's spellings
+(`playback.PortForms`), in a key, a model, a profile's name or a caveat's
+note, or give a converted occurrence native or DoP evidence.**
 
 What the element says. Until B8 it said of the player's DSD what B7
 published, the tuples under the boot and the epoch, the reason, the model and
@@ -690,13 +698,15 @@ flag before its route (`TestNoHealthFlagBeforeItsRoute`). Every word is in a
 closed list of PROTOCOL.md's, and the source-derived token guard reads each
 from its definitions (`TestDSDOutputProtocolTokens`).
 
-The view is the set's own. `readDSD` reads the DSD state once
-(`b.dsdState()`, the store's state in memory) before it computes the set,
-hands that state to `policy.Effective` and to `viewOf`, and the set published
-carries the view (`dsdSet.view`), stored in the same swap; `copyPolicyLocked`
-clones it into `PlayerPolicy.DSD` beside the tuples and converted rates of
-that set, and `Backend.Facts` returns the copy and the live observation under
-one lock. Serve's view of its player (`bridgeOutput.facts`) calls `Facts`
+The view is published with the set it describes. `readDSD` reads the DSD
+state once (`b.dsdState()`, the store's state in memory) before it computes
+the set, hands that state to `policy.Effective` and to `viewOf`, and
+`refreshDSD` publishes the view beside the set in one pair (`dsdPublished`),
+swapped as one, so no reader sees one set's tuples beside a view made for
+another (round 1 carried it in the set, `dsdSet.view`, which round 2's fix
+below took out); `copyPolicyLocked` clones the pair's view into
+`PlayerPolicy.DSD` beside the tuples and converted rates of the pair's set,
+and `Backend.Facts` returns the copy and the live observation under one lock. Serve's view of its player (`bridgeOutput.facts`) calls `Facts`
 once a request and builds `dsdPlayback`, `dsdDAC`, `dsdMode`, `allowDoP` and
 `playback` from what it returned (`bridgeDSDFacts`). A second read could
 show one reading's tuples beside another's choice or first use, and the
@@ -736,10 +746,21 @@ compares what plays (the unit, the endpoint, the identity, each rate's plan
 and refusal), and until B8 a set the same as the one published was dropped,
 so a transport's first use observed, an evidence step, a choice's revision
 or a warning reached the wire only with the next change that moved a plan.
-`refreshDSD` now stores such a set when its view differs
-(`reflect.DeepEqual`), under the generation it had, and reconciles and logs
-nothing, since nothing plays otherwise; a client's grant, keyed on `bootId`
-and `policyGeneration`, stands. The policy is the design's sections 7.1 and
+`refreshDSD` now publishes its view when it differs (`reflect.DeepEqual`),
+in a new pair beside the set as it was: it stores no set, the pointer and the
+generation stay, and it reconciles and logs nothing, since nothing plays
+otherwise; a client's grant, keyed on `bootId` and `policyGeneration`,
+stands. The set's pointer must stay: an occurrence admitted under a set is
+compared with the one published by that pointer, at a gapless join and at a
+converted join window's successor, and only a reconciliation repoints it.
+Round 1 stored a new set for such a change, under the generation it had,
+which no reconciliation followed, so on every first DSD playback of a
+transport (its first use observed at 5 s) the successor admitted before it
+was never under the set published again and the producer waited at the join
+for good (round 2; `TestAFirstUseObservedWhileDSDPlaysKeepsTheProducerWriting`
+holds the producer inside the first track until the monitor has published
+the change, then lets it go: a native successor and a converted one in its
+predecessor's join window, each must join as it was admitted). The policy is the design's sections 7.1 and
 2.5: `policyGeneration` is the epoch of what plays, which section 7.1
 publishes the tuples and converted rates under ("under its boot and
 epoch"), and section 2.5's records (a first use, the evidence, a choice's
@@ -758,15 +779,24 @@ field of the state read again, so a probe's acceptance this run holds in its
 cache alone is `driver_accepted` with no date, and a durable acceptance under
 another kernel or another firmware is no rung of this box's
 (`TestTheEvidenceIsThePolicysRung`). An observation's is its tuple's in the
-set published now, by its policy ID, or, its tuple gone from that set, the
-one it was admitted with; a PCM and a converted occurrence carry none, since
-neither plays a native or DoP path. Its words are the ladder's alone
+set published now, by its policy ID, while that set is the one it was
+admitted under (the observation's boot and generation the set's: since round
+2 a generation names one stored set, and so the unit and the firmware it was
+computed for), else the one its admission gave it. A policy ID names a
+tuple's transport, format, rate and timing, never the DAC, its firmware or
+the set, so another DAC's tuple, or the same DAC's on another firmware, can
+share it, and round 1 gave a retained observation the next DAC's rung and
+date (round 2; `TestARetainedObservationKeepsItsOwnDACsEvidence`, another
+model in the bound port and the same model on another firmware). A PCM and a
+converted occurrence carry none, since neither plays a native or DoP path. Its words are the ladder's alone
 (`reported`, `driver_accepted`, `streaming_observed`, `listener_confirmed`),
 none of which says a DAC decodes DSD.
 
 No serial and no port. The key on the wire (`wireKey`) is the model key's
-`DACKey` with the unit's own serial and port taken out of its product string
-first (`unitText`): a product string that holds the serial would make the
+`DACKey` with the unit's own serial and port, the port in each of its
+spellings (`playback.PortForms`: as sysfs gives it, with the configuration
+and interface after the port, its canonical form, and the port alone, as a
+binding names it), taken out of its product string first (`unitText`): a product string that holds the serial would make the
 key a hash of it, and the model published beside it, the serial redacted,
 gives every other byte of that hash's input, so a short serial could be
 found by trying each; taken out, two units of a model share the key. The
@@ -780,7 +810,15 @@ reads every string of the response under a port binding, which holds no
 serial, its unit's product string holding the serial and its manufacturer
 string the port, two units of the model publishing one key, and through
 serve with the GO bar bound by its port, its product string holding its
-serial.
+serial. Round 2 added a unit whose sysfs port carries its interface
+(`usb2-1:1.0`) and whose USB strings hold the port alone (`usb2-1`), under a
+model binding, which names no port for serve to redact by: neither form is
+published, and two such units at two ports publish one key, where round 1,
+taking out the sysfs form alone, put the port in the model and hashed it into
+the key. Serve's `playerText` takes every spelling of the binding's port out,
+and B543's `playerDACText` every spelling of the unit's out of the `dac`
+element's labels (`TestBridgeDACRedactsIdentityInsideNameAndID`'s port-alone
+cases), by the same helper.
 
 A converted occurrence's observation is its plan's: transport `converted`,
 its PCM's format, rate and valid bits, `logicalRate` 0, and `converted` with

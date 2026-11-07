@@ -344,8 +344,8 @@ not list `converted`. `dsdDAC`, `dsdMode` and `allowDoP` describe the DAC
 (its choice, what each mode offers, the evidence and the first use), which
 the app shows and B9's write changes; they grant nothing, and a client reads
 none of them to decide what to send. A `dacKey` names a model, never a unit:
-the model key's `DACKey`, its product string with the unit's serial and port
-taken out first (`wireKey`). Two members went: `qualificationRevision`, on
+the model key's `DACKey`, its product string with the unit's serial and port,
+every spelling of the port, taken out first (`wireKey`, `playback.PortForms`). Two members went: `qualificationRevision`, on
 `dsdPlayback` and `playback`, and `qualifiedOn`, on `dsdPlayback`, carried an
 owner's approved record's revision and qualification date, which no
 production path reads since B7's cutover: serve had sent neither since (B7's
