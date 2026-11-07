@@ -798,6 +798,61 @@ func TestDeletingOrReplacingAPreparedConvertedSuccessor(t *testing.T) {
 	}
 }
 
+// TestADeletionAtAJoinBehindAHangingReadStopsAtTheEnginesDeadline (B728 B11
+// round 2; backlog B768, named and not built): a, then b, which
+// dsdconv.Continuous joins to a, b's first bits in a's join window. Past the
+// window the producer converts b and is held in a read of b's content that
+// does not return (a file on a mount that hangs, which no context ends; a
+// cut's wcancel ends a Write alone), none of b's frames returned yet.
+// Deleting b asks the backend to take b back through the window (the
+// engine's Prepare, which replaces a successor with nothing submitted, here;
+// its Cut once a frame is), which the producer alone does, between two of its
+// steps, so the call waits on the read: it ends at its deadline and the
+// engine releases the session, so playback stops (backend_timeout) where the
+// deletion would have skipped b. Nothing waits past the engine's deadlines:
+// Delete answers, the release is unconfirmed past its own while the producer
+// is in the read, the release closing nothing under it, and once the read
+// returns the producer leaves and the release is acknowledged, late, every
+// content closed.
+func TestADeletionAtAJoinBehindAHangingReadStopsAtTheEnginesDeadline(t *testing.T) {
+	d := newConvRig(t)
+	a, b := track(playbacktest.DSD64, 0.25, noise(1)), track(playbacktest.DSD64, 3, noise(2))
+	d.files.add("a", a)
+	d.files.add("b", b)
+	// b's open reads its first block group, the 8192 bytes after the DSF's
+	// 92-byte header; the producer's next read of b hangs.
+	parked, unpark := d.files.stall("b", 92+2*4096)
+	t.Cleanup(unpark)
+	ids := d.insert("a", "b")
+	d.play()
+	// b opened: the read that hangs is the producer's, converting b past
+	// a's window, with none of b's own frames returned yet.
+	d.preparedOcc(ids[1])
+	receiveIn(t, parked, "the producer's read of b past its first block group to hang")
+	if err := d.eng.Delete(bg, ids[1]); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	s := d.waitSnap("the session released past the cut's deadline, its release unconfirmed", func(s *engine.Snapshot) bool {
+		_, unconfirmed := s.ReleaseUnconfirmed()
+		return s.State() == engine.Stopped && s.LastStop().Reason != "" && unconfirmed
+	})
+	if got := s.LastStop(); got.Reason != engine.ReasonTimeout {
+		t.Errorf("playback stopped for %s (%s), want %s", got.Reason, got.Detail, engine.ReasonTimeout)
+	}
+	if d.files.closedUnderARead("b") {
+		t.Fatal("the release closed b's content while the producer was in a read of it")
+	}
+	unpark()
+	d.waitSnap("the late acknowledgement", func(s *engine.Snapshot) bool {
+		_, unconfirmed := s.ReleaseUnconfirmed()
+		return !unconfirmed
+	})
+	if !d.files.isClosed("a") || !d.files.isClosed("b") || d.files.closedUnderARead("b") {
+		t.Errorf("a's content closed %v, b's %v (under a read %v): want both closed once the producer left its read",
+			d.files.isClosed("a"), d.files.isClosed("b"), d.files.closedUnderARead("b"))
+	}
+}
+
 // parkingSource is a DSD source whose reads past after bytes a channel wait
 // for their context's end, which they answer: a source read the converter
 // makes inside ReadFrames, on the session's life.
