@@ -181,6 +181,17 @@ type Watcher struct {
 	// (watcher_hold.go). Per instance and set before Run starts, for
 	// afterDispatchHookForTests' reason; nil in production.
 	afterHoldForTests, afterResumeForTests func(root string)
+	// identityForTests stands in for the read of a root folder's identity
+	// (rootIdentity); addForTests runs at the actual Add boundary (addWatch),
+	// just before fsnotify's Add, and an answer that is not nil is that Add's
+	// error, the Add not made; afterRootCheckForTests fires at the end of each
+	// check of the roots' own watches (checkRootWatches), one that finds no
+	// watched root included (backlog B777). Per instance and set before Run
+	// starts, for afterDispatchHookForTests' reason; nil in production. They
+	// run on Run's goroutine and must not call back into the watcher.
+	identityForTests       func(root string) (os.FileInfo, error)
+	addForTests            func(path string) error
+	afterRootCheckForTests func()
 }
 
 // rootAlias pairs the directory a linked configured root resolves to with
@@ -291,12 +302,15 @@ func (wt *Watcher) watchRoots(roots []string) bool {
 	}
 	for _, root := range roots {
 		if err := wt.addTree(root, true); err != nil {
-			watcherLogger.Warn("initial watch add failed (partial coverage; periodic scan still runs)",
-				"root", root, "err", err)
+			watcherLogger.Warn(msgInitialWatchFailed, "root", root, "err", err)
 		}
 	}
 	return true
 }
+
+// msgInitialWatchFailed is the line a root whose watch the start could not add
+// is said with.
+const msgInitialWatchFailed = "initial watch add failed (partial coverage; periodic scan still runs)"
 
 // loop handles fsnotify's events and errors until ctx is done or fsnotify
 // closes them. Where fsnotify holds an open file per watched entry it also
@@ -993,7 +1007,13 @@ const (
 // addWatch registers one directory's watch, and says how it went, with the
 // error that answered a failure.
 func (wt *Watcher) addWatch(path string) (watchAddResult, error) {
-	addErr := wt.w.Add(path)
+	var addErr error
+	if hook := wt.addForTests; hook != nil {
+		addErr = hook(path)
+	}
+	if addErr == nil {
+		addErr = wt.w.Add(path)
+	}
 	switch {
 	case addErr == nil:
 		return watchAdded, nil

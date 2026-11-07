@@ -74,6 +74,7 @@ const (
 	msgWatchRootHeld      = "library root " + readsAsNotMounted + "; the watcher does not watch it until it reads as it did"
 	msgWatchRootResumed   = "library root reads as it did again; the watcher watches it"
 	msgWatchRootRewatched = "library root's own watch went while the root reads as it did; the watcher watches it again where it is now"
+	msgWatchRootReplaced  = "library root is another folder than the one its watch was added on (a volume mounted over it, a remount, a link repointed); the watcher watches it again where it is now"
 	heldRootHint          = hintVolumeMounted + ": the scan keeps the tracks indexed under it, and the watcher looks at it again until it reads as it did; " +
 		hintContainerRestart
 )
@@ -323,6 +324,9 @@ func (wt *Watcher) recheckHeld(ctx context.Context) {
 // whose Create's look waits for the flush is left to it: fsnotify may still be
 // opening the folder at its path, which is why that look waits.
 func (wt *Watcher) checkRootWatches(ctx context.Context) {
+	if hook := wt.afterRootCheckForTests; hook != nil {
+		defer hook()
+	}
 	if len(wt.rootWatches) == 0 {
 		return
 	}

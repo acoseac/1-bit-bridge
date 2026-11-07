@@ -427,8 +427,7 @@ func (wt *Watcher) watchRootsWithinBudget(roots []string) bool {
 	}
 	for _, root := range roots {
 		if err := wt.addTree(root, true); err != nil && !f.off {
-			watcherLogger.Warn("initial watch add failed (partial coverage; periodic scan still runs)",
-				"root", root, "err", err)
+			watcherLogger.Warn(msgInitialWatchFailed, "root", root, "err", err)
 		}
 		if f.off {
 			return false
