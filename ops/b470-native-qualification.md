@@ -658,8 +658,9 @@ eligible; Stop interrupts each tail, and nothing opens before a release is
 acknowledged. For serve, choose one full LAN config, record its logs and the iOS
 checks of step 7 of the owner's list; `GET /v1/outputs` then shows each tuple's
 `transport` (`dop`, absent for native), the observation's `transport`,
-`packingVersion`, `observedAt` and `qualificationRevision`, and the epoch's `model`,
-`bcdDevice` and `qualifiedOn`, never the USB port or serial.
+`packingVersion` and `observedAt`, and the epoch's `model` and `bcdDevice`, never
+the USB port or serial (the record's `qualificationRevision` and `qualifiedOn`
+beside them are no members since B728's B8).
 
 ```sh
 S="$Q/auto.yaml"
@@ -675,7 +676,7 @@ a DSD state of their own (output play's in its state directory, serve's
 record read through the legacy reader. Serve's `GET /v1/outputs` then shows each
 tuple's `transport`, the observation's `transport`, `packingVersion` and `observedAt`,
 and the set's `model` and `bcdDevice`, and sends no `qualificationRevision` or
-`qualifiedOn`.
+`qualifiedOn`, which since B728's B8 are no members of `GET /v1/outputs` at all.
 
 ### 6. Pruning edges from subset records
 

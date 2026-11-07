@@ -232,12 +232,12 @@ func viewOf(d *dsdSet, st dsdstate.State, usb alsa.USBIdentity) DSDView {
 	for _, t := range []string{dsdstate.TransportNative, dsdstate.TransportDoP} {
 		f := DSDFirstUse{Transport: t, State: FirstUsePending}
 		for _, e := range dac.FirstUse {
-			if e.Transport != t || bcd == "" || e.BCDDevice != bcd {
-				continue
-			}
-			f.State, f.BitRates = FirstUseAcknowledged, slices.Clone(e.BitRates)
-			if !e.ObservedAt.IsZero() {
-				f.State = FirstUseObserved
+			switch {
+			case e.Transport != t || bcd == "" || e.BCDDevice != bcd:
+			case e.ObservedAt.IsZero():
+				f = DSDFirstUse{Transport: t, State: FirstUseAcknowledged, BitRates: slices.Clone(e.BitRates)}
+			default:
+				f = DSDFirstUse{Transport: t, State: FirstUseObserved, BitRates: slices.Clone(e.BitRates)}
 			}
 		}
 		out.FirstUse = append(out.FirstUse, f)

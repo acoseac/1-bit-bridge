@@ -868,7 +868,7 @@ The `id` of a kind `bridge` element is `bridge:` and the player's UUID (**The `b
 
 An element of kind `bridge` is this bridge's own player. It is listed while the player's gate holds (`bridgeOutput`) and the player has an identity: a `player-uuid` in the data directory that holds one UUID, which the player's first start makes, or `bridge output dac bind`. Before the player has one, and while `bridge serve` does not hold its data directory's lock (that file is then another serve's player's), there is no element, and the answer may be `200` with `outputs: []`. Listing the player never makes or changes its identity.
 
-Its `id` is `bridge:` and the player's UUID, the one its OpenHome UDN carries; it is no reading's id, and `GET /v1/outputs/{id}/reading` answers it `404` `output_not_found`. `mpd` is absent. `dac` describes the one card resolved for the player's boot binding: `card`, its current ALSA `id`, its short `name`, its observed `usbId` (`vendor:product`), and `capabilities` from the bound PCM device's playback altsets. A port binding reports the model currently at that port. No USB serial or port path is included: each occurrence of the resolved unit's serial or anchored USB port path inside `name` or `id` is replaced with `[redacted]`. Capability lists (`pcmBitDepths`, `nativeDSDRates`, `dsdFormats`) are always arrays, `[]` when empty. `dac` is `null` while the player is unavailable, before the first hotplug snapshot, when that snapshot is stale or names another binding, when the binding does not resolve to exactly one available card, when the unit's card, identity or readable USB enumeration number changes across the `/proc` reading (or cannot be established on both sides), or when the stream cannot be read whole within the read deadline or has no playback altsets. Identity observations bracket the `/proc` read to avoid mixing identical units during a replug. Concurrent callers share the one in-flight read, each waiting at most 500 ms or its own earlier deadline; a caller timing out receives `dac: null` and does not release the slot while that read still runs. The shared read has its own 500 ms deadline, independent of caller cancellation. Its completion or panic releases the slot for a later request. `isMPDsOutput` stays `null` for kind `bridge`; it does not make the element an MPD candidate. The player state and DAC are read moments apart and can disagree briefly around a hotplug. `pathRules` is `[]`, inapplicable to kind `bridge`. Every baseline member of `bridge` is present: `openHome`, `state`, `reason`, `lastError`, `libraryScope`, `fixedVolume`, `codecs`, `dsdMode`, `allowDoP`. The additive `dsdPlayback`, `playback` and `timeSeek` objects are optional: `dsdPlayback` and `playback` with the absence rules below, `timeSeek` with its own (**`timeSeek`**, below).
+Its `id` is `bridge:` and the player's UUID, the one its OpenHome UDN carries; it is no reading's id, and `GET /v1/outputs/{id}/reading` answers it `404` `output_not_found`. `mpd` is absent. `dac` describes the one card resolved for the player's boot binding: `card`, its current ALSA `id`, its short `name`, its observed `usbId` (`vendor:product`), and `capabilities` from the bound PCM device's playback altsets. A port binding reports the model currently at that port. No USB serial or port path is included: each occurrence of the resolved unit's serial or anchored USB port path inside `name` or `id` is replaced with `[redacted]`. Capability lists (`pcmBitDepths`, `nativeDSDRates`, `dsdFormats`) are always arrays, `[]` when empty. `dac` is `null` while the player is unavailable, before the first hotplug snapshot, when that snapshot is stale or names another binding, when the binding does not resolve to exactly one available card, when the unit's card, identity or readable USB enumeration number changes across the `/proc` reading (or cannot be established on both sides), or when the stream cannot be read whole within the read deadline or has no playback altsets. Identity observations bracket the `/proc` read to avoid mixing identical units during a replug. Concurrent callers share the one in-flight read, each waiting at most 500 ms or its own earlier deadline; a caller timing out receives `dac: null` and does not release the slot while that read still runs. The shared read has its own 500 ms deadline, independent of caller cancellation. Its completion or panic releases the slot for a later request. `isMPDsOutput` stays `null` for kind `bridge`; it does not make the element an MPD candidate. The player state and DAC are read moments apart and can disagree briefly around a hotplug. `pathRules` is `[]`, inapplicable to kind `bridge`. Every baseline member of `bridge` is present: `openHome`, `state`, `reason`, `lastError`, `libraryScope`, `fixedVolume`, `codecs`, `dsdMode`, `allowDoP`. The additive `dsdPlayback`, `dsdDAC`, `playback` and `timeSeek` objects are optional: `dsdPlayback`, `dsdDAC` and `playback` with the absence rules below, `timeSeek` with its own (**`timeSeek`**, below).
 
 **`openHome`** is the player's OpenHome Source while `output.player.openhome` was on when `bridge serve` started and the Source listens on at least one LAN address, and `null` otherwise. `udn` is `uuid:` and the player's UUID, as the Source's description and its SSDP advertisements name it. `endpoints` are the host and port of each LOCATION the Source advertises: one per LAN address it listens on, each with its own port when `output.player.openhomePort` is `0`, in address order, written as a URL's authority writes them (an IPv6 host in brackets, its zone percent-encoded: `[fe80::1%25eth0]:7792`). **A client correlates a discovered Source with this element only when the UDN matches and the host and port of the Source's LOCATION are one of `endpoints`**: SSDP carries the UDN in clear, and any host on the LAN can advertise it with a LOCATION of its own.
 
@@ -901,7 +901,7 @@ When none holds, `state` is the transport's: `playing` (a track that is starting
 
 **`libraryScope`** is `self`: the player plays this bridge's own tracks, the ones it would not refuse as `not_indexed` (no row of the library's index has it), `routed` (an upstream server's track) or `outside_library` (a file outside every library root configured now). An OpenHome controller queues one by the URI the player's Source takes in an Insert, `http://<host>:<port>/dlna/file/<id>`: a host this bridge advertises, the DLNA listener's port, and the track's DLNA id (B470 PR 5a4).
 
-**`fixedVolume`** is `true` while the player has no volume control (`output.player.mixer` none, the one this release takes): the DAC receives the file's own level. **`dsdMode`** is `off` (default), `native`, `auto` or `dop`, and **`allowDoP`** is the configured boolean, both as the boot config holds them (`output.player.dsdMode`, `output.player.allowDoP`). Since the bridge's DSD cutover they grant nothing and decide nothing: the bridge migrates them once into the player's DSD state, and the player plays DSD by its effective policy, whose set `dsdPlayback` publishes. No tuple converts DSD to PCM: DoP carries the DSD bits unchanged in a PCM word. A rate the policy converts to PCM, the player converts (since B728's conversion), never bit-exact, and it publishes no tuple.
+**`fixedVolume`** is `true` while the player has no volume control (`output.player.mixer` none, the one this release takes): the DAC receives the file's own level. **`dsdMode`** is the choice word that applies to the DAC the player's DSD set was computed for (`dsdDAC`, below): `auto`, `native`, `dop`, `convert` or `off`, the DAC's own choice, or the bridge's default for a DAC with none (`auto`, or `off` where an explicit opt-out was migrated). It is `off` while no set is published for a DAC: before the player is ready, while no DAC is bound or available, and while the player's DSD state does not read, which refuses every rate. **`allowDoP`** is whether DoP may play for that DAC at a rate it offers DoP at (its carrier, `S32_LE` at the rate over 16 with 24 or more significant bits), by its profile in the bridge's database of DAC models (a rate the profile heard or states DoP at, and does not refuse) or by the user's confirmation of DoP on the DAC's current firmware; `false` with no DAC. Neither says whether DoP's gain check passes or its first use is acknowledged, which `dsdDAC` says. Both describe, and grant nothing: the player plays DSD by its effective policy, whose set `dsdPlayback` publishes. An earlier bridge sent the legacy `output.player.dsdMode` and `allowDoP` here as its boot config held them, whose words were `off`, `native`, `auto` and `dop`; a client holds `dsdMode` as text. No tuple converts DSD to PCM: DoP carries the DSD bits unchanged in a PCM word. A rate the policy converts to PCM, the player converts, never bit-exact: it publishes no tuple, and `dsdPlayback.converted` names it with its plan.
 
 **`codecs`** are the containers the player plays in this release: `flac`, `wav`, `aiff` and `alac` (ALAC in an M4A). A client matches a track by its `codec` in `/v1/manifest`:
 
@@ -912,7 +912,7 @@ When none holds, `state` is the transport's: `playing` (a track that is starting
 | `AIFF` | `aiff` |
 | `ALAC` | `alac` |
 
-Any other `codec` names no container the player plays: `AAC`, which the manifest tells from ALAC in an `.m4a` by its `codec`, `MP3`, `OGG`, and a compressed AIFF-C or WAV. A track with no `codec` cannot be matched, and the player's own refusal decides. `dsf` and `dff` appear only while the player plays a DSD rate, native or DoP (a tuple of `dsdPlayback.tuples`) or converted to PCM, mapping `DSF` and `DFF` respectively; a converted rate publishes no tuple, so a client grants DSD from the tuples alone, as before. A container listed is no promise for every file in it: the player refuses floating-point PCM (`sampleFormat` `"float"`), and a rate, a depth or a transport its DAC does not take.
+Any other `codec` names no container the player plays: `AAC`, which the manifest tells from ALAC in an `.m4a` by its `codec`, `MP3`, `OGG`, and a compressed AIFF-C or WAV. A track with no `codec` cannot be matched, and the player's own refusal decides. `dsf` and `dff` appear only while the player plays a DSD rate, native or DoP (a tuple of `dsdPlayback.tuples`) or converted to PCM (an entry of `dsdPlayback.converted`), mapping `DSF` and `DFF` respectively. A container listed is no promise for every file in it: the player refuses floating-point PCM (`sampleFormat` `"float"`), and a rate, a depth or a transport its DAC does not take.
 
 **`timeSeek`** (additive, optional) says what the player does with a seek within a track, OpenHome's `SeekSecondAbsolute` and `SeekSecondRelative` on its Source, by the kind of content: `pcm` for the PCM containers of `codecs` (`flac`, `wav`, `aiff`, `alac`), and `dsd` for DSD, played native, as DoP or converted to PCM (DoP is DSD carried in PCM words, and DSD the player converts to PCM is DSD too: each is `dsd` whatever its carrier). Each member is a word of the table below. A client reads an absent object, an absent member and a word it does not know as `unknown`: a bridge older than the member sends no object, and a later one may add a member or a word. It says what this bridge's player implements, not whether a seek can be made now: the element sends the same object in every `state`, `unavailable` included. A `supported` kind's seek is still refused with OpenHome's fault 803, `Seek failed`, while the player holds no track to seek in (stopped, releasing to stop or to play another entry, or before anything of the track is known), and at or past the track's end (its exact end included), changing nothing; an `unsupported` kind's always is, but for the answers that follow. Whatever the kind, a seek is UPnP's fault 501, `Action Failed`, while no player runs or it is shutting down, while maintenance holds it, and when it was not admitted within its time budget or a Stop, the DAC going away or maintenance overtook it while it waited behind a pause, a resume or a start; one admitted and still waiting when that budget ends answers success, and the reads show whether it then ran. A seek keeps the transport as it was (one while paused stays paused at its target) and continues the track: the queue, `Id`, the track and Time's and Info's `TrackCount` are unchanged, and Time's `Seconds` reads the target at once, then the target plus what has played. A relative target before the track's start is its start. `ProtocolVersion` stays `1`.
 
@@ -926,49 +926,159 @@ Any other `codec` names no container the player plays: `AAC`, which the manifest
 
 This bridge sends exactly that object.
 
-**DSD eligibility comes only from `bridge.dsdPlayback`**, never passive DAC capabilities, MPD facts or PCM rate ceilings. Optional additive objects (protocol v1):
+**DSD eligibility comes only from `bridge.dsdPlayback`**, its tuples and its converted entries, never passive DAC capabilities, `dsdDAC`, `dsdMode`, `allowDoP`, MPD facts or PCM rate ceilings. Optional additive objects (protocol v1):
 
 `dsdPlayback` is omitted until the player is ready and its playback backend can
-supply policy facts. An available backend with no eligible tuples still emits
-this object with `tuples: []`; absence and an empty tuple set grant no permission.
-`playback` is omitted until that backend has installed an occurrence, and while the
-occurrence observed is DSD the player converts to PCM, whose observation this bridge
-does not send yet. Neither optional object is emitted as `null`.
+supply policy facts. An available backend with nothing eligible still emits this
+object with `tuples: []` and `converted: []`; absence and an empty set grant no
+permission. `dsdDAC` is omitted while no DAC is available to that set: no set could
+be computed, for want of a fresh reading of the bound DAC, which `dsdPlayback.refused`
+then says of every rate (`dsd_dac_unread`). `dsdPlayback` is sent all the same, its
+warnings with it, so a DSD state that does not read shows while no DAC does.
+`playback` is omitted until that backend has installed an occurrence. No optional
+object is emitted as `null`.
 
-The following are the complete member lists (`internal/api/outputs_bridge.go`,
-`OutputDSDPlayback`, `OutputDSDTuple`, `OutputPlayback`). “Integer” means a JSON
-number with no fractional part; generations, session and occurrence are unsigned
-64-bit integers, so clients must preserve their full precision.
+The following are the complete member lists (`internal/api/outputs_bridge.go`:
+`OutputDSDPlayback`, `OutputDSDTuple`, `OutputDSDConverted`, `OutputDSDRefused`,
+`OutputDSDWarning`, `OutputPlayback`, `OutputPlaybackConverted`, and `OutputDSDDAC`
+with the objects it holds). “Integer” means a JSON number with no fractional part;
+generations, session and occurrence are unsigned 64-bit integers, so clients must
+preserve their full precision.
 
 | Object | Always present members (JSON types) | Omitted when empty |
 |---|---|---|
-| `dsdPlayback` | `bootId`: string; `policyGeneration`: integer; `tuples`: array of tuple objects (never null, `[]` when empty) | `qualificationRevision`: string; `reason`: string; `model`: string; `bcdDevice`: string; `qualifiedOn`: string |
-| Each tuple | `format`: string; `bitRate`: integer; `channels`: integer; `policyId`: string; `pause`: string; `tailMs`: integer; `prefillMs`: integer | `transport`: string |
-| `playback` | `bootId`: string; `policyGeneration`: integer; `session`: integer; `occurrence`: integer; `state`: string; `format`: string; `rateHz`: integer; `logicalRate`: integer; `channels`: integer; `validBits`: integer | `policyId`: string; `transport`: string; `packingVersion`: integer; `observedAt`: string; `qualificationRevision`: string |
+| `dsdPlayback` | `bootId`: string; `policyGeneration`: integer; `tuples`: array of tuple objects (never null, `[]` when empty); `converted`: array of converted entry objects (never null, `[]` when empty); `refused`: array of refused rate objects (never null, `[]` when empty); `warnings`: array of warning objects (never null, `[]` when empty) | `reason`: string; `model`: string; `bcdDevice`: string |
+| Each tuple | `format`: string; `bitRate`: integer; `channels`: integer; `policyId`: string; `pause`: string; `tailMs`: integer; `prefillMs`: integer | `transport`: string; `evidence`: string; `evidenceOn`: string |
+| Each converted entry | `bitRate`: integer; `rateHz`: integer; `validBits`: integer; `passbandHz`: integer; `dither`: string; `filter`: string | None |
+| Each refused rate | `bitRate`: integer; `reason`: string | None |
+| Each warning | `code`: string | `reason`: string |
+| `playback` | `bootId`: string; `policyGeneration`: integer; `session`: integer; `occurrence`: integer; `state`: string; `format`: string; `rateHz`: integer; `logicalRate`: integer; `channels`: integer; `validBits`: integer | `policyId`: string; `transport`: string; `packingVersion`: integer; `observedAt`: string; `evidence`: string; `evidenceOn`: string; `converted`: object |
+| `playback.converted` | `fromBitRate`: integer; `filter`: string; `passbandHz`: integer; `dither`: string; `gainDB`: number; `clippedSamples`: integer | None |
+| `dsdDAC` | `dacKey`: string; `choice`: object; `options`: array of option objects (never null, `[]` when empty); `firstUse`: array of first use objects (never null, `[]` when empty) | `profile`: object |
+| `dsdDAC.profile` | `id`: string; `name`: string; `caveats`: array of caveat objects (never null, `[]` when empty) | None |
+| Each caveat | `code`: string; `note`: string | `transport`: string |
+| `dsdDAC.choice` | `mode`: string; `maxBitRate`: integer; `revision`: integer; `dopConfirmed`: boolean | None |
+| Each option | `mode`: string; `offered`: boolean | `rates`: array of option rate objects; `needsConfirmation`: boolean; `blocked`: string; `rateHz`: integer; `validBits`: integer; `passbandHz`: integer; `dither`: string |
+| Each option rate | `bitRate`: integer | `evidence`: string; `evidenceOn`: string |
+| Each first use | `transport`: string; `state`: string | `bitRates`: array of integers |
 
 No required member is omitted for zero or an empty string. Tuple `tailMs` and
 `prefillMs` are signed 64-bit integer milliseconds, including zero. Tuple
 `bitRate` is DSD bits/s and `channels` is currently 2. `bootId` is random per
-backend boot; `policyGeneration` is monotonic within that boot. `policyId` and
-`qualificationRevision` are opaque strings, not token vocabularies.
+backend boot; `policyGeneration` is monotonic within that boot. `policyId` is an
+opaque string, not a token vocabulary.
 
 A tuple's `transport` is `dop` for a DoP policy, DSD carried unchanged in S32_LE
 PCM words at the DoP carrier (`bitRate` / 16 Hz, `format` `S32_LE`), and absent for
 native DSD: absent never means DoP. `model` and `bcdDevice` are the bound DAC the
 set was computed for: its manufacturer and product strings and its USB descriptor
-firmware code. `qualifiedOn` and `qualificationRevision` were an owner-approved
-record's (its qualification date, `YYYY-MM-DD`, and its revision); since the DSD
-cutover this bridge reads no record and sends neither, and a client reads their
-absence as it always has. None of them carries the DAC's USB port path or serial
-number, and every occurrence of the bound unit's port or serial in a USB string is
-replaced with `[redacted]`.
+firmware code. An earlier bridge sent an owner-approved record's
+`qualificationRevision` and `qualifiedOn` on `dsdPlayback`, and the record's
+revision on `playback`; this one reads no record and sends none of them, and a
+client reads their absence as it always has. No member carries the DAC's USB port
+path or serial number: every occurrence of the bound unit's port or serial, as the
+unit reports it and as the boot binding names it, in `model`, a profile's `name` and
+a caveat's `note` is replaced with `[redacted]`, and every other string is a word, a
+date, a hash or hexadecimal digits.
 
-On `playback`, `transport` is `dop` for a DoP occurrence, `pcm` for a PCM one, and
-absent for native DSD. `packingVersion` is the DSD packer's version (1), absent for
-PCM. `observedAt` is when the backend last observed the occurrence's sink (installed,
-released, reopened or revoked), an RFC 3339 UTC time. `qualificationRevision` was
-the approved record's revision the occurrence was admitted under; since the DSD
-cutover this bridge sends none.
+A tuple's `evidence` is the highest rung of the evidence ladder the bridge has for
+it: `listener_confirmed` (a listener's latest answer for that transport and rate,
+on the DAC's current firmware, is clean; an owner's approval the bridge migrated
+from its legacy DSD keys is one), then, on this box and its current firmware,
+`streaming_observed` (an occurrence of the tuple played 5 s of its content without
+a fault) and `driver_accepted` (the kernel's driver took that exact format and rate
+on this endpoint, under the running kernel; for DoP, its PCM carrier alone), and
+`reported` (the bridge's database of DAC models names the transport at that rate
+for this model). `evidenceOn` is its date, `YYYY-MM-DD`, absent where nothing dates
+it (`reported`, an undated migrated answer, and an acceptance the bridge's probe
+holds and has not recorded yet). Both are absent where there is no rung. No rung
+says the DAC decodes DSD: `driver_accepted` says what a kernel takes,
+`streaming_observed` that a stream ran, and `listener_confirmed` what a listener
+heard, on a date.
+
+Each entry of `dsdPlayback.converted` is a DSD rate (`bitRate`, DSD bits/s) the
+player converts to PCM for this DAC, with the plan it converts by: `rateHz` and
+`validBits` the PCM's (176400, 88200 or 44100 Hz at 24 bits, or 16 for a DAC that
+takes no 24-bit target), `passbandHz` its low-pass edge (30000, or 20000 at
+44100 Hz), `dither` (`none` at 24 bits, `tpdf` at 16) and `filter`, the
+converter's name, which a change of its response changes. A converted rate is
+never bit-exact and publishes no tuple; it carries no evidence word, which is a
+native or DoP path's. Each entry of `dsdPlayback.refused` is a rate from DSD64 to
+DSD256 that plays neither way, with the word it is refused with (the table below),
+so the player's tuples, converted entries and refused rates name DSD64, DSD128 and
+DSD256 once each. `dsdPlayback.warnings` are what a client must be able to explain:
+`migration_record_refused` (an owner's approval record named by the bridge's
+legacy DSD keys could not be carried over; `reason` is the legacy reader's word),
+`migration_record_missing` (no record to carry over), `migrated_off` (an explicit
+`dsdMode: off`, or `dop` with DoP not allowed, became the bridge's default, off,
+for every DAC with no choice of its own) and `state_unreadable` (the player's DSD
+state did not read: its bytes were kept aside, and every rate is refused until a
+choice is written again). The first two are a DAC's, sent while that DAC is the one
+bound; the last two the bridge's, sent whatever is bound. `[]` is nothing to
+explain.
+
+**`dsdDAC`** is the DAC the player's DSD set was computed for. `dacKey` names its
+model, never a unit: `d1-` and 16 lowercase hexadecimal digits, the first 8 bytes
+of the SHA-256 of the model's canonical key (its USB vendor and product IDs, the
+USB interface its card is and its product string), with the unit's own serial and
+port taken out of the product string first, so no key is a function of a serial,
+and two units of one model share theirs, and their choice. `profile` is the model's
+entry in the bridge's database of DAC models, `id`, `name` and `caveats`, absent
+for a DAC the database does not know. A caveat says what the bridge cannot see:
+`code` (the table below), `transport` (`native` or `dop`; absent, both) and
+`note`, text for a person.
+
+`choice` is the choice that applies: `mode`, as `dsdMode` says it; `maxBitRate`,
+the rate above which native and DoP are not played (0 for no cap, else 2822400,
+5644800 or 11289600); `revision`, the revision of the DAC's own choice, 0 while it
+has none and `mode` is the bridge's default; and `dopConfirmed`, whether the DAC's
+DoP confirmation counts on its current firmware.
+
+`options` are four, one each for `native`, `dop`, `convert` and `off`, in that
+order, each with its `mode` and `offered`, whether the DAC offers the mode at some
+rate. A native or DoP option lists `rates`, each a rate it is offered at with its
+evidence, as a tuple's (`[]` for none): native where an altset of the bound PCM
+device lists a native DSD format at the rate and the bridge's probe did not refuse
+it, DoP where its carrier is offered and the database does not refuse DoP at the
+rate. DoP's `needsConfirmation` is `true` where a rate it is offered at needs the
+user's confirmation (the database neither heard nor states DoP there, and the DAC's
+confirmation does not count), and its `blocked`, present only where the gain check
+refuses DoP at every rate it is offered at, is that check's word
+(`dop_gain_not_unity`, `dop_gain_unverifiable`). Convert's option carries, while it
+is offered, its plan (`rateHz`, `validBits`, `passbandHz`, `dither`, as a converted
+entry's); off is always offered. While the player's DSD state does not read, the
+set establishes nothing of the DAC, and off alone is offered.
+
+`firstUse` are two, one each for `native` and `dop`: `state` is `pending` (not
+acknowledged on the DAC's current firmware), `acknowledged`, or `observed` (an
+occurrence of the transport has since played 5 s of its content without a fault);
+`bitRates`, ascending, are the rates an acknowledgement covers that a migrated
+owner's approval made, absent for every rate.
+
+On `playback`, `transport` is `dop` for a DoP occurrence, `pcm` for a PCM one,
+`converted` for DSD the player converts to PCM, and absent for native DSD.
+`packingVersion` is the DSD packer's version (1), absent for PCM and a converted
+occurrence. `observedAt` is when the backend last observed the occurrence's sink
+(installed, released, reopened or revoked), an RFC 3339 UTC time. A native or DoP
+occurrence's `evidence` and `evidenceOn` are its tuple's in the set published now,
+or, its tuple gone from that set, the ones it was admitted with; a PCM and a
+converted occurrence carry none. A converted occurrence's `format`, `rateHz` and
+`validBits` are its PCM's, its plan's actual values, `logicalRate` is 0, and
+`converted` is its plan: `fromBitRate`, the source's DSD bits/s; `filter`,
+`passbandHz` and `dither`, as a converted entry's; `gainDB`, 0, unity; and
+`clippedSamples`, the samples its conversion has saturated at full scale so far.
+That count is live: the player counts as it converts, at each 4,096 PCM frames it
+makes (23 ms of 176.4 kHz audio), ahead of what the DAC has played by at most the
+player's buffer, about two seconds; each request reads it afresh, which costs the
+player's audio nothing.
+
+`policyGeneration` moves with what plays. A change of the set (a tuple, a
+converted plan or a refusal's word, the DAC or its firmware) publishes it at the
+next generation; a change that leaves what plays as it was (a transport's first use
+observed, an evidence step, the choice's revision, a warning) is published under
+the same generation, at the bridge's next reading of its DSD policy, within about
+a second (a tenth of one while DSD plays). A client's grant of DSD keys on `bootId`
+and `policyGeneration`, which such a change does not move.
 
 The current token vocabularies are exact and case-sensitive:
 
@@ -977,11 +1087,30 @@ The current token vocabularies are exact and case-sensitive:
 | `dsdPlayback.tuples[].format` | `DSD_U32_BE`, `DSD_U32_LE`, `DSD_U16_LE`, `S32_LE` |
 | `dsdPlayback.tuples[].transport` | `dop` |
 | `dsdPlayback.tuples[].pause` | `kernel`, `silence` |
+| `dsdPlayback.tuples[].evidence` | `reported`, `driver_accepted`, `streaming_observed`, `listener_confirmed` |
+| `dsdPlayback.converted[].dither` | `none`, `tpdf` |
+| `dsdPlayback.converted[].filter` | `dsdconv-1` |
+| `dsdPlayback.refused[].reason` | `dsd_off_by_choice`, `native_not_offered`, `dop_not_offered`, `dop_gain_not_unity`, `dop_gain_unverifiable`, `dop_confirmation_required`, `dsd_rate_above_choice`, `first_use_pending`, `listener_rejected`, `conversion_not_offered`, `dsd_state_unreadable`, `dsd_dac_unread` |
+| `dsdPlayback.warnings[].code` | `migration_record_refused`, `migration_record_missing`, `migrated_off`, `state_unreadable` |
+| `dsdPlayback.warnings[].reason` | `stale_version`, `identity_mismatch`, `hash_mismatch`, `unreadable` |
 | `playback.state` | `open`, `released`, `revoked` |
-| `playback.transport` | `dop`, `pcm` |
+| `playback.transport` | `dop`, `pcm`, `converted` |
 | `playback.format` (PCM) | `S16_LE`, `S24_3LE`, `S24_LE`, `S32_LE` |
 | `playback.format` (native DSD) | `DSD_U32_BE`, `DSD_U32_LE`, `DSD_U16_LE` |
 | `playback.format` (DoP) | `S32_LE` |
+| `playback.evidence` | `reported`, `driver_accepted`, `streaming_observed`, `listener_confirmed` |
+| `playback.converted.dither` | `none`, `tpdf` |
+| `playback.converted.filter` | `dsdconv-1` |
+| `dsdMode` | `auto`, `native`, `dop`, `convert`, `off` |
+| `dsdDAC.profile.caveats[].code` | `dop_noise_in_hidden_mode`, `mode_switch_caps_rates`, `transition_clicks` |
+| `dsdDAC.profile.caveats[].transport` | `native`, `dop` |
+| `dsdDAC.choice.mode` | `auto`, `native`, `dop`, `convert`, `off` |
+| `dsdDAC.options[].mode` | `native`, `dop`, `convert`, `off` |
+| `dsdDAC.options[].rates[].evidence` | `reported`, `driver_accepted`, `streaming_observed`, `listener_confirmed` |
+| `dsdDAC.options[].blocked` | `dop_gain_not_unity`, `dop_gain_unverifiable` |
+| `dsdDAC.options[].dither` | `none`, `tpdf` |
+| `dsdDAC.firstUse[].transport` | `native`, `dop` |
+| `dsdDAC.firstUse[].state` | `pending`, `acknowledged`, `observed` |
 
 Format sources are `format.DSDU32BE`, `format.DSDU32LE`, `format.DSDU16LE`
 (`internal/player/format/dsd_pack.go`) and `format.S16LE`, `format.S243LE`,
@@ -996,8 +1125,18 @@ writes DSD silence. Playback state tokens
 are literal constants in `playback.Facts`, `observeOccurrence`, `observeNote`
 (`internal/player/playback/live.go`) and `Backend.Revoke` (`native.go`), not
 named enum constants. Transport tokens are `playback.TransportDoP` and
-`playback.TransportPCM` (`internal/player/playback/edges.go`); a tuple names
-`dop` alone, and a native DSD tuple or occurrence names no transport.
+`playback.TransportPCM` (`internal/player/playback/edges.go`) and
+`playback.TransportConverted` (`live.go`), a converted occurrence's, whose format
+is a PCM one; a tuple names `dop` alone, and a native DSD tuple or occurrence names
+no transport. The read side's words are the policy's rungs (`policy.Rung*`) and the
+words it refuses a rate it decides with (`policy.Reason*`, beside the backend's
+`playback.ReasonDACUnread` for a set it could not compute), the converter's dither
+words and filter name (`dsdconv.Dither*`, `dsdconv.FilterName`), the DSD state's
+modes, transports, warning codes and reasons (`dsdstate.Mode*`,
+`dsdstate.Transport*`, `dsdstate.Warning*`, `dsdstate.Reason*`), the database's
+caveat codes (`dacprofile.Caveat*`) and the transports its lint lets a caveat
+name, the options' modes (`playback.optionModes`), the gain check's words
+(`policy.Gain`), and first use's states (`playback.FirstUse*`).
 `dsdPlayback.reason` is for display only, not a closed token contract, and it is
 distinct from the baseline `bridge.reason` table above. Since the DSD cutover it is
 sent only while no rate plays, and it is then the word the effective policy refuses
@@ -1011,7 +1150,8 @@ policy would convert to PCM, which the player now converts), or `dsd_dac_unread`
 computed: the bridge has no fresh reading of the bound DAC). An engineering harness's
 backend sends its approval's words instead. The field has always been free text, so a
 client that follows this section shows a word it does not know as text, or nothing,
-and decides nothing by it: eligibility comes from `tuples` alone.
+and decides nothing by it: eligibility comes from `tuples` and `converted` alone,
+and `refused` says the word of each rate that plays neither way.
 **A client must treat an unknown token as unknown, never as a known one; in
 particular it must not infer eligibility from an unknown format or pause.**
 
@@ -1024,7 +1164,7 @@ and a silent probe establish of the DAC now, and for DoP a check that every gain
 stage on the DAC's playback path is visible and at unity. A rate plays native DSD,
 in the first format the DAC offers of `DSD_U32_BE`, `DSD_U32_LE`, `DSD_U16_LE`, or
 DoP, or publishes no tuple; a rate the policy converts to PCM, which the player does,
-publishes none. A change of the set never moves an occurrence
+publishes a converted entry and no tuple. A change of the set never moves an occurrence
 to another transport: an occurrence plays the transport it was admitted under or
 stops (below). The set itself publishes what the policy plays at each rate now: a
 rate whose transport a change took away (a gain stage leaving unity takes DoP away)
@@ -1042,7 +1182,7 @@ not grant permission for another occurrence.
 
 A change of the set publishes it at the next `policyGeneration` and is reconciled per occurrence: one the new set still plays, on the DAC it was opened on, plays on; one prepared and not yet at the DAC is handed off again and admitted under the new set as any entry is, so it plays if the new set plays its rate and is refused with the new set's word if not; one heard, or whose DSD reached the DAC, is Immediate-stopped, and so is one whose DAC is not the one the new set was computed for (another model, or another firmware). Two are stopped where they would be handed off again: a session's first DSD occurrence once its content has opened and before any of it reaches the DAC, and any occurrence of a session being released. One that has played out, its output drained or closed, is not judged. A session playing PCM with only prepared DSD keeps playing PCM. Recovery never autoplays. A session's first DSD occurrence, every activation, a 100 ms monitor while a session plays DSD and the bridge's own refresh read the policy again, and every device opened for DSD must be the DAC the set was computed for.
 
-| Track evidence, in this bridge's own library | DSD eligibility (also requires a stereo tuple of the published set at its rate) |
+| Track evidence, in this bridge's own library | DSD eligibility (also requires a stereo tuple, or a converted entry, of the published set at its rate) |
 |---|---|
 | DSF, validated fmt with known stereo/rate | Eligible |
 | DFF, `raw`, no conflicting DST evidence | Eligible |
