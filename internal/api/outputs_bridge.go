@@ -69,7 +69,10 @@ type OutputBridge struct {
 	FixedVolume bool `json:"fixedVolume"`
 	// Codecs are the containers the player plays in this release.
 	Codecs []string `json:"codecs"`
-	// DSDMode and AllowDoP are the player's DSD settings as it runs.
+	// DSDMode and AllowDoP are the legacy DSD keys as the boot config holds
+	// them (output.player.dsdMode and allowDoP), which since B728's cutover
+	// (B7) decide nothing: the player's DSD state does, and DSDPlayback's
+	// tuples are what plays.
 	DSDMode  string `json:"dsdMode"`
 	AllowDoP bool   `json:"allowDoP"`
 	// TimeSeek is whether the player seeks within a track, by the kind of
@@ -243,16 +246,20 @@ type OutputDSDTuple struct {
 	Transport string `json:"transport,omitempty"`
 }
 
-// OutputDSDPlayback describes the current authorization epoch, not an open DAC.
+// OutputDSDPlayback describes the DSD set published now, not an open DAC:
+// since B728's cutover (B7) the player's effective DSD set, which its
+// backend admits by.
 type OutputDSDPlayback struct {
 	BootID                string           `json:"bootId"`
 	PolicyGeneration      uint64           `json:"policyGeneration"`
 	QualificationRevision string           `json:"qualificationRevision,omitempty"`
 	Reason                string           `json:"reason,omitempty"`
 	Tuples                []OutputDSDTuple `json:"tuples"`
-	// Model, BCDDevice and QualifiedOn are the owner qualification the
-	// epoch's record states: the DAC's model, its descriptor firmware code
-	// and the qualification date (YYYY-MM-DD). Never its port or serial.
+	// Model and BCDDevice are the bound DAC's model and descriptor firmware
+	// code the set was computed for; QualifiedOn and QualificationRevision
+	// are an owner record's, which a harness backend's epoch states and
+	// production reads no more (B728 B7), so serve sends neither. Never the
+	// DAC's port or serial.
 	Model       string `json:"model,omitempty"`
 	BCDDevice   string `json:"bcdDevice,omitempty"`
 	QualifiedOn string `json:"qualifiedOn,omitempty"`

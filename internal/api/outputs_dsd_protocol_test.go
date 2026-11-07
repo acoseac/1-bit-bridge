@@ -150,6 +150,53 @@ func TestDSDOutputProtocolTokens(t *testing.T) {
 		}
 		return true
 	})
+	// Since B728's cutover (B7) production's tuples are the effective
+	// policy's (internal/player/policy): its pause words must be the
+	// approval's, and its native formats among them, so the documented lists
+	// hold what either publishes.
+	policyPause, policyNative := map[string]bool{}, map[string]bool{}
+	protocolGoFiles(t, filepath.Join(root, "internal/player/policy"), func(f *ast.File) {
+		ast.Inspect(f, func(n ast.Node) bool {
+			v, ok := n.(*ast.ValueSpec)
+			if !ok {
+				return true
+			}
+			for i, name := range v.Names {
+				switch {
+				case strings.HasPrefix(name.Name, "Pause") && i < len(v.Values):
+					policyPause[protocolString(t, v.Values[i])] = true
+				case name.Name == "nativeFormats":
+					list, ok := v.Values[i].(*ast.CompositeLit)
+					if !ok {
+						t.Fatal("unresolved nativeFormats initializer")
+					}
+					for _, entry := range list.Elts {
+						sel, ok := entry.(*ast.SelectorExpr)
+						if !ok {
+							t.Fatalf("unresolved native format %T", entry)
+						}
+						value, found := formats[sel.Sel.Name]
+						if !found {
+							t.Fatalf("unknown native format constant %s", sel.Sel.Name)
+						}
+						policyNative[value] = true
+					}
+				}
+			}
+			return true
+		})
+	})
+	if len(policyPause) == 0 || !reflect.DeepEqual(policyPause, pause) {
+		t.Errorf("the effective policy's pause words %v, the approval's %v: production and the harness publish one vocabulary", policyPause, pause)
+	}
+	if len(policyNative) == 0 {
+		t.Error("the effective policy names no native format")
+	}
+	for value := range policyNative {
+		if !approvedFormats[value] {
+			t.Errorf("the effective policy's native format %s is not among the approval's", value)
+		}
+	}
 	// A published tuple is one of the approval's formats (B470 2d.2): a
 	// native DSD word (DSDWordBytes) or DoP's PCM carrier word, the one the
 	// approval takes that is no DSD word.

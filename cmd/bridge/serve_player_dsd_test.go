@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -13,10 +12,11 @@ import (
 	"testing"
 
 	"github.com/acoseac/1-bit-bridge/internal/alsa"
-	"github.com/acoseac/1-bit-bridge/internal/alsactl"
 	"github.com/acoseac/1-bit-bridge/internal/player/dacprofile"
 	"github.com/acoseac/1-bit-bridge/internal/player/dsdstate"
+	"github.com/acoseac/1-bit-bridge/internal/player/engine"
 	"github.com/acoseac/1-bit-bridge/internal/player/playback"
+	"github.com/acoseac/1-bit-bridge/internal/player/playback/playbacktest"
 	"github.com/acoseac/1-bit-bridge/internal/player/qualification"
 	"github.com/acoseac/1-bit-bridge/internal/player/qualification/approvaltest"
 )
@@ -124,17 +124,16 @@ func legacyRecordIn(t *testing.T, dir string, id qualification.Identity, version
 	return a
 }
 
-// wiredAuthorization is the DSD authorization serve's player wired into the
-// backend it built (the stand-in keeps it): what production authorizes DSD
-// by until the cutover.
-func wiredAuthorization(t *testing.T, standIn *playerStandIn) playback.Authorization {
+// wiredPlayback is the backend config serve's player wired (the stand-in
+// keeps it).
+func wiredPlayback(t *testing.T, standIn *playerStandIn) playback.Config {
 	t.Helper()
 	standIn.mu.Lock()
 	defer standIn.mu.Unlock()
-	if !standIn.built || standIn.cfg.Authorization == nil {
-		t.Fatal("serve's player wired no DSD authorization")
+	if !standIn.built {
+		t.Fatal("serve's player built no backend")
 	}
-	return *standIn.cfg.Authorization
+	return standIn.cfg
 }
 
 // TestAnExplicitOffSurvivesAsTheDefault (B728 B6, the design's section 3.6):
@@ -144,30 +143,33 @@ func wiredAuthorization(t *testing.T, standIn *playerStandIn) playback.Authoriza
 // bridge's migrated_off warning and the marker holding the keys as
 // bridge.yaml held them; an unset dsdMode, which refuses DSD today just as
 // off does, migrates nothing: no file, the defaults. The migration is the
-// bridge's part alone, made before the player runs. Production still reads
-// the keys until the cutover: the authorization serve wires is theirs, DSD off
-// or DoP held back, as before.
+// bridge's part alone, made before the player runs. Since the cutover (B7)
+// the keys are read by nothing else: serve wires the effective policy, which
+// over the migrated state refuses the GO bar's DSD as dsd_off_by_choice for
+// an opt-out, and, for the defaults, as dsd_not_in_this_release, its DSD
+// converted under auto until the player converts (B11).
 func TestAnExplicitOffSurvivesAsTheDefault(t *testing.T) {
 	needsDirectorySync(t)
 	persistentMedium(t)
 	no := false
 	for _, tc := range []struct {
 		name, keys string
-		// mode and allowDoP are what serve wires into the authorization, as
-		// before B6.
-		mode     string
-		allowDoP bool
+		// refusal is the word the effective policy refuses the GO bar's DSD
+		// with, at every rate, over the migrated state.
+		refusal string
 		// marker is the migration's, nil for none and no file.
 		marker *dsdstate.Marker
 	}{
-		{"explicit off", "    dsdMode: off\n", "off", false, &dsdstate.Marker{From: dsdstate.FromKeys, DSDMode: "off"}},
-		{"dop without allowDoP", "    dsdMode: dop\n    allowDoP: false\n", "dop", false, &dsdstate.Marker{From: dsdstate.FromKeys, DSDMode: "dop", AllowDoP: &no}},
-		{"unset", "", "off", false, nil},
+		{"explicit off", "    dsdMode: off\n", "dsd_off_by_choice", &dsdstate.Marker{From: dsdstate.FromKeys, DSDMode: "off"}},
+		{"dop without allowDoP", "    dsdMode: dop\n    allowDoP: false\n", "dsd_off_by_choice", &dsdstate.Marker{From: dsdstate.FromKeys, DSDMode: "dop", AllowDoP: &no}},
+		{"unset", "", string(playback.ReasonDSD), nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			trees := goBarTrees(t)
+			goBarDSD(t, trees)
 			standIn := newPlayerStandIn()
-			ps := bootPlayerServe(t, playerServeCase{player: goBarPlayer + tc.keys, standIn: standIn})
-			ps.runningEngine(t)
+			ps := bootPlayerServe(t, playerServeCase{player: goBarPlayer + tc.keys, standIn: standIn, with: func(o *serveOpts) { o.playerTrees = trees }})
+			availableOutput(t, ps.runningEngine(t))
 			st, there := dsdStateIn(t, ps.dataDir)
 			if tc.marker == nil {
 				if there || st.DefaultMode != dsdstate.ModeAuto || len(st.Warnings) != 0 || st.MigratedFrom != nil {
@@ -190,8 +192,8 @@ func TestAnExplicitOffSurvivesAsTheDefault(t *testing.T) {
 					t.Errorf("an opt-out gave a DAC something: %+v", st.DACs)
 				}
 			}
-			if a := wiredAuthorization(t, standIn); a.Mode != tc.mode || a.AllowDoP != tc.allowDoP {
-				t.Errorf("serve wired dsdMode %q and allowDoP %v into the authorization, want %q and %v: production reads the keys until the cutover", a.Mode, a.AllowDoP, tc.mode, tc.allowDoP)
+			if p := policyBackendOf(t, wiredPlayback(t, standIn), dopContents{}, &dopOpens{}).Policy(); len(p.Tuples) != 0 || p.Reason != tc.refusal {
+				t.Errorf("the effective policy serve wired publishes %+v (reason %q), want nothing playing for %s", p.Tuples, p.Reason, tc.refusal)
 			}
 			if code := ps.stopServe(t); code != 0 {
 				t.Fatalf("exit %d; stderr=%s", code, ps.stderr.String())
@@ -208,14 +210,14 @@ func TestAnExplicitOffSurvivesAsTheDefault(t *testing.T) {
 // firmware (undated: a schema-1 record), and a first-use acknowledgement of
 // native that lists DSD64 alone, so it covers DSD64 and not DSD128, which an
 // acknowledgement of the whole transport would. The marker keeps the
-// record's digest and waits for nothing. Production's read of the record is
-// unchanged: the backend over the authorization serve wired still publishes
-// the record's DSD64 tuple through the legacy reader.
+// record's digest and waits for nothing. Since the cutover (B7) that is what
+// plays: the effective policy serve wired publishes native at DSD64 alone,
+// DSD128 and DSD256 refused as first_use_pending, no record read.
 func TestAMigratedApprovalCoversOnlyItsRates(t *testing.T) {
 	needsDirectorySync(t)
 	persistentMedium(t)
 	trees := goBarTrees(t)
-	goBarIdentityFiles(t, trees)
+	goBarDSD(t, trees)
 	standIn := newPlayerStandIn()
 	var record qualification.Approval
 	ps := bootPlayerServe(t, playerServeCase{player: goBarPlayer + "    dsdMode: native\n    dsdQualification: approved.json\n", standIn: standIn,
@@ -225,6 +227,17 @@ func TestAMigratedApprovalCoversOnlyItsRates(t *testing.T) {
 		with: func(o *serveOpts) { o.playerTrees = trees }})
 	eng := ps.runningEngine(t)
 	availableOutput(t, eng)
+	fill := func(ch, i int) byte { return byte(i + ch) }
+	content := dopContents{"dsd128": playbacktest.DSF(dsdstate.DSD128, 0.1, fill), "dsd256": playbacktest.DSF(dsdstate.DSD256, 0.1, fill)}
+	b := policyBackendOf(t, wiredPlayback(t, standIn), content, &dopOpens{})
+	if p := b.Policy(); ratesPublished(p) != `2822400/"" ` || p.Reason != "" {
+		t.Errorf("the effective policy after the migration publishes %s(reason %q), want native at DSD64 alone", ratesPublished(p), p.Reason)
+	}
+	for i, ref := range []string{"dsd128", "dsd256"} {
+		if err := startOn(t, b, engine.SessionID(i+1), ref); unplayable(err) != "first_use_pending" {
+			t.Errorf("%s, a rate the record did not approve: %v, want first_use_pending", ref, err)
+		}
+	}
 	if code := ps.stopServe(t); code != 0 {
 		t.Fatalf("exit %d; stderr=%s", code, ps.stderr.String())
 	}
@@ -262,25 +275,5 @@ func TestAMigratedApprovalCoversOnlyItsRates(t *testing.T) {
 	}
 	if d.DoPConfirmed != nil {
 		t.Errorf("a native record confirmed DoP: %+v", d.DoPConfirmed)
-	}
-	// The legacy reader's verdict, unchanged by the migration: the backend over
-	// what serve wired, its control reader standing in for the box, which has
-	// no control node, reads the record and publishes its tuple.
-	auth := wiredAuthorization(t, standIn)
-	if auth.Mode != "native" || auth.Record != "approved.json" || auth.StateDir != ps.dataDir {
-		t.Fatalf("serve wired %+v, want the keys' native mode and record in its data directory", auth)
-	}
-	auth.Controls = alsactl.Reader{Open: func(int) (alsactl.Device, error) { return qualifyNoControls{}, nil }}
-	auth.Healthy = nil
-	standIn.mu.Lock()
-	locator := standIn.cfg.Locator
-	standIn.mu.Unlock()
-	b, err := playback.New(playback.Config{Authorization: &auth, Locator: locator, Resolver: dopContents{}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	b.RefreshAuthorization(context.Background())
-	if pol := b.Policy(); len(pol.Tuples) != 1 || pol.Tuples[0].Tuple.BitRate != dsdstate.DSD64 || pol.Tuples[0].Tuple.Transport != "" {
-		t.Errorf("the legacy reader's epoch after the migration: %+v (reason %q), want the record's DSD64 native tuple", pol.Tuples, pol.Reason)
 	}
 }

@@ -143,18 +143,19 @@ type IdentityMatch func(recorded, live Identity) bool
 
 // SameIdentity compares every field, the anchored port included:
 // ReadApproval's comparison, and production's through ReadLegacyApproval
-// until B728's cutover.
+// until B728's cutover (B7), since which production reads no record.
 func SameIdentity(recorded, live Identity) bool { return recorded == live }
 
 // ReadLegacyApproval is the reader of B728's cutover (the design's §3.5):
-// production's until the cutover (B7), and from B6 the migration's. It makes
+// production's until the cutover (B7), and since B6 the migration's, its one
+// caller since B7. It makes
 // every check ReadApproval makes but two: the record and each report it holds
 // (each policy's matrix and lifecycle report, each transition report, each
 // DoP experiment and each experiment's contact) may state any version from
 // LegacyVersion to this build's Version, never one past it, which a newer
 // bridge wrote before a downgrade and this code cannot vouch for; and their
 // identity is the unit's as same compares them, an experiment's contact being
-// taken at its own experiment's. Production passes SameIdentity, the port
+// taken at its own experiment's. Production passed SameIdentity, the port
 // included, until B7; the migration compares the model alone.
 func ReadLegacyApproval(stateDir, name string, identity Identity, same IdentityMatch) (Approval, error) {
 	if same == nil {

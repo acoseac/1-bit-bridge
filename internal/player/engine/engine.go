@@ -89,7 +89,10 @@ type Config struct {
 	// releases it, passed to every session; 0 is DefaultPauseRelease, and
 	// it must be 1 s to 10 min.
 	PauseRelease time.Duration
-	// DSD is the configured DSD mode, passed to every session.
+	// DSD is a DSD mode passed to every session (SessionOptions.DSD), which
+	// decides nothing: the bridge's backend plays DSD by the player's
+	// effective DSD policy (B728 B7), and serve and bridge output play pass
+	// none.
 	DSD string
 	// MaintenanceTTL is how long a maintenance hold lasts unrenewed; 0 is
 	// DefaultMaintenanceTTL, and it must be 1 s to 1 h.

@@ -157,6 +157,29 @@ func (s *session) reportStep() bool {
 			}
 		}
 	}
+	// streaming_observed (B728 B7; the design's sections 1.1 and 6.2): a
+	// native or DoP occurrence the effective policy admitted, heard, whose
+	// own content the kernel established played for streamingObserved, with
+	// no fault in the session, an xrun's included, which the step above
+	// reads first: recorded once, off the audio path, with its transport's
+	// first use observed.
+	if s.fault == nil && s.decodeErr == nil && !s.releasing {
+		for _, o := range s.chain {
+			if o.dropped || o.out == nil || !o.crossed || o.observed || o.admitted == nil || o.plan == nil {
+				continue
+			}
+			p := posOf(o.out)
+			if p.State == alsapcm.SinkXrun || p.State == alsapcm.SinkEnded {
+				continue
+			}
+			if played := min(max(p.Played-o.start, 0), o.written); played < observedFrames(o.plan) {
+				continue
+			}
+			o.observed = true
+			set, pp := o.admitted, o.policyPlan
+			evs = append(evs, func() { s.b.noteStreamingObserved(set, pp) })
+		}
+	}
 	if s.fault != nil && !s.faultSent {
 		f := *s.fault
 		switch {

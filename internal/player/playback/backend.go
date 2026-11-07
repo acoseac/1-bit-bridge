@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"runtime/debug"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/alsapcm"
@@ -24,7 +25,16 @@ const MeasureEvery = 50 * time.Millisecond
 
 // Config is what New builds a backend from.
 type Config struct {
-	// Authorization supplies approved-only native DSD admission; nil is off.
+	// DSD is production's DSD admission (B728 B7): the player's effective
+	// DSD policy, which serve and bridge output play configure, and which
+	// reads no approval record. Nil, with no Authorization, refuses all DSD
+	// as dsd_not_in_this_release (ReasonDSD).
+	DSD *DSDPolicy
+	// Authorization is the harness's approved-only native DSD admission
+	// (NewQualificationBackend, NewTransitionQualificationBackend, bridge
+	// output play's report): it reads the owner's approval record at the
+	// harness's version. Production passes DSD and never this; New refuses
+	// a config that sets both.
 	Authorization *Authorization
 	// Resolver opens the content an occurrence's reference names. Required.
 	Resolver Resolver
@@ -89,12 +99,38 @@ type Seams struct {
 	// probe has ended, before the Start takes the device slot: the window in
 	// which a second probe would take the slot from it (B728 B4 round 2).
 	StartWoke func()
+	// Activating runs in a native or DoP occurrence's activation check
+	// (checkDSDActivation) once its read of the policy has returned, before
+	// the check judges the occurrence: the window in which another refresh
+	// publishes a set, and may reconcile the occurrence under it, which the
+	// check must judge it by (B728 B7 round 4).
+	Activating func()
+	// Published runs in a refresh (refreshDSD) once it has published its set
+	// and before it reconciles the sessions' occurrences against it, under
+	// the refreshes' lock, so it must not call the backend: the window in
+	// which a set is published that no reconciliation has judged an
+	// occurrence by yet (B728 B7 round 4).
+	Published func()
 }
 
 // startWoke is the StartWoke seam.
 func (b *Backend) startWoke() {
 	if sm := b.cfg.Seams; sm != nil && sm.StartWoke != nil {
 		sm.StartWoke()
+	}
+}
+
+// activating is the Activating seam.
+func (b *Backend) activating() {
+	if sm := b.cfg.Seams; sm != nil && sm.Activating != nil {
+		sm.Activating()
+	}
+}
+
+// published is the Published seam.
+func (b *Backend) published() {
+	if sm := b.cfg.Seams; sm != nil && sm.Published != nil {
+		sm.Published()
 	}
 }
 
@@ -181,6 +217,18 @@ func (n Note) StatusPath() string {
 // alsapcm.Sink for PCM and alsapcm.DSDSink for approved DSD. It is the
 // package documentation's contract, term by term.
 type Backend struct {
+	// dsd is the effective DSD set published now (B728 B7), which selection
+	// admits by and publication reads, swapped in one step: never nil once
+	// New has returned, for a backend with a DSD policy. dsdMu serializes the
+	// refreshes that swap it, dsdRead is when the last one read the policy,
+	// dsdFenceOnce says once that the state's writes are fenced, and
+	// probeState is the silent probe's bookkeeping (ProbeDSD).
+	dsd          atomic.Pointer[dsdSet]
+	dsdMu        sync.Mutex
+	dsdRead      time.Time
+	dsdFenceOnce sync.Once
+	probeState   dsdProbe
+
 	policyMu            sync.Mutex
 	policy              PlayerPolicy
 	liveFacts           *PlaybackFacts
@@ -225,6 +273,8 @@ func New(cfg Config) (*Backend, error) {
 		return nil, errors.New("player backend: a Resolver is required")
 	case cfg.Locator == nil:
 		return nil, errors.New("player backend: a Locator is required")
+	case cfg.DSD != nil && cfg.Authorization != nil:
+		return nil, errors.New("player backend: production's effective DSD policy and the harness's approval admission are not configured together")
 	}
 	if cfg.OpenSink == nil {
 		cfg.OpenSink = alsapcm.OpenSink
@@ -249,7 +299,15 @@ func New(cfg Config) (*Backend, error) {
 	}
 	zero := make(chan struct{})
 	close(zero)
-	return &Backend{policy: PlayerPolicy{BootID: fmt.Sprintf("%x", randomBoot()), Generation: 1, Reason: "DSD is off"}, cfg: cfg, log: cfg.Log, sessions: map[engine.SessionID]*session{}, took: map[packKey]format.ALSAFormat{}, zero: zero}, nil
+	reason := "DSD is off"
+	if cfg.Authorization == nil {
+		reason = string(ReasonDSD)
+	}
+	b := &Backend{policy: PlayerPolicy{BootID: fmt.Sprintf("%x", randomBoot()), Generation: 1, Reason: reason}, cfg: cfg, log: cfg.Log, sessions: map[engine.SessionID]*session{}, took: map[packKey]format.ALSAFormat{}, zero: zero}
+	if cfg.DSD != nil {
+		b.dsd.Store(&dsdSet{gen: 1, why: "the effective DSD set has not been computed yet"})
+	}
+	return b, nil
 }
 
 // Stats are the backend's counts, for diagnostics and the tests.

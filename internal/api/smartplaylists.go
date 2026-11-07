@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
+	"github.com/acoseac/1-bit-bridge/internal/smartplaylist/season"
 )
 
 // SmartPlaylistStore is the optional backing store for GET /v1/smart-playlists.
@@ -104,6 +105,14 @@ type smartPlaylistsResponse struct {
 // required, like GET /v1/history). The optional `?local_hour=H` (0..23) is
 // the device's current local hour, used ONLY to title the time-of-day family;
 // the bucket itself is the server's current UTC hour (the same instant).
+//
+// The Christmas family is served from 1 December to 5 January, UTC, and
+// left out of every other response (B750). The window is read here, from
+// the clock at the request, never from when the cache was built: the
+// regenerator builds the family all year, so a cache built in November is
+// ready the moment the window opens, and one built on 5 January cannot keep
+// it served on the 6th. A family left out counts toward nothing, the
+// top-level refreshedAt included.
 func (s *Server) smartPlaylists(w http.ResponseWriter, r *http.Request) {
 	if !s.smartPlaylistsActive() {
 		writeError(w, http.StatusNotFound, "smart_playlists_not_supported",
@@ -117,14 +126,19 @@ func (s *Server) smartPlaylists(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	now := s.now()
 	localHour, hasLocal := parseLocalHour(r.URL.Query().Get("local_hour"))
-	nowUTCHour := time.Now().UTC().Hour()
+	nowUTCHour := now.UTC().Hour()
+	inSeason := season.InWindow(now)
 
 	// Operator-uploaded custom covers, keyed by family slug (best-effort).
 	covers := s.coverHashesForScope(r.Context(), manifest.CoverScopeSmartMix)
 
 	resp := smartPlaylistsResponse{Playlists: make([]smartPlaylistDTO, 0, len(rows))}
 	for _, row := range rows {
+		if row.Kind == christmasKind && !inSeason {
+			continue // out of its window: not served, not counted
+		}
 		dto, ok := buildSmartPlaylistDTO(row, nowUTCHour, localHour, hasLocal)
 		if !ok {
 			continue // e.g. time-of-day with no habit at the current hour
@@ -186,6 +200,19 @@ func buildSmartPlaylistDTO(row manifest.StoredSmartPlaylist, nowUTCHour, localHo
 // timeOfDayKind mirrors smartplaylist.KindTimeOfDay without importing the
 // engine package into the API layer (the string is the stable wire contract).
 const timeOfDayKind = "timeOfDay"
+
+// christmasKind mirrors smartplaylist.KindChristmas the same way. The window
+// it is served in is season.InWindow, a leaf the engine side imports too.
+const christmasKind = "christmas"
+
+// now is the clock the smart-playlist feed reads: the test's instant when
+// one is set (clockNow), else time.Now.
+func (s *Server) now() time.Time {
+	if s.clockNow != nil {
+		return s.clockNow()
+	}
+	return time.Now()
+}
 
 // resolveTimeOfDayItems unions the hour pools in [utcHour-window, utcHour+window]
 // (mod 24), center first then outward, deduping by path and capping at max.

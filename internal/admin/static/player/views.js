@@ -1769,7 +1769,25 @@ function collectionTile(c, href, scope) {
     collectionArt(c, scope),
     el("div", { class: "tile-body" },
       el("span", { class: "tile-title", text: c.name || c.id }),
-      el("span", { class: "tile-sub", text: c.subtitle || plural(c.count ?? 0, "track") })));
+      el("span", { class: "tile-sub", text: c.subtitle || plural(c.count ?? 0, "track") }),
+      c.outOfSeason ? el("span", { class: "tile-meta" }, chip("Out of season", "chip-quiet")) : null));
+}
+
+/**
+ * Why a smart mix the 1-bit app is not shown now is still here, or null.
+ *
+ * The Christmas mix is served to the app from 1 December to 5 January
+ * (UTC) alone, and generated all year, so the console lists it all year:
+ * an operator can play it, regenerate it or give it a cover before its
+ * season. The server marks it (outOfSeason); the page only words it.
+ */
+function seasonNote(c) {
+  if (!c.outOfSeason) return null;
+  return el("p", {
+    class: "detail-provenance muted small",
+    text: "Out of season. The 1-bit app shows this mix from 1 December to 5 January (UTC); " +
+      "it is rebuilt with the others all year, so it is ready when the season opens.",
+  });
 }
 
 function collectionArt(c, scope) {
@@ -1857,6 +1875,7 @@ async function renderCollectionDetail(view, ctx, opts) {
   const head = el("div", { class: "detail-head" },
     c.subtitle ? el("p", { class: "detail-artist", text: c.subtitle }) : null,
     el("p", { class: "detail-stats muted small", text: stats }),
+    seasonNote(c),
     collectionProvenance(c),
     unresolvedBlock(d),
     collectionActions(tracks, art));

@@ -13,12 +13,10 @@ import (
 	"testing"
 
 	"github.com/acoseac/1-bit-bridge/internal/alsa/sysfstest"
-	"github.com/acoseac/1-bit-bridge/internal/alsactl"
 	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
 	"github.com/acoseac/1-bit-bridge/internal/player/dsdstate"
 	"github.com/acoseac/1-bit-bridge/internal/player/engine"
 	"github.com/acoseac/1-bit-bridge/internal/player/hotplug"
-	"github.com/acoseac/1-bit-bridge/internal/player/playback"
 	"github.com/acoseac/1-bit-bridge/internal/player/qualification"
 	"github.com/acoseac/1-bit-bridge/internal/player/qualification/approvaltest"
 )
@@ -133,12 +131,14 @@ func migrationLines(log string) []string {
 // 3.5 and 3.6): an owner's record made at version 35, the oldest the legacy
 // reader takes, on another port of the GO bar's model, is the GO bar's at the
 // migration, which compares the model and not the port: its rates' answers
-// and their acknowledgement, under the record's firmware. Production's reader,
-// which compares the port until the cutover, does not take it.
+// and their acknowledgement, under the record's firmware. Since the cutover
+// (B7) those rates play: the effective policy serve wires reads no record,
+// so nothing compares the port.
 func TestAVersion35RecordOnAnotherPortMigrates(t *testing.T) {
 	needsDirectorySync(t)
 	persistentMedium(t)
 	box := newDSDBox(t)
+	goBarDSD(t, box.trees)
 	var record qualification.Approval
 	elsewhere := goBarLiveIdentity(t, box.trees)
 	elsewhere.Port = "platform-xhci-hcd.1/usb2-2:1.0"
@@ -146,7 +146,7 @@ func TestAVersion35RecordOnAnotherPortMigrates(t *testing.T) {
 		record = legacyRecordIn(t, dataDir, elsewhere, qualification.LegacyVersion, nativeAt(dsdstate.DSD64), nativeAt(dsdstate.DSD128))
 	})
 	availableOutput(t, ps.runningEngine(t))
-	auth := wiredAuthorization(t, ps.standIn)
+	pol := policyBackendOf(t, wiredPlayback(t, ps.standIn), dopContents{}, &dopOpens{}).Policy()
 	stopped(t, ps)
 	st, _ := dsdStateIn(t, ps.dataDir)
 	if m := st.MigratedFrom; m == nil || m.RecordSHA256 != record.SHA256 || m.WaitingFor != "" {
@@ -160,19 +160,8 @@ func TestAVersion35RecordOnAnotherPortMigrates(t *testing.T) {
 	if len(st.Warnings) != 0 {
 		t.Errorf("a record taken left warnings: %+v", st.Warnings)
 	}
-	// Production still compares every field, the port among them.
-	auth.Controls = alsactl.Reader{Open: func(int) (alsactl.Device, error) { return qualifyNoControls{}, nil }}
-	auth.Healthy = nil
-	ps.standIn.mu.Lock()
-	locator := ps.standIn.cfg.Locator
-	ps.standIn.mu.Unlock()
-	b, err := playback.New(playback.Config{Authorization: &auth, Locator: locator, Resolver: dopContents{}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	b.RefreshAuthorization(context.Background())
-	if pol := b.Policy(); len(pol.Tuples) != 0 {
-		t.Errorf("production's reader took a record of another port: %+v", pol.Tuples)
+	if got := ratesPublished(pol); got != `2822400/"" 5644800/"" ` || pol.Reason != "" {
+		t.Errorf("the effective policy publishes %s(reason %q), want the record's DSD64 and DSD128 native", got, pol.Reason)
 	}
 }
 

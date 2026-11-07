@@ -54,12 +54,13 @@ const (
 )
 
 // reconciliationMessages are the five post-scan passes, in the order Scan
-// runs them.
+// runs them, the year pass's second run among them.
 var reconciliationMessages = []string{
 	"album-title reconciliation",
 	"album-artist reconciliation",
 	"year reconciliation",
 	"year reconciliation (mbid)",
+	"year reconciliation (after mbid)",
 	"track-number reconciliation",
 }
 
@@ -101,9 +102,10 @@ func TestAScanWhoseDeletionPassFailsStillReportsIt(t *testing.T) {
 }
 
 // TestAScanStoppedInItsReconciliationReportsNothing cancels a scan inside
-// the album-title pass's UPDATE, the first reconciliation write. The four
-// passes after it then run on the cancelled context. None of the five is
-// reported, and the album the first pass was rewriting is unchanged.
+// the album-title pass's UPDATE, the first reconciliation write. The passes
+// after it, the year pass's second run among them, then run on the
+// cancelled context. None of them is reported, and the album the first pass
+// was rewriting is unchanged.
 func TestAScanStoppedInItsReconciliationReportsNothing(t *testing.T) {
 	root := t.TempDir()
 	s, sc := newScanFixture(t, root)

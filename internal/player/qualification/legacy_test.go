@@ -299,7 +299,7 @@ func TestTheLegacyReaderRefusesAVersionNewerThanThisBuild(t *testing.T) {
 // changed after its digest was taken, a byte of a report changed after the
 // record named its digest, an edge no report executed, a CLI candidate in
 // the approved record's place, a record a group may write, and, every field
-// compared as production compares them until B7, the unit on another port.
+// compared as production compared them until B7, the unit on another port.
 func TestTheLegacyReaderKeepsEveryOtherCheck(t *testing.T) {
 	for _, tc := range []struct {
 		name, want string
