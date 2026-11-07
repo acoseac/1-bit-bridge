@@ -1195,6 +1195,14 @@ func Run(ctx context.Context, j JobSpec) (RunResult, error) {
 	// Every step here that writes to the variants directory marks its own
 	// failure: a directory this host will not let the job write is a fact
 	// about the host, which strikes no source (output_fault.go).
+	//
+	// The guard is asked again first: its answer at the start is as old as
+	// the probes and the scratch since, and a volume can go in that time
+	// (backlog B727's second round). It costs the probe alone while the
+	// directory reads as mounted.
+	if err := j.checkOutput(ctx); err != nil {
+		return RunResult{}, err
+	}
 	sidecarDir := filepath.Dir(finalPath)
 	if err := fsutil.MkdirAll(sidecarDir, 0o755); err != nil {
 		return RunResult{}, markOutputFault(outputVariants, sidecarDir, fmt.Errorf("mkdir sidecar dir: %w", err))

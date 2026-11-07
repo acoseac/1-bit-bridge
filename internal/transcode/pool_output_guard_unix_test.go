@@ -72,14 +72,15 @@ func TestThePoolAsksItsOutputGuardBeforeAJobWrites(t *testing.T) {
 		t.Errorf("recovery lines:\n%s\nwant one, the variants output back after 3 failed jobs", strings.Join(back, "\n"))
 	}
 
-	// A guard the spec carries is the one asked.
+	// A guard the spec carries is the one asked: at the start, and again
+	// before the sidecar's directory is made, by a job that renders.
 	own := &awayGuard{}
 	spec.OutputGuard = own
 	g.asked.Store(0)
 	if got := a.run(t, spec, 1); got[0] != "done" {
 		t.Fatalf("a job carrying its own guard announced %q, want done", got[0])
 	}
-	if own.asked.Load() != 1 || g.asked.Load() != 0 {
-		t.Errorf("asked: the spec's guard %d, the pool's %d; want the spec's alone", own.asked.Load(), g.asked.Load())
+	if own.asked.Load() != 2 || g.asked.Load() != 0 {
+		t.Errorf("asked: the spec's guard %d, the pool's %d; want the spec's alone, twice", own.asked.Load(), g.asked.Load())
 	}
 }

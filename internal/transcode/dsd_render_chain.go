@@ -696,7 +696,12 @@ func (j JobSpec) renderDSD(ctx context.Context) (RunResult, error) {
 	token := nextSidecarTmpToken()
 	tmpPath := finalPath + "." + token + sidecarTmpSuffix
 	// Every step that writes to the variants directory or the render
-	// scratch marks its own failure, as in Run (output_fault.go).
+	// scratch marks its own failure, as in Run (output_fault.go). The guard
+	// Run asked at its start is asked again first, as in Run: the geometry
+	// probe ran since, and a volume can go in that time.
+	if err := j.checkOutput(ctx); err != nil {
+		return RunResult{}, err
+	}
 	if err := fsutil.MkdirAll(sidecarDir, 0o755); err != nil {
 		return RunResult{}, markOutputFault(outputVariants, sidecarDir, fmt.Errorf("mkdir sidecar dir: %w", err))
 	}
