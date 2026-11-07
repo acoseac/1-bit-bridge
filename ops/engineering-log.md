@@ -80516,3 +80516,193 @@ brief's reading; the clone is not on this host. The app's half of the
 footer and Deezer's reset on its own when it is switched on again are the
 orchestrator's to file. a29f63e7's message says it keeps round 1's test
 name for the gate's own test; that rename was in a012dd32.
+
+## 2026-11-07 — B617, round 3: every client asks its own switches
+
+The review of PR #1425 read four more points, each to confirm red first or
+answer with evidence. Worker b617, the same host and toolchain. New commits on
+1336238a: the clients' own switches (point 1) 0ab920a8, serve's wiring pin
+dbddd024, the nil switch's test d497db9c, two of point 1's tests made able to
+fail b8ea6d9e and f3a7e80d, a completed answer re-admitted (point 3)
+c1109da0, `bridge fingerprint --config` and its live switch (point 2)
+6e9a58e8, a race in its test 80ec7a86, the re-queue's transaction (point 4)
+541e0d6f, a round 2 test that asserted what point 4 removed 26b1a788, then
+this record. The rule's wording goes in `rules-b617-r3.patch`, over rounds 1
+and 2's.
+
+### The points
+
+1. **Confirmed.** The gate rode the context alone: a client called with a
+   context that carried no switch sent with the switch off. On 1336238a,
+   with the enricher's switch and Deezer's off, `SearchArtist` on a bare
+   context asked MusicBrainz once and Deezer once. Every client is now built
+   with switches of its own (`enrichgate.Switches`: `Enrichment(on)`, and
+   Deezer's `Deezer(on, deezer)`), a required constructor argument, so a
+   client built without them does not compile; a nil predicate, and the
+   zero value, are off, as every switch in `enrichgate` is now
+   (`CancelWhenOff` with a nil switch included; round 2 read it as on). The
+   transport asks the client's switches, and those the request's context
+   carries, at the send and at the answer (`Switches.Answer`; with
+   `enrich.enabled` off a Deezer client answers `ErrOff`, never
+   `ErrDeezerOff`), and a watch of its own, derived from the client's
+   switches, cuts a request on the wire off within `Interval` and is
+   released at the body's `Close` or the error. A refusal by the client's
+   switches ends the switch contexts its request carries, so the pass on
+   them stops. `Admit(ctx, own)` asks the writer's own switch beside the
+   context's. Serve builds every client over the live predicates
+   (`TestServeBuildsEveryClientOverTheLiveSwitches` reads `runServe`, since
+   the batch's, the pass's and the adapter's contexts carry the switch too
+   and no behavioural test can see a client built over a switch always on);
+   the fingerprint sweep's `enrichmentOn` and the cover adapter's are off
+   when nil. Writing "no miss recorded" through the callers found more: with
+   a bare context the enricher read the clients' refusal as a persistent
+   failure, since its callers asked the context alone (`ErrOff` wraps
+   `context.Canceled`, which `IsTransient` calls persistent):
+   `artistCache` and `releaseGroupCache` took `""`, `albumCache` an empty
+   resolution and the track a skip, a cover's refusal was the release-level
+   miss the caller stamps, and each logged at Error. The callers read a
+   refusal from the error now (`enrichgate.Refused`), and the premium fetch
+   reports none.
+2. **Confirmed.** On 0ab920a8 with the lookup base a test can point
+   (`fingerprintLookupBase`) and nothing else: `--config` was an unknown
+   flag (exit 2); switched off between two tracks, the run sent the second
+   track's lookup once its decode, held 8 s by the fpcalc stand-in, was done
+   (two lookups, exit 0); switched off in the middle of a lookup, the held
+   lookup ended only at the client's 20 s timeout; a config found at the
+   start that went away, or stopped loading, changed nothing. The switch
+   (`fingerprintSwitch`) is the variable, then the file `--config` names (one
+   that is not there refuses the lookup, never reads as on), then the file
+   at the default path, kept once found, then on. It is read as a lookup run
+   starts and then once a second by one goroutine (`follow`), which ends the
+   run's context, with `ErrOff`, at the read that finds it off or finds a
+   config it read gone or no longer loading; the client's switch and the
+   context's are that read's answer (`get`), so nothing else reads the
+   config. The run then exits 1 with the refusal's words after its reports,
+   and says on stderr what decided the switch as it starts and when that
+   changes. Measured under -race: the run stopped 0.96 to 0.97 s after the
+   config changed, in each of the five cases. The first version gave the
+   run's context `refresh` itself as its switch, which every admission asks,
+   so it read the config at each send and answer; the between-tracks cases
+   passed in 20 ms on that. `TestTheFingerprintSwitchIsReadAtMostOnceASecond`
+   counts the reads now: three in 2.5 s while the switch is asked thousands
+   of times.
+3. **Confirmed.** On f3a7e80d, the clients' switches in: a test's base
+   transport held each answer's body at its first read, after the answer's
+   admission, turned the switch off there, then let the body go, with every
+   switch asked once an hour. Each of five callers kept a miss, on a pass's
+   context and on a bare one: `resolveArtist` and
+   `fetchRecoveredArtistImage` put Deezer's no-match in `deezerNegCache`,
+   `resolveArtist` took a malformed MusicBrainz body for a persistent
+   failure and cached `""`, `enrichOne` cached a release no-match, and
+   `resolveReleaseGroupMBID` a release with no release group; AcoustID's
+   no-match came back as `ErrNoMatch`, which a sweep persists. MusicBrainz's
+   `get`, Deezer's `SearchArtist`, iTunes' `get` and AcoustID's `get` ask
+   the client's switches, and the context's, again once the answer is read
+   and decoded; a refusal stands for the answer and its decode error. It is
+   asked after the decode, never at the body's EOF, which `json.Decoder`
+   does not read to. The sweep's writes already asked the client's switch
+   (`admitted` asks `Client.Admit` since point 1).
+4. **Confirmed, and transactional.** On c1109da0, with the store's seam
+   inside the reset: a row with a text-derived artist MBID and no album
+   MBID, matched, whose re-queue a switch-off cancelled inside it, or which
+   failed on a live context, kept the match's provenance, written at the
+   acceptance, and the next sweep never offered the file (its wait ran out
+   at 10 s): the candidate scan reads provenance and an artist MBID as
+   settled, so the match was never applied, across a restart too.
+   `ResetEnrichedByPaths`, still the sanctioned writer, takes the matches
+   and writes their provenance and the re-queue in one transaction, so one
+   that does not commit records neither; `fingerprintOne` returns the match
+   rather than writing it; and every exit that does not re-queue, a failed
+   re-queue included, forgets the matches in memory (`forgetUnqueued`), so
+   the next sweep matches the file and re-queues it. The provenance writer
+   alone is a fixture's now (`SetAcoustIDMatchForTest`), and
+   `SetResetEnrichedBeforeCommitForTest` holds the re-queue inside its
+   transaction. The first gate run's `make test-fast` found a round 2 test
+   that asserted the provenance a stopped pass kept
+   (`TestALookupAfterTheFlipIsRefusedAtItsSend`); the package runs of this
+   round's own tests had not selected it. It asserts none now, and both
+   files' provenance once they are re-queued.
+
+### Red first
+
+Each new test ran on the tree before its fix: point 1's on 1336238a in a
+copy, as a test of its own over the constructors' old signatures, which
+the new per-client tests do not build against (each client's
+`SearchArtist` on a bare context with the switches off asked its upstream);
+point 2's on
+0ab920a8 plus the lookup-base seam (all five of
+`TestBridgeFingerprintReadsTheConfigItIsGiven`'s subtests and all five of
+`TestBridgeFingerprintFollowsItsSwitchWhileItRuns`'s); point 3's on f3a7e80d
+(`TestAnAnswerCompletedAfterTheFlipFillsNoNegativeCache`, ten of ten, and
+`TestANoMatchCompletedAfterTheFlipIsNoAnswer`, two of two); point 4's on
+c1109da0 plus the store's seam
+(`TestAMatchWhoseReQueueDidNotLandIsReQueuedByTheNextSweep`, both).
+
+### What the controls found in the tests
+
+Three tests could not fail as written, and a fourth raced. The watch's
+release at `Close` (1c) stayed green: `http.Client` ends a request's context
+itself when its body closes, but only when it has a deadline to stop, and
+the test's client had a `Timeout`; it takes a client with none now. The
+body-cut subtest flipped the switch inside the handler, so the answer's
+admission could see it off first and the subtest passed on that path
+without reading a body; the switch turns off once the answer is admitted
+now. Control 2b showed the live switch's middle-of-a-lookup case reading the
+held handler's report before the handler saw its connection close; it waits
+for it, bounded.
+
+### Negative controls (each on the committed tree, restored after)
+
+Predictions written first, in `controls_r3.predictions.txt` beside the
+runner; the tree was clean after each batch.
+
+| Mutation | Predicted red | Held |
+|---|---|---|
+| (1a) `Answer` asks the context's switches alone | `enrichgate`'s five own-switch tests; each client's off test; AcoustID's | yes, all three packages |
+| (1b) the transport runs no watch | `enrichgate`'s cut, pass and watch tests; each client's cut test and the no-miss test; AcoustID's cut test | yes (the body cut after f3a7e80d) |
+| (1c) `Close` does not release the watch | the watch test | no at first (the client's `Timeout`); yes on b8ea6d9e |
+| (1c-err) the error path does not release it | the watch test's error subtest | yes |
+| (1d) a nil switch reads as on | five `enrichgate` tests | yes |
+| (1e) Deezer's switch asked before `enrich.enabled`'s | the two Deezer tests | yes |
+| (1f) `Refused` answers nil | the no-miss test, five of five | yes |
+| (1f-artist) `resolveArtist` does not ask it | the no-miss test's artist subtest alone | yes |
+| (1g) MusicBrainz's client over a switch always on | the source pin, its off, cut and no-miss cases | yes |
+| (1h) serve builds MusicBrainz's that way | the serve pin | yes |
+| (1j) the cover adapter reads nil as on | the nil test's adapter subtest | yes |
+| (1k) the sweep reads nil as on | the nil test's sweep subtest, the pass pin | yes |
+| (3a) MusicBrainz's `get` does not re-admit | the six MusicBrainz subtests | yes |
+| (3b) Deezer's `SearchArtist` does not | the four Deezer subtests | yes |
+| (3c) iTunes' `get` does not | the iTunes test | yes |
+| (3d) AcoustID's `get` does not | the AcoustID test | yes |
+| (3e) MusicBrainz's re-admits by the context alone | the three bare-context MusicBrainz subtests alone | yes |
+| (2a) `--config` never read | the flag test's three, the flag's live case | yes |
+| (2b) a config not there reads as on | its subtest, the gone case | yes (on 80ec7a86, exactly those) |
+| (2c) no follower | the five live cases | yes |
+| (2d) the found config not kept | the gone case | yes |
+| (2e) a config that does not load reads as on | the no-longer-loading case, round 2's refusal | yes |
+| (2f) the follower's read ends nothing | the three between-tracks cases alone | yes |
+| (2g) `get` reads the config | the read-rate test | yes |
+| (4a) provenance written at the acceptance | the end-state test, both | yes |
+| (4b) a failed re-queue forgets nothing | the same | yes |
+| (4c) provenance outside the transaction | the store's test, its two subtests; the end-state test | yes, both packages |
+
+Every control built; one prediction missed, (1c), for the reason above.
+
+### Gates
+
+On 541e0d6f: gofmt (go1.27.3's) over the Go files the branch changes,
+clean; `make docs-check`, ok, on the tree, and on a copy with all three
+rounds' rules patches applied, which `git apply --check` takes over round
+2's rules. Through the build lock: `make vet` native and with
+`GOOS=windows`, `GOOS=darwin`, `GOOS=linux GOARCH=386` and `GOOS=linux
+GOARCH=arm`, ok; `make test-fast`, 85 of 86 packages ok, the Linux-only
+ones run rather than vetted (alsapcm 35 s, the durable writer 15 s, the
+identity's backup 367 s), and `cmd/bridge` failed on the round 2 test above;
+`make test` (race, the Makefile's tags, `-timeout 30m`) over
+`./internal/enrich/... ./internal/enrichgate/... ./internal/atlasharvest/...
+./internal/acoustid/... ./internal/manifest/... ./cmd/bridge/...`, ok but
+`cmd/bridge`, on the same test (internal/manifest 1,412 s); `make
+build-all`, ok. On 26b1a788, whose one change is that test: gofmt,
+docs-check and the five vets again, ok; `make test-fast` and `make test`
+over `./cmd/bridge/...`, ok (348 s and 1,026 s). Not run here: macOS and
+Windows natively, CI's runners, the console in a browser, and the iOS app.
