@@ -85257,3 +85257,23 @@ after-step case, the race test and the rest of the probe set green.
 No guarded path changed (`dsd_policy.go`, `backend.go` and `dsd_work_test.go` in
 `internal/player/playback`, outside `version_gate.go`'s paths and prefixes):
 `qualificationVersion` stays 45.
+
+### Gates (round 3)
+
+At 7edb419e, inside the build slot, on Go 1.27.3: `make fmt` changed nothing; `make vet` and its
+windows, darwin and linux/386 legs passed; `make docs-check` passed on the tree (player.md 98.9 %),
+and on a copy with `rules-b762-r3.patch` applied (CLAUDE.md 82.1 %, player.md 99.2 %, the worst
+load 67.0 %), where `verify_moves.py --base HEAD` passed with the line and its long form declared
+as edits, and `TestEveryCitedTestNameExists` passed and failed a ghost citation planted in the
+copy's History file; `scripts/qualification-version` passed against B8's head (e2c7b36d, 43) and
+main's c9876026 (42), 45 at HEAD; `go test -race` of playback, alsapcm and cmd/bridge passed
+(1,247 s); both native-integration overlays passed, every case CI names (13 and 29); `make
+build-all` passed. The first `make test` failed in one subtest outside the player,
+`TestAMatchWhoseReQueueDidNotLandIsReQueuedByTheNextSweep/cancelled_inside_the_reset_by_a_switch-off`
+("the first sweep's re-queue landed: the case tests nothing", a timing precondition of the
+fingerprint sweep's test), 88 packages ok; alone under `-race` it failed 1 of 10 and 1 of 40 runs
+at HEAD, and 1 of 40 (0 of 20 before) at the round's base 39da4b77, which this round's commits
+leave untouched outside `internal/player/playback` and this log, so it predates the round; it
+passed in the cmd/bridge race run above. `make test` run again in the slot passed, 89 packages
+ok (2,060 s), the Linux-only tests run here. alsa-abi did not run: no ABI definition or
+`scripts/alsa-abi` file changed.
