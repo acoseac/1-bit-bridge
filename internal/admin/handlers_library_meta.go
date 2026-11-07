@@ -834,6 +834,10 @@ type libraryMetaRetryResponse struct {
 	HarvestResubmitted bool  `json:"harvestResubmitted"`
 	BookletChecksReset int64 `json:"bookletChecksReset"`
 	BookletFetchNudges int   `json:"bookletFetchNudges"`
+	// EnrichmentOff and DeezerOff say which facets did not run for the
+	// switches, as on POST /api/enrichment/retry (backlog B617).
+	EnrichmentOff bool `json:"enrichmentOff,omitempty"`
+	DeezerOff     bool `json:"deezerOff,omitempty"`
 }
 
 // apiLibraryEnrichmentRetryScoped handles POST /api/library/enrichment/retry.
@@ -846,6 +850,13 @@ type libraryMetaRetryResponse struct {
 // upstream protection is the enricher/harvest clients' own pacing
 // (1.1s MB / 500ms CAA / 120ms Deezer): resets deepen the queue, they
 // don't raise the call rate.
+//
+// The facets that feed only the enricher (1, 1b, 2) run only while it runs,
+// as on the global route (apiEnrichmentRetry, backlog B617): with
+// enrich.enabled off they are skipped and the answer says so, the harvest's
+// and the booklets' still run, and with neither wired the retry is refused,
+// 409, before the path is resolved or the rate guard stamped. With
+// enrich.deezerEnabled off, facet 2 is skipped.
 func (s *Server) apiLibraryEnrichmentRetryScoped(w http.ResponseWriter, r *http.Request) {
 	if s.deps.Manifest == nil {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", errMsgNoManifest)
@@ -855,6 +866,11 @@ func (s *Server) apiLibraryEnrichmentRetryScoped(w http.ResponseWriter, r *http.
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, adminMaxBodyBytes))
 	if err := dec.Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "bad-json", err.Error())
+		return
+	}
+	st := enrichmentStateOf(s.deps.CfgHolder.Load())
+	if !st.on && !st.harvestActive && s.deps.BookletPath == nil {
+		writeError(w, http.StatusConflict, errCodeEnrichmentOff, errMsgEnrichmentOffRetry)
 		return
 	}
 	normalised, ok := normaliseBrowsePath(req.Path)
@@ -896,8 +912,47 @@ func (s *Server) apiLibraryEnrichmentRetryScoped(w http.ResponseWriter, r *http.
 	s.libMetaRetryMu.Unlock()
 
 	ctx := r.Context()
-	var resp libraryMetaRetryResponse
+	resp := libraryMetaRetryResponse{EnrichmentOff: !st.on, DeezerOff: st.on && !st.deezerOn}
+	if st.on {
+		s.retryEnricherFacetsUnder(ctx, normalised, st, &resp)
+	}
 
+	// Facet 3: bios / descriptions — the harvest submit is library-
+	// wide by construction (no per-folder submit exists); the UI copy
+	// says so.
+	if harvestAllowed && s.deps.HarvestForceSubmit != nil {
+		resp.HarvestResubmitted = s.deps.HarvestForceSubmit()
+	}
+
+	// Facet 4: booklets — re-arm availability checks for the folder's
+	// releases and nudge the fetch sweep for available-but-unfetched
+	// ones (capped at the priority channel's buffer).
+	s.retryBookletsUnder(ctx, normalised, &resp)
+
+	// Invalidate the dashboard enrichment snapshot + this subtree's
+	// meta caches so the "pending" jump lands promptly. The DETAIL
+	// sweep is load-bearing: the About card deliberately doesn't
+	// auto-refetch after a retry (enrichment runs at the MB/CAA/Deezer
+	// clients' pacing, so an immediate refetch loses the race and reads
+	// as failure) — it refreshes on next open, which a 60s-stale cache
+	// entry would defeat.
+	s.enrichmentMu.Lock()
+	s.enrichmentAt = time.Time{}
+	s.enrichmentMu.Unlock()
+	s.libMetaInvalidateUnder(normalised)
+
+	logger.Info("library metadata retry", "path", normalised,
+		"resetTracks", resp.ResetTracks, "artistImageResets", resp.ArtistImageResets,
+		"harvestResubmitted", resp.HarvestResubmitted,
+		"bookletChecksReset", resp.BookletChecksReset, "bookletFetchNudges", resp.BookletFetchNudges,
+		"enrichmentOff", resp.EnrichmentOff, "deezerOff", resp.DeezerOff)
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// retryEnricherFacetsUnder runs the scoped retry's facets that feed the
+// enricher, which run only while enrich.enabled is on (the caller's check),
+// the artist-image facet only while enrich.deezerEnabled is on too.
+func (s *Server) retryEnricherFacetsUnder(ctx context.Context, normalised string, st enrichmentState, resp *libraryMetaRetryResponse) {
 	// Facet 1: covers / artist-match gaps under the folder.
 	if n, err := s.deps.Manifest.ResetEnrichedMissesUnderPrefix(ctx, normalised); err != nil {
 		logger.Warn("library retry: reset misses", "path", normalised, "err", err)
@@ -917,7 +972,7 @@ func (s *Server) apiLibraryEnrichmentRetryScoped(w http.ResponseWriter, r *http.
 
 	// Facet 2: artist images — MBIDs under the folder minus the
 	// on-disk image set (resetArtistImageGaps shape, scoped).
-	if s.deps.ArtistImages != nil {
+	if st.artistImagesOn() && s.deps.ArtistImages != nil {
 		if files, err := s.deps.ArtistImages(); err == nil {
 			if mbids, err := s.deps.Manifest.DistinctArtistMBIDsUnderPrefix(ctx, normalised); err == nil {
 				var missing []string
@@ -932,55 +987,39 @@ func (s *Server) apiLibraryEnrichmentRetryScoped(w http.ResponseWriter, r *http.
 			}
 		}
 	}
+}
 
-	// Facet 3: bios / descriptions — the harvest submit is library-
-	// wide by construction (no per-folder submit exists); the UI copy
-	// says so.
-	if harvestAllowed && s.deps.HarvestForceSubmit != nil {
-		resp.HarvestResubmitted = s.deps.HarvestForceSubmit()
+// retryBookletsUnder runs the scoped retry's booklet facet, which feeds the
+// harvest's booklet loops, never the enricher: it re-arms the availability
+// checks for the folder's releases and nudges the fetch sweep for
+// available-but-unfetched ones (capped at the priority channel's buffer).
+func (s *Server) retryBookletsUnder(ctx context.Context, normalised string, resp *libraryMetaRetryResponse) {
+	if s.deps.BookletPath == nil {
+		return
 	}
-
-	// Facet 4: booklets — re-arm availability checks for the folder's
-	// releases and nudge the fetch sweep for available-but-unfetched
-	// ones (capped at the priority channel's buffer).
-	if s.deps.BookletPath != nil {
-		if releases, err := s.deps.Manifest.DistinctReleaseMBIDsUnderPrefix(ctx, normalised); err == nil && len(releases) > 0 {
-			if n, err := s.deps.Manifest.ResetBookletChecks(ctx, releases); err == nil {
-				resp.BookletChecksReset = n
-			}
-			if s.deps.BookletNudge != nil {
-				if states, err := s.deps.Manifest.BookletStatesIn(ctx, releases); err == nil {
-					for m, st := range states {
-						if resp.BookletFetchNudges >= bookletNudgeCap {
-							break
-						}
-						if st.Available && !st.Fetched {
-							s.deps.BookletNudge(m)
-							resp.BookletFetchNudges++
-						}
-					}
-				}
-			}
+	releases, err := s.deps.Manifest.DistinctReleaseMBIDsUnderPrefix(ctx, normalised)
+	if err != nil || len(releases) == 0 {
+		return
+	}
+	if n, err := s.deps.Manifest.ResetBookletChecks(ctx, releases); err == nil {
+		resp.BookletChecksReset = n
+	}
+	if s.deps.BookletNudge == nil {
+		return
+	}
+	states, err := s.deps.Manifest.BookletStatesIn(ctx, releases)
+	if err != nil {
+		return
+	}
+	for m, st := range states {
+		if resp.BookletFetchNudges >= bookletNudgeCap {
+			break
+		}
+		if st.Available && !st.Fetched {
+			s.deps.BookletNudge(m)
+			resp.BookletFetchNudges++
 		}
 	}
-
-	// Invalidate the dashboard enrichment snapshot + this subtree's
-	// meta caches so the "pending" jump lands promptly. The DETAIL
-	// sweep is load-bearing: the About card deliberately doesn't
-	// auto-refetch after a retry (enrichment runs at the MB/CAA/Deezer
-	// clients' pacing, so an immediate refetch loses the race and reads
-	// as failure) — it refreshes on next open, which a 60s-stale cache
-	// entry would defeat.
-	s.enrichmentMu.Lock()
-	s.enrichmentAt = time.Time{}
-	s.enrichmentMu.Unlock()
-	s.libMetaInvalidateUnder(normalised)
-
-	logger.Info("library metadata retry", "path", normalised,
-		"resetTracks", resp.ResetTracks, "artistImageResets", resp.ArtistImageResets,
-		"harvestResubmitted", resp.HarvestResubmitted,
-		"bookletChecksReset", resp.BookletChecksReset, "bookletFetchNudges", resp.BookletFetchNudges)
-	writeJSON(w, http.StatusOK, resp)
 }
 
 // --- Byte routes ---

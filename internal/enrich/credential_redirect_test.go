@@ -112,7 +112,7 @@ var credentialedClients = []credentialedClient{
 		want: basicHeader("tok"),
 		base: func(t testing.TB, u string) string { return withUserinfo(t, u, "tok") },
 		send: func(_ testing.TB, hc *http.Client, base string) error {
-			_, err := NewMusicBrainzClient(base+"/ws/2", "t", hc).
+			_, err := NewMusicBrainzClient(base+"/ws/2", "t", hc, onSwitches).
 				SearchRelease(context.Background(), "Artist", "Album")
 			return err
 		},
@@ -122,7 +122,7 @@ var credentialedClients = []credentialedClient{
 		want: basicHeader("tok"),
 		base: func(t testing.TB, u string) string { return withUserinfo(t, u, "tok") },
 		send: func(_ testing.TB, hc *http.Client, base string) error {
-			body, err := NewCoverArtClient(base, "t", hc).
+			body, err := NewCoverArtClient(base, "t", hc, onSwitches).
 				FetchReleaseFrontStream(context.Background(), cancelReleaseMBID, 500)
 			if err == nil {
 				_ = body.Close()
@@ -135,7 +135,7 @@ var credentialedClients = []credentialedClient{
 		want: "Bearer tok123",
 		base: func(_ testing.TB, u string) string { return u },
 		send: func(t testing.TB, hc *http.Client, base string) error {
-			f := NewAtlasPremiumFetcher(fakeCred{token: "tok123", base: base, ok: true}, "ua", hc, "")
+			f := NewAtlasPremiumFetcher(fakeCred{token: "tok123", base: base, ok: true}, "ua", hc, "", onSwitches)
 			_, err := f.RefetchPremium(context.Background(), filepath.Join(t.TempDir(), "x.jpg"), cancelReleaseMBID, 500)
 			return err
 		},

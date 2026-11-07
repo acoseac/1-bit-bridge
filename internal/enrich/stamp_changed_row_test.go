@@ -132,8 +132,8 @@ func changedRowEnricher(t *testing.T, store **manifest.Store, path string, mb, c
 	}); err != nil {
 		t.Fatal(err)
 	}
-	return NewEnricher(s, NewMusicBrainzClient(mb.URL, "t", nil),
-		NewCoverArtClient(caa.URL, "t", nil), nil, filepath.Join(dir, "artwork"))
+	return NewEnricher(s, NewMusicBrainzClient(mb.URL, "t", nil, onSwitches),
+		NewCoverArtClient(caa.URL, "t", nil, onSwitches), nil, filepath.Join(dir, "artwork"))
 }
 
 // TestAStampOverARowThatChangedMidEnrichmentIsNotCounted: the release search

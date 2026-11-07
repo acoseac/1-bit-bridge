@@ -82674,6 +82674,895 @@ From main, unverified against B728 B11's patch (#1427, which brings player.md to
   context lines: the four hunks fall inside the file's one list.
 - The rest of the gate is B706's above, which ran at 73d74a2d. This commit
   touches only `ops/`.
+## 2026-11-06 — B617: enrichment gets an off switch, and says what it stops
+
+Backlog B617, from the site's privacy review of 2026-10-31: the bridge sends
+the artist and album names a library's files carry to MusicBrainz, the
+release IDs it finds to the Cover Art Archive and artist names to Deezer, and
+nothing turned that off; a self-hosted mirror redirects the first two and
+never Deezer, though `config.go` said a mirror keeps "enrichment on your own
+network". Worker b617 (Ubuntu 26.04, linux/amd64, go1.27.3,
+`GOTOOLCHAIN=local`, `GOPROXY=off`), branch `feat/b617-enrichment-off` from
+main 4880f8a4, the orchestrator's brief. Commits: red first 4dc53b9c, the
+switch and the enricher's gate 4009e834, the wire b195f7cc, serve's wiring
+and fingerprinting b8a8c92d, the console 030dbf7a, the CLI's retry a1076ba2,
+the rewrite f337a7f0, the docs and `PROTOCOL.md` a19ad6f7, the serve test's
+manifest and artwork legs e1a71eb4, then this record.
+The rule's line in `.claude/rules/enrichment.md` goes in through a checked
+patch (`rules-b617.patch`; this worker cannot write `.claude/`).
+
+### The design, and what it trades
+
+- **Two keys, both on when absent.** `enrich.enabled` stops the enricher
+  wherever it points, a mirror included; `enrich.deezerEnabled` stops Deezer
+  alone, the one lookup a mirror cannot take over. No switch per service for
+  the other two: the Cover Art Archive is asked for the release IDs
+  MusicBrainz answers, and both have a mirror. Both are `*bool` read through
+  `EffectiveEnabled` and `EffectiveDeezerEnabled`, nil on, as the smart mixes'
+  switch. The default is today's behaviour exactly, pinned against main's
+  own requests (below). The environment names derive from the struct
+  (`BRIDGE_ENRICH_ENABLED`, `BRIDGE_ENRICH_DEEZER_ENABLED`), read through the
+  real `Load`. The console writes only off: a save of on clears the key, so
+  the file goes back to one an older binary loads.
+- **Always construct, never stop.** The clients and the goroutine stay; the
+  enricher asks `WithEnabled`'s predicate, a closure over the live holder,
+  before each batch, and parks without touching the store while it is off.
+  Each batch runs on `enrich.CancelWhenOff`'s context, which asks the
+  predicate every second and is cancelled when it answers off, so a request
+  held at an upstream aborts and `stampEnriched` and `markSkipped` take the
+  path a shutdown takes: no stamp, no skip count, no line. A second stop path
+  in `enrichOne` was the alternative and was not taken: the shutdown's path
+  is the one already proven to record nothing. `CancelWhenOff` takes the
+  predicate the gates share, a plain `func() bool`, so neither the enricher
+  nor the sweep imports the config or follows the holder's `Changed`
+  channel, which would answer sooner; asked once a second, it costs one load
+  of the live config's pointer a second while a batch runs, and that second
+  is the switch's promise: off stops within it. Turned on, the next poll
+  (15 s) resumes. One Info line at a boot where it is off, and one at each
+  flip.
+- **Off never stamps, and nothing fetched is touched.** A row the enricher
+  has not processed stays at `enriched_at = 0`, so turning it on resumes the
+  backlog with nothing lost; a row whose art needs no network (`local-`)
+  waits with the rest, since off means the enricher takes no turn. The IDs in
+  `tags_json`, the covers and portraits in the artwork cache and the cached
+  verdicts stay and are served; the cap's eviction runs as ever.
+- **Deezer off is a narrower promise.** `ensureArtistImageCached` asks the
+  predicate after its cached-file checks and before each of its two requests
+  and answers `errDeezerOff`, which neither caller negative-caches (the cache
+  lives as long as the process, and would outlive the switch) or logs. The
+  row stamps without a portrait: holding it back would re-run the whole
+  `enrichOne` for every row while Deezer is off, covers and IDs included. The
+  repair is "Retry missing", whose artist-image facet re-queues each
+  portrait-less row once Deezer is on. A Deezer request already sent when the
+  switch goes off ends by itself, within the client's 10 s: the name has left
+  by then, and cancelling it would need a second context for little. The
+  console's hint does not say "within a second" for it.
+- **Fingerprints stop too.** A fingerprint's answer feeds the enricher alone,
+  so `fingerprintGates` (serve's `fingerprintReady` and the Jobs card's
+  reason) asks `enrich.enabled` first and says `enrichment_off`, and a sweep
+  runs on the same cancelled-when-off context: the decode is killed, the
+  pacing and a lookup end, and nothing is re-queued.
+- **What off does not stop.** The Atlas harvest and lyrics, their cover
+  refresh included (`atlasCoverRefetcher`, their own opt-ins, which never ask
+  the three); the update check, which has a cadence and no switch; Let's
+  Encrypt. The config's doc, the hints, the example and the docs say so, and
+  none of them is called "off". The config's doc and the settings hint first
+  said the update check had a switch of its own; it does not, and both were
+  corrected in a19ad6f7.
+- **On the wire, additive.** While off, a miss on a MusicBrainz key is
+  terminal: `classifyArtworkMiss` reads pending as false, so `/v1/artwork`
+  and `/v1/artist-image` answer `404 no_image` where they answered `202
+  pending` for a turn that would not come. `local-` keys, probe faults and
+  bytes on disk answer as before. The iOS app asks again for imageless keys
+  at every sync, so the 404 is not sticky: on again, the next request
+  answers 202. `enrichmentProgress` is absent while off from all three
+  builders through one predicate (`Provider.SetEnrichmentEnabledSource`), the
+  `since` leg included, a delta with no row too, so an operator's off never
+  reads as "Enrichment in progress" on a phone. No field, no
+  `ProtocolVersion` bump; `PROTOCOL.md` says it at each place.
+- **The console** has the two switches at the top of the Enrichment tab, both
+  `live` in the matrix; the enrichment card and the Jobs card say Off with a
+  link where they said what is queued, with no ETA, through `off` on
+  `enrichmentResponse` and `jobsEnrichment`. Where the environment sets a
+  switch, GET shows the value the environment set at the last start, and a
+  console save writes the live config, environment values included, into the
+  file: as for every `BRIDGE_*` leaf before this change, which the hints
+  state for these two ("it sets this switch at every start").
+- **Retry while off** runs what can run. The facets that feed only the
+  enricher (the resets, the artist-image facet, the fingerprint clear) are
+  skipped ahead of any write, the harvest's and the scoped route's booklets
+  run, and the answer says `enrichmentOff`; where nothing else can run, 409
+  `enrichment-off`, before the path is read or the rate guard stamped. With
+  Deezer off the artist-image facet is skipped (`deezerOff`). The button is
+  offered only for gaps a facet that can run fills, which also stops it
+  counting bios and descriptions where the harvest does not run, the facet
+  that fills them. `bridge enrichment retry` relays a running bridge's
+  answer whatever its own environment says, and offline refuses before it
+  opens the store, since the harvest has no offline facet.
+- **A rewrite keeps the opt-outs.** `bridge init --force` keeps each switch
+  the file writes off, for the reason it keeps `output.mpd: off`, and lists
+  it among what it kept. `priorEnrich` reads each switch on its own and never
+  fails the file's decode: one that does not read is named after the save,
+  by its line and never its value. The file is read, not the environment.
+  `TestPriorInstallTagsAreConfigs` now checks exported fields alone: an
+  unexported one is no key the decoder reads. One follow-up is named in the
+  report as B617.
+
+### Red first
+
+4dc53b9c, over stubs that change nothing: `TestTheOffSwitchLoads` failed
+because a config writing either key did not load ("that key is not a field of
+type config.EnrichConfig") and the environment set nothing, and
+`TestAnEnricherSwitchedOffAsksNoUpstream` because an enricher handed a gate
+answering off sent 3 requests and listed the store's unenriched tracks.
+
+### Main's requests
+
+Before the change, the switch fixture's enricher (two seeded tracks, fake
+MusicBrainz, Cover Art Archive, Deezer and Atlas) was run on main three times
+and sent the same eight requests each time: two to MusicBrainz (a release
+search, an artist search), two to the Cover Art Archive and two to Atlas
+(each release's cover), two to Deezer (the artist search and the picture).
+`TestEnrichmentIsOnWhereTheConfigSaysNothing` loads a config that says
+nothing through `Load`, wires the gates as serve does, and requires exactly
+those requests, service by service in that order; a load-and-save through
+`config.Edit` writes neither key.
+
+### The tests
+
+- `internal/config`: `TestTheOffSwitchLoads` (the file, the environment, the
+  environment over the file).
+- `internal/enrich`: `TestAnEnricherSwitchedOffAsksNoUpstream`,
+  `TestEnrichmentIsOnWhereTheConfigSaysNothing`,
+  `TestASwitchOffStopsAnEnrichmentInFlightAndStampsNothing` (a MusicBrainz
+  request held at the fake is abandoned within 5 s of the flip, no stamp, no
+  skip count, no further request),
+  `TestASwitchOnResumesTheQueuedRows`,
+  `TestDeezerOffAsksDeezerNothingAndStillFetchesCovers`,
+  `TestAPortraitComesBackAfterDeezerOnAndRetryMissing` (one enricher through
+  off, on and the retry, on the text path and the fingerprint path),
+  `TestDeezerOffAfterASearchSendsNoFetch` (a flip during a held search),
+  `TestCancelWhenOffCancelsOnceItsSwitchIsOff`,
+  `TestTheEnricherSaysWhenItsSwitchesFlip`. No test sleeps a fixed time in
+  place of an event: the fakes hold a request on a seam, and the tests wait
+  for what they assert, under a deadline.
+- `internal/api`: `TestAnImageMissIsTerminalWhileEnrichmentIsOff` (through
+  the real routes: 404 off, 202 for `local-` and on a probe fault, 202 on
+  again), `TestAFetchedCoverAndPortraitAreStillServedWhileOff`.
+- `internal/manifest`: `TestTheManifestOmitsEnrichmentProgressWhileOff` (the
+  stream, a `since` delta with rows and one without, the paginated first page,
+  the buffered build, each present again when on).
+- `cmd/bridge`: `TestFingerprintingStopsWithEnrichment`,
+  `TestASweepInFlightStopsWithEnrichment` (a held fpcalc, a held lookup),
+  `TestServeWiresTheEnrichmentGate` (`runServe` with `enrich.enabled: false`,
+  with `BRIDGE_ENRICH_ENABLED=false`, with `enrich.deezerEnabled: false` and
+  with both on, the mirror bases at a counting server and Deezer's base
+  through a `serveOpts` seam; with enrichment off a paired device's
+  `/v1/manifest` has no `enrichmentProgress` and the portrait of an artist
+  whose track waits answers `404 no_image`, from a row seeded before the
+  boot whose file is gone, which the boot's scan counts missing once: a serve
+  that handed the switch to the enricher alone passed every package test
+  until e1a71eb4), `TestTheHarvestRunsWithEnrichmentOff` (a pending premium
+  cover is refetched, a submit and a poll run, the mirror sees nothing),
+  `TestTheCLIRetryWhileOff`, `TestTheCLIRetrySaysWhatTheRunningBridgeSkipped`,
+  `TestARewriteKeepsTheEnrichmentOptOuts`.
+- `internal/admin`: `TestTheEnrichmentSwitchesSaveLiveAndWriteOnlyOff` (the
+  real PATCH: `live`, the file holds false, no key after on, a managed field
+  refused whole), `TestRetryWhileOffResetsNothing`,
+  `TestTheScopedRetryKeepsItsBookletsWhileOff`,
+  `TestRetryWithDeezerOffSkipsTheArtistImageFacet`,
+  `TestTheEnrichmentCardsSayOffWhereTheSwitchIs`,
+  `TestTheSettingsPayloadSendsBothEnrichmentSwitchesAsTheirCheckboxes` (the
+  payload's two expressions, read from `app.js`'s source), and
+  `TestRetryMissingIsOfferedOnlyForWhatCanRunAndSaysWhatRan`, which runs the
+  shipped functions under node and skips without it.
+
+The console's JavaScript was not driven here: the host has no node and no
+browser. The payload is pinned by the source test above; the button's two
+functions run under node where node is installed.
+
+### Negative controls (each on the committed tree, restored after)
+
+A runner applied each mutation once, ran the package's B617 tests and put the
+file's bytes back from memory; the predictions were written down first, and
+the tree was clean after. (a) to (j) and (g2) ran on a19ad6f7, (g3) and
+(g4) on e1a71eb4, whose serve test is (g) and (g2)'s with two more checks.
+
+| Mutation | Predicted | Red |
+|---|---|---|
+| (a) the gate asked per batch only (no `CancelWhenOff`) | the in-flight test | it alone ("the request held at MusicBrainz was not cancelled within 5s") |
+| (b) off stamps the unenriched rows | the resume test | it, the off test and the in-flight test (rows stamped while off) |
+| (c) the pending probe not gated | the image-miss test | it (202 with Retry-After for both keys) |
+| (d) the paginated builder always builds the block | the manifest test | its paginated leg |
+| (e) `fingerprintReady` not asking `enrich.enabled` | the fingerprint test | it (ready, and the card active, with enrichment off) |
+| (f) a nil pointer read as off | the on-by-default test | it |
+| (g) serve not giving the enricher `WithEnabled` | the serve wiring test | its three legs and the harvest test (the enricher's turns never asked) |
+| (g2) serve's predicate asked and its answer ignored | the serve wiring test | its two enrichment-off legs (the mirror and Deezer asked), the harvest test; the Deezer leg green |
+| (g3) serve not handing the provider the switch | the serve wiring test | its two enrichment-off legs (`enrichmentProgress` served) |
+| (g4) serve not handing the API the switch | the serve wiring test | its two enrichment-off legs (the waiting portrait 202) |
+| (h) the rewrite keeping no switch | the rewrite test | four of its subtests |
+| (i) `errDeezerOff` negative-cached on the text path | the portrait test | it, and the Deezer-off test ("negative-cached although Deezer was never asked") |
+| (i2) the same on the fingerprint path | the portrait test | it |
+| (j) the sweep's gate asked before a pass only | the sweep test | both its subtests ("not stopped within 5s of the switch-off") |
+
+Every control built; none stayed green; each prediction held.
+
+### Gates
+
+On e1a71eb4: gofmt (go1.27.3's) over the 33 Go files the branch changes,
+clean; `make docs-check`, ok, on the tree and on a copy with
+`rules-b617.patch` applied, which `git apply --check` takes; the
+qualification check (`scripts/qualification-version`, 4880f8a4..HEAD), ok.
+Through the build lock: `make vet` native and with `GOOS=windows`,
+`GOOS=darwin`, `GOOS=linux GOARCH=386` and `GOOS=linux GOARCH=arm`, ok;
+`make test-fast`, ok, 85 packages, the Linux-only ones (ALSA, alsapcm, the
+durable writer, the identity) among them, run rather than vetted (cmd/bridge 458 s,
+internal/admin 253 s, internal/manifest 264 s); `make test` over
+`./internal/enrich/... ./internal/config/... ./internal/api/...
+./internal/admin/... ./internal/manifest/... ./cmd/bridge/...` (race, the
+Makefile's tags and `-timeout 30m`), ok (internal/admin 1,024 s,
+internal/manifest 1,495 s, cmd/bridge 1,156 s); `make build-all`, ok. Not
+run here: macOS and Windows natively, CI's runners, the console in a
+browser, and the iOS app.
+
+### Not done here
+
+The iOS app's side of the two wire changes is the brief's reading of the app
+(`LibraryScanner.swift`, `BridgeSourceClient.swift`); its clone is not on this
+host, so what a sync that delivers no row does there was not read again. The
+privacy pages are the owner's follow-up and are unchanged. `PROTOCOL.md`'s
+iOS mirror copies the file.
+
+## 2026-11-07 — B617, round 2: the switch is asked at the send and at the write
+
+The review of PR #1425 read ten points in the round above, each a reading of
+the code to confirm red first or answer with evidence. Worker b617, the same
+host and toolchain. New commits on 3f5e2f6d: the send gate (points 1 and 2)
+a012dd32 and its write tests a29f63e7, the harvest's premium covers (3)
+c7917f29, the variables (6) 1fec230c, `bridge fingerprint` (4) 8fffc57e, the
+value-free warning test 1fec230c broke 570e38a8, the console save (5)
+f6f00b98, `PROTOCOL.md`, iTunes and the builders (7 to 10) 6b976472, what
+two tree-wide guards found b07dff2f, then this record. The rule's wording
+goes in `rules-b617-r2.patch`, over round 1's.
+
+### The points
+
+1. **Confirmed.** `CancelWhenOff` asked the switch once a second, and in
+   that second a request went out, an answer was taken and what the pass
+   wrote of it was kept: on 3f5e2f6d a release search held at the fake and
+   answered after the flip was cached and its track stamped (a no-match
+   stamped skipped, `no_mb_match`, so the album was not asked again once
+   on), the next artist rung was sent, and the sweep cached and persisted
+   an AcoustID no-match or match and re-queued both files. The fix is
+   `internal/enrichgate`: the switch rides the context, and every client of
+   the services (MusicBrainz, the Cover Art Archive, Deezer, iTunes, the
+   Atlas premium fetcher, AcoustID; a mirror is the same client) sends
+   through `enrichgate.Client`, which asks it at the send and again at the
+   answer. A refusal is `enrichgate.ErrOff`, wrapping `context.Canceled`,
+   and cancels the switch's context with itself as the cause, so every
+   error path that asks the context first, which the enricher's and the
+   sweep's all do, takes it for a stop: nothing negative-cached, persisted,
+   logged or stamped. A request on the wire is still cut off by the
+   context's tick, within `enrichgate.Interval`, a second. The writes ask
+   again at the write (`stampAdmitted`: `stampEnriched`, `markSkipped`, the
+   fingerprint veto; `admitted`: the sweep's no-match, match, cached
+   outcomes and re-queue), for an answer taken while on that reaches its
+   write after the flip with nothing sent in between. One more defect
+   turned up writing the test the review asked for (the same fingerprint
+   after off then on): a sweep the switch stopped kept the matches it had
+   cached and not re-queued, and the candidate scan skips a cached file, so
+   those files were never offered again before a restart. A stopped pass
+   forgets them (`forgetUnqueued`); their provenance stays.
+2. **Confirmed.** A Deezer flip reached no Deezer request under way: on
+   3f5e2f6d the held search ran to the client's timeout. Each Deezer request
+   runs on a context of its own (`deezerCall`, `CancelWhenDeezerOff`, scope
+   Deezer), whose refusal is `errDeezerOff` (`enrichgate.ErrDeezerOff`) and
+   leaves the batch's context, and a MusicBrainz request on it, running;
+   Deezer's client asks both switches at its send.
+3. **Confirmed, and the owner decided: off stops every premium cover
+   request.** On a29f63e7 the harvest fetched a pending premium cover with
+   enrichment off. Serve's adapter asks the switch before each refetch and
+   runs it on the switch's context; the premium fetcher's own client copy
+   carries the gate, so the harvest's client, its other legs and lyrics
+   never see it. A refetch the switch stopped, refused or cut off, or a CAA
+   answer that meets the switch off, is `atlasharvest.ErrCoversPaused`,
+   which ends the cover leg for the tick, settles what came before it,
+   logs nothing, and burns no attempt: control (3b) answered the pause as
+   the review read it would be, a miss, and the boot test's pending cover
+   was dropped within its eight ticks.
+4. **Confirmed.** `bridge fingerprint` looked up with enrichment off. A
+   lookup run reads `BRIDGE_ENRICH_ENABLED` as serve does, else
+   `enrich.enabled` in the config at the default path (`./bridge.yaml`, then
+   the platform's; the command has no `--config`), else on, once as it
+   starts, and refuses before the key, the probe or a decode (exit 1); a
+   config there that does not load refuses too. `--no-lookup` is not
+   refused. No other command outside serve builds a client of these
+   services: the constructors are called in `runServe` and in
+   `prepareFingerprintRun` alone.
+5. **Confirmed.** With `BRIDGE_ENRICH_ENABLED=false` over a file that said
+   nothing, a console save of the library name wrote `enabled: false`, and
+   with it `on` over the file's `false` wrote `true`; a start without the
+   variable then read the variable's value. The holder's save writes each
+   switch as the file holds it (read in the save's turn) where the update
+   left the live value as it was, the change otherwise (off as false, on as
+   no key), and publishes the live values (`filedSwitches`). The other
+   variables are still written back (B761).
+6. **Confirmed.** `off`, `no`, `n` and every typo read as on: the variables
+   were read by `strconv.ParseBool`, and a refusal was ignored. They now
+   read as the keys do, without regard to case, white space or an empty
+   value saying nothing, and any other value is off with one Warn naming
+   the variable (`switchEnvPaths`, `readSwitchEnv`). Its commit did not run
+   the whole config package; `TestNoEnvironmentOverrideWarningCarriesAValue`
+   looked for the generic warning for these two and failed, which 570e38a8
+   corrected.
+7. **Corrected.** The footer clears at the next sync the app does not run
+   silently; a silent delta (an event's, a gap probe's) leaves it. The
+   app's condition (`!silent && !enrichmentSeen`) is the brief's reading:
+   the iOS clone is not on this host.
+8. **Corrected.** The error table and the artwork section say the `no_image`
+   of a miss while off is not terminal and must not be cached for good; the
+   coverage sweep the section names is the brief's reading of the app.
+9. **Corrected.** iTunes left the derived-state row and the `no_image`
+   paragraph: no production path calls `WithITunes`
+   (`TestNoProductionPathAsksITunes`).
+10. **Production reaches the builders through the Provider alone**: the
+    API calls its `ManifestProvider`, and the package-level `BuildManifest`,
+    `WriteManifest` and `BuildManifestPage` have no production caller
+    (`TestTheWireManifestIsTheProvidersAlone`). The rule names the
+    Provider's two builders; the test's buffered leg and the private twin of
+    `BuildManifest` it called are gone.
+
+### Red first
+
+Each new test ran on the head before its fix, in a copy of that tree, the
+switch-interval seam taken out and round 1's `CancelWhenOff` in its place
+where needed: on 3f5e2f6d, `TestAnAnswerAfterTheFlipIsNotTaken` (6 and 4
+requests where one was held; the answer cached; the track stamped),
+`TestARequestAfterTheFlipIsRefusedAtItsSend` (two artist rungs, Deezer
+asked, the artist cached), `TestADeezerFlipCancelsDeezersRequestAndNotMusicBrainzs`
+and `TestDeezerOffAfterASearchSendsNoFetch` (the held search not cut off),
+`TestALookupTheSwitchRefusesIsNotAMiss` (sent, and taken as a no-match),
+`TestTheEnrichersSendsRunOnTheSwitchsContext` and
+`TestEveryClientSendsThroughTheSwitchsGate`,
+`TestAnAcoustIDAnswerAfterTheFlipIsNotKept`,
+`TestALookupAfterTheFlipIsRefusedAtItsSend`,
+`TestAReQueueAfterTheFlipIsNotMade`, `TestAFingerprintPassRunsOnTheSwitchsContext`
+and `TestAWriteAfterTheFlipIsNotMade` (every write made with the switch
+off); on a29f63e7 with the harvest's poll seam alone,
+`TestTheHarvestRunsWithEnrichmentOff` (the premium cover fetched, the
+pending entry gone); on c7917f29, `TestTheOffSwitchLoads` (60 subtests); on
+1fec230c, `TestBridgeFingerprintRefusesALookupWhileEnrichmentIsOff` (every
+subtest reached the probe); on 8fffc57e,
+`TestAConsoleSaveKeepsTheFilesOwnSwitches` (all four).
+
+### What the tree-wide guards found
+
+The first gate run, on 6b976472, failed two guards in `cmd/bridge` that no
+package run of the round's own tests reaches.
+`TestNoSubcommandTailBypassesLoadCLIConfig`: `bridge fingerprint` loaded the
+config it had resolved with `config.Load`; it loads through `loadCLIConfig`,
+as every subcommand tail does. `TestEveryConfigWriterTakesTheConfigLock`: the
+holder saved `filedSwitches(next, before, found)`, and the sweep takes a
+call handed the turn's bytes for a value made from the turn whatever else it
+is handed (its documented blind spot, `pick(stale, found)`), so it no longer
+held the save to the holder's `bytes.Equal` refusal and asked for the
+`comparedSaves` entry to go. Taking the entry out would have let a later
+change drop that refusal unseen; instead the holder saves a copy of its
+snapshot whose two opt-outs `filedSwitches` sets through a pointer, which
+the sweep reads as the snapshot the refusal guards. The fixes landed while
+that run's race leg was under way, so its results are not counted; the
+gates below are the second run, on b07dff2f.
+
+### Negative controls (each on the committed tree, restored after)
+
+Predictions written first; the tree was clean after each batch. Points 4
+and 5 ran again on b07dff2f, whose holder and CLI load had changed: (5a) and
+(5d) as (5a2), the call left out, and (5d2), the copy published; every
+prediction held as before, and (4b) missed again.
+
+| Mutation | Predicted red | Held |
+|---|---|---|
+| (1a) the transport's admit at the send removed | the request-after-the-flip test | yes |
+| (1b) its admit at the answer removed | the answer-after-the-flip test; in `acoustid`, the lookup test | yes, both |
+| (1c) `stampAdmitted` always true | the write test | yes, its three off subtests |
+| (1e) the sweep's no-match written without asking | the AcoustID answer test | yes, its no-match taken subtest |
+| (1f) its match written without asking | the same | yes, its match taken subtest |
+| (1g) `forgetUnqueued` forgets nothing | the lookup and re-queue tests | yes |
+| (1h) the re-queue made without asking | the re-queue test | yes |
+| (1i) AcoustID's client built without the gate | the lookup test | yes |
+| (1j) the batch on a context with no switch | the wiring pin and three gate tests | yes |
+| (1l) the fingerprint pass on a context with no switch | the pass pin and four sweeper tests | yes |
+| (2a) `deezerCall` on the batch's context | the two Deezer tests and the wiring pin | yes |
+| (2c) admit asks every switch whatever its scope | `enrichgate`'s two scope tests | yes |
+| (2d) Deezer's context of enrich.enabled's kind | the two Deezer tests and the wiring pin | yes |
+| (3a) the harvest takes the pause for a transient failure | the two pause tests | yes |
+| (3b) the adapter answers off as a miss | the boot test and the adapter's off test | yes (the cover dropped in eight ticks) |
+| (3c) the adapter's fetch on a context with no switch | three adapter tests | yes |
+| (3d) the adapter asks whether the switch ended the fetch, not the switch | the answer test | yes, its read subtest |
+| (3e) serve wires the adapter without the switch | the boot test | yes |
+| (4a) the lookup run asks no switch | the refusal test | yes |
+| (4b) the variable not read, the config alone | both CLI tests | no: only the refusal test's two variable subtests; `config.Load` applies the variable over the file itself, so with a config there the mutation changes nothing, and the variable's own read is pinned by the cases with no config |
+| (4c) a config that does not load taken as on | its subtest | yes |
+| (5a) the holder saves the live config whole | the save test | yes |
+| (5b) an unchanged switch written as its live value | the save test | yes |
+| (5c) a changed switch written as the file held it | the save test; in `admin`, round 1's save test | yes, both |
+| (5d) the holder publishes the filed values | the save test | yes |
+| (6a) an unreadable value says nothing | the load table, the env reader's test | yes |
+| (6b) the spellings read with regard to case | both | yes |
+| (6c) the two read as every other boolean | the load table | yes |
+| (6d) the warning carries the value | the load table | yes |
+| (9a) serve wires `WithITunes` | the iTunes pin | yes |
+| (10a) a production call of `manifest.BuildManifest` | the builders pin | yes |
+
+Every control built; one prediction missed, (4b), for the reason given.
+
+### Gates
+
+On b07dff2f: gofmt (go1.27.3's) over the Go files the branch changes, clean;
+`make docs-check`, ok, on the tree, and on a copy with both rounds' rules
+patches applied, which `git apply --check` takes over round 1's rules.
+Through the build lock: `make vet` native and with `GOOS=windows`,
+`GOOS=darwin`, `GOOS=linux GOARCH=386` and `GOOS=linux GOARCH=arm`, ok;
+`make test-fast`, ok, 86 packages, the Linux-only ones (alsapcm, the durable
+writer, the identity's backup) run rather than vetted (cmd/bridge 458 s,
+internal/admin 253 s, internal/manifest 259 s); `make test` over
+`./internal/enrich/... ./internal/enrichgate/... ./internal/acoustid/...
+./internal/atlasharvest/... ./internal/config/... ./internal/admin/...
+./internal/manifest/... ./cmd/bridge/...` (race, the Makefile's tags and
+`-timeout 30m`), ok (internal/admin 1,004 s, internal/manifest 1,447 s,
+cmd/bridge 1,089 s); `make build-all`, ok. Not run here: macOS and Windows
+natively, CI's runners, the console in a browser, and the iOS app.
+
+### Not done here
+
+The iOS citations (the footer's condition, the coverage sweep) are the
+brief's reading; the clone is not on this host. The app's half of the
+footer and Deezer's reset on its own when it is switched on again are the
+orchestrator's to file. a29f63e7's message says it keeps round 1's test
+name for the gate's own test; that rename was in a012dd32.
+
+## 2026-11-07 — B617, round 3: every client asks its own switches
+
+The review of PR #1425 read four more points, each to confirm red first or
+answer with evidence. Worker b617, the same host and toolchain. New commits on
+1336238a: the clients' own switches (point 1) 0ab920a8, serve's wiring pin
+dbddd024, the nil switch's test d497db9c, two of point 1's tests made able to
+fail b8ea6d9e and f3a7e80d, a completed answer re-admitted (point 3)
+c1109da0, `bridge fingerprint --config` and its live switch (point 2)
+6e9a58e8, a race in its test 80ec7a86, the re-queue's transaction (point 4)
+541e0d6f, a round 2 test that asserted what point 4 removed 26b1a788, then
+this record. The rule's wording goes in `rules-b617-r3.patch`, over rounds 1
+and 2's.
+
+### The points
+
+1. **Confirmed.** The gate rode the context alone: a client called with a
+   context that carried no switch sent with the switch off. On 1336238a,
+   with the enricher's switch and Deezer's off, `SearchArtist` on a bare
+   context asked MusicBrainz once and Deezer once. Every client is now built
+   with switches of its own (`enrichgate.Switches`: `Enrichment(on)`, and
+   Deezer's `Deezer(on, deezer)`), a required constructor argument, so a
+   client built without them does not compile; a nil predicate, and the
+   zero value, are off, as every switch in `enrichgate` is now
+   (`CancelWhenOff` with a nil switch included; round 2 read it as on). The
+   transport asks the client's switches, and those the request's context
+   carries, at the send and at the answer (`Switches.Answer`; with
+   `enrich.enabled` off a Deezer client answers `ErrOff`, never
+   `ErrDeezerOff`), and a watch of its own, derived from the client's
+   switches, cuts a request on the wire off within `Interval` and is
+   released at the body's `Close` or the error. A refusal by the client's
+   switches ends the switch contexts its request carries, so the pass on
+   them stops. `Admit(ctx, own)` asks the writer's own switch beside the
+   context's. Serve builds every client over the live predicates
+   (`TestServeBuildsEveryClientOverTheLiveSwitches` reads `runServe`, since
+   the batch's, the pass's and the adapter's contexts carry the switch too
+   and no behavioural test can see a client built over a switch always on);
+   the fingerprint sweep's `enrichmentOn` and the cover adapter's are off
+   when nil. Writing "no miss recorded" through the callers found more: with
+   a bare context the enricher read the clients' refusal as a persistent
+   failure, since its callers asked the context alone (`ErrOff` wraps
+   `context.Canceled`, which `IsTransient` calls persistent):
+   `artistCache` and `releaseGroupCache` took `""`, `albumCache` an empty
+   resolution and the track a skip, a cover's refusal was the release-level
+   miss the caller stamps, and each logged at Error. The callers read a
+   refusal from the error now (`enrichgate.Refused`), and the premium fetch
+   reports none.
+2. **Confirmed.** On 0ab920a8 with the lookup base a test can point
+   (`fingerprintLookupBase`) and nothing else: `--config` was an unknown
+   flag (exit 2); switched off between two tracks, the run sent the second
+   track's lookup once its decode, held 8 s by the fpcalc stand-in, was done
+   (two lookups, exit 0); switched off in the middle of a lookup, the held
+   lookup ended only at the client's 20 s timeout; a config found at the
+   start that went away, or stopped loading, changed nothing. The switch
+   (`fingerprintSwitch`) is the variable, then the file `--config` names (one
+   that is not there refuses the lookup, never reads as on), then the file
+   at the default path, kept once found, then on. It is read as a lookup run
+   starts and then once a second by one goroutine (`follow`), which ends the
+   run's context, with `ErrOff`, at the read that finds it off or finds a
+   config it read gone or no longer loading; the client's switch and the
+   context's are that read's answer (`get`), so nothing else reads the
+   config. The run then exits 1 with the refusal's words after its reports,
+   and says on stderr what decided the switch as it starts and when that
+   changes. Measured under -race: the run stopped 0.96 to 0.97 s after the
+   config changed, in each of the five cases. The first version gave the
+   run's context `refresh` itself as its switch, which every admission asks,
+   so it read the config at each send and answer; the between-tracks cases
+   passed in 20 ms on that. `TestTheFingerprintSwitchIsReadAtMostOnceASecond`
+   counts the reads now: three in 2.5 s while the switch is asked thousands
+   of times.
+3. **Confirmed.** On f3a7e80d, the clients' switches in: a test's base
+   transport held each answer's body at its first read, after the answer's
+   admission, turned the switch off there, then let the body go, with every
+   switch asked once an hour. Each of five callers kept a miss, on a pass's
+   context and on a bare one: `resolveArtist` and
+   `fetchRecoveredArtistImage` put Deezer's no-match in `deezerNegCache`,
+   `resolveArtist` took a malformed MusicBrainz body for a persistent
+   failure and cached `""`, `enrichOne` cached a release no-match, and
+   `resolveReleaseGroupMBID` a release with no release group; AcoustID's
+   no-match came back as `ErrNoMatch`, which a sweep persists. MusicBrainz's
+   `get`, Deezer's `SearchArtist`, iTunes' `get` and AcoustID's `get` ask
+   the client's switches, and the context's, again once the answer is read
+   and decoded; a refusal stands for the answer and its decode error. It is
+   asked after the decode, never at the body's EOF, which `json.Decoder`
+   does not read to. The sweep's writes already asked the client's switch
+   (`admitted` asks `Client.Admit` since point 1).
+4. **Confirmed, and transactional.** On c1109da0, with the store's seam
+   inside the reset: a row with a text-derived artist MBID and no album
+   MBID, matched, whose re-queue a switch-off cancelled inside it, or which
+   failed on a live context, kept the match's provenance, written at the
+   acceptance, and the next sweep never offered the file (its wait ran out
+   at 10 s): the candidate scan reads provenance and an artist MBID as
+   settled, so the match was never applied, across a restart too.
+   `ResetEnrichedByPaths`, still the sanctioned writer, takes the matches
+   and writes their provenance and the re-queue in one transaction, so one
+   that does not commit records neither; `fingerprintOne` returns the match
+   rather than writing it; and every exit that does not re-queue, a failed
+   re-queue included, forgets the matches in memory (`forgetUnqueued`), so
+   the next sweep matches the file and re-queues it. The provenance writer
+   alone is a fixture's now (`SetAcoustIDMatchForTest`), and
+   `SetResetEnrichedBeforeCommitForTest` holds the re-queue inside its
+   transaction. The first gate run's `make test-fast` found a round 2 test
+   that asserted the provenance a stopped pass kept
+   (`TestALookupAfterTheFlipIsRefusedAtItsSend`); the package runs of this
+   round's own tests had not selected it. It asserts none now, and both
+   files' provenance once they are re-queued.
+
+### Red first
+
+Each new test ran on the tree before its fix: point 1's on 1336238a in a
+copy, as a test of its own over the constructors' old signatures, which
+the new per-client tests do not build against (each client's
+`SearchArtist` on a bare context with the switches off asked its upstream);
+point 2's on
+0ab920a8 plus the lookup-base seam (all five of
+`TestBridgeFingerprintReadsTheConfigItIsGiven`'s subtests and all five of
+`TestBridgeFingerprintFollowsItsSwitchWhileItRuns`'s); point 3's on f3a7e80d
+(`TestAnAnswerCompletedAfterTheFlipFillsNoNegativeCache`, ten of ten, and
+`TestANoMatchCompletedAfterTheFlipIsNoAnswer`, two of two); point 4's on
+c1109da0 plus the store's seam
+(`TestAMatchWhoseReQueueDidNotLandIsReQueuedByTheNextSweep`, both).
+
+### What the controls found in the tests
+
+Three tests could not fail as written, and a fourth raced. The watch's
+release at `Close` (1c) stayed green: `http.Client` ends a request's context
+itself when its body closes, but only when it has a deadline to stop, and
+the test's client had a `Timeout`; it takes a client with none now. The
+body-cut subtest flipped the switch inside the handler, so the answer's
+admission could see it off first and the subtest passed on that path
+without reading a body; the switch turns off once the answer is admitted
+now. Control 2b showed the live switch's middle-of-a-lookup case reading the
+held handler's report before the handler saw its connection close; it waits
+for it, bounded.
+
+### Negative controls (each on the committed tree, restored after)
+
+Predictions written first, in `controls_r3.predictions.txt` beside the
+runner; the tree was clean after each batch.
+
+| Mutation | Predicted red | Held |
+|---|---|---|
+| (1a) `Answer` asks the context's switches alone | `enrichgate`'s five own-switch tests; each client's off test; AcoustID's | yes, all three packages |
+| (1b) the transport runs no watch | `enrichgate`'s cut, pass and watch tests; each client's cut test and the no-miss test; AcoustID's cut test | yes (the body cut after f3a7e80d) |
+| (1c) `Close` does not release the watch | the watch test | no at first (the client's `Timeout`); yes on b8ea6d9e |
+| (1c-err) the error path does not release it | the watch test's error subtest | yes |
+| (1d) a nil switch reads as on | five `enrichgate` tests | yes |
+| (1e) Deezer's switch asked before `enrich.enabled`'s | the two Deezer tests | yes |
+| (1f) `Refused` answers nil | the no-miss test, five of five | yes |
+| (1f-artist) `resolveArtist` does not ask it | the no-miss test's artist subtest alone | yes |
+| (1g) MusicBrainz's client over a switch always on | the source pin, its off, cut and no-miss cases | yes |
+| (1h) serve builds MusicBrainz's that way | the serve pin | yes |
+| (1j) the cover adapter reads nil as on | the nil test's adapter subtest | yes |
+| (1k) the sweep reads nil as on | the nil test's sweep subtest, the pass pin | yes |
+| (3a) MusicBrainz's `get` does not re-admit | the six MusicBrainz subtests | yes |
+| (3b) Deezer's `SearchArtist` does not | the four Deezer subtests | yes |
+| (3c) iTunes' `get` does not | the iTunes test | yes |
+| (3d) AcoustID's `get` does not | the AcoustID test | yes |
+| (3e) MusicBrainz's re-admits by the context alone | the three bare-context MusicBrainz subtests alone | yes |
+| (2a) `--config` never read | the flag test's three, the flag's live case | yes |
+| (2b) a config not there reads as on | its subtest, the gone case | yes (on 80ec7a86, exactly those) |
+| (2c) no follower | the five live cases | yes |
+| (2d) the found config not kept | the gone case | yes |
+| (2e) a config that does not load reads as on | the no-longer-loading case, round 2's refusal | yes |
+| (2f) the follower's read ends nothing | the three between-tracks cases alone | yes |
+| (2g) `get` reads the config | the read-rate test | yes |
+| (4a) provenance written at the acceptance | the end-state test, both | yes |
+| (4b) a failed re-queue forgets nothing | the same | yes |
+| (4c) provenance outside the transaction | the store's test, its two subtests; the end-state test | yes, both packages |
+
+Every control built; one prediction missed, (1c), for the reason above.
+
+### Gates
+
+On 541e0d6f: gofmt (go1.27.3's) over the Go files the branch changes,
+clean; `make docs-check`, ok, on the tree, and on a copy with all three
+rounds' rules patches applied, which `git apply --check` takes over round
+2's rules. Through the build lock: `make vet` native and with
+`GOOS=windows`, `GOOS=darwin`, `GOOS=linux GOARCH=386` and `GOOS=linux
+GOARCH=arm`, ok; `make test-fast`, 85 of 86 packages ok, the Linux-only
+ones run rather than vetted (alsapcm 35 s, the durable writer 15 s, the
+identity's backup 367 s), and `cmd/bridge` failed on the round 2 test above;
+`make test` (race, the Makefile's tags, `-timeout 30m`) over
+`./internal/enrich/... ./internal/enrichgate/... ./internal/atlasharvest/...
+./internal/acoustid/... ./internal/manifest/... ./cmd/bridge/...`, ok but
+`cmd/bridge`, on the same test (internal/manifest 1,412 s); `make
+build-all`, ok. On 26b1a788, whose one change is that test: gofmt,
+docs-check and the five vets again, ok; `make test-fast` and `make test`
+over `./cmd/bridge/...`, ok (348 s and 1,026 s). Not run here: macOS and
+Windows natively, CI's runners, the console in a browser, and the iOS app.
+
+## 2026-11-07 — B617, round 4: every return asks, and `bridge fingerprint` follows from its first read
+
+The review of PR #1425 read two more points, each to confirm red first or
+answer with evidence. Worker b617, the same host and toolchain. New commits on
+29662033: every return from a client once its answer began asks its switches
+(point 1) ce03f3fe, `bridge fingerprint` follows its switch from its first
+read (point 2) 492db044, the premium fetch's check at its return pinned
+5aa0b0b3, then this record. The rule's wording goes in
+`rules-b617-r4.patch`, over rounds 1 to 3's. The review's three other
+readings were left as it said; the public record names them under B761.
+
+### The points
+
+1. **Confirmed.** Round 3 asked a client's switches again only once a 200's
+   body was decoded, and only in MusicBrainz's, Deezer's search, iTunes'
+   search and AcoustID's calls. A 404, or an error status whose body the
+   client read or drained, came back as the status's error, or as the
+   upstream's miss, without asking. Round 3's barrier, which turns the switch
+   off at the body's first read or, now, at its close, after the answer's
+   admission, with every switch asked once an hour, showed it on 29662033
+   with this round's tests: each client took the error answer, MusicBrainz's
+   artist search (400) and release-group lookup (404), the Cover Art
+   Archive's front cover, Deezer's search and image, iTunes' search (400)
+   and artwork, and the Atlas premium refetch (404, the `(false, nil)` that
+   settles a pending cover), the other 404s answering `errNotFound`;
+   AcoustID's 400 came back as its HTTP error. Through the callers, on a
+   pass's context and on a bare one: `enrichOne` cached an empty album
+   resolution for a 400 to the release search and, the switch on again,
+   stamped the track against it with no release; `resolveArtist` cached `""`
+   for a 400 to the artist search and told its caller nil; and
+   `resolveReleaseGroupMBID` cached a 404 as no release group. Each client
+   now asks its switches, and those its context carries, at every return
+   once `Do` gave it a response, through one deferred check over named
+   results: a refusal stands for the answer and its error, and closes a body
+   the client would have handed over (the Cover Art Archive's and iTunes'
+   artwork streams). That covered the premium fetch's `TryCache` too, which
+   answers only whether a cover was cached, so an error status reads false
+   whatever the switch says: a 200 whose body completed after the flip
+   counted as no cover, the bytes it wrote kept, and its test, written after
+   the fix, had control r4-1j below for its red. Round 5 undid that half: a
+   cover the write has committed is cached, and the check applies only to a
+   return that wrote nothing (its record, and the test renamed for what is
+   true). Deezer's search and image returned
+   an error status without reading its body, which the deferred `Close`
+   alone touched, after the check, so the barrier could not reach that
+   check: they drain the body first now, as MusicBrainz, the Cover Art
+   Archive and the premium fetch do, which also gives the connection back to
+   the pool. `Switches.Answer`'s doc says what a client asks it at.
+2. **Confirmed.** A lookup run read its switch as it started, probed fpcalc,
+   and only then started the goroutine that follows the switch. On ce03f3fe
+   plus the probe's seam (`fingerprintProbe`), with a probe that turned the
+   config off as it began and took 1.6 s, the first lookup went out on the
+   start's answer (AcoustID asked once), and only then did the follower end
+   the run, exit 1 (the test took 2.61 s). `prepareFingerprintRun` now
+   starts the follower right after the read that admits a lookup run, before
+   the key check and the probe, and returns the run's context and its stop.
+   The probe runs on that context, so a switch-off during it cuts the probe
+   short, and the run, which then stops at its first file, exits 1 in the
+   refusal's words rather than as a failed fpcalc. The follower may write to
+   stderr while the run does, so the two share one lock (`syncWriter`). The
+   test passes in 1.00 s, and the live switch's five cases stopped 0.93 s
+   after the config changed.
+
+### Red first
+
+Each test ran on the tree before its fix: point 1's on 29662033
+(`TestEveryClientsErrorAnswerCompletedAfterTheFlipIsNoAnswer`, eight of
+eight; `TestAnErrorAnswerCompletedAfterTheFlipFillsNoNegativeCache`, six of
+six; AcoustID's `TestAnErrorAnswerCompletedAfterTheFlipIsNoAnswer`, two of
+two); point 2's on ce03f3fe plus the probe's seam
+(`TestBridgeFingerprintFollowsItsSwitchFromItsFirstRead`). The premium
+fetch's test came after its fix, so its control, the fix taken out, is its
+red.
+
+### Negative controls (each on the committed tree, restored after)
+
+Predictions written first, in `controls_r3.predictions.txt` beside the
+runner; the tree was clean after each.
+
+| Mutation | Predicted red | Held |
+|---|---|---|
+| (r4-1a) MusicBrainz's `get` asks nothing at its returns | its two error subtests; the cache test's six; round 3's six MusicBrainz subtests | yes |
+| (r4-1b) the Cover Art Archive's `fetchStream` asks nothing | its error subtest | yes |
+| (r4-1c) Deezer's `SearchArtist` asks nothing | its error subtest; round 3's four Deezer subtests | yes |
+| (r4-1d) Deezer's search returns its 404 undrained | its error subtest alone | yes |
+| (r4-1e) Deezer's `FetchImage` asks nothing | its error subtest | yes |
+| (r4-1f) iTunes' `get` asks nothing | its error subtest; round 3's iTunes test | yes |
+| (r4-1g) iTunes' `FetchArtwork` asks nothing | its error subtest | yes |
+| (r4-1h) AcoustID's `get` asks nothing | the error test; round 3's no-match test | yes |
+| (r4-1i) the premium `RefetchPremium` asks nothing | its error subtest | yes |
+| (r4-1j) the premium `TryCache` asks nothing | the premium cover test alone | yes |
+| (r4-2a) the follower started after the probe, as round 3 had it | the first-read test alone | yes |
+
+Every control built, and every prediction held. Not controlled: the probe on
+the run's context rather than the caller's (on the caller's, a switch-off
+during a slow probe still ends the run when the probe returns, inside the
+test's bound), and `syncWriter` (no test reaches the two writers at once).
+
+### Gates
+
+On 5aa0b0b3: gofmt (go1.27.3's) over the Go files the branch changes,
+clean; `make docs-check`, ok, and the doc budgets, ok, on a copy with all
+four rounds' rules patches applied, which `git apply --check` takes over
+round 3's rules. Through the build lock: `make vet` native and with
+`GOOS=windows`, `GOOS=darwin`, `GOOS=linux GOARCH=386` and `GOOS=linux
+GOARCH=arm`, ok; `make test-fast`, 86 packages ok, 34 of them from Go's
+test cache, their inputs unchanged since round 3's run (alsapcm ran, 36 s,
+and the identity's backup, 359 s); `make test` (race, the Makefile's tags,
+`-timeout 30m`) over `./internal/enrich/... ./internal/enrichgate/...
+./internal/acoustid/... ./cmd/bridge/...`, ok (`cmd/bridge` 1,024 s). Not
+run here: `make build-all`, macOS and Windows natively, CI's runners, and
+the iOS app.
+
+## 2026-11-07 — B617, round 5: the rule as kept, a written cover is final, one warm stand-in
+
+The review of PR #1425 asked for three things: the rule said as the code
+keeps it, the one defect that rule left, and the windows-latest failure of
+the live switch's test. Worker b617, the same host and toolchain, on the
+orchestrator's merge of main, 8a49f1ad (B489's format view now rides through
+`enrichmentProgressBlock` beside B617's `on`). New commits: a written premium
+cover is final (point 2) 7b0a5cf8, the live-switch test's one warm stand-in
+(point 3) 9772f37d, the rule in the comments and docs (point 1) cbe27be0,
+then this record. The rules' wording goes in `rules-b617-r5.patch`, over the
+tree's.
+
+### The points
+
+1. **The rule, as kept (the owner's decision).** Round 4's reviewers found
+   windows against "Don't … take or write what a pass learns after the
+   flip, an answer completed after it included": a cover whose body finishes
+   inside the second after the flip lands in the cache. Closing all of them
+   would put the switch in the shared atomic writer, its rename retries,
+   every stream's terminal errors and every caller that persists a buffered
+   answer, and nothing goes out in those windows: the request was sent
+   already, and the switch exists to stop outbound lookups. So the rule
+   changed and the code did not grow: off stops every request from being
+   sent and cuts one in flight within `enrichgate.Interval`; what an answer
+   that finished inside that interval gives may be written locally, and
+   nothing further goes out; a refusal is `ErrOff`, the upstream not asked,
+   never a terminal miss, so nothing is lost when the switch comes back.
+   `enrichgate`'s package doc, its Transport and Answer docs, the enricher's
+   switch notes and `Run`, the Cover Art Archive's, iTunes' and the premium
+   fetcher's constructors, the cover adapter, the fingerprint sweep, the
+   docker doc's `BRIDGE_ENRICH_ENABLED` row and the settings matrix's
+   `enrichEnabled` row say so now, and round 4's record says what round 5
+   changed of it. No gate was added, and round 4's checks at the returns
+   that wrote nothing stay. The B617 bullet has no long form: no
+   `ops/History-*` file holds it. `PROTOCOL.md` describes the off state, not
+   the second after the flip, and needed no change.
+2. **Confirmed: a file and a return that disagreed.** Round 4's deferred
+   check in the premium fetcher ran after its cache write. On 8a49f1ad, with
+   round 4's barrier turning the switch off as the 200's body was first
+   read: `TryCache` answered false with the cover whole on disk, so the
+   enricher went on to fetch it again, and `RefetchPremium` answered
+   `(false, ErrOff)` with the premium bytes already over the old cover, so
+   the cover adapter answered a pause, kept the stale tiers, and the harvest
+   kept the cover pending to fetch again. Once `writeArtworkAtomicStream`
+   returns nil the cover is at its path (`RenameWithRetry` never fails once
+   its rename has landed; a refused rename onto the same bytes is taken), so
+   that success is final: the deferred check applies only while nothing is
+   written (`written`). The test that pinned the old result is
+   `TestAPremiumCoverWrittenAfterTheFlipIsCached` now (true, and the cover
+   whole), beside `TestAPremiumUpgradeWrittenAfterTheFlipIsGot`. No other
+   client writes before it returns: Deezer's portrait is read whole by
+   `FetchImage` and written by `ensureArtistImageCached` after the client
+   returned, the Cover Art Archive's and iTunes' streams by
+   `ensureArtworkCached`, and nothing asks the switch after those writes,
+   so a committed write there was final already; AcoustID's sweep asks the
+   switch before each write (`admitted`) and none after; the lyrics tier
+   asks no switch (nothing in it imports `enrichgate`). Those are left
+   alone.
+3. **The Windows fake, and its fix.** The fake fpcalc was a copy of the
+   running test binary, `fpcalc.exe` on Windows (`standintest.Install`; a
+   hard link where one can be made), re-exec'd through `TestMain`
+   (`BRIDGE_FPCALC_STAND_IN`), no shell wrapper, so no child keeps its
+   output open past its exit. `newLookupRun` wrote it into a new
+   `t.TempDir` made the whole of `PATH`, once per case: five copies for the
+   test's five cases. Windows scans a new executable's first start, and the
+   probe gives `fpcalc -version` 2 s (`probeTimeout`): three cases stopped
+   at the real precheck and sent no lookup, and the test, which saw no
+   flip, said "the switch was never changed" (`:247`), or, in the middle
+   cases, waited ten seconds for a cut that never came (`:244`). Reproduced
+   on Linux by giving each copy's first `-version` start 3 s: the old test
+   failed all five cases, with those lines and words. The test installs one
+   copy now and starts it once as the probe does, under two minutes it must
+   finish within (`installWarmFpcalcStandIn`); every run keeps the real
+   precheck, and a case whose run stopped there fails first, by the probe's
+   name and in its words (`requireTheProbePassed`). Under the same
+   simulation the new test passed, its warm-up taking the 3 s. Measured on
+   the way: a stand-in built with `-race` slept a second as it exited (the
+   race runtime's `atexit_sleep_ms`) at every start, half the probe's bound
+   (1.036 s a start; 0.033 s with the sleep off; 0.010 s built without
+   `-race`): `installFpcalcStandIn` turns that off for the stand-in, and
+   the live-switch test went from 16 s to 5 s under `-race`. The Windows leg
+   runs without `-race` (gate.yml), so there the cold start was the whole
+   of it. The probe's 2 s is unchanged: for an operator it is right for a
+   warm fpcalc, a native binary that answers `-version` in milliseconds;
+   a first run an antivirus scan holds past it fails that one run with the
+   precheck's own words, and a rerun passes, which is B706's question for
+   the backup probe, where a change would be decided. In CI, the
+   `test (windows-latest)` log for
+   `TestBridgeFingerprintFollowsItsSwitchWhileItRuns` should show the
+   warm-up's line ("the stand-in's first start answered -version in …",
+   the cold start's cost, once) and five cases passing; a case that fails
+   there says `fpcalc precheck:` first, never "the switch was never
+   changed".
+
+### Red first
+
+Point 2's tests ran on 8a49f1ad first:
+`TestAPremiumCoverWrittenAfterTheFlipIsCached` red ("a cover written after
+the switch-off answered not cached") and
+`TestAPremiumUpgradeWrittenAfterTheFlipIsGot` red (`RefetchPremium = (false,
+enrichment is switched off (enrich.enabled): context canceled)`). Point 3's
+red is the simulation above, on the same tree. Point 1 changes no behaviour.
+
+### Negative controls (each on the committed tree, restored after)
+
+Predictions written first, in `controls_r3.predictions.txt` beside the
+runners; the tree was clean after each.
+
+| Mutation | Predicted red | Held |
+|---|---|---|
+| (r5-2a) `TryCache`'s check put back over a committed write | the cached test alone | yes |
+| (r5-2b) `RefetchPremium`'s check put back over a committed write | the upgrade test alone | yes |
+| (r5-2c) `RefetchPremium` asks nothing at the returns that wrote nothing | the error test's Atlas subtest alone | yes |
+| (r5-3a) the stand-in shared but not warmed, under the simulation | the first case alone, by the probe's name | yes |
+| (r5-3b) a stand-in per case again, under the simulation | all five cases by the probe's name, none "never changed" | yes |
+| (r5-3c) every `-version` start slow | all five cases by the probe's name; the first-read test green | yes |
+
+The fix under the simulation passed (its warm-up 3.0 s). Every control built,
+and every prediction held.
+
+### Gates
+
+On cbe27be0: `make fmt` changed nothing, and gofmt (go1.27.3's) over the Go
+files the branch changes is clean; `make docs-check`, ok, and the doc
+budgets, ok, on a copy with `rules-b617-r5.patch` applied over the tree's
+rules, which `git apply --check` takes; the qualification check against
+main (`scripts/qualification-version` from the merge base, 123a80fa), ok.
+Through the build lock: `make vet` native and with `GOOS=windows`,
+`GOOS=darwin`, `GOOS=linux GOARCH=386` and `GOOS=linux GOARCH=arm`, ok;
+`make test-fast`, 88 packages ok (24 from Go's test cache), and `cmd/bridge`
+failed on one test alone, `TestEveryCitedTestNameExists`, on the renamed
+premium test the tree's `.claude/rules/enrichment.md` still cites until the
+patch is applied; `make test` (race, `-timeout 30m`) over
+`./internal/enrich/... ./internal/enrichgate/... ./cmd/bridge/...`, ok but
+for that same test (`cmd/bridge` 1,049 s, `internal/enrich` 105 s, no race
+reported); and `TestEveryCitedTestNameExists` on a `git archive` copy of
+the tree with the patch applied, ok. Not run here: Windows and macOS
+natively (the Windows fix is for CI's `test (windows-latest)` to show),
+`make build-all`, and the iOS app.
 
 ## 2026-11-07 — B740: the build-site census skips make test's TMPDIR
 

@@ -465,14 +465,32 @@ func (u UPnPUpstreamConfig) Validate() error {
 	return nil
 }
 
-// EnrichConfig overrides the upstream sources the background enricher
-// queries. Empty fields fall back to the public services (MusicBrainz /
-// Cover Art Archive). Point them at a self-hosted 1-bit-atlas mirror to
-// keep enrichment on your own network: set musicbrainzBaseURL to
-// "https://<atlas-host>/ws/2" and coverArtBaseURL to "https://<atlas-host>"
-// — atlas implements exactly the release/artist search + lookup and the
-// /release/{mbid}/front-{250,500,1200} cover endpoints the enricher uses,
-// so no other change is needed. Env: BRIDGE_MUSICBRAINZ_BASE_URL /
+// EnrichConfig governs the background enricher: whether it runs, and where
+// it looks. It sends the artist and album names a library's files carry to
+// MusicBrainz, the release IDs it finds to the Cover Art Archive, and artist
+// names to Deezer for portraits.
+//
+// enabled is the off switch for all of it (backlog B617): false, and the
+// enricher asks none of the three, nor a mirror set below, nor Atlas for a
+// premium cover, the Atlas harvest's premium covers included, and acoustic
+// fingerprinting stops with it, since its answers feed nothing else.
+// deezerEnabled stops the Deezer portrait lookups alone, the one lookup a
+// mirror cannot redirect. Both are on when absent, both apply while the
+// bridge runs, and only an explicit false is written: the console's save of
+// on writes no key. What was fetched before stays and is served: the IDs in
+// the rows, the covers and portraits in the artwork cache. The rest of the
+// Atlas harvest (which still submits the library's artist and release IDs)
+// and its lyrics tier, the update check and certificate renewal are separate,
+// and these stop none of them.
+//
+// The base URLs point MusicBrainz and the Cover Art Archive at a self-hosted
+// 1-bit-atlas mirror; empty fields fall back to the public services. Set
+// musicbrainzBaseURL to "https://<atlas-host>/ws/2" and coverArtBaseURL to
+// "https://<atlas-host>": atlas implements exactly the release/artist search
+// + lookup and the /release/{mbid}/front-{250,500,1200} cover endpoints the
+// enricher uses, so no other change is needed. A mirror keeps those two
+// lookups on your own network; the Deezer portrait lookups still go to
+// Deezer unless deezerEnabled is false. Env: BRIDGE_MUSICBRAINZ_BASE_URL /
 // BRIDGE_COVERART_BASE_URL.
 //
 // A base URL may carry a mirror's credential, `https://user:password@host/ws/2`
@@ -481,6 +499,16 @@ func (u UPnPUpstreamConfig) Validate() error {
 // no log line, error or skip detail names it (backlog B69). Only the settings
 // console shows it, as the value it edits.
 type EnrichConfig struct {
+	// Enabled turns the enricher on or off. Nil (the default) and true are
+	// on; only an explicit false stops it. A pointer so an absent key is
+	// told apart from an explicit false, the shape SmartPlaylistsConfig.Enabled
+	// has. Read through EffectiveEnabled, never directly.
+	Enabled *bool `yaml:"enabled,omitempty"`
+	// DeezerEnabled turns the Deezer artist-portrait lookups on or off, the
+	// same way. Off, a track enriched meanwhile is stamped with no portrait,
+	// and keeps none once Deezer is on again until "Retry missing" queues
+	// it. Read through EffectiveDeezerEnabled, never directly.
+	DeezerEnabled *bool `yaml:"deezerEnabled,omitempty"`
 	// MusicBrainzBaseURL overrides the MusicBrainz ws/2 API root.
 	// Default (empty): https://musicbrainz.org/ws/2.
 	MusicBrainzBaseURL string `yaml:"musicbrainzBaseURL,omitempty"`
@@ -507,6 +535,17 @@ func (e EnrichConfig) EffectiveCoverSize() int {
 		return 1200
 	}
 	return e.CoverSize
+}
+
+// EffectiveEnabled resolves Enabled's nil-means-on default: whether the
+// enricher runs. Every reader goes through it, since a bare nil check would
+// read a config that says nothing as off.
+func (e EnrichConfig) EffectiveEnabled() bool { return e.Enabled == nil || *e.Enabled }
+
+// EffectiveDeezerEnabled resolves DeezerEnabled's nil-means-on default:
+// whether the enricher asks Deezer for artist portraits.
+func (e EnrichConfig) EffectiveDeezerEnabled() bool {
+	return e.DeezerEnabled == nil || *e.DeezerEnabled
 }
 
 // LibraryConfig governs operations that MUTATE library content.

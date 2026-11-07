@@ -2,6 +2,8 @@ package manifest
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -47,13 +49,23 @@ func indexedAt(t *testing.T, s *Store, path string) int64 {
 // know. Takes no ctx, matching seedEnrichedTrack and enrichedAt above.
 func mustResetEnrichedByPaths(t *testing.T, s *Store, paths []string, wantN int64, why string) {
 	t.Helper()
-	n, err := s.ResetEnrichedByPaths(context.Background(), paths)
+	n, err := s.ResetEnrichedByPaths(context.Background(), matchesFor(paths...))
 	if err != nil {
 		t.Fatalf("ResetEnrichedByPaths(%q): %v", paths, err)
 	}
 	if n != wantN {
 		t.Fatalf("RowsAffected = %d, want %d — %s", n, wantN, why)
 	}
+}
+
+// matchesFor is one accepted match for each path, each with a cluster of its
+// own.
+func matchesFor(paths ...string) []AcoustIDMatch {
+	out := make([]AcoustIDMatch, len(paths))
+	for i, p := range paths {
+		out[i] = AcoustIDMatch{Path: p, AcoustID: fmt.Sprintf("00000000-0000-4000-8000-%012d", i+1)}
+	}
+	return out
 }
 
 // TestResetEnrichedByPathsIsScoped is the contract that justifies adding a new
@@ -78,7 +90,7 @@ func TestResetEnrichedByPathsIsScoped(t *testing.T) {
 	beforeIdxA := indexedAt(t, s, "a.flac")
 	beforeEnrB := enrichedAt(t, s, "b.flac")
 
-	n, err := s.ResetEnrichedByPaths(ctx, []string{"a.flac", "c.flac"})
+	n, err := s.ResetEnrichedByPaths(ctx, matchesFor("a.flac", "c.flac"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -156,7 +168,7 @@ func TestAcoustIDMatchProvenance(t *testing.T) {
 	beforeIdx := indexedAt(t, s, "a.flac")
 
 	const acoustID = "9ff43b6a-4f16-427c-93c2-92307ca505e0"
-	if err := s.SetAcoustIDMatch(ctx, "a.flac", acoustID); err != nil {
+	if err := s.SetAcoustIDMatchForTest(ctx, "a.flac", acoustID); err != nil {
 		t.Fatal(err)
 	}
 	got, err := s.AcoustIDMatch(ctx, "a.flac")
@@ -199,7 +211,7 @@ func TestAcoustIDMatchSurvivesReEnrichment(t *testing.T) {
 
 	seedEnrichedTrack(t, s, "a.flac")
 	const acoustID = "9ff43b6a-4f16-427c-93c2-92307ca505e0"
-	if err := s.SetAcoustIDMatch(ctx, "a.flac", acoustID); err != nil {
+	if err := s.SetAcoustIDMatchForTest(ctx, "a.flac", acoustID); err != nil {
 		t.Fatal(err)
 	}
 
@@ -239,10 +251,10 @@ func TestAcoustIDMatchedPaths(t *testing.T) {
 	seedEnrichedTrack(t, s, "a.flac")
 	seedEnrichedTrack(t, s, "b.flac")
 	seedEnrichedTrack(t, s, "c.flac")
-	if err := s.SetAcoustIDMatch(ctx, "a.flac", "9ff43b6a-4f16-427c-93c2-92307ca505e0"); err != nil {
+	if err := s.SetAcoustIDMatchForTest(ctx, "a.flac", "9ff43b6a-4f16-427c-93c2-92307ca505e0"); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SetAcoustIDMatch(ctx, "c.flac", "1c0eee38-6dd2-4b8d-a5a4-ea0b441c30c6"); err != nil {
+	if err := s.SetAcoustIDMatchForTest(ctx, "c.flac", "1c0eee38-6dd2-4b8d-a5a4-ea0b441c30c6"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -492,4 +504,67 @@ func suppressedPaths(t *testing.T, s *Store) map[string]bool {
 		out[p] = true
 	}
 	return out
+}
+
+// TestTheReQueueRecordsEachMatchsProvenanceInItsTransaction (backlog B617,
+// round 3): the re-queue records the cluster accepted for each track beside
+// it, a row already queued included, and a re-queue that does not commit,
+// cancelled inside its transaction or failing there, records neither the
+// re-queue nor any provenance, so the sweeper's next pass offers the file
+// again.
+func TestTheReQueueRecordsEachMatchsProvenanceInItsTransaction(t *testing.T) {
+	t.Run("committed", func(t *testing.T) {
+		s := openTestStore(t)
+		defer s.Close()
+		ctx := context.Background()
+		seedEnrichedTrack(t, s, "a.flac")
+		if err := s.UpsertTrack(ctx, &Track{Path: "queued.flac", Size: 1, ModTime: time.Unix(1, 0)}); err != nil {
+			t.Fatal(err)
+		}
+		matches := matchesFor("a.flac", "queued.flac")
+		n, err := s.ResetEnrichedByPaths(ctx, matches)
+		if err != nil || n != 1 {
+			t.Fatalf("ResetEnrichedByPaths = %d, %v; want the one enriched row re-queued", n, err)
+		}
+		for _, m := range matches {
+			if got, err := s.AcoustIDMatch(ctx, m.Path); err != nil || got != m.AcoustID {
+				t.Errorf("%s's provenance = %q, %v; want %q", m.Path, got, err, m.AcoustID)
+			}
+		}
+	})
+	for _, c := range []struct {
+		name string
+		hold func(cancel context.CancelFunc) func(ctx context.Context) error
+	}{
+		{"cancelled inside its transaction", func(cancel context.CancelFunc) func(ctx context.Context) error {
+			return func(ctx context.Context) error {
+				cancel()
+				<-ctx.Done()
+				return nil
+			}
+		}},
+		{"failing inside its transaction", func(context.CancelFunc) func(ctx context.Context) error {
+			return func(context.Context) error { return errors.New("injected failure") }
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			s := openTestStore(t)
+			defer s.Close()
+			seedEnrichedTrack(t, s, "a.flac")
+			before := enrichedAt(t, s, "a.flac")
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			s.SetResetEnrichedBeforeCommitForTest(c.hold(cancel))
+			if _, err := s.ResetEnrichedByPaths(ctx, matchesFor("a.flac")); err == nil {
+				t.Fatal("a re-queue that did not commit answered no error")
+			}
+			s.SetResetEnrichedBeforeCommitForTest(nil)
+			if got := enrichedAt(t, s, "a.flac"); got != before {
+				t.Errorf("enriched_at = %d after a re-queue that did not commit, want %d", got, before)
+			}
+			if got, err := s.AcoustIDMatch(context.Background(), "a.flac"); err != nil || got != "" {
+				t.Errorf("provenance = %q, %v after a re-queue that did not commit, want none", got, err)
+			}
+		})
+	}
 }

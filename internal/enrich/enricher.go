@@ -23,6 +23,7 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
 	"github.com/acoseac/1-bit-bridge/internal/ctxerr"
+	"github.com/acoseac/1-bit-bridge/internal/enrichgate"
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/logging"
 	"github.com/acoseac/1-bit-bridge/internal/lrucache"
@@ -99,6 +100,17 @@ type Enricher struct {
 	// the Phase-H harvest credential store is available; nil = CAA-only
 	// enrichment (the default).
 	premiumCovers PremiumCoverFetcher
+
+	// enabled and deezerEnabled are the live predicates for enrich.enabled
+	// and enrich.deezerEnabled (WithEnabled, WithDeezerEnabled); nil means
+	// on. See switch.go.
+	enabled       func() bool
+	deezerEnabled func() bool
+	// switchEvery is how far apart the switches' contexts ask them, which
+	// cancels a request on the wire; zero is enrichgate.Interval, a second.
+	// A send and a write ask the switch themselves, whatever this is. A test
+	// seam: a test that sets an hour shows a refusal is the gate's alone.
+	switchEvery time.Duration
 
 	// acoustic is the fingerprint verdict source. Nil (the default) means
 	// acoustic fingerprinting is off, exactly like a nil premiumCovers.
@@ -310,48 +322,67 @@ func (e *Enricher) WithPremiumCovers(f PremiumCoverFetcher) *Enricher {
 // Run loops until ctx is done, pulling un-enriched tracks and processing
 // them in waves. Errors on individual tracks are logged but don't stop
 // the loop.
+//
+// enrich.enabled is asked before each batch: off, the loop asks the store
+// and the upstreams nothing, and asks the switch again after PollInterval,
+// so turning it on takes effect within one. Each batch runs on the switch's
+// context (enrichgate.CancelWhenOff), so turning it off stops the batch under
+// way as a shutdown would: a request after the flip is refused at its send,
+// an answer whose headers arrive after it is not taken, one on the wire is
+// cancelled within a second (a cover whose body ended inside that second may
+// be in the cache; nothing further goes out), and what the batch was
+// enriching stays at enriched_at = 0 for the turn that follows the switch's.
 func (e *Enricher) Run(ctx context.Context) {
+	var report switchReport
 	for {
 		if ctx.Err() != nil {
 			return
 		}
-		batch, err := e.store.UnenrichedTracks(ctx, e.BatchLimit)
-		if err != nil {
-			// A listing the shutdown stopped is not a failed one.
-			if failure := ctxerr.WithoutCancellation(ctx, err); failure != nil {
-				logger.Error("list unenriched", "err", failure)
-			}
-			if !sleepCtx(ctx, e.PollInterval) {
-				return
-			}
-			continue
+		on := e.on()
+		report.note(on, e.deezerOn())
+		pause := e.PollInterval
+		if on {
+			pause = e.runBatch(ctx)
 		}
-		if len(batch) == 0 {
-			if !sleepCtx(ctx, e.PollInterval) {
-				return
-			}
-			continue
-		}
-		for i := range batch {
-			if ctx.Err() != nil {
-				return
-			}
-			e.enrichOne(ctx, &batch[i])
-		}
-		// Unconditional breather between batches.
-		//
-		// The MB/CAA pacers are NOT a substitute: they only sleep when a
-		// network call is actually made, so a batch whose rows all resolve
-		// from the LRU caches (or bail on an early check) completes in
-		// milliseconds and immediately re-queries UnenrichedTracks. At the
-		// old fixed 1.1s MB pace that was invisible; against a self-hosted
-		// mirror at SelfHostedMinInterval it is not, and a batch that keeps
-		// failing WITHOUT stamping enriched_at (the transient-error path)
-		// would spin the DB as fast as the loop can turn.
-		if !sleepCtx(ctx, interBatchPause) {
+		if !sleepCtx(ctx, pause) {
 			return
 		}
 	}
+}
+
+// runBatch enriches one batch on a context the switch cancels, and returns
+// how long Run waits before the next.
+func (e *Enricher) runBatch(ctx context.Context) time.Duration {
+	ctx, release := enrichgate.CancelWhenOff(ctx, e.on, e.switchEvery)
+	defer release()
+	batch, err := e.store.UnenrichedTracks(ctx, e.BatchLimit)
+	if err != nil {
+		// A listing the shutdown or the switch stopped is not a failed one.
+		if failure := ctxerr.WithoutCancellation(ctx, err); failure != nil {
+			logger.Error("list unenriched", "err", failure)
+		}
+		return e.PollInterval
+	}
+	if len(batch) == 0 {
+		return e.PollInterval
+	}
+	for i := range batch {
+		if ctx.Err() != nil {
+			break
+		}
+		e.enrichOne(ctx, &batch[i])
+	}
+	// Unconditional breather between batches.
+	//
+	// The MB/CAA pacers are NOT a substitute: they only sleep when a
+	// network call is actually made, so a batch whose rows all resolve
+	// from the LRU caches (or bail on an early check) completes in
+	// milliseconds and immediately re-queries UnenrichedTracks. At the
+	// old fixed 1.1s MB pace that was invisible; against a self-hosted
+	// mirror at SelfHostedMinInterval it is not, and a batch that keeps
+	// failing WITHOUT stamping enriched_at (the transient-error path)
+	// would spin the DB as fast as the loop can turn.
+	return interBatchPause
 }
 
 // interBatchPause is the floor on how often Run may re-poll the store. Small
@@ -438,8 +469,10 @@ func (e *Enricher) enrichOne(ctx context.Context, t *manifest.Track) {
 			if err != nil {
 				// Shutdown cancellation looks like an MB error; don't
 				// poison the skipped-cache or mark the track so a
-				// future run can retry it normally.
-				if ctx.Err() != nil {
+				// future run can retry it normally. Nor a switch's
+				// refusal, which MusicBrainz's client answers whatever
+				// context it is handed (enrichgate.Refused): no answer.
+				if ctx.Err() != nil || enrichgate.Refused(err) != nil {
 					return
 				}
 				e.logUpstream(upstreamMusicBrainz, "MB search", err, "artist", t.Artist, "album", t.Album)
@@ -604,6 +637,12 @@ func (e *Enricher) enrichOne(ctx context.Context, t *manifest.Track) {
 	// impossible from this site.
 	if !strings.HasPrefix(t.ArtworkMBID, "local-") {
 		if cached, err := e.ensureArtworkCached(ctx, albumMBID, rgMBID, t.Artist, t.Album, e.coverSize()); err != nil {
+			if enrichgate.Refused(err) != nil {
+				// A switch refused the cover's request or its answer
+				// (backlog B617): no answer, so no miss to stamp, and
+				// the track waits at enriched_at = 0.
+				return
+			}
 			// Suppress the Error log on a clean shutdown: ensureArtworkCached
 			// returns ctx.Err() when a pacing sleepCtx trips on cancel, which
 			// isn't a real artwork failure. Mirrors the ctx guard the album /
@@ -692,6 +731,12 @@ func (e *Enricher) resolveArtist(ctx context.Context, t *manifest.Track) error {
 		// ladder that paced only its first rung would burst.
 		res, matchedQuery, err := e.searchArtistWithFallbacks(ctx, attempts, t)
 		if err != nil {
+			// A switch's refusal is no answer, whatever the context says
+			// (enrichgate.Refused; backlog B617): nothing is cached or
+			// logged, and enrichOne leaves the track unstamped.
+			if r := enrichgate.Refused(err); r != nil {
+				return r
+			}
 			// Don't cache transient errors session-wide — a network
 			// blip would otherwise block sibling-track retries until
 			// process restart. Matches the album-path behavior.
@@ -787,6 +832,15 @@ func (e *Enricher) resolveArtist(ctx context.Context, t *manifest.Track) error {
 		return nil
 	}
 	found, err := e.ensureArtistImageCached(ctx, artistMBID, imageName)
+	if errors.Is(err, errDeezerOff) {
+		// Deezer was not asked: no miss to cache, nothing to log.
+		return nil
+	}
+	if r := enrichgate.Refused(err); r != nil {
+		// enrich.enabled's refusal: no miss to cache, nothing to log, and
+		// no stamp, as at the other requests.
+		return r
+	}
 	if err != nil {
 		// Skip the Error log when the failure is just shutdown cancellation
 		// (ensureArtistImageCached returns ctx.Err() from its pacing
@@ -854,11 +908,20 @@ func (e *Enricher) ensureArtistImageCached(ctx context.Context, mbid, artistName
 		}
 		return true, nil
 	}
-	if !sleepCtx(ctx, e.DeezerMinInterval) {
-		return false, ctx.Err()
+	// enrich.deezerEnabled, asked once a cached file has not answered: off,
+	// Deezer is asked nothing (errDeezerOff). Each of the two requests then
+	// runs on a context of its own that the switch cancels (deezerCall), and
+	// the client admits it at its send and its answer at its arrival, so a
+	// flip refuses the next request and cuts off one on the wire, as
+	// errDeezerOff, never as "Deezer has no portrait".
+	if !e.deezerOn() {
+		return false, errDeezerOff
 	}
-	imgURL, err := e.deezer.SearchArtist(ctx, artistName)
-	if err != nil {
+	var imgURL string
+	if err := e.deezerCall(ctx, func(dctx context.Context) (err error) {
+		imgURL, err = e.deezer.SearchArtist(dctx, artistName)
+		return err
+	}); err != nil {
 		return false, err
 	}
 	if imgURL == "" {
@@ -866,11 +929,11 @@ func (e *Enricher) ensureArtistImageCached(ctx context.Context, mbid, artistName
 	}
 	// Deezer image URLs are on their own CDN; second GET happens after
 	// a second DeezerMinInterval pause.
-	if !sleepCtx(ctx, e.DeezerMinInterval) {
-		return false, ctx.Err()
-	}
-	data, err := e.deezer.FetchImage(ctx, imgURL)
-	if err != nil {
+	var data []byte
+	if err := e.deezerCall(ctx, func(dctx context.Context) (err error) {
+		data, err = e.deezer.FetchImage(dctx, imgURL)
+		return err
+	}); err != nil {
 		return false, err
 	}
 	// Through the cover writes' primitive (backlog B168), for its two
@@ -1118,6 +1181,9 @@ func acousticSkipReason(e *Enricher, outcome acousticOutcome, fallback string) s
 // is as the other writer left it, still unenriched, and the next batch
 // reads it again, answering mostly from this enricher's caches.
 func (e *Enricher) stampEnriched(ctx context.Context, t *manifest.Track) {
+	if !e.stampAdmitted(ctx) {
+		return
+	}
 	if err := e.store.MarkEnriched(ctx, t); err != nil {
 		if errors.Is(err, manifest.ErrTrackChanged) {
 			noteChangedWhileEnriched(t)
@@ -1164,6 +1230,9 @@ const msgChangedWhileEnriched = "track changed while it was enriched; the next b
 // reason: the verdict is about tags the row no longer holds, and the next
 // batch reads the row again.
 func (e *Enricher) markSkipped(ctx context.Context, t *manifest.Track, reason, detail string) {
+	if !e.stampAdmitted(ctx) {
+		return
+	}
 	if err := e.store.MarkEnriched(ctx, t); err != nil {
 		if errors.Is(err, manifest.ErrTrackChanged) {
 			noteChangedWhileEnriched(t)
@@ -1286,6 +1355,10 @@ func (e *Enricher) ensureArtworkCached(ctx context.Context, mbid, rgMBID, artist
 		return false, err
 	}
 	rgMBID, rgErr := e.resolveReleaseGroupMBID(ctx, mbid, rgMBID)
+	if r := enrichgate.Refused(rgErr); r != nil {
+		// No answer: never the release-level miss, which the caller stamps.
+		return false, r
+	}
 	if rgErr != nil {
 		// Logging the resolve error but returning the original
 		// release-level not-found so callers stamp the "no artwork"
@@ -1330,6 +1403,11 @@ func (e *Enricher) ensureArtworkCached(ctx context.Context, mbid, rgMBID, artist
 	// /v1/artwork/{mbid} URL serves it transparently.
 	if e.itunes != nil && artist != "" && album != "" {
 		itBody, itErr := e.fetchITunesArtwork(ctx, artist, album)
+		if r := enrichgate.Refused(itErr); r != nil {
+			// No answer: never the release-level miss, which the caller
+			// stamps.
+			return false, r
+		}
 		if itErr == nil {
 			// Stream straight to disk — same shape as the CAA branches
 			// above. Body close + size cap (MaxCoverArtBytes) live
@@ -1422,7 +1500,8 @@ func (e *Enricher) resolveReleaseGroupMBID(ctx context.Context, releaseMBID, hin
 		// cache for a release we never actually looked up. This mirrors the
 		// transient-vs-persistent split SearchRelease already makes in
 		// enrichOne (ctx-cancel first, then IsTransient, then cache-empty).
-		if !IsTransient(err) && ctx.Err() == nil {
+		// A switch's refusal is no answer either (enrichgate.Refused).
+		if !IsTransient(err) && ctx.Err() == nil && enrichgate.Refused(err) == nil {
 			e.releaseGroupCache.Set(releaseMBID, "")
 		}
 		return "", err
