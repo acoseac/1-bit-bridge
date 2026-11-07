@@ -127,8 +127,44 @@ func startRunning(dataDir, token string) bool {
 	if err := fsutil.TryLock(f); err != nil {
 		return errors.Is(err, fsutil.ErrLocked)
 	}
+	callStartProbeHeld(dataDir)
 	_ = fsutil.Unlock(f)
 	return false
+}
+
+// startProbeHeld, nil in production, runs in startRunning once its try has
+// taken a start's lock and before it lets go of it, with the data dir it
+// probes: a test's hold on a probe descheduled there (backlog B660's fourth
+// round).
+var (
+	startProbeHookMu sync.Mutex
+	startProbeHeld   func(dataDir string)
+)
+
+func callStartProbeHeld(dataDir string) {
+	startProbeHookMu.Lock()
+	fn := startProbeHeld
+	startProbeHookMu.Unlock()
+	if fn != nil {
+		fn(dataDir)
+	}
+}
+
+// SetStartProbeHeldForTest makes fn run in every probe of a start's lock that
+// took it, before it lets go, for a test in this package or another that
+// holds a probe there. It returns what puts the seam before it back.
+// Process-global: a test that uses it MUST NOT call t.Parallel(), and
+// restores it in a t.Cleanup.
+func SetStartProbeHeldForTest(fn func(dataDir string)) (restore func()) {
+	startProbeHookMu.Lock()
+	prev := startProbeHeld
+	startProbeHeld = fn
+	startProbeHookMu.Unlock()
+	return func() {
+		startProbeHookMu.Lock()
+		startProbeHeld = prev
+		startProbeHookMu.Unlock()
+	}
 }
 
 // sweepStartLocks removes the lock files of starts that hold them no more (a
