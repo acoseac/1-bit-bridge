@@ -8,7 +8,10 @@ import (
 )
 
 // Decoder is a streaming, bounded, cancellable PCM decoder with exact
-// sample-frame seeking.
+// sample-frame seeking, but for internal/player/dsdconv's converted DSD
+// (B728 §4.7), which is not positioned in time: its Seek takes frame 0
+// before its first read, a no-op, and refuses every other (dsdconv.ErrSeek),
+// so its callers never seek it.
 //
 // ReadFrames writes interleaved, sign-extended int32 samples into dst. The
 // length of dst must be a multiple of Channels. The returned n is the number
@@ -24,7 +27,8 @@ type Decoder interface {
 	Format() format.PCM
 	ReadFrames(ctx context.Context, dst []int32) (n int, err error)
 	// Seek positions the decoder so the next ReadFrames returns sample frame
-	// frame (0-based). Seeking past the end is an error.
+	// frame (0-based). Seeking past the end is an error, and so is any seek
+	// of converted DSD but to frame 0 before its first read.
 	Seek(ctx context.Context, frame int64) error
 	Close() error
 }
