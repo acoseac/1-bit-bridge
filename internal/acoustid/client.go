@@ -464,6 +464,14 @@ func (c *Client) get(ctx context.Context, endpoint string) ([]byte, error) {
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	drainBody(resp.Body)
+	// The answer is complete only here. Its body can finish after a
+	// switch-off its headers' admission did not see, and a no-match read
+	// from it is what a sweep persists. So the client's own switch, and
+	// those ctx carries, are asked again (backlog B617); a refusal stands
+	// for the answer and its error.
+	if r := c.sw.Answer(ctx); r != nil {
+		return nil, r
+	}
 	if err != nil {
 		return nil, fmt.Errorf("acoustid: reading response: %w", err)
 	}

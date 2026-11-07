@@ -156,6 +156,12 @@ func (c *DeezerClient) SearchArtist(ctx context.Context, name string) (string, e
 	// returns the keep-alive connection to the idle pool — json.Decoder
 	// stops at the closing token, not EOF. Mirrors MusicBrainzClient.get.
 	drainBody(resp.Body)
+	// Asked again once the answer is complete, as MusicBrainzClient.get
+	// does: a no-match whose body finished after a switch-off would reach
+	// deezerNegCache, which outlives the switch (backlog B617).
+	if r := c.sw.Answer(ctx); r != nil {
+		return "", r
+	}
 	if err != nil {
 		return "", err
 	}

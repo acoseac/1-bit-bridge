@@ -274,6 +274,11 @@ func (c *ITunesClient) get(ctx context.Context, u string, out any) error {
 	// returns the keep-alive connection to the idle pool — json.Decoder
 	// stops at the closing token, not EOF. Mirrors MusicBrainzClient.get.
 	drainBody(resp.Body)
+	// Asked again once the answer is complete, as MusicBrainzClient.get
+	// does (backlog B617).
+	if r := c.sw.Answer(ctx); r != nil {
+		return r
+	}
 	return err
 }
 

@@ -276,6 +276,14 @@ func (c *MusicBrainzClient) get(ctx context.Context, ep baseEndpoint, path strin
 	// costly during a cold-cache pass against the same handful of hosts.
 	// Matches the drain the 404 / non-200 branches above already do.
 	drainBody(resp.Body)
+	// The answer is complete only here. Its body can finish after a
+	// switch-off its headers' admission did not see, and what it decodes to,
+	// a no-match or a decode error, would reach a negative cache as an
+	// answer. So the client's own switches, and those ctx carries, are asked
+	// again (backlog B617); a refusal stands for the answer and its error.
+	if r := c.sw.Answer(ctx); r != nil {
+		return r
+	}
 	return err
 }
 
