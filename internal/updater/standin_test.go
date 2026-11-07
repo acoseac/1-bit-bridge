@@ -25,6 +25,7 @@ import (
 //     serve that does not define the flag), hang, or exit:<n>
 //   - refusal: the reasons a refusing check gives, one a line
 //   - version: the version `version` names
+//   - silent: how long `version` says nothing before it answers, a duration
 //
 // and the stand-in appends every call's arguments, one call a line, to
 // argv there.
@@ -49,6 +50,9 @@ func runCandidateStandIn(dir string, args []string) int {
 		return strings.TrimSpace(string(b))
 	}
 	if len(args) == 1 && args[0] == "version" {
+		if d, err := time.ParseDuration(script("silent")); err == nil {
+			time.Sleep(d)
+		}
 		v := script("version")
 		if v == "" {
 			fmt.Fprintln(os.Stderr, "stand-in: no version scripted")

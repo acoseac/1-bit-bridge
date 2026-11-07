@@ -100,7 +100,9 @@ func (r *refusedInstall) saveMarker(t *testing.T, dataDir string) {
 // CI's Windows leg took longer than production's 10 s on two PRs on
 // 2026-11-03, failing serve's rollback (backlog B706). Only the number
 // differs: the run, its kill at the bound and the refusal past it are
-// production's.
+// production's. TestTheEarlyRollbackGivesItsBackupTenSecondsInProduction pins
+// production's bound, and TestABackupSilentPastItsBoundIsAskedAgainAtTheNextStart
+// what a backup silent past a bound comes to.
 const testBackupProbeTimeout = 2 * time.Minute
 
 // serve boots the real serve on the install's settings and binary, giving

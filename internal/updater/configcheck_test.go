@@ -156,6 +156,31 @@ func TestProbeVersionNamesTheVersionTheBinarySays(t *testing.T) {
 	}
 }
 
+// TestProbeVersionWithinAsksWithinTheBoundItIsGiven: ProbeVersionWithin is
+// ProbeVersion under the caller's bound (backlog B706). A backup that says
+// nothing past that bound is killed there, the answer says so in that bound's
+// words, and its caller is not held for the rest of the silence. One that
+// answers late but within the bound is taken.
+func TestProbeVersionWithinAsksWithinTheBoundItIsGiven(t *testing.T) {
+	t.Run("silent past its bound", func(t *testing.T) {
+		bak, _ := standInBinary(t, "bridge.bak", false, map[string]string{"version": "0.2.1", "silent": "1h"})
+		start := time.Now()
+		got, err := ProbeVersionWithin(context.Background(), bak, time.Second)
+		if err == nil || err.Error() != "it did not answer within 1s" {
+			t.Errorf("ProbeVersionWithin over a silent backup = %q, %v; want it to say it did not answer within 1s", got, err)
+		}
+		if took := time.Since(start); took > 20*time.Second {
+			t.Errorf("the silent backup held its caller %s", took)
+		}
+	})
+	t.Run("late within its bound", func(t *testing.T) {
+		bak, _ := standInBinary(t, "bridge.bak", false, map[string]string{"version": "0.2.1", "silent": "200ms"})
+		if got, err := ProbeVersionWithin(context.Background(), bak, time.Minute); err != nil || got != "0.2.1" {
+			t.Errorf("ProbeVersionWithin over a backup that answers within its bound = %q, %v; want 0.2.1", got, err)
+		}
+	})
+}
+
 func TestConfigDigestFollowsTheFileAndTheBridgeVariables(t *testing.T) {
 	cfg := filepath.Join(t.TempDir(), "bridge.yaml")
 	write := func(body string) {

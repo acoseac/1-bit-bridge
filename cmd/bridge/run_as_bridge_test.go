@@ -27,6 +27,7 @@ const (
 
 // runAsBridge is the re-exec'd test binary's whole run.
 func runAsBridge() int {
+	holdIfSilent()
 	if v := os.Getenv(runAsBridgeVersionEnv); v != "" {
 		version.ServerVersion = v
 	}
