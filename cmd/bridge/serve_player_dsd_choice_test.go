@@ -538,6 +538,71 @@ func TestALandedChoiceIsUncertainAndFencesTheNext(t *testing.T) {
 	}
 }
 
+// TestTheChoiceRouteAnswers404WhereThePlayerDoesNotRun (binding note 10): off
+// Linux the player's gate never holds (config.PlayerEnabled), whatever the
+// config asks, so serve's view of its player owns no output, /v1/health
+// advertises no bridgeDSDChoice, and the route answers the gates' 404, on
+// Windows as on macOS, its player asked nothing. The store's own refusal of a
+// write there is playback's TestAChoiceWriteOnWindowsIsRefusedAndWritesNothing,
+// on CI's Windows leg.
+func TestTheChoiceRouteAnswers404WhereThePlayerDoesNotRun(t *testing.T) {
+	for _, goos := range []string{"windows", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			cfg := playerOutputConfig(t.TempDir(), nil)
+			plan := planServePlayer(cfg, goos, true)
+			ready := make(chan struct{})
+			close(ready)
+			view := newBridgeOutput(plan, &bridgePlayer{ready: ready}, cfg)
+			if view.Enabled() || view.OwnsOutput(api.BridgeOutputID(thePlayerUUID)) {
+				t.Fatalf("on %s the view is enabled (%v) or owns the player's id: the plan %+v", goos, view.Enabled(), plan)
+			}
+			tokens, err := auth.OpenStore(filepath.Join(t.TempDir(), tokensFileName))
+			if err != nil {
+				t.Fatal(err)
+			}
+			bearer, _, err := tokens.Mint("phone")
+			if err != nil {
+				t.Fatal(err)
+			}
+			srv := api.New(&config.Config{ListenAddress: ":7788", LibraryName: "T", LibraryRoots: []string{t.TempDir()}}, tokens, nil, "fp").
+				WithLocalOutputs(api.LocalOutputsConfig{GOOS: goos, Output: func() config.OutputConfig { return config.OutputConfig{MPD: "on"} }}).
+				WithBridgeOutput(view)
+			hs := httptest.NewServer(srv.Handler())
+			t.Cleanup(hs.Close)
+			do := func(method, path, body string) (int, []byte) {
+				t.Helper()
+				req, err := http.NewRequest(method, hs.URL+path, strings.NewReader(body))
+				if err != nil {
+					t.Fatal(err)
+				}
+				req.Header.Set("Authorization", "Bearer "+bearer)
+				req.Header.Set("Content-Type", "application/json")
+				resp, err := hs.Client().Do(req)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer resp.Body.Close()
+				raw, err := io.ReadAll(resp.Body)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return resp.StatusCode, raw
+			}
+			_, raw := do(http.MethodGet, "/v1/health", "")
+			if strings.Contains(string(raw), `"bridgeDSDChoice"`) {
+				t.Errorf("on %s /v1/health advertises bridgeDSDChoice: %s", goos, raw)
+			}
+			status, raw := do(http.MethodPut, "/v1/outputs/"+api.BridgeOutputID(thePlayerUUID)+"/dsd", body("d1-0123456789abcdef", 0, dsdstate.ModeOff))
+			var e struct {
+				Error string `json:"error"`
+			}
+			if err := json.Unmarshal(raw, &e); err != nil || status != http.StatusNotFound || e.Error != "local_outputs_not_supported" {
+				t.Errorf("on %s the PUT answered %d %s, want 404 local_outputs_not_supported", goos, status, raw)
+			}
+		})
+	}
+}
+
 // TestServeTakesAChoiceThroughItsRoute (binding note 9): serve wires the
 // choice's route to its player: /v1/health advertises bridgeDSDChoice, a
 // write of the key GET /v1/outputs publishes lands in the player's DSD state
