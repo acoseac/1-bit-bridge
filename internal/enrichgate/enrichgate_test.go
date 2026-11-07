@@ -313,6 +313,16 @@ func fresh(t *testing.T) *http.Client {
 	return &http.Client{Transport: tr, Timeout: 10 * time.Second}
 }
 
+// untimed is fresh with no Timeout. http.Client ends a request's context
+// itself once its body is closed, or it fails, only when it has a deadline
+// to stop, so a test of what ends a client's watch takes a client with none.
+func untimed(t *testing.T) *http.Client {
+	t.Helper()
+	c := fresh(t)
+	c.Timeout = 0
+	return c
+}
+
 // get sends a GET on ctx through client and reads the answer.
 func get(ctx context.Context, client *http.Client, url string) (string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -571,7 +581,8 @@ func TestTheTransportAdmitsAtTheSendAndAtTheAnswer(t *testing.T) {
 // TestTheWatchEndsWithTheBodyOrTheError: a client's switches are asked while
 // its request is on the wire, and never again once the answer's body is
 // closed, or once the request fails: the watch is released there and waited
-// for, so nothing asks after Close or the error returns.
+// for, so nothing asks after Close or the error returns, on a client with no
+// Timeout too, whose own context nothing else ends.
 func TestTheWatchEndsWithTheBodyOrTheError(t *testing.T) {
 	srv := newCountingServer(t)
 	const every = time.Millisecond
@@ -595,7 +606,7 @@ func TestTheWatchEndsWithTheBodyOrTheError(t *testing.T) {
 			close(answered)
 		})
 		defer srv.setHold(nil)
-		got, err := get(context.Background(), Enrichment(s.get).Every(every).Client(fresh(t)), srv.srv.URL)
+		got, err := get(context.Background(), Enrichment(s.get).Every(every).Client(untimed(t)), srv.srv.URL)
 		if err != nil || got != "answer" {
 			t.Fatalf("get = %q, %v", got, err)
 		}
@@ -618,7 +629,7 @@ func TestTheWatchEndsWithTheBodyOrTheError(t *testing.T) {
 			panic(http.ErrAbortHandler)
 		})
 		defer srv.setHold(nil)
-		if _, err := get(context.Background(), Enrichment(s.get).Every(every).Client(fresh(t)), srv.srv.URL); err == nil || errors.Is(err, ErrOff) {
+		if _, err := get(context.Background(), Enrichment(s.get).Every(every).Client(untimed(t)), srv.srv.URL); err == nil || errors.Is(err, ErrOff) {
 			t.Fatalf("get = %v, want a transport error", err)
 		}
 		stillAsked(t, s, "the request failed")
