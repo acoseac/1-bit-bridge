@@ -120,10 +120,8 @@ func TestTheWatcherWatchesTheVolumeMountedOverANestedRootItWatchedBare(t *testin
 // goroutine is parked in an event's handling, so no look sees it away, as
 // within one debounce. kqueue keeps the watches on the first mount's revoked
 // folders, all of them still listed, so only the identity of the folder at the
-// root's path can tell. It is logged, whether the remount changed the root
-// folder's device and inode; where it changed neither, identity cannot tell
-// the two mounts apart, and the test skips, saying so: then this case is left
-// (B777).
+// root's path can tell. It logs whether the remount changed the root folder's
+// device and inode, and skips where it changed neither: backlog B777, item 3.
 func TestTheWatcherWatchesARootRemountedInsideTheDebounce(t *testing.T) {
 	dir := t.TempDir()
 	root := filepath.Join(dir, "music")
@@ -162,7 +160,7 @@ func TestTheWatcherWatchesARootRemountedInsideTheDebounce(t *testing.T) {
 	t.Logf("the root's folder was device %d inode %d on the first mount, device %d inode %d on the second", before.dev, before.ino, after.dev, after.ino)
 	if after == before {
 		park.free()
-		t.Skip("B777 item 3 left: the remount gave the root's folder the device and inode it had, so its identity cannot tell the two mounts apart, while kqueue's watches sit on the first mount's revoked folders")
+		t.Skip("the remount kept the root folder's device and inode: backlog B777, item 3")
 	}
 	park.free()
 	writeTracks(t, filepath.Join(root, "Artist", "Album", "02.flac"))

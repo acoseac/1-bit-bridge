@@ -84076,9 +84076,7 @@ point, and the mount then hides it. A configured root whose path is not there
 at all reads as unreachable and is refused, where the first upload used to
 make its folder.
 
-**Left (B776):** the look comes before the write, so a volume that goes
-between the two still takes the write. Closing it needs the writes made
-relative to a descriptor held on the root's folder, which is no small change.
+**Left open:** backlog B776, item 7.
 
 **What the tests rest on.** No mount: the guard asks nothing but
 `lookAtRoot`, which reads a root whose volume is away as a folder holding no
@@ -84231,11 +84229,10 @@ the volume's track and a file written after both indexed),
 same for a nested root) and `TestTheWatcherWatchesARootRemountedInsideTheDebounce`
 (item 3: the image detached and attached again while Run's goroutine is
 parked in an event's handling, so no look sees it away; a file written after
-indexed). The last logs the root folder's device and inode on both mounts,
-and where the remount gave it the ones it had, identity cannot tell the two
-mounts apart: it skips, saying so, and then that case is left (B777). Whether
-the device changes on a remount was not measured: this host has no
-`hdiutil` and cannot mount. On this host a link stands in for the mount where
+indexed). The last logs the root folder's device and inode on both mounts
+and skips where the remount changed neither (backlog B777, item 3). Whether a
+remount changes them was not measured: this host has no `hdiutil` and cannot
+mount. On this host a link stands in for the mount where
 the question is only that the folder at the path changed with nothing said:
 `TestTheWatcherWatchesALinkedRootAgainWhereItsLinkLeadsNow` and
 `TestTheWatcherWatchesARootRemountedInsideTheDebounceOfItsResume` leave a real
@@ -84276,6 +84273,8 @@ again each time, which I2 counted (seven Adds and six lines saying so, for one
 change), and in I4 each of those asks for a scan of the root, whose debounce
 every new ask puts back, so the scan the resume asked for never ran.
 
+**Left open:** backlog B777, item 3.
+
 ### What the orchestrator runs on a Mac
 
 On the Mac, each test alone (a red wait gives up at the deadline less 30 s),
@@ -84312,7 +84311,7 @@ and the rest); `make build-all`, its build-tag census included, and
 against main (`scripts/qualification-version -base 14aa6290 -head HEAD`)
 answers OK. `rules-b77x.patch` applies to the tree (`git apply --check`),
 and on a copy with it applied the budgets hold (scanner.md 37,976 bytes,
-admin-console.md 76,435, build-ci-tests.md 29,155; the worst load 66.5%)
+admin-console.md 76,376, build-ci-tests.md 29,155; the worst load 66.5%)
 and the 23 tests it cites are declared. Not run here: the darwin mount tests
 and the node console test above, and the red of
 `TestARootsIdentityIsTheFolderAtItsPathWhenItIsRead`, which is Windows' alone.

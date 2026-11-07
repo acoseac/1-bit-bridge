@@ -23,11 +23,10 @@ import (
 // hold's words. Only rows are at stake, never a file: nothing the console
 // writes deletes one.
 //
-// What is left (B776): the look comes before the write, so a volume that goes
-// between the two still takes the write. A root the index holds nothing of (a
-// fresh install whose volume is not mounted yet) reads as it is, as it does for
-// the watcher, so a write there lands on the bare mount point, and the mount
-// then hides it.
+// A root the index holds nothing of (a fresh install whose volume is not
+// mounted yet) reads as it is, as it does for the watcher, so a write there
+// lands on the bare mount point, and the mount then hides it. One case stays
+// open: backlog B776, item 7.
 
 // ErrRootNotMounted is what a write refused under a library root that reads as
 // a volume not mounted matches (errors.Is): every *RootAwayError.

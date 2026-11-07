@@ -68,12 +68,11 @@ import (
 // folder at its path, which the check finds and watches, with a scan (B777).
 // kqueue (macOS) keeps the watched folders of an unmounted volume open, so
 // there a volume that goes is seen by the debounced dispatch's look, and a
-// volume mounted again by its root's identity alone: one whose remount gives
-// the root's folder the device and inode it had cannot be told from the first
-// mount (B777, left). A container's bind mount made before the host mounts the
-// volume never sees the mount (Docker's default propagation, rprivate): there
-// the root reads as the bare mount point until the container is restarted
-// (ops/deployment-runbook.md).
+// volume mounted again by its root's identity alone; one case stays open:
+// backlog B777, item 3. A container's bind mount made before the host mounts
+// the volume never sees the mount (Docker's default propagation, rprivate):
+// there the root reads as the bare mount point until the container is
+// restarted (ops/deployment-runbook.md).
 
 // The words a root that reads as a volume not mounted is told by: the hold's
 // line and its hint, and the console's refusal of a write into such a root
