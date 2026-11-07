@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -979,6 +980,95 @@ func TestASeekInAConvertedTrackIsUnsupported(t *testing.T) {
 	if v := d.k.View(); v.Opens != 1 {
 		t.Errorf("%d opens: a refused seek starts no session", v.Opens)
 	}
+}
+
+// TestAConvertedActivationBesideARefreshThatKeepsIt (B728 B11 round 2): a
+// refresh that publishes a set which keeps a converted occurrence (another
+// rate's plan changed: the choice's cap lowered from DSD128 to DSD64, which
+// takes DSD128 from native to converted, and DSD256 converted under both)
+// reconciles the occurrence while its output is being activated, rewriting
+// the set it is admitted under as the activation decides how to activate it.
+// The activation decides from what the occurrence's open fixed and judges it
+// under the session's lock, so the two never race: the activation is held at
+// its first step (playback.Seams.Activation), the refresh where it has
+// published and not reconciled (Seams.Published), and both are let go at
+// once, the activation's reads and the refresh's write unordered, which the
+// race detector make test runs under reports. The occurrence plays on, kept
+// under the new set, the DAC given every converted frame once.
+func TestAConvertedActivationBesideARefreshThatKeepsIt(t *testing.T) {
+	capped := func(max int, revision uint64) dsdstate.State {
+		st := playbacktest.ChoiceState(dsdstate.ModeAuto)
+		st.DACs[0].Choice.MaxBitRate, st.DACs[0].Choice.Revision = max, revision
+		return st
+	}
+	activating, letActivate := make(chan struct{}), make(chan struct{})
+	published, letReconcile := make(chan struct{}), make(chan struct{})
+	var actOnce, pubOnce, goActivate, goReconcile sync.Once
+	var armed atomic.Bool
+	d := newDSDRig(t, capped(playbacktest.DSD128, 1), func(o *rigOptions) {
+		if o.seams == nil {
+			o.seams = &playback.Seams{}
+		}
+		o.seams.Activation = func(engine.OccurrenceID) {
+			actOnce.Do(func() {
+				close(activating)
+				<-letActivate
+			})
+		}
+		o.seams.Published = func() {
+			if armed.Load() {
+				pubOnce.Do(func() {
+					close(published)
+					<-letReconcile
+				})
+			}
+		}
+	})
+	activate := func() { goActivate.Do(func() { close(letActivate) }) }
+	reconcile := func() { goReconcile.Do(func() { close(letReconcile) }) }
+	t.Cleanup(func() { activate(); reconcile() })
+	waitFor := func(what string, c <-chan struct{}) {
+		t.Helper()
+		select {
+		case <-c:
+		case <-time.After(alsapcm.Watchdog()):
+			alsapcm.LogGoroutines(t)
+			t.Fatalf("%s did not come within %v", what, alsapcm.Watchdog())
+		}
+	}
+	a := track(playbacktest.DSD256, 0.25, noise(1))
+	d.files.add("a", a)
+	d.insert("a")
+	go func() { _ = d.eng.Play(bg) }()
+	waitFor("the converted occurrence's activation", activating)
+	armed.Store(true)
+	d.store.Set(capped(playbacktest.DSD64, 2))
+	refreshed := make(chan struct{})
+	go func() {
+		defer close(refreshed)
+		d.be.RefreshDSD(true)
+	}()
+	waitFor("the refresh's publication", published)
+	activate()
+	reconcile()
+	waitFor("the refresh's end", refreshed)
+	d.k.Free()
+	s := d.waitStopped(engine.ReasonEndOfQueue)
+	if len(s.Skips()) != 0 || len(s.Faults()) != 0 {
+		t.Fatalf("the kept occurrence skipped %+v or faulted %+v", s.Skips(), s.Faults())
+	}
+	var converts []int
+	for _, c := range d.be.Policy().Converted {
+		converts = append(converts, c.BitRate)
+	}
+	if !slices.Equal(converts, []int{playbacktest.DSD128, playbacktest.DSD256}) {
+		t.Errorf("the new set converts %v, want DSD128 and DSD256", converts)
+	}
+	if v := d.k.View(); v.Opens != 1 || v.Committed != format.S243LE {
+		t.Errorf("%d opens, %s committed; want the one open in S24_3LE", v.Opens, v.Committed)
+	}
+	want, _ := converted(t, a, convPlan)
+	same(t, "the DAC was given", unpack(t, d.k.Heard(), format.S243LE, 24), want)
 }
 
 // lockedWriter is a writer under a mutex, for a log the backend's goroutines

@@ -129,6 +129,18 @@ type Seams struct {
 	// predecessor's window, is handed to the producer, before the call waits
 	// for its answer.
 	Converting func(step string, o engine.OccurrenceID)
+	// Activation runs on the activating goroutine as an occurrence's output
+	// is about to be activated, before the activation decides anything of
+	// the occurrence (B728 B11 round 2): a test holds it there while a
+	// refresh reconciles the occurrence. It may block.
+	Activation func(o engine.OccurrenceID)
+}
+
+// activation is the Activation seam.
+func (b *Backend) activation(o engine.OccurrenceID) {
+	if sm := b.cfg.Seams; sm != nil && sm.Activation != nil {
+		sm.Activation(o)
+	}
 }
 
 // converting is the Converting seam.

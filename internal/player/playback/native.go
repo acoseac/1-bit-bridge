@@ -255,6 +255,7 @@ func (s *session) openNativeOutput(ctx context.Context, o *occ) (*output, error)
 	return out, nil
 }
 func (s *session) activateOutput(ctx context.Context, o *occ, out *output) error {
+	s.b.activation(o.id)
 	if out.native == nil {
 		if o.converts() {
 			// A converted occurrence's activation reads the effective policy
