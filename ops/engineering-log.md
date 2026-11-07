@@ -82092,3 +82092,143 @@ and the identity's backup, 359 s); `make test` (race, the Makefile's tags,
 ./internal/acoustid/... ./cmd/bridge/...`, ok (`cmd/bridge` 1,024 s). Not
 run here: `make build-all`, macOS and Windows natively, CI's runners, and
 the iOS app.
+
+## 2026-11-07 — B617, round 5: the rule as kept, a written cover is final, one warm stand-in
+
+The review of PR #1425 asked for three things: the rule said as the code
+keeps it, the one defect that rule left, and the windows-latest failure of
+the live switch's test. Worker b617, the same host and toolchain, on the
+orchestrator's merge of main, 8a49f1ad (B489's format view now rides through
+`enrichmentProgressBlock` beside B617's `on`). New commits: a written premium
+cover is final (point 2) 7b0a5cf8, the live-switch test's one warm stand-in
+(point 3) 9772f37d, the rule in the comments and docs (point 1) cbe27be0,
+then this record. The rules' wording goes in `rules-b617-r5.patch`, over the
+tree's.
+
+### The points
+
+1. **The rule, as kept (the owner's decision).** Round 4's reviewers found
+   windows against "Don't … take or write what a pass learns after the
+   flip, an answer completed after it included": a cover whose body finishes
+   inside the second after the flip lands in the cache. Closing all of them
+   would put the switch in the shared atomic writer, its rename retries,
+   every stream's terminal errors and every caller that persists a buffered
+   answer, and nothing goes out in those windows: the request was sent
+   already, and the switch exists to stop outbound lookups. So the rule
+   changed and the code did not grow: off stops every request from being
+   sent and cuts one in flight within `enrichgate.Interval`; what an answer
+   that finished inside that interval gives may be written locally, and
+   nothing further goes out; a refusal is `ErrOff`, the upstream not asked,
+   never a terminal miss, so nothing is lost when the switch comes back.
+   `enrichgate`'s package doc, its Transport and Answer docs, the enricher's
+   switch notes and `Run`, the Cover Art Archive's, iTunes' and the premium
+   fetcher's constructors, the cover adapter, the fingerprint sweep, the
+   docker doc's `BRIDGE_ENRICH_ENABLED` row and the settings matrix's
+   `enrichEnabled` row say so now, and round 4's record says what round 5
+   changed of it. No gate was added, and round 4's checks at the returns
+   that wrote nothing stay. The B617 bullet has no long form: no
+   `ops/History-*` file holds it. `PROTOCOL.md` describes the off state, not
+   the second after the flip, and needed no change.
+2. **Confirmed: a file and a return that disagreed.** Round 4's deferred
+   check in the premium fetcher ran after its cache write. On 8a49f1ad, with
+   round 4's barrier turning the switch off as the 200's body was first
+   read: `TryCache` answered false with the cover whole on disk, so the
+   enricher went on to fetch it again, and `RefetchPremium` answered
+   `(false, ErrOff)` with the premium bytes already over the old cover, so
+   the cover adapter answered a pause, kept the stale tiers, and the harvest
+   kept the cover pending to fetch again. Once `writeArtworkAtomicStream`
+   returns nil the cover is at its path (`RenameWithRetry` never fails once
+   its rename has landed; a refused rename onto the same bytes is taken), so
+   that success is final: the deferred check applies only while nothing is
+   written (`written`). The test that pinned the old result is
+   `TestAPremiumCoverWrittenAfterTheFlipIsCached` now (true, and the cover
+   whole), beside `TestAPremiumUpgradeWrittenAfterTheFlipIsGot`. No other
+   client writes before it returns: Deezer's portrait is read whole by
+   `FetchImage` and written by `ensureArtistImageCached` after the client
+   returned, the Cover Art Archive's and iTunes' streams by
+   `ensureArtworkCached`, and nothing asks the switch after those writes,
+   so a committed write there was final already; AcoustID's sweep asks the
+   switch before each write (`admitted`) and none after; the lyrics tier
+   asks no switch (nothing in it imports `enrichgate`). Those are left
+   alone.
+3. **The Windows fake, and its fix.** The fake fpcalc was a copy of the
+   running test binary, `fpcalc.exe` on Windows (`standintest.Install`; a
+   hard link where one can be made), re-exec'd through `TestMain`
+   (`BRIDGE_FPCALC_STAND_IN`), no shell wrapper, so no child keeps its
+   output open past its exit. `newLookupRun` wrote it into a new
+   `t.TempDir` made the whole of `PATH`, once per case: five copies for the
+   test's five cases. Windows scans a new executable's first start, and the
+   probe gives `fpcalc -version` 2 s (`probeTimeout`): three cases stopped
+   at the real precheck and sent no lookup, and the test, which saw no
+   flip, said "the switch was never changed" (`:247`), or, in the middle
+   cases, waited ten seconds for a cut that never came (`:244`). Reproduced
+   on Linux by giving each copy's first `-version` start 3 s: the old test
+   failed all five cases, with those lines and words. The test installs one
+   copy now and starts it once as the probe does, under two minutes it must
+   finish within (`installWarmFpcalcStandIn`); every run keeps the real
+   precheck, and a case whose run stopped there fails first, by the probe's
+   name and in its words (`requireTheProbePassed`). Under the same
+   simulation the new test passed, its warm-up taking the 3 s. Measured on
+   the way: a stand-in built with `-race` slept a second as it exited (the
+   race runtime's `atexit_sleep_ms`) at every start, half the probe's bound
+   (1.036 s a start; 0.033 s with the sleep off; 0.010 s built without
+   `-race`): `installFpcalcStandIn` turns that off for the stand-in, and
+   the live-switch test went from 16 s to 5 s under `-race`. The Windows leg
+   runs without `-race` (gate.yml), so there the cold start was the whole
+   of it. The probe's 2 s is unchanged: for an operator it is right for a
+   warm fpcalc, a native binary that answers `-version` in milliseconds;
+   a first run an antivirus scan holds past it fails that one run with the
+   precheck's own words, and a rerun passes, which is B706's question for
+   the backup probe, where a change would be decided. In CI, the
+   `test (windows-latest)` log for
+   `TestBridgeFingerprintFollowsItsSwitchWhileItRuns` should show the
+   warm-up's line ("the stand-in's first start answered -version in …",
+   the cold start's cost, once) and five cases passing; a case that fails
+   there says `fpcalc precheck:` first, never "the switch was never
+   changed".
+
+### Red first
+
+Point 2's tests ran on 8a49f1ad first:
+`TestAPremiumCoverWrittenAfterTheFlipIsCached` red ("a cover written after
+the switch-off answered not cached") and
+`TestAPremiumUpgradeWrittenAfterTheFlipIsGot` red (`RefetchPremium = (false,
+enrichment is switched off (enrich.enabled): context canceled)`). Point 3's
+red is the simulation above, on the same tree. Point 1 changes no behaviour.
+
+### Negative controls (each on the committed tree, restored after)
+
+Predictions written first, in `controls_r3.predictions.txt` beside the
+runners; the tree was clean after each.
+
+| Mutation | Predicted red | Held |
+|---|---|---|
+| (r5-2a) `TryCache`'s check put back over a committed write | the cached test alone | yes |
+| (r5-2b) `RefetchPremium`'s check put back over a committed write | the upgrade test alone | yes |
+| (r5-2c) `RefetchPremium` asks nothing at the returns that wrote nothing | the error test's Atlas subtest alone | yes |
+| (r5-3a) the stand-in shared but not warmed, under the simulation | the first case alone, by the probe's name | yes |
+| (r5-3b) a stand-in per case again, under the simulation | all five cases by the probe's name, none "never changed" | yes |
+| (r5-3c) every `-version` start slow | all five cases by the probe's name; the first-read test green | yes |
+
+The fix under the simulation passed (its warm-up 3.0 s). Every control built,
+and every prediction held.
+
+### Gates
+
+On cbe27be0: `make fmt` changed nothing, and gofmt (go1.27.3's) over the Go
+files the branch changes is clean; `make docs-check`, ok, and the doc
+budgets, ok, on a copy with `rules-b617-r5.patch` applied over the tree's
+rules, which `git apply --check` takes; the qualification check against
+main (`scripts/qualification-version` from the merge base, 123a80fa), ok.
+Through the build lock: `make vet` native and with `GOOS=windows`,
+`GOOS=darwin`, `GOOS=linux GOARCH=386` and `GOOS=linux GOARCH=arm`, ok;
+`make test-fast`, 88 packages ok (24 from Go's test cache), and `cmd/bridge`
+failed on one test alone, `TestEveryCitedTestNameExists`, on the renamed
+premium test the tree's `.claude/rules/enrichment.md` still cites until the
+patch is applied; `make test` (race, `-timeout 30m`) over
+`./internal/enrich/... ./internal/enrichgate/... ./cmd/bridge/...`, ok but
+for that same test (`cmd/bridge` 1,049 s, `internal/enrich` 105 s, no race
+reported); and `TestEveryCitedTestNameExists` on a `git archive` copy of
+the tree with the patch applied, ok. Not run here: Windows and macOS
+natively (the Windows fix is for CI's `test (windows-latest)` to show),
+`make build-all`, and the iOS app.
