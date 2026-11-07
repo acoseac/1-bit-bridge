@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/dlna"
+	"github.com/acoseac/1-bit-bridge/internal/formatgate"
 	bridgefs "github.com/acoseac/1-bit-bridge/internal/fs"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
@@ -101,7 +102,7 @@ func newSACDCDSFixture(t *testing.T) sacdCDSFixture {
 		t.Fatal("the routed row meant to have the virtual shape does not")
 	}
 
-	adapter := newManifestLibraryAdapter(store, bridgefs.New([]string{root}), []string{root}, testLogger())
+	adapter := newManifestLibraryAdapter(store, bridgefs.New([]string{root}), []string{root}, formatgate.Set{}, testLogger())
 	f.cds = dlna.ContentDirectoryHandler(adapter, func(*http.Request) string { return "http://bridge.test:7790" })
 	return f
 }
@@ -308,7 +309,7 @@ func TestTheSACDVirtualFilterReadsTheRoutingAtEachRebuild(t *testing.T) {
 		Title: "Later Disc", Artist: "Glasswing", Album: "Later Disc"}); err != nil {
 		t.Fatalf("UpsertTrack: %v", err)
 	}
-	adapter := newManifestLibraryAdapter(store, bridgefs.New([]string{root}), []string{root}, testLogger())
+	adapter := newManifestLibraryAdapter(store, bridgefs.New([]string{root}), []string{root}, formatgate.Set{}, testLogger())
 	id := dlna.TrackID("", p)
 	if _, ok := adapter.GetTrackInfo(id); ok {
 		t.Fatal("an unrouted row of the virtual shape is listed")

@@ -678,7 +678,8 @@ func TestDhowdenStillRenamesRepeatedID3v2FramesOneLookupAtATime(t *testing.T) {
 // TestEveryDhowdenReadIsGuarded pins the call sites: every call of a dhowden
 // reader in this package's production code sits in a function that asks the
 // guards for what that reader reads, and a reader with no guard is not called
-// at all. A new call site that skipped them would hand dhowden a crafted tag.
+// at all, but the ID3v1 reader, which reads 128 bytes and needs none. A new
+// call site that skipped them would hand dhowden a crafted tag.
 // And every such call reads the stream a newDhowdenReadBuffer call in the same
 // function returned (backlog B117): handed the file itself, dhowden reads an
 // unsynchronised tag a read(2) per byte.
@@ -686,6 +687,11 @@ func TestEveryDhowdenReadIsGuarded(t *testing.T) {
 	guardsFor := map[string][]string{
 		"ReadFrom":      {"dhowdenPicturesWithinBudget", "dhowdenID3v2WithinBudget"},
 		"ReadID3v2Tags": {"id3v2TagWithinBudget"},
+		// The ID3v1 reader needs no guard: it reads the last 128 bytes and
+		// nothing else, and no length in them sizes anything (a WavPack or
+		// Monkey's Audio file's fallback, backlog B489). Its stream is still
+		// a buffered one.
+		"ReadID3v1Tags": nil,
 	}
 	entries, err := os.ReadDir(".")
 	if err != nil {
@@ -764,8 +770,8 @@ func TestEveryDhowdenReadIsGuarded(t *testing.T) {
 			}
 		}
 	}
-	if checked < 3 {
-		t.Fatalf("found %d dhowden reads, want the 3 this package makes: the sweep is not reading what it should", checked)
+	if checked < 4 {
+		t.Fatalf("found %d dhowden reads, want the 4 this package makes: the sweep is not reading what it should", checked)
 	}
 }
 

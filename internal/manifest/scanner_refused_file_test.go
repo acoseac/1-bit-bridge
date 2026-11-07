@@ -48,10 +48,12 @@ func refusalLines(rec *loggingtest.Recorder, base string) []string {
 }
 
 // refusedFormats are the files of each extractor that refuses a file it
-// read whole as not its format: the DSF, DFF, AIFF and WAV walks, each over
-// bytes whose header is not one (writeJunkDSF's). Every other extractor
-// reads what it can of a file that is not its format and refuses nothing.
-var refusedFormats = []string{"Artist/Album/bad.dsf", "Artist/Album/bad.dff", "Artist/Album/bad.aiff", "Artist/Album/bad.wav"}
+// read whole as not its format: the DSF, DFF, AIFF and WAV walks and the
+// WavPack and Monkey's Audio readers (backlog B489), each over bytes whose
+// header is not one (writeJunkDSF's). Every other extractor reads what it
+// can of a file that is not its format and refuses nothing.
+var refusedFormats = []string{"Artist/Album/bad.dsf", "Artist/Album/bad.dff", "Artist/Album/bad.aiff", "Artist/Album/bad.wav",
+	"Artist/Album/bad.wv", "Artist/Album/bad.ape"}
 
 // indexRefused writes the refused file into f's library and indexes it, and
 // returns what the scan logged from then on.

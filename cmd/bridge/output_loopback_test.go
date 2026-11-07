@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"go/ast"
@@ -134,6 +135,13 @@ func TestServeServesItsTracksOnLoopbackWhileOutputIsOn(t *testing.T) {
 		t.Fatal(err)
 	}
 	seedTrack(t, dataDir, "a.flac", len(track))
+	// A WavPack file (backlog B489): the route serves every format as it is
+	// to the MPD beside the bridge, where the ContentDirectory offers none.
+	wv := append([]byte("wvpk"), bytes.Repeat([]byte{0x5A}, 4092)...)
+	if err := os.WriteFile(filepath.Join(music, "b.wv"), wv, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	seedTrack(t, dataDir, "b.wv", len(wv))
 	// A row whose path leaves the root: the index resolver refuses it, so
 	// the route has nothing to serve for it.
 	seedTrack(t, dataDir, "../outside/secret.flac", len(secret))
@@ -153,6 +161,10 @@ func TestServeServesItsTracksOnLoopbackWhileOutputIsOn(t *testing.T) {
 	status, body, _ := loopbackFetch(t, s.base, "a.flac")
 	if status != http.StatusOK || string(body) != string(track) {
 		t.Fatalf("a.flac: status %d, %d bytes of %d", status, len(body), len(track))
+	}
+	status, body, _ = loopbackFetch(t, s.base, "b.wv")
+	if status != http.StatusOK || !bytes.Equal(body, wv) {
+		t.Fatalf("b.wv: status %d, %d bytes of %d: the loopback route serves every format as it is", status, len(body), len(wv))
 	}
 	status, body, code := loopbackFetch(t, s.base, "../outside/secret.flac")
 	if status != http.StatusNotFound || code != "not_found" || strings.Contains(string(body), string(secret[:64])) {

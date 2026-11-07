@@ -355,6 +355,44 @@ func TestScanRunsAndReports0(t *testing.T) {
 	}
 }
 
+// TestScanSaysHowManyWavPackAndMonkeysAudioFilesItHolds: bridge scan's
+// summary says how many indexed tracks are WavPack or Monkey's Audio files,
+// and who lists them (backlog B489), counted by the path as the client
+// format gate reads it, a file its extractor refused included; a library
+// with none has no such line. The console lists them and offers their
+// download, marked not playable (round 5, a reviewer: the line said the
+// console's player left them out).
+func TestScanSaysHowManyWavPackAndMonkeysAudioFilesItHolds(t *testing.T) {
+	cfgPath := writeValidConfig(t)
+	stdout, _, code := runCapture(t, "scan", "--config", cfgPath)
+	// The test's name, in its temporary directory, names the formats too.
+	if code != 0 || strings.Contains(stdout, "of them") {
+		t.Fatalf("an empty library: exit %d, %q", code, stdout)
+	}
+	lib := filepath.Join(filepath.Dir(cfgPath), "Music")
+	for _, name := range []string{"a.wv", "b.APE", "c.flac"} {
+		if err := os.WriteFile(filepath.Join(lib, name), []byte("not audio"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stdout, stderr, code := runCapture(t, "scan", "--config", cfgPath)
+	if code != 0 {
+		t.Fatalf("scan exit %d: %s", code, stderr)
+	}
+	if want := gatedFormatSummary(2); !strings.Contains(stdout, want) {
+		t.Errorf("scan stdout %q does not say %q", stdout, want)
+	}
+	if !strings.Contains(gatedFormatSummary(2), "The library holds 2 WavPack or Monkey's Audio files") ||
+		!strings.Contains(gatedFormatSummary(1), "The library holds 1 WavPack or Monkey's Audio file") {
+		t.Errorf("the summary's words: %q, %q", gatedFormatSummary(2), gatedFormatSummary(1))
+	}
+	if s := gatedFormatSummary(2); strings.Contains(s, "console's player") ||
+		!strings.Contains(s, "left out for earlier versions of the app and DLNA renderers") ||
+		!strings.Contains(s, "the console lists them and offers their download, marked not playable in a browser") {
+		t.Errorf("the summary does not say what the console does with them: %q", s)
+	}
+}
+
 func TestScanMissingConfigReturns2(t *testing.T) {
 	_, stderr, code := runCapture(t, "scan", "--config", "/nonexistent/bridge.yaml")
 	if code != 2 {

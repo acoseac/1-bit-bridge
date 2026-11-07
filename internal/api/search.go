@@ -24,6 +24,7 @@ import (
 	"strconv"
 	"unicode/utf8"
 
+	"github.com/acoseac/1-bit-bridge/internal/formatgate"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
@@ -48,9 +49,10 @@ const (
 // widened into ManifestProvider itself, so the several test doubles that
 // implement that interface do not all have to grow a search method they
 // do not use — and so a provider genuinely without search degrades to a
-// clean 503 rather than failing to compile.
+// clean 503 rather than failing to compile. The hits are the view the
+// request declared (formats.go).
 type ServedSearcher interface {
-	SearchServedTracks(ctx context.Context, query string, limit int) ([]manifest.TrackHit, error)
+	SearchServedTracks(ctx context.Context, query string, limit int, view formatgate.Set) ([]manifest.TrackHit, error)
 }
 
 // searchTrackHit is the wire DTO. A DTO rather than manifest.TrackHit
@@ -107,7 +109,8 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request) {
 		limit = n
 	}
 
-	hits, err := searcher.SearchServedTracks(r.Context(), q, limit)
+	varyOnFormats(w.Header())
+	hits, err := searcher.SearchServedTracks(r.Context(), q, limit, requestFormats(r))
 	if err != nil {
 		// A CANCELLED request is the normal case here, not a fault. This
 		// endpoint is called per keystroke, so a client that keeps typing

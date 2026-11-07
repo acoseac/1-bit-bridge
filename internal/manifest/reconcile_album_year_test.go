@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/dupes"
+	"github.com/acoseac/1-bit-bridge/internal/formatgate"
 )
 
 // Backlog B756: one physical album has one year. The owner's Albums view
@@ -239,7 +240,7 @@ func TestScanner_AnAlbumIndexedBeforeTheRuleTakesOneYearAtTheNextFullScan(t *tes
 	scanOnce(t, sc, "the first scan after the upgrade")
 
 	requireAlbumYear(t, store, "the first scan after the upgrade", rels, 2011)
-	delta, err := BuildManifest(ctx, store, []string{root}, since)
+	delta, err := BuildManifest(ctx, store, []string{root}, since, formatgate.All())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -629,7 +630,7 @@ func TestScanner_AnotherFoldersCopyOfARewrittenTrackIsSuppressedNotLost(t *testi
 
 			scanOnce(t, sc, "the first scan after the upgrade")
 
-			served, err := store.ListServedTracks(ctx, nil)
+			served, err := store.ListServedTracks(ctx, nil, formatgate.All())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -656,7 +657,7 @@ func TestScanner_AnotherFoldersCopyOfARewrittenTrackIsSuppressedNotLost(t *testi
 				t.Errorf("the store holds %d rows, want all %d: suppression deletes no row", len(paths), len(rels)+len(copies))
 			}
 
-			delta, err := BuildManifest(ctx, store, []string{root}, since)
+			delta, err := BuildManifest(ctx, store, []string{root}, since, formatgate.All())
 			if err != nil {
 				t.Fatal(err)
 			}

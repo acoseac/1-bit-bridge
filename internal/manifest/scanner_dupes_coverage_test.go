@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/dupes"
+	"github.com/acoseac/1-bit-bridge/internal/formatgate"
 )
 
 // seedFileBackedTrack writes `size` bytes at abs and upserts a row whose
@@ -89,7 +90,7 @@ func TestScanSubtree_RestampsAfterReapingTheServedWinner(t *testing.T) {
 		t.Errorf("surviving copy still suppressed after its winner was reaped: %+v — "+
 			"nothing in the group is served, so the album is invisible to every client", st)
 	}
-	if n, _ := store.CountServedTracks(ctx); n != 1 {
+	if n, _ := store.CountServedTracks(ctx, formatgate.All()); n != 1 {
 		t.Errorf("served tracks = %d, want 1 (the surviving copy)", n)
 	}
 }

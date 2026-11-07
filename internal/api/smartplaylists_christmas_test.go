@@ -74,6 +74,21 @@ func feedServer(t *testing.T, mstore *manifest.Store, demo bool) (get func() sma
 	return get, clock
 }
 
+// fifteenCarols is a cached Christmas family's items that clear the floor in
+// every view: fifteen FLACs by three choirs.
+func fifteenCarols(t *testing.T) []byte {
+	t.Helper()
+	var its []manifest.SmartPlaylistItem
+	for i := 0; i < 15; i++ {
+		its = append(its, manifest.SmartPlaylistItem{Position: i, Path: fmt.Sprintf("/carol%02d.flac", i), Artist: fmt.Sprintf("Choir %d", i%3)})
+	}
+	raw, err := json.Marshal(its)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
 func openFeedStore(t *testing.T) *manifest.Store {
 	t.Helper()
 	s, err := manifest.OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
@@ -102,7 +117,7 @@ func TestTheChristmasFamilyIsServedOnlyInItsWindow(t *testing.T) {
 			{Slug: "daily-mix", Kind: "dailyMix", Title: "Daily Mix", Position: 0, RefreshedAt: 100,
 				ItemsJSON: []byte(`[{"position":0,"path":"/a.flac"}]`)},
 			{Slug: "christmas", Kind: "christmas", Title: "Christmas", Position: 1, RefreshedAt: 200,
-				ItemsJSON: []byte(`[{"position":0,"path":"/carol.flac"}]`)},
+				ItemsJSON: fifteenCarols(t)},
 			{Slug: "time-of-day", Kind: "timeOfDay", Title: "For Right Now", Position: 2, RefreshedAt: 100,
 				ItemsJSON: noon},
 		}); err != nil {

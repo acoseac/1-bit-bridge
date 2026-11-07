@@ -23,6 +23,7 @@ var libraryFileReaders = map[string]string{
 	"readFolderArt":         "a folder's cover",
 	"readSidecarCandidate":  "a lyrics sidecar",
 	"readPlaylistFile":      "a playlist file (.m3u / .m3u8), read whole or not written (backlog B431)",
+	"openCorrectionFile":    "a hybrid WavPack file's correction file (.wvc), whose read that does not complete is the extraction's (observeCorrection, backlog B489)",
 	"rescaleOneArtworkFile": "a cover in the artwork cache",
 	"jpegHeaderDimensions":  "a cover in the artwork cache",
 	"EnsureThumb":           "a cover in the artwork cache",

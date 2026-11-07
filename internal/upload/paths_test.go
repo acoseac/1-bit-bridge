@@ -130,6 +130,25 @@ func TestAcceptedExtUsesTheScannersOwnAudioSet(t *testing.T) {
 	}
 }
 
+// TestAWavPackCorrectionFileIsUploadedBesideItsTrack: a hybrid WavPack file is
+// lossless only with its correction file (backlog B489), which the scanner
+// reads as the row's dependency and never as a track, so an upload takes a
+// .wvc as a companion, never as audio, and takes the .wv and the .ape as
+// audio (manifest.Ext), whatever their case.
+func TestAWavPackCorrectionFileIsUploadedBesideItsTrack(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		accepted, audio bool
+	}{
+		{"01 a.wvc", true, false}, {"01 a.WVC", true, false},
+		{"01 a.wv", true, true}, {"01 a.WV", true, true}, {"01 a.ape", true, true},
+	} {
+		if accepted, audio := AcceptedExt(tc.name); accepted != tc.accepted || audio != tc.audio {
+			t.Errorf("AcceptedExt(%q) = (%v, %v), want (%v, %v)", tc.name, accepted, audio, tc.accepted, tc.audio)
+		}
+	}
+}
+
 func TestIsUnderStaging(t *testing.T) {
 	for _, p := range []string{
 		StagingDirName + "/sid/f.part",

@@ -70,14 +70,20 @@ func (q QualityBucket) IsDSD() bool {
 var lossyCodecs = map[string]struct{}{
 	"MP3": {}, "AAC": {}, "M4A": {}, "OGG": {}, "OPUS": {}, "WMA": {}, "VORBIS": {},
 	"ULAW": {}, "ALAW": {}, "IMA4": {}, "ADPCM": {}, "GSM": {}, "MP2": {},
+	// A hybrid WavPack file with no correction file beside it (backlog
+	// B489): the bridge's own token, lossy wherever the bridge ranks one.
+	"WAVPACK-LOSSY": {},
 }
 
 // losslessPCMCodecs is the allowlist for the CD / hi-res tiers. An
 // unknown codec deliberately reaches NEITHER — it lands in
 // QualityUnknown, matching iOS's rule that a nil/empty codec matches
-// only "All".
+// only "All". "APE" and "WV" are iOS's own names; "WAVPACK" is the
+// bridge's for a lossless WavPack file (backlog B489), whose DSD form,
+// "WAVPACK-DSD", is a DSD row and tiered as one.
 var losslessPCMCodecs = map[string]struct{}{
 	"FLAC": {}, "ALAC": {}, "WAV": {}, "AIFF": {}, "AIF": {}, "PCM": {}, "APE": {}, "WV": {},
+	"WAVPACK": {},
 }
 
 // DSD sample rates. DSD64 is 2.8224 MHz, DSD128 double that; anything

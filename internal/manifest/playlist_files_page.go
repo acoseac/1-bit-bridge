@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"unicode/utf8"
 
+	"github.com/acoseac/1-bit-bridge/internal/formatgate"
 	"github.com/acoseac/1-bit-bridge/internal/version"
 )
 
@@ -137,22 +138,30 @@ var ErrPlaylistFilesChanged = errors.New("manifest: the playlist files changed s
 // rule, the lookup, the album-folder rule, the page budget), so a client
 // paging across a bridge that took the change restarts. A release's own
 // version is folded in as well. 2: a byte of invalid UTF-8 costs what the
-// encoder writes for it, three bytes from Go 1.27 (B452).
-const playlistFeedRulesVersion = 2
+// encoder writes for it, three bytes from Go 1.27 (B452). 3: a line naming a
+// track of a format the request's view does not declare is unresolved in
+// that view, and the album-folder rule counts the view's tracks alone
+// (backlog B489). 4: a line naming a suppressed duplicate is the one served
+// copy of its group the view takes, whatever its own format (servedCopyIn;
+// round 5 of backlog B489).
+const playlistFeedRulesVersion = 4
 
-// playlistFeedVersion is the feed's version: a hash of the rules, the
-// encoder's cost of a byte of invalid UTF-8 (jsonInvalidByteBytes, which
-// decides where pages split for the same rows), the build, the install's
-// backup epoch (a restored database is another history), the generation
-// the v57 triggers keep (any track or playlist row change a page could
-// show) and the completeness mark. Read in the page's own transaction.
-func playlistFeedVersion(ctx context.Context, tx *sql.Tx) (string, bool, error) {
-	return playlistFeedVersionAt(ctx, tx, jsonInvalidByteBytes)
+// playlistFeedVersion is the feed's version in a client's view: a hash of
+// the rules, the encoder's cost of a byte of invalid UTF-8
+// (jsonInvalidByteBytes, which decides where pages split for the same rows),
+// the build, the install's backup epoch (a restored database is another
+// history), the generation the v57 triggers keep (any track or playlist row
+// change a page could show), the completeness mark and the view
+// (format_view.go: the pages of two views answer differently for the same
+// rows, so a cursor of one is stale in the other). Read in the page's own
+// transaction.
+func playlistFeedVersion(ctx context.Context, tx *sql.Tx, view formatgate.Set) (string, bool, error) {
+	return playlistFeedVersionAt(ctx, tx, jsonInvalidByteBytes, view)
 }
 
 // playlistFeedVersionAt is playlistFeedVersion for an encoder that writes
 // a byte of invalid UTF-8 in invalidByteBytes; a test passes another.
-func playlistFeedVersionAt(ctx context.Context, tx *sql.Tx, invalidByteBytes int) (string, bool, error) {
+func playlistFeedVersionAt(ctx context.Context, tx *sql.Tx, invalidByteBytes int, view formatgate.Set) (string, bool, error) {
 	epoch, err := readEpoch(ctx, tx)
 	if err != nil {
 		return "", false, fmt.Errorf("playlist feed version: %w", err)
@@ -167,8 +176,8 @@ func playlistFeedVersionAt(ctx context.Context, tx *sql.Tx, invalidByteBytes int
 		return "", false, fmt.Errorf("playlist feed version: %w", err)
 	}
 	complete := marked > 0
-	sum := sha256.Sum256(fmt.Appendf(nil, "playlist-files\x00%d\x00%d\x00%s\x00%s\x00%d\x00%t",
-		playlistFeedRulesVersion, invalidByteBytes, version.ServerVersion, epoch, gen, complete))
+	sum := sha256.Sum256(fmt.Appendf(nil, "playlist-files\x00%d\x00%d\x00%s\x00%s\x00%d\x00%t\x00%s",
+		playlistFeedRulesVersion, invalidByteBytes, version.ServerVersion, epoch, gen, complete, view.Key()))
 	return hex.EncodeToString(sum[:8]), complete, nil
 }
 
@@ -223,19 +232,26 @@ func playlistFeedVersionAt(ctx context.Context, tx *sql.Tx, invalidByteBytes int
 // A track there is any row the index holds, a suppressed duplicate
 // included, and the rule reads the tracks the lines name, before the
 // duplicate mapping.
-func (s *Store) PlaylistFilesPage(ctx context.Context, want, after string) (PlaylistFilePage, error) {
-	return s.playlistFilesPage(ctx, want, after, PlaylistFilePageBudget, playlistFeedBatchBytes)
+//
+// All of it is a client's view's (format_view.go, backlog B489): a line
+// naming a track of a format view does not declare is unresolved, as it was
+// for every app before the bridge indexed that format (the track had no
+// row), and the album-folder rule counts only the folder's tracks the view
+// takes. The version names the view, so a cursor of one view is
+// ErrPlaylistFilesChanged in another.
+func (s *Store) PlaylistFilesPage(ctx context.Context, want, after string, view formatgate.Set) (PlaylistFilePage, error) {
+	return s.playlistFilesPage(ctx, want, after, PlaylistFilePageBudget, playlistFeedBatchBytes, view)
 }
 
 // playlistFilesPage is PlaylistFilesPage under budget, resolving batchBytes
 // of stored lines at a time; a test passes small ones.
-func (s *Store) playlistFilesPage(ctx context.Context, want, after string, budget, batchBytes int) (PlaylistFilePage, error) {
+func (s *Store) playlistFilesPage(ctx context.Context, want, after string, budget, batchBytes int, view formatgate.Set) (PlaylistFilePage, error) {
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return PlaylistFilePage{}, err
 	}
 	defer tx.Rollback()
-	current, complete, err := playlistFeedVersion(ctx, tx)
+	current, complete, err := playlistFeedVersion(ctx, tx, view)
 	if err != nil {
 		return PlaylistFilePage{}, err
 	}
@@ -243,9 +259,9 @@ func (s *Store) playlistFilesPage(ctx context.Context, want, after string, budge
 		return PlaylistFilePage{}, ErrPlaylistFilesChanged
 	}
 	page := PlaylistFilePage{Version: current, Complete: complete, Files: []PlaylistFile{}}
-	fill := playlistPageFill{page: &page, budget: budget, last: after}
+	fill := playlistPageFill{page: &page, budget: budget, last: after, view: view}
 	known := map[string]playlistTrackMatch{}
-	folders := &playlistFolderTracks{tx: tx}
+	folders := &playlistFolderTracks{tx: tx, view: view}
 	defer folders.close()
 	for from := after; ; {
 		rows, err := readPlaylistFileRowsAfter(ctx, tx, from, playlistPageRowChunk)
@@ -275,6 +291,7 @@ type playlistPageFill struct {
 	budget int
 	cost   int
 	last   string
+	view   formatgate.Set
 }
 
 // takeRows resolves rows a batch at a time and takes each file while the
@@ -284,7 +301,7 @@ func (f *playlistPageFill) takeRows(ctx context.Context, tx *sql.Tx, rows []play
 	known map[string]playlistTrackMatch, folders *playlistFolderTracks) (bool, error) {
 	for start := 0; start < len(rows); {
 		end := nextPlaylistFeedBatch(rows, start, batchBytes)
-		resolved, err := resolvePlaylistBatch(ctx, tx, rows[start:end], known, folders)
+		resolved, err := resolvePlaylistBatch(ctx, tx, rows[start:end], known, folders, f.view)
 		if err != nil {
 			return false, err
 		}

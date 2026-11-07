@@ -130,6 +130,9 @@ type mediaServerRig struct {
 	// id and body are the library's one track: its DLNA id and its bytes.
 	id   string
 	body []byte
+	// gatedID is a WavPack file's DLNA id, indexed beside that track and
+	// offered to no renderer (backlog B489).
+	gatedID string
 }
 
 // startMediaServerOn runs startDLNAIfEnabled, the MediaServer's real wiring,
@@ -157,6 +160,20 @@ func startMediaServerOn(t *testing.T, listenAddress string, at []string, ifs ...
 	t.Cleanup(func() { _ = store.Close() })
 	if err := store.UpsertTrack(context.Background(), &manifest.Track{Path: rel, Size: int64(len(body)), ModTime: time.Now(),
 		Title: "Harbour Light", Artist: "Glasswing", Album: "Harbour", Codec: "FLAC"}); err != nil {
+		t.Fatal(err)
+	}
+	// A WavPack file beside it, indexed as a scan indexes one, which the
+	// ContentDirectory offers no renderer (backlog B489).
+	const gatedRel = "Glasswing/Packed/01 Packed Light.wv"
+	gatedBody := []byte("wvpk-a-wavpack-file-of-this-library")
+	if err := os.MkdirAll(filepath.Join(root, "Glasswing", "Packed"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, filepath.FromSlash(gatedRel)), gatedBody, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertTrack(context.Background(), &manifest.Track{Path: gatedRel, Size: int64(len(gatedBody)), ModTime: time.Now(),
+		Title: "Packed Light", Artist: "Glasswing", Album: "Packed", Codec: manifest.CodecWavPack}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -215,7 +232,7 @@ func startMediaServerOn(t *testing.T, listenAddress string, at []string, ifs ...
 		cancel()
 	})
 	return &mediaServerRig{lc: lc, enabled: enabled, box: box, ssdp: n, log: rec, port: uint16(port),
-		id: dlna.TrackID("", rel), body: body}
+		id: dlna.TrackID("", rel), body: body, gatedID: dlna.TrackID("", gatedRel)}
 }
 
 // at is the stand-in address a with the listener's port.
@@ -447,6 +464,15 @@ func TestTheMediaServerServesAMixedInterfaceOnItsPrivateAddressAlone(t *testing.
 			}
 			if status, got := rig.request(t, lanPhone, private, private+":7790", http.MethodGet, "/dlna/file/"+rig.id, "", ""); status != http.StatusOK || got != string(rig.body) {
 				t.Errorf("GET of the track on %s: status %d, %d bytes, want 200 and its %d bytes", private, status, len(got), len(rig.body))
+			}
+
+			// No renderer is offered the WavPack file beside it, by the
+			// wiring's own view (backlog B489): not listed, not served.
+			if slices.Contains(res, "http://"+private+":7790/dlna/file/"+rig.gatedID) || len(res) != 1 {
+				t.Errorf("Browse on %s lists %v: the WavPack file is offered to a renderer", private, res)
+			}
+			if status, _ := rig.request(t, lanPhone, private, private+":7790", http.MethodGet, "/dlna/file/"+rig.gatedID, "", ""); status != http.StatusNotFound {
+				t.Errorf("GET of the WavPack file on %s: status %d, want 404", private, status)
 			}
 
 			// The public address: closed unread, whatever Host it names.

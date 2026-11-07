@@ -9,6 +9,7 @@ import (
 
 	"golang.org/x/sync/singleflight"
 
+	"github.com/acoseac/1-bit-bridge/internal/formatgate"
 	"github.com/acoseac/1-bit-bridge/internal/librarycat"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
@@ -172,7 +173,10 @@ func (s *Server) rebuildCatalog(ctx context.Context) (*librarycat.Catalog, error
 // the next person to read it may make it optional and never notice the
 // constructor guard that says otherwise.
 func (s *Server) buildLibraryCatalog(ctx context.Context) (*librarycat.Catalog, error) {
-	if n, err := s.deps.Manifest.CountServedTracks(ctx); err == nil && n > catalogMaxTracks {
+	// The console is the operator's: every format, WavPack and Monkey's
+	// Audio included, which the player page lists and words as it words any
+	// format a browser cannot play (backlog B489).
+	if n, err := s.deps.Manifest.CountServedTracks(ctx, formatgate.All()); err == nil && n > catalogMaxTracks {
 		return nil, errCatalogTooLarge
 	}
 	b := librarycat.New()

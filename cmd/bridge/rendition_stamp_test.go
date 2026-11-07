@@ -20,6 +20,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/auth"
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/dsdtone"
+	"github.com/acoseac/1-bit-bridge/internal/formatgate"
 	bridgefs "github.com/acoseac/1-bit-bridge/internal/fs"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/transcode"
@@ -433,7 +434,7 @@ func (b *stampBridge) alternate(t *testing.T, phase string, rounds int) {
 // delta is the paths a device syncing since `since` receives.
 func (b *stampBridge) delta(t *testing.T, since time.Time) []string {
 	t.Helper()
-	tracks, err := b.store.ListServedTracks(context.Background(), &since)
+	tracks, err := b.store.ListServedTracks(context.Background(), &since, formatgate.All())
 	if err != nil {
 		t.Fatal(err)
 	}

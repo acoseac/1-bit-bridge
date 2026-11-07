@@ -21,10 +21,12 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/alsactl"
 	"github.com/acoseac/1-bit-bridge/internal/alsapcm"
 	"github.com/acoseac/1-bit-bridge/internal/config"
+	"github.com/acoseac/1-bit-bridge/internal/formatgate"
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/player/binding"
 	"github.com/acoseac/1-bit-bridge/internal/player/engine"
 	"github.com/acoseac/1-bit-bridge/internal/player/hotplug"
+	"github.com/acoseac/1-bit-bridge/internal/player/library"
 	"github.com/acoseac/1-bit-bridge/internal/player/playback"
 )
 
@@ -212,6 +214,11 @@ func runOutputPlay(ctx context.Context, args []string, env outputPlayEnv, stdout
 			return 1
 		case !st.Mode().IsRegular():
 			fmt.Fprintf(stderr, "output play: %s is not a file\n", f)
+			return 1
+		case formatgate.Gated(f):
+			// The queue's check of serve's player refuses these too, by
+			// the same predicate and in the same words (backlog B489).
+			fmt.Fprintf(stderr, "output play: %s: %s: %s\n", f, library.ReasonGatedFormat, library.GatedFormatDetail)
 			return 1
 		}
 	}

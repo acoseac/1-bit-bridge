@@ -635,7 +635,7 @@ func TestATransportWritesAnswerIsTheEnginesAdmission(t *testing.T) {
 // library's other refusals 501.
 func TestTheLibrarysRefusalsAreItsReasons(t *testing.T) {
 	reasons := reasonsOf(t, filepath.Join("..", "library", "library.go"))
-	for _, name := range []string{"ReasonNotIndexed", "ReasonRouted", "ReasonSACDVirtual", "ReasonOutsideLibrary"} {
+	for _, name := range []string{"ReasonNotIndexed", "ReasonRouted", "ReasonSACDVirtual", "ReasonOutsideLibrary", "ReasonGatedFormat"} {
 		if r, ok := reasons[name]; !ok || !notALibraryTrack(r) {
 			t.Errorf("library.%s (%q) is not one of the refusals that name no track", name, r)
 		}
