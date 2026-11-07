@@ -1,0 +1,60 @@
+{
+  "outputs": [
+    {
+      "id": "bridge:7d444840-9dc0-11d1-b245-5ffdce74fb05",
+      "kind": "bridge",
+      "player": {
+        "software": "bridge",
+        "version": "0.0.1"
+      },
+      "dac": null,
+      "pathRules": [],
+      "bridge": {
+        "dsdPlayback": {
+          "bootId": "golden-boot",
+          "policyGeneration": 2,
+          "reason": "dsd_dac_unread",
+          "tuples": [],
+          "converted": [],
+          "refused": [
+            {
+              "bitRate": 2822400,
+              "reason": "dsd_dac_unread"
+            },
+            {
+              "bitRate": 5644800,
+              "reason": "dsd_dac_unread"
+            },
+            {
+              "bitRate": 11289600,
+              "reason": "dsd_dac_unread"
+            }
+          ],
+          "warnings": [
+            {
+              "code": "state_unreadable"
+            }
+          ]
+        },
+        "openHome": null,
+        "state": "unavailable",
+        "reason": "device_missing",
+        "lastError": null,
+        "libraryScope": "self",
+        "fixedVolume": true,
+        "codecs": [
+          "flac",
+          "wav",
+          "aiff",
+          "alac"
+        ],
+        "dsdMode": "off",
+        "allowDoP": false,
+        "timeSeek": {
+          "pcm": "supported",
+          "dsd": "unsupported"
+        }
+      }
+    }
+  ]
+}

@@ -509,11 +509,11 @@ func (c *consolePlayer) transports(run admin.PlayerRunning, facts api.BridgeOutp
 		}
 		return "no"
 	}
+	// The legacy keys as the boot snapshot holds them, the page's words until
+	// B728's B13 gives it the bound DAC's choice: GET /v1/outputs' dsdMode and
+	// allowDoP describe that choice since B8, which this line does not say.
 	mode := c.bootDSDMode()
 	allowDoP := c.bootAllowDoP()
-	if facts.Listed {
-		mode, allowDoP = facts.DSDMode, facts.AllowDoP
-	}
 	pcm := admin.PlayerTransport{Kind: "pcm", Plays: open, Approved: []string{}, Mode: "always on: PCM needs no approval",
 		Note: "PCM plays bit-exact, as the file holds it: nothing is resampled, converted or mixed."}
 	dop := admin.PlayerTransport{Kind: "dop", Approved: []string{}, Mode: "dsdMode " + mode + ", allowDoP " + fmt.Sprint(allowDoP)}
@@ -586,12 +586,12 @@ func outputOpen(run admin.PlayerRunning, snap *engine.Snapshot) (bool, string) {
 // the player runs with.
 func (c *consolePlayer) bootDSDMode() string {
 	if c.view != nil {
-		return c.view.dsdMode
+		return c.view.bootDSDMode
 	}
 	return "off"
 }
 
-func (c *consolePlayer) bootAllowDoP() bool { return c.view != nil && c.view.allowDoP }
+func (c *consolePlayer) bootAllowDoP() bool { return c.view != nil && c.view.bootAllowDoP }
 
 // dsdTupleText words an approved tuple for the page: its rate by the DSD
 // family's name, and its format.

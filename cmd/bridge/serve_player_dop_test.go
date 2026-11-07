@@ -104,7 +104,8 @@ func TestBridgeDSDTupleTransport(t *testing.T) {
 
 // TestPlaybackFactsTransport: on the wire, a playback observation names its
 // transport (dop, pcm, or none for native DSD), the packer's version for
-// DSD, when it was observed, and the approved record's revision for DSD.
+// DSD and when it was observed, and never a record's revision, which a
+// harness's backend states and B728 B8 sends no more.
 func TestPlaybackFactsTransport(t *testing.T) {
 	at := time.Date(2026, 10, 28, 12, 0, 0, 0, time.UTC)
 	for _, tc := range []struct {
@@ -113,15 +114,15 @@ func TestPlaybackFactsTransport(t *testing.T) {
 		want map[string]string // member to raw value; "" is absent
 	}{
 		{"dop", playback.PlaybackFacts{BootID: "boot", PolicyGeneration: 3, Session: 1, Occurrence: 2, State: "open", Format: "S32_LE", RateHz: 176400, LogicalRate: 2822400, Channels: 2, ValidBits: 1, PolicyID: "dop64", Transport: "dop", PackingVersion: 1, ObservedAt: at, QualificationRevision: "r1"},
-			map[string]string{"transport": `"dop"`, "packingVersion": "1", "observedAt": `"2026-10-28T12:00:00Z"`, "qualificationRevision": `"r1"`}},
+			map[string]string{"transport": `"dop"`, "packingVersion": "1", "observedAt": `"2026-10-28T12:00:00Z"`, "qualificationRevision": ""}},
 		{"native", playback.PlaybackFacts{BootID: "boot", PolicyGeneration: 3, Session: 1, Occurrence: 2, State: "open", Format: "DSD_U32_BE", RateHz: 88200, LogicalRate: 2822400, Channels: 2, ValidBits: 1, PolicyID: "n64", PackingVersion: 1, ObservedAt: at, QualificationRevision: "r1"},
-			map[string]string{"transport": "", "packingVersion": "1", "observedAt": `"2026-10-28T12:00:00Z"`, "qualificationRevision": `"r1"`}},
+			map[string]string{"transport": "", "packingVersion": "1", "observedAt": `"2026-10-28T12:00:00Z"`, "qualificationRevision": ""}},
 		{"pcm", playback.PlaybackFacts{BootID: "boot", PolicyGeneration: 3, Session: 1, Occurrence: 2, State: "open", Format: "S32_LE", RateHz: 48000, Channels: 2, ValidBits: 24, Transport: "pcm", ObservedAt: at},
 			map[string]string{"transport": `"pcm"`, "packingVersion": "", "observedAt": `"2026-10-28T12:00:00Z"`, "qualificationRevision": ""}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			live := tc.live
-			_, out := bridgeDSDFacts(playback.PlayerPolicy{BootID: "boot", Generation: 3}, &live)
+			_, _, out := bridgeDSDFacts(playback.PlayerPolicy{BootID: "boot", Generation: 3}, &live, config.PlayerDevice{})
 			raw, err := json.Marshal(out)
 			if err != nil {
 				t.Fatal(err)
@@ -140,11 +141,11 @@ func TestPlaybackFactsTransport(t *testing.T) {
 	}
 }
 
-// TestOutputsQualificationFacts: GET /v1/outputs states the owner
-// qualification the epoch's record holds, the DAC's model, its descriptor
-// firmware code and the qualification date, and never its USB port or its
-// serial, from a player that holds its boot binding, the serial included,
-// as serve's does.
+// TestOutputsQualificationFacts: GET /v1/outputs states the DAC's model and
+// its descriptor firmware code an epoch holds, and never a record's
+// qualification date or revision, which a harness's backend still states and
+// B728 B8 sends no more, nor the DAC's USB port or its serial, from a player
+// that holds its boot binding, the serial included, as serve's does.
 func TestOutputsQualificationFacts(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("owner approval uses Unix ownership; the player is Linux only")
@@ -188,9 +189,14 @@ func TestOutputsQualificationFacts(t *testing.T) {
 		t.Fatalf("%s: %v", body, err)
 	}
 	dsd := rawKeys(t, rawKeys(t, top.Outputs[0]["bridge"])["dsdPlayback"])
-	for key, want := range map[string]string{"model": `"iFi GO bar"`, "bcdDevice": `"0123"`, "qualifiedOn": `"2026-10-28"`} {
+	for key, want := range map[string]string{"model": `"iFi GO bar"`, "bcdDevice": `"0123"`} {
 		if string(dsd[key]) != want {
 			t.Errorf("dsdPlayback.%s is %s, want %s", key, dsd[key], want)
+		}
+	}
+	for _, key := range []string{"qualifiedOn", "qualificationRevision"} {
+		if v, present := dsd[key]; present {
+			t.Errorf("dsdPlayback.%s is sent (%s): B728 B8 sends neither", key, v)
 		}
 	}
 	trees := goBarTrees(t)

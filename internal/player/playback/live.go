@@ -7,12 +7,12 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/alsapcm"
 	"github.com/acoseac/1-bit-bridge/internal/player/engine"
 	"github.com/acoseac/1-bit-bridge/internal/player/format"
+	"github.com/acoseac/1-bit-bridge/internal/player/policy"
 )
 
 // TransportConverted is a converted occurrence's transport, as its playback
 // observation names it (B728 B11; the design's section 7.1): DSD the player
-// converted to PCM, its PCM the plan's. B8 publishes it; until then GET
-// /v1/outputs sends no observation of such an occurrence.
+// converted to PCM, its PCM the plan's, which GET /v1/outputs publishes (B8).
 const TransportConverted = "converted"
 
 // PlaybackFacts describes an installed occurrence, never a capability estimate.
@@ -41,6 +41,10 @@ type PlaybackFacts struct {
 	// sections 4.8 and 7.1), nil for every other: Format, RateHz and
 	// ValidBits above are its PCM, LogicalRate 0.
 	Converted *ConvertedPlayback
+	// Evidence is a native or DoP occurrence's tuple's rung and date as the
+	// set it was admitted under computed them (B728 B8), the zero value for
+	// PCM and a converted occurrence.
+	Evidence DSDEvidence
 }
 
 // ConvertedPlayback is a converted occurrence's plan as its observation
@@ -85,7 +89,7 @@ func (s *session) observeOccurrence(o *occ, out *output) {
 	// The set a native or DoP occurrence was admitted under, which a refresh's
 	// reconciliation repoints under the session's lock (B728 B7).
 	s.mu.Lock()
-	admitted := o.admitted
+	admitted, pp := o.admitted, o.policyPlan
 	converts, plan, from := o.conv != nil, o.convPlan, o.nativeFormat.BitRateHz
 	s.mu.Unlock()
 	b.policyMu.Lock()
@@ -117,6 +121,13 @@ func (s *session) observeOccurrence(o *occ, out *output) {
 		revision = o.permission.record.Body.Revision
 	}
 	var converted *ConvertedPlayback
+	var evidence DSDEvidence
+	if admitted != nil && !converts && (pp.Outcome == policy.OutcomeNative || pp.Outcome == policy.OutcomeDoP) {
+		// The rung the set it was admitted under computed for its tuple (B728
+		// B8); a converted occurrence plays no native or DoP path, and carries
+		// none.
+		evidence = DSDEvidence{Rung: string(pp.Evidence), On: pp.EvidenceOn}
+	}
 	b.liveClipped = nil
 	if converts {
 		// Its claims are its plan's (B728 B11), read from the plan, never
@@ -128,7 +139,7 @@ func (s *session) observeOccurrence(o *occ, out *output) {
 	}
 	b.liveOutput = out
 	b.liveFacts = &PlaybackFacts{BootID: b.policy.BootID, PolicyGeneration: generation, Session: s.id, Occurrence: o.id, State: state, Format: string(out.transport.Format), RateHz: out.transport.RateHz, LogicalRate: out.transport.LogicalRate, Channels: out.transport.Channels, ValidBits: out.transport.ValidBits, PolicyID: out.policyID,
-		Transport: transport, PackingVersion: out.transport.PackingVersion, ObservedAt: time.Now(), QualificationRevision: revision, Converted: converted}
+		Transport: transport, PackingVersion: out.transport.PackingVersion, ObservedAt: time.Now(), QualificationRevision: revision, Converted: converted, Evidence: evidence}
 }
 func (b *Backend) observeNote(n Note) {
 	b.policyMu.Lock()
