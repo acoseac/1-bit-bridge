@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -19,6 +20,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/admin"
 	"github.com/acoseac/1-bit-bridge/internal/atlasharvest"
 	"github.com/acoseac/1-bit-bridge/internal/config"
+	"github.com/acoseac/1-bit-bridge/internal/enrich"
 	"github.com/acoseac/1-bit-bridge/internal/enrichgate"
 	bridgefs "github.com/acoseac/1-bit-bridge/internal/fs"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
@@ -214,6 +216,50 @@ func eventually(t *testing.T, cond func() bool, what string) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
+}
+
+// TestNoSwitchIsOffForTheSweepAndTheCoverRefresh: a nil switch is off, as
+// everywhere enrichgate asks one (backlog B617, round 3). The fingerprint
+// sweep handed none runs no pass, whatever its own gate says: AcoustID is
+// asked nothing, nothing is re-queued, and no pass is recorded. The
+// harvest's cover adapter handed none asks Atlas for no premium cover and
+// tells the sweep the covers are paused.
+func TestNoSwitchIsOffForTheSweepAndTheCoverRefresh(t *testing.T) {
+	t.Run("the fingerprint sweep", func(t *testing.T) {
+		f := newSweepSwitchFixture(t, "a.flac")
+		var asked atomic.Int64
+		gate := func() bool {
+			asked.Add(1)
+			return true
+		}
+		nudge := make(chan struct{}, 1)
+		status := &sweepStatus[admin.FingerprintSweepCounts]{}
+		runSwitchSweeper(t, f.sweeper, gate, nil, nudge, status)
+		eventually(t, func() bool { return asked.Load() >= 1 }, "the boot pass to ask the gate")
+		nudge <- struct{}{}
+		eventually(t, func() bool { return asked.Load() >= 2 }, "the nudged pass to ask the gate")
+		if got := f.acoustid.requests(); len(got) != 0 {
+			t.Errorf("AcoustID was asked by a sweep with no switch:\n%s", strings.Join(got, "\n"))
+		}
+		if f.requeued(t, "a.flac") {
+			t.Error("a sweep with no switch re-queued a.flac")
+		}
+		if _, lastStart, _, _, _ := status.snapshot(); !lastStart.IsZero() {
+			t.Errorf("a sweep with no switch recorded a pass started at %v", lastStart)
+		}
+	})
+	t.Run("the cover adapter", func(t *testing.T) {
+		const release = "9f9e9d9c-9b9a-4998-9796-959493929190"
+		dir := t.TempDir()
+		a := atlasCoverRefetcher{premium: landingFetcher{}, artworkDir: dir, coverSize: 500}
+		got, err := a.RefetchPremium(context.Background(), release)
+		if got || !errors.Is(err, atlasharvest.ErrCoversPaused) {
+			t.Errorf("RefetchPremium with no switch = %v, %v; want false, ErrCoversPaused", got, err)
+		}
+		if _, err := os.Stat(enrich.ArtworkCachePath(dir, release, 500)); err == nil {
+			t.Error("the adapter with no switch fetched a premium cover")
+		}
+	})
 }
 
 // TestFingerprintingStopsWithEnrichment: with fingerprinting switched on and
