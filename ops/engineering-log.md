@@ -80718,3 +80718,20 @@ and the albumless blob, a "Don't" and eight tests. Checked with `git apply` on
 a fresh copy, equal to the builder's result, every blank context line with its
 leading space, and the budgets over it (`enrichment.md` 35.2%,
 `smart-mixes.md` 12.8%, `wire.md` 58.8%, the worst load 65.5%).
+
+### Gates
+
+On legion0 at 8d9ef04c, through the shared build lock, against main as
+`pr/1423` merged it (fc07f4a1): go1.27.3's gofmt on every Go file changed
+since main, clean; `make docs-check`, ok; the qualification check,
+"qualification version OK: fc07f4a1..HEAD"; `make vet` native and with
+`GOOS=windows`, `GOOS=darwin`, `GOOS=linux GOARCH=386` and `GOOS=linux
+GOARCH=arm`, each clean; `make test-fast`, 87 packages ok; `go test -race`
+over `./internal/dupes/... ./internal/smartplaylist/...
+./internal/smartplaylistgen/... ./internal/api/... ./internal/manifest/...`,
+with the Makefile's tags and `-timeout 60m` (the brief's command names no
+timeout, and Go's ten-minute default would cut `internal/manifest` short), ok:
+internal/dupes 8 s, internal/smartplaylist 3 s, its season 1 s,
+internal/smartplaylistgen 33 s, internal/api 139 s, internal/manifest
+1,519 s; `make build-all`, the six targets. Not run here: macOS and Windows
+natively, CI's runners, and the iOS app.
