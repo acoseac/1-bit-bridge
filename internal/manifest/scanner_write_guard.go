@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 )
 
 // The console's writes into a library root that reads as a volume not mounted
@@ -67,30 +69,99 @@ func (e *RootAwayError) Message() string {
 		"(the scan keeps the tracks indexed under it; %s)", name, readsAsNotMounted, hintVolumeMounted, hintContainerRestart)
 }
 
-// RefuseWritesUnder looks at the deepest configured root that owns each of
-// paths, absolute paths a request would write, by which root a path is
+// RefuseWritesUnder looks at the configured roots that own each of paths,
+// absolute paths a request would write, and answers a *RootAwayError for the
+// first that reads as absent (lookAtRoot), nil when none does, each root
+// looked at once. A path has two owners, which may be one root: the deepest
+// root that holds it as its elements spell it, by which root a path is
 // (rootIn: the containment a subtree scan takes its owning root by, as the
 // volume compares names; a nested root's folder written through the path of
-// the root it is nested in is the nested root's), each root once, and answers
-// a *RootAwayError for the first that reads as absent (lookAtRoot), nil when
-// none does. A path under no configured root asks nothing: the caller's own
-// containment refuses it. A look is a stat, one batch of the root's listing
-// and, for a root holding nothing, one count of its rows, so a healthy write
-// pays a few of them and a scan none.
+// the root it is nested in is the nested root's), and the deepest that holds
+// it where the write lands (landingRoots.owners). rootIn resolves no link,
+// while a write's MkdirAll and rename follow one in its folders, and the
+// upload's and the trash's own containment checks resolve it: a link in a
+// healthy root to the folder of a root whose volume is away took a write
+// into that bare mount point (B776's round 2). A path under no configured
+// root asks nothing: the caller's own containment refuses it. A look is a
+// stat, one batch of the root's listing and, for a root holding nothing, one
+// count of its rows, and where a write lands a few lstats, so a healthy write
+// pays a few of each and a scan none: rootIn is the scans' and the watcher's,
+// and is left as it is.
 func (s *Scanner) RefuseWritesUnder(ctx context.Context, paths []string) error {
 	roots := s.Roots()
+	landing := newLandingRoots(roots)
 	looked := make(map[string]bool)
 	for _, p := range paths {
-		root, _ := s.rootIn(roots, p)
-		if root == "" || looked[root] {
-			continue
+		owners := landing.owners(s, p)
+		if root, _ := s.rootIn(roots, p); root != "" {
+			owners = append([]string{root}, owners...)
 		}
-		looked[root] = true
-		if look := s.lookAtRoot(ctx, root); look.absent {
-			return &RootAwayError{Root: root, look: look}
+		for _, root := range owners {
+			if looked[root] {
+				continue
+			}
+			looked[root] = true
+			if look := s.lookAtRoot(ctx, root); look.absent {
+				return &RootAwayError{Root: root, look: look}
+			}
 		}
 	}
 	return nil
+}
+
+// landingRoots is the configured roots in the form where a write lands is
+// compared with: each as it resolves (fsutil.ResolveLinks: its links, and on
+// Windows its junctions, which a write follows alike), so a write through a
+// link is found under a root configured through one, and a root that does not
+// resolve (its path is not there) as configured, made absolute, so a write
+// that would make that root's folder is found under it. The configured roots
+// a form stands for keep their names for the look, which counts the rows by
+// them; the folders a request names are resolved once.
+type landingRoots struct {
+	forms []string
+	roots map[string][]string
+	dirs  map[string]string
+}
+
+// newLandingRoots is roots in the forms where a write lands is compared with.
+func newLandingRoots(roots []string) *landingRoots {
+	l := &landingRoots{roots: make(map[string][]string), dirs: make(map[string]string)}
+	for _, r := range roots {
+		abs, err := filepath.Abs(r)
+		if err != nil {
+			continue
+		}
+		form := abs
+		if resolved, err := fsutil.ResolveLinks(abs); err == nil {
+			form = resolved
+		}
+		if _, seen := l.roots[form]; !seen {
+			l.forms = append(l.forms, form)
+		}
+		l.roots[form] = append(l.roots[form], r)
+	}
+	return l
+}
+
+// owners is the configured roots that hold p where a write to it lands: its
+// folder resolved through its nearest ancestor that exists
+// (fsutil.EvalSymlinksOrClean), its own name kept, since a rename replaces a
+// link at that name rather than follow it; the deepest form that holds that,
+// compared element by element as which root a path is compares
+// (deepestRootOf), and nil for none.
+func (l *landingRoots) owners(s *Scanner, p string) []string {
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return nil
+	}
+	dir := filepath.Dir(abs)
+	resolved, ok := l.dirs[dir]
+	if !ok {
+		resolved = fsutil.EvalSymlinksOrClean(dir)
+		l.dirs[dir] = resolved
+	}
+	form, _, _ := s.deepestRootOf(l.forms, filepath.Join(resolved, filepath.Base(abs)))
+	return l.roots[form]
 }
 
 // WriteGuard is RefuseWritesUnder on ctx, in the form the console's writers
