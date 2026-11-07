@@ -130,10 +130,13 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
 - **A sidecar walk passes over, at the WALK, every directory a library walk skips (`manifest.ShouldSkipDir`) but lost+found, by its NAME before it lists it** (2026-10-02, backlog B207) → History-rules-jobs.md
 - **The artwork cache's three walks pass over the same directories** (2026-10-14, backlog B260) → History-rules-jobs.md
 - **…and a forward sweep compares a walked file with its rows in ONE spelling, `integrity.KnownSidecarKey`: cleaned, NFC-composed, THEN lowercased** (2026-10-02, backlog B206) → History-rules-jobs.md
-- **No server-side transcoding, ever.** Conversion is offline; `/v1/download`
-  serves bit-exact via `http.ServeContent`. The DSD → PCM renditions (PR #863)
-  are conversion in exactly that sense — a sidecar the job pool built earlier,
-  served as a file — never a decode in the request path.
+- **No server-side transcoding in a request path, ever.** Conversion for a
+  client is offline; `/v1/download` serves bit-exact via `http.ServeContent`.
+  The DSD → PCM renditions (PR #863) are conversion in exactly that sense, a
+  sidecar the job pool built earlier and served as a file, never a decode in
+  the request path. The player's live DSD → PCM (`internal/player/dsdconv`,
+  B728) feeds only the player's DAC. **Don't decode in a request path, and
+  don't serve the player's converted PCM.**
 
 - **Every consumer of `variantsDir` resolves it LIVE — the integrity watchers included.** → History-rules-jobs.md
 

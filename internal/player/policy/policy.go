@@ -135,10 +135,16 @@ type Tuple struct {
 // Target is a conversion's PCM (the design's section 4.3): 176.4 kHz where
 // the DAC takes it at 24 bits or more, else 88.2 kHz, else 44.1 kHz, at 24
 // valid bits; 16 only for a DAC that takes no 24-bit target, at the best of
-// those rates it takes 16 bits at.
+// those rates it takes 16 bits at. Packing is the first packing of the
+// player's table at that depth (S24_3LE, S24_LE, S32_LE for 24 bits; S16_LE
+// first for 16) that the DAC takes at the rate with the bits significant:
+// what the converted occurrence opens and joins a sink as, and nothing else
+// (B728 B11), so the cache of packings a PCM track took and a predecessor's
+// transport never choose it.
 type Target struct {
 	RateHz    int
 	ValidBits int
+	Packing   format.ALSAFormat
 }
 
 // Plan is what plays at one rate under a set, or why nothing does.
@@ -665,7 +671,7 @@ var (
 
 // conversion is the DAC's conversion target, nil when it takes none: the
 // best rate it takes at 24 bits or more in a 24-bit packing, else the best
-// it takes at 16.
+// it takes at 16, in the first of the depth's packings that carries them.
 func (rd *reading) conversion() *Target {
 	for _, bits := range []int{24, 16} {
 		packings := packings24
@@ -675,7 +681,7 @@ func (rd *reading) conversion() *Target {
 		for _, rate := range conversionRates {
 			for _, f := range packings {
 				if rd.pcmTaken(f, rate, bits) {
-					return &Target{RateHz: rate, ValidBits: bits}
+					return &Target{RateHz: rate, ValidBits: bits, Packing: f}
 				}
 			}
 		}

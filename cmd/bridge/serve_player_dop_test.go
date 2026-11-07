@@ -327,12 +327,13 @@ func dopRecordAs(t *testing.T, dir string, trees outputTrees, confirmation strin
 // and dsdMode and allowDoP reach it only through the migration of the
 // player's DSD state (B6) from an owner's record of one DoP policy at DSD64:
 // under dop with allowDoP false the migration's defaultMode off refuses DSD
-// as dsd_off_by_choice; under auto with allowDoP false the record gives its
-// answer and no acknowledgement, so the GO bar's DSD converts and is refused
-// as dsd_not_in_this_release until the player converts (B11); either way
-// before the DAC is opened, nothing published, and PCM still reaches the
-// DAC. With allowDoP the record's DoP rate publishes and opens DoP, from the
-// policy over the box, the gain check passing a card with no gain stage.
+// as dsd_off_by_choice before the DAC is opened, nothing published, and PCM
+// still reaches the DAC; under auto with allowDoP false the record gives its
+// answer and no acknowledgement, so the GO bar's DSD converts (B11): no tuple,
+// no reason, every rate converted, and the DSD opens nothing native, only the
+// PCM sink of its conversion's target. With allowDoP the record's DoP rate
+// publishes and opens DoP, from the policy over the box, the gain check
+// passing a card with no gain stage.
 func TestServeOutputPlayAllowDoP(t *testing.T) {
 	needsDirectorySync(t)
 	persistentMedium(t)
@@ -343,10 +344,11 @@ func TestServeOutputPlayAllowDoP(t *testing.T) {
 	content := dopContents{"dsd": dsd, "pcm": qualifyWAV(44100)}
 	for _, path := range []string{"serve", "output_play"} {
 		for _, tc := range []struct {
-			mode    string
-			allow   bool
-			refusal engine.Reason
-		}{{"dop", false, "dsd_off_by_choice"}, {"auto", false, playback.ReasonDSD}, {"dop", true, ""}, {"auto", true, ""}} {
+			mode     string
+			allow    bool
+			refusal  engine.Reason
+			converts bool
+		}{{"dop", false, "dsd_off_by_choice", false}, {"auto", false, "", true}, {"dop", true, "", false}, {"auto", true, "", false}} {
 			t.Run(fmt.Sprintf("%s/%s_allowDoP_%t", path, tc.mode, tc.allow), func(t *testing.T) {
 				var wired playback.Config
 				switch path {
@@ -361,7 +363,18 @@ func TestServeOutputPlayAllowDoP(t *testing.T) {
 				b := policyBackendOf(t, wired, content, opens)
 				pol := b.Policy()
 				err := startOn(t, b, 1, "dsd")
-				native, _ := opens.counts()
+				native, pcm := opens.counts()
+				if tc.converts {
+					if len(pol.Tuples) != 0 || pol.Reason != "" || len(pol.Converted) != 3 {
+						t.Fatalf("auto with allowDoP false published %+v (reason %q, converted %+v), want every rate converted", pol.Tuples, pol.Reason, pol.Converted)
+					}
+					c := pol.Converted[0]
+					if len(native) != 0 || len(pcm) != 1 || pcm[0].Transport.Kind != format.KindPCM || pcm[0].Transport.RateHz != c.Plan.RateHz ||
+						pcm[0].Transport.ValidBits != c.Plan.ValidBits || pcm[0].Transport.Format != c.Packing {
+						t.Fatalf("DSD under auto with allowDoP false: %d DSD opens, PCM opens %+v (%v); want its conversion's sink alone, %+v in %s", len(native), pcm, err, c.Plan, c.Packing)
+					}
+					return
+				}
 				if tc.refusal != "" {
 					if len(pol.Tuples) != 0 || pol.Reason != string(tc.refusal) {
 						t.Fatalf("allowDoP false published %+v (reason %q), want nothing playing for %s", pol.Tuples, pol.Reason, tc.refusal)

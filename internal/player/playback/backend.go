@@ -14,6 +14,7 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/alsapcm"
 	"github.com/acoseac/1-bit-bridge/internal/logging"
+	"github.com/acoseac/1-bit-bridge/internal/player/decode"
 	"github.com/acoseac/1-bit-bridge/internal/player/engine"
 	"github.com/acoseac/1-bit-bridge/internal/player/format"
 )
@@ -111,6 +112,42 @@ type Seams struct {
 	// which a set is published that no reconciliation has judged an
 	// occurrence by yet (B728 B7 round 4).
 	Published func()
+	// DSDSource, when set, is what a converted occurrence's converter reads
+	// in place of the DSD source its open made (B728 B11): a test's wrapper
+	// of src, for ref's content. It runs under the session's lock, in the
+	// step that ends the open, and must return at once; the source it
+	// returns is read on the producer's goroutine, with the session's life.
+	DSDSource func(ref engine.Reference, src decode.DSDDecoder) decode.DSDDecoder
+	// Converting runs with no lock held at four steps of a converted
+	// occurrence's join (B728 B11). On the producer's goroutine, where it may
+	// block, holding the producer there: "holding", once o is at its window
+	// point, every frame of it before its window in its sink; "decided", once
+	// o's join window is decided (continued into a successor or ended) and
+	// before the window is read; and "ended", once o's last frame is in its
+	// sink, before the producer takes its next step. On the goroutine of the
+	// call that cuts: "cut", once a cut of o, whose first bits are in its
+	// predecessor's window, is handed to the producer, before the call waits
+	// for its answer.
+	Converting func(step string, o engine.OccurrenceID)
+	// Activation runs on the activating goroutine as an occurrence's output
+	// is about to be activated, before the activation decides anything of
+	// the occurrence (B728 B11 round 2): a test holds it there while a
+	// refresh reconciles the occurrence. It may block.
+	Activation func(o engine.OccurrenceID)
+}
+
+// activation is the Activation seam.
+func (b *Backend) activation(o engine.OccurrenceID) {
+	if sm := b.cfg.Seams; sm != nil && sm.Activation != nil {
+		sm.Activation(o)
+	}
+}
+
+// converting is the Converting seam.
+func (b *Backend) converting(step string, o engine.OccurrenceID) {
+	if sm := b.cfg.Seams; sm != nil && sm.Converting != nil {
+		sm.Converting(step, o)
+	}
 }
 
 // startWoke is the StartWoke seam.
@@ -229,10 +266,14 @@ type Backend struct {
 	dsdFenceOnce sync.Once
 	probeState   dsdProbe
 
-	policyMu            sync.Mutex
-	policy              PlayerPolicy
-	liveFacts           *PlaybackFacts
-	liveOutput          *output
+	policyMu   sync.Mutex
+	policy     PlayerPolicy
+	liveFacts  *PlaybackFacts
+	liveOutput *output
+	// liveClipped is the current converted occurrence's count of saturated
+	// samples, which its observation reads as the producer counts (B728 B11);
+	// nil for every other occurrence.
+	liveClipped         *atomic.Int64
 	publishedPermission *permission
 	cliCandidate        bool
 	transitions         *TransitionPlans

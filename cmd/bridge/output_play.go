@@ -96,10 +96,10 @@ The bridge player's engine and backend, by hand (B470 PR 4b2's hardware gate).
 It resolves the configured binding, output.player.device, to its DAC on this
 box's trees, runs the hotplug watcher, and plays the files in order through
 the player's engine and backend: integer FLAC, WAV, AIFF, AIFC and ALAC, plus
-DSF and raw DFF as the player's effective DSD policy plays them, native or
-DoP (B728). The bound DAC opens exclusively. Floating-point and lossy content
-is refused, and so is DSD the policy does not play, a rate it would convert
-to PCM included, until the player converts.
+DSF and raw DFF as the player's effective DSD policy plays them, native, DoP
+or converted to PCM, never bit-exact (B728). The bound DAC opens exclusively.
+Floating-point and lossy content is refused, and so is DSD the policy does
+not play.
 
 Files play at their own level: the bridge never lowers a sample (no software
 volume). Use headphones, with the DAC's or the amplifier's own volume set low.
@@ -265,7 +265,7 @@ func runOutputPlay(ctx context.Context, args []string, env outputPlayEnv, stdout
 	if !on {
 		out.line("output.player.enabled is false in %s: this harness plays all the same, and bridge serve runs no player", path)
 	}
-	out.line("files play bit-exact, at their own level, which the bridge never lowers: use headphones, with the DAC's or the amplifier's own volume set low")
+	out.line("files play at their own level, which the bridge never lowers: use headphones, with the DAC's or the amplifier's own volume set low")
 	code := r.run(ctx, dir, player.Device)
 	if err := r.report.finish(code); err != nil {
 		fmt.Fprintln(stderr, err)

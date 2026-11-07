@@ -55,10 +55,20 @@ var card = alsapcm.FakeEndpoint().Card
 
 func newDSDRig(t *testing.T, st dsdstate.State, opts ...func(*rigOptions)) *dsdRig {
 	t.Helper()
+	return newDSDRigWith(t, st, nil, opts...)
+}
+
+// newDSDRigWith is newDSDRig with edit applied to the policy before the rig
+// starts (B728 B11: a DAC no profile knows).
+func newDSDRigWith(t *testing.T, st dsdstate.State, edit func(*playback.DSDPolicy), opts ...func(*rigOptions)) *dsdRig {
+	t.Helper()
 	d := &dsdRig{box: playbacktest.NewBox(card), store: playbacktest.NewMemStore(st), monitor: make(chan time.Time)}
 	d.pol = playbacktest.Policy(card, d.box, d.store)
 	d.pol.Profiles = playbacktest.KnownProfiles(&dacprofile.Timing{DSDPrefillMs: 1})
 	d.pol.Tick = func() (<-chan time.Time, func()) { return d.monitor, func() {} }
+	if edit != nil {
+		edit(d.pol)
+	}
 	opts = append(opts, func(o *rigOptions) {
 		o.native = true
 		o.edit = func(r *rig, cfg *playback.Config) {
@@ -101,7 +111,9 @@ func (d *dsdRig) pcmOpens() int {
 }
 
 // monitorTick has the session's DSD monitor read the policy once: the second
-// send is the barrier, taken once the first one's refresh is done.
+// send is the barrier, taken once the first one's refresh is done. It is for
+// a refresh that leaves the session playing; one that ends it takes
+// monitorTickThatRevokes.
 func (d *dsdRig) monitorTick() {
 	d.t.Helper()
 	for range 2 {
@@ -111,6 +123,23 @@ func (d *dsdRig) monitorTick() {
 			alsapcm.LogGoroutines(d.t)
 			d.t.Fatalf("no DSD monitor took a tick within %v", alsapcm.Watchdog())
 		}
+	}
+}
+
+// monitorTickThatRevokes has the session's DSD monitor read the policy once,
+// for a refresh that revokes the session's DSD: one send, bounded by the
+// watchdog. The revocation ends the session, and its monitor may then leave
+// on the session's end before it takes a second send, which nothing would
+// take: monitorTick's barrier there waited out the watchdog and failed the
+// test, a flake of B728 B7's TestAGainChangeRevokesDoPWithoutConsent. The
+// caller waits on the stop the refresh makes, never on the monitor.
+func (d *dsdRig) monitorTickThatRevokes() {
+	d.t.Helper()
+	select {
+	case d.monitor <- time.Time{}:
+	case <-time.After(alsapcm.Watchdog()):
+		alsapcm.LogGoroutines(d.t)
+		d.t.Fatalf("no DSD monitor took a tick within %v", alsapcm.Watchdog())
 	}
 }
 
@@ -468,7 +497,7 @@ func TestAGainChangeRevokesDoPWithoutConsent(t *testing.T) {
 	})
 	writes := d.store.Writes()
 	d.box.SetControls(card, playbacktest.VolumeControls(200)...)
-	d.monitorTick()
+	d.monitorTickThatRevokes()
 	s := d.tickUntilStopped(engine.ReasonFault)
 	if f := s.Faults(); len(f) != 1 || f[0].Reason != "native_revoked" {
 		t.Errorf("the gain change's faults %+v, want DoP revoked", f)

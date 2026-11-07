@@ -93,11 +93,11 @@ func Open(rs io.ReadSeeker) (Source, error) {
 	case sniffDFF:
 		return openDFF(view)
 	case sniffMP3:
-		return nil, refuse(ReasonLossy, "MP3 is refused; the bridge player is bit-exact lossless only")
+		return nil, refuse(ReasonLossy, "MP3 is refused; the bridge player plays lossless files only")
 	case sniffAAC:
-		return nil, refuse(ReasonLossy, "AAC is refused; the bridge player is bit-exact lossless only")
+		return nil, refuse(ReasonLossy, "AAC is refused; the bridge player plays lossless files only")
 	case sniffOgg:
-		return nil, refuse(ReasonLossy, "Ogg/Opus/Vorbis is refused; the bridge player is bit-exact lossless only")
+		return nil, refuse(ReasonLossy, "Ogg/Opus/Vorbis is refused; the bridge player plays lossless files only")
 	default:
 		return nil, refuse(ReasonUnknownContainer, "unrecognised audio container")
 	}

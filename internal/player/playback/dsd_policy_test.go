@@ -9,11 +9,13 @@ import (
 	"testing"
 
 	"github.com/acoseac/1-bit-bridge/internal/alsapcm"
+	"github.com/acoseac/1-bit-bridge/internal/player/dsdconv"
 	"github.com/acoseac/1-bit-bridge/internal/player/dsdstate"
 	"github.com/acoseac/1-bit-bridge/internal/player/engine"
 	"github.com/acoseac/1-bit-bridge/internal/player/format"
 	"github.com/acoseac/1-bit-bridge/internal/player/playback"
 	"github.com/acoseac/1-bit-bridge/internal/player/playback/playbacktest"
+	"github.com/acoseac/1-bit-bridge/internal/player/policy"
 )
 
 // The effective DSD policy's selection and publication (B728 B7), without a
@@ -203,39 +205,59 @@ func TestSelectionAndPublicationReadOneSet(t *testing.T) {
 	}
 }
 
-// TestAConvertedRateIsRefusedUntilThePlayerConverts (B728 B7, until B11): a
-// rate the effective set converts to PCM is refused at its admission as
-// dsd_not_in_this_release, and published with no tuple, that word the
-// aggregate reason, since no rate plays.
-func TestAConvertedRateIsRefusedUntilThePlayerConverts(t *testing.T) {
-	b := policyBackend(t, playbacktest.NewBox(5), playbacktest.NewMemStore(playbacktest.ChoiceState(dsdstate.ModeConvert)))
-	for _, rate := range []int{playbacktest.DSD64, playbacktest.DSD128, playbacktest.DSD256} {
-		if _, _, err := b.AdmitDSDForTest(dsdAt(rate), true); reasonOf(err) != playback.ReasonDSD {
-			t.Errorf("DSD at %d under a conversion: %v, want %s", rate, err, playback.ReasonDSD)
+// convertedAt checks that b admits DSD at each rate to be converted to the
+// test DAC's target, 176.4 kHz / 24 bits in S24_3LE, with no native plan, and
+// publishes them as converted rates, no tuple and no reason, since a rate
+// plays (B728 B11).
+func convertedAt(t *testing.T, b *playback.Backend, rates ...int) {
+	t.Helper()
+	want := policy.Target{RateHz: 176400, ValidBits: 24, Packing: format.S243LE}
+	for _, rate := range rates {
+		plan, pp, converts, err := b.AdmitDSDPlanForTest(dsdAt(rate), true)
+		if err != nil || !converts || plan.Tuple != (engine.NativeTuple{}) || plan.PolicyID != "" || pp.Outcome != policy.OutcomeConverted || pp.Target != want {
+			t.Errorf("DSD at %d: native plan %+v, plan %+v (converts %v), %v; want it converted to %+v and no native plan", rate, plan, pp, converts, err, want)
 		}
 	}
-	if p := b.Policy(); len(p.Tuples) != 0 || p.Reason != string(playback.ReasonDSD) {
-		t.Errorf("a converting set published %+v (%q), want no tuple and %s", p.Tuples, p.Reason, playback.ReasonDSD)
+	p := b.Policy()
+	if len(p.Tuples) != 0 || p.Reason != "" || !p.PlaysDSD() || len(p.Converted) != len(rates) {
+		t.Fatalf("a converting set published %+v (%q), converted %+v; want no tuple, no reason, %d rates converted", p.Tuples, p.Reason, p.Converted, len(rates))
+	}
+	for i, c := range p.Converted {
+		if c.BitRate != rates[i] || c.Plan != (dsdconv.Plan{RateHz: want.RateHz, ValidBits: want.ValidBits}) || c.Packing != want.Packing {
+			t.Errorf("the converted rate %d published %+v, want %d at %+v", i, c, rates[i], want)
+		}
 	}
 }
 
-// TestAnUnknownDACsDSDStaysRefused (B728 B7; binding note 1): a DAC the
-// profile database does not know, with no choice of its own, is converted
-// at every rate under the bridge's auto, which refuses it until B11; a
-// migrated explicit choice for it plays at the rates its record approved.
-func TestAnUnknownDACsDSDStaysRefused(t *testing.T) {
+// TestAConvertedRateIsAdmittedToBeConverted (B728 B11; B7 refused it as
+// dsd_not_in_this_release until the player converted): under convert, every
+// rate is admitted to be converted to the DAC's target, with no native plan,
+// and published so.
+func TestAConvertedRateIsAdmittedToBeConverted(t *testing.T) {
+	b := policyBackend(t, playbacktest.NewBox(5), playbacktest.NewMemStore(playbacktest.ChoiceState(dsdstate.ModeConvert)))
+	convertedAt(t, b, playbacktest.DSD64, playbacktest.DSD128, playbacktest.DSD256)
+}
+
+// TestAnUnknownDACsDSDIsConverted (B728 B11; binding note 1 of B7): a DAC the
+// profile database does not know, with no choice of its own, is converted at
+// every rate under the bridge's auto; a migrated explicit choice for it plays
+// native at the rates its record approved, and a migrated explicit off
+// converts nothing.
+func TestAnUnknownDACsDSDIsConverted(t *testing.T) {
 	b := policyBackend(t, playbacktest.NewBox(5), playbacktest.NewMemStore(dsdstate.Defaults()))
-	for _, rate := range []int{playbacktest.DSD64, playbacktest.DSD128, playbacktest.DSD256} {
-		if _, _, err := b.AdmitDSDForTest(dsdAt(rate), true); reasonOf(err) != playback.ReasonDSD {
-			t.Errorf("an unknown DAC's DSD at %d: %v, want %s", rate, err, playback.ReasonDSD)
-		}
-	}
-	if p := b.Policy(); len(p.Tuples) != 0 || p.Reason != string(playback.ReasonDSD) {
-		t.Errorf("an unknown DAC published %+v (%q), want nothing playing", p.Tuples, p.Reason)
-	}
+	convertedAt(t, b, playbacktest.DSD64, playbacktest.DSD128, playbacktest.DSD256)
 	migrated := policyBackend(t, playbacktest.NewBox(5), playbacktest.NewMemStore(playbacktest.MigratedState(dsdstate.ModeNative, false, []int{playbacktest.DSD64}, nil)))
 	if plan, _, err := migrated.AdmitDSDForTest(dsdAt(playbacktest.DSD64), true); err != nil || plan.Tuple.Format != string(format.DSDU32BE) {
 		t.Errorf("an unknown DAC's migrated native choice at DSD64: %+v, %v; want native", plan, err)
+	}
+	st := dsdstate.Defaults()
+	st.DefaultMode = dsdstate.ModeOff
+	off := policyBackend(t, playbacktest.NewBox(5), playbacktest.NewMemStore(st))
+	if _, _, converts, err := off.AdmitDSDPlanForTest(dsdAt(playbacktest.DSD64), true); converts || reasonOf(err) != "dsd_off_by_choice" {
+		t.Errorf("a migrated explicit off: converts %v, %v; want dsd_off_by_choice", converts, err)
+	}
+	if p := off.Policy(); p.PlaysDSD() || p.Reason != "dsd_off_by_choice" {
+		t.Errorf("a migrated explicit off published %+v (%q), want nothing playing", p, p.Reason)
 	}
 }
 
