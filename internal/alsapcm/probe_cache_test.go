@@ -114,9 +114,10 @@ func TestAProbeOfTheModelAnewLapsesWhatWasKeptBefore(t *testing.T) {
 	}
 }
 
-// TestAChoiceWriteForgetsTheModelsAnswers pins Forget, what a choice written
-// for a DAC calls (the design's section 7.2): every answer kept for that
-// model goes, and another model's stay.
+// TestAChoiceWriteForgetsTheModelsAnswers pins Forget, which the migration's
+// part for a DAC calls, and a choice written for it called until B728's B9,
+// which makes a probe due and forgets nothing (the name is B4's): every
+// answer kept for that model goes, and another model's stay.
 func TestAChoiceWriteForgetsTheModelsAnswers(t *testing.T) {
 	other := ProbeUnit{Model: "dacKey/1\n2972\n0047\n-\n=GO bar", Firmware: "0100", Kernel: brooklyn.Kernel, Enumeration: "feed 1, generation 2"}
 	c := NewProbeCache()
@@ -134,11 +135,11 @@ func TestAChoiceWriteForgetsTheModelsAnswers(t *testing.T) {
 }
 
 // TestAChoiceWriteLapsesAProbeAlreadyRunning pins the model's epoch against
-// a choice write (B728 B4 round 2): a probe begun before a choice written
-// for its model (Forget) ends after it, and its report, which predates the
-// write, is not taken: nothing of it is kept. A probe begun after the write,
-// the write's own, keeps its answers; and a write for another model leaves a
-// probe of this one alone.
+// a Forget (B728 B4 round 2; the migration's part for a DAC since B9, whose
+// choice write forgets nothing, the name B4's): a probe begun before a Forget
+// of its model ends after it, and its report, which predates the Forget, is
+// not taken: nothing of it is kept. A probe begun after it keeps its answers;
+// and a Forget of another model leaves a probe of this one alone.
 func TestAChoiceWriteLapsesAProbeAlreadyRunning(t *testing.T) {
 	c := NewProbeCache()
 	running := c.Begin(brooklyn)

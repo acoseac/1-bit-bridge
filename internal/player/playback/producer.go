@@ -133,6 +133,13 @@ func (s *session) next() step {
 	if o.stale {
 		return step{kind: stepWait}
 	}
+	if p := s.b.pendingFor(o); p != nil {
+		// A choice's write pending would play its rate otherwise (B728 B9): it
+		// waits out of any sink until the write settles, so the write's
+		// classification of it (a re-plan, which interrupts nothing) still holds
+		// when the write publishes.
+		return step{kind: stepWait, wait: p.done}
+	}
 	// One answer decides a join, Prepared's and this: Transport.Join, which
 	// tells same-carrier PCM from DoP by kind, valid bits, logical rate and
 	// packing version, never by format and rate alone; a DSD successor
@@ -454,6 +461,7 @@ func (s *session) transition(o *occ) bool {
 		}
 		// With no sink current, the reporter looks again: a pause that holds
 		// no device reports its release only then (reportStep).
+		pend := s.b.pendingFor(o)
 		switch {
 		case s.ctx.Err() != nil:
 			l.unlock()
@@ -475,6 +483,20 @@ func (s *session) transition(o *occ) bool {
 			l.unlock()
 			wake(s.wakeR)
 			if !s.waitWake(nil) {
+				return false
+			}
+		case o.stale:
+			// Being handed off again (B728 B7): the engine's replacement drops
+			// it, and the producer's next step waits for that.
+			l.unlock()
+			return true
+		case pend != nil:
+			// A choice's write pending would play its rate otherwise (B728 B9):
+			// no sink is opened for it until the write settles.
+			l.unlock()
+			select {
+			case <-pend.done:
+			case <-s.ctx.Done():
 				return false
 			}
 		default:

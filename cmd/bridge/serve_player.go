@@ -562,8 +562,9 @@ func (p *bridgePlayer) watch(ctx context.Context) {
 	// where an input changed (a snapshot, a migration's part for a DAC) and
 	// otherwise at most once a dsdIdle; and the silent probe, at a snapshot
 	// that resolves the boot binding, at the tick after a migration's part for
-	// a DAC changed the state (dsdPartChanged), and while one is due and the
-	// device slot refused it, at each tick until the slot is free.
+	// a DAC changed the state (dsdPartChanged) or a choice was written for it
+	// (playback.Backend.ProbeDSDPending, B728 B9), and while one is due and
+	// the device slot refused it, at each tick until the slot is free.
 	be, _ := p.be.(*playback.Backend)
 	probePending := false
 	refresh := func(force bool) {
@@ -597,7 +598,7 @@ func (p *bridgePlayer) watch(ctx context.Context) {
 		case <-policyTick.C:
 			refresh(false)
 			p.dsd.retry(ctx)
-			if probePending {
+			if probePending || be != nil && be.ProbeDSDPending() {
 				if snap, ok := p.feed.Latest(); ok {
 					probe(snap)
 				}

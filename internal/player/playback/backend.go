@@ -15,6 +15,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/alsapcm"
 	"github.com/acoseac/1-bit-bridge/internal/logging"
 	"github.com/acoseac/1-bit-bridge/internal/player/decode"
+	"github.com/acoseac/1-bit-bridge/internal/player/dsdstate"
 	"github.com/acoseac/1-bit-bridge/internal/player/engine"
 	"github.com/acoseac/1-bit-bridge/internal/player/format"
 )
@@ -284,9 +285,14 @@ type Backend struct {
 	dsdRead      time.Time
 	dsdFenceOnce sync.Once
 	probeState   dsdProbe
-	// pending is the choice write between its reading and its settle (B728
-	// B9), nil while none is.
-	pending atomic.Pointer[pendingChoice]
+	// choiceTurn is the writes' turn: one choice write at a time (B728 B9,
+	// ChooseDSD); pending is the write between its reading and its settle, nil
+	// while none is; landedChoice is the state a choice's write left in the
+	// state's file, landed and not known to be durable, which every refresh
+	// holds the set to until the next start (setOver), nil while there is none.
+	choiceTurn   chan struct{}
+	pending      atomic.Pointer[pendingChoice]
+	landedChoice atomic.Pointer[dsdstate.State]
 
 	policyMu   sync.Mutex
 	policy     PlayerPolicy
@@ -366,7 +372,8 @@ func New(cfg Config) (*Backend, error) {
 	if cfg.Authorization == nil {
 		reason = string(ReasonDSD)
 	}
-	b := &Backend{policy: PlayerPolicy{BootID: fmt.Sprintf("%x", randomBoot()), Generation: 1, Reason: reason}, cfg: cfg, log: cfg.Log, sessions: map[engine.SessionID]*session{}, took: map[packKey]format.ALSAFormat{}, zero: zero}
+	b := &Backend{policy: PlayerPolicy{BootID: fmt.Sprintf("%x", randomBoot()), Generation: 1, Reason: reason}, cfg: cfg, log: cfg.Log, sessions: map[engine.SessionID]*session{}, took: map[packKey]format.ALSAFormat{}, zero: zero,
+		choiceTurn: make(chan struct{}, 1)}
 	if cfg.DSD != nil {
 		// Its read side the state's warnings of the bridge's already, a state
 		// that did not read among them, before the first refresh reads the box.

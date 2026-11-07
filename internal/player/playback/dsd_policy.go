@@ -438,16 +438,17 @@ func (b *Backend) probeUnit(key dacprofile.Key, bcd string, bd BoundDAC) alsapcm
 
 // readDSD computes the effective set from what it reads now (the design's
 // section 3.1), and its read side: the state, once, which the set and its
-// read side are both made from, then the box (readBox). What does not read
-// leaves no set, and DSD refused (ReasonDACUnread), its read side the state's
-// warnings of the bridge's all the same (noView).
+// read side are both made from, then the box (readBox), the set held to what
+// a landed choice's state plays alike while there is one (setOver). What does
+// not read leaves no set, and DSD refused (ReasonDACUnread), its read side the
+// state's warnings of the bridge's all the same (noView).
 func (b *Backend) readDSD() (*dsdSet, DSDView) {
 	st := b.dsdState()
 	r, why := b.readBox()
 	if r == nil {
 		return noSet(why, st)
 	}
-	return r.setFor(st)
+	return b.setOver(r, st)
 }
 
 // dsdReading is what one reading of the box establishes of the bound DAC
@@ -526,6 +527,21 @@ func (r *dsdReading) setFor(st dsdstate.State) (*dsdSet, DSDView) {
 	d := r.tmpl
 	d.set = policy.Effective(r.inputs(st))
 	return &d, viewOf(&d, st, r.m.USB)
+}
+
+// setOver is the set the backend publishes from r over st, and its read side:
+// r's set, held, while a choice's write that landed is not known to be durable
+// (landedChoice), to what the state it left in the file plays alike
+// (policy.Intersect), so what plays until the next start plays under either
+// state that start may read (B728 B9).
+func (b *Backend) setOver(r *dsdReading, st dsdstate.State) (*dsdSet, DSDView) {
+	d, v := r.setFor(st)
+	if l := b.landedChoice.Load(); l != nil {
+		ld, _ := r.setFor(*l)
+		d.set = policy.Intersect(d.set, ld.set)
+		v = viewOf(d, st, r.m.USB)
+	}
+	return d, v
 }
 
 // refreshDSD computes the effective set from fresh inputs (readDSD) and,
@@ -752,61 +768,102 @@ func (s *session) occurrenceFactsLocked(o *occ) policy.Occurrence {
 	return f
 }
 
+// dsdJudgement is what reconciliation does with one of a session's DSD
+// occurrences against a set (judgeDSDLocked): nothing (not judged); keep it,
+// counting under the set from now on; hold it back from the sink to hand it
+// off again (stale); revoke the session's DSD, for why; and whether that
+// interrupts what plays, which a choice's write asks first (writeInterrupts).
+type dsdJudgement struct {
+	keep, stale bool
+	revoke      string
+	interrupts  bool
+}
+
+// judgeDSDLocked is the one classification of o against next that both
+// reconciliation (reconcileDSD) and a choice's write (writeInterrupts) act by:
+// policy.Reconcile on what o is now (occurrenceFactsLocked), and the
+// backend's rest. A re-plan is a revocation for a session's first occurrence
+// and for an occurrence of a session being released, and where the engine
+// hands nothing off again (replans false) it is held back and the session's
+// DSD revoked. An occurrence still opening, dropped, PCM, admitted under next
+// already, or played out (its sink drained or closed, or its every frame
+// played with its end in its sink) is not judged. A re-plan interrupts where
+// policy.Reconcile says so, frames of it in a sink, and also for the
+// occurrence the producer writes and one whose first bits are in its
+// predecessor's join window, whose frames may reach the sink before a write
+// publishes. s.mu is held.
+func (s *session) judgeDSDLocked(o *occ, next *dsdSet, replans bool) dsdJudgement {
+	if !o.opened() || o.admitted == nil || o.dropped || o.admitted == next {
+		return dsdJudgement{}
+	}
+	if out := o.out; out != nil && (out.drained || out.closed || o.eof && out.sink.Position().Played >= o.start+o.written) {
+		return dsdJudgement{}
+	}
+	v := policy.Reconcile(next.set, s.occurrenceFactsLocked(o))
+	switch v.Action {
+	case policy.Keep:
+		return dsdJudgement{keep: true}
+	case policy.Replan:
+		switch {
+		case o.leading || s.releasing:
+			return dsdJudgement{revoke: fmt.Sprintf("occurrence %d's DSD plan left the effective set before any of it played", o.id), interrupts: true}
+		case !replans:
+			return dsdJudgement{stale: true, revoke: "an occurrence's DSD plan left the effective set, and the engine hands nothing off again", interrupts: true}
+		}
+		return dsdJudgement{stale: true, interrupts: v.Interrupts || s.writing == o || o.inWindowLocked()}
+	}
+	return dsdJudgement{revoke: fmt.Sprintf("occurrence %d's DSD plan left the effective set, or its DAC changed, while it played", o.id), interrupts: true}
+}
+
 // reconcileDSD judges each of s's DSD occurrences against next
-// (policy.Reconcile): one next still plays on its identity is kept and
-// counts under next from now on; one to re-plan is held back from the sink
-// (stale) and the engine is asked to hand it off again (ReplanEvents), the
-// path an edit after hand-off takes, so it is admitted under next as any
-// hand-off is, a session's first occurrence and one a session being released
-// holds excepted, which are revoked; one to revoke stops the session's DSD at
-// once (Revoke). An occurrence whose sink has played everything it was given
-// (drained) or is closed sounds no more, and nothing of it can reach the DAC
-// again, so no change of the set can make it unsafe: it is not judged, which
-// would revoke the session's DSD and with it a successor the set still plays
-// in a sink of its own (a DoP occurrence played out, the native one after it
-// filling its prefill; round 2). Nor is one whose every frame the sink has
-// played, its end in it, which a sink shared with what follows it (a
-// converted occurrence's, PCM after it on the same transport, B728 B11) does
-// not drain: judged, it would stop that PCM. A converted occurrence is judged
-// as native and DoP are, its plan its target (policy.Plan.Same), its frames
-// PCM frames. A change of the set never asks a user's consent here: the
-// safety changes (the gain leaving unity, the identity changing, the DAC
-// leaving, the state no longer reading) act at once, and B7 makes no other;
-// B9's write asks first with the same predicate.
+// (judgeDSDLocked, over policy.Reconcile): one next still plays on its
+// identity is kept and counts under next from now on; one to re-plan is held
+// back from the sink (stale) and the engine is asked to hand it off again
+// (ReplanEvents), the path an edit after hand-off takes, so it is admitted
+// under next as any hand-off is, a session's first occurrence and one a
+// session being released holds excepted, which are revoked; one to revoke
+// stops the session's DSD at once (Revoke). An occurrence whose sink has
+// played everything it was given (drained) or is closed sounds no more, and
+// nothing of it can reach the DAC again, so no change of the set can make it
+// unsafe: it is not judged, which would revoke the session's DSD and with it
+// a successor the set still plays in a sink of its own (a DoP occurrence
+// played out, the native one after it filling its prefill; round 2). Nor is
+// one whose every frame the sink has played, its end in it, which a sink
+// shared with what follows it (a converted occurrence's, PCM after it on the
+// same transport, B728 B11) does not drain: judged, it would stop that PCM. A
+// converted occurrence is judged as native and DoP are, its plan its target
+// (policy.Plan.Same), its frames PCM frames. A change of the set never asks a
+// user's consent here: the safety changes (the gain leaving unity, the
+// identity changing, the DAC leaving, the state no longer reading) act at
+// once; a choice's write (B9) asks first, by the same classification.
 func (s *session) reconcileDSD(next *dsdSet) {
 	var revoke []string
 	var replan []engine.OccurrenceID
 	s.mu.Lock()
+	re, replans := s.ev.(engine.ReplanEvents)
+	noReplan := ""
 	for _, o := range s.chain {
-		if !o.opened() || o.admitted == nil || o.dropped || o.admitted == next {
-			continue
-		}
-		if out := o.out; out != nil && (out.drained || out.closed || o.eof && out.sink.Position().Played >= o.start+o.written) {
-			continue
-		}
-		v := policy.Reconcile(next.set, s.occurrenceFactsLocked(o))
-		switch v.Action {
-		case policy.Keep:
+		j := s.judgeDSDLocked(o, next, replans)
+		switch {
+		case j.keep:
 			o.admitted = next
-		case policy.Replan:
-			if o.leading || s.releasing {
-				revoke = append(revoke, fmt.Sprintf("occurrence %d's DSD plan left the effective set before any of it played", o.id))
+		case j.stale:
+			o.stale = true
+			if j.revoke != "" {
+				noReplan = j.revoke
 				continue
 			}
-			o.stale = true
 			replan = append(replan, o.id)
-		default:
-			revoke = append(revoke, fmt.Sprintf("occurrence %d's DSD plan left the effective set, or its DAC changed, while it played", o.id))
+		case j.revoke != "":
+			revoke = append(revoke, j.revoke)
 		}
 	}
-	ev := s.ev
 	s.mu.Unlock()
-	if re, ok := ev.(engine.ReplanEvents); ok {
-		for _, id := range replan {
-			re.Replan(s.id, id, "its DSD plan left the effective set")
-		}
-	} else if len(replan) > 0 {
-		revoke = append(revoke, "an occurrence's DSD plan left the effective set, and the engine hands nothing off again")
+	for _, id := range replan {
+		re.Replan(s.id, id, "its DSD plan left the effective set")
+	}
+	if noReplan != "" {
+		revoke = append(revoke, noReplan)
 	}
 	if len(revoke) > 0 {
 		s.b.dsdLog().Warn("player: the effective DSD set no longer plays what this session holds: its DSD stops", "session", uint64(s.id), "generation", next.gen, "why", revoke[0])
@@ -1032,8 +1089,8 @@ type dsdProbe struct {
 // design's section 5), and answers whether one is still pending: at the
 // player's start once the output is available, when the unit's model,
 // firmware, kernel or enumeration changes (a replug, a reset, a firmware
-// update), and after a choice was written for it (ForgetDSDProbe), never on
-// a timer. A probe the device slot refuses, a session holding the device
+// update), after a migration's part for it (ForgetDSDProbe) and after a
+// choice was written for it (oweProbe), never on a timer. A probe the device slot refuses, a session holding the device
 // (playing, opening it, paused, releasing) or a release unconfirmed, stays
 // due, opens nothing and waits for nothing: it answers pending, and the
 // supervisor asks again at its next tick, so the probe runs once the slot is
@@ -1160,8 +1217,8 @@ func (b *Backend) noteProbed(key dacprofile.Key, bcd string, rep alsapcm.ProbeRe
 }
 
 // ForgetDSDProbe drops the probe's answers for key's model and makes a probe
-// due, as a choice written for the DAC does (the design's section 5): the
-// migration's part for a DAC, and B9's write.
+// due: the migration's part for a DAC (the design's section 5). A choice
+// written for the DAC (B9) makes a probe due and drops nothing (oweProbe).
 func (b *Backend) ForgetDSDProbe(key dacprofile.Key) {
 	if p := b.cfg.DSD; p != nil && p.Probes != nil {
 		p.Probes.Forget(key.Canonical())

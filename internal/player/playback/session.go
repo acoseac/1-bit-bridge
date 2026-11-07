@@ -511,8 +511,11 @@ func (s *session) start(ctx context.Context, req engine.StartRequest) (err error
 	// it under that set and a reconciliation after it judges it (B728 B7, round
 	// 2). Once its done is closed, reconciliation repoints its set and a
 	// revocation refuses it, under this lock, so what decides the DSD monitor
-	// and the open's refusal is read in that step too (round 3).
-	s.mu.Lock()
+	// and the open's refusal is read in that step too (round 3). A choice's
+	// write pending that plays its rate otherwise is waited for first, the
+	// lock let go, so the write either judged it opened or it is admitted under
+	// what the write left (lockSettled, B728 B9).
+	s.lockSettled(cctx, first)
 	s.readmitDSDLocked(first)
 	s.makeConverterLocked(first)
 	close(first.done)
@@ -876,7 +879,7 @@ func (s *session) openSuccessor(ctx context.Context, o *occ) {
 	if o.admitted != nil {
 		s.startDSDMonitor()
 	}
-	s.mu.Lock()
+	s.lockSettled(ctx, o)
 	defer func() {
 		close(o.done)
 		s.mu.Unlock()
@@ -886,7 +889,9 @@ func (s *session) openSuccessor(ctx context.Context, o *occ) {
 	// Admitted under a set a refresh has replaced since, which no
 	// reconciliation reaches while the open is under way: admitted again under
 	// the set published now, before its Prepared is reported (B728 B7), and
-	// its converter made for the plan it is admitted under (B11).
+	// its converter made for the plan it is admitted under (B11); a choice's
+	// write pending that plays its rate otherwise waited for first
+	// (lockSettled, B728 B9).
 	s.readmitDSDLocked(o)
 	s.makeConverterLocked(o)
 	if s.nativeRevoked && (o.plan != nil || o.converts()) && o.refused == nil {
@@ -1457,11 +1462,36 @@ func (s *session) resume(ctx context.Context) (how engine.ResumeResult, err erro
 	// and leaves the session paused. The open is the session's while it
 	// runs (s.wg), joined by its release, which is never acknowledged while
 	// a node this open holds is open: until the check after open answers no
-	// sink exists to close the node with the session's life.
+	// sink exists to close the node with the session's life. A choice's write
+	// pending that plays its rate otherwise is waited for first (B728 B9), and
+	// an occurrence it left being handed off again opens nothing here: the
+	// producer waits for its replacement, which opens its own sink.
 	l.lock()
 	if err := s.callableLocked(); err != nil {
 		l.unlock()
 		return 0, err
+	}
+	if p := s.b.pendingFor(between); p != nil {
+		l.unlock()
+		select {
+		case <-p.done:
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		}
+		l.lock()
+		if err := s.callableLocked(); err != nil {
+			l.unlock()
+			return 0, err
+		}
+	}
+	if between.stale || between.dropped || s.between != between {
+		if err := s.unpausedLocked(); err != nil {
+			return 0, err
+		}
+		l.unlock()
+		wake(s.wakeP)
+		wake(s.wakeR)
+		return engine.ResumeContinued, nil
 	}
 	s.wg.Add(1)
 	l.unlock()

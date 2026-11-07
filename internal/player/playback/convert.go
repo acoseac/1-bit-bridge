@@ -182,8 +182,9 @@ func (a *afterFirst) ReadDSD(ctx context.Context, dst [][]byte) (int, error) {
 // holdLocked is the producer's next step for a, a converted occurrence at
 // its window point (the design's section 4.7). Its window waits while what
 // follows has not settled: no successor named and no end, or one still
-// opening, being handed off again (stale), or admitted under a set a refresh
-// has replaced, which that refresh's reconciliation keeps or hands off. A
+// opening, being handed off again (stale), admitted under a set a refresh
+// has replaced, which that refresh's reconciliation keeps or hands off, or at
+// a rate a choice's write pending plays otherwise (B728 B9), until it settles. A
 // settled successor converted at a's DSD rate under a's plan, which
 // dsdconv.Continuous takes and which follows on a's transport, continues
 // a's chain (Continue): the window is computed with its first bits. The end
@@ -192,10 +193,21 @@ func (a *afterFirst) ReadDSD(ctx context.Context, dst [][]byte) (int, error) {
 func (s *session) holdLocked(a *occ) step {
 	f := s.followingLocked(a)
 	settled := f != nil && f.opened() && !f.stale && (f.admitted == nil || f.admitted == s.b.dsd.Load())
+	var pend *pendingChoice
+	if settled {
+		// A choice's write pending that plays f's rate otherwise (B728 B9) is
+		// waited for as an unsettled successor is, so f's first bits enter no
+		// window the write's publish would cut through.
+		pend = s.b.pendingFor(f)
+		settled = pend == nil
+	}
 	switch {
 	case f == nil && s.endAfter == a.id:
 	case !settled:
 		if !s.floorLocked(a) {
+			if pend != nil {
+				return step{kind: stepWait, wait: pend.done}
+			}
 			return step{kind: stepWait}
 		}
 	case f.conv != nil && a.out != nil && a.out.transport.Join(f.transport).Gapless &&
