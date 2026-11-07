@@ -3626,7 +3626,14 @@ one, holding an IPv4 address, on which a socket joined to the group hears a
 question the querier sends there (a probe with a nonce, within 2 s). Where
 none qualifies, and on Windows as internal/mdns's live tests, the row pins
 loopback as before and records a skipped subtest, "the responder answers
-the name it advertises", saying why. Once the responder has started, a
-question unanswered for 10 s (asked again every half second) is a failure,
-never a skip, and so is an answer without the interface's address. On
-legion0 it is pinned to enp4s0 and answered at once.
+the name it advertises", saying why. Once the responder has started, no
+answer carrying the interface's address within 10 s (the question asked
+again every half second) is a failure, never a skip, and says what came
+back instead. An answer is taken by its address because another responder
+on the host may answer for the same name: internal/mdns's live test
+publishes `xn--f1ai0a.local` on loopback, and on Linux a socket joined to
+the group on one interface also takes the group's datagrams arriving on
+another where a socket joined (`IP_MULTICAST_ALL`, which hashicorp/mdns
+leaves on). A probe measured it both ways on legion0, and that test's own
+question takes its answer by its address too (ee885b74). On legion0 the
+responder is pinned to enp4s0 and answered at once.

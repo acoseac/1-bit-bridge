@@ -80712,6 +80712,24 @@ rebuild (nil is `os.Hostname`), which the lifecycle sets to
 read. In production both read `os.Hostname`, so nothing changes there; the
 row passes on enp4s0 in under half a second.
 
+**Part 4's cross-talk** (ee885b74, found before the gates ran). The fix
+made two tests publish `xn--f1ai0a.local` from a live responder: the serve
+row on enp4s0, and internal/mdns's
+`TestAClientResolvesTheASCIINameThroughTheBridgesResponder` on loopback
+with 127.0.0.1. On Linux a socket joined to the mDNS group on one
+interface also takes the group's datagrams arriving on another where a
+socket joined (`IP_MULTICAST_ALL`, which hashicorp/mdns leaves on; the
+DLNA rules record the same for SSDP), and each test took the first answer
+naming the host, so under a parallel `make test` either could take the
+other responder's answer and fail. Measured with a probe
+(`.tmp/_b74x/xtalkprobe`, hashicorp/mdns v1.0.7, a socket joined on the
+asking interface): a responder pinned to lo answered a question asked on
+enp4s0 with A 127.0.0.1, and one pinned to enp4s0 answered a question
+asked on lo with A 192.168.0.139, the reply's source address being the
+host's either way. Each question now takes only an answer carrying the
+address it asks for, and keeps asking until its deadline; both tests pass
+alone.
+
 **Process.** Every multi-package run went through the build lock but one: a
 two-package `go test ./internal/config/ ./internal/hostname/` at part 1's
 green, 9 s, outside it (`.tmp/_b74x/b744-1-green-config.log`). The
