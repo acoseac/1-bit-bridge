@@ -134,6 +134,22 @@ type Seams struct {
 	// the occurrence (B728 B11 round 2): a test holds it there while a
 	// refresh reconciles the occurrence. It may block.
 	Activation func(o engine.OccurrenceID)
+	// ChoicePending runs in a choice write (ChooseDSD, B728 B9) once the set
+	// the write would publish is pending and what it would interrupt is
+	// classified, before the state is written: the window in which an
+	// occurrence is admitted beside a write. It may block.
+	ChoicePending func()
+	// ChoiceWritten runs in a choice write once the state's write has
+	// returned, err its answer, before the set is published: the window in
+	// which the published epoch trails the state. It may block.
+	ChoiceWritten func(err error)
+	// ChoiceQueued runs in a choice write that finds another write's turn
+	// under way, before it waits for it. It must not block.
+	ChoiceQueued func()
+	// ChoiceAwaited runs where the step that ends occurrence o's open waits
+	// for a pending choice write to settle, its session's lock let go. It
+	// must not block.
+	ChoiceAwaited func(o engine.OccurrenceID)
 }
 
 // activation is the Activation seam.
@@ -268,6 +284,9 @@ type Backend struct {
 	dsdRead      time.Time
 	dsdFenceOnce sync.Once
 	probeState   dsdProbe
+	// pending is the choice write between its reading and its settle (B728
+	// B9), nil while none is.
+	pending atomic.Pointer[pendingChoice]
 
 	policyMu   sync.Mutex
 	policy     PlayerPolicy

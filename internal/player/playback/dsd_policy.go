@@ -438,44 +438,66 @@ func (b *Backend) probeUnit(key dacprofile.Key, bcd string, bd BoundDAC) alsapcm
 
 // readDSD computes the effective set from what it reads now (the design's
 // section 3.1), and its read side: the state, once, which the set and its
-// read side are both made from; the bound DAC from a fresh reading, its
-// unit's model read from sysfs while it is still the unit that reading
-// resolved, its PCM device's playback altsets, the DoP gain check's mixer,
-// the probe's answers, the profiles and the kernel; then the unit read again,
-// so a card renumbered while its files were read is never taken. What does
-// not read leaves no set, and DSD refused (ReasonDACUnread), its read side
-// the state's warnings of the bridge's all the same (noView).
+// read side are both made from, then the box (readBox). What does not read
+// leaves no set, and DSD refused (ReasonDACUnread), its read side the state's
+// warnings of the bridge's all the same (noView).
 func (b *Backend) readDSD() (*dsdSet, DSDView) {
-	p := b.cfg.DSD
 	st := b.dsdState()
+	r, why := b.readBox()
+	if r == nil {
+		return noSet(why, st)
+	}
+	return r.setFor(st)
+}
+
+// dsdReading is what one reading of the box establishes of the bound DAC
+// (readBox): the effective policy's inputs but the state, and what a set
+// made from them is computed for. A refresh makes its set from it and the
+// state; a choice write makes, from one reading, the set the state gives and
+// the one the write would publish (B728 B9).
+type dsdReading struct {
+	m    alsa.UnitModel
+	key  dacprofile.Key
+	in   policy.Inputs
+	tmpl dsdSet
+}
+
+// readBox reads the bound DAC from a fresh reading of the box: its unit's
+// model read from sysfs while it is still the unit that reading resolved,
+// its PCM device's playback altsets, the DoP gain check's mixer, the probe's
+// answers, the profiles and the kernel; then the unit read again, so a card
+// renumbered while its files were read is never taken. It answers why not
+// where nothing could be read.
+func (b *Backend) readBox() (*dsdReading, string) {
+	p := b.cfg.DSD
 	if p.Bound == nil || p.Box == nil {
-		return noSet("the player has no reading of the box", st)
+		return nil, "the player has no reading of the box"
 	}
 	bd, ok := p.Bound()
 	if !ok {
-		return noSet("the box's reading of the bound DAC is stale, or the binding names no unit now", st)
+		return nil, "the box's reading of the bound DAC is stale, or the binding names no unit now"
 	}
 	same := func(u alsa.USBIdentity) bool {
 		return binding.SameUnit(u, bd.Identity) && u.DevNum > 0 && u.DevNum == bd.Identity.DevNum
 	}
 	m, err := p.Box.UnitModel(bd.Card)
 	if err != nil {
-		return noSet("the bound DAC's identity did not read: "+err.Error(), st)
+		return nil, "the bound DAC's identity did not read: " + err.Error()
 	}
 	if !same(m.USB) {
-		return noSet("the bound card is no longer the unit the box's reading resolved", st)
+		return nil, "the bound card is no longer the unit the box's reading resolved"
 	}
 	key, err := dsdstate.KeyOf(m.USB, m.Product)
 	if err != nil {
-		return noSet("the bound DAC's model does not key: "+err.Error(), st)
+		return nil, "the bound DAC's model does not key: " + err.Error()
 	}
 	alts, err := p.Box.PlaybackAltsets(bd.Card, bd.Device)
 	if err != nil {
-		return noSet("the bound PCM device's stream did not read: "+err.Error(), st)
+		return nil, "the bound PCM device's stream did not read: " + err.Error()
 	}
 	mixer := readMixer(p.Box, bd.Card, m)
 	if u, ok := p.Box.CardUnit(bd.Card); !ok || !same(u) {
-		return noSet("the bound card changed while it was read", st)
+		return nil, "the bound card changed while it was read"
 	}
 	unit := dacprofile.Unit{Key: key, BCDDevice: m.BCDDevice}
 	var answers []alsapcm.ProbeResult
@@ -485,16 +507,25 @@ func (b *Backend) readDSD() (*dsdSet, DSDView) {
 			answers = append(answers, p.Probes.Answer(pu, c))
 		}
 	}
-	d := &dsdSet{computed: true, card: bd.Card, device: bd.Device, subdevice: bd.Subdevice, enumeration: bd.Enumeration,
-		model: unitText(strings.TrimSpace(strings.TrimSpace(m.Manufacturer)+" "+strings.TrimSpace(m.Product)), m.USB)}
+	r := &dsdReading{m: m, key: key, in: policy.Inputs{Unit: unit, Profiles: p.Profiles, Kernel: p.Kernel, Altsets: alts, Probe: answers, Mixer: mixer},
+		tmpl: dsdSet{computed: true, card: bd.Card, device: bd.Device, subdevice: bd.Subdevice, enumeration: bd.Enumeration,
+			model: unitText(strings.TrimSpace(strings.TrimSpace(m.Manufacturer)+" "+strings.TrimSpace(m.Product)), m.USB)}}
 	if p.Profiles != nil {
 		if prof, ok := p.Profiles.Match(unit); ok {
-			d.profile = &prof
+			r.tmpl.profile = &prof
 		}
 	}
-	d.set = policy.Effective(policy.Inputs{Unit: unit, Profiles: p.Profiles, State: st, Kernel: p.Kernel,
-		Altsets: alts, Probe: answers, Mixer: mixer})
-	return d, viewOf(d, st, m.USB)
+	return r, ""
+}
+
+// inputs are the effective policy's inputs of r over st.
+func (r *dsdReading) inputs(st dsdstate.State) policy.Inputs { return r.in.WithState(st) }
+
+// setFor is the set r makes with st, and its read side.
+func (r *dsdReading) setFor(st dsdstate.State) (*dsdSet, DSDView) {
+	d := r.tmpl
+	d.set = policy.Effective(r.inputs(st))
+	return &d, viewOf(&d, st, r.m.USB)
 }
 
 // refreshDSD computes the effective set from fresh inputs (readDSD) and,
