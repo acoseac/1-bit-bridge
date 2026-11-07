@@ -209,6 +209,9 @@ func TestTheBridgeElementCarriesTheDACChoice(t *testing.T) {
 	})
 
 	t.Run("a choice recorded in a seeded state file", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("the state is seeded through its durable writer, which Windows cannot do, and the player whose element this is runs on Linux alone")
+		}
 		persistentMedium(t)
 		dir := t.TempDir()
 		seed, err := dsdstate.Open(dir)
