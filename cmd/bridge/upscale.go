@@ -632,6 +632,11 @@ func runUpscaleWorker(
 		if ctx.Err() != nil {
 			return
 		}
+		// The guard on the variants directory rides the job as the pool
+		// would have set it, whoever built the spec (backlog B727).
+		if c.spec.OutputGuard == nil {
+			c.spec.OutputGuard = renditionOutputGuard{store: store}
+		}
 		res, err := transcode.Run(ctx, c.spec)
 		if err != nil {
 			if ctx.Err() == nil {
@@ -758,6 +763,13 @@ func runUpscaleBatch(ctx context.Context, stdout, stderr io.Writer, store *manif
 
 	if toRun == 0 {
 		return 0
+	}
+	// A variants directory that reads as a volume not mounted while the
+	// catalog records renditions in it is refused once, before any job, and
+	// every job's own guard asks again as it runs (backlog B727).
+	if err := (renditionOutputGuard{store: store}).CheckOutput(ctx, p.outputDir); err != nil {
+		fmt.Fprintf(stderr, "Not rendering: %v\n", err)
+		return 1
 	}
 
 	// The album-level gain, exactly as the serve pool applies it: every DSD

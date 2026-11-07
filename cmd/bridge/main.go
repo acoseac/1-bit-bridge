@@ -5271,6 +5271,10 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		// the stale-rendition heal below reads the same ones.
 		kindGates := renditionGates{upscale: upscaleActiveFn, optimize: carPlayOptimizeActiveFn, pcm: dsdRenderActiveFn}
 		upscalePool.SetLiveGate(kindGates.admits)
+		// Every job the pool runs asks before it writes into its variants
+		// directory, refused while it reads as a volume not mounted and the
+		// catalog records renditions there (backlog B727).
+		upscalePool.SetOutputGuard(renditionOutputGuard{store: manifestStore})
 		// v1.3 Coordinator wraps the Pool with per-batch tracking.
 		// `RecoverInterruptedBatches` runs synchronously inside
 		// NewCoordinator — any rows left in pending/running from a

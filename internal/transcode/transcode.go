@@ -327,6 +327,13 @@ type JobSpec struct {
 	// RUNS, never at an enqueue site, so no path that builds a DSD spec can
 	// leave it out.
 	AlbumGain AlbumGainer
+
+	// OutputGuard, when set, is asked first in Run whether the render may
+	// make or write anything in OutputDir, and its refusal ends the job as a
+	// fault of the output side, which strikes no source (output_guard.go,
+	// backlog B727). The pool and the CLI set it when the job RUNS, as they
+	// set AlbumGain; nil asks nothing.
+	OutputGuard OutputGuard
 }
 
 // RenderScratchBytes is the Stage A scratch this job holds on the temp
@@ -1101,6 +1108,13 @@ func Run(ctx context.Context, j JobSpec) (RunResult, error) {
 	// hours behind a library-wide batch, and every enqueuer's own check is
 	// as old as the job.
 	if err := j.sourceChanged("not rendered"); err != nil {
+		return RunResult{}, err
+	}
+	// A variants directory that reads as a volume not mounted while the
+	// catalog records renditions in it is written nothing, the DSD chain's
+	// sidecar directory included: one rendition there would read the
+	// directory as mounted to every reaper (output_guard.go).
+	if err := j.checkOutput(ctx); err != nil {
 		return RunResult{}, err
 	}
 	// Both paths come from SoxArgs's single SidecarPath() computation (Q2) —

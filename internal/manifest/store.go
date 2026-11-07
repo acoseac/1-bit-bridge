@@ -10096,6 +10096,33 @@ func (s *Store) AnyVariantExists(ctx context.Context) (bool, error) {
 	return any, nil
 }
 
+// VariantRecordedUnder reports whether the catalog records a rendition whose
+// sidecar path is below dir, an absolute directory: the evidence that dir held
+// renditions, which a render asks for before it writes into a variants
+// directory that reads as a volume not mounted (backlog B727). A row recorded
+// under another directory (a variants directory set to a new one, its
+// renditions not moved yet) is no evidence for dir. The bounds are a byte
+// range on the recorded path, dir's own spelling and the platform's
+// separator, never LIKE, which folds ASCII case; a trailing separator is
+// trimmed before the bounds append their own. EXISTS, so a match ends the
+// read; no index serves sidecar_path, and the one caller asks only once the
+// directory has read as away. Read-only; no s.mu.
+func (s *Store) VariantRecordedUnder(ctx context.Context, dir string) (bool, error) {
+	if dir == "" {
+		return false, nil
+	}
+	base := strings.TrimRight(dir, string(filepath.Separator))
+	var held bool
+	row := s.db.QueryRowContext(ctx, `
+		SELECT EXISTS(SELECT 1 FROM track_variants
+		 WHERE sidecar_path COLLATE BINARY >= ? AND sidecar_path COLLATE BINARY < ?)`,
+		base+string(filepath.Separator), base+string(rune(filepath.Separator+1)))
+	if err := row.Scan(&held); err != nil {
+		return false, fmt.Errorf("variants recorded under the variants directory: %w", err)
+	}
+	return held, nil
+}
+
 // AnalysisRow is the on-disk record for one track's offline audio
 // analysis (the `track_analysis` table). Phase 1 carries the waveform
 // sidecar pointer + content tag + freshness fields; a later phase adds
