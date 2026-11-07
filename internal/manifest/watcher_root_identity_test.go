@@ -80,11 +80,14 @@ func (s *identityAs) failWith(err error) {
 }
 
 // noteRootWatchesForTests records each root's own watch after a test added
-// its tree itself, with no identity, as noteRootWatch records a root whose
-// folder could not be read before its walk: such a root is never compared.
+// its tree itself, with the identity its folder has now, as the start records
+// one read before its walk, so the check compares it and finds it unchanged.
+// Recorded with none, a root's watch would be added again at the next check,
+// its identity taken then (takeRootIdentity).
 func noteRootWatchesForTests(w *Watcher, roots ...string) {
 	for _, root := range roots {
-		w.noteRootWatch(root, nil, w.watchSet())
+		id, _ := w.rootIdentity(root)
+		w.noteRootWatch(root, id, w.watchSet())
 	}
 }
 

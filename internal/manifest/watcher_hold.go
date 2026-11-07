@@ -48,7 +48,9 @@ import (
 //     mounted again, whose first mount's revoked folders kqueue keeps watched
 //     and listed, a linked root's link repointed, none of which fsnotify says
 //     anything about. A root that then reads as a volume not mounted is held;
-//     an identity that cannot be read is no change;
+//     an identity that cannot be read is no change, and one that could not be
+//     read as the watch was added is taken once the folder reads, the watch
+//     added again around the read (takeRootIdentity);
 //   - and, while it is held, on a bounded retry (recheckHeld): recheckFirst
 //     after a root is held, then twice as long each time, recheckMax at most,
 //     each look a stat, one batch of the root's listing and, for a root that
@@ -493,11 +495,12 @@ func (wt *Watcher) checkRootWatches(ctx context.Context) {
 // where it is now, recording that folder's identity. An identity that cannot be
 // read is no change: the root is held where it reads as a volume not mounted,
 // and otherwise left as it is until the next check. A root recorded with no
-// identity (its folder could not be read as its watch was added) is not
-// compared.
+// identity (its folder could not be read as its watch was added) takes one
+// once its folder reads (takeRootIdentity).
 func (wt *Watcher) checkRootIdentity(ctx context.Context, root string) {
 	want, known := wt.rootIDs[root]
 	if !known {
+		wt.takeRootIdentity(ctx, root)
 		return
 	}
 	now, err := wt.rootIdentity(root)
@@ -510,6 +513,23 @@ func (wt *Watcher) checkRootIdentity(ctx context.Context, root string) {
 	if !os.SameFile(want, now) {
 		wt.lookAgain(ctx, root, msgWatchRootReplaced)
 	}
+}
+
+// takeRootIdentity is the check of a watched root recorded with no identity,
+// its folder unreadable as its own watch was added (B777's round 2): every
+// check returned there, for good, though the reads answered again. Once the
+// folder reads, the root is looked at again and its watch added again around
+// the read (lookAgain, watchAgain), never the identity recorded against the
+// watch it has, which may be on a folder another has covered since (a volume
+// mounted, a link repointed while the reads failed): the identity recorded is
+// of the folder the new watch is on, with a scan of it. A folder that still
+// does not read is left to the next check, which reads it again and nothing
+// more.
+func (wt *Watcher) takeRootIdentity(ctx context.Context, root string) {
+	if _, err := wt.rootIdentity(root); err != nil {
+		return
+	}
+	wt.lookAgain(ctx, root, msgWatchRootIdentityTaken)
 }
 
 // lookAgain looks at a watched root whose own watch can no longer be trusted:
