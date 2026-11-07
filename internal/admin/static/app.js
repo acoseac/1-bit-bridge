@@ -1943,6 +1943,7 @@ function wireUpload(signal) {
   document.getElementById("upload-resume-discard")?.addEventListener("click", discardResumable);
   document.getElementById("upload-cancel")?.addEventListener("click", resetUpload);
   document.getElementById("upload-start")?.addEventListener("click", startUpload);
+  document.getElementById("upload-retry-button")?.addEventListener("click", retryUpload);
   document.getElementById("upload-abort")?.addEventListener("click", () => {
     if (uploadState) uploadState.aborted = true;
   });
@@ -2264,6 +2265,7 @@ function stageFiles(picked) {
     return;
   }
   uploadState = { picked: usable, session: null, aborted: false, preflightSkipped: 0, junkSkipped: junk, digestUnavailable: false };
+  hideUploadRetry();
   const note = document.getElementById("upload-dupe-note");
   if (note) note.hidden = true;
   renderUploadReview();
@@ -2308,6 +2310,7 @@ async function startUpload() {
   const err = document.getElementById("upload-error");
   const start = document.getElementById("upload-start");
   err.hidden = true;
+  hideUploadRetry();
   setDisabled(start, true);
   try {
     const overwrite = document.getElementById("upload-overwrite")?.checked === true;
@@ -2381,9 +2384,61 @@ async function startUpload() {
     const res = await API.post(`/api/upload/sessions/${encodeURIComponent(session.id)}/commit`);
     reportCommit(res);
   } catch (e) {
-    showUploadError(e?.message ? e.message : String(e));
+    showUploadFailure(e);
   } finally {
     setDisabled(start, false);
+    document.getElementById("upload-progress").hidden = true;
+  }
+}
+
+// showUploadFailure says why an upload stopped. Where the server refused it
+// because a library root it writes under reads as a volume that is not
+// mounted (backlog B776), after its session was made, it also offers Try
+// again: the review that holds the Upload button is hidden by then, and the
+// session, which nothing was written beside, commits once the volume is back.
+// A refusal before the session was made leaves the review and its Upload
+// button where they were.
+function showUploadFailure(e) {
+  showUploadError(e?.message ? e.message : String(e));
+  if (e?.code === "root_not_mounted" && uploadState?.session) {
+    document.getElementById("upload-retry").hidden = false;
+  }
+}
+
+// hideUploadRetry takes Try again away: a new pick, a new upload, a reset,
+// or the retry's own start.
+function hideUploadRetry() {
+  const retry = document.getElementById("upload-retry");
+  if (retry) retry.hidden = true;
+}
+
+// retryUpload carries on the upload a refusal stopped (showUploadFailure):
+// the same session, read again from the server, the files it holds complete
+// passed over (transferAll) and the rest sent from the offsets it holds, then
+// committed. It makes no session and sends no finished file again.
+async function retryUpload() {
+  const sid = uploadState?.session?.id;
+  if (!sid) return;
+  const button = document.getElementById("upload-retry-button");
+  setDisabled(button, true);
+  hideUploadRetry();
+  document.getElementById("upload-error").hidden = true;
+  try {
+    uploadState.aborted = false;
+    const session = await API.get(`/api/upload/sessions/${encodeURIComponent(sid)}`);
+    uploadState.session = session;
+    document.getElementById("upload-progress").hidden = false;
+    await transferAll(session);
+    if (uploadState.aborted) {
+      showUploadResult("Upload stopped. Staged progress is kept — start again to resume.");
+      return;
+    }
+    const res = await API.post(`/api/upload/sessions/${encodeURIComponent(sid)}/commit`);
+    reportCommit(res);
+  } catch (e) {
+    showUploadFailure(e);
+  } finally {
+    setDisabled(button, false);
     document.getElementById("upload-progress").hidden = true;
   }
 }
@@ -2646,6 +2701,7 @@ function resetUpload() {
   uploadState = null;
   document.getElementById("upload-review").hidden = true;
   document.getElementById("upload-progress").hidden = true;
+  hideUploadRetry();
   // The duplicate note is deliberately NOT cleared here. resetUpload runs
   // immediately after a commit, and the note is the explanation for the
   // number the operator is about to read — hiding it leaves "1 added" with

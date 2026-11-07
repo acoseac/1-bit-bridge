@@ -121,8 +121,30 @@ func (s *Server) uploadManager(w http.ResponseWriter) (*upload.Manager, bool) {
 	return s.deps.Upload, true
 }
 
+// errCodeRootNotMounted is the console's code for a write refused under a
+// library root that reads as a volume not mounted (backlog B776), which the
+// upload page answers with a retry of the same session.
+const errCodeRootNotMounted = "root_not_mounted"
+
+// writeRootAwayRefusal answers a write refused under a library root that
+// reads as a volume not mounted (backlog B776): 409, in the hold's words
+// (manifest.RootAwayError.Message), which name the root by its folder's name
+// and no path. Nothing was written, and the same request succeeds once the
+// volume is back. Logged at Info with the root, as the watcher's held line
+// names it.
+func writeRootAwayRefusal(w http.ResponseWriter, away *manifest.RootAwayError) {
+	logger.Info("console write refused: the library root reads as a volume that is not mounted",
+		"root", away.Root, "reads", away.Reason())
+	writeError(w, http.StatusConflict, errCodeRootNotMounted, away.Message())
+}
+
 // writeUploadError maps the package sentinels onto status codes.
 func writeUploadError(w http.ResponseWriter, err error) {
+	var away *manifest.RootAwayError
+	if errors.As(err, &away) {
+		writeRootAwayRefusal(w, away)
+		return
+	}
 	var mm *upload.OffsetMismatch
 	if errors.As(err, &mm) {
 		w.Header().Set("Content-Type", "application/json")

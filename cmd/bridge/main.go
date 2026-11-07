@@ -6087,6 +6087,12 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	// library.allowDelete hot-applies; a nil gate would fail closed, which is
 	// the right direction for the only thing in the bridge that removes
 	// library content.
+	//
+	// Both writers refuse a write under a library root that reads as a volume
+	// not mounted (backlog B776): the guard asks the look the watcher holds a
+	// root by, of the deepest root that owns each path a request would write,
+	// before anything is written.
+	writeGuard := scanner.WriteGuard(scanCtx)
 	trashMgr := trash.New(
 		scanner.Roots,
 		// The SAME resolver every byte route uses. A path names its own root;
@@ -6098,6 +6104,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 			return live != nil && live.Library.AllowDelete
 		},
 		time.Duration(cfg.Library.TrashTtlSeconds)*time.Second,
+		trash.WithRootGuard(writeGuard),
 	)
 	// bgWriters-joined for the same reason the upload sweeper is: it unlinks
 	// files inside a library root.
@@ -6119,7 +6126,8 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		// "lets the UI turn a dead end into 'empty trash and resume'", and it
 		// had no production caller at all: the option was passed only by two
 		// tests, which is why they were green.
-		upload.WithReclaimable(trashMgr.Reclaimable))
+		upload.WithReclaimable(trashMgr.Reclaimable),
+		upload.WithRootGuard(writeGuard))
 	// A restore and a commit of one path share the commit's destination lock.
 	// Trash is built first (the 507 needs it), so the bind is applied after
 	// the upload manager exists.
