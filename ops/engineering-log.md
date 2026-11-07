@@ -80583,10 +80583,12 @@ not shown. `ProtocolVersion` stays 1.
 DSD state it computes the set from, carried in the published set (`dsdSet.view`) and cloned into
 `PlayerPolicy.DSD` by `copyPolicyLocked`; `Backend.Facts` returns it beside the set's tuples and
 converted rates and the live observation, under `policyMu`, and serve's `bridgeOutput.facts`
-calls `Facts` once a request (`bridgeDSDFacts`). The route reads no file and takes neither the
+calls `Facts` once a request (`bridgeDSDFacts`). That read opens no file and takes neither the
 store's lock, which a write holds across its fsync, nor `dsdMu`, which a refresh holds across its
 reading of the box: it waits on `policyMu`, held for copies and the observation's updates, and
-on the current sink's lock, which `Position` takes and no kernel call holds. `dsdDAC` is the
+on the current sink's lock, which `Position` takes and no kernel call holds. (The route's other
+reads are as before: the identity file until the engine runs, and B543's bounded reading for the
+element's `dac`.) `dsdDAC` is the
 view's DAC, omitted while the set was computed for none, and never decided by the element's `dac`
 (B543's own reading of the box).
 
@@ -80654,3 +80656,18 @@ api's health and protocol tests (eight), all green unmutated.
 | c | the view's DAC rebuilt from a fresh read of the store at every copy | as predicted: `TestTheBridgeElementCarriesTheDACChoice`'s seeded state file (the route read the state), `TestNoDACKeyOrModelCarriesASerialOrAPort`'s in-memory half (no unit to redact by: the key a hash of the serial) |
 | d | `refreshDSD` keeps the published set whenever the next plays the same | as predicted: `TestAChangeThatMovesNoPlanIsPublishedInItsEpoch`'s four steps, `TestTheBridgeElementCarriesTheDACChoice`'s first use observed on a published backend |
 | e | a converted occurrence's observation takes the native option's evidence at its source rate | as predicted: `TestAConvertedEntryCarriesItsPlan`'s 176.4 kHz case (`streaming_observed`); its 44.1 kHz case, where native is not offered, and the goldens stayed green |
+
+### Gates
+
+At 99c66d91, inside the build slot, on Go 1.27.3: `make fmt` changed nothing; `make vet` and its
+windows, darwin and linux/386 legs passed; `make docs-check` passed (CLAUDE.md 80.9 %, player.md
+99.3 %, the worst load 66.0 %), and on a copy with the rules patch applied (CLAUDE.md 81.4 %,
+`output.md` 69,771 bytes, `wire.md` 55,334, the worst load 66.0 %), where
+`TestEveryCitedTestNameExists` and `TestEveryBridgeWordIsInTheProtocol` passed and `rules-for.py`
+names `output.md` for the read side's tests and goldens; `go test -race` of the touched packages
+(playback, manifest, api, cmd/bridge) passed (1,468 s); both native-integration overlays passed,
+every case CI names (13 and 29 cases); `scripts/qualification-version` passed at 41 against
+c7192a6f and against 9dd51ae4; `make test` passed, 87 packages ok (1,848 s), the Linux-only tests
+(ALSA, alsapcm, the durable writer, the identity paths) run here, not vetted alone; `make
+build-all` passed. alsa-abi did not run: B8 touches neither `internal/alsapcm` nor
+`scripts/alsa-abi`.
