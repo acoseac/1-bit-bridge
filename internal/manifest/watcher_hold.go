@@ -124,14 +124,30 @@ func (wt *Watcher) holdAbsentRoots(ctx context.Context, roots []string) []string
 // after a walk that went on is said with.
 var errRootWatchMissing = errors.New("the root's own watch was not added")
 
+// errIdentityUnread is a folder whose identity its stat left to a later read,
+// which failed.
+var errIdentityUnread = errors.New("the folder's identity could not be read")
+
 // rootIdentity is the identity of the folder at root's path now, through every
 // link on the way (os.Stat, as the walk resolves a linked root), or a test's
-// stand-in for it (identityForTests).
+// stand-in for it (identityForTests). Windows' os.Stat of a plain folder keeps
+// its path and reads the folder's file ID only when os.SameFile first asks,
+// from whatever folder the path names then, so the comparison of the stat with
+// itself reads it here: an identity taken before a walk is of the folder there
+// before it. Elsewhere the stat's device and inode are the identity, and the
+// comparison reads nothing.
 func (wt *Watcher) rootIdentity(root string) (os.FileInfo, error) {
 	if h := wt.identityForTests; h != nil {
 		return h(root)
 	}
-	return os.Stat(root)
+	info, err := os.Stat(root)
+	if err != nil {
+		return nil, err
+	}
+	if !os.SameFile(info, info) {
+		return nil, errIdentityUnread
+	}
+	return info, nil
 }
 
 // rootIdentities is each root's identity now (rootIdentity), taken before the
