@@ -80734,3 +80734,100 @@ alone.
 two-package `go test ./internal/config/ ./internal/hostname/` at part 1's
 green, 9 s, outside it (`.tmp/_b74x/b744-1-green-config.log`). The
 branch's gates are in B745's record.
+
+## 2026-11-07 — B745: the player's DSD state in the CLI's rules, and a Windows restore of the player's files
+
+Backlog B745, the last item on `fix/b74x-small-followups`, worker b74x, as
+for B740. Commits: the red f416a082, the fix 93ba1e34, the rule's long form
+fc6aab6a (under B745 in `ops/History-rules-cli-serve.md`), then this
+record; the rule's line in `.claude/rules/cli-serve.md` ships in
+`rules-b74x.patch`.
+
+**What happened.** `cli-serve.md`, which loads with `internal/backup`, had
+no bullet for the snapshot's newest file, `player-dsd.json`: the DSD
+state's backup and restore rules (B728 B3) are in `player.md`, which loads
+with the player's packages, so a session changing the backup met no rule
+for it. And a snapshot a Linux box takes once its player has run holds
+both of the player's files, the identity (`player-uuid`, with
+`player-ids.json`) and the DSD state. Restored on Windows, where no
+directory can be synced (`atomicwrite.ErrNoDirectoryBarrier`) and the
+player does not run, each is refused, the DSD state as the identity is:
+the owner's decision in B728, kept. The DSD state's refusal named the way
+through, removing it from a copy of the snapshot; the identity's, "restore
+player reservation: atomicwrite: this platform cannot fsync a directory,
+so no write here is made durable: unsupported operation", named none.
+
+**Red first.** At f416a082,
+`TestARestoreWhereNoDirectoryCanBeSyncedRefusesThePlayersFilesNamingTheWay`
+takes a snapshot where directories sync and restores it with the barrier
+taken away (`atomicwrite.SetSyncDirForTest(nil)`, the existing seam, so it
+runs natively on every OS), for the identity, the DSD state and both: red
+for the identity and for both (the refusal said neither that nothing was
+restored nor the way through), green for the DSD state alone, whose
+refusal said both already.
+
+**The fix** (93ba1e34). `RestoreWithOptions` asks once, after reading both
+files from the snapshot and comparing the config and before its first
+write, whether a directory can be synced (`atomicwrite.HasDirectoryBarrier`,
+which reads the barrier the strict writer reads), and refuses a snapshot
+holding either file through `playerFilesNeedABarrier`:
+`ErrNoDirectoryBarrier` wrapped, every one of those files the snapshot
+holds named (`player-uuid`, `player-ids.json` where the manifest lists it,
+`player-dsd.json`), nothing restored, and the way through, removing them
+from a copy of the snapshot, which then restores the rest while this box
+keeps its own. The test's last step takes that way: the copy restores
+`tokens.json` and writes neither of the player's files.
+`restorePlayerDSD`'s own refusal stays behind the check.
+
+**Negative controls** (`.tmp/_b74x/ctl2.py`, `spec_b745.py`), predicted by
+name in `.tmp/_b74x/controls-b745.predictions.txt` before the run, at
+93ba1e34; the baseline green and `git status` clean after each. N is the
+new test, D `TestARestoreThatCannotWriteTheDSDStateDurablyRestoresNothing`,
+L `TestARestoreWhoseBarrierFailsOnceTheStateLandedSaysItChanged`, U
+`TestSnapshotCarriesThePlayerUUIDAndRestoreWritesItAsTheIdentityFile`.
+
+| Mutation | Red | Green |
+|---|---|---|
+| C745-1 the check removed | N (the identity, and both) | N's DSD-state row, D, L, U |
+| C745-2 the check removed and the DSD state's writer not durable (`atomicwrite.WriteBytes`) | N (all three rows), D, L | U |
+
+C745-2's first run did not build ("path/filepath" imported and not used),
+which is no verdict, as the predictions file records; it was run again
+with the path cleaned through `filepath`, its prediction unchanged, and
+went as predicted. C745-1 is the brief's control, the check removed: the
+test fails for the identity, and for the DSD state once its writer's own
+refusal, the second layer, is gone too.
+
+**The branch's gates**, at fc6aab6a (the code as it ships; only this
+record follows it):
+
+- `make test-fast` through the build lock (`buildslot.py b74x`), TMPDIR
+  unset, so the Makefile's default, the worktree's `.tmp`, with B740's
+  planted link in it: 87 packages ok and 14 with no test files, none
+  failed, in about eight minutes once the slot was taken. Among them the
+  Linux-only paths, run here and not only vetted: `internal/alsa`,
+  `internal/alsapcm` (42.6 s), the durable writer `internal/atomicwrite`
+  (14.9 s), the identity's `internal/backup` (366 s), and
+  `scripts/third-party-licenses` (21.6 s), the census B740 fixed, beside the
+  planted link.
+- `make vet` through the lock, native, `GOOS=windows`, `GOOS=darwin` and
+  `GOOS=linux GOARCH=386` (the vet job's portability leg): clean.
+- gofmt: go1.27.3's `gofmt -l` (go.mod's toolchain, from the module cache)
+  over the 30 Go files the branch changes lists none.
+- `make docs-check` on the tree: ok. `rules-b74x.patch`: `git apply --check`
+  clean against fc6aab6a; applied to a copy of CLAUDE.md, the rules files
+  and the skills, every budget holds (config-lifecycle.md at 96.7%, the
+  fullest file it touches; player.md, untouched, 98.2%), and each of the 12
+  test names its added lines cite is declared. It carries, beside the four
+  items' lines, a test-discipline line in build-ci-tests.md for B744's
+  cross-talk. It is built with one line of context, so no hunk holds a
+  blank or whitespace-only line: the tool that wrote it to the job
+  directory drops a line's lone space (a first copy lost four blank context
+  lines' spaces), and the job directory's copy was compared with the checked
+  one byte for byte (`.tmp/_b74x/cmppatch.py`).
+- The qualification guard (`internal/player/qualification/version_gate.go`):
+  the branch touches no guarded prefix or path, so `qualificationVersion`
+  stays.
+
+The planted link of B740's red (`.tmp/b740-planted/run/user/1000/bus`, a
+link to nothing) was in place for the test run and was removed after it.
