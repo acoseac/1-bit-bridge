@@ -81,6 +81,7 @@ lost my library."
 - **…and the guard counts only LIBRARY CONTENT, by the walk's own rule** (2026-09-28, CodeRabbit on #1076) → History-rules-scanner.md
 - **…and the rows it counts are the ROOT'S OWN: never a UPnP-routed row** (2026-09-29, backlog B51) → History-rules-scanner.md
 - **A link to a directory BELOW a root is still not followed, and the scanner SAYS so** (2026-09-29, backlog B74) **Never the `ModeSymlink` bit** → History-rules-scanner.md
+- **…and the watcher's look reads a root holding only links to directories as the scan's guard does, through the one reading they and the owning-root audit share (`lookAtContentlessRoot`)** (2026-11-07, backlog B742) **Don't classify a root holding no content anywhere but `lookAtContentlessRoot`, or clear `absent` for the links case: the parent scans read it.** → History-rules-scanner.md
 - **A configured root that is a link is WATCHED at the directory it resolves to, and every event under it is named back under the configured root** (2026-09-29, backlog B51) → History-rules-scanner.md
 - **Every containment check and sidecar walk resolves a Windows junction as it resolves a symlink** (`fsutil.ResolveLinks`, 2026-09-29, backlog B51) → History-rules-scanner.md
 - **The five post-scan reconciliation passes all exclude UPnP-routed rows, from ONE routed set computed at the reconciliation head** → History-rules-scanner.md

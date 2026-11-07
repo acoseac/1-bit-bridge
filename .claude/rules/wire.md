@@ -368,7 +368,10 @@ Audited PR-by-PR; verified clean at the time of this section's introduction. Re-
   `HasCredentialParts` until B66, which let a path, a scheme and a port
   through; and it wrote the untrimmed flag, so a padded domain's endpoint
   (`https://` joined to the spaces) did not parse and the install was saved
-  with none.
+  with none. A host that is not ASCII takes the same split since B744
+  (`auth-tls.md`, the configured-name bullet): a loaded entry is published
+  with its host in its IDNA ASCII form, or pruned where it has none, and a
+  typed one is stored in that form, or refused.
   **Don't drop such an entry**: its host and port still reach the bridge,
   and a loaded config must not lose a route over a part nothing reads.
   **Don't strip at the publish sites**: every enumeration
@@ -408,7 +411,10 @@ Audited PR-by-PR; verified clean at the time of this section's introduction. Re-
   never refused**: the value loaded before. **Refuse what is typed**:
   `bridge init --public --domain` refuses any value `AutocertHost` would
   change (exit 2, nothing written), and trims once and writes what it
-  checked.
+  checked. **A host that is not ASCII is served in its IDNA ASCII form**,
+  and one with none as `config.InvalidAutocertDomain` with a warning; init
+  writes that form, saying so, and refuses a domain with none (B744, the
+  configured-name bullet in `auth-tls.md`).
   **A value that names no host that can be read is served as
   `config.InvalidAutocertDomain`** (`autocert-domain.invalid`, RFC 6761),
   never blanked: `Validate` refuses an empty public domain, and the phones of
@@ -457,9 +463,16 @@ Audited PR-by-PR; verified clean at the time of this section's introduction. Re-
   none read, which publishes no `host=` and an SRV target made of its
   first address (`onebit-bridge-192-168-1-20.local`, `mdns.RecordsFor`),
   never `localhost.local`, which no certificate names: the client takes
-  `ips=` or resolves the service (PROTOCOL.md's `host` row). **Don't build
-  any of them from the name as the system reported it, or publish
-  `localhost.local`.**
+  `ips=` or resolves the service (PROTOCOL.md's `host` row). The responder
+  reads the host's name through the probe the endpoints and the
+  certificate read (`mdns.Config.HostnameSource`, which serve sets to
+  `advertise.ReportedHostname`, B744), so it publishes, and answers for,
+  the name they advertise; one that fails to start leaves the `.local`
+  endpoint listed, and its failure's line names it
+  (`advertise.OwnResponderEndpoint`, the bullet in `cli-serve.md`).
+  **Don't build any of them from the name as the system reported it,
+  publish `localhost.local`, or let the responder read the host's name
+  but through that probe.**
 - **A container id, the default docker0 address, and a point-to-point ULA
   stay out of the lists a phone dials** (2026-10-13, backlog B189, B199,
   B229). `/v1/health` endpoints and the certificate want-set share one
@@ -549,7 +562,9 @@ Audited PR-by-PR; verified clean at the time of this section's introduction. Re-
   (`dns: bad rdata`), so the bridge is never discovered; the one trace is an
   INFO line per query ("[ERR] mdns: Failed to handle query"). 64 ASCII
   characters, or 22 CJK ones, were enough (measured on a Linux LAN).
-  `sanitizeInstance` cuts it to `maxInstanceLen` bytes on a rune boundary;
+  `sanitizeInstance` cuts it to `maxInstanceLen` bytes on a rune boundary,
+  once the dots and every control the library name's entries strip are
+  gone (`config.WithoutControlCharacters`, C1 included since B744);
   TXT `library=` carries up to 240 bytes of the name. **The instance and
   every TXT string are DNS presentation format to miekg/dns**, where a
   backslash escapes what follows it (`\X` is X, `\DDD` a byte): each is

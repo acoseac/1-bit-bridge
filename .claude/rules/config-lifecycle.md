@@ -182,9 +182,11 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   Don't count bytes: 256 `é` must pass. **Refuse what the operator types,
   repair what is already stored** (#1042's rule, one step on):
   `config.CheckLibraryName` refuses in the PATCH (400 `validate`, nothing
-  written) and in init's `--name` (exit 2, before anything is written), and
+  written) and in init's `--name` (exit 2, before anything is written),
+  through `CleanTypedLibraryName` since B744 (the next bullet), and
   init's prompt asks again; `Normalize` repairs a config's or an override's
-  name (`config.RepairLibraryName`: U+FFFD for bytes that are not UTF-8, cut
+  name (`config.RepairLibraryName`: U+FFFD for bytes that are not UTF-8,
+  its control characters removed, cut
   to 256 runes and re-trimmed, with a WARN), because a `Load` refusal would
   stop a bridge from starting over a display name. init keeps and offers an
   install's name AS LOAD SERVES IT, or its prompt would offer a name it then
@@ -194,6 +196,7 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   paste without a word; the handler's 400 is what the page shows ("Save
   failed: libraryName: must be at most 256 characters, …"). Added in #1046's
   first round, removed on review (CodeRabbit).
+- **…and a library name loses its control characters, the runes U+0000 to U+001F, U+007F and U+0080 to U+009F read after decoding, wherever it is set: what is typed (`config.CleanTypedLibraryName`: init's `--name` and its prompt, the console's save) after the refusal of bytes that are not UTF-8 and before its length is counted, and what loads (`RepairLibraryName`: the file, `BRIDGE_LIBRARY_NAME`, a prior install's name, with the repair's WARN), so a name served live is the name served after a restart; the Bonjour instance strips by the same definition (`config.WithoutControlCharacters`)** (2026-11-07, backlog B744). **Don't strip bytes rather than runes, strip before the UTF-8 refusal, count a typed name's length before its controls are gone, or give an entry a strip of its own.** → History-rules-config-lifecycle.md
 - **A configured URL is named in every refusal and warning by its field,
   its scheme and its host, never its value** (backlog B54). #1074 gave the
   WARNINGS that rule (`urlOriginForLog`, under DLNA) and left the two
