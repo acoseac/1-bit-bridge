@@ -162,6 +162,22 @@ func TestAHybridWavPacksCorrectionFileDecidesItsCodec(t *testing.T) {
 		first.subs = [][]byte{wvSub(fxIDWVCBitstream, nil)}
 		return append(first.bytes(), full[n:]...)
 	}()
+	// Round 5 (CodeRabbit, two findings). A stream whose header states no
+	// length, ended by a block of metadata alone (the reference encoder's MD5
+	// sum or RIFF trailer, its flags and index cleared), ends where its last
+	// block with samples does, which the look for the stream's end reaches by
+	// passing over the blocks with none; a block of metadata too large for the
+	// tail the look reads leaves no audio block there to find, so the end is
+	// not found and nothing matches (as the reference decoder's look at its
+	// last 1 MiB finds no final block either). And a .wv whose header states the
+	// length, beside a correction file whose header the encoder left unknown,
+	// matches: the reference decoder reads the stream's length from the .wv
+	// alone and compares no total (match_wvc_header). The reverse, a known
+	// total in the .wvc alone, and two known totals that differ ("another
+	// stream's") stay refused.
+	md5Tail := wvMetadataBlock(-1, 16).bytes()
+	bigTail := wvMetadataBlock(-1, wvSearchLimit+4096).bytes()
+	unknownWVC := wvBlocksStating(spec, true, -1)
 	cases := []struct {
 		name  string
 		wv    wvSpec
@@ -176,6 +192,12 @@ func TestAHybridWavPacksCorrectionFileDecidesItsCodec(t *testing.T) {
 		{"its own, the stream from past its first sample", spec, map[string][]byte{hybridWVC: late(true, 2)}, "", matched},
 		{"cut at a block's end, the stream from past its first sample", spec, map[string][]byte{hybridWVC: late(true, 1)}, "", rejected},
 		{"its own, its correction bitstream empty", spec, map[string][]byte{hybridWVC: emptyWVC}, "", rejected},
+		{"its own, the length unknown, a metadata block after the audio", unknown, map[string][]byte{hybridWVC: wvcFile(unknown)}, "", matched},
+		{"its own, the length unknown, a metadata block after the audio past the tail the look reads", unknown, map[string][]byte{hybridWVC: wvcFile(unknown)}, "", rejected},
+		{"its own, its length stated in the .wv alone", spec, map[string][]byte{hybridWVC: unknownWVC}, "", matched},
+		{"its own, its length stated in the .wvc alone", unknown, map[string][]byte{hybridWVC: wvBlocksStating(unknown, true, 8192)}, "", rejected},
+		{"its own, its length stated in the .wv alone, a metadata block after the .wvc's audio", spec,
+			map[string][]byte{hybridWVC: append(append([]byte(nil), unknownWVC...), md5Tail...)}, "", matched},
 		{"no correction file", spec, nil, "", lossy},
 		{"its own", spec, map[string][]byte{hybridWVC: full}, "",
 			want{CodecWavPack, 16, SampleFormatInteger, hybridWVC, '+', false}},
@@ -196,8 +218,10 @@ func TestAHybridWavPacksCorrectionFileDecidesItsCodec(t *testing.T) {
 	}
 	// The .wv's audio where a case's spec cannot lay it out.
 	wvData := map[string][]byte{
-		"its own, the stream from past its first sample":              late(false, 2),
-		"cut at a block's end, the stream from past its first sample": late(false, 2),
+		"its own, the stream from past its first sample":                                             late(false, 2),
+		"cut at a block's end, the stream from past its first sample":                                late(false, 2),
+		"its own, the length unknown, a metadata block after the audio":                              append(wvFile(unknown), md5Tail...),
+		"its own, the length unknown, a metadata block after the audio past the tail the look reads": append(wvFile(unknown), bigTail...),
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

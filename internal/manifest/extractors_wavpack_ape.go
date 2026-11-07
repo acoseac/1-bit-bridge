@@ -45,20 +45,23 @@ func extractWavPackWithContext(absPath string, t *Track, ec *ExtractContext) err
 	if err != nil {
 		return err
 	}
-	s, err := readWavPackStream(f, info.Size())
+	// Every read is against the size the stat gave: one that ends short of it
+	// is the file shrinking while it is read (statBoundReader).
+	r := statBound(f, info.Size(), ec)
+	s, err := readWavPackStream(r, info.Size())
 	if err != nil {
 		return err
 	}
 	if s.hybrid && !s.dsd && !s.statesItsLength() {
 		// Its correction file must end where its own audio does.
-		if s.final, s.finalFound, err = wvStreamFinal(f, info.Size()); err != nil {
+		if s.final, s.finalFound, err = wvStreamFinal(r, info.Size()); err != nil {
 			return err
 		}
 	}
 	if err := applyWavPackStream(absPath, t, s, ec); err != nil {
 		return err
 	}
-	readAPEFamilyTags(f, info.Size(), absPath, t, ec)
+	readAPEFamilyTags(r, info.Size(), absPath, t, ec)
 	return nil
 }
 
@@ -137,7 +140,10 @@ func extractAPEWithContext(absPath string, t *Track, ec *ExtractContext) error {
 	if err != nil {
 		return err
 	}
-	s, err := readAPEHeader(f, info.Size())
+	// As a .wv's: a read that ends short of the stat's size is the file
+	// shrinking while it is read (statBoundReader).
+	r := statBound(f, info.Size(), ec)
+	s, err := readAPEHeader(r, info.Size())
 	if err != nil {
 		return err
 	}
@@ -162,16 +168,17 @@ func extractAPEWithContext(absPath string, t *Track, ec *ExtractContext) error {
 	if d := s.duration(); plausibleDuration(d) {
 		t.Duration = &d
 	}
-	readAPEFamilyTags(f, info.Size(), absPath, t, ec)
+	readAPEFamilyTags(r, info.Size(), absPath, t, ec)
 	return nil
 }
 
 // readAPEFamilyTags reads the tags of a WavPack or Monkey's Audio file of
 // size bytes from f: its APEv2 tag, or where it has none, its ID3v1 tag
 // (readAPEFamilyID3v1); then the cover, the tag's front cover ahead of the
-// folder's. A read of the tag that did not complete returns, noted by f, so
+// folder's. A read of the tag that did not complete returns, noted by f (the
+// file's source, and statBoundReader for a read that ends short of size), so
 // the extraction's caller discards what was read.
-func readAPEFamilyTags(f extractSource, size int64, absPath string, t *Track, ec *ExtractContext) {
+func readAPEFamilyTags(f io.ReaderAt, size int64, absPath string, t *Track, ec *ExtractContext) {
 	apeTags, found, err := readAPEv2(f, size, trackLogPath(absPath, t))
 	if err != nil {
 		return
@@ -203,7 +210,7 @@ func readAPEFamilyTags(f extractSource, size int64, absPath string, t *Track, ec
 // file, and through a dhowdenReadBuffer, as every dhowden read is (backlog
 // B117). Then the folder's cover, as for a file whose tags hold none, and the
 // stem's explicit mark for a file with no ID3v1 tag either.
-func readAPEFamilyID3v1(f extractSource, size int64, absPath string, t *Track, ec *ExtractContext) {
+func readAPEFamilyID3v1(f io.ReaderAt, size int64, absPath string, t *Track, ec *ExtractContext) {
 	var m tag.Metadata
 	if size >= apeID3v1Bytes {
 		stream, release := newDhowdenReadBuffer(io.NewSectionReader(f, size-apeID3v1Bytes, apeID3v1Bytes))

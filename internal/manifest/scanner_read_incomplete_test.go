@@ -580,3 +580,110 @@ func TestScanSubtree_AChangedFileWhoseReadDidNotCompleteKeepsItsRow(t *testing.T
 	}
 	requireOneUnreadLine(t, rec, 1, rel, "read")
 }
+
+// shrunkAudio is an opened audio file that shrank after its stat: Stat is the
+// file's, and every read ends at cut, short of the size Stat gave, as the
+// reads of a file truncated after it was stat'd end.
+type shrunkAudio struct {
+	*os.File
+	cut int64
+}
+
+func (f *shrunkAudio) ReadAt(p []byte, off int64) (int, error) {
+	if off >= f.cut {
+		return 0, io.EOF
+	}
+	if off+int64(len(p)) > f.cut {
+		n, err := f.File.ReadAt(p[:f.cut-off], off)
+		if err == nil {
+			err = io.EOF
+		}
+		return n, err
+	}
+	return f.File.ReadAt(p, off)
+}
+
+func (f *shrunkAudio) Read(p []byte) (int, error) {
+	pos, err := f.File.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return 0, err
+	}
+	n, err := f.ReadAt(p, pos)
+	if _, serr := f.File.Seek(pos+int64(n), io.SeekStart); serr != nil && err == nil {
+		err = serr
+	}
+	return n, err
+}
+
+// TestScanner_AFileThatShrinksWhileItIsReadKeepsItsRow: a WavPack or Monkey's
+// Audio file whose reads end short of the size its extractor's stat gave
+// shrank while it was read, a read that did not complete (backlog B134), not
+// a file cut as it was written (round 5 of backlog B489, CodeRabbit). The row
+// a changed file had is kept, byte for byte, the scan says so once, and the
+// next scan, reading the file whole, writes its own tags. Until round 5 the
+// end inside a WavPack block the file held whole by its stat was taken for a
+// block cut short (errWVBlockCut), which is a refusal, and an end inside an
+// APEv2 tag for a file with no tag: either replaced the good row with one by
+// the file's name.
+func TestScanner_AFileThatShrinksWhileItIsReadKeepsItsRow(t *testing.T) {
+	format := func(name string) readFaultFormat {
+		for _, f := range readFaultFormats {
+			if f.name == name {
+				return f
+			}
+		}
+		t.Fatalf("no read-fault format %q", name)
+		return readFaultFormat{}
+	}
+	for _, c := range []struct {
+		name   string
+		format readFaultFormat
+		cut    func(size int64) int64
+	}{
+		{"WavPack, inside its first audio block", format("WavPack"), func(int64) int64 { return 40 }},
+		{"WavPack, inside its APEv2 tag", format("WavPack"), func(size int64) int64 { return size - 10 }},
+		{"Monkey's Audio, inside its APEv2 tag", format("Monkey's Audio"), func(size int64) int64 { return size - 10 }},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := newLinkedFixture(t)
+			p := filepath.Join(f.album, c.format.file)
+			rel := "Music/Album/" + c.format.file
+			c.format.write(t, p, "Original")
+			setMTime(t, p, time.Date(2021, 3, 4, 5, 6, 7, 0, time.UTC))
+			scanOnce(t, f.sc, "the original")
+			requireVersion(t, f.store, rel, "Original")
+			before, _ := storedRowAt(t, f.store, rel)
+
+			c.format.write(t, p, "Retagged")
+			info, err := os.Stat(p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cut := c.cut(info.Size())
+			f.sc.openAudio = func(abs string) (extractSource, error) {
+				file, err := os.Open(abs)
+				if err != nil {
+					return nil, err
+				}
+				if filepath.Clean(abs) != filepath.Clean(p) {
+					return file, nil
+				}
+				return &shrunkAudio{File: file, cut: cut}, nil
+			}
+			rec := loggingtest.Record(t)
+			scanOnce(t, f.sc, "the shrink")
+			if after, _ := storedRowAt(t, f.store, rel); after != before {
+				t.Errorf("the row changed:\n got  %+v\n want %+v", after, before)
+			}
+			lines := rec.Lines(msgUnreadAudio)
+			if len(lines) != 1 || !strings.Contains(lines[0], "count=1") ||
+				!strings.Contains(lines[0], "example="+rel) || !strings.Contains(lines[0], "shrank") {
+				t.Errorf("unread lines %q, want one counting the file, naming it, and saying it shrank", lines)
+			}
+
+			f.sc.openAudio = nil
+			scanOnce(t, f.sc, "read whole")
+			requireVersion(t, f.store, rel, "Retagged")
+		})
+	}
+}

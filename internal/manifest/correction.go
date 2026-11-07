@@ -235,6 +235,11 @@ func observeCorrection(absWV string, wv wvStream, ec *ExtractContext) (correctio
 		return correctionObservation{}, err
 	}
 	wvc, readErr := readWavPackCorrection(f, obs.size)
+	if errors.Is(readErr, errFileShrank) {
+		// A read ended short of the size its stat gave: the file changed
+		// while it was read, which the stat after the read would say too.
+		return correctionObservation{}, errCorrectionReplaced
+	}
 	if readErr != nil && isReadFailure(readErr) {
 		if errors.Is(readErr, fs.ErrPermission) {
 			obs.state = correctionUnreadable

@@ -2380,10 +2380,18 @@
   row's rate is eight times that byte rate, the bit rate a DSF row carries.
   The length is the 40-bit total (`GET_TOTAL_SAMPLES`), and none for the
   unknown length a streaming encoder writes, which leaves the duration nil.
-  **That block must lie inside the file** (`errWVBlockCut`, read as a file cut
-  while it is read): round 2 (Codex's review) found a 34-byte file, a header
-  claiming a 36-byte block and an `ID_WV_BITSTREAM` the file ends before,
-  indexed as a second of lossless audio. **And its bitstreams must be ones
+  **That block must lie inside the file** (`errWVBlockCut`, a file cut as it
+  was written, which is a refusal): round 2 (Codex's review) found a 34-byte
+  file, a header claiming a 36-byte block and an `ID_WV_BITSTREAM` the file
+  ends before, indexed as a second of lossless audio. **And a read that ends
+  short of the size the file's stat gave is the file shrinking while it is
+  read** (`statBoundReader`: `errFileShrank`, noted as a read that did not
+  complete, B134), never a block cut as it was written, a header or a missing
+  tag: round 5 (CodeRabbit) found the end inside a block the stat held whole
+  taken for `errWVBlockCut`, so a changed `.wv` that shrank while it was read
+  had its good row replaced by its name, under the new size and mtime the skip
+  gate then kept, and an end inside an APEv2 tag dropped the tags the same
+  way; the WavPack and Monkey's Audio extractors read their file through it. **And its bitstreams must be ones
   the reference decoder opens**: a main or correction bitstream that is empty
   or of odd length, and an extended one of its 4-byte CRC alone or of odd
   length, are refused, as `init_wv_bitstream`, `init_wvc_bitstream` and
@@ -2468,8 +2476,10 @@
   length for an allocation, keep more than `apeTagMaxValues` of a tag's
   values, walk a block's sub-blocks a read each, hand dhowden more than the
   last 128 bytes, give a lossy hybrid or a DSD stream a sample kind, or a
-  lossy hybrid a bit depth.**
+  lossy hybrid a bit depth, or take a read that ends short of the stat's size
+  for a file cut as it was written.**
   `TestTheScanIndexesAWavPackAndAnAPEFile` (red first on main),
+  `TestScanner_AFileThatShrinksWhileItIsReadKeepsItsRow` (round 5),
   `TestTheWavPackHeaderStatesItsFormat`, `TestTheAPEHeaderStatesItsFormat`
   (every compression level in both layouts),
   `TestAWavPackFileItsReaderRefusesIsRefused`,
@@ -2502,11 +2512,26 @@
   block is a correction block of this stream (`wvpk`, the block index, the
   sample counts and the flags, which libwavpack's `match_wvc_header` compares
   too: round 2, Codex's review, found a 24-bit or a mono stream's `.wvc`
-  matching beside a 16-bit stereo `.wv`), and the block that ends it ends the
+  matching beside a 16-bit stereo `.wv`), with a total that is the `.wv`'s, or
+  unknown beside a `.wv` that states one (round 5, CodeRabbit:
+  `correctionTotalAgrees`; the pair an encode that learned the stream's length
+  only at its end leaves when its rewrite of the `.wvc`'s first block fails,
+  which the reference decoder takes, since it reads the length from the `.wv`
+  alone, `WavpackOpenFileInputEx64` and `seek_final_index`, and takes a
+  correction block by its index, samples and flags, `read_wvc_block` and
+  `match_wvc_header`; cited from libwavpack 5's source as published, which
+  was not on the host this was written on: a total in the `.wvc` alone, and
+  two totals that differ, stay refused), and the block that ends it ends the
   file at the stream's last
   sample, found as libwavpack's `seek_final_index` finds a stream's length (the
-  last 1 MiB, a window at a time from the end), so a copy cut short does not
-  match. Where the `.wv`'s header states no usable length (a total the
+  last 1 MiB, a window at a time from the end; the last block with samples,
+  which must be final, passing over at most 16 blocks with no samples after
+  it, the encoder's MD5 sum or RIFF trailer, written with their flags and
+  index cleared: round 5, CodeRabbit, found a `.wv` whose header states no
+  length and that ends with its MD5 sum matching no correction file; blocks
+  with no samples that fill the whole last 1 MiB leave the end unknown, as
+  `seek_final_index` finds no final block there either, and nothing
+  matches), so a copy cut short does not match. Where the `.wv`'s header states no usable length (a total the
   encoder could not write, or a first audio block past index 0), that last
   sample is the `.wv`'s own last block's, found the same way before its tags
   (`wvStreamFinal`: an ID3v1 tag, then an APEv2 tag with its header), and a
@@ -2553,6 +2578,8 @@
   a `.wvc`, read one beside a lossless or DSD stream, call a `.wvc` matching
   from its first block alone, without the stream's flags, or without the
   stream's own last sample where its header states no usable length, take a
+  total the `.wvc` states and the `.wv` does not, or two that differ, stop the
+  look for a stream's end at a block with no samples, take a
   look that did not complete for absence or a refused open or read for a look
   that did not complete, compare its stat more loosely than the walk compares
   an audio file's, or put the key in `tags_json`.**

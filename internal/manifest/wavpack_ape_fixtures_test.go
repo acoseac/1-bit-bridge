@@ -47,6 +47,7 @@ const (
 	fxIDChannelInfo  = 0xd
 	fxIDDSDBlock     = 0xe
 	fxIDRIFFHeader   = 0x21
+	fxIDMD5Checksum  = 0x26
 	fxIDSampleRate   = 0x27
 	// fxIDWVXNew is the optional extended bitstream (ID_OPTIONAL_DATA |
 	// ID_WVX_BITSTREAM).
@@ -225,7 +226,16 @@ func wvcFile(spec wvSpec) []byte { return wvBlocks(spec, true) }
 // first audio block, and at the block that ends the file. A stream whose
 // length the encoder could not write gets a second block after the first.
 func wvBlocks(spec wvSpec, correction bool) []byte {
+	return wvBlocksStating(spec, correction, spec.total)
+}
+
+// wvBlocksStating is wvBlocks with every header stating total (-1: the
+// unknown length) in place of spec's: the blocks an encoder writes for a
+// stream it learned the length of only once the stream was written, the
+// headers it did not go back to rewrite.
+func wvBlocksStating(spec wvSpec, correction bool, total int64) []byte {
 	first := wvFirstBlock(spec, correction)
+	first.totalSamples = total
 	out := first.bytes()
 	n := int64(first.blockSamples)
 	switch {
@@ -241,6 +251,16 @@ func wvBlocks(spec wvSpec, correction bool) []byte {
 		out = append(out, last.bytes()...)
 	}
 	return out
+}
+
+// wvMetadataBlock is a block of metadata alone, with no samples, as the
+// reference encoder's write_metadata_block writes one after a stream's audio
+// (its MD5 sum, a RIFF trailer): a header cleared but for its id, version,
+// size and total, so its flags are 0 and its index 0, holding one sub-block
+// of payload bytes.
+func wvMetadataBlock(total int64, payload int) wvBlock {
+	return wvBlock{totalSamples: total, crc: 0xFEED,
+		subs: [][]byte{wvSub(fxIDMD5Checksum, bytes.Repeat([]byte{0x3C}, payload))}}
 }
 
 // The APE compression levels and the format flags the fixtures set, as
