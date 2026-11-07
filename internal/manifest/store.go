@@ -13,6 +13,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -10108,29 +10109,50 @@ func (s *Store) AnyVariantExists(ctx context.Context) (bool, error) {
 // renditions, which a render asks for before it writes into a variants
 // directory that reads as a volume not mounted (backlog B727). A row recorded
 // under another directory (a variants directory set to a new one, its
-// renditions not moved yet) is no evidence for dir. The bounds are a byte
-// range on the recorded path, dir's own spelling and the platform's
-// separator, never LIKE, which folds ASCII case; a trailing separator is
-// trimmed before the bounds append their own. EXISTS, so a match ends the
-// read; no index serves sidecar_path, and the one caller asks only once the
-// directory has read as away. Read-only; no s.mu.
+// renditions not moved yet) is no evidence for dir. The bounds are a range on
+// the recorded path, never LIKE: dir's own spelling and the platform's
+// separator, below the character after the separator ('0' after '/', ']'
+// after '\'), a trailing separator trimmed before the bounds append their
+// own, compared as this platform's volumes compare names (volumesFoldCase):
+// byte for byte on Linux, and folded on Windows and macOS (unicode_lower on
+// both sides), where a variants directory spelled in another case since its
+// renditions were recorded is the same directory (backlog B727's second
+// round). EXISTS, so a match ends the read; no index serves sidecar_path, or
+// its fold, and the one caller asks only once the directory has read as away.
+// Read-only; no s.mu.
 func (s *Store) VariantRecordedUnder(ctx context.Context, dir string) (bool, error) {
-	return s.variantRecordedUnder(ctx, dir, filepath.Separator, false)
+	return s.variantRecordedUnder(ctx, dir, filepath.Separator, volumesFoldCase)
 }
+
+// volumesFoldCase is whether this platform's volumes compare names without
+// regard to case by default: NTFS on Windows, APFS and HFS+ on macOS. A volume
+// there that compares them exactly (a case-sensitive APFS volume, a Windows
+// folder set case-sensitive) is folded all the same, which can only have the
+// guard refuse a render where it would have taken one, never the reverse.
+var volumesFoldCase = runtime.GOOS == "windows" || runtime.GOOS == "darwin"
 
 // variantRecordedUnder is VariantRecordedUnder on a platform whose separator
 // is sep, and whose volumes compare names without regard to case where fold
-// is set, so a test asks either shape on every platform.
+// is set, so a test asks either shape on every platform. Folded, both bounds
+// go through pathFold, which unicode_lower applies to each recorded path, and
+// which changes neither separator nor the character after it.
 func (s *Store) variantRecordedUnder(ctx context.Context, dir string, sep rune, fold bool) (bool, error) {
 	if dir == "" {
 		return false, nil
 	}
 	base := strings.TrimRight(dir, string(sep))
-	var held bool
-	row := s.db.QueryRowContext(ctx, `
+	lo, hi := base+string(sep), base+string(sep+1)
+	query := `
 		SELECT EXISTS(SELECT 1 FROM track_variants
-		 WHERE sidecar_path COLLATE BINARY >= ? AND sidecar_path COLLATE BINARY < ?)`,
-		base+string(sep), base+string(sep+1))
+		 WHERE sidecar_path COLLATE BINARY >= ? AND sidecar_path COLLATE BINARY < ?)`
+	if fold {
+		lo, hi = pathFold(lo), pathFold(hi)
+		query = `
+		SELECT EXISTS(SELECT 1 FROM track_variants
+		 WHERE unicode_lower(sidecar_path) >= ? AND unicode_lower(sidecar_path) < ?)`
+	}
+	var held bool
+	row := s.db.QueryRowContext(ctx, query, lo, hi)
 	if err := row.Scan(&held); err != nil {
 		return false, fmt.Errorf("variants recorded under the variants directory: %w", err)
 	}
