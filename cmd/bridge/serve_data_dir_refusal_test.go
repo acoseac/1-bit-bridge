@@ -152,6 +152,36 @@ func TestServeSaysTheRefusalOfADataDirItsNoteDoesNotName(t *testing.T) {
 	}
 }
 
+// TestTheRefusalsNoteMakesNoDirectory: the note goes beside the record, in
+// the directory the record was read from; a directory that went since (the
+// config's, inside the data dir, on the volume that went) is not made again
+// for it, which would make the data dir being refused in the bare mount
+// point. The refusal is said all the same, and the next start says it again.
+func TestTheRefusalsNoteMakesNoDirectory(t *testing.T) {
+	base := t.TempDir()
+	mountPoint := filepath.Join(base, "usb")
+	if err := os.Mkdir(mountPoint, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dataDir := filepath.Join(mountPoint, "bridge")
+	record := filepath.Join(dataDir, "config", ".bridge.yaml.datadir")
+	var out strings.Builder
+	sayServeRefusal(&dataDirGoneError{dataDir: dataDir, record: record}, &out, time.Now())
+	if !strings.Contains(out.String(), dataDirGoneLine(dataDir)) {
+		t.Errorf("the refusal was not said:\n%s", out.String())
+	}
+	if entries, err := os.ReadDir(mountPoint); err != nil || len(entries) != 0 {
+		var names []string
+		_ = filepath.WalkDir(mountPoint, func(p string, _ fs.DirEntry, _ error) error {
+			if r, err := filepath.Rel(mountPoint, p); err == nil && r != "." {
+				names = append(names, filepath.ToSlash(r))
+			}
+			return nil
+		})
+		t.Errorf("the note made %v in the bare mount point (%v)", names, err)
+	}
+}
+
 // TestAStartThatCannotRemoveTheNoteSaysSo: the start that finds its data dir
 // again and cannot remove the note (its directory made read-only since) says
 // at Warn that a refusal soon after may not be said, and leaves the note.
