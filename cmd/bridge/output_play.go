@@ -94,10 +94,10 @@ The bridge player's engine and backend, by hand (B470 PR 4b2's hardware gate).
 It resolves the configured binding, output.player.device, to its DAC on this
 box's trees, runs the hotplug watcher, and plays the files in order through
 the player's engine and backend: integer FLAC, WAV, AIFF, AIFC and ALAC, plus
-DSF and raw DFF as the player's effective DSD policy plays them, native or
-DoP (B728). The bound DAC opens exclusively. Floating-point and lossy content
-is refused, and so is DSD the policy does not play, a rate it would convert
-to PCM included, until the player converts.
+DSF and raw DFF as the player's effective DSD policy plays them, native, DoP
+or converted to PCM, never bit-exact (B728). The bound DAC opens exclusively.
+Floating-point and lossy content is refused, and so is DSD the policy does
+not play.
 
 Files play at their own level: the bridge never lowers a sample (no software
 volume). Use headphones, with the DAC's or the amplifier's own volume set low.
