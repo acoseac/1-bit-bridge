@@ -28,6 +28,7 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/baseurl"
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
+	"github.com/acoseac/1-bit-bridge/internal/hostname"
 	"github.com/acoseac/1-bit-bridge/internal/logging"
 )
 
@@ -1552,7 +1553,9 @@ type AutocertConfig struct {
 	//
 	// A host name alone. Normalize serves any other value as the host it
 	// names (AutocertHost), and one that names none as
-	// InvalidAutocertDomain, with a warning either way (backlog B66).
+	// InvalidAutocertDomain, with a warning either way (backlog B66); and a
+	// host that is not ASCII in its IDNA ASCII form, or as
+	// InvalidAutocertDomain where it has none (backlog B744).
 	//
 	// Consumed by:
 	//   - Admin Origin allowlist (PR 2)
@@ -1617,6 +1620,15 @@ const (
 	autocertDomainNamesNoHost = "autocert.domain names no host that can be read; served as " +
 		InvalidAutocertDomain + ", a name that resolves nowhere, until it is set to the host name " +
 		"clients dial; a save stores it that way"
+	// autocertDomainHasNoIDNAForm and autocertDomainServedInIDNAForm are what
+	// Normalize logs for a host that is not ASCII (backlog B744): one with
+	// no IDNA ASCII form, served as InvalidAutocertDomain, and, below Warn,
+	// one served in that form.
+	autocertDomainHasNoIDNAForm = "autocert.domain names a host that is not ASCII and has no IDNA ASCII form, " +
+		"which no certificate can carry; served as " + InvalidAutocertDomain + ", a name that resolves nowhere, " +
+		"until it is set to the host name clients dial; a save stores it that way"
+	autocertDomainServedInIDNAForm = "autocert.domain is served in its IDNA ASCII form, the form a certificate " +
+		"carries; a save stores it that way"
 )
 
 // AutocertHost returns the host name an autocert.domain value names, or ""
@@ -3298,7 +3310,8 @@ func RepairLibraryName(name string) string {
 // AutocertHost, in public mode and wherever autocert is enabled),
 // customEndpoints (prune-and-warn to the entries that survive
 // ValidateCustomEndpoints, each without a user name, password, path, query
-// or fragment it carried), and the library name (RepairLibraryName, and
+// or fragment it carried, and a host that is not ASCII in its IDNA ASCII
+// form, backlog B744), and the library name (RepairLibraryName, and
 // DefaultLibraryName for a blank one). Idempotent — running it twice
 // produces the same Config as running it once.
 //
@@ -3384,21 +3397,39 @@ func (c *Config) normalize(warn bool) error {
 	// config with autocert off never reads the field, so its value is left
 	// as written and not warned about. A typo'd deployment.mode reports
 	// non-public here and Validate surfaces the mode error separately.
+	//
+	// And a host that is not ASCII is served in its IDNA ASCII form, the form
+	// a certificate carries (hostname.Configured, backlog B744): as written,
+	// every mint refused it, the ACME manager's included. One with no such
+	// form is served as InvalidAutocertDomain, warned about as a value that
+	// names no host is. An ASCII host is kept as written.
 	if c.IsPublic() || c.Autocert.Enabled {
 		d := strings.TrimSpace(c.Autocert.Domain)
 		if d != "" {
-			switch host := AutocertHost(d); {
+			host := AutocertHost(d)
+			ascii, hasForm := hostname.Configured(host)
+			switch {
 			case host == "":
 				if warn {
 					validateLogger.Warn(autocertDomainNamesNoHost, "field", "autocert.domain")
 				}
 				d = InvalidAutocertDomain
-			case host != d:
+			case !hasForm:
 				if warn {
-					validateLogger.Warn(autocertDomainServedAsItsHost,
+					validateLogger.Warn(autocertDomainHasNoIDNAForm,
 						"field", urlFieldForLog("autocert.domain", "https://"+hostForURL(host)))
 				}
-				d = host
+				d = InvalidAutocertDomain
+			default:
+				if host != d && warn {
+					validateLogger.Warn(autocertDomainServedAsItsHost,
+						"field", urlFieldForLog("autocert.domain", "https://"+hostForURL(ascii)))
+				}
+				if ascii != host && warn {
+					validateLogger.Info(autocertDomainServedInIDNAForm,
+						"field", urlFieldForLog("autocert.domain", "https://"+hostForURL(ascii)))
+				}
+				d = ascii
 			}
 		}
 		c.Autocert.Domain = d
@@ -3463,6 +3494,10 @@ func (c *Config) normalize(warn bool) error {
 		}
 		if errors.Is(w, errCustomEndpointCredentials) {
 			validateLogger.Warn(customEndpointPublishedWithoutCredentials, "err", w)
+			continue
+		}
+		if errors.Is(w, errCustomEndpointIDNAForm) {
+			validateLogger.Info(customEndpointPublishedInIDNAForm, "err", w)
 			continue
 		}
 		validateLogger.Warn("dropped invalid custom endpoint", "err", w)
@@ -4040,6 +4075,23 @@ var errCustomEndpointCredentials = errors.New("carries a user name, password, pa
 const customEndpointPublishedWithoutCredentials = "custom endpoint published without its user name, " +
 	"password, path, query or fragment; a save stores it that way"
 
+// errCustomEndpointNoIDNAForm is what a custom endpoint whose host is not
+// ASCII and has no IDNA ASCII form (hostname.Configured) is dropped for where
+// it loads, and refused for where it is typed (backlog B744).
+var errCustomEndpointNoIDNAForm = errors.New("its host is not ASCII and has no IDNA ASCII form, " +
+	"so no certificate can carry it (x509 takes an ASCII DNS name alone)")
+
+// errCustomEndpointIDNAForm marks a custom endpoint ValidateCustomEndpoints
+// kept with its host in its IDNA ASCII form (backlog B744), which Normalize
+// logs under customEndpointPublishedInIDNAForm.
+var errCustomEndpointIDNAForm = errors.New("its host is published in its IDNA ASCII form")
+
+// customEndpointPublishedInIDNAForm is what Normalize logs, once per entry
+// and below Warn, for a custom endpoint whose host it publishes in its IDNA
+// ASCII form: nothing was wrong with the name, and nothing was dropped.
+const customEndpointPublishedInIDNAForm = "custom endpoint published with its host in its IDNA ASCII form, " +
+	"the form a certificate carries; a save stores it that way"
+
 // HasCredentialParts reports whether raw parses as a URL with a part that
 // can carry a credential: a user name or a password (an empty one included,
 // `https://@host`), a path other than the root (backlog B66), a query (`?`,
@@ -4092,14 +4144,25 @@ func withoutCredentialParts(u *url.URL) *url.URL {
 // without those parts (ValidateCustomEndpoints, in Normalize): refusing it
 // would stop a bridge that started before. Storing the repaired entry for a
 // typed one would store a URL nobody typed, which is why the typed list is
-// refused (the library name's rule, #1042 / #1046). Entries that are invalid
-// for another reason are left to the prune, as they always were.
+// refused (the library name's rule, #1042 / #1046). So is an entry whose host
+// is not ASCII and has no IDNA ASCII form (backlog B744): the prune would
+// drop it. One whose host has a form is taken, and Normalize stores that
+// form, the one a certificate carries, as it does for a loaded entry. Entries
+// that are invalid for another reason are left to the prune, as they always
+// were.
 func CheckCustomEndpoints(in []string) error {
 	for i, raw := range in {
 		raw = strings.TrimSpace(raw)
-		if raw != "" && HasCredentialParts(raw) {
+		if raw == "" {
+			continue
+		}
+		if HasCredentialParts(raw) {
 			return fmt.Errorf("%s: %w; write it without them",
 				urlFieldForLog(fmt.Sprintf("customEndpoints[%d]", i), raw), errCustomEndpointCredentials)
+		}
+		if typedHostHasNoIDNAForm(raw) {
+			return fmt.Errorf("%s: %w; write a host name a certificate can carry",
+				urlFieldForLog(fmt.Sprintf("customEndpoints[%d]", i), raw), errCustomEndpointNoIDNAForm)
 		}
 	}
 	return nil
@@ -4167,6 +4230,23 @@ func ValidateCustomEndpoints(in []string) (kept []string, warnings []error) {
 			warnings = append(warnings, fmt.Errorf("%s: missing host", entry(i, raw)))
 			continue
 		}
+		// A host that is not ASCII is published in its IDNA ASCII form,
+		// the form a certificate carries (hostname.Configured, backlog
+		// B744): kept as written, it reached the want-set, and every mint
+		// refused the config. One with no such form is dropped, as any
+		// entry the bridge cannot publish is. An ASCII host is kept as
+		// written.
+		converted := false
+		if host := u.Hostname(); !isASCII(host) {
+			ascii, ok := hostname.Configured(host)
+			if !ok {
+				warnings = append(warnings, fmt.Errorf("%s: %w", entry(i, raw), errCustomEndpointNoIDNAForm))
+				continue
+			}
+			u = withHost(u, ascii)
+			raw = u.String()
+			converted = true
+		}
 		if hostLen := len(u.Hostname()); hostLen > maxCustomEndpointHostLen {
 			warnings = append(warnings, fmt.Errorf("customEndpoints[%d]: hostname is %d characters, exceeds %d-character limit", i, hostLen, maxCustomEndpointHostLen))
 			continue
@@ -4201,9 +4281,44 @@ func ValidateCustomEndpoints(in []string) (kept []string, warnings []error) {
 		if strip {
 			warnings = append(warnings, fmt.Errorf("%s: %w", entry(i, raw), errCustomEndpointCredentials))
 		}
+		if converted {
+			warnings = append(warnings, fmt.Errorf("%s: %w", entry(i, raw), errCustomEndpointIDNAForm))
+		}
 		kept = append(kept, raw)
 	}
 	return kept, warnings
+}
+
+// withHost returns u with its host replaced by host, its port kept.
+func withHost(u *url.URL, host string) *url.URL {
+	out := *u
+	out.Host = host
+	if port := u.Port(); port != "" {
+		out.Host = net.JoinHostPort(host, port)
+	}
+	return &out
+}
+
+// isASCII reports whether s holds no byte outside ASCII.
+func isASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= utf8.RuneSelf {
+			return false
+		}
+	}
+	return true
+}
+
+// typedHostHasNoIDNAForm reports whether raw is a custom endpoint the prune
+// would keep, an https URL with a host, but for its host, which is not ASCII
+// and has no IDNA ASCII form (hostname.Configured).
+func typedHostHasNoIDNAForm(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "https" || u.Hostname() == "" {
+		return false
+	}
+	_, ok := hostname.Configured(u.Hostname())
+	return !ok
 }
 
 // ParseQuietHours parses a "HH:MM-HH:MM" window into start and end

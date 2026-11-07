@@ -51,8 +51,13 @@ func TestInitConvertsADomainThatIsNotASCII(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if strings.Contains(strings.ToLower(string(raw)), "ünchen") {
-				t.Errorf("the file holds the domain as typed, not in its IDNA form:\n%s", raw)
+			// The file's own lines, not only what Load serves (the test's
+			// directory names carry the domain as typed, so only the lines
+			// that write it are asked).
+			for _, line := range strings.Split(string(raw), "\n") {
+				if (strings.Contains(line, "domain:") || strings.Contains(line, "https://")) && !isASCIIText(line) {
+					t.Errorf("the file writes the domain as typed, not in its IDNA form: %q", line)
+				}
 			}
 			if !strings.Contains(all, "xn--mnchen-3ya.de") {
 				t.Errorf("init did not say the domain is written in its IDNA form")
@@ -85,6 +90,16 @@ func TestInitConvertsADomainThatIsNotASCII(t *testing.T) {
 			}
 		})
 	}
+}
+
+// isASCIIText reports whether s holds no byte outside ASCII.
+func isASCIIText(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 0x80 {
+			return false
+		}
+	}
+	return true
 }
 
 // TestAConfiguredNameThatIsNotASCIIIsCertifiedInItsIDNAForm is B744's other

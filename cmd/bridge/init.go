@@ -28,6 +28,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/doctor"
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
+	"github.com/acoseac/1-bit-bridge/internal/hostname"
 	"github.com/acoseac/1-bit-bridge/internal/packaging"
 	servertls "github.com/acoseac/1-bit-bridge/internal/tls"
 )
@@ -380,6 +381,22 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 				"path, query or fragment (/v1/health, which answers any caller, and every pairing QR publish "+
 				"the endpoint init writes from it; the port is --listen-address's)\n")
 			return 2
+		}
+		// A host that is not ASCII is written in its IDNA ASCII form, the
+		// form the certificate init mints carries, as Normalize serves one
+		// that loads (hostname.Configured, backlog B744): as typed, the mint
+		// refused it, and init installed nothing. One with no such form is
+		// refused here, before anything is written. The host alone is
+		// echoed: the check above refused anything else.
+		ascii, ok := hostname.Configured(domain)
+		if !ok {
+			fmt.Fprintf(stderr, "--domain: %q is not ASCII and has no IDNA ASCII form, so no certificate can "+
+				"carry it; give a host name a certificate can carry\n", domain)
+			return 2
+		}
+		if ascii != domain {
+			fmt.Fprintf(stdout, "--domain %s is written as %s, its IDNA ASCII form, the form a certificate carries\n", domain, ascii)
+			domain = ascii
 		}
 		// Every later use writes the domain as checked. Untrimmed, the
 		// endpoint init builds from a padded one (`https:// host `) did not
