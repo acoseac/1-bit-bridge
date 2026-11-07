@@ -723,10 +723,11 @@ func (s *session) reconcileDSD(next *dsdSet) {
 	wake(s.wakeR)
 }
 
-// checkDSDActivation is a native or DoP occurrence's check as its sink is
-// about to write to the DAC (the design's section 3.5: every activation reads
-// the policy): the policy read afresh, which reconciles a change, then the
-// occurrence judged against the set published now, under the session's lock,
+// checkDSDActivation is a native, DoP or converted occurrence's check as its
+// sink is about to write to the DAC (the design's section 3.5: every
+// activation reads the policy): the policy read afresh, which reconciles a
+// change, then the occurrence, its set and its plan read here alone, judged
+// against the set published now, under the session's lock,
 // by reconciliation's own predicate (policy.Reconcile): under that set, or
 // kept by it, when it counts under it from now on, as reconciliation would
 // have it. A refresh beside the activation can publish a set between the read

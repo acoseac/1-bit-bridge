@@ -257,10 +257,17 @@ func (s *session) openNativeOutput(ctx context.Context, o *occ) (*output, error)
 func (s *session) activateOutput(ctx context.Context, o *occ, out *output) error {
 	s.b.activation(o.id)
 	if out.native == nil {
-		if o.converts() {
+		if o.conv != nil {
 			// A converted occurrence's activation reads the effective policy
 			// again too (B728 B11): one its change did not keep is refused
-			// before a frame, never played another way.
+			// before a frame, never played another way. That it converts is
+			// what its open fixed: o.conv, set once in the step that ended the
+			// open and never again, since a reconciliation keeps the
+			// occurrence (repointing o.admitted, under s.mu), hands it off
+			// again as another occurrence or revokes the session, and none of
+			// them turns a converted occurrence into another kind. Its set and
+			// plan are read in checkDSDActivation alone, under s.mu: read here
+			// they raced a reconciliation's Keep (round 2).
 			if err := s.checkDSDActivation(o); err != nil {
 				return err
 			}
