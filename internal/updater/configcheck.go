@@ -23,16 +23,21 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 )
 
-// configCheckTimeout bounds one settings check, and versionProbeTimeout one
+// configCheckTimeout bounds one settings check, and VersionProbeTimeout one
 // `version` of a backup: a candidate that never answers must not park an
 // install, nor a backup the early rollback. Each is generous next to the
-// load it bounds (milliseconds), for a cold start of a 30 MiB binary from an
-// SD card. Vars, not consts, solely so a test can shorten them; production
-// code MUST NOT mutate them.
-var (
-	configCheckTimeout  = 30 * time.Second
-	versionProbeTimeout = 10 * time.Second
-)
+// load it bounds (milliseconds), for a cold start of the bridge's binary from
+// an SD card. configCheckTimeout is a var, not a const, solely so a test can
+// shorten it; production code MUST NOT mutate it.
+var configCheckTimeout = 30 * time.Second
+
+// VersionProbeTimeout is ProbeVersion's bound, which the early rollback asks
+// its backup within in production. A release binary's `version` answered in
+// 8 ms on legion0 with its pages dropped from the cache, reading 0.5 MB of
+// its 53 MB (backlog B706). A backup that has not answered by then is not put
+// back, and the next start, which the service manager makes, asks it again.
+// A test passes its own bound to ProbeVersionWithin.
+const VersionProbeTimeout = 10 * time.Second
 
 // The settings check a candidate answers before it is installed (backlog
 // B613): `<candidate> serve --validate-config --config <path>` loads the
@@ -122,17 +127,29 @@ func CheckConfig(ctx context.Context, candidate, configPath string) ConfigCheck 
 // wire protocol's.
 var versionLine = regexp.MustCompile(`^1-bit-bridge (\S+) \(protocol v[0-9]+\)$`)
 
-// ProbeVersion runs `binary version`, bounded, its standard input empty, and
-// returns the version it names. The early rollback asks it of a backup, to
-// verify the backup is the version the install marker says it replaced: a
-// version check of the file, not a proof of its bytes.
+// ProbeVersion runs `binary version` within VersionProbeTimeout, its standard
+// input empty, and returns the version it names. The early rollback asks it
+// of a backup, to verify the backup is the version the install marker says it
+// replaced: a version check of the file, not a proof of its bytes.
 func ProbeVersion(ctx context.Context, binary string) (string, error) {
-	run := runCandidate(ctx, versionProbeTimeout, binary, "version")
+	return ProbeVersionWithin(ctx, binary, VersionProbeTimeout)
+}
+
+// ProbeVersionWithin is ProbeVersion under the bound within, which must be
+// positive: a run past it is killed, and its answer is that the binary did
+// not answer within that bound. Production asks within VersionProbeTimeout
+// (cmd/bridge, backupProbeBound). A test whose backup is slower to start than
+// a release binary passes a longer bound: cmd/bridge's backup is a fresh copy
+// of its test binary (89 MB on CI's Windows leg), whose first start on a
+// loaded runner took longer than 10 s (backlog B706). A test of the bound
+// passes a shorter one.
+func ProbeVersionWithin(ctx context.Context, binary string, within time.Duration) (string, error) {
+	run := runCandidate(ctx, within, binary, "version")
 	switch {
 	case run.cancelled != nil:
 		return "", run.cancelled
 	case run.timedOut:
-		return "", fmt.Errorf("it did not answer within %s", versionProbeTimeout)
+		return "", fmt.Errorf("it did not answer within %s", within)
 	case run.startErr != nil:
 		return "", fmt.Errorf("it could not be run: %s", startErrorWithoutPath(run.startErr))
 	case run.exit != 0:

@@ -92,13 +92,29 @@ func (r *refusedInstall) saveMarker(t *testing.T, dataDir string) {
 	}
 }
 
-// serve boots the real serve on the install's settings and binary.
+// testBackupProbeTimeout is how long these tests give the backup, a fresh
+// copy of the test binary, to say its version (serveOpts.backupProbeTimeout),
+// where production gives a release binary updater.VersionProbeTimeout. The
+// copy answers in milliseconds where its pages are warm, and in about a
+// second as the race-instrumented binary of make test, but its first start on
+// CI's Windows leg took longer than production's 10 s on two PRs on
+// 2026-11-03, failing serve's rollback (backlog B706). Only the number
+// differs: the run, its kill at the bound and the refusal past it are
+// production's.
+const testBackupProbeTimeout = 2 * time.Minute
+
+// serve boots the real serve on the install's settings and binary, giving
+// the backup testBackupProbeTimeout to say its version unless opts gives
+// another bound.
 func (r *refusedInstall) serve(t *testing.T, opts serveOpts) (code int, stderr string) {
 	t.Helper()
 	if opts.configPath == "" {
 		opts.configPath = r.cfg
 	}
 	opts.binaryPath = r.bin
+	if opts.backupProbeTimeout == 0 {
+		opts.backupProbeTimeout = testBackupProbeTimeout
+	}
 	var out, errs bytes.Buffer
 	code = runServe(t.Context(), opts, &out, &errs)
 	return code, errs.String()

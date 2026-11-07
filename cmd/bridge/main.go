@@ -2969,6 +2969,14 @@ type serveOpts struct {
 	// boot test can make either fail. Nil (the updater's) in production.
 	restoreBackup   func(dst, backupExt string) error
 	saveUpdateState func(dataDir string, st updater.State) error
+	// backupProbeTimeout is how long the early rollback gives its backup to
+	// say its version (backupProbeBound). Zero in production, which gives it
+	// updater.VersionProbeTimeout. A boot test whose backup is a fresh copy
+	// of the test binary gives it longer, since that copy's first start on a
+	// loaded Windows runner took longer than production's bound (backlog
+	// B706), and a test of the bound gives it less. Per invocation for
+	// tailscaleCLI's reason.
+	backupProbeTimeout time.Duration
 	// upscaleTargetBeforeCommit runs in every SetUpscaleTarget of serve's
 	// store, the boot's upscale seed among them, once both keys are written
 	// and before the transaction commits

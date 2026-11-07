@@ -254,7 +254,8 @@ func TestARollbackThatHoldsTheMarkersLockFirstStopsTheMigration(t *testing.T) {
 	serveDone := make(chan struct{})
 	go func() {
 		defer close(serveDone)
-		codes <- runServe(ctx, serveOpts{configPath: r.cfg, binaryPath: r.bin, restoreBackup: restore}, &stdout, &stderr)
+		codes <- runServe(ctx, serveOpts{configPath: r.cfg, binaryPath: r.bin, restoreBackup: restore,
+			backupProbeTimeout: testBackupProbeTimeout}, &stdout, &stderr)
 	}()
 	drainLoopOnCleanup(t, cancel, serveDone, "the early rollback's serve")
 	select {
