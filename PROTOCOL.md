@@ -1284,7 +1284,7 @@ Gate on the **`bridgeDSDChoice`** feature flag. It sorts between `booklets` and 
 
 The checks, in this order, each answered with its word and changing nothing:
 
-1. The body is that object: no other member, every member of its type, the required ones present, a mode and a cap the table names (`400` `bad_request`). A body past its bound is refused before it is parsed.
+1. The body is that object: no other member, every member of its type, the required ones present, a mode and a cap the table names (`400` `bad_request`). `null` is no member's value: an optional member is left out, never sent as `null`. A body past its bound is refused before it is parsed.
 2. The player has a fresh reading of a bound DAC now (`409` `dac_unavailable`).
 3. `dacKey` is that DAC's key as `GET /v1/outputs` publishes it now (`409` `dac_changed`): a key of another model, one published before another DAC took the binding's place, or one of another bridge's.
 4. `baseRevision` is the DAC's choice's revision as `GET /v1/outputs` publishes it (`409` `stale`). The body carries `dsdDAC` as the player publishes it once any write in flight before this one has been published, so its revision is the one to write from.

@@ -86,16 +86,21 @@ func (s *Server) dsdChooser() BridgeDSDChooser {
 
 // parseDSDChoice is body as a choice, or why it is none: one JSON object of
 // the route's members alone, each of its type, dacKey, baseRevision and mode
-// present, a mode and a cap the route takes, nothing after it.
+// present, a mode and a cap the route takes, nothing after it. An explicit
+// null is no member's value (B728 B9 round 2): decoded into a value, a null
+// is taken as the member left out, so a client's null for confirmDoP,
+// firstUseAcknowledged or interrupt would ask nothing it did not say, and the
+// optional members are kept as their bytes and decoded only when they are
+// not null.
 func parseDSDChoice(body []byte) (DSDChoiceRequest, error) {
 	var in struct {
-		DACKey               *string `json:"dacKey"`
-		BaseRevision         *uint64 `json:"baseRevision"`
-		Mode                 *string `json:"mode"`
-		MaxBitRate           int     `json:"maxBitRate"`
-		ConfirmDoP           bool    `json:"confirmDoP"`
-		FirstUseAcknowledged bool    `json:"firstUseAcknowledged"`
-		Interrupt            bool    `json:"interrupt"`
+		DACKey               *string         `json:"dacKey"`
+		BaseRevision         *uint64         `json:"baseRevision"`
+		Mode                 *string         `json:"mode"`
+		MaxBitRate           json.RawMessage `json:"maxBitRate"`
+		ConfirmDoP           json.RawMessage `json:"confirmDoP"`
+		FirstUseAcknowledged json.RawMessage `json:"firstUseAcknowledged"`
+		Interrupt            json.RawMessage `json:"interrupt"`
 	}
 	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.DisallowUnknownFields()
@@ -105,6 +110,15 @@ func parseDSDChoice(body []byte) (DSDChoiceRequest, error) {
 	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
 		return DSDChoiceRequest{}, errors.New("data after the body")
 	}
+	var out DSDChoiceRequest
+	for _, m := range []struct {
+		raw json.RawMessage
+		to  any
+	}{{in.MaxBitRate, &out.MaxBitRate}, {in.ConfirmDoP, &out.ConfirmDoP}, {in.FirstUseAcknowledged, &out.FirstUseAcknowledged}, {in.Interrupt, &out.Interrupt}} {
+		if err := optionalMember(m.raw, m.to); err != nil {
+			return DSDChoiceRequest{}, err
+		}
+	}
 	switch {
 	case in.DACKey == nil || !dsdChoiceKey.MatchString(*in.DACKey):
 		return DSDChoiceRequest{}, errors.New("dacKey is not a DAC key")
@@ -112,11 +126,24 @@ func parseDSDChoice(body []byte) (DSDChoiceRequest, error) {
 		return DSDChoiceRequest{}, errors.New("baseRevision is missing")
 	case in.Mode == nil || !slices.Contains(dsdChoiceModes, *in.Mode):
 		return DSDChoiceRequest{}, errors.New("mode is not a mode")
-	case !slices.Contains(dsdChoiceCaps, in.MaxBitRate):
+	case !slices.Contains(dsdChoiceCaps, out.MaxBitRate):
 		return DSDChoiceRequest{}, errors.New("maxBitRate is neither 0 nor a DSD rate")
 	}
-	return DSDChoiceRequest{DACKey: *in.DACKey, BaseRevision: *in.BaseRevision, Mode: *in.Mode, MaxBitRate: in.MaxBitRate,
-		ConfirmDoP: in.ConfirmDoP, FirstUseAcknowledged: in.FirstUseAcknowledged, Interrupt: in.Interrupt}, nil
+	out.DACKey, out.BaseRevision, out.Mode = *in.DACKey, *in.BaseRevision, *in.Mode
+	return out, nil
+}
+
+// optionalMember decodes an optional member's bytes into to: nothing for a
+// member left out, a refusal for an explicit null, and otherwise the value,
+// of to's type alone.
+func optionalMember(raw json.RawMessage, to any) error {
+	switch {
+	case raw == nil:
+		return nil
+	case bytes.Equal(bytes.TrimSpace(raw), []byte("null")):
+		return errors.New("an optional member is null")
+	}
+	return json.Unmarshal(raw, to)
 }
 
 // putOutputDSD is PUT /v1/outputs/{id}/dsd: 404 local_outputs_not_supported
