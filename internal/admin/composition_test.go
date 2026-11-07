@@ -3,6 +3,7 @@ package admin
 import (
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
@@ -138,5 +139,28 @@ func TestTheCompositionSaysHowManyWavPackAndMonkeysAudioFilesTheLibraryHolds(t *
 	}
 	if _, ok := keys["wavpackApe"]; !ok {
 		t.Errorf("the frame has no wavpackApe key: %s", body)
+	}
+}
+
+// TestTheCompositionNoteSaysTheConsoleListsWavPackAndMonkeysAudio: the
+// dashboard's note on these files says what each reader does with them
+// (round 5 of backlog B489, a reviewer): earlier versions of the app and DLNA
+// renderers leave them out, while this console lists them, offers their
+// download and marks them not playable in a browser, as its player's track
+// rows do (playNone, a Download link on every row). The note said the
+// console's player left them out. Read from applyComposition's literals, its
+// comments stripped (jsFunctionBody).
+func TestTheCompositionNoteSaysTheConsoleListsWavPackAndMonkeysAudio(t *testing.T) {
+	body := jsFunctionBody(t, "function applyComposition(")
+	for _, want := range []string{
+		"Earlier versions of the app and DLNA renderers leave them out",
+		"this console lists them and offers their download, marked not playable in a browser",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("applyComposition's note does not say %q", want)
+		}
+	}
+	if strings.Contains(body, "console's player leave them out") {
+		t.Error("applyComposition's note says the console's player leaves them out")
 	}
 }

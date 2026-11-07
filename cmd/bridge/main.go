@@ -6807,9 +6807,10 @@ func scanCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	fmt.Fprintf(stdout, "Scan complete: %d tracks indexed in %s\n", n, time.Since(start).Round(time.Millisecond))
-	// WavPack and Monkey's Audio are indexed like every file and served
-	// only to an app that says it plays them (backlog B489): the operator
-	// sees how many there are and which apps list them.
+	// WavPack and Monkey's Audio are indexed like every file, served to a
+	// 1-bit app only when it says it plays them, and listed by the console
+	// (backlog B489): the operator sees how many there are and who lists
+	// them.
 	if g, err := store.CountGatedFormatTracks(ctx); err == nil && g > 0 {
 		fmt.Fprintln(stdout, gatedFormatSummary(g))
 	}
@@ -6817,14 +6818,17 @@ func scanCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 }
 
 // gatedFormatSummary is bridge scan's line about the WavPack and Monkey's
-// Audio files the library holds (backlog B489), n of them.
+// Audio files the library holds (backlog B489), n of them. The console is
+// no 1-bit app: its player lists every format and offers each file's
+// download, marking one no browser plays as not playable.
 func gatedFormatSummary(n int) string {
 	what := fmt.Sprintf("%d of them are WavPack or Monkey's Audio files", n)
 	if n == 1 {
 		what = "1 of them is a WavPack or Monkey's Audio file"
 	}
 	return "  " + what + ": served as they are to a 1-bit app that plays these formats, " +
-		"and left out for earlier versions of the app, DLNA renderers and the console's player"
+		"and left out for earlier versions of the app and DLNA renderers; " +
+		"the console lists them and offers their download, marked not playable in a browser"
 }
 
 // harvestStatePath is the bulk harvest's state file, holding its credential

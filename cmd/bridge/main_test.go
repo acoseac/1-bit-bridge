@@ -357,9 +357,11 @@ func TestScanRunsAndReports0(t *testing.T) {
 
 // TestScanSaysHowManyWavPackAndMonkeysAudioFilesItHolds: bridge scan's
 // summary says how many indexed tracks are WavPack or Monkey's Audio files,
-// and which apps list them (backlog B489), counted by the path as the client
+// and who lists them (backlog B489), counted by the path as the client
 // format gate reads it, a file its extractor refused included; a library
-// with none has no such line.
+// with none has no such line. The console lists them and offers their
+// download, marked not playable (round 5, a reviewer: the line said the
+// console's player left them out).
 func TestScanSaysHowManyWavPackAndMonkeysAudioFilesItHolds(t *testing.T) {
 	cfgPath := writeValidConfig(t)
 	stdout, _, code := runCapture(t, "scan", "--config", cfgPath)
@@ -383,6 +385,11 @@ func TestScanSaysHowManyWavPackAndMonkeysAudioFilesItHolds(t *testing.T) {
 	if !strings.Contains(gatedFormatSummary(2), "2 of them are WavPack or Monkey's Audio files") ||
 		!strings.Contains(gatedFormatSummary(1), "1 of them is a WavPack or Monkey's Audio file") {
 		t.Errorf("the summary's words: %q, %q", gatedFormatSummary(2), gatedFormatSummary(1))
+	}
+	if s := gatedFormatSummary(2); strings.Contains(s, "console's player") ||
+		!strings.Contains(s, "left out for earlier versions of the app and DLNA renderers") ||
+		!strings.Contains(s, "the console lists them and offers their download, marked not playable in a browser") {
+		t.Errorf("the summary does not say what the console does with them: %q", s)
 	}
 }
 

@@ -417,9 +417,10 @@ function applyComposition(c) {
   const dsdSection = document.getElementById("comp-dsd-section");
   if (dsdSection) dsdSection.hidden = dsd.length === 0;
   renderDistBar("comp-dsd-bar", "comp-dsd-legend", dsd, total, "dsd");
-  // WavPack and Monkey's Audio (backlog B489): indexed like every file and
-  // served only to an app that says it plays them, which the operator is
-  // told here, hidden at zero.
+  // WavPack and Monkey's Audio (backlog B489): indexed like every file,
+  // served to a 1-bit app only when it says it plays them, and listed by
+  // this console's player with their download, marked not playable in a
+  // browser. The operator is told here, hidden at zero.
   const gatedNote = document.getElementById("comp-wavpack-ape");
   if (gatedNote) {
     const n = c.wavpackApe ?? 0;
@@ -428,7 +429,8 @@ function applyComposition(c) {
       ? "1 track is a WavPack or Monkey's Audio file"
       : `${n} tracks are WavPack or Monkey's Audio files`) +
       ", indexed and served as they are to a 1-bit app that plays these formats." +
-      " Earlier versions of the app, DLNA renderers and this console's player leave them out.";
+      " Earlier versions of the app and DLNA renderers leave them out;" +
+      " this console lists them and offers their download, marked not playable in a browser.";
   }
   root.hidden = total === 0;
 }
