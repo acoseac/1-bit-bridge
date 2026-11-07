@@ -78770,3 +78770,305 @@ under the shared build lock, at 5b5c363e unless said:
 - The 1-bit.app updater page is owed at release (the orchestrator's).
 - What B660 leaves uncovered is filed under backlog B660 until each item has
   an id of its own.
+
+## 2026-11-07 — B660's second round: a stop taken back as it arrives, a command's migration held, the host's refusals by what the backup meets
+
+The review of PR #1424 (ten points). Worker b660 on the Linux worker host,
+the branch as the first round left it (0492e06e; the rules patch the
+orchestrator applied on the pushed branch is not in this tree, and the
+round's wording is `rules-b660-r2.patch` over it, below). Commits: the
+reproduction 435bc43a (red), the change 1629aed4, two comments corrected
+829d1834, the lock's try only where a count can hold a serve's start
+3f05ea92 (below), the bind sites' comments e16e9367, then this record. Each
+point was a reviewer's reading of the code. Points 1 to 8 were each
+confirmed red first on 435bc43a, the predictions written to a file before
+the run, and 9 and 10 by reading (PROTOCOL.md said the next boot confirms
+the install; the tests point 10 names made their errno up, were missing, or
+built nowhere but Unix); three tests
+written or changed after that run (the restart request's arm, the tailnet
+failure run to serve's own end, the console's grade over a store at the
+ladder's top) were run against 435bc43a's production code in a copy of the
+tree, and were red as predicted.
+
+**1. An address the host does not have** (confirmed). The subtest that
+called EADDRNOTAVAIL a failed start is now four starts in a row over
+TEST-NET-1 (`TestAPortAnotherProcessHoldsIsNotAFailedStart`): on 435bc43a
+start 1 counted 1, and the fourth would have put back a backup that met the
+same refusal (a static address not up yet after a reboot, under
+`Restart=always`). `doctor.IsAddrNotAvail` (EADDRNOTAVAIL; on Windows
+`WSAEADDRNOTAVAIL`, 10049, beside syscall's, as the other two arms), asked by
+`bindRefusedByTheHost`. No bind retry. The runbook's line said an absent
+address stayed counted; it says the opposite now.
+
+**2. A stop the supervisor kills** (confirmed: with the teardown parked at
+its UPnP stop, the count stayed 1 for 20 s; a real serve process stopped
+with SIGTERM while a held TLS connection kept its drain going, then killed
+with SIGKILL, kept 1). `stopTakeBack` (cmd/bridge/serve_stop_takeback.go):
+`context.AfterFunc` on the context runServe's caller gave it, kept before
+runServe shadows it with its own, which only a stop cancels (main's
+`signal.NotifyContext` for SIGINT and SIGTERM, the SCM's Stop through
+`runAsWindowsService`, the launcher's scope, a test's), and the restart
+request's own hook (`serveRestart.onRequest`, called before its cancel),
+never runServe's own context, which its first defer cancels on every exit.
+The take-back's goroutine asks `TakeBackFailedStart` until it has an
+answer or the teardown ends; the defer registered after the admission
+unregisters it, ends and joins it (`finish`: a stop that arrives after it
+starts nothing), all before the data dir's lock is let go, and the
+take-back after the teardown runs where a host's refusal ended the start or
+the stop's never had its answer, writing nothing where the stop's landed
+(`FailedStarts == CountTried` no longer holds). Accepted, as the review
+said: a crash in the teardown after a stop is not counted. The test binary's
+re-exec now stops on SIGINT and SIGTERM as main does, which the process test
+needs.
+
+**3. The marker's lock at the take-back** (confirmed: on 435bc43a nothing
+asked for the lock while the teardown ran). The stop's take-back waits for
+the lock as `LockState` does (30 s a wait), and asks again 50 ms after a
+wait that gives up, until the teardown ends; then the take-back after it
+gives the lock 2 s more. Who holds `update-state.lock`, and for how long:
+this serve's own admission, its crash rollback's check and its boot's
+housekeeping (before the take-back exists, or in its teardown's order); its
+confirmation and not-ready record (milliseconds, joined in the teardown); a
+store open's migration disarm, a command's or this serve's (a read, a write
+and a barrier, milliseconds, inside the ladder's lock); `Updater.Install`,
+from its marker writes through its swap (milliseconds on a same-volume
+POSIX swap, seconds for a cross-volume copy, and on Windows the SCM's stop
+of a running service inside it, `scmStopWait`, up to 15 s), which replaces
+the marker with a new install's, where the take-back then has nothing to
+take; `Updater.Rollback` (a read, a record and a rename; on Windows the
+same SCM stop); a hold's record and the restamp (milliseconds); the early
+rollback and the crash rollback of another serve (only where this one
+holds no data dir lock). Nothing but those Windows SCM stops can hold it
+for a whole teardown, and those replace the marker anyway. What remains is
+backlog B760.
+
+**4. A backup that predates the settings check** (confirmed: on 435bc43a
+the fourth start put it back, exit 75). `ConfigCheckUnsupported` refuses
+and records `the backup predates the settings check`; the test that
+required the put-back is `TestABackupThatPredatesTheCheckIsNotPutBack` now,
+and the first round's record above names it so. The comment that justified the put-back (a refusal "stops
+it at its load") is replaced: a backup that cannot load the settings does
+not start once put back, with this version held back from the
+auto-installer. By hand with real 0.2.2 and 0.2.3 binaries below.
+
+**5. A command's migration while the install awaits its confirmation**
+(confirmed: on 435bc43a `bridge scan` over a store one step behind, the
+install on probation after a failed start, migrated it to 60 and recorded
+`storeMigratedBy`, and so did `bridge doctor`, the command an operator runs
+to see why starts fail, which took the backup away for good).
+`updater.MigrationHeld(st, current, serveRunning)` holds a migration where
+the marker awaits this version's confirmation, the crash rollback's checks
+at the limit would put the backup back (`CrashRollbackAtLimit`), and a start
+before now did not end cleanly: `FailedStarts` less the start a serve holding
+the data dir's lock counts until it stops cleanly. The store open's disarm
+refuses on it (`ErrMigrationHeld`), with the marker's lock or without,
+writing nothing and running no step. Serve's own start carries its
+admission's permission (`DisarmResult.Permit`, `updater.MigrationPermit`,
+naming the data dir and the version, made only by `AdmitBoot`) through
+`manifest.OpenStoreAdmitted`, and `TestEveryStoreTheBridgeOpensIsItsDataDirsDatabase`
+reads that open too. Whether a serve holds the lock is
+`updater.ServeHoldsDataDir`: this process's holds from what it noted
+(`NoteDataDirLock`, serve's as a serve's; restore, reset-player,
+clear-missing and the DAC bind as a command's, so that a restore's own
+hold does not read as a serve's), and another process's by a try of
+`server.lock` that never waits and lets go at once of a free lock; it is
+asked before the marker's lock is taken, and only where the marker counts a
+start of an install of this version awaiting its confirmation
+(`RunningServeCounted`; 3f05ea92, once a reading of 1629aed4 found the
+doctor trying the lock on every run and for each of its store probes,
+whatever the marker held). The commands it stops, and what they say: `bridge scan`,
+`analyze`, `artwork`, `upscale`, `optimize`, `render`, `variants`, `manifest`
+(clear-missing), `library` (add, remove), `enrichment` and `duplicates`
+print their store open's failure, `… record in the install marker that the
+store is migrated from version N: this command does not migrate the store:
+the install of X awaits its confirmation, and K of its starts did not end
+cleanly: a migration of the store now would keep a crash rollback from ever
+putting Y back, so only a start of bridge serve migrates it until the
+install is confirmed`, and exit 1. `bridge restore` refuses before its
+first write a snapshot whose store this version would migrate (its
+restored store is opened at once to mint the backup epoch, which would
+refuse past the database's copy): `the snapshot's store is N migration(s)
+behind this version, which the restore would run, and this command does not
+migrate the store: …; nothing was restored`. `bridge doctor` opens nothing
+for its store probes (`doctorOpenStore`: `not checked: the store has N
+migration(s) pending, which bridge doctor does not run while the install
+awaits its confirmation (the store-migrations line)`), and its new
+`store-migrations` line, a warn, says `N migration(s) pending, which bridge
+doctor runs none of: …`, from `manifest.PendingMigrations`, a read-only open
+(`mode=ro`) that asks `user_version` alone and makes nothing. Serve and the
+console's doctor are not stopped: serve has its permission, and a serving
+process has migrated its store already. With no start before now that did
+not end cleanly (the running serve's own left out), a command migrates as
+before. Tests: serve migrating at a pending migration after a failed start
+(`TestServeMigratesTheStoreAfterAFailedStart`), a command beside a starting
+serve that refuses with one start before it and migrates with none
+(`TestACommandBesideAStartingServe`), and the updater's, the store's and
+restore's own.
+
+**6. A permission refusal and a tailnet failure** (confirmed). What the
+swap carries: `dst`'s mode alone (`installedMode`); the owner is the
+process's (the staged file is created by it), and no extended attribute was
+read. So an operator's setcap went with an update, the new binary's bind
+below 1024 was refused for a permission, and the start was taken back as the
+host's. `carryCapabilities` now gives the staged binary `dst`'s
+`security.capability` before the rename, which only a process with
+CAP_SETFCAP may set (`sudo bridge update`); where it cannot (the service
+user's auto-installer, the console's install), the swap goes on, and
+`bindRefusalIsTheHosts` counts a permission refusal where `.bak` carries
+capabilities the binary does not (`updater.FileCapabilities`, Linux's one
+small `getxattr`; elsewhere none), saying so. An SELinux label is not
+carried: the staged binary takes the label the policy gives a new file in
+its directory (`restorecon`'s), so a hand-set label goes with the update;
+that is backlog B760. The tailnet: `tailnetNetworkFailure` takes back a
+`*net.OpError` (tsnet's netstack listener answers a closed or reset
+endpoint as one) or `net.ErrClosed` (tsnet's listener once its node stops),
+and counts anything else its `Serve` returns; the `tsnet listener: …` line
+names the class. On 435bc43a a non-network failure was taken back, and a
+permission refusal beside a `.bak` that carried capabilities was too.
+
+**7. The auto-installer's hold** (confirmed: each arm held on 435bc43a).
+`ProbationHolds(st, current, binaryPath, uptime)` holds nothing beside a
+refused rollback (`RollbackRefused`), without a regular file at
+`binaryPath+".bak"`, or where `CrashRollbackAtLimit` refuses (the migration,
+which it asked alone before, among them); `probationHolds` passes
+`autoInstallOpts.BinaryPath` at the gate and `opts.BinaryPath` under the
+lock. A test per arm, each red with its arm deleted (the controls).
+
+**8. The words and the levels** (confirmed: on 435bc43a the console graded
+two crashed starts and the running one as a failure, the doctor read one
+crash with no serve running as ok and said nothing of it, and both said
+`the next start puts 0.0.0-previous back` beside a missing backup and a
+migrated store). `ProbationStatus(st, current, running)`: `running` is
+whether a serve holds the data dir's lock (`ServeHoldsDataDir`), the
+console's and serve's own true; `Says` and `Level` count the starts that
+did not end cleanly, the running one left out; `ThisStart` and the new
+`ThisStartLevel` the starts before the running one. The words follow
+`CrashRollbackAtLimit`: where it refuses, `the backup is not put back:` and
+its reason; otherwise `the next start tries to put X back, if the backup
+can run these settings`, never a promise. Tests: the console with two
+crashes and a running start (warn), the doctor with one crash and no serve
+(warn, no "running now"), at the limit with the backup missing (a fail that
+promises nothing), over a migrated store (no put-back, and why), and beside
+a running serve (ok).
+
+**9. PROTOCOL.md's "Boot-time rollback" paragraph** is rewritten here: the
+probation, the take-back's ends, the crash rollback and its vetoes, exit 75,
+the hold of a command's migration and of the auto-installer, and the clean-up
+of `.bak` at the boot after the confirmation. The iOS mirror is the
+orchestrator's.
+
+**10. Tests that could not catch their defect.**
+`TestIsBindPermissionMatchesWhatTheHostAnswersARefusedBind` asks the host
+too (a bind of 127.0.0.1:1 as uid 1000 here: EACCES; it skips where the
+bind is let through), beside the platform's errno; its twin for an absent
+address (TEST-NET-1) is new. Serve over a permission refused
+(`TestAPermissionRefusalTheBackupWouldNotMeetIsAFailedStart`, the real
+EACCES with the capabilities stood in for) and over a tailnet listener that
+fails (`TestATailnetFailureIsTheNetworksOnlyWhenItSaysSo`, the fake node).
+`TestAnInstallListeningOnTheWildcardIsConfirmed` runs a confirmation
+through a listener that reports `[::]:port` (a loopback listener handed in,
+so no test binds the host's interfaces): the probe dials loopback
+(`probeHost`) and `GET /v1/health` is asked with `Host: [::]:port`. The
+auto-installer's probation tests moved to a file every platform builds
+(`probation_holds_test.go`), on an updater of their own whose install fails
+at once at its download. `decide023` stays: it pins 0.2.3's decision over
+the crash rollback's record from a literal fixture, and the first round's
+by-hand run with a real 0.2.3 showed the write that follows it, the marker
+once the restored 0.2.3 served: status, the install's fields and the count
+gone, `rejectedVersion`, `rejectedReason` and `migrationVeto` kept (its
+`ClearInstall` keeping the hold and the veto), `dataDirOpenedBy` and
+`previousVersion` kept (B705).
+
+**Round one's tests that met the new rules**: the status table
+(`TestProbationStatusSaysWhereAnInstallStands`, rewritten for `running` and
+the two levels), the migration record's cases (serve's own open now with
+its permission; the barrier's and the lock's cases over a marker with no
+start counted, so they test the record and not the hold), the late start's
+store open (`TestAStartOfAnotherVersionKeepsTheRecordOfALateStartThatDied`,
+serve's, with its permission), and three auto-installer tests, moved.
+
+**Negative controls** (each on the committed change, the bytes put back
+from memory after it, each predicted by name in a file before the run; every
+one came out as predicted, and the tree after them held only the docs):
+
+| | mutation | red | green beside it |
+|---|---|---|---|
+| (1a) | `bindRefusedByTheHost` without `IsAddrNotAvail` | `TestAPortAnotherProcessHoldsIsNotAFailedStart` (the absent address) | its other two subtests |
+| (1b) | `IsAddrNotAvail`'s Windows arm on syscall's errno alone | `TestTheWindowsBindChecksNameTheWinsockErrnos` | |
+| (2a) | no take-back as the stop arrives (after the teardown alone, as the first round) | `TestAStopTakesItsCountBackAsItArrives`, `TestAStopWhileServeStartsTakesItsCountBackAsItArrives`, `TestAServeKilledWhileItDrainsHasTakenItsCountBack`, `TestAStopThatFindsTheMarkersLockHeldTakesItsCountBackOnceItIsFree` | `TestAStopIsNotAFailedStart`, `TestARestartRequestIsNotAFailedStart` |
+| (2b) | the restart request's hook removed | `TestARestartRequestTakesItsCountBackAsItArrives` | `TestARestartRequestIsNotAFailedStart`, `TestAStopTakesItsCountBackAsItArrives` |
+| (2c) | the take-back begun at every end of serve | `TestAnErrorExitStaysCountedWhateverItsCallerDoesAfter` (both), `TestAStoreThatWillNotOpenIsAFailedStart`, `TestAPanicInServeIsAFailedStart`, `TestAMigrationThatFailsStillRefusesTheRollback` | |
+| (3a) | one ask for the marker's lock, no asking again | `TestAStopThatFindsTheMarkersLockHeldTakesItsCountBackOnceItIsFree` | |
+| (4a) | a backup that predates the check put back | `TestABackupThatPredatesTheCheckIsNotPutBack` | |
+| (5a) | `MigrationHeld` holding nothing | `TestACommandDoesNotMigrateTheStoreWhileTheInstallAwaitsItsConfirmation`, `TestTheDoctorLeavesThePendingMigrationsAndSaysSo`, `TestACommandBesideAStartingServe` (one start before), `TestMigrationHeldAsksTheStartsBeforeNow` (its held cases), `TestAMigratingOpenIsHeldWhileTheInstallAwaitsItsConfirmation` (a command's, with the lock and without), `TestThePermitAdmitsOnlyItsOwnStart`, `TestARestoreThatWouldMigrateIsRefusedWhileTheInstallAwaitsItsConfirmation` | the cases that hold nothing, serve's own |
+| (5b) | serve's own open without its permission | `TestServeMigratesTheStoreAfterAFailedStart` | `TestACommandBesideAStartingServe` (it does not ask serve's exit) |
+| (5c) | the start a running serve counts not taken off | `TestACommandBesideAStartingServe` (none before), `TestMigrationHeldAsksTheStartsBeforeNow` (a serve's own) | |
+| (5d) | this process's command hold read as a serve's | `TestServeHoldsDataDirReadsTheLockAndThisProcesssHolds` | |
+| (6a) | a permission refusal taken back whatever `.bak` carries | `TestAPermissionRefusalTheBackupWouldNotMeetIsAFailedStart` (the backup's capability) | both carry it, neither does |
+| (6b) | the swap carries no capabilities | `TestTheSwapCarriesTheBinarysFileCapabilities`, `TestASwapThatCannotSetTheCapabilitiesStillSwaps` | |
+| (6c) | every tailnet failure taken back, as the first round | `TestATailnetFailureIsTheNetworksOnlyWhenItSaysSo` (another failure) | the network's two |
+| (7a) | the hold beside a refused rollback | `TestTheAutoInstallerDoesNotWaitBesideARefusedRollback` | |
+| (7b) | the hold without a backup | `TestTheAutoInstallerDoesNotWaitWithoutABackup` | `TestTheAutoInstallerWaitsForTheRunningInstallsProbation` |
+| (7c) | the hold where the crash rollback's checks refuse | `TestTheAutoInstallerDoesNotWaitWhereTheCrashRollbackWouldRefuse` (each case), `TestTheAutoInstallerDoesNotWaitWhereTheBackupCannotBePutBack` | |
+
+(5a), (5c) and (5d) ran again on 3f05ea92, the gate's question changed under
+them, with the same results.
+
+**By hand, with real builds**: this tree at 829d1834 built as 0.2.4-b660,
+over 0.2.3 (git archive 0ddb8c72) and 0.2.2 (2012195e, which has no settings
+check), each laid out as `bridge update` leaves an install (the old binary
+served its data dir first, then `.bak`, the new binary and an `installing`
+marker), on loopback, mDNS off.
+- *Point 1*: four starts over `listenAddress: 192.0.2.1:7788` each exited 1
+  (`listen 192.0.2.1:7788: … bind: cannot assign requested address`), the
+  count back to none after each, and the fourth put nothing back: the binary
+  0.2.4-b660, `.bak` beside it.
+- *Point 2*: three starts, each listening with the count at 1, then a TLS
+  client that sent half a request, SIGTERM, and SIGKILL 2.5 s later at the
+  latest: the count was back 10 ms, 20 ms and 10 ms after the SIGTERM, each
+  process still alive at its kill and killed by it (exit -9). The fourth
+  start served 0.2.4-b660, no rollback, and its own stop took its count back.
+- *Point 4*: three starts killed with SIGKILL over a 0.2.2 backup, and the
+  fourth served, counting itself (4), with `updater: not rolling back the
+  install of 0.2.4-b660 after 3 starts of it that did not end cleanly: the
+  backup, 0.2.2, predates the settings check, so it cannot say whether it
+  loads this bridge's settings, and one that does not would not start once
+  put back; this start goes on, and counts itself` and `rollbackRefused: the
+  backup predates the settings check`. The same over a 0.2.3 backup: the
+  fourth exited 75, the binary then reported 0.2.3, and the marker held
+  0.2.4-b660 back and vetoed its migrations.
+
+**Checks.**
+- The red run on 435bc43a (cmd/bridge and internal/updater, the predictions
+  in a file beforehand): every test predicted red was red, and every guard
+  beside them green. One failed for its own reason first, the wildcard
+  test's unquoted `[::]` in YAML, and passed once quoted, as predicted.
+- `make test-fast` through the shared build lock (`buildslot.py b660`, which
+  waited 695 s for another worker's run): ok, 85 packages and 14 without
+  tests (cmd/bridge 489 s, internal/backup 371 s, internal/manifest 262 s; a
+  few unchanged packages from the test cache); the Linux-only packages ran
+  (internal/alsa, internal/alsapcm, internal/atomicwrite, internal/backup and
+  the player's).
+- `go test -race -count=1 -timeout 30m` with make's tags over
+  ./cmd/bridge/..., ./internal/updater/... and ./internal/doctor/...: ok
+  (1,089 s, 27 s, 7 s).
+- `make vet` natively, with `GOOS=windows`, with `GOOS=darwin` and with
+  `GOOS=linux GOARCH=386`: ok.
+- `make build-all`: ok (its build-tag check, then the six targets).
+- The qualification check (`scripts/qualification-version -base 4880f8a4
+  -head HEAD`): `qualification version OK`.
+- go1.27.3's gofmt on the 43 Go files the round changed: clean.
+- `make docs-check`: ok as the tree stands; with both rules patches applied
+  to a copy of the rules files, measured by check-doc-budgets.py's own
+  `measure` and `problems` over the tracked files: ok, config-lifecycle.md
+  97,579 bytes (97.6 %), cli-serve.md 41,369, scanner.md 32,762, the worst
+  load 314,357 bytes (65.5 %). `git apply --check` takes
+  `rules-b660-r2.patch` over the rules files as the first patch left them,
+  and every test its lines cite exists.
+
+**For the owner.**
+- PROTOCOL.md's "Boot-time rollback" paragraph is rewritten in this tree;
+  its iOS mirror (`docs/BridgeProtocol.md`) is owed with it.
+- The 1-bit.app updater page is owed at release (the orchestrator's), with
+  the note on a binary given file capabilities.
+- What this round leaves is backlog B760.

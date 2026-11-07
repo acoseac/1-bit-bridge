@@ -894,27 +894,35 @@ the backup of … is removed at the next start`, and the marker shows
 missing answer in the brackets), records `"notReady": true`, and keeps
 serving: not ready rolls nothing back.
 - **Each start of the new version counts itself** (`"failedStarts"`) before
-  it writes anything, and takes its count back when it ends cleanly: a stop
-  (`systemctl stop` or restart, `docker stop`, Ctrl-C), a restart request (the
-  console's Restart, the auto-installer's), an API or console address another
-  process holds, a bind refused for a permission, a tailnet listener that
-  failed. A crash, a `kill -9`, an OOM kill, a power cut, a panic and an error
-  exit (a store that will not open, a bind to an address the host does not
-  have) stay counted, and so does a stop the service manager had to finish
-  with SIGKILL. A take-back that cannot hold the marker's lock within 2 s
-  leaves the count (`updater: this start ended cleanly and its count … was not
-  taken back …`). Once one start has not ended cleanly, each start after it
-  says how many came before it. A start that ends before it counts itself
-  (its settings refused, say) is not counted: the early rollback above
-  answers that case.
+  it writes anything, and takes its count back when it ends cleanly. A stop
+  (`systemctl stop` or restart, `docker stop`, Ctrl-C, the SCM's Stop) or a
+  restart request (the console's Restart, the auto-installer's) takes it back
+  as soon as it arrives, so a stop the service manager has to finish with
+  SIGKILL (past systemd's `TimeoutStopSec`, launchd's `ExitTimeOut`) is taken
+  back already, and a crash in the teardown after it is not counted. An API
+  or console address another process holds, one the host does not have (a
+  static address not up yet after a reboot), a bind refused for a permission
+  the previous binary would meet too (not where `.bak` carries file
+  capabilities the new binary does not: below), and a failure of the
+  tailnet's network take it back after the teardown. A crash, a `kill -9`
+  with no stop before it, an OOM kill, a power cut, a panic, an error exit (a
+  store that will not open) and a tailnet listener's failure that is not the
+  network's stay counted (the journal's `tsnet listener: …` line says which).
+  A stop's take-back that cannot hold the marker's lock keeps asking for it
+  until the teardown ends, and the one after it gives the lock 2 s more; one
+  that never has it leaves the count (`updater: this start ended cleanly and
+  its count … was not taken back …`). Once one start has not ended cleanly,
+  each start after it says how many came before it. A start that ends before
+  it counts itself (its settings refused, say) is not counted: the early
+  rollback above answers that case.
 - **At three, the next start puts `.bak` back before it writes anything**,
   holding the data dir's lock and the marker's, where the marker shows the
   install reached its swap and names the previous version, no version but the
   new one opened the data dir, and no migration of the store began; `.bak`
   must report that previous version, and load the settings
-  (`--validate-config`; a backup from before that check is put back with a
-  warning, unchecked: if it refuses the settings it stops at its load, and
-  the settings are what to fix). It records the new version as held back and its store migrations
+  (`--validate-config`; a backup from before that check, 0.2.2 and older, is
+  not put back: it cannot say whether it loads them, and the start records
+  `the backup predates the settings check`). It records the new version as held back and its store migrations
   vetoed, puts `.bak` back and exits 75: `updater: 3 starts of … since its
   install did not end cleanly, so the install is rolled back: … is back at
   /…/bridge and … is held back from the auto-installer; exiting for the
@@ -926,10 +934,20 @@ serving: not ready rolls nothing back.
   `"rollbackRefused"`. Every later start that does not end cleanly asks
   again, so a refusal that passes (a backup's settings check that did not
   answer) is no lasting one. **A migration of the store refuses it for
-  good**: whatever command first opens the store after the update with a
-  step to run (serve, `bridge doctor`, `bridge scan`, …) records
+  good**: whatever first migrates the store after the update records
   `"storeMigratedBy"` before its first step, and a step that failed counts
-  as begun, since the ladder's steps are not one transaction. Past that the
+  as begun, since the ladder's steps are not one transaction. While the
+  install awaits its confirmation after a start that did not end cleanly,
+  only serve's own start migrates it: every other command that would
+  (`bridge scan`, `analyze`, `artwork`, `upscale`, `optimize`, `render`,
+  `variants`, `manifest`, `library`, `enrichment`, `duplicates`) refuses,
+  running no step (`this command does not migrate the store: the install of
+  … awaits its confirmation, and N of its starts did not end cleanly: …`),
+  `bridge restore` refuses a snapshot it would migrate before it writes
+  anything, and `bridge doctor` runs none, says `N migrations pending` on its
+  `store-migrations` line and leaves the checks that read the store. With no
+  start before it that did not end cleanly (the one a running serve counts
+  left out), a command migrates as before. Past that the
   way back is the operator's: a snapshot from before the update
   (`bridge restore`) with `.bak`, by hand. This is the design's plainest
   cost: the ladder's top moved in 6 of the last 7 releases (0.1.7 23, 0.1.8
@@ -945,8 +963,10 @@ serving: not ready rolls nothing back.
   extracted by a newer extractor are served as indexed until their file
   changes.
 - **The auto-installer waits** while the running version's install is
-  unconfirmed, no migration has begun and the process has been up for less
-  than 20 minutes (the Updates panel's deferred reason: `… awaits its
+  unconfirmed, the process has been up for less than 20 minutes, and the
+  crash rollback would put `.bak` back: no rollback of it refused, `.bak`
+  beside the binary, no migration begun, the swap reached, no other version
+  over the data dir (the Updates panel's deferred reason: `… awaits its
   confirmation …`), so it does not replace `.bak` with a version not yet
   known to run. A manual install (`bridge update`, the console's Install) is
   not held, and its `.bak` is the unconfirmed version. An automatic install
@@ -954,15 +974,29 @@ serving: not ready rolls nothing back.
   `.bak` while the marker names the running one, and a crash rollback then
   refuses (`the backup is …, where the install replaced …`).
 - **Where to look**: `bridge doctor`'s `install-probation` line (ok on
-  probation, warn from two starts that did not end cleanly, fail at three,
-  where the rollback was refused, or where a start did not answer as
-  ready), the Updates panel's **Probation** row, and `"failedStarts"`,
+  probation, warn from one start that did not end cleanly, a serve running
+  now not counted among them, fail at three, where the rollback was refused,
+  or where a start did not answer as ready; it says the next start tries to
+  put `.bak` back, if the backup can run these settings, or why it does not),
+  its `store-migrations` line, the Updates panel's **Probation** row (graded
+  on the starts before the one running), and `"failedStarts"`,
   `"storeMigratedBy"`, `"rollbackRefused"` and `"notReady"` in
   `update-state.json`. On a filesystem that keeps no locks an install is
   counted but never confirmed and never rolled back (the next paragraph).
   On Windows the crash rollback renames the running exe aside as the boot
   rollback does (B202); that path has been checked by cross-compiling and by
   the rename's own test, not on a Windows service.
+- **A binary given file capabilities** (`setcap cap_net_bind_service=+ep`,
+  to bind a port below 1024 as the service user) keeps them across an update
+  only where the updater may set them, run as root (`sudo bridge update`).
+  The service user's auto-installer and the console's install cannot: the
+  new binary's bind of that port is refused, and the start counts, since
+  `.bak` still carries them (`updater: the backup beside this binary carries
+  file capabilities this binary does not …`), so three such starts put `.bak`
+  back. Run `setcap` on the new binary after such an update, or update with
+  `sudo bridge update`. An SELinux label set by hand (`chcon`) is not carried
+  either: the new binary takes the label the policy gives a new file in its
+  directory (`restorecon`'s; backlog B760).
 
 **A data dir whose filesystem cannot fsync a directory.** Linux's NFS and
 CIFS/SMB clients treat a directory's fsync as a successful no-op, and its

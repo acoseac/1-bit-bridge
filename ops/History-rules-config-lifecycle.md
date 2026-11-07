@@ -2490,7 +2490,7 @@ record is in `ops/engineering-log.md`, 2026-11-04, B707.
 
 ## An install counted healthy only once it has answered and stayed up (backlog B660, 2026-11-06)
 
-- **An install counts as healthy only once one start of its version has answered as ready and stayed up for `updater.ProbationWindow`, and three of its starts that did not end cleanly roll it back at the next start, before it writes anything, unless a migration of the store has begun or the backup cannot be shown to run here** (2026-11-06, backlog B660). **Don't confirm on a version match, don't let a scan, a root or a certificate decide readiness, don't count a stop or a port another process holds, don't roll back once a migration step has begun or where the backup refuses the settings, and don't compare `user_version` to excuse a failed step.** → History-rules-config-lifecycle.md
+- **An install counts as healthy only once one start of its version has answered as ready and stayed up for `updater.ProbationWindow`, and three of its starts that did not end cleanly roll it back at the next start, before it writes anything, unless a migration of the store has begun or the backup cannot be shown to run here** (2026-11-06, backlog B660; its second round, 2026-11-07). **Don't confirm on a version match, don't let a scan, a root or a certificate decide readiness, don't count a stop (take its count back as the stop arrives, on the caller's context or a restart request, never serve's own context, and join that take-back before the data dir's lock goes), a port another process holds or an address the host does not have, don't take back a permission refusal the backup would not meet (file capabilities the binary lacks) or a tailnet failure that is not the network's, don't roll back once a migration step has begun or where the backup refuses the settings, does not answer their check or predates it, don't let a command but serve's own start migrate the store while the install awaits its confirmation after a start that did not end cleanly, don't hold the auto-installer for a backup the crash rollback would not put back, don't promise a put-back, and don't compare `user_version` to excuse a failed step.** → History-rules-config-lifecycle.md
 
 *The defect* (the self-healing study of 2026-11-02, read from the code;
 B613's "Not here" above; B198's scenario). `DecideBootAction` answered
@@ -2568,18 +2568,36 @@ refusal: a missed count errs toward not rolling back. A crash before the
 admission is not counted: a candidate that never runs is what the settings
 check before the swap sees, and a start refused for its settings has the
 early rollback. The take-back is registered right after the admission, so
-it runs after every teardown and holds the data dir's lock, and it reads a
-local flag (`notAFailedStart`) that exactly the clean ends set: serve's stop
-(the `ctx.Done` branch, and `stoppedBeforeServing`), a restart request
-(which cancels the same context), a bind refused for an address in use or a
-permission, the API's or the console's (`doctor.IsAddrInUse` and
-`IsBindPermission`, exported, the Windows arms reading Winsock's
-`WSAEADDRINUSE` and `WSAEACCES`, since `syscall.EADDRINUSE` alone is always
-false there), and the tailnet listener's failure: a host's trouble, which
-the backup would meet too. Never `code`: `runServe` does not recover, and a
-panic on serve's goroutine runs the defers with `code` still 0. It gives the
-marker's lock 2 s (`takeBackWait`), goes on where the filesystem keeps none,
-as a disarm does, and writes only where the marker is still an armed
+it is joined while the data dir's lock is held. A stop's begins as the stop
+arrives (`stopTakeBack`, the second round): `context.AfterFunc` on the
+context runServe's caller gave it, which only a stop cancels (main's signal
+context for SIGINT and SIGTERM, the SCM's Stop, the launcher's, a test's),
+and the restart request's own hook (`serveRestart.onRequest`), never
+runServe's own context, which it cancels on every exit; it asks for the
+marker's lock again, a wait at a time, until the teardown ends, and is then
+unregistered and joined. Until the second round the stop's take-back ran
+after the whole teardown, which a supervisor that kills a slow stop
+(launchd's `ExitTimeOut`, systemd's `TimeoutStopSec`, the SCM's wait) cut
+short, leaving a clean stop counted. A crash in the teardown after a stop is
+not counted, by the same rule: the stop came first. The other clean ends are
+taken back after the teardown, reading a local flag (`notAFailedStart`) that
+exactly they set: a bind refused for an address another process holds, one
+the host does not have (`doctor.IsAddrNotAvail`, the second round: a static
+address not up yet after a reboot made four counted starts in a row, and
+the fourth put back a backup that met the same refusal), or a permission the
+backup would meet too (`bindRefusalIsTheHosts`: not where `.bak` carries
+file capabilities the binary does not), the API's or the console's
+(`doctor.IsAddrInUse`, `IsAddrNotAvail` and `IsBindPermission`, exported,
+the Windows arms reading Winsock's `WSAEADDRINUSE`, `WSAEADDRNOTAVAIL` and
+`WSAEACCES`, since syscall's alone are always false there); and a failure of
+the tailnet's network (`tailnetNetworkFailure`: a `*net.OpError` or
+`net.ErrClosed`, which the line names; any other failure of the listener
+counts, the second round). Never `code`: `runServe` does not recover, and a
+panic on serve's goroutine runs the defers with `code` still 0. The
+take-back after the teardown gives the marker's lock 2 s (`takeBackWait`),
+and is also the last try of a stop's that never had its answer; each goes on
+where the filesystem keeps none, as a disarm does, and writes only where the
+marker is still an armed
 install of this version holding the count this start wrote (`FailedStarts
 == CountTried`): a stop after the confirmation and a restart into a newer
 install touch nothing, and no earlier start's count goes with this one. A
@@ -2602,13 +2620,15 @@ store does not run the backup at every start: `updater.CrashRollback`
 `StoreMigratedBy`, `DataDirOpenedBy` empty or this version; no recency
 window, since the count has no clock and an install first started the next
 day deserves the same, B705); `.bak` a regular file whose `ProbeVersion` is
-`PreviousVersion`; and `CheckConfig(.bak, the settings)`, valid or
-`ConfigCheckUnsupported` going on, refused or failed refusing, so that a
-rollback does not trade one crash loop for another over a key the new
-version saved. A backup that predates the check cannot say whether it loads
-the settings: it is put back with a warning, and one that refuses them stops
-at its load, before its own early rollback if it has one, and the settings
-are what to fix. Then `CrashRollbackRecord` durably (status "",
+`PreviousVersion`; and `CheckConfig(.bak, the settings)`, valid going on,
+refused, failed or `ConfigCheckUnsupported` refusing, so that a rollback does
+not trade one crash loop for another over a key the new version saved. A
+backup that predates the check (0.2.2 and older) cannot say whether it loads
+the settings, and one that does not would stop at its load with this
+version held back from the auto-installer, its strict decoder refusing a key
+it does not know: it is refused, and recorded as `the backup predates the
+settings check` (the second round; until then it was put back with a
+warning). Then `CrashRollbackRecord` durably (status "",
 `RollbackStarted`, the version held back with a reason naming the failed
 starts and no digest, since this is no fault of the settings, its
 migrations vetoed, `DataDirOpenedBy` and the count kept, `RollbackRefused`
@@ -2646,7 +2666,9 @@ refuse it, but skips every step. This is the design's plainest cost: the
 ladder's top moved in 6 of the last 7 releases (0.1.7 23, 0.1.8 26, 0.1.9
 41, 0.2.0 44, 0.2.1 50, 0.2.2 60, 0.2.3 60), so an install of such a release
 that crash-loops after its first store open gets its backup kept and a
-report, not a rollback.
+report, not a rollback. Since the second round no command but serve's own
+start begins one while the install awaits its confirmation after a start
+that did not end cleanly (*The second round*, below).
 
 *What the target wrote without a migration* goes back under the backup with
 no check, and none of it stops the backup starting, so none is a refusal in
@@ -2673,8 +2695,14 @@ migration began, which every migrating open records since B660.
 gate in `maybeAutoInstall`, past its pending-restart path, and again under
 the lock in `decideUnderLock`, as the hold is (`ErrInstallAwaitsConfirmation`,
 a deferred reason), while the marker is an unconfirmed install of the running
-version with no `StoreMigratedBy` and the process has been up for less than
-twice the window (`Options.Uptime`, monotonic). A swap then would replace
+version, the process has been up for less than twice the window
+(`Options.Uptime`, monotonic), and the crash rollback would put the backup
+beside the binary back (`ProbationHolds(st, current, binaryPath, uptime)`,
+both callers passing the binary serve runs as: no `RollbackRefused`, `.bak`
+a regular file, and `CrashRollbackAtLimit` passing; the second round added
+the first two and the last beside the migration it asked alone, since a
+hold kept for a backup no rollback would put back held a newer release,
+perhaps the fix, for nothing). A swap then would replace
 the last version known to run here with one not yet shown to. Past that
 bound an install that never answered does not wait on itself, since a newer
 release may be its fix; where a migration began the backup cannot be put
@@ -2684,17 +2712,27 @@ then an automatic one over it, keeps the behaviour from before: `.bak` is
 then the staged release, not `PreviousVersion`, so the crash rollback
 refuses it at its second check.
 
-*The report* has one source, `updater.ProbationStatus`, in words that name
-no path or value: `Says`, the count as the marker holds it (the running start
-counts itself until its take-back, so a healthy install on probation reads
-1), for `bridge doctor`'s `install-probation` line, one builder for the CLI
-and the console's doctor (none where no install awaits; ok at 1, warn from
-2, fail at the limit, beside a refused rollback, or with `NotReady`; a
-marker that cannot be read is a warn, not checked), the surface that works
-while serve cannot start; and `ThisStart`, the running start taken off the
-count, for serve's stderr (a line per start with a count before it, and one
-for every refusal) and the console's Updates panel, a Probation row beside
-the Rollback row. Beside a refused rollback it promises no put-back.
+*The report* has one source, `updater.ProbationStatus(st, current,
+running)`, in words that name no path or value: `Says`, the starts that did
+not end cleanly, less the one a serve holding the data dir's lock counts
+until it stops cleanly (`running`, `updater.ServeHoldsDataDir`; the second
+round: until then one was taken off whether or not a serve ran), graded by
+`Level`, for `bridge doctor`'s `install-probation` line, one builder for the
+CLI and the console's doctor (none where no install awaits; ok with none,
+warn from one, fail at the limit, beside a refused rollback, or with
+`NotReady`; a marker that cannot be read is a warn, not checked), the
+surface that works while serve cannot start; and `ThisStart`, the running
+start taken off the count, graded by `ThisStartLevel` on the starts before
+it (the second round: the console graded the count with itself in it, so
+two starts that crashed read as the failure a third makes), for serve's
+stderr (a line per start with a count before it, and one for every refusal)
+and the console's Updates panel, a Probation row beside the Rollback row.
+Neither promises a put-back (the second round): the words follow the crash
+rollback's own checks of the marker at the limit (`CrashRollbackAtLimit`),
+saying why the backup is not put back where they refuse, and otherwise that
+the next start tries to put it back, if the backup can run these settings,
+since its version and its settings check are asked only by the start that
+acts.
 
 *Replaced, not only added*: `bridge update`'s promise (it says what is
 checked now: answered, up for 10 minutes, the backup put back after three
@@ -2704,9 +2742,9 @@ and the comments at the housekeeping's call and the auto-installer's
 restart, the runbook's B613, B692 and B705 paragraphs and its paragraph for
 B660, B613's "Not here" above, and the long forms of B613's rounds 3 and 4,
 B692's round 2 and B705 here, each where it said a start confirms the
-install. PROTOCOL.md's Updates paragraph still says the next boot confirms
-the install or restores `.bak`; that sentence changes with the iOS mirror,
-not here.
+install. PROTOCOL.md's Updates paragraph said the next boot confirms the
+install or restores `.bak` until the second round rewrote it; its iOS mirror
+is the orchestrator's.
 
 *Tests.* Red first on 99568a9d, the marker's fields and serve's seams added
 inert: `TestACrashAfterTheFirstBootKeepsTheBackup` (the housekeeping stamped
@@ -2723,9 +2761,111 @@ the confirmation now and keep what each pins. Twelve negative controls,
 each observed as predicted, and a by-hand run with two real builds: the
 log's entry has them.
 
-*Left.* What B660 leaves uncovered is filed under backlog B660 until each
-item has an id of its own. The record is in `ops/engineering-log.md`,
-2026-11-06, B660.
+*The second round* (2026-11-07, PR #1424's review). Besides the stop's
+take-back as it arrives, the host's refusals by what the backup would meet,
+the backup that predates the check, the hold's arms and the report's words
+(each in its paragraph above):
+
+- *A command's migration is held while the install awaits its
+  confirmation after a start that did not end cleanly.* `bridge doctor`,
+  run to see why starts fail, opened the store and migrated it, and its
+  record (`StoreMigratedBy`) refused the crash rollback for good: the one
+  backup that would have run, taken away by the diagnostic. A store open
+  with a step pending and no permission now refuses, running no step and
+  writing nothing (`updater.MigrationHeld`, `ErrMigrationHeld`), while the
+  marker awaits this version's confirmation, the crash rollback's checks at
+  the limit would put the backup back, and a start before now did not end
+  cleanly: `FailedStarts` less the start a serve holding the data dir's lock
+  counts until it stops cleanly (`updater.ServeHoldsDataDir`), so with none
+  before now a command migrates as it did. Serve's own start carries its
+  admission's permission through the open (`DisarmResult.Permit`,
+  `updater.MigrationPermit`, `manifest.OpenStoreAdmitted`), which names the
+  data dir and the version and which only `AdmitBoot` makes, so it admits
+  that start alone. The gate is asked before the install marker's lock is
+  taken, and asks whether a serve holds the lock only where the marker counts
+  a start of an install of this version awaiting its confirmation
+  (`RunningServeCounted`, `MigrationHeldIn`, which the doctor's line, its
+  store probes and restore's check ask too), so a command or a doctor with no
+  count to read tries no lock. `ServeHoldsDataDir` answers this process's
+  own holds from what it noted (`NoteDataDirLock`: serve's as a serve's,
+  restore's, reset-player's, clear-missing's and the DAC bind's as a
+  command's), since a try of the lock cannot tell this process's serve from
+  its restore, and another process's by a try of `server.lock` that never
+  waits, letting go at once of one it finds free (what that leaves is
+  backlog B760). `bridge doctor` runs no migration either: its probes
+  that read the store say they wait for serve's start (`doctorOpenStore`),
+  and its `store-migrations` line says how many are pending
+  (`manifest.PendingMigrations`, a read-only open that asks the store's
+  `user_version` alone and makes nothing). `bridge restore` refuses before
+  its first write a snapshot whose store this version would migrate
+  (`restoreMigrationHeld`): the restored store is opened at once to mint its
+  backup epoch, which would refuse past the database's copy and leave the
+  restore half done. Every other command that opens the store says the
+  store's refusal: `bridge scan`, `analyze`, `artwork`, `upscale` (and
+  `optimize` and `render`, which open the store there), `variants`,
+  `manifest`, `library`, `enrichment` and `duplicates`.
+- *The swap carries the binary's file capabilities where it may.* It
+  carried the mode alone (`installedMode`): the new binary is the process's
+  own file, with no extended attribute of `dst`'s, so an operator's setcap
+  (cap_net_bind_service, for a port below 1024 as the service user) went
+  with the update, the new binary's bind was refused for a permission, and
+  that refusal was taken back as the host's, so no rollback ever put back
+  the backup that kept it. `carryCapabilities` gives the staged binary
+  `dst`'s `security.capability` before the rename, which only a process with
+  CAP_SETFCAP may do (`sudo bridge update`); where it cannot (the service
+  user's auto-installer, the console's install), the swap goes on, and a
+  bind refused for a permission counts where `.bak` carries capabilities
+  the binary does not (`bindRefusalIsTheHosts`, Linux's one small attribute
+  read; elsewhere files carry none). An SELinux label is not carried: the
+  staged binary takes the label the policy gives a new file in its
+  directory, which is `restorecon`'s, so a label set by hand (`chcon`) goes
+  with the update (backlog B760).
+- *Tests that could not catch their defect* now can: a bind refused by the
+  host itself (port 1, below the unprivileged floor) beside the errno each
+  platform spells, an address no host holds (TEST-NET-1) for
+  `IsAddrNotAvail`, serve over a permission refused and over a tailnet
+  listener that fails, the confirmation through a listener on the wildcard
+  (dialled on loopback, `GET /v1/health` asked with `Host: [::]:port`), and
+  the auto-installer's hold tested on every platform.
+
+`TestAStopTakesItsCountBackAsItArrives`,
+`TestARestartRequestTakesItsCountBackAsItArrives`,
+`TestAStopWhileServeStartsTakesItsCountBackAsItArrives`,
+`TestAServeKilledWhileItDrainsHasTakenItsCountBack` (a real serve process
+killed with SIGKILL while a held connection keeps its drain going),
+`TestAStopThatFindsTheMarkersLockHeldTakesItsCountBackOnceItIsFree`,
+`TestAnErrorExitStaysCountedWhateverItsCallerDoesAfter`,
+`TestABackupThatPredatesTheCheckIsNotPutBack`,
+`TestACommandDoesNotMigrateTheStoreWhileTheInstallAwaitsItsConfirmation`,
+`TestTheDoctorLeavesThePendingMigrationsAndSaysSo`,
+`TestServeMigratesTheStoreAfterAFailedStart`, `TestACommandBesideAStartingServe`,
+`TestAPermissionRefusalTheBackupWouldNotMeetIsAFailedStart`,
+`TestATailnetFailureIsTheNetworksOnlyWhenItSaysSo`,
+`TestAnInstallListeningOnTheWildcardIsConfirmed`,
+`TestTheConsoleGradesTheStartsBeforeTheRunningOne`,
+`TestTheDoctorCountsEveryStartWhereNoServeRuns`,
+`TestTheDoctorSaysTheBackupIsTriedNotPromised`,
+`TestTheDoctorPromisesNoPutBackTheMarkerRefuses` and
+`TestTheDoctorBesideARunningServeTakesItsStartOff` (cmd/bridge);
+`TestServeHoldsDataDirReadsTheLockAndThisProcesssHolds`,
+`TestMigrationHeldAsksTheStartsBeforeNow`,
+`TestAMigratingOpenIsHeldWhileTheInstallAwaitsItsConfirmation`,
+`TestThePermitAdmitsOnlyItsOwnStart`,
+`TestCrashRollbackAtLimitAsksTheMarkerAtTheLimit`,
+`TestTheAutoInstallerDoesNotWaitBesideARefusedRollback`,
+`TestTheAutoInstallerDoesNotWaitWithoutABackup`,
+`TestTheAutoInstallerDoesNotWaitWhereTheCrashRollbackWouldRefuse`,
+`TestTheSwapCarriesTheBinarysFileCapabilities` and
+`TestASwapThatCannotSetTheCapabilitiesStillSwaps` (internal/updater);
+`TestPendingMigrationsReadsTheStoreWithoutMigratingIt` (internal/manifest);
+`TestARestoreThatWouldMigrateIsRefusedWhileTheInstallAwaitsItsConfirmation`
+(internal/backup); and `TestIsAddrNotAvailMatchesWhatTheHostAnswersAnAbsentAddress`
+and `TestIsBindPermissionMatchesWhatTheHostAnswersARefusedBind`
+(internal/doctor) pin it.
+
+*Left.* What B660 leaves uncovered is filed as backlog B760. The records
+are in `ops/engineering-log.md`, 2026-11-06, B660, and 2026-11-07, its
+second round.
 
 ## Config, settings and process lifecycle
 
