@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"slices"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 )
 
 // The roots the watcher holds (backlog B651). A NAS that starts the bridge
@@ -272,16 +274,13 @@ func (wt *Watcher) unwatchRoot(ctx context.Context, root, msg string) {
 	wt.scheduleScan(ctx, root)
 }
 
-// retryUnwatched tries each root among unwatched again. Where fsnotify keeps
-// no open file per watch (fds is nil: inotify, ReadDirectoryChangesW), the
-// root's own folder is asked for alone first, saying nothing of a refusal
-// (tryAdd), so a limit still spent costs one Add and no line; where fsnotify
-// does (kqueue), the tree is walked as watchAgain walks it, its account kept.
-// A root that takes its watch is looked at and watched again where it is now
-// (watchAgain, which lets the folder's own watch go first, takes its identity
-// around the walk and asks for a scan), said once (msgRootWatchAdded); one that
-// reads as a volume not mounted meanwhile goes to the hold. A root no longer
-// configured is let go.
+// retryUnwatched tries each root among unwatched again: its own folder is
+// asked first, saying nothing of a refusal (probeRootWatch), so a limit still
+// spent costs one ask and no line. A root that answers is looked at and
+// watched again where it is now (watchAgain, which lets what the ask holds go
+// first, takes the folder's identity around the walk and asks for a scan),
+// said once (msgRootWatchAdded); one that reads as a volume not mounted
+// meanwhile goes to the hold. A root no longer configured is let go.
 func (wt *Watcher) retryUnwatched(ctx context.Context) {
 	roots := wt.scanner.Roots()
 	for _, root := range slices.Sorted(maps.Keys(wt.unwatched)) {
@@ -289,7 +288,7 @@ func (wt *Watcher) retryUnwatched(ctx context.Context) {
 			delete(wt.unwatched, root)
 			continue
 		}
-		if wt.fds == nil && wt.tryAdd(wt.rootWatchPath(root)) != nil {
+		if wt.probeRootWatch(wt.rootWatchPath(root)) != nil {
 			continue
 		}
 		look := wt.scanner.lookAtRoot(ctx, root)
@@ -311,6 +310,29 @@ func (wt *Watcher) retryUnwatched(ctx context.Context) {
 			watcherLogger.Info(msgRootWatchAdded, "root", root)
 		}
 	}
+}
+
+// probeRootWatch asks, saying nothing, whether a root's own folder would take
+// its watch now. Where fsnotify keeps no open file per watch (fds is nil:
+// inotify, ReadDirectoryChangesW) the ask is the Add itself (tryAdd), whose
+// watch the next walk keeps; where it does (kqueue) an Add opens every entry
+// of the folder outside the watcher's account, so the ask is addForTests, as
+// it answers the Add it stands for, and an open of the folder alone, closed at
+// once, which is what a refusal there is made of (a permission).
+func (wt *Watcher) probeRootWatch(path string) error {
+	if wt.fds == nil {
+		return wt.tryAdd(path)
+	}
+	if hook := wt.addForTests; hook != nil {
+		if err := hook(path); err != nil {
+			return err
+		}
+	}
+	f, err := fsutil.OpenDir(path)
+	if err != nil {
+		return err
+	}
+	return f.Close()
 }
 
 // unwatchedRetried notes a try of the unwatched roots that left some: the next
