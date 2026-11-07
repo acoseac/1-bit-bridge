@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
@@ -92,6 +93,19 @@ type Store struct {
 	// after it (ErrLandedNotHeld).
 	landed error
 	report Report
+
+	// pub is a copy of state, published each time the store holds a new one
+	// (hold), which State reads without the lock a write holds through its
+	// durable write (B762 round 2). Never changed once published.
+	pub atomic.Pointer[State]
+}
+
+// hold makes st the state the store holds, and publishes a copy of it for
+// State. The caller holds s.mu, or has not shared the store yet (open).
+func (s *Store) hold(st State) {
+	s.state = st
+	c := st.Clone()
+	s.pub.Store(&c)
 }
 
 // options are a test's seams, on the store they serve.
@@ -148,7 +162,8 @@ func open(dataDir string, o options) (*Store, error) {
 			s.unread(fmt.Errorf("dsdstate: the entry at the state's name leads to no file: %w", errors.Join(err, lerr)), nil)
 			break
 		}
-		s.state, s.report = Defaults(), Report{Outcome: Missing}
+		s.hold(Defaults())
+		s.report = Report{Outcome: Missing}
 	case err != nil:
 		s.unread(fmt.Errorf("dsdstate: the state cannot be read: %w", err), nil)
 	case len(data) > maxFileBytes:
@@ -159,7 +174,8 @@ func open(dataDir string, o options) (*Store, error) {
 			s.damaged(data, err)
 			return s, nil
 		}
-		s.state, s.report = st, Report{Outcome: Loaded}
+		s.hold(st)
+		s.report = Report{Outcome: Loaded}
 	}
 	return s, nil
 }
@@ -179,7 +195,7 @@ func readBounded(path string) ([]byte, error) {
 // unread is a file left where it is: the state refuses in memory, and no
 // write replaces the file.
 func (s *Store) unread(why, kept error) {
-	s.state = Refusing(s.now())
+	s.hold(Refusing(s.now()))
 	s.blocked = errors.Join(why, kept)
 	s.report = Report{Outcome: Unread, Why: why, Kept: kept}
 }
@@ -193,7 +209,8 @@ func (s *Store) damaged(data []byte, why error) {
 		return
 	}
 	fresh := Refusing(s.now())
-	s.state, s.report = fresh, Report{Outcome: Damaged, Why: why, Aside: aside}
+	s.hold(fresh)
+	s.report = Report{Outcome: Damaged, Why: why, Aside: aside}
 	out, err := fresh.encode()
 	if err == nil {
 		err = s.write(s.path, out)
@@ -241,8 +258,18 @@ func (s *Store) Report() Report {
 	return s.report
 }
 
-// State is a copy of the state the last write left.
+// State is a copy of the state the last write left, read without the store's
+// lock (B762 round 2): a write holds that lock through its durable write,
+// whose fsyncs a stalled disk holds as long as it likes, and a reader, serve's
+// player's supervisor at each snapshot among them, never waits on it. A state
+// is published once the store holds it, after its write is durable, so a
+// reader sees what the next write starts from, or what a write under way
+// started from.
 func (s *Store) State() State {
+	if p := s.pub.Load(); p != nil {
+		return p.Clone()
+	}
+	// A store Open did not make.
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.state.Clone()
@@ -321,7 +348,8 @@ func (s *Store) updateLocked(fn func(*State) error) error {
 		}
 		return fmt.Errorf("dsdstate: the state's write failed: %w", err)
 	}
-	s.state, s.blocked = next, nil
+	s.hold(next)
+	s.blocked = nil
 	return nil
 }
 

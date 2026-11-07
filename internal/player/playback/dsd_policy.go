@@ -1062,8 +1062,8 @@ func (b *Backend) probeDSD(ctx context.Context, cond ProbeConditions) (pending, 
 	ps := &b.probeState
 	// What its answers are checked against before they change anything
 	// (publishProbe), read before anything else: the probe's generation,
-	// which a choice written for the DAC moves, and the Starts that came to
-	// the device slot.
+	// which a choice written for the DAC moves, and the Starts that took the
+	// device slot.
 	ps.mu.Lock()
 	gen := ps.gen
 	ps.mu.Unlock()
@@ -1126,10 +1126,10 @@ func (b *Backend) probeDSD(ctx context.Context, cond ProbeConditions) (pending, 
 // once it has taken them, and otherwise why they are dropped, nothing of them
 // kept and a probe owed: its context ended (its supervisor has gone); a
 // choice was written for the DAC since it began (gen, ForgetDSDProbe), whose
-// probe is owed; a Start came to the device slot since (starts), which a
-// session may now hold; the binding no longer resolves to the unit it probed
-// (bd: a replug, a reset, the DAC gone, a reading gone stale); or the cache
-// refused the report, its model's epoch moved. Nothing reads the box here: the
+// probe is owed; a Start took the device slot since (starts), which a session
+// holds or held; the binding no longer resolves to the unit it probed (bd: a
+// replug, a reset, the DAC gone, a reading gone stale); or the cache refused
+// the report, its model's epoch moved. Nothing reads the box here: the
 // binding's resolution is the watcher's latest, in memory (DSDPolicy.Bound).
 func (b *Backend) publishProbe(ctx context.Context, gen, starts uint64, bd BoundDAC, unit alsapcm.ProbeUnit, epoch alsapcm.ProbeEpoch, rep alsapcm.ProbeReport) string {
 	p := b.cfg.DSD
@@ -1144,7 +1144,7 @@ func (b *Backend) publishProbe(ctx context.Context, gen, starts uint64, bd Bound
 	case ps.gen != gen:
 		why = "a choice was written for the DAC while it ran"
 	case b.starts.Load() != starts:
-		why = "a session came to the device while it ran"
+		why = "a session took the device while it ran"
 	case !ok || now.Card != bd.Card || now.Enumeration != bd.Enumeration || !binding.SameUnit(now.Identity, bd.Identity) || now.Identity.DevNum != bd.Identity.DevNum:
 		why = "the binding no longer resolves to the unit it probed"
 	case rep.Opened && !p.Probes.Record(epoch, rep):

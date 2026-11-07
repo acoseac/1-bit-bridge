@@ -315,9 +315,11 @@ type Backend struct {
 	took                map[packKey]format.ALSAFormat
 	overlaps            int
 	terminalUnconfirmed bool
-	// starts counts the Starts that came to the device slot (hold): a probe
-	// a Start came to the slot beside keeps nothing of what it asked
-	// (publishProbe, B762).
+	// starts counts the Starts that took the device slot (hold), directly or
+	// once a probe let it go: a probe a Start took the slot from keeps nothing
+	// of what it asked (publishProbe, B762). A Start that gave its wait up, or
+	// that its context or its release ended first, took nothing and is not
+	// counted (round 2).
 	starts atomic.Uint64
 
 	// The supervisor's refresh (RequestRefreshDSD, B762): its goroutine, and a
@@ -325,17 +327,20 @@ type Backend struct {
 	refreshRun    coalesced
 	refreshForced atomic.Bool
 
-	// The goroutines the backend started and that have not returned.
-	gmu  sync.Mutex
-	live int
-	zero chan struct{} // closed while live is 0
-
-	// Those of them that write the player's DSD state, or may start a write
-	// (spawnWrite): a share of the data directory's lock is kept while one
-	// runs (DSDWrites, B762).
-	wmu    sync.Mutex
-	writes int
-	wzero  chan struct{} // closed while writes is 0
+	// The goroutines the backend started and that have not returned; those of
+	// them that write the player's DSD state, or may start a write
+	// (spawnWrite), for which a share of the data directory's lock is kept
+	// (DSDWrites, B762); and whether the writes are closed to any asked from
+	// now on (CloseDSDWrites, B762 round 2). One lock, so a count of both is
+	// one reading (Running).
+	gmu     sync.Mutex
+	live    int
+	zero    chan struct{} // closed while live is 0
+	writes  int
+	wzero   chan struct{} // closed while writes is 0
+	wclosed bool
+	// wrefused says, once, that a write came once the writes were closed.
+	wrefused sync.Once
 }
 
 // New builds a backend.
@@ -466,40 +471,30 @@ func (b *Backend) logPanic(where string, r any) {
 
 // spawnWrite runs f as spawn does, counted among the writes of the player's
 // DSD state too (DSDWrites) until it returns: a write (recordDSD), or the
-// silent probe's goroutine, which may start one (RequestProbeDSD). It
-// reports whether f runs; what names the write.
+// silent probe's goroutine, which may start one (RequestProbeDSD). It reports
+// whether f runs: once the writes are closed (CloseDSDWrites) it runs
+// nothing, and says so once whatever asks, what naming the first.
 func (b *Backend) spawnWrite(what string, f func()) bool {
-	b.wmu.Lock()
-	if b.writes == 0 {
-		b.wzero = make(chan struct{})
+	b.gmu.Lock()
+	if b.wclosed {
+		b.gmu.Unlock()
+		b.wrefused.Do(func() { b.dsdLog().Warn(dsdWriteRefused, "what", what) })
+		return false
 	}
-	b.writes++
-	b.wmu.Unlock()
-	b.spawn(func() {
-		defer func() {
-			b.wmu.Lock()
-			b.writes--
-			if b.writes == 0 {
-				close(b.wzero)
-			}
-			b.wmu.Unlock()
-		}()
-		f()
-	})
+	b.startLocked(true)
+	b.gmu.Unlock()
+	go b.counted(true, f)
 	return true
 }
 
 // Running is how many of the goroutines the backend started have not
-// returned, and how many of those are writes of the player's DSD state or
-// may start one (spawnWrite).
+// returned, and how many of those are writes of the player's DSD state or may
+// start one (spawnWrite), from one reading: serve's player's stop says what
+// each kind left past its bound (B762 round 2).
 func (b *Backend) Running() (goroutines, writes int) {
 	b.gmu.Lock()
-	goroutines = b.live
-	b.gmu.Unlock()
-	b.wmu.Lock()
-	writes = b.writes
-	b.wmu.Unlock()
-	return goroutines, writes
+	defer b.gmu.Unlock()
+	return b.live, b.writes
 }
 
 // spawn runs f on a goroutine the backend counts until it returns. Each f
@@ -507,22 +502,42 @@ func (b *Backend) Running() (goroutines, writes int) {
 // the rest).
 func (b *Backend) spawn(f func()) {
 	b.gmu.Lock()
+	b.startLocked(false)
+	b.gmu.Unlock()
+	go b.counted(false, f)
+}
+
+// startLocked counts a goroutine about to start, among the writes too when it
+// is one. b.gmu is held.
+func (b *Backend) startLocked(write bool) {
 	if b.live == 0 {
 		b.zero = make(chan struct{})
 	}
 	b.live++
-	b.gmu.Unlock()
-	go func() {
-		defer func() {
-			b.gmu.Lock()
-			b.live--
-			if b.live == 0 {
-				close(b.zero)
+	if write {
+		if b.writes == 0 {
+			b.wzero = make(chan struct{})
+		}
+		b.writes++
+	}
+}
+
+// counted runs f, and once it returns counts its goroutine done, among the
+// writes too when it is one, in one step.
+func (b *Backend) counted(write bool, f func()) {
+	defer func() {
+		b.gmu.Lock()
+		defer b.gmu.Unlock()
+		if write {
+			if b.writes--; b.writes == 0 {
+				close(b.wzero)
 			}
-			b.gmu.Unlock()
-		}()
-		f()
+		}
+		if b.live--; b.live == 0 {
+			close(b.zero)
+		}
 	}()
+	f()
 }
 
 // notify tells Config.Notify of a note.
@@ -573,10 +588,11 @@ var errReleased = errors.New("player backend: the session's release came first: 
 // open. ctx's end, and s's release, end the wait too. While it waits the
 // Start counts among the waiters, whom reserveProbe refuses a probe for, so
 // no second probe takes the slot between the first's end and this Start's
-// taking it (B728 B4 round 2). It counts the Start's coming (starts) first:
-// a probe it came beside keeps nothing of what it asked (B762).
+// taking it (B728 B4 round 2). It counts the Start (starts) in the step that
+// takes the slot: a probe whose answers are taken after it keeps nothing of
+// what it asked (B762), and one whose answers were taken before, or beside a
+// Start that gave its wait up, keeps them (round 2).
 func (b *Backend) hold(ctx context.Context, s *session) error {
-	b.starts.Add(1)
 	var expired chan struct{}
 	stop := func() bool { return false }
 	waiting := false
@@ -607,6 +623,7 @@ func (b *Backend) hold(ctx context.Context, s *session) error {
 				return fmt.Errorf("%w: session %d has not released it", ErrOverlap, h.id)
 			}
 			b.holder = s
+			b.starts.Add(1)
 			b.mu.Unlock()
 			return nil
 		}

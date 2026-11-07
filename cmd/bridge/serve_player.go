@@ -769,8 +769,10 @@ func (p *bridgePlayer) send(rp engine.OutputReport) {
 // the engine as it stops (the surface refuses, shuts down within its grace,
 // and closes what is open); then it stops the engine and waits for it, then
 // for the backend's goroutines, each within its bound, and says what it
-// left: an engine whose state write did not return, a device call held in
-// the kernel, a release never confirmed. An engine whose Run a panic ended
+// left: an engine whose state write did not return, a write of the player's
+// DSD state (which keeps the lock's share) and any other goroutine of the
+// backend's (a device call held in the kernel), each that runs, a release
+// never confirmed. An engine whose Run a panic ended
 // never ran its own shutdown, which releases the session it plays, so the
 // backend lets go of every session it holds first, within the backend's
 // bound (releaseAll). Then it waits for the index's build within a bound of
@@ -810,14 +812,19 @@ func (p *bridgePlayer) shutdown() {
 	}
 	err := run.be.Wait(wctx)
 	cancel()
-	switch {
-	case err == nil:
-	case !closed(dsdWrites(run.be)):
-		playerLog.Warn("player: a write of the player's DSD state did not finish within the stop's bound: the player keeps its share of the data directory's lock until it ends",
-			"err", err)
-	default:
-		playerLog.Warn("player: the backend did not finish within its bound: a call to the device is held in the kernel, and the device may still be held until the process exits",
-			"err", err)
+	if err != nil {
+		// Each kind of goroutine still running is said for what it holds, both
+		// where both run (B762 round 2): a write of the player's DSD state the
+		// lock's share, any other the device.
+		writes, others := stillRunning(run.be)
+		if writes {
+			playerLog.Warn("player: a write of the player's DSD state did not finish within the stop's bound: the player keeps its share of the data directory's lock until it ends",
+				"err", err)
+		}
+		if others {
+			playerLog.Warn("player: the backend did not finish within its bound: a call to the device is held in the kernel, and the device may still be held until the process exits",
+				"err", err)
+		}
 	}
 	if u, ok := run.eng.Snapshot().ReleaseUnconfirmed(); ok {
 		playerLog.Warn("player: a session's release was never confirmed: the device may still be held until the process exits",
@@ -846,9 +853,12 @@ func releaseAll(ctx context.Context, be playBackend) {
 }
 
 // settle lets go of the player's share of the data directory's lock and
-// closes settled, once the engine's Run has returned too, and every write of
-// the player's DSD state the backend started (dsdWrites, B762): at once when
-// they have, and when they do for those the stop abandoned. A Run a panic
+// closes settled, once the engine's Run has returned, and then, the writes of
+// the player's DSD state closed to any asked from then on (closeDSDWrites,
+// B762 round 2), once every one the backend started before has returned: at
+// once when they have, and when they do for those the stop abandoned. A
+// write a goroutine the stop abandoned asks for after that is never made, so
+// none lands in the data directory once its lock is let go. A Run a panic
 // ended is abandoned for good: the panic skipped Run's own shutdown, which
 // waits for the engine's reservation writes and its queue writer, so they may
 // still write in the data directory, and the player keeps its share of the
@@ -867,26 +877,40 @@ func (p *bridgePlayer) settle() {
 		finish()
 		return
 	}
-	runDone, writes := p.run.done, dsdWrites(p.run.be)
-	if closed(runDone) && closed(writes) {
+	runDone, be := p.run.done, p.run.be
+	if closed(runDone) && closed(closeDSDWrites(be)) {
 		finish()
 		return
 	}
 	go func() {
 		<-runDone
-		<-writes
+		<-closeDSDWrites(be)
 		finish()
 	}()
 }
 
-// dsdWrites is closed once no write of the player's DSD state the backend
-// started runs (playback.Backend.DSDWrites), as it is asked: at once for a
-// backend that makes none.
-func dsdWrites(be playBackend) <-chan struct{} {
-	if w, ok := be.(interface{ DSDWrites() <-chan struct{} }); ok {
-		return w.DSDWrites()
+// closeDSDWrites closes the writes of the player's DSD state the backend
+// makes to any asked from now on (playback.Backend.CloseDSDWrites) and
+// returns the channel closed once those under way have returned: at once for
+// a backend that makes none.
+func closeDSDWrites(be playBackend) <-chan struct{} {
+	if w, ok := be.(interface{ CloseDSDWrites() <-chan struct{} }); ok {
+		return w.CloseDSDWrites()
 	}
 	return noWrites
+}
+
+// stillRunning says what of the goroutines be started still runs, once its
+// wait has given up: writes of the player's DSD state, or the probe's
+// goroutine, which may start one (playback.Backend.Running), and any other,
+// a session's or a reading's that a call into the kernel holds. A backend
+// that does not count them may run any other.
+func stillRunning(be playBackend) (writes, others bool) {
+	if c, ok := be.(interface{ Running() (int, int) }); ok {
+		n, w := c.Running()
+		return w > 0, n > w
+	}
+	return false, true
 }
 
 // noWrites is the writes of a backend that makes none.

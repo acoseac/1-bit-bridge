@@ -29,8 +29,9 @@ type coalesced struct {
 }
 
 // ask keeps work, and starts the goroutine that runs it through spawn,
-// which counts it, when none runs: so it is counted before ask returns.
-func (c *coalesced) ask(spawn func(func()), recovered func(r any), work func()) {
+// which counts it, when none runs: so it is counted before ask returns. A
+// spawn that runs nothing (the writes closed, spawnWrite) keeps nothing.
+func (c *coalesced) ask(spawn func(func()) bool, recovered func(r any), work func()) {
 	c.mu.Lock()
 	c.next = work
 	if c.running {
@@ -39,7 +40,7 @@ func (c *coalesced) ask(spawn func(func()), recovered func(r any), work func()) 
 	}
 	c.running = true
 	c.mu.Unlock()
-	spawn(func() {
+	started := spawn(func() {
 		for {
 			c.mu.Lock()
 			f := c.next
@@ -60,6 +61,11 @@ func (c *coalesced) ask(spawn func(func()), recovered func(r any), work func()) 
 			}()
 		}
 	})
+	if !started {
+		c.mu.Lock()
+		c.running, c.next = false, nil
+		c.mu.Unlock()
+	}
 }
 
 // RequestProbeDSD asks for the silent probe of the bound DAC (ProbeDSD) and
@@ -71,12 +77,13 @@ func (c *coalesced) ask(spawn func(func()), recovered func(r any), work func()) 
 // slot). The probe's answers are taken only while current (publishProbe), and
 // the policy's reading they call for is asked of the refresh's goroutine. ctx
 // ends the probe as it ends ProbeDSD, its answers dropped; its goroutine
-// counts among the writes of the player's DSD state (DSDWrites).
+// counts among the writes of the player's DSD state (DSDWrites), and none
+// starts once they are closed (CloseDSDWrites).
 func (b *Backend) RequestProbeDSD(ctx context.Context, cond ProbeConditions) {
 	if p := b.cfg.DSD; p == nil || p.Probes == nil {
 		return
 	}
-	spawn := func(f func()) { b.spawnWrite("the silent probe", f) }
+	spawn := func(f func()) bool { return b.spawnWrite("the silent probe", f) }
 	b.probeState.run.ask(spawn, func(r any) { b.logPanic("the silent probe's goroutine", r) }, func() {
 		if ctx.Err() != nil {
 			return
@@ -110,7 +117,11 @@ func (b *Backend) RequestRefreshDSD(ctx context.Context, force bool) {
 	if force {
 		b.refreshForced.Store(true)
 	}
-	b.refreshRun.ask(b.spawn, func(r any) { b.logPanic("the effective DSD policy's refresh", r) }, func() {
+	spawn := func(f func()) bool {
+		b.spawn(f)
+		return true
+	}
+	b.refreshRun.ask(spawn, func(r any) { b.logPanic("the effective DSD policy's refresh", r) }, func() {
 		if ctx.Err() == nil {
 			b.RefreshDSD(b.refreshForced.Swap(false))
 		}
@@ -119,18 +130,31 @@ func (b *Backend) RequestRefreshDSD(ctx context.Context, force bool) {
 
 // DSDWrites is closed once no write of the player's DSD state runs, nor the
 // probe's goroutine, which may start one: at once when none does as it is
-// asked, and a write started after that is not covered. Serve's player asks
-// it once its supervisor, the probe's only asker, has left, and keeps its
-// share of the data directory's lock until it is closed.
+// asked, and a write started after that is not covered, unless the writes are
+// closed (CloseDSDWrites), after which none starts.
 func (b *Backend) DSDWrites() <-chan struct{} {
-	b.wmu.Lock()
-	defer b.wmu.Unlock()
+	b.gmu.Lock()
+	defer b.gmu.Unlock()
 	return b.wzero
 }
 
 // dsdWriteRefused is the line that says a write of the player's DSD state
-// came after the writes were closed.
+// came once the writes were closed.
 const dsdWriteRefused = "player: a write of the player's DSD state came after the player's stop closed them, and is not made"
 
-// CloseDSDWrites returns DSDWrites.
-func (b *Backend) CloseDSDWrites() <-chan struct{} { return b.DSDWrites() }
+// CloseDSDWrites closes the writes of the player's DSD state, for good, to
+// every write asked for from now on, in the step that reads those under way
+// (spawnWrite runs none, and says so once), and returns the channel closed
+// once those under way have returned: at once when none runs, and never
+// replaced, since none starts after it. Serve's player calls it once its
+// engine's Run has returned, and keeps its share of the data directory's lock
+// until the channel closes (B762 round 2, backlog B780): a goroutine of a
+// session the stop abandoned, an open the kernel held past it among them,
+// then writes nothing into a directory another serve may hold by the time it
+// asks.
+func (b *Backend) CloseDSDWrites() <-chan struct{} {
+	b.gmu.Lock()
+	defer b.gmu.Unlock()
+	b.wclosed = true
+	return b.wzero
+}
