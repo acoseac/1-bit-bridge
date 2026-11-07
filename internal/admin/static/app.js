@@ -2474,27 +2474,31 @@ async function transferAll(session) {
   paint();
 
   let next = 0;
+  // The first failure stops this transfer's other workers at their next
+  // chunk, and the transfer answers it only once every worker has settled,
+  // the chunk each had out answered: answered at once, the page offered Try
+  // again while a sibling was still sending, the retry ran beside it, and
+  // that sibling's own failure, which set uploadState.aborted, stopped the
+  // retry (backlog B776's round 2). uploadState.aborted is the operator's
+  // Stop alone.
+  let failure = null;
+  const stopped = () => uploadState.aborted || failure !== null;
   const worker = async () => {
     try {
       await workerLoop();
     } catch (err) {
-      // Promise.all rejects on the first failure and startUpload tears the
-      // progress UI down — but the sibling workers only watch `aborted`, so
-      // without this they keep PUTting chunks after the operator has been
-      // told the upload failed.
-      uploadState.aborted = true;
-      throw err;
+      if (failure === null) failure = err;
     }
   };
   const workerLoop = async () => {
-    while (!uploadState.aborted) {
+    while (!stopped()) {
       const i = next++;
       if (i >= queue.length) return;
       const meta = queue[i];
       const file = byPath.get(meta.path);
       if (!file) continue;
       let offset = meta.offset;
-      while (offset < meta.size && !uploadState.aborted) {
+      while (offset < meta.size && !stopped()) {
         const end = Math.min(offset + session.chunkBytes, meta.size);
         // Read the chunk once, into memory: the digest needs the bytes, and
         // handing the same buffer to fetch avoids reading the slice twice.
@@ -2510,6 +2514,7 @@ async function transferAll(session) {
   await Promise.all(
     Array.from({ length: Math.min(UPLOAD_PARALLEL_FILES, queue.length) }, worker),
   );
+  if (failure !== null) throw failure;
 }
 
 // chunkDigestHeaders builds the RFC 9530 Content-Digest for one chunk.
@@ -2584,14 +2589,27 @@ async function putUploadChunk(sid, fid, offset, bytes) {
     },
     body: bytes,
   });
-  if (r.status === 409) {
-    // The server holds a different offset. It tells us which, so resume
-    // rather than guessing.
-    const body = await r.json().catch(() => ({}));
-    if (typeof body.offset === "number") return { offset: body.offset };
+  if (r.ok) return r.json();
+  // A refusal's body is read once and answers both questions: a 409 that
+  // names the server's offset is a resume (the server holds a different
+  // offset, so resume rather than guess), and anything else is the refusal,
+  // its code kept (root_not_mounted, digest_mismatch), which a second read of
+  // a body already read lost to a bare status line.
+  let body;
+  try {
+    body = await r.json();
+  } catch {
+    body = undefined;
   }
-  if (!r.ok) throw await errorFromResponse(r);
-  return r.json();
+  if (r.status === 409 && typeof body?.offset === "number") return { offset: body.offset };
+  throw await errorFromResponse({
+    status: r.status,
+    statusText: r.statusText,
+    json: async () => {
+      if (body === undefined) throw new Error("not JSON");
+      return body;
+    },
+  });
 }
 
 function reportCommit(res) {
