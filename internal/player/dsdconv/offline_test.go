@@ -53,19 +53,25 @@ func TestTheOfflineChainAgrees(t *testing.T) {
 		sx := exec.Command(sox, "-t", "raw", "-e", "float", "-b", "32", "-L", "-r", "352800", "-c", "2", "-",
 			"-t", "raw", "-e", "float", "-b", "64", "-L", "-c", "1", out, "remix", "1",
 			"rate", "-v", "-L", "176400", "sinc", "-a", "110", "-t", "10000", "-35000")
-		pipe, err := ff.StdoutPipe()
+		// The parent closes both ends once the children hold them, so a sox
+		// that exits early breaks ffmpeg's pipe rather than blocking it until
+		// the test's timeout.
+		rd, wr, err := os.Pipe()
 		if err != nil {
 			t.Fatal(err)
 		}
-		sx.Stdin = pipe
-		if err := sx.Start(); err != nil {
-			t.Fatal(err)
+		var ffErr, sxErr bytes.Buffer
+		ff.Stdout, ff.Stderr = wr, &ffErr
+		sx.Stdin, sx.Stderr = rd, &sxErr
+		startFF, startSX := ff.Start(), sx.Start()
+		rd.Close()
+		wr.Close()
+		if startFF != nil || startSX != nil {
+			t.Fatalf("ffmpeg: %v; sox: %v", startFF, startSX)
 		}
-		if err := ff.Run(); err != nil {
-			t.Fatalf("ffmpeg: %v", err)
-		}
-		if err := sx.Wait(); err != nil {
-			t.Fatalf("sox: %v", err)
+		errFF, errSX := ff.Wait(), sx.Wait()
+		if errFF != nil || errSX != nil {
+			t.Fatalf("ffmpeg: %v: %s; sox: %v: %s", errFF, ffErr.Bytes(), errSX, sxErr.Bytes())
 		}
 		raw, err := os.ReadFile(out)
 		if err != nil || len(raw) == 0 || len(raw)%8 != 0 {
