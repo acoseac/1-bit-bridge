@@ -1016,6 +1016,10 @@ const (
 	watchOutOfFiles
 )
 
+// msgWatchLimitReached is the line an Add that meets inotify's watch limit is
+// said with, once a walk: the walk stops there.
+const msgWatchLimitReached = "watch limit reached — periodic scan covers the gap; raise fs.inotify.max_user_watches to fix"
+
 // addWatch registers one directory's watch, and says how it went, with the
 // error that answered a failure.
 func (wt *Watcher) addWatch(path string) (watchAddResult, error) {
@@ -1035,7 +1039,7 @@ func (wt *Watcher) addWatch(path string) (watchAddResult, error) {
 		// the periodic scan nothing to open files with either.
 		return watchOutOfFiles, addErr
 	case isWatchLimitError(addErr):
-		watcherLogger.Error("watch limit reached — periodic scan covers the gap; raise fs.inotify.max_user_watches to fix",
+		watcherLogger.Error(msgWatchLimitReached,
 			"path", path, "err", addErr,
 			"hint", "echo fs.inotify.max_user_watches=524288 | sudo tee -a /etc/sysctl.d/99-bridge.conf && sudo sysctl -p")
 		return watchLimitReached, addErr

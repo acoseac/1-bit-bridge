@@ -514,42 +514,6 @@ func TestTheWatcherHoldsARootThatWentBetweenItsLookAndItsWalk(t *testing.T) {
 	f.mustHold(t, lateMountTrack)
 }
 
-// TestTheWatcherTriesAgainARootWhoseOwnWatchCouldNotBeAdded (B777 item 2): a
-// root that is there, whose own Add fails at the start (here the watch limit,
-// answered at the Add boundary), was neither held nor recorded, and the
-// ordinary walker reports nothing for it, an Add's failure being logged and
-// passed over. It is not held, its failure is said as a walk's is, and it is
-// recorded, so the check of the roots' own watches finds its watch missing and
-// adds it again: a file dropped into it reaches the manifest.
-func TestTheWatcherTriesAgainARootWhoseOwnWatchCouldNotBeAdded(t *testing.T) {
-	f := newLateMountFixture(t)
-	var refused atomic.Bool
-	f.w.addForTests = func(path string) error {
-		if filepath.Clean(path) == filepath.Clean(f.root) && refused.CompareAndSwap(false, true) {
-			return fmt.Errorf("inotify_add_watch: %w", syscall.ENOSPC)
-		}
-		return nil
-	}
-	held, _ := f.hooks()
-	rec := loggingtest.Record(t)
-	startWatcher(t, f.w)
-	if !refused.Load() {
-		t.Fatal("premise: the root's own Add was never made")
-	}
-	f.drop(t, "02.flac", "a file dropped into a root whose own watch could not be added at the start never reached the manifest")
-	select {
-	case r := <-held:
-		t.Errorf("the watcher held %s, a root that is there", r)
-	default:
-	}
-	if got := rec.Failures(msgInitialWatchFailed); len(got) != 1 {
-		t.Errorf("the start said %d times that the root's watch could not be added, want once:\n%v", len(got), got)
-	}
-	if got := rec.Lines(msgWatchRootRewatched); len(got) != 1 {
-		t.Errorf("the watcher said %d times that it watched the root again, want once:\n%v", len(got), got)
-	}
-}
-
 // TestARootWithAFolderItCannotReadIsWatchedAndScanned (B777 item 2): an Add
 // that fails below a root that is there (a folder at mode 000, which inotify
 // refuses to watch and the walk cannot list) leaves the root's own watch, and

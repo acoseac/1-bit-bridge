@@ -94,7 +94,12 @@ const (
 	// msgWatchRootIdentityTaken: a root whose folder could not be read as its
 	// watch was added, read since (B777's round 2).
 	msgWatchRootIdentityTaken = "library root's folder reads again; the watcher watches it again where it is now, to tell when another folder takes its place"
-	heldRootHint              = hintVolumeMounted + ": the scan keeps the tracks indexed under it, and the watcher looks at it again until it reads as it did; " +
+	// msgRootWatchNotAdded and msgRootWatchAdded: a root that is there whose own
+	// watch fsnotify would not add (the watch limit spent, a permission), and
+	// its watch added again (B777's round 2).
+	msgRootWatchNotAdded = "library root's own watch could not be added; the watcher tries again, less often each time, and the periodic scan still covers it"
+	msgRootWatchAdded    = "library root's own watch could be added again; the watcher watches it"
+	heldRootHint         = hintVolumeMounted + ": the scan keeps the tracks indexed under it, and the watcher looks at it again until it reads as it did; " +
 		hintContainerRestart
 )
 
