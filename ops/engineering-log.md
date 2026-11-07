@@ -80570,3 +80570,149 @@ C742-1 is the shared classifier's control: one mutation of it reaches the
 watcher's look, the scan's guard and the subtree audit at once. C742-2 shows
 the hold and the sparing pinned by the table and the parent-scan test, the
 words staying.
+
+## 2026-11-07 — B744: configured hosts in their IDNA form, a library name without its controls, and the mDNS responder's name
+
+Backlog B744, the third item on `fix/b74x-small-followups`, worker b74x, as
+for B740: four follow-ups to B739, each with a red commit and its fix. The
+rules go into `.claude/rules/auth-tls.md` and `wire.md` (part 1),
+`config-lifecycle.md` (part 2) and `cli-serve.md` (parts 3 and 4) through
+`rules-b74x.patch`; the long forms of the last two files' lines are in
+`ops/History-rules-config-lifecycle.md` and `ops/History-rules-cli-serve.md`
+under B744.
+
+**Part 1, a configured host that is not ASCII** (red 76dd31b9, fix
+3059c845). B739 left a configured name as written: a `customEndpoints`
+entry or `autocert.domain` whose host is not ASCII loaded, reached the
+certificate's want-set, and every mint refused it, since x509 takes an
+ASCII DNS name alone. At the red, `bridge init --public --domain
+münchen.de` exited 1 with "TLS cert: generate TLS material: create cert:
+x509: "münchen.de" cannot be encoded as an IA5String", after making its
+config dir, and a hand edit of `customEndpoints` made `bridge cert rotate`
+refuse (B739's own test of it). Red there:
+`TestALoadedCustomEndpointThatIsNotASCIITakesItsIDNAForm` (the file and
+`BRIDGE_CUSTOM_ENDPOINTS`: kept as written, nothing said),
+`TestALoadedAutocertDomainThatIsNotASCIITakesItsIDNAForm`,
+`TestATypedCustomEndpointIsConvertedOrRefused` (a host with no form not
+refused), `TestNormalizeServesAutocertDomainAsItsHost`'s internationalized
+row, `TestTheSettingsPatchConvertsACustomEndpointHostThatIsNotASCII` (200
+for a host with no form, want 400), `TestInitConvertsADomainThatIsNotASCII`
+(exit 1 for each spelling) and
+`TestAConfiguredNameThatIsNotASCIIIsCertifiedInItsIDNAForm`. The fix:
+`hostname.Configured` keeps an ASCII host byte for byte (its case, an
+underscore) and gives one that is not ASCII the conversion `hostname.ASCII`
+gives the host's own name, idna.Lookup's ToASCII (case mapped: `münchen.de`
+and `MÜNCHEN.DE` are both `xn--mnchen-3ya.de`) held to 63 bytes a label and
+253 a name. Where it loads, by the field's existing policy:
+`ValidateCustomEndpoints` publishes an entry's host in that form, its port
+and place kept, said once at Info, and drops one with no form with the
+prune's warning; Normalize serves the domain in that form, or as
+`InvalidAutocertDomain` with a warning where it has none. Both are
+infallible after Normalize's one fallible step, so its all-or-nothing
+contract holds and no config refuses to start over a host. Where it is
+typed: the settings save takes an entry with a form (Normalize stores the
+form) and refuses one with none (`CheckCustomEndpoints`, 400 `validate`,
+the file untouched), and `bridge init --domain` writes the form, says so,
+and refuses a domain with none, exit 2, before anything is written
+(`a_ü.example`, `-ü.example` and a label of 58 `ж`, whose form is 64 bytes,
+have none). The mint
+converts no configured name: `TestAConfiguredNameTheCertificateCannotCarryStillRefuses`
+and its twin now hand the mint a config built in memory, never loaded, and
+still pass on main's code and after. `golang.org/x/net` is already a direct
+dependency (internal/tls and internal/hostname import idna): go.mod and the
+licence census are unchanged.
+
+**Part 2, a library name's control characters** (red 6391c6d4, fix
+cd8394aa, the rows past the cap 86581cdd). A library name kept the runes
+U+0000 to U+001F, U+007F and U+0080 to U+009F wherever it was set but the
+host's name (`firstInstallName`, B739): init's `--name` and its prompt, the
+console's save, and what loads (bridge.yaml, `BRIDGE_LIBRARY_NAME`, a prior
+install's name, which the prompt offers and `--yes` keeps); and
+`sanitizeInstance` kept the C1 ones in the Bonjour instance. Red at
+6391c6d4: `TestInitTypedNameLosesItsControlCharacters`,
+`TestInitPromptedNameLosesItsControlCharacters`,
+`TestInitOffersAnInstallsNameWithoutItsControlCharacters`,
+`TestTheSettingsSaveStripsControlCharactersFromTheName`,
+`TestALoadedLibraryNameLosesItsControlCharacters`,
+`TestALibraryNameInTheFileLosesItsControlCharacters` and
+`TestSanitizeInstanceStripsEveryControlRune`; green there, as they must
+stay, `--name`'s refusal of bytes that are not UTF-8 beside a control, and
+the rows of runes whose second byte is a C1 number (`Ā` C4 80, `š` C5 A1).
+The fix: `config.WithoutControlCharacters`, the one strip, of runes after
+decoding; `CleanTypedLibraryName` for every typed entry (trim, the UTF-8
+refusal first, strip, trim, then the entry's blank and length policy) and
+`RepairLibraryName` for what loads (U+FFFD, trim, strip, trim, cut, with
+the repair's WARN); `firstInstallName` and `sanitizeInstance` through the
+same function, init.go's copy gone. Each typed test reloads the file it
+saved and compares the live name with the reloaded one.
+
+Negative controls (`.tmp/_b74x/ctl2.py`, as `ctl.py` for B740 with the
+output read as bytes), predicted by name in
+`.tmp/_b74x/controls-b744-2.predictions.txt` before the first run, at
+cd8394aa, and in `controls-b744-2b.predictions.txt` before the second, at
+86581cdd; the baseline green and `git status` clean after each. TI, TP and
+TO are the three init tests above in order, TR
+`TestInitRefusesANameAPairingCodeCannotCarry`, TA
+`TestInitAsksAgainForANameAPairingCodeCannotCarry`, TK
+`TestInitKeepsTheNameAnInstallIsServedUnder`, TD
+`TestTheDefaultLibraryNameIsTheHostsNameAsItReads` (cmd/bridge); CL and CF
+the two config tests; AS the admin test; MS
+`TestSanitizeInstanceStripsEveryControlRune` and MD
+`TestSanitizeInstanceStripsDotsAndControlChars` (mdns).
+
+| Mutation | Red | Green |
+|---|---|---|
+| C744-2a the strip before the UTF-8 refusal | TI ("not UTF-8, with a control"), TP (asked once, `Caf` and U+FFFD saved), TR (both "not UTF-8" rows) | TO, TA, TK, TD, CL, CF, AS, MS, MD |
+| C744-2b the strip by bytes | TI, TP, TO, TD (`Жук`, `DESKTOP-日本`, the test Mac's bytes mangled), CL, CF, AS, MS | TR, TA, TK, MD |
+| C744-2c `sanitizeInstance`'s own strip back (C0 and DEL) | MS | the rest |
+| C744-2d `RepairLibraryName` without the strip | TO, CL, CF | the rest |
+| C744-2e `CleanTypedLibraryName` without the strip | TI, TP, AS (each "nothing but controls" row alone) | the rest |
+| C744-2e again, at 86581cdd | TI and AS ("nothing but controls", "controls past the cap"), TP ("nothing but controls") | the rest |
+| C744-2de both strips gone | TI, TP, TO, CL, CF, AS (every row with a control) | TR, TA, TK, TD, MS, MD |
+
+Every test went red or green as predicted; in the first run the rows of
+two mutations did not. Under C744-2b the rows with controls between spaces at a name's ends
+stayed green: the trim before the strip takes U+0085 for white space, so
+the byte strip never met it. Under C744-2e only the rows of a name that is
+nothing but controls went red: the save runs Normalize, whose repair
+strips the rest, so the stored bytes are guarded twice. The rows past the
+cap (86581cdd: 260 runes typed, 250 once the controls are gone, stored)
+are what the typed strip alone decides with that one; the second run
+predicted them, and C744-2de, both layers gone, every row with a control.
+
+**Part 3, a failed responder's line** (red 2e955761, fix 4ebdbe22). With
+`mdns.enabled` on, /v1/health, the pairing QR and the doctor list the
+`.local` endpoint of a host whose name is converted (B739's second round)
+from the setting, whether or not the responder started, and only that
+responder answers it; a failure said only "mDNS advertise failed
+(non-fatal)". `TestAFailedResponderSaysTheConvertedLocalNameWillNotResolve`
+forces the failure through `mdnsLifecycle.start` (a per-instance seam, nil
+`bridgemdns.Advertise`): red for `Жук` at 2e955761, green for an ASCII name
+and a name with no valid form, which get the failure's line alone, then and
+after. The fix says, beside it, that `https://xn--f1ai0a.local:<port>` will
+not resolve while mDNS is down, from `advertise.OwnResponderEndpoint`
+(`Endpoints`' own helper, `localEndpoint`, through the same host-name
+probe); no state is kept and what is published is unchanged.
+
+**Part 4, the started responder asked** (red b5b147cc, fix 415a141d).
+`TestServeOnAHostWhoseNameIsNotASCII`'s mDNS-on row pinned the responder
+to loopback and asked it nothing. It now asks the started responder, as a
+LAN client asks, from a querier bound to the interface the responder is
+pinned to, multicast loopback on (`mdns_query_test.go`); the interface is
+chosen, and the skip decided and recorded as a skipped subtest saying why,
+before the responder starts, and a question unanswered for 10 s after it
+is a failure. Red at b5b147cc on enp4s0: "the started responder left the A
+question for xn--f1ai0a.local. unanswered on enp4s0 for 10 s". The
+transport answered: the same row asking for `legion0.local`, the name the
+system reports, passed (`.tmp/_b74x/b744_4_redcheck.py`, the test's bytes
+put back from memory), so the responder published `os.Hostname`'s name,
+not the probe's. The fix: `mdns.Config.HostnameSource`, read at each
+rebuild (nil is `os.Hostname`), which the lifecycle sets to
+`advertise.ReportedHostname`, the probe the endpoints and the certificate
+read. In production both read `os.Hostname`, so nothing changes there; the
+row passes on enp4s0 in under half a second.
+
+**Process.** Every multi-package run went through the build lock but one: a
+two-package `go test ./internal/config/ ./internal/hostname/` at part 1's
+green, 9 s, outside it (`.tmp/_b74x/b744-1-green-config.log`). The
+branch's gates are in B745's record.

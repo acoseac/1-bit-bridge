@@ -3570,3 +3570,63 @@ no usermod, and the numeric manager unit. `TestDACAdviceWithoutSystemd`
 checks joining, stale process groups, and a CLI login whose groups are newer
 than the running bridge's, preserving FAIL/WARN and asking for a new login
 without a systemd command or manager claim. These cases bind no sockets.
+
+## B744 — serve's mDNS responder and the host's converted name (2026-11-07)
+
+- **Serve's mDNS lifecycle says, when its responder fails to start, that the `.local` endpoint only the bridge's own responder answers will not resolve while mDNS is down (`advertise.OwnResponderEndpoint`: the host's name in its IDNA ASCII form, which /v1/health, the pairing QR and the doctor keep listing from the setting), and hands the responder the host-name probe the endpoints and the certificate read (`advertise.ReportedHostname`, `mdns.Config.HostnameSource`)** (2026-11-07, backlog B744). **Don't keep a state of the responder's failure, change what is published over it, or let the responder read the host's name but through that probe.**
+
+*The failure's line.* Since B739's second round a host name that is not
+ASCII is advertised in its IDNA ASCII form (`xn--f1ai0a.local` for `Жук`),
+which no responder on the LAN publishes but the bridge's own, so its
+`.local` endpoint is listed only while `mdns.enabled` is on
+(`advertise.Params.MDNS`). That is the setting, not the responder: one that
+fails to start leaves the endpoint listed in /v1/health, the pairing QR and
+the doctor's `pairing-url`, and nothing answers it. The owner asked for a
+diagnostic and no new state: `mdnsLifecycle.Set` prints, after "mDNS
+advertise failed (non-fatal)", that the advertised
+`https://<name>.local:<port>` will not resolve while mDNS is down, that only
+the bridge's own responder answers it, and that /v1/health and the pairing
+QR keep listing it while `mdns.enabled` is on. `advertise.OwnResponderEndpoint`
+is that endpoint, or "" where none is published that the bridge alone
+answers (an ASCII name, which the system's responder answers; no name; a
+container's generated one): one helper with `Endpoints`' own
+(`localEndpoint`), read through the same host-name probe at the call,
+keeping nothing. What is published is unchanged. `mdnsLifecycle.start` is a
+per-instance seam (nil is `bridgemdns.Advertise`), through which
+`TestAFailedResponderSaysTheConvertedLocalNameWillNotResolve` forces the
+failure: the line for `Жук`, and the failure's line alone for an ASCII name
+and for a name with no valid form.
+
+*The responder's name.* The responder took its SRV target and `host=` from
+`os.Hostname` (`mdns.Config.advertisedHost`), while /v1/health's `.local`
+endpoint and the certificate read the name through `advertise`'s host-name
+probe, which `SetHostProbeForTest` moves. In production both are
+`os.Hostname`; under a test's probe they differed, and no test asked the
+responder: `TestServeOnAHostWhoseNameIsNotASCII`'s mDNS-on row pinned it to
+loopback and asked nothing. Asked (below), the started responder left
+`xn--f1ai0a.local` unanswered and answered the name the system reports
+(checked at the red commit). `mdns.Config.HostnameSource`, read at each
+rebuild where `Hostname` is empty (nil is `os.Hostname`), is the probe the
+lifecycle hands it (`advertise.ReportedHostname`), so the responder
+publishes, and answers for, the name the bridge advertises. It is read only
+in a rebuild, under the lock Close takes, so nothing reads the probe once
+serve stops.
+
+*The question.* `mdns_query_test.go`'s querier asks the started responder
+as a LAN client asks: an A question for the `.local` name /v1/health lists,
+from a UDP socket bound to one selected interface's IPv4 address, sent to
+224.0.0.251:5353 out of that interface (`SetMulticastInterface`) with
+multicast loopback on, so the responder, pinned to the same interface
+(`pick`), hears it on this host. hashicorp/mdns answers every question by
+unicast to the address that asked (`Server.sendResponse`), which the socket
+reads, so neither side depends on the host's default multicast route (a
+Docker bridge, a VPN). The interface is chosen before the responder starts
+(`newMDNSQuerier`): up, able to multicast, no loopback or point-to-point
+one, holding an IPv4 address, on which a socket joined to the group hears a
+question the querier sends there (a probe with a nonce, within 2 s). Where
+none qualifies, and on Windows as internal/mdns's live tests, the row pins
+loopback as before and records a skipped subtest, "the responder answers
+the name it advertises", saying why. Once the responder has started, a
+question unanswered for 10 s (asked again every half second) is a failure,
+never a skip, and so is an answer without the interface's address. On
+legion0 it is pinned to enp4s0 and answered at once.

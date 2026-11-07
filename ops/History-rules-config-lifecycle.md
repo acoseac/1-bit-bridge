@@ -2467,6 +2467,63 @@ fix. `TestTheUpdatesPanelShowsRollBackOrWhyNot` runs the shipped
 each observed exactly as predicted (the log's entry has the table). The
 record is in `ops/engineering-log.md`, 2026-11-04, B707.
 
+## A library name loses its control characters wherever it is set (backlog B744, 2026-11-07)
+
+- **…and a library name loses its control characters, the runes U+0000 to U+001F, U+007F and U+0080 to U+009F read after decoding, wherever it is set: what is typed (`config.CleanTypedLibraryName`: init's `--name` and its prompt, the console's save) after the refusal of bytes that are not UTF-8 and before its length is counted, and what loads (`RepairLibraryName`: the file, `BRIDGE_LIBRARY_NAME`, a prior install's name, with the repair's WARN), so a name served live is the name served after a restart; the Bonjour instance strips by the same definition (`config.WithoutControlCharacters`)** (2026-11-07, backlog B744). **Don't strip bytes rather than runes, strip before the UTF-8 refusal, count a typed name's length before its controls are gone, or give an entry a strip of its own.**
+
+*The gap.* A library name reaches every pairing code's `name=`,
+`/v1/health`, the console and the Bonjour instance. `firstInstallName`
+already removed the control characters of the host's name (B739: a test
+Mac's kern.hostname holds U+0091), and nothing else did: init's `--name`
+and its prompt, the console's settings save, and what loads (bridge.yaml,
+`BRIDGE_LIBRARY_NAME`, and a prior install's name, which init's prompt
+offers and `--yes` keeps) kept them, and `sanitizeInstance` stripped C0 and
+DEL from the Bonjour instance and kept the C1 controls.
+
+*One definition.* `config.WithoutControlCharacters` strips the runes U+0000
+to U+001F, U+007F and U+0080 to U+009F, read as runes after decoding
+(`strings.Map`), never as bytes: `Ā` is the bytes C4 80 and `š` C5 A1,
+whose second bytes are the numbers of C1 controls and are none (control
+C744-2b strips by bytes and mangles them, and the host names `Жук` and
+`DESKTOP-日本` with them). It is the set `unicode.IsControl` names, so
+`firstInstallName`, whose copy in init.go used that, is unchanged. Every
+entry strips by it: a typed name through `CleanTypedLibraryName`, what loads
+through `RepairLibraryName`, the host's name through `firstInstallName`, and
+the Bonjour instance through `sanitizeInstance`.
+
+*The order, typed.* `CleanTypedLibraryName` trims (`TrimLibraryName`),
+refuses a name that is not UTF-8 first, strips, trims again, and only then
+applies the entry's own policies. The refusal comes first because the
+strip maps runes and takes such bytes as U+FFFD: stripped first, a `Café`
+typed in a Latin-1 terminal next to a control was stored as `Caf` and
+U+FFFD (control C744-2a). An empty answer is a name that was blank once its
+controls were gone, which init takes for no name and the settings save
+refuses as a blank one. The length is counted on the stripped name, so 260
+runes typed, 250 once the controls are gone, are stored. What it returns,
+`RepairLibraryName` returns unchanged, so the live name is the reloaded one
+(each typed test reloads the file and compares).
+
+*The order, loaded.* `RepairLibraryName` replaces the bytes that are not
+UTF-8 with U+FFFD, trims, strips, trims again, and cuts to the cap.
+Normalize's WARN says the name is served repaired, with a `controls`
+attribute beside `validUTF8` and `runes`, and a load never refuses over a
+display name (#1042's rule). The settings save also runs Normalize, so its
+stored bytes are guarded twice; only a name that is nothing but controls,
+and one past the cap until its controls go, are decided by the typed strip
+alone (control C744-2e). The JSON the console sends carries no byte that is
+not UTF-8, the decoder having replaced them, so its refusal is the length's
+alone.
+
+`TestInitTypedNameLosesItsControlCharacters`,
+`TestInitPromptedNameLosesItsControlCharacters`,
+`TestInitOffersAnInstallsNameWithoutItsControlCharacters` (cmd/bridge),
+`TestTheSettingsSaveStripsControlCharactersFromTheName` (admin),
+`TestALoadedLibraryNameLosesItsControlCharacters`,
+`TestALibraryNameInTheFileLosesItsControlCharacters` (config) and
+`TestSanitizeInstanceStripsEveryControlRune` (mdns). The record, with its
+negative controls (six mutations in seven runs), is in
+`ops/engineering-log.md`, 2026-11-07, B744.
+
 ## Config, settings and process lifecycle
 
 - **An install of a target already staged on disk is REFUSED, and the refusal
