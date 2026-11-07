@@ -83,6 +83,12 @@ const (
 	// outputGone: an I/O error on the volume, or a mount gone (a FUSE
 	// daemon that died, a stale NFS handle).
 	outputGone
+	// outputAway: the variants directory reads as a volume not mounted
+	// while the catalog records renditions in it, the job's OutputGuard's
+	// refusal (output_guard.go), asked before anything is written. A fact
+	// about the volume, like the kinds above: a job that writes there again
+	// proves it back.
+	outputAway
 )
 
 // outputFault is a failure of the output side: where the job was writing,

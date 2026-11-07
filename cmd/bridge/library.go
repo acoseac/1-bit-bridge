@@ -96,6 +96,9 @@ func libraryAddCmd(ctx context.Context, args []string, env libraryEnv, stdout, s
 		fmt.Fprintf(stderr, "library add: config load: %v\n", err)
 		return 2
 	}
+	if refuseDataDirAway("library add", resolvedCfgPath, cfg.DataDir, stderr) {
+		return 1
+	}
 	if running, code := tryLibraryViaAdmin(ctx, cfg, http.MethodPost, target, stdout, stderr); running {
 		return code
 	}
@@ -183,6 +186,9 @@ func libraryRemoveCmd(ctx context.Context, args []string, env libraryEnv, stdout
 	if err != nil {
 		fmt.Fprintf(stderr, "library remove: config load: %v\n", err)
 		return 2
+	}
+	if refuseDataDirAway("library remove", resolvedCfgPath, cfg.DataDir, stderr) {
+		return 1
 	}
 	if running, code := tryLibraryViaAdmin(ctx, cfg, http.MethodDelete, target, stdout, stderr); running {
 		return code

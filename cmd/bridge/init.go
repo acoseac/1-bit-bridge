@@ -573,6 +573,16 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		}
 	}
 	keep := exists && !replace
+	// A rewrite over a data dir the record beside the config names, which
+	// holds neither its database nor its lock file, makes and writes nothing
+	// (backlog B727): its volume is not mounted, and the rewrite would make
+	// the data dir and mint a TLS pair under the bare mount point. Asked
+	// before the preflight, which grades a certificate it cannot see there. A
+	// first install has no config whose record it would be, and a run that
+	// keeps the config writes nothing there.
+	if replace && refuseDataDirAway("init", cfgPath, dataDir, stderr) {
+		return 1
+	}
 
 	// A posture flag the run would not write (warnIgnoredPostureFlags). A
 	// rewrite of a public install given one is refused here, before anything

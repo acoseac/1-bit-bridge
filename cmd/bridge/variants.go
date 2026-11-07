@@ -119,10 +119,13 @@ func variantsMoveCmd(ctx context.Context, args []string, stdout, stderr io.Write
 		return 2
 	}
 
-	cfg, _, err := loadCLIConfig(*configPath)
+	cfg, cfgPath, err := loadCLIConfig(*configPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "config load: %v\n", err)
 		return 2
+	}
+	if refuseDataDirAway("variants move", cfgPath, cfg.DataDir, stderr) {
+		return 1
 	}
 	if conflictingRoot := fsutil.IsUnderAny(*to, cfg.LibraryRoots); conflictingRoot != "" {
 		fmt.Fprintf(stderr, "--to must not be under library root %q\n", conflictingRoot)

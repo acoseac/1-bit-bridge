@@ -31,13 +31,13 @@ func playerResetCmd(ctx context.Context, args []string, stdin io.Reader, stdout,
 		fmt.Fprintln(stderr, "reset-player: unexpected arguments")
 		return 2
 	}
-	cfg, _, err := loadCLIConfig(*configPath)
+	cfg, cfgPath, err := loadCLIConfig(*configPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "config load failed: %v\n", err)
 		return 2
 	}
 	const action = "reset-player"
-	release, fallback, refused := holdDataDirForMutation(cfg.DataDir, action, stderr)
+	release, fallback, refused := holdDataDirForMutation(cfgPath, cfg.DataDir, action, stderr)
 	defer release()
 	if refused {
 		return 1

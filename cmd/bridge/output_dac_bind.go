@@ -629,7 +629,7 @@ func runDACBind(ctx context.Context, args []string, env outputBindEnv, stdout, s
 		env.beforeLock()
 	}
 	dataDir := cfg.DataDir
-	release, fallback, refused := holdDataDirForMutation(dataDir, cmd, stderr)
+	release, fallback, refused := holdDataDirForMutation(cfgPath, dataDir, cmd, stderr)
 	defer release()
 	if refused {
 		return 1

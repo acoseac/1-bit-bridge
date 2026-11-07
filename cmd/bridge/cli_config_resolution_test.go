@@ -201,7 +201,7 @@ func TestTranscodeCmdResolvesPlatformConfigWithoutExplicitFlag(t *testing.T) {
 	writeInstallAt(t, platform, "some-track.flac")
 
 	var se bytes.Buffer
-	_, code := bootstrapTranscodeCmd(context.Background(), &se, "", "", false)
+	_, code := bootstrapTranscodeCmd(context.Background(), &se, "upscale", "", "", false)
 	if code == 0 {
 		t.Fatalf("expected a refusal (the fixture leaves upscale.enabled false), got 0")
 	}

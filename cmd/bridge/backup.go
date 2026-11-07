@@ -48,6 +48,9 @@ func backupCmd(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "config load failed: %v\n", err)
 		return 2
 	}
+	if refuseDataDirAway("backup", resolvedCfgPath, cfg.DataDir, stderr) {
+		return 1
+	}
 
 	src := buildBackupSources(cfg, resolvedCfgPath)
 	// CLI runs to completion in a short-lived process; a non-context
@@ -150,7 +153,7 @@ func restoreCmd(ctx context.Context, args []string, stdin io.Reader, stdout, std
 	// port is fixed, including while this command holds the lock: a serve
 	// that continued after a lock error other than contention holds none.
 	// An ephemeral admin port cannot be probed; the lock alone decides.
-	releaseLock, fallback, refused := holdDataDirForMutation(cfg.DataDir, "restore", stderr)
+	releaseLock, fallback, refused := holdDataDirForMutation(resolvedCfgPath, cfg.DataDir, "restore", stderr)
 	defer releaseLock()
 	if refused {
 		return 1

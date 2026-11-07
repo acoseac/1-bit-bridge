@@ -87,9 +87,12 @@ func adminResetPasswordCmd(args []string, stdin io.Reader, stdout, stderr io.Wri
 		return 2
 	}
 
-	cfg, _, err := loadConfigForAdminCmd(*configPath)
+	cfg, cfgPath, err := loadConfigForAdminCmd(*configPath)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	if refuseDataDirAway("admin reset-password", cfgPath, cfg.DataDir, stderr) {
 		return 1
 	}
 
@@ -166,9 +169,12 @@ func adminSignOutEverywhereCmd(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "all options must be passed as flags")
 		return 2
 	}
-	cfg, _, err := loadCLIConfig(*configPath)
+	cfg, cfgPath, err := loadCLIConfig(*configPath)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	if refuseDataDirAway("admin sign-out-everywhere", cfgPath, cfg.DataDir, stderr) {
 		return 1
 	}
 	storePath := filepath.Join(cfg.DataDir, adminauth.FileName)
@@ -264,9 +270,12 @@ func adminLoginLink(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "all options must be passed as flags")
 		return 2
 	}
-	cfg, _, err := loadCLIConfig(*configPath)
+	cfg, cfgPath, err := loadCLIConfig(*configPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "%v\n", err)
+		return 1
+	}
+	if refuseDataDirAway("admin login-link", cfgPath, cfg.DataDir, stderr) {
 		return 1
 	}
 	store, err := adminauth.OpenStore(filepath.Join(cfg.DataDir, adminauth.FileName))
