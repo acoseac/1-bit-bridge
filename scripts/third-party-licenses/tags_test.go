@@ -2,6 +2,10 @@ package main
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
+	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -279,6 +283,100 @@ func TestCensusExcludedTreesAndRecords(t *testing.T) {
 			}
 		})
 	}
+}
+
+// makefileTestTmpDir is the directory below the root that make test and make
+// test-fast give go test as TMPDIR when the caller sets none, read from the
+// Makefile's TMPDIR lines ($(CURDIR)/<dir>), never from the environment: a
+// bare go test has a TMPDIR of its own, elsewhere.
+func makefileTestTmpDir(t *testing.T) string {
+	t.Helper()
+	b, err := readRepoBytes("../../Makefile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var dirs []string
+	for _, line := range strings.Split(string(b), "\n") {
+		// A recipe line (a tab) runs the variable; the assignment is a line of
+		// the Makefile's own.
+		if strings.HasPrefix(line, "\t") || strings.HasPrefix(strings.TrimSpace(line), "#") || !makefileTMPDIRAssignment.MatchString(line) {
+			continue
+		}
+		for _, m := range makefileCurdirPath.FindAllStringSubmatch(line, -1) {
+			dirs = append(dirs, strings.TrimSuffix(m[1], "/"))
+		}
+	}
+	if len(dirs) != 1 {
+		t.Fatalf("the Makefile's TMPDIR lines name %d directories below $(CURDIR), want one: %q", len(dirs), dirs)
+	}
+	return dirs[0]
+}
+
+var (
+	makefileTMPDIRAssignment = regexp.MustCompile(`\bTMPDIR\s*(?:::=|:=|\?=|\+=|!=|=)`)
+	makefileCurdirPath       = regexp.MustCompile(`\$[({]CURDIR[)}]/([^)}\s,]+)`)
+)
+
+// TestTheCensusSkipsTheMakefilesTMPDIRAtTheRoot: make test and make
+// test-fast give every package's tests the Makefile's TMPDIR, a directory
+// below the root, and the census walking it met another package's temporary
+// files mid-run, scripts/install-test's link at run/user/1000/bus, and failed
+// with "build site must not be a symlink" (B740). The census skips that
+// directory at the root, by its name, and nowhere else: a link anywhere else
+// still fails it, a directory of the same name further down included.
+func TestTheCensusSkipsTheMakefilesTMPDIRAtTheRoot(t *testing.T) {
+	tmp := makefileTestTmpDir(t)
+	link := func(t *testing.T, root, name string) {
+		t.Helper()
+		path := filepath.Join(root, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(filepath.Join(t.TempDir(), "bus"), path); err != nil {
+			t.Skipf("cannot create a symlink on this host: %v", err)
+		}
+	}
+	t.Run("the Makefile's TMPDIR", func(t *testing.T) {
+		root := buildSiteFixture(t)
+		// What the suite leaves there while it runs: install-test's link (no
+		// extension; a link's mode reads executable on Unix), a link named as
+		// a build site, a stub that runs go, and a note holding a command.
+		link(t, root, tmp+"/TestTheUserManagerIsFoundOrNothingChanges/001/root/run/user/1000/bus")
+		link(t, root, tmp+"/TestX/001/deploy.sh")
+		put(t, root, tmp+"/TestX/001/bin/stub", "#!/bin/sh\ngo build ./cmd/bridge\n")
+		if err := os.Chmod(filepath.Join(root, tmp, "TestX", "001", "bin", "stub"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		put(t, root, tmp+"/TestX/001/README.md", "```sh\ngo build ./cmd/bridge\n```\n")
+		if err := checkBuildTags(root); err != nil {
+			t.Fatalf("the census walked %s, the Makefile's TMPDIR: %v", tmp, err)
+		}
+	})
+	for _, name := range []string{"deploy.sh", "docs/" + tmp + "/deploy.sh", tmp + ".old/deploy.sh", "scripts/" + tmp + "/run/user/1000/bus.sh"} {
+		t.Run("a link at "+name, func(t *testing.T) {
+			root := buildSiteFixture(t)
+			link(t, root, name)
+			want := "build site must not be a symlink: " + name
+			if err := checkBuildTags(root); err == nil || err.Error() != want {
+				t.Fatalf("got %v, want %q", err, want)
+			}
+		})
+	}
+	if runtime.GOOS != "windows" {
+		// install-test's own shape outside the TMPDIR: only a link's Unix mode
+		// makes an extensionless name a site.
+		t.Run("install-test's link outside it", func(t *testing.T) {
+			root := buildSiteFixture(t)
+			link(t, root, "scripts/run/user/1000/bus")
+			want := "build site must not be a symlink: scripts/run/user/1000/bus"
+			if err := checkBuildTags(root); err == nil || err.Error() != want {
+				t.Fatalf("got %v, want %q", err, want)
+			}
+		})
+	}
+	t.Run("a note in a "+tmp+" below the root", func(t *testing.T) {
+		refuseNewSite(t, "docs/"+tmp+"/README.md", "```sh\ngo build ./cmd/bridge\n```\n")
+	})
 }
 
 func TestCensusExpandedGoPaths(t *testing.T) {
