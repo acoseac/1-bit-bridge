@@ -413,10 +413,19 @@ func (d *dsdSet) planAt(bitRate int) policy.Plan {
 }
 
 // changes reports whether p's set plays o's rate otherwise than cur, the set
-// published: o a DSD occurrence (admitted under a set) not refused. Two
-// refusals play it alike, whatever their words.
+// published, which is what o is admitted under, or would be, until the write
+// publishes: o a DSD occurrence admitted under a set and not refused, or one
+// a set's plan refused at a rate the policy decides (refusedUnder, B728 B9
+// round 2), whose refusal the write may lift. The set published, never the
+// one the write was made from: one that has published what the write would
+// (a session's start reading the durable state before the write's own
+// publish) changes nothing the write would. Two refusals play it alike,
+// whatever their words.
 func (p *pendingChoice) changes(cur *dsdSet, o *occ) bool {
-	if o.admitted == nil || o.refused != nil {
+	switch {
+	case o.admitted != nil && o.refused == nil:
+	case o.refusedUnder != nil:
+	default:
 		return false
 	}
 	a, c := cur.planAt(o.nativeFormat.BitRateHz), p.set.planAt(o.nativeFormat.BitRateHz)
@@ -433,6 +442,37 @@ func (b *Backend) pendingFor(o *occ) *pendingChoice {
 		return p
 	}
 	return nil
+}
+
+// settleOpen takes s.mu for the step that ends o's open, as lockSettled
+// does, and asks again, its lock let go, an admission the effective policy
+// refused under a set that is not the one published now (B728 B9 round 2,
+// point 2): lifted by a choice's write, pending when the refusal was made
+// (lockSettled waits for it) or published since, or by any change of the
+// set. The content's own checks are made again with it (openNativeContent:
+// its first chunk read, its conversion's plan), outside the lock, so an
+// enabled rate's content that gives no bits is refused as that; a refusal
+// that is the content's (its decoder's, a rate no transport carries) is
+// never asked again. It returns with s.mu held.
+func (s *session) settleOpen(ctx context.Context, o *occ) {
+	for {
+		s.lockSettled(ctx, o)
+		u := o.refusedUnder
+		if u == nil || u == s.b.dsd.Load() || ctx.Err() != nil || s.ctx.Err() != nil {
+			return
+		}
+		s.mu.Unlock()
+		s.b.reaskDSD(ctx, o)
+	}
+}
+
+// reaskDSD asks o's admission again, its refusal by the effective policy
+// forgotten, on its opener's goroutine before its open ends (settleOpen),
+// with no lock held: the native open's admission and what follows it
+// (openNativeContent, whose reservation is charged once).
+func (b *Backend) reaskDSD(ctx context.Context, o *occ) {
+	o.refused, o.refusedUnder, o.admitted, o.policyPlan, o.plan = nil, nil, nil, policy.Plan{}, nil
+	b.openNativeContent(ctx, o, o.dsd)
 }
 
 // lockSettled takes s.mu for the step that ends o's open: at once while no

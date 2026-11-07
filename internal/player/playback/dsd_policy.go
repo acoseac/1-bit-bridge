@@ -633,7 +633,10 @@ func (b *Backend) logDSDSet(d *dsdSet) {
 // the content's rate or its refusal. The occurrence keeps the set and the
 // plan it was admitted under, which the check after open, its activation and
 // reconciliation compare with. A converted rate answers no native plan: the
-// occurrence converts (occ.converts, B728 B11).
+// occurrence converts (occ.converts, B728 B11). A refusal by the set's word,
+// at a rate and in channels the policy decides, keeps the set it was made
+// under (refusedUnder), which a choice's write or a later set can lift
+// (settleOpen, B728 B9 round 2).
 func (b *Backend) admitDSD(o *occ, f format.NativeDSD) (engine.NativePlan, error) {
 	cur := b.dsd.Load()
 	if o.leading || b.dsdStale() {
@@ -641,6 +644,9 @@ func (b *Backend) admitDSD(o *occ, f format.NativeDSD) (engine.NativePlan, error
 	}
 	plan, pp, err := cur.selectFor(f)
 	if err != nil {
+		if nativeLogicalRate(f.BitRateHz) && f.Channels == 2 {
+			o.refusedUnder = cur
+		}
 		return engine.NativePlan{}, err
 	}
 	o.admitted, o.policyPlan = cur, pp

@@ -515,12 +515,13 @@ func (s *session) start(ctx context.Context, req engine.StartRequest) (err error
 	// and the open's refusal is read in that step too (round 3). A choice's
 	// write pending that plays its rate otherwise is waited for first, the
 	// lock let go, so the write either judged it opened or it is admitted under
-	// what the write left (lockSettled, B728 B9).
-	s.lockSettled(cctx, first)
+	// what the write left, and a refusal of the policy's a later set lifts is
+	// asked again (settleOpen, B728 B9).
+	s.settleOpen(cctx, first)
 	s.readmitDSDLocked(first)
 	s.makeConverterLocked(first)
 	close(first.done)
-	monitor, refused := first.admitted != nil, first.refused
+	monitor, refused := first.admitted != nil && first.refused == nil, first.refused
 	if refused != nil {
 		first.dropped = true
 	}
@@ -878,13 +879,17 @@ func (s *session) openSuccessor(ctx context.Context, o *occ) {
 	defer o.cancel()
 	s.b.open(ctx, o)
 	s.b.opened(o)
-	if o.admitted != nil {
-		s.startDSDMonitor()
-	}
-	s.lockSettled(ctx, o)
+	s.settleOpen(ctx, o)
+	monitor := false
 	defer func() {
 		close(o.done)
 		s.mu.Unlock()
+		if monitor {
+			// The session's DSD monitor, once a DSD occurrence of it is
+			// admitted: a PCM session's first, asked again where a write lifted
+			// its refusal, among them (B728 B9 round 2).
+			s.startDSDMonitor()
+		}
 		wake(s.wakeP)
 		wake(s.wakeR)
 	}()
@@ -892,13 +897,15 @@ func (s *session) openSuccessor(ctx context.Context, o *occ) {
 	// reconciliation reaches while the open is under way: admitted again under
 	// the set published now, before its Prepared is reported (B728 B7), and
 	// its converter made for the plan it is admitted under (B11); a choice's
-	// write pending that plays its rate otherwise waited for first
-	// (lockSettled, B728 B9).
+	// write pending that plays its rate otherwise waited for first, and a
+	// refusal of the policy's a later set lifts asked again (settleOpen, B728
+	// B9).
 	s.readmitDSDLocked(o)
 	s.makeConverterLocked(o)
 	if s.nativeRevoked && (o.plan != nil || o.converts()) && o.refused == nil {
 		o.refused = &engine.Unplayable{Reason: "native_revoked", Detail: "DSD permission revoked"}
 	}
+	monitor = o.admitted != nil && o.refused == nil && !o.dropped
 	if o.dropped {
 		// Dropped while it opened: nothing of it plays or is reported, and
 		// it leaves the chain with its opener, which retirement passed over

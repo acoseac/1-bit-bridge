@@ -79,6 +79,11 @@ type occ struct {
 	leading    bool
 	stale      bool
 	observed   bool
+	// refusedUnder is the set whose plan refused the occurrence's DSD at its
+	// open, a rate the policy decides (B728 B9 round 2): the step that ends
+	// its open asks again where a choice's write would lift the refusal, or
+	// a set published since does (settleOpen). nil for any other refusal.
+	refusedUnder *dsdSet
 	conversion
 	reservation *engine.OccurrenceReservation
 	id          engine.OccurrenceID
