@@ -2365,7 +2365,7 @@
   headers and their APEv2 tag, decoding nothing, and a length a file holds is
   checked against the file and a cap of its own before anything is read or
   allocated on its account** (ExtractorVersion 32, 2026-11-06, backlog B489,
-  and its round 2).
+  and its rounds 2 and 5).
   The bridge serves both formats as they are and decodes neither, so the
   extractors read what the files state and no more. **WavPack**
   (`wavpack.go`, after WavPack5FileFormat.pdf and wavpack.h): the first block
@@ -2475,9 +2475,9 @@
   the extended bits its samples need, trust a
   length for an allocation, keep more than `apeTagMaxValues` of a tag's
   values, walk a block's sub-blocks a read each, hand dhowden more than the
-  last 128 bytes, give a lossy hybrid or a DSD stream a sample kind, or a
-  lossy hybrid a bit depth, or take a read that ends short of the stat's size
-  for a file cut as it was written.**
+  last 128 bytes, take a read that ends short of the stat's size for a file
+  cut as it was written, give a lossy hybrid or a DSD stream a sample kind, or
+  a lossy hybrid a bit depth.**
   `TestTheScanIndexesAWavPackAndAnAPEFile` (red first on main),
   `TestScanner_AFileThatShrinksWhileItIsReadKeepsItsRow` (round 5),
   `TestTheWavPackHeaderStatesItsFormat`, `TestTheAPEHeaderStatesItsFormat`
@@ -2500,7 +2500,7 @@
 - **A `.wvc` is never a track; a hybrid `.wv`'s row depends on it in five
   states kept apart, recorded in `tracks.correction_key` (v61), and the skip
   gate asks it again with the walk's own stat comparison** (2026-11-06, backlog
-  B489, and its round 2). A hybrid WavPack stream is lossy alone; its correction file, the
+  B489, and its rounds 2 and 5). A hybrid WavPack stream is lossy alone; its correction file, the
   `.wv`'s name with `.wvc` (in any case) in the same folder, is what makes its
   decode lossless. Beside a lossless or a DSD stream a `.wvc` is an orphan and
   never read. `openAudioFile` records a failed open, absence included, as the

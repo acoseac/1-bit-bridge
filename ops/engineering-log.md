@@ -80735,3 +80735,249 @@ internal/dupes 8 s, internal/smartplaylist 3 s, its season 1 s,
 internal/smartplaylistgen 33 s, internal/api 139 s, internal/manifest
 1,519 s; `make build-all`, the six targets. Not run here: macOS and Windows
 natively, CI's runners, and the iOS app.
+
+## 2026-11-07 — B489 PR 1, round 5: each view's Christmas pick, a suppressed member in its view, three WavPack edges, the reconciliation rule and the console's notes
+
+The orchestrator's round 5 for worker b489b: eight points, each a reviewer's
+reading of the code, each confirmed red first or answered with evidence. The
+orchestrator had applied round 4's rules patch on the pushed branch,
+`pr/1423` here (56b14535, the rules commit over round 4's head 05191ced; its
+merge of main is still round 4's, 9ff1f13f, over fc07f4a1). The fast-forward
+was made by hand as round 4's was (`git merge` needs approval on legion0):
+the three rules files that differ taken with `git checkout pr/1423
+--pathspec-from-file`, the branch's loose ref written with 56b14535, and the
+tree checked clean and equal to `pr/1423`. Nothing was applied from `.claude`
+beyond what `pr/1423` holds. Commits: 3f56c2eb (points 4, 5 and 6), 81624c8c
+(point 3), 51b7c8ce (point 1), be5e2ff8 (point 7), 318d44e8 (point 8), this
+record, the gates' results.
+
+### Point 1: a cap over one selection could erase the spread that qualified it
+
+Confirmed, both ways the review read it, and a third. Round 4 asked the floor
+of the whole qualifying pool and stored one selection capped at 100. One
+choir's 110 tracks of one album beside one track each of two more albums
+cleared the floor, and in a season whose order put the third album's track
+past the cap the stored 100 held two albums and one artist, so every view was
+refused. 120 FLACs by two artists on two albums filled the cap ahead of ten
+WavPack singles by ten others, so a client declaring WavPack, whose pool
+holds twelve artists, was refused too. And one selection could not suit four
+views: 99 FLACs by two artists, one `.wv` and one `.ape` passed as a whole,
+while the stored 100 dropped the `.ape` and the APE view, left 99 FLACs, was
+refused. Red first through the real regenerator
+(`TestRegenerate_ChristmasStoresWhatEachViewNeedsToClearTheFloor`, its three
+subtests) and the real router in all four views
+(`TestEachViewIsPickedItsChristmasItemsAtTheRequest`), and round 4's tests
+updated to the stored superset, every result as predicted in a file before
+the run.
+
+The first fixture needs a season that puts the second or the third album past
+position 100, which most seasons do not: over 2026 to 2060, ten of 35 do
+(modelled in Python on the engine's FNV-1a order, one artist, so the artist
+spread keeps the order). The tests pin 2029 (the third album's track at 108)
+and assert that precondition through the engine itself
+(`smartplaylist.ChristmasOrder`, the order the family takes a format in, now
+exported for it), failing with "pin another season" if a change to the order
+moves it.
+
+The selection for a view is made at the response from a bounded stored
+superset. The regenerator stores each format on its own (`storeChristmas`,
+`selectChristmas`'s successor): the tracks every client is served, then the
+WavPack ones, then the Monkey's Audio ones, each in the season's order spread
+eight an artist (`ChristmasOrder`) and cut at `season.MaxTracks` (100) by
+`season.KeepSpread`, which first moves the first track of each of its first
+three albums and of each of its first three artists to the front: up to 300
+items, each with its album. The storage keeps both spreads ahead of its cut,
+where the brief's response rule takes one: without it the one choir's third
+album is never stored and no pick can bring it back, and a format that cannot
+clear the floor alone (two albums, one artist) may complete another's in a
+view that declares both, by either spread. `season.Pick`, one pure function of
+the stored items and the view, is each request's selection: the view's
+formats, those every client is served first, then the declared gated formats
+in turn; before the cap, the first track of each of the first three distinct
+albums, or failing that of the first three distinct artists, moves to the
+front (named as the floor names them, an empty one naming nothing); then the
+first 100; and the floor is asked of the result. `GET /v1/smart-playlists`
+calls it per request and leaves the family out of a view below the floor,
+positions closing up as before; the regenerator calls it for its decision,
+storing the family when one of the four views clears it; the console shows
+the pick of a client that declares every format (`consoleMixItems`, which the
+mix's item count and its track list read), as it showed the whole family
+before. `Options.MaxChristmasItems` is gone (the cap is `season.MaxTracks`),
+as `MinChristmas` went in round 4. The season seed's order is unchanged: one
+season, one order. `buildChristmas`', `storeChristmas`' and the season
+package's comments say the floor is asked of each view's pick, not of every
+qualifying track. `PROTOCOL.md`'s `christmas` paragraph says each request is
+picked its items.
+
+Round 4's regeneration tests now store 115 (15 FLACs and 100 WavPack files)
+and the full 100 of a thousand `.wv` files beside fifteen `.ape`, and the
+thousand-WavPack HTTP test gives the WavPack view its own 100 (it was the 85
+the cap left). `TestTheChristmasFamilyServesEachViewItsItems` compares its
+mixed view as a set, since the pick orders the formats in turn. The leaf has
+its own tests (`TestPickKeepsTheFloorWheneverTheItemsCan`,
+`TestKeepSpreadKeepsBothSpreadsAheadOfTheCut`) and the console its own
+(`TestTheConsoleShowsTheChristmasFamilyAsServedToEveryFormat`: 40 FLACs, 100
+`.wv` and 100 `.ape`, the console showing the FLACs, then a `.wv` and an
+`.ape` in turn). Not changed here: the family's energy envelope and modal
+rate are signed at generation over what is stored (`signEnergy`), now the
+superset, as they were over round 4's stored 100, not over a view's pick.
+
+### Point 2: a blob with no albums stays judged on its artists
+
+No change, as the brief decided: B750 has shipped in no release (0.2.3 has no
+Christmas family), so no released bridge holds a blob without albums, and the
+family is rebuilt daily. `season.Pick` and `season.MeetsFloor` name an empty
+album as nothing, so such a blob is judged on its artists, and no count-only
+fallback was added, which would serve what the floor refuses. Round 4's
+`TestAChristmasFamilyCachedWithoutAlbumsIsJudgedOnItsArtists` runs through the
+response's `Pick` now and still refuses fifteen items by one artist across
+three albums cached without their albums (it stayed green under every control
+this round).
+
+### Point 3: a suppressed member's replacement was decided outside the view
+
+Confirmed. `servedCopies` mapped a line naming a suppressed duplicate to its
+group's one served row, and a group with two served rows left the line
+unresolved in every view, though a request takes at most one of them: a
+missing `A/x.wv` beside `B/x.flac` and `C/x.ape` was unresolved for a client
+declaring nothing, which can play the FLAC; and a line naming a suppressed
+copy of a gated format the request does not declare was unresolved before its
+group was asked (`TestASuppressedDuplicateIsServedAsItsOneServedCopyInTheView`,
+red in views nothing, WavPack and APE as predicted, green in both, where two
+survivors stay unresolved).
+
+The feed now keeps every served row of a group (`servedCopies`) and decides
+among those the request's view takes (`servedCopyIn`): exactly one is the
+member, whatever the suppressed track's own format, and none or several leave
+the line unresolved, as before; a group with a DSD and a PCM edition each
+keeping one is unresolved where the view takes both, as it was, with no new
+reading of the domain. The view reaches it as every other member rule does:
+`resolvePlaylistBatch` passes the request's set to `resolve`, whose lines are
+judged in it. The paging keys on it through the feed's version, which hashes
+the view's key and `playlistFeedRulesVersion`, now 4: every version, cursor
+and ETag made under the old rule answers stale (`410`
+`playlist_files_stale`), and one view's never answers another's. The rows a
+page shows are the same rows, so the v57 triggers that move the feed's
+generation need nothing new. The older test,
+`TestASuppressedDuplicateMemberIsServedAsItsServedCopy`, passes unchanged.
+
+### Points 4, 5 and 6: a stream's end past its metadata, a shrink while read, a `.wvc`'s unknown total
+
+Point 4, confirmed: with no stated length, `wvFinalIndex` took only a final
+block ending the file, and the reference encoder ends a stream with a block
+of metadata alone (its MD5 sum, a RIFF trailer: `write_metadata_block`, whose
+header is cleared but for its id, version, size and total, so no final block
+and no samples). A `.wv` of unknown length ending with its MD5 sum matched no
+`.wvc` and was indexed WAVPACK-LOSSY. The look now starts at the block that
+ends where the file does and passes back over blocks with no samples, each
+found as the block that ends where the one after it begins, at most
+`wvMaxTrailingBlocks` (16), to the last block with samples, which must be a
+final block: as `seek_final_index` takes the last final audio block of the
+file's last 1 MiB. A trailing metadata block larger than one 64 KiB window is
+still found (the look walks back window by window to that 1 MiB floor); one
+that fills the whole of the last 1 MiB (a RIFF trailer past 1 MiB) leaves no
+block with samples there, so the stream's end is unknown, no correction file
+matches, and the row is WAVPACK-LOSSY, a pinned subtest. This parser has not
+shipped, so `ExtractorVersion` stays this PR's 32.
+
+Point 5, confirmed: a `.wv` that shrank after its extractor's stat met the
+file's end inside a block, which `wvWindow` answered `errWVBlockCut` (a file
+cut as it was written, a refusal) with no read fault, and a WavPack or
+Monkey's Audio file cut inside its APEv2 tag read as one with no tag; either
+replaced a changed file's good row under the file's new size and mtime, which
+the skip gate then kept, so the defect outlived the shrink (the red run's one
+sub-check not predicted: the final readable scan of each subtest failed too).
+Both extractors now read through `statBoundReader`, which answers a read that
+reaches the file's end short of the stat's size with `errFileShrank` and notes
+it in the extraction's read faults, so the read did not complete and the row
+it had is kept (B134's rule); `wvWindow` tells a short read inside a block
+found within the stat's size (the shrink) from a block that runs past that
+size (`errWVBlockCut`, answered before any of the block is read), and the
+correction look answers a shrink as a correction file replaced while read.
+`TestScanner_AFileThatShrinksWhileItIsReadKeepsItsRow` cuts a WavPack file
+inside its first audio block, and a WavPack and a Monkey's Audio file inside
+their tags, between the stat and the read.
+
+Point 6, confirmed: a `.wvc` whose first block states no total beside a `.wv`
+that states one was refused, and that is the pair an encode of a stream whose
+length the encoder learned only at its end leaves when its rewrite of the
+`.wvc`'s header fails: every header is written with the unknown total, and
+`cli/wavpack.c` rewrites the `.wv`'s first block with the length, then the
+`.wvc`'s. The reference decoder takes the pair: it reads the stream's length
+from the `.wv` alone (`WavpackOpenFileInputEx64`: the first audio block's
+total, else `seek_final_index` over the `.wv`) and takes a correction block by
+its index, samples and flags (`read_wvc_block`, `match_wvc_header`), never by
+its total. These are cited from libwavpack 5's source as published, which was
+not on legion0 and could not be fetched there (no network): the acceptance
+rests on that citation until the reference-encoder corpus exists, and the
+owner's check of it against the source is asked in the round's report.
+`correctionTotalAgrees` takes the same total, both unknown, or unknown in the
+`.wvc` beside a known one in the `.wv`; it refuses the reverse and two known
+totals that differ, which the decoder would take but no reference encode
+writes, and every other check stays: the block's index, samples and flags,
+the correction bitstream, and the `.wvc`'s end at the stream's last sample. A
+built fixture covers it (`wvBlocksStating`), and one subtest joins points 4
+and 6: a `.wv` stating its length, a `.wvc` stating none and ending with a
+metadata block after its audio, matched.
+
+### Point 7: a client reconciles whenever its declared formats change
+
+Confirmed by reading: `PROTOCOL.md` had a client make its full sync "once per
+bridge, when it first sees `wavpackApe`", so a client that first declares
+`wavpack` and later adds `ape` missed the APE rows indexed before its delta
+cursor, and one that drops a format kept rows no filtered delta removes, since
+the bridge still holds them and no tombstone names them. The paging and
+deltas paragraph now says a client records, for each bridge, the set of
+formats it declares there, and makes a full reconciliation (a paginated full
+sync, after which it holds exactly the rows delivered) whenever that set
+changes; the set declared to a bridge that does not advertise `wavpackApe` is
+empty, so that bridge's update changes it. Nothing changes on the bridge; the
+iOS half reads this.
+
+### Point 8: the console lists these files
+
+Confirmed: `bridge scan`'s summary line and the dashboard's composition note
+said the console's player left these files out, while the player lists every
+track with a Download link and marks one no browser plays "Not playable in a
+browser" (`playNone`). Both now say that earlier versions of the app and DLNA
+renderers leave them out, and that the console lists them and offers their
+download, marked not playable in a browser. The scan test pins the line's
+words, and `TestTheCompositionNoteSaysTheConsoleListsWavPackAndMonkeysAudio`
+pins the note's literals (comments stripped, `jsFunctionBody`); both were
+written after the words were corrected, and both are red with the old words
+put back in memory, as predicted (r8 below).
+
+### Negative controls
+
+Committed before each control; every mutation in memory, the bytes restored
+after the run and checked; predictions in a file before each run.
+
+| Control | Mutation | Red |
+|---|---|---|
+| c1 | the move to the front reverted (`moveToFront` keeps nothing) | as predicted: the pick's two spread subtests, `TestKeepSpreadKeepsBothSpreadsAheadOfTheCut`, the one choir in regeneration and in every HTTP view, and the 120-FLAC case in views WavPack and both; and one not predicted, the 120-FLAC case in regeneration: the decision is the same `Pick`, so no view cleared the floor and nothing was stored; the 99, 1 and 1 case green |
+| c3 | the survivors counted before the view | as predicted: views nothing, WavPack and APE |
+| c3b | the suppressed copy's own format asked first | as predicted: view nothing alone |
+| c4 | the look for a stream's end stops at a block with no samples | as predicted: the metadata-after-audio subtest and the joined case |
+| c5 | the stat-bounded reader's shrink check off | as predicted: the shrink test's three subtests |
+| c6 | a known `.wv` total no longer agrees with an unknown `.wvc` one | as predicted: the `.wv`-alone subtest and the joined case |
+| c6r | the reverse direction taken too | as predicted: the `.wvc`-alone subtest |
+| r8 | point 8's old words put back | as predicted: the scan test and the composition note's test |
+
+### The rules
+
+`rules-b489b-r5.patch` is over `pr/1423`'s rules (round 4's applied):
+`scanner.md`'s two WavPack lines take round 5 in their titles and the bold
+"Don't" sentences their long forms in `ops/History-rules-scanner.md` now
+carry (a read short of the stat's size taken for a cut file; a total in the
+`.wvc` alone or two that differ; the look for the end stopped at a block with
+no samples); `wire.md`'s B489 bullet takes the per-view Christmas pick, the
+suppressed member in its view, `playlistFeedRulesVersion` 4, the
+reconciliation rule, a "Don't" and two tests, and its playlist-files bullet
+the member rule; `smart-mixes.md`'s Christmas bullet takes the stored
+superset, `season.Pick`, the albumless blob with no fallback, the "Don't"
+sentences and five tests; `admin-console.md`'s B489 bullet what the console
+says of these files, a "Don't" and two tests. Checked with `git apply` on a
+fresh copy, equal to the builder's result, every blank context line with its
+leading space, every test it names declared, and the budgets over it
+(`admin-console.md` 72.6%, `scanner.md` 34.4%, `smart-mixes.md` 14.3%,
+`wire.md` 59.5%, the worst load 65.5%).
