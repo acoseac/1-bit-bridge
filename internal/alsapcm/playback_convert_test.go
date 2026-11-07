@@ -708,9 +708,13 @@ func TestDeletingOrReplacingAPreparedConvertedSuccessor(t *testing.T) {
 		wc, _ := converted(t, c, convPlan)
 		return cat(wa, wc)
 	}
-	// setup queues a, b and the variant's c, and plays.
+	// setup queues a, b and the variant's c, and plays. A producer the steps
+	// hold is let go before the rig's teardown, which cleanups run last
+	// registered first, so a test that fails while it is held ends with
+	// nothing left running.
 	setup := func(t *testing.T, steps *convSteps, c []byte) (*dsdRig, []uint32) {
 		d := newConvRig(t, withSteps(steps))
+		t.Cleanup(steps.letGo)
 		d.files.add("a", a)
 		d.files.add("b", b)
 		refs := []string{"a", "b"}
