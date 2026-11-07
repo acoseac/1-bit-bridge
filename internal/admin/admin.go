@@ -1116,8 +1116,12 @@ type AnalysisSweepCounts struct {
 	Total       int `json:"total"`
 	UpToDate    int `json:"upToDate"`
 	DSDExcluded int `json:"dsdExcluded"`
-	ZeroByte    int `json:"zeroByte"`
-	Missing     int `json:"missing"`
+	// WavPackAPE is how many WavPack and Monkey's Audio sources the sweep
+	// passed over: the bridge serves them as they are and decodes nothing
+	// of theirs (backlog B489).
+	WavPackAPE int `json:"wavpackApe"`
+	ZeroByte   int `json:"zeroByte"`
+	Missing    int `json:"missing"`
 	// Unreadable is how many candidates THIS sweep skipped because the
 	// decoders have refused them repeatedly. Reported beside Missing and
 	// never folded into it: one is a path the bridge could not address, the

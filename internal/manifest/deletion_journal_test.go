@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/formatgate"
 )
 
 func openJournalTestStore(t *testing.T) *Store {
@@ -369,7 +371,7 @@ func TestManifest_DeltaCarriesDeletedPaths_BothLegs(t *testing.T) {
 	}
 
 	// Buffered leg.
-	m, err := BuildManifest(ctx, s, []string{"/lib"}, since)
+	m, err := BuildManifest(ctx, s, []string{"/lib"}, since, formatgate.All())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -382,7 +384,7 @@ func TestManifest_DeltaCarriesDeletedPaths_BothLegs(t *testing.T) {
 
 	// Streaming leg — decode the wire bytes and require parity.
 	var buf bytes.Buffer
-	if err := WriteManifest(ctx, &buf, s, []string{"/lib"}, since); err != nil {
+	if err := WriteManifest(ctx, &buf, s, []string{"/lib"}, since, formatgate.All()); err != nil {
 		t.Fatal(err)
 	}
 	var streamed Manifest
@@ -397,7 +399,7 @@ func TestManifest_DeltaCarriesDeletedPaths_BothLegs(t *testing.T) {
 	}
 
 	// Legs isolation: a FULL manifest carries neither field.
-	full, err := BuildManifest(ctx, s, []string{"/lib"}, time.Time{})
+	full, err := BuildManifest(ctx, s, []string{"/lib"}, time.Time{}, formatgate.All())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -406,7 +408,7 @@ func TestManifest_DeltaCarriesDeletedPaths_BothLegs(t *testing.T) {
 			full.Deleted, full.DeltaIncomplete)
 	}
 	buf.Reset()
-	if err := WriteManifest(ctx, &buf, s, []string{"/lib"}, time.Time{}); err != nil {
+	if err := WriteManifest(ctx, &buf, s, []string{"/lib"}, time.Time{}, formatgate.All()); err != nil {
 		t.Fatal(err)
 	}
 	if bytes.Contains(buf.Bytes(), []byte(`"deleted"`)) ||
@@ -423,7 +425,7 @@ func TestManifest_DeltaIncompleteWhenCursorPredatesCoverage(t *testing.T) {
 	// year earlier predates it.
 	stale := time.Now().Add(-365 * 24 * time.Hour)
 
-	m, err := BuildManifest(ctx, s, []string{"/lib"}, stale)
+	m, err := BuildManifest(ctx, s, []string{"/lib"}, stale, formatgate.All())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -435,7 +437,7 @@ func TestManifest_DeltaIncompleteWhenCursorPredatesCoverage(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	if err := WriteManifest(ctx, &buf, s, []string{"/lib"}, stale); err != nil {
+	if err := WriteManifest(ctx, &buf, s, []string{"/lib"}, stale, formatgate.All()); err != nil {
 		t.Fatal(err)
 	}
 	var streamed Manifest
@@ -458,7 +460,7 @@ func TestManifest_DeltaOmitsPathsWithServedRows(t *testing.T) {
 		t.Fatal(err)
 	}
 	since := time.Now().Add(-time.Hour)
-	deleted, overflow, err := s.DeletedSince(ctx, since)
+	deleted, overflow, err := s.DeletedSince(ctx, since, formatgate.All())
 	if err != nil || overflow {
 		t.Fatalf("DeletedSince: %v overflow=%v", err, overflow)
 	}

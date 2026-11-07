@@ -29,6 +29,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/formatgate"
 	"github.com/acoseac/1-bit-bridge/internal/logging"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/google/uuid"
@@ -605,6 +606,13 @@ func (c *Coordinator) buildUpscaleCandidates(batchPath string, projections []man
 			continue
 		}
 		if manifest.IsLossyCodec(t.Codec) {
+			continue
+		}
+		// WavPack and Monkey's Audio files are never a rendition's source
+		// (backlog B489): the bridge serves them as they are and decodes
+		// nothing of theirs. By the path, as the client gate reads them
+		// (SQL mirror: upscaleEligibleSQL's ungatedPathSQLT).
+		if formatgate.Gated(t.Path) {
 			continue
 		}
 		// Refuse what this sox build cannot decode, for the same reason

@@ -34,7 +34,10 @@
 // (ambiguous_reference); the row is not an upstream server's (routed), nor an
 // SACD image's virtual track (sacd_virtual_track), at whose path nothing is,
 // since the bridge never demuxes (manifest.IsSACDVirtualPath, the
-// ContentDirectory's own refusal); the path names a library root configured
+// ContentDirectory's own refusal), nor a WavPack or Monkey's Audio file
+// (formatgate.Gated, backlog B489), refused with the decoders' own reason for
+// content they cannot open (unknown_container), since the bridge serves those
+// as they are and its player decodes neither; the path names a library root configured
 // now (outside_library), through the live path resolver; and, at an open, the
 // file is opened as the loopback route opens one, with its containment
 // check: its links resolved inside a root before the open
@@ -79,6 +82,7 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/ctxerr"
 	"github.com/acoseac/1-bit-bridge/internal/dlna"
+	"github.com/acoseac/1-bit-bridge/internal/formatgate"
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/logging"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
@@ -112,7 +116,18 @@ const (
 	ReasonIndexUnreadable engine.Reason = "index_unreadable"
 	// ReasonResolverFailed is a panic in the resolver, recovered.
 	ReasonResolverFailed engine.Reason = "resolver_failed"
+	// ReasonGatedFormat is a WavPack or Monkey's Audio file (formatgate.Gated,
+	// backlog B489): the decoders' own reason for content they cannot open,
+	// decode.ReasonUnknownContainer (TestTheGatedFormatsAreRefusedWithTheDecodersReason
+	// holds the two equal), which a WavPack or Monkey's Audio file's own
+	// content gets at an open, here asked of the row at the queue's check, so
+	// an Insert learns at once (600) and no open is tried.
+	ReasonGatedFormat engine.Reason = "unknown_container"
 )
+
+// GatedFormatDetail is ReasonGatedFormat's detail, which bridge output play
+// says too when it is handed such a file.
+const GatedFormatDetail = "WavPack and Monkey's Audio files are served as they are, and the bridge's player decodes neither"
 
 // staleSlack is how far past twice the rows its last build read the index may
 // grow before the next lookup builds it again: a path the index holds is let
@@ -513,8 +528,9 @@ func (r *Resolver) StoredPath(ctx context.Context, ref engine.Reference) (path s
 
 // check is what an open and a membership check ask of id short of the file:
 // the one path the index holds for it whose row is there (pathsOf), a row of
-// the bridge's own, not an SACD image's virtual track, in a library root
-// configured now. It answers the path resolved onto that root, or why not.
+// the bridge's own, not an SACD image's virtual track, not a WavPack or
+// Monkey's Audio file (ReasonGatedFormat), in a library root configured now.
+// It answers the path resolved onto that root, or why not.
 func (r *Resolver) check(ctx context.Context, id string) (string, error) {
 	path, err := r.pathsOf(ctx, id)
 	if err != nil {
@@ -529,6 +545,9 @@ func (r *Resolver) check(ctx context.Context, id string) (string, error) {
 	}
 	if manifest.IsSACDVirtualPath(path) {
 		return "", refuse(ReasonSACDVirtual, "the track is an SACD image's virtual track: nothing is at its path, since the bridge never demuxes")
+	}
+	if formatgate.Gated(path) {
+		return "", refuse(ReasonGatedFormat, GatedFormatDetail)
 	}
 	abs, err := r.cfg.Paths.Resolve(path)
 	if err != nil {

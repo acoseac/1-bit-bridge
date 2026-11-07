@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/acoseac/1-bit-bridge/internal/config"
+	"github.com/acoseac/1-bit-bridge/internal/formatgate"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
@@ -91,7 +92,7 @@ func TestScanCmdHonoursConfiguredDuplicatesFilter(t *testing.T) {
 		t.Fatalf("indexed %d tracks, want 2 (fixture did not land as expected)", total)
 	}
 
-	served, err := store.ListServedTracks(ctx, nil)
+	served, err := store.ListServedTracks(ctx, nil, formatgate.All())
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -120,3 +120,25 @@ func TestPlayabilityOfCompressedPCM(t *testing.T) {
 		t.Errorf("playerContentType(.aifc) = %q, want audio/aiff", got)
 	}
 }
+
+// TestNoBrowserPlaysWavPackOrMonkeysAudio: a .wv or an .ape is "none" to the
+// console's player (backlog B489), whatever its codec or case, and its audio
+// route announces opaque bytes, as DSD's does: no browser engine decodes
+// either format, and the bridge renders no sidecar to stand in. The client
+// words "none" as "Not playable in a browser" (format.js unplayableReason),
+// and the row keeps its download.
+func TestNoBrowserPlaysWavPackOrMonkeysAudio(t *testing.T) {
+	for _, c := range []struct{ codec, ext string }{
+		{"WAVPACK", ".wv"}, {"WAVPACK-LOSSY", ".wv"}, {"", ".WV"}, {"APE", ".ape"}, {"", ".Ape"},
+	} {
+		if got := playabilityKind(c.codec, c.ext, false); got != playNone {
+			t.Errorf("playabilityKind(%q, %s) = %q, want %q", c.codec, c.ext, got, playNone)
+		}
+		if got := playerContentType(c.ext); got != octetStream {
+			t.Errorf("playerContentType(%s) = %q, want %q", c.ext, got, octetStream)
+		}
+	}
+	if got := playabilityKind("WAVPACK-DSD", ".wv", true); got != playNone {
+		t.Errorf("a WavPack DSD file = %q, want %q", got, playNone)
+	}
+}

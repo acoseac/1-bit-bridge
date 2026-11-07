@@ -17,6 +17,7 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/dupes"
+	"github.com/acoseac/1-bit-bridge/internal/formatgate"
 )
 
 // Backlog B756 round 2. A stored year could outvote the tags it replaced
@@ -298,7 +299,7 @@ func TestTheTaggedYearIsStoredAndNeverServed(t *testing.T) {
 	}
 	for _, since := range []time.Time{{}, time.Unix(0, 1)} {
 		var body bytes.Buffer
-		if err := WriteManifest(ctx, &body, store, []string{root}, since); err != nil {
+		if err := WriteManifest(ctx, &body, store, []string{root}, since, formatgate.All()); err != nil {
 			t.Fatal(err)
 		}
 		if !bytes.Contains(body.Bytes(), []byte(rels[7])) {
@@ -540,7 +541,7 @@ func TestScanner_ACopyKnownMissingNeverWinsItsGroup(t *testing.T) {
 	if st := stampOf(t, store, copies[7]); !st.Suppressed {
 		t.Errorf("%s, whose file is gone, is served", copies[7])
 	}
-	served, err := store.ListServedTracks(ctx, nil)
+	served, err := store.ListServedTracks(ctx, nil, formatgate.All())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -549,7 +550,7 @@ func TestScanner_ACopyKnownMissingNeverWinsItsGroup(t *testing.T) {
 			t.Errorf("the served set holds %s, whose file is gone", tr.Path)
 		}
 	}
-	delta, err := BuildManifest(ctx, store, []string{root}, since)
+	delta, err := BuildManifest(ctx, store, []string{root}, since, formatgate.All())
 	if err != nil {
 		t.Fatal(err)
 	}

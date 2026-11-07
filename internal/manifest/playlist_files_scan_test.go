@@ -13,6 +13,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/formatgate"
 )
 
 // The scan side of the playlist-file index (backlog B431): which files a
@@ -413,7 +415,7 @@ func TestAPlaylistFilePastACapStillLetsTheIndexBeComplete(t *testing.T) {
 	writeLibraryFile(t, root, "Playlists/many.m3u", bytes.Repeat([]byte("a\n"), playlistFileMaxEntries+1))
 	s, sc := newScanFixture(t, root)
 	scanOnce(t, sc, "scan")
-	page, err := s.PlaylistFilesPage(context.Background(), "", "")
+	page, err := s.PlaylistFilesPage(context.Background(), "", "", formatgate.All())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -461,7 +463,7 @@ func TestThePlaylistIndexIsCompleteOnlyOnceAFullScanBacksEveryFile(t *testing.T)
 	ctx := context.Background()
 	complete := func(when string) bool {
 		t.Helper()
-		page, err := s.PlaylistFilesPage(ctx, "", "")
+		page, err := s.PlaylistFilesPage(ctx, "", "", formatgate.All())
 		if err != nil {
 			t.Fatalf("%s: %v", when, err)
 		}

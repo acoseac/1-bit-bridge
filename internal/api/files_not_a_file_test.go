@@ -118,3 +118,29 @@ func TestByteRoutesRefuseWhatIsNotAFile(t *testing.T) {
 		t.Errorf("updater sessions: %d begun, %d still in flight; want %d begun and none left", begun, active, requests)
 	}
 }
+
+// TestANamedPipeNamedLikeACorrectionFileIsRefused: a named pipe called like a
+// WavPack correction file (backlog B489) is refused by the byte routes at
+// once, 400 bad_request naming the kind, as one named like a track is; the
+// routes add no rule of their own for a .wvc.
+func TestANamedPipeNamedLikeACorrectionFileIsRefused(t *testing.T) {
+	srv, tok, root := fileFixtureServer(t)
+	pipe := filepath.Join(root, "Artist", "Album", "01 Track.wvc")
+	fsutiltest.MakeFIFO(t, pipe)
+	h := srv.Handler()
+	for _, rt := range []struct{ method, route, rng string }{
+		{http.MethodGet, "/v1/download", ""},
+		{http.MethodHead, "/v1/download", ""},
+		{http.MethodGet, "/v1/download", "bytes=0-9"},
+		{http.MethodGet, "/v1/read", "bytes=0-1023"},
+	} {
+		req := httptest.NewRequest(rt.method, rt.route+"?path=Artist/Album/01%20Track.wvc", nil)
+		req.Header.Set("Authorization", "Bearer "+tok)
+		if rt.rng != "" {
+			req.Header.Set("Range", rt.rng)
+		}
+		rec := fsutiltest.ServeWithin(t, h, req, pipe)
+		requireRefusal(t, rt.method+" "+rt.route+" of a named pipe called 01 Track.wvc", rec, rt.method,
+			http.StatusBadRequest, "bad_request", "named pipe")
+	}
+}

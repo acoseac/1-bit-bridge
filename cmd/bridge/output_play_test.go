@@ -18,6 +18,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/player/engine"
 	"github.com/acoseac/1-bit-bridge/internal/player/format"
 	"github.com/acoseac/1-bit-bridge/internal/player/hotplug"
+	"github.com/acoseac/1-bit-bridge/internal/player/library"
 	"github.com/acoseac/1-bit-bridge/internal/player/playback"
 )
 
@@ -321,6 +322,39 @@ func TestOutputPlayRefusesWhatItCannotPlay(t *testing.T) {
 				t.Errorf("a refused run built a backend")
 			}
 		})
+	}
+}
+
+// TestOutputPlayRefusesWavPackAndMonkeysAudioAtItsQueuesCheck: a WavPack or
+// Monkey's Audio file among the files is refused before anything starts
+// (backlog B489), with the reason and the words serve's player's queue check
+// gives (the library resolver's unknown_container, the decoders' own reason
+// for content they cannot open), whatever the extension's case, and no
+// backend is built.
+func TestOutputPlayRefusesWavPackAndMonkeysAudioAtItsQueuesCheck(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{"a.wv", "b.APE"} {
+		c := newPlayCase(t, goBarPlayer)
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte("not decoded"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		c.files = append(c.files, p)
+		built := false
+		env := c.env("linux")
+		env.backend = func(playback.Config) (playBackend, error) {
+			built = true
+			return c.standIn, nil
+		}
+		stdout, stderr := newPlayBuf(), newPlayBuf()
+		code := runOutputPlay(context.Background(), append([]string{"--config", c.configPath}, c.files...), env, stdout, stderr)
+		want := name + ": " + string(library.ReasonGatedFormat) + ": " + library.GatedFormatDetail
+		if code != 1 || !strings.Contains(stderr.String(), want) {
+			t.Errorf("%s: exit %d, want 1 saying %q:\n%s", name, code, want, stderr.String())
+		}
+		if built {
+			t.Errorf("%s: a refused run built a backend", name)
+		}
 	}
 }
 

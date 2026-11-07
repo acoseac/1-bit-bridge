@@ -25,9 +25,10 @@ import (
 // record.
 
 // requireTheLatestSchema checks whether the store in dataDir has what this
-// build's last migration adds (v60: tracks.sample_format_size and
-// sample_format_mtime_ns, and idx_tracks_sample_format_stale), present or
-// not: a store genuinely older than this build lacks them.
+// build's last migration adds (v61: tracks.correction_key, backlog B489;
+// v60's sample-kind stat columns and index until then), present or not: a
+// store genuinely older than this build lacks it. A new migration names its
+// own here.
 func requireTheLatestSchema(t *testing.T, dataDir string, present bool) {
 	t.Helper()
 	raw, err := sql.Open("sqlite", dsn.File(manifest.DefaultDBPath(dataDir), "_pragma=busy_timeout(5000)"))
@@ -35,19 +36,16 @@ func requireTheLatestSchema(t *testing.T, dataDir string, present bool) {
 		t.Fatal(err)
 	}
 	defer raw.Close()
-	var columns, indexes int
-	if err := raw.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('tracks') WHERE name IN ('sample_format_size', 'sample_format_mtime_ns')`).Scan(&columns); err != nil {
+	var columns int
+	if err := raw.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('tracks') WHERE name = 'correction_key'`).Scan(&columns); err != nil {
 		t.Fatal(err)
 	}
-	if err := raw.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_tracks_sample_format_stale'`).Scan(&indexes); err != nil {
-		t.Fatal(err)
-	}
-	wantColumns, wantIndexes := 0, 0
+	want := 0
 	if present {
-		wantColumns, wantIndexes = 2, 1
+		want = 1
 	}
-	if columns != wantColumns || indexes != wantIndexes {
-		t.Errorf("the store has %d of v60's two columns and %d of its index, want %d and %d", columns, indexes, wantColumns, wantIndexes)
+	if columns != want {
+		t.Errorf("the store has %d of v61's one column, want %d", columns, want)
 	}
 }
 

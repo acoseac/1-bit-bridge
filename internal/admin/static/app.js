@@ -417,6 +417,21 @@ function applyComposition(c) {
   const dsdSection = document.getElementById("comp-dsd-section");
   if (dsdSection) dsdSection.hidden = dsd.length === 0;
   renderDistBar("comp-dsd-bar", "comp-dsd-legend", dsd, total, "dsd");
+  // WavPack and Monkey's Audio (backlog B489): indexed like every file,
+  // served to a 1-bit app only when it says it plays them, and listed by
+  // this console's player with their download, marked not playable in a
+  // browser. The operator is told here, hidden at zero.
+  const gatedNote = document.getElementById("comp-wavpack-ape");
+  if (gatedNote) {
+    const n = c.wavpackApe ?? 0;
+    gatedNote.hidden = n === 0;
+    gatedNote.textContent = (n === 1
+      ? "1 track is a WavPack or Monkey's Audio file"
+      : `${n} tracks are WavPack or Monkey's Audio files`) +
+      ", indexed and served as they are to a 1-bit app that plays these formats." +
+      " Earlier versions of the app and DLNA renderers leave them out;" +
+      " this console lists them and offers their download, marked not playable in a browser.";
+  }
   root.hidden = total === 0;
 }
 
@@ -6470,6 +6485,7 @@ function renderAnalysisCoverage(cov) {
   }
   const parts = [];
   if (cov.dsdExcluded > 0) parts.push(`${cov.dsdExcluded} DSD excluded by design (sox can't decode DSD)`);
+  if (cov.wavpackApeExcluded > 0) parts.push(`${cov.wavpackApeExcluded} WavPack or Monkey's Audio, served as they are and never decoded`);
   if (cov.zeroByteExcluded > 0) parts.push(`${cov.zeroByteExcluded} zero-byte (upload never finished)`);
   // `unreadableExcluded` is the SUPPRESSED subset — the right number for
   // "not counted as eligible". The list below is broader: it carries every
@@ -6499,6 +6515,7 @@ function describeAnalysisSweep(last) {
   if (last.alreadyQueued > 0) parts.push(`${last.alreadyQueued} already queued`);
   parts.push(`${last.upToDate ?? 0} up to date`);
   if (last.dsdExcluded > 0) parts.push(`${last.dsdExcluded} DSD`);
+  if (last.wavpackApe > 0) parts.push(`${last.wavpackApe} WavPack or Monkey's Audio`);
   if (last.zeroByte > 0) parts.push(`${last.zeroByte} zero-byte`);
   if (last.missing > 0) parts.push(`${last.missing} unresolvable`);
   if (last.unreadable > 0) parts.push(`${last.unreadable} unreadable`);

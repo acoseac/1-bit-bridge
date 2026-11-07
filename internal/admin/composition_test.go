@@ -3,6 +3,7 @@ package admin
 import (
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
@@ -94,5 +95,72 @@ func TestBuildCompositionEmpty(t *testing.T) {
 	}
 	if len(got.PCM) != 0 || len(got.DSD) != 0 || len(got.Codecs) != 0 {
 		t.Errorf("want all-empty bars, got %+v", got)
+	}
+}
+
+// TestTheCompositionSaysHowManyWavPackAndMonkeysAudioFilesTheLibraryHolds:
+// the dashboard's composition carries the count of indexed WavPack and
+// Monkey's Audio files (backlog B489), by the path as the client format
+// gate reads it, a refused file's row with no codec included, so
+// applyComposition can say they are indexed and which apps list them; the
+// codec bar names their codecs as it names every codec.
+func TestTheCompositionSaysHowManyWavPackAndMonkeysAudioFilesTheLibraryHolds(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	ctx := t.Context()
+	for _, tr := range []manifest.Track{
+		{Path: "A/01.flac", Size: 1, Codec: "FLAC"},
+		{Path: "A/02.wv", Size: 1, Codec: manifest.CodecWavPack},
+		{Path: "A/03.APE", Size: 1, Codec: manifest.CodecAPE},
+		{Path: "A/04.wv", Size: 1}, // refused: no codec
+	} {
+		tr := tr
+		if err := srv.deps.Manifest.UpsertTrack(ctx, &tr); err != nil {
+			t.Fatal(err)
+		}
+	}
+	snap := srv.getCompositionSnapshot()
+	if snap.WavPackAPE != 3 {
+		t.Errorf("wavpackApe = %d, want 3", snap.WavPackAPE)
+	}
+	labels := map[string]int{}
+	for _, b := range snap.Codecs {
+		labels[b.Label] = b.Count
+	}
+	if labels[manifest.CodecWavPack] != 1 || labels[manifest.CodecAPE] != 1 || labels["Unknown"] != 1 {
+		t.Errorf("codec bar %+v, want WAVPACK, APE and Unknown once each", snap.Codecs)
+	}
+	body, err := json.Marshal(snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var keys map[string]any
+	if err := json.Unmarshal(body, &keys); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := keys["wavpackApe"]; !ok {
+		t.Errorf("the frame has no wavpackApe key: %s", body)
+	}
+}
+
+// TestTheCompositionNoteSaysTheConsoleListsWavPackAndMonkeysAudio: the
+// dashboard's note on these files says what each reader does with them
+// (round 5 of backlog B489, a reviewer): earlier versions of the app and DLNA
+// renderers leave them out, while this console lists them, offers their
+// download and marks them not playable in a browser, as its player's track
+// rows do (playNone, a Download link on every row). The note said the
+// console's player left them out. Read from applyComposition's literals, its
+// comments stripped (jsFunctionBody).
+func TestTheCompositionNoteSaysTheConsoleListsWavPackAndMonkeysAudio(t *testing.T) {
+	body := jsFunctionBody(t, "function applyComposition(")
+	for _, want := range []string{
+		"Earlier versions of the app and DLNA renderers leave them out",
+		"this console lists them and offers their download, marked not playable in a browser",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("applyComposition's note does not say %q", want)
+		}
+	}
+	if strings.Contains(body, "console's player leave them out") {
+		t.Error("applyComposition's note says the console's player leaves them out")
 	}
 }

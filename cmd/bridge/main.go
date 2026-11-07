@@ -52,6 +52,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/dlna"
 	"github.com/acoseac/1-bit-bridge/internal/dupes"
 	"github.com/acoseac/1-bit-bridge/internal/enrich"
+	"github.com/acoseac/1-bit-bridge/internal/formatgate"
 	bridgefs "github.com/acoseac/1-bit-bridge/internal/fs"
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/handshakelog"
@@ -1006,6 +1007,16 @@ func (a *upscaleEnqueuerAdapter) resolveAndLookupTrack(libraryRelativePath strin
 	if track == nil {
 		// File exists on disk but scanner hasn't reached it yet.
 		// Silent reject (no remediation path beyond rescan).
+		return "", nil, api.ErrUpscaleIneligible
+	}
+	// A WavPack or Monkey's Audio file is never a rendition's source, of
+	// any kind (backlog B489): the bridge serves those as they are and
+	// decodes nothing of theirs. Asked before the sox check below, which
+	// fails open on an extension it does not map. The batch walks and the
+	// coverage bars ask the same predicate (formatgate.Gated; the upscale
+	// mirror's SQL twin, and the optimize and pcm allowlists, which name
+	// neither format).
+	if formatgate.Gated(track.Path) {
 		return "", nil, api.ErrUpscaleIneligible
 	}
 	// A DSD source (DSF / DSDIFF) is no longer refused HERE: it is the
@@ -4546,7 +4557,13 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	// The reading (GET /v1/outputs/{id}/reading) names the song MPD is on
 	// as one of this bridge's rows through the same index, so a song MPD
 	// fetches from the route is the row the route serves.
-	loopLib := newManifestLibraryAdapter(manifestStore, apiSrv.Resolver(), cfg.LibraryRoots, logger)
+	//
+	// Every format, WavPack and Monkey's Audio included (backlog B489): the
+	// route hands MPD the file as it is, MPD decodes it with its own
+	// plugins, and the app that casts a track there was served its row,
+	// which the client format gate decided for the app. The ContentDirectory
+	// keeps its own view, which offers neither.
+	loopLib := newManifestLibraryAdapter(manifestStore, apiSrv.Resolver(), cfg.LibraryRoots, formatgate.All(), logger)
 	outLoop := newOutputLoopback(outputLoopbackWiring{
 		Library: loopLib,
 		Roots:   apiSrv.Resolver().Roots,
@@ -7006,7 +7023,28 @@ func scanCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	fmt.Fprintf(stdout, "Scan complete: %d tracks indexed in %s\n", n, time.Since(start).Round(time.Millisecond))
+	// WavPack and Monkey's Audio are indexed like every file, served to a
+	// 1-bit app only when it says it plays them, and listed by the console
+	// (backlog B489): the operator sees how many there are and who lists
+	// them.
+	if g, err := store.CountGatedFormatTracks(ctx); err == nil && g > 0 {
+		fmt.Fprintln(stdout, gatedFormatSummary(g))
+	}
 	return 0
+}
+
+// gatedFormatSummary is bridge scan's line about the WavPack and Monkey's
+// Audio files the library holds (backlog B489), n of them. The console is
+// no 1-bit app: its player lists every format and offers each file's
+// download, marking one no browser plays as not playable.
+func gatedFormatSummary(n int) string {
+	what := fmt.Sprintf("The library holds %d WavPack or Monkey's Audio files", n)
+	if n == 1 {
+		what = "The library holds 1 WavPack or Monkey's Audio file"
+	}
+	return "  " + what + ": served as they are to a 1-bit app that plays these formats, " +
+		"and left out for earlier versions of the app and DLNA renderers; " +
+		"the console lists them and offers their download, marked not playable in a browser"
 }
 
 // harvestStatePath is the bulk harvest's state file, holding its credential

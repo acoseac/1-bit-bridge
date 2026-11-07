@@ -137,6 +137,14 @@ func TestCodecFromExtension_KnownAndUnknown(t *testing.T) {
 		"x.mp4":   "",
 		"x.weird": "",
 		"x":       "",
+		// WavPack and Monkey's Audio (backlog B489): an upstream row has no
+		// header the bridge parsed, so it is never WAVPACK or APE, which
+		// would say lossless (a hybrid .wv without its correction file is
+		// lossy), and its gate is its path's extension.
+		"x.wv":  "",
+		"x.WV":  "",
+		"x.ape": "",
+		"x.wvc": "",
 	}
 	for p, want := range cases {
 		if got := codecFromExtension(p); got != want {
