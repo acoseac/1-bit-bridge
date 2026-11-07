@@ -354,21 +354,78 @@ func TestAWriteBackOfARevisionReadInTheWindowIsAnsweredWithTheDurableOne(t *test
 	wantChoice(t, b.ChooseDSD(bg, choiceOf(t, b, dsdstate.ModeAuto, revisionOf(t, b.Policy()))), playback.ChoiceWritten)
 }
 
-// TestAStaleAnswerNeverCarriesARevisionTheStateHasMovedPast (binding note 2):
-// where another writer (the migration's part for a DAC) moved the choice's
-// revision and its refresh has not published it yet, a stale answer reads the
-// policy again first, so the revision it carries is the state's.
-func TestAStaleAnswerNeverCarriesARevisionTheStateHasMovedPast(t *testing.T) {
-	b, store, _ := choiceBackend(t, playbacktest.ChoiceState(dsdstate.ModeNative))
-	st := store.State()
-	st.DACs[0].Choice.Revision, st.DACs[0].Choice.Mode = 2, dsdstate.ModeConvert
-	store.Set(st)
-	res := b.ChooseDSD(bg, choiceOf(t, b, dsdstate.ModeOff, 1))
-	wantChoice(t, res, playback.ChoiceStale)
-	if got := revisionOf(t, res.Policy); got != 2 {
-		t.Fatalf("the stale answer carries revision %d, want 2, the state's", got)
+// heldLines is a log whose first line of a write's outcome holds the write
+// there until release is closed, held closed once it does; every later line
+// passes.
+type heldLines struct {
+	*choiceLog
+	taken         atomic.Bool
+	held, release chan struct{}
+}
+
+func (h *heldLines) Info(msg string, args ...any) {
+	h.choiceLog.Info(msg, args...)
+	for i := 0; i+1 < len(args); i += 2 {
+		if args[i] == "outcome" && h.taken.CompareAndSwap(false, true) {
+			close(h.held)
+			<-h.release
+		}
 	}
-	wantChoice(t, b.ChooseDSD(bg, choiceOf(t, b, dsdstate.ModeOff, 2)), playback.ChoiceWritten)
+}
+
+// TestAStaleAnswerNeverCarriesARevisionAnotherWriteHasPassed (binding note 2;
+// B728 B9 round 2, point 4): a write is answered with the epoch published as
+// its turn ended, read inside the turn, so no other write, each of which takes
+// the turn, can have moved past what it carries. Stale says that the write's
+// base was not the state's revision at its compare-and-set, and carries the
+// state's revision as the turn ended: where another writer that takes no turn
+// (the migration's part for a DAC, at serve's player start) moved it and its
+// refresh had not published it yet, the stale answer reads the policy again
+// first; such a writer can move it again after the answer, which the next
+// write's compare-and-set answers stale once more, with that revision. And a
+// write still being answered while the next write lands (its line held) carries
+// its own epoch, never the next write's.
+func TestAStaleAnswerNeverCarriesARevisionAnotherWriteHasPassed(t *testing.T) {
+	t.Run("a revision a writer outside the turn moved", func(t *testing.T) {
+		b, store, _ := choiceBackend(t, playbacktest.ChoiceState(dsdstate.ModeNative))
+		st := store.State()
+		st.DACs[0].Choice.Revision, st.DACs[0].Choice.Mode = 2, dsdstate.ModeConvert
+		store.Set(st)
+		res := b.ChooseDSD(bg, choiceOf(t, b, dsdstate.ModeOff, 1))
+		wantChoice(t, res, playback.ChoiceStale)
+		if got := revisionOf(t, res.Policy); got != 2 {
+			t.Fatalf("the stale answer carries revision %d, want 2, the state's", got)
+		}
+		wantChoice(t, b.ChooseDSD(bg, choiceOf(t, b, dsdstate.ModeOff, 2)), playback.ChoiceWritten)
+	})
+	t.Run("the next write landing while the answer is made", func(t *testing.T) {
+		lines := &heldLines{choiceLog: &choiceLog{}, held: make(chan struct{}), release: make(chan struct{})}
+		b, _, _ := choiceBackend(t, playbacktest.ChoiceState(dsdstate.ModeNative), func(p *playback.DSDPolicy) { p.Log = lines })
+		stale := make(chan playback.ChoiceResult, 1)
+		go func() { stale <- b.ChooseDSD(bg, choiceOf(t, b, dsdstate.ModeOff, 0)) }()
+		select {
+		case <-lines.held:
+		case res := <-stale:
+			t.Fatalf("the stale write was answered (%s) without a line", res.Outcome)
+		case <-time.After(watchdog):
+			t.Fatal("the stale write never came to its line")
+		}
+		next := make(chan playback.ChoiceResult, 1)
+		go func() { next <- b.ChooseDSD(bg, choiceOf(t, b, dsdstate.ModeOff, 1)) }()
+		select {
+		case res := <-next:
+			wantChoice(t, res, playback.ChoiceWritten)
+		case <-time.After(watchdog):
+			close(lines.release)
+			t.Fatal("the next write waited for the stale one's line: a line is written inside the writes' turn")
+		}
+		close(lines.release)
+		res := <-stale
+		wantChoice(t, res, playback.ChoiceStale)
+		if got := revisionOf(t, res.Policy); got != 1 {
+			t.Fatalf("the stale answer carries revision %d, want 1, the state's as its turn ended: the next write's epoch reached it", got)
+		}
+	})
 }
 
 // TestARevisionMovedBeforeTheStoresWriteIsStale (binding note 2): the

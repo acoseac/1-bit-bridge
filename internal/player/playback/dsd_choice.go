@@ -369,6 +369,7 @@ func (s *session) lockSettled(ctx context.Context, o *occ) {
 		s.b.choiceAwaited(o.id)
 		select {
 		case <-p.done:
+			s.b.choiceWoke(o.id)
 		case <-ctx.Done():
 			s.mu.Lock()
 			return

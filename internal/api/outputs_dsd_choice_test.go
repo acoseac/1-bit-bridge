@@ -213,9 +213,11 @@ func TestTheChoiceRouteIsAnAuthenticatedBoundedWrite(t *testing.T) {
 }
 
 // TestTheChoiceBodyIsBoundedAndStrict (the design's section 7.2, check 1;
-// binding note 9): a body past its bound is refused before it is parsed, and
-// one that is not exactly the body (a malformed one, an unknown member, a
-// member missing, a mode or a cap the bridge does not know) is 400
+// binding note 9; B728 B9 round 2, points 6 and 7): a body past its bound is
+// refused before it is parsed, a well-formed choice after white space past the
+// bound among them, and one that is not exactly the body (a malformed one, an
+// unknown member, a member missing, a mode or a cap the bridge does not know,
+// an explicit null for any member, the optional ones included) is 400
 // bad_request; neither asks the player anything. A well-formed one reaches it
 // whole.
 func TestTheChoiceBodyIsBoundedAndStrict(t *testing.T) {
@@ -223,20 +225,31 @@ func TestTheChoiceBodyIsBoundedAndStrict(t *testing.T) {
 	hs, token, _ := newChoiceHTTP(t, "off", false, c)
 	padded := `{"dacKey":"d1-0123456789abcdef","baseRevision":4,"mode":"native","pad":"` + strings.Repeat("x", 8<<10) + `"}`
 	for name, body := range map[string]string{
-		"past its bound":          padded,
-		"not JSON":                `{"dacKey":`,
-		"data after the body":     `{"dacKey":"d1-0123456789abcdef","baseRevision":4,"mode":"off"}{}`,
-		"an unknown member":       `{"dacKey":"d1-0123456789abcdef","baseRevision":4,"mode":"off","dsd512":true}`,
-		"no dacKey":               `{"baseRevision":4,"mode":"off"}`,
-		"an empty dacKey":         `{"dacKey":"","baseRevision":4,"mode":"off"}`,
-		"no baseRevision":         `{"dacKey":"d1-0123456789abcdef","mode":"off"}`,
-		"a negative revision":     `{"dacKey":"d1-0123456789abcdef","baseRevision":-1,"mode":"off"}`,
-		"a fractional revision":   `{"dacKey":"d1-0123456789abcdef","baseRevision":1.5,"mode":"off"}`,
-		"no mode":                 `{"dacKey":"d1-0123456789abcdef","baseRevision":4}`,
-		"a mode it does not know": `{"dacKey":"d1-0123456789abcdef","baseRevision":4,"mode":"loud"}`,
-		"a cap past DSD256":       `{"dacKey":"d1-0123456789abcdef","baseRevision":4,"mode":"auto","maxBitRate":22579200}`,
-		"a cap that is no rate":   `{"dacKey":"d1-0123456789abcdef","baseRevision":4,"mode":"auto","maxBitRate":1}`,
-		"a flag that is no bool":  `{"dacKey":"d1-0123456789abcdef","baseRevision":4,"mode":"auto","interrupt":"yes"}`,
+		"past its bound":                 padded,
+		"a choice after its bound":       strings.Repeat(" ", maxDSDChoiceBody) + `{"dacKey":"d1-0123456789abcdef","baseRevision":4,"mode":"off"}`,
+		"a null dacKey":                  `{"dacKey":null,"baseRevision":4,"mode":"off"}`,
+		"a null baseRevision":            `{"dacKey":"d1-0123456789abcdef","baseRevision":null,"mode":"off"}`,
+		"a null mode":                    `{"dacKey":"d1-0123456789abcdef","baseRevision":4,"mode":null}`,
+		"a null maxBitRate":              `{"dacKey":"d1-0123456789abcdef","baseRevision":4,"mode":"off","maxBitRate":null}`,
+		"a null confirmDoP":              `{"dacKey":"d1-0123456789abcdef","baseRevision":4,"mode":"off","confirmDoP":null}`,
+		"a null firstUseAcknowledged":    `{"dacKey":"d1-0123456789abcdef","baseRevision":4,"mode":"off","firstUseAcknowledged":null}`,
+		"a null interrupt":               `{"dacKey":"d1-0123456789abcdef","baseRevision":4,"mode":"off","interrupt":null}`,
+		"a cap that is a string":         `{"dacKey":"d1-0123456789abcdef","baseRevision":4,"mode":"auto","maxBitRate":"5644800"}`,
+		"a confirmation that is a word":  `{"dacKey":"d1-0123456789abcdef","baseRevision":4,"mode":"dop","confirmDoP":"true"}`,
+		"an acknowledgement that is one": `{"dacKey":"d1-0123456789abcdef","baseRevision":4,"mode":"native","firstUseAcknowledged":1}`,
+		"not JSON":                       `{"dacKey":`,
+		"data after the body":            `{"dacKey":"d1-0123456789abcdef","baseRevision":4,"mode":"off"}{}`,
+		"an unknown member":              `{"dacKey":"d1-0123456789abcdef","baseRevision":4,"mode":"off","dsd512":true}`,
+		"no dacKey":                      `{"baseRevision":4,"mode":"off"}`,
+		"an empty dacKey":                `{"dacKey":"","baseRevision":4,"mode":"off"}`,
+		"no baseRevision":                `{"dacKey":"d1-0123456789abcdef","mode":"off"}`,
+		"a negative revision":            `{"dacKey":"d1-0123456789abcdef","baseRevision":-1,"mode":"off"}`,
+		"a fractional revision":          `{"dacKey":"d1-0123456789abcdef","baseRevision":1.5,"mode":"off"}`,
+		"no mode":                        `{"dacKey":"d1-0123456789abcdef","baseRevision":4}`,
+		"a mode it does not know":        `{"dacKey":"d1-0123456789abcdef","baseRevision":4,"mode":"loud"}`,
+		"a cap past DSD256":              `{"dacKey":"d1-0123456789abcdef","baseRevision":4,"mode":"auto","maxBitRate":22579200}`,
+		"a cap that is no rate":          `{"dacKey":"d1-0123456789abcdef","baseRevision":4,"mode":"auto","maxBitRate":1}`,
+		"a flag that is no bool":         `{"dacKey":"d1-0123456789abcdef","baseRevision":4,"mode":"auto","interrupt":"yes"}`,
 	} {
 		status, raw := put(t, hs, token, choicePath, body)
 		if status != http.StatusBadRequest || errorCode(raw) != "bad_request" {

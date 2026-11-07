@@ -430,6 +430,9 @@ type recorder struct {
 	// native is the rig's native option: each session's events pass its
 	// native events on (nativeRecEvents).
 	native bool
+	// noReplan is the rig's noReplan option: each session's events hide
+	// Replan (noReplanEvents).
+	noReplan bool
 }
 
 // heldCall is a call the engine made, held short of the backend: held is
@@ -686,6 +689,35 @@ func (v nativeRecEvents) CurrentOccurrence(s engine.SessionID, o engine.Occurren
 	}
 }
 
+// noReplanEvents is a session's events with every event the engine takes but
+// Replan: an engine that hands nothing off again (engine.ReplanEvents
+// absent), the backend's every other event passed on as it is.
+type noReplanEvents struct{ engine.Events }
+
+func (v noReplanEvents) Details(s engine.SessionID, o engine.OccurrenceID, d engine.Details) {
+	if de, ok := v.Events.(engine.DetailsEvents); ok {
+		de.Details(s, o, d)
+	}
+}
+
+func (v noReplanEvents) NativePlan(s engine.SessionID, o engine.OccurrenceID, p engine.NativePlan) {
+	if pe, ok := v.Events.(engine.NativePlanEvents); ok {
+		pe.NativePlan(s, o, p)
+	}
+}
+
+func (v noReplanEvents) Retiring(t engine.ReleaseToken, n engine.NativeEvent) {
+	if re, ok := v.Events.(engine.NativeReleaseEvents); ok {
+		re.Retiring(t, n)
+	}
+}
+
+func (v noReplanEvents) CurrentOccurrence(s engine.SessionID, o engine.OccurrenceID, p *engine.NativePlan) {
+	if ce, ok := v.Events.(engine.CurrentOccurrenceEvents); ok {
+		ce.CurrentOccurrence(s, o, p)
+	}
+}
+
 // tee is the backend as the engine sees it: every call recorded, and every
 // session's events through the recorder.
 type tee struct {
@@ -699,6 +731,9 @@ func (b tee) Start(ctx context.Context, req engine.StartRequest) error {
 		req.Events = nativeRecEvents{&recEvents{r: b.r, next: req.Events}}
 	} else {
 		req.Events = &recEvents{r: b.r, next: req.Events}
+	}
+	if b.r.noReplan {
+		req.Events = noReplanEvents{req.Events}
 	}
 	err := b.Backend.Start(ctx, req)
 	b.r.note(func() {
@@ -872,6 +907,9 @@ type rigOptions struct {
 	// native passes the native events a session reports on to the engine
 	// (nativeRecEvents), as serve's engine takes them.
 	native bool
+	// noReplan hides engine.ReplanEvents from the backend (noReplanEvents):
+	// an engine that hands nothing off again (B728 B9 round 2).
+	noReplan bool
 }
 
 // newRig starts an engine with the backend over a fresh fake kernel, and
@@ -933,7 +971,7 @@ func newRig(t *testing.T, opts ...func(*rigOptions)) *rig {
 	if o.edit != nil {
 		o.edit(r, &cfg)
 	}
-	r.rec.native = o.native
+	r.rec.native, r.rec.noReplan = o.native, o.noReplan
 	be, err := playback.New(cfg)
 	if err != nil {
 		t.Fatal(err)

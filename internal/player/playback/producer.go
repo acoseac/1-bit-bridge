@@ -32,6 +32,9 @@ type step struct {
 	kind    stepKind
 	o       *occ
 	wait    <-chan struct{}
+	// awaits is the occurrence a wait is for while a choice's write is
+	// pending that plays its rate otherwise (the ChoiceAwaited seam).
+	awaits *occ
 }
 
 // produce is the session's producer, the one goroutine that decodes, packs
@@ -61,6 +64,9 @@ func (s *session) produce() {
 				return
 			}
 		case stepWait:
+			if st.awaits != nil {
+				s.b.choiceAwaited(st.awaits.id)
+			}
 			if !s.waitWake(st.wait) {
 				return
 			}
@@ -138,7 +144,7 @@ func (s *session) next() step {
 		// waits out of any sink until the write settles, so the write's
 		// classification of it (a re-plan, which interrupts nothing) still holds
 		// when the write publishes.
-		return step{kind: stepWait, wait: p.done}
+		return step{kind: stepWait, wait: p.done, awaits: o}
 	}
 	// One answer decides a join, Prepared's and this: Transport.Join, which
 	// tells same-carrier PCM from DoP by kind, valid bits, logical rate and
@@ -494,8 +500,10 @@ func (s *session) transition(o *occ) bool {
 			// A choice's write pending would play its rate otherwise (B728 B9):
 			// no sink is opened for it until the write settles.
 			l.unlock()
+			s.b.choiceAwaited(o.id)
 			select {
 			case <-pend.done:
+				s.b.choiceWoke(o.id)
 			case <-s.ctx.Done():
 				return false
 			}

@@ -206,7 +206,7 @@ func (s *session) holdLocked(a *occ) step {
 	case !settled:
 		if !s.floorLocked(a) {
 			if pend != nil {
-				return step{kind: stepWait, wait: pend.done}
+				return step{kind: stepWait, wait: pend.done, awaits: f}
 			}
 			return step{kind: stepWait}
 		}

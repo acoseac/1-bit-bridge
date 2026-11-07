@@ -504,6 +504,7 @@ func (s *session) start(ctx context.Context, req engine.StartRequest) (err error
 		s.monitorPermission()
 	}
 	s.b.open(cctx, first)
+	s.b.opened(first)
 	// Admitted under a set a refresh may have replaced while its first chunk
 	// was read, which no reconciliation reaches while the open is under way:
 	// admitted again under the set published now, in the step that ends the
@@ -876,6 +877,7 @@ func (s *session) callableLocked() error {
 func (s *session) openSuccessor(ctx context.Context, o *occ) {
 	defer o.cancel()
 	s.b.open(ctx, o)
+	s.b.opened(o)
 	if o.admitted != nil {
 		s.startDSDMonitor()
 	}
@@ -1473,8 +1475,10 @@ func (s *session) resume(ctx context.Context) (how engine.ResumeResult, err erro
 	}
 	if p := s.b.pendingFor(between); p != nil {
 		l.unlock()
+		s.b.choiceAwaited(between.id)
 		select {
 		case <-p.done:
+			s.b.choiceWoke(between.id)
 		case <-ctx.Done():
 			return 0, ctx.Err()
 		}
@@ -1579,6 +1583,9 @@ func (s *session) release(ctx context.Context) error {
 		return nil
 	}
 	s.mu.Unlock()
+	if first {
+		s.b.releasingSeam(s.id)
+	}
 	// The session's life ends: its sinks drop their streams and close their
 	// devices on their own, and its goroutines return.
 	s.cancel()

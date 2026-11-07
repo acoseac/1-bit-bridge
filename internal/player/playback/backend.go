@@ -147,10 +147,51 @@ type Seams struct {
 	// ChoiceQueued runs in a choice write that finds another write's turn
 	// under way, before it waits for it. It must not block.
 	ChoiceQueued func()
-	// ChoiceAwaited runs where the step that ends occurrence o's open waits
-	// for a pending choice write to settle, its session's lock let go. It
-	// must not block.
+	// ChoiceAwaited runs where a step of occurrence o's waits for a pending
+	// choice write that plays its rate otherwise to settle, its session's
+	// lock let go: the step that ends its open, the producer's (a sink's
+	// adoption or its activation, a join window's hold, a transport's open,
+	// a gapless join) and a resume's open between transports. It must not
+	// block.
 	ChoiceAwaited func(o engine.OccurrenceID)
+	// ChoiceWoke runs where a step that waited for a pending choice write
+	// (ChoiceAwaited) has seen it settle, before it asks again whether a
+	// write is pending, its session's lock let go (B728 B9 round 2). It may
+	// block, holding that goroutine there.
+	ChoiceWoke func(o engine.OccurrenceID)
+	// Opened runs on an opener's goroutine once occurrence o's open, of
+	// ref's content, has returned, its admission made or refused, before the
+	// step that ends the open takes the session's lock (B728 B9 round 2): the
+	// window in which a choice's write publishes beside an open whose
+	// admission read the set before it. It may block.
+	Opened func(o engine.OccurrenceID, ref engine.Reference)
+	// Releasing runs in session s's Release once the session is marked
+	// released and its native sinks have begun their release, before its
+	// life ends, its lock let go (B728 B9 round 2): the window in which a
+	// choice's write classifies what a session being released holds. It may
+	// block.
+	Releasing func(s engine.SessionID)
+}
+
+// releasingSeam is the Releasing seam.
+func (b *Backend) releasingSeam(s engine.SessionID) {
+	if sm := b.cfg.Seams; sm != nil && sm.Releasing != nil {
+		sm.Releasing(s)
+	}
+}
+
+// choiceWoke is the ChoiceWoke seam.
+func (b *Backend) choiceWoke(o engine.OccurrenceID) {
+	if sm := b.cfg.Seams; sm != nil && sm.ChoiceWoke != nil {
+		sm.ChoiceWoke(o)
+	}
+}
+
+// opened is the Opened seam.
+func (b *Backend) opened(o *occ) {
+	if sm := b.cfg.Seams; sm != nil && sm.Opened != nil {
+		sm.Opened(o.id, o.ref)
+	}
 }
 
 // activation is the Activation seam.

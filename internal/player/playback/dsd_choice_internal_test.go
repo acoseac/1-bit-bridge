@@ -3,6 +3,7 @@ package playback
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -10,6 +11,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/alsa"
 	"github.com/acoseac/1-bit-bridge/internal/alsactl"
 	"github.com/acoseac/1-bit-bridge/internal/alsapcm"
+	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
 	"github.com/acoseac/1-bit-bridge/internal/player/dsdstate"
 	"github.com/acoseac/1-bit-bridge/internal/player/engine"
 	"github.com/acoseac/1-bit-bridge/internal/player/format"
@@ -50,10 +52,16 @@ func (choiceBox) ReadControls(int) (alsactl.Snapshot, error) {
 	return alsactl.Snapshot{}, errors.New("no controls")
 }
 
-// choiceStore is the player's DSD state in memory.
+// choiceStore is the player's DSD state in memory. land, when set, is what
+// its next Update answers once its change is made, as dsdstate.Store answers
+// a write whose rename landed and whose barrier failed: the change is not
+// held, and every later Update is fenced (dsdstate.ErrLandedNotHeld), which
+// Landed reports.
 type choiceStore struct {
-	mu sync.Mutex
-	st dsdstate.State
+	mu     sync.Mutex
+	st     dsdstate.State
+	land   error
+	landed error
 }
 
 func (c *choiceStore) State() dsdstate.State {
@@ -65,12 +73,27 @@ func (c *choiceStore) State() dsdstate.State {
 func (c *choiceStore) Update(fn func(*dsdstate.State) error) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.landed != nil {
+		return dsdstate.ErrLandedNotHeld
+	}
 	next := c.st.Clone()
 	if err := fn(&next); err != nil {
 		return err
 	}
+	if c.land != nil {
+		c.landed, c.land = c.land, nil
+		return c.landed
+	}
 	c.st = next
 	return nil
+}
+
+// Landed is the write that landed and fences the store, nil while none did
+// (dsdstate.Store.Landed).
+func (c *choiceStore) Landed() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.landed
 }
 
 // nativeChosen is a state whose test DAC chose native, its first use
@@ -284,6 +307,77 @@ func TestAWriteCountsWhatItInterruptsNotWhatTheBoxDoes(t *testing.T) {
 	}
 }
 
+// heardSession is a session of b's whose one occurrence, DSD64 natively under
+// the set b publishes, is heard: half its frames played.
+func heardSession(t *testing.T, b *Backend) (*session, *occ) {
+	t.Helper()
+	s := b.session(1)
+	t.Cleanup(s.cancel)
+	s.ev = &replans{}
+	o := openedOcc(b, 2)
+	o.out, o.written, o.crossed = &output{sink: choiceSink{pos: alsapcm.Position{Written: 4096, Played: 2048}}}, 4096, true
+	s.chain = []*occ{o}
+	return s, o
+}
+
+// TestTheWritesChecksAreAnsweredInTheirOrder (B728 B9 round 2, point 3; the
+// design's section 7.2): what a write would interrupt is its eighth check,
+// answered inside the state's one write, after the state's own checks made on
+// the state that write is made from, and only where those and the write's
+// reading still hold; the classification it answers by is made before, with no
+// lock of the store's held. A write that would interrupt the occurrence heard,
+// the revision moved in its window by another writer, is stale; beside an
+// earlier write that landed and is not known to be durable, which fences every
+// write until the next start, one that would interrupt is persist_uncertain, no
+// check of the state's made. Neither stops what plays.
+func TestTheWritesChecksAreAnsweredInTheirOrder(t *testing.T) {
+	write := func(b *Backend, c policy.Choice) ChoiceOutcome {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		c.By = dsdstate.ByApp
+		return b.ChooseDSD(ctx, ChoiceRequest{DACKey: b.dsdPub.Load().view.DAC.Key, Choice: c}).Outcome
+	}
+	t.Run("a revision moved in the write's window", func(t *testing.T) {
+		b, store := choiceSessionBackend(t)
+		s, _ := heardSession(t, b)
+		var once sync.Once
+		b.cfg.Seams = &Seams{ChoicePending: func() {
+			once.Do(func() {
+				if err := store.Update(func(st *dsdstate.State) error {
+					st.DACs[0].Choice.Revision, st.DACs[0].Choice.SetBy = 2, dsdstate.ByMigration
+					return nil
+				}); err != nil {
+					t.Error(err)
+				}
+			})
+		}}
+		if got := write(b, policy.Choice{BaseRevision: 1, Mode: dsdstate.ModeConvert}); got != ChoiceStale {
+			t.Fatalf("a write that would interrupt, its revision moved in its window: %s, want stale", got)
+		}
+		if s.nativeRevoked {
+			t.Error("a stale write stopped what plays")
+		}
+	})
+	t.Run("beside an earlier write that landed", func(t *testing.T) {
+		b, store := choiceSessionBackend(t)
+		s, _ := heardSession(t, b)
+		store.mu.Lock()
+		store.land = fmt.Errorf("the directory's barrier failed: %w", atomicwrite.ErrLanded)
+		store.mu.Unlock()
+		// The cap at DSD256 plays what native at every rate plays: it interrupts
+		// nothing, and lands.
+		if got := write(b, policy.Choice{BaseRevision: 1, Mode: dsdstate.ModeNative, MaxBitRate: dsdstate.DSD256}); got != ChoicePersistUncertain {
+			t.Fatalf("the first write: %s, want persist_uncertain", got)
+		}
+		if got := write(b, policy.Choice{BaseRevision: 1, Mode: dsdstate.ModeConvert}); got != ChoicePersistUncertain {
+			t.Fatalf("a write that would interrupt, beside the fence: %s, want persist_uncertain", got)
+		}
+		if s.nativeRevoked {
+			t.Error("a fenced write stopped what plays")
+		}
+	})
+}
+
 // TestAnOccurrenceWhoseRateTheWriteChangesWaitsAtTheEndOfItsOpen (binding note
 // 3): while a write is pending, the step that ends an occurrence's open takes
 // it only where the set published and the set pending play its rate alike;
@@ -443,8 +537,12 @@ func TestAWriteThatPanicsLeavesNothingPending(t *testing.T) {
 // TestTheChoiceWritesLockOrderHolds (binding note 3): a choice write takes the
 // writes' turn, then the refreshes' lock, then each session's; a refresh the
 // refreshes' lock, then each session's; the state's store is taken alone, its
-// writes with no lock of the backend's held; under -race and together, writes,
-// refreshes, evidence writes, reconciliations and reads all finish.
+// writes with no lock of the backend's held, nor any taken inside them; under
+// -race and together, writes, refreshes, evidence writes, reconciliations and
+// reads all finish. A reader that takes the store's lock under a session's
+// (B728 B9 round 2, point 7) stands in for any path that would, so a write
+// that took a session's lock inside the state's write (what it would interrupt
+// classified in its closure) deadlocks here.
 func TestTheChoiceWritesLockOrderHolds(t *testing.T) {
 	b, store := choiceSessionBackend(t)
 	s := b.session(1)
@@ -494,8 +592,26 @@ func TestTheChoiceWritesLockOrderHolds(t *testing.T) {
 			s.mu.Unlock()
 		}
 	}()
+	writers := make(chan struct{})
+	var readers sync.WaitGroup
+	readers.Add(1)
+	go func() {
+		defer readers.Done()
+		for {
+			select {
+			case <-writers:
+				return
+			default:
+			}
+			s.mu.Lock()
+			_ = store.State()
+			s.mu.Unlock()
+		}
+	}()
 	go func() {
 		wg.Wait()
+		close(writers)
+		readers.Wait()
 		close(done)
 	}()
 	select {
