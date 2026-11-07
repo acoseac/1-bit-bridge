@@ -85291,7 +85291,8 @@ fb145695; the console f87e618a (red) and ce3cd800; a failed first identity
 read ca28675a (red) and f0174927; a root whose own watch cannot be added
 5e5b1c17 (red), 5e53ba5b and ce3a39d8; the Windows fixture 0f8f2bc1; a
 missing root's first upload 08f41726 (red), 7bc36e84 and the pin dfa32bbb;
-then this record and the runbook's paragraph. The rules go through
+then this record and the runbook's paragraph (4a80b77f), and the link's
+short cut ccbea589, with its account here. The rules go through
 `rules-b77x-r2.patch` (scanner.md's B776 and B777 lines and their long forms,
 admin-console.md's B776 bullet). Severity stays low: rows only, never a file.
 
@@ -85318,7 +85319,17 @@ link at that name, compared element by element as `rootIn` compares
 (`deepestRootOf`, so the case handling is the same) with each root as it
 resolves (`fsutil.ResolveLinks`, `newLandingRoots`), and with a root that
 does not resolve as configured; the look counts the rows by the configured
-name. On Windows a directory junction (`mklink /J`, which needs no privilege)
+name. As c5871f1a had it, every guarded write, each chunk included, resolved
+every configured root, so a root on a network mount that hangs would have
+stalled uploads into the healthy roots, which no write did before: each
+containment check resolves its own root alone. The roots are resolved now
+only once a path's folder is found to resolve elsewhere, once a request
+(ccbea589); where nothing on the way is a link, the owner is `rootIn`'s, which
+is the scans' (`nestedRootsUnder` compares the roots as configured too).
+`TestAWriteWithNoLinkOnItsWayResolvesNoOtherRoot` counts the roots a write
+resolves through a per-scanner hook (`resolveRootHook`): none for a write with
+no link on its way, each once for a request through a link. On Windows a
+directory junction (`mklink /J`, which needs no privilege)
 is what a link in a folder usually is there, and `ResolveLinks` resolves it
 as a symbolic link (GetFinalPathNameByHandle), on both sides of the
 comparison; the tests make a junction on Windows and a symbolic link
@@ -85465,6 +85476,22 @@ All sixteen as predicted. Not a control: `unwatchRoot`'s early return for a
 root already in the retry, a second line and scan where a try's walk fails
 again after its ask answered, a race no test makes. C2-3a and C2-3b red a
 pin of shape; the behaviour is the node test's.
+
+The link's controls again on ccbea589, predicted in
+`.tmp/_b77x/controls-r2b.predictions.txt` (C2-1b's and C2-1c's text now the
+hook's `resolveRoot`), with W1
+`TestAWriteWithNoLinkOnItsWayResolvesNoOtherRoot`; the baselines green:
+
+| Control | Red | Green |
+|---|---|---|
+| C2-1a no owner where the write lands | L1 (all three), L2 (both) | the rest |
+| C2-1b roots compared as configured | L2, the linked nested root | the rest |
+| C2-1c a root that does not resolve left out | L2, the gone root through its parent | the rest |
+| C2-1d no short cut, the roots resolved for a write with no link (c5871f1a's form) | W1, both roots resolved | |
+| C2-1e the forms made again for each path | W1, through a link: each root twice | |
+| C2-6b the row count not asked (admin) | U1's gone path, L2's gone root | the rest |
+
+All six as predicted.
 
 **Left open:** backlog B776, item 7; backlog B777, item 3.
 

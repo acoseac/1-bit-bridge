@@ -195,9 +195,8 @@ func (l *landingRoots) resolve(s *Scanner) {
 // compared element by element as which root a path is compares
 // (deepestRootOf), and nil for none. Where the folder resolves to itself,
 // nothing on the way is a link, the write lands where p's elements say, and
-// rootIn has answered: nil. A root configured through a link to a folder that
-// another root's path reaches with no link is not looked for there, as the
-// scans do not take it for nested either.
+// its owner is rootIn's, which is the scans' (nestedRootsUnder compares the
+// roots as configured too): nil.
 func (l *landingRoots) owners(s *Scanner, p string) []string {
 	abs, err := filepath.Abs(p)
 	if err != nil {
