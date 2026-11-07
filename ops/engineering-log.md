@@ -82339,6 +82339,341 @@ run; every one as predicted:
 
 **For the owner.** What this round leaves is backlog B760.
 
+## 2026-11-07 — B706: the early rollback's backup probe keeps production's 10 s, and the tests give their backup longer
+
+Worker b70x, legion0 (Ubuntu 26.04, linux/amd64, Go 1.27.3), branch
+`fix/b70x-rollback-probe-rules` from main 123a80fa. Commits: d09f0762 (the seam,
+and the tests' longer bound), 2e3c6b2b (the pinning tests), then this record.
+Production's behaviour is unchanged, so no test went red first.
+
+On windows-latest, on two PRs on 2026-11-03, two subtests of
+`TestServeRollsBackAnInstallWhoseVersionRefusesItsSettings` and
+`TestARollbackThatHoldsTheMarkersLockFirstStopsTheMigration` failed. Each time
+serve exited 2 with `the backup at …\bridge.exe.bak did not say its version: it
+did not answer within 10s`, the early rollback's ask of its backup
+(`updater.ProbeVersion`, 10 s). The same PRs' earlier runs had passed.
+
+### What an operator sees when the probe times out
+
+Read from the code. Windows was not run here.
+
+- **Serve exits 2 and writes nothing but its two lock files, which earlier
+  starts made already.** `recoverRefusedInstall` returns `acted == false`, and
+  runServe returns the settings' refusal as it did before B613. The binary,
+  `.bak` and `update-state.json` are left as they were. No store, token file,
+  pid file or certificate is written: the load's refusal returns before
+  runServe's own boot begins. Both locks (`server.lock` and
+  `update-state.lock`) are released as the function returns. The log has the
+  refusal, `config load failed: …` (or `serveConfigRefusal`'s line), then
+  `updater: not rolling back the install of <version>: the backup at <path>
+  did not say its version: it did not answer within 10s`. On Windows, stderr is
+  the service log (`%PROGRAMDATA%\1-bit-bridge\bridge.log`), and
+  `serviceExitCode` adds `bridge service exited: subcommand exited with code 2`.
+- **The service manager starts it again, into the same refusal, and that start
+  asks the backup again.** systemd: the unit's `Restart=always` with
+  `RestartSec=2` and no start-limit override. A start that waits out the
+  probe takes more than 10 s, so the default five starts in ten seconds are
+  never reached. The SCM: exit 2 becomes the service-specific code 1
+  (`serviceServeResult`, `serviceExitCode`). `FailureActionsOnNonCrashFailures`
+  then runs the recovery actions: a restart after 2 s, 2 s, then 30 s for
+  every later failure, with the count reset after an hour. The handler reports
+  Running before serve runs, so no SCM start timeout applies, and the service
+  is a delayed auto-start. launchd: `KeepAlive {SuccessfulExit: false}`
+  restarts an exit 2 too. Each restart finds the same marker and the same
+  backup, its pages now warm, and the 6 h recency window
+  (`recencyWindow`) leaves hundreds of tries. Past the window the start says
+  `the install is older than 6h0m0s` and refuses as it did before B613. The
+  bridge then stays down until the operator fixes the settings or rolls back
+  by hand. A run from a terminal shows the same lines and exits 2, and running
+  it again asks the backup again.
+
+### What the probe protects, and why a slow answer is the cheap one
+
+The rename that puts the backup back is one way. On Unix the backup is renamed
+over the binary. On Windows the running image is moved aside and the backup is
+renamed into its place. Either way the binary that refused its settings is no
+longer at the path. The probe is the one check that `.bak` is the version the
+marker says the install replaced: a version check of the file, not a proof of
+its bytes. Without it a stale `.bak` from an earlier install, a damaged file or
+a non-program would be put back. The result would be a service that cannot
+start at all, or a downgrade past the store.
+
+So a slow answer costs one restart cycle (the bound, the restart delay and
+one start), with the install as it was. A wrong answer, taking a backup that
+said nothing for the version, would put back an unknown binary, and no
+restart undoes that. The timeout fails safe.
+
+### Whether 10 s suits a cold start
+
+Measured here, with goreleaser's flags (`CGO_ENABLED=0 -trimpath -ldflags "-s
+-w"`, the release tags), `.tmp/_b70x/measure.py`:
+
+| binary | size | `version` warm (median of 20) | cold (median of 10) | read from disk, cold |
+|---|---|---|---|---|
+| linux/amd64 release | 52.7 MB | 7.3 ms | 8.3 ms | 0.5 MB |
+| windows/amd64 release | 53.0 MB | (not runnable here) | | |
+| cmd/bridge test binary, no race (CI's Windows leg builds it so) | 89.5 MB (88.6 MB for Windows) | 8.7 ms | 10.8 ms | 1.3 MB |
+| cmd/bridge test binary, race (make test) | 119.3 MB | 1,036 ms | 1,094 ms | 48.0 MB |
+
+"Cold" is the file fsynced and its page cache dropped (`posix_fadvise(DONTNEED)`)
+before each run, read back from this host's NVMe, with `mincore` counting what
+the run brought in. `bridge version` runs the package inits and prints one
+line: it touches 0.5 MB of the release binary, which even an SD card reads in
+well under a second. 10 s is three orders of magnitude above the program's own
+cost here.
+
+What 10 s must also cover on Windows is CreateProcess, where an antivirus scans
+a new or changed executable. A context cannot cut that short: os/exec starts
+`watchCtx` only once `StartProcess` returns, so a scan longer than the bound
+ends in a kill the moment the start returns, whatever the program would have
+answered (`TestAHungFpcalcDoesNotHoldTheSweep`'s record above met the same with
+a copied stand-in). The usual backup is the image the previous service process ran
+until moments before: on Windows the swap moves the running exe aside as
+`.bak`, so it has been scanned and its pages are likely still in memory. The
+cold case is a first start after a reboot: a power loss between the swap and
+the restart, or a rollback stopped before its rename and finished at the next
+boot. Even then the delayed auto-start puts the service about two minutes
+after the boot's other services. Not measured on Windows here.
+
+**No longer bound and no retry for production.** The retry exists already: it
+is the service manager's restart, over an unchanged marker, with a warm and
+scanned backup. A longer bound changes no outcome. It moves time from a restart
+cycle into one start, and in a true hang (a backup that never answers) it costs
+its whole length on every start. The early rollback also holds
+`update-state.lock` across the probe, and `LockState`'s other takers wait 30 s
+for it (`defaultStateLockWait`, whose comment counts the probe's 10 s): a store
+open that migrates, the console's rollback, the boot's housekeeping. A bound
+near 30 s would turn their waits into refusals. An in-process retry would
+double the hang's cost for what the restart already gives. Production keeps
+`updater.VersionProbeTimeout`, 10 s, which is now exported and pinned.
+
+### Why CI was slow, and the seam
+
+The tests' backup is a copy of the running test binary (`installBridgeCopy`: a
+hard link where the host makes one, a fresh copy on Windows), 88.6 MB as CI's
+Windows leg builds it, made anew for each case and started for the first time
+inside the probe, while other packages' tests run beside it (`go test ./...`
+runs as many test binaries at once as the runner has CPUs).
+gate.yml excludes Go's temp tree from Defender in a step that may fail
+(`continue-on-error`), and CI's logs could not be read here (`gh` is refused),
+so whether the exclusion took on those runs is not known. Under the race
+detector the copy takes a second to answer on this idle 16-core host.
+
+- `updater.ProbeVersionWithin(ctx, binary, within)` is ProbeVersion under
+  another bound. `ProbeVersion` is ProbeVersionWithin at `VersionProbeTimeout`,
+  as before.
+- `serveOpts.backupProbeTimeout` is zero in production. `backupProbeBound`
+  resolves zero to `updater.VersionProbeTimeout`, and the early rollback asks
+  within it.
+- `refusedInstall.serve`, and the one direct runServe that reaches the probe
+  (`TestARollbackThatHoldsTheMarkersLockFirstStopsTheMigration`), give the
+  backup `testBackupProbeTimeout`, 2 minutes. No test asserts how long a probe
+  took.
+
+**Why the longer bound does not hide the production path.** Only the number
+differs: the run, the kill at the bound, the refusal past it and every check
+after it are production's code. Production's number is pinned
+(`TestTheEarlyRollbackGivesItsBackupTenSecondsInProduction`). What a backup
+silent past its bound comes to is pinned through the seam
+(`TestABackupSilentPastItsBoundIsAskedAgainAtTheNextStart`, a 1 s bound and a
+backup silent for a minute). A release binary answers `version` in
+milliseconds, so the 2 minutes cover only the test's own copy.
+
+### Who else asks a binary its version
+
+On main, `updater.ProbeVersion` had one caller, the early rollback. B660 (#1424,
+not merged; read on the local branch `fix/b660-install-probation`, since this
+clone has no `origin/fix/b660-install-probation`) adds a second:
+`recoverCrashedInstall` (`cmd/bridge/serve_crashed_install.go`) asks the
+backup's version before its settings check, and `CrashRollback`'s doc names
+it. B660 relies on `ProbeVersion`'s signature, its 10 s, its words and its
+return of the caller's context error, and all four are unchanged. B706's seam
+does not reach B660's crash rollback, whose real-subprocess tests meet the same
+bound on CI's Windows leg. Once B660 merges, `recoverCrashedInstall` can ask
+`updater.ProbeVersionWithin(ctx, backup, backupProbeBound(opts))`, a one-line
+change, named in the report for the orchestrator. B660 also touches
+`serve_refused_install.go`, `run_as_bridge_test.go` and
+`serve_refused_install_r3_test.go`, in hunks clear of this branch's. Neither
+the console's rollback nor the boot rollback asks a version. `CheckConfig`'s
+30 s bound on a candidate's settings check is its own and is unchanged.
+`configCheckTimeout`'s comment no longer claims a 30 MiB binary, and
+`defaultStateLockWait`'s names `VersionProbeTimeout`.
+
+### The tests
+
+- `TestTheEarlyRollbackGivesItsBackupTenSecondsInProduction` (pinning):
+  `backupProbeBound(serveOpts{})` is 10 s, and a test's bound is its own.
+- `TestABackupSilentPastItsBoundIsAskedAgainAtTheNextStart` (pinning): the
+  backup silent for a minute, the bound a second. Serve exits 2, the binary,
+  the backup and the marker are byte for byte as they were, nothing of serve's
+  is written, and the updater line says `did not say its version: it did not
+  answer within 1s`. Then the next start, with the backup answering, exits 75
+  with the backup back and the rollback's record holding this version back.
+- `TestProbeVersionWithinAsksWithinTheBoundItIsGiven` (internal/updater): a
+  stand-in silent for an hour answers `it did not answer within 1s` within the
+  test's 20 s, and one silent for 200 ms is taken within a minute.
+- The silent backup is the copy run with `CMDBRIDGE_TEST_RUN_AS_BRIDGE_SILENT`,
+  a duration (`holdIfSilent`, first in `runAsBridge`). The updater's stand-in
+  takes a `silent` script file. Each ends by itself when its pause is over.
+
+### Negative controls
+
+Predicted in `.tmp/_b70x/controls.predictions.txt` before any ran, each alone
+on 2e3c6b2b, the bytes restored from memory (`git status` clean after them all).
+T1 to T5 are the first two tests above, the two CI failures, and
+`TestServeLeavesAnInstallItCannotProveAsItIs`. U1 is the updater test above,
+and U2 `TestProbeVersionNamesTheVersionTheBinarySays`.
+
+| # | Mutation | Predicted red | Observed |
+|---|---|---|---|
+| BASE | none | none | all green |
+| NC1 | backupProbeBound's production value 30 s | T1 | T1 alone: "gives its backup 30s in production, want 10s" |
+| NC2 | the early rollback calls `ProbeVersion`, the seam unused | T2 | T2 alone, at 10.2 s, "within 10s" |
+| NC3 | a "did not answer" error taken for the marker's version | T2 | T2 alone: exit 75 at the first start |
+| NC4 | ProbeVersionWithin runs and words VersionProbeTimeout | U1, T2 | U1 (its silent case) and T2, each "within 10s"; U2, T1, T3, T4, T5 green |
+| NC5 | the copy's silence removed | T2 | T2 alone: exit 75 at the first start |
+| NC6 | the stand-in's silence removed | U1 | U1 alone: it answered 0.2.1 |
+| NC7a | none; every backup answers after 11 s (the variable set for the whole test binary) | none | T3's first case (22.1 s) and T5 (23.7 s) green |
+| NC7b | as NC7a, with the tests' long bound removed (the test side before B706) | T3's case, T5 | both, in CI's words: "serve = 2, want 75 … did not answer within 10s" and "serve = 2 before its rename" |
+
+NC7b reproduces the Windows failure on Linux, with a backup slower than
+production's bound, and NC7a shows the tests' bound carrying it.
+
+### Checks
+
+On legion0 at 73d74a2d, through the shared build lock (`.tmp/_b70x/gate.sh`).
+B722's commit after it touches only `ops/`.
+
+- `make fmt`: no file changed. go1.27.3's gofmt (`go run cmd/gofmt -l`) on
+  every changed Go file: clean.
+- `make vet` and `GOOS=windows make vet`: clean.
+- `make test`, under race, `-timeout 30m`, `-p 4`, TMPDIR under
+  `.tmp/_b70x`: 88 packages ok, none failed and none cached, in 2,002 s.
+  cmd/bridge took 1,082 s, internal/admin 998 s, internal/manifest 1,585 s
+  and internal/updater 28 s. Of the Linux-only packages, internal/alsapcm
+  took 48 s, internal/alsa 2 s and internal/atomicwrite 20 s.
+- `make build-all`: the six targets.
+- The qualification check, `go run ./scripts/qualification-version -base main
+  -head HEAD` with the tags: "qualification version OK: main..HEAD".
+- Run alone under race: the two cmd/bridge pins,
+  `TestServeRollsBackAnInstallWhoseVersionRefusesItsSettings` (17.0 s; the
+  race-built copy takes about a second for each start) and
+  `TestARollbackThatHoldsTheMarkersLockFirstStopsTheMigration` (5.2 s).
+- `TestEveryCitedTestNameExists` passes over this record, and fails on a ghost
+  name planted in the log (the planted bytes restored).
+- Not run here: Windows and macOS natively, nor CI's runners. What this record
+  says of the SCM, of Defender and of CreateProcess is read from the code and
+  the docs, not measured.
+
+## 2026-11-07 — B722: dlna-upnp.md relieved: four long forms moved verbatim, each pointer keeping its binding sentences
+
+Worker b70x, legion0, the same branch as B706 (`fix/b70x-rollback-probe-rules`).
+The rules half ships as `rules-b70x.patch` (this worker cannot write
+`.claude/`): four hunks of `.claude/rules/dlna-upnp.md`, `git apply --check`
+clean, and a strict applier reproduces the moved file byte for byte. The long
+forms are committed here, in `ops/History-rules-dlna-upnp.md`, under its
+`## DLNA, UPnP and discovery`, since that History file is not under `.claude/`.
+
+### The figure
+
+`make docs-check` today: "ok — CLAUDE.md 79.6%; player.md 98.3%; worst load,
+player_openhome_test.go 65.6%". It prints only the largest rules file, so
+dlna-upnp.md's share comes from the same script's `measure`: 97,334 bytes,
+97.3% of its 100,000 (97.0% on 2026-11-04). With the patch it is 87,127 bytes,
+87.1%.
+
+### What moved, and each pointer against its long form
+
+Each candidate came from `move_entry.py --largest 25` and was dry-run first.
+Each pointer was built from exact pieces of its own entry, with whitespace runs
+collapsed as a one-line pointer has them, and checked by `move_entry.plan` with
+`--text`'s checks. The default pointer, which keeps the bold title and the
+bolded Don't/Never sentences, would have dropped sentences that state rules in
+other words. Mechanism, measurements, history, residuals and test lists go to
+the long form. The moves, highest line first:
+
+| entry | bytes | pointer | what the pointer keeps besides the title and its Don'ts |
+|---|---|---|---|
+| L1152, eligibility and selection | 2,900 | 415 | `PickAllLANEligibleInterfaces`' rule that a point-to-point interface whose only addresses are link-local is left out whenever anything else is eligible, cut at its colon (the measurement follows). The ranking (`lanPreference`) is the title's "prefers a real LAN", and goes to the long form. |
+| L854, each SSDP advertiser on its own interface | 4,420 | 591 | `IP_MULTICAST_ALL = 0` set in the Control, **before the bind**, cut at its colon (the window it closes follows); a kernel that refuses the option keeps the old listener with one Warn, never a refusal that takes DLNA down; the unconnected sender, pinned before anything is sent (`openNotifySender`). |
+| L816, a test's advertiser on loopback | 2,699 | 509 | a new test does the same; the skip decided by the pin, not only by Start's error; the production fallback stays; measuring what leaves a Linux host from another namespace, never a listener in the same one. |
+| L217, a malformed host | 2,248 | 545 | never stripped so the remainder can be classified; an ASCII space in an IPv6 zone whose head parses is kept; fullwidth digits and a literal `%25` are not this kind; "Do not drop that dial check", which is not bold and starts with no Don't word, so the default pointer would have left it out. "A control or any other space in that zone is still malformed" is not kept: the title and the zone exception's narrow wording say it. |
+
+12,267 bytes moved for 2,060 bytes of pointers. `verify_moves.py --base main`,
+on a copy of the tree with the patch applied (git pointed at this worktree's
+index): "moved: 4 blocks, 12267 bytes", "citations: 35 phrases cited in
+instruction files, 0 broken", the four pointers listed as the new blocks
+(2,060 bytes), "RESULT: PASS". `make docs-check` on that copy: ok. The worst
+load is unchanged, and the heaviest load with dlna-upnp.md is now
+`internal/baseurl/baseurl_test.go`'s, 256,004 bytes, 53.3%.
+
+### What stays, and why
+
+The larger entries hold more sentences worded as rules than a 600-byte pointer
+can keep verbatim, so they stay whole.
+
+- **L1050** (7,065 B, the listener and SSDP serving only LAN addresses). Its
+  default pointer (588 B) drops "It warns and starts; don't make it refuse" and
+  "and don't name the peer in a refusal", whose bold starts with no Don't word.
+  With them, the warning of a pin to an address not served, `dlna.allowTsnet`'s
+  "reserved and has no effect", and the exception "(only a listener that
+  cannot be armed answers as before, with one Warn)", it is 771 bytes, and its
+  suffix must keep "· doc: docker.md".
+- **L513** (5,031 B, the listener's bounds). The five bolded bounds and the
+  rules worded "stays" (the initial NOTIFY best-effort, `TotalMatches` and
+  `UpdateID`, `WriteTimeout` unset) come to 807 bytes.
+- **Read, not built.** L374, L699, L162, L459, L116, L292, L250 and L589 each
+  carry five to ten more rule sentences (a dial approval's source, a cache's
+  refusals, an approval kept beside its URL, a list that is the one list, a
+  route's shape). L338, L762 and L636 come to an estimated 650 to 700 bytes.
+  L762's "Don't give a client its own copy of the policy" is not bold, so its
+  default pointer would drop it.
+
+### player.md (not touched)
+
+From main, unverified against B728 B11's patch (#1427, which brings player.md to
+99.3%), `move_entry.py --largest 8` lists these:
+
+- L96 (5,481 B): refused by move_entry, since its bolded Don't is 658
+  characters.
+- L91 (1,481 B): its default pointer keeps what its rule sentences say. Its
+  bold "The reason is the process's, so every test that asserts the line calls
+  `forgetPlayerOffReason` first" is its last Don't in other words.
+- Each of these needs `--text` for rule sentences its default pointer drops:
+  - L138 (2,004 B): a successor at the sink's rate and depth takes that sink's
+    packing.
+  - L115 (1,743 B): a command whose context ended does not run, and Stop never
+    waits.
+  - L93 (1,607 B): a binding's interface suffix is only a preference.
+  - L117 (1,556 B): a call's deadline and what a derived context answers.
+  - L79 (1,539 B): a pause by zeros reserves two segments, a refused reopen
+    comes back typed, and the sink ends rather than skip frames.
+  - L109 (1,449 B): disabling publishes `disabled`, and nothing in a snapshot
+    means play.
+- All of this is a first read, not a dry run.
+
+### Checks
+
+- On a fresh copy of 715ac544, the commit holding the long forms, with
+  `rules-b70x.patch` applied by `git apply` (`--check`, then the apply, both
+  clean):
+  - The rules file is 87,127 bytes, the same bytes the moves made.
+  - The History file is the committed one.
+  - `make docs-check`: ok ("CLAUDE.md 79.6%; player.md 98.3%; worst load,
+    player_openhome_test.go 65.6%"). The line on stderr that git listed no
+    tracked files is the self-test's, by design.
+  - `verify_moves.py --base main`, git pointed at this worktree's index:
+    PASS, 4 blocks and 12,267 bytes moved, 35 cited phrases, 0 broken.
+  - `TestEveryCitedTestNameExists`: ok.
+- In the worktree, without the patch: `TestEveryCitedTestNameExists` ok, and it
+  fails on a ghost name planted in the History file (the planted bytes
+  restored). The budgets are ok, with dlna-upnp.md at 97.3% until the patch
+  lands.
+- The patch is 19,936 bytes. A strict applier of its own reproduces the moved
+  file, and the job's copy is byte for byte the one checked. It has no blank
+  context lines: the four hunks fall inside the file's one list.
+- The rest of the gate is B706's above, which ran at 73d74a2d. This commit
+  touches only `ops/`.
 
 ## 2026-11-07 — B740: the build-site census skips make test's TMPDIR
 

@@ -34,13 +34,13 @@ func StateLockPath(dataDir string) string {
 const stateLockRetry = 50 * time.Millisecond
 
 // defaultStateLockWait is how long LockState waits for another holder (the
-// early rollback holds the lock across its backup's version, ProbeVersion's
-// 10 s at most, a record and a rename; a disarm, across one marker write; the
-// boot's housekeeping, across two marker writes and a rename or the backup's
-// removal; an install, across a marker read, two marker writes and its swap,
-// which on Windows first waits up to scmStopWait for the SCM to stop the
-// service; an operator's rollback, across a read, a write and the backup's
-// rename, with the same stop on Windows).
+// early rollback holds the lock across its backup's version, at most
+// VersionProbeTimeout's 10 s in production, a record and a rename; a disarm,
+// across one marker write; the boot's housekeeping, across two marker writes
+// and a rename or the backup's removal; an install, across a marker read, two
+// marker writes and its swap, which on Windows first waits up to scmStopWait
+// for the SCM to stop the service; an operator's rollback, across a read, a
+// write and the backup's rename, with the same stop on Windows).
 const defaultStateLockWait = 30 * time.Second
 
 // stateLockHookMu guards the test seams below: stateLockWait,

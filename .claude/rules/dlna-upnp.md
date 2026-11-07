@@ -214,39 +214,7 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   what the other side says about it (here, backlog B78). (This bullet also
   said the later dials of a HOSTNAME control URL were not covered; the next
   bullet covers them.)
-- **A host that, decoded, holds a Unicode control character or whitespace
-  is malformed, and it is refused before any other kind** (2026-10-12,
-  backlog B246; the app's twin is acoseac/1-bit#2042). `classifyHost` asks
-  `hostIsMalformed` on the original host, before the trailing-dot trim and
-  before `ParseAddr`. `unicode.IsControl` or `unicode.IsSpace` is the
-  kind `hostMalformed`. The character is never stripped so the remainder
-  can be classified: `127.0.0.1` plus U+0085 stays malformed, and a strip
-  would call it this machine. Go's `url.Parse` already refuses an ASCII
-  control or space in a host. What reaches the classifier is the non-ASCII
-  set (U+0085, U+00A0, U+2028, U+3000). **An ASCII space inside an IPv6
-  zone whose head parses as an address is kept**: Windows names the
-  adapter `Wi-Fi 4`, and `TestParseDeviceDescription_KeepsNoServiceURLThatDoesNotParseBack`
-  requires `http://[fe80::1%25Wi-Fi%204]:8080/d.xml`. A control or any
-  other space in that zone is still malformed. A `%` whose head is not an
-  IP is not a zone (the `%25` name). `hostKindAllowed` refuses the kind.
-  `isFetchableURL` refuses it, so `fetchableLocation` reads such a
-  LOCATION as absent. `resolveServiceURL` returns
-  `errServiceURLMalformedHost` before `isFetchableURL` and again in the
-  kind switch. `LocationPermittedBy` refuses it even when the packet came
-  from loopback, ahead of the localhost arm that would otherwise keep a
-  name it cannot parse. `OperatorChose` approves only this machine and
-  link-local, so a malformed manual URL approves nothing.
-  `callbackHostAllowed` already refuses one: it is not an address
-  `ParseAddr` accepts. **Fullwidth digits (`１２７．０．０．１`) and a
-  literal `%25` are not this kind.** IDNA maps the fullwidth host to
-  `127.0.0.1`; `%25` decodes to a name holding `%`. Both stay elsewhere,
-  and `refuseUnapprovedHostLocal` is the backstop that stops the dial.
-  Do not drop that dial check because the string check now exists.
-  (`TestAHostWithAControlOrASpaceIsMalformed`,
-  `TestAMalformedHostIsNeverStrippedBeforeItIsClassified`,
-  `TestAMalformedHostIsRefusedAtEverySiteThatJudgesOne`,
-  `TestFullwidthDigitsAndAPercent25StayOnTheDialCheck`,
-  `Test_callbackHostAllowed`.)
+- **A host that, decoded, holds a Unicode control character or whitespace is malformed, and it is refused before any other kind** The character is never stripped so the remainder can be classified: `127.0.0.1` plus U+0085 stays malformed, and a strip would call it this machine. **An ASCII space inside an IPv6 zone whose head parses as an address is kept**. A control or any other space in that zone is still malformed. **Fullwidth digits (`１２７．０．０．１`) and a literal `%25` are not this kind.** `OperatorChose` approves only this machine and link-local, so a malformed manual URL approves nothing. IDNA maps the fullwidth host to `127.0.0.1`; `%25` decodes to a name holding `%`. Both stay elsewhere, and `refuseUnapprovedHostLocal` is the backstop that stops the dial. Do not drop that dial check because the string check now exists. → History-rules-dlna-upnp.md
 - **…and every LATER request to a device dials under the approval its URL
   came with, because a NAME in it resolves again at each dial** (backlog B36,
   2026-09-28). The ingest's SOAP Browse (`upnpUpstreamSOAPHTTPClient`, then on
@@ -813,107 +781,8 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   and returns it, which the shared log drops; a write that fails for its own reason still
   logs one Debug line per target, and the burst's result reaches the
   default level through the log.
-- **A test that starts an SSDP advertiser binds it to the loopback
-  interface, and a discovery test client sends no M-SEARCH** (2026-09-28,
-  backlog B38). Two `internal/dlna` tests bound the OS default, so one run of
-  the package multicast about 310 NOTIFYs of a fake MediaServer with a
-  loopback LOCATION to every device and bridge on the LAN (measured with a
-  listener joined on en0, three runs; about 300 of them from
-  `Test_SSDPAdvertiser_StartStopRaceFree`'s 1 ms advertise interval), and
-  each package's `TestStopWaitsForInFlightFetch` sent a real M-SEARCH.
-  `loopbackInterface(t)` pins the join, the sends and the listener to
-  loopback and keeps the race and lifecycle coverage (both tests PASS, not
-  skip, on macOS and in a Linux container); `newTestClient` and
-  `newServerDiscoveryTestClient` install a `writeMSearch` that sends nothing.
-  Measured after: 0 datagrams on en0 in three runs of each package, while a
-  lo0 listener heard the advertisers' NOTIFYs; on Linux 0 on the Docker
-  bridge, where main put 299. **A new test that starts an advertiser or a
-  client does the same.** **The skip is decided by the PIN, not only by
-  Start's error**: Start only warns when `SetMulticastInterface` fails, and
-  sends on the OS default interface, so a test whose Start succeeded would
-  multicast onto the LAN on such a host. `loopbackInterface` first pins a
-  socket of its own with Start's own call (`pinMulticastInterface`) and
-  skips where that fails (CodeRabbit on #1086). The fallback itself stays:
-  a production advertiser whose pin fails still advertises. **Measure what
-  leaves a Linux host from ANOTHER network namespace, or with tcpdump on
-  the bridge, never with a listener
-  in the same one**: Go binds a multicast listener to the WILDCARD address
-  and the group's port (this said "the group address" until 2026-09-29),
-  and with Linux's default `IP_MULTICAST_ALL` a socket joined on one
-  interface also receives the group's datagrams arriving on any interface
-  another socket joined (a listener on eth0 heard the loopback advertisers'
-  NOTIFYs, and one on lo heard eth0's). A test's own listener keeps that
-  default; the advertisers' listeners turn it off since backlog B71 (the
-  next bullet). On the Windows runner the join and the pin both take on
-  "Loopback Pseudo-Interface 1": the tests run there, and its log shows them
-  starting with no pin warning. What left a Windows host was measured on
-  2026-09-29 (B71, on a Windows 11 host with Tailscale, with a listener on
-  the same LAN): nothing reached the LAN, because the advertiser's
-  connected NOTIFY sender took the Tailscale route, which its pin did not
-  move. The sender is unconnected since.
-- **Each SSDP advertiser hears only the multicast M-SEARCHes that arrive on
-  its own interface, and announces from that interface's address** (2026-09-29,
-  backlog B71). The DLNA server runs one SSDP endpoint per LAN interface,
-  each with that interface's LOCATION (#328), on one listener per interface
-  that every device of the SSDP subsystem shares (B470 PR 5a1, the
-  subsystem's bullet below), and by the eligibility rule a Linux
-  host running Docker is such a host: `docker0` and every user bridge carry
-  a private IPv4.
-  **The listener**: `net.ListenMulticastUDP` binds the wildcard address
-  (net's `listenDatagram` rewrites the group before the bind), and Linux's
-  default `IP_MULTICAST_ALL = 1` delivers the group's datagrams to it from
-  every interface where any socket on the host joined, so every advertiser
-  answered every interface's M-SEARCHes with its own LOCATION. Measured with
-  the real binary in three network namespaces: each M-SEARCH from either
-  subnet (6 of 6) got two answers, one naming the other subnet, the wrong
-  one first in 3. macOS and Windows deliver per joined interface
-  (measured). `listenSSDP` (ssdp_listen_linux.go) sets `IP_MULTICAST_ALL =
-  0` in the `ListenConfig`'s Control, **before the bind**: from the bind on
-  a wildcard socket takes other interfaces' group datagrams, so setting it
-  after `ListenMulticastUDP` returns leaves a window. A kernel that refuses
-  the option keeps the old listener with one Warn, never a refusal that
-  takes DLNA down. **The sender is an unconnected socket, pinned before
-  anything is sent, writing each NOTIFY to the group** (`openNotifySender`).
-  `net.DialUDP` fixed its route and source address at the connect, along
-  the group's route, and a pin set afterwards did not move the source (Linux,
-  macOS) or even the route (Windows). Measured: the second interface's
-  NOTIFYs came from the first interface's address, and a renderer with no
-  route back received 0 of 5 (5 of 5 now); on Windows with Tailscale
-  (home-pc's shape: Windows' SSDP service holds the group on every
-  interface and Tailscale's route has metric 5) the connect took the
-  Tailscale address and route, and a sender pinned to Ethernet put 0 of 4
-  datagrams on the LAN (2 of 2 now). **And on a host with no route to the
-  group (no default route) the connect failed ("network is unreachable"),
-  no advertiser could start, and DLNA did not start at all**; an
-  unconnected socket needs no route. **Don't connect it, and don't pin a
-  socket after connecting it.** A single-interface host sees no change:
-  its advertiser's one membership is where every search arrives, and its
-  source is that interface's address either way. The discovery clients
-  take nothing from `IP_MULTICAST_ALL` (an ephemeral port, no membership);
-  the upstream client's MediaServer search is answered by the bridge's own
-  advertisers, with both LOCATIONs before and one now (a looped-back
-  search, measured), and only a configured server is ever walked. Pinned
-  by `TestAnSSDPListenerHearsOnlyTheInterfaceItJoined` (Linux, and macOS
-  where the host sends its datagram: GitHub's macOS runner answers `no
-  route to host` for en0, and the test skips there),
-  `TestAStartedAdvertisersListenerHearsOnlyItsOwnInterface` and
-  `TestAListenerTheKernelWillNotConfineStillListensAndSaysSo` (Linux),
-  `TestAStartedAdvertiserWritesItsNotifiesFromAnUnconnectedSocket` (all),
-  `TestAnAdvertiserOnLoopbackNotifiesFromALoopbackAddress` (macOS, Windows:
-  Linux gives a lo-pinned multicast another interface's address either way,
-  127.0.0.1 being host-scoped), and
-  `TestSSDPAdvertisersKeepToTheirOwnInterfaces`, the real server over veths
-  in a network namespace of the test's own, with and without a route to the
-  group (root, or a user namespace: dido, not CI). **Still open**: a unicast
-  M-SEARCH to port 1900 reaches ONE listener's socket (Linux: the last
-  bound; macOS, Windows: the first) and the MediaServer answers it with its
-  endpoint on that listener, whichever served address it was sent to
-  (backlog B119, which B470 PR 5a1 keeps exactly; since
-  B48 one sent to an address the server does not serve is not answered at
-  all, the bullet after the Tailscale one below); on Windows the
-  advertiser hears no search sent from its own host (B120); and a pinned
-  `dlna.listenAddress` advertises on the picker's interface, which need
-  not hold that address (B121).
+- **A test that starts an SSDP advertiser binds it to the loopback interface, and a discovery test client sends no M-SEARCH** `loopbackInterface(t)` pins the join, the sends and the listener to loopback and keeps the race and lifecycle coverage (both tests PASS, not skip, on macOS and in a Linux container); `newTestClient` and `newServerDiscoveryTestClient` install a `writeMSearch` that sends nothing. **A new test that starts an advertiser or a client does the same.** **The skip is decided by the PIN, not only by Start's error**: Start only warns when `SetMulticastInterface` fails, and sends on the OS default interface. `loopbackInterface` first pins a socket of its own with Start's own call (`pinMulticastInterface`) and skips where that fails. The fallback itself stays: a production advertiser whose pin fails still advertises. **Measure what leaves a Linux host from ANOTHER network namespace, or with tcpdump on the bridge, never with a listener in the same one** → History-rules-dlna-upnp.md
+- **Each SSDP advertiser hears only the multicast M-SEARCHes that arrive on its own interface, and announces from that interface's address** `listenSSDP` (ssdp_listen_linux.go) sets `IP_MULTICAST_ALL = 0` in the `ListenConfig`'s Control, **before the bind** A kernel that refuses the option keeps the old listener with one Warn, never a refusal that takes DLNA down. **The sender is an unconnected socket, pinned before anything is sent, writing each NOTIFY to the group** (`openNotifySender`). **Don't connect it, and don't pin a socket after connecting it.** The discovery clients take nothing from `IP_MULTICAST_ALL` (an ephemeral port, no membership); the upstream client's MediaServer search is answered by the bridge's own advertisers, with both LOCATIONs before and one now (a looped-back search, measured), and only a configured server is ever walked. **Still open**: a unicast M-SEARCH to port 1900 reaches ONE listener's socket (Linux: the last bound; macOS, Windows: the first) and the MediaServer answers it with its endpoint on that listener, whichever served address it was sent to (backlog B119, which B470 PR 5a1 keeps exactly; since B48 one sent to an address the server does not serve is not answered at all, the bullet after the Tailscale one below); on Windows the advertiser hears no search sent from its own host (B120); and a pinned `dlna.listenAddress` advertises on the picker's interface, which need not hold that address (B121). → History-rules-dlna-upnp.md
 - **`upnp_track_routing.server_udn` holds the ingest's `StableServerKey`, NOT the
   device's raw UDN.** They are equal only for a device whose UDN is already
   lowercase, and never for a manually-configured server (`manual:<sha256(url)>`).
@@ -1149,46 +1018,7 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   `TestEveryAdvertiserAnswersByTheServersServedAddrs`.)
 - **…and the parser of each datagram's control data holds whatever it is handed, on every platform: `parseDatagramMeta` reports x/net's answer wherever `ipv4.ControlMessage.Parse` returns, and neither a destination nor an arrival wherever that parse panics, whatever else the buffer holds** (2026-10-31, backlog B610; Windows reads its own `parseWSAPktinfo`). An entry x/net's per-platform table leaves unset has a name and a length of 0 and no parse function (only Darwin's sets every entry), and up to x/net v0.61.0 an IPPROTO_IP message of type 0 called the missing one; v0.62.0 passes such an entry over (backlog B615), so no input known reaches the recover now. No kernel writes such a message and no network peer can supply the ancillary bytes, but the SSDP read loop has no recovery, so a panic there ends the process. **Don't call x/net's parse outside `parseControlMessage`'s recover, widen that recover past the one call, trade it for anything narrower (a filter of type-0 messages, a fix of one platform's), or drop it because x/net v0.62.0 no longer panics on a message of type 0: it is the defence in depth for whatever else panics there.** `TestParseDatagramMetaAnswersEveryShapeOfControlData` (red on any shape x/net panics on again), `FuzzParseDatagramMetaIsXNetsParse` and `TestTheDatagramMetaSeedsAreLinuxsControlData` pin it. → History-rules-dlna-upnp.md
 - **…and both announce and serve only the private (RFC 1918, a ULA outside Tailscale's), link-local and loopback addresses, whichever order an interface lists them in; a public address only as the IP literal `dlna.listenAddress` names, the operator's opt-in, that address alone** (2026-11-02, backlog B687, security). Eligibility stays per interface, and serving is per address: the wiring announces each member's first RFC 1918 or 169.254 IPv4 address (`firstLANIPv4OnInterface`, every address read, and the fallback ServerURL alike, never a public one); `servedAddrs` serves no public address but the pin (`PinnedPublicAddress`: an IP literal, globally routable, never 100.64/10 or Tailscale's ULA, never a name or a wildcard however spelled), while an interface holds it, its advertiser on that interface, eligible or not; the Host check takes a literal only of those classes or the pin (`mayName`), so a wildcard ContentDirectory builds no URL on a public address; a specifically bound listener builds file and artwork URLs on its actual bound address and port, ignoring the accepted Host; NewServer refuses a malformed or hostless ServerURL or LOCATION, a literal of another class unless `dlna.listenAddress` names it, and a hostname unless it is the configured listen name, so a pin to the tailnet's still warns and starts; a listen name must bind one address, never a wildcard; Start refuses a listener not bound to the pin, and says once, naming no address, that anyone who can reach it can browse and stream the library; and the wiring says once a start, naming no address, that it left a global unicast IPv4 or IPv6 address out. **Don't serve or announce a public address but the literal `dlna.listenAddress` names, take a name, a wildcard, 100.64/10 or Tailscale's ULA as the opt-in, accept a Host literal of a class the listener does not serve, choose an announced address by its place in the interface's list, fall back to a public one, reject a whole mixed interface (the pickers drive mDNS and discovery too), or name an address in either new line.** `TestTheMediaServerServesAMixedInterfaceOnItsPrivateAddressAlone`, `TestTheMediaServerAnswersNoRequestNamingItsPublicAddress`, `TestTheMediaServerFallsBackToNoPublicAddress`, `TestTheMediaServerServesThePublicAddressItsListenAddressNames`, `TestTheMediaServerTakesNoPublicAddressItsListenAddressDoesNotName`, `TestTheMediaServerSaysOnceAndWithoutTheAddressThatItLeftOutAPublicAddress`, `Test_ownHostOnly_RefusesAnAddressOfThisHostItDoesNotServe`, `TestNewServerRefusesToAdvertiseAnAddressItWouldNotServe`, `TestStartRefusesANamedListenAddressOnAWildcardListener` and `TestTheAddressClassesAndTheOptIn` pin it. → History-rules-dlna-upnp.md
-- **Eligibility is the allowlist; SELECTION prefers a real LAN among what it
-  admits, and the two stay separate** (2026-09-27). `PickLANEligibleInterface`
-  returned the FIRST eligible interface, and macOS enumerates system utuns
-  ahead of `en0`: on the dev Mac that was `utun0` (`UP,POINTOPOINT,RUNNING,
-  MULTICAST`, one fe80 address), which the zero-config arm admits. The mDNS
-  responder pinned itself there, its IPv4 listen failed without a word
-  (hashicorp/mdns drops that error, and utun0 has no IPv4), and neither
-  hashicorp/mdns's client on `en0` nor `dns-sd -B` found the bridge, while
-  the NUC's bridge on the same LAN was found. The picker now ranks what
-  eligibility admits (`lanPreference`): not point-to-point first, then a
-  private IPv4, then any other usable address (a ULA, the opted-in tsnet
-  interface), then link-local only, and enumeration order among equals, so
-  a host whose first eligible interface already ranks best keeps it (dido
-  measured: `enp1s0f0` and the same five-member set as before; three
-  members since the next paragraph's rule and the Tailscale bullet above).
-  `PickAllLANEligibleInterfaces` keeps its members and order but leaves out
-  a point-to-point interface whose only addresses are link-local whenever
-  anything else is eligible: six such utuns sat in the dev Mac's set, and
-  the renderer and UPnP-upstream discovery clients start one SSDP client per
-  member, while an IPv4 multicast send pinned to such a tunnel fails
-  (`sendto: can't assign requested address`, hashicorp/mdns's client on
-  utun0). **Don't fold the preference into `IsLANEligibleInterface`**:
-  dropping every point-to-point interface, or the zero-config arm, from
-  ELIGIBILITY takes away an opted-in tunnel and a direct-cable renderer,
-  and the bullet above says why each arm is there. **Don't reduce the key
-  to either half**: the flag alone misses Windows' Wintun adapter
-  (WireGuard's, and Tailscale's when opted in; `IF_TYPE_PROP_VIRTUAL`,
-  which Go gives no point-to-point flag) and a Mac's `bridge0` holding a
-  self-assigned address, and the class alone ties a WireGuard tunnel's
-  private 10.x with `en0` and lets enumeration order pick the tunnel (each
-  half turns rows red that the other leaves green). One case moves the
-  other way: a host whose LAN is zero-config (169.254 / fe80 only) beside a
-  private-IPv4 bridge (`docker0`, a VM's) now binds the bridge, where the
-  first eligible used to win if it came first. The tables drive
-  `pickLANInterface` and `pickAllLANInterfaces`, the seam both exported
-  pickers call (`TestPickLANInterfacePrefersANonTunnelWithAPrivateIPv4`,
-  `TestPickAllLANInterfacesDropsALinkLocalOnlyTunnel`), and
-  `TestTheExportedPickersRunTheSelection` compares the exported pair with it
-  on the host, which can fail only where the first eligible interface does
-  not rank best (the dev Mac, not a typical Linux runner).
+- **Eligibility is the allowlist; SELECTION prefers a real LAN among what it admits, and the two stay separate** The picker now ranks what eligibility admits (`lanPreference`): not point-to-point first, then a private IPv4, then any other usable address (a ULA, the opted-in tsnet interface), then link-local only, and enumeration order among equals, so a host whose first eligible interface already ranks best keeps it (dido measured: `enp1s0f0` and the same five-member set as before; three members since the next paragraph's rule and the Tailscale bullet above). `PickAllLANEligibleInterfaces` keeps its members and order but leaves out a point-to-point interface whose only addresses are link-local whenever anything else is eligible. **Don't fold the preference into `IsLANEligibleInterface`**: dropping every point-to-point interface, or the zero-config arm, from ELIGIBILITY takes away an opted-in tunnel and a direct-cable renderer. **Don't reduce the key to either half**: the flag alone misses Windows' Wintun adapter (WireGuard's, and Tailscale's when opted in; `IF_TYPE_PROP_VIRTUAL`, which Go gives no point-to-point flag) and a Mac's `bridge0` holding a self-assigned address, and the class alone ties a WireGuard tunnel's private 10.x with `en0` and lets enumeration order pick the tunnel (each half turns rows red that the other leaves green). → History-rules-dlna-upnp.md
 - **…and then leaves out a member with no IPv4 address, whenever one with
   an IPv4 address remains** (2026-09-28). Every consumer of the set runs
   SSDP over IPv4 (udp4, 239.255.255.250): the advertisers, which already
