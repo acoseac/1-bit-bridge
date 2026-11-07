@@ -3285,15 +3285,20 @@ func CheckLibraryName(name string) error {
 
 // RepairLibraryName returns name as Normalize stores and serves it, but for
 // the default: valid UTF-8, with U+FFFD for each run of bytes that are not;
-// trimmed (TrimLibraryName); and, when longer than MaxLibraryNameLength runes,
-// cut to that many and trimmed again, since a cut can end on a space. "" is a
-// name that is blank once trimmed, which Normalize serves as
-// DefaultLibraryName and `bridge init` treats as no name at all.
+// trimmed (TrimLibraryName); without its control characters
+// (WithoutControlCharacters, backlog B744: a hand edit, BRIDGE_LIBRARY_NAME or
+// a prior installation's name could hold them) and trimmed again; and, when
+// longer than MaxLibraryNameLength runes, cut to that many and trimmed again,
+// since a cut can end on a space. "" is a name that is blank once trimmed,
+// which Normalize serves as DefaultLibraryName and `bridge init` treats as no
+// name at all.
 //
 // What CheckLibraryName refuses a typed name for, this repairs in a name that
 // is already stored, so what it returns always passes CheckLibraryName.
 func RepairLibraryName(name string) string {
 	name = TrimLibraryName(strings.ToValidUTF8(name, "\ufffd"))
+	// Valid UTF-8 now, so the strip reads runes and replaces nothing.
+	name = TrimLibraryName(WithoutControlCharacters(name))
 	runes := 0
 	for i := range name {
 		if runes == MaxLibraryNameLength {
@@ -3302,6 +3307,58 @@ func RepairLibraryName(name string) string {
 		runes++
 	}
 	return name
+}
+
+// WithoutControlCharacters is s without its control characters: the runes
+// U+0000 to U+001F, U+007F and U+0080 to U+009F (backlog B744). They are read
+// as runes, after decoding, never as bytes: "Ā" is the bytes C4 80 and "š"
+// C5 A1, whose second bytes are the numbers of C1 controls and are none. A
+// byte that is not UTF-8 decodes as U+FFFD (strings.Map), which is kept, so a
+// caller that refuses such a name asks before it strips
+// (CleanTypedLibraryName): stripped first, the name would be taken.
+//
+// The one definition every entry of the library name strips by (init's
+// --name and its prompt, the console's settings save, RepairLibraryName for
+// what loads, firstInstallName for the host's name) and the Bonjour instance
+// too (mdns's sanitizeInstance).
+func WithoutControlCharacters(s string) string {
+	return strings.Map(func(r rune) rune {
+		if isControlRune(r) {
+			return -1
+		}
+		return r
+	}, s)
+}
+
+// isControlRune reports whether r is one of the runes WithoutControlCharacters
+// removes: C0, DEL and C1.
+func isControlRune(r rune) bool {
+	return r <= 0x1f || r == 0x7f || (r >= 0x80 && r <= 0x9f)
+}
+
+// CleanTypedLibraryName returns a library name the operator typed (init's
+// --name and its prompt, the console's settings save) as it is stored, or why
+// it is refused (backlog B744): trimmed (TrimLibraryName); refused when it is
+// not UTF-8, first, since the strip maps runes and would take those bytes as
+// U+FFFD; without its control characters (WithoutControlCharacters) and
+// trimmed again; and refused when it is past MaxLibraryNameLength runes
+// (CheckLibraryName). "" is a name blank once its controls are gone, which
+// each entry answers by its own blank policy: init takes it for no name, the
+// settings save refuses it. What it returns, RepairLibraryName returns
+// unchanged, so a typed name is served after a restart as it was live.
+func CleanTypedLibraryName(name string) (string, error) {
+	name = TrimLibraryName(name)
+	if !utf8.ValidString(name) {
+		return "", CheckLibraryName(name)
+	}
+	name = TrimLibraryName(WithoutControlCharacters(name))
+	if name == "" {
+		return "", nil
+	}
+	if err := CheckLibraryName(name); err != nil {
+		return "", err
+	}
+	return name, nil
 }
 
 // Normalize rewrites the fields whose canonical on-disk form differs from
@@ -3459,11 +3516,18 @@ func (c *Config) normalize(warn bool) error {
 	// here, refusing would stop a bridge from starting over a display name,
 	// so the name is cut or its bytes replaced, and the log says so, since
 	// the operator did not choose the result.
+	//
+	// And without its control characters, since 2026-11-07 (backlog B744):
+	// the runes WithoutControlCharacters removes, which a typed name loses
+	// too (CleanTypedLibraryName), so a name served live is the name served
+	// after a restart.
 	name := RepairLibraryName(c.LibraryName)
 	if warn && name != TrimLibraryName(c.LibraryName) {
-		validateLogger.Warn("libraryName is longer than a pairing code carries, or not UTF-8; serving it repaired",
+		validateLogger.Warn("libraryName is longer than a pairing code carries, not UTF-8, or holds control "+
+			"characters; serving it repaired",
 			"served", name, "runes", utf8.RuneCountInString(c.LibraryName),
-			"validUTF8", utf8.ValidString(c.LibraryName), "max", MaxLibraryNameLength)
+			"validUTF8", utf8.ValidString(c.LibraryName),
+			"controls", strings.ContainsFunc(c.LibraryName, isControlRune), "max", MaxLibraryNameLength)
 	}
 	if name == "" {
 		name = DefaultLibraryName
