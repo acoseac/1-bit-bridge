@@ -137,7 +137,10 @@ func outranks(a, b Row) bool {
 //   - TierSameFormat suppresses everything but the elected winner per
 //     domain; TierDifferentFormat does the same only under
 //     FilterHighestQuality.
-//   - Every suppression unit serves EXACTLY ONE member (its winner).
+//   - Every suppression unit serves EXACTLY ONE member (its winner), or
+//     none when every member's file is gone (Row.Missing) and a unit of its
+//     domain holding a found copy serves: rows no client can play, beside a
+//     copy a client can (round 4 of backlog B489; exactly one until then).
 func PlanSuppression(g Group, p Policy) []string {
 	if p.Mode == FilterOff || g.Tier == TierInconclusive {
 		return nil
@@ -219,6 +222,14 @@ func nestShallower(a, b Row) bool {
 // format, so a .wv and an .ape of one track are never suppressed against
 // each other: the gate is per format, and a client that declares one of them
 // alone would lose its only copy.
+//
+// A unit whose every member's file is gone (Row.Missing) is suppressed whole
+// while another unit of its domain holds a found copy (round 4 of backlog
+// B489): no client can play those rows, so none is lost, and a client whose
+// view holds the found copy is no longer served a dead row beside it until
+// the deletion pass reaps them. A domain whose every copy is gone keeps each
+// unit's winner, as before. The rule is one domain's: a gone DSD edition
+// beside found PCM copies is its domain's one member, and is served.
 func planDomainWinners(members []Row) []string {
 	var dsd, pcm []Row
 	for _, m := range members {
@@ -230,7 +241,14 @@ func planDomainWinners(members []Row) []string {
 	}
 	var out []string
 	for _, domain := range [][]Row{dsd, pcm} {
+		found := holdsFound(domain)
 		for _, unit := range gateUnits(domain) {
+			if found && !holdsFound(unit) {
+				for _, m := range unit {
+					out = append(out, m.Path)
+				}
+				continue
+			}
 			if len(unit) < 2 {
 				continue
 			}
@@ -256,10 +274,14 @@ func planDomainWinners(members []Row) []string {
 // it holds a copy every client is served whose file the last scan found, or
 // copies of one gated format at most, and otherwise one unit per format, in
 // the order the domain first names each. A copy every client is served whose
-// file is gone (Row.Missing) is then a unit of its own, suppressing nothing:
-// the found gated copies are the only ones any client can play, so a .wv and
-// an .ape beside a gone .flac are no more suppressed against each other than
-// beside no .flac at all (round 3 of backlog B489, the merge of B756).
+// file is gone (Row.Missing) is then a unit of its own, which suppresses none
+// of the gated copies: the found ones are the only copies any client can
+// play, so a .wv and an .ape beside a gone .flac are no more suppressed
+// against each other than beside no .flac at all (round 3 of backlog B489,
+// the merge of B756). planDomainWinners then suppresses that unit whole, as
+// it does any unit whose every copy is gone, while a gated unit of the domain
+// holds a found copy (round 4): its rows are served to no client beside the
+// copy that client can play.
 func gateUnits(domain []Row) [][]Row {
 	var order []formatgate.Format
 	byFormat := map[formatgate.Format][]Row{}
@@ -283,6 +305,16 @@ func gateUnits(domain []Row) [][]Row {
 		units = append(units, byFormat[f])
 	}
 	return units
+}
+
+// holdsFound reports whether any of rows is a file the last scan found.
+func holdsFound(rows []Row) bool {
+	for _, m := range rows {
+		if !m.Missing {
+			return true
+		}
+	}
+	return false
 }
 
 // ID is the stable persistence identity for a key: hex SHA-256 over an
