@@ -6494,10 +6494,12 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		lis, err = net.Listen("tcp", cfg.ListenAddress)
 		if err != nil {
 			fmt.Fprintf(stderr, "listen %s: %v\n", cfg.ListenAddress, err)
-			// A port another process holds, or one the host refuses this
-			// user, is the host's trouble, which the backup would meet too:
-			// no failed start of an install (backlog B660). Asked through
-			// doctor's checks, whose Windows arm reads Winsock's errnos.
+			// A port another process holds, an address the host does not
+			// have, or a permission the host refuses this user where the
+			// backup would meet it too, is the host's trouble: no failed
+			// start of an install (backlog B660; bindRefusalIsTheHosts).
+			// Asked through doctor's checks, whose Windows arm reads
+			// Winsock's errnos.
 			notAFailedStart = bindRefusalIsTheHosts(err, opts, stderr)
 			return 1
 		}
@@ -6790,9 +6792,10 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		// the main API listener.
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			fmt.Fprintf(stderr, "admin server: %v\n", err)
-			// The console's port held by another process, or refused this
-			// user, is the host's trouble: no failed start of an install
-			// (backlog B660).
+			// The console's port held by another process, its address not
+			// the host's, or its port refused this user where the backup
+			// would meet that too, is the host's trouble: no failed start of
+			// an install (backlog B660; bindRefusalIsTheHosts).
 			notAFailedStart = bindRefusalIsTheHosts(err, opts, stderr)
 			// Tear down the main API listener cleanly before exit so
 			// in-flight iOS requests get `http.ErrServerClosed` rather
