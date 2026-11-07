@@ -169,7 +169,7 @@ func TestProbeVersionWithinAsksWithinTheBoundItIsGiven(t *testing.T) {
 		if err == nil || err.Error() != "it did not answer within 1s" {
 			t.Errorf("ProbeVersionWithin over a silent backup = %q, %v; want it to say it did not answer within 1s", got, err)
 		}
-		if took := time.Since(start); took > 20*time.Second {
+		if took := time.Since(start); took >= VersionProbeTimeout {
 			t.Errorf("the silent backup held its caller %s", took)
 		}
 	})

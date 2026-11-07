@@ -431,7 +431,8 @@ declared view, or give an upstream row a codec its header was never read for.**
   utun0). **Don't fold the preference into `IsLANEligibleInterface`**:
   dropping every point-to-point interface, or the zero-config arm, from
   ELIGIBILITY takes away an opted-in tunnel and a direct-cable renderer,
-  and the bullet above says why each arm is there. **Don't reduce the key
+  and the “`IsLANEligibleInterface` scans all addresses then decides” entry
+  in `.claude/rules/dlna-upnp.md` says why each arm is there. **Don't reduce the key
   to either half**: the flag alone misses Windows' Wintun adapter
   (WireGuard's, and Tailscale's when opted in; `IF_TYPE_PROP_VIRTUAL`,
   which Go gives no point-to-point flag) and a Mac's `bridge0` holding a
@@ -452,8 +453,9 @@ declared view, or give an upstream row a codec its header was never read for.**
   its own interface, and announces from that interface's address** (2026-09-29,
   backlog B71). The DLNA server runs one SSDP endpoint per LAN interface,
   each with that interface's LOCATION (#328), on one listener per interface
-  that every device of the SSDP subsystem shares (B470 PR 5a1, the
-  subsystem's bullet below), and by the eligibility rule a Linux
+  that every device of the SSDP subsystem shares (B470 PR 5a1, “Every
+  advertised device registers with serve's one SSDP subsystem” in
+  `.claude/rules/dlna-upnp.md`), and by the eligibility rule a Linux
   host running Docker is such a host: `docker0` and every user bridge carry
   a private IPv4.
   **The listener**: `net.ListenMulticastUDP` binds the wildcard address
@@ -507,7 +509,8 @@ declared view, or give an upstream row a codec its header was never read for.**
   endpoint on that listener, whichever served address it was sent to
   (backlog B119, which B470 PR 5a1 keeps exactly; since
   B48 one sent to an address the server does not serve is not answered at
-  all, the bullet after the Tailscale one below); on Windows the
+  all; B48, “the DLNA listener and SSDP serve only the LAN-eligible
+  interfaces' addresses” in `.claude/rules/dlna-upnp.md`); on Windows the
   advertiser hears no search sent from its own host (B120); and a pinned
   `dlna.listenAddress` advertises on the picker's interface, which need
   not hold that address (B121).
@@ -542,8 +545,9 @@ declared view, or give an upstream row a codec its header was never read for.**
   interface also receives the group's datagrams arriving on any interface
   another socket joined (a listener on eth0 heard the loopback advertisers'
   NOTIFYs, and one on lo heard eth0's). A test's own listener keeps that
-  default; the advertisers' listeners turn it off since backlog B71 (the
-  next bullet). On the Windows runner the join and the pin both take on
+  default; the advertisers' listeners turn it off since backlog B71 (“Each
+  SSDP advertiser hears only the multicast M-SEARCHes that arrive on its own
+  interface”). On the Windows runner the join and the pin both take on
   "Loopback Pseudo-Interface 1": the tests run there, and its log shows them
   starting with no pin warning. What left a Windows host was measured on
   2026-09-29 (B71, on a Windows 11 host with Tailscale, with a listener on

@@ -58,7 +58,11 @@ func TestABackupSilentPastItsBoundIsAskedAgainAtTheNextStart(t *testing.T) {
 	files := watch(t, r.bin, r.bak, updater.StatePath(r.dataDir))
 	// A minute of silence, far past the second it is given.
 	t.Setenv(runAsBridgeSilentEnv, time.Minute.String())
+	start := time.Now()
 	code, stderr := r.serve(t, serveOpts{backupProbeTimeout: time.Second})
+	if took := time.Since(start); took >= updater.VersionProbeTimeout {
+		t.Errorf("the silent backup held serve %s", took)
+	}
 	if code != 2 {
 		t.Fatalf("serve over a backup that does not answer = %d, want 2, the settings' refusal as before; stderr=%s", code, stderr)
 	}

@@ -262,7 +262,7 @@ func TestARollbackThatHoldsTheMarkersLockFirstStopsTheMigration(t *testing.T) {
 	case <-atRestore.ch:
 	case <-serveDone:
 		t.Fatalf("serve = %d before its rename; stderr=%s", <-codes, stderr.String())
-	case <-time.After(withinTheTest):
+	case <-time.After(testBackupProbeTimeout + withinTheTest):
 		t.Fatal("the rollback never reached its rename")
 	}
 
