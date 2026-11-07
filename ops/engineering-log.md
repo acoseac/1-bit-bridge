@@ -80598,7 +80598,8 @@ bind is let through), beside the platform's errno; its twin for an absent
 address (TEST-NET-1) is new. Serve over a permission refused
 (`TestAPermissionRefusalTheBackupWouldNotMeetIsAFailedStart`, the real
 EACCES with the capabilities stood in for) and over a tailnet listener that
-fails (`TestATailnetFailureIsTheNetworksOnlyWhenItSaysSo`, the fake node).
+fails (the fake node; renamed in the third round, its cases turned round:
+`TestATailnetListenerThatFailsIsAFailedStart`).
 `TestAnInstallListeningOnTheWildcardIsConfirmed` runs a confirmation
 through a listener that reports `[::]:port` (a loopback listener handed in,
 so no test binds the host's interfaces): the probe dials loopback
@@ -80629,7 +80630,7 @@ one came out as predicted, and the tree after them held only the docs):
 |---|---|---|---|
 | (1a) | `bindRefusedByTheHost` without `IsAddrNotAvail` | `TestAPortAnotherProcessHoldsIsNotAFailedStart` (the absent address) | its other two subtests |
 | (1b) | `IsAddrNotAvail`'s Windows arm on syscall's errno alone | `TestTheWindowsBindChecksNameTheWinsockErrnos` | |
-| (2a) | no take-back as the stop arrives (after the teardown alone, as the first round) | `TestAStopTakesItsCountBackAsItArrives`, `TestAStopWhileServeStartsTakesItsCountBackAsItArrives`, `TestAServeKilledWhileItDrainsHasTakenItsCountBack`, `TestAStopThatFindsTheMarkersLockHeldTakesItsCountBackOnceItIsFree` | `TestAStopIsNotAFailedStart`, `TestARestartRequestIsNotAFailedStart` |
+| (2a) | no take-back as the stop arrives (after the teardown alone, as the first round) | `TestAStopTakesItsCountBackAsItArrives`, the stop-while-starting test (replaced in the third round), `TestAServeKilledWhileItDrainsHasTakenItsCountBack`, `TestAStopThatFindsTheMarkersLockHeldTakesItsCountBackOnceItIsFree` | `TestAStopIsNotAFailedStart`, `TestARestartRequestIsNotAFailedStart` |
 | (2b) | the restart request's hook removed | `TestARestartRequestTakesItsCountBackAsItArrives` | `TestARestartRequestIsNotAFailedStart`, `TestAStopTakesItsCountBackAsItArrives` |
 | (2c) | the take-back begun at every end of serve | `TestAnErrorExitStaysCountedWhateverItsCallerDoesAfter` (both), `TestAStoreThatWillNotOpenIsAFailedStart`, `TestAPanicInServeIsAFailedStart`, `TestAMigrationThatFailsStillRefusesTheRollback` | |
 | (3a) | one ask for the marker's lock, no asking again | `TestAStopThatFindsTheMarkersLockHeldTakesItsCountBackOnceItIsFree` | |
@@ -80640,7 +80641,7 @@ one came out as predicted, and the tree after them held only the docs):
 | (5d) | this process's command hold read as a serve's | `TestServeHoldsDataDirReadsTheLockAndThisProcesssHolds` | |
 | (6a) | a permission refusal taken back whatever `.bak` carries | `TestAPermissionRefusalTheBackupWouldNotMeetIsAFailedStart` (the backup's capability) | both carry it, neither does |
 | (6b) | the swap carries no capabilities | `TestTheSwapCarriesTheBinarysFileCapabilities`, `TestASwapThatCannotSetTheCapabilitiesStillSwaps` | |
-| (6c) | every tailnet failure taken back, as the first round | `TestATailnetFailureIsTheNetworksOnlyWhenItSaysSo` (another failure) | the network's two |
+| (6c) | every tailnet failure taken back, as the first round | the tailnet test (another failure; renamed in the third round) | the network's two |
 | (7a) | the hold beside a refused rollback | `TestTheAutoInstallerDoesNotWaitBesideARefusedRollback` | |
 | (7b) | the hold without a backup | `TestTheAutoInstallerDoesNotWaitWithoutABackup` | `TestTheAutoInstallerWaitsForTheRunningInstallsProbation` |
 | (7c) | the hold where the crash rollback's checks refuse | `TestTheAutoInstallerDoesNotWaitWhereTheCrashRollbackWouldRefuse` (each case), `TestTheAutoInstallerDoesNotWaitWhereTheBackupCannotBePutBack` | |

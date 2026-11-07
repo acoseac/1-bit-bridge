@@ -241,6 +241,12 @@ type State struct {
 	// a start; the next start's admission and the confirmation clear it. Not
 	// ready is not proof of a broken version, so it rolls nothing back.
 	NotReady bool `json:"notReady,omitempty"`
+
+	// RunningStart is the token of the start of TargetVersion whose count
+	// FailedStarts holds while it runs (backlog B660's third round): serve's
+	// admission writes it with the count, and a start counts as running only
+	// while the lock its token names is held.
+	RunningStart string `json:"runningStart,omitempty"`
 }
 
 // ProbationWindow is how long one start of an install's version stays up,

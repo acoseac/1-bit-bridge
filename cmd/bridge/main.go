@@ -3012,6 +3012,17 @@ type serveOpts struct {
 	// it does it, and a stand-in for its round's store read. Nil in
 	// production. Per invocation for tailscaleCLI's reason.
 	probation *probationSeams
+	// stopArriving runs on the goroutine that tells the take-back of the
+	// start's count that a stop arrived (the AfterFunc of serve's caller's
+	// context, or a restart request), before it tells it. Nil in production;
+	// a boot test holds a stop's arrival there, past the end of a start the
+	// stop came before (backlog B660's third round).
+	stopArriving func()
+	// teardownHold runs last in serve's teardown, before the take-back of the
+	// start's count decides, on every path that ends a counted start. Nil in
+	// production; a boot test holds the teardown there, as a stop whose
+	// teardown a supervisor kills (backlog B660's third round).
+	teardownHold func()
 	// scannerBoot is handed serve's scanner before its periodic loop starts.
 	// Nil in production; a boot test parks a scan on the scanner's own test
 	// hooks (manifest.Scanner.SetAfterExtractHookForTests). Per invocation
@@ -3525,8 +3536,15 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	notAFailedStart := false
 	if admission.CountTried > 0 {
 		takeBack := newStopTakeBack(cfg.DataDir, admission.CountTried)
-		unregister := context.AfterFunc(stopped, takeBack.arrived)
-		restart.onRequest(takeBack.arrived)
+		arrived := takeBack.arrived
+		if opts.stopArriving != nil {
+			arrived = func() {
+				opts.stopArriving()
+				takeBack.arrived()
+			}
+		}
+		unregister := context.AfterFunc(stopped, arrived)
+		restart.onRequest(arrived)
 		defer func() {
 			unregister()
 			arrived, settled := takeBack.finish()
@@ -3534,6 +3552,9 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 				takeBackFailedStart(cfg.DataDir, admission.CountTried, stderr)
 			}
 		}()
+		if opts.teardownHold != nil {
+			defer opts.teardownHold()
+		}
 	}
 	sayTheAdmissionsCount(admission, stderr)
 	// Adopt pre-floor identities before any live backup can run, even with
@@ -6817,7 +6838,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 			// too, is no failed start of an install; any other failure of the
 			// listener is (backlog B660's second round: until then every one
 			// was taken back). The line says which.
-			notAFailedStart = tailnetNetworkFailure(err)
+			notAFailedStart = tailnetEndIsServes(tsFront, err)
 			class := "not a failure of the tailnet's network: it counts as a start of this install that did not end cleanly"
 			if notAFailedStart {
 				class = "a failure of the tailnet's network, which the backup would meet too: not counted against this install"

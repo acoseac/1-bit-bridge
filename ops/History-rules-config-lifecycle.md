@@ -2830,7 +2830,6 @@ the backup that predates the check, the hold's arms and the report's words
 
 `TestAStopTakesItsCountBackAsItArrives`,
 `TestARestartRequestTakesItsCountBackAsItArrives`,
-`TestAStopWhileServeStartsTakesItsCountBackAsItArrives`,
 `TestAServeKilledWhileItDrainsHasTakenItsCountBack` (a real serve process
 killed with SIGKILL while a held connection keeps its drain going),
 `TestAStopThatFindsTheMarkersLockHeldTakesItsCountBackOnceItIsFree`,
@@ -2840,7 +2839,7 @@ killed with SIGKILL while a held connection keeps its drain going),
 `TestTheDoctorLeavesThePendingMigrationsAndSaysSo`,
 `TestServeMigratesTheStoreAfterAFailedStart`, `TestACommandBesideAStartingServe`,
 `TestAPermissionRefusalTheBackupWouldNotMeetIsAFailedStart`,
-`TestATailnetFailureIsTheNetworksOnlyWhenItSaysSo`,
+`TestATailnetListenerThatFailsIsAFailedStart` (the third round's name),
 `TestAnInstallListeningOnTheWildcardIsConfirmed`,
 `TestTheConsoleGradesTheStartsBeforeTheRunningOne`,
 `TestTheDoctorCountsEveryStartWhereNoServeRuns`,

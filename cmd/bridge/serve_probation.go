@@ -48,6 +48,9 @@ type probationSeams struct {
 	// storeRead stands in for a round's store read (the store's
 	// CountServedTracks).
 	storeRead func(ctx context.Context) error
+	// beforeReady runs once a round has first answered as ready, before this
+	// start counts as ready (backlog B660's third round).
+	beforeReady func()
 }
 
 // probationTiming is the confirmation's clock: the window one start stays up

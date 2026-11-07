@@ -327,6 +327,12 @@ func tailnetNetworkFailure(err error) bool {
 	return errors.As(err, &op) || errors.Is(err, net.ErrClosed)
 }
 
+// tailnetEndIsServes reports whether err, what the tailnet listener's Serve
+// returned on f, ends this start as no failed start of an install.
+func tailnetEndIsServes(f *tsnetFront, err error) bool {
+	return tailnetNetworkFailure(err)
+}
+
 // takeBackFailedStart takes back this start's count of the install's starts
 // that did not end cleanly (updater.TakeBackFailedStart), counted being what
 // its admission tried to write: serve's defer calls it after every teardown,

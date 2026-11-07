@@ -364,6 +364,14 @@ func (f *tsnetFront) publishHTTP3(ls []tsnetH3Listener) bool {
 	return true
 }
 
+// closeBegun reports whether serve's stop of its tailnet side has begun: stop
+// sets it before it shuts any server down or closes the node.
+func (f *tsnetFront) closeBegun() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.stopping
+}
+
 // publishHTTPS is publishHTTP3 for the HTTPS server.
 func (f *tsnetFront) publishHTTPS(srv *http.Server) bool {
 	f.mu.Lock()

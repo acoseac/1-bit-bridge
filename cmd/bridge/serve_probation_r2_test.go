@@ -96,18 +96,20 @@ func (p *parkedTeardown) waitParked(t *testing.T) {
 	}
 }
 
-// TestAStopTakesItsCountBackAsItArrives: serve's stop takes back the count
-// its admission added as soon as it arrives, while the teardown still runs: a
-// supervisor that kills a stop it finds too slow (launchd's ExitTimeOut,
-// systemd's TimeoutStopSec, the SCM's wait) must not leave a clean stop
-// counted. Until the second round the count went back only after every
-// teardown had run.
+// TestAStopTakesItsCountBackAsItArrives: serve's stop, once this start has
+// answered as ready, takes back the count its admission added as soon as it
+// arrives, while the teardown still runs: a supervisor that kills a stop it
+// finds too slow (launchd's ExitTimeOut, systemd's TimeoutStopSec, the SCM's
+// wait) must not leave a clean stop counted. Until the second round the count
+// went back only after every teardown had run; since the third, a stop before
+// ready waits for its teardown (TestAStopBeforeReadyStaysCountedUntilItsTeardownHasRun).
 func TestAStopTakesItsCountBackAsItArrives(t *testing.T) {
 	r := newRefusedInstall(t, "")
 	teardown := newParkedTeardown()
-	_, seams := newProbationWatch(longProbation)
+	events, seams := newProbationWatch(longProbation)
 	sb := r.bootWith(t, serveOpts{probation: seams, upnpStopping: teardown.seam})
 	teardown.releaseFirst(t)
+	events.waitFor(t, probationWindow)
 	r.requireCount(t, 1, "while serve runs")
 	sb.stop()
 	teardown.waitParked(t)
@@ -120,15 +122,16 @@ func TestAStopTakesItsCountBackAsItArrives(t *testing.T) {
 }
 
 // TestARestartRequestTakesItsCountBackAsItArrives: the console's restart is a
-// stop of its own, which runServe's own context alone carries: its count goes
-// back as the request arrives, while the teardown still runs, as a stop's
-// does.
+// stop of its own, which runServe's own context alone carries: once this
+// start has answered as ready, its count goes back as the request arrives,
+// while the teardown still runs, as a stop's does.
 func TestARestartRequestTakesItsCountBackAsItArrives(t *testing.T) {
 	r := newRefusedInstall(t, "")
 	teardown := newParkedTeardown()
-	_, seams := newProbationWatch(longProbation)
+	events, seams := newProbationWatch(longProbation)
 	sb, admin := r.bootConsole(t, serveOpts{probation: seams, upnpStopping: teardown.seam})
 	teardown.releaseFirst(t)
+	events.waitFor(t, probationWindow)
 	r.requireCount(t, 1, "while serve runs")
 	requestRestart(t, admin)
 	teardown.waitParked(t)
@@ -139,58 +142,18 @@ func TestARestartRequestTakesItsCountBackAsItArrives(t *testing.T) {
 	waitForExit(t, sb, supervision.RestartExitCode)
 }
 
-// TestAStopWhileServeStartsTakesItsCountBackAsItArrives: a stop that lands
-// while serve is still starting, past its admission, takes the count back as
-// it arrives, while the start is still held where it was.
-func TestAStopWhileServeStartsTakesItsCountBackAsItArrives(t *testing.T) {
-	r := newRefusedInstall(t, "")
-	parked, release := newOnceCloser(), newOnceCloser()
-	t.Cleanup(release.close)
-	ctx, cancel := context.WithCancel(context.Background())
-	stderr := &safeBuffer{}
-	codes, done := make(chan int, 1), make(chan struct{})
-	go func() {
-		defer close(done)
-		codes <- runServe(ctx, serveOpts{configPath: r.cfg, binaryPath: r.bin,
-			playerStatePreflight: func(string, bool) error {
-				parked.close()
-				<-release.ch
-				return nil
-			}}, &safeBuffer{}, stderr)
-	}()
-	drainLoopOnCleanup(t, func() { cancel(); release.close() }, done, "serve")
-	select {
-	case <-parked.ch:
-	case <-time.After(withinTheTest):
-		t.Fatalf("serve never reached its player's preflight; stderr=%s", stderr.String())
-	}
-	r.requireCount(t, 1, "as the start is held past its admission")
-	cancel()
-	if !r.waitForCountWithin(t, 0, withinTheTest) {
-		t.Errorf("the marker while the stopped start is held = %+v, want its count taken back already", markerOf(t, r.dataDir))
-	}
-	release.close()
-	select {
-	case code := <-codes:
-		if code != 0 {
-			t.Errorf("serve stopped while it started = %d, want 0; stderr=%s", code, stderr.String())
-		}
-	case <-serveGiveUp(t):
-		t.Fatalf("serve did not return; stderr=%s", stderr.String())
-	}
-	r.requireCount(t, 0, "after a stop while it started")
-}
-
 // TestAStopThatFindsTheMarkersLockHeldTakesItsCountBackOnceItIsFree: a stop
-// whose take-back finds the install marker's lock held keeps asking for it
-// for the rest of the teardown, past a wait that gives up, and lands as soon
-// as the lock is free, while the teardown still runs.
+// once this start has answered as ready, whose take-back finds the install
+// marker's lock held, keeps asking for it for the rest of the teardown, past
+// a wait that gives up, and lands as soon as the lock is free, while the
+// teardown still runs.
 func TestAStopThatFindsTheMarkersLockHeldTakesItsCountBackOnceItIsFree(t *testing.T) {
 	r := newRefusedInstall(t, "")
 	teardown := newParkedTeardown()
-	_, seams := newProbationWatch(longProbation)
+	events, seams := newProbationWatch(longProbation)
 	sb := r.bootWith(t, serveOpts{probation: seams, upnpStopping: teardown.seam})
 	teardown.releaseFirst(t)
+	events.waitFor(t, probationWindow)
 	r.requireCount(t, 1, "while serve runs")
 	held, err := updater.LockState(t.Context(), r.dataDir)
 	if err != nil || !held.Held() {
@@ -461,38 +424,6 @@ func (l *refusingTailnetListener) Close() error {
 }
 func (l *refusingTailnetListener) Addr() net.Addr {
 	return &net.TCPAddr{IP: net.IPv4(100, 64, 0, 1), Port: 7788}
-}
-
-// TestATailnetFailureIsTheNetworksOnlyWhenItSaysSo: a tailnet listener that
-// fails takes the start's count back only for a failure of the network
-// (an accept the network refused, a listener the node closed), which the
-// backup would meet too; any other failure of it stays counted.
-func TestATailnetFailureIsTheNetworksOnlyWhenItSaysSo(t *testing.T) {
-	for _, tc := range []struct {
-		name    string
-		err     error
-		counted int
-	}{
-		{"the network went down", &net.OpError{Op: "accept", Net: "tcp", Err: os.NewSyscallError("accept", syscall.ENETDOWN)}, 0},
-		{"the node closed its listener", net.ErrClosed, 0},
-		{"another failure", errors.New("the tailnet listener broke"), 1},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			r := newRefusedInstall(t, "")
-			r.writeSettings(t, "dataDir: "+r.dataDir+"\n", "tailscale:\n  mode: tsnet\n")
-			node := newFakeTsnetNode()
-			node.listen = func() (net.Listener, error) {
-				return &refusingTailnetListener{err: tc.err, closed: make(chan struct{})}, nil
-			}
-			// To its own end: a stop on its banner, as serveToItsEnd makes,
-			// would race the listener's failure, and take the count back.
-			code, stderr := r.serve(t, serveOpts{tsnetNode: node})
-			if code != 1 || !strings.Contains(stderr, "tsnet listener:") {
-				t.Fatalf("serve over a tailnet listener that fails = %d, want 1 at it; stderr=%s", code, stderr)
-			}
-			r.requireCount(t, tc.counted, "after the tailnet listener failed")
-		})
-	}
 }
 
 // wildcardListener is a loopback listener that reports the wildcard address
