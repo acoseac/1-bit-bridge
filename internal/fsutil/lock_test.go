@@ -44,6 +44,48 @@ func TestTryLockRefusesASecondOpenOfTheFile(t *testing.T) {
 	}
 }
 
+// TestASharedTryMeetsOnlyAnExclusiveHold: a shared try through another open
+// of the file is refused with ErrLocked while an exclusive hold is there, and
+// taken beside another shared hold, so two shared tries asked at once never
+// answer each other; an exclusive try is refused while a shared hold is
+// there, and each is free again once the hold lets go (backlog B660's fourth
+// round: the probe of a start's lock is the shared try, the start's hold the
+// exclusive one). On every platform: flock's LOCK_SH, and LockFileEx without
+// LOCKFILE_EXCLUSIVE_LOCK over the same range on Windows.
+func TestASharedTryMeetsOnlyAnExclusiveHold(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "lock")
+	holder, a, b := openForLock(t, path), openForLock(t, path), openForLock(t, path)
+	if err := TryLock(holder); err != nil {
+		t.Fatalf("TryLock on a free file: %v", err)
+	}
+	if err := TryLockShared(a); !errors.Is(err, ErrLocked) {
+		t.Errorf("a shared try beside an exclusive hold = %v, want ErrLocked", err)
+	}
+	if err := Unlock(holder); err != nil {
+		t.Fatal(err)
+	}
+	if err := TryLockShared(a); err != nil {
+		t.Fatalf("a shared try on a free file = %v, want nil", err)
+	}
+	if err := TryLockShared(b); err != nil {
+		t.Errorf("a shared try beside another shared hold = %v, want nil: a question met another question", err)
+	}
+	if err := TryLock(holder); !errors.Is(err, ErrLocked) {
+		t.Errorf("an exclusive try beside shared holds = %v, want ErrLocked", err)
+	}
+	for _, f := range []*os.File{a, b} {
+		if err := Unlock(f); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := TryLock(holder); err != nil {
+		t.Errorf("an exclusive try once the shared holds let go = %v, want nil", err)
+	}
+	if err := TryLockShared(nil); !errors.Is(err, os.ErrInvalid) {
+		t.Errorf("TryLockShared(nil) = %v, want os.ErrInvalid", err)
+	}
+}
+
 // TestTryLockAnswersErrInvalidForNoFile requires TryLock and Unlock to
 // answer a nil file with os.ErrInvalid, as os.File's own methods do, never
 // with a panic: the error is wrapped with the file's name, and Name

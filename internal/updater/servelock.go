@@ -52,10 +52,12 @@ func isStartToken(token string) bool {
 // token names (serve-start-<token>.lock) on a file made for it, then writes the
 // token into the install marker with the start's count (State.RunningStart),
 // and the start holds it until it returns. Only a counted start takes such a
-// lock, so the count holds a start running now (RunningServeCounted) only
-// where the marker names a token whose lock is held: never by the data dir's
-// lock, which a command holds too, and never after a crash or a kill, whose
-// lock the kernel lets go with the process. No process liveness is read.
+// lock exclusively, and every probe of it takes it shared (startRunning,
+// sweepStartLocks), so the count holds a start running now
+// (RunningServeCounted) only where the marker names a token whose lock that
+// start holds: never by the data dir's lock, which a command holds too, never
+// by another probe's hold, and never after a crash or a kill, whose lock the
+// kernel lets go with the process. No process liveness is read.
 type StartHold struct {
 	dataDir, token string
 
@@ -109,12 +111,17 @@ func (h *StartHold) Release() {
 }
 
 // startRunning reports whether the start whose token is token holds its lock
-// now: a try of the lock the token names, which finds it held. It never waits,
-// so it takes no part in the order the locks are waited for in (server.lock,
-// the ladder, update-state.lock), and a try that finds the lock free lets go
-// of it at once. A token that is not a start's, a lock file that is not
-// there, and one that cannot be opened or tried, read as none; it makes
-// nothing.
+// now: a SHARED try of the lock the token names (fsutil.TryLockShared), which
+// the start's exclusive hold refuses, on every platform. A probe never takes
+// the lock exclusively, so two probes asked at once never answer each other
+// (backlog B660's fourth round: with an exclusive try, a `bridge doctor`'s
+// probe of a crashed start's lock, between its try and its release, read to a
+// migrating open's probe as the crashed start running, which took the sole
+// failure off the count and let the migration through). It never waits, so it
+// takes no part in the order the locks are waited for in (server.lock, the
+// ladder, update-state.lock), and a try that takes the lock lets go of it at
+// once. A token that is not a start's, a lock file that is not there, and one
+// that cannot be opened or tried, read as none; it makes nothing.
 func startRunning(dataDir, token string) bool {
 	if !isStartToken(token) {
 		return false
@@ -124,7 +131,7 @@ func startRunning(dataDir, token string) bool {
 		return false
 	}
 	defer f.Close()
-	if err := fsutil.TryLock(f); err != nil {
+	if err := fsutil.TryLockShared(f); err != nil {
 		return errors.Is(err, fsutil.ErrLocked)
 	}
 	callStartProbeHeld(dataDir)
@@ -170,7 +177,10 @@ func SetStartProbeHeldForTest(fn func(dataDir string)) (restore func()) {
 // sweepStartLocks removes the lock files of starts that hold them no more (a
 // start killed, or a removal that failed), which a counted start's admission
 // does before it makes its own: a file whose lock is held, and one that cannot
-// be opened or tried, stays.
+// be opened or tried, stays. Its try is a probe's, shared, so it can neither
+// pass for a start to a probe beside it nor be refused by one (backlog B660's
+// fourth round); a file a probe has open stays where the platform will not
+// remove an open file (Windows), until a later sweep.
 func sweepStartLocks(dataDir string) {
 	entries, err := os.ReadDir(dataDir)
 	if err != nil {
@@ -190,7 +200,7 @@ func sweepStartLocks(dataDir string) {
 		if err != nil {
 			continue
 		}
-		if fsutil.TryLock(f) != nil {
+		if fsutil.TryLockShared(f) != nil {
 			_ = f.Close()
 			continue
 		}

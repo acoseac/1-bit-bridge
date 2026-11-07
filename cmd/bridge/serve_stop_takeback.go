@@ -30,6 +30,39 @@ const stopTakeBackRetry = 50 * time.Millisecond
 // same budget from its teardown's end.
 const stopBudget = 10 * time.Second
 
+// finishTakeBackFloor is how long, at least, a take-back begun once the
+// teardown has run asks for the install marker's lock, where that teardown ran
+// past the stop's budget with nothing killing the process (backlog B660's
+// fourth round: its deadline was the budget's from the stop's arrival, past by
+// then, so it gave up at the lock's first refusal, and three such clean stops
+// before ready rolled a working install back).
+const finishTakeBackFloor = 2 * time.Second
+
+// stopExitMargin is how long before updater.SCMStopWait from the stop's
+// arrival a take-back begun once the teardown has run gives up at the latest,
+// leaving the process that long to exit inside the Windows updater's wait for
+// the service to stop, which it waits out holding the install marker's lock.
+const stopExitMargin = time.Second
+
+// finishTakeBackDeadline is the deadline of a take-back begun at now, once the
+// teardown has run: the stop's budget from its arrival stopAt (now where no
+// arrival was told: a bind the host refused, a close serve began, or a stop
+// whose notice had not run), but at least finishTakeBackFloor from now, and
+// never past updater.SCMStopWait less stopExitMargin from the arrival.
+func finishTakeBackDeadline(stopAt, now time.Time) time.Time {
+	if stopAt.IsZero() {
+		stopAt = now
+	}
+	deadline := stopAt.Add(stopBudget)
+	if floor := now.Add(finishTakeBackFloor); floor.After(deadline) {
+		deadline = floor
+	}
+	if ceiling := stopAt.Add(updater.SCMStopWait - stopExitMargin); deadline.After(ceiling) {
+		deadline = ceiling
+	}
+	return deadline
+}
+
 // stopTakeBack is a start's take-back of its count (backlog B660's rounds 2
 // and 3). Once the start has answered as ready (arm, the confirmation's first
 // yes), it begins as the start's stop arrives (arrived: serve's caller's
@@ -49,7 +82,9 @@ const stopBudget = 10 * time.Second
 // It asks updater.TakeBackFailedStart, which writes only where the marker
 // still holds the count this start wrote, and clears the start's token in
 // that write, until it has its answer or the stop's budget (stopBudget) ends:
-// one budget for the teardown and the take-back together. Whether an end is a
+// one budget for the teardown and the take-back together, but that a take-back
+// begun once a teardown longer than the budget has run asks for
+// finishTakeBackFloor still, inside the SCM's wait (the fourth round). Whether an end is a
 // stop is asked when the teardown has run, of serve's caller's context and
 // the restart request as they stand then (finish's takeBack), never of the
 // notice arrived has had: the context's AfterFunc runs on a goroutine of its
@@ -90,7 +125,7 @@ func (b *stopTakeBack) arrived() {
 		b.stopAt = time.Now()
 	}
 	if b.armed && !b.began {
-		b.beginLocked()
+		b.beginLocked(b.stopAt.Add(stopBudget))
 	}
 }
 
@@ -111,16 +146,13 @@ func (b *stopTakeBack) arm(ctx context.Context) bool {
 }
 
 // beginLocked starts the take-back on a goroutine of its own, until it has its
-// answer or the budget, from the first stop's arrival, or from now where none
-// arrived, ends. b.mu is held.
-func (b *stopTakeBack) beginLocked() {
+// answer or deadline passes: the budget from the stop's arrival for one begun
+// as the stop arrives, finishTakeBackDeadline's for one begun once the
+// teardown has run. b.mu is held.
+func (b *stopTakeBack) beginLocked(deadline time.Time) {
 	b.began = true
-	from := b.stopAt
-	if from.IsZero() {
-		from = time.Now()
-	}
-	b.deadline = from.Add(stopBudget)
-	go b.run(b.deadline)
+	b.deadline = deadline
+	go b.run(deadline)
 }
 
 // run takes the count back, asking again until it has an answer or deadline
@@ -150,17 +182,18 @@ func (b *stopTakeBack) run(deadline time.Time) {
 // takes the start's count back: a stop, asked by the caller of serve's caller's
 // context and of the restart request as they stand now, a bind the host
 // refused, or a close serve began. It begins the take-back where none has
-// begun and the end takes the count back, and joins it, so nothing of it
-// writes once serve lets go of its data dir; no take-back begins after it. It
-// reports whether the take-back had its answer, why not where it began and
-// had none, and the deadline the rest of this start's end keeps to: the
-// budget's end, from the first stop's arrival, or from now where none
-// arrived.
+// begun and the end takes the count back (finishTakeBackDeadline: at least
+// finishTakeBackFloor from now, below the SCM's wait from the stop's arrival),
+// and joins it, so nothing of it writes once serve lets go of its data dir; no
+// take-back begins after it. It reports whether the take-back had its answer,
+// why not where it began and had none, and the deadline the rest of this
+// start's end keeps to: the take-back's, or the budget's from now where none
+// began.
 func (b *stopTakeBack) finish(takeBack bool) (answered bool, missed error, deadline time.Time) {
 	b.mu.Lock()
 	b.finished = true
 	if takeBack && !b.began {
-		b.beginLocked()
+		b.beginLocked(finishTakeBackDeadline(b.stopAt, time.Now()))
 	}
 	began := b.began
 	deadline = b.deadline

@@ -8,7 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -43,12 +43,15 @@ func TestADoctorsProbeHeldBeforeItsUnlockLetsNoScanMigrate(t *testing.T) {
 	}
 	behind := storeVersion(t, r.dataDir)
 	parked, release := newOnceCloser(), newOnceCloser()
-	var once sync.Once
+	// The doctor's first probe alone is held; every later one, the scan's
+	// among them, goes on at once (a sync.Once would hold a concurrent one
+	// inside Do too).
+	var first atomic.Bool
 	t.Cleanup(updater.SetStartProbeHeldForTest(func(string) {
-		once.Do(func() {
+		if first.CompareAndSwap(false, true) {
 			parked.close()
 			<-release.ch
-		})
+		}
 	}))
 	doctored := make(chan struct{})
 	go func() {
@@ -113,6 +116,41 @@ func TestATailnetServerClosedAnswerEndsTheStart(t *testing.T) {
 		t.Fatalf("serve went on past the tailnet's closed answer; stderr=%s", stderr.String())
 	}
 	r.requireCount(t, 0, "once the tailnet's closed answer ended the start")
+}
+
+// TestATakeBackBegunOnceTheTeardownHasRunHasAFloorBelowTheSCMsWait: the
+// deadline of a take-back begun once the teardown has run is the stop's
+// budget from its arrival, but at least finishTakeBackFloor from the
+// teardown's end, and never later than updater.SCMStopWait less
+// stopExitMargin from the arrival, so a teardown that ends just as the budget
+// does still has the whole floor; with no arrival told it is the budget from
+// the teardown's end.
+func TestATakeBackBegunOnceTheTeardownHasRunHasAFloorBelowTheSCMsWait(t *testing.T) {
+	stop := time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC)
+	ceiling := stop.Add(updater.SCMStopWait - stopExitMargin)
+	for _, tc := range []struct {
+		name     string
+		teardown time.Duration
+		want     time.Time
+	}{
+		{"a teardown well inside the budget", time.Second, stop.Add(stopBudget)},
+		{"a teardown that ends near the budget's end", stopBudget - time.Second, stop.Add(stopBudget + finishTakeBackFloor - time.Second)},
+		{"a teardown past the budget", stopBudget + 500*time.Millisecond, stop.Add(stopBudget + 500*time.Millisecond + finishTakeBackFloor)},
+		{"a teardown past the ceiling's floor", updater.SCMStopWait - time.Second, ceiling},
+		{"a teardown past the SCM's wait", 2 * updater.SCMStopWait, ceiling},
+	} {
+		if got := finishTakeBackDeadline(stop, stop.Add(tc.teardown)); !got.Equal(tc.want) {
+			t.Errorf("%s: the deadline is %s after the stop, want %s", tc.name, got.Sub(stop), tc.want.Sub(stop))
+		}
+	}
+	if !stop.Add(stopBudget + finishTakeBackFloor).Before(ceiling.Add(time.Nanosecond)) {
+		t.Errorf("a teardown that ends with the budget (%s) has less than the floor %s before the ceiling %s",
+			stopBudget, finishTakeBackFloor, updater.SCMStopWait-stopExitMargin)
+	}
+	end := stop.Add(3 * time.Second)
+	if got := finishTakeBackDeadline(time.Time{}, end); !got.Equal(end.Add(stopBudget)) {
+		t.Errorf("with no arrival told the deadline is %s after the teardown's end, want %s", got.Sub(end), stopBudget)
+	}
 }
 
 // TestAPreReadyStopWhoseTeardownOutlastsTheBudgetIsTakenBack: a stop before

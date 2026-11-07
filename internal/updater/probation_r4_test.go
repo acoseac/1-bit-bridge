@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -40,13 +41,16 @@ func TestAProbeHeldBeforeItsUnlockIsNoRunningStart(t *testing.T) {
 	dir := t.TempDir()
 	st := aCrashedStart(t, dir)
 	parked, release := make(chan struct{}), make(chan struct{})
-	var parkOnce, releaseOnce sync.Once
+	var first atomic.Bool
+	var releaseOnce sync.Once
 	letGo := func() { releaseOnce.Do(func() { close(release) }) }
+	// The first probe alone is held; every later one goes on at once (a
+	// sync.Once would hold a concurrent one inside Do too).
 	t.Cleanup(SetStartProbeHeldForTest(func(string) {
-		parkOnce.Do(func() {
+		if first.CompareAndSwap(false, true) {
 			close(parked)
 			<-release
-		})
+		}
 	}))
 	running, probed := false, make(chan struct{})
 	go func() {
