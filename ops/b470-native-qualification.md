@@ -917,9 +917,37 @@ tests over the fake kernel gain two, a write of the DAC's DSD choice beside what
 write in flight (`TestAnOccurrenceBesideAWriteIsNotRevoked`). No sink, packer, plan or
 harness reader changes, and no DSD byte a native or DoP occurrence sends: the write,
 `PUT /v1/outputs/{id}/dsd`, is the player's backend (`internal/player/playback`) and
-its route, outside the guard. B11 holds 42 and B8 43 on their branches, so the check
-against main alone would report 42 free; this takes 44. The harness's approval
+its route, outside the guard. B11 held 42 and B8 43 on their branches then, so the check
+against main alone would have reported 42 free; this took 44. The harness's approval
 admission reads a record of version 44 alone; the migration reads an owner's record
 of 35 to 44 (`LegacyVersion` stays 35). For owners: nothing the harness runs or
 records changes, and nothing plays differently from version 41. Every earlier
 version's harness evidence is stale to the harness, as at every bump.
+
+Version 45 covers B762's second round, under the `internal/alsapcm/` prefix alone:
+the backend's tests over the fake kernel gain one, a native open the kernel holds
+past the player's stop that writes nothing of the player's DSD state once it lands
+(`TestAnOpenHeldPastTheGateWritesNothingOfTheDSDState`). No sink, packer, plan or
+harness reader changes, and no DSD byte a native or DoP occurrence sends: the fix is
+the player's backend closing the writes of the DSD state once serve's player has
+stopped its engine (`CloseDSDWrites`), in `internal/player/playback`, outside the
+guard. B9's first round held 44 on its branch then, so this takes 45. The harness's approval admission
+reads a record of version 45 alone; the migration reads an owner's record of 35 to 45
+(`LegacyVersion` stays 35). For owners: nothing the harness runs or records changes,
+and nothing plays differently from version 41. Every earlier version's harness
+evidence is stale to the harness, as at every bump.
+
+Version 46 covers B728's B9 round 2, under the guarded `internal/player/playback/native.go`
+(a DSD occurrence's activation passes its context to its check, `checkDSDActivation`,
+which waits there, no lock held, for a pending choice's write that would change what the
+occurrence plays) and the `internal/alsapcm/` prefix (the backend's tests over the fake
+kernel gain twelve, in `playback_dsd_choice_round2_test.go`: an open, an activation, a
+resume, a join window and a gapless successor beside a write in flight, and a write beside
+a session being released, among them; and their rig its seams). No sink, packer, plan or
+harness reader changes, and no DSD byte a native or DoP occurrence sends. B762 took 45 on
+main while that round was under way, so it took 46; the merge of main into B9 touches no
+guarded path beyond these, so it stays 46. The harness's approval admission reads a record
+of version 46 alone; the migration reads an owner's record of 35 to 46 (`LegacyVersion`
+stays 35). For owners: nothing the harness runs or records changes, and nothing plays
+differently from version 41. Every earlier version's harness evidence is stale to the
+harness, as at every bump.

@@ -65,7 +65,12 @@ import (
 // store is taken alone: its Update runs with no lock of the backend's held,
 // and its closure is pure, no lock taken inside it, so no fsync is ever
 // waited for under a lock an occurrence's admission takes. Playback calls
-// Store.Update only on goroutines of its own (recordDSD), under no lock.
+// Store.Update only on goroutines of its own (recordDSD, through spawnWrite),
+// under no lock; a choice's write calls it on its caller's goroutine, counted
+// among those writes and refused once they are closed (dsdWrite,
+// CloseDSDWrites), the gate's lock (gmu) let go before the Update. The probe's
+// lock, which a written choice takes to owe its probe (oweProbe), is taken
+// under none of these.
 
 // ChoiceOutcome is how a write of the bound DAC's DSD choice ended (B728 B9;
 // the design's section 7.2): written, or the word it was refused with.
@@ -145,9 +150,13 @@ var errWouldInterrupt = errors.New("player backend: the choice's write would int
 // (writeInterrupts, classified before the state's write: would_interrupt).
 // Then the state is written, durably (persist_failed before it lands, nothing
 // changed; persist_uncertain once it lands and its sync fails; state_unreadable
-// where the file is refused in memory), a probe is made due (ProbeDSDPending),
-// the set the state gives is published and reconciled (refreshDSD), and the
-// write is answered from that epoch. A stale answer reads the policy again
+// where the file is refused in memory), a probe is made due and owed
+// (oweProbe, ProbeDSDPending), the set the state gives is published and
+// reconciled (refreshDSD), and the write is answered from that epoch. The
+// state's write is one of the writes of the player's DSD state (dsdWrite):
+// once the player's stop has closed them (CloseDSDWrites) it is not made,
+// persist_failed, nothing changed, and one under way at the close keeps them
+// open until it returns. A stale answer reads the policy again
 // first, so the revision it carries is the state's. A write that cannot be made
 // within maxChoiceRounds rounds, the state or the box moving under it, is
 // persist_failed too: nothing changed either way, and the client writes again
@@ -260,30 +269,36 @@ func (b *Backend) chooseDSD(ctx context.Context, req ChoiceRequest, j *choiceJou
 			b.choicePending()
 		}
 		var wrote dsdstate.State
-		err := p.Store.Update(func(s *dsdstate.State) error {
-			next, err := policy.Choose(r.inputs(*s), req.Choice, now)
-			if err != nil {
-				return err
-			}
-			if pend == nil {
-				return errChoiceRound
-			}
-			if c, _ := b.setOver(r, *s); !c.same(cur) {
-				return errChoiceRound
-			}
-			if n, _ := b.setOver(r, next); !n.same(want) {
-				return errChoiceRound
-			}
-			// What the write would interrupt, the last of its checks, after the
-			// state's own on the state it is made from (round 2, point 3): its
-			// classification was made before, under the pending set and no lock
-			// of the store's, of the two sets this state gives.
-			if interrupts && !req.Interrupt {
-				return errWouldInterrupt
-			}
-			*s, wrote = next, next.Clone()
-			return nil
-		})
+		var err error
+		if !b.dsdWrite("a choice's write", func() {
+			err = p.Store.Update(func(s *dsdstate.State) error {
+				next, err := policy.Choose(r.inputs(*s), req.Choice, now)
+				if err != nil {
+					return err
+				}
+				if pend == nil {
+					return errChoiceRound
+				}
+				if c, _ := b.setOver(r, *s); !c.same(cur) {
+					return errChoiceRound
+				}
+				if n, _ := b.setOver(r, next); !n.same(want) {
+					return errChoiceRound
+				}
+				// What the write would interrupt, the last of its checks, after
+				// the state's own on the state it is made from (round 2, point
+				// 3): its classification was made before, under the pending set
+				// and no lock of the store's, of the two sets this state gives.
+				if interrupts && !req.Interrupt {
+					return errWouldInterrupt
+				}
+				*s, wrote = next, next.Clone()
+				return nil
+			})
+		}) {
+			j.why = "the player's stop closed the writes of its DSD state"
+			return ChoiceResult{Outcome: ChoicePersistFailed}
+		}
 		b.choiceWritten(err)
 		var refusal *policy.ChoiceRefusal
 		switch {
@@ -371,33 +386,27 @@ func (b *Backend) settleChoice(p *pendingChoice) {
 	})
 }
 
-// oweProbe makes the silent probe due, which the supervisor's next ask runs
-// once the device slot is free (ProbeDSDPending, ProbeDSD), as after a choice
-// written for the DAC (the design's section 5). It drops none of the probe's
-// answers: they are the kernel's and the descriptors', which a choice does
-// not change, and with them dropped while a session holds the device, where
-// no probe can run, each tuple's pause would fall back to silence and what
-// the probe refused would be offered again, so a write that changes nothing
-// that plays would change the set and interrupt what it promised to leave
-// alone. A backend with no probe cache owes none.
+// oweProbe makes the silent probe due and owed, which the supervisor's next
+// ask runs once the device slot is free (ProbeDSDPending, RequestProbeDSD), as
+// after a choice written for the DAC (the design's section 5), and asks it
+// anew (asked), so a run begun before the write that finds nothing to ask
+// leaves it owed (settled). It drops none of the probe's answers and moves
+// no generation: they are the kernel's and the descriptors', which a choice
+// does not change, so a probe under way keeps what it asks, which is the
+// probe owed (publishProbe); and with them dropped while a session holds the
+// device, where no probe can run, each tuple's pause would fall back to
+// silence and what the probe refused would be offered again, so a write that
+// changes nothing that plays would change the set and interrupt what it
+// promised to leave alone. A backend with no probe cache owes none.
 func (b *Backend) oweProbe() {
 	if p := b.cfg.DSD; p == nil || p.Probes == nil {
 		return
 	}
-	b.probeState.mu.Lock()
-	b.probeState.forced = true
-	b.probeState.mu.Unlock()
-}
-
-// ProbeDSDPending reports whether a probe is owed that only the supervisor's
-// next ask makes (ProbeDSD): one a choice written for the DAC, or a
-// migration's part for it (ForgetDSDProbe), made due, and that has not run
-// since. Serve's supervisor and output play's watch ask the probe at each
-// policy tick while it is.
-func (b *Backend) ProbeDSDPending() bool {
-	b.probeState.mu.Lock()
-	defer b.probeState.mu.Unlock()
-	return b.probeState.forced
+	ps := &b.probeState
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	ps.asked++
+	ps.forced, ps.pending = true, true
 }
 
 // pendingChoice is a choice write between its reading and its settle: the

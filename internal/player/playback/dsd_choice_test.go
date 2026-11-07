@@ -780,9 +780,6 @@ func TestTheWritesLineNamesTheKeyAndTheModesAlone(t *testing.T) {
 	}
 }
 
-// watchdog bounds a wait for something the test is sure comes.
-const watchdog = 30 * time.Second
-
 // bg is the tests' context.
 var bg = context.Background()
 

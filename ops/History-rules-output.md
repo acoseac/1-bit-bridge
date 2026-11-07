@@ -954,11 +954,18 @@ Lock order: the writes' turn, then the refreshes' (`dsdMu`), then the
 backend's, then each session's, then a sink's; the store's lock is taken
 alone and its closure is pure, so no lock an admission takes spans the fsync,
 and playback's own writes of the state (`recordDSD`) run on goroutines of
-their own, under no lock. A written choice owes the silent probe (`oweProbe`,
-`ProbeDSDPending`), which serve's supervisor asks at its next policy tick and
-which runs once the device slot is free, never inside the request; it drops
-none of the probe's answers (`player.md`'s bullet on the silent probe), so a
-write that changes the choice and nothing that plays publishes no new set.
+their own, under no lock. Since the merge with B762 (2026-11-07) the
+choice's own write is one of the writes of the player's DSD state the
+player's stop closes (`dsdWrite`, `CloseDSDWrites`): refused once they are
+closed (persist_failed, nothing written), and counted while it runs, so the
+stop keeps its share of the data directory's lock until it ends. A written
+choice owes the silent probe (`oweProbe`, `ProbeDSDPending`), which serve's
+supervisor asks at its next policy tick and which runs, on a goroutine of the
+backend's since B762, once the device slot is free, never inside the
+request; it drops none of the probe's answers and moves no generation
+(`player.md`'s bullet on the silent probe), so a write that changes the
+choice and nothing that plays publishes no new set, and a probe under way as
+it is written keeps what it asks.
 What playback observes (a driver's acceptance, streaming observed, first use
 observed) never moves a choice's revision: a negative control that moved it
 at each such write made every write of a session's base stale.

@@ -563,7 +563,8 @@ func (b *Backend) setOver(r *dsdReading, st dsdstate.State) (*dsdSet, DSDView) {
 // so what they publish is in the order their readings were taken; it answers
 // the set published once it is done. It reads no file on the audio path: a
 // session's admission, its activation and its monitor ask it, and the
-// supervisor's RefreshDSD.
+// supervisor's RefreshDSD, on a goroutine of the backend's
+// (RequestRefreshDSD, B762).
 func (b *Backend) refreshDSD() *dsdSet {
 	b.dsdMu.Lock()
 	defer b.dsdMu.Unlock()
@@ -591,7 +592,8 @@ func (b *Backend) refreshDSD() *dsdSet {
 // watcher's, a write of the state, a probe's answers), and otherwise once
 // dsdIdle has passed since the last reading, so a control's change, which no
 // event announces, reaches the published set. A backend with no policy
-// configured does nothing.
+// configured does nothing. It runs on the caller's goroutine, and waits for
+// the refreshes' lock: the supervisor asks it through RequestRefreshDSD.
 func (b *Backend) RefreshDSD(force bool) {
 	if b.cfg.DSD == nil {
 		return
@@ -999,7 +1001,8 @@ func tupleTransport(p policy.Plan) string {
 }
 
 // recordDSD writes into the player's DSD state what playback observed of
-// key's model, on a goroutine of the backend's own, never the audio path's:
+// key's model, on a goroutine of the backend's own, never the audio path's,
+// counted among its writes (DSDWrites):
 // mutate changes the DAC's entry and reports whether it changed anything,
 // and an unchanged state writes nothing. A write the store refuses changes
 // nothing and is said, the landed write's fence once (dsdstate's
@@ -1010,7 +1013,7 @@ func (b *Backend) recordDSD(what string, key dacprofile.Key, mutate func(d *dsds
 	if p == nil || p.Store == nil {
 		return
 	}
-	b.spawn(func() {
+	b.spawnWrite(what, func() {
 		defer func() {
 			if r := recover(); r != nil {
 				b.logPanic("a write of the player's DSD state", r)
@@ -1098,77 +1101,219 @@ func observedFrames(p *engine.NativePlan) int64 {
 // once the slot is free (ProbeDSD).
 var probeSlotSkips = []ProbeSkip{ProbeSessionHolds, ProbeSessionPaused, ProbeReleasePending, ProbeReleaseUnconfirmed, ProbeRunning}
 
-// dsdProbe is the probe's bookkeeping: the unit last probed, and a probe
-// asked for anew (ForgetDSDProbe).
+// dsdProbe is the probe's bookkeeping: the unit last probed; a probe asked
+// for anew (forced: a migration's part, ForgetDSDProbe, or a choice written,
+// oweProbe) and the count of those asks (asked), which a run's end checks
+// before it clears what is owed (settled); the generation, which the
+// migration's part alone moves, in the step that drops the answers, and a
+// probe's answers are checked against (publishProbe); a probe owed that only
+// the supervisor's next ask makes (ProbeDSDPending); and the goroutine its
+// asks run on (RequestProbeDSD, B762).
 type dsdProbe struct {
-	mu     sync.Mutex
-	probed alsapcm.ProbeUnit
-	done   bool
-	forced bool
+	mu      sync.Mutex
+	probed  alsapcm.ProbeUnit
+	done    bool
+	forced  bool
+	asked   uint64
+	gen     uint64
+	pending bool
+	run     coalesced
+}
+
+// settled says a run of the probe owes nothing, unless a probe was asked
+// anew since it began (asked moved: a migration's part, or a choice written
+// for the DAC), which is still owed.
+func (ps *dsdProbe) settled(asked uint64) {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	if ps.asked == asked {
+		ps.pending = false
+	}
+}
+
+// owe says a probe is owed.
+func (ps *dsdProbe) owe() {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	ps.pending = true
 }
 
 // ProbeDSD runs the silent probe of the bound DAC when one is due (the
-// design's section 5), and answers whether one is still pending: at the
-// player's start once the output is available, when the unit's model,
-// firmware, kernel or enumeration changes (a replug, a reset, a firmware
-// update), after a migration's part for it (ForgetDSDProbe) and after a
-// choice was written for it (oweProbe), never on a timer. A probe the device slot refuses, a session holding the device
-// (playing, opening it, paused, releasing) or a release unconfirmed, stays
-// due, opens nothing and waits for nothing: it answers pending, and the
-// supervisor asks again at its next tick, so the probe runs once the slot is
-// free, B4's preconditions unchanged. One that ran, or met a busy node
-// (MPD's), or found no unit, is done for that unit. Its answers are kept
-// (alsapcm.ProbeCache), each accepted native format and DoP carrier recorded
-// as the tuple's driver_accepted under the kernel, and the policy read
-// again, all under the unit it captured before the probe, which the node it
-// opens must be (probedUnit): another unit there is asked nothing. cond is
-// the watcher's view of the bound DAC.
+// design's section 5), on the caller's goroutine, and answers whether one is
+// still owed (ProbeDSDPending): at the player's start once the output is
+// available, when the unit's model, firmware, kernel or enumeration changes
+// (a replug, a reset, a firmware update), after a migration's part for it
+// (ForgetDSDProbe) and after a choice was written for it (oweProbe), never on
+// a timer. A probe the device slot refuses, a session holding the device
+// (playing, opening it, paused, releasing), a Start waiting for it, or a
+// release unconfirmed, stays due, opens nothing and waits for nothing: it
+// answers owed, and the supervisor asks again at its next tick, so the probe
+// runs once the slot is free, B4's preconditions unchanged. One that ran, or
+// met a busy node (MPD's), or found no unit, is done for that unit. Its
+// answers are kept (alsapcm.ProbeCache), each accepted native format and DoP
+// carrier recorded as the tuple's driver_accepted under the kernel, and the
+// policy read again, all under the unit it captured before the probe, which
+// the node it opens must be (probedUnit): another unit there is asked
+// nothing. They are taken only while still current (publishProbe, B762); a
+// probe whose answers are dropped keeps nothing of them and is owed again.
+// cond is the watcher's view of the bound DAC. The supervisor asks it
+// through RequestProbeDSD.
 func (b *Backend) ProbeDSD(ctx context.Context, cond ProbeConditions) (pending bool) {
+	pending, refresh := b.probeDSD(ctx, cond)
+	if refresh {
+		b.refreshDSD()
+	}
+	return pending
+}
+
+// probeDSD is one run of the probe (ProbeDSD) but for the policy's reading
+// that its answers call for, which it reports (refresh) for its caller to
+// make: on its own goroutine, ProbeDSD; on the probe's, RequestProbeDSD, which
+// asks it of the refresh's goroutine (RequestRefreshDSD).
+func (b *Backend) probeDSD(ctx context.Context, cond ProbeConditions) (pending, refresh bool) {
 	p := b.cfg.DSD
 	if p == nil || p.Probes == nil || p.Bound == nil || p.Box == nil {
-		return false
+		return false, false
+	}
+	ps := &b.probeState
+	// What its answers are checked against before they change anything
+	// (publishProbe), read before anything else: the probe's generation,
+	// which a migration's part for the DAC moves, and the Starts that took the
+	// device slot; and the asks for a probe anew so far, which a choice
+	// written moves too, so a run that ends owing nothing clears no ask made
+	// after it began (settled).
+	ps.mu.Lock()
+	gen, asked := ps.gen, ps.asked
+	ps.mu.Unlock()
+	starts := b.starts.Load()
+	settled := func() (bool, bool) {
+		ps.settled(asked)
+		return false, false
 	}
 	bd, ok := p.Bound()
 	if !ok || !cond.Available || !cond.Fresh {
-		return false
+		return settled()
 	}
 	m, err := p.Box.UnitModel(bd.Card)
 	// A device number that did not read (0) tells no enumeration from another,
 	// so its unit is not probed: its answers would be kept under an
 	// enumeration nothing can tell from the next (round 3).
 	if err != nil || !binding.SameUnit(m.USB, bd.Identity) || m.USB.DevNum <= 0 || m.USB.DevNum != bd.Identity.DevNum {
-		return false
+		return settled()
 	}
 	key, err := dsdstate.KeyOf(m.USB, m.Product)
 	if err != nil {
-		return false
+		return settled()
 	}
 	unit := b.probeUnit(key, m.BCDDevice, bd)
-	b.probeState.mu.Lock()
-	due := !b.probeState.done || b.probeState.probed != unit || b.probeState.forced
-	b.probeState.mu.Unlock()
+	ps.mu.Lock()
+	due := !ps.done || ps.probed != unit || ps.forced
+	ps.mu.Unlock()
 	if !due {
-		return false
+		return settled()
+	}
+	if ctx.Err() != nil {
+		// Its supervisor has gone: the DAC is not asked.
+		return false, false
 	}
 	epoch := p.Probes.Begin(unit)
 	rep, err := b.Probe(ctx, ProbeRequest{Conditions: cond, Candidates: alsapcm.ProbeCandidates(), Check: probedUnit(p.Box, m, key)})
 	var skipped *ProbeSkipped
 	if errors.As(err, &skipped) && slices.Contains(probeSlotSkips, skipped.Reason) {
-		return true
+		ps.owe()
+		return true, false
 	}
+	b.probed()
 	if ctx.Err() != nil {
-		return false
+		return false, false
 	}
-	b.probeState.mu.Lock()
-	b.probeState.probed, b.probeState.done, b.probeState.forced = unit, true, false
-	b.probeState.mu.Unlock()
+	if why := b.publishProbe(ctx, gen, starts, bd, unit, epoch, rep); why != "" {
+		b.dsdLog().Info("player: the silent probe's answers are dropped, and a probe is owed", "why", why)
+		return true, false
+	}
+	// Kept means decided before any Start counted (publishProbe's step). What
+	// the probe accepted is written into the player's DSD state after that
+	// decision and outside every lock, through spawnWrite, which takes gmu: so
+	// the write may run beside a Start that took the slot after the decision,
+	// a write of the state and never a call to the device, recording answers
+	// the probe got while it alone held the device.
 	if rep.Opened {
-		p.Probes.Record(epoch, rep)
 		b.noteProbed(key, m.BCDDevice, rep)
 	}
 	b.dsdLog().Info("player: the silent probe asked the bound DAC", "opened", rep.Opened, "err", errorText(err))
-	b.refreshDSD()
-	return false
+	return false, true
+}
+
+// publishProbe takes a probe's answers as current, in one step under the
+// probe's lock, which ForgetDSDProbe and oweProbe take too: its report kept
+// in the probe's cache, its unit done, a probe asked anew satisfied, a choice
+// written while it ran among them (oweProbe), whose answers it is. It answers
+// "" once it has taken them, and otherwise why they are dropped, nothing of
+// them kept and a probe owed: its context ended (its supervisor has gone); a
+// migration's part for the DAC was made since it began (gen, ForgetDSDProbe),
+// whose probe is owed; or, decided in one step under the backend's lock (takeProbe),
+// a Start took the device slot since (starts), which a session holds or held,
+// the binding no longer resolves to the unit it probed (bd: a replug, a
+// reset, the DAC gone, a reading gone stale), or the cache refused the
+// report, its model's epoch moved. Nothing reads the box here: the binding's
+// resolution is the watcher's latest, in memory (DSDPolicy.Bound), read before
+// the backend's lock: in serve it reads the hotplug feed's latest snapshot
+// under the feed's own lock, which is held for in-memory work alone and never
+// for I/O, but which is another package's, so it stays out of that step.
+//
+// The locks, in the one order they are taken in: the probe's (ps.mu), then
+// the backend's (b.mu), then the probe cache's own. Nothing takes ps.mu, a
+// session's lock or gmu under b.mu, and nothing takes b.mu under the cache's
+// lock (the cache calls nothing back); nothing under any of them blocks: they
+// compare what is in memory, and Record writes the cache's map.
+func (b *Backend) publishProbe(ctx context.Context, gen, starts uint64, bd BoundDAC, unit alsapcm.ProbeUnit, epoch alsapcm.ProbeEpoch, rep alsapcm.ProbeReport) string {
+	p := b.cfg.DSD
+	ps := &b.probeState
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	why := ""
+	now, ok := p.Bound()
+	switch {
+	case ctx.Err() != nil:
+		why = "its supervisor has gone"
+	case ps.gen != gen:
+		why = "a migration's part for the DAC was made while it ran"
+	default:
+		why = b.takeProbe(starts, bd, now, ok, epoch, rep)
+	}
+	if why != "" {
+		ps.pending = true
+		return why
+	}
+	ps.probed, ps.done, ps.forced, ps.pending = unit, true, false, false
+	return ""
+}
+
+// takeProbe is publishProbe's decision on the Starts, the binding and the
+// cache, in one step under the backend's lock, the lock hold counts a Start
+// under in the step that takes the device slot (b.holder, b.starts) and
+// reserveProbe reads the slot under (B762 round 3). A Start that has taken
+// the slot by then voids the answers, the cache recording nothing; one that
+// takes it after finds them recorded, and opens the DAC after the decision.
+// Round 2 compared the Starts apart from the Record, so a Start could take
+// the slot between the two and open the DAC beside answers kept. The device
+// slot itself stays the probe's alone until its node is closed (endProbe):
+// this step holds the backend's lock, never the slot. ProbeDeciding runs just
+// before the step and ProbeDecided just after it, the backend's lock let go.
+func (b *Backend) takeProbe(starts uint64, bd, now BoundDAC, bound bool, epoch alsapcm.ProbeEpoch, rep alsapcm.ProbeReport) string {
+	b.probeDeciding()
+	defer b.probeDecided()
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	switch {
+	case b.starts.Load() != starts:
+		return "a session took the device while it ran"
+	case !bound || now.Card != bd.Card || now.Enumeration != bd.Enumeration || !binding.SameUnit(now.Identity, bd.Identity) || now.Identity.DevNum != bd.Identity.DevNum:
+		return "the binding no longer resolves to the unit it probed"
+	case rep.Opened && !b.cfg.DSD.Probes.Record(epoch, rep):
+		return "its model's answers moved on while it ran"
+	}
+	return ""
 }
 
 // probedUnit is the probe's check of the node it opened (ProbeRequest.Check):
@@ -1239,13 +1384,21 @@ func (b *Backend) noteProbed(key dacprofile.Key, bcd string, rep alsapcm.ProbeRe
 }
 
 // ForgetDSDProbe drops the probe's answers for key's model and makes a probe
-// due: the migration's part for a DAC (the design's section 5). A choice
-// written for the DAC (B9) makes a probe due and drops nothing (oweProbe).
+// due: the migration's part for a DAC (the design's section 5). The probe is
+// owed (ProbeDSDPending), which the supervisor asks at its next tick, since
+// no snapshot comes of an unchanged DAC, and asked anew (asked), so a run
+// begun before it leaves it owed; and the probe's generation moves, in the
+// step the answers are dropped, so a probe under way keeps nothing of what it
+// asked before the part was made (publishProbe). A choice written for the DAC
+// (B9) makes a probe due and owed too, and drops nothing (oweProbe).
 func (b *Backend) ForgetDSDProbe(key dacprofile.Key) {
+	ps := &b.probeState
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
 	if p := b.cfg.DSD; p != nil && p.Probes != nil {
 		p.Probes.Forget(key.Canonical())
 	}
-	b.probeState.mu.Lock()
-	b.probeState.forced = true
-	b.probeState.mu.Unlock()
+	ps.gen++
+	ps.asked++
+	ps.forced, ps.pending = true, true
 }
