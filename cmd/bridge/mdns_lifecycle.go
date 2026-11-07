@@ -6,6 +6,7 @@ import (
 	"net"
 	"sync"
 
+	"github.com/acoseac/1-bit-bridge/internal/advertise"
 	"github.com/acoseac/1-bit-bridge/internal/dlna"
 	bridgemdns "github.com/acoseac/1-bit-bridge/internal/mdns"
 )
@@ -118,6 +119,16 @@ func (m *mdnsLifecycle) Set(enabled bool) {
 		})
 		if err != nil {
 			fmt.Fprintf(m.stderr, "mDNS advertise failed (non-fatal): %v\n", err)
+			// A converted host name's `.local` endpoint is published from
+			// the setting, which says on, whether or not the responder
+			// started, and nothing but this responder answers it (backlog
+			// B744). Said here, read from the probe the endpoints read,
+			// with no state of its own: publication stays as it is.
+			if local := advertise.OwnResponderEndpoint(m.port); local != "" {
+				fmt.Fprintf(m.stderr, "mDNS: the advertised %s will not resolve while mDNS is down: it is the host's "+
+					"name in its IDNA ASCII form, which only the bridge's own responder answers, and /v1/health "+
+					"and the pairing QR keep listing it while mdns.enabled is on\n", local)
+			}
 			return
 		}
 		m.advertiser = a
