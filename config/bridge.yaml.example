@@ -125,7 +125,6 @@ libraryName: "My Music Library"
 #   it (the internet, when it routes there) can browse and stream the
 #   library without signing in. A host name never opts in.
 # dlna:
-#   enabled: false
 #   # listenAddress: ":7790"
 #   # friendlyName: "1-bit Bridge"
 
@@ -170,9 +169,7 @@ libraryName: "My Music Library"
 #   and artist photos. It sends the artist and album names your files carry
 #   to MusicBrainz, the release IDs it finds to the Cover Art Archive, and
 #   artist names to Deezer for photos.
-#   enabled: false stops it, and acoustic fingerprinting with it: nothing goes
 #   to MusicBrainz, the Cover Art Archive, Deezer or a mirror set below.
-#   deezerEnabled: false stops only the Deezer photo lookups. Both are on when
 #   absent and apply at once from the admin console (Settings -> Metadata),
 #   which writes only an off; also BRIDGE_ENRICH_ENABLED /
 #   BRIDGE_ENRICH_DEEZER_ENABLED. Covers, IDs and photos already fetched stay,
@@ -185,10 +182,15 @@ libraryName: "My Music Library"
 #   since no mirror takes them over. Also settable in the admin console and via
 #   BRIDGE_MUSICBRAINZ_BASE_URL / BRIDGE_COVERART_BASE_URL.
 # enrich:
-#   enabled: false
-#   deezerEnabled: false
 #   musicbrainzBaseURL: "https://atlas.example.com/ws/2"
 #   coverArtBaseURL: "https://atlas.example.com"
+# To switch enrichment off (both are on when absent; off stops the lookups they name):
+# enrich:
+#   enabled: false
+#   enabled: false stops it, and acoustic fingerprinting with it: nothing goes
+#   deezerEnabled: false stops only the Deezer photo lookups. Both are on when
+#   enabled: false
+#   deezerEnabled: false
 
 # atlas: optional RICH-tier metadata (artist bios, album descriptions, genres).
 #   Disabled by default. Distinct from `enrich` above (artwork + MusicBrainz
