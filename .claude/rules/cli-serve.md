@@ -54,6 +54,7 @@ The largest package in the repo (`main.go` alone 4,698 lines) had **no section h
   returns false for a nil sweeper or a nil predicate; `runFingerprintSweeper`'s
   nil arm reads the other way and is its own call. A disabled pass records NO
   status, so the Jobs card keeps its last real breakdown.
+- **Serve's harvest cover adapter (`atlasCoverRefetcher`) asks `enrich.enabled` before each refetch and runs it on the switch's context, and a refetch the switch stopped is `atlasharvest.ErrCoversPaused`, never the miss a CAA answer is** (2026-11-06, backlog B617; `enrichment.md`'s B617 bullet). **Don't answer a switched-off refetch (false, nil): six of those drop a pending cover.** `TestTheCoverAdapterAsksAtlasNothingWhileEnrichmentIsOff` and `TestTheHarvestRunsWithEnrichmentOff` pin it.
 - **Feature gates on a mutation handler run BEFORE path resolution and the
   folder walk.** Both checks depend only on the decoded body, and a request that
   will be refused should not first cost a recursive `WalkDir`. Asserting on the

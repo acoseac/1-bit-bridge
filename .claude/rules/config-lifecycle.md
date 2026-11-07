@@ -295,6 +295,7 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   three fragments that then vanish in validation. Two legacy enrich base-URL
   names are kept as aliases — losing them sends an Atlas-configured bridge back
   to public MusicBrainz at the self-hosted pace.
+- **The two opt-outs, `enrich.enabled` and `enrich.deezerEnabled`, read their variables as their keys read, without regard to case, and a value that reads as neither as off with a Warn naming the variable (`switchEnvPaths`, `readSwitchEnv`); and the holder's save writes each as the file holds it, read in the save's turn, unless the save changed it, then off as false and on as no key, publishing the live value either way (`filedSwitches`)** (2026-11-06, backlog B617; the rule is `enrichment.md`'s B617 bullet). **Don't read them by `strconv.ParseBool` with a refusal ignored, or write a variable's value into the file from a save that did not change the switch; the other variables still are (B761).** `TestTheOffSwitchLoads` and `TestAConsoleSaveKeepsTheFilesOwnSwitches` pin it.
 - **`Uninstall` refuses a system-level install, like `Stop`/`Start`/`Restart` —
   and the four read ONE predicate.** The condition was spelled out in the first
   three and missing from the fourth, and the two POSIX uninstallers touch only
