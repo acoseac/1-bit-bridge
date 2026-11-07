@@ -23,6 +23,9 @@ internal/player/decode/testdata/dsd-goldens/*.dff binary
 # The ALAC goldens are compared sample for sample after decoding; keep git
 # from ever treating one as text.
 internal/player/decode/testdata/alac-goldens/*.m4a binary
+# A DAC's USB descriptors, captured from its sysfs descriptors attribute, are
+# read byte for byte; keep git from ever treating one as text.
+internal/player/policy/testdata/*.bin binary
 # The DAC profile database is compared byte for byte with its canonical
 # encoding, LF line ends and all; a CRLF checkout (Windows CI) would change
 # every line of it.
