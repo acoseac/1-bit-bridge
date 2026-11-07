@@ -437,12 +437,14 @@ func (b *Backend) Policy() PlayerPolicy {
 }
 func (b *Backend) copyPolicyLocked() PlayerPolicy {
 	if b.cfg.DSD != nil {
-		// Production (B728 B7): the effective set published now, the one
+		// Production (B728 B7): the effective set published, the one
 		// selection admits by, with the bound unit's model and firmware and no
 		// record's revision or date, since none is read; and its read side
-		// (B8), from the same set.
-		d := b.dsd.Load()
-		view := d.view.clone()
+		// (B8), from the pair that holds the two, so one is never read beside
+		// another's.
+		pub := b.dsdPub.Load()
+		d := pub.set
+		view := pub.view.clone()
 		return PlayerPolicy{BootID: b.policy.BootID, Generation: d.gen, Reason: d.reason(), Tuples: d.tuples(), Converted: d.converted(), Model: d.model, BCDDevice: d.bcd(), DSD: &view}
 	}
 	p := b.policy

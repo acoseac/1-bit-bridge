@@ -13,10 +13,12 @@ import (
 // The read side of the player's DSD (B728 B8; the design's section 7.1):
 // what GET /v1/outputs publishes of the bound DAC's DSD beside the set's
 // tuples and converted rates. A refresh makes it (readDSD) from the reading
-// and the state it computes the set from, and the set published carries it
-// (dsdSet.view), so a reader of Facts reads no state file, no box and no lock
-// a reading holds, and never sees one generation's tuples beside another
-// reading's choice or first use.
+// and the state it computes the set from, and publishes it in one pair with
+// the set published (dsdPublished): beside a new set, or, when the reading
+// plays what the published set plays, beside that set as it was, whose
+// pointer the occurrences admitted under it are compared with. A reader of
+// Facts reads no state file, no box and no lock a reading holds, and never
+// sees one set's tuples beside a view made for another.
 
 // The words of a transport's first use (dsdDAC.firstUse[].state).
 const (

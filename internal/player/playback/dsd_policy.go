@@ -151,14 +151,13 @@ func (h HostBox) ReadControls(card int) (alsactl.Snapshot, error) {
 
 // dsdSet is one effective set as the backend publishes and admits by:
 // immutable once stored. computed is false while no set could be computed,
-// and why says why; every rate is then refused (ReasonDACUnread). view is
-// its read side (B728 B8), made from the same reading and state.
+// and why says why; every rate is then refused (ReasonDACUnread). Its read
+// side is published beside it (dsdPublished), never in it.
 type dsdSet struct {
 	gen      uint64
 	set      policy.Set
 	computed bool
 	why      string
-	view     DSDView
 	// unit is where the set was computed: the bound card and endpoint, the
 	// unit's enumeration, and its model's text for publication.
 	card, device, subdevice int
@@ -167,6 +166,21 @@ type dsdSet struct {
 	// profile is the profile that matched the unit, nil for an unknown DAC:
 	// the gain check at an open reads its exemptions.
 	profile *dacprofile.Profile
+}
+
+// dsdPublished is what GET /v1/outputs reads of the player's DSD (B728 B8):
+// the set published and its read side, swapped as one pair, so a reader never
+// sees one set's tuples beside a view made for another. The set's pointer
+// moves only with what plays (dsdSet.same), since every occurrence admitted
+// under it is compared with the set published by that pointer (the gapless
+// join, a converted join window's successor), and only a reconciliation
+// repoints one; the view moves with every refresh that says another thing of
+// the DAC, the pair then holding the set as it was (round 2: a view-only
+// change stored a new set and stranded each occurrence admitted under the
+// old one).
+type dsdPublished struct {
+	set  *dsdSet
+	view DSDView
 }
 
 // rateWords are the rates' names in a log line.
@@ -251,8 +265,8 @@ func (d *dsdSet) bcd() string {
 // neither, with the same reason; the same unit, endpoint and identity; and at
 // every rate the same plan (policy.Plan.Same) or the same refusal. The read
 // side is no part of it: a change of evidence, first use, the choice's
-// revision or a warning alone moves no generation, and refreshDSD publishes
-// it under the generation it had (B728 B8).
+// revision or a warning alone moves neither the set nor its generation, and
+// refreshDSD publishes it beside the set as it was (B728 B8).
 func (d *dsdSet) same(e *dsdSet) bool {
 	if d.computed != e.computed {
 		return false
@@ -351,9 +365,9 @@ func (b *Backend) dsdState() dsdstate.State {
 	return dsdstate.Refusing(b.dsdNow())
 }
 
-// noSet is a set that could not be computed, for why, its read side from
-// the state st (noView).
-func noSet(why string, st dsdstate.State) *dsdSet { return &dsdSet{why: why, view: noView(st)} }
+// noSet is a set that could not be computed, for why, and its read side
+// from the state st (noView).
+func noSet(why string, st dsdstate.State) (*dsdSet, DSDView) { return &dsdSet{why: why}, noView(st) }
 
 // canonicalBCD is a firmware as the state keys it, four lowercase
 // hexadecimal digits, or "" for one that does not read.
@@ -399,15 +413,15 @@ func (b *Backend) probeUnit(key dacprofile.Key, bcd string, bd BoundDAC) alsapcm
 }
 
 // readDSD computes the effective set from what it reads now (the design's
-// section 3.1): the state, once, which the set and its read side are both
-// made from; the bound DAC from a fresh reading, its unit's model read from
-// sysfs while it is still the unit that reading resolved, its PCM device's
-// playback altsets, the DoP gain check's mixer, the probe's answers, the
-// profiles and the kernel; then the unit read again, so a card renumbered
-// while its files were read is never taken. What does not read leaves no
-// set, and DSD refused (ReasonDACUnread), its read side the state's
-// warnings of the bridge's all the same (noView).
-func (b *Backend) readDSD() *dsdSet {
+// section 3.1), and its read side: the state, once, which the set and its
+// read side are both made from; the bound DAC from a fresh reading, its
+// unit's model read from sysfs while it is still the unit that reading
+// resolved, its PCM device's playback altsets, the DoP gain check's mixer,
+// the probe's answers, the profiles and the kernel; then the unit read again,
+// so a card renumbered while its files were read is never taken. What does
+// not read leaves no set, and DSD refused (ReasonDACUnread), its read side
+// the state's warnings of the bridge's all the same (noView).
+func (b *Backend) readDSD() (*dsdSet, DSDView) {
 	p := b.cfg.DSD
 	st := b.dsdState()
 	if p.Bound == nil || p.Box == nil {
@@ -456,41 +470,44 @@ func (b *Backend) readDSD() *dsdSet {
 	}
 	d.set = policy.Effective(policy.Inputs{Unit: unit, Profiles: p.Profiles, State: st, Kernel: p.Kernel,
 		Altsets: alts, Probe: answers, Mixer: mixer})
-	d.view = viewOf(d, st, m.USB)
-	return d
+	return d, viewOf(d, st, m.USB)
 }
 
 // refreshDSD computes the effective set from fresh inputs (readDSD) and,
 // when it publishes or admits anything another way than the one published
 // (dsdSet.same), publishes it at the next generation, in one swap that
-// selection and publication both see, then reconciles every session's DSD
-// occurrences against it (policy.Reconcile). One that plays and admits what
-// the published one does, and says another thing of the DAC (its read side:
-// first use observed, an evidence step, the choice's revision, a warning),
-// is published in the same swap under the published generation (B728 B8):
-// the epoch a client's grant keys on is what plays, the design's section 7.1
-// putting the tuples and the converted rates under it, and nothing an
-// occurrence was admitted under moves, so nothing is reconciled. Refreshes
-// run one at a time, so what they publish is in the order their readings
-// were taken; it answers the set published once it is done. It reads no file
-// on the audio path: a session's admission, its activation and its monitor
-// ask it, and the supervisor's RefreshDSD.
+// selection sees and then one that publication sees, the pair with its read
+// side (dsdPublished), then reconciles every session's DSD occurrences
+// against it (policy.Reconcile). One that plays and admits what the published
+// one does is not stored: the set published stays, pointer and generation,
+// and what the reading says of the DAC (its read side: first use observed, an
+// evidence step, the choice's revision, a warning), when it says another
+// thing, is published beside it (B728 B8). The epoch a client's grant keys on
+// is what plays, the design's section 7.1 putting the tuples and the
+// converted rates under it, and the set an occurrence was admitted under is
+// still the one published, so nothing is reconciled (round 2: a new set
+// stored for a view-only change, which no reconciliation followed, left every
+// occurrence admitted under the old one outside the set published, and the
+// producer waited at the gapless join for good). Refreshes run one at a time,
+// so what they publish is in the order their readings were taken; it answers
+// the set published once it is done. It reads no file on the audio path: a
+// session's admission, its activation and its monitor ask it, and the
+// supervisor's RefreshDSD.
 func (b *Backend) refreshDSD() *dsdSet {
 	b.dsdMu.Lock()
 	defer b.dsdMu.Unlock()
 	b.dsdRead = b.dsdNow()
-	next := b.readDSD()
+	next, view := b.readDSD()
 	cur := b.dsd.Load()
 	if cur.same(next) {
-		if reflect.DeepEqual(cur.view, next.view) {
-			return cur
+		if pub := b.dsdPub.Load(); !reflect.DeepEqual(pub.view, view) {
+			b.dsdPub.Store(&dsdPublished{set: cur, view: view})
 		}
-		next.gen = cur.gen
-		b.dsd.Store(next)
-		return next
+		return cur
 	}
 	next.gen = cur.gen + 1
 	b.dsd.Store(next)
+	b.dsdPub.Store(&dsdPublished{set: next, view: view})
 	b.logDSDSet(next)
 	b.published()
 	b.reconcileDSD(next)
