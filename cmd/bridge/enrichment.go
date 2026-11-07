@@ -9,7 +9,10 @@
 // `retry` is the scripted equivalent of the admin console's "Retry
 // missing" button — the same three sanctioned enriched_at writers, the
 // same 60s guard — so a backfill after a matching fix doesn't require an
-// admin session. There is no new enriched_at writer here.
+// admin session. There is no new enriched_at writer here. With enrichment
+// switched off (enrich.enabled, backlog B617) a running bridge runs only the
+// facets that feed no enricher, or refuses with 409, and `retry` relays its
+// answer; with no bridge running, `retry` refuses before it opens the store.
 //
 // Both prefer a RUNNING bridge over touching the database directly: the
 // live process owns the store, and going through the admin API also
@@ -409,6 +412,19 @@ func enrichmentRetryCmd(ctx context.Context, args []string, stdout, stderr io.Wr
 		return 1
 	}
 
+	// Offline: this run's own config decides, its environment included
+	// (backlog B617). Through a running bridge the bridge's live value
+	// decided above, whatever this process reads. With enrichment off a
+	// reset would queue rows for a turn the enricher does not take, and the
+	// one facet that feeds no enricher, the harvest's re-submit, has no
+	// offline equivalent, so refuse before the store is opened.
+	if !cfg.Enrich.EffectiveEnabled() {
+		fmt.Fprintln(stderr, "enrichment retry: enrichment is off (enrich.enabled, or BRIDGE_ENRICH_ENABLED),")
+		fmt.Fprintln(stderr, "  so nothing would look up the tracks a retry re-queues. Nothing was changed.")
+		fmt.Fprintln(stderr, "  Turn enrichment on, then retry.")
+		return 1
+	}
+
 	// Offline: reset directly. Same sanctioned writer the admin handler
 	// calls; the harvest re-submit has no offline equivalent (there is no
 	// harvest client running to nudge), so say so rather than implying a
@@ -514,13 +530,22 @@ func retryViaAdmin(ctx context.Context, addr, scope string, stdout, stderr io.Wr
 			continue
 		}
 		if status >= 400 {
+			// A refusal in the console's envelope is relayed in its words
+			// (the 409 enrichment-off a bridge with enrichment off answers,
+			// backlog B617), whatever this process's own config says.
+			var refusal struct {
+				Error   string `json:"error"`
+				Message string `json:"message"`
+			}
+			if json.Unmarshal([]byte(payload), &refusal) == nil && refusal.Error != "" && refusal.Message != "" {
+				fmt.Fprintf(stderr, "enrichment retry: the running bridge refused it (HTTP %d, %s): %s\n",
+					status, refusal.Error, refusal.Message)
+				return 1
+			}
 			fmt.Fprintf(stderr, "enrichment retry: admin returned HTTP %d: %s\n", status, strings.TrimSpace(payload))
 			return 1
 		}
-		var ack struct {
-			ResetTracks        int64 `json:"resetTracks"`
-			HarvestResubmitted bool  `json:"harvestResubmitted"`
-		}
+		var ack retryAck
 		if err := json.Unmarshal([]byte(payload), &ack); err != nil {
 			// The server ACCEPTED the retry — only its ack is unreadable. So
 			// warn and still exit 0: reporting failure here would make a
@@ -531,11 +556,44 @@ func retryViaAdmin(ctx context.Context, addr, scope string, stdout, stderr io.Wr
 				status, err)
 			return 0
 		}
-		fmt.Fprintf(stdout, "enrichment retry: re-queued %d tracks via the running bridge.\n", ack.ResetTracks)
-		if ack.HarvestResubmitted {
-			fmt.Fprintln(stdout, "  artist bios / album descriptions re-submitted to Atlas.")
-		}
+		ack.report(stdout)
 		return 0
+	}
+}
+
+// retryAck is what either retry route answers: the library-wide route's
+// count of re-queued rows includes its artist-image resets, and the scoped
+// route counts them apart and adds its booklets. EnrichmentOff and DeezerOff
+// say which facets the running bridge's switches skipped (backlog B617).
+type retryAck struct {
+	ResetTracks        int64 `json:"resetTracks"`
+	ArtistImageResets  int64 `json:"artistImageResets"`
+	HarvestResubmitted bool  `json:"harvestResubmitted"`
+	BookletChecksReset int64 `json:"bookletChecksReset"`
+	BookletFetchNudges int   `json:"bookletFetchNudges"`
+	EnrichmentOff      bool  `json:"enrichmentOff"`
+	DeezerOff          bool  `json:"deezerOff"`
+}
+
+// report says what the running bridge's retry did, facet by facet.
+func (a retryAck) report(w io.Writer) {
+	if a.EnrichmentOff {
+		fmt.Fprintln(w, "enrichment retry: enrichment is off on the running bridge (enrich.enabled),")
+		fmt.Fprintln(w, "  so no track was re-queued.")
+	} else {
+		fmt.Fprintf(w, "enrichment retry: re-queued %d tracks via the running bridge.\n",
+			a.ResetTracks+a.ArtistImageResets)
+	}
+	if a.DeezerOff {
+		fmt.Fprintln(w, "  Deezer is off on the running bridge (enrich.deezerEnabled), so no track was")
+		fmt.Fprintln(w, "  re-queued for its artist photo.")
+	}
+	if a.HarvestResubmitted {
+		fmt.Fprintln(w, "  artist bios / album descriptions re-submitted to Atlas.")
+	}
+	if a.BookletChecksReset > 0 || a.BookletFetchNudges > 0 {
+		fmt.Fprintf(w, "  booklets: %d check(s) re-armed, %d fetch(es) nudged.\n",
+			a.BookletChecksReset, a.BookletFetchNudges)
 	}
 }
 

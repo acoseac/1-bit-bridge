@@ -130,6 +130,13 @@ type Store struct {
 	// statement and its commit (SetUpscaleTargetBeforeCommitForTest).
 	// Production leaves it nil.
 	upscaleTargetBeforeCommit func(*sql.Tx) error
+
+	// resetEnrichedBeforeCommit, when set, runs in ResetEnrichedByPaths once
+	// its statements are written and before its transaction commits, with
+	// the reset's context. A non-nil error is the reset's, and the
+	// transaction rolls back. Tests hold the re-queue there
+	// (SetResetEnrichedBeforeCommitForTest). Production leaves it nil.
+	resetEnrichedBeforeCommit func(context.Context) error
 }
 
 // indexedAtAdvanceSQL is the `SET indexed_at = …` expression EVERY

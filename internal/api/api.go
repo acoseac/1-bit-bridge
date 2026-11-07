@@ -121,6 +121,7 @@ type Server struct {
 	manifest               ManifestProvider
 	artworkDirs            ArtworkDirProvider
 	mbidProbe              MBIDProbe
+	enrichmentEnabled      func() bool
 	updater                UpdaterStatus
 	sessions               SessionTracker
 	pairing                *pairing.Store
@@ -552,6 +553,21 @@ func (s *Server) WithArtworkDirs(ad ArtworkDirProvider) *Server {
 func (s *Server) WithMBIDProbe(p MBIDProbe) *Server {
 	s.mbidProbe = p
 	return s
+}
+
+// WithEnrichmentEnabled attaches the live predicate for enrich.enabled,
+// which the artwork and artist-image misses read per request
+// (classifyArtworkMiss): while it is off, an MBID whose rows wait for the
+// enricher answers the terminal 404 `no_image` rather than a 202 for a
+// turn that is not coming (backlog B617). Nil (the default) is on.
+func (s *Server) WithEnrichmentEnabled(f func() bool) *Server {
+	s.enrichmentEnabled = f
+	return s
+}
+
+// enrichmentOn is enrich.enabled as the predicate answers it now.
+func (s *Server) enrichmentOn() bool {
+	return s.enrichmentEnabled == nil || s.enrichmentEnabled()
 }
 
 // WithUpdater attaches an UpdaterStatus so /v1/health can advertise

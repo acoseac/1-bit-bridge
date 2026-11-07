@@ -42,9 +42,9 @@ import (
 // that a store that was migrated does not run the backup at every start:
 // updater.CrashRollback (the count, the swap, the versions, no migration of
 // the store begun, no version but this one recorded over the data dir), the
-// backup's version (updater.ProbeVersion), and the backup's settings check
-// (updater.CheckConfig), so that a rollback does not trade one crash loop for
-// another over a setting this version saved that the backup refuses. A
+// backup's version (updater.ProbeVersionWithin), and the backup's settings
+// check (updater.CheckConfig), so that a rollback does not trade one crash
+// loop for another over a setting this version saved that the backup refuses. A
 // backup that predates that check (ConfigCheckUnsupported: 0.2.2 and older)
 // is not put back, and the start records why (B660's second round; until
 // then it was put back with a warning): it cannot say whether it loads the
@@ -115,7 +115,7 @@ func recoverCrashedInstall(ctx context.Context, dataDir, configPath string, opts
 		refuse(fmt.Sprintf("there is no backup to put back, a regular file at %s", backup), "there is no backup beside the binary to put back")
 		return 0, false
 	}
-	got, err := updater.ProbeVersion(ctx, backup)
+	got, err := updater.ProbeVersionWithin(ctx, backup, backupProbeBound(opts))
 	if err != nil {
 		refuse(fmt.Sprintf("the backup at %s did not say its version: %v", backup, err), "the backup did not say its version")
 		return 0, false

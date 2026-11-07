@@ -39,7 +39,7 @@ func TestResolveArtist_PersistentErrorIsNegativeCached(t *testing.T) {
 	defer srv.Close()
 
 	e := &Enricher{
-		mb:            NewMusicBrainzClient(srv.URL, "test", nil),
+		mb:            NewMusicBrainzClient(srv.URL, "test", nil, onSwitches),
 		MBMinInterval: 0, // don't pace the test
 		artistCache:   newArtistCacheForTest(),
 	}
@@ -73,7 +73,7 @@ func TestResolveArtist_TransientErrorIsNotCached(t *testing.T) {
 	defer srv.Close()
 
 	e := &Enricher{
-		mb:            NewMusicBrainzClient(srv.URL, "test", nil),
+		mb:            NewMusicBrainzClient(srv.URL, "test", nil, onSwitches),
 		MBMinInterval: 0,
 		artistCache:   newArtistCacheForTest(),
 	}
@@ -127,7 +127,7 @@ func newCountingArtistEnricher(t *testing.T) (*Enricher, *atomic.Int32) {
 	}))
 	t.Cleanup(srv.Close)
 	return &Enricher{
-		mb:            NewMusicBrainzClient(srv.URL, "test", nil),
+		mb:            NewMusicBrainzClient(srv.URL, "test", nil, onSwitches),
 		MBMinInterval: 0,
 		artistCache:   newArtistCacheForTest(),
 	}, calls
@@ -151,7 +151,7 @@ func newRecordingArtistEnricher(t *testing.T, out *[]string) (*Enricher, *atomic
 	}))
 	t.Cleanup(srv.Close)
 	return &Enricher{
-		mb:            NewMusicBrainzClient(srv.URL, "test", nil),
+		mb:            NewMusicBrainzClient(srv.URL, "test", nil, onSwitches),
 		MBMinInterval: 0,
 		artistCache:   newArtistCacheForTest(),
 	}, calls
