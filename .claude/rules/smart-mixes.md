@@ -10,7 +10,7 @@ paths:
 ---
 # Smart mixes
 
-The smart-mix generator: the families and the harmonic engine (`internal/smartplaylist`), the regenerator and its inputs (`internal/smartplaylistgen`), the store queries and the `smart_playlist_served` table (`internal/manifest/smartplaylist*.go`), the serve-side regeneration loop (`cmd/bridge/smartplaylists.go`) and the console's regenerate handlers. `/v1/smart-playlists` serves the cache; its wire rules are in `wire.md`, and the Christmas family's window, which that handler and the console's mix views apply, is here.
+The smart-mix generator: the families and the harmonic engine (`internal/smartplaylist`), the regenerator and its inputs (`internal/smartplaylistgen`), the store queries and the `smart_playlist_served` table (`internal/manifest/smartplaylist*.go`), the serve-side regeneration loop (`cmd/bridge/smartplaylists.go`) and the console's regenerate handlers. `/v1/smart-playlists` serves the cache; its wire rules are in `wire.md`, and the Christmas family's window and its pick for each view (`season.Pick`), which that handler and the console's mix views apply, are here.
 
 The record behind each rule is in `ops/engineering-log.md` (backlog B451, 2026-10-18).
 
@@ -150,20 +150,34 @@ The record behind each rule is in `ops/engineering-log.md` (backlog B451, 2026-1
   shares, so no bare `Silent Night`), or one of four title words. The
   artist's name never qualifies a track, and `jul` and `natal` count only
   as a genre segment. The floor is one predicate, `season.MeetsFloor`, the
-  owner's rule: 15 tracks from 3 albums or 3 artists, asked of the
-  qualifying tracks at generation (a client that declares every gated
-  format may be sent all of them) and of each request's view at the
-  response, which leaves the family out of a view the format gate leaves
-  below it (round 4 of backlog B489). The cap is 100, filled first from
-  the tracks every client is served, 8 an artist before the rest fill in
-  the same order, then from the WavPack and Monkey's Audio tracks, each
-  format spread the same way, the two in turn (`selectChristmas`):
-  shuffled as one pool, a thousand `.wv` files took the cap from the
-  fifteen FLACs an app that declares neither can play, all season. Each
-  item stores its album for the response's floor
-  (`SmartPlaylistItem.Album`, never on the wire), and a blob cached before
-  it is judged on its artists until the next build. The order is seeded
-  by the season's year
+  owner's rule: 15 tracks from 3 albums or 3 artists. **Each request's
+  items are picked at the response from a bounded superset the
+  regenerator stores** (rounds 4 and 5 of backlog B489: one selection
+  capped at generation could cut away the album or the artist that
+  qualified its pool, so a family went to nobody, and could not suit four
+  views). The regenerator stores each format on its own
+  (`storeChristmas`): the tracks every client is served, then the WavPack
+  ones, then the Monkey's Audio ones, each in the season's order, 8 an
+  artist before the rest fill in (`ChristmasOrder`), and cut at 100 by
+  `season.KeepSpread`, which first moves the first track of each of its
+  first three albums and of each of its first three artists to the front:
+  up to 300 items, each with its album (`SmartPlaylistItem.Album`, never
+  on the wire). `season.Pick`, one pure function of the stored items and
+  the view, is each request's selection: the view's formats, those every
+  client is served first, then the declared gated formats in turn (so a
+  thousand `.wv` files cannot take the cap from the fifteen FLACs an app
+  that declares neither can play); before the cap of 100
+  (`season.MaxTracks`) the first track of each of the first three albums,
+  or failing that of the first three artists, moves to the front, so the
+  cap never cuts away a spread those items hold; and the floor is asked of
+  the pick, a view below it not sent the family. The regenerator stores
+  the family when the pick of one of the four views a client can declare
+  clears it, and the console shows the pick of a client that declares
+  every format. A blob cached before its items stored their album is
+  judged on its artists until the next build, with no fallback on its
+  count alone, which would serve what the floor refuses (B750 has shipped
+  in no release, so no released bridge holds such a blob, and the family
+  is rebuilt daily). The order is seeded by the season's year
   (`season.Year`: 1 to 5 January is the previous December's, and it turns
   on 6 January, a day nothing is served). It is no
   discovery shelf and reads no exclusion. `GET /v1/smart-playlists`
@@ -177,8 +191,10 @@ The record behind each rule is in `ops/engineering-log.md` (backlog B451, 2026-1
   the 6th, and one built in November would miss 1 December), don't
   seed its order by the calendar year, don't let a gated track take the
   cap ahead of one every client is served or one gated format crowd out
-  the other, don't hold the floor at generation and the response in two
-  places, and don't put the album on the wire.** Tests:
+  the other, don't pick a view's items anywhere but `season.Pick`, cut a
+  view's pick or a format's stored tracks before the spread moves to the
+  front, store more than `season.MaxTracks` of a format, judge a blob with
+  no albums by its count alone, or put the album on the wire.** Tests:
   `TestMatchChristmasExclusions`,
   `TestEveryChristmasFixtureThroughTheStoresRead`,
   `TestMatchingTrackFeaturesHandsEveryServedRowToItsMatch`,
@@ -197,4 +213,9 @@ The record behind each rule is in `ops/engineering-log.md` (backlog B451, 2026-1
   `TestAViewLeftBelowTheChristmasFloorIsNotSentTheFamily`,
   `TestAChristmasFamilyOfOneArtistOrOneAlbumClearsTheFloorInEveryView`,
   `TestAThousandWavPackFilesLeaveTheAPEViewItsFifteen`,
-  `TestAChristmasFamilyCachedWithoutAlbumsIsJudgedOnItsArtists`.
+  `TestAChristmasFamilyCachedWithoutAlbumsIsJudgedOnItsArtists`,
+  `TestRegenerate_ChristmasStoresWhatEachViewNeedsToClearTheFloor`,
+  `TestEachViewIsPickedItsChristmasItemsAtTheRequest`,
+  `TestPickKeepsTheFloorWheneverTheItemsCan`,
+  `TestKeepSpreadKeepsBothSpreadsAheadOfTheCut`,
+  `TestTheConsoleShowsTheChristmasFamilyAsServedToEveryFormat`.

@@ -73,11 +73,14 @@ Audited PR-by-PR; verified clean at the time of this section's introduction. Re-
   `pendingDeletions` counts (each cached per view; the folders are every
   view's), search, the
   smart mixes (an item left out, the positions after it closed up, an emptied
-  family not sent, the Christmas family in its window among them, sent only
-  to a view whose items clear its floor: `smart-mixes.md`) and the
-  playlist feed (a gated line unresolved, the album
-  rule over the view's tracks, the version naming the view:
-  `playlistFeedRulesVersion` 3, so one view's ETag is never another's 304).
+  family not sent, the Christmas family in its window among them, picked
+  for each view at the response and sent only to a view whose pick clears
+  its floor: `smart-mixes.md`) and the
+  playlist feed (a gated line unresolved, a line naming a suppressed
+  duplicate the one served copy of its group the view takes, whatever the
+  suppressed track's own format, else unresolved (`servedCopyIn`, round
+  5), the album rule over the view's tracks, the version naming the view:
+  `playlistFeedRulesVersion` 4, so one view's ETag is never another's 304).
   **Not gated, on purpose**: `folders`; the filesystem views and every
   path-keyed read; the documents a device writes (playlists, favorites,
   history), which a client reads and writes back whole, so a filtered read
@@ -86,8 +89,11 @@ Audited PR-by-PR; verified clean at the time of this section's introduction. Re-
   (`dlna-upnp.md`). A manifest page cursor continues only its own view: the
   zero view's stays the raw path, a declared view's is an opaque token, and
   another view's is `410` `manifest_cursor_view`. A delta's `since` names no
-  view, so a client's first sync that declares a format is a full one, which
-  PROTOCOL.md says is the client's to make. An upgrade over a routed row the
+  view, so a client records the formats it declares to each bridge and
+  makes a full reconciliation whenever that set changes, a format added or
+  dropped (round 5: "once per bridge" missed a format added later, and a
+  filtered delta cannot remove a dropped format's rows), which PROTOCOL.md
+  says is the client's to make. An upgrade over a routed row the
   gate now holds back, or a tombstone of one (an upstream item whose URL
   names a `.wv` or `.ape` file, which every app was served), restarts the
   deletion journal's coverage in v61's step (`restartCoverageOverGatedPaths`,
@@ -98,7 +104,8 @@ Audited PR-by-PR; verified clean at the time of this section's introduction. Re-
   none, a tombstone no row), give a surface an ungated fallback, count a
   gated row in a view's `pendingDeletions`, let an upgrade over a gated
   routed row leave an older delta cursor complete, filter a document a
-  device writes, or let one view's cursor or ETag answer another.**
+  device writes, map a suppressed duplicate's line to a copy its view does
+  not take, or let one view's cursor or ETag answer another.**
   `TestTheFormatViewSQLIsFormatgatesRule`,
   `TestParseReadsTheHeaderAsTheProtocolSays`,
   `TestTheManifestServesEachViewItsRows`,
@@ -109,11 +116,13 @@ Audited PR-by-PR; verified clean at the time of this section's introduction. Re-
   `TestSearchServesEachViewItsHits`, `TestSmartPlaylistsServeEachViewItsItems`,
   `TestThePlaylistFilesServeEachViewItsMembers`,
   `TestThePlaylistFeedJudgesTheAlbumRuleInEachView`,
+  `TestASuppressedDuplicateIsServedAsItsOneServedCopyInTheView`,
   `TestADevicesDocumentsKeepAWavPackEntryForEveryClient`,
   `TestPendingDeletionsAreEachViewsRows`,
   `TestAnUpgradeOverAGatedRowSendsEveryDeltaCursorToAFullSync`,
   `TestTheChristmasFamilyServesEachViewItsItems`,
   `TestAViewLeftBelowTheChristmasFloorIsNotSentTheFamily`,
+  `TestEachViewIsPickedItsChristmasItemsAtTheRequest`,
   `TestTheFilesystemViewsAreNotHeldBack`,
   `TestAnAllWavPackLibraryIsAnHonestEmptyFeedToAClientThatDeclaresNothing` and
   `TestTheGoldenManifestOfEachView` (its goldens in
@@ -700,8 +709,9 @@ Audited PR-by-PR; verified clean at the time of this section's introduction. Re-
   lines, mtime, `too_large` or `folder_whole`); enrichment moves none. The
   ETag is the SHA-256 of the page's JSON, because members resolve per request;
   a placed line is its exact path, else the one track a case-and-composition
-  fold answers; a suppressed duplicate is its group's one served copy or
-  unresolved; a file of 2,000,000 bytes or more (the app's cap) or of more
+  fold answers; a suppressed duplicate is the one served copy of its group
+  the request's view takes, or unresolved where it takes none or several
+  (B489's round 5); a file of 2,000,000 bytes or more (the app's cap) or of more
   than 100,000 entry lines is listed `tooLarge` with empty lists, and no
   budget ever makes one so. **An album-folder playlist is
   not listed, by the app's four terms** (`AlbumFolderPlaylist.isAlbumPlaylist`,
