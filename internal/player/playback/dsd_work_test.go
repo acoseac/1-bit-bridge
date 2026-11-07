@@ -651,6 +651,62 @@ func TestAStartRefusedBusyBesideAProbeLeavesItsAnswers(t *testing.T) {
 	}
 }
 
+// TestAStartAndTheProbesAnswersAreOrderedByOneStep (B762 round 3): a Start
+// that waited for the probe, held once woken (StartWoke) until the probe's
+// goroutine is at the step that takes its answers, held there by the
+// ProbeDeciding seam, takes the device slot through the real hold (b.holder,
+// b.starts). A Start that has taken the slot by the time the step decides
+// voids the answers: no Record in the probe's cache, no driver_accepted
+// written, and a probe owed. Round 2 counted the Start where it takes the
+// slot, and compared that count apart from the cache's Record, so a Start
+// that took the slot between the two left the answers kept beside its open
+// of the DAC (both reviews of round 2).
+func TestAStartAndTheProbesAnswersAreOrderedByOneStep(t *testing.T) {
+	t.Run("the Start takes the slot just before the step decides", func(t *testing.T) {
+		probe := newHeldProbe(dsd64Frames, dsd128Frames)
+		let := probe.hold(0)
+		defer let()
+		woke, deciding := newHeldOnce(), newHeldOnce()
+		defer woke.let()
+		defer deciding.let()
+		r := newProbeRig(t, probe, func(c *playback.Config) {
+			c.Seams = &playback.Seams{StartWoke: woke.reach, ProbeDeciding: deciding.reach}
+		})
+		ctx := context.Background()
+		r.ask(t, ctx, ready)
+		within(t, probe.came, "the probe's call")
+		started := make(chan error, 1)
+		go func() { started <- r.b.Start(ctx, startOf(t, 1)) }()
+		within(t, r.timer.armed, "the Start's wait for the probe")
+		let()
+		within(t, deciding.came, "the probe's goroutine at the step that takes its answers")
+		// The probe has let the slot go: the Start, let go of, takes it and
+		// opens the DAC, which refuses every open here, while the step has not
+		// decided.
+		woke.let()
+		if err := within(t, started, "the Start"); err == nil {
+			t.Fatal("the Start answered nil: the test's DAC refuses every open")
+		}
+		deciding.let()
+		r.idle(t)
+		if opens, beside := r.sinks.counts(); opens != 1 || beside != 0 {
+			t.Errorf("the DAC was opened %d times, %d of them while the probe had its node open; want once, after it", opens, beside)
+		}
+		if rates, kept := accepted(r.pol, probedAt(2)); kept != 0 {
+			t.Errorf("the probe's cache keeps %d answers (DSD_U32_BE at %v) decided after a Start took the slot", kept, rates)
+		}
+		if e := probeEvidence(r.store.State(), playbacktest.DSD64); e != nil {
+			t.Errorf("the player's DSD state holds %+v from answers decided after a Start took the slot", e)
+		}
+		if !r.b.ProbeDSDPending() {
+			t.Error("no probe is owed once answers decided after a Start took the slot were dropped")
+		}
+		if err := r.b.Release(ctx, 1); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
 // TestOneProbeAtATimeAndAReplugIsProbedOnceTheHeldOneEnds (B762): the
 // supervisor's ask for the silent probe returns at once, and one probe runs
 // at a time. A DAC unplugged and plugged in again while an older

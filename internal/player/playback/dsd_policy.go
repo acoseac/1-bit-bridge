@@ -1147,8 +1147,11 @@ func (b *Backend) publishProbe(ctx context.Context, gen, starts uint64, bd Bound
 		why = "a session took the device while it ran"
 	case !ok || now.Card != bd.Card || now.Enumeration != bd.Enumeration || !binding.SameUnit(now.Identity, bd.Identity) || now.Identity.DevNum != bd.Identity.DevNum:
 		why = "the binding no longer resolves to the unit it probed"
-	case rep.Opened && !p.Probes.Record(epoch, rep):
-		why = "its model's answers moved on while it ran"
+	default:
+		b.probeDeciding()
+		if rep.Opened && !p.Probes.Record(epoch, rep) {
+			why = "its model's answers moved on while it ran"
+		}
 	}
 	if why != "" {
 		ps.pending = true

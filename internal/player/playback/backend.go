@@ -139,12 +139,25 @@ type Seams struct {
 	// it there while a Start takes the slot the probe let go of (B762 round
 	// 2). It may block, and must not call the backend.
 	Probed func()
+	// ProbeDeciding runs on the silent probe's goroutine in the step that
+	// takes its answers (publishProbe), once that step has compared the
+	// Starts that took the device slot and before the cache records the
+	// report: a test takes the slot there through a Start (B762 round 3). It
+	// may block, and must not call the backend.
+	ProbeDeciding func()
 }
 
 // probed is the Probed seam.
 func (b *Backend) probed() {
 	if sm := b.cfg.Seams; sm != nil && sm.Probed != nil {
 		sm.Probed()
+	}
+}
+
+// probeDeciding is the ProbeDeciding seam.
+func (b *Backend) probeDeciding() {
+	if sm := b.cfg.Seams; sm != nil && sm.ProbeDeciding != nil {
+		sm.ProbeDeciding()
 	}
 }
 
