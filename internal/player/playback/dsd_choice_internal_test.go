@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -165,14 +166,34 @@ func setOf(t *testing.T, b *Backend, st dsdstate.State) *dsdSet {
 	return d
 }
 
+// driftBox is the box with the test DAC whose playback altsets, once armed,
+// lose the native DSD one at every other read, the first one first: a
+// reading of the DAC that never agrees with the one before it.
+type driftBox struct {
+	choiceBox
+	armed atomic.Bool
+	reads atomic.Int32
+}
+
+func (d *driftBox) PlaybackAltsets(card, device int) ([]alsa.Altset, error) {
+	alts, err := d.choiceBox.PlaybackAltsets(card, device)
+	if d.armed.Load() && d.reads.Add(1)%2 == 1 {
+		return alts[:1], err
+	}
+	return alts, err
+}
+
 // choiceSessionBackend is a backend over the test DAC whose state chose native
-// at every rate, its set published.
-func choiceSessionBackend(t *testing.T) (*Backend, *choiceStore) {
+// at every rate, its set published, edit applied to the policy first.
+func choiceSessionBackend(t *testing.T, edit ...func(*DSDPolicy)) (*Backend, *choiceStore) {
 	t.Helper()
 	store := &choiceStore{st: nativeChosen(t)}
 	pol := &DSDPolicy{Store: store, Kernel: choiceKernel, Box: choiceBox{}, Probes: alsapcm.NewProbeCache(),
 		Bound: func() (BoundDAC, bool) { return BoundDAC{Card: 5, Identity: choiceUSB(), Enumeration: "test/2"}, true },
 		Now:   func() time.Time { return choiceT0 }}
+	for _, e := range edit {
+		e(pol)
+	}
 	b, err := New(Config{Resolver: nativeFilesForRefusal{}, Locator: refuseLocator{}, DSD: pol})
 	if err != nil {
 		t.Fatal(err)
@@ -329,7 +350,9 @@ func heardSession(t *testing.T, b *Backend) (*session, *occ) {
 // the revision moved in its window by another writer, is stale; beside an
 // earlier write that landed and is not known to be durable, which fences every
 // write until the next start, one that would interrupt is persist_uncertain, no
-// check of the state's made. Neither stops what plays.
+// check of the state's made, and so is one whose reading of the DAC never
+// agrees with the set published, which would otherwise go round to its bound.
+// Neither stops what plays.
 func TestTheWritesChecksAreAnsweredInTheirOrder(t *testing.T) {
 	write := func(b *Backend, c policy.Choice) ChoiceOutcome {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -374,6 +397,20 @@ func TestTheWritesChecksAreAnsweredInTheirOrder(t *testing.T) {
 		}
 		if s.nativeRevoked {
 			t.Error("a fenced write stopped what plays")
+		}
+	})
+	t.Run("beside an earlier write that landed, the DAC's reading drifting", func(t *testing.T) {
+		db := &driftBox{}
+		b, store := choiceSessionBackend(t, func(p *DSDPolicy) { p.Box = db })
+		store.mu.Lock()
+		store.land = fmt.Errorf("the directory's barrier failed: %w", atomicwrite.ErrLanded)
+		store.mu.Unlock()
+		if got := write(b, policy.Choice{BaseRevision: 1, Mode: dsdstate.ModeNative, MaxBitRate: dsdstate.DSD256}); got != ChoicePersistUncertain {
+			t.Fatalf("the first write: %s, want persist_uncertain", got)
+		}
+		db.armed.Store(true)
+		if got := write(b, policy.Choice{BaseRevision: 1, Mode: dsdstate.ModeConvert}); got != ChoicePersistUncertain {
+			t.Fatalf("a write beside the fence, its reading of the DAC drifting: %s, want persist_uncertain, whatever the DAC reads: no write is made", got)
 		}
 	})
 }
