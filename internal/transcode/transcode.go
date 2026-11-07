@@ -327,6 +327,13 @@ type JobSpec struct {
 	// RUNS, never at an enqueue site, so no path that builds a DSD spec can
 	// leave it out.
 	AlbumGain AlbumGainer
+
+	// OutputGuard, when set, is asked first in Run whether the render may
+	// make or write anything in OutputDir, and its refusal ends the job as a
+	// fault of the output side, which strikes no source (output_guard.go,
+	// backlog B727). The pool and the CLI set it when the job RUNS, as they
+	// set AlbumGain; nil asks nothing.
+	OutputGuard OutputGuard
 }
 
 // RenderScratchBytes is the Stage A scratch this job holds on the temp
@@ -1103,6 +1110,13 @@ func Run(ctx context.Context, j JobSpec) (RunResult, error) {
 	if err := j.sourceChanged("not rendered"); err != nil {
 		return RunResult{}, err
 	}
+	// A variants directory that reads as a volume not mounted while the
+	// catalog records renditions in it is written nothing, the DSD chain's
+	// sidecar directory included: one rendition there would read the
+	// directory as mounted to every reaper (output_guard.go).
+	if err := j.checkOutput(ctx); err != nil {
+		return RunResult{}, err
+	}
 	// Both paths come from SoxArgs's single SidecarPath() computation (Q2) —
 	// no re-hash here, and the rename target below is exactly the path sox
 	// wrote. tmpPath carries a per-job token, so it MUST be the value from
@@ -1181,6 +1195,14 @@ func Run(ctx context.Context, j JobSpec) (RunResult, error) {
 	// Every step here that writes to the variants directory marks its own
 	// failure: a directory this host will not let the job write is a fact
 	// about the host, which strikes no source (output_fault.go).
+	//
+	// The guard is asked again first: its answer at the start is as old as
+	// the probes and the scratch since, and a volume can go in that time
+	// (backlog B727's second round). It costs the probe alone while the
+	// directory reads as mounted.
+	if err := j.checkOutput(ctx); err != nil {
+		return RunResult{}, err
+	}
 	sidecarDir := filepath.Dir(finalPath)
 	if err := fsutil.MkdirAll(sidecarDir, 0o755); err != nil {
 		return RunResult{}, markOutputFault(outputVariants, sidecarDir, fmt.Errorf("mkdir sidecar dir: %w", err))

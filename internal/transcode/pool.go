@@ -255,6 +255,13 @@ type Pool struct {
 	albumGainerMu sync.RWMutex
 	albumGainer   AlbumGainer
 
+	// outputGuard is asked by every job this pool runs before it writes into
+	// its variants directory (output_guard.go): processJob injects it into
+	// the spec when the job STARTS, as it does albumGainer. Nil asks
+	// nothing. Guarded by its own mutex: wired once after construction.
+	outputGuardMu sync.RWMutex
+	outputGuard   OutputGuard
+
 	// sourceRescan asks for the directory of a source that changed after
 	// its row was written to be read again (SetSourceRescan): a job whose
 	// run refused its source (ErrSourceChanged) asks for it, and so does a
@@ -699,6 +706,21 @@ func (p *Pool) currentAlbumGainer() AlbumGainer {
 	p.albumGainerMu.RLock()
 	defer p.albumGainerMu.RUnlock()
 	return p.albumGainer
+}
+
+// SetOutputGuard wires (or, with nil, removes) the guard every job this pool
+// runs asks before it writes into its variants directory (output_guard.go).
+// Race-safe; in practice set once during cmd/bridge wiring.
+func (p *Pool) SetOutputGuard(g OutputGuard) {
+	p.outputGuardMu.Lock()
+	p.outputGuard = g
+	p.outputGuardMu.Unlock()
+}
+
+func (p *Pool) currentOutputGuard() OutputGuard {
+	p.outputGuardMu.RLock()
+	defer p.outputGuardMu.RUnlock()
+	return p.outputGuard
 }
 
 // albumSurveyTimeout widens a job's deadline by the album survey its render
@@ -1461,6 +1483,11 @@ func (p *Pool) processJob(workerID int, job poolJob) {
 	spec := job.spec
 	if spec.SourceIsDSD && spec.AlbumGain == nil {
 		spec.AlbumGain = p.currentAlbumGainer()
+	}
+	// So does the guard on the variants directory, whichever path built the
+	// spec (output_guard.go).
+	if spec.OutputGuard == nil {
+		spec.OutputGuard = p.currentOutputGuard()
 	}
 	timeout := jobTimeoutFor(p.jobTimeout, spec)
 	if spec.SourceIsDSD && spec.AlbumGain != nil {
