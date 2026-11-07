@@ -80414,3 +80414,125 @@ main's fc07f4a1 says the version stays, no guarded path having changed.
 `~/onebit/jobs/b728-b10/dsdconv-linux-arm64.test`, and `-amd64.test` beside it, rebuilt at
 5adcb8dd at round 1's paths. The amd64 one passes run where no source is, the golden among its
 tests, every digest a constant of it.
+
+## 2026-11-07 — B728 B11: the player converts DSD
+
+Worker b728-b11, legion0, branch `feat/b728-b11-convert` from main's c7192a6f. Commits:
+77aa53a9 (B7's revoking monitor tick, binding note 8), 15fcd23f (the tests, red), d19f985b (the
+conversion, QualificationVersion 41), 62f48bf2 (a converted sink's reopen checks its DAC; a DAC with
+no target refuses), c058ae25 (a seek in converted DSD is unsupported), f02faece (PROTOCOL.md),
+061ebee2 (CLAUDE.md's rows), fea99f0c (a held producer let go before the rig's teardown),
+5f9e8456 (the content refusal's long form, the renamed tests' citations), d5f8e160 (`bridge output
+play`'s help), then this record. The rule text changes through `rules-b728-b11.patch`.
+
+### What changes
+
+Where the effective set converts a DSD rate, the player converts it, where B7 refused it as
+`dsd_not_in_this_release`. A DAC the profile database does not know, with no choice of its own,
+plays DSD64, DSD128 and DSD256 converted under the bridge's auto, at its best target (176.4, 88.2
+or 44.1 kHz at 24 valid bits, or 16 where it takes no 24-bit target); a known DAC converts until its
+first use is acknowledged; a migrated owner's native or DoP setup plays as before, and a migrated
+explicit off stays off. A DAC that takes no target is `conversion_not_offered`, DSD512 stays refused.
+For an OpenHome controller, ProtocolInfo lists DSF and DFF and the element's codecs dsf and dff while
+the set plays any DSD rate, a converted one included (`PlayerPolicy.PlaysDSD`). A converted rate
+publishes no tuple and its occurrence no observation until B8, so the iOS app, which grants DSD
+from the tuples, sends none yet.
+
+### As built
+
+`native.go`'s DSD open branches for a converted plan (`occ.converts`) before `nativeLogicalRate`
+and `nativeTransport`, reads the first DSD chunk, and the step that ends the open, after its
+readmission under the set published then, makes `dsdconv`'s converter with that chunk as
+`Options.First` and `Hold`. The plan's packing is `policy.Target.Packing`, the depth's first in the
+player's table the DAC takes with the plan's bits significant: `openOutput` offers it alone, never
+the cache a PCM track filled, and a successor joins a sink only where the sink's transport is it
+(`TestConvertedDSDReachesTheDACPackedByTheTable`, a cached and an inherited S32_LE the reading
+excludes). Its policy ownership (`admitted`, `policyPlan`) is a DSD occurrence's, its transport the
+PCM: the check after open of every node its sink opens or reopens (`checkDSDNode`; a PCM sink it
+joins takes its set, `carryDSD`), its activation, reconciliation and `Revoke` judge it, so an `off`
+written or a retarget revokes one playing (its PCM sink dropped, `native_revoked`) and hands one
+prepared off again, refused by the set's word or opened at the new target; one fully played is not
+judged, or it would stop the PCM after it in its sink. Details are the plan's PCM, codec DSD,
+never lossless; the observation's transport `converted` with the plan and the clip count.
+
+The three joins, classified by `dsdconv.Continuous` alone: continuous (one rate, one plan), one
+chain, the predecessor's last H frames held at its window point until the successor settles, then
+computed with its first bits; abutting on one PCM transport (another DSD rate, PCM of the
+transport, or a successor that settles once the sink's lookahead is at 100 ms), the window
+zero-padded in the same sink; another transport, a reopen. The cut of a successor whose bits are in
+the window is the producer's whatever of its own frames a sink holds: before the window is
+submitted, `Rewind`; after, the sink's marker at the window's first frame, the window submitted
+again for what follows now; once the kernel has a frame from there, late (`removed_entry_audible`).
+The predecessor keeps its converter past its end until that successor is heard. `Rewind` after a
+`Continue` and after the window's frames were read restores the snapshot (`converter.go`: the
+engine copied back, `emitted`, `clipped` and the dither, the successor detached), which B10's
+`TestTheJoinWindowRecomputesFromTheSnapshot` and this PR's
+`TestDeletingOrReplacingAPreparedConvertedSuccessor` exercise.
+
+### Red first
+
+At 15fcd23f (the tests over declaration stubs: `Target.Packing`, `PlayerPolicy.Converted` and
+`PlaysDSD`, the observation's `Converted` and `TransportConverted`, the `DSDSource` and `Converting`
+seams, `occ.converts`): every conversion test in alsapcm red (a converted rate refused,
+`all_unplayable`, or a successor never prepared), but the explicit off's case;
+`TestAConvertedRateIsAdmittedToBeConverted`, `TestAnUnknownDACsDSDIsConverted` and
+`TestANativeRateIsUnaffectedByAnUnverifiableDoPGain` red in playback;
+`TestTheConversionTargetIsTheDACsBest` red in policy (no packing); and in cmd/bridge
+`TestTheElementListsDSDWhileThePlayerConverts`, `TestServeOutputPlayAllowDoP`'s two auto cases and
+`TestAnExplicitOffSurvivesAsTheDefault`'s unset case. `TestNoConvertedStreamIsServed` and the token
+guard were green before and after. 62f48bf2's reopen test and c058ae25's seek test were red on
+15fcd23f's tree (the converted rate refused there); 62f48bf2's no-target case, like the explicit
+off, is green before and after. B7's
+`…AConvertedRateIsRefusedUntilThePlayerConverts` and `…AnUnknownDACsDSDStaysRefused` became
+`TestAConvertedRateIsAdmittedToBeConverted` and `TestAnUnknownDACsDSDIsConverted`; B7's record
+above cites them elided.
+
+### Negative controls
+
+Each an exact-once mutation of a committed tree, predicted by name in
+`.tmp/_b728-b11/controls.predictions.txt` before it ran, the alsapcm test binary built with it and
+the source restored from memory at once; `git status` empty after every run.
+
+| | mutation | red |
+|---|---|---|
+| a | the window submitted before its successor settles | the floor case, as predicted, and the three continuous replacements before the kernel has the window, of the possible ones |
+| b | the cut at the successor's own first frame once the window is submitted | the six moments after submission, exactly |
+| c | the converter restarted inside a continuous join | as predicted (24 and 16 bits, the continuous replacements, the late cuts), and six more: the deleted and abutting cases' wait for the window cut's step times out |
+| d | Lossless true | `TestAConvertedTrackIsNotLossless`, both `TestTheClaimsAreThePlans` cases |
+| e | the observation's claims hard-coded at 176.4 kHz / 24 | the 44.1 kHz, 16-bit case alone |
+| e2 | the Details' rate and bits hard-coded at 176.4 kHz / 24 | the same case alone |
+| f | a converted occurrence's own PCM sink with no set | the reopen test's own-sink case alone |
+| g | `carryDSD` a no-op | its joined-sink case alone |
+| h | `codecName` of `ContainerConverted` "" | the seek test, not-lossless, both claims cases |
+| i | `Revoke` not counting a converted PCM sink | the withdrawn and retargeted cases while it plays |
+| j | no lookahead floor | the floor case alone |
+| k | a predecessor closed at its end whatever its successor | the six moments after submission, exactly |
+| l | `cutFromLocked` without its in-window case | as predicted (six), and six more where `sinkCutLocked` cut at the successor's own frame |
+
+### The hardware run (the design's section 4.6), the owner's
+
+On the Pi 400, and the Pi with the Mytek, bound in `output.player.device` to a DAC the policy
+converts for (unknown to the database, or its first use not acknowledged): DSD64, DSD128 and DSD256
+tracks of a few minutes each through `bridge output play --config <bridge.yaml> FILE...`, then
+through serve and an OpenHome controller, two continuous tracks at one rate and a DSD64 then DSD128
+pair among them; the bridge's CPU share of one core at each rate (`top -p <pid>`),
+DSD256 at most 25 % of a Pi 4 core (B10's Pi 400 run of the converter alone: 15.3 %, 18.3 % scaled
+to a Pi 4); no xrun (a fault `xrun` would stop playback and print); and a listening pass on each
+rate and at both joins. The Pi 5 run is the owner's. A miss takes the section's steps: int32
+tables and an unrolled stage 3 (B10 has int32 tables), then nibble-wide tables at DSD256, and last
+DSD256 refused as `conversion_not_offered` until a faster converter lands.
+
+### Gates
+
+At d5f8e160, inside one build slot: `make fmt` changed nothing; `make vet` and its windows,
+darwin and linux/386 legs passed; `go test -race` of the touched packages (alsapcm, playback,
+dsdconv, policy, engine, qualification, api, cmd/bridge) passed (1,056 s); both native-integration
+overlays passed, every case they name; `scripts/qualification-version` against c7192a6f passed at
+41; alsa-abi against Ubuntu's asound.h, compared as v6.12's, found 252 facts agreeing on
+linux/amd64; `make test` passed, 87 packages ok (1,855 s); `make build-all` passed; `make
+docs-check` passed (player.md 98.2 %), and on a copy with the rules patch applied (player.md
+99.3 %, the worst load 66.0 %), where `verify_moves.py --base HEAD` proved the patch's move lossless
+alone (one block, 1,743 bytes, no citation broken) and, with the other edits declared, accounted
+for every block but the four no-transcoding entries the design retitles (CLAUDE.md's, AGENTS.md's,
+`History-Cross-Repo.md`'s and `jobs.md`'s), each beside its successor among the new. The
+conversion tests and B7's revoking test then passed four times more under `-race` (122 s).
