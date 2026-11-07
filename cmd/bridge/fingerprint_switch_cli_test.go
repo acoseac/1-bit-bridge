@@ -10,11 +10,12 @@ import (
 )
 
 // `bridge fingerprint` and enrich.enabled (backlog B617): the command builds
-// its own AcoustID client and has no --config, so a run that would look up
-// reads the switch itself as it starts: BRIDGE_ENRICH_ENABLED where it says
-// on or off, else the config at the default path, else on. Off, it sends
-// nothing, before the key, the probe or a decode, and exits 1; --no-lookup
-// sends nothing and is not refused.
+// its own AcoustID client, so a run that would look up reads the switch
+// itself as it starts: BRIDGE_ENRICH_ENABLED where it says on or off, else
+// the config --config names, else the config at the default path, else on.
+// Off, it sends nothing, before the key, the probe or a decode, and exits 1;
+// --no-lookup sends nothing and is not refused. --config, and the switch a
+// run follows while it runs, are fingerprint_live_switch_test.go's.
 
 const (
 	// fingerprintOffRefusal begins the command's refusal while off.

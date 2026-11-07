@@ -26,18 +26,53 @@ const fpcalcStandInEnv = "BRIDGE_FPCALC_STAND_IN"
 const (
 	fpcalcStandInPID  = "FPCALC_STANDIN_PID"
 	fpcalcStandInNext = "FPCALC_STANDIN_NEXT"
+	// fpcalcStandInHold is how long lookup-2.flac's decode takes, a
+	// duration (lookupHold when unset).
+	fpcalcStandInHold = "FPCALC_STANDIN_HOLD"
+)
+
+const (
+	// fpcalcLookupSeconds is the length of the tracks `bridge fingerprint`'s
+	// runs fingerprint, and of what the stand-in decodes from them.
+	fpcalcLookupSeconds = 240
+	// fpcalcLookupJSON is the stand-in's answer for them: 64 distinct
+	// base64 characters, over the gate's entropy floor.
+	fpcalcLookupJSON = `{"duration":240,"fingerprint":"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"}`
+	// lookupHold is how long lookup-2.flac's decode holds a run that does
+	// not stop it: past the bound a switch-off has, so a run that sent the
+	// second lookup sent it after the switch was off.
+	lookupHold = 8 * time.Second
 )
 
 // runFpcalcStandIn is the fpcalc a hung-file test puts on PATH. A file named
 // hang.flac writes its pid and sleeps, so the parent's deadline is what ends
 // it. next.flac writes a marker and prints a fingerprint the gate refuses,
-// so the lookup is never reached.
+// so the lookup is never reached. For `bridge fingerprint`'s runs (backlog
+// B617): -version answers the probe, lookup-1.flac prints a fingerprint the
+// gate takes for a track of fpcalcLookupSeconds at once, and lookup-2.flac
+// prints the same after fpcalcStandInHold (lookupHold), unless the run
+// kills it first.
 func runFpcalcStandIn() int {
 	path := ""
 	if len(os.Args) > 0 {
 		path = os.Args[len(os.Args)-1]
 	}
+	if path == "-version" {
+		fmt.Println("fpcalc version 1.6.1 (stand-in)")
+		return 0
+	}
 	switch filepath.Base(path) {
+	case "lookup-1.flac":
+		fmt.Println(fpcalcLookupJSON)
+		return 0
+	case "lookup-2.flac":
+		hold, err := time.ParseDuration(os.Getenv(fpcalcStandInHold))
+		if err != nil {
+			hold = lookupHold
+		}
+		time.Sleep(hold)
+		fmt.Println(fpcalcLookupJSON)
+		return 0
 	case "hang.flac":
 		if pidPath := os.Getenv(fpcalcStandInPID); pidPath != "" {
 			_ = os.WriteFile(pidPath, []byte(strconv.Itoa(os.Getpid())), 0o644)

@@ -10,6 +10,9 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/acoustid"
@@ -33,15 +36,18 @@ import (
 //
 // It reads files directly rather than going through the config and the library
 // resolver, so it needs no bridge config and can be pointed at anything. The
-// one thing it reads of a bridge's settings is enrich.enabled, before a run
-// that would send a fingerprint to AcoustID (fingerprintSwitch).
+// one thing it reads of a bridge's settings is enrich.enabled, as a run that
+// would send a fingerprint to AcoustID starts and once a second while it runs
+// (fingerprintSwitch), from the config --config names or the one at the
+// default path.
 //
 // NOTHING here writes: not the manifest, not the artwork cache, not a single
 // MBID. The gate's verdict is printed, never applied.
 //
 // Exit codes: 0 the run completed, 1 the run could not start (enrichment
-// switched off for a lookup, no key, no fpcalc, unwritable output), 2 usage
-// error, 130 interrupted mid-batch
+// switched off for a lookup, no key, no fpcalc, unwritable output) or
+// enrichment was switched off while it ran, 2 usage error, 130 interrupted
+// mid-batch
 // (POSIX 128+SIGINT) so a script can tell an interrupted run from a complete
 // one — matching `bridge analyze`.
 //
@@ -60,6 +66,9 @@ func fingerprintCmd(ctx context.Context, args []string, stdout, stderr io.Writer
 		"pipe only the first N bytes to fpcalc instead of letting it read the file "+
 			"(0 = off). Measures whether capping the read reduces what a network mount fetches.")
 	asJSON := fs.Bool("json", false, "emit JSON instead of a human summary")
+	configPath := fs.String("config", "",
+		"the bridge.yaml whose enrich.enabled a lookup run follows "+
+			"(default: ./bridge.yaml, then the platform's)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -69,19 +78,32 @@ func fingerprintCmd(ctx context.Context, args []string, stdout, stderr io.Writer
 			"Fingerprints one or more audio files and reports what AcoustID knows\n"+
 			"about them, plus the acceptance gate's verdict. Writes nothing. With\n"+
 			"enrichment switched off (BRIDGE_ENRICH_ENABLED, or enrich.enabled in the\n"+
-			"bridge.yaml found here or in the platform's config directory), only\n"+
-			"--no-lookup runs.\n\n")
+			"bridge.yaml --config names, else the one found here or in the platform's\n"+
+			"config directory), only --no-lookup runs, and a run stops once it is\n"+
+			"switched off.\n\n")
 		fs.PrintDefaults()
 		return 2
 	}
 
-	info, client, code := prepareFingerprintRun(ctx, *key, *noLookup, stderr)
+	sw := &fingerprintSwitch{explicit: *configPath, stderr: stderr}
+	info, client, code := prepareFingerprintRun(ctx, *key, *noLookup, sw, stderr)
 	if code != 0 {
 		return code
 	}
 
-	reports, interrupted := runFingerprintFiles(ctx, client, paths,
+	// A lookup run follows its switch while it runs (backlog B617): a
+	// switch-off, or a config read at the start that goes away or no longer
+	// loads, cuts the lookup on the wire off and sends no other within a
+	// second (follow). The goroutine that reads the switch writes a change
+	// to stderr, which nothing else writes until stop has joined it.
+	runCtx, stop := ctx, func() {}
+	if client != nil {
+		runCtx, stop = sw.follow(ctx)
+	}
+	reports, interrupted := runFingerprintFiles(runCtx, client, paths,
 		time.Duration(*lengthSec)*time.Second, *prefixBytes)
+	switchedOff := enrichgate.Refusal(runCtx) != nil
+	stop()
 
 	// Print what we DID measure before reporting the interruption: on a long
 	// run over a network-backed library those partial numbers are the
@@ -96,6 +118,12 @@ func fingerprintCmd(ctx context.Context, args []string, stdout, stderr io.Writer
 		}
 	} else {
 		printFingerprintReports(stdout, info, reports)
+	}
+	if interrupted && switchedOff {
+		fmt.Fprintf(stderr, "\nstopped after %d of %d file(s): %s"+
+			"Pass --no-lookup to fingerprint without contacting AcoustID.\n",
+			len(reports), len(paths), sw.current().line())
+		return 1
 	}
 	if interrupted {
 		fmt.Fprintf(stderr, "\ninterrupted after %d of %d file(s)\n", len(reports), len(paths))
@@ -155,25 +183,33 @@ func lastDidLookup(reports []fingerprintReport) bool {
 // a nil client means --no-lookup (fingerprint without contacting AcoustID).
 //
 // A run that would look up asks enrich.enabled first, before the key, the
-// probe or any decode (backlog B617): off, it sends nothing and exits 1.
-// --no-lookup sends nothing, so it asks nothing.
+// probe or any decode (backlog B617): off, or a config it cannot read, it
+// sends nothing and exits 1; on, it says what decided that. --no-lookup sends
+// nothing, so it asks nothing.
 func prepareFingerprintRun(ctx context.Context, key string, noLookup bool,
-	stderr io.Writer) (acoustid.Info, *acoustid.Client, int) {
+	sw *fingerprintSwitch, stderr io.Writer) (acoustid.Info, *acoustid.Client, int) {
 
 	if !noLookup {
-		on, source, err := fingerprintSwitch()
-		if err != nil {
+		st := sw.start()
+		switch {
+		case st.gone:
+			fmt.Fprintf(stderr, "The config at %s is not there (--config), so whether enrichment is\n"+
+				"switched off (enrich.enabled) cannot be told, and no fingerprint is sent to\n"+
+				"AcoustID. Name a config that is there, or pass --no-lookup to fingerprint\n"+
+				"without contacting AcoustID.\n", st.path)
+			return acoustid.Info{}, nil, 1
+		case st.err != nil:
 			fmt.Fprintf(stderr, "The config at %s does not load (%v),\n"+
 				"so whether enrichment is switched off (enrich.enabled) cannot be told, and no\n"+
 				"fingerprint is sent to AcoustID. Fix it, or pass --no-lookup to fingerprint\n"+
-				"without contacting AcoustID.\n", source, err)
+				"without contacting AcoustID.\n", st.path, st.err)
 			return acoustid.Info{}, nil, 1
-		}
-		if !on {
+		case !st.on:
 			fmt.Fprintf(stderr, "Enrichment is switched off (%s), so no fingerprint is sent to AcoustID.\n"+
-				"Pass --no-lookup to fingerprint without contacting AcoustID.\n", source)
+				"Pass --no-lookup to fingerprint without contacting AcoustID.\n", st.source)
 			return acoustid.Info{}, nil, 1
 		}
+		fmt.Fprint(stderr, st.line())
 	}
 	if key == "" {
 		key = os.Getenv("ACOUSTID_API_KEY")
@@ -202,34 +238,176 @@ func prepareFingerprintRun(ctx context.Context, key string, noLookup bool,
 	}
 	userAgent := fmt.Sprintf("1-bit-bridge/%s (+https://github.com/acoseac/1-bit-bridge)",
 		version.ServerVersion)
-	// The run asked enrich.enabled at its start, above, and found it on; the
-	// client holds that answer as its switch (backlog B617).
-	asked := func() bool { return true }
-	return info, acoustid.NewClient("", key, userAgent, nil, enrichgate.Enrichment(asked)), 0
+	// The client's switch is the run's (backlog B617): its last read, which
+	// the run's context refreshes once a second.
+	return info, acoustid.NewClient(fingerprintLookupBase, key, userAgent, nil, enrichgate.Enrichment(sw.get)), 0
 }
 
-// fingerprintSwitch is enrich.enabled as `bridge fingerprint` reads it, once,
-// at its start: BRIDGE_ENRICH_ENABLED where it says on or off, read as serve
-// reads it (config.EnrichEnabledFromEnv); else the config at the default
-// path (resolveConfigPath: ./bridge.yaml, then the platform's), the command
-// having no --config of its own; else on, the default. source names what
-// decided it. A config that is there and does not load is an error: whether
-// the operator switched enrichment off cannot be told from it, and a lookup
-// would send what they may have asked to stop. A console flip governs a
-// running serve, not a command already started.
-func fingerprintSwitch() (on bool, source string, err error) {
-	if on, set := config.EnrichEnabledFromEnv(); set {
-		return on, "BRIDGE_ENRICH_ENABLED", nil
+// fingerprintLookupBase is the AcoustID base `bridge fingerprint` asks, ""
+// for acoustid.DefaultBaseURL. A test points it at a server of its own and
+// puts it back once the run has returned; production never sets it.
+var fingerprintLookupBase = ""
+
+// fingerprintSwitch is enrich.enabled as `bridge fingerprint` reads it, as a
+// lookup run starts and once a second while it runs (backlog B617):
+// BRIDGE_ENRICH_ENABLED where it says on or off, read as serve reads it
+// (config.EnrichEnabledFromEnv); else the config --config names, which must be
+// there; else the config at the default path (resolveConfigPath:
+// ./bridge.yaml, then the platform's); else on, the default. A config read
+// once is the run's from then on: gone, or no longer loading, it reads as
+// off, since whether the operator switched enrichment off cannot be told from
+// it, and a lookup would send what they may have asked to stop.
+type fingerprintSwitch struct {
+	explicit string    // --config, or ""
+	stderr   io.Writer // where a change is said
+	// onRead, when set, is called at each read: a test's count of them.
+	onRead func()
+
+	mu    sync.Mutex
+	found string                 // the config a read found at the default path
+	last  fingerprintSwitchState // the last read, which was said
+	on    atomic.Bool            // the last read's answer, which get gives
+}
+
+// fingerprintSwitchState is one read of the switch.
+type fingerprintSwitchState struct {
+	on     bool
+	source string // what decided it: the variable, or enrich.enabled in a file
+	path   string // the config that could not be read
+	gone   bool   // that config is not there
+	err    error  // that config does not load
+}
+
+// read reads the switch now.
+func (s *fingerprintSwitch) read() fingerprintSwitchState {
+	if s.onRead != nil {
+		s.onRead()
 	}
-	path, found := resolveConfigPath("")
-	if !found {
-		return true, "", nil
+	if on, set := config.EnrichEnabledFromEnv(); set {
+		return fingerprintSwitchState{on: on, source: "BRIDGE_ENRICH_ENABLED"}
+	}
+	s.mu.Lock()
+	path := s.explicit
+	if path == "" {
+		path = s.found
+	}
+	s.mu.Unlock()
+	if path == "" {
+		p, found := resolveConfigPath("")
+		if !found {
+			return fingerprintSwitchState{on: true,
+				source: "the default: no config at " + strings.Join(configSearchPaths(""), " or ")}
+		}
+		path = p
+		s.mu.Lock()
+		s.found = p
+		s.mu.Unlock()
+	}
+	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+		return fingerprintSwitchState{path: path, gone: true}
 	}
 	cfg, _, err := loadCLIConfig(path)
 	if err != nil {
-		return false, path, err
+		return fingerprintSwitchState{path: path, err: err}
 	}
-	return cfg.Enrich.EffectiveEnabled(), "enrich.enabled in " + path, nil
+	return fingerprintSwitchState{on: cfg.Enrich.EffectiveEnabled(), source: "enrich.enabled in " + path}
+}
+
+// start is the read a lookup run starts on, kept as the one said.
+func (s *fingerprintSwitch) start() fingerprintSwitchState {
+	st := s.read()
+	s.on.Store(st.on)
+	s.mu.Lock()
+	s.last = st
+	s.mu.Unlock()
+	return st
+}
+
+// follow returns a context derived from ctx that the switch ends, and the
+// function that stops following it and waits for the goroutine that reads
+// it. That goroutine reads the switch once a second (refresh), and nothing
+// else reads the config while it runs: the client's switch and the
+// context's are the last read's answer (get). A read that finds the switch
+// off, or a config it cannot read, ends the context at once, with ErrOff as
+// its cause, which cuts a lookup on the wire off, so a flip reaches the run
+// within a second.
+func (s *fingerprintSwitch) follow(ctx context.Context) (context.Context, func()) {
+	// The context's own asking is not what ends it: the goroutine below
+	// does, at the read that finds the switch off. The context asks the last
+	// read's answer when a request asks it, at each send and answer.
+	runCtx, release := enrichgate.CancelWhenOff(ctx, s.get, time.Hour)
+	done, exited := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(exited)
+		tick := time.NewTicker(enrichgate.Interval)
+		defer tick.Stop()
+		for {
+			select {
+			case <-runCtx.Done():
+				return
+			case <-done:
+				return
+			case <-tick.C:
+				if !s.refresh() {
+					// The context's switch is the read's answer, now off:
+					// asked, it ends the context with ErrOff.
+					_ = enrichgate.Admit(runCtx, s.get)
+					return
+				}
+			}
+		}
+	}()
+	var once sync.Once
+	return runCtx, func() {
+		once.Do(func() {
+			close(done)
+			<-exited
+			release()
+		})
+	}
+}
+
+// refresh reads the switch again, keeps the answer get gives, and says on
+// stderr what decided it when that changed. follow's goroutine calls it once
+// a second, so the config is read at most once a second.
+func (s *fingerprintSwitch) refresh() bool {
+	st := s.read()
+	s.on.Store(st.on)
+	s.mu.Lock()
+	changed := st.line() != s.last.line()
+	s.last = st
+	s.mu.Unlock()
+	if changed {
+		fmt.Fprint(s.stderr, st.line())
+	}
+	return st.on
+}
+
+// get is the last read's answer: the run's AcoustID client's switch.
+func (s *fingerprintSwitch) get() bool { return s.on.Load() }
+
+// current is the last read.
+func (s *fingerprintSwitch) current() fingerprintSwitchState {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.last
+}
+
+// line is what a run says of a read: what decided the switch, and what that
+// means for the lookups.
+func (st fingerprintSwitchState) line() string {
+	switch {
+	case st.gone:
+		return fmt.Sprintf("The config at %s is gone, so whether enrichment is switched off\n"+
+			"(enrich.enabled) cannot be told, and no further fingerprint is sent to AcoustID.\n", st.path)
+	case st.err != nil:
+		return fmt.Sprintf("The config at %s no longer loads (%v),\nso whether enrichment is "+
+			"switched off (enrich.enabled) cannot be told, and no further\nfingerprint is sent to AcoustID.\n",
+			st.path, st.err)
+	case !st.on:
+		return fmt.Sprintf("Enrichment is switched off (%s), so no further fingerprint is sent to AcoustID.\n", st.source)
+	}
+	return fmt.Sprintf("Enrichment is on (%s): fingerprints are sent to AcoustID while it stays on.\n", st.source)
 }
 
 // fingerprintReport is the per-file result. CLI-only — this is a diagnostic
