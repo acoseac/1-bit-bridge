@@ -118,7 +118,11 @@ type smartPlaylistsResponse struct {
 // Each family's items, the Christmas family's in its window among them, are
 // the view the request declared (formats.go): an item of a format the view
 // does not declare is left out and the positions after it close up, and a
-// family the gate leaves with no item is not sent.
+// family the gate leaves with no item is not sent. The Christmas family is
+// sent only while what the view leaves of it clears its floor
+// (season.MeetsFloor, the predicate the engine asks of the whole pool), so a
+// client is never sent a mix below the owner's floor because the gate
+// thinned it.
 func (s *Server) smartPlaylists(w http.ResponseWriter, r *http.Request) {
 	if !s.smartPlaylistsActive() {
 		writeError(w, http.StatusNotFound, "smart_playlists_not_supported",
@@ -164,8 +168,8 @@ func (s *Server) smartPlaylists(w http.ResponseWriter, r *http.Request) {
 // The time-of-day family is special-cased: its blob is per-UTC-hour pools,
 // from which we union the window around nowUTCHour and retitle by the local
 // hour. ok=false drops the family from this response (an empty time-of-day
-// window, or a family whose every item is of a format view does not
-// declare).
+// window, a family whose every item is of a format view does not declare,
+// or a Christmas family view leaves below its floor).
 func buildSmartPlaylistDTO(row manifest.StoredSmartPlaylist, nowUTCHour, localHour int, hasLocal bool, view formatgate.Set) (smartPlaylistDTO, bool) {
 	dto := smartPlaylistDTO{
 		Slug: row.Slug, Kind: row.Kind, Title: row.Title,
@@ -198,20 +202,36 @@ func buildSmartPlaylistDTO(row manifest.StoredSmartPlaylist, nowUTCHour, localHo
 	if err := json.Unmarshal(row.ItemsJSON, &stored); err != nil {
 		return smartPlaylistDTO{}, false
 	}
-	dto.Items = make([]smartPlaylistItemDTO, 0, len(stored))
+	inView := make([]manifest.SmartPlaylistItem, 0, len(stored))
 	for _, it := range stored {
-		if !view.Takes(it.Path) {
-			continue
+		if view.Takes(it.Path) {
+			inView = append(inView, it)
 		}
+	}
+	if len(stored) > 0 && len(inView) == 0 {
+		return smartPlaylistDTO{}, false
+	}
+	// The Christmas family's floor holds for what this request is sent, by
+	// the one predicate generation asks of the whole pool (round 4 of
+	// backlog B489): the gate can leave a view fourteen tracks, or two
+	// artists on two albums, of a family the whole pool built.
+	if row.Kind == christmasKind && !season.MeetsFloor(inView, storedItemAlbum, storedItemArtist) {
+		return smartPlaylistDTO{}, false
+	}
+	dto.Items = make([]smartPlaylistItemDTO, 0, len(inView))
+	for _, it := range inView {
 		dto.Items = append(dto.Items, smartPlaylistItemDTO{
 			Position: len(dto.Items), Path: it.Path, Title: it.Title, Artist: it.Artist,
 		})
 	}
-	if len(stored) > 0 && len(dto.Items) == 0 {
-		return smartPlaylistDTO{}, false
-	}
 	return dto, true
 }
+
+// storedItemAlbum and storedItemArtist are what season.MeetsFloor reads of a
+// cached item. A blob cached before items stored their album has none, and
+// its family is judged on its artists alone until the next build.
+func storedItemAlbum(it manifest.SmartPlaylistItem) string  { return it.Album }
+func storedItemArtist(it manifest.SmartPlaylistItem) string { return it.Artist }
 
 // timeOfDayKind mirrors smartplaylist.KindTimeOfDay without importing the
 // engine package into the API layer (the string is the stable wire contract).

@@ -510,7 +510,9 @@ func TestSmartPlaylistsServeEachViewItsItems(t *testing.T) {
 // In its window an item a view does not declare is left out and the
 // positions close up, and a Christmas family of held-back tracks alone is
 // sent only to a view that declares them; out of its window it is sent to no
-// view, whatever the view declares.
+// view, whatever the view declares. Each family here clears the floor (15
+// items by three artists) in every view it is sent to: a view the gate leaves
+// below it is TestAViewLeftBelowTheChristmasFloorIsNotSentTheFamily's.
 func TestTheChristmasFamilyServesEachViewItsItems(t *testing.T) {
 	clock := &atomic.Pointer[time.Time]{}
 	f := newFormatsFixture(t, func(s *Server) { s.clockNow = func() time.Time { return *clock.Load() } })
@@ -518,7 +520,7 @@ func TestTheChristmasFamilyServesEachViewItsItems(t *testing.T) {
 		t.Helper()
 		var its []manifest.SmartPlaylistItem
 		for i, p := range paths {
-			its = append(its, manifest.SmartPlaylistItem{Position: i, Path: p})
+			its = append(its, manifest.SmartPlaylistItem{Position: i, Path: p, Artist: "Choir " + strconv.Itoa(i%3)})
 		}
 		raw, err := json.Marshal(its)
 		if err != nil {
@@ -560,6 +562,9 @@ func TestTheChristmasFamilyServesEachViewItsItems(t *testing.T) {
 	inSeason := time.Date(2026, 12, 24, 18, 0, 0, 0, time.UTC)
 	clock.Store(&inSeason)
 	mixed := []string{"Artist/Album/02 Gate Two.wv", "Artist/Album/01 Gate One.flac", "Artist/Album/03 Gate Three.ape", "Other/05 Gate Five.mp3"}
+	for i := 0; i < 15; i++ {
+		mixed = append(mixed, "Carols/"+strconv.Itoa(i)+".flac")
+	}
 	christmas(mixed...)
 	for _, v := range gateViews {
 		t.Run("in season, mixed/"+v.name, func(t *testing.T) {
@@ -574,7 +579,11 @@ func TestTheChristmasFamilyServesEachViewItsItems(t *testing.T) {
 			}
 		})
 	}
-	christmas("Artist/Album/02 Gate Two.wv", "Artist/Album/04 Gate Four.WV")
+	wavpackAlone := []string{"Artist/Album/02 Gate Two.wv", "Artist/Album/04 Gate Four.WV"}
+	for i := 0; i < 13; i++ {
+		wavpackAlone = append(wavpackAlone, "WavPack/"+strconv.Itoa(i)+".wv")
+	}
+	christmas(wavpackAlone...)
 	for _, v := range gateViews {
 		t.Run("in season, WavPack alone/"+v.name, func(t *testing.T) {
 			want := v.takes("Artist/Album/02 Gate Two.wv")
