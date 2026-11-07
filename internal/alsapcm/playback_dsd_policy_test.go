@@ -114,6 +114,19 @@ func (d *dsdRig) monitorTick() {
 	}
 }
 
+// monitorTickThatRevokes sends the one tick whose refresh ends the session: the
+// monitor can leave on the session's teardown, so monitorTick's second send,
+// its barrier, may find nobody to take it.
+func (d *dsdRig) monitorTickThatRevokes() {
+	d.t.Helper()
+	select {
+	case d.monitor <- time.Time{}:
+	case <-time.After(alsapcm.Watchdog()):
+		alsapcm.LogGoroutines(d.t)
+		d.t.Fatalf("no DSD monitor took a tick within %v", alsapcm.Watchdog())
+	}
+}
+
 // playedOut plays the queue, waits until every frame of refs is in the
 // sink, then lets the DAC play d of what the sink holds: the prefill's 1 ms
 // and then content, so a content the sink holds whole plays exactly d less
@@ -468,7 +481,7 @@ func TestAGainChangeRevokesDoPWithoutConsent(t *testing.T) {
 	})
 	writes := d.store.Writes()
 	d.box.SetControls(card, playbacktest.VolumeControls(200)...)
-	d.monitorTick()
+	d.monitorTickThatRevokes()
 	s := d.tickUntilStopped(engine.ReasonFault)
 	if f := s.Faults(); len(f) != 1 || f[0].Reason != "native_revoked" {
 		t.Errorf("the gain change's faults %+v, want DoP revoked", f)
