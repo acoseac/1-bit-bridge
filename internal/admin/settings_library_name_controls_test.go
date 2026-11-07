@@ -3,6 +3,7 @@ package admin
 import (
 	"bytes"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/acoseac/1-bit-bridge/internal/config"
@@ -21,6 +22,10 @@ func TestTheSettingsSaveStripsControlCharactersFromTheName(t *testing.T) {
 		{"C0, DEL and C1 controls around it", bel + "Kitchen" + csi + del, "Kitchen"},
 		{"controls between spaces at its ends", " " + nel + " Den " + bel + " ", "Den"},
 		{"runes whose second byte is a C1 number", "Ā Šoštarić", "Ā Šoštarić"},
+		// The cap counts the name stored: 260 runes sent, 250 once the
+		// controls are gone. The save's Normalize strips controls too, so
+		// this row and the refusal below are what the typed strip decides.
+		{"controls past the cap", strings.Repeat("a", 250) + strings.Repeat(bel, 10), strings.Repeat("a", 250)},
 	} {
 		t.Run(tc.label, func(t *testing.T) {
 			srv, _, cfgPath := newTestServer(t)

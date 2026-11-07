@@ -40,6 +40,10 @@ var controlNames = []struct{ label, name, stored string }{
 	// controls: a name is read as runes, never as bytes.
 	{"runes whose second byte is a C1 number", "Ā Šoštarić", "Ā Šoštarić"},
 	{"nothing but controls", ctlBEL + ctlNEL + ctlDEL, ""},
+	// The cap counts the name stored: 260 runes typed, 250 once the controls
+	// are gone. The save's Normalize strips controls too, so this row and
+	// the one above are what the typed strip alone decides.
+	{"controls past the cap", strings.Repeat("a", 250) + strings.Repeat(ctlBEL, 10), strings.Repeat("a", 250)},
 }
 
 // TestInitTypedNameLosesItsControlCharacters: `bridge init --name` stores a
