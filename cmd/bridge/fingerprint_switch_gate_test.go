@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"go/ast"
+	"go/format"
 	"go/parser"
 	"go/token"
 	"go/types"
@@ -326,5 +327,87 @@ func TestAFingerprintPassRunsOnTheSwitchsContext(t *testing.T) {
 	want := "enrichgate.CancelWhenOff(ctx, enrichmentOn, s.switchEvery)"
 	if len(calls) != 1 || calls[0] != want {
 		t.Errorf("runFingerprintSweeper's calls of enrichgate.CancelWhenOff = %q, want %q alone", calls, want)
+	}
+}
+
+// TestServeBuildsEveryClientOverTheLiveSwitches pins what serve's behavioural
+// tests cannot see, since the enricher's batch, the sweep's pass and the
+// cover adapter carry the switch on their contexts as well: every client
+// runServe builds of an upstream enrich.enabled governs holds the live
+// switches, enrichmentOn, and Deezer's deezerOn beside it, each read from the
+// live config, so a client fails closed whatever context it is handed
+// (backlog B617, round 3).
+func TestServeBuildsEveryClientOverTheLiveSwitches(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "main.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		"enrich.NewMusicBrainzClient":   "enrichgate.Enrichment(enrichmentOn)",
+		"enrich.NewCoverArtClient":      "enrichgate.Enrichment(enrichmentOn)",
+		"enrich.NewDeezerClient":        "enrichgate.Deezer(enrichmentOn, deezerOn)",
+		"enrich.NewITunesClient":        "enrichgate.Enrichment(enrichmentOn)",
+		"enrich.NewAtlasPremiumFetcher": "enrichgate.Enrichment(enrichmentOn)",
+		"acoustid.NewClient":            "enrichgate.Enrichment(enrichmentOn)",
+	}
+	wantSwitch := map[string]string{
+		"enrichmentOn": "func() bool { return liveCfg().Enrich.EffectiveEnabled() }",
+		"deezerOn":     "func() bool { return liveCfg().Enrich.EffectiveDeezerEnabled() }",
+	}
+	built := map[string]int{}
+	switches := map[string][]string{}
+	found := false
+	for _, d := range file.Decls {
+		fd, ok := d.(*ast.FuncDecl)
+		if !ok || fd.Name.Name != "runServe" || fd.Body == nil {
+			continue
+		}
+		found = true
+		ast.Inspect(fd.Body, func(n ast.Node) bool {
+			switch n := n.(type) {
+			case *ast.CallExpr:
+				fun := types.ExprString(n.Fun)
+				sw, listed := want[fun]
+				if !listed {
+					return true
+				}
+				built[fun]++
+				if len(n.Args) == 0 {
+					t.Errorf("%s: %s is called with no argument", fset.Position(n.Pos()), fun)
+					return true
+				}
+				if got := types.ExprString(n.Args[len(n.Args)-1]); got != sw {
+					t.Errorf("%s: %s is built over %s, want %s", fset.Position(n.Pos()), fun, got, sw)
+				}
+			case *ast.AssignStmt:
+				for i, lhs := range n.Lhs {
+					if id, ok := lhs.(*ast.Ident); ok && i < len(n.Rhs) {
+						if _, ok := wantSwitch[id.Name]; ok {
+							var b strings.Builder
+							if err := format.Node(&b, fset, n.Rhs[i]); err != nil {
+								t.Fatal(err)
+							}
+							switches[id.Name] = append(switches[id.Name], strings.Join(strings.Fields(b.String()), " "))
+						}
+					}
+				}
+			}
+			return true
+		})
+	}
+	if !found {
+		t.Fatal("found no runServe in main.go: the pin reads nothing")
+	}
+	for _, fun := range []string{"enrich.NewMusicBrainzClient", "enrich.NewCoverArtClient", "enrich.NewDeezerClient",
+		"enrich.NewAtlasPremiumFetcher", "acoustid.NewClient"} {
+		if built[fun] == 0 {
+			t.Errorf("runServe builds no %s: the pin reads nothing of it", fun)
+		}
+	}
+	for name, rhs := range wantSwitch {
+		if got := switches[name]; len(got) != 1 || got[0] != rhs {
+			t.Errorf("runServe's %s = %q, want %q alone", name, got, rhs)
+		}
 	}
 }
