@@ -379,16 +379,40 @@ func canonicalBCD(s string) string {
 }
 
 // unitText is a USB string of the unit u as the set publishes it
-// (PROTOCOL.md's dsdPlayback.model): every occurrence of u's own port path and
-// serial replaced with [redacted], as the dac element's labels have them
-// taken out. The unit's own, from the reading, whatever the binding names: a
-// binding by model or by port names neither, and a product string may carry
-// the serial (round 2).
+// (PROTOCOL.md's dsdPlayback.model): every occurrence of u's own port path, in
+// each of its spellings (PortForms), and of its serial replaced with
+// [redacted], as the dac element's labels have them taken out. The unit's
+// own, from the reading, whatever the binding names: a binding by model or by
+// port names neither, and a product string may carry the serial (B7 round 2)
+// or the port alone (B8 round 2).
 func unitText(s string, u alsa.USBIdentity) string {
-	if u.Port != "" {
-		s = strings.ReplaceAll(s, u.Port, "[redacted]")
+	for _, p := range PortForms(u.Port) {
+		s = strings.ReplaceAll(s, p, "[redacted]")
 	}
 	return u.Serial.Redact(s)
+}
+
+// PortForms are the spellings of the port path p that a USB string or a
+// label may hold, the longest first: p as given, which sysfs gives with the
+// unit's configuration and interface after the port (usb2-1:1.0), its
+// canonical form, and the port alone, as a port binding names it
+// (usbid.Port.Place); a path the port grammar does not read, p alone, and
+// none for "". B728 B8 round 2: a product string holding the port alone kept
+// it in the model, and the dacKey was a hash of it.
+func PortForms(p string) []string {
+	if p == "" {
+		return nil
+	}
+	forms := []string{p}
+	if port, err := usbid.ParsePort(p); err == nil {
+		for _, f := range []string{port.String(), port.Place().String()} {
+			if f != "" && !slices.Contains(forms, f) {
+				forms = append(forms, f)
+			}
+		}
+	}
+	slices.SortStableFunc(forms, func(a, b string) int { return len(b) - len(a) })
+	return forms
 }
 
 // readMixer is what the DoP gain check reads of card, whose unit m is: its

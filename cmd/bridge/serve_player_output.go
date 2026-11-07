@@ -310,16 +310,16 @@ func bridgePlayback(policy playback.PlayerPolicy, live *playback.PlaybackFacts) 
 }
 
 // playerText takes the boot binding's serial and port out of s wherever
-// they show, as the DAC's labels have them taken out (playerDACText): the
-// free text of the player's DSD, which the backend took the unit's own
-// serial and port out of already, and which a USB string may hold either
-// in.
+// they show, the port in each of its spellings (playback.PortForms), as the
+// DAC's labels have them taken out (playerDACText): the free text of the
+// player's DSD, which the backend took the unit's own serial and port out of
+// already, and which a USB string may hold either in.
 func playerText(s string, device config.PlayerDevice) string {
 	if device.Serial.Present() {
 		s = device.Serial.Redact(s)
 	}
-	if device.Port != "" {
-		s = strings.ReplaceAll(s, device.Port, "[redacted]")
+	for _, p := range playback.PortForms(device.Port) {
+		s = strings.ReplaceAll(s, p, "[redacted]")
 	}
 	return s
 }
