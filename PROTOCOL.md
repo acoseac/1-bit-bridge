@@ -901,7 +901,7 @@ When none holds, `state` is the transport's: `playing` (a track that is starting
 
 **`libraryScope`** is `self`: the player plays this bridge's own tracks, the ones it would not refuse as `not_indexed` (no row of the library's index has it), `routed` (an upstream server's track) or `outside_library` (a file outside every library root configured now). An OpenHome controller queues one by the URI the player's Source takes in an Insert, `http://<host>:<port>/dlna/file/<id>`: a host this bridge advertises, the DLNA listener's port, and the track's DLNA id (B470 PR 5a4).
 
-**`fixedVolume`** is `true` while the player has no volume control (`output.player.mixer` none, the one this release takes): the DAC receives the file's own level. **`dsdMode`** is `off` (default), `native`, `auto` or `dop`, and **`allowDoP`** is the configured boolean, both as the boot config holds them (`output.player.dsdMode`, `output.player.allowDoP`). Since the bridge's DSD cutover they grant nothing and decide nothing: the bridge migrates them once into the player's DSD state, and the player plays DSD by its effective policy, whose set `dsdPlayback` publishes. No tuple converts DSD to PCM: DoP carries the DSD bits unchanged in a PCM word, and a rate the policy would convert is refused until the player converts DSD itself.
+**`fixedVolume`** is `true` while the player has no volume control (`output.player.mixer` none, the one this release takes): the DAC receives the file's own level. **`dsdMode`** is `off` (default), `native`, `auto` or `dop`, and **`allowDoP`** is the configured boolean, both as the boot config holds them (`output.player.dsdMode`, `output.player.allowDoP`). Since the bridge's DSD cutover they grant nothing and decide nothing: the bridge migrates them once into the player's DSD state, and the player plays DSD by its effective policy, whose set `dsdPlayback` publishes. No tuple converts DSD to PCM: DoP carries the DSD bits unchanged in a PCM word. A rate the policy converts to PCM, the player converts (since B728's conversion), never bit-exact, and it publishes no tuple.
 
 **`codecs`** are the containers the player plays in this release: `flac`, `wav`, `aiff` and `alac` (ALAC in an M4A). A client matches a track by its `codec` in `/v1/manifest`:
 
@@ -912,9 +912,9 @@ When none holds, `state` is the transport's: `playing` (a track that is starting
 | `AIFF` | `aiff` |
 | `ALAC` | `alac` |
 
-Any other `codec` names no container the player plays: `AAC`, which the manifest tells from ALAC in an `.m4a` by its `codec`, `MP3`, `OGG`, and a compressed AIFF-C or WAV. A track with no `codec` cannot be matched, and the player's own refusal decides. `dsf` and `dff` appear only when `dsdPlayback.tuples` is nonempty, mapping `DSF` and `DFF` respectively. A container listed is no promise for every file in it: the player refuses floating-point PCM (`sampleFormat` `"float"`), and a rate, a depth or a transport its DAC does not take.
+Any other `codec` names no container the player plays: `AAC`, which the manifest tells from ALAC in an `.m4a` by its `codec`, `MP3`, `OGG`, and a compressed AIFF-C or WAV. A track with no `codec` cannot be matched, and the player's own refusal decides. `dsf` and `dff` appear only while the player plays a DSD rate, native or DoP (a tuple of `dsdPlayback.tuples`) or converted to PCM, mapping `DSF` and `DFF` respectively; a converted rate publishes no tuple, so a client grants DSD from the tuples alone, as before. A container listed is no promise for every file in it: the player refuses floating-point PCM (`sampleFormat` `"float"`), and a rate, a depth or a transport its DAC does not take.
 
-**`timeSeek`** (additive, optional) says what the player does with a seek within a track, OpenHome's `SeekSecondAbsolute` and `SeekSecondRelative` on its Source, by the kind of content: `pcm` for the PCM containers of `codecs` (`flac`, `wav`, `aiff`, `alac`), and `dsd` for DSD, played native or as DoP (DoP is DSD carried in PCM words, and is `dsd` whatever its carrier). Each member is a word of the table below. A client reads an absent object, an absent member and a word it does not know as `unknown`: a bridge older than the member sends no object, and a later one may add a member or a word. It says what this bridge's player implements, not whether a seek can be made now: the element sends the same object in every `state`, `unavailable` included. A `supported` kind's seek is still refused with OpenHome's fault 803, `Seek failed`, while the player holds no track to seek in (stopped, releasing to stop or to play another entry, or before anything of the track is known), and at or past the track's end (its exact end included), changing nothing; an `unsupported` kind's always is, but for the answers that follow. Whatever the kind, a seek is UPnP's fault 501, `Action Failed`, while no player runs or it is shutting down, while maintenance holds it, and when it was not admitted within its time budget or a Stop, the DAC going away or maintenance overtook it while it waited behind a pause, a resume or a start; one admitted and still waiting when that budget ends answers success, and the reads show whether it then ran. A seek keeps the transport as it was (one while paused stays paused at its target) and continues the track: the queue, `Id`, the track and Time's and Info's `TrackCount` are unchanged, and Time's `Seconds` reads the target at once, then the target plus what has played. A relative target before the track's start is its start. `ProtocolVersion` stays `1`.
+**`timeSeek`** (additive, optional) says what the player does with a seek within a track, OpenHome's `SeekSecondAbsolute` and `SeekSecondRelative` on its Source, by the kind of content: `pcm` for the PCM containers of `codecs` (`flac`, `wav`, `aiff`, `alac`), and `dsd` for DSD, played native, as DoP or converted to PCM (DoP is DSD carried in PCM words, and DSD the player converts to PCM is DSD too: each is `dsd` whatever its carrier). Each member is a word of the table below. A client reads an absent object, an absent member and a word it does not know as `unknown`: a bridge older than the member sends no object, and a later one may add a member or a word. It says what this bridge's player implements, not whether a seek can be made now: the element sends the same object in every `state`, `unavailable` included. A `supported` kind's seek is still refused with OpenHome's fault 803, `Seek failed`, while the player holds no track to seek in (stopped, releasing to stop or to play another entry, or before anything of the track is known), and at or past the track's end (its exact end included), changing nothing; an `unsupported` kind's always is, but for the answers that follow. Whatever the kind, a seek is UPnP's fault 501, `Action Failed`, while no player runs or it is shutting down, while maintenance holds it, and when it was not admitted within its time budget or a Stop, the DAC going away or maintenance overtook it while it waited behind a pause, a resume or a start; one admitted and still waiting when that budget ends answers success, and the reads show whether it then ran. A seek keeps the transport as it was (one while paused stays paused at its target) and continues the track: the queue, `Id`, the track and Time's and Info's `TrackCount` are unchanged, and Time's `Seconds` reads the target at once, then the target plus what has played. A relative target before the track's start is its start. `ProtocolVersion` stays `1`.
 
 | `timeSeek` member | Words |
 |---|---|
@@ -931,8 +931,9 @@ This bridge sends exactly that object.
 `dsdPlayback` is omitted until the player is ready and its playback backend can
 supply policy facts. An available backend with no eligible tuples still emits
 this object with `tuples: []`; absence and an empty tuple set grant no permission.
-`playback` is omitted until that backend has installed an occurrence. Neither
-optional object is emitted as `null`.
+`playback` is omitted until that backend has installed an occurrence, and while the
+occurrence observed is DSD the player converts to PCM, whose observation this bridge
+does not send yet. Neither optional object is emitted as `null`.
 
 The following are the complete member lists (`internal/api/outputs_bridge.go`,
 `OutputDSDPlayback`, `OutputDSDTuple`, `OutputPlayback`). “Integer” means a JSON
@@ -1005,8 +1006,8 @@ the lowest rate with (`internal/player/policy/policy.go`,
 `dop_not_offered`, `dop_gain_not_unity`, `dop_gain_unverifiable`,
 `dop_confirmation_required`, `dsd_rate_above_choice`, `first_use_pending`,
 `listener_rejected`, `conversion_not_offered`, `dsd_state_unreadable`,
-`rate_not_supported`, `dsd_not_in_this_release` (a rate the policy would convert to
-PCM, which the player does not do yet), or `dsd_dac_unread` (no set could be
+`rate_not_supported`, `dsd_not_in_this_release` (an earlier bridge's word for a rate the
+policy would convert to PCM, which the player now converts), or `dsd_dac_unread` (no set could be
 computed: the bridge has no fresh reading of the bound DAC). An engineering harness's
 backend sends its approval's words instead. The field has always been free text, so a
 client that follows this section shows a word it does not know as text, or nothing,
@@ -1022,8 +1023,8 @@ default for a DAC with none), the bridge's database of DAC models, what the kern
 and a silent probe establish of the DAC now, and for DoP a check that every gain
 stage on the DAC's playback path is visible and at unity. A rate plays native DSD,
 in the first format the DAC offers of `DSD_U32_BE`, `DSD_U32_LE`, `DSD_U16_LE`, or
-DoP, or publishes no tuple; a rate the policy would convert to PCM publishes none
-until the player converts DSD itself. A change of the set never moves an occurrence
+DoP, or publishes no tuple; a rate the policy converts to PCM, which the player does,
+publishes none. A change of the set never moves an occurrence
 to another transport: an occurrence plays the transport it was admitted under or
 stops (below). The set itself publishes what the policy plays at each rate now: a
 rate whose transport a change took away (a gain stage leaving unity takes DoP away)
