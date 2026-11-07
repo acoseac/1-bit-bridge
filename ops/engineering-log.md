@@ -85978,3 +85978,24 @@ and `TestARootsIdentityIsTheFolderAtItsPathWhenItIsRead` passes; with
 `rootIdentity`'s comparison taken out it goes red there, which a Windows host
 can run as that control. On macOS `TestAWriteWithNoLinkOnItsWayResolvesNoOtherRoot`
 passes too, its folders resolved through `/private/var` first.
+
+### The gates
+
+At 1202ce48, the branch's code as it ships (the commit after it adds this
+section alone), through the shared build lock in one run
+(`.tmp/_b77x/gate.sh`), on go1.27.3, go.mod's: `make fmt` rewrote nothing;
+`make vet` clean, and so with `GOOS=windows`, `GOOS=darwin` and
+`GOOS=linux GOARCH=386`; `make test` (`-race`, `-timeout 30m`) green, 89
+packages, among them cmd/bridge in 1313 s, internal/admin in 1045 s,
+internal/manifest in 1621 s, internal/upload in 11 s, internal/trash in 2 s
+and internal/fsutil in 3 s, and the packages that test Linux alone run here
+for real (internal/alsa, internal/alsapcm on this host's ALSA,
+internal/atomicwrite, internal/player/hotplug; internal/usbid's result cached
+from an identical run); `make build-all`, its build-tag census included, and
+`make docs-check` clean; `git status` clean after. The qualification check
+against main (`scripts/qualification-version -base 98edead3 -head HEAD`, main's
+tip as merged) answers OK. `rules-b77x-r3.patch` applies to the tree
+(`git apply --check`), and on a copy with it applied the budgets hold
+(scanner.md 39,464 bytes; the worst load 67.1%) and the test it cites is
+declared. Not run here: the Windows and macOS legs above, and the node console
+tests.
