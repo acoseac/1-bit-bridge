@@ -565,6 +565,12 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   `TestTheManifestOmitsEnrichmentProgressWhileOff`,
   `TestServeWiresTheEnrichmentGate`, `TestRetryWhileOffResetsNothing` and
   `TestARewriteKeepsTheEnrichmentOptOuts` pin it.
+- **WavPack and Monkey's Audio rows are enriched and harvested like any
+  other row** (2026-11-06, backlog B489): the client format gate holds them
+  back at serving (`wire.md`), never at the enricher's work query or the
+  harvest's release set, so an app that declares them receives them
+  enriched. **Don't leave them out of an enrichment or harvest query.**
+  `TestWavPackAndMonkeysAudioRowsTakePartInEnrichment` pins it.
 
 ## Duplicates and the served set
 
@@ -588,3 +594,48 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   decision; don't flip `includeRouted` without making it.
 - Tier names are evidence claims: only `identical-audio` may say "reclaimable";
   `inconclusive` is never suppressed.
+- **A copy every client is served that the last scan found outranks one the
+  client format gate holds back, before every other term but `Row.Missing`,
+  and a domain with no such copy that holds two gated formats is one
+  suppression unit per format, a unit whose every copy is gone suppressed
+  while another unit of its domain holds a found one** (2026-11-06,
+  backlog B489, the owner's decision in its brief; round 3, the merge of
+  B756; round 4). `dupe_suppressed` is
+  one flag for every client and the gate (`X-Bridge-Formats`, `wire.md`) is
+  per client: a `.wv` winning over a `.flac` of one album would leave an app
+  that declares nothing no copy of it at all. So `outranks` asks
+  `formatgate.Gated` right after `Missing` (the bullet above), which costs an
+  app that plays both formats the gated copy's better geometry and never
+  costs a client its only copy; `Missing` comes first because a copy whose
+  file is gone is no copy any client can play, so a found `.wv` takes a gone
+  `.flac`'s place. And `gateUnits` splits by format a domain that holds no
+  found ungated copy and copies of two gated formats, so a `.wv` and an
+  `.ape` of one track are never suppressed against each other (a client
+  may declare one alone), while two `.wv` copies are ranked as any
+  same-format pair. `planDomainWinners` then suppresses whole a unit whose
+  every copy is gone (a gone `.flac` beside a found `.wv` and `.ape`, a gone
+  `.wv` beside a found `.ape`) while another unit of its DSD or PCM domain
+  holds a found copy (round 4): those rows were no copy any client could
+  play, and until the deletion pass reaped them, three full scans by
+  default, an app was served a dead row beside the copy it can play. A
+  domain whose every copy is gone keeps each unit's winner, and the rule
+  never crosses domains (a gone DSD edition beside found PCM copies is
+  served). So every suppression unit serves exactly one member, or none
+  when every member is gone and a found unit of its domain serves
+  (`PlanSuppression`'s invariant, exactly one until round 4).
+  `WAVPACK-LOSSY` is in the ranking's lossy set (`lossyCodecs`,
+  `IsLossyCodec`'s mirror, `TestDupesLossyCodecsMirrorIsLossyCodec`). The
+  partition is untouched: this is the bridge's election, not the iOS
+  normalizer's grouping. **Don't let a gated copy win over a found one every
+  client is served, put the gate's term before `Missing`, suppress one
+  gated format against another, serve a unit whose every copy is gone
+  beside a found unit of its domain, or let that rule cross a domain.**
+  `TestAGatedCopyNeverWinsOverACopyEveryClientIsServed`,
+  `TestTheGateAndTheMissingTermHoldBesideEachOther`,
+  `TestNoViewIsServedAGoneCopyBesideAFoundOne`,
+  `TestPlanSuppression_EveryUnitServesOneWinnerOrNoneWhenItsCopiesAreGone`,
+  `TestAFoundPCMCopyNeverSuppressesAGoneDSDEdition`,
+  `TestTheGoneUnitRuleChangesNoOtherTierOrMode`,
+  `TestAGoneFLACBesideAWavPackAndAnAPECopyIsServedToNoView`,
+  `TestAGatedCopyIsSuppressedAgainstItsOwnFormatAsAnyCopyIs` and
+  `TestALossyHybridWavPackCopyIsLossy` pin it.

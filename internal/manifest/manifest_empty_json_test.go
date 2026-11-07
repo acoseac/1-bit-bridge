@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/formatgate"
 )
 
 // TestManifestEmptyTracksMarshalsAsArray guards the `"tracks":[]` wire shape.
@@ -23,10 +25,10 @@ func TestManifestEmptyTracksMarshalsAsArray(t *testing.T) {
 		fn   func() (*Manifest, error)
 	}{
 		{"BuildManifest", func() (*Manifest, error) {
-			return BuildManifest(context.Background(), s, nil, time.Time{})
+			return BuildManifest(context.Background(), s, nil, time.Time{}, formatgate.All())
 		}},
 		{"BuildManifestPage", func() (*Manifest, error) {
-			return BuildManifestPage(context.Background(), s, nil, "", 100)
+			return BuildManifestPage(context.Background(), s, nil, "", 100, formatgate.Set{})
 		}},
 	}
 	for _, tc := range cases {

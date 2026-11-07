@@ -22,6 +22,7 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/ctxerr"
 	"github.com/acoseac/1-bit-bridge/internal/dsn"
+	"github.com/acoseac/1-bit-bridge/internal/formatgate"
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/logging"
 	"github.com/acoseac/1-bit-bridge/internal/lyrics"
@@ -2633,6 +2634,45 @@ var migrations = []migration{
 			return err
 		},
 	},
+	{
+		// v61 records, per track, what its extraction saw of a hybrid
+		// WavPack file's correction file (Track.correctionKey, backlog
+		// B489: confirmed absence, or a file's state, size, mtime and
+		// name), which the skip gate compares with the folder's now
+		// (correctionDrifted), so a correction file added, replaced or
+		// removed beside an unchanged .wv reaches its row, and one that
+		// did not change is read no more. Column-only: never in tags_json;
+		// a matching file's path and stat reach the wire through
+		// Track.Correction, inside tags_json.
+		//
+		// '' for every existing row, which is also the key of a row that
+		// depends on no correction file: the walk indexed no .wv before this
+		// version, and a routed row (an upstream server's item, which its
+		// URL may name .wv) is never extracted, so nothing is re-read for
+		// it.
+		//
+		// This version brings the client format gate too, so a store that
+		// holds a routed row or a tombstone the gate now holds back from an
+		// app that declares no format restarts the deletion journal's
+		// coverage, and every delta cursor from before the upgrade takes a
+		// full sync (restartCoverageOverGatedPaths, round 2 of B489: such a
+		// row was served to every app, and would stay on those apps with no
+		// tombstone for good).
+		//
+		// Append-only / idempotent per the ladder contract: the ALTER rides
+		// post(), not `sql` (see the v9 docblock).
+		version: 61,
+		name:    "tracks.correction_key (the WavPack correction file a row was extracted against)",
+		sql:     `-- column added idempotently in post(); see Track.correctionKey`,
+		post: func(db *sql.DB) error {
+			if err := addColumnsIfMissing(db, "tracks",
+				tableColumn{"correction_key", "ALTER TABLE tracks ADD COLUMN correction_key TEXT NOT NULL DEFAULT ''"},
+			); err != nil {
+				return err
+			}
+			return restartCoverageOverGatedPaths(db)
+		},
+	},
 }
 
 // healTransitionBandBandwidths is migration v34's post(): every wf7
@@ -3116,6 +3156,13 @@ func marshalForStorage(t *Track) ([]byte, error) {
 	// compares against. An ASCII path is unchanged.
 	coerceStoredUTF8(&clone)
 	clone.Path = strings.ToValidUTF8(clone.Path, "\uFFFD")
+	// A correction file's path likewise (backlog B489), on a copy of its
+	// own: the pointer is the caller's.
+	if clone.Correction != nil {
+		c := *clone.Correction
+		c.Path = strings.ToValidUTF8(c.Path, "\uFFFD")
+		clone.Correction = &c
+	}
 	clone.Enriched = nil
 	// Variants are column-derived (spliced from the variants table at
 	// read time via scanTrackVariants, same as Enriched). Zero them so a
@@ -3732,12 +3779,15 @@ func (s *Store) StampExtractorVersionBatch(ctx context.Context, ts []*Track) err
 	// changed beside a track whose art did not (its embedded picture wins,
 	// or the new cover is the old one's bytes) lands here, and a stamp that
 	// kept the old key would send the skip gate back to it on every scan.
+	// correction_key likewise (v61): a correction file that changed and is
+	// still not the stream's lands here, and its new stat must be recorded.
 	stmt, err := tx.PrepareContext(ctx, `
 		UPDATE tracks
 		SET extractor_version = ?,
 		    missing_count = 0,
 		    audio_md5 = COALESCE(NULLIF(?, ''), audio_md5),
 		    folder_art_key = ?,
+		    correction_key = ?,
 		    extract_refused = ?
 		WHERE path = ?
 	`)
@@ -3769,7 +3819,7 @@ func (s *Store) StampExtractorVersionBatch(ctx context.Context, ts []*Track) err
 			}
 		}
 		if _, err := stmt.ExecContext(ctx, ExtractorVersion, t.audioMD5, t.folderArtKey,
-			boolToInt(t.extractRefused), t.Path); err != nil {
+			t.correctionKey, boolToInt(t.extractRefused), t.Path); err != nil {
 			return err
 		}
 		if t.extractRefused {
@@ -3972,8 +4022,9 @@ func prepareTrackUpsert(ctx context.Context, tx dbTx) (*sql.Stmt, error) {
 		                   sample_rate, bits_per_sample, is_dsd, codec,
 		                   extractor_version, audio_md5, compression,
 		                   folder_art_key, extract_refused, first_indexed_at,
-		                   sample_format, sample_format_size, sample_format_mtime_ns)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		                   sample_format, sample_format_size, sample_format_mtime_ns,
+		                   correction_key)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(path) DO UPDATE SET
 			size          = excluded.size,
 			mtime_ns      = excluded.mtime_ns,
@@ -4048,7 +4099,11 @@ func prepareTrackUpsert(ctx context.Context, tx dbTx) (*sql.Stmt, error) {
 			-- again): a kind is never written apart from it.
 			sample_format = excluded.sample_format,
 			sample_format_size = excluded.sample_format_size,
-			sample_format_mtime_ns = excluded.sample_format_mtime_ns
+			sample_format_mtime_ns = excluded.sample_format_mtime_ns,
+			-- v61: what this extraction saw of a hybrid WavPack file's
+			-- correction file (Track.correctionKey), which the skip gate
+			-- compares, unconditional like folder_art_key.
+			correction_key = excluded.correction_key
 			-- v53 first_indexed_at is insert-only. The conflict arm leaves it.
 	`)
 }
@@ -4102,7 +4157,7 @@ func (s *Store) UpsertTrack(ctx context.Context, t *Track) error {
 	_, err = stmt.ExecContext(ctx, t.Path, t.Size, t.ModTime.UnixNano(), raw, stamp,
 		rate, bits, isDSD, codec, ExtractorVersion, t.audioMD5, compression, t.folderArtKey,
 		boolToInt(t.extractRefused), firstIndexedInsertNS(t.carryFirstIndexedNS, now),
-		sampleFormatColumn(t), t.Size, t.ModTime.UnixNano())
+		sampleFormatColumn(t), t.Size, t.ModTime.UnixNano(), t.correctionKey)
 	if err != nil {
 		return err
 	}
@@ -4172,6 +4227,7 @@ func (s *Store) UpsertTrackBatch(ctx context.Context, ts []*Track) error {
 		refused     int
 		firstNS     int64
 		sampleFmt   string
+		corrKey     string
 	}
 	rows := make([]row, len(ts))
 	for i, t := range ts {
@@ -4195,6 +4251,7 @@ func (s *Store) UpsertTrackBatch(ctx context.Context, ts []*Track) error {
 			refused:     boolToInt(t.extractRefused),
 			firstNS:     t.carryFirstIndexedNS,
 			sampleFmt:   sampleFormatColumn(t),
+			corrKey:     t.correctionKey,
 		}
 	}
 
@@ -4230,7 +4287,7 @@ func (s *Store) UpsertTrackBatch(ctx context.Context, ts []*Track) error {
 	for _, r := range rows {
 		if _, err := stmt.ExecContext(ctx, r.path, r.size, r.mtime, r.tagsRaw, stamp,
 			r.rate, r.bits, r.isDSD, r.codec, ExtractorVersion, r.audioMD5, r.compression, r.artKey,
-			r.refused, firstIndexedInsertNS(r.firstNS, now), r.sampleFmt, r.size, r.mtime); err != nil {
+			r.refused, firstIndexedInsertNS(r.firstNS, now), r.sampleFmt, r.size, r.mtime, r.corrKey); err != nil {
 			return err
 		}
 	}
@@ -4558,6 +4615,11 @@ type TrackStat struct {
 	// extractor version, refused the file (Track.extractRefused). The skip
 	// gate asks such a row nothing else while those three hold.
 	ExtractRefused bool
+	// CorrectionKey is the `correction_key` column (v61): what the row's
+	// extraction saw of a hybrid WavPack file's correction file, which the
+	// skip gate compares with the folder's now (correctionDrifted). ''
+	// for a row that depends on none.
+	CorrectionKey string
 }
 
 // GetTrackStat is the skip-gate twin of GetTrack: same exact-key
@@ -4597,11 +4659,13 @@ func (s *Store) GetTrackStat(ctx context.Context, path string) (*TrackStat, erro
 		SELECT t.size, t.mtime_ns, COALESCE(json_extract(t.tags_json, '$.artworkMBID'), ''),
 		       t.extractor_version, t.folder_art_key, t.extract_refused != 0,
 		       COALESCE(l.source, ''), COALESCE(l.sidecar_name, ''),
-		       COALESCE(l.source_mtime_ns, 0), COALESCE(l.source_size, 0)
+		       COALESCE(l.source_mtime_ns, 0), COALESCE(l.source_size, 0),
+		       t.correction_key
 		FROM tracks t LEFT JOIN track_lyrics l ON l.source_path = t.path
 		WHERE t.path = ?`, path).
 		Scan(&st.Size, &st.MTimeNS, &st.ArtworkMBID, &st.ExtractorVersion, &st.FolderArtKey, &st.ExtractRefused,
-			&st.LyricsSource, &st.LyricsSidecarName, &st.LyricsSourceMTimeNS, &st.LyricsSourceSize)
+			&st.LyricsSource, &st.LyricsSidecarName, &st.LyricsSourceMTimeNS, &st.LyricsSourceSize,
+			&st.CorrectionKey)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -5095,30 +5159,34 @@ func formatSampleRateLabel(hz float64) string {
 // require re-marshalling every track on each `MarkEnriched` write
 // just to flip a bool, which is what the column is for.
 func (s *Store) ListTracks(ctx context.Context, since *time.Time) ([]Track, error) {
-	return s.listTracks(ctx, since, false)
+	return s.listTracks(ctx, since, nil)
 }
 
 // ListServedTracks is ListTracks restricted to the SERVED set
-// (dupe_suppressed = 0). It exists for the client-facing consumers —
-// the manifest builders and the DLNA adapter — while ListTracks keeps
-// full-store semantics for the internal machinery (reconciliation
-// passes, sweepers, CLI batches). Do NOT "simplify" the two into one
-// filtered reader: the scan tail and the enricher must keep seeing
+// (dupe_suppressed = 0) in a client's view (format_view.go: a row of a
+// format view does not declare is left out). It exists for the
+// client-facing consumers — the manifest builders and the DLNA adapter —
+// while ListTracks keeps full-store semantics for the internal machinery
+// (reconciliation passes, sweepers, CLI batches). Do NOT "simplify" the two
+// into one filtered reader: the scan tail and the enricher must keep seeing
 // suppressed rows or suppression would freeze their metadata forever.
-func (s *Store) ListServedTracks(ctx context.Context, since *time.Time) ([]Track, error) {
-	return s.listTracks(ctx, since, true)
+func (s *Store) ListServedTracks(ctx context.Context, since *time.Time, view formatgate.Set) ([]Track, error) {
+	return s.listTracks(ctx, since, &view)
 }
 
 // trackReadPredicates builds the WHERE clause shared by the track
-// readers: the served-set restriction and/or the since-delta filter,
+// readers: the served set in a view (served non-nil: dupe_suppressed = 0
+// and the format gate, formatViewSQL) and/or the since-delta filter,
 // AND-composed (the conditional-WHERE composition is exactly why this
 // helper exists — a naive `+= " WHERE …"` at two sites is how the two
-// filters would eventually collide).
-func trackReadPredicates(servedOnly bool, since *time.Time) (string, []any) {
+// filters would eventually collide). A nil served reads every row, the
+// full-store readers' semantics.
+func trackReadPredicates(served *formatgate.Set, since *time.Time) (string, []any) {
 	var conds []string
 	var args []any
-	if servedOnly {
-		conds = append(conds, `dupe_suppressed = 0`)
+	if served != nil {
+		conds = append(conds, `dupe_suppressed = 0`, formatViewSQL)
+		args = append(args, formatViewArgs(*served)...)
 	}
 	if since != nil {
 		conds = append(conds, `indexed_at > ?`)
@@ -5177,9 +5245,9 @@ func collectListedTracks(rows *sql.Rows, out []Track) ([]Track, error) {
 	return out, rows.Err()
 }
 
-func (s *Store) listTracks(ctx context.Context, since *time.Time, servedOnly bool) ([]Track, error) {
+func (s *Store) listTracks(ctx context.Context, since *time.Time, served *formatgate.Set) ([]Track, error) {
 	q := `SELECT tags_json, indexed_at, enriched_at, ` + variantsAggSQL + `, ` + waveformTagSQL + `, ` + replayGainSQL + `, ` + analysisScalarsSQL + `, artwork_version, booklet_tag, ` + lyricsTagSQL + `, first_indexed_at, sample_format FROM tracks`
-	where, args := trackReadPredicates(servedOnly, since)
+	where, args := trackReadPredicates(served, since)
 	q += where + ` ORDER BY path ASC`
 	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
@@ -5205,19 +5273,19 @@ func (s *Store) listTracks(ctx context.Context, since *time.Time, servedOnly boo
 // is propagated. rows.Err() (post-iteration) is also returned if fn
 // finished cleanly.
 func (s *Store) StreamTracks(ctx context.Context, sp *time.Time, fn func(*Track) error) error {
-	return s.streamTracks(ctx, sp, false, fn)
+	return s.streamTracks(ctx, sp, nil, fn)
 }
 
 // StreamServedTracks is StreamTracks restricted to the SERVED set
-// (dupe_suppressed = 0) — the legacy /v1/manifest streaming leg's
-// reader. Same callback-reuse contract. See ListServedTracks for why
-// the full-store StreamTracks must stay unfiltered for internal
-// callers.
-func (s *Store) StreamServedTracks(ctx context.Context, sp *time.Time, fn func(*Track) error) error {
-	return s.streamTracks(ctx, sp, true, fn)
+// (dupe_suppressed = 0) in a client's view — the legacy /v1/manifest
+// streaming leg's reader. Same callback-reuse contract. See
+// ListServedTracks for why the full-store StreamTracks must stay
+// unfiltered for internal callers.
+func (s *Store) StreamServedTracks(ctx context.Context, sp *time.Time, view formatgate.Set, fn func(*Track) error) error {
+	return s.streamTracks(ctx, sp, &view, fn)
 }
 
-func (s *Store) streamTracks(ctx context.Context, sp *time.Time, servedOnly bool, fn func(*Track) error) error {
+func (s *Store) streamTracks(ctx context.Context, sp *time.Time, served *formatgate.Set, fn func(*Track) error) error {
 	if fn == nil {
 		// Defensive guard: invoking the callback later would panic with
 		// a nil-deref. CodeRabbit on PR #70 — surface a clear error
@@ -5226,7 +5294,7 @@ func (s *Store) streamTracks(ctx context.Context, sp *time.Time, servedOnly bool
 		return errors.New("StreamTracks: nil callback")
 	}
 	q := `SELECT tags_json, indexed_at, enriched_at, ` + variantsAggSQL + `, ` + waveformTagSQL + `, ` + replayGainSQL + `, ` + analysisScalarsSQL + `, artwork_version, booklet_tag, ` + lyricsTagSQL + `, first_indexed_at, sample_format FROM tracks`
-	where, args := trackReadPredicates(servedOnly, sp)
+	where, args := trackReadPredicates(served, sp)
 	q += where + ` ORDER BY path ASC`
 	// **QueryContext (not Query)** so a client disconnect mid-stream
 	// terminates the SQLite scan instead of holding the read lock +
@@ -5275,31 +5343,34 @@ func (s *Store) streamTracks(ctx context.Context, sp *time.Time, servedOnly bool
 // which isn't worth the complexity for a code path that already
 // returns bounded output.
 func (s *Store) ListTracksPage(ctx context.Context, afterPath string, limit int) ([]Track, error) {
-	return s.listTracksPage(ctx, afterPath, limit, false)
+	return s.listTracksPage(ctx, afterPath, limit, nil)
 }
 
 // ListServedTracksPage is ListTracksPage restricted to the SERVED set
-// (dupe_suppressed = 0) — the paginated /v1/manifest reader. The path
-// cursor walks the same total order; suppressed rows are simply skipped,
-// so pages stay dense and NextCursor semantics are unchanged.
-func (s *Store) ListServedTracksPage(ctx context.Context, afterPath string, limit int) ([]Track, error) {
-	return s.listTracksPage(ctx, afterPath, limit, true)
+// (dupe_suppressed = 0) in a client's view — the paginated /v1/manifest
+// reader. The path cursor walks the same total order; suppressed rows and
+// rows of a format the view does not declare are simply skipped, so pages
+// stay dense and NextCursor semantics are unchanged.
+func (s *Store) ListServedTracksPage(ctx context.Context, afterPath string, limit int, view formatgate.Set) ([]Track, error) {
+	return s.listTracksPage(ctx, afterPath, limit, &view)
 }
 
-func (s *Store) listTracksPage(ctx context.Context, afterPath string, limit int, servedOnly bool) ([]Track, error) {
+func (s *Store) listTracksPage(ctx context.Context, afterPath string, limit int, served *formatgate.Set) ([]Track, error) {
 	if limit <= 0 {
 		limit = 1000
 	}
 	q := `
 		SELECT tags_json, indexed_at, enriched_at, ` + variantsAggSQL + `, ` + waveformTagSQL + `, ` + replayGainSQL + `, ` + analysisScalarsSQL + `, artwork_version, booklet_tag, ` + lyricsTagSQL + `, first_indexed_at, sample_format FROM tracks
 		WHERE path > ?`
-	if servedOnly {
-		q += ` AND dupe_suppressed = 0`
+	args := []any{afterPath}
+	if served != nil {
+		q += ` AND dupe_suppressed = 0 AND ` + formatViewSQL
+		args = append(args, formatViewArgs(*served)...)
 	}
 	q += `
 		ORDER BY path ASC
 		LIMIT ?`
-	rows, err := s.db.QueryContext(ctx, q, afterPath, limit)
+	rows, err := s.db.QueryContext(ctx, q, append(args, limit)...)
 	if err != nil {
 		return nil, err
 	}
@@ -5591,10 +5662,13 @@ func (s *Store) CountTracks(ctx context.Context) (int, error) {
 // Admin/operator surfaces deliberately keep the full-store CountTracks /
 // RollupByPrefix truth instead — that split re-divides two numbers a
 // prior PR unified, and it is intentional: the operator sees everything,
-// the wire describes what is served.
-func (s *Store) CountServedTracks(ctx context.Context) (int, error) {
+// the wire describes what is served. The count is of a client's view
+// (format_view.go), so it agrees with the rows that client is sent; an
+// operator surface passes formatgate.All.
+func (s *Store) CountServedTracks(ctx context.Context, view formatgate.Set) (int, error) {
 	var n int
-	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM tracks WHERE dupe_suppressed = 0`).Scan(&n)
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM tracks WHERE dupe_suppressed = 0 AND `+formatViewSQL,
+		formatViewArgs(view)...).Scan(&n)
 	return n, err
 }
 
@@ -5660,7 +5734,11 @@ func (s *Store) ArtworkMBIDsInUse(ctx context.Context) ([]string, error) {
 // `encoding/json` doesn't treat the time-struct's IsZero as "empty"),
 // emit `"0001-01-01T00:00:00Z"` on the wire, and the iOS decoder would
 // parse that as a real date — breaking the 24 h freshness gate.
-func (s *Store) EnrichmentCounts(ctx context.Context) (enriched int, lastEnrichedAt *time.Time, err error) {
+//
+// The enriched count is of a client's view (format_view.go), the same view
+// as the total beside it, so the footer's numerator cannot pass its
+// denominator; the freshness stamp stays unscoped, below.
+func (s *Store) EnrichmentCounts(ctx context.Context, view formatgate.Set) (enriched int, lastEnrichedAt *time.Time, err error) {
 	var lastNs sql.NullInt64
 	// `enriched_at > 0` is sargeable; `enriched_at != 0` is not. Even
 	// though both predicates describe the same row set (the column is
@@ -5680,9 +5758,9 @@ func (s *Store) EnrichmentCounts(ctx context.Context) (enriched int, lastEnriche
 	// population count.
 	err = s.db.QueryRowContext(ctx, `
 		SELECT
-			(SELECT COUNT(*) FROM tracks WHERE enriched_at > 0 AND dupe_suppressed = 0),
+			(SELECT COUNT(*) FROM tracks WHERE enriched_at > 0 AND dupe_suppressed = 0 AND `+formatViewSQL+`),
 			(SELECT MAX(enriched_at) FROM tracks)
-	`).Scan(&enriched, &lastNs)
+	`, formatViewArgs(view)...).Scan(&enriched, &lastNs)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -7316,18 +7394,22 @@ func splitIllFormedUTF8Paths(paths []string) (valid, illFormed []string) {
 
 // PendingDeletions returns the total count of rows across `tracks` and
 // `folders` that have a non-zero missing_count but haven't yet hit the
-// delete threshold. Exposed for the /v1/health ScanState surface and
-// the admin dashboard "X rows pending deletion" hint. Two filtered
-// COUNT(*) scans — there is NO dedicated missing_count index, so the
-// `missing_count > 0` predicate is a table scan; the /v1/health caller
-// TTL-caches the result (healthCountsCache) so an unauthenticated flood
-// can't run these per request. Nil-safe under closed Store (returns 0, nil).
-func (s *Store) PendingDeletions(ctx context.Context) (int64, error) {
+// delete threshold: of the tracks, view's (format_view.go), as the rows
+// its manifest lists (round 2 of backlog B489, Claude's review: a count of
+// the rows a view is never served reached it), and every folder, as its
+// folders block lists every folder. Exposed for the /v1/health ScanState
+// surface. Two filtered COUNT(*) scans — there is NO dedicated
+// missing_count index, so the `missing_count > 0` predicate is a table
+// scan; the /v1/health caller TTL-caches the result per view
+// (healthCountsCache) so an unauthenticated flood can't run these per
+// request. Nil-safe under closed Store (returns 0, nil).
+func (s *Store) PendingDeletions(ctx context.Context, view formatgate.Set) (int64, error) {
 	if s == nil || s.db == nil {
 		return 0, nil
 	}
 	var tracks, folders int64
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM tracks WHERE missing_count > 0`).Scan(&tracks); err != nil {
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM tracks WHERE missing_count > 0 AND `+formatViewSQL,
+		formatViewArgs(view)...).Scan(&tracks); err != nil {
 		return 0, err
 	}
 	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM folders WHERE missing_count > 0`).Scan(&folders); err != nil {
@@ -10605,10 +10687,11 @@ func (s *Store) DeleteAnalysis(ctx context.Context, sourcePath string) error {
 
 // AnalysisCoverage is the whole-library analysed-vs-eligible breakdown
 // backing the admin Jobs page's coverage bar. Eligible = TotalLocal -
-// DSDExcluded - ZeroByteExcluded; the buckets are DISJOINT in the
-// analysis sweeper's own precedence order (DSD before zero-byte,
-// matching collectAnalysisCandidates' control flow in
-// cmd/bridge/analyze.go — pinned by the lockstep test there).
+// DSDExcluded - WavPackAPEExcluded - ZeroByteExcluded; the buckets are
+// DISJOINT in the analysis sweeper's own precedence order (DSD, then
+// WavPack and Monkey's Audio, before zero-byte, matching
+// collectAnalysisCandidates' control flow in cmd/bridge/analyze.go —
+// pinned by the lockstep test there).
 type AnalysisCoverage struct {
 	// TotalLocal counts filesystem-backed tracks only — UPnP-routed
 	// rows never resolve on disk and are never analysed.
@@ -10626,6 +10709,13 @@ type AnalysisCoverage struct {
 	// DSDExcluded: .dsf/.dff sources — sox can't decode 1-bit DSD, so
 	// these are permanently out of scope, not a backlog.
 	DSDExcluded int
+	// WavPackAPEExcluded: WavPack and Monkey's Audio sources, by the path
+	// as the client format gate reads it (formatgate.Gated; backlog B489).
+	// The bridge serves them as they are and decodes nothing of theirs:
+	// no decoder of the analysis pipeline is proven on them, and one that
+	// decodes a hybrid WavPack file without its correction file reads
+	// lossy audio as the file's. Out of scope, not a backlog.
+	WavPackAPEExcluded int
 	// ZeroByteExcluded: zero-byte sources (failed/incomplete uploads)
 	// skipped at collection time. Size is the SCAN-TIME size.
 	ZeroByteExcluded int
@@ -10685,28 +10775,34 @@ func (s *Store) AnalysisCoverage(ctx context.Context, schemaVersion string) (Ana
 	row := s.db.QueryRowContext(ctx, `
 		SELECT COUNT(*),
 		       COALESCE(SUM(CASE WHEN lower(t.path) LIKE '%.dsf' OR lower(t.path) LIKE '%.dff' THEN 1 ELSE 0 END), 0),
-		       COALESCE(SUM(CASE WHEN t.size = 0 AND NOT (lower(t.path) LIKE '%.dsf' OR lower(t.path) LIKE '%.dff') THEN 1 ELSE 0 END), 0),
+		       COALESCE(SUM(CASE WHEN `+analysisGatedSQL+` THEN 1 ELSE 0 END), 0),
+		       COALESCE(SUM(CASE WHEN t.size = 0 AND NOT (lower(t.path) LIKE '%.dsf' OR lower(t.path) LIKE '%.dff' OR `+analysisGatedSQL+`) THEN 1 ELSE 0 END), 0),
 		       COALESCE(SUM(CASE WHEN ta.waveform_tag != '' AND ta.schema_version = ?1
-		                          AND NOT (lower(t.path) LIKE '%.dsf' OR lower(t.path) LIKE '%.dff' OR t.size = 0)
+		                          AND NOT (lower(t.path) LIKE '%.dsf' OR lower(t.path) LIKE '%.dff' OR `+analysisGatedSQL+` OR t.size = 0)
 		                         THEN 1 ELSE 0 END), 0),
 		       COALESCE(SUM(CASE WHEN ta.waveform_tag != '' AND ta.schema_version != ?1
-		                          AND NOT (lower(t.path) LIKE '%.dsf' OR lower(t.path) LIKE '%.dff' OR t.size = 0)
+		                          AND NOT (lower(t.path) LIKE '%.dsf' OR lower(t.path) LIKE '%.dff' OR `+analysisGatedSQL+` OR t.size = 0)
 		                          AND NOT `+analysisFailureSuppressedSQL2+`
 		                         THEN 1 ELSE 0 END), 0),
 		       COALESCE(SUM(CASE WHEN `+analysisFailureSuppressedSQL2+`
-		                          AND NOT (lower(t.path) LIKE '%.dsf' OR lower(t.path) LIKE '%.dff' OR t.size = 0)
+		                          AND NOT (lower(t.path) LIKE '%.dsf' OR lower(t.path) LIKE '%.dff' OR `+analysisGatedSQL+` OR t.size = 0)
 		                          AND NOT (COALESCE(ta.waveform_tag, '') != '' AND COALESCE(ta.schema_version, '') = ?1)
 		                         THEN 1 ELSE 0 END), 0)
 		FROM tracks t
 		LEFT JOIN track_analysis ta ON ta.source_path = t.path
 		WHERE NOT EXISTS (SELECT 1 FROM upnp_track_routing r WHERE r.source_path = t.path)`,
 		schemaVersion, s.AnalysisFailureCutoff())
-	if err := row.Scan(&c.TotalLocal, &c.DSDExcluded, &c.ZeroByteExcluded,
+	if err := row.Scan(&c.TotalLocal, &c.DSDExcluded, &c.WavPackAPEExcluded, &c.ZeroByteExcluded,
 		&c.AnalysedFresh, &c.AnalysedStale, &c.UnreadableExcluded); err != nil {
 		return AnalysisCoverage{}, err
 	}
 	return c, nil
 }
+
+// analysisGatedSQL is true for a row of tracks as t that is a WavPack or
+// Monkey's Audio file (ungatedPathSQLT's negation, formatgate.Gated), which
+// the analysis sweep never decodes (AnalysisCoverage.WavPackAPEExcluded).
+const analysisGatedSQL = `NOT ` + ungatedPathSQLT
 
 // CountAnalysis returns (rows-with-a-waveform, total waveform bytes)
 // for the analysis stats tile. Mirrors CountVariants' shape; degrades

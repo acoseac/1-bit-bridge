@@ -445,13 +445,15 @@ func (h *handler) confine(ctx context.Context, uri string) *faultReply {
 // notALibraryTrack reports whether the library's refusal of a track id says
 // the URI names no track the bridge plays (an argument the action cannot
 // take, 600): no row has it, an upstream server routes it, it is an SACD
-// image's virtual track, or no root configured now holds it. The library's
-// other refusals (two rows with the id, an index it cannot read, a panic)
-// are the bridge's state, 501. The reasons are internal/player/library's,
-// named here as they are written there.
+// image's virtual track, no root configured now holds it, or it is a
+// WavPack or Monkey's Audio file, which the player decodes nothing of
+// (library.ReasonGatedFormat, the decoders' unknown_container, backlog
+// B489). The library's other refusals (two rows with the id, an index it
+// cannot read, a panic) are the bridge's state, 501. The reasons are
+// internal/player/library's, named here as they are written there.
 func notALibraryTrack(reason engine.Reason) bool {
 	switch reason {
-	case "not_indexed", "routed", "sacd_virtual_track", "outside_library":
+	case "not_indexed", "routed", "sacd_virtual_track", "outside_library", "unknown_container":
 		return true
 	}
 	return false

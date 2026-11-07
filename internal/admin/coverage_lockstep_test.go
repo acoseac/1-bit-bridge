@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/formatgate"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/transcode"
 )
@@ -446,7 +447,7 @@ func checkDenominatorFreshness(t *testing.T, st *manifest.Store, cases []freshne
 		for _, c := range cases {
 			e := c.elig
 			want := map[string]bool{
-				variantKindUpscale:  c.fresh[variantKindUpscale] || upscaleSubmitGate(targetRate, targetBits)(e.codec, e.rate, e.bits),
+				variantKindUpscale:  c.fresh[variantKindUpscale] || upscaleSubmitGate(targetRate, targetBits)(c.path, e.codec, e.rate, e.bits),
 				variantKindOptimize: c.fresh[variantKindOptimize] || transcode.OptimizeEligibleFor(c.path, e.codec, int(e.rate), e.bits, e.isDSD, e.compression, cs.caps),
 				variantKindPCM:      c.fresh[variantKindPCM] || transcode.PCMRenderEligible(c.path, e.codec, e.isDSD, int(e.rate), e.compression, cs.caps),
 			}
@@ -485,13 +486,16 @@ func checkDenominatorFreshness(t *testing.T, st *manifest.Store, cases []freshne
 // upscaleSubmitGate is the literal re-statement of Coordinator.Submit's
 // candidate gate that TestEligibilitySQLAgreesWithUpscaleSubmitGate pins
 // upscaleEligibleSQL against.
-func upscaleSubmitGate(targetRate, targetBits int) func(codec string, rate float64, bits int) bool {
-	return func(codec string, rate float64, bits int) bool {
+func upscaleSubmitGate(targetRate, targetBits int) func(path, codec string, rate float64, bits int) bool {
+	return func(path, codec string, rate float64, bits int) bool {
 		r, b := int(rate), bits
 		if r <= 0 || b <= 0 {
 			return false
 		}
 		if manifest.IsLossyCodec(codec) {
+			return false
+		}
+		if formatgate.Gated(path) {
 			return false
 		}
 		if r > targetRate || b > targetBits {

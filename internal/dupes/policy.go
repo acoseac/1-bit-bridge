@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"sort"
 	"strings"
+
+	"github.com/acoseac/1-bit-bridge/internal/formatgate"
 )
 
 // FilterMode selects which duplicate tiers the bridge suppresses from
@@ -38,10 +40,13 @@ type Policy struct {
 // package, so calling it directly would be an import cycle; the lockstep
 // test lives on the manifest side (TestDupesLossyCodecsMirrorIsLossyCodec),
 // which is the only package that can see both. The compressed AIFF-C and
-// WAV encodings joined both with ExtractorVersion 21 (backlog B124, B154).
+// WAV encodings joined both with ExtractorVersion 21 (backlog B124, B154),
+// and a hybrid WavPack file with no correction file with ExtractorVersion 32
+// (backlog B489).
 var lossyCodecs = map[string]struct{}{
 	"MP3": {}, "AAC": {}, "OGG": {}, "OPUS": {}, "WMA": {},
 	"ULAW": {}, "ALAW": {}, "IMA4": {}, "ADPCM": {}, "GSM": {}, "MP2": {},
+	"WAVPACK-LOSSY": {},
 }
 
 // LossyCodecNames returns the ranking vocabulary, sorted, for the
@@ -64,7 +69,9 @@ func isLossy(codec string) bool {
 // unit's winner: a file the last scan found beats one it did not (Missing:
 // a winner whose file is gone suppresses the one copy a client can play
 // until the deletion pass reaps its row, three full scans later by
-// default; backlog B756 round 2), then lossless beats lossy, then bit
+// default; backlog B756 round 2), then a copy every client is served beats
+// one the client format gate holds back (formatgate.Gated: a WavPack or
+// Monkey's Audio file, by its path), then lossless beats lossy, then bit
 // depth, then sample rate, then size (a bigger file of the same geometry is
 // the less-compressed / better-provenanced rip), then the shallower path,
 // then the shorter path, then lexicographic path — the last three exist
@@ -74,9 +81,23 @@ func isLossy(codec string) bool {
 // library as it was, and a walk that could not read a folder spares its
 // rows' counts (the deletion pass's errored subtrees), so a flapping mount
 // does not move it either.
+//
+// The gate's term comes before every term but Missing because suppression
+// is server-wide and the gate is per client (backlog B489): an app that
+// declares no gated format is never served a .wv or an .ape, so a gated
+// winner would leave it no copy of the track at all, where an ungated
+// winner is in every client's view. It costs an app that plays both the
+// gated copy's better geometry, which is the owner's choice: no client
+// ever loses the only copy it can play. Missing comes before the gate
+// because a copy whose file is gone is no copy any client can play (B489's
+// merge of B756): a found .wv over a gone .flac costs an app that declares
+// nothing a row it could not play, and keeps the copy the others can.
 func outranks(a, b Row) bool {
 	if a.Missing != b.Missing {
 		return !a.Missing
+	}
+	if ga, gb := formatgate.Gated(a.Path), formatgate.Gated(b.Path); ga != gb {
+		return !ga
 	}
 	if la, lb := isLossy(a.Codec), isLossy(b.Codec); la != lb {
 		return !la
@@ -116,7 +137,10 @@ func outranks(a, b Row) bool {
 //   - TierSameFormat suppresses everything but the elected winner per
 //     domain; TierDifferentFormat does the same only under
 //     FilterHighestQuality.
-//   - Every suppression unit serves EXACTLY ONE member (its winner).
+//   - Every suppression unit serves EXACTLY ONE member (its winner), or
+//     none when every member's file is gone (Row.Missing) and a unit of its
+//     domain holding a found copy serves: rows no client can play, beside a
+//     copy a client can (round 4 of backlog B489; exactly one until then).
 func PlanSuppression(g Group, p Policy) []string {
 	if p.Mode == FilterOff || g.Tier == TierInconclusive {
 		return nil
@@ -187,10 +211,25 @@ func nestShallower(a, b Row) bool {
 }
 
 // planDomainWinners splits members into DSD and PCM domains and, within
-// each domain holding ≥2 members, suppresses everything but the
+// each suppression unit holding ≥2 members, suppresses everything but the
 // rank-elected winner. A single-member domain is untouched — that is the
 // "DSD and PCM are never cross-suppressed" rule expressed structurally:
 // the sole DSD edition can never lose to a PCM one, or vice versa.
+//
+// A domain is one unit while it holds a copy every client is served whose
+// file the last scan found, which outranks then makes the winner, or copies
+// of one gated format at most (gateUnits). Otherwise it is one unit per
+// format, so a .wv and an .ape of one track are never suppressed against
+// each other: the gate is per format, and a client that declares one of them
+// alone would lose its only copy.
+//
+// A unit whose every member's file is gone (Row.Missing) is suppressed whole
+// while another unit of its domain holds a found copy (round 4 of backlog
+// B489): no client can play those rows, so none is lost, and a client whose
+// view holds the found copy is no longer served a dead row beside it until
+// the deletion pass reaps them. A domain whose every copy is gone keeps each
+// unit's winner, as before. The rule is one domain's: a gone DSD edition
+// beside found PCM copies is its domain's one member, and is served.
 func planDomainWinners(members []Row) []string {
 	var dsd, pcm []Row
 	for _, m := range members {
@@ -202,23 +241,80 @@ func planDomainWinners(members []Row) []string {
 	}
 	var out []string
 	for _, domain := range [][]Row{dsd, pcm} {
-		if len(domain) < 2 {
-			continue
-		}
-		winner := 0
-		for i := 1; i < len(domain); i++ {
-			if outranks(domain[i], domain[winner]) {
-				winner = i
+		found := holdsFound(domain)
+		for _, unit := range gateUnits(domain) {
+			if found && !holdsFound(unit) {
+				for _, m := range unit {
+					out = append(out, m.Path)
+				}
+				continue
 			}
-		}
-		for i, m := range domain {
-			if i != winner {
-				out = append(out, m.Path)
+			if len(unit) < 2 {
+				continue
+			}
+			winner := 0
+			for i := 1; i < len(unit); i++ {
+				if outranks(unit[i], unit[winner]) {
+					winner = i
+				}
+			}
+			for i, m := range unit {
+				if i != winner {
+					out = append(out, m.Path)
+				}
 			}
 		}
 	}
 	sort.Strings(out)
 	return out
+}
+
+// gateUnits splits one domain into its suppression units by the client
+// format gate (formatgate.Of of each member's path): the whole domain when
+// it holds a copy every client is served whose file the last scan found, or
+// copies of one gated format at most, and otherwise one unit per format, in
+// the order the domain first names each. A copy every client is served whose
+// file is gone (Row.Missing) is then a unit of its own, which suppresses none
+// of the gated copies: the found ones are the only copies any client can
+// play, so a .wv and an .ape beside a gone .flac are no more suppressed
+// against each other than beside no .flac at all (round 3 of backlog B489,
+// the merge of B756). planDomainWinners then suppresses that unit whole, as
+// it does any unit whose every copy is gone, while a gated unit of the domain
+// holds a found copy (round 4): its rows are served to no client beside the
+// copy that client can play.
+func gateUnits(domain []Row) [][]Row {
+	var order []formatgate.Format
+	byFormat := map[formatgate.Format][]Row{}
+	served, gated := false, 0
+	for _, m := range domain {
+		f := formatgate.Of(m.Path)
+		if _, seen := byFormat[f]; !seen {
+			order = append(order, f)
+			if f != formatgate.None {
+				gated++
+			}
+		}
+		byFormat[f] = append(byFormat[f], m)
+		served = served || (f == formatgate.None && !m.Missing)
+	}
+	if served || gated < 2 {
+		return [][]Row{domain}
+	}
+	units := make([][]Row, 0, len(order))
+	for _, f := range order {
+		units = append(units, byFormat[f])
+	}
+	return units
+}
+
+// holdsFound reports whether any of rows is a file the last scan found.
+func holdsFound(rows []Row) bool {
+	for _, m := range rows {
+		if !m.Missing {
+			return true
+		}
+	}
+	return false
 }
 
 // ID is the stable persistence identity for a key: hex SHA-256 over an

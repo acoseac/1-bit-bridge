@@ -135,6 +135,48 @@ func endOfFile(err error) bool {
 	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
 }
 
+// errFileShrank is a read of an audio file that reached the file's end short
+// of the size its extractor's stat gave (statBoundReader).
+var errFileShrank = errors.New("the file shrank while it was read: a read ended before the size its stat gave")
+
+// statBoundReader reads an audio file its extractor stat'd at size. A read
+// that reaches the end of the file before size ended at an end the stat did
+// not have: the file shrank between the stat and the read, so the read did
+// not complete (backlog B134). It is noted in the extraction's read faults
+// and answered as errFileShrank, never as the end of the file, which a
+// format reader takes for a file cut as it was written: a WavPack block cut
+// short or a Monkey's Audio header, each a refusal, or a file with no APEv2
+// tag, a row without its tags; either replaced a changed file's good row,
+// under the file's new size and mtime, which the skip gate then kept (round 5
+// of backlog B489, CodeRabbit). A read that reaches the end at size is the
+// file's end, an answer, as it always was. The WavPack and Monkey's Audio
+// extractors read their file through it, by offset alone.
+type statBoundReader struct {
+	r      io.ReaderAt
+	size   int64
+	faults *readFaults
+}
+
+// statBound is f read as statBoundReader against size, its faults the
+// extraction's (none outside ExtractWithContext, where errFileShrank is still
+// the answer).
+func statBound(f io.ReaderAt, size int64, ec *ExtractContext) statBoundReader {
+	var faults *readFaults
+	if ec != nil {
+		faults = ec.reads
+	}
+	return statBoundReader{r: f, size: size, faults: faults}
+}
+
+func (s statBoundReader) ReadAt(p []byte, off int64) (int, error) {
+	n, err := s.r.ReadAt(p, off)
+	if n < len(p) && endOfFile(err) && off >= 0 && off+int64(n) < s.size {
+		s.faults.note(errFileShrank)
+		return n, errFileShrank
+	}
+	return n, err
+}
+
 // readIncompleteError is ExtractWithContext's answer for a file it could not
 // read whole: its open, or a read, seek or stat of it, failed with something
 // other than the answers faultNotingSource counts as complete. err is the

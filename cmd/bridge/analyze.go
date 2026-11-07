@@ -14,6 +14,7 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/admin"
 	"github.com/acoseac/1-bit-bridge/internal/analyze"
+	"github.com/acoseac/1-bit-bridge/internal/formatgate"
 	bridgefs "github.com/acoseac/1-bit-bridge/internal/fs"
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/integrity"
@@ -200,8 +201,8 @@ func runAnalyzeBatch(ctx context.Context, stdout, stderr io.Writer, store *manif
 	// with a different remedy (files to replace, vs paths this bridge cannot
 	// address at all), and two counts sharing one label is how an operator
 	// reads the wrong number.
-	fmt.Fprintf(stdout, "analyze: %d tracks, %d to analyze, %d up-to-date, %d skipped (DSD), %d empty, %d unresolvable, %d unreadable\n",
-		res.total, len(candidates), res.skipped, res.dsdSkipped, res.emptySkipped, res.missing, res.unreadable)
+	fmt.Fprintf(stdout, "analyze: %d tracks, %d to analyze, %d up-to-date, %d skipped (DSD), %d skipped (WavPack or Monkey's Audio), %d empty, %d unresolvable, %d unreadable\n",
+		res.total, len(candidates), res.skipped, res.dsdSkipped, res.wavpackApeSkipped, res.emptySkipped, res.missing, res.unreadable)
 	if res.unreadable > 0 {
 		subject, verb, object := "sources", "are", "the files"
 		if res.unreadable == 1 {
@@ -534,12 +535,15 @@ const analysisGCMaxOrphanPercent = 20
 // analysisScanResult bundles the enumeration outcome shared by the CLI
 // batch path and the serve-side auto-analysis sweeper.
 type analysisScanResult struct {
-	candidates   []analyze.AnalyzeSpec
-	total        int
-	skipped      int // up-to-date sidecar (scan-skip gate hit)
-	dsdSkipped   int // DSD source (sox can't decode)
-	emptySkipped int // zero-byte source (unanalyzable — failed/incomplete upload)
-	missing      int // unresolvable / directory
+	candidates []analyze.AnalyzeSpec
+	total      int
+	skipped    int // up-to-date sidecar (scan-skip gate hit)
+	dsdSkipped int // DSD source (sox can't decode)
+	// wavpackApeSkipped: a WavPack or Monkey's Audio source, which the
+	// bridge serves as it is and decodes nothing of (backlog B489).
+	wavpackApeSkipped int
+	emptySkipped      int // zero-byte source (unanalyzable — failed/incomplete upload)
+	missing           int // unresolvable / directory
 	// unreadable is how many sources the decoders have refused enough
 	// consecutive times, against the version currently on disk, to stop
 	// being offered (manifest's analysis-failure debounce). Reported
@@ -594,6 +598,18 @@ func collectAnalysisCandidates(ctx context.Context, store *manifest.Store, resol
 		switch strings.ToLower(filepath.Ext(rel)) {
 		case ".dsf", ".dff":
 			res.dsdSkipped++
+			continue
+		}
+		// So are WavPack and Monkey's Audio (backlog B489), by the path as
+		// the client format gate reads it: the bridge serves them as they
+		// are and decodes nothing of theirs. No decoder of this pipeline
+		// is proven on them, and ffmpeg decodes a hybrid WavPack file
+		// without its correction file, so it would analyse lossy audio as
+		// the file's. Skipped here, before any resolve, so a library of
+		// them costs no decode and no strike on any sweep;
+		// Store.AnalysisCoverage counts them apart in the same order.
+		if formatgate.Gated(rel) {
+			res.wavpackApeSkipped++
 			continue
 		}
 		abs, info, rerr := resolver.ResolveChecked(rel)
@@ -770,6 +786,7 @@ func (s *analysisSweeper) sweep(ctx context.Context) *admin.AnalysisSweepCounts 
 		Total:       res.total,
 		UpToDate:    res.skipped,
 		DSDExcluded: res.dsdSkipped,
+		WavPackAPE:  res.wavpackApeSkipped,
 		ZeroByte:    res.emptySkipped,
 		Missing:     res.missing,
 		Unreadable:  res.unreadable,

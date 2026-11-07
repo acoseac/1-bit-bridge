@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/dupes"
+	"github.com/acoseac/1-bit-bridge/internal/formatgate"
 )
 
 // dupeScanner builds a Scanner over the store with an injectable policy.
@@ -67,14 +68,14 @@ func TestRestampDuplicates_EndToEnd(t *testing.T) {
 		t.Fatalf("non-duplicate row must stay unstamped: %+v", st)
 	}
 	// Served manifest excludes exactly the loser; count matches.
-	served, err := s.ListServedTracks(ctx, nil)
+	served, err := s.ListServedTracks(ctx, nil, formatgate.All())
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(served) != 2 {
 		t.Fatalf("served rows = %d, want 2", len(served))
 	}
-	total, _ := s.CountServedTracks(ctx)
+	total, _ := s.CountServedTracks(ctx, formatgate.All())
 	if total != 2 {
 		t.Fatalf("CountServedTracks = %d, want 2", total)
 	}
@@ -142,7 +143,7 @@ func TestRestampDuplicates_PolicyFlipUnsuppressesViaDelta(t *testing.T) {
 	if st := stampOf(t, s, "CopyA/Album/01 Song.flac"); st.GroupID == "" {
 		t.Fatalf("group stamp must survive policy off: %+v", st)
 	}
-	delta, err := s.ListServedTracks(ctx, &since)
+	delta, err := s.ListServedTracks(ctx, &since, formatgate.All())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -198,7 +199,7 @@ func TestRestampDuplicates_UnwiredPolicySuppressesNothing(t *testing.T) {
 	if st := stampOf(t, s, "CopyA/Album/01 Song.flac"); st.GroupID == "" {
 		t.Fatal("unwired scanner still stamps groups (stats work with filter off)")
 	}
-	n, _ := s.CountServedTracks(ctx)
+	n, _ := s.CountServedTracks(ctx, formatgate.All())
 	if n != 3 {
 		t.Fatalf("everything stays served, got %d", n)
 	}

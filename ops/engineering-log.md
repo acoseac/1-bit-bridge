@@ -80414,6 +80414,935 @@ main's fc07f4a1 says the version stays, no guarded path having changed.
 `~/onebit/jobs/b728-b10/dsdconv-linux-arm64.test`, and `-amd64.test` beside it, rebuilt at
 5adcb8dd at round 1's paths. The amd64 one passes run where no source is, the golden among its
 tests, every digest a constant of it.
+## 2026-11-06 — B489 PR 1: WavPack and Monkey's Audio indexed and served as they are, behind a client format gate (ExtractorVersion 32)
+
+Backlog B489, PR 1 of 5: the owner's decision of 2026-11-06 ("We can include
+B489 in 2.3"), after a user with about 2,400 WavPack files asked. 1-bit 2.3
+decodes both formats and bridge 0.2.4 ships first, so this PR is the
+bridge's whole part: it scans, indexes and serves the files unchanged and
+decodes nothing (no transcoding, ever). Worker b489b on legion0 (Ubuntu
+26.04, linux/amd64, go1.27.3, `GOTOOLCHAIN=local`, `GOPROXY=off`), branch
+`feat/b489-wavpack-ape-index` from main 4880f8a4, the orchestrator's brief
+and its study. Commits: red first 9a8aaa79; the headers, the tags, the codecs,
+ExtractorVersion 32 and migration v61 c6744a34; the correction file's four
+states ea4b20dd; the client format gate a76a28ae; what else meets the rows
+689ecbfa; fuzz, allocation in bytes, the file routes and the golden manifests
+a3b02257; the item that alone claims 0xFFFFFFFF 4b3a0b8b; two doc comments on
+the declarations they name 1ef61d18; a 32-bit integer WavPack stream and
+every Monkey's Audio level 8c77ea29; this record, the rules' long forms in
+`ops/History-rules-{scanner,jobs,dlna-upnp,player,openhome}.md`,
+History-Build.md's fuzz census and PROTOCOL.md's last two additions
+59898f08; the three defects the gate found f3ab3ab6 (below); then the gates'
+results. The rules' lines go in through a checked patch
+(`rules-b489b.patch`: this worker cannot write `.claude/`).
+
+### What the bridge reads, and what it refuses
+
+**WavPack** (`wavpack.go`, after WavPack5FileFormat.pdf and wavpack.h): the
+first block with audio, found as the reference decoder's `read_next_header`
+finds one, searched 64 KiB at a time up to 1 MiB; the rate from the header's
+table or `ID_SAMPLE_RATE`; the bytes stored less the bits shifted out; mono,
+stereo or `ID_CHANNEL_INFO`'s count; float; hybrid; WavPack 5's DSD (the
+table's rate shifted left by `ID_DSD_BLOCK`'s power is the byte rate, and the
+row's `sampleRate` is eight times it, the bit rate a DSF row carries); the
+40-bit total, none for a streamed file. **Monkey's Audio** (`ape.go`):
+versions 3.80 to 3.99, the descriptor and header from 3.98, the old header
+before. **Tags** (`apev2.go`): APEv2 at the end or before ID3v1, through the
+Vorbis reader's names, joined as the other formats join, Track and Disc by
+B743's `leadingTagNumber`, the front cover as an embedded one; dhowden's
+ID3v1 reader over the last 128 bytes only where there is no APEv2 tag. A
+header the reference decoders would refuse takes B145's path (indexed by
+name, no codec), before any division. The codecs are `WAVPACK`,
+`WAVPACK-LOSSY` (a hybrid stream without its matching correction file:
+lossy for every purpose, no depth, no sample kind), `WAVPACK-DSD` and `APE`.
+The long form, with every cap, is under **Scanner** in
+`ops/History-rules-scanner.md`.
+
+**What was generated here.** No reference encoder runs on legion0 (none of
+`wavpack`, `mac`, `ffmpeg`, `sox`, `flac`), so every fixture is built in test
+code from the formats' definitions (`wavpack_ape_fixtures_test.go`), never a
+committed binary: WavPack integer 16, 20 (shifted), 24 and 32 bits, float,
+mono, stereo, six channels, a rate in `ID_SAMPLE_RATE`, a 40-bit total, an
+unknown length, hybrid with its correction file, without it and beside
+another stream's or a cut one, DSD64 and DSD128 of the 48 kHz family;
+Monkey's Audio 3.99 and 3.98 (a longer descriptor and header), the old layout
+at 3.97, 3.95, 3.90 and 3.80, every compression level from Fast to Insane in
+both layouts, 8, 16, 24 and 32 bits, mono, after ID3v2 junk. **Owed**: a
+corpus from the reference encoders (WavPack 5's `wavpack -h -c`, `-b`
+hybrid, `--dsd`; Monkey's Audio's `mac -c1000` to `-c5000`) on a host that
+has them, read through `TestTheWavPackHeaderStatesItsFormat`'s shape.
+
+**Red first** (9a8aaa79): `TestTheScanIndexesAWavPackAndAnAPEFile` on main's
+tree: `GetTrack(Artist/Album/01 First.wv)` nil, the `.wv` and the `.ape`
+passed over (neither in `manifest.Ext`).
+
+### The correction file
+
+Four observations kept apart (`correction.go`): confirmed absence
+(`WAVPACK-LOSSY`), a matching file (`WAVPACK` with `correction` on the wire),
+an invalid or mismatched one (`WAVPACK-LOSSY`, said once a stat), and an
+observation that did not complete (the `.wv`'s own incomplete read, B134: the
+row keeps what it had). A file matches only when its first block is this
+stream's correction block and its last block ends the file at the stream's
+last sample, found as libwavpack's `seek_final_index` finds a length: from
+its first block alone, a `.wvc` cut short by an interrupted copy read as
+matching. The row records the observation in `tracks.correction_key` (v61,
+column-only), and the skip gate asks it again with the walk's own
+`statUnchanged`, so a `.wvc` added, rewritten, replaced or removed beside an
+unchanged `.wv` reaches its row once and an unchanged one is read no more.
+The serving routes needed nothing: `serveFile` serves any regular file inside
+a root, so a `.wvc` is fetched by its path like a `.cue`
+(`TestWavPackMonkeysAudioAndCorrectionFilesAreServedAsTheyAre`: bytes, ranges
+and tails of a `.wv`, its `.wvc` and an `.ape` equal the files', whatever the
+request declares; a climb out of the root and a NUL 400, an absolute path 404
+since it names nothing inside a root; `TestANamedPipeNamedLikeACorrectionFileIsRefused`:
+a FIFO named `*.wvc` is the routes' 400).
+
+### The client format gate
+
+`X-Bridge-Formats: wavpack, ape` (comma-separated, any case, an unknown token
+ignored), `/v1/health.features` `wavpackApe`, a row judged by its path's
+extension. The decision behind each surface:
+
+| Surface | In a view that declares nothing | Why |
+|---|---|---|
+| `GET /v1/manifest` full, paged, delta: rows, `total`, `enrichmentProgress`'s counts, tombstones | left out | the shipped app upserts every row and plays neither format |
+| `/v1/health` `scanState.tracksIndexed` | the view's count, cached per view | the count of the rows that view's manifest holds |
+| `GET /v1/search` | no hit | search serves what the manifest serves |
+| `GET /v1/smart-playlists` | item left out, positions closed up, emptied family not sent | a family the view leaves empty is none to that client |
+| `GET /v1/playlist-files` | a gated line unresolved, the album rule over the view, the version naming the view (rules version 3) | as every app read such a line before B489: the track had no row |
+| `folders` | listed | a folder is a directory the scan saw |
+| `/v1/list`, `/stat`, `/read`, `/download`, `/lyrics`, `/waveform`, `/spectrum` | answered | path-keyed; the app's listing walk filters by `MetadataNormalizer.isAudio`, which excludes both extensions (the brief's reading of the app) |
+| `/v1/playlists`, `/v1/favorites`, `/v1/history` | returned whole | a device writes them back whole: filtered, an old app would erase another device's entries |
+| artwork, artist images, `GET /v1/events` | unchanged | keyed by MBID or version; `library.changed` names no path |
+| DLNA ContentDirectory | neither format, for every renderer | a renderer cannot declare one, and the profiles have no entry |
+| the loopback track route (MPD beside the bridge) | served | MPD decodes both with its own plugins |
+
+A manifest page cursor continues only its own view (the zero view's stays the
+raw path; a declared view's is an opaque token; another view's is `410`
+`manifest_cursor_view`, a new row in PROTOCOL.md's error table), and the one
+validator on a gated surface, the playlist feed's ETag, names the view, so a
+view's ETag is never another's 304 (`TestThePlaylistFilesServeEachViewItsMembers`).
+A delta's `since` names no view, so a client's first declaring sync must be a
+full one, which PROTOCOL.md states as the app's job. The goldens
+(`internal/manifest/testdata/b489`, full and delta for a client that declares
+nothing and one that declares both, over a lossless, a hybrid with and
+without its correction file, a DSD, a float and a malformed WavPack file,
+Monkey's Audio of both layouts and an unsupported version, and a FLAC) are
+written from what the bridge serves by `BRIDGE_UPDATE_B489_GOLDENS=1`, LF on
+every checkout, for the iOS mirror's fixtures.
+
+### What else meets these rows
+
+- **Duplicates** (the owner's rule in the brief): a copy every client is
+  served outranks a gated one before every other term, and a domain of gated
+  copies alone is a unit per gated format, so a `.wv` beside a `.flac`
+  suppresses the `.wv` and a `.wv` beside an `.ape` suppresses neither.
+- **Renditions**: never a source (the upscale gate in Go and its SQL mirror,
+  the enqueue, the CLI classifier, the console's `wavpack_ape` reason).
+- **Analysis**: skipped at collection before any decode, counted apart in the
+  same order as the coverage SQL; not decoded, since no decoder of the
+  pipeline is proven on them here and FFmpeg decodes a hybrid stream without
+  its correction file. Analysis of either format is owed to a host that can
+  prove a decoder on a reference corpus.
+- **The console's player**: none, "Not playable in a browser".
+- **The bridge's player**: the library resolver refuses either format at the
+  queue's check with the decoders' own reason, `unknown_container`, so an
+  OpenHome Insert is 600 and `bridge output play` refuses before it starts.
+- **Upstream UPnP**: no header parse, so no codec (never `WAVPACK` or `APE`,
+  which would say lossless); an item named by its protocolInfo's extension
+  whatever its URL's; a `.wvc` is no item. An item with neither an audio class
+  nor an audio protocolInfo is still not admitted by a `.wv` URL alone
+  (`isKnownAudioExt` unchanged).
+- **Enrichment and the Atlas harvest**: every row, gated at serving.
+- **Signal path** (`internal/signalpath`, unchanged): `WAVPACK` was already
+  lossless there and `APE` too; `WAVPACK-LOSSY` is `source_lossy` through
+  `IsLossyCodec`; `WAVPACK-DSD` is `source_codec_unknown`, a withheld verdict,
+  until what MPD hands on for a WavPack DSD file is read on a box.
+- **Operator counts**: `bridge scan` says how many it holds and who is served
+  them; the dashboard's composition, the coverage and the sweep lines count
+  them apart. An upload takes a `.wvc` as a companion.
+
+### Fuzz and allocation
+
+Each target a minute, `-fuzzminimizetime 1s`, four workers, no failure:
+`FuzzExtractWavPack` 459,329 executions and `FuzzExtractAPE` 480,612 at
+f3ab3ab6, the fallback's last change (440,291 and 361,449 at 4b3a0b8b, before
+it), and `FuzzAPEv2` 713,048 at 4b3a0b8b, the reader unchanged since. The first minute of
+`FuzzExtractAPE`, before the fallback changed, failed at 48 s: a 603-byte file
+allocated 1.35 MB, past the target's bound (a mebibyte and eight bytes a byte
+of input), because the fallback handed the whole file to dhowden, whose
+dispatcher reads an ID3v2 tag ahead of the stream and sizes a buffer by its
+header. The fallback is the ID3v1 tag alone since (`TestTheFallbackIsTheID3v1TagAlone`),
+the input a seed (`testdata/fuzz/FuzzExtractAPE/8d8278f5530fa1a8`); a leading
+ID3v2 tag in either format is no longer read, which a reference corpus may
+show taggers write. Allocation is measured in bytes,
+`runtime.MemStats.TotalAlloc` before and after (`testing.AllocsPerRun` counts
+allocations, not bytes): files of 4,196 to 4,779 bytes whose every length
+claims 0xFFFFFFFF allocate 66,384 to 79,368 bytes to extract (a file whose
+tag is refused takes the ID3v1 fallback and its 4 KiB page), and the APEv2
+reader alone 96 bytes (a claiming footer) and 368 (a claiming item), the
+least of three runs (`TestAFewKilobytesClaimingFourGibibytesAllocateUnderAMebibyte`).
+
+### What the gate found
+
+`make test-fast` at 59898f08 failed on three defects of this branch, each
+caught by a test that was there before it, and fixed in f3ab3ab6. The ID3v1
+fallback called `tag.ReadID3v1Tags` on a section reader:
+`TestEveryDhowdenReadIsGuarded` knows every dhowden reader the package calls
+and wants each on a `newDhowdenReadBuffer` stream (B117), so the read goes
+through one, and the guard lists the ID3v1 reader with no guard, since it reads
+the last 128 bytes and nothing in them sizes anything. The read-fault matrix
+(B134) still had the WavPack file with an ID3v1 tag down as a reader that
+seeks, which the fallback stopped doing: three tests' seek case found the row
+written; the fallback reads by offset, so that case is skipped as it is for the
+APEv2 rows. And `requireTheLatestSchema` (cmd/bridge) names what the ladder's
+newest step adds, still v60's columns after v61 joined: three updater tests
+failed on it; it names `tracks.correction_key` now, and a merge that
+renumbers v61 renumbers it. Earlier, `TestNoDocblockNamesAnotherDeclaration`
+caught a test helper's doc naming a function that does not exist, and the
+walker's `isKnownAudioExt` had lost its doc comment to the helper inserted
+above it (1ef61d18). The lesson is the rules' own: run the package that holds
+the sweeps after every change, not only the tests of the change.
+
+### Negative controls (a runner applied each mutation, ran the tests named and restored the bytes from memory)
+
+| Mutation | Red |
+|---|---|
+| (a) search reads every format (`formatgate.All()`) | `TestSearchServesEachViewItsHits`: four views, every hit in each |
+| (b) a hybrid without its `.wvc` reported lossless | `TestAHybridWavPacksCorrectionFileDecidesItsCodec` (no correction file, a directory of its name, another file's: `WAVPACK`, 16 bits, `integer`) and the declared full golden |
+| (c) `.wvc` indexed as a track | the four goldens, and the correction test's rows with a `.wvc` beside the `.wv` (the index read 2 audio files, want 1) |
+| (d) a size field trusted for an allocation: the item's two bounds (before the footer, a text value's cap) removed | first GREEN: the claiming tag also claimed its footer's size, so the footer's bound stopped it before an item was read. With `claimingItemTag` (a true footer, one item claiming 0xFFFFFFFF), RED: 4,295,042,544 bytes extracting a 4,779-byte `.ape`, 4,294,967,680 for the reader alone |
+| (e) a `.wvc` change not reaching the row (`correctionDrifted` out of the skip gate) | `TestACorrectionFilesChangesReachItsRow`: added, rewritten and replaced each read 0 files, codec stayed `WAVPACK-LOSSY`, `indexed_at` unmoved |
+| (f) a filtered playlist written back | `TestADevicesDocumentsKeepAWavPackEntryForEveryClient`: the undeclaring client's GET lost the `.wv` entry |
+| (g) a gate by codec alone | `TestTheManifestServesEachViewItsRows` (every view: rows, `tracksTotal`, `tracksIndexed`) and three goldens (the refused `.wv` and the unsupported `.ape` have no codec) |
+| dupes without the gate's term | `TestAGatedCopyNeverWinsOverACopyEveryClientIsServed`, four rows |
+| upscale SQL without the path term | `TestEligibilitySQLAgreesWithUpscaleSubmitGate`, six rows |
+| the player's check without the gate | `TestTheGatedFormatsAreRefusedWithTheDecodersReason`: Member answered nil and the open opened |
+
+Every control built; (d) went red once its fixture reached the bound it is
+for, which is the rule under **Build, CI, and test discipline** that a fixture
+must be a value the change would act on.
+
+### Rules and versions
+
+`ExtractorVersion` 31 → 32 (main's is 31 at 4880f8a4, B743's): a bridge whose
+rows are older reads each once at its first scan, and a row that reads alike
+is only stamped (no `indexed_at`, no delta), as every bump. Migration v61 adds
+`tracks.correction_key`. **At merge, read main's**: if another PR took 32 or
+v61, this takes the next free number. The rules (the patch): `scanner.md`
+two lines and globs for `wavpack*.go`, `ape*.go` and `correction*.go`, which
+loaded no rules file; `wire.md` the gate's bullet and globs for
+`internal/formatgate/**`, `format_view*.go` and `search*.go`;
+`enrichment.md` the dupes bullet and the enrichment one; `jobs.md`,
+`admin-console.md` and `dlna-upnp.md` a line each; `player.md` and
+`openhome.md` the resolver's refusal in their enumerations; `output.md`
+the signal path's codec list (`WAVPACK` was in the code and not the rule);
+CLAUDE.md's table names the gate beside the served set. Two long forms that
+B489 made false were corrected: B181's "An APE tag is not read" and B743's
+"WavPack and APE are not scanner extensions". `ProtocolVersion` stays 1;
+PROTOCOL.md carries the formats' rows, `correction`, the gate, the cursor
+rule, the first declaring sync, the `410` row, `unknown_container` in
+`libraryScope` and the loopback route, for the mirror PR.
+
+**Owed to the app (not readable here: its clone is not on this host)**: what
+the app does with a playlist, favorite or history entry naming a `.wv` it
+cannot resolve; its first declaring sync being a full one; its golden
+fixtures copied from `testdata/b489`.
+
+### Gates
+
+On legion0 at 41120312, each run that builds or tests many packages through
+the shared build lock: go1.27.3's gofmt on the branch's changed Go files,
+clean; `make docs-check`, ok, and `rules-b489b.patch` taken by `git apply
+--check` with the budgets measured over its results (`player.md` 97.4%,
+`dlna-upnp.md` 97.3%, the worst load 65.2%); the qualification check
+(`scripts/qualification-version -base 4880f8a4 -head HEAD`), "qualification
+version OK: 4880f8a4..HEAD", since nothing it guards was touched; `make vet`
+native and with `GOOS=windows`, `GOOS=darwin`, `GOOS=linux GOARCH=386` and
+`GOOS=linux GOARCH=arm`, each clean; `make test-fast`, 86 packages ok and
+none failed (cmd/bridge 446 s, internal/manifest 266 s; the Linux-only
+packages, `internal/alsapcm` and `internal/atomicwrite` among them, run here);
+`make test TEST_PKGS="./internal/manifest/... ./internal/api/...
+./internal/admin/... ./cmd/bridge/..."` (race, the Makefile's tags, 30 min a
+package), ok: internal/manifest 1,509 s, internal/api 124 s, internal/admin
+987 s, cmd/bridge 1,063 s; `make build-all`, the six targets. The first run,
+at 59898f08, failed `make test-fast` on the three defects above. Not run
+here: macOS and Windows natively, CI's runners, the race detector over the
+other packages, and the iOS app.
+
+## 2026-11-06 — B489 PR 1, round 2: two reviews, each point red first or refuted with evidence
+
+The orchestrator's round 2 for worker b489b (legion0, go1.27.3,
+`GOTOOLCHAIN=local`, `GOPROXY=off`, branch `feat/b489-wavpack-ape-index`):
+Codex's six points and Claude's six, read as one list. Every point was first
+written as a test against 73b21165, its failure predicted by name in a file
+before the run; the run went as predicted, and the fixes followed. Commits:
+the fixes and their tests eb6ef4ea; this record, the long forms and
+PROTOCOL.md 6d38cbc5; Codex's payload point by another byte, found while
+the first gates ran (stopped for it after vet) and red first as well,
+edf5d666 (its row below); then the record's last part and the gates'
+results. The round's rules lines are
+`rules-b489b-r2.patch`, over the rules round 1's patch made on the pushed
+branch (this worker cannot write `.claude/`). **Main read again**: `main` is
+4880f8a4, `ExtractorVersion` 31 and the ladder's last step v60, as at round
+1, so the branch's 32 and v61 stay the next numbers. Round 2's extraction
+changes ride the branch's one bump to 32: no build that stored a row at 32
+has been released.
+
+### The points
+
+| Point | The claim | Red first (73b21165 and the new test) | What changed |
+|---|---|---|---|
+| Codex P1, `apev2.go` | 1,023 `Artist` items of 64 KiB of `a` and a NUL, inside every cap, are 33.5 million strings | confirmed: `TestManyTinyAPEv2ValuesAllocateWithinTheBound` (64 such items, a 4,195,480-byte `.wv`) allocated 589,147,856 bytes against `wvAPEAllocLimit`'s 34,612,416 | the values a tag's text items keep are capped at `apeTagMaxValues` (64K, `maxVorbisCommentTags`'s count) for all items together, split a value at a time, a text item passed over unread once they are spent, said once (`msgAPETagValuesCapped`); an item's key is normalised once, not once a value. 13,217,432 bytes since, the artist the first 65,536 values joined |
+| Codex P2, `wavpack.go` (flags) | a 24-bit or mono `.wvc` beside a 16-bit stereo `.wv` matches: the flags are not compared, where libwavpack's `match_wvc_header` compares them | confirmed: `TestAHybridWavPacksCorrectionFileDecidesItsCodec`'s new rows of other bits and of other channels were `WAVPACK`, want `WAVPACK-LOSSY` | `correctionMatches` requires the flags equal |
+| Codex P2, `wavpack.go` (no length), and Claude's third | with no usable total (a streamed file, or a first block past index 0) the end is never compared: a `.wvc` cut at a block's end matches | confirmed, both shapes: the rows "cut at a block's end, the length unknown" and "the stream from past its first sample" were `WAVPACK`; the same files whole stay `WAVPACK` | the `.wvc`'s last sample must be the `.wv`'s own, found before its tags (`wvStreamFinal`: an ID3v1 tag, then an APEv2 tag and its header) as `wvFinalIndex` finds the `.wvc`'s, read only for a hybrid stream whose header states no usable length; a `.wv` whose end is not found matches nothing |
+| Codex P2, `wavpack.go` (payload) | a 34-byte file, a header claiming a 36-byte block, `0x0a 0x01` declaring a bitstream that is not there: one second of 16-bit lossless | confirmed: `TestAWavPackFileItsReaderRefusesIsRefused`'s two new rows took the file | the first audio block must lie inside the file (`errWVBlockCut`), and the windowed walk refuses a window read that comes short inside the block |
+| the same, by another byte (found in this round, not by a reviewer) | a block that declares its bitstream empty (`0x0a 0x00`) is the same missing payload, and so is an extended bitstream of its CRC alone; libwavpack's `init_wv_bitstream`, `init_wvc_bitstream` and `init_wvx_bitstream` refuse an empty or odd-length bitstream and an extended one of 4 bytes or fewer | confirmed, predicted in a file first: four new refusal rows took the file (an empty and an odd-length bitstream as one second of lossless 16-bit, an extended bitstream of 4 bytes as `WAVPACK-LOSSY`, one of 15 bytes as lossless 32-bit), and a `.wvc` whose bitstream is empty matched (`WAVPACK`, key '+') | the three refusals, as libwavpack's readers make them; a `.wvc` whose bitstream is empty is another file's |
+| Codex P2, `extractors_wavpack_ape.go` (extended bits) | a non-hybrid stream with INT32 sent bits, or float data sending exponents, zeros or exceptions, and no WVX bitstream is lossless here and lossy to libwavpack | confirmed: `TestAStreamWhoseExtendedBitsAreMissingIsLossy`'s five lossy rows were `WAVPACK` (32-bit integer; float `0x20`, `0x08`, `0x04`, `0x02`); its four lossless rows (the bits carried, no bits sent, the float `0x01` that sends nothing) passed | `wvStream.needsExtended`, read as libwavpack's `unpack_init` counts `lossy_blocks`: INT32_DATA with `ID_INT32_INFO`'s sent bits, or FLOAT_DATA with `ID_FLOAT_INFO`'s flags 0x02, 0x04, 0x08 or 0x20, and no extended bitstream of more than its 4-byte CRC in the block or the matching correction file's first block: then `WAVPACK-LOSSY`, no correction on the wire; an int32 or float information of any length but 4 is refused, as `read_int32_info` and `read_float_info` refuse it. The extended bitstream's optional form (0x2c, `ID_OPTIONAL_DATA` with its function) counts as one and refuses nothing, since a decoder that does not know it passes over it: counting only 0xc would call lossy a lossless float file an encoder wrote that way; no reference file was read here, since no encoder runs on this host, which is owed with round 1's corpus |
+| Codex P2, `ape.go` | a 76-byte file of a descriptor and a header claiming `0xFFFFFFFF` bytes passes with format facts | confirmed: nine new rows of `TestAnAPEFileItsReaderRefusesIsRefused` took the file, the reviewer's 76 bytes first (a 15-second `APE`; an old header of 1,000 frames whose seek table runs past its 544-byte file read 6,680 seconds) | `apeFrames.fits`: what the header says lies ahead of the frames ends inside the file with frame data after it, and the seek table names every frame, FFmpeg's three refusals (none, fewer entries than frames, cut inside it): from 3.98 the descriptor, header, seek table and WAV header the descriptor sizes; before, the old header, its peak level and seek count where its flags say, the WAV header unless `CREATE_WAV_HEADER`, the seek table and, before 3.81, a byte a frame |
+| Claude medium, `correction.go` | a `.wvc` the bridge may not read (`EACCES`) is a look that did not complete: a new `.wv` never gets a row and is re-read at every scan | confirmed for the new file: `TestACorrectionFileTheBridgeMayNotReadIsLossy` (its open refused, its read refused): "the .wv has no row" | the state '?': a refused open or read (`fs.ErrPermission`) is an answer, `WAVPACK-LOSSY` with no correction on the wire, said once a stat (`msgCorrectionUnreadable`), and the skip gate asks again at every scan with an open and a one-byte read (`correctionReadableNow`), so the first scan that may read it matches it; a scan that finds it still refused reads nothing |
+| the same, its matched-row half | a `.wvc` matched and made unreadable later keeps `WAVPACK` and its `correction` for good: a chmod moves no mtime | refused as a code change, taken in the protocol: an open of every matched `.wvc` at every scan would cost every hybrid row a file open a scan to catch a permissions change, and the walk compares size and mtime by rule (`statUnchanged`), never the ctime a chmod moves | PROTOCOL.md: any answer for the correction file's path but the file the row describes (a 404, any other error, another size or mtime) is a refusal of the lossless decode, and this case is named there |
+| Claude medium, `store.go` v61 | "no row before this version is a WavPack file's" is false for routed rows: an upstream `.wv` or `.ape` item was indexed under that name and served to every app; after the upgrade the zero view stops seeing it with no tombstone, and its later tombstone is filtered, so the row stays on old clients for good | confirmed: `TestAnUpgradeOverAGatedRowSendsEveryDeltaCursorToAFullSync`: a routed `.wv` row and a routed `.APE` row, `deltaIncomplete` false from a cursor taken before the upgrade; a store without one was complete, as it should stay | v61's step, past its column, restarts the deletion journal's coverage when the store holds a gated row, in one transaction with the question (`restartCoverageOverGatedPaths`); so does a gated tombstone, which the review did not name: a routed `.wv` deleted before the upgrade whose tombstone a client had not fetched is filtered from the zero view the same way (the test's tombstone row, red with that half dropped, control r10). A store with neither keeps its coverage and its tombstones |
+| Claude low, `output.md` and the signal path's list | the rule says the lossless list holds `WAVPACK` and the code does not, so every lossless WavPack row MPD plays is withheld as `source_codec_unknown` | refuted: `signalpath.losslessCodec` lists `WAVPACK` on main (`signalpath.go` line 654: FLAC, ALAC, WAV, AIFF, WV, WAVPACK, APE, DSF, DFF), and `TestAHybridMPDFetchesThroughTheLoopbackRouteIsLossy`'s "a lossless stream by the loopback route" passed, `format_preserved`, at 73b21165 | nothing |
+| the same, its trap | MPD's WavPack plugin opens the stream's URI with `c` appended; the loopback route serves rows only, so MPD decodes a hybrid lossy while the verdict says lossless | confirmed: "a hybrid by the loopback route" was `format_preserved`, want `withheld` [`source_lossy`]; "a hybrid by its path" (MPD opens the `.wvc` beside the file) passed | `sourceFacts` takes a row with a correction file that MPD fetches by the loopback route as `WAVPACK-LOSSY` (`OutputTrack.Correction`, filled by `outputTrackLookup`); the route's 404 for `<id>c` is pinned (`TestLoopbackRouteServesNoCorrectionFile`). The review's other choice, serving the correction file at the track's URL with `c`, was not taken: the route serves a track's own file by its id alone (`output.md`), and a correction file is no track |
+| Claude low, `health_counts.go` | `pendingDeletions` counts every row, so the zero view hears of gated rows | confirmed: `TestPendingDeletionsAreEachViewsRows`: a `.flac` and a `.wv` gone, pendingDeletions 2 for the three views that do not declare WavPack, want 1; the three that do passed | `Store.PendingDeletions(ctx, view)`: the tracks through `formatViewSQL`, the folders whole, as the manifest's `folders` block is every view's; the health cache already keyed both counts by view |
+| Claude low, `wavpack.go` (sub-blocks) | each sub-block costs a 4-byte `ReadAt`; a block of id-0, length-0 sub-blocks is millions of reads | confirmed: `TestABlockOfManyTinySubBlocksIsReadInAFewReads`, 524,292 reads of a 1,048,728-byte file | the walk reads a 64 KiB window at a time (`wvWindow`), as libwavpack's `read_metadata_buff` walks the block in memory: 18 reads |
+
+### Negative controls
+
+`controls_r2.py` applied each mutation to the committed tree (eb6ef4ea, and
+edf5d666 for r15 to r17) in memory, ran the tests named, and put the bytes
+back; the predictions were written before each run. Every control built and
+went red as predicted, and no sibling predicted to pass failed.
+
+| Control | Mutation | Red, as predicted |
+|---|---|---|
+| r1 | `apeTagMaxValues` = 1 << 40 | `TestManyTinyAPEv2ValuesAllocateWithinTheBound`: 538,292,480 bytes |
+| r2 | the flags out of `correctionMatches` | the rows of other bits and other channels (`WAVPACK`, key '+') |
+| r3 | the no-length arm back to `return true` | the two rows cut at a block's end (the length unknown, past its first sample) |
+| r4 | the first block's fit and the window's short read both allowed | the two new WavPack refusal rows |
+| r5 | `needsExtended` ignored | the five lossy extended-bits rows, the four lossless ones still passing |
+| r6 | `fits` ignored | the nine new APE refusal rows |
+| r7 | `fs.ErrPermission` a look that did not complete | both unreadable rows: no row |
+| r8 | an unreadable file never asked again | both unreadable rows at the scan that may read it: 0 files read, `WAVPACK-LOSSY` |
+| r9 | v61 restarts no coverage | the WavPack row, the Monkey's Audio row and the tombstone; "no gated row" still passing |
+| r10 | the tombstone half of `holdsGatedPathSQL` dropped | the tombstone row alone |
+| r11 | `PendingDeletions` of `formatgate.All()` | the three views that do not declare WavPack: 2, want 1 |
+| r12 | `sourceFacts` without the loopback hybrid | "a hybrid by the loopback route": `format_preserved` |
+| r13 | the loopback route serving `<id>c` as the correction file | `TestLoopbackRouteServesNoCorrectionFile`: 200 with the file's bytes |
+| r14 | `wvBlockWindow` = 4 | `TestABlockOfManyTinySubBlocksIsReadInAFewReads`: 262,148 reads |
+| r15 | the main and correction bitstreams' refusal off | the empty and the odd-length bitstream rows, and the `.wvc` whose bitstream is empty (key '+') |
+| r16 | the extended bitstream unrefused (`dataLen > 4` alone) | the rows of an extended bitstream of its CRC alone and of odd length |
+| r17 | the optional extended form not counted | its two lossless rows (`WAVPACK-LOSSY`); its CRC-alone row still passing |
+
+### Rules, protocol and long forms
+
+The rules patch (`rules-b489b-r2.patch`, three files, checked with `git
+apply` over round 1's results and the budgets measured over the outcome:
+`output.md` 68.3%, `wire.md` 58.6%, `scanner.md` 33.0%, the worst load 65.2%):
+`scanner.md`'s two B489 lines take round 2's refusals and its fifth state;
+`wire.md`'s gate bullet takes `pendingDeletions` and v61's coverage restart;
+`output.md`'s verdict bullet takes the loopback hybrid. Their long forms in
+`ops/History-rules-scanner.md` carry the measurements above, and the `.wvc`
+entry's note on v61 was corrected (a routed row may be named `.wv`).
+PROTOCOL.md, for the mirror PR: `WAVPACK-LOSSY` covers a stream without the
+extended bits its samples need; a file that ends inside its first block, or
+an APE file whose headers or seek table it does not hold, is refused; a
+correction file matches with the stream's flags and its own last sample, and
+one the bridge may not read is lossy and asked again at every scan; any
+answer for the correction file's path but the file the row describes refuses
+the lossless decode; `pendingDeletions`'s tracks are the request's view's;
+an update over a gated routed row or tombstone restarts the deletion journal
+(`deltaIncomplete`'s list of causes names it); the loopback route serves no
+correction file, and the reading says `source_lossy` for a hybrid MPD
+fetches there. `ProtocolVersion` stays 1.
+
+### Gates
+
+On legion0 at 80f8b41a, each run that builds or tests many packages through
+the shared build lock: go1.27.3's gofmt on every Go file the branch changed
+since 4880f8a4, clean; `make docs-check`, ok, and `rules-b489b-r2.patch`
+applied over round 1's results with the budgets measured over the outcome
+(above); the qualification check (`scripts/qualification-version -base
+4880f8a4 -head HEAD`), "qualification version OK: 4880f8a4..HEAD"; `make
+vet` native and with `GOOS=windows`, `GOOS=darwin`, `GOOS=linux GOARCH=386`
+and `GOOS=linux GOARCH=arm`, each clean; `make test-fast`, 86 packages ok
+and none failed (cmd/bridge 447 s, internal/manifest 276 s; the Linux-only
+`internal/alsapcm` and `internal/atomicwrite` run here); `make test
+TEST_PKGS="./internal/manifest/... ./internal/api/... ./internal/dlna/...
+./cmd/bridge/..."` (race, the Makefile's tags, 30 min a package), ok:
+internal/manifest 1,500 s, internal/api 124 s, internal/dlna 43 s,
+internal/dlna/discovery 3 s, cmd/bridge 1,033 s; `make build-all`, the six
+targets. A first run at 6d38cbc5 was stopped after its vets passed, when the
+bitstream point above was found; nothing in it had failed. Not run here:
+macOS and Windows natively, CI's runners, the race detector over the other
+packages (`internal/admin`, which round 2 does not touch, among them), and
+the iOS app, whose mirror of PROTOCOL.md's changes is owed.
+
+## 2026-11-06 — B489 PR 1, round 3: main merged (B750, B756), the gate beside the missing-count term
+
+The orchestrator's round 3 for worker b489b: main moved by B750 (a Christmas
+smart mix, 8747d29b) and B756 (one physical album has one year, 1a101716,
+whose round 2 added `Row.Missing` to the duplicate election), and this
+branch takes main. `git merge` needs approval on legion0, so the merge was
+made by hand, as the earlier merges there were: the base found with `git log
+--boundary main...HEAD` (4880f8a4); main's 40 files this branch never
+touched taken whole with `git checkout main --pathspec-from-file`; the 11
+files both sides changed merged with `git merge-file -p --diff3` into
+scratch (which prints and writes nothing), 9 conflicts in 5 of them, each
+resolved by what both sides mean and placed; `MERGE_HEAD` written into the
+worktree's git dir; and one merge commit, 33e20b83 (parents 06822ae4 and
+1a101716). Proof before it: every file main alone changed is main's in the
+index but the two of its tests below, every file this branch alone changed
+is this branch's, and nothing else is staged. Commits after: f131aab9 (the
+gate beside the missing-count term), e52bd024 (the Christmas family's
+gate), this record, the gates' results.
+
+**Main read again**: `ExtractorVersion` 31 and the ladder ending at v60, as
+before; B756 bumped neither. So this branch's 32 and v61 stand, and
+`requireTheLatestSchema` still names v61's column. B756's re-read machinery
+(`taggedYear`, `yearRecordOnly`) is written for the next bump, and this
+branch's 32 is that bump: the full suite passes over it.
+
+### The conflicts, and what each side meant
+
+| File | Main | This branch | Resolution |
+|---|---|---|---|
+| `internal/dupes/policy.go` (2) | `Missing` first in `outranks`: a copy whose file the last scan did not find never wins its unit | the gate first: a `.wv` or `.ape` never wins over a copy every client is served | `Missing`, then the gate (below) |
+| `internal/api/smartplaylists.go` (3) | one reading of the clock (`s.now()`) for the hour and `season.InWindow`; the Christmas family skipped out of its window | the request's view (`requestFormats`, `Vary`) for every family's items | both: the window's skip first, then the build in the view; the doc says the Christmas family's items are the view's |
+| `internal/manifest/types.go` (2) | `taggedYear`, `yearRecord` | `correctionKey`, `CorrectionFile` | both, side by side |
+| `.gitattributes` (1) | the album-year table's LF pin | the B489 goldens' | both, main's first |
+| `ops/engineering-log.md` (1) | B750's two entries and B756's three | B489's two | main's first, then B489's |
+
+`store.go`, `scanner.go`, `admin.go`, `api.go`, `PROTOCOL.md` and
+`ops/History-rules-scanner.md` merged without conflict, and were read for
+meaning: the stamp leg carries this branch's `correction_key` beside B756's
+record-only write; every stored-Track read goes through B756's
+`decodeStoredTrack`, and this branch adds no other; `IncrementMissingTracks`
+and `ResetTrackMissingCount`'s new answers have no caller here. Two of main's
+new tests called the served-set readers without the view this branch added
+(`BuildManifest`, `WriteManifest`, `ListServedTracks`); they take
+`formatgate.All()`, as every earlier caller did in round 1. `.claude` takes
+main's rules as they are (`enrichment.md`, `scanner.md`, `smart-mixes.md`);
+nothing of this branch's is applied there.
+
+### The gate beside the missing-count term
+
+Both rules said "first". By what they mean, only one order lets both hold:
+B756's `Missing`, then the gate. A copy whose file is gone is no copy any
+client can play, so a found `.wv` takes a gone `.flac`'s place (an app that
+declares nothing loses a row it could not play, and the apps that declare
+WavPack keep the copy they can), while among found copies a `.flac` still
+beats every `.wv` and `.ape`. With the gate first, a gone `.flac` would win
+and suppress the one playable copy, which is the defect B756 fixed.
+
+That order left one hole in this branch's units, found writing
+`TestTheGateAndTheMissingTermHoldBesideEachOther` (seven groups, every view,
+the property that a client who could play a copy before the plan can play
+one after it), red first at the merge in one case as predicted in a file: a
+gone `.flac` beside a found `.wv` and a found `.ape` made one unit (round 1's
+`gateUnits` asked for any copy every client is served, gone or not), so the
+`.ape` suppressed the `.wv` and an app declaring WavPack alone lost its only
+playable copy. `gateUnits` now asks for a found copy every client is served,
+and splits by format a domain holding copies of two gated formats; a gone
+copy every client is served is then a unit of its own, suppressing nothing,
+and is reaped by the deletion pass as any gone row is. A domain of a gone
+`.flac` and one gated format stays one unit, so its found copy wins, as B756
+wants.
+
+The Christmas family takes the smart mixes' gate by construction (it is built
+through the same item loop after the window's skip), and
+`TestTheChristmasFamilyServesEachViewItsItems` pins it: in its window each
+view's items, positions closed up, a family of held-back tracks alone sent
+only to a view that declares them, and out of its window nothing to any view.
+
+### Negative controls
+
+`controls_r3.py` on e52bd024, each mutation in memory and put back, the
+predictions written before the run:
+
+| Control | Mutation | Red |
+|---|---|---|
+| c1 | the gate before `Missing` | as predicted: "a gone FLAC beside a found WavPack" (the `.wv` suppressed), "beside two found WavPack copies", and the order check |
+| c2 | `gateUnits` counts a gone copy every client is served | as predicted: the three-copy case, suppressed `[A/x.flac B/x.wv]` |
+| c3 | `gateUnits` splits on the formats named, not the gated ones | the two predicted subtests, and one more not predicted: "a gone FLAC beside a gone WavPack" (nothing suppressed where the `.wv` should be), since a domain whose every copy is gone also splits under it |
+| c4 | the Christmas family's items skip the view | as predicted: the four views that leave a format out in the mixed family, the three that do not declare WavPack in the WavPack-alone family; the "both" views and every out-of-season case still passing |
+
+### The rules
+
+`rules-b489b-r3.patch` is over main's rules as this merge holds them, and
+carries B489's rules whole: round 1's patch no longer applies there, since its
+`enrichment.md` hunk anchors on the availability bullet B756 rewrote (round
+1's scanner hunk applies with a one-line offset). Built on a scratch copy:
+round 1's patch with `--reject`, its one rejected hunk's bullet put after
+B756's with round 3's wording (the gate's term after `Missing`, the found copy
+in `gateUnits`, the new test), round 2's patch, and the Christmas family in
+`wire.md`'s gate bullet; checked with `git apply` on a fresh copy, equal to
+the builder's result, and the budgets measured over it (`enrichment.md` 34.0%,
+`scanner.md` 34.1%, `wire.md` 58.7%, the worst load 65.2%).
+
+**A test harness note**: the first `cmd/bridge` run of the merge failed 20 tests
+and hung in a player serve test, every one of them comparing a path under a
+TMPDIR that held `..` (`.tmp/_b489b/r3/../gotmp`): the harness's error, not the
+tree's. With the TMPDIR made absolute the same package passed (330 s).
+
+### Gates
+
+On legion0 at 76b771cb, through the shared build lock, against main
+(1a101716): go1.27.3's gofmt on every Go file changed since main, clean;
+`make docs-check`, ok; the qualification check, "qualification version OK:
+1a101716..HEAD"; `make vet` native and with `GOOS=windows`, `GOOS=darwin`,
+`GOOS=linux GOARCH=386` and `GOOS=linux GOARCH=arm`, each clean; `make
+test-fast`, 87 packages ok; `make test TEST_PKGS=` the packages the merge
+touched (race, 30 min a package), ok: internal/dupes 1 s, internal/api
+132 s, internal/manifest 1,592 s, internal/admin 990 s,
+internal/smartplaylist 3 s, its season 1 s, internal/smartplaylistgen 27 s,
+cmd/bridge 1,061 s; `make build-all`, the six targets. Not run here: macOS
+and Windows natively, CI's runners, and the iOS app.
+
+## 2026-11-07 — B489 PR 1, round 4: the Christmas mix fills from what every client can play, and a gone copy is no unit of its own beside found gated ones
+
+The orchestrator's round 4 for worker b489b: two points a reviewer read on the
+merge, each confirmed red first. The orchestrator had taken round 3's merge
+and rules patch and merged main again (B728 B7's cutover) on the pushed
+branch, `pr/1423` here (9ff1f13f). `git merge` needs approval on legion0, so
+the fast-forward was made by hand, as round 3's merge was: the 77 paths that
+differ (16 added, 61 modified, none deleted) taken with `git checkout pr/1423
+--pathspec-from-file`, the branch's loose ref written with 9ff1f13f, and the
+tree checked clean and equal to `pr/1423`. Nothing was applied from `.claude`
+beyond what `pr/1423` holds. Commits: 30656fc8 (point 2), 4596fcb6 (point
+1), this record, the gates' results.
+
+### Point 2: a gone ungated copy stayed served beside found gated ones
+
+Confirmed. Round 3's `gateUnits` split a domain that held no found ungated
+copy and two gated formats into one unit per format, a gone ungated copy a
+unit of its own: in `A/x.flac` (gone), `B/x.wv` and `C/x.ape` the gone `.flac`
+won its unit of one, so until the deletion pass reaped its row (three full
+scans by default) a WavPack-only app listed a dead row beside its copy and an
+app declaring both listed three rows, one dead. With one gated format the
+domain stayed whole and `Missing` suppressed the `.flac`, so the two cases
+disagreed, and `TestTheGateAndTheMissingTermHoldBesideEachOther` pinned the
+wrong one (`want nil`). Through the real scanner
+(`TestAGoneFLACBesideAWavPackAndAnAPECopyIsServedToNoView`: real `.flac`,
+`.wv` and `.ape` files, the `.flac` removed, one full scan inside the grace)
+the red run served `[A/x.flac]` to an app declaring nothing, `[A/x.flac
+B/x.wv]` to WavPack, `[A/x.flac C/x.ape]` to APE and all three to both, as
+predicted in a file before the run (`policy.go` put back to 9ff1f13f's bytes
+for that run and restored from memory after).
+
+The fix is inside `planDomainWinners`, one DSD or PCM domain at a time: a
+unit whose every member is gone (`Row.Missing`) is suppressed whole while
+another unit of the same domain holds a found copy. The split per format for
+the found gated copies stays; a unit holding a gone copy and a found one
+suppresses the gone one as before (`Missing` first in `outranks`); a domain
+whose every copy is gone keeps each unit's winner, the resolution as it was,
+since the restated invariant allows none only beside a found unit; and the
+rule never crosses domains: a gone DSD edition beside found PCM copies is its
+domain's one member and is served
+(`TestAFoundPCMCopyNeverSuppressesAGoneDSDEdition`). `FilterOff`,
+`TierInconclusive`, `TierDifferentAudio`, `TierDifferentFormat` under
+`FilterSameFormat` and a self-nested group's non-twins never reach the
+election and are unchanged (`TestTheGoneUnitRuleChangesNoOtherTierOrMode`).
+No client loses a playable copy: the rows the rule suppresses were unplayable.
+
+This supersedes round 3's choice (a gone ungated copy a unit of its own,
+suppressing nothing) and restates `PlanSuppression`'s documented invariant,
+"every suppression unit serves exactly one member", as "exactly one, or none
+when every member is gone and a found unit in its domain serves": its doc,
+`gateUnits`' paragraph and `RestampDuplicates`' doc say so. The test that
+pinned exactly one, named for the same-format group's one served winner, is
+`TestPlanSuppression_EveryUnitServesOneWinnerOrNoneWhenItsCopiesAreGone`
+now: its same-format case as before, and every unit `gateUnits` makes over a
+pool of nine copies of one track (two FLACs, an MP3, two WavPack, two Monkey's
+Audio, a DSF and a WavPack DSD file), every group of two or more with each
+member found or gone (19,664 groups), under the five tier and mode routes that
+reach the election: each unit serves one member, or none when it is all gone
+and its domain holds a found copy. The view check the review asked for,
+`TestNoViewIsServedAGoneCopyBesideAFoundOne`, runs over the same 98,320 plans:
+no view is served a gone copy while a found copy of the track is in it in that
+domain, and each view keeps a found copy per domain where it held one. Red
+first: 18,675 plans failed the view check and 28,125 of 228,960 units the
+invariant. The view check also found a shape no subtest named, a gone `.wv`
+beside a found `.ape` with no ungated copy at all (the same defect: a client
+declaring both was served the dead `.wv`); it became a named case, red before
+the fix too, its prediction written before its own run. The three-copy case
+wants `[A/x.flac]`, with six more cases beside it.
+
+One consumer moves with it: the playlist feed maps a line naming a suppressed
+duplicate to its group's one served row, and a group with several leaves the
+line unresolved (`servedCopies`). A line naming that group's gone `.flac`
+resolved to the dead row before; with the `.wv` and the `.ape` served it is
+unresolved, as a line naming a suppressed copy in a group with a DSD and a PCM
+edition already was.
+
+| Control | Mutation | Red |
+|---|---|---|
+| p2a | the gone-unit rule off | as predicted: the six gone-unit subtests, the view check, the invariant, and the scanner test in its four views |
+| p2b | the rule asks the whole group for a found copy, not the domain | as predicted: the DSD test's three subtests under highest-quality, and the invariant; the view check stays green (a domain with no found copy is vacuous for it, which is why the DSD test exists) |
+| p2c | the rule suppresses every all-gone unit, found copy or not | as predicted: "a gone FLAC beside a gone WavPack", "every copy gone, of three formats", the DSD test and the invariant |
+
+### Point 1: the Christmas mix threw the playable tracks away before the filter
+
+Confirmed, exactly: at the 2026 season's seed, fifteen FLACs by three choirs
+beside a thousand `.wv` singles gave a cached family of 100 `.wv` files and no
+FLAC (`TestRegenerate_ChristmasStoresWhatEveryClientCanPlayFirst`, red), so a
+client declaring neither format was not sent the family at all
+(`TestTheChristmasFamilyFillsFromWhatEveryViewCanPlayFirst`, red in every
+view), and an APE client beside the same thousand was sent a family of one
+`.ape` (`TestAThousandWavPackFilesLeaveTheAPEViewItsFifteen`). One prediction
+file covered every red test; the `-run` pattern of the first HTTP run missed
+the last of them (no "Christmas" in its name), which was run alone at the same
+tree under the same prediction.
+
+The selection, `selectChristmas`, fills from what every client can play
+first: the tracks every client is served (no gated format by `formatgate.Of`)
+are ordered by the season and spread by artist up to the cap, and the WavPack
+and the Monkey's Audio tracks, each format ordered and spread the same way,
+take what is left of the cap in turn, so a thousand `.wv` files cannot crowd
+fifteen `.ape` files out
+(`TestRegenerate_ChristmasSharesTheGatedRoomBetweenTheFormatsInTurn`). The
+season's order of a subset is the order those tracks have in the whole pool
+(each path is hashed alone), so a library with no gated file is ordered as
+before, and every earlier Christmas test passes unchanged.
+
+The floor is one predicate, `season.MeetsFloor`, in the leaf the engine and
+the API both import (the API does not import the engine): the owner's rule,
+15 tracks from 3 albums or 3 artists, each named as the diversity caps name
+them, an empty one naming nothing (`TestMeetsFloorIsTheOwnersRule`).
+Generation asks it of the whole qualifying pool, since a client declaring
+every gated format may be sent all of it; `GET /v1/smart-playlists` asks it of
+each request's view of the cached family and leaves the family out of that
+response when the view falls below it (other families are still left out only
+when the gate empties them). `Options.MinChristmas` is gone, so the two cannot
+hold two floors; no test or caller set it. Each Christmas item stores its
+album for that check (`smartplaylist.Item.Album`,
+`manifest.SmartPlaylistItem.Album`, `album` in the blob, never on the wire:
+the item DTO has none). A blob cached before it has none and is judged on its
+artists until the next build
+(`TestAChristmasFamilyCachedWithoutAlbumsIsJudgedOnItsArtists`: fifteen items
+by one artist across three albums are left out without their albums and sent
+with them; fifteen by three artists are sent either way).
+
+Tests, through the real regenerator and router, for apps declaring nothing,
+WavPack, APE and both: the review's library; fourteen FLACs beside `.wv` (no
+family to nothing or APE, a family to WavPack and both); fifteen FLACs by one
+artist across three albums, and on one album by three artists, both sent to
+every view; fifteen FLACs by two artists on two albums beside `.wv` by others
+(no family to nothing or APE); a thousand `.wv` beside fifteen `.ape` (the APE
+view its fifteen, WavPack the 85 the cap leaves, nothing no family, both the
+whole cap). Two older API tests stored Christmas families of one to four items
+with no artist, which no view is sent now; their fixtures clear the floor
+(fifteen items by three choirs), and they test the window and the gate they
+were written for. `PROTOCOL.md` says what each request is sent, in its Client
+formats list, its Smart playlists paragraph and the `christmas` paragraph; the
+iOS mirror copies it.
+
+| Control | Mutation | Red |
+|---|---|---|
+| p1a | the response's floor reverted | as predicted: the fourteen-FLAC case in views nothing and APE (the brief's), the two-artist case in the same views, and the albumless blob of one artist in every view |
+| p1b | the selection back to one pool | as predicted: both regeneration tests, the review's library in every view, the thousand-`.wv` case in APE, WavPack and both |
+| p1c | the gated formats one after the other, WavPack first | as predicted: the in-turn regeneration test, and the thousand-`.wv` case in APE, WavPack and both |
+| p1d | no album stored | as predicted: the stored album, and one artist across three albums in view nothing alone (the gated views hold the singles' artists) |
+| p1e | the generation floor asked of the ungated tracks alone | as predicted: both below-the-floor cases in views WavPack and both, the thousand-`.wv` case, and the in-turn regeneration test (no family) |
+
+The other families were not changed here, as the brief scoped; which of them
+could thin a view later is in the round's report, for the orchestrator to
+file.
+
+### The rules
+
+`rules-b489b-r4.patch` is over `pr/1423`'s rules (round 3's applied):
+`enrichment.md`'s dupe bullet takes the gone-unit rule, its restated
+invariant, a "Don't" and five tests; `wire.md`'s B489 bullet sends the
+Christmas family only to a view whose items clear its floor; `smart-mixes.md`'s
+Christmas bullet takes the one floor, the selection order, the stored album
+and the albumless blob, a "Don't" and eight tests. Checked with `git apply` on
+a fresh copy, equal to the builder's result, every blank context line with its
+leading space, and the budgets over it (`enrichment.md` 35.2%,
+`smart-mixes.md` 12.8%, `wire.md` 58.8%, the worst load 65.5%).
+
+### Gates
+
+On legion0 at 8d9ef04c, through the shared build lock, against main as
+`pr/1423` merged it (fc07f4a1): go1.27.3's gofmt on every Go file changed
+since main, clean; `make docs-check`, ok; the qualification check,
+"qualification version OK: fc07f4a1..HEAD"; `make vet` native and with
+`GOOS=windows`, `GOOS=darwin`, `GOOS=linux GOARCH=386` and `GOOS=linux
+GOARCH=arm`, each clean; `make test-fast`, 87 packages ok; `go test -race`
+over `./internal/dupes/... ./internal/smartplaylist/...
+./internal/smartplaylistgen/... ./internal/api/... ./internal/manifest/...`,
+with the Makefile's tags and `-timeout 60m` (the brief's command names no
+timeout, and Go's ten-minute default would cut `internal/manifest` short), ok:
+internal/dupes 8 s, internal/smartplaylist 3 s, its season 1 s,
+internal/smartplaylistgen 33 s, internal/api 139 s, internal/manifest
+1,519 s; `make build-all`, the six targets. Not run here: macOS and Windows
+natively, CI's runners, and the iOS app.
+
+## 2026-11-07 — B489 PR 1, round 5: each view's Christmas pick, a suppressed member in its view, three WavPack edges, the reconciliation rule and the console's notes
+
+The orchestrator's round 5 for worker b489b: eight points, each a reviewer's
+reading of the code, each confirmed red first or answered with evidence. The
+orchestrator had applied round 4's rules patch on the pushed branch,
+`pr/1423` here (56b14535, the rules commit over round 4's head 05191ced; its
+merge of main is still round 4's, 9ff1f13f, over fc07f4a1). The fast-forward
+was made by hand as round 4's was (`git merge` needs approval on legion0):
+the three rules files that differ taken with `git checkout pr/1423
+--pathspec-from-file`, the branch's loose ref written with 56b14535, and the
+tree checked clean and equal to `pr/1423`. Nothing was applied from `.claude`
+beyond what `pr/1423` holds. Commits: 3f56c2eb (points 4, 5 and 6), 81624c8c
+(point 3), 51b7c8ce (point 1), be5e2ff8 (point 7), 318d44e8 (point 8), this
+record, the gates' results.
+
+### Point 1: a cap over one selection could erase the spread that qualified it
+
+Confirmed, both ways the review read it, and a third. Round 4 asked the floor
+of the whole qualifying pool and stored one selection capped at 100. One
+choir's 110 tracks of one album beside one track each of two more albums
+cleared the floor, and in a season whose order put the third album's track
+past the cap the stored 100 held two albums and one artist, so every view was
+refused. 120 FLACs by two artists on two albums filled the cap ahead of ten
+WavPack singles by ten others, so a client declaring WavPack, whose pool
+holds twelve artists, was refused too. And one selection could not suit four
+views: 99 FLACs by two artists, one `.wv` and one `.ape` passed as a whole,
+while the stored 100 dropped the `.ape` and the APE view, left 99 FLACs, was
+refused. Red first through the real regenerator
+(`TestRegenerate_ChristmasStoresWhatEachViewNeedsToClearTheFloor`, its three
+subtests) and the real router in all four views
+(`TestEachViewIsPickedItsChristmasItemsAtTheRequest`), and round 4's tests
+updated to the stored superset, every result as predicted in a file before
+the run.
+
+The first fixture needs a season that puts the second or the third album past
+position 100, which most seasons do not: over 2026 to 2060, ten of 35 do
+(modelled in Python on the engine's FNV-1a order, one artist, so the artist
+spread keeps the order). The tests pin 2029 (the third album's track at 108)
+and assert that precondition through the engine itself
+(`smartplaylist.ChristmasOrder`, the order the family takes a format in, now
+exported for it), failing with "pin another season" if a change to the order
+moves it.
+
+The selection for a view is made at the response from a bounded stored
+superset. The regenerator stores each format on its own (`storeChristmas`,
+`selectChristmas`'s successor): the tracks every client is served, then the
+WavPack ones, then the Monkey's Audio ones, each in the season's order spread
+eight an artist (`ChristmasOrder`) and cut at `season.MaxTracks` (100) by
+`season.KeepSpread`, which first moves the first track of each of its first
+three albums and of each of its first three artists to the front: up to 300
+items, each with its album. The storage keeps both spreads ahead of its cut,
+where the brief's response rule takes one: without it the one choir's third
+album is never stored and no pick can bring it back, and a format that cannot
+clear the floor alone (two albums, one artist) may complete another's in a
+view that declares both, by either spread. `season.Pick`, one pure function of
+the stored items and the view, is each request's selection: the view's
+formats, those every client is served first, then the declared gated formats
+in turn; before the cap, the first track of each of the first three distinct
+albums, or failing that of the first three distinct artists, moves to the
+front (named as the floor names them, an empty one naming nothing); then the
+first 100; and the floor is asked of the result. `GET /v1/smart-playlists`
+calls it per request and leaves the family out of a view below the floor,
+positions closing up as before; the regenerator calls it for its decision,
+storing the family when one of the four views clears it; the console shows
+the pick of a client that declares every format (`consoleMixItems`, which the
+mix's item count and its track list read), as it showed the whole family
+before. `Options.MaxChristmasItems` is gone (the cap is `season.MaxTracks`),
+as `MinChristmas` went in round 4. The season seed's order is unchanged: one
+season, one order. `buildChristmas`', `storeChristmas`' and the season
+package's comments say the floor is asked of each view's pick, not of every
+qualifying track. `PROTOCOL.md`'s `christmas` paragraph says each request is
+picked its items.
+
+Round 4's regeneration tests now store 115 (15 FLACs and 100 WavPack files)
+and the full 100 of a thousand `.wv` files beside fifteen `.ape`, and the
+thousand-WavPack HTTP test gives the WavPack view its own 100 (it was the 85
+the cap left). `TestTheChristmasFamilyServesEachViewItsItems` compares its
+mixed view as a set, since the pick orders the formats in turn. The leaf has
+its own tests (`TestPickKeepsTheFloorWheneverTheItemsCan`,
+`TestKeepSpreadKeepsBothSpreadsAheadOfTheCut`) and the console its own
+(`TestTheConsoleShowsTheChristmasFamilyAsServedToEveryFormat`: 40 FLACs, 100
+`.wv` and 100 `.ape`, the console showing the FLACs, then a `.wv` and an
+`.ape` in turn). Not changed here: the family's energy envelope and modal
+rate are signed at generation over what is stored (`signEnergy`), now the
+superset, as they were over round 4's stored 100, not over a view's pick.
+
+### Point 2: a blob with no albums stays judged on its artists
+
+No change, as the brief decided: B750 has shipped in no release (0.2.3 has no
+Christmas family), so no released bridge holds a blob without albums, and the
+family is rebuilt daily. `season.Pick` and `season.MeetsFloor` name an empty
+album as nothing, so such a blob is judged on its artists, and no count-only
+fallback was added, which would serve what the floor refuses. Round 4's
+`TestAChristmasFamilyCachedWithoutAlbumsIsJudgedOnItsArtists` runs through the
+response's `Pick` now and still refuses fifteen items by one artist across
+three albums cached without their albums (it stayed green under every control
+this round).
+
+### Point 3: a suppressed member's replacement was decided outside the view
+
+Confirmed. `servedCopies` mapped a line naming a suppressed duplicate to its
+group's one served row, and a group with two served rows left the line
+unresolved in every view, though a request takes at most one of them: a
+missing `A/x.wv` beside `B/x.flac` and `C/x.ape` was unresolved for a client
+declaring nothing, which can play the FLAC; and a line naming a suppressed
+copy of a gated format the request does not declare was unresolved before its
+group was asked (`TestASuppressedDuplicateIsServedAsItsOneServedCopyInTheView`,
+red in views nothing, WavPack and APE as predicted, green in both, where two
+survivors stay unresolved).
+
+The feed now keeps every served row of a group (`servedCopies`) and decides
+among those the request's view takes (`servedCopyIn`): exactly one is the
+member, whatever the suppressed track's own format, and none or several leave
+the line unresolved, as before; a group with a DSD and a PCM edition each
+keeping one is unresolved where the view takes both, as it was, with no new
+reading of the domain. The view reaches it as every other member rule does:
+`resolvePlaylistBatch` passes the request's set to `resolve`, whose lines are
+judged in it. The paging keys on it through the feed's version, which hashes
+the view's key and `playlistFeedRulesVersion`, now 4: every version, cursor
+and ETag made under the old rule answers stale (`410`
+`playlist_files_stale`), and one view's never answers another's. The rows a
+page shows are the same rows, so the v57 triggers that move the feed's
+generation need nothing new. The older test,
+`TestASuppressedDuplicateMemberIsServedAsItsServedCopy`, passes unchanged.
+
+### Points 4, 5 and 6: a stream's end past its metadata, a shrink while read, a `.wvc`'s unknown total
+
+Point 4, confirmed: with no stated length, `wvFinalIndex` took only a final
+block ending the file, and the reference encoder ends a stream with a block
+of metadata alone (its MD5 sum, a RIFF trailer: `write_metadata_block`, whose
+header is cleared but for its id, version, size and total, so no final block
+and no samples). A `.wv` of unknown length ending with its MD5 sum matched no
+`.wvc` and was indexed WAVPACK-LOSSY. The look now starts at the block that
+ends where the file does and passes back over blocks with no samples, each
+found as the block that ends where the one after it begins, at most
+`wvMaxTrailingBlocks` (16), to the last block with samples, which must be a
+final block: as `seek_final_index` takes the last final audio block of the
+file's last 1 MiB. A trailing metadata block larger than one 64 KiB window is
+still found (the look walks back window by window to that 1 MiB floor); one
+that fills the whole of the last 1 MiB (a RIFF trailer past 1 MiB) leaves no
+block with samples there, so the stream's end is unknown, no correction file
+matches, and the row is WAVPACK-LOSSY, a pinned subtest. This parser has not
+shipped, so `ExtractorVersion` stays this PR's 32.
+
+Point 5, confirmed: a `.wv` that shrank after its extractor's stat met the
+file's end inside a block, which `wvWindow` answered `errWVBlockCut` (a file
+cut as it was written, a refusal) with no read fault, and a WavPack or
+Monkey's Audio file cut inside its APEv2 tag read as one with no tag; either
+replaced a changed file's good row under the file's new size and mtime, which
+the skip gate then kept, so the defect outlived the shrink (the red run's one
+sub-check not predicted: the final readable scan of each subtest failed too).
+Both extractors now read through `statBoundReader`, which answers a read that
+reaches the file's end short of the stat's size with `errFileShrank` and notes
+it in the extraction's read faults, so the read did not complete and the row
+it had is kept (B134's rule); `wvWindow` tells a short read inside a block
+found within the stat's size (the shrink) from a block that runs past that
+size (`errWVBlockCut`, answered before any of the block is read), and the
+correction look answers a shrink as a correction file replaced while read.
+`TestScanner_AFileThatShrinksWhileItIsReadKeepsItsRow` cuts a WavPack file
+inside its first audio block, and a WavPack and a Monkey's Audio file inside
+their tags, between the stat and the read.
+
+Point 6, confirmed: a `.wvc` whose first block states no total beside a `.wv`
+that states one was refused, and that is the pair an encode of a stream whose
+length the encoder learned only at its end leaves when its rewrite of the
+`.wvc`'s header fails: every header is written with the unknown total, and
+`cli/wavpack.c` rewrites the `.wv`'s first block with the length, then the
+`.wvc`'s. The reference decoder takes the pair: it reads the stream's length
+from the `.wv` alone (`WavpackOpenFileInputEx64`: the first audio block's
+total, else `seek_final_index` over the `.wv`) and takes a correction block by
+its index, samples and flags (`read_wvc_block`, `match_wvc_header`), never by
+its total. These are cited from libwavpack 5's source as published, which was
+not on legion0 and could not be fetched there (no network): the acceptance
+rests on that citation until the reference-encoder corpus exists, and the
+owner's check of it against the source is asked in the round's report.
+`correctionTotalAgrees` takes the same total, both unknown, or unknown in the
+`.wvc` beside a known one in the `.wv`; it refuses the reverse and two known
+totals that differ, which the decoder would take but no reference encode
+writes, and every other check stays: the block's index, samples and flags,
+the correction bitstream, and the `.wvc`'s end at the stream's last sample. A
+built fixture covers it (`wvBlocksStating`), and one subtest joins points 4
+and 6: a `.wv` stating its length, a `.wvc` stating none and ending with a
+metadata block after its audio, matched.
+
+### Point 7: a client reconciles whenever its declared formats change
+
+Confirmed by reading: `PROTOCOL.md` had a client make its full sync "once per
+bridge, when it first sees `wavpackApe`", so a client that first declares
+`wavpack` and later adds `ape` missed the APE rows indexed before its delta
+cursor, and one that drops a format kept rows no filtered delta removes, since
+the bridge still holds them and no tombstone names them. The paging and
+deltas paragraph now says a client records, for each bridge, the set of
+formats it declares there, and makes a full reconciliation (a paginated full
+sync, after which it holds exactly the rows delivered) whenever that set
+changes; the set declared to a bridge that does not advertise `wavpackApe` is
+empty, so that bridge's update changes it. Nothing changes on the bridge; the
+iOS half reads this.
+
+### Point 8: the console lists these files
+
+Confirmed: `bridge scan`'s summary line and the dashboard's composition note
+said the console's player left these files out, while the player lists every
+track with a Download link and marks one no browser plays "Not playable in a
+browser" (`playNone`). Both now say that earlier versions of the app and DLNA
+renderers leave them out, and that the console lists them and offers their
+download, marked not playable in a browser. The scan test pins the line's
+words, and `TestTheCompositionNoteSaysTheConsoleListsWavPackAndMonkeysAudio`
+pins the note's literals (comments stripped, `jsFunctionBody`); both were
+written after the words were corrected, and both are red with the old words
+put back in memory, as predicted (r8 below).
+
+### Negative controls
+
+Committed before each control; every mutation in memory, the bytes restored
+after the run and checked; predictions in a file before each run.
+
+| Control | Mutation | Red |
+|---|---|---|
+| c1 | the move to the front reverted (`moveToFront` keeps nothing) | as predicted: the pick's two spread subtests, `TestKeepSpreadKeepsBothSpreadsAheadOfTheCut`, the one choir in regeneration and in every HTTP view, and the 120-FLAC case in views WavPack and both; and one not predicted, the 120-FLAC case in regeneration: the decision is the same `Pick`, so no view cleared the floor and nothing was stored; the 99, 1 and 1 case green |
+| c3 | the survivors counted before the view | as predicted: views nothing, WavPack and APE |
+| c3b | the suppressed copy's own format asked first | as predicted: view nothing alone |
+| c4 | the look for a stream's end stops at a block with no samples | as predicted: the metadata-after-audio subtest and the joined case |
+| c5 | the stat-bounded reader's shrink check off | as predicted: the shrink test's three subtests |
+| c6 | a known `.wv` total no longer agrees with an unknown `.wvc` one | as predicted: the `.wv`-alone subtest and the joined case |
+| c6r | the reverse direction taken too | as predicted: the `.wvc`-alone subtest |
+| r8 | point 8's old words put back | as predicted: the scan test and the composition note's test |
+
+### The rules
+
+`rules-b489b-r5.patch` is over `pr/1423`'s rules (round 4's applied):
+`scanner.md`'s two WavPack lines take round 5 in their titles and the bold
+"Don't" sentences their long forms in `ops/History-rules-scanner.md` now
+carry (a read short of the stat's size taken for a cut file; a total in the
+`.wvc` alone or two that differ; the look for the end stopped at a block with
+no samples); `wire.md`'s B489 bullet takes the per-view Christmas pick, the
+suppressed member in its view, `playlistFeedRulesVersion` 4, the
+reconciliation rule, a "Don't" and two tests, and its playlist-files bullet
+the member rule; `smart-mixes.md`'s Christmas bullet takes the stored
+superset, `season.Pick`, the albumless blob with no fallback, the "Don't"
+sentences and five tests; `admin-console.md`'s B489 bullet what the console
+says of these files, a "Don't" and two tests. Checked with `git apply` on a
+fresh copy, equal to the builder's result, every blank context line with its
+leading space, every test it names declared, and the budgets over it
+(`admin-console.md` 72.6%, `scanner.md` 34.4%, `smart-mixes.md` 14.3%,
+`wire.md` 59.5%, the worst load 65.5%).
+
+### Gates
+
+On legion0 at bde89a96, through the shared build lock, against main as
+`pr/1423` merged it (fc07f4a1): go1.27.3's gofmt on every Go file changed
+since main, clean; `make docs-check`, ok; the qualification check,
+"qualification version OK: fc07f4a1..HEAD" (after 3,805 s waiting for the
+build slot); `make vet` native and with `GOOS=windows`, `GOOS=darwin`,
+`GOOS=linux GOARCH=386` and `GOOS=linux GOARCH=arm`, each clean; `make
+test-fast`, 87 packages ok, the Linux-only ones run here (cmd/bridge 450 s,
+internal/admin 250 s, internal/alsapcm 42 s, internal/atomicwrite 15 s); `go
+test -race` over `./internal/dupes/... ./internal/smartplaylist/...
+./internal/smartplaylistgen/... ./internal/api/... ./internal/manifest/...`,
+with the Makefile's tags and `-timeout 60m`, ok: internal/dupes from Go's test
+cache (its inputs unchanged since round 4's run), internal/smartplaylist 3 s,
+its season 1 s, internal/smartplaylistgen 37 s, internal/api 143 s,
+internal/manifest 1,515 s; `make build-all`, the six targets. Not run here:
+macOS and Windows natively, CI's runners, and the iOS app.
 ## 2026-11-06 — B617: enrichment gets an off switch, and says what it stops
 
 Backlog B617, from the site's privacy review of 2026-10-31: the bridge sends

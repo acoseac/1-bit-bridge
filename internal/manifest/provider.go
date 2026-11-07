@@ -5,6 +5,8 @@ import (
 	"io"
 	"sync/atomic"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/formatgate"
 )
 
 // VariantLookup is the minimum metadata downstream needs to (a)
@@ -184,15 +186,17 @@ func (p *Provider) enrichmentGate() bool {
 // `ctx` is checked inside the per-row stream loop so a client
 // disconnect mid-response (slow network, iOS app backgrounded mid-sync,
 // slow-read DOS) terminates the SQLite scan instead of running to EOF.
-func (p *Provider) WriteManifest(ctx context.Context, w io.Writer, since time.Time) error {
-	return writeManifestGated(ctx, w, p.store, p.scanner.Roots(), since, p.upscaleGate(), p.enrichmentGate())
+//
+// view is the formats the request declared (format_view.go).
+func (p *Provider) WriteManifest(ctx context.Context, w io.Writer, since time.Time, view formatgate.Set) error {
+	return writeManifestGated(ctx, w, p.store, p.scanner.Roots(), since, view, p.upscaleGate(), p.enrichmentGate())
 }
 
 // BuildManifestPage satisfies api.ManifestProvider for the paginated
 // full-manifest path introduced in v1.1. See `BuildManifestPage` in
-// scanner.go for the cursor semantics.
-func (p *Provider) BuildManifestPage(ctx context.Context, cursor string, limit int) (*Manifest, error) {
-	return buildManifestPageGated(ctx, p.store, p.scanner.Roots(), cursor, limit, p.upscaleGate(), p.enrichmentGate())
+// scanner.go for the cursor semantics, the view's among them.
+func (p *Provider) BuildManifestPage(ctx context.Context, cursor string, limit int, view formatgate.Set) (*Manifest, error) {
+	return buildManifestPageGated(ctx, p.store, p.scanner.Roots(), cursor, limit, view, p.upscaleGate(), p.enrichmentGate())
 }
 
 // IsScanning satisfies api.ManifestProvider.
@@ -212,9 +216,10 @@ func (p *Provider) LastFullScan() time.Time { return p.scanner.LastFullScan() }
 // tracksIndexed must agree with the manifest a client can fetch, not
 // with the store's internal row count (which the admin dashboard's
 // RollupByPrefix keeps reporting in full). Backed by a `SELECT COUNT(*)`
-// so /v1/health doesn't allocate O(n) strings per poll.
-func (p *Provider) TracksIndexed(ctx context.Context) int {
-	n, err := p.store.CountServedTracks(ctx)
+// so /v1/health doesn't allocate O(n) strings per poll. The count is of
+// the formats the request declared (format_view.go), as its manifest is.
+func (p *Provider) TracksIndexed(ctx context.Context, view formatgate.Set) int {
+	n, err := p.store.CountServedTracks(ctx, view)
 	if err != nil {
 		// Surface the DB fault for operators without changing the wire
 		// value — returning e.g. -1 would break the versioned /v1/health
@@ -227,10 +232,11 @@ func (p *Provider) TracksIndexed(ctx context.Context) int {
 
 // PendingDeletions satisfies api.ManifestProvider. Reports the number of
 // tracks + folders rows the scanner has marked as missing this pass but
-// hasn't yet reached the configured delete threshold for. Cheap query —
-// two indexed counts.
-func (p *Provider) PendingDeletions(ctx context.Context) int64 {
-	n, err := p.store.PendingDeletions(ctx)
+// hasn't yet reached the configured delete threshold for, the tracks of
+// the request's view (Store.PendingDeletions). Two counts, each a table
+// scan the health cache bounds.
+func (p *Provider) PendingDeletions(ctx context.Context, view formatgate.Set) int64 {
+	n, err := p.store.PendingDeletions(ctx, view)
 	if err != nil {
 		throttledHealthErr(&p.lastPendingErrLogNS, "health probe: pending deletions failed", err)
 		return 0
@@ -407,10 +413,10 @@ func (p *Provider) SearchAvailable(ctx context.Context) (bool, error) {
 }
 
 // SearchServedTracks forwards the SERVED-set search — duplicate-
-// suppressed rows joined out. See Store.SearchServedTracks for why that
-// restriction is the point.
-func (p *Provider) SearchServedTracks(ctx context.Context, query string, limit int) ([]TrackHit, error) {
-	return p.store.SearchServedTracks(ctx, query, limit)
+// suppressed rows joined out, in the request's view. See
+// Store.SearchServedTracks for why that restriction is the point.
+func (p *Provider) SearchServedTracks(ctx context.Context, query string, limit int, view formatgate.Set) ([]TrackHit, error) {
+	return p.store.SearchServedTracks(ctx, query, limit, view)
 }
 
 // FirstIndexedAtReady reports whether every track row has a first-indexed

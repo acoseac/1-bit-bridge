@@ -1,0 +1,195 @@
+{
+  "enrichmentProgress": {
+    "tracksEnriched": 0,
+    "tracksTotal": 10
+  },
+  "folders": [
+    {
+      "mtime": "2026-01-02T03:04:05Z",
+      "path": "."
+    },
+    {
+      "mtime": "2026-01-02T03:04:05Z",
+      "path": "Glasswing"
+    },
+    {
+      "mtime": "2026-01-02T03:04:05Z",
+      "path": "Glasswing/Monkey"
+    },
+    {
+      "mtime": "2026-01-02T03:04:05Z",
+      "path": "Glasswing/Packed"
+    },
+    {
+      "mtime": "2026-01-02T03:04:05Z",
+      "path": "Glasswing/Plain"
+    }
+  ],
+  "tracks": [
+    {
+      "album": "Monkey",
+      "artist": "Glasswing",
+      "bitsPerSample": 16,
+      "channels": 2,
+      "codec": "APE",
+      "duration": 15.069206349206349,
+      "enriched": false,
+      "isDSD": false,
+      "mtime": "2026-01-02T03:04:05Z",
+      "path": "Glasswing/Monkey/01 Monkey.ape",
+      "sampleFormat": "integer",
+      "sampleRate": 44100,
+      "size": 750,
+      "title": "Monkey",
+      "trackNumber": 1,
+      "year": 2024
+    },
+    {
+      "album": "Monkey",
+      "artist": "Glasswing",
+      "bitsPerSample": 16,
+      "channels": 2,
+      "codec": "APE",
+      "duration": 60.20879818594104,
+      "enriched": false,
+      "isDSD": false,
+      "mtime": "2026-01-02T03:04:05Z",
+      "path": "Glasswing/Monkey/02 Old Monkey.ape",
+      "sampleFormat": "integer",
+      "sampleRate": 44100,
+      "size": 718,
+      "title": "Old Monkey",
+      "trackNumber": 2,
+      "year": 2024
+    },
+    {
+      "album": "Monkey",
+      "artist": "Glasswing",
+      "enriched": false,
+      "mtime": "2026-01-02T03:04:05Z",
+      "path": "Glasswing/Monkey/03 Unsupported.ape",
+      "size": 755,
+      "title": "03 Unsupported",
+      "year": 2024
+    },
+    {
+      "album": "Packed",
+      "artist": "Glasswing",
+      "bitsPerSample": 16,
+      "channels": 2,
+      "codec": "WAVPACK",
+      "duration": 1,
+      "enriched": false,
+      "isDSD": false,
+      "mtime": "2026-01-02T03:04:05Z",
+      "path": "Glasswing/Packed/01 Lossless.wv",
+      "sampleFormat": "integer",
+      "sampleRate": 44100,
+      "size": 316,
+      "title": "Lossless",
+      "trackNumber": 1,
+      "year": 2024
+    },
+    {
+      "album": "Packed",
+      "artist": "Glasswing",
+      "bitsPerSample": 16,
+      "channels": 2,
+      "codec": "WAVPACK",
+      "correction": {
+        "mtime": "2026-01-02T03:04:05Z",
+        "path": "Glasswing/Packed/02 Hybrid.wvc",
+        "size": 196
+      },
+      "duration": 6.802721088435374,
+      "enriched": false,
+      "isDSD": false,
+      "mtime": "2026-01-02T03:04:05Z",
+      "path": "Glasswing/Packed/02 Hybrid.wv",
+      "sampleFormat": "integer",
+      "sampleRate": 44100,
+      "size": 478,
+      "title": "Hybrid",
+      "trackNumber": 2,
+      "year": 2024
+    },
+    {
+      "album": "Packed",
+      "artist": "Glasswing",
+      "channels": 2,
+      "codec": "WAVPACK-LOSSY",
+      "duration": 6.802721088435374,
+      "enriched": false,
+      "isDSD": false,
+      "mtime": "2026-01-02T03:04:05Z",
+      "path": "Glasswing/Packed/03 Hybrid Alone.wv",
+      "sampleRate": 44100,
+      "size": 484,
+      "title": "Hybrid Alone",
+      "trackNumber": 3,
+      "year": 2024
+    },
+    {
+      "album": "Packed",
+      "artist": "Glasswing",
+      "bitsPerSample": 1,
+      "channels": 2,
+      "codec": "WAVPACK-DSD",
+      "duration": 2,
+      "enriched": false,
+      "isDSD": true,
+      "mtime": "2026-01-02T03:04:05Z",
+      "path": "Glasswing/Packed/04 DSD.wv",
+      "sampleRate": 2822400,
+      "size": 335,
+      "title": "DSD",
+      "trackNumber": 4,
+      "year": 2024
+    },
+    {
+      "album": "Packed",
+      "artist": "Glasswing",
+      "bitsPerSample": 32,
+      "channels": 2,
+      "codec": "WAVPACK",
+      "duration": 1,
+      "enriched": false,
+      "isDSD": false,
+      "mtime": "2026-01-02T03:04:05Z",
+      "path": "Glasswing/Packed/05 Float.wv",
+      "sampleFormat": "float",
+      "sampleRate": 48000,
+      "size": 319,
+      "title": "Float",
+      "trackNumber": 5,
+      "year": 2024
+    },
+    {
+      "album": "Packed",
+      "artist": "Glasswing",
+      "enriched": false,
+      "mtime": "2026-01-02T03:04:05Z",
+      "path": "Glasswing/Packed/06 Malformed.wv",
+      "size": 32,
+      "title": "06 Malformed",
+      "year": 2024
+    },
+    {
+      "album": "Plain",
+      "artist": "Glasswing",
+      "bitsPerSample": 16,
+      "codec": "FLAC",
+      "duration": 5,
+      "enriched": false,
+      "isDSD": false,
+      "mtime": "2026-01-02T03:04:05Z",
+      "path": "Glasswing/Plain/01 Plain.flac",
+      "sampleFormat": "integer",
+      "sampleRate": 44100,
+      "size": 146,
+      "title": "Plain",
+      "trackNumber": 1
+    }
+  ],
+  "version": 1
+}

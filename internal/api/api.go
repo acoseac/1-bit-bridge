@@ -44,6 +44,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/advertise"
 	"github.com/acoseac/1-bit-bridge/internal/auth"
 	"github.com/acoseac/1-bit-bridge/internal/config"
+	"github.com/acoseac/1-bit-bridge/internal/formatgate"
 	bridgefs "github.com/acoseac/1-bit-bridge/internal/fs"
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/logging"
@@ -409,14 +410,18 @@ type ManifestProvider interface {
 	// disconnect mid-response (slow network, iOS app backgrounded)
 	// terminates the SQLite scan instead of running it to EOF holding
 	// connection resources.
-	WriteManifest(ctx context.Context, w io.Writer, since time.Time) error
+	//
+	// view is the formats the request declared (formats.go): every row,
+	// tombstone and count is that view's.
+	WriteManifest(ctx context.Context, w io.Writer, since time.Time, view formatgate.Set) error
 	// BuildManifestPage is the v1.1 paginated-manifest variant used
 	// when the client asks for `?limit=`. `cursor=""` requests the
 	// first page. Callers iterate until the returned page's
 	// `NextCursor` is nil. Returns a fully-materialised value because
 	// per-page output is bounded by the page-size cap (5000) and the
-	// JSON writer can buffer the whole page without OOM risk.
-	BuildManifestPage(ctx context.Context, cursor string, limit int) (*ManifestPage, error)
+	// JSON writer can buffer the whole page without OOM risk. A cursor
+	// made for another view is manifest.ErrCursorOfAnotherView.
+	BuildManifestPage(ctx context.Context, cursor string, limit int, view formatgate.Set) (*ManifestPage, error)
 	IsScanning() bool
 	// IsScanStalled reports a scan that is running but has committed
 	// nothing for longer than the scanner's stall threshold — a wedged
@@ -424,11 +429,14 @@ type ManifestProvider interface {
 	// `health`).
 	IsScanStalled() bool
 	LastFullScan() time.Time
-	TracksIndexed(ctx context.Context) int
+	// TracksIndexed is the served count in the request's view, the
+	// count its manifest's rows make.
+	TracksIndexed(ctx context.Context, view formatgate.Set) int
 	// PendingDeletions returns the total count of rows across tracks
-	// and folders with missing_count > 0 — surfaced on ScanState. May
-	// return 0 for an unwired or pre-v5 store; never errors today.
-	PendingDeletions(ctx context.Context) int64
+	// and folders with missing_count > 0 — surfaced on ScanState — the
+	// tracks of the request's view, as TracksIndexed's. May return 0
+	// for an unwired or pre-v5 store; never errors today.
+	PendingDeletions(ctx context.Context, view formatgate.Set) int64
 }
 
 // MBIDProbe is an optional interface the artwork + artist-image
@@ -1872,8 +1880,11 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 		scanState.LastFullScan = nilIfZeroTime(s.manifest.LastFullScan())
 		// TTL-cached: /v1/health is unauthenticated and can be flooded, so the
 		// two COUNT(*) scans run at most ~once per healthCountsTTL rather than
-		// per request. See healthCountsCache.
-		scanState.TracksIndexed, scanState.PendingDeletions = s.healthCounts.counts(r.Context(), s.manifest)
+		// per request. See healthCountsCache. tracksIndexed is the count of
+		// the view the request declared (formats.go), the rows its manifest
+		// holds, so the response varies on it.
+		varyOnFormats(w.Header())
+		scanState.TracksIndexed, scanState.PendingDeletions = s.healthCounts.counts(r.Context(), s.manifest, requestFormats(r))
 	}
 	resp := HealthResponse{
 		ProtocolVersion: version.ProtocolVersion,
@@ -1967,7 +1978,7 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	//     upscale gate says.
 	//
 	// Alpha-sort stays correct by construction: each conditional
-	// appends in lex order. Capacity 39 covers the current maximum
+	// appends in lex order. Capacity 40 covers the current maximum
 	// (atlasEnrichment + booklets + bridgeOutput + carPlayOptimize + deleteVariants +
 	// demoMode + diagnosticsSummary + dlnaArtwork + dlnaServer + dsdRender +
 	// dsdSilence +
@@ -1978,12 +1989,13 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	// playlistFilesPaged + playlistListRevision +
 	// playlistsCrossDevice + pushEventsSupported + rendererDiscovery +
 	// sampleFormat + search + smartPlaylists + spectrum + syncEvents +
-	// trackQuality + upscaleCompleteEvents + variantBumpsIndex + waveform).
+	// trackQuality + upscaleCompleteEvents + variantBumpsIndex + waveform +
+	// wavpackApe).
 	// `trackQuality` was missing from this enumeration — and so from the
 	// count — until 2026-08-16; keep the list and the number in step when
 	// adding a flag, since the list is the only thing that makes the
 	// number checkable.
-	feats := make([]string, 0, 39)
+	feats := make([]string, 0, 40)
 	// `atlasEnrichment` advertises the rich-tier Atlas metadata surface
 	// (cfg.Atlas.Enabled): the bridge accepts POST /v1/atlas-ingest from the
 	// closed-source app and serves GET /v1/atlas-meta/{release,artist}/{mbid}.
@@ -2266,9 +2278,17 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	if s.analysisActive() {
 		// Offline audio analysis is active — iOS may fetch
 		// `GET /v1/waveform?path=…` for any track whose manifest row
-		// carries a `waveformTag`. Alpha-sorted last (`w` > `v`).
+		// carries a `waveformTag`. Alpha-sorted after `variantBumpsIndex`
+		// (`w` > `v`).
 		feats = append(feats, "waveform")
 	}
+	// `wavpackApe` advertises the client format gate (backlog B489): this
+	// bridge indexes WavPack (.wv) and Monkey's Audio (.ape) files and
+	// serves their rows only to a request that declares the format in
+	// X-Bridge-Formats (`wavpack`, `ape`), so an app that plays them knows to
+	// send it. Every bridge from this build on: the gate is not a setting.
+	// Alpha-sorted last (`waveform` < `wavpackApe`: "wave" < "wavp").
+	feats = append(feats, "wavpackApe")
 	resp.Features = feats
 	// Per-root reachability (v1.2 additive). Probed through the same TTL
 	// cache the list/stat handlers use, so a 1Hz iOS /v1/health poll
@@ -2594,11 +2614,19 @@ func endpointURLs(eps []advertise.Endpoint) []string {
 // `?limit=` + `?since=` together returns 400 — mixing the two would
 // need a composite (timestamp, path) cursor for ordering stability,
 // and since-deltas are bounded anyway.
+//
+// Every row, tombstone and count is the view the request declared in
+// X-Bridge-Formats (formats.go), and the response varies on it. A page
+// cursor continues only the view that made it: one made for another view
+// is a 410 `manifest_cursor_view`, and the client starts again from the
+// first page.
 func (s *Server) manifestHandler(w http.ResponseWriter, r *http.Request) {
 	if s.manifest == nil {
 		writeError(w, http.StatusServiceUnavailable, "scan_in_progress", "manifest not ready")
 		return
 	}
+	view := requestFormats(r)
+	varyOnFormats(w.Header())
 	// safeQuery preserves literal '+' in query values — load-bearing for
 	// RFC3339 ?since= timestamps with positive timezone offsets like
 	// 2026-05-23T15:40:00+02:00, which the stdlib's r.URL.Query() would
@@ -2630,7 +2658,12 @@ func (s *Server) manifestHandler(w http.ResponseWriter, r *http.Request) {
 			limit = maxPageLimit
 		}
 		cursor := q.Get("cursor")
-		body, err := s.manifest.BuildManifestPage(r.Context(), cursor, limit)
+		body, err := s.manifest.BuildManifestPage(r.Context(), cursor, limit, view)
+		if errors.Is(err, manifest.ErrCursorOfAnotherView) {
+			writeError(w, http.StatusGone, "manifest_cursor_view",
+				"this cursor was made for another set of formats; start again from the first page")
+			return
+		}
 		if err != nil {
 			writeErrorLog(w, r, http.StatusInternalServerError, "internal",
 				"the bridge couldn't build this manifest page", err)
@@ -2678,7 +2711,7 @@ func (s *Server) manifestHandler(w http.ResponseWriter, r *http.Request) {
 	// manifest handler ONLY, not as global middleware.
 	useGzip := acceptsGzip(r)
 	if useGzip {
-		w.Header().Set("Vary", "Accept-Encoding")
+		addVary(w.Header(), "Accept-Encoding")
 		w.Header().Set(headerContentEncoding, "gzip")
 	}
 
@@ -2711,7 +2744,7 @@ func (s *Server) manifestHandler(w http.ResponseWriter, r *http.Request) {
 	// iOS backgrounded mid-sync, attacker slow-reading) interrupts the
 	// SQLite scan within the next per-row check instead of running to
 	// EOF holding the read lock and CPU.
-	writeErr := s.manifest.WriteManifest(r.Context(), bodyWriter, since)
+	writeErr := s.manifest.WriteManifest(r.Context(), bodyWriter, since, view)
 
 	// Flush the gzip trailer ONLY if any compressed byte already
 	// reached the wire. `dw.written` is the authoritative signal:
@@ -2751,7 +2784,7 @@ func (s *Server) manifestHandler(w http.ResponseWriter, r *http.Request) {
 		// client sees a plain empty 200 — same shape as the pre-stream
 		// error path below, without the 5xx.
 		w.Header().Del(headerContentEncoding)
-		w.Header().Del("Vary")
+		dropVary(w.Header(), "Accept-Encoding")
 	}
 
 	if writeErr != nil {
@@ -2762,7 +2795,7 @@ func (s *Server) manifestHandler(w http.ResponseWriter, r *http.Request) {
 			// (URLSession would surface a transport error and
 			// silently retry, masking the real DB failure).
 			w.Header().Del(headerContentEncoding)
-			w.Header().Del("Vary")
+			dropVary(w.Header(), "Accept-Encoding")
 			// A client that disconnected (or hit its own deadline)
 			// before the first body byte is the normal iOS-backgrounds-
 			// mid-sync case, NOT a server fault — demote to debug and
@@ -2955,7 +2988,7 @@ func writeJSONGzip(w http.ResponseWriter, r *http.Request, status int, v any) {
 		return
 	}
 	w.Header().Set(headerContentType, contentTypeJSON)
-	w.Header().Set("Vary", "Accept-Encoding")
+	addVary(w.Header(), "Accept-Encoding")
 	w.Header().Set(headerContentEncoding, "gzip")
 	w.WriteHeader(status)
 	gz := manifestGzipPool.Get().(*gzip.Writer)

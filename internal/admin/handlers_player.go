@@ -873,8 +873,9 @@ type playerVariantDTO struct {
 //	Kind        a coarse hint: "universal" | "engine-dependent" | "none"
 //	VariantID   a FRESH FLAC sidecar to prefer, when one exists
 //
-// "none" is reserved for DSD, where the answer really is universal: no
-// browser decodes a 1-bit stream.
+// "none" is reserved for DSD, WavPack and Monkey's Audio, where the
+// answer really is universal: no browser decodes a 1-bit stream, a .wv or
+// an .ape.
 type playerPlayabilityDTO struct {
 	Kind        string `json:"kind"`
 	ContentType string `json:"contentType"`

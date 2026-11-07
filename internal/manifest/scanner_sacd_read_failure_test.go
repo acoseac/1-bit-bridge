@@ -25,6 +25,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/formatgate"
 	"github.com/acoseac/1-bit-bridge/internal/logging/loggingtest"
 )
 
@@ -94,7 +95,7 @@ func sacdStampedThenTouched(t *testing.T) (*Store, *Scanner, string, time.Time, 
 // the same instant as the query's bound (DeletedSince is strictly after).
 func sacdTombstones(t *testing.T, store *Store) []string {
 	t.Helper()
-	deleted, overflow, err := store.DeletedSince(context.Background(), time.Unix(0, 0))
+	deleted, overflow, err := store.DeletedSince(context.Background(), time.Unix(0, 0), formatgate.All())
 	if err != nil || overflow {
 		t.Fatalf("DeletedSince: overflow=%v err=%v", overflow, err)
 	}

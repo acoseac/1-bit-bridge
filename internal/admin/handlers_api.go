@@ -760,6 +760,12 @@ type compositionResponse struct {
 	PCM    []compositionBar `json:"pcm"`
 	DSD    []compositionBar `json:"dsd"`
 	Codecs []compositionBar `json:"codecs"`
+	// WavPackAPE is how many indexed tracks are WavPack or Monkey's Audio
+	// files, by the path as the client format gate reads it
+	// (manifest.Store.CountGatedFormatTracks, backlog B489): served as they
+	// are to an app that says it plays them and to no other, which
+	// applyComposition says beside the codec bar, hidden at zero.
+	WavPackAPE int `json:"wavpackApe"`
 }
 
 // pcmTierOrder / dsdTierOrder fix the display + wire order of the PCM
@@ -911,6 +917,18 @@ func (s *Server) getCompositionSnapshot() compositionResponse {
 			return snap, nil
 		}
 		snap := buildComposition(groups)
+		gated, err := s.deps.Manifest.CountGatedFormatTracks(ctx)
+		if err != nil {
+			// The count belongs to the snapshot it is computed with, so
+			// a failed count serves the last good snapshot whole, as a
+			// failed distribution does.
+			logger.Warn("composition: gated-format count", "err", err)
+			s.compositionMu.Lock()
+			last := s.composition
+			s.compositionMu.Unlock()
+			return last, nil
+		}
+		snap.WavPackAPE = gated
 		s.compositionMu.Lock()
 		s.composition = snap
 		s.compositionAt = time.Now()

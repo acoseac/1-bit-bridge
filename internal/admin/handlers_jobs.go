@@ -59,17 +59,21 @@ type jobsScanner struct {
 }
 
 // jobsAnalysisCoverage is the analysed-vs-eligible split. Eligible =
-// TotalLocal - DSDExcluded - ZeroByteExcluded. APPROXIMATE by design
+// TotalLocal - DSDExcluded - WavPackAPEExcluded - ZeroByteExcluded.
+// APPROXIMATE by design
 // (scan-time sizes; mtime-stale rows count as analysed) — the sweep
 // recorder's last-run counts are the exact per-run truth, and the UI
 // shows both. DSD is a permanent by-design exclusion (sox can't decode
-// 1-bit DSD), not a backlog — the whole reason this tile exists.
+// 1-bit DSD), not a backlog — the whole reason this tile exists — and so
+// are WavPack and Monkey's Audio, which the bridge serves as they are
+// and decodes nothing of (backlog B489).
 type jobsAnalysisCoverage struct {
-	Eligible         int `json:"eligible"`
-	Analysed         int `json:"analysed"`
-	Stale            int `json:"stale,omitempty"`
-	DSDExcluded      int `json:"dsdExcluded"`
-	ZeroByteExcluded int `json:"zeroByteExcluded"`
+	Eligible           int `json:"eligible"`
+	Analysed           int `json:"analysed"`
+	Stale              int `json:"stale,omitempty"`
+	DSDExcluded        int `json:"dsdExcluded"`
+	WavPackAPEExcluded int `json:"wavpackApeExcluded"`
+	ZeroByteExcluded   int `json:"zeroByteExcluded"`
 	// UnreadableExcluded: sources the decoders refused enough consecutive
 	// times to stop being offered. Subtracted from Eligible like the other
 	// two exclusions, so the bar can reach 100% on a library that holds a
@@ -572,11 +576,12 @@ func (s *Server) getAnalysisCoverage(ctx context.Context) *jobsAnalysisCoverage 
 			return snap, nil
 		}
 		snap := &jobsAnalysisCoverage{
-			Eligible: cov.TotalLocal - cov.DSDExcluded - cov.ZeroByteExcluded -
-				cov.UnreadableExcluded,
+			Eligible: cov.TotalLocal - cov.DSDExcluded - cov.WavPackAPEExcluded -
+				cov.ZeroByteExcluded - cov.UnreadableExcluded,
 			Analysed:           cov.AnalysedFresh,
 			Stale:              cov.AnalysedStale,
 			DSDExcluded:        cov.DSDExcluded,
+			WavPackAPEExcluded: cov.WavPackAPEExcluded,
 			ZeroByteExcluded:   cov.ZeroByteExcluded,
 			UnreadableExcluded: cov.UnreadableExcluded,
 		}

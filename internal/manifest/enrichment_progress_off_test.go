@@ -7,6 +7,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/formatgate"
 )
 
 // TestTheManifestOmitsEnrichmentProgressWhileOff: while enrich.enabled is
@@ -39,7 +41,7 @@ func TestTheManifestOmitsEnrichmentProgressWhileOff(t *testing.T) {
 	stream := func(since time.Time) func(*testing.T) map[string]json.RawMessage {
 		return func(t *testing.T) map[string]json.RawMessage {
 			var buf bytes.Buffer
-			if err := p.WriteManifest(ctx, &buf, since); err != nil {
+			if err := p.WriteManifest(ctx, &buf, since, formatgate.Set{}); err != nil {
 				t.Fatal(err)
 			}
 			return topLevelKeys(t, buf.Bytes())
@@ -65,7 +67,7 @@ func TestTheManifestOmitsEnrichmentProgressWhileOff(t *testing.T) {
 		{"a since delta with rows", func(t *testing.T) map[string]json.RawMessage { return stream(time.Now().Add(-time.Hour))(t) }},
 		{"a since delta with no row", func(t *testing.T) map[string]json.RawMessage { return stream(time.Now().Add(time.Hour))(t) }},
 		{"the paginated first page", func(t *testing.T) map[string]json.RawMessage {
-			return built(p.BuildManifestPage(ctx, "", 10))(t)
+			return built(p.BuildManifestPage(ctx, "", 10, formatgate.Set{}))(t)
 		}},
 	}
 	for _, leg := range legs {
