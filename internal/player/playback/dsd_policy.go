@@ -902,8 +902,10 @@ var errReplanned = errors.New("player backend: the occurrence is being handed of
 // A choice's write pending that plays its rate otherwise is waited for
 // first, no lock held (awaitWrite, B728 B9 round 2, point 1), so the check
 // judges it under what the write left published; a successor being handed
-// off again by then (the write landed, or a refresh changed the set) is
-// errReplanned, which its sink's adoption takes back, never written to.
+// off again by then (the write landed, or a refresh changed the set), or
+// dropped already for its replacement (a cut of a successor with no frame
+// written drops it at once), is errReplanned, which its sink's adoption takes
+// back, never written to.
 func (s *session) checkDSDActivation(ctx context.Context, o *occ) error {
 	s.awaitWrite(ctx, o)
 	s.b.refreshDSD()
@@ -912,7 +914,7 @@ func (s *session) checkDSDActivation(ctx context.Context, o *occ) error {
 	defer s.mu.Unlock()
 	cur := s.b.dsd.Load()
 	switch {
-	case o.stale && !o.leading && !o.dropped:
+	case (o.stale || o.dropped) && !o.leading:
 		return errReplanned
 	case o.stale || o.dropped || o.admitted == nil:
 	case o.admitted == cur:

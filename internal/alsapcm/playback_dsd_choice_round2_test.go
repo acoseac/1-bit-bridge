@@ -68,19 +68,21 @@ func reachedGate(t *testing.T, g *gate, res <-chan playback.ChoiceResult, what s
 // session's release held (Releasing); and each wait for a write and each
 // activation recorded.
 type writeSeams struct {
-	mu        sync.Mutex
-	changed   chan struct{}
-	pending   *gate
-	inWrite   func()
-	opened    map[string]*gate
-	woke      map[engine.OccurrenceID]*gate
-	releasing *gate
-	awaited   []engine.OccurrenceID
-	activated []engine.OccurrenceID
+	mu         sync.Mutex
+	changed    chan struct{}
+	pending    *gate
+	inWrite    func()
+	opened     map[string]*gate
+	woke       map[engine.OccurrenceID]*gate
+	activation map[engine.OccurrenceID]*gate
+	releasing  *gate
+	awaited    []engine.OccurrenceID
+	activated  []engine.OccurrenceID
 }
 
 func newWriteSeams() *writeSeams {
-	return &writeSeams{changed: make(chan struct{}), opened: map[string]*gate{}, woke: map[engine.OccurrenceID]*gate{}}
+	return &writeSeams{changed: make(chan struct{}), opened: map[string]*gate{}, woke: map[engine.OccurrenceID]*gate{},
+		activation: map[engine.OccurrenceID]*gate{}}
 }
 
 func (w *writeSeams) note(f func()) {
@@ -143,8 +145,26 @@ func (w *writeSeams) seams(base *playback.Seams) *playback.Seams {
 		}
 	}
 	s.ChoiceAwaited = func(o engine.OccurrenceID) { w.note(func() { w.awaited = append(w.awaited, o) }) }
-	s.Activation = func(o engine.OccurrenceID) { w.note(func() { w.activated = append(w.activated, o) }) }
+	s.Activation = func(o engine.OccurrenceID) {
+		w.note(func() { w.activated = append(w.activated, o) })
+		w.mu.Lock()
+		g := w.activation[o]
+		delete(w.activation, o)
+		w.mu.Unlock()
+		if g != nil {
+			g.pass()
+		}
+	}
 	return s
+}
+
+// holdActivation holds o's activation as it begins, its sink adopted.
+func (w *writeSeams) holdActivation(t *testing.T, o engine.OccurrenceID) *gate {
+	g := newGate(t)
+	w.mu.Lock()
+	w.activation[o] = g
+	w.mu.Unlock()
+	return g
 }
 
 // holdPending holds the next write at its pending window.
@@ -458,6 +478,46 @@ func TestASuccessorsOpenBesideAWriteIsCountedAndWaitsForIt(t *testing.T) {
 				t.Errorf("a write answered would_interrupt changed the choice: %+v", c)
 			}
 		})
+	}
+}
+
+// TestAnActivationBesideAWriteWaitsForIt (B728 B9 round 2, point 1): a
+// write that becomes pending once a successor's own sink was adopted, and
+// before its activation, is waited for by the activation, no lock held, and
+// the successor it hands off again by then (dropped for its replacement, or
+// still to be) is taken back from its sink unwritten, never a fault: with the
+// go-ahead, the write lands, b's node opened and given nothing, b's entry
+// skipped under the cap.
+func TestAnActivationBesideAWriteWaitsForIt(t *testing.T) {
+	w := newWriteSeams()
+	d := newDSDRig(t, playbacktest.ChoiceState(dsdstate.ModeNative), func(o *rigOptions) { o.seams = w.seams(nil) })
+	d.files.add("a", dsd(playbacktest.DSD64, 0.25))
+	d.files.add("b", dsd(playbacktest.DSD128, 0.25))
+	ids := d.insert("a", "b")
+	d.play()
+	ob := d.occurrenceOf(ids[1])
+	act := w.holdActivation(t, ob)
+	d.k.Free()
+	awaitHeld(t, "b's activation, its sink adopted", act.in)
+	stop := w.holdPending(t)
+	res := d.choose(choiceReq(t, d, dsdstate.ModeNative, 1, capAt(playbacktest.DSD64), goAhead))
+	reachedGate(t, stop, res, "the write's pending window")
+	act.letGo()
+	w.waitAwaited(t, ob, 1)
+	stop.letGo()
+	if got := answer(t, res); got.Outcome != playback.ChoiceWritten {
+		t.Fatalf("the cap with the go-ahead: %s, want written", got.Outcome)
+	}
+	s := d.waitEnded()
+	d.rig.stop()
+	if f := s.Faults(); len(f) != 0 || count(d.rec.events(), "fault", 0) != 0 {
+		t.Errorf("the hand-off of b at its activation faulted: %+v", f)
+	}
+	if v := d.k.View(); len(v.OpenAt) != 2 || v.GivenBytes != v.OpenAt[1] {
+		t.Errorf("b's node: %d opens, %d bytes given, b's from byte %v; want b's node opened and given nothing", v.Opens, v.GivenBytes, v.OpenAt)
+	}
+	if _, ok := s.Skipped(ids[1]); !ok {
+		t.Errorf("b's entry was not skipped: the cap refuses its DSD128 once the write landed; skips %+v", s.Skips())
 	}
 }
 
