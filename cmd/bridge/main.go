@@ -6949,10 +6949,13 @@ func pairCmd(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "pair: --name is required")
 		return 2
 	}
-	cfg, _, err := loadCLIConfig(*configPath)
+	cfg, cfgPath, err := loadCLIConfig(*configPath)
 	if err != nil {
 		fmt.Fprintf(stderr, configLoadFailedFormat, err)
 		return 2
+	}
+	if refuseDataDirAway("pair", cfgPath, cfg.DataDir, stderr) {
+		return 1
 	}
 	store, err := auth.OpenStore(filepath.Join(cfg.DataDir, tokensFileName))
 	if err != nil {
@@ -6979,10 +6982,13 @@ func scanCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	cfg, _, err := loadCLIConfig(*configPath)
+	cfg, cfgPath, err := loadCLIConfig(*configPath)
 	if err != nil {
 		fmt.Fprintf(stderr, configLoadFailedFormat, err)
 		return 2
+	}
+	if refuseDataDirAway("scan", cfgPath, cfg.DataDir, stderr) {
+		return 1
 	}
 	store, err := manifest.OpenStore(manifest.DefaultDBPath(cfg.DataDir))
 	if err != nil {

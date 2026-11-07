@@ -1100,10 +1100,20 @@ bridge does about it:
   server.lock now: …`, exit 1, and the service manager starts it again (the
   unit `bridge init` writes restarts it every 2 s; launchd and the Windows
   service's recovery do the same) until the volume is mounted. `bridge
-  doctor`'s `data-dir` line fails the same state. **A data dir removed or
-  moved on purpose**: remove `.bridge.yaml.datadir` beside the config and
-  start again. Removing `bridge.db*` alone (the local fixture's reset) still
-  starts and makes a new database. A system unit can order the start after
+  doctor`'s `data-dir` line fails the same state, and since B727 every other
+  command that makes, opens or writes the data dir (scan, the render
+  commands, analyze, variants, artwork, enrichment, duplicates, library,
+  pair, token, admin, cert rotate, backup, restore, reset-player, manifest
+  clear-missing, output dac bind, update, tsnet, init's rewrite) refuses it
+  the same way, under its own name, and makes nothing there; the reads
+  (doctor, status, logs, token list, cert info, update --check) still run.
+  **A data dir moved on purpose**: set `dataDir` in bridge.yaml to where it
+  is now (the record names the old place, so nothing is refused, and the
+  next serve records the new one). **Removed on purpose**: remove
+  `.bridge.yaml.datadir` beside the config and start again; removing it
+  over a data dir that was moved would have the next command make an empty
+  one at the old path. Removing `bridge.db*` alone (the local fixture's
+  reset) still starts and makes a new database. A system unit can order the start after
   the mount instead (`RequiresMountsFor=<mount point>` in a drop-in); a user
   unit cannot, its manager not seeing the system's mount units.
 - **Docker.** A bind mount made before the host mounted the volume never sees

@@ -86,10 +86,15 @@ func duplicatesCmd(ctx context.Context, args []string, stdout, stderr io.Writer)
 		fmt.Fprintln(stderr, "duplicates: --limit must not be negative")
 		return 2
 	}
-	cfg, _, err := loadCLIConfig(o.configPath)
+	cfg, cfgPath, err := loadCLIConfig(o.configPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "duplicates: load config: %v\n", err)
 		return 2
+	}
+	// A read, whose open of the store would make the data dir and an empty
+	// database where its volume is not mounted (backlog B727).
+	if refuseDataDirAway("duplicates", cfgPath, cfg.DataDir, stderr) {
+		return 1
 	}
 	report, err := collectDuplicates(ctx, cfg, o)
 	if err != nil {

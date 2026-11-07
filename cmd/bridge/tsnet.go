@@ -12,6 +12,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -31,7 +32,9 @@ import (
 // loadConfigForCmd parses a `--config` flag from args and loads the
 // resulting bridge.yaml. Shared by all `bridge tsnet` subcommands —
 // they all need the same config + the same flag shape, and a
-// helper avoids three near-identical flag.Parse blocks.
+// helper avoids three near-identical flag.Parse blocks. The tsnet server
+// they build keeps its state in the data dir, so a data dir its record
+// names while its volume is not mounted is refused first (backlog B727).
 func loadConfigForCmd(args []string, stderr io.Writer) (*config.Config, error) {
 	fs := flag.NewFlagSet("tsnet", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -39,13 +42,20 @@ func loadConfigForCmd(args []string, stderr io.Writer) (*config.Config, error) {
 	if err := fs.Parse(args); err != nil {
 		return nil, err
 	}
-	cfg, _, err := loadCLIConfig(*configPath)
+	cfg, cfgPath, err := loadCLIConfig(*configPath)
 	if err != nil {
 		fmt.Fprintf(stderr, configLoadFailedFormat, err)
 		return nil, err
 	}
+	if refuseDataDirAway("tsnet", cfgPath, cfg.DataDir, stderr) {
+		return nil, errDataDirAway
+	}
 	return cfg, nil
 }
+
+// errDataDirAway is loadConfigForCmd's error once refuseDataDirAway has said
+// why on stderr.
+var errDataDirAway = errors.New("the data directory's volume is not mounted")
 
 // loadConfigAndRequireTsnetMode is the shared gate for all `bridge
 // tsnet` subcommands. Loads the config AND verifies tailscale.mode
@@ -459,9 +469,13 @@ func tsnetLogoutCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) in
 	if err := fs.Parse(args); err != nil {
 		return 1
 	}
-	cfg, _, err := loadCLIConfig(*configPath)
+	cfg, cfgPath, err := loadCLIConfig(*configPath)
 	if err != nil {
 		fmt.Fprintf(stderr, configLoadFailedFormat, err)
+		return 1
+	}
+	// A state dir missing with its volume is not one already logged out.
+	if refuseDataDirAway("tsnet logout", cfgPath, cfg.DataDir, stderr) {
 		return 1
 	}
 	mode, modeErr := cfg.Tailscale.EffectiveMode()

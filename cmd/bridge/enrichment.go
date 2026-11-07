@@ -110,10 +110,15 @@ func enrichmentMissesCmd(ctx context.Context, args []string, stdout, stderr io.W
 		fmt.Fprintln(stderr, "enrichment misses: --limit must not be negative")
 		return 2
 	}
-	cfg, _, err := loadCLIConfig(*configPath)
+	cfg, cfgPath, err := loadCLIConfig(*configPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "enrichment misses: load config: %v\n", err)
 		return 2
+	}
+	// A read, whose cold open of the store would make the data dir and an
+	// empty database where its volume is not mounted (backlog B727).
+	if refuseDataDirAway("enrichment misses", cfgPath, cfg.DataDir, stderr) {
+		return 1
 	}
 
 	report, err := collectMisses(ctx, cfg, *pathScope)
@@ -376,10 +381,13 @@ func enrichmentRetryCmd(ctx context.Context, args []string, stdout, stderr io.Wr
 	if refusePositionalScope(fs, "enrichment retry", "path", stderr) {
 		return 2
 	}
-	cfg, _, err := loadCLIConfig(*configPath)
+	cfg, cfgPath, err := loadCLIConfig(*configPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "enrichment retry: load config: %v\n", err)
 		return 2
+	}
+	if refuseDataDirAway("enrichment retry", cfgPath, cfg.DataDir, stderr) {
+		return 1
 	}
 
 	addr := adminAddrOf(cfg)

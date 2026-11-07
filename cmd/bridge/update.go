@@ -59,6 +59,11 @@ func updateCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stde
 		fmt.Fprintf(stderr, "config load failed: %v\n", err)
 		return 2
 	}
+	// An install writes its marker in the data dir, which would be made in
+	// its place where its volume is not mounted (backlog B727); --check reads.
+	if !*check && refuseDataDirAway("update", cfgPath, cfg.DataDir, stderr) {
+		return 1
+	}
 	// The candidate is checked against this file before its swap (backlog
 	// B613), and runs from another directory: an absolute path names the
 	// same file there.

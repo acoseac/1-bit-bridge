@@ -81,11 +81,15 @@ func goneRefusal(t *testing.T, text string) (dataDir, record string) {
 		t.Fatalf("no refusal of a data directory in %q", text)
 	}
 	dataDir = before[i+len(lead):]
-	_, after, ok := strings.Cut(text, "moved on purpose, remove ")
+	if !strings.Contains(text, "moved on purpose, set dataDir in bridge.yaml to where it is now") {
+		t.Errorf("the refusal does not say how to go on from a data directory moved on purpose: %q", text)
+	}
+	_, after, ok := strings.Cut(text, "removed on purpose, remove ")
 	if !ok {
 		t.Fatalf("the refusal names no record to remove: %q", text)
 	}
 	record, _, _ = strings.Cut(after, " and start bridge serve again")
+	record, _, _ = strings.Cut(record, " and run bridge ")
 	record, _, _ = strings.Cut(record, "\n")
 	return dataDir, record
 }

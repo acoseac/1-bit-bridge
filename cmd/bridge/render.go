@@ -78,7 +78,7 @@ func renderCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		}
 	}
 
-	r, exitCode := bootstrapTranscodeCmd(ctx, stderr, *configPath, *quality, *gc)
+	r, exitCode := bootstrapTranscodeCmd(ctx, stderr, "render", *configPath, *quality, *gc)
 	if r == nil {
 		return exitCode
 	}
