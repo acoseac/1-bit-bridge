@@ -429,7 +429,7 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   first. Artwork cache keys stay MB-derived so the wire shape is unchanged.
 - **`enrich.enabled` stops every lookup it names and `enrich.deezerEnabled`
   its Deezer lookups alone; both are on when absent, both are live, and only
-  off is ever written** (2026-11-06, backlog B617, four rounds). Off stops,
+  off is ever written** (2026-11-06, backlog B617, five rounds). Off stops,
   with no restart, every MusicBrainz, Cover Art Archive, Deezer, AcoustID
   and Atlas premium-cover request, a mirror's and the harvest's covers
   included. The switches are each client's own (`internal/enrichgate`):
@@ -438,13 +438,19 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   live config, and a nil predicate, or none, is off, so a client sends
   nothing while they are off whatever context it is handed. Its transport
   asks them, and those its request's context carries, at the send and at
-  the answer, and the client asks them again at each return once its
-  answer began, a decoded body, a 404 and an error status's body alike, in
-  every client; a watch of the transport's own, released at the body's
-  Close or the error, cuts a request on the wire off within
-  `enrichgate.Interval` (a second): a request after the flip is refused
-  before it leaves, and an answer whose headers or body arrive after it is
-  not taken. The enricher's batch, each fingerprint pass and each harvest
+  the answer, and the client asks them again at each return that wrote
+  nothing once its answer began, a decoded body, a 404 and an error
+  status's body alike, in every client; a watch of the transport's own,
+  released at the body's Close or the error, cuts a request on the wire off
+  within `enrichgate.Interval` (a second). **That is the whole promise, and
+  it is about what goes out** (round 5, the owner's decision): off stops
+  every request from being sent and cuts one in flight within the interval;
+  what an answer that finished inside it gives may be written locally (a
+  cover streamed to the cache, a portrait, a premium cover its fetcher
+  committed, which is then cached and got whatever the switch says by its
+  return), and nothing further goes out; a refusal is "not asked", never a
+  terminal miss, so nothing is lost when the switch comes back. The
+  enricher's batch, each fingerprint pass and each harvest
   cover refetch also run on `enrichgate.CancelWhenOff`. A refusal is
   `enrichgate.ErrOff`, which wraps `context.Canceled` and ends the pass's
   context with itself as the cause, and a caller reads it from the error as
@@ -487,10 +493,13 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   refuses offline before it opens the store; `bridge init --force` keeps
   each switch written off (`priorEnrich`). **Don't build a client without
   its switches or read a nil switch as on, send what a client's switches or
-  a context's refuse, take or write what a pass learns after the flip, an
-  answer completed after it included, return from a client once its answer
-  began without asking its switches again, an error status's included, take
-  a client's error for a miss without asking it for a refusal, rely on a
+  a context's refuse, let a request on the wire outlive the interval, take
+  an answer whose headers came after the flip, return from a client that
+  wrote nothing without asking its switches again once its answer began, an
+  error status's included, answer a refusal over a cover the client's write
+  committed, gate another local write against the flip (the atomic writer,
+  its rename retries, a stream's end: nothing goes out there), take a
+  client's error for a miss without asking it for a refusal, rely on a
   context's tick alone, write a match's provenance apart from its re-queue
   or keep a match whose re-queue did not land, read `bridge fingerprint`'s
   switch once, follow it only once its probe is done or re-read its config
@@ -521,7 +530,8 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   `TestEveryClientsErrorAnswerCompletedAfterTheFlipIsNoAnswer`,
   `TestAnErrorAnswerCompletedAfterTheFlipFillsNoNegativeCache`,
   `TestAnErrorAnswerCompletedAfterTheFlipIsNoAnswer`,
-  `TestAPremiumCoverCompletedAfterTheFlipCountsNoCover`,
+  `TestAPremiumCoverWrittenAfterTheFlipIsCached`,
+  `TestAPremiumUpgradeWrittenAfterTheFlipIsGot`,
   `TestServeBuildsEveryClientOverTheLiveSwitches`,
   `TestNoSwitchIsOffForTheSweepAndTheCoverRefresh`,
   `TestAnAnswerAfterTheFlipIsNotTaken`,
