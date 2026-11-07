@@ -235,10 +235,12 @@ func TestBridgeFingerprintFollowsItsSwitchWhileItRuns(t *testing.T) {
 			code, stderr, ended := f.run(append(args, "--key", "k")...)
 			stopped := ended
 			if c.middle {
+				// The held handler sees the cut once the connection closes,
+				// which can be after the run has returned.
 				select {
 				case stopped = <-cut:
-				default:
-					t.Fatalf("the run returned with the held lookup still on the wire; exit %d, stderr:\n%s", code, stderr)
+				case <-time.After(10 * time.Second):
+					t.Fatalf("the held lookup was never cut off; exit %d, stderr:\n%s", code, stderr)
 				}
 			}
 			took := stopped.Sub(flip.get(t))
