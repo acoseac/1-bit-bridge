@@ -168,6 +168,11 @@ type Watcher struct {
 	rootWatches  map[string]string
 	recheckDelay time.Duration
 	rearm        bool
+	// rootIDs is, for a root in rootWatches, the identity its folder had just
+	// before its own watch was added (noteRootWatch), which checkRootWatches
+	// compares with the folder at the root's path now (backlog B777). Run's
+	// goroutine alone.
+	rootIDs map[string]os.FileInfo
 	// holdAsks are the roots a debounced dispatch found absent, for Run's
 	// goroutine to hold, under mu; holdWake wakes Run's loop to take them.
 	holdAsks map[string]rootLook
@@ -226,6 +231,7 @@ func NewWatcher(scanner *Scanner, debounce time.Duration) (*Watcher, error) {
 		reconcileEvery:  reconcileEvery,
 		held:            make(map[string]rootLook),
 		rootWatches:     make(map[string]string),
+		rootIDs:         make(map[string]os.FileInfo),
 		holdWake:        make(chan struct{}, 1),
 		recheckFirst:    heldRecheckFirst,
 		recheckMax:      heldRecheckMax,
@@ -264,7 +270,9 @@ func NewWatcher(scanner *Scanner, debounce time.Duration) (*Watcher, error) {
 // A root that reads as a volume that is not mounted (not there, or the bare
 // mount point holding nothing while the index holds its tracks) is held
 // rather than watched, and watched once it reads as it did (B651,
-// watcher_hold.go).
+// watcher_hold.go). Each root's own watch is confirmed once the walks are
+// done, against the identity its folder had before them (confirmRootWatches,
+// B777).
 func (wt *Watcher) Run(ctx context.Context) error {
 	// Stop armed debounce timers on EVERY exit path — ctx cancel AND the
 	// fsnotify Events/Errors channels closing (an internal fatal error) —
@@ -279,12 +287,14 @@ func (wt *Watcher) Run(ctx context.Context) error {
 	defer wt.w.Close()
 
 	roots := wt.holdAbsentRoots(ctx, wt.scanner.Roots())
-	if !wt.watchRoots(roots) {
+	ids := wt.rootIdentities(roots)
+	fails, on := wt.watchRoots(roots)
+	if !on {
 		// Logged: the watcher stays off, holding nothing, and the
 		// periodic scan picks up changes. No scan is pending yet.
 		return nil
 	}
-	wt.noteRootWatches(roots)
+	wt.confirmRootWatches(ctx, roots, ids, fails)
 	if hook := wt.afterInitialWalkHookForTests; hook != nil {
 		hook()
 	}
@@ -294,18 +304,20 @@ func (wt *Watcher) Run(ctx context.Context) error {
 // watchRoots adds every configured root's tree and reports whether the
 // watcher is on. Where fsnotify holds an open file per watched entry the
 // library must fit the watcher's budget first (watchRootsWithinBudget); a
-// root that cannot be walked is logged and the others are watched, on
-// every platform.
-func (wt *Watcher) watchRoots(roots []string) bool {
+// root that cannot be walked is logged, and is among fails, and the others are
+// watched, on every platform.
+func (wt *Watcher) watchRoots(roots []string) (fails map[string]bool, on bool) {
 	if wt.fds != nil {
 		return wt.watchRootsWithinBudget(roots)
 	}
+	fails = make(map[string]bool)
 	for _, root := range roots {
 		if err := wt.addTree(root, true); err != nil {
 			watcherLogger.Warn(msgInitialWatchFailed, "root", root, "err", err)
+			fails[root] = true
 		}
 	}
-	return true
+	return fails, true
 }
 
 // msgInitialWatchFailed is the line a root whose watch the start could not add

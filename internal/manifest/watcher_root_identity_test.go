@@ -79,6 +79,15 @@ func (s *identityAs) failWith(err error) {
 	s.fail = err
 }
 
+// noteRootWatchesForTests records each root's own watch after a test added
+// its tree itself, with no identity, as noteRootWatch records a root whose
+// folder could not be read before its walk: such a root is never compared.
+func noteRootWatchesForTests(w *Watcher, roots ...string) {
+	for _, root := range roots {
+		w.noteRootWatch(root, nil, w.watchSet())
+	}
+}
+
 // rootChecks counts the checks of the roots' own watches
 // (afterRootCheckForTests), so a test can let several pass.
 type rootChecks struct{ n atomic.Int64 }
