@@ -1,6 +1,6 @@
 # B470 native qualification — owner approval and provisional evidence
 
-QualificationVersion is **41**. All older evidence must be rerun for the harness, native included. The
+QualificationVersion is **42**. All older evidence must be rerun for the harness, native included. The
 harness never creates approval. Since B728 no production path reads an approval record or a candidate:
 the player plays DSD by its effective policy (`ops/plan-b728-dsd-capability-design.md`). This runbook
 is the engineering harness's. Its evidence binds `qualificationVersion`, whose guard covers the DSD byte
@@ -249,7 +249,7 @@ GOTOOLCHAIN=go1.27.3 go test -race -tags ts_omit_webclient,ts_omit_debugeventbus
 
 ## Round 3 evidence rules
 
-Historical round 3 used qualificationVersion 4; current version is **41**. A native contact's
+Historical round 3 used qualificationVersion 4; current version is **42**. A native contact's
 Contact.SchemaVersion remains **2**; a DoP contact's is **3**. All older
 contacts are invalid; repeat contact on this build. Required Device and Subdevice
 fields bind the configured PCM endpoint, including a nonzero subdevice, before
@@ -338,7 +338,7 @@ still resolve inside it). `dsdMode: native` or `auto` enables only approved nati
 
 The Go contracts are `qualification.Approval`, `ApprovalBody`, `ApprovedPolicy`, `Edge`
 and `Evidence` in `internal/player/qualification/approval.go`. JSON uses those exact
-exported field names. SchemaVersion=1, or 2 with Transitions and QualifiedOn (2d.2, below); QualificationVersion=41; Revision is the owner's
+exported field names. SchemaVersion=1, or 2 with Transitions and QualifiedOn (2d.2, below); QualificationVersion=42; Revision is the owner's
 revision; Identity is the observed VID/ProductID/manufacturer/product/bcdDevice,
 anchored controller/port, interface, device and subdevice. No serial or card number is
 persistent identity. Unchanged descriptors may retain approval after replug/restart;
@@ -386,7 +386,7 @@ At least one native fixture must finish with measured playback of that tuple.
 NativeTuple and NativeCompleted record that execution; PCM-only lists or completion
 cannot qualify it. LifecycleActions count observed native outcomes: pause/resume,
 release/reopen, navigation between native occurrences, Stop, and natural completion.
-An admitted command alone is insufficient. Version 41 invalidates older evidence.
+An admitted command alone is insufficient. Version 42 invalidates older evidence.
 List all candidate directional edges explicitly. No command generates that record.
 
 ```sh
@@ -425,7 +425,7 @@ or evidence names resolving to the state directory itself before any ancestor
 walk. Native monitoring remains fail-closed without a grace period. The overlay
 generator requires both integration suites before publishing its overlay.
 Guarded API, config, extractor, output-play and approval paths changed; rerun
-qualification with version 41. ExtractorVersion 30 retains the first parsed DFF
+qualification with version 42. ExtractorVersion 30 retains the first parsed DFF
 PROP's known format facts when a later PROP makes compression unsupported.
 
 Version 13 also covers the deterministic PCM trace capture test. It changes no
@@ -884,3 +884,14 @@ know, and a known one whose first use is not acknowledged, now plays its DSD
 converted to PCM under `auto`, never bit-exact, where it was refused; an explicit
 `off` migrated stays off. Every earlier version's harness evidence is stale to the
 harness, as at every bump.
+
+Version 42 covers B728's B8 round 2, under the `internal/alsapcm/` prefix alone: the
+backend's tests over the fake kernel gain one, a first use observed while DSD plays,
+whose successor must join as it was admitted. No sink, packer, plan or harness
+reader changes, and no DSD byte a native or DoP occurrence sends: the fix is the
+player's backend publishing a change of what it says of the DAC beside the set it
+admits by, the set's pointer kept, in `internal/player/playback`, outside the guard.
+The harness's approval admission reads a record of version 42 alone; the migration
+reads an owner's record of 35 to 42 (`LegacyVersion` stays 35). For owners: nothing
+the harness runs or records changes, and nothing plays differently from version 41.
+Every earlier version's harness evidence is stale to the harness, as at every bump.
