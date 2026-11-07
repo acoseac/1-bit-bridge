@@ -23,17 +23,17 @@ import (
 // start says why, records it, and goes on.
 
 // withAStepThatFailsMidway puts the store in r's data dir one step behind,
-// with a table named as the last step's index, so that step adds its
-// columns and then fails at the index, user_version unmoved: a migration
+// with the deletion journal gone, so the last step adds its column and then
+// fails looking for gated-format rows, user_version unmoved: a migration
 // begun and not finished.
 func (r *refusedInstall) withAStepThatFailsMidway(t *testing.T) {
 	t.Helper()
-	if latest := latestStoreVersion(t); latest != 60 {
-		t.Fatalf("the obstacle stands in migration 60's way, and the ladder ends at %d: give the last step an obstacle of its own", latest)
+	if latest := latestStoreVersion(t); latest != 61 {
+		t.Fatalf("the obstacle stands in migration 61's way, and the ladder ends at %d: give the last step an obstacle of its own", latest)
 	}
 	r.withAnOlderStore(t)
 	db := openRawStore(t, r.dataDir)
-	if _, err := db.Exec(`CREATE TABLE idx_tracks_sample_format_stale (x INTEGER)`); err != nil {
+	if _, err := db.Exec(`DROP TABLE manifest_deletions`); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -99,16 +99,16 @@ func TestAMigrationThatFailsStillRefusesTheRollback(t *testing.T) {
 	behind := storeVersion(t, r.dataDir)
 	binaries := watch(t, r.bin, r.bak)
 	for start := 1; start <= updater.ProbationFailedStarts; start++ {
-		if code, stderr := r.serve(t, serveOpts{}); code != 1 || !strings.Contains(stderr, "migration 60") {
+		if code, stderr := r.serve(t, serveOpts{}); code != 1 || !strings.Contains(stderr, "migration 61") {
 			t.Fatalf("start %d over a step that fails = %d, want 1 at the migration; stderr=%s", start, code, stderr)
 		}
 	}
 	if st := markerOf(t, r.dataDir); st.StoreMigratedBy != version.ServerVersion || st.FailedStarts != updater.ProbationFailedStarts {
 		t.Fatalf("the marker after the failed migrations = %+v, want the migration recorded and every start counted", st)
 	}
-	if v := storeVersion(t, r.dataDir); v != behind || !tracksHasColumn(t, r.dataDir, "sample_format_size") {
+	if v := storeVersion(t, r.dataDir); v != behind || !tracksHasColumn(t, r.dataDir, "correction_key") {
 		t.Fatalf("the store after the failed step: user_version %d (want %d unmoved), its columns added %v (want true): "+
-			"the test shows nothing", v, behind, tracksHasColumn(t, r.dataDir, "sample_format_size"))
+			"the test shows nothing", v, behind, tracksHasColumn(t, r.dataDir, "correction_key"))
 	}
 	code, stderr := r.serve(t, serveOpts{})
 	if code != 1 {
@@ -172,9 +172,9 @@ func TestAMigrationWhoseRecordCannotBeWrittenDoesNotRun(t *testing.T) {
 	if !armed.Load() {
 		t.Fatal("the migration's record was never written: the test shows nothing")
 	}
-	if v := storeVersion(t, r.dataDir); v != behind || tracksHasColumn(t, r.dataDir, "sample_format_size") {
+	if v := storeVersion(t, r.dataDir); v != behind || tracksHasColumn(t, r.dataDir, "correction_key") {
 		t.Errorf("the store after a refused record: user_version %d (want %d), the step's columns there %v (want false)",
-			v, behind, tracksHasColumn(t, r.dataDir, "sample_format_size"))
+			v, behind, tracksHasColumn(t, r.dataDir, "correction_key"))
 	}
 }
 
