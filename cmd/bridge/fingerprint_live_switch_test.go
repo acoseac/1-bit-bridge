@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/acoustid"
 	"github.com/acoseac/1-bit-bridge/internal/enrichgate"
 )
 
@@ -287,5 +288,45 @@ func TestTheFingerprintSwitchIsReadAtMostOnceASecond(t *testing.T) {
 	// The start's read and one a second over two and a half seconds.
 	if n := reads.Load(); n < 2 || n > 3 {
 		t.Errorf("the config was read %d time(s) while the switch was asked %d times, want the start's and one a second", n, 2*asked)
+	}
+}
+
+// TestBridgeFingerprintFollowsItsSwitchFromItsFirstRead (backlog B617, round
+// 4): a lookup run follows its switch from the read it starts on, before it
+// probes fpcalc, so a switch-off just after that read reaches the run within
+// a second however long the probe takes. The probe here (fingerprintProbe)
+// turns the config off as it begins and takes 1.6 s; the run sends no lookup
+// and exits 1 with the refusal, where a run that followed its switch only
+// once the probe was done sent its first lookup on the start's answer.
+func TestBridgeFingerprintFollowsItsSwitchFromItsFirstRead(t *testing.T) {
+	fingerprintSwitchCase{name: "probe"}.setUp(t)
+	cfg := filepath.Join(t.TempDir(), "bridge.yaml")
+	writeSwitchConfig(t, cfg, "  enabled: true\n")
+	off := configBytes(t, "  enabled: false\n")
+	f := newLookupRun(t, func(_ int64, w http.ResponseWriter, _ *http.Request) { noMatch(w) })
+	var flip flipAt
+	prev := fingerprintProbe
+	fingerprintProbe = func(ctx context.Context) (acoustid.Info, error) {
+		replaceFile(cfg, off)
+		flip.mark()
+		select {
+		case <-time.After(1600 * time.Millisecond):
+		case <-ctx.Done():
+			return acoustid.Info{}, ctx.Err()
+		}
+		return acoustid.Info{Path: "fpcalc", Version: "1.6.1"}, nil
+	}
+	t.Cleanup(func() { fingerprintProbe = prev })
+
+	code, stderr, ended := f.run("--config", cfg, "--key", "k")
+	if n := f.asked.Load(); n != 0 {
+		t.Errorf("AcoustID was asked %d time(s) after the switch-off during the probe", n)
+	}
+	if code != 1 || !strings.Contains(stderr, fingerprintOffRefusal+"enrich.enabled in "+cfg+")") ||
+		!strings.Contains(stderr, "--no-lookup") {
+		t.Errorf("exit %d, stderr:\n%s\nwant exit 1 and the switch-off's refusal", code, stderr)
+	}
+	if took := ended.Sub(flip.get(t)); took > 2*enrichgate.Interval+time.Second {
+		t.Errorf("the run ended %v after the switch-off", took)
 	}
 }

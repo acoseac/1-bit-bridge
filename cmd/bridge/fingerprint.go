@@ -85,21 +85,20 @@ func fingerprintCmd(ctx context.Context, args []string, stdout, stderr io.Writer
 		return 2
 	}
 
+	// The goroutine that follows a lookup run's switch writes a change to
+	// stderr while the run writes there too: one lock orders the two.
+	stderr = &syncWriter{w: stderr}
 	sw := &fingerprintSwitch{explicit: *configPath, stderr: stderr}
-	info, client, code := prepareFingerprintRun(ctx, *key, *noLookup, sw, stderr)
+	runCtx, stop, info, client, code := prepareFingerprintRun(ctx, *key, *noLookup, sw, stderr)
+	defer stop()
 	if code != 0 {
 		return code
 	}
 
-	// A lookup run follows its switch while it runs (backlog B617): a
-	// switch-off, or a config read at the start that goes away or no longer
-	// loads, cuts the lookup on the wire off and sends no other within a
-	// second (follow). The goroutine that reads the switch writes a change
-	// to stderr, which nothing else writes until stop has joined it.
-	runCtx, stop := ctx, func() {}
-	if client != nil {
-		runCtx, stop = sw.follow(ctx)
-	}
+	// A lookup run follows its switch from its first read (backlog B617;
+	// prepareFingerprintRun): a switch-off, or a config read at the start that
+	// goes away or no longer loads, ends runCtx, which cuts the lookup on the
+	// wire off and sends no other within a second (follow).
 	reports, interrupted := runFingerprintFiles(runCtx, client, paths,
 		time.Duration(*lengthSec)*time.Second, *prefixBytes)
 	switchedOff := enrichgate.Refusal(runCtx) != nil
@@ -184,11 +183,17 @@ func lastDidLookup(reports []fingerprintReport) bool {
 //
 // A run that would look up asks enrich.enabled first, before the key, the
 // probe or any decode (backlog B617): off, or a config it cannot read, it
-// sends nothing and exits 1; on, it says what decided that. --no-lookup sends
-// nothing, so it asks nothing.
+// sends nothing and exits 1; on, it says what decided that, and follows the
+// switch from then on, before anything else it does (round 4): runCtx is the
+// context the switch ends, which the probe and the run go on, and stop joins
+// the goroutine that follows it. A switch-off during the probe ends the probe
+// and leaves the run to stop at its first file, as a run stopped later does.
+// --no-lookup sends nothing, so it asks nothing, and runCtx is ctx.
 func prepareFingerprintRun(ctx context.Context, key string, noLookup bool,
-	sw *fingerprintSwitch, stderr io.Writer) (acoustid.Info, *acoustid.Client, int) {
+	sw *fingerprintSwitch, stderr io.Writer) (runCtx context.Context, stop func(),
+	info acoustid.Info, client *acoustid.Client, code int) {
 
+	runCtx, stop = ctx, func() {}
 	if !noLookup {
 		st := sw.start()
 		switch {
@@ -197,19 +202,23 @@ func prepareFingerprintRun(ctx context.Context, key string, noLookup bool,
 				"switched off (enrich.enabled) cannot be told, and no fingerprint is sent to\n"+
 				"AcoustID. Name a config that is there, or pass --no-lookup to fingerprint\n"+
 				"without contacting AcoustID.\n", st.path)
-			return acoustid.Info{}, nil, 1
+			return runCtx, stop, acoustid.Info{}, nil, 1
 		case st.err != nil:
 			fmt.Fprintf(stderr, "The config at %s does not load (%v),\n"+
 				"so whether enrichment is switched off (enrich.enabled) cannot be told, and no\n"+
 				"fingerprint is sent to AcoustID. Fix it, or pass --no-lookup to fingerprint\n"+
 				"without contacting AcoustID.\n", st.path, st.err)
-			return acoustid.Info{}, nil, 1
+			return runCtx, stop, acoustid.Info{}, nil, 1
 		case !st.on:
 			fmt.Fprintf(stderr, "Enrichment is switched off (%s), so no fingerprint is sent to AcoustID.\n"+
 				"Pass --no-lookup to fingerprint without contacting AcoustID.\n", st.source)
-			return acoustid.Info{}, nil, 1
+			return runCtx, stop, acoustid.Info{}, nil, 1
 		}
 		fmt.Fprint(stderr, st.line())
+		// Followed from this read on, before the key or the probe: a probe
+		// that takes longer than a second would otherwise let the first
+		// lookup go out on this read's answer after a switch-off.
+		runCtx, stop = sw.follow(ctx)
 	}
 	if key == "" {
 		key = os.Getenv("ACOUSTID_API_KEY")
@@ -220,33 +229,55 @@ func prepareFingerprintRun(ctx context.Context, key string, noLookup bool,
 			"Or pass --no-lookup to fingerprint without contacting AcoustID.\n")
 		// 1, not 2: this is "the run could not start", the same class as a
 		// missing fpcalc a few lines below — not a malformed command line.
-		return acoustid.Info{}, nil, 1
+		return runCtx, stop, acoustid.Info{}, nil, 1
 	}
 
-	info, err := acoustid.Probe(ctx)
-	if err != nil {
+	info, err := fingerprintProbe(runCtx)
+	switch {
+	case err != nil && enrichgate.Refusal(runCtx) != nil:
+		// The switch went off while fpcalc was probed: no failure of
+		// fpcalc's. The run goes on to stop at its first file, saying so.
+	case err != nil:
 		if errors.Is(err, acoustid.ErrFpcalcMissing) {
 			fmt.Fprintf(stderr, "%v\n\nInstall fpcalc (Chromaprint):\n", err)
 			printFpcalcInstallHint(stderr)
 		} else {
 			fmt.Fprintf(stderr, "fpcalc precheck: %v\n", err)
 		}
-		return acoustid.Info{}, nil, 1
+		return runCtx, stop, acoustid.Info{}, nil, 1
 	}
 	if noLookup {
-		return info, nil, 0
+		return runCtx, stop, info, nil, 0
 	}
 	userAgent := fmt.Sprintf("1-bit-bridge/%s (+https://github.com/acoseac/1-bit-bridge)",
 		version.ServerVersion)
 	// The client's switch is the run's (backlog B617): its last read, which
-	// the run's context refreshes once a second.
-	return info, acoustid.NewClient(fingerprintLookupBase, key, userAgent, nil, enrichgate.Enrichment(sw.get)), 0
+	// the goroutine that follows it refreshes once a second.
+	client = acoustid.NewClient(fingerprintLookupBase, key, userAgent, nil, enrichgate.Enrichment(sw.get))
+	return runCtx, stop, info, client, 0
+}
+
+// syncWriter orders the writes of the goroutines that share w.
+type syncWriter struct {
+	mu sync.Mutex
+	w  io.Writer
+}
+
+func (s *syncWriter) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.w.Write(p)
 }
 
 // fingerprintLookupBase is the AcoustID base `bridge fingerprint` asks, ""
 // for acoustid.DefaultBaseURL. A test points it at a server of its own and
 // puts it back once the run has returned; production never sets it.
 var fingerprintLookupBase = ""
+
+// fingerprintProbe is how `bridge fingerprint` probes fpcalc,
+// acoustid.Probe. A test makes it slow, and puts it back once the run has
+// returned; production never sets it.
+var fingerprintProbe = acoustid.Probe
 
 // fingerprintSwitch is enrich.enabled as `bridge fingerprint` reads it, as a
 // lookup run starts and once a second while it runs (backlog B617):
