@@ -138,16 +138,21 @@ func (s *Scanner) firstWriteMakesRoot(ctx context.Context, root string, look roo
 }
 
 // landingRoots is the configured roots in the form where a write lands is
-// compared with: each as it resolves (fsutil.ResolveLinks: its links, and on
-// Windows its junctions, which a write follows alike), so a write through a
-// link is found under a root configured through one, and a root that does not
-// resolve (its path is not there) as configured, made absolute, so a write
-// that would make that root's folder is found under it. The configured roots
-// a form stands for keep their names for the look, which counts the rows by
-// them. The forms are made only once a path's folder is found to resolve
-// elsewhere, so a write with no link on its way waits on no other root's
-// volume (a network mount that hangs); the folders a request names are
-// resolved once each.
+// compared with, each resolved as that is (fsutil.EvalSymlinksOrClean): its
+// links resolved, and on Windows its junctions, which a write follows alike,
+// so a write through a link is found under a root configured through one; and
+// a root whose path is not there resolved through its nearest folder that is,
+// its missing names kept, so a write that would make that root's folder is
+// found under it. Kept as it was configured, such a root was compared in
+// another form than the write wherever a link or another spelling leads to its
+// parent (backlog B794): a root nested in a library root configured through a
+// link, and on CI's hosts every root a test makes, under macOS's temporary
+// folder, reached through /var, a link to /private/var, or a Windows runner's,
+// named by its short name. The configured roots a form stands for keep their
+// names for the look, which counts the rows by them. The forms are made only
+// once a path's folder is found to resolve elsewhere, so a write with no link
+// on its way waits on no other root's volume (a network mount that hangs); the
+// folders a request names are resolved once each.
 type landingRoots struct {
 	configured []string
 	resolved   bool
@@ -168,7 +173,7 @@ func (l *landingRoots) resolve(s *Scanner) {
 	}
 	l.resolved = true
 	l.roots = make(map[string][]string)
-	resolveRoot := fsutil.ResolveLinks
+	resolveRoot := fsutil.EvalSymlinksOrClean
 	if h := s.resolveRootHook; h != nil {
 		resolveRoot = h
 	}
@@ -177,10 +182,7 @@ func (l *landingRoots) resolve(s *Scanner) {
 		if err != nil {
 			continue
 		}
-		form := abs
-		if resolved, err := resolveRoot(abs); err == nil {
-			form = resolved
-		}
+		form := resolveRoot(abs)
 		if _, seen := l.roots[form]; !seen {
 			l.forms = append(l.forms, form)
 		}

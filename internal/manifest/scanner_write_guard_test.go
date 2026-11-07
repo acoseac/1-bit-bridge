@@ -25,9 +25,9 @@ func TestAWriteWithNoLinkOnItsWayResolvesNoOtherRoot(t *testing.T) {
 	writeTracks(t, filepath.Join(music, "A", "one.flac"), filepath.Join(other, "B", "two.flac"))
 	s := NewScanner([]string{music, other}, openStoreIn(t, t.TempDir()), "")
 	var resolved []string
-	s.resolveRootHook = func(root string) (string, error) {
+	s.resolveRootHook = func(root string) string {
 		resolved = append(resolved, root)
-		return fsutil.ResolveLinks(root)
+		return fsutil.EvalSymlinksOrClean(root)
 	}
 	ctx := context.Background()
 	if err := s.RefuseWritesUnder(ctx, []string{
