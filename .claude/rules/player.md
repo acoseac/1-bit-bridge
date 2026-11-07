@@ -218,6 +218,6 @@ The bit-exact OpenHome player inside the bridge (B470), PR by PR. These sections
 
 ## Player DSD converted to PCM (B728 B11)
 
-- **A rate the effective set converts plays through the PCM path, and its occurrence is the policy's as a native or DoP one is, apart from its transport.** **Don't let a converted occurrence escape the check after open, its activation's, a reconciliation or a revocation for having no native plan, or judge one whose every frame has played.** → History-rules-player.md
+- **A rate the effective set converts plays through the PCM path, and its occurrence is the policy's as a native or DoP one is, apart from its transport.** **Don't let a converted occurrence escape the check after open, its activation's, a reconciliation or a revocation for having no native plan, read its set or plan off the session's lock, or judge one whose every frame has played.** → History-rules-player.md
 - **A cut of a converted successor whose first bits are in its predecessor's join window goes through that window, and is the producer's alone.** **Don't take the window's dependency from frame ownership, close the predecessor's converter before that successor is heard, or answer such a cut true once a frame from the window's first is the kernel's.** → History-rules-player.md
 - **A converted occurrence's claims (Details, the observation, `converted`) are its plan's: rate, valid bits, passband and dither.** **Don't state 24 bits, 30 kHz or 176.4 kHz for a plan that is not.** → History-rules-player.md
