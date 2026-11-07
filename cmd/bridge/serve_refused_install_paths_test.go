@@ -41,7 +41,7 @@ func TestServeMarkerDiagnosticsCarryNoPaths(t *testing.T) {
 		dir := t.TempDir()
 		unreadableInstallMarker(t, dir, true)
 		var stderr bytes.Buffer
-		if err := disarmEarlyRollback(t.Context(), dir, serveOpts{}, &stderr); err != nil {
+		if _, err := disarmEarlyRollback(t.Context(), dir, serveOpts{}, &stderr); err != nil {
 			t.Fatal(err)
 		}
 		requirePathlessMarkerOutput(t, dir, stderr.String(), "removed an install marker that could not be read")

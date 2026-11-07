@@ -778,9 +778,11 @@ between the record and the rename finishes the rollback at the next start
 whose settings are still refused (only on the same proof: recent, swapped,
 the backup's version, no version recorded over it, so a record older than
 6 h is left as it is). If the settings are fixed before that start, the new
-version starts instead, confirms the install (the marker then shows
-`"status": "installed"`, and `.bak` is removed at the start after), and the
-rollback is over. From the record on, the new version's store migrations
+version starts instead, and the rollback is over: since B660 its start puts
+the install back on probation (the marker then shows `"status":
+"installing"`, `.bak` kept) until a start of it confirms it (the B660
+paragraph below; until B660 that start stamped it installed, and `.bak` was
+removed at the start after). From the record on, the new version's store migrations
 are vetoed (`"migrationVeto"` in the marker), and the veto outlives the
 record, which the previous version's first start clears: a command of the
 new version that would migrate the store (`bridge doctor`, `bridge scan`,
@@ -828,7 +830,9 @@ and until that rename has landed the marker says the rollback is under way
 finished by the next start, as a rollback done where `.bak` is back, or as
 none where the version installed is still in place, whose start records
 that it opened the data dir, after which no rollback restores over its
-store (round 2 of B692).
+store (round 2 of B692) but the crash rollback of B660, which goes on over
+that record and is refused once a migration of the store has begun (the
+B660 paragraph below).
 Where it does not act it says why on an `updater: not rolling back the
 install of …` line (no backup, a backup of another version, a marker older
 than 6 h or dated in the future, another process on the data dir or the
@@ -845,7 +849,7 @@ hand once they are fixed); a release with this round clears the install
 from the record at its start and keeps the hold, which then follows the
 settings' digest. To see what is recorded: `cat <dataDir>/update-state.json`.
 
-**From the release that carries B705, the new version's first start completes
+**From the release that carries B705, the new version's first start takes up
 its install however late it comes.** A `bridge update` with the service
 stopped and a start the next day, or a crash between the swap and the
 restart, brings the new version up more than 6 h after the marker was
@@ -853,10 +857,13 @@ written. Before B705 that start read the marker as abandoned and cleared it:
 the install was never stamped installed, `.bak` was never removed, and the
 record that the new version opened the data dir (`"dataDirOpenedBy"`) went
 with the marker, so the console's Roll back then put `.bak` back over the
-store the new version had just migrated. Now that start confirms the install
-as any start of the new version does (the marker shows `"status":
-"installed"` and keeps `"dataDirOpenedBy"`; Roll back answers 409
-`rollback-refused`), and `.bak` is removed at the start after. A removal that
+store the new version had just migrated. Now that start goes on with the
+install as any start of the new version does, and keeps `"dataDirOpenedBy"`
+(Roll back answers 409 `rollback-refused`). Until B660 it also confirmed the
+install at once (`"status": "installed"`) and `.bak` was removed at the start
+after; since B660 the install stays on probation until a start of it has
+answered and stayed up (the next paragraph), and `.bak` is removed at the
+start after that confirmation. A removal that
 fails (Windows can fail one) leaves the marker as it is, with `updater: remove
 .bak: …; the install marker is left as it is, for the next start to remove
 it`, and the next start tries again. The 6 h limits above still stand: they
@@ -868,6 +875,164 @@ the hold (no status, `"dataDirOpenedBy"` and `"previousVersion"`), so a Roll
 back of the `.bak` they leave stays refused until a new install, or `.bak`
 removed by hand (since B707 the console does not offer it, and its Rollback
 row says why).
+
+**From the release that carries B660, an install counts as healthy only once
+it has answered and stayed up.** Until B660 the new version's first start
+stamped its install installed during its boot, before anything listened, and
+the start after it removed `.bak`: under `Restart=always` a new version that
+crashed after its boot had its backup deleted by its own second start, about
+two seconds later. Now the install stays on probation (`"status": "installing"`, `.bak`
+kept) until one start of it has answered as ready and then stayed up for 10
+minutes, on the monotonic clock: ready is a connect to its API listener that
+its own accept loop took, `GET /v1/health` answering 200 with its version
+(asked inside the process, which logs one `path=/v1/health` access line a
+round), and a read of its store. A scan, the library roots, enrichment, a TLS
+handshake, the tailnet, the player and DLNA play no part, so a slow first
+scan does not hold the confirmation back. The journal then says `updater: …
+has answered as ready and stayed up for 10m0s, so its install is confirmed:
+the backup of … is removed at the next start`, and the marker shows
+`"status": "installed"`. A start that never answers as ready says so once
+(`updater: … has not answered as ready within 10m0s of serving (…)`, the
+missing answer in the brackets), records `"notReady": true`, and keeps
+serving: not ready rolls nothing back. A start that has answered says so as it
+does (`updater: this start of … has answered as ready (its API listener,
+/v1/health and its store): its install is confirmed once it has stayed up for
+10m0s`), the moment from which a stop takes its count back as it arrives (the
+next bullet). The probe of a listener on the IPv6 wildcard (`[::]:7788`)
+dials 127.0.0.1 and then ::1, and so does `bridge health`, so a bridge bound
+IPv6-only beside another process on the port's IPv4 loopback is still
+reached.
+- **Each start of the new version counts itself** (`"failedStarts"`) before
+  it writes anything, and takes its count back when it ends cleanly. A stop
+  (`systemctl stop` or restart, `docker stop`, Ctrl-C, the SCM's Stop) or a
+  restart request (the console's Restart, the auto-installer's) takes it back
+  as soon as it arrives once the start has answered as ready, so a stop the
+  service manager has to finish with SIGKILL (past systemd's
+  `TimeoutStopSec`, launchd's `ExitTimeOut`) is taken back already, and a
+  crash in the teardown after it is not counted. Before the start has
+  answered, a stop takes it back only once its teardown has run: a version
+  that hangs before it is ready, which the service manager stops and then
+  kills, counts, and the third such start's successor tries the rollback
+  below (by hand with real builds: three hung starts, each killed three
+  seconds after its SIGTERM, then exit 75 and 0.2.3 back). The cost, taken
+  on purpose: a slow but healthy start killed in a slow teardown before it
+  was ready counts too. Whether an end is a stop is asked of the stop itself
+  once the teardown has run, so a stop followed at once by an error (a TLS
+  pair that will not load) is a stop. An API or console address another
+  process holds, one the host does not have (a static address not up yet
+  after a reboot), a bind refused for a permission the previous binary would
+  meet too (not where `.bak` carries file capabilities the new binary does
+  not: below), and a close of the tailnet listener that serve itself began
+  take it back after the teardown. A crash, a `kill -9` with no stop before
+  it, an OOM kill, a power cut, a panic, an error exit (a store that will not
+  open) and any other end of the tailnet listener, closed or not, stay
+  counted (the journal's `tsnet listener: …` line says which). A take-back
+  that cannot hold the marker's lock keeps asking for it until it lands or
+  the stop's budget ends: 10 s from the stop's arrival for the teardown and
+  the take-back together, inside the SCM's 15 s (the updater's wait for a
+  service to stop), launchd's 20 s and systemd's 90 s, neither of which the
+  plist or the unit changes, a take-back begun once a teardown longer than
+  that has run asking for 2 s more, never past 14 s from the stop's arrival;
+  one that never has it leaves the count
+  (`updater: this start ended cleanly and its count … was not taken back
+  within 10s …`). Once one start has not ended cleanly,
+  each start after it says how many came before it. A start that ends before
+  it counts itself (its settings refused, say) is not counted: the early
+  rollback above answers that case.
+- **At three, the next start tries to put `.bak` back before it writes anything**,
+  holding the data dir's lock and the marker's, where the marker shows the
+  install reached its swap and names the previous version, no version but the
+  new one opened the data dir, and no migration of the store began; `.bak`
+  must report that previous version, and load the settings
+  (`--validate-config`; a backup from before that check, 0.2.2 and older, is
+  not put back: it cannot say whether it loads them, and the start records
+  `the backup predates the settings check`). It records the new version as held back and its store migrations
+  vetoed, puts `.bak` back and exits 75: `updater: 3 starts of … since its
+  install did not end cleanly, so the install is rolled back: … is back at
+  /…/bridge and … is held back from the auto-installer; exiting for the
+  service manager to start …` (where nothing restarts it, run `bridge serve`
+  again). The count has no clock: three starts the next week count as three.
+- **Where it does not, it says why and goes on**: `updater: not rolling back
+  the install of … after N starts of it that did not end cleanly: …; this
+  start goes on, and counts itself`, with the reason in
+  `"rollbackRefused"`. Every later start that does not end cleanly asks
+  again, so a refusal that passes (a backup's settings check that did not
+  answer) is no lasting one. **A migration of the store refuses it for
+  good**: whatever first migrates the store after the update records
+  `"storeMigratedBy"` before its first step, and a step that failed counts
+  as begun, since the ladder's steps are not one transaction. While the
+  install awaits its confirmation after a start that did not end cleanly,
+  only serve's own start migrates it: every other command that would
+  (`bridge scan`, `analyze`, `artwork`, `upscale`, `optimize`, `render`,
+  `variants`, `manifest`, `library`, `enrichment`, `duplicates`) refuses,
+  running no step (`this command does not migrate the store: the install of
+  … awaits its confirmation, and N of its starts did not end cleanly: …`),
+  `bridge restore` refuses a snapshot it would migrate before it writes
+  anything, and `bridge doctor` runs none, says `N migrations pending` on its
+  `store-migrations` line and leaves the checks that read the store. With no
+  start before it that did not end cleanly (the one a running serve counts
+  left out), a command migrates as before. A serve runs, for these
+  questions, only where the marker's `"runningStart"` names a start whose own
+  lock is held: `serve-start-<token>.lock` in the data dir, which a counted
+  start takes before it writes its token with its count, holds while it runs
+  and lets go as it returns, its token cleared, and which every question asks
+  with a shared lock, so one question (a `bridge doctor` beside a `bridge
+  scan`) cannot pass for the start to another; never `server.lock`, which
+  `bridge reset-player`, `restore`, `manifest clear-missing` and `output dac
+  bind` hold too, and never a killed start's, whose lock dies with it. The
+  file a killed start leaves is removed by the next counted start (one left
+  where 0.2.3 is put back is harmless). Past that the
+  way back is the operator's: a snapshot from before the update
+  (`bridge restore`) with `.bak`, by hand. This is the design's plainest
+  cost: the ladder's top moved in 6 of the last 7 releases (0.1.7 23, 0.1.8
+  26, 0.1.9 41, 0.2.0 44, 0.2.1 50, 0.2.2 60, 0.2.3 60), so an install of
+  such a release whose starts crash after its first store open gets its
+  backup kept and a report (`bridge doctor` fails, the Probation row says
+  why), not a rollback.
+- **What the backup finds**: nothing the new version wrote without a
+  migration stops it starting. The tokens, the console's account and its
+  tickets, the harvest state and the marker are JSON it reads, dropping a
+  field it does not know at its next write; the player's DSD state or queue,
+  where it does not know a field, turns its player off, never serve; rows
+  extracted by a newer extractor are served as indexed until their file
+  changes.
+- **The auto-installer waits** from the first start of the new version
+  while its install is unconfirmed, for at most 20 minutes of that process's
+  uptime (each restart starts the 20 minutes again), where `.bak` is beside
+  the binary and the marker would not refuse the crash rollback: no rollback
+  of it refused, no migration begun, the swap reached, no other version over
+  the data dir (the Updates panel's deferred reason: `… awaits its
+  confirmation …`), so it does not replace `.bak` with a version not yet
+  known to run. It asks neither the backup's version nor its settings check:
+  those only the start that rolls back runs. A manual install (`bridge update`, the console's Install) is
+  not held, and its `.bak` is the unconfirmed version. An automatic install
+  over a release staged and not yet restarted makes that staged release
+  `.bak` while the marker names the running one, and a crash rollback then
+  refuses (`the backup is …, where the install replaced …`).
+- **Where to look**: `bridge doctor`'s `install-probation` line (ok on
+  probation, warn from one start that did not end cleanly, a serve running
+  now not counted among them, fail at three, where the rollback was refused,
+  or where a start did not answer as ready; it says the next start tries to
+  put `.bak` back, if the backup can run these settings, or why it does not),
+  its `store-migrations` line, the Updates panel's **Probation** row (graded
+  on the starts before the one running), and `"failedStarts"`,
+  `"storeMigratedBy"`, `"rollbackRefused"`, `"notReady"` and `"runningStart"`
+  in `update-state.json`. On a filesystem that keeps no locks an install is
+  counted but never confirmed and never rolled back (the next paragraph).
+  On Windows the crash rollback renames the running exe aside as the boot
+  rollback does (B202); that path has been checked by cross-compiling and by
+  the rename's own test, not on a Windows service.
+- **A binary given file capabilities** (`setcap cap_net_bind_service=+ep`,
+  to bind a port below 1024 as the service user) keeps them across an update
+  only where the updater may set them, run as root (`sudo bridge update`).
+  The service user's auto-installer and the console's install cannot: the
+  new binary's bind of that port is refused, and the start counts, since
+  `.bak` still carries them (`updater: the backup beside this binary carries
+  file capabilities this binary does not …`), so three such starts put `.bak`
+  back. Run `setcap` on the new binary after such an update, or update with
+  `sudo bridge update`. An SELinux label set by hand (`chcon`) is not carried
+  either: the new binary takes the label the policy gives a new file in its
+  directory (`restorecon`'s; backlog B760).
 
 **A data dir whose filesystem cannot fsync a directory.** Linux's NFS and
 CIFS/SMB clients treat a directory's fsync as a successful no-op, and its
@@ -901,8 +1066,9 @@ since B692 neither `bridge update`, the console's Install and Roll back nor
 the auto-installer installs or rolls back (`… the data dir's filesystem
 keeps no locks …: stop the bridge and replace its binary by hand`): **on
 such a mount, update with the service stopped**, the binary replaced by
-hand. An install there is not stamped installed and its `.bak` stays until
-the data dir is on a filesystem that keeps locks, and the rest goes on.
+hand. An install there is not stamped installed (confirmed, since B660) and
+its `.bak` stays until the data dir is on a filesystem that keeps locks, its
+starts are counted and never rolled back, and the rest goes on.
 
 ## A volume that is mounted after the bridge starts (backlog B651)
 

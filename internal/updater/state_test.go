@@ -87,14 +87,17 @@ func TestDecideBootAction(t *testing.T) {
 			serverVer: "0.1.0",
 		},
 		{
-			name: "installing + version-match → success",
+			// Backlog B660: a version match is the install on probation,
+			// never its success: the housekeeping runs before anything
+			// listens.
+			name: "installing + version-match → probation",
 			st: State{
 				Status:        "installing",
 				TargetVersion: "0.2.0",
 				AttemptedAt:   now.Add(-time.Minute),
 			},
 			serverVer: "0.2.0",
-			want:      BootInstallSucceeded,
+			want:      BootInstallProbation,
 		},
 		{
 			name: "installing + swapped + version-mismatch → failed",
@@ -126,16 +129,17 @@ func TestDecideBootAction(t *testing.T) {
 			// Upgrade-boundary guard: a marker written by a pre-fix
 			// binary has no swapStarted field (false after unmarshal),
 			// but if we're demonstrably RUNNING TargetVersion the swap
-			// obviously happened — the success stamp must still fire, or
-			// InstalledAt is never set and .bak is never reclaimed.
-			name: "installing + never swapped + version-match → success",
+			// obviously happened — the install must still go on
+			// probation, or it is never confirmed and .bak is never
+			// reclaimed.
+			name: "installing + never swapped + version-match → probation",
 			st: State{
 				Status:        "installing",
 				TargetVersion: "0.2.0",
 				AttemptedAt:   now.Add(-time.Minute),
 			},
 			serverVer: "0.2.0",
-			want:      BootInstallSucceeded,
+			want:      BootInstallProbation,
 		},
 		{
 			name: "installing + abandoned (older than recency window) → clear",
@@ -172,7 +176,37 @@ func TestDecideBootAction(t *testing.T) {
 				AttemptedAt:   now.Add(-time.Minute),
 			},
 			serverVer: "0.2.0",
-			want:      BootInstallSucceeded,
+			want:      BootInstallProbation,
+		},
+		{
+			// Backlog B660: the count, the refusal and the readiness
+			// record decide nothing at boot: the crash rollback runs
+			// before the admission, and readiness is serve's.
+			name: "installing + version-match + three failed starts → probation",
+			st: State{
+				Status:          "installing",
+				TargetVersion:   "0.2.0",
+				PreviousVersion: "0.1.0",
+				AttemptedAt:     now.Add(-time.Minute),
+				SwapStarted:     true,
+				FailedStarts:    ProbationFailedStarts,
+				RollbackRefused: "a refusal",
+				NotReady:        true,
+			},
+			serverVer: "0.2.0",
+			want:      BootInstallProbation,
+		},
+		{
+			name: "installing + another version + a count → failed, as before",
+			st: State{
+				Status:        "installing",
+				TargetVersion: "0.2.0",
+				AttemptedAt:   now.Add(-time.Minute),
+				SwapStarted:   true,
+				FailedStarts:  ProbationFailedStarts,
+			},
+			serverVer: "0.1.0",
+			want:      BootInstallFailed,
 		},
 	}
 	for _, c := range cases {
@@ -188,8 +222,9 @@ func TestDecideBootAction(t *testing.T) {
 // rollback's record (Status "", RollbackStarted) is its own case, never an
 // install marker and never a hold alone (backlog B613's round 3). The
 // housekeeping runs only once serve got past its settings, so the install's
-// version booting confirms the install, whatever the record's age (an
-// expired one is confirmed, not cleared); the backup's version booting
+// version booting overtakes the rollback, whatever the record's age (an
+// expired one is overtaken, not cleared), and puts the install back on
+// probation (ProbationOverRollback, backlog B660); the backup's version booting
 // means the rollback finished, and keeps the hold; any other version, and a
 // hold with no rollback, does nothing.
 func TestDecideBootActionReadsAnInterruptedRollbackOnItsOwn(t *testing.T) {
@@ -223,53 +258,61 @@ func TestDecideBootActionReadsAnInterruptedRollbackOnItsOwn(t *testing.T) {
 	}
 }
 
-// TestTheConfirmationOverARollbackKeepsWhatIsNotItsOwn: the install is
-// confirmed (installed, now), the rollback's mark goes, and the hold goes
-// only where it holds this version back; the install and the data dir's
-// record stay, for the boot after it to clean the backup up by.
+// TestTheConfirmationOverARollbackKeepsWhatIsNotItsOwn: over a rollback's
+// record of an install of the version booting, the install goes back on
+// probation (installing, not installed: backlog B660), the rollback's mark
+// goes, and the hold and the veto go only where they name this version; the
+// install, the data dir's record and the count of starts that did not end
+// cleanly stay, since that install has not been confirmed. Until B660 the
+// install was confirmed here, stamped installed, and the boot after it
+// removed the backup.
 func TestTheConfirmationOverARollbackKeepsWhatIsNotItsOwn(t *testing.T) {
 	now := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
 	record := RollbackRecord(State{Status: "installing", TargetVersion: "0.2.3", PreviousVersion: "0.2.1",
 		AttemptedAt: now.Add(-time.Minute), SwapStarted: true}, "0.2.3", "0.2.3 refused this bridge's settings: line 4: x", "a digest")
 	record.DataDirOpenedBy = "0.2.3"
-	got, err := ConfirmOverRollback(record, "0.2.3", now)
+	record.FailedStarts = 2
+	got, err := ProbationOverRollback(record, "0.2.3")
 	if err != nil {
-		t.Fatalf("ConfirmOverRollback = %v", err)
+		t.Fatalf("ProbationOverRollback = %v", err)
 	}
-	want := State{Status: "installed", TargetVersion: "0.2.3", PreviousVersion: "0.2.1", AttemptedAt: record.AttemptedAt,
-		InstalledAt: now, SwapStarted: true, DataDirOpenedBy: "0.2.3"}
+	want := State{Status: "installing", TargetVersion: "0.2.3", PreviousVersion: "0.2.1", AttemptedAt: record.AttemptedAt,
+		SwapStarted: true, DataDirOpenedBy: "0.2.3", FailedStarts: 2}
 	if got != want {
-		t.Errorf("ConfirmOverRollback =\n %+v\nwant\n %+v", got, want)
+		t.Errorf("ProbationOverRollback =\n %+v\nwant\n %+v", got, want)
 	}
-	if DecideBootAction(got, "0.2.3", now.Add(time.Hour)) != BootCleanupBak {
-		t.Errorf("the boot after the confirmation does not clean the backup up")
+	if DecideBootAction(got, "0.2.3", now.Add(time.Hour)) != BootInstallProbation {
+		t.Errorf("the boot after the rollback was overtaken does not find the install on probation")
 	}
 	other := record
 	other.RejectedVersion, other.RejectedReason, other.RejectedConfigDigest = "0.2.4", "0.2.4 refuses this bridge's settings: line 9: y", "another digest"
-	got, err = ConfirmOverRollback(other, "0.2.3", now)
+	other.MigrationVeto = "0.2.4"
+	got, err = ProbationOverRollback(other, "0.2.3")
 	if err != nil {
-		t.Fatalf("ConfirmOverRollback = %v", err)
+		t.Fatalf("ProbationOverRollback = %v", err)
 	}
-	if got.RejectedVersion != "0.2.4" || got.RejectedReason != other.RejectedReason || got.RejectedConfigDigest != other.RejectedConfigDigest {
-		t.Errorf("a hold of another version after the confirmation = %+v, want it kept", got)
+	if got.RejectedVersion != "0.2.4" || got.RejectedReason != other.RejectedReason || got.RejectedConfigDigest != other.RejectedConfigDigest ||
+		got.MigrationVeto != "0.2.4" {
+		t.Errorf("a hold and a veto of another version after the rollback was overtaken = %+v, want them kept", got)
 	}
-	if got.Status != "installed" || got.RollbackStarted {
-		t.Errorf("the confirmation = %+v, want installed with no rollback started", got)
+	if got.Status != "installing" || got.RollbackStarted {
+		t.Errorf("the rollback overtaken = %+v, want the install on probation with no rollback started", got)
 	}
 }
 
-// TestTheConfirmationNeedsTheInstallsOwnRecordOfTheDataDir: an install is
-// confirmed over the early rollback's record only on the record serve's
-// admission makes of the install's own version opening the data dir (backlog
-// B613's round 4); with none, or another version's, ConfirmOverRollback
-// refuses, and its caller leaves the marker as it is.
+// TestTheConfirmationNeedsTheInstallsOwnRecordOfTheDataDir: an install goes
+// back on probation over the early rollback's record only on the record
+// serve's admission makes of the install's own version opening the data dir
+// (backlog B613's round 4; until B660 it was confirmed there); with none, or
+// another version's, ProbationOverRollback refuses, and its caller leaves the
+// marker as it is.
 func TestTheConfirmationNeedsTheInstallsOwnRecordOfTheDataDir(t *testing.T) {
 	now := time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
 	record := RollbackRecord(State{Status: "installing", TargetVersion: "0.2.3", PreviousVersion: "0.2.1",
 		AttemptedAt: now.Add(-time.Minute), SwapStarted: true}, "0.2.3", "0.2.3 refused this bridge's settings: line 4: x", "a digest")
 	for _, tc := range []struct {
 		name, openedBy string
-		confirms       bool
+		resumes        bool
 	}{
 		{"no version recorded", "", false},
 		{"the backup's version recorded", "0.2.1", false},
@@ -280,12 +323,12 @@ func TestTheConfirmationNeedsTheInstallsOwnRecordOfTheDataDir(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			st := record
 			st.DataDirOpenedBy = tc.openedBy
-			got, err := ConfirmOverRollback(st, "0.2.3", now)
+			got, err := ProbationOverRollback(st, "0.2.3")
 			switch {
-			case tc.confirms && (err != nil || got.Status != "installed"):
-				t.Errorf("ConfirmOverRollback with %q recorded = %+v, %v; want the install confirmed", tc.openedBy, got, err)
-			case !tc.confirms && err == nil:
-				t.Errorf("ConfirmOverRollback with %q recorded = %+v, want a refusal", tc.openedBy, got)
+			case tc.resumes && (err != nil || got.Status != "installing" || got.RollbackStarted):
+				t.Errorf("ProbationOverRollback with %q recorded = %+v, %v; want the install back on probation", tc.openedBy, got, err)
+			case !tc.resumes && (err == nil || got != st):
+				t.Errorf("ProbationOverRollback with %q recorded = %+v, %v; want a refusal and the record as it was", tc.openedBy, got, err)
 			}
 		})
 	}

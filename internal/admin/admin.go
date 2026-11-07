@@ -1400,6 +1400,15 @@ type UpdateStatus struct {
 	// its own, as it shows a held update. Empty where the rollback would
 	// run, and where there is no backup. Names no path.
 	RollbackRefusal string `json:"rollbackRefusal,omitempty"`
+	// Probation says where an install of the running version that awaits
+	// its confirmation stands (backlog B660): the running start's own words
+	// from updater.ProbationStatus, its own start taken off the count of
+	// starts that did not end cleanly, so they speak of the starts before it.
+	// Empty where no install of the running version awaits its
+	// confirmation. ProbationLevel is "ok", "warn" or "fail", the Updates
+	// panel's badge. Names no path and no value.
+	Probation      string `json:"probation,omitempty"`
+	ProbationLevel string `json:"probationLevel,omitempty"`
 	// DeferredReason is the most-recent gate-refusal explanation
 	// from the auto-installer. Empty when the previous cycle
 	// either installed the candidate, found no candidate, or
