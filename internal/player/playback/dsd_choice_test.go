@@ -374,28 +374,39 @@ func TestAStaleAnswerNeverCarriesARevisionTheStateHasMovedPast(t *testing.T) {
 // TestARevisionMovedBeforeTheStoresWriteIsStale (binding note 2): the
 // compare-and-set reads the state inside the store's one write, so a write
 // another writer makes between a choice write's reading and its own (the
-// migration's part for a DAC, which writes a choice) makes it stale, and
-// never written over.
+// migration's part for a DAC, which writes a choice) makes it stale, and is
+// never written over: one that moves the revision alone, what plays as it
+// was, which only the compare-and-set inside the write can see, and one that
+// changes what plays too, which sends the write round again first.
 func TestARevisionMovedBeforeTheStoresWriteIsStale(t *testing.T) {
-	b, store, _ := choiceBackend(t, playbacktest.ChoiceState(dsdstate.ModeNative))
-	var once sync.Once
-	playback.SetSeamsForTest(b, &playback.Seams{ChoicePending: func() {
-		once.Do(func() {
-			if err := store.Update(func(st *dsdstate.State) error {
-				st.DACs[0].Choice.Revision, st.DACs[0].Choice.Mode, st.DACs[0].Choice.SetBy = 2, dsdstate.ModeConvert, dsdstate.ByMigration
-				return nil
-			}); err != nil {
-				t.Error(err)
+	for _, tc := range []struct {
+		name, mode string
+	}{
+		{"the revision alone", dsdstate.ModeNative},
+		{"what plays too", dsdstate.ModeConvert},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b, store, _ := choiceBackend(t, playbacktest.ChoiceState(dsdstate.ModeNative))
+			var once sync.Once
+			playback.SetSeamsForTest(b, &playback.Seams{ChoicePending: func() {
+				once.Do(func() {
+					if err := store.Update(func(st *dsdstate.State) error {
+						st.DACs[0].Choice.Revision, st.DACs[0].Choice.Mode, st.DACs[0].Choice.SetBy = 2, tc.mode, dsdstate.ByMigration
+						return nil
+					}); err != nil {
+						t.Error(err)
+					}
+				})
+			}})
+			res := b.ChooseDSD(bg, choiceOf(t, b, dsdstate.ModeOff, 1))
+			wantChoice(t, res, playback.ChoiceStale)
+			if c := store.State().DACs[0].Choice; c.Mode != tc.mode || c.Revision != 2 || c.SetBy != dsdstate.ByMigration {
+				t.Errorf("the state holds %+v, want the other writer's %s at revision 2", c, tc.mode)
+			}
+			if got := revisionOf(t, res.Policy); got != 2 {
+				t.Errorf("the stale answer carries revision %d, want 2", got)
 			}
 		})
-	}})
-	res := b.ChooseDSD(bg, choiceOf(t, b, dsdstate.ModeOff, 1))
-	wantChoice(t, res, playback.ChoiceStale)
-	if c := store.State().DACs[0].Choice; c.Mode != dsdstate.ModeConvert || c.Revision != 2 {
-		t.Errorf("the state holds %+v, want the other writer's convert at revision 2", c)
-	}
-	if got := revisionOf(t, res.Policy); got != 2 {
-		t.Errorf("the stale answer carries revision %d, want 2", got)
 	}
 }
 
