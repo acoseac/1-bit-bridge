@@ -328,9 +328,10 @@ func (e *Enricher) WithPremiumCovers(f PremiumCoverFetcher) *Enricher {
 // so turning it on takes effect within one. Each batch runs on the switch's
 // context (enrichgate.CancelWhenOff), so turning it off stops the batch under
 // way as a shutdown would: a request after the flip is refused at its send,
-// an answer after it is not taken, one on the wire is cancelled within a
-// second, and what the batch was enriching stays at enriched_at = 0 for the
-// turn that follows the switch's.
+// an answer whose headers arrive after it is not taken, one on the wire is
+// cancelled within a second (a cover whose body ended inside that second may
+// be in the cache; nothing further goes out), and what the batch was
+// enriching stays at enriched_at = 0 for the turn that follows the switch's.
 func (e *Enricher) Run(ctx context.Context) {
 	var report switchReport
 	for {

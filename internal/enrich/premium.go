@@ -70,9 +70,11 @@ type atlasPremiumFetcher struct {
 // gets a 30s-timeout default — an image fetch over a high-latency relay link
 // must not hang background enrichment forever (http.DefaultClient has no
 // timeout). sw is enrich.enabled as the fetcher asks it
-// (enrichgate.Enrichment; backlog B617): a cover is fetched, and its answer
-// taken, only while it is on, whatever context the fetch carries; zero
-// switches are off, and fetch nothing.
+// (enrichgate.Enrichment; backlog B617): a cover is fetched only while it is
+// on, whatever context the fetch carries, and an answer that wrote nothing is
+// taken only while it still is; a cover the fetcher's write has committed is
+// final, whatever the switch says by its return (round 5). Zero switches are
+// off, and fetch nothing.
 func NewAtlasPremiumFetcher(cred AtlasCredentialSource, userAgent string, httpClient *http.Client, cacheDir string, sw enrichgate.Switches) PremiumCoverFetcher {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 30 * time.Second}

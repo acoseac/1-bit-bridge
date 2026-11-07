@@ -15,6 +15,14 @@
 // request's context carries as well as its own, and a refusal from either ends
 // that context's pass.
 //
+// That is the whole promise, and it is about what goes out (round 5): off, no
+// request is sent, and one on the wire is cut off within Interval. What an
+// answer that finished inside that interval gives may still be written
+// locally (a cover streamed to the cache, a portrait, a premium cover its
+// fetcher committed), and nothing further goes out; nothing here gates a
+// local write against the flip. A refusal is ErrOff, the upstream not asked,
+// never a terminal miss, so nothing is lost once the switch is on again.
+//
 // enrich.enabled governs every send (the MusicBrainz, Cover Art Archive,
 // Deezer, iTunes, Atlas premium-cover and AcoustID clients, a mirror's
 // included); enrich.deezerEnabled governs Deezer's sends alone, so turning
@@ -302,8 +310,10 @@ func (s Switches) refusal() error {
 
 // Answer asks s and the switches ctx carries whether what a client is about
 // to take may be taken: a request at its send, an answer as it arrives, and
-// whatever a client returns once its answer began (a decoded body, a 404, an
-// error status's body), which a caller could otherwise keep as a miss. A
+// whatever a client returns once its answer began, having written nothing of
+// it (a decoded body, a 404, an error status's body), which a caller could
+// otherwise keep as a miss. A client's own write that has committed is final,
+// and its return asks nothing (the premium cover fetch's; round 5). A
 // refusal ends the switch contexts ctx carries that it reaches, so the pass
 // on ctx stops, and is returned, ErrOff before ErrDeezerOff; nil when every
 // switch is on.
@@ -358,8 +368,10 @@ func (s Switches) watch(ctx context.Context) (context.Context, func()) {
 // a context that carries none answering to s alone; its answer is taken only
 // while they still are when it arrives; and while it is on the wire, its body
 // included, s is asked every interval, and a switch-off cuts it off with the
-// switch's refusal rather than a bare cancellation. The request's watch ends
-// when its body is closed, or with the error that ends it.
+// switch's refusal rather than a bare cancellation. A body that ends before
+// that ask is read whole, and what its reader writes of it is the reader's
+// (the package doc). The request's watch ends when its body is closed, or
+// with the error that ends it.
 func (s Switches) Transport(base http.RoundTripper) http.RoundTripper {
 	if base == nil {
 		base = http.DefaultTransport

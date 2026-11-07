@@ -67,8 +67,10 @@ type ITunesClient struct {
 // NewITunesClient constructs a client. userAgent must identify the
 // caller (Apple's recommended courtesy; not enforced). sw is enrich.enabled
 // as the client asks it (enrichgate.Enrichment; backlog B617): a request is
-// sent, and its answer taken, only while it is on, whatever context the
-// request carries; zero switches are off, and send nothing.
+// sent, and its answer taken or handed over, only while it is on, whatever
+// context the request carries, and an artwork body it hands over is cut off
+// within enrichgate.Interval of a switch-off (what its reader wrote of it by
+// then stays); zero switches are off, and send nothing.
 func NewITunesClient(base, userAgent string, httpClient *http.Client, sw enrichgate.Switches) *ITunesClient {
 	if base == "" {
 		base = DefaultITunesBase

@@ -55,8 +55,10 @@ type CoverArtClient struct {
 
 // NewCoverArtClient constructs a client. sw is enrich.enabled as the client
 // asks it (enrichgate.Enrichment; backlog B617): a request is sent, and its
-// answer taken, only while it is on, whatever context the request carries;
-// zero switches are off, and send nothing.
+// answer handed over, only while it is on, whatever context the request
+// carries, and the body it hands over is cut off within enrichgate.Interval
+// of a switch-off (what its reader wrote of it by then stays); zero switches
+// are off, and send nothing.
 func NewCoverArtClient(base, userAgent string, httpClient *http.Client, sw enrichgate.Switches) *CoverArtClient {
 	if base == "" {
 		base = DefaultCoverArtBase

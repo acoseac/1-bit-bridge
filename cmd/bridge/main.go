@@ -360,9 +360,12 @@ func (b bookletDiskStore) RemoveBooklet(mbid string) error {
 // leaves the pending covers and their attempts as they are. Each fetch runs
 // on the switch's context (enrichgate.CancelWhenOff), and the premium
 // fetcher's own client, built with the same switch, refuses a request that
-// starts after the flip and an answer that arrives after it, and cuts one on
-// the wire off within a second, whatever context it is handed; a miss that
-// meets the switch off is no miss either. A cover written while on is kept.
+// starts after the flip and an answer whose headers arrive after it, and cuts
+// one on the wire off within a second, whatever context it is handed; a miss
+// that meets the switch off is no miss either. A cover the fetcher's write
+// has committed is got, whatever the switch says by then (backlog B617, round
+// 5): it is in the cache, its stale tiers go, and the harvest settles it,
+// where a pause would have fetched it again.
 // Nil is off, as everywhere enrichgate asks a switch: nothing is asked of
 // Atlas. switchEvery is how far apart the fetch's context asks the switch (a
 // second when zero; a test seam).

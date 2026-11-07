@@ -18,11 +18,14 @@ import (
 // (enrichgate.CancelWhenOff). Every client holds the switches cmd/bridge built
 // it with (enrichgate.Switches) and asks them whatever context a request
 // carries, so a request that starts after the flip is refused before it
-// leaves, an answer that arrives after it is not taken, and a request on the
-// wire is cancelled within a second; each refusal cancels the batch's context
-// at once, so the pass stops as at a shutdown, and stampEnriched, markSkipped
-// and the fingerprint veto's write ask the switch again at the write. A row
-// waits at enriched_at = 0, and turning the switch on resumes it.
+// leaves, an answer whose headers arrive after it is not taken, and a request
+// on the wire is cancelled within a second; each refusal cancels the batch's
+// context at once, so the pass stops as at a shutdown, and stampEnriched,
+// markSkipped and the fingerprint veto's write ask the switch again at the
+// write. A cover or a portrait whose body ended inside that second may still
+// be written to the cache, and nothing further goes out: the switch is about
+// what goes out (enrichgate's package doc). A row waits at enriched_at = 0,
+// and turning the switch on resumes it.
 // deezerEnabled stops the Deezer requests alone: each runs on a context of
 // its own (enrichgate.CancelWhenDeezerOff), so a Deezer flip cancels a Deezer
 // request and leaves the batch, and MusicBrainz on it, running.

@@ -167,9 +167,10 @@ const fingerprintTagVetoTTL = 30 * 24 * time.Hour
 // way stops as at a shutdown: AcoustID's client refuses a lookup that starts
 // after the flip and an answer that arrives after it, a lookup on the wire
 // is cancelled within a second, the decode is killed, the pacing ends, and
-// what the pass would write asks the switch again at the write (admitted),
-// so nothing is cached, persisted or re-queued. Nil is off, as everywhere
-// enrichgate asks a switch: no pass runs, and none is recorded.
+// what the pass would write asks the switch again at the write (admitted):
+// a write that finds it off is not made, and its file is offered again once
+// the switch is on. Nil is off, as everywhere enrichgate asks a switch: no
+// pass runs, and none is recorded.
 func runFingerprintSweeper(ctx context.Context, s *fingerprintSweeper, enabled, enrichmentOn func() bool, interval func() time.Duration, nudge, rearm <-chan struct{}, status *sweepStatus[admin.FingerprintSweepCounts]) {
 	runSweepLoop(ctx, status, fingerprintSweeperSettleDelay, interval, nudge, rearm, func(bool) {
 		if enabled != nil && !enabled() {
