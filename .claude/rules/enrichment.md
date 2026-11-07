@@ -429,7 +429,7 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   first. Artwork cache keys stay MB-derived so the wire shape is unchanged.
 - **`enrich.enabled` stops every lookup it names and `enrich.deezerEnabled`
   its Deezer lookups alone; both are on when absent, both are live, and only
-  off is ever written** (2026-11-06, backlog B617, three rounds). Off stops,
+  off is ever written** (2026-11-06, backlog B617, four rounds). Off stops,
   with no restart, every MusicBrainz, Cover Art Archive, Deezer, AcoustID
   and Atlas premium-cover request, a mirror's and the harvest's covers
   included. The switches are each client's own (`internal/enrichgate`):
@@ -437,10 +437,11 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   (`enrichgate.Enrichment`, Deezer's `enrichgate.Deezer`), serve's over the
   live config, and a nil predicate, or none, is off, so a client sends
   nothing while they are off whatever context it is handed. Its transport
-  asks them, and those its request's context carries, at the send, at the
-  answer and once the answer is complete (the decode of MusicBrainz's,
-  Deezer's, iTunes' and AcoustID's), and a watch of its own, released at
-  the body's Close or the error, cuts a request on the wire off within
+  asks them, and those its request's context carries, at the send and at
+  the answer, and the client asks them again at each return once its
+  answer began, a decoded body, a 404 and an error status's body alike, in
+  every client; a watch of the transport's own, released at the body's
+  Close or the error, cuts a request on the wire off within
   `enrichgate.Interval` (a second): a request after the flip is refused
   before it leaves, and an answer whose headers or body arrive after it is
   not taken. The enricher's batch, each fingerprint pass and each harvest
@@ -468,9 +469,10 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   client, reads `BRIDGE_ENRICH_ENABLED`, else the file `--config` names
   (one that is not there refuses), else the config at the default path,
   else on: as it starts, refusing a lookup before its probe, and once a
-  second while it runs (`fingerprintSwitch.follow`), which ends the run,
-  exit 1, within a second of the switch going off or a config it read
-  going away or no longer loading. The variables read as the keys do, a
+  second from that read on, the key check and the probe included
+  (`fingerprintSwitch.follow`), which ends the run, exit 1, within a second
+  of the switch going off or a config it read going away or no longer
+  loading. The variables read as the keys do, a
   value that reads as neither being off (`switchEnvPaths`), and the
   holder's save writes a switch only when it changes it, else the file's
   own value (`filedSwitches`; the other variables are B761's). AcoustID
@@ -486,11 +488,13 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   each switch written off (`priorEnrich`). **Don't build a client without
   its switches or read a nil switch as on, send what a client's switches or
   a context's refuse, take or write what a pass learns after the flip, an
-  answer completed after it included, take a client's error for a miss
-  without asking it for a refusal, rely on a context's tick alone, write a
-  match's provenance apart from its re-queue or keep a match whose re-queue
-  did not land, read `bridge fingerprint`'s switch once or re-read its
-  config at each ask, answer a switched-off cover refetch as a miss, let a
+  answer completed after it included, return from a client once its answer
+  began without asking its switches again, an error status's included, take
+  a client's error for a miss without asking it for a refusal, rely on a
+  context's tick alone, write a match's provenance apart from its re-queue
+  or keep a match whose re-queue did not land, read `bridge fingerprint`'s
+  switch once, follow it only once its probe is done or re-read its config
+  at each ask, answer a switched-off cover refetch as a miss, let a
   fingerprint go out with enrichment off from serve or the CLI,
   negative-cache an answer Deezer never gave, give `enrichOne` a stop path
   of its own, read the opt-outs' variables as other booleans are, write a
@@ -514,6 +518,10 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   `TestTheClientRefusesABareContextWhileItsSwitchIsOff`,
   `TestTheClientCutsOffABareContextsLookupWhenItsSwitchTurnsOff`,
   `TestANoMatchCompletedAfterTheFlipIsNoAnswer`,
+  `TestEveryClientsErrorAnswerCompletedAfterTheFlipIsNoAnswer`,
+  `TestAnErrorAnswerCompletedAfterTheFlipFillsNoNegativeCache`,
+  `TestAnErrorAnswerCompletedAfterTheFlipIsNoAnswer`,
+  `TestAPremiumCoverCompletedAfterTheFlipCountsNoCover`,
   `TestServeBuildsEveryClientOverTheLiveSwitches`,
   `TestNoSwitchIsOffForTheSweepAndTheCoverRefresh`,
   `TestAnAnswerAfterTheFlipIsNotTaken`,
@@ -538,6 +546,7 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   `TestBridgeFingerprintRefusesALookupWhileEnrichmentIsOff`,
   `TestBridgeFingerprintReadsTheConfigItIsGiven`,
   `TestBridgeFingerprintFollowsItsSwitchWhileItRuns`,
+  `TestBridgeFingerprintFollowsItsSwitchFromItsFirstRead`,
   `TestTheFingerprintSwitchIsReadAtMostOnceASecond`,
   `TestTheOffSwitchLoads`, `TestAConsoleSaveKeepsTheFilesOwnSwitches`,
   `TestTheWireManifestIsTheProvidersAlone`,
