@@ -97,6 +97,13 @@ func runFpcalcStandIn() int {
 
 // installFpcalcStandIn puts a copy of this test binary on PATH under the
 // name fpcalc, and nothing else, so LookPath cannot find a real fpcalc.
+//
+// A stand-in built with -race sleeps a second as it exits (the race
+// runtime's atexit_sleep_ms, 1000 by default), half the 2 s the probe gives
+// `fpcalc -version`: measured on Linux, each -version start of this
+// package's race binary took 1.036 s, and 0.033 s with the sleep off
+// (backlog B617, round 5). The stand-in runs with it off; a race report
+// still prints as the race is found.
 func installFpcalcStandIn(t *testing.T, pidFile, nextFile string) {
 	t.Helper()
 	bin := t.TempDir()
@@ -105,6 +112,7 @@ func installFpcalcStandIn(t *testing.T, pidFile, nextFile string) {
 	t.Setenv(fpcalcStandInEnv, "1")
 	t.Setenv(fpcalcStandInPID, pidFile)
 	t.Setenv(fpcalcStandInNext, nextFile)
+	t.Setenv("GORACE", strings.TrimSpace(os.Getenv("GORACE")+" atexit_sleep_ms=0"))
 }
 
 // TestFpcalcBudgetDefaultsToTenMinutes pins the production bound. A test

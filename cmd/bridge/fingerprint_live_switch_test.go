@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -85,8 +86,9 @@ func TestBridgeFingerprintReadsTheConfigItIsGiven(t *testing.T) {
 }
 
 // lookupRun is `bridge fingerprint` over two tracks of fpcalcLookupSeconds,
-// lookup-1.flac and lookup-2.flac, with the fpcalc stand-in on PATH and an
-// AcoustID of the test's own, which answers each lookup with answer.
+// lookup-1.flac and lookup-2.flac, with the fpcalc stand-in its test put on
+// PATH (installFpcalcStandIn) and an AcoustID of the test's own, which
+// answers each lookup with answer.
 type lookupRun struct {
 	dir    string
 	asked  atomic.Int64
@@ -106,8 +108,45 @@ func newLookupRun(t *testing.T, answer func(n int64, w http.ResponseWriter, r *h
 	prev := fingerprintLookupBase
 	fingerprintLookupBase = srv.URL
 	t.Cleanup(func() { fingerprintLookupBase = prev })
-	installFpcalcStandIn(t, "", "")
 	return f
+}
+
+// installWarmFpcalcStandIn puts the fpcalc stand-in on PATH for t and its
+// subtests, one copy of this test binary (installFpcalcStandIn), and starts it
+// once as the run's probe does (`fpcalc -version`), under a bound far past the
+// probe's own 2 s, failing unless it answers (backlog B617, round 5). On
+// Windows a copy is a new executable, whose first start the antivirus scan can
+// hold past the probe's bound: windows-latest failed three cases of
+// TestBridgeFingerprintFollowsItsSwitchWhileItRuns at the run's real precheck
+// ("fpcalc -version timed out after 2s") while each case wrote a copy of its
+// own. That first start is paid here, once, so every run's real precheck,
+// which the cases keep, finds the stand-in warm.
+func installWarmFpcalcStandIn(t *testing.T) {
+	t.Helper()
+	installFpcalcStandIn(t, "", "")
+	const bound = 2 * time.Minute
+	ctx, cancel := context.WithTimeout(context.Background(), bound)
+	defer cancel()
+	began := time.Now()
+	out, err := exec.CommandContext(ctx, "fpcalc", "-version").CombinedOutput()
+	if ctx.Err() != nil || err != nil || !strings.Contains(string(out), "fpcalc version") {
+		t.Fatalf("fpcalc precheck: the stand-in did not answer -version within %v (%v): %q", bound, err, out)
+	}
+	t.Logf("the stand-in's first start answered -version in %v", time.Since(began).Round(time.Millisecond))
+}
+
+// requireTheProbePassed fails a run that stopped at its real probe of fpcalc,
+// by the probe's name and in its words, before anything is asserted of the
+// switch: such a run sent no lookup, so its switch was never changed, and a
+// failure that said so would hide why.
+func requireTheProbePassed(t *testing.T, code int, stderr string) {
+	t.Helper()
+	for _, line := range strings.Split(stderr, "\n") {
+		if strings.HasPrefix(line, "fpcalc precheck:") || strings.Contains(line, fingerprintProbed) {
+			t.Fatalf("fpcalc precheck: the run stopped at its probe of the stand-in (exit %d): %s\nstderr:\n%s",
+				code, strings.TrimSpace(line), stderr)
+		}
+	}
 }
 
 // run runs `bridge fingerprint` with args and the two tracks, and returns
@@ -175,6 +214,8 @@ func (f *flipAt) get(t *testing.T) time.Time {
 // the lookup off; either way it exits 1 saying why, as a run refused at its
 // start does. The config is the one found here, or the one --config names.
 func TestBridgeFingerprintFollowsItsSwitchWhileItRuns(t *testing.T) {
+	// One stand-in for every case, warm before the first (round 5).
+	installWarmFpcalcStandIn(t)
 	// The run re-reads its switch once a second (Interval); the rest is for
 	// a loaded host, and stays well below lookupHold, which a run that never
 	// noticed would wait out before sending its second lookup.
@@ -234,6 +275,7 @@ func TestBridgeFingerprintFollowsItsSwitchWhileItRuns(t *testing.T) {
 				panic(http.ErrAbortHandler)
 			})
 			code, stderr, ended := f.run(append(args, "--key", "k")...)
+			requireTheProbePassed(t, code, stderr)
 			stopped := ended
 			if c.middle {
 				// The held handler sees the cut once the connection closes,
@@ -303,6 +345,9 @@ func TestBridgeFingerprintFollowsItsSwitchFromItsFirstRead(t *testing.T) {
 	cfg := filepath.Join(t.TempDir(), "bridge.yaml")
 	writeSwitchConfig(t, cfg, "  enabled: true\n")
 	off := configBytes(t, "  enabled: false\n")
+	// The probe is the seam below, and the run stops before its first file,
+	// so the stand-in is never started here.
+	installFpcalcStandIn(t, "", "")
 	f := newLookupRun(t, func(_ int64, w http.ResponseWriter, _ *http.Request) { noMatch(w) })
 	var flip flipAt
 	prev := fingerprintProbe
