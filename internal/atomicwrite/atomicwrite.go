@@ -262,6 +262,14 @@ func SetSyncFileForTest(fn func(*os.File) error) (restore func()) {
 // other packages go through SetSyncDirForTest.
 var syncDir = platformSyncDir()
 
+// HasDirectoryBarrier reports whether this platform can fsync a directory,
+// that is whether WriteBytesDurable can make a write durable at all: false
+// where it cannot (Windows), where every strict write and probe refuses with
+// ErrNoDirectoryBarrier. It reads the barrier they read (SetSyncDirForTest
+// moves it), so a caller that asks before it writes anything refuses where
+// they would: backup's restore of the player's files (backlog B745).
+func HasDirectoryBarrier() bool { return syncDir != nil }
+
 // platformSyncDir is (*os.File).Sync where the platform has a directory
 // barrier, and nil where it has none.
 func platformSyncDir() func(d *os.File) error {

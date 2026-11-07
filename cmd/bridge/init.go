@@ -18,7 +18,6 @@ import (
 	"strings"
 	"syscall"
 	"time"
-	"unicode"
 
 	"golang.org/x/term"
 
@@ -28,6 +27,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/doctor"
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
+	"github.com/acoseac/1-bit-bridge/internal/hostname"
 	"github.com/acoseac/1-bit-bridge/internal/packaging"
 	servertls "github.com/acoseac/1-bit-bridge/internal/tls"
 )
@@ -67,24 +67,15 @@ var installHostname = os.Hostname
 // one stays as the system reports it and is never converted, as the
 // certificate's and the advertised names are (hostname.ASCII, backlog B739);
 // only its control characters are removed (a test Mac's kern.hostname holds
-// U+0091), and a name that leaves nothing else is no name.
+// U+0091), and a name that leaves nothing else is no name. The removal is
+// config.WithoutControlCharacters, the one every entry of the library name
+// strips by (backlog B744).
 func firstInstallName() string {
 	h, _ := installHostname()
-	if name := config.TrimLibraryName(withoutControlCharacters(h)); name != "" {
+	if name := config.TrimLibraryName(config.WithoutControlCharacters(h)); name != "" {
 		return name
 	}
 	return config.DefaultLibraryName
-}
-
-// withoutControlCharacters is s with every control character removed: the
-// C0 controls, DEL and the C1 controls (unicode.IsControl).
-func withoutControlCharacters(s string) string {
-	return strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) {
-			return -1
-		}
-		return r
-	}, s)
 }
 
 // initAddresses is the API and admin address a run of `bridge init` writes:
@@ -349,12 +340,14 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	// anything is written, as any other bad flag is: one that is not UTF-8
 	// (`--name $'Caf\xe9'` from a Latin-1 terminal was saved as `!!binary`
 	// and every QR's name=Caf%E9 was refused as a missing field) or one over
-	// config.MaxLibraryNameLength. A blank one is no name, as below.
-	if name := config.TrimLibraryName(*libraryName); name != "" {
-		if err := config.CheckLibraryName(name); err != nil {
-			fmt.Fprintf(stderr, "--name %v\n", err)
-			return 2
-		}
+	// config.MaxLibraryNameLength. Its control characters are removed first
+	// (config.CleanTypedLibraryName, backlog B744), after the refusal of bytes
+	// that are not UTF-8, which the removal would take as U+FFFD. A blank one,
+	// or one that is nothing but controls, is no name, as below.
+	typedName, err := config.CleanTypedLibraryName(*libraryName)
+	if err != nil {
+		fmt.Fprintf(stderr, "--name %v\n", err)
+		return 2
 	}
 	if *publicMode {
 		domain := strings.TrimSpace(*publicDomain)
@@ -380,6 +373,22 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 				"path, query or fragment (/v1/health, which answers any caller, and every pairing QR publish "+
 				"the endpoint init writes from it; the port is --listen-address's)\n")
 			return 2
+		}
+		// A host that is not ASCII is written in its IDNA ASCII form, the
+		// form the certificate init mints carries, as Normalize serves one
+		// that loads (hostname.Configured, backlog B744): as typed, the mint
+		// refused it, and init installed nothing. One with no such form is
+		// refused here, before anything is written. The host alone is
+		// echoed: the check above refused anything else.
+		ascii, ok := hostname.Configured(domain)
+		if !ok {
+			fmt.Fprintf(stderr, "--domain: %q is not ASCII and has no IDNA ASCII form, so no certificate can "+
+				"carry it; give a host name a certificate can carry\n", domain)
+			return 2
+		}
+		if ascii != domain {
+			fmt.Fprintf(stdout, "--domain %s is written as %s, its IDNA ASCII form, the form a certificate carries\n", domain, ascii)
+			domain = ascii
 		}
 		// Every later use writes the domain as checked. Untrimmed, the
 		// endpoint init builds from a padded one (`https:// host `) did not
@@ -682,7 +691,7 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			defaultName = kept
 		}
 	}
-	name := config.TrimLibraryName(*libraryName)
+	name := typedName
 	if name == "" && !*nonInteractive && !keep {
 		var code int
 		if name, code = askLibraryName(in, stdout, stderr, defaultName); code != 0 {
@@ -1668,23 +1677,24 @@ const maxLibraryPrompts = 5
 // again when the answer is one the app's pairing parser would refuse
 // (config.CheckLibraryName), where `--name` exits 2: by the prompt the library
 // is chosen and the preflight has run, and a run should not end over the
-// name. The answer is trimmed as the parser trims it, and one blank once
-// trimmed is returned as "", no name, which the caller turns into def.
+// name. The answer is trimmed as the parser trims it and loses its control
+// characters (config.CleanTypedLibraryName, backlog B744), and one blank once
+// they are gone is returned as "", no name, which the caller turns into def.
 //
 // Enter takes def, and so does a closed stdin (ask returns it for both), so
 // the loop cannot spin on a stream that has ended. def is not checked: it is
-// the host's name or the name the install is served under, and a host name
-// the parser would refuse is repaired where the config is saved
+// the host's name or the name the install is served under, each already
+// without controls (firstInstallName, config.RepairLibraryName), and a host
+// name the parser would refuse is repaired where the config is saved
 // (config.RepairLibraryName, in Normalize). Returns (name, 0), or ("", 2)
 // after maxLibraryPrompts refused answers.
 func askLibraryName(in *bufio.Reader, stdout, stderr io.Writer, def string) (string, int) {
 	for attempt := 0; attempt < maxLibraryPrompts; attempt++ {
 		answer := ask(in, stdout, "Library display name", def)
-		name := config.TrimLibraryName(answer)
-		if name == "" || answer == def {
-			return name, 0
+		if answer == def {
+			return config.TrimLibraryName(answer), 0
 		}
-		err := config.CheckLibraryName(name)
+		name, err := config.CleanTypedLibraryName(answer)
 		if err == nil {
 			return name, 0
 		}

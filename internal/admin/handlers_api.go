@@ -2684,8 +2684,14 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 	)
 	updateErr := s.deps.CfgHolder.Update(s.deps.CfgPath, func(next *config.Config) error {
 		if p.LibraryName != nil {
-			v := config.TrimLibraryName(*p.LibraryName)
-			// A blank name is REFUSED, never stored. Stored, it was served
+			// Trimmed and without its control characters, read as runes
+			// (config.CleanTypedLibraryName, backlog B744), as Load serves a
+			// name a config holds, so the name served live is the one served
+			// after a restart. JSON has already replaced any byte that is not
+			// UTF-8, so its refusal is for the length alone here.
+			v, nameErr := config.CleanTypedLibraryName(*p.LibraryName)
+			// A blank name is REFUSED, never stored, and so is one that is
+			// nothing but control characters. Stored, it was served
 			// as "" live (in /v1/health, and in the name= of every pairing
 			// QR, which the app then refuses) and as DefaultLibraryName
 			// after a restart, which is what Load serves a config without
@@ -2694,7 +2700,7 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 			// the operator's name with one nobody chose, and the console
 			// sends this field on every Save, so a cleared box is a mistake
 			// to report rather than a name to guess.
-			if v == "" {
+			if v == "" && nameErr == nil {
 				return &cfgAbort{status: http.StatusBadRequest, code: "validate",
 					msg: "libraryName: must not be blank (devices show this bridge under it, " +
 						"and a pairing code without one does not pair)"}
@@ -2705,9 +2711,9 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 			// answered 200 `live` and the next QR did not pair. Refused,
 			// not cut, for the blank name's reason: the operator typed it,
 			// and Normalize cutting it would store a name nobody typed.
-			if err := config.CheckLibraryName(v); err != nil {
+			if nameErr != nil {
 				return &cfgAbort{status: http.StatusBadRequest, code: "validate",
-					msg: "libraryName: " + err.Error()}
+					msg: "libraryName: " + nameErr.Error()}
 			}
 			// Compare before assigning: the write is idempotent either
 			// way (the stored value is already trimmed), but without the
