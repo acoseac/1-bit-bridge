@@ -82808,3 +82808,260 @@ At PR #1427's head 9dd51ae4, on a Raspberry Pi 5 held at 1.5 GHz by its conserva
 | B4: joins and Stop | a continuous pair and DSD64 to DSD128: one open, one close; Stop 31 ms, OpenHome's Stop about 56 ms |
 
 Named from the run: B773 (the DAC's two identical configurations), B774 (the control node's opens). `output play`'s banner claimed bit-exactness for every play; fixed here. **Owed:** §4.6's Pi 4 run, and the owner's listening pass and replug.
+
+## 2026-11-07 — B728 B9: the write of the bound DAC's DSD choice
+
+Worker b728-b9, legion0 (Ubuntu 26.04, Linux 7.0, Go 1.27.3), branch
+`feat/b728-b9-choice` from f34f8227, B8's head (#1430, over B11's #1427), where
+`dsdDAC` is published. Commits: 2c007f8b (the red tests, over stubs, with
+PROTOCOL.md's section and rows), aa2f2231 (the write), 6b2a4c66 (the design's
+corrections), 0eea1d0e and ba6ed8e0 (two tests the negative controls showed
+too weak), 4ae2e452 (two test helpers' docs, which the docblock guard caught,
+and PROTOCOL.md's sentence on a re-armed acknowledgement), 2cd0ec1c (the
+route's 404 off Linux, through serve's view), ceaf0c7b (a write that panics
+leaves nothing pending, found reading the write again while the last gate
+waited for the build slot), and this record. The rules changes are a patch
+the orchestrator applies (`wire.md`, `output.md`, `player.md`,
+`cli-serve.md`, CLAUDE.md and their long forms).
+
+A paired client can now set a bound DAC's mode and rate cap, confirm DoP and
+acknowledge a transport's first use, with `PUT /v1/outputs/{id}/dsd` (flag
+`bridgeDSDChoice`), and what the write answers is what `GET /v1/outputs`
+then says: the effective choice from the epoch the player published, refusals
+included. `ProtocolVersion` stays 1; the iOS mirror copies PROTOCOL.md (I4).
+
+### The checks and the revision (binding notes 1 and 2)
+
+`policy.Choose` is the checks that read the state, the design's section 7.2's
+4 to 7 in order, and the write itself; `playback.Backend.ChooseDSD` runs it
+inside `dsdstate.Store.Update`'s closure, on the state the write is made from,
+so the compare-and-set, DoP's confirmation, first use, a listener's rejection
+and the firmware an acknowledgement is held under are read where nothing can
+come between them and the write. The words before them (`bad_request`,
+`dac_unavailable`, `dac_changed`) are answered first; each refusal writes
+nothing and publishes nothing (`TestEveryRefusalChangesNothing`, one line a
+write with its outcome). Writes are one at a time end to end (`choiceTurn`):
+a write that finds the revision moved answers `stale` once the write that
+moved it has published, and reads the policy again first, so the revision a
+stale answer carries is the state's and the next write's
+(`TestTwoWritesOfOneRevisionLandOnce`: eight writes of one revision, one
+lands; `TestAStaleAnswerNeverCarriesARevisionTheStateHasMovedPast`). A `GET`
+between another write's durable write and its publish reads the old
+revision; a write from it waits for the write in flight and answers `stale`
+with the durable revision, which a write-back then takes
+(`TestAWriteBackOfARevisionReadInTheWindowIsAnsweredWithTheDurableOne`). A
+state holding a listener's rejection at its current revision needs the
+acknowledgement to choose the transport again and clears the rejection with
+it (`TestARejectionAtTheCurrentRevisionNeedsTheAcknowledgement`). A state that
+did not read publishes revision 0: over the fresh state that replaced a
+damaged file a write-back of 0 lands and clears `state_unreadable`; over a file
+refused in memory every write answers `state_unreadable` and writes nothing
+(`TestTheRevisionOfAStateThatDidNotRead`). A revision always moves by one from
+the DAC's own, whatever was published, so it never goes back.
+
+### What the answer promises (binding note 3)
+
+`would_interrupt` is decided before the write, from one reading of the box:
+the set the write would publish and the one the state gives without it, and
+the one classification reconciliation acts by (`judgeDSDLocked`, which
+`reconcileDSD` now calls too): `policy.Reconcile`, a re-plan of a session's
+first occurrence or of a releasing session's a revocation, a re-plan where
+the engine hands nothing off again a revocation, an occurrence played out,
+opening, dropped or PCM not judged (`TestTheWriteAsksWhatReconciliationDoes`,
+twelve shapes, a leading occurrence awaiting its first submission and an
+engine with no re-plan support among them). An occurrence counts only where
+it interrupts against the new set and not against the old one
+(`TestAWriteCountsWhatItInterruptsNotWhatTheBoxDoes`). The closure makes both
+sets again from its own state and sends the write round again where either
+moved (`TestAnEvidenceWriteRacingAChoiceMovesNoRevision`'s second case), so
+the decision holds at the commit. The set is pending from before the
+classification until the write settles: the step that ends an open waits for
+it outside its lock where it plays the occurrence's rate otherwise
+(`lockSettled`; `TestAnOccurrenceWhoseRateTheWriteChangesWaitsAtTheEndOfItsOpen`),
+and the producer holds such an occurrence out of any sink
+(`TestTheProducerHoldsAnOccurrenceAPendingWriteWouldReplan`), as do a
+transition's open, a converted join's window and a resume between transports.
+A re-plan of the occurrence the producer writes, or of one in a join window,
+counts as interrupting, since its frames can reach a sink before the publish.
+The brief's (a)/(b)/(c) suggested admitting only what both sets play while a
+write is pending; waiting was chosen, since that intersection would skip a
+track at a rate the write changes that starts in the window, where the wait,
+bounded by the fsync, admits it under what the write leaves. Over the fake
+kernel: an occurrence starting after the durable write and before the publish
+plays the new set (converted) and is not revoked; one starting while a write
+that then fails is under way waits, and plays native, the set as it was; one
+starting while a write that lands and fails its sync waits, and is refused
+before anything plays as `dsd_choice_uncertain`, the intersection's word
+(`TestAnOccurrenceBesideAWriteIsNotRevoked`). An unused cap and the choice
+written again need no `interrupt` and every occurrence plays on, the
+successor joining in one sink; native to convert under the occurrence heard
+is `would_interrupt`, nothing changed, and with `interrupt` revokes
+(`TestOnlyAWriteThatInterruptsNeedsTheGoAhead`). The residual: a session whose
+release begins between the classification and the publish has its DSD revoked
+by the publish, as a releasing session's always is, which the write did not
+count. Every end of a write settles its pending set, once, before the
+writes' turn is given back, a panic's included: the API's recoverer answers a
+panic in the handler, and without the deferred settle (ceaf0c7b) the set
+stayed pending, so an occurrence at a rate the write changes would wait for a
+write that never publishes, the producer's until its session ended; a panic
+after the state's write leaves the choice in the state, which the next
+refresh publishes (`TestAWriteThatPanicsLeavesNothingPending`, a panic before
+and after the state's write). Lock order: the writes' turn, `dsdMu`, `b.mu`,
+`s.mu`, a sink's; the store's lock alone, its closure pure
+(`TestTheChoiceWritesLockOrderHolds`, four writers, two refreshers and an
+evidence writer together under `-race`).
+
+### Durability, the probe and the crash points (binding note 5)
+
+The order is the durable write, the probe made due, the publish and its
+reconciliation, the answer from the published epoch. The design's section
+7.2 said "probes the DAC if it is free": the write makes the probe due
+instead (`oweProbe`, `ProbeDSDPending`), which serve's supervisor asks at its
+next policy tick and which runs once the device slot is free, so the request
+never waits on a probe, takes no device from an occurrence, and claims no
+driver acceptance the probe did not give; its answers publish later through
+the read side's path (`TestAWrittenChoiceOwesAProbeAndKeepsTheProbesAnswers`).
+It drops none of the probe's answers, against the design's section 5 and B4's
+`Forget`: they are the kernel's and the descriptors', and dropping them while a
+session holds the device would turn each tuple's pause to silence, so a write
+that changes nothing that plays would change the set (the test's first half
+is that). The three failure words: `persist_failed` (500), the write failed
+before it replaced the file, or the turn's wait outlived the request, nothing
+changed; `persist_uncertain` (500), the rename landed and the barrier failed,
+and every later write the fence refuses; `state_unreadable` (409), the file
+refused in memory. A landed write keeps the state it left (`landedChoice`) and
+every refresh publishes what both states play alike until the next start
+(`TestALandedWriteIsUncertainAndPublishesWhatBothStatesPlay`); on the real
+store a sync failure injected after the rename makes the write
+`persist_uncertain`, another choice and an evidence write are fenced, and a
+reopen reads what landed
+(`TestALandedWriteOfTheRealStoreFencesWhatFollowsAndIsReadAtTheNextStart`).
+`TestTheChoiceIsDurableBeforeItIsAnswered` holds the durable writer's barrier
+on the state's directory once the file is in place and sees the answer only
+after it returns. Crash points: before the rename, the choice as it was;
+after the rename and before its barrier, the new file, which the next start
+reads if the disk kept it; after the durable write and before the publish,
+the new choice, which the next start publishes; after the publish and before
+the answer, the same, and a client reads `GET` again. Nothing is rolled
+back.
+
+### What a write records (binding notes 6 to 8, 12 and 13)
+
+Explicit `native` and `dop` acknowledge their own transport, every rate under
+the unit's firmware; `auto` acknowledges each transport its set would play at
+some rate once both are acknowledged (native first, DoP by the profile's
+claim or a confirmation, the write's own included, under its cap, every
+rejection kept), and clears no rejection; `convert` and `off` acknowledge
+nothing, so a client may send the flag there and nothing false is recorded. A
+migrated acknowledgement of some rates, or one under another firmware, is
+replaced by one of every rate, a whole one kept with its observation, and one
+a rejection re-armed replaced, the rejection cleared
+(`TestAnAcknowledgementWidensAMigratedChoiceToEveryRate`,
+`TestAnAcknowledgementOnAutoCoversTheTransportsAutoPlays`,
+`TestChoosingARejectedTransportAgainClearsTheRejection`,
+`TestAnAcknowledgementAWriteDoesNotNeedRecordsNothing`). `confirmDoP` records
+the confirmation on a `dop` or `auto` write, kept by every later write
+(`TestTheConfirmationSurvivesLeavingDoP`); a profile claiming DoP at every rate
+it is offered at needs none (`TestDoPOnAnUnknownDACNeedsConfirmation`). A
+unit whose firmware does not read takes the choice and records neither
+consent. Every write clears its DAC's warnings and `state_unreadable`,
+`migrated_off` kept (`TestAWriteClearsItsDACsWarnings`). The key a write names
+is compared with `wireKey`, the one `GET` publishes; the write lands on the
+DAC's own entry; one line a write names the wire key, the mode before and
+after and the outcome, never a serial, a port, a product string or the token
+(`TestTheWritesLineNamesTheKeyAndTheModesAlone`,
+`TestAKeyRoundTripsWhateverTheUnitsStringsHold`, a product string holding the
+serial and each spelling of the port). The answer is the effective choice
+(`TestTheAnswerIsTheEffectiveChoice`).
+
+### The route, Windows, other writers (binding notes 9 to 11)
+
+`PUT /v1/outputs/{id}/dsd` is `rateWrite`, bearer and bounded (15 s), absent
+on a public bridge, and answers the gates' 404s while they are shut; the body
+is read whole within 4 KiB before it is parsed; `bridgeDSDChoice` arrives with
+the route and a player that takes a choice
+(`TestTheChoiceFlagArrivesWithItsRoute`; B8's
+`TestNoHealthFlagBeforeItsRoute` updated). On Windows the store refuses every
+write and writes nothing (`TestAChoiceWriteOnWindowsIsRefusedAndWritesNothing`,
+CI's Windows leg), and the player's gate never holds off Linux, so serve's
+view owns no output, `/v1/health` advertises no `bridgeDSDChoice` and the
+route answers `404` `local_outputs_not_supported`, on Windows as on macOS
+(`TestTheChoiceRouteAnswers404WhereThePlayerDoesNotRun`).
+Passive evidence never moves a choice's revision, so an evidence write racing
+a choice lands beside it (`TestAnEvidenceWriteRacingAChoiceMovesNoRevision`);
+a listener's answer (B12) is to move it, which the design's section 6.4 and
+B12's row now say.
+
+### The qualification version
+
+44. B9 touches `internal/alsapcm/` (two rig tests, `probe_cache.go`'s and its
+tests' comments), a guarded prefix. B11 holds 42 and B8 43 on their branches
+(f34f8227 is at 43); the local main, 14aa6290, is at 40, so a version chosen
+against main alone would be 41 (the brief expected 42, from a main at 41).
+`scripts/qualification-version` passed at 2cd0ec1c against f34f8227 and
+against 14aa6290.
+
+### Red first
+
+At 2c007f8b, over stubs: policy, 15 of 16 choice tests (the sixteenth, words
+the write does not know, passes vacuously over a stub that refuses all);
+playback, 18 of 19 (`TestTheChoiceWritesLockOrderHolds` is liveness, green
+over a stub); alsapcm, both rig tests, six subtests; api, the five route tests,
+`TestHealthFeaturesCompleteSet`, `TestEveryDocumentedEndpointIsRouted`,
+`TestEveryProtocolErrorRowIsSent` and `TestDSDOutputProtocolTokens`'s refused
+row; cmd/bridge, all eight. `TestRouteRegistry_completeness` took the route
+with the implementation. `TestTheChoiceRouteAnswers404WhereThePlayerDoesNotRun`
+(2cd0ec1c) and `TestAWriteThatPanicsLeavesNothingPending` (ceaf0c7b) came
+after it, so their red is controls g's and h's.
+
+### Negative controls
+
+Each an exact-once mutation of the committed tree, predicted by name in
+`.tmp/_b728-b9/controls.predictions.txt` before it ran, the source restored
+from memory, `git status` empty after each.
+
+| | mutation | red |
+|---|---|---|
+| a | the compare-and-set read before `Store.Update`, the closure taking the stored revision | first run, at 6b2a4c66: green, against the prediction: the test's racing write changed what plays too, and the write's round again answered stale. Strengthened (0eea1d0e): `TestARevisionMovedBeforeTheStoresWriteIsStale/the_revision_alone` red, as predicted, its sibling and the three others green |
+| b | `would_interrupt` against the current set (`writeInterrupts(cur, cur)`) | as predicted: `TestOnlyAWriteThatInterruptsNeedsTheGoAhead/a_change_of_what_is_heard` |
+| c | the answer from the epoch before the write, its choice from the request | as predicted: `TestTheAnswerIsTheEffectiveChoice`, `TestAStaleRevisionChangesNothing`; `TestServeTakesAChoiceThroughItsRoute` and the key round trip green |
+| d | the route unmounted, the flag still advertised | as predicted: `TestTheChoiceFlagArrivesWithItsRoute`, `TestEveryDocumentedEndpointIsRouted`, `TestRouteRegistry_completeness`, `TestTheChoiceRouteIsAnAuthenticatedBoundedWrite`; `TestHealthFeaturesCompleteSet` green |
+| e | the store's write with no barrier (a plain write and rename) | as predicted: `TestTheChoiceIsDurableBeforeItIsAnswered` (answered 200 before any barrier), `TestALandedWriteOfTheRealStoreFencesWhatFollowsAndIsReadAtTheNextStart`; the Windows test green on Linux |
+| f | `recordDSD` moving the choice's revision | as predicted: all three subtests of `TestOnlyAWriteThatInterruptsNeedsTheGoAhead` (stale) |
+| g | the route's gate 404 lost: with both gates shut and an MPD gate configured, every id `output_not_found` (at 2cd0ec1c) | as predicted: both subtests of `TestTheChoiceRouteAnswers404WhereThePlayerDoesNotRun` |
+| h | the write's deferred settle removed (at ceaf0c7b) | as predicted: both subtests of `TestAWriteThatPanicsLeavesNothingPending` (a set still pending, its waiters never woken; the next write lands); `TestTheChoiceWritesLockOrderHolds` and `TestTwoWritesOfOneRevisionLandOnce` green |
+
+The key round trip saw one spelling of the port, the fixture's having no
+configuration and interface after it; ba6ed8e0 gives the unit sysfs's
+spelling, so the product strings hold both.
+
+### Gates
+
+The first run, through the shared build slot at ba6ed8e0 (what came after it
+is two test helpers' docs, PROTOCOL.md's sentence and one `cmd/bridge` test):
+`make fmt` left the tree as it was; `make vet` clean, and with `GOOS=windows`,
+`GOOS=darwin` and `GOOS=linux GOARCH=386`; `go test -race -count=5` over the
+write's tests in `internal/player/policy`, `internal/player/playback` and
+`internal/alsapcm` (the `-run` of `.tmp/_b728-b9/gates.py`, the scratch
+directory) green; the native-integration overlay
+(`scripts/native-integration-overlay.py`), `cmd/bridge`'s 13 and playback's 29
+`TestNativeIntegration` tests green under `-race`; `make build-all` built the
+six targets; `make docs-check` clean. Its `make test` failed one guard,
+`TestNoDocblockNamesAnotherDeclaration`: playback's `wantChoice`'s doc opened
+with `wantOutcome`, the rig's helper in `internal/alsapcm`, whose own doc
+opened with a word (4ae2e452; the guard's rerun green). The final run, at
+ceaf0c7b, through the slot: `make fmt` left the tree as it was, the four vets
+clean, `make test` green (88 packages, 1,981 s; `cmd/bridge` 1,244 s,
+`internal/alsapcm` 85 s), `make build-all` built the six targets, `make
+docs-check` clean; and the write's tests in playback and `internal/alsapcm`
+again five times under `-race`, green. `go run
+./scripts/qualification-version` passed at 2cd0ec1c, and again at this
+record, against f34f8227 and against main (14aa6290). The rules patch applies
+to HEAD (`git apply --check`), and on a copy of HEAD with it applied the doc
+budgets pass (player.md at 99.5%, the patch adding one clause there; the rest
+of B9's rules are in `output.md` and `wire.md`, for player.md's budget),
+`rules-for` names `output.md` and `player.md` for
+`internal/player/playback/dsd_choice.go`, and the guards that read the
+tracked docs pass on it (`TestEveryCitedTestNameExists`,
+`TestEveryBridgeWordIsInTheProtocol`, the endpoint and error-table guards,
+`TestDSDOutputProtocolTokens` and `TestQualificationRunbookVersion`).
