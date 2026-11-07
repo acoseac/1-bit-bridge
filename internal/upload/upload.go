@@ -134,6 +134,11 @@ type Manager struct {
 	// test that does not care, in which case the 507 reports zero.
 	reclaimable func(root string) int64
 
+	// rootGuard answers for the absolute paths a request would write whether
+	// any lies under a library root that reads as a volume not mounted
+	// (WithRootGuard); nil asks nothing.
+	rootGuard func(paths []string) error
+
 	now func() time.Time
 }
 
@@ -157,6 +162,15 @@ func WithClock(fn func() time.Time) Option { return func(m *Manager) { m.now = f
 // WithReclaimable supplies the trash-purge estimate used by NoSpace.
 func WithReclaimable(fn func(root string) int64) Option {
 	return func(m *Manager) { m.reclaimable = fn }
+}
+
+// WithRootGuard refuses a write into a library root that reads as a volume
+// not mounted (backlog B776): fn is asked, before anything is written, for
+// every path a request would write, and an answer that is not nil refuses the
+// whole request with it. cmd/bridge passes the scanner's
+// (manifest.Scanner.WriteGuard).
+func WithRootGuard(fn func(paths []string) error) Option {
+	return func(m *Manager) { m.rootGuard = fn }
 }
 
 // NewManager builds a Manager over the given live-root accessor.

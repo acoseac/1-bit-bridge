@@ -60,13 +60,22 @@ import (
 // root reads as the bare mount point until the container is restarted
 // (ops/deployment-runbook.md).
 
+// The words a root that reads as a volume not mounted is told by: the hold's
+// line and its hint, and the console's refusal of a write into such a root
+// (RootAwayError, backlog B776), which says what the hold says.
+const (
+	readsAsNotMounted    = "reads as a volume that is not mounted"
+	hintVolumeMounted    = "check that its volume is mounted"
+	hintContainerRestart = "in a container, restart it once the volume is mounted, since a bind mount made before the mount does not see it"
+)
+
 // Messages the held roots log, named so tests can find them.
 const (
-	msgWatchRootHeld      = "library root reads as a volume that is not mounted; the watcher does not watch it until it reads as it did"
+	msgWatchRootHeld      = "library root " + readsAsNotMounted + "; the watcher does not watch it until it reads as it did"
 	msgWatchRootResumed   = "library root reads as it did again; the watcher watches it"
 	msgWatchRootRewatched = "library root's own watch went while the root reads as it did; the watcher watches it again where it is now"
-	heldRootHint          = "check that its volume is mounted: the scan keeps the tracks indexed under it, and the watcher looks at it again until it reads as it did; " +
-		"in a container, restart it once the volume is mounted, since a bind mount made before the mount does not see it"
+	heldRootHint          = hintVolumeMounted + ": the scan keeps the tracks indexed under it, and the watcher looks at it again until it reads as it did; " +
+		hintContainerRestart
 )
 
 const (
