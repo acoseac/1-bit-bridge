@@ -3584,3 +3584,74 @@ no usermod, and the numeric manager unit. `TestDACAdviceWithoutSystemd`
 checks joining, stale process groups, and a CLI login whose groups are newer
 than the running bridge's, preserving FAIL/WARN and asking for a new login
 without a systemd command or manager claim. These cases bind no sockets.
+
+## B727 — every command asks the data dir's record, and serve says its refusal once (2026-11-07)
+
+- **Every command but serve that makes, opens or writes the data dir asks the check serve makes of the record beside its config, right after its config loads (`refuseDataDirAway`: the record beside the file the config's name opens, as bridge doctor reads it, and `checkServeDataDirRecord`), and refuses a data dir the record names that holds neither `bridge.db` nor `server.lock`, exit 1, in serve's first sentence under its own name, saying that it makes and writes nothing there, to mount the volume and run it again, and how to go on from a data dir moved on purpose (set `dataDir` to where it is now, which the record does not name) or removed on purpose (remove the record): scan, the render commands, analyze, variants move, artwork, enrichment misses and retry, duplicates, library add and remove, pair, token rotate, expire and revoke, admin reset-password, sign-out-everywhere and login-link, cert rotate, backup, tsnet, update but under `--check`, init's rewrite before its preflight, and, through `holdDataDirForMutation` before it prepares and locks, restore, reset-player, manifest clear-missing and the DAC bind; and serve says its own refusal once per state: a note beside the record (`.bridge.yaml.datadir.refused`) names the data dir refused and when it was said, a start says the refusal where the note names another data dir or none or is a day old, and always to a terminal, and the first start that finds its data dir again removes the note and says so at Info** (2026-11-07, backlog B727 items 2 and 5). **Don't let a command make, open or write the data dir before the check, ask it of a read (doctor, status, logs, token list, cert info, update --check, init keeping the config), ask it in `manifest.OpenStore`, tell the operator of a data dir moved on purpose to remove the record, keep the note in the data dir, or let the note's write decide what serve refuses or how it exits.** `TestEveryCommandThatWritesTheDataDirRefusesItWhileItsVolumeIsAway`, `TestTheDiagnosticsStayAvailableWhileTheDataDirsVolumeIsAway`, `TestACommandOverAnInstallWithNoRecordMakesItsDataDirAsBefore`, `TestUpdateAsksTheRecordBeforeItAsksForARelease`, `TestServeSaysItsRefusalOncePerState`, `TestServeSaysTheRefusalOfADataDirItsNoteDoesNotName`, `TestServeSaysItsRefusalToATerminalAtEveryStart` (Linux), `TestAStartThatCannotRemoveTheNoteSaysSo` and `TestServeSaysItsRefusalAtEveryStartWhereItCannotKeepTheNote` pin it.
+
+*The gap* (B727's second item). B651 gave serve the refusal and left every
+other command as it was. Over an install whose record names its data dir,
+on a volume whose mount point is bare, each of 28 commands run through
+`run`'s dispatch on main (49071fbf) went on, and 22 made a `bridge.db` or a
+`server.lock` under the bare mount point: `manifest.OpenStore` makes the
+data dir and an empty database (scan, upscale, optimize, render, analyze,
+variants move, artwork, enrichment misses and retry, duplicates, library add
+and remove), and a command that takes the data dir's lock its lock file
+(restore, reset-player, manifest clear-missing, the DAC bind); pair made
+`tokens.json`, admin reset-password `adminauth.json`, cert rotate and init's
+rewrite a TLS pair, backup a snapshot. Either file has the next serve take
+the bare mount point for the data dir it served from, and start on an empty
+database with a new TLS pair, which unpairs every device: B651's own defect,
+reached through another command.
+
+*The check* is the command's, right after its config loads and before
+anything that makes, opens or writes the data dir: `refuseDataDirAway` asks
+`checkServeDataDirRecord` of the record beside the file the config's name
+opens (`dataDirRecordPath`, as bridge doctor reads it: a command has no boot
+read whose file serve keeps to), so the doctor, serve and every command
+answer one state alike. Never in `manifest.OpenStore`, which knows a
+database path and not the config whose record names the data dir, and which
+the doctor's reads and serve after its own check open too. No record is no
+check: a fresh install, init's first run and an install no serve has run on
+are refused nothing, and a record of another data dir (one moved on purpose
+and set where it is now) refuses nothing either. Init has three paths kept
+apart: a first install has no config whose record it could ask, a run that
+keeps the config writes nothing in the data dir and asks nothing, and a
+rewrite (`--force`, or yes at the prompt) asks before its preflight, which
+would grade a certificate it cannot see there. `bridge update` asks it but
+under `--check`, which reads, and before it asks GitHub for a release, since
+its install writes its marker in the data dir. The reads ask nothing:
+doctor, whose data-dir line fails the state in serve's words, status, logs,
+token list, cert info and update --check. The refusal is serve's first
+sentence under the command's own name, then that the command makes and
+writes nothing there, to mount the volume and run it again, and how to go on
+(`commandRefusal`).
+
+*A data dir moved on purpose.* B651 said to remove the record for a data dir
+removed or moved on purpose. Over a moved one that has the next command make
+an empty data dir at the old path, and the next serve start there. The
+refusal, the doctor's fix and serve's now say: moved, set `dataDir` in
+bridge.yaml to where it is now (the record names the old place, so nothing
+is refused, and the next serve records the new one); removed, remove the
+record (`onPurpose`).
+
+*Once per state* (B727's fifth item). The service manager starts serve again
+until the volume is mounted (systemd's unit every 2 s, launchd, the SCM's
+recovery, a container's restart policy), and each start printed the whole
+refusal: three starts on main, three refusals said, nothing kept. Each start
+is a new process, so the state lives on disk: a note beside the record,
+`.bridge.yaml.datadir.refused` in the config's directory, never in the data
+dir, which is the bare mount point, holding the data dir refused as its
+config gives it and when the refusal was said (`sayServeRefusal`). A start
+says the refusal where the note names another data dir or none, or was
+written a day or more ago (the variant watcher's latch's rule, so a journal
+read later has a line of the day), and always to a terminal, a start by hand
+(`writesToATerminal`); then it writes the note. The first start that finds
+its data dir again removes the note and says so at Info (`endServeRefusal`).
+A note that cannot be written leaves the next start to say the refusal again
+(`TestServeSaysItsRefusalAtEveryStartWhereItCannotKeepTheNote`); what serve
+refuses, and its exit, are the same either way. The one write whose failure
+quiets a refusal is the removal: a note the start that found its data dir
+cannot remove keeps the next refusal quiet until a day after the last was
+said, which that start says at Warn (`TestAStartThatCannotRemoveTheNoteSaysSo`).
+The record is in `ops/engineering-log.md`, 2026-11-07, B727.

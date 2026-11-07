@@ -2309,3 +2309,40 @@
   `TestAVolumeComparisonThatCannotStatADirectoryNamesNeither` (POSIX),
   `TestARenditionTheVolumesRefuseNamesNoDirectory`,
   `TestADSDRequestThatCannotCompareItsVolumesNamesNoDirectory` (POSIX).)
+
+## B727 — a render into a variants directory that reads as away (2026-11-07)
+
+- **…and a render writes nothing into a variants directory that reads as away while the catalog records a rendition under it: `transcode.Run` asks the job's `OutputGuard` first, before a decoder probe, a scratch or a claim (cmd/bridge's `renditionOutputGuard`: the probe, `integrity.VariantsDirSweepBlock`, then `Store.VariantRecordedUnder`), which the pool injects into each job (`Pool.SetOutputGuard`) and the CLI's worker sets, the CLI's batch asking it once before any job; the refusal (`transcode.VariantsDirAwayError`) names the directory by its role, says to mount the volume and how to drop the rows of renditions removed on purpose, and is a fault of the output (`outputAway`): no strike, said once per outage** (2026-11-07, backlog B727 item 1). **Don't render into a variants directory the probe reads as away while the catalog records renditions under it, ask the catalog of one that reads as mounted, strike a source for the refusal, or name the directory by its path in its text.** `TestARenderWritesNothingIntoAVariantsVolumeThatIsAway`, `TestTheRenderCommandsRefuseAVariantsVolumeThatIsAwayBeforeAnyJob`, `TestTheWatcherKeepsTheRowsOfAVariantsVolumeThatIsAwayAfterARender`, `TestADownloadKeepsTheRowOfARenditionOnAVariantsVolumeThatIsAway`, `TestARenderMakesTheVariantsDirectoryOfACatalogThatRecordsNoneThere`, `TestARenderIntoAVariantsVolumeThatIsBackPublishes` and transcode's `TestThePoolAsksItsOutputGuardBeforeAJobWrites` pin it.
+
+*The gap* (B727's first item). Every reaper asks the mount-loss probe
+(`integrity.VariantsDirSweepBlock`) before it deletes, and no writer did.
+With the variants directory on a volume whose mount point is bare, the CLI's
+worker rendered a track through `transcode.Run` and a stand-in sox on main
+(49071fbf): it made the variants directory under the bare mount point and
+published a rendition there, the probe then read it as mounted, and serve's
+watcher deleted the three rows of renditions on the volume (below the
+mass-delete floor of 10; twelve were refused as a relocation), and a
+download of a rendition on the volume reaped its row at three rows and at
+twelve (the download's reap has no floor).
+
+*The guard.* `transcode.Run` asks the job's `OutputGuard` before a decoder
+probe, a scratch or a claim. transcode cannot import integrity, which
+imports it, so the guard is cmd/bridge's `renditionOutputGuard`, injected as
+the album gain is: the pool sets it on each job it starts
+(`Pool.SetOutputGuard`), the CLI's worker on each job it runs, and the
+CLI's batch asks it once before any job, refusing the run (exit 1). The
+probe first: a directory that reads as mounted renders without a read of
+the catalog. Then the catalog: a directory that reads as away (not there,
+holding no rendition, or not readable) is refused only while the catalog
+records a rendition under it (`Store.VariantRecordedUnder`, a byte range on
+the recorded sidecar path), so a fresh install, or a variants directory just
+set to a new place, renders as before. The refusal
+(`transcode.VariantsDirAwayError`) names the directory by its role, says
+what the probe found (`VariantsDirBlock.Missing`, new, tells not there from
+holding no rendition), to mount the volume, and that `bridge upscale --gc
+--allow-mass-delete` drops the rows of renditions removed on purpose. Run
+marks it a fault of the output (`outputAway`): it strikes no source, and
+serve's pool says it once per outage (`pool: rendition output unavailable`)
+and proves the outage over at the next job that writes there (`pool:
+rendition output available again`). The record is in
+`ops/engineering-log.md`, 2026-11-07, B727.
