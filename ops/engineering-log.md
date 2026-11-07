@@ -80758,3 +80758,16 @@ seven read-side and `dac` tests) green unmutated.
 | r2 | `bridgePlayback` substitutes whenever the boot is the observation's, the generation not asked | as predicted: both cases of `TestARetainedObservationKeepsItsOwnDACsEvidence` |
 | r3a | `unitText` takes out the longest spelling of the port alone | as predicted: `TestNoDACKeyOrModelCarriesASerialOrAPort`'s model-binding case; the `dac` labels' test green |
 | r3b | `PortForms` adds the canonical form alone, never the port alone | as predicted: that case and both port-alone cases of `TestBridgeDACRedactsIdentityInsideNameAndID` |
+
+### Gates
+
+At d1bc3b43, inside the build slot, on Go 1.27.3: `make fmt` changed nothing; `make vet` and its
+windows, darwin and linux/386 legs passed; `make docs-check` passed, and on a copy with
+`rules-b728-b8-r2.patch` applied (CLAUDE.md 81.5 %, `output.md` 70,418 bytes, player.md 99.3 %,
+the worst load 66.1 %), where `TestEveryCitedTestNameExists` and
+`TestEveryBridgeWordIsInTheProtocol` passed; `go test -race` of the touched packages (playback,
+alsapcm, api, qualification, cmd/bridge) passed (1,051 s); both native-integration overlays
+passed, every case CI names (13 and 29); `scripts/qualification-version` passed at 42 against
+c7192a6f, 9dd51ae4 and 5bfec662; `make test` passed, 87 packages ok (1,825 s); `make build-all`
+passed. alsa-abi did not run: no ABI definition or `scripts/alsa-abi` file changed, only a test
+of the backend under `internal/alsapcm/`.
