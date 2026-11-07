@@ -89,8 +89,11 @@ func sayServeRefusal(gone *dataDirGoneError, stderr io.Writer, now time.Time) {
 	b, err := json.Marshal(dataDirRefusalNote{DataDir: gone.dataDir, SaidAt: now.UTC()})
 	if err == nil {
 		// Unsaid where it fails: the next start finds no note and says the
-		// refusal again.
-		_ = atomicwrite.WriteBytes(path, append(b, '\n'), ".bridge-datadir-*.tmp")
+		// refusal again. Into the directory the record was read from alone,
+		// never one made again for it: a config directory inside the data
+		// dir, on the volume that went since, would be the data dir being
+		// refused, made in the bare mount point.
+		_ = atomicwrite.WriteBytesInExisting(path, append(b, '\n'), ".bridge-datadir-*.tmp")
 	}
 }
 
