@@ -899,8 +899,10 @@ A state that does not read publishes revision 0: a write-back of 0 over the
 fresh state that replaced a damaged file lands and clears its refusal, and one
 over a file refused in memory answers `state_unreadable` and writes nothing.
 
-`would_interrupt` is decided before the write, from one reading of the box:
-the set the write would publish and the one the state gives without it, and an
+`would_interrupt` is classified before the write, from one reading of the
+box, and, since round 2 (below), answered inside the store's closure after
+the state's checks: the set the write would publish and the one the state
+gives without it, and an
 occurrence interrupts where `judgeDSDLocked`, the one classification
 `reconcileDSD` acts by too, says it interrupts against the first and not
 against the second, so what a change of the box does anyway is no interruption
@@ -913,7 +915,8 @@ in its predecessor's join window, whose frames can reach the sink before the
 write publishes; an occurrence played out, still opening, dropped or PCM is
 not judged. The store's closure makes the two sets again from its own state
 and sends the write round again where either moved (`errChoiceRound`, at most
-eight rounds, then `stale`), so the decision holds at the commit.
+eight rounds, then, since round 2, `persist_failed`), so the decision holds at
+the commit.
 
 The set the write would publish is pending (`Backend.pending`) from before the
 classification until the write settles. The step that ends an occurrence's
@@ -971,3 +974,114 @@ at each such write made every write of a session's base stale.
 `TestOnlyAWriteThatInterruptsNeedsTheGoAhead`,
 `TestAnOccurrenceBesideAWriteIsNotRevoked` and
 `TestAWriteThatPanicsLeavesNothingPending` pin it.
+
+## B728 B9 round 2 — the write beside what plays (2026-11-07)
+
+The long form of `output.md`'s second bullet under "The player's DSD choice:
+its write (B728 B9)"; the record is the engineering log's round 2 entry of
+that date.
+
+**Beside what plays (B728 B9 round 2), a write counts an occurrence whose own
+sink an open is under way for as reaching it (`occ.claimed`, taken in the step
+that found no write pending and kept to the end of its activation), and that
+open's adoption and activation wait for a write pending, an occurrence it
+handed off again by then, or dropped for its replacement, taken back from its
+sink unwritten (`errReplanned`, `unadopt`); a resume waits in a loop; a refusal
+of the policy's that a write or a later set lifts is asked again where the open
+ends, the content's checks with it (`settleOpen`, `refusedUnder`), a
+successor's DSD monitor starting once it is admitted; a gapless successor waits
+out of its sink only while that sink holds more than its floor; the write
+decides `would_interrupt` inside the store's closure, after the state's checks,
+from a classification made before it, answers an earlier landed write's fence
+first, and goes round at most eight times, then `persist_failed`; its answer's
+epoch is read inside its turn; and it is judged against the set published, a
+reading of the DAC that gives another set published and reconciled first. Don't
+open, adopt or activate an occurrence's own sink beside a write that has not
+counted it, wait for a write with an `if` where another may follow, fault a
+successor handed off again or dropped at its activation, ask a decoder's
+refusal again or a policy's without the content's checks, compare a pending set
+with any set but the one published, hold a gapless successor past its sink's
+floor, take a session's lock inside the store's closure or answer
+`would_interrupt` before the state's checks, answer a write the state or the
+DAC kept moving under `stale`, read an answer's epoch after its turn, or judge
+a write on a reading the set published does not agree with.**
+
+The producer's transition, and a resume between transports, open the next
+occurrence's own sink outside the session's lock, and a write that classified
+meanwhile saw an occurrence opened and in no sink, a re-plan that interrupts
+nothing, while the open went on to adopt and activate the sink before the
+publish: a write told it interrupted nothing put b's frames on its node, and
+one with the go-ahead stranded b, the engine's replacement refused because
+b's frames were the kernel's. The step that finds no write pending now claims
+the occurrence in the same lock, and the classification counts a claimed one
+as reaching its sink. The claim's adoption waits while a write is pending and
+closes the sink unwritten where the occurrence is being handed off again;
+its activation waits too, no lock held (`checkDSDActivation`, `awaitWrite`),
+for a write that became pending after the adoption, and an occurrence handed
+off again by then, or dropped for its replacement (a cut of a successor with
+no frame written drops it at once, which the check took for a refusal and
+faulted the session on: a control that removed it went red in 4 of 5 runs),
+is taken back from its sink unwritten. Of the two waits the activation's alone
+holds every case a test can reach: a control that removed the adoption's alone
+stayed green, and one that removed both went red. A resume asks again under
+the lock each time a write settles, since another write may be pending by
+then. Each wait is bounded by the write's own, which settles at every end of
+it, and ends with the session's life, which a release ends, a resume's with
+the call's context too.
+
+A successor the set refused by its word was refused for good though the write
+that lifts the refusal was pending as it was made, or published before the
+open ended. The set it was refused under is kept, the pending fence counts it,
+and the step that ends the open asks again, outside the lock, an admission
+refused under a set that is no longer the one published, through
+`openNativeContent`, its reservation charged once, so the content's checks
+are made with it (an empty content refused as that); a decoder's refusal is
+never asked again. The fence compares the pending set with the set published,
+never with the one the write was made from: a session's start that reads the
+durable state before the write's own publish has published what the write
+would, and the first try, comparing with the write's own, made an occurrence
+admitted under it wait for a publish the test held
+(`TestAnOccurrenceBesideAWriteIsNotRevoked`).
+
+The producer held a successor at a rate a write changes in `next()`, whatever
+its transport, with no bound, so a write whose fsync outlasted the sink's
+lookahead ran the sink dry; a gapless successor now waits only while the sink
+it would join holds more than its floor (100 ms, `windowFloor`, the reporter
+waking the producer at each measurement), and at the floor, like any other,
+takes the transport's step, which drains the sink before it and opens none for
+the successor until the write settles: an honest gap, never an xrun. A
+converted join window's hold is the same wait, bounded the same way.
+
+`would_interrupt` is the write's last check: classified before the store's
+write, under the pending set, with no lock of the store's held, and answered
+inside its closure after the policy's checks and the two sets' consistency,
+so a write that would interrupt and finds the revision moved is `stale`.
+Classifying inside the closure would take each session's lock under the
+store's, which a control showed deadlocking `TestTheChoiceWritesLockOrderHolds`
+once it held a reader that takes the store's lock under a session's. The
+store's fence, checked before the closure, then answers a fenced write first
+anyway, and the backend answers it before reading the state as well
+(`choiceFenced`), so a fenced write whose reading of the DAC drifts does not go
+round to its bound and answer `persist_failed`. Past eight rounds the write is
+`persist_failed`; its line is a warning that the write was not made, with why,
+never that it was not made durable, which says it landed. The epoch an answer
+carries is read by a defer registered after the turn's, at every return
+inside the turn: read after it, the next write could publish first, and a
+stale answer carry a revision that write moved past. Stale says the base was
+not the state's revision at the compare-and-set; the migration's part for a
+DAC takes no turn and can move the revision after the answer, which the next
+write's compare-and-set answers stale with the newer one.
+
+A write is judged against the set published. Where its reading of the DAC
+gives another set than the one published, a reading that glitched or the
+DAC's own change, it publishes and reconciles that reading first, a refresh of
+its own that reads the box again, and goes another round, sharing the bound:
+judged on its own reading, a gain read that glitched in it alone made the DoP
+occurrence heard look revoked anyway, so the write was told it interrupted
+nothing and its publish, from a reading that did not glitch, revoked DoP. The
+other option, publishing exactly the write's own reading, was not taken: what
+the box shows is published by a refresh, and the write's publish is one. The
+classification also counts a session being released, and an engine that
+hands nothing off again, as revocations (`TestAWriteBesideASessionBeingReleasedIsTold`,
+`TestAWriteBesideAnEngineThatHandsNothingOffAgainIsTold`, the rig's
+`noReplan`). `TestASuccessorsOpenBesideAWriteIsCountedAndWaitsForIt`, `TestAnActivationBesideAWriteWaitsForIt`, `TestAResumesOpenBetweenTransportsBesideAWriteIsCounted`, `TestAResumeWaitsForEveryWriteThatChangesWhatItOpens`, `TestAPolicyRefusalAWriteLiftsIsAskedAgain`, `TestASuccessorWhoseOpenEndsBesideAWriteWaitsForIt`, `TestNoSinkOpensForASuccessorWhileAWriteChangesItsRate`, `TestAConvertedJoinWindowWaitsForAWriteThatChangesItsSuccessor`, `TestAGaplessSuccessorWaitsForAWriteNoLongerThanTheSinksLookahead`, `TestAWriteBesideAnEngineThatHandsNothingOffAgainIsTold`, `TestAWriteBesideASessionBeingReleasedIsTold`, `TestTheWritesChecksAreAnsweredInTheirOrder`, `TestAWriteTheStateKeepsMovingUnderIsNotMade`, `TestAStaleAnswerNeverCarriesARevisionAnotherWriteHasPassed`, `TestAWriteIsJudgedAgainstTheSetPublished` and `TestAWriteWhoseReadingNeverAgreesWithTheSetPublishedIsNotMade` pin it.

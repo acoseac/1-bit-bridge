@@ -448,3 +448,23 @@ refuses after it, until the next start; `state_unreadable` (409), the state's
 file refused in memory, which nothing writes over until it is moved. Each
 word and row is PROTOCOL.md's, held there by the error table's guards; the
 iOS mirror copies PROTOCOL.md, and its DTOs and the mode UI are I4's.
+
+Round 2 (the same day; the record is the engineering log's round 2 entry).
+An explicit `null` is no member's value, the optional ones' included:
+decoded into a value it was the member left out, so a client's `null` for
+`confirmDoP`, `firstUseAcknowledged`, `interrupt` or `maxBitRate` asked
+nothing it said and still wrote; the optional members are kept as their bytes
+and decoded only when they are not `null` (`TestTheChoiceBodyIsBoundedAndStrict`,
+each of the four, and a valid object after white space past the bound, which
+a control that dropped the bound let reach the player). An earlier write
+that landed and is not known to be durable fences every write until the next
+start: the write answers `persist_uncertain` once the DAC is known, before
+the state's checks, none of which a write that cannot be made is put to.
+`persist_failed` answers too a write that the state or the player's reading
+of the DAC kept moving under for eight rounds: nothing changed, the client's
+revision is not behind, so never `stale`, and a client need not tell it from
+a failed write, the action being the same, writing again from the revision
+`GET` publishes; the bridge's line says which. The answer's epoch is read
+inside the writes' turn, so no later write's revision reaches it
+(`TestAStaleAnswerNeverCarriesARevisionAnotherWriteHasPassed`). PROTOCOL.md's
+section and its error table say each.
