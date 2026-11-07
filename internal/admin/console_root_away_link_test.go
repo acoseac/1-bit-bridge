@@ -133,9 +133,16 @@ func TestAWriteThroughALinkIntoAnAbsentNestedRootIsRefused(t *testing.T) {
 }
 
 // TestAWriteThroughALinkIsAskedOfTheRootItLandsIn: the root a write lands in is
-// found by comparing where the write lands with each root as it resolves, and
-// a root whose path is not there as it is configured, so a root configured
-// through a link, and one whose folder went with its volume, are found too.
+// found by comparing where the write lands with each root as it resolves, a
+// root whose path is not there through its nearest folder that is, as the
+// write's own folder is resolved, so a root configured through a link, and one
+// whose folder went with its volume, are found too. Kept as it is configured,
+// a root whose path is not there was compared in another form than the write
+// wherever a link or another spelling leads to its parent (backlog B794): the
+// one a test configures under macOS's temporary folder, reached through /var,
+// a link to /private/var, and under a Windows runner's, named by its short
+// name (RUNNER~1), let the write through there, while Linux's have neither;
+// a root configured under a link of its own did so on every host.
 func TestAWriteThroughALinkIsAskedOfTheRootItLandsIn(t *testing.T) {
 	t.Run("a nested root configured through a link", func(t *testing.T) {
 		srv, cfg, _ := newTestServer(t)
@@ -187,4 +194,82 @@ func TestAWriteThroughALinkIsAskedOfTheRootItLandsIn(t *testing.T) {
 			t.Errorf("the refused upload made the folder of a root whose volume is away: %v", err)
 		}
 	})
+
+	// The commit of an upload through a link inside the library root, which
+	// the upload's own containment check passes, made the nested root's
+	// folder anew with the upload alone, and the scans would then reap the
+	// rows the index holds under it.
+	t.Run("a root whose path is gone, configured under a linked parent", func(t *testing.T) {
+		srv, lib, usb, real := linkedParentConsole(t, true)
+		h := srv.Handler()
+		body := []byte("fresh audio bytes for the volume")
+		sess := createSession(t, srv, []map[string]any{{"path": "alias/usb/Band/Record/03.flac", "size": len(body)}},
+			map[string]any{"root": filepath.Base(lib)})
+		sid, _ := sess["id"].(string)
+		fid, _ := firstFile(t, sess)["id"].(string)
+		if code, out := putChunk(t, h, sid, fid, 0, body, nil); code != http.StatusOK {
+			t.Fatalf("chunk = %d %v", code, out)
+		}
+		if err := os.Rename(filepath.Join(real, "vol", "usb"), filepath.Join(t.TempDir(), "volume")); err != nil {
+			t.Fatal(err)
+		}
+		var out map[string]any
+		code := doJSON(t, h, "POST", "/api/upload/sessions/"+sid+"/commit", nil, &out)
+		mustRefuseAsNotMounted(t, code, out, usb, notMountedWords)
+		if _, err := os.Lstat(filepath.Join(real, "vol", "usb")); !os.IsNotExist(err) {
+			t.Errorf("the refused commit made the folder of a root whose volume is away: %v", err)
+		}
+	})
+
+	t.Run("a root under a linked parent whose path is not there, holding no rows, takes its first upload", func(t *testing.T) {
+		srv, lib, _, real := linkedParentConsole(t, false)
+		h := srv.Handler()
+		body := []byte("the first upload of a root")
+		sess := createSession(t, srv, []map[string]any{{"path": "alias/usb/Band/Record/03.flac", "size": len(body)}},
+			map[string]any{"root": filepath.Base(lib)})
+		sid, _ := sess["id"].(string)
+		fid, _ := firstFile(t, sess)["id"].(string)
+		if code, out := putChunk(t, h, sid, fid, 0, body, nil); code != http.StatusOK {
+			t.Fatalf("chunk = %d %v", code, out)
+		}
+		var commit map[string]any
+		if code := doJSON(t, h, "POST", "/api/upload/sessions/"+sid+"/commit", nil, &commit); code != http.StatusOK || commit["committed"] != float64(1) {
+			t.Fatalf("the first upload's commit = %d %v, want 200 and 1 committed", code, commit)
+		}
+		srvBgScansWait(t, srv)
+		if got, err := os.ReadFile(filepath.Join(real, "vol", "usb", "Band", "Record", "03.flac")); err != nil || string(got) != string(body) {
+			t.Errorf("the first upload into the root = %q, %v", got, err)
+		}
+	})
+}
+
+// linkedParentConsole is a console over a library root configured through a
+// link (lib, which leads to real) and a root nested under it (lib/vol/usb),
+// with a link inside the library root to the nested root's parent (real/alias,
+// which leads to real/vol): a library under a linked folder, and a link an
+// operator keeps in it. holding seeds the nested root with a track and indexes
+// both roots; without it the nested root's folder is never made.
+func linkedParentConsole(t *testing.T, holding bool) (srv *Server, lib, usb, real string) {
+	t.Helper()
+	srv, _, _ = newTestServer(t)
+	enableUploads(t, srv)
+	base := t.TempDir()
+	real = filepath.Join(base, "real")
+	seedLibraryFile(t, real, "Artist/Album/01.flac", "not a real flac")
+	if err := os.MkdirAll(filepath.Join(real, "vol"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if holding {
+		seedLibraryFile(t, filepath.Join(real, "vol", "usb"), "Band/Record/01.flac", "not a real flac")
+	}
+	lib = filepath.Join(base, "lib")
+	linkDir(t, real, lib)
+	linkDir(t, filepath.Join(real, "vol"), filepath.Join(real, "alias"))
+	usb = filepath.Join(lib, "vol", "usb")
+	srv.deps.Scanner.SetRoots([]string{lib, usb})
+	srv.deps.Resolver.SetRoots([]string{lib, usb})
+	if holding {
+		indexLibrary(t, srv)
+	}
+	return srv, lib, usb, real
 }
