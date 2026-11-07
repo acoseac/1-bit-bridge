@@ -1331,25 +1331,23 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 // asked for deletes the rows under them while the links still lead to them,
 // and the way to index a linked directory is to make it a library root. Until
 // 2026-09-29 the line was the mount-failure one, with that hint (backlog B74).
-// The rows are kept either way, as before.
+// The rows are kept either way, as before. The case is decided by the reading
+// the watcher's look shares (lookAtContentlessRoot, B742).
 func (s *Scanner) emptyRootMustBeSpared(ctx context.Context, root string, multiRoot bool, links []string) bool {
-	n, countErr := s.store.CountTracksUnderRoot(ctx, root, multiRoot)
-	if countErr != nil {
+	look := lookAtContentlessRoot(ctx, s.store, root, multiRoot, len(links))
+	switch look.reason {
+	case rootAbsentUncounted:
 		// Spared either way. A count the shutdown stopped is not reported:
 		// the scan stops before its deletion pass regardless.
-		if failure := ctxerr.WithoutCancellation(ctx, countErr); failure != nil {
+		if failure := ctxerr.WithoutCancellation(ctx, look.err); failure != nil {
 			scanLogger.Warn("count tracks under root; conservatively sparing deletion for root",
 				"root", root, "err", failure)
 		}
-		return true
-	}
-	if n > 0 && len(links) > 0 {
+	case rootOnlyDirLinks:
 		scanLogger.Error(msgRootOnlyDirLinks, rootLineAttrs(root, rootLinkTarget(root),
-			"rows_in_db", n, "rows_under_links", s.rowsUnderDirLinks(ctx, links),
+			"rows_in_db", look.rows, "rows_under_links", s.rowsUnderDirLinks(ctx, links),
 			"dir_links", len(links), "example", links[0], "hint", dirLinkSentinelHint)...)
-		return true
-	}
-	if n > 0 {
+	case rootAbsentEmpty:
 		// For a linked root, the directory the walk found empty is the
 		// one the link points at, and that is where the sentinel is
 		// looked for (through the link), so the line names it.
@@ -1360,18 +1358,49 @@ func (s *Scanner) emptyRootMustBeSpared(ctx context.Context, root string, multiR
 				"place .bridge-allow-empty in that directory to confirm intent"
 		}
 		scanLogger.Error("suspected clean-empty mount failure",
-			rootLineAttrs(root, target, "rows_in_db", n, "hint", hint)...)
-		return true
+			rootLineAttrs(root, target, "rows_in_db", look.rows, "hint", hint)...)
 	}
-	return false
+	return look.absent
+}
+
+// lookAtContentlessRoot is the one reading of a library root whose walk or
+// listing found no library content (isLibraryEntry) and that holds no
+// .bridge-allow-empty, by what the index holds under it and by dirLinks, the
+// links to directories (dirLinkEntry) that walk or listing passed over. The
+// scan's clean-empty guard (emptyRootMustBeSpared), the owning-root audit
+// (auditOwningRootOnSubtreeMiss) and the watcher's look (lookAtRoot) all read
+// such a root through it, so none tells the cases apart otherwise than the
+// others: the look read a root holding only links to directories as an
+// emptied mount point, and the watcher holding it said to check that its
+// volume is mounted, while the guard told that root apart (backlog B742).
+//
+// The root is absent, its rows spared and the watcher holding it, when the
+// index holds tracks under it (rootOnlyDirLinks where it holds a link to a
+// directory, rootAbsentEmpty where it holds none) or cannot count them
+// (rootAbsentUncounted). A root the index holds nothing of (a fresh install,
+// a wiped library) reads as it is.
+func lookAtContentlessRoot(ctx context.Context, store *Store, root string, multiRoot bool, dirLinks int) rootLook {
+	n, err := store.CountTracksUnderRoot(ctx, root, multiRoot)
+	switch {
+	case err != nil:
+		return rootLook{absent: true, reason: rootAbsentUncounted, err: err}
+	case n == 0:
+		return rootLook{}
+	case dirLinks > 0:
+		return rootLook{absent: true, reason: rootOnlyDirLinks, rows: n}
+	}
+	return rootLook{absent: true, reason: rootAbsentEmpty, rows: n}
 }
 
 // rootLook is what a look at a configured library root found
-// (Scanner.lookAtRoot): whether it reads as a volume that is not mounted, the
-// way the scan's guards read it, and how.
+// (Scanner.lookAtRoot): whether the full scan would spare every row under it,
+// the way the scan's guards read it, and how.
 type rootLook struct {
-	// absent: the root reads as a volume that is not mounted. reason says
-	// how (the rootAbsent constants), "" when it does not.
+	// absent: the root reads as a volume that is not mounted, or as one
+	// holding nothing but links to directories over tracks the index holds
+	// (rootOnlyDirLinks), whose rows the scan spares as well. reason says
+	// how (the rootAbsent constants and rootOnlyDirLinks), "" when it does
+	// not.
 	absent bool
 	reason string
 	// rows is the number of tracks the index holds under the root, when the
@@ -1396,6 +1425,13 @@ const (
 	// rootAbsentUncounted: it holds no library content and the tracks under
 	// it could not be counted, which the scan takes as the clean-empty case.
 	rootAbsentUncounted = "uncounted"
+	// rootOnlyDirLinks: it holds no library content but links to directories,
+	// which no walk follows, while the index holds tracks under it. Not a
+	// volume that is not mounted: a link stat'ed through to a directory says
+	// the volume holding the root is there (B74). The scan spares its rows
+	// all the same and says so (msgRootOnlyDirLinks), so the watcher holds it
+	// too, and its held line gives that account (heldHint, B742).
+	rootOnlyDirLinks = "only-dir-links"
 )
 
 // lookAtRoot reads a configured root as the scan's guards read it, for a
@@ -1405,31 +1441,27 @@ const (
 // full scan would spare every row under it: a root it cannot see (walkRoot's
 // fsutil.WalkableRoot), one whose listing fails, and one that holds no
 // library content (isLibraryEntry) and no .bridge-allow-empty while the index
-// holds tracks under it, or cannot count them (emptyRootMustBeSpared). A root
-// that holds content, the sentinel, or nothing the index knows of (a fresh
-// install) reads as it is. The listing is read a batch at a time, so a root
-// of thousands of folders is answered by its first entries, and it logs
-// nothing: the caller says what it does about the answer.
+// holds tracks under it, or cannot count them (emptyRootMustBeSpared), read
+// through the reading the scan's guard shares (lookAtContentlessRoot), so a
+// root holding nothing but links to directories reads as rootOnlyDirLinks, as
+// the guard reads it. A root that holds content, the sentinel, or nothing the
+// index knows of (a fresh install) reads as it is. The listing is read a
+// batch at a time, so a root of thousands of folders is answered by its first
+// entries, and it logs nothing: the caller says what it does about the
+// answer.
 func (s *Scanner) lookAtRoot(ctx context.Context, root string) rootLook {
 	walkFrom, err := fsutil.WalkableRoot(root)
 	if err != nil {
 		return rootLook{absent: true, reason: rootAbsentUnreachable, err: err}
 	}
-	holds, err := dirHoldsLibraryContent(walkFrom)
+	holds, dirLinks, err := dirHoldsLibraryContent(walkFrom)
 	if err != nil {
 		return rootLook{absent: true, reason: rootAbsentUnreadable, err: err}
 	}
 	if holds || hasAllowEmptySentinel(root) {
 		return rootLook{}
 	}
-	n, err := s.store.CountTracksUnderRoot(ctx, root, len(s.Roots()) > 1)
-	switch {
-	case err != nil:
-		return rootLook{absent: true, reason: rootAbsentUncounted, err: err}
-	case n == 0:
-		return rootLook{}
-	}
-	return rootLook{absent: true, reason: rootAbsentEmpty, rows: n}
+	return lookAtContentlessRoot(ctx, s.store, root, len(s.Roots()) > 1, dirLinks)
 }
 
 // rootLookBatch is how many entries of a root's listing dirHoldsLibraryContent
@@ -1437,24 +1469,28 @@ func (s *Scanner) lookAtRoot(ctx context.Context, root string) rootLook {
 const rootLookBatch = 64
 
 // dirHoldsLibraryContent reports whether the directory dir holds library
-// content (holdsLibraryContent), reading its listing rootLookBatch entries at
-// a time and stopping at the first batch that holds some.
-func dirHoldsLibraryContent(dir string) (bool, error) {
+// content (listingContent), reading its listing rootLookBatch entries at a
+// time and stopping at the first batch that holds some, and how many links to
+// directories the entries it read before that content hold: every one in the
+// listing, when it holds no content.
+func dirHoldsLibraryContent(dir string) (holds bool, dirLinks int, err error) {
 	f, err := fsutil.OpenDir(dir)
 	if err != nil {
-		return false, err
+		return false, 0, err
 	}
 	defer f.Close()
 	for {
 		entries, err := f.ReadDir(rootLookBatch)
-		if holdsLibraryContent(dir, entries) {
-			return true, nil
+		holds, links := listingContent(dir, entries)
+		dirLinks += links
+		if holds {
+			return true, dirLinks, nil
 		}
 		if errors.Is(err, io.EOF) {
-			return false, nil
+			return false, dirLinks, nil
 		}
 		if err != nil {
-			return false, err
+			return false, dirLinks, err
 		}
 	}
 }
@@ -3696,6 +3732,9 @@ func hasAllowEmptySentinel(root string) bool {
 //   - root holds no content AND CountTracksUnderRoot == 0:
 //     trustworthy — fresh install or post-wipe state with no rows
 //     to protect.
+//
+// The three cases of a root holding no content are the reading the scan's
+// guard and the watcher's look share (lookAtContentlessRoot, B742).
 func auditOwningRootOnSubtreeMiss(ctx context.Context, store *Store, owningRoot string, multiRoot bool) error {
 	if _, err := os.Stat(owningRoot); err != nil {
 		return fmt.Errorf("audit owning root: stat: %w", err)
@@ -3707,20 +3746,20 @@ func auditOwningRootOnSubtreeMiss(ctx context.Context, store *Store, owningRoot 
 	if holdsLibraryContent(owningRoot, entries) || hasAllowEmptySentinel(owningRoot) {
 		return nil
 	}
-	n, err := store.CountTracksUnderRoot(ctx, owningRoot, multiRoot)
-	if err != nil {
-		return fmt.Errorf("audit owning root: count tracks: %w", err)
-	}
-	if n == 0 {
+	links := dirLinksIn(owningRoot, entries, multiRoot)
+	look := lookAtContentlessRoot(ctx, store, owningRoot, multiRoot, len(links))
+	switch look.reason {
+	case "":
 		return nil
-	}
-	if links := dirLinksIn(owningRoot, entries, multiRoot); len(links) > 0 {
+	case rootAbsentUncounted:
+		return fmt.Errorf("audit owning root: count tracks: %w", look.err)
+	case rootOnlyDirLinks:
 		return fmt.Errorf("audit owning root %q: no library content on disk but %d tracks in DB, %v of them under the links to directories it holds (%d, e.g. %s), "+
 			"which the scanner does not follow; placing .bridge-allow-empty would delete them, with a tombstone to every paired device, though the links still lead to their files; "+
 			"to index what a link leads to, add that directory as a library root of its own",
-			owningRoot, n, countRowsUnderDirLinks(ctx, store, links), len(links), links[0])
+			owningRoot, look.rows, countRowsUnderDirLinks(ctx, store, links), len(links), links[0])
 	}
-	return fmt.Errorf("audit owning root %q: no library content on disk but %d tracks in DB (suspected mount drop; place .bridge-allow-empty to confirm intent)", owningRoot, n)
+	return fmt.Errorf("audit owning root %q: no library content on disk but %d tracks in DB (suspected mount drop; place .bridge-allow-empty to confirm intent)", owningRoot, look.rows)
 }
 
 // dirLinksIn returns the links to directories among a root's entries
@@ -4049,17 +4088,26 @@ func isLibraryEntry(abs, name string, isDir bool) bool {
 // isLibraryEntry takes as library content, never counting a link to a
 // directory (dirLinkEntry), as the walks do not.
 func holdsLibraryContent(dir string, entries []fs.DirEntry) bool {
+	holds, _ := listingContent(dir, entries)
+	return holds
+}
+
+// listingContent is holdsLibraryContent's answer, and how many links to
+// directories (dirLinkEntry) the entries before the first that is content
+// hold: every one in the listing, when none is content.
+func listingContent(dir string, entries []fs.DirEntry) (holds bool, dirLinks int) {
 	for _, e := range entries {
 		abs := filepath.Join(dir, e.Name())
 		through := throughStat{abs: abs}
 		if _, linked := dirLinkEntry(e.Type(), e.Name(), through.stat); linked {
+			dirLinks++
 			continue
 		}
 		if isLibraryEntry(abs, e.Name(), e.IsDir()) {
-			return true
+			return true, dirLinks
 		}
 	}
-	return false
+	return false, dirLinks
 }
 
 // variantIDInfixRe matches a bridge variant ID EXACTLY:
