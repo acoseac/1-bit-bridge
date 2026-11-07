@@ -52,7 +52,7 @@ type atlasPremiumFetcher struct {
 	userAgent string
 	http      *http.Client
 	// sw is the fetcher's own switch, enrich.enabled, which its transport
-	// asks and every answer's return asks again (backlog B617).
+	// asks and every return that wrote no cover asks again (backlog B617).
 	sw enrichgate.Switches
 	// cacheDir bounds every write this fetcher makes. Both of its write
 	// sites receive a fully-built `path` from a caller, and one of those
@@ -109,11 +109,14 @@ func (f *atlasPremiumFetcher) TryCache(ctx context.Context, path, mbid string, s
 		return false // no credential / transport error → CAA path
 	}
 	defer resp.Body.Close()
-	// Every return from here asks the fetcher's switch again, as the enrich
-	// clients' do (backlog B617): no cover counts as cached from an answer
-	// the switch refused.
+	// Every return from here that wrote nothing asks the fetcher's switch
+	// again, as the enrich clients' do (backlog B617): a refusal ends the pass
+	// on ctx, and such a return answers no cover already. A cover the write
+	// below committed is cached, whatever the switch says by then (round 5):
+	// it is on disk, and a false would leave the caller to fetch it again.
+	written := false
 	defer func() {
-		if f.sw.Answer(ctx) != nil {
+		if !written && f.sw.Answer(ctx) != nil {
 			cached = false
 		}
 	}()
@@ -150,6 +153,7 @@ func (f *atlasPremiumFetcher) TryCache(ctx context.Context, path, mbid string, s
 		}
 		return false
 	}
+	written = true
 	logger.Debug("atlas premium cover cached", "mbid", mbid, "size", size)
 	return true
 }
@@ -218,10 +222,17 @@ func (f *atlasPremiumFetcher) RefetchPremium(ctx context.Context, path, mbid str
 		return false, err
 	}
 	defer resp.Body.Close()
-	// Every return from here asks the fetcher's switch again, as TryCache's
-	// do (backlog B617): "no cover at Atlas" read after a switch-off would
-	// settle a pending cover the switch stopped.
+	// Every return from here that wrote nothing asks the fetcher's switch
+	// again, as TryCache's do (backlog B617): "no cover at Atlas" read after a
+	// switch-off would settle a pending cover the switch stopped. A premium
+	// cover the write below committed is got, whatever the switch says by then
+	// (round 5): the cache holds it, and a refusal would keep the cover
+	// pending for the harvest to fetch again.
+	written := false
 	defer func() {
+		if written {
+			return
+		}
 		if r := f.sw.Answer(ctx); r != nil {
 			got, err = false, r
 		}
@@ -268,6 +279,7 @@ func (f *atlasPremiumFetcher) RefetchPremium(ctx context.Context, path, mbid str
 	if err := writeArtworkAtomicStream(f.cacheDir, path, resp.Body, MaxCoverArtBytes); err != nil {
 		return false, err
 	}
+	written = true
 	logger.Info("atlas premium cover upgraded", "mbid", mbid, "size", size)
 	return true, nil
 }

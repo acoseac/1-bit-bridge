@@ -1,6 +1,7 @@
 package enrich
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -153,31 +154,69 @@ func TestEveryClientsErrorAnswerCompletedAfterTheFlipIsNoAnswer(t *testing.T) {
 	}
 }
 
-// TestAPremiumCoverCompletedAfterTheFlipCountsNoCover: the premium fetch's
-// TryCache, which answers only whether a cover was cached, so an error
-// status reads false whatever its switch says, asks it again at its return
-// after a 200 too: a cover whose body completed after the switch-off counts
-// as none, on a context that carries no switch. What it wrote stays.
-func TestAPremiumCoverCompletedAfterTheFlipCountsNoCover(t *testing.T) {
+// premiumAfterTheFlip is a premium fetcher whose one answer is a 200 carrying
+// premiumJPEG, as Atlas serves a premium cover, and turns s off as its body is
+// first read, after the answer's admission; every switch is asked once an
+// hour, so no tick refuses it.
+func premiumAfterTheFlip(t *testing.T, s *flipSwitch) (f PremiumCoverFetcher, path string) {
+	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-Atlas-Asset-Source", "tidal")
 		_, _ = w.Write(premiumJPEG)
 	}))
 	t.Cleanup(srv.Close)
-	s := newFlipSwitch(true)
 	hc := barrierClient(t, s, func(*http.Request) bool { return true })
 	dir := t.TempDir()
-	f := NewAtlasPremiumFetcher(fakeCred{token: "tok", base: srv.URL, ok: true}, "t", hc, dir,
+	f = NewAtlasPremiumFetcher(fakeCred{token: "tok", base: srv.URL, ok: true}, "t", hc, dir,
 		enrichgate.Enrichment(s.get).Every(time.Hour))
-	path := ArtworkCachePath(dir, clientMBID, 500)
-	cached := f.TryCache(context.Background(), path, clientMBID, 500)
+	return f, ArtworkCachePath(dir, clientMBID, 500)
+}
+
+// requireTheCoverWritten fails a premium case whose cover is not at path,
+// whole, or whose answer's body was never read after the switch-off: such a
+// case tests nothing.
+func requireTheCoverWritten(t *testing.T, s *flipSwitch, path string) {
+	t.Helper()
 	if s.on.Load() {
 		t.Fatal("the answer's body was never read: the case tests nothing")
 	}
-	if _, err := os.Stat(path); err != nil {
-		t.Fatalf("the cover was not written, so the return asked nothing a written cover tests: %v", err)
+	if b, err := os.ReadFile(path); err != nil || !bytes.Equal(b, premiumJPEG) {
+		t.Fatalf("the cover is not at its path whole (%v): the case tests nothing", err)
 	}
-	if cached {
-		t.Error("a cover whose answer completed after the switch-off counted as cached")
+}
+
+// TestAPremiumCoverWrittenAfterTheFlipIsCached: once the premium fetch's
+// write has committed a cover, TryCache answers it cached whatever its switch
+// says by its return (backlog B617, round 5): the cover is there, and a false
+// left its caller, once the switch was on again, to fetch the same cover. Its
+// body here completes after the switch-off, inside the second the transport's
+// watch takes to cut a request, on a context that carries no switch.
+func TestAPremiumCoverWrittenAfterTheFlipIsCached(t *testing.T) {
+	s := newFlipSwitch(true)
+	f, path := premiumAfterTheFlip(t, s)
+	cached := f.TryCache(context.Background(), path, clientMBID, 500)
+	requireTheCoverWritten(t, s, path)
+	if !cached {
+		t.Error("a cover written after the switch-off answered not cached: its caller fetches it again")
+	}
+}
+
+// TestAPremiumUpgradeWrittenAfterTheFlipIsGot: the same for the harvest's
+// upgrade: a premium cover RefetchPremium has written over the cached one
+// answers (true, nil) whatever the switch says by its return, so the
+// harvest settles its pending cover. The refusal it answered, with the cover
+// already replaced, kept the cover pending and fetched it again.
+func TestAPremiumUpgradeWrittenAfterTheFlipIsGot(t *testing.T) {
+	s := newFlipSwitch(true)
+	f, path := premiumAfterTheFlip(t, s)
+	if err := os.WriteFile(path, []byte("OLD-CAA-COVER"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := f.RefetchPremium(context.Background(), path, clientMBID, 500)
+	requireTheCoverWritten(t, s, path)
+	if !got || err != nil {
+		t.Errorf("RefetchPremium = (%v, %v) for a cover it wrote after the switch-off, want (true, nil): "+
+			"the harvest keeps it pending and fetches it again", got, err)
 	}
 }
 

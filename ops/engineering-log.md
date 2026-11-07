@@ -82015,12 +82015,14 @@ readings were left as it said; the public record names them under B761.
    once `Do` gave it a response, through one deferred check over named
    results: a refusal stands for the answer and its error, and closes a body
    the client would have handed over (the Cover Art Archive's and iTunes'
-   artwork streams). That covers the premium fetch's `TryCache` too, which
+   artwork streams). That covered the premium fetch's `TryCache` too, which
    answers only whether a cover was cached, so an error status reads false
-   whatever the switch says: a 200 whose body completes after the flip counts
-   as no cover now, and the bytes it wrote stay
-   (`TestAPremiumCoverCompletedAfterTheFlipCountsNoCover`, written after the
-   fix; its red is control r4-1j below). Deezer's search and image returned
+   whatever the switch says: a 200 whose body completed after the flip
+   counted as no cover, the bytes it wrote kept, and its test, written after
+   the fix, had control r4-1j below for its red. Round 5 undid that half: a
+   cover the write has committed is cached, and the check applies only to a
+   return that wrote nothing (its record, and the test renamed for what is
+   true). Deezer's search and image returned
    an error status without reading its body, which the deferred `Close`
    alone touched, after the check, so the barrier could not reach that
    check: they drain the body first now, as MusicBrainz, the Cover Art
