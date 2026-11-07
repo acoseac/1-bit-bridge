@@ -34,6 +34,7 @@
 // before them (ErrWindow) with a snapshot of itself, and computes them only
 // once its caller says what follows: the successor (Continue) or nothing
 // (End). Rewind goes back to that snapshot, for a successor replaced or cut,
-// as often as asked. Nothing in production calls the package yet: B728's
-// B11 wires it into the player's backend.
+// as often as asked. The player's backend (internal/player/playback, B728
+// B11) is its one caller: it converts where the effective set converts a
+// rate, and hands the samples to its DAC's sink alone.
 package dsdconv

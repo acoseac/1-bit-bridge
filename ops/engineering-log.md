@@ -79695,8 +79695,8 @@ word by `TestEveryDSDRefusalWordIsInTheProtocol`, and moves
 `ReasonDACUnread` beside the other refusals there, so the guard maps it too.
 
 **Tests**, new: `TestSelectionAndPublicationReadOneSet` (also under a race
-of refreshes and admissions), `TestAConvertedRateIsRefusedUntilThePlayerConverts`,
-`TestAnUnknownDACsDSDStaysRefused`, `TestAMigratedChoiceRefusesARateItsRecordDidNotApprove`,
+of refreshes and admissions), `…AConvertedRateIsRefusedUntilThePlayerConverts`,
+`…AnUnknownDACsDSDStaysRefused`, `TestAMigratedChoiceRefusesARateItsRecordDidNotApprove`,
 `TestAMigratedDoPSetupWithUnverifiableGainRefuses`,
 `TestThePublishedReasonIsTheLowestRatesWordOnlyWhenNoRatePlays`,
 `TestAStateThatDoesNotReadRefusesEveryRate`, `TestNoSetComesFromAReadingThatIsNotFresh`
@@ -79752,8 +79752,8 @@ C2 a stale set after a change, a refresh reconciling nothing
 (`TestAGainChangeRevokesDoPWithoutConsent`); C4 the monitor never started
 (the same); C5 streaming_observed early, at 4 s (its 4.9 s case); C6
 streaming_observed beside a failed decode (its decode case); C7 a converted
-rate played (`TestAConvertedRateIsRefusedUntilThePlayerConverts`,
-`TestAnUnknownDACsDSDStaysRefused`); C8 the opened node's identity unchecked
+rate played (`…AConvertedRateIsRefusedUntilThePlayerConverts`,
+`…AnUnknownDACsDSDStaysRefused`); C8 the opened node's identity unchecked
 (`TestTheOpenedNodeMustBeTheIdentityThePolicyWasComputedFor`, both cases:
 the activation's refresh refuses as a second layer, after the open recorded
 a driver acceptance for the wrong unit); C9 the DoP gain check at the open
@@ -83980,6 +83980,732 @@ record follows it):
 
 The planted link of B740's red (`.tmp/b740-planted/run/user/1000/bus`, a
 link to nothing) was in place for the test run and was removed after it.
+## 2026-11-07 — B773: a DAC with two identical USB configurations plays DoP
+
+Worker b773, legion0 (Ubuntu 26.04, linux/amd64, Linux 7.0.0-38, Go 1.27.3), branch
+`fix/b773-duplicate-configuration` from main 49071fbf. Commits: 69927023 (the Mytek's captured
+descriptors and a red test), 2a2d1165 (the fix and its table test), then this record. The rule
+and its long form change through `~/onebit/jobs/b773/rules-b773.patch` (a new bullet in
+`player.md`'s B728 section, 441 bytes, taking the file to 98,773 of its 100,000). The
+qualification check takes no bump: `internal/player/policy/` is not guarded, and nothing guarded
+changed.
+
+### The finding
+
+The orchestrator's hardware run on a Mytek Brooklyn DAC+ (25ce:0025, bcdDevice 0100),
+2026-11-07: `bNumConfigurations` 2, and the sysfs `descriptors` attribute 970 bytes holding two
+byte-identical configurations of 476 bytes, both headed `0902dc01040100c001`, value 1.
+`policy.configuration` refused any two configurations of one value, so every DoP rate was
+refused: `dop_gain_unverifiable: the playback path of interface 2, altset 1 does not resolve:
+the descriptors do not resolve: two configurations hold the value 1`. It failed closed: native
+was unaffected and `auto` converted those rates, but DoP could never play on that DAC. A
+diagnostic build that kept the first configuration resolved the path, played DoP at DSD64 and
+DSD128, and a volume move stopped it in 56 to 62 ms.
+
+The capture is the fixture `internal/player/policy/testdata/mytek-brooklyn-dac-plus.descriptors.bin`
+(SHA-256 02400f69dc719bfbc53b54fa74d990ee4bdce797be688942dd7be7c2f9eebece; `binary` in
+`.gitattributes`, since `internal/alsa/testdata/**` is `text eol=lf` and the file would not
+survive that). Its descriptors are the device (type 1), two configurations (2), two interface
+associations (0x0b), 20 interfaces (4), 42 class-specific interface (0x24), 20 endpoint (5) and
+12 class-specific endpoint (0x25) descriptors and two HID (0x21): no string descriptor (3), no
+printable run of four characters in ASCII or UTF-16 either byte order, and `iSerialNumber` is the
+index 3. No serial. Its playback path: interface 2 (altset 1 S32_LE at 32 bits, altset 2 raw data,
+the native DSD one) linked to input terminal 3 (USB streaming), through feature unit 4 (mute and
+volume on the master channel) to output terminal 5 (0x0602), in control interface 0's function;
+interface 1 is its capture (input terminal 1 to USB streaming output terminal 2), interface 3 a
+HID.
+
+### What the kernel does with two configurations of one value
+
+What this host holds: the `linux-headers-7.0.0-38` and `-42` packages, headers, Kconfig and
+Makefiles alone; no `drivers/usb/core/*.c`, no kernel source tree, no Documentation/ABI, and the
+Go module cache holds none either. From `include/linux/usb.h` (7.0.0-38):
+`usb_get_descriptor(struct usb_device *dev, unsigned char desctype, unsigned char descindex,
+void *buf, int size)` asks a descriptor by its index, never by a value; `struct usb_device` keeps
+`config` ("all of the device's configs"), one `actconfig` ("the active configuration") and
+`rawdescriptors` ("raw descriptors for each config"); and `struct usb_host_config`'s comment has
+one configuration active at a time, their number in `bNumConfigurations`.
+
+What could not be read here, stated from upstream's `drivers/usb/core` as this worker knows it
+and unverified on the box: `usb_get_configuration` (`config.c`) reads configuration index 0 to
+`bNumConfigurations` − 1, each by `usb_get_descriptor(dev, USB_DT_CONFIG, cfgno, …)`, first its
+9 bytes and then its `wTotalLength`, keeps each in `rawdescriptors[cfgno]`, and leaves
+`bNumConfigurations` at the number it read (the capture's device descriptor says 2, so both
+copies were read and parsed); `usb_choose_configuration` (`generic.c`) chooses, for an audio
+device with no UAC3 configuration, the first configuration, and returns its
+`bConfigurationValue`; `usb_set_configuration` (`message.c`) takes the first `config[i]` holding
+that value (it breaks at the first match) as `actconfig`, whose interfaces snd-usb-audio parses;
+and sysfs's `descriptors` (`sysfs.c`, `read_descriptors`) writes the device descriptor, then each
+`rawdescriptors[i]` for `config[i].desc.wTotalLength` bytes, in index order. So the Mytek's
+firmware answered index 1 with index 0's bytes, the kernel set the first copy, and the second is
+never active. A unit whose copies differed would get the first index's too, by that code; but the
+bridge cannot see the index (the card's interface name, `<bus>-<port>:<config>.<interface>`, and
+sysfs's `bConfigurationValue` carry the value), so a pair that differs stays refused, and the
+gain check leans on nothing it cannot read on the box.
+
+### The change
+
+`configuration` takes configurations of the selected value as one when they are the same bytes,
+the whole of each by its `wTotalLength`, its configuration descriptor included
+(`bytes.Equal(rest[:total], found)`), and returns the first's body. Two that differ anywhere are
+refused with the sentence a duplicate always had, "two configurations hold the value N", so the
+gain check's reason stays `dop_gain_unverifiable` and its detail the same words. A configuration
+that runs past the stream is still refused before any comparison, whichever copy it is ("a
+configuration's total length runs past its descriptors"; a first copy cut short shifts the walk,
+which then refuses at the next, "a configuration descriptor is cut short or missing"). Another
+value's duplicates are not the selected configuration's. `ParsePlayback`'s doc says "held once
+or as copies byte for byte the same".
+
+### The other readers of the descriptors
+
+- The topology (`policy.ParsePlayback`, under `CheckGain`, which serve's player calls through
+  `readMixer` at admission, at the check after open and on the monitor): changed.
+- `alsa.SysfsReader.QualificationGain` (`descriptorGain`, the harness's DoP admission, in guarded
+  `internal/alsa/`): walks every descriptor of every configuration by bLength, true when any
+  audio control interface holds a feature unit; it reads no value and no `wTotalLength`, and
+  never refused a duplicate. The Mytek reads true with one copy or two (unit 4). Unchanged.
+- The silent probe (`alsapcm.Probe`): reads no descriptor; the kernel answers its HW_REFINEs
+  from the active configuration's altsets.
+- `bridge output dac inspect` and the migration (`dacModelReader`, `playerDSD.boundOf`): read the
+  unit's strings and firmware through `alsa.SysfsReader.Qualification`, never the descriptors
+  attribute (the "descriptors" they name are the string descriptors' values).
+- The profile database's keys (`dsdstate.KeyOf`, `dacprofile.NewKey`): idVendor and idProduct,
+  the card's interface from its sysfs name, the product string; no descriptor.
+- `alsa.SysfsReader.UnitModel`: reads the attribute's bytes, bounded at 256 KiB, and parses
+  nothing; its `Config` is the value the interface name carries.
+
+So no reader resolves the Mytek while another refuses it.
+
+### Evidence
+
+Red first: 69927023's `TestTheMyteksCapturedDescriptorsGiveItsDoPPath` failed every assertion
+on 49071fbf's parse, with the finding's words (both altsets' paths, the gain at and off 0 dB,
+DoP at DSD64 and DSD128), and is green on 2a2d1165. It checks the capture is the finding's (970
+bytes, two copies of configuration 1 in 476 bytes each, no string descriptor); interface 2's
+path at altsets 1 and 2 (input terminal 3, feature unit 4's master volume, output terminal 5);
+the gain check over the S32_LE altset with unit 4's volume at 0 dB (unity) and at -64 dB
+(`dop_gain_not_unity`), through the usbmixer table and altsets its box's /proc gave (replacing a synthetic table on review); and `Effective` planning DoP at DSD64 and DSD128 at 0 dB and refusing DSD64 off it.
+
+`TestByteIdenticalConfigurationsAreOne`: one, two and three the same; two the same with another
+value's between them; two under one header with different bodies, in both orders (a mute alone
+against a volume, one length); two of different lengths; two differing in their configuration
+descriptors alone (bMaxPower); three, the third differing; another value's differing pair, at
+the other value (resolves) and at its own (refused, "the value 2"); two the same with the second
+cut short and with the first; and the Mytek's capture with its second copy cut short by a byte,
+and with its second copy's feature unit 4 a mute alone (byte 605, 0x0f to 0x03). A refused row
+asserts the exact sentence and `dop_gain_unverifiable`; a resolving row the one configuration's
+path and unity at 0 dB.
+
+Negative controls, predicted in a file before any ran, each one exact-once replacement in
+`topology.go` on the committed 2a2d1165, the policy package's test binary run whole, the bytes
+put back from memory; every one went red exactly as predicted and nowhere else, and the tree was
+clean after:
+
+| control | mutation | red |
+|---|---|---|
+| A, comparing only the headers | `bytes.Equal(rest[:rest[0]], found[:found[0]])` | the two rows under one header, "three, the third differing", the Mytek's changed copy |
+| B, accepting differing bytes | `bytes.Equal(rest[:total], rest[:total])` | all six differing rows, the Mytek's changed copy |
+| C (extra), comparing only the bodies | `bytes.Equal(rest[rest[0]:total], found[found[0]:])` | "two differing in their configuration descriptors alone" |
+| D (extra), the first copy taken, the walk ended | `return rest[rest[0]:total], nil` at the first match | all six differing rows, both cut-short rows, the Mytek's cut and changed copies |
+
+**Checks.**
+- The red run above: 69927023's test against 49071fbf's parse, every assertion red with the
+  finding's words; the policy package (`go test -count=1`) ok on 2a2d1165.
+- The rules patch: `git apply --check -v` clean on the worktree; a strict applier of this
+  worker's own gives the generated files byte for byte; on a `git archive` copy of 2a2d1165 with
+  both patched files in, `check-doc-budgets.py` (and its self-test), `rules-for.py --self-test`
+  and `move_entry.py --self-test` pass: `player.md` 98,773 bytes (98.8%, which the script calls
+  close to its budget), the worst load 66.3%.
+- `make fmt vet test build-all` through the shared build lock on 08ee0224 (the slot taken after
+  44 minutes behind two other workers): `go fmt` changed nothing, `make vet` ok, `make test`
+  (race, TMPDIR under `.tmp/_b773`) ok in 34 minutes, 88 packages and 14 without tests, the
+  Linux-only ones run (internal/alsa, internal/alsapcm, internal/atomicwrite, internal/backup,
+  the player's, scripts/install-test); `make build-all` ok.
+- `make vet` with `GOOS=windows` and with `GOOS=darwin`: ok; `go vet` of the policy package for
+  linux/386 and linux/arm64 too, and its tests run as a linux/386 build: ok.
+- `go test -race -count=1 ./internal/player/policy/`: ok.
+- The qualification check against main (`scripts/qualification-version -base main -head HEAD`):
+  "qualification version OK: main..HEAD", no guarded path touched, so no bump.
+- `make docs-check` on the tree as it stands: ok.
+## 2026-11-07 — B727: late-mounting volumes, the rest of B651
+
+Backlog B727, on `fix/b72v-late-volumes` from main 49071fbf; worker b72v on
+the Linux worker host. Seven questions B651 left about a NAS or USB volume
+that mounts after the service starts, each first checked at this head.
+Commits, each item's red test first: item 1, 8abc3658 and b3475e94; item 2,
+14888772 and 69300f79, and 4c7646ee for its update check; item 5, ef0ed0f6
+and ac4f0361, and 3809e9ce, three tests of what decides whether a start
+says it;
+40bd5dc5 the runbook; then this record. The rules are `rules-b72v.patch`
+(scanner.md's B651 line, a bullet each in cli-serve.md and jobs.md, and
+their long forms). Red runs were on a copy of the tree with the changed
+files put back at 49071fbf.
+
+**1. A render into a bare mount point's variants directory** (real; fixed).
+With the variants directory on a volume whose mount point is bare, the
+CLI's worker rendered a track through `transcode.Run` and a stand-in sox:
+on 49071fbf it made the variants directory under the bare mount point and
+published a rendition there (`done=1 failed=0`), the mount-loss probe then
+read it as mounted, serve's variant watcher deleted the three rows of
+renditions on the volume (`Rows:4 Present:1 Deleted:3`; with twelve the
+relocation guard refused), and a download of one of them reaped its row at
+three rows and at twelve (the download's reap has no floor). A render now
+asks a guard first (`OutputGuard`, cmd/bridge's `renditionOutputGuard`):
+the probe, then `Store.VariantRecordedUnder`; a directory that reads as away
+while the catalog records a rendition under it is written nothing, and the
+refusal is an output fault, one Warn per outage, no strike. A catalog that
+records nothing there (a fresh install, a variants directory just set to a
+new place) and a directory that reads as mounted render as before. Likely
+where the folder a variants directory sits in is the service user's to
+write while its volume is away (a mount point chowned to it, a bridge run
+as root): a render runs at the auto-optimize sweep and at a client's
+request.
+
+**2. Commands that made a data dir and a database during an outage** (real;
+fixed). An install whose record names its data dir, the volume's mount
+point bare: of the 28 commands that make, open or write the data dir, run
+through `run`'s dispatch, every one went on at 49071fbf, and 22 made a
+`bridge.db` or a `server.lock` under the bare mount point (the store's open
+makes the data dir and an empty database; a command that takes the data
+dir's lock, its lock file); pair made `tokens.json`, admin reset-password
+`adminauth.json`, cert rotate and init's rewrite a TLS pair, backup a
+snapshot. Either file has the next serve take the bare mount point for the
+data dir it served from and start on an empty database with a new TLS pair.
+Each asks the record's check now, right after its config loads
+(`refuseDataDirAway`, the record beside the file the config's name opens,
+as bridge doctor reads it); the reads (doctor, status, logs, token list,
+cert info, update --check, init keeping the config) ask nothing; no record
+is no check; `manifest.OpenStore` asks nothing, since it knows no config.
+Init's first install, its rewrite and its run that keeps the config are
+kept apart (only the rewrite asks, before its preflight). A data dir moved
+on purpose goes on by setting `dataDir` to where it is now, which the
+record does not name: serve's refusal and the doctor's fix said to remove
+the record, which over a moved data dir has the next command make an empty
+one at the old path; both say to set `dataDir` now. Likely: an operator who finds
+the library empty runs `bridge scan` or a render by hand, as root, before
+the volume is back.
+
+**3.** A limit scanner.md's B651 line names by its id: backlog B776.
+
+**4.** Open: backlog B777.
+
+**5. Serve's refusal said at every retry** (real; fixed). Three starts in a
+row on 49071fbf, as a service manager's retries, said the refusal three
+times (`[true true true]`) and kept nothing. Serve keeps a note beside the
+record now, `.bridge.yaml.datadir.refused`, never in the data dir: the data
+dir refused and when it was said. A start says the refusal where the note
+names another data dir or none, or was written a day or more ago, and
+always to a terminal; the first start that finds its data dir again removes
+the note and says so at Info. A note that cannot be written leaves the
+next start to say it again, and what serve refuses is the same either way;
+a note that cannot be removed keeps the next refusal quiet until a day
+after the last was said, which that start says at Warn.
+
+**6.** Open: backlog B777.
+
+**7. CI's Windows leg and round 1's two tests that rename a watched
+folder.** `TestTheWatcherDispatchesNoScanForARootWhoseContentWent` and
+`TestTheWatcherHoldsARootThatWentAndWatchesWhatComesBack` skip on Windows
+since B651's fourth round: Windows refuses to rename a folder while a
+ReadDirectoryChangesW handle is open under it, and both failed there at
+their first rename with "Access is denied" (that round's Windows host), so
+on Windows a rename under a watch cannot stand in for an unmount at all.
+What could still fail there is what stands in for them:
+`TestTheWatcherHoldsARootWhoseWatchesWentWithoutAWord` renames the root
+once it has removed every watch, which works because fsnotify's Windows
+`Remove` closes each directory handle on its I/O thread before it answers
+(`remWatch`, then `startRead`'s CancelIo and CloseHandle once the watch's
+mask is 0, in the fork the replace pins, read in the module cache); a
+release that deferred that close would fail it with the same words, so a
+bump of the replace is when to look. None of B727's tests renames a watched
+folder: item 1's move a variants volume no watch is on, and do not build on
+Windows (the stand-in sox is a shell script); item 5's move a data dir once
+serve has stopped.
+
+**Negative controls**, each on a frozen copy of the tree at its fix (item
+1 at b3475e94, items 2 and 5 at 3809e9ce, the update check at 4c7646ee),
+one mutation, each test alone with `-test.v`, the bytes put back from
+memory, predicted in a file before the run:
+
+| control | mutation | red | as predicted |
+|---|---|---|---|
+| N1a | Run asks no guard | the render, the watcher at 3 rows, the download (both), the pool's | yes |
+| N1b | the pool injects no guard | the pool's alone | yes |
+| N1c | the CLI's worker sets no guard | the render, the watcher at 3 rows, the download | yes |
+| N1d | the CLI batch's pre-flight removed | the batch refusal alone | yes |
+| N1e | the guard refuses without the catalog's evidence | both of `TestARenderMakesTheVariantsDirectoryOfACatalogThatRecordsNoneThere` | yes |
+| N1f | `VariantRecordedUnder` asks for any row | its 3-rows-elsewhere case alone | yes |
+| N1g | the guard asks the catalog without the probe | the volume back, in the batch test and its own | yes |
+| N1h | `VariantsDirSweepBlock` sets no `Missing` | integrity's `TestVariantsDirSweepBlockReason` alone | yes |
+| N1i | the refusal not an output fault | the pool's (a strike, a sox Warn) | yes |
+| N2a | `refuseDataDirAway` never refuses | all 28 subtests | yes |
+| N2b | scan asks no record | scan alone | yes |
+| N2c | `holdDataDirForMutation` asks no record | restore, reset-player, clear-missing, the DAC bind | yes |
+| N2d | token list asks it too | the token list read alone | yes |
+| N2e | init asks it keeping the config | that read alone | yes |
+| N2f | update asks it under `--check` | the update check | red, but said "asks no record": the check read the call only as a guard's right side; 4c7646ee reads it in any condition |
+| N2f' | the same, at 4c7646ee | the update check, "guarded by \"\"" | yes |
+| N2g, N2g' | update asks no record | the update check, "asks no record" | yes |
+| N2n | update asks it after the release check | the update check, the order | yes |
+| N2h | the refusal does not say to mount and run again | all 28 | yes |
+| N2i | nothing on a data dir moved on purpose | all 28, serve's two refusal tests | yes |
+| N2j | the doctor's fix says nothing on it | the doctors' test alone | yes |
+| N2k | tsnet's config load asks no record | tsnet alone | yes |
+| N2l | `bootstrapTranscodeCmd` asks no record | upscale, optimize, render | yes |
+| N5a | a note never keeps a refusal quiet | the once-per-state and other-data-dir tests | yes |
+| N5b | a note of any age keeps it quiet | once-per-state, a day later | yes |
+| N5c | the note's data dir not compared | the other-data-dir test alone | yes |
+| N5d | a terminal is quiet like any writer | the terminal test alone | yes |
+| N5e | the start that finds its data dir removes no note | once-per-state, the unremoved-note test | yes |
+| N5f | serve never ends the refusal | once-per-state alone | yes |
+| N5g | the note kept in the data dir | once-per-state, the other-data-dir, terminal and unremoved-note tests, serve's two refusal tests in both shapes, the no-note control | more than predicted: the note's write makes its parent (`atomicwrite.WriteBytes`), so it made the data dir itself, which both shapes of serve's tests and the control refuse; predicted green for the not-there shapes and the control |
+
+**Checks.**
+- The red runs, each on its copy at 49071fbf, the predictions in a file
+  beforehand: item 1's render, its batch refusal, the watcher at 3 rows and
+  the download at 3 and 12 red, and the watcher at 12 (the relocation
+  guard's) and the two controls green; item 2's 28 subtests and the update
+  check red, the four reads and both no-record cases green; item 5's first
+  test red (`[true true true]`), its control green.
+- Through the shared build lock, on 4c7646ee: `make fmt` left the tree as
+  it was; `make vet` natively and with `GOOS=windows`, `GOOS=darwin`,
+  `GOOS=linux GOARCH=386` and `GOOS=linux GOARCH=arm`: ok; `make test`
+  (`go test -race -timeout 30m` over every package, `-count=1`, TMPDIR under
+  `.tmp/_b72v`): ok, 88 packages and 14 without tests in 1,998 s (cmd/bridge
+  1,255 s, internal/manifest 1,592 s, internal/admin 1,002 s,
+  internal/transcode 206 s, internal/integrity 5 s), the Linux-only packages
+  run (internal/alsa, internal/alsapcm, internal/atomicwrite,
+  internal/backup and the player's); that run is the race run of the
+  touched packages; `make build-all`: ok.
+- `make docs-check`: ok as the tree stands; with `rules-b72v.patch` applied
+  to a copy: ok, by check-doc-budgets.py's own measure (scanner.md 36,550
+  bytes, cli-serve.md 44,596, jobs.md 19,467), `git apply --check` takes the
+  patch, and `TestEveryCitedTestNameExists` passes there.
+- The qualification check against 49071fbf: ok; no guarded prefix changed,
+  so no version is taken.
+- The Windows leg is vetted and cross-compiled here, not run: item 2's and
+  item 5's tests build and run on every platform but the two that need a
+  mode refusing this user a write (skipped on Windows and as root) and the
+  terminal test (Linux).
+
+**For the owner.** What B727 leaves: backlog B776 and B777.
+
+## 2026-11-07 — B727 round 2: the review of #1431
+
+Backlog B727's second round, on `fix/b72v-late-volumes` (#1431) from
+5883baf5 (round 1 with main at c2e9d40a merged); worker b72v on the Linux
+worker host. Nine review points, each confirmed before anything changed: a
+red test committed first, a negative control on the old test where the point
+was about a test, or evidence where it did not hold. Commits: point 1,
+0fde2859 and 267ab6ca; point 2, e6c396ab; point 3, 8145ea98 and c7a38c6c;
+point 4, 2960b4f1; point 5, 2cd98e26 and 055ecb3c; point 6, 50a503db,
+9e272b49, 7217847d (c3730153, its gofmt) and 73ba90cb, the runbook; point 7,
+ff4300f1; point 9, 8db072a7; then this record. The rules are
+`rules-b72v-r2.patch`: scanner.md's B651 line names its limits by their ids,
+cli-serve.md's and jobs.md's B727 bullets take round 2, config-lifecycle.md
+takes a bullet for the writer that makes no directory, and the long forms
+follow.
+
+**1. The variants guard's evidence where the volume folds case** (confirmed;
+fixed). `VariantRecordedUnder` compared each recorded sidecar path with the
+directory byte for byte, so on Windows and macOS a variants directory
+spelled in another case since its renditions were recorded, the same
+directory on NTFS or APFS, read as recording nothing, and with its volume
+away a render made it on the bare mount point. Red at 0fde2859:
+`TestTheVariantsGuardFindsADirectoryRespelledWhereTheVolumeFoldsCase`, every
+respelled shape where the fold is asked (`/`, `\` with its `]` bound, and
+`MÜSIK`). It folds on Windows and macOS now (`volumesFoldCase`: `pathFold`
+for the bounds, `unicode_lower` for the column) and stays exact on Linux.
+The range's siblings (`Variants2`, `Variants-old`, `Variants.bak`,
+`Variants0`, `Variants]`, the directory's own path), the trailing separator
+and both separators are
+`TestTheVariantsGuardHoldsOnlyWhatIsRecordedBelowItsDirectory`'s, and the
+exported method's choice by platform
+`TestTheVariantsGuardComparesAsThisPlatformsVolumesDo`'s.
+
+**2. Serve's pool's guard, pinned** (confirmed). With
+`upscalePool.SetOutputGuard` deleted from runServe, every test round 1 cited
+passed: the render tests run the CLI's worker.
+`TestServesOwnPoolWritesNothingIntoAVariantsVolumeThatIsAway` boots serve
+with a stand-in sox and asks the pre-generation sweep from the console, so
+serve's own pool is offered a render into a variants directory on a volume
+that is away while the catalog records a rendition there: nothing at the
+mount point, one output Warn, the row kept. Red with the line removed
+(C2a): the pool published `variants/Artist/Album/01.flac.optimized-v2-48000-16.flac`
+under the bare mount point and said nothing.
+
+**3. Asked again before the sidecar's directory** (confirmed; fixed). Run
+asked its guard at its start alone. Red at 8145ea98:
+`TestTheGuardIsAskedAgainJustBeforeTheSidecarDirectoryIsMade` parks the
+guard at that ask, takes the volume away and lets Run go on, and both paths
+asked once and published there (`01.flac.upscaled-v2-176400-24.flac`,
+`01.dsf.pcm-v2-176400-24.flac`). Run's PCM path and renderDSD ask again
+just before the `MkdirAll` of the sidecar's directory.
+
+**4. The reads, pinned** (confirmed for the rows; the open did not hold).
+doctor, doctor --fix, logs (a log of the test's own, under a home of the
+test's) and update --check (its release check asked of a server of the
+test's own, `updateReleases`) are rows of
+`TestTheDiagnosticsStayAvailableWhileTheDataDirsVolumeIsAway`: each refuses
+nothing and makes nothing under the bare mount point. The doctor reaches no
+store open while its data-dir line fails: each of its five opens asks first
+whether `bridge.db` is there, and the refusal is of a data dir that holds
+none, so no gate was added. C4c, the variants-index probe opening a store
+that is not there, made `bridge/bridge.db` there and both doctor rows went
+red.
+
+**5. The note that makes its directory** (confirmed; fixed). Red at
+2cd98e26: `TestTheRefusalsNoteMakesNoDirectory`, the note made
+`bridge/config/.bridge.yaml.datadir.refused` under the bare mount point:
+`atomicwrite.WriteBytes` makes the file's directory, as round 1's N5g found.
+The note goes through `atomicwrite.WriteBytesInExisting` now, which makes
+none (`TestWriteBytesInExistingMakesNoDirectory`).
+
+**6. The line that ends a refusal** (confirmed; fixed). Red at 50a503db:
+`TestTheEndOfARefusalIsSaidAsItIs`, four of five starts after a refusal
+(`dataDir` set elsewhere, the record removed with the volume still away,
+another serve holding the lock, a regular file where the data dir goes)
+said the data dir held its files again, and the two refused starts removed
+the note. `endServeRefusal` runs once the data dir is prepared and its lock
+taken now, and says the data dir is back only where the note names the data
+dir the config names and that data dir held its database or its lock file
+before the preparation; otherwise, that the refusal no longer applies. The
+brief's `note.DataDir == cfg.DataDir` alone does not cover the record
+removed with the volume away (the same data dir, made anew), hence the
+files read before the preparation (`dataDirBack`). 7217847d dropped a check
+of the record there that no case could make matter, and
+`TestTheEndOfARefusalCallsBackOnlyTheDataDirItRefused` pins the two
+conditions.
+
+**7. tsnet's exit, as its commands map it** (confirmed). With either
+command's return after its gate made 0, at 9e272b49, the old row stayed
+green (R7a, R7b). The rows run `bridge tsnet auth` and `bridge tsnet status`
+whole, through `run`'s dispatch, the tsnet server each builds past its gate
+stood in for (`tsnetCommandServer`), so a gate that let one through brings
+no node up and makes nothing in the data dir; the refusal names the
+subcommand.
+
+**8.** Confirmed on a scratch copy of the tree. Not a small change, so not
+made here: backlog B777.
+
+**9. Open items in public text** (confirmed). This branch's prose on items
+3, 4 and 6 (this file's B727 record, scanner.md's B651 line and its long
+form) names them by their ids alone: B776, the limit the line names, and
+B777. Lines that predate this branch stay as they are on main.
+
+**Negative controls**, on a frozen copy of the tree at c3730153 (R7a and
+R7b at 9e272b49, before point 7's change), one mutation each, each test
+alone with `-test.v`, the bytes put back from memory, predicted in a file
+before the run; every one came out as predicted:
+
+| control | mutation | red |
+|---|---|---|
+| C1a | the fold never applied | the respelled test, its three shapes |
+| C1b | Linux's volumes taken to fold | the platform's own test alone |
+| C1c | the column folded by SQLite's ASCII `lower()` | the non-ASCII shape, folded, in the range and the respelled tests |
+| C1d | the upper bound one character on | the `/` and `\` shapes of the range and respelled tests (`Variants0`, `Variants]`) |
+| C1e | a trailing separator kept | every shape of the range and respelled tests |
+| C2a | serve's pool sets no guard | serve's pool test; the CLI's render test green |
+| C3a | the PCM path asks once | the second-ask test's PCM case, the pool test's count |
+| C3b | renderDSD asks once | the second-ask test's DSD case alone |
+| C4a | update --check asks the record | its row, and the update order test |
+| C4b | logs exits 1 before it prints | its row alone |
+| C4c | the doctor's variants-index probe opens a store that is not there | both doctor rows |
+| C5a | the note through `WriteBytes` | the note test alone |
+| C5b | `WriteBytesInExisting` makes the directory | atomicwrite's test and the note test |
+| C6a | the end said at the check | the lock and regular-file starts |
+| C6b | back whatever the data dir held | the record-removed start, and the holding-neither case |
+| C6c | back whatever data dir the note names | the other-data-dir case alone |
+| C6d | back read after the preparation and the lock | the record-removed start alone |
+| C7a | tsnet auth exits 0 past its gate | its row alone |
+| C7b | tsnet status exits 0 past its gate | its row alone |
+| C7c | the tsnet gate asks no record | both rows (the stand-in server reached); logout's green |
+| R7a, R7b | either command's gate return 0, at 9e272b49 | none: the old row stayed green, the point's reading |
+
+**Checks.**
+- The red runs, each test committed before its fix and run at that commit
+  (points 1, 3, 5 and 6), point 2's at its control (C2a), point 7's on the
+  old row at 9e272b49 (R7a, R7b), and point 8's on a scratch copy of
+  ff4300f1.
+- Through the shared build lock, on c3730153: `make fmt` left the tree as
+  it was; `make vet` natively and with `GOOS=windows`, `GOOS=darwin`,
+  `GOOS=linux GOARCH=386` and `GOOS=linux GOARCH=arm`: ok; `make test`
+  (`go test -race -timeout 30m` over every package, `-count=1`, TMPDIR under
+  `.tmp/_b72v`): ok, 89 packages and 14 without tests in 2,055 s
+  (cmd/bridge 1,317 s, internal/manifest 1,609 s, internal/admin 1,019 s,
+  internal/backup 276 s, internal/transcode 206 s, internal/atomicwrite
+  20 s), the Linux-only packages run (internal/alsa, internal/alsapcm,
+  internal/atomicwrite, internal/backup and the player's); that run is the
+  race run of the touched packages; `make build-all`: ok; `make
+  docs-check`: ok; the qualification check against c2e9d40a: ok.
+- With `rules-b72v-r2.patch` applied to a copy: `git apply --check` takes
+  it, docs-check's four commands pass (config-lifecycle.md at 99.5% of its
+  budget, 99.2% on main), and `TestEveryCitedTestNameExists` passes there
+  and fails on a name planted in the patched jobs.md, so it read the
+  patched files.
+- The Windows and macOS legs are vetted here, not run. Points 2's and 3's
+  tests are `!windows` (shell stand-ins, as their packages' other unix
+  tests); the rest build and run everywhere: point 1's compare strings and
+  expect the fold where `runtime.GOOS` is windows or darwin, point 4's logs
+  row sets HOME, USERPROFILE and LOCALAPPDATA to the test's own and its
+  update row asks a loopback server, point 6's lock case is the
+  `dataDirTryLock` seam, and its regular-file case may be refused at the
+  record's check on Windows instead (a lookup through a file can answer
+  there as an absence), its assertions holding either way.
+
+**For the owner.** What B727 leaves after round 2: backlog B776 and B777.
+## 2026-11-07 — B728 B11: the player converts DSD
+
+Worker b728-b11, legion0, branch `feat/b728-b11-convert` from main's c7192a6f. Commits:
+77aa53a9 (B7's revoking monitor tick, binding note 8), 15fcd23f (the tests, red), d19f985b (the
+conversion, QualificationVersion 41), 62f48bf2 (a converted sink's reopen checks its DAC; a DAC with
+no target refuses), c058ae25 (a seek in converted DSD is unsupported), f02faece (PROTOCOL.md),
+061ebee2 (CLAUDE.md's rows), fea99f0c (a held producer let go before the rig's teardown),
+5f9e8456 (the content refusal's long form, the renamed tests' citations), d5f8e160 (`bridge output
+play`'s help), then this record. The rule text changes through `rules-b728-b11.patch`.
+
+### What changes
+
+Where the effective set converts a DSD rate, the player converts it, where B7 refused it as
+`dsd_not_in_this_release`. A DAC the profile database does not know, with no choice of its own,
+plays DSD64, DSD128 and DSD256 converted under the bridge's auto, at its best target (176.4, 88.2
+or 44.1 kHz at 24 valid bits, or 16 where it takes no 24-bit target); a known DAC converts until its
+first use is acknowledged; a migrated owner's native or DoP setup plays as before, and a migrated
+explicit off stays off. A DAC that takes no target is `conversion_not_offered`, DSD512 stays refused.
+For an OpenHome controller, ProtocolInfo lists DSF and DFF and the element's codecs dsf and dff while
+the set plays any DSD rate, a converted one included (`PlayerPolicy.PlaysDSD`). A converted rate
+publishes no tuple and its occurrence no observation until B8, so the iOS app, which grants DSD
+from the tuples, sends none yet.
+
+### As built
+
+`native.go`'s DSD open branches for a converted plan (`occ.converts`) before `nativeLogicalRate`
+and `nativeTransport`, reads the first DSD chunk, and the step that ends the open, after its
+readmission under the set published then, makes `dsdconv`'s converter with that chunk as
+`Options.First` and `Hold`. The plan's packing is `policy.Target.Packing`, the depth's first in the
+player's table the DAC takes with the plan's bits significant: `openOutput` offers it alone, never
+the cache a PCM track filled, and a successor joins a sink only where the sink's transport is it
+(`TestConvertedDSDReachesTheDACPackedByTheTable`, a cached and an inherited S32_LE the reading
+excludes). Its policy ownership (`admitted`, `policyPlan`) is a DSD occurrence's, its transport the
+PCM: the check after open of every node its sink opens or reopens (`checkDSDNode`; a PCM sink it
+joins takes its set, `carryDSD`), its activation, reconciliation and `Revoke` judge it, so an `off`
+written or a retarget revokes one playing (its PCM sink dropped, `native_revoked`) and hands one
+prepared off again, refused by the set's word or opened at the new target; one fully played is not
+judged, or it would stop the PCM after it in its sink. Details are the plan's PCM, codec DSD,
+never lossless; the observation's transport `converted` with the plan and the clip count.
+
+The three joins, classified by `dsdconv.Continuous` alone: continuous (one rate, one plan), one
+chain, the predecessor's last H frames held at its window point until the successor settles, then
+computed with its first bits; abutting on one PCM transport (another DSD rate, PCM of the
+transport, or a successor that settles once the sink's lookahead is at 100 ms), the window
+zero-padded in the same sink; another transport, a reopen. The cut of a successor whose bits are in
+the window is the producer's whatever of its own frames a sink holds: before the window is
+submitted, `Rewind`; after, the sink's marker at the window's first frame, the window submitted
+again for what follows now; once the kernel has a frame from there, late (`removed_entry_audible`).
+The predecessor keeps its converter past its end until that successor is heard. `Rewind` after a
+`Continue` and after the window's frames were read restores the snapshot (`converter.go`: the
+engine copied back, `emitted`, `clipped` and the dither, the successor detached), which B10's
+`TestTheJoinWindowRecomputesFromTheSnapshot` and this PR's
+`TestDeletingOrReplacingAPreparedConvertedSuccessor` exercise.
+
+### Red first
+
+At 15fcd23f (the tests over declaration stubs: `Target.Packing`, `PlayerPolicy.Converted` and
+`PlaysDSD`, the observation's `Converted` and `TransportConverted`, the `DSDSource` and `Converting`
+seams, `occ.converts`): every conversion test in alsapcm red (a converted rate refused,
+`all_unplayable`, or a successor never prepared), but the explicit off's case;
+`TestAConvertedRateIsAdmittedToBeConverted`, `TestAnUnknownDACsDSDIsConverted` and
+`TestANativeRateIsUnaffectedByAnUnverifiableDoPGain` red in playback;
+`TestTheConversionTargetIsTheDACsBest` red in policy (no packing); and in cmd/bridge
+`TestTheElementListsDSDWhileThePlayerConverts`, `TestServeOutputPlayAllowDoP`'s two auto cases and
+`TestAnExplicitOffSurvivesAsTheDefault`'s unset case. `TestNoConvertedStreamIsServed` and the token
+guard were green before and after. 62f48bf2's reopen test and c058ae25's seek test were red on
+15fcd23f's tree (the converted rate refused there); 62f48bf2's no-target case, like the explicit
+off, is green before and after. B7's
+`…AConvertedRateIsRefusedUntilThePlayerConverts` and `…AnUnknownDACsDSDStaysRefused` became
+`TestAConvertedRateIsAdmittedToBeConverted` and `TestAnUnknownDACsDSDIsConverted`; B7's record
+above cites them elided.
+
+### Negative controls
+
+Each an exact-once mutation of a committed tree, predicted by name in
+`.tmp/_b728-b11/controls.predictions.txt` before it ran, the alsapcm test binary built with it and
+the source restored from memory at once; `git status` empty after every run.
+
+| | mutation | red |
+|---|---|---|
+| a | the window submitted before its successor settles | the floor case, as predicted, and the three continuous replacements before the kernel has the window, of the possible ones |
+| b | the cut at the successor's own first frame once the window is submitted | the six moments after submission, exactly |
+| c | the converter restarted inside a continuous join | as predicted (24 and 16 bits, the continuous replacements, the late cuts), and six more: the deleted and abutting cases' wait for the window cut's step times out |
+| d | Lossless true | `TestAConvertedTrackIsNotLossless`, both `TestTheClaimsAreThePlans` cases |
+| e | the observation's claims hard-coded at 176.4 kHz / 24 | the 44.1 kHz, 16-bit case alone |
+| e2 | the Details' rate and bits hard-coded at 176.4 kHz / 24 | the same case alone |
+| f | a converted occurrence's own PCM sink with no set | the reopen test's own-sink case alone |
+| g | `carryDSD` a no-op | its joined-sink case alone |
+| h | `codecName` of `ContainerConverted` "" | the seek test, not-lossless, both claims cases |
+| i | `Revoke` not counting a converted PCM sink | the withdrawn and retargeted cases while it plays |
+| j | no lookahead floor | the floor case alone |
+| k | a predecessor closed at its end whatever its successor | the six moments after submission, exactly |
+| l | `cutFromLocked` without its in-window case | as predicted (six), and six more where `sinkCutLocked` cut at the successor's own frame |
+
+### The hardware run (the design's section 4.6), the owner's
+
+On the Pi 400, and the Pi with the Mytek, bound in `output.player.device` to a DAC the policy
+converts for (unknown to the database, or its first use not acknowledged): DSD64, DSD128 and DSD256
+tracks of a few minutes each through `bridge output play --config <bridge.yaml> FILE...`, then
+through serve and an OpenHome controller, two continuous tracks at one rate and a DSD64 then DSD128
+pair among them; the bridge's CPU share of one core at each rate (`top -p <pid>`),
+DSD256 at most 25 % of a Pi 4 core (B10's Pi 400 run of the converter alone: 15.3 %, 18.3 % scaled
+to a Pi 4); no xrun (a fault `xrun` would stop playback and print); and a listening pass on each
+rate and at both joins. The Pi 5 run is the owner's. A miss takes the section's steps: int32
+tables and an unrolled stage 3 (B10 has int32 tables), then nibble-wide tables at DSD256, and last
+DSD256 refused as `conversion_not_offered` until a faster converter lands.
+
+### Gates
+
+At d5f8e160, inside one build slot: `make fmt` changed nothing; `make vet` and its windows,
+darwin and linux/386 legs passed; `go test -race` of the touched packages (alsapcm, playback,
+dsdconv, policy, engine, qualification, api, cmd/bridge) passed (1,056 s); both native-integration
+overlays passed, every case they name; `scripts/qualification-version` against c7192a6f passed at
+41; alsa-abi against Ubuntu's asound.h, compared as v6.12's, found 252 facts agreeing on
+linux/amd64; `make test` passed, 87 packages ok (1,855 s); `make build-all` passed; `make
+docs-check` passed (player.md 98.2 %), and on a copy with the rules patch applied (player.md
+99.3 %, the worst load 66.0 %), where `verify_moves.py --base HEAD` proved the patch's move lossless
+alone (one block, 1,743 bytes, no citation broken) and, with the other edits declared, accounted
+for every block but the four no-transcoding entries the design retitles (CLAUDE.md's, AGENTS.md's,
+`History-Cross-Repo.md`'s and `jobs.md`'s), each beside its successor among the new. The
+conversion tests and B7's revoking test then passed four times more under `-race` (122 s).
+
+## 2026-11-07 — B728 B11 round 2: the review's four points
+
+Worker b728-b11, legion0, branch `feat/b728-b11-convert` at 9dd51ae4 (round 1's
+`rules-b728-b11.patch` applied by the orchestrator). Commits: e54b2909 (point 1's test, red under
+`-race`), 04dbb7f3 (point 1's fix), 08eeabfd (point 2's pin), 85a2c465 (point 3's migrated pin),
+ca8d0719 (point 4's test), 16319805 (QualificationVersion 42), then this record. The rule wording
+changes through `rules-b728-b11-r2.patch`: B11's ownership entry in `player.md` (its Don't gains
+"read its set or plan off the session's lock") and its long form.
+
+### 1. A converted activation raced a refresh's reconciliation: confirmed
+
+`activateOutput` decided whether a PCM output's occurrence converts by `o.converts()`, which reads
+`o.admitted` and `o.policyPlan` without the session's lock, while `reconcileDSD`'s Keep repoints
+`o.admitted` under it. What can change: nothing that decides the kind. `o.conv` is set once, in the
+step that ends the open; a Keep repoints the set alone, the plan the same (`policy.Plan.Same`); a
+Replan marks the occurrence stale and the engine hands it off again as another occurrence; a
+revocation ends the session's DSD. A withdrawal and a retarget are each of those, so `o.conv != nil`
+and `converts()` never disagree after the open and the decision cannot flip: the read was a data
+race on the pointer, not a wrong decision. Red at e54b2909,
+`TestAConvertedActivationBesideARefreshThatKeepsIt`: the activation held at its first step (a new
+seam, `Seams.Activation`), a refresh held where it has published a set that keeps the occurrence
+and not reconciled it (`Seams.Published`; the choice's cap lowered from DSD128 to DSD64, which
+takes DSD128 from native to converted while DSD256 converts under both), and both let go at once:
+the race detector reported convert.go:86 (from native.go:260) against dsd_policy.go:697, in five
+separate processes of five. 04dbb7f3 decides by `o.conv` and reads the set and plan in
+`checkDSDActivation` alone, under the lock: five of five green under `-race`. The other reads of
+`o.admitted` outside the lock are the open's own, before its `done` closes, which no
+reconciliation reaches (it skips an occurrence not opened).
+
+### 2. The revocation's Drop of a converted sink: pinned
+
+`TestAConversionWithdrawnOrRetargetedIsReconciled`'s two cases that revoke while playing passed
+with `Revoke`'s Drop loop deleted: the engine's release drops every sink too. 08eeabfd holds the
+engine's release short of the backend (`holdNextRelease`), awaits the revocation's Drop (a drop
+handed to the PCM sink's writer, `FakeKernel.OnCommand`, and the device let go), grants the DAC a
+second more and checks it is given nothing more while the release is held, then lets it go.
+
+### 3. A migrated DoP rate under auto converts, by the design; an explicit choice never does
+
+Section 3.2's auto row converts what neither transport plays, so `MigratedState(auto, allowDoP,
+native DSD64, DoP DSD128)` with an unverifiable gain stage converts DSD128, as
+`TestANativeRateIsUnaffectedByAnUnverifiableDoPGain` has it. The other side of the table:
+`TestTheEffectivePolicyTable` runs every clause of the explicit rows' cells failing in every way it
+knows, each refusing with its word, and `TestTheRefusalsComeInTheirOrder` the eleven words in their
+order (native: `native_not_offered`, `listener_rejected`, `dsd_rate_above_choice`,
+`first_use_pending`; dop: `dop_not_offered`, `listener_rejected`, `dop_gain_unverifiable`,
+`dop_gain_not_unity`, `dop_confirmation_required`, `dsd_rate_above_choice`, `first_use_pending`),
+both on a written choice. 85a2c465 adds
+`TestAnExplicitChoiceNeverConvertsWrittenOrMigrated`, the same cells on the entry `dsdstate.Migrate`
+writes from dsdMode native or dop with allowDoP and a record approving the transport at every rate,
+and the migration of no record, the choice alone, refusing every rate as `first_use_pending`.
+
+Until B8 lands, by design and as PROTOCOL.md says: `dsdPlayback` publishes no converted rate and no
+tuple for one, and its `reason` is empty while any rate plays, so the app, which grants DSD from the
+tuples alone, sends the bridge's player no DSD while the element's codecs list dsf and dff; and the
+element sends no `playback` while a converted occurrence plays, so the app shows no observation of
+it. An OpenHome controller sees DSF and DFF in ProtocolInfo and plays DSD converted, its Info
+reading codec DSD, the plan's rate and bits and lossless false, which is right. The console's Player
+page says nothing of conversion until B13.
+
+### 4. A deletion at a join behind a read that hangs: backlog B768, named
+
+`TestADeletionAtAJoinBehindAHangingReadStopsAtTheEnginesDeadline` (ca8d0719) pins what happens and
+that nothing waits past the engine's deadlines: the engine's call (a Prepare, its successor having
+nothing submitted, or a Cut) ends at its deadline and playback stops with `backend_timeout`; the
+release is unconfirmed past its own while the read hangs, nothing closed under it, and is
+acknowledged late once the read returns. B768 is not built.
+
+### Negative controls
+
+Each an exact-once mutation of 16319805, predicted by name in
+`.tmp/_b728-b11/controls_r2.predictions.txt` before it ran, the package's test binary built with
+it and the source restored from memory at once; `git status` empty after the run. All red as
+predicted:
+
+| | mutation | red |
+|---|---|---|
+| r2a | `activateOutput` by `o.converts()` again | `TestAConvertedActivationBesideARefreshThatKeepsIt`, race detected, three runs of three |
+| r2b | `Revoke`'s Drop loop removed | the two revoked-while-playing cases, at the wait for the revocation's Drop |
+| r2c | an explicit native with no native offered converts | `TestAnExplicitChoiceNeverConvertsWrittenOrMigrated/native`, `TestTheEffectivePolicyTable/native`, `TestTheRefusalsComeInTheirOrder` |
+| r2d | an explicit dop whose gain cannot be read converts | the same three, dop |
+
+### Gates
+
+At 16319805, inside one build slot (queued 3,325 s behind two other workers): `make fmt` changed
+nothing; `make vet` and its windows, darwin and linux/386 legs passed; `go test -race` of alsapcm,
+playback, policy and qualification passed (75 s); both native-integration overlays passed, every case
+they name; `scripts/qualification-version` against the merge base, c7192a6f, passed at 42; alsa-abi
+passed; `make build-all` and `make docs-check` passed. `make test`: 86 packages of 87 ok, and
+cmd/bridge failed once in `TestARefusedHandedUDPSocketLeavesTheLANPortFree/mismatched_address`, at
+its fixture's own guard before serve runs: the kernel gave its UDP socket the number of the TCP port
+the test had just closed, a coincidence of two allocators no change here touches. Twenty reruns of it
+passed, and cmd/bridge whole under `-race` passed (1,033 s). The round-2 rules patch: `git apply
+--check` at 16319805, the budgets on a patched copy (player.md 99.3 %), and `verify_moves.py --base
+HEAD` with its two edits declared, all passed.
+
+## 2026-11-07 — B728 B11: the hardware run on the Pi 5 with the Mytek
+
+At PR #1427's head 9dd51ae4, on a Raspberry Pi 5 held at 1.5 GHz by its conservative governor, the Mytek Brooklyn DAC+ over USB. The box's service was stopped for 13 min 23 s and came back on its release, its files unchanged and its mixer where it was. The box has no file capabilities and no approval record, so section A ran on minted records.
+
+| Case | Result |
+|---|---|
+| A1, A2: migrated native at DSD64, 128 and 256 through `output play` and serve | pass: one open per rate, `DSD_U32_BE` at 88200, 176400 and 352800; `driverAcceptedAt`, `streamingObservedAt` and first use's `observedAt` written |
+| A3: DoP | **refused on this build:** every rate `dop_gain_unverifiable` (B773). With a diagnostic build keeping the first of the DAC's two identical configurations: DoP64 and 128 play S32_LE at 176400 and 352800; a volume change to -1 dB stops in 56-62 ms; off 0 dB at the open is `dop_gain_not_unity`, with no PCM open |
+| A4: the first-use gate | pass: `first_use_pending`, OpenHome's Play answers fault 501, `/v1/outputs` carries the reason only when no rate plays |
+| A5: the silent probe | pass: opened 1, closed 1, `HW_REFINE` 23, `INFO` 1, `PVERSION` 1; one at the start and none in a session. A replug wasn't run |
+| A6: PCM across the refresh | pass: a 34 s WAV, one stream open, no refresh noise; two sub-millisecond opens before `HW_PARAMS` |
+| B1: conversion | pass: S32_LE at 176400, 24 valid bits, one open per run |
+| B2: CPU of a core, from `/proc`, with the Pi at 1.5 GHz | DSD64 14.7 %, DSD128 15.8 %, DSD256 17.4 % |
+| B3: xruns | none; the lowest `minLead` 19338 of 35280 frames |
+| B4: joins and Stop | a continuous pair and DSD64 to DSD128: one open, one close; Stop 31 ms, OpenHome's Stop about 56 ms |
+
+Named from the run: B773 (the DAC's two identical configurations), B774 (the control node's opens). `output play`'s banner claimed bit-exactness for every play; fixed here. **Owed:** the owner's listening pass and replug.
+
+### The Pi 4 class run (§4.6)
+
+On a Pi 400 (Cortex-A72, 1.8 GHz at most, four cores) with an AURALiC ALTAIR G1 over USB, a DAC the policy converts for, at S32_LE 176.4 kHz, 24 valid bits, through `bridge output play`. The files, the binary and the player's state were all in RAM, since this box's SD card is too slow to write test files to, which took a measurement build allowing the state on tmpfs and otherwise this PR's code at a0a26228. CPU is the whole process's `/proc` utime and stime.
+
+| Playing | CPU of a core | At |
+|---|---|---|
+| PCM, 176.4 kHz, 24-bit, silent | 15.1 % | about 770 MHz, ondemand |
+| DSD64, silent | 44.2 % | about 870 MHz, ondemand |
+| DSD128, silent | 43.1 % | about 930 MHz, ondemand |
+| DSD256, silent | 52.6 % | about 990 MHz, ondemand |
+| DSD256, silent, every core oversubscribed | 28.5-28.9 % | 1.8 GHz held, 20 s |
+| **DSD256, varied bytes, every core oversubscribed** | **31.3 %** | **1.8 GHz held, 164 s, 49 to 54 °C, no throttling** |
+
+No xrun or fault in any run; the lowest buffer delay sampled at about 8 Hz in the sustained run was 18,785 frames of about 36,000. "Varied bytes" is each random byte followed by its complement: every table entry is touched and the audio band stays near silent, so nothing is played aloud. Busy-loop processes kept every core oversubscribed in the runs marked so: a leftover three beside the four the sustained run started, so seven on four cores.
+
+**Against the gate:** the converter alone is 18.3 % of a 1.5 GHz core by B10's benchmark, inside 25 %. The whole process is about 37.6 % of a 1.5 GHz core (31.3 % scaled by clock, which is an extrapolation: no 1.5 GHz Pi 4 was run). That misses the 25 % §4.6 first wrote, read as the whole process, and meets the amended 40 %. Argon and Codex both recommended merging and landing the optimization separately, bit-identical (B779); neither saw a case for refusing DSD256 on these numbers.
 
 ## 2026-11-07 — B776, B777: the console's writes into a root that reads as not mounted, and a watched root that stays blind until a restart
 

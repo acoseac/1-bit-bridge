@@ -83,8 +83,8 @@ func TestAControlIndexPastAUint32LeavesDoPUnverifiable(t *testing.T) {
 // native and is published, under auto beside a DoP rate, on a DAC the profile
 // database knows and on one it does not, and under native alone. Under auto
 // the DoP rate whose gain cannot be verified converts, as the design's section
-// 3.2 has auto do wherever neither transport qualifies, and is refused until
-// the player converts; only an explicit dop names dop_gain_unverifiable
+// 3.2 has auto do wherever neither transport qualifies, which the player does
+// since B728's B11; only an explicit dop names dop_gain_unverifiable
 // (TestAMigratedDoPSetupWithUnverifiableGainRefuses).
 func TestANativeRateIsUnaffectedByAnUnverifiableDoPGain(t *testing.T) {
 	mixed := playbacktest.MigratedState(dsdstate.ModeAuto, true, []int{playbacktest.DSD64}, []int{playbacktest.DSD128})
@@ -114,8 +114,8 @@ func TestANativeRateIsUnaffectedByAnUnverifiableDoPGain(t *testing.T) {
 				}
 			}
 			for _, rate := range c.converted {
-				if _, _, err := b.AdmitDSDForTest(dsdAt(rate), true); reasonOf(err) != playback.ReasonDSD {
-					t.Errorf("DoP at %d with its gain unverifiable under auto: %v, want it converted, %s until the player converts", rate, err, playback.ReasonDSD)
+				if _, _, converts, err := b.AdmitDSDPlanForTest(dsdAt(rate), true); err != nil || !converts {
+					t.Errorf("DoP at %d with its gain unverifiable under auto: converts %v, %v; want it converted", rate, converts, err)
 				}
 			}
 			p := b.Policy()

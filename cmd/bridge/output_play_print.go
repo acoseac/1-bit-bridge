@@ -122,13 +122,18 @@ func (v *playEvents) Audible(s engine.SessionID, o engine.OccurrenceID) {
 
 // Details prints what the backend reported of an occurrence's content, its
 // decoder's length and format, and passes it on to an engine that takes it
-// (engine.DetailsEvents, B470 PR 5a3).
+// (engine.DetailsEvents, B470 PR 5a3). DSD the player converts is said so,
+// its rate and bits the PCM's (B728 B11).
 func (v *playEvents) Details(s engine.SessionID, o engine.OccurrenceID, d engine.Details) {
 	length := "no length declared"
 	if d.Frames > 0 && d.RateHz > 0 {
 		length = fmt.Sprintf("%.3f s (%d frames)", float64(d.Frames)/float64(d.RateHz), d.Frames)
 	}
-	v.r.out.line("session %d: %s is %s, %d Hz, %d bits, %d channels, %s", s, v.r.name(o), d.Codec, d.RateHz, d.Bits, d.Channels, length)
+	codec := d.Codec
+	if codec == "DSD" && !d.Lossless {
+		codec = "DSD converted to PCM"
+	}
+	v.r.out.line("session %d: %s is %s, %d Hz, %d bits, %d channels, %s", s, v.r.name(o), codec, d.RateHz, d.Bits, d.Channels, length)
 	if de, ok := v.next.(engine.DetailsEvents); ok {
 		de.Details(s, o, d)
 	}

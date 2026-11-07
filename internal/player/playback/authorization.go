@@ -16,6 +16,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/alsa"
 	"github.com/acoseac/1-bit-bridge/internal/alsactl"
 	"github.com/acoseac/1-bit-bridge/internal/alsapcm"
+	"github.com/acoseac/1-bit-bridge/internal/player/dsdconv"
 	"github.com/acoseac/1-bit-bridge/internal/player/engine"
 	"github.com/acoseac/1-bit-bridge/internal/player/format"
 	"github.com/acoseac/1-bit-bridge/internal/player/qualification"
@@ -45,12 +46,32 @@ type PlayerPolicy struct {
 	Generation       uint64
 	Revision, Reason string
 	Tuples           []engine.NativePlan
+	// Converted are the rates the effective set converts to PCM (B728 B11),
+	// each with its plan, ascending: what the element's codecs and OpenHome's
+	// ProtocolInfo read beside the tuples (PlaysDSD), and what B8 publishes as
+	// dsdPlayback.converted (the design's section 7.1). The harness's
+	// admission converts nothing.
+	Converted []ConvertedRate
 	// Model, BCDDevice and QualifiedOn are the owner qualification the
 	// epoch's record states: the DAC's model (its manufacturer and product
 	// strings), its descriptor firmware code and the qualification date,
 	// never its port or serial.
 	Model, BCDDevice, QualifiedOn string
 }
+
+// ConvertedRate is a DSD rate the effective set converts to PCM (B728 B11):
+// the one-bit rate a channel, its plan (the PCM's rate and valid bits, and
+// through the plan's methods the passband, the dither, the filter and the
+// gain) and the packing the DAC takes it in.
+type ConvertedRate struct {
+	BitRate int
+	Plan    dsdconv.Plan
+	Packing format.ALSAFormat
+}
+
+// PlaysDSD reports whether the epoch plays any DSD rate: a native or DoP
+// tuple, or a rate converted to PCM (B728 B11).
+func (p PlayerPolicy) PlaysDSD() bool { return len(p.Tuples) > 0 || len(p.Converted) > 0 }
 
 type permission struct {
 	unavailable map[string]bool
@@ -416,7 +437,7 @@ func (b *Backend) copyPolicyLocked() PlayerPolicy {
 		// selection admits by, with the bound unit's model and firmware and no
 		// record's revision or date, since none is read.
 		d := b.dsd.Load()
-		return PlayerPolicy{BootID: b.policy.BootID, Generation: d.gen, Reason: d.reason(), Tuples: d.tuples(), Model: d.model, BCDDevice: d.bcd()}
+		return PlayerPolicy{BootID: b.policy.BootID, Generation: d.gen, Reason: d.reason(), Tuples: d.tuples(), Converted: d.converted(), Model: d.model, BCDDevice: d.bcd()}
 	}
 	p := b.policy
 	p.Tuples = slices.Clone(p.Tuples)

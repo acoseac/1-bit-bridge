@@ -12,6 +12,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -29,23 +30,34 @@ import (
 )
 
 // loadConfigForCmd parses a `--config` flag from args and loads the
-// resulting bridge.yaml. Shared by all `bridge tsnet` subcommands —
-// they all need the same config + the same flag shape, and a
-// helper avoids three near-identical flag.Parse blocks.
-func loadConfigForCmd(args []string, stderr io.Writer) (*config.Config, error) {
+// resulting bridge.yaml for bridge cmd. Shared by `bridge tsnet auth` and
+// `status` — they need the same config + the same flag shape, and a helper
+// avoids near-identical flag.Parse blocks (logout parses a flag of its own,
+// --force). The tsnet server
+// they build keeps its state in the data dir, so a data dir its record
+// names while its volume is not mounted is refused first, in cmd's name
+// (backlog B727).
+func loadConfigForCmd(cmd string, args []string, stderr io.Writer) (*config.Config, error) {
 	fs := flag.NewFlagSet("tsnet", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	configPath := fs.String("config", "", configFlagUsage)
 	if err := fs.Parse(args); err != nil {
 		return nil, err
 	}
-	cfg, _, err := loadCLIConfig(*configPath)
+	cfg, cfgPath, err := loadCLIConfig(*configPath)
 	if err != nil {
 		fmt.Fprintf(stderr, configLoadFailedFormat, err)
 		return nil, err
 	}
+	if refuseDataDirAway(cmd, cfgPath, cfg.DataDir, stderr) {
+		return nil, errDataDirAway
+	}
 	return cfg, nil
 }
+
+// errDataDirAway is loadConfigForCmd's error once refuseDataDirAway has said
+// why on stderr.
+var errDataDirAway = errors.New("the data directory's volume is not mounted")
 
 // loadConfigAndRequireTsnetMode is the shared gate for all `bridge
 // tsnet` subcommands. Loads the config AND verifies tailscale.mode
@@ -54,8 +66,8 @@ func loadConfigForCmd(args []string, stderr io.Writer) (*config.Config, error) {
 // `EffectiveMode()` errors into the generic "set mode to tsnet"
 // path, which hid config typos and reported the wrong current
 // mode. CodeRabbit round-2 on PR #139.
-func loadConfigAndRequireTsnetMode(args []string, stderr io.Writer) (*config.Config, error) {
-	cfg, err := loadConfigForCmd(args, stderr)
+func loadConfigAndRequireTsnetMode(cmd string, args []string, stderr io.Writer) (*config.Config, error) {
+	cfg, err := loadConfigForCmd(cmd, args, stderr)
 	if err != nil {
 		return nil, err
 	}
@@ -70,6 +82,13 @@ func loadConfigAndRequireTsnetMode(args []string, stderr io.Writer) (*config.Con
 	}
 	return cfg, nil
 }
+
+// tsnetCommandServer builds the tsnet server that bridge tsnet auth and
+// status bring up (newTsnetServer), its state dir in the data dir: a test
+// stands in for it, so that a gate that let either command past a data dir
+// whose volume is away brings no node up on the tailnet and makes nothing
+// there.
+var tsnetCommandServer = newTsnetServer
 
 // newTsnetServer builds a configured *tsnet.Server from cfg. Returns
 // an error if state-dir setup fails AT CONSTRUCTION (perms / path).
@@ -339,11 +358,11 @@ Subcommands:
 // immediately without printing anything — operator sees "already
 // authenticated" and exits clean.
 func tsnetAuthCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
-	cfg, err := loadConfigAndRequireTsnetMode(args, stderr)
+	cfg, err := loadConfigAndRequireTsnetMode("tsnet auth", args, stderr)
 	if err != nil {
 		return 1
 	}
-	server, err := newTsnetServer(cfg, stderr)
+	server, err := tsnetCommandServer(cfg, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "construct tsnet server: %v\n", err)
 		return 1
@@ -398,11 +417,11 @@ func tsnetAuthCmd(ctx context.Context, args []string, stdout, stderr io.Writer) 
 // printed). Doesn't require interactive auth — works on any
 // previously-auth'd state.
 func tsnetStatusCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
-	cfg, err := loadConfigAndRequireTsnetMode(args, stderr)
+	cfg, err := loadConfigAndRequireTsnetMode("tsnet status", args, stderr)
 	if err != nil {
 		return 1
 	}
-	server, err := newTsnetServer(cfg, stderr)
+	server, err := tsnetCommandServer(cfg, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "construct tsnet server: %v\n", err)
 		return 1
@@ -459,9 +478,13 @@ func tsnetLogoutCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) in
 	if err := fs.Parse(args); err != nil {
 		return 1
 	}
-	cfg, _, err := loadCLIConfig(*configPath)
+	cfg, cfgPath, err := loadCLIConfig(*configPath)
 	if err != nil {
 		fmt.Fprintf(stderr, configLoadFailedFormat, err)
+		return 1
+	}
+	// A state dir missing with its volume is not one already logged out.
+	if refuseDataDirAway("tsnet logout", cfgPath, cfg.DataDir, stderr) {
 		return 1
 	}
 	mode, modeErr := cfg.Tailscale.EffectiveMode()
