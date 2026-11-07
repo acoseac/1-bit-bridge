@@ -6822,9 +6822,9 @@ func scanCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 // no 1-bit app: its player lists every format and offers each file's
 // download, marking one no browser plays as not playable.
 func gatedFormatSummary(n int) string {
-	what := fmt.Sprintf("%d of them are WavPack or Monkey's Audio files", n)
+	what := fmt.Sprintf("The library holds %d WavPack or Monkey's Audio files", n)
 	if n == 1 {
-		what = "1 of them is a WavPack or Monkey's Audio file"
+		what = "The library holds 1 WavPack or Monkey's Audio file"
 	}
 	return "  " + what + ": served as they are to a 1-bit app that plays these formats, " +
 		"and left out for earlier versions of the app and DLNA renderers; " +

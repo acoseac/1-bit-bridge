@@ -382,8 +382,8 @@ func TestScanSaysHowManyWavPackAndMonkeysAudioFilesItHolds(t *testing.T) {
 	if want := gatedFormatSummary(2); !strings.Contains(stdout, want) {
 		t.Errorf("scan stdout %q does not say %q", stdout, want)
 	}
-	if !strings.Contains(gatedFormatSummary(2), "2 of them are WavPack or Monkey's Audio files") ||
-		!strings.Contains(gatedFormatSummary(1), "1 of them is a WavPack or Monkey's Audio file") {
+	if !strings.Contains(gatedFormatSummary(2), "The library holds 2 WavPack or Monkey's Audio files") ||
+		!strings.Contains(gatedFormatSummary(1), "The library holds 1 WavPack or Monkey's Audio file") {
 		t.Errorf("the summary's words: %q, %q", gatedFormatSummary(2), gatedFormatSummary(1))
 	}
 	if s := gatedFormatSummary(2); strings.Contains(s, "console's player") ||
