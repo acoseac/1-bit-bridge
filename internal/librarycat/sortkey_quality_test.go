@@ -198,3 +198,28 @@ func TestClassifyCountsTheCompressedPCMCodecsLossy(t *testing.T) {
 		t.Errorf("Classify(WAV, no rate) = %v, want %v", got, QualityUnknown)
 	}
 }
+
+// TestClassifyTiersTheWavPackAndMonkeysAudioTokens: the bridge's tokens for
+// the formats B489 indexes reach the tiers their content does, as the
+// iOS app's own names (APE, WV) do: a lossless WavPack or Monkey's Audio
+// file is CD Quality or Hi-Res by its rate and depth, a hybrid one with no
+// correction file is lossy, and a WavPack DSD file is a DSD tier.
+func TestClassifyTiersTheWavPackAndMonkeysAudioTokens(t *testing.T) {
+	for _, tc := range []struct {
+		codec      string
+		rate, bits int
+		isDSD      bool
+		want       QualityBucket
+	}{
+		{"WAVPACK", 44100, 16, false, QualityCD},
+		{"WAVPACK", 96000, 24, false, QualityHiRes},
+		{"APE", 44100, 16, false, QualityCD},
+		{"APE", 192000, 24, false, QualityHiRes},
+		{"WAVPACK-LOSSY", 44100, 0, false, QualityLossy},
+		{"WAVPACK-DSD", 2822400, 1, true, QualityDSD64},
+	} {
+		if got := Classify(tc.codec, tc.rate, tc.bits, tc.isDSD); got != tc.want {
+			t.Errorf("Classify(%q, %d, %d, %v) = %v, want %v", tc.codec, tc.rate, tc.bits, tc.isDSD, got, tc.want)
+		}
+	}
+}

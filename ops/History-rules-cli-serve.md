@@ -1780,6 +1780,20 @@ mentions across the four `ops/audit-*.md` files.
   it. The window is between the node's close and that cancel, and the
   test holds serve there on its `tsnet close:` print. The publication
   gate has no seam a boot test can hold, so it is driven directly.
+  **The one goroutine the stop leaves behind** (2026-11-06, backlog
+  B660): the install's confirmation (`serveProbation`,
+  serve_probation.go) runs on `scanCtx` and is joined through
+  `bgWriters`, but each of its readiness rounds runs on a goroutine of
+  its own, because one of its answers is `GET /v1/health` asked in
+  process through the API handler, and `ServeHTTP` takes no cancel (the
+  health handler's endpoint walk is a singleflight that ignores its
+  caller's context). A round still out at its bound is a no, no second
+  round starts beside it, and the stop does not wait for it: a handler
+  that never returns would otherwise hold serve's exit, this bullet's
+  defect. What such a round reads after the teardown fails as a read of
+  a closed store does, and its answer is dropped.
+  `TestAHealthCallThatNeverReturnsIsNotReadyAndDoesNotHoldTheStop` holds
+  the call until after serve has exited 0.
 
 - **An HTTP/3 drain is bounded, drained ONCE, and its socket closed a
   moment AFTER the grace, never at it** (#1010). Both LAN HTTP/3 drains,

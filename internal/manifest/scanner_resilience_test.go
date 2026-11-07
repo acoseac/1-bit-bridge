@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/acoseac/1-bit-bridge/internal/formatgate"
 )
 
 // TestScannerSurvivesSingleMissingScanWithThreshold3 verifies the core
@@ -248,7 +250,7 @@ func TestPendingDeletionsCount(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if got, _ := store.PendingDeletions(context.Background()); got != 0 {
+	if got, _ := store.PendingDeletions(context.Background(), formatgate.All()); got != 0 {
 		t.Errorf("clean state: PendingDeletions = %d, want 0", got)
 	}
 
@@ -258,7 +260,7 @@ func TestPendingDeletionsCount(t *testing.T) {
 	if _, err := s.Scan(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if got, _ := store.PendingDeletions(context.Background()); got != 1 {
+	if got, _ := store.PendingDeletions(context.Background(), formatgate.All()); got != 1 {
 		t.Errorf("after first miss: PendingDeletions = %d, want 1", got)
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -817,5 +818,97 @@ func BenchmarkSortEntriesByName1000(b *testing.B) {
 	for n := 0; n < b.N; n++ {
 		copy(work, src)
 		sortEntriesByName(work)
+	}
+}
+
+// TestWavPackMonkeysAudioAndCorrectionFilesAreServedAsTheyAre: the byte routes
+// serve a WavPack file, its correction file and a Monkey's Audio file as they
+// serve any regular file inside a root (backlog B489: no new restriction, the
+// path-keyed routes are ungated): every byte, a range and a tail of each
+// exactly as the file holds them, whatever the request declares. A path that
+// climbs out of the root, an absolute one and one holding a NUL are refused,
+// and a file that is no track (a cover beside them) still downloads.
+func TestWavPackMonkeysAudioAndCorrectionFilesAreServedAsTheyAre(t *testing.T) {
+	hs, tok, root := fileFixture(t)
+	files := map[string][]byte{}
+	for i, rel := range []string{"Artist/Packed/01 a.wv", "Artist/Packed/01 a.wvc", "Artist/Monkey/01 b.ape", "Artist/Packed/cover.jpg"} {
+		data := make([]byte, 3000+i*17)
+		for j := range data {
+			data[j] = byte((j*7 + i*31) & 0xFF)
+		}
+		p := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		files[rel] = data
+	}
+	outside := filepath.Join(filepath.Dir(root), "outside.wvc")
+	if err := os.WriteFile(outside, []byte("not the library's"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	read := func(resp *http.Response) []byte {
+		t.Helper()
+		defer resp.Body.Close()
+		b, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	for rel, data := range files {
+		q := "?path=" + url.PathEscape(rel)
+		for _, declared := range []string{"", "wavpack, ape"} {
+			req, _ := http.NewRequest(http.MethodGet, hs.URL+"/v1/download"+q, nil)
+			req.Header.Set("Authorization", "Bearer "+tok)
+			if declared != "" {
+				req.Header.Set("X-Bridge-Formats", declared)
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := read(resp); resp.StatusCode != http.StatusOK || !bytes.Equal(got, data) {
+				t.Errorf("download of %s (declaring %q): status %d, %d bytes of %d", rel, declared, resp.StatusCode, len(got), len(data))
+			}
+		}
+		resp := authGetRange(t, hs, "/v1/download"+q, tok, "bytes=100-199")
+		if got := read(resp); resp.StatusCode != http.StatusPartialContent || !bytes.Equal(got, data[100:200]) {
+			t.Errorf("range of %s: status %d, %d bytes", rel, resp.StatusCode, len(got))
+		}
+		resp = authGetRange(t, hs, "/v1/read"+q, tok, "bytes=-16")
+		if got := read(resp); resp.StatusCode != http.StatusPartialContent || !bytes.Equal(got, data[len(data)-16:]) {
+			t.Errorf("tail of %s: status %d, %d bytes", rel, resp.StatusCode, len(got))
+		}
+		resp = authGet(t, hs, "/v1/stat"+q, tok)
+		if read(resp); resp.StatusCode != http.StatusOK {
+			t.Errorf("stat of %s: status %d", rel, resp.StatusCode)
+		}
+	}
+	// A climb out of the root and a NUL are refused as bad paths (400); an
+	// absolute path names a path inside the root, where nothing is (404), or on
+	// Windows an invalid name there, whose stat fails (500; backlog B766).
+	// Neither ever serves the file outside the root.
+	absolute := http.StatusNotFound
+	if runtime.GOOS == "windows" {
+		absolute = http.StatusInternalServerError
+	}
+	for _, tc := range []struct {
+		path   string
+		status int
+	}{
+		{"../outside.wvc", http.StatusBadRequest},
+		{"Artist/../../outside.wvc", http.StatusBadRequest},
+		{"Artist/Packed/01 a.wv\x00.flac", http.StatusBadRequest},
+		{outside, absolute},
+	} {
+		for _, route := range []string{"/v1/download", "/v1/read"} {
+			resp := authGetRange(t, hs, route+"?path="+url.QueryEscape(tc.path), tok, "bytes=0-9")
+			if got := read(resp); resp.StatusCode != tc.status || bytes.Contains(got, []byte("not the library's")) {
+				t.Errorf("%s of %q: status %d, want %d", route, tc.path, resp.StatusCode, tc.status)
+			}
+		}
 	}
 }

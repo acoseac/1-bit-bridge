@@ -50,19 +50,51 @@ func TestFundamentalSkipReason(t *testing.T) {
 	}
 }
 
+// TestAWavPackOrMonkeysAudioFileSaysItIsServedAsItIs pins the badge of the
+// formats the bridge never renders (backlog B489), by the path as the gate
+// reads it: ahead of the DSD and lossy arms (a WavPack DSD file is no DSF
+// whose renditions the caps may open, and a lossy hybrid one is refused
+// whatever its codec), behind the routed one, and fail-closed whatever the
+// decoder probe says (sox fails open on an extension it does not map).
+func TestAWavPackOrMonkeysAudioFileSaysItIsServedAsItIs(t *testing.T) {
+	rate, bits := f64p(96000), intp(24)
+	decodesAll := func(string) bool { return true }
+	for _, c := range []struct {
+		name   string
+		routed bool
+		isDSD  bool
+		codec  string
+		path   string
+		want   string
+	}{
+		{"lossless WavPack", false, false, "WAVPACK", "A/x.wv", "wavpack_ape"},
+		{"WavPack, upper-case extension", false, false, "WAVPACK", "A/x.WV", "wavpack_ape"},
+		{"lossy hybrid WavPack", false, false, "WAVPACK-LOSSY", "A/x.wv", "wavpack_ape"},
+		{"WavPack DSD", false, true, "WAVPACK-DSD", "A/x.wv", "wavpack_ape"},
+		{"Monkey's Audio", false, false, "APE", "A/x.ape", "wavpack_ape"},
+		{"a refused file, no codec", false, false, "", "A/x.ape", "wavpack_ape"},
+		{"on an upstream", true, false, "", "2go/x.wv", "routed_upstream"},
+		{"a correction file's name is no track's", false, false, "FLAC", "A/x.wvc", ""},
+	} {
+		if got := fundamentalSkipReason(c.routed, c.isDSD, c.codec, rate, bits, c.path, decodesAll); got != c.want {
+			t.Errorf("%s: %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
 // TestIsLossyCodecLabel pins the lossy denylist the badge AND the
 // upscale gates share (it delegates to manifest.IsLossyCodec — the
 // single source of truth also mirrored by upscaleEligibleSQL; the
 // optimize gate remains transcode.OptimizeEligible's PCM allowlist).
 // Lossless + DSD + empty codec are NOT lossy.
 func TestIsLossyCodecLabel(t *testing.T) {
-	lossy := []string{"MP3", "mp3", " AAC ", "OGG", "OPUS", "WMA"}
+	lossy := []string{"MP3", "mp3", " AAC ", "OGG", "OPUS", "WMA", "WAVPACK-LOSSY", "wavpack-lossy"}
 	for _, c := range lossy {
 		if !isLossyCodecLabel(c) {
 			t.Errorf("isLossyCodecLabel(%q) = false, want true", c)
 		}
 	}
-	notLossy := []string{"FLAC", "ALAC", "WAV", "AIFF", "DSF", "DFF", ""}
+	notLossy := []string{"FLAC", "ALAC", "WAV", "AIFF", "DSF", "DFF", "WAVPACK", "WAVPACK-DSD", "APE", ""}
 	for _, c := range notLossy {
 		if isLossyCodecLabel(c) {
 			t.Errorf("isLossyCodecLabel(%q) = true, want false", c)

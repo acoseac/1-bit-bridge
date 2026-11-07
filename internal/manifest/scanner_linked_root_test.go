@@ -32,6 +32,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/formatgate"
 	bridgefs "github.com/acoseac/1-bit-bridge/internal/fs"
 	"github.com/acoseac/1-bit-bridge/internal/logging/loggingtest"
 )
@@ -184,7 +185,7 @@ func (f indexedRoot) requireRowsKept(t *testing.T, label string) {
 // no paired device was told a track was deleted.
 func requireNoTombstones(t *testing.T, store *Store, since time.Time, label string) {
 	t.Helper()
-	deleted, _, err := store.DeletedSince(context.Background(), since)
+	deleted, _, err := store.DeletedSince(context.Background(), since, formatgate.All())
 	if err != nil {
 		t.Fatal(err)
 	}

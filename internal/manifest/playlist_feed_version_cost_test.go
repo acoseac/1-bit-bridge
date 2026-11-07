@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"testing"
+
+	"github.com/acoseac/1-bit-bridge/internal/formatgate"
 )
 
 // TestTheFeedVersionNamesTheEncodersCostOfAnInvalidByte (CodeRabbit on
@@ -22,7 +24,7 @@ func TestTheFeedVersionNamesTheEncodersCostOfAnInvalidByte(t *testing.T) {
 	defer tx.Rollback()
 	versions := map[int]string{}
 	for _, cost := range []int{3, 6} {
-		v, _, err := playlistFeedVersionAt(ctx, tx, cost)
+		v, _, err := playlistFeedVersionAt(ctx, tx, cost, formatgate.All())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -31,7 +33,7 @@ func TestTheFeedVersionNamesTheEncodersCostOfAnInvalidByte(t *testing.T) {
 	if versions[3] == versions[6] {
 		t.Errorf("the version is %s whatever an invalid byte costs", versions[3])
 	}
-	current, _, err := playlistFeedVersion(ctx, tx)
+	current, _, err := playlistFeedVersion(ctx, tx, formatgate.All())
 	if err != nil {
 		t.Fatal(err)
 	}

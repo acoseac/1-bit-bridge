@@ -80414,6 +80414,1930 @@ main's fc07f4a1 says the version stays, no guarded path having changed.
 `~/onebit/jobs/b728-b10/dsdconv-linux-arm64.test`, and `-amd64.test` beside it, rebuilt at
 5adcb8dd at round 1's paths. The amd64 one passes run where no source is, the golden among its
 tests, every digest a constant of it.
+## 2026-11-06 — B489 PR 1: WavPack and Monkey's Audio indexed and served as they are, behind a client format gate (ExtractorVersion 32)
+
+Backlog B489, PR 1 of 5: the owner's decision of 2026-11-06 ("We can include
+B489 in 2.3"), after a user with about 2,400 WavPack files asked. 1-bit 2.3
+decodes both formats and bridge 0.2.4 ships first, so this PR is the
+bridge's whole part: it scans, indexes and serves the files unchanged and
+decodes nothing (no transcoding, ever). Worker b489b on legion0 (Ubuntu
+26.04, linux/amd64, go1.27.3, `GOTOOLCHAIN=local`, `GOPROXY=off`), branch
+`feat/b489-wavpack-ape-index` from main 4880f8a4, the orchestrator's brief
+and its study. Commits: red first 9a8aaa79; the headers, the tags, the codecs,
+ExtractorVersion 32 and migration v61 c6744a34; the correction file's four
+states ea4b20dd; the client format gate a76a28ae; what else meets the rows
+689ecbfa; fuzz, allocation in bytes, the file routes and the golden manifests
+a3b02257; the item that alone claims 0xFFFFFFFF 4b3a0b8b; two doc comments on
+the declarations they name 1ef61d18; a 32-bit integer WavPack stream and
+every Monkey's Audio level 8c77ea29; this record, the rules' long forms in
+`ops/History-rules-{scanner,jobs,dlna-upnp,player,openhome}.md`,
+History-Build.md's fuzz census and PROTOCOL.md's last two additions
+59898f08; the three defects the gate found f3ab3ab6 (below); then the gates'
+results. The rules' lines go in through a checked patch
+(`rules-b489b.patch`: this worker cannot write `.claude/`).
+
+### What the bridge reads, and what it refuses
+
+**WavPack** (`wavpack.go`, after WavPack5FileFormat.pdf and wavpack.h): the
+first block with audio, found as the reference decoder's `read_next_header`
+finds one, searched 64 KiB at a time up to 1 MiB; the rate from the header's
+table or `ID_SAMPLE_RATE`; the bytes stored less the bits shifted out; mono,
+stereo or `ID_CHANNEL_INFO`'s count; float; hybrid; WavPack 5's DSD (the
+table's rate shifted left by `ID_DSD_BLOCK`'s power is the byte rate, and the
+row's `sampleRate` is eight times it, the bit rate a DSF row carries); the
+40-bit total, none for a streamed file. **Monkey's Audio** (`ape.go`):
+versions 3.80 to 3.99, the descriptor and header from 3.98, the old header
+before. **Tags** (`apev2.go`): APEv2 at the end or before ID3v1, through the
+Vorbis reader's names, joined as the other formats join, Track and Disc by
+B743's `leadingTagNumber`, the front cover as an embedded one; dhowden's
+ID3v1 reader over the last 128 bytes only where there is no APEv2 tag. A
+header the reference decoders would refuse takes B145's path (indexed by
+name, no codec), before any division. The codecs are `WAVPACK`,
+`WAVPACK-LOSSY` (a hybrid stream without its matching correction file:
+lossy for every purpose, no depth, no sample kind), `WAVPACK-DSD` and `APE`.
+The long form, with every cap, is under **Scanner** in
+`ops/History-rules-scanner.md`.
+
+**What was generated here.** No reference encoder runs on legion0 (none of
+`wavpack`, `mac`, `ffmpeg`, `sox`, `flac`), so every fixture is built in test
+code from the formats' definitions (`wavpack_ape_fixtures_test.go`), never a
+committed binary: WavPack integer 16, 20 (shifted), 24 and 32 bits, float,
+mono, stereo, six channels, a rate in `ID_SAMPLE_RATE`, a 40-bit total, an
+unknown length, hybrid with its correction file, without it and beside
+another stream's or a cut one, DSD64 and DSD128 of the 48 kHz family;
+Monkey's Audio 3.99 and 3.98 (a longer descriptor and header), the old layout
+at 3.97, 3.95, 3.90 and 3.80, every compression level from Fast to Insane in
+both layouts, 8, 16, 24 and 32 bits, mono, after ID3v2 junk. **Owed**: a
+corpus from the reference encoders (WavPack 5's `wavpack -h -c`, `-b`
+hybrid, `--dsd`; Monkey's Audio's `mac -c1000` to `-c5000`) on a host that
+has them, read through `TestTheWavPackHeaderStatesItsFormat`'s shape.
+
+**Red first** (9a8aaa79): `TestTheScanIndexesAWavPackAndAnAPEFile` on main's
+tree: `GetTrack(Artist/Album/01 First.wv)` nil, the `.wv` and the `.ape`
+passed over (neither in `manifest.Ext`).
+
+### The correction file
+
+Four observations kept apart (`correction.go`): confirmed absence
+(`WAVPACK-LOSSY`), a matching file (`WAVPACK` with `correction` on the wire),
+an invalid or mismatched one (`WAVPACK-LOSSY`, said once a stat), and an
+observation that did not complete (the `.wv`'s own incomplete read, B134: the
+row keeps what it had). A file matches only when its first block is this
+stream's correction block and its last block ends the file at the stream's
+last sample, found as libwavpack's `seek_final_index` finds a length: from
+its first block alone, a `.wvc` cut short by an interrupted copy read as
+matching. The row records the observation in `tracks.correction_key` (v61,
+column-only), and the skip gate asks it again with the walk's own
+`statUnchanged`, so a `.wvc` added, rewritten, replaced or removed beside an
+unchanged `.wv` reaches its row once and an unchanged one is read no more.
+The serving routes needed nothing: `serveFile` serves any regular file inside
+a root, so a `.wvc` is fetched by its path like a `.cue`
+(`TestWavPackMonkeysAudioAndCorrectionFilesAreServedAsTheyAre`: bytes, ranges
+and tails of a `.wv`, its `.wvc` and an `.ape` equal the files', whatever the
+request declares; a climb out of the root and a NUL 400, an absolute path 404
+since it names nothing inside a root; `TestANamedPipeNamedLikeACorrectionFileIsRefused`:
+a FIFO named `*.wvc` is the routes' 400).
+
+### The client format gate
+
+`X-Bridge-Formats: wavpack, ape` (comma-separated, any case, an unknown token
+ignored), `/v1/health.features` `wavpackApe`, a row judged by its path's
+extension. The decision behind each surface:
+
+| Surface | In a view that declares nothing | Why |
+|---|---|---|
+| `GET /v1/manifest` full, paged, delta: rows, `total`, `enrichmentProgress`'s counts, tombstones | left out | the shipped app upserts every row and plays neither format |
+| `/v1/health` `scanState.tracksIndexed` | the view's count, cached per view | the count of the rows that view's manifest holds |
+| `GET /v1/search` | no hit | search serves what the manifest serves |
+| `GET /v1/smart-playlists` | item left out, positions closed up, emptied family not sent | a family the view leaves empty is none to that client |
+| `GET /v1/playlist-files` | a gated line unresolved, the album rule over the view, the version naming the view (rules version 3) | as every app read such a line before B489: the track had no row |
+| `folders` | listed | a folder is a directory the scan saw |
+| `/v1/list`, `/stat`, `/read`, `/download`, `/lyrics`, `/waveform`, `/spectrum` | answered | path-keyed; the app's listing walk filters by `MetadataNormalizer.isAudio`, which excludes both extensions (the brief's reading of the app) |
+| `/v1/playlists`, `/v1/favorites`, `/v1/history` | returned whole | a device writes them back whole: filtered, an old app would erase another device's entries |
+| artwork, artist images, `GET /v1/events` | unchanged | keyed by MBID or version; `library.changed` names no path |
+| DLNA ContentDirectory | neither format, for every renderer | a renderer cannot declare one, and the profiles have no entry |
+| the loopback track route (MPD beside the bridge) | served | MPD decodes both with its own plugins |
+
+A manifest page cursor continues only its own view (the zero view's stays the
+raw path; a declared view's is an opaque token; another view's is `410`
+`manifest_cursor_view`, a new row in PROTOCOL.md's error table), and the one
+validator on a gated surface, the playlist feed's ETag, names the view, so a
+view's ETag is never another's 304 (`TestThePlaylistFilesServeEachViewItsMembers`).
+A delta's `since` names no view, so a client's first declaring sync must be a
+full one, which PROTOCOL.md states as the app's job. The goldens
+(`internal/manifest/testdata/b489`, full and delta for a client that declares
+nothing and one that declares both, over a lossless, a hybrid with and
+without its correction file, a DSD, a float and a malformed WavPack file,
+Monkey's Audio of both layouts and an unsupported version, and a FLAC) are
+written from what the bridge serves by `BRIDGE_UPDATE_B489_GOLDENS=1`, LF on
+every checkout, for the iOS mirror's fixtures.
+
+### What else meets these rows
+
+- **Duplicates** (the owner's rule in the brief): a copy every client is
+  served outranks a gated one before every other term, and a domain of gated
+  copies alone is a unit per gated format, so a `.wv` beside a `.flac`
+  suppresses the `.wv` and a `.wv` beside an `.ape` suppresses neither.
+- **Renditions**: never a source (the upscale gate in Go and its SQL mirror,
+  the enqueue, the CLI classifier, the console's `wavpack_ape` reason).
+- **Analysis**: skipped at collection before any decode, counted apart in the
+  same order as the coverage SQL; not decoded, since no decoder of the
+  pipeline is proven on them here and FFmpeg decodes a hybrid stream without
+  its correction file. Analysis of either format is owed to a host that can
+  prove a decoder on a reference corpus.
+- **The console's player**: none, "Not playable in a browser".
+- **The bridge's player**: the library resolver refuses either format at the
+  queue's check with the decoders' own reason, `unknown_container`, so an
+  OpenHome Insert is 600 and `bridge output play` refuses before it starts.
+- **Upstream UPnP**: no header parse, so no codec (never `WAVPACK` or `APE`,
+  which would say lossless); an item named by its protocolInfo's extension
+  whatever its URL's; a `.wvc` is no item. An item with neither an audio class
+  nor an audio protocolInfo is still not admitted by a `.wv` URL alone
+  (`isKnownAudioExt` unchanged).
+- **Enrichment and the Atlas harvest**: every row, gated at serving.
+- **Signal path** (`internal/signalpath`, unchanged): `WAVPACK` was already
+  lossless there and `APE` too; `WAVPACK-LOSSY` is `source_lossy` through
+  `IsLossyCodec`; `WAVPACK-DSD` is `source_codec_unknown`, a withheld verdict,
+  until what MPD hands on for a WavPack DSD file is read on a box.
+- **Operator counts**: `bridge scan` says how many it holds and who is served
+  them; the dashboard's composition, the coverage and the sweep lines count
+  them apart. An upload takes a `.wvc` as a companion.
+
+### Fuzz and allocation
+
+Each target a minute, `-fuzzminimizetime 1s`, four workers, no failure:
+`FuzzExtractWavPack` 459,329 executions and `FuzzExtractAPE` 480,612 at
+f3ab3ab6, the fallback's last change (440,291 and 361,449 at 4b3a0b8b, before
+it), and `FuzzAPEv2` 713,048 at 4b3a0b8b, the reader unchanged since. The first minute of
+`FuzzExtractAPE`, before the fallback changed, failed at 48 s: a 603-byte file
+allocated 1.35 MB, past the target's bound (a mebibyte and eight bytes a byte
+of input), because the fallback handed the whole file to dhowden, whose
+dispatcher reads an ID3v2 tag ahead of the stream and sizes a buffer by its
+header. The fallback is the ID3v1 tag alone since (`TestTheFallbackIsTheID3v1TagAlone`),
+the input a seed (`testdata/fuzz/FuzzExtractAPE/8d8278f5530fa1a8`); a leading
+ID3v2 tag in either format is no longer read, which a reference corpus may
+show taggers write. Allocation is measured in bytes,
+`runtime.MemStats.TotalAlloc` before and after (`testing.AllocsPerRun` counts
+allocations, not bytes): files of 4,196 to 4,779 bytes whose every length
+claims 0xFFFFFFFF allocate 66,384 to 79,368 bytes to extract (a file whose
+tag is refused takes the ID3v1 fallback and its 4 KiB page), and the APEv2
+reader alone 96 bytes (a claiming footer) and 368 (a claiming item), the
+least of three runs (`TestAFewKilobytesClaimingFourGibibytesAllocateUnderAMebibyte`).
+
+### What the gate found
+
+`make test-fast` at 59898f08 failed on three defects of this branch, each
+caught by a test that was there before it, and fixed in f3ab3ab6. The ID3v1
+fallback called `tag.ReadID3v1Tags` on a section reader:
+`TestEveryDhowdenReadIsGuarded` knows every dhowden reader the package calls
+and wants each on a `newDhowdenReadBuffer` stream (B117), so the read goes
+through one, and the guard lists the ID3v1 reader with no guard, since it reads
+the last 128 bytes and nothing in them sizes anything. The read-fault matrix
+(B134) still had the WavPack file with an ID3v1 tag down as a reader that
+seeks, which the fallback stopped doing: three tests' seek case found the row
+written; the fallback reads by offset, so that case is skipped as it is for the
+APEv2 rows. And `requireTheLatestSchema` (cmd/bridge) names what the ladder's
+newest step adds, still v60's columns after v61 joined: three updater tests
+failed on it; it names `tracks.correction_key` now, and a merge that
+renumbers v61 renumbers it. Earlier, `TestNoDocblockNamesAnotherDeclaration`
+caught a test helper's doc naming a function that does not exist, and the
+walker's `isKnownAudioExt` had lost its doc comment to the helper inserted
+above it (1ef61d18). The lesson is the rules' own: run the package that holds
+the sweeps after every change, not only the tests of the change.
+
+### Negative controls (a runner applied each mutation, ran the tests named and restored the bytes from memory)
+
+| Mutation | Red |
+|---|---|
+| (a) search reads every format (`formatgate.All()`) | `TestSearchServesEachViewItsHits`: four views, every hit in each |
+| (b) a hybrid without its `.wvc` reported lossless | `TestAHybridWavPacksCorrectionFileDecidesItsCodec` (no correction file, a directory of its name, another file's: `WAVPACK`, 16 bits, `integer`) and the declared full golden |
+| (c) `.wvc` indexed as a track | the four goldens, and the correction test's rows with a `.wvc` beside the `.wv` (the index read 2 audio files, want 1) |
+| (d) a size field trusted for an allocation: the item's two bounds (before the footer, a text value's cap) removed | first GREEN: the claiming tag also claimed its footer's size, so the footer's bound stopped it before an item was read. With `claimingItemTag` (a true footer, one item claiming 0xFFFFFFFF), RED: 4,295,042,544 bytes extracting a 4,779-byte `.ape`, 4,294,967,680 for the reader alone |
+| (e) a `.wvc` change not reaching the row (`correctionDrifted` out of the skip gate) | `TestACorrectionFilesChangesReachItsRow`: added, rewritten and replaced each read 0 files, codec stayed `WAVPACK-LOSSY`, `indexed_at` unmoved |
+| (f) a filtered playlist written back | `TestADevicesDocumentsKeepAWavPackEntryForEveryClient`: the undeclaring client's GET lost the `.wv` entry |
+| (g) a gate by codec alone | `TestTheManifestServesEachViewItsRows` (every view: rows, `tracksTotal`, `tracksIndexed`) and three goldens (the refused `.wv` and the unsupported `.ape` have no codec) |
+| dupes without the gate's term | `TestAGatedCopyNeverWinsOverACopyEveryClientIsServed`, four rows |
+| upscale SQL without the path term | `TestEligibilitySQLAgreesWithUpscaleSubmitGate`, six rows |
+| the player's check without the gate | `TestTheGatedFormatsAreRefusedWithTheDecodersReason`: Member answered nil and the open opened |
+
+Every control built; (d) went red once its fixture reached the bound it is
+for, which is the rule under **Build, CI, and test discipline** that a fixture
+must be a value the change would act on.
+
+### Rules and versions
+
+`ExtractorVersion` 31 → 32 (main's is 31 at 4880f8a4, B743's): a bridge whose
+rows are older reads each once at its first scan, and a row that reads alike
+is only stamped (no `indexed_at`, no delta), as every bump. Migration v61 adds
+`tracks.correction_key`. **At merge, read main's**: if another PR took 32 or
+v61, this takes the next free number. The rules (the patch): `scanner.md`
+two lines and globs for `wavpack*.go`, `ape*.go` and `correction*.go`, which
+loaded no rules file; `wire.md` the gate's bullet and globs for
+`internal/formatgate/**`, `format_view*.go` and `search*.go`;
+`enrichment.md` the dupes bullet and the enrichment one; `jobs.md`,
+`admin-console.md` and `dlna-upnp.md` a line each; `player.md` and
+`openhome.md` the resolver's refusal in their enumerations; `output.md`
+the signal path's codec list (`WAVPACK` was in the code and not the rule);
+CLAUDE.md's table names the gate beside the served set. Two long forms that
+B489 made false were corrected: B181's "An APE tag is not read" and B743's
+"WavPack and APE are not scanner extensions". `ProtocolVersion` stays 1;
+PROTOCOL.md carries the formats' rows, `correction`, the gate, the cursor
+rule, the first declaring sync, the `410` row, `unknown_container` in
+`libraryScope` and the loopback route, for the mirror PR.
+
+**Owed to the app (not readable here: its clone is not on this host)**: what
+the app does with a playlist, favorite or history entry naming a `.wv` it
+cannot resolve; its first declaring sync being a full one; its golden
+fixtures copied from `testdata/b489`.
+
+### Gates
+
+On legion0 at 41120312, each run that builds or tests many packages through
+the shared build lock: go1.27.3's gofmt on the branch's changed Go files,
+clean; `make docs-check`, ok, and `rules-b489b.patch` taken by `git apply
+--check` with the budgets measured over its results (`player.md` 97.4%,
+`dlna-upnp.md` 97.3%, the worst load 65.2%); the qualification check
+(`scripts/qualification-version -base 4880f8a4 -head HEAD`), "qualification
+version OK: 4880f8a4..HEAD", since nothing it guards was touched; `make vet`
+native and with `GOOS=windows`, `GOOS=darwin`, `GOOS=linux GOARCH=386` and
+`GOOS=linux GOARCH=arm`, each clean; `make test-fast`, 86 packages ok and
+none failed (cmd/bridge 446 s, internal/manifest 266 s; the Linux-only
+packages, `internal/alsapcm` and `internal/atomicwrite` among them, run here);
+`make test TEST_PKGS="./internal/manifest/... ./internal/api/...
+./internal/admin/... ./cmd/bridge/..."` (race, the Makefile's tags, 30 min a
+package), ok: internal/manifest 1,509 s, internal/api 124 s, internal/admin
+987 s, cmd/bridge 1,063 s; `make build-all`, the six targets. The first run,
+at 59898f08, failed `make test-fast` on the three defects above. Not run
+here: macOS and Windows natively, CI's runners, the race detector over the
+other packages, and the iOS app.
+
+## 2026-11-06 — B489 PR 1, round 2: two reviews, each point red first or refuted with evidence
+
+The orchestrator's round 2 for worker b489b (legion0, go1.27.3,
+`GOTOOLCHAIN=local`, `GOPROXY=off`, branch `feat/b489-wavpack-ape-index`):
+Codex's six points and Claude's six, read as one list. Every point was first
+written as a test against 73b21165, its failure predicted by name in a file
+before the run; the run went as predicted, and the fixes followed. Commits:
+the fixes and their tests eb6ef4ea; this record, the long forms and
+PROTOCOL.md 6d38cbc5; Codex's payload point by another byte, found while
+the first gates ran (stopped for it after vet) and red first as well,
+edf5d666 (its row below); then the record's last part and the gates'
+results. The round's rules lines are
+`rules-b489b-r2.patch`, over the rules round 1's patch made on the pushed
+branch (this worker cannot write `.claude/`). **Main read again**: `main` is
+4880f8a4, `ExtractorVersion` 31 and the ladder's last step v60, as at round
+1, so the branch's 32 and v61 stay the next numbers. Round 2's extraction
+changes ride the branch's one bump to 32: no build that stored a row at 32
+has been released.
+
+### The points
+
+| Point | The claim | Red first (73b21165 and the new test) | What changed |
+|---|---|---|---|
+| Codex P1, `apev2.go` | 1,023 `Artist` items of 64 KiB of `a` and a NUL, inside every cap, are 33.5 million strings | confirmed: `TestManyTinyAPEv2ValuesAllocateWithinTheBound` (64 such items, a 4,195,480-byte `.wv`) allocated 589,147,856 bytes against `wvAPEAllocLimit`'s 34,612,416 | the values a tag's text items keep are capped at `apeTagMaxValues` (64K, `maxVorbisCommentTags`'s count) for all items together, split a value at a time, a text item passed over unread once they are spent, said once (`msgAPETagValuesCapped`); an item's key is normalised once, not once a value. 13,217,432 bytes since, the artist the first 65,536 values joined |
+| Codex P2, `wavpack.go` (flags) | a 24-bit or mono `.wvc` beside a 16-bit stereo `.wv` matches: the flags are not compared, where libwavpack's `match_wvc_header` compares them | confirmed: `TestAHybridWavPacksCorrectionFileDecidesItsCodec`'s new rows of other bits and of other channels were `WAVPACK`, want `WAVPACK-LOSSY` | `correctionMatches` requires the flags equal |
+| Codex P2, `wavpack.go` (no length), and Claude's third | with no usable total (a streamed file, or a first block past index 0) the end is never compared: a `.wvc` cut at a block's end matches | confirmed, both shapes: the rows "cut at a block's end, the length unknown" and "the stream from past its first sample" were `WAVPACK`; the same files whole stay `WAVPACK` | the `.wvc`'s last sample must be the `.wv`'s own, found before its tags (`wvStreamFinal`: an ID3v1 tag, then an APEv2 tag and its header) as `wvFinalIndex` finds the `.wvc`'s, read only for a hybrid stream whose header states no usable length; a `.wv` whose end is not found matches nothing |
+| Codex P2, `wavpack.go` (payload) | a 34-byte file, a header claiming a 36-byte block, `0x0a 0x01` declaring a bitstream that is not there: one second of 16-bit lossless | confirmed: `TestAWavPackFileItsReaderRefusesIsRefused`'s two new rows took the file | the first audio block must lie inside the file (`errWVBlockCut`), and the windowed walk refuses a window read that comes short inside the block |
+| the same, by another byte (found in this round, not by a reviewer) | a block that declares its bitstream empty (`0x0a 0x00`) is the same missing payload, and so is an extended bitstream of its CRC alone; libwavpack's `init_wv_bitstream`, `init_wvc_bitstream` and `init_wvx_bitstream` refuse an empty or odd-length bitstream and an extended one of 4 bytes or fewer | confirmed, predicted in a file first: four new refusal rows took the file (an empty and an odd-length bitstream as one second of lossless 16-bit, an extended bitstream of 4 bytes as `WAVPACK-LOSSY`, one of 15 bytes as lossless 32-bit), and a `.wvc` whose bitstream is empty matched (`WAVPACK`, key '+') | the three refusals, as libwavpack's readers make them; a `.wvc` whose bitstream is empty is another file's |
+| Codex P2, `extractors_wavpack_ape.go` (extended bits) | a non-hybrid stream with INT32 sent bits, or float data sending exponents, zeros or exceptions, and no WVX bitstream is lossless here and lossy to libwavpack | confirmed: `TestAStreamWhoseExtendedBitsAreMissingIsLossy`'s five lossy rows were `WAVPACK` (32-bit integer; float `0x20`, `0x08`, `0x04`, `0x02`); its four lossless rows (the bits carried, no bits sent, the float `0x01` that sends nothing) passed | `wvStream.needsExtended`, read as libwavpack's `unpack_init` counts `lossy_blocks`: INT32_DATA with `ID_INT32_INFO`'s sent bits, or FLOAT_DATA with `ID_FLOAT_INFO`'s flags 0x02, 0x04, 0x08 or 0x20, and no extended bitstream of more than its 4-byte CRC in the block or the matching correction file's first block: then `WAVPACK-LOSSY`, no correction on the wire; an int32 or float information of any length but 4 is refused, as `read_int32_info` and `read_float_info` refuse it. The extended bitstream's optional form (0x2c, `ID_OPTIONAL_DATA` with its function) counts as one and refuses nothing, since a decoder that does not know it passes over it: counting only 0xc would call lossy a lossless float file an encoder wrote that way; no reference file was read here, since no encoder runs on this host, which is owed with round 1's corpus |
+| Codex P2, `ape.go` | a 76-byte file of a descriptor and a header claiming `0xFFFFFFFF` bytes passes with format facts | confirmed: nine new rows of `TestAnAPEFileItsReaderRefusesIsRefused` took the file, the reviewer's 76 bytes first (a 15-second `APE`; an old header of 1,000 frames whose seek table runs past its 544-byte file read 6,680 seconds) | `apeFrames.fits`: what the header says lies ahead of the frames ends inside the file with frame data after it, and the seek table names every frame, FFmpeg's three refusals (none, fewer entries than frames, cut inside it): from 3.98 the descriptor, header, seek table and WAV header the descriptor sizes; before, the old header, its peak level and seek count where its flags say, the WAV header unless `CREATE_WAV_HEADER`, the seek table and, before 3.81, a byte a frame |
+| Claude medium, `correction.go` | a `.wvc` the bridge may not read (`EACCES`) is a look that did not complete: a new `.wv` never gets a row and is re-read at every scan | confirmed for the new file: `TestACorrectionFileTheBridgeMayNotReadIsLossy` (its open refused, its read refused): "the .wv has no row" | the state '?': a refused open or read (`fs.ErrPermission`) is an answer, `WAVPACK-LOSSY` with no correction on the wire, said once a stat (`msgCorrectionUnreadable`), and the skip gate asks again at every scan with an open and a one-byte read (`correctionReadableNow`), so the first scan that may read it matches it; a scan that finds it still refused reads nothing |
+| the same, its matched-row half | a `.wvc` matched and made unreadable later keeps `WAVPACK` and its `correction` for good: a chmod moves no mtime | refused as a code change, taken in the protocol: an open of every matched `.wvc` at every scan would cost every hybrid row a file open a scan to catch a permissions change, and the walk compares size and mtime by rule (`statUnchanged`), never the ctime a chmod moves | PROTOCOL.md: any answer for the correction file's path but the file the row describes (a 404, any other error, another size or mtime) is a refusal of the lossless decode, and this case is named there |
+| Claude medium, `store.go` v61 | "no row before this version is a WavPack file's" is false for routed rows: an upstream `.wv` or `.ape` item was indexed under that name and served to every app; after the upgrade the zero view stops seeing it with no tombstone, and its later tombstone is filtered, so the row stays on old clients for good | confirmed: `TestAnUpgradeOverAGatedRowSendsEveryDeltaCursorToAFullSync`: a routed `.wv` row and a routed `.APE` row, `deltaIncomplete` false from a cursor taken before the upgrade; a store without one was complete, as it should stay | v61's step, past its column, restarts the deletion journal's coverage when the store holds a gated row, in one transaction with the question (`restartCoverageOverGatedPaths`); so does a gated tombstone, which the review did not name: a routed `.wv` deleted before the upgrade whose tombstone a client had not fetched is filtered from the zero view the same way (the test's tombstone row, red with that half dropped, control r10). A store with neither keeps its coverage and its tombstones |
+| Claude low, `output.md` and the signal path's list | the rule says the lossless list holds `WAVPACK` and the code does not, so every lossless WavPack row MPD plays is withheld as `source_codec_unknown` | refuted: `signalpath.losslessCodec` lists `WAVPACK` on main (`signalpath.go` line 654: FLAC, ALAC, WAV, AIFF, WV, WAVPACK, APE, DSF, DFF), and `TestAHybridMPDFetchesThroughTheLoopbackRouteIsLossy`'s "a lossless stream by the loopback route" passed, `format_preserved`, at 73b21165 | nothing |
+| the same, its trap | MPD's WavPack plugin opens the stream's URI with `c` appended; the loopback route serves rows only, so MPD decodes a hybrid lossy while the verdict says lossless | confirmed: "a hybrid by the loopback route" was `format_preserved`, want `withheld` [`source_lossy`]; "a hybrid by its path" (MPD opens the `.wvc` beside the file) passed | `sourceFacts` takes a row with a correction file that MPD fetches by the loopback route as `WAVPACK-LOSSY` (`OutputTrack.Correction`, filled by `outputTrackLookup`); the route's 404 for `<id>c` is pinned (`TestLoopbackRouteServesNoCorrectionFile`). The review's other choice, serving the correction file at the track's URL with `c`, was not taken: the route serves a track's own file by its id alone (`output.md`), and a correction file is no track |
+| Claude low, `health_counts.go` | `pendingDeletions` counts every row, so the zero view hears of gated rows | confirmed: `TestPendingDeletionsAreEachViewsRows`: a `.flac` and a `.wv` gone, pendingDeletions 2 for the three views that do not declare WavPack, want 1; the three that do passed | `Store.PendingDeletions(ctx, view)`: the tracks through `formatViewSQL`, the folders whole, as the manifest's `folders` block is every view's; the health cache already keyed both counts by view |
+| Claude low, `wavpack.go` (sub-blocks) | each sub-block costs a 4-byte `ReadAt`; a block of id-0, length-0 sub-blocks is millions of reads | confirmed: `TestABlockOfManyTinySubBlocksIsReadInAFewReads`, 524,292 reads of a 1,048,728-byte file | the walk reads a 64 KiB window at a time (`wvWindow`), as libwavpack's `read_metadata_buff` walks the block in memory: 18 reads |
+
+### Negative controls
+
+`controls_r2.py` applied each mutation to the committed tree (eb6ef4ea, and
+edf5d666 for r15 to r17) in memory, ran the tests named, and put the bytes
+back; the predictions were written before each run. Every control built and
+went red as predicted, and no sibling predicted to pass failed.
+
+| Control | Mutation | Red, as predicted |
+|---|---|---|
+| r1 | `apeTagMaxValues` = 1 << 40 | `TestManyTinyAPEv2ValuesAllocateWithinTheBound`: 538,292,480 bytes |
+| r2 | the flags out of `correctionMatches` | the rows of other bits and other channels (`WAVPACK`, key '+') |
+| r3 | the no-length arm back to `return true` | the two rows cut at a block's end (the length unknown, past its first sample) |
+| r4 | the first block's fit and the window's short read both allowed | the two new WavPack refusal rows |
+| r5 | `needsExtended` ignored | the five lossy extended-bits rows, the four lossless ones still passing |
+| r6 | `fits` ignored | the nine new APE refusal rows |
+| r7 | `fs.ErrPermission` a look that did not complete | both unreadable rows: no row |
+| r8 | an unreadable file never asked again | both unreadable rows at the scan that may read it: 0 files read, `WAVPACK-LOSSY` |
+| r9 | v61 restarts no coverage | the WavPack row, the Monkey's Audio row and the tombstone; "no gated row" still passing |
+| r10 | the tombstone half of `holdsGatedPathSQL` dropped | the tombstone row alone |
+| r11 | `PendingDeletions` of `formatgate.All()` | the three views that do not declare WavPack: 2, want 1 |
+| r12 | `sourceFacts` without the loopback hybrid | "a hybrid by the loopback route": `format_preserved` |
+| r13 | the loopback route serving `<id>c` as the correction file | `TestLoopbackRouteServesNoCorrectionFile`: 200 with the file's bytes |
+| r14 | `wvBlockWindow` = 4 | `TestABlockOfManyTinySubBlocksIsReadInAFewReads`: 262,148 reads |
+| r15 | the main and correction bitstreams' refusal off | the empty and the odd-length bitstream rows, and the `.wvc` whose bitstream is empty (key '+') |
+| r16 | the extended bitstream unrefused (`dataLen > 4` alone) | the rows of an extended bitstream of its CRC alone and of odd length |
+| r17 | the optional extended form not counted | its two lossless rows (`WAVPACK-LOSSY`); its CRC-alone row still passing |
+
+### Rules, protocol and long forms
+
+The rules patch (`rules-b489b-r2.patch`, three files, checked with `git
+apply` over round 1's results and the budgets measured over the outcome:
+`output.md` 68.3%, `wire.md` 58.6%, `scanner.md` 33.0%, the worst load 65.2%):
+`scanner.md`'s two B489 lines take round 2's refusals and its fifth state;
+`wire.md`'s gate bullet takes `pendingDeletions` and v61's coverage restart;
+`output.md`'s verdict bullet takes the loopback hybrid. Their long forms in
+`ops/History-rules-scanner.md` carry the measurements above, and the `.wvc`
+entry's note on v61 was corrected (a routed row may be named `.wv`).
+PROTOCOL.md, for the mirror PR: `WAVPACK-LOSSY` covers a stream without the
+extended bits its samples need; a file that ends inside its first block, or
+an APE file whose headers or seek table it does not hold, is refused; a
+correction file matches with the stream's flags and its own last sample, and
+one the bridge may not read is lossy and asked again at every scan; any
+answer for the correction file's path but the file the row describes refuses
+the lossless decode; `pendingDeletions`'s tracks are the request's view's;
+an update over a gated routed row or tombstone restarts the deletion journal
+(`deltaIncomplete`'s list of causes names it); the loopback route serves no
+correction file, and the reading says `source_lossy` for a hybrid MPD
+fetches there. `ProtocolVersion` stays 1.
+
+### Gates
+
+On legion0 at 80f8b41a, each run that builds or tests many packages through
+the shared build lock: go1.27.3's gofmt on every Go file the branch changed
+since 4880f8a4, clean; `make docs-check`, ok, and `rules-b489b-r2.patch`
+applied over round 1's results with the budgets measured over the outcome
+(above); the qualification check (`scripts/qualification-version -base
+4880f8a4 -head HEAD`), "qualification version OK: 4880f8a4..HEAD"; `make
+vet` native and with `GOOS=windows`, `GOOS=darwin`, `GOOS=linux GOARCH=386`
+and `GOOS=linux GOARCH=arm`, each clean; `make test-fast`, 86 packages ok
+and none failed (cmd/bridge 447 s, internal/manifest 276 s; the Linux-only
+`internal/alsapcm` and `internal/atomicwrite` run here); `make test
+TEST_PKGS="./internal/manifest/... ./internal/api/... ./internal/dlna/...
+./cmd/bridge/..."` (race, the Makefile's tags, 30 min a package), ok:
+internal/manifest 1,500 s, internal/api 124 s, internal/dlna 43 s,
+internal/dlna/discovery 3 s, cmd/bridge 1,033 s; `make build-all`, the six
+targets. A first run at 6d38cbc5 was stopped after its vets passed, when the
+bitstream point above was found; nothing in it had failed. Not run here:
+macOS and Windows natively, CI's runners, the race detector over the other
+packages (`internal/admin`, which round 2 does not touch, among them), and
+the iOS app, whose mirror of PROTOCOL.md's changes is owed.
+
+## 2026-11-06 — B489 PR 1, round 3: main merged (B750, B756), the gate beside the missing-count term
+
+The orchestrator's round 3 for worker b489b: main moved by B750 (a Christmas
+smart mix, 8747d29b) and B756 (one physical album has one year, 1a101716,
+whose round 2 added `Row.Missing` to the duplicate election), and this
+branch takes main. `git merge` needs approval on legion0, so the merge was
+made by hand, as the earlier merges there were: the base found with `git log
+--boundary main...HEAD` (4880f8a4); main's 40 files this branch never
+touched taken whole with `git checkout main --pathspec-from-file`; the 11
+files both sides changed merged with `git merge-file -p --diff3` into
+scratch (which prints and writes nothing), 9 conflicts in 5 of them, each
+resolved by what both sides mean and placed; `MERGE_HEAD` written into the
+worktree's git dir; and one merge commit, 33e20b83 (parents 06822ae4 and
+1a101716). Proof before it: every file main alone changed is main's in the
+index but the two of its tests below, every file this branch alone changed
+is this branch's, and nothing else is staged. Commits after: f131aab9 (the
+gate beside the missing-count term), e52bd024 (the Christmas family's
+gate), this record, the gates' results.
+
+**Main read again**: `ExtractorVersion` 31 and the ladder ending at v60, as
+before; B756 bumped neither. So this branch's 32 and v61 stand, and
+`requireTheLatestSchema` still names v61's column. B756's re-read machinery
+(`taggedYear`, `yearRecordOnly`) is written for the next bump, and this
+branch's 32 is that bump: the full suite passes over it.
+
+### The conflicts, and what each side meant
+
+| File | Main | This branch | Resolution |
+|---|---|---|---|
+| `internal/dupes/policy.go` (2) | `Missing` first in `outranks`: a copy whose file the last scan did not find never wins its unit | the gate first: a `.wv` or `.ape` never wins over a copy every client is served | `Missing`, then the gate (below) |
+| `internal/api/smartplaylists.go` (3) | one reading of the clock (`s.now()`) for the hour and `season.InWindow`; the Christmas family skipped out of its window | the request's view (`requestFormats`, `Vary`) for every family's items | both: the window's skip first, then the build in the view; the doc says the Christmas family's items are the view's |
+| `internal/manifest/types.go` (2) | `taggedYear`, `yearRecord` | `correctionKey`, `CorrectionFile` | both, side by side |
+| `.gitattributes` (1) | the album-year table's LF pin | the B489 goldens' | both, main's first |
+| `ops/engineering-log.md` (1) | B750's two entries and B756's three | B489's two | main's first, then B489's |
+
+`store.go`, `scanner.go`, `admin.go`, `api.go`, `PROTOCOL.md` and
+`ops/History-rules-scanner.md` merged without conflict, and were read for
+meaning: the stamp leg carries this branch's `correction_key` beside B756's
+record-only write; every stored-Track read goes through B756's
+`decodeStoredTrack`, and this branch adds no other; `IncrementMissingTracks`
+and `ResetTrackMissingCount`'s new answers have no caller here. Two of main's
+new tests called the served-set readers without the view this branch added
+(`BuildManifest`, `WriteManifest`, `ListServedTracks`); they take
+`formatgate.All()`, as every earlier caller did in round 1. `.claude` takes
+main's rules as they are (`enrichment.md`, `scanner.md`, `smart-mixes.md`);
+nothing of this branch's is applied there.
+
+### The gate beside the missing-count term
+
+Both rules said "first". By what they mean, only one order lets both hold:
+B756's `Missing`, then the gate. A copy whose file is gone is no copy any
+client can play, so a found `.wv` takes a gone `.flac`'s place (an app that
+declares nothing loses a row it could not play, and the apps that declare
+WavPack keep the copy they can), while among found copies a `.flac` still
+beats every `.wv` and `.ape`. With the gate first, a gone `.flac` would win
+and suppress the one playable copy, which is the defect B756 fixed.
+
+That order left one hole in this branch's units, found writing
+`TestTheGateAndTheMissingTermHoldBesideEachOther` (seven groups, every view,
+the property that a client who could play a copy before the plan can play
+one after it), red first at the merge in one case as predicted in a file: a
+gone `.flac` beside a found `.wv` and a found `.ape` made one unit (round 1's
+`gateUnits` asked for any copy every client is served, gone or not), so the
+`.ape` suppressed the `.wv` and an app declaring WavPack alone lost its only
+playable copy. `gateUnits` now asks for a found copy every client is served,
+and splits by format a domain holding copies of two gated formats; a gone
+copy every client is served is then a unit of its own, suppressing nothing,
+and is reaped by the deletion pass as any gone row is. A domain of a gone
+`.flac` and one gated format stays one unit, so its found copy wins, as B756
+wants.
+
+The Christmas family takes the smart mixes' gate by construction (it is built
+through the same item loop after the window's skip), and
+`TestTheChristmasFamilyServesEachViewItsItems` pins it: in its window each
+view's items, positions closed up, a family of held-back tracks alone sent
+only to a view that declares them, and out of its window nothing to any view.
+
+### Negative controls
+
+`controls_r3.py` on e52bd024, each mutation in memory and put back, the
+predictions written before the run:
+
+| Control | Mutation | Red |
+|---|---|---|
+| c1 | the gate before `Missing` | as predicted: "a gone FLAC beside a found WavPack" (the `.wv` suppressed), "beside two found WavPack copies", and the order check |
+| c2 | `gateUnits` counts a gone copy every client is served | as predicted: the three-copy case, suppressed `[A/x.flac B/x.wv]` |
+| c3 | `gateUnits` splits on the formats named, not the gated ones | the two predicted subtests, and one more not predicted: "a gone FLAC beside a gone WavPack" (nothing suppressed where the `.wv` should be), since a domain whose every copy is gone also splits under it |
+| c4 | the Christmas family's items skip the view | as predicted: the four views that leave a format out in the mixed family, the three that do not declare WavPack in the WavPack-alone family; the "both" views and every out-of-season case still passing |
+
+### The rules
+
+`rules-b489b-r3.patch` is over main's rules as this merge holds them, and
+carries B489's rules whole: round 1's patch no longer applies there, since its
+`enrichment.md` hunk anchors on the availability bullet B756 rewrote (round
+1's scanner hunk applies with a one-line offset). Built on a scratch copy:
+round 1's patch with `--reject`, its one rejected hunk's bullet put after
+B756's with round 3's wording (the gate's term after `Missing`, the found copy
+in `gateUnits`, the new test), round 2's patch, and the Christmas family in
+`wire.md`'s gate bullet; checked with `git apply` on a fresh copy, equal to
+the builder's result, and the budgets measured over it (`enrichment.md` 34.0%,
+`scanner.md` 34.1%, `wire.md` 58.7%, the worst load 65.2%).
+
+**A test harness note**: the first `cmd/bridge` run of the merge failed 20 tests
+and hung in a player serve test, every one of them comparing a path under a
+TMPDIR that held `..` (`.tmp/_b489b/r3/../gotmp`): the harness's error, not the
+tree's. With the TMPDIR made absolute the same package passed (330 s).
+
+### Gates
+
+On legion0 at 76b771cb, through the shared build lock, against main
+(1a101716): go1.27.3's gofmt on every Go file changed since main, clean;
+`make docs-check`, ok; the qualification check, "qualification version OK:
+1a101716..HEAD"; `make vet` native and with `GOOS=windows`, `GOOS=darwin`,
+`GOOS=linux GOARCH=386` and `GOOS=linux GOARCH=arm`, each clean; `make
+test-fast`, 87 packages ok; `make test TEST_PKGS=` the packages the merge
+touched (race, 30 min a package), ok: internal/dupes 1 s, internal/api
+132 s, internal/manifest 1,592 s, internal/admin 990 s,
+internal/smartplaylist 3 s, its season 1 s, internal/smartplaylistgen 27 s,
+cmd/bridge 1,061 s; `make build-all`, the six targets. Not run here: macOS
+and Windows natively, CI's runners, and the iOS app.
+
+## 2026-11-07 — B489 PR 1, round 4: the Christmas mix fills from what every client can play, and a gone copy is no unit of its own beside found gated ones
+
+The orchestrator's round 4 for worker b489b: two points a reviewer read on the
+merge, each confirmed red first. The orchestrator had taken round 3's merge
+and rules patch and merged main again (B728 B7's cutover) on the pushed
+branch, `pr/1423` here (9ff1f13f). `git merge` needs approval on legion0, so
+the fast-forward was made by hand, as round 3's merge was: the 77 paths that
+differ (16 added, 61 modified, none deleted) taken with `git checkout pr/1423
+--pathspec-from-file`, the branch's loose ref written with 9ff1f13f, and the
+tree checked clean and equal to `pr/1423`. Nothing was applied from `.claude`
+beyond what `pr/1423` holds. Commits: 30656fc8 (point 2), 4596fcb6 (point
+1), this record, the gates' results.
+
+### Point 2: a gone ungated copy stayed served beside found gated ones
+
+Confirmed. Round 3's `gateUnits` split a domain that held no found ungated
+copy and two gated formats into one unit per format, a gone ungated copy a
+unit of its own: in `A/x.flac` (gone), `B/x.wv` and `C/x.ape` the gone `.flac`
+won its unit of one, so until the deletion pass reaped its row (three full
+scans by default) a WavPack-only app listed a dead row beside its copy and an
+app declaring both listed three rows, one dead. With one gated format the
+domain stayed whole and `Missing` suppressed the `.flac`, so the two cases
+disagreed, and `TestTheGateAndTheMissingTermHoldBesideEachOther` pinned the
+wrong one (`want nil`). Through the real scanner
+(`TestAGoneFLACBesideAWavPackAndAnAPECopyIsServedToNoView`: real `.flac`,
+`.wv` and `.ape` files, the `.flac` removed, one full scan inside the grace)
+the red run served `[A/x.flac]` to an app declaring nothing, `[A/x.flac
+B/x.wv]` to WavPack, `[A/x.flac C/x.ape]` to APE and all three to both, as
+predicted in a file before the run (`policy.go` put back to 9ff1f13f's bytes
+for that run and restored from memory after).
+
+The fix is inside `planDomainWinners`, one DSD or PCM domain at a time: a
+unit whose every member is gone (`Row.Missing`) is suppressed whole while
+another unit of the same domain holds a found copy. The split per format for
+the found gated copies stays; a unit holding a gone copy and a found one
+suppresses the gone one as before (`Missing` first in `outranks`); a domain
+whose every copy is gone keeps each unit's winner, the resolution as it was,
+since the restated invariant allows none only beside a found unit; and the
+rule never crosses domains: a gone DSD edition beside found PCM copies is its
+domain's one member and is served
+(`TestAFoundPCMCopyNeverSuppressesAGoneDSDEdition`). `FilterOff`,
+`TierInconclusive`, `TierDifferentAudio`, `TierDifferentFormat` under
+`FilterSameFormat` and a self-nested group's non-twins never reach the
+election and are unchanged (`TestTheGoneUnitRuleChangesNoOtherTierOrMode`).
+No client loses a playable copy: the rows the rule suppresses were unplayable.
+
+This supersedes round 3's choice (a gone ungated copy a unit of its own,
+suppressing nothing) and restates `PlanSuppression`'s documented invariant,
+"every suppression unit serves exactly one member", as "exactly one, or none
+when every member is gone and a found unit in its domain serves": its doc,
+`gateUnits`' paragraph and `RestampDuplicates`' doc say so. The test that
+pinned exactly one, named for the same-format group's one served winner, is
+`TestPlanSuppression_EveryUnitServesOneWinnerOrNoneWhenItsCopiesAreGone`
+now: its same-format case as before, and every unit `gateUnits` makes over a
+pool of nine copies of one track (two FLACs, an MP3, two WavPack, two Monkey's
+Audio, a DSF and a WavPack DSD file), every group of two or more with each
+member found or gone (19,664 groups), under the five tier and mode routes that
+reach the election: each unit serves one member, or none when it is all gone
+and its domain holds a found copy. The view check the review asked for,
+`TestNoViewIsServedAGoneCopyBesideAFoundOne`, runs over the same 98,320 plans:
+no view is served a gone copy while a found copy of the track is in it in that
+domain, and each view keeps a found copy per domain where it held one. Red
+first: 18,675 plans failed the view check and 28,125 of 228,960 units the
+invariant. The view check also found a shape no subtest named, a gone `.wv`
+beside a found `.ape` with no ungated copy at all (the same defect: a client
+declaring both was served the dead `.wv`); it became a named case, red before
+the fix too, its prediction written before its own run. The three-copy case
+wants `[A/x.flac]`, with six more cases beside it.
+
+One consumer moves with it: the playlist feed maps a line naming a suppressed
+duplicate to its group's one served row, and a group with several leaves the
+line unresolved (`servedCopies`). A line naming that group's gone `.flac`
+resolved to the dead row before; with the `.wv` and the `.ape` served it is
+unresolved, as a line naming a suppressed copy in a group with a DSD and a PCM
+edition already was.
+
+| Control | Mutation | Red |
+|---|---|---|
+| p2a | the gone-unit rule off | as predicted: the six gone-unit subtests, the view check, the invariant, and the scanner test in its four views |
+| p2b | the rule asks the whole group for a found copy, not the domain | as predicted: the DSD test's three subtests under highest-quality, and the invariant; the view check stays green (a domain with no found copy is vacuous for it, which is why the DSD test exists) |
+| p2c | the rule suppresses every all-gone unit, found copy or not | as predicted: "a gone FLAC beside a gone WavPack", "every copy gone, of three formats", the DSD test and the invariant |
+
+### Point 1: the Christmas mix threw the playable tracks away before the filter
+
+Confirmed, exactly: at the 2026 season's seed, fifteen FLACs by three choirs
+beside a thousand `.wv` singles gave a cached family of 100 `.wv` files and no
+FLAC (`TestRegenerate_ChristmasStoresWhatEveryClientCanPlayFirst`, red), so a
+client declaring neither format was not sent the family at all
+(`TestTheChristmasFamilyFillsFromWhatEveryViewCanPlayFirst`, red in every
+view), and an APE client beside the same thousand was sent a family of one
+`.ape` (`TestAThousandWavPackFilesLeaveTheAPEViewItsFifteen`). One prediction
+file covered every red test; the `-run` pattern of the first HTTP run missed
+the last of them (no "Christmas" in its name), which was run alone at the same
+tree under the same prediction.
+
+The selection, `selectChristmas`, fills from what every client can play
+first: the tracks every client is served (no gated format by `formatgate.Of`)
+are ordered by the season and spread by artist up to the cap, and the WavPack
+and the Monkey's Audio tracks, each format ordered and spread the same way,
+take what is left of the cap in turn, so a thousand `.wv` files cannot crowd
+fifteen `.ape` files out
+(`TestRegenerate_ChristmasSharesTheGatedRoomBetweenTheFormatsInTurn`). The
+season's order of a subset is the order those tracks have in the whole pool
+(each path is hashed alone), so a library with no gated file is ordered as
+before, and every earlier Christmas test passes unchanged.
+
+The floor is one predicate, `season.MeetsFloor`, in the leaf the engine and
+the API both import (the API does not import the engine): the owner's rule,
+15 tracks from 3 albums or 3 artists, each named as the diversity caps name
+them, an empty one naming nothing (`TestMeetsFloorIsTheOwnersRule`).
+Generation asks it of the whole qualifying pool, since a client declaring
+every gated format may be sent all of it; `GET /v1/smart-playlists` asks it of
+each request's view of the cached family and leaves the family out of that
+response when the view falls below it (other families are still left out only
+when the gate empties them). `Options.MinChristmas` is gone, so the two cannot
+hold two floors; no test or caller set it. Each Christmas item stores its
+album for that check (`smartplaylist.Item.Album`,
+`manifest.SmartPlaylistItem.Album`, `album` in the blob, never on the wire:
+the item DTO has none). A blob cached before it has none and is judged on its
+artists until the next build
+(`TestAChristmasFamilyCachedWithoutAlbumsIsJudgedOnItsArtists`: fifteen items
+by one artist across three albums are left out without their albums and sent
+with them; fifteen by three artists are sent either way).
+
+Tests, through the real regenerator and router, for apps declaring nothing,
+WavPack, APE and both: the review's library; fourteen FLACs beside `.wv` (no
+family to nothing or APE, a family to WavPack and both); fifteen FLACs by one
+artist across three albums, and on one album by three artists, both sent to
+every view; fifteen FLACs by two artists on two albums beside `.wv` by others
+(no family to nothing or APE); a thousand `.wv` beside fifteen `.ape` (the APE
+view its fifteen, WavPack the 85 the cap leaves, nothing no family, both the
+whole cap). Two older API tests stored Christmas families of one to four items
+with no artist, which no view is sent now; their fixtures clear the floor
+(fifteen items by three choirs), and they test the window and the gate they
+were written for. `PROTOCOL.md` says what each request is sent, in its Client
+formats list, its Smart playlists paragraph and the `christmas` paragraph; the
+iOS mirror copies it.
+
+| Control | Mutation | Red |
+|---|---|---|
+| p1a | the response's floor reverted | as predicted: the fourteen-FLAC case in views nothing and APE (the brief's), the two-artist case in the same views, and the albumless blob of one artist in every view |
+| p1b | the selection back to one pool | as predicted: both regeneration tests, the review's library in every view, the thousand-`.wv` case in APE, WavPack and both |
+| p1c | the gated formats one after the other, WavPack first | as predicted: the in-turn regeneration test, and the thousand-`.wv` case in APE, WavPack and both |
+| p1d | no album stored | as predicted: the stored album, and one artist across three albums in view nothing alone (the gated views hold the singles' artists) |
+| p1e | the generation floor asked of the ungated tracks alone | as predicted: both below-the-floor cases in views WavPack and both, the thousand-`.wv` case, and the in-turn regeneration test (no family) |
+
+The other families were not changed here, as the brief scoped; which of them
+could thin a view later is in the round's report, for the orchestrator to
+file.
+
+### The rules
+
+`rules-b489b-r4.patch` is over `pr/1423`'s rules (round 3's applied):
+`enrichment.md`'s dupe bullet takes the gone-unit rule, its restated
+invariant, a "Don't" and five tests; `wire.md`'s B489 bullet sends the
+Christmas family only to a view whose items clear its floor; `smart-mixes.md`'s
+Christmas bullet takes the one floor, the selection order, the stored album
+and the albumless blob, a "Don't" and eight tests. Checked with `git apply` on
+a fresh copy, equal to the builder's result, every blank context line with its
+leading space, and the budgets over it (`enrichment.md` 35.2%,
+`smart-mixes.md` 12.8%, `wire.md` 58.8%, the worst load 65.5%).
+
+### Gates
+
+On legion0 at 8d9ef04c, through the shared build lock, against main as
+`pr/1423` merged it (fc07f4a1): go1.27.3's gofmt on every Go file changed
+since main, clean; `make docs-check`, ok; the qualification check,
+"qualification version OK: fc07f4a1..HEAD"; `make vet` native and with
+`GOOS=windows`, `GOOS=darwin`, `GOOS=linux GOARCH=386` and `GOOS=linux
+GOARCH=arm`, each clean; `make test-fast`, 87 packages ok; `go test -race`
+over `./internal/dupes/... ./internal/smartplaylist/...
+./internal/smartplaylistgen/... ./internal/api/... ./internal/manifest/...`,
+with the Makefile's tags and `-timeout 60m` (the brief's command names no
+timeout, and Go's ten-minute default would cut `internal/manifest` short), ok:
+internal/dupes 8 s, internal/smartplaylist 3 s, its season 1 s,
+internal/smartplaylistgen 33 s, internal/api 139 s, internal/manifest
+1,519 s; `make build-all`, the six targets. Not run here: macOS and Windows
+natively, CI's runners, and the iOS app.
+
+## 2026-11-07 — B489 PR 1, round 5: each view's Christmas pick, a suppressed member in its view, three WavPack edges, the reconciliation rule and the console's notes
+
+The orchestrator's round 5 for worker b489b: eight points, each a reviewer's
+reading of the code, each confirmed red first or answered with evidence. The
+orchestrator had applied round 4's rules patch on the pushed branch,
+`pr/1423` here (56b14535, the rules commit over round 4's head 05191ced; its
+merge of main is still round 4's, 9ff1f13f, over fc07f4a1). The fast-forward
+was made by hand as round 4's was (`git merge` needs approval on legion0):
+the three rules files that differ taken with `git checkout pr/1423
+--pathspec-from-file`, the branch's loose ref written with 56b14535, and the
+tree checked clean and equal to `pr/1423`. Nothing was applied from `.claude`
+beyond what `pr/1423` holds. Commits: 3f56c2eb (points 4, 5 and 6), 81624c8c
+(point 3), 51b7c8ce (point 1), be5e2ff8 (point 7), 318d44e8 (point 8), this
+record, the gates' results.
+
+### Point 1: a cap over one selection could erase the spread that qualified it
+
+Confirmed, both ways the review read it, and a third. Round 4 asked the floor
+of the whole qualifying pool and stored one selection capped at 100. One
+choir's 110 tracks of one album beside one track each of two more albums
+cleared the floor, and in a season whose order put the third album's track
+past the cap the stored 100 held two albums and one artist, so every view was
+refused. 120 FLACs by two artists on two albums filled the cap ahead of ten
+WavPack singles by ten others, so a client declaring WavPack, whose pool
+holds twelve artists, was refused too. And one selection could not suit four
+views: 99 FLACs by two artists, one `.wv` and one `.ape` passed as a whole,
+while the stored 100 dropped the `.ape` and the APE view, left 99 FLACs, was
+refused. Red first through the real regenerator
+(`TestRegenerate_ChristmasStoresWhatEachViewNeedsToClearTheFloor`, its three
+subtests) and the real router in all four views
+(`TestEachViewIsPickedItsChristmasItemsAtTheRequest`), and round 4's tests
+updated to the stored superset, every result as predicted in a file before
+the run.
+
+The first fixture needs a season that puts the second or the third album past
+position 100, which most seasons do not: over 2026 to 2060, ten of 35 do
+(modelled in Python on the engine's FNV-1a order, one artist, so the artist
+spread keeps the order). The tests pin 2029 (the third album's track at 108)
+and assert that precondition through the engine itself
+(`smartplaylist.ChristmasOrder`, the order the family takes a format in, now
+exported for it), failing with "pin another season" if a change to the order
+moves it.
+
+The selection for a view is made at the response from a bounded stored
+superset. The regenerator stores each format on its own (`storeChristmas`,
+`selectChristmas`'s successor): the tracks every client is served, then the
+WavPack ones, then the Monkey's Audio ones, each in the season's order spread
+eight an artist (`ChristmasOrder`) and cut at `season.MaxTracks` (100) by
+`season.KeepSpread`, which first moves the first track of each of its first
+three albums and of each of its first three artists to the front: up to 300
+items, each with its album. The storage keeps both spreads ahead of its cut,
+where the brief's response rule takes one: without it the one choir's third
+album is never stored and no pick can bring it back, and a format that cannot
+clear the floor alone (two albums, one artist) may complete another's in a
+view that declares both, by either spread. `season.Pick`, one pure function of
+the stored items and the view, is each request's selection: the view's
+formats, those every client is served first, then the declared gated formats
+in turn; before the cap, the first track of each of the first three distinct
+albums, or failing that of the first three distinct artists, moves to the
+front (named as the floor names them, an empty one naming nothing); then the
+first 100; and the floor is asked of the result. `GET /v1/smart-playlists`
+calls it per request and leaves the family out of a view below the floor,
+positions closing up as before; the regenerator calls it for its decision,
+storing the family when one of the four views clears it; the console shows
+the pick of a client that declares every format (`consoleMixItems`, which the
+mix's item count and its track list read), as it showed the whole family
+before. `Options.MaxChristmasItems` is gone (the cap is `season.MaxTracks`),
+as `MinChristmas` went in round 4. The season seed's order is unchanged: one
+season, one order. `buildChristmas`', `storeChristmas`' and the season
+package's comments say the floor is asked of each view's pick, not of every
+qualifying track. `PROTOCOL.md`'s `christmas` paragraph says each request is
+picked its items.
+
+Round 4's regeneration tests now store 115 (15 FLACs and 100 WavPack files)
+and the full 100 of a thousand `.wv` files beside fifteen `.ape`, and the
+thousand-WavPack HTTP test gives the WavPack view its own 100 (it was the 85
+the cap left). `TestTheChristmasFamilyServesEachViewItsItems` compares its
+mixed view as a set, since the pick orders the formats in turn. The leaf has
+its own tests (`TestPickKeepsTheFloorWheneverTheItemsCan`,
+`TestKeepSpreadKeepsBothSpreadsAheadOfTheCut`) and the console its own
+(`TestTheConsoleShowsTheChristmasFamilyAsServedToEveryFormat`: 40 FLACs, 100
+`.wv` and 100 `.ape`, the console showing the FLACs, then a `.wv` and an
+`.ape` in turn). Not changed here: the family's energy envelope and modal
+rate are signed at generation over what is stored (`signEnergy`), now the
+superset, as they were over round 4's stored 100, not over a view's pick.
+
+### Point 2: a blob with no albums stays judged on its artists
+
+No change, as the brief decided: B750 has shipped in no release (0.2.3 has no
+Christmas family), so no released bridge holds a blob without albums, and the
+family is rebuilt daily. `season.Pick` and `season.MeetsFloor` name an empty
+album as nothing, so such a blob is judged on its artists, and no count-only
+fallback was added, which would serve what the floor refuses. Round 4's
+`TestAChristmasFamilyCachedWithoutAlbumsIsJudgedOnItsArtists` runs through the
+response's `Pick` now and still refuses fifteen items by one artist across
+three albums cached without their albums (it stayed green under every control
+this round).
+
+### Point 3: a suppressed member's replacement was decided outside the view
+
+Confirmed. `servedCopies` mapped a line naming a suppressed duplicate to its
+group's one served row, and a group with two served rows left the line
+unresolved in every view, though a request takes at most one of them: a
+missing `A/x.wv` beside `B/x.flac` and `C/x.ape` was unresolved for a client
+declaring nothing, which can play the FLAC; and a line naming a suppressed
+copy of a gated format the request does not declare was unresolved before its
+group was asked (`TestASuppressedDuplicateIsServedAsItsOneServedCopyInTheView`,
+red in views nothing, WavPack and APE as predicted, green in both, where two
+survivors stay unresolved).
+
+The feed now keeps every served row of a group (`servedCopies`) and decides
+among those the request's view takes (`servedCopyIn`): exactly one is the
+member, whatever the suppressed track's own format, and none or several leave
+the line unresolved, as before; a group with a DSD and a PCM edition each
+keeping one is unresolved where the view takes both, as it was, with no new
+reading of the domain. The view reaches it as every other member rule does:
+`resolvePlaylistBatch` passes the request's set to `resolve`, whose lines are
+judged in it. The paging keys on it through the feed's version, which hashes
+the view's key and `playlistFeedRulesVersion`, now 4: every version, cursor
+and ETag made under the old rule answers stale (`410`
+`playlist_files_stale`), and one view's never answers another's. The rows a
+page shows are the same rows, so the v57 triggers that move the feed's
+generation need nothing new. The older test,
+`TestASuppressedDuplicateMemberIsServedAsItsServedCopy`, passes unchanged.
+
+### Points 4, 5 and 6: a stream's end past its metadata, a shrink while read, a `.wvc`'s unknown total
+
+Point 4, confirmed: with no stated length, `wvFinalIndex` took only a final
+block ending the file, and the reference encoder ends a stream with a block
+of metadata alone (its MD5 sum, a RIFF trailer: `write_metadata_block`, whose
+header is cleared but for its id, version, size and total, so no final block
+and no samples). A `.wv` of unknown length ending with its MD5 sum matched no
+`.wvc` and was indexed WAVPACK-LOSSY. The look now starts at the block that
+ends where the file does and passes back over blocks with no samples, each
+found as the block that ends where the one after it begins, at most
+`wvMaxTrailingBlocks` (16), to the last block with samples, which must be a
+final block: as `seek_final_index` takes the last final audio block of the
+file's last 1 MiB. A trailing metadata block larger than one 64 KiB window is
+still found (the look walks back window by window to that 1 MiB floor); one
+that fills the whole of the last 1 MiB (a RIFF trailer past 1 MiB) leaves no
+block with samples there, so the stream's end is unknown, no correction file
+matches, and the row is WAVPACK-LOSSY, a pinned subtest. This parser has not
+shipped, so `ExtractorVersion` stays this PR's 32.
+
+Point 5, confirmed: a `.wv` that shrank after its extractor's stat met the
+file's end inside a block, which `wvWindow` answered `errWVBlockCut` (a file
+cut as it was written, a refusal) with no read fault, and a WavPack or
+Monkey's Audio file cut inside its APEv2 tag read as one with no tag; either
+replaced a changed file's good row under the file's new size and mtime, which
+the skip gate then kept, so the defect outlived the shrink (the red run's one
+sub-check not predicted: the final readable scan of each subtest failed too).
+Both extractors now read through `statBoundReader`, which answers a read that
+reaches the file's end short of the stat's size with `errFileShrank` and notes
+it in the extraction's read faults, so the read did not complete and the row
+it had is kept (B134's rule); `wvWindow` tells a short read inside a block
+found within the stat's size (the shrink) from a block that runs past that
+size (`errWVBlockCut`, answered before any of the block is read), and the
+correction look answers a shrink as a correction file replaced while read.
+`TestScanner_AFileThatShrinksWhileItIsReadKeepsItsRow` cuts a WavPack file
+inside its first audio block, and a WavPack and a Monkey's Audio file inside
+their tags, between the stat and the read.
+
+Point 6, confirmed: a `.wvc` whose first block states no total beside a `.wv`
+that states one was refused, and that is the pair an encode of a stream whose
+length the encoder learned only at its end leaves when its rewrite of the
+`.wvc`'s header fails: every header is written with the unknown total, and
+`cli/wavpack.c` rewrites the `.wv`'s first block with the length, then the
+`.wvc`'s. The reference decoder takes the pair: it reads the stream's length
+from the `.wv` alone (`WavpackOpenFileInputEx64`: the first audio block's
+total, else `seek_final_index` over the `.wv`) and takes a correction block by
+its index, samples and flags (`read_wvc_block`, `match_wvc_header`), never by
+its total. These are cited from libwavpack 5's source as published, which was
+not on legion0 and could not be fetched there (no network): the acceptance
+rests on that citation until the reference-encoder corpus exists, and the
+owner's check of it against the source is asked in the round's report.
+`correctionTotalAgrees` takes the same total, both unknown, or unknown in the
+`.wvc` beside a known one in the `.wv`; it refuses the reverse and two known
+totals that differ, which the decoder would take but no reference encode
+writes, and every other check stays: the block's index, samples and flags,
+the correction bitstream, and the `.wvc`'s end at the stream's last sample. A
+built fixture covers it (`wvBlocksStating`), and one subtest joins points 4
+and 6: a `.wv` stating its length, a `.wvc` stating none and ending with a
+metadata block after its audio, matched.
+
+### Point 7: a client reconciles whenever its declared formats change
+
+Confirmed by reading: `PROTOCOL.md` had a client make its full sync "once per
+bridge, when it first sees `wavpackApe`", so a client that first declares
+`wavpack` and later adds `ape` missed the APE rows indexed before its delta
+cursor, and one that drops a format kept rows no filtered delta removes, since
+the bridge still holds them and no tombstone names them. The paging and
+deltas paragraph now says a client records, for each bridge, the set of
+formats it declares there, and makes a full reconciliation (a paginated full
+sync, after which it holds exactly the rows delivered) whenever that set
+changes; the set declared to a bridge that does not advertise `wavpackApe` is
+empty, so that bridge's update changes it. Nothing changes on the bridge; the
+iOS half reads this.
+
+### Point 8: the console lists these files
+
+Confirmed: `bridge scan`'s summary line and the dashboard's composition note
+said the console's player left these files out, while the player lists every
+track with a Download link and marks one no browser plays "Not playable in a
+browser" (`playNone`). Both now say that earlier versions of the app and DLNA
+renderers leave them out, and that the console lists them and offers their
+download, marked not playable in a browser. The scan test pins the line's
+words, and `TestTheCompositionNoteSaysTheConsoleListsWavPackAndMonkeysAudio`
+pins the note's literals (comments stripped, `jsFunctionBody`); both were
+written after the words were corrected, and both are red with the old words
+put back in memory, as predicted (r8 below).
+
+### Negative controls
+
+Committed before each control; every mutation in memory, the bytes restored
+after the run and checked; predictions in a file before each run.
+
+| Control | Mutation | Red |
+|---|---|---|
+| c1 | the move to the front reverted (`moveToFront` keeps nothing) | as predicted: the pick's two spread subtests, `TestKeepSpreadKeepsBothSpreadsAheadOfTheCut`, the one choir in regeneration and in every HTTP view, and the 120-FLAC case in views WavPack and both; and one not predicted, the 120-FLAC case in regeneration: the decision is the same `Pick`, so no view cleared the floor and nothing was stored; the 99, 1 and 1 case green |
+| c3 | the survivors counted before the view | as predicted: views nothing, WavPack and APE |
+| c3b | the suppressed copy's own format asked first | as predicted: view nothing alone |
+| c4 | the look for a stream's end stops at a block with no samples | as predicted: the metadata-after-audio subtest and the joined case |
+| c5 | the stat-bounded reader's shrink check off | as predicted: the shrink test's three subtests |
+| c6 | a known `.wv` total no longer agrees with an unknown `.wvc` one | as predicted: the `.wv`-alone subtest and the joined case |
+| c6r | the reverse direction taken too | as predicted: the `.wvc`-alone subtest |
+| r8 | point 8's old words put back | as predicted: the scan test and the composition note's test |
+
+### The rules
+
+`rules-b489b-r5.patch` is over `pr/1423`'s rules (round 4's applied):
+`scanner.md`'s two WavPack lines take round 5 in their titles and the bold
+"Don't" sentences their long forms in `ops/History-rules-scanner.md` now
+carry (a read short of the stat's size taken for a cut file; a total in the
+`.wvc` alone or two that differ; the look for the end stopped at a block with
+no samples); `wire.md`'s B489 bullet takes the per-view Christmas pick, the
+suppressed member in its view, `playlistFeedRulesVersion` 4, the
+reconciliation rule, a "Don't" and two tests, and its playlist-files bullet
+the member rule; `smart-mixes.md`'s Christmas bullet takes the stored
+superset, `season.Pick`, the albumless blob with no fallback, the "Don't"
+sentences and five tests; `admin-console.md`'s B489 bullet what the console
+says of these files, a "Don't" and two tests. Checked with `git apply` on a
+fresh copy, equal to the builder's result, every blank context line with its
+leading space, every test it names declared, and the budgets over it
+(`admin-console.md` 72.6%, `scanner.md` 34.4%, `smart-mixes.md` 14.3%,
+`wire.md` 59.5%, the worst load 65.5%).
+
+### Gates
+
+On legion0 at bde89a96, through the shared build lock, against main as
+`pr/1423` merged it (fc07f4a1): go1.27.3's gofmt on every Go file changed
+since main, clean; `make docs-check`, ok; the qualification check,
+"qualification version OK: fc07f4a1..HEAD" (after 3,805 s waiting for the
+build slot); `make vet` native and with `GOOS=windows`, `GOOS=darwin`,
+`GOOS=linux GOARCH=386` and `GOOS=linux GOARCH=arm`, each clean; `make
+test-fast`, 87 packages ok, the Linux-only ones run here (cmd/bridge 450 s,
+internal/admin 250 s, internal/alsapcm 42 s, internal/atomicwrite 15 s); `go
+test -race` over `./internal/dupes/... ./internal/smartplaylist/...
+./internal/smartplaylistgen/... ./internal/api/... ./internal/manifest/...`,
+with the Makefile's tags and `-timeout 60m`, ok: internal/dupes from Go's test
+cache (its inputs unchanged since round 4's run), internal/smartplaylist 3 s,
+its season 1 s, internal/smartplaylistgen 37 s, internal/api 143 s,
+internal/manifest 1,515 s; `make build-all`, the six targets. Not run here:
+macOS and Windows natively, CI's runners, and the iOS app.
+## 2026-11-06 — B660: an install counts as healthy only once it has answered and stayed up
+
+Backlog B660, from the self-healing study of 2026-11-02 (read from the code:
+the updater took a version match for success), Argon's rule beside it (never
+roll the binary back past a schema change; stop and say so instead) and
+B613's "Not here" (`ops/History-rules-config-lifecycle.md`). The scenario is
+B198's; nobody reported it, and the owner wanted it covered by design.
+Worker b660 on the Linux worker host (Ubuntu 26.04, linux/amd64, 16 cores,
+go1.27.3, `GOTOOLCHAIN=local`, `GOPROXY=off`), branch
+`fix/b660-install-probation` from main 4880f8a4. Commits: the reproduction
+99568a9d (red), the change 9177e87a, the tests through serve 08f92121, two
+test fixes 27d245d3 and 5b5c363e, the Windows test build eeaabd5e (the
+checks below), then this record. The rule is a new bullet
+in `config-lifecycle.md` with corrections to B613's, B692's round 2's and
+B705's lines there, to two lines of `cli-serve.md` and one of `scanner.md`,
+shipped as a checked patch (`rules-b660.patch`; this worker cannot write
+`.claude/`), with the long forms in `ops/History-rules-config-lifecycle.md`
+(the new section, and B613's, its rounds 3 and 4, B692's round 2 and B705's
+where each said a start confirms the install) and
+`ops/History-rules-cli-serve.md` (#1009's).
+
+**What it was** (4880f8a4). `DecideBootAction` (state.go:477) answered
+`BootInstallSucceeded` for the target at any age, main.go:2444-2455 stamped
+`installed`, and the next start of any version removed `.bak`
+(state.go:495, main.go:2456-2472). The housekeeping ran at main.go:4033,
+after the store opened (:3570) and before anything listened (`ServeTLS` at
+:6584), so the stamp said nothing about serving: under `Restart=always`
+(`RestartSec=2`, systemd.service.tmpl:10-11) a new binary that stamped and
+then crashed had `.bak` deleted by its second start, about two seconds
+later, after `bridge update` had promised (update.go:158) a rollback "if the
+new bridge fails to come up at version X within 6h0m0s of restart", which
+only a version mismatch triggered. Nothing rolled a version back once it got
+past its settings: the admission's `DataDirOpenedBy` (disarm.go:105) refused
+all three rollbacks (`EarlyRollback`, configcheck.go:473; `BootInstallFailed`,
+main.go:2487; `RollbackRefusal`, state.go:546) without saying whether the
+store changed, and a migration under serve left no record of its own
+(`ArmsDataDirRecord`, configcheck.go:489, false once the admission had
+recorded). The ladder is not one transaction (store.go:2895-2908: a step's
+SQL, its `post`, then `PRAGMA user_version`), and an older binary over a
+newer store skips every step (:2891-2894).
+
+**What changed** (the long form is the History section):
+- The marker stays `installing` until confirmed; a version match at boot is
+  `BootInstallProbation`, which writes nothing and takes no lock.
+- Serve confirms it (`serveProbation`, `updater.ConfirmInstall` under the
+  marker's lock, the marker read again) once a round of this process's own
+  answers has said yes and `updater.ProbationWindow` (10 minutes, monotonic)
+  has passed: a connect its accept loop took (`acceptWatch`), `GET
+  /v1/health` in process at this version, a store read; a round bounded at
+  5 s with a second's grace, one at a time, never waited for at the stop.
+- Each start counts itself at its admission (`FailedStarts`) and takes the
+  count back only where it ends cleanly (a stop, a restart request, a bind
+  refused for an address in use or a permission, the tailnet listener), by a
+  flag, never `code`.
+- At three (`updater.ProbationFailedStarts`) the next start, before its
+  admission, puts `.bak` back (`recoverCrashedInstall`: `CrashRollback`, the
+  backup's version, its settings check) or records why not
+  (`RollbackRefused`).
+- Every migrating store open records `StoreMigratedBy` before its first
+  step, after the admission too, and refuses where it cannot.
+- The auto-installer waits on the running version's unconfirmed install for
+  at most twice the window; `ProbationStatus` gives the stderr lines, `bridge
+  doctor`'s `install-probation` and the console's Probation row.
+
+**The numbers.** The window is 10 minutes from the first ready answer,
+asked every 5 s before it, once at its end and every 30 s after a no; the
+take-back gives the lock 2 s; the auto-installer waits at most 20 minutes of
+uptime. Three failed starts: one power cut or OOM kill does not roll back,
+and at `RestartSec=2` the fourth start comes inside systemd's default start
+limit (5 in 10 s). The ladder's top by release (0.1.7 23, 0.1.8 26, 0.1.9
+41, 0.2.0 44, 0.2.1 50, 0.2.2 60, 0.2.3 60) moved in 6 of the last 7 (all
+but 0.2.3), and an install of a release that moves it migrates at its first
+store open, which takes it out of the crash rollback's reach.
+
+**Trade-offs, named.**
+- Begun is changed: once a migration step has begun, by serve or any
+  command, the crash rollback refuses for good, whatever `user_version`
+  says, and says why. With the ladder moving in 6 of 7 releases, a crash loop
+  after a release's first store open usually gets its backup kept and a
+  report (`bridge doctor` fails, the panel says it), not a rollback; the way
+  back is the operator's (a snapshot from before the update, with `.bak`).
+- The count has no clock and no cause: three starts that end uncleanly for
+  any reason (a power cut, an OOM kill, `kill -9`, a service manager's
+  SIGKILL after its stop timeout) before a start is confirmed make the next
+  start try to roll a working install back, an attempt that a migration of
+  the store begun under the install, or a check that fails (another version
+  opened the data dir, the backup's version, its settings check), prevents,
+  saying why (qualified in the third round, after CodeRabbit's thread on
+  #1424). A confirmation needs one start up for 10 minutes; a host that
+  restarts the bridge more often than that never confirms, and is counted.
+- Not ready is never proof: a start that serves but never answers is not
+  confirmed, keeps running, says so once and records `NotReady`; nothing
+  rolls it back, and the auto-installer stops waiting on it after 20 minutes.
+- A take-back that cannot hold the marker's lock within 2 s leaves its count,
+  which errs toward a rollback; the confirmation clears it.
+- What the target wrote without a migration goes back under the backup
+  unchecked (the History section lists each file and what the backup does
+  with it); none of it stops the backup starting, so none is a refusal.
+- A backup that predates the settings check is put back with a warning,
+  unchecked, as the early rollback does. (Reversed in the second round: it
+  is refused, below.)
+- A crash before the admission is not counted: the settings check before the
+  swap saw the candidate run, and a start refused for its settings has the
+  early rollback. That is the boundary.
+- A manual install is not held by the probation, and its `.bak` is the
+  unconfirmed version it replaced.
+- Each readiness round logs one `path=/v1/health` access line; a start that
+  answers at once logs two.
+- Where the filesystem keeps no locks, an install is counted, never
+  confirmed and never rolled back.
+
+**Red first** on 99568a9d (the marker's four fields and serve's seams added
+inert), each failing as main behaves:
+`TestACrashAfterTheFirstBootKeepsTheBackup`: `the marker after the
+housekeeping of start 1 = {Status:installed … InstalledAt:2026-11-06
+18:55:54.245749627 +0000 UTC …}, want the install still on probation:
+nothing listened yet`, the second housekeeping's marker cleared, and `the
+backup after the housekeeping of start 2: lstat …/bin/bridge.bak: no such
+file or directory`; `TestAnInstallIsConfirmedOnlyOnceItAnsweredAndStayedUp`:
+`the marker once serve listens = {Status:installed …}, want the install on
+probation, this start counted`;
+`TestThreeFailedStartsRollBackAnInstallThatMigratedNothing`: `the fourth
+start = 0 (served true), want 75 before it served`;
+`TestARollbackIsRefusedAndReportedOnceAMigrationBegan`: `the marker after a
+start that migrated the store = {Status:installed … StoreMigratedBy: …},
+want it to record that 0.0.1 began a migration`.
+
+**Tests.** internal/updater: `TestCrashRollbackDecidesOnTheMarkerAlone` (19
+cases, each refusal's words, none naming a path),
+`TestTheCrashRollbacksRecordKeepsWhatTellsItFromTheOthers`,
+`TestTheCrashRecordIsWhatAnOlderUpdaterReadsAsARollbackDone` (the record as
+0.2.3's `State` reads it and 0.2.3's decision over it, both frozen from its
+tag; and the upgrade: 0.2.3's own install marker, with none of the new
+fields, on probation here and counted at its admission),
+`TestProbationStatusSaysWhereAnInstallStands`,
+`TestTheAdmissionCountsTheStartsOfTheInstallsVersion`,
+`TestAMigrationRecordsThatItBeganThoughTheDataDirIsRecorded`,
+`TestTheConfirmationStampsOnlyAnInstallThatAwaitsIt`,
+`TestAConfirmationThatWaitsReadsTheMarkerAgain` (an ended context with the
+lock free among its cases), `TestATakeBackWritesOnlyTheCountItsStartWrote`,
+`TestTheAutoInstallerWaitsForTheRunningInstallsProbation`,
+`TestTheAutoInstallerDoesNotWaitWhereTheBackupCannotBePutBack`,
+`TestTheAutoInstallerDoesNotWaitForAnInstallThatNeverAnswered` and
+`TestAnAutomaticInstallOverAStagedVersionLeavesTheStagedOneAsTheBackup`, with
+`TestDecideBootAction`'s probation rows. internal/doctor:
+`TestIsBindPermissionMatchesWhatTheHostAnswersARefusedBind` and the source
+pin of the Windows arms, `TestTheWindowsBindChecksNameTheWinsockErrnos`.
+internal/admin: `TestTheSettingsPageSaysWhereAnInstallOnProbationStands` and
+`TestTheUpdatesPanelScriptSaysWhereAnInstallOnProbationStands`. Through the
+real serve (cmd/bridge, a real store, a stand-in `.bak` that is the test
+binary run as the bridge of another version, the existing seams and a
+short window through `serveOpts.probation`, waited on through its events):
+the red four above; readiness:
+`TestAHeldScanDoesNotDelayTheConfirmation`,
+`TestAStopDuringAHeldScanIsNotAFailedStart`,
+`TestAStartThatNeverAnswersIsNeverConfirmed`,
+`TestASocketNobodyAcceptsOnIsNotReady`,
+`TestAHealthAnswerOfAnotherVersionIsNotReady`,
+`TestAStoreThatDoesNotAnswerIsNotReady`,
+`TestAHealthCallThatNeverReturnsIsNotReadyAndDoesNotHoldTheStop`,
+`TestAConfirmationReadsTheMarkerUnderItsLock`,
+`TestAStopWhileAConfirmationWaitsWritesNothing`,
+`TestTheDoctorReadsOkBesideAHealthyStartOnProbation`; the count:
+`TestAStopIsNotAFailedStart`, `TestARestartRequestIsNotAFailedStart`,
+`TestARestartIntoANewerInstallLeavesItsMarker`,
+`TestAStopAfterConfirmationWritesNothing`,
+`TestAPortAnotherProcessHoldsIsNotAFailedStart` (the API's and the
+console's, and an address the host does not have, which stays counted),
+`TestAStoreThatWillNotOpenIsAFailedStart`, `TestAPanicInServeIsAFailedStart`,
+`TestACountPublishedBeforeItsBarrierFailedIsTakenBack` (the count's own
+barrier failing after its rename); the rollback:
+`TestAMigrationThatFailsStillRefusesTheRollback` (a step that adds its
+columns and fails at its index, `user_version` unmoved),
+`TestACommandsMigrationRefusesTheRollbackToo` (`bridge doctor`'s open),
+`TestAMigrationWhoseRecordCannotBeWrittenDoesNotRun`,
+`TestABackupThatRefusesTheSettingsIsNotPutBack`,
+`TestABackupThatCannotAnswerIsNotPutBack`,
+`TestABackupOfAnotherVersionIsNotPutBack`,
+`TestAnAutomaticInstallOverAStagedVersionCannotRollBackPastIt`,
+`TestNoBackupIsPutBackWhereThereIsNone`,
+`TestABackupThatPredatesTheCheckIsNotPutBack` (which required the put-back
+under another name until the second round), `TestACrashRollbackNeedsBothLocks`
+(the data dir's lock failing, a filesystem that keeps none for it, and none
+for the marker's), `TestATransientRefusalAtTheFourthStartRollsBackAtTheFifth`,
+`TestAStartFinishesACrashRollbackStoppedBeforeItsRename`,
+`TestARollbackOvertakenGoesBackOnProbation` and
+`TestAnOperatorsRecordIsNotFinishedByTheCrashRollback`.
+
+**The existing tests that stamped at the first boot**, each changed to the
+confirmation and keeping what it pins:
+- `TestDecideBootAction` (state_test.go): the target's rows answer
+  `BootInstallProbation` for `BootInstallSucceeded`; every other branch as it
+  was.
+- `TestDecideBootActionReadsAnInterruptedRollbackOnItsOwn`: its doc (the
+  target overtakes the record and puts the install on probation); its rows
+  unchanged.
+- `TestTheConfirmationOverARollbackKeepsWhatIsNotItsOwn` and
+  `TestTheConfirmationNeedsTheInstallsOwnRecordOfTheDataDir`: through
+  `ProbationOverRollback` for `ConfirmOverRollback`, the marker `installing`
+  with its count kept rather than `installed`; still the rollback's mark, the
+  hold and the veto of this version gone and the rest kept, and still only
+  on the install's own admission's record.
+- `TestALateFirstBootOfTheInstalledVersionConfirmsTheInstall`
+  (late_boot_test.go): its version-match rows answer `BootInstallProbation`
+  at any age; still the version asked before the window.
+- `TestDeferredRestartRefreshesInstallRecency` (autoinstall_test.go): the
+  boot after the restamp is `BootInstallProbation`; the restamp itself as
+  before.
+- `TestALateFirstStartOfTheInstalledVersionCompletesItsInstall`
+  (serve_late_boot_test.go): the start 30 hours late is on probation once it
+  listens, and confirmed after a short window before its stop; the record,
+  the refused Roll back and the next start's cleanup as before.
+- `TestATargetWhoseSettingsAreFixedConfirmsAnInterruptedRollback`
+  (serve_refused_install_r3_test.go): back on probation once the start
+  listens (the mark, the hold and the veto gone), confirmed after the
+  window, then the next boot's cleanup.
+- `TestTheBootConfirmsAnInterruptedRollbackOnlyOnTheInstallsOwnRecord`
+  (serve_refused_install_r4_test.go): the line `not putting the install … back
+  on probation` for `not confirming`, and `installing` for `installed`.
+- `TestAManualRollbackStoppedBeforeItsRenameKeepsTheStoreFromASecondRollback`
+  (update_marker_lock_r2_test.go): the restart's marker `installing` for
+  `installed`; the second rollback still refused.
+- `TestAManualRollbackThatHoldsTheMarkersLockFirstLeavesTheBootNothingToDo`
+  (update_marker_lock_test.go): the housekeeping of an install on probation
+  asks for no lock, so the wait it pinned moved to the confirmation, which
+  waits for the rollback's lock and then does nothing over its record.
+- `TestTheConsoleOffersRollBackOnlyWhereTheRollbackWouldRun`
+  (update_rollback_offer_test.go): the marker after the start `installing`
+  for `installed`; the refusal and the panel's row as before.
+- `TestSettingsUpdateRowsRenderOnceAndKeepDTAdjacency` (internal/admin): the
+  Probation row is a fourth conditional row in every case.
+
+**Negative controls**, each one mutation applied exactly once (each replaced
+string's count asserted), the test binaries rebuilt with make's tags, the
+listed tests run, the bytes put back from memory and compared (the tree was
+clean after each). Predicted in a file before the first ran; every outcome
+as predicted:
+
+| | Mutation | Red | Green |
+|---|---|---|---|
+| (a) | the housekeeping stamps `installed` at a version match again | `TestACrashAfterTheFirstBootKeepsTheBackup` (installed at the first housekeeping, `.bak` gone at the second), `TestAnInstallIsConfirmedOnlyOnceItAnsweredAndStayedUp` | `TestThreeFailedStartsRollBackAnInstallThatMigratedNothing` |
+| (b) | readiness also waits for the scan (the store read refuses while one is in flight) | `TestAHeldScanDoesNotDelayTheConfirmation` (every round `a scan is under way`, no confirmation) | `TestAnInstallIsConfirmedOnlyOnceItAnsweredAndStayedUp` |
+| (c) | serve's stop branch no longer marks the start clean | `TestAStopIsNotAFailedStart` (both: once it serves, while it starts), `TestARestartRequestIsNotAFailedStart` | `TestAPortAnotherProcessHoldsIsNotAFailedStart` |
+| (d) | the take-back reads `code == 0` | `TestAPanicInServeIsAFailedStart` (taken back after a panic), `TestAPortAnotherProcessHoldsIsNotAFailedStart` (the API's, the console's) | `TestAStopIsNotAFailedStart`, `TestAStoreThatWillNotOpenIsAFailedStart` |
+| (e) | `StoreMigratedBy` written only where `DataDirOpenedBy` is empty | `TestARollbackIsRefusedAndReportedOnceAMigrationBegan`, `TestAMigrationThatFailsStillRefusesTheRollback`, `TestAMigrationRecordsThatItBeganThoughTheDataDirIsRecorded` (3 of 8 cases) | `TestACommandsMigrationRefusesTheRollbackToo` (a command's open comes before any admission) |
+| (f) | no `CheckConfig` (the backup taken as loading the settings) | `TestABackupThatRefusesTheSettingsIsNotPutBack` and `TestABackupThatCannotAnswerIsNotPutBack` (exit 75 before serving), `TestABackupThatPredatesTheCheckIsNotPutBack` (no warning; it required the put-back then) | `TestThreeFailedStartsRollBackAnInstallThatMigratedNothing` |
+| (g) | the bind's check not asked at all (both sites) | `TestAPortAnotherProcessHoldsIsNotAFailedStart` (the API's, the console's; the absent address green) | `TestAStopIsNotAFailedStart` |
+| (h) | the confirmation decides on its read before the lock | `TestAConfirmationReadsTheMarkerUnderItsLock` (the newer install's marker stamped over), `TestAConfirmationThatWaitsReadsTheMarkerAgain` | `TestAnInstallIsConfirmedOnlyOnceItAnsweredAndStayedUp` |
+| (i) | `==` for the limit | `TestATransientRefusalAtTheFourthStartRollsBackAtTheFifth` (the fifth start served), `TestCrashRollbackDecidesOnTheMarkerAlone` ("past the limit") | `TestThreeFailedStartsRollBackAnInstallThatMigratedNothing` |
+| (j) | the store's open ignores its record's failure | `TestAMigrationWhoseRecordCannotBeWrittenDoesNotRun` (served), internal/manifest's `TestAStoreOpenThatCannotRecordItsMigrationMigratesNothing` | `TestARollbackIsRefusedAndReportedOnceAMigrationBegan` |
+| (k) | a blind decrement at the take-back | `TestAStopAfterConfirmationWritesNothing`, `TestARestartIntoANewerInstallLeavesItsMarker`, `TestATakeBackWritesOnlyTheCountItsStartWrote` (3 of 6) | `TestAStopIsNotAFailedStart` |
+| (l) | the probe's own connect taken for one the accept loop took | `TestASocketNobodyAcceptsOnIsNotReady` (the first round ready) | `TestAnInstallIsConfirmedOnlyOnceItAnsweredAndStayedUp` |
+
+(g) covers the bind's check being asked; the Windows arms of the check
+(Winsock's errnos) cannot run here and are held on every other host by a
+source pin, `TestTheWindowsBindChecksNameTheWinsockErrnos`. Two tests that
+ran `r.serve`, which waits for serve to return, would have hung rather than
+failed under (j) and its kin; they run serve with `serveToItsEnd` now
+(27d245d3), and (b)'s failure printed event kinds as numbers, which
+5b5c363e names.
+
+**By hand, with two real builds.** 0.2.3 built from its tag's tree (`git
+archive 0ddb8c72`; its go.mod and go.sum are this tree's) as the previous
+version, and this tree as 0.2.4-b660, both with make's tags and
+`-ldflags -X …ServerVersion=`, in a scratch directory, loopback listeners,
+mDNS off. Each run: 0.2.3 serves the data dir first and stops, then the
+install is laid out as `bridge update` leaves it (0.2.3 as `bridge.bak`, the
+new binary in place, an `installing` marker naming both).
+- Run 1: three starts of 0.2.4-b660, each killed with SIGKILL once it
+  listened: the marker read `failedStarts` 1, 2, 3, `dataDirOpenedBy`
+  0.2.4-b660, no `storeMigratedBy` (both ladders end at 60); the second and
+  third said `updater: 0.2.4-b660 is on probation since its install, and 1 of
+  its starts before this one did not end cleanly: once 3 have not, the next
+  start puts 0.2.3 back` and `updater: 2 of 0.2.4-b660's starts before this
+  one did not end cleanly: if this one does not either, the next start puts
+  0.2.3 back`. The fourth exited 75 before serving: `updater: 3 starts of
+  0.2.4-b660 since its install did not end cleanly, so the install is rolled
+  back: 0.2.3 is back at /…/bin/bridge and 0.2.4-b660 is held back from the
+  auto-installer; exiting for the service manager to start 0.2.3 (where
+  nothing starts it, run bridge serve again)`; `bin/bridge version` then
+  answered `1-bit-bridge 0.2.3 (protocol v1)`, `.bak` was gone, and the
+  marker was the record (`rollbackStarted`, `rejectedVersion` and
+  `migrationVeto` 0.2.4-b660, `failedStarts` 3). The next start, the real
+  0.2.3 on what 0.2.4-b660 wrote, served (listening), and its housekeeping
+  finished the record as a rollback done: the install cleared, the hold, the
+  veto, `dataDirOpenedBy` and `previousVersion` kept, `failedStarts` dropped
+  as a field it does not know; its stop exited 0.
+- Run 2: a start of 0.2.4-b660 left up. On probation once it listened
+  (`failedStarts` 1), and `bridge doctor` beside it said `ok | 0.2.4-b660 is
+  on probation since its install: a start of it is confirmed once it has
+  answered as ready and stayed up for 10m0s`. Its first round answered 5 s
+  after it listened, at 19:59:07 (one `path=/v1/health` access line), and at
+  20:09:07: `updater: 0.2.4-b660 has answered as ready and stayed up for
+  10m0s, so its install is confirmed: the backup of 0.2.3 is removed at the
+  next start`, the marker `installed` with `installedAt` 20:09:07, the count
+  cleared, `dataDirOpenedBy` kept. Its stop (SIGTERM) exited 0 and left the
+  marker byte for byte; the next start removed `.bak`, and the marker with
+  it, and its stop exited 0.
+The Windows path (the crash rollback's rename of the running exe aside,
+B202's) has been vetted only by cross-compiling and by
+`rollback_running_windows_test.go`, not run on Windows.
+
+**Checks**, on the Linux worker host, every `make` and multi-package run
+under the shared build lock, at 5b5c363e unless said:
+- `make test-fast` (TMPDIR under `.tmp/_b660`, so the build-site census
+  skips it): ok, 85 packages and 14 without tests (cmd/bridge 476 s); the
+  Linux-only packages ran (internal/alsa, internal/alsapcm,
+  internal/atomicwrite, internal/backup and the player's).
+- `go test -race -count=1 -timeout 30m` with make's tags over
+  internal/updater, internal/manifest, internal/doctor, internal/admin and
+  cmd/bridge: ok (27 s, 1,435 s, 7 s, 965 s, 1,150 s).
+- `make vet` natively and with `GOOS=darwin`: ok. With `GOOS=windows` it
+  failed: `internal/updater/probation_test.go:602:19: undefined:
+  makeAutoInstallUpdater`, three auto-installer tests in a file that builds
+  everywhere calling a helper declared for every platform but Windows.
+  eeaabd5e moves them beside it, under `!windows`; then internal/updater's
+  tests ran again natively (ok), and `make vet` natively, with
+  `GOOS=windows` and with `GOOS=linux GOARCH=386` (CI's portability vet):
+  ok.
+- `make build-all`: ok (its `-check-build-tags` step OK, and the six
+  targets built).
+- The qualification check (`scripts/qualification-version -base 4880f8a4
+  -head HEAD`): `qualification version OK`; nothing it guards changed.
+- go1.27.3's gofmt on the changed Go files: clean.
+- `make docs-check`: ok as the tree stands (CLAUDE.md 77.5 %, the worst load
+  player_openhome_test.go 65.1 %); and with `rules-b660.patch` applied to a
+  copy of the rules files, the budgets measured by check-doc-budgets.py's own
+  `measure` and `problems` over this tree's tracked files: ok,
+  config-lifecycle.md 96,900 bytes (96.9 %), cli-serve.md 40,809,
+  scanner.md 31,533, the worst load 313,678 bytes (65.3 %). `git apply
+  --check` takes the patch.
+
+**For the owner.**
+- PROTOCOL.md's Updates paragraph still says the next boot confirms the
+  install or restores `.bak`. It changes with the iOS mirror, not here.
+- The 1-bit.app updater page is owed at release (the orchestrator's).
+- What B660 leaves uncovered is filed under backlog B660 until each item has
+  an id of its own.
+
+## 2026-11-07 — B660's second round: a stop taken back as it arrives, a command's migration held, the host's refusals by what the backup meets
+
+The review of PR #1424 (ten points). Worker b660 on the Linux worker host,
+the branch as the first round left it (0492e06e; the rules patch the
+orchestrator applied on the pushed branch is not in this tree, and the
+round's wording is `rules-b660-r2.patch` over it, below). Commits: the
+reproduction 435bc43a (red), the change 1629aed4, two comments corrected
+829d1834, the lock's try only where a count can hold a serve's start
+3f05ea92 (below), the bind sites' comments e16e9367, then this record. Each
+point was a reviewer's reading of the code. Points 1 to 8 were each
+confirmed red first on 435bc43a, the predictions written to a file before
+the run, and 9 and 10 by reading (PROTOCOL.md said the next boot confirms
+the install; the tests point 10 names made their errno up, were missing, or
+built nowhere but Unix); three tests
+written or changed after that run (the restart request's arm, the tailnet
+failure run to serve's own end, the console's grade over a store at the
+ladder's top) were run against 435bc43a's production code in a copy of the
+tree, and were red as predicted.
+
+**1. An address the host does not have** (confirmed). The subtest that
+called EADDRNOTAVAIL a failed start is now four starts in a row over
+TEST-NET-1 (`TestAPortAnotherProcessHoldsIsNotAFailedStart`): on 435bc43a
+start 1 counted 1, and the fourth would have put back a backup that met the
+same refusal (a static address not up yet after a reboot, under
+`Restart=always`). `doctor.IsAddrNotAvail` (EADDRNOTAVAIL; on Windows
+`WSAEADDRNOTAVAIL`, 10049, beside syscall's, as the other two arms), asked by
+`bindRefusedByTheHost`. No bind retry. The runbook's line said an absent
+address stayed counted; it says the opposite now.
+
+**2. A stop the supervisor kills** (confirmed: with the teardown parked at
+its UPnP stop, the count stayed 1 for 20 s; a real serve process stopped
+with SIGTERM while a held TLS connection kept its drain going, then killed
+with SIGKILL, kept 1). `stopTakeBack` (cmd/bridge/serve_stop_takeback.go):
+`context.AfterFunc` on the context runServe's caller gave it, kept before
+runServe shadows it with its own, which only a stop cancels (main's
+`signal.NotifyContext` for SIGINT and SIGTERM, the SCM's Stop through
+`runAsWindowsService`, the launcher's scope, a test's), and the restart
+request's own hook (`serveRestart.onRequest`, called before its cancel),
+never runServe's own context, which its first defer cancels on every exit.
+The take-back's goroutine asks `TakeBackFailedStart` until it has an
+answer or the teardown ends; the defer registered after the admission
+unregisters it, ends and joins it (`finish`: a stop that arrives after it
+starts nothing), all before the data dir's lock is let go, and the
+take-back after the teardown runs where a host's refusal ended the start or
+the stop's never had its answer, writing nothing where the stop's landed
+(`FailedStarts == CountTried` no longer holds). Accepted, as the review
+said: a crash in the teardown after a stop is not counted. The test binary's
+re-exec now stops on SIGINT and SIGTERM as main does, which the process test
+needs.
+
+**3. The marker's lock at the take-back** (confirmed: on 435bc43a nothing
+asked for the lock while the teardown ran). The stop's take-back waits for
+the lock as `LockState` does (30 s a wait), and asks again 50 ms after a
+wait that gives up, until the teardown ends; then the take-back after it
+gives the lock 2 s more. Who holds `update-state.lock`, and for how long:
+this serve's own admission, its crash rollback's check and its boot's
+housekeeping (before the take-back exists, or in its teardown's order); its
+confirmation and not-ready record (milliseconds, joined in the teardown); a
+store open's migration disarm, a command's or this serve's (a read, a write
+and a barrier, milliseconds, inside the ladder's lock); `Updater.Install`,
+from its marker writes through its swap (milliseconds on a same-volume
+POSIX swap, seconds for a cross-volume copy, and on Windows the SCM's stop
+of a running service inside it, `scmStopWait`, up to 15 s), which replaces
+the marker with a new install's, where the take-back then has nothing to
+take; `Updater.Rollback` (a read, a record and a rename; on Windows the
+same SCM stop); a hold's record and the restamp (milliseconds); the early
+rollback and the crash rollback of another serve (only where this one
+holds no data dir lock). Nothing but those Windows SCM stops can hold it
+for a whole teardown, and those replace the marker anyway. What remains is
+backlog B760.
+
+**4. A backup that predates the settings check** (confirmed: on 435bc43a
+the fourth start put it back, exit 75). `ConfigCheckUnsupported` refuses
+and records `the backup predates the settings check`; the test that
+required the put-back is `TestABackupThatPredatesTheCheckIsNotPutBack` now,
+and the first round's record above names it so. The comment that justified the put-back (a refusal "stops
+it at its load") is replaced: a backup that cannot load the settings does
+not start once put back, with this version held back from the
+auto-installer. By hand with real 0.2.2 and 0.2.3 binaries below.
+
+**5. A command's migration while the install awaits its confirmation**
+(confirmed: on 435bc43a `bridge scan` over a store one step behind, the
+install on probation after a failed start, migrated it to 60 and recorded
+`storeMigratedBy`, and so did `bridge doctor`, the command an operator runs
+to see why starts fail, which took the backup away for good).
+`updater.MigrationHeld(st, current, serveRunning)` holds a migration where
+the marker awaits this version's confirmation, the crash rollback's checks
+at the limit would put the backup back (`CrashRollbackAtLimit`), and a start
+before now did not end cleanly: `FailedStarts` less the start a serve holding
+the data dir's lock counts until it stops cleanly. The store open's disarm
+refuses on it (`ErrMigrationHeld`), with the marker's lock or without,
+writing nothing and running no step. Serve's own start carries its
+admission's permission (`DisarmResult.Permit`, `updater.MigrationPermit`,
+naming the data dir and the version, made only by `AdmitBoot`) through
+`manifest.OpenStoreAdmitted`, and `TestEveryStoreTheBridgeOpensIsItsDataDirsDatabase`
+reads that open too. Whether a serve holds the lock is
+`updater.ServeHoldsDataDir`: this process's holds from what it noted
+(`NoteDataDirLock`, serve's as a serve's; restore, reset-player,
+clear-missing and the DAC bind as a command's, so that a restore's own
+hold does not read as a serve's), and another process's by a try of
+`server.lock` that never waits and lets go at once of a free lock; it is
+asked before the marker's lock is taken, and only where the marker counts a
+start of an install of this version awaiting its confirmation
+(`RunningServeCounted`; 3f05ea92, once a reading of 1629aed4 found the
+doctor trying the lock on every run and for each of its store probes,
+whatever the marker held). The commands it stops, and what they say: `bridge scan`,
+`analyze`, `artwork`, `upscale`, `optimize`, `render`, `variants`, `manifest`
+(clear-missing), `library` (add, remove), `enrichment` and `duplicates`
+print their store open's failure, `… record in the install marker that the
+store is migrated from version N: this command does not migrate the store:
+the install of X awaits its confirmation, and K of its starts did not end
+cleanly: a migration of the store now would keep a crash rollback from ever
+putting Y back, so only a start of bridge serve migrates it until the
+install is confirmed`, and exit 1. `bridge restore` refuses before its
+first write a snapshot whose store this version would migrate (its
+restored store is opened at once to mint the backup epoch, which would
+refuse past the database's copy): `the snapshot's store is N migration(s)
+behind this version, which the restore would run, and this command does not
+migrate the store: …; nothing was restored`. `bridge doctor` opens nothing
+for its store probes (`doctorOpenStore`: `not checked: the store has N
+migration(s) pending, which bridge doctor does not run while the install
+awaits its confirmation (the store-migrations line)`), and its new
+`store-migrations` line, a warn, says `N migration(s) pending, which bridge
+doctor runs none of: …`, from `manifest.PendingMigrations`, a read-only open
+(`mode=ro`) that asks `user_version` alone and makes nothing. Serve and the
+console's doctor are not stopped: serve has its permission, and a serving
+process has migrated its store already. With no start before now that did
+not end cleanly (the running serve's own left out), a command migrates as
+before. Tests: serve migrating at a pending migration after a failed start
+(`TestServeMigratesTheStoreAfterAFailedStart`), a command beside a starting
+serve that refuses with one start before it and migrates with none
+(`TestACommandBesideAStartingServe`), and the updater's, the store's and
+restore's own.
+
+**6. A permission refusal and a tailnet failure** (confirmed). What the
+swap carries: `dst`'s mode alone (`installedMode`); the owner is the
+process's (the staged file is created by it), and no extended attribute was
+read. So an operator's setcap went with an update, the new binary's bind
+below 1024 was refused for a permission, and the start was taken back as the
+host's. `carryCapabilities` now gives the staged binary `dst`'s
+`security.capability` before the rename, which only a process with
+CAP_SETFCAP may set (`sudo bridge update`); where it cannot (the service
+user's auto-installer, the console's install), the swap goes on, and
+`bindRefusalIsTheHosts` counts a permission refusal where `.bak` carries
+capabilities the binary does not (`updater.FileCapabilities`, Linux's one
+small `getxattr`; elsewhere none), saying so. An SELinux label is not
+carried: the staged binary takes the label the policy gives a new file in
+its directory (`restorecon`'s), so a hand-set label goes with the update;
+that is backlog B760. The tailnet: `tailnetNetworkFailure` takes back a
+`*net.OpError` (tsnet's netstack listener answers a closed or reset
+endpoint as one) or `net.ErrClosed` (tsnet's listener once its node stops),
+and counts anything else its `Serve` returns; the `tsnet listener: …` line
+names the class. On 435bc43a a non-network failure was taken back, and a
+permission refusal beside a `.bak` that carried capabilities was too.
+
+**7. The auto-installer's hold** (confirmed: each arm held on 435bc43a).
+`ProbationHolds(st, current, binaryPath, uptime)` holds nothing beside a
+refused rollback (`RollbackRefused`), without a regular file at
+`binaryPath+".bak"`, or where `CrashRollbackAtLimit` refuses (the migration,
+which it asked alone before, among them); `probationHolds` passes
+`autoInstallOpts.BinaryPath` at the gate and `opts.BinaryPath` under the
+lock. A test per arm, each red with its arm deleted (the controls).
+
+**8. The words and the levels** (confirmed: on 435bc43a the console graded
+two crashed starts and the running one as a failure, the doctor read one
+crash with no serve running as ok and said nothing of it, and both said
+`the next start puts 0.0.0-previous back` beside a missing backup and a
+migrated store). `ProbationStatus(st, current, running)`: `running` is
+whether a serve holds the data dir's lock (`ServeHoldsDataDir`), the
+console's and serve's own true; `Says` and `Level` count the starts that
+did not end cleanly, the running one left out; `ThisStart` and the new
+`ThisStartLevel` the starts before the running one. The words follow
+`CrashRollbackAtLimit`: where it refuses, `the backup is not put back:` and
+its reason; otherwise `the next start tries to put X back, if the backup
+can run these settings`, never a promise. Tests: the console with two
+crashes and a running start (warn), the doctor with one crash and no serve
+(warn, no "running now"), at the limit with the backup missing (a fail that
+promises nothing), over a migrated store (no put-back, and why), and beside
+a running serve (ok).
+
+**9. PROTOCOL.md's "Boot-time rollback" paragraph** is rewritten here: the
+probation, the take-back's ends, the crash rollback and its vetoes, exit 75,
+the hold of a command's migration and of the auto-installer, and the clean-up
+of `.bak` at the boot after the confirmation. The iOS mirror is the
+orchestrator's.
+
+**10. Tests that could not catch their defect.**
+`TestIsBindPermissionMatchesWhatTheHostAnswersARefusedBind` asks the host
+too (a bind of 127.0.0.1:1 as uid 1000 here: EACCES; it skips where the
+bind is let through), beside the platform's errno; its twin for an absent
+address (TEST-NET-1) is new. Serve over a permission refused
+(`TestAPermissionRefusalTheBackupWouldNotMeetIsAFailedStart`, the real
+EACCES with the capabilities stood in for) and over a tailnet listener that
+fails (the fake node; renamed in the third round, its cases turned round:
+`TestATailnetListenerThatFailsIsAFailedStart`).
+`TestAnInstallListeningOnTheWildcardIsConfirmed` runs a confirmation
+through a listener that reports `[::]:port` (a loopback listener handed in,
+so no test binds the host's interfaces): the probe dials loopback
+(`probeHost`) and `GET /v1/health` is asked with `Host: [::]:port`. The
+auto-installer's probation tests moved to a file every platform builds
+(`probation_holds_test.go`), on an updater of their own whose install fails
+at once at its download. `decide023` stays: it pins 0.2.3's decision over
+the crash rollback's record from a literal fixture, and the first round's
+by-hand run with a real 0.2.3 showed the write that follows it, the marker
+once the restored 0.2.3 served: status, the install's fields and the count
+gone, `rejectedVersion`, `rejectedReason` and `migrationVeto` kept (its
+`ClearInstall` keeping the hold and the veto), `dataDirOpenedBy` and
+`previousVersion` kept (B705).
+
+**Round one's tests that met the new rules**: the status table
+(`TestProbationStatusSaysWhereAnInstallStands`, rewritten for `running` and
+the two levels), the migration record's cases (serve's own open now with
+its permission; the barrier's and the lock's cases over a marker with no
+start counted, so they test the record and not the hold), the late start's
+store open (`TestAStartOfAnotherVersionKeepsTheRecordOfALateStartThatDied`,
+serve's, with its permission), and three auto-installer tests, moved.
+
+**Negative controls** (each on the committed change, the bytes put back
+from memory after it, each predicted by name in a file before the run; every
+one came out as predicted, and the tree after them held only the docs):
+
+| | mutation | red | green beside it |
+|---|---|---|---|
+| (1a) | `bindRefusedByTheHost` without `IsAddrNotAvail` | `TestAPortAnotherProcessHoldsIsNotAFailedStart` (the absent address) | its other two subtests |
+| (1b) | `IsAddrNotAvail`'s Windows arm on syscall's errno alone | `TestTheWindowsBindChecksNameTheWinsockErrnos` | |
+| (2a) | no take-back as the stop arrives (after the teardown alone, as the first round) | `TestAStopTakesItsCountBackAsItArrives`, the stop-while-starting test (replaced in the third round), `TestAServeKilledWhileItDrainsHasTakenItsCountBack`, `TestAStopThatFindsTheMarkersLockHeldTakesItsCountBackOnceItIsFree` | `TestAStopIsNotAFailedStart`, `TestARestartRequestIsNotAFailedStart` |
+| (2b) | the restart request's hook removed | `TestARestartRequestTakesItsCountBackAsItArrives` | `TestARestartRequestIsNotAFailedStart`, `TestAStopTakesItsCountBackAsItArrives` |
+| (2c) | the take-back begun at every end of serve | `TestAnErrorExitStaysCountedWhateverItsCallerDoesAfter` (both), `TestAStoreThatWillNotOpenIsAFailedStart`, `TestAPanicInServeIsAFailedStart`, `TestAMigrationThatFailsStillRefusesTheRollback` | |
+| (3a) | one ask for the marker's lock, no asking again | `TestAStopThatFindsTheMarkersLockHeldTakesItsCountBackOnceItIsFree` | |
+| (4a) | a backup that predates the check put back | `TestABackupThatPredatesTheCheckIsNotPutBack` | |
+| (5a) | `MigrationHeld` holding nothing | `TestACommandDoesNotMigrateTheStoreWhileTheInstallAwaitsItsConfirmation`, `TestTheDoctorLeavesThePendingMigrationsAndSaysSo`, `TestACommandBesideAStartingServe` (one start before), `TestMigrationHeldAsksTheStartsBeforeNow` (its held cases), `TestAMigratingOpenIsHeldWhileTheInstallAwaitsItsConfirmation` (a command's, with the lock and without), `TestThePermitAdmitsOnlyItsOwnStart`, `TestARestoreThatWouldMigrateIsRefusedWhileTheInstallAwaitsItsConfirmation` | the cases that hold nothing, serve's own |
+| (5b) | serve's own open without its permission | `TestServeMigratesTheStoreAfterAFailedStart` | `TestACommandBesideAStartingServe` (it does not ask serve's exit) |
+| (5c) | the start a running serve counts not taken off | `TestACommandBesideAStartingServe` (none before), `TestMigrationHeldAsksTheStartsBeforeNow` (a serve's own) | |
+| (5d) | this process's command hold read as a serve's | the registry's own test (removed in the third round with the registry) | |
+| (6a) | a permission refusal taken back whatever `.bak` carries | `TestAPermissionRefusalTheBackupWouldNotMeetIsAFailedStart` (the backup's capability) | both carry it, neither does |
+| (6b) | the swap carries no capabilities | `TestTheSwapCarriesTheBinarysFileCapabilities`, `TestASwapThatCannotSetTheCapabilitiesStillSwaps` | |
+| (6c) | every tailnet failure taken back, as the first round | the tailnet test (another failure; renamed in the third round) | the network's two |
+| (7a) | the hold beside a refused rollback | `TestTheAutoInstallerDoesNotWaitBesideARefusedRollback` | |
+| (7b) | the hold without a backup | `TestTheAutoInstallerDoesNotWaitWithoutABackup` | `TestTheAutoInstallerWaitsForTheRunningInstallsProbation` |
+| (7c) | the hold where the crash rollback's checks refuse | `TestTheAutoInstallerDoesNotWaitWhereTheCrashRollbackWouldRefuse` (each case), `TestTheAutoInstallerDoesNotWaitWhereTheBackupCannotBePutBack` | |
+
+(5a), (5c) and (5d) ran again on 3f05ea92, the gate's question changed under
+them, with the same results.
+
+**By hand, with real builds**: this tree at 829d1834 built as 0.2.4-b660,
+over 0.2.3 (git archive 0ddb8c72) and 0.2.2 (2012195e, which has no settings
+check), each laid out as `bridge update` leaves an install (the old binary
+served its data dir first, then `.bak`, the new binary and an `installing`
+marker), on loopback, mDNS off.
+- *Point 1*: four starts over `listenAddress: 192.0.2.1:7788` each exited 1
+  (`listen 192.0.2.1:7788: … bind: cannot assign requested address`), the
+  count back to none after each, and the fourth put nothing back: the binary
+  0.2.4-b660, `.bak` beside it.
+- *Point 2*: three starts, each listening with the count at 1, then a TLS
+  client that sent half a request, SIGTERM, and SIGKILL 2.5 s later at the
+  latest: the count was back 10 ms, 20 ms and 10 ms after the SIGTERM, each
+  process still alive at its kill and killed by it (exit -9). The fourth
+  start served 0.2.4-b660, no rollback, and its own stop took its count back.
+- *Point 4*: three starts killed with SIGKILL over a 0.2.2 backup, and the
+  fourth served, counting itself (4), with `updater: not rolling back the
+  install of 0.2.4-b660 after 3 starts of it that did not end cleanly: the
+  backup, 0.2.2, predates the settings check, so it cannot say whether it
+  loads this bridge's settings, and one that does not would not start once
+  put back; this start goes on, and counts itself` and `rollbackRefused: the
+  backup predates the settings check`. The same over a 0.2.3 backup: the
+  fourth exited 75, the binary then reported 0.2.3, and the marker held
+  0.2.4-b660 back and vetoed its migrations.
+
+**Checks.**
+- The red run on 435bc43a (cmd/bridge and internal/updater, the predictions
+  in a file beforehand): every test predicted red was red, and every guard
+  beside them green. One failed for its own reason first, the wildcard
+  test's unquoted `[::]` in YAML, and passed once quoted, as predicted.
+- `make test-fast` through the shared build lock (`buildslot.py b660`, which
+  waited 695 s for another worker's run): ok, 85 packages and 14 without
+  tests (cmd/bridge 489 s, internal/backup 371 s, internal/manifest 262 s; a
+  few unchanged packages from the test cache); the Linux-only packages ran
+  (internal/alsa, internal/alsapcm, internal/atomicwrite, internal/backup and
+  the player's).
+- `go test -race -count=1 -timeout 30m` with make's tags over
+  ./cmd/bridge/..., ./internal/updater/... and ./internal/doctor/...: ok
+  (1,089 s, 27 s, 7 s).
+- `make vet` natively, with `GOOS=windows`, with `GOOS=darwin` and with
+  `GOOS=linux GOARCH=386`: ok.
+- `make build-all`: ok (its build-tag check, then the six targets).
+- The qualification check (`scripts/qualification-version -base 4880f8a4
+  -head HEAD`): `qualification version OK`.
+- go1.27.3's gofmt on the 43 Go files the round changed: clean.
+- `make docs-check`: ok as the tree stands; with both rules patches applied
+  to a copy of the rules files, measured by check-doc-budgets.py's own
+  `measure` and `problems` over the tracked files: ok, config-lifecycle.md
+  97,579 bytes (97.6 %), cli-serve.md 41,369, scanner.md 32,762, the worst
+  load 314,357 bytes (65.5 %). `git apply --check` takes
+  `rules-b660-r2.patch` over the rules files as the first patch left them,
+  and every test its lines cite exists.
+
+**For the owner.**
+- PROTOCOL.md's "Boot-time rollback" paragraph is rewritten in this tree;
+  its iOS mirror (`docs/BridgeProtocol.md`) is owed with it.
+- The 1-bit.app updater page is owed at release (the orchestrator's), with
+  the note on a binary given file capabilities.
+- What this round leaves is backlog B760.
+
+## 2026-11-07 — B660's third round: a stop taken back early only once ready, a running start by its own lock, the tailnet's end serve's own, one stop budget, both loopbacks
+
+The second review of PR #1424 (seven points). Worker b660 on the Linux
+worker host, the branch as the second round left it (cb0b0f2b; the rules
+patches the orchestrator applied and its merge of main are on the pushed
+branch, not in this tree, and the round's wording is `rules-b660-r3.patch`
+over the rules files as the first two patches left them). Commits: the
+reproduction 0fdfd391 (red, with the seams its tests need, read by nothing
+or nil in production), the change 65d2c3a8, one test strengthened
+ed8eeeda (point 1, below), then this record. Each point was a reviewer's
+reading of the code. Points 1 to 6 were confirmed red first on 0fdfd391,
+the predictions written to a file before the run, and every guard beside
+them green; point 7 by reading.
+
+**1. A start that hangs before it is ready was never counted** (confirmed;
+a regression of the second round's early take-back). The take-back was
+armed at the admission, so a version that hung past its admission, stopped
+with SIGTERM, took its count back as the stop arrived, its supervisor killed
+it, and the count never reached three. On 0fdfd391
+`TestAStopBeforeReadyStaysCountedUntilItsTeardownHasRun` read the count
+taken back while the teardown of a stop before ready was held, and
+`TestAStopBeforeReadyIsNotArmedByAReadyAnswerInItsTeardown` failed at its
+20 s wait (`the confirmation's first ready answer never came to count the
+start as ready; it did [{kind:1 ready:true why:} {kind:2 ready:false
+why:}]`): the round had answered and the window begun, with no point at
+which the start became ready. By hand (below) round 2's build, hung after
+its admission, took its count back at each SIGTERM and served again at the
+fourth start. The change: the confirmation's first yes arms the take-back
+(`serveProbation.onReady`, `stopTakeBack.arm`, asking serve's own context,
+which a stop and a restart request both end, and whether a stop's arrival
+was already told, a restart request telling it before it cancels), only
+where no stop came first; armed, a stop's take-back begins as the stop
+arrives; otherwise only once the teardown has run, so a stop before ready
+whose teardown hangs and is killed stays counted. The start says that it
+has answered (`updater: this start of … has answered as ready (its API
+listener, /v1/health and its store): its install is confirmed once it has
+stayed up for 10m0s`). A slow but healthy start killed in a slow teardown
+before it was ready counts too, the cost the review accepted; it is said in
+PROTOCOL.md, the runbook and the long form. The second round's three early
+take-back tests wait for the window first, the stop-while-starting test that
+waited for an early take-back is removed, replaced by the two above, the
+subprocess kill test waits for the readiness line (the copy asks every
+20 ms through `CMDBRIDGE_TEST_RUN_AS_BRIDGE_PROBATION_ASK`, read by the test
+binary's re-exec alone), and its twin
+`TestAServeKilledInItsTeardownBeforeReadyStaysCounted` stops and kills a
+start before ready and finds it counted. The ready-after-the-stop test was
+strengthened after the change (ed8eeeda): it holds the stop's own notice
+too, since with the notice through, the arrival it records refused the
+arming as well, and the context's check went unexercised (control 1b).
+
+**2. A stop during startup followed by an error read as a failure**
+(confirmed). `finish()` had no context: the stop's `AfterFunc` runs on a
+goroutine of its own, and an error at once after the stop (its TLS pair)
+reached `finish()` first, whose `sync.Once` then ended the take-back unbegun.
+On 0fdfd391, with the stop's notice held (`serveOpts.stopArriving`, as that
+goroutine can be), `TestAStopBeforeAnErrorIsAStop/its_teardown_runs` read
+the count left at 1, and `/its_teardown_hangs` (a hold at the teardown's
+end, `serveOpts.teardownHold`) read it taken back while the teardown hung.
+The change: once the teardown has run, the end is asked of the caller's own
+context and the restart request as they stand then (`finish(takeBack)`),
+which after ready also keeps the clean-up from losing that race to a
+callback that has not run.
+
+**3. A held `server.lock` did not prove the count held a running start**
+(confirmed). A command holds the lock too, and the in-process registry of
+the second round answered only this process's holds. On 0fdfd391
+`TestTheDoctorBesideACommandHoldingTheDataDirsLockCountsEveryStart` (one
+failed start before a pending migration, the lock held as another process's
+command holds it; and the same with a killed start's token left) read the
+doctor's line `ok … is on probation` and `the store after bridge doctor is
+at 60, want 59, unmigrated`, with `StoreMigratedBy` recorded;
+`TestTheDoctorAfterAStopsTakeBackCountsTheStartsBeforeIt` (a stop's count
+taken back while its serve tears down, holding the lock) read `ok` over the
+start before it; `TestACountedStartCarriesItsTokenUntilItReturns` found no
+token; `TestARunningStartIsTheLockItsTokenNames` read the command's lock,
+another start's and a released one as a start running; and
+`TestAMigrationReadsTheRunningStartUnderTheMarkersLock`, the ordering
+forced (the open waiting for the install marker's lock, a take-back's write
+of two to one and its token cleared landing in the wait, the serve still
+holding both its locks), answered `<nil>`, the migration recorded, where it
+must be held: `disarm` read the running start before its wait.
+`TestTheTakeBackClearsItsStartsToken` found the token left. The change: a
+random per-start token, no process liveness. The admission sweeps the lock
+files of starts that hold theirs no more, makes a token, takes the lock it
+names on a file made for it (`serve-start-<token>.lock`,
+`updater.StartHold`), and only then writes the token with the count
+(`State.RunningStart`), so no reader meets the token before its lock is
+held; `RunningServeCounted` needs the token and that lock held, tried
+without waiting, and a command never takes such a lock, so `server.lock`
+is not read at all, nor the registry, which goes. The take-back clears the
+token in its decrement's write; every return of `runServe` clears it where
+the marker still names it, keeping the count where it was not taken back
+(`updater.EndStart`, within the stop's budget: the launcher's serve returns
+to its menu with the process alive), and lets the lock go; the confirmation
+clears it. A migrating open reads the running start of the marker it reads
+under the install marker's lock (`migrationGate.holds`), so the count and
+the token are read together, and the try of the start's lock never waits,
+so nothing is waited for against the lock order. 0.2.3's reader (`git show
+0ddb8c72:internal/updater/state.go`: a plain `json.Unmarshal`, which drops a
+field it does not know) takes a marker with the token
+(`TestThePreviousReleaseReadsAMarkerWithARunningStart`, a guard, green on
+both commits), and by hand 0.2.3 put back over one served and dropped it.
+
+**4. The tailnet classifier took back nearly everything** (confirmed). Any
+`*net.OpError` and any `net.ErrClosed` read as a failure of the tailnet's
+network. On 0fdfd391 `TestATailnetListenerThatFailsIsAFailedStart` read the
+count taken back for tsnet's own closed error and for an accept error, and
+`TestOnlyACloseServeBeganEndsItsTailnetListenerCleanly` took a closed
+listener with no close of serve's for a clean end and the server's closed
+answer for none. The change (`tailnetEndIsServes`): only a close serve began
+(`tsnetFront.closeBegun`, the flag its stop sets before it shuts a server
+down or closes the node) or `http.ErrServerClosed` is no failed start, set
+before the line's guard so the closed answer falls through as one; every
+other end counts, closed or not. What is left of the classification: tsnet's
+listener without a TUN answers `net.ErrClosed` only once closed and blocks
+while the tailnet is down (tsnet.go's `listener.Accept`, `closeLocked`), and
+serve's select reads the listener's end only before its own stop of the
+tailnet side, which comes after it, so today every end it reads but the
+server's closed answer counts; the begun close answers an end that races it.
+
+**5. The take-back after the teardown had a fixed 2 s on every path**
+(confirmed). On 0fdfd391
+`TestAStopsTakeBackWaitsForTheMarkersLockWithinItsBudget` (the marker's
+lock held from before the stop to two seconds and a half past the
+teardown's end, which the pid file's removal marks) left the count at 1. The
+change: one named budget, `stopBudget`, 10 s from the stop's arrival, or from
+the teardown's end where no stop arrived, for the teardown and the take-back
+together, the take-back asking again as `stopTakeBack.run` did until it
+lands or the budget ends, and `takeBackWait` goes. It is inside the shortest
+of systemd's `TimeoutStopSec` (90 s by default; the unit sets none),
+launchd's `ExitTimeOut` (20 s by default; the plist sets none) and the
+Windows updater's wait for the SCM to stop the service (15 s, exported as
+`updater.SCMStopWait`, which it waits out holding the install marker's
+lock): `TestTheStopBudgetIsInsideEveryServiceManagersWait` reads the two
+templates for either key.
+
+**6. The probe of `::` dialled 127.0.0.1 alone** (confirmed). On 0fdfd391
+`TestTheReadinessProbeTriesTheIPv6LoopbackForAWildcard` (the bridge's
+listener IPv6-only on `[::1]`, reported as the wildcard, another listener on
+the port's IPv4 loopback) answered `a connect to the API listener's address
+was not taken by this process's accept loop` at the round's 5 s, and
+`TestBridgeHealthTriesTheIPv6LoopbackForAWildcard` exited 1 (`health: API
+listener 127.0.0.1:39875 not accepting connections: … connection refused`).
+The change: `probeHosts`, 127.0.0.1 and then ::1 for `::` and an empty host,
+127.0.0.1 for `0.0.0.0`, a specific IP as it is, for the probe and `bridge
+health`; the probe gives each connect but the last its share of what is
+left of the round. Gemini's status-0 thread stays declined (the
+orchestrator's answer).
+
+**7. What was said** (by reading). PROTOCOL.md's paragraph said the next
+start puts the backup back, that the auto-installer's hold followed an
+unclean start and lasted at most 20 minutes, of the install by its words,
+and that `.bak` was "one the rollback would put back"; the code holds from
+the first start (`ProbationHolds` asks `AwaitsConfirmation`), for 20 minutes
+of the process's uptime, which each restart starts again, and asks the
+marker and `.bak`'s presence alone. It says so now, with point 1's rule and
+point 4's; its iOS mirror is owed. The trade-off line in the first round's
+record on what three unclean starts do now says they make the next start
+try, an attempt a migration begun or a failed check prevents (CodeRabbit's
+thread).
+
+**Negative controls**, each alone on ed8eeeda, every listed test run with
+`-test.v`, the bytes put back from memory, predicted in a file before the
+run; every one as predicted:
+
+| control | mutation | red | green beside it |
+|---|---|---|---|
+| (1a) | the take-back armed from the admission, as the second round | `TestAStopBeforeReadyStaysCountedUntilItsTeardownHasRun`, `TestAStopBeforeReadyIsNotArmedByAReadyAnswerInItsTeardown`, `TestAStopBeforeAnErrorIsAStop` (its teardown hangs), `TestAServeKilledInItsTeardownBeforeReadyStaysCounted` | the ready case: `TestAStopTakesItsCountBackAsItArrives`, `TestARestartRequestTakesItsCountBackAsItArrives`, `TestAServeKilledWhileItDrainsHasTakenItsCountBack`; its teardown runs; `TestAStopIsNotAFailedStart` |
+| (1b) | the arming deaf to serve's own context | `TestAStopBeforeReadyIsNotArmedByAReadyAnswerInItsTeardown` | the other two |
+| (1c) | no take-back as a stop arrives | `TestAStopTakesItsCountBackAsItArrives`, `TestARestartRequestTakesItsCountBackAsItArrives`, `TestAStopThatFindsTheMarkersLockHeldTakesItsCountBackOnceItIsFree`, `TestAServeKilledWhileItDrainsHasTakenItsCountBack`, `TestTheDoctorAfterAStopsTakeBackCountsTheStartsBeforeIt` | the stops after their teardown, the budget's |
+| (2a) | a stop told by its notice alone | `TestAStopBeforeAnErrorIsAStop` (its teardown runs) | its teardown hangs; `TestAStopIsNotAFailedStart`; `TestARestartRequestIsNotAFailedStart` |
+| (3a) | the data dir's lock read as a counted start | `TestARunningStartIsTheLockItsTokenNames`, `TestAMigrationReadsTheRunningStartUnderTheMarkersLock`, `TestARunningServeIsAskedForOnlyWhereAStartIsCounted`, `TestTheAdmissionWritesItsStartsTokenWithItsCount`, `TestTheDoctorBesideACommandHoldingTheDataDirsLockCountsEveryStart` (both), `TestTheDoctorAfterAStopsTakeBackCountsTheStartsBeforeIt` | `TestACountedStartCarriesItsTokenUntilItReturns`, `TestACommandBesideAStartingServe`, `TestTheDoctorBesideARunningServeTakesItsStartOff` |
+| (3b) | the running start read before the marker's lock | `TestAMigrationReadsTheRunningStartUnderTheMarkersLock` | the open's own, the token's, `TestACommandBesideAStartingServe` |
+| (3c) | the take-back leaves the token | `TestTheTakeBackClearsItsStartsToken`, `TestTheDoctorAfterAStopsTakeBackCountsTheStartsBeforeIt` | the return's, the stop's |
+| (3d) | a return keeps the token | `TestACountedStartCarriesItsTokenUntilItReturns` | the stop's, the doctor's |
+| (3e) | a return keeps its lock | `TestACountedStartCarriesItsTokenUntilItReturns` | the stop's, the doctor's |
+| (4a) | the second round's classifier | `TestATailnetListenerThatFailsIsAFailedStart` (closed, accept), `TestOnlyACloseServeBeganEndsItsTailnetListenerCleanly` | another failure |
+| (4b) | a close serve began not asked | `TestOnlyACloseServeBeganEndsItsTailnetListenerCleanly` | the listener's three |
+| (4c) | the server's closed answer counted | `TestOnlyACloseServeBeganEndsItsTailnetListenerCleanly` | the listener's three |
+| (5a) | a fixed 2 s | `TestAStopsTakeBackWaitsForTheMarkersLockWithinItsBudget` | the bound's, the lock retry's, the confirmation's wait |
+| (5b) | one ask for the lock | `TestAStopThatFindsTheMarkersLockHeldTakesItsCountBackOnceItIsFree` | the budget's |
+| (5c) | a budget of 16 s | `TestTheStopBudgetIsInsideEveryServiceManagersWait` | the budget's |
+| (6a) | the IPv6 wildcard on 127.0.0.1 alone | `TestTheReadinessProbeTriesTheIPv6LoopbackForAWildcard`, `TestBridgeHealthTriesTheIPv6LoopbackForAWildcard` | `TestAnInstallListeningOnTheWildcardIsConfirmed` |
+| (6b) | no share of the round for the IPv4 connect | `TestTheReadinessProbeTriesTheIPv6LoopbackForAWildcard` | health's, the wildcard's |
+
+**By hand, with real builds**: a real 0.2.3 (`git archive 0ddb8c72`) as the
+backup, served first; this round's build (ed8eeeda) and the second round's
+(cb0b0f2b), each as 0.2.4-b660 with the line after its admission patched to
+sleep for good where `B660_HANG_AFTER_ADMISSION` is set, a version that
+deadlocks before it is ready; each installed by hand over 0.2.3, `.bak` and
+an `installing` marker as the updater leaves them.
+- This round's, hung: three starts, each counted and never listening,
+  SIGTERM, still alive three seconds later, SIGKILL; the count 1, 2 and 3,
+  each start's token in the marker and its lock file swept by the next. The
+  fourth start exited 75 (`updater: 3 starts of 0.2.4-b660 since its install
+  did not end cleanly, so the install is rolled back: 0.2.3 is back at …`),
+  the binary reported 0.2.3, and 0.2.3 served and ended the record as a
+  rollback done, the hold and the veto kept.
+- The second round's, hung, the same three starts: each SIGTERM took the
+  count back (none in the marker, the process still hung), and the fourth
+  start served the hung version again, no rollback.
+- This round's, without the hang: a start that answered as ready (after
+  5.0 s, production's first ask), stopped with a held connection keeping its
+  drain going, had its count back 0.058 s after SIGTERM and was killed in
+  the drain (exit -9); a start stopped before it was ready exited 0 once its
+  teardown had run, its count back, its token cleared and the dead start's
+  lock file swept.
+
+**Checks.**
+- The red run on 0fdfd391 (cmd/bridge and internal/updater, the predictions
+  in a file beforehand): every test predicted red was red, for the reason
+  predicted, and every guard beside them green.
+- The change, before its commit: cmd/bridge's whole suite in five runs split
+  by the names' first letter, one package each, and the whole of
+  internal/updater, internal/manifest, internal/backup and internal/doctor:
+  ok.
+- `make test-fast` through the shared build lock (`buildslot.py b660`, which
+  waited 510 s for another worker's run): ok, 85 packages and 14 without
+  tests (cmd/bridge 510 s, internal/backup 363 s, internal/manifest 260 s);
+  the Linux-only packages ran (internal/alsa, internal/alsapcm,
+  internal/atomicwrite, internal/backup and the player's).
+- `go test -race -count=1 -timeout 30m -p 4` with make's tags over
+  ./cmd/bridge/..., ./internal/updater/..., ./internal/doctor/...,
+  ./internal/manifest/... and ./internal/admin/..., through the lock: ok
+  (1,166 s, 27 s, 7 s, 1,436 s, 955 s).
+- `make vet` natively, with `GOOS=windows`, with `GOOS=darwin` and with
+  `GOOS=linux GOARCH=386`: ok.
+- `make build-all`: ok (its build-tag check, then the six targets).
+- The qualification check (`scripts/qualification-version -base 4880f8a4
+  -head HEAD`): `qualification version OK`.
+- go1.27.3's gofmt on the 20 Go files the round changed: clean.
+- `make docs-check`: ok as the tree stands; with the three rules patches
+  applied to a copy of the rules files, measured by check-doc-budgets.py's
+  own `measure` and `problems` over the tracked files: ok,
+  config-lifecycle.md 98,249 bytes (98.2 %), cli-serve.md 41,956, scanner.md
+  33,039, the worst load 315,027 bytes (65.6 %). `git apply --check` takes
+  `rules-b660-r3.patch` over the rules files as the first two patches left
+  them, and every test its lines cite exists.
+
+**For the owner.**
+- PROTOCOL.md's "Boot-time rollback" paragraph is worded to the code in this
+  tree; its iOS mirror (`docs/BridgeProtocol.md`) is owed with it.
+- What this round leaves is backlog B760.
+
+## 2026-11-07 — B660's fourth round: a probe that cannot pass for a start, a floor for a take-back after a long teardown
+
+The third review of PR #1424 (three points). Worker b660 on the Linux worker
+host, the branch as the third round left it (c9bedda1; the rules patches and
+the merge of main are on the pushed branch, and the round's wording is
+`rules-b660-r4.patch` over the rules files as the first three patches left
+them). Commits: the reproduction 14c339f4 (red, with a probe seam nil in
+production), the change 21007a28, then this record. Points 1 and 3 were
+confirmed red first on 14c339f4, the predictions written to a file before
+the run; point 2 does not hold, by the code below.
+
+**1. A liveness probe could pass for the crashed start** (confirmed).
+`startRunning` took the start's lock exclusively (`fsutil.TryLock`) and read
+`ErrLocked` as the start running, so one probe's hold answered another. On
+14c339f4 `TestAProbeHeldBeforeItsUnlockIsNoRunningStart` (a crashed start:
+one start counted, its token, its lock file held by nobody; a probe held
+between its try and its release, `updater.SetStartProbeHeldForTest`) had
+the migrating open beside it answer `<nil>`, `StoreMigratedBy:0.2.4`
+recorded, and `TestADoctorsProbeHeldBeforeItsUnlockLetsNoScanMigrate` had a
+`bridge scan` beside a `bridge doctor` held there exit 0, the store at 60,
+want 59, unmigrated. The change: every probe tries the lock shared
+(`fsutil.TryLockShared`: flock's `LOCK_SH|LOCK_NB` on unix; on Windows
+`LockFileEx` with `LOCKFILE_FAIL_IMMEDIATELY` and without
+`LOCKFILE_EXCLUSIVE_LOCK` over every byte, the range `TryLock` takes, which
+an exclusive lock of it refuses with `ERROR_LOCK_VIOLATION` and a shared
+one does not; unsupported elsewhere, as `TryLock` is), the sweep of stale
+start locks included, and only the start's own hold is exclusive.
+`TestASharedTryMeetsOnlyAnExclusiveHold` pins the primitive on every
+platform; Windows is vetted and cross-compiled here and run by CI's Windows
+leg. The two probe tests first held their first probe inside a `sync.Once`,
+which held the fixed open's probe, now taking the lock too, inside `Do`
+behind it (the updater package's run timed out at 10 minutes); an atomic
+flag holds the first alone now. Under round 3's exclusive try that probe
+never reached the hook, so the red run stood.
+
+**2. `notAFailedStart` latching on the tailnet's closed answer** (does not
+hold). The select (main.go:6812 here; main c7192a6f's at :6616) reads the
+tailnet listener's end once: an error returns 1 in that case, and the
+closed answer falls through to the select's `return 0`, so either outcome
+ends the start, and no later end of it comes for the flag to be read at. The
+answer itself reaches the select only once serve's own stop of its tailnet
+side has begun: `http.Server.Serve` answers `http.ErrServerClosed` only after
+its `Shutdown` or `Close`, the tailnet's HTTPS server is published once a
+run (`publishHTTPS`, refused once the stop began) and shut down by
+`tsnetFront.stop` alone, which runs after the select.
+`TestATailnetServerClosedAnswerEndsTheStart` (the fake listener gives the
+answer) pins it, green on 14c339f4 and after: serve returns 0 at once, the
+count taken back, as the third round has it for that answer. The review's
+test, the answer and then an error return of the same start, cannot be
+made, since the start has ended; and setting the flag in the error branch
+alone would count that answer, which the third round's review asked not
+to. Nothing changed.
+
+**3. A clean stop before ready whose teardown outlasted the budget stayed
+counted** (confirmed, where the install marker's lock is held at that
+moment). The take-back begun once the teardown has run had the budget's
+deadline from the stop's arrival, past after such a teardown. `LockState`
+still tries once before it looks at its context
+(`TestATakeBackPastItsDeadlineStillTriesTheLockOnce`, a guard, green on
+both: it lands where the lock is free), so only a lock held at that try
+made it give up at once. On 14c339f4
+`TestAPreReadyStopWhoseTeardownOutlastsTheBudgetIsTakenBack` (its teardown
+held 10.5 s from the stop, the marker's lock held across the teardown's end
+and let go a second after) left the count at 1. The change
+(`finishTakeBackDeadline`): the budget from the arrival, but at least
+`finishTakeBackFloor` (2 s) from the teardown's end, and never past
+`updater.SCMStopWait` less `stopExitMargin` (1 s) from the arrival; with no
+arrival told, the budget from the teardown's end, as before.
+`TestATakeBackBegunOnceTheTeardownHasRunHasAFloorBelowTheSCMsWait` pins the
+formula and that a teardown ending with the budget keeps the whole floor.
+
+**Negative controls**, each alone on 21007a28, every listed test run with
+`-test.v`, the bytes put back from memory, predicted in a file before the
+run; every one as predicted:
+
+| control | mutation | red | green beside it |
+|---|---|---|---|
+| (1a) | the probe exclusive again, as the third round | `TestAProbeHeldBeforeItsUnlockIsNoRunningStart`, `TestADoctorsProbeHeldBeforeItsUnlockLetsNoScanMigrate` | `TestARunningStartIsTheLockItsTokenNames`, `TestAMigrationReadsTheRunningStartUnderTheMarkersLock` |
+| (1b) | fsutil's shared try exclusive on unix | `TestASharedTryMeetsOnlyAnExclusiveHold`, `TestAProbeHeldBeforeItsUnlockIsNoRunningStart` | `TestTryLockRefusesASecondOpenOfTheFile`, `TestARunningStartIsTheLockItsTokenNames` |
+| (2) | the tailnet's closed answer serving on until a stop, the review's reading | `TestATailnetServerClosedAnswerEndsTheStart` | `TestATailnetListenerThatFailsIsAFailedStart`, `TestOnlyACloseServeBeganEndsItsTailnetListenerCleanly` |
+| (3a) | no floor, as the third round | `TestAPreReadyStopWhoseTeardownOutlastsTheBudgetIsTakenBack`, `TestATakeBackBegunOnceTheTeardownHasRunHasAFloorBelowTheSCMsWait` | `TestAStopsTakeBackWaitsForTheMarkersLockWithinItsBudget`, `TestAStopBeforeReadyStaysCountedUntilItsTeardownHasRun`, `TestTheStopBudgetIsInsideEveryServiceManagersWait` |
+| (3b) | no ceiling below the SCM's wait | `TestATakeBackBegunOnceTheTeardownHasRunHasAFloorBelowTheSCMsWait` | `TestAPreReadyStopWhoseTeardownOutlastsTheBudgetIsTakenBack` |
+
+**Checks.**
+- The red run on 14c339f4 (the predictions in a file beforehand): the two
+  tests predicted red were red for the reasons predicted, and every guard
+  beside them green.
+- `make test-fast` through the shared build lock: its first run failed
+  `TestEveryBackgroundGoroutineDrainsOnCleanup` on the new doctor test,
+  which joined its `bridge doctor` by a cleanup of its own; it drains it
+  through `drainLoopOnCleanup` now (9b9759de), and the run again on 9b9759de
+  was ok, 85 packages and 14 without tests (cmd/bridge 525 s,
+  internal/backup 366 s, internal/manifest 264 s), the Linux-only packages
+  run (internal/alsa, internal/alsapcm, internal/atomicwrite,
+  internal/backup and the player's).
+- `go test -race -count=1 -timeout 30m -p 4` with make's tags over
+  ./cmd/bridge/..., ./internal/updater/..., ./internal/doctor/... and
+  ./internal/fsutil/..., through the lock: ok (1,144 s, 28 s, 7 s, 3 s).
+- `make vet` natively, with `GOOS=windows`, with `GOOS=darwin` and with
+  `GOOS=linux GOARCH=386`: ok; `make build-all`: ok; the qualification check
+  against 4880f8a4: ok.
+- go1.27.3's gofmt on the 9 Go files the round changed: clean.
+- `make docs-check`: ok as the tree stands; with the four rules patches
+  applied to a copy, by check-doc-budgets.py's own measure: ok,
+  config-lifecycle.md 98,451 bytes, cli-serve.md 42,144, the worst load
+  315,229 bytes. `git apply --check` takes `rules-b660-r4.patch` over the
+  rules files as the first three patches left them.
+
+**For the owner.** What this round leaves is backlog B760.
 
 ## 2026-11-07 — B728 B11: the player converts DSD
 

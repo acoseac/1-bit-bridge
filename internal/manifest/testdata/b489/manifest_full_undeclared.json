@@ -1,0 +1,47 @@
+{
+  "enrichmentProgress": {
+    "tracksEnriched": 0,
+    "tracksTotal": 1
+  },
+  "folders": [
+    {
+      "mtime": "2026-01-02T03:04:05Z",
+      "path": "."
+    },
+    {
+      "mtime": "2026-01-02T03:04:05Z",
+      "path": "Glasswing"
+    },
+    {
+      "mtime": "2026-01-02T03:04:05Z",
+      "path": "Glasswing/Monkey"
+    },
+    {
+      "mtime": "2026-01-02T03:04:05Z",
+      "path": "Glasswing/Packed"
+    },
+    {
+      "mtime": "2026-01-02T03:04:05Z",
+      "path": "Glasswing/Plain"
+    }
+  ],
+  "tracks": [
+    {
+      "album": "Plain",
+      "artist": "Glasswing",
+      "bitsPerSample": 16,
+      "codec": "FLAC",
+      "duration": 5,
+      "enriched": false,
+      "isDSD": false,
+      "mtime": "2026-01-02T03:04:05Z",
+      "path": "Glasswing/Plain/01 Plain.flac",
+      "sampleFormat": "integer",
+      "sampleRate": 44100,
+      "size": 146,
+      "title": "Plain",
+      "trackNumber": 1
+    }
+  ],
+  "version": 1
+}

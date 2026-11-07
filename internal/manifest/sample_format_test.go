@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/formatgate"
 )
 
 // Backlog B513: the manifest says whether a PCM track's samples are integers
@@ -408,21 +410,21 @@ func TestSampleFormatRidesItsColumnAndNeverTagsJSON(t *testing.T) {
 		}
 		check("GetTrack", path, got.SampleFormat)
 	}
-	listed, err := s.ListServedTracks(ctx, nil)
+	listed, err := s.ListServedTracks(ctx, nil, formatgate.All())
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, tr := range listed {
 		check("ListServedTracks", tr.Path, tr.SampleFormat)
 	}
-	err = s.StreamServedTracks(ctx, nil, func(tr *Track) error {
+	err = s.StreamServedTracks(ctx, nil, formatgate.All(), func(tr *Track) error {
 		check("StreamServedTracks", tr.Path, tr.SampleFormat)
 		return nil
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	page, err := s.ListServedTracksPage(ctx, "", 10)
+	page, err := s.ListServedTracksPage(ctx, "", 10, formatgate.All())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -460,7 +462,7 @@ func TestADSDRowNeverCarriesASampleFormat(t *testing.T) {
 	if got.SampleFormat != "" {
 		t.Errorf("GetTrack serves %q on a DSD row", got.SampleFormat)
 	}
-	listed, err := s.ListServedTracks(ctx, nil)
+	listed, err := s.ListServedTracks(ctx, nil, formatgate.All())
 	if err != nil || len(listed) != 1 {
 		t.Fatalf("ListServedTracks: %d rows, %v", len(listed), err)
 	}
@@ -485,7 +487,7 @@ func TestADSDRowNeverCarriesASampleFormat(t *testing.T) {
 // keys as the wire carries them, by path.
 func pagedTracksByPath(t *testing.T, store *Store, root string) map[string]map[string]any {
 	t.Helper()
-	page, err := BuildManifestPage(context.Background(), store, []string{root}, "", 100)
+	page, err := BuildManifestPage(context.Background(), store, []string{root}, "", 100, formatgate.Set{})
 	if err != nil {
 		t.Fatalf("BuildManifestPage: %v", err)
 	}
@@ -584,7 +586,7 @@ func TestAVariantCarriesTheKindItsFormatIs(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	listed, err := s.ListServedTracks(ctx, nil)
+	listed, err := s.ListServedTracks(ctx, nil, formatgate.All())
 	if err != nil || len(listed) != 1 {
 		t.Fatalf("ListServedTracks: %d rows, %v", len(listed), err)
 	}

@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/formatgate"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
@@ -20,9 +21,10 @@ import (
 // (backlog B431, paged since B442): the `.m3u` / `.m3u8` files the scanner
 // read from the library, a page at a time, with their entries resolved
 // against the tracks it holds now. *manifest.Store satisfies it. Read-only:
-// the scanner writes the index, and nothing writes a playlist file.
+// the scanner writes the index, and nothing writes a playlist file. A page is
+// the view the request declared (formats.go), whose key its version holds.
 type PlaylistFileStore interface {
-	PlaylistFilesPage(ctx context.Context, version, after string) (manifest.PlaylistFilePage, error)
+	PlaylistFilesPage(ctx context.Context, version, after string, view formatgate.Set) (manifest.PlaylistFilePage, error)
 }
 
 // WithPlaylistFileStore wires the playlist-file feed and advertises the
@@ -138,12 +140,19 @@ func nonNilStrings(s []string) []string {
 // `after` this bridge did not make is a 400 `bad_request`, a store failure
 // is a 500 `internal` logged at Error, and a client that went away mid-read
 // is the Info line and 499 writeErrorLog records (B364).
+//
+// The pages are the view the request declared (formats.go): a line naming a
+// track of a format the view does not declare is unresolved there. The
+// version names the view, so a cursor of one view is a 410 in another, and
+// the response varies on the header.
 func (s *Server) playlistFiles(w http.ResponseWriter, r *http.Request) {
 	if s.playlistFileStore == nil {
 		writeError(w, http.StatusNotFound, "playlist_files_not_supported",
 			"this bridge does not index playlist files")
 		return
 	}
+	view := requestFormats(r)
+	varyOnFormats(w.Header())
 	var want, after string
 	if cursor := r.URL.Query().Get("after"); cursor != "" {
 		var err error
@@ -153,7 +162,7 @@ func (s *Server) playlistFiles(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	page, err := s.playlistFileStore.PlaylistFilesPage(r.Context(), want, after)
+	page, err := s.playlistFileStore.PlaylistFilesPage(r.Context(), want, after, view)
 	if errors.Is(err, manifest.ErrPlaylistFilesChanged) {
 		writeError(w, http.StatusGone, "playlist_files_stale",
 			"the playlist files changed since this cursor; start again from the first page")

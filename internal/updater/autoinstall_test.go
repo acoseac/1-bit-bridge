@@ -288,8 +288,9 @@ func TestMaybeAutoInstallDefersRestartWhenSessionStartsMidInstall(t *testing.T) 
 // ~30 MiB bridge.bak was never reclaimed (the install also silently lost
 // its boot-time rollback protection).
 //
-// Since backlog B705 the install's version booting confirms it whatever the
-// marker's age, so that boot's decision no longer shows the restamp: the
+// Since backlog B705 the install's version booting is taken for it whatever
+// the marker's age (on probation since B660), so that boot's decision no
+// longer shows the restamp: the
 // windows that still run from AttemptedAt are the rollbacks', the boot
 // rollback of a start that does not come up as the version installed and
 // the early rollback. So the restamp is asserted itself: the marker's time is
@@ -379,11 +380,12 @@ func TestDeferredRestartRefreshesInstallRecency(t *testing.T) {
 	if reloaded != want {
 		t.Errorf("the marker after the restamp = %+v, want it as it was but for its time, %+v", reloaded, want)
 	}
-	// The boot this restart leads into confirms the install, and the
-	// rollback of a boot that does not come up as that version is in its
+	// The boot this restart leads into puts the install on probation (its
+	// confirmation is a start that answers and stays up: backlog B660), and
+	// the rollback of a boot that does not come up as that version is in its
 	// window.
-	if got := DecideBootAction(reloaded, fix.latestVersion, time.Now().UTC()); got != BootInstallSucceeded {
-		t.Errorf("DecideBootAction of the version installed after a deferred restart = %v, want BootInstallSucceeded", got)
+	if got := DecideBootAction(reloaded, fix.latestVersion, time.Now().UTC()); got != BootInstallProbation {
+		t.Errorf("DecideBootAction of the version installed after a deferred restart = %v, want BootInstallProbation", got)
 	}
 	if got := DecideBootAction(reloaded, "0.1.0", time.Now().UTC()); got != BootInstallFailed {
 		t.Errorf("DecideBootAction of another version after a deferred restart = %v, want BootInstallFailed: "+

@@ -609,7 +609,7 @@ func toBoolSet(m map[string]struct{}) map[string]bool {
 func toStoredItems(items []smartplaylist.Item) []manifest.SmartPlaylistItem {
 	out := make([]manifest.SmartPlaylistItem, len(items))
 	for i, it := range items {
-		out[i] = manifest.SmartPlaylistItem{Position: it.Position, Path: it.Path, Title: it.Title, Artist: it.Artist}
+		out[i] = manifest.SmartPlaylistItem{Position: it.Position, Path: it.Path, Title: it.Title, Artist: it.Artist, Album: it.Album}
 	}
 	return out
 }

@@ -87,6 +87,9 @@ func swapBinary(dst, newBinary, backupExt string, markSwapStarted func() error) 
 	if err != nil {
 		return err
 	}
+	// The operator's setcap on the binary, where this process may set it
+	// (backlog B660's second round).
+	carryCapabilities(dst, staged)
 	committed := false
 	defer func() {
 		if !committed {

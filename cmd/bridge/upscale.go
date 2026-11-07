@@ -49,6 +49,7 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/albumgain"
 	"github.com/acoseac/1-bit-bridge/internal/config"
+	"github.com/acoseac/1-bit-bridge/internal/formatgate"
 	bridgefs "github.com/acoseac/1-bit-bridge/internal/fs"
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/integrity"
@@ -434,6 +435,16 @@ func classifyUpscaleTrack(
 	// OptimizeEligible below for kind=optimize) also counts lossy
 	// under the accurate `notPCM` bucket instead of alreadyAtTarget.
 	if manifest.IsLossyCodec(t.Codec) {
+		counters.notPCM++
+		return nil, 0
+	}
+	// A WavPack or Monkey's Audio file is never a rendition's source, of
+	// any kind (backlog B489): the bridge serves those as they are and
+	// decodes nothing of theirs. The server-side gates ask the same
+	// predicate; counted under notPCM, the bucket for "this pipeline does
+	// not take it". A WavPack DSD file never reaches it: the DSD shape's
+	// arms above refuse it, since no rendition gate names its codec.
+	if formatgate.Gated(t.Path) {
 		counters.notPCM++
 		return nil, 0
 	}

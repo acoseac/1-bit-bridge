@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/dupes"
+	"github.com/acoseac/1-bit-bridge/internal/formatgate"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
@@ -83,7 +84,7 @@ func wantServed(t *testing.T, srv *Server, when string, want ...string) {
 // cursor, the delta a client holding it is sent.
 func servedPaths(t *testing.T, srv *Server, since *time.Time) []string {
 	t.Helper()
-	tracks, err := srv.deps.Manifest.ListServedTracks(context.Background(), since)
+	tracks, err := srv.deps.Manifest.ListServedTracks(context.Background(), since, formatgate.All())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,7 +121,7 @@ func TestTrashingTheServedCopyOfADuplicateServesTheOther(t *testing.T) {
 	if got := servedPaths(t, srv, &cursor); !slices.Equal(got, []string{dupeLoser}) {
 		t.Errorf("delta since the delete: %+q, want %+q", got, []string{dupeLoser})
 	}
-	deleted, _, err := srv.deps.Manifest.DeletedSince(context.Background(), cursor)
+	deleted, _, err := srv.deps.Manifest.DeletedSince(context.Background(), cursor, formatgate.All())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,7 +155,7 @@ func TestTrashingATrackThatIsNoCopyRunsNoStampingPass(t *testing.T) {
 	if got := servedPaths(t, srv, &cursor); len(got) != 0 {
 		t.Errorf("delta since the delete: %+q, want none", got)
 	}
-	deleted, _, err := srv.deps.Manifest.DeletedSince(context.Background(), cursor)
+	deleted, _, err := srv.deps.Manifest.DeletedSince(context.Background(), cursor, formatgate.All())
 	if err != nil {
 		t.Fatal(err)
 	}

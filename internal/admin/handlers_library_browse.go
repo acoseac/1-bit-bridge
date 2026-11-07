@@ -34,6 +34,7 @@ import (
 	"strings"
 
 	"github.com/acoseac/1-bit-bridge/internal/config"
+	"github.com/acoseac/1-bit-bridge/internal/formatgate"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/smartplaylist"
 	"github.com/acoseac/1-bit-bridge/internal/transcode"
@@ -227,6 +228,11 @@ func isLossyCodecLabel(codec string) bool {
 // badges them inline on every track tile, straight from the row's own
 // data — no projection round-trip. Pure + table-tested.
 //
+//   - wavpack_ape    : a WavPack or Monkey's Audio file (formatgate.Gated,
+//     by its path), which the bridge serves as it is and never renders
+//     (backlog B489); ahead of the DSD and lossy arms, which a WavPack DSD
+//     file and a lossy hybrid one would otherwise answer, as if a DSF's
+//     renditions or a lossless copy's were open to them
 //   - dsd_bitstream  : DSD (1-bit) — the SoX PCM pipeline rejects it
 //   - lossy_source   : a known lossy codec (manifest.IsLossyCodec: MP3,
 //     AAC, OGG, OPUS, WMA, and the compressed AIFF-C and WAV encodings)
@@ -258,6 +264,8 @@ func fundamentalSkipReason(routed bool, isDSD bool, codec string, sampleRate *fl
 		// "Format unreadable" about a file whose format is perfectly
 		// well known. That was 13,519 tracks on the reference library.
 		return "routed_upstream"
+	case formatgate.Gated(path):
+		return "wavpack_ape"
 	case isDSD:
 		return "dsd_bitstream"
 	case isLossyCodecLabel(codec):
@@ -821,12 +829,13 @@ func (s *Server) apiLibraryBrowseProjection(w http.ResponseWriter, r *http.Reque
 				continue
 			}
 		} else {
-			if isLossyCodecLabel(t.Codec) {
+			if isLossyCodecLabel(t.Codec) || formatgate.Gated(t.Path) {
 				// Lossy sources are never upscaled (Submit's gate,
-				// PROTOCOL.md "PCM") — genuinely skipped, so they
+				// PROTOCOL.md "PCM"), nor is a WavPack or Monkey's
+				// Audio file (backlog B489) — genuinely skipped, so they
 				// belong in the unknownFormat bucket the UI labels
 				// "DSD / lossy / unknown format", NOT at-target.
-				// Same shared predicate as the tile badge (the local
+				// Same shared predicates as the tile badge (the local
 				// wrapper delegates to manifest.IsLossyCodec).
 				unknownFormat++
 				continue

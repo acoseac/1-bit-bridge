@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/formatgate"
 )
 
 // openTestStore is a small helper that calls `OpenStore` with a
@@ -52,7 +54,7 @@ func openTestStore(t *testing.T) *Store {
 func TestStoreEnrichmentCountsEmpty(t *testing.T) {
 	s := openTestStore(t)
 	defer s.Close()
-	enriched, last, err := s.EnrichmentCounts(context.Background())
+	enriched, last, err := s.EnrichmentCounts(context.Background(), formatgate.All())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +85,7 @@ func TestStoreEnrichmentCountsMixed(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	enriched, last, err := s.EnrichmentCounts(context.Background())
+	enriched, last, err := s.EnrichmentCounts(context.Background(), formatgate.All())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +115,7 @@ func TestEnrichmentProgressTotalMatchesManifestTotal(t *testing.T) {
 			Size: 1, ModTime: now,
 		})
 	}
-	m, err := BuildManifestPage(context.Background(), s, []string{"/tmp/nope/Music"}, "", 100)
+	m, err := BuildManifestPage(context.Background(), s, []string{"/tmp/nope/Music"}, "", 100, formatgate.Set{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -205,7 +207,7 @@ func TestBuildManifestSetsEnrichmentProgress(t *testing.T) {
 	s.MarkEnriched(context.Background(), &first[0])
 	s.MarkEnriched(context.Background(), &first[1])
 
-	m, err := BuildManifest(context.Background(), s, []string{"/tmp/nope/Music"}, time.Time{})
+	m, err := BuildManifest(context.Background(), s, []string{"/tmp/nope/Music"}, time.Time{}, formatgate.All())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -236,7 +238,7 @@ func TestBuildManifestPageEnrichmentProgressOnFirstPageOnly(t *testing.T) {
 		})
 	}
 
-	first, err := BuildManifestPage(context.Background(), s, []string{"/tmp/nope/Music"}, "", 2)
+	first, err := BuildManifestPage(context.Background(), s, []string{"/tmp/nope/Music"}, "", 2, formatgate.Set{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -247,7 +249,7 @@ func TestBuildManifestPageEnrichmentProgressOnFirstPageOnly(t *testing.T) {
 		t.Errorf("first page TracksTotal = %d, want 5", first.EnrichmentProgress.TracksTotal)
 	}
 
-	mid, err := BuildManifestPage(context.Background(), s, []string{"/tmp/nope/Music"}, "Music/2.flac", 2)
+	mid, err := BuildManifestPage(context.Background(), s, []string{"/tmp/nope/Music"}, "Music/2.flac", 2, formatgate.Set{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -416,7 +418,7 @@ func TestEnrichmentProgressOmitsLastEnrichedAtWhenNeverEnriched(t *testing.T) {
 	// row yet" state.
 	s.UpsertTrack(context.Background(), &Track{Path: "a.flac", Size: 1, ModTime: now})
 
-	m, err := BuildManifest(context.Background(), s, []string{"/tmp/nope/Music"}, time.Time{})
+	m, err := BuildManifest(context.Background(), s, []string{"/tmp/nope/Music"}, time.Time{}, formatgate.All())
 	if err != nil {
 		t.Fatal(err)
 	}
