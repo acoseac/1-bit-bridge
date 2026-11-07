@@ -7,10 +7,18 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/packaging"
+	"github.com/acoseac/1-bit-bridge/internal/updater"
 )
 
 // Backlog B727's second item: a command other than serve, run while the
@@ -228,30 +236,109 @@ func TestEveryCommandThatWritesTheDataDirRefusesItWhileItsVolumeIsAway(t *testin
 
 // TestTheDiagnosticsStayAvailableWhileTheDataDirsVolumeIsAway: what only
 // reads the data dir, and init's run that keeps the config, refuse nothing
-// and make nothing there. bridge doctor's data-dir line fails the state in
-// serve's words (TestBothDoctorsFailADataDirItsRecordNamesWhileItsVolumeIsAway).
+// and make nothing there: token list, cert info, status, logs (a log of the
+// test's own), update --check (its release check asked of a server of the
+// test's own) and init keeping the config. bridge doctor, --fix or not, fails
+// its data-dir line in serve's words and makes nothing there either: every
+// open of the store it makes asks first whether the database is there
+// (TestBothDoctorsFailADataDirItsRecordNamesWhileItsVolumeIsAway reads the
+// line itself).
 func TestTheDiagnosticsStayAvailableWhileTheDataDirsVolumeIsAway(t *testing.T) {
+	cli := func(args ...string) func(t *testing.T, a awayDataDir) (int, string) {
+		return func(t *testing.T, a awayDataDir) (int, string) {
+			full := make([]string, 0, len(args))
+			for _, arg := range args {
+				switch arg {
+				case "CFG":
+					full = append(full, a.cfg)
+				case "BASE":
+					full = append(full, a.base)
+				case "LIB":
+					full = append(full, a.lib)
+				default:
+					full = append(full, arg)
+				}
+			}
+			return runCLI(t, full...)
+		}
+	}
 	for _, c := range []struct {
 		name string
-		args func(a awayDataDir) []string
+		run  func(t *testing.T, a awayDataDir) (int, string)
 		code int
+		// says is what the run says where its job is to say the refusal
+		// (bridge doctor's data-dir line); "" for a read that says nothing of
+		// it.
+		says string
 	}{
-		{"token list", func(a awayDataDir) []string { return []string{"token", "list", "--config", a.cfg} }, 0},
-		{"cert info", func(a awayDataDir) []string { return []string{"cert", "info", "--config", a.cfg} }, 1},
-		{"status", func(a awayDataDir) []string { return []string{"status", "--config", a.cfg} }, 1},
-		{"init keeping the config", func(a awayDataDir) []string {
-			return []string{"init", "--dir", a.base, "--yes", "--library", a.lib, "--no-service", "--skip-doctor"}
-		}, 0},
+		{name: "token list", run: cli("token", "list", "--config", "CFG"), code: 0},
+		{name: "cert info", run: cli("cert", "info", "--config", "CFG"), code: 1},
+		{name: "status", run: cli("status", "--config", "CFG"), code: 1},
+		{name: "init keeping the config", code: 0,
+			run: cli("init", "--dir", "BASE", "--yes", "--library", "LIB", "--no-service", "--skip-doctor")},
+		{name: "doctor", run: cli("doctor", "--config", "CFG"), code: 1,
+			says: "bridge serve will not start: the data directory "},
+		{name: "doctor --fix", run: cli("doctor", "--fix", "--config", "CFG"), code: 1,
+			says: "bridge serve will not start: the data directory "},
+		{name: "logs", code: 0, run: func(t *testing.T, a awayDataDir) (int, string) {
+			// The log a service start wrote, where this test's home puts it.
+			home := filepath.Join(a.base, "home")
+			t.Setenv("HOME", home)
+			t.Setenv("USERPROFILE", home)
+			t.Setenv("XDG_STATE_HOME", "")
+			t.Setenv("LOCALAPPDATA", filepath.Join(home, "AppData", "Local"))
+			path, err := packaging.DefaultLogPath()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte("a line the bridge logged\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			code, out := runCLI(t, "logs")
+			if !strings.Contains(out, "a line the bridge logged") {
+				t.Errorf("bridge logs printed no line of the log:\n%s", out)
+			}
+			return code, out
+		}},
+		{name: "update --check", code: 0, run: func(t *testing.T, a awayDataDir) (int, string) {
+			var asked atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				asked.Add(1)
+				if r.URL.Path != "/repos/"+updater.DefaultRepo+"/releases/latest" {
+					http.NotFound(w, r)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"tag_name":"v99.0.0","name":"v99.0.0",`+
+					`"html_url":"https://github.com/`+updater.DefaultRepo+`/releases/tag/v99.0.0","assets":[]}`)
+			}))
+			t.Cleanup(srv.Close)
+			prev := updateReleases
+			updateReleases = updater.NewClient(updater.DefaultRepo, 5*time.Second).WithBaseURL(srv.URL)
+			t.Cleanup(func() { updateReleases = prev })
+			code, out := runCLI(t, "update", "--check", "--config", a.cfg)
+			if asked.Load() == 0 {
+				t.Errorf("bridge update --check asked no release of the test's server:\n%s", out)
+			}
+			return code, out
+		}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			a := newAwayDataDir(t, 1, "")
 			cfgBefore, recordBefore := mustRead(t, a.cfg), mustRead(t, dataDirRecordFile(a.cfg))
-			code, out := runCLI(t, c.args(a)...)
+			code, out := c.run(t, a)
+			out = stripANSI(out)
 			if code != c.code {
 				t.Errorf("exit %d, want %d:\n%s", code, c.code, out)
 			}
-			if strings.Contains(out, "held this bridge's database") {
+			switch {
+			case c.says == "" && strings.Contains(out, "held this bridge's database"):
 				t.Errorf("a read refused the data dir:\n%s", out)
+			case c.says != "" && !strings.Contains(out, c.says):
+				t.Errorf("the run does not say %q:\n%s", c.says, out)
 			}
 			requireNothingMadeThere(t, a, cfgBefore, recordBefore)
 		})
