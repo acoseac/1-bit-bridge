@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
+	"os"
 	"path/filepath"
 
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
@@ -27,8 +29,11 @@ import (
 //
 // A root the index holds nothing of (a fresh install whose volume is not
 // mounted yet) reads as it is, as it does for the watcher, so a write there
-// lands on the bare mount point, and the mount then hides it. One case stays
-// open: backlog B776, item 7.
+// lands on the bare mount point, and the mount then hides it. A root whose
+// path is not there at all reads as unreachable, and a write may make its
+// folder only where the index holds none of its rows (firstWriteMakesRoot):
+// the first upload into a root configured before its folder was made, which a
+// public serve starts over. One case stays open: backlog B776, item 7.
 
 // ErrRootNotMounted is what a write refused under a library root that reads as
 // a volume not mounted matches (errors.Is): every *RootAwayError.
@@ -101,12 +106,34 @@ func (s *Scanner) RefuseWritesUnder(ctx context.Context, paths []string) error {
 				continue
 			}
 			looked[root] = true
-			if look := s.lookAtRoot(ctx, root); look.absent {
+			if look := s.lookAtRoot(ctx, root); look.absent && !s.firstWriteMakesRoot(ctx, root, look) {
 				return &RootAwayError{Root: root, look: look}
 			}
 		}
 	}
 	return nil
+}
+
+// firstWriteMakesRoot reports whether a write may make the folder of a root
+// that reads as unreachable (B776's round 2): only where nothing at all is at
+// its path (os.Lstat answers that it does not exist, not a permission refused,
+// an I/O error or a link to nothing) and the index's count of its rows answers
+// none. That is a root configured before its folder was made, which a public
+// serve starts over (a loopback one refuses an inaccessible root at its start),
+// or one whose folder went while it held nothing. A root the index holds rows
+// under is refused (a removed mount point, a renamed folder: made anew, its
+// folder would hold the upload alone, and the scans would reap its rows), and
+// so is one whose count fails. Only the write's admission asks this: what the
+// root reads as for the scans and the watcher (lookAtRoot) is unchanged.
+func (s *Scanner) firstWriteMakesRoot(ctx context.Context, root string, look rootLook) bool {
+	if look.reason != rootAbsentUnreachable {
+		return false
+	}
+	if _, err := os.Lstat(filepath.Clean(root)); !errors.Is(err, fs.ErrNotExist) {
+		return false
+	}
+	n, err := s.store.CountTracksUnderRoot(ctx, root, len(s.Roots()) > 1)
+	return err == nil && n == 0
 }
 
 // landingRoots is the configured roots in the form where a write lands is
