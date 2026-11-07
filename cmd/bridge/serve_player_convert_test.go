@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"runtime"
 	"slices"
 	"testing"
 
@@ -19,6 +20,9 @@ import (
 // occurrence's observation is published as converted, never as PCM or native
 // DSD (B8 removed B11's withholding of it).
 func TestTheElementListsDSDWhileThePlayerConverts(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the player's identity is written durably, which Windows cannot do, and the player whose element this is runs on Linux alone")
+	}
 	off := dsdstate.Defaults()
 	off.DefaultMode = dsdstate.ModeOff
 	for _, tc := range []struct {
