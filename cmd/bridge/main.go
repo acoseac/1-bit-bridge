@@ -357,11 +357,14 @@ func (b bookletDiskStore) RemoveBooklet(mbid string) error {
 // enrichmentOn is enrich.enabled, read live (backlog B617): off, no premium
 // cover is asked of Atlas, and the sweep is told so (ErrCoversPaused), which
 // leaves the pending covers and their attempts as they are. Each fetch runs
-// on the switch's context (enrichgate.CancelWhenOff), so the premium
-// fetcher's own client refuses a request that starts after the flip and an
-// answer that arrives after it, and cuts one on the wire off within
-// switchEvery (a second when zero; a test seam); a miss that meets the switch
-// off is no miss either. A cover written while on is kept. Nil is on.
+// on the switch's context (enrichgate.CancelWhenOff), and the premium
+// fetcher's own client, built with the same switch, refuses a request that
+// starts after the flip and an answer that arrives after it, and cuts one on
+// the wire off within a second, whatever context it is handed; a miss that
+// meets the switch off is no miss either. A cover written while on is kept.
+// Nil is off, as everywhere enrichgate asks a switch: nothing is asked of
+// Atlas. switchEvery is how far apart the fetch's context asks the switch (a
+// second when zero; a test seam).
 type atlasCoverRefetcher struct {
 	premium      enrich.PremiumCoverFetcher
 	artworkDir   string
@@ -375,7 +378,7 @@ func (a atlasCoverRefetcher) RefetchPremium(ctx context.Context, releaseMBID str
 	if a.premium == nil {
 		return false, atlasharvest.ErrNoCredential
 	}
-	if a.enrichmentOn != nil && !a.enrichmentOn() {
+	if a.enrichmentOn == nil || !a.enrichmentOn() {
 		return false, atlasharvest.ErrCoversPaused
 	}
 	// FIRST LAYER. releaseMBID comes off the Atlas harvest RESULTS page
@@ -414,7 +417,7 @@ func (a atlasCoverRefetcher) RefetchPremium(ctx context.Context, releaseMBID str
 	// Asked again once the fetch has answered: the switch refused its
 	// request, its answer or the read of it, or meets what it learnt off. No
 	// answer to count, so no miss and no failure.
-	paused := !got && enrichgate.Admit(fetchCtx) != nil
+	paused := !got && enrichgate.Admit(fetchCtx, a.enrichmentOn) != nil
 	release()
 	if paused {
 		return false, atlasharvest.ErrCoversPaused
@@ -3889,22 +3892,24 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	// pacing re-derives from the same live value inside the clients —
 	// see WithLiveBase, and note that a frozen interval pointed at a
 	// changed host is the one mistake here that reaches a third party.
-	mbClient := enrich.NewMusicBrainzClient(cfg.Enrich.MusicBrainzBaseURL, userAgent, nil).
-		WithLiveBase(func() string { return liveCfg().Enrich.MusicBrainzBaseURL })
-	caaClient := enrich.NewCoverArtClient(cfg.Enrich.CoverArtBaseURL, userAgent, nil).
-		WithLiveBase(func() string { return liveCfg().Enrich.CoverArtBaseURL })
-	// opts.deezerBase is empty, the public service, everywhere but a boot
-	// test.
-	deezerClient := enrich.NewDeezerClient(opts.deezerBase, userAgent, nil)
 	// enrich.enabled and enrich.deezerEnabled, read live (backlog B617). The
 	// clients and the enricher's goroutine are built and started on every
 	// bridge ("always construct, never stop"), and these two closures are the
-	// gates: the enricher asks them, the fingerprint gate and its sweep ask
-	// the first, and so do the artwork misses and the manifest's
-	// enrichmentProgress, so a console save, or an environment value at the
-	// next start, turns the lookups off everywhere at once, with no restart.
+	// gates: each client holds them (enrichgate.Enrichment, enrichgate.Deezer)
+	// and asks them whatever context a request carries, the enricher asks
+	// them, the fingerprint gate and its sweep ask the first, and so do the
+	// artwork misses and the manifest's enrichmentProgress, so a console save,
+	// or an environment value at the next start, turns the lookups off
+	// everywhere at once, with no restart.
 	enrichmentOn := func() bool { return liveCfg().Enrich.EffectiveEnabled() }
 	deezerOn := func() bool { return liveCfg().Enrich.EffectiveDeezerEnabled() }
+	mbClient := enrich.NewMusicBrainzClient(cfg.Enrich.MusicBrainzBaseURL, userAgent, nil, enrichgate.Enrichment(enrichmentOn)).
+		WithLiveBase(func() string { return liveCfg().Enrich.MusicBrainzBaseURL })
+	caaClient := enrich.NewCoverArtClient(cfg.Enrich.CoverArtBaseURL, userAgent, nil, enrichgate.Enrichment(enrichmentOn)).
+		WithLiveBase(func() string { return liveCfg().Enrich.CoverArtBaseURL })
+	// opts.deezerBase is empty, the public service, everywhere but a boot
+	// test.
+	deezerClient := enrich.NewDeezerClient(opts.deezerBase, userAgent, nil, enrichgate.Deezer(enrichmentOn, deezerOn))
 	// Phase-H harvest credential store, opened early so the enricher can wire
 	// the Phase-B authenticated premium-cover fetcher BEFORE its worker
 	// goroutine starts (avoids a field-write/read race). The same store is
@@ -3946,7 +3951,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	// store at request time (never baked into the open-source binary).
 	var premiumCovers enrich.PremiumCoverFetcher
 	if harvestState != nil {
-		premiumCovers = enrich.NewAtlasPremiumFetcher(harvestState, userAgent, opts.harvestHTTP, artworkDir)
+		premiumCovers = enrich.NewAtlasPremiumFetcher(harvestState, userAgent, opts.harvestHTTP, artworkDir, enrichgate.Enrichment(enrichmentOn))
 		enricher.WithPremiumCovers(premiumCovers)
 	}
 	// Acoustic fingerprinting: the cache is constructed here and attached
@@ -5044,8 +5049,9 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		resolver: apiSrv.Resolver(),
 		// Live API key: it is otherwise read once here, so an operator
 		// pasting a freshly registered AcoustID key would keep getting
-		// "no API key configured" until they bounced the bridge.
-		client: acoustid.NewClient("", "", userAgent, nil).
+		// "no API key configured" until they bounced the bridge. The client
+		// holds enrich.enabled as the enricher's clients do (backlog B617).
+		client: acoustid.NewClient("", "", userAgent, nil, enrichgate.Enrichment(enrichmentOn)).
 			WithLiveAPIKey(func() string { return liveCfg().Fingerprint.ResolvedAPIKey() }),
 		cache:     fingerprintCache,
 		workers:   cfg.Fingerprint.EffectiveWorkers(),

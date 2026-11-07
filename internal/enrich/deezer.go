@@ -26,6 +26,9 @@ type DeezerClient struct {
 	base      string
 	userAgent string
 	http      *http.Client
+	// sw is the client's own switches, enrich.enabled and
+	// enrich.deezerEnabled, which its transport asks (backlog B617).
+	sw enrichgate.Switches
 	// allowedImageHosts suffix-matches on the Deezer image URL host.
 	// Production values (".dzcdn.net", ".deezer.com") are set by
 	// NewDeezerClient; tests may append their httptest host via
@@ -47,7 +50,13 @@ type DeezerClient struct {
 // metadata) or an RFC1918 address and we'd happily fetch it. The check
 // fires for every hop, keeping the allowlist authoritative for the whole
 // redirect chain.
-func NewDeezerClient(base, userAgent string, httpClient *http.Client) *DeezerClient {
+//
+// sw is enrich.enabled and enrich.deezerEnabled as the client asks them
+// (enrichgate.Deezer; backlog B617): a request is sent, and its answer taken,
+// only while both are on, whatever context the request carries. Switches
+// that are not Deezer's have no Deezer switch, which is off (ForDeezer), and
+// zero switches are off: either sends nothing.
+func NewDeezerClient(base, userAgent string, httpClient *http.Client, sw enrichgate.Switches) *DeezerClient {
 	if base == "" {
 		base = DefaultDeezerBase
 	}
@@ -62,12 +71,13 @@ func NewDeezerClient(base, userAgent string, httpClient *http.Client) *DeezerCli
 	// without this copy a caller passing http.DefaultClient or a client
 	// shared with NewMusicBrainzClient would suddenly see Deezer's
 	// SSRF allowlist constrain redirects across the whole process.
-	// enrichgate.DeezerClient is that copy, sending only while
-	// enrich.enabled and enrich.deezerEnabled are on (backlog B617).
+	// sw.Client is that copy, sending only while its switches are on.
+	sw = sw.ForDeezer()
 	c := &DeezerClient{
 		base:              base,
 		userAgent:         userAgent,
-		http:              enrichgate.DeezerClient(httpClient),
+		http:              sw.Client(httpClient),
+		sw:                sw,
 		allowedImageHosts: append([]string(nil), deezerAllowedHosts...),
 	}
 	c.installRedirectGuard()

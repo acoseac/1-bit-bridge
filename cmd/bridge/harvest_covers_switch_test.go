@@ -67,7 +67,7 @@ func newSwitchCoverFixture(t *testing.T, every time.Duration) *switchCoverFixtur
 	t.Cleanup(f.atlas.srv.Close)
 	f.cred = &switchCoverCred{base: f.atlas.srv.URL}
 	f.adapter = atlasCoverRefetcher{
-		premium:      enrich.NewAtlasPremiumFetcher(f.cred, "ua", f.atlas.srv.Client(), f.artworkDir),
+		premium:      enrich.NewAtlasPremiumFetcher(f.cred, "ua", f.atlas.srv.Client(), f.artworkDir, onSwitches),
 		artworkDir:   f.artworkDir,
 		coverSize:    enrich.DefaultCoverSize,
 		enrichmentOn: f.on.Load,
@@ -141,7 +141,7 @@ func TestACoverAnswerAfterTheFlipIsNoMiss(t *testing.T) {
 				f.atlas.setHold(nil)
 				f.adapter.premium = enrich.NewAtlasPremiumFetcher(f.cred, "ua",
 					&http.Client{Transport: &flipAtBodyEOF{base: f.atlas.srv.Client().Transport, at: func() { f.on.Store(false) }}},
-					f.artworkDir)
+					f.artworkDir, onSwitches)
 			}
 			got, err := f.adapter.RefetchPremium(context.Background(), switchCoverRelease)
 			if got || !errors.Is(err, atlasharvest.ErrCoversPaused) {

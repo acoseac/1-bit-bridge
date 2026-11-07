@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/enrichgate"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
@@ -33,6 +34,18 @@ const (
 
 // switchJPEG is enough of a JPEG for the artwork writes' signature check.
 var switchJPEG = []byte{0xFF, 0xD8, 0xFF, 0xE1, 0xDE, 0xAD}
+
+// alwaysOn is a switch that is never off: what a test hands a client it
+// builds when the switches are not what it tests, since a client built
+// without its switches sends nothing (enrichgate.Switches; backlog B617).
+func alwaysOn() bool { return true }
+
+// onSwitches are a client's switches, and onDeezerSwitches Deezer's, always
+// on.
+var (
+	onSwitches       = enrichgate.Enrichment(alwaysOn)
+	onDeezerSwitches = enrichgate.Deezer(alwaysOn, alwaysOn)
+)
 
 // countingUpstream is one fake service: every request it answers is logged
 // as "METHOD /path?query" before hold, when set, decides when it answers.
@@ -172,13 +185,13 @@ func switchEnricher(t *testing.T, ups *switchUpstreams) (*Enricher, *manifest.St
 	if err := os.MkdirAll(artworkDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	deezer := NewDeezerClient(ups.deezer.srv.URL, "t", nil)
+	deezer := NewDeezerClient(ups.deezer.srv.URL, "t", nil, onDeezerSwitches)
 	deezer.SetAllowedImageHostsForTest([]string{"127.0.0.1"})
 	e := NewEnricher(store,
-		NewMusicBrainzClient(ups.mb.srv.URL, "t", nil),
-		NewCoverArtClient(ups.caa.srv.URL, "t", nil),
+		NewMusicBrainzClient(ups.mb.srv.URL, "t", nil, onSwitches),
+		NewCoverArtClient(ups.caa.srv.URL, "t", nil, onSwitches),
 		deezer, artworkDir)
-	e.WithPremiumCovers(NewAtlasPremiumFetcher(fakeCred{token: "tok", base: ups.atlas.srv.URL, ok: true}, "t", nil, artworkDir))
+	e.WithPremiumCovers(NewAtlasPremiumFetcher(fakeCred{token: "tok", base: ups.atlas.srv.URL, ok: true}, "t", nil, artworkDir, onSwitches))
 	tuneForTest(e)
 	e.PollInterval = time.Millisecond
 	return e, store, artworkDir

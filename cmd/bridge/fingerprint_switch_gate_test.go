@@ -141,7 +141,7 @@ func TestAnAcoustIDAnswerAfterTheFlipIsNotKept(t *testing.T) {
 				} else {
 					var once sync.Once
 					flip := &flipAtBodyEOF{base: f.acoustid.srv.Client().Transport, at: func() { once.Do(func() { on.Store(false) }) }}
-					f.sweeper.client = acoustid.NewClient(f.acoustid.srv.URL, "k", "ua", &http.Client{Transport: flip})
+					f.sweeper.client = acoustid.NewClient(f.acoustid.srv.URL, "k", "ua", &http.Client{Transport: flip}, onSwitches)
 					runSwitchSweeper(t, f.sweeper, func() bool { return true }, on.Load, nudge, status)
 					eventually(t, func() bool { return !on.Load() }, "the first answer to be read")
 				}

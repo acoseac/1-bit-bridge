@@ -57,11 +57,11 @@ func gateEnricher(t *testing.T, ups *switchUpstreams, mbHTTP *http.Client, track
 	if err := os.MkdirAll(artworkDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	deezer := NewDeezerClient(ups.deezer.srv.URL, "t", nil)
+	deezer := NewDeezerClient(ups.deezer.srv.URL, "t", nil, onDeezerSwitches)
 	deezer.SetAllowedImageHostsForTest([]string{"127.0.0.1"})
-	e := NewEnricher(store, NewMusicBrainzClient(ups.mb.srv.URL, "t", mbHTTP),
-		NewCoverArtClient(ups.caa.srv.URL, "t", nil), deezer, artworkDir)
-	e.WithPremiumCovers(NewAtlasPremiumFetcher(fakeCred{token: "tok", base: ups.atlas.srv.URL, ok: true}, "t", nil, artworkDir))
+	e := NewEnricher(store, NewMusicBrainzClient(ups.mb.srv.URL, "t", mbHTTP, onSwitches),
+		NewCoverArtClient(ups.caa.srv.URL, "t", nil, onSwitches), deezer, artworkDir)
+	e.WithPremiumCovers(NewAtlasPremiumFetcher(fakeCred{token: "tok", base: ups.atlas.srv.URL, ok: true}, "t", nil, artworkDir, onSwitches))
 	tuneForTest(e)
 	e.PollInterval = time.Millisecond
 	e.switchEvery = time.Hour

@@ -34,7 +34,7 @@ import (
 func TestSweeperPacerSerialisesAcrossWorkers(t *testing.T) {
 	// A local base URL resolves to the self-hosted interval, keeping the test
 	// quick while still exercising real pacing.
-	c := acoustid.NewClient("http://127.0.0.1:1/v2", "k", "ua", nil)
+	c := acoustid.NewClient("http://127.0.0.1:1/v2", "k", "ua", nil, onSwitches)
 	interval := c.MinInterval()
 	s := &fingerprintSweeper{client: c}
 
@@ -111,7 +111,7 @@ func TestSweeperRateLimitStallsTheWholePool(t *testing.T) {
 	s := &fingerprintSweeper{
 		// A local base URL resolves to the self-hosted interval (150ms), which
 		// is what the pause has to be distinguishable FROM.
-		client: acoustid.NewClient(srv.URL, "k", "ua", srv.Client()),
+		client: acoustid.NewClient(srv.URL, "k", "ua", srv.Client(), onSwitches),
 		cache:  acoustid.NewCache(16),
 		length: time.Minute,
 		store:  store,
@@ -235,7 +235,7 @@ func TestSweeperNoteLookupErrSurvivesATypedNil(t *testing.T) {
 // TestSweeperPacerHonoursCancellation — a shutting-down sweep must not sit out
 // the full interval.
 func TestSweeperPacerHonoursCancellation(t *testing.T) {
-	c := acoustid.NewClient("https://api.acoustid.org/v2", "k", "ua", nil) // public: 350ms
+	c := acoustid.NewClient("https://api.acoustid.org/v2", "k", "ua", nil, onSwitches) // public: 350ms
 	s := &fingerprintSweeper{client: c, last: time.Now()}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -252,7 +252,7 @@ func TestSweeperPacerHonoursCancellation(t *testing.T) {
 // become an hour-long shutdown. The sweeper is joined to bgWriters, so a pause
 // that ignored cancellation would hold process exit open behind it.
 func TestSweeperPauseHonoursCancellation(t *testing.T) {
-	s := &fingerprintSweeper{client: acoustid.NewClient("https://api.acoustid.org/v2", "k", "ua", nil)}
+	s := &fingerprintSweeper{client: acoustid.NewClient("https://api.acoustid.org/v2", "k", "ua", nil, onSwitches)}
 	s.noteLookupErr(&acoustid.RateLimitError{RetryAfter: time.Hour})
 
 	ctx, cancel := context.WithCancel(context.Background())

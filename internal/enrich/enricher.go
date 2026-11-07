@@ -352,7 +352,7 @@ func (e *Enricher) Run(ctx context.Context) {
 // runBatch enriches one batch on a context the switch cancels, and returns
 // how long Run waits before the next.
 func (e *Enricher) runBatch(ctx context.Context) time.Duration {
-	ctx, release := enrichgate.CancelWhenOff(ctx, e.enabled, e.switchEvery)
+	ctx, release := enrichgate.CancelWhenOff(ctx, e.on, e.switchEvery)
 	defer release()
 	batch, err := e.store.UnenrichedTracks(ctx, e.BatchLimit)
 	if err != nil {
@@ -468,8 +468,10 @@ func (e *Enricher) enrichOne(ctx context.Context, t *manifest.Track) {
 			if err != nil {
 				// Shutdown cancellation looks like an MB error; don't
 				// poison the skipped-cache or mark the track so a
-				// future run can retry it normally.
-				if ctx.Err() != nil {
+				// future run can retry it normally. Nor a switch's
+				// refusal, which MusicBrainz's client answers whatever
+				// context it is handed (enrichgate.Refused): no answer.
+				if ctx.Err() != nil || enrichgate.Refused(err) != nil {
 					return
 				}
 				e.logUpstream(upstreamMusicBrainz, "MB search", err, "artist", t.Artist, "album", t.Album)
@@ -634,6 +636,12 @@ func (e *Enricher) enrichOne(ctx context.Context, t *manifest.Track) {
 	// impossible from this site.
 	if !strings.HasPrefix(t.ArtworkMBID, "local-") {
 		if cached, err := e.ensureArtworkCached(ctx, albumMBID, rgMBID, t.Artist, t.Album, e.coverSize()); err != nil {
+			if enrichgate.Refused(err) != nil {
+				// A switch refused the cover's request or its answer
+				// (backlog B617): no answer, so no miss to stamp, and
+				// the track waits at enriched_at = 0.
+				return
+			}
 			// Suppress the Error log on a clean shutdown: ensureArtworkCached
 			// returns ctx.Err() when a pacing sleepCtx trips on cancel, which
 			// isn't a real artwork failure. Mirrors the ctx guard the album /
@@ -722,6 +730,12 @@ func (e *Enricher) resolveArtist(ctx context.Context, t *manifest.Track) error {
 		// ladder that paced only its first rung would burst.
 		res, matchedQuery, err := e.searchArtistWithFallbacks(ctx, attempts, t)
 		if err != nil {
+			// A switch's refusal is no answer, whatever the context says
+			// (enrichgate.Refused; backlog B617): nothing is cached or
+			// logged, and enrichOne leaves the track unstamped.
+			if r := enrichgate.Refused(err); r != nil {
+				return r
+			}
 			// Don't cache transient errors session-wide — a network
 			// blip would otherwise block sibling-track retries until
 			// process restart. Matches the album-path behavior.
@@ -820,6 +834,11 @@ func (e *Enricher) resolveArtist(ctx context.Context, t *manifest.Track) error {
 	if errors.Is(err, errDeezerOff) {
 		// Deezer was not asked: no miss to cache, nothing to log.
 		return nil
+	}
+	if r := enrichgate.Refused(err); r != nil {
+		// enrich.enabled's refusal: no miss to cache, nothing to log, and
+		// no stamp, as at the other requests.
+		return r
 	}
 	if err != nil {
 		// Skip the Error log when the failure is just shutdown cancellation
@@ -1161,7 +1180,7 @@ func acousticSkipReason(e *Enricher, outcome acousticOutcome, fallback string) s
 // is as the other writer left it, still unenriched, and the next batch
 // reads it again, answering mostly from this enricher's caches.
 func (e *Enricher) stampEnriched(ctx context.Context, t *manifest.Track) {
-	if !stampAdmitted(ctx) {
+	if !e.stampAdmitted(ctx) {
 		return
 	}
 	if err := e.store.MarkEnriched(ctx, t); err != nil {
@@ -1210,7 +1229,7 @@ const msgChangedWhileEnriched = "track changed while it was enriched; the next b
 // reason: the verdict is about tags the row no longer holds, and the next
 // batch reads the row again.
 func (e *Enricher) markSkipped(ctx context.Context, t *manifest.Track, reason, detail string) {
-	if !stampAdmitted(ctx) {
+	if !e.stampAdmitted(ctx) {
 		return
 	}
 	if err := e.store.MarkEnriched(ctx, t); err != nil {
@@ -1335,6 +1354,10 @@ func (e *Enricher) ensureArtworkCached(ctx context.Context, mbid, rgMBID, artist
 		return false, err
 	}
 	rgMBID, rgErr := e.resolveReleaseGroupMBID(ctx, mbid, rgMBID)
+	if r := enrichgate.Refused(rgErr); r != nil {
+		// No answer: never the release-level miss, which the caller stamps.
+		return false, r
+	}
 	if rgErr != nil {
 		// Logging the resolve error but returning the original
 		// release-level not-found so callers stamp the "no artwork"
@@ -1379,6 +1402,11 @@ func (e *Enricher) ensureArtworkCached(ctx context.Context, mbid, rgMBID, artist
 	// /v1/artwork/{mbid} URL serves it transparently.
 	if e.itunes != nil && artist != "" && album != "" {
 		itBody, itErr := e.fetchITunesArtwork(ctx, artist, album)
+		if r := enrichgate.Refused(itErr); r != nil {
+			// No answer: never the release-level miss, which the caller
+			// stamps.
+			return false, r
+		}
 		if itErr == nil {
 			// Stream straight to disk — same shape as the CAA branches
 			// above. Body close + size cap (MaxCoverArtBytes) live
@@ -1471,7 +1499,8 @@ func (e *Enricher) resolveReleaseGroupMBID(ctx context.Context, releaseMBID, hin
 		// cache for a release we never actually looked up. This mirrors the
 		// transient-vs-persistent split SearchRelease already makes in
 		// enrichOne (ctx-cancel first, then IsTransient, then cache-empty).
-		if !IsTransient(err) && ctx.Err() == nil {
+		// A switch's refusal is no answer either (enrichgate.Refused).
+		if !IsTransient(err) && ctx.Err() == nil && enrichgate.Refused(err) == nil {
 			e.releaseGroupCache.Set(releaseMBID, "")
 		}
 		return "", err

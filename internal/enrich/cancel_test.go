@@ -190,7 +190,7 @@ func TestAPremiumCoverFetchStoppedByShutdownReportsNothing(t *testing.T) {
 	}))
 	defer srv.Close()
 	dir := t.TempDir()
-	f := NewAtlasPremiumFetcher(fakeCred{token: "tok", base: srv.URL, ok: true}, "ua", nil, dir)
+	f := NewAtlasPremiumFetcher(fakeCred{token: "tok", base: srv.URL, ok: true}, "ua", nil, dir, onSwitches)
 
 	rec := loggingtest.Record(t)
 	if f.TryCache(ctx, filepath.Join(dir, cancelReleaseMBID+"-500.jpg"), cancelReleaseMBID, 500) {
@@ -206,7 +206,7 @@ func TestAPremiumCoverFetchThatFailsIsStillReported(t *testing.T) {
 	// No listener can own port zero.
 	base := "http://127.0.0.1:0"
 	dir := t.TempDir()
-	f := NewAtlasPremiumFetcher(fakeCred{token: "tok", base: base, ok: true}, "ua", nil, dir)
+	f := NewAtlasPremiumFetcher(fakeCred{token: "tok", base: base, ok: true}, "ua", nil, dir, onSwitches)
 
 	rec := loggingtest.Record(t)
 	f.TryCache(context.Background(), filepath.Join(dir, cancelReleaseMBID+"-500.jpg"), cancelReleaseMBID, 500)
@@ -233,7 +233,7 @@ func TestAPremiumCoverWriteStoppedByShutdownReportsNothing(t *testing.T) {
 	defer srv.Close()
 	dir := t.TempDir()
 	client := &http.Client{Transport: cancelOnFirstRead{rt: http.DefaultTransport, cancel: cancel}}
-	f := NewAtlasPremiumFetcher(fakeCred{token: "tok", base: srv.URL, ok: true}, "ua", client, dir)
+	f := NewAtlasPremiumFetcher(fakeCred{token: "tok", base: srv.URL, ok: true}, "ua", client, dir, onSwitches)
 
 	rec := loggingtest.Record(t)
 	if f.TryCache(ctx, filepath.Join(dir, cancelReleaseMBID+"-500.jpg"), cancelReleaseMBID, 500) {
@@ -250,7 +250,7 @@ func TestAPremiumCoverWriteThatFailsIsStillReported(t *testing.T) {
 	}))
 	defer srv.Close()
 	dir := t.TempDir()
-	f := NewAtlasPremiumFetcher(fakeCred{token: "tok", base: srv.URL, ok: true}, "ua", nil, dir)
+	f := NewAtlasPremiumFetcher(fakeCred{token: "tok", base: srv.URL, ok: true}, "ua", nil, dir, onSwitches)
 
 	rec := loggingtest.Record(t)
 	f.TryCache(context.Background(), filepath.Join(dir, cancelReleaseMBID+"-500.jpg"), cancelReleaseMBID, 500)
@@ -280,7 +280,7 @@ func enricherStoppedInThePortraitFetch(t *testing.T, stop bool) (*Enricher, *man
 		_, _ = io.WriteString(w, `{"data":[]}`)
 	}))
 	t.Cleanup(deezer.Close)
-	e.deezer = NewDeezerClient(deezer.URL, "t", nil)
+	e.deezer = NewDeezerClient(deezer.URL, "t", nil, onDeezerSwitches)
 	tuneForTest(e)
 	return e, store, ctx
 }

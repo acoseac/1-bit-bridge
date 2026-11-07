@@ -19,6 +19,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/admin"
 	"github.com/acoseac/1-bit-bridge/internal/atlasharvest"
 	"github.com/acoseac/1-bit-bridge/internal/config"
+	"github.com/acoseac/1-bit-bridge/internal/enrichgate"
 	bridgefs "github.com/acoseac/1-bit-bridge/internal/fs"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
@@ -26,6 +27,18 @@ import (
 // enrich.enabled and enrich.deezerEnabled in serve (backlog B617): what the
 // fingerprint path does with enrichment off, and that serve wires the
 // switches into everything that asks the upstreams, and into nothing else.
+
+// alwaysOn is a switch that is never off: what a test hands a client, or a
+// sweep, when the switches are not what it tests, since a client built
+// without its switches sends nothing (enrichgate.Switches).
+func alwaysOn() bool { return true }
+
+// onSwitches are a client's switches, and onDeezerSwitches Deezer's, always
+// on.
+var (
+	onSwitches       = enrichgate.Enrichment(alwaysOn)
+	onDeezerSwitches = enrichgate.Deezer(alwaysOn, alwaysOn)
+)
 
 // switchCounter is a server that counts and logs the requests it answers.
 type switchCounter struct {
@@ -147,7 +160,7 @@ func newSweepSwitchFixtureAnswering(t *testing.T, answer string, names ...string
 	f.sweeper = &fingerprintSweeper{
 		store:     store,
 		resolver:  bridgefs.New([]string{root}),
-		client:    acoustid.NewClient(f.acoustid.srv.URL, "k", "ua", f.acoustid.srv.Client()),
+		client:    acoustid.NewClient(f.acoustid.srv.URL, "k", "ua", f.acoustid.srv.Client(), onSwitches),
 		cache:     acoustid.NewCache(16),
 		workers:   1,
 		maxPerRun: 10,

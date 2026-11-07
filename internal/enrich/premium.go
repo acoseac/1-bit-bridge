@@ -66,19 +66,22 @@ type atlasPremiumFetcher struct {
 // NewAtlasPremiumFetcher builds the premium-cover fetcher. A nil httpClient
 // gets a 30s-timeout default — an image fetch over a high-latency relay link
 // must not hang background enrichment forever (http.DefaultClient has no
-// timeout).
-func NewAtlasPremiumFetcher(cred AtlasCredentialSource, userAgent string, httpClient *http.Client, cacheDir string) PremiumCoverFetcher {
+// timeout). sw is enrich.enabled as the fetcher asks it
+// (enrichgate.Enrichment; backlog B617): a cover is fetched, and its answer
+// taken, only while it is on, whatever context the fetch carries; zero
+// switches are off, and fetch nothing.
+func NewAtlasPremiumFetcher(cred AtlasCredentialSource, userAgent string, httpClient *http.Client, cacheDir string, sw enrichgate.Switches) PremiumCoverFetcher {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 30 * time.Second}
 	}
 	// A copy that never carries the bearer token, or the Basic header a stored
 	// base with user information gets, from an https request onto a hop that
-	// is not https (guardRedirects), and sends only while enrich.enabled is on
-	// (enrichgate.Client, backlog B617): the gate is on the fetcher's own
-	// client, so the harvest's client, which a test may share, and its other
-	// legs and lyrics never see it.
+	// is not https (guardRedirects), and sends only while sw is on
+	// (sw.Client): the switches are on the fetcher's own client, so the
+	// harvest's client, which a test may share, and its other legs and lyrics
+	// never see them.
 	return &atlasPremiumFetcher{
-		cred: cred, userAgent: userAgent, http: guardRedirects(enrichgate.Client(httpClient)), cacheDir: cacheDir,
+		cred: cred, userAgent: userAgent, http: guardRedirects(sw.Client(httpClient)), cacheDir: cacheDir,
 		reports: newUpstreamReports(),
 	}
 }
@@ -94,8 +97,10 @@ func NewAtlasPremiumFetcher(cred AtlasCredentialSource, userAgent string, httpCl
 func (f *atlasPremiumFetcher) TryCache(ctx context.Context, path, mbid string, size int) bool {
 	resp, err := f.authedCoverGet(ctx, mbid, size)
 	if err != nil {
-		// A fetch the shutdown stopped is not reported either.
-		if failure := ctxerr.WithoutCancellation(ctx, err); failure != nil && !errors.Is(failure, ErrNoCredential) {
+		// A fetch the shutdown stopped is not reported either, nor one a
+		// switch refused (enrichgate.Refused; backlog B617).
+		if failure := ctxerr.WithoutCancellation(ctx, err); failure != nil && !errors.Is(failure, ErrNoCredential) &&
+			enrichgate.Refused(failure) == nil {
 			f.reports.report(upstreamAtlas, "atlas premium cover fetch", failure, "mbid", mbid, "size", size)
 		}
 		return false // no credential / transport error → CAA path
@@ -127,9 +132,9 @@ func (f *atlasPremiumFetcher) TryCache(ctx context.Context, path, mbid string, s
 	}
 	f.reports.answered(upstreamAtlas)
 	if err := writeArtworkAtomicStream(f.cacheDir, path, resp.Body, MaxCoverArtBytes); err != nil {
-		// A body the shutdown cut off is not a failed write; the write
-		// removed its temp file either way.
-		if failure := ctxerr.WithoutCancellation(ctx, err); failure != nil {
+		// A body the shutdown or a switch cut off is not a failed write;
+		// the write removed its temp file either way.
+		if failure := ctxerr.WithoutCancellation(ctx, err); failure != nil && enrichgate.Refused(failure) == nil {
 			logger.Warn("atlas premium cover write", "mbid", mbid, "size", size, "err", failure)
 		}
 		return false

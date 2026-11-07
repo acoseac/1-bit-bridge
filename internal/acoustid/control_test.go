@@ -76,7 +76,7 @@ func TestAcoustIDCoverageControl(t *testing.T) {
 	}
 	t.Logf("control set: %d file(s) under %s", len(files), dir)
 
-	client := NewClient("", key, "1-bit-bridge-control/0 (+https://github.com/acoseac/1-bit-bridge)", nil)
+	client := NewClient("", key, "1-bit-bridge-control/0 (+https://github.com/acoseac/1-bit-bridge)", nil, onSwitches)
 	ctx := context.Background()
 
 	var tally controlTally

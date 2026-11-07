@@ -50,7 +50,7 @@ func TestSearchAlbum_RejectsEmptyCollectionName(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewITunesClient(srv.URL, "test", nil)
+	c := NewITunesClient(srv.URL, "test", nil, onSwitches)
 
 	got, err := c.SearchAlbum(context.Background(), "Miles Davis", "Kind of Blue")
 	if err != nil {
@@ -82,7 +82,7 @@ func TestSearchAlbum_EmptyCollectionNameAloneIsNotFound(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewITunesClient(srv.URL, "test", nil)
+	c := NewITunesClient(srv.URL, "test", nil, onSwitches)
 
 	if _, err := c.SearchAlbum(context.Background(), "Someone", "Totally Unrelated Album"); err == nil {
 		t.Fatal("a nameless candidate was returned as a match for an unrelated query")

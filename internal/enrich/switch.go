@@ -9,16 +9,18 @@ import (
 // enrich.enabled and enrich.deezerEnabled, as the enricher reads them
 // (backlog B617). Each is a live predicate cmd/bridge hands the enricher
 // (WithEnabled, WithDeezerEnabled), nil meaning on, the way acousticEnabled
-// reads, since NewEnricher's other callers are tests.
+// reads, since NewEnricher's other callers are tests; the enricher hands
+// enrichgate its methods, on and deezerOn, never a nil.
 //
 // Off, the enricher asks MusicBrainz, the Cover Art Archive, Deezer and Atlas
 // nothing: Run asks enabled before each batch and parks without touching the
 // store, and each batch runs on enrich.enabled's context
-// (enrichgate.CancelWhenOff). Every client sends through enrichgate's gate, so
-// a request that starts after the flip is refused before it leaves, an
-// answer that arrives after it is not taken, and a request on the wire is
-// cancelled within a second; each refusal cancels the batch's context at
-// once, so the pass stops as at a shutdown, and stampEnriched, markSkipped
+// (enrichgate.CancelWhenOff). Every client holds the switches cmd/bridge built
+// it with (enrichgate.Switches) and asks them whatever context a request
+// carries, so a request that starts after the flip is refused before it
+// leaves, an answer that arrives after it is not taken, and a request on the
+// wire is cancelled within a second; each refusal cancels the batch's context
+// at once, so the pass stops as at a shutdown, and stampEnriched, markSkipped
 // and the fingerprint veto's write ask the switch again at the write. A row
 // waits at enriched_at = 0, and turning the switch on resumes it.
 // deezerEnabled stops the Deezer requests alone: each runs on a context of
@@ -61,7 +63,7 @@ func (e *Enricher) deezerOn() bool { return e.deezerEnabled == nil || e.deezerEn
 // has cancelled the batch. A request the client refused or whose answer it
 // did not take answers the same refusal through call's error.
 func (e *Enricher) deezerCall(ctx context.Context, call func(context.Context) error) error {
-	dctx, release := enrichgate.CancelWhenDeezerOff(ctx, e.deezerEnabled, e.switchEvery)
+	dctx, release := enrichgate.CancelWhenDeezerOff(ctx, e.deezerOn, e.switchEvery)
 	defer release()
 	if !sleepCtx(dctx, e.DeezerMinInterval) {
 		if r := enrichgate.Refusal(dctx); r != nil {
@@ -83,7 +85,9 @@ func (e *Enricher) deezerCall(ctx context.Context, call func(context.Context) er
 // at a shutdown, and the batch's context is cancelled so the pass stops
 // there (enrichgate.Admit). An answer taken while the switch was on can still
 // meet it off here.
-func stampAdmitted(ctx context.Context) bool { return enrichgate.Admit(ctx) == nil }
+func (e *Enricher) stampAdmitted(ctx context.Context) bool {
+	return enrichgate.Admit(ctx, e.on) == nil
+}
 
 // The Info lines the enricher logs about its switches: one at its start for
 // each that is off, and one at each flip it sees after that.

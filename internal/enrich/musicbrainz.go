@@ -51,6 +51,9 @@ type MusicBrainzClient struct {
 	base      baseEndpoint
 	userAgent string
 	http      *http.Client
+	// sw is the client's own switches, which its transport asks (backlog
+	// B617).
+	sw enrichgate.Switches
 
 	// minInterval is the politeness pacing the ENRICHER must apply before
 	// each call, derived from base at construction. It lives here rather
@@ -67,8 +70,11 @@ type MusicBrainzClient struct {
 }
 
 // NewMusicBrainzClient constructs a client. userAgent MUST be set to
-// something identifying the caller (MB requires this).
-func NewMusicBrainzClient(base, userAgent string, httpClient *http.Client) *MusicBrainzClient {
+// something identifying the caller (MB requires this). sw is enrich.enabled
+// as the client asks it (enrichgate.Enrichment; backlog B617): a request is
+// sent, and its answer taken, only while it is on, whatever context the
+// request carries; zero switches are off, and send nothing.
+func NewMusicBrainzClient(base, userAgent string, httpClient *http.Client, sw enrichgate.Switches) *MusicBrainzClient {
 	if base == "" {
 		base = DefaultMusicBrainzBase
 	}
@@ -80,11 +86,12 @@ func NewMusicBrainzClient(base, userAgent string, httpClient *http.Client) *Musi
 	ep := parseBaseEndpoint(base)
 	// The client is a copy that never carries the credential from an https
 	// request onto a hop that is not https (guardRedirects), and sends only
-	// while enrich.enabled is on (enrichgate.Client, backlog B617).
+	// while its switches are on (sw.Client).
 	return &MusicBrainzClient{
 		base:        ep,
 		userAgent:   userAgent,
-		http:        guardRedirects(enrichgate.Client(httpClient)),
+		http:        guardRedirects(sw.Client(httpClient)),
+		sw:          sw,
 		minInterval: minIntervalForBase(ep.root, PublicMBMinInterval, publicMBHosts),
 	}
 }

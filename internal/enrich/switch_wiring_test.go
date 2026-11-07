@@ -95,8 +95,8 @@ func TestTheEnrichersSendsRunOnTheSwitchsContext(t *testing.T) {
 		}
 	}
 	want := map[string][]string{
-		"(*Enricher).runBatch":   {"enrichgate.CancelWhenOff(ctx, e.enabled, e.switchEvery)"},
-		"(*Enricher).deezerCall": {"enrichgate.CancelWhenDeezerOff(ctx, e.deezerEnabled, e.switchEvery)"},
+		"(*Enricher).runBatch":   {"enrichgate.CancelWhenOff(ctx, e.on, e.switchEvery)"},
+		"(*Enricher).deezerCall": {"enrichgate.CancelWhenDeezerOff(ctx, e.deezerOn, e.switchEvery)"},
 	}
 	var keys []string
 	for k := range gates {
@@ -129,18 +129,20 @@ func TestTheEnrichersSendsRunOnTheSwitchsContext(t *testing.T) {
 }
 
 // TestEveryClientSendsThroughTheSwitchsGate: each constructor in this
-// package (a New function) that takes an *http.Client builds its client over
-// enrichgate's gate, Deezer's over the gate of enrich.deezerEnabled too, so a
-// request that starts after a switch-off, or an answer that arrives after
-// it, is refused by the client the next constructor builds as well.
+// package (a New function) that takes an *http.Client takes the client's own
+// switches too (enrichgate.Switches), so no client is built without them,
+// and builds its client over them (the parameter's Client), Deezer's over
+// Deezer's (its ForDeezer first), so a request that starts after a
+// switch-off, or an answer that arrives after it, is refused by the client
+// the next constructor builds as well, whatever context it is handed.
 func TestEveryClientSendsThroughTheSwitchsGate(t *testing.T) {
 	_, files := enrichSources(t)
-	want := map[string]string{
-		"NewMusicBrainzClient":   "enrichgate.Client",
-		"NewCoverArtClient":      "enrichgate.Client",
-		"NewITunesClient":        "enrichgate.Client",
-		"NewAtlasPremiumFetcher": "enrichgate.Client",
-		"NewDeezerClient":        "enrichgate.DeezerClient",
+	want := map[string][]string{
+		"NewMusicBrainzClient":   {"Client"},
+		"NewCoverArtClient":      {"Client"},
+		"NewITunesClient":        {"Client"},
+		"NewAtlasPremiumFetcher": {"Client"},
+		"NewDeezerClient":        {"ForDeezer", "Client"},
 	}
 	found := map[string]bool{}
 	for _, f := range files {
@@ -151,13 +153,20 @@ func TestEveryClientSendsThroughTheSwitchsGate(t *testing.T) {
 			}
 			name := fd.Name.Name
 			found[name] = true
-			gate, listed := want[name]
+			methods, listed := want[name]
 			if !listed {
-				t.Errorf("%s takes an *http.Client and is not listed: build its client over enrichgate.Client and list it", name)
+				t.Errorf("%s takes an *http.Client and is not listed: take the client's enrichgate.Switches, build its client over them and list it", name)
 				continue
 			}
-			if !callsNamed(fd, func(call *ast.CallExpr) bool { return types.ExprString(call.Fun) == gate }) {
-				t.Errorf("%s does not build its client over %s", name, gate)
+			sw := switchesParam(fd)
+			if sw == "" {
+				t.Errorf("%s takes no enrichgate.Switches, so a client can be built without its switches", name)
+				continue
+			}
+			for _, m := range methods {
+				if !callsNamed(fd, func(call *ast.CallExpr) bool { return types.ExprString(call.Fun) == sw+"."+m }) {
+					t.Errorf("%s does not call %s.%s on its switches", name, sw, m)
+				}
 			}
 		}
 	}
@@ -166,6 +175,17 @@ func TestEveryClientSendsThroughTheSwitchsGate(t *testing.T) {
 			t.Errorf("%s is listed and takes no *http.Client here: remove the entry", name)
 		}
 	}
+}
+
+// switchesParam is the name of fd's parameter of type enrichgate.Switches, or
+// "" when it has none.
+func switchesParam(fd *ast.FuncDecl) string {
+	for _, p := range fd.Type.Params.List {
+		if types.ExprString(p.Type) == "enrichgate.Switches" && len(p.Names) == 1 {
+			return p.Names[0].Name
+		}
+	}
+	return ""
 }
 
 // takesAnHTTPClient reports whether fd has a parameter of type *http.Client.

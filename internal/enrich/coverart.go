@@ -50,8 +50,11 @@ type CoverArtClient struct {
 	liveBase func() string
 }
 
-// NewCoverArtClient constructs a client.
-func NewCoverArtClient(base, userAgent string, httpClient *http.Client) *CoverArtClient {
+// NewCoverArtClient constructs a client. sw is enrich.enabled as the client
+// asks it (enrichgate.Enrichment; backlog B617): a request is sent, and its
+// answer taken, only while it is on, whatever context the request carries;
+// zero switches are off, and send nothing.
+func NewCoverArtClient(base, userAgent string, httpClient *http.Client, sw enrichgate.Switches) *CoverArtClient {
 	if base == "" {
 		base = DefaultCoverArtBase
 	}
@@ -64,11 +67,11 @@ func NewCoverArtClient(base, userAgent string, httpClient *http.Client) *CoverAr
 	ep := parseBaseEndpoint(base)
 	// The client is a copy that never carries the credential from an https
 	// request onto a hop that is not https (guardRedirects), and sends only
-	// while enrich.enabled is on (enrichgate.Client, backlog B617).
+	// while its switches are on (sw.Client).
 	return &CoverArtClient{
 		base:        ep,
 		userAgent:   userAgent,
-		http:        guardRedirects(enrichgate.Client(httpClient)),
+		http:        guardRedirects(sw.Client(httpClient)),
 		minInterval: minIntervalForBase(ep.root, PublicCAAMinInterval, publicCAAHosts),
 	}
 }

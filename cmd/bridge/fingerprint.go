@@ -14,6 +14,7 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/acoustid"
 	"github.com/acoseac/1-bit-bridge/internal/config"
+	"github.com/acoseac/1-bit-bridge/internal/enrichgate"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/version"
 )
@@ -201,7 +202,10 @@ func prepareFingerprintRun(ctx context.Context, key string, noLookup bool,
 	}
 	userAgent := fmt.Sprintf("1-bit-bridge/%s (+https://github.com/acoseac/1-bit-bridge)",
 		version.ServerVersion)
-	return info, acoustid.NewClient("", key, userAgent, nil), 0
+	// The run asked enrich.enabled at its start, above, and found it on; the
+	// client holds that answer as its switch (backlog B617).
+	asked := func() bool { return true }
+	return info, acoustid.NewClient("", key, userAgent, nil, enrichgate.Enrichment(asked)), 0
 }
 
 // fingerprintSwitch is enrich.enabled as `bridge fingerprint` reads it, once,

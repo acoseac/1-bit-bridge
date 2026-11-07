@@ -152,7 +152,7 @@ func TestAtlasAcceptanceControl(t *testing.T) {
 	rows := loadControlRows(t, "BRIDGE_CONTROL_MATCHED")
 	cc := &controlClient{
 		base: base, cache: map[string][]releaseCandidate{},
-		mb: NewMusicBrainzClient(base, "1-bit-bridge-control/1.0 (arsenie@odysseus.fi)", nil),
+		mb: NewMusicBrainzClient(base, "1-bit-bridge-control/1.0 (arsenie@odysseus.fi)", nil, onSwitches),
 	}
 	ctx := context.Background()
 
@@ -223,7 +223,7 @@ func TestAtlasRecallOnUnmatched(t *testing.T) {
 	rows := loadControlRows(t, "BRIDGE_CONTROL_UNMATCHED")
 	cc := &controlClient{
 		base: base, cache: map[string][]releaseCandidate{},
-		mb: NewMusicBrainzClient(base, "1-bit-bridge-control/1.0 (arsenie@odysseus.fi)", nil),
+		mb: NewMusicBrainzClient(base, "1-bit-bridge-control/1.0 (arsenie@odysseus.fi)", nil, onSwitches),
 	}
 	ctx := context.Background()
 

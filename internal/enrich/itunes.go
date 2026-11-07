@@ -54,6 +54,9 @@ type ITunesClient struct {
 	base      string
 	userAgent string
 	http      *http.Client
+	// sw is the client's own switch, enrich.enabled, which its transport
+	// asks (backlog B617).
+	sw enrichgate.Switches
 	// noteAnswered ends the iTunes failure streak when a request is
 	// answered, including a 404. A 429 or a 5xx keeps the streak. A
 	// transport error does not call it. Nil when the client is built
@@ -62,8 +65,11 @@ type ITunesClient struct {
 }
 
 // NewITunesClient constructs a client. userAgent must identify the
-// caller (Apple's recommended courtesy; not enforced).
-func NewITunesClient(base, userAgent string, httpClient *http.Client) *ITunesClient {
+// caller (Apple's recommended courtesy; not enforced). sw is enrich.enabled
+// as the client asks it (enrichgate.Enrichment; backlog B617): a request is
+// sent, and its answer taken, only while it is on, whatever context the
+// request carries; zero switches are off, and send nothing.
+func NewITunesClient(base, userAgent string, httpClient *http.Client, sw enrichgate.Switches) *ITunesClient {
 	if base == "" {
 		base = DefaultITunesBase
 	}
@@ -75,9 +81,9 @@ func NewITunesClient(base, userAgent string, httpClient *http.Client) *ITunesCli
 		// churn during enrichment passes.
 		httpClient = &http.Client{Timeout: 10 * time.Second, Transport: sharedHTTPTransport}
 	}
-	// A copy that sends only while enrich.enabled is on (enrichgate.Client,
-	// backlog B617), though no production path builds this client.
-	return &ITunesClient{base: base, userAgent: userAgent, http: enrichgate.Client(httpClient)}
+	// A copy that sends only while sw is on (sw.Client), though no
+	// production path builds this client.
+	return &ITunesClient{base: base, userAgent: userAgent, http: sw.Client(httpClient), sw: sw}
 }
 
 // ITunesAlbum is the trimmed-down iTunes album result the enricher

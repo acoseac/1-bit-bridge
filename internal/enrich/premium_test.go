@@ -52,7 +52,7 @@ func TestAtlasPremiumFetcher_TryCache(t *testing.T) {
 		defer srv.Close()
 
 		dir := t.TempDir()
-		f := NewAtlasPremiumFetcher(fakeCred{token: "tok123", base: srv.URL, ok: true}, "test-ua", srv.Client(), dir)
+		f := NewAtlasPremiumFetcher(fakeCred{token: "tok123", base: srv.URL, ok: true}, "test-ua", srv.Client(), dir, onSwitches)
 		path := filepath.Join(dir, mbid+"-500.jpg")
 		if !f.TryCache(context.Background(), path, mbid, 500) {
 			t.Fatal("TryCache returned false on a 200 response")
@@ -95,7 +95,7 @@ func TestAtlasPremiumFetcher_TryCache(t *testing.T) {
 				defer srv.Close()
 				cred := &fakeClearableCred{fakeCred: fakeCred{token: "tok", base: srv.URL, ok: true}}
 				dir := t.TempDir()
-				f := NewAtlasPremiumFetcher(cred, "ua", srv.Client(), dir)
+				f := NewAtlasPremiumFetcher(cred, "ua", srv.Client(), dir, onSwitches)
 				path := filepath.Join(dir, mbid+"-500.jpg")
 				if f.TryCache(context.Background(), path, mbid, 500) {
 					t.Errorf("TryCache returned true on %d", status)
@@ -119,7 +119,7 @@ func TestAtlasPremiumFetcher_TryCache(t *testing.T) {
 		defer srv.Close()
 		// ok=false → fetcher must short-circuit before any HTTP call.
 		dir := t.TempDir()
-		f := NewAtlasPremiumFetcher(fakeCred{ok: false}, "ua", srv.Client(), dir)
+		f := NewAtlasPremiumFetcher(fakeCred{ok: false}, "ua", srv.Client(), dir, onSwitches)
 		path := filepath.Join(dir, mbid+"-500.jpg")
 		if f.TryCache(context.Background(), path, mbid, 500) {
 			t.Error("TryCache returned true with no credential")
@@ -137,7 +137,7 @@ func TestAtlasPremiumFetcher_TryCache(t *testing.T) {
 		}))
 		defer srv.Close()
 		dir := t.TempDir()
-		f := NewAtlasPremiumFetcher(fakeCred{token: "t", base: srv.URL + "/", ok: true}, "ua", srv.Client(), dir)
+		f := NewAtlasPremiumFetcher(fakeCred{token: "t", base: srv.URL + "/", ok: true}, "ua", srv.Client(), dir, onSwitches)
 		path := filepath.Join(dir, mbid+"-1200.jpg")
 		if !f.TryCache(context.Background(), path, mbid, 1200) {
 			t.Fatal("TryCache returned false")
@@ -172,7 +172,7 @@ func TestAtlasPremiumFetcher_RefetchPremium(t *testing.T) {
 		if err := os.WriteFile(path, []byte(existing), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		return NewAtlasPremiumFetcher(fakeCred{token: "t", base: srv.URL, ok: true}, "ua", srv.Client(), dir), path
+		return NewAtlasPremiumFetcher(fakeCred{token: "t", base: srv.URL, ok: true}, "ua", srv.Client(), dir, onSwitches), path
 	}
 
 	t.Run("premium source overwrites the cache", func(t *testing.T) {
@@ -199,7 +199,7 @@ func TestAtlasPremiumFetcher_RefetchPremium(t *testing.T) {
 
 	t.Run("no credential returns ErrNoCredential", func(t *testing.T) {
 		dir := t.TempDir()
-		f := NewAtlasPremiumFetcher(fakeCred{ok: false}, "ua", nil, dir)
+		f := NewAtlasPremiumFetcher(fakeCred{ok: false}, "ua", nil, dir, onSwitches)
 		got, err := f.RefetchPremium(context.Background(), filepath.Join(dir, "x.jpg"), mbid, 500)
 		if got || !errors.Is(err, ErrNoCredential) {
 			t.Errorf("got=%v err=%v, want false + ErrNoCredential", got, err)
@@ -212,7 +212,7 @@ func TestAtlasPremiumFetcher_RefetchPremium(t *testing.T) {
 		}))
 		defer srv.Close()
 		dir := t.TempDir()
-		f := NewAtlasPremiumFetcher(fakeCred{token: "t", base: srv.URL, ok: true}, "ua", srv.Client(), dir)
+		f := NewAtlasPremiumFetcher(fakeCred{token: "t", base: srv.URL, ok: true}, "ua", srv.Client(), dir, onSwitches)
 		got, err := f.RefetchPremium(context.Background(), filepath.Join(dir, "x.jpg"), mbid, 500)
 		if got || err == nil {
 			t.Errorf("got=%v err=%v, want false + error on 5xx", got, err)
