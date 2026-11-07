@@ -258,7 +258,7 @@ func runOutputPlay(ctx context.Context, args []string, env outputPlayEnv, stdout
 	if !on {
 		out.line("output.player.enabled is false in %s: this harness plays all the same, and bridge serve runs no player", path)
 	}
-	out.line("files play bit-exact, at their own level, which the bridge never lowers: use headphones, with the DAC's or the amplifier's own volume set low")
+	out.line("files play at their own level, which the bridge never lowers: use headphones, with the DAC's or the amplifier's own volume set low")
 	code := r.run(ctx, dir, player.Device)
 	if err := r.report.finish(code); err != nil {
 		fmt.Fprintln(stderr, err)
