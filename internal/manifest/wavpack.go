@@ -294,17 +294,17 @@ func readWavPackCorrection(r io.ReaderAt, size int64) (wvCorrection, error) {
 // wvMaxTrailingBlocks bounds the blocks with no samples the look for a
 // stream's end passes over after its last block with samples. An encoder
 // writes one or two there (its MD5 sum, a RIFF trailer); the reference
-// decoder's seek_final_index walks every block of its last wvSearchLimit
+// decoder's seek_eof_information walks every block of its last wvSearchLimit
 // bytes, and the bound is this reader's, against a file of many tiny blocks,
 // each a look back of its own.
 const wvMaxTrailingBlocks = 16
 
 // wvFinalIndex finds where the audio of a file of size bytes ends and returns
 // the index one past its last sample, as the reference decoder's
-// seek_final_index finds a stream's length: in the file's last wvSearchLimit
+// seek_eof_information finds a stream's length: in the file's last wvSearchLimit
 // bytes, the last block with samples, which must be a final block (the last
 // of its frame). Blocks with no samples after it are passed over, as
-// seek_final_index passes over them: the reference encoder writes its MD5 sum
+// seek_eof_information passes over them: the reference encoder writes its MD5 sum
 // and a RIFF trailer after the audio, in a block of metadata alone whose
 // header is cleared but for its id, version, size and total
 // (write_metadata_block), so it is no final block, and its index is 0. The
@@ -317,10 +317,10 @@ const wvMaxTrailingBlocks = 16
 // block, and a file with anything after its last block (a correction file
 // holds no tag) is not one an encoder wrote. Nor is one found where the blocks
 // with no samples fill the whole of the file's last wvSearchLimit bytes (a
-// RIFF trailer past 1 MiB): no block with samples starts there, as
-// seek_final_index finds no final block in its last 1 MiB either, so the
-// stream's end is not known, and no correction file matches it
-// (correctionMatches): its row is WAVPACK-LOSSY.
+// RIFF trailer past 1 MiB): no block with samples starts there, so the
+// stream's end is not known here, where seek_eof_information would step back
+// another 1 MiB, and no correction file matches it (correctionMatches): its
+// row is WAVPACK-LOSSY, the cautious answer.
 func wvFinalIndex(r io.ReaderAt, size int64) (uint64, bool, error) {
 	floor := max(size-wvSearchLimit, 0)
 	buf := make([]byte, wvSearchWindow+wvHeaderBytes)
@@ -730,7 +730,7 @@ func correctionMatches(wv wvStream, wvc wvCorrection) bool {
 // it (cli/wavpack.c), so a rewrite of the .wvc that fails leaves this pair.
 // The reference decoder takes it: it reads the stream's length from the .wv
 // alone (WavpackOpenFileInputEx64: the .wv's first audio block's total, or
-// seek_final_index over the .wv), and takes a correction block by its index,
+// seek_eof_information over the .wv), and takes a correction block by its index,
 // samples and flags (read_wvc_block, match_wvc_header), never its total. It
 // would take the reverse too, a total in the .wvc alone, and two totals that
 // differ, which no reference encode writes, so this reader refuses both, and

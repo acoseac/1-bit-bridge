@@ -2517,21 +2517,21 @@
   `correctionTotalAgrees`; the pair an encode that learned the stream's length
   only at its end leaves when its rewrite of the `.wvc`'s first block fails,
   which the reference decoder takes, since it reads the length from the `.wv`
-  alone, `WavpackOpenFileInputEx64` and `seek_final_index`, and takes a
+  alone, `WavpackOpenFileInputEx64` and `seek_eof_information`, and takes a
   correction block by its index, samples and flags, `read_wvc_block` and
   `match_wvc_header`; cited from libwavpack 5's source as published, which
   was not on the host this was written on: a total in the `.wvc` alone, and
   two totals that differ, stay refused), and the block that ends it ends the
   file at the stream's last
-  sample, found as libwavpack's `seek_final_index` finds a stream's length (the
+  sample, found as libwavpack's `seek_eof_information` finds a stream's length (the
   last 1 MiB, a window at a time from the end; the last block with samples,
   which must be final, passing over at most 16 blocks with no samples after
   it, the encoder's MD5 sum or RIFF trailer, written with their flags and
   index cleared: round 5, CodeRabbit, found a `.wv` whose header states no
   length and that ends with its MD5 sum matching no correction file; blocks
-  with no samples that fill the whole last 1 MiB leave the end unknown, as
-  `seek_final_index` finds no final block there either, and nothing
-  matches), so a copy cut short does not match. Where the `.wv`'s header states no usable length (a total the
+  with no samples that fill the whole last 1 MiB leave the end unknown here,
+  where `seek_eof_information` would step back another 1 MiB, and nothing
+  matches, the cautious answer), so a copy cut short does not match. Where the `.wv`'s header states no usable length (a total the
   encoder could not write, or a first audio block past index 0), that last
   sample is the `.wv`'s own last block's, found the same way before its tags
   (`wvStreamFinal`: an ID3v1 tag, then an APEv2 tag with its header), and a
