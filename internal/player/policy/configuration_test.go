@@ -27,39 +27,45 @@ func mytekDescriptors(t *testing.T) []byte {
 	return b
 }
 
-// mytekAltsets are the Mytek's playback altsets, on interface 2, as the
-// owner's capture of 2026-11-04 describes them (the DAC's profile): S32_LE to
-// 384 kHz, DoP's carriers to DSD128's, and native DSD_U32_BE to DSD256's
-// frame rate.
+// mytekAltsets are the Mytek's playback altsets, on interface 2, as the box's
+// /proc/asound/card5/stream0 gave them (2026-11-07): S32_LE and DSD_U32_BE,
+// each to 384 kHz.
 func mytekAltsets() []alsa.Altset {
 	return []alsa.Altset{
 		{Interface: ptr(2), Altset: ptr(1), Formats: []string{"S32_LE"}, Channels: ptr(2),
 			Rates: []int{44100, 48000, 88200, 96000, 176400, 192000, 352800, 384000}, Bits: ptr(32)},
 		{Interface: ptr(2), Altset: ptr(2), Formats: []string{"SPECIAL", "DSD_U32_BE"}, Channels: ptr(2),
-			Rates: []int{88200, 176400, 352800}, Bits: ptr(32)},
+			Rates: []int{44100, 48000, 88200, 96000, 176400, 192000, 352800, 384000}, Bits: ptr(32)},
 	}
 }
 
 // mytekMixerTable is the kernel's table of the controls its USB audio driver
-// made of the Mytek's feature unit 4, written as sound/usb/mixer.c writes it
-// at v6.12: synthetic, since no capture of the unit's table is kept, its
-// names the ones the driver gives a feature unit after a USB streaming input
-// terminal.
+// made of the Mytek, as the box's /proc/asound/card5/usbmixer gave it
+// (2026-11-07).
 const mytekMixerTable = `USB Mixer: usb_id=0x25ce0025, ctrlif=0, ctlerr=0
-Card: Mytek Brooklyn DAC+ at usb-0000:01:00.0-1.3, high speed
-  Unit: 4
-    Control: name="PCM Playback Switch", index=0
-    Info: id=4, control=1, cmask=0x0, channels=1, type="INV_BOOLEAN"
+Card: Mytek Digital Brooklyn DAC+ at usb-xhci-hcd.0-1.4, high speed
   Unit: 4
     Control: name="PCM Playback Volume", index=0
     Info: id=4, control=2, cmask=0x0, channels=1, type="S16"
-    Volume: min=-32768, max=0, dBmin=-12800, dBmax=0
+    Volume: min=-25344, max=0, dBmin=-9900, dBmax=0
+  Unit: 4
+    Control: name="PCM Playback Switch", index=0
+    Info: id=4, control=1, cmask=0x0, channels=1, type="INV_BOOLEAN"
+    Volume: min=0, max=1, dBmin=0, dBmax=0
+  Unit: 7
+    Control: name="Clock Source 7 Validity", index=0
+    Info: id=7, control=2, cmask=0x0, channels=1, type="BOOLEAN"
+    Volume: min=0, max=1, dBmin=0, dBmax=0
+  Unit: 8
+    Control: name="PCM Clock Source", index=0
+    Info: id=8, control=1, cmask=0x0, channels=1, type="U8"
+    Volume: min=1, max=2, dBmin=0, dBmax=0
 `
 
 // mytekMixer is what the gain check reads of the Mytek's card: its captured
 // descriptors in configuration 1, the kernel's table of unit 4
 // (mytekMixerTable), and its controls, the mute on and the master volume at
-// volume of 0 to 128, -128 dB to 0 dB.
+// volume of 0 to 25344, -99 dB to 0 dB, 256 to the decibel, as the box reads.
 func mytekMixer(t *testing.T, volume int64) Mixer {
 	t.Helper()
 	units, err := ParseUSBMixer([]byte(mytekMixerTable))
@@ -68,7 +74,7 @@ func mytekMixer(t *testing.T, volume int64) Mixer {
 	}
 	return Mixer{Descriptors: mytekDescriptors(t), Config: 1, ControlsRead: true, UnitsRead: true, Units: units,
 		Controls: alsactl.Snapshot{Controls: []alsactl.Control{boolean("PCM Playback Switch", 1),
-			integer("PCM Playback Volume", 0, 0, 128, dbMinMax(-12800, 0), volume)}}}
+			integer("PCM Playback Volume", 0, 0, 25344, dbMinMax(-9900, 0), volume)}}}
 }
 
 // TestTheMyteksCapturedDescriptorsGiveItsDoPPath (B773): a Mytek Brooklyn
@@ -106,10 +112,10 @@ func TestTheMyteksCapturedDescriptorsGiveItsDoPPath(t *testing.T) {
 		}
 	}
 	carriers := DoPAltsets(mytekAltsets(), dsd64)
-	wantGain(t, "the Mytek's volume at 0 dB", CheckGain(mytekMixer(t, 128), carriers, nil, "0100"), "")
+	wantGain(t, "the Mytek's volume at 0 dB", CheckGain(mytekMixer(t, 25344), carriers, nil, "0100"), "")
 	wantGain(t, "the Mytek's volume off 0 dB", CheckGain(mytekMixer(t, 64), carriers, nil, "0100"), ReasonGainNotUnity)
 	r := newRig(t).everything(dsdstate.ModeDoP)
-	r.altsets, r.mixer = mytekAltsets(), mytekMixer(t, 128)
+	r.altsets, r.mixer = mytekAltsets(), mytekMixer(t, 25344)
 	wantOutcome(t, "DoP at DSD64 on the Mytek at 0 dB", r.plan(dsd64), OutcomeDoP)
 	wantOutcome(t, "DoP at DSD128 on the Mytek at 0 dB", r.plan(dsd128), OutcomeDoP)
 	r.mixer = mytekMixer(t, 64)
