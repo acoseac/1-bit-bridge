@@ -552,6 +552,13 @@ func TestOneProbeAtATimeAndAReplugIsProbedOnceTheHeldOneEnds(t *testing.T) {
 			within(t, probe.came, "the probe's call")
 			r.bound.replug(r.box, 3)
 			r.ask(t, ctx, ready)
+			// The ask is kept, and starts nothing: the backend runs the held
+			// probe's goroutine and the probe's own call, nothing more. A second
+			// goroutine counts from the ask, or, gone already, has had its probe
+			// refused beside the held one, and no probe follows the held one.
+			if n := r.b.Stats().Goroutines; n != 2 {
+				t.Fatalf("%d goroutines of the backend's run once the replug's ask returned; want the held probe's and its call's alone", n)
+			}
 			var started <-chan error
 			if c.then != nil {
 				started = c.then(t, r)
