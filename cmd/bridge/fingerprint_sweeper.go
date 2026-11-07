@@ -40,10 +40,12 @@ import (
 // # What it is allowed to write
 //
 // Outcomes go into an in-memory cache that the enricher reads. The only
-// database write is ResetEnrichedByPaths over the paths it actually resolved —
+// database write of a match is ResetEnrichedByPaths over the paths it actually
+// resolved, which records each match's provenance in the same transaction —
 // deliberately NOT the library-wide ResetEnrichedMisses, which selects roughly
 // half the library and would push a ~9,000-track delta to every paired device
-// on every sweep (the PR #369 wipe-loop class, on a timer).
+// on every sweep (the PR #369 wipe-loop class, on a timer). A no-match and an
+// apply-time veto are recorded as markers of their own.
 
 // pathResolver is the one method the sweeper needs from bridgefs.Resolver.
 //
@@ -265,8 +267,13 @@ func (s *fingerprintSweeper) sweep(ctx context.Context) *admin.FingerprintSweepC
 			s.forgetUnqueued(resolved)
 			return nil
 		}
+		// The re-queue and each match's provenance are one transaction
+		// (backlog B617): a re-queue a switch-off or a shutdown cancels, or one
+		// that fails, records neither, and forgetting the matches here leaves
+		// each file for the next sweep to match and re-queue again.
 		n, err := s.store.ResetEnrichedByPaths(ctx, resolved)
 		if err != nil {
+			s.forgetUnqueued(resolved)
 			// A cancelled context here is a normal shutdown, not a fault —
 			// logging it at Error would put a misleading line in the journal
 			// every time the bridge stops mid-sweep.
@@ -281,16 +288,19 @@ func (s *fingerprintSweeper) sweep(ctx context.Context) *admin.FingerprintSweepC
 	return counts
 }
 
-// forgetUnqueued drops what a stopped pass cached for the files it resolved
-// and did not re-queue (backlog B617). The candidate scan skips a file this
-// cache answers, and only the re-queue hands a verdict to the enricher, so a
-// match kept past the stop held its file out of every later pass in this
-// process: enrichment switched off mid-sweep and on again never applied it.
-// Forgotten, the next pass offers the file again, as after a restart. The
-// provenance (SetAcoustIDMatch) records an acceptance, and stays.
-func (s *fingerprintSweeper) forgetUnqueued(resolved []string) {
-	for _, path := range resolved {
-		s.cache.Forget(path)
+// forgetUnqueued drops what a pass cached for the files it resolved and did
+// not re-queue: one a switch-off or a shutdown stopped, or whose re-queue
+// failed (backlog B617). The candidate scan skips a file this cache answers,
+// and only the re-queue hands a verdict to the enricher, so a match kept past
+// the stop held its file out of every later pass in this process: enrichment
+// switched off mid-sweep and on again never applied it. Forgotten, the next
+// pass offers the file again, as after a restart. Nothing of the match is in
+// the store: its provenance is written only with its re-queue, in the same
+// transaction (ResetEnrichedByPaths), so no provenance holds the file out of
+// the next pass either.
+func (s *fingerprintSweeper) forgetUnqueued(resolved []manifest.AcoustIDMatch) {
+	for _, m := range resolved {
+		s.cache.Forget(m.Path)
 	}
 }
 
@@ -352,7 +362,7 @@ func (s *fingerprintSweeper) collectCandidates(ctx context.Context) ([]candidate
 		// Deliberately NOT keyed on membership alone: matched-but-artistless
 		// rows are verdicts vetoed at apply time, or lost to a restart between
 		// re-queue and enrichment — provenance records acceptance, not
-		// application (see SetAcoustIDMatch) — and those are exactly the rows
+		// application (see ResetEnrichedByPaths) — and those are exactly the rows
 		// a sweep can still advance.
 		//
 		// The converse is deliberately approximate, and the approximation is
@@ -525,11 +535,11 @@ func (s *fingerprintSweeper) resolveCandidates(in []candidate) []candidate {
 var errSweepFull = errors.New("fingerprint: per-run cap reached")
 
 // fingerprintAll runs the workers and returns the paths that resolved.
-func (s *fingerprintSweeper) fingerprintAll(ctx context.Context, cands []candidate) []string {
+func (s *fingerprintSweeper) fingerprintAll(ctx context.Context, cands []candidate) []manifest.AcoustIDMatch {
 	jobs := make(chan candidate)
 	var (
 		mu       sync.Mutex
-		resolved []string
+		resolved []manifest.AcoustIDMatch
 		wg       sync.WaitGroup
 	)
 
@@ -541,9 +551,9 @@ func (s *fingerprintSweeper) fingerprintAll(ctx context.Context, cands []candida
 				if ctx.Err() != nil {
 					return
 				}
-				if ok := s.fingerprintOne(ctx, c); ok {
+				if m, ok := s.fingerprintOne(ctx, c); ok {
 					mu.Lock()
-					resolved = append(resolved, c.path)
+					resolved = append(resolved, m)
 					mu.Unlock()
 				}
 			}
@@ -581,7 +591,7 @@ func (s *fingerprintSweeper) fingerprintAll(ctx context.Context, cands []candida
 
 	mu.Lock()
 	defer mu.Unlock()
-	return append([]string(nil), resolved...)
+	return append([]manifest.AcoustIDMatch(nil), resolved...)
 }
 
 // waitForWorkers blocks until the workers finish, or — if the context is
@@ -638,9 +648,10 @@ func (s *fingerprintSweeper) fpcalcBudget() time.Duration {
 	return fingerprintDecodeTimeout
 }
 
-// fingerprintOne decodes, looks up, and records one track. Returns true when
-// the gate accepted a match.
-func (s *fingerprintSweeper) fingerprintOne(ctx context.Context, c candidate) bool {
+// fingerprintOne decodes, looks up, and records one track. Returns the match
+// and true when the gate accepted one, which the sweep's re-queue records
+// with the track's provenance (ResetEnrichedByPaths).
+func (s *fingerprintSweeper) fingerprintOne(ctx context.Context, c candidate) (manifest.AcoustIDMatch, bool) {
 	key := acoustid.Key{Path: c.path, Size: c.size, MTimeNS: c.mtimeNS}
 
 	// The rate-limit pause gates the DECODE, not just the lookup. fpcalc costs
@@ -650,7 +661,7 @@ func (s *fingerprintSweeper) fingerprintOne(ctx context.Context, c candidate) bo
 	// to save, and arrive at the wall anyway.
 	s.awaitPause(ctx)
 	if ctx.Err() != nil {
-		return false
+		return manifest.AcoustIDMatch{}, false
 	}
 
 	// The sweep context stays the parent. A per-file timeout is what bounds
@@ -663,7 +674,7 @@ func (s *fingerprintSweeper) fingerprintOne(ctx context.Context, c candidate) bo
 	fp, err := s.fingerprintFile(fileCtx, c.absPath)
 	if err != nil {
 		s.noteDecodeErr(ctx, fileCtx, key, c.path, err)
-		return false
+		return manifest.AcoustIDMatch{}, false
 	}
 
 	in := acoustid.Input{
@@ -677,12 +688,12 @@ func (s *fingerprintSweeper) fingerprintOne(ctx context.Context, c candidate) bo
 	}
 	if reason := acoustid.CheckFingerprint(in); reason != acoustid.ReasonNone {
 		s.cache.Set(key, acoustid.Outcome{})
-		return false
+		return manifest.AcoustIDMatch{}, false
 	}
 
 	s.wait(ctx)
 	if ctx.Err() != nil {
-		return false
+		return manifest.AcoustIDMatch{}, false
 	}
 	results, err := s.client.Lookup(ctx, fp)
 	if err != nil {
@@ -692,11 +703,11 @@ func (s *fingerprintSweeper) fingerprintOne(ctx context.Context, c candidate) bo
 		// nothing is cached, persisted or logged, and the file is offered
 		// again once the switch is on. Classified before anything else.
 		if ctx.Err() != nil || errors.Is(err, enrichgate.ErrOff) {
-			return false
+			return manifest.AcoustIDMatch{}, false
 		}
 		if errors.Is(err, acoustid.ErrNoMatch) {
 			if !s.admitted(ctx) {
-				return false
+				return manifest.AcoustIDMatch{}, false
 			}
 			// AcoustID answered cleanly and knows nothing. A fact about the
 			// audio, so cache it — and persist it, so the next restart does
@@ -711,12 +722,12 @@ func (s *fingerprintSweeper) fingerprintOne(ctx context.Context, c candidate) bo
 			// nothing to do with their audio.
 			s.cache.Set(key, acoustid.Outcome{})
 			if err := s.store.SetAcoustIDNoMatch(ctx, c.path, c.size, c.mtimeNS); err != nil && ctx.Err() == nil {
-				// Best-effort, exactly like the provenance write: failing to
-				// remember a negative costs one future decode, and must not
-				// turn a clean answer into a retryable failure.
+				// Best-effort: failing to remember a negative costs one
+				// future decode, and must not turn a clean answer into a
+				// retryable failure.
 				logger.Warn("fingerprint: record no-match", "path", c.path, "err", err)
 			}
-			return false
+			return manifest.AcoustIDMatch{}, false
 		}
 		// A 429 tells the whole pool to stand down, not just this worker.
 		// Must run BEFORE the classification below returns: a rate limit IS
@@ -729,30 +740,28 @@ func (s *fingerprintSweeper) fingerprintOne(ctx context.Context, c candidate) bo
 			logger.Warn("fingerprint: lookup", "path", c.path, "err", err)
 			s.cache.Set(key, acoustid.Outcome{})
 		}
-		return false
+		return manifest.AcoustIDMatch{}, false
 	}
 
 	in.Results = results
 	decision, reason := acoustid.Accept(in)
 	// What AcoustID answered is written only while enrich.enabled is still
-	// on (backlog B617): the cache, which the enricher reads, and the
-	// provenance below.
+	// on (backlog B617): the cache, which the enricher reads, and the match
+	// the sweep's re-queue records.
 	if !s.admitted(ctx) {
-		return false
+		return manifest.AcoustIDMatch{}, false
 	}
 	if reason != acoustid.ReasonNone {
 		s.cache.Set(key, acoustid.Outcome{})
-		return false
+		return manifest.AcoustIDMatch{}, false
 	}
 
 	s.cache.Set(key, acoustid.Outcome{Matched: true, Decision: decision})
-	// Provenance, so the write is attributable and reversible. Best-effort:
-	// failing to record HOW a row was resolved must not stop it being
-	// resolved.
-	if err := s.store.SetAcoustIDMatch(ctx, c.path, decision.AcoustID); err != nil && ctx.Err() == nil {
-		logger.Warn("fingerprint: record provenance", "path", c.path, "err", err)
-	}
-	return true
+	// Provenance, so the write is attributable and reversible, is the
+	// re-queue's to record, in its transaction: written here, ahead of it, a
+	// re-queue that did not land left it behind, and with a text-derived
+	// artist MBID that held the file out of every later sweep (backlog B617).
+	return manifest.AcoustIDMatch{Path: c.path, AcoustID: decision.AcoustID}, true
 }
 
 // noteDecodeErr logs and records one failed decode. ctx is the SWEEP

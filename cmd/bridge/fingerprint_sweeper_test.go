@@ -124,7 +124,7 @@ func TestSweeperRateLimitStallsTheWholePool(t *testing.T) {
 	// One worker takes the 429.
 	first := base
 	first.path = "a.flac"
-	if s.fingerprintOne(context.Background(), first) {
+	if _, matched := s.fingerprintOne(context.Background(), first); matched {
 		t.Fatal("a rate-limited lookup must not report a match")
 	}
 
@@ -508,8 +508,8 @@ func TestCollectCandidatesSkipsMatchedAndConsumedRows(t *testing.T) {
 	f.seed(t, "vetoed.flac", "")
 	f.seed(t, "text.flac", artistMBID)
 	for _, p := range []string{"consumed.flac", "vetoed.flac"} {
-		if err := f.store.SetAcoustIDMatch(ctx, p, acoustID); err != nil {
-			t.Fatalf("SetAcoustIDMatch %q: %v", p, err)
+		if err := f.store.SetAcoustIDMatchForTest(ctx, p, acoustID); err != nil {
+			t.Fatalf("SetAcoustIDMatchForTest %q: %v", p, err)
 		}
 	}
 
@@ -619,8 +619,8 @@ func TestCollectCandidatesSkipsPersistedTagVetoUnlessInputsChanged(t *testing.T)
 		f.seedTagged(t, p, "", tagged)
 		// Every one of them was ACCEPTED at the gate — that is what makes this
 		// a test about the veto marker rather than about provenance.
-		if err := f.store.SetAcoustIDMatch(ctx, p, acoustID); err != nil {
-			t.Fatalf("SetAcoustIDMatch %q: %v", p, err)
+		if err := f.store.SetAcoustIDMatchForTest(ctx, p, acoustID); err != nil {
+			t.Fatalf("SetAcoustIDMatchForTest %q: %v", p, err)
 		}
 	}
 
