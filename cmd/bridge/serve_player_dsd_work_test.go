@@ -130,7 +130,6 @@ func TestTheSupervisorAnswersWhileTheSilentProbeIsHeld(t *testing.T) {
 			goBarDSD(t, box.trees)
 			kernelReleaseIn(t, box.trees)
 			probe := newHeldDACProbe(true)
-			t.Cleanup(probe.let)
 			seams := noControlNodes()
 			if exit == "a panic in the supervisor" {
 				seams.reports = func(rp engine.OutputReport) {
@@ -144,6 +143,8 @@ func TestTheSupervisorAnswersWhileTheSilentProbeIsHeld(t *testing.T) {
 					box.with(o)
 					o.playerBackend = probe.backend
 				}})
+			// Registered after the boot, so it runs before serve's drain.
+			t.Cleanup(probe.let)
 			eng := ps.runningEngine(t)
 			availableOutput(t, eng)
 			probe.await(t)
@@ -221,7 +222,6 @@ func TestServeKeepsTheDataDirLockWhileTheProbesEvidenceIsWritten(t *testing.T) {
 	goBarDSD(t, box.trees)
 	kernelReleaseIn(t, box.trees)
 	writes := &heldStateWrites{came: make(chan struct{}), gate: make(chan struct{})}
-	t.Cleanup(writes.let)
 	seams := noControlNodes()
 	controls := seams.dsdPolicy
 	seams.dsdPolicy = func(p *playback.DSDPolicy) {
@@ -234,6 +234,8 @@ func TestServeKeepsTheDataDirLockWhileTheProbesEvidenceIsWritten(t *testing.T) {
 			box.with(o)
 			o.playerBackend = probe.backend
 		}})
+	// Registered after the boot, so it runs before serve's drain.
+	t.Cleanup(writes.let)
 	availableOutput(t, ps.runningEngine(t))
 	select {
 	case <-writes.came:
@@ -306,7 +308,6 @@ func TestTheSupervisorAnswersWhileARefreshIsHeldReadingTheControls(t *testing.T)
 	box := newDSDBox(t)
 	goBarDSD(t, box.trees)
 	node := &heldControlNode{came: make(chan struct{}), gate: make(chan struct{})}
-	t.Cleanup(node.let)
 	seams := &servePlayerSeams{dsdPolicy: func(p *playback.DSDPolicy) {
 		hb, ok := p.Box.(playback.HostBox)
 		if !ok {
@@ -320,6 +321,8 @@ func TestTheSupervisorAnswersWhileARefreshIsHeldReadingTheControls(t *testing.T)
 		box.with(o)
 		o.playerBackend = probes.backend
 	}})
+	// Registered after the boot, so it runs before serve's drain.
+	t.Cleanup(node.let)
 	eng := ps.runningEngine(t)
 	availableOutput(t, eng)
 	node.armed.Store(true)

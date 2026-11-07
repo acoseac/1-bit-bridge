@@ -303,11 +303,27 @@ type Backend struct {
 	took                map[packKey]format.ALSAFormat
 	overlaps            int
 	terminalUnconfirmed bool
+	// starts counts the Starts that came to the device slot (hold): a probe
+	// a Start came to the slot beside keeps nothing of what it asked
+	// (publishProbe, B762).
+	starts atomic.Uint64
+
+	// The supervisor's refresh (RequestRefreshDSD, B762): its goroutine, and a
+	// forced refresh asked while one ran.
+	refreshRun    coalesced
+	refreshForced atomic.Bool
 
 	// The goroutines the backend started and that have not returned.
 	gmu  sync.Mutex
 	live int
 	zero chan struct{} // closed while live is 0
+
+	// Those of them that write the player's DSD state, or may start a write
+	// (spawnWrite): a share of the data directory's lock is kept while one
+	// runs (DSDWrites, B762).
+	wmu    sync.Mutex
+	writes int
+	wzero  chan struct{} // closed while writes is 0
 }
 
 // New builds a backend.
@@ -347,7 +363,7 @@ func New(cfg Config) (*Backend, error) {
 	if cfg.Authorization == nil {
 		reason = string(ReasonDSD)
 	}
-	b := &Backend{policy: PlayerPolicy{BootID: fmt.Sprintf("%x", randomBoot()), Generation: 1, Reason: reason}, cfg: cfg, log: cfg.Log, sessions: map[engine.SessionID]*session{}, took: map[packKey]format.ALSAFormat{}, zero: zero}
+	b := &Backend{policy: PlayerPolicy{BootID: fmt.Sprintf("%x", randomBoot()), Generation: 1, Reason: reason}, cfg: cfg, log: cfg.Log, sessions: map[engine.SessionID]*session{}, took: map[packKey]format.ALSAFormat{}, zero: zero, wzero: zero}
 	if cfg.DSD != nil {
 		// Its read side the state's warnings of the bridge's already, a state
 		// that did not read among them, before the first refresh reads the box.
@@ -363,7 +379,9 @@ func New(cfg Config) (*Backend, error) {
 type Stats struct {
 	// Goroutines is the goroutines the backend started that have not
 	// returned: each session's producer, reporter and openers, a release's
-	// teardown, and a call waiting on its sink for its caller. A device the
+	// teardown, a call waiting on its sink for its caller, the writes of the
+	// player's DSD state, and the silent probe's and the refresh's that the
+	// supervisor asks for (RequestProbeDSD, RequestRefreshDSD). A device the
 	// kernel holds in a call that never returns keeps the sink's writer in
 	// it, and with it the teardown that closes that sink and any call that
 	// waits on it: those are abandoned, never joined, and stay counted
@@ -432,6 +450,29 @@ func (b *Backend) logPanic(where string, r any) {
 		attrs = append(attrs, "error", rerr.Error())
 	}
 	b.log.Error(panicMessage, attrs...)
+}
+
+// spawnWrite runs f as spawn does, counted among the writes of the player's
+// DSD state too (DSDWrites) until it returns: a write (recordDSD), or the
+// silent probe's goroutine, which may start one (RequestProbeDSD).
+func (b *Backend) spawnWrite(f func()) {
+	b.wmu.Lock()
+	if b.writes == 0 {
+		b.wzero = make(chan struct{})
+	}
+	b.writes++
+	b.wmu.Unlock()
+	b.spawn(func() {
+		defer func() {
+			b.wmu.Lock()
+			b.writes--
+			if b.writes == 0 {
+				close(b.wzero)
+			}
+			b.wmu.Unlock()
+		}()
+		f()
+	})
 }
 
 // spawn runs f on a goroutine the backend counts until it returns. Each f
@@ -505,8 +546,10 @@ var errReleased = errors.New("player backend: the session's release came first: 
 // open. ctx's end, and s's release, end the wait too. While it waits the
 // Start counts among the waiters, whom reserveProbe refuses a probe for, so
 // no second probe takes the slot between the first's end and this Start's
-// taking it (B728 B4 round 2).
+// taking it (B728 B4 round 2). It counts the Start's coming (starts) first:
+// a probe it came beside keeps nothing of what it asked (B762).
 func (b *Backend) hold(ctx context.Context, s *session) error {
+	b.starts.Add(1)
 	var expired chan struct{}
 	stop := func() bool { return false }
 	waiting := false

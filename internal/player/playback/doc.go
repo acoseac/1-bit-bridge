@@ -22,7 +22,8 @@
 // (ReasonDACUnread). The set is read again at a session's first occurrence
 // and at any DSD occurrence's admission it was read more than 100 ms before,
 // at each native activation, on a 100 ms monitor while a session holds DSD,
-// and at the supervisor's refresh (RefreshDSD), never on the audio path; a
+// and at the supervisor's refresh (RequestRefreshDSD, on a goroutine of the
+// backend's, B762), never on the audio path; a
 // change is swapped in one step and reconciled per occurrence
 // (policy.Reconcile): kept, handed off again through the engine
 // (engine.ReplanEvents) while no frame of it is the kernel's, or revoked. The check after open requires the opened node to be
@@ -32,7 +33,10 @@
 // probe's, and once an occurrence played five seconds of content with no
 // fault its tuple's streaming_observed and its transport's first use
 // observed. The silent probe runs when one is due (ProbeDSD), on the device
-// slot a session holds, never beside one.
+// slot a session holds, never beside one, and the supervisor asks it of a
+// goroutine of the backend's, one at a time (RequestProbeDSD, B762): a Start
+// that comes while it holds the slot waits for it, at most ProbeWait, and its
+// answers, which a Start came beside, are dropped and the probe owed.
 //
 // # DSD converted to PCM (B728 B11)
 //
