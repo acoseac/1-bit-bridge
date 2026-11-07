@@ -162,8 +162,7 @@ func (b *bridgeOutput) facts(ctx context.Context) (api.BridgeOutputFacts, engine
 	if ready {
 		if be, ok := b.p.be.(*playback.Backend); ok {
 			policy, live := be.Facts()
-			facts.DSDPlayback, facts.Playback = bridgeDSDFacts(policy, live)
-			facts.DSDPlayback.Model = playerModelText(facts.DSDPlayback.Model, b.p.device)
+			facts.DSDPlayback, facts.DSDDAC, facts.Playback = bridgeDSDFacts(policy, live, b.p.device)
 			if policy.PlaysDSD() {
 				// A tuple, or a rate the player converts to PCM (B728 B11).
 				facts.Codecs = append(facts.Codecs, "dsf", "dff")
@@ -181,15 +180,15 @@ func (b *bridgeOutput) facts(ctx context.Context) (api.BridgeOutputFacts, engine
 // set's converted rates, are B8's to publish (the design's section 7.1):
 // until then the element sends no observation while the occurrence observed
 // is one the player converts, rather than call it PCM or native DSD.
-func bridgeDSDFacts(policy playback.PlayerPolicy, live *playback.PlaybackFacts) (*api.OutputDSDPlayback, *api.OutputPlayback) {
+func bridgeDSDFacts(policy playback.PlayerPolicy, live *playback.PlaybackFacts, device config.PlayerDevice) (*api.OutputDSDPlayback, *api.OutputDSDDAC, *api.OutputPlayback) {
 	dsd := &api.OutputDSDPlayback{BootID: policy.BootID, PolicyGeneration: policy.Generation, QualificationRevision: policy.Revision, Reason: policy.Reason, Tuples: []api.OutputDSDTuple{},
-		Model: policy.Model, BCDDevice: policy.BCDDevice, QualifiedOn: policy.QualifiedOn}
+		Model: playerModelText(policy.Model, device), BCDDevice: policy.BCDDevice, QualifiedOn: policy.QualifiedOn}
 	for _, p := range policy.Tuples {
 		dsd.Tuples = append(dsd.Tuples, api.OutputDSDTuple{Format: p.Tuple.Format, BitRate: p.Tuple.BitRate, Channels: 2, PolicyID: p.PolicyID, Pause: p.Pause, TailMS: p.Tail.Milliseconds(), PrefillMS: p.Prefill.Milliseconds(),
 			Transport: playback.TupleTransport(p.Tuple)})
 	}
 	if live == nil || live.Transport == playback.TransportConverted {
-		return dsd, nil
+		return dsd, nil, nil
 	}
 	out := &api.OutputPlayback{BootID: live.BootID, PolicyGeneration: live.PolicyGeneration, Session: uint64(live.Session), Occurrence: uint64(live.Occurrence), State: live.State, Format: live.Format, RateHz: live.RateHz, LogicalRate: live.LogicalRate, Channels: live.Channels, ValidBits: live.ValidBits, PolicyID: live.PolicyID,
 		Transport: live.Transport, PackingVersion: live.PackingVersion, QualificationRevision: live.QualificationRevision}
@@ -197,7 +196,7 @@ func bridgeDSDFacts(policy playback.PlayerPolicy, live *playback.PlaybackFacts) 
 		at := live.ObservedAt.UTC()
 		out.ObservedAt = &at
 	}
-	return dsd, out
+	return dsd, nil, out
 }
 
 // playerModelText takes the boot binding's serial and port out of the

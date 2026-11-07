@@ -5,6 +5,7 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/player/dsdstate"
 	"github.com/acoseac/1-bit-bridge/internal/player/playback"
 	"github.com/acoseac/1-bit-bridge/internal/player/playback/playbacktest"
@@ -13,10 +14,10 @@ import (
 // TestTheElementListsDSDWhileThePlayerConverts (B728 B11; output.md's codecs
 // bullet): the player's element lists dsf and dff while the effective set
 // plays a DSD rate, a rate the player converts to PCM included, and not while
-// it plays none; a set that converts publishes no tuple and no reason, the
-// converted rates the backend's alone until B8 publishes them, and so does the
-// observation of a converted occurrence: the element sends none rather than
-// call it PCM or native DSD.
+// it plays none; a set that converts publishes no tuple and no reason, its
+// converted rates in dsdPlayback.converted (B8), and a converted
+// occurrence's observation is published as converted, never as PCM or native
+// DSD (B8 removed B11's withholding of it).
 func TestTheElementListsDSDWhileThePlayerConverts(t *testing.T) {
 	off := dsdstate.Defaults()
 	off.DefaultMode = dsdstate.ModeOff
@@ -55,12 +56,15 @@ func TestTheElementListsDSDWhileThePlayerConverts(t *testing.T) {
 			if f.DSDPlayback == nil || len(f.DSDPlayback.Tuples) != 0 || f.DSDPlayback.Reason != tc.reason {
 				t.Errorf("the element's dsdPlayback %+v, want no tuple and the reason %q", f.DSDPlayback, tc.reason)
 			}
+			if converted := len(f.DSDPlayback.Converted); tc.dsd != (converted == 3) {
+				t.Errorf("the element's dsdPlayback converts %d rates, want every rate while it plays DSD and none while it plays none", converted)
+			}
 		})
 	}
-	_, out := bridgeDSDFacts(playback.PlayerPolicy{BootID: "boot", Generation: 3}, &playback.PlaybackFacts{BootID: "boot", PolicyGeneration: 3, Session: 1, Occurrence: 2,
+	_, _, out := bridgeDSDFacts(playback.PlayerPolicy{BootID: "boot", Generation: 3}, &playback.PlaybackFacts{BootID: "boot", PolicyGeneration: 3, Session: 1, Occurrence: 2,
 		State: "open", Format: "S24_3LE", RateHz: 176400, Channels: 2, ValidBits: 24, Transport: playback.TransportConverted,
-		Converted: &playback.ConvertedPlayback{FromBitRate: playbacktest.DSD64, Filter: "dsdconv-1", PassbandHz: 30000, Dither: "none"}})
-	if out != nil {
-		t.Errorf("a converted occurrence's observation was published as %+v: it is B8's", *out)
+		Converted: &playback.ConvertedPlayback{FromBitRate: playbacktest.DSD64, Filter: "dsdconv-1", PassbandHz: 30000, Dither: "none"}}, config.PlayerDevice{})
+	if out == nil || out.Transport != playback.TransportConverted || out.Converted == nil || out.LogicalRate != 0 || out.Format != "S24_3LE" {
+		t.Errorf("a converted occurrence's observation was published as %+v, want converted with its plan", out)
 	}
 }

@@ -50,7 +50,10 @@ func TimeSeekWords() []string {
 // when they say nothing, and Codecs is never null.
 type OutputBridge struct {
 	DSDPlayback *OutputDSDPlayback `json:"dsdPlayback,omitempty"`
-	Playback    *OutputPlayback    `json:"playback,omitempty"`
+	// DSDDAC is the bound DAC's DSD (B728 B8): optional, omitted while no
+	// DAC is available, as an older bridge omits it.
+	DSDDAC   *OutputDSDDAC   `json:"dsdDAC,omitempty"`
+	Playback *OutputPlayback `json:"playback,omitempty"`
 	// OpenHome is the player's OpenHome Source while the opt-in started it
 	// and it listens on a LAN address, null otherwise.
 	OpenHome *OutputOpenHome `json:"openHome"`
@@ -106,6 +109,7 @@ type OutputOpenHome struct {
 // State is unavailable; OpenHome nil, or with no endpoint, is no Source.
 type BridgeOutputFacts struct {
 	DSDPlayback *OutputDSDPlayback
+	DSDDAC      *OutputDSDDAC
 	Playback    *OutputPlayback
 	Listed      bool
 	UUID        string
@@ -244,6 +248,105 @@ type OutputDSDTuple struct {
 	PrefillMS int64  `json:"prefillMs"`
 	// Transport is dop for a DoP tuple; absent, a native DSD one.
 	Transport string `json:"transport,omitempty"`
+	// Evidence is the tuple's rung of the evidence ladder and EvidenceOn its
+	// date, YYYY-MM-DD (B728 B8): each absent while there is none.
+	Evidence   string `json:"evidence,omitempty"`
+	EvidenceOn string `json:"evidenceOn,omitempty"`
+}
+
+// OutputDSDConverted is a rate the set converts to PCM (B728 B8), with
+// the plan it converts by: every claim of a converted occurrence is its
+// plan's.
+type OutputDSDConverted struct {
+	BitRate    int    `json:"bitRate"`
+	RateHz     int    `json:"rateHz"`
+	ValidBits  int    `json:"validBits"`
+	PassbandHz int    `json:"passbandHz"`
+	Dither     string `json:"dither"`
+	Filter     string `json:"filter"`
+}
+
+// OutputDSDRefused is a rate the set plays neither way, and the word it
+// refuses that rate with.
+type OutputDSDRefused struct {
+	BitRate int    `json:"bitRate"`
+	Reason  string `json:"reason"`
+}
+
+// OutputDSDWarning is one thing a client must be able to explain: a code,
+// and migration_record_refused's reason word.
+type OutputDSDWarning struct {
+	Code   string `json:"code"`
+	Reason string `json:"reason,omitempty"`
+}
+
+// OutputDSDDAC is the bound DAC's DSD as the set published now says it
+// (B728 B8): its key, its profile, the choice that applies and its
+// revision, what each mode offers, and each transport's first use.
+type OutputDSDDAC struct {
+	DACKey   string              `json:"dacKey"`
+	Profile  *OutputDSDProfile   `json:"profile,omitempty"`
+	Choice   OutputDSDChoice     `json:"choice"`
+	Options  []OutputDSDOption   `json:"options"`
+	FirstUse []OutputDSDFirstUse `json:"firstUse"`
+}
+
+// OutputDSDProfile is the DAC's profile in the bridge's database: its ID,
+// its name and its caveats.
+type OutputDSDProfile struct {
+	ID      string            `json:"id"`
+	Name    string            `json:"name"`
+	Caveats []OutputDSDCaveat `json:"caveats"`
+}
+
+// OutputDSDCaveat is a profile's caveat: a code, the transport it concerns
+// (absent for both) and the note a person is shown.
+type OutputDSDCaveat struct {
+	Code      string `json:"code"`
+	Transport string `json:"transport,omitempty"`
+	Note      string `json:"note"`
+}
+
+// OutputDSDChoice is the choice that applies to the DAC: its mode, its cap
+// (0 for none), the revision of the DAC's own choice (0 for none), and
+// whether the DAC's DoP confirmation counts on its firmware.
+type OutputDSDChoice struct {
+	Mode         string `json:"mode"`
+	MaxBitRate   int    `json:"maxBitRate"`
+	Revision     uint64 `json:"revision"`
+	DoPConfirmed bool   `json:"dopConfirmed"`
+}
+
+// OutputDSDOption is what a mode offers the DAC: native's and DoP's rates
+// with their evidence, DoP's need of a confirmation and what blocks it, and
+// the plan convert converts by. A member a mode does not have is absent.
+type OutputDSDOption struct {
+	Mode    string `json:"mode"`
+	Offered bool   `json:"offered"`
+	// Rates is native's and DoP's, [] when the mode offers no rate.
+	Rates             *[]OutputDSDOptionRate `json:"rates,omitempty"`
+	NeedsConfirmation *bool                  `json:"needsConfirmation,omitempty"`
+	Blocked           string                 `json:"blocked,omitempty"`
+	RateHz            int                    `json:"rateHz,omitempty"`
+	ValidBits         int                    `json:"validBits,omitempty"`
+	PassbandHz        int                    `json:"passbandHz,omitempty"`
+	Dither            string                 `json:"dither,omitempty"`
+}
+
+// OutputDSDOptionRate is a rate a mode offers, and its evidence.
+type OutputDSDOptionRate struct {
+	BitRate    int    `json:"bitRate"`
+	Evidence   string `json:"evidence,omitempty"`
+	EvidenceOn string `json:"evidenceOn,omitempty"`
+}
+
+// OutputDSDFirstUse is a transport's first use: pending, acknowledged or
+// observed, and the rates a migrated acknowledgement covers (absent for
+// every rate).
+type OutputDSDFirstUse struct {
+	Transport string `json:"transport"`
+	State     string `json:"state"`
+	BitRates  []int  `json:"bitRates,omitempty"`
 }
 
 // OutputDSDPlayback describes the DSD set published now, not an open DAC:
@@ -255,6 +358,12 @@ type OutputDSDPlayback struct {
 	QualificationRevision string           `json:"qualificationRevision,omitempty"`
 	Reason                string           `json:"reason,omitempty"`
 	Tuples                []OutputDSDTuple `json:"tuples"`
+	// Converted, Refused and Warnings are the set's rates converted to PCM,
+	// its rates refused and what a client must be able to explain (B728
+	// B8): each an array, [] when empty, which an older bridge omits.
+	Converted []OutputDSDConverted `json:"converted"`
+	Refused   []OutputDSDRefused   `json:"refused"`
+	Warnings  []OutputDSDWarning   `json:"warnings"`
 	// Model and BCDDevice are the bound DAC's model and descriptor firmware
 	// code the set was computed for; QualifiedOn and QualificationRevision
 	// are an owner record's, which a harness backend's epoch states and
@@ -287,4 +396,23 @@ type OutputPlayback struct {
 	// QualificationRevision is the approved record's revision the
 	// occurrence was admitted under, absent for PCM.
 	QualificationRevision string `json:"qualificationRevision,omitempty"`
+	// Evidence and EvidenceOn are a native or DoP occurrence's tuple's rung
+	// and its date (B728 B8), absent for PCM and a converted one.
+	Evidence   string `json:"evidence,omitempty"`
+	EvidenceOn string `json:"evidenceOn,omitempty"`
+	// Converted is a converted occurrence's plan (B728 B8), absent for every
+	// other: Format, RateHz and ValidBits are then its PCM's.
+	Converted *OutputPlaybackConverted `json:"converted,omitempty"`
+}
+
+// OutputPlaybackConverted is the plan a converted occurrence plays by: the
+// source's DSD rate, the filter, the passband, the dither and the gain, and
+// the samples its conversion has saturated so far.
+type OutputPlaybackConverted struct {
+	FromBitRate    int     `json:"fromBitRate"`
+	Filter         string  `json:"filter"`
+	PassbandHz     int     `json:"passbandHz"`
+	Dither         string  `json:"dither"`
+	GainDB         float64 `json:"gainDB"`
+	ClippedSamples int64   `json:"clippedSamples"`
 }

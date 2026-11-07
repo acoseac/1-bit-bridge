@@ -57,6 +57,10 @@ type PlayerPolicy struct {
 	// strings), its descriptor firmware code and the qualification date,
 	// never its port or serial.
 	Model, BCDDevice, QualifiedOn string
+	// DSD is the read side of the set published (B728 B8): what it says of
+	// the bound DAC's DSD beside its tuples, from the same set. Nil for the
+	// harness's admission, which states its record's epoch alone.
+	DSD *DSDView
 }
 
 // ConvertedRate is a DSD rate the effective set converts to PCM (B728 B11):

@@ -41,6 +41,10 @@ type PlaybackFacts struct {
 	// sections 4.8 and 7.1), nil for every other: Format, RateHz and
 	// ValidBits above are its PCM, LogicalRate 0.
 	Converted *ConvertedPlayback
+	// Evidence is a native or DoP occurrence's tuple's rung and date as the
+	// set it was admitted under computed them (B728 B8), the zero value for
+	// PCM and a converted occurrence.
+	Evidence DSDEvidence
 }
 
 // ConvertedPlayback is a converted occurrence's plan as its observation
