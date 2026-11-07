@@ -84741,3 +84741,83 @@ file changed.
 
 Two follow-ups found beside this change go to the backlog, which the orchestrator files (legion0
 has no backlog file); they are not described here.
+
+## 2026-11-07 — B762 round 2: the review's points on the probe off the supervisor loop
+
+Worker b762, legion0, branch `fix/b762-probe-off-supervisor` (#1433, stacked on B8's #1430), after
+round 1's rules patch was applied and B8 merged in (4ac62f63). Commits: ccee2e3d (the tests, red,
+over seams), 5f072c13 (the fixes), 0c6ba77b (qualificationVersion 45), f007201e (two pins written
+after the fixes, red by their controls), then this record and the gates'. The rule text changes
+through `rules-b762-r2.patch`, which first moves one entry of `player.md`, then at 99.6 % of its
+budget, to `History-rules-player.md`. Point 1 closes backlog B780; point 3 narrows B781, whose
+remainder stays in the backlog.
+
+### The points, each confirmed
+
+1. **A write after the fence.** `settle` read `DSDWrites` once and waited on that channel. A write
+   that a goroutine the stop abandoned asked for afterwards, a session's native open the kernel
+   held past the stop recording its driver_accepted once it landed, made a channel nobody waited
+   on, and could land once the player's share of the data directory's lock was let go. The backend
+   now counts its goroutines, its writes of the DSD state and a gate on them under one lock (`gmu`;
+   round 1 had a second, `wmu`). `CloseDSDWrites` closes the writes for good, in the step that reads
+   those under way, and returns the channel closed once they have returned, never replaced since
+   none starts after it. `spawnWrite` runs nothing after the gate and says so once
+   (`dsdWriteRefused`), and the coalesced runner keeps nothing a refused spawn did not start.
+   `settle` closes the gate once the engine's Run has returned and waits on what it returns.
+2. **The Start's count.** `hold` counted a Start on entry (`starts`), so a Start that gave its wait
+   up (busy past `ProbeWait`), or that its context or its release ended, voided the probe's answers
+   and left a probe owed: a DAC whose probe outlasts `ProbeWait` would lose its answers to each
+   Start in turn. `hold` now counts the Start in the step that takes the slot, directly or once a
+   probe let it go; answers taken before that step are kept.
+3. **The store's lock on the supervisor.** `Store.State` took the store's mutex, which `Update`
+   holds through its durable write, and the supervisor reads the state at each snapshot
+   (`playerDSD.resolve`, through `waits`), as the policy's refresh does at each reading: a write
+   whose fsync stalled held the supervisor. Round 1's test held the writes in front of the store,
+   before its lock, and missed it. `State` now reads a copy published each time the store holds a
+   new state (`Store.hold`, an `atomic.Pointer`), after its write is durable, as before; no reader
+   takes the lock, so the read is off the snapshot's path whatever the migration's state.
+4. **The cache's epoch alone.** Every stale case moved the probe's generation or the binding, so
+   `Record`'s refusal was never what dropped a report, and round 1's control C1c stayed green. A
+   case that moves the epoch alone (`ProbeCache.Forget` while the probe runs) now requires the
+   answers dropped, no evidence written and the probe owed. No code changed.
+5. **Both lines at the stop.** The stop's switch said the kept lock whenever a write ran, and then
+   never the device. `Backend.Running` reads both counts in one step, and the stop says the lock
+   line whenever a write runs and the device line whenever any other goroutine of the backend's
+   does; a backend that counts nothing (a stand-in) gets the device line, as before.
+
+### Red first
+
+At ccee2e3d, before the fixes, each predicted in `.tmp/_b762/r2-red.predictions.txt` before the
+run: `TestAWriteAfterTheGateIsNeverMade` (two writes after the gate admitted and run, nothing
+said); `TestAnOpenHeldPastTheGateWritesNothingOfTheDSDState` (the held open's driver_accepted
+written after the gate); the second subtest of
+`TestAStartBesideAHeldProbeOpensOnlyOnceItEndsAndVoidsItsAnswers` (answers taken before the Start
+took the slot dropped) and `TestAStartRefusedBusyBesideAProbeLeavesItsAnswers` (answers dropped,
+a probe owed, the DAC probed twice); `TestServeKeepsTheDataDirLockWhileTheProbesEvidenceIsWritten`
+(an unplug while the write held the store's real lock, at the staged file's fsync, never reached
+the engine: the give-up wait); `TestAStopBesideAHeldWriteAndAHeldReadingSaysBoth` (the device line
+not said beside the lock's). The first subtest of the Start test and the epoch case passed, as
+predicted: regression pins, the epoch case's red is control C1c.
+
+### Negative controls
+
+Each an exact-once mutation of the committed tree (f007201e), predicted by name in
+`.tmp/_b762/r2-controls.predictions.txt` before it ran, the test binaries built with it and the
+source restored from memory, `git status` empty after each.
+
+| | mutation | red |
+|---|---|---|
+| CR1a | `spawnWrite` ignores the gate | as predicted: the gate's unit test, the held open's, and the serve lock test's ask after the player settled |
+| CR1b | `settle` waits on `DSDWrites`, the gate never closed | as predicted: the serve lock test alone |
+| CR2a | the Start counted at `hold`'s entry again | as predicted: the answers-before-the-Start subtest and the Start refused busy |
+| CR2b | the Start never counted | as predicted: the Start-takes-the-slot-first subtest |
+| CR3 | `State` takes the store's lock again | as predicted: `TestTheStateIsReadWithoutWaitingOnAWrite` and the serve lock test (the unplug) |
+| CR5a | the device line only where no write runs | as predicted: `TestAStopBesideAHeldWriteAndAHeldReadingSaysBoth` |
+| CR5b | the writes counted among the others | as predicted: the serve lock test (the device line beside the write alone) |
+| C1c | `Record`'s refusal ignored (round 1's, rerun) | as predicted: the epoch case alone, where round 1 had none |
+
+### Qualification
+
+The red commit added a test under `internal/alsapcm/`, a guarded prefix. B9 holds 44 on its
+branch, so this takes 45; the runbook's five current references move with it, and its record says
+what 45 covers.
