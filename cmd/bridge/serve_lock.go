@@ -318,7 +318,19 @@ func recordedServePID(dataDir string) int {
 // prompt and its last write, and the caller still probes a fixed admin port
 // (probeAdminBesideTheLock): a serve that continued after a lock error other
 // than contention holds no lock. release is never nil.
-func holdDataDirForMutation(dataDir, cmd string, stderr io.Writer) (release func(), fallback, refused bool) {
+//
+// Before all of that, the check serve makes before its preparation, on the
+// record beside the config at cfgFile (refuseDataDirAway, backlog B727): a
+// data dir its record names that holds neither its database nor its lock
+// file is refused, since its volume is not mounted, and nothing is made or
+// locked there; a lock file made in the bare mount point would have the next
+// serve take it for the data dir it served from.
+func holdDataDirForMutation(cfgFile, dataDir, cmd string, stderr io.Writer) (release func(), fallback, refused bool) {
+	if refuseDataDirAway(cmd, cfgFile, dataDir, stderr) {
+		return func() {
+			// Nothing to release: no lock has been taken.
+		}, false, true
+	}
 	if err := prepareServeDataDir(dataDir); err != nil {
 		fmt.Fprintf(stderr, "%s: %v.\n", cmd, err)
 		fmt.Fprintln(stderr, "Move what stands in its way, or set dataDir in bridge.yaml to a directory, then re-run this command.")

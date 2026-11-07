@@ -359,6 +359,8 @@ func currentValuesForEveryPatchField(t *testing.T, cfg *config.Config) map[strin
 		"autoOptimizeEnabled":      cfg.Upscale.AutoOptimize.Enabled,
 		"dsdRenderEnabled":         cfg.Upscale.DSDRender.Enabled,
 		"libraryWatchEnabled":      cfg.LibraryWatch.Enabled,
+		"enrichEnabled":            cfg.Enrich.EffectiveEnabled(),
+		"enrichDeezerEnabled":      cfg.Enrich.EffectiveDeezerEnabled(),
 		"enrichMusicBrainzBaseURL": cfg.Enrich.MusicBrainzBaseURL,
 		"enrichCoverArtBaseURL":    cfg.Enrich.CoverArtBaseURL,
 		"atlasEnabled":             cfg.Atlas.Enabled,
@@ -532,7 +534,7 @@ func differentValueFor(t *testing.T, field string) (any, bool) {
 		"fingerprintEnabled", "upscaleEnabled", "autoOptimizeEnabled",
 		"dsdRenderEnabled", "updateAutoInstall", "dlnaEnabled":
 		return true, true
-	case "smartPlaylistsEnabled", "optimizeEnabled":
+	case "smartPlaylistsEnabled", "optimizeEnabled", "enrichEnabled", "enrichDeezerEnabled":
 		return false, true
 	// Numbers, all clear of their validation floors.
 	case "scanIntervalSec":

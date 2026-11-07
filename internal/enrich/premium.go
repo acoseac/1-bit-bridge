@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/ctxerr"
+	"github.com/acoseac/1-bit-bridge/internal/enrichgate"
 )
 
 // ErrNoCredential is returned by RefetchPremium when no usable Atlas credential
@@ -50,6 +51,9 @@ type atlasPremiumFetcher struct {
 	cred      AtlasCredentialSource
 	userAgent string
 	http      *http.Client
+	// sw is the fetcher's own switch, enrich.enabled, which its transport
+	// asks and every return that wrote no cover asks again (backlog B617).
+	sw enrichgate.Switches
 	// cacheDir bounds every write this fetcher makes. Both of its write
 	// sites receive a fully-built `path` from a caller, and one of those
 	// callers (cmd/bridge's atlasCoverRefetcher) builds it from an MBID
@@ -65,16 +69,24 @@ type atlasPremiumFetcher struct {
 // NewAtlasPremiumFetcher builds the premium-cover fetcher. A nil httpClient
 // gets a 30s-timeout default — an image fetch over a high-latency relay link
 // must not hang background enrichment forever (http.DefaultClient has no
-// timeout).
-func NewAtlasPremiumFetcher(cred AtlasCredentialSource, userAgent string, httpClient *http.Client, cacheDir string) PremiumCoverFetcher {
+// timeout). sw is enrich.enabled as the fetcher asks it
+// (enrichgate.Enrichment; backlog B617): a cover is fetched only while it is
+// on, whatever context the fetch carries, and an answer that wrote nothing is
+// taken only while it still is; a cover the fetcher's write has committed is
+// final, whatever the switch says by its return (round 5). Zero switches are
+// off, and fetch nothing.
+func NewAtlasPremiumFetcher(cred AtlasCredentialSource, userAgent string, httpClient *http.Client, cacheDir string, sw enrichgate.Switches) PremiumCoverFetcher {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 30 * time.Second}
 	}
 	// A copy that never carries the bearer token, or the Basic header a stored
 	// base with user information gets, from an https request onto a hop that
-	// is not https (guardRedirects).
+	// is not https (guardRedirects), and sends only while sw is on
+	// (sw.Client): the switches are on the fetcher's own client, so the
+	// harvest's client, which a test may share, and its other legs and lyrics
+	// never see them.
 	return &atlasPremiumFetcher{
-		cred: cred, userAgent: userAgent, http: guardRedirects(httpClient), cacheDir: cacheDir,
+		cred: cred, userAgent: userAgent, http: guardRedirects(sw.Client(httpClient)), sw: sw, cacheDir: cacheDir,
 		reports: newUpstreamReports(),
 	}
 }
@@ -87,16 +99,29 @@ func NewAtlasPremiumFetcher(cred AtlasCredentialSource, userAgent string, httpCl
 // 5xx, network) so the caller falls through to the CAA chain; only a streamed
 // 200 returns true. Never propagates an error — a premium miss must not fail
 // the whole artwork-caching step.
-func (f *atlasPremiumFetcher) TryCache(ctx context.Context, path, mbid string, size int) bool {
+func (f *atlasPremiumFetcher) TryCache(ctx context.Context, path, mbid string, size int) (cached bool) {
 	resp, err := f.authedCoverGet(ctx, mbid, size)
 	if err != nil {
-		// A fetch the shutdown stopped is not reported either.
-		if failure := ctxerr.WithoutCancellation(ctx, err); failure != nil && !errors.Is(failure, ErrNoCredential) {
+		// A fetch the shutdown stopped is not reported either, nor one a
+		// switch refused (enrichgate.Refused; backlog B617).
+		if failure := ctxerr.WithoutCancellation(ctx, err); failure != nil && !errors.Is(failure, ErrNoCredential) &&
+			enrichgate.Refused(failure) == nil {
 			f.reports.report(upstreamAtlas, "atlas premium cover fetch", failure, "mbid", mbid, "size", size)
 		}
 		return false // no credential / transport error → CAA path
 	}
 	defer resp.Body.Close()
+	// Every return from here that wrote nothing asks the fetcher's switch
+	// again, as the enrich clients' do (backlog B617): a refusal ends the pass
+	// on ctx, and such a return answers no cover already. A cover the write
+	// below committed is cached, whatever the switch says by then (round 5):
+	// it is on disk, and a false would leave the caller to fetch it again.
+	written := false
+	defer func() {
+		if !written && f.sw.Answer(ctx) != nil {
+			cached = false
+		}
+	}()
 	if resp.StatusCode != http.StatusOK {
 		// 404 = no cover at Atlas (normal — fall through to CAA rg + iTunes);
 		// 429 or 5xx = Atlas busy (transientHTTPStatus, the one predicate the
@@ -123,13 +148,14 @@ func (f *atlasPremiumFetcher) TryCache(ctx context.Context, path, mbid string, s
 	}
 	f.reports.answered(upstreamAtlas)
 	if err := writeArtworkAtomicStream(f.cacheDir, path, resp.Body, MaxCoverArtBytes); err != nil {
-		// A body the shutdown cut off is not a failed write; the write
-		// removed its temp file either way.
-		if failure := ctxerr.WithoutCancellation(ctx, err); failure != nil {
+		// A body the shutdown or a switch cut off is not a failed write;
+		// the write removed its temp file either way.
+		if failure := ctxerr.WithoutCancellation(ctx, err); failure != nil && enrichgate.Refused(failure) == nil {
 			logger.Warn("atlas premium cover write", "mbid", mbid, "size", size, "err", failure)
 		}
 		return false
 	}
+	written = true
 	logger.Debug("atlas premium cover cached", "mbid", mbid, "size", size)
 	return true
 }
@@ -189,7 +215,7 @@ func (f *atlasPremiumFetcher) clearOnAuthReject(status int) {
 // retries later. Returns true when a premium cover was written. Never an error
 // for a "not premium yet" miss; only for a write/transport failure worth
 // surfacing.
-func (f *atlasPremiumFetcher) RefetchPremium(ctx context.Context, path, mbid string, size int) (bool, error) {
+func (f *atlasPremiumFetcher) RefetchPremium(ctx context.Context, path, mbid string, size int) (got bool, err error) {
 	resp, err := f.authedCoverGet(ctx, mbid, size)
 	if err != nil {
 		// ErrNoCredential or a transport error — the sweep leaves the cover
@@ -198,6 +224,21 @@ func (f *atlasPremiumFetcher) RefetchPremium(ctx context.Context, path, mbid str
 		return false, err
 	}
 	defer resp.Body.Close()
+	// Every return from here that wrote nothing asks the fetcher's switch
+	// again, as TryCache's do (backlog B617): "no cover at Atlas" read after a
+	// switch-off would settle a pending cover the switch stopped. A premium
+	// cover the write below committed is got, whatever the switch says by then
+	// (round 5): the cache holds it, and a refusal would keep the cover
+	// pending for the harvest to fetch again.
+	written := false
+	defer func() {
+		if written {
+			return
+		}
+		if r := f.sw.Answer(ctx); r != nil {
+			got, err = false, r
+		}
+	}()
 	if resp.StatusCode != http.StatusOK {
 		f.clearOnAuthReject(resp.StatusCode)
 		// Same connection-reuse rationale as TryCache's non-200 branch.
@@ -240,6 +281,7 @@ func (f *atlasPremiumFetcher) RefetchPremium(ctx context.Context, path, mbid str
 	if err := writeArtworkAtomicStream(f.cacheDir, path, resp.Body, MaxCoverArtBytes); err != nil {
 		return false, err
 	}
+	written = true
 	logger.Info("atlas premium cover upgraded", "mbid", mbid, "size", size)
 	return true, nil
 }

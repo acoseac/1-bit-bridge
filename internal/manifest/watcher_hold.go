@@ -15,7 +15,9 @@ import (
 // act on one either: a watch on the bare mount point is on a directory the
 // mount then hides, so nothing the volume holds is ever seen, and a root that
 // could not be walked at the start was never watched at all. So a configured
-// root that reads as a volume not mounted (Scanner.lookAtRoot) is held: it is
+// root that reads as a volume not mounted (Scanner.lookAtRoot), or as one
+// holding nothing but links to directories over tracks the index holds, whose
+// rows the scan spares as well (rootOnlyDirLinks, B742), is held: it is
 // not watched, not even by the walk of a root it is nested in (heldBelow), its
 // events are dropped and no scan is dispatched for it, until a look finds it
 // as it was. A path is the deepest configured root's that holds it
@@ -155,13 +157,26 @@ func (wt *Watcher) holdRoot(root string, look rootLook) bool {
 	if look.err != nil {
 		attrs = append(attrs, "err", look.err)
 	}
-	watcherLogger.Warn(msgWatchRootHeld, append(attrs, "hint", heldRootHint)...)
+	watcherLogger.Warn(msgWatchRootHeld, append(attrs, "hint", heldHint(look))...)
 	if !was {
 		if hook := wt.afterHoldForTests; hook != nil {
 			hook(root)
 		}
 	}
 	return !was
+}
+
+// heldHint is the hint the line holdRoot logs gives for what the look found.
+// A root holding nothing but links to directories over tracks the index holds
+// (rootOnlyDirLinks) is held as the scan spares its rows, and its volume is
+// there, so the line gives the scan's own account of it (msgRootOnlyDirLinks)
+// where it said to check that the volume is mounted (B742); every other hold
+// is a volume that may not be mounted.
+func heldHint(look rootLook) string {
+	if look.reason == rootOnlyDirLinks {
+		return msgRootOnlyDirLinks
+	}
+	return heldRootHint
 }
 
 // releaseRoot lets go of every watch the watcher holds at or under root's own:

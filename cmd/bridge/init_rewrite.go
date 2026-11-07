@@ -74,6 +74,13 @@ import (
 //     would turn back on. A setting that does not read, or that the
 //     config's own check refuses, is not kept, and the run says which and
 //     why (priorOutput, warnOutputNotKept).
+//   - enrich.enabled and enrich.deezerEnabled, each where the config writes
+//     it off, in either posture (backlog B617), for the reason output.mpd:
+//     off is kept: each is the operator's opt-out of lookups that send the
+//     library's names out, which the default, on, would turn back on without
+//     a word, and init asks for neither. One written on is the default, which
+//     a first install writes no key for. One that does not read is not kept,
+//     and the run says which (priorEnrich, warnEnrichNotKept).
 //
 // Everything else is this run's value or the default, which is the
 // documented overwrite: features and cadences. The ports are kept under
@@ -108,6 +115,66 @@ type priorInstallFile struct {
 	// moves it off (warnKeptEndpointsOnAMovedPort).
 	ListenAddress string `yaml:"listenAddress"`
 	AdminAddress  string `yaml:"adminAddress,omitempty"`
+	// Enrich is the enrich block's two switches, which a rewrite keeps where
+	// the file writes them off (priorEnrich).
+	Enrich priorEnrich `yaml:"enrich"`
+}
+
+// priorEnrich is what a rewrite reads of the enrich block of the config it
+// replaces: its two switches (backlog B617). Its UnmarshalYAML reads each
+// switch on its own and never fails the file's decode, so a switch that does
+// not read costs the rewrite nothing else the file gives up: the switch is
+// left out, and notKept says which and on what line, never its value. Its
+// exported fields' yaml keys and types are config.EnrichConfig's
+// (TestPriorInstallTagsAreConfigs).
+type priorEnrich struct {
+	Enabled       *bool `yaml:"enabled"`
+	DeezerEnabled *bool `yaml:"deezerEnabled"`
+	notKept       []string
+}
+
+// UnmarshalYAML reads the block as the decoder hands it, through an alias or
+// a merge key as the decoder reads them, a value that is not a block of
+// settings keeping neither switch, and each switch as Load's decoder reads
+// it into config.EnrichConfig, null read as no key. It never returns an
+// error.
+func (e *priorEnrich) UnmarshalYAML(n *yaml.Node) error {
+	var each struct {
+		Enabled       yaml.Node `yaml:"enabled"`
+		DeezerEnabled yaml.Node `yaml:"deezerEnabled"`
+	}
+	if err := n.Decode(&each); err != nil {
+		e.notKept = []string{fmt.Sprintf("enrich (line %d): it is not a block of settings, so neither of its switches is kept", n.Line)}
+		return nil
+	}
+	e.Enabled = e.readSwitch("enrich.enabled", &each.Enabled)
+	e.DeezerEnabled = e.readSwitch("enrich.deezerEnabled", &each.DeezerEnabled)
+	return nil
+}
+
+// readSwitch is the value of setting the node v holds, nil where the block
+// writes no such key or writes it null, and nil, said in notKept, where it
+// does not read as on or off.
+func (e *priorEnrich) readSwitch(setting string, v *yaml.Node) *bool {
+	if v.Kind == 0 {
+		return nil
+	}
+	var on *bool
+	if err := v.Decode(&on); err != nil {
+		e.notKept = append(e.notKept, fmt.Sprintf("%s (line %d): it does not read as on or off, so it is not kept", setting, v.Line))
+		return nil
+	}
+	return on
+}
+
+// optedOut is what a rewrite writes for a switch the config it replaces
+// gives as v: false where v is off, and nil, the default, on, otherwise.
+func optedOut(v *bool) *bool {
+	if v == nil || *v {
+		return nil
+	}
+	off := false
+	return &off
 }
 
 // readPriorInstall reads the config at cfgPath as priorInstallFile, with its
@@ -356,16 +423,18 @@ func managedControlsSaid(d config.DeploymentConfig) string {
 }
 
 // keepFromPrior sets on cfg what a rewrite keeps from prior that has not
-// reached it already: the TLS pair, and a loopback install's custom
-// endpoints on a loopback rewrite. The data dir, the roots and the name reach
-// cfg through baseConfig: initCmd decides the first two before the
-// preflight, which uses the data dir, and the name at its prompt. It reports
-// whether it kept the endpoints, for printKept.
+// reached it already: the TLS pair, the enrichment switches written off,
+// and a loopback install's custom endpoints on a loopback rewrite. The data
+// dir, the roots and the name reach cfg through baseConfig: initCmd decides
+// the first two before the preflight, which uses the data dir, and the name
+// at its prompt. It reports whether it kept the endpoints, for printKept.
 func keepFromPrior(cfg *config.Config, prior *priorInstallFile) (endpointsKept bool) {
 	if prior == nil {
 		return false
 	}
 	cfg.TLSCertPath, cfg.TLSKeyPath = prior.TLSCertPath, prior.TLSKeyPath
+	cfg.Enrich.Enabled = optedOut(prior.Enrich.Enabled)
+	cfg.Enrich.DeezerEnabled = optedOut(prior.Enrich.DeezerEnabled)
 	if cfg.IsPublic() || !prior.loopback() || len(prior.CustomEndpoints) == 0 {
 		return false
 	}
@@ -528,10 +597,17 @@ func printKept(w io.Writer, cfg *config.Config, initDataDir string, rootsKept, n
 	for _, l := range keptOutputLines(cfg.Output) {
 		add(l[0], l[1])
 	}
+	// Nor an enrichment switch, so one in cfg was kept, off (optedOut).
+	if cfg.Enrich.Enabled != nil {
+		add("enrich.enabled", strconv.FormatBool(*cfg.Enrich.Enabled))
+	}
+	if cfg.Enrich.DeezerEnabled != nil {
+		add("enrich.deezerEnabled", strconv.FormatBool(*cfg.Enrich.DeezerEnabled))
+	}
 	if len(lines) == 0 {
 		return
 	}
-	// Sixteen columns, or the longest key's (output.loopbackPort is 19).
+	// Sixteen columns, or the longest key's (enrich.deezerEnabled is 20).
 	width := 16
 	for _, l := range lines {
 		width = max(width, len(l[0]))
@@ -891,4 +967,18 @@ func warnOutputNotKept(w io.Writer, notKept []string) {
 		fmt.Fprintf(w, "  %s\n", s)
 	}
 	fmt.Fprintln(w, "the config did not load with them either. Set them again in bridge.yaml if you want them.")
+}
+
+// warnEnrichNotKept names, once the rewrite is saved, the enrichment
+// switches it could not keep (priorEnrich), so none is dropped without a
+// word: each is on in the config the run wrote.
+func warnEnrichNotKept(w io.Writer, notKept []string) {
+	if len(notKept) == 0 {
+		return
+	}
+	fmt.Fprintln(w, "warning: enrichment switches in the config this run replaced do not read, so the rewrite did not keep them:")
+	for _, s := range notKept {
+		fmt.Fprintf(w, "  %s\n", s)
+	}
+	fmt.Fprintln(w, "the config did not load with them either, and each is on now: set it again in bridge.yaml to turn it off.")
 }

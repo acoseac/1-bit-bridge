@@ -130,6 +130,11 @@ func TestVariantsDirSweepBlockReason(t *testing.T) {
 			if block.Empty != tc.wantEmpty {
 				t.Errorf("Empty = %v, want %v (reason %q)", block.Empty, tc.wantEmpty, block.Reason)
 			}
+			// Missing is the one case with nothing at the path, which a
+			// render's guard words apart (backlog B727).
+			if want := tc.wantReason == "missing"; block.Missing != want {
+				t.Errorf("Missing = %v, want %v (reason %q)", block.Missing, want, block.Reason)
+			}
 			// Info is the directory whose entries the probe read (healthy
 			// or empty), which the watcher and the delete handler compare
 			// with later (backlog B203), and only that.

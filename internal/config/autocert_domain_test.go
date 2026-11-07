@@ -22,6 +22,10 @@ import (
 
 // autocertHostCases is every shape a hand edit can leave in autocert.domain,
 // beside the host AutocertHost reads from it ("" when it names none).
+//
+// AutocertHost reads a host and converts nothing: the internationalized name
+// is read as written, and Normalize then serves it in the IDNA ASCII form
+// autocertIDNAForms gives (B744).
 var autocertHostCases = []struct{ name, in, want string }{
 	// A host name alone is kept as written.
 	{"a host name", "bridge.example.test", "bridge.example.test"},
@@ -78,6 +82,10 @@ var autocertHostCases = []struct{ name, in, want string }{
 	{"a scheme and nothing else", "https://", ""},
 	{"blank", "   ", ""},
 }
+
+// autocertIDNAForms is the IDNA ASCII form Normalize serves for each host of
+// autocertHostCases that is not ASCII.
+var autocertIDNAForms = map[string]string{"bücher.example": "xn--bcher-kva.example"}
 
 // TestAutocertHostReadsTheHostAValueNames is the reduction Normalize serves
 // the field as and `bridge init --domain` refuses a value by: the host a
@@ -141,6 +149,11 @@ func TestNormalizeServesAutocertDomainAsItsHost(t *testing.T) {
 			want := tc.want
 			if want == "" {
 				want = InvalidAutocertDomain
+			}
+			// A host that is not ASCII is served in its IDNA ASCII form, said
+			// below Warn (B744; TestALoadedAutocertDomainThatIsNotASCIITakesItsIDNAForm).
+			if form, ok := autocertIDNAForms[want]; ok {
+				want = form
 			}
 			if c.Autocert.Domain != want {
 				t.Errorf("autocert.domain = %q, want %q", c.Autocert.Domain, want)

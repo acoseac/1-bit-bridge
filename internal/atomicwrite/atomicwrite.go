@@ -262,6 +262,14 @@ func SetSyncFileForTest(fn func(*os.File) error) (restore func()) {
 // other packages go through SetSyncDirForTest.
 var syncDir = platformSyncDir()
 
+// HasDirectoryBarrier reports whether this platform can fsync a directory,
+// that is whether WriteBytesDurable can make a write durable at all: false
+// where it cannot (Windows), where every strict write and probe refuses with
+// ErrNoDirectoryBarrier. It reads the barrier they read (SetSyncDirForTest
+// moves it), so a caller that asks before it writes anything refuses where
+// they would: backup's restore of the player's files (backlog B745).
+func HasDirectoryBarrier() bool { return syncDir != nil }
+
 // platformSyncDir is (*os.File).Sync where the platform has a directory
 // barrier, and nil where it has none.
 func platformSyncDir() func(d *os.File) error {
@@ -955,6 +963,16 @@ func WriteBytes(path string, data []byte, tmpPrefix string) error {
 	if err := fsutil.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
+	return writeBytes(path, data, tmpPrefix, nil, nil)
+}
+
+// WriteBytesInExisting is WriteBytes for a file whose directory must already
+// be there: it makes none, and into a directory that is not there it fails as
+// its staging's create does, fs.ErrNotExist, having written nothing. Serve's
+// note that it said its refusal of a data dir whose volume is away is one
+// (backlog B727): its directory is the config's, which may lie on that volume,
+// and WriteBytes would make it in the bare mount point.
+func WriteBytesInExisting(path string, data []byte, tmpPrefix string) error {
 	return writeBytes(path, data, tmpPrefix, nil, nil)
 }
 

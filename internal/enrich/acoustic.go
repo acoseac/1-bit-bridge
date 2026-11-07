@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 
+	"github.com/acoseac/1-bit-bridge/internal/enrichgate"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/metrics"
 )
@@ -375,6 +376,10 @@ func (e *Enricher) applyAcousticFallback(ctx context.Context, t *manifest.Track)
 // verdict into a retryable failure. A cancelled context is an ordinary
 // shutdown, not a fault.
 func (e *Enricher) recordAcousticTagVeto(ctx context.Context, t *manifest.Track) {
+	// Asked again at the write, as a stamp is (stampAdmitted, backlog B617).
+	if !e.stampAdmitted(ctx) {
+		return
+	}
 	if err := e.store.SetAcoustIDTagVeto(ctx, t.Path, t.Size, t.ModTime.UnixNano(), t.Artist); err != nil && ctx.Err() == nil {
 		logger.Warn("fingerprint: record tag veto", "path", t.Path, "err", err)
 	}
@@ -405,7 +410,9 @@ func (e *Enricher) enrichWithRecoveredArtist(ctx context.Context, t *manifest.Tr
 func (e *Enricher) applyAlbumHop(ctx context.Context, t *manifest.Track, m AcousticMatch) bool {
 	releaseMBID, rgMBID, err := e.resolveAlbumFromAcoustic(ctx, t, m)
 	if err != nil {
-		if ctx.Err() != nil {
+		// A switch's refusal is no answer, whatever the context says
+		// (enrichgate.Refused; backlog B617): no stamp.
+		if ctx.Err() != nil || enrichgate.Refused(err) != nil {
 			return false
 		}
 		e.logUpstream(upstreamMusicBrainz, "MB search (fingerprint artist)", err, "path", t.Path)
@@ -425,6 +432,10 @@ func (e *Enricher) applyAlbumHop(ctx context.Context, t *manifest.Track, m Acous
 	// here would quietly lose that fallback.
 	cached, aerr := e.ensureArtworkCached(ctx, releaseMBID, rgMBID, m.ArtistName, albumSearchTerm(t, m), e.coverSize())
 	if aerr != nil {
+		if enrichgate.Refused(aerr) != nil {
+			// No answer, so no miss to stamp.
+			return false
+		}
 		if ctx.Err() == nil {
 			e.logUpstream(upstreamCoverArt, "artwork", aerr, "mbid", releaseMBID)
 		}
@@ -465,6 +476,11 @@ func (e *Enricher) fetchRecoveredArtistImage(ctx context.Context, t *manifest.Tr
 		return
 	}
 	found, err := e.ensureArtistImageCached(ctx, t.ArtistMBID, m.ArtistName)
+	if enrichgate.Refused(err) != nil {
+		// Deezer was not asked, or its answer was not taken (errDeezerOff,
+		// or enrich.enabled's refusal): no miss to cache, nothing to log.
+		return
+	}
 	if err != nil {
 		if ctx.Err() == nil {
 			e.logUpstream(upstreamDeezer, "artist image", err, "mbid", t.ArtistMBID)

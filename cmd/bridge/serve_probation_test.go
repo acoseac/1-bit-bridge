@@ -132,10 +132,13 @@ var shortProbation = probationTiming{window: 300 * time.Millisecond, ask: 20 * t
 	retry: 20 * time.Millisecond, round: 5 * time.Second}
 
 // bootWith boots the real serve on r's settings and binary with opts, as boot
-// does, until it listens.
+// does, until it listens, giving the copied backup the tests' probe bound.
 func (r *refusedInstall) bootWith(t *testing.T, opts serveOpts) servedBridge {
 	t.Helper()
 	opts.configPath, opts.binaryPath = r.cfg, r.bin
+	if opts.backupProbeTimeout == 0 {
+		opts.backupProbeTimeout = testBackupProbeTimeout
+	}
 	return launchServe(t, func(ctx context.Context, stdout, stderr io.Writer) int {
 		return runServe(ctx, opts, stdout, stderr)
 	})
@@ -163,6 +166,7 @@ func (r *refusedInstall) startThatPanics(t *testing.T) {
 		defer func() { panicked = recover() != nil }()
 		var out, errs bytes.Buffer
 		runServe(t.Context(), serveOpts{configPath: r.cfg, binaryPath: r.bin,
+			backupProbeTimeout:   testBackupProbeTimeout,
 			playerStatePreflight: func(string, bool) error { panic("a crash of the start") }}, &out, &errs)
 	}()
 	if !panicked {
@@ -172,9 +176,13 @@ func (r *refusedInstall) startThatPanics(t *testing.T) {
 
 // serveToItsEnd runs serve with opts on a goroutine until it exits, and
 // returns its code and what it said; a serve that prints its banner first
-// went on to serve, which it says in served, stopped at once.
+// went on to serve, which it says in served, stopped at once. The copied
+// backup gets the tests' probe bound unless opts gives another.
 func serveToItsEnd(t *testing.T, opts serveOpts) (code int, stderr string, served bool) {
 	t.Helper()
+	if opts.backupProbeTimeout == 0 {
+		opts.backupProbeTimeout = testBackupProbeTimeout
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	stdout, errs := &safeBuffer{}, &safeBuffer{}
 	codes, done := make(chan int, 1), make(chan struct{})

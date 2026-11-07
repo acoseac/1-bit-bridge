@@ -182,9 +182,11 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   Don't count bytes: 256 `é` must pass. **Refuse what the operator types,
   repair what is already stored** (#1042's rule, one step on):
   `config.CheckLibraryName` refuses in the PATCH (400 `validate`, nothing
-  written) and in init's `--name` (exit 2, before anything is written), and
+  written) and in init's `--name` (exit 2, before anything is written),
+  through `CleanTypedLibraryName` since B744 (the next bullet), and
   init's prompt asks again; `Normalize` repairs a config's or an override's
-  name (`config.RepairLibraryName`: U+FFFD for bytes that are not UTF-8, cut
+  name (`config.RepairLibraryName`: U+FFFD for bytes that are not UTF-8,
+  its control characters removed, cut
   to 256 runes and re-trimmed, with a WARN), because a `Load` refusal would
   stop a bridge from starting over a display name. init keeps and offers an
   install's name AS LOAD SERVES IT, or its prompt would offer a name it then
@@ -194,6 +196,7 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   paste without a word; the handler's 400 is what the page shows ("Save
   failed: libraryName: must be at most 256 characters, …"). Added in #1046's
   first round, removed on review (CodeRabbit).
+- **…and a library name loses its control characters, the runes U+0000 to U+001F, U+007F and U+0080 to U+009F read after decoding, wherever it is set: what is typed (`config.CleanTypedLibraryName`: init's `--name` and its prompt, the console's save) after the refusal of bytes that are not UTF-8 and before its length is counted, and what loads (`RepairLibraryName`: the file, `BRIDGE_LIBRARY_NAME`, a prior install's name, with the repair's WARN), so a name served live is the name served after a restart; the Bonjour instance strips by the same definition (`config.WithoutControlCharacters`)** (2026-11-07, backlog B744). **Don't strip bytes rather than runes, strip before the UTF-8 refusal, count a typed name's length before its controls are gone, or give an entry a strip of its own.** → History-rules-config-lifecycle.md
 - **A configured URL is named in every refusal and warning by its field,
   its scheme and its host, never its value** (backlog B54). #1074 gave the
   WARNINGS that rule (`urlOriginForLog`, under DLNA) and left the two
@@ -295,6 +298,7 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   three fragments that then vanish in validation. Two legacy enrich base-URL
   names are kept as aliases — losing them sends an Atlas-configured bridge back
   to public MusicBrainz at the self-hosted pace.
+- **The two opt-outs, `enrich.enabled` and `enrich.deezerEnabled`, read their variables as their keys read, without regard to case, and a value that reads as neither as off with a Warn naming the variable (`switchEnvPaths`, `readSwitchEnv`); and the holder's save writes each as the file holds it, read in the save's turn, unless the save changed it, then off as false and on as no key, publishing the live value either way (`filedSwitches`)** (2026-11-06, backlog B617; the rule is `enrichment.md`'s B617 bullet). **Don't read them by `strconv.ParseBool` with a refusal ignored, or write a variable's value into the file from a save that did not change the switch; the other variables still are (B761).** `TestTheOffSwitchLoads` and `TestAConsoleSaveKeepsTheFilesOwnSwitches` pin it.
 - **`Uninstall` refuses a system-level install, like `Stop`/`Start`/`Restart` —
   and the four read ONE predicate.** The condition was spelled out in the first
   three and missing from the fourth, and the two POSIX uninstallers touch only
@@ -316,47 +320,7 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   SIGINT/SIGTERM**, never `os.Exit(0)` — that is what honours the `bgScans`
   WaitGroup (SQLite corruption), cleans up in-flight jobs, and flushes the auth
   store's debounce buffer. Same rule for the updater's auto-install restart.
-- **…and a restart request exits with `supervision.RestartExitCode` (75),
-  a stop with 0: an exit 0 is what a supervisor leaves stopped** (2026-09-29,
-  backlog B201). The console's Restart, "Install & restart" and the
-  auto-installer's restart all exited 0, and the LaunchAgent `bridge init`
-  writes relaunches an unsuccessful exit only (KeepAlive
-  {SuccessfulExit: false}), while the Windows service had no recovery
-  actions: measured under a real LaunchAgent on the dev Mac and a real SCM
-  service on nomos, `restarting: true`, then exit 0 and nothing listening,
-  for good. `serveRestart.request` marks the stop and calls runServe's own
-  cancel (so the whole shutdown runs, the rule above), and runServe's
-  second defer turns a clean exit after a request into 75 (EX_TEMPFAIL):
-  launchd relaunched the probe with `last exit code = 75: EX_TEMPFAIL`,
-  and a SIGTERM (`launchctl kill`) still exited 0 and stayed down.
-  `admin.Deps.Restart` and `AutoInstallRestart` are both
-  `restart.request`, never a bare `cancel`
-  (`TestEveryRestartInServeGoesThroughTheRestartRequest` reads the wiring;
-  `TestARestartRequestedFromTheConsoleExitsToBeRestarted` drives the
-  console's). **Windows needs two more parts, both load-bearing**: the
-  service's recovery actions (restart after 2 s, 2 s, then 30 s, reset
-  after an hour) with `FailureActionsOnNonCrashFailures`, set by the
-  installer and, for a service installed before v0.2.1, by the running
-  service itself as it starts (`packaging.EnsureServiceRecovery` with its
-  own name, args[0]; it leaves recovery an operator configured alone), since
-  a console update replaces the binary and never re-installs; and the
-  service handler returns the exit code WITHOUT reporting Stopped first,
-  because the SCM takes the exit code from the first Stopped status: the
-  old handler's early Stopped (exit 0) made a failure read as a clean stop
-  (measured on nomos with recovery set: the early-Stopped build stayed down
-  with exit code 0; the fixed one logged event 7024, "service-specific
-  error 75", then 7031, "corrective action … Restart the service", and was
-  back in 4 s; an SCM Stop stays stopped). systemd's Restart=always restarts
-  either (its journal names this one 75/TEMPFAIL), and Docker's
-  `on-failure` policy, which restarts a non-zero exit, now relaunches it
-  too (docs/docker.md). **And `bridge start` kickstarts a
-  loaded agent**: `launchctl bootstrap` of one answers "Bootstrap failed:
-  5: Input/output error" on macOS 27, which `startForOS` did not swallow,
-  so `bridge start` over the stopped agent failed; a kickstart starts a
-  loaded agent and leaves a running one alone (both measured).
-  **Release note**: a macOS or Windows service install that updates from
-  v0.2.0 through the console runs v0.2.0's restart, which exits 0, so it
-  comes back down: run `bridge restart` once after that update.
+- **…and a restart request exits with `supervision.RestartExitCode` (75), a stop with 0: an exit 0 is what a supervisor leaves stopped** (2026-09-29, backlog B201). `admin.Deps.Restart` and `AutoInstallRestart` are both `restart.request`, never a bare `cancel`. **Windows needs two more parts, both load-bearing**: the service's recovery actions, and a handler that returns the exit code WITHOUT reporting Stopped first. **And `bridge start` kickstarts a loaded agent.** → History-rules-config-lifecycle.md · doc: docker.md
 - **A live backup retries Windows sharing/access failures while opening files replaced by rename, with atomicwrite’s bounded, cancellable backoff; persistent errors still refuse it.** **Only a reservation refused as data gets backup’s player reset advice; cancellation, an expired context and file-access errors never do. Exhausted sharing/access retries say the file was busy and to retry the backup.** → History-rules-config-lifecycle.md
 - **Atomic writes: stage, then rename with retry.** `RenameWithRetry` absorbs
   the Windows AV scan-on-close window; the deferred `Close` must be registered
@@ -619,6 +583,7 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   `TestReplaceDurable_ABarrierThatFailsLeavesTheWriteNotDurable` and
   `TestReplaceDurable_RefusesBeforeItStages` pin it.
   → History-rules-config-lifecycle.md
+- **`atomicwrite.WriteBytesInExisting` makes no directory: into one that is not there it fails, `fs.ErrNotExist`, having written nothing** (2026-11-07, B727's round 2; serve's refusal note, cli-serve.md). **Don't give it a `MkdirAll`.** `TestWriteBytesInExistingMakesNoDirectory` pins it.
 - **`auth.Store.FlushLastUsed` reloads before persisting** — the shutdown flush
   rewrote `tokens.json` from a stale in-memory slice and deleted a sibling
   `bridge pair` mint. A reload failure ABORTS the flush.

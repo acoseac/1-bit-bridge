@@ -128,8 +128,8 @@ func TestResolveArtistFetchesPortraitByCanonicalName(t *testing.T) {
 	}
 	defer func() { _ = store.Close() }()
 
-	e := NewEnricher(store, NewMusicBrainzClient(mbSrv.URL, "t", nil), nil,
-		NewDeezerClient(deezerSrv.URL, "t", nil), filepath.Join(dir, "artwork"))
+	e := NewEnricher(store, NewMusicBrainzClient(mbSrv.URL, "t", nil, onSwitches), nil,
+		NewDeezerClient(deezerSrv.URL, "t", nil, onDeezerSwitches), filepath.Join(dir, "artwork"))
 	e.MBMinInterval = 0
 	e.DeezerMinInterval = 0
 
@@ -176,7 +176,7 @@ func TestFetchRecoveredArtistImageSkipsWhenTheMBIDIsNotTheFingerprints(t *testin
 	}
 	defer func() { _ = store.Close() }()
 
-	e := NewEnricher(store, nil, nil, NewDeezerClient(deezerSrv.URL, "t", nil),
+	e := NewEnricher(store, nil, nil, NewDeezerClient(deezerSrv.URL, "t", nil, onDeezerSwitches),
 		filepath.Join(dir, "artwork"))
 	e.DeezerMinInterval = 0
 

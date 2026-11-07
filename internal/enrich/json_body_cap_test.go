@@ -50,7 +50,7 @@ func TestMusicBrainzGetCapsResponseBody(t *testing.T) {
 		`{"id":"dddddddd-dddd-4ddd-8ddd-dddddddddddd","score":100,"title":"Album","artist-credit":[{"name":"Artist"}]}`,
 		`{"id":"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee","score":1,"title":"`+filler+`","artist-credit":[{"name":"Nobody"}]}`,
 		`]}`)
-	c := NewMusicBrainzClient(srv.URL, "test", nil)
+	c := NewMusicBrainzClient(srv.URL, "test", nil, onSwitches)
 	c.minInterval = 0
 	if _, err := c.SearchRelease(context.Background(), "Artist", "Album"); err == nil {
 		t.Fatal("decoded an oversized body without error — the cap did not fire")
@@ -63,7 +63,7 @@ func TestITunesGetCapsResponseBody(t *testing.T) {
 		`{"collectionId":1,"collectionName":"Album","artworkUrl100":"http://x/100x100bb.jpg","wrapperType":"collection"}`,
 		`{"collectionId":0,"collectionName":"`+filler+`","artworkUrl100":"","wrapperType":"collection"}`,
 		`]}`)
-	c := NewITunesClient(srv.URL, "test", nil)
+	c := NewITunesClient(srv.URL, "test", nil, onSwitches)
 	if _, err := c.SearchAlbum(context.Background(), "Artist", "Album"); err == nil {
 		t.Fatal("decoded an oversized body without error — the cap did not fire")
 	}
@@ -75,7 +75,7 @@ func TestDeezerSearchArtistCapsResponseBody(t *testing.T) {
 		`{"id":1,"name":"Artist","picture_xl":"http://x/a.jpg","picture_big":""}`,
 		`{"id":2,"name":"`+filler+`","picture_xl":"","picture_big":""}`,
 		`]}`)
-	c := NewDeezerClient(srv.URL, "test", nil)
+	c := NewDeezerClient(srv.URL, "test", nil, onDeezerSwitches)
 	if _, err := c.SearchArtist(context.Background(), "Artist"); err == nil {
 		t.Fatal("decoded an oversized body without error — the cap did not fire")
 	}
@@ -90,7 +90,7 @@ func TestJSONBodyCapLeavesRealResponsesAlone(t *testing.T) {
 		io.WriteString(w, `{"artists":[{"id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","score":100,"name":"Artist"}]}`)
 	}))
 	defer srv.Close()
-	c := NewMusicBrainzClient(srv.URL, "test", nil)
+	c := NewMusicBrainzClient(srv.URL, "test", nil, onSwitches)
 	c.minInterval = 0
 	got, err := c.SearchArtist(context.Background(), "Artist")
 	if err != nil {

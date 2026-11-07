@@ -2987,6 +2987,63 @@ platform), `TestADoctorsProbeHeldBeforeItsUnlockLetsNoScanMigrate`,
 are in `ops/engineering-log.md`, 2026-11-06, B660, and 2026-11-07, its
 second, third and fourth rounds.
 
+## A library name loses its control characters wherever it is set (backlog B744, 2026-11-07)
+
+- **…and a library name loses its control characters, the runes U+0000 to U+001F, U+007F and U+0080 to U+009F read after decoding, wherever it is set: what is typed (`config.CleanTypedLibraryName`: init's `--name` and its prompt, the console's save) after the refusal of bytes that are not UTF-8 and before its length is counted, and what loads (`RepairLibraryName`: the file, `BRIDGE_LIBRARY_NAME`, a prior install's name, with the repair's WARN), so a name served live is the name served after a restart; the Bonjour instance strips by the same definition (`config.WithoutControlCharacters`)** (2026-11-07, backlog B744). **Don't strip bytes rather than runes, strip before the UTF-8 refusal, count a typed name's length before its controls are gone, or give an entry a strip of its own.**
+
+*The gap.* A library name reaches every pairing code's `name=`,
+`/v1/health`, the console and the Bonjour instance. `firstInstallName`
+already removed the control characters of the host's name (B739: a test
+Mac's kern.hostname holds U+0091), and nothing else did: init's `--name`
+and its prompt, the console's settings save, and what loads (bridge.yaml,
+`BRIDGE_LIBRARY_NAME`, and a prior install's name, which init's prompt
+offers and `--yes` keeps) kept them, and `sanitizeInstance` stripped C0 and
+DEL from the Bonjour instance and kept the C1 controls.
+
+*One definition.* `config.WithoutControlCharacters` strips the runes U+0000
+to U+001F, U+007F and U+0080 to U+009F, read as runes after decoding
+(`strings.Map`), never as bytes: `Ā` is the bytes C4 80 and `š` C5 A1,
+whose second bytes are the numbers of C1 controls and are none (control
+C744-2b strips by bytes and mangles them, and the host names `Жук` and
+`DESKTOP-日本` with them). It is the set `unicode.IsControl` names, so
+`firstInstallName`, whose copy in init.go used that, is unchanged. Every
+entry strips by it: a typed name through `CleanTypedLibraryName`, what loads
+through `RepairLibraryName`, the host's name through `firstInstallName`, and
+the Bonjour instance through `sanitizeInstance`.
+
+*The order, typed.* `CleanTypedLibraryName` trims (`TrimLibraryName`),
+refuses a name that is not UTF-8 first, strips, trims again, and only then
+applies the entry's own policies. The refusal comes first because the
+strip maps runes and takes such bytes as U+FFFD: stripped first, a `Café`
+typed in a Latin-1 terminal next to a control was stored as `Caf` and
+U+FFFD (control C744-2a). An empty answer is a name that was blank once its
+controls were gone, which init takes for no name and the settings save
+refuses as a blank one. The length is counted on the stripped name, so 260
+runes typed, 250 once the controls are gone, are stored. What it returns,
+`RepairLibraryName` returns unchanged, so the live name is the reloaded one
+(each typed test reloads the file and compares).
+
+*The order, loaded.* `RepairLibraryName` replaces the bytes that are not
+UTF-8 with U+FFFD, trims, strips, trims again, and cuts to the cap.
+Normalize's WARN says the name is served repaired, with a `controls`
+attribute beside `validUTF8` and `runes`, and a load never refuses over a
+display name (#1042's rule). The settings save also runs Normalize, so its
+stored bytes are guarded twice; only a name that is nothing but controls,
+and one past the cap until its controls go, are decided by the typed strip
+alone (control C744-2e). The JSON the console sends carries no byte that is
+not UTF-8, the decoder having replaced them, so its refusal is the length's
+alone.
+
+`TestInitTypedNameLosesItsControlCharacters`,
+`TestInitPromptedNameLosesItsControlCharacters`,
+`TestInitOffersAnInstallsNameWithoutItsControlCharacters` (cmd/bridge),
+`TestTheSettingsSaveStripsControlCharactersFromTheName` (admin),
+`TestALoadedLibraryNameLosesItsControlCharacters`,
+`TestALibraryNameInTheFileLosesItsControlCharacters` (config) and
+`TestSanitizeInstanceStripsEveryControlRune` (mdns). The record, with its
+negative controls (six mutations in seven runs), is in
+`ops/engineering-log.md`, 2026-11-07, B744.
+
 ## Config, settings and process lifecycle
 
 - **An install of a target already staged on disk is REFUSED, and the refusal
@@ -3143,3 +3200,45 @@ second, third and fourth rounds.
   `TestInitRefusalNamesAManagedControlItDoesNotKnowByItsPlace`,
   `TestServeNamesAManagedControlItDoesNotKnowByItsPlace` and
   `TestInitRewriteDropsAnOutputSettingThatDoesNotReadAndSaysSo` pin it.
+
+- **…and a restart request exits with `supervision.RestartExitCode` (75),
+  a stop with 0: an exit 0 is what a supervisor leaves stopped** (2026-09-29,
+  backlog B201). The console's Restart, "Install & restart" and the
+  auto-installer's restart all exited 0, and the LaunchAgent `bridge init`
+  writes relaunches an unsuccessful exit only (KeepAlive
+  {SuccessfulExit: false}), while the Windows service had no recovery
+  actions: measured under a real LaunchAgent on the dev Mac and a real SCM
+  service on nomos, `restarting: true`, then exit 0 and nothing listening,
+  for good. `serveRestart.request` marks the stop and calls runServe's own
+  cancel (so the whole shutdown runs, the rule above), and runServe's
+  second defer turns a clean exit after a request into 75 (EX_TEMPFAIL):
+  launchd relaunched the probe with `last exit code = 75: EX_TEMPFAIL`,
+  and a SIGTERM (`launchctl kill`) still exited 0 and stayed down.
+  `admin.Deps.Restart` and `AutoInstallRestart` are both
+  `restart.request`, never a bare `cancel`
+  (`TestEveryRestartInServeGoesThroughTheRestartRequest` reads the wiring;
+  `TestARestartRequestedFromTheConsoleExitsToBeRestarted` drives the
+  console's). **Windows needs two more parts, both load-bearing**: the
+  service's recovery actions (restart after 2 s, 2 s, then 30 s, reset
+  after an hour) with `FailureActionsOnNonCrashFailures`, set by the
+  installer and, for a service installed before v0.2.1, by the running
+  service itself as it starts (`packaging.EnsureServiceRecovery` with its
+  own name, args[0]; it leaves recovery an operator configured alone), since
+  a console update replaces the binary and never re-installs; and the
+  service handler returns the exit code WITHOUT reporting Stopped first,
+  because the SCM takes the exit code from the first Stopped status: the
+  old handler's early Stopped (exit 0) made a failure read as a clean stop
+  (measured on nomos with recovery set: the early-Stopped build stayed down
+  with exit code 0; the fixed one logged event 7024, "service-specific
+  error 75", then 7031, "corrective action … Restart the service", and was
+  back in 4 s; an SCM Stop stays stopped). systemd's Restart=always restarts
+  either (its journal names this one 75/TEMPFAIL), and Docker's
+  `on-failure` policy, which restarts a non-zero exit, now relaunches it
+  too (docs/docker.md). **And `bridge start` kickstarts a
+  loaded agent**: `launchctl bootstrap` of one answers "Bootstrap failed:
+  5: Input/output error" on macOS 27, which `startForOS` did not swallow,
+  so `bridge start` over the stopped agent failed; a kickstart starts a
+  loaded agent and leaves a running one alone (both measured).
+  **Release note**: a macOS or Windows service install that updates from
+  v0.2.0 through the console runs v0.2.0's restart, which exits 0, so it
+  comes back down: run `bridge restart` once after that update.

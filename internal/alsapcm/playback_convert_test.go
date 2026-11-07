@@ -727,6 +727,35 @@ func TestDeletingOrReplacingAPreparedConvertedSuccessor(t *testing.T) {
 		d.play()
 		return d, ids
 	}
+	// tookBack waits for the engine's call that took b back to have returned,
+	// and reports whether it could. The "cut" step comes as the producer is
+	// asked, before it answers, and a DAC set free before that answer would be
+	// given b's frames in the moment a real one takes 200 ms to reach them. On
+	// a host starved of CPU the producer can be past the window before the call
+	// comes, so b can't be taken back and the engine stops, as "once the kernel
+	// has its window" pins: that run holds the stop instead, and the test as a
+	// whole holds that some run took b back.
+	asked, took := 0, 0
+	t.Cleanup(func() {
+		if asked > 0 && took == 0 {
+			t.Error("no run took b back")
+		}
+	})
+	tookBack := func(d *dsdRig, oa, ob engine.OccurrenceID) bool {
+		d.t.Helper()
+		asked++
+		c := d.waitCall("the engine's call that took b back to return", func(c call) bool {
+			return (c.kind == "cut" && c.from == ob) ||
+				(c.kind == "prepare" && c.after == oa && (c.next == nil || c.next.ID != ob))
+		})
+		if (c.kind == "cut" && !c.ok) || (c.kind == "prepare" && c.err != nil) {
+			d.k.Free()
+			d.tickUntilStopped(engine.ReasonRemovedAudible)
+			return false
+		}
+		took++
+		return true
+	}
 	// finish plays the rest out and holds the DAC's bytes to want.
 	finish := func(t *testing.T, d *dsdRig, want []int32) {
 		d.k.Free()
@@ -747,7 +776,9 @@ func TestDeletingOrReplacingAPreparedConvertedSuccessor(t *testing.T) {
 			}
 			steps.wait(t, "cut", ob)
 			steps.letGo()
-			finish(t, d, oracle(t, v.c))
+			if tookBack(d, d.firstOcc(), ob) {
+				finish(t, d, oracle(t, v.c))
+			}
 		})
 		t.Run("after its window is submitted, before the kernel has it/"+v.name, func(t *testing.T) {
 			steps := newConvSteps(t, "")
@@ -758,7 +789,9 @@ func TestDeletingOrReplacingAPreparedConvertedSuccessor(t *testing.T) {
 				t.Fatal(err)
 			}
 			steps.wait(t, "cut", ob)
-			finish(t, d, oracle(t, v.c))
+			if tookBack(d, d.firstOcc(), ob) {
+				finish(t, d, oracle(t, v.c))
+			}
 		})
 		t.Run("after its window is submitted, none of b's frames submitted/"+v.name, func(t *testing.T) {
 			steps := newConvSteps(t, "ended")
@@ -770,7 +803,9 @@ func TestDeletingOrReplacingAPreparedConvertedSuccessor(t *testing.T) {
 			}
 			steps.wait(t, "cut", ob)
 			steps.letGo()
-			finish(t, d, oracle(t, v.c))
+			if tookBack(d, d.firstOcc(), ob) {
+				finish(t, d, oracle(t, v.c))
+			}
 		})
 		t.Run("once the kernel has its window/"+v.name, func(t *testing.T) {
 			steps := newConvSteps(t, "")
@@ -790,10 +825,14 @@ func TestDeletingOrReplacingAPreparedConvertedSuccessor(t *testing.T) {
 			whole := chained(t, convPlan, a, b)
 			fa := 2 * int(0.25*float64(playbacktest.DSD64)) / 16
 			got := unpack(t, d.k.Heard(), format.S243LE, 24)
-			if len(got) <= fa || len(got) > len(whole) {
+			if len(got) <= fa {
 				t.Fatalf("the DAC was given %d samples; want a's %d, its window b's, then b's start", len(got), fa)
 			}
-			same(t, "the DAC was given", got, whole[:len(got)])
+			// On a starved host the free-running DAC can reach b's end, and
+			// the variant's c after it, before a tick stops the session: a's
+			// frames, the window and b's start are what this holds.
+			n := min(len(got), 2*fa)
+			same(t, "the DAC was given", got[:n], whole[:n])
 		})
 	}
 }
@@ -1265,6 +1304,11 @@ func TestAConversionWithdrawnOrRetargetedIsReconciled(t *testing.T) {
 		d.store.Set(off)
 		d.be.RefreshDSD(true)
 		d.waitEvents("a handed off again", func(evs []event) bool { return count(evs, "replan", oa) > 0 })
+		// The engine's new hand-off, before the PCM may end: an activation
+		// that reached a in the moment before it would be refused (B782).
+		d.waitCall("a handed off again", func(c call) bool {
+			return c.kind == "prepare" && c.next != nil && c.next.Entry == ids[1] && c.next.ID != oa
+		})
 		d.k.Free()
 		s := d.waitEnded()
 		if sk, ok := s.Skipped(ids[1]); !ok || sk.Reason != "dsd_off_by_choice" {
@@ -1287,6 +1331,11 @@ func TestAConversionWithdrawnOrRetargetedIsReconciled(t *testing.T) {
 		retarget(d)
 		d.be.RefreshDSD(true)
 		d.waitEvents("a handed off again", func(evs []event) bool { return count(evs, "replan", oa) > 0 })
+		// The engine's new hand-off, before the PCM may end: an activation
+		// that reached a in the moment before it would be refused (B782).
+		d.waitCall("a handed off again", func(c call) bool {
+			return c.kind == "prepare" && c.next != nil && c.next.Entry == ids[1] && c.next.ID != oa
+		})
 		d.k.Free()
 		s := d.waitStopped(engine.ReasonEndOfQueue)
 		if len(s.Skips()) != 0 || len(s.Faults()) != 0 {

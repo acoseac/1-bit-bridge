@@ -157,10 +157,13 @@ func certRotateCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	cfg, _, err := loadCLIConfig(*configPath)
+	cfg, cfgPath, err := loadCLIConfig(*configPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "config load failed: %v\n", err)
 		return 2
+	}
+	if refuseDataDirAway("cert rotate", cfgPath, cfg.DataDir, stderr) {
+		return 1
 	}
 	certPath, keyPath := resolveCertPaths(cfg)
 

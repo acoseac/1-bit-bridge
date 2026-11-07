@@ -21,6 +21,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/hostname"
 	"github.com/acoseac/1-bit-bridge/internal/logging"
 	hcmdns "github.com/hashicorp/mdns"
@@ -96,6 +97,13 @@ type Config struct {
 	// no name (none valid, or none read) publishes no host= and an SRV
 	// target made of its address (srvTarget).
 	Hostname string
+
+	// HostnameSource yields the host's name where Hostname is empty, read at
+	// each rebuild; nil is os.Hostname. cmd/bridge hands it the probe every
+	// name the bridge certifies and advertises is read through
+	// (advertise.ReportedHostname, backlog B744), so the responder publishes
+	// the `.local` name /v1/health lists from the same read.
+	HostnameSource func() (string, error)
 
 	// ProtocolVersion is advertised in the TXT record as "pv=<N>" so
 	// clients can version-gate at discovery time.
@@ -664,7 +672,8 @@ func addressName(ips []net.IP) string {
 }
 
 // advertisedHost returns the hostname that the SRV record and host= will
-// use, re-deriving it from `cfg.Hostname` (or os.Hostname when blank) and
+// use, re-deriving it from `cfg.Hostname` (or cfg.HostnameSource, else
+// os.Hostname, when blank) and
 // applying the same first-label + ".local." normalization Advertise
 // uses internally. Kept as a method on Config so the TXT-record
 // builder doesn't have to duplicate the logic.
@@ -686,7 +695,11 @@ func addressName(ips []net.IP) string {
 func (cfg Config) advertisedHost() (host string, named bool) {
 	host = strings.TrimSuffix(cfg.Hostname, ".")
 	if host == "" {
-		if h, err := os.Hostname(); err == nil {
+		read := os.Hostname
+		if cfg.HostnameSource != nil {
+			read = cfg.HostnameSource
+		}
+		if h, err := read(); err == nil {
 			host = strings.TrimSuffix(h, ".")
 		}
 	}
@@ -718,7 +731,9 @@ const maxInstanceLen = 63
 // the characters Bonjour can't handle (dots confuse the label-splitting,
 // control chars cause encoding errors), then cuts what is left to the
 // maxInstanceLen bytes a DNS label holds, on a rune boundary, with no space
-// left at its end, and logs the cut.
+// left at its end, and logs the cut. The controls are every one the library
+// name's entries strip, C0, DEL and C1, read as runes
+// (config.WithoutControlCharacters, backlog B744: it kept the C1 ones).
 //
 // What it returns is DNS presentation format, not the label itself:
 // hashicorp/mdns joins it into "<instance>._onebit-bridge._tcp.local." and
@@ -729,14 +744,8 @@ const maxInstanceLen = 63
 // escaped the dot after it and merged the instance into the service label:
 // a different name, or one too long to pack (CodeRabbit on #1046).
 func sanitizeInstance(s string) string {
-	var b strings.Builder
-	for _, r := range s {
-		if r < 0x20 || r == 0x7F || r == '.' {
-			continue
-		}
-		b.WriteRune(r)
-	}
-	instance, dropped := cappedTXTValue(strings.TrimSpace(b.String()), maxInstanceLen)
+	stripped := strings.ReplaceAll(config.WithoutControlCharacters(s), ".", "")
+	instance, dropped := cappedTXTValue(strings.TrimSpace(stripped), maxInstanceLen)
 	if dropped > 0 {
 		instance = strings.TrimRightFunc(instance, unicode.IsSpace)
 		logger.Info("mdns: instance name cut to fit a DNS label", "instance", instance, "dropped", dropped)
