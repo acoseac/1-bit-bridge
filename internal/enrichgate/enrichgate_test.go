@@ -423,7 +423,6 @@ func TestTheClientsOwnSwitchesGovernABareContext(t *testing.T) {
 		srv.setHold(func(w http.ResponseWriter, r *http.Request) {
 			_, _ = io.WriteString(w, "part")
 			w.(http.Flusher).Flush()
-			s.on.Store(false)
 			<-r.Context().Done()
 		})
 		defer srv.setHold(nil)
@@ -433,14 +432,11 @@ func TestTheClientsOwnSwitchesGovernABareContext(t *testing.T) {
 		}
 		resp, err := client.Do(req)
 		if err != nil {
-			// The switch can be off before the answer is admitted: that is
-			// the refusal at the answer, and the same no-answer.
-			if !errors.Is(err, ErrOff) {
-				t.Fatalf("Do = %v, want an answer or ErrOff", err)
-			}
-			return
+			t.Fatalf("Do with the switch on = %v, want the answer", err)
 		}
 		defer resp.Body.Close()
+		// Off once the answer is admitted, while its body is still coming.
+		s.on.Store(false)
 		if _, err := io.ReadAll(resp.Body); !errors.Is(err, ErrOff) {
 			t.Errorf("a body cut off on the wire: %v, want ErrOff", err)
 		}
