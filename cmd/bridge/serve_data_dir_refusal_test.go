@@ -240,10 +240,10 @@ func TestTheEndOfARefusalIsSaidAsItIs(t *testing.T) {
 func TestTheEndOfARefusalCallsBackOnlyTheDataDirItRefused(t *testing.T) {
 	const back, over = "holds its database or its lock file again", "no longer applies"
 	for _, tc := range []struct {
-		name               string
+		name              string
 		refused, startsOn string
-		held               bool
-		says               string
+		held              bool
+		says              string
 	}{
 		{"the data dir the note names, back", "/mnt/usb/bridge", "/mnt/usb/bridge", true, back},
 		{"the data dir the note names, holding neither file", "/mnt/usb/bridge", "/mnt/usb/bridge", false, over},
