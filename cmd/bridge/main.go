@@ -3518,7 +3518,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	}
 	// Read before the preparation and the lock make the data dir and its lock
 	// file: a start calls back only a data dir that held them before it.
-	refusedIsBack := dataDirBack(dataDirRecord, cfg.DataDir)
+	refusedIsBack := dataDirBack(cfg.DataDir)
 	if err := prepareServeDataDir(cfg.DataDir); err != nil {
 		fmt.Fprintf(stderr, "serve: %v; bridge serve starts only on a data directory it can make or use: "+
 			"move what stands in its way, or set dataDir in bridge.yaml to a directory\n", err)

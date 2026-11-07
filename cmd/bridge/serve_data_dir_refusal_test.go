@@ -230,6 +230,43 @@ func TestTheEndOfARefusalIsSaidAsItIs(t *testing.T) {
 	}
 }
 
+// TestTheEndOfARefusalCallsBackOnlyTheDataDirItRefused: the line that a
+// refused data dir is back is said only where the note names the data dir
+// this start's config names and that data dir held its database or its lock
+// file before this start's preparation; a data dir that held neither (the
+// record removed with the volume still away), and a note naming another data
+// dir (one a start that could not remove it left), end in the line that the
+// refusal no longer applies.
+func TestTheEndOfARefusalCallsBackOnlyTheDataDirItRefused(t *testing.T) {
+	const back, over = "holds its database or its lock file again", "no longer applies"
+	for _, tc := range []struct {
+		name               string
+		refused, startsOn string
+		held               bool
+		says               string
+	}{
+		{"the data dir the note names, back", "/mnt/usb/bridge", "/mnt/usb/bridge", true, back},
+		{"the data dir the note names, holding neither file", "/mnt/usb/bridge", "/mnt/usb/bridge", false, over},
+		{"another data dir than the note names, holding its files", "/mnt/nas/bridge", "/mnt/usb/bridge", true, over},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			record := filepath.Join(t.TempDir(), ".bridge.yaml.datadir")
+			sayServeRefusal(&dataDirGoneError{dataDir: tc.refused, record: record}, io.Discard, time.Now())
+			rec := loggingtest.Record(t)
+			endServeRefusal(record, tc.startsOn, tc.held)
+			for _, line := range []string{back, over} {
+				want := 0
+				if line == tc.says {
+					want = 1
+				}
+				if got := rec.Carrying(line); len(got) != want {
+					t.Errorf("the start said %q %d time(s), want %d:\n%s", line, len(got), want, strings.Join(rec.All(), "\n"))
+				}
+			}
+		})
+	}
+}
+
 // TestServeSaysTheRefusalOfADataDirItsNoteDoesNotName: the note is of one
 // state, the refusal of the data dir it names, so a refusal of another data
 // dir is said, with the note just written, and the start after it is quiet.

@@ -101,16 +101,12 @@ func sayServeRefusal(gone *dataDirGoneError, stderr io.Writer, now time.Time) {
 	}
 }
 
-// dataDirBack reports whether the data dir dataDir, which the record at
-// record names, holds its database or its lock file, by an Lstat that finds
-// one: a data dir serve refused while its volume was away that is back.
-// Asked before serve prepares the data dir and takes its lock, which make
-// the data dir and its lock file, so that a start calls back only a data dir
-// that held them before it made any (endServeRefusal).
-func dataDirBack(record, dataDir string) bool {
-	if record == "" || !readDataDirRecord(record).names(dataDir) {
-		return false
-	}
+// dataDirBack reports whether the data dir dataDir holds its database or its
+// lock file, by an Lstat that finds one. Asked before serve prepares the data
+// dir and takes its lock, which make the data dir and its lock file, so that
+// a start calls back only a data dir that held them before it made any
+// (endServeRefusal).
+func dataDirBack(dataDir string) bool {
 	for _, p := range []string{manifest.DefaultDBPath(dataDir), filepath.Join(dataDir, serveLockFileName)} {
 		if _, err := os.Lstat(p); err == nil {
 			return true
@@ -122,11 +118,13 @@ func dataDirBack(record, dataDir string) bool {
 // endServeRefusal removes the note beside the record at record, at the first
 // start after a refusal that gets past the data dir's preparation and its
 // lock, and says once how the refusal ended: that the data dir is back, where
-// it was (back, dataDirBack's answer before the preparation) and the note
-// names dataDir, the data dir this start's config names; and otherwise that
-// the refusal no longer applies (dataDir set to another directory, or the
-// record removed with the volume still away, where serve makes the data dir
-// anew). Nothing where the note is not there.
+// the note names dataDir, the data dir this start's config names, and that
+// data dir held its database or its lock file before the preparation (back,
+// dataDirBack's answer); and otherwise that the refusal no longer applies
+// (dataDir set to another directory, or the record removed with the volume
+// still away, where serve makes the data dir anew; a note naming another
+// data dir than the config's, which a start that could not remove it left).
+// Nothing where the note is not there.
 func endServeRefusal(record, dataDir string, back bool) {
 	if record == "" {
 		return
