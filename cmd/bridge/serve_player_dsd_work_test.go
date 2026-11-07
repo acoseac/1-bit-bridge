@@ -191,10 +191,12 @@ func TestTheSupervisorAnswersWhileTheSilentProbeIsHeld(t *testing.T) {
 
 // The lines serve's player's stop says of what its backend left running past
 // its bound: a write of the player's DSD state, which keeps the player's share
-// of the data directory's lock, and anything else, which may keep the device.
+// of the data directory's lock, and anything else, which may keep the device;
+// and the backend's line for a write asked once the writes were closed.
 const (
-	keptLockLine   = "player: a write of the player's DSD state did not finish within the stop's bound: the player keeps its share of the data directory's lock until it ends"
-	heldDeviceLine = "player: the backend did not finish within its bound: a call to the device is held in the kernel, and the device may still be held until the process exits"
+	keptLockLine     = "player: a write of the player's DSD state did not finish within the stop's bound: the player keeps its share of the data directory's lock until it ends"
+	heldDeviceLine   = "player: the backend did not finish within its bound: a call to the device is held in the kernel, and the device may still be held until the process exits"
+	writeRefusedLine = "player: a write of the player's DSD state came after the player's stop closed them, and is not made"
 )
 
 // heldStateWrite holds the first write of the player's DSD state whose bytes
@@ -253,7 +255,8 @@ func (h *heldStateWrite) await(t *testing.T) {
 // keeps the player's share of the data directory's lock, said once, so no
 // other serve takes the directory while it may still land, and nothing more
 // is said of the backend, of which nothing else runs; the player's stop is
-// done all the same. Once the write lands the share is let go.
+// done all the same. Once the write lands the share is let go, the writes
+// closed: one asked for after that is never made (backlog B780).
 func TestServeKeepsTheDataDirLockWhileTheProbesEvidenceIsWritten(t *testing.T) {
 	needsDirectorySync(t)
 	persistentMedium(t)
@@ -310,6 +313,25 @@ func TestServeKeepsTheDataDirLockWhileTheProbesEvidenceIsWritten(t *testing.T) {
 	release()
 	if goBarProbeEvidence(t, ps.dataDir) == nil {
 		t.Error("the probe's driver_accepted did not land once let go")
+	}
+	// The player settled with the writes of its DSD state closed (round 2,
+	// backlog B780): a write asked for now, as a goroutine of the backend's
+	// the stop abandoned would ask, is never made, and is said once.
+	be, ok := ps.player.be.(*playback.Backend)
+	if !ok {
+		t.Fatalf("serve's player runs %T, want the backend production builds", ps.player.be)
+	}
+	wctx, cancel := context.WithDeadline(context.Background(), serveGiveUpTime(t))
+	defer cancel()
+	if err := be.Wait(wctx); err != nil {
+		t.Fatal(err)
+	}
+	be.RequestProbeDSD(context.Background(), playback.ProbeConditions{Available: true, Fresh: true})
+	if goroutines, writes := be.Running(); goroutines != 0 || writes != 0 {
+		t.Errorf("a probe asked once the player settled runs: %d goroutines, %d of them writes", goroutines, writes)
+	}
+	if lines := rec.Failures(writeRefusedLine); len(lines) != 1 {
+		t.Errorf("the write asked once the player settled was said %q, want once", lines)
 	}
 }
 
