@@ -1,0 +1,138 @@
+{
+  "outputs": [
+    {
+      "id": "bridge:7d444840-9dc0-11d1-b245-5ffdce74fb03",
+      "kind": "bridge",
+      "player": {
+        "software": "bridge",
+        "version": "0.0.1"
+      },
+      "dac": null,
+      "pathRules": [],
+      "bridge": {
+        "dsdPlayback": {
+          "bootId": "golden-boot",
+          "policyGeneration": 2,
+          "reason": "first_use_pending",
+          "tuples": [],
+          "converted": [],
+          "refused": [
+            {
+              "bitRate": 2822400,
+              "reason": "first_use_pending"
+            },
+            {
+              "bitRate": 5644800,
+              "reason": "first_use_pending"
+            },
+            {
+              "bitRate": 11289600,
+              "reason": "dop_confirmation_required"
+            }
+          ],
+          "warnings": [],
+          "model": "Test Test DAC",
+          "bcdDevice": "0100"
+        },
+        "dsdDAC": {
+          "dacKey": "d1-29e725b72bbce9ac",
+          "profile": {
+            "id": "test.dac",
+            "name": "Test DAC",
+            "caveats": [
+              {
+                "code": "transition_clicks",
+                "transport": "dop",
+                "note": "This DAC clicks at a transition into DSD128 or DSD256."
+              }
+            ]
+          },
+          "choice": {
+            "mode": "dop",
+            "maxBitRate": 0,
+            "revision": 2,
+            "dopConfirmed": false
+          },
+          "options": [
+            {
+              "mode": "native",
+              "offered": true,
+              "rates": [
+                {
+                  "bitRate": 2822400,
+                  "evidence": "reported"
+                },
+                {
+                  "bitRate": 5644800,
+                  "evidence": "reported"
+                },
+                {
+                  "bitRate": 11289600,
+                  "evidence": "reported"
+                }
+              ]
+            },
+            {
+              "mode": "dop",
+              "offered": true,
+              "rates": [
+                {
+                  "bitRate": 2822400,
+                  "evidence": "reported"
+                },
+                {
+                  "bitRate": 5644800,
+                  "evidence": "reported"
+                },
+                {
+                  "bitRate": 11289600
+                }
+              ],
+              "needsConfirmation": true
+            },
+            {
+              "mode": "convert",
+              "offered": true,
+              "rateHz": 176400,
+              "validBits": 24,
+              "passbandHz": 30000,
+              "dither": "none"
+            },
+            {
+              "mode": "off",
+              "offered": true
+            }
+          ],
+          "firstUse": [
+            {
+              "transport": "native",
+              "state": "pending"
+            },
+            {
+              "transport": "dop",
+              "state": "pending"
+            }
+          ]
+        },
+        "openHome": null,
+        "state": "stopped",
+        "reason": null,
+        "lastError": null,
+        "libraryScope": "self",
+        "fixedVolume": true,
+        "codecs": [
+          "flac",
+          "wav",
+          "aiff",
+          "alac"
+        ],
+        "dsdMode": "dop",
+        "allowDoP": true,
+        "timeSeek": {
+          "pcm": "supported",
+          "dsd": "unsupported"
+        }
+      }
+    }
+  ]
+}

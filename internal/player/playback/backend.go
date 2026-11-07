@@ -334,7 +334,11 @@ func New(cfg Config) (*Backend, error) {
 	}
 	b := &Backend{policy: PlayerPolicy{BootID: fmt.Sprintf("%x", randomBoot()), Generation: 1, Reason: reason}, cfg: cfg, log: cfg.Log, sessions: map[engine.SessionID]*session{}, took: map[packKey]format.ALSAFormat{}, zero: zero}
 	if cfg.DSD != nil {
-		b.dsd.Store(&dsdSet{gen: 1, why: "the effective DSD set has not been computed yet"})
+		// Its read side the state's warnings of the bridge's already, a state
+		// that did not read among them, before the first refresh reads the box.
+		set := noSet("the effective DSD set has not been computed yet", b.dsdState())
+		set.gen = 1
+		b.dsd.Store(set)
 	}
 	return b, nil
 }

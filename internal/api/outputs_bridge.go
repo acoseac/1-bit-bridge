@@ -72,10 +72,11 @@ type OutputBridge struct {
 	FixedVolume bool `json:"fixedVolume"`
 	// Codecs are the containers the player plays in this release.
 	Codecs []string `json:"codecs"`
-	// DSDMode and AllowDoP are the legacy DSD keys as the boot config holds
-	// them (output.player.dsdMode and allowDoP), which since B728's cutover
-	// (B7) decide nothing: the player's DSD state does, and DSDPlayback's
-	// tuples are what plays.
+	// DSDMode and AllowDoP describe the bound DAC's DSD (B728 B8): the choice
+	// word that applies to it, and whether DoP may play for it by its profile
+	// or the user's confirmation; off and false while no DAC's set is
+	// published. They permit nothing: DSDPlayback's tuples and converted rates
+	// are what plays.
 	DSDMode  string `json:"dsdMode"`
 	AllowDoP bool   `json:"allowDoP"`
 	// TimeSeek is whether the player seeks within a track, by the kind of
@@ -180,7 +181,7 @@ func (s *Server) bridgeElement(ctx context.Context) (OutputInfo, bool) {
 		return OutputInfo{}, false
 	}
 	b := &OutputBridge{
-		DSDPlayback: f.DSDPlayback, Playback: f.Playback,
+		DSDPlayback: dsdPlaybackLists(f.DSDPlayback), DSDDAC: dsdDACLists(f.DSDDAC), Playback: f.Playback,
 		State:        f.State,
 		LibraryScope: LibraryScopeSelf,
 		FixedVolume:  f.FixedVolume,
@@ -210,6 +211,42 @@ func (s *Server) bridgeElement(ctx context.Context) (OutputInfo, bool) {
 		Bridge:    b,
 		DAC:       f.DAC,
 	}, true
+}
+
+// orEmpty is v, or an empty list in nil's place: a list is [], never null.
+func orEmpty[T any](v []T) []T {
+	if v == nil {
+		return []T{}
+	}
+	return v
+}
+
+// dsdPlaybackLists is a copy of p whose lists are each [] in nil's place,
+// nil for nil: the facts handed in are left as they are.
+func dsdPlaybackLists(p *OutputDSDPlayback) *OutputDSDPlayback {
+	if p == nil {
+		return nil
+	}
+	c := *p
+	c.Tuples, c.Converted, c.Refused, c.Warnings = orEmpty(p.Tuples), orEmpty(p.Converted), orEmpty(p.Refused), orEmpty(p.Warnings)
+	return &c
+}
+
+// dsdDACLists is dsdPlaybackLists for the bound DAC: its options, first
+// uses and its profile's caveats. An option's rates are its facts': absent
+// for a mode that has none.
+func dsdDACLists(d *OutputDSDDAC) *OutputDSDDAC {
+	if d == nil {
+		return nil
+	}
+	c := *d
+	c.Options, c.FirstUse = orEmpty(d.Options), orEmpty(d.FirstUse)
+	if p := d.Profile; p != nil {
+		cp := *p
+		cp.Caveats = orEmpty(p.Caveats)
+		c.Profile = &cp
+	}
+	return &c
 }
 
 // composeOutputs is GET /v1/outputs' body: the MPD elements when mpdOn,
@@ -351,13 +388,13 @@ type OutputDSDFirstUse struct {
 
 // OutputDSDPlayback describes the DSD set published now, not an open DAC:
 // since B728's cutover (B7) the player's effective DSD set, which its
-// backend admits by.
+// backend admits by. An owner record's qualificationRevision and
+// qualifiedOn are no members since B8: no record stands behind them.
 type OutputDSDPlayback struct {
-	BootID                string           `json:"bootId"`
-	PolicyGeneration      uint64           `json:"policyGeneration"`
-	QualificationRevision string           `json:"qualificationRevision,omitempty"`
-	Reason                string           `json:"reason,omitempty"`
-	Tuples                []OutputDSDTuple `json:"tuples"`
+	BootID           string           `json:"bootId"`
+	PolicyGeneration uint64           `json:"policyGeneration"`
+	Reason           string           `json:"reason,omitempty"`
+	Tuples           []OutputDSDTuple `json:"tuples"`
 	// Converted, Refused and Warnings are the set's rates converted to PCM,
 	// its rates refused and what a client must be able to explain (B728
 	// B8): each an array, [] when empty, which an older bridge omits.
@@ -365,13 +402,9 @@ type OutputDSDPlayback struct {
 	Refused   []OutputDSDRefused   `json:"refused"`
 	Warnings  []OutputDSDWarning   `json:"warnings"`
 	// Model and BCDDevice are the bound DAC's model and descriptor firmware
-	// code the set was computed for; QualifiedOn and QualificationRevision
-	// are an owner record's, which a harness backend's epoch states and
-	// production reads no more (B728 B7), so serve sends neither. Never the
-	// DAC's port or serial.
-	Model       string `json:"model,omitempty"`
-	BCDDevice   string `json:"bcdDevice,omitempty"`
-	QualifiedOn string `json:"qualifiedOn,omitempty"`
+	// code the set was computed for, never the DAC's port or serial.
+	Model     string `json:"model,omitempty"`
+	BCDDevice string `json:"bcdDevice,omitempty"`
 }
 
 // OutputPlayback is the backend's current occurrence observation.
@@ -393,9 +426,6 @@ type OutputPlayback struct {
 	PackingVersion int `json:"packingVersion,omitempty"`
 	// ObservedAt is when the backend last observed the occurrence's sink.
 	ObservedAt *time.Time `json:"observedAt,omitempty"`
-	// QualificationRevision is the approved record's revision the
-	// occurrence was admitted under, absent for PCM.
-	QualificationRevision string `json:"qualificationRevision,omitempty"`
 	// Evidence and EvidenceOn are a native or DoP occurrence's tuple's rung
 	// and its date (B728 B8), absent for PCM and a converted one.
 	Evidence   string `json:"evidence,omitempty"`

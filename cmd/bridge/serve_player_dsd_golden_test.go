@@ -114,16 +114,16 @@ func dsdGoldenCases(t *testing.T) []dsdGoldenCase {
 func indentedJSON(t *testing.T, body []byte) []byte {
 	t.Helper()
 	var b bytes.Buffer
-	if err := json.Indent(&b, body, "", "  "); err != nil {
+	if err := json.Indent(&b, bytes.TrimSpace(body), "", "  "); err != nil {
 		t.Fatal(err)
 	}
 	b.WriteByte('\n')
 	return b.Bytes()
 }
 
-// hostLike is an IPv4 address, a host's port or a scheme, none of which a
-// fixture may hold.
-var hostLike = regexp.MustCompile(`\d+\.\d+\.\d+\.\d+|:\d{2,5}\b|://`)
+// hostLike is an IPv4 address, a URL, a .local name or a host and its port,
+// none of which a fixture may hold.
+var hostLike = regexp.MustCompile(`\d+\.\d+\.\d+\.\d+|://|\.local\b|^[a-z0-9.-]+:\d{2,5}$`)
 
 // TestEachKindOfDACsWholeResponseIsItsGolden pins GET /v1/outputs' whole
 // response for each kind of DAC (B728 B8's evidence): the same bytes as the

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -150,12 +151,14 @@ func (h HostBox) ReadControls(card int) (alsactl.Snapshot, error) {
 
 // dsdSet is one effective set as the backend publishes and admits by:
 // immutable once stored. computed is false while no set could be computed,
-// and why says why; every rate is then refused (ReasonDACUnread).
+// and why says why; every rate is then refused (ReasonDACUnread). view is
+// its read side (B728 B8), made from the same reading and state.
 type dsdSet struct {
 	gen      uint64
 	set      policy.Set
 	computed bool
 	why      string
+	view     DSDView
 	// unit is where the set was computed: the bound card and endpoint, the
 	// unit's enumeration, and its model's text for publication.
 	card, device, subdevice int
@@ -201,7 +204,8 @@ func (d *dsdSet) tuples() []engine.NativePlan {
 
 // converted are the set's rates converted to PCM (B728 B11), each with its
 // plan and packing: what codecs and OpenHome's ProtocolInfo read beside the
-// tuples, and what B8 publishes (the design's section 7.1).
+// tuples, and what GET /v1/outputs publishes as dsdPlayback.converted (B8;
+// the design's section 7.1).
 func (d *dsdSet) converted() []ConvertedRate {
 	if !d.computed {
 		return nil
@@ -245,9 +249,10 @@ func (d *dsdSet) bcd() string {
 
 // same reports whether e publishes and admits what d does: both computed or
 // neither, with the same reason; the same unit, endpoint and identity; and at
-// every rate the same plan (policy.Plan.Same) or the same refusal. Evidence
-// is no part of it: a rung's change moves no generation in B7, which
-// publishes none (B8 does).
+// every rate the same plan (policy.Plan.Same) or the same refusal. The read
+// side is no part of it: a change of evidence, first use, the choice's
+// revision or a warning alone moves no generation, and refreshDSD publishes
+// it under the generation it had (B728 B8).
 func (d *dsdSet) same(e *dsdSet) bool {
 	if d.computed != e.computed {
 		return false
@@ -346,8 +351,9 @@ func (b *Backend) dsdState() dsdstate.State {
 	return dsdstate.Refusing(b.dsdNow())
 }
 
-// noSet is a set that could not be computed, for why.
-func noSet(why string) *dsdSet { return &dsdSet{why: why} }
+// noSet is a set that could not be computed, for why, its read side from
+// the state st (noView).
+func noSet(why string, st dsdstate.State) *dsdSet { return &dsdSet{why: why, view: noView(st)} }
 
 // canonicalBCD is a firmware as the state keys it, four lowercase
 // hexadecimal digits, or "" for one that does not read.
@@ -393,42 +399,45 @@ func (b *Backend) probeUnit(key dacprofile.Key, bcd string, bd BoundDAC) alsapcm
 }
 
 // readDSD computes the effective set from what it reads now (the design's
-// section 3.1): the bound DAC from a fresh reading, its unit's model read
-// from sysfs while it is still the unit that reading resolved, its PCM
-// device's playback altsets, the DoP gain check's mixer, the state, the
-// probe's answers, the profiles and the kernel; then the unit read again, so
-// a card renumbered while its files were read is never taken. What does not
-// read leaves no set, and DSD refused (ReasonDACUnread).
+// section 3.1): the state, once, which the set and its read side are both
+// made from; the bound DAC from a fresh reading, its unit's model read from
+// sysfs while it is still the unit that reading resolved, its PCM device's
+// playback altsets, the DoP gain check's mixer, the probe's answers, the
+// profiles and the kernel; then the unit read again, so a card renumbered
+// while its files were read is never taken. What does not read leaves no
+// set, and DSD refused (ReasonDACUnread), its read side the state's
+// warnings of the bridge's all the same (noView).
 func (b *Backend) readDSD() *dsdSet {
 	p := b.cfg.DSD
+	st := b.dsdState()
 	if p.Bound == nil || p.Box == nil {
-		return noSet("the player has no reading of the box")
+		return noSet("the player has no reading of the box", st)
 	}
 	bd, ok := p.Bound()
 	if !ok {
-		return noSet("the box's reading of the bound DAC is stale, or the binding names no unit now")
+		return noSet("the box's reading of the bound DAC is stale, or the binding names no unit now", st)
 	}
 	same := func(u alsa.USBIdentity) bool {
 		return binding.SameUnit(u, bd.Identity) && u.DevNum > 0 && u.DevNum == bd.Identity.DevNum
 	}
 	m, err := p.Box.UnitModel(bd.Card)
 	if err != nil {
-		return noSet("the bound DAC's identity did not read: " + err.Error())
+		return noSet("the bound DAC's identity did not read: "+err.Error(), st)
 	}
 	if !same(m.USB) {
-		return noSet("the bound card is no longer the unit the box's reading resolved")
+		return noSet("the bound card is no longer the unit the box's reading resolved", st)
 	}
 	key, err := dsdstate.KeyOf(m.USB, m.Product)
 	if err != nil {
-		return noSet("the bound DAC's model does not key: " + err.Error())
+		return noSet("the bound DAC's model does not key: "+err.Error(), st)
 	}
 	alts, err := p.Box.PlaybackAltsets(bd.Card, bd.Device)
 	if err != nil {
-		return noSet("the bound PCM device's stream did not read: " + err.Error())
+		return noSet("the bound PCM device's stream did not read: "+err.Error(), st)
 	}
 	mixer := readMixer(p.Box, bd.Card, m)
 	if u, ok := p.Box.CardUnit(bd.Card); !ok || !same(u) {
-		return noSet("the bound card changed while it was read")
+		return noSet("the bound card changed while it was read", st)
 	}
 	unit := dacprofile.Unit{Key: key, BCDDevice: m.BCDDevice}
 	var answers []alsapcm.ProbeResult
@@ -445,8 +454,9 @@ func (b *Backend) readDSD() *dsdSet {
 			d.profile = &prof
 		}
 	}
-	d.set = policy.Effective(policy.Inputs{Unit: unit, Profiles: p.Profiles, State: b.dsdState(), Kernel: p.Kernel,
+	d.set = policy.Effective(policy.Inputs{Unit: unit, Profiles: p.Profiles, State: st, Kernel: p.Kernel,
 		Altsets: alts, Probe: answers, Mixer: mixer})
+	d.view = viewOf(d, st, m.USB)
 	return d
 }
 
@@ -454,11 +464,17 @@ func (b *Backend) readDSD() *dsdSet {
 // when it publishes or admits anything another way than the one published
 // (dsdSet.same), publishes it at the next generation, in one swap that
 // selection and publication both see, then reconciles every session's DSD
-// occurrences against it (policy.Reconcile). Refreshes run one at a time, so
-// generations are published in the order their readings were taken; it
-// answers the set published once it is done. It reads no file on the audio
-// path: a session's admission, its activation and its monitor ask it, and
-// the supervisor's RefreshDSD.
+// occurrences against it (policy.Reconcile). One that plays and admits what
+// the published one does, and says another thing of the DAC (its read side:
+// first use observed, an evidence step, the choice's revision, a warning),
+// is published in the same swap under the published generation (B728 B8):
+// the epoch a client's grant keys on is what plays, the design's section 7.1
+// putting the tuples and the converted rates under it, and nothing an
+// occurrence was admitted under moves, so nothing is reconciled. Refreshes
+// run one at a time, so what they publish is in the order their readings
+// were taken; it answers the set published once it is done. It reads no file
+// on the audio path: a session's admission, its activation and its monitor
+// ask it, and the supervisor's RefreshDSD.
 func (b *Backend) refreshDSD() *dsdSet {
 	b.dsdMu.Lock()
 	defer b.dsdMu.Unlock()
@@ -466,7 +482,12 @@ func (b *Backend) refreshDSD() *dsdSet {
 	next := b.readDSD()
 	cur := b.dsd.Load()
 	if cur.same(next) {
-		return cur
+		if reflect.DeepEqual(cur.view, next.view) {
+			return cur
+		}
+		next.gen = cur.gen
+		b.dsd.Store(next)
+		return next
 	}
 	next.gen = cur.gen + 1
 	b.dsd.Store(next)
@@ -499,8 +520,8 @@ func (b *Backend) RefreshDSD(force bool) {
 }
 
 // logDSDSet says what the set published plays at each rate, one Info line a
-// generation: native, dop, or the word of the rate's refusal, which GET
-// /v1/outputs publishes only in the aggregate until B8.
+// generation: native, dop, converted, or the word of the rate's refusal,
+// which GET /v1/outputs publishes as dsdPlayback.refused (B728 B8).
 func (b *Backend) logDSDSet(d *dsdSet) {
 	attrs := []any{"generation", d.gen}
 	if !d.computed {
