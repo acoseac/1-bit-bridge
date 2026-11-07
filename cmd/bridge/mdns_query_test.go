@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"net"
+	"os"
 	"runtime"
 	"strings"
 	"testing"
@@ -41,7 +42,10 @@ func (q *mdnsQuerier) pick() (*net.Interface, error) { return q.iface, nil }
 // mDNS group (the join the responder makes) and hears a question this
 // querier sends there (the path the responder's will take). So once a
 // responder has started, a question it leaves unanswered is a failure.
-// Windows is not asked, as internal/mdns's live tests are not.
+// Windows is not asked, as internal/mdns's live tests are not. Only CI asks:
+// on a LAN interface the test's responder would show a phone on the same
+// network a bridge that exists only for the run, and answer it, so a
+// developer's `go test` stays pinned to loopback and skips the question.
 func newMDNSQuerier(t *testing.T) (*mdnsQuerier, string) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
@@ -50,6 +54,9 @@ func newMDNSQuerier(t *testing.T) (*mdnsQuerier, string) {
 	ifaces, err := net.Interfaces()
 	if err != nil {
 		return nil, "the interfaces cannot be listed: " + err.Error()
+	}
+	if os.Getenv("CI") == "" {
+		return nil, "only CI asks the responder: on a developer's LAN it would show nearby phones a bridge that exists only for this run"
 	}
 	var tried []string
 	for i := range ifaces {
