@@ -515,6 +515,16 @@ func RestoreWithOptions(snapshotDir string, dst Targets, opts RestoreOptions) er
 			return err
 		}
 	}
+	// Where no directory can be synced (Windows), none of the player's files
+	// can be written durably, and each is written durably or not at all, so a
+	// snapshot holding them is refused here, before anything is written: the
+	// DSD state as the identity is (backlog B745, the owner's decision). The
+	// refusal names every one of them the snapshot holds and the way through;
+	// the identity's own writer refused with no way named. A Linux box's
+	// snapshot holds both once its player has run.
+	if (playerUUIDRead || dsdStateRead) && !atomicwrite.HasDirectoryBarrier() {
+		return playerFilesNeedABarrier(m, playerUUIDRead, dsdStateRead)
+	}
 	// restored names what has been written, for a refusal at bridge.yaml's
 	// own write to say.
 	var restored []string
@@ -753,6 +763,32 @@ func unrestoredFrom(names []string, mapping map[string]string) []string {
 		out = append(out, name)
 	}
 	return out
+}
+
+// playerFilesNeedABarrier is a restore's refusal, where no directory can be
+// synced (atomicwrite.ErrNoDirectoryBarrier: Windows), of a snapshot holding
+// the player's files: which of them it holds (the identity, player-uuid with
+// its reservation when listed, and the DSD state), that nothing was restored,
+// and the way through, removing them from a copy of the snapshot, which then
+// restores the rest while this box keeps its own (backlog B745).
+func playerFilesNeedABarrier(m Manifest, identity, dsd bool) error {
+	var names []string
+	if identity {
+		names = append(names, PlayerUUIDFileName)
+		if slices.Contains(m.Files, engine.ReservationFileName) {
+			names = append(names, engine.ReservationFileName)
+		}
+	}
+	if dsd {
+		names = append(names, PlayerDSDFileName)
+	}
+	list := names[0]
+	if n := len(names); n > 1 {
+		list = strings.Join(names[:n-1], ", ") + " and " + names[n-1]
+	}
+	return fmt.Errorf("restore: %w; the snapshot's %s cannot be restored here, each being written durably or not at all; "+
+		"nothing was restored: remove %s from a copy of the snapshot to restore the rest, and this box keeps its own",
+		atomicwrite.ErrNoDirectoryBarrier, list, list)
 }
 
 // restorePlayerDSD installs the snapshot's DSD state at target, in the data
