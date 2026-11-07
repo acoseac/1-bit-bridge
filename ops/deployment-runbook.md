@@ -1099,7 +1099,13 @@ bridge does about it:
   directory … held this bridge's database, and holds neither bridge.db nor
   server.lock now: …`, exit 1, and the service manager starts it again (the
   unit `bridge init` writes restarts it every 2 s; launchd and the Windows
-  service's recovery do the same) until the volume is mounted. `bridge
+  service's recovery do the same) until the volume is mounted. Since B727
+  serve says it once: at the first start it refuses, again a day later, and
+  at every start from a terminal (`bridge serve` by hand), keeping when it
+  was said in a note beside the record, `.bridge.yaml.datadir.refused`; the
+  first start that finds the data dir again removes the note and says `the
+  data directory serve refused while its volume was away holds its database
+  or its lock file again: serve starts on it` (Info). `bridge
   doctor`'s `data-dir` line fails the same state, and since B727 every other
   command that makes, opens or writes the data dir (scan, the render
   commands, analyze, variants, artwork, enrichment, duplicates, library,
@@ -1116,6 +1122,18 @@ bridge does about it:
   reset) still starts and makes a new database. A system unit can order the start after
   the mount instead (`RequiresMountsFor=<mount point>` in a drop-in); a user
   unit cannot, its manager not seeing the system's mount units.
+- **The variants directory on that volume.** Since B727 a render (the
+  console's, a download's, the auto-optimize sweep's, `bridge upscale`,
+  `optimize` and `render`) writes nothing into a variants directory that is
+  not there, holds no rendition or cannot be read while the catalog records
+  renditions in it, so the reapers, which skip a variants directory that
+  reads that way, keep its rows. Serve says `pool: rendition output
+  unavailable` (Warn, `output=variants`) once for the outage and `pool:
+  rendition output available again` (Info) at the first render after it;
+  the CLI refuses its batch once, `Not rendering: the variants directory
+  (upscale.variantsDir) reads as a volume that is not mounted: …`, exit 1.
+  Mount the volume; if its renditions were removed on purpose, `bridge
+  upscale --gc --allow-mass-delete` drops their rows.
 - **Docker.** A bind mount made before the host mounted the volume never sees
   the mount (Docker's default propagation, `rprivate`): for the life of that
   container the library root reads as the bare mount point, which the scan
