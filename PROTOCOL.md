@@ -1067,10 +1067,10 @@ converted occurrence carry none. A converted occurrence's `format`, `rateHz` and
 `converted` is its plan: `fromBitRate`, the source's DSD bits/s; `filter`,
 `passbandHz` and `dither`, as a converted entry's; `gainDB`, 0, unity; and
 `clippedSamples`, the samples its conversion has saturated at full scale so far.
-That count is live: the player counts as it converts, at each 4,096 PCM frames it
-makes (23 ms of 176.4 kHz audio), ahead of what the DAC has played by at most the
-player's buffer, about two seconds; each request reads it afresh, which costs the
-player's audio nothing.
+That count is live: the player counts as it converts, at least every 4,096 PCM
+frames it makes (23 ms of 176.4 kHz audio), ahead of what the DAC has played by
+what the player holds, its lookahead of about two seconds and the hardware's
+buffer; each request reads it afresh, which costs the player's audio nothing.
 
 `policyGeneration` moves with what plays. A change of the set (a tuple, a
 converted plan or a refusal's word, the DAC or its firmware) publishes it at the
