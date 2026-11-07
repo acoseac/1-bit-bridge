@@ -6,6 +6,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/player/dacprofile"
 	"github.com/acoseac/1-bit-bridge/internal/player/engine"
 	"github.com/acoseac/1-bit-bridge/internal/player/format"
+	"github.com/acoseac/1-bit-bridge/internal/player/policy"
 )
 
 // ProbedUnitForTest is the silent probe's check of the node it opened
@@ -25,4 +26,13 @@ func (b *Backend) AdmitDSDForTest(f format.NativeDSD, leading bool) (engine.Nati
 		return plan, 0, err
 	}
 	return plan, o.admitted.gen, err
+}
+
+// AdmitDSDPlanForTest is AdmitDSDForTest with the effective set's plan the
+// occurrence was admitted under, and whether it converts (B728 B11): a
+// converted rate's admission has no native plan.
+func (b *Backend) AdmitDSDPlanForTest(f format.NativeDSD, leading bool) (engine.NativePlan, policy.Plan, bool, error) {
+	o := &occ{leading: leading}
+	plan, err := b.admitDSD(o, f)
+	return plan, o.policyPlan, o.converts(), err
 }

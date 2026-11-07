@@ -146,8 +146,8 @@ func wiredPlayback(t *testing.T, standIn *playerStandIn) playback.Config {
 // bridge's part alone, made before the player runs. Since the cutover (B7)
 // the keys are read by nothing else: serve wires the effective policy, which
 // over the migrated state refuses the GO bar's DSD as dsd_off_by_choice for
-// an opt-out, and, for the defaults, as dsd_not_in_this_release, its DSD
-// converted under auto until the player converts (B11).
+// an opt-out, and, for the defaults, converts it under auto, which the player
+// does since B11: no tuple and no reason, every rate converted.
 func TestAnExplicitOffSurvivesAsTheDefault(t *testing.T) {
 	needsDirectorySync(t)
 	persistentMedium(t)
@@ -155,14 +155,15 @@ func TestAnExplicitOffSurvivesAsTheDefault(t *testing.T) {
 	for _, tc := range []struct {
 		name, keys string
 		// refusal is the word the effective policy refuses the GO bar's DSD
-		// with, at every rate, over the migrated state.
+		// with, at every rate, over the migrated state; "" for one it
+		// converts.
 		refusal string
 		// marker is the migration's, nil for none and no file.
 		marker *dsdstate.Marker
 	}{
 		{"explicit off", "    dsdMode: off\n", "dsd_off_by_choice", &dsdstate.Marker{From: dsdstate.FromKeys, DSDMode: "off"}},
 		{"dop without allowDoP", "    dsdMode: dop\n    allowDoP: false\n", "dsd_off_by_choice", &dsdstate.Marker{From: dsdstate.FromKeys, DSDMode: "dop", AllowDoP: &no}},
-		{"unset", "", string(playback.ReasonDSD), nil},
+		{"unset", "", "", nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			trees := goBarTrees(t)
@@ -192,8 +193,9 @@ func TestAnExplicitOffSurvivesAsTheDefault(t *testing.T) {
 					t.Errorf("an opt-out gave a DAC something: %+v", st.DACs)
 				}
 			}
-			if p := policyBackendOf(t, wiredPlayback(t, standIn), dopContents{}, &dopOpens{}).Policy(); len(p.Tuples) != 0 || p.Reason != tc.refusal {
-				t.Errorf("the effective policy serve wired publishes %+v (reason %q), want nothing playing for %s", p.Tuples, p.Reason, tc.refusal)
+			p := policyBackendOf(t, wiredPlayback(t, standIn), dopContents{}, &dopOpens{}).Policy()
+			if len(p.Tuples) != 0 || p.Reason != tc.refusal || (len(p.Converted) == 3) != (tc.refusal == "") {
+				t.Errorf("the effective policy serve wired publishes %+v (reason %q, converted %+v), want %s", p.Tuples, p.Reason, p.Converted, map[bool]string{true: "every rate converted", false: "nothing playing for " + tc.refusal}[tc.refusal == ""])
 			}
 			if code := ps.stopServe(t); code != 0 {
 				t.Fatalf("exit %d; stderr=%s", code, ps.stderr.String())

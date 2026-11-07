@@ -121,7 +121,10 @@ func (p *bridgePlayer) startOpenHome(id string, w servePlayerWiring, lib openhom
 		Engine: eng,
 		DSDPolicy: func() bool {
 			if be, ok := p.be.(*playback.Backend); ok {
-				return len(be.Policy().Tuples) > 0
+				// A tuple, or a rate the player converts to PCM (B728 B11):
+				// a controller sends DSF and DFF only where ProtocolInfo
+				// lists them.
+				return be.Policy().PlaysDSD()
 			}
 			return false
 		},

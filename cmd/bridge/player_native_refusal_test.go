@@ -75,9 +75,9 @@ func playOnEngine(t *testing.T, b playBackend, what string, names ...string) (*e
 // constructors, given the effective DSD policy as their wiring gives it
 // (B728 B7), refuse DSD the policy does not play before any hardware is
 // located or opened, by the policy's word: the bound DAC with no fresh
-// reading of it is dsd_dac_unread, and a DAC no profile knows, with no choice
-// of its own, converts under the bridge's auto, which is dsd_not_in_this_release
-// until the player converts (B11).
+// reading of it is dsd_dac_unread, and the bridge's default migrated off is
+// dsd_off_by_choice. A DAC no profile knows, with no choice of its own, plays
+// converted since B11 (internal/alsapcm's TestAnUnknownDACPlaysDSDConverted).
 func TestNativeProductionConstructorsRefuse(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("the engine keeps its IDs durable with a directory fsync, which Windows has not: the player runs on Linux")
@@ -89,8 +89,10 @@ func TestNativeProductionConstructorsRefuse(t *testing.T) {
 			p.Bound = func() (playback.BoundDAC, bool) { return playback.BoundDAC{}, false }
 			return p
 		},
-		playback.ReasonDSD: func() *playback.DSDPolicy {
-			return playbacktest.Policy(5, playbacktest.NewBox(5), playbacktest.NewMemStore(dsdstate.Defaults()))
+		"dsd_off_by_choice": func() *playback.DSDPolicy {
+			st := dsdstate.Defaults()
+			st.DefaultMode = dsdstate.ModeOff
+			return playbacktest.Policy(5, playbacktest.NewBox(5), playbacktest.NewMemStore(st))
 		},
 	}
 	for _, mode := range []string{"serve", "output-play"} {

@@ -169,17 +169,19 @@ type dsdSet struct {
 // rateWords are the rates' names in a log line.
 var rateWords = map[int]string{dsdstate.DSD64: "DSD64", dsdstate.DSD128: "DSD128", dsdstate.DSD256: "DSD256"}
 
-// planOutcome is what a rate's plan plays, for a log line: native, dop, or
-// the word of its refusal, a converted rate's dsd_not_in_this_release until
-// conversion ships (B11).
+// planOutcome is what a rate's plan plays, for a log line: native, dop,
+// converted (to PCM by the player, B728 B11) or the word of its refusal.
 func planOutcome(p policy.Plan) string {
 	switch p.Outcome {
-	case policy.OutcomeNative, policy.OutcomeDoP:
+	case policy.OutcomeNative, policy.OutcomeDoP, policy.OutcomeConverted:
 		return string(p.Outcome)
-	case policy.OutcomeConverted:
-		return string(ReasonDSD)
 	}
 	return string(p.Reason)
+}
+
+// plays reports whether a plan plays its rate: native, DoP or converted.
+func plays(p policy.Plan) bool {
+	return p.Outcome == policy.OutcomeNative || p.Outcome == policy.OutcomeDoP || p.Outcome == policy.OutcomeConverted
 }
 
 // tuples are the set's native and DoP plans, by rate: what it publishes and
@@ -197,16 +199,33 @@ func (d *dsdSet) tuples() []engine.NativePlan {
 	return out
 }
 
+// converted are the set's rates converted to PCM (B728 B11), each with its
+// plan and packing: what codecs and OpenHome's ProtocolInfo read beside the
+// tuples, and what B8 publishes (the design's section 7.1).
+func (d *dsdSet) converted() []ConvertedRate {
+	if !d.computed {
+		return nil
+	}
+	var out []ConvertedRate
+	for _, r := range d.set.All() {
+		if r.Plan.Outcome == policy.OutcomeConverted {
+			out = append(out, ConvertedRate{BitRate: r.Plan.BitRate, Plan: convPlanOf(r.Plan.Target), Packing: r.Plan.Target.Packing})
+		}
+	}
+	return out
+}
+
 // reason is the set's aggregate refusal as GET /v1/outputs publishes it
-// (B7 within today's wire shape): "" while any rate plays, and otherwise the
-// word of the lowest rate's refusal, a converted one's dsd_not_in_this_release.
+// (B7 within today's wire shape): "" while any rate plays, a converted one
+// included since the player converts (B728 B11), and otherwise the word of
+// the lowest rate's refusal.
 func (d *dsdSet) reason() string {
 	if !d.computed {
 		return string(ReasonDACUnread)
 	}
 	all := d.set.All()
 	for _, r := range all {
-		if r.Plan.Outcome == policy.OutcomeNative || r.Plan.Outcome == policy.OutcomeDoP {
+		if plays(r.Plan) {
 			return ""
 		}
 	}
@@ -275,9 +294,10 @@ func enginePlan(p policy.Plan) engine.NativePlan {
 }
 
 // selectFor is d's plan for DSD content of f: the native or DoP plan at its
-// rate, or the rate's refusal by the word the set names; a converted rate is
-// refused as dsd_not_in_this_release until the player converts (B11), and a
-// set that could not be computed refuses every rate (ReasonDACUnread).
+// rate; a converted rate's plan (B728 B11), with no native plan, which the
+// open converts to the target's PCM; or the rate's refusal by the word the
+// set names. A set that could not be computed refuses every rate
+// (ReasonDACUnread).
 func (d *dsdSet) selectFor(f format.NativeDSD) (engine.NativePlan, policy.Plan, error) {
 	if !nativeLogicalRate(f.BitRateHz) {
 		return engine.NativePlan{}, policy.Plan{}, &engine.Unplayable{Reason: ReasonRate, Detail: "DSD64, DSD128 and DSD256 only: no native, DoP or converted transport here carries this DSD rate"}
@@ -293,8 +313,7 @@ func (d *dsdSet) selectFor(f format.NativeDSD) (engine.NativePlan, policy.Plan, 
 	case policy.OutcomeNative, policy.OutcomeDoP:
 		return enginePlan(p), p, nil
 	case policy.OutcomeConverted:
-		return engine.NativePlan{}, p, &engine.Unplayable{Reason: ReasonDSD,
-			Detail: "the effective DSD policy converts this rate to PCM, which the player does in a later release: until then it is refused"}
+		return engine.NativePlan{}, p, nil
 	}
 	return engine.NativePlan{}, p, &engine.Unplayable{Reason: p.Reason, Detail: p.Detail}
 }
@@ -504,7 +523,8 @@ func (b *Backend) logDSDSet(d *dsdSet) {
 // read longer ago than a session's monitor reads it (dsdStale), its plan at
 // the content's rate or its refusal. The occurrence keeps the set and the
 // plan it was admitted under, which the check after open, its activation and
-// reconciliation compare with.
+// reconciliation compare with. A converted rate answers no native plan: the
+// occurrence converts (occ.converts, B728 B11).
 func (b *Backend) admitDSD(o *occ, f format.NativeDSD) (engine.NativePlan, error) {
 	cur := b.dsd.Load()
 	if o.leading || b.dsdStale() {
@@ -535,7 +555,11 @@ func (b *Backend) dsdStale() bool {
 // is located or opened; round 2). No reconciliation reaches an occurrence
 // still opening, so the step that ends its open admits it again, under s.mu,
 // and closes its done in that step: a refresh published before it is the one
-// it is admitted under, and one published after it judges it. s.mu is held.
+// it is admitted under, and one published after it judges it. Its open read
+// the first DSD chunk and kept its source, whatever it was admitted as, so
+// it is admitted again as native, DoP or converted alike: a converted one's
+// converter is made after this, in the same step (makeConverterLocked), for
+// the plan it is admitted under now (B728 B11). s.mu is held.
 func (s *session) readmitDSDLocked(o *occ) {
 	cur := s.b.dsd.Load()
 	if o.admitted == nil || o.admitted == cur || o.refused != nil {
@@ -552,6 +576,10 @@ func (s *session) readmitDSDLocked(o *occ) {
 		return
 	}
 	o.admitted, o.policyPlan = cur, pp
+	if pp.Outcome == policy.OutcomeConverted {
+		o.plan = nil
+		return
+	}
 	p := plan
 	o.plan = &p
 	o.transport = nativeTransport(p)
@@ -643,19 +671,24 @@ func (s *session) occurrenceFactsLocked(o *occ) policy.Occurrence {
 // again, so no change of the set can make it unsafe: it is not judged, which
 // would revoke the session's DSD and with it a successor the set still plays
 // in a sink of its own (a DoP occurrence played out, the native one after it
-// filling its prefill; round 2). A change of the set never asks a user's
-// consent here: the safety changes (the gain leaving unity, the identity
-// changing, the DAC leaving, the state no longer reading) act at once, and
-// B7 makes no other; B9's write asks first with the same predicate.
+// filling its prefill; round 2). Nor is one whose every frame the sink has
+// played, its end in it, which a sink shared with what follows it (a
+// converted occurrence's, PCM after it on the same transport, B728 B11) does
+// not drain: judged, it would stop that PCM. A converted occurrence is judged
+// as native and DoP are, its plan its target (policy.Plan.Same), its frames
+// PCM frames. A change of the set never asks a user's consent here: the
+// safety changes (the gain leaving unity, the identity changing, the DAC
+// leaving, the state no longer reading) act at once, and B7 makes no other;
+// B9's write asks first with the same predicate.
 func (s *session) reconcileDSD(next *dsdSet) {
 	var revoke []string
 	var replan []engine.OccurrenceID
 	s.mu.Lock()
 	for _, o := range s.chain {
-		if !o.opened() || o.admitted == nil || o.dropped || o.plan == nil || o.admitted == next {
+		if !o.opened() || o.admitted == nil || o.dropped || o.admitted == next {
 			continue
 		}
-		if out := o.out; out != nil && (out.drained || out.closed) {
+		if out := o.out; out != nil && (out.drained || out.closed || o.eof && out.sink.Position().Played >= o.start+o.written) {
 			continue
 		}
 		v := policy.Reconcile(next.set, s.occurrenceFactsLocked(o))
@@ -690,10 +723,11 @@ func (s *session) reconcileDSD(next *dsdSet) {
 	wake(s.wakeR)
 }
 
-// checkDSDActivation is a native or DoP occurrence's check as its sink is
-// about to write to the DAC (the design's section 3.5: every activation reads
-// the policy): the policy read afresh, which reconciles a change, then the
-// occurrence judged against the set published now, under the session's lock,
+// checkDSDActivation is a native, DoP or converted occurrence's check as its
+// sink is about to write to the DAC (the design's section 3.5: every
+// activation reads the policy): the policy read afresh, which reconciles a
+// change, then the occurrence, its set and its plan read here alone, judged
+// against the set published now, under the session's lock,
 // by reconciliation's own predicate (policy.Reconcile): under that set, or
 // kept by it, when it counts under it from now on, as reconciliation would
 // have it. A refresh beside the activation can publish a set between the read
@@ -720,14 +754,16 @@ func (s *session) checkDSDActivation(o *occ) error {
 	return errors.New("the effective DSD set no longer plays this occurrence's plan")
 }
 
-// checkDSDNode is the check after open of a native or DoP occurrence's node
-// (the design's sections 3.4 and 3.5), at its open and at every reopen after
-// a pause's release: the node's unit is the DAC the set the occurrence was
-// admitted under was computed for, by its model's key and its firmware
-// (policy.Identity), never by its port; and for DoP the gain check, read
-// afresh at the node's card, passes for the plan's rate. It records the
-// identity the sink opened.
-func (out *output) checkDSDNode(n alsapcm.NodeInfo) error {
+// checkDSDNode is the check after open of a DSD occurrence's node (the
+// design's sections 3.4 and 3.5), at its open and at every reopen after a
+// pause's release, admitted is the set the sink's DSD was admitted under:
+// the node's unit is the DAC that set was computed for, by its model's key
+// and its firmware (policy.Identity), never by its port; and for DoP the
+// gain check, read afresh at the node's card, passes for the plan's rate. A
+// PCM sink a converted occurrence plays in (B728 B11) has no native plan and
+// no gain check: its PCM changes no DoP word. It records the identity the
+// sink opened.
+func (out *output) checkDSDNode(n alsapcm.NodeInfo, admitted *dsdSet) error {
 	p := out.s.b.cfg.DSD
 	if p == nil || p.Box == nil {
 		return errors.New("player backend: the effective DSD policy has no reading of the box")
@@ -741,16 +777,16 @@ func (out *output) checkDSDNode(n alsapcm.NodeInfo) error {
 		return fmt.Errorf("player backend: the opened node's unit does not key: %w", err)
 	}
 	id := policy.Identity{Key: key, BCDDevice: m.BCDDevice}
-	if !id.Same(out.admitted.set.Identity()) {
+	if !id.Same(admitted.set.Identity()) {
 		return &alsapcm.Error{Reason: alsapcm.ReasonWrongDevice, Op: "open", Endpoint: alsapcm.Endpoint{Card: n.Card, Device: n.Device},
 			Detail: "the node opened is not the DAC the effective DSD set was computed for (its model or its firmware differs)"}
 	}
-	if out.plan.Tuple.Transport == TransportDoP {
+	if out.plan != nil && out.plan.Tuple.Transport == TransportDoP {
 		alts, err := p.Box.PlaybackAltsets(n.Card, n.Device)
 		if err != nil {
 			return fmt.Errorf("player backend: the opened node's stream did not read for the DoP gain check: %w", err)
 		}
-		g := policy.CheckGain(readMixer(p.Box, n.Card, m), policy.DoPAltsets(alts, out.plan.Tuple.BitRate), out.admitted.profile, m.BCDDevice)
+		g := policy.CheckGain(readMixer(p.Box, n.Card, m), policy.DoPAltsets(alts, out.plan.Tuple.BitRate), admitted.profile, m.BCDDevice)
 		if !g.Unity {
 			return fmt.Errorf("player backend: DoP refused at the open, %s: %s", g.Reason, g.Detail)
 		}

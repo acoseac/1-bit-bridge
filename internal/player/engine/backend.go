@@ -82,10 +82,11 @@ type StartRequest struct {
 }
 
 // TimeSeek reports whether a seek within a track takes content of a kind
-// (B674): PCM is positioned at any frame before its end, and DSD, native or
-// DoP, at none (DoP is DSD carried in PCM words, whatever its carrier). A
-// seek in DSD is refused with ReasonSeekUnsupported before anything changes,
-// and GET /v1/outputs states the same (bridge.timeSeek).
+// (B674): PCM is positioned at any frame before its end, and DSD, native,
+// DoP or converted to PCM (B728 B11), at none (DoP is DSD carried in PCM
+// words, whatever its carrier, and a converted occurrence's Details say codec
+// DSD). A seek in DSD is refused with ReasonSeekUnsupported before anything
+// changes, and GET /v1/outputs states the same (bridge.timeSeek).
 func TimeSeek(dsd bool) bool { return !dsd }
 
 // Join is how a successor follows the content before it.
@@ -123,7 +124,9 @@ func (p Position) Seconds() float64 {
 // decoder is open, as the decoder gives it (B470 PR 5a3): the content's
 // exact length, in frames at its rate, and its format. Never the
 // controller's metadata, which is untrusted, and never the library index's
-// length, a tag's rounded value.
+// length, a tag's rounded value. Of DSD the player converts to PCM (B728
+// B11) they are the conversion's: the PCM's frames, rate and bits, codec DSD,
+// never lossless.
 type Details struct {
 	// Frames is the content's length in frames, 0 when its container
 	// declares none; RateHz is its rate.
@@ -133,10 +136,10 @@ type Details struct {
 	Bits     int
 	Channels int
 	// Codec names the decoder that reads the content: FLAC, WAV, AIFF or
-	// ALAC.
+	// ALAC, and DSD for DSD, native, DoP or converted.
 	Codec string
-	// Lossless is content played as it is stored, everything this release's
-	// backend plays.
+	// Lossless is content played as it is stored: everything the backend
+	// plays but DSD it converts.
 	Lossless bool
 }
 

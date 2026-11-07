@@ -208,9 +208,19 @@ func TestDSDOutputProtocolTokens(t *testing.T) {
 			dop[value] = true
 		}
 	}
+	// A converted occurrence's observation is withheld from /v1/outputs until
+	// B728's B8 publishes it: bridgeDSDFacts sends no playback object for one
+	// (TestTheElementListsDSDWhileThePlayerConverts), so its word is no
+	// emitting definition of playback.transport yet. B8 drops this exclusion
+	// and documents the word.
+	if _, ok := transports["TransportConverted"]; !ok {
+		t.Fatal("playback names no TransportConverted: the withheld observation's exclusion is stale")
+	}
 	observed := map[string]bool{}
-	for _, value := range transports {
-		observed[value] = true
+	for name, value := range transports {
+		if name != "TransportConverted" {
+			observed[value] = true
+		}
 	}
 	tupleTransport := map[string]bool{}
 	if value, ok := transports["TransportDoP"]; ok {

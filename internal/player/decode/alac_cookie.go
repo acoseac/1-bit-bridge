@@ -82,7 +82,7 @@ func parseALACSampleDescription(p []byte) (alacConfig, error) {
 	switch typ := string(rest[4:8]); typ {
 	case "alac":
 	case "mp4a":
-		return alacConfig{}, refuse(ReasonLossy, "AAC is refused; the bridge player is bit-exact lossless only")
+		return alacConfig{}, refuse(ReasonLossy, "AAC is refused; the bridge player plays lossless files only")
 	default:
 		return alacConfig{}, refuse(ReasonUnsupportedComp, "M4A audio codec %q is not ALAC", typ)
 	}

@@ -228,7 +228,14 @@ func (s *session) reportStep() bool {
 	// What this step reported of the occurrences before the one heard was
 	// the last of them.
 	s.retireLocked(heard)
+	// A converted occurrence's join window held for what follows (B728 B11):
+	// the producer reads the sink's lookahead again at each measurement, so
+	// the window ends at its floor.
+	holding := s.holdingLocked()
 	l.unlock()
+	if holding {
+		wake(s.wakeP)
+	}
 	for _, e := range evs {
 		e()
 	}
