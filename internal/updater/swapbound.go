@@ -16,7 +16,10 @@ import "time"
 // (a migrating store open, a start's admission and housekeeping) waits
 // defaultStateLockWait for it, so the stop may take at most half of that
 // wait, leaving the rest for the marker's writes and the swap's renames
-// (TestAnSCMStopFitsInsideTheMarkersLockWait). Serve's stop takes no part of
-// the lock, so the service the swap stops never waits on it
-// (TestServeStopsWhileAnotherProcessHoldsTheMarkersLock, cmd/bridge).
+// (TestAnSCMStopFitsInsideTheMarkersLockWait). Serve's stop waits for the
+// lock only to take back its start's count of an install (backlog B660), on
+// a goroutine of its own while it tears down and for at most two seconds
+// after (cmd/bridge's takeBackWait), so the service the swap stops ends
+// inside this wait; a serve with no count to take back takes no part of the
+// lock (TestServeStopsWhileAnotherProcessHoldsTheMarkersLock, cmd/bridge).
 const scmStopWait = 15 * time.Second

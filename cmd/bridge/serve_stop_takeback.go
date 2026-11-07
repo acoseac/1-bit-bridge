@@ -29,8 +29,8 @@ const stopTakeBackRetry = 50 * time.Millisecond
 // (takeBackFailedStart), kept for the ends that are no stop, a bind the host
 // refused and a failure of the tailnet's network, writes nothing once this
 // one has landed. A wait for the install marker's lock that gives up is asked
-// again until the teardown ends; whoever holds the lock that long (see the
-// record of B660's second round) leaves the count to that last take-back.
+// again until the teardown ends, and the take-back after it is the last try
+// (what a holder past both leaves is backlog B760).
 type stopTakeBack struct {
 	dataDir string
 	counted int

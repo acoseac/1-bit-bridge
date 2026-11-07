@@ -167,10 +167,13 @@ func TestABootThatHoldsTheMarkersLockFirstLeavesTheManualRollbackNothingToPutBac
 	}
 }
 
-// TestServeStopsWhileAnotherProcessHoldsTheMarkersLock: nothing in serve's
-// stop takes the install marker's lock, so a `bridge update` that holds it
-// while it stops the service (on Windows, through the SCM, for up to
-// scmStopWait) is never waiting on the serve it stops.
+// TestServeStopsWhileAnotherProcessHoldsTheMarkersLock: with no install
+// counting its start, nothing in serve's stop takes the install marker's
+// lock, so a `bridge update` that holds it while it stops the service (on
+// Windows, through the SCM, for up to scmStopWait) is never waiting on the
+// serve it stops; a start an install counts waits for it to take its count
+// back, on a goroutine while it tears down and for at most takeBackWait after
+// (backlog B660).
 func TestServeStopsWhileAnotherProcessHoldsTheMarkersLock(t *testing.T) {
 	r := newRefusedInstall(t, "")
 	if err := updater.ClearState(r.dataDir); err != nil {

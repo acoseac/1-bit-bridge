@@ -54,11 +54,9 @@ func NoteDataDirLock(dataDir string, serve bool) (release func()) {
 // (NoteDataDirLock), and another process's by a try of the lock, which finds
 // it held. It never waits, so it takes no part in the order the locks are
 // waited for in (server.lock, the ladder, update-state.lock); a try that
-// finds the lock free lets go of it at once, and a serve that asks for it in
-// that instant is refused as by another serve, before its admission, so the
-// start is not counted. A lock held by another process's command (a restore)
-// reads as a serve's, a lock file that is not there, or that cannot be opened
-// or tried, as none.
+// finds the lock free lets go of it at once (what that leaves is backlog
+// B760). A lock file that is not there, or that cannot be opened or tried,
+// reads as none.
 func ServeHoldsDataDir(dataDir string) bool {
 	key := filepath.Clean(dataDir)
 	dataDirHolds.Lock()
