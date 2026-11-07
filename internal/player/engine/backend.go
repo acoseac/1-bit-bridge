@@ -82,10 +82,11 @@ type StartRequest struct {
 }
 
 // TimeSeek reports whether a seek within a track takes content of a kind
-// (B674): PCM is positioned at any frame before its end, and DSD, native or
-// DoP, at none (DoP is DSD carried in PCM words, whatever its carrier). A
-// seek in DSD is refused with ReasonSeekUnsupported before anything changes,
-// and GET /v1/outputs states the same (bridge.timeSeek).
+// (B674): PCM is positioned at any frame before its end, and DSD, native,
+// DoP or converted to PCM (B728 B11), at none (DoP is DSD carried in PCM
+// words, whatever its carrier, and a converted occurrence's Details say codec
+// DSD). A seek in DSD is refused with ReasonSeekUnsupported before anything
+// changes, and GET /v1/outputs states the same (bridge.timeSeek).
 func TimeSeek(dsd bool) bool { return !dsd }
 
 // Join is how a successor follows the content before it.

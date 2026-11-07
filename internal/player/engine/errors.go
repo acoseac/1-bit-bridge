@@ -103,9 +103,9 @@ const (
 	// the content, or that the arithmetic cannot hold, or in content of no
 	// known length or rate.
 	ReasonSeekOutOfRange Reason = "seek_out_of_range"
-	// ReasonSeekUnsupported is a seek in DSD, native or DoP (DoP is DSD,
-	// whatever its PCM carrier): the player does not position DSD in time
-	// (TimeSeek).
+	// ReasonSeekUnsupported is a seek in DSD, native, DoP or converted to
+	// PCM (DoP is DSD, whatever its PCM carrier, and so is DSD the player
+	// converts): the player does not position DSD in time (TimeSeek).
 	ReasonSeekUnsupported Reason = "seek_unsupported"
 )
 

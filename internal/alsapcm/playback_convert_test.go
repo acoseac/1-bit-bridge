@@ -946,6 +946,37 @@ func TestTheClaimsAreThePlans(t *testing.T) {
 	}
 }
 
+// TestASeekInAConvertedTrackIsUnsupported (B728 B11; the design's section
+// 4.7): seeking within converted DSD stays unsupported, as within native DSD
+// and DoP. The engine knows the track for DSD by its Details' codec, which a
+// converted occurrence's are, and refuses an absolute and a relative seek
+// with seek_unsupported, changing nothing: the track plays on in its one
+// sink and the DAC is given every converted frame once.
+func TestASeekInAConvertedTrackIsUnsupported(t *testing.T) {
+	d := newConvRig(t)
+	a := track(playbacktest.DSD64, 0.5, noise(1))
+	d.files.add("a", a)
+	d.insert("a")
+	d.play()
+	d.k.Await(t, "the writer to fill the hardware buffer and wait on the DAC", runningAndWaiting)
+	d.k.Play(t, 50*time.Millisecond)
+	d.tick()
+	d.waitSnap("a heard, its Details known", func(s *engine.Snapshot) bool { tr, ok := s.Track(); return ok && tr.HasDetails })
+	if err := d.eng.SeekAbsolute(bg, 0); engine.ReasonOf(err) != engine.ReasonSeekUnsupported {
+		t.Errorf("an absolute seek in a converted track: %v, want %s", err, engine.ReasonSeekUnsupported)
+	}
+	if err := d.eng.SeekRelative(bg, -1); engine.ReasonOf(err) != engine.ReasonSeekUnsupported {
+		t.Errorf("a relative seek in a converted track: %v, want %s", err, engine.ReasonSeekUnsupported)
+	}
+	d.k.Free()
+	d.waitStopped(engine.ReasonEndOfQueue)
+	want, _ := converted(t, a, convPlan)
+	same(t, "the DAC was given", unpack(t, d.k.Heard(), format.S243LE, 24), want)
+	if v := d.k.View(); v.Opens != 1 {
+		t.Errorf("%d opens: a refused seek starts no session", v.Opens)
+	}
+}
+
 // lockedWriter is a writer under a mutex, for a log the backend's goroutines
 // write.
 type lockedWriter struct {

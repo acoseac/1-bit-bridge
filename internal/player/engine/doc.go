@@ -180,11 +180,12 @@
 // at or past the end of the content, the decoder's length (Details.Frames),
 // so the exact end too, where nothing would be left to play, an absolute one
 // before the start, one the arithmetic cannot hold, and any in content of no
-// known length or rate are refused with ReasonSeekOutOfRange; DSD, native or
-// DoP, known by the occurrence's native plan or Details or the session's
-// transport, never by a PCM carrier, with ReasonSeekUnsupported (TimeSeek),
-// before anything else is asked; and a track the backend has reported
-// nothing of with ReasonSeekUnavailable. A refusal changes nothing.
+// known length or rate are refused with ReasonSeekOutOfRange; DSD, native,
+// DoP or converted to PCM, known by the occurrence's native plan or Details
+// (a converted occurrence's codec is DSD) or the session's transport, never
+// by a PCM carrier, with ReasonSeekUnsupported (TimeSeek), before anything
+// else is asked; and a track the backend has reported nothing of with
+// ReasonSeekUnavailable. A refusal changes nothing.
 //
 // A seek keeps the transport as it was: playing (or starting), it releases
 // the session and, once the release is acknowledged, starts one at the
