@@ -3200,3 +3200,45 @@ negative controls (six mutations in seven runs), is in
   `TestInitRefusalNamesAManagedControlItDoesNotKnowByItsPlace`,
   `TestServeNamesAManagedControlItDoesNotKnowByItsPlace` and
   `TestInitRewriteDropsAnOutputSettingThatDoesNotReadAndSaysSo` pin it.
+
+- **…and a restart request exits with `supervision.RestartExitCode` (75),
+  a stop with 0: an exit 0 is what a supervisor leaves stopped** (2026-09-29,
+  backlog B201). The console's Restart, "Install & restart" and the
+  auto-installer's restart all exited 0, and the LaunchAgent `bridge init`
+  writes relaunches an unsuccessful exit only (KeepAlive
+  {SuccessfulExit: false}), while the Windows service had no recovery
+  actions: measured under a real LaunchAgent on the dev Mac and a real SCM
+  service on nomos, `restarting: true`, then exit 0 and nothing listening,
+  for good. `serveRestart.request` marks the stop and calls runServe's own
+  cancel (so the whole shutdown runs, the rule above), and runServe's
+  second defer turns a clean exit after a request into 75 (EX_TEMPFAIL):
+  launchd relaunched the probe with `last exit code = 75: EX_TEMPFAIL`,
+  and a SIGTERM (`launchctl kill`) still exited 0 and stayed down.
+  `admin.Deps.Restart` and `AutoInstallRestart` are both
+  `restart.request`, never a bare `cancel`
+  (`TestEveryRestartInServeGoesThroughTheRestartRequest` reads the wiring;
+  `TestARestartRequestedFromTheConsoleExitsToBeRestarted` drives the
+  console's). **Windows needs two more parts, both load-bearing**: the
+  service's recovery actions (restart after 2 s, 2 s, then 30 s, reset
+  after an hour) with `FailureActionsOnNonCrashFailures`, set by the
+  installer and, for a service installed before v0.2.1, by the running
+  service itself as it starts (`packaging.EnsureServiceRecovery` with its
+  own name, args[0]; it leaves recovery an operator configured alone), since
+  a console update replaces the binary and never re-installs; and the
+  service handler returns the exit code WITHOUT reporting Stopped first,
+  because the SCM takes the exit code from the first Stopped status: the
+  old handler's early Stopped (exit 0) made a failure read as a clean stop
+  (measured on nomos with recovery set: the early-Stopped build stayed down
+  with exit code 0; the fixed one logged event 7024, "service-specific
+  error 75", then 7031, "corrective action … Restart the service", and was
+  back in 4 s; an SCM Stop stays stopped). systemd's Restart=always restarts
+  either (its journal names this one 75/TEMPFAIL), and Docker's
+  `on-failure` policy, which restarts a non-zero exit, now relaunches it
+  too (docs/docker.md). **And `bridge start` kickstarts a
+  loaded agent**: `launchctl bootstrap` of one answers "Bootstrap failed:
+  5: Input/output error" on macOS 27, which `startForOS` did not swallow,
+  so `bridge start` over the stopped agent failed; a kickstart starts a
+  loaded agent and leaves a running one alone (both measured).
+  **Release note**: a macOS or Windows service install that updates from
+  v0.2.0 through the console runs v0.2.0's restart, which exits 0, so it
+  comes back down: run `bridge restart` once after that update.
