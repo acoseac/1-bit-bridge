@@ -219,11 +219,12 @@ func TestASuccessorDroppedAtItsActivationIsTakenBackUnwritten(t *testing.T) {
 		awaitHeld(t, "the session's release", rel.in)
 		// The release has come and the session's life has not ended yet (its
 		// release is held at the Releasing seam): b's activation goes on there,
-		// and its fence's answer is the release's, noted, or a fault.
+		// and its fence's answer is the release's, noted. A fault it made would
+		// be reported only once the release goes on (the teardown's last
+		// report: the reporter sends nothing while a session is released), so
+		// a step refused for the release is what this waits for.
 		act.letGo()
-		waitOn(t, "b's activation refused for the release, or a fault", d.rec.ch, func() bool {
-			return slices.Contains(d.rec.fencedSteps(), "activate") || count(d.rec.events(), "fault", 0) != 0
-		})
+		waitOn(t, "a step refused for the release", d.rec.ch, func() bool { return len(d.rec.fencedSteps()) > 0 })
 		rel.letGo()
 		select {
 		case err := <-stopped:
