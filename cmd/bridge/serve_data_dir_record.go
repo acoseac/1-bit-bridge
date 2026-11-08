@@ -13,6 +13,7 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
 	"github.com/acoseac/1-bit-bridge/internal/config"
+	"github.com/acoseac/1-bit-bridge/internal/doctor"
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
@@ -274,23 +275,24 @@ func (e *dataDirGoneError) Error() string {
 	case noIdentity:
 		return e.what() + ": when it is on a volume that is mounted at boot, the volume is not mounted yet, and what it holds was made " +
 			"in the bare mount point. bridge serve does not take it for its data directory, and its service manager starts it again; " +
-			e.onPurpose("start bridge serve again")
+			e.onPurpose("serve", "start bridge serve again")
 	case otherIdentity:
 		return e.what() + ": when it is on a volume that is mounted at boot, another volume is mounted there. " +
 			"bridge serve does not take it for its data directory, and its service manager starts it again; " +
-			e.onPurpose("start bridge serve again")
+			e.onPurpose("serve", "start bridge serve again")
 	case identityUnreadable, recordUnreadable:
 		return e.what() + ": bridge serve cannot tell it from another data directory, and does not start on it; " +
-			e.onPurpose("start bridge serve again")
+			e.onPurpose("serve", "start bridge serve again")
 	}
 	return e.what() + ": when it is on a volume that is mounted at boot, the volume is not mounted yet. " +
 		"bridge serve does not make an empty data directory in its place, and its service manager starts it again; " +
-		e.onPurpose("start bridge serve again")
+		e.onPurpose("serve", "start bridge serve again")
 }
 
-// onPurpose is how to go on by hand (recovery), then doing what then says.
-func (e *dataDirGoneError) onPurpose(then string) string {
-	return e.recovery() + " and " + then
+// onPurpose is how to go on by hand (recovery), said to bridge cmd, then
+// doing what then says.
+func (e *dataDirGoneError) onPurpose(cmd, then string) string {
+	return e.recovery(cmd) + " and " + then
 }
 
 // recovery is how to go on by hand from the refusal, ending in the record to
@@ -303,8 +305,8 @@ func (e *dataDirGoneError) onPurpose(then string) string {
 // takes up its identity, or gives it one (backlog B741). A marker that does
 // not read is moved aside with it, and a record that does not read is removed
 // with the data dir there, which serve records again; one this user may not
-// read is made readable first.
-func (e *dataDirGoneError) recovery() string {
+// read is read first as the service's user (readable), said to bridge cmd.
+func (e *dataDirGoneError) recovery(cmd string) string {
 	const moved = "if the data directory was moved on purpose, set dataDir in bridge.yaml to where it is now; "
 	switch e.cause {
 	case noIdentity:
@@ -313,20 +315,29 @@ func (e *dataDirGoneError) recovery() string {
 	case otherIdentity:
 		return moved + "if it was removed on purpose, or it is the data directory to serve from now, remove " + e.record
 	case identityUnreadable:
-		return e.readable() + moved + "if it was removed on purpose, or it is the data directory to serve from, move " + dataDirMarkerName +
+		return e.readable(cmd) + moved + "if it was removed on purpose, or it is the data directory to serve from, move " + dataDirMarkerName +
 			" aside and remove " + e.record
 	case recordUnreadable:
-		return e.readable() + "where the data directory is there, its volume mounted, remove " + e.record
+		return e.readable(cmd) + "where the data directory is there, its volume mounted, remove " + e.record
 	}
 	return moved + "if it was removed on purpose, remove " + e.record
 }
 
-// readable is the advice for a record or a marker this user may not read.
-func (e *dataDirGoneError) readable() string {
-	if errors.Is(e.err, fs.ErrPermission) {
+// readable is the advice for a record or a marker this user may not read,
+// said to bridge cmd: serve, which its service manager runs as the service's
+// user, is to have it made readable by that user; any other command, bridge
+// doctor included, is to run as that user (B741's round 2: the advice to make
+// readable what the service's user already reads told a command run by
+// another user to change nothing), and to make it readable by that user if
+// it is not, which this user cannot tell.
+func (e *dataDirGoneError) readable(cmd string) string {
+	switch {
+	case !errors.Is(e.err, fs.ErrPermission):
+		return ""
+	case cmd == "serve":
 		return "make it readable by the user the service runs as; "
 	}
-	return ""
+	return "run bridge " + cmd + " as the user the service runs as, and make it readable by that user if it is not; "
 }
 
 // unreadableHere reports whether the refusal is of a record or a marker this
@@ -335,6 +346,16 @@ func (e *dataDirGoneError) readable() string {
 // inspect (B659).
 func (e *dataDirGoneError) unreadableHere() bool {
 	return (e.cause == recordUnreadable || e.cause == identityUnreadable) && errors.Is(e.err, fs.ErrPermission)
+}
+
+// doctorLine is bridge doctor's data-dir line on the refusal (dataDirCheck):
+// a fail in serve's refusal's words with its fix, or, for a record or a
+// marker this user may not read, not checked, a warn.
+func (e *dataDirGoneError) doctorLine() (status doctor.Status, summary, hint string) {
+	if e.unreadableHere() {
+		return doctor.Warn, "not checked: " + e.what(), e.recovery("doctor")
+	}
+	return doctor.Fail, "bridge serve will not start: " + e.what(), e.fix()
 }
 
 // what is the refusal's first sentence, which bridge doctor's data-dir line
@@ -369,11 +390,11 @@ func (e *dataDirGoneError) why() string {
 func (e *dataDirGoneError) fix() string {
 	switch e.cause {
 	case dataDirNotThere, noIdentity:
-		return "mount the volume it is on (serve's service manager starts it again until it is there); " + e.recovery()
+		return "mount the volume it is on (serve's service manager starts it again until it is there); " + e.recovery("doctor")
 	case otherIdentity:
-		return "mount the volume this bridge served from (serve's service manager starts it again until it is there); " + e.recovery()
+		return "mount the volume this bridge served from (serve's service manager starts it again until it is there); " + e.recovery("doctor")
 	}
-	return e.recovery()
+	return e.recovery("doctor")
 }
 
 // commandRefusal is the refusal of bridge cmd, a command other than serve, of
@@ -384,17 +405,17 @@ func (e *dataDirGoneError) commandRefusal(cmd string) string {
 	switch e.cause {
 	case noIdentity:
 		return e.what() + ": when it is on a volume that is mounted at boot, the volume is not mounted yet, and what it holds was made " +
-			"in the bare mount point. bridge " + cmd + " makes and writes nothing there: mount the volume and run it again; " + e.onPurpose(again)
+			"in the bare mount point. bridge " + cmd + " makes and writes nothing there: mount the volume and run it again; " + e.onPurpose(cmd, again)
 	case otherIdentity:
 		return e.what() + ": when it is on a volume that is mounted at boot, another volume is mounted there. bridge " + cmd +
-			" makes and writes nothing there: mount the volume this bridge served from and run it again; " + e.onPurpose(again)
+			" makes and writes nothing there: mount the volume this bridge served from and run it again; " + e.onPurpose(cmd, again)
 	case identityUnreadable, recordUnreadable:
 		return e.what() + ": bridge " + cmd + " cannot tell it from another data directory, and makes and writes nothing there; " +
-			e.onPurpose(again)
+			e.onPurpose(cmd, again)
 	}
 	return e.what() + ": when it is on a volume that is mounted at boot, the volume is not mounted yet. " +
 		"bridge " + cmd + " makes and writes nothing there: mount the volume and run it again; " +
-		e.onPurpose(again)
+		e.onPurpose(cmd, again)
 }
 
 // dataDirAway is the check serve makes before it prepares its data dir

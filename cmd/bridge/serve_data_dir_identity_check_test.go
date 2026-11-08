@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/doctor"
 )
 
 // The check's answers and the refusal's words, backlog B741, without a serve:
@@ -276,7 +278,9 @@ func TestTheRefusalNoteIsOfOneState(t *testing.T) {
 // that holds neither file says it holds neither (B651's words, which the
 // other causes would make false); each says how to go on by hand, ending in
 // the record to remove, under serve's name, a command's and bridge doctor's;
-// and a record or a marker this user may not read says to make it readable.
+// and of a record or a marker this user may not read, serve says to make it
+// readable by the user the service runs as, and a command and bridge doctor
+// to run as that user (B741's round 2), a warn on the doctor's line.
 func TestEachRefusalSaysWhatItIsAndHowToGoOn(t *testing.T) {
 	const dataDir, record = "/mnt/usb/bridge", "/etc/bridge/.bridge.yaml.datadir"
 	denied := &fs.PathError{Op: "open", Path: record, Err: fs.ErrPermission}
@@ -298,17 +302,24 @@ func TestEachRefusalSaysWhatItIsAndHowToGoOn(t *testing.T) {
 			if says := strings.Contains(what, "holds neither"); says != (e.cause == dataDirNotThere) {
 				t.Errorf("the refusal for %s says %q", e.cause, what)
 			}
-			for surface, text := range map[string]string{
-				"serve":         e.Error(),
-				"a command":     e.commandRefusal("scan"),
-				"bridge doctor": e.fix() + " and ",
+			status, _, hint := e.doctorLine()
+			for _, s := range []struct{ surface, text, readable string }{
+				{"serve", e.Error(), "make it readable by the user the service runs as; "},
+				{"a command", e.commandRefusal("scan"), "run bridge scan as the user the service runs as, and make it readable by that user if it is not; "},
+				{"bridge doctor", hint + " and ", "run bridge doctor as the user the service runs as, and make it readable by that user if it is not; "},
 			} {
-				if got := recordToRemove(t, text); got != record {
-					t.Errorf("%s says to remove %q, want the record %q:\n%s", surface, got, record, text)
+				if got := recordToRemove(t, s.text); got != record {
+					t.Errorf("%s says to remove %q, want the record %q:\n%s", s.surface, got, record, s.text)
 				}
-				if readable := strings.Contains(text, "make it readable by the user the service runs as"); readable != errors.Is(e.err, fs.ErrPermission) {
-					t.Errorf("%s says to make it readable: %v:\n%s", surface, readable, text)
+				if readable := strings.Contains(s.text, s.readable); readable != errors.Is(e.err, fs.ErrPermission) {
+					t.Errorf("%s says %q: %v:\n%s", s.surface, s.readable, readable, s.text)
 				}
+				if s.surface != "serve" && strings.Contains(s.text, "make it readable by the user the service runs as") {
+					t.Errorf("%s says to make it readable by the user the service runs as, which may read it already:\n%s", s.surface, s.text)
+				}
+			}
+			if want := map[bool]doctor.Status{true: doctor.Warn, false: doctor.Fail}[errors.Is(e.err, fs.ErrPermission)]; status != want {
+				t.Errorf("bridge doctor's line is %v, want %v", status, want)
 			}
 			if cmd := e.commandRefusal("scan"); !strings.Contains(cmd, "bridge scan ") || !strings.Contains(cmd, "makes and writes nothing there") ||
 				!strings.HasSuffix(cmd, "run bridge scan again") {

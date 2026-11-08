@@ -79,10 +79,7 @@ func dataDirCheck(cfgFile, dir string) (doctor.Check, bool) {
 	}
 	var gone *dataDirGoneError
 	if record, err := dataDirRecordPath(cfgFile); err == nil && errors.As(checkServeDataDirRecord(record, dir), &gone) {
-		if gone.unreadableHere() {
-			return line(doctor.Warn, "not checked: "+gone.what(), "run bridge doctor as the user the service runs as, who can read it; "+gone.recovery())
-		}
-		return line(doctor.Fail, "bridge serve will not start: "+gone.what(), gone.fix())
+		return line(gone.doctorLine())
 	}
 	nearest, inTheWay, err := fsutil.BlockingEntry(dir)
 	switch {

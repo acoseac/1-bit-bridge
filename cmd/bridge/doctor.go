@@ -367,8 +367,10 @@ func buildDoctorDepsWith(cfgPath string, absentIsPreSetup bool, dacHost dacAcces
 			// A player box's checklist, from a one-shot outputs builder it
 			// closes at once (output_checklist.go). The console's doctor
 			// replaces it with the serving process's own
-			// (adminDoctorRunner).
-			d.OutputChecklist = doctorOutputChecklist(cfg, nil)
+			// (adminDoctorRunner). Its proof of the library's paths reads
+			// the indexed tracks from the data dir's database, which it opens
+			// only where the record refuses nothing (doctorStoreGate).
+			d.OutputChecklist = doctorOutputChecklist(d.ConfigFile.Path, cfg, nil)
 			// The storage under the data directory of the bridge's own player,
 			// from the medium check its strict writer makes (B603), for both
 			// the CLI and the console, which reads these Deps too.
@@ -421,17 +423,14 @@ func buildDoctorDepsWith(cfgPath string, absentIsPreSetup bool, dacHost dacAcces
 			// open that migrates records it in the install marker beside it
 			// (TestEveryStoreTheBridgeOpensIsItsDataDirsDatabase).
 			dbPath := manifest.DefaultDBPath(cfg.DataDir)
-			// No probe opens the database of a data directory serve refuses
-			// (backlog B741): one its record names may hold a database that
-			// is not this bridge's (one a start or a command made in the bare
-			// mount point, another data dir's), which a store open migrates.
-			// Until B741 a refused data dir held none, so no probe reached a
-			// store there (B727). The data-dir line says why; each probe's
-			// line says the store was not read.
-			refused := dataDirAway(d.ConfigFile.Path, cfg.DataDir) != nil
+			// No probe opens the database of a data directory the record
+			// refuses (doctorStoreGate, asked at each probe's call), and the
+			// player checklist's proof of the library's paths opens it on the
+			// same terms (doctorOutputChecklist).
+			cfgFile := d.ConfigFile.Path
 			d.LibraryHasCodec = func(ctx context.Context, codec string) (bool, error) {
-				if refused {
-					return false, errStoreOfARefusedDataDir
+				if err := doctorStoreGate(cfgFile, cfg.DataDir); err != nil {
+					return false, err
 				}
 				// The stat looks redundant against OpenStore's own error and
 				// was flagged as such — it is NOT. `OpenStore` on a missing
@@ -472,8 +471,8 @@ func buildDoctorDepsWith(cfgPath string, absentIsPreSetup bool, dacHost dacAcces
 			maxDeletePercent := cfg.VariantSweepMaxDeletePercent()
 			if _, err := os.Stat(dbPath); !os.IsNotExist(err) {
 				d.RelocatedSidecars = func(ctx context.Context) (doctor.RelocatedSidecars, error) {
-					if refused {
-						return doctor.RelocatedSidecars{}, errStoreOfARefusedDataDir
+					if err := doctorStoreGate(cfgFile, cfg.DataDir); err != nil {
+						return doctor.RelocatedSidecars{}, err
 					}
 					return relocatedSidecarCounts(ctx, dbPath, variantsDir, waveformDir)
 				}
@@ -481,16 +480,16 @@ func buildDoctorDepsWith(cfgPath string, absentIsPreSetup bool, dacHost dacAcces
 				// describes. Same lazy open, same reasons; the walk it
 				// adds is bounded — see doctorVariantsIndexBudget.
 				d.VariantsIndex = func(ctx context.Context) (doctor.VariantsIndex, error) {
-					if refused {
-						return doctor.VariantsIndex{}, errStoreOfARefusedDataDir
+					if err := doctorStoreGate(cfgFile, cfg.DataDir); err != nil {
+						return doctor.VariantsIndex{}, err
 					}
 					return variantsIndexCounts(ctx, dbPath, variantsDir, maxDeletePercent, doctorVariantsIndexBudget)
 				}
 				// Names in one folder the app reads as one (backlog B420):
 				// the same lazy open, over the indexed paths alone.
 				d.NameCollisions = func(ctx context.Context) (doctor.NameCollisions, error) {
-					if refused {
-						return doctor.NameCollisions{}, errStoreOfARefusedDataDir
+					if err := doctorStoreGate(cfgFile, cfg.DataDir); err != nil {
+						return doctor.NameCollisions{}, err
 					}
 					return nameCollisionGroups(ctx, dbPath, doctorNameCollisionGroups)
 				}
@@ -562,10 +561,39 @@ func asWrittenOrAsGiven(p string) string {
 	return p
 }
 
-// errStoreOfARefusedDataDir is a store probe's answer where serve refuses the
-// data dir whose database it would read (dataDirAway): it opens nothing, and
-// its line says the store was not read.
-var errStoreOfARefusedDataDir = errors.New("bridge doctor opens no database in a data directory serve refuses (the data-dir line says why)")
+// errStoreOfARefusedDataDir and errStoreNotChecked are a store probe's answer
+// where the record refuses the data dir whose database it would read
+// (doctorStoreGate): it opens nothing, and its line says the store was not
+// read, and why: serve refuses that data dir, or this user cannot read its
+// record or its identity, which the user the service runs as may.
+var (
+	errStoreOfARefusedDataDir = errors.New("bridge doctor opens no database in a data directory serve refuses (the data-dir line says why)")
+	errStoreNotChecked        = errors.New("bridge doctor opens no database in a data directory whose record or identity this user cannot read (the data-dir line says why)")
+)
+
+// doctorStoreGate is whether bridge doctor may open the database of the data
+// dir dataDir that the config at cfgFile names: nil where the record beside
+// it refuses nothing (dataDirAway), and otherwise why it opens nothing there
+// (backlog B741). A data dir the record refuses may hold a database that is
+// not this bridge's, one a start or a command made in the bare mount point
+// or another data dir's, which a store open migrates; until B741 a refused
+// data dir held none, so no probe reached a store there (B727). A config
+// with no file ("": one built in memory) has no record, and refuses nothing.
+// Asked at each call of a probe that opens the store: the codec probe, the
+// sidecar-paths, variants-index and name-collisions probes, and the player
+// checklist's proof of the library's paths (doctorOutputChecklist).
+func doctorStoreGate(cfgFile, dataDir string) error {
+	if cfgFile == "" {
+		return nil
+	}
+	switch gone := dataDirAway(cfgFile, dataDir); {
+	case gone == nil:
+		return nil
+	case gone.unreadableHere():
+		return errStoreNotChecked
+	}
+	return errStoreOfARefusedDataDir
+}
 
 // relocatedSidecarCounts opens the manifest for one doctor probe and
 // counts the rows of each sidecar table recorded outside its current

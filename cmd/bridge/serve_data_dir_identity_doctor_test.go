@@ -58,7 +58,7 @@ func TestTheDoctorsChecklistOpensNoStoreInARefusedDataDir(t *testing.T) {
 				}
 			}
 			before := treeOf(t, v.mnt)
-			checks := doctorOutputChecklist(mustLoadConfig(t, v.cfg), linuxBoxSeam(v.lib))(context.Background())
+			checks := doctorOutputChecklist(v.cfg, mustLoadConfig(t, v.cfg), linuxBoxSeam(v.lib))(context.Background())
 			if len(checks) == 0 {
 				t.Fatal("the checklist said nothing: the MPD gate is shut, and nothing reached the store")
 			}
