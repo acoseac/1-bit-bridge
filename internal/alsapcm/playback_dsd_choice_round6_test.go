@@ -85,15 +85,14 @@ func wantUnwritten(t *testing.T, d *dsdRig, opens int, whose string) {
 	}
 }
 
-// parkedOrGiven waits until parked, a node's close held in the kernel, is
-// closed (true) or b's node, the second opened, has been given a byte
-// (false), whichever comes first: it orders a test's steps, and what the node
-// was given is read once the rig has stopped.
-func (d *dsdRig) parkedOrGiven(parked <-chan struct{}, what string) bool {
+// heldOrGiven waits until held is closed (true) or b's node, the second
+// opened, has been given a byte (false), whichever comes first: it orders a
+// test's steps, and what the node was given is read once the rig has stopped.
+func (d *dsdRig) heldOrGiven(held <-chan struct{}, what string) bool {
 	d.t.Helper()
 	given := d.k.When(func(v alsapcm.KernelView) bool { return len(v.OpenAt) >= 2 && v.GivenBytes > v.OpenAt[1] })
 	select {
-	case <-parked:
+	case <-held:
 		return true
 	case <-given:
 		return false
@@ -102,6 +101,41 @@ func (d *dsdRig) parkedOrGiven(parked <-chan struct{}, what string) bool {
 		d.t.Fatalf("waited %v for %s", alsapcm.Watchdog(), what)
 	}
 	return false
+}
+
+// closeHold holds, once armed, whoever makes the backend's next note that an
+// occurrence's sink closed (playback.NoteClosed), in that note: the last step
+// of a sink's close (the backend's closeOutput), its output marked closed, its
+// sink's end come and its node closed, before the close returns.
+type closeHold struct {
+	mu sync.Mutex
+	o  engine.OccurrenceID
+	g  *gate
+}
+
+// arm holds the next note that o's sink closed, at the gate answered.
+func (c *closeHold) arm(t *testing.T, o engine.OccurrenceID) *gate {
+	g := newGate(t)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.o, c.g = o, g
+	return g
+}
+
+// note is the rig's notify (rigOptions.notify).
+func (c *closeHold) note(n playback.Note) {
+	if n.Kind != playback.NoteClosed {
+		return
+	}
+	c.mu.Lock()
+	g := c.g
+	if g == nil || n.Occurrence != c.o {
+		c.mu.Unlock()
+		return
+	}
+	c.g = nil
+	c.mu.Unlock()
+	g.pass()
 }
 
 // revokedAtTheCheck runs Codex's sequence of round 5's review on d, whose
@@ -201,36 +235,39 @@ func TestARevocationAtASuccessorsActivationCheckKeepsItsFault(t *testing.T) {
 
 // TestARevocationThatRunsDuringATakeBackKeepsItsOneFault (B728 B9 round 6):
 // the other order of Codex's. b's sink's activation answers the fence the
-// reconciliation's own step set, and b is taken back: the take-back marks its
-// output closed and waits on the sink's end, held here at the node's close in
-// the kernel, while the reconciliation's line and Backend.Revoke run first,
-// the node still open. Revoke finds the output closed and adds no fault, and
-// the reconciliation's stands: the session stops native_revoked, once, for the
-// reason Revoke is given, nothing more opens, and once the rig has stopped b's
-// node was given nothing and every node is closed.
+// reconciliation's own step set, and b is taken back: the take-back gives up
+// b's claim and its output, marks the output closed and waits on the sink's
+// end, and is held here in its close's last step, before it returns to the
+// producer, while the reconciliation's line and Backend.Revoke run first.
+// Revoke finds the output closed and adds no fault, and the reconciliation's
+// stands: the session stops native_revoked, once, for the reason Revoke is
+// given, nothing more opens, and once the rig has stopped b's node was given
+// nothing and every node is closed. (Held at the node's close in the kernel
+// instead, the take-back raced the sink's writer, which closes the node once
+// it has answered the fence: a record made after the reconciliation's lock
+// found b still claimed or not, run to run.)
 func TestARevocationThatRunsDuringATakeBackKeepsItsOneFault(t *testing.T) {
-	w, log := newWriteSeams(), &stopsLog{}
-	d := revokeRig(t, playbacktest.ChoiceState(dsdstate.ModeNative), w, &heldGate{}, log)
-	_, _, letAdmit := heldAdmissionOn(t, d, w)
+	w, log, closing := newWriteSeams(), &stopsLog{}, &closeHold{}
+	d := newDSDRigWith(t, playbacktest.ChoiceState(dsdstate.ModeNative), func(p *playback.DSDPolicy) { p.Log = log }, func(o *rigOptions) {
+		o.seams, o.noReplan, o.notify = w.seams(nil), true, closing.note
+	})
+	_, ob, letAdmit := heldAdmissionOn(t, d, w)
 	_, letFault := d.rec.holdNextFault()
 	t.Cleanup(letFault)
-	closing, letClose := d.k.ParkNextClose()
-	t.Cleanup(letClose)
+	held := closing.arm(t, ob)
 	stops := newGate(t)
 	log.arm(stops)
 	res := d.choose(choiceReq(t, d, dsdstate.ModeNative, 1, capAt(playbacktest.DSD64), goAhead))
 	reachedGate(t, stops, res, "the reconciliation's revocation of the session's DSD, before its call to Revoke")
 	letAdmit()
-	taken := d.parkedOrGiven(closing, "b's node's close as b is taken back, or a byte given to b's node")
+	d.heldOrGiven(held.in, "b's take-back held in its close, or a byte given to b's node")
 	stops.letGo()
 	if got := answer(t, res); got.Outcome != playback.ChoiceWritten {
 		t.Fatalf("the cap with the go-ahead: %s, want written", got.Outcome)
 	}
-	if v := d.k.View(); taken && !v.Open {
-		t.Fatalf("b's node was closed before Backend.Revoke returned: the take-back was not held")
-	}
-	letClose()
+	held.letGo()
 	letFault()
+	d.stoppedOrOpenedC("the revocation's fault was not the session's once b's take-back went on")
 	s := d.tickUntilStopped(engine.ReasonFault)
 	d.rig.stop()
 	wantRevoked(t, d, s, log)
@@ -313,7 +350,11 @@ func TestARevocationAtTheFirstOccurrencesActivationFencesItsSink(t *testing.T) {
 	res := d.choose(choiceReq(t, d, dsdstate.ModeNative, 1, capAt(playbacktest.DSD64), goAhead))
 	reachedGate(t, stops, res, "the reconciliation's revocation of the session's DSD, before its call to Revoke")
 	letAdmit()
-	d.waitSnap("the Start's answer", func(s *engine.Snapshot) bool { return s.LastAttempt().Seq > 0 })
+	// The Start's answer, or playback stopped: a session that faults before
+	// its Start answers is released, and the engine then takes no answer.
+	d.waitSnap("the Start's answer, or playback stopped", func(s *engine.Snapshot) bool {
+		return s.LastAttempt().Seq > 0 || s.State() == engine.Stopped && s.LastStop().Reason != ""
+	})
 	stops.letGo()
 	if got := answer(t, res); got.Outcome != playback.ChoiceWritten {
 		t.Fatalf("the cap with the go-ahead: %s, want written", got.Outcome)
