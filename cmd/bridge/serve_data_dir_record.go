@@ -222,15 +222,38 @@ func serveDataDirRecord(boot config.BootFile) string {
 // (B741's round 2, Codex on #1441: it read as no record, so serve made the
 // data dir in the bare mount point and renamed a fresh record over the link).
 func readDataDirRecord(path string) (dataDirRecord, bool, error) {
+	return readDataDirRecordWith(path, recordReadSteps{})
+}
+
+// recordReadSteps are the moments of a read of the record at which a test
+// acts as another process would, each nil but in a test: afterRead, once the
+// read has missed, before the record's entry is looked up; afterLstat, once
+// the lookup has found an entry.
+type recordReadSteps struct {
+	afterRead, afterLstat func()
+}
+
+// readDataDirRecordWith is readDataDirRecord, taking at's steps.
+func readDataDirRecordWith(path string, at recordReadSteps) (dataDirRecord, bool, error) {
 	b, err := readSmallFile(path, dataDirRecordMax)
 	if errors.Is(err, fs.ErrNotExist) {
+		if at.afterRead != nil {
+			at.afterRead()
+		}
 		switch fi, lerr := os.Lstat(path); {
 		case errors.Is(lerr, fs.ErrNotExist):
 			return dataDirRecord{}, false, nil
 		case lerr != nil:
 			err = lerr
 		case fi.Mode()&fs.ModeSymlink != 0:
+			if at.afterLstat != nil {
+				at.afterLstat()
+			}
 			err = &fs.PathError{Op: "open", Path: path, Err: errLinkToNothing}
+		default:
+			if at.afterLstat != nil {
+				at.afterLstat()
+			}
 		}
 	}
 	if err != nil {

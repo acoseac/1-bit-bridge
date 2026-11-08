@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -195,6 +196,87 @@ func TestTheRecordReadsOnlyAsOne(t *testing.T) {
 	symlinkOrSkip(t, filepath.Join(dir, "not-there"), link)
 	if _, ok, err := readDataDirRecord(link); ok || !errors.Is(err, errLinkToNothing) || errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("a link to nothing at the record's path read as ok %v, err %v; want a link to nothing, which is no absence", ok, err)
+	}
+}
+
+// TestARecordReadThatRacesAWriteReadsAgain: a read of the record that misses
+// it, while another process writes it (serve's first record, or a link's
+// target on a volume mounting), reads it again once its entry is found: a
+// record written, and a link whose target appeared, after the read missed
+// them read as the record; a link that stays one to nothing is still one
+// (errLinkToNothing); and a record removed between the lookup that found it
+// and the read again is no record. Until round 3 the entry found after the
+// miss answered at once, a regular file with the read's ENOENT and a link
+// with errLinkToNothing, so bridge doctor or a command run as serve wrote
+// its first record could refuse the data dir for a record that does not
+// read (the Claude API on #1441, and the reviews of round 3's brief).
+func TestARecordReadThatRacesAWriteReadsAgain(t *testing.T) {
+	const body = `{"dataDir":"/mnt/usb/bridge","id":"0123456789abcdef0123456789abcdef"}` + "\n"
+	write := func(t *testing.T, path string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	remove := func(t *testing.T, path string) {
+		t.Helper()
+		if err := os.Remove(path); err != nil {
+			t.Fatal(err)
+		}
+	}
+	type answer string
+	const (
+		theRecord     answer = "the record"
+		noRecord      answer = "no record"
+		linkToNothing answer = "a link to nothing"
+	)
+	for _, tc := range []struct {
+		name string
+		// link: the record's path is a link to target, which is not there
+		// at first.
+		link                  bool
+		afterRead, afterLstat func(t *testing.T, path, target string)
+		want                  answer
+	}{
+		{name: "a record written after the read missed it",
+			afterRead: func(t *testing.T, path, _ string) { write(t, path) }, want: theRecord},
+		{name: "a link whose target appeared after the read missed it", link: true,
+			afterRead: func(t *testing.T, _, target string) { write(t, target) }, want: theRecord},
+		{name: "a link that stays one to nothing", link: true, want: linkToNothing},
+		{name: "a record removed between the lookup and the read again",
+			afterRead:  func(t *testing.T, path, _ string) { write(t, path) },
+			afterLstat: func(t *testing.T, path, _ string) { remove(t, path) }, want: noRecord},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, ".bridge.yaml.datadir")
+			target := filepath.Join(dir, "the-record-on-the-volume")
+			if tc.link {
+				symlinkOrSkip(t, target, path)
+			}
+			var at recordReadSteps
+			if tc.afterRead != nil {
+				at.afterRead = func() { tc.afterRead(t, path, target) }
+			}
+			if tc.afterLstat != nil {
+				at.afterLstat = func() { tc.afterLstat(t, path, target) }
+			}
+			r, ok, err := readDataDirRecordWith(path, at)
+			var got answer
+			switch {
+			case ok && err == nil && r.DataDir == "/mnt/usb/bridge":
+				got = theRecord
+			case !ok && err == nil:
+				got = noRecord
+			case !ok && errors.Is(err, errLinkToNothing):
+				got = linkToNothing
+			default:
+				got = answer(fmt.Sprintf("read %+v, ok %v, err %v", r, ok, err))
+			}
+			if got != tc.want {
+				t.Errorf("the read answered %s, want %s", got, tc.want)
+			}
+		})
 	}
 }
 
