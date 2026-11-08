@@ -3044,6 +3044,67 @@ alone.
 negative controls (six mutations in seven runs), is in
 `ops/engineering-log.md`, 2026-11-07, B744.
 
+## A console save writes the file's own value for each leaf a variable set (backlog B761, 2026-11-08)
+
+- **Every other leaf a `BRIDGE_*` variable set at the start is written by a console save as the file holds it, unless the save changed it: the load records the leaves the variables set (`Config.envSet`, which `Clone` copies), and the holder's save gives each one the update left at its live value the file's own value, decoded by `DecodeFile` from the bytes its turn found, absent where the file writes none (`filedEnvValues`, beside `filedSwitches`); a leaf the save changed is written and published, and the variable sets it again at the next start, which the Settings page says** (2026-11-08, backlog B761). **Don't write a variable's value into the file from a save that left its leaf at that value, read the file's own value but from the turn's bytes through `DecodeFile`, set a leaf of the saved copy through a pointer the published snapshot holds, or drop the record from a clone.**
+
+*The gap.* Load applies a `BRIDGE_*` variable over the file, the live
+holder publishes what Load gave it, and every console save (the settings
+PATCH, the variants folder, the roots, the player's three writes, the UPnP
+servers) goes through `RuntimeConfig.UpdateChecked`, which wrote the
+holder's snapshot whole, the variables' values in it. B617 kept the two
+opt-outs as the file holds them (`filedSwitches`, the bullet before this
+one in `config-lifecycle.md`); every other leaf a variable set was written
+back, so a start without the variable read its value from the file.
+
+*The boundary.* The fix sits where every console save already meets the
+file: in the holder's turn of the file's lock, after its changed-file
+refusal and before its save. `filedEnvValues` runs beside `filedSwitches`
+over the copy the holder saves (`saved := *next`, changed through a
+pointer, so the config writers' sweep still reads the save as the snapshot
+the holder's `bytes.Equal` refusal guards, B617 round 2's shape), and the
+snapshot published is `next`, the live values.
+
+*Which leaves.* `applyEnvOverrides` records the yaml path of each leaf it
+set (`Config.envSet`, sorted): `applyEnvValue` reports whether it set its
+leaf, so a value it ignores (a boolean or a whole number that does not
+read, an opt-out's white space) records nothing, and a legacy alias records
+the path it sets. `Clone` copies the record, so a snapshot an update
+published keeps the boot load's. A config no load made has none, and a
+save of it writes as it did.
+
+*The file's own value.* For each recorded leaf but the two opt-outs, whose
+rule stays `filedSwitches'` (a change to on writes no key), a save that
+left the leaf at its live value writes the leaf as the bytes its turn found
+give it, decoded by `DecodeFile`, Load's own decode, before Load's
+defaults, its paths and its checks: the file's own spelling, a relative
+path included, and the field's zero value where the file writes none,
+which writes no key where the field omits an empty one. Bytes that do not
+decode, which only a holder told nothing of its file can meet, leave the
+live value as it is. Each leaf of the copy is set by assignment to its own
+field (`envLeaf`: every step a struct held by value), never through a
+pointer the published snapshot holds. The opt-outs' skip is not
+load-bearing: an unchanged switch gets the same file value from either
+writer, and the comparison leaves a changed one to `filedSwitches`.
+
+*A change.* A save that changes such a leaf writes the change and
+publishes it, `live` or `restart` as the field's row says, and the variable
+sets the leaf again at the next start. The Settings page says both
+(`TestTheSettingsPageSaysASaveKeepsTheFilesOwnValueForAVariable`), as do
+`docs/docker.md` and `ops/settings-apply-semantics.md`.
+
+`TestASaveKeepsTheFilesOwnValueForEachVariable` (an integer, a pointer to
+an integer the file does not write, a pointer to a boolean, a list, a
+string and a legacy alias, each through serve's own boot read and two
+saves), `TestASaveThatChangesAVariablesSettingWritesAndPublishesTheChange`,
+`TestASaveOverAFileThatDoesNotDecodeWritesTheLiveValue`,
+`TestTheOptOutsVariablesAreStillWrittenAsTheirSwitchesAre` (config),
+`TestAConsoleSaveKeepsTheFilesOwnValueForEachVariable` (cmd/bridge: the
+variants folder's save and the settings form's) and
+`TestTheSettingsPageSaysASaveKeepsTheFilesOwnValueForAVariable` (admin)
+pin it. The record, with its negative controls, is in
+`ops/engineering-log.md`, 2026-11-08, B761.
+
 ## Config, settings and process lifecycle
 
 - **An install of a target already staged on disk is REFUSED, and the refusal
