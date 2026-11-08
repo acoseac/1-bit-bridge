@@ -1153,6 +1153,26 @@ bridge does about it:
   reset) still starts and makes a new database. A system unit can order the start after
   the mount instead (`RequiresMountsFor=<mount point>` in a drop-in); a user
   unit cannot, its manager not seeing the system's mount units.
+  **From the release that carries B741 the data dir has an identity**: a
+  random id serve writes into the data dir, `data-dir-id.json`, and into the
+  record, the marker first. A start refuses a data dir the record names
+  that holds `server.lock` or `bridge.db` and not that identity (`the data
+  directory … holds server.lock but not the identity of the data directory
+  this bridge served from (data-dir-id.json): …`: a start or a command made
+  those in the bare mount point once, which B651 took for the data dir), one
+  holding another data dir's identity (another volume mounted there), and a
+  record or a marker that does not read; each says how to go on, and the
+  doctor and every command refuse the same. Leave `data-dir-id.json` where
+  it is, and move it with the data dir. The first start of B741 over a
+  record from before it takes up whatever data dir is at the path: where a
+  start before the volume was mounted made one in the bare mount point,
+  that one gains the identity, and the real volume, once mounted, is
+  refused for holding none, the refusal saying so: with the volume mounted,
+  remove `.bridge.yaml.datadir` and start again, and serve takes the volume's
+  data dir as its own. An install with no record yet, one whose first start
+  of a release carrying B651 comes before its volume is mounted, still
+  starts on the bare mount point: nothing outside the volume tells it from a
+  fresh install.
 - **The variants directory on that volume.** Since B727 a render (the
   console's, a download's, the auto-optimize sweep's, `bridge upscale`,
   `optimize` and `render`) writes nothing into a variants directory that is
