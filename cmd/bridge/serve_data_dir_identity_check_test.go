@@ -146,10 +146,10 @@ func quoteJSON(s string) string {
 
 // TestTheRecordReadsOnlyAsOne pins readDataDirRecord: nothing there is no
 // record; a record that is there and is not one (not JSON, no data dir, an
-// identity out of shape, more bytes than a record ever holds, a directory)
-// does not read, with an error, never as no record; one written before B741
-// and one holding an identity read, and so does one holding a field a later
-// version adds.
+// identity out of shape, more bytes than a record ever holds, a directory, a
+// link to nothing) does not read, with an error, never as no record; one
+// written before B741 and one holding an identity read, and so does one
+// holding a field a later version adds.
 func TestTheRecordReadsOnlyAsOne(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, ".bridge.yaml.datadir")
@@ -190,6 +190,11 @@ func TestTheRecordReadsOnlyAsOne(t *testing.T) {
 	mkdirs(t, path)
 	if _, ok, err := readDataDirRecord(path); ok || err == nil || errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("a directory at the record's path read as ok %v, err %v; want an error that is no absence", ok, err)
+	}
+	link := filepath.Join(dir, ".linked.yaml.datadir")
+	symlinkOrSkip(t, filepath.Join(dir, "not-there"), link)
+	if _, ok, err := readDataDirRecord(link); ok || !errors.Is(err, errLinkToNothing) || errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("a link to nothing at the record's path read as ok %v, err %v; want a link to nothing, which is no absence", ok, err)
 	}
 }
 

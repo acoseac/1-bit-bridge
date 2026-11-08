@@ -71,6 +71,11 @@ const dataDirRecordSuffix = ".datadir"
 // dataDirRecordMax is the most of a record readDataDirRecord reads.
 const dataDirRecordMax = 64 << 10
 
+// errLinkToNothing is why a record that is a link whose target is not there
+// does not read (readDataDirRecord): never fs.ErrNotExist, the absence of a
+// record, which it is not.
+var errLinkToNothing = errors.New("a link to nothing")
+
 // dataDirRecord is what the record holds: the data dir serve opened its
 // database in, in both of its spellings (B651's fifth round, CodeRabbit on
 // #1397). config.ResolvePath cleans a path and resolves no link, so the
@@ -194,12 +199,25 @@ func serveDataDirRecord(boot config.BootFile) string {
 // identity out of shape), which is its own state (backlog B741), never the
 // absence of a record a fresh install has: an identity it holds is not to be
 // replaced unread. Until B741 such a record named nothing.
+//
+// Nothing is there only where the record's entry is not (os.Lstat): the open
+// answers a link to nothing as it answers no file, and a link left beside the
+// config to a record kept on a volume that is away is there and does not read
+// (B741's round 2, Codex on #1441: it read as no record, so serve made the
+// data dir in the bare mount point and renamed a fresh record over the link).
 func readDataDirRecord(path string) (dataDirRecord, bool, error) {
 	b, err := readSmallFile(path, dataDirRecordMax)
-	switch {
-	case errors.Is(err, fs.ErrNotExist):
-		return dataDirRecord{}, false, nil
-	case err != nil:
+	if errors.Is(err, fs.ErrNotExist) {
+		switch fi, lerr := os.Lstat(path); {
+		case errors.Is(lerr, fs.ErrNotExist):
+			return dataDirRecord{}, false, nil
+		case lerr != nil:
+			err = lerr
+		case fi.Mode()&fs.ModeSymlink != 0:
+			err = &fs.PathError{Op: "open", Path: path, Err: errLinkToNothing}
+		}
+	}
+	if err != nil {
 		return dataDirRecord{}, false, err
 	}
 	var r dataDirRecord
