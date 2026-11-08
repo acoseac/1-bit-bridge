@@ -72,8 +72,11 @@ process.stdout.write("ok\n");
 func TestUploadSHA256MatchesNode(t *testing.T) {
 	runUploadClient(t, []string{
 		"rotr", "createSHA256", "sha256Bytes", "fileFingerprint", "attachUploadIdentity",
+		"uploadCheckpoint", "uploadRunLive", "uploadOwns", "uploadAbortError",
 	}, `import { createHash } from "node:crypto";
-let uploadState = { aborted: false };
+let uploadState = { run: null };
+const run = { state: uploadState, aborted: false };
+uploadState.run = run;
 `, `
 function nodeHash(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
@@ -104,7 +107,7 @@ const empty = new File([], "empty.flac", { lastModified: 1 });
 const emptyHex = nodeHash(new Uint8Array(0));
 check(await fileFingerprint(empty) === emptyHex + emptyHex, "empty fingerprint");
 const picked = [{ path: "Album/01.flac", file }];
-await attachUploadIdentity(picked);
+await attachUploadIdentity(picked, run);
 check(picked[0].modified === 1700000000000, "modified");
 check(picked[0].fingerprint === fp, "attached fingerprint");
 if (errors.length) {
@@ -124,9 +127,12 @@ func TestANewSessionReadsOnlyTheFingerprint(t *testing.T) {
 	if _, ok := extractJSFunctionIfPresent(js, "sha256File"); ok {
 		names = append(names, "sha256File")
 	}
-	names = append(names, "fileFingerprint", "attachUploadIdentity", "createUploadSession")
+	names = append(names, "fileFingerprint", "attachUploadIdentity", "createUploadSession",
+		"uploadCheckpoint", "uploadRunLive", "uploadOwns")
 	runUploadClient(t, names, `
-let uploadState = { aborted: false };
+let uploadState = { run: null };
+const run = { state: uploadState, aborted: false };
+uploadState.run = run;
 const posted = [];
 const API = {
   async post(_url, body) {
@@ -154,11 +160,11 @@ const fingerprintRanges = [
 ];
 function sameRange(a, b) { return a[0] === b[0] && a[1] === b[1]; }
 const picked = [{ path: "Album/01.flac", file }];
-await attachUploadIdentity(picked);
+await attachUploadIdentity(picked, run);
 check(reads.length === fingerprintRanges.length, "fingerprint read count " + reads.length);
 check(reads.every((r, i) => sameRange(r, fingerprintRanges[i])), "fingerprint ranges " + JSON.stringify(reads));
 const beforeCreate = reads.length;
-await createUploadSession(picked, false);
+await createUploadSession(picked, false, run);
 check(reads.length === beforeCreate, "create read the file");
 const declared = posted[0].files[0];
 check(declared.digest === undefined, "declared digest");
@@ -166,9 +172,9 @@ check(!Object.hasOwn(declared, "digest"), "digest field");
 check(declared.fingerprint === picked[0].fingerprint, "declared fingerprint");
 check(declared.modified === 1700000000000, "declared modified");
 const fresh = [{ path: "Album/02.flac", file: new File([bytes], "02.flac", { lastModified: 9 }) }];
-uploadState.aborted = true;
+run.aborted = true;
 let aborted = false;
-try { await createUploadSession(fresh, false); } catch (e) { aborted = e && e.code === "aborted"; }
+try { await createUploadSession(fresh, false, run); } catch (e) { aborted = e && e.code === "aborted"; }
 check(aborted, "abort before create");
 check(posted.length === 1, "aborted create posted");
 if (errors.length) {

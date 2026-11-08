@@ -1867,7 +1867,24 @@ function isOSJunkPath(path) {
   return false;
 }
 
-
+// uploadState is the page's upload: the files staged (picked), the session
+// made or carried on for them, and the run under way (run), null between
+// runs. A pick replaces it; Cancel and a navigation clear it.
+//
+// One run owns the page at a time (backlog B797). A run is startUpload's (a
+// new upload, or the resume of an interrupted one) or retryUpload's. It takes
+// the page and its files and session before its first await
+// (beginUploadRun), and until it ends everything that would start or replace
+// an upload is refused (setUploadBusy, stageFiles, the drop handler). Every
+// continuation of a run asks whether it still owns the page before it touches
+// the page or this state (uploadOwns), and whether it may still send right
+// before each request (uploadCheckpoint): a run Cancel or a navigation took
+// the page from sends nothing new and touches nothing, though a request it had
+// already made may finish. Refusing, not superseding: a run superseded by a
+// new pick would leave its session with no control on the page, and before
+// this a pick while Try again read its session handed the session another
+// file's bytes, which no chunk digest sees and no whole-file digest is
+// declared to catch.
 let uploadState = null;
 
 function initUpload() {
@@ -1913,7 +1930,10 @@ function wireUpload(signal) {
   const folderInput = document.getElementById("upload-folder");
 
   API.get("/api/library/space")
-    .then((sp) => setText("upload-root", sp?.root ? sp.root : "your library"))
+    .then((sp) => {
+      // A navigation since the read took the page it was for.
+      if (!signal?.aborted) setText("upload-root", sp?.root ? sp.root : "your library");
+    })
     .catch(() => {});
 
   // Surface an interrupted session BEFORE the operator re-picks. A browser
@@ -1936,7 +1956,14 @@ function wireUpload(signal) {
   }
   drop?.addEventListener("drop", async (e) => {
     e.preventDefault();
+    // A div cannot be disabled, so the drop target refuses here while a run
+    // owns the page, and the note beside the pickers says why.
+    if (uploadState?.run) return;
     const picked = await collectFromDataTransfer(e.dataTransfer);
+    // Reading a dropped folder takes time: the page it was dropped on may
+    // have gone meanwhile (a navigation), or an upload begun on it, and
+    // neither is staged over.
+    if (signal?.aborted || uploadState?.run) return;
     stageFiles(picked);
   });
 
@@ -1944,13 +1971,19 @@ function wireUpload(signal) {
   document.getElementById("upload-cancel")?.addEventListener("click", resetUpload);
   document.getElementById("upload-start")?.addEventListener("click", startUpload);
   document.getElementById("upload-retry-button")?.addEventListener("click", retryUpload);
+  // Stop is the run's alone: it sends nothing more and says it stopped.
   document.getElementById("upload-abort")?.addEventListener("click", () => {
-    if (uploadState) uploadState.aborted = true;
+    const run = uploadState?.run;
+    if (run) run.aborted = true;
   });
 
-  // An in-flight upload must not survive a boosted navigation away.
+  // A boosted navigation takes the page from its upload: a run under way
+  // stops at its next step, and touches nothing on the page that replaces
+  // this one, which starts with no upload of its own.
   signal?.addEventListener("abort", () => {
-    if (uploadState) uploadState.aborted = true;
+    const run = uploadState?.run;
+    if (run) run.aborted = true;
+    uploadState = null;
   });
 }
 
@@ -1972,11 +2005,16 @@ let resumableSessions = [];
 async function refreshResumable() {
   const banner = document.getElementById("upload-resume");
   if (!banner) return;
+  let sessions;
   try {
-    resumableSessions = (await API.get("/api/upload/sessions")) || [];
+    sessions = (await API.get("/api/upload/sessions")) || [];
   } catch {
-    resumableSessions = [];
+    sessions = [];
   }
+  // A navigation since the read took the page this banner was on, and the
+  // page now shown reads its own.
+  if (!banner.isConnected) return;
+  resumableSessions = sessions;
   if (!resumableSessions.length) {
     banner.hidden = true;
     return;
@@ -2122,9 +2160,11 @@ async function fileFingerprint(file) {
   return sha256Bytes(head) + sha256Bytes(tail);
 }
 
-async function attachUploadIdentity(picked) {
+// attachUploadIdentity reads each pick's resume identity for run, asking
+// before each file whether the run may go on, so a Cancel stops the reads.
+async function attachUploadIdentity(picked, run) {
   for (const p of picked) {
-    if (!uploadState || uploadState.aborted) throw uploadAbortError();
+    uploadCheckpoint(run);
     p.modified = Math.trunc(p.file.lastModified);
     p.fingerprint = await fileFingerprint(p.file);
   }
@@ -2195,16 +2235,21 @@ async function discardResumable() {
   // resumableSessions[0]; discarding the whole list would throw away staged
   // progress for uploads the operator never saw, let alone chose to abandon.
   // Re-reading afterwards lets the next one surface.
+  //
+  // Refused while a run owns the page (Discard it is disabled then), whose
+  // session this may be. What it says comes after a request, so it is said
+  // only on the page it was asked on, and never over a run begun meanwhile.
   const s = resumableSessions[0];
-  if (!s) return;
+  if (!s || uploadState?.run) return;
+  const banner = document.getElementById("upload-resume");
   try {
     await API.delete(`/api/upload/sessions/${encodeURIComponent(s.id)}`);
   } catch (e) {
-    showUploadError(e?.message ? e.message : String(e));
+    if (banner?.isConnected && !uploadState?.run) showUploadError(e?.message ? e.message : String(e));
     return;
   }
   await refreshResumable();
-  showUploadResult("Discarded the interrupted upload.");
+  if (banner?.isConnected && !uploadState?.run) showUploadResult("Discarded the interrupted upload.");
 }
 
 function collectFromInput(input) {
@@ -2253,6 +2298,10 @@ async function collectFromDataTransfer(dt) {
 }
 
 function stageFiles(picked) {
+  // While a run owns the page its files are what it sends, and a pick would
+  // replace them: the pickers are disabled and the note beside them says why
+  // (setUploadBusy), and this is the refusal itself.
+  if (uploadState?.run) return;
   const present = picked.filter((p) => p.file?.size >= 0);
   const usable = present.filter((p) => !isOSJunkPath(p.path));
   const junk = present.length - usable.length;
@@ -2264,7 +2313,7 @@ function stageFiles(picked) {
     );
     return;
   }
-  uploadState = { picked: usable, session: null, aborted: false, preflightSkipped: 0, junkSkipped: junk, digestUnavailable: false };
+  uploadState = { picked: usable, session: null, run: null, preflightSkipped: 0, junkSkipped: junk, digestUnavailable: false };
   hideUploadRetry();
   const note = document.getElementById("upload-dupe-note");
   if (note) note.hidden = true;
@@ -2305,13 +2354,97 @@ function renderUploadReview() {
   }
 }
 
+// beginUploadRun makes a run of the page's upload and gives it the page, before
+// the run's first await: the files it sends and the session it carries on are
+// taken here, so nothing picked, dropped or navigated to afterwards reaches
+// them. Until the run ends, everything that would start or replace an upload
+// is refused (setUploadBusy).
+function beginUploadRun() {
+  const state = uploadState;
+  const run = { state, picked: [...state.picked], session: state.session, aborted: false };
+  state.run = run;
+  setUploadBusy(true);
+  return run;
+}
+
+// uploadOwns says whether run still owns the page: the page's upload is the
+// one the run began on, and the run is that upload's. Cancel and a navigation
+// take the page from a run (resetUpload, wireUpload's abort), and its own end
+// gives the page back (endUploadRun). A run's continuations ask this before
+// they touch the page or uploadState.
+function uploadOwns(run) {
+  return uploadState === run.state && run.state.run === run;
+}
+
+// uploadRunLive says whether run may still send: it owns the page, and it was
+// not stopped.
+function uploadRunLive(run) {
+  return !run.aborted && uploadOwns(run);
+}
+
+// uploadCheckpoint is asked after each await of a run and right before each
+// request it makes: a run that may not go on ends there, with the stop its
+// catch answers (showUploadRunEnd).
+function uploadCheckpoint(run) {
+  if (!uploadRunLive(run)) throw uploadAbortError();
+}
+
+// endUploadRun gives the page back as a run ends, where the run still owns
+// it: the controls take a new upload again and the progress is hidden. A run
+// Cancel or a navigation took the page from left it as they wanted it, and a
+// commit's report has reset it already (reportCommit).
+function endUploadRun(run) {
+  if (!uploadOwns(run)) return;
+  run.state.run = null;
+  setUploadBusy(false);
+  document.getElementById("upload-progress").hidden = true;
+}
+
+// setUploadBusy refuses, while a run owns the page, everything that would
+// start or replace an upload: both pickers, Upload, Try again and Discard it
+// are disabled, and the drop target, a div no disabled state stops, says so
+// in aria-disabled while its handler refuses the drop. The note in the drop
+// zone says why. Cancel and Stop stay: they are how a run is stopped.
+function setUploadBusy(busy) {
+  for (const id of ["upload-files", "upload-folder", "upload-start", "upload-retry-button", "upload-resume-discard"]) {
+    const el = document.getElementById(id);
+    if (el) setDisabled(el, busy);
+  }
+  const drop = document.getElementById("upload-drop");
+  if (drop) {
+    if (busy) drop.setAttribute("aria-disabled", "true");
+    else drop.removeAttribute("aria-disabled");
+  }
+  const note = document.getElementById("upload-busy");
+  if (note) note.hidden = !busy;
+}
+
+// showUploadRunEnd says why a run ended before its commit, where the run still
+// owns the page: a stop as a stop, anything else as the failure, with Try
+// again where showUploadFailure offers it. A run that no longer owns the page
+// says nothing, since the page is no longer its own.
+function showUploadRunEnd(run, e) {
+  if (!uploadOwns(run)) return;
+  if (e?.code === "aborted") showUploadStopped();
+  else showUploadFailure(e, run.state);
+}
+
+// showUploadStopped says a run was stopped. Its session keeps what it was
+// sent, and the banner is read again so that choosing the same files carries
+// it on (findResumable), as the message says: a session made since the page
+// read its list was in none.
+function showUploadStopped() {
+  showUploadResult("Upload stopped. Staged progress is kept — start again to resume.");
+  refreshResumable();
+}
+
 async function startUpload() {
-  if (!uploadState) return;
-  const err = document.getElementById("upload-error");
-  const start = document.getElementById("upload-start");
-  err.hidden = true;
+  // A run owns the page already: Upload is disabled then, and this is the
+  // refusal itself.
+  if (!uploadState || uploadState.run) return;
+  const run = beginUploadRun();
+  document.getElementById("upload-error").hidden = true;
   hideUploadRetry();
-  setDisabled(start, true);
   try {
     const overwrite = document.getElementById("upload-overwrite")?.checked === true;
 
@@ -2319,10 +2452,11 @@ async function startUpload() {
     // already staged? Continue it. A same-size edit starts over: the staged
     // prefix belongs to the version the session recorded. transferAll skips
     // complete files and resumes partial ones from their recorded offset.
-    await attachUploadIdentity(uploadState.picked);
-    const existing = findResumable(uploadState.picked, overwrite);
+    await attachUploadIdentity(run.picked, run);
+    uploadCheckpoint(run);
+    const existing = findResumable(run.picked, overwrite);
     const isResumed = !!existing;
-    if (!isResumed && findFilesOnlyMatch(uploadState.picked)) {
+    if (!isResumed && findFilesOnlyMatch(run.picked)) {
       showUploadError(
         `Starting over rather than resuming: the interrupted upload was created with ` +
           `"Replace files that already exist" ${overwrite ? "off" : "on"}, and it is now ` +
@@ -2331,7 +2465,8 @@ async function startUpload() {
     }
     let session = isResumed
       ? await API.get(`/api/upload/sessions/${encodeURIComponent(existing.id)}`)
-      : await createUploadSession(uploadState.picked, overwrite);
+      : await createUploadSession(run.picked, overwrite, run);
+    uploadCheckpoint(run);
     if (isResumed) {
       const done = session.files.reduce((n, f) => n + f.offset, 0);
       showUploadResult(`Continuing the interrupted upload from ${formatBytes(done)}.`);
@@ -2351,7 +2486,7 @@ async function startUpload() {
     // with overwrite if that is what they meant.
     const dupes = isResumed ? [] : session.files.filter((f) => f.duplicateOf);
     if (dupes.length && !overwrite) {
-      const keep = uploadState.picked.filter((p) => {
+      const keep = run.picked.filter((p) => {
         const f = session.files.find((x) => x.path === p.path);
         return !(f?.duplicateOf);
       });
@@ -2363,31 +2498,34 @@ async function startUpload() {
         `library (for example ${dupes[0].duplicateOf}) and will be skipped. ` +
         `Tick "Replace files that already exist" if you meant to overwrite them.`;
       await API.delete(`/api/upload/sessions/${encodeURIComponent(session.id)}`);
+      uploadCheckpoint(run);
       if (!keep.length) {
         document.getElementById("upload-review").hidden = true;
         showUploadResult("Nothing to upload — every file is already in the library.");
         return;
       }
-      uploadState.preflightSkipped = dupes.length;
-      uploadState.picked = keep;
-      session = await createUploadSession(keep, overwrite);
+      run.state.preflightSkipped = dupes.length;
+      run.state.picked = keep;
+      run.picked = keep;
+      session = await createUploadSession(keep, overwrite, run);
+      uploadCheckpoint(run);
     }
 
-    uploadState.session = session;
+    run.session = session;
+    run.state.session = session;
     document.getElementById("upload-review").hidden = true;
     document.getElementById("upload-progress").hidden = false;
-    await transferAll(session);
-    if (uploadState.aborted) {
-      showUploadResult("Upload stopped. Staged progress is kept — start again to resume.");
-      return;
-    }
+    await transferAll(run, session);
+    uploadCheckpoint(run);
     const res = await API.post(`/api/upload/sessions/${encodeURIComponent(session.id)}/commit`);
-    reportCommit(res);
+    // A commit already asked for may land after Cancel or a navigation took
+    // the page; it is said only on the page it was asked from.
+    if (!uploadOwns(run)) return;
+    reportCommit(run.state, res);
   } catch (e) {
-    showUploadFailure(e);
+    showUploadRunEnd(run, e);
   } finally {
-    setDisabled(start, false);
-    document.getElementById("upload-progress").hidden = true;
+    endUploadRun(run);
   }
 }
 
@@ -2397,10 +2535,11 @@ async function startUpload() {
 // again: the review that holds the Upload button is hidden by then, and the
 // session, which nothing was written beside, commits once the volume is back.
 // A refusal before the session was made leaves the review and its Upload
-// button where they were.
-function showUploadFailure(e) {
+// button where they were. state is the failed run's upload, which owns the
+// page (showUploadRunEnd).
+function showUploadFailure(e, state) {
   showUploadError(e?.message ? e.message : String(e));
-  if (e?.code === "root_not_mounted" && uploadState?.session) {
+  if (e?.code === "root_not_mounted" && state?.session) {
     document.getElementById("upload-retry").hidden = false;
   }
 }
@@ -2415,41 +2554,44 @@ function hideUploadRetry() {
 // retryUpload carries on the upload a refusal stopped (showUploadFailure):
 // the same session, read again from the server, the files it holds complete
 // passed over (transferAll) and the rest sent from the offsets it holds, then
-// committed. It makes no session and sends no finished file again.
+// committed. It makes no session and sends no finished file again. The
+// session and the files are the run's from its start (beginUploadRun), so
+// nothing picked while the session is read can reach them.
 async function retryUpload() {
   const sid = uploadState?.session?.id;
-  if (!sid) return;
-  const button = document.getElementById("upload-retry-button");
-  setDisabled(button, true);
+  // A run owns the page already: Try again is disabled then, and this is the
+  // refusal itself.
+  if (!sid || uploadState.run) return;
+  const run = beginUploadRun();
   hideUploadRetry();
   document.getElementById("upload-error").hidden = true;
+  // Stop is there from the start: the session's read can take as long as a
+  // chunk.
+  document.getElementById("upload-progress").hidden = false;
   try {
-    uploadState.aborted = false;
     const session = await API.get(`/api/upload/sessions/${encodeURIComponent(sid)}`);
-    uploadState.session = session;
-    document.getElementById("upload-progress").hidden = false;
-    await transferAll(session);
-    if (uploadState.aborted) {
-      showUploadResult("Upload stopped. Staged progress is kept — start again to resume.");
-      return;
-    }
+    uploadCheckpoint(run);
+    run.session = session;
+    run.state.session = session;
+    await transferAll(run, session);
+    uploadCheckpoint(run);
     const res = await API.post(`/api/upload/sessions/${encodeURIComponent(sid)}/commit`);
-    reportCommit(res);
+    if (!uploadOwns(run)) return;
+    reportCommit(run.state, res);
   } catch (e) {
-    showUploadFailure(e);
+    showUploadRunEnd(run, e);
   } finally {
-    setDisabled(button, false);
-    document.getElementById("upload-progress").hidden = true;
+    endUploadRun(run);
   }
 }
 
 // createUploadSession records the resume identity already computed for each
 // pick. It does not hash the file. A whole-file digest is optional on the
-// server, and this console does not declare one.
-async function createUploadSession(picked, overwrite) {
+// server, and this console does not declare one. A run Cancel or a navigation
+// stopped makes no session.
+async function createUploadSession(picked, overwrite, run) {
   const files = [];
   for (const p of picked) {
-    if (!uploadState || uploadState.aborted) throw uploadAbortError();
     files.push({
       path: p.path,
       size: p.file.size,
@@ -2457,17 +2599,22 @@ async function createUploadSession(picked, overwrite) {
       fingerprint: p.fingerprint,
     });
   }
+  uploadCheckpoint(run);
   return API.post("/api/upload/sessions", { overwrite, files });
 }
 
-async function transferAll(session) {
-  const byPath = new Map(uploadState.picked.map((p) => [p.path, p.file]));
+// transferAll sends what session still lacks of run's files: the files the
+// run took at its start, never the page's later pick.
+async function transferAll(run, session) {
+  const byPath = new Map(run.picked.map((p) => [p.path, p.file]));
   const queue = session.files.filter((f) => !f.complete);
   const totalBytes = session.files.reduce((n, f) => n + f.size, 0) || 1;
   let doneBytes = session.files.reduce((n, f) => n + f.offset, 0);
 
   const bar = document.getElementById("upload-bar");
   const paint = () => {
+    // A chunk answered once the page was no longer the run's paints nothing.
+    if (!uploadOwns(run)) return;
     bar.value = Math.min(100, Math.round((doneBytes / totalBytes) * 100));
     setText("upload-status", `${formatBytes(doneBytes)} of ${formatBytes(totalBytes)}`);
   };
@@ -2478,16 +2625,17 @@ async function transferAll(session) {
   // chunk, and the transfer answers it only once every worker has settled,
   // the chunk each had out answered: answered at once, the page offered Try
   // again while a sibling was still sending, the retry ran beside it, and
-  // that sibling's own failure, which set uploadState.aborted, stopped the
-  // retry (backlog B776's round 2). uploadState.aborted is the operator's
-  // Stop alone.
+  // that sibling's own failure, which then set the page's stop flag, stopped
+  // the retry (backlog B776's round 2). A run's stop is the operator's Stop,
+  // Cancel or a navigation alone, and a worker that finds it before a chunk's
+  // request ends as stopped, not failed (uploadCheckpoint).
   let failure = null;
-  const stopped = () => uploadState.aborted || failure !== null;
+  const stopped = () => !uploadRunLive(run) || failure !== null;
   const worker = async () => {
     try {
       await workerLoop();
     } catch (err) {
-      if (failure === null) failure = err;
+      if (failure === null && err?.code !== "aborted") failure = err;
     }
   };
   const workerLoop = async () => {
@@ -2504,7 +2652,7 @@ async function transferAll(session) {
         // handing the same buffer to fetch avoids reading the slice twice.
         // Peak cost is UPLOAD_PARALLEL_FILES x chunkBytes (3 x 4 MiB).
         const bytes = await file.slice(offset, end).arrayBuffer();
-        const res = await putUploadChunkVerified(session.id, meta.id, offset, bytes);
+        const res = await putUploadChunkVerified(run, session.id, meta.id, offset, bytes);
         doneBytes += res.offset - offset;
         offset = res.offset;
         paint();
@@ -2532,20 +2680,17 @@ async function transferAll(session) {
 // deployment must lose verification rather than the ability to upload, so a
 // missing or failing SubtleCrypto degrades to no header — and says so at the
 // end, because silently dropping an integrity guarantee is worse than not
-// having offered one.
+// having offered one: null here, which the chunk's run records on its own
+// upload (putUploadChunk), never on whatever upload the page holds by then.
 async function chunkDigestHeaders(bytes) {
   const subtle = globalThis.crypto?.subtle;
-  if (!subtle) {
-    if (uploadState) uploadState.digestUnavailable = true;
-    return null;
-  }
+  if (!subtle) return null;
   try {
     const hash = new Uint8Array(await subtle.digest("SHA-256", bytes));
     let raw = "";
     for (const b of hash) raw += String.fromCharCode(b);
     return { "content-digest": `sha-256=:${btoa(raw)}:` };
   } catch {
-    if (uploadState) uploadState.digestUnavailable = true;
     return null;
   }
 }
@@ -2557,15 +2702,16 @@ async function chunkDigestHeaders(bytes) {
 // the staged file truncates back to that offset — so the retry writes the same
 // range over nothing. Without it, adding verification could only ever convert
 // silent corruption into a dead multi-gigabyte upload. Every other failure
-// keeps its existing behaviour and propagates on the first occurrence.
-async function putUploadChunkVerified(sid, fid, offset, bytes) {
+// keeps its existing behaviour and propagates on the first occurrence. Each
+// attempt asks right before its request whether run may still send
+// (putUploadChunk), so a re-send of a run stopped meanwhile sends nothing.
+async function putUploadChunkVerified(run, sid, fid, offset, bytes) {
   for (let attempt = 0; ; attempt++) {
     try {
-      return await putUploadChunk(sid, fid, offset, bytes);
+      return await putUploadChunk(run, sid, fid, offset, bytes);
     } catch (e) {
       if (
         attempt >= UPLOAD_DIGEST_RETRIES ||
-        uploadState?.aborted ||
         !e ||
         e.code !== "digest_mismatch"
       ) {
@@ -2575,17 +2721,23 @@ async function putUploadChunkVerified(sid, fid, offset, bytes) {
   }
 }
 
-async function putUploadChunk(sid, fid, offset, bytes) {
+async function putUploadChunk(run, sid, fid, offset, bytes) {
   const url =
     `/api/upload/sessions/${encodeURIComponent(sid)}/files/${encodeURIComponent(fid)}` +
     `?offset=${offset}`;
+  const digest = await chunkDigestHeaders(bytes);
+  // Asked here, after the chunk was read and hashed and right before its
+  // request: a run stopped, cancelled or navigated away from meanwhile sends
+  // nothing new. A request already made may still finish.
+  uploadCheckpoint(run);
+  if (!digest) run.state.digestUnavailable = true;
   const r = await fetch(url, {
     method: "PUT",
     headers: {
       // octet-stream is what csrfGuard's narrow allowlist admits, and it is
       // preflight-forced, unlike a multipart form.
       "content-type": "application/octet-stream",
-      ...((await chunkDigestHeaders(bytes)) || {}),
+      ...(digest || {}),
     },
     body: bytes,
   });
@@ -2612,13 +2764,15 @@ async function putUploadChunk(sid, fid, offset, bytes) {
   });
 }
 
-function reportCommit(res) {
+// reportCommit says what a run's commit did, state being the run's upload,
+// which owns the page (the run asks uploadOwns first), then resets the page.
+function reportCommit(state, res) {
   const parts = [];
   if (res.committed) parts.push(`${res.committed} added`);
   // Files the PRE-FLIGHT dropped never reached the session, so the server
   // cannot count them. Reporting only the server's number would leave the
   // operator staring at "1 added" after picking three files.
-  const preflight = uploadState?.preflightSkipped || 0;
+  const preflight = state.preflightSkipped || 0;
   if (preflight) parts.push(`${preflight} already in your library`);
   if (res.skipped) parts.push(`${res.skipped} skipped (already present)`);
   if (res.failed) parts.push(`${res.failed} failed`);
@@ -2630,7 +2784,7 @@ function reportCommit(res) {
   }
   const failed = (res.outcomes || []).filter((o) => o.status === "failed");
   if (failed.length) msg += ` First failure: ${failed[0].path} (${failed[0].reason}).`;
-  if (uploadState?.digestUnavailable) {
+  if (state.digestUnavailable) {
     msg +=
       " Note: this browser did not expose SHA-256 for chunk checks, so each" +
       " chunk was checked for length only.";
@@ -2715,11 +2869,23 @@ function uploadNoteScanFinished() {
   text.nodeValue = text.nodeValue.replace(/ — rescanning[^.]*\./, " — your library is up to date.");
 }
 
+// resetUpload clears the page's upload: Cancel, and a commit's report.
+//
+// Cancel is offered while a run prepares (the review stays up until its
+// session is ready): it stops the run there. The run no longer owns the page,
+// so it sends nothing more and touches nothing, though a request it had
+// already made may finish; a session the server made for it meanwhile holds
+// nothing it sent, and stays on the server as an interrupted upload, listed
+// by the banner at its next read and taken away by Discard it. The page is
+// clear at once, for a new pick.
 function resetUpload() {
+  const run = uploadState?.run;
+  if (run) run.aborted = true;
   uploadState = null;
   document.getElementById("upload-review").hidden = true;
   document.getElementById("upload-progress").hidden = true;
   hideUploadRetry();
+  setUploadBusy(false);
   // The duplicate note is deliberately NOT cleared here. resetUpload runs
   // immediately after a commit, and the note is the explanation for the
   // number the operator is about to read — hiding it leaves "1 added" with
