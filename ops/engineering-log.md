@@ -87732,3 +87732,17 @@ passed.
 | T3 | off Windows the sync opens the marker with a plain open | the named-pipe test, after its 10 s bound |
 | T4 | `readAgain` does not read again | the written-record and appeared-target rows |
 | T5 | `readAgain` does not look the entry up once more | the dangling-link and removed-record rows, the record-read test's link check |
+
+### Gates
+
+At 0d4d629d (the code is d3179788's), inside the build slot: `GOTOOLCHAIN=go1.27.3 make test
+TEST_PKGS='./cmd/bridge/... ./internal/doctor/...'` with TMPDIR on disk (`.tmp/_b741/gotmp-r3`) passed,
+cmd/bridge 1,266 s and internal/doctor 6.7 s; then the new and changed tests by name under `-race` passed, 14
+of 14 (the three new ones, the words test, the record-read and marker tests round 2 added, the upgrade's and
+the cited-names guard). `go vet ./cmd/bridge/` passed with `GOOS=windows`, `GOOS=darwin` and `GOOS=linux
+GOARCH=386`, the Windows-only test among what Windows vets. The rules patch: `git apply --check` clean;
+applied to a disposable `git archive` copy of HEAD (its landing asserted in each of its four files), where
+`make docs-check` passed (cli-serve.md 56.2 KB, scanner.md 42.2 KB, the worst load unchanged) and
+`verify_moves.py --base HEAD` found no citation broken, its MISSING exactly the eight blocks the patch
+edits, the open-gap paragraph among them, removed with no successor; every test name the patch cites exists
+(58 of 58). Not run here: the Windows test, which CI's Windows leg runs, and macOS.
