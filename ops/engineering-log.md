@@ -87953,4 +87953,27 @@ which every marker writer relies on.
 - `rules-b760-r3.patch`, built by `.tmp/_b760/r3/build_rules_patch_r3.py` on a
   copy of the tracked files (each replaced text asserted once, and the rules
   line and its long form's copy asserted to stay verbatim twins): checked
-  below, with the gates.
+  under the gates.
+
+### Gates
+
+At 6a72b6c1, on Go 1.27.3 (`GOTOOLCHAIN=go1.27.3`, go.mod's), TMPDIR under
+`.tmp/_b760`, in one session of the shared build slot, started by a guard that
+waited for it (`.tmp/_b760/r3/gates_r3.py`; in the slot from 19:45, after 14
+minutes behind another worker's gate): `make fmt` changed nothing; `make vet`,
+and with `GOOS=windows`, `GOOS=darwin` and `GOOS=linux GOARCH=386`: ok;
+`make test TEST_PKGS='./cmd/bridge/... ./internal/updater/...'` (race, `-p 4`,
+`-timeout 30m`, the Makefile's tags): ok, cmd/bridge 1,268 s,
+internal/updater 30 s; `git status` empty after.
+
+`rules-b760-r3.patch` (18,170 bytes, sha256 `3317ea12…`), built again on a
+copy of 6a72b6c1's tracked files byte for byte as first built: `git apply
+--check` takes it over the final head, this record's commit, which changes no
+rules file; on the patched copy `make -s docs-check` passes (config-lifecycle.md
+98,444 bytes of its 100,000, the worst load 67.5 %), and
+`TestEveryCitedTestNameExists` passes there and fails on a ghost citation
+planted in its History file.
+
+Not run here: the whole suite and `make build-all` (round 1 ran them at
+fdd74a31; this round changed comments and string literals alone, as the AST
+check shows), macOS and Windows natively, and CI's runners.
