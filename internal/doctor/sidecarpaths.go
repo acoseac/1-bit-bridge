@@ -39,10 +39,12 @@ type RelocatedSidecars struct {
 // its track is next asked for and not before.
 //
 // What this check is still for is the row whose file is at NEITHER
-// location. For waveforms that is the silent case: the analysis skip
-// gate keys on the SOURCE's mtime and size, never the curve, so the
-// candidate walk never offers the track again and a plain
-// `bridge analyze` regenerates nothing.
+// location. For waveforms the analysis skip gate keys on the SOURCE's
+// mtime and size, never the curve, so the candidate walk never offers the
+// track again and a plain `bridge analyze` regenerates nothing; since
+// backlog B652 the curve's next lookup renders it again, waveform only,
+// and checkWaveformRegeneration stats the rows and reports those curves,
+// and whether the bridge refuses to.
 //
 // But the COUNTS cannot tell those cases apart. CountVariantsNotUnderPrefix
 // and CountWaveformsNotUnderPrefix are pure SQL over the recorded paths
@@ -97,8 +99,9 @@ func checkSidecarPaths(ctx context.Context, d Deps) Check {
 			"under that directory is adopted on the first analysis lookup for the track, rewriting the row with "+
 			"nothing re-decoded, though there is no proactive waveform sweep so that happens when the curve is next "+
 			"requested and not before. Only a curve at NEITHER location needs rebuilding, and the analysis skip gate "+
-			"reads the row rather than the file, so a plain `bridge analyze` will not notice it: "+
-			"`bridge analyze --force` is for that case, and re-decodes the whole library to reach it.",
+			"reads the row rather than the file, so a plain `bridge analyze` will not notice it: the curve's next "+
+			"lookup renders it again, waveform only, unless the waveform-regeneration line says the bridge refuses "+
+			"to or stopped, and `bridge analyze --force` re-decodes the whole library to reach every one.",
 			rel.Waveforms, rel.WaveformDir)
 	}
 	return warn(checkNameSidecarPaths, summary, hint)

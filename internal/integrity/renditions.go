@@ -10,18 +10,59 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 )
 
-// renditionScan is what scanForRenditions found in a variants directory.
+// sidecarFamily is what a sidecar directory's guards know of one kind of
+// sidecar: how to recognise one of its files by its basename, and the words
+// a refusal names the directory and its files with. The variants
+// directory's renditions and the waveform directory's curves are the two
+// (variantSidecars, waveformSidecars), and the probe, the relocation and
+// emptied guard and the identity check are one body for both
+// (dirSweepBlock, massMissingRefusal, dirChanged), so they cannot disagree
+// about what a tree that holds sidecars looks like (backlog B652).
+type sidecarFamily struct {
+	// isSidecar reports whether a basename is one of the family's files.
+	isSidecar func(name string) bool
+	// dir names the directory ("variants directory"), path the path when it
+	// names no directory ("variants path"), file one of its files
+	// ("rendition"), files more of them ("sidecar files"), and rowFile what
+	// a row that has none at either location lacks ("sidecar").
+	dir, path, file, files, rowFile string
+}
+
+// variantSidecars is the variants directory's family: a rendition in either
+// layout looksLikeVariantSidecar recognises.
+var variantSidecars = sidecarFamily{
+	isSidecar: looksLikeVariantSidecar,
+	dir:       "variants directory",
+	path:      "variants path",
+	file:      "rendition",
+	files:     "sidecar files",
+	rowFile:   "sidecar",
+}
+
+// waveformSidecars is the waveform directory's family: a curve the analysis
+// pool writes (ConsiderWaveformSidecar).
+var waveformSidecars = sidecarFamily{
+	isSidecar: ConsiderWaveformSidecar,
+	dir:       "waveform directory",
+	path:      "waveform path",
+	file:      "waveform",
+	files:     "waveform files",
+	rowFile:   "curve",
+}
+
+// renditionScan is what scanForSidecars found in a sidecar directory.
 type renditionScan struct {
 	// root is the directory the scan listed, stat'ed from the handle it
 	// listed it with (fsutil.DirIdentity says why never os.Stat): the
-	// identity VariantsDirBlock.Info carries. Set whenever the root was
+	// identity SidecarDirBlock.Info carries. Set whenever the root was
 	// opened, whatever else the scan found.
 	root os.FileInfo
 	// entries: the directory itself holds at least one entry, of any kind.
 	entries bool
-	// rendition: a file looksLikeVariantSidecar names, regular or a link
-	// resolving to a regular file, outside a directory SkipsDerivedTreeDir
-	// names (a dot-directory, a NAS recycle bin or snapshot, and the rest).
+	// rendition: a file the family names (a rendition looksLikeVariantSidecar
+	// names, or a curve), regular or a link resolving to a regular file,
+	// outside a directory SkipsDerivedTreeDir names (a dot-directory, a NAS
+	// recycle bin or snapshot, and the rest).
 	rendition bool
 	// dirLink: a link to a directory (a symlink, or on Windows a junction or
 	// a volume mounted in a folder), not named as SkipsDerivedTreeDir skips,
@@ -71,11 +112,19 @@ type pendingScanDir struct {
 // stopped at its first error, so whether a readable rendition was seen
 // depended on how the names sorted.
 func scanForRenditions(dir string) (renditionScan, error) {
+	return scanForSidecars(dir, variantSidecars)
+}
+
+// scanForSidecars is scanForRenditions for any family: the same walk, by the
+// same rules, looking for one of fam's files. The waveform guard asks it of
+// the waveform directory (WaveformDirSweepBlock), so a tree that holds only
+// curves is not read as a tree that holds nothing (backlog B652).
+func scanForSidecars(dir string, fam sidecarFamily) (renditionScan, error) {
 	var scan renditionScan
 	if dir == "" {
 		// Refused before resolveSidecarRoot: filepath.EvalSymlinks("") is
 		// ".", so an unguarded "" would walk the working directory.
-		return scan, errors.New("integrity: no variants directory")
+		return scan, errors.New("integrity: no " + fam.dir)
 	}
 	root, err := resolveSidecarRoot(dir)
 	if err != nil {
@@ -101,7 +150,7 @@ func scanForRenditions(dir string) (renditionScan, error) {
 	var pending []pendingScanDir
 	cur, curPath := f, root
 	for {
-		if err := scanDirEntries(cur, curPath, curPath == root, &scan, &pending); err != nil {
+		if err := scanDirEntries(cur, curPath, curPath == root, fam, &scan, &pending); err != nil {
 			note(err)
 		}
 		_ = cur.Close()
@@ -128,11 +177,11 @@ func scanForRenditions(dir string) (renditionScan, error) {
 }
 
 // scanDirEntries reads the open directory d, at path, a batch at a time: it
-// sets scan.rendition and returns at the first rendition, queues each
+// sets scan.rendition and returns at the first of fam's files, queues each
 // directory below it that SkipsDerivedTreeDir does not name, and marks the
 // root's entries and any link to a directory. An error ends the listing
 // of d alone.
-func scanDirEntries(d *os.File, path string, isRoot bool, scan *renditionScan, pending *[]pendingScanDir) error {
+func scanDirEntries(d *os.File, path string, isRoot bool, fam sidecarFamily, scan *renditionScan, pending *[]pendingScanDir) error {
 	for {
 		ents, err := d.ReadDir(renditionScanBatch)
 		for _, e := range ents {
@@ -147,7 +196,7 @@ func scanDirEntries(d *os.File, path string, isRoot bool, scan *renditionScan, p
 					*pending = append(*pending, pendingScanDir{path: p, entry: e})
 				}
 			case t.IsRegular():
-				if looksLikeVariantSidecar(name) {
+				if fam.isSidecar(name) {
 					scan.rendition = true
 					return nil
 				}
@@ -164,7 +213,7 @@ func scanDirEntries(d *os.File, path string, isRoot bool, scan *renditionScan, p
 					if !SkipsDerivedTreeDir(name) {
 						scan.dirLink = true
 					}
-				case st.Mode().IsRegular() && looksLikeVariantSidecar(name):
+				case st.Mode().IsRegular() && fam.isSidecar(name):
 					scan.rendition = true
 					return nil
 				}

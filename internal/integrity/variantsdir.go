@@ -61,7 +61,8 @@ func VariantsDirSweepBlockReason(dir string) string {
 	return VariantsDirSweepBlock(dir).Reason
 }
 
-// VariantsDirBlock is the probe's full answer.
+// SidecarDirBlock is the probe's full answer, for a variants directory
+// (VariantsDirSweepBlock) or the waveform directory (WaveformDirSweepBlock).
 //
 // Empty is broken out on its own because it is the ONE reason a
 // caller can explain away: a sweep that just unlinked renditions from
@@ -69,7 +70,7 @@ func VariantsDirSweepBlockReason(dir string) string {
 // unmounted volume. Nothing else on this list is explicable that
 // way — see gcCheckOutputDirBeforeReverseSweep and the variant delete
 // handler, the callers that ask.
-type VariantsDirBlock struct {
+type SidecarDirBlock struct {
 	// Reason is "" when the directory is healthy for sweeping;
 	// otherwise the operator-facing phrase.
 	Reason string
@@ -95,31 +96,49 @@ type VariantsDirBlock struct {
 }
 
 // VariantsDirSweepBlock probes dir once and reports both halves.
-func VariantsDirSweepBlock(dir string) VariantsDirBlock {
+func VariantsDirSweepBlock(dir string) SidecarDirBlock {
+	return dirSweepBlock(dir, variantSidecars)
+}
+
+// WaveformDirSweepBlock is VariantsDirSweepBlock for the waveform directory:
+// the same probe, by the same rules, finding a curve where the variants
+// probe finds a rendition. A waveform directory that is missing, or holds no
+// curve while the catalog records curves, is what a volume that is away
+// looks like, and what a directory emptied by hand looks like too, which the
+// directory alone cannot tell apart; the regeneration guard refuses both
+// (JudgeWaveformCatalog, backlog B652), so the catalog's last curve gone
+// reads as refused, never as one curve to render again.
+func WaveformDirSweepBlock(dir string) SidecarDirBlock {
+	return dirSweepBlock(dir, waveformSidecars)
+}
+
+// dirSweepBlock is the probe, for fam's directory: VariantsDirSweepBlock's
+// docblock is its rules.
+func dirSweepBlock(dir string, fam sidecarFamily) SidecarDirBlock {
 	info, err := os.Stat(dir)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
-		return VariantsDirBlock{Reason: "variants directory is missing", Missing: true}
+		return SidecarDirBlock{Reason: fam.dir + " is missing", Missing: true}
 	case err != nil:
-		return VariantsDirBlock{Reason: fmt.Sprintf("cannot stat variants directory: %v", err)}
+		return SidecarDirBlock{Reason: fmt.Sprintf("cannot stat %s: %v", fam.dir, err)}
 	case !info.IsDir():
-		return VariantsDirBlock{Reason: "variants path is not a directory"}
+		return SidecarDirBlock{Reason: fam.path + " is not a directory"}
 	}
-	scan, err := scanForRenditions(dir)
+	scan, err := scanForSidecars(dir, fam)
 	switch {
 	case scan.rendition:
-		return VariantsDirBlock{Info: scan.root}
+		return SidecarDirBlock{Info: scan.root}
 	case err != nil:
-		return VariantsDirBlock{Reason: fmt.Sprintf("cannot read variants directory: %v", err)}
+		return SidecarDirBlock{Reason: fmt.Sprintf("cannot read %s: %v", fam.dir, err)}
 	case scan.dirLink:
 		// Renditions may sit behind the link, where the scan does not
 		// look: no evidence the volume is gone, the reading every entry
 		// got before B223.
-		return VariantsDirBlock{Info: scan.root}
+		return SidecarDirBlock{Info: scan.root}
 	case !scan.entries:
-		return VariantsDirBlock{Reason: "variants directory is empty", Empty: true, Info: scan.root}
+		return SidecarDirBlock{Reason: fam.dir + " is empty", Empty: true, Info: scan.root}
 	}
-	return VariantsDirBlock{Reason: "variants directory holds no rendition", Empty: true, Info: scan.root}
+	return SidecarDirBlock{Reason: fam.dir + " holds no " + fam.file, Empty: true, Info: scan.root}
 }
 
 // VariantsDirReplaced is the answer VariantsDirChanged gives when the path
@@ -153,17 +172,32 @@ const VariantsDirReplaced = "the variants directory is no longer the directory t
 // "" for an empty dir: the watcher probes nothing then (a nil or empty
 // provider disables the mount-loss guard), so there is nothing to compare.
 func VariantsDirChanged(dir string, start os.FileInfo) string {
+	return dirChanged(dir, start, variantSidecars, "sweep")
+}
+
+// WaveformDirChanged is VariantsDirChanged for the waveform directory, in its
+// words: `analyze --gc` asks it before it unlinks and before each unlink.
+func WaveformDirChanged(dir string, start os.FileInfo) string {
+	return dirChanged(dir, start, waveformSidecars, "sweep")
+}
+
+// dirChanged is the identity check, for fam's directory, worded for the
+// activity that asks it ("sweep", or the regeneration guard's "check"):
+// VariantsDirChanged's docblock is its rules, and fsutil.DirStillIs the
+// comparison itself, which the analysis pool's waveform-only repair makes
+// too (analyze imports no integrity).
+func dirChanged(dir string, start os.FileInfo, fam sidecarFamily, activity string) string {
 	if dir == "" {
 		return ""
 	}
-	now, err := fsutil.DirIdentity(dir)
+	err := fsutil.DirStillIs(dir, start)
 	switch {
+	case err == nil:
+		return ""
 	case errors.Is(err, fs.ErrNotExist):
-		return "the variants directory went missing during the sweep"
-	case err != nil:
-		return fmt.Sprintf("cannot open variants directory during the sweep: %v", err)
-	case !os.SameFile(start, now):
-		return VariantsDirReplaced
+		return "the " + fam.dir + " went missing during the " + activity
+	case errors.Is(err, fsutil.ErrDirReplaced):
+		return "the " + fam.dir + " is no longer the directory this " + activity + " began on"
 	}
-	return ""
+	return fmt.Sprintf("cannot open %s during the %s: %v", fam.dir, activity, err)
 }

@@ -515,13 +515,13 @@ func hashFileShort(path string) (string, error) {
 //
 // Where the variant adapter is protecting a row from serveVariant's
 // reaper, this one is protecting the FILE from never being looked at
-// again. Nothing reaps a waveform row, and nothing regenerates one
-// either: the analysis skip gate keys on the SOURCE's mtime and size,
-// which a host move leaves untouched, so the candidate walk never
-// offers the track and `/v1/waveform` answers 410 for the lifetime of
-// the install. `bridge doctor`'s sidecar-paths check reports it and can
-// only suggest re-running analysis over the whole library to recover
-// curves that are already on disk. (#937's named follow-up, #938.)
+// again. Nothing reaps a waveform row, and the analysis skip gate keys
+// on the SOURCE's mtime and size, which a host move or a deleted curve
+// leaves untouched, so the candidate walk never offers the track: a
+// relocated curve is adopted here (#937's named follow-up, #938), and
+// since backlog B652 a curve proven missing at both places, or a
+// partial copy at the canonical one, is asked to be rendered again,
+// waveform only (waveformRegenerator), from a /v1/waveform lookup alone.
 type analysisStoreAdapter struct {
 	provider *manifest.Provider
 	// store performs the adoption UPDATE; nil in fixtures that only
@@ -532,15 +532,45 @@ type analysisStoreAdapter struct {
 	// lookup for liveVariantsDir's reason: the probe has to look where
 	// a curve belongs NOW.
 	waveformDir func() string
+	// regen asks for a curve proven missing to be rendered again; nil
+	// in fixtures that only project or adopt. Serve sets it once its
+	// analysis pool exists, before any listener starts.
+	regen *waveformRegenerator
 }
 
+// LookupAnalysis is the row, with a relocated curve adopted: the lookup
+// /v1/spectrum makes, and /v1/waveform's before its regeneration.
 func (a *analysisStoreAdapter) LookupAnalysis(ctx context.Context, sourcePath string) (*api.AnalysisRecord, error) {
+	rec, _, err := a.lookup(ctx, sourcePath)
+	return rec, err
+}
+
+// LookupWaveform is LookupAnalysis, and for a curve DecideWaveform proves
+// missing (or finds a partial copy of), a request that it be rendered again,
+// keyed on the row's own source path, never the request's spelling: a
+// folded request names the same row, and the job it asks for is the same
+// job. The request returns at once; the record is the row's as it stands,
+// so the handler answers this request as it always has.
+func (a *analysisStoreAdapter) LookupWaveform(ctx context.Context, sourcePath string) (*api.AnalysisRecord, error) {
+	rec, d, err := a.lookup(ctx, sourcePath)
+	if err != nil || rec == nil {
+		return rec, err
+	}
+	if d.Regenerates() && a.regen != nil {
+		a.regen.request(ctx, rec.SourcePath)
+	}
+	return rec, nil
+}
+
+// lookup is the row, with what DecideWaveform makes of its curve; a
+// relocated curve is adopted.
+func (a *analysisStoreAdapter) lookup(ctx context.Context, sourcePath string) (*api.AnalysisRecord, integrity.WaveformDecision, error) {
 	al, err := a.provider.LookupAnalysis(ctx, sourcePath)
 	if err != nil {
-		return nil, err
+		return nil, integrity.WaveformDecision{}, err
 	}
 	if al == nil {
-		return nil, nil
+		return nil, integrity.WaveformDecision{}, nil
 	}
 	rec := &api.AnalysisRecord{
 		// Canonical row values — the case-insensitive lookup may have
@@ -553,37 +583,38 @@ func (a *analysisStoreAdapter) LookupAnalysis(ctx context.Context, sourcePath st
 		Spectrum:      al.Spectrum,
 	}
 	if a.store == nil || a.waveformDir == nil || al.WaveformPath == "" {
-		return rec, nil
+		return rec, integrity.WaveformDecision{Action: integrity.WaveformServe}, nil
 	}
-	loc := integrity.LocateWaveform(a.waveformDir(), integrity.WaveformSnapshot{
+	d := integrity.DecideWaveform(a.waveformDir(), integrity.WaveformSnapshot{
 		SourcePath:   al.SourcePath,
 		WaveformPath: al.WaveformPath,
 		SizeBytes:    al.WaveformSize,
 	})
-	if loc.Verdict != integrity.SidecarRelocated {
-		// Present (serve it), Mismatched (a copy in flight — the open
-		// fails and the handler answers as it always has, rather than
-		// streaming a partial curve), Missing at both, or Unknown.
-		return rec, nil
+	if d.Action != integrity.WaveformAdopt {
+		// Serve (present), Regenerate (missing at both: LookupWaveform
+		// asks for it), Replace (a partial copy at the canonical path:
+		// the open of the recorded path fails and the handler answers as
+		// it always has, rather than streaming a partial curve), or Leave.
+		return rec, d, nil
 	}
 	// Serve from the canonical path whether or not the UPDATE lands:
 	// the bytes are there. No `indexed_at` bump — a path correction
 	// changes nothing a client can see.
-	if err := a.store.UpdateAnalysisWaveformPath(ctx, al.SourcePath, loc.Canonical); err != nil {
+	if err := a.store.UpdateAnalysisWaveformPath(ctx, al.SourcePath, d.Canonical); err != nil {
 		logger.Warn("waveform lookup: adopting relocated sidecar failed; serving it anyway",
 			slog.String("source_path", al.SourcePath),
-			slog.String("canonical", loc.Canonical),
+			slog.String("canonical", d.Canonical),
 			slog.Any("err", err),
 		)
 	} else {
 		logger.Info("waveform lookup: adopted relocated sidecar",
 			slog.String("source_path", al.SourcePath),
 			slog.String("from", al.WaveformPath),
-			slog.String("to", loc.Canonical),
+			slog.String("to", d.Canonical),
 		)
 	}
-	rec.WaveformPath = loc.Canonical
-	return rec, nil
+	rec.WaveformPath = d.Canonical
+	return rec, d, nil
 }
 
 // lyricsStoreAdapter implements api.LyricsStore on top of the manifest
@@ -629,7 +660,7 @@ type variantDeleterAdapter struct {
 // SidecarStoreState answers serveVariant's "is the file gone, or the
 // volume?" from the same probe the two sweeps refuse on, so the three
 // reapers cannot disagree about what an unmounted variants directory
-// looks like. Both halves of integrity.VariantsDirBlock are carried
+// looks like. Both halves of integrity.SidecarDirBlock are carried
 // across: the delete handler can explain an EMPTY directory away once it
 // has unlinked files itself, and nothing else on that list.
 //
@@ -4563,6 +4594,11 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	// process: a code issued anywhere else could never be redeemed.
 	pairingCodes := pairingcode.New()
 
+	// The /v1/waveform and /v1/spectrum lookup. Its regenerator, which asks
+	// for a curve proven missing to be rendered again (backlog B652), is set
+	// once the analysis pool exists, below, before any listener starts.
+	waveformLookup := &analysisStoreAdapter{provider: provider, store: manifestStore, waveformDir: liveWaveformDir}
+
 	apiSrv := api.New(cfg, store, provider, fingerprint).
 		WithArtworkDirs(artworkDirBridge(artworkDir)).
 		WithMBIDProbe(provider).
@@ -4586,7 +4622,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		// flag ∧ the cached ffmpeg probe, fail-closed), so the health
 		// response cannot advertise a kind the enqueuer would refuse.
 		WithDSDRender(dsdRenderActiveFn).
-		WithAnalysis(analysisActiveFn, &analysisStoreAdapter{provider: provider, store: manifestStore, waveformDir: liveWaveformDir}).
+		WithAnalysis(analysisActiveFn, waveformLookup).
 		WithLyrics(&lyricsStoreAdapter{provider: provider}).
 		WithAnalysisStats(&analysisStatsAdapter{
 			enabled:     analysisActiveFn,
@@ -5206,6 +5242,23 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		analysisPool = analyze.NewPool(manifestStore, cfg.Analysis.EffectiveWorkers(), cfg.Analysis.EffectiveQueueCap(),
 			analyze.WithLiveGate(analysisActiveFn))
 		defer analysisPool.Stop()
+		// A waveform curve proven missing is rendered again on its next
+		// /v1/waveform lookup, waveform only, through this pool, under the
+		// live analysis gate and the catalog's guard (backlog B652). Its
+		// guard judges the catalog on a goroutine of its own, on a context
+		// scanCtx parents; the deferred Close, registered after the pool's
+		// Stop, runs before it and before the store closes, so no judgment
+		// reads the store and no admission reaches the pool after either.
+		waveformRegen := newWaveformRegenerator(scanCtx, waveformRegenConfig{
+			store:    manifestStore,
+			resolver: apiSrv.Resolver(),
+			enabled:  analysisActiveFn,
+			dir:      liveWaveformDir,
+			queue:    analysisPool,
+			build:    waveformRegenBuild(),
+		})
+		defer waveformRegen.Close()
+		waveformLookup.regen = waveformRegen
 		// Buffered-1 nudge: the scanner's post-scan hook and the admin
 		// "Analyze now" button both non-blocking-send; a pending nudge
 		// coalesces (the sweep about to run covers it).

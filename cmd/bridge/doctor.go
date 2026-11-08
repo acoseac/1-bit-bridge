@@ -469,6 +469,12 @@ func buildDoctorDepsWith(cfgPath string, absentIsPreSetup bool, dacHost dacAcces
 				d.VariantsIndex = func(ctx context.Context) (doctor.VariantsIndex, error) {
 					return variantsIndexCounts(ctx, dbPath, variantsDir, maxDeletePercent, doctorVariantsIndexBudget)
 				}
+				// The waveform catalog as the regeneration guard judges it
+				// (backlog B652): the same judgment, over the same rows,
+				// bounded as the variants walk is.
+				d.WaveformRegeneration = func(ctx context.Context) (doctor.WaveformRegeneration, error) {
+					return waveformRegenerationReport(ctx, dbPath, waveformDir, doctorVariantsIndexBudget)
+				}
 				// Names in one folder the app reads as one (backlog B420):
 				// the same lazy open, over the indexed paths alone.
 				d.NameCollisions = func(ctx context.Context) (doctor.NameCollisions, error) {
@@ -660,6 +666,69 @@ func variantsIndexCounts(ctx context.Context, dbPath, variantsDir string, maxOrp
 			p = rel
 		}
 		out.OrphanSample = append(out.OrphanSample, p)
+	}
+	return out, nil
+}
+
+// waveformRegenerationReport judges the waveform catalog for the doctor's
+// waveform-regeneration check, through integrity.JudgeWaveformCatalog, the
+// judgment serve's regeneration guard makes, so the doctor's "refused" is the
+// guard's own answer: over the first budget rows, a refusal those rows prove,
+// and Undecided where they cannot tell. The stopped curves are those whose
+// failures stop them under this binary's build (waveformRegenBuild) and whose
+// curve is still proven missing, the first few named library-relative.
+// Opened per call and closed immediately, like the other manifest probes:
+// `bridge doctor` may run beside a live `bridge serve`.
+func waveformRegenerationReport(ctx context.Context, dbPath, waveformDir string, budget int) (doctor.WaveformRegeneration, error) {
+	if _, err := os.Stat(dbPath); err != nil {
+		return doctor.WaveformRegeneration{}, err
+	}
+	st, err := doctorOpenStore(dbPath)
+	if err != nil {
+		return doctor.WaveformRegeneration{}, err
+	}
+	defer func() { _ = st.Close() }()
+	recorded, err := st.RecordedWaveforms(ctx)
+	if err != nil {
+		return doctor.WaveformRegeneration{}, err
+	}
+	rows := make([]integrity.WaveformSnapshot, len(recorded))
+	for i, w := range recorded {
+		rows[i] = integrity.WaveformSnapshot{SourcePath: w.SourcePath, WaveformPath: w.WaveformPath, SizeBytes: w.WaveformSize}
+	}
+	j := integrity.JudgeWaveformCatalog(ctx, waveformDir, rows, integrity.WaveformJudgeOptions{
+		MaxMissingPercent: integrity.WaveformRegenMaxMissingPercent,
+		MaxRows:           budget,
+	})
+	if j.Cancelled {
+		return doctor.WaveformRegeneration{}, ctx.Err()
+	}
+	out := doctor.WaveformRegeneration{
+		Rows: j.Rows, Looked: j.Looked, Relocated: j.Relocated,
+		Missing: j.Missing, Mismatched: j.Mismatched,
+		Refusal: string(j.Refusal), Reason: j.Reason, Undecided: j.Undecided,
+		WaveformDir: waveformDir,
+	}
+	stopped, err := st.StoppedWaveformRegens(ctx, waveformRegenBuild())
+	if err != nil {
+		return doctor.WaveformRegeneration{}, err
+	}
+	for _, f := range stopped {
+		row, err := st.GetAnalysis(ctx, f.SourcePath)
+		if err != nil {
+			return doctor.WaveformRegeneration{}, err
+		}
+		if row == nil || !integrity.DecideWaveform(waveformDir, integrity.WaveformSnapshot{
+			SourcePath: row.SourcePath, WaveformPath: row.WaveformPath, SizeBytes: row.WaveformSize,
+		}).Regenerates() {
+			// Its curve is back (put back, or analysed again by hand): the
+			// stop holds nothing.
+			continue
+		}
+		out.Stopped++
+		if len(out.StoppedSample) < doctorVariantsIndexSamples {
+			out.StoppedSample = append(out.StoppedSample, f.SourcePath)
+		}
 	}
 	return out, nil
 }
