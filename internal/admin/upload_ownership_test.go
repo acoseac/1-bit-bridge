@@ -848,7 +848,7 @@ func (rig *ownershipRig) requireFilePuts(t *testing.T, sid, fid, body string, wa
 		seen = append(seen, ownershipPut{p.Offset, p.Status})
 		end := min(p.Offset+ownershipChunk, int64(len(body)))
 		if p.Offset < 0 || p.Offset >= end || string(p.Body) != body[p.Offset:end] {
-			t.Errorf("session %s was sent %q at offset %d, want %q: the bytes of a file it never took", sid, p.Body, p.Offset, body[min(p.Offset, end):end])
+			t.Errorf("session %s was sent %q at offset %d, want %q: the bytes of a file it never took", sid, p.Body, p.Offset, body[max(0, min(p.Offset, end)):end])
 		}
 	}
 	if len(seen) != len(want) {
@@ -1694,6 +1694,31 @@ const steps = {
     await settle(click("upload-resume-discard"), "Discard it");
     await settle(discardRead, "the failed read after Discard it");
     out.shown.discarded = shown();
+    await settle(pick([oldFile()]), "the pick of the same files");
+    await settle(click("upload-start"), "the upload of the same files");
+    out.shown.final = shown();
+  },
+  // An interrupted upload listed; Discard it pressed and its delete held; the
+  // same files chosen and Upload pressed while the delete is pending.
+  "discard-pending-upload": async () => {
+    newPage();
+    await ready();
+    out.shown.loaded = shown();
+    const discard = click("upload-resume-discard");
+    await reached("discard");
+    await settle(pick([oldFile()]), "the pick of the same files");
+    const run = click("upload-start");
+    await release("discard");
+    await settle(discard, "Discard it");
+    await settle(run, "the upload of the same files");
+    out.shown.final = shown();
+  },
+  // An interrupted upload listed; Discard it refused; the same files chosen again.
+  "discard-fails-upload": async () => {
+    newPage();
+    await ready();
+    await settle(click("upload-resume-discard"), "Discard it, refused");
+    out.shown.refused = shown();
     await settle(pick([oldFile()]), "the pick of the same files");
     await settle(click("upload-start"), "the upload of the same files");
     out.shown.final = shown();
@@ -2607,6 +2632,37 @@ func TestALateOrFailedReadOfTheListKeepsWhatThePageChanged(t *testing.T) {
 		}
 		requireAdded(t, "after the same files were chosen again", got.Shown["final"], "1 added")
 		rig.requirePuts(t, made[0], ownershipOld, everyChunk)
+		rig.requireFile(t, ownershipPath, ownershipOld)
+	})
+
+	t.Run("Upload while Discard it is pending", func(t *testing.T) {
+		rig := newOwnershipRig(t, ownershipRule{Kind: "abandon", Nth: 1, Hold: "discard"})
+		sid := rig.interruptedSession(t)
+		got := runOwnershipCase(t, rig, script, node, "discard-pending-upload")
+		requireOnList(t, "as the page loaded", got.Shown["loaded"], sid)
+		// The session being deleted is never matched: the same files start a
+		// new session, and none of their bytes go to the one Discard it took.
+		made := rig.sessionsMade()
+		if len(made) != 1 || len(rig.of("put", sid)) != 0 || len(rig.of("read", sid)) != 0 {
+			t.Fatalf("the page made the sessions %q, read the discarded one %d times and sent it %d chunks, want one new session and nothing to the discarded\n%v",
+				made, len(rig.of("read", sid)), len(rig.of("put", sid)), rig.requests())
+		}
+		requireAdded(t, "after the same files were chosen while Discard it was pending", got.Shown["final"], "1 added")
+		rig.requirePuts(t, made[0], ownershipOld, everyChunk)
+		rig.requireFile(t, ownershipPath, ownershipOld)
+	})
+
+	t.Run("Discard it refused, then the same files", func(t *testing.T) {
+		rig := newOwnershipRig(t, ownershipRule{Kind: "abandon", Nth: 1, Answer: http.StatusInternalServerError,
+			AnswerBody: `{"error":"test_failure","message":"a failure the test made"}`})
+		sid := rig.interruptedSession(t)
+		got := runOwnershipCase(t, rig, script, node, "discard-fails-upload")
+		requireOnList(t, "after Discard it was refused", got.Shown["refused"], sid)
+		// A refused delete leaves the session matchable: the same files carry it on.
+		if made := rig.sessionsMade(); len(made) != 0 {
+			t.Fatalf("the page made the sessions %q, want the session Discard it could not delete carried on\n%v", made, rig.requests())
+		}
+		requireAdded(t, "after the same files were chosen again", got.Shown["final"], "1 added")
 		rig.requireFile(t, ownershipPath, ownershipOld)
 	})
 
