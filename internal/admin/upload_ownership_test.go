@@ -286,7 +286,7 @@ func TestTheUploadPageRefusesAnotherUploadWhileARunOwnsIt(t *testing.T) {
 		"stageFiles":       "if (uploadState?.run) return;",
 		"startUpload":      "if (!uploadState || uploadState.run) return;",
 		"retryUpload":      "if (!sid || uploadState.run) return;",
-		"discardResumable": "if (!s || uploadState?.run) return;",
+		"discardResumable": "if (!s || uploadState?.run || resumableDiscarding.has(s.id)) return;",
 	} {
 		body := uploadJSFunction(t, src, name)
 		at := strings.Index(body, refusal)
@@ -1712,8 +1712,8 @@ const steps = {
     const run = click("upload-start");
     await reached("create");
     await release("discard");
-    await release("create");
     await settle(discard, "Discard it");
+    await release("create");
     await settle(run, "the upload of the same files");
     out.shown.final = shown();
   },

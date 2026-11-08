@@ -2338,8 +2338,12 @@ async function discardResumable() {
   }
   resumableDiscarding.delete(s.id);
   forgetResumable(s.id);
-  // A refused run's Try again offered this session: it is gone.
-  if (uploadState?.session?.id === s.id) hideUploadRetry();
+  // A refused run's Try again offered this session: it is gone, and so is
+  // the word that it was being discarded.
+  if (uploadState?.session?.id === s.id) {
+    hideUploadRetry();
+    document.getElementById("upload-error").hidden = true;
+  }
   await refreshResumable();
   if (banner?.isConnected && !uploadState?.run) showUploadResult("Discarded the interrupted upload.");
 }
