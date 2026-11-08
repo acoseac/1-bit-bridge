@@ -103,6 +103,13 @@
         the review collapses when the upload starts, and an error raised during
         it must survive that. role=alert so it is announced, not just shown. */ -}}
     <p class="error" id="upload-error" hidden role="alert"></p>
+    {{- /* Outside #upload-review for the same reason: a write refused because
+        its library root reads as a volume not mounted (backlog B776) comes
+        after the review collapsed, and Try again carries on the same session
+        once the volume is back. */ -}}
+    <div class="row-actions" id="upload-retry" hidden>
+      <button type="button" id="upload-retry-button" class="btn primary">Try again</button>
+    </div>
     <p class="hint warn" id="upload-dupe-note" hidden></p>
     <p class="hint" id="upload-result" aria-live="polite" hidden></p>
   </div>

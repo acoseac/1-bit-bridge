@@ -100,9 +100,11 @@ func newTestServer(t *testing.T) (*Server, *config.Config, string) {
 		// cfg.Upload.Enabled (default off), read per request, so a test
 		// that wants uploads flips the config rather than the wiring.
 		// The disk probe is stubbed so a full CI volume cannot fail
-		// unrelated tests.
+		// unrelated tests. The root guard is the scanner's, as serve's
+		// (backlog B776).
 		Upload: upload.NewManager(upload.Config{}, scanner.Roots,
-			upload.WithFreeBytes(func(string) (int64, error) { return 1 << 40, nil })),
+			upload.WithFreeBytes(func(string) (int64, error) { return 1 << 40, nil }),
+			upload.WithRootGuard(scanner.WriteGuard(scanCtx))),
 		Fingerprint: "AB:CD:EF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC",
 		StartedAt:   time.Now().UTC(),
 		Restart:     func() {}, // no-op in tests

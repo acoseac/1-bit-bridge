@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/trash"
 )
 
@@ -64,6 +65,11 @@ func (s *Server) trashManager(w http.ResponseWriter) (*trash.Manager, bool) {
 }
 
 func writeTrashError(w http.ResponseWriter, err error) {
+	var away *manifest.RootAwayError
+	if errors.As(err, &away) {
+		writeRootAwayRefusal(w, away)
+		return
+	}
 	switch {
 	case errors.Is(err, trash.ErrDisabled):
 		writeError(w, http.StatusForbidden, "delete_disabled", err.Error())

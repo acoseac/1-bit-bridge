@@ -241,11 +241,15 @@ func TestUploadInsufficientSpaceReturns507WithReclaimable(t *testing.T) {
 // and the shallower one wins the duplicate election — so warning up front is
 // the only place it can be prevented.
 func TestSessionCreateFlagsExistingBasenameSizeMatches(t *testing.T) {
-	srv, _, _ := newTestServer(t)
+	srv, cfg, _ := newTestServer(t)
 	enableUploads(t, srv)
 
 	body := []byte("existing audio")
 	existing := "Dark Side/01 Speak to Me.flac"
+	// The row's file is on disk, as an indexed library's is: a root holding no
+	// content under rows the index holds reads as a volume not mounted, and no
+	// upload is staged there (backlog B776).
+	seedLibraryFile(t, cfg.LibraryRoots[0], existing, string(body))
 	if err := srv.deps.Manifest.UpsertTrack(t.Context(), &manifest.Track{
 		Path: existing, Size: int64(len(body)),
 	}); err != nil {
@@ -277,6 +281,9 @@ func TestPreflightHintDoesNotBlockTheUpload(t *testing.T) {
 	srv, cfg, _ := newTestServer(t)
 	enableUploads(t, srv)
 	body := []byte("dupe")
+	// On disk as its row says, for TestSessionCreateFlagsExistingBasenameSizeMatches'
+	// reason.
+	seedLibraryFile(t, cfg.LibraryRoots[0], "Other/x.flac", string(body))
 	if err := srv.deps.Manifest.UpsertTrack(t.Context(), &manifest.Track{
 		Path: "Other/x.flac", Size: int64(len(body)),
 	}); err != nil {

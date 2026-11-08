@@ -134,6 +134,11 @@ type Manager struct {
 	// test that does not care, in which case the 507 reports zero.
 	reclaimable func(root string) int64
 
+	// rootGuard answers for the absolute paths a request would write whether
+	// any lies under a library root that reads as a volume not mounted
+	// (WithRootGuard); nil asks nothing.
+	rootGuard func(paths []string) error
+
 	now func() time.Time
 }
 
@@ -157,6 +162,17 @@ func WithClock(fn func() time.Time) Option { return func(m *Manager) { m.now = f
 // WithReclaimable supplies the trash-purge estimate used by NoSpace.
 func WithReclaimable(fn func(root string) int64) Option {
 	return func(m *Manager) { m.reclaimable = fn }
+}
+
+// WithRootGuard refuses a write into a library root that reads as a volume
+// not mounted (backlog B776): fn is asked, before anything is written, for
+// every path a request would write (a create's staging and its declared
+// destinations, a chunk's staging, a commit's destinations), and for every
+// root when a session is in none, and an answer that is not nil refuses the
+// whole request with it. cmd/bridge passes the scanner's
+// (manifest.Scanner.WriteGuard).
+func WithRootGuard(fn func(paths []string) error) Option {
+	return func(m *Manager) { m.rootGuard = fn }
 }
 
 // NewManager builds a Manager over the given live-root accessor.
@@ -349,6 +365,14 @@ func (m *Manager) Create(decls []FileDecl, opts CreateOptions) (*Session, error)
 	if opts.MaxBytes > 0 && total > opts.MaxBytes {
 		return nil, fmt.Errorf("%w: %d bytes declared, session limit is %d", ErrTooLarge, total, opts.MaxBytes)
 	}
+	// Nothing is staged in a root that reads as a volume not mounted: the
+	// session would land on the bare mount point, which the mount then hides
+	// (backlog B776). Each declared destination's root is asked too, a root
+	// nested in this one among them, so a refusal costs nothing here rather
+	// than the whole transfer at the commit.
+	if err := m.guard(m.createTargets(root, doc)); err != nil {
+		return nil, err
+	}
 	if err := m.checkSpace(root, total); err != nil {
 		return nil, err
 	}
@@ -435,7 +459,49 @@ func (m *Manager) findSession(sid string) (sessionDoc, error) {
 			return sessionDoc{}, err
 		}
 	}
+	// A session staged on a volume that is away is in no root the bridge can
+	// see, and its id names no root, so a root that reads as a volume not
+	// mounted answers for it: a 404 reads as an upload lost, while the
+	// session is on the volume and its commit lands once the volume is back
+	// (backlog B776). With more than one root, a session that is gone for
+	// good is answered so too while any root's volume is away.
+	if err := m.guard(m.roots()); err != nil {
+		return sessionDoc{}, err
+	}
 	return sessionDoc{}, ErrNotFound
+}
+
+// guard asks the root guard (WithRootGuard) about paths, nil without one.
+func (m *Manager) guard(paths []string) error {
+	if m.rootGuard == nil || len(paths) == 0 {
+		return nil
+	}
+	return m.rootGuard(paths)
+}
+
+// createTargets is what a session's create would write: its staging, and
+// every destination it declares, which its commit writes.
+func (m *Manager) createTargets(root string, doc sessionDoc) []string {
+	out := make([]string, 0, len(doc.Files)+1)
+	out = append(out, m.sessionDir(root, doc.ID))
+	for _, f := range doc.Files {
+		out = append(out, filepath.Join(root, filepath.FromSlash(f.RelPath)))
+	}
+	return out
+}
+
+// commitTargets is what a session's commit would write: every destination
+// whose path validates, joined onto the root the session was found in, and
+// that root's staging, which the commit empties.
+func (m *Manager) commitTargets(doc sessionDoc) []string {
+	out := make([]string, 0, len(doc.Files)+1)
+	out = append(out, m.sessionDir(doc.Root, doc.ID))
+	for _, f := range doc.Files {
+		if clean, err := ValidateRelPath(f.RelPath); err == nil {
+			out = append(out, filepath.Join(doc.Root, filepath.FromSlash(clean)))
+		}
+	}
+	return out
 }
 
 // Get returns the current view of a session, including per-file offsets. This
@@ -532,6 +598,14 @@ func (m *Manager) WriteChunk(sid, fid string, offset int64, r io.Reader, chunkDi
 	}
 	if fd == nil {
 		return 0, ErrNotFound
+	}
+	// A session found is no proof its root reads as it did: a root that kept
+	// its staging folder while its library content went, and an old session's
+	// staging left on a bare mount point, both read as a volume not mounted.
+	// Every chunk asks the root its staging is in before it writes, and the
+	// answer is never kept: a look a chunk (backlog B776's round 2).
+	if err := m.guard([]string{m.sessionDir(doc.Root, sid)}); err != nil {
+		return 0, err
 	}
 
 	unlock := m.locks.lock(sid + "/" + fid)
@@ -705,6 +779,14 @@ type CommitResult struct {
 func (m *Manager) Commit(sid string) (*CommitResult, error) {
 	doc, err := m.findSession(sid)
 	if err != nil {
+		return nil, err
+	}
+	// Refused whole, before any file is renamed, when a root the commit would
+	// write under reads as a volume not mounted, the deepest that owns each
+	// destination, a root nested in the session's included: the session
+	// stays as it is, and its commit once the volume is back lands every file
+	// (backlog B776).
+	if err := m.guard(m.commitTargets(doc)); err != nil {
 		return nil, err
 	}
 	res := &CommitResult{Root: doc.Root}
