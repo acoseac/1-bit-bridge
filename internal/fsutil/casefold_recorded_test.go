@@ -165,18 +165,68 @@ func TestSamePathAsRecordedProbesNoVolume(t *testing.T) {
 	if !SamePathAsRecorded(recorded, now, folding) {
 		t.Errorf("SamePathAsRecorded(%q, %q) = false where the record says its folder folded case", recorded, now)
 	}
-	link := filepath.Join(base, "link")
-	if err := os.Symlink(mnt, link); err == nil {
+	t.Run("through a link to the mount point", func(t *testing.T) {
+		link := filepath.Join(base, "link")
+		if err := os.Symlink(mnt, link); err != nil {
+			t.Skipf("this host makes no link here: %v", err)
+		}
 		if through := filepath.Join(link, "bridge"); !SamePathAsRecorded(recorded, through, folding) {
 			t.Errorf("SamePathAsRecorded(%q, %q) = false: a link to the mount point resolves now", recorded, through)
 		}
-	}
+	})
 	folding[len(folding)-1] = CaseSensitive
 	if SamePathAsRecorded(recorded, now, folding) {
 		t.Errorf("SamePathAsRecorded(%q, %q) = true where the record says its folder kept case", recorded, now)
 	}
 	if !SamePathAsRecorded(recorded, recorded, folding) {
 		t.Errorf("SamePathAsRecorded(%q, itself) = false", recorded)
+	}
+}
+
+// TestACaseOnlyDifferenceInAFolderThatIsThere states the answer for a folder
+// on the way that is there, named in another case (B741's round 4): on
+// Windows, where the folder takes both spellings, one folder whatever the
+// letter of the folder its name is looked up in, since a resolution there
+// names a folder that is there by its name on disk, so both spellings resolve
+// to it and the letters judge only what lies below it; on Linux and macOS,
+// whose resolution keeps the spelling it is given, one folder where that
+// letter is folding case and two where it is keeping case, the record
+// deciding as it does for a folder that is not there. A difference in the
+// leaf, which is not there, is judged by its folder's letter everywhere.
+func TestACaseOnlyDifferenceInAFolderThatIsThere(t *testing.T) {
+	base := t.TempDir()
+	music := filepath.Join(base, "Music")
+	if err := os.Mkdir(music, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_, err := os.Stat(filepath.Join(base, "MUSIC"))
+	oneFolder := runtime.GOOS == "windows" && err == nil
+	recorded := filepath.Join(music, "Bridge")
+	const (
+		I = CaseInsensitive
+		S = CaseSensitive
+	)
+	for _, tc := range []struct {
+		name    string
+		now     string
+		letters map[string]CaseFolding
+		same    bool
+	}{
+		{"its folder recorded as folding case", filepath.Join(base, "MUSIC", "Bridge"),
+			map[string]CaseFolding{base: I, music: S}, true},
+		{"its folder recorded as keeping case", filepath.Join(base, "MUSIC", "Bridge"),
+			map[string]CaseFolding{base: S, music: S}, oneFolder},
+		{"its folder recorded as keeping case, the leaf in another case in a folder folding case", filepath.Join(base, "MUSIC", "bridge"),
+			map[string]CaseFolding{base: S, music: I}, oneFolder},
+		{"its folder recorded as folding case, the leaf in another case in a folder keeping case", filepath.Join(base, "MUSIC", "bridge"),
+			map[string]CaseFolding{base: I, music: S}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			folding := FoldingOnTheWay(recorded, lettersOf(tc.letters), map[string]CaseFolding{})
+			if got := SamePathAsRecorded(recorded, tc.now, folding); got != tc.same {
+				t.Errorf("SamePathAsRecorded(%q, %q, %s) = %v, want %v (%s)", recorded, tc.now, FormatFolding(folding), got, tc.same, runtime.GOOS)
+			}
+		})
 	}
 }
 
