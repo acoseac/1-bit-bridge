@@ -87841,4 +87841,29 @@ predicted, and `git status` was clean after.
   cli-serve.md 50,819, the worst load 67.5 %), and `TestEveryCitedTestNameExists`
   passes there and fails on a ghost citation planted in the copy's History
   file. No entry moves, so `verify_moves.py` has nothing to prove.
-- The gates follow, once run.
+- The gates, below.
+
+### Gates
+
+At 41a085d0, on Go 1.27.3 (`GOTOOLCHAIN=go1.27.3`, go.mod's), TMPDIR under
+`.tmp/_b760`, in one session of the shared build slot, started by a guard
+that waited for it (`.tmp/_b760/r2/gates_r2.py`; in the slot from 17:27 with
+no wait): `make fmt` changed nothing; `make vet`, and with `GOOS=windows`,
+`GOOS=darwin` and `GOOS=linux GOARCH=386`: ok; `make docs-check`: ok
+(CLAUDE.md 82.1 %, the worst load 67.4 %); the qualification check
+(`go run ./scripts/qualification-version -base 3d0a0d05 -head HEAD`):
+`qualification version OK`; `make test TEST_PKGS='./cmd/bridge/...
+./internal/updater/...'` (race, `-p 4`, `-timeout 30m`, the Makefile's tags):
+ok, cmd/bridge 1,265 s, internal/updater 29 s; `git status` empty after. Not
+run this round: the whole suite and `make build-all`, which round 1 ran at
+fdd74a31. This round's code is in cmd/bridge and internal/updater, whose
+suites ran whole, and `make vet` compiled every package and its tests for the
+four targets, `TakeBackFailedStart`'s new parameter among them.
+
+`rules-b760-r2.patch` (39,340 bytes, sha256 `09a0c97c…`) was built again on a
+copy of 41a085d0's tracked files, byte for byte the patch checked above, and
+`git apply --check` takes it over the final head, this record's commit, which
+changes no rules file.
+
+Not run here: macOS and Windows natively, CI's runners, and a by-hand run with
+real release builds.
