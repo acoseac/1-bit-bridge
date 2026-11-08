@@ -187,7 +187,8 @@ const dataDirMarkerMode = 0o644
 // the record gains its identity, each step one a boot test stands in for to
 // record it or fail it (dataDirRecording.durability): the staged marker's
 // bytes synced, the rename that puts it in place, and the marker synced where
-// it is, which the adoption of a marker a start before left runs too
+// it is, its own bytes and metadata and then its directory's entries
+// (syncInPlace), which the adoption of a marker a start before left runs too
 // (recordServeDataDir). A nil step is its own.
 type markerDurability struct {
 	// syncStaged syncs the staged marker's bytes, before the rename.
@@ -195,9 +196,12 @@ type markerDurability struct {
 	// rename puts the staged marker in place: the rename and its retries
 	// alone (atomicwrite.RenameWithRetryUnsynced), the barrier syncInPlace's.
 	rename func(from, to string) error
-	// syncInPlace makes the marker at path durable where it is
-	// (syncMarkerInPlace).
-	syncInPlace func(path string) error
+	// syncFile syncs the marker at path where it is, through a handle of its
+	// own (syncMarkerFile).
+	syncFile func(path string) error
+	// syncDir syncs the entries of the directory that holds path
+	// (fsutil.SyncParentDir).
+	syncDir func(path string) error
 }
 
 // steps is d with each nil step its own.
@@ -208,10 +212,29 @@ func (d markerDurability) steps() markerDurability {
 	if d.rename == nil {
 		d.rename = atomicwrite.RenameWithRetryUnsynced
 	}
-	if d.syncInPlace == nil {
-		d.syncInPlace = syncMarkerInPlace
+	if d.syncFile == nil {
+		d.syncFile = syncMarkerFile
+	}
+	if d.syncDir == nil {
+		d.syncDir = fsutil.SyncParentDir
 	}
 	return d
+}
+
+// syncInPlace makes the marker at path durable where it is, once renamed
+// there: its own bytes and metadata (syncFile), then its directory's entries
+// (syncDir; nothing on Windows, where a directory cannot be synced), a
+// directory fsync the filesystem cannot make (EINVAL, ENOTSUP, EOPNOTSUPP),
+// as for the updater's marker, taken as made.
+func (d markerDurability) syncInPlace(path string) error {
+	d = d.steps()
+	if err := d.syncFile(path); err != nil {
+		return err
+	}
+	if err := d.syncDir(path); err != nil && !cannotSyncADirectory(err) {
+		return err
+	}
+	return nil
 }
 
 // writeDataDirMarker writes the marker in the data dir dataDir holding id,
@@ -269,17 +292,14 @@ func writeDataDirMarker(dataDir, id string, d markerDurability) (err error) {
 	return nil
 }
 
-// syncMarkerInPlace makes the marker at path durable where it is, once
-// renamed there: its bytes and its own metadata synced through a handle of
-// its own, opened for writing since on Windows Sync is FlushFileBuffers,
-// which needs that, and which commits the file's metadata, the rename that
-// put it there among it, to NTFS's journal before it answers (B741's round 2,
-// the Claude API on #1441: the rename alone left that to the journal's own
-// flush, so a record on another volume could reach its disk first); then its
-// directory's entries (fsutil.SyncParentDir; nothing on Windows, where a
-// directory cannot be synced), a directory fsync the filesystem cannot make
-// (EINVAL, ENOTSUP, EOPNOTSUPP), as for the updater's marker, taken as made.
-func syncMarkerInPlace(path string) error {
+// syncMarkerFile syncs the marker at path where it is, its bytes and its own
+// metadata, through a handle of its own, opened for writing since on Windows
+// Sync is FlushFileBuffers, which needs that, and which commits the file's
+// metadata, the rename that put it there among it, to NTFS's journal before
+// it answers (B741's round 2, the Claude API on #1441: the rename alone left
+// that to the journal's own flush, so a record on another volume could reach
+// its disk first).
+func syncMarkerFile(path string) error {
 	f, err := os.OpenFile(path, os.O_RDWR, 0)
 	if err != nil {
 		return err
@@ -288,13 +308,7 @@ func syncMarkerInPlace(path string) error {
 		_ = f.Close()
 		return err
 	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-	if err := fsutil.SyncParentDir(path); err != nil && !cannotSyncADirectory(err) {
-		return err
-	}
-	return nil
+	return f.Close()
 }
 
 // cannotSyncADirectory reports whether err is a directory fsync's answer that

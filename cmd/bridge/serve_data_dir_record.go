@@ -574,7 +574,7 @@ func (w dataDirRecording) writeMarker(dataDir, id string) error {
 // syncMarker makes the marker the data dir dataDir holds durable where it
 // is (markerDurability.syncInPlace), before the record takes up its identity.
 func (w dataDirRecording) syncMarker(dataDir string) error {
-	return w.durability.steps().syncInPlace(filepath.Join(dataDir, dataDirMarkerName))
+	return w.durability.syncInPlace(filepath.Join(dataDir, dataDirMarkerName))
 }
 
 func (w dataDirRecording) writeRecord(path string, data []byte) error {

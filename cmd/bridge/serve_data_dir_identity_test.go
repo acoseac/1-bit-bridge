@@ -979,8 +979,11 @@ func markerSteps(dataDir string, steps *[]string, fail string) dataDirRecording 
 			rename: func(from, to string) error {
 				return step("rename it into place", func() error { return own.rename(from, to) })
 			},
-			syncInPlace: func(path string) error {
-				return step("sync it in place", func() error { return own.syncInPlace(path) })
+			syncFile: func(path string) error {
+				return step("sync it in place", func() error { return own.syncFile(path) })
+			},
+			syncDir: func(path string) error {
+				return step("sync its directory", func() error { return own.syncDir(path) })
 			},
 		},
 		record: func(path string, data []byte) error {
@@ -997,12 +1000,13 @@ func markerSteps(dataDir string, steps *[]string, fail string) dataDirRecording 
 
 // TestTheMarkerHoldsTheIdentityBeforeTheRecordDoes: the record gains the
 // identity only once the marker in the data dir holds it durably: its staged
-// bytes synced, renamed into place, and synced where it is (on Windows its
-// bytes and metadata flushed through a handle of its own), each step before
-// the next, so a crash anywhere in between leaves a marker the next start
-// takes up, never a record holding an identity no marker holds, which every
-// start after it would refuse. Until round 2 this pinned the order of the two
-// writes alone, and dropping either sync passed it (Codex on #1441).
+// bytes synced, renamed into place, synced where it is (on Windows its bytes
+// and metadata flushed through a handle of its own), and its directory
+// synced, each step before the next, so a crash anywhere in between leaves a
+// marker the next start takes up, never a record holding an identity no
+// marker holds, which every start after it would refuse. Until round 2 this
+// pinned the order of the two writes alone, and dropping either sync passed
+// it (Codex on #1441).
 func TestTheMarkerHoldsTheIdentityBeforeTheRecordDoes(t *testing.T) {
 	base := t.TempDir()
 	lib := filepath.Join(base, "Music")
@@ -1012,7 +1016,7 @@ func TestTheMarkerHoldsTheIdentityBeforeTheRecordDoes(t *testing.T) {
 	var steps []string
 	stopServed(t, serveWithOpts(t, serveOpts{configPath: cfg, dataDirRecording: markerSteps(dataDir, &steps, "")}))
 	id := identityOf(t, dataDir)
-	want := []string{"sync the staged marker", "rename it into place", "sync it in place",
+	want := []string{"sync the staged marker", "rename it into place", "sync it in place", "sync its directory",
 		fmt.Sprintf("record %q, the marker holding {\"id\":%q} (<nil>)", id, id)}
 	if !slices.Equal(steps, want) {
 		t.Errorf("serve took the steps %q, want %q", steps, want)
@@ -1034,12 +1038,12 @@ func TestAMarkerWhoseBarrierFailedIsTakenUpOnceDurable(t *testing.T) {
 	dataDir := filepath.Join(base, "data")
 	cfg := writeIdentityConfig(t, filepath.Join(base, "bridge.yaml"), lib, dataDir)
 	var steps []string
-	stopServed(t, serveWithOpts(t, serveOpts{configPath: cfg, dataDirRecording: markerSteps(dataDir, &steps, "sync it in place")}))
+	stopServed(t, serveWithOpts(t, serveOpts{configPath: cfg, dataDirRecording: markerSteps(dataDir, &steps, "sync its directory")}))
 	id := identityOf(t, dataDir)
 	if !isIdentity(id) {
 		t.Fatalf("the marker renamed into place holds %q, want an identity", id)
 	}
-	want := []string{"sync the staged marker", "rename it into place", "sync it in place",
+	want := []string{"sync the staged marker", "rename it into place", "sync it in place", "sync its directory",
 		fmt.Sprintf("record %q, the marker holding {\"id\":%q} (<nil>)", "", id)}
 	if !slices.Equal(steps, want) {
 		t.Errorf("the start whose barrier failed took the steps %q, want %q", steps, want)
@@ -1047,7 +1051,7 @@ func TestAMarkerWhoseBarrierFailedIsTakenUpOnceDurable(t *testing.T) {
 
 	steps = nil
 	stopServed(t, serveWithOpts(t, serveOpts{configPath: cfg, dataDirRecording: markerSteps(dataDir, &steps, "")}))
-	want = []string{"sync it in place", fmt.Sprintf("record %q, the marker holding {\"id\":%q} (<nil>)", id, id)}
+	want = []string{"sync it in place", "sync its directory", fmt.Sprintf("record %q, the marker holding {\"id\":%q} (<nil>)", id, id)}
 	if !slices.Equal(steps, want) {
 		t.Errorf("the next start took the steps %q, want %q: the marker made durable where it is before the record takes up its identity", steps, want)
 	}

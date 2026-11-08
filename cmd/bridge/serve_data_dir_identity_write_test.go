@@ -156,6 +156,46 @@ func TestARecordKeepsItsIdentityWhereTheMarkerCannotBeReadAtItsWrite(t *testing.
 	}
 }
 
+// TestNoWriteOfTheRecordDropsOrReplacesItsIdentity: a record holding its data
+// dir's identity is left as it was by a start whose marker, at the record's
+// write, is gone and cannot be written again, or holds another identity, each
+// a change since the check, which would have refused either: the next start
+// refuses the data dir as this one would have (B741's round 2, the Claude API
+// on #1441: a record written again without its identity reads as one written
+// before B741, which, with the volume away, takes up whatever the bare mount
+// point holds).
+func TestNoWriteOfTheRecordDropsOrReplacesItsIdentity(t *testing.T) {
+	const id, other = "0123456789abcdef0123456789abcdef", "fedcba9876543210fedcba9876543210"
+	for _, tc := range []struct {
+		name   string
+		marker string // the identity the data dir's marker holds at the write, "" for none
+	}{
+		{"its marker gone and not to be written again", ""},
+		{"its marker holding another identity", other},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			base := t.TempDir()
+			dataDir := filepath.Join(base, "data")
+			mkdirs(t, dataDir)
+			touch(t, filepath.Join(dataDir, "bridge.db"), filepath.Join(dataDir, serveLockFileName))
+			if tc.marker != "" {
+				writeIdentity(t, dataDir, tc.marker)
+			}
+			cfg := filepath.Join(base, "bridge.yaml")
+			writeRecordWithIdentity(t, cfg, dataDir, id)
+			record := mustRead(t, dataDirRecordFile(cfg))
+			recordServeDataDir(dataDirRecordFile(cfg), dataDir, dataDirRecording{
+				marker: func(string, string) error { return errors.New("the test's marker that cannot be written") }})
+			if got := mustRead(t, dataDirRecordFile(cfg)); got != record {
+				t.Errorf("serve wrote the record %q, was %q", got, record)
+			}
+			if got := identityOf(t, dataDir); got != tc.marker {
+				t.Errorf("the data dir's marker holds %q, want %q, as it was", got, tc.marker)
+			}
+		})
+	}
+}
+
 // TestTheMarkerIsReadableByWhoeverReadsTheDatabase: the marker holds no
 // secret, and a user who may read the data dir's database may read it, so
 // that a command or bridge doctor run as a member of the service's group
