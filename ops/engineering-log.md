@@ -86160,6 +86160,8 @@ test, never committed (the third controls read held, the life's revocation held,
 then the read let go), 20 runs passed: the harness waits in `DSDSink.Activate`'s select from
 before the Stop, and that select's cancellation arm revokes the sink at once, so the fence's
 error is neither the harness's answer nor recorded in the sink's result.
+Round 2 found this wrong: that arm is one goroutine of several the Stop wakes, and the scratch
+test let the writer go only once it had run. With it held, the run exits 1 (B765 round 2, below).
 
 ### Qualification
 
@@ -86186,4 +86188,121 @@ under `-race` it passed 80 of 80 at HEAD and 80 of 80 on a copy of main's 98edea
 this change touches reaches it. `make test` run again in the slot passed, 89 packages ok (2,035
 s), its TMPDIR under `.tmp/_b765`, the Linux-only tests (ALSA, alsapcm, the durable writer, the
 identity paths) run here. alsa-abi did not run: no ABI definition or `scripts/alsa-abi` file
+changed.
+
+## 2026-11-08 — B765 round 2: the life's other windows, one read, and the harness's TrackChange context
+
+Worker b765, legion0, branch `fix/b765-tail-stop` (#1438), after round 1's rules patch was applied
+(e6baae14) and main merged in (79e6781b). Commits: 3c41b8fc (the tests, red), 70989901 (the
+fixes), 2a445bc3 (the runbook's version 47), then this record. The rule changes through
+`rules-b765-r2.patch`: round 1's line in `player.md`, reworded, and its long form in
+`History-rules-player.md`.
+
+### The reviews' points, each checked
+
+0. **A tail write or drain already waiting** (Claude's review of round 1). `beginReleaseLocked`
+   makes `releaseCtx` with `context.WithCancel(context.Background())` (`sink_dsd.go:448`); a tail
+   write's context descends from it and the drain waits on it, so the life's end cancels neither:
+   only the Immediate release, its mode set first under the same lock, or the release budget's
+   timer does. No window, so no fix and no test for it.
+1. **Between `nativeContext`'s two reads of the life** (Codex). Confirmed: the first read began no
+   release, the second cancelled the write, and a tail write so cancelled, the release still
+   TrackChange, was recorded as ErrReleaseUnconfirmed. One read decides both now.
+   `TestNativeTailWhoseLifeEndsAfterItsReadIsNoFailure` ends the life inside the tail write's read
+   (`endingLife`, a context whose armed `Err` reads the life live and ends it before returning, as
+   a Stop landing just after that read would; contract-true, since the answer was true when read),
+   the watcher held: red before, the writer then draining until the revocation after.
+2. **The activation's classification** (the brief's review). The brief's two cases do not hold as
+   it put them. A reopen's cancelled `Locate` is `held`: `paused` stays set until the reopen's
+   activation succeeds, so nothing is recorded, and the sink waits paused for its watcher (the
+   harness's DSDConfig sets no `Locate` at all). A prefill's cancellation is recorded, but as a
+   plain one (`*alsapcm.Error` with ReasonCancelled unwraps to `context.Canceled`), which the
+   harness's `withoutNativeCancellation` strips: a Stop there exits 0, red at the sink alone. The
+   same block does record what is no cancellation: the fences an ended life trips, "native
+   activation fenced" (the activation's, after its admission) and "native resume fenced after
+   status" (a resume's, after its STATUS, `paused` already cleared), whenever the writer reaches
+   the classification before every escalation of the Stop (the life's watcher, and Activate's,
+   Resume's or Finish's own cancellation arm). A Stop's run then exits 1. The writer now begins the
+   Immediate release under the sink's lock before that classification once the life has ended; a
+   terminal error is recorded before it, as ever.
+3. **The harness case passes with its context fix reverted** (Codex). Confirmed by reading: a
+   TrackChange release that ran only once the sink was Done answered nil through `waitRelease`'s
+   first check, whatever its context, so round 1's C2 was red only as the scheduler allowed.
+   `nativeReleaseHold` now hands the test the context the harness gives that release, and every
+   Stop case requires it live with the node's close still held.
+
+**Round 1's record was wrong** under "Checked, and not a window": a Stop in the activation's
+admission is a window. That scratch test let the writer go only once the harness's own escalation
+(Activate's cancellation arm) had run, so it tested the order that passes.
+`TestNativeIntegrationStopInsideActivation` holds that escalation and found exit 1.
+
+### As built
+
+- `nativeContext` reads the life once (`ended`), for the Immediate release it begins and for the
+  write's cancellation.
+- `loopNative`'s activation block begins the Immediate release under the sink's lock before its
+  terminal and held classification once the life has ended.
+- Tests in alsapcm, each with the life's watcher held (`lifeSink`, over `nativeSeams.lifeEnded`)
+  and a caller on a context the life does not end, so the writer meets the ended life before any
+  escalation: `TestNativeTailWhoseLifeEndsAfterItsReadIsNoFailure`,
+  `TestNativeActivationFencedByItsEndedLifeIsNoFailure` (the life ends in the activation's admission),
+  `TestNativeResumeFencedByItsEndedLifeIsNoFailure` (at the resume's STATUS, `parkNextStatus`),
+  `TestNativePrefillCancelledByItsEndedLifeIsNoFailure` (a prefill longer than the buffer, waiting for
+  room) and `TestNativeReopenWhoseLifeEndsInLocateReleases` (a resume after the pause's release, its
+  `Locate` waiting).
+- In the harness, `TestNativeIntegrationStopInsideActivation` (activation, prefill, resume): the
+  writer where the Stop lands (the activation's controls read held; the prefill waiting for room;
+  the resume's STATUS parked after a kernel pause), every escalation held (`ParkNextLifeEnd`, and
+  `nativeEscalationHold`, which runs the harness's Activate, Resume and Finish on a context the Stop
+  does not end and escalates only once released, as their own cancellation arms do), the node's
+  close reached while they are held. The resume case needs Finish held too: the feeder waits in it,
+  and its cancellation escalates (`cancelFinish`).
+
+### Red first
+
+At 3c41b8fc, predicted in `.tmp/_b765/predictions-r2-red.txt`, `-count 3`, alsapcm with
+`-watchdog 10s`: the two-read case 3/3 red ("native release unconfirmed"), the activation 3/3
+("native activation fenced"), the resume 3/3 ("native resume fenced after status"), the prefill
+3/3 (a plain "write: cancelled (context canceled)", its answer no ErrReleaseUnconfirmed), the
+reopen 3/3 by the watchdog (held, waiting for the watcher); round 1's tail case green. In the
+harness, activation and resume 3/3 red (exit=1, End stopped, those Errors), prefill 3/3 green
+(exit 0: the brief's red there does not hold), NextInsideFinish 3/3 green.
+
+### Negative controls
+
+At 70989901, each an exact-once mutation predicted by name in
+`.tmp/_b765/predictions-r2-controls.txt`, the overlay regenerated, the source restored from memory,
+`git status` empty after; `-count 3`.
+
+| | mutation | red |
+|---|---|---|
+| C1 | `nativeContext`'s cancel reads the life again | as predicted: the two-read case 3/3; the rest green |
+| C2 | the classification's escalation removed | as predicted: activation, resume, prefill and reopen in alsapcm 3/3 each (the reopen by the watchdog); the harness's activation and resume 3/3 (exit 1), its prefill green |
+| C3 | `nativeTrackRelease` on `Release(ctx, TrackChange)` again | as predicted: cutoff, tail and drain 3/3 each, on the context (9 of 9) and on the answer (9 of 9); natural green |
+| C4 | `nativeContext`'s escalation removed, the one read kept | as predicted: round 1's tail case 3/3 and cutoff 3/3 (exit 1); the rest green |
+| C5 | C2's mutation with `nativeEscalationHold` escalating at once, the test's wait for it skipped | predicted green 3/3; activation and prefill were, and resume went red in 1 of 3: without the hold the order is the scheduler's, which is what the hold takes away |
+
+### Qualification
+
+`internal/alsapcm/` and the dsd-test files are guarded, and this round changes both; 47 stays (main
+is at 45, B9 holds 46). The runbook's record of 47 now says what round 2 adds.
+
+### Gates (round 2)
+
+At 2a445bc3, inside the build slot, on Go 1.27.3, in two sessions: a single one that waited 45
+minutes for the slot would have outrun its background call's two hours, and gave the slot up
+unrun. `make fmt` changed nothing; `make vet` and its windows, darwin and linux/386 legs passed;
+`make docs-check` passed on the tree (player.md 99.6 %) and on a copy with `rules-b765-r2.patch`
+applied (CLAUDE.md 82.1 %, player.md 99.9 %, the worst load 67.2 %), where `verify_moves.py --base
+HEAD` found the reworded line and its long form gone beside their two successors and nothing else,
+no citation broken (no `--edit` prefix can pair a reworded title: it must start both blocks); the
+qualification check passed against main's a77578f8 (45 there, 47 at HEAD); `go test -race` passed
+for alsapcm and qualification without the overlay and for cmd/bridge with CI's tags and the overlay
+(1,239 s); CI's two native-integration invocations passed, cmd/bridge 78 of 78 (NextInsideFinish's
+four windows and StopInsideActivation's three among them) and playback 79 of 79. Each of C1 to C4
+was run again against both whole suites as gate.yml runs them, the overlay regenerated after the
+mutation: cmd/bridge red only where predicted, playback 79 of 79 under every one, since a backend
+sink's life ends only after Done. `make test` passed, 89 packages ok (2,093 s), its TMPDIR under
+`.tmp/_b765`, the Linux-only tests (ALSA, alsapcm, the durable writer, the identity paths) run
+here; `make build-all` passed. alsa-abi did not run: no ABI definition or `scripts/alsa-abi` file
 changed.
