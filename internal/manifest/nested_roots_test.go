@@ -598,7 +598,7 @@ func TestANestedRootIsWalkedAsItsFolderListsItOnlyWhereTheFolderTakesBothSpellin
 			if err := w.addTree(configured, true); err != nil && c.listed {
 				t.Fatal(err)
 			}
-			w.noteRootWatches([]string{configured})
+			noteRootWatchesForTests(w, configured)
 			w.handleEvent(context.Background(), fsnotify.Event{Name: disk, Op: fsnotify.Create})
 			armed := armedUnder(w, outer)
 			if c.listed && len(armed) != 0 {

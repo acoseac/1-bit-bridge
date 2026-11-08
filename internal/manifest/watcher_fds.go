@@ -401,15 +401,16 @@ type plannedWatch struct {
 // per watched entry: it counts what the library would hold open, by the walk
 // bridge doctor counts with (CountWatchSet), stays off with one warning when
 // that is more than the budget, and adds every root's tree otherwise. It
-// reports whether the watcher is on. The count runs to the end, so the
-// warning names what the library needs: it holds no path, and it runs once,
-// on the watcher's goroutine. A root that cannot be walked is left to
-// addTree, which meets the same failure and logs it, as on every platform.
-func (wt *Watcher) watchRootsWithinBudget(roots []string) bool {
+// reports whether the watcher is on, and the roots whose walk could not
+// start (fails). The count runs to the end, so the warning names what the
+// library needs: it holds no path, and it runs once, on the watcher's
+// goroutine. A root that cannot be walked is left to addTree, which meets the
+// same failure and logs it, as on every platform.
+func (wt *Watcher) watchRootsWithinBudget(roots []string) (fails map[string]bool, on bool) {
 	f := wt.fds
 	if f.limitErr != nil {
 		watcherLogger.Warn(msgWatcherNoLimit, "err", f.limitErr, "hint", watchFDHint)
-		return false
+		return nil, false
 	}
 	var total WatchSetCount
 	for _, root := range roots {
@@ -423,18 +424,19 @@ func (wt *Watcher) watchRootsWithinBudget(roots []string) bool {
 	if total.OpenFiles() > f.budget {
 		watcherLogger.Warn(msgWatcherStaysOff, f.budgetArgs("open_files_needed", total.OpenFiles(),
 			"folders", total.Folders, "entries", total.Entries)...)
-		return false
+		return nil, false
 	}
+	fails = make(map[string]bool)
 	for _, root := range roots {
 		if err := wt.addTree(root, true); err != nil && !f.off {
-			watcherLogger.Warn("initial watch add failed (partial coverage; periodic scan still runs)",
-				"root", root, "err", err)
+			watcherLogger.Warn(msgInitialWatchFailed, "root", root, "err", err)
+			fails[root] = true
 		}
 		if f.off {
-			return false
+			return nil, false
 		}
 	}
-	return true
+	return fails, true
 }
 
 // addTreeWithinBudget is addTree where fsnotify holds an open file per watched

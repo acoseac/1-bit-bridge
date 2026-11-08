@@ -1943,6 +1943,7 @@ function wireUpload(signal) {
   document.getElementById("upload-resume-discard")?.addEventListener("click", discardResumable);
   document.getElementById("upload-cancel")?.addEventListener("click", resetUpload);
   document.getElementById("upload-start")?.addEventListener("click", startUpload);
+  document.getElementById("upload-retry-button")?.addEventListener("click", retryUpload);
   document.getElementById("upload-abort")?.addEventListener("click", () => {
     if (uploadState) uploadState.aborted = true;
   });
@@ -2264,6 +2265,7 @@ function stageFiles(picked) {
     return;
   }
   uploadState = { picked: usable, session: null, aborted: false, preflightSkipped: 0, junkSkipped: junk, digestUnavailable: false };
+  hideUploadRetry();
   const note = document.getElementById("upload-dupe-note");
   if (note) note.hidden = true;
   renderUploadReview();
@@ -2308,6 +2310,7 @@ async function startUpload() {
   const err = document.getElementById("upload-error");
   const start = document.getElementById("upload-start");
   err.hidden = true;
+  hideUploadRetry();
   setDisabled(start, true);
   try {
     const overwrite = document.getElementById("upload-overwrite")?.checked === true;
@@ -2381,9 +2384,61 @@ async function startUpload() {
     const res = await API.post(`/api/upload/sessions/${encodeURIComponent(session.id)}/commit`);
     reportCommit(res);
   } catch (e) {
-    showUploadError(e?.message ? e.message : String(e));
+    showUploadFailure(e);
   } finally {
     setDisabled(start, false);
+    document.getElementById("upload-progress").hidden = true;
+  }
+}
+
+// showUploadFailure says why an upload stopped. Where the server refused it
+// because a library root it writes under reads as a volume that is not
+// mounted (backlog B776), after its session was made, it also offers Try
+// again: the review that holds the Upload button is hidden by then, and the
+// session, which nothing was written beside, commits once the volume is back.
+// A refusal before the session was made leaves the review and its Upload
+// button where they were.
+function showUploadFailure(e) {
+  showUploadError(e?.message ? e.message : String(e));
+  if (e?.code === "root_not_mounted" && uploadState?.session) {
+    document.getElementById("upload-retry").hidden = false;
+  }
+}
+
+// hideUploadRetry takes Try again away: a new pick, a new upload, a reset,
+// or the retry's own start.
+function hideUploadRetry() {
+  const retry = document.getElementById("upload-retry");
+  if (retry) retry.hidden = true;
+}
+
+// retryUpload carries on the upload a refusal stopped (showUploadFailure):
+// the same session, read again from the server, the files it holds complete
+// passed over (transferAll) and the rest sent from the offsets it holds, then
+// committed. It makes no session and sends no finished file again.
+async function retryUpload() {
+  const sid = uploadState?.session?.id;
+  if (!sid) return;
+  const button = document.getElementById("upload-retry-button");
+  setDisabled(button, true);
+  hideUploadRetry();
+  document.getElementById("upload-error").hidden = true;
+  try {
+    uploadState.aborted = false;
+    const session = await API.get(`/api/upload/sessions/${encodeURIComponent(sid)}`);
+    uploadState.session = session;
+    document.getElementById("upload-progress").hidden = false;
+    await transferAll(session);
+    if (uploadState.aborted) {
+      showUploadResult("Upload stopped. Staged progress is kept — start again to resume.");
+      return;
+    }
+    const res = await API.post(`/api/upload/sessions/${encodeURIComponent(sid)}/commit`);
+    reportCommit(res);
+  } catch (e) {
+    showUploadFailure(e);
+  } finally {
+    setDisabled(button, false);
     document.getElementById("upload-progress").hidden = true;
   }
 }
@@ -2419,27 +2474,31 @@ async function transferAll(session) {
   paint();
 
   let next = 0;
+  // The first failure stops this transfer's other workers at their next
+  // chunk, and the transfer answers it only once every worker has settled,
+  // the chunk each had out answered: answered at once, the page offered Try
+  // again while a sibling was still sending, the retry ran beside it, and
+  // that sibling's own failure, which set uploadState.aborted, stopped the
+  // retry (backlog B776's round 2). uploadState.aborted is the operator's
+  // Stop alone.
+  let failure = null;
+  const stopped = () => uploadState.aborted || failure !== null;
   const worker = async () => {
     try {
       await workerLoop();
     } catch (err) {
-      // Promise.all rejects on the first failure and startUpload tears the
-      // progress UI down — but the sibling workers only watch `aborted`, so
-      // without this they keep PUTting chunks after the operator has been
-      // told the upload failed.
-      uploadState.aborted = true;
-      throw err;
+      if (failure === null) failure = err;
     }
   };
   const workerLoop = async () => {
-    while (!uploadState.aborted) {
+    while (!stopped()) {
       const i = next++;
       if (i >= queue.length) return;
       const meta = queue[i];
       const file = byPath.get(meta.path);
       if (!file) continue;
       let offset = meta.offset;
-      while (offset < meta.size && !uploadState.aborted) {
+      while (offset < meta.size && !stopped()) {
         const end = Math.min(offset + session.chunkBytes, meta.size);
         // Read the chunk once, into memory: the digest needs the bytes, and
         // handing the same buffer to fetch avoids reading the slice twice.
@@ -2455,6 +2514,7 @@ async function transferAll(session) {
   await Promise.all(
     Array.from({ length: Math.min(UPLOAD_PARALLEL_FILES, queue.length) }, worker),
   );
+  if (failure !== null) throw failure;
 }
 
 // chunkDigestHeaders builds the RFC 9530 Content-Digest for one chunk.
@@ -2529,14 +2589,27 @@ async function putUploadChunk(sid, fid, offset, bytes) {
     },
     body: bytes,
   });
-  if (r.status === 409) {
-    // The server holds a different offset. It tells us which, so resume
-    // rather than guessing.
-    const body = await r.json().catch(() => ({}));
-    if (typeof body.offset === "number") return { offset: body.offset };
+  if (r.ok) return r.json();
+  // A refusal's body is read once and answers both questions: a 409 that
+  // names the server's offset is a resume (the server holds a different
+  // offset, so resume rather than guess), and anything else is the refusal,
+  // its code kept (root_not_mounted, digest_mismatch), which a second read of
+  // a body already read lost to a bare status line.
+  let body;
+  try {
+    body = await r.json();
+  } catch {
+    body = undefined;
   }
-  if (!r.ok) throw await errorFromResponse(r);
-  return r.json();
+  if (r.status === 409 && typeof body?.offset === "number") return { offset: body.offset };
+  throw await errorFromResponse({
+    status: r.status,
+    statusText: r.statusText,
+    json: async () => {
+      if (body === undefined) throw new Error("not JSON");
+      return body;
+    },
+  });
 }
 
 function reportCommit(res) {
@@ -2646,6 +2719,7 @@ function resetUpload() {
   uploadState = null;
   document.getElementById("upload-review").hidden = true;
   document.getElementById("upload-progress").hidden = true;
+  hideUploadRetry();
   // The duplicate note is deliberately NOT cleared here. resetUpload runs
   // immediately after a commit, and the note is the explanation for the
   // number the operator is about to read — hiding it leaves "1 added" with

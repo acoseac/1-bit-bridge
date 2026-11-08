@@ -37,3 +37,25 @@ func TestUploadReclaimableIsWiredInProduction(t *testing.T) {
 			"a restore and a commit of one path can both pass the existence check and rename")
 	}
 }
+
+// TestTheConsolesLibraryWritersAreGuardedInProduction: the upload and trash
+// managers refuse a write into a library root that reads as a volume not
+// mounted only where serve hands them the scanner's guard (backlog B776). The
+// console's tests wire the guard themselves, as serve does, so only a check on
+// the call site sees serve leave it out: TestUploadReclaimableIsWiredInProduction's
+// reason, by its method.
+func TestTheConsolesLibraryWritersAreGuardedInProduction(t *testing.T) {
+	raw, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := stripGoComments(strings.ReplaceAll(string(raw), "\r\n", "\n"))
+	if !strings.Contains(src, "writeGuard := scanner.WriteGuard(scanCtx)") {
+		t.Fatal("runServe builds no root guard from its scanner (scanner.WriteGuard), on the context its writers' looks run on")
+	}
+	for _, want := range []string{"upload.WithRootGuard(writeGuard)", "trash.WithRootGuard(writeGuard)"} {
+		if !strings.Contains(src, want) {
+			t.Errorf("runServe does not pass %s: that writer writes into a root whose volume is away", want)
+		}
+	}
+}
