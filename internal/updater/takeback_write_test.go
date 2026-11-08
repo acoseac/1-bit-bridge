@@ -8,7 +8,8 @@ import (
 
 // TestATakeBackWhoseWriteIsRefusedKeepsTheCount: a take-back whose write the
 // data dir refuses before it publishes (a directory this user may not write
-// into) answers the refusal and leaves the count as it was, which serve's stop
+// into) answers the refusal, saying that it reached its write, and leaves the
+// count as it was, which serve's stop
 // asks again for the rest of its budget (stopBudget, cmd/bridge) and then
 // leaves, saying so: a clean stop counted, which errs toward a rollback
 // (backlog B760 keeps it). Not as root, which a mode does not stop, nor on
@@ -29,8 +30,8 @@ func TestATakeBackWhoseWriteIsRefusedKeepsTheCount(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
-	if took, err := TakeBackFailedStart(t.Context(), dir, "0.2.4", 1); err == nil || took {
-		t.Fatalf("a take-back whose write the data dir refuses = %v, %v; want its refusal, nothing taken back", took, err)
+	if reached, err := TakeBackFailedStart(t.Context(), dir, "0.2.4", 1, nil); err == nil || !reached {
+		t.Fatalf("a take-back whose write the data dir refuses = %v, %v; want its refusal, its write reached", reached, err)
 	}
 	if err := os.Chmod(dir, 0o700); err != nil {
 		t.Fatal(err)

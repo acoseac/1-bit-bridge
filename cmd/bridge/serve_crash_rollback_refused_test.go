@@ -258,3 +258,52 @@ func TestARefusedStartBelowTheCrashRollbacksLimitLeavesTheInstall(t *testing.T) 
 		t.Errorf("the start below the limit did not give the early rollback's reason alone; its updater lines: %q", said)
 	}
 }
+
+// TestARefusedStartBesideTheDataDirsHolderSaysWhyTheCrashRollbackLeavesTheInstall:
+// a start that refuses its settings at the crash rollback's limit, the data
+// dir's lock another process's, writes nothing, says why the crash rollback
+// leaves the install, and refuses its settings as before, exit 2: in the crash
+// rollback's own words where it refuses whatever the lock (a migration of the
+// store began), and where it would run, that only the data dir's owner puts
+// the backup back, word for word as before. Until B760's second round the
+// first said nothing of the install: the early rollback's reason, which such a
+// start gave before B760, was no longer reached, and the line of the data
+// dir's lock is said only where the crash rollback would run.
+func TestARefusedStartBesideTheDataDirsHolderSaysWhyTheCrashRollbackLeavesTheInstall(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		migrated bool
+	}{
+		{"a migration of the store began", true},
+		{"the crash rollback would run", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newRefusedInstall(t, "")
+			r.crashedThreeTimes(t)
+			st := markerOf(t, r.dataDir)
+			if tc.migrated {
+				st.StoreMigratedBy = version.ServerVersion
+				if err := updater.SaveState(r.dataDir, st); err != nil {
+					t.Fatal(err)
+				}
+			}
+			why := "the data dir's lock is not this process's, and only its owner may put the backup back"
+			if ok, refused := updater.CrashRollback(st, version.ServerVersion); !ok {
+				why = refused
+			}
+			r.withSettingsThisVersionRefuses(t, "load")
+			holdTheDataDirsLockAsACommand(t, r.dataDir)
+			files := watch(t, r.bin, r.bak, updater.StatePath(r.dataDir))
+			code, stderr := r.serve(t, serveOpts{})
+			if code != 2 {
+				t.Fatalf("the start that refuses its settings = %d, want 2, its refusal as before; stderr=%s", code, stderr)
+			}
+			files.requireUnchanged(t)
+			want := fmt.Sprintf("updater: not rolling back the install of %s after %d starts of it that did not end cleanly: %s; "+
+				"this start refuses its settings, as it did before, and is not counted\n", version.ServerVersion, updater.ProbationFailedStarts, why)
+			if !strings.Contains(stderr, want) {
+				t.Errorf("the start did not say why the crash rollback leaves the install, %q; stderr=%s", want, stderr)
+			}
+		})
+	}
+}

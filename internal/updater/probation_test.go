@@ -614,7 +614,7 @@ func TestATakeBackWritesOnlyTheCountItsStartWrote(t *testing.T) {
 			dir := t.TempDir()
 			mustSave(t, dir, tc.st)
 			before := mustLoad(t, dir)
-			took, err := TakeBackFailedStart(t.Context(), dir, "0.2.4", tc.counted)
+			took, err := TakeBackFailedStart(t.Context(), dir, "0.2.4", tc.counted, nil)
 			if err != nil || took != tc.takes {
 				t.Fatalf("TakeBackFailedStart = %v, %v; want %v", took, err, tc.takes)
 			}
@@ -631,7 +631,7 @@ func TestATakeBackWritesOnlyTheCountItsStartWrote(t *testing.T) {
 		dir := t.TempDir()
 		mustSave(t, dir, probationMarker(1))
 		t.Cleanup(SetStateTryLockForTest(func(*os.File) error { return syscall.EOPNOTSUPP }))
-		if took, err := TakeBackFailedStart(t.Context(), dir, "0.2.4", 1); err != nil || !took {
+		if took, err := TakeBackFailedStart(t.Context(), dir, "0.2.4", 1, nil); err != nil || !took {
 			t.Fatalf("TakeBackFailedStart where no lock is kept = %v, %v; want it taken back, as a disarm goes on", took, err)
 		}
 	})

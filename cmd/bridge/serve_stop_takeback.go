@@ -95,6 +95,10 @@ func finishTakeBackDeadline(stopAt, now time.Time) time.Time {
 type stopTakeBack struct {
 	dataDir string
 	counted int
+	// save and asked are a boot test's (serveOpts.saveTakeBack and
+	// takeBackAsked): nil in production.
+	save  func(dataDir string, st updater.State) error
+	asked func(reached bool, err error)
 
 	mu       sync.Mutex
 	armed    bool      // the start answered as ready before any stop
@@ -109,9 +113,10 @@ type stopTakeBack struct {
 }
 
 // newStopTakeBack is the take-back of the count counted that the admission of
-// this start tried to write in dataDir's install marker.
-func newStopTakeBack(dataDir string, counted int) *stopTakeBack {
-	return &stopTakeBack{dataDir: dataDir, counted: counted, done: make(chan struct{})}
+// this start tried to write in dataDir's install marker, with opts' seams.
+func newStopTakeBack(dataDir string, counted int, opts serveOpts) *stopTakeBack {
+	return &stopTakeBack{dataDir: dataDir, counted: counted, save: opts.saveTakeBack, asked: opts.takeBackAsked,
+		done: make(chan struct{})}
 }
 
 // arrived is told that a stop of this start arrived. It records when the first
@@ -165,7 +170,10 @@ func (b *stopTakeBack) run(deadline time.Time) {
 	ctx, cancel := context.WithDeadline(context.Background(), deadline)
 	defer cancel()
 	for {
-		_, err := updater.TakeBackFailedStart(ctx, b.dataDir, version.ServerVersion, b.counted)
+		reached, err := updater.TakeBackFailedStart(ctx, b.dataDir, version.ServerVersion, b.counted, b.save)
+		if b.asked != nil {
+			b.asked(reached, err)
+		}
 		if err == nil {
 			b.settled.Store(true)
 			return

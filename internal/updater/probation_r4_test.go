@@ -90,7 +90,7 @@ func TestATakeBackPastItsDeadlineStillTriesTheLockOnce(t *testing.T) {
 	cancel()
 	free := t.TempDir()
 	mustSave(t, free, probationMarker(1))
-	if took, err := TakeBackFailedStart(ended, free, "0.2.4", 1); err != nil || !took {
+	if took, err := TakeBackFailedStart(ended, free, "0.2.4", 1, nil); err != nil || !took {
 		t.Errorf("a take-back past its deadline, the lock free = %v, %v; want it landed", took, err)
 	}
 	held := t.TempDir()
@@ -101,7 +101,7 @@ func TestATakeBackPastItsDeadlineStillTriesTheLockOnce(t *testing.T) {
 	}
 	t.Cleanup(l.Release)
 	asked := time.Now()
-	if took, err := TakeBackFailedStart(ended, held, "0.2.4", 1); err == nil || took {
+	if took, err := TakeBackFailedStart(ended, held, "0.2.4", 1, nil); err == nil || took {
 		t.Errorf("a take-back past its deadline, the lock held = %v, %v; want it given up", took, err)
 	}
 	if waited := time.Since(asked); waited > time.Second {

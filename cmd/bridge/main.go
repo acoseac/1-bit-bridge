@@ -3073,6 +3073,14 @@ type serveOpts struct {
 	// production; a boot test holds the teardown there, as a stop whose
 	// teardown a supervisor kills (backlog B660's third round).
 	teardownHold func()
+	// saveTakeBack stands in for updater.SaveState in the take-back of the
+	// start's count (updater.TakeBackFailedStart's save), and takeBackAsked
+	// is told each answer the take-back's asks get, on its goroutine, as it
+	// gets it. Both nil in production; a boot test makes the take-back's write
+	// publish and then fail, and waits for a take-back that writes nothing
+	// (backlog B760's second round).
+	saveTakeBack  func(dataDir string, st updater.State) error
+	takeBackAsked func(reached bool, err error)
 	// scannerBoot is handed serve's scanner before its periodic loop starts.
 	// Nil in production; a boot test parks a scan on the scanner's own test
 	// hooks (manifest.Scanner.SetAfterExtractHookForTests). Per invocation
@@ -3630,7 +3638,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	var takeBack *stopTakeBack
 	var starting *startWatch
 	if admission.CountTried > 0 {
-		takeBack = newStopTakeBack(cfg.DataDir, admission.CountTried)
+		takeBack = newStopTakeBack(cfg.DataDir, admission.CountTried, opts)
 		arrived := takeBack.arrived
 		if opts.stopArriving != nil {
 			arrived = func() {

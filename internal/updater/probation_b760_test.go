@@ -93,3 +93,62 @@ func TestTheAdmissionKeepsItsStartsHoldWhereItsCountsWriteFailed(t *testing.T) {
 		}
 	})
 }
+
+// TestATakeBackSaysItReachedItsWriteWhateverTheWriteAnswered: a take-back
+// that finds the marker holding the count its start wrote reports that it
+// reached its write, whether the write landed, published and then failed its
+// barrier (SaveState renames first, so the next ask finds no count of its own
+// and answers no write and no error), or failed before it published; one that
+// finds another count reaches no write, its save never asked (backlog B760's
+// second round: serve counts a start again only after a take-back that reached
+// its write, CountFailedStartAgain).
+func TestATakeBackSaysItReachedItsWriteWhateverTheWriteAnswered(t *testing.T) {
+	t.Run("published, then its barrier failed", func(t *testing.T) {
+		dir := t.TempDir()
+		mustSave(t, dir, probationMarker(2))
+		armed := true
+		t.Cleanup(SetMarkerBarrierForTest(func(step string) error {
+			if step == "sync" && armed {
+				armed = false
+				return syscall.EIO
+			}
+			return nil
+		}))
+		if reached, err := TakeBackFailedStart(t.Context(), dir, "0.2.4", 2, nil); err == nil || !reached {
+			t.Fatalf("a take-back whose barrier failed = %v, %v; want its write reached, and the failure", reached, err)
+		}
+		if armed {
+			t.Fatal("the take-back's barrier was never asked: the test shows nothing")
+		}
+		if st := mustLoad(t, dir); st.FailedStarts != 1 {
+			t.Fatalf("the marker after a take-back whose barrier failed = %+v, want its count taken back, published", st)
+		}
+		if reached, err := TakeBackFailedStart(t.Context(), dir, "0.2.4", 2, nil); err != nil || reached {
+			t.Errorf("the take-back asked again = %v, %v; want no write and no error, its count gone back already", reached, err)
+		}
+	})
+	t.Run("failed before it published", func(t *testing.T) {
+		dir := t.TempDir()
+		mustSave(t, dir, probationMarker(2))
+		before := mustLoad(t, dir)
+		reached, err := TakeBackFailedStart(t.Context(), dir, "0.2.4", 2, func(string, State) error { return errors.New("the disk is full") })
+		if err == nil || !reached {
+			t.Fatalf("a take-back whose write failed = %v, %v; want its write reached, and the failure", reached, err)
+		}
+		if got := mustLoad(t, dir); got != before {
+			t.Errorf("the marker = %+v, want it as it was, %+v", got, before)
+		}
+	})
+	t.Run("a count that never landed", func(t *testing.T) {
+		dir := t.TempDir()
+		mustSave(t, dir, probationMarker(1))
+		saved := false
+		reached, err := TakeBackFailedStart(t.Context(), dir, "0.2.4", 2, func(dir string, st State) error {
+			saved = true
+			return SaveState(dir, st)
+		})
+		if err != nil || reached || saved {
+			t.Errorf("a take-back over a count its start never wrote = %v, %v (saved %v); want no write reached", reached, err, saved)
+		}
+	})
+}

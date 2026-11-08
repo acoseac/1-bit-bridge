@@ -119,10 +119,14 @@ func KeepsNoLocks(err error) bool {
 // one running. It reports whether it wrote. A take-back that does not land
 // leaves one count, which errs toward a rollback of an install whose starts
 // did end cleanly; the next start that ends cleanly does not take it back, and
-// the confirmation clears it.
-func TakeBackFailedStart(ctx context.Context, dataDir, current string, counted int) (bool, error) {
+// the confirmation clears it. save writes the marker; nil is SaveState, as
+// AdmitBoot's is.
+func TakeBackFailedStart(ctx context.Context, dataDir, current string, counted int, save func(dataDir string, st State) error) (bool, error) {
 	if counted <= 0 {
 		return false, nil
+	}
+	if save == nil {
+		save = SaveState
 	}
 	lock, err := LockState(ctx, dataDir)
 	if err != nil {
@@ -138,7 +142,7 @@ func TakeBackFailedStart(ctx context.Context, dataDir, current string, counted i
 	}
 	st.FailedStarts--
 	st.RunningStart = ""
-	if err := SaveState(dataDir, st); err != nil {
+	if err := save(dataDir, st); err != nil {
 		return false, markerIOError{err}
 	}
 	return true, nil
