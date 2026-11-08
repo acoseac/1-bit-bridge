@@ -24,16 +24,19 @@ func (s *DSDSink) loopNative() {
 		s.active = false
 		if s.activation != nil {
 			// The writer ends with an activation it never ran (B728 B9 round
-			// 4), answered as fenced answers every command (round 8): a failure
-			// the writer or its release recorded, its device's or a close that
+			// 4), its one answer, sent here after the writer's own close, so it
+			// carries the cleanup's verdict, by fenced (round 8): a failure the
+			// writer or its release recorded, its device's or a close that
 			// failed (ErrReleaseUnconfirmed), joined to the words of its own,
 			// never to the sink's fence, which a caller takes for its drop's,
 			// and never dropped for the life's cancellation; with none, the
 			// sink's own fence while its life runs, and that life's
-			// cancellation once it has ended (B765).
+			// cancellation once it has ended (B765). Its caller takes it
+			// whole, or, past the release's deadline, has answered already
+			// (await, round 9).
 			e := ErrActivationFenced
 			if s.err != nil {
-				e = errors.New("native activation cancelled")
+				e = errNativeActivationCancelled
 			}
 			s.activation.reply <- s.fenced("native activation", e)
 			s.activation = nil
@@ -99,13 +102,16 @@ func (s *DSDSink) loopNative() {
 				// and 3). What that end caused, a fence it tripped or a wait
 				// it ended, is no fault, and is answered as the life's
 				// cancellation: a harness the life stopped took "native
-				// activation fenced" for a failure. Nothing is recorded yet
-				// then: a request is admitted only while the sink has recorded
-				// no failure, and the writer records one only here or as it
-				// ends, so this answer drops none, the rule fenced answers by
-				// (B728 B9 round 8). A caller whose own context's arm took the
-				// life's end waits for the writer's end and answers what it
-				// recorded (abandoned). Anything else, a device's or an
+				// activation fenced" for a failure. This reply holds what is
+				// recorded as it is sent (a request is admitted only while the
+				// sink has recorded no failure, and the writer records one only
+				// here or as it ends), and not what the Immediate release this
+				// begins records after it, a close that fails: that reaches
+				// the caller through its wait, which settles a reply taken
+				// once the life has ended by the cleanup's verdict, the
+				// writer's end awaited within the release's budget (settled,
+				// abandoned; B728 B9 rounds 8 and 9). So does a success or any
+				// other answer sent here. Anything else, a device's or an
 				// admission's failure, stays the sink's fault, though the
 				// release has begun, and is the answer itself. While the life
 				// runs a release in progress excuses what it met, as ever, and
@@ -243,7 +249,12 @@ func (s *DSDSink) activateNative(r *nativeRequest) error {
 	if ctx.Err() != nil || s.life.Err() != nil || s.revoked || s.releasing || (s.paused && (!r.resume || r.pauseEpoch != s.pauseEpoch)) {
 		s.mu.Unlock()
 		if reopened {
-			return nativeCleanupError(ErrActivationFenced, s.closeNative())
+			if ce := s.closeNative(); ce != nil {
+				// A fence whose own close failed is no fence: the reopened
+				// node's release cannot be confirmed, the sink's fault, never
+				// the fence a caller takes for its drop's (B728 B9 round 9).
+				return errors.Join(errReopenFenced, ErrReleaseUnconfirmed, ce)
+			}
 		}
 		return ErrActivationFenced
 	}
@@ -523,6 +534,12 @@ func (s *DSDSink) expectedReleaseCancellation(e error) bool {
 // activation's own fence, ErrActivationFenced (B728 B9 round 4, which
 // B765's unexported sentinel of the same words became in the merge).
 var errNativeResumeFenced = errors.New("native resume fenced after status")
+
+// errReopenFenced is the words of a fence a reopened node met whose own close
+// then failed: the release's failure, joined to ErrReleaseUnconfirmed, and
+// not the sink's fence, which a caller takes for its drop's (B728 B9 round
+// 9).
+var errReopenFenced = errors.New("native reopen fenced")
 
 // lifeCaused says whether e is what the sink's ended life (end, its error)
 // made of an activation or a resume: a fence it tripped, or a wait it ended,
