@@ -86211,3 +86211,144 @@ rather than vetted (alsapcm 84 s, the durable writer 20 s, the identity's backup
 internal/config 13 s), and `make build-all` passed. Nothing on the wire
 changed, so neither `PROTOCOL.md` nor the iOS app's mirror is touched. Not run
 here: macOS and Windows natively, CI's runners and the console in a browser.
+
+## 2026-11-08 — B761 round 2: a save writes no key the file lacks, and compares a list by its entries
+
+Worker b761, legion0 (Ubuntu 26.04, linux/amd64, go1.27.3, `GOTOOLCHAIN=local`,
+`GOPROXY=off`), branch `fix/b761-enrich-followups` at ea962f19 (round 1, its
+rules applied as b6a76061, main a77578f8 merged), the orchestrator's brief on
+the two findings of Codex's review of round 1 (Claude's review found none).
+Commits: the red tests 408af06f, the fix 520238d6, the every-leaf test's
+fixture 384e2719, two more tests f30eceb5, the second decode removed 446703db,
+then this record. The rules' words go in `rules-b761-r2.patch`:
+`config-lifecycle.md`'s B761 line and its long form.
+
+### 1. A leaf the file does not write is written as no key
+
+Round 1 wrote a leaf a variable set, which the save left as it was, as the
+file's own value decoded by `DecodeFile`, and where the file writes no value
+for it, as its zero value: no key where the field omits an empty value, but
+five fields write theirs as a key, `libraryRoots`, `listenAddress`, `dataDir`,
+`scanIntervalSec` and `libraryName`, each a field of Config's own (the only
+leaves a variable sets without `omitempty`, read off the type). With
+`scanIntervalSec` absent and `BRIDGE_SCAN_INTERVAL_SEC=120`, a save of another
+setting wrote `scanIntervalSec: 0`.
+
+*Red first.* At 408af06f, ea962f19's code with the new tests, every row of
+`TestASaveWritesNoKeyTheFileDoesNotWrite` failed at both saves
+(`scanIntervalSec = 0`, `listenAddress = ""`, `dataDir = ""`,
+`libraryName = ""`, `libraryRoots = []`). The brief's other half held there: a
+start without the variable read each one's default, since Load's defaults and
+`Normalize` read those zeros as unset, so what the defect broke was the file,
+given a key it never had, and not what the next start read.
+
+*The fix.* `filedEnvValues` records each leaf it gives the file's own value
+(`Config.filed`, an unexported field set on the save's copy alone; `Clone`
+drops it), and `Config.save` writes through `Config.marshal`: with nothing
+recorded, `yaml.Marshal(c)` as before; otherwise `yaml.Marshal` of a copy whose
+type (`reflect.StructOf`, the same exported fields, names, order and tags)
+gives each recorded field of Config's own `omitempty`. Such a leaf is written
+as no key at its zero value and as it is at any other, and the rest of the
+text is the same encoder's over the same values, byte for byte. Load decodes
+the file into a zero config (`loadData`: `var cfg Config`, then `DecodeFile`),
+so a leaf's zero value is what a file gives that writes no value for it,
+writes it as null, or writes the zero itself (`scanIntervalSec: 0`,
+`libraryRoots: []`), all of which a start reads alike: the save writes all of
+them as no key. Every leaf a variable sets whose tag writes its zero value is
+a field of Config's own, so the copy rebuilds no section and loses no
+section's method (`PlayerConfig`'s `MarshalYAML` and `IsZero`);
+`TestEveryLeafWhoseZeroIsAKeyIsAtTheTopLevel` holds it.
+
+*Two shapes tried and dropped.* First, a `yaml.Node` round trip
+(`Node.Encode`, the key removed, the node marshalled):
+`TestASavesTextIsYAMLMarshalsWithoutTheKeysItLeavesOut`, over a config with
+every field set and strings YAML must quote, escape, fold or encode, found it
+is not byte for byte, yaml.v3 re-encoding a plain `<<` string as
+`!!merge <<`. Second, at 520238d6, a decode of the turn's bytes into a config
+whose leaves held a mark (`markLeaf`), to record only the leaves the file does
+not write: its two negative controls (the decode reading every leaf as
+written, and none) turned nothing red, because `omitempty` leaves out a zero
+value alone and a start reads an explicit zero as it reads none, so the decode
+told only an explicit zero key from no key. 446703db removed it, and records
+every leaf the save gives the file's own value.
+
+### 2. An unchanged empty list is no edit
+
+`BRIDGE_METRICS_ALLOW_CIDRS=","` loads an empty list (`applyEnvValue` makes a
+non-nil empty slice), `Clone` makes it nil, and `filedEnvValues`'s
+`reflect.DeepEqual` took the difference for an edit, so the save wrote the
+update's none over the file's `metrics.allowCidrs`, which a start without the
+variable then no longer read.
+
+*Red first.* At 408af06f `TestAnEmptyListOverrideASaveLeftKeepsTheFilesList`
+failed: both saves left no `metrics.allowCidrs`, and a start without the
+variable read none.
+
+*The fix.* The comparison is by value (`sameValue`): a list by its entries, so
+an empty list and none are one value; any other leaf as `reflect.DeepEqual`
+compares it, a pointer by what it points to. `Clone` is left as it is: the
+comparison holds whatever a clone makes of an empty list.
+
+### Tests
+
+`TestASaveWritesNoKeyTheFileDoesNotWrite` (the five, each absent from the
+file and written as its zero value, through serve's boot read, `LoadFileAt`
+and `RecordFile`, two saves and a start without the variable),
+`TestAnEmptyListOverrideASaveLeftKeepsTheFilesList`,
+`TestASaveWritesNoKeyForAnyLeafTheFileDoesNotWrite` (each of the 120 leaves a
+variable sets but the opt-outs, on a config with every other field set so that
+every section is written, over an empty file, an empty mapping and a file
+writing another setting alone, through `filedEnvValues` and `marshal`),
+`TestASavesTextIsYAMLMarshalsWithoutTheKeysItLeavesOut`,
+`TestEveryLeafWhoseZeroIsAKeyIsAtTheTopLevel`,
+`TestASaveKeepsALeafAMergeKeyWrites` (the file's own value is what Load's
+decode reads: `<<: {scanIntervalSec: 300}` is written back as 300, which a
+lookup of the file's own keys would lose) and `TestACloneCarriesNoSavesRecord`.
+Round 1's tests pass unchanged, and `ops/settings-apply-semantics.md`'s section
+on a setting a variable sets says the new rule.
+
+### Negative controls (each on the committed tree, restored after)
+
+Predicted by name in a file before each set ran
+(`.tmp/_b761/controls2.predictions.txt`, `controls2.predictions.v2.txt`), then
+applied once each by `.tmp/_b761/controls2.py` and `controls3.py` over the
+round-2 and round-1 save tests of config, `TestConfigCloneIsDeep`, and
+cmd/bridge's two console saves and the config writers' sweep: each rebuilt the
+test binaries, ran the list and put the file's bytes back from memory. A
+baseline with no mutation came first in every run and passed, and `git status`
+was empty after.
+
+The first set, at f30eceb5:
+
+| Mutation | Predicted red | Held |
+|---|---|---|
+| (R2a) `marshal` ignores the record | the five rows, the five keyed leaves of the every-leaf test, the text test | yes |
+| (R2b) the second decode reads every leaf as written | the five rows, the five keyed leaves | yes |
+| (R2c) the second decode reads no leaf as written | round 1's integer and string rows, the merge test, the console test | no: nothing red |
+| (R2d) `markLeaf` marks nothing | the five rows, all 120 leaves of the every-leaf test | yes |
+| (R2e) an unchanged leaf compared by `reflect.DeepEqual` | the empty-list test | yes |
+| (R2f) presence by a lookup of the file's own keys | the merge test | no: nothing red |
+| (R2g) `Clone` keeps the record | the clone test | yes |
+| (R2h) `upscale.variantsDir` loses `omitempty` | the top-level test, the every-leaf test's `upscale.variantsDir` | yes |
+
+R2c and R2f were wrong predictions, and right about the code: a recorded leaf
+not at its zero value is written as it is, so reading a written leaf as
+unwritten changed no text a start reads otherwise, and the decode they mutated
+was removed (446703db). The second set, at 446703db:
+
+| Mutation | Predicted red | Held |
+|---|---|---|
+| (V1) `marshal` ignores the record | the five rows, absent and as their zero value; the five keyed leaves; the text test | yes |
+| (V2) `filedEnvValues` records nothing | the five rows, absent and as their zero value; the five keyed leaves | yes |
+| (V3) a recorded field written as no key whatever its value (`yaml:"-"` for `omitempty`) | round 1's integer and string rows, the merge test, the text test, the console test | yes |
+| (V4) the file's own value by a lookup of the file's own keys (a leaf no mapping holds literally given its zero value) | the merge test | yes |
+| (V5) an unchanged leaf compared by `reflect.DeepEqual` | the empty-list test | yes |
+| (V6) `Clone` keeps the record | the clone test | yes |
+| (V7) `upscale.variantsDir` loses `omitempty` | the top-level test, the every-leaf test's `upscale.variantsDir` | yes |
+
+### Qualification
+
+No guarded path changed (`internal/config` and `ops/settings-apply-semantics.md`
+are outside `version_gate.go`'s paths and prefixes):
+`go run ./scripts/qualification-version -base a77578f8 -head HEAD` passed at
+446703db, and `qualificationVersion` stays 45.

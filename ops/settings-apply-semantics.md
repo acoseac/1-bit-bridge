@@ -89,14 +89,17 @@ additive; widening a string into an object is not.
 shows the value it set. Every console save (this PATCH, the variants folder,
 the roots, the player's writes, the UPnP servers) goes through
 `CfgHolder.UpdateChecked`, which writes, for each leaf a variable set at the
-start that the save left at that value, the file's own value, read from the
-bytes the save's turn of the file's lock found, by `Load`'s own decode, and
-absent where the file writes none; so the variable never lands in the file,
-and a start without it reads what the file said (`config.filedEnvValues`,
-backlog B761). A save that changes such a leaf writes and runs the change,
-`live` or `restart` as its row says, and the variable sets the leaf again at
-the next start: the Settings page says so. The two enrichment switches keep
-their own rule (`config.filedSwitches`, B617): a change to on writes no key.
+start that the save left at that value (compared by value: an empty list is
+none), the file's own value, read from the bytes the save's turn of the
+file's lock found, by `Load`'s own decode, and no key where that is the
+leaf's zero value, what a file that writes none gives, whatever the field's
+tag; so the variable never lands in the file, nor a key the file did not
+write, and a start without it reads what the file said
+(`config.filedEnvValues`, `Config.marshal`, backlog B761). A save that
+changes such a leaf writes and runs the change, `live` or `restart` as its
+row says, and the variable sets the leaf again at the next start: the
+Settings page says so. The two enrichment switches keep their own rule
+(`config.filedSwitches`, B617): a change to on writes no key.
 
 ---
 
