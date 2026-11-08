@@ -1939,7 +1939,11 @@ function wireUpload(signal) {
   // Surface an interrupted session BEFORE the operator re-picks. A browser
   // cannot reopen files from a previous page load, so resume still needs them
   // to choose the same folder — but knowing the bytes are still there is what
-  // makes them choose it rather than give up.
+  // makes them choose it rather than give up. The list is the console's, kept
+  // across a boosted navigation, and this page's banner starts hidden: draw
+  // the list as it stands before reading it, so a read that fails leaves the
+  // banner and the list agreeing (B797 round 4).
+  renderResumable();
   refreshResumable();
 
   filesInput?.addEventListener("change", () => stageFiles(collectFromInput(filesInput)));
