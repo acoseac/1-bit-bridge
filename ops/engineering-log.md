@@ -88686,3 +88686,18 @@ confirmed close's row; N7 (`releaseExpired` made at the release's begin again) r
 deadline case off the life, its arm a nil channel, and the race detector reported the field's
 write and its unlocked read (12 reports), failing B765's cases and round 4's fence case
 beside it. Nothing else differed from the predictions.
+
+Round 9's gates, on 93a536bf at legion0, through the build slot in two sessions: `make fmt`
+left the tree clean; `make vet` passed for linux/amd64, `GOOS=windows`, `GOOS=darwin` and
+`GOOS=linux GOARCH=386`; `go test -race` on `./internal/alsapcm/...`, `./internal/player/...`
+and `./cmd/bridge/...` passed (17 packages, 1,289 s); the round's four cases with their
+neighbours (round 8's and B765's cases, round 4's fence case, the revocation family,
+`TestDoPPrecision` and `TestNativeTeardownOwnership`) passed 20 times running under `-race`,
+and the internal one-fault case with `TestTheWriteAsksWhatReconciliationDoes` 20 times; CI's
+two native-integration runs passed under the overlay, every name CI requires among them;
+`make docs-check` passed, and again on a copy of the branch with the rules patch applied,
+where `TestEveryCitedTestNameExists`, `TestNoDocblockNamesAnotherDeclaration`,
+`TestEveryBridgeWordIsInTheProtocol`, `TestDSDOutputProtocolTokens` and
+`TestQualificationRunbookVersion` passed too; the qualification check against main's tip's
+merge base (3d0a0d05) passed at 50; `make test` passed, 89 packages ok and none failing
+(2,057 s), the Linux-only tests run here; and `make build-all` passed.
