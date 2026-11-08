@@ -86624,3 +86624,105 @@ rules patch applied, where the guards that read the tracked docs passed too
 `TestNoDocblockNamesAnotherDeclaration`, the endpoint and error-table guards,
 `TestDSDOutputProtocolTokens` and `TestQualificationRunbookVersion`); and the qualification
 check against main, the merge base CI takes (98edead3), passed at 46.
+
+## 2026-11-08 — B728 B9 round 4: a successor dropped during its sink's activation, and the cut case going on
+
+Worker b728-b9, legion0 (Ubuntu 26.04, Linux 7.0, Go 1.27.3), branch
+`feat/b728-b9-choice` at 42ce107d (round 3's rules, and main merged: B776/B777, B799, B779's
+record). The reviews of round 3 (Codex's one point, Claude's one) and of this round's brief
+(Codex's two notes, Claude's six), folded into it. Commits: 1e502202 (the round's tests,
+red), 1bdc388d (point 2), 75773129 (point 1), 4d399008 (the prefill's release guard),
+56618514 (the cause cases failing by name), and this record. The rules are a patch the
+orchestrator applies (`output.md`'s bullet on the write beside what plays, and its long form).
+
+**Point 1 (Codex): confirmed, red first, and wider than its window.** Round 3's
+`errReplanned` covered a drop seen at the top of the activation (`activateOutput`'s fence,
+`checkDSDActivation`). Past them the native sink's own activation (`DSDSink.Activate`, run on
+its writer: the check after open of its node, its fence, then the run's prefill) answered a
+drop's revocation (`dropLocked` revokes a successor's unwritten sink) with "native activation
+fenced", or in the prefill with the write's cancellation, and `transition` took either for a
+failed open: the session faulted. Red on 42ce107d through the engine's Run
+(`TestASuccessorDroppedAtItsSinksAdmissionIsTakenBackUnwritten`; the admission held at the
+unit's check, armed once b's sink was opened, noted and adopted and its activation begun, so
+the check held is the activation's, b's node open and given nothing): b's entry deleted, a
+write's replacement of b and a cut of b each stopped with `device_error: the device could not
+be opened for the next transport: native activation fenced` before c's sink opened. A cut
+reaches the window: the backend's Cut drops an occurrence none of whose frames is written at
+once while the producer is in no Write (`cutFromLocked`), and the producer is in the
+activation; the engine replaces a successor it has not submitted through Prepare (which drops
+it by the same call) and cuts only a submitted one, so after its cut the case tells the engine
+by the edit that deletes b's entry. A write that hands b off again with its replacement still
+to come (the engine's Prepare held short of the backend: `holdNextPrepare`) left b stale and
+not dropped, nothing revoked its sink, and the activation wrote its prefill to b's node (1,416
+bytes) while b was being handed off again. A drop during the prefill
+(`TestASuccessorDroppedWhileItsSinkWritesItsPrefillIsTakenBack`: a profile's second of
+prefill, past the buffer, the DAC held) faulted with `write: cancelled (context canceled)`:
+the prefill is written before the activation answers, as fast as the DAC plays it, so that
+window is as long as the profile's prefill (up to 5 s), the widest of the three.
+
+The fix. The native sink answers its own fence as `alsapcm.ErrActivationFenced` (revoked,
+released, being released or paused before the activation was asked, at its admission's end,
+with its writer ending before it ran it, or its prefill cut short by an Immediate release, the
+cancellation beside it), never as the device's answer (an admission the check refused, a
+write that failed); a sink that failed before the activation refuses it as "native
+activation refused", with a second activation and a generation not past its last.
+`transition` judges a failed activation by its cause, in this order: a release ends the
+session, no fault; a revocation of the session's DSD keeps its fault; an occurrence dropped
+or handed off again whose activation answered `errReplanned` or the sink's own fence is taken
+back (`unadopt`) and the session goes on; anything else is the fault it was. A reconciliation
+that hands off again an occurrence whose own sink an activation is under way for
+(`occ.claimed`) revokes that sink, as a drop does, so the activation never writes to the DAC
+for an occurrence the set no longer plays.
+
+Guards, green on 42ce107d and after (`TestAnActivationsFailureBesideADropIsJudgedByItsCause`):
+a release in the admission beside b's drop (the admission answers the release, the steps
+refused for it "admit" and "activate", nothing opened for c); a release while b's prefill is
+written, b dropped beside it (the prefill's write held inside the kernel until both have
+come, so the activation answers the sink's own fence for both; added after the fix, the one
+input the release's place before the drop's tells apart); a revocation of the session's DSD
+beside the drop (its fault held short of the engine, `holdNextFault`, so nothing releases the
+session before the activation answers: the fault stands and c is never activated;
+`Backend.Revoke` records that fault itself while b's sink is registered, so no order of the
+classification reddens the case: it pins the outcome); and the device's refusal at the
+admission beside the drop (the fault it was, a `device_error` whose detail is the refusal, c
+never activated). The sink's own answers are pinned at its level, eight cases
+(`TestTheActivationsOwnFenceIsErrActivationFenced`).
+
+**Point 2 (Claude): a test gap, confirmed by its control.** The cut case at the activation's
+top now tells the engine by the edit that deletes b's entry, waits for c's replacement
+Prepare and checks that the session goes on (`wentOn`). Green on 42ce107d, as the brief said.
+The brief's example mutation, `unadopt` not waking the producer, pins nothing: `unadopt` runs
+on the producer's own goroutine. The control instead has `unadopt` answer false, so the
+producer stops once it has taken b back: round 3's case as it was passes under it, the gap,
+and the new one fails, c's own sink never opening (P2).
+
+**Controls**, predicted by name before each run (`r4-controls.predictions.txt`), on a
+committed tree with every file's bytes restored after it: P2 as above. C1, only
+`errReplanned` taken back: red in the four admission cases and the prefill case. C2, any
+failure beside a drop taken back: red in the device refusal's case, first by the watchdog
+(the session went on with the DAC held), so the cause cases now wait for the stop or c's sink
+and fail by name (56618514), C2 then red by name. C3, the drop's case judged before the
+release's: red in the prefill's release case, its refused step "open". C4, a prefill cut
+short answered as the bare cancellation: red in the prefill case and the sink's. C5, no
+revocation at a hand-off: red in the hand-off case, 1,416 bytes. C6, the admission's fence a
+bare error: red in the four admission cases and the sink's admission and pause cases. C7 to
+C10, each of the sink's other answers: red in its own sink case alone. Every other case stayed
+green, as predicted.
+
+**Two siblings, not taken this round.** A pause, not a drop, while a successor's sink admits
+its activation: the sink's fence answers it, and `transition`, which leaves a pause to
+`openFailed`, takes it for a failed open. A probe (a temporary test, removed) stopped with
+`device_error: the device could not be opened for the next transport: native activation
+fenced`, on the fix as on 42ce107d. The sink is built to survive it (a pause racing the
+admission wins before the first write, the sink inert and paused), so a fix belongs to the
+backend: an activation a pause fenced would leave the sink current and paused, as
+`transition`'s own paused branch does. A follow-up, in the round's report. And a drop while a resume
+activates a successor's sink installed paused: the resume answered continued in ten probe
+runs, nothing faulted; the resume reads the sink's state after the activation's answer, and a
+sink whose writer has not ended by then reads as paused, so a refused resume, the session left
+paused, is possible there (read, not run).
+
+**The qualification version.** Round 4 changes the `internal/alsapcm/` prefix (the native
+sink's answers to its activation, and its tests); no DSD byte changes. The branch holds 46 and
+main 45 (a77578f8), so the check against main passes and it stays 46, the runbook's 46
+paragraph saying round 4. B765, unmerged, takes 47: a merge after it needs the next free one.

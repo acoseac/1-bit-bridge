@@ -953,6 +953,16 @@ the backend's tests over the fake kernel gain two
 (`TestASuccessorDroppedAtItsActivationIsTakenBackUnwritten`,
 `TestAReleaseWhileASuccessorsAdoptionWaitsLetsGoOfTheDevice`), round 2's adoption cases now
 requiring the adoption's own wait; again no DSD byte a native or DoP occurrence sends changes.
+B9's round 4, unmerged too, changes the `internal/alsapcm/` prefix alone and stays 46: the
+native sink's activation answers its own fence as `ErrActivationFenced` (the sink revoked,
+released or paused before the activation ran, at its admission's end, or its prefill cut
+short by an Immediate release), which the backend tells from the device's answer, and one of
+a sink that failed before it is refused (`native activation refused`); the sink's tests gain
+one (`TestTheActivationsOwnFenceIsErrActivationFenced`) and the backend's over the fake
+kernel three (`TestASuccessorDroppedAtItsSinksAdmissionIsTakenBackUnwritten`,
+`TestASuccessorDroppedWhileItsSinkWritesItsPrefillIsTakenBack`,
+`TestAnActivationsFailureBesideADropIsJudgedByItsCause`), with their rig's holds; again no
+DSD byte a native or DoP occurrence sends changes.
 The harness's approval admission reads a record
 of version 46 alone; the migration reads an owner's record of 35 to 46 (`LegacyVersion`
 stays 35). For owners: nothing the harness runs or records changes, and nothing plays
