@@ -909,8 +909,9 @@ reached.
   as soon as it arrives once the start has answered as ready, so a stop the
   service manager has to finish with SIGKILL (past systemd's
   `TimeoutStopSec`, launchd's `ExitTimeOut`) is taken back already, and a
-  panic of serve's own in the teardown after it counts the start again
-  (backlog B760). Before the start has
+  panic of serve's own in the teardown after it asks to count the start
+  again, its `updater:` line saying whether it was (backlog B760). Before
+  the start has
   answered, a stop takes it back only once its teardown has run: a version
   that hangs before it is ready, which the service manager stops and then
   kills, counts, and the third such start's successor tries the rollback

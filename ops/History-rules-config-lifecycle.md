@@ -2990,7 +2990,7 @@ follows. The records are in `ops/engineering-log.md`, 2026-11-06, B660, and
 
 ## The probation's narrow windows (backlog B760, 2026-11-08)
 
-- **…and the probation's narrow windows: a start that refuses its settings hands an install whose count asks for the crash rollback to that rollback whole, where the early rollback leaves it, and says the crash rollback's own refusal where the data dir's lock is another's, writing nothing; a panic on serve's goroutine ends a start uncleanly whatever came before it, a ready start counted again where an ask of its stop's take-back reached its write, whatever that write answered; a counted start that has not begun serving by its deadline from its admission is said not ready, reporting only; and a start whose count's own write failed keeps its hold** (2026-11-08, backlog B760, three rounds). **Don't relax the early rollback, copy the crash rollback's checks for a refused start, or write the marker where the data dir's lock is another's; don't take a panic's count back, keep the panic from being raised again, or count a start again unless an ask of its take-back reached its write; don't count a start for not serving; and don't let go of a start's hold where its count's write failed, or word the line of a count's write that answered an error, or of a take-back with no answer, as what came of the count: each says where to look (`bridge doctor`).** What it leaves open is backlog B760's; a bind refused with `EADDRNOTAVAIL` is the host's since B660's second round. → History-rules-config-lifecycle.md
+- **…and the probation's narrow windows: a start that refuses its settings hands an install whose count asks for the crash rollback to that rollback whole, where the early rollback leaves it, and says the crash rollback's own refusal where the data dir's lock is another's, writing nothing; a panic on serve's goroutine ends a start uncleanly whatever came before it, a ready start asked to be counted again where an ask of its stop's take-back reached its write, whatever that write answered, its line saying whether it was; a counted start that has not begun serving by its deadline from its admission is said not ready, reporting only; and a start whose count's own write failed keeps its hold** (2026-11-08, backlog B760, three rounds). **Don't relax the early rollback, copy the crash rollback's checks for a refused start, or write the marker where the data dir's lock is another's; don't take a panic's count back, keep the panic from being raised again, or count a start again unless an ask of its take-back reached its write; don't count a start for not serving; and don't let go of a start's hold where its count's write failed, or word the line of a count's write that answered an error, or of a take-back with no answer, as what came of the count: each says where to look (`bridge doctor`).** What it leaves open is backlog B760's; a bind refused with `EADDRNOTAVAIL` is the host's since B660's second round. → History-rules-config-lifecycle.md
 
 What B660 left (its section, before this one), each window looked at
 first, then fixed where the fix is contained and provable, or kept (backlog
@@ -3047,11 +3047,11 @@ stop arrived (B660's second round: so that a supervisor's kill of a slow
 teardown leaves a clean stop uncounted, and a later classification cannot
 undo it). The take-back's defer now recovers a panic, reads the end as no
 clean one, begins no take-back, and where an ask of one begun as the stop
-arrived reached its write (the second round, below) counts the start again
+arrived reached its write (the second round, below) asks to count the start again
 (`stopTakeBack.countAgain`,
 `updater.CountFailedStartAgain`: under the install marker's lock, only where
 the marker holds what that take-back left, the count less one, within
-`finishTakeBackDeadline`'s), says so, clears the start's token and lets go
+`finishTakeBackDeadline`'s), says whether it was, clears the start's token and lets go
 of its lock as before, and raises the panic again as it was (Go prints it
 `[recovered, repanicked]`, its stack from the panic's own site). The kill
 behaviour stays as it was: a kill is no panic, and
