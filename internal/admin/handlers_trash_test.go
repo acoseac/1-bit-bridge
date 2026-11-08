@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"context"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -20,7 +21,8 @@ func enableDelete(t *testing.T, srv *Server, on bool) {
 	srv.deps.CfgHolder.Store(cfg)
 }
 
-// wireTrash attaches a manager reading the live gate, as production does.
+// wireTrash attaches a manager reading the live gate, and the scanner's root
+// guard (backlog B776), as production does.
 func wireTrash(t *testing.T, srv *Server) {
 	t.Helper()
 	srv.deps.TrashManager = trash.New(
@@ -31,6 +33,7 @@ func wireTrash(t *testing.T, srv *Server) {
 			return c != nil && c.Library.AllowDelete
 		},
 		trash.DefaultTTL,
+		trash.WithRootGuard(srv.deps.Scanner.WriteGuard(context.Background())),
 	)
 	srv.deps.Trash = srv.deps.TrashManager.Reclaimable
 }

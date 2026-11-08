@@ -2,10 +2,14 @@ package manifest
 
 import (
 	"context"
+	"errors"
 	"maps"
+	"os"
 	"path/filepath"
 	"slices"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 )
 
 // The roots the watcher holds (backlog B651). A NAS that starts the bridge
@@ -39,6 +43,16 @@ import (
 //     fsnotify swallows), and kqueue drops a folder's watch and sends nothing
 //     when the folder is renamed after a change in it and before fsnotify read
 //     the change (reconcileWatches), a root's own folder as much as any;
+//   - every rootCheckEvery too, when the folder at a watched root's path is
+//     another than the one its own watch was added on (os.SameFile, against the
+//     identity taken just before that watch was added; backlog B777): a volume
+//     mounted over the folder the root was watched on, a volume unmounted and
+//     mounted again, whose first mount's revoked folders kqueue keeps watched
+//     and listed, a linked root's link repointed, none of which fsnotify says
+//     anything about. A root that then reads as a volume not mounted is held;
+//     an identity that cannot be read is no change, and one that could not be
+//     read as the watch was added is taken once the folder reads, the watch
+//     added again around the read (takeRootIdentity);
 //   - and, while it is held, on a bounded retry (recheckHeld): recheckFirst
 //     after a root is held, then twice as long each time, recheckMax at most,
 //     each look a stat, one batch of the root's listing and, for a root that
@@ -48,25 +62,50 @@ import (
 // its path now, and a scan of it is asked for, since nothing saw what changed
 // in it meanwhile. Each change is said once: held, at Warn, with what the look
 // found (and again when that changes), and watched again, at Info. A look that
-// finds what the last one found says nothing.
+// finds what the last one found says nothing. A root the start could not watch
+// (it went between the start's look and its walk, or its own Add failed) is
+// held where it reads as a volume not mounted (B777); one that is there whose
+// own watch fsnotify would not add, at the start or at a check, is tried again
+// on a backoff of its own, the hold's timing, with one scan as it gets there
+// and none at a try, said once each way (unwatchRoot, retryUnwatched; B777's
+// round 2).
 //
 // A root the index holds nothing of (a fresh install whose volume is not
-// mounted yet) reads as it is and is watched; a mount over it then hides that
-// watch until the bridge restarts, and the periodic scan still indexes the
-// volume. kqueue (macOS) keeps the watched folders of an unmounted volume
-// open, so there a volume that goes is seen by the debounced dispatch's look
-// alone. A container's bind mount made before the host mounts the volume
-// never sees the mount (Docker's default propagation, rprivate): there the
-// root reads as the bare mount point until the container is restarted
-// (ops/deployment-runbook.md).
+// mounted yet) reads as it is and is watched; a mount over it puts another
+// folder at its path, which the check finds and watches, with a scan (B777).
+// kqueue (macOS) keeps the watched folders of an unmounted volume open, so
+// there a volume that goes is seen by the debounced dispatch's look, and a
+// volume mounted again by its root's identity alone; one case stays open:
+// backlog B777, item 3. A container's bind mount made before the host mounts
+// the volume never sees the mount (Docker's default propagation, rprivate):
+// there the root reads as the bare mount point until the container is
+// restarted (ops/deployment-runbook.md).
+
+// The words a root that reads as a volume not mounted is told by: the hold's
+// line and its hint, and the console's refusal of a write into such a root
+// (RootAwayError, backlog B776), which says what the hold says.
+const (
+	readsAsNotMounted    = "reads as a volume that is not mounted"
+	hintVolumeMounted    = "check that its volume is mounted"
+	hintContainerRestart = "in a container, restart it once the volume is mounted, since a bind mount made before the mount does not see it"
+)
 
 // Messages the held roots log, named so tests can find them.
 const (
-	msgWatchRootHeld      = "library root reads as a volume that is not mounted; the watcher does not watch it until it reads as it did"
+	msgWatchRootHeld      = "library root " + readsAsNotMounted + "; the watcher does not watch it until it reads as it did"
 	msgWatchRootResumed   = "library root reads as it did again; the watcher watches it"
 	msgWatchRootRewatched = "library root's own watch went while the root reads as it did; the watcher watches it again where it is now"
-	heldRootHint          = "check that its volume is mounted: the scan keeps the tracks indexed under it, and the watcher looks at it again until it reads as it did; " +
-		"in a container, restart it once the volume is mounted, since a bind mount made before the mount does not see it"
+	msgWatchRootReplaced  = "library root is another folder than the one its watch was added on (a volume mounted over it, a remount, a link repointed); the watcher watches it again where it is now"
+	// msgWatchRootIdentityTaken: a root whose folder could not be read as its
+	// watch was added, read since (B777's round 2).
+	msgWatchRootIdentityTaken = "library root's folder reads again; the watcher watches it again where it is now, to tell when another folder takes its place"
+	// msgRootWatchNotAdded and msgRootWatchAdded: a root that is there whose own
+	// watch fsnotify would not add (the watch limit spent, a permission), and
+	// its watch added again (B777's round 2).
+	msgRootWatchNotAdded = "library root's own watch could not be added; the watcher tries again, less often each time, and the periodic scan still covers it"
+	msgRootWatchAdded    = "library root's own watch could be added again; the watcher watches it"
+	heldRootHint         = hintVolumeMounted + ": the scan keeps the tracks indexed under it, and the watcher looks at it again until it reads as it did; " +
+		hintContainerRestart
 )
 
 const (
@@ -95,21 +134,229 @@ func (wt *Watcher) holdAbsentRoots(ctx context.Context, roots []string) []string
 	return watch
 }
 
-// noteRootWatches records, for each of roots whose own watch fsnotify now
-// holds, the path that watch is registered as, for checkRootWatches. A root
-// whose own watch could not be added is not recorded: no check could tell a
-// watch that went from one that was never there.
-func (wt *Watcher) noteRootWatches(roots []string) {
-	if len(roots) == 0 {
-		return
+// errRootWatchMissing is what a root whose own watch fsnotify does not hold
+// after a walk that went on is said with.
+var errRootWatchMissing = errors.New("the root's own watch was not added")
+
+// errIdentityUnread is a folder whose identity its stat left to a later read,
+// which failed.
+var errIdentityUnread = errors.New("the folder's identity could not be read")
+
+// rootIdentity is the identity of the folder at root's path now, through every
+// link on the way (os.Stat, as the walk resolves a linked root), or a test's
+// stand-in for it (identityForTests). Windows' os.Stat of a plain folder keeps
+// its path and reads the folder's file ID only when os.SameFile first asks,
+// from whatever folder the path names then, so the comparison of the stat with
+// itself reads it here: an identity taken before a walk is of the folder there
+// before it. os.SameFile has no shortcut for one FileInfo given twice: it
+// reads each side's ID before comparing them (go1.27.3's sameFile, in
+// os/types_windows.go, through loadFileId), and the first read is the stat's
+// own. Elsewhere the stat's device and inode are the identity, and the
+// comparison reads nothing. TestARootsIdentityIsTheFolderAtItsPathWhenItIsRead
+// is red on Windows without the comparison.
+func (wt *Watcher) rootIdentity(root string) (os.FileInfo, error) {
+	if h := wt.identityForTests; h != nil {
+		return h(root)
 	}
-	live := wt.watchSet()
+	info, err := os.Stat(root)
+	if err != nil {
+		return nil, err
+	}
+	if !os.SameFile(info, info) {
+		return nil, errIdentityUnread
+	}
+	return info, nil
+}
+
+// rootIdentities is each root's identity now (rootIdentity), taken before the
+// walks that add their watches: nil for a root whose folder cannot be read.
+// All are taken before any walk, so a nested root's is taken before the walk
+// of the root it is nested in opens its folder: on kqueue that walk holds the
+// folder as an entry of the one above, and fsnotify's Add of the nested root
+// keeps that descriptor, on whatever was at the path then (B651's ninth round).
+func (wt *Watcher) rootIdentities(roots []string) map[string]os.FileInfo {
+	ids := make(map[string]os.FileInfo, len(roots))
 	for _, root := range roots {
-		rw := wt.rootWatchPath(root)
-		if _, ok := live[rw]; ok {
-			wt.rootWatches[root] = rw
+		if info, err := wt.rootIdentity(root); err == nil {
+			ids[root] = info
 		}
 	}
+	return ids
+}
+
+// noteRootWatch records root's own watch for checkRootWatches, after a walk
+// that was to add it: the path the watch is registered as, and pre, the
+// identity the root's folder had just before the walk (backlog B777), where
+// the watch is among live, fsnotify's watches, and pre is known. It reports
+// false where the folder at the root's path is another now than pre: the
+// watch may be on either, and the caller adds it again. Taken once the walk
+// is done, the identity would be of the folder there then, which a volume
+// mounted while the watch was added makes the mounted one, recorded against a
+// watch on the folder it covers, and the two would compare equal for good.
+// A root whose own watch fsnotify does not hold is recorded with no identity,
+// so checkRootWatches finds the watch missing and tries again.
+func (wt *Watcher) noteRootWatch(root string, pre os.FileInfo, live map[string]struct{}) bool {
+	rw := wt.rootWatchPath(root)
+	wt.rootWatches[root] = rw
+	delete(wt.rootIDs, root)
+	if _, installed := live[rw]; !installed || pre == nil {
+		return true
+	}
+	wt.rootIDs[root] = pre
+	post, err := wt.rootIdentity(root)
+	return err != nil || os.SameFile(pre, post)
+}
+
+// confirmRootWatches records each root's own watch once the start's walks are
+// done, with the identity its folder had before them (ids), and fails is the
+// roots whose walk could not start, said already (backlog B777). A root whose
+// own watch fsnotify does not hold goes to rootWatchMissing. One whose folder
+// is another than it was before the walks (a volume mounted while they ran) is
+// looked at again, as the check would: its watch may be on what was there.
+func (wt *Watcher) confirmRootWatches(ctx context.Context, roots []string, ids map[string]os.FileInfo, fails map[string]bool) {
+	for _, root := range roots {
+		live := wt.watchSet()
+		if _, installed := live[wt.rootWatchPath(root)]; !installed {
+			wt.rootWatchMissing(ctx, root, fails[root])
+			continue
+		}
+		if !wt.noteRootWatch(root, ids[root], live) {
+			wt.lookAgain(ctx, root, msgWatchRootReplaced)
+		}
+	}
+}
+
+// rootWatchMissing is a root whose own watch fsnotify does not hold once the
+// start's walk was to add it (backlog B777): the walk could not start, the
+// root having gone between holdAbsentRoots' look and the walk, or the root's
+// own Add failed while the walk went on (the ordinary walker logs an Add's
+// failure and goes on, and kqueue's counts the folder held). A root that reads
+// as a volume not mounted is held, as holdAbsentRoots holds one, unless the
+// watcher has stopped for good (fds.off, as resumeRoot does). Any other is
+// recorded and tried again on a backoff of its own (unwatchRoot), said as a
+// walk that could not start is, where that was not said already (said): an
+// Add can fail on a root that is there (a permission, the watch limit).
+func (wt *Watcher) rootWatchMissing(ctx context.Context, root string, said bool) {
+	look := wt.scanner.lookAtRoot(ctx, root)
+	if ctx.Err() != nil {
+		return
+	}
+	if look.absent {
+		if wt.fds == nil || !wt.fds.off {
+			wt.holdRoot(root, look)
+		}
+		return
+	}
+	wt.noteRootWatch(root, nil, nil)
+	msg := msgInitialWatchFailed
+	if said {
+		msg = ""
+	}
+	wt.unwatchRoot(ctx, root, msg)
+}
+
+// unwatchRoot puts a root that is there, whose own watch fsnotify would not
+// add, among the roots tried again on a backoff of their own (unwatched,
+// retryUnwatched; B777's round 2), saying so with msg ("" when it was said
+// already) and asking once for a scan of it, which reads what changed while
+// nothing watched it; a root already there is left as it is, nothing said and
+// no scan asked. Not the hold, which lets a root's watches go and drops its
+// scans and its events, which a root that is there keeps: with the watch
+// limit spent, every check looked at the root again, walked its tree, asked
+// for a scan of it and said the limit again, for as long as the limit held,
+// which on a NAS is not an outage. The periodic scan (scanIntervalSec, 6 h by
+// default, which config cannot turn off) still covers it.
+func (wt *Watcher) unwatchRoot(ctx context.Context, root, msg string) {
+	if wt.unwatched[root] {
+		return
+	}
+	wt.unwatched[root] = true
+	wt.addRetryDelay, wt.addRearm = wt.recheckFirst, true
+	if msg != "" {
+		watcherLogger.Warn(msg, "root", root, "err", errRootWatchMissing)
+	}
+	wt.scheduleScan(ctx, root)
+}
+
+// retryUnwatched tries each root among unwatched again: its own folder is
+// asked first, saying nothing of a refusal (probeRootWatch), so a limit still
+// spent costs one ask and no line. A root that answers is looked at and
+// watched again where it is now (watchAgain, which lets what the ask holds go
+// first, takes the folder's identity around the walk and asks for a scan),
+// said once (msgRootWatchAdded); one that reads as a volume not mounted
+// meanwhile goes to the hold. A root no longer configured is let go.
+func (wt *Watcher) retryUnwatched(ctx context.Context) {
+	roots := wt.scanner.Roots()
+	for _, root := range slices.Sorted(maps.Keys(wt.unwatched)) {
+		if !slices.Contains(roots, root) {
+			delete(wt.unwatched, root)
+			continue
+		}
+		if wt.probeRootWatch(wt.rootWatchPath(root)) != nil {
+			continue
+		}
+		look := wt.scanner.lookAtRoot(ctx, root)
+		if ctx.Err() != nil {
+			return
+		}
+		if look.absent {
+			wt.holdRoot(root, look)
+			continue
+		}
+		if err := wt.watchAgain(ctx, root); err != nil {
+			delete(wt.unwatched, root)
+			if wt.fds == nil || !wt.fds.off {
+				wt.holdRoot(root, rootLook{absent: true, reason: rootAbsentUnreachable, err: err})
+			}
+			continue
+		}
+		if !wt.unwatched[root] {
+			watcherLogger.Info(msgRootWatchAdded, "root", root)
+		}
+	}
+}
+
+// probeRootWatch asks, saying nothing, whether a root's own folder would take
+// its watch now. Where fsnotify keeps no open file per watch (fds is nil:
+// inotify, ReadDirectoryChangesW) the ask is the Add itself (tryAdd), whose
+// watch the next walk keeps; where it does (kqueue) an Add opens every entry
+// of the folder outside the watcher's account, so the ask is addForTests, as
+// it answers the Add it stands for, and an open of the folder alone, closed at
+// once, which is what a refusal there is made of (a permission).
+func (wt *Watcher) probeRootWatch(path string) error {
+	if wt.fds == nil {
+		return wt.tryAdd(path)
+	}
+	if hook := wt.addForTests; hook != nil {
+		if err := hook(path); err != nil {
+			return err
+		}
+	}
+	f, err := fsutil.OpenDir(path)
+	if err != nil {
+		return err
+	}
+	return f.Close()
+}
+
+// unwatchedRetried notes a try of the unwatched roots that left some: the next
+// is due twice as long after it, recheckMax at most.
+func (wt *Watcher) unwatchedRetried() {
+	if len(wt.unwatched) == 0 {
+		return
+	}
+	wt.addRetryDelay = min(max(2*wt.addRetryDelay, wt.recheckFirst), wt.recheckMax)
+	wt.addRearm = true
+}
+
+// rearmAddRetry arms the unwatched roots' try when an entry or a try asked for
+// it (addRearm), addRetryDelay from now.
+func (wt *Watcher) rearmAddRetry(t *time.Timer) {
+	if !wt.addRearm {
+		return
+	}
+	wt.addRearm = false
+	t.Reset(wt.addRetryDelay)
 }
 
 // rootWatchPath is the path a configured root's own watch is registered as:
@@ -140,6 +387,7 @@ func (wt *Watcher) watchSet() map[string]struct{} {
 // what the last one found says nothing. It reports whether root was newly
 // held.
 func (wt *Watcher) holdRoot(root string, look rootLook) bool {
+	delete(wt.unwatched, root)
 	prev, was := wt.held[root]
 	wt.held[root] = look
 	if was && prev.reason == look.reason {
@@ -192,6 +440,7 @@ func heldHint(look rootLook) string {
 func (wt *Watcher) releaseRoot(root string) {
 	rw := wt.rootWatchPath(root)
 	delete(wt.rootWatches, root)
+	delete(wt.rootIDs, root)
 	c := wt.scanner.caseLook()
 	if wt.fds != nil {
 		if !wt.fds.off {
@@ -243,20 +492,38 @@ func (wt *Watcher) dropScansUnder(root string) {
 // in the root was seen while its folders below, opened through the path, were
 // (B651's ninth round, Codex on round 8). fsnotify forgets having seen the
 // path with it, so the next change in the folder above sends a Create for the
-// root, which asks for a scan of that folder. It answers the error of a root
-// whose tree could not be added after all (it went again between the look and
-// the walk, or, on kqueue, took the watcher past its budget, which stops the
-// watcher for good).
+// root, which asks for a scan of that folder. The identity of the folder at the
+// root's path is taken just before the walk and recorded with the root's own
+// watch (noteRootWatch), so a later change of it is found too; where it changed
+// while the walk ran, the watch is added once more (backlog B777). A root
+// whose own watch fsnotify would not add after all (the watch limit spent, a
+// permission) is tried again on a backoff of its own (unwatchRoot, which asks
+// for the scan the first time alone, and B777's round 2), and one that takes
+// its watch leaves it. It answers the error of a root whose tree could not be
+// added after all (it went again between the look and the walk, or, on
+// kqueue, took the watcher past its budget, which stops the watcher for good).
 func (wt *Watcher) watchAgain(ctx context.Context, root string) error {
 	if wt.fds != nil && wt.fds.off {
 		return errWatchBudget
 	}
-	wt.releaseRoot(root)
-	wt.aliases = slices.DeleteFunc(wt.aliases, func(a rootAlias) bool { return a.configured == root })
-	if err := wt.addTree(root, true); err != nil {
-		return err
+	var live map[string]struct{}
+	for attempt := 1; ; attempt++ {
+		wt.releaseRoot(root)
+		wt.aliases = slices.DeleteFunc(wt.aliases, func(a rootAlias) bool { return a.configured == root })
+		pre := wt.rootIdentities([]string{root})[root]
+		if err := wt.addTree(root, true); err != nil {
+			return err
+		}
+		live = wt.watchSet()
+		if wt.noteRootWatch(root, pre, live) || attempt == 2 {
+			break
+		}
 	}
-	wt.noteRootWatches([]string{root})
+	if _, installed := live[wt.rootWatchPath(root)]; !installed {
+		wt.unwatchRoot(ctx, root, msgRootWatchNotAdded)
+		return nil
+	}
+	delete(wt.unwatched, root)
 	wt.scheduleScan(ctx, root)
 	return nil
 }
@@ -272,7 +539,10 @@ func (wt *Watcher) resumeRoot(ctx context.Context, root string) {
 		return
 	}
 	delete(wt.held, root)
-	watcherLogger.Info(msgWatchRootResumed, "root", root)
+	// A root whose own watch could not be added was said so (unwatchRoot).
+	if !wt.unwatched[root] {
+		watcherLogger.Info(msgWatchRootResumed, "root", root)
+	}
 	if hook := wt.afterResumeForTests; hook != nil {
 		hook(root)
 	}
@@ -312,8 +582,13 @@ func (wt *Watcher) recheckHeld(ctx context.Context) {
 // or moved away and another folder put at its path): what is left of its
 // watches goes, and it is watched again where it is now, with a scan. A root
 // whose Create's look waits for the flush is left to it: fsnotify may still be
-// opening the folder at its path, which is why that look waits.
+// opening the folder at its path, which is why that look waits. A root whose
+// own watch fsnotify holds is compared with the folder at its path now
+// (checkRootIdentity, backlog B777).
 func (wt *Watcher) checkRootWatches(ctx context.Context) {
+	if hook := wt.afterRootCheckForTests; hook != nil {
+		defer hook()
+	}
 	if len(wt.rootWatches) == 0 {
 		return
 	}
@@ -329,11 +604,67 @@ func (wt *Watcher) checkRootWatches(ctx context.Context) {
 		}
 	}
 	for _, root := range slices.Sorted(maps.Keys(wt.rootWatches)) {
-		if held[wt.rootWatches[root]] || wt.fds.lookWaits(root) {
+		// A root whose own watch could not be added is its retry's
+		// (retryUnwatched), on a backoff of its own, never a check's.
+		if wt.fds.lookWaits(root) || wt.unwatched[root] {
 			continue
 		}
-		wt.lookAgain(ctx, root, msgWatchRootRewatched)
+		if !held[wt.rootWatches[root]] {
+			wt.lookAgain(ctx, root, msgWatchRootRewatched)
+			continue
+		}
+		wt.checkRootIdentity(ctx, root)
 	}
+}
+
+// checkRootIdentity looks again at a watched root whose own watch fsnotify
+// holds, where the folder at its path is another than the one that watch was
+// added on (rootIDs, os.SameFile; backlog B777): a volume mounted over the
+// folder the root was watched on, a volume unmounted and mounted again (kqueue
+// keeps watching, and listing, its first mount's revoked folders; inotify drops
+// an unmounted volume's watches, which the check finds missing), a linked
+// root's link repointed. None of these is anything fsnotify says. lookAgain
+// holds a root that then reads as a volume not mounted, as holdAbsentRoots
+// holds one, so a volume away is looked at by the hold's retry and never
+// watched again at every check, and watches one that reads as it did again
+// where it is now, recording that folder's identity. An identity that cannot be
+// read is no change: the root is held where it reads as a volume not mounted,
+// and otherwise left as it is until the next check. A root recorded with no
+// identity (its folder could not be read as its watch was added) takes one
+// once its folder reads (takeRootIdentity).
+func (wt *Watcher) checkRootIdentity(ctx context.Context, root string) {
+	want, known := wt.rootIDs[root]
+	if !known {
+		wt.takeRootIdentity(ctx, root)
+		return
+	}
+	now, err := wt.rootIdentity(root)
+	if err != nil {
+		if look := wt.scanner.lookAtRoot(ctx, root); look.absent && ctx.Err() == nil {
+			wt.holdRoot(root, look)
+		}
+		return
+	}
+	if !os.SameFile(want, now) {
+		wt.lookAgain(ctx, root, msgWatchRootReplaced)
+	}
+}
+
+// takeRootIdentity is the check of a watched root recorded with no identity,
+// its folder unreadable as its own watch was added (B777's round 2): every
+// check returned there, for good, though the reads answered again. Once the
+// folder reads, the root is looked at again and its watch added again around
+// the read (lookAgain, watchAgain), never the identity recorded against the
+// watch it has, which may be on a folder another has covered since (a volume
+// mounted, a link repointed while the reads failed): the identity recorded is
+// of the folder the new watch is on, with a scan of it. A folder that still
+// does not read is left to the next check, which reads it again and nothing
+// more.
+func (wt *Watcher) takeRootIdentity(ctx context.Context, root string) {
+	if _, err := wt.rootIdentity(root); err != nil {
+		return
+	}
+	wt.lookAgain(ctx, root, msgWatchRootIdentityTaken)
 }
 
 // lookAgain looks at a watched root whose own watch can no longer be trusted:
@@ -356,7 +687,10 @@ func (wt *Watcher) lookAgain(ctx context.Context, root, msg string) {
 		}
 		return
 	}
-	watcherLogger.Info(msg, "root", root)
+	// A root whose own watch could not be added was said so (unwatchRoot).
+	if !wt.unwatched[root] {
+		watcherLogger.Info(msg, "root", root)
+	}
 }
 
 // lookAgainAfterCreate is the look a Create of root asked for while root's own

@@ -325,7 +325,7 @@ func TestAReplacedRootsCreateLeavesItsLookToTheFlush(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			w.noteRootWatches([]string{outer, nested})
+			noteRootWatchesForTests(w, outer, nested)
 			if err := w.w.Remove(nested); err != nil {
 				t.Fatal(err)
 			}
@@ -404,7 +404,7 @@ func TestTheCheckOfTheRootsWatchesLeavesAWaitingLookToTheFlush(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	w.noteRootWatches(roots)
+	noteRootWatchesForTests(w, roots...)
 	for _, gone := range []string{nested, other} {
 		if err := w.w.Remove(gone); err != nil {
 			t.Fatal(err)

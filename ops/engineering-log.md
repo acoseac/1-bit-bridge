@@ -85277,6 +85277,750 @@ leave untouched outside `internal/player/playback` and this log, so it predates 
 passed in the cmd/bridge race run above. `make test` run again in the slot passed, 89 packages
 ok (2,060 s), the Linux-only tests run here. alsa-abi did not run: no ABI definition or
 `scripts/alsa-abi` file changed.
+## 2026-11-07 — B776, B777: the console's writes into a root that reads as not mounted, and a watched root that stays blind until a restart
+
+Backlog B776 and B777, the last two late-mount items, on `fix/b77x-away-roots`
+from main 14aa6290, worker b77x on legion0 (Ubuntu 26.04, linux/amd64,
+go1.27.3, `GOTOOLCHAIN=local`, `GOPROXY=off`). Commits: B776's red tests
+452310a4 and its fix c98b66fe; B777's red tests 100e9adc and its fix
+466119c5; this record and the runbook's paragraph 7aac47a9; B777's identity
+read on Windows, its test f564c322 and its fix 3013cebd; what stays open
+named by its backlog id alone, 1c554c9b; then the gates' results, added
+here. The rules go into `.claude/rules/scanner.md`,
+`admin-console.md` and `build-ci-tests.md`, with the long forms in
+`ops/History-rules-scanner.md`, through `rules-b77x.patch`
+(this worker cannot write `.claude/`). Both items stay small: only rows are
+at stake, never a file, and a scan or a healthy upload pays nothing but a few
+looks (a stat, one batch of a root's listing, at most one count).
+
+### B776: the console's writers
+
+**What happened at main.** Where the bare mount point a volume leaves is the
+service user's to write, the console wrote there while the volume was away,
+and the scans then read what it wrote as the root's content: the clean-empty
+guard no longer spared the root, and the volume's rows went missing and were
+reaped at the threshold; the volume, mounted again, hid what was written. Red
+at 452310a4 (the guard in the tree, nothing calling it), through the real
+handlers, each with the root's index holding a scanned track:
+
+| Request, the volume away | main |
+|---|---|
+| upload create, the bare mount point | 201, staged there |
+| upload create, the root's path gone | 201, the root's folder made |
+| upload create, a root holding only a link to a directory | 201 |
+| a session on the volume: commit, read, chunk, abandon | 404 `not_found` each, read by the console as an upload lost |
+| create through a healthy outer root into an absent nested root | 201 |
+| commit of a session bound for the outer root and the nested one | 200, both committed, one into the nested root's bare mount point |
+| restore of an entry the outer root trashed from the nested root's folder | 200, renamed into the bare mount point |
+| restore of a healthy root's entry and one whose volume is away | 200: the first renamed back, the second "no such entry" |
+
+The structural console test was red too (no retry), and serve's wiring pin
+(no guard at the call site).
+
+**The fix.** The upload and trash managers ask a guard, before they write
+anything, for every path a request would write (`upload.WithRootGuard`,
+`trash.WithRootGuard`); serve passes the scanner's, `WriteGuard` on
+`scanCtx`. `Scanner.RefuseWritesUnder` takes each path's owner as which root
+a path is decides (`rootIn`: `deepestRootOf` and `caseLook.under`, so a
+nested root owns the paths below its folder whatever root the request
+names), looks at each such root once with `lookAtRoot`, the look the
+watcher's hold reads, and answers a `*RootAwayError` (matching
+`ErrRootNotMounted`) for the first that reads as absent. A create asks for
+its staging and every declared destination, so a refusal costs nothing
+before the transfer; a commit asks for every destination before its first
+rename (`commitTargets`); a restore for every destination before its first
+rename (`guardRestore`), and for every root where an entry is in no root's
+trash; a session in no root asks every root's own look, since its id names no
+root. With more than one root, a session or an entry gone for good is then
+answered with the refusal while any root's volume is away, the safe direction.
+`writeUploadError` and `writeTrashError` answer it with 409
+`root_not_mounted` (`writeRootAwayRefusal`), logged at Info with the root.
+
+**What the console says.** For a root that reads as a volume not mounted
+(unreachable, unreadable, empty under its rows, or uncounted): `the library
+root "Music" reads as a volume that is not mounted, so nothing was written to
+it: check that its volume is mounted, then try again (the scan keeps the
+tracks indexed under it; in a container, restart it once the volume is
+mounted, since a bind mount made before the mount does not see it)`. For a
+root holding nothing but links to directories over its rows: `the library
+root "Music" holds no content but links to directories, which the scanner
+does not follow, so nothing was written to it: a file written there would let
+the scans delete the rows kept under those links. To index what a link leads
+to, add that directory as a library root of its own`. The words are the
+hold's: the line's message and hint are built from the same constants
+(`readsAsNotMounted`, `hintVolumeMounted`, `hintContainerRestart`,
+`holdsOnlyDirLinks`), and their bytes are unchanged. The root is named by its
+folder's name, and no path is.
+
+**What an upload does on the refusal.** At create nothing is staged, and the
+review with its Upload button stays where it was. After the review collapsed
+(a chunk refused, or the commit), the page shows the refusal and, below it,
+outside the review, Try again (`upload-retry`, `showUploadFailure`): it reads
+the same session again from the server, sends only what is not complete from
+the offsets the server holds (`transferAll` passes over a complete file), and
+commits it (`retryUpload`). No session is made and no finished file is sent
+again; a refusal at Try again offers it again.
+
+**Never refused.** A first upload or restore into a fresh, empty root on a
+healthy disk, an empty folder on the same device as its parent that the index
+holds nothing of, reads as it is (`TestTheFirstUploadAndRestoreIntoAFreshEmptyRootAreNotRefused`,
+through the handlers: create, chunk, commit, trash, and a restore into a root
+then holding only its dot folders and no row). **A root never mounted on a
+fresh install** reads as it is too where its bare mount point is there: the
+index holds nothing of it, and nothing tells a bare mount point from an empty
+folder but a device, which B651 rejected; a write there lands on the mount
+point, and the mount then hides it. A configured root whose path is not there
+at all reads as unreachable and is refused, where the first upload used to
+make its folder.
+
+**Left open:** backlog B776, item 7.
+
+**What the tests rest on.** No mount: the guard asks nothing but
+`lookAtRoot`, which reads a root whose volume is away as a folder holding no
+library content under rows the index holds, or as a path that is not there.
+The tests' volume is the root's folder whose entries are moved aside and back
+(`awayVolume`), leaving the bare mount point empty and writable; its `back`
+refuses while the bare mount point holds anything a write left. The watcher's
+tests of what a mount does mount a disk image (build-ci-tests.md).
+
+**The console's test.** node is not installed on this host, and no other
+JavaScript engine is: `TestTheConsoleRetriesARefusedCommitWithItsSessionOnceTheVolumeIsBack`
+runs the shipped upload page under node against the real handlers over HTTP
+(the volume taken away as the first commit arrives, put back between the
+two clicks) and requires one session, its one chunk, one read by Try again,
+two commits of that session and the file on the volume; it skipped here and
+was never run. What runs here pins the shape: `TestARefusalTheReviewHidOffersARetryOfTheSameSession`
+(the retry outside the review, the catch through `showUploadFailure`, the
+retry reading and committing the same session id and making none, finished
+files passed over).
+
+**Negative controls**, predicted by name in
+`.tmp/_b77x/controls-b776.predictions.txt` before the run, each on c98b66fe
+with exact-once edits, its package's test binary built, each test run alone,
+the bytes put back from memory (`.tmp/_b77x/controls.py`); the baseline green
+and `git status` clean after. U1 is
+`TestAnUploadIntoARootThatReadsAsNotMountedIsRefusedAndWritesNothing`, U2
+`TestAnUploadSessionOnAVolumeThatIsAwayAnswersTheRefusalNotNotFound`, U3
+`TestAWriteThroughAHealthyOuterRootIntoAnAbsentNestedOneIsRefused`, U4
+`TestARestoreIsRefusedWholeBeforeItRenamesAnything`, U5
+`TestTheFirstUploadAndRestoreIntoAFreshEmptyRootAreNotRefused`, U6
+`TestARefusalTheReviewHidOffersARetryOfTheSameSession`, W1 cmd/bridge's
+`TestTheConsolesLibraryWritersAreGuardedInProduction`.
+
+| Control | Red | Green |
+|---|---|---|
+| C776-1 a create asks no guard | U1 (all three), U3 create | U2, U3 commit and restore, U4, U5, U6 |
+| C776-2 a session in no root answers 404 | U2 (all four) | U1, U3, U4, U5, U6 |
+| C776-3 a commit asks no guard | U3 commit | the rest |
+| C776-4a a create asks its staging root alone | U3 create | the rest |
+| C776-4b a commit asks the session's root alone | U3 commit | the rest |
+| C776-5 the guard takes the first root holding a path, not the deepest | U3 (all three) | U1, U2, U4, U5, U6 |
+| C776-6 a restore asks nothing for an entry in no trash | U4 | the rest |
+| C776-7 a restore guarded entry by entry, inside its loop | U4 (the healthy entry renamed before the refusal) | the rest |
+| C776-8 a commit guarded file by file, inside its loop | U3 commit (the outer root's file committed before the refusal) | the rest |
+| C776-9r a root holding no content absent whatever the index holds | U5 | the rest |
+| C776-10a the upload's errors map no refusal | U1, U2, U3 create and commit | U3 restore, U4, U5, U6 |
+| C776-10b the trash's errors map no refusal | U3 restore, U4 | the rest |
+| C776-11r the refusal names the root's path | U1, U2, U3, U4 | U5, U6 |
+| C776-12a the upload's catch shows the error alone | U6 | the rest |
+| C776-12b the retry makes a new session | U6 | the rest |
+| C776-13 serve leaves the trash's guard out | W1 | |
+
+Two first forms were my mutations' faults, as the predictions file records:
+C776-9 also set the reason of every root it refused, the links case's
+included, and so reddened U1's links leg as well (not predicted); C776-11
+left `filepath` unused and did not build, which is no verdict. Each was run
+again corrected (C776-9r, C776-11r), predicted before, and went as predicted.
+
+### B777: a watched root that stays blind until a restart
+
+**What happened at main.** fsnotify says nothing when the folder at a watched
+root's path becomes another folder while the watch stays where it was: a
+volume mounted over the bare mount point a root was watched on (a fresh
+install, which the index holds nothing of, reads as it is and is watched
+there), a volume unmounted and mounted again, a linked root's link
+repointed. The check of the roots' own watches asked only whether fsnotify
+still listed each root's own watch, which it does in all three. And the start
+neither held nor recorded a root whose own watch it could not add: one that
+went between `holdAbsentRoots`' look and the walk was logged `initial watch
+add failed` and never looked at again, and one whose own Add failed while the
+walk went on (the ordinary walker discards an Add's failure, kqueue's counts
+the folder held) was not even logged. Red at 100e9adc, each test alone on
+Linux:
+
+| Test | main |
+|---|---|
+| `TestTheWatcherWatchesAgainARootWhoseFolderIsNoLongerTheOneItWatches` (a stand-in for the identity read) | never looked at again |
+| `TestTheWatcherAddsARootsWatchAgainWhenItsFolderChangedWhileTheWatchWasAdded` | the root's own watch added once |
+| `TestTheWatcherWatchesALinkedRootAgainWhereItsLinkLeadsNow` (no stand-in) | a file where the link leads now never indexed |
+| `TestTheWatcherWatchesARootRemountedInsideTheDebounceOfItsResume` | the same, after a hold and a resume |
+| `TestAVolumeAwayForSeveralChecksIsHeldWithNoScanPerCheck` | never held |
+| `TestTheWatcherHoldsARootThatWentBetweenItsLookAndItsWalk` | never held |
+| `TestTheWatcherTriesAgainARootWhoseOwnWatchCouldNotBeAdded` | never tried again |
+
+`TestAFolderWhoseIdentityCannotBeReadIsNeitherWatchedAgainNorScanned`,
+`TestAnOrdinaryRenameDoesNotLoopTheWatcher` and
+`TestARootWithAFolderItCannotReadIsWatchedAndScanned` are green at main and
+after: their red is a control's.
+
+**The fix.** Every root's identity (`os.Stat`, through its links) is taken
+before any watch is added (`rootIdentities`), and read again once the start's
+walks are done (`confirmRootWatches`, `noteRootWatch`); where the two differ,
+the root is looked at again and its watch added again, after what is held at
+its path is let go (`lookAgain`, `watchAgain`'s `releaseRoot`), since an Add
+over a path fsnotify holds keeps what it holds. `watchAgain` takes and records
+the identity the same way, so a later change is found too. Windows' `os.Stat`
+of a plain folder keeps its path and reads the folder's file ID only when
+`os.SameFile` first asks, from whatever folder the path names then, so an
+identity taken before a walk would be that of the folder at the path after
+it; the identity's read compares the stat with itself at once (`rootIdentity`,
+3013cebd). `TestARootsIdentityIsTheFolderAtItsPathWhenItIsRead` reads an
+identity, puts another folder at the path and requires the two to differ:
+green here and on macOS at f564c322, where the stat's device and inode are
+the identity at once, and red on Windows alone without the fix, which this
+host cannot run (found reading go1.27.3's `os/stat_windows.go` and
+`types_windows.go`, `saveInfoFromPath` and `loadFileId`). The check
+(`checkRootIdentity`, every `rootWatchCheckEvery`, 30 s) compares, where a
+root's own watch is still listed, the recorded identity with the folder at
+its path now (`os.SameFile`): a root found another folder goes through
+`lookAgain`, so one that reads as a volume not mounted is held, as
+`holdAbsentRoots` holds one, and goes to the hold's retry, never watched
+again at every check; one that reads as it did is watched where it is now,
+with a scan. An identity that cannot be read is no change: the root is held
+where it reads as not mounted and otherwise left to the next check. At the
+start, a root whose own watch is not listed is held where it reads as a
+volume not mounted (unless the watcher stopped for good, `fds.off`, as
+`resumeRoot` does), and otherwise said with today's line (`msgInitialWatchFailed`,
+`errRootWatchMissing` where the walk said nothing) and recorded, so the check
+finds its watch missing and adds it again. A root whose own Add keeps failing
+(the watch limit spent) is tried again at every check, each try saying the
+Add's failure again: the price of not leaving it blind.
+
+**kqueue's pre-existing entry watches.** The walk of a root a nested root is
+in lists the nested root's folder, and fsnotify opens it as an entry of the
+folder above; the nested root's own Add then finds that descriptor by its
+path and keeps it, on whatever was at the path when the outer walk listed it
+(B651's ninth round). So the identity must be taken before the outer walk
+opens the folder, which taking every root's before any walk does, and a watch
+added again must let go of what is held at the path first (`releaseRoot`),
+which `lookAgain` and `watchAgain` do: an Add over a held path reuses it.
+`TestTheWatcherWatchesTheVolumeMountedOverANestedRootItWatchedBare` (macOS)
+mounts over a nested root watched bare and requires nothing held on the
+covered folder after.
+
+**The order.** Taken once the walks are done, the identity would be of the
+folder there then, which a volume mounted as the root's watch was added makes
+the mounted one, recorded against a watch on the folder it covers, and the
+two would compare equal for good: control C777-2 below records it that way,
+and `TestTheWatcherAddsARootsWatchAgainWhenItsFolderChangedWhileTheWatchWasAdded`
+goes red.
+
+**The mounts.** The tests that mount are darwin's, `watcher_mount_test.go`
+under the file tag the B651 mount test uses (`//go:build darwin`), a disk
+image attached with `hdiutil attach -mountpoint`; on Linux a mount needs
+rights this host lacks. None of them ran here, red or green.
+`TestTheWatcherWatchesTheVolumeMountedOverARootItWatchedBare` (item 1: a fresh
+install's root watched on its bare mount point, the image mounted over it,
+the volume's track and a file written after both indexed),
+`TestTheWatcherWatchesTheVolumeMountedOverANestedRootItWatchedBare` (the
+same for a nested root) and `TestTheWatcherWatchesARootRemountedInsideTheDebounce`
+(item 3: the image detached and attached again while Run's goroutine is
+parked in an event's handling, so no look sees it away; a file written after
+indexed). The last logs the root folder's device and inode on both mounts
+and skips where the remount changed neither (backlog B777, item 3). Whether a
+remount changes them was not measured: this host has no `hdiutil` and cannot
+mount. On this host a link stands in for the mount where
+the question is only that the folder at the path changed with nothing said:
+`TestTheWatcherWatchesALinkedRootAgainWhereItsLinkLeadsNow` and
+`TestTheWatcherWatchesARootRemountedInsideTheDebounceOfItsResume` leave a real
+stale watch, which no backend sees, and a stand-in answers the identity read
+for the rest (`identityForTests`), with a hook at the actual Add boundary
+(`addForTests`) and one after each check (`afterRootCheckForTests`).
+
+**Negative controls**, predicted by name in
+`.tmp/_b77x/controls-b777.predictions.txt` before the run, each on 466119c5,
+as for B776. I1 to I10 are, in order,
+`TestTheWatcherWatchesAgainARootWhoseFolderIsNoLongerTheOneItWatches`,
+`TestTheWatcherAddsARootsWatchAgainWhenItsFolderChangedWhileTheWatchWasAdded`,
+`TestTheWatcherWatchesALinkedRootAgainWhereItsLinkLeadsNow`,
+`TestTheWatcherWatchesARootRemountedInsideTheDebounceOfItsResume`,
+`TestAVolumeAwayForSeveralChecksIsHeldWithNoScanPerCheck`,
+`TestAFolderWhoseIdentityCannotBeReadIsNeitherWatchedAgainNorScanned`,
+`TestAnOrdinaryRenameDoesNotLoopTheWatcher`,
+`TestTheWatcherHoldsARootThatWentBetweenItsLookAndItsWalk`,
+`TestTheWatcherTriesAgainARootWhoseOwnWatchCouldNotBeAdded` and
+`TestARootWithAFolderItCannotReadIsWatchedAndScanned`.
+
+| Control | Red | Green |
+|---|---|---|
+| C777-1 the check compares no identity | I1, I3, I4, I5 | I2, I6 to I10 |
+| C777-2 the identity recorded after the walk, never redone | I2 | the rest |
+| C777-3 a watch added again keeps the identity it had | I1, I2, I3, I4 | I5 to I10 |
+| C777-4 an identity read that fails taken for a change | I6 | the rest |
+| C777-5 a root found another folder watched again with no look | I5 | the rest |
+| C777-6 the start confirms no root whose own watch is missing | I8, I9 | the rest |
+| C777-7 such a root held with no look | I9 | the rest |
+| C777-8 such a root, there, not recorded | I9 | the rest |
+| C777-9 the walk stops at a folder it cannot read | I10 | the rest |
+| C777-10 the start adds no watch again whose folder changed during its walk | I2 | the rest |
+
+All as predicted but C777-3, predicted red for I1 and I3 alone: a watch added
+again that keeps the old identity is found changed at every check and added
+again each time, which I2 counted (seven Adds and six lines saying so, for one
+change), and in I4 each of those asks for a scan of the root, whose debounce
+every new ask puts back, so the scan the resume asked for never ran.
+
+**Left open:** backlog B777, item 3.
+
+### What the orchestrator runs on a Mac
+
+On the Mac, each test alone (a red wait gives up at the deadline less 30 s),
+red with B777's fix reverted, 3013cebd, f564c322 and 466119c5, newest first
+(f564c322's test calls what 466119c5 adds; or the tree at 100e9adc for
+`internal/manifest`), and green at the branch's head:
+
+    go test ./internal/manifest/ -count=1 -v -timeout 120s -run '^TestTheWatcherWatchesTheVolumeMountedOverARootItWatchedBare$'
+    go test ./internal/manifest/ -count=1 -v -timeout 120s -run '^TestTheWatcherWatchesTheVolumeMountedOverANestedRootItWatchedBare$'
+    go test ./internal/manifest/ -count=1 -v -timeout 120s -run '^TestTheWatcherWatchesARootRemountedInsideTheDebounce$'
+
+The third logs whether the remount changed the root folder's device and
+inode, and skips where it did not; B651's
+`TestTheWatcherWatchesAHeldNestedRootOnTheVolumeMountedOverItsBareFolder`
+stays green with the fix. And red with c98b66fe (B776's fix) reverted, green
+with it, where node is installed:
+
+    go test ./internal/admin/ -count=1 -v -timeout 300s -run '^TestTheConsoleRetriesARefusedCommitWithItsSessionOnceTheVolumeIsBack$'
+
+CI's macOS leg runs all four in the package suites.
+
+### The gates
+
+At 1c554c9b, the branch's code as it ships, through the shared build lock in
+one run (`.tmp/_b77x/gate.sh`), on go1.27.3, go.mod's, and so at 3013cebd
+before it, which differs from it in comments, a test's skip and this record
+alone: `make fmt` rewrote nothing; `make vet` clean, and so
+with `GOOS=windows`, `GOOS=darwin` and `GOOS=linux GOARCH=386`; `make test`
+(`-race`, `-timeout 30m`) green, 89 packages, among them cmd/bridge in
+1283 s, internal/admin in 1039 s, internal/manifest in 1607 s,
+internal/upload in 12 s and internal/trash in 2 s, and the packages that test
+Linux alone run here for real (internal/alsa, internal/alsapcm on this
+host's ALSA, internal/atomicwrite, internal/usbid, internal/player/hotplug
+and the rest); `make build-all`, its build-tag census included, and
+`make docs-check` clean; `git status` clean after. The qualification check
+against main (`scripts/qualification-version -base 14aa6290 -head HEAD`)
+answers OK. `rules-b77x.patch` applies to the tree (`git apply --check`),
+and on a copy with it applied the budgets hold (scanner.md 37,976 bytes,
+admin-console.md 76,376, build-ci-tests.md 29,155; the worst load 66.5%)
+and the 23 tests it cites are declared. Not run here: the darwin mount tests
+and the node console test above, and the red of
+`TestARootsIdentityIsTheFolderAtItsPathWhenItIsRead`, which is Windows' alone.
+
+## 2026-11-07 — B776, B777 round 2: what the reviews found in the away roots
+
+Round 2 of backlog B776 and B777 on `fix/b77x-away-roots`, PR #1435, after the
+orchestrator applied round 1's rules patch and merged main at 994e21ba
+(ff68400c); worker b77x on legion0 (Ubuntu 26.04, linux/amd64, go1.27.3,
+`GOTOOLCHAIN=local`, `GOPROXY=off`). Each point a reviewer's reading,
+confirmed red first through the real paths, then fixed. Commits, oldest
+first: a link 7369f520 (red) and c5871f1a; a chunk 7c84c921 (red) and
+fb145695; the console f87e618a (red) and ce3cd800; a failed first identity
+read ca28675a (red) and f0174927; a root whose own watch cannot be added
+5e5b1c17 (red), 5e53ba5b and ce3a39d8; the Windows fixture 0f8f2bc1; a
+missing root's first upload 08f41726 (red), 7bc36e84 and the pin dfa32bbb;
+then this record and the runbook's paragraph (4a80b77f), and the link's
+short cut ccbea589, with its account here. The rules go through
+`rules-b77x-r2.patch` (scanner.md's B776 and B777 lines and their long forms,
+admin-console.md's B776 bullet). Severity stays low: rows only, never a file.
+
+### 1. A write through a link into an absent root (B776)
+
+Which root a path is (`rootIn`) compares the path's elements with the
+configured roots' and resolves no link, while a write's `MkdirAll` and rename
+follow one in its folders, and the upload's and the trash's containment
+checks (`AssertRootContains`, `IsUnderAny`) resolve it and took the
+destination as inside the root the request named. Red at 7369f520, through
+the console's real handlers, music/alias a link to the nested root music/usb
+whose volume is away: an upload's create through the link 201; its commit
+200, the file in the bare mount point; a restore of an entry trashed through
+the link 200, renamed into it; a nested root configured through a link, with
+another link to the same folder, 201; a root whose path went with its
+volume, reached through a link to its parent, 201.
+
+`RefuseWritesUnder` (alone: `rootIn` is a subtree scan's owning root and the
+watcher's events' owner, and the scans do not change) looks at a second owner
+of each path, the deepest root that holds where the write lands: the path's
+folder resolved through its nearest ancestor that exists
+(`fsutil.EvalSymlinksOrClean`), its own name kept, since a rename replaces a
+link at that name, compared element by element as `rootIn` compares
+(`deepestRootOf`, so the case handling is the same) with each root as it
+resolves (`fsutil.ResolveLinks`, `newLandingRoots`), and with a root that
+does not resolve as configured; the look counts the rows by the configured
+name. As c5871f1a had it, every guarded write, each chunk included, resolved
+every configured root, so a root on a network mount that hangs would have
+stalled uploads into the healthy roots, which no write did before: each
+containment check resolves its own root alone. The roots are resolved now
+only once a path's folder is found to resolve elsewhere, once a request
+(ccbea589); where nothing on the way is a link, the owner is `rootIn`'s, which
+is the scans' (`nestedRootsUnder` compares the roots as configured too).
+`TestAWriteWithNoLinkOnItsWayResolvesNoOtherRoot` counts the roots a write
+resolves through a per-scanner hook (`resolveRootHook`): none for a write with
+no link on its way, each once for a request through a link. On Windows a
+directory junction (`mklink /J`, which needs no privilege)
+is what a link in a folder usually is there, and `ResolveLinks` resolves it
+as a symbolic link (GetFinalPathNameByHandle), on both sides of the
+comparison; the tests make a junction on Windows and a symbolic link
+elsewhere (`linkDir`). Not run on Windows here.
+
+### 2. A chunk into a root that reads as not mounted (B776)
+
+The guard ran only where a session was not found. Red at 7c84c921: a session
+whose first chunk was taken, its root then keeping its staging folder (a dot
+folder, no library content) while its library content went and the index
+held its rows, took its next chunk, 200 and the file complete. `WriteChunk`
+asks the guard of the session's staging folder before it reads or writes
+anything; 409 `root_not_mounted`, the offset where it was. The answer is not
+kept: every chunk asks again. What a healthy upload pays: one look a chunk
+(a stat, one batch of the root's listing, a count only for a root holding
+nothing, and the few lstats of where the staging lands), measured at 98 µs a
+chunk on a root of 200 folders on this host (a scratch benchmark, not
+committed), beside the chunk's own 4 MiB write and fsync.
+
+### 3. The console: a chunk's refusal and the retry beside it (B776)
+
+`putUploadChunk` read every 409's body for an offset and then handed the
+response, its body read, to `errorFromResponse`, which could read nothing and
+answered a bare status line: a chunk refused with `root_not_mounted` lost its
+code and the page offered no Try again. And `transferAll` answered its first
+worker's failure at once, its siblings' chunks still out, a failure setting
+`uploadState.aborted`, which the retry cleared: Try again could run beside an
+old worker still sending, whose late failure then stopped the retry. Now a
+refusal's body is read once and handed to `errorFromResponse` as read
+(`errorFromResponse` unchanged: a test runs it alone under node, another pins
+its `e.code = j.error`), and a transfer keeps its first failure, stops its
+other workers at their next chunk and answers it only once every worker has
+settled; a worker's failure no longer sets the operator's Stop. No JavaScript
+engine runs on this host, so red at f87e618a by shape alone
+(`TestAChunkRefusalKeepsItsCodeAndAFailedTransferSettlesFirst`);
+`TestTheConsoleSettlesAFailedTransferBeforeItOffersItsRetry` runs the page
+under node over the real handlers (two files, the first chunk held, the
+second refused as the volume goes, Try again clicked as soon as it shows, the
+held chunk let go with a failure of its own; no file sent by two requests at
+once, both committed through Try again) and has never run: it skips here.
+The edited functions' brackets were checked by a tokenizer here.
+
+### 4. A first identity read that failed (B777)
+
+A root whose identity read failed before its watch was added was recorded
+with none, and every check returned before comparing, for good. Red at
+ca28675a: a linked root, its reads failing at the start, its link repointed
+while they failed and the reads then answering; a file written where the link
+leads now never reached the manifest. A check that finds no identity takes
+one once the folder reads, by looking at the root again and adding its watch
+again around the read (`takeRootIdentity`, `lookAgain`, `watchAgain`), with a
+scan, said once: an identity read at the check and recorded against the watch
+the root had would be the new folder's against a watch on the old one.
+`noteRootWatchesForTests`, which tests that add their trees themselves call,
+records each folder's identity now, as the start does, so those roots are
+compared and not watched again (a kqueue test, which skips here, calls the
+check directly over such roots).
+
+### 5. A root whose own watch cannot be added (B777)
+
+With the inotify watch limit spent, a root's own Add answers ENOSPC, its walk
+stops, and the start recorded the root, which every check of the roots' own
+watches then looked at again, walked, scanned and said the limit for. Red at
+5e5b1c17, the Add failing until the limit lifts (round 1's test failed it
+once, and could not see the loop): over twelve checks, eleven scans,
+thirteen tries forty milliseconds apart, the limit said thirteen times. A
+root that is there whose own watch fsnotify will not add goes to a retry
+state of its own, not the hold (which would let a healthy root's watches go
+and drop its scans and events): said once, scanned once as it gets there,
+passed over by the check, tried on the hold's timing (5 s, then twice as long
+each time, 5 min at most) on a timer of its own, each try asking its own
+folder first and saying nothing of a refusal, an Add where fsnotify keeps no
+open file per watch and, on kqueue, an open of the folder alone, since an Add
+there opens every entry outside the watcher's account (ce3a39d8: kqueue's
+walker counts a failed Add's folder held and goes on, so a root there gets to
+the retry too); once it takes its watch, watched again where it is now, with
+a scan, said once. The periodic scan, `scanIntervalSec`, 6 h by default,
+covers it meanwhile; config cannot turn it off (0 reads as the default, and
+below 1 is refused). The other root's watches deliver throughout, and the
+test's tries are spaced by the backoff and recover once the limit lifts.
+
+### 6. The linked-root fixture on Windows (B777)
+
+`repoint` renames a new directory symlink over the root's, which Windows
+refuses, and `newLinkedRootFixture` skipped only where `os.Symlink` failed,
+so on a Windows host that can make symbolic links its tests stopped there. It
+skips Windows, as `TestAnOrdinaryRenameDoesNotLoopTheWatcher` does
+(0f8f2bc1); not red on this host.
+
+### A missing root's first upload (B776)
+
+A configured root whose path is not there at all read as unreachable and was
+refused by round 1's guard, where the first upload used to make its folder.
+Reachable where a public serve starts over such a root (it warns and goes on)
+and where a root's folder goes while the bridge runs; a loopback serve does
+not start (exit 2, `TestALoopbackServeRefusesARootWhosePathIsNotThere`). Red
+at 08f41726 through a real public start: the first upload into a root not
+made yet, the index holding nothing of it, 409. The write's admission takes
+such a root where `os.Lstat` answers that nothing is at the path and the
+index's count of its rows answers none (`firstWriteMakesRoot`; `lookAtRoot`
+unchanged for the scans): 201, the folder made. A root the index holds rows
+under is still refused, nothing made (green at 08f41726, the half that must
+stay), and so is one unreachable but for its absence, a permission refused on
+its way or a link to nothing (pinned at dfa32bbb, its red a control's), and
+one whose count fails.
+
+### Negative controls
+
+Predicted by name in `.tmp/_b77x/controls-r2.predictions.txt` before the run,
+each on ce3a39d8, exact-once edits, the package's test binary built, each test
+run alone, the bytes put back from memory (`.tmp/_b77x/controls_r2.py`); the
+baselines green, `git status` clean after. L1
+`TestAWriteThroughALinkIntoAnAbsentNestedRootIsRefused`, L2
+`TestAWriteThroughALinkIsAskedOfTheRootItLandsIn`, K1
+`TestAChunkIntoARootThatReadsAsNotMountedIsRefused`, J1
+`TestAChunkRefusalKeepsItsCodeAndAFailedTransferSettlesFirst`, P1
+`TestAWriteIntoARootUnreachableButForItsAbsenceIsRefusedWithNoRows`, F1
+`TestAFirstIdentityReadThatFailedIsTakenOnceTheFolderReads`, R1
+`TestTheWatcherTriesAgainARootWhoseOwnWatchCouldNotBeAdded`, G1
+`TestAPublicBridgesFirstUploadIntoARootNotMadeYetMakesIt`, G2
+`TestAPublicBridgeRefusesAnUploadIntoAGoneRootTheIndexHoldsRowsUnder`, beside
+round 1's U1 to U6 and I1 to I10 in each package's set.
+
+| Control | Red | Green |
+|---|---|---|
+| C2-1a no owner where the write lands | L1 (all three), L2 (both) | the rest |
+| C2-1b roots compared as configured, never as they resolve | L2, the linked nested root | the rest |
+| C2-1c a root that does not resolve left out | L2, the gone root through its parent | the rest |
+| C2-2 no guard before a chunk | K1 | the rest |
+| C2-3a a refusal handed to errorFromResponse(r) | J1 | the rest |
+| C2-3b a worker's failure sets the Stop and rejects at once | J1 | the rest |
+| C2-4a no identity taken | F1 | the rest |
+| C2-4b the identity recorded at the check, no watch added | F1 | the rest |
+| C2-5a the check does not pass over an unwatched root | R1 | the rest |
+| C2-5c no backoff | R1 | the rest |
+| C2-5d no quiet ask, the tree walked at each try | R1 | the rest |
+| C2-5e an unwatched root held | R1 | the rest |
+| C2-6a no first-write allowance | G1 | G2, G3 |
+| C2-6b the row count not asked (admin) | U1's gone path, L2's gone root | the rest |
+| C2-6b the row count not asked (cmd/bridge) | G2 | G1, G3 |
+| C2-6c the absence not asked | P1 (both) | the rest |
+
+All sixteen as predicted. Not a control: `unwatchRoot`'s early return for a
+root already in the retry, a second line and scan where a try's walk fails
+again after its ask answered, a race no test makes. C2-3a and C2-3b red a
+pin of shape; the behaviour is the node test's.
+
+The link's controls again on ccbea589, predicted in
+`.tmp/_b77x/controls-r2b.predictions.txt` (C2-1b's and C2-1c's text now the
+hook's `resolveRoot`), with W1
+`TestAWriteWithNoLinkOnItsWayResolvesNoOtherRoot`; the baselines green:
+
+| Control | Red | Green |
+|---|---|---|
+| C2-1a no owner where the write lands | L1 (all three), L2 (both) | the rest |
+| C2-1b roots compared as configured | L2, the linked nested root | the rest |
+| C2-1c a root that does not resolve left out | L2, the gone root through its parent | the rest |
+| C2-1d no short cut, the roots resolved for a write with no link (c5871f1a's form) | W1, both roots resolved | |
+| C2-1e the forms made again for each path | W1, through a link: each root twice | |
+| C2-6b the row count not asked (admin) | U1's gone path, L2's gone root | the rest |
+
+All six as predicted.
+
+**Left open:** backlog B776, item 7; backlog B777, item 3.
+
+### What the orchestrator runs on a Mac
+
+Round 1's three mount tests, red with B777's round-1 fix reverted (the tree at
+100e9adc for `internal/manifest`) and green at the branch's head, each alone:
+
+    go test ./internal/manifest/ -count=1 -v -timeout 120s -run '^TestTheWatcherWatchesTheVolumeMountedOverARootItWatchedBare$'
+    go test ./internal/manifest/ -count=1 -v -timeout 120s -run '^TestTheWatcherWatchesTheVolumeMountedOverANestedRootItWatchedBare$'
+    go test ./internal/manifest/ -count=1 -v -timeout 120s -run '^TestTheWatcherWatchesARootRemountedInsideTheDebounce$'
+
+The third logs whether the remount changed the root folder's device and
+inode, and skips where it did not. Round 2's watcher tests on kqueue, green
+at the head (the backoff's quiet ask is an open of the folder there):
+
+    go test ./internal/manifest/ -count=1 -v -timeout 300s -run '^(TestTheWatcherTriesAgainARootWhoseOwnWatchCouldNotBeAdded|TestAFirstIdentityReadThatFailedIsTakenOnceTheFolderReads|TestTheCheckOfTheRootsWatchesLeavesAWaitingLookToTheFlush)$'
+
+And where node is installed, red with ce3cd800 reverted, green at the head:
+
+    go test ./internal/admin/ -count=1 -v -timeout 300s -run '^(TestTheConsoleSettlesAFailedTransferBeforeItOffersItsRetry|TestTheConsoleRetriesARefusedCommitWithItsSessionOnceTheVolumeIsBack)$'
+
+On Windows (CI's leg): the link tests through a directory junction, and the
+linked-root fixture's skip.
+
+### The gates
+
+At 8f17452e, the branch's code as it ships (the commit after it adds this
+section alone), through the shared build lock in one run
+(`.tmp/_b77x/gate.sh`), on go1.27.3, go.mod's: `make fmt` rewrote nothing;
+`make vet` clean, and so with `GOOS=windows`, `GOOS=darwin` and
+`GOOS=linux GOARCH=386`; `make test` (`-race`, `-timeout 30m`) green, 89
+packages, among them cmd/bridge in 1303 s, internal/admin in 1041 s,
+internal/manifest in 1625 s, internal/upload in 12 s, internal/trash in 2 s
+and internal/fsutil in 3 s, and the packages that test Linux alone run here
+for real (internal/alsa, internal/alsapcm on this host's ALSA,
+internal/atomicwrite, internal/player/hotplug; internal/usbid's result cached
+from an identical run); `make build-all`, its build-tag census included, and
+`make docs-check` clean; `git status` clean after. The qualification check
+against main (`scripts/qualification-version -base 994e21ba -head HEAD`)
+answers OK. `rules-b77x-r2.patch` applies to the tree (`git apply --check`),
+and on a copy with it applied the budgets hold (scanner.md 39,137 bytes,
+admin-console.md 78,529; the worst load 67.2%) and the 14 tests it cites are
+declared. Not run here: the node console tests, the darwin and kqueue runs
+above, and the Windows link tests through a junction.
+
+## 2026-11-07 — B776, B777 round 3: CI on macOS and Windows, and Windows' file identity
+
+Round 3 of backlog B776 and B777 on `fix/b77x-away-roots`, PR #1435, after the
+orchestrator applied round 2's rules patch (7959ea6f) and merged main (B762,
+903b9a1b); worker b77x on legion0 (Ubuntu 26.04, linux/amd64, go1.27.3,
+`GOTOOLCHAIN=local`, `GOPROXY=off`). Commits, oldest first: fb73c07f (red) and
+ca3db275, backlog B794; 31c67e46, the identity's comment; then this record.
+The rules go through `rules-b77x-r3.patch` (scanner.md's B776 and B777 lines
+and their long forms).
+
+### 1. A root whose path is gone, and CI's macOS and Windows legs (B794)
+
+CI's macOS and Windows legs answered 201 for
+`TestAWriteThroughALinkIsAskedOfTheRootItLandsIn`'s gone root reached through a
+link to its parent, which Linux's refused. The guard compared where a write
+lands, its folder resolved through its nearest ancestor that exists
+(`fsutil.EvalSymlinksOrClean`), with each root as `fsutil.ResolveLinks`
+resolves it and, for a root whose path is not there, as configured: two forms
+wherever a link or another spelling leads to that root's parent. Every root a
+test makes is in its temporary folder, which on macOS is reached through
+`/var`, a link to `/private/var`, and on a Windows runner is named by its short
+name (`%TEMP%` is `C:\Users\RUNNER~1\…`, `.github/scripts/printtmpdir`; the
+handle's final path that `ResolveLinks` reads spells it long,
+`TestResolveLinksAgreesWithEvalSymlinksWhereThereIsNoLink`). So the gone root
+kept `/var/…` or `RUNNER~1` while the write resolved to `/private/var/…` or the
+long name, and no root held the write. Linux's temporary folder has neither,
+and the two forms agreed there. That subtest's link leads outside the request's
+root, where the upload's own containment check refuses the commit anyway; the
+shape that loses rows is a link inside it. Red on Linux at fb73c07f, through
+the console's real handlers: a library root configured through a link, a root
+nested in it whose volume went, and an upload through a link inside the library
+root to the nested root's parent, which the containment check passes. Its
+commit answered 200, one committed, and the nested root's folder was made anew
+with the upload alone, for the scans to reap the rows under it. The forms are
+`EvalSymlinksOrClean`'s now (ca3db275), the resolution the write's own folder
+gets: a root that resolves as before, and one whose path is not there through
+its nearest folder that is, its missing names kept. The commit is refused (409
+`root_not_mounted`), nothing made; the same root holding no rows still takes
+its first upload, which makes its folder (green before and after).
+`resolveRootHook` stands in for `EvalSymlinksOrClean`. Closes backlog B794.
+
+### 2. Windows' file identity (B777)
+
+A review read `rootIdentity`'s `os.SameFile(info, info)` as answering true at
+once, reading no file ID, which would leave the identity to its first
+comparison, after the walk. go1.27.3 has no such shortcut: `os.SameFile`
+(`os/types.go`) calls `sameFile` (`os/types_windows.go`), which reads each
+side's ID through `loadFileId` before it compares them. `os.Stat` of a plain
+folder (`GetFileAttributesEx`, then `saveInfoFromPath`) leaves the ID to that
+read, which opens the path then and keeps the ID; the second read of the same
+`FileInfo` finds it done. So the comparison of the stat with itself reads the
+ID as the identity is taken. Nothing changed but the comment, which now says
+this (31c67e46), and the rules add a Don't against dropping the comparison.
+`TestARootsIdentityIsTheFolderAtItsPathWhenItIsRead` (round 1) takes the
+identity, puts another folder at the path and requires the two to differ:
+without the comparison the identity's ID is read from the new folder, red on
+Windows alone, since a stat on Linux and macOS carries the device and inode
+already.
+
+### 3. A root whose own Add keeps failing (B777)
+
+CodeRabbit read `rootWatchMissing` → `noteRootWatch(root, nil, nil)` →
+`checkRootWatches` → `lookAgain` → `watchAgain` → `scheduleScan` as a scan and
+a line at every check while the root's own Add keeps failing. That is round
+1's code. Since round 2 (5e53ba5b) `rootWatchMissing` hands such a root to
+`unwatchRoot`, which marks it, says so once and asks for one scan;
+`checkRootWatches` passes over a marked root before anything else, so no check
+reaches `lookAgain`; and a try whose walk fails again finds the root marked,
+saying nothing and scanning nothing. `TestTheWatcherTriesAgainARootWhoseOwnWatchCouldNotBeAdded`
+(R1) fails the root's own Add from the start, at the Add boundary, and asserts
+one scan over twelve checks, the limit said once and the tries on the backoff.
+C2-5a again, on 31c67e46 (the check not passing over a marked root): R1 red,
+the Add tried 18 times over twelve checks and not on the backoff, the limit
+said 13 times, and the root's watch never said as added again once the limit
+lifted (each check's look took it first). Nothing to fix.
+
+### Negative controls
+
+Predicted in `.tmp/_b77x/controls-r3.predictions.txt` before the run, each on
+31c67e46, exact-once edits, the package's test binary built, each test run
+alone, the bytes put back from memory (`.tmp/_b77x/controls_r3.py`); the
+baselines green, `git status` clean after. L2
+`TestAWriteThroughALinkIsAskedOfTheRootItLandsIn`, W1
+`TestAWriteWithNoLinkOnItsWayResolvesNoOtherRoot`, R1
+`TestTheWatcherTriesAgainARootWhoseOwnWatchCouldNotBeAdded`, beside the rest
+of the guard's tests.
+
+| Control | Red | Green |
+|---|---|---|
+| C3-1a a root whose path is not there kept as configured | L2, the gone root configured under a linked parent | the rest, L2's other three subtests among them |
+| C2-5a the check does not pass over a root whose own watch could not be added | R1 | W1 |
+
+Both as predicted. Not a control here: `rootIdentity`'s comparison of the stat
+with itself, whose removal is red on Windows alone.
+
+### What CI's macOS and Windows legs must show
+
+`TestAWriteThroughALinkIsAskedOfTheRootItLandsIn` green on both, its four
+subtests passing: the gone root through a link to its parent, red there before
+ca3db275, refused. On Windows the link tests run through directory junctions,
+and `TestARootsIdentityIsTheFolderAtItsPathWhenItIsRead` passes; with
+`rootIdentity`'s comparison taken out it goes red there, which a Windows host
+can run as that control. On macOS `TestAWriteWithNoLinkOnItsWayResolvesNoOtherRoot`
+passes too, its folders resolved through `/private/var` first.
+
+### The gates
+
+At 1202ce48, the branch's code as it ships (the commit after it adds this
+section alone), through the shared build lock in one run
+(`.tmp/_b77x/gate.sh`), on go1.27.3, go.mod's: `make fmt` rewrote nothing;
+`make vet` clean, and so with `GOOS=windows`, `GOOS=darwin` and
+`GOOS=linux GOARCH=386`; `make test` (`-race`, `-timeout 30m`) green, 89
+packages, among them cmd/bridge in 1313 s, internal/admin in 1045 s,
+internal/manifest in 1621 s, internal/upload in 11 s, internal/trash in 2 s
+and internal/fsutil in 3 s, and the packages that test Linux alone run here
+for real (internal/alsa, internal/alsapcm on this host's ALSA,
+internal/atomicwrite, internal/player/hotplug; internal/usbid's result cached
+from an identical run); `make build-all`, its build-tag census included, and
+`make docs-check` clean; `git status` clean after. The qualification check
+against main (`scripts/qualification-version -base 98edead3 -head HEAD`, main's
+tip as merged) answers OK. `rules-b77x-r3.patch` applies to the tree
+(`git apply --check`), and on a copy with it applied the budgets hold
+(scanner.md 39,464 bytes; the worst load 67.1%) and the test it cites is
+declared. Not run here: the Windows and macOS legs above, and the node console
+tests.
+
+## 2026-11-08 — B779: the DSD converter's unrolled stages, measured on a Pi 400 and not taken
+
+**Why it was tried.** B11's Pi 4 class run (above) left the gate passing with margin to spare
+but 7 to 10 points of the whole process unexplained: DSD256 converted to 176.4 kHz held 28.5 to
+31.3 % of a 1.8-GHz Cortex-A72 core for the whole process, the converter alone 15.3 % by
+`BenchmarkConvert`. B779 asked for margin, not a fix: the design's first step (§4.6), stages 2
+and 3 over fixed-size windows with no bounds checks, in pure Go, and nibble tables only if the
+A72 asked for them.
+
+**What was measured.** Two arm64 test binaries built with identical settings, the base and the
+candidate, then a third with nibble tables, each run on the Pi 400 from RAM: the determinism
+digests and `TestTheChainIsTheIndependentToolsGolden` matched in every build, so the output was
+bit-identical. Against the base, the fixed windows alone gave DSD64 −13.8 %, DSD128 −7.7 % and
+DSD256 +5.5 %: worse at the rate the margin is about. With nibble tables, DSD256 came to −4.5 %,
+about 0.8 points of a core, at +50 to +78 % on amd64.
+
+**Not taken.** The gate passes as amended (at most 40 % for the whole process, 25 % for the
+converter), and neither result justifies changing the hot loops that `dsdconv.Continuous` and
+the join windows rest on, or keeping two code paths for two architectures. The branch and the
+nibble-table patch are kept outside the repository. If margin is ever needed, profile the whole
+process's unexplained points first: the converter is about half of what the Pi measured.
 
 ## 2026-11-08 — B765: a Stop inside a native track change's release
 

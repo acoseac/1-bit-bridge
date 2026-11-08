@@ -384,6 +384,87 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   `TestAnOriginRecordOutsideTheTrashIsNotWritten`,
   `TestAnOriginRecordOutsideTheTrashIsNotRemoved`,
   `TestARecordedRootThatIsNotAbsoluteCannotBeRead`.)
+- **The console writes nothing under a library root that reads as a volume not
+  mounted: an upload's create (its staging and every destination it declares),
+  a session found in no root (its commit, its read, a chunk, its abandon), a
+  chunk whose session it finds, an upload's commit and a trash restore are
+  refused whole, before anything is written, with 409 `root_not_mounted` in
+  the hold's words** (2026-11-07, backlog B776, and its review's round 2).
+  Where the bare mount point a volume leaves is the service user's to write,
+  an upload or a restore while the volume was away left library content there,
+  which the scans then read as the root's and reaped the volume's rows under,
+  and the volume, mounted again, hid it (the guard's bullet under **Scanner**,
+  `scanner.md`). Staging lives inside its root, so a session created there
+  landed on the bare mount point and the remount hid it; a session on the
+  volume was not found while the volume was away, and each route that looked
+  for it answered 404, which the console reads as an upload lost; a commit
+  joins a path onto its session's root and a restore onto the root its entry
+  was trashed under, so either reached a root nested in that one; and a
+  restore runs its entries in turn, so one refused after another had been
+  renamed back would have answered an error in place of that success and its
+  rescan. The managers ask a guard for every path a request would write before
+  they write anything (`upload.WithRootGuard`, `trash.WithRootGuard`; serve
+  passes the scanner's, `manifest.Scanner.WriteGuard` on `scanCtx`), which
+  looks at the deepest configured root that owns each path, as its elements
+  spell it and where the write lands (round 2: a link in a healthy root to
+  another root's folder, which the write follows; the guard's bullet under
+  **Scanner**): a create's staging and its destinations, a chunk's staging
+  (round 2: a session found is no proof its root reads as it did, a root that
+  kept its staging folder while its library content went, or an old session's
+  staging left on a bare mount point; asked at every chunk, the answer never
+  kept), a commit's destinations (`commitTargets`), a restore's
+  (`guardRestore`). A session in no root, or a restore entry in no root's
+  trash, asks every root's own look, since its id names no root: with more
+  than one root, one gone for good is then answered so too while any root's
+  volume is away. The answer (`writeRootAwayRefusal`, from `writeUploadError`
+  and `writeTrashError`) names the root by its folder's name and no path, and
+  is logged at Info with the root. The upload page shows it with Try again,
+  outside the review it hid (`showUploadFailure`), which carries on the same
+  session (`retryUpload`: read again from the server, the files it holds
+  complete passed over by `transferAll`, then committed), never a new session
+  or a finished file sent again; a refusal at create leaves the review and its
+  Upload button where they were. A chunk's refusal keeps its code (round 2:
+  `putUploadChunk` reads a refusal's body once, where it handed
+  `errorFromResponse` a 409's body it had read for an offset, so the page
+  offered no Try again), and a transfer that fails answers only once every
+  worker has settled, its other workers stopped at their next chunk
+  (`transferAll`), so Try again never runs beside an old worker; a worker's
+  failure no longer sets `uploadState.aborted`, the operator's Stop, which the
+  retry cleared and an old worker's late failure had turned into a stop of the
+  retry. The first upload or restore into a fresh, empty root on a healthy
+  disk, which the index holds nothing of, is never refused; a configured root
+  whose path is not there at all, the index holding none of its rows, takes
+  its first upload, which makes its folder (round 2; a public serve starts
+  over such a root, a loopback one refuses it at its start), while one the
+  index holds rows under, and one unreachable but for its absence (a
+  permission, a link to nothing), is refused, nothing made. One case stays
+  open: backlog B776, item 7. **Don't write any of a request before its roots
+  are looked at, ask the root a request names in place of the deepest that
+  owns each path, ask the root a request names in place of where the write
+  lands, refuse part of a request after writing another part, answer a session
+  or an entry in no root with 404 while a root reads as not mounted, take a
+  chunk without asking its staging's root, name a path in the refusal, give
+  the retry a new session, hand `errorFromResponse` a response whose body was
+  read, answer a transfer's failure before every worker has settled, or let a
+  worker's failure set the operator's Stop.**
+  `TestAnUploadIntoARootThatReadsAsNotMountedIsRefusedAndWritesNothing`,
+  `TestAnUploadSessionOnAVolumeThatIsAwayAnswersTheRefusalNotNotFound`,
+  `TestAWriteThroughAHealthyOuterRootIntoAnAbsentNestedOneIsRefused`,
+  `TestARestoreIsRefusedWholeBeforeItRenamesAnything`,
+  `TestTheFirstUploadAndRestoreIntoAFreshEmptyRootAreNotRefused`,
+  `TestAWriteThroughALinkIntoAnAbsentNestedRootIsRefused`,
+  `TestAWriteThroughALinkIsAskedOfTheRootItLandsIn`,
+  `TestAChunkIntoARootThatReadsAsNotMountedIsRefused`,
+  `TestAWriteIntoARootUnreachableButForItsAbsenceIsRefusedWithNoRows`,
+  `TestAChunkRefusalKeepsItsCodeAndAFailedTransferSettlesFirst`,
+  `TestARefusalTheReviewHidOffersARetryOfTheSameSession`,
+  `TestTheConsoleRetriesARefusedCommitWithItsSessionOnceTheVolumeIsBack` and
+  `TestTheConsoleSettlesAFailedTransferBeforeItOffersItsRetry` (both under
+  node, where node is installed) and cmd/bridge's
+  `TestTheConsolesLibraryWritersAreGuardedInProduction`,
+  `TestAPublicBridgesFirstUploadIntoARootNotMadeYetMakesIt`,
+  `TestAPublicBridgeRefusesAnUploadIntoAGoneRootTheIndexHoldsRowsUnder` and
+  `TestALoopbackServeRefusesARootWhosePathIsNotThere` pin it.
 
 - **A CSS grid with no `grid-template-columns` sizes its track to the WIDEST
   item's max-content, and no Go guard can see the result.** `.deleted-list`
