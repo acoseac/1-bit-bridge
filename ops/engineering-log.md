@@ -85999,3 +85999,25 @@ tip as merged) answers OK. `rules-b77x-r3.patch` applies to the tree
 (scanner.md 39,464 bytes; the worst load 67.1%) and the test it cites is
 declared. Not run here: the Windows and macOS legs above, and the node console
 tests.
+
+## 2026-11-08 — B779: the DSD converter's unrolled stages, measured on a Pi 400 and not taken
+
+**Why it was tried.** B11's Pi 4 class run (above) left the gate passing with margin to spare
+but 7 to 10 points of the whole process unexplained: DSD256 converted to 176.4 kHz held 28.5 to
+31.3 % of a 1.8-GHz Cortex-A72 core for the whole process, the converter alone 15.3 % by
+`BenchmarkConvert`. B779 asked for margin, not a fix: the design's first step (§4.6), stages 2
+and 3 over fixed-size windows with no bounds checks, in pure Go, and nibble tables only if the
+A72 asked for them.
+
+**What was measured.** Two arm64 test binaries built with identical settings, the base and the
+candidate, then a third with nibble tables, each run on the Pi 400 from RAM: the determinism
+digests and `TestTheChainIsTheIndependentToolsGolden` matched in every build, so the output was
+bit-identical. Against the base, the fixed windows alone gave DSD64 −13.8 %, DSD128 −7.7 % and
+DSD256 +5.5 %: worse at the rate the margin is about. With nibble tables, DSD256 came to −4.5 %,
+about 0.8 points of a core, at +50 to +78 % on amd64.
+
+**Not taken.** The gate passes as amended (at most 40 % for the whole process, 25 % for the
+converter), and neither result justifies changing the hot loops that `dsdconv.Continuous` and
+the join windows rest on, or keeping two code paths for two architectures. The branch and the
+nibble-table patch are kept outside the repository. If margin is ever needed, profile the whole
+process's unexplained points first: the converter is about half of what the Pi measured.
