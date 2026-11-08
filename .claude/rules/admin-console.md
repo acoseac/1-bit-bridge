@@ -478,32 +478,48 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   sees and no whole-file digest is declared to catch. After every await a run
   asks whether it may go on (`uploadCheckpoint`), and right before each
   request whether it may still send: each chunk after its read and hash, a
-  digest mismatch's re-send included, and its session's create. A commit
-  already asked for may land; its report is said only where the run still
+  digest mismatch's re-send included, and its session's create; a chunk's
+  request asks too whether its transfer has failed (`failed`, round 2): a
+  worker reading or hashing its chunk when a sibling's chunk failed sends
+  nothing more. A commit already asked for may land; its report is said
+  only where the run still
   owns the page (`uploadOwns`), and its catch and finally go through
   `showUploadRunEnd` and `endUploadRun`, which ask first. Refused, not
   superseded, since a superseded run would leave its session with no control
   on the page: while a run owns it, both pickers, Upload, Try again and
   Discard it are disabled (`setUploadBusy`, the pickers' labels dimmed),
   `stageFiles` refuses, the drop target's handler refuses a drop (a div no
-  disabled state stops) and again a folder still being read when a run began,
-  and the note in the drop zone (`upload-busy`) says why. Stop is offered from
-  Try again's start, and a stop reads the page's interrupted uploads again
-  (`showUploadStopped`), so choosing the same files carries its session on,
-  as its words say. Cancel while a run prepares stops it and clears the page
-  at once, a session the server made meanwhile left an interrupted upload; a
+  disabled state stops), and the note in the drop zone (`upload-busy`) says
+  why. A dropped folder is staged only where the page holds the same upload,
+  with the same count of runs (`runs`, counted in `beginUploadRun`), as when
+  its reading began (round 2): a run begun since, under way or ended (its
+  report, or the Try again it offers, the page's now, since an ended run
+  leaves its upload in place), a pick, Cancel, a commit's report and a
+  navigation each refuse it. Stop is offered from Try again's start, and a
+  stop puts its session on the page's list of interrupted uploads at once,
+  at the list's end so the banner's session, the one Discard it takes, stays
+  the first, then reads the list back (`showUploadStopped`): choosing the
+  same files carries the session on, as the stop's words say, even before
+  that read answers (round 2: the controls came back first, and a pick in
+  between started over in a second session). Cancel while a run prepares
+  stops it and clears the page at once, a session the server made meanwhile
+  left an interrupted upload; a
   navigation (wireUpload's abort) stops the run and clears the page's upload,
   and the library root's read, `refreshResumable` and `discardResumable`
   touch only the page they were asked on. **Don't read `uploadState` in a
   run's chain, take a run's files or session after its first await, touch the
   page or the state after an await without the run's ask, make a request
-  without `uploadCheckpoint` right before it, leave a picker, Upload, Try
+  without `uploadCheckpoint` right before it, send a chunk without asking
+  its transfer's `failed` right before it, leave a picker, Upload, Try
   again, Discard it or the drop target live while a run owns the page,
-  supersede a running upload with a pick, or let a run that lost the page
-  speak or give back controls.** `TestAnUploadRunOwnsThePageFromItsFirstAwait`,
+  stage a dropped folder whose reading saw a run begin or the page's upload
+  change, give a stop's controls back before its session is on the page's
+  list, supersede a running upload with a pick, or let a run that lost the
+  page speak or give back controls.** `TestAnUploadRunOwnsThePageFromItsFirstAwait`,
   `TestAnUploadRunSendsNothingOnceItMayNotGoOn` and
   `TestTheUploadPageRefusesAnotherUploadWhileARunOwnsIt` pin the shape;
   `TestARetrySendsOnlyTheFilesItBeganWith`,
+  `TestASiblingSendsNothingOnceAnotherWorkersChunkFailed`,
   `TestStopAndCancelEndARunWhereverItIs`,
   `TestNoContinuationTouchesAPageItNoLongerOwns`,
   `TestTheResumePathIsRefusedWhileARetryRuns` and
