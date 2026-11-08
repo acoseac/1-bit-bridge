@@ -87826,3 +87826,17 @@ with the reason where its volume makes no short names), `TestACaseOnlyDifference
 Windows answer, and the alias and link cases through symbolic links (skipping with the error where the
 runner may make none; round 3's link case ran there). `TestARecordedPathComparesAsWindowsResolvesIt` stands
 Windows' resolution in on every host. Vetted with `GOOS=windows` and `GOOS=darwin`; neither run here.
+
+### Gates
+
+At 8283d4d9 (the code is 62294b1c's), inside the build slot: `GOTOOLCHAIN=go1.27.3 make test
+TEST_PKGS='./internal/fsutil/... ./cmd/bridge/...'` with TMPDIR on disk (`.tmp/_b741/gotmp-r4`) passed,
+internal/fsutil 3.5 s and cmd/bridge 1,283 s; then the round's cases and the data dir's spelling cases by
+name under `-race` passed, 19 of 19 with their 94 subtests and none skipped, once with TMPDIR on disk and once
+through a link to a folder one deeper. internal/fsutil is vetted with `GOOS=windows`, `GOOS=darwin` and
+`GOOS=linux GOARCH=386`, the Windows-only case among what Windows vets, and cmd/bridge (a comment changed)
+on Linux; go1.27.3's gofmt is clean. The rules patch: `git apply --check` clean; applied to a disposable
+`git archive` copy of HEAD (its landing asserted in both files), where `make docs-check` passed (scanner.md
+43.6 KB) and `verify_moves.py --base HEAD` found no citation broken, its MISSING exactly the two blocks the
+patch edits (the gap-3 line, and its twin with the long form); every test name the patch cites exists. Not
+run here: the Windows cases, which CI's Windows leg runs, and macOS.
