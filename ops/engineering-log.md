@@ -86352,3 +86352,22 @@ No guarded path changed (`internal/config` and `ops/settings-apply-semantics.md`
 are outside `version_gate.go`'s paths and prefixes):
 `go run ./scripts/qualification-version -base a77578f8 -head HEAD` passed at
 446703db, and `qualificationVersion` stays 45.
+
+### Gates
+
+At 90935a2e, inside the build slot (taken at 08:30 after a 42-minute wait), on
+Go 1.27.3: `make fmt` changed nothing; `make vet` and its windows, darwin and
+linux/386 legs passed; `make docs-check` passed on the tree (player.md 99.2 %,
+the worst load 67.3 %), and the budgets measured with `rules-b761-r2.patch`'s
+rules file in place passed (config-lifecycle.md 99,532 bytes of its 100,000:
+the next rule there moves an entry out first; the worst load 67.4 %), where
+`git apply --check` takes the patch and `TestEveryCitedTestNameExists` passed
+on a patched copy of the tree and failed a ghost citation planted in the
+copy's History file. `go test -race` of internal/config passed alone before
+the gate. `make test` (race, the Makefile's tags, `-timeout 30m`) passed, 89
+packages ok in 35 minutes, the Linux-only ones run rather than vetted (alsapcm
+82 s, the durable writer 20 s, the identity's backup 269 s; cmd/bridge
+1,311 s, internal/admin 1,048 s, internal/manifest 1,640 s, internal/config
+15 s), and `make build-all` passed. Nothing on the wire changed, so neither
+`PROTOCOL.md` nor the iOS app's mirror is touched. Not run here: macOS and
+Windows natively, CI's runners and the console in a browser.
