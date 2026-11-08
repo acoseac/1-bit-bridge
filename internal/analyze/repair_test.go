@@ -560,7 +560,9 @@ func TestARepairThatFailsOnTheCurvesAccountIsCounted(t *testing.T) {
 			if err := p.EnqueueRepair(f.spec); err != nil {
 				t.Fatal(err)
 			}
-			waitForPool(t, p, counted.name, func(st PoolStats) bool { return st.Failed == 1 })
+			if st := waitForPoolSettled(t, p, counted.name); st.Enqueued != 1 || st.Failed != 1 {
+				t.Fatalf("pool = %+v, want the one repair enqueued and failed", st)
+			}
 			rec, err := f.store.GetWaveformRegenFailure(context.Background(), f.spec.SourceLibraryRel)
 			if err != nil || rec == nil || rec.Failures != 1 || rec.Build != f.spec.Build ||
 				rec.SourceMTimeNS != f.spec.SourceMTimeNS || rec.SourceSize != f.spec.SourceSize {
@@ -621,7 +623,7 @@ func TestARepairRecordsTheCurveAndNothingElse(t *testing.T) {
 	if err := p.EnqueueRepair(f.spec); err != nil {
 		t.Fatal(err)
 	}
-	st := waitForPool(t, p, "repair", func(st PoolStats) bool { return st.Done+st.Failed == 1 })
+	st := waitForPoolSettled(t, p, "repair")
 	if st.Done != 1 || st.Enqueued != 1 {
 		t.Fatalf("pool = %+v, want the one repair enqueued and done", st)
 	}
