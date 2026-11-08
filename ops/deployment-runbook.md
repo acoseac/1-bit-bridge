@@ -1106,12 +1106,18 @@ bridge does about it:
   in the words the watcher holds it with, and nothing is written to the bare
   mount point, whose content the scans would read as the root's and reap the
   volume's rows under; a write through a link in another root that leads
-  there is refused too. The upload page offers Try again, which commits the
-  same upload, its finished files not sent again, once the volume is back. A
+  there is refused too. Where the upload had begun, the page offers Try
+  again, which commits the same upload, its finished files not sent again,
+  once the volume is back; where its start was refused, nothing was begun and
+  there is nothing to try again: Upload starts it once the volume is back. A
   root whose folder is not there at all, and that the index holds nothing of
   (a public bridge starts over one; a loopback bridge does not start), takes
   its first upload, which makes the folder; one the index holds tracks under
-  is refused, nothing made.
+  is refused, nothing made. A root whose folder is there but that the index
+  holds nothing of reads as it is, so an upload into its bare mount point is
+  not refused, and the volume, once mounted, hides it (backlog B776, item 7):
+  before the first upload into a root nothing has been indexed under, check
+  that its volume is mounted.
 - **The data dir on that volume.** From the second start of that release,
   serve keeps a record of the data dir it opened its database in, beside the
   config: `.bridge.yaml.datadir`. A start that finds that data dir holding
