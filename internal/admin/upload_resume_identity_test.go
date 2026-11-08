@@ -18,6 +18,7 @@ func TestASameSizeEditDoesNotResume(t *testing.T) {
 	}
 	js := readFile(t, "static/app.js")
 	driver := `let resumableSessions = [];
+const resumableDiscarding = new Set();
 ` + extractJSFunction(t, js, "resumeIdentityComplete") + `
 ` + extractJSFunction(t, js, "sessionKey") + `
 ` + extractJSFunction(t, js, "findResumable") + `

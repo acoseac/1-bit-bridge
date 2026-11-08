@@ -2029,6 +2029,9 @@ let resumableSessions = [];
 // and a read answered before a commit listed the committed session again.
 // The list and this are the console's, kept across a boosted navigation.
 const resumableReads = { generation: 0, asked: 0, askedIn: 0, believed: 0 };
+// The sessions Discard it is deleting, which no pick resumes until the delete
+// has answered (discardResumable).
+const resumableDiscarding = new Set();
 
 async function refreshResumable() {
   const banner = document.getElementById("upload-resume");
@@ -2274,6 +2277,7 @@ function findResumable(picked, overwrite) {
   if (want == null) return undefined;
   return resumableSessions.find(
     (s) =>
+      !resumableDiscarding.has(s.id) &&
       !!s.overwrite === !!overwrite &&
       sessionKey(s.files.map((f) => ({
         path: f.path, size: f.size, modified: f.modified, fingerprint: f.fingerprint,
@@ -2290,7 +2294,7 @@ function findFilesOnlyMatch(picked) {
   })));
   if (want == null) return undefined;
   return resumableSessions.find(
-    (s) => sessionKey(s.files.map((f) => ({
+    (s) => !resumableDiscarding.has(s.id) && sessionKey(s.files.map((f) => ({
       path: f.path, size: f.size, modified: f.modified, fingerprint: f.fingerprint,
     }))) === want,
   );
@@ -2310,13 +2314,19 @@ async function discardResumable() {
   const s = resumableSessions[0];
   if (!s || uploadState?.run) return;
   const banner = document.getElementById("upload-resume");
+  // While its delete is pending no pick resumes it (findResumable): the same
+  // files chosen meanwhile start a session of their own rather than feed one
+  // about to go (B797's round 5). A refused delete gives it back.
+  resumableDiscarding.add(s.id);
   try {
     await API.delete(`/api/upload/sessions/${encodeURIComponent(s.id)}`);
   } catch (e) {
+    resumableDiscarding.delete(s.id);
     if (banner?.isConnected && !uploadState?.run) showUploadError(e?.message ? e.message : String(e));
     return;
   }
   forgetResumable(s.id);
+  resumableDiscarding.delete(s.id);
   await refreshResumable();
   if (banner?.isConnected && !uploadState?.run) showUploadResult("Discarded the interrupted upload.");
 }

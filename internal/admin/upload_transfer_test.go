@@ -126,6 +126,7 @@ globalThis.document = {
 let uploadState = null;
 let resumableSessions = [];
 let uploadAwaitingScan = false;
+const resumableDiscarding = new Set();
 const shown = () => ({
   reviewHidden: pageEls.get("upload-review").hidden,
   error: pageEls.get("upload-error").hidden ? "" : pageEls.get("upload-error").textContent,

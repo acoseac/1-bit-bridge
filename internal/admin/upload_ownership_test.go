@@ -1154,6 +1154,7 @@ globalThis.document = {
 let uploadState = null;
 let resumableSessions = [];
 let uploadAwaitingScan = false;
+const resumableDiscarding = new Set();
 
 // newPage renders the page as upload.html ships it and wires it, as initUpload
 // does with uploads on. Its first read of the list of interrupted uploads is
