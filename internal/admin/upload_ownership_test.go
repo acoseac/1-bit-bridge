@@ -1713,6 +1713,18 @@ const steps = {
     await settle(click("upload-start"), "the upload of the same files");
     out.shown.final = shown();
   },
+  // An interrupted upload listed; the page is left and opened again, and the
+  // new page's read of the list fails.
+  "navigation-failed-read": async () => {
+    newPage();
+    await ready();
+    out.shown.loaded = shown();
+    const failedRead = answerParsed("GET /api/upload/sessions", 2);
+    navigate();
+    await ready();
+    await settle(failedRead, "the new page's failed read of the list");
+    out.shown.after = shown();
+  },
   // An interrupted upload listed, a second stopped and put on the list, both
   // then deleted elsewhere (another tab's Discard it); the page is left and
   // opened again, and reads the list.
@@ -2670,6 +2682,21 @@ func TestALateOrFailedReadOfTheListKeepsWhatThePageChanged(t *testing.T) {
 		// The read after both were deleted elsewhere is the server's word: the
 		// session the page itself put on the list goes too.
 		requireOnList(t, "once both were deleted elsewhere and the page read its list", got.Shown["after"])
+	})
+
+	t.Run("a failed read once the page was left and opened again", func(t *testing.T) {
+		rig := newOwnershipRig(t, ownershipFailedList(2))
+		rig.session = rig.interruptedSessionOf(t, ownershipOtherPath, ownershipOther)
+		got := runOwnershipCase(t, rig, script, node, "navigation-failed-read")
+		requireOnList(t, "as the page loaded", got.Shown["loaded"], rig.session)
+		// The list is the console's, kept across the navigation, and the new
+		// page's read failed: the banner shows what the list holds, so Discard
+		// it can be reached and the same files resume knowingly.
+		after := got.Shown["after"]
+		requireOnList(t, "once the page was opened again and its read failed", after, rig.session)
+		if !strings.Contains(after.BannerText, "An upload was interrupted") {
+			t.Errorf("once the page was opened again and its read failed, the banner says %q, want the kept session's words", after.BannerText)
+		}
 	})
 
 	t.Run("a commit that lands after its page was left", func(t *testing.T) {
