@@ -248,7 +248,8 @@ func TestAnUploadRunSendsNothingOnceItMayNotGoOn(t *testing.T) {
 // page, a pick, a drop (one whose folder was still being read included),
 // Upload, Try again and Discard it are refused, the drop target in its handler
 // since a div cannot be disabled, and the note in the drop zone says why; Stop
-// is offered from the retry's start.
+// is offered from the retry's start, and a stopped run's session is listed
+// again, as the stop's words promise.
 func TestTheUploadPageRefusesAnotherUploadWhileARunOwnsIt(t *testing.T) {
 	src := readFile(t, "static/app.js")
 	for name, refusal := range map[string]string{
@@ -303,6 +304,12 @@ func TestTheUploadPageRefusesAnotherUploadWhileARunOwnsIt(t *testing.T) {
 	retry := uploadJSFunction(t, src, "retryUpload")
 	if stop := strings.Index(retry, `document.getElementById("upload-progress").hidden = false;`); stop < 0 || stop > strings.Index(retry, "await ") {
 		t.Error("Stop is not offered until Try again has read its session: a stop during that read cannot be pressed")
+	}
+	// A stop says its session's progress is kept and that starting again
+	// resumes it, which holds only once the page has read its interrupted
+	// uploads again: a session made since the page's last read is in no list.
+	if stopped := uploadJSFunction(t, src, "showUploadStopped"); !strings.Contains(stopped, "start again to resume") || !strings.Contains(stopped, "refreshResumable();") {
+		t.Error("a stopped upload's session is not read back into the page's list, so choosing the same files again starts over, against what the stop says")
 	}
 
 	tmpl := readFile(t, "templates/upload.html")
@@ -1063,6 +1070,24 @@ const steps = {
     await settle(first, "the cancelled upload");
     out.shown.final = shown();
   },
+  "cancel-overlap": async () => {
+    newPage();
+    await ready();
+    await settle(pick([oldFile()]), "the pick");
+    const first = click("upload-start");
+    await reached("create");
+    await settle(click("upload-cancel"), "Cancel");
+    await settle(pick([fileAt(input.otherPath, input.other)]), "the second pick");
+    const second = click("upload-start");
+    out.took.second = second !== null;
+    await reached("second-put");
+    await release("create");
+    await settle(first, "the cancelled upload");
+    out.shown.during = shown();
+    await release("second-put");
+    await settle(second, "the second upload");
+    out.shown.final = shown();
+  },
   "drop-pending": async () => {
     newPage();
     await ready();
@@ -1106,11 +1131,16 @@ const steps = {
     navigate();
     await ready();
     out.shown.fresh = shown();
+    // The new page's own upload is under way when the left one's chunk fails.
+    await settle(pick([fileAt(input.otherPath, input.other)]), "the new page's pick");
+    const second = click("upload-start");
+    out.took.second = second !== null;
+    await reached("second-put");
     await release("put");
     await settle(run, "the upload a navigation left");
     out.shown.after = shown();
-    await settle(pick([fileAt(input.otherPath, input.other)]), "the new page's pick");
-    await settle(click("upload-start"), "the new page's upload");
+    await release("second-put");
+    await settle(second, "the new page's upload");
     out.shown.final = shown();
   },
   "navigate-commit": async () => {
@@ -1398,8 +1428,9 @@ func TestARetrySendsOnlyTheFilesItBeganWith(t *testing.T) {
 // resumable, the page says so and lists it, and choosing the same files again
 // carries it on. Cancel while an upload prepares (its session's create held)
 // ends it there: the page is clear at once for a new upload, which runs and
-// reports alone, and the cancelled upload, its create answered, sends nothing
-// and says nothing, its session left on the server as an interrupted upload.
+// reports alone, and the cancelled upload, its create answered (after the new
+// upload, or while its chunk is held), sends nothing and says nothing, its
+// session left on the server as an interrupted upload.
 func TestStopAndCancelEndARunWhereverItIs(t *testing.T) {
 	script, node := ownershipScript(t)
 	words := uploadBusyWords(readFile(t, "templates/upload.html"))
@@ -1482,15 +1513,41 @@ func TestStopAndCancelEndARunWhereverItIs(t *testing.T) {
 		rig.requireFile(t, ownershipOtherPath, ownershipOther)
 		rig.requireFile(t, ownershipPath, "")
 	})
+
+	t.Run("Cancel, the cancelled upload's create answering while the next upload runs", func(t *testing.T) {
+		rig := newOwnershipRig(t, ownershipRule{Kind: "create", Nth: 1, Hold: "create"}, ownershipRule{Kind: "put", Nth: 1, Hold: "second-put"})
+		got := runOwnershipCase(t, rig, script, node, "cancel-overlap")
+		if !got.Took["second"] {
+			t.Fatal("after Cancel the page refused a new upload")
+		}
+		// The next upload owns the page: the cancelled one's end says
+		// nothing there and gives back nothing it does not own.
+		during := got.Shown["during"]
+		if !during.ProgressShown || during.Error != "" || during.RetryShown || during.Result != "" {
+			t.Errorf("once the cancelled upload's create answered, the page shows %+v, want the running upload's progress and nothing else", during)
+		}
+		requireBusy(t, "once the cancelled upload's create answered", during, words)
+		requireAdded(t, "after the next upload", got.Shown["final"], "1 added")
+		made := rig.sessionsMade()
+		if len(made) != 2 {
+			t.Fatalf("the page made the sessions %q, want the cancelled upload's and the next one's:\n%v", made, rig.requests())
+		}
+		if puts := rig.of("put", made[0]); len(puts) != 0 {
+			t.Errorf("the cancelled upload sent %d chunks", len(puts))
+		}
+		rig.requirePuts(t, made[1], ownershipOther, []ownershipPut{{0, 200}, {8, 200}, {16, 200}})
+		rig.requireFile(t, ownershipOtherPath, ownershipOther)
+	})
 }
 
 // TestNoContinuationTouchesAPageItNoLongerOwns: a folder whose reading was
 // still under way when an upload began, or when a navigation replaced the
 // page, is not staged over either; a drop while an upload runs is refused at
-// once; and an upload a navigation left (its chunk held, then failing; or its
-// commit held, then answered) sends nothing more and touches nothing on the
-// page shown since, whose own upload then runs and reports alone. The commit
-// already asked for lands.
+// once; and an upload a navigation left (its chunk held, then failing while
+// the new page's own upload runs; or its commit held, then answered over the
+// new page's staged pick) sends nothing more and touches nothing on the page
+// shown since, whose own upload runs and reports alone. The commit already
+// asked for lands.
 func TestNoContinuationTouchesAPageItNoLongerOwns(t *testing.T) {
 	script, node := ownershipScript(t)
 	words := uploadBusyWords(readFile(t, "templates/upload.html"))
@@ -1533,17 +1590,27 @@ func TestNoContinuationTouchesAPageItNoLongerOwns(t *testing.T) {
 		rig.requireFile(t, "Dropped/01.flac", "")
 	})
 
-	t.Run("an upload whose chunk fails after a navigation", func(t *testing.T) {
-		rig := newOwnershipRig(t, ownershipRule{Kind: "put", Nth: 2, Hold: "put",
-			Answer: http.StatusInternalServerError, AnswerBody: `{"error":"test_failure","message":"a failure the test made"}`})
+	t.Run("an upload whose chunk fails after a navigation, the new page's upload under way", func(t *testing.T) {
+		rig := newOwnershipRig(t,
+			ownershipRule{Kind: "put", Nth: 2, Hold: "put", Answer: http.StatusInternalServerError,
+				AnswerBody: `{"error":"test_failure","message":"a failure the test made"}`},
+			ownershipRule{Kind: "put", Nth: 3, Hold: "second-put"})
 		got := runOwnershipCase(t, rig, script, node, "navigate-failure")
-		fresh, after := got.Shown["fresh"], got.Shown["after"]
-		for at, s := range map[string]ownershipShown{"the page shown since": fresh, "once the chunk failed": after} {
-			if s.ReviewShown || s.ProgressShown || s.Error != "" || s.RetryShown || s.Result != "" {
-				t.Errorf("%s shows %+v, want nothing of the upload a navigation left", at, s)
-			}
-			requireFree(t, at, s)
+		fresh := got.Shown["fresh"]
+		if fresh.ReviewShown || fresh.ProgressShown || fresh.Error != "" || fresh.RetryShown || fresh.Result != "" {
+			t.Errorf("the page shown since shows %+v, want nothing of the upload a navigation left", fresh)
 		}
+		requireFree(t, "the page shown since", fresh)
+		if !got.Took["second"] {
+			t.Fatal("the new page refused its own upload")
+		}
+		// The new page's upload owns it: the left one's failure says nothing
+		// there and gives back nothing it does not own.
+		after := got.Shown["after"]
+		if !after.ProgressShown || after.Error != "" || after.RetryShown || after.Result != "" {
+			t.Errorf("once the left upload's chunk failed, the new page shows %+v, want its own upload's progress and nothing else", after)
+		}
+		requireBusy(t, "once the left upload's chunk failed", after, words)
 		requireAdded(t, "after the new page's upload", got.Shown["final"], "1 added")
 		made := rig.sessionsMade()
 		if len(made) != 2 {
