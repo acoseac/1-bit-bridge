@@ -345,7 +345,9 @@ const (
 	ownershipNew       = "NEW:0123NEW:4567NEW:89abNEW:cdef" // OLD's path and size, other bytes
 	ownershipOtherPath = "Other Album/02.flac"
 	ownershipOther     = "oth:0123oth:4567oth:89ab" // 24 bytes, three chunks
-	ownershipModified  = 1700000000000
+	// File.lastModified in milliseconds, past 2^31: an int64, not the int an
+	// untyped constant becomes in a map of any, which a 32-bit build overflows.
+	ownershipModified = int64(1700000000000)
 )
 
 // ownershipReq is one request the page made, as the rig saw it.
