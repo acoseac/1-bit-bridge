@@ -329,3 +329,149 @@ func TestTheOptOutsVariablesAreStillWrittenAsTheirSwitchesAre(t *testing.T) {
 		}
 	}
 }
+
+// envSaveFile writes text as a config in a directory of its own, beside a
+// library, {lib} and {dir} in it standing for the library's path and the
+// config's directory, and returns the config's path and its directory.
+func envSaveFile(t *testing.T, text string) (path, dir string) {
+	t.Helper()
+	dir = t.TempDir()
+	lib := filepath.Join(dir, "Music")
+	if err := os.MkdirAll(lib, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	text = strings.NewReplacer("{lib}", yamlStr(lib), "{dir}", yamlStr(dir)).Replace(text)
+	path = filepath.Join(dir, "bridge.yaml")
+	if err := os.WriteFile(path, []byte(text), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path, dir
+}
+
+// TestASaveWritesNoKeyTheFileDoesNotWrite: a leaf a variable set that the
+// file does not write is written as no key by a save of another setting,
+// whatever its field's tag (backlog B761's second round). The five leaves
+// whose field writes its zero value as a key (no omitempty) are the ones an
+// empty or zero value would put there, a key the file never had: each is
+// left out of the file, through serve's boot read and two saves, and the
+// next start without the variable reads the file's own value, the default.
+func TestASaveWritesNoKeyTheFileDoesNotWrite(t *testing.T) {
+	const roots = "libraryRoots:\n  - {lib}\n"
+	for _, c := range []struct {
+		name, leaf, file string
+		vars             func(dir string) map[string]string
+		// value is the leaf as a config gives it, and own what the next start
+		// without the variable reads, the file's own value, its default.
+		value func(c *Config) any
+		own   func(dir string) any
+	}{
+		{
+			name: "scanIntervalSec", leaf: "scanIntervalSec", file: roots,
+			vars:  func(string) map[string]string { return map[string]string{"BRIDGE_SCAN_INTERVAL_SEC": "120"} },
+			value: func(c *Config) any { return c.ScanIntervalSec },
+			own:   func(string) any { return DefaultScanIntervalSec },
+		},
+		{
+			name: "listenAddress", leaf: "listenAddress", file: roots,
+			vars:  func(string) map[string]string { return map[string]string{"BRIDGE_LISTEN_ADDRESS": "127.0.0.1:9911"} },
+			value: func(c *Config) any { return c.ListenAddress },
+			own:   func(string) any { return DefaultListenAddress },
+		},
+		{
+			name: "dataDir", leaf: "dataDir", file: roots,
+			vars: func(dir string) map[string]string {
+				return map[string]string{"BRIDGE_DATA_DIR": filepath.Join(dir, "elsewhere")}
+			},
+			value: func(c *Config) any { return c.DataDir },
+			own:   func(dir string) any { return filepath.Join(dir, "data") },
+		},
+		{
+			name: "libraryName", leaf: "libraryName", file: roots,
+			vars:  func(string) map[string]string { return map[string]string{"BRIDGE_LIBRARY_NAME": "Env Name"} },
+			value: func(c *Config) any { return c.LibraryName },
+			own:   func(string) any { return DefaultLibraryName },
+		},
+		{
+			// An output-only bridge is a loopback install with no library
+			// root, so a file without roots loads without the variable too.
+			name: "libraryRoots", leaf: "libraryRoots", file: "output:\n  mpd: \"on\"\n",
+			vars: func(dir string) map[string]string {
+				return map[string]string{"BRIDGE_LIBRARY_ROOTS": filepath.Join(dir, "Music")}
+			},
+			value: func(c *Config) any { return len(c.LibraryRoots) },
+			own:   func(string) any { return 0 },
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			path, dir := envSaveFile(t, c.file)
+			vars := c.vars(dir)
+			for name, v := range vars {
+				t.Setenv(name, v)
+			}
+			if _, there := fileLeaf(t, path, c.leaf); there {
+				t.Fatalf("the fixture writes %s; it must not", c.leaf)
+			}
+			rc := bootHolder(t, path)
+			live := c.value(rc.Load())
+			if reflect.DeepEqual(live, c.own(dir)) {
+				t.Fatalf("booted with %v, the live %s is %#v, the default: the variable set nothing", vars, c.leaf, live)
+			}
+			for i := 1; i <= 2; i++ {
+				if err := rc.Update(path, func(next *Config) error {
+					next.Library.AllowDelete = !next.Library.AllowDelete
+					return nil
+				}); err != nil {
+					t.Fatalf("save %d: %v", i, err)
+				}
+				if got, there := fileLeaf(t, path, c.leaf); there {
+					t.Errorf("save %d of another setting wrote %s = %#v, a key the file did not have", i, c.leaf, got)
+				}
+				if got := c.value(rc.Load()); !reflect.DeepEqual(got, live) {
+					t.Errorf("save %d: the holder publishes %s = %#v, want the variable's %#v", i, c.leaf, got, live)
+				}
+			}
+			withoutVariables(t, vars, func() {
+				if got := c.value(loadAt(t, path)); !reflect.DeepEqual(got, c.own(dir)) {
+					t.Errorf("a start without %v reads %s = %#v, want the file's own %#v", vars, c.leaf, got, c.own(dir))
+				}
+			})
+		})
+	}
+}
+
+// TestAnEmptyListOverrideASaveLeftKeepsTheFilesList: a variable that sets a
+// list to none (BRIDGE_METRICS_ALLOW_CIDRS="," loads an empty list) and that
+// a save of another setting leaves as it was keeps the file's own list in
+// the file, through two saves, and a start without the variable reads it
+// (backlog B761's second round): an empty list and no list are one value,
+// whatever a clone makes of the one the load gave.
+func TestAnEmptyListOverrideASaveLeftKeepsTheFilesList(t *testing.T) {
+	vars := map[string]string{"BRIDGE_METRICS_ALLOW_CIDRS": ","}
+	for name, v := range vars {
+		t.Setenv(name, v)
+	}
+	path := envSaveConfig(t, "metrics:\n  allowCidrs:\n    - 192.168.0.0/16\n")
+	rc := bootHolder(t, path)
+	if got := rc.Load().Metrics.AllowCIDRs; len(got) != 0 {
+		t.Fatalf("booted with BRIDGE_METRICS_ALLOW_CIDRS=\",\", the live list is %q, want none", got)
+	}
+	for i := 1; i <= 2; i++ {
+		if err := rc.Update(path, func(next *Config) error {
+			next.Library.AllowDelete = !next.Library.AllowDelete
+			return nil
+		}); err != nil {
+			t.Fatalf("save %d: %v", i, err)
+		}
+		if got, there := fileLeaf(t, path, "metrics.allowCidrs"); !there || !reflect.DeepEqual(got, []any{"192.168.0.0/16"}) {
+			t.Errorf("save %d of another setting left metrics.allowCidrs = %#v (there %v), want the file's own list", i, got, there)
+		}
+		if got := rc.Load().Metrics.AllowCIDRs; len(got) != 0 {
+			t.Errorf("save %d: the holder publishes the list %q, want the variable's none", i, got)
+		}
+	}
+	withoutVariables(t, vars, func() {
+		if got := loadAt(t, path).Metrics.AllowCIDRs; !reflect.DeepEqual(got, []string{"192.168.0.0/16"}) {
+			t.Errorf("a start without the variable reads metrics.allowCidrs %q, want the file's own list", got)
+		}
+	})
+}
