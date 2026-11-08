@@ -393,7 +393,7 @@ func (e *dataDirGoneError) recovery(cmd string) string {
 	const moved = "if the data directory was moved on purpose, set dataDir in bridge.yaml to where it is now; "
 	switch e.cause {
 	case noIdentity:
-		return moved + "if it was removed on purpose, or it is the data directory to serve from, remove " + e.record
+		return moved + "if it was removed on purpose, or it is the data directory to serve from, with its volume mounted, remove " + e.record
 	case otherIdentity:
 		return moved + "if it was removed on purpose, or it is the data directory to serve from now, remove " + e.record
 	case identityUnreadable:
@@ -671,16 +671,13 @@ func (w dataDirRecording) foldingOnTheWay(spellings ...string) []string {
 //
 // Nothing it cannot write refuses the start, which goes on, and each is said
 // at Warn: no path (a boot read that resolved no file) or a record serve
-// cannot write (a config directory it may not write), where a later start
-// cannot tell that data dir's volume missing; and a marker it cannot write,
-// or make durable, where the record holds no identity, and a later start
-// tells the data dir by its database and its lock file alone, as before B741.
+// cannot write (a config directory it may not write), and a marker it cannot
+// write, or make durable, where the record holds no identity: what a later
+// start can tell then is backlog B813's.
 // It writes no record the next start's check would read otherwise than this
 // start's did, and none without, or with another than, the identity the
-// record holds of this data dir (B741's round 2, the Claude API on #1441: a
-// marker that did not read at the write, whose record it wrote without one, had
-// the next start refuse that data dir, or with the volume away take up the
-// bare mount point's lock file for it): a record that does not read, and a
+// record holds of this data dir (B741's round 2, the Claude API on #1441; what
+// such a write led to is backlog B813's): a record that does not read, and a
 // marker that does not read or cannot be inspected, leave the record as it
 // was; and so does a marker of this data dir's identity that is gone and
 // cannot be written again, which the next start refuses as it would have

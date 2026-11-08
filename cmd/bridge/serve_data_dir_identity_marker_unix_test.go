@@ -64,7 +64,9 @@ func TestAMarkerThisUserMayNotWriteIsTakenUp(t *testing.T) {
 // as a file (fsutil.OpenAsFile), so a named pipe found at its path, swapped in
 // after its rename or its read, is refused at once, never waited on for a
 // writer: an open for reading alone of a named pipe blocks until one comes,
-// and would hold serve's start.
+// and would hold serve's start. Round 2's O_RDWR open passes this case too
+// (it doesn't wait on a pipe, and its Sync then fails): the case guards
+// against a plain open for reading, not round 3's change alone.
 func TestTheMarkersSyncWaitsForNoNamedPipe(t *testing.T) {
 	fifo := filepath.Join(t.TempDir(), dataDirMarkerName)
 	if err := unix.Mkfifo(fifo, 0o600); err != nil {

@@ -410,6 +410,9 @@ func TestEachRefusalSaysWhatItIsAndHowToGoOn(t *testing.T) {
 				if (e.cause == noIdentity || e.cause == otherIdentity) && !strings.Contains(s.text, "or it is the data directory to serve from") {
 					t.Errorf("%s does not say to remove the record for the data directory to serve from:\n%s", s.surface, s.text)
 				}
+				if e.cause == noIdentity && !strings.Contains(s.text, "with its volume mounted") {
+					t.Errorf("%s does not say the volume must be mounted before the record is removed:\n%s", s.surface, s.text)
+				}
 			}
 			if r := e.recovery("scan"); strings.Contains(r, "(") {
 				t.Errorf("the advice explains itself in an aside, %q: it says what to do and no more", r)
