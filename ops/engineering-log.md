@@ -87368,3 +87368,23 @@ docs-check` clean; the qualification check against main
 (admin-console.md 84,696 bytes; the worst load 67.3%) and whose cited test
 names `TestEveryCitedTestNameExists` finds declared; `git status` clean
 after. internal/admin's race run is `make test`'s, with node absent.
+
+## 2026-11-08 — B797 round 4 (the orchestrator, where node runs)
+
+Round 3's node cases never ran on its worker's host, which has no node; run
+here (node v26.12.1), two of them stopped at a step of the rig itself:
+`/__test/abandon` deletes a session "elsewhere" through the console with
+`httptest.NewRequest`, whose remote, 192.0.2.1, the console's `loopbackOnly`
+refuses (403). The rig's request now comes from 127.0.0.1 (`756d726d`); both
+cases pass.
+
+The reviews of round 3 (Codex and the Claude API) found one gap: the list is
+kept across a boosted navigation and the new page's banner starts hidden, so a
+failed first read left the list holding a session the banner never showed.
+Red first (`TestALateOrFailedReadOfTheListKeepsWhatThePageChanged`'s new case
+"a failed read once the page was left and opened again": the banner hidden
+over a one-session list); fixed by drawing the list as it stands before the
+page's first read (`wireUpload`); green, and red again with that line removed
+(the red run is the control). Cancel was checked as the review asked: it
+deletes nothing on the server, and its session stays listed until Discard it,
+so the list needs no change there.

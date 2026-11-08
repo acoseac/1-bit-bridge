@@ -513,7 +513,11 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   `renderResumable`). A read asked under an older generation, or older
   than one the list took, or one that fails, changes nothing; a read asked
   under the current generation is the server's word and replaces the list,
-  a session deleted elsewhere going with it; and a stale read that finds no
+  a session deleted elsewhere going with it; a page draws the list as it
+  stands before its first read (`wireUpload`, round 4: a boosted navigation
+  keeps the list while the new page's banner starts hidden, so a failed
+  first read left the list holding a session the banner never showed, and
+  Discard it out of reach); and a stale read that finds no
   read asked since the change asks one (a commit landing after its page was
   left changes the list and asks none). A session's offsets follow its
   chunks' answers (`transferAll`), so a stopped session's banner says what
