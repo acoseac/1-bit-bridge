@@ -82,23 +82,29 @@ func realNativeRig(t *testing.T) (*nativeHarnessRig, *alsapcm.FakeKernel, *io.Pi
 	}
 	return h, k, w
 }
-func nativeReportResult(t *testing.T, h *nativeHarnessRig, answer <-chan int, want int, end string) nativeReport {
+
+// nativeReportResult waits for the run's exit code and reads its report. An
+// exit that is not want says why: the report's End and Error, and what the
+// run printed to diagnostics, its errout, since an exit 1 with the End
+// expected says nothing more (B765).
+func nativeReportResult(t *testing.T, h *nativeHarnessRig, answer <-chan int, diagnostics *lockedBuffer, want int, end string) nativeReport {
 	t.Helper()
+	var code int
 	select {
-	case code := <-answer:
-		if code != want {
-			t.Errorf("exit=%d want=%d", code, want)
-		}
+	case code = <-answer:
 	case <-time.After(3 * time.Second):
 		t.Fatal("key did not stop within release budget")
 	}
 	b, e := os.ReadFile(filepath.Join(h.dir, "report.json"))
 	if e != nil {
-		t.Fatal(e)
+		t.Fatalf("exit=%d want=%d, and the report does not read: %v; diagnostics %q", code, want, e, diagnostics.String())
 	}
 	var r nativeReport
 	if e = json.Unmarshal(b, &r); e != nil {
 		t.Fatal(e)
+	}
+	if code != want {
+		t.Errorf("exit=%d want=%d: End=%s Error=%q diagnostics %q", code, want, r.End, r.Error, diagnostics.String())
 	}
 	if r.End != end {
 		t.Errorf("serialized End=%s want=%s Error=%s", r.End, end, r.Error)
@@ -145,8 +151,9 @@ func TestNativeIntegrationStopEveryLeg(t *testing.T) {
 						return nativeOpen(ctx, c)
 					}
 					answer := make(chan int, 1)
+					diagnostics := &lockedBuffer{}
 					go func() {
-						answer <- runOutputDSDTest(context.Background(), h.args, h.env, nativePromptOutput{h: h}, io.Discard)
+						answer <- runOutputDSDTest(context.Background(), h.args, h.env, nativePromptOutput{h: h}, diagnostics)
 					}()
 					if scenario == "level-check" {
 						harnessEvent(t, h, qualification.CalibrationPhrase)
@@ -178,7 +185,7 @@ func TestNativeIntegrationStopEveryLeg(t *testing.T) {
 					if key == 'q' {
 						end = "quit"
 					}
-					nativeReportResult(t, h, answer, 0, end)
+					nativeReportResult(t, h, answer, diagnostics, 0, end)
 					v := k.View()
 					if v.Opens != expected || v.Open {
 						t.Errorf("later open or incomplete Immediate: %+v", v)
@@ -204,7 +211,8 @@ func TestNativeIntegrationNextInsideFinish(t *testing.T) {
 			b, _ := json.Marshal(h.contact)
 			_ = os.WriteFile(filepath.Join(h.dir, "contact.json"), b, 0600)
 			answer := make(chan int, 1)
-			go func() { answer <- runOutputDSDTest(context.Background(), h.args, h.env, io.Discard, io.Discard) }()
+			diagnostics := &lockedBuffer{}
+			go func() { answer <- runOutputDSDTest(context.Background(), h.args, h.env, io.Discard, diagnostics) }()
 			harnessEvent(t, h, "finish")
 			k.Await(t, "native buffer held", func(v alsapcm.KernelView) bool { return v.State == "RUNNING" && v.Starved })
 			prefix := len(k.Given())
@@ -222,7 +230,7 @@ func TestNativeIntegrationNextInsideFinish(t *testing.T) {
 				nativeKey(w, 's')
 				end = "stopped"
 			}
-			nativeReportResult(t, h, answer, 0, end)
+			nativeReportResult(t, h, answer, diagnostics, 0, end)
 			if k.View().Opens != 1 {
 				t.Fatal("successor opened after last track/stop")
 			}
@@ -256,9 +264,10 @@ func TestNativeIntegrationPCMAdmission(t *testing.T) {
 		return base(ctx, c)
 	}
 	answer := make(chan int, 1)
-	go func() { answer <- runOutputDSDTest(context.Background(), h.args, h.env, io.Discard, io.Discard) }()
+	diagnostics := &lockedBuffer{}
+	go func() { answer <- runOutputDSDTest(context.Background(), h.args, h.env, io.Discard, diagnostics) }()
 	_ = w
-	r := nativeReportResult(t, h, answer, 1, "incomplete")
+	r := nativeReportResult(t, h, answer, diagnostics, 1, "incomplete")
 	if len(k.Given()) != 0 || k.View().Opens != 1 || !strings.Contains(r.Error, "binding/mixer reference changed") {
 		t.Fatalf("reference bypassed admission: %+v %s", k.View(), r.Error)
 	}
@@ -312,20 +321,21 @@ func TestNativeIntegrationPCMDescriptor(t *testing.T) {
 				return
 			}
 			answer := make(chan int, 1)
+			diagnostics := &lockedBuffer{}
 			go func() {
-				answer <- runOutputDSDTest(context.Background(), h.args, h.env, nativePromptOutput{h: h, hook: hook}, io.Discard)
+				answer <- runOutputDSDTest(context.Background(), h.args, h.env, nativePromptOutput{h: h, hook: hook}, diagnostics)
 			}()
 			harnessEvent(t, h, qualification.CalibrationPhrase)
 			_, _ = io.WriteString(w, qualification.CalibrationPhrase+"\n")
 			if mode == "hash" {
-				r := nativeReportResult(t, h, answer, 1, "incomplete")
+				r := nativeReportResult(t, h, answer, diagnostics, 1, "incomplete")
 				if opened.Load() != 0 || !strings.Contains(r.Error, "opened fixture hash mismatch") {
 					t.Fatalf("unverified replacement opened: %d %s", opened.Load(), r.Error)
 				}
 			} else {
 				harnessEvent(t, h, qualification.PCMConfirmation)
 				_, _ = io.WriteString(w, "s\n")
-				nativeReportResult(t, h, answer, 0, "stopped")
+				nativeReportResult(t, h, answer, diagnostics, 0, "stopped")
 				if len(k.Given()) != 44100*3*4 {
 					t.Fatalf("did not decode verified descriptor: %d bytes", len(k.Given()))
 				}
@@ -377,12 +387,13 @@ func TestNativeIntegrationFingerprint(t *testing.T) {
 				return base(ctx, c)
 			}
 			answer := make(chan int, 1)
-			go func() { answer <- runOutputDSDTest(context.Background(), h.args, h.env, io.Discard, io.Discard) }()
+			diagnostics := &lockedBuffer{}
+			go func() { answer <- runOutputDSDTest(context.Background(), h.args, h.env, io.Discard, diagnostics) }()
 			code, end := 1, "incomplete"
 			if mode == "volatile_pcm" || mode == "receipt_reuse" {
 				code, end = 0, "complete"
 			}
-			r := nativeReportResult(t, h, answer, code, end)
+			r := nativeReportResult(t, h, answer, diagnostics, code, end)
 			if code == 1 && len(k.Given()) != 0 {
 				t.Fatal("changed constrained controls wrote")
 			}
@@ -408,7 +419,8 @@ func TestNativeIntegrationStopCleanupFailure(t *testing.T) {
 				return &nativeCleanupFailureSink{nativeTestSink: s}, nil
 			}
 			answer := make(chan int, 1)
-			go func() { answer <- runOutputDSDTest(context.Background(), h.args, h.env, io.Discard, io.Discard) }()
+			diagnostics := &lockedBuffer{}
+			go func() { answer <- runOutputDSDTest(context.Background(), h.args, h.env, io.Discard, diagnostics) }()
 			harnessEvent(t, h, "finish")
 			k.Await(t, "native playback", func(v alsapcm.KernelView) bool { return v.State == "RUNNING" && v.Starved })
 			nativeKey(w, key)
@@ -416,7 +428,7 @@ func TestNativeIntegrationStopCleanupFailure(t *testing.T) {
 			if key == 'q' {
 				end = "quit"
 			}
-			r := nativeReportResult(t, h, answer, 1, end)
+			r := nativeReportResult(t, h, answer, diagnostics, 1, end)
 			if !strings.Contains(r.Error, "cleanup failure") {
 				t.Fatalf("cleanup error lost: %s", r.Error)
 			}
@@ -504,7 +516,8 @@ func TestNativeIntegrationPendingWorkers(t *testing.T) {
 				return cleanupTicks, func() {}
 			}
 			answer := make(chan int, 1)
-			go func() { answer <- runOutputDSDTest(ctx, h.args, h.env, io.Discard, io.Discard) }()
+			diagnostics := &lockedBuffer{}
+			go func() { answer <- runOutputDSDTest(ctx, h.args, h.env, io.Discard, diagnostics) }()
 			select {
 			case <-entered:
 			case <-time.After(3 * time.Second):
@@ -546,7 +559,7 @@ func TestNativeIntegrationPendingWorkers(t *testing.T) {
 			if name == "admission_deadline" || name == "attachment_deadline" {
 				end = "deadline"
 			}
-			r := nativeReportResult(t, h, answer, 1, end)
+			r := nativeReportResult(t, h, answer, diagnostics, 1, end)
 			if !strings.Contains(r.Error, "unconfirmed") {
 				t.Error("missing unconfirmed evidence", r.Error)
 			}
