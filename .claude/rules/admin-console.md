@@ -520,7 +520,10 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   Discard it out of reach); a session Discard it is deleting is passed over
   by both resume matches until its delete answers (`resumableDiscarding`,
   round 5: the same files chosen meanwhile resumed the session being
-  deleted), and a refused delete gives it back; and a stale read that finds no
+  deleted), and a refused delete gives it back; while it is pending a second
+  Discard it asks nothing, the banner says the upload is being discarded,
+  and Try again refuses that session and goes once it is deleted (round 6);
+  and a stale read that finds no
   read asked since the change asks one (a commit landing after its page was
   left changes the list and asks none). A session's offsets follow its
   chunks' answers (`transferAll`), so a stopped session's banner says what

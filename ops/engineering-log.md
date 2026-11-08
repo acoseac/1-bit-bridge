@@ -87406,3 +87406,21 @@ carried on). Controls, each red as predicted: the pending check dropped from
 Gemini's note on `requireFilePuts`: its condition can't panic (`||`
 short-circuits before the slice), but its message sliced from a negative
 offset; clamped. internal/admin green with node present.
+
+## 2026-11-08 — B797 round 6 (the orchestrator, where node runs)
+
+The reviews of round 5 (Codex and the Claude API): a second Discard it of a
+session whose delete was pending sent a second delete, and a refusal of
+either gave the session back while the other could still take it; the banner
+still offered "choose the same folder again" while the matches refused it; Try
+again read its session directly and could feed one being deleted; the put
+check's message could still slice past its bounds. Now a second Discard it
+asks nothing while one is pending (the new case "Discard it twice": one
+delete, the discard said, no error), the banner says "Discarding the
+interrupted upload…" meanwhile, Try again refuses a session being discarded
+and its offer goes once the session is deleted (by code reading; no case
+makes a refused run's session the banner's), the pending case holds the new
+session's create until the delete is released, so the upload is shown to have
+decided while the delete was pending, and the message clamps both bounds.
+Controls, each red as predicted: the duplicate guard removed (the twice case),
+the pending banner's words removed (the pending case).
