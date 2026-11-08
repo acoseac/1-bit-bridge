@@ -175,17 +175,58 @@ func dataDirEvidenceOf(dataDir string) dataDirEvidence {
 	return dataDirEvidence{held: len(f.held) > 0, identity: f.identity}
 }
 
+// dataDirMarkerMode is the marker's mode: it holds no secret, and whoever may
+// read the data dir's database may read it, so that a command or bridge
+// doctor run by a member of the service's group reads the identity of a
+// healthy data dir (B741's round 2, the Claude API on #1441: it was the
+// owner's alone, and every such run took the data dir for one whose identity
+// does not read).
+const dataDirMarkerMode = 0o644
+
+// markerDurability is how writeDataDirMarker makes the marker durable before
+// the record gains its identity, each step one a boot test stands in for to
+// record it or fail it (dataDirRecording.durability): the staged marker's
+// bytes synced, the rename that puts it in place, and the marker synced where
+// it is, which the adoption of a marker a start before left runs too
+// (recordServeDataDir). A nil step is its own.
+type markerDurability struct {
+	// syncStaged syncs the staged marker's bytes, before the rename.
+	syncStaged func(f *os.File) error
+	// rename puts the staged marker in place: the rename and its retries
+	// alone (atomicwrite.RenameWithRetryUnsynced), the barrier syncInPlace's.
+	rename func(from, to string) error
+	// syncInPlace makes the marker at path durable where it is
+	// (syncMarkerInPlace).
+	syncInPlace func(path string) error
+}
+
+// steps is d with each nil step its own.
+func (d markerDurability) steps() markerDurability {
+	if d.syncStaged == nil {
+		d.syncStaged = (*os.File).Sync
+	}
+	if d.rename == nil {
+		d.rename = atomicwrite.RenameWithRetryUnsynced
+	}
+	if d.syncInPlace == nil {
+		d.syncInPlace = syncMarkerInPlace
+	}
+	return d
+}
+
 // writeDataDirMarker writes the marker in the data dir dataDir holding id,
-// durably before it answers: staged beside it, its bytes fsynced, renamed
-// into place, and the data dir fsynced, the barrier's failure the write's,
-// so that the record beside the config, which gains the identity after it,
-// never outlives a crash that took the marker. A directory fsync the
-// filesystem cannot make (EINVAL, ENOTSUP, EOPNOTSUPP), as for the updater's
-// marker, is taken as made; on Windows there is no directory to fsync, and
-// the rename is what NTFS's journal keeps. It makes no directory: the data dir
-// is there, its database open. Run as root, the marker takes the data dir's
-// owner (fsutil.KeepOwner), so the service can read it.
-func writeDataDirMarker(dataDir, id string) (err error) {
+// durably before it answers (markerDurability's steps): staged beside it,
+// readable by its group and others (dataDirMarkerMode), its bytes synced,
+// renamed into place, and synced where it is, the barrier's failure the
+// write's, so that the record beside the config, which gains the identity
+// after it, never outlives a crash that took the marker. A failure after the
+// rename leaves the marker in place, and the record without its identity: the
+// next start takes it up (recordServeDataDir), once its own barrier has
+// answered. It makes no directory: the data dir is there, its database open.
+// Run as root, the marker takes the data dir's owner (fsutil.KeepOwner), so
+// the service can read it.
+func writeDataDirMarker(dataDir, id string, d markerDurability) (err error) {
+	d = d.steps()
 	b, err := json.Marshal(dataDirMarker{ID: id})
 	if err != nil {
 		return err
@@ -206,21 +247,52 @@ func writeDataDirMarker(dataDir, id string) (err error) {
 	if err := fsutil.KeepOwner(tmp, path); err != nil {
 		return err
 	}
+	if err := tmp.Chmod(dataDirMarkerMode); err != nil {
+		return err
+	}
 	if _, err := tmp.Write(append(b, '\n')); err != nil {
 		return err
 	}
-	if err := tmp.Sync(); err != nil {
+	if err := d.syncStaged(tmp); err != nil {
 		return err
 	}
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	if err := atomicwrite.RenameWithRetryUnsynced(tmpName, path); err != nil {
+	if err := d.rename(tmpName, path); err != nil {
 		return err
 	}
 	tmpName = ""
-	if err := fsutil.SyncParentDir(path); err != nil && !cannotSyncADirectory(err) {
+	if err := d.syncInPlace(path); err != nil {
 		return fmt.Errorf("the marker is in place and may not outlive a crash: %w", err)
+	}
+	return nil
+}
+
+// syncMarkerInPlace makes the marker at path durable where it is, once
+// renamed there: its bytes and its own metadata synced through a handle of
+// its own, opened for writing since on Windows Sync is FlushFileBuffers,
+// which needs that, and which commits the file's metadata, the rename that
+// put it there among it, to NTFS's journal before it answers (B741's round 2,
+// the Claude API on #1441: the rename alone left that to the journal's own
+// flush, so a record on another volume could reach its disk first); then its
+// directory's entries (fsutil.SyncParentDir; nothing on Windows, where a
+// directory cannot be synced), a directory fsync the filesystem cannot make
+// (EINVAL, ENOTSUP, EOPNOTSUPP), as for the updater's marker, taken as made.
+func syncMarkerInPlace(path string) error {
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	if err := fsutil.SyncParentDir(path); err != nil && !cannotSyncADirectory(err) {
+		return err
 	}
 	return nil
 }

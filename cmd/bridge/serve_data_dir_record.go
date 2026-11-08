@@ -550,22 +550,31 @@ func checkServeDataDirRecord(path, dataDir string) error {
 }
 
 // dataDirRecording is what recordServeDataDir writes and reads: the marker
-// in the data dir (writeDataDirMarker), the record beside the config, and how
-// a folder on the data dir's way compares the names in it (fsutil.FoldingIn).
-// A nil field is the one of its own; a boot test fails either write, as a
-// start interrupted between them leaves them, and answers for a folder as a
-// volume this host does not have would (serveOpts.dataDirRecording).
+// in the data dir (writeDataDirMarker) and the steps that make it durable
+// (markerDurability), the record beside the config, and how a folder on the
+// data dir's way compares the names in it (fsutil.FoldingIn). A nil field is
+// the one of its own; a boot test fails a write or a step, as a start
+// interrupted there leaves them, records the steps in their order, and
+// answers for a folder as a volume this host does not have would
+// (serveOpts.dataDirRecording).
 type dataDirRecording struct {
-	marker  func(dataDir, id string) error
-	record  func(path string, data []byte) error
-	folding func(dir string) fsutil.CaseFolding
+	marker     func(dataDir, id string) error
+	durability markerDurability
+	record     func(path string, data []byte) error
+	folding    func(dir string) fsutil.CaseFolding
 }
 
 func (w dataDirRecording) writeMarker(dataDir, id string) error {
 	if w.marker != nil {
 		return w.marker(dataDir, id)
 	}
-	return writeDataDirMarker(dataDir, id)
+	return writeDataDirMarker(dataDir, id, w.durability)
+}
+
+// syncMarker makes the marker the data dir dataDir holds durable where it
+// is (markerDurability.syncInPlace), before the record takes up its identity.
+func (w dataDirRecording) syncMarker(dataDir string) error {
+	return w.durability.steps().syncInPlace(filepath.Join(dataDir, dataDirMarkerName))
 }
 
 func (w dataDirRecording) writeRecord(path string, data []byte) error {
@@ -600,11 +609,12 @@ func (w dataDirRecording) foldingOnTheWay(spellings ...string) []string {
 // it and where it leads now, through its links, and how each folder on the
 // way of both compares the names in it, while the volume it is on is there
 // to resolve them and to ask (dataDirRecord), and the data dir's identity
-// (backlog B741), which its marker holds before the record does. The identity
-// is the marker's where the data dir holds one; else the record's own where
-// it names this data dir (never a second one minted beside it), else a new
-// one; and a marker that is not there is written first, durably
-// (writeDataDirMarker), the record gaining the identity only once it is. It
+// (backlog B741), which its marker holds durably before the record does. The
+// identity is the marker's where the data dir holds one, taken up once the
+// marker is synced where it is (a marker a start before left, whose record's
+// write or whose barrier after its rename failed); else the record's own
+// where it names this data dir (never a second one minted beside it), else a
+// new one, and the marker is written first, durably (writeDataDirMarker). It
 // writes the record only when it does not hold exactly what it is to hold
 // already, so a record that names the data dir in another spelling, or in one
 // alone (a record written before B651's fifth round), or with no identity or
@@ -614,11 +624,19 @@ func (w dataDirRecording) foldingOnTheWay(spellings ...string) []string {
 // Nothing it cannot write refuses the start, which goes on, and each is said
 // at Warn: no path (a boot read that resolved no file) or a record serve
 // cannot write (a config directory it may not write), where a later start
-// cannot tell that data dir's volume missing; and a marker it cannot write or
-// that does not read, where the record holds no identity, and a later start
+// cannot tell that data dir's volume missing; and a marker it cannot write,
+// or make durable, where the record holds no identity, and a later start
 // tells the data dir by its database and its lock file alone, as before B741.
-// A record that does not read is left as it is, never replaced unread: the
-// check before the preparation refused it, so it went that way since.
+// It writes no record the next start's check would read otherwise than this
+// start's did, and none without, or with another than, the identity the
+// record holds of this data dir (B741's round 2, the Claude API on #1441: a
+// marker that did not read at the write, whose record it wrote without one, had
+// the next start refuse that data dir, or with the volume away take up the
+// bare mount point's lock file for it): a record that does not read, and a
+// marker that does not read or cannot be inspected, leave the record as it
+// was; and so does a marker of this data dir's identity that is gone and
+// cannot be written again, which the next start refuses as it would have
+// refused this one.
 func recordServeDataDir(path, dataDir string, w dataDirRecording) {
 	if path == "" {
 		logger.Warn("could not record the data directory beside the config: serve's boot read resolved no file for the config's name, so a later start cannot tell the data directory's volume missing from a fresh install",
@@ -638,23 +656,46 @@ func recordServeDataDir(path, dataDir string, w dataDirRecording) {
 			"record", path, "dataDir", dataDir, "err", fsutil.ErrorWithoutPath(err))
 		return
 	}
+	// kept is the identity the record holds of this data dir, which no write
+	// of the record drops or replaces.
+	kept := ""
+	if ok && had.names(dataDir) {
+		kept = had.ID
+	}
 	id := ""
 	switch f := inspectDataDir(dataDir); {
-	case f.identity != "":
-		id = f.identity
 	case f.unreadable != nil || f.uninspected != nil:
 		reason := f.unreadable
 		if reason == nil {
 			reason = f.uninspected
 		}
-		logger.Warn("did not record the data directory's identity: its marker cannot be read, and serve does not replace it unread; a later start tells the data directory by its database and its lock file alone",
+		logger.Warn("did not record the data directory beside the config: its marker cannot be read, and serve does not replace it unread; the record is left as it was",
 			"dataDir", dataDir, "marker", dataDirMarkerName, "err", fsutil.ErrorWithoutPath(reason))
+		return
+	case f.identity != "" && kept != "" && f.identity != kept:
+		logger.Warn("did not record the data directory beside the config: its marker holds another identity than the record, and serve replaces neither; the record is left as it was, and the next start refuses the data directory for it",
+			"dataDir", dataDir, "marker", dataDirMarkerName)
+		return
+	case f.identity != "":
+		id = f.identity
+		if id != kept {
+			if err := w.syncMarker(dataDir); err != nil {
+				logger.Warn("did not record the data directory's identity beside the config: its marker may not outlive a crash, and the record takes up its identity only once it is durable; the next start tries again",
+					"dataDir", dataDir, "marker", dataDirMarkerName, "err", fsutil.ErrorWithoutPath(err))
+				id = ""
+			}
+		}
 	default:
-		id = had.ID
-		if !ok || id == "" || !had.names(dataDir) {
+		id = kept
+		if id == "" {
 			id = mintDataDirIdentity()
 		}
 		if err := w.writeMarker(dataDir, id); err != nil {
+			if kept != "" {
+				logger.Warn("could not record the data directory's identity in it again: the record is left as it was, holding it, and the next start refuses the data directory for holding no marker of it",
+					"dataDir", dataDir, "marker", dataDirMarkerName, "err", fsutil.ErrorWithoutPath(err))
+				return
+			}
 			logger.Warn("could not record the data directory's identity in it: a later start tells the data directory by its database and its lock file alone",
 				"dataDir", dataDir, "marker", dataDirMarkerName, "err", fsutil.ErrorWithoutPath(err))
 			id = ""

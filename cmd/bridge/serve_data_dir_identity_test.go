@@ -956,24 +956,32 @@ func TestAStartWhoseRecordCannotBeWrittenLeavesItsMarkerToTheNext(t *testing.T) 
 	}
 }
 
-// TestTheMarkerHoldsTheIdentityBeforeTheRecordDoes: the record gains the
-// identity only once the marker in the data dir holds it, so a crash between
-// the two writes leaves a marker the next start takes up, never a record
-// holding an identity no marker holds, which every start after it would
-// refuse.
-func TestTheMarkerHoldsTheIdentityBeforeTheRecordDoes(t *testing.T) {
-	base := t.TempDir()
-	lib := filepath.Join(base, "Music")
-	mkdirs(t, lib)
-	dataDir := filepath.Join(base, "data")
-	cfg := writeIdentityConfig(t, filepath.Join(base, "bridge.yaml"), lib, dataDir)
-	// What each write saw, kept on serve's goroutine and read once serve has
-	// exited.
-	var writes []string
-	stopServed(t, serveWithOpts(t, serveOpts{configPath: cfg, dataDirRecording: dataDirRecording{
-		marker: func(dataDir, id string) error {
-			writes = append(writes, "marker "+id)
-			return writeDataDirMarker(dataDir, id)
+// markerSteps is a dataDirRecording that keeps, in order, each step that
+// makes the marker durable and the record's write, each step then taken as
+// its own unless fail names it, which fails it as a crash or a fault there
+// would: what the record held, and what the marker held as the record was
+// written. steps is appended to on serve's goroutine, and read once serve has
+// exited.
+func markerSteps(dataDir string, steps *[]string, fail string) dataDirRecording {
+	own := markerDurability{}.steps()
+	step := func(name string, take func() error) error {
+		*steps = append(*steps, name)
+		if name == fail {
+			return errors.New("the test's " + name + " that fails")
+		}
+		return take()
+	}
+	return dataDirRecording{
+		durability: markerDurability{
+			syncStaged: func(f *os.File) error {
+				return step("sync the staged marker", func() error { return own.syncStaged(f) })
+			},
+			rename: func(from, to string) error {
+				return step("rename it into place", func() error { return own.rename(from, to) })
+			},
+			syncInPlace: func(path string) error {
+				return step("sync it in place", func() error { return own.syncInPlace(path) })
+			},
 		},
 		record: func(path string, data []byte) error {
 			var r struct {
@@ -981,13 +989,76 @@ func TestTheMarkerHoldsTheIdentityBeforeTheRecordDoes(t *testing.T) {
 			}
 			_ = json.Unmarshal(data, &r)
 			marker, err := os.ReadFile(dataDirMarkerFile(dataDir))
-			writes = append(writes, fmt.Sprintf("record %s, the marker holding %s (%v)", r.ID, strings.TrimSpace(string(marker)), err))
+			*steps = append(*steps, fmt.Sprintf("record %q, the marker holding %s (%v)", r.ID, strings.TrimSpace(string(marker)), err))
 			return os.WriteFile(path, data, 0o600)
-		}}}))
+		},
+	}
+}
+
+// TestTheMarkerHoldsTheIdentityBeforeTheRecordDoes: the record gains the
+// identity only once the marker in the data dir holds it durably: its staged
+// bytes synced, renamed into place, and synced where it is (on Windows its
+// bytes and metadata flushed through a handle of its own), each step before
+// the next, so a crash anywhere in between leaves a marker the next start
+// takes up, never a record holding an identity no marker holds, which every
+// start after it would refuse. Until round 2 this pinned the order of the two
+// writes alone, and dropping either sync passed it (Codex on #1441).
+func TestTheMarkerHoldsTheIdentityBeforeTheRecordDoes(t *testing.T) {
+	base := t.TempDir()
+	lib := filepath.Join(base, "Music")
+	mkdirs(t, lib)
+	dataDir := filepath.Join(base, "data")
+	cfg := writeIdentityConfig(t, filepath.Join(base, "bridge.yaml"), lib, dataDir)
+	var steps []string
+	stopServed(t, serveWithOpts(t, serveOpts{configPath: cfg, dataDirRecording: markerSteps(dataDir, &steps, "")}))
 	id := identityOf(t, dataDir)
-	want := []string{"marker " + id, fmt.Sprintf("record %s, the marker holding {\"id\":%q} (<nil>)", id, id)}
-	if !slices.Equal(writes, want) {
-		t.Errorf("serve wrote %q, want %q", writes, want)
+	want := []string{"sync the staged marker", "rename it into place", "sync it in place",
+		fmt.Sprintf("record %q, the marker holding {\"id\":%q} (<nil>)", id, id)}
+	if !slices.Equal(steps, want) {
+		t.Errorf("serve took the steps %q, want %q", steps, want)
+	}
+}
+
+// TestAMarkerWhoseBarrierFailedIsTakenUpOnceDurable: a start whose marker was
+// renamed into place and whose barrier after the rename failed (as a crash
+// there leaves it, the marker in place and not known durable) goes on, its
+// record holding no identity; the next start takes the marker's identity up
+// into the record only once its own barrier has made the marker durable where
+// it is, and a start whose record holds it already makes none (B741's round
+// 2: the failure stood in for the whole write, never one after the rename;
+// Codex on #1441).
+func TestAMarkerWhoseBarrierFailedIsTakenUpOnceDurable(t *testing.T) {
+	base := t.TempDir()
+	lib := filepath.Join(base, "Music")
+	mkdirs(t, lib)
+	dataDir := filepath.Join(base, "data")
+	cfg := writeIdentityConfig(t, filepath.Join(base, "bridge.yaml"), lib, dataDir)
+	var steps []string
+	stopServed(t, serveWithOpts(t, serveOpts{configPath: cfg, dataDirRecording: markerSteps(dataDir, &steps, "sync it in place")}))
+	id := identityOf(t, dataDir)
+	if !isIdentity(id) {
+		t.Fatalf("the marker renamed into place holds %q, want an identity", id)
+	}
+	want := []string{"sync the staged marker", "rename it into place", "sync it in place",
+		fmt.Sprintf("record %q, the marker holding {\"id\":%q} (<nil>)", "", id)}
+	if !slices.Equal(steps, want) {
+		t.Errorf("the start whose barrier failed took the steps %q, want %q", steps, want)
+	}
+
+	steps = nil
+	stopServed(t, serveWithOpts(t, serveOpts{configPath: cfg, dataDirRecording: markerSteps(dataDir, &steps, "")}))
+	want = []string{"sync it in place", fmt.Sprintf("record %q, the marker holding {\"id\":%q} (<nil>)", id, id)}
+	if !slices.Equal(steps, want) {
+		t.Errorf("the next start took the steps %q, want %q: the marker made durable where it is before the record takes up its identity", steps, want)
+	}
+	if got := requireOneIdentity(t, cfg, dataDir); got != id {
+		t.Errorf("the record holds %q, want the marker's %q", got, id)
+	}
+
+	steps = nil
+	stopServed(t, serveWithOpts(t, serveOpts{configPath: cfg, dataDirRecording: markerSteps(dataDir, &steps, "")}))
+	if len(steps) != 0 {
+		t.Errorf("a start whose record holds its marker's identity took the steps %q, want none", steps)
 	}
 }
 
