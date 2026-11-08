@@ -946,7 +946,14 @@ resume, a join window and a gapless successor beside a write in flight, and a wr
 a session being released, among them; and their rig its seams). No sink, packer, plan or
 harness reader changes, and no DSD byte a native or DoP occurrence sends. B762 took 45 on
 main while that round was under way, so it took 46; the merge of main into B9 touches no
-guarded path beyond these, so it stays 46. The harness's approval admission reads a record
+guarded path beyond these, so it stays 46. B9's round 3, unmerged like the rest, changes the
+same two and stays 46 too: the activation's fence in `native.go` takes a successor dropped
+while its sink was adopted back unwritten (`errReplanned`), where it faulted the session, and
+the backend's tests over the fake kernel gain two
+(`TestASuccessorDroppedAtItsActivationIsTakenBackUnwritten`,
+`TestAReleaseWhileASuccessorsAdoptionWaitsLetsGoOfTheDevice`), round 2's adoption cases now
+requiring the adoption's own wait; again no DSD byte a native or DoP occurrence sends changes.
+The harness's approval admission reads a record
 of version 46 alone; the migration reads an owner's record of 35 to 46 (`LegacyVersion`
 stays 35). For owners: nothing the harness runs or records changes, and nothing plays
 differently from version 41. Every earlier version's harness evidence is stale to the

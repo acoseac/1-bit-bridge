@@ -85788,3 +85788,82 @@ counting) the write under way. M1's first run did not build, so it counted for
 nothing, and it went red once rebuilt. Round 2's C14 and C29, whose text the merge
 moved into `dsdWrite`, went red as before; the other 27 mutate nothing the merge
 changed.
+
+## 2026-11-08 — B728 B9 round 3: a dropped successor, the adoption wait, a release during it
+
+Worker b728-b9, legion0 (Ubuntu 26.04, Linux 7.0, Go 1.27.3), branch
+`feat/b728-b9-choice` at 2a8feb62 (the merge of main and its rules). Two reviews of round 2
+and the merge: Codex's two points and Claude's one. Commits: 4c7fe613 (the round's tests,
+red), a809eed5 (point 1), 8fe59bb0 (the release case's wait), and this record. The rules are
+a patch the orchestrator applies (`output.md`'s bullet on the write beside what plays, and
+its long form).
+
+**Point 1 (Codex): confirmed, red first.** The activation's fence in `activateOutput`
+(`fenced := s.releasing || s.nativeRevoked || o.dropped || s.cur != out`) answered a
+successor dropped while its sink was adopted with "native activation fenced", which
+`transition` took for a failed open (`openFailed`): the session faulted. Red on 2a8feb62
+(`TestASuccessorDroppedAtItsActivationIsTakenBackUnwritten`, a, b and c at DSD64, DSD128
+and DSD64, b's activation held, the DAC held so nothing after it plays): a cap at DSD64
+written with the go-ahead and b replaced before the activation goes on, b's entry deleted,
+and a cut of b each stopped with `device_error: the device could not be opened for the next
+transport: native activation fenced` before c's sink opened. Where the activation's own
+check catches the drop (it waits for the write, and b is replaced before it wakes) the
+session went on, and b's decoder and content were still open as c's sink opened: the drop
+leaves the decoder of the occurrence the producer writes to the producer (`dropLocked`),
+whose next step closes a dropped one (`next`), and `unadopt` cleared `s.writing` first, so
+nothing closed it until a retirement or the teardown. A drop there is `errReplanned` now,
+where the session is neither being released nor revoked, and `unadopt` closes a dropped
+occurrence's decoder and content. The engine replaces a successor not yet submitted through
+Prepare and cuts only a submitted one, and one whose activation is held has submitted
+nothing, so the cut case calls the backend's Cut as the engine's call would reach it. A
+release beside the replacement ended the session but recorded a `device_error`: the fence
+answered a release that came before the session's life ended (between `release`'s marking
+and its cancel, held here at the Releasing seam), and `openFailed` took it for a failed
+open; the teardown's last report delivered it (the reporter sends nothing while a session is
+released). `transition` takes a failed activation of a released session for the release's
+now (`fenced("activate")`, the step added to `Seams.Fenced`'s list), the session ending with
+no fault. Two cases were made exact after the first green runs: the cut case waits for b's
+sink's close note, since the cut's own revocation of b's inert sink closes the node and the
+decoder check raced it (2 of 20 runs); and the release case lets the activation go while the
+release is held and waits for a step refused for the release.
+
+**Point 2 (Codex): confirmed, by its control.** `waitedOrActivated` took b's activation for
+the adoption's wait, so removing the adoption's wait left the cases green, as round 2's
+control C7 had found and recorded as harmless. The adoption cases now wait for b's first
+wait for the write and fail where its activation has begun by then (`waitedUnactivated`):
+the adoption's wait comes before the activation, whose own (`awaitWrite`) comes after it. No
+code changed. The control that removes the adoption's wait (D5) is red in each case.
+
+**Point 3 (Claude): the sink is not left open; no code changed, the cases kept as guards.**
+The review read a release during the adoption's wait (and the loop's other exits once its
+context ends) as abandoning the opened sink to its own context. Every sink an open makes is
+the session's before the open returns (`s.outs`); `release` begins each native one's
+release and cancels the life of each PCM one (`s.ctx`); and the teardown closes every one,
+after the files and before it acknowledges, a native one once its release is done. Two cases
+(`TestAReleaseWhileASuccessorsAdoptionWaitsLetsGoOfTheDevice`: native b's adoption waiting
+for a write pending, and PCM b's adoption in the pause its sink takes first, the session
+paused while it opened, the call held through the fake kernel's `OnCommand`) were green on
+2a8feb62: once the release was acknowledged the node was closed, every open of it closed
+once, nothing given to b's node, every content closed, and the next Start opened the node.
+The brief's other candidate, the node closed before the decoders close, is no rule: the
+teardown closes the files first so that a sink a kernel call holds cannot keep them open
+(`player.md`, the bullet on the release), and in the code as it is the sink's own release
+and the teardown's file closes race, so no case asserts their order.
+
+**Controls**, predicted before the runs (`r3-controls.predictions.txt`), each on a committed
+tree with every file's bytes restored after it: D1, the fence's `errReplanned` removed: red
+in the write, edit and cut cases, by the fault; D2, `unadopt`'s close removed: red in the four
+cases that go on, by the open decoder; D3, `transition`'s release check removed: red in the
+release case, though not as predicted: the fault it records is withheld while the session is
+released, so the case met its watchdog waiting for a refused step; D4, the fence's exclusion
+of a session being released dropped: red in the release case at once, its refused step
+"open" (the activation went on to c's transition, whose open the release fenced); D5, the
+adoption's wait removed: red in the three adoption cases, the resume's and point 3's
+waiting case. Each other case stayed green, as predicted.
+
+**The qualification version.** Round 3 changes two guarded paths, `native.go` (the fence)
+and the `internal/alsapcm/` tests. The branch holds 46 and main 45, so the check against
+main passes and it stays 46, the runbook's 46 paragraph saying round 3. B765, unmerged,
+takes 47: a merge after it needs the next free one.
+
+**Left, by its id:** B792, not taken this round.
