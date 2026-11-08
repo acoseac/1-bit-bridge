@@ -87018,3 +87018,44 @@ test, which ends its context with nothing serving, is the pin.
   in substance, but "that start says why, records it, and goes on" does not
   fit a start that refused its settings, which then refuses them; a change
   there needs its iOS mirror, so it is the orchestrator's.
+
+### Gates
+
+At fdd74a31, on Go 1.27.3 (`GOTOOLCHAIN=go1.27.3`, go.mod's), TMPDIR under
+`.tmp/_b760`, in two sessions of the shared build slot, each started by a
+guard that waited for the slot (`.tmp/_b760/gates.py`):
+- Part a, in the slot from 14:11 after a 24-minute wait: `make fmt` changed
+  nothing; `make vet`, and with `GOOS=windows`, `GOOS=darwin` and
+  `GOOS=linux GOARCH=386`: ok; `make docs-check`: ok (CLAUDE.md 82.1 %, the
+  worst load 67.6 %); the qualification check
+  (`go run ./scripts/qualification-version -base 0fd7e3f8 -head HEAD`):
+  `qualification version OK`; `make test TEST_PKGS='./cmd/bridge/...
+  ./internal/updater/...'` (race, `-p 4`, `-timeout 30m`, the Makefile's tags):
+  ok, cmd/bridge 1,254 s, internal/updater 29 s.
+- Part b: in the slot from 15:46, the guard's first try having given up at 15:26
+  with the slot held by other workers since 14:33: `make fmt vet test build-all`
+  (race, `-p 4`, `-timeout 30m`, the Makefile's tags): ok in 37 minutes, 89
+  packages ok and 14 without tests, the Linux-only ones run rather than vetted
+  (internal/alsa 1.8 s, internal/alsapcm 82 s, internal/atomicwrite's durable
+  writer 20 s, internal/backup's identity paths 291 s; cmd/bridge 1,375 s,
+  internal/manifest 1,685 s, internal/admin 1,055 s, internal/updater 32 s),
+  `make fmt` changing nothing, `make build-all`'s build-tag check and its six
+  targets; `git status` empty after.
+- `rules-b760.patch` (59,583 bytes), built by a script on a copy of the
+  tracked files at fdd74a31 (`.tmp/_b760/build_rules_patch.py`): `git apply
+  --check` takes it over the worktree; on a copy it is applied to, make
+  docs-check's four commands pass (config-lifecycle.md 98,149 bytes of its
+  100,000, cli-serve.md 50,605, the worst load 67.3 %), and
+  `TestEveryCitedTestNameExists` passes there and fails on a ghost citation
+  planted in the copy's History file. `verify_moves.py --base HEAD` passes
+  for the move alone (a copy holding `move_entry.py`'s move only); over the
+  whole patch, with the cli-serve bullet, B660's *The count.* and its *Left.*
+  declared as edits, it lists MISSING only the two copies of B613's line, the
+  rules line and its long form's verbatim head, rewritten alike, which `--edit`
+  cannot declare (it pairs one gone block a prefix), each one's successor
+  present in its file (`.tmp/_b760/verify_moves_two_ways.py`).
+
+Not run here: macOS and Windows natively (Windows is vetted by
+`GOOS=windows make vet` and cross-compiled by `make build-all`;
+`rollback_running_windows_test.go` runs only there), CI's runners, and a
+by-hand run with real release builds.
