@@ -161,7 +161,7 @@ jobs:
   # 218s then and rode that leg; it reached the package's 30-minute timeout
   # there on 2026-11-08 (1,782.6s on #1435's green run the day before;
   # backlog B799), so it is sharded four ways too, as `bridge`. The COUNT
-  # is the script's (`SHARDED=(manifest:4 admin:4)`), not a `shards:` key
+  # is the script's (its `SHARDED` array), not a `shards:` key
   # here — two places that must agree about a partition can disagree
   # silently, and the script's own check requires this matrix to schedule
   # exactly the indices it believes in. Measured
