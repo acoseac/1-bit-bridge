@@ -21,6 +21,13 @@ func (m *Manager) Restore(ids []string) (*Result, error) {
 	if m.split == nil {
 		return nil, ErrRootUnavailable
 	}
+	// The whole request is looked at before anything is renamed (backlog
+	// B776): entries run in turn and across roots, and one refused after
+	// another had been renamed back would answer an error in place of that
+	// success and its rescan. A refusal renames nothing.
+	if err := m.guardRestore(ids); err != nil {
+		return nil, err
+	}
 	res := &Result{}
 	dirs := map[string]struct{}{}
 	spellers := map[string]*fsutil.Speller{}
@@ -197,6 +204,45 @@ func (m *Manager) Purge(ids []string) (*Result, error) {
 	}
 	m.invalidateReclaim()
 	return res, nil
+}
+
+// guardRestore asks the root guard (WithRootGuard) about every path the
+// restore of ids would write: the destination of each entry it would rename
+// back, which may lie in a root nested in the one it was trashed from, and,
+// where an entry is in no root's trash, every configured root, since a trash
+// on a volume that is away is not seen, and an id names no root: a root that
+// reads as a volume not mounted then answers for it, where the entry read as
+// "no such entry", and with more than one root an entry gone for good is
+// answered so too while any root's volume is away. An id that does not parse,
+// or an entry whose place is refused, is left to the restore's own outcome.
+// Nil without a guard.
+func (m *Manager) guardRestore(ids []string) error {
+	if m.rootGuard == nil {
+		return nil
+	}
+	var paths []string
+	unseen := false
+	for _, id := range ids {
+		stamp, rel, err := splitID(id)
+		if err != nil {
+			continue
+		}
+		root, src, ok := m.locate(stamp, rel)
+		if !ok {
+			unseen = true
+			continue
+		}
+		if dst, _, _, reason := m.restorePlace(root, rel, src); reason == "" {
+			paths = append(paths, dst)
+		}
+	}
+	if unseen {
+		paths = append(paths, m.roots()...)
+	}
+	if len(paths) == 0 {
+		return nil
+	}
+	return m.rootGuard(paths)
 }
 
 // locate finds the on-disk file for a (stamp, rel) pair across every root.

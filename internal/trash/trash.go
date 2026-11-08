@@ -183,6 +183,10 @@ type Manager struct {
 	// os.Stat. A test injects a fault so a failed check can be told from
 	// "nothing there".
 	destStat func(path string) (os.FileInfo, error)
+	// rootGuard answers for the absolute paths a restore would write whether
+	// any lies under a library root that reads as a volume not mounted
+	// (WithRootGuard); nil asks nothing.
+	rootGuard func(paths []string) error
 }
 
 type reclaimEntry struct {
@@ -207,6 +211,15 @@ func WithDestinationLock(fn func(abs string) func()) Option {
 // it nil, which is os.Stat.
 func WithDestStat(fn func(path string) (os.FileInfo, error)) Option {
 	return func(m *Manager) { m.destStat = fn }
+}
+
+// WithRootGuard refuses a restore into a library root that reads as a volume
+// not mounted (backlog B776): fn is asked, before anything is renamed, for
+// every path the restore would write, and an answer that is not nil refuses
+// the whole request with it. cmd/bridge passes the scanner's
+// (manifest.Scanner.WriteGuard).
+func WithRootGuard(fn func(paths []string) error) Option {
+	return func(m *Manager) { m.rootGuard = fn }
 }
 
 // New builds a Manager. `enabled` is read LIVE on every mutating call so the
