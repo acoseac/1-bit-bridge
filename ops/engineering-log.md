@@ -86421,3 +86421,142 @@ which the check calls close to its budget: the next rule there moves an entry ou
 load 67.3 %), and `verify_moves.py --base HEAD` found round 2's line and its long form gone beside
 their two rewordings and nothing else, no citation broken. alsa-abi did not run: no ABI definition or
 `scripts/alsa-abi` file changed.
+
+## 2026-11-08 — B741: the data dir's record gains an identity
+
+Worker b741, legion0, branch `fix/b741-data-dir-identity` from main's 7c1db6dd. Commits: 7bb7d84b (the
+tests, red), 4ec5f783 (the identity), f85a388b (gap 3), cdfe5415 (the runbook), 3c4f0226 (the doctors'
+writes, red), 995a25e0 (the doctors' fix), then this record. The rule changes through `rules-b741.patch`:
+`cli-serve.md`'s B741 line, its B727 and B659 lines corrected, `scanner.md`'s B651 line corrected and a
+gap-3 line with a path glob for `serve_data_dir_identity*.go`, and each one's long form.
+
+### The gaps
+
+B651's record (`.bridge.yaml.datadir`) refused a start whose recorded data dir held neither `bridge.db`
+nor `server.lock`. (1) An install whose first start of a release with the record came before its volume
+had no record, read as fresh, and made a data dir, a TLS pair and a database on the bare mount point,
+evidence at every later start. (2) `server.lock` was evidence, and it is made before the database opens:
+a start on the bare mount point before any record that failed between the two left one, and a database a
+command made there before B727 read the same way. (3) `fsutil.SamePath` probes how the folder holding a
+path compares names now; with the volume away the nearest folder is the bare mount point, whose own name
+the probe looks up in the folder above, so a record and a config that differ in case alone read as two
+data dirs and the refusal was skipped.
+
+### As built
+
+- **The identity.** 16 random bytes in lower-case hex, in a marker in the data dir (`data-dir-id.json`,
+  `{"id":…}`) and in the record. Serve writes it once its database is open and its lock file is there:
+  the marker first, staged beside its place, fsynced, renamed (Windows' retries, no barrier of the
+  rename's own), then the data dir fsynced, that barrier's failure the write's (a directory fsync the
+  filesystem cannot make, EINVAL, ENOTSUP or EOPNOTSUPP, taken as made, as the updater's marker takes it);
+  the record gains the identity after. The identity is the marker's, else the record's own where it names
+  this data dir, else minted. A marker serve cannot write leaves the record without an identity, said at
+  Warn; a record it cannot write leaves the marker for the next start. Only serve writes the marker.
+- **The check**, keyed on the record naming the data dir: a marker of the record's identity is the data
+  dir served from whatever else it holds; another identity, a marker that does not read, and a record that
+  does not read are refused, each with a cause of its own; with no marker, neither file is B651's refusal,
+  and either file under a record holding an identity is refused (`noIdentity`, gap 2), under a record from
+  before B741 taken up. An error other than an entry's absence on the way is still no refusal.
+- **One type, `dataDirGoneError`, with a `cause`**: serve, both doctors (`dataDirCheck`) and every command
+  `refuseDataDirAway` guards refuse each cause alike, nothing written; only B651's first sentence says the
+  data dir holds neither file; each keeps today's recovery advice, a marker that does not read moved aside
+  and a record or marker this user may not read made readable first. bridge doctor says a permission error
+  is not checked, a warn (B659's rule).
+- **The note and the end of a refusal**: the note holds the cause and the identity beside the data dir,
+  so a changed cause is said again; the end calls a data dir back only where it holds, before the
+  preparation, the identity the refusal was of (`dataDirEvidence`), in a line of its own; a refusal whose
+  record held none keeps B727's rule and line.
+- **Gap 3**: the record holds, for every folder on the way of both spellings, `fsutil.FoldingIn`'s answer
+  at the write (`fsutil.FoldingOnTheWay`), and the check compares by it, probing nothing
+  (`fsutil.SameAsRecorded`, `SamePathAsRecorded`): a case-only difference is one data dir where its
+  folder was not read as case-sensitive (read as folding, as unknown, or not recorded: the direction that
+  refuses). A record without it falls back to the probe until a start with the volume there writes it
+  again; one its reader would refuse for its size (64 KiB) is written without it.
+- **The doctors' store probes** (the codec probe behind the ALAC and DSD lines, sidecar-paths,
+  variants-index, name-collisions) open nothing in a data dir the record refuses, any cause
+  (`errStoreOfARefusedDataDir`). Found while the gates queued: a probe of the gap-2 state through both
+  doctors on a copy of the tree showed a stray 0-byte `bridge.db` in the bare mount point migrated to a
+  whole schema by the doctors, whose data-dir line said bridge serve will not start there. B727 had
+  reasoned that a refused data dir holds no database, which B741's refusals make false; its long form says
+  so now.
+
+### Gap 1, and the doctor
+
+Open, as briefed: an install with no record yet whose first start of a release carrying B651 comes before
+its volume still starts on the bare mount point. B705's install marker is in the data dir, nothing in
+bridge.yaml tells an old install from a new one, and the sign the brief offered the doctor, a database with
+no tracks and no tokens beside the record's first start, is not reliable: a fresh install looks the same at
+its first start (an empty database, no paired device), and so does every install before its first pairing
+and scan; the TLS pair minted by serve rather than init would single out Docker's `--init-if-missing`
+fresh installs too. So the doctor says nothing of it, and says, as serve does, the refusal of the real
+volume once it is mounted in gap 1's shape: B741's adoption trusts the database it finds, so a B651-era
+bare mount point database present at the first B741 start gains the identity, and the real volume, holding
+none, is refused with words that say a start before the volume can have taken the bare mount point, and
+that removing the record with the volume mounted has serve take the volume's data dir as its own.
+
+### Red first
+
+At 7bb7d84b, the tests through serve's real start, both doctors and bridge scan, written as files so that
+they compile against main's code, predicted in `.tmp/_b741/predictions-red.txt`: 15 tests failed as
+predicted (the marker missing; serve served over a lock file, a database or both in the bare mount point,
+over another install's data dir, over a torn record, over a marker that does not read and over a record
+it cannot read; the record holding no identity after the upgrade's starts and an interrupted write; the
+case-folded record taken for another data dir; the stray lock served rather than said; the end of a refusal
+calling a lock file back), B651's two refusals of a legacy record and the case-sensitive sibling passed as
+controls, and the opt-in real-volume case skipped. The doctors' writes: at 3c4f0226 the gap-2 rows with a
+database failed ("the doctors changed what is under …"), the rest green.
+
+### Negative controls
+
+At f85a388b (C16 at 995a25e0), each an exact-once mutation predicted by name in
+`.tmp/_b741/predictions-controls.txt` before it ran, the test binary built and the data-dir set run (625
+tests of cmd/bridge; fsutil's casefold tests for C10 and C11), the source restored from memory and found
+equal to HEAD after each, `git status` empty after the set.
+
+| | mutation | red |
+|---|---|---|
+| C1 | the check takes a lock file or a database without a marker under a record holding an identity | the three gap-2 rows, the cause change, three matrix rows |
+| C2 | the check takes another identity | the other-identity test, its matrix row |
+| C3 | a record that does not read is no record again | the torn-record test, the unreadable-record row, nine matrix rows, the B651 check test |
+| C4 | a marker that does not read is no marker | the torn-marker test (refused in the no-identity words), the unreadable-marker row, two matrix rows |
+| C5 | the record keeps the identity when the marker could not be written | the marker-write-failure test |
+| C6 | serve mints anew where the marker holds an identity | six identity-keeping tests |
+| C7 | the marker written after the record | the order test, and the marker-write-failure test (not predicted: a failed marker write then leaves an identity-bearing record, the same defect) |
+| C8 | the end of a refusal calls a lock file back whatever the identity | the end-of-refusal test, three of four predicted unit rows (the fourth, a data dir holding its identity and its files, says back either way) |
+| C9 | the note keyed on the data dir alone | the cause-change test, the note's unit test |
+| C10 | a case-only difference never one data dir by the record | four fsutil rows, two fsutil tests, the folded-case serve row, the folding-write test |
+| C11 | the case-sensitive sibling: always one data dir | two fsutil rows, two fsutil tests, the case-kept serve row |
+| C12 | serve records no folding | the folding-write test |
+| C13 | the size guard removed | the size-guard test |
+| C14 | the doctor fails what this user cannot read | both rows of the unreadable test |
+| C15 | a record from before B741 over its lock file or database refused | three upgrade rows, three matrix rows, the B651 check test, and (not predicted) the marker-write-failure test's restart and the B651 doctor test's last step, both a record holding no identity over a database |
+| C16 | the doctors' store probes ungated | the two gap-2 rows with a database |
+
+The C3 run first used a pattern that did not match `TestServeRefusesWhatItCannotRead`, which I had
+predicted red; with the pattern widened it went red as predicted, and it is in every run after.
+
+### Not run here
+
+The real case-insensitive volume (`BRIDGE_TEST_CASE_INSENSITIVE_DIR`) skipped: legion0 cannot mount a vfat,
+exFAT or casefold filesystem without root, and the sandbox refuses `chattr +F` and `unshare`. The stand-in
+probe (`dataDirRecording.folding`) and the unit tests carry the case. Windows and macOS are vetted
+(`GOOS=… make vet`) and left to CI's legs.
+
+### Gates
+
+At 995a25e0, inside the build slot, on Go 1.27.3, in three sessions. The first: `go test -race
+-count=1 -timeout 30m` with CI's tags over `./cmd/bridge/... ./internal/fsutil/...` passed (cmd/bridge
+1,260 s, fsutil 2.9 s; the Linux-only tests, ALSA, alsapcm's, the durable writer's and the identity paths',
+run here); `make vet` passed, and with `GOOS=windows`, `GOOS=darwin` and `GOOS=linux GOARCH=386`; `make fmt`
+changed nothing. The second: `make build-all` and `make docs-check` passed; `make test` failed in one
+subtest outside this change,
+`TestAMatchWhoseReQueueDidNotLandIsReQueuedByTheNextSweep/cancelled_inside_the_reset_by_a_switch-off`
+("the first sweep's re-queue landed: the case tests nothing"), the fingerprint sweep's timing precondition
+B765's record names (1 of 40 at B762's base), 88 packages ok; alone under `-race` with CI's tags it passed
+40 of 40 at 995a25e0, and nothing this change touches reaches it. The third: `make test` again, 89
+packages ok (2,044 s; cmd/bridge 1,347 s), its TMPDIR under `.tmp/_b741`. `scripts/qualification-version`
+passed against main's 7c1db6dd (no guarded file changed). `make docs-check` passed on a `git archive` copy
+with `rules-b741.patch` applied (`git apply --check` clean; cli-serve.md 53.8 KB, scanner.md 41.1 KB; the
+worst load unchanged); `verify_moves.py --base HEAD` found no citation broken and lists the three entries
+the patch edits (B651's, B727's, B659's) as changed blocks, which it reports as missing since it checks
+moves, not edits. Every test name the patch cites exists (72 of 72).
