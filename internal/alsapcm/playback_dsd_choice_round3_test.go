@@ -76,6 +76,14 @@ func (d *dsdRig) opensOrStopped(n int, what string) {
 func heldSuccessor(t *testing.T, w *writeSeams) (*dsdRig, []uint32, engine.OccurrenceID, *gate) {
 	t.Helper()
 	d := newDSDRig(t, playbacktest.ChoiceState(dsdstate.ModeNative), func(o *rigOptions) { o.seams = w.seams(nil) })
+	ids, ob, act := heldSuccessorOn(t, d, w)
+	return d, ids, ob, act
+}
+
+// heldSuccessorOn is heldSuccessor on a rig the caller made, its seams w's
+// (B728 B9 round 5: a rig whose engine hands nothing off again).
+func heldSuccessorOn(t *testing.T, d *dsdRig, w *writeSeams) ([]uint32, engine.OccurrenceID, *gate) {
+	t.Helper()
 	d.files.add("a", dsd(playbacktest.DSD64, 0.25))
 	d.files.add("b", dsd(playbacktest.DSD128, 0.25))
 	d.files.add("c", dsd(playbacktest.DSD64, 0.25))
@@ -86,7 +94,7 @@ func heldSuccessor(t *testing.T, w *writeSeams) (*dsdRig, []uint32, engine.Occur
 	d.k.Free()
 	awaitHeld(t, "b's activation, its sink adopted", act.in)
 	d.k.Hold()
-	return d, ids, ob, act
+	return ids, ob, act
 }
 
 // replaced waits until the engine has handed off, after a, an occurrence

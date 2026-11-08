@@ -337,6 +337,13 @@ func (tk *FakeKernel) ParkNextClose() (<-chan struct{}, func()) {
 	return entered, func() { once.Do(func() { close(gate) }) }
 }
 
+// FailDrops makes every DROP from now on fail with EIO, whichever sink makes
+// it: a node whose teardown the kernel refuses, so the release of each sink
+// that lets its node go from then on is unconfirmed (B728 B9 round 5).
+func (tk *FakeKernel) FailDrops() {
+	tk.k.inspect(func(k *fakeKernel) { k.fail[ioctlDrop] = errno(5) })
+}
+
 // OpenNativeSinkWithCleanupError injects a teardown failure after a real open.
 func (tk *FakeKernel) OpenNativeSinkWithCleanupError(ctx context.Context, c DSDConfig, where string) (*DSDSink, error) {
 	a := &nativeAuditSys{sys: tk.k}
