@@ -860,12 +860,17 @@ func (s *session) reconcileDSD(next *dsdSet) {
 			o.admitted = next
 		case j.stale:
 			o.stale = true
-			if o.claimed && o.out != nil && o.out.native != nil {
-				// Its own sink's activation is under way (B728 B9 round 4): the
-				// sink is revoked, as a drop revokes it (dropLocked), so the
-				// activation answers the sink's own fence, at its admission or in
-				// its prefill, and the sink is taken back with none of the
-				// occurrence written; its replacement opens one of its own.
+			if j.revoke == "" && o.claimed && o.out != nil && o.out.native != nil {
+				// Its own sink's activation is under way and the engine hands it
+				// off again (B728 B9 round 4): the sink is revoked, as a drop
+				// revokes it (dropLocked), so the activation answers the sink's own
+				// fence, at its admission or in its prefill, and the sink is taken
+				// back with none of the occurrence written; its replacement opens
+				// one of its own. Where the engine hands nothing off again the
+				// session's DSD is revoked instead, and its sinks are Revoke's to
+				// stop, after the fault it records (round 5): stopped here first,
+				// the sink taken back could be closed before Revoke ran, which then
+				// found no sink to stop and recorded no fault.
 				o.out.native.Revoke()
 				o.out.drained = true
 			}
