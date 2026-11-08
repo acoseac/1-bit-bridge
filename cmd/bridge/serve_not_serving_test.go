@@ -1,9 +1,12 @@
 package main
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/version"
 )
 
 // Backlog B760's fourth residual: the confirmation begins once ServeTLS runs,
@@ -131,6 +134,50 @@ func TestAStartStoppedBeforeItsDeadlineIsNotSaidNotReady(t *testing.T) {
 	}
 	if line := doctorLineOf(t, r.cfg); line == nil || line.Status != "ok" {
 		t.Errorf("bridge doctor after the stop = %+v, want ok", line)
+	}
+}
+
+// TestTheStartWatchFiresOnlyWhileTheStartHasNotBegunServing: the watch says
+// once that the start has not begun serving, and records NotReady, at its
+// deadline where nothing ended it before; and records nothing, its deadline
+// long past, where the start began serving first, or serve's stop came first.
+func TestTheStartWatchFiresOnlyWhileTheStartHasNotBegunServing(t *testing.T) {
+	const deadline = 50 * time.Millisecond
+	for _, tc := range []struct {
+		name  string
+		end   func(w *startWatch, stop context.CancelFunc)
+		fires bool
+	}{
+		{"nothing ends it", func(*startWatch, context.CancelFunc) {}, true},
+		{"the start begins serving", func(w *startWatch, _ context.CancelFunc) { w.served() }, false},
+		{"serve's stop", func(_ *startWatch, stop context.CancelFunc) { stop() }, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newRefusedInstall(t, "")
+			r.marker.DataDirOpenedBy, r.marker.FailedStarts = version.ServerVersion, 1
+			r.saveMarker(t, r.dataDir)
+			events, seams := newProbationWatch(probationTiming{serve: deadline})
+			ctx, stop := context.WithCancel(context.Background())
+			defer stop()
+			stderr := &safeBuffer{}
+			w := watchTheStart(ctx, r.dataDir, version.ServerVersion, seams, stderr)
+			tc.end(w, stop)
+			within := 8 * deadline
+			if tc.fires {
+				within = withinTheTest
+			}
+			_, fired := events.waitForWithin(probationNotReady, within)
+			w.end()
+			if fired != tc.fires {
+				t.Fatalf("the watch said the start had not begun serving: %v, want %v; stderr=%s", fired, tc.fires, stderr.String())
+			}
+			if st := markerOf(t, r.dataDir); st.NotReady != tc.fires || st.FailedStarts != 1 {
+				t.Errorf("the marker = %+v, want NotReady %v and the count as it was", st, tc.fires)
+			}
+			if n := strings.Count(stderr.String(), "has not begun serving"); n != boolInt(tc.fires) {
+				t.Errorf("the watch said it %d times, want %d; stderr=%s", n, boolInt(tc.fires), stderr.String())
+			}
+		})
 	}
 }
 

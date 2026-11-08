@@ -32,7 +32,13 @@ import (
 // (the backup is put back by the data dir's owner alone), before the boot's
 // admission (disarmEarlyRollback), so nothing of this start has written yet,
 // and a start that finds the crash rollback's own record with its rename not
-// landed finishes it, the record being the install still. It follows the
+// landed finishes it, the record being the install still. A start that
+// refused its settings runs it too, from the early rollback's place, where the
+// early rollback leaves the install and the count asks for this one, under the
+// data dir's lock it takes there (recoverCrashedRefusedInstall; backlog B760).
+// then is what the start does where this leaves the install, which each line
+// that says so ends with (crashRollbackGoesOn, crashRollbackRefusedStart). It
+// follows the
 // early rollback (recoverRefusedInstall) step for step: the install marker's
 // lock, held from its read through the rename (never without the exclusion),
 // the marker read again under it, the backup a regular file whose `version`
@@ -57,7 +63,7 @@ import (
 // is what the settings check before the swap sees, and a start refused for
 // its settings has the early rollback. This rollback counts what got past
 // both.
-func recoverCrashedInstall(ctx context.Context, dataDir, configPath string, opts serveOpts, stderr io.Writer) (code int, acted bool) {
+func recoverCrashedInstall(ctx context.Context, dataDir, configPath string, opts serveOpts, then string, stderr io.Writer) (code int, acted bool) {
 	current := version.ServerVersion
 	st, err := updater.LoadState(dataDir)
 	if err != nil {
@@ -66,10 +72,11 @@ func recoverCrashedInstall(ctx context.Context, dataDir, configPath string, opts
 	}
 	if ok, why := updater.CrashRollback(st, current); !ok {
 		if why != "" {
-			refuseCrashRollbackOnARead(ctx, dataDir, current, why, opts, stderr)
+			refuseCrashRollbackOnARead(ctx, dataDir, current, why, then, opts, stderr)
 		}
 		return 0, false
 	}
+	say := func(st updater.State, why string) { crashRollbackLine(stderr, st, why, then) }
 	save := opts.saveUpdateState
 	if save == nil {
 		save = updater.SaveState
@@ -78,25 +85,25 @@ func recoverCrashedInstall(ctx context.Context, dataDir, configPath string, opts
 	if err != nil {
 		var refused *updater.StateLockError
 		if !errors.As(err, &refused) {
-			crashRollbackLine(stderr, st, "this start was stopped while it waited for the install marker's lock")
+			say(st, "this start was stopped while it waited for the install marker's lock")
 			return 0, false
 		}
-		crashRollbackLine(stderr, st, fmt.Sprintf("the install marker's lock cannot be taken (%v), and only its holder may put the backup back", err))
+		say(st, fmt.Sprintf("the install marker's lock cannot be taken (%v), and only its holder may put the backup back", err))
 		return 0, false
 	}
 	defer stateLock.Release()
 	if !stateLock.Held() {
-		crashRollbackLine(stderr, st, "the data dir's filesystem keeps no locks, so nothing would keep a store's migration out while the backup is put back")
+		say(st, "the data dir's filesystem keeps no locks, so nothing would keep a store's migration out while the backup is put back")
 		return 0, false
 	}
 	// The marker as it is now that its lock is this process's.
 	if st, err = updater.LoadState(dataDir); err != nil {
-		crashRollbackLine(stderr, updater.State{Status: "installing", TargetVersion: current, FailedStarts: updater.ProbationFailedStarts},
+		say(updater.State{Status: "installing", TargetVersion: current, FailedStarts: updater.ProbationFailedStarts},
 			"the install marker cannot be read again")
 		return 0, false
 	}
 	refuse := func(said, recorded string) {
-		crashRollbackLine(stderr, st, said)
+		say(st, said)
 		recordCrashRollbackRefusal(dataDir, st, recorded, save, stderr)
 	}
 	if ok, why := updater.CrashRollback(st, current); !ok {
@@ -140,7 +147,7 @@ func recoverCrashedInstall(ctx context.Context, dataDir, configPath string, opts
 		return 0, false
 	default:
 		if check.Err != nil {
-			crashRollbackLine(stderr, st, "this start was stopped while the backup checked the settings")
+			say(st, "this start was stopped while the backup checked the settings")
 			return 0, false
 		}
 		refuse(fmt.Sprintf("the backup's settings check did not answer: %s", check.Detail),
@@ -153,7 +160,7 @@ func recoverCrashedInstall(ctx context.Context, dataDir, configPath string, opts
 	// migrate the store past the binary put back.
 	record := updater.CrashRollbackRecord(st, current)
 	if err := save(dataDir, record); err != nil {
-		crashRollbackLine(stderr, st, fmt.Sprintf("could not record %s as held back (%v), and a backup put back without that record would "+
+		say(st, fmt.Sprintf("could not record %s as held back (%v), and a backup put back without that record would "+
 			"install it again", current, err))
 		return 0, false
 	}
@@ -166,10 +173,10 @@ func recoverCrashedInstall(ctx context.Context, dataDir, configPath string, opts
 		// still this version's.
 		st.RollbackRefused = "the backup could not be put back over the binary"
 		if perr := save(dataDir, st); perr != nil {
-			crashRollbackLine(stderr, st, fmt.Sprintf("could not put the backup back (%v), nor the install marker as it was (%v)", err, perr))
+			say(st, fmt.Sprintf("could not put the backup back (%v), nor the install marker as it was (%v)", err, perr))
 			return 0, false
 		}
-		crashRollbackLine(stderr, st, fmt.Sprintf("could not put the backup back: %v", err))
+		say(st, fmt.Sprintf("could not put the backup back: %v", err))
 		return 0, false
 	}
 	fmt.Fprintf(stderr, "updater: %d starts of %s since its install did not end cleanly, so the install is rolled back: %s is back at %s "+
@@ -178,12 +185,22 @@ func recoverCrashedInstall(ctx context.Context, dataDir, configPath string, opts
 	return supervision.RestartExitCode, true
 }
 
+// What a start does where its crash rollback leaves the install, with which
+// each line that says so ends: a start whose settings loaded goes on and
+// counts itself, and one that refused them ends at that refusal, as it did
+// before its crash rollback was asked (backlog B760).
+const (
+	crashRollbackGoesOn       = "this start goes on, and counts itself"
+	crashRollbackRefusedStart = "this start refuses its settings, as it did before, and is not counted"
+)
+
 // crashRollbackLine says why the crash rollback leaves the install st
-// describes, for an install of this version whose count asked for it; the
-// line may name the backup's path, as the early rollback's do.
-func crashRollbackLine(stderr io.Writer, st updater.State, why string) {
-	fmt.Fprintf(stderr, "updater: not rolling back the install of %s after %d starts of it that did not end cleanly: %s; "+
-		"this start goes on, and counts itself\n", st.TargetVersion, st.FailedStarts, why)
+// describes, for an install of this version whose count asked for it, and
+// then, what the start does next; the line may name the backup's path, as the
+// early rollback's do.
+func crashRollbackLine(stderr io.Writer, st updater.State, why, then string) {
+	fmt.Fprintf(stderr, "updater: not rolling back the install of %s after %d starts of it that did not end cleanly: %s; %s\n",
+		st.TargetVersion, st.FailedStarts, why, then)
 }
 
 // recordCrashRollbackRefusal records why the crash rollback left the install
@@ -205,7 +222,8 @@ func recordCrashRollbackRefusal(dataDir string, st updater.State, why string, sa
 // that its first check refused on a read without the install marker's lock,
 // and records it under that lock, on the marker read again and checked again,
 // where the lock can be held: a lock that cannot be leaves the line alone.
-func refuseCrashRollbackOnARead(ctx context.Context, dataDir, current, why string, opts serveOpts, stderr io.Writer) {
+// then is what the start does next (crashRollbackLine).
+func refuseCrashRollbackOnARead(ctx context.Context, dataDir, current, why, then string, opts serveOpts, stderr io.Writer) {
 	save := opts.saveUpdateState
 	if save == nil {
 		save = updater.SaveState
@@ -214,7 +232,7 @@ func refuseCrashRollbackOnARead(ctx context.Context, dataDir, current, why strin
 	if err != nil || !lock.Held() {
 		lock.Release()
 		if st, rerr := updater.LoadState(dataDir); rerr == nil {
-			crashRollbackLine(stderr, st, why)
+			crashRollbackLine(stderr, st, why, then)
 		}
 		return
 	}
@@ -224,7 +242,7 @@ func refuseCrashRollbackOnARead(ctx context.Context, dataDir, current, why strin
 		return
 	}
 	if _, why := updater.CrashRollback(st, current); why != "" {
-		crashRollbackLine(stderr, st, why)
+		crashRollbackLine(stderr, st, why, then)
 		recordCrashRollbackRefusal(dataDir, st, why, save, stderr)
 	}
 }
@@ -232,15 +250,41 @@ func refuseCrashRollbackOnARead(ctx context.Context, dataDir, current, why strin
 // sayCrashRollbackNeedsTheDataDir says, where serve did not take its data
 // dir's lock, that an install whose count asks for the crash rollback is left
 // as it is: only the data dir's owner puts the backup back. Nothing is
-// written.
-func sayCrashRollbackNeedsTheDataDir(dataDir string, stderr io.Writer) {
+// written; then is what the start does next (crashRollbackLine).
+func sayCrashRollbackNeedsTheDataDir(dataDir, then string, stderr io.Writer) {
 	st, err := updater.LoadState(dataDir)
 	if err != nil {
 		return
 	}
 	if ok, _ := updater.CrashRollback(st, version.ServerVersion); ok {
-		crashRollbackLine(stderr, st, "the data dir's lock is not this process's, and only its owner may put the backup back")
+		crashRollbackLine(stderr, st, "the data dir's lock is not this process's, and only its owner may put the backup back", then)
 	}
+}
+
+// recoverCrashedRefusedInstall is the crash rollback (recoverCrashedInstall)
+// for a start of this version that refused its settings, where the early
+// rollback leaves the install and its count asks for the crash rollback
+// (backlog B760): an install marker, or the crash rollback's own record whose
+// rename did not land, with updater.ProbationFailedStarts starts of this
+// version that did not end cleanly, which recorded that this version opened
+// the data dir, so the early rollback refuses it. Until B760 such a start
+// exited 2, as did every start after it while the settings stayed refused,
+// and its crash rollback was never asked. It takes the data dir's lock, as the
+// early rollback does, and asks the crash rollback whole, its own checks of
+// the marker and the backup, the backup's settings check of the settings as
+// they are now (a backup that refuses them too is not put back), and its
+// record, its rename and its exit, holding the install marker's lock as that
+// rollback does; where it leaves the install it says why, and records it as it
+// does at any start, and the start refuses its settings as it did before. A
+// data dir's lock that cannot be taken leaves the install as it is.
+func recoverCrashedRefusedInstall(ctx context.Context, dataDir, configPath string, opts serveOpts, stderr io.Writer) (code int, acted bool) {
+	release, err := lockServeDataDir(dataDir)
+	if err != nil {
+		sayCrashRollbackNeedsTheDataDir(dataDir, crashRollbackRefusedStart, stderr)
+		return 0, false
+	}
+	defer release()
+	return recoverCrashedInstall(ctx, dataDir, configPath, opts, crashRollbackRefusedStart, stderr)
 }
 
 // sayTheAdmissionsCount says what the boot's admission counted (backlog

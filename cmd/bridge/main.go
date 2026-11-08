@@ -3568,11 +3568,11 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	// check allows it, and otherwise says why and goes on. Only the data
 	// dir's owner puts the backup back.
 	if lockErr == nil {
-		if code, acted := recoverCrashedInstall(ctx, cfg.DataDir, *configPath, opts, stderr); acted {
+		if code, acted := recoverCrashedInstall(ctx, cfg.DataDir, *configPath, opts, crashRollbackGoesOn, stderr); acted {
 			return code
 		}
 	} else {
-		sayCrashRollbackNeedsTheDataDir(cfg.DataDir, stderr)
+		sayCrashRollbackNeedsTheDataDir(cfg.DataDir, crashRollbackGoesOn, stderr)
 	}
 	// Before the first write to the data dir, and so before the store's
 	// migrations: an armed install marker records that this version went on
@@ -3608,8 +3608,14 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	// serve's own context, which runServe cancels on every exit, nor of the
 	// stop's notice, which an error at once after the stop can beat (the third
 	// round). A panic on serve's own goroutine runs these defers with code
-	// still 0, and runServe does not recover, so the take-back reads
-	// notAFailedStart, which exactly the host's paths set, and never code.
+	// still 0, so the take-back reads notAFailedStart, which exactly the
+	// host's paths set, and never code; and its defer recovers such a panic,
+	// to read the end as no clean one whatever came before it (a stop, a
+	// restart request, a refusal of the host's), to count again a ready start
+	// whose stop had taken its count back as it arrived, and to raise it again
+	// as it was (backlog B760: until then the end of a panic after a stop was
+	// read as the stop's). A panic on another goroutine ends the process with
+	// no defer run, its count as it stands.
 	// Registered here, right after the admission, so it runs after every
 	// teardown and while the data dir's lock is held: the take-back is joined
 	// there, within the stop's budget (stopBudget), before the lock is let go.
@@ -3617,9 +3623,12 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	// publishes before its barrier can fail. On every return the start's token
 	// is cleared, its count kept where it is not taken back, and its own lock
 	// let go (updater.StartHold; the third round), so a start that returned,
-	// the launcher's own included, is never read as running.
+	// the launcher's own included, is never read as running. And a counted
+	// start is watched from here until it begins serving (startWatch; backlog
+	// B760), so one that has not begun within its deadline is said not ready.
 	notAFailedStart := false
 	var takeBack *stopTakeBack
+	var starting *startWatch
 	if admission.CountTried > 0 {
 		takeBack = newStopTakeBack(cfg.DataDir, admission.CountTried)
 		arrived := takeBack.arrived
@@ -3632,12 +3641,23 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		unregister := context.AfterFunc(stopped, arrived)
 		restart.onRequest(arrived)
 		defer func() {
+			panicked := recover()
 			unregister()
-			end := stopped.Err() != nil || restart.requested.Load() || notAFailedStart
+			end := panicked == nil && (stopped.Err() != nil || restart.requested.Load() || notAFailedStart)
 			answered, missed, deadline := takeBack.finish(end)
 			if end && !answered {
 				fmt.Fprintf(stderr, "updater: this start ended cleanly and its count of the install's starts was not taken back "+
 					"within %s (%v): it counts as one that did not\n", stopBudget, missed)
+			}
+			if panicked != nil {
+				switch tried, again, err := takeBack.countAgain(); {
+				case again:
+					fmt.Fprintf(stderr, "updater: this start panicked after its stop had taken its count of the install's starts back, "+
+						"so it is counted again, as a start that did not end cleanly\n")
+				case tried && err != nil:
+					fmt.Fprintf(stderr, "updater: this start panicked after its stop had taken its count of the install's starts back, "+
+						"and could not be counted again (%v)\n", err)
+				}
 			}
 			if !answered {
 				endCtx, cancel := context.WithDeadline(context.Background(), deadline)
@@ -3645,10 +3665,15 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 				cancel()
 			}
 			admission.Start.Release()
+			if panicked != nil {
+				panic(panicked)
+			}
 		}()
 		if opts.teardownHold != nil {
 			defer opts.teardownHold()
 		}
+		starting = watchTheStart(ctx, cfg.DataDir, version.ServerVersion, opts.probation, stderr)
+		defer starting.end()
 	}
 	sayTheAdmissionsCount(admission, stderr)
 	// Adopt pre-floor identities before any live backup can run, even with
@@ -6883,6 +6908,9 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	if opts.probation != nil && opts.probation.beforeServing != nil {
 		opts.probation.beforeServing()
 	}
+	// This start begins serving: the watch on it from its admission ends
+	// here, and the confirmation takes over below (backlog B760).
+	starting.served()
 	serveErr := make(chan error, 1)
 	go func() {
 		serveErr <- httpSrv.ServeTLS(lis, "", "")

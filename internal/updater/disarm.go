@@ -52,8 +52,11 @@ type DisarmResult struct {
 	// Start is the counted start's hold on its own lock, whose token the
 	// count's write carried (StartHold, State.RunningStart; backlog B660's
 	// third round): nil where the admission counted nothing, or could not
-	// take one, which leaves the start read as not running. The start lets
-	// go of it as it returns, once its token is cleared (EndStart).
+	// take one, which leaves the start read as not running. It is kept where
+	// the count was the admission's only write and that write failed
+	// (CountMissed), which may have published the token before its barrier
+	// failed (backlog B760). The start lets go of it as it returns, once its
+	// token is cleared (EndStart).
 	Start *StartHold
 	// State is the marker as the disarm left it: as it wrote it, or as it
 	// read it where it wrote nothing.
@@ -374,8 +377,13 @@ func disarmHeld(dataDir, current string, save func(dataDir string, st State) err
 		callBeforeDisarmRecord(dataDir)
 		res := DisarmResult{CountTried: next.FailedStarts, State: st}
 		if err := save(dataDir, next); err != nil {
-			hold.Release()
+			// The write may have published before it failed (SaveState renames
+			// before its barrier), the token with the count: the start keeps its
+			// hold, so a reader that finds the token reads the start running, and
+			// the start clears the token as it returns (backlog B760; until then
+			// the hold went here, and the running start read as a failed one).
 			res.CountMissed = fmt.Errorf("this start of %s was not counted against its install: %w", current, markerIOError{err})
+			res.Start = hold
 			return res, nil
 		}
 		res.Counted, res.State, res.Start = true, next, hold

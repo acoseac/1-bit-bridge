@@ -224,6 +224,9 @@ func TestARefusedStartWhoseCrashRollbackRefusesKeepsTheInstall(t *testing.T) {
 			}
 			binaries.requireUnchanged(t)
 			requireRefusal(t, r, stderr, tc.said, tc.recorded)
+			if said := updaterLines(stderr); !strings.Contains(said, "refuses its settings, as it did before") || strings.Contains(said, "goes on") {
+				t.Errorf("the start that refuses its settings said it goes on, or not what it does; its updater lines: %q", said)
+			}
 			after := markerOf(t, r.dataDir)
 			after.RollbackRefused = before.RollbackRefused
 			if after != before {

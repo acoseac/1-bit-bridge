@@ -78,6 +78,9 @@ func finishTakeBackDeadline(stopAt, now time.Time) time.Time {
 // admission never reached its rollback). A slow but healthy start that a
 // supervisor kills in a slow teardown before it was ready counts too, which
 // errs toward a rollback that the confirmation of a later start forestalls.
+// A panic on serve's goroutine ends a start uncleanly, whatever came before
+// it (backlog B760): its end takes nothing back, and a take-back that began as
+// the stop arrived is undone (countAgain).
 //
 // It asks updater.TakeBackFailedStart, which writes only where the marker
 // still holds the count this start wrote, and clears the start's token in
@@ -208,4 +211,37 @@ func (b *stopTakeBack) finish(takeBack bool) (answered bool, missed error, deadl
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return false, b.lastErr, deadline
+}
+
+// countAgain counts this start again where its take-back began as its stop
+// arrived and the start then ended in a panic on serve's goroutine (backlog
+// B760): the start had answered as ready, so its count went back as the stop
+// arrived, which the panic that ended it after came too late to stop. It is
+// asked once finish has joined the take-back, whatever that answered, and
+// writes only where the take-back's own write stands
+// (updater.CountFailedStartAgain), asking again until it has an answer or its
+// deadline passes: finishTakeBackDeadline's, at least finishTakeBackFloor from
+// now and below the SCM's wait from the stop's arrival. tried says a take-back
+// had begun, so that there was one to undo; counted, that this wrote the count
+// back; err, why it had no answer.
+func (b *stopTakeBack) countAgain() (tried, counted bool, err error) {
+	b.mu.Lock()
+	began, stopAt := b.began, b.stopAt
+	b.mu.Unlock()
+	if !began {
+		return false, false, nil
+	}
+	ctx, cancel := context.WithDeadline(context.Background(), finishTakeBackDeadline(stopAt, time.Now()))
+	defer cancel()
+	for {
+		wrote, err := updater.CountFailedStartAgain(ctx, b.dataDir, version.ServerVersion, b.counted)
+		if err == nil {
+			return true, wrote, nil
+		}
+		select {
+		case <-ctx.Done():
+			return true, false, err
+		case <-time.After(stopTakeBackRetry):
+		}
+	}
 }

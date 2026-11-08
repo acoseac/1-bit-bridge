@@ -144,6 +144,42 @@ func TakeBackFailedStart(ctx context.Context, dataDir, current string, counted i
 	return true, nil
 }
 
+// CountFailedStartAgain counts again a start of current whose stop took its
+// count back (TakeBackFailedStart) and which then did not end cleanly after
+// all, counted being what its admission tried to write (backlog B760): serve
+// calls it where a panic on its own goroutine ends a start whose take-back
+// began as its stop arrived, the start having answered as ready, holding the
+// data dir's lock. ctx bounds the wait for the install marker's lock, as the
+// take-back's does; on a filesystem that keeps none it goes on without it. It
+// reads the marker again and writes only where the marker is still an
+// install of current that the start counted against (countsStart) and holds
+// what the take-back left, counted less one, so it undoes that take-back and
+// nothing else: a take-back that never landed, a confirmation and an install
+// of another version since leave it nothing to write. It reports whether it
+// wrote.
+func CountFailedStartAgain(ctx context.Context, dataDir, current string, counted int) (bool, error) {
+	if counted <= 0 {
+		return false, nil
+	}
+	lock, err := LockState(ctx, dataDir)
+	if err != nil {
+		return false, err
+	}
+	defer lock.Release()
+	st, err := LoadState(dataDir)
+	if err != nil {
+		return false, fmt.Errorf("the install marker cannot be read: %w", markerIOError{err})
+	}
+	if !countsStart(st, current) || st.FailedStarts != counted-1 {
+		return false, nil
+	}
+	st.FailedStarts = counted
+	if err := SaveState(dataDir, st); err != nil {
+		return false, markerIOError{err}
+	}
+	return true, nil
+}
+
 // CrashRollback reports whether a start of version current may put back the
 // backup the install marker st describes because ProbationFailedStarts starts
 // of current did not end cleanly (backlog B660), and why not where it may
