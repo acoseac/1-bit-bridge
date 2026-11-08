@@ -88487,3 +88487,104 @@ applied, where the guards that read the tracked docs passed too
 `TestNoDocblockNamesAnotherDeclaration`, the endpoint and error-table guards,
 `TestDSDOutputProtocolTokens` and `TestQualificationRunbookVersion`); and the qualification
 check against main's tip, the merge base CI takes now (0fd7e3f8), passed at 48.
+
+## 2026-11-08 — B728 B9 round 8: the producer's stop pinned with Revoke held; a fault survives every ended-life answer
+
+Worker b728-b9, legion0 (Ubuntu 26.04, Linux 7.0, Go 1.27.3), branch
+`feat/b728-b9-choice` at 85ccf536 (round 7 taken, its rules applied, main's B797 merged).
+The reviews of round 7 (Codex's one finding, Claude's three) and the two reviews of this
+round's brief (Codex's five, Claude's six), folded into its three points. Commits: 1b472e62
+(point 1), 2dcd52eb (point 3's cases, red), 1db60e4f (point 3's fix, and qualification 49),
+this record, and the gates' paragraph after it. The rules are a patch the orchestrator
+applies (`rules-b728-b9-r8.patch`): `output.md`'s bullet on the write beside what plays,
+with its long form (point 2), and `player.md`'s B765 bullet, with its long form (point 3).
+
+**Point 1 (both reviews of round 7): confirmed.** The install-held case of
+`TestARevocationOfAConvertedSuccessorGivesItsNodeNothing` let the install and the
+reconciliation's hold go together, so `Backend.Revoke` could drop b's PCM sink before the
+producer's next step, and with the producer's checks removed the node stayed unwritten
+(round 7's K3, green). The producer checks two things there (`next`): the session's fault,
+and a stale occurrence it writes, and b is stale in this fixture: a successor whose
+revocation an activation under way records is a re-plan the engine does not take
+(`judgeDSDLocked`), held back. No seam marked the producer's decision; `holdNextFault`
+holds the reporter, which says nothing of it. A per-backend seam now does,
+`Seams.ProducerStep`, on the producer once `next` has decided, no lock held, before the step
+is taken. The case keeps the reconciliation held before Revoke after the install is let
+go, frees the kernel so a write would land, and waits, under the watchdog, on the
+producer's first step: it must be the stop on the recorded fault, b's node given nothing
+then; a write first is followed until b's node grows, which fails the case saying how
+much; any other first step fails it at once. Only then are Revoke and the held fault let
+go. `reconcileDSD`'s comment and the rules (point 2) say which guarantee holds where.
+
+**Point 2: the rules line, exact.** HEAD said the converted PCM sink is not fenced and
+that its producer stops on the recorded fault. It now says, scoped: revoked once its
+activation completed (held at its install, claimed, its output adopted), the fault is
+recorded and the producer's next step is its stop on it, which keeps the bytes off the
+node before Revoke drops the sink, pinned by point 1's case; revoked at its open's
+admission, the occurrence has no output of its own, so no fault is recorded, its adoption
+closes the sink unwritten and Revoke drops the occurrence. A Don't is added: the producer
+takes no step past a recorded revocation's fault but its stop.
+
+**Point 3 (Claude's third finding of round 7; both reviews of the brief): confirmed, red
+first.** Once a native sink's life had ended, `fenced` answered the life's cancellation
+whatever `s.err` held: the writer's reply to a request it ended without running and the
+refusals of Activate, Resume, ActivatePaused, Pause and WriteDSD dropped a device's failure
+or `ErrReleaseUnconfirmed`, against `ErrActivationFenced`'s doc and B765's rule that a
+terminal error keeps it. And a request whose caller's context is the life, as the
+harness's is, answered its plain cancellation from its own context's arm at once, before
+the release had recorded anything (Claude's review of the brief: a case that does not
+force the arm can pass either way). Red on 2dcd52eb, the cases before the fix:
+`TestNativeResumeTheEndedLifeNeverRanAnswersAFailedClose` (a resume asked while the writer
+sits in its pause's watch, never run; the node still open until the writer's end, whose
+close fails), through the writer's reply (its caller on a context the life does not end)
+the life's cancellation, through its caller's own context (the caller on the life, the
+writer held in its watch's poll and the watcher before its revocation, so the context's arm
+is the one taken) `context canceled`; `TestNativeResumeTheEndedLifeNeverRanAnswersTheDevicesFailure`
+(Codex's review of the brief: the existing case's poll, once released, returns its
+cancellation and never reaches the STATUS, so the new case holds the writer inside its
+pause watch's STATUS after a poll that ended, asks the resume and ends the life, then lets
+the STATUS answer EIO, and asserts it did), the same two answers, the EIO dropped; and
+`TestNativeCommandsAfterTheLifeEndsAnswerItsCancellation`'s ten new rows (the five
+commands after a device's EIO the writer recorded before the life ended, and after the
+release's close failed once it had), each the life's cancellation; its five clean rows
+green. The fix, 1db60e4f: `fenced` has one rule, a recorded failure joined to the
+command's own refusal, the life running or ended, and with none the refusal while the life
+runs and the life's cancellation once it has ended; the loop-end reply goes through it, its
+words never the sink's fence where a failure is recorded (round 4's rule, kept). Activate,
+Resume and ActivatePaused wait through one helper (`await`), whose context arm revokes the
+sink and answers `abandoned`: the cause with the recorded failure joined, at once while the
+life runs, a call honouring its context, and, once the life has ended too, after the
+writer's end, within the release's budget, past which the release is answered unconfirmed;
+joining what is recorded at the arm's moment was the other way the brief allowed, and
+answers neither case, the close's failure and the STATUS's EIO both coming after the life's
+end. An activation the writer runs and classifies records nothing before its own answer (a
+request is admitted only while nothing is recorded, and the writer records only there or as
+it ends), so its life's cancellation drops none: the in-loop comment says so. Out of scope,
+said here: Pause's and WriteDSD's own waits answer their caller's context as before; they
+race no reply, and the harness's Release after a failed command returns the sink's outcome.
+Serve's player is unaffected but for a refusal of a sink that failed, which now carries the
+failure beside its words.
+
+**Controls**, predicted by name before the runs (`r8-controls.predictions.txt`), every
+file's bytes restored after each: K3 (both of the producer's checks removed) red, b's node
+given 24,576 bytes, the producer's steps [write write]; K3a (the stop on the fault alone)
+red at once, the step a wait, b's node unwritten; K3b (the stale wait alone) green. M8a
+(`fenced` without its join) red in both "through its reply" subtests and the ten failure
+rows, as predicted, and in round 4's `TestTheActivationsOwnFenceIsErrActivationFenced/ended
+by a failure with the activation asked and not yet run`, not predicted: the loop-end reply
+now carries the failure through `fenced` alone; M8b (the context arm answering its cause
+alone) and M8c (`abandoned` without its wait) red in both "through its caller's context"
+subtests alone; M8d (the loop-end reply always the sink's fence) red in round 4's failure
+row alone. Nothing else differed from the predictions.
+
+**A failure seen once.** `TestAGaplessSuccessorWaitsForAWriteNoLongerThanTheSinksLookahead`
+failed once in a whole `-race` run of `internal/alsapcm` on 1db60e4f's tree ("2 opens, want
+a's alone"), then passed 60 runs alone; its rig opens no native sink and sets no
+`ProducerStep`, so neither change reaches it. The write it holds reconciles before it
+settles (`refreshDSD`, then `settleChoice`), so b is stale by the time the producer's
+transition wakes, and the second open needs another order than the one read here.
+
+**The qualification version** is 49: `sink_dsd.go` and `sink_dsd_writer.go` changed under
+the guard, with the sink's tests and the backend's; the runbook's five current lines say 49
+and 49's paragraph records what changed for owners (a failure beside a Stop now in the
+command's answer too; a clean Stop unchanged; nothing plays differently).
