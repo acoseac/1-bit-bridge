@@ -487,7 +487,8 @@ func TestAnEmptyListOverrideASaveLeftKeepsTheFilesList(t *testing.T) {
 // TestASaveWritesNoKeyForAnyLeafTheFileDoesNotWrite: for every leaf a
 // variable sets, whatever its field's tag, a save that leaves the leaf at the
 // variable's value over a file that does not write it writes no key for it:
-// the save's own steps (filedEnvValues, then marshal), over an empty file, an
+// the save's own steps (filedEnvValues, then marshal) on a config with every
+// other field set, so that every section is written, over an empty file, an
 // empty mapping and a file that writes another setting alone. The opt-outs
 // are filedSwitches' (TestTheOptOutsVariablesAreStillWrittenAsTheirSwitchesAre).
 func TestASaveWritesNoKeyForAnyLeafTheFileDoesNotWrite(t *testing.T) {
@@ -505,7 +506,9 @@ func TestASaveWritesNoKeyForAnyLeafTheFileDoesNotWrite(t *testing.T) {
 			if kind == reflect.Pointer {
 				kind = b.elemKind
 			}
-			before := &Config{envSet: []string{b.YAMLPath}}
+			before := &Config{}
+			fillNonZero(reflect.ValueOf(before).Elem())
+			before.envSet = []string{b.YAMLPath}
 			if !before.applyEnvValue(b, b.EnvVar, values[kind]) {
 				t.Fatalf("%s=%q sets nothing", b.EnvVar, values[kind])
 			}
