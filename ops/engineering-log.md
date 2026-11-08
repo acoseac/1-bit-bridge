@@ -88608,3 +88608,81 @@ packages ok and `cmd/bridge` failing on
 (1 of 40 alone in B762's round 3, once in B765's first `make test`), with `cmd/bridge` whole
 passing under `-race` in the first session; run again, `make test` passed, 89 packages ok and
 none failing (2,059 s), the Linux-only tests run here.
+
+## 2026-11-08 — B728 B9 round 9: a cleanup failure after an answer reaches the caller
+
+Worker b728-b9, legion0 (Ubuntu 26.04, Linux 7.0, Go 1.27.3), branch
+`feat/b728-b9-choice` at 9709b106 (round 8 taken, its rules applied). The reviews of round 8
+(Codex's two findings, Claude's two) and the two reviews of this round's brief (Codex's
+three, Claude's six), folded into its rule. Commits: 804349c4 (the cases, red, with the
+caller-side test seam), c72a76a2 (the fix, and qualification 50), 5a345a6c (one case made
+watchdog-bounded, after control N4), this record, and the gates' paragraph after it. The
+rules are a patch the orchestrator applies (`rules-b728-b9-r9.patch`): `player.md`'s B765
+bullet, retitled, with its long form.
+
+**The defect: confirmed, red first.** An answer could be given before the device's cleanup
+had a verdict, and a failure recorded after it never reached the caller. Red on 804349c4,
+whose only code change is the test seam `nativeSeams.awaiting` (nil outside a test):
+`TestNativeAnActivationOnAnEndedLifeAnswersItsCleanup` (an Activate on its already ended
+life answered the plain cancellation straight after its revocation, its close then failing;
+with the close confirmed it answered the plain cancellation, not the life's typed one; and
+refused at its entry while its release was past its budget it answered the life's
+cancellation; its row with the life running, the caller's own context ended, answered at once
+and passed); `TestNativeAReplyTakenAfterTheLifeEndsCarriesItsCleanup` (the writer's success
+or its admission's refusal, its caller held where it begins to wait until the life ended and
+the release's close failed, answered as sent: off the life every run, and on it 11 and 8
+runs of 20, whenever the select took the reply or the writer's end over the context's arm);
+`TestNativeAReopenFencedByTheEndedLifeAnswersItsFailedClose` (a fence a reopened node met
+whose own close failed answered `ErrActivationFenced` beside the failure; DoP's precision
+refusal there passed, see below); and `TestNativeACallerWaitsNoLongerThanTheReleasesBudget`
+(off the life the caller waited for the held close past the release's deadline; on the life
+it passed, round 8's `abandoned` having the deadline's arm, which no test reached until now).
+
+**What the brief said that does not hold.** The reopen paths' closes are not recorded in
+`cleanupErr` alone: `nativeCleanupError` joins `ErrReleaseUnconfirmed`, so an answer whose
+close failed is terminal and the classification records it in `s.err` too
+(`TestNativeAReopenFencedByTheEndedLifeAnswersItsFailedClose`'s DoP row, green before the fix).
+What was wrong there was the fence path's answer carrying `ErrActivationFenced`.
+
+**The fix (c72a76a2).** Once the sink's life has ended, every answer of Activate, Resume
+and ActivatePaused carries the cleanup's verdict. `await` settles the writer's reply, taken
+by its own arm or the writer's end (`settled`): the caller waits for the writer's end within
+the release's shared budget (`endOfLife`, which begins the life's Immediate release where no
+one has, no lock held while it waits), then answers by `s.err`, where every failure of the
+writer and its release is joined, a failed close's with `ErrReleaseUnconfirmed` (`cleanupErr`
+holds the closes' alone, `CleanupResult`'s). Nothing recorded: the answer as it was, the
+life's typed cancellation among them. A failure the answer carries already, or the answer
+itself all that is recorded with the release confirmed: the answer. Otherwise the recorded
+failure, beside the answer's own fault where it is one, or beside fixed words where it is a
+success, a cancellation or the sink's fence. The three commands' refusals at their entry
+are settled the same way; Activate's pre-cancelled caller goes through `abandoned`, which
+waits only once the life has ended (its revocation ends the writer whatever the life, so a
+caller whose own context ended while the life runs is answered at once, the writer still in
+its release); `await` watches the release's deadline (`releaseExpired`, now made at the
+sink's construction and closed once at that deadline, so a wait begun before the release can
+watch it), so a caller off the life is answered `ErrReleaseUnconfirmed` there, as one on it
+is by `abandoned`, the cleanup still the writer's and the sink not done; and a reopened
+node's fence whose own close failed answers that failure (`errReopenFenced`,
+`ErrReleaseUnconfirmed`). The writer still sends one reply per request: none is deferred, so
+the loop-end reply, sent after the writer's own close, is the only one a request it never ran
+gets. Pause's and WriteDSD's own waits stay outside: they answer their caller's context, their
+refusals what is recorded as they answer. Serve's sinks, whose lives end only after Done,
+answer as before. The comments on the activation's reply, the loop-end reply,
+`ErrActivationFenced`, `await`, `abandoned` and `settled` say the contract, and the rules
+line is retitled to it.
+
+**Controls**, predicted by name before the runs (`r9-controls.predictions.txt`), every
+file's bytes restored after each, `-race`, `-watchdog 10s`: N1 (the pre-cancelled caller
+answering at once) red in both of its life-ended rows; N2 (no settle) red in both "through
+its reply" rows and the entry refusal's row, and in the two life-context rows in 14 and 15
+runs of 21, green in the rest; N3 (`await` without its deadline arm) red in the deadline
+case off the life; N4 (`endOfLife` without its deadline arm) red in the deadline case on the
+life and the entry refusal's row: at first that row called Activate on the test's goroutine,
+so the hang ran to the binary's 10-minute timeout and aborted the run, and once the answer
+was taken on a goroutine under the watchdog (5a345a6c) N4 failed those two rows by the
+watchdog, as predicted; N5 (the reopen fence's failed close joined to the fence again) red in
+the fence row; N6 (`abandoned` answering its plain cause with nothing recorded) red in the
+confirmed close's row; N7 (`releaseExpired` made at the release's begin again) red in the
+deadline case off the life, its arm a nil channel, and the race detector reported the field's
+write and its unlocked read (12 reports), failing B765's cases and round 4's fence case
+beside it. Nothing else differed from the predictions.
