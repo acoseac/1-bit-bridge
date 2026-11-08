@@ -993,7 +993,10 @@ sink an open is under way for as reaching it (`occ.claimed`, taken in the step
 that found no write pending and kept to the end of its activation), and that
 open's adoption and activation wait for a write pending, an occurrence it
 handed off again by then, or dropped for its replacement, taken back from its
-sink unwritten (`errReplanned`, `unadopt`); a resume waits in a loop; a refusal
+sink unwritten (`errReplanned`, `unadopt`), and so is one dropped as its
+activation begins, by whatever dropped it, its decoder and content closed as it
+is taken back, a release then ending the session with no fault (round 3); a
+resume waits in a loop; a refusal
 of the policy's that a write or a later set lifts is asked again where the open
 ends, the content's checks with it (`settleOpen`, `refusedUnder`), a
 successor's DSD monitor starting once it is admitted; a gapless successor waits
@@ -1005,7 +1008,10 @@ epoch is read inside its turn; and it is judged against the set published, a
 reading of the DAC that gives another set published and reconciled first. Don't
 open, adopt or activate an occurrence's own sink beside a write that has not
 counted it, wait for a write with an `if` where another may follow, fault a
-successor handed off again or dropped at its activation, ask a decoder's
+successor handed off again or dropped at its activation, at its fence too, take
+a dropped one back with its decoder open, fault a session whose release came
+during an activation, let a test of the adoption's wait pass on the activation's
+own, ask a decoder's
 refusal again or a policy's without the content's checks, compare a pending set
 with any set but the one published, hold a gapless successor past its sink's
 floor, take a session's lock inside the store's closure or answer
@@ -1028,9 +1034,12 @@ for a write that became pending after the adoption, and an occurrence handed
 off again by then, or dropped for its replacement (a cut of a successor with
 no frame written drops it at once, which the check took for a refusal and
 faulted the session on: a control that removed it went red in 4 of 5 runs),
-is taken back from its sink unwritten. Of the two waits the activation's alone
-holds every case a test can reach: a control that removed the adoption's alone
-stayed green, and one that removed both went red. A resume asks again under
+is taken back from its sink unwritten. Of the two waits, round 2's tests held
+the activation's alone: a control that removed the adoption's alone stayed green
+there, and one that removed both went red. Since round 3 the adoption cases
+require the adoption's own wait, the occurrence's activation unreached while the
+write is held (`waitedUnactivated`), and a control that removes the adoption's
+wait alone goes red in each of them. A resume asks again under
 the lock each time a write settles, since another write may be pending by
 then. Each wait is bounded by the write's own, which settles at every end of
 it, and ends with the session's life, which a release ends, a resume's with
@@ -1091,4 +1100,37 @@ the box shows is published by a refresh, and the write's publish is one. The
 classification also counts a session being released, and an engine that
 hands nothing off again, as revocations (`TestAWriteBesideASessionBeingReleasedIsTold`,
 `TestAWriteBesideAnEngineThatHandsNothingOffAgainIsTold`, the rig's
-`noReplan`). `TestASuccessorsOpenBesideAWriteIsCountedAndWaitsForIt`, `TestAnActivationBesideAWriteWaitsForIt`, `TestAResumesOpenBetweenTransportsBesideAWriteIsCounted`, `TestAResumeWaitsForEveryWriteThatChangesWhatItOpens`, `TestAPolicyRefusalAWriteLiftsIsAskedAgain`, `TestASuccessorWhoseOpenEndsBesideAWriteWaitsForIt`, `TestNoSinkOpensForASuccessorWhileAWriteChangesItsRate`, `TestAConvertedJoinWindowWaitsForAWriteThatChangesItsSuccessor`, `TestAGaplessSuccessorWaitsForAWriteNoLongerThanTheSinksLookahead`, `TestAWriteBesideAnEngineThatHandsNothingOffAgainIsTold`, `TestAWriteBesideASessionBeingReleasedIsTold`, `TestTheWritesChecksAreAnsweredInTheirOrder`, `TestAWriteTheStateKeepsMovingUnderIsNotMade`, `TestAStaleAnswerNeverCarriesARevisionAnotherWriteHasPassed`, `TestAWriteIsJudgedAgainstTheSetPublished` and `TestAWriteWhoseReadingNeverAgreesWithTheSetPublishedIsNotMade` pin it.
+`noReplan`). `TestASuccessorsOpenBesideAWriteIsCountedAndWaitsForIt`, `TestAnActivationBesideAWriteWaitsForIt`, `TestASuccessorDroppedAtItsActivationIsTakenBackUnwritten`, `TestAReleaseWhileASuccessorsAdoptionWaitsLetsGoOfTheDevice`, `TestAResumesOpenBetweenTransportsBesideAWriteIsCounted`, `TestAResumeWaitsForEveryWriteThatChangesWhatItOpens`, `TestAPolicyRefusalAWriteLiftsIsAskedAgain`, `TestASuccessorWhoseOpenEndsBesideAWriteWaitsForIt`, `TestNoSinkOpensForASuccessorWhileAWriteChangesItsRate`, `TestAConvertedJoinWindowWaitsForAWriteThatChangesItsSuccessor`, `TestAGaplessSuccessorWaitsForAWriteNoLongerThanTheSinksLookahead`, `TestAWriteBesideAnEngineThatHandsNothingOffAgainIsTold`, `TestAWriteBesideASessionBeingReleasedIsTold`, `TestTheWritesChecksAreAnsweredInTheirOrder`, `TestAWriteTheStateKeepsMovingUnderIsNotMade`, `TestAStaleAnswerNeverCarriesARevisionAnotherWriteHasPassed`, `TestAWriteIsJudgedAgainstTheSetPublished` and `TestAWriteWhoseReadingNeverAgreesWithTheSetPublishedIsNotMade` pin it.
+
+Round 3 (2026-11-08, the reviews of round 2 and of the merge). The activation's
+fence (`activateOutput`) answered a successor dropped while its sink was
+adopted, by its replacement once a write the go-ahead let land took its rate, by
+an edit that deleted its entry or by a cut, with `native activation fenced`,
+which `transition` took for a failed open: the session faulted, `device_error`.
+A drop there is `errReplanned` now, where the session is neither being released
+nor revoked (those keep the fence, and the session ends), and the sink is taken
+back unwritten as at the activation's check. The drop leaves the decoder and
+content of the occurrence the producer writes to the producer (`dropLocked`),
+which closes a dropped one at its next step; `unadopt` cleared the occurrence
+it writes first, so nothing closed them until the session's end (a retirement
+or the teardown), and `unadopt` closes a dropped one now. A release that came
+while the activation ran, before the session's life ended (between `release`'s
+marking and its cancel), had the fence's answer taken for a failed open too: a
+Stop there recorded a `device_error`, which the teardown's last report delivered
+(the reporter sends nothing while a session is released); `transition` takes a
+failed activation of a released session for the release's now
+(`fenced("activate")`), and the session ends with no fault. A release while a
+successor's own sink waits to be adopted (for a write pending, or in the pause
+call its sink takes first, the session having paused while it opened) leaves
+the sink to the teardown, which owns every sink opened (the session's outputs),
+begins each native one's release and ends each PCM one's life at the release,
+and closes it after the files and before it acknowledges: once the release is
+acknowledged the node is closed, every content closed and the device free for a
+Start. The producer's exits there close nothing of their own, and no code
+changed for it: the cases stay as guards. The engine replaces a successor not
+yet submitted through Prepare and cuts only a submitted one, which a successor
+whose activation is held is not, so the cut case calls the backend's Cut, as
+the engine's call reaches it. `TestASuccessorDroppedAtItsActivationIsTakenBackUnwritten`
+(the write landing and the replacement made before the activation goes on, and
+after it begins to wait for the write; an edit; a cut; a release) and
+`TestAReleaseWhileASuccessorsAdoptionWaitsLetsGoOfTheDevice` pin it.
