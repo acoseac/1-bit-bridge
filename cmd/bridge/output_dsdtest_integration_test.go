@@ -203,12 +203,14 @@ func TestNativeIntegrationStopEveryLeg(t *testing.T) {
 }
 
 // nativeReleaseHold is the sink the harness's releases go through in
-// TestNativeIntegrationNextInsideFinish: each TrackChange release's answer
-// goes to answers, and escalate, when set, runs as the harness asks for an
-// Immediate release, before the sink has it: a test's hold on a Stop's
-// escalation, where a scheduler can leave it (B765).
+// TestNativeIntegrationNextInsideFinish: each TrackChange release's context
+// goes to contexts as the harness asks for it, and its answer to answers;
+// escalate, when set, runs as the harness asks for an Immediate release,
+// before the sink has it: a test's hold on a Stop's escalation, where a
+// scheduler can leave it (B765).
 type nativeReleaseHold struct {
 	nativeTestSink
+	contexts chan context.Context
 	answers  chan error
 	escalate func()
 }
@@ -216,6 +218,9 @@ type nativeReleaseHold struct {
 func (s *nativeReleaseHold) Release(ctx context.Context, m alsapcm.ReleaseMode) error {
 	if m == alsapcm.Immediate && s.escalate != nil {
 		s.escalate()
+	}
+	if m == alsapcm.TrackChange {
+		s.contexts <- ctx
 	}
 	e := s.nativeTestSink.Release(ctx, m)
 	if m == alsapcm.TrackChange {
@@ -236,10 +241,17 @@ func nativeHold() (hold func(), parked <-chan struct{}, release func()) {
 // once, with what the run said, when the run ends first.
 func nativeAwait(t *testing.T, parked <-chan struct{}, answer chan int, diagnostics *lockedBuffer, what string) {
 	t.Helper()
+	nativeTake(t, parked, answer, diagnostics, what)
+}
+
+// nativeTake receives one value from ch as nativeAwait waits.
+func nativeTake[T any](t *testing.T, ch <-chan T, answer chan int, diagnostics *lockedBuffer, what string) T {
+	t.Helper()
 	timer := time.NewTimer(alsapcm.Watchdog())
 	defer timer.Stop()
 	select {
-	case <-parked:
+	case v := <-ch:
+		return v
 	case code := <-answer:
 		answer <- code
 		t.Fatalf("the run ended (exit %d: %q) before %s", code, diagnostics.String(), what)
@@ -247,6 +259,8 @@ func nativeAwait(t *testing.T, parked <-chan struct{}, answer chan int, diagnost
 		alsapcm.LogGoroutines(t)
 		t.Fatalf("waited %v for %s", alsapcm.Watchdog(), what)
 	}
+	var zero T
+	return zero
 }
 
 // TestNativeIntegrationNextInsideFinish: a next while the native sink's
@@ -260,9 +274,12 @@ func nativeAwait(t *testing.T, parked <-chan struct{}, answer chan int, diagnost
 // ErrReleaseUnconfirmed, an exit 1); tail, while the tail write waits for
 // room; drain, while the drain waits. A Stop's run exits 0 as stopped, its
 // cleanup confirmed, the node's close held until the Stop has reached it;
-// and the TrackChange release the harness waits on answers with the sink's
-// own outcome, never the Stop's cancellation (B765: select could take that
-// answer for the release's when both were ready).
+// and the TrackChange release the harness waits on outlives the Stop (its
+// context, taken as the harness asked for it, is live with the close still
+// held) and answers with the sink's own outcome, never the Stop's
+// cancellation (B765: select could take that answer for the release's when
+// both were ready; round 2: whether its answer showed it was the scheduler's,
+// since a release that ran only once the sink was Done answered nil).
 func TestNativeIntegrationNextInsideFinish(t *testing.T) {
 	for _, stopAt := range []string{"natural", "cutoff", "tail", "drain"} {
 		t.Run(stopAt, func(t *testing.T) {
@@ -271,7 +288,7 @@ func TestNativeIntegrationNextInsideFinish(t *testing.T) {
 			h.contact.Tuple.TailMS = 1
 			b, _ := json.Marshal(h.contact)
 			_ = os.WriteFile(filepath.Join(h.dir, "contact.json"), b, 0600)
-			sink := &nativeReleaseHold{answers: make(chan error, 1)}
+			sink := &nativeReleaseHold{contexts: make(chan context.Context, 1), answers: make(chan error, 1)}
 			open := h.env.open
 			h.env.open = func(ctx context.Context, c alsapcm.DSDConfig) (nativeTestSink, error) {
 				s, e := open(ctx, c)
@@ -302,6 +319,15 @@ func TestNativeIntegrationNextInsideFinish(t *testing.T) {
 			nativeKey(w, 'n')
 			harnessEvent(t, h, "cutoff")
 			harnessEvent(t, h, "finish-return")
+			trackChange := nativeTake(t, sink.contexts, answer, diagnostics, "the harness asking for the TrackChange release")
+			// outlived says whether the release the harness waits on kept its
+			// context through the Stop: asked once the Stop's release has
+			// reached the node's close, which stays held.
+			outlived := func() {
+				if e := trackChange.Err(); e != nil {
+					t.Errorf("the TrackChange release the harness waits on ended with the Stop (%v): its answer can be the Stop's cancellation", e)
+				}
+			}
 			end := "stopped"
 			switch stopAt {
 			case "natural":
@@ -315,6 +341,7 @@ func TestNativeIntegrationNextInsideFinish(t *testing.T) {
 				nativeAwait(t, escalating, answer, diagnostics, "the Stop's Immediate release, held")
 				write()
 				nativeAwait(t, closing, answer, diagnostics, "the writer's release reaching the node's close")
+				outlived()
 				escalate()
 				revoke()
 				closed()
@@ -332,6 +359,7 @@ func TestNativeIntegrationNextInsideFinish(t *testing.T) {
 				t.Cleanup(closed)
 				nativeKey(w, 's')
 				nativeAwait(t, closing, answer, diagnostics, "the Stop's release reaching the node's close")
+				outlived()
 				closed()
 			}
 			nativeReportResult(t, h, answer, diagnostics, 0, end)
@@ -351,6 +379,139 @@ func TestNativeIntegrationNextInsideFinish(t *testing.T) {
 				}
 			case <-time.After(alsapcm.Watchdog()):
 				t.Error("the TrackChange release the harness waited on never answered")
+			}
+			k.CheckClosedEach(t)
+		})
+	}
+}
+
+// nativeEscalationHold is the sink the harness activates, resumes and
+// finishes through in TestNativeIntegrationStopInsideActivation: each call
+// waits on the sink's answer alone, and on the harness's context's end runs
+// escalate before it revokes the sink, as the sink's own cancellation arm
+// does (Activate's and Resume's Revoke, Finish's Immediate release) once a
+// scheduler runs it: a test's hold on that escalation (B765 round 2).
+type nativeEscalationHold struct {
+	nativeTestSink
+	escalate func()
+}
+
+func (s *nativeEscalationHold) call(ctx context.Context, f func(context.Context) error) error {
+	answer := make(chan error, 1)
+	go func() { answer <- f(context.WithoutCancel(ctx)) }()
+	select {
+	case e := <-answer:
+		return e
+	case <-ctx.Done():
+		s.escalate()
+		s.BeginRelease(alsapcm.Immediate)
+		return ctx.Err()
+	}
+}
+
+func (s *nativeEscalationHold) Activate(ctx context.Context, gen uint64) error {
+	return s.call(ctx, func(ctx context.Context) error { return s.nativeTestSink.Activate(ctx, gen) })
+}
+
+func (s *nativeEscalationHold) Resume(ctx context.Context) error {
+	return s.call(ctx, s.nativeTestSink.Resume)
+}
+
+func (s *nativeEscalationHold) Finish(ctx context.Context) error {
+	return s.call(ctx, s.nativeTestSink.Finish)
+}
+
+// TestNativeIntegrationStopInsideActivation: a Stop while the native sink
+// activates or resumes, each window forced. The sink's writer is where the
+// Stop lands (activation: in the admission, reading the controls; prefill:
+// in the first prefill, waiting for room; resume: at the resume's STATUS
+// after a kernel pause), and every escalation of the Stop is held, the
+// life's revocation (ParkNextLifeEnd) and the harness's own
+// (nativeEscalationHold), as a scheduler can leave them, so the writer meets
+// the ended life first. The run exits 0 as stopped, the node's close reached
+// while those are held (B765 round 2: the writer recorded "native activation
+// fenced" or "native resume fenced after status" as the sink's fault, and
+// the Stop's run exited 1; the prefill's cancellation it recorded too, a
+// plain one, which the harness strips, so that case exited 0 before as well).
+func TestNativeIntegrationStopInsideActivation(t *testing.T) {
+	for _, at := range []string{"activation", "prefill", "resume"} {
+		t.Run(at, func(t *testing.T) {
+			h, k, w := realNativeRig(t)
+			sink := &nativeEscalationHold{}
+			var escalating <-chan struct{}
+			var escalate func()
+			sink.escalate, escalating, escalate = nativeHold()
+			revoking, revoke := k.ParkNextLifeEnd()
+			t.Cleanup(func() { escalate(); revoke() })
+			open := h.env.open
+			h.env.open = func(ctx context.Context, c alsapcm.DSDConfig) (nativeTestSink, error) {
+				s, e := open(ctx, c)
+				if e != nil {
+					return nil, e
+				}
+				sink.nativeTestSink = s
+				return sink, nil
+			}
+			letGo := func() {}
+			held := make(chan struct{})
+			switch at {
+			case "activation":
+				// The third read of the controls: the run's, the open's
+				// admission's, then the activation's.
+				gate := make(chan struct{})
+				var once sync.Once
+				letGo = func() { once.Do(func() { close(gate) }) }
+				t.Cleanup(letGo)
+				var reads atomic.Int32
+				controls := h.env.controls
+				h.env.controls = func(card int) (alsactl.Snapshot, error) {
+					if reads.Add(1) == 3 {
+						close(held)
+						<-gate
+					}
+					return controls(card)
+				}
+			case "prefill":
+				// Past the 200 ms buffer, so the first prefill waits for room.
+				h.args = setNativeArg(h.args, "prefill-ms", "300")
+				h.contact.Tuple.PrefillMS = 300
+				b, _ := json.Marshal(h.contact)
+				_ = os.WriteFile(filepath.Join(h.dir, "contact.json"), b, 0600)
+			}
+			answer := make(chan int, 1)
+			diagnostics := &lockedBuffer{}
+			go func() { answer <- runOutputDSDTest(context.Background(), h.args, h.env, io.Discard, diagnostics) }()
+			switch at {
+			case "activation":
+				nativeAwait(t, held, answer, diagnostics, "the activation's admission reading the controls")
+			case "prefill":
+				// No content reaches the sink before its activation answers.
+				k.Await(t, "the first prefill waiting for room", func(v alsapcm.KernelView) bool { return v.State == "RUNNING" && v.Starved })
+			case "resume":
+				k.Await(t, "native playback", func(v alsapcm.KernelView) bool { return v.State == "RUNNING" && v.Starved })
+				nativeKey(w, ' ')
+				k.Await(t, "the kernel's pause", func(v alsapcm.KernelView) bool { return v.State == "PAUSED" })
+				// The pause's STATUS calls came before its PAUSE: the next is
+				// the resume's, after its admission.
+				var statusing <-chan struct{}
+				statusing, letGo = k.ParkNextStatus()
+				t.Cleanup(letGo)
+				nativeKey(w, ' ')
+				nativeAwait(t, statusing, answer, diagnostics, "the resume's STATUS")
+			}
+			closing, closed := k.ParkNextClose()
+			t.Cleanup(closed)
+			nativeKey(w, 's')
+			nativeAwait(t, revoking, answer, diagnostics, "the Stop ending the sink's life, its revocation held")
+			nativeAwait(t, escalating, answer, diagnostics, "the harness's escalation of its Stop, held")
+			letGo()
+			nativeAwait(t, closing, answer, diagnostics, "the writer's release reaching the node's close, every escalation held")
+			escalate()
+			revoke()
+			closed()
+			nativeReportResult(t, h, answer, diagnostics, 0, "stopped")
+			if v := k.View(); v.Opens != 1 || v.Open {
+				t.Errorf("the node after the Stop: %+v; want its one open closed", v)
 			}
 			k.CheckClosedEach(t)
 		})
