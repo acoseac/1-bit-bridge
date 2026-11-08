@@ -1161,9 +1161,14 @@ bridge does about it:
   this bridge served from (data-dir-id.json): …`: a start or a command made
   those in the bare mount point once, which B651 took for the data dir), one
   holding another data dir's identity (another volume mounted there), and a
-  record or a marker that does not read; each says how to go on, and the
-  doctor and every command refuse the same. Leave `data-dir-id.json` where
-  it is, and move it with the data dir. The first start of B741 over a
+  record or a marker that does not read (a record that is a link to nothing
+  among them); each says how to go on, and the doctor and every command
+  refuse the same. Leave `data-dir-id.json` where it is, and move it with the
+  data dir. The marker is readable by everyone who can reach the data dir,
+  and the record by its owner alone: run a command as the user the service
+  runs as, since one run as another user that cannot read either refuses,
+  saying so, and `bridge doctor` says the data dir is not checked and opens
+  no database there. The first start of B741 over a
   record from before it takes up whatever data dir is at the path: where a
   start before the volume was mounted made one in the bare mount point,
   that one gains the identity, and the real volume, once mounted, is
