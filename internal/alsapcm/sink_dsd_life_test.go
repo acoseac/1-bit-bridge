@@ -20,15 +20,20 @@ func lifeSink(t *testing.T, k *fakeKernel, c DSDConfig, life context.Context) (s
 }
 
 // lifeSinkOn is lifeSink with the node reached through sy, a seam over k:
-// a close that fails, a STATUS held and failed (B728 B9 round 8).
-func lifeSinkOn(t *testing.T, k *fakeKernel, sy sys, c DSDConfig, life context.Context) (s *DSDSink, revoking <-chan struct{}, revoke func()) {
+// a close that fails, a STATUS held and failed (B728 B9 round 8); and the
+// sink's other seams as hooks set them (the caller's, round 9).
+func lifeSinkOn(t *testing.T, k *fakeKernel, sy sys, c DSDConfig, life context.Context, hooks ...func(*nativeSeams)) (s *DSDSink, revoking <-chan struct{}, revoke func()) {
 	t.Helper()
 	in, gate := make(chan struct{}), make(chan struct{})
 	var once sync.Once
 	revoke = func() { once.Do(func() { close(gate) }) }
 	t.Cleanup(revoke)
-	s, e := openDSDSink(life, c, nativeSeams{open: func(ep Endpoint, c Config) (*Device, error) { return openNative(sy, k.now, ep, c) }, now: k.now, at: k.nativeAt,
-		lifeEnded: func() { close(in); <-gate }})
+	h := nativeSeams{open: func(ep Endpoint, c Config) (*Device, error) { return openNative(sy, k.now, ep, c) }, now: k.now, at: k.nativeAt,
+		lifeEnded: func() { close(in); <-gate }}
+	for _, hook := range hooks {
+		hook(&h)
+	}
+	s, e := openDSDSink(life, c, h)
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -60,12 +65,13 @@ func (f *statusFault) ioctl(fd int, req uint32, arg unsafe.Pointer) error {
 
 // theSinksFailure fails the test unless e carries want, a failure the sink
 // recorded (its device's, or its cleanup's, ErrReleaseUnconfirmed), and is
-// not the ended life's cancellation alone: a caller the life stopped takes
-// that for the stop it is, and the failure with it (B728 B9 round 8).
+// neither the ended life's cancellation, which a caller the life stopped
+// takes for the stop it is (B728 B9 round 8), nor the sink's own fence,
+// which a caller takes for its drop's (round 9).
 func theSinksFailure(t *testing.T, e, want error, what string) {
 	t.Helper()
-	if !errors.Is(e, want) || ReasonOf(e) == ReasonCancelled {
-		t.Errorf("%s answered %v; want the failure the sink recorded (%v), not the life's cancellation", what, e, want)
+	if !errors.Is(e, want) || ReasonOf(e) == ReasonCancelled || errors.Is(e, ErrActivationFenced) {
+		t.Errorf("%s answered %v; want the failure the sink recorded (%v), not the life's cancellation or the sink's fence", what, e, want)
 	}
 }
 

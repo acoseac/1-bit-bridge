@@ -142,6 +142,11 @@ type nativeSeams struct {
 	// sink once its life, the open's context, has ended, just before the
 	// revocation: a test parks it there, as a scheduler can leave it (B765).
 	lifeEnded func()
+	// awaiting, nil but in a test, runs on a request's caller as it begins to
+	// wait for its answer (await), the request already the writer's: a test
+	// holds the caller there while the writer answers it and the life ends,
+	// as a scheduler can leave it (B728 B9 round 9).
+	awaiting func()
 }
 
 // OpenDSDSink opens an inert native sink. Activate is mandatory. A cancelled
@@ -312,6 +317,9 @@ func (s *DSDSink) Activate(ctx context.Context, gen uint64) error {
 // caller's context's end, which revokes the sink and is answered by
 // abandoned.
 func (s *DSDSink) await(ctx context.Context, r *nativeRequest) error {
+	if h := s.seams.awaiting; h != nil {
+		h()
+	}
 	select {
 	case e := <-r.reply:
 		return e
