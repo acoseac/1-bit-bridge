@@ -9,10 +9,12 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -37,7 +39,7 @@ import (
 // takes the page from it. Refused, not superseded: a superseded run would
 // leave its session with no control on the page.
 //
-// The first three tests pin, without node, the shape that does it, and run
+// The first four tests pin, without node, the shape that does it, and run
 // everywhere. The node cases after them run the page itself, where node is
 // installed.
 
@@ -50,8 +52,26 @@ var uploadRunFunctions = []string{"startUpload", "retryUpload"}
 // is still the run's.
 var uploadRunAsks = []string{"uploadCheckpoint(run);", "if (!uploadOwns(run)) return;"}
 
+// nextStatement is the statement of body that begins at or after from, white
+// space passed over, through the semicolon that ends a line, and where body
+// goes on after it. The code it is asked of has its comments stripped.
+func nextStatement(body string, from int) (string, int) {
+	rest := body[from:]
+	trimmed := strings.TrimLeft(rest, " \t\n")
+	start := from + len(rest) - len(trimmed)
+	end := strings.Index(trimmed, ";\n")
+	if end < 0 {
+		return strings.TrimSpace(trimmed), len(body)
+	}
+	return trimmed[:end+1], start + end + 2
+}
+
 // awaitsUnasked lists each statement of body that awaits and is not followed
-// by one of the run's asks (uploadRunAsks).
+// by one of the run's asks (uploadRunAsks). A session the server has removed
+// (a commit's, once answered, or a duplicate's, once deleted) may leave the
+// page's list of interrupted uploads first (forgetResumable), whether or not
+// the run still owns the page: the list is the console's, kept across a
+// navigation, and forgetting touches nothing of the run's (B797's round 3).
 func awaitsUnasked(body string) []string {
 	var out []string
 	for i := 0; ; {
@@ -66,6 +86,9 @@ func awaitsUnasked(body string) []string {
 		}
 		next := at + end + 2
 		rest := strings.TrimLeft(body[next:], " \t\n")
+		if stmt, after := nextStatement(body, next); strings.HasPrefix(stmt, "forgetResumable(") {
+			rest = strings.TrimLeft(body[after:], " \t\n")
+		}
 		asked := false
 		for _, ask := range uploadRunAsks {
 			asked = asked || strings.HasPrefix(rest, ask)
@@ -327,13 +350,15 @@ func TestTheUploadPageRefusesAnotherUploadWhileARunOwnsIt(t *testing.T) {
 	// resumes it, which holds only once the session is on the page's list: one
 	// made since the page's last read is in none. It goes there at once, before
 	// the list is read back (round 2: a pick made before that read answered
-	// started over in a second session), and at the list's end, so the one the
-	// banner shows, the one Discard it takes, stays the first.
+	// started over in a second session), as the page's own change of the list
+	// (round 3: changeResumable, so that no read asked before the stop takes
+	// it off again), and at the list's end, so the one the banner shows, the
+	// one Discard it takes, stays the first.
 	stopped := uploadJSFunction(t, src, "showUploadStopped")
 	if !strings.Contains(stopped, "start again to resume") || !strings.Contains(stopped, "refreshResumable();") {
 		t.Error("a stopped upload's session is not read back into the page's list, so choosing the same files again starts over, against what the stop says")
 	}
-	if put, read := strings.Index(stopped, "resumableSessions = [...resumableSessions, s];"), strings.Index(stopped, "refreshResumable();"); put < 0 || read < put || strings.Contains(stopped, "await ") {
+	if put, read := strings.Index(stopped, "changeResumable("), strings.Index(stopped, "refreshResumable();"); put < 0 || read < put || !strings.Contains(stopped, "[...resumableSessions, s]") || strings.Contains(stopped, "await ") {
 		t.Errorf("a stopped upload's session is on the page's list only once the list is read back, so the same files chosen again before then start over:\n%s", stopped)
 	}
 	if !strings.Contains(uploadJSFunction(t, src, "showUploadRunEnd"), "showUploadStopped(run);") {
@@ -356,6 +381,114 @@ func TestTheUploadPageRefusesAnotherUploadWhileARunOwnsIt(t *testing.T) {
 	css := uploadCSSCommentRe.ReplaceAllString(readFile(t, "static/app.css"), "")
 	if !strings.Contains(css, ".upload-pick label:has(input:disabled)") {
 		t.Error("a picker refused while a run owns the page still looks live: its label is what reads as the control")
+	}
+}
+
+// TestTheListOfInterruptedUploadsTakesNoReadOlderThanThePagesOwnChange: the
+// page changes its list of interrupted uploads itself, at once, where it knows
+// the server's answer has changed before a read could say so (B797's round 3):
+// Stop puts its session on it, and a commit (whatever its files' outcomes) or
+// Discard it, once answered, takes its session off, a commit whether or not
+// its run still owns the page, as does the delete of a session the pre-flight
+// found already in the library. Each change advances the list's generation
+// and draws the banner again from the list's first session, the one Discard
+// it takes. A read asked under an older generation, or older than a read taken
+// already, or one that fails, changes nothing; one asked under the current
+// generation replaces the list, and where a stale read finds none asked since
+// the change, it asks one. A stopped session's offsets are what its chunks
+// answered, which the banner says. Before this the page-load read, answered
+// before Stop's session existed and delivered after Stop, took the session
+// off the list, a failed read emptied it, and the same files chosen again
+// started over in a second session; and a read answered before a commit and
+// delivered after it relisted the committed session.
+func TestTheListOfInterruptedUploadsTakesNoReadOlderThanThePagesOwnChange(t *testing.T) {
+	src := readFile(t, "static/app.js")
+	if !strings.Contains(src, "\nconst resumableReads = { generation: 0, asked: 0, askedIn: 0, believed: 0 };\n") {
+		t.Error("the list of interrupted uploads keeps no generation for its reads to be told by")
+	}
+
+	refresh := uploadJSFunction(t, src, "refreshResumable")
+	ask := strings.Index(refresh, "const read = { n: ++resumableReads.asked, generation: resumableReads.generation };")
+	sent := strings.Index(refresh, `await API.get("/api/upload/sessions")`)
+	if ask < 0 || sent < ask || !strings.Contains(refresh[ask:sent], "resumableReads.askedIn = read.generation;") {
+		t.Errorf("a read of the list does not record, before it goes out, the generation it is asked under:\n%s", refresh)
+	}
+	if at := strings.Index(refresh, "} catch {"); at < 0 || !strings.HasPrefix(strings.TrimSpace(refresh[at+len("} catch {"):]), "return;") {
+		t.Errorf("a read of the list that fails changes the list (before round 3 it emptied it, a stopped session with it):\n%s", refresh)
+	}
+	stale := strings.Index(refresh, "if (read.generation !== resumableReads.generation) {")
+	older := strings.Index(refresh, "if (read.n < resumableReads.believed) return;")
+	took := strings.Index(refresh, "resumableSessions = sessions;")
+	switch {
+	case stale < 0 || took < stale:
+		t.Errorf("a read asked before the page's own change of the list replaces it:\n%s", refresh)
+	case older < 0 || took < older:
+		t.Errorf("a read older than one the list took already replaces it:\n%s", refresh)
+	default:
+		block := jsBlockAt(refresh, stale)
+		if strings.Contains(block, "resumableSessions") || !strings.HasSuffix(strings.TrimSpace(strings.TrimSuffix(block, "}")), "return;") {
+			t.Errorf("a read asked under an older generation changes the list:\n%s", block)
+		}
+		if !strings.Contains(block, "if (resumableReads.askedIn !== resumableReads.generation) refreshResumable();") {
+			t.Errorf("a read asked under an older generation leaves the page without the server's word where no read has been asked since the change:\n%s", block)
+		}
+	}
+	if !strings.Contains(refresh, "resumableReads.believed = read.n;") || !strings.Contains(refresh[max(took, 0):], "renderResumable();") {
+		t.Errorf("a read the list takes does not become the newest taken, or does not draw the banner again:\n%s", refresh)
+	}
+
+	change := uploadJSFunction(t, src, "changeResumable")
+	for _, want := range []string{"resumableReads.generation += 1;", "resumableSessions = sessions;", "renderResumable();"} {
+		if !strings.Contains(change, want) {
+			t.Errorf("changeResumable, the page's own change of the list, has no %s", want)
+		}
+	}
+	if !strings.Contains(uploadJSFunction(t, src, "forgetResumable"), "changeResumable(resumableSessions.filter((s) => s.id !== id));") {
+		t.Error("forgetResumable does not take its session off the list as the page's own change of it")
+	}
+	if !strings.Contains(uploadJSFunction(t, src, "renderResumable"), "const s = resumableSessions[0];") {
+		t.Error("the banner is not drawn from the list's first session, the one Discard it takes")
+	}
+
+	stopped := uploadJSFunction(t, src, "showUploadStopped")
+	if !strings.Contains(stopped, "resumableSessions.map((x) => (x.id === s.id ? s : x))") {
+		t.Errorf("a stopped session already on the list keeps the offsets the list last read, not what its chunks answered:\n%s", stopped)
+	}
+	transfer := uploadJSFunction(t, src, "transferAll")
+	if at := strings.Index(transfer, "offset = res.offset;"); at < 0 {
+		t.Error("transferAll does not move a file's offset to what its chunk answered")
+	} else if next, _ := nextStatement(transfer, at+len("offset = res.offset;")); next != "meta.offset = offset;" {
+		t.Errorf("a session's own record keeps the offsets it was read with, so a stop puts it on the list with what it held then: after a chunk, %q", next)
+	}
+
+	// A commit, once answered, takes its session off the list before anything
+	// else, whether or not its run still owns the page; so does the delete of
+	// a session the pre-flight found already in the library.
+	start := uploadJSFunction(t, src, "startUpload")
+	for name, forget := range map[string]string{"startUpload": "forgetResumable(session.id);", "retryUpload": "forgetResumable(sid);"} {
+		body := uploadJSFunction(t, src, name)
+		commit := strings.Index(body, "/commit`);")
+		if commit < 0 {
+			t.Errorf("%s commits nothing", name)
+			continue
+		}
+		first, at := nextStatement(body, commit+len("/commit`);"))
+		second, _ := nextStatement(body, at)
+		if first != forget || second != "if (!uploadOwns(run)) return;" {
+			t.Errorf("%s's commit, once answered, does not take its session off the page's list before anything else, the run's ask after it: %q, then %q", name, first, second)
+		}
+	}
+	if del := strings.Index(start, "await API.delete(`/api/upload/sessions/${encodeURIComponent(session.id)}`);"); del < 0 {
+		t.Error("startUpload no longer deletes the session of a pick the library already holds")
+	} else if first, at := nextStatement(start, del+len("await API.delete(`/api/upload/sessions/${encodeURIComponent(session.id)}`);")); first != "forgetResumable(session.id);" {
+		t.Errorf("the delete of a session the pre-flight found already in the library does not take it off the page's list: %q", first)
+	} else if second, _ := nextStatement(start, at); second != "uploadCheckpoint(run);" {
+		t.Errorf("after the delete of a pre-flight's session, %q comes before the run's ask", second)
+	}
+	discard := uploadJSFunction(t, src, "discardResumable")
+	del, forget, read := strings.Index(discard, "await API.delete("), strings.Index(discard, "forgetResumable(s.id);"), strings.Index(discard, "await refreshResumable();")
+	if del < 0 || forget < del || read < forget {
+		t.Errorf("Discard it, once answered, does not take its session off the page's list before the read after it:\n%s", discard)
 	}
 }
 
@@ -395,7 +528,9 @@ type ownershipReq struct {
 // ownershipRule acts on the nth request of a kind, counted from 1: it holds
 // it until the script lets it go, takes the root's volume away before it is
 // served, or answers it with Answer and AnswerBody, never serving it; in that
-// order, where a rule names more than one.
+// order, where a rule names more than one. HoldAnswer, a rule of its own,
+// serves the request as it arrives and holds the answer until the script lets
+// it go: the server's word at that moment, delivered late.
 type ownershipRule struct {
 	Kind       string
 	Nth        int
@@ -403,6 +538,7 @@ type ownershipRule struct {
 	Away       bool
 	Answer     int
 	AnswerBody string
+	HoldAnswer string
 }
 
 type ownershipHold struct {
@@ -415,7 +551,8 @@ func (h *ownershipHold) let() { h.releaseOnce.Do(func() { close(h.release) }) }
 // ownershipRig is the console's real handlers behind a test server that
 // records every request the upload page makes, in order, acts on the ones the
 // case's rules name, and takes the script's own requests under /__test/: put
-// the volume back, wait until a held request is reached, let it go.
+// the volume back, wait until a held request is reached, let it go, delete a
+// session as another tab would.
 type ownershipRig struct {
 	t    *testing.T
 	srv  *Server
@@ -423,6 +560,8 @@ type ownershipRig struct {
 	root string
 	vol  *awayVolume
 	ts   *httptest.Server
+	// session is the interrupted upload a case names (input.session).
+	session string
 
 	mu     sync.Mutex
 	reqs   []ownershipReq
@@ -499,8 +638,10 @@ func newOwnershipRig(t *testing.T, rules ...ownershipRule) *ownershipRig {
 		counts: map[string]int{}, rules: rules, holds: map[string]*ownershipHold{},
 	}
 	for _, r := range rules {
-		if r.Hold != "" {
-			rig.holds[r.Hold] = &ownershipHold{reached: make(chan struct{}), release: make(chan struct{})}
+		for _, name := range []string{r.Hold, r.HoldAnswer} {
+			if name != "" {
+				rig.holds[name] = &ownershipHold{reached: make(chan struct{}), release: make(chan struct{})}
+			}
 		}
 	}
 	rig.ts = httptest.NewServer(http.HandlerFunc(rig.serve))
@@ -550,6 +691,20 @@ func (rig *ownershipRig) serve(w http.ResponseWriter, r *http.Request) {
 			panic(http.ErrAbortHandler)
 		}
 		return
+	case "/__test/abandon":
+		// Another tab's Discard it: the session deleted through the console,
+		// and never seen by the page.
+		del := httptest.NewRequest(http.MethodDelete, "/api/upload/sessions/"+url.PathEscape(r.URL.Query().Get("sid")), nil)
+		del.Host = testConsoleHost
+		del.Header.Set("Origin", "http://"+testConsoleHost)
+		rec := httptest.NewRecorder()
+		rig.h.ServeHTTP(rec, del)
+		if rec.Code != http.StatusNoContent {
+			http.Error(w, "the session's delete answered "+strconv.Itoa(rec.Code)+": "+rec.Body.String(), http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+		return
 	}
 
 	kind, sid, fid := ownershipKind(r.Method, r.URL.Path)
@@ -575,6 +730,32 @@ func (rig *ownershipRig) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	rig.mu.Unlock()
 
+	// As the console's own page reaches it: its host and its origin.
+	r.Host = testConsoleHost
+	r.Header.Set("Origin", "http://"+testConsoleHost)
+	if rule.HoldAnswer != "" {
+		rec := httptest.NewRecorder()
+		rig.h.ServeHTTP(rec, r)
+		h := rig.holds[rule.HoldAnswer]
+		h.reachedOnce.Do(func() { close(h.reached) })
+		select {
+		case <-h.release:
+		case <-r.Context().Done():
+		}
+		if r.Context().Err() != nil {
+			// The page is gone (node exited): answer nothing.
+			panic(http.ErrAbortHandler)
+		}
+		for k, v := range rec.Header() {
+			w.Header()[k] = v
+		}
+		w.WriteHeader(rec.Code)
+		_, _ = w.Write(rec.Body.Bytes())
+		rig.mu.Lock()
+		rig.reqs[idx].Status, rig.reqs[idx].Answer, rig.reqs[idx].Served = rec.Code, rec.Body.Bytes(), true
+		rig.mu.Unlock()
+		return
+	}
 	if rule.Hold != "" {
 		h := rig.holds[rule.Hold]
 		h.reachedOnce.Do(func() { close(h.reached) })
@@ -593,9 +774,6 @@ func (rig *ownershipRig) serve(w http.ResponseWriter, r *http.Request) {
 	rw := &ownershipWriter{ResponseWriter: w}
 	served := rule.Answer == 0
 	if served {
-		// As the console's own page reaches it: its host and its origin.
-		r.Host = testConsoleHost
-		r.Header.Set("Origin", "http://"+testConsoleHost)
 		rig.h.ServeHTTP(rw, r)
 	} else {
 		rw.Header().Set("Content-Type", "application/json")
@@ -742,15 +920,21 @@ func (rig *ownershipRig) requireListed(t *testing.T, sid string) {
 // sent.
 func (rig *ownershipRig) interruptedSession(t *testing.T) string {
 	t.Helper()
-	sum := sha256.Sum256([]byte(ownershipOld))
+	return rig.interruptedSessionOf(t, ownershipPath, ownershipOld)
+}
+
+// interruptedSessionOf is interruptedSession for the file body at path.
+func (rig *ownershipRig) interruptedSessionOf(t *testing.T, path, body string) string {
+	t.Helper()
+	sum := sha256.Sum256([]byte(body))
 	// The head and the tail are the whole of a file under 64 KiB.
 	fingerprint := hex.EncodeToString(sum[:]) + hex.EncodeToString(sum[:])
 	sess := createSession(t, rig.srv, []map[string]any{{
-		"path": ownershipPath, "size": len(ownershipOld), "modified": ownershipModified, "fingerprint": fingerprint,
+		"path": path, "size": len(body), "modified": ownershipModified, "fingerprint": fingerprint,
 	}}, nil)
 	sid, _ := sess["id"].(string)
 	fid, _ := firstFile(t, sess)["id"].(string)
-	if code, out := putChunk(t, rig.h, sid, fid, 0, []byte(ownershipOld[:ownershipChunk]), nil); code != http.StatusOK {
+	if code, out := putChunk(t, rig.h, sid, fid, 0, []byte(body[:ownershipChunk]), nil); code != http.StatusOK {
 		t.Fatalf("the interrupted session's first chunk = %d %v", code, out)
 	}
 	return sid
@@ -773,6 +957,8 @@ type ownershipShown struct {
 	StopClickable   bool     `json:"stopClickable"`
 	CancelClickable bool     `json:"cancelClickable"`
 	BannerShown     bool     `json:"bannerShown"`
+	BannerText      string   `json:"bannerText"`
+	Listed          []string `json:"listed"`
 	Preview         []string `json:"preview"`
 }
 
@@ -824,17 +1010,21 @@ func requireAdded(t *testing.T, at string, s ownershipShown, added string) {
 const ownershipRun = `
 const input = JSON.parse(await (await import("node:fs/promises")).readFile(process.argv[2], "utf8"));
 const realFetch = globalThis.fetch;
-// The page's requests go to the rig. answerParsed(method, nth) resolves once
-// the page has read the body of the answer to its nth request of method, and a
-// turn of the event loop has run what the page does with it.
+// The page's requests go to the rig. answerParsed(key, nth) resolves once the
+// page has read the body of the answer to its nth request of key, and a turn of
+// the event loop has run what the page does with it. A key is a method ("PUT")
+// or a method and a path ("GET /api/upload/sessions"), counted apart.
 const answerWatchers = [];
 const requestsMade = {};
 globalThis.fetch = async (url, init) => {
   const method = (init && init.method) || "GET";
-  requestsMade[method] = (requestsMade[method] || 0) + 1;
-  const nth = requestsMade[method];
+  const keys = [method, method + " " + new URL(url, input.base).pathname];
+  const counted = keys.map((k) => {
+    requestsMade[k] = (requestsMade[k] || 0) + 1;
+    return { key: k, nth: requestsMade[k] };
+  });
   const r = await realFetch(new URL(url, input.base), init);
-  for (const w of answerWatchers.filter((x) => x.method === method && x.nth === nth)) {
+  for (const w of answerWatchers.filter((x) => counted.some((c) => c.key === x.key && c.nth === x.nth))) {
     const json = r.json.bind(r);
     r.json = async () => {
       try {
@@ -846,7 +1036,10 @@ globalThis.fetch = async (url, init) => {
   }
   return r;
 };
-const answerParsed = (method, nth) => new Promise((resolve) => answerWatchers.push({ method, nth, resolve }));
+const answerParsed = (key, nth) => new Promise((resolve) => answerWatchers.push({ key, nth, resolve }));
+// listReadsMade is how many reads of the list of interrupted uploads the page
+// has asked for.
+const listReadsMade = () => requestsMade["GET /api/upload/sessions"] || 0;
 const rigCall = async (path, method) => {
   const r = await realFetch(new URL(path, input.base), { method });
   if (r.status !== 204) throw new Error(path + " answered " + r.status + ": " + (await r.text()));
@@ -956,26 +1149,27 @@ globalThis.document = {
 };
 
 let uploadState = null;
-let resumableSessions = null;
+let resumableSessions = [];
 let uploadAwaitingScan = false;
 
 // newPage renders the page as upload.html ships it and wires it, as initUpload
-// does with uploads on.
+// does with uploads on. Its first read of the list of interrupted uploads is
+// the next one the page asks for: page.ready resolves once the page has done
+// what it does with that read's answer.
 const newPage = () => {
   const els = new Map();
   for (const id of pageIDs) els.set(id, new PageEl(id, els));
   for (const id of hiddenAsShipped) els.get(id).hidden = true;
   els.get("upload-busy").text = input.busyWords;
-  page = { els, nav: new AbortController() };
+  page = { els, nav: new AbortController(), ready: answerParsed("GET /api/upload/sessions", listReadsMade() + 1) };
   wireUpload(page.nav.signal);
 };
 // navigate is a boosted navigation away and back: the page's scope aborted, as
 // boostSwap and dispatchPageInit abort it, its elements replaced, and the page
-// rendered and wired again. resumableSessions is cleared so that ready() waits
-// for the new page's own read.
+// rendered and wired again. The page's globals stay, as a boosted navigation
+// leaves them.
 const navigate = () => {
   page.nav.abort();
-  resumableSessions = null;
   newPage();
 };
 const el = (id) => page.els.get(id);
@@ -1083,7 +1277,7 @@ const settle = async (p, what) => {
   }
 };
 // ready waits for the page's read of the interrupted uploads.
-const ready = () => waitFor("the page's read of the interrupted uploads", () => resumableSessions !== null);
+const ready = () => settle(page.ready, "the page's read of the interrupted uploads");
 const shown = () => {
   const text = (id) => (shows(el(id)) ? el(id).textContent : "");
   return {
@@ -1102,6 +1296,8 @@ const shown = () => {
     stopClickable: shows(el("upload-abort")) && !el("upload-abort").disabled,
     cancelClickable: shows(el("upload-cancel")) && !el("upload-cancel").disabled,
     bannerShown: shows(el("upload-resume")),
+    bannerText: text("upload-resume-text"),
+    listed: resumableSessions.map((s) => s.id),
     preview: shows(el("upload-review")) ? el("upload-preview").children.map((c) => c.textContent) : [],
   };
 };
@@ -1421,6 +1617,176 @@ const steps = {
     await settle(dropped, "the drop read through the upload");
     out.shown.after = shown();
   },
+  // Round 3. The page-load read of the list is answered before any session
+  // exists, and that answer held on its way back until after Stop's own read
+  // has answered; the same files are chosen again once it lands.
+  "stale-load-read": async () => {
+    const loadRead = answerParsed("GET /api/upload/sessions", 1);
+    const stopRead = answerParsed("GET /api/upload/sessions", 2);
+    newPage();
+    await reached("load-list");
+    await settle(pick([oldFile()]), "the pick");
+    const run = click("upload-start");
+    await reached("put");
+    await settle(click("upload-abort"), "Stop");
+    await release("put");
+    await settle(run, "the upload");
+    await settle(stopRead, "Stop's read of the list");
+    out.shown.stopped = shown();
+    await release("load-list");
+    await settle(loadRead, "the page-load read's late answer");
+    out.shown.afterLate = shown();
+    await settle(pick([oldFile()]), "the pick of the same files");
+    await settle(click("upload-start"), "the upload of the same files");
+    out.shown.final = shown();
+  },
+  // The same, the page-load read delivered while Stop's own read is still
+  // out, and the same files chosen again before that read answers.
+  "stale-load-read-first": async () => {
+    const loadRead = answerParsed("GET /api/upload/sessions", 1);
+    newPage();
+    await reached("load-list");
+    await settle(pick([oldFile()]), "the pick");
+    const run = click("upload-start");
+    await reached("put");
+    await settle(click("upload-abort"), "Stop");
+    await release("put");
+    await settle(run, "the upload");
+    await reached("stop-list");
+    await release("load-list");
+    await settle(loadRead, "the page-load read's late answer");
+    out.shown.afterLate = shown();
+    await settle(pick([oldFile()]), "the pick of the same files");
+    await settle(click("upload-start"), "the upload of the same files");
+    out.shown.final = shown();
+    const stopRead = answerParsed("GET /api/upload/sessions", 2);
+    await release("stop-list");
+    await settle(stopRead, "Stop's read, answered after the commit");
+    out.shown.end = shown();
+  },
+  // Stop's read of the list fails; the same files are chosen again.
+  "stop-failed-read": async () => {
+    newPage();
+    await ready();
+    const stopRead = answerParsed("GET /api/upload/sessions", 2);
+    await settle(pick([oldFile()]), "the pick");
+    const run = click("upload-start");
+    await reached("put");
+    await settle(click("upload-abort"), "Stop");
+    await release("put");
+    await settle(run, "the upload");
+    await settle(stopRead, "Stop's failed read of the list");
+    out.shown.stopped = shown();
+    await settle(pick([oldFile()]), "the pick of the same files");
+    await settle(click("upload-start"), "the upload of the same files");
+    out.shown.final = shown();
+  },
+  // An interrupted upload listed, Discard it pressed, the read after it
+  // failing; the same files are chosen again.
+  "discard-failed-read": async () => {
+    newPage();
+    await ready();
+    out.shown.loaded = shown();
+    const discardRead = answerParsed("GET /api/upload/sessions", 2);
+    await settle(click("upload-resume-discard"), "Discard it");
+    await settle(discardRead, "the failed read after Discard it");
+    out.shown.discarded = shown();
+    await settle(pick([oldFile()]), "the pick of the same files");
+    await settle(click("upload-start"), "the upload of the same files");
+    out.shown.final = shown();
+  },
+  // An interrupted upload carried on and committed, the read after the
+  // commit failing; the same files are chosen again.
+  "commit-failed-read": async () => {
+    newPage();
+    await ready();
+    out.shown.loaded = shown();
+    const commitRead = answerParsed("GET /api/upload/sessions", 2);
+    await settle(pick([oldFile()]), "the pick");
+    await settle(click("upload-start"), "the resume");
+    await settle(commitRead, "the failed read after the commit");
+    out.shown.committed = shown();
+    await settle(pick([oldFile()]), "the pick of the same files");
+    await settle(click("upload-start"), "the upload of the same files");
+    out.shown.final = shown();
+  },
+  // An interrupted upload listed, a second stopped and put on the list, both
+  // then deleted elsewhere (another tab's Discard it); the page is left and
+  // opened again, and reads the list.
+  "deleted-elsewhere": async () => {
+    newPage();
+    await ready();
+    out.shown.loaded = shown();
+    const stopRead = answerParsed("GET /api/upload/sessions", 2);
+    await settle(pick([oldFile()]), "the pick");
+    const run = click("upload-start");
+    await reached("put");
+    await settle(click("upload-abort"), "Stop");
+    await release("put");
+    await settle(run, "the upload");
+    await settle(stopRead, "Stop's read of the list");
+    out.shown.stopped = shown();
+    for (const id of resumableSessions.map((s) => s.id)) {
+      await rigCall("/__test/abandon?sid=" + encodeURIComponent(id), "POST");
+    }
+    navigate();
+    await ready();
+    out.shown.after = shown();
+  },
+  // An interrupted upload T listed. An upload's commit is held; T is deleted
+  // elsewhere; the page is left and opened again, its read of the list
+  // answered at once (the upload's session not committed yet) and held on its
+  // way back; the commit lands, then that read's answer. The page may read the
+  // list again once more.
+  "commit-across-navigation": async () => {
+    newPage();
+    await ready();
+    out.shown.loaded = shown();
+    const commitAnswer = answerParsed("POST", 2);
+    await settle(pick([oldFile()]), "the pick");
+    const run = click("upload-start");
+    await reached("commit");
+    await rigCall("/__test/abandon?sid=" + input.session, "POST");
+    navigate();
+    await reached("new-page-list");
+    await release("commit");
+    await settle(run, "the upload a navigation left");
+    await settle(commitAnswer, "the page's read of the commit's answer");
+    out.shown.committed = shown();
+    out.awaitingScan = uploadAwaitingScan;
+    const lateRead = answerParsed("GET /api/upload/sessions", 2);
+    const readAgain = answerParsed("GET /api/upload/sessions", 3);
+    await release("new-page-list");
+    await settle(lateRead, "the new page's read, answered before the commit");
+    await Promise.race([readAgain, new Promise((resolve) => setTimeout(resolve, 10000))]);
+    out.shown.after = shown();
+  },
+  // Stop's own read of the list answered at once, the session listed, and held
+  // on its way back while the same files carry the session on and commit it;
+  // the commit's own read of the list is held until then.
+  "stop-read-across-commit": async () => {
+    newPage();
+    await ready();
+    await settle(pick([oldFile()]), "the pick");
+    const run = click("upload-start");
+    await reached("put");
+    await settle(click("upload-abort"), "Stop");
+    await release("put");
+    await settle(run, "the upload");
+    await reached("stop-list");
+    await settle(pick([oldFile()]), "the pick of the same files");
+    await settle(click("upload-start"), "the upload of the same files");
+    out.shown.committed = shown();
+    await reached("commit-list");
+    const lateRead = answerParsed("GET /api/upload/sessions", 2);
+    await release("stop-list");
+    await settle(lateRead, "Stop's read, answered before the commit");
+    out.shown.after = shown();
+    const commitRead = answerParsed("GET /api/upload/sessions", 3);
+    await release("commit-list");
+    await settle(commitRead, "the commit's own read of the list");
+    out.shown.final = shown();
+  },
 };
 try {
   await steps[input.case]();
@@ -1491,6 +1857,11 @@ func ownershipScript(t *testing.T) (script, node string) {
 	for _, c := range []string{"const BYTE_UNITS = ", "const UPLOAD_PARALLEL_FILES = ", "const UPLOAD_DIGEST_RETRIES = ", "const UPLOAD_JUNK_NAMES = "} {
 		harness += jsStatement(t, src, c)
 	}
+	// The list's generation (B797's round 3), where app.js has one yet, so
+	// that the cases run against the console before it too.
+	if strings.Contains(src, "\nconst resumableReads = ") {
+		harness += jsStatement(t, src, "const resumableReads = ")
+	}
 	harness += ownershipRun
 	script = withReachedFunctions(t, harness, src, "wireUpload", "stageFiles", "collectFromInput",
 		"startUpload", "retryUpload", "discardResumable", "resetUpload", "errorFromResponse")
@@ -1515,6 +1886,7 @@ func runOwnershipCase(t *testing.T, rig *ownershipRig, script, node, name string
 		"base": rig.ts.URL, "case": name, "busyWords": uploadBusyWords(readFile(t, "templates/upload.html")),
 		"path": ownershipPath, "old": ownershipOld, "new": ownershipNew,
 		"otherPath": ownershipOtherPath, "other": ownershipOther, "lastModified": ownershipModified,
+		"session": rig.session,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -2096,5 +2468,255 @@ func TestAnOrdinaryUploadRetryResumeAndStopAreUnchanged(t *testing.T) {
 			t.Errorf("the stopped upload committed %v", commits)
 		}
 		rig.requireFile(t, ownershipPath, "")
+	})
+}
+
+// ownershipFailedList answers the page's nth read of its list of interrupted
+// uploads with a failure the test made.
+func ownershipFailedList(nth int) ownershipRule {
+	return ownershipRule{Kind: "list", Nth: nth, Answer: http.StatusInternalServerError,
+		AnswerBody: `{"error":"test_failure","message":"a failure the test made"}`}
+}
+
+// requireOnList fails the test unless the page's list of interrupted uploads
+// held the sessions want, in order, in s, and the banner showed exactly where
+// the list held one.
+func requireOnList(t *testing.T, at string, s ownershipShown, want ...string) {
+	t.Helper()
+	if !slices.Equal(s.Listed, want) {
+		t.Errorf("%s: the page's list of interrupted uploads holds %q, want %q", at, s.Listed, want)
+	}
+	if s.BannerShown != (len(want) > 0) {
+		t.Errorf("%s: the banner is shown %v over the list %q", at, s.BannerShown, s.Listed)
+	}
+}
+
+// listedIn says whether a's sessions, an answer to the list's read, carry sid.
+func listedIn(a []byte, sid string) bool {
+	var listed []struct{ ID string }
+	if json.Unmarshal(a, &listed) != nil {
+		return false
+	}
+	return slices.ContainsFunc(listed, func(s struct{ ID string }) bool { return s.ID == sid })
+}
+
+// ownershipBanner is what the banner says of a session of one file of size
+// bytes whose first chunk is kept.
+func ownershipBanner(size int) string {
+	return "1 file, 8 B of " + strconv.Itoa(size) + " B already transferred"
+}
+
+// TestALateOrFailedReadOfTheListKeepsWhatThePageChanged: the page changes its
+// list of interrupted uploads itself, at once, where the server's answer has
+// changed: Stop puts its session on it, and a commit or Discard it, once
+// answered, takes its session off (B797's round 3). A read of the list asked
+// before that change, or one that fails, changes nothing: neither takes Stop's
+// session off, so the same files chosen again carry it on in one session, nor
+// lists again a session committed or discarded. A read asked since replaces
+// the list, a session deleted elsewhere going with it. Before this the
+// page-load read, answered before Stop's session existed and delivered after
+// Stop, took the session off the list, a failed read emptied it, and the same
+// files chosen again started over in a second session; and a read answered
+// before a commit and delivered after it listed the committed session again,
+// on the page shown since a navigation too.
+func TestALateOrFailedReadOfTheListKeepsWhatThePageChanged(t *testing.T) {
+	script, node := ownershipScript(t)
+	stopAt := ownershipRule{Kind: "put", Nth: 2, Hold: "put"}
+	// OLD's four chunks, each sent once: by one upload, or by an upload Stop
+	// ended and the same files chosen again.
+	everyChunk := []ownershipPut{{0, 200}, {8, 200}, {16, 200}, {24, 200}}
+
+	t.Run("the page-load read delivered after Stop's own", func(t *testing.T) {
+		rig := newOwnershipRig(t, ownershipRule{Kind: "list", Nth: 1, HoldAnswer: "load-list"}, stopAt)
+		got := runOwnershipCase(t, rig, script, node, "stale-load-read")
+		made := rig.sessionsMade()
+		if len(made) != 1 {
+			t.Fatalf("the page made the sessions %q, want the stopped one alone, carried on: the page-load read, answered before it existed and delivered after Stop, took it off the list\n%v", made, rig.requests())
+		}
+		if lists := rig.of("list", ""); len(lists) == 0 || listedIn(lists[0].Answer, made[0]) {
+			t.Fatalf("the page-load read was answered after the session was made: %v", lists)
+		}
+		requireOnList(t, "after Stop's read", got.Shown["stopped"], made[0])
+		requireOnList(t, "once the page-load read was delivered", got.Shown["afterLate"], made[0])
+		requireAdded(t, "after the same files were chosen again", got.Shown["final"], "1 added")
+		rig.requirePuts(t, made[0], ownershipOld, everyChunk)
+		rig.requireFile(t, ownershipPath, ownershipOld)
+	})
+
+	t.Run("the page-load read delivered while Stop's own is out", func(t *testing.T) {
+		rig := newOwnershipRig(t, ownershipRule{Kind: "list", Nth: 1, HoldAnswer: "load-list"}, stopAt,
+			ownershipRule{Kind: "list", Nth: 2, Hold: "stop-list"})
+		got := runOwnershipCase(t, rig, script, node, "stale-load-read-first")
+		made := rig.sessionsMade()
+		if len(made) != 1 {
+			t.Fatalf("the page made the sessions %q, want the stopped one alone, carried on: the page-load read, answered before it existed and delivered after Stop, took it off the list\n%v", made, rig.requests())
+		}
+		requireOnList(t, "once the page-load read was delivered", got.Shown["afterLate"], made[0])
+		requireAdded(t, "after the same files were chosen again", got.Shown["final"], "1 added")
+		requireOnList(t, "once Stop's read, answered after the commit, was delivered", got.Shown["end"])
+		rig.requirePuts(t, made[0], ownershipOld, everyChunk)
+		rig.requireFile(t, ownershipPath, ownershipOld)
+	})
+
+	t.Run("Stop's read fails", func(t *testing.T) {
+		rig := newOwnershipRig(t, stopAt, ownershipFailedList(2))
+		got := runOwnershipCase(t, rig, script, node, "stop-failed-read")
+		made := rig.sessionsMade()
+		if len(made) != 1 {
+			t.Fatalf("the page made the sessions %q, want the stopped one alone, carried on: a failed read emptied the list\n%v", made, rig.requests())
+		}
+		stopped := got.Shown["stopped"]
+		requireOnList(t, "after Stop's read failed", stopped, made[0])
+		// The banner says what the session holds: its chunks' answers, two of
+		// four, not the offsets its create answered.
+		if want := "1 file, 16 B of 32 B already transferred"; !strings.Contains(stopped.BannerText, want) {
+			t.Errorf("after Stop the banner says %q, want %q", stopped.BannerText, want)
+		}
+		requireAdded(t, "after the same files were chosen again", got.Shown["final"], "1 added")
+		rig.requirePuts(t, made[0], ownershipOld, everyChunk)
+		rig.requireFile(t, ownershipPath, ownershipOld)
+	})
+
+	t.Run("Discard it, then a failed read", func(t *testing.T) {
+		rig := newOwnershipRig(t, ownershipFailedList(2))
+		sid := rig.interruptedSession(t)
+		got := runOwnershipCase(t, rig, script, node, "discard-failed-read")
+		requireOnList(t, "as the page loaded", got.Shown["loaded"], sid)
+		discarded := got.Shown["discarded"]
+		requireOnList(t, "after Discard it and a failed read", discarded)
+		if !strings.Contains(discarded.Result, "Discarded the interrupted upload.") || discarded.Error != "" {
+			t.Errorf("after Discard it the page shows %+v, want the discard said", discarded)
+		}
+		if abandons := rig.of("abandon", ""); len(abandons) != 1 || abandons[0].Session != sid {
+			t.Errorf("the page deleted %v, want the session the banner showed", abandons)
+		}
+		// The same files chosen again start a new session, never the discarded one.
+		made := rig.sessionsMade()
+		if len(made) != 1 || len(rig.of("read", sid)) != 0 {
+			t.Fatalf("the page made the sessions %q and read the discarded one %d times, want one new session and no read\n%v", made, len(rig.of("read", sid)), rig.requests())
+		}
+		requireAdded(t, "after the same files were chosen again", got.Shown["final"], "1 added")
+		rig.requirePuts(t, made[0], ownershipOld, everyChunk)
+		rig.requireFile(t, ownershipPath, ownershipOld)
+	})
+
+	t.Run("Discard it with another listed, then a failed read", func(t *testing.T) {
+		rig := newOwnershipRig(t, ownershipFailedList(2))
+		other := rig.interruptedSessionOf(t, ownershipOtherPath, ownershipOther)
+		sid := rig.interruptedSession(t)
+		got := runOwnershipCase(t, rig, script, node, "discard-failed-read")
+		loaded := got.Shown["loaded"]
+		if len(loaded.Listed) != 2 || !slices.Contains(loaded.Listed, other) || !slices.Contains(loaded.Listed, sid) {
+			t.Fatalf("as the page loaded its list holds %q, want %q and %q", loaded.Listed, sid, other)
+		}
+		banner := map[string]string{sid: ownershipBanner(len(ownershipOld)), other: ownershipBanner(len(ownershipOther))}
+		first, second := loaded.Listed[0], loaded.Listed[1]
+		if !strings.Contains(loaded.BannerText, banner[first]) {
+			t.Errorf("as the page loaded the banner says %q, want the list's first, %q", loaded.BannerText, banner[first])
+		}
+		// Discard it takes the session the banner shows, and the banner then
+		// shows the one left, whatever the read after it answered.
+		if abandons := rig.of("abandon", ""); len(abandons) != 1 || abandons[0].Session != first {
+			t.Errorf("the page deleted %v, want the session the banner showed, %s", abandons, first)
+		}
+		discarded := got.Shown["discarded"]
+		requireOnList(t, "after Discard it and a failed read", discarded, second)
+		if !strings.Contains(discarded.BannerText, banner[second]) {
+			t.Errorf("after Discard it the banner says %q, want the session left, %q", discarded.BannerText, banner[second])
+		}
+		requireAdded(t, "after OLD was chosen again", got.Shown["final"], "1 added")
+		wantMade := 0
+		if first == sid {
+			wantMade = 1
+		}
+		if made := rig.sessionsMade(); len(made) != wantMade {
+			t.Errorf("the page made the sessions %q, want %d", made, wantMade)
+		}
+		rig.requireFile(t, ownershipPath, ownershipOld)
+	})
+
+	t.Run("a commit, then a failed read", func(t *testing.T) {
+		rig := newOwnershipRig(t, ownershipFailedList(2))
+		sid := rig.interruptedSession(t)
+		got := runOwnershipCase(t, rig, script, node, "commit-failed-read")
+		requireOnList(t, "as the page loaded", got.Shown["loaded"], sid)
+		committed := got.Shown["committed"]
+		requireAdded(t, "after the resume", committed, "1 added")
+		requireOnList(t, "after the commit and a failed read", committed)
+		// The same files chosen again start a new session, never the committed
+		// one, and are passed over as the library's own already.
+		if reads := rig.of("read", sid); len(reads) != 1 {
+			t.Errorf("the page read the committed session %d times, want once, by the resume", len(reads))
+		}
+		if made := rig.sessionsMade(); len(made) != 1 {
+			t.Errorf("the page made the sessions %q, want one, for the same files chosen again", made)
+		}
+		if final := got.Shown["final"]; final.Error != "" || !strings.Contains(final.Result, "already") {
+			t.Errorf("after the same files were chosen again the page shows %+v, want them passed over as in the library", final)
+		}
+		rig.requireFile(t, ownershipPath, ownershipOld)
+	})
+
+	t.Run("a session deleted elsewhere", func(t *testing.T) {
+		rig := newOwnershipRig(t, stopAt)
+		other := rig.interruptedSessionOf(t, ownershipOtherPath, ownershipOther)
+		got := runOwnershipCase(t, rig, script, node, "deleted-elsewhere")
+		made := rig.sessionsMade()
+		if len(made) != 1 {
+			t.Fatalf("the page made the sessions %q, want one", made)
+		}
+		requireOnList(t, "as the page loaded", got.Shown["loaded"], other)
+		if stopped := got.Shown["stopped"].Listed; len(stopped) != 2 || !slices.Contains(stopped, other) || !slices.Contains(stopped, made[0]) {
+			t.Fatalf("after Stop the page's list holds %q, want %q and the stopped %q", stopped, other, made[0])
+		}
+		// The read after both were deleted elsewhere is the server's word: the
+		// session the page itself put on the list goes too.
+		requireOnList(t, "once both were deleted elsewhere and the page read its list", got.Shown["after"])
+	})
+
+	t.Run("a commit that lands after its page was left", func(t *testing.T) {
+		rig := newOwnershipRig(t, ownershipRule{Kind: "commit", Nth: 1, Hold: "commit"},
+			ownershipRule{Kind: "list", Nth: 2, HoldAnswer: "new-page-list"})
+		rig.session = rig.interruptedSessionOf(t, ownershipOtherPath, ownershipOther)
+		got := runOwnershipCase(t, rig, script, node, "commit-across-navigation")
+		requireOnList(t, "as the page loaded", got.Shown["loaded"], rig.session)
+		made := rig.sessionsMade()
+		if len(made) != 1 {
+			t.Fatalf("the page made the sessions %q, want one", made)
+		}
+		if lists := rig.of("list", ""); len(lists) < 2 || !listedIn(lists[1].Answer, made[0]) || listedIn(lists[1].Answer, rig.session) {
+			t.Fatalf("the new page's read was not answered between the delete elsewhere and the commit: %v", lists)
+		}
+		committed := got.Shown["committed"]
+		if committed.Result != "" || committed.Error != "" || committed.ProgressShown || committed.RetryShown || committed.ReviewShown {
+			t.Errorf("once the left upload's commit answered, the page shown since shows %+v, want nothing of that upload", committed)
+		}
+		if got.AwaitingScan {
+			t.Error("the left upload's commit set the scan note of the page shown since")
+		}
+		// Neither the committed session, which the late read listed, nor the
+		// one deleted elsewhere, which the list held from before the commit.
+		requireOnList(t, "once the new page's read, answered before the commit, was delivered", got.Shown["after"])
+		rig.requireFile(t, ownershipPath, ownershipOld)
+	})
+
+	t.Run("Stop's read answered before the commit of the session it lists", func(t *testing.T) {
+		rig := newOwnershipRig(t, stopAt, ownershipRule{Kind: "list", Nth: 2, HoldAnswer: "stop-list"},
+			ownershipRule{Kind: "list", Nth: 3, Hold: "commit-list"})
+		got := runOwnershipCase(t, rig, script, node, "stop-read-across-commit")
+		made := rig.sessionsMade()
+		if len(made) != 1 {
+			t.Fatalf("the page made the sessions %q, want the stopped one alone, carried on", made)
+		}
+		if lists := rig.of("list", ""); len(lists) < 2 || !listedIn(lists[1].Answer, made[0]) {
+			t.Fatalf("Stop's read was not answered before the commit: %v", lists)
+		}
+		committed := got.Shown["committed"]
+		requireAdded(t, "after the same files were chosen again", committed, "1 added")
+		requireOnList(t, "after the commit", committed)
+		requireOnList(t, "once Stop's read was delivered after the commit", got.Shown["after"])
+		requireOnList(t, "once the commit's own read was delivered", got.Shown["final"])
+		rig.requirePuts(t, made[0], ownershipOld, everyChunk)
+		rig.requireFile(t, ownershipPath, ownershipOld)
 	})
 }
