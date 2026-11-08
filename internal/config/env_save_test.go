@@ -484,6 +484,51 @@ func TestAnEmptyListOverrideASaveLeftKeepsTheFilesList(t *testing.T) {
 	})
 }
 
+// TestASaveKeepsALeafAMergeKeyWrites: whether the file writes a leaf is the
+// decode's to say. scanIntervalSec written through a merge key alone (<<:
+// {scanIntervalSec: 300}), which a lookup of the file's own keys does not
+// find, is the file's own value: a save of another setting writes it, as a
+// key, since the save writes the config's fields and keeps no merge key, and
+// a start without BRIDGE_SCAN_INTERVAL_SEC reads 300.
+func TestASaveKeepsALeafAMergeKeyWrites(t *testing.T) {
+	vars := map[string]string{"BRIDGE_SCAN_INTERVAL_SEC": "120"}
+	for name, v := range vars {
+		t.Setenv(name, v)
+	}
+	path := envSaveConfig(t, "<<: {scanIntervalSec: 300}\n")
+	withoutVariables(t, vars, func() {
+		if got := loadAt(t, path).ScanIntervalSec; got != 300 {
+			t.Fatalf("a start without the variable reads scanIntervalSec %d: the fixture's merge key sets nothing", got)
+		}
+	})
+	rc := bootHolder(t, path)
+	if err := rc.Update(path, func(next *Config) error {
+		next.Library.AllowDelete = true
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got, there := fileLeaf(t, path, "scanIntervalSec"); !there || got != 300 {
+		t.Errorf("a save of another setting left scanIntervalSec = %#v (there %v), want the file's own 300", got, there)
+	}
+	if got := rc.Load().ScanIntervalSec; got != 120 {
+		t.Errorf("the holder publishes scanIntervalSec %d, want the variable's 120", got)
+	}
+	withoutVariables(t, vars, func() {
+		if got := loadAt(t, path).ScanIntervalSec; got != 300 {
+			t.Errorf("after the save, a start without the variable reads scanIntervalSec %d, want the file's own 300", got)
+		}
+	})
+}
+
+// TestACloneCarriesNoSavesRecord: the record of the leaves a save leaves out
+// (unwritten) is that save's copy's alone, and Clone drops it.
+func TestACloneCarriesNoSavesRecord(t *testing.T) {
+	if got := Clone(&Config{unwritten: []string{"scanIntervalSec"}}).unwritten; got != nil {
+		t.Errorf("a clone carries a save's record of the leaves it leaves out, %q", got)
+	}
+}
+
 // TestASaveWritesNoKeyForAnyLeafTheFileDoesNotWrite: for every leaf a
 // variable sets, whatever its field's tag, a save that leaves the leaf at the
 // variable's value over a file that does not write it writes no key for it:
