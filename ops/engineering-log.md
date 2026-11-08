@@ -86021,3 +86021,246 @@ converter), and neither result justifies changing the hot loops that `dsdconv.Co
 the join windows rest on, or keeping two code paths for two architectures. The branch and the
 nibble-table patch are kept outside the repository. If margin is ever needed, profile the whole
 process's unexplained points first: the converter is about half of what the Pi measured.
+
+## 2026-11-08 — B797: one upload owns the console's upload page, from its first await
+
+Backlog B797 on `fix/b797-upload-ownership` from main a77578f8, worker b797 on
+legion0 (Ubuntu 26.04, linux/amd64, go1.27.3, `GOTOOLCHAIN=local`,
+`GOPROXY=off`). Commits: the red tests 254afba0 and ef75e41f, the fix
+7bc1b781, this record, and the gates' results added to it after. The rule
+goes into `.claude/rules/admin-console.md` (beside B776's bullet, whose
+mention of the page's stop flag it corrects) and `build-ci-tests.md` (the
+harness's blind spot) through `rules-b797.patch`, since this worker cannot
+write `.claude/`.
+
+### What happened at main
+
+Try again (`retryUpload`) awaited its session's read before `transferAll`
+read `uploadState.picked`, while the pickers, the drop target and Upload
+stayed live. A batch picked meanwhile replaced `uploadState`, and the retry
+then sent the old session the new batch's bytes from the offsets the server
+held: with the same path and size and other bytes, a splice of two files
+under one session, which no chunk digest sees (each chunk verifies against
+its own bytes) and no whole-file digest is declared to catch (the console
+declares none, B176), so the commit lands it and the bridge serves it
+bit-exact. Both transfers ran: the retry's `stopped()` read the new upload's
+flag, and either one's end acted on the other's page (its finally hid the
+other's progress; its commit's report reset the other's staged pick). The
+stale writers were every continuation after an await: the post-read
+`uploadState.session` assignment, `paint()`, both catches, the commit and its
+report (`uploadAwaitingScan` included), the finallys, `chunkDigestHeaders`'
+`uploadState.digestUnavailable`, and a digest re-send's check of the page's
+flag. Beside them, by trace: Cancel while an upload prepared (the review is
+still up then) nulled the state under the run, which then showed a
+TypeError's text as the upload's error, or, with a new pick staged by then,
+carried on into that pick's state, writing its session there and sending its
+own session that pick's files wherever their paths matched; Upload stayed
+disabled after that Cancel until the cancelled run's
+finally, which a held create kept back; a dropped folder still being read was
+staged over a running upload, and on the page a navigation put in its place;
+a navigation set the page's stop flag but left the state, so the left run's
+failure was shown on the next page; Stop sat in the progress panel, which
+Try again showed only after its read; and a stop's "start again to resume"
+was false within a page's life, the page's list of interrupted uploads read
+only at its start.
+
+### The policy, and why
+
+Refused, not superseded. While a run (an upload, the resume of an
+interrupted one, or Try again) owns the page, both pickers, Upload, Try again
+and Discard it are disabled, a drop is refused in the drop target's handler
+(a div no disabled state stops), and a note in the drop zone says an upload
+is running and that more files can be chosen once it has finished or been
+stopped. A superseded run would leave its session with no control on the
+page (Try again is offered from the page's upload, which would be the new
+one's), and the operator who drags a second album while the first uploads
+means both, not the second instead. The refused pick leaves the running
+upload as it was; Stop is how to change course, and a stopped upload's
+session stays resumable, the page saying so and listing it.
+
+### The fix (7bc1b781)
+
+`beginUploadRun` gives a run the page, its files (a copy of the pick) and its
+session, before its first await; from then on it works on what it took
+(`run.picked`, `run.session`, `run.state`), and `transferAll`,
+`putUploadChunk(Verified)`, `attachUploadIdentity`, `createUploadSession` and
+`reportCommit` read no `uploadState`; `chunkDigestHeaders` is pure, its
+caller recording an absent digest on its own run's upload. `uploadOwns` (the
+page's upload is still the run's, and the run still its upload's) and
+`uploadRunLive` (that, and not stopped): after every await a run asks
+`uploadCheckpoint`, and right before each request (a chunk after its read and
+hash, a digest mismatch's re-send included, its session's create) whether it
+may still send; a worker that finds its run stopped there ends as stopped,
+not failed. A commit already asked for may land after the page was taken; its
+report is said only where the run still owns the page. The catches and the
+finallys go through `showUploadRunEnd` and `endUploadRun`, which ask first.
+Cancel (`resetUpload`) stops a run and clears the page at once; a session the
+server made for a cancelled run meanwhile holds nothing it sent and stays an
+interrupted upload. A navigation (wireUpload's abort) stops the run and
+clears the page's upload; the library root's read, `refreshResumable` and
+`discardResumable` touch only the page they were asked on (the signal, the
+banner's `isConnected`). Try again shows Stop before its read. A stop reads
+the page's list again (`showUploadStopped`), so choosing the same files
+carries the session on, as the stop's words say. The page's state stays on
+`uploadState` (its `run`) and each run's own object: no new global, so the
+node harnesses declare nothing new.
+
+### The tests
+
+Three pin, without node, the shape that does it, and run everywhere:
+`TestAnUploadRunOwnsThePageFromItsFirstAwait` (the run taken before the first
+await, every await of a run followed by its ask, the catches and finallys
+through the asking helpers, no `uploadState` in the run's chain),
+`TestAnUploadRunSendsNothingOnceItMayNotGoOn` (the ask between a chunk's hash
+and its request, the create's ask, the workers' stop, Cancel and the
+navigation taking the page, the late reads touching only their page) and
+`TestTheUploadPageRefusesAnotherUploadWhileARunOwnsIt` (each refusal, the
+busy note in the template, the refused pickers' look, Stop from Try again's
+start, the stop's list read again). Red at 254afba0 (all three; ef75e41f adds
+the stop's pin, red too), green at 7bc1b781.
+
+Five run the page under node, through its wired events, against the
+console's real handlers behind `ownershipRig`, a test server that records
+every request in order and acts on the nth of a kind (holds it until the
+script lets it go, takes the root's volume away first, or answers it
+itself): `TestARetrySendsOnlyTheFilesItBeganWith` (the retry's read, its
+second chunk, or a digest mismatch's re-send held while a batch with OLD's
+path and size and NEW's bytes is picked and Upload pressed: OLD's session is
+sent OLD's bytes alone, each missing chunk once), `TestStopAndCancelEndARunWhereverItIs`
+(Stop during the retry's read, then the same files chosen again resume it;
+Cancel while an upload prepares, its create answering after the next upload
+or while the next upload's chunk is held), `TestNoContinuationTouchesAPageItNoLongerOwns`
+(a dropped folder still being read as an upload begins or a navigation
+replaces the page; a chunk failing after a navigation while the new page's
+upload has a chunk out; a commit answering after a navigation over the new
+page's staged pick), `TestTheResumePathIsRefusedWhileARetryRuns`, and
+`TestAnOrdinaryUploadRetryResumeAndStopAreUnchanged`. Sessions take chunks
+of eight bytes, so a 32-byte OLD goes in four and a retry has chunks left
+after its first. The harness's elements nest as upload.html nests them: an
+element shows only while it and every container around it do, and a click or
+a pick is taken only by a shown element that is not disabled (null where
+none was taken); a pick goes through the folder picker's change event, a drop
+through the drop target's handler, and a navigation aborts the page's signal,
+replaces its elements and wires the page again.
+
+**The harness's blind spot.** `withReachedFunctions` finds calls with
+`jsCallRe`, which consumes the character before a name, so a call written
+directly inside another call's parentheses is missed: `collectFromInput`, in
+`stageFiles(collectFromInput(filesInput))`, was not carried, and every case,
+which picks through the picker, would have answered a ReferenceError at its
+first pick, at main and at the fix alike. It is named as an entry now, and
+`requireCarried` checks an assembled script before node is looked for: a
+top-level binding of app.js its functions read that the harness does not
+declare, and any name it calls that it neither declares nor has as a global
+(a call scan that consumes nothing before the name). It runs on this host,
+where node does not.
+
+**Not run here.** node is not installed on legion0, and no JavaScript engine
+is (no browser, no Go or Python package of one; checked again for this
+change): the five node tests skip here, after `requireCarried`, which passes
+on both red commits and the fix. What stands in for a run: the scripts node
+would run, assembled as the tests assemble them at main's app.js and at the
+fix (and B776's two harnesses at the fix), lexed by a scratch JavaScript
+lexer (`.tmp/_b797/jscheck.py`, not committed: comments, strings, template
+literals with their expressions, regular expression literals, bracket
+balance), which passes all nine shipped scripts and reported three slips
+injected to test it; and a trace of each case against the page's code. By
+that trace, at ef75e41f: `TestARetrySendsOnlyTheFilesItBeganWith` red in all
+three (the held read: OLD's session sent NEW's bytes at 8, 16 and 24, the
+splice; all three: the pick and Upload taken, a second session made, no busy
+note); `TestStopAndCancelEndARunWhereverItIs` red in all three (Stop cannot
+be pressed while Try again reads; after Cancel, Upload stays disabled until
+the cancelled run's finally, so the next upload cannot start);
+`TestNoContinuationTouchesAPageItNoLongerOwns` red in all four (the folder
+staged over the upload, and on the next page; the left failure shown on the
+new page and its progress hidden; the left commit's report replacing the
+staged pick); `TestTheResumePathIsRefusedWhileARetryRuns` red (the session
+read three times); `TestAnOrdinaryUploadRetryResumeAndStopAreUnchanged`
+green. At 7bc1b781 all five green, and B776's two node tests and the identity
+ones (their callers pass a run now) green, by the same trace.
+
+**Pin updates, intended.** `TestARefusalTheReviewHidOffersARetryOfTheSameSession`
+pinned `"await transferAll(session);"`, `showUploadFailure(e);` in both
+catches and `uploadState?.session` in `showUploadFailure`: it now pins the
+catch through `showUploadRunEnd(run, e);`, which hands a failure to
+`showUploadFailure(e, run.state)`, `state?.session` there, and
+`await transferAll(run, session);`, still asserting B776's guarantees (the
+retry reads and commits the session it holds, `uploadState?.session?.id`
+taken before its first await, makes no session, and complete files are
+passed over). `TestUploadSHA256MatchesNode` and
+`TestANewSessionReadsOnlyTheFingerprint` pass a run to
+`attachUploadIdentity` and `createUploadSession`, the abort before a create
+now the run's (`run.aborted`).
+
+### Negative controls
+
+Thirty, predicted by name in `.tmp/_b797/controls.predictions.txt` before the
+run, on 7bc1b781, each an exact-once edit, the package's test binary built
+once (and again for the two controls of the test file), each test run alone,
+the bytes put back from memory (`.tmp/_b797/controls.py`); the baseline green
+before and after, `git status` clean after. O1 is
+`TestAnUploadRunOwnsThePageFromItsFirstAwait`, O2
+`TestAnUploadRunSendsNothingOnceItMayNotGoOn`, O3
+`TestTheUploadPageRefusesAnotherUploadWhileARunOwnsIt`, R1
+`TestARefusalTheReviewHidOffersARetryOfTheSameSession`, P1
+`TestUploadPanelIDsExistInTheTemplate`, N1 to N5 the five node tests; also
+run, and green under every control: `TestAChunkRefusalKeepsItsCodeAndAFailedTransferSettlesFirst`,
+`TestChunkUploadSendsAndRetriesTheDigest`, `TestUploadPanelIDsAreWiredInAppJS`,
+`TestNoConsoleControlDisablesItselfOutsideSetDisabled`,
+`TestAppJSHasNoCallsToDeletedHelpers`.
+
+| Control | Red |
+|---|---|
+| C1 `transferAll` sends the page's pick | O1 |
+| C2 Try again takes the page after its read | O1 |
+| C3 no ask after Try again's read | O1 |
+| C4 a chunk's request without the ask right before it | O2 |
+| C5 the session's create without the ask | O2 |
+| C6 workers go on once the run lost the page | O2 |
+| C7 `showUploadRunEnd` speaks without asking | O1 |
+| C8 Upload's commit report said without asking | O1 |
+| C9 `endUploadRun` gives back a page it does not own | O1 |
+| C10 a folder read meanwhile staged anyway | O3 |
+| C11 `stageFiles` stages over a run | O3 |
+| C12 `setUploadBusy` disables nothing | O3 |
+| C13 the busy note never shown | O3 |
+| C14 Stop not offered during Try again's read | O3 |
+| C15 a navigation leaves the page's upload | O2 |
+| C16 Cancel leaves the run's upload | O2 |
+| C17 a stopped session not read back into the list | O3 |
+| C18 a worker's stop counted as the transfer's failure | O2 |
+| C19 the absent digest written on the page's upload | O1 |
+| C20 the busy note gone from the template | O3, P1 |
+| C21 the refused pickers' CSS rule gone | O3 |
+| C22 Discard it during a run | O3 |
+| C23 Upload starts a second run | O3 |
+| C24 a drop read while a run owns the page | O3 |
+| C25 Try again offered from the page's upload | R1 |
+| C26 `refreshResumable` writes a replaced page's banner | O2 |
+| C27 the harness does not carry `collectFromInput` | N1 to N5 |
+| C28 the harness does not declare `uploadAwaitingScan` | N1 to N5 |
+| C29 `uploadOwns` answers yes always | O1 |
+| C30 `uploadRunLive` ignores a stop | O1 |
+
+All thirty as predicted. Under node, not run here, the predictions file
+records which node cases each control reddens: C2 the splice again (Try
+again, taking the page after its read, takes the pick made during it); C7,
+C8, C9 and C29 the stale run's word or controls on the next upload's page;
+C10 and C15 the navigation cases; C12, C13, C14, C16, C17, C20 and C30 their
+cases; and C1, C3 to C6, C11, C18, C19 and C21 to C26 none, each a second
+layer behind another (the refusal keeps a pick off the page while a run owns
+it; a run's stop and its loss of the page come together) or a fact node does
+not see.
+
+### What the orchestrator runs where node is installed
+
+Red at ef75e41f (but `TestAnOrdinaryUploadRetryResumeAndStopAreUnchanged`,
+green), all green at 7bc1b781:
+
+    go test ./internal/admin/ -count=1 -v -timeout 600s -run '^(TestARetrySendsOnlyTheFilesItBeganWith|TestStopAndCancelEndARunWhereverItIs|TestNoContinuationTouchesAPageItNoLongerOwns|TestTheResumePathIsRefusedWhileARetryRuns|TestAnOrdinaryUploadRetryResumeAndStopAreUnchanged)$'
+
+And at 7bc1b781 the console's other node tests the fix touches, green:
+
+    go test ./internal/admin/ -count=1 -v -timeout 600s -run '^(TestTheConsoleRetriesARefusedCommitWithItsSessionOnceTheVolumeIsBack|TestTheConsoleSettlesAFailedTransferBeforeItOffersItsRetry|TestUploadSHA256MatchesNode|TestANewSessionReadsOnlyTheFingerprint|TestASameSizeEditDoesNotResume|TestClientChunkDigestIsAcceptedByTheServerParser)$'
+
+CI's Linux, macOS and Windows legs have node, so they run all of these.
