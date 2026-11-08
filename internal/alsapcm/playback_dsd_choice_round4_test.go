@@ -431,7 +431,7 @@ func TestAnActivationsFailureBesideADropIsJudgedByItsCause(t *testing.T) {
 		d.files.add("c", dsd(playbacktest.DSD64, 0.25))
 		ids := d.insert("a", "b", "c")
 		d.play()
-		ob := d.occurrenceOf(ids[1])
+		oa, ob := d.firstOcc(), d.occurrenceOf(ids[1])
 		opened, letOpen := d.unit.holdNextAdmit()
 		t.Cleanup(letOpen)
 		d.k.Free()
@@ -455,7 +455,18 @@ func TestAnActivationsFailureBesideADropIsJudgedByItsCause(t *testing.T) {
 		if err := d.eng.Delete(bg, ids[1]); err != nil {
 			t.Fatalf("deleting b's entry: %v", err)
 		}
-		d.replaced(ob, "c handed off in b's place")
+		// The edit reaches the backend as a cut of b (its frames are in its
+		// sink, so the engine cuts it) or as a Prepare after a that names
+		// another occurrence: either drops b and revokes its sink. The call is
+		// what is waited for: a Prepare naming c came before the edit, once b
+		// was all in its sink, so a wait for a Prepare naming another than b
+		// found that one, and the reopen went on before b was dropped.
+		e := d.waitCall("the edit that deletes b's entry reaching the backend", func(c call) bool {
+			return (c.kind == "cut" && c.from == ob) || (c.kind == "prepare" && c.after == oa && (c.next == nil || c.next.ID != ob))
+		})
+		if e.err != nil || (e.kind == "cut" && !e.ok) {
+			t.Fatalf("the edit that deletes b's entry reached the backend as a %s answered %v %v; want b dropped", e.kind, e.ok, e.err)
+		}
 		letReopen()
 		select {
 		case err := <-resumed:
