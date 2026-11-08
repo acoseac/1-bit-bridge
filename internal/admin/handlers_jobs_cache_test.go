@@ -32,13 +32,20 @@ func seedSnapshot(t *testing.T, root, name string, created time.Time) {
 	}
 }
 
+// lastBackupAtForTest is the card's newest snapshot time.
+func (s *Server) lastBackupAtForTest(ctx context.Context) *time.Time {
+	return s.getBackupCard(ctx).lastBackupAt
+}
+
 // TestLastBackupAtIsCached pins that /api/jobs stops walking the snapshot
 // directory on every poll.
 //
 // The listing opens and JSON-parses a manifest out of every snapshot
 // directory, and /api/jobs is polled every 10s per open admin tab. It ran
 // inline and uncached, right beside a database query the same handler was
-// careful to bound at 2s.
+// careful to bound at 2s. A poll that finds the backups folder as it was
+// lists nothing; one that finds it changed (a snapshot made by another
+// process, a verdict written: backlog B653) lists again and shows it.
 func TestLastBackupAtIsCached(t *testing.T) {
 	s, _, _ := newTestServer(t)
 	root := t.TempDir()
@@ -47,21 +54,33 @@ func TestLastBackupAtIsCached(t *testing.T) {
 	want := time.Now().Add(-time.Hour).Truncate(time.Second)
 	seedSnapshot(t, root, "20260804-120000", want)
 
-	got := s.getLastBackupAt(context.Background())
+	got := s.lastBackupAtForTest(context.Background())
 	if got == nil {
 		t.Fatal("no snapshot timestamp read from a seeded backups dir")
 	}
 	if !got.Equal(want) {
 		t.Errorf("timestamp = %v, want %v", got, want)
 	}
+	// The folder unchanged: no second listing.
+	for i := 0; i < 3; i++ {
+		_ = s.lastBackupAtForTest(context.Background())
+	}
+	if n := s.lastBackupListings.Load(); n != 1 {
+		t.Errorf("%d listings for four polls of an unchanged folder, want 1", n)
+	}
 
-	// A snapshot added behind the cache's back must NOT appear while the
-	// entry is still fresh — that is what "cached" means here, and it is
-	// the observable difference from the pre-fix inline read.
-	seedSnapshot(t, root, "20260804-130000", time.Now())
-	again := s.getLastBackupAt(context.Background())
-	if again == nil || !again.Equal(want) {
-		t.Errorf("timestamp = %v after a second snapshot landed; want the cached %v", again, want)
+	// A snapshot another process adds moves the folder's modification time
+	// (put a second ahead here, past any filesystem's granularity): the next
+	// poll lists again.
+	newer := time.Now().Truncate(time.Second)
+	seedSnapshot(t, root, "20260804-130000", newer)
+	backups := filepath.Join(root, backup.BackupsDirName)
+	ahead := time.Now().Add(time.Second)
+	if err := os.Chtimes(backups, ahead, ahead); err != nil {
+		t.Fatal(err)
+	}
+	if again := s.lastBackupAtForTest(context.Background()); again == nil || !again.Equal(newer) {
+		t.Errorf("timestamp = %v after a second snapshot landed in the folder; want it, %v", again, newer)
 	}
 }
 
@@ -77,7 +96,7 @@ func TestInvalidateLastBackupIsImmediate(t *testing.T) {
 
 	first := time.Now().Add(-time.Hour).Truncate(time.Second)
 	seedSnapshot(t, root, "20260804-120000", first)
-	if got := s.getLastBackupAt(context.Background()); got == nil || !got.Equal(first) {
+	if got := s.lastBackupAtForTest(context.Background()); got == nil || !got.Equal(first) {
 		t.Fatalf("priming read = %v, want %v", got, first)
 	}
 
@@ -85,7 +104,7 @@ func TestInvalidateLastBackupIsImmediate(t *testing.T) {
 	seedSnapshot(t, root, "20260804-130000", second)
 	s.invalidateLastBackup()
 
-	got := s.getLastBackupAt(context.Background())
+	got := s.lastBackupAtForTest(context.Background())
 	if got == nil || !got.Equal(second) {
 		t.Errorf("after invalidate: %v, want the new snapshot %v", got, second)
 	}
@@ -106,7 +125,7 @@ func TestLastBackupAtSingleFlights(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			results[i] = s.getLastBackupAt(context.Background())
+			results[i] = s.lastBackupAtForTest(context.Background())
 		}(i)
 	}
 	wg.Wait()
@@ -125,7 +144,7 @@ func TestLastBackupAtSingleFlights(t *testing.T) {
 func TestLastBackupAtNilWithoutDataDir(t *testing.T) {
 	s, _, _ := newTestServer(t)
 	s.deps.BackupSources.DataDir = ""
-	if got := s.getLastBackupAt(context.Background()); got != nil {
+	if got := s.lastBackupAtForTest(context.Background()); got != nil {
 		t.Errorf("got %v with no backup sources wired, want nil", got)
 	}
 }

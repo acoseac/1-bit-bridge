@@ -13,10 +13,25 @@ import (
 
 // writeSnapshotDir builds the minimal directory shape backup.List
 // recognises: a timestamped dir containing a manifest.json with the
-// schema version + CreatedAt the function reads. Real Snapshot writes
-// many more fields, but List only consults what `readManifest`
-// requires for ordering / filtering.
+// schema version + CreatedAt the function reads, and no verification
+// record: a snapshot written before snapshots were verified, which reads
+// UNVERIFIED (backlog B653). Real Snapshot writes many more fields, but List
+// only consults what `readManifest` requires for ordering / filtering.
 func writeSnapshotDir(t *testing.T, root string, createdAt time.Time) string {
+	return writeSnapshotDirAt(t, root, createdAt, nil)
+}
+
+// writeVerifiedSnapshotDir is writeSnapshotDir with a record whose two
+// verdicts are VERIFIED.
+func writeVerifiedSnapshotDir(t *testing.T, root string, createdAt time.Time) string {
+	return writeSnapshotDirAt(t, root, createdAt, &backup.Verification{
+		Format: 1, DatabaseState: backup.StateVerified, FilesState: backup.StateVerified,
+		Level: backup.CheckQuick, CheckedAt: createdAt,
+	})
+}
+
+// writeSnapshotDirAt is writeSnapshotDir with the record rec (nil: none).
+func writeSnapshotDirAt(t *testing.T, root string, createdAt time.Time, rec *backup.Verification) string {
 	t.Helper()
 	dir := filepath.Join(root, createdAt.Format("2006-01-02T15-04-05Z"))
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -26,6 +41,10 @@ func writeSnapshotDir(t *testing.T, root string, createdAt time.Time) string {
 		SchemaVersion: backup.SchemaVersion,
 		CreatedAt:     createdAt,
 		Files:         []string{"bridge.db"},
+		Verification:  rec,
+	}
+	if rec != nil {
+		m.Baselines = []backup.Baseline{{Name: "bridge.db"}}
 	}
 	b, err := json.Marshal(m)
 	if err != nil {
@@ -54,7 +73,7 @@ func TestStartupSnapshotShouldSkip_NoExistingSnapshots(t *testing.T) {
 func TestStartupSnapshotShouldSkip_RecentSnapshotWithinThreshold(t *testing.T) {
 	root := t.TempDir()
 	now := time.Now().UTC()
-	writeSnapshotDir(t, root, now.Add(-2*time.Hour))
+	writeVerifiedSnapshotDir(t, root, now.Add(-2*time.Hour))
 
 	skip, latest, err := startupSnapshotShouldSkip(root, now, 24*time.Hour)
 	if err != nil {
@@ -71,7 +90,7 @@ func TestStartupSnapshotShouldSkip_RecentSnapshotWithinThreshold(t *testing.T) {
 func TestStartupSnapshotShouldSkip_OldSnapshotPastThreshold(t *testing.T) {
 	root := t.TempDir()
 	now := time.Now().UTC()
-	writeSnapshotDir(t, root, now.Add(-26*time.Hour))
+	writeVerifiedSnapshotDir(t, root, now.Add(-26*time.Hour))
 
 	skip, _, err := startupSnapshotShouldSkip(root, now, 24*time.Hour)
 	if err != nil {
@@ -92,7 +111,7 @@ func TestStartupSnapshotShouldSkip_SnapshotExactlyAtThresholdDoesNotSkip(t *test
 	// edge alignment a constant-cadence ticker would hit.
 	root := t.TempDir()
 	now := time.Now().UTC()
-	writeSnapshotDir(t, root, now.Add(-24*time.Hour))
+	writeVerifiedSnapshotDir(t, root, now.Add(-24*time.Hour))
 
 	skip, _, err := startupSnapshotShouldSkip(root, now, 24*time.Hour)
 	if err != nil {
@@ -109,8 +128,8 @@ func TestStartupSnapshotShouldSkip_PicksMostRecentNotOldest(t *testing.T) {
 	// old one.
 	root := t.TempDir()
 	now := time.Now().UTC()
-	writeSnapshotDir(t, root, now.Add(-7*24*time.Hour))
-	writeSnapshotDir(t, root, now.Add(-2*time.Hour))
+	writeVerifiedSnapshotDir(t, root, now.Add(-7*24*time.Hour))
+	writeVerifiedSnapshotDir(t, root, now.Add(-2*time.Hour))
 
 	skip, latest, err := startupSnapshotShouldSkip(root, now, 24*time.Hour)
 	if err != nil {
@@ -122,6 +141,51 @@ func TestStartupSnapshotShouldSkip_PicksMostRecentNotOldest(t *testing.T) {
 	if age := now.Sub(latest); age > 3*time.Hour {
 		t.Errorf("latest age = %v, want close to 2h (helper picked the older snapshot)", age)
 	}
+}
+
+// TestStartupSnapshotShouldSkip_OnlyForARecentVerifiedDatabase is the
+// brief's red for the skip (backlog B653): a recent snapshot whose
+// database FAILED, did not finish, waits for its check or predates
+// verification is no recovery point, so the startup snapshot is taken; a
+// recent one whose database is VERIFIED skips it, whatever its files say, a
+// newer failed one beside it included. Red on main: any recent snapshot
+// skipped.
+func TestStartupSnapshotShouldSkip_OnlyForARecentVerifiedDatabase(t *testing.T) {
+	now := time.Now().UTC()
+	for _, tc := range []struct {
+		name string
+		rec  *backup.Verification
+		skip bool
+	}{
+		{"written before verification", nil, false},
+		{"its database failed", &backup.Verification{Format: 1, DatabaseState: backup.StateFailed,
+			DatabaseReasons: []backup.Reason{backup.ReasonQuickCheck}, FilesState: backup.StateVerified}, false},
+		{"its check did not finish", &backup.Verification{Format: 1, DatabaseState: backup.StateIncomplete,
+			DatabaseReasons: []backup.Reason{backup.ReasonCancelled}, FilesState: backup.StateIncomplete}, false},
+		{"its check is pending", &backup.Verification{Format: 1, DatabaseState: backup.StatePending,
+			FilesState: backup.StatePending, PendingSince: now}, false},
+		{"its database verified and a file not", &backup.Verification{Format: 1, DatabaseState: backup.StateVerified,
+			FilesState: backup.StateFailed, FilesReasons: []backup.Reason{backup.ReasonHash}}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeSnapshotDirAt(t, root, now.Add(-2*time.Hour), tc.rec)
+			skip, _, err := startupSnapshotShouldSkip(root, now, 24*time.Hour)
+			if err != nil || skip != tc.skip {
+				t.Errorf("skip = %v (err %v), want %v", skip, err, tc.skip)
+			}
+		})
+	}
+	t.Run("a newer failed one beside an older verified one", func(t *testing.T) {
+		root := t.TempDir()
+		writeVerifiedSnapshotDir(t, root, now.Add(-5*time.Hour))
+		writeSnapshotDirAt(t, root, now.Add(-1*time.Hour), &backup.Verification{Format: 1,
+			DatabaseState: backup.StateFailed, DatabaseReasons: []backup.Reason{backup.ReasonHash}, FilesState: backup.StateVerified})
+		skip, latest, err := startupSnapshotShouldSkip(root, now, 24*time.Hour)
+		if err != nil || !skip || now.Sub(latest) < 4*time.Hour {
+			t.Errorf("skip = %v at %v (err %v), want the verified one's skip", skip, latest, err)
+		}
+	})
 }
 
 func TestStartupSnapshotShouldSkip_MissingBackupsRootIsNotAnError(t *testing.T) {

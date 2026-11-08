@@ -16,6 +16,7 @@ package admin
 import (
 	"context"
 	"net/http"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -131,10 +132,25 @@ type jobsSmartMixes struct {
 type jobsBackups struct {
 	// IntervalHours 0 = ticker disabled by the operator (on-demand
 	// snapshots stay available).
-	IntervalHours int          `json:"intervalHours"`
-	Keep          int          `json:"keep"`
-	LastBackupAt  *time.Time   `json:"lastBackupAt,omitempty"`
-	Run           *JobRunState `json:"run,omitempty"`
+	IntervalHours int `json:"intervalHours"`
+	Keep          int `json:"keep"`
+	// LastBackupAt is when the newest snapshot was written, and
+	// LastVerifiedAt when the newest whose database is verified was: the
+	// recovery point, apart (backlog B653). NewestDatabase and NewestFiles
+	// are the newest snapshot's two verdicts with their reason codes, as
+	// every surface words them (backup.StateWords, backup.FilesWords).
+	LastBackupAt   *time.Time   `json:"lastBackupAt,omitempty"`
+	LastVerifiedAt *time.Time   `json:"lastVerifiedAt,omitempty"`
+	NewestDatabase string       `json:"newestDatabase,omitempty"`
+	NewestFiles    string       `json:"newestFiles,omitempty"`
+	Run            *JobRunState `json:"run,omitempty"`
+}
+
+// backupCard is what the jobs card shows of the backups folder, from the
+// manifests alone (backup.ReadStatus).
+type backupCard struct {
+	lastBackupAt, lastVerifiedAt *time.Time
+	newestDatabase, newestFiles  string
 }
 
 type jobsUpdates struct {
@@ -336,10 +352,12 @@ func (s *Server) getJobsSnapshot(ctx context.Context) jobsSnapshotResponse {
 	if run := s.deps.BackupRun; run != nil {
 		resp.Backups.Run = run()
 	}
-	// Newest snapshot's timestamp — covers snapshots from before this
-	// process started (the recorder is process-lifetime only). Cached:
-	// see getLastBackupAt.
-	resp.Backups.LastBackupAt = s.getLastBackupAt(ctx)
+	// The newest snapshot, its verdicts, and the newest verified one —
+	// covers snapshots from before this process started (the recorder is
+	// process-lifetime only). Cached: see getBackupCard.
+	card := s.getBackupCard(ctx)
+	resp.Backups.LastBackupAt, resp.Backups.LastVerifiedAt = card.lastBackupAt, card.lastVerifiedAt
+	resp.Backups.NewestDatabase, resp.Backups.NewestFiles = card.newestDatabase, card.newestFiles
 
 	// Updates. CheckIntervalHours 0 means "updater default" (6 h,
 	// updater.DefaultCheckInterval) — resolve it here so the card never
@@ -421,38 +439,48 @@ func refusalOf[K ~string](status func() integrity.RefusalStatus[K], running bool
 	return string(st.Refusing), &started
 }
 
-// getLastBackupAt returns the TTL-cached timestamp of the newest
-// snapshot, single-flighted so concurrent polls collapse to one listing.
+// getBackupCard returns what the jobs card shows of the backups folder,
+// cached and single-flighted so concurrent polls collapse to one listing.
 //
-// backup.List walks every snapshot directory and reads a manifest out of
-// each. /api/jobs is polled every 10s per open admin tab, so doing that
-// inline — as this did — put unbounded, uncached filesystem work on a
+// backup.ListContext walks every snapshot directory and reads a manifest
+// out of each. /api/jobs is polled every 10s per open admin tab, so doing
+// that inline — as this did — put unbounded, uncached filesystem work on a
 // hot polling path, right beside a database query the same handler was
 // careful to bound at 2s. It is also unbounded in the case that matters
-// most: with `backup.keep <= 0` the create path skips Prune entirely, so
-// snapshots accumulate without limit and the listing grows with them.
+// most: with `backup.keep <= 0` the prune keeps every snapshot, so the
+// listing grows with them.
 //
-// Nil means "no snapshots, or we couldn't tell" — the card just omits
-// the line, which is the pre-existing behaviour on a listing error.
-func (s *Server) getLastBackupAt(ctx context.Context) *time.Time {
-	root := s.deps.BackupSources.DataDir
-	if root == "" {
-		return nil
+// The entry stands for lastBackupCacheTTL while the backups folder's
+// modification time is the one it was filled at, one stat a poll: a
+// snapshot made or removed moves it, and so does a verdict's write
+// (backup's stampChange), whichever process made them (backlog B653).
+//
+// The zero card means "no snapshots, or we couldn't tell" — the card just
+// shows dashes, which is the pre-existing behaviour on a listing error.
+func (s *Server) getBackupCard(ctx context.Context) backupCard {
+	dataDir := s.deps.BackupSources.DataDir
+	if dataDir == "" {
+		return backupCard{}
+	}
+	root := filepath.Join(dataDir, backup.BackupsDirName)
+	stamp := folderStamp(root)
+	fresh := func() bool {
+		return !s.lastBackupAt.IsZero() && time.Since(s.lastBackupAt) < lastBackupCacheTTL && s.lastBackupStamp.Equal(stamp)
 	}
 	s.lastBackupMu.Lock()
-	if !s.lastBackupAt.IsZero() && time.Since(s.lastBackupAt) < lastBackupCacheTTL {
-		v := s.lastBackupAtVal
+	if fresh() {
+		card := s.lastBackupCard
 		s.lastBackupMu.Unlock()
-		return v
+		return card
 	}
 	s.lastBackupMu.Unlock()
 
 	v, _, _ := s.lastBackupSF.Do("lastBackup", func() (any, error) {
 		s.lastBackupMu.Lock()
-		if !s.lastBackupAt.IsZero() && time.Since(s.lastBackupAt) < lastBackupCacheTTL {
-			val := s.lastBackupAtVal
+		if fresh() {
+			card := s.lastBackupCard
 			s.lastBackupMu.Unlock()
-			return val, nil
+			return card, nil
 		}
 		s.lastBackupMu.Unlock()
 
@@ -461,32 +489,49 @@ func (s *Server) getLastBackupAt(ctx context.Context) *time.Time {
 		// failure for the rest (the PR #373 singleflight rule).
 		listCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), backupListTimeout)
 		defer cancel()
-		entries, err := backup.ListContext(listCtx, filepath.Join(root, backup.BackupsDirName))
+		s.lastBackupListings.Add(1)
+		st, err := backup.ReadStatus(listCtx, root)
 		if err != nil {
 			logger.Warn("jobs: backup list", "err", err)
 			s.lastBackupMu.Lock()
-			val := s.lastBackupAtVal // last good (possibly nil)
+			card := s.lastBackupCard // last good (possibly zero)
 			// Stamp on failure too, so a slow or failing listing backs
 			// off for a TTL instead of being retried on every poll.
-			s.lastBackupAt = time.Now()
+			s.lastBackupAt, s.lastBackupStamp = time.Now(), stamp
 			s.lastBackupMu.Unlock()
-			return val, nil
+			return card, nil
 		}
-		var newest *time.Time
-		if len(entries) > 0 {
-			t := entries[0].CreatedAt
-			newest = &t
+		var card backupCard
+		if sn, ok := st.Newest(); ok {
+			t := sn.CreatedAt
+			card.lastBackupAt = &t
+			card.newestDatabase = backup.StateWords(sn.Verdict.DatabaseState, sn.Verdict.DatabaseReasons)
+			card.newestFiles = backup.FilesWords(sn.Verdict)
+		}
+		if sn, ok := st.NewestVerified(); ok {
+			t := sn.CreatedAt
+			card.lastVerifiedAt = &t
 		}
 		s.lastBackupMu.Lock()
-		s.lastBackupAtVal = newest
-		s.lastBackupAt = time.Now()
+		s.lastBackupCard = card
+		s.lastBackupAt, s.lastBackupStamp = time.Now(), stamp
 		s.lastBackupMu.Unlock()
-		return newest, nil
+		return card, nil
 	})
-	if t, ok := v.(*time.Time); ok {
-		return t
+	if card, ok := v.(backupCard); ok {
+		return card
 	}
-	return nil
+	return backupCard{}
+}
+
+// folderStamp is the folder at path's modification time, or the zero time
+// where it cannot be read (a folder not made yet).
+func folderStamp(path string) time.Time {
+	info, err := os.Stat(path)
+	if err != nil {
+		return time.Time{}
+	}
+	return info.ModTime()
 }
 
 // invalidateAnalysisCoverage drops the TTL-cached coverage snapshot so the

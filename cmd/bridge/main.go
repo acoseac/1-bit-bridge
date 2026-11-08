@@ -2749,7 +2749,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	case "update":
 		return updateCmd(ctx, args[1:], os.Stdin, stdout, stderr)
 	case "backup":
-		return backupCmd(args[1:], stdout, stderr)
+		return backupCmdContext(ctx, args[1:], stdout, stderr)
 	case "restore":
 		return restoreCmd(ctx, args[1:], os.Stdin, stdout, stderr)
 	case "reset-player":

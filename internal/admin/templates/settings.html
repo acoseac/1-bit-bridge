@@ -904,8 +904,12 @@
           <dd id="backup-count">…</dd>
           <dt>Most recent</dt>
           <dd id="backup-latest">…</dd>
+          <dt>Its check</dt>
+          <dd id="backup-latest-check">…</dd>
+          <dt>Newest verified</dt>
+          <dd id="backup-verified">…</dd>
         </dl>
-        <p class="panel-note">Snapshots capture <code>bridge.db</code>, <code>tokens.json</code>, the TLS cert + key, and <code>bridge.yaml</code> into <code id="backup-root">…</code>. <strong>Backups contain the TLS private key and token hashes</strong> — store them with the same care as the live state. Restore from CLI: stop the bridge, then <code>bridge restore &lt;snapshot-dir&gt;</code>.</p>
+        <p class="panel-note">Snapshots capture <code>bridge.db</code>, <code>tokens.json</code>, the TLS cert + key, and <code>bridge.yaml</code> into the <code>backups</code> folder in the bridge's data directory. Each is checked as it is taken: its database by SQLite's quick check and the schema its version needs, every file against the size and hash it was written with; <code>bridge backup --verify &lt;snapshot-dir&gt; --full</code> runs SQLite's full integrity and foreign-key checks too. <strong>Backups contain the TLS private key and token hashes</strong> — store them with the same care as the live state. Restore from CLI: stop the bridge, then <code>bridge restore &lt;snapshot-dir&gt;</code>.</p>
       </div>
 
       {{/*
@@ -925,7 +929,7 @@
         <label for="backupKeep">Snapshots to keep</label>
         <input type="number" id="backupKeep" name="backupKeep" min="1" max="365"
                value="{{.Data.BackupKeep}}">
-        <p class="hint">Older snapshots are pruned after each successful run.</p>
+        <p class="hint">Older snapshots are pruned after each run, keeping beyond this count the newest whose database is verified and the newest that failed its check.</p>
       </div>
 
       <h2 class="section-head">Data retention</h2>

@@ -246,6 +246,10 @@
         <dd id="job-backup-state">—</dd>
         <dt>Last snapshot</dt>
         <dd id="job-backup-last">—</dd>
+        <dt>Its check</dt>
+        <dd id="job-backup-check">—</dd>
+        <dt>Last verified</dt>
+        <dd id="job-backup-verified">—</dd>
         <dt>Next snapshot</dt>
         <dd id="job-backup-next">—</dd>
         <dt>Retention</dt>
@@ -253,7 +257,9 @@
       </dl>
       <p class="hint">
         Snapshots bridge.db, tokens, certs and config into the data
-        directory. Restore and the snapshot list live in
+        directory, and checks each one as it is taken: its database
+        against SQLite's quick check, every file against the size and
+        hash it was written with. Restore and the snapshot list live in
         <a href="/settings?tab=backups">Settings → Backups</a>.
       </p>
     </div>

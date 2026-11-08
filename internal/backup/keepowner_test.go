@@ -30,7 +30,7 @@ func TestSnapshotAndRestoreAsRootKeepTheInstallOwner(t *testing.T) {
 		t.Skip("a file takes its directory's ACL on Windows; these helpers change no owner there")
 	}
 	dataDir := resolvedTempDir(t)
-	src := primeLiveState(t, dataDir)
+	src := primePreLadderLiveState(t, dataDir)
 	changes, restore := fsutil.SimulateRootForTest(4242, 4243)
 	defer restore()
 
@@ -103,7 +103,7 @@ func TestSnapshotAndRestoreAsRootKeepTheConsoleAccountAndHarvestState(t *testing
 		t.Skip("a file takes its directory's ACL on Windows; these helpers change no owner there")
 	}
 	dataDir := resolvedTempDir(t)
-	src := primeLiveState(t, dataDir)
+	src := primePreLadderLiveState(t, dataDir)
 	src.AdminAuth = filepath.Join(dataDir, backup.AdminAuthFileName)
 	src.AtlasHarvest = filepath.Join(dataDir, backup.AtlasHarvestFileName)
 	if err := os.WriteFile(src.AdminAuth, []byte("{}\n"), 0o600); err != nil {

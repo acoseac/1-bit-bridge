@@ -19,6 +19,7 @@ import (
 	"testing"
 
 	"github.com/acoseac/1-bit-bridge/internal/dsn"
+	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/sqlitetest"
 )
 
@@ -27,16 +28,26 @@ import (
 // the driver's interrupt several chances to land (see its docblock).
 const sourceRows = 32
 
-// WriteSource adds to the SQLite database at path, creating it if it is
-// absent, a table whose index is ordered under the park's collation, so a
-// VACUUM of that database compares keys through sqlitetest. It opens the
-// database in WAL mode, as the bridge opens its own manifest database.
+// WriteSource makes the SQLite database at path a bridge store, as the
+// bridge's own open makes it (manifest.OpenStore: the whole migration
+// ladder), so a snapshot of it passes a verification's schema check (backlog
+// B653), and adds to it a table whose index is ordered under the park's
+// collation, so a VACUUM of that database compares keys through sqlitetest.
+// It opens the database in WAL mode, as the bridge opens its own manifest
+// database.
 //
 // Call it before ParkVacuum: writing the rows compares keys too.
 func WriteSource(t testing.TB, path string) {
 	t.Helper()
 	if sqlitetest.Armed() {
 		t.Fatal("backuptest: WriteSource with a Park armed would park its own inserts")
+	}
+	st, err := manifest.OpenStore(path)
+	if err != nil {
+		t.Fatalf("backuptest: open the store %s: %v", path, err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("backuptest: close the store %s: %v", path, err)
 	}
 	db, err := sql.Open("sqlite", dsn.File(path, "_pragma=journal_mode(WAL)"))
 	if err != nil {

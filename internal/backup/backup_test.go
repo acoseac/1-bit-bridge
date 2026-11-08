@@ -419,13 +419,11 @@ func TestPruneKeepsMostRecent(t *testing.T) {
 	backupsRoot := filepath.Join(dataDir, backup.BackupsDirName)
 
 	// Create five snapshots, each in a distinct second so timestamps
-	// don't collide.
+	// don't collide, each verified as every caller verifies one: a PENDING
+	// younger than its bound is never pruned (backlog B653).
 	dirs := make([]string, 0, 5)
 	for i := 0; i < 5; i++ {
-		dst, err := backup.Snapshot(t.Context(), src)
-		if err != nil {
-			t.Fatalf("Snapshot %d: %v", i, err)
-		}
+		dst := verifiedSnapshot(t, src)
 		dirs = append(dirs, dst)
 		// Force a 1-second gap so the timestamp strings are distinct.
 		time.Sleep(1100 * time.Millisecond)
@@ -499,14 +497,11 @@ func TestPruneIsBestEffortPastALockedDir(t *testing.T) {
 	src := primeLiveState(t, dataDir)
 	backupsRoot := filepath.Join(dataDir, backup.BackupsDirName)
 
-	// Three snapshots in distinct seconds; keep=1 makes the two oldest
-	// eligible for pruning.
+	// Three verified snapshots in distinct seconds; keep=1 makes the two
+	// oldest eligible for pruning.
 	dirs := make([]string, 0, 3)
 	for i := 0; i < 3; i++ {
-		dst, err := backup.Snapshot(t.Context(), src)
-		if err != nil {
-			t.Fatalf("Snapshot %d: %v", i, err)
-		}
+		dst := verifiedSnapshot(t, src)
 		dirs = append(dirs, dst)
 		time.Sleep(1100 * time.Millisecond)
 	}
@@ -1270,13 +1265,30 @@ func TestLooksLikeSnapshotDir(t *testing.T) {
 
 // --- Helpers ---
 
-// primeLiveState builds a plausible bridge state: an empty SQLite
-// db, a tokens.json with one stub token, dummy cert/key files, a
-// minimal bridge.yaml. Returns the populated Sources for Snapshot.
+// primeLiveState builds a plausible bridge state: an empty bridge store,
+// a tokens.json with one stub token, dummy cert/key files, a minimal
+// bridge.yaml. Returns the populated Sources for Snapshot.
 func primeLiveState(t *testing.T, dataDir string) backup.Sources {
 	t.Helper()
+	// Manifest db — a real bridge store, so VACUUM INTO works and the
+	// snapshot's verification finds the schema its version requires
+	// (backlog B653).
+	store, err := manifest.OpenStore(filepath.Join(dataDir, "bridge.db"))
+	if err != nil {
+		t.Fatalf("open the store: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close the store: %v", err)
+	}
+	return primePreLadderLiveState(t, dataDir)
+}
 
-	// Manifest db — a real SQLite file so VACUUM INTO works.
+// primePreLadderLiveState is primeLiveState with a database that predates
+// the migration ladder, a SQLite file holding one table, unless one is there
+// already: what the root-owner tests restore, whose epoch reset then
+// migrates it, creating the ladder's and the install marker's locks.
+func primePreLadderLiveState(t *testing.T, dataDir string) backup.Sources {
+	t.Helper()
 	dbPath := filepath.Join(dataDir, "bridge.db")
 	db, err := sql.Open("sqlite", dsn.File(dbPath, "_pragma=journal_mode(WAL)"))
 	if err != nil {
@@ -1314,6 +1326,21 @@ func primeLiveState(t *testing.T, dataDir string) backup.Sources {
 		ServerKey:  keyPath,
 		BridgeYAML: yamlPath,
 	}
+}
+
+// verifiedSnapshot takes a snapshot of src through the one path every
+// caller takes, pruning nothing, and requires both its verdicts VERIFIED.
+func verifiedSnapshot(t *testing.T, src backup.Sources) string {
+	t.Helper()
+	res := backup.SnapshotAndVerify(t.Context(), src, backup.SnapshotOptions{})
+	if !res.Kept() || res.VerifyErr != nil {
+		t.Fatalf("SnapshotAndVerify: kept %v, capture %v, verification %v", res.Kept(), res.CaptureErr, res.VerifyErr)
+	}
+	if v := res.Verify.Record; v.DatabaseState != backup.StateVerified || v.FilesState != backup.StateVerified {
+		t.Fatalf("the snapshot reads database %s %v, files %s %v; want both VERIFIED",
+			v.DatabaseState, v.DatabaseReasons, v.FilesState, v.FilesReasons)
+	}
+	return res.Dir
 }
 
 func pathExists(t *testing.T, p string) bool {

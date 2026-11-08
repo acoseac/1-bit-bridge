@@ -48,6 +48,8 @@ package backup
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -150,6 +152,16 @@ type Manifest struct {
 	// recorded nothing, and BridgeVersion cannot tell the two apart (it is the
 	// build's stamped version, the same 0.0.1 for every build from source).
 	PlayerFloorRequired bool `json:"playerFloorRequired,omitempty"`
+	// Baselines is each captured file's size and SHA-256, recorded as
+	// Snapshot wrote it (backlog B653), in the order of Files; a snapshot
+	// written before verification has none. A verification compares the
+	// bundle against them and never replaces them.
+	Baselines []Baseline `json:"baselines,omitempty"`
+	// Verification is the snapshot's verification record (verify.go):
+	// PENDING as Snapshot publishes it, then the verdicts a verification
+	// writes. A snapshot written before verification has none, which a
+	// reader reads as UNVERIFIED (readVerdict).
+	Verification *Verification `json:"verification,omitempty"`
 }
 
 // Sources points at the live files that should be captured.
@@ -202,6 +214,13 @@ var afterIdentityCopy func()
 // timestamped directory under `<src.DataDir>/backups/`. Returns the
 // absolute path of the created directory.
 //
+// The manifest it publishes records each captured file's size and SHA-256
+// (Manifest.Baselines: the copies' as they stream, the database's by one
+// read once VACUUM INTO has written it) and carries the bundle's
+// verification record already PENDING (backlog B653), so no bundle is ever
+// without one. Every caller verifies the bundle next and prunes after it
+// (SnapshotAndVerify, Finish).
+//
 // `ctx` is forwarded to the SQLite VACUUM INTO step and read retries so the
 // periodic ticker can cancel an in-flight snapshot on bridge shutdown. Pass
 // `context.Background()` if you don't have a richer scope.
@@ -242,12 +261,22 @@ func Snapshot(ctx context.Context, src Sources) (snapDir string, retErr error) {
 	}()
 
 	var captured []string
+	// Each captured file's size and SHA-256 as it is written (backlog
+	// B653), which a verification compares the bundle against.
+	var baselines []Baseline
 	if src.ManifestDB != "" {
 		if _, err := os.Stat(src.ManifestDB); err == nil {
-			if err := vacuumInto(ctx, src.ManifestDB, filepath.Join(dst, ManifestDBFileName)); err != nil {
+			out := filepath.Join(dst, ManifestDBFileName)
+			if err := vacuumInto(ctx, src.ManifestDB, out); err != nil {
 				return "", fmt.Errorf("vacuum manifest db: %w", err)
 			}
-			captured = append(captured, ManifestDBFileName)
+			// SQLite wrote the copy, so its baseline is one read of it, now,
+			// while the pages are fresh.
+			b, err := baselineOf(ctx, out, ManifestDBFileName)
+			if err != nil {
+				return "", fmt.Errorf("read the database's copy back: %w", err)
+			}
+			captured, baselines = append(captured, ManifestDBFileName), append(baselines, b)
 		} else if !errors.Is(err, os.ErrNotExist) {
 			return "", fmt.Errorf("stat manifest db: %w", err)
 		}
@@ -277,10 +306,12 @@ func Snapshot(ctx context.Context, src Sources) (snapDir string, retErr error) {
 		} else if err != nil {
 			return "", fmt.Errorf("stat %s: %w", pair.name, err)
 		}
-		if err := copyFileCtx(ctx, pair.src, filepath.Join(dst, pair.name), 0o600); err != nil {
+		size, sum, err := copyFileHashed(ctx, pair.src, filepath.Join(dst, pair.name), 0o600)
+		if err != nil {
 			return "", fmt.Errorf("copy %s: %w", pair.name, err)
 		}
 		captured = append(captured, pair.name)
+		baselines = append(baselines, Baseline{Name: pair.name, Size: size, SHA256: sum})
 	}
 
 	// Capture the UUID before its floor and require the same named identity.
@@ -348,22 +379,29 @@ func Snapshot(ctx context.Context, src Sources) (snapDir string, retErr error) {
 			if err != nil {
 				return "", err
 			}
-			if err := writeFrom(filepath.Join(dst, engine.ReservationFileName), bytes.NewReader(data), 0o600); err != nil {
+			size, sum, err := writeFromHashed(filepath.Join(dst, engine.ReservationFileName), bytes.NewReader(data), 0o600)
+			if err != nil {
 				return "", err
 			}
 			captured = append(captured, engine.ReservationFileName)
+			baselines = append(baselines, Baseline{Name: engine.ReservationFileName, Size: size, SHA256: sum})
 		}
 	}
 
 	// Every captured player UUID above travels with its floor, or the
-	// snapshot was refused: the manifest says so to restore.
+	// snapshot was refused: the manifest says so to restore. The manifest is
+	// published with its verification record already PENDING, so no bundle
+	// is ever without one (backlog B653).
+	now := time.Now().UTC()
 	m := Manifest{
 		SchemaVersion:       SchemaVersion,
 		BridgeVersion:       version.ServerVersion,
 		ProtocolVersion:     version.ProtocolVersion,
-		CreatedAt:           time.Now().UTC(),
+		CreatedAt:           now,
 		Files:               captured,
 		PlayerFloorRequired: true,
+		Baselines:           baselines,
+		Verification:        pendingRecord(now, slices.Contains(captured, ManifestDBFileName)),
 	}
 	if err := writeManifest(filepath.Join(dst, ManifestFile), m); err != nil {
 		return "", fmt.Errorf("write snapshot manifest: %w", err)
@@ -877,6 +915,10 @@ type PruneResult struct {
 	// ReapErr is the orphan sweep's non-fatal outcome. Never nil-checked
 	// as a prune failure — see the type docblock.
 	ReapErr error
+	// Skipped says the keep-policy did not run this round: another
+	// process's verification or prune held the backups folder's lock
+	// (backlog B653). The next round prunes.
+	Skipped bool
 }
 
 // Prune is PruneContext with a background context. Kept for the CLI and
@@ -906,41 +948,101 @@ func Prune(backupsRoot string, keep int) (PruneResult, error) {
 //
 // The returned error covers only the keep-policy prune (plus cancellation).
 // Orphan-sweep problems ride on PruneResult.ReapErr — see PruneResult.
+//
+// **The keep-policy keeps what recovery needs** (backlog B653), reading each
+// snapshot's database verdict alone (readVerdict): the `keep` newest stay as
+// before, and beside them, beyond `keep` if they must, the newest snapshot
+// whose database is VERIFIED; while none is, the newest snapshot written
+// before verification (a legacy one, UNVERIFIED); the newest whose database
+// is FAILED or INCOMPLETE, as evidence, one at most; and every PENDING
+// younger than PendingBound, whose check may be under way. Every other
+// snapshot is kept or pruned by `keep` as before. It runs holding the
+// backups folder's lock (LockFileName) across its listing and its
+// deletions, tried once: a round that finds it held (another process
+// verifying or pruning) prunes nothing and says so (PruneResult.Skipped).
+// The orphan sweep runs first, as before, without it.
 func PruneContext(ctx context.Context, backupsRoot string, keep int) (PruneResult, error) {
-	// Reap crash-orphaned partial snapshots first — dirs with no
-	// manifest.json that `List` (and therefore the keep-policy below)
-	// can never see, so the keep-policy would leave them forever. Runs
-	// regardless of `keep` (an orphan is never a snapshot worth
-	// retaining). Best-effort: a reap error is REPORTED but never blocks
-	// the keep-policy prune. Prune is the natural wiring point — every
-	// snapshot path (ticker, admin, CLI) calls it right after Snapshot.
-	reaped, reapErr := reapOrphans(ctx, backupsRoot, orphanReapGrace)
-	res := PruneResult{Reaped: reaped, ReapErr: reapErr}
+	res := reap(ctx, backupsRoot)
 	if keep <= 0 {
 		return res, nil
 	}
 	if err := ctx.Err(); err != nil {
 		return res, err
 	}
-	manifests, err := ListContext(ctx, backupsRoot)
+	// A folder not made yet holds nothing to prune, and no lock to take.
+	if _, err := os.Lstat(backupsRoot); errors.Is(err, os.ErrNotExist) {
+		return res, nil
+	}
+	unlock, err := lockBackups(ctx, backupsRoot, 0)
+	if errors.Is(err, ErrBackupsBusy) {
+		res.Skipped = true
+		return res, nil
+	}
 	if err != nil {
 		return res, err
 	}
-	if len(manifests) <= keep {
+	defer unlock()
+	n, err := pruneKeepPolicy(ctx, backupsRoot, keep)
+	res.Deleted = n
+	return res, err
+}
+
+// reap is the orphan sweep every prune runs first: crash-orphaned partial
+// snapshots — dirs with no manifest.json that `List` (and therefore the
+// keep-policy) can never see, so the keep-policy would leave them forever.
+// Runs regardless of `keep` (an orphan is never a snapshot worth retaining).
+// Best-effort: a reap error is REPORTED but never blocks the keep-policy
+// prune. Prune is the natural wiring point — every snapshot path (ticker,
+// admin, CLI) calls it right after a snapshot.
+func reap(ctx context.Context, backupsRoot string) PruneResult {
+	reaped, reapErr := reapOrphans(ctx, backupsRoot, orphanReapGrace)
+	return PruneResult{Reaped: reaped, ReapErr: reapErr}
+}
+
+// pruneHeld is PruneContext for a caller that holds the backups folder's
+// lock already: a verification's Finish, which prunes under the hold its
+// verdict was written in.
+func pruneHeld(ctx context.Context, backupsRoot string, keep int) (PruneResult, error) {
+	res := reap(ctx, backupsRoot)
+	if keep <= 0 {
 		return res, nil
 	}
+	if err := ctx.Err(); err != nil {
+		return res, err
+	}
+	n, err := pruneKeepPolicy(ctx, backupsRoot, keep)
+	res.Deleted = n
+	return res, err
+}
+
+// pruneKeepPolicy deletes, by PruneContext's rule, the snapshots under
+// backupsRoot that retention lets go, and answers how many it deleted. Its
+// caller holds the backups folder's lock.
+func pruneKeepPolicy(ctx context.Context, backupsRoot string, keep int) (int, error) {
+	manifests, err := ListContext(ctx, backupsRoot)
+	if err != nil {
+		return 0, err
+	}
+	if len(manifests) <= keep {
+		return 0, nil
+	}
+	kept := keptByRecovery(manifests, keep)
 	// `manifests` is newest-first; the trailing entries are the
 	// oldest and the ones to delete. Use the on-disk DirName so the
 	// dedup suffix from `uniqueDir` is preserved (rebuilding from
 	// CreatedAt would miss "<stamp>-1" / "<stamp>-2" collisions).
+	deleted := 0
 	var errs []error
-	for _, m := range manifests[keep:] {
+	for i, m := range manifests {
+		if kept[i] {
+			continue
+		}
 		// Between removals, not mid-removal: os.RemoveAll isn't
 		// interruptible, and abandoning a half-removed snapshot dir would
 		// manufacture exactly the manifest-less orphan the sweep above
 		// exists to clean up.
 		if err := ctx.Err(); err != nil {
-			return res, errors.Join(errors.Join(errs...), err)
+			return deleted, errors.Join(errors.Join(errs...), err)
 		}
 		full := filepath.Join(backupsRoot, m.DirName)
 		if err := os.RemoveAll(full); err != nil {
@@ -952,9 +1054,51 @@ func PruneContext(ctx context.Context, backupsRoot string, keep int) (PruneResul
 			errs = append(errs, fmt.Errorf("remove %s: %w", full, err))
 			continue
 		}
-		res.Deleted++
+		deleted++
 	}
-	return res, errors.Join(errs...)
+	return deleted, errors.Join(errs...)
+}
+
+// keptByRecovery is which of manifests (newest first, with the verdict a
+// reader reads) the keep-policy keeps: the `keep` newest, and beside them
+// the newest whose database is VERIFIED, or while none is the newest written
+// before verification, the newest whose database is FAILED or INCOMPLETE,
+// and every PENDING (one PendingBound has not passed: readVerdict reads an
+// older one INCOMPLETE).
+func keptByRecovery(manifests []snapshotEntry, keep int) map[int]bool {
+	kept := make(map[int]bool, len(manifests))
+	for i := 0; i < keep && i < len(manifests); i++ {
+		kept[i] = true
+	}
+	verified, legacy, evidence := -1, -1, -1
+	for i, m := range manifests {
+		switch m.Verdict.DatabaseState {
+		case StateVerified:
+			if verified < 0 {
+				verified = i
+			}
+		case StateFailed, StateIncomplete:
+			if evidence < 0 {
+				evidence = i
+			}
+		}
+		if m.Verdict.DatabaseState == StatePending || m.Verdict.FilesState == StatePending {
+			kept[i] = true
+		}
+		if m.legacy() && legacy < 0 {
+			legacy = i
+		}
+	}
+	switch {
+	case verified >= 0:
+		kept[verified] = true
+	case legacy >= 0:
+		kept[legacy] = true
+	}
+	if evidence >= 0 {
+		kept[evidence] = true
+	}
+	return kept
 }
 
 // ReapOrphans deletes snapshot subdirectories under backupsRoot that
@@ -1068,10 +1212,15 @@ func reapOrphans(ctx context.Context, backupsRoot string, grace time.Duration) (
 
 // snapshotEntry is List's return shape — Manifest plus the on-disk
 // directory path so callers (admin UI, prune) can act on the entry
-// without re-reading the directory list.
+// without re-reading the directory list — and the verdict a reader reads in
+// its record as it was listed (readVerdict: a snapshot with no record
+// UNVERIFIED, a PENDING past PendingBound INCOMPLETE, a VERIFIED beside the
+// bundle's veto INCOMPLETE), the one reading the pruner, the startup skip,
+// the doctor and the console take (backlog B653).
 type snapshotEntry struct {
 	Manifest
-	DirName string `json:"dirName"`
+	DirName string       `json:"dirName"`
+	Verdict Verification `json:"-"`
 }
 
 // List returns the snapshots under `backupsRoot`, newest-first.
@@ -1141,6 +1290,7 @@ func ListContext(ctx context.Context, backupsRoot string) ([]snapshotEntry, erro
 		return nil, err
 	}
 	out := make([]snapshotEntry, 0, len(entries))
+	now := time.Now()
 	for _, e := range entries {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -1148,12 +1298,12 @@ func ListContext(ctx context.Context, backupsRoot string) ([]snapshotEntry, erro
 		if !e.IsDir() {
 			continue
 		}
-		mPath := filepath.Join(backupsRoot, e.Name(), ManifestFile)
-		m, err := readManifest(mPath)
+		dir := filepath.Join(backupsRoot, e.Name())
+		m, err := readManifest(filepath.Join(dir, ManifestFile))
 		if err != nil {
 			continue
 		}
-		out = append(out, snapshotEntry{Manifest: m, DirName: e.Name()})
+		out = append(out, snapshotEntry{Manifest: m, DirName: e.Name(), Verdict: readVerdict(m, now, vetoedAt(dir))})
 	}
 	sort.Slice(out, func(i, j int) bool {
 		return out[i].CreatedAt.After(out[j].CreatedAt)
@@ -1189,6 +1339,13 @@ func copyFile(srcPath, dstPath string, mode os.FileMode) error {
 // source open is retried; the copy and its commit still happen exactly once.
 // OpenAsFile refuses a named pipe without waiting for a writer.
 func copyFileCtx(ctx context.Context, srcPath, dstPath string, mode os.FileMode) error {
+	_, _, err := copyFileHashed(ctx, srcPath, dstPath, mode)
+	return err
+}
+
+// copyFileHashed is copyFileCtx answering the size and SHA-256 of the bytes
+// it wrote, the snapshot's baseline of the copy (backlog B653).
+func copyFileHashed(ctx context.Context, srcPath, dstPath string, mode os.FileMode) (int64, string, error) {
 	var in *os.File
 	err := atomicwrite.ReadWithRetryCtx(ctx, func() error {
 		var err error
@@ -1196,10 +1353,25 @@ func copyFileCtx(ctx context.Context, srcPath, dstPath string, mode os.FileMode)
 		return err
 	})
 	if err != nil {
-		return err
+		return 0, "", err
 	}
 	defer in.Close()
-	return writeFrom(dstPath, in, mode)
+	return writeFromHashed(dstPath, in, mode)
+}
+
+// baselineOf is the baseline of the file at path, read once from its start,
+// stopping when ctx ends: a snapshot's database copy, which SQLite wrote.
+func baselineOf(ctx context.Context, path, name string) (Baseline, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return Baseline{}, err
+	}
+	defer f.Close()
+	size, sum, err := hashPaced(&pacer{ctx: ctx}, f)
+	if err != nil {
+		return Baseline{}, err
+	}
+	return Baseline{Name: name, Size: size, SHA256: sum}, nil
 }
 
 // writeFrom is copyFile's commit: one temp file, one KeepOwner, then
@@ -1207,9 +1379,16 @@ func copyFileCtx(ctx context.Context, srcPath, dstPath string, mode os.FileMode)
 // holds the file in memory. Restore hands it the signed-out account
 // through bytes.NewReader, so that account is a single write.
 func writeFrom(dstPath string, r io.Reader, mode os.FileMode) error {
+	_, _, err := writeFromHashed(dstPath, r, mode)
+	return err
+}
+
+// writeFromHashed is writeFrom answering the size and SHA-256 (hex) of the
+// bytes it wrote, hashed as they stream into the temp file.
+func writeFromHashed(dstPath string, r io.Reader, mode os.FileMode) (int64, string, error) {
 	tmp, err := os.CreateTemp(filepath.Dir(dstPath), ".bridge-bak-*")
 	if err != nil {
-		return err
+		return 0, "", err
 	}
 	tmpName := tmp.Name()
 	committed := false
@@ -1224,28 +1403,30 @@ func writeFrom(dstPath string, r io.Reader, mode os.FileMode) error {
 	// The owner of what this replaces (a restore's live file), or of the
 	// directory (a snapshot's copy): the service must read both.
 	if err := fsutil.KeepOwner(tmp, dstPath); err != nil {
-		return err
+		return 0, "", err
 	}
 
-	if _, err := io.Copy(tmp, r); err != nil {
+	h := sha256.New()
+	n, err := io.Copy(io.MultiWriter(tmp, h), r)
+	if err != nil {
 		_ = tmp.Close()
-		return err
+		return 0, "", err
 	}
 	if err := tmp.Sync(); err != nil {
 		_ = tmp.Close()
-		return err
+		return 0, "", err
 	}
 	if err := tmp.Close(); err != nil {
-		return err
+		return 0, "", err
 	}
 	if err := os.Chmod(tmpName, mode); err != nil {
-		return err
+		return 0, "", err
 	}
 	if err := atomicwrite.RenameWithRetry(tmpName, dstPath); err != nil {
-		return err
+		return 0, "", err
 	}
 	committed = true
-	return nil
+	return n, hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // signedOutAdminAuth reads a snapshot's console account and returns it

@@ -107,7 +107,15 @@ func TestABackupCancelledBeforeItsPruneReportsNothing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read backups root: %v", err)
 	}
-	if len(entries) != 1 || !backup.LooksLikeSnapshotDir(filepath.Join(dataDir, backup.BackupsDirName, entries[0].Name())) {
+	// The snapshots' lock file (backup.LockFileName) sits beside them, once
+	// a verification or a prune has taken it, and is no snapshot.
+	var snapshots []os.DirEntry
+	for _, e := range entries {
+		if e.Name() != backup.LockFileName {
+			snapshots = append(snapshots, e)
+		}
+	}
+	if len(snapshots) != 1 || !backup.LooksLikeSnapshotDir(filepath.Join(dataDir, backup.BackupsDirName, snapshots[0].Name())) {
 		t.Errorf("backups root holds %v, want the one complete snapshot the pass wrote", entries)
 	}
 }
