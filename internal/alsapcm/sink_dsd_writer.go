@@ -244,9 +244,17 @@ func (s *DSDSink) activateNative(r *nativeRequest) error {
 
 // nativeContext installs cancellation under the same lock as the command's
 // fence. A Pause/Stop that won before this point gives a cancelled context.
+// A life that has ended is the sink's revocation, which its watcher makes
+// (openDSDSink) on a goroutine a scheduler can run after this one: the
+// Immediate release is established here, under that lock, before a write
+// sees the context the life cancels, so the cancellation is the
+// revocation's, expected, and never a release failure (B765).
 func (s *DSDSink) nativeContext(tail, allowPaused bool) (context.Context, context.CancelFunc) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.life.Err() != nil {
+		s.beginReleaseLocked(Immediate)
+	}
 	parent := s.life
 	if tail && s.releaseCtx != nil {
 		parent = s.releaseCtx
