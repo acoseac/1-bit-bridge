@@ -87746,3 +87746,83 @@ applied to a disposable `git archive` copy of HEAD (its landing asserted in each
 `verify_moves.py --base HEAD` found no citation broken, its MISSING exactly the eight blocks the patch
 edits, the open-gap paragraph among them, removed with no successor; every test name the patch cites exists
 (58 of 58). Not run here: the Windows test, which CI's Windows leg runs, and macOS.
+
+## 2026-11-08 — B741 round 4: a recorded path compared through an alias of its ancestors
+
+Worker b741, legion0, the same branch from 9a91a51b (round 3 and the orchestrator's commit on it). Commits:
+13e4bb90 (the cases, red), acd2ff60 (the comparison), 62294b1c (its fallback as before), then this record.
+The rule changes through `rules-b741-r4.patch`: `scanner.md`'s gap-3 line and its long form.
+
+### The defect
+
+CI was red on macOS and Windows in `TestSamePathAsRecordedProbesNoVolume`: a spelling through a link to the
+mount point read as another path ("a link to the mount point resolves now"). `SamePathAsRecorded` took two
+spellings for one where both resolved whole (`EvalSymlinksOrClean`) to one string, or where recorded as
+written was alike, by the record's letters, with now as written or as it resolved, name by name from the
+root (`SameAsRecorded`). The letters are one a folder of recorded's own spelling, and the test's temporary
+directory runs through an alias of its own on both hosts: macOS's /var is a link to /private/var, one
+folder deeper, so the resolution held one name more and nothing lined up; on Windows a short (8.3) name
+resolves to its long one, and every folder that is there to its case on disk. Reproduced here with TMPDIR
+through a link to a folder one deeper: the case failed in CI's words.
+
+### The comparison as built
+
+`SamePathAsRecorded` walks the two spellings from their ends up (`sameAbsAsRecorded`): at each pair of
+folders as many names above each end it resolves both (`ResolveLinks`), and the deepest pair that resolves
+to one directory decides, the names below it compared as written, each by the letter recorded for the
+folder recorded's own spelling looks it up in, counted from the end (`alikeByRecord`, which
+`SameAsRecorded` now shares); the resolved folders are compared exactly, and a name unalike ends the walk,
+since every pair above has it below. Where no pair resolves to one with the names below alike, recorded as
+written is compared with now as written and as it resolves, name by name from the root, as before: a drive
+that is not there, and a record that spells a folder in another case than the folder a link in now leads
+to, where every name alike with the one in its place keeps each letter on its folder (the walk alone,
+acd2ff60, parted those; control C8 below). A folding is checked against recorded's own spelling
+(`foldingOf`): one as long as a resolution's folders is no folding of it, every folder `CaseUnknown`.
+Nothing is probed. The resolution is a parameter (`sameAbsAsRecorded`, and `resolvedOrClean`, which
+`EvalSymlinksOrClean` now calls), so tests stand in for a drive that is not there and for Windows'
+resolution on every host.
+
+A case-only difference in a folder that is there: on Windows one folder whatever its letter, since the
+resolution names it by its name on disk; on Linux and macOS, whose resolution keeps the spelling it is
+given, the letter of the folder above decides, as for a folder that is not there
+(`TestACaseOnlyDifferenceInAFolderThatIsThere` states both; `TestFoldersThatDifferInCaseAloneResolveApart`
+holds two such folders where the volume keeps case, their resolutions compared exactly and the record
+deciding above them).
+
+### Red first
+
+At 13e4bb90, with TMPDIR on disk, five failed as predicted (`.tmp/_b741/predictions-red-r4.txt`): the four
+rows of `TestARecordedPathComparesThroughAnAliasOfItsAncestors` recorded through an alias with the leaf's
+folder folding case (a target deeper, one shallower, a case-only difference between the alias and the
+leaf, letters mixed), and its folding as long as the resolution's folders; every keeping-case row, the
+guards recorded by the real path, and the existing cases passed. With TMPDIR through a link to a folder one
+deeper (macOS's /var stood in for), `TestSamePathAsRecordedProbesNoVolume/through_a_link_to_the_mount_point`
+failed too, in CI's words. The keeping-case rows are what shows a letter stayed on its folder: a fix that
+gives the letters up where the depths differ turns every folding-case row green and every keeping-case row
+red (control C2). The link and alias cases skip, naming the error, where no link can be made.
+
+### Negative controls
+
+Each predicted by name in `.tmp/_b741/predictions-controls-r4.txt` before it ran: an exact-once mutation of
+internal/fsutil, its whole test binary run, the source restored from memory and found equal to HEAD. C1 to
+C7 ran at acd2ff60 and all eight again at 62294b1c, each red as predicted and nothing else; the run with no
+mutation passed (239 tests, the three skips older ones: two need root, one a volume that folds case).
+
+| | mutation | red |
+|---|---|---|
+| C1 | every case-only difference taken (the letters ignored) | every keeping-case row of the round's cases, and the older keeping-case assertions (SameAsRecorded's, FoldingOnTheWay's, the volume-away case's) |
+| C2 | the folding checked against now's spelling | the resolution-long folding, and the keeping-case alias rows whose spellings differ in depth |
+| C3 | the resolutions compared but for case | the two folders that differ in case alone, recorded as keeping case |
+| C4 | the first pair that resolves decides | the two folders that differ in case alone, recorded as folding case |
+| C5 | the names below the pair left unchecked | every keeping-case row with a folder both resolve to above its difference |
+| C6 | no comparison where no pair resolves to one | the drive that is not there, folding case; the record in another case than the alias's target |
+| C7 | the recorded side never resolved | the four folding-case rows recorded through an alias, the resolution-long folding, the short name stood in for; with TMPDIR through a link, the link case too |
+| C8 | no comparison with now as it resolves | the record in another case than the alias's target, folding case |
+
+### What Windows will exercise
+
+`TestARecordedPathComparesThroughAShortName` (a folder's short name from `GetShortPathName`, skipping
+with the reason where its volume makes no short names), `TestACaseOnlyDifferenceInAFolderThatIsThere`'s
+Windows answer, and the alias and link cases through symbolic links (skipping with the error where the
+runner may make none; round 3's link case ran there). `TestARecordedPathComparesAsWindowsResolvesIt` stands
+Windows' resolution in on every host. Vetted with `GOOS=windows` and `GOOS=darwin`; neither run here.
