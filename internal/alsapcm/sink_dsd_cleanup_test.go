@@ -93,32 +93,51 @@ func pastBudget(t *testing.T, k *fakeKernel, s *DSDSink) {
 // life does not end, refused at its entry while the release is past its
 // budget, is answered the release unconfirmed. Until round 9 the first two
 // answered the plain cancellation at once, before the release, and the last
-// the life's cancellation.
+// the life's cancellation. And with a device's failure recorded before the
+// life ended, its release confirmed, the activation answers that failure,
+// with no ErrReleaseUnconfirmed (round 10); until round 10 that answer, and
+// the one with the close failing, carried the activation's own context's
+// cancellation beside the failure.
 func TestNativeAnActivationOnAnEndedLifeAnswersItsCleanup(t *testing.T) {
-	for _, closeFails := range []bool{true, false} {
-		name := "its close confirmed"
-		if closeFails {
-			name = "its close failing"
-		}
-		t.Run(name, func(t *testing.T) {
+	const eio errno = 5 // EIO, asm-generic's: an errno this package does not tell apart
+	for _, cleanup := range []string{"its close failing", "its close confirmed", "a device's failure recorded"} {
+		t.Run(cleanup, func(t *testing.T) {
 			k := nativeKernel(t)
 			f := newCleanupFault(t, k)
-			f.failing.Store(closeFails)
+			f.failing.Store(cleanup == "its close failing")
 			life, end := context.WithCancel(context.Background())
 			defer end()
 			s, revoking, _ := lifeSinkOn(t, k, f, nativeConfig(), life)
-			end()
-			await(t, revoking, "the life's end, its revocation held")
+			if cleanup == "a device's failure recorded" {
+				// An inert sink's writer makes no call until it is paused, whose
+				// STATUS then fails: the writer ends on it, its release
+				// confirmed, and its watcher ends with it.
+				k.inspect(func(k *fakeKernel) { k.fail[ioctlStatus] = eio })
+				if e := s.Pause(context.Background()); e != nil {
+					t.Fatal(e)
+				}
+				await(t, s.Done(), "the writer's end on the device's EIO")
+				end()
+			} else {
+				end()
+				await(t, revoking, "the life's end, its revocation held")
+			}
 			e := s.Activate(life, 1)
 			await(t, s.Done(), "the release the activation began")
-			if closeFails {
+			switch cleanup {
+			case "its close failing":
 				theSinksFailure(t, e, ErrReleaseUnconfirmed, "the activation on the ended life, its close failing")
 				if !errors.Is(e, f.err) || !errors.Is(s.CleanupResult(), f.err) {
 					t.Errorf("the answer %v, the cleanup %v: want the close's failure in both", e, s.CleanupResult())
 				}
-			} else {
+			case "its close confirmed":
 				theLifesCancellation(t, e, "the activation on the ended life, its close confirmed")
 				noFailure(t, s, "the release the activation began")
+			default:
+				theSinksFailure(t, e, eio, "the activation on the ended life, a device's failure recorded")
+				if errors.Is(e, ErrReleaseUnconfirmed) || s.CleanupResult() != nil {
+					t.Errorf("the answer %v, the cleanup %v: the release was confirmed, want no ErrReleaseUnconfirmed in either", e, s.CleanupResult())
+				}
 			}
 			k.checkClosedEach(t)
 		})
@@ -185,11 +204,13 @@ func TestNativeAnActivationOnAnEndedLifeAnswersItsCleanup(t *testing.T) {
 // caller is held where it begins to wait; then the life ends and the
 // release's close fails. The caller, let go, takes the reply with the life
 // ended, and its answer carries the close's failure beside the refusal it
-// was, by the writer's reply (its caller on a context the life does not end)
-// and by every arm alike (its caller on the life). Until round 9 the reply was
-// answered as it was sent, the close's failure lost: always so off the life,
-// and on it whenever the select took the reply or the writer's end over the
-// context's arm.
+// was, by every arm alike: the writer's reply and the writer's end (its
+// caller on a context the life does not end) and its own context's end (its
+// caller on the life), each fixed (nativeSeams.arm). Until round 9 the reply
+// was answered as it was sent, the close's failure lost: always so off the
+// life, and on it whenever the select took the reply or the writer's end
+// over the context's arm; until round 10 the context's arm answered the
+// failure beside its cancellation, the refusal lost.
 func TestNativeAReplyTakenAfterTheLifeEndsCarriesItsCleanup(t *testing.T) {
 	refused := errors.New("the controls changed")
 	for _, success := range []bool{true, false} {
@@ -197,7 +218,11 @@ func TestNativeAReplyTakenAfterTheLifeEndsCarriesItsCleanup(t *testing.T) {
 		if success {
 			reply = "a success"
 		}
-		for _, asked := range endedRequest {
+		for _, asked := range []struct {
+			name   string
+			onLife bool
+			arm    awaitArm
+		}{{"through its reply", false, armReply}, {"through the writer's end", false, armDone}, {"through its caller's context", true, armContext}} {
 			t.Run(reply+" "+asked.name, func(t *testing.T) {
 				k := nativeKernel(t)
 				f := newCleanupFault(t, k)
@@ -213,14 +238,16 @@ func TestNativeAReplyTakenAfterTheLifeEndsCarriesItsCleanup(t *testing.T) {
 					}
 				}
 				hold := newCallerHold(t)
+				pick := &armPick{}
 				life, end := context.WithCancel(context.Background())
 				defer end()
-				s, revoking, revoke := lifeSinkOn(t, k, f, c, life, func(h *nativeSeams) { h.awaiting = hold.awaiting })
+				s, revoking, revoke := lifeSinkOn(t, k, f, c, life, func(h *nativeSeams) { h.awaiting = hold.awaiting }, pick.hook)
 				ctx := context.Background()
 				if asked.onLife {
 					ctx = life
 				}
 				hold.armed.Store(true)
+				pick.set(asked.arm)
 				answer := make(chan error, 1)
 				go func() { answer <- s.Activate(ctx, 1) }()
 				await(t, hold.in, "the activation's caller, held as it begins to wait")
@@ -301,17 +328,25 @@ func TestNativeAReopenFencedByTheEndedLifeAnswersItsFailedClose(t *testing.T) {
 // its release's close past the release's budget. The resume is answered at
 // that deadline, ErrReleaseUnconfirmed, the writer still in its cleanup and
 // the sink not done, by its caller on a context the life does not end and on
-// the life alike; let go, the close fails late, into cleanupErr, the sink is
-// done, and the writer answered the request once. Until round 9 the caller
-// off the life had no arm the deadline reached, and waited for the close.
+// the life alike, through the deadline's arm and its own context's, each
+// fixed (nativeSeams.arm); let go, the close fails late, into cleanupErr, the
+// sink is done, and the writer answered the request once. Until round 9 the
+// caller off the life had no arm the deadline reached, and waited for the
+// close; until round 10 the one on the life answered the release unconfirmed
+// beside its context's cancellation.
 func TestNativeACallerWaitsNoLongerThanTheReleasesBudget(t *testing.T) {
-	for _, asked := range endedRequest {
+	for _, asked := range []struct {
+		name   string
+		onLife bool
+		arm    awaitArm
+	}{{"at the release's deadline", false, armDeadline}, {"through its caller's context", true, armContext}} {
 		t.Run(asked.name, func(t *testing.T) {
 			k := nativeKernel(t)
 			f := newCleanupFault(t, k)
+			pick := &armPick{}
 			life, end := context.WithCancel(context.Background())
 			defer end()
-			s, revoking, revoke := lifeSinkOn(t, k, f, nativeConfig(), life)
+			s, revoking, revoke := lifeSinkOn(t, k, f, nativeConfig(), life, pick.hook)
 			if e := s.Activate(context.Background(), 1); e != nil {
 				t.Fatal(e)
 			}
@@ -329,6 +364,7 @@ func TestNativeACallerWaitsNoLongerThanTheReleasesBudget(t *testing.T) {
 				t.Fatal(e)
 			}
 			await(t, polling, "the writer in its pause's watch")
+			pick.set(asked.arm)
 			answer := queueResume(t, s, life, asked.onLife)
 			s.mu.Lock()
 			r := s.activation

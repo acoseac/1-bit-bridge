@@ -148,6 +148,50 @@ type nativeSeams struct {
 	// holds the caller there while the writer answers it and the life ends,
 	// as a scheduler can leave it (B728 B9 round 9).
 	awaiting func()
+	// arm, nil but in a test, names the one arm of a request's wait (await)
+	// that may answer it, asked once the caller begins to select: the
+	// others are left out of the select, so a test takes the arm a
+	// scheduler may pick among the ready ones, and knows which it took
+	// (B728 B9 round 10).
+	arm func() awaitArm
+}
+
+// awaitArm is an arm of a request's wait (await), for a test that fixes
+// which one answers it (nativeSeams.arm).
+type awaitArm int
+
+const (
+	// armAny is the wait's select over every arm, production's.
+	armAny awaitArm = iota
+	// armReply is the writer's reply.
+	armReply
+	// armContext is the end of the request's own context.
+	armContext
+	// armDone is the writer's end.
+	armDone
+	// armDeadline is the release's shared deadline passing.
+	armDeadline
+)
+
+// armOnly is a request's wait's channels with every arm but a nil, so never
+// ready: the arm a test fixed (nativeSeams.arm); armAny leaves them all.
+func armOnly[T any](a awaitArm, reply <-chan T, cancelled, done, expired <-chan struct{}) (<-chan T, <-chan struct{}, <-chan struct{}, <-chan struct{}) {
+	if a == armAny {
+		return reply, cancelled, done, expired
+	}
+	if a != armReply {
+		reply = nil
+	}
+	if a != armContext {
+		cancelled = nil
+	}
+	if a != armDone {
+		done = nil
+	}
+	if a != armDeadline {
+		expired = nil
+	}
+	return reply, cancelled, done, expired
 }
 
 // OpenDSDSink opens an inert native sink. Activate is mandatory. A cancelled
@@ -331,15 +375,19 @@ func (s *DSDSink) await(ctx context.Context, r *nativeRequest) error {
 	if h := s.seams.awaiting; h != nil {
 		h()
 	}
+	reply, cancelled, done, expired := (<-chan error)(r.reply), ctx.Done(), (<-chan struct{})(s.done), (<-chan struct{})(s.releaseExpired)
+	if pick := s.seams.arm; pick != nil {
+		reply, cancelled, done, expired = armOnly(pick(), reply, cancelled, done, expired)
+	}
 	select {
-	case e := <-r.reply:
+	case e := <-reply:
 		return s.settled(e)
-	case <-ctx.Done():
+	case <-cancelled:
 		s.Revoke()
 		return s.abandoned(ctx.Err())
-	case <-s.done:
+	case <-done:
 		return s.settled(<-r.reply)
-	case <-s.releaseExpired:
+	case <-expired:
 		select {
 		case e := <-r.reply:
 			return s.settled(e)

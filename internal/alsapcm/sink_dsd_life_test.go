@@ -66,12 +66,14 @@ func (f *statusFault) ioctl(fd int, req uint32, arg unsafe.Pointer) error {
 // theSinksFailure fails the test unless e carries want, a failure the sink
 // recorded (its device's, or its cleanup's, ErrReleaseUnconfirmed), and is
 // neither the ended life's cancellation, which a caller the life stopped
-// takes for the stop it is (B728 B9 round 8), nor the sink's own fence,
-// which a caller takes for its drop's (round 9).
+// takes for the stop it is (B728 B9 round 8), nor any cancellation, which a
+// caller that asks for one before it asks the reason takes for a clean stop
+// (round 10), nor the sink's own fence, which a caller takes for its drop's
+// (round 9).
 func theSinksFailure(t *testing.T, e, want error, what string) {
 	t.Helper()
-	if !errors.Is(e, want) || ReasonOf(e) == ReasonCancelled || errors.Is(e, ErrActivationFenced) {
-		t.Errorf("%s answered %v; want the failure the sink recorded (%v), not the life's cancellation or the sink's fence", what, e, want)
+	if !errors.Is(e, want) || ReasonOf(e) == ReasonCancelled || errors.Is(e, context.Canceled) || errors.Is(e, ErrActivationFenced) {
+		t.Errorf("%s answered %v; want the failure the sink recorded (%v), not a cancellation or the sink's fence", what, e, want)
 	}
 }
 
@@ -482,11 +484,13 @@ func TestNativeResumeTheEndedLifeNeverRanAnswersItsCancellation(t *testing.T) {
 // endedRequest is how a resume the ended life never ran is answered (B728
 // B9 round 8): by the writer's reply, its caller on a context the life does
 // not end, or by its caller's own context's arm, that caller on the life
-// itself, as the harness's is.
+// itself, as the harness's is; each the arm its caller's wait takes, fixed
+// (nativeSeams.arm, round 10).
 var endedRequest = []struct {
 	name   string
 	onLife bool
-}{{"through its reply", false}, {"through its caller's context", true}}
+	arm    awaitArm
+}{{"through its reply", false, armReply}, {"through its caller's context", true, armContext}}
 
 // queueResume asks s to resume, its caller on the life where onLife, and
 // waits for the request to be the writer's to answer.
@@ -517,16 +521,6 @@ func revokeEnded(t *testing.T, s *DSDSink, revoking <-chan struct{}, revoke func
 	nativeWait(t, s, "the revocation", func() bool { return s.releasing })
 }
 
-// answeredBy fails the test unless e came the way it was asked: the reply
-// carries no cancellation once the sink recorded a failure, and the caller's
-// own context's arm joins that failure to its context's end.
-func answeredBy(t *testing.T, e error, onLife bool, what string) {
-	t.Helper()
-	if errors.Is(e, context.Canceled) != onLife {
-		t.Errorf("%s answered %v: want it answered by its caller's context %v", what, e, onLife)
-	}
-}
-
 // TestNativeResumeTheEndedLifeNeverRanAnswersAFailedClose (B728 B9 round 8):
 // the resume of TestNativeResumeTheEndedLifeNeverRanAnswersItsCancellation,
 // asked while the writer sits in its pause's watch and never run, its life
@@ -536,7 +530,8 @@ func answeredBy(t *testing.T, e error, onLife bool, what string) {
 // the writer's reply and through its caller's own context's arm alike, which
 // waits for the writer's end once the life has ended. Until round 8 the reply
 // was the life's cancellation (fenced), and the context's arm answered that
-// cancellation before the close.
+// cancellation before the close; until round 10 the context's arm answered
+// the failure beside that cancellation.
 func TestNativeResumeTheEndedLifeNeverRanAnswersAFailedClose(t *testing.T) {
 	for _, asked := range endedRequest {
 		t.Run(asked.name, func(t *testing.T) {
@@ -544,7 +539,8 @@ func TestNativeResumeTheEndedLifeNeverRanAnswersAFailedClose(t *testing.T) {
 			a := &nativeAuditSys{sys: k, t: t, closeErr: errors.New("the node's close failed")}
 			life, end := context.WithCancel(context.Background())
 			defer end()
-			s, revoking, revoke := lifeSinkOn(t, k, a, nativeConfig(), life)
+			pick := &armPick{}
+			s, revoking, revoke := lifeSinkOn(t, k, a, nativeConfig(), life, pick.hook)
 			if e := s.Activate(context.Background(), 1); e != nil {
 				t.Fatal(e)
 			}
@@ -560,6 +556,7 @@ func TestNativeResumeTheEndedLifeNeverRanAnswersAFailedClose(t *testing.T) {
 				t.Fatal(e)
 			}
 			await(t, polling, "the writer in its pause's watch")
+			pick.set(asked.arm)
 			answer := queueResume(t, s, life, asked.onLife)
 			end()
 			revokeEnded(t, s, revoking, revoke, asked.onLife)
@@ -572,7 +569,6 @@ func TestNativeResumeTheEndedLifeNeverRanAnswersAFailedClose(t *testing.T) {
 			poll()
 			e := receive(t, answer, "the resume's answer")
 			theSinksFailure(t, e, ErrReleaseUnconfirmed, "the resume the ended life never ran, its close failing")
-			answeredBy(t, e, asked.onLife, "the resume")
 			await(t, s.Done(), "the revocation's release")
 			revoke()
 			k.inspect(func(k *fakeKernel) { closes = k.closes })
@@ -592,7 +588,8 @@ func TestNativeResumeTheEndedLifeNeverRanAnswersAFailedClose(t *testing.T) {
 // life's cancellation alone, through the writer's reply and through its
 // caller's own context's arm alike. Until round 8 the reply was the life's
 // cancellation (fenced), and the context's arm answered that cancellation
-// while the STATUS was still held.
+// while the STATUS was still held; until round 10 the context's arm answered
+// the EIO beside that cancellation.
 func TestNativeResumeTheEndedLifeNeverRanAnswersTheDevicesFailure(t *testing.T) {
 	const eio errno = 5 // EIO, asm-generic's: an errno this package does not tell apart
 	for _, asked := range endedRequest {
@@ -604,7 +601,8 @@ func TestNativeResumeTheEndedLifeNeverRanAnswersTheDevicesFailure(t *testing.T) 
 			defer letGo()
 			life, end := context.WithCancel(context.Background())
 			defer end()
-			s, revoking, revoke := lifeSinkOn(t, k, f, nativeConfig(), life)
+			pick := &armPick{}
+			s, revoking, revoke := lifeSinkOn(t, k, f, nativeConfig(), life, pick.hook)
 			if e := s.Activate(context.Background(), 1); e != nil {
 				t.Fatal(e)
 			}
@@ -617,13 +615,16 @@ func TestNativeResumeTheEndedLifeNeverRanAnswersTheDevicesFailure(t *testing.T) 
 			f.armed.Store(true)
 			k.grant(s.Params().PeriodTime())
 			await(t, f.held, "the pause watch's STATUS, its poll ended")
+			pick.set(asked.arm)
 			answer := queueResume(t, s, life, asked.onLife)
 			end()
 			revokeEnded(t, s, revoking, revoke, asked.onLife)
 			letGo()
 			e := receive(t, answer, "the resume's answer")
 			theSinksFailure(t, e, eio, "the resume the ended life never ran, its STATUS failing")
-			answeredBy(t, e, asked.onLife, "the resume")
+			if errors.Is(e, ErrReleaseUnconfirmed) {
+				t.Errorf("the resume answered %v: the release was confirmed, want no ErrReleaseUnconfirmed", e)
+			}
 			await(t, s.Done(), "the writer's release")
 			revoke()
 			if !f.failed.Load() {
