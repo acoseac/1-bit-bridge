@@ -161,7 +161,9 @@ func TestNativeAnActivationOnAnEndedLifeAnswersItsCleanup(t *testing.T) {
 		revoke()
 		await(t, f.held, "the writer's release in its close, held")
 		pastBudget(t, k, s)
-		e := s.Activate(context.Background(), 1)
+		answer := make(chan error, 1)
+		go func() { answer <- s.Activate(context.Background(), 1) }()
+		e := receive(t, answer, "the answer of the activation refused at its entry, the close still held")
 		theSinksFailure(t, e, ErrReleaseUnconfirmed, "the activation refused at its entry past its release's budget")
 		select {
 		case <-s.Done():
