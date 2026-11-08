@@ -510,10 +510,10 @@ type EnrichConfig struct {
 	// it. Read through EffectiveDeezerEnabled, never directly.
 	DeezerEnabled *bool `yaml:"deezerEnabled,omitempty"`
 	// MusicBrainzBaseURL overrides the MusicBrainz ws/2 API root.
-	// Default (empty): https://musicbrainz.org/ws/2.
+	// Default (empty): DefaultMusicBrainzBaseURL.
 	MusicBrainzBaseURL string `yaml:"musicbrainzBaseURL,omitempty"`
 	// CoverArtBaseURL overrides the Cover Art Archive root.
-	// Default (empty): https://coverartarchive.org.
+	// Default (empty): DefaultCoverArtBaseURL.
 	CoverArtBaseURL string `yaml:"coverArtBaseURL,omitempty"`
 	// CoverSize is the pixel tier the enricher fetches NEW album covers
 	// at (CAA's native tiers: 250 / 500 / 1200). Default (0): 1200 —
@@ -526,6 +526,19 @@ type EnrichConfig struct {
 	// ladder serves whichever tier exists.
 	CoverSize int `yaml:"coverSize,omitempty"`
 }
+
+// DefaultMusicBrainzBaseURL and DefaultCoverArtBaseURL are what an empty
+// enrich base stands for: the public MusicBrainz ws/2 root and the Cover Art
+// Archive's, which the enricher asks where no mirror is set.
+// internal/enrich's DefaultMusicBrainzBase and DefaultCoverArtBase are the
+// source of truth, written out here rather than imported, since this package
+// depends on no feature package; cmd/bridge, which imports both, pins the two
+// pairs equal (TestEnrichBaseDefaultsAgree). bridge init's rewrite writes no
+// key for a base the config it replaces gives as either.
+const (
+	DefaultMusicBrainzBaseURL = "https://musicbrainz.org/ws/2"
+	DefaultCoverArtBaseURL    = "https://coverartarchive.org"
+)
 
 // EffectiveCoverSize resolves CoverSize's zero default (1200). Values
 // are validated at load (Config.Validate) so this stays a pure default
@@ -3254,6 +3267,17 @@ func normalizeBaseURL(field, raw string) (string, error) {
 			urlFieldForLog(field, v))
 	}
 	return v, nil
+}
+
+// NormalizeEnrichBaseURL is Load's own check of an enrich base URL, raw
+// written for field (enrich.musicbrainzBaseURL or enrich.coverArtBaseURL),
+// and the form Load keeps it in (normalizeBaseURL): trimmed, with no trailing
+// slash, "" for an empty one, and Load's refusal for one that is not an
+// absolute http(s) URL with a host, which names the value by its field, its
+// scheme and its host alone. bridge init's rewrite keeps a base the config it
+// replaces writes only where this takes it (backlog B761).
+func NormalizeEnrichBaseURL(field, raw string) (string, error) {
+	return normalizeBaseURL(field, raw)
 }
 
 // maxIntervalSeconds and maxIntervalHours cap the cadence + TTL config

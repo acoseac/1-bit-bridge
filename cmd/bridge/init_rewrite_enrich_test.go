@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/acoseac/1-bit-bridge/internal/config"
+	"github.com/acoseac/1-bit-bridge/internal/enrich"
 )
 
 // TestARewriteKeepsTheEnrichmentOptOuts: `bridge init --force` keeps each
@@ -384,6 +385,22 @@ func TestARewriteKeepsTheEnrichmentBases(t *testing.T) {
 			t.Error("the run shows a base the environment sets")
 		}
 	})
+}
+
+// TestEnrichBaseDefaultsAgree pins config's two enrich base defaults, which
+// a rewrite writes no key for, to the enricher's, which say what an empty
+// base asks: internal/config imports no feature package, so it writes them
+// out, and cmd/bridge, which imports both, is where the two can be held equal.
+// The enricher's are the source of truth.
+func TestEnrichBaseDefaultsAgree(t *testing.T) {
+	if config.DefaultMusicBrainzBaseURL != enrich.DefaultMusicBrainzBase {
+		t.Errorf("config.DefaultMusicBrainzBaseURL = %q, enrich.DefaultMusicBrainzBase = %q: update config's",
+			config.DefaultMusicBrainzBaseURL, enrich.DefaultMusicBrainzBase)
+	}
+	if config.DefaultCoverArtBaseURL != enrich.DefaultCoverArtBase {
+		t.Errorf("config.DefaultCoverArtBaseURL = %q, enrich.DefaultCoverArtBase = %q: update config's",
+			config.DefaultCoverArtBaseURL, enrich.DefaultCoverArtBase)
+	}
 }
 
 // TestARewriteOverTheDefaultsWritesWhatAFirstInstallWrites is a regression
