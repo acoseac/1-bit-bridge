@@ -87668,3 +87668,67 @@ ceiling, `GIT_CEILING_DIRECTORIES`, keeps it off the checkout), `check-doc-budge
 55.8 KB, scanner.md 42.2 KB, the worst load unchanged), the self-tests of `rules-for.py` and `move_entry.py`
 passed, and `verify_moves.py --base HEAD` found no citation broken, its MISSING exactly the seven blocks the
 patch edits, each one's successor there. Every test name the patch cites exists (55 of 55).
+
+## 2026-11-08 — B741 round 3: what stays open named only as B813, the marker's sync, a racing read
+
+Worker b741, legion0, the same branch from a62b01c2 (round 2 and its rules). Commits: 8a54aa93 (B813),
+f091ae87 (a marker this user may not write, red), 296684ef (its fix), 61e3e4a1 (a record read that races a
+write, red), d3179788 (its fix), then this record. The rule changes through `rules-b741-r3.patch`:
+`cli-serve.md`'s B741 line and `scanner.md`'s B651 line, and their long forms.
+
+### Each point
+
+- **What this change leaves open is named only as B813.** The project names a weakness still open by its
+  backlog id alone, and round 1 had written this one out, as its brief asked. The identity file's header,
+  two test docs, the runbook, round 1's and round 2's records here, and through the patch the rules and
+  their long forms now say B813 and no more; the text about the two gaps this change closes stays. The
+  refusal of a data dir holding no identity explained the window in an aside, on every surface it reaches
+  (serve's refusal, every command's, the doctor's hint): it says what to do, and no more, and
+  `TestEachRefusalSaysWhatItIsAndHowToGoOn` pins that advice and that no cause's advice holds an aside. What
+  was removed, the changed string, and the commits on the branch whose messages describe it are listed for
+  the orchestrator outside the repository.
+- **The marker's sync in place opened it for writing on every OS** (the Claude API on round 2), where only
+  Windows needs it, its `FlushFileBuffers`: a marker serve may read and not write (another user's, as where
+  root owns the data dir and a member of its group serves it, or an immutable one) was never synced, so its
+  identity was never taken up. Off Windows the open is `fsutil.OpenAsFile`'s, for reading, which syncs and
+  refuses a named pipe at once, where a plain open for reading would wait for a writer and hold serve's start
+  (`openMarkerForSync`); on Windows it stays for writing, so a read-only marker there, its attribute or an ACL,
+  is still never taken up (`TestAReadOnlyMarkerIsNeverTakenUpOnWindows`, which CI's Windows leg runs; vetted
+  here with `GOOS=windows`).
+- **A read of the record that raced a write** (the Claude API on round 2, and the reviews of round 3's
+  brief): a read that missed, whose lookup then found an entry, answered at once, a regular file with the
+  miss's ENOENT and a link with `errLinkToNothing`, though the record may have just been written there
+  (serve's first, beside bridge doctor or a command) or a link's target just mounted. The entry is read again
+  once (`readAgain`), and where that read misses too, looked up once more: no record only where no entry is
+  left, `errLinkToNothing` only where a link still is, and otherwise that read's own error. The cases take
+  their steps through `recordReadSteps`, a parameter of `readDataDirRecordWith`, never a package variable that
+  parallel `-race` runs race on.
+- **The checklist test's refused row** (the Claude API's note): `treeOf` reads every file's bytes, so the row
+  already sees a stray database migrated (round 2's control R1 turned it red); nothing changed.
+
+### Red first
+
+At f091ae87, `TestAMarkerThisUserMayNotWriteIsTakenUp` failed in both rows (no record, and a record written
+before B741: a 0444 marker, not root), the adoption's sync answering "open: permission denied" and the record
+written without the identity; `TestTheMarkersSyncWaitsForNoNamedPipe` passed there too, as a guard (an O_RDWR
+open of a named pipe returns at once on Linux; a plain open for reading would wait). At 61e3e4a1, through the
+seam alone, three of `TestARecordReadThatRacesAWriteReadsAgain`'s four rows failed as predicted: a record
+written after the read missed it answered ENOENT, a link whose target appeared then answered a link to
+nothing, and a record removed between the lookup and the read again answered ENOENT where no record was there;
+the link that stays one to nothing passed as the control. The first point is wording, with no red of its own:
+its evidence is the search, and its pin is new.
+
+### Negative controls
+
+At d3179788, each predicted by name in `.tmp/_b741/predictions-controls-r3.txt` before it ran: an exact-once
+mutation, the test binary built, the data-dir set run (654 tests of cmd/bridge), the source restored from
+memory and found equal to HEAD. Each went red as predicted and nothing else failed; the set with no mutation
+passed.
+
+| | mutation | red |
+|---|---|---|
+| T1 | the no-identity advice explains itself in an aside again | its row of the words test |
+| T2 | off Windows the sync opens the marker for writing again | both rows of the read-only marker test |
+| T3 | off Windows the sync opens the marker with a plain open | the named-pipe test, after its 10 s bound |
+| T4 | `readAgain` does not read again | the written-record and appeared-target rows |
+| T5 | `readAgain` does not look the entry up once more | the dangling-link and removed-record rows, the record-read test's link check |
