@@ -1,0 +1,331 @@
+package config
+
+import (
+	"os"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"testing"
+
+	"gopkg.in/yaml.v3"
+)
+
+// A console save and the BRIDGE_* variables (backlog B761). Load applies a
+// variable over the file, the live holder publishes what Load gave it, and a
+// console save (Update, UpdateChecked) writes the holder's snapshot. For each
+// leaf a variable set that the save left at its live value, the save writes
+// the file's own value, read from the bytes its turn found, so a variable
+// never lands in the file, and a start without it finds what the file said;
+// a save that changes such a leaf writes and publishes the change, which the
+// variable sets again at the next start. These tests drive the holder
+// through serve's own boot read (LoadFileAt, RecordFile).
+
+// envSaveConfig writes a config holding body beside a library of its own,
+// and returns its path.
+func envSaveConfig(t *testing.T, body string) string {
+	t.Helper()
+	dir := t.TempDir()
+	lib := filepath.Join(dir, "Music")
+	if err := os.MkdirAll(lib, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "bridge.yaml")
+	text := "libraryRoots:\n  - " + yamlStr(lib) + "\ndataDir: " + yamlStr(filepath.Join(dir, "data")) + "\n" + body
+	if err := os.WriteFile(path, []byte(text), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// bootHolder loads the config at path as serve's boot read does and hands it
+// to a live holder told the bytes and the file that read read (RecordFile).
+func bootHolder(t *testing.T, path string) *RuntimeConfig {
+	t.Helper()
+	cfg, raw, file, err := LoadFileAt(path)
+	if err != nil {
+		t.Fatalf("the config does not load: %v", err)
+	}
+	rc := NewRuntimeConfig(cfg)
+	rc.RecordFile(file, raw)
+	return rc
+}
+
+// fileLeaf is the value the config at path writes at the yaml path leaf, as
+// yaml.v3 decodes it into an any, and whether the file writes it at all.
+func fileLeaf(t *testing.T, path, leaf string) (any, bool) {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var v any
+	if err := yaml.Unmarshal(raw, &v); err != nil {
+		t.Fatalf("the saved config does not parse: %v", err)
+	}
+	for _, key := range strings.Split(leaf, ".") {
+		m, ok := v.(map[string]any)
+		if !ok {
+			return nil, false
+		}
+		if v, ok = m[key]; !ok {
+			return nil, false
+		}
+	}
+	return v, true
+}
+
+// loadAt is the config at path as a start loads it.
+func loadAt(t *testing.T, path string) *Config {
+	t.Helper()
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("the saved config does not load: %v", err)
+	}
+	return cfg
+}
+
+// withoutVariables runs fn with each variable vars names unset, and sets
+// them back as they were for the rest of the test.
+func withoutVariables(t *testing.T, vars map[string]string, fn func()) {
+	t.Helper()
+	for name := range vars {
+		t.Setenv(name, "")
+		os.Unsetenv(name)
+	}
+	fn()
+	for name, v := range vars {
+		t.Setenv(name, v)
+	}
+}
+
+// envSaveCase is one kind of leaf a variable sets: the variables, set at the
+// boot; what the file writes; the leaf, as the file holds it after a save
+// (filedThere false for no key) and as a config gives it (value); and what
+// the variable makes it and what the file alone does.
+type envSaveCase struct {
+	name       string
+	vars       map[string]string
+	file       string
+	leaf       string
+	filed      any
+	filedThere bool
+	value      func(c *Config) any
+	varValue   any
+	ownValue   any
+}
+
+// envSaveCases cover the kinds a binding takes: an integer, a pointer to an
+// integer the file does not write, a pointer to a boolean, a list, a string,
+// and a legacy alias.
+var envSaveCases = []envSaveCase{
+	{
+		name: "an integer", vars: map[string]string{"BRIDGE_SCAN_INTERVAL_SEC": "120"},
+		file: "scanIntervalSec: 600\n", leaf: "scanIntervalSec", filed: 600, filedThere: true,
+		value: func(c *Config) any { return c.ScanIntervalSec }, varValue: 120, ownValue: 600,
+	},
+	{
+		name: "a pointer to an integer the file does not write", vars: map[string]string{"BRIDGE_BACKUP_INTERVAL_HOURS": "12"},
+		file: "", leaf: "backup.intervalHours", filed: nil, filedThere: false,
+		value: func(c *Config) any {
+			if c.Backup.IntervalHours == nil {
+				return nil
+			}
+			return *c.Backup.IntervalHours
+		},
+		varValue: 12, ownValue: nil,
+	},
+	{
+		name: "a pointer to a boolean", vars: map[string]string{"BRIDGE_SMART_PLAYLISTS_ENABLED": "true"},
+		file: "smartPlaylists:\n  enabled: false\n", leaf: "smartPlaylists.enabled", filed: false, filedThere: true,
+		value: func(c *Config) any {
+			if c.SmartPlaylists.Enabled == nil {
+				return nil
+			}
+			return *c.SmartPlaylists.Enabled
+		},
+		varValue: true, ownValue: false,
+	},
+	{
+		name: "a list", vars: map[string]string{"BRIDGE_METRICS_ALLOW_CIDRS": "10.0.0.0/8,172.16.0.0/12"},
+		file: "metrics:\n  allowCidrs:\n    - 192.168.0.0/16\n", leaf: "metrics.allowCidrs",
+		filed: []any{"192.168.0.0/16"}, filedThere: true,
+		value:    func(c *Config) any { return c.Metrics.AllowCIDRs },
+		varValue: []string{"10.0.0.0/8", "172.16.0.0/12"}, ownValue: []string{"192.168.0.0/16"},
+	},
+	{
+		name: "a string", vars: map[string]string{"BRIDGE_LIBRARY_NAME": "Env Name"},
+		file: "libraryName: File Name\n", leaf: "libraryName", filed: "File Name", filedThere: true,
+		value: func(c *Config) any { return c.LibraryName }, varValue: "Env Name", ownValue: "File Name",
+	},
+	{
+		name: "a legacy alias", vars: map[string]string{"BRIDGE_MUSICBRAINZ_BASE_URL": "https://env.example/ws/2"},
+		file: "enrich:\n  musicbrainzBaseURL: https://file.example/ws/2\n", leaf: "enrich.musicbrainzBaseURL",
+		filed: "https://file.example/ws/2", filedThere: true,
+		value:    func(c *Config) any { return c.Enrich.MusicBrainzBaseURL },
+		varValue: "https://env.example/ws/2", ownValue: "https://file.example/ws/2",
+	},
+}
+
+// requireFiled fails unless the config at path holds leaf as c's file
+// holds it after a save that did not change it.
+func (c envSaveCase) requireFiled(t *testing.T, path, when string) {
+	t.Helper()
+	got, there := fileLeaf(t, path, c.leaf)
+	if there != c.filedThere || !reflect.DeepEqual(got, c.filed) {
+		t.Errorf("%s: the file holds %s = %#v (there %v), want the file's own %#v (there %v)",
+			when, c.leaf, got, there, c.filed, c.filedThere)
+	}
+}
+
+// TestASaveKeepsTheFilesOwnValueForEachVariable: a save of another setting,
+// twice, writes the file's own value for the leaf a variable set, and the
+// holder goes on publishing the variable's; a start with the variable reads
+// the variable's, and one without it the file's own.
+func TestASaveKeepsTheFilesOwnValueForEachVariable(t *testing.T) {
+	for _, c := range envSaveCases {
+		t.Run(c.name, func(t *testing.T) {
+			for name, v := range c.vars {
+				t.Setenv(name, v)
+			}
+			path := envSaveConfig(t, c.file)
+			rc := bootHolder(t, path)
+			if got := c.value(rc.Load()); !reflect.DeepEqual(got, c.varValue) {
+				t.Fatalf("booted with %v, the live %s is %#v, want the variable's %#v", c.vars, c.leaf, got, c.varValue)
+			}
+			for i := 1; i <= 2; i++ {
+				if err := rc.Update(path, func(next *Config) error {
+					next.Library.AllowDelete = !next.Library.AllowDelete
+					return nil
+				}); err != nil {
+					t.Fatalf("save %d: %v", i, err)
+				}
+				c.requireFiled(t, path, "a save of another setting")
+				if got := c.value(rc.Load()); !reflect.DeepEqual(got, c.varValue) {
+					t.Errorf("save %d: the holder publishes %s = %#v, want the variable's %#v", i, c.leaf, got, c.varValue)
+				}
+			}
+			if got := c.value(loadAt(t, path)); !reflect.DeepEqual(got, c.varValue) {
+				t.Errorf("a start with %v reads %s = %#v, want the variable's %#v", c.vars, c.leaf, got, c.varValue)
+			}
+			withoutVariables(t, c.vars, func() {
+				if got := c.value(loadAt(t, path)); !reflect.DeepEqual(got, c.ownValue) {
+					t.Errorf("a start without %v reads %s = %#v, want the file's own %#v", c.vars, c.leaf, got, c.ownValue)
+				}
+			})
+		})
+	}
+}
+
+// TestASaveThatChangesAVariablesSettingWritesAndPublishesTheChange: a save
+// that changes a leaf a variable set writes the change and the holder
+// publishes it; the variable sets the leaf again at the next start, and a
+// start without it reads the change.
+func TestASaveThatChangesAVariablesSettingWritesAndPublishesTheChange(t *testing.T) {
+	for _, c := range []struct {
+		envSaveCase
+		change func(next *Config)
+		// changed is the change as a config gives it, and changeFiled as
+		// the file holds it.
+		changed, changeFiled any
+	}{
+		{envSaveCases[0], func(next *Config) { next.ScanIntervalSec = 300 }, 300, 300},
+		{envSaveCases[1], func(next *Config) { six := 6; next.Backup.IntervalHours = &six }, 6, 6},
+		{envSaveCases[3], func(next *Config) { next.Metrics.AllowCIDRs = []string{"10.1.0.0/16"} },
+			[]string{"10.1.0.0/16"}, []any{"10.1.0.0/16"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			for name, v := range c.vars {
+				t.Setenv(name, v)
+			}
+			path := envSaveConfig(t, c.file)
+			rc := bootHolder(t, path)
+			if err := rc.Update(path, func(next *Config) error {
+				c.change(next)
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if got, there := fileLeaf(t, path, c.leaf); !there || !reflect.DeepEqual(got, c.changeFiled) {
+				t.Errorf("the file holds %s = %#v (there %v), want the change %#v", c.leaf, got, there, c.changeFiled)
+			}
+			if got := c.value(rc.Load()); !reflect.DeepEqual(got, c.changed) {
+				t.Errorf("the holder publishes %s = %#v, want the change %#v", c.leaf, got, c.changed)
+			}
+			if got := c.value(loadAt(t, path)); !reflect.DeepEqual(got, c.varValue) {
+				t.Errorf("a start with %v reads %s = %#v, want the variable's %#v", c.vars, c.leaf, got, c.varValue)
+			}
+			withoutVariables(t, c.vars, func() {
+				if got := c.value(loadAt(t, path)); !reflect.DeepEqual(got, c.changed) {
+					t.Errorf("a start without %v reads %s = %#v, want the change %#v", c.vars, c.leaf, got, c.changed)
+				}
+			})
+		})
+	}
+}
+
+// TestASaveOverAFileThatDoesNotDecodeWritesTheLiveValue: a holder told
+// nothing of the file saves over whatever it holds, and where that does not
+// decode as Load decodes it (a key no config has), the leaf a variable set
+// is written as the update holds it, its live value. Green before B761 and
+// after: what changed is the file that decodes.
+func TestASaveOverAFileThatDoesNotDecodeWritesTheLiveValue(t *testing.T) {
+	t.Setenv("BRIDGE_SCAN_INTERVAL_SEC", "120")
+	path := envSaveConfig(t, "scanIntervalSec: 600\n")
+	rc := NewRuntimeConfig(loadAt(t, path))
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("scanIntervalSecs: 5\n"); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	if err := rc.Update(path, func(next *Config) error {
+		next.Library.AllowDelete = true
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got, there := fileLeaf(t, path, "scanIntervalSec"); !there || got != 120 {
+		t.Errorf("the file holds scanIntervalSec = %#v (there %v), want the live 120 written as it is", got, there)
+	}
+}
+
+// TestTheOptOutsVariablesAreStillWrittenAsTheirSwitchesAre is a regression
+// guard, green before B761 and after: BRIDGE_ENRICH_ENABLED's switch is
+// written as B617 writes it, whatever the other variables' leaves now do: a
+// save of another setting writes the file's own (no key), a change to on
+// writes no key, and a change to off writes false.
+func TestTheOptOutsVariablesAreStillWrittenAsTheirSwitchesAre(t *testing.T) {
+	t.Setenv("BRIDGE_ENRICH_ENABLED", "false")
+	path := envSaveConfig(t, "")
+	rc := bootHolder(t, path)
+	if rc.Load().Enrich.EffectiveEnabled() {
+		t.Fatal("booted with BRIDGE_ENRICH_ENABLED=false, enrichment is on")
+	}
+	for _, step := range []struct {
+		name   string
+		change func(next *Config)
+		filed  any
+		there  bool
+		live   bool
+	}{
+		{"a save of another setting", func(next *Config) { next.Library.AllowDelete = true }, nil, false, false},
+		{"the switch changed on", func(next *Config) { on := true; next.Enrich.Enabled = &on }, nil, false, true},
+		{"the switch changed off", func(next *Config) { off := false; next.Enrich.Enabled = &off }, false, true, false},
+	} {
+		if err := rc.Update(path, func(next *Config) error {
+			step.change(next)
+			return nil
+		}); err != nil {
+			t.Fatalf("%s: %v", step.name, err)
+		}
+		if got, there := fileLeaf(t, path, "enrich.enabled"); there != step.there || got != step.filed {
+			t.Errorf("%s: the file holds enrich.enabled = %#v (there %v), want %#v (there %v)",
+				step.name, got, there, step.filed, step.there)
+		}
+		if got := rc.Load().Enrich.EffectiveEnabled(); got != step.live {
+			t.Errorf("%s: the holder publishes enrichment %v, want %v", step.name, got, step.live)
+		}
+	}
+}
