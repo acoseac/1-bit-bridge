@@ -1012,7 +1012,12 @@ anything is marked stale, for the reason `Backend.Revoke` is given, Revoke
 adding none where a fault is there, and that native sink is fenced there as a
 hand-off's is, so its node is given nothing and no answer, take-back or close
 of it comes before the fault, and one with no output of its own records none,
-Revoke dropping it (round 6); a resume waits in a loop; a refusal
+Revoke dropping it (round 6); a Start whose session's DSD such a revocation
+reached fails naming it whether or not its activation succeeded first, launching
+nothing, and a converted occurrence's PCM sink, which admits its node only at its
+open, before its output is adopted, and at a resume's reopen, and writes nothing
+of its own, is not fenced, the producer that alone writes it stopping on the
+fault at its next step (round 7); a resume waits in a loop; a refusal
 of the policy's that a write or a later set lifts is asked again where the open
 ends, the content's checks with it (`settleOpen`, `refusedUnder`), a
 successor's DSD monitor starting once it is admitted; a gapless successor waits
@@ -1032,7 +1037,9 @@ own answer, judge a drop before a release, mark an activating occurrence stale
 or fence its sink before its revocation's fault is the session's, record that
 fault but as the session's one fault for the reason Revoke is given, replace a
 fault there, fault a session for a revoked occurrence with no output of its
-own, leave a revoked activating native sink to `Backend.Revoke`, let a take-back
+own, leave a revoked activating native sink to `Backend.Revoke`, read a Start's
+recorded revocation beside an activation's error alone or launch its producer or
+reporter beside one, let a take-back
 go on past a release its sink could not confirm, leave to its
 activation the sink of an occurrence a reconciliation handed off again, answer a
 device's failure as the native sink's own fence or that fence by a bare error,
@@ -1125,7 +1132,7 @@ the box shows is published by a refresh, and the write's publish is one. The
 classification also counts a session being released, and an engine that
 hands nothing off again, as revocations (`TestAWriteBesideASessionBeingReleasedIsTold`,
 `TestAWriteBesideAnEngineThatHandsNothingOffAgainIsTold`, the rig's
-`noReplan`). `TestASuccessorsOpenBesideAWriteIsCountedAndWaitsForIt`, `TestAnActivationBesideAWriteWaitsForIt`, `TestASuccessorDroppedAtItsActivationIsTakenBackUnwritten`, `TestAReleaseWhileASuccessorsAdoptionWaitsLetsGoOfTheDevice`, `TestASuccessorDroppedAtItsSinksAdmissionIsTakenBackUnwritten`, `TestASuccessorDroppedWhileItsSinkWritesItsPrefillIsTakenBack`, `TestAnActivationsFailureBesideADropIsJudgedByItsCause`, `TestTheActivationsOwnFenceIsErrActivationFenced`, `TestARevocationWhileASuccessorsSinkActivatesKeepsItsFault`, `TestARevocationAtASuccessorsActivationCheckKeepsItsFault`, `TestARevocationThatRunsDuringATakeBackKeepsItsOneFault`, `TestARevocationOfAPreparedSuccessorLetsThePCMPlayOn`, `TestARevocationAtTheFirstOccurrencesActivationFencesItsSink`, `TestARevocationsFaultIsTheSessionsOneFault`, `TestAResumesOpenBetweenTransportsBesideAWriteIsCounted`, `TestAResumeWaitsForEveryWriteThatChangesWhatItOpens`, `TestAPolicyRefusalAWriteLiftsIsAskedAgain`, `TestASuccessorWhoseOpenEndsBesideAWriteWaitsForIt`, `TestNoSinkOpensForASuccessorWhileAWriteChangesItsRate`, `TestAConvertedJoinWindowWaitsForAWriteThatChangesItsSuccessor`, `TestAGaplessSuccessorWaitsForAWriteNoLongerThanTheSinksLookahead`, `TestAWriteBesideAnEngineThatHandsNothingOffAgainIsTold`, `TestAWriteBesideASessionBeingReleasedIsTold`, `TestTheWritesChecksAreAnsweredInTheirOrder`, `TestAWriteTheStateKeepsMovingUnderIsNotMade`, `TestAStaleAnswerNeverCarriesARevisionAnotherWriteHasPassed`, `TestAWriteIsJudgedAgainstTheSetPublished` and `TestAWriteWhoseReadingNeverAgreesWithTheSetPublishedIsNotMade` pin it.
+`noReplan`). `TestASuccessorsOpenBesideAWriteIsCountedAndWaitsForIt`, `TestAnActivationBesideAWriteWaitsForIt`, `TestASuccessorDroppedAtItsActivationIsTakenBackUnwritten`, `TestAReleaseWhileASuccessorsAdoptionWaitsLetsGoOfTheDevice`, `TestASuccessorDroppedAtItsSinksAdmissionIsTakenBackUnwritten`, `TestASuccessorDroppedWhileItsSinkWritesItsPrefillIsTakenBack`, `TestAnActivationsFailureBesideADropIsJudgedByItsCause`, `TestTheActivationsOwnFenceIsErrActivationFenced`, `TestARevocationWhileASuccessorsSinkActivatesKeepsItsFault`, `TestARevocationAtASuccessorsActivationCheckKeepsItsFault`, `TestARevocationThatRunsDuringATakeBackKeepsItsOneFault`, `TestARevocationOfAPreparedSuccessorLetsThePCMPlayOn`, `TestARevocationAtTheFirstOccurrencesActivationFencesItsSink`, `TestARevocationsFaultIsTheSessionsOneFault`, `TestARevocationOnceTheFirstOccurrencesSinkActivatedFailsItsStart`, `TestARevocationOfAConvertedSuccessorGivesItsNodeNothing`, `TestAResumesOpenBetweenTransportsBesideAWriteIsCounted`, `TestAResumeWaitsForEveryWriteThatChangesWhatItOpens`, `TestAPolicyRefusalAWriteLiftsIsAskedAgain`, `TestASuccessorWhoseOpenEndsBesideAWriteWaitsForIt`, `TestNoSinkOpensForASuccessorWhileAWriteChangesItsRate`, `TestAConvertedJoinWindowWaitsForAWriteThatChangesItsSuccessor`, `TestAGaplessSuccessorWaitsForAWriteNoLongerThanTheSinksLookahead`, `TestAWriteBesideAnEngineThatHandsNothingOffAgainIsTold`, `TestAWriteBesideASessionBeingReleasedIsTold`, `TestTheWritesChecksAreAnsweredInTheirOrder`, `TestAWriteTheStateKeepsMovingUnderIsNotMade`, `TestAStaleAnswerNeverCarriesARevisionAnotherWriteHasPassed`, `TestAWriteIsJudgedAgainstTheSetPublished` and `TestAWriteWhoseReadingNeverAgreesWithTheSetPublishedIsNotMade` pin it.
 
 Round 3 (2026-11-08, the reviews of round 2 and of the merge). The activation's
 fence (`activateOutput`) answered a successor dropped while its sink was
@@ -1269,3 +1276,28 @@ its close while the warning and Revoke run),
 `TestARevocationOfAPreparedSuccessorLetsThePCMPlayOn`,
 `TestARevocationAtTheFirstOccurrencesActivationFencesItsSink` and round 5's
 case, which now requires the node given nothing, pin it.
+
+Round 7 (2026-11-08, the reviews of round 6, with main merged). A session's
+first occurrence stayed claimed after its activation succeeded until its Start
+locked again, so a reconciliation in that window recorded the revocation and
+fenced the live sink, and the Start, which read the fault beside an
+activation's error alone, launched its producer, which stopped on the fault
+before its first frames, and its reporter: the engine took the Start's failure
+in the producer's words, which named no revocation, or the reporter's fault,
+whichever came first. The Start now reads the recorded revocation in the step
+that gives the claim up, whether or not the activation erred, and fails naming
+it before anything is launched; giving the claim up as the activation completes
+was the other way, and would have left the Start's answer to the producer's race
+with Revoke. A converted occurrence's PCM sink is not fenced, and needs none: it
+admits its node at its open, before its output is adopted, where no fault is
+recorded and its adoption closes it unwritten once the occurrence is stale, and
+at a resume's reopen, after the claim is given up; it writes nothing of its own;
+and the producer, which alone writes it, stops at its next step on the recorded
+fault. The internal case of the one fault reads the fault while the
+reconciliation is held before Revoke: read after, it was Revoke's own record too,
+and a reconciliation that recorded nothing passed.
+`TestARevocationOnceTheFirstOccurrencesSinkActivatedFailsItsStart` (the install
+held, the fault's delivery held),
+`TestARevocationOfAConvertedSuccessorGivesItsNodeNothing` (held at its PCM sink's
+admission, and at its activation's install) and
+`TestARevocationsFaultIsTheSessionsOneFault` pin it.
