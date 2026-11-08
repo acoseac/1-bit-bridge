@@ -2566,7 +2566,7 @@ the install's target (`DisarmResult.Counted`, `CountTried`), in its one
 write with the record where it makes one. Where the count is all it has to
 write, the barrier still runs first and still refuses, and the count's own
 write failing, or its lock not taken, is a line (`CountMissed`), never a
-refusal: a missed count errs toward not rolling back. A crash before the
+refusal (backlog B760). A crash before the
 admission is not counted: a candidate that never runs is what the settings
 check before the swap sees, and a start refused for its settings has the
 early rollback. The take-back is registered right after the admission, so
@@ -2585,9 +2585,10 @@ so a version that hung past its admission, stopped and killed, took its
 count back every time and never reached its rollback (the third round). A
 stop before ready takes its count back once the teardown has run, and a
 start killed in that teardown stays counted, a slow but healthy start
-included. A crash in the teardown after a stop was not counted, by the same
-rule, the stop having come first, until B760: a panic on serve's goroutine
-counts whatever came before it (its section, after this one). Whether an end
+included. A panic on serve's goroutine in the teardown after a stop was not
+counted, by the same rule, the stop having come first, until B760, since
+which it counts whatever came before it (its section, after this one).
+Whether an end
 is a stop is asked once the
 teardown has run, of the caller's context and the restart request as they
 stand then, never of the stop's notice, which an error at once after the
@@ -2622,8 +2623,8 @@ install of this version holding the count this start wrote (`FailedStarts
 == CountTried`): a stop after the confirmation and a restart into a newer
 install touch nothing, and no earlier start's count goes with this one. A
 start that tried to count tries to take back, since `SaveState` publishes
-before its barrier can fail. A take-back that does not land leaves one
-count, which the confirmation clears.
+before its barrier can fail. What a take-back that does not land leaves is
+backlog B760's.
 
 *The crash rollback.* `updater.ProbationFailedStarts` is 3, so one power cut
 or OOM kill does not roll back, and the fourth start at `RestartSec=2` comes
@@ -2839,10 +2840,8 @@ the backup that predates the check, the hold's arms and the report's words
   user's auto-installer, the console's install), the swap goes on, and a
   bind refused for a permission counts where `.bak` carries capabilities
   the binary does not (`bindRefusalIsTheHosts`, Linux's one small attribute
-  read; elsewhere files carry none). An SELinux label is not carried: the
-  staged binary takes the label the policy gives a new file in its
-  directory, which is `restorecon`'s, so a label set by hand (`chcon`) goes
-  with the update (backlog B760).
+  read; elsewhere files carry none). What else the swap does not carry is
+  backlog B760's.
 - *Tests that could not catch their defect* now can: a bind refused by the
   host itself (port 1, below the unprivileged floor) beside the errno each
   platform spells, an address no host holds (TEST-NET-1) for
@@ -2992,11 +2991,11 @@ follows. The records are in `ops/engineering-log.md`, 2026-11-06, B660, and
 
 ## The probation's narrow windows (backlog B760, 2026-11-08)
 
-- **…and the probation's narrow windows: a start that refuses its settings hands an install whose count asks for the crash rollback to that rollback whole, where the early rollback leaves it; a panic on serve's goroutine ends a start uncleanly whatever came before it, a ready start's take-back counted again; a counted start that has not begun serving by its deadline from its admission is said not ready, reporting only; and a start whose count's own write failed keeps its hold** (2026-11-08, backlog B760). **Don't relax the early rollback, or copy the crash rollback's checks for a refused start; don't take a panic's count back, or keep the panic from being raised again; don't count a start for not serving; and don't let go of a start's hold over a write that may have published its token.** Left, in its long form: a panic on another goroutine after a ready start's take-back, a count that published nothing, a refused admission's one count, and a take-back whose write fails through its budget; a bind refused with `EADDRNOTAVAIL` is the host's since B660's second round. → History-rules-config-lifecycle.md
+- **…and the probation's narrow windows: a start that refuses its settings hands an install whose count asks for the crash rollback to that rollback whole, where the early rollback leaves it, and says the crash rollback's own refusal where the data dir's lock is another's, writing nothing; a panic on serve's goroutine ends a start uncleanly whatever came before it, a ready start counted again where an ask of its stop's take-back reached its write, whatever that write answered; a counted start that has not begun serving by its deadline from its admission is said not ready, reporting only; and a start whose count's own write failed keeps its hold** (2026-11-08, backlog B760, two rounds). **Don't relax the early rollback, copy the crash rollback's checks for a refused start, or write the marker where the data dir's lock is another's; don't take a panic's count back, keep the panic from being raised again, or count a start again unless an ask of its take-back reached its write; don't count a start for not serving; and don't let go of a start's hold over a write that may have published its token.** What it leaves open is backlog B760's; a bind refused with `EADDRNOTAVAIL` is the host's since B660's second round. → History-rules-config-lifecycle.md
 
 What B660 left (its section, before this one), each window looked at
-first, then fixed where the fix is contained and provable, or kept and said
-why.
+first, then fixed where the fix is contained and provable, or kept (backlog
+B760's).
 
 *A start that refuses its settings never reached the crash rollback (R1).*
 The crash rollback runs after the data dir's lock, past every refusal serve
@@ -3048,8 +3047,9 @@ the teardown of a ready start, whose take-back had begun, and landed, as the
 stop arrived (B660's second round: so that a supervisor's kill of a slow
 teardown leaves a clean stop uncounted, and a later classification cannot
 undo it). The take-back's defer now recovers a panic, reads the end as no
-clean one, begins no take-back, and where one began as the stop arrived
-counts the start again (`stopTakeBack.countAgain`,
+clean one, begins no take-back, and where an ask of one begun as the stop
+arrived reached its write (the second round, below) counts the start again
+(`stopTakeBack.countAgain`,
 `updater.CountFailedStartAgain`: under the install marker's lock, only where
 the marker holds what that take-back left, the count less one, within
 `finishTakeBackDeadline`'s), says so, clears the start's token and lets go
@@ -3058,19 +3058,12 @@ of its lock as before, and raises the panic again as it was (Go prints it
 behaviour stays as it was: a kill is no panic, and
 `TestAServeKilledWhileItDrainsHasTakenItsCountBack` holds.
 
-What R3 leaves, since no change keeps the early take-back and closes it: a
-panic on another goroutine ends the process with no defer of serve's run, so
-a ready start whose take-back landed as its stop arrived stays taken back (a
-start not ready stays counted, nothing having taken its count back); a kill
-after the take-back, by design; a panic in the defers that run after the
-take-back's own (the data dir's lock let go, the exit code, serve's cancel),
-which do nothing that panics; and a count again whose lock or write has no
-answer within its deadline, which it says.
+What R3 leaves is backlog B760's.
 
-*A start that hangs before `ServeTLS` and is stopped cleanly (R4).* The
-admission counts the start and a clean stop takes the count back, by
-design: counting it would roll back a healthy slow start (a long migration
-at the store's open, a lock it waits for). Reporting only, then: a counted
+*A counted start that has not begun serving (R4).* The confirmation began
+once `ServeTLS` ran, so such a start was never said not ready, and the
+doctor read it on probation throughout. Reporting only, then (what that
+leaves is backlog B760's): a counted
 start is watched from its admission (`startWatch`, on serve's own context,
 which a stop ends), the watch ended where the start begins serving, just
 before `ServeTLS` (`served`), and at the teardown (`end`), joined each time;
@@ -3079,9 +3072,7 @@ admission (production's `updater.ProbationWindow`, on the monotonic clock),
 it says so once and records NotReady (`updater.RecordNotReady`), which
 `bridge doctor`'s install-probation line and the console's Probation row
 fail on, and which the next start's admission and the confirmation clear.
-The count stays the admission's and the take-back's, so a slow but healthy
-start stopped cleanly counts nothing, and one stopped before its deadline is
-said nothing of. A start that begins serving late keeps NotReady until its
+A start that begins serving late keeps NotReady until its
 confirmation clears it, as one that serves and does not answer does; the
 deadline is the window, so the doctor's words (did not answer as ready
 within 10m0s) hold for both, and the log says which. `probationSeams`
@@ -3094,16 +3085,14 @@ again after a write that fails, until it lands or the stop's budget ends
 (`stopBudget`, 10 s from the stop's arrival; one begun once a teardown past
 the budget has run asks for `finishTakeBackFloor`, 2 s, still, never past
 `updater.SCMStopWait` less `stopExitMargin` from the arrival). One with no
-answer by then leaves the count and says so, which errs toward a rollback:
-the confirmation clears the count, and the crash rollback's own record's
-write meets a failure that lasts. A take-back's write that published and
-failed its barrier is answered by its next ask, the count already lowered.
+answer by then is backlog B760's. A take-back's write that published and
+failed its barrier is answered by its next ask, the count already lowered,
+which the second round latches (below).
 The count's own writes, each decided:
 
-- *One that failed before it published*: the marker as it was, and the start
-  goes on uncounted, saying so, a missed count erring toward not rolling back
-  (B660's design, kept): the take-back finds nothing to take, and a panic's
-  count again writes nothing, no take-back having begun.
+- *One that failed before it published*: backlog B760's. The take-back finds
+  nothing to take, and since the second round a panic's count again writes
+  nothing there, no ask of the take-back having reached its write.
 - *One that published and failed its directory barrier*: taken back at a
   clean stop as one that landed, and now the start keeps its hold
   (`DisarmResult.Start`), so the token published with the count names a lock
@@ -3113,22 +3102,40 @@ The count's own writes, each decided:
   did not end cleanly, a command's migration was held against it, and the
   token outlived it.
 - *The admission's one write of its record and its count*, which refuses the
-  start where it cannot be made durable: where it published before its
-  barrier failed, that start, an error return before it served, stays
-  counted, and every later start while the barrier fails refuses before it
-  writes, so it adds at most one count (kept: a take-back there would be one
-  more write over a marker whose barrier just failed).
+  start where it cannot be made durable: every later start while the barrier
+  fails refuses before it writes; what the first leaves is backlog B760's.
 
 *R2*, a bind refused with `EADDRNOTAVAIL`, has been the host's refusal since
 B660's second round (`bindRefusedByTheHost`, `doctor.IsAddrNotAvail`), and
 nothing of it is left.
 
-*Left.* A panic on another goroutine after a ready start's take-back landed;
-a kill after it; a count whose write published nothing, uncounted; a refused
-admission's one published count; a take-back or a count again whose writes
-fail through its budget, the count left and said; and the windows B660's
-records filed beside these that this job did not take (an SELinux label the
-swap does not carry).
+*The second round* (2026-11-08, from the first round's reviews). *A count
+again of a start whose count never landed.* `countAgain` asked only that a
+take-back had begun, and `updater.CountFailedStartAgain` writes where the
+marker holds the count less one, which a take-back's write leaves and a
+count that never published leaves too: a start whose count's write failed
+before it published, ready and stopped, its take-back finding no count of
+its own, then panicking in its teardown, was counted, and its line said its
+stop had taken the count back. `updater.TakeBackFailedStart` now reports
+whether it reached its write, the marker holding the start's count,
+whatever the write answered: one that published and then failed its
+barrier is followed by an ask that finds no count of its own and answers no
+write and no error. Serve's take-back latches that across its asks under
+its lock (`stopTakeBack.reached`), `countAgain` asks it in place of a
+take-back begun, and `CountFailedStartAgain`'s doc states that its caller
+establishes it. *A refused start's lock failure said nothing.* Where
+`recoverCrashedRefusedInstall` could not take the data dir's lock it said
+only the line of a crash rollback that would run
+(`sayCrashRollbackNeedsTheDataDir`), so at the limit, with the crash
+rollback's own refusal (a migration of the store begun), a start that
+refused its settings exited 2 saying nothing of the install, where before
+B760 it gave the early rollback's reason. That branch now says the crash
+rollback's refusal on the marker read again, writing nothing; the shared
+helper, which a start whose settings load calls too, is unchanged. Neither
+moves the early rollback or the crash rollback's checks.
+
+*Left.* What this job leaves open, and the windows B660's records filed
+beside it, are backlog B760's.
 
 `TestARefusedStartPutsTheBackupBackWhereItsCountAsksForTheCrashRollback`,
 `TestARefusedStartFinishesACrashRollbackWhoseRenameDidNotLand`,
@@ -3142,12 +3149,17 @@ swap does not carry).
 `TestAStartThatBeginsServingEndsItsWatch`,
 `TestTheStartWatchFiresOnlyWhileTheStartHasNotBegunServing`,
 `TestACountWhoseBarrierFailedKeepsItsStartsHold`,
-`TestACountThatFailedBeforeItPublishedLeavesItsStartUncounted` and
-`TestARefusedAdmissionLeavesAtMostOneCount` (cmd/bridge);
-`TestCountingAStartAgainUndoesItsTakeBackAlone`,
-`TestTheAdmissionKeepsItsStartsHoldWhereItsCountsWriteFailed` and
-`TestATakeBackWhoseWriteIsRefusedKeepsTheCount` (internal/updater) pin it.
-The record is in `ops/engineering-log.md`, 2026-11-08, B760.
+`TestACountThatFailedBeforeItPublishedLeavesItsStartUncounted`,
+`TestARefusedAdmissionLeavesAtMostOneCount`,
+`TestAPanicAfterTheStopOfAStartWhoseCountNeverLandedCountsNothing`,
+`TestAPanicAfterATakeBackWhoseWritePublishedThenFailedCountsTheStartAgainOnce` and
+`TestARefusedStartBesideTheDataDirsHolderSaysWhyTheCrashRollbackLeavesTheInstall`
+(cmd/bridge); `TestCountingAStartAgainUndoesItsTakeBackAlone`,
+`TestTheAdmissionKeepsItsStartsHoldWhereItsCountsWriteFailed`,
+`TestATakeBackWhoseWriteIsRefusedKeepsTheCount` and
+`TestATakeBackSaysItReachedItsWriteWhateverTheWriteAnswered`
+(internal/updater) pin it. The record is in `ops/engineering-log.md`,
+2026-11-08, B760, and B760's second round.
 
 ## A library name loses its control characters wherever it is set (backlog B744, 2026-11-07)
 
