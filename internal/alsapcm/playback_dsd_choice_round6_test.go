@@ -113,8 +113,9 @@ func (d *dsdRig) parkedOrGiven(parked <-chan struct{}, what string) bool {
 // session's DSD stops, before Backend.Revoke; b's check let go, which finds b
 // stale and answers errReplanned, so b is taken back from its sink while the
 // session's DSD is not revoked yet, its sink closed and noted so; and only then
-// the reconciliation goes on to Revoke. It answers the snapshot once playback
-// stopped for a fault, the rig stopped.
+// the reconciliation goes on to Revoke. It fails t where the session went on
+// to c's own sink, and answers the snapshot once playback stopped for a fault,
+// the rig stopped.
 func revokedAtTheCheck(t *testing.T, d *dsdRig, act *gate, hold *heldGate, log *stopsLog, ob engine.OccurrenceID, req playback.ChoiceRequest) *engine.Snapshot {
 	t.Helper()
 	checking := newGate(t)
@@ -134,6 +135,7 @@ func revokedAtTheCheck(t *testing.T, d *dsdRig, act *gate, hold *heldGate, log *
 		t.Fatalf("the write with the go-ahead: %s, want written", got.Outcome)
 	}
 	letFault()
+	d.stoppedOrOpenedC("the revocation's fault was not the session's before b was taken back")
 	s := d.tickUntilStopped(engine.ReasonFault)
 	d.rig.stop()
 	return s
@@ -146,16 +148,34 @@ func revokedAtTheCheck(t *testing.T, d *dsdRig, act *gate, hold *heldGate, log *
 // marked stale, so the successor's activation check, which finds it stale and
 // answers errReplanned, and its take-back cannot come before the fault: until
 // round 6 they did, Backend.Revoke then found no open sink and recorded none,
-// and the session ended with nothing faulted. A native successor's and a
-// converted one's (its own PCM sink, a transport of its own after PCM, B728
-// B11) alike: the session stops native_revoked, once, for the reason Revoke is
-// given, nothing more opens, and once the rig has stopped b's node was given
-// nothing and every node is closed.
+// and the session went on with nothing faulted: to the end of its queue, the
+// DSD after b refused, or to the PCM after it, whose own sink opened. A native
+// successor's and a converted one's (its own PCM sink, a transport of its own
+// after PCM, B728 B11) alike: the session stops native_revoked, once, for the
+// reason Revoke is given, before anything more opens, and once the rig has
+// stopped b's node was given nothing and every node is closed.
 func TestARevocationAtASuccessorsActivationCheckKeepsItsFault(t *testing.T) {
 	t.Run("a native successor", func(t *testing.T) {
 		w, hold, log := newWriteSeams(), &heldGate{}, &stopsLog{}
 		d := revokeRig(t, playbacktest.ChoiceState(dsdstate.ModeNative), w, hold, log)
 		_, ob, act := heldSuccessorOn(t, d, w)
+		s := revokedAtTheCheck(t, d, act, hold, log, ob, choiceReq(t, d, dsdstate.ModeNative, 1, capAt(playbacktest.DSD64), goAhead))
+		wantRevoked(t, d, s, log)
+		wantUnwritten(t, d, 2, "b's")
+	})
+	t.Run("a native successor, PCM after it", func(t *testing.T) {
+		w, hold, log := newWriteSeams(), &heldGate{}, &stopsLog{}
+		d := revokeRig(t, playbacktest.ChoiceState(dsdstate.ModeNative), w, hold, log)
+		d.files.add("a", dsd(playbacktest.DSD64, 0.25))
+		d.files.add("b", dsd(playbacktest.DSD128, 0.25))
+		d.files.add("c", wav(44100, 16, pattern(1, 4410, 16)))
+		ids := d.insert("a", "b", "c")
+		d.play()
+		ob := d.occurrenceOf(ids[1])
+		act := w.holdActivation(t, ob)
+		d.k.Free()
+		awaitHeld(t, "b's activation, its sink adopted", act.in)
+		d.k.Hold()
 		s := revokedAtTheCheck(t, d, act, hold, log, ob, choiceReq(t, d, dsdstate.ModeNative, 1, capAt(playbacktest.DSD64), goAhead))
 		wantRevoked(t, d, s, log)
 		wantUnwritten(t, d, 2, "b's")
