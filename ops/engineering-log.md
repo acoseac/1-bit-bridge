@@ -86840,3 +86840,115 @@ and error-table guards, `TestDSDOutputProtocolTokens` and `TestQualificationRunb
 and the qualification check against main, the merge base CI takes (a77578f8), passed at 46. A
 first run of these gates, on 3cff0151, was stopped once its race runs had found the reopen
 case's flake.
+
+## 2026-11-08 — B728 B9 round 6: a revocation's fault recorded before anything can take its occurrence back
+
+Worker b728-b9, legion0 (Ubuntu 26.04, Linux 7.0, Go 1.27.3), branch
+`feat/b728-b9-choice` at 0183d34b (round 5's rules applied). The reviews of round 5:
+Codex's one point, Claude's two. Commits: 89dbf9b5 (the round's tests, red), 3610794e
+(Codex's case with PCM after the revoked successor, and the one-fault rule's internal case),
+204729db (the fix), 50b33f14 (the other order's hold and the first occurrence's wait, after
+the controls' first runs), this record, and the gates' paragraph after it. The rules are a
+patch the orchestrator applies (`output.md`'s bullet on the write beside what plays, and its
+long form).
+
+**Point 1 (both reviews): confirmed, red first.** Round 5 left a revocation's sinks to
+`Backend.Revoke` and still marked the occurrence stale in the reconciliation's own step.
+Codex's order: b's activation held at its check once its read of the policy had returned
+(the `Activating` seam), a cap at DSD64 written with the go-ahead where the engine hands
+nothing off again, the reconciliation held at its line saying the session's DSD stops,
+before Revoke, and the check let go: it found b stale and answered `errReplanned`,
+`transition` took b back and closed its output while the session's DSD was not yet revoked,
+and Revoke found no open sink and recorded no fault. Claude's order: b held at its sink's
+admission instead; nothing fenced the sink, so the activation completed in the window and
+gave b's node its prefill, DSD silence at the rate the cap took away, until Revoke stopped
+it, which round 5's own case allowed. Red on 0183d34b (`r6-red.predictions.txt`, written
+before the run): round 5's case, which now asserts the counters once the rig has stopped
+(two opens, b's node given nothing, every node closed), by 1416 bytes to b's node; Codex's
+case for a native successor and for a converted one (its own PCM sink, after PCM),
+`playback stopped for end_of_queue`, b and c refused, no fault; the other order (below) by
+b's node's bytes; and the first occurrence's case (below) by its Start answering, the fault
+Revoke's and 14096 bytes to a's node. A third Codex case, a native successor with PCM after
+it, is red on round 5's production with these tests: c's own sink opened (3 opens), the
+session gone on past b.
+
+The fix (`reconcileDSD`): the reconciliation judges every occurrence first and orders the
+reasons as Revoke will get them (`revoke[0]`: the revocations' own reasons in the chain's
+order, then the one for an engine that hands nothing off again, which can differ from an
+occurrence's own `j.revoke`); then, under the same lock and before anything is marked stale,
+an occurrence whose own sink's activation is under way (claimed, its output adopted) and
+whose DSD is revoked records `native_revoked` for that reason on the session (`s.fault`,
+the fault the producer's next step stops on before it opens a successor), unless the
+session has a fault already; then it marks what is stale and revokes that native sink as a
+hand-off's is, round 4's fence, for a revocation again. Revoke, finding the fault there,
+adds none (its own `s.fault == nil`, unchanged); a session being released records none, its
+release ending it. Under the lock the record and the marks change memory alone, beside round
+4's call to the sink's `Revoke`; the warning and Revoke still run after it. What Revoke keeps
+stays: a prepared successor with no output behind PCM is dropped, refused `native_revoked`,
+the PCM playing on and nothing faulted (`TestARevocationOfAPreparedSuccessorLetsThePCMPlayOn`,
+through the reconciliation; green on 0183d34b too, a guard), and a fault already on the
+session is never replaced (`TestARevocationsFaultIsTheSessionsOneFault`).
+
+**The first occurrence: extended.** A session's first occurrence is revoked, never handed
+off again, so its revocation took the branch that never fenced, and round 5 let its
+activation in its Start give the node its prefill in the same window. It is now claimed in
+its Start from its sink's adoption to its activation's end, so its revocation records the
+fault and fences the sink in the reconciliation's step too: the activation answers the
+sink's own fence, the node is given nothing, and the Start fails, its error naming the
+revocation and its reason (`TestARevocationAtTheFirstOccurrencesActivationFencesItsSink`:
+the open's check held, then the activation's admission). A native Start's failure is the
+engine's fault `backend_error` (`startDone`), as it already was where Revoke ran first;
+nothing in the engine changed. No reporter runs for a session whose Start failed, so the
+record reaches the engine in the Start's words alone.
+
+**A converted successor: the record covers its PCM sink, beyond the brief's condition.** The
+brief named an active native output (`o.out.native != nil`). A converted occurrence's own
+sink is a PCM sink, its activation's check answers `errReplanned` for a stale one as a
+native one's does, and `transition` takes it back the same way, so Codex's order lost its
+fault too: red on 0183d34b, and red under a control that keeps the record to native sinks
+(C7). The record covers any claimed occurrence with an adopted output; the fence, a native
+sink's own, stays native.
+
+**The one-fault rule.** Both records are the session's one fault, written for one reason
+and sent once by the reporter, so a second record cannot be told from the first through the
+real paths: a control that drops both guards (C5) stays green in every case over the fake
+kernel, the other order included, where Revoke finds b's output closed anyway
+(`closeOutput` marks it before it waits on the sink's end). The internal case pins it where
+it shows: a converted occurrence claimed with its PCM sink open, which Revoke counts as
+active, the reconciliation's record, then Revoke for another reason, which must leave it;
+and a session with an xrun before the reconciliation, which both must leave.
+
+**The other order** (`TestARevocationThatRunsDuringATakeBackKeepsItsOneFault`): b's take-back
+held in its close's last step, the backend's note that b's sink closed, once its claim and
+output were given up and its sink's end came, while the warning and Revoke run; then let go:
+one fault, nothing given, two opens. Its first version held the node's close in the kernel
+(`ParkNextClose`), which the sink's writer reaches as soon as it has answered the fence,
+before the producer's take-back may have given up b's claim, so a record made late found b
+claimed or not, run to run: control C2 passed on that version. The first occurrence's case
+waited for the Start's answer alone, and under control C1 the session's own fault reached
+the engine first, which then took no answer and recorded no attempt: the case now waits for
+the answer or the stop.
+
+**Point 2 (Claude): the qualification record corrected.** The runbook's version 46
+paragraph said round 5 changed `internal/alsapcm/`'s tests alone, and round 5's entry above
+said so too, with no DSD byte changed: round 5 changed, outside the guard, when a session's
+sinks are fenced during a revocation, and with it what a revocation during a held activation
+sends (the prefill, until Revoke). The paragraph now says so and adds round 6's change.
+Round 6 changes the guarded `native.go` by a comment alone (Revoke's doc) and the prefix's
+tests; the branch holds 46 and main 45, so it stays 46.
+
+**Controls**, predicted by name before the runs (`r6-controls.predictions.txt`), with every
+file's bytes restored after each. R0, round 5's production with these tests: the red run's
+reds and the PCM case's. C1, the fence for a hand-off alone, the record kept: round 5's case
+and the other order red by b's node's 1416 bytes alone, the first occurrence's by its bytes
+and its fault. C2, the record moved after the lock, just before Revoke, by the same rule
+read afresh: Codex's three cases, round 5's case and the other order red (`end_of_queue`, or
+c's own sink opened), the first occurrence's Start naming no revocation. C3, the hand-off's
+`o.out.native.Revoke()` removed: round 4's
+`TestASuccessorDroppedAtItsSinksAdmissionIsTakenBackUnwritten/a_write_that_hands_b_off_again,_its_replacement_still_to_come`
+red, b's node given 1416 bytes. C4, the record for any revocation, its output or not: the
+PCM case red, the session faulted. C5, both guards dropped: the internal case red alone. C7,
+the record for native sinks alone: the converted case red. C8, the first occurrence not
+claimed: its case red, the prefill given. Every other case stayed green. The first runs of R0
+to C3 found the two test faults above; the tests were fixed and committed (50b33f14) and
+every control run again, each red where predicted, by the predicted message.

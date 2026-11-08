@@ -962,11 +962,29 @@ one (`TestTheActivationsOwnFenceIsErrActivationFenced`) and the backend's over t
 kernel three (`TestASuccessorDroppedAtItsSinksAdmissionIsTakenBackUnwritten`,
 `TestASuccessorDroppedWhileItsSinkWritesItsPrefillIsTakenBack`,
 `TestAnActivationsFailureBesideADropIsJudgedByItsCause`), with their rig's holds; again no
-DSD byte a native or DoP occurrence sends changes. B9's round 5, unmerged too, changes that
-prefix's tests alone and stays 46: the backend's tests over the fake kernel gain
+DSD byte a native or DoP occurrence sends changes. B9's round 5, unmerged too, stays 46, and
+did not change that prefix's tests alone, as this record said until round 6: outside the
+guard (`internal/player/playback/dsd_policy.go`) it changed when a session's sinks are fenced
+during a revocation. A reconciliation that revoked the session's DSD no longer revoked the
+sink an occurrence's activation was under way for, leaving every sink to `Backend.Revoke`,
+after the fault Revoke records; so a revocation during a held activation let the activation
+answer in the window between the reconciliation and Revoke and give its node the prefill,
+DSD silence at the rate the change had taken away, until Revoke stopped the sink (round 4 had
+sent that node nothing, and lost the fault instead when the activation was taken back before
+Revoke ran). Under the prefix its tests gain
 `TestARevocationWhileASuccessorsSinkActivatesKeepsItsFault` and two cases of a node whose
 close is unconfirmed beside a drop, the fake kernel `FailDrops`; no sink, packer, plan or
-harness reader changes.
+harness reader changes. B9's round 6, unmerged too, stays 46: outside the guard, the
+reconciliation records the revocation's fault on the session in its own step, before the
+occurrence is marked stale, for an occurrence whose own sink's activation is under way (a
+successor's in the producer's transition, and now a session's first occurrence's in its
+Start, `session.go`), and revokes that native sink there as a re-plan's is, so the
+activation answers the sink's own fence and the node is given nothing, the fault standing in
+every order of the activation's answer, its take-back and Revoke; a converted occurrence's
+PCM sink records the fault the same way. The guarded `native.go` changes a comment alone
+(Revoke keeps a fault already there). Under the prefix the backend's tests over the fake
+kernel gain four (`playback_dsd_choice_round6_test.go`) and round 5's case requires the node
+given nothing; no sink, packer, plan or harness reader changes.
 The harness's approval admission reads a record
 of version 46 alone; the migration reads an owner's record of 35 to 46 (`LegacyVersion`
 stays 35). For owners: nothing the harness runs or records changes, and nothing plays
