@@ -34,7 +34,9 @@ const (
 	// "refused" refuses the settings, a reason on its line, exit 78;
 	// "predates" answers as a release from before the check, the flag
 	// package's own words and exit 2; "fails" exits 1, a check that did not
-	// answer. Empty is the code that ships.
+	// answer; "takes" loads them, exit 0, as a backup of a version that takes
+	// what this one refuses does (backlog B760: 0.2.1 took the leading zero
+	// 0.2.2 refuses). Empty is the code that ships.
 	runAsBridgeCheckEnv = "CMDBRIDGE_TEST_RUN_AS_BRIDGE_CHECK"
 	// runAsBridgeProbationAskEnv, a duration, is how often the copy's serve
 	// asks whether its start is ready before its first yes (probationTiming's
@@ -63,6 +65,9 @@ func runAsBridge() int {
 		case "fails":
 			fmt.Fprintln(os.Stderr, "the settings could not be read")
 			return updater.ConfigCheckFailedExit
+		case "takes":
+			fmt.Fprintf(os.Stdout, "config ok: 1-bit-bridge %s loads these settings\n", version.ServerVersion)
+			return updater.ConfigCheckValidExit
 		}
 	}
 	// A stop by SIGINT or SIGTERM, as main gives the bridge one, so that a

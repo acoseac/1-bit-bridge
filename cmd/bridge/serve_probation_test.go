@@ -111,6 +111,8 @@ func (k probationEventKind) String() string {
 		return "unconfirmed"
 	case probationEnded:
 		return "end"
+	case probationServing:
+		return "serving"
 	}
 	return fmt.Sprintf("kind %d", int(k))
 }

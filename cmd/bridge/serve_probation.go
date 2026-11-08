@@ -51,21 +51,26 @@ type probationSeams struct {
 	// beforeReady runs once a round has first answered as ready, before this
 	// start counts as ready (backlog B660's third round).
 	beforeReady func()
+	// beforeServing runs on serve's goroutine just before it begins serving
+	// (ServeTLS): a boot test's hold on a start that has not begun serving
+	// (backlog B760).
+	beforeServing func()
 }
 
 // probationTiming is the confirmation's clock: the window one start stays up
 // for once it has answered as ready (updater.ProbationWindow), how often it
 // asks before its first yes, how often after a no at the window's end (and
-// after the window's first lapse with no yes), and one round's bound. Timers
-// and time.Since read the monotonic clock: a box with no RTC boots with a
-// stale date, and nothing here reads the wall clock.
+// after the window's first lapse with no yes), one round's bound, and how
+// long a start has from its admission to begin serving (updater.ProbationWindow
+// too; backlog B760). Timers and time.Since read the monotonic clock: a box
+// with no RTC boots with a stale date, and nothing here reads the wall clock.
 type probationTiming struct {
-	window, ask, retry, round time.Duration
+	window, ask, retry, round, serve time.Duration
 }
 
 // productionProbation is production's timing.
 var productionProbation = probationTiming{window: updater.ProbationWindow, ask: 5 * time.Second,
-	retry: 30 * time.Second, round: 5 * time.Second}
+	retry: 30 * time.Second, round: 5 * time.Second, serve: updater.ProbationWindow}
 
 // orProduction is t with each zero field production's.
 func (t probationTiming) orProduction() probationTiming {
@@ -80,6 +85,9 @@ func (t probationTiming) orProduction() probationTiming {
 	}
 	if t.round <= 0 {
 		t.round = productionProbation.round
+	}
+	if t.serve <= 0 {
+		t.serve = productionProbation.serve
 	}
 	return t
 }
@@ -103,6 +111,9 @@ const (
 	probationUnconfirmed
 	// probationEnded: the confirmation's goroutine returned.
 	probationEnded
+	// probationServing: the start began serving, which ended the watch on it
+	// from its admission (backlog B760).
+	probationServing
 )
 
 // probationEvent is one thing the confirmation did.

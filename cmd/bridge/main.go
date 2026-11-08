@@ -6878,6 +6878,11 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 
 	fmt.Fprintln(stdout, "Press Ctrl-C to shut down.")
 
+	// A boot test's hold on a start that has not begun serving (backlog
+	// B760). Nil in production.
+	if opts.probation != nil && opts.probation.beforeServing != nil {
+		opts.probation.beforeServing()
+	}
 	serveErr := make(chan error, 1)
 	go func() {
 		serveErr <- httpSrv.ServeTLS(lis, "", "")
