@@ -1031,7 +1031,9 @@ reached.
   `.bak` still carries them (`updater: the backup beside this binary carries
   file capabilities this binary does not …`), so three such starts put `.bak`
   back. Run `setcap` on the new binary after such an update, or update with
-  `sudo bridge update`. What else an update does not carry is backlog B760's.
+  `sudo bridge update`. On an SELinux host whose policy labels the binary,
+  run `restorecon` on it after an update. What else an update does not carry
+  is backlog B760's.
 
 **A data dir whose filesystem cannot fsync a directory.** Linux's NFS and
 CIFS/SMB clients treat a directory's fsync as a successful no-op, and its
