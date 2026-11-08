@@ -2089,6 +2089,13 @@ function renderResumable() {
     return;
   }
   const s = resumableSessions[0];
+  if (resumableDiscarding.has(s.id)) {
+    // Its delete is pending: choosing the same folder would start over, not
+    // carry it on (findResumable), so the banner says what is happening.
+    setText("upload-resume-text", "Discarding the interrupted upload…");
+    banner.hidden = false;
+    return;
+  }
   const total = s.files.reduce((n, f) => n + f.size, 0);
   const done = s.files.reduce((n, f) => n + f.offset, 0);
   setText(
@@ -2312,21 +2319,27 @@ async function discardResumable() {
   // session this may be. What it says comes after a request, so it is said
   // only on the page it was asked on, and never over a run begun meanwhile.
   const s = resumableSessions[0];
-  if (!s || uploadState?.run) return;
+  // A second Discard it of a session whose delete is pending asks nothing:
+  // its refusal would give back a session the first delete may still take.
+  if (!s || uploadState?.run || resumableDiscarding.has(s.id)) return;
   const banner = document.getElementById("upload-resume");
   // While its delete is pending no pick resumes it (findResumable): the same
   // files chosen meanwhile start a session of their own rather than feed one
   // about to go (B797's round 5). A refused delete gives it back.
   resumableDiscarding.add(s.id);
+  renderResumable();
   try {
     await API.delete(`/api/upload/sessions/${encodeURIComponent(s.id)}`);
   } catch (e) {
     resumableDiscarding.delete(s.id);
+    renderResumable();
     if (banner?.isConnected && !uploadState?.run) showUploadError(e?.message ? e.message : String(e));
     return;
   }
-  forgetResumable(s.id);
   resumableDiscarding.delete(s.id);
+  forgetResumable(s.id);
+  // A refused run's Try again offered this session: it is gone.
+  if (uploadState?.session?.id === s.id) hideUploadRetry();
   await refreshResumable();
   if (banner?.isConnected && !uploadState?.run) showUploadResult("Discarded the interrupted upload.");
 }
@@ -2667,8 +2680,12 @@ function hideUploadRetry() {
 async function retryUpload() {
   const sid = uploadState?.session?.id;
   // A run owns the page already: Try again is disabled then, and this is the
-  // refusal itself.
+  // refusal itself. Nor into a session Discard it is deleting (B797's round 6).
   if (!sid || uploadState.run) return;
+  if (resumableDiscarding.has(sid)) {
+    showUploadError("That interrupted upload is being discarded.");
+    return;
+  }
   const run = beginUploadRun();
   hideUploadRetry();
   document.getElementById("upload-error").hidden = true;

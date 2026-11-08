@@ -848,7 +848,7 @@ func (rig *ownershipRig) requireFilePuts(t *testing.T, sid, fid, body string, wa
 		seen = append(seen, ownershipPut{p.Offset, p.Status})
 		end := min(p.Offset+ownershipChunk, int64(len(body)))
 		if p.Offset < 0 || p.Offset >= end || string(p.Body) != body[p.Offset:end] {
-			t.Errorf("session %s was sent %q at offset %d, want %q: the bytes of a file it never took", sid, p.Body, p.Offset, body[max(0, min(p.Offset, end)):end])
+			t.Errorf("session %s was sent %q at offset %d, want %q: the bytes of a file it never took", sid, p.Body, p.Offset, body[min(max(0, p.Offset), max(0, end)):max(0, end)])
 		}
 	}
 	if len(seen) != len(want) {
@@ -1708,10 +1708,25 @@ const steps = {
     const discard = click("upload-resume-discard");
     await reached("discard");
     await settle(pick([oldFile()]), "the pick of the same files");
+    out.shown.pending = shown();
     const run = click("upload-start");
+    await reached("create");
     await release("discard");
+    await release("create");
     await settle(discard, "Discard it");
     await settle(run, "the upload of the same files");
+    out.shown.final = shown();
+  },
+  // An interrupted upload listed; Discard it pressed, its delete held, and
+  // pressed again.
+  "discard-twice": async () => {
+    newPage();
+    await ready();
+    const first = click("upload-resume-discard");
+    await reached("discard");
+    await settle(click("upload-resume-discard"), "the second Discard it");
+    await release("discard");
+    await settle(first, "the first Discard it");
     out.shown.final = shown();
   },
   // An interrupted upload listed; Discard it refused; the same files chosen again.
@@ -2637,10 +2652,14 @@ func TestALateOrFailedReadOfTheListKeepsWhatThePageChanged(t *testing.T) {
 	})
 
 	t.Run("Upload while Discard it is pending", func(t *testing.T) {
-		rig := newOwnershipRig(t, ownershipRule{Kind: "abandon", Nth: 1, Hold: "discard"})
+		rig := newOwnershipRig(t, ownershipRule{Kind: "abandon", Nth: 1, Hold: "discard"},
+			ownershipRule{Kind: "create", Nth: 1, Hold: "create"})
 		sid := rig.interruptedSession(t)
 		got := runOwnershipCase(t, rig, script, node, "discard-pending-upload")
 		requireOnList(t, "as the page loaded", got.Shown["loaded"], sid)
+		if pending := got.Shown["pending"]; !strings.Contains(pending.BannerText, "Discarding the interrupted upload") {
+			t.Errorf("while Discard it's delete is pending the banner says %q, want it said", pending.BannerText)
+		}
 		// The session being deleted is never matched: the same files start a
 		// new session, and none of their bytes go to the one Discard it took.
 		made := rig.sessionsMade()
@@ -2651,6 +2670,18 @@ func TestALateOrFailedReadOfTheListKeepsWhatThePageChanged(t *testing.T) {
 		requireAdded(t, "after the same files were chosen while Discard it was pending", got.Shown["final"], "1 added")
 		rig.requirePuts(t, made[0], ownershipOld, everyChunk)
 		rig.requireFile(t, ownershipPath, ownershipOld)
+	})
+
+	t.Run("Discard it twice while its delete is pending", func(t *testing.T) {
+		rig := newOwnershipRig(t, ownershipRule{Kind: "abandon", Nth: 1, Hold: "discard"})
+		sid := rig.interruptedSession(t)
+		got := runOwnershipCase(t, rig, script, node, "discard-twice")
+		if abandons := rig.of("abandon", ""); len(abandons) != 1 || abandons[0].Session != sid {
+			t.Fatalf("the page deleted %v, want the one session once", abandons)
+		}
+		if final := got.Shown["final"]; final.Error != "" || !strings.Contains(final.Result, "Discarded the interrupted upload.") {
+			t.Errorf("after both presses the page shows %+v, want the one discard said and no error", final)
+		}
 	})
 
 	t.Run("Discard it refused, then the same files", func(t *testing.T) {
