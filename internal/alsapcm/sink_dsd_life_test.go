@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unsafe"
 )
 
 // lifeSink opens a native sink on k whose life is life, its watcher held
@@ -15,16 +16,57 @@ import (
 // watcher holds there; the test's end releases it too.
 func lifeSink(t *testing.T, k *fakeKernel, c DSDConfig, life context.Context) (s *DSDSink, revoking <-chan struct{}, revoke func()) {
 	t.Helper()
+	return lifeSinkOn(t, k, k, c, life)
+}
+
+// lifeSinkOn is lifeSink with the node reached through sy, a seam over k:
+// a close that fails, a STATUS held and failed (B728 B9 round 8).
+func lifeSinkOn(t *testing.T, k *fakeKernel, sy sys, c DSDConfig, life context.Context) (s *DSDSink, revoking <-chan struct{}, revoke func()) {
+	t.Helper()
 	in, gate := make(chan struct{}), make(chan struct{})
 	var once sync.Once
 	revoke = func() { once.Do(func() { close(gate) }) }
 	t.Cleanup(revoke)
-	s, e := openDSDSink(life, c, nativeSeams{open: func(ep Endpoint, c Config) (*Device, error) { return openNative(k, k.now, ep, c) }, now: k.now, at: k.nativeAt,
+	s, e := openDSDSink(life, c, nativeSeams{open: func(ep Endpoint, c Config) (*Device, error) { return openNative(sy, k.now, ep, c) }, now: k.now, at: k.nativeAt,
 		lifeEnded: func() { close(in); <-gate }})
 	if e != nil {
 		t.Fatal(e)
 	}
 	return s, in, revoke
+}
+
+// statusFault is the fake's node with its next STATUS, once armed, held in
+// the call until letGo is closed, then answered err without reaching the
+// fake, as a device that fails the STATUS a wait of the writer's ended in
+// (B728 B9 round 8): the fake's own failure of a request (fail) answers
+// before any hold. failed says that STATUS answered err.
+type statusFault struct {
+	sys
+	err         error
+	armed       atomic.Bool
+	held, letGo chan struct{}
+	failed      atomic.Bool
+}
+
+func (f *statusFault) ioctl(fd int, req uint32, arg unsafe.Pointer) error {
+	if req == ioctlStatus && f.armed.CompareAndSwap(true, false) {
+		close(f.held)
+		<-f.letGo
+		f.failed.Store(true)
+		return f.err
+	}
+	return f.sys.ioctl(fd, req, arg)
+}
+
+// theSinksFailure fails the test unless e carries want, a failure the sink
+// recorded (its device's, or its cleanup's, ErrReleaseUnconfirmed), and is
+// not the ended life's cancellation alone: a caller the life stopped takes
+// that for the stop it is, and the failure with it (B728 B9 round 8).
+func theSinksFailure(t *testing.T, e, want error, what string) {
+	t.Helper()
+	if !errors.Is(e, want) || ReasonOf(e) == ReasonCancelled {
+		t.Errorf("%s answered %v; want the failure the sink recorded (%v), not the life's cancellation", what, e, want)
+	}
 }
 
 // noFailure fails the test unless the sink's release recorded no fault and
@@ -431,6 +473,167 @@ func TestNativeResumeTheEndedLifeNeverRanAnswersItsCancellation(t *testing.T) {
 	k.checkClosedEach(t)
 }
 
+// endedRequest is how a resume the ended life never ran is answered (B728
+// B9 round 8): by the writer's reply, its caller on a context the life does
+// not end, or by its caller's own context's arm, that caller on the life
+// itself, as the harness's is.
+var endedRequest = []struct {
+	name   string
+	onLife bool
+}{{"through its reply", false}, {"through its caller's context", true}}
+
+// queueResume asks s to resume, its caller on the life where onLife, and
+// waits for the request to be the writer's to answer.
+func queueResume(t *testing.T, s *DSDSink, life context.Context, onLife bool) <-chan error {
+	t.Helper()
+	ctx := context.Background()
+	if onLife {
+		ctx = life
+	}
+	answer := make(chan error, 1)
+	go func() { answer <- s.Resume(ctx) }()
+	nativeWait(t, s, "the resume's request", func() bool { return s.activation != nil })
+	return answer
+}
+
+// revokeEnded begins the release of the sink whose life has ended, its
+// watcher held at revoking: where onLife the resume's caller does, its own
+// context's arm, the writer being held in a call and the watcher before its
+// revocation, and otherwise the watcher, let go.
+func revokeEnded(t *testing.T, s *DSDSink, revoking <-chan struct{}, revoke func(), onLife bool) {
+	t.Helper()
+	await(t, revoking, "the life's end, its revocation held")
+	if onLife {
+		nativeWait(t, s, "the resume's caller revoking the sink", func() bool { return s.releasing })
+		return
+	}
+	revoke()
+	nativeWait(t, s, "the revocation", func() bool { return s.releasing })
+}
+
+// answeredBy fails the test unless e came the way it was asked: the reply
+// carries no cancellation once the sink recorded a failure, and the caller's
+// own context's arm joins that failure to its context's end.
+func answeredBy(t *testing.T, e error, onLife bool, what string) {
+	t.Helper()
+	if errors.Is(e, context.Canceled) != onLife {
+		t.Errorf("%s answered %v: want it answered by its caller's context %v", what, e, onLife)
+	}
+}
+
+// TestNativeResumeTheEndedLifeNeverRanAnswersAFailedClose (B728 B9 round 8):
+// the resume of TestNativeResumeTheEndedLifeNeverRanAnswersItsCancellation,
+// asked while the writer sits in its pause's watch and never run, its life
+// ended, but the node's close at the writer's end fails, the device still
+// open until then: that release cannot be confirmed (ErrReleaseUnconfirmed),
+// and the resume answers it, never the life's cancellation alone, through
+// the writer's reply and through its caller's own context's arm alike, which
+// waits for the writer's end once the life has ended. Until round 8 the reply
+// was the life's cancellation (fenced), and the context's arm answered that
+// cancellation before the close.
+func TestNativeResumeTheEndedLifeNeverRanAnswersAFailedClose(t *testing.T) {
+	for _, asked := range endedRequest {
+		t.Run(asked.name, func(t *testing.T) {
+			k := nativeKernel(t)
+			a := &nativeAuditSys{sys: k, t: t, closeErr: errors.New("the node's close failed")}
+			life, end := context.WithCancel(context.Background())
+			defer end()
+			s, revoking, revoke := lifeSinkOn(t, k, a, nativeConfig(), life)
+			if e := s.Activate(context.Background(), 1); e != nil {
+				t.Fatal(e)
+			}
+			statusing, status := k.parkNextStatus()
+			defer status()
+			paused := make(chan error, 1)
+			go func() { paused <- s.Pause(context.Background()) }()
+			await(t, statusing, "the pause's STATUS")
+			polling, poll := k.parkNextPoll()
+			defer poll()
+			status()
+			if e := receive(t, paused, "the pause"); e != nil {
+				t.Fatal(e)
+			}
+			await(t, polling, "the writer in its pause's watch")
+			answer := queueResume(t, s, life, asked.onLife)
+			end()
+			revokeEnded(t, s, revoking, revoke, asked.onLife)
+			var open bool
+			var closes int
+			k.inspect(func(k *fakeKernel) { open, closes = k.isOpen, k.closes })
+			if !open || closes != 0 {
+				t.Fatalf("the node before the writer's end: open %v, closed %d times; want it open, for the writer's end to close", open, closes)
+			}
+			poll()
+			e := receive(t, answer, "the resume's answer")
+			theSinksFailure(t, e, ErrReleaseUnconfirmed, "the resume the ended life never ran, its close failing")
+			answeredBy(t, e, asked.onLife, "the resume")
+			await(t, s.Done(), "the revocation's release")
+			revoke()
+			k.inspect(func(k *fakeKernel) { closes = k.closes })
+			if closes != 1 || !errors.Is(s.CleanupResult(), ErrReleaseUnconfirmed) {
+				t.Errorf("the node closed %d times, the cleanup %v: want the writer's end's one close, unconfirmed", closes, s.CleanupResult())
+			}
+			k.checkClosedEach(t)
+		})
+	}
+}
+
+// TestNativeResumeTheEndedLifeNeverRanAnswersTheDevicesFailure (B728 B9 round
+// 8): the writer in its pause's watch, past a poll that ended, is held in that
+// watch's STATUS while a resume is asked and the life ends, its watcher held;
+// the STATUS then answers EIO, the device's own failure, which the writer
+// records before it ends. The resume, never run, answers that EIO, never the
+// life's cancellation alone, through the writer's reply and through its
+// caller's own context's arm alike. Until round 8 the reply was the life's
+// cancellation (fenced), and the context's arm answered that cancellation
+// while the STATUS was still held.
+func TestNativeResumeTheEndedLifeNeverRanAnswersTheDevicesFailure(t *testing.T) {
+	const eio errno = 5 // EIO, asm-generic's: an errno this package does not tell apart
+	for _, asked := range endedRequest {
+		t.Run(asked.name, func(t *testing.T) {
+			k := nativeKernel(t)
+			f := &statusFault{sys: k, err: eio, held: make(chan struct{}), letGo: make(chan struct{})}
+			var once sync.Once
+			letGo := func() { once.Do(func() { close(f.letGo) }) }
+			defer letGo()
+			life, end := context.WithCancel(context.Background())
+			defer end()
+			s, revoking, revoke := lifeSinkOn(t, k, f, nativeConfig(), life)
+			if e := s.Activate(context.Background(), 1); e != nil {
+				t.Fatal(e)
+			}
+			if e := s.Pause(context.Background()); e != nil {
+				t.Fatal(e)
+			}
+			// The pause applied, its STATUS calls made: the writer's next STATUS
+			// is its watch's, once the poll before it ends, which the period
+			// granted here does.
+			f.armed.Store(true)
+			k.grant(s.Params().PeriodTime())
+			await(t, f.held, "the pause watch's STATUS, its poll ended")
+			answer := queueResume(t, s, life, asked.onLife)
+			end()
+			revokeEnded(t, s, revoking, revoke, asked.onLife)
+			letGo()
+			e := receive(t, answer, "the resume's answer")
+			theSinksFailure(t, e, eio, "the resume the ended life never ran, its STATUS failing")
+			answeredBy(t, e, asked.onLife, "the resume")
+			await(t, s.Done(), "the writer's release")
+			revoke()
+			if !f.failed.Load() {
+				t.Error("the pause watch's STATUS never answered EIO")
+			}
+			if e := s.Result(); !errors.Is(e, eio) {
+				t.Errorf("the sink's outcome is %v; want the STATUS's EIO, its fault", e)
+			}
+			if e := s.CleanupResult(); e != nil {
+				t.Errorf("the release's cleanup failed: %v", e)
+			}
+			k.checkClosedEach(t)
+		})
+	}
+}
+
 // TestNativeCommandsAfterTheLifeEndsAnswerItsCancellation: a command the
 // sink's ended life fences before the writer sees it, its caller's own check
 // of its context having passed just before the life ended (a context the
@@ -441,8 +644,13 @@ func TestNativeResumeTheEndedLifeNeverRanAnswersItsCancellation(t *testing.T) {
 // admission closed". The harness's console cancels the run on an s at once
 // while a space read just before still reaches Pause or Resume, and the
 // feeder's WriteDSD reads its context before it takes the sink's lock, so a
-// Stop typed beside a command exited 1).
+// Stop typed beside a command exited 1). The same commands after a failure
+// the sink recorded, a device's EIO the writer met before the life ended or
+// the release's close failing once it had, answer that failure joined to
+// their refusal, never the life's cancellation alone (B728 B9 round 8: they
+// answered the cancellation, the failure dropped).
 func TestNativeCommandsAfterTheLifeEndsAnswerItsCancellation(t *testing.T) {
+	const eio errno = 5 // EIO, asm-generic's: an errno this package does not tell apart
 	activate := func(t *testing.T, s *DSDSink) {
 		t.Helper()
 		if e := s.Activate(context.Background(), 1); e != nil {
@@ -455,35 +663,81 @@ func TestNativeCommandsAfterTheLifeEndsAnswerItsCancellation(t *testing.T) {
 			t.Fatal(e)
 		}
 	}
+	// failStatus makes every STATUS answer EIO from now on.
+	failStatus := func(k *fakeKernel) { k.inspect(func(k *fakeKernel) { k.fail[ioctlStatus] = eio }) }
+	// watchFails ends a writer that watches its stream on the device's EIO:
+	// its next STATUS fails, and the period granted ends its poll before it.
+	watchFails := func(t *testing.T, k *fakeKernel, s *DSDSink) {
+		failStatus(k)
+		k.grant(s.Params().PeriodTime())
+	}
 	for _, command := range []struct {
 		name    string
 		prepare []func(*testing.T, *DSDSink)
-		call    func(*DSDSink) error
+		// fail has the writer meet the device's EIO, after prepare.
+		fail func(*testing.T, *fakeKernel, *DSDSink)
+		call func(*DSDSink) error
 	}{
-		{"activate", nil, func(s *DSDSink) error { return s.Activate(context.Background(), 1) }},
-		{"resume", []func(*testing.T, *DSDSink){activate, pause}, func(s *DSDSink) error { return s.Resume(context.Background()) }},
-		{"paused activation", []func(*testing.T, *DSDSink){pause}, func(s *DSDSink) error { return s.ActivatePaused(context.Background()) }},
-		{"pause", []func(*testing.T, *DSDSink){activate}, func(s *DSDSink) error { return s.Pause(context.Background()) }},
-		{"write", []func(*testing.T, *DSDSink){activate}, func(s *DSDSink) error {
+		// An inert sink's writer makes no call until it is paused, whose
+		// STATUS then fails.
+		{"activate", nil, func(t *testing.T, k *fakeKernel, s *DSDSink) { failStatus(k); pause(t, s) },
+			func(s *DSDSink) error { return s.Activate(context.Background(), 1) }},
+		{"resume", []func(*testing.T, *DSDSink){activate, pause}, watchFails, func(s *DSDSink) error { return s.Resume(context.Background()) }},
+		{"paused activation", []func(*testing.T, *DSDSink){pause}, watchFails, func(s *DSDSink) error { return s.ActivatePaused(context.Background()) }},
+		{"pause", []func(*testing.T, *DSDSink){activate}, watchFails, func(s *DSDSink) error { return s.Pause(context.Background()) }},
+		{"write", []func(*testing.T, *DSDSink){activate}, watchFails, func(s *DSDSink) error {
 			_, e := s.WriteDSD(context.Background(), 1, []byte{1, 2, 3, 4}, []byte{5, 6, 7, 8}, 0, 32)
 			return e
 		}},
 	} {
-		t.Run(command.name, func(t *testing.T) {
-			k := nativeKernel(t)
-			life, end := context.WithCancel(context.Background())
-			defer end()
-			s, revoking, revoke := lifeSink(t, k, nativeConfig(), life)
-			for _, prepare := range command.prepare {
-				prepare(t, s)
+		for _, fault := range []string{"", "a device's failure", "a failed cleanup"} {
+			name := command.name
+			if fault != "" {
+				name += " after " + fault
 			}
-			end()
-			await(t, revoking, "the life's end")
-			revoke()
-			await(t, s.Done(), "the revocation's release")
-			theLifesCancellation(t, command.call(s), "the "+command.name+" after the sink's life ended")
-			noFailure(t, s, "the revocation")
-			k.checkClosedEach(t)
-		})
+			t.Run(name, func(t *testing.T) {
+				k := nativeKernel(t)
+				var node sys = k
+				if fault == "a failed cleanup" {
+					node = &nativeAuditSys{sys: k, t: t, closeErr: errors.New("the node's close failed")}
+				}
+				life, end := context.WithCancel(context.Background())
+				defer end()
+				s, revoking, revoke := lifeSinkOn(t, k, node, nativeConfig(), life)
+				for _, prepare := range command.prepare {
+					prepare(t, s)
+				}
+				if fault == "a device's failure" {
+					// The writer ends on the failure first, so its watcher ends
+					// with it, and the life's end then revokes nothing.
+					command.fail(t, k, s)
+					await(t, s.Done(), "the writer's end on the device's EIO")
+					end()
+				} else {
+					end()
+					await(t, revoking, "the life's end")
+					revoke()
+					await(t, s.Done(), "the revocation's release")
+				}
+				e := command.call(s)
+				what := "the " + command.name + " after the sink's life ended"
+				switch fault {
+				case "":
+					theLifesCancellation(t, e, what)
+					noFailure(t, s, "the revocation")
+				case "a device's failure":
+					theSinksFailure(t, e, eio, what+", the device's EIO recorded")
+					if r := s.Result(); !errors.Is(r, eio) {
+						t.Errorf("the sink's outcome is %v; want the device's EIO", r)
+					}
+				default:
+					theSinksFailure(t, e, ErrReleaseUnconfirmed, what+", its release's close failed")
+					if r := s.CleanupResult(); !errors.Is(r, ErrReleaseUnconfirmed) {
+						t.Errorf("the release's cleanup is %v; want it unconfirmed", r)
+					}
+				}
+				k.checkClosedEach(t)
+			})
+		}
 	}
 }
