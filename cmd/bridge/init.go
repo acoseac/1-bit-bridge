@@ -800,8 +800,8 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		}
 	}
 	// The TLS pair the install serves, the enrichment switches it writes off,
-	// and a loopback install's custom endpoints. The data dir and the roots
-	// are in cfg already.
+	// the enrich bases it writes, and a loopback install's custom endpoints.
+	// The data dir and the roots are in cfg already.
 	endpointsKept := keepFromPrior(cfg, prior)
 	// And the output block, in either posture, but for a setting the config
 	// did not load with either (priorOutput).
@@ -941,7 +941,7 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 	warnOutputNotKept(stderr, outputNotKept)
 	if prior != nil {
-		warnEnrichNotKept(stderr, prior.Enrich.notKept)
+		warnEnrichNotKept(stderr, prior.Enrich)
 	}
 
 	if !*publicMode {

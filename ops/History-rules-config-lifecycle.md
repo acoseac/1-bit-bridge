@@ -3044,6 +3044,112 @@ alone.
 negative controls (six mutations in seven runs), is in
 `ops/engineering-log.md`, 2026-11-07, B744.
 
+## A console save writes the file's own value for each leaf a variable set (backlog B761, 2026-11-08)
+
+- **Every other leaf a `BRIDGE_*` variable set at the start is written by a console save as the file holds it, unless the save changed it: the load records the leaves the variables set (`Config.envSet`, which `Clone` copies), and the holder's save gives each one the update left at its live value, compared by value (`sameValue`: an empty list is none), the file's own value, decoded by `DecodeFile` from the bytes its turn found (`filedEnvValues`, beside `filedSwitches`), and writes it as no key at its zero value, what a file that writes none gives, whatever its tag (`Config.filed`, which `Clone` drops; `Config.marshal` gives such a field of Config's own omitempty on a copy, and every leaf whose tag writes its zero value is one); a leaf the save changed is written and published, and the variable sets it again at the next start, which the Settings page says** (2026-11-08, backlog B761, two rounds). **Don't write a variable's value into the file from a save that left its leaf at that value, or a key for a leaf the file gives only its zero value, read the file's own value but from the turn's bytes through `DecodeFile`, compare a leaf by `reflect.DeepEqual`, leave out a key at another value, re-encode the save through a `yaml.Node`, set a leaf of the saved copy through a pointer the published snapshot holds, or let a clone drop `envSet` or keep `filed`.**
+
+*The gap.* Load applies a `BRIDGE_*` variable over the file, the live
+holder publishes what Load gave it, and every console save (the settings
+PATCH, the variants folder, the roots, the player's three writes, the UPnP
+servers) goes through `RuntimeConfig.UpdateChecked`, which wrote the
+holder's snapshot whole, the variables' values in it. B617 kept the two
+opt-outs as the file holds them (`filedSwitches`, the bullet before this
+one in `config-lifecycle.md`); every other leaf a variable set was written
+back, so a start without the variable read its value from the file.
+
+*The boundary.* The fix sits where every console save already meets the
+file: in the holder's turn of the file's lock, after its changed-file
+refusal and before its save. `filedEnvValues` runs beside `filedSwitches`
+over the copy the holder saves (`saved := *next`, changed through a
+pointer, so the config writers' sweep still reads the save as the snapshot
+the holder's `bytes.Equal` refusal guards, B617 round 2's shape), and the
+snapshot published is `next`, the live values.
+
+*Which leaves.* `applyEnvOverrides` records the yaml path of each leaf it
+set (`Config.envSet`, sorted): `applyEnvValue` reports whether it set its
+leaf, so a value it ignores (a boolean or a whole number that does not
+read, an opt-out's white space) records nothing, and a legacy alias records
+the path it sets. `Clone` copies the record, so a snapshot an update
+published keeps the boot load's. A config no load made has none, and a
+save of it writes as it did.
+
+*The file's own value.* For each recorded leaf but the two opt-outs, whose
+rule stays `filedSwitches'` (a change to on writes no key), a save that
+left the leaf at its live value writes the leaf as the bytes its turn found
+give it, decoded by `DecodeFile`, Load's own decode, before Load's
+defaults, its paths and its checks: the file's own spelling, a relative
+path included, and the field's zero value where the file writes none,
+written as no key whatever the field's tag (round 2, below). Bytes that do not
+decode, which only a holder told nothing of its file can meet, leave the
+live value as it is. Each leaf of the copy is set by assignment to its own
+field (`envLeaf`: every step a struct held by value), never through a
+pointer the published snapshot holds. The opt-outs' skip is not
+load-bearing: an unchanged switch gets the same file value from either
+writer, and the comparison leaves a changed one to `filedSwitches`.
+
+*A change.* A save that changes such a leaf writes the change and
+publishes it, `live` or `restart` as the field's row says, and the variable
+sets the leaf again at the next start. The Settings page says both
+(`TestTheSettingsPageSaysASaveKeepsTheFilesOwnValueForAVariable`), as do
+`docs/docker.md` and `ops/settings-apply-semantics.md`.
+
+*Round 2: no key the file does not write, whatever the tag.* The first
+round wrote a leaf the file writes no value for as its zero value, which
+writes no key where the field omits an empty one; five fields write theirs
+as a key (`libraryRoots`, `listenAddress`, `dataDir`, `scanIntervalSec`,
+`libraryName`, all of Config's own), so a save of another setting under
+`BRIDGE_SCAN_INTERVAL_SEC` wrote `scanIntervalSec: 0` into a file without
+the key (Codex on round 1; a start still read the default, Load's defaults
+and `Normalize` reading those zeros as unset). `filedEnvValues` records
+each leaf it gives the file's own value (`Config.filed`, on the save's copy
+alone; `Clone` drops it), and the save's `Config.marshal` marshals a copy
+whose type (`reflect.StructOf`: the same fields, names, order and tags)
+gives each such field of Config's own omitempty: such a leaf is written as
+no key at its zero value and as it is at any other, and everything else is
+the same encoder's over the same values, byte for byte. Load decodes the
+file into a zero config (`loadData`, `DecodeFile`), so the zero value is
+what a file gives that writes no value for the leaf, writes it as null, or
+writes its zero value (`scanIntervalSec: 0`), which a start reads alike;
+the save writes all three as no key. A leaf below the top level omits its
+zero value by its own tag, every leaf a variable sets whose tag writes its
+zero value being a field of Config's own, so no section is rebuilt and no
+section's method (`PlayerConfig`'s `MarshalYAML`, its `IsZero`) is lost.
+
+*Rejected.* A `yaml.Node` round trip (`Node.Encode`, the key removed, the
+node marshalled) is not byte for byte: yaml.v3 re-encodes a plain `<<`
+string as `!!merge <<`. A second decode of the turn's bytes into a config
+whose leaves held a mark, to tell a leaf the file writes from one it does
+not, kept an explicit zero as a key, a difference no start sees: its two
+negative controls (every leaf read as written, and none) turned nothing
+red, and it was removed.
+
+*Round 2: an empty list.* `BRIDGE_METRICS_ALLOW_CIDRS=","` loads an empty
+list, `Clone` makes it none, and `reflect.DeepEqual` took the difference
+for an edit, so a save of another setting removed the file's
+`metrics.allowCidrs`, which a start without the variable then no longer
+read (Codex on round 1). The comparison is by value (`sameValue`): a list
+by its entries, an empty one the same as none, any other leaf as
+`reflect.DeepEqual` compares it, a pointer by what it points to.
+
+`TestASaveKeepsTheFilesOwnValueForEachVariable` (an integer, a pointer to
+an integer the file does not write, a pointer to a boolean, a list, a
+string and a legacy alias, each through serve's own boot read and two
+saves), `TestASaveThatChangesAVariablesSettingWritesAndPublishesTheChange`,
+`TestASaveOverAFileThatDoesNotDecodeWritesTheLiveValue`,
+`TestTheOptOutsVariablesAreStillWrittenAsTheirSwitchesAre`,
+`TestASaveWritesNoKeyTheFileDoesNotWrite` (the five, each absent and
+written as its zero value, through serve's boot read and two saves),
+`TestAnEmptyListOverrideASaveLeftKeepsTheFilesList`,
+`TestASaveWritesNoKeyForAnyLeafTheFileDoesNotWrite` (every leaf a variable
+sets but the opt-outs), `TestASavesTextIsYAMLMarshalsWithoutTheKeysItLeavesOut`,
+`TestEveryLeafWhoseZeroIsAKeyIsAtTheTopLevel`,
+`TestASaveKeepsALeafAMergeKeyWrites`, `TestACloneCarriesNoSavesRecord`
+(config), `TestAConsoleSaveKeepsTheFilesOwnValueForEachVariable`
+(cmd/bridge: the variants folder's save and the settings form's) and
+`TestTheSettingsPageSaysASaveKeepsTheFilesOwnValueForAVariable` (admin)
+pin it. The records, with their negative controls, are in
+`ops/engineering-log.md`, 2026-11-08, B761 and B761 round 2.
+
 ## Config, settings and process lifecycle
 
 - **An install of a target already staged on disk is REFUSED, and the refusal

@@ -481,7 +481,8 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   loading. The variables read as the keys do, a
   value that reads as neither being off (`switchEnvPaths`), and the
   holder's save writes a switch only when it changes it, else the file's
-  own value (`filedSwitches`; the other variables are B761's). AcoustID
+  own value (`filedSwitches`; every other variable's leaf by the same
+  rule, `filedEnvValues`, B761, in `config-lifecycle.md`). AcoustID
   stops with it: `fingerprintGates` degrades `fingerprintReady` with
   `enrichment_off`. On the wire while off, a miss on a MusicBrainz key is a
   `404 no_image` that is not terminal (`classifyArtworkMiss`), and
@@ -491,7 +492,8 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   and answer `enrichmentOff`, or 409 `enrichment-off` where no other facet
   can run; `bridge enrichment retry` relays a running bridge's answer and
   refuses offline before it opens the store; `bridge init --force` keeps
-  each switch written off (`priorEnrich`). **Don't build a client without
+  each switch written off, and each enrich base Load takes that is not the
+  default (`priorEnrich`; B761, in `cli-serve.md`). **Don't build a client without
   its switches or read a nil switch as on, send what a client's switches or
   a context's refuse, let a request on the wire outlive the interval, take
   an answer whose headers came after the flip, return from a client that
