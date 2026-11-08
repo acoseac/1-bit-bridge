@@ -221,6 +221,10 @@ func serveDataDirRecord(boot config.BootFile) string {
 // config to a record kept on a volume that is away is there and does not read
 // (B741's round 2, Codex on #1441: it read as no record, so serve made the
 // data dir in the bare mount point and renamed a fresh record over the link).
+// An entry found once the read missed is read again, once (readAgain): the
+// read can miss a record another process writes as it reads (serve's first
+// record, beside bridge doctor or a command), or a link whose target a
+// volume mounting brings, which a read again finds.
 func readDataDirRecord(path string) (dataDirRecord, bool, error) {
 	return readDataDirRecordWith(path, recordReadSteps{})
 }
@@ -228,7 +232,7 @@ func readDataDirRecord(path string) (dataDirRecord, bool, error) {
 // recordReadSteps are the moments of a read of the record at which a test
 // acts as another process would, each nil but in a test: afterRead, once the
 // read has missed, before the record's entry is looked up; afterLstat, once
-// the lookup has found an entry.
+// the lookup has found an entry, before it is read again.
 type recordReadSteps struct {
 	afterRead, afterLstat func()
 }
@@ -240,20 +244,9 @@ func readDataDirRecordWith(path string, at recordReadSteps) (dataDirRecord, bool
 		if at.afterRead != nil {
 			at.afterRead()
 		}
-		switch fi, lerr := os.Lstat(path); {
-		case errors.Is(lerr, fs.ErrNotExist):
+		var absent bool
+		if b, absent, err = readAgain(path, at); absent {
 			return dataDirRecord{}, false, nil
-		case lerr != nil:
-			err = lerr
-		case fi.Mode()&fs.ModeSymlink != 0:
-			if at.afterLstat != nil {
-				at.afterLstat()
-			}
-			err = &fs.PathError{Op: "open", Path: path, Err: errLinkToNothing}
-		default:
-			if at.afterLstat != nil {
-				at.afterLstat()
-			}
 		}
 	}
 	if err != nil {
@@ -264,6 +257,39 @@ func readDataDirRecordWith(path string, at recordReadSteps) (dataDirRecord, bool
 		return dataDirRecord{}, false, errDoesNotRead
 	}
 	return r, true, nil
+}
+
+// readAgain is the read of the record at path once a read of it missed:
+// absent where os.Lstat finds no entry there; else the entry, a regular file
+// or a link, is read again, once, through readSmallFile, and where that read
+// misses too the entry is looked up once more: absent where it is gone by
+// then, errLinkToNothing where a link is still there, and otherwise that
+// read's own error (B741's round 3: the entry found answered at once, a
+// regular file with the miss's ENOENT and a link with errLinkToNothing,
+// though the record may have just been written there, or a link's target
+// just mounted; the Claude API on #1441, and the reviews of round 3's brief).
+func readAgain(path string, at recordReadSteps) (b []byte, absent bool, err error) {
+	switch _, lerr := os.Lstat(path); {
+	case errors.Is(lerr, fs.ErrNotExist):
+		return nil, true, nil
+	case lerr != nil:
+		return nil, false, lerr
+	}
+	if at.afterLstat != nil {
+		at.afterLstat()
+	}
+	if b, err = readSmallFile(path, dataDirRecordMax); !errors.Is(err, fs.ErrNotExist) {
+		return b, false, err
+	}
+	switch fi, lerr := os.Lstat(path); {
+	case errors.Is(lerr, fs.ErrNotExist):
+		return nil, true, nil
+	case lerr != nil:
+		return nil, false, lerr
+	case fi.Mode()&fs.ModeSymlink != 0:
+		return nil, false, &fs.PathError{Op: "open", Path: path, Err: errLinkToNothing}
+	}
+	return nil, false, err
 }
 
 // dataDirCause is why the check refuses the data dir its record names
