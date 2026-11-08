@@ -75,9 +75,8 @@ func finishTakeBackDeadline(stopAt, now time.Time) time.Time {
 // stopped and killed in a teardown that never ends, stays counted, so the
 // third such start's successor rolls the install back (the third round: the
 // second began it as any stop arrived, and a version that hung past its
-// admission never reached its rollback). A slow but healthy start that a
-// supervisor kills in a slow teardown before it was ready counts too, which
-// errs toward a rollback that the confirmation of a later start forestalls.
+// admission never reached its rollback). A slow but healthy start killed in
+// a slow teardown before it was ready is backlog B760's.
 // A panic on serve's goroutine ends a start uncleanly, whatever came before
 // it (backlog B760): its end takes nothing back, and a take-back that began as
 // the stop arrived and reached its write is undone (countAgain).

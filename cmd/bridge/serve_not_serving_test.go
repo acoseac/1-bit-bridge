@@ -60,9 +60,9 @@ func (w *probationWatch) waitForWithin(kind probationEventKind, within time.Dura
 // TestAStartThatHasNotBegunServingIsSaidNotReady: a start held just before it
 // begins serving, past its deadline from its admission, is said not to have
 // begun serving, once, and recorded not ready (NotReady), its count its own,
-// and `bridge doctor` reads a fail beside it, not "ok, on probation"; its
-// clean stop takes the count back as before, NotReady kept, so the doctor
-// still fails; and a later start that serves clears NotReady at its admission,
+// and `bridge doctor` reads a fail beside it, not "ok, on probation"; after
+// its clean stop NotReady is kept, so the doctor still fails (what the stop
+// does to its count is backlog B760's); and a later start that serves clears NotReady at its admission,
 // the doctor reading ok beside it. Until B760 nothing was said of such a start.
 func TestAStartThatHasNotBegunServingIsSaidNotReady(t *testing.T) {
 	r := newRefusedInstall(t, "")

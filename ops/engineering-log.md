@@ -87548,8 +87548,8 @@ before serving, a 200 ms deadline: no not-ready event within 20 s, nothing on
 stderr) and `TestAStartThatBeginsServingEndsItsWatch` (no watch event before
 the first round). `TestAStartStoppedBeforeItsDeadlineIsNotSaidNotReady`, a
 guard, passed on both. Through the fix the held test reads, while held,
-NotReady and the doctor's fail; after the clean stop, the count 0, NotReady
-kept and the fail kept; and beside a later start that serves, NotReady cleared
+NotReady and the doctor's fail; after the clean stop, NotReady kept and the
+fail kept (the count: backlog B760); and beside a later start that serves, NotReady cleared
 at its admission and the doctor ok.
 
 ### R5. The take-back's and the count's write failures (one fixed)
