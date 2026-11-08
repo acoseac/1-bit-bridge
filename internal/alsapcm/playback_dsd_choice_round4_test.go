@@ -205,6 +205,19 @@ func TestASuccessorDroppedWhileItsSinkWritesItsPrefillIsTakenBack(t *testing.T) 
 	wentOnGiven(t, d, ids, "its prefill's DSD silence alone", silence)
 }
 
+// stoppedOrOpenedC waits until playback has stopped or the node has been
+// opened a third time, for c, whichever comes first, and fails t, saying why,
+// on the second: c's own sink opened, the session gone on past b.
+func (d *dsdRig) stoppedOrOpenedC(why string) {
+	d.t.Helper()
+	stopped := func() bool { s := d.eng.Snapshot(); return s.State() == engine.Stopped && s.LastStop().Reason != "" }
+	waitOnEither(d.t, "playback to stop, or c's own sink to open", d.eng.Changed, func() <-chan struct{} { return d.k.When(func(v alsapcm.KernelView) bool { return v.Opens >= 3 }) },
+		func() bool { return d.k.View().Opens >= 3 || stopped() })
+	if v := d.k.View(); v.Opens >= 3 {
+		d.t.Fatalf("c's own sink opened (%d opens), the session gone on past b: %s", v.Opens, why)
+	}
+}
+
 // droppedAtAdmission is heldAdmission with b's entry deleted and c handed off
 // in b's place while the admission is held. It answers c's occurrence and the
 // function that lets the admission go.
@@ -319,6 +332,7 @@ func TestAnActivationsFailureBesideADropIsJudgedByItsCause(t *testing.T) {
 		letAdmit()
 		d.k.Await(t, "b's node closed by its sink once its activation answered", func(v alsapcm.KernelView) bool { return v.Closes >= 2 })
 		letFault()
+		d.stoppedOrOpenedC("the revocation's fault did not stand")
 		s := d.waitEnded()
 		d.rig.stop()
 		if f := s.Faults(); len(f) != 1 || f[0].Reason != "native_revoked" {
@@ -336,6 +350,7 @@ func TestAnActivationsFailureBesideADropIsJudgedByItsCause(t *testing.T) {
 		d, oc, letAdmit := droppedAtAdmission(t, w)
 		d.unit.refuseNext(1)
 		letAdmit()
+		d.stoppedOrOpenedC("the device's refusal of b's node was taken back as the drop's")
 		s := d.waitEnded()
 		d.rig.stop()
 		if f := s.Faults(); len(f) != 1 || f[0].Reason != engine.ReasonDeviceError || !strings.Contains(f[0].Detail, "card 5 is another unit now") {
