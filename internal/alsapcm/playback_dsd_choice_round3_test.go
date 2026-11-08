@@ -38,6 +38,24 @@ func (d *dsdRig) sessionOf() engine.SessionID {
 	return d.waitCall("the engine's first Start", func(c call) bool { return c.kind == "start" }).s
 }
 
+// noteOf waits for the backend's note of kind for occurrence o's sink,
+// reading the rig's notes, which nothing else in these tests reads.
+func (d *dsdRig) noteOf(kind playback.NoteKind, o engine.OccurrenceID, what string) {
+	d.t.Helper()
+	deadline := time.After(alsapcm.Watchdog())
+	for {
+		select {
+		case n := <-d.notes:
+			if n.Kind == kind && n.Occurrence == o {
+				return
+			}
+		case <-deadline:
+			alsapcm.LogGoroutines(d.t)
+			d.t.Fatalf("waited %v for %s", alsapcm.Watchdog(), what)
+		}
+	}
+}
+
 // opensOrStopped waits until the fake node has been opened n times, or
 // playback stopped, and fails t, naming the stop, where it stopped first.
 func (d *dsdRig) opensOrStopped(n int, what string) {
@@ -174,9 +192,10 @@ func TestASuccessorDroppedAtItsActivationIsTakenBackUnwritten(t *testing.T) {
 			t.Fatalf("the cut of b, none of it written: %v %v, want true", ok, err)
 		}
 		act.letGo()
-		waitOnEither(t, "b's node closed, or playback stopped", d.eng.Changed,
-			func() <-chan struct{} { return d.k.When(func(v alsapcm.KernelView) bool { return v.Closes >= 2 }) },
-			func() bool { return d.k.View().Closes >= 2 || d.eng.Snapshot().State() == engine.Stopped })
+		// The note of b's sink closed, which the taking back sends once b's
+		// decoder is closed (unadopt): the cut's own revocation of b's sink
+		// closes its node, and sends none.
+		d.noteOf(playback.NoteClosed, ob, "b's sink closed")
 		if s := d.eng.Snapshot(); s.State() == engine.Stopped || count(d.rec.events(), "fault", 0) != 0 {
 			t.Fatalf("b cut at its activation stopped the session (%s: %s): faults %+v, events %s", s.LastStop().Reason, s.LastStop().Detail, s.Faults(), kinds(d.rec.events()))
 		}
@@ -198,8 +217,14 @@ func TestASuccessorDroppedAtItsActivationIsTakenBackUnwritten(t *testing.T) {
 		stopped := make(chan error, 1)
 		go func() { stopped <- d.eng.Stop(bg) }()
 		awaitHeld(t, "the session's release", rel.in)
-		rel.letGo()
+		// The release has come and the session's life has not ended yet (its
+		// release is held at the Releasing seam): b's activation goes on there,
+		// and its fence's answer is the release's, noted, or a fault.
 		act.letGo()
+		waitOn(t, "b's activation refused for the release, or a fault", d.rec.ch, func() bool {
+			return slices.Contains(d.rec.fencedSteps(), "activate") || count(d.rec.events(), "fault", 0) != 0
+		})
+		rel.letGo()
 		select {
 		case err := <-stopped:
 			if err != nil {
@@ -216,8 +241,11 @@ func TestASuccessorDroppedAtItsActivationIsTakenBackUnwritten(t *testing.T) {
 		if !d.files.firstClosed("b") {
 			t.Errorf("b's decoder and content are open once the release was acknowledged")
 		}
-		if s := d.eng.Snapshot(); len(s.Faults()) != 0 {
-			t.Errorf("the release faulted: %+v", s.Faults())
+		if s := d.eng.Snapshot(); len(s.Faults()) != 0 || count(d.rec.events(), "fault", 0) != 0 {
+			t.Errorf("the release faulted: %+v; events %s", s.Faults(), kinds(d.rec.events()))
+		}
+		if got := d.rec.fencedSteps(); !slices.Equal(got, []string{"activate"}) {
+			t.Errorf("the steps refused for the release: %q, want b's activation's", got)
 		}
 	})
 }

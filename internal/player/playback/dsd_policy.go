@@ -882,9 +882,9 @@ func (s *session) reconcileDSD(next *dsdSet) {
 	wake(s.wakeR)
 }
 
-// errReplanned is an activation's check finding its occurrence being handed
-// off again (checkDSDActivation): its sink is taken back unwritten
-// (unadopt), never a fault.
+// errReplanned is an activation finding its occurrence being handed off
+// again (checkDSDActivation) or dropped (activateOutput's fence, B728 B9
+// round 3): its sink is taken back unwritten (unadopt), never a fault.
 var errReplanned = errors.New("player backend: the occurrence is being handed off again")
 
 // checkDSDActivation is a native, DoP or converted occurrence's check as its

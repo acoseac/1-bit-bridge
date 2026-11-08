@@ -278,10 +278,19 @@ func (s *session) activateOutput(ctx context.Context, o *occ, out *output) error
 	}
 	s.mu.Lock()
 	fenced := s.releasing || s.nativeRevoked || o.dropped || s.cur != out
+	// A successor dropped while its sink was adopted and its activation began
+	// (its replacement, an edit's, a cut) is taken back from its sink
+	// unwritten, its decoder closed, and the session goes on (errReplanned,
+	// unadopt), never a fault (B728 B9 round 3, point 1); a session being
+	// released or whose DSD was revoked ends at the fence.
+	replanned := o.dropped && !o.leading && !s.releasing && !s.nativeRevoked
 	paused := s.paused
 	s.mu.Unlock()
 	if fenced {
 		out.native.Revoke()
+		if replanned {
+			return errReplanned
+		}
 		return errors.New("native activation fenced")
 	}
 	if o.permission != nil {

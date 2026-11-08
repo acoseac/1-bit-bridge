@@ -91,9 +91,10 @@ type Seams struct {
 	// Fenced runs where the backend finds the session released, by its
 	// Release or by the engine's taking it before that Release came
 	// (engine.StartRequest.Released), at a step that would acquire, open,
-	// admit, adopt, resume, write or cut, and refuses that step (B674 round
-	// 3): step names it ("start", "open", "admit", "adopt", "resume",
-	// "write", "cut"). A sink refused at its adoption is closed before it
+	// admit, adopt, activate, resume, write or cut, and refuses that step
+	// (B674 round 3): step names it ("start", "open", "admit", "adopt",
+	// "activate", a successor's sink's activation, B728 B9 round 3,
+	// "resume", "write", "cut"). A sink refused at its adoption is closed before it
 	// runs; one refused at its check after open is closed by the sink after
 	// it. It must not call the backend.
 	Fenced func(step string)

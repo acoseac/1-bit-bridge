@@ -609,7 +609,15 @@ func (s *session) transition(o *occ) bool {
 			}
 			l.lock()
 			o.claimed = false
+			released := s.releasedLocked()
 			l.unlock()
+			if err != nil && released {
+				// Its release came while the sink was activated, which the
+				// activation's fence answers, before the session's life has ended:
+				// the session ends, no fault (B728 B9 round 3).
+				s.b.fenced("activate")
+				return false
+			}
 			if err != nil {
 				return s.openFailed(o, err)
 			}
@@ -640,10 +648,14 @@ func (s *session) transition(o *occ) bool {
 
 // unadopt takes back out, the sink just opened and made current for o,
 // once o's activation found it handed off again while a choice's write it
-// waited for settled (errReplanned): no frame of o reached the sink, so it is
+// waited for settled, or dropped (its replacement, an edit's, a cut: B728 B9
+// round 3, point 1), errReplanned: no frame of o reached the sink, so it is
 // closed unwritten, nothing is current, and the producer's next step waits
-// for o's replacement. A session paused meanwhile is paused holding no
-// device, its release reported as such a pause's is.
+// for o's replacement or goes on to what follows. A dropped o's decoder and
+// content are closed here: the drop left them to the producer, o being the
+// occurrence it writes (dropLocked), and nothing else closes them until the
+// session's end. A session paused meanwhile is paused holding no device, its
+// release reported as such a pause's is.
 func (s *session) unadopt(o *occ, out *output) bool {
 	s.mu.Lock()
 	if s.cur == out {
@@ -651,6 +663,9 @@ func (s *session) unadopt(o *occ, out *output) bool {
 	}
 	if s.writing == o {
 		s.writing = nil
+		if o.dropped {
+			s.closeOcc(o)
+		}
 	}
 	o.out, o.claimed = nil, false
 	if s.paused {
