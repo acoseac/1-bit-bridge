@@ -87664,3 +87664,19 @@ else failed, and the set with no mutation passed.
 
 As in round 1: no case-insensitive volume (the stand-in probe carries it); Windows' `FlushFileBuffers` and
 macOS run on CI's legs, vetted here.
+
+### Gates
+
+At a0a52240 (the code is 3fb52355's), inside the build slot, on Go 1.27.3, in two sessions. The first: `go
+test -race -count=1 -timeout 30m` with CI's tags over `./cmd/bridge/... ./internal/fsutil/...` passed
+(1,290 s; the Linux-only tests run here); `make vet` passed, and with `GOOS=windows`, `GOOS=darwin` and
+`GOOS=linux GOARCH=386`; `make fmt` changed nothing. The second: `make test` passed, 89 packages ok, none
+failed (2,092 s; cmd/bridge 1,368 s), its TMPDIR under `.tmp/_b741`; `make build-all` and `make docs-check`
+passed. `scripts/qualification-version` passed against main's 3d0a0d05, the merge's main parent. The rules
+patch: `git apply --check` clean, and on a `git archive` copy with it applied, its landing asserted in each
+of its four files (the first check ran `git apply` with its cwd in the copy, inside the worktree's `.tmp`,
+where git skips every path outside the cwd and exits 0, and `verify_moves` saw the tree unchanged; a
+ceiling, `GIT_CEILING_DIRECTORIES`, keeps it off the checkout), `check-doc-budgets.py` passed (cli-serve.md
+55.8 KB, scanner.md 42.2 KB, the worst load unchanged), the self-tests of `rules-for.py` and `move_entry.py`
+passed, and `verify_moves.py --base HEAD` found no citation broken, its MISSING exactly the seven blocks the
+patch edits, each one's successor there. Every test name the patch cites exists (55 of 55).
