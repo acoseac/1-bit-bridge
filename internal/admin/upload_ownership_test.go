@@ -695,6 +695,9 @@ func (rig *ownershipRig) serve(w http.ResponseWriter, r *http.Request) {
 		// Another tab's Discard it: the session deleted through the console,
 		// and never seen by the page.
 		del := httptest.NewRequest(http.MethodDelete, "/api/upload/sessions/"+url.PathEscape(r.URL.Query().Get("sid")), nil)
+		// httptest's own remote (192.0.2.1) is not loopback, and the console
+		// refuses every request that isn't (loopbackOnly).
+		del.RemoteAddr = "127.0.0.1:1234"
 		del.Host = testConsoleHost
 		del.Header.Set("Origin", "http://"+testConsoleHost)
 		rec := httptest.NewRecorder()
