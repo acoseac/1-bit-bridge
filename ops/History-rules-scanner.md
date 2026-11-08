@@ -3736,7 +3736,7 @@
   `TestTheWatcherWatchesTheVolumeMountedOverANestedRootItWatchedBare` and
   `TestTheWatcherWatchesARootRemountedInsideTheDebounce`.
 
-- **A data dir's record keeps how each folder on the way of its two spellings compared the names in it when serve wrote it (`fsutil.FoldingOnTheWay` over `fsutil.FoldingIn`, CaseUnknown included), and the check compares a spelling of the data dir in another case by that, probing nothing (`fsutil.SameAsRecorded`, `SamePathAsRecorded`): once the volume is away every folder below its mount point is gone, and a probe answers for the folder left at the mount point, on the volume above; a folder not read as case-sensitive takes two spellings for one, the direction that refuses; a record written before B741 holds none and is compared by the probe (`fsutil.SamePath`) until a start with the volume there writes it again, and a record its own reader would refuse for its size keeps none** (2026-11-08, backlog B741's gap 3; the identity is cli-serve.md's B741 bullet). **Don't probe a record's folders at the check where the record says how they compared names, take a folder read as case-sensitive for one that folds, or write a record its reader refuses.** `TestARecordedFoldingDecidesACaseOnlyDifference` (its case-sensitive sibling the control), `TestFoldingOnTheWayAsksEachFolderOnce`, `TestSamePathAsRecordedProbesNoVolume`, `TestServeRefusesTheDataDirItRecordedInAnotherCaseWhereItsFolderFoldsCase`, `TestServeRecordsHowEachFolderOnItsDataDirsWayComparesNames`, `TestARecordItsReaderWouldRefuseKeepsNoFolding` and, on a volume that folds case, `TestServeRefusesTheDataDirInAnotherCaseOnACaseInsensitiveVolume` (`BRIDGE_TEST_CASE_INSENSITIVE_DIR`) pin it.
+- **A data dir's record keeps how each folder on the way of each of its two spellings compared the names in it when serve wrote it, one letter a folder from the volume's root down (`dataDirFolding`, `resolvedFolding`: `fsutil.FormatFolding` of `fsutil.FoldingOnTheWay` over `fsutil.FoldingIn`, CaseUnknown included), so that the record grows with its paths alone, however deep, and the check compares a spelling of the data dir in another case by that, probing nothing (`fsutil.SameAsRecorded`, `SamePathAsRecorded`): once the volume is away every folder below its mount point is gone, and a probe answers for the folder left at the mount point, on the volume above; a folder not read as case-sensitive takes two spellings for one, the direction that refuses, and so does every folder of a spelling whose folding is not one of its folders; a record holding an identity or a folding is never compared by the probe, and one written before B741, which holds neither, is (`fsutil.SamePath`) until a start with the volume there writes it again; the reader takes 2 MiB, past the record of any path an OS takes, and a record whose folding alone would take it past that keeps the letter u, every folder unknown, one longer without it never written** (2026-11-08, backlog B741's gap 3, and its round 2, Codex on #1441: keyed by each folder's whole path the record grew as the square of the depth, and past its reader's 64 KiB was written without its folding, which the check compared by the probe; the identity is cli-serve.md's B741 bullet). **Don't probe a record's folders at the check where the record holds an identity or a folding, key a folder's folding by its path, take a folder read as case-sensitive for one that folds, read a folding that is not of its spelling's folders as any of them, or write a record its reader refuses.** `TestARecordedFoldingDecidesACaseOnlyDifference` (its case-sensitive sibling the control), `TestFoldingOnTheWayAsksEachFolderOnce`, `TestSamePathAsRecordedProbesNoVolume`, `TestParseFoldingReadsWhatFormatFoldingWrites`, `TestServeRefusesTheDataDirItRecordedInAnotherCaseWhereItsFolderFoldsCase`, `TestServeRecordsHowEachFolderOnItsDataDirsWayComparesNames`, `TestServeKeepsTheFoldingOfADataDirHoweverDeep`, `TestARecordItsReaderWouldRefuseKeepsNoFolding` and, on a volume that folds case, `TestServeRefusesTheDataDirInAnotherCaseOnACaseInsensitiveVolume` (`BRIDGE_TEST_CASE_INSENSITIVE_DIR`) pin it.
   B651's check compared the record's spellings with the config's as the
   directory they name, through `fsutil.SamePath`, which folds a case-only
   difference where `caseInsensitiveFS` finds the volume holding the path
@@ -3754,22 +3754,43 @@
   mount point is asked of the mounted volume's names), and the check compares
   element by element by that (`fsutil.SameAsRecorded`), a case-only
   difference one data dir where its folder was not read as case-sensitive:
-  read as folding case, read as unknown, or not recorded. That is the
+  read as folding case, read as unknown, or not recorded (a folding that is
+  not of the spelling's folders says nothing of any of them). That is the
   direction that refuses: B651's protection is the refusal, and a data dir set
   on purpose to a directory that differs from the recorded one in case alone,
   in a folder that could not tell, is refused, its refusal saying how to go
   on. `fsutil.SamePathAsRecorded` keeps SamePath's resolution of what still
   resolves (a link at the mount point, outside the volume) and compares the
   recorded spelling with the config's as written and as it resolves. A
-  record without the folding, written before B741, falls back to the probe,
-  and the gap stays open for it until a start with the volume there writes
-  the record again. The comparison takes the stored folding as an input, so
+  record holding neither an identity nor a folding, written before B741,
+  falls back to the probe, and the gap stays open for it until a start with
+  the volume there writes the record again; one holding either never does.
+  The comparison takes the stored folding as an input, so
   a unit test covers it on every host with a case-sensitive sibling as its
   control; a serve test stands a probe in for a volume that folds case
   (`dataDirRecording.folding`); and a real one is an opt-in case behind
   `BRIDGE_TEST_CASE_INSENSITIVE_DIR`, a directory on a volume that folds case
   whose own name its folder above compares with case, which skips naming the
-  variable (legion0 can make none without root). A record whose folding would
-  make it longer than its reader takes (64 KiB, a path nested past a hundred
-  levels) is written without it, since a record that does not read refuses
-  every start. The record is in `ops/engineering-log.md`, 2026-11-08, B741.
+  variable (legion0 can make none without root). The record is in
+  `ops/engineering-log.md`, 2026-11-08, B741.
+
+  Round 2 (Codex on #1441). Round 1 kept each folder's folding keyed by the
+  folder's whole path, so the record grew as the square of the data dir's
+  depth (45,510 bytes for a direct path 200 folders deep; Codex measured
+  66,186 for a path of 495 bytes in 240), and a record past its reader's
+  64 KiB was written without its folding, which the check then compared by
+  the probe: the gap open again at a depth an ordinary path reaches. The
+  folding is one letter a folder now (`fsutil.FormatFolding`: s, i or u),
+  one string a spelling (`dataDirFolding`, `resolvedFolding`), aligned with
+  the spelling's folders from its volume's root down
+  (`fsutil.FoldingOnTheWay` answers a slice, a folder shared by both
+  spellings asked once): 1,320 bytes for the same 200 folders. A folding
+  not of its spelling's folders (none, or another path's) says nothing of
+  any of them, every folder CaseUnknown, the refusing direction; a record
+  holding an identity or a folding is never compared by the probe. The
+  reader takes 2 MiB, past the record of any path an OS takes (both
+  spellings at Windows' 32,767 units, each escaped as JSON escapes at
+  most); a record whose folding alone would take it past that keeps the
+  letter u for each spelling, read as every folder unknown, and one longer
+  without it is not written, never one its reader refuses. The record is
+  in `ops/engineering-log.md`, 2026-11-08, B741 round 2.
