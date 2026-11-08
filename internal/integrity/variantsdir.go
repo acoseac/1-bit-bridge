@@ -101,8 +101,11 @@ func VariantsDirSweepBlock(dir string) SidecarDirBlock {
 }
 
 // WaveformDirSweepBlock is VariantsDirSweepBlock for the waveform directory:
-// the same probe, by the same rules, finding a curve where the variants
-// probe finds a rendition. A waveform directory that is missing, or holds no
+// the same probe, by the same rules but one, finding a curve where the
+// variants probe finds a rendition. The one: a curve is a regular file, and
+// a link counts for nothing, neither a curve whatever it leads to nor, as a
+// link to a directory, a tree that may hold curves (sidecarFamily.links,
+// backlog B652's round 2). A waveform directory that is missing, or holds no
 // curve while the catalog records curves, is what a volume that is away
 // looks like, and what a directory emptied by hand looks like too, which the
 // directory alone cannot tell apart; the regeneration guard refuses both

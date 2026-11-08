@@ -567,6 +567,26 @@ func TestNoCurveIsRenderedAgainOverAWaveformDirectoryGoneAwayOrEmptied(t *testin
 		f.lookup(t, f.tracks[0])
 		f.requireNothingRegenerated(t, f.tracks[0], "last curve deleted")
 	})
+	t.Run("only a link to an empty folder", func(t *testing.T) {
+		// A link is never a curve, whatever it leads to (round 2): the tree
+		// holds none while the rows record three.
+		f := newRegenFixture(t, 3)
+		if err := os.RemoveAll(f.dir); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(f.dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		elsewhere := t.TempDir()
+		if err := os.Symlink(elsewhere, filepath.Join(f.dir, "Artist")); err != nil {
+			t.Skipf("symlink: %v", err)
+		}
+		f.lookup(t, f.tracks[0])
+		f.requireNothingRegenerated(t, f.tracks[0], "a link only")
+		if left, err := os.ReadDir(elsewhere); err != nil || len(left) != 0 {
+			t.Errorf("the folder the link leads to holds %v (%v), want nothing made through the link", left, err)
+		}
+	})
 	t.Run("emptied past the threshold", func(t *testing.T) {
 		f := newRegenFixture(t, 30)
 		for _, rel := range f.tracks[:11] {

@@ -27,7 +27,9 @@ import (
 //     is the mount-loss probe (WaveformDirSweepBlock): what a volume that
 //     is away looks like. The last curve's deletion reads the same way and
 //     is refused with it, conservatively, since the directory alone cannot
-//     tell the two apart;
+//     tell the two apart. A curve is a regular file: a link is never one,
+//     whatever it leads to, and a link to a directory is no evidence that
+//     the tree holds any (sidecarFamily.links);
 //   - more than WaveformRegenMaxMissingPercent of the rows that record a
 //     curve with no curve at either location (missing, or a partial copy at
 //     the canonical path), past massDeleteFloor, while the directory still
@@ -35,7 +37,11 @@ import (
 //     emptied past the threshold;
 //   - the directory asked again by identity once every row is classified,
 //     since a volume that went during the judgment leaves the rows after it
-//     reading as missing (backlog B203's rule).
+//     reading as missing (backlog B203's rule);
+//   - and the tree probed again for a curve just before the judgment admits,
+//     whatever the floor and the ratio said: a tree emptied in place since
+//     the first probe keeps its identity, and below the floor the ratio
+//     looks at nothing.
 //
 // A judgment that admits names the rows it found to be regenerated (the
 // rows it may admit until the next one) and the waveform directory it saw,
@@ -100,6 +106,10 @@ type WaveformJudgeOptions struct {
 	// at already prove the refusal (missing rows can only be added by the
 	// rest), and is Undecided otherwise: it never admits.
 	MaxRows int
+
+	// afterProbe, a test's seam, runs once the probe that begins the
+	// judgment has passed, before any row is classified.
+	afterProbe func()
 }
 
 // WaveformJudgment is one look at the whole waveform catalog.
@@ -182,6 +192,9 @@ func JudgeWaveformCatalog(ctx context.Context, dir string, rows []WaveformSnapsh
 		j.Refusal, j.Reason = refusalOfBlock(block)
 		return j
 	}
+	if opts.afterProbe != nil {
+		opts.afterProbe()
+	}
 	repairable := make(map[string]struct{})
 	for _, r := range rows {
 		if ctx.Err() != nil {
@@ -230,6 +243,21 @@ func JudgeWaveformCatalog(ctx context.Context, dir string, rows []WaveformSnapsh
 	// again in any case, before they write.
 	if changed := dirChanged(dir, block.Info, waveformSidecars, "check"); changed != "" {
 		j.Refusal, j.Reason = WaveformRefusalDirAway, changed
+		return j
+	}
+	// And the tree looked at again for a curve, whatever the floor and the
+	// ratio said: one emptied in place since the probe (its identity the
+	// same, so neither check above sees it) reads below the floor as a few
+	// curves to render again, and the ratio, below its floor, looks at
+	// nothing. A tree that holds no curve now, while the rows record one, is
+	// refused as the probe refuses it, a judgment its budget stops included
+	// (backlog B652, round 2).
+	if last := WaveformDirSweepBlock(dir); last.Reason != "" {
+		j.Refusal, j.Reason = refusalOfBlock(last)
+		j.Reason = "looked at again before admitting: " + j.Reason
+		return j
+	} else if !os.SameFile(last.Info, block.Info) {
+		j.Refusal, j.Reason = WaveformRefusalDirAway, "the waveform directory is no longer the directory this check began on"
 		return j
 	}
 	if j.Looked < j.Rows {
@@ -429,8 +457,11 @@ func (g *WaveformRegenGuard) judge(dir string) {
 			}
 		}
 	}
-	g.noteLocked(j)
+	say := g.noteLocked(j)
 	g.mu.Unlock()
+	if say != nil {
+		say()
+	}
 
 	if g.cfg.OnJudged != nil {
 		g.cfg.OnJudged(j)
@@ -446,19 +477,28 @@ func (g *WaveformRegenGuard) judge(dir string) {
 	}
 }
 
-// noteLocked logs a judgment through the refusal latch.
-func (g *WaveformRegenGuard) noteLocked(j WaveformJudgment) {
+// noteLocked moves the refusal latch for j, under g.mu, and returns the line
+// the latch says for it, nil for none, which the caller logs once it has let
+// the lock go: a log sink that blocks holds no Ask and no Close then
+// (backlog B652, round 2).
+func (g *WaveformRegenGuard) noteLocked(j WaveformJudgment) func() {
 	if j.Refusal == "" {
-		if ended := g.refusal.lift(); ended != "" {
+		ended := g.refusal.lift()
+		if ended == "" {
+			return nil
+		}
+		return func() {
 			logger.Info(msgWaveformRegenLifted,
 				slog.Int("rows", j.Rows),
 				slog.Int("toRegenerate", j.ToRegenerate()),
 				slog.String("ended", string(ended)),
 			)
 		}
-		return
 	}
-	if g.refusal.refuse(j.At, j.Refusal) {
+	if !g.refusal.refuse(j.At, j.Refusal) {
+		return nil
+	}
+	return func() {
 		logger.Warn(msgWaveformRegenRefused,
 			slog.String("reason", j.Reason),
 			slog.String("kind", string(j.Refusal)),
@@ -470,7 +510,11 @@ func (g *WaveformRegenGuard) noteLocked(j WaveformJudgment) {
 
 // Close ends the guard: no Ask is answered but WaveformClosed, no Admit is
 // told after it, and the judgment under way is cancelled and joined,
-// bounded by stopGrace, as the package's other loops are.
+// bounded by stopGrace, as the package's other loops are. It returns within
+// that bound whatever the log does: the judgment logs outside the lock
+// Close takes, and the warning that the grace ran out is said from a
+// goroutine of its own, since a log sink that blocks may be what holds the
+// judgment (backlog B652, round 2).
 func (g *WaveformRegenGuard) Close() {
 	g.mu.Lock()
 	g.closed = true
@@ -486,7 +530,7 @@ func (g *WaveformRegenGuard) Close() {
 	select {
 	case <-done:
 	case <-t.C:
-		logger.Warn("waveform regeneration: a judgment of the catalog did not stop within the grace; leaving it")
+		go logger.Warn("waveform regeneration: a judgment of the catalog did not stop within the grace; leaving it")
 	}
 }
 

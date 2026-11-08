@@ -93,8 +93,10 @@ func checkWaveformRegeneration(ctx context.Context, d Deps) Check {
 		return ok(checkNameWaveformRegeneration, "no analysis row records a waveform yet")
 	}
 	gone := r.Missing + r.Mismatched
+	// The scope is a budget's, which stopped the probe after some rows: a
+	// refusal at the probe looked at none, and says so by naming no scope.
 	scope := ""
-	if r.Looked < r.Rows {
+	if r.Looked > 0 && r.Looked < r.Rows {
 		scope = fmt.Sprintf(" (the first %d of %d row(s))", r.Looked, r.Rows)
 	}
 	var parts []string

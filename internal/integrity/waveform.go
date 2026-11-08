@@ -50,15 +50,24 @@ import (
 // the one row (JudgeWaveformCatalog, WaveformRegenGuard): a waveform
 // directory that is missing, holds no curve (what a volume that is away
 // looks like, and a directory emptied by hand, the last curve's deletion
-// included), cannot be read, or has lost more than
-// WaveformRegenMaxMissingPercent of the catalog's curves while it still
-// holds curves (massMissingRefusal, the variant reapers' relocation
-// decision over the waveform family), regenerates nothing, one track at a
-// time or otherwise, and `bridge doctor`'s waveform-regeneration line says
-// why. And the job carries the waveform directory the judgment saw, asked
-// again just before it makes a directory or a file and before it renames
-// the curve into place (fsutil.DirStillIs), so a volume that goes after
-// the lookup gets no directory, no file and no strike.
+// included; a curve is a regular file, never a link), cannot be read, or
+// has lost more than WaveformRegenMaxMissingPercent of the catalog's
+// curves while it still holds curves (massMissingRefusal, the variant
+// reapers' relocation decision over the waveform family), regenerates
+// nothing, one track at a time or otherwise, the tree looked at again for
+// a curve just before a judgment admits; and `bridge doctor`'s
+// waveform-regeneration line says why. And the job carries the identity of
+// the waveform directory the judgment saw. A volume that goes before the
+// decode is done gets nothing at all and no strike: the path is asked
+// before the source is opened, and the directory is opened as the repair's
+// root only after the decode, on that identity alone. One that goes after
+// the root opened gets nothing at its path and no strike either: every
+// directory, scratch, removal, rename and sync of the repair goes through
+// the root (analyze.RunWaveformRepair), which keeps the directory it
+// opened, and the path is compared with the root again before the rename
+// and right before the commit, which is refused; what the root reached
+// meanwhile (the curve's directories, at most the curve) is in the
+// directory it opened, and nothing records it.
 //
 // Deliberately NOT a reaper. Nothing here deletes: LocateWaveform
 // classifies, the adapter adopts, and a repair only ever renames a curve

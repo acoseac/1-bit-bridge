@@ -47,3 +47,21 @@ func SyncParentDir(filePath string) (err error) {
 	}
 	return nil
 }
+
+// syncDirIn is SyncParentDir's barrier through r: the directory dir in r,
+// opened through r and synced.
+func syncDirIn(r *os.Root, dir string) (err error) {
+	d, err := r.Open(dir)
+	if err != nil {
+		return fmt.Errorf("open dir: %w", err)
+	}
+	defer func() {
+		if cerr := d.Close(); err == nil && cerr != nil {
+			err = fmt.Errorf("close dir: %w", cerr)
+		}
+	}()
+	if syncErr := d.Sync(); syncErr != nil {
+		return fmt.Errorf("sync dir: %w", syncErr)
+	}
+	return nil
+}

@@ -21,6 +21,14 @@ import (
 type sidecarFamily struct {
 	// isSidecar reports whether a basename is one of the family's files.
 	isSidecar func(name string) bool
+	// links says whether a link counts at all: one that resolves to a regular
+	// file of the family's name as one of its files, and one to a directory
+	// as a tree that may hold them, which the scan does not look behind
+	// (renditionScan.dirLink). True for the variants, whose reapers read a
+	// directory they cannot see behind as one that may hold renditions; false
+	// for the curves, which the waveform guard counts as files alone, a link
+	// never one, whatever it leads to (backlog B652, round 2).
+	links bool
 	// dir names the directory ("variants directory"), path the path when it
 	// names no directory ("variants path"), file one of its files
 	// ("rendition"), files more of them ("sidecar files"), and rowFile what
@@ -32,6 +40,7 @@ type sidecarFamily struct {
 // layout looksLikeVariantSidecar recognises.
 var variantSidecars = sidecarFamily{
 	isSidecar: looksLikeVariantSidecar,
+	links:     true,
 	dir:       "variants directory",
 	path:      "variants path",
 	file:      "rendition",
@@ -40,7 +49,7 @@ var variantSidecars = sidecarFamily{
 }
 
 // waveformSidecars is the waveform directory's family: a curve the analysis
-// pool writes (ConsiderWaveformSidecar).
+// pool writes (ConsiderWaveformSidecar), a regular file and never a link.
 var waveformSidecars = sidecarFamily{
 	isSidecar: ConsiderWaveformSidecar,
 	dir:       "waveform directory",
@@ -60,14 +69,15 @@ type renditionScan struct {
 	// entries: the directory itself holds at least one entry, of any kind.
 	entries bool
 	// rendition: a file the family names (a rendition looksLikeVariantSidecar
-	// names, or a curve), regular or a link resolving to a regular file,
-	// outside a directory SkipsDerivedTreeDir names (a dot-directory, a NAS
-	// recycle bin or snapshot, and the rest).
+	// names, or a curve), a regular file, or for a family that counts links
+	// (the variants') a link resolving to one, outside a directory
+	// SkipsDerivedTreeDir names (a dot-directory, a NAS recycle bin or
+	// snapshot, and the rest).
 	rendition bool
-	// dirLink: a link to a directory (a symlink, or on Windows a junction or
-	// a volume mounted in a folder), not named as SkipsDerivedTreeDir skips,
-	// which the scan does not look behind: what it holds, the scan cannot
-	// say.
+	// dirLink: for a family that counts links, a link to a directory (a
+	// symlink, or on Windows a junction or a volume mounted in a folder), not
+	// named as SkipsDerivedTreeDir skips, which the scan does not look
+	// behind: what it holds, the scan cannot say.
 	dirLink bool
 }
 
@@ -200,6 +210,10 @@ func scanDirEntries(d *os.File, path string, isRoot bool, fam sidecarFamily, sca
 					scan.rendition = true
 					return nil
 				}
+			case !fam.links:
+				// The curves' family counts files alone: a link, or any other
+				// entry that is no regular file, is nothing to it, neither a
+				// curve nor a tree that may hold one.
 			default:
 				// A symlink, a Windows junction or mounted folder
 				// (ModeIrregular since Go 1.23), or a special file: judged

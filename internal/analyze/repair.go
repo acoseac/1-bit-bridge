@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -23,6 +24,15 @@ import (
 // else, so a decode that could not measure what the analysis measured does
 // not take the measurement away, and a build that would measure it otherwise
 // does not rewrite it behind a curve.
+//
+// Every file operation of a repair goes through one handle on its waveform
+// directory (repairDir, since round 2): the directory the judgment saw,
+// opened as an os.Root once the decode is done and compared with the
+// identity the job carries. A root keeps the directory it opened, so nothing
+// is made, removed, renamed or synced anywhere but there, whatever comes to
+// be at the path; and the path is asked again, against the root, before the
+// rename and right before the pool commits, so a curve written into a
+// directory no longer at its path is never recorded.
 
 // RepairSpec is one waveform-only repair.
 type RepairSpec struct {
@@ -37,14 +47,19 @@ type RepairSpec struct {
 	// only while the row is still this one.
 	Base manifest.AnalysisRow
 	// OutputDirIdentity is the waveform directory the catalog's judgment saw
-	// (from the handle its probe read it with), asked again before the
-	// repair makes a directory or a file and before it renames the curve into
-	// place (fsutil.DirStillIs). Required: a repair without one writes
-	// nothing.
+	// (from the handle its probe read it with): the directory the repair's
+	// root must be (repairDir), and the path is asked against it before the
+	// decode. Required: a repair without one writes nothing.
 	OutputDirIdentity os.FileInfo
 	// Build is the bridge build a failure of the repair is counted against
 	// (manifest.Store.RecordWaveformRegenFailure).
 	Build string
+
+	// dir is the job's one handle on its waveform directory, which the pool
+	// sets so that the runner's writes and the pool's sync and checks before
+	// its commit go through the same root. Nil when RunWaveformRepair is
+	// called by itself, which then opens one of its own.
+	dir *repairDir
 }
 
 // RepairResult is the curve a repair wrote.
@@ -57,18 +72,21 @@ type RepairResult struct {
 // ErrWaveformDirAway is a repair's refusal when the waveform directory is not
 // the one it was admitted on: gone, another directory at the path (a volume
 // unmounted, its mountpoint the local directory again), or one that cannot be
-// opened. It makes no directory and no file, and is no failure of the curve.
+// opened. No failure of the curve; nothing it writes reaches the directory at
+// the path, and nothing it wrote is recorded.
 var ErrWaveformDirAway = errors.New("the waveform directory is not the one the repair was admitted on")
 
 // ErrSourceChanged is a repair's refusal when the source is not the version
-// its analysis describes: a changed source goes through ordinary analysis,
-// whose skip gate now offers it, and a curve of it here would describe bytes
-// the row's measurements do not. No failure of the curve.
+// its analysis describes, by its size and mtime, the bridge's identity of a
+// source everywhere (a rewrite that keeps both is not seen, as the analysis
+// skip gate does not see it): a changed source goes through ordinary
+// analysis, whose skip gate now offers it, and a curve of it here would
+// describe bytes the row's measurements do not. No failure of the curve.
 var ErrSourceChanged = errors.New("the source is not the version its analysis describes")
 
 // ErrSourceUnreachable is a repair's refusal when the source cannot be
-// stat'ed: a mount that dropped, a permission that changed. No failure of
-// the curve.
+// stat'ed, opened or read: a mount that dropped, a permission that changed,
+// credentials a mount no longer has. No failure of the curve.
 var ErrSourceUnreachable = errors.New("the source could not be reached")
 
 // ErrCurveNotWritten marks a repair that rendered the curve and could not
@@ -79,12 +97,12 @@ var ErrCurveNotWritten = errors.New("the curve could not be written")
 
 // CountsAgainstTheCurve reports whether a repair's error is a failure on the
 // curve's own account, which counts toward manifest.WaveformRegenStopAfter:
-// the decoder's verdict on a source that is still there and unchanged
-// (ErrSourceUnreadable), or a curve rendered and not written
+// the decoder's verdict on a source that is still there, unchanged and
+// readable (ErrSourceUnreadable), or a curve rendered and not written
 // (ErrCurveNotWritten). Everything else is transient and counts nothing: an
-// unreachable or changed source, the waveform directory gone, a decoder that
-// is missing or was killed, a cancellation. The pool also counts nothing for
-// its per-job timeout and for a shutdown, before asking.
+// unreachable, unreadable or changed source, the waveform directory gone, a
+// decoder that is missing or was killed, a cancellation. The pool also counts
+// nothing for its per-job timeout and for a shutdown, before asking.
 func CountsAgainstTheCurve(err error) bool {
 	return SourceUnreadable(err) || errors.Is(err, ErrCurveNotWritten)
 }
@@ -92,17 +110,21 @@ func CountsAgainstTheCurve(err error) bool {
 // RunWaveformRepair renders spec's curve again and puts it where it belongs,
 // the canonical path under the waveform directory, written beside whatever is
 // there (a partial copy) and renamed over it, never by deleting it first. The
-// pool fsyncs it and commits it to the row.
+// pool syncs it through the same root and commits it to the row.
 //
-// In order, each a refusal that writes nothing: the waveform directory is
-// asked whether it is still the one the repair was admitted on, before the
-// source is opened or a decoder started; the source whether it is still the
-// version the row describes; the curve is decoded as RunAnalysis decodes it
-// (decodeCurve), and a decoder's verdict counts only once the source is
-// asked again and is still there unchanged, since a mount that dropped during
-// the decode answers as a verdict too; the source is asked again after a
-// clean decode; the directory again before a directory is made (never the
-// waveform directory itself, mkdirBelow) and again before the rename.
+// In order, each a refusal that writes nothing: the waveform directory at its
+// path is asked whether it is still the one the repair was admitted on,
+// before the source is opened or a decoder started; the source whether it is
+// still the version the row describes and can be read (sourceReadable); the
+// curve is decoded as RunAnalysis decodes it (decodeCurve), and a decoder's
+// verdict counts only once the source is asked again and is still there,
+// unchanged and readable, since a mount that dropped or a permission that
+// changed during the decode answers as a verdict too; the source is asked
+// again after a clean decode; the directory is opened as the repair's root
+// and compared with the identity the job carries; every directory (never the
+// waveform directory itself, mkdirBelow), the scratch, its stale copy's
+// removal, its cleanup and the rename go through that root, and the path is
+// asked again, against the root, just before the rename.
 func RunWaveformRepair(ctx context.Context, spec RepairSpec) (RepairResult, error) {
 	return runWaveformRepair(ctx, spec, toolchainSource)
 }
@@ -112,20 +134,26 @@ func runWaveformRepair(ctx context.Context, spec RepairSpec, src curveSource) (R
 	return runWaveformRepairWith(ctx, spec, src, nil)
 }
 
-// repairHooks are a test's view inside one repair: beforeRename runs once the
-// curve is in its scratch beside its place, before the check that precedes
-// the rename. Nil in production.
+// repairHooks are a test's view inside one repair: beforeMkdir runs once the
+// repair's root is open and checked, before its first directory is made;
+// beforeRename once the curve is in its scratch beside its place, before the
+// check that precedes the rename. Nil in production.
 type repairHooks struct {
+	beforeMkdir  func()
 	beforeRename func(tmp, final string)
 }
 
 // runWaveformRepairWith is runWaveformRepair with a test's hooks.
 func runWaveformRepairWith(ctx context.Context, spec RepairSpec, src curveSource, hooks *repairHooks) (RepairResult, error) {
-	root := spec.OutputDir
-	if err := dirStillAdmitted(root, spec.OutputDirIdentity); err != nil {
+	d := spec.dir
+	if d == nil {
+		d = newRepairDir(spec.OutputDir, spec.OutputDirIdentity)
+		defer d.close()
+	}
+	if err := d.atPath(); err != nil {
 		return RepairResult{}, err
 	}
-	if err := sourceStillDescribed(spec.AnalyzeSpec); err != nil {
+	if err := sourceReadable(spec.AnalyzeSpec); err != nil {
 		return RepairResult{}, err
 	}
 	pr := src.probe(ctx, spec.SourceAbsPath)
@@ -137,38 +165,54 @@ func runWaveformRepairWith(ctx context.Context, spec RepairSpec, src curveSource
 		return RepairResult{}, serr
 	}
 	if err != nil {
+		if SourceUnreadable(err) {
+			// Nor is its refusal of a source it could not open: a permission
+			// that changed answers as a verdict too, and stats as before.
+			if rerr := sourceReadable(spec.AnalyzeSpec); rerr != nil {
+				return RepairResult{}, rerr
+			}
+		}
 		return RepairResult{}, err
 	}
 
-	finalPath := spec.SidecarPath()
-	if err := dirStillAdmitted(root, spec.OutputDirIdentity); err != nil {
+	root, err := d.open()
+	if err != nil {
 		return RepairResult{}, err
 	}
-	if err := mkdirBelow(root, filepath.Dir(finalPath)); err != nil {
-		return RepairResult{}, writeFailure(ctx, spec, err)
+	finalPath := spec.SidecarPath()
+	finalRel, err := d.rel(finalPath)
+	if err != nil {
+		return RepairResult{}, curveNotWritten{err}
 	}
-	tmpPath := finalPath + AnalysisTmpSuffix
-	// Clear any stale tmp from a prior interrupted run, as RunAnalysis does.
-	_ = os.Remove(tmpPath)
+	if hooks != nil && hooks.beforeMkdir != nil {
+		hooks.beforeMkdir()
+	}
+	if err := mkdirBelow(root, filepath.Dir(finalRel)); err != nil {
+		return RepairResult{}, writeFailure(ctx, d, err)
+	}
+	tmpRel := finalRel + AnalysisTmpSuffix
+	// Clear any stale tmp from a prior interrupted run, as RunAnalysis does,
+	// in the root alone.
+	_ = root.Remove(tmpRel)
 	cleanup := true
 	defer func() {
 		if cleanup {
-			_ = os.Remove(tmpPath)
+			_ = root.Remove(tmpRel)
 		}
 	}()
-	if err := writeWaveformTmp(tmpPath, finalPath, data); err != nil {
-		return RepairResult{}, writeFailure(ctx, spec, err)
+	if err := writeWaveformTmpIn(root, tmpRel, finalRel, data); err != nil {
+		return RepairResult{}, writeFailure(ctx, d, err)
 	}
 	if hooks != nil && hooks.beforeRename != nil {
-		hooks.beforeRename(tmpPath, finalPath)
+		hooks.beforeRename(finalPath+AnalysisTmpSuffix, finalPath)
 	}
-	// Before the curve is published: the rename puts it where a reader of
-	// the row finds it.
-	if err := dirStillAdmitted(root, spec.OutputDirIdentity); err != nil {
+	// Before the curve is published: the rename puts it where a reader of the
+	// row finds it, so the directory at the path must still be the root.
+	if err := d.atPath(); err != nil {
 		return RepairResult{}, err
 	}
-	if err := atomicwrite.RenameWithRetryCtx(ctx, tmpPath, finalPath); err != nil {
-		return RepairResult{}, writeFailure(ctx, spec, err)
+	if err := atomicwrite.RenameInRootCtx(ctx, root, tmpRel, finalRel); err != nil {
+		return RepairResult{}, writeFailure(ctx, d, err)
 	}
 	cleanup = false
 	return RepairResult{
@@ -176,6 +220,101 @@ func runWaveformRepairWith(ctx context.Context, spec RepairSpec, src curveSource
 		WaveformTag:  waveformTag(data),
 		WaveformSize: int64(len(data)),
 	}, nil
+}
+
+// repairDir is a repair's one handle on its waveform directory: the
+// directory the catalog's judgment saw (admitted), opened as an os.Root at
+// most once (open), through which the repair makes every directory, scratch,
+// removal, rename and sync, and against which the directory at the path is
+// asked again (atPath). A root keeps the directory it opened: once it is
+// open, what is at the path can change, the directory the repair writes into
+// cannot.
+type repairDir struct {
+	path     string
+	admitted os.FileInfo
+	root     *os.Root
+	// id is the root's own identity, read from a handle opened through it.
+	id os.FileInfo
+}
+
+func newRepairDir(path string, admitted os.FileInfo) *repairDir {
+	return &repairDir{path: path, admitted: admitted}
+}
+
+// open is the repair's root, opened at its first call, and only on the
+// directory the job was admitted on: anything else is dirAway, nothing kept
+// open.
+func (d *repairDir) open() (*os.Root, error) {
+	if d.root != nil {
+		return d.root, nil
+	}
+	if d.admitted == nil {
+		return nil, dirAway{errors.New("the repair carries no waveform directory")}
+	}
+	r, err := os.OpenRoot(d.path)
+	if err != nil {
+		return nil, dirAway{err}
+	}
+	id, err := rootIdentity(r)
+	if err != nil {
+		_ = r.Close()
+		return nil, dirAway{err}
+	}
+	if !os.SameFile(id, d.admitted) {
+		_ = r.Close()
+		return nil, dirAway{fsutil.ErrDirReplaced}
+	}
+	d.root, d.id = r, id
+	return r, nil
+}
+
+// rootIdentity is the identity of the directory r holds, stat'ed from a
+// handle opened through r: on Windows a stat by path reads the identity at
+// the comparison, from whatever the path names then (fsutil.DirIdentity).
+func rootIdentity(r *os.Root) (os.FileInfo, error) {
+	f, err := r.Open(".")
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	return f.Stat()
+}
+
+// atPath asks whether the directory at the path is still the one the repair
+// works through: the root once it is open, which a stale identity could not
+// stand in for (the root keeps its directory, so no other can take its
+// identity), and the identity the judgment saw before.
+func (d *repairDir) atPath() error {
+	if d.root == nil {
+		return dirStillAdmitted(d.path, d.admitted)
+	}
+	now, err := fsutil.DirIdentity(d.path)
+	if err != nil {
+		return dirAway{err}
+	}
+	if !os.SameFile(now, d.id) {
+		return dirAway{fsutil.ErrDirReplaced}
+	}
+	return nil
+}
+
+// rel is path relative to the repair's directory, refused when it is not
+// below it.
+func (d *repairDir) rel(path string) (string, error) {
+	rel, err := filepath.Rel(d.path, path)
+	if err != nil {
+		return "", err
+	}
+	if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", errors.New("the curve's path is not below the waveform directory")
+	}
+	return rel, nil
+}
+
+func (d *repairDir) close() {
+	if d.root != nil {
+		_ = d.root.Close()
+	}
 }
 
 // dirStillAdmitted asks whether root is still the waveform directory the
@@ -213,8 +352,9 @@ func (e dirAway) Unwrap() error        { return e.cause }
 func (e dirAway) Is(target error) bool { return target == ErrWaveformDirAway }
 
 // sourceStillDescribed asks whether the source is still the version the
-// row's measurements describe: its size and mtime, exactly, as the analysis
-// skip gate compares them.
+// row's measurements describe: a regular file, of its size and mtime,
+// exactly, as the analysis skip gate compares them. What is no regular file
+// is never opened here.
 func sourceStillDescribed(spec AnalyzeSpec) error {
 	info, err := os.Stat(spec.SourceAbsPath)
 	if err != nil {
@@ -226,11 +366,40 @@ func sourceStillDescribed(spec AnalyzeSpec) error {
 	return nil
 }
 
-// writeFailure classifies an error writing the curve: the waveform directory
-// gone since its last check is its refusal, a cancellation is the context's,
+// sourceReadable asks whether the source can be read at all: still the
+// version the row describes (sourceStillDescribed, which refuses what is no
+// regular file before anything opens it), then opened as a file
+// (fsutil.OpenAsFile, which waits for no named pipe put there since) and read
+// for a byte. A failed open or read is unreachable, never a verdict on the
+// curve: a permission that changed leaves the stat as it was, and the
+// decoder's refusal of a file it cannot open would otherwise count. An empty
+// read of a file whose size said otherwise is another version.
+func sourceReadable(spec AnalyzeSpec) error {
+	if err := sourceStillDescribed(spec); err != nil {
+		return err
+	}
+	f, _, err := fsutil.OpenAsFile(spec.SourceAbsPath)
+	if err != nil {
+		return fmt.Errorf("%w: %s", ErrSourceUnreachable, pathless(err))
+	}
+	defer func() { _ = f.Close() }()
+	var b [1]byte
+	n, err := f.Read(b[:])
+	switch {
+	case n == 1:
+		return nil
+	case err == nil || errors.Is(err, io.EOF):
+		return ErrSourceChanged
+	}
+	return fmt.Errorf("%w: %s", ErrSourceUnreachable, pathless(err))
+}
+
+// writeFailure classifies an error writing the curve: the directory at the
+// path no longer the repair's (its root, or before it opens the identity the
+// job carries) is the directory's refusal, a cancellation is the context's,
 // and anything else is a failure of the curve (ErrCurveNotWritten).
-func writeFailure(ctx context.Context, spec RepairSpec, err error) error {
-	if derr := dirStillAdmitted(spec.OutputDir, spec.OutputDirIdentity); derr != nil {
+func writeFailure(ctx context.Context, d *repairDir, err error) error {
+	if derr := d.atPath(); derr != nil {
 		return derr
 	}
 	if ctx.Err() != nil {
@@ -248,36 +417,55 @@ func (e curveNotWritten) Error() string {
 func (e curveNotWritten) Unwrap() error        { return e.cause }
 func (e curveNotWritten) Is(target error) bool { return target == ErrCurveNotWritten }
 
-// mkdirBelow makes dir and the directories between it and root, never root
-// itself: a waveform directory that is not there is a volume that went (or
-// was never mounted), and making it would put the curve on the disk under the
-// mountpoint, where the next judgment would find a directory holding one
-// curve. Each directory is made by fsutil.Mkdir, which gives it its parent's
-// owner when the process is root, as RunAnalysis's fsutil.MkdirAll does.
-func mkdirBelow(root, dir string) error {
-	rel, err := filepath.Rel(root, dir)
-	if err != nil {
-		return err
-	}
-	if rel == "." {
+// mkdirBelow makes dir, relative to root, and the directories between it and
+// root, through root, never root itself: a waveform directory that is not
+// there is a volume that went (or was never mounted), and making it would put
+// the curve on the disk under the mountpoint, where the next judgment would
+// find a directory holding one curve. Each directory is made by
+// fsutil.MkdirIn, which gives it its parent's owner when the process is root,
+// as RunAnalysis's fsutil.MkdirAll does; one there already is taken only as a
+// directory, read through root.
+func mkdirBelow(root *os.Root, dir string) error {
+	if dir == "." {
 		return nil
 	}
-	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return fmt.Errorf("the curve's directory is not below the waveform directory")
-	}
-	cur := root
-	for _, part := range strings.Split(rel, string(filepath.Separator)) {
+	cur := ""
+	for _, part := range strings.Split(dir, string(filepath.Separator)) {
 		cur = filepath.Join(cur, part)
-		err := fsutil.Mkdir(cur, 0o700)
+		err := fsutil.MkdirIn(root, cur, 0o700)
 		if err == nil {
 			continue
 		}
 		if errors.Is(err, fs.ErrExist) {
-			if info, serr := os.Stat(cur); serr == nil && info.IsDir() {
+			if info, serr := root.Stat(cur); serr == nil && info.IsDir() {
 				continue
 			}
 		}
 		return err
+	}
+	return nil
+}
+
+// writeWaveformTmpIn is writeWaveformTmp through root: the scratch created,
+// truncating debris a crash left, 0600, given the owner of the curve it will
+// replace, or of its directory, while it is open (fsutil.KeepOwnerIn, a no-op
+// unless this process is root). No fsync here: the pool syncs the curve
+// through the same root before it commits the row that names it.
+func writeWaveformTmpIn(root *os.Root, tmpRel, finalRel string, data []byte) error {
+	f, err := root.OpenFile(tmpRel, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return fmt.Errorf("write waveform tmp: %w", err)
+	}
+	if err := fsutil.KeepOwnerIn(root, f, finalRel); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("write waveform tmp: %w", err)
+	}
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("write waveform tmp: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("write waveform tmp: %w", err)
 	}
 	return nil
 }

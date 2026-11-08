@@ -63,8 +63,10 @@ func TestTheDoctorReportsWhatTheRegenerationGuardJudges(t *testing.T) {
 			t.Fatal(err)
 		}
 		c := waveformRegenLine(t, doctorRegenInstall(t, f))
-		if c.Status != doctor.Warn || !strings.Contains(c.Summary, "regeneration refused: the waveform directory is gone") {
-			t.Errorf("got %+v, want the refusal said", c)
+		// The whole line: a refusal at the probe looked at no row, and claims
+		// no budget's scope (round 2).
+		if c.Status != doctor.Warn || c.Summary != "regeneration refused: the waveform directory is gone" {
+			t.Errorf("got %+v, want the refusal said, and nothing else", c)
 		}
 	})
 	t.Run("emptied", func(t *testing.T) {

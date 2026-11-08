@@ -75,8 +75,18 @@ func TestTheWaveformRegenerationLineSaysEachStateApart(t *testing.T) {
 	t.Run("undecided", func(t *testing.T) {
 		c := waveformRegenerationCheck(t, Deps{AnalysisEnabled: true,
 			WaveformRegeneration: regenProbe(WaveformRegeneration{Rows: 90000, Looked: 20000, Missing: 4, Undecided: true}, nil)})
-		if c.Status != Warn || !strings.Contains(c.Summary, "the first 20000 of 90000") || !strings.Contains(c.Hint, "cannot be told") {
-			t.Errorf("got %+v, want a scoped warn that claims no verdict", c)
+		want := "4 curve(s) proven missing (4 at neither location, 0 a partial copy) (the first 20000 of 90000 row(s))"
+		if c.Status != Warn || c.Summary != want || !strings.Contains(c.Hint, "cannot be told") {
+			t.Errorf("got %+v, want a warn scoped to the rows looked at, %q, that claims no verdict", c, want)
+		}
+	})
+	t.Run("a refusal before any row was looked at claims no scope", func(t *testing.T) {
+		// The probe's refusals classify no row: Looked 0 is no budget.
+		c := waveformRegenerationCheck(t, Deps{AnalysisEnabled: true,
+			WaveformRegeneration: regenProbe(WaveformRegeneration{Rows: 3, Looked: 0,
+				Refusal: waveformRefusalDirMissing, Reason: "waveform directory is missing"}, nil)})
+		if c.Status != Warn || c.Summary != "regeneration refused: the waveform directory is gone" {
+			t.Errorf("summary %q, want %q alone", c.Summary, "regeneration refused: the waveform directory is gone")
 		}
 	})
 	for _, kind := range WaveformRefusalKinds() {

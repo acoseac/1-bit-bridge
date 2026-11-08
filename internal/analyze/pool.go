@@ -3,6 +3,8 @@ package analyze
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -108,7 +110,11 @@ type Pool struct {
 	repairRunner func(ctx context.Context, spec RepairSpec) (RepairResult, error)
 	jobTimeout   time.Duration
 	fsyncFn      func(path string) error
-	now          func() time.Time
+	// syncIn is a waveform-only repair's durability barrier, through the
+	// root the curve was written through (fsutil.FsyncInRoot): name is
+	// relative to it.
+	syncIn func(root *os.Root, name string) error
+	now    func() time.Time
 	// liveGate is the live analysis gate, asked when a worker takes a job
 	// (WithLiveGate). Nil reads as open: `bridge analyze` builds its own
 	// pool, with none, for a run the operator asked for.
@@ -151,9 +157,13 @@ func WithRepairRunner(fn func(ctx context.Context, spec RepairSpec) (RepairResul
 }
 
 // WithFsync overrides the durability-barrier fsync (tests inject a
-// no-op or a failure stub).
+// no-op or a failure stub). A waveform-only repair's barrier, made through
+// its root in production, calls fn with the curve's path, at the same point.
 func WithFsync(fn func(path string) error) PoolOption {
-	return func(p *Pool) { p.fsyncFn = fn }
+	return func(p *Pool) {
+		p.fsyncFn = fn
+		p.syncIn = func(root *os.Root, name string) error { return fn(filepath.Join(root.Name(), name)) }
+	}
 }
 
 // WithJobTimeout overrides the per-job deadline (tests shrink it to
@@ -209,6 +219,7 @@ func NewPool(store *manifest.Store, workers, queueCap int, opts ...PoolOption) *
 		repairRunner:    RunWaveformRepair,
 		jobTimeout:      defaultJobTimeout,
 		fsyncFn:         fsutil.FsyncFileAndParent,
+		syncIn:          fsutil.FsyncInRoot,
 		now:             time.Now,
 		stateChangeChan: make(chan struct{}, 1),
 	}

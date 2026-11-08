@@ -277,6 +277,12 @@ func TestARepairWritesNothingIntoAWaveformDirectoryThatWent(t *testing.T) {
 		if _, serr := os.Lstat(final); !errors.Is(serr, fs.ErrNotExist) {
 			t.Errorf("a curve was published at %s in a waveform directory that went before its rename (%v)", final, serr)
 		}
+		// Nor in the directory it was admitted on, now moved aside, which its
+		// writes go through: the check before the rename refused the rename
+		// there (round 2), and its scratch was cleaned up there too.
+		if left := regularFilesUnder(t, f.dir+".volume"); len(left) != 0 {
+			t.Errorf("the directory the repair was admitted on holds %v, want the rename never made and its scratch gone", left)
+		}
 	})
 	t.Run("no identity carried", func(t *testing.T) {
 		f := newRepairFixture(t)
