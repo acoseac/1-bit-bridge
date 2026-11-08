@@ -1959,11 +1959,17 @@ function wireUpload(signal) {
     // A div cannot be disabled, so the drop target refuses here while a run
     // owns the page, and the note beside the pickers says why.
     if (uploadState?.run) return;
+    // What the page holds as the folder is read: its upload, and how many
+    // runs that upload has had (beginUploadRun counts them).
+    const staged = uploadState;
+    const runs = staged?.runs;
     const picked = await collectFromDataTransfer(e.dataTransfer);
-    // Reading a dropped folder takes time: the page it was dropped on may
-    // have gone meanwhile (a navigation), or an upload begun on it, and
-    // neither is staged over.
-    if (signal?.aborted || uploadState?.run) return;
+    // Reading a dropped folder takes time. The page it was dropped on may
+    // have gone meanwhile (a navigation), its upload been replaced or cleared
+    // (a pick, Cancel, a commit's report), or a run begun on it, under way or
+    // ended since, its report or the Try again it offers the page's now (a
+    // run that ends leaves its upload in place): none of those is staged over.
+    if (signal?.aborted || uploadState !== staged || uploadState?.runs !== runs) return;
     stageFiles(picked);
   });
 
@@ -2313,7 +2319,7 @@ function stageFiles(picked) {
     );
     return;
   }
-  uploadState = { picked: usable, session: null, run: null, preflightSkipped: 0, junkSkipped: junk, digestUnavailable: false };
+  uploadState = { picked: usable, session: null, run: null, runs: 0, preflightSkipped: 0, junkSkipped: junk, digestUnavailable: false };
   hideUploadRetry();
   const note = document.getElementById("upload-dupe-note");
   if (note) note.hidden = true;
@@ -2358,11 +2364,14 @@ function renderUploadReview() {
 // the run's first await: the files it sends and the session it carries on are
 // taken here, so nothing picked, dropped or navigated to afterwards reaches
 // them. Until the run ends, everything that would start or replace an upload
-// is refused (setUploadBusy).
+// is refused (setUploadBusy). The upload counts its runs, which a folder
+// dropped before one began and read after it ended is told by (the drop
+// handler in wireUpload).
 function beginUploadRun() {
   const state = uploadState;
   const run = { state, picked: [...state.picked], session: state.session, aborted: false };
   state.run = run;
+  state.runs += 1;
   setUploadBusy(true);
   return run;
 }
@@ -2425,16 +2434,25 @@ function setUploadBusy(busy) {
 // says nothing, since the page is no longer its own.
 function showUploadRunEnd(run, e) {
   if (!uploadOwns(run)) return;
-  if (e?.code === "aborted") showUploadStopped();
+  if (e?.code === "aborted") showUploadStopped(run);
   else showUploadFailure(e, run.state);
 }
 
 // showUploadStopped says a run was stopped. Its session keeps what it was
-// sent, and the banner is read again so that choosing the same files carries
-// it on (findResumable), as the message says: a session made since the page
-// read its list was in none.
-function showUploadStopped() {
+// sent, and choosing the same files carries it on (findResumable), as the
+// message says: so the session goes on the page's list of interrupted uploads
+// at once, since one made since the page's last read is in none, and the
+// controls come back as the run ends, before the list read below answers
+// (B797's round 2: the same files chosen in between started over in a second
+// session). It goes at the list's end, so the session the banner shows, the
+// one Discard it takes, stays the first; the read then lists it with its
+// offsets, and the banner shows it.
+function showUploadStopped(run) {
   showUploadResult("Upload stopped. Staged progress is kept — start again to resume.");
+  const s = run.session;
+  if (s?.id && !resumableSessions.some((x) => x.id === s.id)) {
+    resumableSessions = [...resumableSessions, s];
+  }
   refreshResumable();
 }
 
@@ -2628,9 +2646,13 @@ async function transferAll(run, session) {
   // that sibling's own failure, which then set the page's stop flag, stopped
   // the retry (backlog B776's round 2). A run's stop is the operator's Stop,
   // Cancel or a navigation alone, and a worker that finds it before a chunk's
-  // request ends as stopped, not failed (uploadCheckpoint).
+  // request ends as stopped, not failed (uploadCheckpoint). failed is asked
+  // again right before each request (putUploadChunk): a worker reading or
+  // hashing its chunk when a sibling's chunk failed sends nothing more
+  // (B797's round 2; the check there asked only for the run's own stop).
   let failure = null;
-  const stopped = () => !uploadRunLive(run) || failure !== null;
+  const failed = () => failure !== null;
+  const stopped = () => !uploadRunLive(run) || failed();
   const worker = async () => {
     try {
       await workerLoop();
@@ -2652,7 +2674,7 @@ async function transferAll(run, session) {
         // handing the same buffer to fetch avoids reading the slice twice.
         // Peak cost is UPLOAD_PARALLEL_FILES x chunkBytes (3 x 4 MiB).
         const bytes = await file.slice(offset, end).arrayBuffer();
-        const res = await putUploadChunkVerified(run, session.id, meta.id, offset, bytes);
+        const res = await putUploadChunkVerified(run, session.id, meta.id, offset, bytes, failed);
         doneBytes += res.offset - offset;
         offset = res.offset;
         paint();
@@ -2703,12 +2725,13 @@ async function chunkDigestHeaders(bytes) {
 // range over nothing. Without it, adding verification could only ever convert
 // silent corruption into a dead multi-gigabyte upload. Every other failure
 // keeps its existing behaviour and propagates on the first occurrence. Each
-// attempt asks right before its request whether run may still send
-// (putUploadChunk), so a re-send of a run stopped meanwhile sends nothing.
-async function putUploadChunkVerified(run, sid, fid, offset, bytes) {
+// attempt asks right before its request whether run may still send, and
+// whether its transfer has failed (putUploadChunk), so a re-send of a run
+// stopped, or of a transfer failed, meanwhile sends nothing.
+async function putUploadChunkVerified(run, sid, fid, offset, bytes, failed) {
   for (let attempt = 0; ; attempt++) {
     try {
-      return await putUploadChunk(run, sid, fid, offset, bytes);
+      return await putUploadChunk(run, sid, fid, offset, bytes, failed);
     } catch (e) {
       if (
         attempt >= UPLOAD_DIGEST_RETRIES ||
@@ -2721,15 +2744,18 @@ async function putUploadChunkVerified(run, sid, fid, offset, bytes) {
   }
 }
 
-async function putUploadChunk(run, sid, fid, offset, bytes) {
+async function putUploadChunk(run, sid, fid, offset, bytes, failed) {
   const url =
     `/api/upload/sessions/${encodeURIComponent(sid)}/files/${encodeURIComponent(fid)}` +
     `?offset=${offset}`;
   const digest = await chunkDigestHeaders(bytes);
   // Asked here, after the chunk was read and hashed and right before its
   // request: a run stopped, cancelled or navigated away from meanwhile sends
-  // nothing new. A request already made may still finish.
+  // nothing new, nor does a worker whose sibling's chunk failed meanwhile
+  // (failed, the transfer's own, which answers that failure once every worker
+  // has settled). A request already made may still finish.
   uploadCheckpoint(run);
+  if (failed()) throw uploadAbortError();
   if (!digest) run.state.digestUnavailable = true;
   const r = await fetch(url, {
     method: "PUT",
