@@ -962,7 +962,11 @@ one (`TestTheActivationsOwnFenceIsErrActivationFenced`) and the backend's over t
 kernel three (`TestASuccessorDroppedAtItsSinksAdmissionIsTakenBackUnwritten`,
 `TestASuccessorDroppedWhileItsSinkWritesItsPrefillIsTakenBack`,
 `TestAnActivationsFailureBesideADropIsJudgedByItsCause`), with their rig's holds; again no
-DSD byte a native or DoP occurrence sends changes.
+DSD byte a native or DoP occurrence sends changes. B9's round 5, unmerged too, changes that
+prefix's tests alone and stays 46: the backend's tests over the fake kernel gain
+`TestARevocationWhileASuccessorsSinkActivatesKeepsItsFault` and two cases of a node whose
+close is unconfirmed beside a drop, the fake kernel `FailDrops`; no sink, packer, plan or
+harness reader changes.
 The harness's approval admission reads a record
 of version 46 alone; the migration reads an owner's record of 35 to 46 (`LegacyVersion`
 stays 35). For owners: nothing the harness runs or records changes, and nothing plays

@@ -86739,3 +86739,81 @@ applied, where the guards that read the tracked docs passed too
 `TestNoDocblockNamesAnotherDeclaration`, the endpoint and error-table guards,
 `TestDSDOutputProtocolTokens` and `TestQualificationRunbookVersion`); and the qualification
 check against main, the merge base CI takes (a77578f8), passed at 46.
+
+## 2026-11-08 — B728 B9 round 5: a revocation keeps its fault, an unconfirmed close is no fence
+
+Worker b728-b9, legion0 (Ubuntu 26.04, Linux 7.0, Go 1.27.3), branch
+`feat/b728-b9-choice` at 9950ca63 (round 4's rules, which matched round 4's resolution byte
+for byte once applied). The reviews of round 4: Codex's one point, Claude's three. Commits:
+f5bf4929 (the round's tests, red), d9091a62 (point 1), 02b0f456 (transition's comment, points
+2 and 4), and this record. The rules are a patch the orchestrator applies (`output.md`'s
+bullet on the write beside what plays, and its long form).
+
+**Point 1 (Codex): confirmed, red first.** Round 4's early cancellation in `reconcileDSD`
+revoked the sink a claimed occurrence's activation is under way for whenever the occurrence
+was stale, a revocation of the session's DSD included (`j.revoke` set: the engine hands
+nothing off again). The activation could then answer the sink's own fence and `transition`
+take the occurrence back and close its output before `Backend.Revoke` ran, which found no
+sink of the session's open and recorded no fault. Red on 9950ca63, eight runs of eight
+(`TestARevocationWhileASuccessorsSinkActivatesKeepsItsFault`: the rig with no
+`engine.ReplanEvents`, b's sink's admission held, a cap at DSD64 written with the go-ahead,
+the reconciliation held between its judgement and its call to Revoke at its line saying the
+session's DSD stops, through the policy's `Log`, the admission let go, and the take-back's
+close note awaited): `playback stopped for end_of_queue`, b and c refused `native_revoked`,
+no fault. The test first raced: it waited for b's node to close, which the sink's writer does
+before the take-back marks the output closed, and `Revoke` won; it now waits for the
+take-back's close note, sent once the output is marked closed, or for b's node given its
+prefill, which is what happens once fixed. The early cancellation now runs only for a real
+hand-off (`j.revoke == ""`); for a revocation the sinks are `Backend.Revoke`'s to stop, after
+the fault it records. The activation then completes in the held window (its prefill given to
+b's node), and Revoke, let go, records `native_revoked` and stops the sink: nothing more
+opens.
+
+**Point 2 (Claude): does not hold; guards added, no code change.** The fence joined with
+`ErrReleaseUnconfirmed` comes from one place, `activateNative`'s reopened branch
+(`nativeCleanupError(ErrActivationFenced, closeNative())`), which only an activation of a
+sink whose node a pause's release let go makes: `ActivatePaused` or `Resume`, a resume's
+call, answered to the resume (and to the adoption's resume command), never to
+`transition`'s activation. `transition` activates through `Activate`, whose early check
+fences a released sink before its writer runs, and `nativeStream.activate` answers nil for a
+paused one, so `taken` never sees the joined error. Where a node's close fails after a take-back,
+the take-back waits for the sink's end all the same: `unadopt` closes the output through
+`nativeStream.Close`, which waits for `Done`, and `closeOutput` then makes the sink's result
+(the writer records an unconfirmed release there, at a fenced reopen too) the session's
+fault, before the producer's next step, which stops on it. Of the review's two options that
+is the second, already the code's; the first would be unreachable. Two cases pin it, green on
+9950ca63 (`TestAnActivationsFailureBesideADropIsJudgedByItsCause`, the fake kernel's
+`FailDrops`): b's node's DROP failing as the take-back lets it go (the session's fault, the
+release unconfirmed, nothing opened for c); and the review's own sequence, b's sink paused
+before its adoption and released after 30 s, the resume reopening it, b's entry deleted while
+the reopen's check is held, the reopened node's DROP failing (the resume refused, the sink's
+end the session's fault, nothing opened for c). A paused sink's waits take granted time
+alone, free or not, so the pause's 30 s is a 31 s grant.
+
+**Point 3 (Claude): a test gap, confirmed by its control.** The cut case at the sink's
+admission let the admission go only after the edit that deletes b's entry, whose own drop
+gave everything `wentOn` checks. It now lets the admission go after the cut alone and checks
+b's node closed and given nothing, b's take-back noted, no fault, the session not stopped and
+b's decoder closed, and only then tells the engine and checks that the session goes on.
+
+**Point 4 (Claude): the revocation half of the order is not observable; dropped from the
+claim.** With `taken` judged before `revoked`, the session's revocation still ends it with
+the fault `Backend.Revoke` recorded, and nothing more opens; the orders differ only in which
+step closes b's sink and decoder (the take-back's, or the teardown's), both before the release
+is acknowledged, which no consumer of the backend sees. The rule's "judge a drop before a
+release or a revocation" now reads "before a release", which the two release cases pin; the
+code keeps its order, and its comment says why it does not matter.
+
+**Controls**, predicted by name before the runs (`r5-controls.predictions.txt`), on d9091a62
+with every file's bytes restored after each: P1, round 4's early cancellation for a
+revocation too: red in the revocation case alone, by name; P2a, `closeOutput` not making the
+sink's unconfirmed end the session's fault: red in the take-back's close case alone, c's sink
+opened; P2b, the reporter not faulting on the current sink's end: red in the reopen's case
+alone, the session left paused; P3, the backend's Cut answering true and cutting nothing:
+red in the cut case, b's node given its prefill, while round 4's cut case as it was (a
+temporary copy) passed. Every other case stayed green.
+
+**The qualification version.** Round 5 changes the `internal/alsapcm/` prefix's tests alone
+(and `internal/player/playback`, unguarded); no DSD byte changes. The branch holds 46 and main
+45, so the check against main passes and it stays 46, the runbook's 46 paragraph saying round
+5.
