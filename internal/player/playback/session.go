@@ -592,10 +592,15 @@ func (s *session) start(ctx context.Context, req engine.StartRequest) (err error
 	s.cur = out
 	s.currentNative = out.native != nil
 	first.out, first.start, first.transport = out, 0, out.transport
-	// Its own sink's activation is under way (claimed) until it answers, as a
-	// successor's is in the producer's transition: a reconciliation that
-	// revokes the session's DSD meanwhile records its fault and fences the sink
-	// in its own step (B728 B9 round 6), and the Start's failure then says so.
+	// Its own sink's activation is under way (claimed) until the Start has
+	// taken its answer, as a successor's is in the producer's transition: a
+	// reconciliation that revokes the session's DSD meanwhile records its fault
+	// and fences the sink in its own step (B728 B9 round 6), whether or not the
+	// activation succeeded first, and the Start then fails saying so, the claim
+	// given up in the step that reads the fault, before anything is launched
+	// (round 7: read beside an activation's error alone, a fault recorded after
+	// the activation succeeded let the Start launch its producer, which stopped
+	// on it, and its reporter, and fail in words that named no revocation).
 	first.claimed = true
 	s.writing = first
 	s.mu.Unlock()
@@ -604,10 +609,14 @@ func (s *session) start(ctx context.Context, req engine.StartRequest) (err error
 	first.claimed = false
 	f := s.fault
 	s.mu.Unlock()
-	if err != nil {
-		if f != nil && f.Reason == "native_revoked" {
-			return fmt.Errorf("player backend: the session's DSD was revoked as its first occurrence's sink activated (%s: %s): %w", f.Reason, f.Detail, err)
+	if f != nil && f.Reason == "native_revoked" {
+		why := fmt.Sprintf("player backend: the session's DSD was revoked as its first occurrence's sink activated (%s: %s)", f.Reason, f.Detail)
+		if err != nil {
+			return fmt.Errorf("%s: %w", why, err)
 		}
+		return errors.New(why)
+	}
+	if err != nil {
 		return err
 	}
 	s.mu.Lock()
