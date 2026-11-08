@@ -86304,7 +86304,7 @@ orchestrator applied round 1's rules patch (1365731c); worker b797 on legion0
 Two reviews (Codex's, which probed the page under node with held answers, and
 Claude's) found four points; each holds at 1365731c by a trace of the code,
 and the Codex points by its probes too. Commits: the red tests a200f1a5, the
-fix 6fa4bafd, this record, and the gates' results added to it after. The rule
+fix 6fa4bafd, this record 874c2a69, and the gates' results added to it after. The rule
 goes through `rules-b797-r2.patch` (admin-console.md's B797 bullet).
 
 ### 1. Stop could restart into a second session
@@ -86413,3 +86413,25 @@ Red at a200f1a5 in the cases named above, green at 6fa4bafd:
 And R2-C4 under node: with `uploadCheckpoint(run);` taken out of
 `putUploadChunk`, `TestStopAndCancelEndARunWhereverItIs`'s "Stop while a chunk
 is read, before its request" goes red (the second chunk sent).
+
+### The gates
+
+At 874c2a69, the branch's code as it ships (the commit after it adds this
+section alone), through the shared build lock in one run
+(`.tmp/_b797/gate3.sh`, started by `.tmp/_b797/gate_guard.py`, which waits
+in the slot's queue only while enough of the background call's two-hour
+window remains), on go1.27.3, go.mod's: `make fmt` rewrote nothing; `make
+vet` clean, and so with `GOOS=windows`, `GOOS=darwin` and `GOOS=linux
+GOARCH=386`; `make test` (`-race`, `-timeout 30m`) green, among them
+internal/admin in 1057 s and cmd/bridge in 1313 s, and the packages that test
+Linux alone run here for real (internal/alsa, internal/alsapcm on this
+host's ALSA, internal/atomicwrite, internal/player/hotplug; internal/usbid's
+result cached from an identical run); B797's three structural tests and the
+moved B776 pin pass, its six node tests skip (node is not installed here);
+`make build-all`, its build-tag census included, and `make docs-check`
+clean; the qualification check against main (`scripts/qualification-version
+-base a77578f8 -head HEAD`) answers OK, no guarded path changed;
+`rules-b797-r2.patch` applies to a copy of the tree, whose budgets hold
+(admin-console.md 82,699 bytes; the worst load 67.3%) and whose cited test
+names `TestEveryCitedTestNameExists` finds declared; `git status` clean
+after. internal/admin's race run is `make test`'s, with node absent.
