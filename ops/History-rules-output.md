@@ -1003,7 +1003,11 @@ hand-off revoking that sink, whose activation answers its own fence
 judged by its cause in this order: a release ends the session, a revocation of
 the session's DSD keeps its fault, the drop's own answer (the sink's fence,
 `errReplanned`) is taken back, and anything else is the fault it was (round 4);
-a resume waits in a loop; a refusal
+a revocation of the session's DSD leaves its sinks to `Backend.Revoke`, which
+stops them after the fault it records, the reconciliation stopping an
+activating sink itself only for a hand-off, and a take-back's close waits for
+the sink's end, a release the sink cannot confirm the session's fault (round
+5); a resume waits in a loop; a refusal
 of the policy's that a write or a later set lifts is asked again where the open
 ends, the content's checks with it (`settleOpen`, `refusedUnder`), a
 successor's DSD monitor starting once it is admitted; a gapless successor waits
@@ -1019,7 +1023,9 @@ successor handed off again or dropped at its activation, at its fence too, take
 a dropped one back with its decoder open, fault a session whose release came
 during an activation, let a test of the adoption's wait pass on the activation's
 own, take an activation's failure beside a drop for the drop's but by the drop's
-own answer, judge a drop before a release or a revocation, leave to its
+own answer, judge a drop before a release, stop a sink of a session whose DSD
+is revoked before `Backend.Revoke` records its fault, let a take-back go on past
+a release its sink could not confirm, leave to its
 activation the sink of an occurrence a reconciliation handed off again, answer a
 device's failure as the native sink's own fence or that fence by a bare error,
 ask a decoder's
@@ -1111,7 +1117,7 @@ the box shows is published by a refresh, and the write's publish is one. The
 classification also counts a session being released, and an engine that
 hands nothing off again, as revocations (`TestAWriteBesideASessionBeingReleasedIsTold`,
 `TestAWriteBesideAnEngineThatHandsNothingOffAgainIsTold`, the rig's
-`noReplan`). `TestASuccessorsOpenBesideAWriteIsCountedAndWaitsForIt`, `TestAnActivationBesideAWriteWaitsForIt`, `TestASuccessorDroppedAtItsActivationIsTakenBackUnwritten`, `TestAReleaseWhileASuccessorsAdoptionWaitsLetsGoOfTheDevice`, `TestASuccessorDroppedAtItsSinksAdmissionIsTakenBackUnwritten`, `TestASuccessorDroppedWhileItsSinkWritesItsPrefillIsTakenBack`, `TestAnActivationsFailureBesideADropIsJudgedByItsCause`, `TestTheActivationsOwnFenceIsErrActivationFenced`, `TestAResumesOpenBetweenTransportsBesideAWriteIsCounted`, `TestAResumeWaitsForEveryWriteThatChangesWhatItOpens`, `TestAPolicyRefusalAWriteLiftsIsAskedAgain`, `TestASuccessorWhoseOpenEndsBesideAWriteWaitsForIt`, `TestNoSinkOpensForASuccessorWhileAWriteChangesItsRate`, `TestAConvertedJoinWindowWaitsForAWriteThatChangesItsSuccessor`, `TestAGaplessSuccessorWaitsForAWriteNoLongerThanTheSinksLookahead`, `TestAWriteBesideAnEngineThatHandsNothingOffAgainIsTold`, `TestAWriteBesideASessionBeingReleasedIsTold`, `TestTheWritesChecksAreAnsweredInTheirOrder`, `TestAWriteTheStateKeepsMovingUnderIsNotMade`, `TestAStaleAnswerNeverCarriesARevisionAnotherWriteHasPassed`, `TestAWriteIsJudgedAgainstTheSetPublished` and `TestAWriteWhoseReadingNeverAgreesWithTheSetPublishedIsNotMade` pin it.
+`noReplan`). `TestASuccessorsOpenBesideAWriteIsCountedAndWaitsForIt`, `TestAnActivationBesideAWriteWaitsForIt`, `TestASuccessorDroppedAtItsActivationIsTakenBackUnwritten`, `TestAReleaseWhileASuccessorsAdoptionWaitsLetsGoOfTheDevice`, `TestASuccessorDroppedAtItsSinksAdmissionIsTakenBackUnwritten`, `TestASuccessorDroppedWhileItsSinkWritesItsPrefillIsTakenBack`, `TestAnActivationsFailureBesideADropIsJudgedByItsCause`, `TestTheActivationsOwnFenceIsErrActivationFenced`, `TestARevocationWhileASuccessorsSinkActivatesKeepsItsFault`, `TestAResumesOpenBetweenTransportsBesideAWriteIsCounted`, `TestAResumeWaitsForEveryWriteThatChangesWhatItOpens`, `TestAPolicyRefusalAWriteLiftsIsAskedAgain`, `TestASuccessorWhoseOpenEndsBesideAWriteWaitsForIt`, `TestNoSinkOpensForASuccessorWhileAWriteChangesItsRate`, `TestAConvertedJoinWindowWaitsForAWriteThatChangesItsSuccessor`, `TestAGaplessSuccessorWaitsForAWriteNoLongerThanTheSinksLookahead`, `TestAWriteBesideAnEngineThatHandsNothingOffAgainIsTold`, `TestAWriteBesideASessionBeingReleasedIsTold`, `TestTheWritesChecksAreAnsweredInTheirOrder`, `TestAWriteTheStateKeepsMovingUnderIsNotMade`, `TestAStaleAnswerNeverCarriesARevisionAnotherWriteHasPassed`, `TestAWriteIsJudgedAgainstTheSetPublished` and `TestAWriteWhoseReadingNeverAgreesWithTheSetPublishedIsNotMade` pin it.
 
 Round 3 (2026-11-08, the reviews of round 2 and of the merge). The activation's
 fence (`activateOutput`) answered a successor dropped while its sink was
@@ -1186,3 +1192,34 @@ cut), `TestASuccessorDroppedWhileItsSinkWritesItsPrefillIsTakenBack`,
 `TestAnActivationsFailureBesideADropIsJudgedByItsCause` (a release at the
 admission, a release in the prefill, a revocation, a device's refusal) and
 `TestTheActivationsOwnFenceIsErrActivationFenced` (the sink's answers) pin it.
+
+Round 5 (2026-11-08, the reviews of round 4). Round 4's early cancellation in
+`reconcileDSD` revoked the sink an activation is under way for whenever the
+occurrence was held back, a revocation of the session's DSD included, which is
+what a re-plan is where the engine hands nothing off again: the activation
+could then answer the sink's own fence, and `transition` take the occurrence
+back and close its output before `Backend.Revoke` ran, which found no sink of
+the session's open and recorded no fault, so the occurrence and what followed
+it were refused and the queue played on. The cancellation now runs only for a
+hand-off; a revocation's sinks are `Backend.Revoke`'s, stopped after the fault
+it records, and the activation meanwhile may complete. A release the sink
+cannot confirm is never taken back as the drop's: the fence joined with
+`ErrReleaseUnconfirmed` comes only from a reopen, which only a resume's
+activation of a sink whose node a pause's release let go makes, answered to
+the resume, and where a node's close fails after a take-back, `unadopt`'s
+close waits for the sink's end (`nativeStream.Close` waits for `Done`) and
+`closeOutput` makes the sink's result, where the writer records an unconfirmed
+release, the session's fault before the producer's next step. Excluding
+`ErrReleaseUnconfirmed` from the take-back was the other option, and would
+have been unreachable. The order of a revocation and a drop is not
+observable: judged either way the session ends with `Backend.Revoke`'s fault
+and opens nothing more, the two differing only in whether the take-back or
+the teardown closes the sink and the decoder, both before the release is
+acknowledged; so the rule holds a drop to be judged after a release, which the
+release cases pin, and the code's order stays, its comment saying why. The cut
+case at the sink's admission checks the cut alone before the engine is told.
+`TestARevocationWhileASuccessorsSinkActivatesKeepsItsFault` (the engine handing
+nothing off again, the reconciliation held between its judgement and its call
+to Revoke) and `TestAnActivationsFailureBesideADropIsJudgedByItsCause` (a
+node's close failing beside a drop, at the take-back and at a resume's reopen)
+pin it.
