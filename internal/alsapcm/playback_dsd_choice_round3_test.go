@@ -195,7 +195,7 @@ func TestASuccessorDroppedAtItsActivationIsTakenBackUnwritten(t *testing.T) {
 	})
 	t.Run("a cut of b while its activation is held", func(t *testing.T) {
 		w := newWriteSeams()
-		d, _, ob, act := heldSuccessor(t, w)
+		d, ids, ob, act := heldSuccessor(t, w)
 		if ok, err := d.be.Cut(bg, d.sessionOf(), ob); !ok || err != nil {
 			t.Fatalf("the cut of b, none of it written: %v %v, want true", ok, err)
 		}
@@ -207,12 +207,16 @@ func TestASuccessorDroppedAtItsActivationIsTakenBackUnwritten(t *testing.T) {
 		if s := d.eng.Snapshot(); s.State() == engine.Stopped || count(d.rec.events(), "fault", 0) != 0 {
 			t.Fatalf("b cut at its activation stopped the session (%s: %s): faults %+v, events %s", s.LastStop().Reason, s.LastStop().Detail, s.Faults(), kinds(d.rec.events()))
 		}
-		if !d.files.firstClosed("b") {
-			t.Errorf("b's decoder and content are still open once its node was closed: the dropped occurrence's decoder was not closed")
+		// A cut drops b and everything after it, and what follows comes with
+		// the engine's next Prepare (the backend's contract): the engine, which
+		// replaces a successor it has not submitted through Prepare, still names
+		// b, so the edit that deletes b's entry tells it, and c is handed off in
+		// b's place (B728 B9 round 4, point 2).
+		if err := d.eng.Delete(bg, ids[1]); err != nil {
+			t.Fatalf("deleting b's entry: %v", err)
 		}
-		if v := d.k.View(); v.GivenBytes != v.OpenAt[1] {
-			t.Errorf("b's node was given %d bytes, want none", v.GivenBytes-v.OpenAt[1])
-		}
+		d.replaced(ob, "c handed off in b's place")
+		wentOn(t, d, ids)
 	})
 	t.Run("a release beside b's replacement while its activation is held", func(t *testing.T) {
 		w := newWriteSeams()
