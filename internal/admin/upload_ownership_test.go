@@ -197,7 +197,9 @@ func TestAnUploadRunOwnsThePageFromItsFirstAwait(t *testing.T) {
 // still send right before each request (each chunk, its retries included,
 // after the chunk was read and hashed; its session's create), and Cancel and
 // a navigation take the page from it, so a run stopped either way sends
-// nothing new and its continuations touch nothing.
+// nothing new and its continuations touch nothing. A chunk's request asks too
+// whether a sibling worker's chunk has failed (B797's round 2): the worker may
+// have been reading or hashing its chunk when that failure landed.
 func TestAnUploadRunSendsNothingOnceItMayNotGoOn(t *testing.T) {
 	src := readFile(t, "static/app.js")
 	put := uploadJSFunction(t, src, "putUploadChunk")
@@ -207,9 +209,11 @@ func TestAnUploadRunSendsNothingOnceItMayNotGoOn(t *testing.T) {
 		t.Errorf("putUploadChunk does not hash its chunk before it makes the chunk's request:\n%s", put)
 	} else if between := put[hash+len("await ") : send]; !strings.Contains(between, "uploadCheckpoint(run);") || strings.Contains(between, "await ") {
 		t.Errorf("putUploadChunk does not ask whether its run may still send right before the chunk's request, after the chunk was read and hashed:\n%s", between)
+	} else if !strings.Contains(between, "if (failed()) throw uploadAbortError();") {
+		t.Errorf("putUploadChunk sends a chunk whatever a sibling worker's chunk answered meanwhile: the transfer's failure is not asked right before the request:\n%s", between)
 	}
-	if !strings.Contains(uploadJSFunction(t, src, "putUploadChunkVerified"), "return await putUploadChunk(run, sid, fid, offset, bytes);") {
-		t.Error("a digest mismatch's re-send does not go through putUploadChunk's ask")
+	if !strings.Contains(uploadJSFunction(t, src, "putUploadChunkVerified"), "return await putUploadChunk(run, sid, fid, offset, bytes, failed);") {
+		t.Error("a digest mismatch's re-send does not go through putUploadChunk's asks")
 	}
 	if !strings.Contains(uploadJSFunction(t, src, "createUploadSession"), "uploadCheckpoint(run);\n  return API.post(\"/api/upload/sessions\"") {
 		t.Error("createUploadSession makes a session without asking first whether its run may still send")
@@ -218,8 +222,11 @@ func TestAnUploadRunSendsNothingOnceItMayNotGoOn(t *testing.T) {
 		t.Error("attachUploadIdentity reads every file's identity whether or not its run was stopped")
 	}
 	transfer := uploadJSFunction(t, src, "transferAll")
-	if !strings.Contains(transfer, "const stopped = () => !uploadRunLive(run) || failure !== null;") {
-		t.Error("transferAll's workers go on taking chunks once their run may not")
+	if !strings.Contains(transfer, "const failed = () => failure !== null;") || !strings.Contains(transfer, "const stopped = () => !uploadRunLive(run) || failed();") {
+		t.Error("transferAll's workers go on taking chunks once their run may not, or once a sibling's chunk failed")
+	}
+	if !strings.Contains(transfer, "putUploadChunkVerified(run, session.id, meta.id, offset, bytes, failed)") {
+		t.Error("transferAll does not hand its chunks' requests the transfer's failure to ask")
 	}
 	if !strings.Contains(transfer, `if (failure === null && err?.code !== "aborted") failure = err;`) {
 		t.Error("a worker that finds its run stopped before a chunk's request counts it as the transfer's failure")
@@ -275,14 +282,25 @@ func TestTheUploadPageRefusesAnotherUploadWhileARunOwnsIt(t *testing.T) {
 		handler := jsBlockAt(wire, at)
 		walk := strings.Index(handler, "await collectFromDataTransfer(")
 		before := strings.Index(handler, "if (uploadState?.run) return;")
-		after := strings.Index(handler, "if (signal?.aborted || uploadState?.run) return;")
+		staged := strings.Index(handler, "const staged = uploadState;")
+		runs := strings.Index(handler, "const runs = staged?.runs;")
+		after := strings.Index(handler, "if (signal?.aborted || uploadState !== staged || uploadState?.runs !== runs) return;")
 		stage := strings.Index(handler, "stageFiles(picked);")
 		if walk < 0 || before < 0 || before > walk {
 			t.Errorf("the drop target, a div no disabled state stops, takes a drop while a run owns the page:\n%s", handler)
 		}
-		if after < walk || stage < after {
-			t.Errorf("a dropped folder read while an upload began, or while a navigation replaced the page, is staged anyway:\n%s", handler)
+		// Round 2: a run that began and ended while the folder was read left
+		// no run on the page, and the folder was staged over its report or the
+		// Try again it offered.
+		if staged < 0 || runs < staged || walk < runs || after < walk || stage < after {
+			t.Errorf("a dropped folder read while an upload began (under way, or ended since), while the page's upload was replaced, or while a navigation replaced the page, is staged anyway:\n%s", handler)
 		}
+	}
+	if !strings.Contains(uploadJSFunction(t, src, "beginUploadRun"), "state.runs += 1;") {
+		t.Error("beginUploadRun does not count its upload's runs, which a dropped folder's read is told by")
+	}
+	if !strings.Contains(uploadJSFunction(t, src, "stageFiles"), "runs: 0,") {
+		t.Error("a staged upload does not start with no runs counted")
 	}
 	if stop := strings.Index(wire, `getElementById("upload-abort")?.addEventListener("click", () => {`); stop < 0 || !strings.Contains(jsBlockAt(wire, stop), "const run = uploadState?.run;\n    if (run) run.aborted = true;") {
 		t.Error("Stop does not stop the run that owns the page")
@@ -306,10 +324,20 @@ func TestTheUploadPageRefusesAnotherUploadWhileARunOwnsIt(t *testing.T) {
 		t.Error("Stop is not offered until Try again has read its session: a stop during that read cannot be pressed")
 	}
 	// A stop says its session's progress is kept and that starting again
-	// resumes it, which holds only once the page has read its interrupted
-	// uploads again: a session made since the page's last read is in no list.
-	if stopped := uploadJSFunction(t, src, "showUploadStopped"); !strings.Contains(stopped, "start again to resume") || !strings.Contains(stopped, "refreshResumable();") {
+	// resumes it, which holds only once the session is on the page's list: one
+	// made since the page's last read is in none. It goes there at once, before
+	// the list is read back (round 2: a pick made before that read answered
+	// started over in a second session), and at the list's end, so the one the
+	// banner shows, the one Discard it takes, stays the first.
+	stopped := uploadJSFunction(t, src, "showUploadStopped")
+	if !strings.Contains(stopped, "start again to resume") || !strings.Contains(stopped, "refreshResumable();") {
 		t.Error("a stopped upload's session is not read back into the page's list, so choosing the same files again starts over, against what the stop says")
+	}
+	if put, read := strings.Index(stopped, "resumableSessions = [...resumableSessions, s];"), strings.Index(stopped, "refreshResumable();"); put < 0 || read < put || strings.Contains(stopped, "await ") {
+		t.Errorf("a stopped upload's session is on the page's list only once the list is read back, so the same files chosen again before then start over:\n%s", stopped)
+	}
+	if !strings.Contains(uploadJSFunction(t, src, "showUploadRunEnd"), "showUploadStopped(run);") {
+		t.Error("showUploadRunEnd does not hand the stopped run, whose session goes on the list, to showUploadStopped")
 	}
 
 	tmpl := readFile(t, "templates/upload.html")
@@ -624,9 +652,18 @@ type ownershipPut struct {
 // another file's.
 func (rig *ownershipRig) requirePuts(t *testing.T, sid, body string, want []ownershipPut) {
 	t.Helper()
-	got := rig.of("put", sid)
+	rig.requireFilePuts(t, sid, "", body, want)
+}
+
+// requireFilePuts is requirePuts for one file of the session, the file whose
+// id is fid ("" for every file).
+func (rig *ownershipRig) requireFilePuts(t *testing.T, sid, fid, body string, want []ownershipPut) {
+	t.Helper()
 	var seen []ownershipPut
-	for _, p := range got {
+	for _, p := range rig.of("put", sid) {
+		if fid != "" && p.File != fid {
+			continue
+		}
 		seen = append(seen, ownershipPut{p.Offset, p.Status})
 		end := min(p.Offset+ownershipChunk, int64(len(body)))
 		if p.Offset < 0 || p.Offset >= end || string(p.Body) != body[p.Offset:end] {
@@ -634,15 +671,38 @@ func (rig *ownershipRig) requirePuts(t *testing.T, sid, body string, want []owne
 		}
 	}
 	if len(seen) != len(want) {
-		t.Errorf("session %s was sent the chunks %v, want %v", sid, seen, want)
+		t.Errorf("session %s (file %q) was sent the chunks %v, want %v", sid, fid, seen, want)
 		return
 	}
 	for i := range want {
 		if seen[i] != want[i] {
-			t.Errorf("session %s was sent the chunks %v, want %v", sid, seen, want)
+			t.Errorf("session %s (file %q) was sent the chunks %v, want %v", sid, fid, seen, want)
 			return
 		}
 	}
+}
+
+// fileIDOf is the id session sid gave the file at path, as the page's create
+// of that session answered it; "" where no create did.
+func (rig *ownershipRig) fileIDOf(sid, path string) string {
+	for _, r := range rig.requests() {
+		if r.Kind != "create" || r.Status != http.StatusCreated {
+			continue
+		}
+		var s struct {
+			ID    string
+			Files []struct{ ID, Path string }
+		}
+		if json.Unmarshal(r.Answer, &s) != nil || s.ID != sid {
+			continue
+		}
+		for _, f := range s.Files {
+			if f.Path == path {
+				return f.ID
+			}
+		}
+	}
+	return ""
 }
 
 // requireFile fails the test unless the root holds body at path; or nothing
@@ -764,7 +824,29 @@ func requireAdded(t *testing.T, at string, s ownershipShown, added string) {
 const ownershipRun = `
 const input = JSON.parse(await (await import("node:fs/promises")).readFile(process.argv[2], "utf8"));
 const realFetch = globalThis.fetch;
-globalThis.fetch = (url, init) => realFetch(new URL(url, input.base), init);
+// The page's requests go to the rig. answerParsed(method, nth) resolves once
+// the page has read the body of the answer to its nth request of method, and a
+// turn of the event loop has run what the page does with it.
+const answerWatchers = [];
+const requestsMade = {};
+globalThis.fetch = async (url, init) => {
+  const method = (init && init.method) || "GET";
+  requestsMade[method] = (requestsMade[method] || 0) + 1;
+  const nth = requestsMade[method];
+  const r = await realFetch(new URL(url, input.base), init);
+  for (const w of answerWatchers.filter((x) => x.method === method && x.nth === nth)) {
+    const json = r.json.bind(r);
+    r.json = async () => {
+      try {
+        return await json();
+      } finally {
+        setTimeout(w.resolve, 0);
+      }
+    };
+  }
+  return r;
+};
+const answerParsed = (method, nth) => new Promise((resolve) => answerWatchers.push({ method, nth, resolve }));
 const rigCall = async (path, method) => {
   const r = await realFetch(new URL(path, input.base), { method });
   if (r.status !== 204) throw new Error(path + " answered " + r.status + ": " + (await r.text()));
@@ -928,6 +1010,33 @@ const fileAt = (path, body) => {
   const f = new File([body], path.split("/").pop(), { lastModified: input.lastModified });
   Object.defineProperty(f, "webkitRelativePath", { value: path });
   return f;
+};
+// gatedFile is fileAt's file whose read of the bytes [start, end), a chunk's,
+// waits until the script calls open: reached resolves once the page has asked
+// for it. Its identity's reads, the whole of a file this small, pass.
+const gatedFile = (path, body, start, end) => {
+  const f = fileAt(path, body);
+  const sliceOf = f.slice.bind(f);
+  let open = null;
+  const opened = new Promise((resolve) => {
+    open = resolve;
+  });
+  let arrive = null;
+  const reachedRead = new Promise((resolve) => {
+    arrive = resolve;
+  });
+  f.slice = (from, to) => {
+    const part = sliceOf(from, to);
+    if (from !== start || to !== end) return part;
+    return {
+      arrayBuffer: async () => {
+        arrive();
+        await opened;
+        return part.arrayBuffer();
+      },
+    };
+  };
+  return { file: f, open, reached: reachedRead };
 };
 // folderDrop is a dropped folder holding files, whose reading waits until the
 // script calls open.
@@ -1225,6 +1334,93 @@ const steps = {
     await settle(run, "the upload");
     out.shown.final = shown();
   },
+  // Stop, then the same files chosen again and Upload pressed while the
+  // page's read of its interrupted uploads, which the stop asked for, is held.
+  "stop-repick": async () => {
+    newPage();
+    await ready();
+    await settle(pick([oldFile()]), "the pick");
+    const run = click("upload-start");
+    await reached("put");
+    const stop = click("upload-abort");
+    out.took.stop = stop !== null;
+    await settle(stop, "Stop");
+    await release("put");
+    await settle(run, "the upload");
+    out.shown.stopped = shown();
+    await reached("stop-list");
+    await settle(pick([oldFile()]), "the pick of the same files");
+    await settle(click("upload-start"), "the upload of the same files");
+    out.shown.final = shown();
+    await release("stop-list");
+  },
+  // Stop while a chunk is read, before its request: the read is held.
+  "stop-before-send": async () => {
+    newPage();
+    await ready();
+    const gated = gatedFile(input.path, input.old, 8, 16);
+    await settle(pick([gated.file]), "the pick");
+    const run = click("upload-start");
+    await settle(gated.reached, "the second chunk's read");
+    out.shown.during = shown();
+    const stop = click("upload-abort");
+    out.took.stop = stop !== null;
+    await settle(stop, "Stop");
+    gated.open();
+    await settle(run, "the upload");
+    out.shown.final = shown();
+  },
+  // Two files: B's first chunk's read is held until A's first chunk has been
+  // refused (its root's volume away) and the page has read that answer.
+  "sibling-after-failure": async () => {
+    newPage();
+    await ready();
+    const gated = gatedFile(input.otherPath, input.other, 0, 8);
+    const firstAnswer = answerParsed("PUT", 1);
+    await settle(pick([oldFile(), gated.file]), "the pick");
+    const run = click("upload-start");
+    await reached("a-put");
+    await settle(gated.reached, "B's first chunk's read");
+    await release("a-put");
+    await settle(firstAnswer, "the page's read of A's refusal");
+    gated.open();
+    await settle(run, "the upload");
+    out.shown.refused = shown();
+    await back();
+    await settle(click("upload-retry-button"), "Try again");
+    out.shown.final = shown();
+  },
+  // A folder dropped before Upload, whose reading ends after the whole upload
+  // has: refused, Try again offered (outlives-refusal), or committed.
+  "drop-outlives-refusal": async () => {
+    newPage();
+    await ready();
+    await settle(pick([oldFile()]), "the pick");
+    const pending = folderDrop("Dropped", [new File([input.other], "01.flac", { lastModified: input.lastModified })]);
+    const dropped = drop(pending.dataTransfer);
+    out.took.drop = dropped !== null;
+    await settle(click("upload-start"), "the upload");
+    out.shown.ended = shown();
+    pending.open();
+    await settle(dropped, "the drop read through the upload");
+    out.shown.after = shown();
+    await back();
+    await settle(click("upload-retry-button"), "Try again");
+    out.shown.final = shown();
+  },
+  "drop-outlives-success": async () => {
+    newPage();
+    await ready();
+    await settle(pick([oldFile()]), "the pick");
+    const pending = folderDrop("Dropped", [new File([input.other], "01.flac", { lastModified: input.lastModified })]);
+    const dropped = drop(pending.dataTransfer);
+    out.took.drop = dropped !== null;
+    await settle(click("upload-start"), "the upload");
+    out.shown.ended = shown();
+    pending.open();
+    await settle(dropped, "the drop read through the upload");
+    out.shown.after = shown();
+  },
 };
 try {
   await steps[input.case]();
@@ -1425,10 +1621,47 @@ func TestARetrySendsOnlyTheFilesItBeganWith(t *testing.T) {
 	}
 }
 
+// TestASiblingSendsNothingOnceAnotherWorkersChunkFailed: an upload of two
+// files, A (OLD) and B, each a worker of the transfer's own. B's first chunk is
+// read, and its read held, while A's first chunk is refused, its root's volume
+// away; the read is let go once the page has read that refusal. B's worker then
+// sends nothing: the first failure stops the transfer's other workers before
+// their next request, not only at their next chunk (before B797's round 2 the
+// check right before a chunk's request asked whether the run was stopped or had
+// lost the page, never whether a sibling had failed). Try again then sends both
+// files whole and commits them.
+func TestASiblingSendsNothingOnceAnotherWorkersChunkFailed(t *testing.T) {
+	script, node := ownershipScript(t)
+	rig := newOwnershipRig(t, ownershipRule{Kind: "put", Nth: 1, Hold: "a-put", Away: true})
+	got := runOwnershipCase(t, rig, script, node, "sibling-after-failure")
+	if refused := got.Shown["refused"]; !strings.Contains(refused.Error, notMountedWords) || !refused.RetryShown {
+		t.Fatalf("the refused upload shows %+v, want the refusal and Try again", refused)
+	}
+	made := rig.sessionsMade()
+	if len(made) == 0 {
+		t.Fatalf("the page made no session:\n%v", rig.requests())
+	}
+	fidA, fidB := rig.fileIDOf(made[0], ownershipPath), rig.fileIDOf(made[0], ownershipOtherPath)
+	if fidA == "" || fidB == "" {
+		t.Fatalf("the session's create named the files %q and %q:\n%v", fidA, fidB, rig.requests())
+	}
+	// B's chunks are Try again's alone: none was sent after A's refusal.
+	rig.requireFilePuts(t, made[0], fidB, ownershipOther, []ownershipPut{{0, 200}, {8, 200}, {16, 200}})
+	rig.requireFilePuts(t, made[0], fidA, ownershipOld, []ownershipPut{{0, 409}, {0, 200}, {8, 200}, {16, 200}, {24, 200}})
+	requireAdded(t, "after Try again", got.Shown["final"], "2 added")
+	if len(made) != 1 {
+		t.Errorf("the page made the sessions %q, want one", made)
+	}
+	rig.requireFile(t, ownershipPath, ownershipOld)
+	rig.requireFile(t, ownershipOtherPath, ownershipOther)
+}
+
 // TestStopAndCancelEndARunWhereverItIs: Stop is offered from Try again's start
 // and ends it during its session's read, sending nothing; the session stays
 // resumable, the page says so and lists it, and choosing the same files again
-// carries it on. Cancel while an upload prepares (its session's create held)
+// carries it on, before the page has read its list back too. Stop while a
+// chunk is read, before its request, sends that chunk nothing. Cancel while an
+// upload prepares (its session's create held)
 // ends it there: the page is clear at once for a new upload, which runs and
 // reports alone, and the cancelled upload, its create answered (after the new
 // upload, or while its chunk is held), sends nothing and says nothing, its
@@ -1477,6 +1710,51 @@ func TestStopAndCancelEndARunWhereverItIs(t *testing.T) {
 			t.Errorf("the session was committed %v, want once, by the resume", commits)
 		}
 		rig.requireFile(t, ownershipPath, ownershipOld)
+	})
+
+	t.Run("Stop, the same files chosen again before the page's list is read back", func(t *testing.T) {
+		rig := newOwnershipRig(t, ownershipRule{Kind: "put", Nth: 2, Hold: "put"}, ownershipRule{Kind: "list", Nth: 2, Hold: "stop-list"})
+		got := runOwnershipCase(t, rig, script, node, "stop-repick")
+		if stopped := got.Shown["stopped"]; !got.Took["stop"] || !strings.Contains(stopped.Result, "Upload stopped") {
+			t.Fatalf("Stop did not stop the upload: %+v", stopped)
+		}
+		requireAdded(t, "after the same files were chosen again", got.Shown["final"], "1 added")
+		// The stopped session is carried on though the page's read of its
+		// interrupted uploads was still out: no second session, nothing sent
+		// twice.
+		made := rig.sessionsMade()
+		if len(made) != 1 {
+			t.Fatalf("the page made the sessions %q, want the stopped one alone, carried on: choosing the same files again before the list was read back started over\n%v", made, rig.requests())
+		}
+		if reads := rig.of("read", made[0]); len(reads) != 1 {
+			t.Errorf("the page read the stopped session %d times, want once, as the same files carried it on", len(reads))
+		}
+		rig.requirePuts(t, made[0], ownershipOld, []ownershipPut{{0, 200}, {8, 200}, {16, 200}, {24, 200}})
+		if commits := rig.of("commit", made[0]); len(commits) != 1 || commits[0].Status != http.StatusOK {
+			t.Errorf("the session was committed %v, want once", commits)
+		}
+		rig.requireFile(t, ownershipPath, ownershipOld)
+	})
+
+	t.Run("Stop while a chunk is read, before its request", func(t *testing.T) {
+		rig := newOwnershipRig(t)
+		got := runOwnershipCase(t, rig, script, node, "stop-before-send")
+		if during := got.Shown["during"]; !during.StopClickable || !got.Took["stop"] {
+			t.Fatalf("Stop could not be pressed while the second chunk was read: %+v", during)
+		}
+		if final := got.Shown["final"]; !strings.Contains(final.Result, "Upload stopped") || final.Error != "" || final.ProgressShown {
+			t.Errorf("after Stop the page shows %+v, want the stop said", final)
+		}
+		// The second chunk was read and hashed after the stop: the check right
+		// before its request is what keeps it from being sent.
+		made := rig.sessionsMade()
+		if len(made) != 1 {
+			t.Fatalf("the page made the sessions %q, want one", made)
+		}
+		rig.requirePuts(t, made[0], ownershipOld, []ownershipPut{{0, 200}})
+		if commits := rig.of("commit", ""); len(commits) != 0 {
+			t.Errorf("the stopped upload committed %v", commits)
+		}
 	})
 
 	t.Run("Cancel while an upload prepares", func(t *testing.T) {
@@ -1543,9 +1821,11 @@ func TestStopAndCancelEndARunWhereverItIs(t *testing.T) {
 }
 
 // TestNoContinuationTouchesAPageItNoLongerOwns: a folder whose reading was
-// still under way when an upload began, or when a navigation replaced the
-// page, is not staged over either; a drop while an upload runs is refused at
-// once; and an upload a navigation left (its chunk held, then failing while
+// still under way when an upload began (whether that upload still runs when
+// the read ends, or has ended by then, refused with Try again or committed),
+// or when a navigation replaced the page, is not staged over any of them; a
+// drop while an upload runs is refused at once; and an upload a navigation
+// left (its chunk held, then failing while
 // the new page's own upload runs; or its commit held, then answered over the
 // new page's staged pick) sends nothing more and touches nothing on the page
 // shown since, whose own upload runs and reports alone. The commit already
@@ -1587,6 +1867,52 @@ func TestNoContinuationTouchesAPageItNoLongerOwns(t *testing.T) {
 		requireAdded(t, "after the new page's upload", got.Shown["final"], "1 added")
 		if made := rig.sessionsMade(); len(made) != 1 {
 			t.Errorf("the page made the sessions %q, want the new page's one", made)
+		}
+		rig.requireFile(t, ownershipPath, ownershipOld)
+		rig.requireFile(t, "Dropped/01.flac", "")
+	})
+
+	t.Run("a folder still being read through a whole upload, refused with Try again", func(t *testing.T) {
+		rig := newOwnershipRig(t, ownershipSecondChunkAway)
+		got := runOwnershipCase(t, rig, script, node, "drop-outlives-refusal")
+		if !got.Took["drop"] {
+			t.Fatal("the drop target took no drop before the upload began")
+		}
+		ended := got.Shown["ended"]
+		if !strings.Contains(ended.Error, notMountedWords) || !ended.RetryShown {
+			t.Fatalf("the refused upload shows %+v, want the refusal and Try again", ended)
+		}
+		// The run began and ended while the folder was read: its Try again is
+		// the page's now, and the folder is not staged over it.
+		after := got.Shown["after"]
+		if !after.RetryShown || after.Error != ended.Error || after.ReviewShown || len(after.Preview) != 0 {
+			t.Errorf("once the folder read through the upload was done, the page shows %+v, want the refusal and its Try again as they were (%+v)", after, ended)
+		}
+		requireAdded(t, "after Try again", got.Shown["final"], "1 added")
+		made := rig.sessionsMade()
+		if len(made) != 1 {
+			t.Fatalf("the page made the sessions %q, want one, carried on by Try again:\n%v", made, rig.requests())
+		}
+		rig.requirePuts(t, made[0], ownershipOld, []ownershipPut{{0, 200}, {8, 409}, {8, 200}, {16, 200}, {24, 200}})
+		rig.requireFile(t, ownershipPath, ownershipOld)
+		rig.requireFile(t, "Dropped/01.flac", "")
+	})
+
+	t.Run("a folder still being read through a whole upload, committed", func(t *testing.T) {
+		rig := newOwnershipRig(t)
+		got := runOwnershipCase(t, rig, script, node, "drop-outlives-success")
+		if !got.Took["drop"] {
+			t.Fatal("the drop target took no drop before the upload began")
+		}
+		ended := got.Shown["ended"]
+		requireAdded(t, "after the upload", ended, "1 added")
+		// The run began and ended while the folder was read: its report is the
+		// page's now, and the folder is not staged under it.
+		if after := got.Shown["after"]; after.Result != ended.Result || after.ReviewShown || len(after.Preview) != 0 || after.Error != "" {
+			t.Errorf("once the folder read through the upload was done, the page shows %+v, want the upload's report as it was (%q)", after, ended.Result)
+		}
+		if made := rig.sessionsMade(); len(made) != 1 {
+			t.Errorf("the page made the sessions %q, want one", made)
 		}
 		rig.requireFile(t, ownershipPath, ownershipOld)
 		rig.requireFile(t, "Dropped/01.flac", "")
