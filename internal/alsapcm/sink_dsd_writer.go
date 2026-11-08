@@ -23,7 +23,7 @@ func (s *DSDSink) loopNative() {
 		s.released = true
 		s.active = false
 		if s.activation != nil {
-			s.activation.reply <- errors.New("native activation cancelled")
+			s.activation.reply <- s.fenced("native activation", errors.New("native activation cancelled"))
 			s.activation = nil
 		}
 		if s.releaseCancel != nil {
@@ -74,37 +74,46 @@ func (s *DSDSink) loopNative() {
 			if s.activation == r {
 				s.activation = nil
 			}
-			if errors.Is(e, ErrReleaseUnconfirmed) {
+			terminal := errors.Is(e, ErrReleaseUnconfirmed)
+			if terminal {
 				s.err = errors.Join(s.err, e)
 				s.revoked = true
 			}
-			r.reply <- e
-			s.notify()
-			s.mu.Unlock()
+			held := false
 			if e != nil {
-				s.mu.Lock()
 				// The life's end is the sink's revocation, which its watcher
-				// can make after this: begun here before the error is
-				// classified, so an activation or a resume the ended life
-				// fenced or cancelled ("native activation fenced", a prefill's
-				// cancellation) records no fault and holds no refused reopen
-				// for a resume that cannot come (B765 round 2). A terminal
-				// error stays recorded above.
-				if s.life.Err() != nil {
+				// can make after this: begun here, on one read of the life,
+				// before the error is classified and answered (B765 rounds 2
+				// and 3). What that end caused, a fence it tripped or a wait
+				// it ended, is no fault, and the caller's answer is the life's
+				// cancellation, whichever arm of its select takes the reply: a
+				// harness the life stopped took "native activation fenced" for
+				// a failure. Anything else, a device's or an admission's
+				// failure, stays the sink's fault, though the release has
+				// begun. While the life runs a release in progress excuses
+				// what it met, as ever, and a refused reopen while paused is
+				// held for the next resume; a terminal error is recorded above.
+				end := s.life.Err()
+				if end != nil {
 					s.beginReleaseLocked(Immediate)
 				}
-				terminal := errors.Is(e, ErrReleaseUnconfirmed)
-				held := s.paused && !s.releasing && !terminal
-				if !terminal && !held && !s.releasing {
+				caused := end != nil && lifeCaused(e, end)
+				held = s.paused && !s.releasing && !terminal
+				if !terminal && !held && !caused && (end != nil || !s.releasing) {
 					s.err = errors.Join(s.err, e)
 				}
 				if held && !r.resume {
 					s.active = false
 				}
-				s.mu.Unlock()
-				if !held {
-					s.beginRelease(Immediate)
+				if caused && !terminal {
+					e = s.lifeCancelled("native activation", end)
 				}
+			}
+			r.reply <- e
+			s.notify()
+			s.mu.Unlock()
+			if e != nil && !held {
+				s.beginRelease(Immediate)
 			}
 			continue
 		}
@@ -215,9 +224,9 @@ func (s *DSDSink) activateNative(r *nativeRequest) error {
 	if ctx.Err() != nil || s.life.Err() != nil || s.revoked || s.releasing || (s.paused && (!r.resume || r.pauseEpoch != s.pauseEpoch)) {
 		s.mu.Unlock()
 		if reopened {
-			return nativeCleanupError(errors.New("native activation fenced"), s.closeNative())
+			return nativeCleanupError(errNativeActivationFenced, s.closeNative())
 		}
-		return errors.New("native activation fenced")
+		return errNativeActivationFenced
 	}
 	wasActive := s.active
 	s.active = true
@@ -235,7 +244,7 @@ func (s *DSDSink) activateNative(r *nativeRequest) error {
 		fenced := s.life.Err() != nil || s.revoked || s.releasing || r.pauseEpoch != s.pauseEpoch
 		s.mu.Unlock()
 		if fenced {
-			return errors.New("native resume fenced after status")
+			return errNativeResumeFenced
 		}
 		if st.state == statePaused {
 			if e = s.dev.Pause(false); e != nil {
@@ -480,4 +489,21 @@ func (s *DSDSink) closeNative() error {
 // Immediate escalation. A device error established before that fence survives.
 func (s *DSDSink) expectedReleaseCancellation(e error) bool {
 	return s.immediate() && (errors.Is(e, context.Canceled) || ReasonOf(e) == ReasonCancelled)
+}
+
+// The fences an activation or a resume meets once a release, a pause or the
+// sink's ended life has overtaken it, which the writer tells from a device's
+// failure (lifeCaused).
+var (
+	errNativeActivationFenced = errors.New("native activation fenced")
+	errNativeResumeFenced     = errors.New("native resume fenced after status")
+)
+
+// lifeCaused says whether e is what the sink's ended life (end, its error)
+// made of an activation or a resume: a fence it tripped, or a wait it ended,
+// by its own error or a device call it cancelled. Never a device's or an
+// admission's failure, which is the sink's fault whenever it comes (B765
+// round 3).
+func lifeCaused(e, end error) bool {
+	return errors.Is(e, errNativeActivationFenced) || errors.Is(e, errNativeResumeFenced) || errors.Is(e, end) || errors.Is(e, context.Canceled) || ReasonOf(e) == ReasonCancelled
 }
