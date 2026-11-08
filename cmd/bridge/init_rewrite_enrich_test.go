@@ -283,35 +283,50 @@ func TestARewriteKeepsTheEnrichmentBases(t *testing.T) {
 		})
 	}
 
-	t.Run("a base with a credential is kept and the credential never shown", func(t *testing.T) {
-		cfgDir := filepath.Join(t.TempDir(), "cfg")
-		rewrite := rewritePostures[0].setUp(t, cfgDir)
-		const login = "mirror-login"
-		mb := "https://" + login + ":" + baseSecret + "@mirror.example/ws/2?apikey=" + baseSecret
-		caa := "https://" + baseSecret + "@covers.example"
-		appendToConfig(t, cfgDir, "enrich:\n  musicbrainzBaseURL: \""+mb+"\"\n  coverArtBaseURL: \""+caa+"\"\n")
+	// Each base carries its credential in one part alone, so that each part
+	// is shown or not on its own: a password beside a user name, a token
+	// written as the user name, a query, a fragment.
+	const login = "mirror-login"
+	for _, c := range []struct{ name, mb, caa string }{
+		{"a password, and a query",
+			"https://" + login + ":" + baseSecret + "@mirror.example/ws/2",
+			"https://covers.example/?apikey=" + baseSecret},
+		{"a query, and a token as the user name",
+			"https://mirror.example/ws/2?apikey=" + baseSecret,
+			"https://" + baseSecret + "@covers.example"},
+		{"a fragment, and a password",
+			"https://mirror.example/ws/2#" + baseSecret,
+			"https://" + login + ":" + baseSecret + "@covers.example"},
+	} {
+		t.Run("a base with a credential is kept and the credential never shown: "+c.name, func(t *testing.T) {
+			cfgDir := filepath.Join(t.TempDir(), "cfg")
+			rewrite := rewritePostures[0].setUp(t, cfgDir)
+			appendToConfig(t, cfgDir, "enrich:\n  musicbrainzBaseURL: \""+c.mb+"\"\n  coverArtBaseURL: \""+c.caa+"\"\n")
 
-		code, out := rewrite()
-		defer logRunOnFailure(t, out)
+			code, out := rewrite()
+			defer logRunOnFailure(t, out)
 
-		if code != 0 {
-			t.Fatalf("the rewrite exited %d", code)
-		}
-		got := loadInstallConfig(t, cfgDir).Enrich
-		if got.MusicBrainzBaseURL != mb || got.CoverArtBaseURL != caa {
-			t.Errorf("the rewritten config has enrich bases %q and %q, want both kept whole", got.MusicBrainzBaseURL, got.CoverArtBaseURL)
-		}
-		for _, key := range []string{"enrich.musicbrainzBaseURL", "enrich.coverArtBaseURL"} {
-			if _, listed := keptValue(out, key); !listed {
-				t.Errorf("the run's list of what it kept leaves %s out", key)
+			if code != 0 {
+				t.Fatalf("the rewrite exited %d", code)
 			}
-		}
-		for _, part := range []string{baseSecret, login, "apikey"} {
-			if strings.Contains(strings.ToLower(out), strings.ToLower(part)) {
-				t.Errorf("the run printed %q, part of a kept base's user information or query", part)
+			got := loadInstallConfig(t, cfgDir).Enrich
+			// The Cover Art Archive's base with a query keeps its slash: Load
+			// trims only a slash that ends the value.
+			if got.MusicBrainzBaseURL != c.mb || got.CoverArtBaseURL != c.caa {
+				t.Errorf("the rewritten config has enrich bases %q and %q, want both kept whole", got.MusicBrainzBaseURL, got.CoverArtBaseURL)
 			}
-		}
-	})
+			for _, key := range []string{"enrich.musicbrainzBaseURL", "enrich.coverArtBaseURL"} {
+				if _, listed := keptValue(out, key); !listed {
+					t.Errorf("the run's list of what it kept leaves %s out", key)
+				}
+			}
+			for _, part := range []string{baseSecret, login, "apikey"} {
+				if strings.Contains(strings.ToLower(out), strings.ToLower(part)) {
+					t.Errorf("the run printed %q, part of a kept base's user information, query or fragment", part)
+				}
+			}
+		})
+	}
 
 	t.Run("a base Load refuses, then a rewrite that loads", func(t *testing.T) {
 		cfgDir := filepath.Join(t.TempDir(), "cfg")
