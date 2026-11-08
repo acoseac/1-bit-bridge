@@ -923,3 +923,21 @@ reads a record of version 45 alone; the migration reads an owner's record of 35 
 (`LegacyVersion` stays 35). For owners: nothing the harness runs or records changes,
 and nothing plays differently from version 41. Every earlier version's harness
 evidence is stale to the harness, as at every bump.
+
+Version 47 covers B765, under the `internal/alsapcm/` prefix and the dsd-test files: a
+Stop inside a native track change's release. The native sink's writer now begins the
+Immediate release itself, under the sink's lock, when it sees its life (the open's
+context, which for the harness is the run's) ended, before any write sees the context
+that life cancels (`nativeContext`), so a tail write the Stop cancels is the
+revocation's and never a release failure; a seam, `nativeSeams.lifeEnded`, nil outside
+a test, parks the life's watcher in the tests. The harness's TrackChange wait
+(`nativeTrackRelease`) takes no context a Stop ends, so its answer is the sink's own
+outcome. The real-sink integration tests print the report's End and Error and the
+run's diagnostics on an exit they did not want. B9 holds 46 on its branch, so this
+takes 47. The harness's approval admission reads a record of version 47 alone; the
+migration reads an owner's record of 35 to 47 (`LegacyVersion` stays 35). For owners:
+Stop or quit pressed while a navigation's release plays its tail or drains ends the
+run as stopped, exit 0, where it could exit 1 with `native release unconfirmed`;
+nothing plays differently, and serve's player, whose sinks' lives end only after their
+release, is unaffected. Every earlier version's harness evidence is stale to the
+harness, as at every bump.
