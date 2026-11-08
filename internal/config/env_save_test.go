@@ -1,9 +1,11 @@
 package config
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -58,6 +60,12 @@ func fileLeaf(t *testing.T, path, leaf string) (any, bool) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	return textLeaf(t, raw, leaf)
+}
+
+// textLeaf is fileLeaf for raw, a config's text.
+func textLeaf(t *testing.T, raw []byte, leaf string) (any, bool) {
+	t.Helper()
 	var v any
 	if err := yaml.Unmarshal(raw, &v); err != nil {
 		t.Fatalf("the saved config does not parse: %v", err)
@@ -474,4 +482,149 @@ func TestAnEmptyListOverrideASaveLeftKeepsTheFilesList(t *testing.T) {
 			t.Errorf("a start without the variable reads metrics.allowCidrs %q, want the file's own list", got)
 		}
 	})
+}
+
+// TestASaveWritesNoKeyForAnyLeafTheFileDoesNotWrite: for every leaf a
+// variable sets, whatever its field's tag, a save that leaves the leaf at the
+// variable's value over a file that does not write it writes no key for it:
+// the save's own steps (filedEnvValues, then marshal), over an empty file, an
+// empty mapping and a file that writes another setting alone. The opt-outs
+// are filedSwitches' (TestTheOptOutsVariablesAreStillWrittenAsTheirSwitchesAre).
+func TestASaveWritesNoKeyForAnyLeafTheFileDoesNotWrite(t *testing.T) {
+	values := map[reflect.Kind]string{reflect.String: "v", reflect.Bool: "true", reflect.Int: "7", reflect.Int64: "7", reflect.Slice: "v"}
+	for _, b := range envBindings() {
+		if switchEnvPaths[b.YAMLPath] {
+			continue
+		}
+		t.Run(b.YAMLPath, func(t *testing.T) {
+			var marked Config
+			if markLeaf(envLeaf(&marked, b)); envLeaf(&marked, b).IsZero() {
+				t.Fatalf("markLeaf leaves %s at its zero value, so a save cannot tell whether a file writes it", b.YAMLPath)
+			}
+			kind := b.kind
+			if kind == reflect.Pointer {
+				kind = b.elemKind
+			}
+			before := &Config{envSet: []string{b.YAMLPath}}
+			if !before.applyEnvValue(b, b.EnvVar, values[kind]) {
+				t.Fatalf("%s=%q sets nothing", b.EnvVar, values[kind])
+			}
+			other := "libraryName: Kept\n"
+			if b.YAMLPath == "libraryName" {
+				other = "scanIntervalSec: 60\n"
+			}
+			for _, file := range []string{"", "{}\n", other} {
+				saved := *Clone(before)
+				filedEnvValues(&saved, before, []byte(file))
+				text, err := saved.marshal()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got, there := textLeaf(t, text, b.YAMLPath); there {
+					t.Errorf("over a file of %q, a save that left %s wrote it as %#v, a key the file did not have", file, b.YAMLPath, got)
+				}
+			}
+		})
+	}
+}
+
+// TestASavesTextIsYAMLMarshalsWithoutTheKeysItLeavesOut: the text a save
+// writes where it leaves keys out (marshal) is yaml.Marshal's with those keys
+// taken out and nothing else changed, over a config with every field set and
+// strings YAML must quote, escape, fold or encode (a plain << among them,
+// which a yaml.Node re-encodes as !!merge <<): byte for byte where no field
+// of Config's own is named, a leaf below the top level naming none (its tag
+// omits its zero value); without that key's line for each field of Config's
+// own at its zero value; and byte for byte for one at another value, which is
+// written as it is.
+func TestASavesTextIsYAMLMarshalsWithoutTheKeysItLeavesOut(t *testing.T) {
+	cfg := &Config{}
+	fillNonZero(reflect.ValueOf(cfg).Elem())
+	awkward := []string{
+		"", " ", "  leading", "trailing  ", "two\nlines", "a newline at its end\n", "\ttab", "a: b", "a #b", "#hash",
+		"- dash", "? q", "'single'", `"double"`, `back\slash`, "true", "no", "On", "y", "123", "0x1F", "0o17", "1e3",
+		"1_000", ".5", "-.inf", ".NaN", "~", "null", "2026-11-08", "12:30", "@at", "`tick`", "%pct", "!bang",
+		"&anchor", "*alias", "|pipe", ">fold", "{}", "[]", "[a, b]", "{a: b}", ",", "<<", "Japanese 日本語",
+		"nul\x00byte", "bell\a", "del\x7f", "line" + string(rune(0x2028)) + "separator", string(rune(0xfeff)) + "bom",
+		"emoji " + string(rune(0x1f3b5)), "caf\xe9, Latin-1", strings.Repeat("long ", 60),
+	}
+	cfg.LibraryRoots = awkward
+	cfg.CustomEndpoints = awkward
+	cfg.Metrics.AllowCIDRs = awkward
+	cfg.LibraryName = "two\nlines"
+	cfg.ListenAddress = "a: b"
+	cfg.DataDir = "  leading"
+	cfg.Enrich.MusicBrainzBaseURL = strings.Repeat("long ", 60)
+	plain, err := yaml.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.unwritten = []string{"nothing", "no.such.key", "metrics.allowCidrs"}
+	if got, err := cfg.marshal(); err != nil || !bytes.Equal(got, plain) {
+		t.Errorf("naming no field of Config's own, a save writes (%v)\n%s\nwant yaml.Marshal's\n%s", err, got, plain)
+	}
+	for _, path := range []string{"scanIntervalSec", "libraryRoots", "listenAddress"} {
+		cfg.unwritten = []string{path}
+		if got, err := cfg.marshal(); err != nil || !bytes.Equal(got, plain) {
+			t.Errorf("naming %s, set, a save writes (%v)\n%s\nwant it written as it is\n%s", path, err, got, plain)
+		}
+	}
+
+	for _, b := range envBindings() {
+		c := *cfg
+		c.unwritten = nil
+		envLeaf(&c, b).Set(reflect.Zero(envLeaf(&c, b).Type()))
+		zero, err := yaml.Marshal(&c)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := zero
+		if !strings.Contains(b.YAMLPath, ".") {
+			want = withoutTopLevelKey(t, zero, b.YAMLPath)
+		}
+		c.unwritten = []string{b.YAMLPath}
+		if got, err := c.marshal(); err != nil || !bytes.Equal(got, want) {
+			t.Errorf("leaving %s out at its zero value, a save writes (%v)\n%s\nwant\n%s", b.YAMLPath, err, got, want)
+		}
+	}
+}
+
+// withoutTopLevelKey is text, a config's YAML, without the line that writes
+// key at the top level, and text as it is where no line does.
+func withoutTopLevelKey(t *testing.T, text []byte, key string) []byte {
+	t.Helper()
+	var out strings.Builder
+	found := 0
+	for _, line := range strings.SplitAfter(string(text), "\n") {
+		if strings.HasPrefix(line, key+":") {
+			found++
+			continue
+		}
+		out.WriteString(line)
+	}
+	if found > 1 {
+		t.Fatalf("%d lines write %s", found, key)
+	}
+	return []byte(out.String())
+}
+
+// TestEveryLeafWhoseZeroIsAKeyIsAtTheTopLevel: a leaf a variable sets whose
+// field writes its zero value as a key (its yaml tag names no omitempty) is a
+// field of Config itself, which a save that leaves it out gives omitempty
+// (marshal), and which lies below no type that reads its own YAML, so the
+// save's second decode says whether the file writes it (filedEnvValues). One
+// below the top level would be written as its zero value, a key the file did
+// not have: give it omitempty (every leaf below the top level has it).
+func TestEveryLeafWhoseZeroIsAKeyIsAtTheTopLevel(t *testing.T) {
+	for _, b := range envBindings() {
+		typ := reflect.TypeFor[Config]()
+		var tag string
+		for _, i := range b.index {
+			f := typ.Field(i)
+			typ, tag = f.Type, f.Tag.Get("yaml")
+		}
+		if len(b.index) > 1 && !slices.Contains(strings.Split(tag, ",")[1:], "omitempty") {
+			t.Errorf("%s writes its zero value as a key below the top level: give it omitempty", b.YAMLPath)
+		}
+	}
 }

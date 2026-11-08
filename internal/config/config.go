@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"slices"
 	"strconv"
@@ -116,6 +117,11 @@ type Config struct {
 	// value for each one an update left as it was (filedEnvValues, backlog
 	// B761). Clone copies it.
 	envSet []string
+	// unwritten is the yaml path of each of those leaves that the file the
+	// holder's save is over writes no value for, which that save writes as no
+	// key, whatever the field's tag (marshal, filedEnvValues). It is set on
+	// that save's copy alone, and Clone drops it.
+	unwritten []string
 }
 
 // OutputConfig is the bridge reporting the player beside it. MPD is
@@ -4870,7 +4876,7 @@ func (c *Config) save(l *FileLock, unchanged func(context.Context) error) ([]byt
 	if err := l.heldFor(); err != nil {
 		return nil, err
 	}
-	data, err := yaml.Marshal(c)
+	data, err := c.marshal()
 	if err != nil {
 		return nil, fmt.Errorf("marshal config: %w", err)
 	}
@@ -4878,4 +4884,40 @@ func (c *Config) save(l *FileLock, unchanged func(context.Context) error) ([]byt
 		return nil, err
 	}
 	return data, nil
+}
+
+// marshal is the YAML a save of c writes: yaml.Marshal's of c, and where c
+// records leaves the file writes no value for (unwritten), yaml.Marshal's of
+// a copy of c whose type gives each such field of Config's own omitempty, so
+// that a field whose tag writes its zero value as a key (scanIntervalSec,
+// libraryRoots) is written as no key at that value, as one that omits an
+// empty value is, and at any other value as it is; everything else is the
+// same encoder's over the same values. A leaf below the top level is written
+// as no key at its zero value by its own tag: every leaf a variable sets whose
+// tag writes its zero value as a key is a field of Config itself
+// (TestEveryLeafWhoseZeroIsAKeyIsAtTheTopLevel).
+func (c *Config) marshal() ([]byte, error) {
+	if len(c.unwritten) == 0 {
+		return yaml.Marshal(c)
+	}
+	v := reflect.ValueOf(c).Elem()
+	var fields []reflect.StructField
+	var values []reflect.Value
+	for i := range v.NumField() {
+		f := v.Type().Field(i)
+		if !f.IsExported() {
+			continue
+		}
+		tag := f.Tag.Get("yaml")
+		if key, opts, _ := strings.Cut(tag, ","); slices.Contains(c.unwritten, key) && !slices.Contains(strings.Split(opts, ","), "omitempty") {
+			f.Tag = reflect.StructTag(`yaml:"` + tag + `,omitempty"`)
+		}
+		fields = append(fields, reflect.StructField{Name: f.Name, Type: f.Type, Tag: f.Tag})
+		values = append(values, v.Field(i))
+	}
+	out := reflect.New(reflect.StructOf(fields)).Elem()
+	for i, fv := range values {
+		out.Field(i).Set(fv)
+	}
+	return yaml.Marshal(out.Interface())
 }
