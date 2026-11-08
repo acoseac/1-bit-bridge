@@ -80,7 +80,7 @@ func finishTakeBackDeadline(stopAt, now time.Time) time.Time {
 // errs toward a rollback that the confirmation of a later start forestalls.
 // A panic on serve's goroutine ends a start uncleanly, whatever came before
 // it (backlog B760): its end takes nothing back, and a take-back that began as
-// the stop arrived is undone (countAgain).
+// the stop arrived and reached its write is undone (countAgain).
 //
 // It asks updater.TakeBackFailedStart, which writes only where the marker
 // still holds the count this start wrote, and clears the start's token in
@@ -107,6 +107,12 @@ type stopTakeBack struct {
 	began    bool      // the take-back has begun
 	deadline time.Time // the budget's end, once it has begun
 	lastErr  error     // why its last ask had no answer
+	// reached says an ask of the take-back found the marker holding the count
+	// this start wrote and reached its write, whatever the write answered
+	// (updater.TakeBackFailedStart's first answer): latched across run's
+	// asks, since one whose write published and then failed is followed by
+	// one that finds no count of its own (backlog B760's second round).
+	reached bool
 
 	done    chan struct{}
 	settled atomic.Bool
@@ -164,13 +170,21 @@ func (b *stopTakeBack) beginLocked(deadline time.Time) {
 }
 
 // run takes the count back, asking again until it has an answer or deadline
-// passes.
+// passes, and latches whether an ask reached its write (reached).
 func (b *stopTakeBack) run(deadline time.Time) {
 	defer close(b.done)
 	ctx, cancel := context.WithDeadline(context.Background(), deadline)
 	defer cancel()
 	for {
 		reached, err := updater.TakeBackFailedStart(ctx, b.dataDir, version.ServerVersion, b.counted, b.save)
+		b.mu.Lock()
+		if reached {
+			b.reached = true
+		}
+		if err != nil {
+			b.lastErr = err
+		}
+		b.mu.Unlock()
 		if b.asked != nil {
 			b.asked(reached, err)
 		}
@@ -178,9 +192,6 @@ func (b *stopTakeBack) run(deadline time.Time) {
 			b.settled.Store(true)
 			return
 		}
-		b.mu.Lock()
-		b.lastErr = err
-		b.mu.Unlock()
 		select {
 		case <-ctx.Done():
 			return
@@ -221,22 +232,30 @@ func (b *stopTakeBack) finish(takeBack bool) (answered bool, missed error, deadl
 	return false, b.lastErr, deadline
 }
 
-// countAgain counts this start again where its take-back began as its stop
-// arrived and the start then ended in a panic on serve's goroutine (backlog
-// B760): the start had answered as ready, so its count went back as the stop
-// arrived, which the panic that ended it after came too late to stop. It is
-// asked once finish has joined the take-back, whatever that answered, and
-// writes only where the take-back's own write stands
-// (updater.CountFailedStartAgain), asking again until it has an answer or its
-// deadline passes: finishTakeBackDeadline's, at least finishTakeBackFloor from
-// now and below the SCM's wait from the stop's arrival. tried says a take-back
-// had begun, so that there was one to undo; counted, that this wrote the count
+// countAgain counts this start again where an ask of its take-back, begun as
+// its stop arrived, found the marker holding the count this start wrote and
+// reached its write, whatever that write answered (reached, latched across
+// run's asks), and the start then ended in a panic on serve's goroutine
+// (backlog B760): the start had answered as ready, so its count went back as
+// the stop arrived, which the panic that ended it came too late to stop. A
+// write that published and then failed took the count back all the same; one
+// that published nothing left the marker at the count, where
+// updater.CountFailedStartAgain writes nothing; and where no ask reached its
+// write the take-back took nothing back, whatever the marker holds: one below
+// the count the start tried, where that count never landed, reads to
+// CountFailedStartAgain as a take-back's (the second round; until then a
+// take-back begun was enough, and such a start was counted here). It is
+// asked once finish has joined the take-back, whatever that answered,
+// asking again until it has an answer or its deadline passes:
+// finishTakeBackDeadline's, at least finishTakeBackFloor from now and below
+// the SCM's wait from the stop's arrival. tried says the take-back reached its
+// write, so that there may be one to undo; counted, that this wrote the count
 // back; err, why it had no answer.
 func (b *stopTakeBack) countAgain() (tried, counted bool, err error) {
 	b.mu.Lock()
-	began, stopAt := b.began, b.stopAt
+	reached, stopAt := b.reached, b.stopAt
 	b.mu.Unlock()
-	if !began {
+	if !reached {
 		return false, false, nil
 	}
 	ctx, cancel := context.WithDeadline(context.Background(), finishTakeBackDeadline(stopAt, time.Now()))

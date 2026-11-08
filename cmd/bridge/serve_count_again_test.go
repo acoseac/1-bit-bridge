@@ -85,7 +85,9 @@ func TestAPanicAfterTheStopOfAStartWhoseCountNeverLandedCountsNothing(t *testing
 	teardown.release.close()
 	waitForThePanic(t, sb, panicked, teardownPanic)
 	marker.requireUnchanged(t)
-	if strings.Contains(sb.stderr.String(), "counted again") {
+	// Both of countAgain's lines begin so; "counted again" alone is in the
+	// admission's own "was not counted against its install".
+	if strings.Contains(sb.stderr.String(), "panicked after its stop") {
 		t.Errorf("serve said it counted again a start it never counted; stderr=%s", sb.stderr.String())
 	}
 }

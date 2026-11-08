@@ -276,10 +276,21 @@ func sayCrashRollbackNeedsTheDataDir(dataDir, then string, stderr io.Writer) {
 // record, its rename and its exit, holding the install marker's lock as that
 // rollback does; where it leaves the install it says why, and records it as it
 // does at any start, and the start refuses its settings as it did before. A
-// data dir's lock that cannot be taken leaves the install as it is.
+// data dir's lock that cannot be taken leaves the install as it is, writes
+// nothing, and says why: in the crash rollback's own words where it refuses
+// whatever the lock, on the marker read again, and otherwise that only the
+// data dir's owner puts the backup back (sayCrashRollbackNeedsTheDataDir).
+// Until B760's second round the first was said nowhere, where before B760 the
+// early rollback's reason was.
 func recoverCrashedRefusedInstall(ctx context.Context, dataDir, configPath string, opts serveOpts, stderr io.Writer) (code int, acted bool) {
 	release, err := lockServeDataDir(dataDir)
 	if err != nil {
+		if st, rerr := updater.LoadState(dataDir); rerr == nil {
+			if _, why := updater.CrashRollback(st, version.ServerVersion); why != "" {
+				crashRollbackLine(stderr, st, why, crashRollbackRefusedStart)
+				return 0, false
+			}
+		}
 		sayCrashRollbackNeedsTheDataDir(dataDir, crashRollbackRefusedStart, stderr)
 		return 0, false
 	}

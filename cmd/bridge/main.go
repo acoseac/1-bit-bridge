@@ -3663,7 +3663,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 					fmt.Fprintf(stderr, "updater: this start panicked after its stop had taken its count of the install's starts back, "+
 						"so it is counted again, as a start that did not end cleanly\n")
 				case tried && err != nil:
-					fmt.Fprintf(stderr, "updater: this start panicked after its stop had taken its count of the install's starts back, "+
+					fmt.Fprintf(stderr, "updater: this start panicked after its stop may have taken its count of the install's starts back, "+
 						"and could not be counted again (%v)\n", err)
 				}
 			}
