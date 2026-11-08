@@ -3131,7 +3131,7 @@
   (2026-11-04, backlog B651; Codex's and Argon's notes on the brief; B727,
   2026-11-07; B776 and B777, 2026-11-07, the two entries after this one;
   B741, 2026-11-08, the entry after them). What stays open is named by
-  backlog B776 and B777. On a NAS reboot systemd or Docker can start the
+  backlog B776, B777 and B813. On a NAS reboot systemd or Docker can start the
   bridge before a USB, RAID or network volume is mounted, so a path on it is
   not there (a directory on the volume) or reads as the bare mount point,
   empty. **The scan** needed nothing new: walkRoot's upfront
@@ -3389,7 +3389,8 @@
   the record does not name (B727: this said to remove the record for a move
   as well, which has the next command make an empty data dir at the old
   path). The record is plain file I/O, so Windows behaves alike,
-  a record that does not read names nothing, and a config directory serve
+  a record that does not read named nothing (since B741 it is refused,
+  cli-serve.md's B741 bullet), and a config directory serve
   cannot write keeps none, said once a start. `bridge doctor`'s data-dir line
   fails the same state in the refusal's words (cli-serve.md, B659's line).
   In a container whose config and data dir share one volume (the image's
@@ -3532,10 +3533,8 @@
   `History-rules-cli-serve.md`); the record and the config spelling the data
   dir in two cases, compared by a probe that answers for the bare mount point
   once the volume is away (gap 3), closed by the folding the record keeps
-  (the entry after B777's here); and an install with no record yet started on
-  the bare mount point (gap 1), which stays open: nothing outside the volume
-  tells it from a fresh install. The record is in `ops/engineering-log.md`,
-  2026-11-08, B741.
+  (the entry after B777's here); and backlog B813, which stays open. The
+  record is in `ops/engineering-log.md`, 2026-11-08, B741.
 - **A console write under a library root asks first, of the deepest configured
   root that owns each path it would write as the path's elements spell it and
   of the deepest that owns where the write lands, the look the watcher holds a
