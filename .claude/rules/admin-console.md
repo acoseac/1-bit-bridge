@@ -429,9 +429,10 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   offered no Try again), and a transfer that fails answers only once every
   worker has settled, its other workers stopped at their next chunk
   (`transferAll`), so Try again never runs beside an old worker; a worker's
-  failure no longer sets `uploadState.aborted`, the operator's Stop, which the
-  retry cleared and an old worker's late failure had turned into a stop of the
-  retry. The first upload or restore into a fresh, empty root on a healthy
+  failure no longer sets the operator's Stop (then `uploadState.aborted`, a
+  run's own flag since B797, the next bullet), which the retry cleared and an
+  old worker's late failure had turned into a stop of the retry. The first
+  upload or restore into a fresh, empty root on a healthy
   disk, which the index holds nothing of, is never refused; a configured root
   whose path is not there at all, the index holding none of its rows, takes
   its first upload, which makes its folder (round 2; a public serve starts
@@ -465,6 +466,50 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   `TestAPublicBridgesFirstUploadIntoARootNotMadeYetMakesIt`,
   `TestAPublicBridgeRefusesAnUploadIntoAGoneRootTheIndexHoldsRowsUnder` and
   `TestALoopbackServeRefusesARootWhosePathIsNotThere` pin it.
+
+- **One upload owns the upload page at a time, from before its first await**
+  (2026-11-08, backlog B797). A run, Upload's (a new upload or the resume of
+  an interrupted one) or Try again's, takes the page, its files and its
+  session in `beginUploadRun`, before its first await, and works on what it
+  took (`run.picked`, `run.session`, `run.state`), never on `uploadState`,
+  which a later pick replaces: Try again read its session before it read the
+  files to send, and a batch picked meanwhile with the same path and size and
+  other bytes was what the old session was then sent, a splice no chunk digest
+  sees and no whole-file digest is declared to catch. After every await a run
+  asks whether it may go on (`uploadCheckpoint`), and right before each
+  request whether it may still send: each chunk after its read and hash, a
+  digest mismatch's re-send included, and its session's create. A commit
+  already asked for may land; its report is said only where the run still
+  owns the page (`uploadOwns`), and its catch and finally go through
+  `showUploadRunEnd` and `endUploadRun`, which ask first. Refused, not
+  superseded, since a superseded run would leave its session with no control
+  on the page: while a run owns it, both pickers, Upload, Try again and
+  Discard it are disabled (`setUploadBusy`, the pickers' labels dimmed),
+  `stageFiles` refuses, the drop target's handler refuses a drop (a div no
+  disabled state stops) and again a folder still being read when a run began,
+  and the note in the drop zone (`upload-busy`) says why. Stop is offered from
+  Try again's start, and a stop reads the page's interrupted uploads again
+  (`showUploadStopped`), so choosing the same files carries its session on,
+  as its words say. Cancel while a run prepares stops it and clears the page
+  at once, a session the server made meanwhile left an interrupted upload; a
+  navigation (wireUpload's abort) stops the run and clears the page's upload,
+  and the library root's read, `refreshResumable` and `discardResumable`
+  touch only the page they were asked on. **Don't read `uploadState` in a
+  run's chain, take a run's files or session after its first await, touch the
+  page or the state after an await without the run's ask, make a request
+  without `uploadCheckpoint` right before it, leave a picker, Upload, Try
+  again, Discard it or the drop target live while a run owns the page,
+  supersede a running upload with a pick, or let a run that lost the page
+  speak or give back controls.** `TestAnUploadRunOwnsThePageFromItsFirstAwait`,
+  `TestAnUploadRunSendsNothingOnceItMayNotGoOn` and
+  `TestTheUploadPageRefusesAnotherUploadWhileARunOwnsIt` pin the shape;
+  `TestARetrySendsOnlyTheFilesItBeganWith`,
+  `TestStopAndCancelEndARunWhereverItIs`,
+  `TestNoContinuationTouchesAPageItNoLongerOwns`,
+  `TestTheResumePathIsRefusedWhileARetryRuns` and
+  `TestAnOrdinaryUploadRetryResumeAndStopAreUnchanged` run the page under
+  node, where node is installed, through its wired events, against the
+  console's real handlers.
 
 - **A CSS grid with no `grid-template-columns` sizes its track to the WIDEST
   item's max-content, and no Go guard can see the result.** `.deleted-list`
