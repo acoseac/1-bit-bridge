@@ -88588,3 +88588,23 @@ transition wakes, and the second open needs another order than the one read here
 the guard, with the sink's tests and the backend's; the runbook's five current lines say 49
 and 49's paragraph records what changed for owners (a failure beside a Stop now in the
 command's answer too; a clean Stop unchanged; nothing plays differently).
+
+Round 8's gates, on 09163971 at legion0, through the build slot in three sessions: `make
+fmt` left the tree clean; `make vet` passed for linux/amd64, `GOOS=windows`, `GOOS=darwin`
+and `GOOS=linux GOARCH=386`; `go test -race` on `./internal/alsapcm/...`,
+`./internal/player/...` and `./cmd/bridge/...` passed (17 packages, 1,311 s); the round's
+cases with their neighbours (the revocation family, round 4's fence case, B765's ten, the two
+new resume cases and the gapless case seen to fail once) passed 20 times running under
+`-race`, and the internal one-fault case with `TestTheWriteAsksWhatReconciliationDoes` 20
+times; CI's two native-integration runs passed under the overlay, every name CI requires
+among them; `make docs-check` passed, and again on a copy of the branch with the rules patch
+applied, where `TestEveryCitedTestNameExists`, `TestNoDocblockNamesAnotherDeclaration`,
+`TestEveryBridgeWordIsInTheProtocol`, `TestDSDOutputProtocolTokens` and
+`TestQualificationRunbookVersion` passed too; the qualification check against main's tip's
+merge base (3d0a0d05) passed at 49; `make build-all` passed. `make test`'s first run had 88
+packages ok and `cmd/bridge` failing on
+`TestAMatchWhoseReQueueDidNotLandIsReQueuedByTheNextSweep/cancelled_inside_the_reset_by_a_switch-off`
+("the first sweep's re-queue landed"), the fingerprint sweep's known flake outside the player
+(1 of 40 alone in B762's round 3, once in B765's first `make test`), with `cmd/bridge` whole
+passing under `-race` in the first session; run again, `make test` passed, 89 packages ok and
+none failing (2,059 s), the Linux-only tests run here.
