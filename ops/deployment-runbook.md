@@ -1089,8 +1089,35 @@ bridge does about it:
   time, 5 min at most, and once the root holds its library again it watches it
   (`library root reads as it did again; the watcher watches it`, Info) and
   scans it. A root the index holds nothing of (a fresh install) is watched as
-  it is, and a mount over it hides that watch until the next restart; the
-  periodic scan still indexes it.
+  it is. From the release that carries B777, a mount over a watched root, or
+  a linked root's link repointed, is found within 30 s and the folder at the
+  root's path watched and scanned (`library root is another folder than the
+  one its watch was added on …`, Info); before it, the mount hid that watch
+  until the next restart, and the periodic scan still indexed the volume. A
+  root that is there whose own watch the kernel will not add (the inotify
+  watch limit spent: `watch limit reached …`, said once) is tried again 5 s
+  later, then twice as long each time, 5 min at most, quietly, and is scanned
+  once as its watch goes and again once it is watched again (`library root's
+  own watch could be added again …`, Info); the periodic scan (6 h by
+  default) covers it meanwhile. Raise `fs.inotify.max_user_watches` to end it.
+- **The console's writes into that root.** From the release that carries
+  B776, an upload (its start, a chunk, its commit) or a trash restore into a
+  root that reads as a volume not mounted is refused, 409 `root_not_mounted`,
+  in the words the watcher holds it with, and nothing is written to the bare
+  mount point, whose content the scans would read as the root's and reap the
+  volume's rows under; a write through a link in another root that leads
+  there is refused too. Where the upload had begun, the page offers Try
+  again, which commits the same upload, its finished files not sent again,
+  once the volume is back; where its start was refused, nothing was begun and
+  there is nothing to try again: Upload starts it once the volume is back. A
+  root whose folder is not there at all, and that the index holds nothing of
+  (a public bridge starts over one; a loopback bridge does not start), takes
+  its first upload, which makes the folder; one the index holds tracks under
+  is refused, nothing made. A root whose folder is there but that the index
+  holds nothing of reads as it is, so an upload into its bare mount point is
+  not refused, and the volume, once mounted, hides it (backlog B776, item 7):
+  before the first upload into a root nothing has been indexed under, check
+  that its volume is mounted.
 - **The data dir on that volume.** From the second start of that release,
   serve keeps a record of the data dir it opened its database in, beside the
   config: `.bridge.yaml.datadir`. A start that finds that data dir holding

@@ -12,6 +12,11 @@
 #   cmd/bridge         218s      internal/adminauth   40s
 #   internal/transcode 137s      everything else     <10s each
 #
+# cmd/bridge did not stay there: on 2026-11-07 it took 1,782.6s of the
+# `rest` leg (#1435's green run) against the package's 30-minute timeout,
+# and on 2026-11-08 it reached the timeout (#1436, backlog B799), so it is
+# sharded too, as `bridge`.
+#
 # Total work is ~1,970 CPU-seconds and `-p $(nproc)` already packs it onto
 # four cores well — the job is not slow because the scheduler is bad, it is
 # slow because ONE package takes 760s and nothing can start its second half
@@ -21,8 +26,9 @@
 # package across processes is the only lever that does, short of a faster
 # core.
 #
-# So: `manifest` and `admin` are sharded by test name, and every other
-# package rides one `rest` shard that keeps `-p $(nproc)`.
+# So: `manifest`, `admin` and `bridge` (cmd/bridge) are sharded by test
+# name, and every other package rides one `rest` shard that keeps
+# `-p $(nproc)`.
 #
 # WHAT MUST NOT HAPPEN
 #
@@ -60,7 +66,7 @@
 
 set -euo pipefail
 
-GROUP="${1:?usage: test-shard.sh <rest|manifest|admin> <index>}"
+GROUP="${1:?usage: test-shard.sh <rest|manifest|admin|bridge> <index>}"
 INDEX="${2:?shard index, 0-based}"
 
 # The two flags that MUST stay identical to the Makefile's `test` target.
@@ -79,7 +85,15 @@ RACE_FLAGS=(-race -timeout 30m)
 # a different partition of the same names. The workflow now says only WHICH
 # group and WHICH index; this file decides how many there are, and
 # assert_matrix_is_complete requires the matrix to match.
-SHARDED=(manifest:4 admin:4)
+SHARDED=(manifest:4 admin:4 bridge:4)
+
+# group_dir <group> — the package directory a sharded group names, relative
+# to the module root: cmd/bridge for `bridge`, internal/<group> for the rest.
+# The one place a group becomes a path, so is_sharded's exclusion and the
+# shard's own package can't name two different directories.
+group_dir() {
+  if [ "$1" = bridge ]; then printf 'cmd/bridge'; else printf 'internal/%s' "$1"; fi
+}
 
 # cores — `-p` for the `rest` leg. The `4` is not arbitrary: it is the
 # Makefile's own default `P`, which exists for exactly this "the machine is
@@ -115,7 +129,7 @@ sharded_count() {
 is_sharded() {
   local pkg="$1" entry
   for entry in "${SHARDED[@]}"; do
-    if [[ "$pkg" == */internal/"${entry%%:*}" ]]; then
+    if [[ "$pkg" == */"$(group_dir "${entry%%:*}")" ]]; then
       return 0
     fi
   done
@@ -219,10 +233,10 @@ assert_matrix_is_complete() {
       # use here (SonarCloud shelldre:S7688).
       if [[ "$g" == rest ]]; then
         echo "            the 'rest' leg is what runs every NON-sharded package —" >&2
-        echo "            without it internal/api, internal/transcode and cmd/bridge" >&2
+        echo "            without it internal/api, internal/transcode and the rest" >&2
         echo "            run nowhere, and every sharded leg still passes." >&2
       else
-        echo "            'rest' skips internal/${g} on the promise those legs run" >&2
+        echo "            'rest' skips $(group_dir "$g") on the promise those legs run" >&2
         echo "            it, so a missing one runs nowhere and nothing goes red." >&2
       fi
       exit 1
@@ -335,7 +349,7 @@ if [ "$GROUP" = rest ]; then
   exit 0
 fi
 if shards="$(sharded_count "$GROUP")"; then
-  run_sharded "./internal/$GROUP/" "$shards"
+  run_sharded "./$(group_dir "$GROUP")/" "$shards"
   exit 0
 fi
 echo "test-shard: unknown group '$GROUP' (want rest, or one of: ${SHARDED[*]%%:*})" >&2

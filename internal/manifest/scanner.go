@@ -239,6 +239,12 @@ type Scanner struct {
 	// neither (B651's ninth round). A test sets the two together; per
 	// instance, nil in production, read as foldingHook is.
 	lookupHook func(name string) (fs.FileInfo, error)
+	// resolveRootHook, when set, answers in fsutil.EvalSymlinksOrClean's place
+	// for the form a configured root is compared in where a console write
+	// lands (landingRoots.resolve), so that a test counts the roots a write
+	// resolves. Per instance, nil in production; read on the writer's
+	// goroutine, so a test sets it before the write.
+	resolveRootHook func(root string) string
 
 	// postScanHook, when set, fires after every successful full Scan —
 	// see SetPostScanHook. atomic.Pointer so the boot-time SetPostScanHook
@@ -4394,8 +4400,13 @@ func (d *dirLinkTally) holding(p string) (string, bool) {
 // found no library content and at least one link to a directory. It is not a
 // suspected mount failure: a link the walk stat'ed through to a directory
 // says the volume holding the root's entries is there. The rows are kept as
-// the guard keeps an emptied root's, and the hint is dirLinkSentinelHint.
-const msgRootOnlyDirLinks = "library root holds no content but links to directories, which the scanner does not follow; its rows are kept"
+// the guard keeps an emptied root's, and the hint is dirLinkSentinelHint. The
+// console's refusal of a write into such a root says what it holds in the
+// same words (holdsOnlyDirLinks, RootAwayError).
+const msgRootOnlyDirLinks = "library root " + holdsOnlyDirLinks + "; its rows are kept"
+
+// holdsOnlyDirLinks is what a root read as rootOnlyDirLinks holds.
+const holdsOnlyDirLinks = "holds no content but links to directories, which the scanner does not follow"
 
 // dirLinkSentinelHint is what the guard's line, and the owning-root audit's
 // refusal, tell an operator whose root holds only links to directories. The
