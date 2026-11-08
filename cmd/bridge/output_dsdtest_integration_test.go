@@ -82,23 +82,29 @@ func realNativeRig(t *testing.T) (*nativeHarnessRig, *alsapcm.FakeKernel, *io.Pi
 	}
 	return h, k, w
 }
-func nativeReportResult(t *testing.T, h *nativeHarnessRig, answer <-chan int, want int, end string) nativeReport {
+
+// nativeReportResult waits for the run's exit code and reads its report. An
+// exit that is not want says why: the report's End and Error, and what the
+// run printed to diagnostics, its errout, since an exit 1 with the End
+// expected says nothing more (B765).
+func nativeReportResult(t *testing.T, h *nativeHarnessRig, answer <-chan int, diagnostics *lockedBuffer, want int, end string) nativeReport {
 	t.Helper()
+	var code int
 	select {
-	case code := <-answer:
-		if code != want {
-			t.Errorf("exit=%d want=%d", code, want)
-		}
+	case code = <-answer:
 	case <-time.After(3 * time.Second):
 		t.Fatal("key did not stop within release budget")
 	}
 	b, e := os.ReadFile(filepath.Join(h.dir, "report.json"))
 	if e != nil {
-		t.Fatal(e)
+		t.Fatalf("exit=%d want=%d, and the report does not read: %v; diagnostics %q", code, want, e, diagnostics.String())
 	}
 	var r nativeReport
 	if e = json.Unmarshal(b, &r); e != nil {
 		t.Fatal(e)
+	}
+	if code != want {
+		t.Errorf("exit=%d want=%d: End=%s Error=%q diagnostics %q", code, want, r.End, r.Error, diagnostics.String())
 	}
 	if r.End != end {
 		t.Errorf("serialized End=%s want=%s Error=%s", r.End, end, r.Error)
@@ -145,8 +151,9 @@ func TestNativeIntegrationStopEveryLeg(t *testing.T) {
 						return nativeOpen(ctx, c)
 					}
 					answer := make(chan int, 1)
+					diagnostics := &lockedBuffer{}
 					go func() {
-						answer <- runOutputDSDTest(context.Background(), h.args, h.env, nativePromptOutput{h: h}, io.Discard)
+						answer <- runOutputDSDTest(context.Background(), h.args, h.env, nativePromptOutput{h: h}, diagnostics)
 					}()
 					if scenario == "level-check" {
 						harnessEvent(t, h, qualification.CalibrationPhrase)
@@ -178,7 +185,7 @@ func TestNativeIntegrationStopEveryLeg(t *testing.T) {
 					if key == 'q' {
 						end = "quit"
 					}
-					nativeReportResult(t, h, answer, 0, end)
+					nativeReportResult(t, h, answer, diagnostics, 0, end)
 					v := k.View()
 					if v.Opens != expected || v.Open {
 						t.Errorf("later open or incomplete Immediate: %+v", v)
@@ -195,34 +202,167 @@ func TestNativeIntegrationStopEveryLeg(t *testing.T) {
 	}
 }
 
+// nativeReleaseHold is the sink the harness's releases go through in
+// TestNativeIntegrationNextInsideFinish: each TrackChange release's context
+// goes to contexts as the harness asks for it, and its answer to answers;
+// escalate, when set, runs as the harness asks for an Immediate release,
+// before the sink has it: a test's hold on a Stop's escalation, where a
+// scheduler can leave it (B765).
+type nativeReleaseHold struct {
+	nativeTestSink
+	contexts chan context.Context
+	answers  chan error
+	escalate func()
+}
+
+func (s *nativeReleaseHold) Release(ctx context.Context, m alsapcm.ReleaseMode) error {
+	if m == alsapcm.Immediate && s.escalate != nil {
+		s.escalate()
+	}
+	if m == alsapcm.TrackChange {
+		s.contexts <- ctx
+	}
+	e := s.nativeTestSink.Release(ctx, m)
+	if m == alsapcm.TrackChange {
+		s.answers <- e
+	}
+	return e
+}
+
+// nativeHold is a gate: hold blocks its callers until release, and parked
+// is closed once the first is held.
+func nativeHold() (hold func(), parked <-chan struct{}, release func()) {
+	entered, gate := make(chan struct{}), make(chan struct{})
+	var in, out sync.Once
+	return func() { in.Do(func() { close(entered) }); <-gate }, entered, func() { out.Do(func() { close(gate) }) }
+}
+
+// nativeAwait waits for parked under the fake kernel's watchdog, failing at
+// once, with what the run said, when the run ends first.
+func nativeAwait(t *testing.T, parked <-chan struct{}, answer chan int, diagnostics *lockedBuffer, what string) {
+	t.Helper()
+	nativeTake(t, parked, answer, diagnostics, what)
+}
+
+// nativeTake receives one value from ch as nativeAwait waits.
+func nativeTake[T any](t *testing.T, ch <-chan T, answer chan int, diagnostics *lockedBuffer, what string) T {
+	t.Helper()
+	timer := time.NewTimer(alsapcm.Watchdog())
+	defer timer.Stop()
+	select {
+	case v := <-ch:
+		return v
+	case code := <-answer:
+		answer <- code
+		t.Fatalf("the run ended (exit %d: %q) before %s", code, diagnostics.String(), what)
+	case <-timer.C:
+		alsapcm.LogGoroutines(t)
+		t.Fatalf("waited %v for %s", alsapcm.Watchdog(), what)
+	}
+	var zero T
+	return zero
+}
+
+// TestNativeIntegrationNextInsideFinish: a next while the native sink's
+// Finish waits, its TrackChange release then played out (natural), or a Stop
+// landing in each window of that release, each forced: cutoff, after the
+// cutoff and before the tail write, the sink's writer held in the write the
+// cutoff interrupted until the Stop has ended the sink's life and both the
+// life's revocation and the harness's Immediate release wait, so the writer
+// reaches the tail write first, as a scheduler can run it (B765: the tail
+// write took the cancellation the ended life made for a release failure,
+// ErrReleaseUnconfirmed, an exit 1); tail, while the tail write waits for
+// room; drain, while the drain waits. A Stop's run exits 0 as stopped, its
+// cleanup confirmed, the node's close held until the Stop has reached it;
+// and the TrackChange release the harness waits on outlives the Stop (its
+// context, taken as the harness asked for it, is live with the close still
+// held) and answers with the sink's own outcome, never the Stop's
+// cancellation (B765: select could take that answer for the release's when
+// both were ready; round 2: whether its answer showed it was the scheduler's,
+// since a release that ran only once the sink was Done answered nil).
 func TestNativeIntegrationNextInsideFinish(t *testing.T) {
-	for _, stopAt := range []string{"natural", "tail", "drain"} {
+	for _, stopAt := range []string{"natural", "cutoff", "tail", "drain"} {
 		t.Run(stopAt, func(t *testing.T) {
 			h, k, w := realNativeRig(t)
 			h.args = setNativeArg(h.args, "tail-ms", "1")
 			h.contact.Tuple.TailMS = 1
 			b, _ := json.Marshal(h.contact)
 			_ = os.WriteFile(filepath.Join(h.dir, "contact.json"), b, 0600)
+			sink := &nativeReleaseHold{contexts: make(chan context.Context, 1), answers: make(chan error, 1)}
+			open := h.env.open
+			h.env.open = func(ctx context.Context, c alsapcm.DSDConfig) (nativeTestSink, error) {
+				s, e := open(ctx, c)
+				if e != nil {
+					return nil, e
+				}
+				sink.nativeTestSink = s
+				return sink, nil
+			}
+			var written, revoking, escalating <-chan struct{}
+			var write, revoke, escalate func()
+			if stopAt == "cutoff" {
+				written, write = k.ParkNextWrite()
+				revoking, revoke = k.ParkNextLifeEnd()
+				sink.escalate, escalating, escalate = nativeHold()
+				t.Cleanup(func() { write(); revoke(); escalate() })
+			}
 			answer := make(chan int, 1)
-			go func() { answer <- runOutputDSDTest(context.Background(), h.args, h.env, io.Discard, io.Discard) }()
+			diagnostics := &lockedBuffer{}
+			go func() { answer <- runOutputDSDTest(context.Background(), h.args, h.env, io.Discard, diagnostics) }()
 			harnessEvent(t, h, "finish")
-			k.Await(t, "native buffer held", func(v alsapcm.KernelView) bool { return v.State == "RUNNING" && v.Starved })
+			if stopAt == "cutoff" {
+				nativeAwait(t, written, answer, diagnostics, "the writer held in its first write")
+			} else {
+				k.Await(t, "native buffer held", func(v alsapcm.KernelView) bool { return v.State == "RUNNING" && v.Starved })
+			}
 			prefix := len(k.Given())
 			nativeKey(w, 'n')
 			harnessEvent(t, h, "cutoff")
 			harnessEvent(t, h, "finish-return")
-			end := "complete"
-			if stopAt == "natural" {
+			trackChange := nativeTake(t, sink.contexts, answer, diagnostics, "the harness asking for the TrackChange release")
+			// outlived says whether the release the harness waits on kept its
+			// context through the Stop: asked once the Stop's release has
+			// reached the node's close, which stays held.
+			outlived := func() {
+				if e := trackChange.Err(); e != nil {
+					t.Errorf("the TrackChange release the harness waits on ended with the Stop (%v): its answer can be the Stop's cancellation", e)
+				}
+			}
+			end := "stopped"
+			switch stopAt {
+			case "natural":
+				end = "complete"
 				k.Free()
-			} else {
+			case "cutoff":
+				closing, closed := k.ParkNextClose()
+				t.Cleanup(closed)
+				nativeKey(w, 's')
+				nativeAwait(t, revoking, answer, diagnostics, "the Stop ending the sink's life, its revocation held")
+				nativeAwait(t, escalating, answer, diagnostics, "the Stop's Immediate release, held")
+				write()
+				nativeAwait(t, closing, answer, diagnostics, "the writer's release reaching the node's close")
+				outlived()
+				escalate()
+				revoke()
+				closed()
+			default:
 				if stopAt == "drain" {
 					k.Grant(100 * time.Millisecond)
 					k.Await(t, "drain waiting", func(v alsapcm.KernelView) bool { return v.Drains > 0 && v.Starved })
+				} else {
+					// No content write waits once the cutoff has cancelled it,
+					// and a wait whose context ended is not starved: a writer
+					// waiting for time waits in the tail write.
+					k.Await(t, "the tail write waiting for room", func(v alsapcm.KernelView) bool { return v.Starved })
 				}
+				closing, closed := k.ParkNextClose()
+				t.Cleanup(closed)
 				nativeKey(w, 's')
-				end = "stopped"
+				nativeAwait(t, closing, answer, diagnostics, "the Stop's release reaching the node's close")
+				outlived()
+				closed()
 			}
-			nativeReportResult(t, h, answer, 0, end)
+			nativeReportResult(t, h, answer, diagnostics, 0, end)
 			if k.View().Opens != 1 {
 				t.Fatal("successor opened after last track/stop")
 			}
@@ -231,6 +371,238 @@ func TestNativeIntegrationNextInsideFinish(t *testing.T) {
 				if !bytes.Equal(k.Given(), want) {
 					t.Fatalf("Finish cancellation lost qualified tail: got %d bytes want %d", len(k.Given()), len(want))
 				}
+			}
+			select {
+			case e := <-sink.answers:
+				if e != nil {
+					t.Errorf("the TrackChange release the harness waited on answered %q; want the sink's release, confirmed", e)
+				}
+			case <-time.After(alsapcm.Watchdog()):
+				t.Error("the TrackChange release the harness waited on never answered")
+			}
+			k.CheckClosedEach(t)
+		})
+	}
+}
+
+// nativeEscalationHold is the sink the harness activates, resumes and
+// finishes through in TestNativeIntegrationStopInsideActivation: each call
+// waits on the sink's answer alone, and on the harness's context's end runs
+// escalate before it revokes the sink, as the sink's own cancellation arm
+// does (Activate's and Resume's Revoke, Finish's Immediate release) once a
+// scheduler runs it: a test's hold on that escalation (B765 round 2).
+// Answered, a call returns the sink's own answer, never its context's end:
+// a caller whose select took the sink's reply, ready beside its
+// cancellation (round 3).
+type nativeEscalationHold struct {
+	nativeTestSink
+	escalate func()
+	answered bool
+}
+
+func (s *nativeEscalationHold) call(ctx context.Context, f func(context.Context) error) error {
+	answer := make(chan error, 1)
+	go func() { answer <- f(context.WithoutCancel(ctx)) }()
+	if s.answered {
+		return <-answer
+	}
+	select {
+	case e := <-answer:
+		return e
+	case <-ctx.Done():
+		s.escalate()
+		s.BeginRelease(alsapcm.Immediate)
+		return ctx.Err()
+	}
+}
+
+func (s *nativeEscalationHold) Activate(ctx context.Context, gen uint64) error {
+	return s.call(ctx, func(ctx context.Context) error { return s.nativeTestSink.Activate(ctx, gen) })
+}
+
+func (s *nativeEscalationHold) Resume(ctx context.Context) error {
+	return s.call(ctx, s.nativeTestSink.Resume)
+}
+
+func (s *nativeEscalationHold) Finish(ctx context.Context) error {
+	return s.call(ctx, s.nativeTestSink.Finish)
+}
+
+// TestNativeIntegrationStopInsideActivation: a Stop while the native sink
+// activates or resumes, each window forced. The sink's writer is where the
+// Stop lands (activation: in the admission, reading the controls; prefill:
+// in the first prefill, waiting for room; resume: at the resume's STATUS
+// after a kernel pause), and every escalation of the Stop is held, the
+// life's revocation (ParkNextLifeEnd) and the harness's own
+// (nativeEscalationHold), as a scheduler can leave them, so the writer meets
+// the ended life first. The run exits 0 as stopped, the node's close reached
+// while those are held (B765 round 2: the writer recorded "native activation
+// fenced" or "native resume fenced after status" as the sink's fault, and
+// the Stop's run exited 1; the prefill's cancellation it recorded too, a
+// plain one, which the harness strips, so that case exited 0 before as well).
+// The answered cases take the sink's reply for the harness's Activate or
+// Resume, as a select that found it ready beside the Stop's cancellation
+// can: it is the life's cancellation, and the run exits 0 (round 3: the
+// reply was that plain fence, which the run reported, an exit 1).
+func TestNativeIntegrationStopInsideActivation(t *testing.T) {
+	for _, at := range []string{"activation", "prefill", "resume", "activation-answered", "resume-answered"} {
+		t.Run(at, func(t *testing.T) {
+			window, answered := strings.CutSuffix(at, "-answered")
+			h, k, w := realNativeRig(t)
+			sink := &nativeEscalationHold{answered: answered}
+			var escalating <-chan struct{}
+			var escalate func()
+			sink.escalate, escalating, escalate = nativeHold()
+			revoking, revoke := k.ParkNextLifeEnd()
+			t.Cleanup(func() { escalate(); revoke() })
+			open := h.env.open
+			h.env.open = func(ctx context.Context, c alsapcm.DSDConfig) (nativeTestSink, error) {
+				s, e := open(ctx, c)
+				if e != nil {
+					return nil, e
+				}
+				sink.nativeTestSink = s
+				return sink, nil
+			}
+			letGo := func() {}
+			held := make(chan struct{})
+			switch window {
+			case "activation":
+				// The third read of the controls: the run's, the open's
+				// admission's, then the activation's.
+				gate := make(chan struct{})
+				var once sync.Once
+				letGo = func() { once.Do(func() { close(gate) }) }
+				t.Cleanup(letGo)
+				var reads atomic.Int32
+				controls := h.env.controls
+				h.env.controls = func(card int) (alsactl.Snapshot, error) {
+					if reads.Add(1) == 3 {
+						close(held)
+						<-gate
+					}
+					return controls(card)
+				}
+			case "prefill":
+				// Past the 200 ms buffer, so the first prefill waits for room.
+				h.args = setNativeArg(h.args, "prefill-ms", "300")
+				h.contact.Tuple.PrefillMS = 300
+				b, _ := json.Marshal(h.contact)
+				_ = os.WriteFile(filepath.Join(h.dir, "contact.json"), b, 0600)
+			}
+			answer := make(chan int, 1)
+			diagnostics := &lockedBuffer{}
+			go func() { answer <- runOutputDSDTest(context.Background(), h.args, h.env, io.Discard, diagnostics) }()
+			switch window {
+			case "activation":
+				nativeAwait(t, held, answer, diagnostics, "the activation's admission reading the controls")
+			case "prefill":
+				// No content reaches the sink before its activation answers.
+				k.Await(t, "the first prefill waiting for room", func(v alsapcm.KernelView) bool { return v.State == "RUNNING" && v.Starved })
+			case "resume":
+				k.Await(t, "native playback", func(v alsapcm.KernelView) bool { return v.State == "RUNNING" && v.Starved })
+				nativeKey(w, ' ')
+				k.Await(t, "the kernel's pause", func(v alsapcm.KernelView) bool { return v.State == "PAUSED" })
+				// The pause's STATUS calls came before its PAUSE: the next is
+				// the resume's, after its admission.
+				var statusing <-chan struct{}
+				statusing, letGo = k.ParkNextStatus()
+				t.Cleanup(letGo)
+				nativeKey(w, ' ')
+				nativeAwait(t, statusing, answer, diagnostics, "the resume's STATUS")
+			}
+			closing, closed := k.ParkNextClose()
+			t.Cleanup(closed)
+			nativeKey(w, 's')
+			nativeAwait(t, revoking, answer, diagnostics, "the Stop ending the sink's life, its revocation held")
+			if !answered {
+				nativeAwait(t, escalating, answer, diagnostics, "the harness's escalation of its Stop, held")
+			}
+			letGo()
+			nativeAwait(t, closing, answer, diagnostics, "the writer's release reaching the node's close, every escalation held")
+			escalate()
+			revoke()
+			closed()
+			nativeReportResult(t, h, answer, diagnostics, 0, "stopped")
+			if v := k.View(); v.Opens != 1 || v.Open {
+				t.Errorf("the node after the Stop: %+v; want its one open closed", v)
+			}
+			k.CheckClosedEach(t)
+		})
+	}
+}
+
+// nativeCommandHold is the sink the harness pauses and resumes through in
+// TestNativeIntegrationStopBesideAPauseOrResume: armed, it holds the next
+// Pause or Resume before it reaches the sink, as a scheduler can leave the
+// command loop that took a space while the Stop typed right after it ends
+// the sink's life and the life's watcher revokes the sink (B765 round 3).
+type nativeCommandHold struct {
+	nativeTestSink
+	armed atomic.Bool
+	hold  func()
+}
+
+func (s *nativeCommandHold) Pause(ctx context.Context) error {
+	if s.armed.CompareAndSwap(true, false) {
+		s.hold()
+	}
+	return s.nativeTestSink.Pause(ctx)
+}
+
+func (s *nativeCommandHold) Resume(ctx context.Context) error {
+	if s.armed.CompareAndSwap(true, false) {
+		s.hold()
+	}
+	return s.nativeTestSink.Resume(ctx)
+}
+
+// TestNativeIntegrationStopBesideAPauseOrResume: a space and an s typed
+// together. The console cancels the run on the s at once, and the command
+// loop has taken the space: held here before its Pause or Resume reaches the
+// sink until the Stop's revocation has reached the node's close. The command
+// then meets the sink its life's end released and answers that life's
+// cancellation, and the run exits 0 as stopped (B765 round 3: Pause answered
+// "native releasing" and Resume "native resume fenced", which the run
+// reported, an exit 1).
+func TestNativeIntegrationStopBesideAPauseOrResume(t *testing.T) {
+	for _, command := range []string{"pause", "resume"} {
+		t.Run(command, func(t *testing.T) {
+			h, k, w := realNativeRig(t)
+			sink := &nativeCommandHold{}
+			var holding <-chan struct{}
+			var letGo func()
+			sink.hold, holding, letGo = nativeHold()
+			t.Cleanup(letGo)
+			open := h.env.open
+			h.env.open = func(ctx context.Context, c alsapcm.DSDConfig) (nativeTestSink, error) {
+				s, e := open(ctx, c)
+				if e != nil {
+					return nil, e
+				}
+				sink.nativeTestSink = s
+				return sink, nil
+			}
+			answer := make(chan int, 1)
+			diagnostics := &lockedBuffer{}
+			go func() { answer <- runOutputDSDTest(context.Background(), h.args, h.env, io.Discard, diagnostics) }()
+			k.Await(t, "native playback", func(v alsapcm.KernelView) bool { return v.State == "RUNNING" && v.Starved })
+			if command == "resume" {
+				nativeKey(w, ' ')
+				k.Await(t, "the kernel's pause", func(v alsapcm.KernelView) bool { return v.State == "PAUSED" })
+			}
+			sink.armed.Store(true)
+			nativeKey(w, ' ')
+			nativeAwait(t, holding, answer, diagnostics, "the harness's "+command+", held before the sink")
+			closing, closed := k.ParkNextClose()
+			t.Cleanup(closed)
+			nativeKey(w, 's')
+			nativeAwait(t, closing, answer, diagnostics, "the Stop's revocation reaching the node's close")
+			letGo()
+			closed()
+			nativeReportResult(t, h, answer, diagnostics, 0, "stopped")
+			if v := k.View(); v.Opens != 1 || v.Open {
+				t.Errorf("the node after the Stop: %+v; want its one open closed", v)
 			}
 			k.CheckClosedEach(t)
 		})
@@ -256,9 +628,10 @@ func TestNativeIntegrationPCMAdmission(t *testing.T) {
 		return base(ctx, c)
 	}
 	answer := make(chan int, 1)
-	go func() { answer <- runOutputDSDTest(context.Background(), h.args, h.env, io.Discard, io.Discard) }()
+	diagnostics := &lockedBuffer{}
+	go func() { answer <- runOutputDSDTest(context.Background(), h.args, h.env, io.Discard, diagnostics) }()
 	_ = w
-	r := nativeReportResult(t, h, answer, 1, "incomplete")
+	r := nativeReportResult(t, h, answer, diagnostics, 1, "incomplete")
 	if len(k.Given()) != 0 || k.View().Opens != 1 || !strings.Contains(r.Error, "binding/mixer reference changed") {
 		t.Fatalf("reference bypassed admission: %+v %s", k.View(), r.Error)
 	}
@@ -312,20 +685,21 @@ func TestNativeIntegrationPCMDescriptor(t *testing.T) {
 				return
 			}
 			answer := make(chan int, 1)
+			diagnostics := &lockedBuffer{}
 			go func() {
-				answer <- runOutputDSDTest(context.Background(), h.args, h.env, nativePromptOutput{h: h, hook: hook}, io.Discard)
+				answer <- runOutputDSDTest(context.Background(), h.args, h.env, nativePromptOutput{h: h, hook: hook}, diagnostics)
 			}()
 			harnessEvent(t, h, qualification.CalibrationPhrase)
 			_, _ = io.WriteString(w, qualification.CalibrationPhrase+"\n")
 			if mode == "hash" {
-				r := nativeReportResult(t, h, answer, 1, "incomplete")
+				r := nativeReportResult(t, h, answer, diagnostics, 1, "incomplete")
 				if opened.Load() != 0 || !strings.Contains(r.Error, "opened fixture hash mismatch") {
 					t.Fatalf("unverified replacement opened: %d %s", opened.Load(), r.Error)
 				}
 			} else {
 				harnessEvent(t, h, qualification.PCMConfirmation)
 				_, _ = io.WriteString(w, "s\n")
-				nativeReportResult(t, h, answer, 0, "stopped")
+				nativeReportResult(t, h, answer, diagnostics, 0, "stopped")
 				if len(k.Given()) != 44100*3*4 {
 					t.Fatalf("did not decode verified descriptor: %d bytes", len(k.Given()))
 				}
@@ -377,12 +751,13 @@ func TestNativeIntegrationFingerprint(t *testing.T) {
 				return base(ctx, c)
 			}
 			answer := make(chan int, 1)
-			go func() { answer <- runOutputDSDTest(context.Background(), h.args, h.env, io.Discard, io.Discard) }()
+			diagnostics := &lockedBuffer{}
+			go func() { answer <- runOutputDSDTest(context.Background(), h.args, h.env, io.Discard, diagnostics) }()
 			code, end := 1, "incomplete"
 			if mode == "volatile_pcm" || mode == "receipt_reuse" {
 				code, end = 0, "complete"
 			}
-			r := nativeReportResult(t, h, answer, code, end)
+			r := nativeReportResult(t, h, answer, diagnostics, code, end)
 			if code == 1 && len(k.Given()) != 0 {
 				t.Fatal("changed constrained controls wrote")
 			}
@@ -408,7 +783,8 @@ func TestNativeIntegrationStopCleanupFailure(t *testing.T) {
 				return &nativeCleanupFailureSink{nativeTestSink: s}, nil
 			}
 			answer := make(chan int, 1)
-			go func() { answer <- runOutputDSDTest(context.Background(), h.args, h.env, io.Discard, io.Discard) }()
+			diagnostics := &lockedBuffer{}
+			go func() { answer <- runOutputDSDTest(context.Background(), h.args, h.env, io.Discard, diagnostics) }()
 			harnessEvent(t, h, "finish")
 			k.Await(t, "native playback", func(v alsapcm.KernelView) bool { return v.State == "RUNNING" && v.Starved })
 			nativeKey(w, key)
@@ -416,7 +792,7 @@ func TestNativeIntegrationStopCleanupFailure(t *testing.T) {
 			if key == 'q' {
 				end = "quit"
 			}
-			r := nativeReportResult(t, h, answer, 1, end)
+			r := nativeReportResult(t, h, answer, diagnostics, 1, end)
 			if !strings.Contains(r.Error, "cleanup failure") {
 				t.Fatalf("cleanup error lost: %s", r.Error)
 			}
@@ -504,7 +880,8 @@ func TestNativeIntegrationPendingWorkers(t *testing.T) {
 				return cleanupTicks, func() {}
 			}
 			answer := make(chan int, 1)
-			go func() { answer <- runOutputDSDTest(ctx, h.args, h.env, io.Discard, io.Discard) }()
+			diagnostics := &lockedBuffer{}
+			go func() { answer <- runOutputDSDTest(ctx, h.args, h.env, io.Discard, diagnostics) }()
 			select {
 			case <-entered:
 			case <-time.After(3 * time.Second):
@@ -546,7 +923,7 @@ func TestNativeIntegrationPendingWorkers(t *testing.T) {
 			if name == "admission_deadline" || name == "attachment_deadline" {
 				end = "deadline"
 			}
-			r := nativeReportResult(t, h, answer, 1, end)
+			r := nativeReportResult(t, h, answer, diagnostics, 1, end)
 			if !strings.Contains(r.Error, "unconfirmed") {
 				t.Error("missing unconfirmed evidence", r.Error)
 			}
