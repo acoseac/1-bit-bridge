@@ -87436,14 +87436,12 @@ gap-3 line with a path glob for `serve_data_dir_identity*.go`, and each one's lo
 ### The gaps
 
 B651's record (`.bridge.yaml.datadir`) refused a start whose recorded data dir held neither `bridge.db`
-nor `server.lock`. (1) An install whose first start of a release with the record came before its volume
-had no record, read as fresh, and made a data dir, a TLS pair and a database on the bare mount point,
-evidence at every later start. (2) `server.lock` was evidence, and it is made before the database opens:
-a start on the bare mount point before any record that failed between the two left one, and a database a
-command made there before B727 read the same way. (3) `fsutil.SamePath` probes how the folder holding a
-path compares names now; with the volume away the nearest folder is the bare mount point, whose own name
-the probe looks up in the folder above, so a record and a config that differ in case alone read as two
-data dirs and the refusal was skipped.
+nor `server.lock`. (1) Backlog B813, which this change leaves open. (2) `server.lock` was evidence, and it
+is made before the database opens: a start on the bare mount point before any record that failed between
+the two left one, and a database a command made there before B727 read the same way. (3)
+`fsutil.SamePath` probes how the folder holding a path compares names now; with the volume away the
+nearest folder is the bare mount point, whose own name the probe looks up in the folder above, so a
+record and a config that differ in case alone read as two data dirs and the refusal was skipped.
 
 ### As built
 
@@ -87483,19 +87481,9 @@ data dirs and the refusal was skipped.
   reasoned that a refused data dir holds no database, which B741's refusals make false; its long form says
   so now.
 
-### Gap 1, and the doctor
+### What stays open
 
-Open, as briefed: an install with no record yet whose first start of a release carrying B651 comes before
-its volume still starts on the bare mount point. B705's install marker is in the data dir, nothing in
-bridge.yaml tells an old install from a new one, and the sign the brief offered the doctor, a database with
-no tracks and no tokens beside the record's first start, is not reliable: a fresh install looks the same at
-its first start (an empty database, no paired device), and so does every install before its first pairing
-and scan; the TLS pair minted by serve rather than init would single out Docker's `--init-if-missing`
-fresh installs too. So the doctor says nothing of it, and says, as serve does, the refusal of the real
-volume once it is mounted in gap 1's shape: B741's adoption trusts the database it finds, so a B651-era
-bare mount point database present at the first B741 start gains the identity, and the real volume, holding
-none, is refused with words that say a start before the volume can have taken the bare mount point, and
-that removing the record with the volume mounted has serve take the volume's data dir as its own.
+Backlog B813.
 
 ### Red first
 
@@ -87605,7 +87593,7 @@ Codex's review of round 1 and the Claude API's, every finding real but the last:
   (`TestAMarkerWhoseBarrierFailedIsTakenUpOnceDurable`).
 - **A marker that did not read at the record's write** (the Claude API, Low 1): serve wrote the record
   naming the data dir with no identity, so the next start refused that data dir for its marker, or, the
-  record having held one, took up the bare mount point's lock file with the volume away. A marker that does
+  record having held one, read it as a record written before B741 (backlog B813). A marker that does
   not read or cannot be inspected leaves the record as it was, and no write drops or replaces the identity
   the record holds of its data dir (a marker gone since the check that cannot be written again, one of
   another identity: `TestNoWriteOfTheRecordDropsOrReplacesItsIdentity`).

@@ -344,8 +344,7 @@ func (e *dataDirGoneError) recovery(cmd string) string {
 	const moved = "if the data directory was moved on purpose, set dataDir in bridge.yaml to where it is now; "
 	switch e.cause {
 	case noIdentity:
-		return moved + "if it was removed on purpose, or it is the data directory to serve from (a start before its volume was mounted " +
-			"can have taken the bare mount point for one), remove " + e.record
+		return moved + "if it was removed on purpose, or it is the data directory to serve from, remove " + e.record
 	case otherIdentity:
 		return moved + "if it was removed on purpose, or it is the data directory to serve from now, remove " + e.record
 	case identityUnreadable:

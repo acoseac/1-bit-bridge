@@ -285,7 +285,10 @@ func TestTheRefusalNoteIsOfOneState(t *testing.T) {
 // the record to remove, under serve's name, a command's and bridge doctor's;
 // and of a record or a marker this user may not read, serve says to make it
 // readable by the user the service runs as, and a command and bridge doctor
-// to run as that user (B741's round 2), a warn on the doctor's line.
+// to run as that user (B741's round 2), a warn on the doctor's line. A data
+// dir holding no identity, or another's, is the one to serve from where the
+// operator removes the record, which each surface says in those words (round
+// 3: the window behind it is backlog B813's, never the operator's to read).
 func TestEachRefusalSaysWhatItIsAndHowToGoOn(t *testing.T) {
 	const dataDir, record = "/mnt/usb/bridge", "/etc/bridge/.bridge.yaml.datadir"
 	denied := &fs.PathError{Op: "open", Path: record, Err: fs.ErrPermission}
@@ -322,6 +325,12 @@ func TestEachRefusalSaysWhatItIsAndHowToGoOn(t *testing.T) {
 				if s.surface != "serve" && strings.Contains(s.text, "make it readable by the user the service runs as") {
 					t.Errorf("%s says to make it readable by the user the service runs as, which may read it already:\n%s", s.surface, s.text)
 				}
+				if (e.cause == noIdentity || e.cause == otherIdentity) && !strings.Contains(s.text, "or it is the data directory to serve from") {
+					t.Errorf("%s does not say to remove the record for the data directory to serve from:\n%s", s.surface, s.text)
+				}
+			}
+			if r := e.recovery("scan"); strings.Contains(r, "(") {
+				t.Errorf("the advice explains itself in an aside, %q: it says what to do and no more", r)
 			}
 			if want := map[bool]doctor.Status{true: doctor.Warn, false: doctor.Fail}[errors.Is(e.err, fs.ErrPermission)]; status != want {
 				t.Errorf("bridge doctor's line is %v, want %v", status, want)

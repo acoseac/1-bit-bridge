@@ -135,9 +135,8 @@ func TestADataDirWhoseIdentityDoesNotReadKeepsItsRecordAsItWas(t *testing.T) {
 // TestARecordKeepsItsIdentityWhereTheMarkerCannotBeReadAtItsWrite: a marker
 // that read at the check and does not read at the record's write (an EIO on a
 // flaky volume) leaves the record as it was, its identity with it. Until
-// round 2 the record was written again without it, and with the volume away
-// at the next start it read as one written before B741, which takes up
-// whatever the bare mount point holds (the Claude API on #1441).
+// round 2 the record was written again without it, which then read as one
+// written before B741 (backlog B813; the Claude API on #1441).
 func TestARecordKeepsItsIdentityWhereTheMarkerCannotBeReadAtItsWrite(t *testing.T) {
 	const id = "0123456789abcdef0123456789abcdef"
 	base := t.TempDir()
@@ -162,8 +161,7 @@ func TestARecordKeepsItsIdentityWhereTheMarkerCannotBeReadAtItsWrite(t *testing.
 // a change since the check, which would have refused either: the next start
 // refuses the data dir as this one would have (B741's round 2, the Claude API
 // on #1441: a record written again without its identity reads as one written
-// before B741, which, with the volume away, takes up whatever the bare mount
-// point holds).
+// before B741, backlog B813).
 func TestNoWriteOfTheRecordDropsOrReplacesItsIdentity(t *testing.T) {
 	const id, other = "0123456789abcdef0123456789abcdef", "fedcba9876543210fedcba9876543210"
 	for _, tc := range []struct {

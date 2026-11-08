@@ -38,14 +38,10 @@ import (
 // holds no identity, as before B741.
 //
 // A record written before B741 holds none, and the first start of B741 takes
-// up the data dir it finds at its path, whatever it holds, so that a database
+// it up, giving the data dir at its path an identity, so that a database
 // removed on purpose with its lock file kept (the local fixture's reset) still
-// starts: gap 2 is closed from the first marker on. That start trusts the
-// database it finds, which may be the bare mount point's where a start before
-// the volume was mounted made one there (gap 1), and nothing outside the volume
-// can tell an install whose volume is away from a fresh one, so the real
-// volume, once mounted, is refused for holding no identity, in words that say
-// so and how to go on.
+// starts: gap 2 is closed from the first marker on. What stays open is named
+// by backlog B813.
 
 // dataDirMarkerName is the marker's name in the data dir.
 const dataDirMarkerName = "data-dir-id.json"

@@ -30,11 +30,11 @@ import (
 // read, before it makes or writes anything there; the doctor and every
 // command that writes the data dir refuse it in the same words. A record
 // written before B741 holds no identity: the first start of this version
-// takes up whatever data dir is there. Two spellings of the data dir that
-// differ in case alone were compared by a probe of what is there now, which
-// answers for the folder above the mount point once the volume is away (gap
-// 3): the record keeps how each folder on the data dir's way compared names
-// when it was written, and the check compares by that.
+// takes it up, giving the data dir an identity. Two spellings of the data dir
+// that differ in case alone were compared by a probe of what is there now,
+// which answers for the folder above the mount point once the volume is away
+// (gap 3): the record keeps how each folder on the data dir's way compared
+// names when it was written, and the check compares by that.
 
 // dataDirMarkerFile is the data dir's identity marker: in the data dir.
 func dataDirMarkerFile(dataDir string) string { return filepath.Join(dataDir, "data-dir-id.json") }

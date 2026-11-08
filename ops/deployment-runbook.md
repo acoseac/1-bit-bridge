@@ -1118,9 +1118,9 @@ bridge does about it:
   not refused, and the volume, once mounted, hides it (backlog B776, item 7):
   before the first upload into a root nothing has been indexed under, check
   that its volume is mounted.
-- **The data dir on that volume.** From the second start of that release,
-  serve keeps a record of the data dir it opened its database in, beside the
-  config: `.bridge.yaml.datadir`. A start that finds that data dir holding
+- **The data dir on that volume.** From that release, serve keeps a record
+  of the data dir it opened its database in, beside the config:
+  `.bridge.yaml.datadir`. A start that finds that data dir holding
   neither `bridge.db` nor `server.lock` refuses before it makes or writes
   anything there (no new TLS pair, no empty token store): `serve: the data
   directory … held this bridge's database, and holds neither bridge.db nor
@@ -1168,16 +1168,10 @@ bridge does about it:
   and the record by its owner alone: run a command as the user the service
   runs as, since one run as another user that cannot read either refuses,
   saying so, and `bridge doctor` says the data dir is not checked and opens
-  no database there. The first start of B741 over a
-  record from before it takes up whatever data dir is at the path: where a
-  start before the volume was mounted made one in the bare mount point,
-  that one gains the identity, and the real volume, once mounted, is
-  refused for holding none, the refusal saying so: with the volume mounted,
-  remove `.bridge.yaml.datadir` and start again, and serve takes the volume's
-  data dir as its own. An install with no record yet, one whose first start
-  of a release carrying B651 comes before its volume is mounted, still
-  starts on the bare mount point: nothing outside the volume tells it from a
-  fresh install.
+  no database there. A data dir refused for holding no identity that is the
+  one to serve from, its volume mounted: remove `.bridge.yaml.datadir` and
+  start again, and serve takes it as its own. What stays open is backlog
+  B813.
 - **The variants directory on that volume.** Since B727 a render (the
   console's, a download's, the auto-optimize sweep's, `bridge upscale`,
   `optimize` and `render`) writes nothing into a variants directory that is
