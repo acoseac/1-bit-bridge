@@ -87716,3 +87716,96 @@ branch with the rules patch applied, where the guards that read the tracked docs
 `TestNoDocblockNamesAnotherDeclaration`, the endpoint and error-table guards,
 `TestDSDOutputProtocolTokens` and `TestQualificationRunbookVersion`); and the
 qualification check against main, the merge base CI takes (a77578f8), passed at 46.
+
+## 2026-11-08 — B728 B9 round 7: main merged (B765, B761); a Start a revocation beat fails; a converted sink needs no fence
+
+Worker b728-b9, legion0 (Ubuntu 26.04, Linux 7.0, Go 1.27.3), branch
+`feat/b728-b9-choice` at 561648a2 (round 6's rules applied), main at 0fd7e3f8 (B765,
+#1438; B761, #1439). The reviews of round 6: Codex's two points, Claude's two. Commits:
+9ff9de97 (the merge), faf00b98 (the round's tests, red where they can be), e7c41cc5 (point
+1), c5d0c6c9 (the converted case's doc, after the controls), be96e9e4 (`reconcileDSD`'s
+comment, point 3), this record, and the gates' paragraph after it. The rules are a patch the
+orchestrator applies: the merge's two `.claude/rules` files, and `output.md`'s bullet on the
+write beside what plays with its long form.
+
+**The merge (point 0).** Made as earlier merges here were, `git merge` needing approval: the
+18 files main alone changed taken from main, the 10 both changed merged three ways (`git
+merge-file`) and each conflict resolved by an explicit rule, `MERGE_HEAD` written, and the
+staged tree proven path by path before the commit (3,201 paths untouched, 50 the branch's
+alone, 18 main's alone, 10 resolved). The native sink keeps both behaviours: while its life
+runs, an activation its own fence ends answers B9's `ErrActivationFenced` and a refusal
+`native activation refused`; once its life has ended, each answers the life's cancellation
+(B765's `fenced`, `lifeCancelled`). The writer's classification is B765's, its `lifeCaused`
+reading `ErrActivationFenced` in place of B765's unexported sentinel of the same words (no
+test on main named it), and its reply to an activation it ends without running is B9's (the
+fence, or the failure that ended it) through `fenced`. The qualification version is 48 (46
+the branch's, 47 main's): the runbook keeps 46's paragraph and 47's (47's "B9 holds 46" now
+in the past) and adds 48's; the log keeps main's entries, then the branch's. The two
+`.claude/rules` files both sides changed (`cli-serve.md`, B761's reworded bullet on a
+rewrite; `player.md`, B765's new bullet) merged without conflict but are not writable here,
+so the merge commit keeps the branch's and the round's rules patch carries main's change to
+each; their long forms are merged in the commit. The proof: `go test -race` on
+`./internal/alsapcm/...` and `./internal/player/...` passed (16 packages); CI's two
+native-integration invocations passed under the overlay, B765's
+`TestNativeIntegrationStopInsideActivation` and `TestNativeIntegrationStopBesideAPauseOrResume`
+among them; B761's and B9's new tests in `cmd/bridge` (13), `internal/config` (11),
+`internal/admin` (1) and `internal/api` (5) passed by name under `-race`, and B765's ten and
+B9's 25 in `internal/alsapcm` three times. Controls on the resolution, predicted by name: M1
+(`lifeCaused` not reading `ErrActivationFenced`) red in B765's
+`TestNativeActivationFencedByItsEndedLifeIsNoFailure`, the fence answered as itself and
+recorded as the sink's fault, and not in its prefill twin, predicted red: the answer for a
+prefill an Immediate release cuts short joins the cancellation, which `lifeCaused`
+recognises on its own; M2 (`Activate`'s fence answered bare) red in
+`TestNativeCommandsAfterTheLifeEndsAnswerItsCancellation/activate`; M3 (the writer's reply
+answered bare) red in `TestNativeResumeTheEndedLifeNeverRanAnswersItsCancellation`; round 4's
+`TestTheActivationsOwnFenceIsErrActivationFenced` green under all three, its sinks' lives
+never ending.
+
+**Point 1 (both reviews): confirmed, red first.** A session's first occurrence stayed
+claimed after its activation succeeded until the Start locked again, and a reconciliation in
+that window recorded `native_revoked` and fenced the live sink; the Start read the fault
+beside an activation's error alone, so it launched its producer, which stopped on the fault
+before its first frames, and its reporter. With the fault's delivery held, the Start's
+answer reached the engine first, in the producer's words ("the session stopped before its
+first frames reached the sink", `backend_error`), naming no revocation; without the hold the
+reporter's fault could come first, and the Start's answer was then dropped. Red on 9ff9de97
+(`TestARevocationOnceTheFirstOccurrencesSinkActivatedFailsItsStart`: the install held through
+`Config.Installed`, the activation succeeded and the node given its prefill, the cap written,
+the reconciliation held at its warning, the install let go): the producer's words, and one
+fault event from the launched reporter. After locking again, a recorded `native_revoked` now
+fails the Start whether or not the activation erred, naming the revocation and its reason,
+before anything is launched, the claim given up in that step. Of the brief's two fixes this
+one: giving the claim up as the activation completes would leave the revocation to Revoke,
+and the Start's answer to the producer's race with it. Control K1 (the fault read beside an
+error alone) red in that case alone.
+
+**Point 2 (Codex): confirmed.** The internal case read the fault after `reconcileDSD` had
+returned, when Revoke had recorded the same fault itself, so a reconciliation that recorded
+nothing passed: control K2', round 6's version of the case with the record removed, green.
+The case now holds the reconciliation at its line saying the session's DSD stops, before
+Revoke, and reads the fault there, then after Revoke and after a second revocation for
+another reason: green on 9ff9de97, and red with the record removed (K2), at the hold.
+
+**Point 3 (Claude): does not hold; no fence, the claim made exact.** A converted
+occurrence's PCM sink admits its node at its open, which comes before its output is adopted
+(no record then, the occurrence having no output of its own, and its adoption closing the
+sink unwritten once the occurrence is stale), and at a resume's reopen, after the claim is
+given up; never in an activation, and it writes nothing of its own: a PCM sink has no
+prefill. Only the producer writes it, and its next step stops on the recorded fault, and
+waits on a stale occurrence. No window is left in which a fence would keep bytes from the
+node. The case the review asked for, `TestARevocationOfAConvertedSuccessorGivesItsNodeNothing`:
+held at its PCM sink's admission (its open's), b refused `native_revoked`, nothing faulted, b's
+node given nothing; held at its activation's install, the revocation recorded once, b's node
+given nothing. Both green on 9ff9de97. Control K4 (the record made for a claimed occurrence
+with no output adopted) red in the first ("playback stopped for fault"). Control K3 (the
+producer neither stopping on the fault nor waiting on a stale occurrence), predicted red in
+the second, stayed green: the case lets Revoke run as soon as the install is let go, and
+Revoke's drop of the PCM sink can come before the producer's first write, so it does not
+tell the producer's own stop from that drop, and nothing marks the producer's exit without a
+seam of its own; the case's doc says what it pins. The rules, the PR and the runbook say a
+converted PCM sink is not fenced and why.
+
+**Controls**, predicted by name before the runs (`r7-controls.predictions.txt`), every
+file's bytes restored after each: K1, K2, K2', K3, K4 and M1 to M3 as above, every other
+case green. K3 and M1's prefill case were predicted red and stayed green, for the reasons
+given; nothing else differed from the predictions.

@@ -1033,7 +1033,14 @@ classification of an activation's error is B765's, its `lifeCaused` reading B9's
 `ErrActivationFenced` where B765 had an unexported sentinel of the same words, and its reply
 to an activation it ends without running is B9's (the fence, or the failure that ended it)
 through B765's `fenced`. Serve's player, whose sinks' lives end only after their release,
-answers as each did before. The harness's approval admission reads a record of version 48
+answers as each did before. B9's round 7, after the merge, stays 48: outside the guard, a
+session's Start fails naming a revocation the reconciliation recorded whether or not its first
+occurrence's activation succeeded first, launching nothing (`session.go`); and a converted
+occurrence's PCM sink, which admits its node only at its open, before its output is adopted,
+and at a resume's reopen, and writes nothing of its own, is not fenced, the producer that
+alone writes it stopping on the recorded fault. Under the prefix the backend's tests gain two
+(`playback_dsd_choice_round7_test.go`); no sink, packer, plan or harness reader changes. The
+harness's approval admission reads a record of version 48
 alone; the migration reads an owner's record of 35 to 48 (`LegacyVersion` stays 35). For
 owners: what 46 and 47 say, and nothing more plays differently. Every earlier version's
 harness evidence is stale to the harness, as at every bump.
