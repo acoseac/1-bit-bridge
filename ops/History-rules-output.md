@@ -1014,10 +1014,15 @@ hand-off's is, so its node is given nothing and no answer, take-back or close
 of it comes before the fault, and one with no output of its own records none,
 Revoke dropping it (round 6); a Start whose session's DSD such a revocation
 reached fails naming it whether or not its activation succeeded first, launching
-nothing, and a converted occurrence's PCM sink, which admits its node only at its
-open, before its output is adopted, and at a resume's reopen, and writes nothing
-of its own, is not fenced, the producer that alone writes it stopping on the
-fault at its next step (round 7); a resume waits in a loop; a refusal
+nothing (round 7); a converted occurrence's PCM sink, which admits its node only
+at its open, before its output is adopted, and at a resume's reopen, and writes
+nothing of its own, is not fenced: revoked once its activation completed, the
+occurrence claimed with its output adopted, its fault is recorded and the
+producer's next step is its stop on that fault, which keeps its bytes off the
+node before Revoke drops the sink (round 8), and revoked at its open's admission
+it has no output of its own, so no fault is recorded, its adoption closes the
+sink unwritten and Revoke drops the occurrence (round 7); a resume waits in a
+loop; a refusal
 of the policy's that a write or a later set lifts is asked again where the open
 ends, the content's checks with it (`settleOpen`, `refusedUnder`), a
 successor's DSD monitor starting once it is admitted; a gapless successor waits
@@ -1039,7 +1044,8 @@ fault but as the session's one fault for the reason Revoke is given, replace a
 fault there, fault a session for a revoked occurrence with no output of its
 own, leave a revoked activating native sink to `Backend.Revoke`, read a Start's
 recorded revocation beside an activation's error alone or launch its producer or
-reporter beside one, let a take-back
+reporter beside one, let the producer take a step past a recorded revocation's
+fault but its stop, let a take-back
 go on past a release its sink could not confirm, leave to its
 activation the sink of an occurrence a reconciliation handed off again, answer a
 device's failure as the native sink's own fence or that fence by a bare error,
@@ -1301,3 +1307,25 @@ held, the fault's delivery held),
 `TestARevocationOfAConvertedSuccessorGivesItsNodeNothing` (held at its PCM sink's
 admission, and at its activation's install) and
 `TestARevocationsFaultIsTheSessionsOneFault` pin it.
+
+Round 8 (2026-11-08, the reviews of round 7). The install-held case of
+`TestARevocationOfAConvertedSuccessorGivesItsNodeNothing` let the reconciliation
+go on to `Backend.Revoke` with the install, and Revoke's drop of b's PCM sink
+could come before the producer's next step, so b's node stayed unwritten with
+both of the producer's checks removed, its stop on the session's fault and its
+wait on a stale occurrence (round 7's control K3). The case now holds the
+reconciliation before Revoke until the producer has decided its next step, which
+a per-backend seam reports from the producer's own goroutine
+(`Seams.ProducerStep`; the reporter's fault, which `holdNextFault` holds, says
+nothing of the producer), the kernel free so a write would land: that step must
+be the stop on the recorded fault, b's node given nothing then, and a write is
+followed until the node grows, which fails the case. With both checks removed it
+fails so, b's node given 24,576 bytes; with the stop on the fault alone removed
+it fails at once, the step a wait: a successor whose revocation an activation
+under way records is a re-plan the engine does not take (`judgeDSDLocked`), so it
+is stale too and the wait would keep its bytes off as well, but the case pins the
+stop. Held at its open's admission the occurrence has no output of its own: no
+fault is recorded, its adoption closes the sink unwritten and Revoke drops it,
+so the producer's stop is not what keeps that node unwritten, and the line says
+which guarantee holds where. `TestARevocationOfAConvertedSuccessorGivesItsNodeNothing`
+pins both.
