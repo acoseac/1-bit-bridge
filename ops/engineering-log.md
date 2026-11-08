@@ -87809,3 +87809,27 @@ converted PCM sink is not fenced and why.
 file's bytes restored after each: K1, K2, K2', K3, K4 and M1 to M3 as above, every other
 case green. K3 and M1's prefill case were predicted red and stayed green, for the reasons
 given; nothing else differed from the predictions.
+
+**The rules patch** (`~/onebit/jobs/b728-b9/rules-b728-b9-r7.patch`) carries the merge's
+`cli-serve.md` and `player.md` and round 7's `output.md` and its long form. With B765's
+bullet the merged `player.md` was 100,040 bytes, over its 100,000: the entry on how samples
+reach the DAC, packed by B470's table (its line 138, 2,530 bytes, the largest that can move),
+moved verbatim to `ops/History-rules-player.md` with `scripts/doc-split/move_entry.py --line
+138`, leaving its one-line pointer, its every "Don't" kept (97,919 bytes); `verify_moves.py
+--base` on the copy found the one block moved and nothing lost.
+
+Round 7's gates, on e4b0b2ed at legion0, in one call of the build slot (entered at 15:07,
+after a first guard waited its hour behind two other workers and started nothing): `make fmt`
+left the tree clean; `make vet` passed for linux/amd64, `GOOS=windows`, `GOOS=darwin` and
+`GOOS=linux GOARCH=386`; `go test -race` on the packages round 7 touched (playback, alsapcm,
+qualification) passed (84 s), round 7's and round 6's cases, round 4's and 5's activation
+cases and B765's ten passed 20 times running under `-race` (62 s), and the internal one-fault
+case with `TestTheWriteAsksWhatReconciliationDoes` 20 times; the native overlay's two runs
+passed, B765's two stop cases among them; `make test` passed, 89 packages ok and none failing
+(2,064 s), the Linux-only tests run here; `make build-all` and `make docs-check` passed,
+docs-check's budgets and self-tests again on a copy of the branch with the rules patch
+applied, where the guards that read the tracked docs passed too
+(`TestEveryCitedTestNameExists`, `TestEveryBridgeWordIsInTheProtocol`,
+`TestNoDocblockNamesAnotherDeclaration`, the endpoint and error-table guards,
+`TestDSDOutputProtocolTokens` and `TestQualificationRunbookVersion`); and the qualification
+check against main's tip, the merge base CI takes now (0fd7e3f8), passed at 48.
