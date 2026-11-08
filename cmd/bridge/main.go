@@ -3620,10 +3620,9 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	// host's paths set, and never code; and its defer recovers such a panic,
 	// to read the end as no clean one whatever came before it (a stop, a
 	// restart request, a refusal of the host's), to count again a ready start
-	// whose stop had taken its count back as it arrived, and to raise it again
-	// as it was (backlog B760: until then the end of a panic after a stop was
-	// read as the stop's). A panic on another goroutine ends the process with
-	// no defer run, its count as it stands.
+	// whose stop's take-back reached its write as the stop arrived, and to
+	// raise it again as it was (backlog B760: until then the end of a panic
+	// after a stop was read as the stop's).
 	// Registered here, right after the admission, so it runs after every
 	// teardown and while the data dir's lock is held: the take-back is joined
 	// there, within the stop's budget (stopBudget), before the lock is let go.

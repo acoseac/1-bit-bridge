@@ -81436,8 +81436,8 @@ store open, which takes it out of the crash rollback's reach.
 - Not ready is never proof: a start that serves but never answers is not
   confirmed, keeps running, says so once and records `NotReady`; nothing
   rolls it back, and the auto-installer stops waiting on it after 20 minutes.
-- A take-back that cannot hold the marker's lock within 2 s leaves its count,
-  which errs toward a rollback; the confirmation clears it.
+- What a take-back that cannot hold the marker's lock leaves is backlog
+  B760's.
 - What the target wrote without a migration goes back under the backup
   unchecked (the History section lists each file and what the backup does
   with it); none of it stops the backup starting, so none is a refusal.
@@ -81727,8 +81727,8 @@ unregisters it, ends and joins it (`finish`: a stop that arrives after it
 starts nothing), all before the data dir's lock is let go, and the
 take-back after the teardown runs where a host's refusal ended the start or
 the stop's never had its answer, writing nothing where the stop's landed
-(`FailedStarts == CountTried` no longer holds). Accepted, as the review
-said: a crash in the teardown after a stop is not counted. The test binary's
+(`FailedStarts == CountTried` no longer holds). What it accepted, as the
+review said, is backlog B760's. The test binary's
 re-exec now stops on SIGINT and SIGTERM as main does, which the process test
 needs.
 
@@ -81827,10 +81827,8 @@ CAP_SETFCAP may set (`sudo bridge update`); where it cannot (the service
 user's auto-installer, the console's install), the swap goes on, and
 `bindRefusalIsTheHosts` counts a permission refusal where `.bak` carries
 capabilities the binary does not (`updater.FileCapabilities`, Linux's one
-small `getxattr`; elsewhere none), saying so. An SELinux label is not
-carried: the staged binary takes the label the policy gives a new file in
-its directory (`restorecon`'s), so a hand-set label goes with the update;
-that is backlog B760. The tailnet: `tailnetNetworkFailure` takes back a
+small `getxattr`; elsewhere none), saying so. What else the swap does not
+carry is backlog B760's. The tailnet: `tailnetNetworkFailure` takes back a
 `*net.OpError` (tsnet's netstack listener answers a closed or reset
 endpoint as one) or `net.ErrClosed` (tsnet's listener once its node stops),
 and counts anything else its `Serve` returns; the `tsnet listener: …` line
@@ -87494,7 +87492,7 @@ The host's refusal since B660's second round (`bindRefusedByTheHost`,
 `doctor.IsAddrNotAvail`, and the four starts over TEST-NET-1 in
 `TestAPortAnotherProcessHoldsIsNotAFailedStart`): nothing of it is left.
 
-### R3. A panic in the teardown was taken back as a clean end (fixed, one window kept)
+### R3. A panic in the teardown was taken back as a clean end (fixed)
 
 The take-back's defer read the end by `stopped.Err()`, the restart request and
 `notAFailedStart`, never whether serve's goroutine was panicking, so three
@@ -87518,14 +87516,7 @@ from the panic's own site (measured with a throwaway program in
 ready-stop-then-kill behaviour is unchanged: a kill is no panic, and
 `TestAServeKilledWhileItDrainsHasTakenItsCountBack` passes.
 
-*Kept:* a panic on another goroutine ends the process with no defer of
-serve's run, so a ready start whose take-back landed as its stop arrived stays
-taken back (a start not yet ready stays counted: nothing took its count back);
-closing it would mean taking the count back only after the teardown, which
-the second round's kill case forbids. A kill after the take-back, by design.
-A panic in the three defers that run after the take-back's (the data dir's
-lock let go, the exit code, serve's cancel). A count again with no answer
-within its deadline, said on its line.
+*Kept:* what R3 leaves is backlog B760's.
 
 *Red first* at afbd45bb: `TestAPanicInTheTeardownOfAStopBeforeReadyStaysCounted`
 (the marker after the panic `FailedStarts:0`, want 1),
@@ -87534,15 +87525,13 @@ within its deadline, said on its line.
 the stop's take-back seen landing while the teardown was held, want 1, and no
 line). Each requires the panic raised again as it was, which passed on both.
 
-### R4. A start that hangs before ServeTLS, stopped cleanly (reporting added)
+### R4. A counted start that had not begun serving was never said not ready (reporting added)
 
 The confirmation starts once `ServeTLS` runs (`newServeProbation` after the
-`go ServeTLS` line), and `probationSeams` acted after it, so a start that hung
-between its admission and its first serve was never said not ready; its
-admission counted it and a clean stop took the count back, by design (a long
-migration at the store's open, a lock it waits for), so `bridge doctor` read
-`ok … is on probation` throughout. Counting it would roll back healthy slow
-starts, so the change reports only. `startWatch`, armed at the admission of a
+`go ServeTLS` line), and `probationSeams` acted after it, so a start that had
+not begun serving was never said not ready, and `bridge doctor` read
+`ok … is on probation` throughout. The change reports only (backlog B760).
+`startWatch`, armed at the admission of a
 counted start on serve's own context, ends where the start begins serving
 (`served`, just before `ServeTLS`) and at the teardown (`end`), joined each
 time; at `probationTiming.serve` from its admission (production's
@@ -87563,23 +87552,20 @@ NotReady and the doctor's fail; after the clean stop, the count 0, NotReady
 kept and the fail kept; and beside a later start that serves, NotReady cleared
 at its admission and the doctor ok.
 
-### R5. The take-back's and the count's write failures (one fixed, two kept)
+### R5. The take-back's and the count's write failures (one fixed)
 
 Restated against the budget the take-back has had since B660's third round:
 it asks for the marker's lock a wait at a time and asks again after a write
 that fails, until it lands or `stopBudget` (10 s from the stop's arrival)
 ends, one begun once a teardown past the budget has run asking 2 s still
-(`finishTakeBackFloor`), never past `updater.SCMStopWait` less a second; with
-no answer it leaves the count and says so (`TestAStopWhileAConfirmationWaitsWritesNothing`:
-the lock held through the budget; `TestATakeBackWhoseWriteIsRefusedKeepsTheCount`:
-a write the data dir refuses answers its refusal, the count kept), which errs
-toward a rollback that the crash rollback's own record's write meets too. A
-take-back write that published and failed its barrier is answered by its next
-ask. The count's three writes:
-- *Failed before it published* (kept): the marker as it was, the start goes on
-  uncounted, saying so; a missed count errs toward not rolling back (B660).
-  `TestACountThatFailedBeforeItPublishedLeavesItsStartUncounted` (a guard,
-  green on both) shows it: a crash after it leaves the count as it was.
+(`finishTakeBackFloor`), never past `updater.SCMStopWait` less a second; one
+with no answer is backlog B760's (`TestAStopWhileAConfirmationWaitsWritesNothing`,
+`TestATakeBackWhoseWriteIsRefusedKeepsTheCount`). A take-back write that
+published and failed its barrier is answered by its next ask. The count's
+three writes:
+- *Failed before it published* (kept, backlog B760):
+  `TestACountThatFailedBeforeItPublishedLeavesItsStartUncounted`, a guard,
+  green on both.
 - *Published, then its barrier failed* (fixed): taken back at a clean stop
   already (`TestACountPublishedBeforeItsBarrierFailedIsTakenBack`), but the
   admission let go of the start's hold at the failed write, so the token the
@@ -87591,12 +87577,9 @@ ask. The count's three writes:
   (while it ran, the token in the marker and not read as running; after its
   error return, the token left).
 - *The admission's one write of its record and its count*, which refuses the
-  start (kept): where it published before its barrier failed, that start, an
-  error return before it served, stays counted, and every later start while
-  the barrier fails refuses before it writes (`syncMarkerDir` first), so it
-  adds at most one count; a take-back there would be one more write over the
-  marker whose barrier just failed. `TestARefusedAdmissionLeavesAtMostOneCount`
-  (a guard, green on both: three starts with the barrier failing, the count 1).
+  start (kept, backlog B760): every later start while the barrier fails
+  refuses before it writes (`syncMarkerDir` first).
+  `TestARefusedAdmissionLeavesAtMostOneCount`, a guard, green on both.
 
 ### The red run
 
@@ -87659,12 +87642,11 @@ test, which ends its context with nothing serving, is the pin.
 
 ### For the owner
 
-- B660's records file one more item under B760 that this brief did not take:
-  an SELinux label set by hand (`chcon`) is not carried by the swap, which
-  takes the label the policy gives a new file (`restorecon`'s). It stays open.
+- B660's records file one more item under B760 that this brief did not take;
+  it stays open there.
 - R3 counts a panic on serve's goroutine after a stop, which B660's second
-  round accepted as uncounted (a crash in the teardown after a stop); the
-  rule's words say it now. The owner may want that confirmed.
+  round had accepted as uncounted; the rule's words say it now. The owner may
+  want that confirmed.
 - R4's deadline is the probation window, 10 minutes from the admission: a
   healthy start whose migration runs longer is said not ready until its
   confirmation clears it.

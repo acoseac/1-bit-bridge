@@ -10,11 +10,9 @@ import (
 )
 
 // Backlog B760's fourth residual: the confirmation begins once ServeTLS runs,
-// so a start that hangs before it and is stopped cleanly was never said not to
-// be ready: its admission counted it and its stop took the count back, by
-// design (a slow but healthy start, a long migration at the store's open,
-// must not roll anything back), and `bridge doctor` read "ok, on probation"
-// throughout. A start is watched from its admission now, reporting only.
+// so a start that had not begun serving was never said not to be ready, and
+// `bridge doctor` read "ok, on probation" throughout. A start is watched from
+// its admission now, reporting only.
 
 // heldBeforeServing is a hold of serve's start just before it begins serving
 // (probationSeams.beforeServing).

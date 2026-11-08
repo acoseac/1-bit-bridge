@@ -909,7 +909,8 @@ reached.
   as soon as it arrives once the start has answered as ready, so a stop the
   service manager has to finish with SIGKILL (past systemd's
   `TimeoutStopSec`, launchd's `ExitTimeOut`) is taken back already, and a
-  crash in the teardown after it is not counted. Before the start has
+  panic of serve's own in the teardown after it counts the start again
+  (backlog B760). Before the start has
   answered, a stop takes it back only once its teardown has run: a version
   that hangs before it is ready, which the service manager stops and then
   kills, counts, and the third such start's successor tries the rollback
@@ -932,10 +933,10 @@ reached.
   the take-back together, inside the SCM's 15 s (the updater's wait for a
   service to stop), launchd's 20 s and systemd's 90 s, neither of which the
   plist or the unit changes, a take-back begun once a teardown longer than
-  that has run asking for 2 s more, never past 14 s from the stop's arrival;
-  one that never has it leaves the count
+  that has run asking for 2 s more, never past 14 s from the stop's arrival,
+  and one that never lands says so
   (`updater: this start ended cleanly and its count … was not taken back
-  within 10s …`). Once one start has not ended cleanly,
+  within 10s …`; backlog B760). Once one start has not ended cleanly,
   each start after it says how many came before it. A start that ends before
   it counts itself (its settings refused, say) is not counted: the early
   rollback above answers that case.
@@ -1030,9 +1031,7 @@ reached.
   `.bak` still carries them (`updater: the backup beside this binary carries
   file capabilities this binary does not …`), so three such starts put `.bak`
   back. Run `setcap` on the new binary after such an update, or update with
-  `sudo bridge update`. An SELinux label set by hand (`chcon`) is not carried
-  either: the new binary takes the label the policy gives a new file in its
-  directory (`restorecon`'s; backlog B760).
+  `sudo bridge update`. What else an update does not carry is backlog B760's.
 
 **A data dir whose filesystem cannot fsync a directory.** Linux's NFS and
 CIFS/SMB clients treat a directory's fsync as a successful no-op, and its

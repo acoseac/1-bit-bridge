@@ -122,11 +122,9 @@ func KeepsNoLocks(err error) bool {
 // renames before its barrier, and the next ask then finds no count of its own
 // and answers no write and no error; serve counts a start again after a panic
 // only where some ask of its take-back reached its write
-// (CountFailedStartAgain; backlog B760's second round). A take-back that does not land
-// leaves one count, which errs toward a rollback of an install whose starts
-// did end cleanly; the next start that ends cleanly does not take it back, and
-// the confirmation clears it. save writes the marker; nil is SaveState, as
-// AdmitBoot's is.
+// (CountFailedStartAgain; backlog B760's second round). What a take-back that
+// does not land leaves is backlog B760's. save writes the marker; nil is
+// SaveState, as AdmitBoot's is.
 func TakeBackFailedStart(ctx context.Context, dataDir, current string, counted int, save func(dataDir string, st State) error) (bool, error) {
 	if counted <= 0 {
 		return false, nil

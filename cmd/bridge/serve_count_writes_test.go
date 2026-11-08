@@ -15,10 +15,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/version"
 )
 
-// Backlog B760's fifth residual, the count's writes that fail: one that
-// failed before it published, one that published and failed its directory
-// barrier after (SaveState renames first), and the admission's one write of
-// its record and its count, whose failure refuses the start.
+// Backlog B760's fifth residual: the count's writes that fail.
 
 // TestACountWhoseBarrierFailedKeepsItsStartsHold: a count whose barrier
 // failed stands in the marker with its token, published before the barrier:
@@ -91,9 +88,8 @@ func TestACountWhoseBarrierFailedKeepsItsStartsHold(t *testing.T) {
 }
 
 // TestACountThatFailedBeforeItPublishedLeavesItsStartUncounted: a count
-// whose write failed before it published leaves the marker as it was; the
-// start goes on, saying so, and a crash of it is then not counted, which errs
-// toward not rolling back (backlog B660's design, which B760 keeps).
+// whose write failed before it published leaves the marker as it was, and the
+// start goes on, saying so (backlog B760).
 func TestACountThatFailedBeforeItPublishedLeavesItsStartUncounted(t *testing.T) {
 	r := newRefusedInstall(t, "")
 	r.marker.DataDirOpenedBy, r.marker.FailedStarts = version.ServerVersion, 1
@@ -118,10 +114,8 @@ func TestACountThatFailedBeforeItPublishedLeavesItsStartUncounted(t *testing.T) 
 
 // TestARefusedAdmissionLeavesAtMostOneCount: the admission's one write of its
 // record and its count refuses the start where it cannot be made durable, and
-// it may have published before its barrier failed: that start, which returned
-// an error before it served, stays counted, and every later start while the
-// barrier fails refuses before it writes, adding no count of its own (backlog
-// B760 keeps it).
+// every later start while the barrier fails refuses before it writes, adding
+// no count of its own (backlog B760).
 func TestARefusedAdmissionLeavesAtMostOneCount(t *testing.T) {
 	r := newRefusedInstall(t, "")
 	t.Cleanup(updater.SetMarkerBarrierForTest(func(step string) error {

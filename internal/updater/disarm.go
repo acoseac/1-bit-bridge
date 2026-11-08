@@ -43,8 +43,7 @@ type DisarmResult struct {
 	CountTried int
 	// CountMissed is why the count was not written, where the count was the
 	// admission's only write (its lock not taken, or its save failed): a line
-	// for the caller to say, never a refusal, since a missed count errs
-	// toward not rolling back.
+	// for the caller to say, never a refusal (backlog B760).
 	CountMissed error
 	// Permit is serve's admission's permission to migrate the store at its
 	// own start (MigrationPermit), the zero value but from AdmitBoot.
@@ -163,8 +162,8 @@ func MigrationVetoed(st State, current string) bool {
 // the install back at the next start where CrashRollback allows it. Where the
 // count is all it has to write, the barrier still runs first and still
 // refuses, and the count's own write failing, or its lock not taken, is a
-// line for the caller (CountMissed), never a refusal: a missed count errs
-// toward not rolling back. A crash before the admission is not counted: a
+// line for the caller (CountMissed), never a refusal (backlog B760). A crash
+// before the admission is not counted: a
 // candidate that never runs is what the settings check before the swap sees
 // (CheckConfig), and a start refused for its settings has the early
 // rollback (EarlyRollback).
@@ -276,8 +275,7 @@ func migrationHeldError(why string) error {
 // install, record a migration begun, lift a veto of current's migrations, or
 // remove a marker it cannot read, and a migration refuses under that veto as
 // it does with the lock. An admission's count is the one write it goes on
-// without: a line (CountMissed), since a missed count errs toward not rolling
-// back.
+// without: a line (CountMissed; backlog B760).
 func disarmUnlocked(dataDir, current string, migrating bool, gate migrationGate, lockErr error) (DisarmResult, error) {
 	st, err := LoadState(dataDir)
 	held := ""

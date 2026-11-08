@@ -36,9 +36,8 @@ func FileCapabilities(path string) ([]byte, error) { return readCapability(path)
 // (cmd/bridge's bindRefusalIsTheHosts) counts the start a refused bind ends,
 // since the backup, which keeps them, would bind. A read of dst that fails
 // sets nothing. Nothing else of dst's is carried but its mode
-// (installedMode): not its owner, which is the process's, nor any other
-// extended attribute, nor an SELinux label, which the staged file takes from
-// the policy for a new file in dst's directory.
+// (installedMode): not its owner, which is the process's (what else is not
+// carried is backlog B760's).
 func carryCapabilities(dst, staged string) {
 	caps, err := capabilityXattr.get(dst)
 	if err != nil || len(caps) == 0 {

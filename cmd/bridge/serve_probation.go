@@ -575,18 +575,15 @@ func (p *serveProbation) confirm(ctx context.Context) bool {
 }
 
 // startWatch is the watch on a counted start's beginning to serve (backlog
-// B760). The confirmation begins once ServeTLS runs, so a start that hung
-// before it (a migration at the store's open that never ends, a lock it waits
-// for) and was stopped cleanly was never said not to be ready: its admission
-// counted it, its stop took the count back, and the doctor read "ok, on
-// probation" throughout. Armed at the admission, it says once that the start
-// has not begun serving and records NotReady (updater.RecordNotReady), which
-// the doctor and the console fail on and the next start's admission and the
-// confirmation clear, where the start has not begun serving within
-// timing.serve of its admission (updater.ProbationWindow in production), on
-// the monotonic clock. Reporting only: the count stays the admission's and the
-// take-back's, so a slow but healthy start stopped cleanly counts nothing, and
-// a start stopped before its deadline is not said not to be ready.
+// B760). The confirmation begins once ServeTLS runs, so until B760 a start
+// that had not begun serving was never said not to be ready, and the doctor
+// read "ok, on probation" throughout. Armed at the admission, it says once
+// that the start has not begun serving and records NotReady
+// (updater.RecordNotReady), which the doctor and the console fail on and the
+// next start's admission and the confirmation clear, where the start has not
+// begun serving within timing.serve of its admission (updater.ProbationWindow
+// in production), on the monotonic clock. Reporting only: it writes no count
+// (backlog B760).
 type startWatch struct {
 	cancel  context.CancelFunc
 	done    chan struct{}

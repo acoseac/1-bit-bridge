@@ -9,11 +9,8 @@ import (
 // TestATakeBackWhoseWriteIsRefusedKeepsTheCount: a take-back whose write the
 // data dir refuses before it publishes (a directory this user may not write
 // into) answers the refusal, saying that it reached its write, and leaves the
-// count as it was, which serve's stop
-// asks again for the rest of its budget (stopBudget, cmd/bridge) and then
-// leaves, saying so: a clean stop counted, which errs toward a rollback
-// (backlog B760 keeps it). Not as root, which a mode does not stop, nor on
-// Windows, which keeps no POSIX modes.
+// count as it was (backlog B760). Not as root, which a mode does not stop, nor
+// on Windows, which keeps no POSIX modes.
 func TestATakeBackWhoseWriteIsRefusedKeepsTheCount(t *testing.T) {
 	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
 		t.Skip("a directory's mode stops no write here")
