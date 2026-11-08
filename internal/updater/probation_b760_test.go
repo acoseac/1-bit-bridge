@@ -50,9 +50,7 @@ func TestCountingAStartAgainUndoesItsTakeBackAlone(t *testing.T) {
 
 // TestTheAdmissionKeepsItsStartsHoldWhereItsCountsWriteFailed: where the count
 // is the admission's only write and that write fails, the start keeps its hold
-// on its own lock (backlog B760): a write that published before its barrier
-// failed names the start's token in the marker, which reads as a start running
-// while it runs; one that published nothing leaves the marker as it was.
+// on its own lock (backlog B760).
 func TestTheAdmissionKeepsItsStartsHoldWhereItsCountsWriteFailed(t *testing.T) {
 	t.Run("published, its barrier failed", func(t *testing.T) {
 		dir := t.TempDir()

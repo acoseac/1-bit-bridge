@@ -81512,8 +81512,8 @@ the red four above; readiness:
 `TestAPortAnotherProcessHoldsIsNotAFailedStart` (the API's and the
 console's, and an address the host does not have, which stays counted),
 `TestAStoreThatWillNotOpenIsAFailedStart`, `TestAPanicInServeIsAFailedStart`,
-`TestACountPublishedBeforeItsBarrierFailedIsTakenBack` (the count's own
-barrier failing after its rename); the rollback:
+`TestACountPublishedBeforeItsBarrierFailedIsTakenBack` (backlog B760); the
+rollback:
 `TestAMigrationThatFailsStillRefusesTheRollback` (a step that adds its
 columns and fails at its index, `user_version` unmoved),
 `TestACommandsMigrationRefusesTheRollbackToo` (`bridge doctor`'s open),
@@ -81816,10 +81816,10 @@ serve that refuses with one start before it and migrates with none
 (`TestACommandBesideAStartingServe`), and the updater's, the store's and
 restore's own.
 
-**6. A permission refusal and a tailnet failure** (confirmed). What the
-swap carries: `dst`'s mode alone (`installedMode`); the owner is the
-process's (the staged file is created by it), and no extended attribute was
-read. So an operator's setcap went with an update, the new binary's bind
+**6. A permission refusal and a tailnet failure** (confirmed). The swap
+carried `dst`'s mode alone (`installedMode`; the rest of what it does with
+`dst`'s attributes is backlog B760's), so an operator's setcap went with an
+update, the new binary's bind
 below 1024 was refused for a permission, and the start was taken back as the
 host's. `carryCapabilities` now gives the staged binary `dst`'s
 `security.capability` before the rename, which only a process with
@@ -82020,8 +82020,7 @@ whose teardown hangs and is killed stays counted. The start says that it
 has answered (`updater: this start of … has answered as ready (its API
 listener, /v1/health and its store): its install is confirmed once it has
 stayed up for 10m0s`). A slow but healthy start killed in a slow teardown
-before it was ready counts too, the cost the review accepted; it is said in
-PROTOCOL.md, the runbook and the long form. The second round's three early
+before it was ready is backlog B760's. The second round's three early
 take-back tests wait for the window first, the stop-while-starting test that
 waited for an early take-back is removed, replaced by the two above, the
 subprocess kill test waits for the readiness line (the copy asks every
@@ -82074,9 +82073,9 @@ held; `RunningServeCounted` needs the token and that lock held, tried
 without waiting, and a command never takes such a lock, so `server.lock`
 is not read at all, nor the registry, which goes. The take-back clears the
 token in its decrement's write; every return of `runServe` clears it where
-the marker still names it, keeping the count where it was not taken back
-(`updater.EndStart`, within the stop's budget: the launcher's serve returns
-to its menu with the process alive), and lets the lock go; the confirmation
+the marker still names it (`updater.EndStart`, within the stop's budget:
+the launcher's serve returns to its menu with the process alive), and lets
+the lock go; the confirmation
 clears it. A migrating open reads the running start of the marker it reads
 under the install marker's lock (`migrationGate.holds`), so the count and
 the token are read together, and the try of the start's lock never waits,
@@ -87566,16 +87565,12 @@ three writes:
 - *Failed before it published* (kept, backlog B760):
   `TestACountThatFailedBeforeItPublishedLeavesItsStartUncounted`, a guard,
   green on both.
-- *Published, then its barrier failed* (fixed): taken back at a clean stop
-  already (`TestACountPublishedBeforeItsBarrierFailedIsTakenBack`), but the
-  admission let go of the start's hold at the failed write, so the token the
-  write published named a lock nobody held: `RunningServeCounted` read the
-  running start as one that did not end cleanly (the doctor counting it, a
-  command's migration held on it), and its return cleared no token
+- *A count's write that failed, and the start's hold* (fixed): the admission
+  let go of the start's hold at the failed write, so `RunningServeCounted`
+  read the running start as one that did not end cleanly (the doctor counting
+  it, a command's migration held on it), and its return cleared no token
   (`EndStart` was given ""). The start keeps its hold now (`DisarmResult.Start`).
-  Red first at afbd45bb: `TestACountWhoseBarrierFailedKeepsItsStartsHold`
-  (while it ran, the token in the marker and not read as running; after its
-  error return, the token left).
+  Red first at afbd45bb: `TestACountWhoseBarrierFailedKeepsItsStartsHold`.
 - *The admission's one write of its record and its count*, which refuses the
   start (kept, backlog B760): every later start while the barrier fails
   refuses before it writes (`syncMarkerDir` first).
@@ -87615,7 +87610,7 @@ after. Thirteen came out as predicted; one prediction was wrong (4d).
 | (3e) | `CountFailedStartAgain` without its comparison with what the take-back left | `TestCountingAStartAgainUndoesItsTakeBackAlone`, a take-back that never landed | its six other cases |
 | (4a) | the watch never armed | the held test, `TestAStartThatBeginsServingEndsItsWatch` | the stopped test, `TestTheStartWatchFiresOnlyWhileTheStartHasNotBegunServing` |
 | (4b) | `served` does not end the watch | the watch's unit test, the start begins serving; `TestAStartThatBeginsServingEndsItsWatch` | its two other cases, the held and stopped tests |
-| (4c) | a start the watch found not serving stays counted at its clean stop (a slow but healthy start counted) | the held test (the count 1 after its clean stop) | the stopped test, `TestAStopIsNotAFailedStart`, `TestAStartThatBeginsServingEndsItsWatch` |
+| (4c) | the count of a start the watch found not serving, at its stop (backlog B760) | the held test | the stopped test, `TestAStopIsNotAFailedStart`, `TestAStartThatBeginsServingEndsItsWatch` |
 | (4d) | the watch says the start has not begun serving at serve's stop | the watch's unit test, serve's stop | its two other cases, the held test, `TestAStartThatBeginsServingEndsItsWatch`; and, against the prediction, the stopped test |
 | (5a) | the admission lets go of the start's hold at a failed count write again | `TestTheAdmissionKeepsItsStartsHoldWhereItsCountsWriteFailed` (both), `TestACountWhoseBarrierFailedKeepsItsStartsHold` | `TestTheAdmissionCountsTheStartsOfTheInstallsVersion`, `TestACountPublishedBeforeItsBarrierFailedIsTakenBack`, `TestACountThatFailedBeforeItPublishedLeavesItsStartUncounted` |
 
@@ -87746,8 +87741,8 @@ an hour's probation window) failed: `update-state.json` changed (the count
 written from 1 to 2), and serve printed `updater: this start panicked after its
 stop had taken its count of the install's starts back, so it is counted
 again`. Its second check, that no such line is printed, asked for "counted
-again", which the admission's own line holds ("was not counted against its
-install"), so it would have failed without the false line: 15c167a5 asks for
+again", which the admission's own line held then, so it would have failed
+without the false line: 15c167a5 asks for
 countAgain's own words ("panicked after its stop"), and control N1 below shows
 that check red on its own.
 `TestATakeBackSaysItReachedItsWriteWhateverTheWriteAnswered` (internal/updater:

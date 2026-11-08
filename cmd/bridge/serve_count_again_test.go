@@ -45,14 +45,12 @@ func nextTakeBackAnswer(t *testing.T, answers <-chan takeBackAnswer) takeBackAns
 	}
 }
 
-// TestAPanicAfterTheStopOfAStartWhoseCountNeverLandedCountsNothing: a start
-// whose count's write failed before it published leaves the marker as it was,
-// answers as ready, and its stop's take-back, armed, begins as the stop
-// arrives, finds no count of its own and writes nothing; the teardown then
-// panics, and nothing is counted again, nor said to be. Until B760's second
-// round a take-back begun was enough: the marker one below the count the
-// admission tried read as the take-back's, and the panic wrote a count the
-// start never had, saying its stop had taken it back.
+// TestAPanicAfterTheStopOfAStartWhoseCountNeverLandedCountsNothing: where the
+// armed take-back of a ready start's stop finds no count of its own and writes
+// nothing, a panic in the teardown after it writes no count again and says
+// none (backlog B760). Until B760's second round a take-back begun was
+// enough: the marker one below the count the admission tried read as the
+// take-back's, and the panic wrote a count, saying its stop had taken it back.
 func TestAPanicAfterTheStopOfAStartWhoseCountNeverLandedCountsNothing(t *testing.T) {
 	r := newRefusedInstall(t, "")
 	// A start of this version opened the data dir before, so this start's
@@ -71,7 +69,7 @@ func TestAPanicAfterTheStopOfAStartWhoseCountNeverLandedCountsNothing(t *testing
 		teardownHold:    func() { panic(teardownPanic) }})
 	teardown.releaseFirst(t)
 	events.waitFor(t, probationWindow)
-	if !strings.Contains(sb.stderr.String(), "was not counted against its install") {
+	if !strings.Contains(sb.stderr.String(), "write of the count of this start") {
 		t.Fatalf("the start's count was not refused: the test shows nothing; stderr=%s", sb.stderr.String())
 	}
 	sb.stop()
@@ -85,8 +83,7 @@ func TestAPanicAfterTheStopOfAStartWhoseCountNeverLandedCountsNothing(t *testing
 	teardown.release.close()
 	waitForThePanic(t, sb, panicked, teardownPanic)
 	marker.requireUnchanged(t)
-	// Both of countAgain's lines begin so; "counted again" alone is in the
-	// admission's own "was not counted against its install".
+	// Both of countAgain's lines begin so.
 	if strings.Contains(sb.stderr.String(), "panicked after its stop") {
 		t.Errorf("serve said it counted again a start it never counted; stderr=%s", sb.stderr.String())
 	}

@@ -17,13 +17,12 @@ import (
 
 // Backlog B760's fifth residual: the count's writes that fail.
 
-// TestACountWhoseBarrierFailedKeepsItsStartsHold: a count whose barrier
-// failed stands in the marker with its token, published before the barrier:
-// the start keeps the lock its token names while it runs, so a reader beside
-// it reads it running, and clears the token as it returns, the count of a
-// start that did not end cleanly kept. Until B760 the admission let go of the
-// lock at the failed write, so the running start read as one that had not
-// ended cleanly, and its token outlived it.
+// TestACountWhoseBarrierFailedKeepsItsStartsHold: a start whose count's
+// barrier failed keeps the lock its token names while it runs, and clears the
+// token as it returns, the count of a start that did not end cleanly kept
+// (backlog B760). Until B760 the admission let go of the lock at the failed
+// write, so the running start read as one that had not ended cleanly, and its
+// token outlived it.
 func TestACountWhoseBarrierFailedKeepsItsStartsHold(t *testing.T) {
 	r := newRefusedInstall(t, "")
 	// A start of this version opened the data dir before, so this start's
@@ -63,7 +62,7 @@ func TestACountWhoseBarrierFailedKeepsItsStartsHold(t *testing.T) {
 	case <-time.After(withinTheTest):
 		t.Fatalf("serve never reached its player's preflight; stderr=%s", stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "was not counted against its install") || armed.Load() {
+	if !strings.Contains(stderr.String(), "write of the count of this start") || armed.Load() {
 		t.Fatalf("the count's barrier did not fail: the test shows nothing; stderr=%s", stderr.String())
 	}
 	st := markerOf(t, r.dataDir)
@@ -87,9 +86,9 @@ func TestACountWhoseBarrierFailedKeepsItsStartsHold(t *testing.T) {
 	}
 }
 
-// TestACountThatFailedBeforeItPublishedLeavesItsStartUncounted: a count
-// whose write failed before it published leaves the marker as it was, and the
-// start goes on, saying so (backlog B760).
+// TestACountThatFailedBeforeItPublishedLeavesItsStartUncounted: a count's
+// write that the admission's save refuses, and the line the start says
+// (backlog B760).
 func TestACountThatFailedBeforeItPublishedLeavesItsStartUncounted(t *testing.T) {
 	r := newRefusedInstall(t, "")
 	r.marker.DataDirOpenedBy, r.marker.FailedStarts = version.ServerVersion, 1
@@ -106,8 +105,8 @@ func TestACountThatFailedBeforeItPublishedLeavesItsStartUncounted(t *testing.T) 
 	if !panicked {
 		t.Fatal("serve returned where its player's preflight panics: the start was meant to crash there")
 	}
-	if !strings.Contains(errs.String(), "was not counted against its install") {
-		t.Errorf("serve did not say its count was not written; stderr=%s", errs.String())
+	if !strings.Contains(errs.String(), "write of the count of this start") {
+		t.Errorf("serve did not say its count's write answered an error; stderr=%s", errs.String())
 	}
 	marker.requireUnchanged(t)
 }

@@ -35,9 +35,8 @@ func FileCapabilities(path string) ([]byte, error) { return readCapability(path)
 // attributes keep them: the swap goes on without them, and serve's bind check
 // (cmd/bridge's bindRefusalIsTheHosts) counts the start a refused bind ends,
 // since the backup, which keeps them, would bind. A read of dst that fails
-// sets nothing. Nothing else of dst's is carried but its mode
-// (installedMode): not its owner, which is the process's (what else is not
-// carried is backlog B760's).
+// sets nothing. The rest of what the swap does with dst's attributes is
+// backlog B760's.
 func carryCapabilities(dst, staged string) {
 	caps, err := capabilityXattr.get(dst)
 	if err != nil || len(caps) == 0 {

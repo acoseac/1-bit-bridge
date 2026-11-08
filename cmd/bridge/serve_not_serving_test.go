@@ -112,8 +112,8 @@ func TestAStartThatHasNotBegunServingIsSaidNotReady(t *testing.T) {
 }
 
 // TestAStartStoppedBeforeItsDeadlineIsNotSaidNotReady: a start held before it
-// begins serving and stopped before its deadline is a short cancelled start:
-// nothing says it is not ready, its count goes back, and the doctor reads ok.
+// begins serving and stopped before its deadline, a short cancelled start
+// (backlog B760).
 func TestAStartStoppedBeforeItsDeadlineIsNotSaidNotReady(t *testing.T) {
 	r := newRefusedInstall(t, "")
 	events, seams := newProbationWatch(longProbation)
@@ -138,7 +138,8 @@ func TestAStartStoppedBeforeItsDeadlineIsNotSaidNotReady(t *testing.T) {
 // TestTheStartWatchFiresOnlyWhileTheStartHasNotBegunServing: the watch says
 // once that the start has not begun serving, and records NotReady, at its
 // deadline where nothing ended it before; and records nothing, its deadline
-// long past, where the start began serving first, or serve's stop came first.
+// long past, where the start began serving first (where serve's stop came
+// first, backlog B760).
 func TestTheStartWatchFiresOnlyWhileTheStartHasNotBegunServing(t *testing.T) {
 	const deadline = 50 * time.Millisecond
 	for _, tc := range []struct {

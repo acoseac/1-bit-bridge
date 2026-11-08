@@ -915,9 +915,9 @@ reached.
   that hangs before it is ready, which the service manager stops and then
   kills, counts, and the third such start's successor tries the rollback
   below (by hand with real builds: three hung starts, each killed three
-  seconds after its SIGTERM, then exit 75 and 0.2.3 back). The cost, taken
-  on purpose: a slow but healthy start killed in a slow teardown before it
-  was ready counts too. Whether an end is a stop is asked of the stop itself
+  seconds after its SIGTERM, then exit 75 and 0.2.3 back). A slow but
+  healthy start killed in a slow teardown before it was ready is backlog
+  B760's. Whether an end is a stop is asked of the stop itself
   once the teardown has run, so a stop followed at once by an error (a TLS
   pair that will not load) is a stop. An API or console address another
   process holds, one the host does not have (a static address not up yet
@@ -934,9 +934,9 @@ reached.
   service to stop), launchd's 20 s and systemd's 90 s, neither of which the
   plist or the unit changes, a take-back begun once a teardown longer than
   that has run asking for 2 s more, never past 14 s from the stop's arrival,
-  and one that never lands says so
-  (`updater: this start ended cleanly and its count … was not taken back
-  within 10s …`; backlog B760). Once one start has not ended cleanly,
+  and one with no answer says so and where to look (`updater: this start
+  ended cleanly, and the take-back of its count … had no answer within 10s
+  …; run bridge doctor, …`; backlog B760). Once one start has not ended cleanly,
   each start after it says how many came before it. A start that ends before
   it counts itself (its settings refused, say) is not counted: the early
   rollback above answers that case.

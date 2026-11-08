@@ -304,7 +304,7 @@ func recoverCrashedRefusedInstall(ctx context.Context, dataDir, configPath strin
 // could not be counted.
 func sayTheAdmissionsCount(res updater.DisarmResult, stderr io.Writer) {
 	if res.CountMissed != nil {
-		fmt.Fprintf(stderr, "updater: %v; a start that does not end cleanly may then not count toward the install's rollback\n", res.CountMissed)
+		fmt.Fprintf(stderr, "updater: %v; run bridge doctor, whose install-probation line says where the install stands\n", res.CountMissed)
 		return
 	}
 	if !res.Counted || res.State.FailedStarts < 2 {

@@ -83,8 +83,8 @@ func TestAProbeHeldBeforeItsUnlockIsNoRunningStart(t *testing.T) {
 
 // TestATakeBackPastItsDeadlineStillTriesTheLockOnce: a take-back whose
 // context has ended still tries the install marker's lock once, as LockState
-// tries before it waits: it lands where the lock is free, and gives up at once
-// where another holds it.
+// tries before it waits, and lands where the lock is free; where another
+// holds it, backlog B760.
 func TestATakeBackPastItsDeadlineStillTriesTheLockOnce(t *testing.T) {
 	ended, cancel := context.WithCancel(context.Background())
 	cancel()

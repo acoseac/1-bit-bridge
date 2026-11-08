@@ -3626,11 +3626,10 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	// Registered here, right after the admission, so it runs after every
 	// teardown and while the data dir's lock is held: the take-back is joined
 	// there, within the stop's budget (stopBudget), before the lock is let go.
-	// A start that tried to count tries to take back, since the marker's write
-	// publishes before its barrier can fail. On every return the start's token
-	// is cleared, its count kept where it is not taken back, and its own lock
-	// let go (updater.StartHold; the third round), so a start that returned,
-	// the launcher's own included, is never read as running. And a counted
+	// A start that tried to count tries to take back (backlog B760). On every
+	// return the start's token is cleared and its own lock let go
+	// (updater.StartHold; the third round), so a start that returned, the
+	// launcher's own included, is never read as running. And a counted
 	// start is watched from here until it begins serving (startWatch; backlog
 	// B760), so one that has not begun within its deadline is said not ready.
 	notAFailedStart := false
@@ -3653,8 +3652,8 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 			end := panicked == nil && (stopped.Err() != nil || restart.requested.Load() || notAFailedStart)
 			answered, missed, deadline := takeBack.finish(end)
 			if end && !answered {
-				fmt.Fprintf(stderr, "updater: this start ended cleanly and its count of the install's starts was not taken back "+
-					"within %s (%v): it counts as one that did not\n", stopBudget, missed)
+				fmt.Fprintf(stderr, "updater: this start ended cleanly, and the take-back of its count of the install's starts had no answer "+
+					"within %s (%v); run bridge doctor, whose install-probation line says where the install stands\n", stopBudget, missed)
 			}
 			if panicked != nil {
 				switch tried, again, err := takeBack.countAgain(); {

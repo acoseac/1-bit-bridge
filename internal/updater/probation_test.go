@@ -324,8 +324,8 @@ func TestProbationStatusSaysWhereAnInstallStands(t *testing.T) {
 // TestTheAdmissionCountsTheStartsOfTheInstallsVersion: serve's admission adds
 // one to the count where its version is the install's target, in its one
 // write with its record, clears NotReady, and counts nothing of another
-// version; the count's own write failing, or its lock not taken, is a line
-// (CountMissed), never a refusal, while the barrier before it still refuses.
+// version; the count's own write failing, or its lock not taken, is
+// CountMissed's (backlog B760), while the barrier before it still refuses.
 func TestTheAdmissionCountsTheStartsOfTheInstallsVersion(t *testing.T) {
 	t.Run("with its record", func(t *testing.T) {
 		dir := t.TempDir()
