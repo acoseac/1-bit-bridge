@@ -995,8 +995,15 @@ open's adoption and activation wait for a write pending, an occurrence it
 handed off again by then, or dropped for its replacement, taken back from its
 sink unwritten (`errReplanned`, `unadopt`), and so is one dropped as its
 activation begins, by whatever dropped it, its decoder and content closed as it
-is taken back, a release then ending the session with no fault (round 3); a
-resume waits in a loop; a refusal
+is taken back, a release then ending the session with no fault (round 3), and
+one dropped or handed off again while its sink's own activation admits its node
+or writes its prefill is taken back with none of it written, the drop or the
+hand-off revoking that sink, whose activation answers its own fence
+(`alsapcm.ErrActivationFenced`, never the device's answer), a failed activation
+judged by its cause in this order: a release ends the session, a revocation of
+the session's DSD keeps its fault, the drop's own answer (the sink's fence,
+`errReplanned`) is taken back, and anything else is the fault it was (round 4);
+a resume waits in a loop; a refusal
 of the policy's that a write or a later set lifts is asked again where the open
 ends, the content's checks with it (`settleOpen`, `refusedUnder`), a
 successor's DSD monitor starting once it is admitted; a gapless successor waits
@@ -1011,7 +1018,11 @@ counted it, wait for a write with an `if` where another may follow, fault a
 successor handed off again or dropped at its activation, at its fence too, take
 a dropped one back with its decoder open, fault a session whose release came
 during an activation, let a test of the adoption's wait pass on the activation's
-own, ask a decoder's
+own, take an activation's failure beside a drop for the drop's but by the drop's
+own answer, judge a drop before a release or a revocation, leave to its
+activation the sink of an occurrence a reconciliation handed off again, answer a
+device's failure as the native sink's own fence or that fence by a bare error,
+ask a decoder's
 refusal again or a policy's without the content's checks, compare a pending set
 with any set but the one published, hold a gapless successor past its sink's
 floor, take a session's lock inside the store's closure or answer
@@ -1100,7 +1111,7 @@ the box shows is published by a refresh, and the write's publish is one. The
 classification also counts a session being released, and an engine that
 hands nothing off again, as revocations (`TestAWriteBesideASessionBeingReleasedIsTold`,
 `TestAWriteBesideAnEngineThatHandsNothingOffAgainIsTold`, the rig's
-`noReplan`). `TestASuccessorsOpenBesideAWriteIsCountedAndWaitsForIt`, `TestAnActivationBesideAWriteWaitsForIt`, `TestASuccessorDroppedAtItsActivationIsTakenBackUnwritten`, `TestAReleaseWhileASuccessorsAdoptionWaitsLetsGoOfTheDevice`, `TestAResumesOpenBetweenTransportsBesideAWriteIsCounted`, `TestAResumeWaitsForEveryWriteThatChangesWhatItOpens`, `TestAPolicyRefusalAWriteLiftsIsAskedAgain`, `TestASuccessorWhoseOpenEndsBesideAWriteWaitsForIt`, `TestNoSinkOpensForASuccessorWhileAWriteChangesItsRate`, `TestAConvertedJoinWindowWaitsForAWriteThatChangesItsSuccessor`, `TestAGaplessSuccessorWaitsForAWriteNoLongerThanTheSinksLookahead`, `TestAWriteBesideAnEngineThatHandsNothingOffAgainIsTold`, `TestAWriteBesideASessionBeingReleasedIsTold`, `TestTheWritesChecksAreAnsweredInTheirOrder`, `TestAWriteTheStateKeepsMovingUnderIsNotMade`, `TestAStaleAnswerNeverCarriesARevisionAnotherWriteHasPassed`, `TestAWriteIsJudgedAgainstTheSetPublished` and `TestAWriteWhoseReadingNeverAgreesWithTheSetPublishedIsNotMade` pin it.
+`noReplan`). `TestASuccessorsOpenBesideAWriteIsCountedAndWaitsForIt`, `TestAnActivationBesideAWriteWaitsForIt`, `TestASuccessorDroppedAtItsActivationIsTakenBackUnwritten`, `TestAReleaseWhileASuccessorsAdoptionWaitsLetsGoOfTheDevice`, `TestASuccessorDroppedAtItsSinksAdmissionIsTakenBackUnwritten`, `TestASuccessorDroppedWhileItsSinkWritesItsPrefillIsTakenBack`, `TestAnActivationsFailureBesideADropIsJudgedByItsCause`, `TestTheActivationsOwnFenceIsErrActivationFenced`, `TestAResumesOpenBetweenTransportsBesideAWriteIsCounted`, `TestAResumeWaitsForEveryWriteThatChangesWhatItOpens`, `TestAPolicyRefusalAWriteLiftsIsAskedAgain`, `TestASuccessorWhoseOpenEndsBesideAWriteWaitsForIt`, `TestNoSinkOpensForASuccessorWhileAWriteChangesItsRate`, `TestAConvertedJoinWindowWaitsForAWriteThatChangesItsSuccessor`, `TestAGaplessSuccessorWaitsForAWriteNoLongerThanTheSinksLookahead`, `TestAWriteBesideAnEngineThatHandsNothingOffAgainIsTold`, `TestAWriteBesideASessionBeingReleasedIsTold`, `TestTheWritesChecksAreAnsweredInTheirOrder`, `TestAWriteTheStateKeepsMovingUnderIsNotMade`, `TestAStaleAnswerNeverCarriesARevisionAnotherWriteHasPassed`, `TestAWriteIsJudgedAgainstTheSetPublished` and `TestAWriteWhoseReadingNeverAgreesWithTheSetPublishedIsNotMade` pin it.
 
 Round 3 (2026-11-08, the reviews of round 2 and of the merge). The activation's
 fence (`activateOutput`) answered a successor dropped while its sink was
@@ -1134,3 +1145,44 @@ the engine's call reaches it. `TestASuccessorDroppedAtItsActivationIsTakenBackUn
 (the write landing and the replacement made before the activation goes on, and
 after it begins to wait for the write; an edit; a cut; a release) and
 `TestAReleaseWhileASuccessorsAdoptionWaitsLetsGoOfTheDevice` pin it.
+
+Round 4 (2026-11-08, the reviews of round 3 and of its brief). Past the
+activation's own checks, the native sink's activation (`DSDSink.Activate`, on
+its writer) makes its check after open of the node, then its fence, then writes
+the run's prefill, the profile's DSD silence (up to 5 s), as fast as the DAC
+plays it, before it answers. A successor dropped there (by an edit that deleted
+its entry, its replacement once a write took its rate, or a cut, which drops a
+successor with no frame written at once while the producer is in no Write) had
+its unwritten sink revoked by the drop (`dropLocked`), and the activation
+answered `native activation fenced`, or in the prefill the write's
+cancellation, which `transition` took for a failed open: the session faulted.
+One a write handed off again with its replacement still to come (stale, not yet
+dropped) had nothing revoke its sink, and the activation wrote its prefill to
+the node for an occurrence the set no longer plays. The native sink now answers
+its own fence as `alsapcm.ErrActivationFenced` (revoked, released, being
+released or paused before the activation was asked, at its admission's end,
+with its writer ending before it ran it, or its prefill cut short by an
+Immediate release, the cancellation joined to it), never as the device's
+answer: an admission the check refused and a write that failed are returned as
+they are, and a sink that failed before the activation refuses it (`native
+activation refused`). `transition` judges a failed activation by its cause, in
+this order: a release ends the session with no fault; a revocation of the
+session's DSD keeps its fault; an occurrence dropped or handed off again whose
+activation answered `errReplanned` or the sink's own fence is taken back
+(`unadopt`) and the session goes on; anything else, a device's refusal beside a
+drop among them, is the fault it was. A reconciliation that hands off again an
+occurrence whose own sink an activation is under way for (`occ.claimed`)
+revokes that sink as a drop does. Only a release and a drop together whose
+activation answers the sink's own fence tell the release's place before the
+drop's apart, a release while the dropped successor's prefill is written; the
+fault of a revocation `Backend.Revoke` records itself while the sink is
+registered, so no order of the classification reddens its case, which pins the
+outcome. A cut reaches the window through the backend's Cut alone: the engine
+replaces a successor it has not submitted through Prepare, so after a cut the
+cases tell the engine by the edit that deletes the entry, and check that the
+session goes on. `TestASuccessorDroppedAtItsSinksAdmissionIsTakenBackUnwritten`
+(an edit, a write's replacement, a write's hand-off with its replacement held, a
+cut), `TestASuccessorDroppedWhileItsSinkWritesItsPrefillIsTakenBack`,
+`TestAnActivationsFailureBesideADropIsJudgedByItsCause` (a release at the
+admission, a release in the prefill, a revocation, a device's refusal) and
+`TestTheActivationsOwnFenceIsErrActivationFenced` (the sink's answers) pin it.
