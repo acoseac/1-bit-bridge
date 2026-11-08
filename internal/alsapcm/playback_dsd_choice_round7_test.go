@@ -162,9 +162,12 @@ func convertedRig(t *testing.T, w *writeSeams, inst *installHold, log *stopsLog)
 // fault and marks it stale, its sink's adoption closes the sink unwritten,
 // and Revoke drops it, refused native_revoked, nothing faulted. Held at its
 // activation's last step, its install, the occurrence claimed with its sink
-// adopted: the reconciliation records the revocation, and the producer's next
-// step stops on it before a frame. Either way, once the rig has stopped, b's
-// node was given nothing and every node is closed.
+// adopted: the reconciliation records the revocation, once. Either way, once
+// the rig has stopped, b's node was given nothing and every node is closed.
+// (The second lets the reconciliation go on to Revoke as soon as the install
+// is let go, so Revoke's drop of the PCM sink can come before the producer's
+// next step: it does not tell that step's own stop on the recorded fault, which
+// the code makes before it writes, from that drop; round 7's control K3.)
 func TestARevocationOfAConvertedSuccessorGivesItsNodeNothing(t *testing.T) {
 	t.Run("held at its PCM sink's admission", func(t *testing.T) {
 		w, log, inst := newWriteSeams(), &stopsLog{}, &installHold{}
