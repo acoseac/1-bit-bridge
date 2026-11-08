@@ -110,6 +110,12 @@ type Config struct {
 	// (WarnLegacyDSDKeysIn), nil for a config no start gave one: Clone keeps
 	// it, shared, since it is the start's and not the value's.
 	legacyDSD *LegacyDSDWarnings
+	// envSet is the yaml path of each leaf a BRIDGE_* variable set at the
+	// load that made this config (applyEnvOverrides), sorted, nil for a
+	// config no load made: the live holder's save writes the file's own
+	// value for each one an update left as it was (filedEnvValues, backlog
+	// B761). Clone copies it.
+	envSet []string
 }
 
 // OutputConfig is the bridge reporting the player beside it. MPD is

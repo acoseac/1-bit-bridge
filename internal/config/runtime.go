@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
+	"reflect"
 	"sync"
 	"sync/atomic"
 
@@ -243,10 +245,12 @@ func (r *RuntimeConfig) UpdateChecked(path string, fn func(next *Config, check f
 	if err := fn(next, check); err != nil {
 		return err
 	}
-	// The snapshot, with the two opt-outs as the file is to hold them; the
-	// live values are what is published.
+	// The snapshot, with the two opt-outs and every other leaf a variable
+	// set as the file is to hold them; the live values are what is
+	// published.
 	saved := *next
 	filedSwitches(&saved, before, found)
+	filedEnvValues(&saved, before, found)
 	written, err := saved.save(l, nil)
 	if err != nil {
 		return changedOutside(path, err)
@@ -265,9 +269,9 @@ func (r *RuntimeConfig) UpdateChecked(path string, fn func(next *Config, check f
 // setting writes no variable's value into the file, and a start without the
 // variable finds what the operator chose; a switch the update changed is
 // written as the change, off as false and on as no key. The snapshot
-// published is next, the live values. Other variables are written as they
-// are (B761). Only these two fields of saved are set: what is saved is the
-// snapshot the holder compared with the turn's bytes.
+// published is next, the live values. Every other leaf a variable set is
+// filedEnvValues' (B761). Only these two fields of saved are set: what is
+// saved is the snapshot the holder compared with the turn's bytes.
 func filedSwitches(saved, before *Config, file []byte) {
 	var own struct {
 		Enrich struct {
@@ -297,6 +301,50 @@ func filedSwitch(now, was bool, filed *bool) *bool {
 	}
 	off := false
 	return &off
+}
+
+// filedEnvValues sets, in saved, a copy of an Update's next, each leaf a
+// BRIDGE_* variable set at the load the holder's snapshot came from
+// (before's envSet), the two opt-outs aside (filedSwitches writes them), as
+// the file is to hold it (backlog B761): where the update left the leaf at
+// its live value, the variable's, the file's own value, read from file, the
+// bytes the turn found, by Load's own decode (DecodeFile): the leaf as the
+// file writes it, and its zero value, which writes no key where the field
+// omits an empty one, where the file writes none; and where the file does
+// not decode, the live value, as it is. So a save of any other setting writes
+// no variable's value into the file, and a start without the variable finds
+// what the file said. A leaf the update changed is written as the change:
+// saved, published, and set by the variable again at the next start. The
+// snapshot published is next, the live values. Only those leaves of saved
+// are set, each by assignment to its own field, never through a pointer next
+// holds; what is saved is still the snapshot the holder compared with the
+// turn's bytes.
+func filedEnvValues(saved, before *Config, file []byte) {
+	if len(before.envSet) == 0 {
+		return
+	}
+	var own Config
+	if err := DecodeFile(file, &own); err != nil && !errors.Is(err, io.EOF) {
+		// The bytes loaded once (the holder's own read or write); a file the
+		// holder was told nothing of that does not decode keeps what the
+		// update holds.
+		return
+	}
+	bindings := make(map[string]envBinding)
+	for _, b := range envBindings() {
+		bindings[b.YAMLPath] = b
+	}
+	for _, path := range before.envSet {
+		b, ok := bindings[path]
+		if !ok || switchEnvPaths[path] {
+			continue
+		}
+		now := envLeaf(saved, b)
+		if !reflect.DeepEqual(now.Interface(), envLeaf(before, b).Interface()) {
+			continue
+		}
+		now.Set(envLeaf(&own, b))
+	}
 }
 
 // changedOutside is err, a turn's answer to the holder's save of the config
@@ -407,6 +455,9 @@ func Clone(cfg *Config) *Config {
 		out.Output.LoopbackPort = &v
 	}
 	out.Output.Player = cfg.Output.Player.clone()
+	if cfg.envSet != nil {
+		out.envSet = append([]string(nil), cfg.envSet...)
+	}
 	// UPnPUpstream: the Servers slice + its per-element SkipTopLevelContainers
 	// slice both need deep copies so mutations on the clone don't leak back.
 	if cfg.UPnPUpstream.Servers != nil {

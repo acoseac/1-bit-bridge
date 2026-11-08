@@ -21,6 +21,16 @@
       it again manually after the exit.
     {{end}}
   </p>
+  {{/* A save writes bridge.yaml's own value for each setting a BRIDGE_*
+       variable set at the start, unless the save changed it
+       (config.filedEnvValues, backlog B761). */}}
+  <p class="hint">
+    Where a <code>BRIDGE_*</code> environment variable sets a setting, it
+    sets it at every start, and this console shows the value it set. A save
+    in the console keeps bridge.yaml&rsquo;s own value for such a setting
+    unless you change it: a change you make is saved, and the variable sets
+    the setting again at the next start.
+  </p>
 
   <form id="settings-form" class="panel">
     {{/*
