@@ -103,12 +103,20 @@ func (d *dsdRig) replaced(old engine.OccurrenceID, what string) {
 // nothing faulted and c was heard.
 func wentOn(t *testing.T, d *dsdRig, ids []uint32) *engine.Snapshot {
 	t.Helper()
+	return wentOnGiven(t, d, ids, "nothing", func(b []byte) bool { return len(b) == 0 })
+}
+
+// wentOnGiven is wentOn with the bytes b's node was given held to given,
+// which what names (B728 B9 round 4: the node of a sink dropped while it
+// wrote its prefill was given that silence).
+func wentOnGiven(t *testing.T, d *dsdRig, ids []uint32, what string, given func([]byte) bool) *engine.Snapshot {
+	t.Helper()
 	d.opensOrStopped(3, "c's own sink opened, the session going on past b")
 	if !d.files.firstClosed("b") {
 		t.Errorf("b's decoder and content are still open once the session went on past it: the dropped occurrence's decoder was not closed")
 	}
-	if v := d.k.View(); len(v.OpenAt) < 3 || v.OpenAt[2] != v.OpenAt[1] {
-		t.Errorf("b's node: opens at bytes %v; want b's node given nothing before c's opened", v.OpenAt)
+	if v := d.k.View(); len(v.OpenAt) < 3 || !given(d.k.Given()[v.OpenAt[1]:v.OpenAt[2]]) {
+		t.Errorf("b's node: opens at bytes %v; want b's node given %s before c's opened", v.OpenAt, what)
 	}
 	oc := d.occurrenceOf(ids[2])
 	d.k.Free()

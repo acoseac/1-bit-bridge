@@ -421,9 +421,13 @@ type recorder struct {
 	// the delivery holdAfterNext waits to hold.
 	opened int
 	hold   *heldDelivery
-	// release, start and cut are the engine's next call of each kind to hold
-	// short of the backend (holdNextRelease, holdNextStart, holdNextCut).
-	release, start, cut *heldCall
+	// release, start, cut and prepare are the engine's next call of each kind
+	// to hold short of the backend (holdNextRelease, holdNextStart,
+	// holdNextCut, holdNextPrepare).
+	release, start, cut, prepare *heldCall
+	// fault is the next fault a session reports to hold short of the engine
+	// (holdNextFault).
+	fault *heldCall
 	// fenced is the steps the backend refused for a session released
 	// (playback.Seams.Fenced), in order.
 	fenced []string
@@ -481,6 +485,21 @@ func (r *recorder) holdNextStart() (held <-chan struct{}, letGo func()) { return
 // holdNextCut holds the engine's next Cut call short of the backend until
 // letGo (B674 round 3).
 func (r *recorder) holdNextCut() (held <-chan struct{}, letGo func()) { return r.holdCall(&r.cut) }
+
+// holdNextPrepare holds the engine's next Prepare call short of the backend
+// until letGo, as holdNextCut holds a Cut (B728 B9 round 4: an occurrence a
+// write handed off again, its replacement still to come). The engine's call
+// has its deadline (engine.CallTimeout): a test lets it go well within it.
+func (r *recorder) holdNextPrepare() (held <-chan struct{}, letGo func()) {
+	return r.holdCall(&r.prepare)
+}
+
+// holdNextFault holds the next fault a session reports, recorded, short of
+// the engine until letGo: the engine, not told of it, releases nothing for it
+// meanwhile (B728 B9 round 4).
+func (r *recorder) holdNextFault() (held <-chan struct{}, letGo func()) {
+	return r.holdCall(&r.fault)
+}
 
 // fencedSteps is the steps the backend refused for a session released.
 func (r *recorder) fencedSteps() []string {
@@ -625,6 +644,7 @@ func (v *recEvents) Position(s engine.SessionID, p engine.Position) {
 
 func (v *recEvents) Fault(s engine.SessionID, f engine.Fault) {
 	h := v.add(event{kind: "fault", s: s, o: f.Occurrence, fault: f})
+	v.r.take(&v.r.fault)
 	v.next.Fault(s, f)
 	h.wait()
 }
@@ -743,6 +763,7 @@ func (b tee) Start(ctx context.Context, req engine.StartRequest) error {
 }
 
 func (b tee) Prepare(ctx context.Context, s engine.SessionID, after engine.OccurrenceID, next *engine.Occurrence) error {
+	b.r.take(&b.r.prepare)
 	err := b.Backend.Prepare(ctx, s, after, next)
 	var n *engine.Occurrence
 	if next != nil {
