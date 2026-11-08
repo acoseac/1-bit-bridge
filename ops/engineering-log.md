@@ -86597,3 +86597,26 @@ Red at 4cc88320 in the cases named above, green at d4452ba7:
 
 A case that waits out a read it expects (a commit landing after its page was
 left, red at 4cc88320) takes ten seconds more there.
+
+### The gates
+
+At efa00fd7, the branch's code as it ships (the commit after it adds this
+section alone), through the shared build lock in one run
+(`.tmp/_b797/gate4.sh`, started by `.tmp/_b797/gate_guard.py`; the slot was
+free at once, and the run took 37 minutes), on go1.27.3, go.mod's: `make fmt`
+rewrote nothing; `make vet` clean, and so with `GOOS=windows`, `GOOS=darwin`
+and `GOOS=linux GOARCH=386`; `make test` (`-race`, `-timeout 30m`) green,
+among them internal/admin in 1081 s and cmd/bridge in 1352 s, and the
+packages that test Linux alone run here for real (internal/alsa,
+internal/alsapcm on this host's ALSA, internal/atomicwrite,
+internal/player/hotplug; internal/usbid and internal/alsactl, whose results
+came from the cache, run again alone with `-count=1 -race`, green); B797's
+four structural tests, B776's moved pin and `TestResumeBannerIsWiredBothWays`
+pass, B797's seven node tests and B776's two skip (node is not installed
+here); `make build-all`, its build-tag census included, and `make
+docs-check` clean; the qualification check against main
+(`scripts/qualification-version -base a77578f8 -head HEAD`) answers OK;
+`rules-b797-r3.patch` applies to a copy of the tree, whose budgets hold
+(admin-console.md 84,696 bytes; the worst load 67.3%) and whose cited test
+names `TestEveryCitedTestNameExists` finds declared; `git status` clean
+after. internal/admin's race run is `make test`'s, with node absent.
