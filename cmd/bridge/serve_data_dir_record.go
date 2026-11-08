@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
 	"github.com/acoseac/1-bit-bridge/internal/config"
@@ -27,32 +28,35 @@ import (
 // the record is a file beside the config, in the directory a write of the
 // config lands in (fsutil.ResolveParent, where the config's lock is), named
 // after it: `.bridge.yaml.datadir` beside bridge.yaml, holding the data dir's
-// path as its config gave it and where that led (dataDirRecord). Serve's is
-// beside the file its boot read of the config was of (serveDataDirRecord), for
-// its check and its write alike, never beside the file the config's name
-// opens by then.
+// path as its config gave it and where that led, and since B741 its identity,
+// which a marker in the data dir holds too (dataDirRecord,
+// serve_data_dir_identity.go). Serve's is beside the file its boot read of
+// the config was of (serveDataDirRecord), for its check and its write alike,
+// never beside the file the config's name opens by then.
 //
 // Serve writes it once its database is open and its lock file is there
 // (recordServeDataDir), and, before it prepares the data dir, refuses one the
-// record names that holds neither its database nor its lock file
-// (checkServeDataDirRecord): a data dir that is not the one serve served
-// from, which is what a volume not mounted looks like. The refusal exits 1,
-// and the service manager starts serve again (systemd's Restart=always,
-// launchd's KeepAlive, the SCM's recovery actions, a container's restart
-// policy) until the volume is mounted; serve never waits for it.
+// record names that is not the one it served from (checkServeDataDirRecord):
+// one that holds neither its database nor its lock file, which is what a
+// volume not mounted looks like, and since B741 one that does not hold the
+// identity the record holds, and a record or a marker that does not read. The
+// refusal exits 1, and the service manager starts serve again (systemd's
+// Restart=always, launchd's KeepAlive, the SCM's recovery actions, a
+// container's restart policy) until the volume is mounted; serve never waits
+// for it.
 //
 // A first run has no record: a fresh install, and bridge init, which makes
 // the data dir and its TLS pair and no database, start as they did, and the
 // first serve writes the record. A database removed on purpose with the lock
 // file kept (the local fixture's reset) is the data dir serve served from,
-// and is made again as before. A data dir removed whole is refused, saying to
-// remove the record; one moved without the config being told, saying to set
-// dataDir where it is now, which the record does not name (onPurpose). A
-// config directory serve cannot write keeps no record, said once a start, and
-// serve goes on as before. The record is plain file I/O, the same on Windows.
-// In a container whose config and data dir are on one volume (the image's
-// /data), the record is on that volume too, and a missing volume is a missing
-// config.
+// its identity kept, and is made again as before. A data dir removed whole is
+// refused, saying to remove the record; one moved without the config being
+// told, saying to set dataDir where it is now, which the record does not name
+// (onPurpose). A config directory serve cannot write keeps no record, said
+// once a start, and serve goes on as before. The record is plain file I/O,
+// the same on Windows. In a container whose config and data dir are on one
+// volume (the image's /data), the record is on that volume too, and a missing
+// volume is a missing config.
 //
 // Every other command that makes, opens or writes the data dir asks the same
 // check first (refuseDataDirAway, backlog B727): a store open makes the data
@@ -77,6 +81,11 @@ type dataDirRecord struct {
 	// Resolved is where DataDir led, through its links, when serve wrote the
 	// record (fsutil.ResolveLinks); "" where it did not resolve.
 	Resolved string `json:"resolved,omitempty"`
+	// ID is the data dir's identity, which the marker in it holds too
+	// (backlog B741): minted by the first start of B741 that opened its
+	// database there, and kept by every start after it. "" in a record
+	// written before B741, or by a start that could not write the marker.
+	ID string `json:"id,omitempty"`
 }
 
 // names reports whether the record names dataDir, by either of its
@@ -126,28 +135,69 @@ func serveDataDirRecord(boot config.BootFile) string {
 	return dataDirRecordBeside(file)
 }
 
-// readDataDirRecord answers what the record at path holds, the zero record
-// for no record, or one that does not read as one: such a record names
-// nothing, and the next serve that opens its database writes it again.
-func readDataDirRecord(path string) dataDirRecord {
-	f, _, err := fsutil.OpenAsFile(path)
-	if err != nil {
-		return dataDirRecord{}
-	}
-	defer f.Close()
-	b, err := io.ReadAll(io.LimitReader(f, dataDirRecordMax))
-	if err != nil {
-		return dataDirRecord{}
+// readDataDirRecord reads the record at path: ok false where nothing is
+// there, and an error for one that is there and does not read as one (the
+// open's or the read's error, or errDoesNotRead: not JSON, no data dir, an
+// identity out of shape), which is its own state (backlog B741), never the
+// absence of a record a fresh install has: an identity it holds is not to be
+// replaced unread. Until B741 such a record named nothing.
+func readDataDirRecord(path string) (dataDirRecord, bool, error) {
+	b, err := readSmallFile(path, dataDirRecordMax)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return dataDirRecord{}, false, nil
+	case err != nil:
+		return dataDirRecord{}, false, err
 	}
 	var r dataDirRecord
-	if json.Unmarshal(b, &r) != nil || r.DataDir == "" {
-		return dataDirRecord{}
+	if json.Unmarshal(b, &r) != nil || r.DataDir == "" || r.ID != "" && !isDataDirIdentity(r.ID) {
+		return dataDirRecord{}, false, errDoesNotRead
 	}
-	return r
+	return r, true, nil
 }
 
-// dataDirGoneError is serve's refusal of a data dir its record names and that
-// holds neither its database nor its lock file (checkServeDataDirRecord).
+// dataDirCause is why the check refuses the data dir its record names
+// (dataDirGoneError), each said in words of its own.
+type dataDirCause int
+
+const (
+	// dataDirNotThere: the data dir holds neither its database nor its lock
+	// file, nor an identity (B651's refusal).
+	dataDirNotThere dataDirCause = iota
+	// noIdentity: it holds its database or its lock file, and the record holds
+	// an identity its data dir holds no marker of (B741's gap 2).
+	noIdentity
+	// otherIdentity: it holds a marker of another identity than the record's.
+	otherIdentity
+	// identityUnreadable: it holds a marker that does not read.
+	identityUnreadable
+	// recordUnreadable: the record does not read, so no data dir is known to
+	// be the one serve served from.
+	recordUnreadable
+)
+
+// String is the cause's name in the note that serve said its refusal
+// (dataDirRefusalNote.Cause).
+func (c dataDirCause) String() string {
+	switch c {
+	case noIdentity:
+		return "no-identity"
+	case otherIdentity:
+		return "other-identity"
+	case identityUnreadable:
+		return "identity-unreadable"
+	case recordUnreadable:
+		return "record-unreadable"
+	}
+	return "not-there"
+}
+
+// dataDirGoneError is serve's refusal of a data dir its record names that is
+// not the one serve served from, or of every data dir where the record does
+// not read (checkServeDataDirRecord), for its cause. B651 named it for its
+// one cause then, a data dir gone with its volume; every cause since is said
+// through it, so that bridge doctor and every command that asks the check
+// (dataDirAway) refuse each alike.
 type dataDirGoneError struct {
 	// dataDir is the data dir as the config gives it, never as the record or
 	// a resolution spells it: what bridge.yaml says, which is what the
@@ -155,46 +205,144 @@ type dataDirGoneError struct {
 	// beside the file the config's name opens, through whatever links lead
 	// there.
 	dataDir, record string
+	cause           dataDirCause
+	// identity is the identity the record holds, "" for none: the note that
+	// the refusal was said keeps it, and the data dir back is the one holding
+	// it (dataDirBack).
+	identity string
+	// held names what the data dir holds without its identity (noIdentity).
+	held []string
+	// err is why the record or the marker does not read (recordUnreadable,
+	// identityUnreadable).
+	err error
 }
 
 func (e *dataDirGoneError) Error() string {
+	switch e.cause {
+	case noIdentity:
+		return e.what() + ": when it is on a volume that is mounted at boot, the volume is not mounted yet, and what it holds was made " +
+			"in the bare mount point. bridge serve does not take it for its data directory, and its service manager starts it again; " +
+			e.onPurpose("start bridge serve again")
+	case otherIdentity:
+		return e.what() + ": when it is on a volume that is mounted at boot, another volume is mounted there. " +
+			"bridge serve does not take it for its data directory, and its service manager starts it again; " +
+			e.onPurpose("start bridge serve again")
+	case identityUnreadable, recordUnreadable:
+		return e.what() + ": bridge serve cannot tell it from another data directory, and does not start on it; " +
+			e.onPurpose("start bridge serve again")
+	}
 	return e.what() + ": when it is on a volume that is mounted at boot, the volume is not mounted yet. " +
 		"bridge serve does not make an empty data directory in its place, and its service manager starts it again; " +
 		e.onPurpose("start bridge serve again")
 }
 
-// onPurpose is how to go on from a data dir that was moved or removed on
-// purpose, then doing what then says: a data dir moved is named where it is
-// now, which the record does not name, so nothing is refused and the next
-// serve records it; one removed takes the record with it (backlog B727).
-// Removing the record of a data dir that was moved would have the next
-// command make an empty one in its place.
+// onPurpose is how to go on by hand (recovery), then doing what then says.
 func (e *dataDirGoneError) onPurpose(then string) string {
-	return "if the data directory was moved on purpose, set dataDir in bridge.yaml to where it is now; " +
-		"if it was removed on purpose, remove " + e.record + " and " + then
+	return e.recovery() + " and " + then
+}
+
+// recovery is how to go on by hand from the refusal, ending in the record to
+// remove. A data dir moved on purpose is named where it is now, which the
+// record does not name, so nothing is refused and the next serve records it;
+// one removed takes the record with it (backlog B727). Removing the record of
+// a data dir that was moved would have the next command make an empty one in
+// its place. A data dir holding no identity or another's is the one to serve
+// from where the operator says so, by removing the record: the next serve
+// takes up its identity, or gives it one (backlog B741). A marker that does
+// not read is moved aside with it, and a record that does not read is removed
+// with the data dir there, which serve records again; one this user may not
+// read is made readable first.
+func (e *dataDirGoneError) recovery() string {
+	const moved = "if the data directory was moved on purpose, set dataDir in bridge.yaml to where it is now; "
+	switch e.cause {
+	case noIdentity:
+		return moved + "if it was removed on purpose, or it is the data directory to serve from (a start before its volume was mounted " +
+			"can have taken the bare mount point for one), remove " + e.record
+	case otherIdentity:
+		return moved + "if it was removed on purpose, or it is the data directory to serve from now, remove " + e.record
+	case identityUnreadable:
+		return e.readable() + moved + "if it was removed on purpose, or it is the data directory to serve from, move " + dataDirMarkerName +
+			" aside and remove " + e.record
+	case recordUnreadable:
+		return e.readable() + "where the data directory is there, its volume mounted, remove " + e.record
+	}
+	return moved + "if it was removed on purpose, remove " + e.record
+}
+
+// readable is the advice for a record or a marker this user may not read.
+func (e *dataDirGoneError) readable() string {
+	if errors.Is(e.err, fs.ErrPermission) {
+		return "make it readable by the user the service runs as; "
+	}
+	return ""
+}
+
+// unreadableHere reports whether the refusal is of a record or a marker this
+// user may not read, which the user the service runs as may: bridge doctor
+// says it is not checked (dataDirCheck), as for a data dir it may not
+// inspect (B659).
+func (e *dataDirGoneError) unreadableHere() bool {
+	return (e.cause == recordUnreadable || e.cause == identityUnreadable) && errors.Is(e.err, fs.ErrPermission)
 }
 
 // what is the refusal's first sentence, which bridge doctor's data-dir line
 // says too (dataDirCheck).
 func (e *dataDirGoneError) what() string {
+	switch e.cause {
+	case noIdentity:
+		return "the data directory " + e.dataDir + " holds " + strings.Join(e.held, " and ") +
+			" but not the identity of the data directory this bridge served from (" + dataDirMarkerName + ")"
+	case otherIdentity:
+		return "the data directory " + e.dataDir + " holds the identity of another data directory than the one this bridge served from (" +
+			dataDirMarkerName + ")"
+	case identityUnreadable:
+		return "the data directory " + e.dataDir + " holds an identity (" + dataDirMarkerName + ") that " + e.why()
+	case recordUnreadable:
+		return "the data directory " + e.dataDir + " cannot be checked against the one this bridge served from: its record (" +
+			e.record + ") " + e.why()
+	}
 	return fmt.Sprintf("the data directory %s held this bridge's database, and holds neither %s nor %s now",
 		e.dataDir, filepath.Base(manifest.DefaultDBPath(e.dataDir)), serveLockFileName)
 }
 
+// why is what kept the record or the marker from reading, naming no path.
+func (e *dataDirGoneError) why() string {
+	if errors.Is(e.err, errDoesNotRead) {
+		return "does not read as one"
+	}
+	return "cannot be read (" + fsutil.ErrorWithoutPath(e.err) + ")"
+}
+
 // fix is the data-dir line's hint for the refusal.
 func (e *dataDirGoneError) fix() string {
-	return "mount the volume it is on (serve's service manager starts it again until it is there); " +
-		"if the data directory was moved on purpose, set dataDir in bridge.yaml to where it is now; " +
-		"if it was removed on purpose, remove " + e.record
+	switch e.cause {
+	case dataDirNotThere, noIdentity:
+		return "mount the volume it is on (serve's service manager starts it again until it is there); " + e.recovery()
+	case otherIdentity:
+		return "mount the volume this bridge served from (serve's service manager starts it again until it is there); " + e.recovery()
+	}
+	return e.recovery()
 }
 
 // commandRefusal is the refusal of bridge cmd, a command other than serve, of
 // the data dir its record names (dataDirAway): serve's first sentence, and how
 // to go on.
 func (e *dataDirGoneError) commandRefusal(cmd string) string {
+	again := "run bridge " + cmd + " again"
+	switch e.cause {
+	case noIdentity:
+		return e.what() + ": when it is on a volume that is mounted at boot, the volume is not mounted yet, and what it holds was made " +
+			"in the bare mount point. bridge " + cmd + " makes and writes nothing there: mount the volume and run it again; " + e.onPurpose(again)
+	case otherIdentity:
+		return e.what() + ": when it is on a volume that is mounted at boot, another volume is mounted there. bridge " + cmd +
+			" makes and writes nothing there: mount the volume this bridge served from and run it again; " + e.onPurpose(again)
+	case identityUnreadable, recordUnreadable:
+		return e.what() + ": bridge " + cmd + " cannot tell it from another data directory, and makes and writes nothing there; " +
+			e.onPurpose(again)
+	}
 	return e.what() + ": when it is on a volume that is mounted at boot, the volume is not mounted yet. " +
 		"bridge " + cmd + " makes and writes nothing there: mount the volume and run it again; " +
-		e.onPurpose("run bridge "+cmd+" again")
+		e.onPurpose(again)
 }
 
 // dataDirAway is the check serve makes before it prepares its data dir
@@ -205,12 +353,11 @@ func (e *dataDirGoneError) commandRefusal(cmd string) string {
 // and an empty database, which serve's own check then takes for the data dir
 // it served from). It answers the refusal of the data dir dataDir, which the
 // config at cfgFile names, where the record beside the file that name opens
-// (dataDirRecordPath, as bridge doctor reads it) names it and it holds neither
-// its database nor its lock file, and nil otherwise: no record (a fresh
-// install, init's first run), a record naming another data dir (dataDir moved
-// on purpose and set where it is now), the data dir holding either file, or a
-// config name that does not resolve, which bridge doctor's data-dir line does
-// not refuse either.
+// (dataDirRecordPath, as bridge doctor reads it) refuses it, for any of its
+// causes, and nil otherwise: no record (a fresh install, init's first run), a
+// record naming another data dir (dataDir moved on purpose and set where it
+// is now), the data dir the one serve served from, or a config name that does
+// not resolve, which bridge doctor's data-dir line does not refuse either.
 func dataDirAway(cfgFile, dataDir string) *dataDirGoneError {
 	record, err := dataDirRecordPath(cfgFile)
 	if err != nil {
@@ -237,46 +384,110 @@ func refuseDataDirAway(cmd, cfgFile, dataDir string, stderr io.Writer) bool {
 	return true
 }
 
-// checkServeDataDirRecord refuses the data dir dataDir, with a
-// *dataDirGoneError, when the record at path names it and it holds neither
-// its database nor its lock file: neither is ever removed by the bridge, and
-// a serve that opened its database there took its lock first, so a data dir
-// holding neither is not the one serve served from. Asked before serve
-// prepares the data dir, so a data dir that is not there is refused and never
-// made. The record and the config may spell one data dir two ways (through a
-// link, or in another case on a volume that folds case), so the record names
-// dataDir by either of its spellings, each compared as the directory it names
-// (dataDirRecord.names), never as a string alone. Anything else is no
-// refusal: no record (path "" included), or one that does not read or names
-// another data dir (the config's dataDir changed), a database or a lock file
-// there, and an error other than an entry's absence, which serve's
+// checkServeDataDirRecord refuses, with a *dataDirGoneError, the data dir
+// dataDir that the record at path names where it is not the data dir serve
+// served from, and every data dir where the record does not read. Asked
+// before serve prepares the data dir, so a data dir that is not there is
+// refused and never made. The record and the config may spell one data dir
+// two ways (through a link, or in another case on a volume that folds case),
+// so the record names dataDir by either of its spellings, each compared as
+// the directory it names (dataDirRecord.names), never as a string alone.
+//
+// Of a data dir the record names: one holding a marker of the identity the
+// record holds is the one serve served from, whatever else it holds (its
+// database removed on purpose, its lock file too); one holding a marker of
+// another identity is refused (otherIdentity), and so is one holding a marker
+// that does not read (identityUnreadable). Where it holds no marker: one
+// holding neither its database nor its lock file is refused, as B651 refused
+// it (dataDirNotThere: neither is ever removed by the bridge, and a serve
+// that opened its database there took its lock first); and one holding either
+// is refused while the record holds an identity (noIdentity: a lock file a
+// start made on the bare mount point and a database a command made there read
+// as the data dir before B741), and taken up while it holds none, a record
+// written before B741, whose next start gives it one (backlog B741).
+//
+// Anything else is no refusal: no record (path "" included), one naming
+// another data dir (the config's dataDir changed), and an error other than an
+// entry's absence on the way to what the data dir holds, which serve's
 // preparation, its lock and its store answer.
 func checkServeDataDirRecord(path, dataDir string) error {
 	if path == "" {
 		return nil
 	}
-	if !readDataDirRecord(path).names(dataDir) {
+	rec, ok, err := readDataDirRecord(path)
+	if err != nil {
+		return &dataDirGoneError{dataDir: dataDir, record: path, cause: recordUnreadable, err: err}
+	}
+	if !ok || !rec.names(dataDir) {
 		return nil
 	}
-	for _, p := range []string{manifest.DefaultDBPath(dataDir), filepath.Join(dataDir, serveLockFileName)} {
-		if _, err := os.Lstat(p); !errors.Is(err, fs.ErrNotExist) {
-			return nil
-		}
+	f := inspectDataDir(dataDir)
+	gone := &dataDirGoneError{dataDir: dataDir, record: path, identity: rec.ID}
+	switch {
+	case f.uninspected != nil:
+		return nil
+	case f.unreadable != nil:
+		gone.cause, gone.err = identityUnreadable, f.unreadable
+	case f.identity != "" && rec.ID != "" && f.identity != rec.ID:
+		gone.cause = otherIdentity
+	case f.identity != "":
+		return nil
+	case len(f.held) == 0:
+		gone.cause = dataDirNotThere
+	case rec.ID != "":
+		gone.cause, gone.held = noIdentity, f.held
+	default:
+		return nil
 	}
-	return &dataDirGoneError{dataDir: dataDir, record: path}
+	return gone
+}
+
+// dataDirWrites are recordServeDataDir's writes: the marker in the data dir
+// (writeDataDirMarker) and the record beside the config. A nil field is the
+// writer of its own; a boot test fails either, as a start interrupted between
+// them leaves them (serveOpts.dataDirWrites).
+type dataDirWrites struct {
+	marker func(dataDir, id string) error
+	record func(path string, data []byte) error
+}
+
+func (w dataDirWrites) writeMarker(dataDir, id string) error {
+	if w.marker != nil {
+		return w.marker(dataDir, id)
+	}
+	return writeDataDirMarker(dataDir, id)
+}
+
+func (w dataDirWrites) writeRecord(path string, data []byte) error {
+	if w.record != nil {
+		return w.record(path, data)
+	}
+	return atomicwrite.WriteBytes(path, data, ".bridge-datadir-*.tmp")
 }
 
 // recordServeDataDir writes the record at path naming dataDir, once serve's
 // database is open there and its lock file is too: dataDir as its config gave
 // it and where it leads now, through its links, while the volume it is on is
-// there to resolve them (dataDirRecord). It writes only when the record does
-// not hold exactly those two already, so a record that names the data dir in
-// another spelling, or in one alone (a record written before B651's fifth
-// round), is written again in both of this config's. No path (a boot read that
-// resolved no file), or a record serve cannot write (a config directory it may
-// not write), is said once, at Warn, and the start goes on: a later start
-// cannot then tell that data dir's volume missing.
-func recordServeDataDir(path, dataDir string) {
+// there to resolve them (dataDirRecord), and the data dir's identity (backlog
+// B741), which its marker holds before the record does. The identity is the
+// marker's where the data dir holds one; else the record's own where it names
+// this data dir (never a second one minted beside it), else a new one; and a
+// marker that is not there is written first, durably (writeDataDirMarker),
+// the record gaining the identity only once it is. It writes the record only
+// when it does not hold exactly what it is to hold already, so a record that
+// names the data dir in another spelling, or in one alone (a record written
+// before B651's fifth round), or with no identity (one written before B741),
+// is written again.
+//
+// Nothing it cannot write refuses the start, which goes on, and each is said
+// at Warn: no path (a boot read that resolved no file) or a record serve
+// cannot write (a config directory it may not write), where a later start
+// cannot tell that data dir's volume missing; and a marker it cannot write or
+// that does not read, where the record holds no identity, and a later start
+// tells the data dir by its database and its lock file alone, as before B741.
+// A record that does not read is left as it is, never replaced unread: the
+// check before the preparation refused it, so it went that way since.
+func recordServeDataDir(path, dataDir string, w dataDirWrites) {
 	if path == "" {
 		logger.Warn("could not record the data directory beside the config: serve's boot read resolved no file for the config's name, so a later start cannot tell the data directory's volume missing from a fresh install",
 			"dataDir", dataDir)
@@ -289,16 +500,44 @@ func recordServeDataDir(path, dataDir string) {
 			return
 		}
 	}
-	want := dataDirRecord{DataDir: dataDir}
+	had, ok, err := readDataDirRecord(path)
+	if err != nil {
+		logger.Warn("did not record the data directory beside the config: its record does not read, and serve does not replace what it cannot read; the next start refuses it until it reads or is removed",
+			"record", path, "dataDir", dataDir, "err", fsutil.ErrorWithoutPath(err))
+		return
+	}
+	id := ""
+	switch f := inspectDataDir(dataDir); {
+	case f.identity != "":
+		id = f.identity
+	case f.unreadable != nil || f.uninspected != nil:
+		reason := f.unreadable
+		if reason == nil {
+			reason = f.uninspected
+		}
+		logger.Warn("did not record the data directory's identity: its marker cannot be read, and serve does not replace it unread; a later start tells the data directory by its database and its lock file alone",
+			"dataDir", dataDir, "marker", dataDirMarkerName, "err", fsutil.ErrorWithoutPath(reason))
+	default:
+		id = had.ID
+		if !ok || id == "" || !had.names(dataDir) {
+			id = mintDataDirIdentity()
+		}
+		if err := w.writeMarker(dataDir, id); err != nil {
+			logger.Warn("could not record the data directory's identity in it: a later start tells the data directory by its database and its lock file alone",
+				"dataDir", dataDir, "marker", dataDirMarkerName, "err", fsutil.ErrorWithoutPath(err))
+			id = ""
+		}
+	}
+	want := dataDirRecord{DataDir: dataDir, ID: id}
 	if resolved, err := fsutil.ResolveLinks(dataDir); err == nil {
 		want.Resolved = resolved
 	}
-	if readDataDirRecord(path) == want {
+	if ok && had == want {
 		return
 	}
 	b, err := json.Marshal(want)
 	if err == nil {
-		err = atomicwrite.WriteBytes(path, append(b, '\n'), ".bridge-datadir-*.tmp")
+		err = w.writeRecord(path, append(b, '\n'))
 	}
 	if err != nil {
 		logger.Warn("could not record the data directory beside the config: a later start cannot tell the data directory's volume missing from a fresh install",

@@ -1,9 +1,11 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -805,7 +807,7 @@ func TestServeSaysItsRefusalAgainWhenItsCauseChanges(t *testing.T) {
 // applies, never that the data dir is back. On main a lock file there read as
 // the data dir back.
 func TestTheEndOfARefusalCallsBackOnlyTheDataDirHoldingItsIdentity(t *testing.T) {
-	const back, over = "holds its database or its lock file again", "no longer applies"
+	const back, over = refusedBackLine, "no longer applies"
 	v := newIdentityVolume(t)
 	v.takeAway(t)
 	if said := refuseTimes(t, v.cfg, v.dataDir, 1); !said[0] {
@@ -861,4 +863,126 @@ func TestServeRefusesTheDataDirInAnotherCaseOnACaseInsensitiveVolume(t *testing.
 	configured := filepath.Join(folder, "bridge")
 	writeIdentityConfig(t, cfg, lib, configured)
 	requireServeRefuses(t, cfg, folder, "the data directory "+configured+" held this bridge's database")
+}
+
+// serveWithOpts runs serve with opts, as bootServe runs it from a command
+// line, and returns once it listens: serve writes its record and its marker
+// before it listens.
+func serveWithOpts(t *testing.T, opts serveOpts) servedBridge {
+	t.Helper()
+	return launchServe(t, func(ctx context.Context, stdout, stderr io.Writer) int {
+		return runServe(ctx, opts, stdout, stderr)
+	})
+}
+
+// TestAStartWhoseMarkerCannotBeWrittenGoesOnWithoutAnIdentity: a marker
+// serve cannot write refuses nothing: the start goes on, says so at Warn,
+// and the record it writes holds no identity, so the next start tells the
+// data dir by its database and its lock file, as before B741, and starts,
+// writing the marker then.
+func TestAStartWhoseMarkerCannotBeWrittenGoesOnWithoutAnIdentity(t *testing.T) {
+	base := t.TempDir()
+	lib := filepath.Join(base, "Music")
+	mkdirs(t, lib)
+	dataDir := filepath.Join(base, "data")
+	cfg := writeIdentityConfig(t, filepath.Join(base, "bridge.yaml"), lib, dataDir)
+	rec := loggingtest.Record(t)
+	stopServed(t, serveWithOpts(t, serveOpts{configPath: cfg, dataDirWrites: dataDirWrites{
+		marker: func(string, string) error { return errors.New("the test's marker that cannot be written") }}}))
+	if lines := rec.Carrying("could not record the data directory's identity in it"); len(lines) != 1 || !strings.HasPrefix(lines[0], "WARN") {
+		t.Errorf("the start said it could not write its marker %d time(s), want once at Warn:\n%s", len(lines), strings.Join(rec.All(), "\n"))
+	}
+	if got := identityOf(t, dataDir); got != "" {
+		t.Errorf("the data dir holds the identity %q from a marker that could not be written", got)
+	}
+	if got := recordedDataDir(t, cfg); got != dataDir {
+		t.Errorf("the record names %q, want %q", got, dataDir)
+	}
+	if got := recordedIdentity(t, cfg); got != "" {
+		t.Errorf("the record holds the identity %q, which no marker in the data dir holds", got)
+	}
+	stopServed(t, bootServe(t, "--config", cfg))
+	requireOneIdentity(t, cfg, dataDir)
+}
+
+// TestAStartWhoseRecordCannotBeWrittenLeavesItsMarkerToTheNext: a start that
+// wrote its marker and not its record (here, a record that cannot be
+// written), as a crash between the two would leave them, goes on, and the
+// next start takes the marker's identity into the record.
+func TestAStartWhoseRecordCannotBeWrittenLeavesItsMarkerToTheNext(t *testing.T) {
+	base := t.TempDir()
+	lib := filepath.Join(base, "Music")
+	mkdirs(t, lib)
+	dataDir := filepath.Join(base, "data")
+	cfg := writeIdentityConfig(t, filepath.Join(base, "bridge.yaml"), lib, dataDir)
+	stopServed(t, serveWithOpts(t, serveOpts{configPath: cfg, dataDirWrites: dataDirWrites{
+		record: func(string, []byte) error { return errors.New("the test's record that cannot be written") }}}))
+	marked := identityOf(t, dataDir)
+	if !isIdentity(marked) {
+		t.Fatalf("the data dir's marker holds %q after a start whose record could not be written, want an identity", marked)
+	}
+	if _, err := os.Stat(dataDirRecordFile(cfg)); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("a record serve could not write is there: %v", err)
+	}
+	stopServed(t, bootServe(t, "--config", cfg))
+	if got := requireOneIdentity(t, cfg, dataDir); got != marked {
+		t.Errorf("the next start recorded the identity %q, want %q, the marker's", got, marked)
+	}
+}
+
+// TestTheMarkerHoldsTheIdentityBeforeTheRecordDoes: the record gains the
+// identity only once the marker in the data dir holds it, so a crash between
+// the two writes leaves a marker the next start takes up, never a record
+// holding an identity no marker holds, which every start after it would
+// refuse.
+func TestTheMarkerHoldsTheIdentityBeforeTheRecordDoes(t *testing.T) {
+	base := t.TempDir()
+	lib := filepath.Join(base, "Music")
+	mkdirs(t, lib)
+	dataDir := filepath.Join(base, "data")
+	cfg := writeIdentityConfig(t, filepath.Join(base, "bridge.yaml"), lib, dataDir)
+	// What each write saw, kept on serve's goroutine and read once serve has
+	// exited.
+	var writes []string
+	stopServed(t, serveWithOpts(t, serveOpts{configPath: cfg, dataDirWrites: dataDirWrites{
+		marker: func(dataDir, id string) error {
+			writes = append(writes, "marker "+id)
+			return writeDataDirMarker(dataDir, id)
+		},
+		record: func(path string, data []byte) error {
+			var r struct {
+				ID string `json:"id"`
+			}
+			_ = json.Unmarshal(data, &r)
+			marker, err := os.ReadFile(dataDirMarkerFile(dataDir))
+			writes = append(writes, fmt.Sprintf("record %s, the marker holding %s (%v)", r.ID, strings.TrimSpace(string(marker)), err))
+			return os.WriteFile(path, data, 0o600)
+		}}}))
+	id := identityOf(t, dataDir)
+	want := []string{"marker " + id, fmt.Sprintf("record %s, the marker holding {\"id\":%q} (<nil>)", id, id)}
+	if !slices.Equal(writes, want) {
+		t.Errorf("serve wrote %q, want %q", writes, want)
+	}
+}
+
+// TestACommandThatOpensTheStoreMakesNoMarker: only serve writes the marker;
+// bridge scan over a fresh install makes the data dir and its database, as
+// before, and no marker, which the next serve writes.
+func TestACommandThatOpensTheStoreMakesNoMarker(t *testing.T) {
+	base := t.TempDir()
+	lib := filepath.Join(base, "Music")
+	mkdirs(t, lib)
+	dataDir := filepath.Join(base, "data")
+	cfg := writeIdentityConfig(t, filepath.Join(base, "bridge.yaml"), lib, dataDir)
+	if code, out := runCLI(t, "scan", "--config", cfg); code != 0 {
+		t.Fatalf("bridge scan exited %d:\n%s", code, out)
+	}
+	if _, err := os.Stat(filepath.Join(dataDir, "bridge.db")); err != nil {
+		t.Fatalf("bridge scan made no database: %v", err)
+	}
+	if got := identityOf(t, dataDir); got != "" {
+		t.Errorf("bridge scan wrote the marker %q", got)
+	}
+	stopServed(t, bootServe(t, "--config", cfg))
+	requireOneIdentity(t, cfg, dataDir)
 }
