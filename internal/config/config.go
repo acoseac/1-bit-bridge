@@ -117,11 +117,11 @@ type Config struct {
 	// value for each one an update left as it was (filedEnvValues, backlog
 	// B761). Clone copies it.
 	envSet []string
-	// unwritten is the yaml path of each of those leaves that the file the
-	// holder's save is over writes no value for, which that save writes as no
-	// key, whatever the field's tag (marshal, filedEnvValues). It is set on
-	// that save's copy alone, and Clone drops it.
-	unwritten []string
+	// filed is the yaml path of each of those leaves that the holder's save
+	// writes as the file holds it, which that save writes as no key at its
+	// zero value, whatever the field's tag (filedEnvValues, marshal). It is
+	// set on that save's copy alone, and Clone drops it.
+	filed []string
 }
 
 // OutputConfig is the bridge reporting the player beside it. MPD is
@@ -4887,7 +4887,7 @@ func (c *Config) save(l *FileLock, unchanged func(context.Context) error) ([]byt
 }
 
 // marshal is the YAML a save of c writes: yaml.Marshal's of c, and where c
-// records leaves the file writes no value for (unwritten), yaml.Marshal's of
+// records leaves it writes as the file holds them (filed), yaml.Marshal's of
 // a copy of c whose type gives each such field of Config's own omitempty, so
 // that a field whose tag writes its zero value as a key (scanIntervalSec,
 // libraryRoots) is written as no key at that value, as one that omits an
@@ -4897,7 +4897,7 @@ func (c *Config) save(l *FileLock, unchanged func(context.Context) error) ([]byt
 // tag writes its zero value as a key is a field of Config itself
 // (TestEveryLeafWhoseZeroIsAKeyIsAtTheTopLevel).
 func (c *Config) marshal() ([]byte, error) {
-	if len(c.unwritten) == 0 {
+	if len(c.filed) == 0 {
 		return yaml.Marshal(c)
 	}
 	v := reflect.ValueOf(c).Elem()
@@ -4909,7 +4909,7 @@ func (c *Config) marshal() ([]byte, error) {
 			continue
 		}
 		tag := f.Tag.Get("yaml")
-		if key, opts, _ := strings.Cut(tag, ","); slices.Contains(c.unwritten, key) && !slices.Contains(strings.Split(opts, ","), "omitempty") {
+		if key, opts, _ := strings.Cut(tag, ","); slices.Contains(c.filed, key) && !slices.Contains(strings.Split(opts, ","), "omitempty") {
 			f.Tag = reflect.StructTag(`yaml:"` + tag + `,omitempty"`)
 		}
 		fields = append(fields, reflect.StructField{Name: f.Name, Type: f.Type, Tag: f.Tag})

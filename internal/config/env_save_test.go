@@ -363,30 +363,35 @@ func envSaveFile(t *testing.T, text string) (path, dir string) {
 // empty or zero value would put there, a key the file never had: each is
 // left out of the file, through serve's boot read and two saves, and the
 // next start without the variable reads the file's own value, the default.
+// So is each where the file writes its zero value (scanIntervalSec: 0), which
+// Load decodes as it decodes no value: the save writes no key for it either,
+// and the next start reads what it read.
 func TestASaveWritesNoKeyTheFileDoesNotWrite(t *testing.T) {
 	const roots = "libraryRoots:\n  - {lib}\n"
 	for _, c := range []struct {
 		name, leaf, file string
-		vars             func(dir string) map[string]string
+		// zero is the line that writes the leaf's zero value.
+		zero string
+		vars func(dir string) map[string]string
 		// value is the leaf as a config gives it, and own what the next start
 		// without the variable reads, the file's own value, its default.
 		value func(c *Config) any
 		own   func(dir string) any
 	}{
 		{
-			name: "scanIntervalSec", leaf: "scanIntervalSec", file: roots,
+			name: "scanIntervalSec", leaf: "scanIntervalSec", file: roots, zero: "scanIntervalSec: 0\n",
 			vars:  func(string) map[string]string { return map[string]string{"BRIDGE_SCAN_INTERVAL_SEC": "120"} },
 			value: func(c *Config) any { return c.ScanIntervalSec },
 			own:   func(string) any { return DefaultScanIntervalSec },
 		},
 		{
-			name: "listenAddress", leaf: "listenAddress", file: roots,
+			name: "listenAddress", leaf: "listenAddress", file: roots, zero: "listenAddress: \"\"\n",
 			vars:  func(string) map[string]string { return map[string]string{"BRIDGE_LISTEN_ADDRESS": "127.0.0.1:9911"} },
 			value: func(c *Config) any { return c.ListenAddress },
 			own:   func(string) any { return DefaultListenAddress },
 		},
 		{
-			name: "dataDir", leaf: "dataDir", file: roots,
+			name: "dataDir", leaf: "dataDir", file: roots, zero: "dataDir: \"\"\n",
 			vars: func(dir string) map[string]string {
 				return map[string]string{"BRIDGE_DATA_DIR": filepath.Join(dir, "elsewhere")}
 			},
@@ -394,7 +399,7 @@ func TestASaveWritesNoKeyTheFileDoesNotWrite(t *testing.T) {
 			own:   func(dir string) any { return filepath.Join(dir, "data") },
 		},
 		{
-			name: "libraryName", leaf: "libraryName", file: roots,
+			name: "libraryName", leaf: "libraryName", file: roots, zero: "libraryName: \"\"\n",
 			vars:  func(string) map[string]string { return map[string]string{"BRIDGE_LIBRARY_NAME": "Env Name"} },
 			value: func(c *Config) any { return c.LibraryName },
 			own:   func(string) any { return DefaultLibraryName },
@@ -402,7 +407,7 @@ func TestASaveWritesNoKeyTheFileDoesNotWrite(t *testing.T) {
 		{
 			// An output-only bridge is a loopback install with no library
 			// root, so a file without roots loads without the variable too.
-			name: "libraryRoots", leaf: "libraryRoots", file: "output:\n  mpd: \"on\"\n",
+			name: "libraryRoots", leaf: "libraryRoots", file: "output:\n  mpd: \"on\"\n", zero: "libraryRoots: []\n",
 			vars: func(dir string) map[string]string {
 				return map[string]string{"BRIDGE_LIBRARY_ROOTS": filepath.Join(dir, "Music")}
 			},
@@ -410,40 +415,42 @@ func TestASaveWritesNoKeyTheFileDoesNotWrite(t *testing.T) {
 			own:   func(string) any { return 0 },
 		},
 	} {
-		t.Run(c.name, func(t *testing.T) {
-			path, dir := envSaveFile(t, c.file)
-			vars := c.vars(dir)
-			for name, v := range vars {
-				t.Setenv(name, v)
-			}
-			if _, there := fileLeaf(t, path, c.leaf); there {
-				t.Fatalf("the fixture writes %s; it must not", c.leaf)
-			}
-			rc := bootHolder(t, path)
-			live := c.value(rc.Load())
-			if reflect.DeepEqual(live, c.own(dir)) {
-				t.Fatalf("booted with %v, the live %s is %#v, the default: the variable set nothing", vars, c.leaf, live)
-			}
-			for i := 1; i <= 2; i++ {
-				if err := rc.Update(path, func(next *Config) error {
-					next.Library.AllowDelete = !next.Library.AllowDelete
-					return nil
-				}); err != nil {
-					t.Fatalf("save %d: %v", i, err)
+		for _, shape := range []struct{ name, line string }{{"", ""}, {" written as its zero value", c.zero}} {
+			t.Run(c.name+shape.name, func(t *testing.T) {
+				path, dir := envSaveFile(t, c.file+shape.line)
+				vars := c.vars(dir)
+				for name, v := range vars {
+					t.Setenv(name, v)
 				}
-				if got, there := fileLeaf(t, path, c.leaf); there {
-					t.Errorf("save %d of another setting wrote %s = %#v, a key the file did not have", i, c.leaf, got)
+				if _, there := fileLeaf(t, path, c.leaf); there != (shape.line != "") {
+					t.Fatalf("the fixture writes %s: %v, want %v", c.leaf, there, shape.line != "")
 				}
-				if got := c.value(rc.Load()); !reflect.DeepEqual(got, live) {
-					t.Errorf("save %d: the holder publishes %s = %#v, want the variable's %#v", i, c.leaf, got, live)
+				rc := bootHolder(t, path)
+				live := c.value(rc.Load())
+				if reflect.DeepEqual(live, c.own(dir)) {
+					t.Fatalf("booted with %v, the live %s is %#v, the default: the variable set nothing", vars, c.leaf, live)
 				}
-			}
-			withoutVariables(t, vars, func() {
-				if got := c.value(loadAt(t, path)); !reflect.DeepEqual(got, c.own(dir)) {
-					t.Errorf("a start without %v reads %s = %#v, want the file's own %#v", vars, c.leaf, got, c.own(dir))
+				for i := 1; i <= 2; i++ {
+					if err := rc.Update(path, func(next *Config) error {
+						next.Library.AllowDelete = !next.Library.AllowDelete
+						return nil
+					}); err != nil {
+						t.Fatalf("save %d: %v", i, err)
+					}
+					if got, there := fileLeaf(t, path, c.leaf); there {
+						t.Errorf("save %d of another setting wrote %s = %#v, want no key", i, c.leaf, got)
+					}
+					if got := c.value(rc.Load()); !reflect.DeepEqual(got, live) {
+						t.Errorf("save %d: the holder publishes %s = %#v, want the variable's %#v", i, c.leaf, got, live)
+					}
 				}
+				withoutVariables(t, vars, func() {
+					if got := c.value(loadAt(t, path)); !reflect.DeepEqual(got, c.own(dir)) {
+						t.Errorf("a start without %v reads %s = %#v, want the file's own %#v", vars, c.leaf, got, c.own(dir))
+					}
+				})
 			})
-		})
+		}
 	}
 }
 
@@ -484,8 +491,8 @@ func TestAnEmptyListOverrideASaveLeftKeepsTheFilesList(t *testing.T) {
 	})
 }
 
-// TestASaveKeepsALeafAMergeKeyWrites: whether the file writes a leaf is the
-// decode's to say. scanIntervalSec written through a merge key alone (<<:
+// TestASaveKeepsALeafAMergeKeyWrites: the file's own value is what Load's
+// decode reads. scanIntervalSec written through a merge key alone (<<:
 // {scanIntervalSec: 300}), which a lookup of the file's own keys does not
 // find, is the file's own value: a save of another setting writes it, as a
 // key, since the save writes the config's fields and keeps no merge key, and
@@ -521,11 +528,11 @@ func TestASaveKeepsALeafAMergeKeyWrites(t *testing.T) {
 	})
 }
 
-// TestACloneCarriesNoSavesRecord: the record of the leaves a save leaves out
-// (unwritten) is that save's copy's alone, and Clone drops it.
+// TestACloneCarriesNoSavesRecord: the record of the leaves a save writes as
+// the file holds them (filed) is that save's copy's alone, and Clone drops it.
 func TestACloneCarriesNoSavesRecord(t *testing.T) {
-	if got := Clone(&Config{unwritten: []string{"scanIntervalSec"}}).unwritten; got != nil {
-		t.Errorf("a clone carries a save's record of the leaves it leaves out, %q", got)
+	if got := Clone(&Config{filed: []string{"scanIntervalSec"}}).filed; got != nil {
+		t.Errorf("a clone carries a save's record of the leaves it writes as the file holds them, %q", got)
 	}
 }
 
@@ -543,10 +550,6 @@ func TestASaveWritesNoKeyForAnyLeafTheFileDoesNotWrite(t *testing.T) {
 			continue
 		}
 		t.Run(b.YAMLPath, func(t *testing.T) {
-			var marked Config
-			if markLeaf(envLeaf(&marked, b)); envLeaf(&marked, b).IsZero() {
-				t.Fatalf("markLeaf leaves %s at its zero value, so a save cannot tell whether a file writes it", b.YAMLPath)
-			}
 			kind := b.kind
 			if kind == reflect.Pointer {
 				kind = b.elemKind
@@ -577,11 +580,12 @@ func TestASaveWritesNoKeyForAnyLeafTheFileDoesNotWrite(t *testing.T) {
 }
 
 // TestASavesTextIsYAMLMarshalsWithoutTheKeysItLeavesOut: the text a save
-// writes where it leaves keys out (marshal) is yaml.Marshal's with those keys
-// taken out and nothing else changed, over a config with every field set and
-// strings YAML must quote, escape, fold or encode (a plain << among them,
-// which a yaml.Node re-encodes as !!merge <<): byte for byte where no field
-// of Config's own is named, a leaf below the top level naming none (its tag
+// writes where it records leaves it writes as the file holds them (marshal)
+// is yaml.Marshal's with the keys of those at their zero value taken out and
+// nothing else changed, over a config with every field set and strings YAML
+// must quote, escape, fold or encode (a plain << among them, which a
+// yaml.Node re-encodes as !!merge <<): byte for byte where no field of
+// Config's own is named, a leaf below the top level naming none (its tag
 // omits its zero value); without that key's line for each field of Config's
 // own at its zero value; and byte for byte for one at another value, which is
 // written as it is.
@@ -607,12 +611,12 @@ func TestASavesTextIsYAMLMarshalsWithoutTheKeysItLeavesOut(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg.unwritten = []string{"nothing", "no.such.key", "metrics.allowCidrs"}
+	cfg.filed = []string{"nothing", "no.such.key", "metrics.allowCidrs"}
 	if got, err := cfg.marshal(); err != nil || !bytes.Equal(got, plain) {
 		t.Errorf("naming no field of Config's own, a save writes (%v)\n%s\nwant yaml.Marshal's\n%s", err, got, plain)
 	}
 	for _, path := range []string{"scanIntervalSec", "libraryRoots", "listenAddress"} {
-		cfg.unwritten = []string{path}
+		cfg.filed = []string{path}
 		if got, err := cfg.marshal(); err != nil || !bytes.Equal(got, plain) {
 			t.Errorf("naming %s, set, a save writes (%v)\n%s\nwant it written as it is\n%s", path, err, got, plain)
 		}
@@ -620,7 +624,7 @@ func TestASavesTextIsYAMLMarshalsWithoutTheKeysItLeavesOut(t *testing.T) {
 
 	for _, b := range envBindings() {
 		c := *cfg
-		c.unwritten = nil
+		c.filed = nil
 		envLeaf(&c, b).Set(reflect.Zero(envLeaf(&c, b).Type()))
 		zero, err := yaml.Marshal(&c)
 		if err != nil {
@@ -630,7 +634,7 @@ func TestASavesTextIsYAMLMarshalsWithoutTheKeysItLeavesOut(t *testing.T) {
 		if !strings.Contains(b.YAMLPath, ".") {
 			want = withoutTopLevelKey(t, zero, b.YAMLPath)
 		}
-		c.unwritten = []string{b.YAMLPath}
+		c.filed = []string{b.YAMLPath}
 		if got, err := c.marshal(); err != nil || !bytes.Equal(got, want) {
 			t.Errorf("leaving %s out at its zero value, a save writes (%v)\n%s\nwant\n%s", b.YAMLPath, err, got, want)
 		}
@@ -658,11 +662,10 @@ func withoutTopLevelKey(t *testing.T, text []byte, key string) []byte {
 
 // TestEveryLeafWhoseZeroIsAKeyIsAtTheTopLevel: a leaf a variable sets whose
 // field writes its zero value as a key (its yaml tag names no omitempty) is a
-// field of Config itself, which a save that leaves it out gives omitempty
-// (marshal), and which lies below no type that reads its own YAML, so the
-// save's second decode says whether the file writes it (filedEnvValues). One
-// below the top level would be written as its zero value, a key the file did
-// not have: give it omitempty (every leaf below the top level has it).
+// field of Config itself, which a save that writes it as the file holds it
+// gives omitempty (marshal). One below the top level would be written as its
+// zero value, a key the file did not have: give it omitempty (every leaf below
+// the top level has it).
 func TestEveryLeafWhoseZeroIsAKeyIsAtTheTopLevel(t *testing.T) {
 	for _, b := range envBindings() {
 		typ := reflect.TypeFor[Config]()

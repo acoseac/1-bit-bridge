@@ -309,76 +309,46 @@ func filedSwitch(now, was bool, filed *bool) *bool {
 // the file is to hold it (backlog B761): where the update left the leaf at
 // its live value, the variable's, compared by value (sameValue: an empty list
 // is the same as none, which Clone makes of it), the file's own value, read
-// from file, the bytes the turn found, by Load's own decode (DecodeFile); and
-// where the file writes no value for the leaf, its zero value, its yaml path
-// recorded in saved.unwritten, so that the save writes no key for it, whatever
-// the field's tag (marshal). Which leaves the file writes is the decode's to
-// say: file is decoded again into a config whose leaves hold a mark
-// (markLeaf), and a leaf the decode left marked is one it did not set, its key
-// absent, or written with no value where the decode leaves such a field as it
-// was, a merge key and an alias reaching the leaf as they reach it in Load.
-// Where the file does not decode, the live value is kept, as it is. So a save
-// of any other setting writes no variable's value into the file, and no key
-// the file did not write, and a start without the variable finds what the file
-// said. A leaf the update changed is written as the change: saved, published,
-// and set by the variable again at the next start. The snapshot published is
-// next, the live values. Only those leaves of saved are set, each by
-// assignment to its own field, never through a pointer next holds; what is
-// saved is still the snapshot the holder compared with the turn's bytes.
+// from file, the bytes the turn found, by Load's own decode (DecodeFile), its
+// yaml path recorded in saved.filed, so that the save writes the leaf as no
+// key where that value is its zero value, whatever the field's tag (marshal):
+// Load decodes the file into a zero config, so the zero value is what a file
+// that writes no value for the leaf gives, and one that writes its zero
+// value, which a start reads alike. Where the file does not decode, the live
+// value is kept, as it is. So a save of any other setting writes no
+// variable's value into the file, and no key the file did not write, and a
+// start without the variable finds what the file said. A leaf the update
+// changed is written as the change: saved, published, and set by the variable
+// again at the next start. The snapshot published is next, the live values.
+// Only those leaves of saved are set, each by assignment to its own field,
+// never through a pointer next holds; what is saved is still the snapshot the
+// holder compared with the turn's bytes.
 func filedEnvValues(saved, before *Config, file []byte) {
 	if len(before.envSet) == 0 {
+		return
+	}
+	var own Config
+	if err := DecodeFile(file, &own); err != nil && !errors.Is(err, io.EOF) {
+		// The bytes loaded once (the holder's own read or write); a file the
+		// holder was told nothing of that does not decode keeps what the
+		// update holds.
 		return
 	}
 	bindings := make(map[string]envBinding)
 	for _, b := range envBindings() {
 		bindings[b.YAMLPath] = b
 	}
-	var kept []envBinding
 	for _, path := range before.envSet {
 		b, ok := bindings[path]
-		if ok && !switchEnvPaths[path] && sameValue(envLeaf(saved, b), envLeaf(before, b)) {
-			kept = append(kept, b)
+		if !ok || switchEnvPaths[path] {
+			continue
 		}
-	}
-	if len(kept) == 0 {
-		return
-	}
-	var own, marked Config
-	for _, b := range kept {
-		markLeaf(envLeaf(&marked, b))
-	}
-	for _, into := range []*Config{&own, &marked} {
-		if err := DecodeFile(file, into); err != nil && !errors.Is(err, io.EOF) {
-			// The bytes loaded once (the holder's own read or write); a file
-			// the holder was told nothing of that does not decode keeps what
-			// the update holds.
-			return
+		now := envLeaf(saved, b)
+		if !sameValue(now, envLeaf(before, b)) {
+			continue
 		}
-	}
-	for _, b := range kept {
-		filed := envLeaf(&own, b)
-		envLeaf(saved, b).Set(filed)
-		if !sameValue(filed, envLeaf(&marked, b)) {
-			saved.unwritten = append(saved.unwritten, b.YAMLPath)
-		}
-	}
-}
-
-// markLeaf sets v, a leaf envBindings names, to a value other than its zero
-// value, which a decode that sets the leaf replaces and one that does not
-// leaves (filedEnvValues).
-func markLeaf(v reflect.Value) {
-	switch v.Kind() {
-	case reflect.String:
-		v.SetString("-")
-	case reflect.Bool:
-		v.SetBool(true)
-	case reflect.Int, reflect.Int64:
-		v.SetInt(1)
-	case reflect.Slice:
-		v.Set(reflect.MakeSlice(v.Type(), 1, 1))
-	case reflect.Pointer:
-		v.Set(reflect.New(v.Type().Elem()))
+		now.Set(envLeaf(&own, b))
+		saved.filed = append(saved.filed, path)
 	}
 }
 
@@ -513,7 +483,7 @@ func Clone(cfg *Config) *Config {
 	if cfg.envSet != nil {
 		out.envSet = append([]string(nil), cfg.envSet...)
 	}
-	out.unwritten = nil
+	out.filed = nil
 	// UPnPUpstream: the Servers slice + its per-element SkipTopLevelContainers
 	// slice both need deep copies so mutations on the clone don't leak back.
 	if cfg.UPnPUpstream.Servers != nil {
