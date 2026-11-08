@@ -86826,3 +86826,17 @@ refused.
 (and `internal/player/playback`, unguarded); no DSD byte changes. The branch holds 46 and main
 45, so the check against main passes and it stays 46, the runbook's 46 paragraph saying round
 5.
+
+Round 5's gates, on 512879ea at legion0, in one call of the build slot: `make fmt` left the
+tree clean; `make vet` passed for linux/amd64, `GOOS=windows`, `GOOS=darwin` and `GOOS=linux
+GOARCH=386`; `go test -race` on the packages round 5 touched (playback, alsapcm,
+qualification) passed (80 s), and the round's cases passed 20 times running under `-race`;
+the native overlay's two runs passed; `make test` passed, 89 packages ok and none failing
+(2,043 s), the Linux-only tests run here; `make build-all` and `make docs-check` passed,
+docs-check again on a copy of the branch with the rules patch applied, where the guards that
+read the tracked docs passed too (`TestEveryCitedTestNameExists`,
+`TestEveryBridgeWordIsInTheProtocol`, `TestNoDocblockNamesAnotherDeclaration`, the endpoint
+and error-table guards, `TestDSDOutputProtocolTokens` and `TestQualificationRunbookVersion`);
+and the qualification check against main, the merge base CI takes (a77578f8), passed at 46. A
+first run of these gates, on 3cff0151, was stopped once its race runs had found the reopen
+case's flake.
