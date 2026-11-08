@@ -81436,8 +81436,8 @@ store open, which takes it out of the crash rollback's reach.
 - Not ready is never proof: a start that serves but never answers is not
   confirmed, keeps running, says so once and records `NotReady`; nothing
   rolls it back, and the auto-installer stops waiting on it after 20 minutes.
-- A take-back that cannot hold the marker's lock within 2 s leaves its count,
-  which errs toward a rollback; the confirmation clears it.
+- What a take-back that cannot hold the marker's lock leaves is backlog
+  B760's.
 - What the target wrote without a migration goes back under the backup
   unchecked (the History section lists each file and what the backup does
   with it); none of it stops the backup starting, so none is a refusal.
@@ -81512,8 +81512,8 @@ the red four above; readiness:
 `TestAPortAnotherProcessHoldsIsNotAFailedStart` (the API's and the
 console's, and an address the host does not have, which stays counted),
 `TestAStoreThatWillNotOpenIsAFailedStart`, `TestAPanicInServeIsAFailedStart`,
-`TestACountPublishedBeforeItsBarrierFailedIsTakenBack` (the count's own
-barrier failing after its rename); the rollback:
+`TestACountPublishedBeforeItsBarrierFailedIsTakenBack` (backlog B760); the
+rollback:
 `TestAMigrationThatFailsStillRefusesTheRollback` (a step that adds its
 columns and fails at its index, `user_version` unmoved),
 `TestACommandsMigrationRefusesTheRollbackToo` (`bridge doctor`'s open),
@@ -81727,8 +81727,8 @@ unregisters it, ends and joins it (`finish`: a stop that arrives after it
 starts nothing), all before the data dir's lock is let go, and the
 take-back after the teardown runs where a host's refusal ended the start or
 the stop's never had its answer, writing nothing where the stop's landed
-(`FailedStarts == CountTried` no longer holds). Accepted, as the review
-said: a crash in the teardown after a stop is not counted. The test binary's
+(`FailedStarts == CountTried` no longer holds). What it accepted, as the
+review said, is backlog B760's. The test binary's
 re-exec now stops on SIGINT and SIGTERM as main does, which the process test
 needs.
 
@@ -81816,10 +81816,10 @@ serve that refuses with one start before it and migrates with none
 (`TestACommandBesideAStartingServe`), and the updater's, the store's and
 restore's own.
 
-**6. A permission refusal and a tailnet failure** (confirmed). What the
-swap carries: `dst`'s mode alone (`installedMode`); the owner is the
-process's (the staged file is created by it), and no extended attribute was
-read. So an operator's setcap went with an update, the new binary's bind
+**6. A permission refusal and a tailnet failure** (confirmed). The swap
+carried `dst`'s mode alone (`installedMode`; the rest of what it does with
+`dst`'s attributes is backlog B760's), so an operator's setcap went with an
+update, the new binary's bind
 below 1024 was refused for a permission, and the start was taken back as the
 host's. `carryCapabilities` now gives the staged binary `dst`'s
 `security.capability` before the rename, which only a process with
@@ -81827,10 +81827,8 @@ CAP_SETFCAP may set (`sudo bridge update`); where it cannot (the service
 user's auto-installer, the console's install), the swap goes on, and
 `bindRefusalIsTheHosts` counts a permission refusal where `.bak` carries
 capabilities the binary does not (`updater.FileCapabilities`, Linux's one
-small `getxattr`; elsewhere none), saying so. An SELinux label is not
-carried: the staged binary takes the label the policy gives a new file in
-its directory (`restorecon`'s), so a hand-set label goes with the update;
-that is backlog B760. The tailnet: `tailnetNetworkFailure` takes back a
+small `getxattr`; elsewhere none), saying so. What else the swap does not
+carry is backlog B760's. The tailnet: `tailnetNetworkFailure` takes back a
 `*net.OpError` (tsnet's netstack listener answers a closed or reset
 endpoint as one) or `net.ErrClosed` (tsnet's listener once its node stops),
 and counts anything else its `Serve` returns; the `tsnet listener: …` line
@@ -82022,8 +82020,7 @@ whose teardown hangs and is killed stays counted. The start says that it
 has answered (`updater: this start of … has answered as ready (its API
 listener, /v1/health and its store): its install is confirmed once it has
 stayed up for 10m0s`). A slow but healthy start killed in a slow teardown
-before it was ready counts too, the cost the review accepted; it is said in
-PROTOCOL.md, the runbook and the long form. The second round's three early
+before it was ready is backlog B760's. The second round's three early
 take-back tests wait for the window first, the stop-while-starting test that
 waited for an early take-back is removed, replaced by the two above, the
 subprocess kill test waits for the readiness line (the copy asks every
@@ -82076,9 +82073,9 @@ held; `RunningServeCounted` needs the token and that lock held, tried
 without waiting, and a command never takes such a lock, so `server.lock`
 is not read at all, nor the registry, which goes. The take-back clears the
 token in its decrement's write; every return of `runServe` clears it where
-the marker still names it, keeping the count where it was not taken back
-(`updater.EndStart`, within the stop's budget: the launcher's serve returns
-to its menu with the process alive), and lets the lock go; the confirmation
+the marker still names it (`updater.EndStart`, within the stop's budget:
+the launcher's serve returns to its menu with the process alive), and lets
+the lock go; the confirmation
 clears it. A migrating open reads the running start of the marker it reads
 under the install marker's lock (`migrationGate.holds`), so the count and
 the token are read together, and the try of the start's lock never waits,
@@ -87425,6 +87422,561 @@ decided while the delete was pending, and the message clamps both bounds.
 Controls, each red as predicted: the duplicate guard removed (the twice case),
 the pending banner's words removed (the pending case).
 
+## 2026-11-08 — B760: the probation's narrow windows, B660's residuals
+
+Worker b760, legion0 (Ubuntu 26.04, linux/amd64, go1.27.3, `GOTOOLCHAIN=local`,
+`GOPROXY=off`), branch `fix/b760-probation-windows` from main 0fd7e3f8, on the
+orchestrator's brief with Codex's and Claude's reviews of its draft folded in.
+Commits: the reproduction afbd45bb (red, with the seams its tests need, read
+by nothing or nil in production), the change b8bd6ce5, then this record. The
+rules' words go in `rules-b760.patch`: a B760 line in `config-lifecycle.md`,
+B613's line where it said the early rollback is the only way a refused start
+puts the backup back (the line and its long form), `cli-serve.md`'s serve
+bullet, B660's long form where it said a panic after a stop is not counted,
+and B760's long form in `ops/History-rules-config-lifecycle.md`; and, since
+`config-lifecycle.md` stood at 99,532 bytes of its 100,000, the long form of
+#1047's line moved out first by `move_entry.py` (its line kept as a pointer).
+
+Each residual was looked at first, in the code, then fixed where the fix is
+contained and provable, or kept with the test that shows the window.
+
+### R1. A start that refuses its settings never reached the crash rollback (fixed)
+
+The crash rollback runs after the data dir's lock (main.go, after
+`lockServeDataDirWith`), and every refusal serve makes from its config alone
+comes before that lock, where `recoverRefusedInstall` asks the early rollback
+alone. `updater.EarlyRollback` refuses wherever `DataDirOpenedBy` is set
+(configcheck.go:493), and every counted start writes it in its admission's one
+write (`disarmHeld`, `ArmsDataDirRecord`), so an install with three starts that
+crashed, and then settings this version refuses, exited 2 at every start while
+they stayed refused: the crash rollback was never asked, the install neither
+rolled back nor confirmed. The same for a crash rollback's own record whose
+rename had not landed (`CrashRollbackRecord` keeps `DataDirOpenedBy`), its
+backup not back and this version's migrations vetoed; and for a marker past
+the early rollback's 6 h window, which the crash rollback does not ask.
+
+*The change.* Where the early rollback refuses on its first read and the count
+asks for the crash rollback (`updater.CrashRollback` answers yes, or why not),
+`recoverRefusedInstall` hands the start to `recoverCrashedRefusedInstall`,
+which takes the data dir's lock as the early rollback does and runs
+`recoverCrashedInstall` whole: the install marker's lock from its read through
+the rename, `CrashRollback` again under it (a migration begun refusing), the
+backup a regular file, its version (`ProbeVersionWithin`), its settings check
+(`CheckConfig`) of the settings as they are now, the hold and the veto durable
+before the rename, exit 75. Where it leaves the install it says why and
+records it (`RollbackRefused`) as at any start, and the start refuses its
+settings as before, exit 2. `recoverCrashedInstall` and its line helpers take
+what the start does next, so a refused start's lines end
+`this start refuses its settings, as it did before, and is not counted`
+(`crashRollbackRefusedStart`) where a start whose settings load says it goes
+on and counts itself (`crashRollbackGoesOn`). `EarlyRollback` is unchanged and
+asked first.
+
+*Red first* at afbd45bb (the stand-in backup given a check mode that takes the
+settings this version refuses, "takes", as 0.2.1 took the leading zero 0.2.2
+refuses): `TestARefusedStartPutsTheBackupBackWhereItsCountAsksForTheCrashRollback`
+exited 2 in each case (the load's refusal, serve's own, a marker past the
+window), want 75; `TestARefusedStartFinishesACrashRollbackWhoseRenameDidNotLand`
+exited 2 over the record a nil-returning restore left (no timing);
+`TestARefusedStartWhoseCrashRollbackRefusesKeepsTheInstall` said only the early
+rollback's reason (`0.0.1 has already opened the data dir, so its store may
+hold changes 0.0.0-previous does not know`) and recorded nothing, for a backup
+that refuses the settings too (over the marker and over the record) and for a
+migration begun. `TestARefusedStartBelowTheCrashRollbacksLimitLeavesTheInstall`,
+a guard, passed on both.
+
+### R2. A bind refused with EADDRNOTAVAIL (left as it is)
+
+The host's refusal since B660's second round (`bindRefusedByTheHost`,
+`doctor.IsAddrNotAvail`, and the four starts over TEST-NET-1 in
+`TestAPortAnotherProcessHoldsIsNotAFailedStart`): nothing of it is left.
+
+### R3. A panic in the teardown was taken back as a clean end (fixed)
+
+The take-back's defer read the end by `stopped.Err()`, the restart request and
+`notAFailedStart`, never whether serve's goroutine was panicking, so three
+cases took a panic's count back: a stop of a start not yet ready whose
+teardown then panicked (the take-back begun once the teardown had run); a
+panic after the stop's cancel and before serve's select read it; and a panic
+in the teardown of a ready start, whose take-back had begun, and landed, as
+the stop arrived (`stopTakeBack.arrived`), which no classification at the end
+can undo.
+
+*The change.* The take-back's defer recovers a panic, reads the end as no
+clean one (`finish(false)`: nothing begun), and where a take-back began as the
+stop arrived counts the start again (`stopTakeBack.countAgain`,
+`updater.CountFailedStartAgain`: under the install marker's lock, writing only
+where the marker holds what that take-back left, the count less one, within
+`finishTakeBackDeadline`'s deadline, said on a line), clears the token and lets
+the start's lock go as before, and raises the panic again as it was. Go
+1.27.3 prints it `panic: … [recovered, repanicked]`, the goroutine's stack
+from the panic's own site (measured with a throwaway program in
+`.tmp/_b760/panicdemo`: the trace held `main.teardown()` at its line). The
+ready-stop-then-kill behaviour is unchanged: a kill is no panic, and
+`TestAServeKilledWhileItDrainsHasTakenItsCountBack` passes.
+
+*Kept:* what R3 leaves is backlog B760's.
+
+*Red first* at afbd45bb: `TestAPanicInTheTeardownOfAStopBeforeReadyStaysCounted`
+(the marker after the panic `FailedStarts:0`, want 1),
+`TestAPanicAfterAStopBeforeServesStopBranchStaysCounted` (0, want 1) and
+`TestAPanicInTheTeardownOfAReadyStartsStopCountsItAgain` (0 after the panic,
+the stop's take-back seen landing while the teardown was held, want 1, and no
+line). Each requires the panic raised again as it was, which passed on both.
+
+### R4. A counted start that had not begun serving was never said not ready (reporting added)
+
+The confirmation starts once `ServeTLS` runs (`newServeProbation` after the
+`go ServeTLS` line), and `probationSeams` acted after it, so a start that had
+not begun serving was never said not ready, and `bridge doctor` read
+`ok … is on probation` throughout. The change reports only (backlog B760).
+`startWatch`, armed at the admission of a
+counted start on serve's own context, ends where the start begins serving
+(`served`, just before `ServeTLS`) and at the teardown (`end`), joined each
+time; at `probationTiming.serve` from its admission (production's
+`updater.ProbationWindow`, monotonic) it says once
+`<version> has not begun serving within 10m0s of its start, so its install is
+not confirmed` and records NotReady (`updater.RecordNotReady`), which the
+doctor's install-probation line and the console's Probation row fail on, and
+which the next start's admission and the confirmation clear. A hold of the
+start just before it begins serving is the test's seam
+(`probationSeams.beforeServing`, nil in production).
+
+*Red first* at afbd45bb: `TestAStartThatHasNotBegunServingIsSaidNotReady` (held
+before serving, a 200 ms deadline: no not-ready event within 20 s, nothing on
+stderr) and `TestAStartThatBeginsServingEndsItsWatch` (no watch event before
+the first round). `TestAStartStoppedBeforeItsDeadlineIsNotSaidNotReady`, a
+guard, passed on both. Through the fix the held test reads, while held,
+NotReady and the doctor's fail; after the clean stop, NotReady kept and the
+fail kept (the count: backlog B760); and beside a later start that serves, NotReady cleared
+at its admission and the doctor ok.
+
+### R5. The take-back's and the count's write failures (one fixed)
+
+Restated against the budget the take-back has had since B660's third round:
+it asks for the marker's lock a wait at a time and asks again after a write
+that fails, until it lands or `stopBudget` (10 s from the stop's arrival)
+ends, one begun once a teardown past the budget has run asking 2 s still
+(`finishTakeBackFloor`), never past `updater.SCMStopWait` less a second; one
+with no answer is backlog B760's (`TestAStopWhileAConfirmationWaitsWritesNothing`,
+`TestATakeBackWhoseWriteIsRefusedKeepsTheCount`). A take-back write that
+published and failed its barrier is answered by its next ask. The count's
+three writes:
+- *Failed before it published* (kept, backlog B760):
+  `TestACountThatFailedBeforeItPublishedLeavesItsStartUncounted`, a guard,
+  green on both.
+- *A count's write that failed, and the start's hold* (fixed): the admission
+  let go of the start's hold at the failed write, so `RunningServeCounted`
+  read the running start as one that did not end cleanly (the doctor counting
+  it, a command's migration held on it), and its return cleared no token
+  (`EndStart` was given ""). The start keeps its hold now (`DisarmResult.Start`).
+  Red first at afbd45bb: `TestACountWhoseBarrierFailedKeepsItsStartsHold`.
+- *The admission's one write of its record and its count*, which refuses the
+  start (kept, backlog B760): every later start while the barrier fails
+  refuses before it writes (`syncMarkerDir` first).
+  `TestARefusedAdmissionLeavesAtMostOneCount`, a guard, green on both.
+
+### The red run
+
+At afbd45bb, cmd/bridge and internal/updater, the predictions in
+`.tmp/_b760/predictions-red.txt` before the run: every test predicted red was
+red for the reason predicted (above), and every guard beside them green
+(`TestARefusedStartBelowTheCrashRollbacksLimitLeavesTheInstall`,
+`TestAStartStoppedBeforeItsDeadlineIsNotSaidNotReady`,
+`TestACountThatFailedBeforeItPublishedLeavesItsStartUncounted`,
+`TestARefusedAdmissionLeavesAtMostOneCount`,
+`TestATakeBackWhoseWriteIsRefusedKeepsTheCount`, and ten existing probation,
+crash-rollback and refused-install tests).
+
+### Negative controls
+
+Each alone on b8bd6ce5, applied once (each replaced text asserted to occur
+once) by `.tmp/_b760/controls.py`, the package's test binary rebuilt with
+make's tags, the listed tests run with TMPDIR on this checkout's disk, the
+bytes put back from memory and compared after each, predicted by name in
+`.tmp/_b760/predictions-controls.txt` before the run; `git status` was clean
+after. Thirteen came out as predicted; one prediction was wrong (4d).
+
+| | Mutation | Red | Green beside it |
+|---|---|---|---|
+| (1a) | the refused start never hands over to the crash rollback | the put-back test (its three cases), the record's test, the refusals' test (its three) | the below-the-limit guard, `TestServeRollsBackAnInstallWhoseVersionRefusesItsSettings`, `TestServeLeavesAnInstallItCannotProveAsItIs`, `TestAStartFinishesARollbackStoppedBeforeItsRename` |
+| (1b) | the hand-over only where the crash rollback answers yes, never on its why | the refusals' test, a migration begun | its two backup cases, the put-back and record tests |
+| (1c) | the refused start's crash rollback without the backup's settings check | the refusals' test, both backup cases (exit 75) | a migration begun, `TestABackupThatRefusesTheSettingsIsNotPutBack`, the put-back test |
+| (1d) | the refused start's lines say it goes on and counts itself | the refusals' test, its three cases (the words) | the put-back test |
+| (3a) | the take-back's defer recovers nothing (HEAD's classification) | the three R3 tests | `TestAPanicInServeIsAFailedStart`, `TestAStopTakesItsCountBackAsItArrives`, `TestAStopIsNotAFailedStart`, `TestAStopBeforeReadyStaysCountedUntilItsTeardownHasRun` |
+| (3b) | the panic recovered and not raised again | the three R3 tests (no panic), `TestAPanicInServeIsAFailedStart` | `TestAStopTakesItsCountBackAsItArrives`, `TestAStopIsNotAFailedStart` |
+| (3c) | no count again after a ready start's take-back | `TestAPanicInTheTeardownOfAReadyStartsStopCountsItAgain` | the other two R3 tests |
+| (3d) | the count again asked where no take-back began | `TestACountThatFailedBeforeItPublishedLeavesItsStartUncounted` (a start counted late) | the three R3 tests, `TestAPanicInServeIsAFailedStart` |
+| (3e) | `CountFailedStartAgain` without its comparison with what the take-back left | `TestCountingAStartAgainUndoesItsTakeBackAlone`, a take-back that never landed | its six other cases |
+| (4a) | the watch never armed | the held test, `TestAStartThatBeginsServingEndsItsWatch` | the stopped test, `TestTheStartWatchFiresOnlyWhileTheStartHasNotBegunServing` |
+| (4b) | `served` does not end the watch | the watch's unit test, the start begins serving; `TestAStartThatBeginsServingEndsItsWatch` | its two other cases, the held and stopped tests |
+| (4c) | the count of a start the watch found not serving, at its stop (backlog B760) | the held test | the stopped test, `TestAStopIsNotAFailedStart`, `TestAStartThatBeginsServingEndsItsWatch` |
+| (4d) | the watch says the start has not begun serving at serve's stop | the watch's unit test, serve's stop | its two other cases, the held test, `TestAStartThatBeginsServingEndsItsWatch`; and, against the prediction, the stopped test |
+| (5a) | the admission lets go of the start's hold at a failed count write again | `TestTheAdmissionKeepsItsStartsHoldWhereItsCountsWriteFailed` (both), `TestACountWhoseBarrierFailedKeepsItsStartsHold` | `TestTheAdmissionCountsTheStartsOfTheInstallsVersion`, `TestACountPublishedBeforeItsBarrierFailedIsTakenBack`, `TestACountThatFailedBeforeItPublishedLeavesItsStartUncounted` |
+
+(4d)'s miss is the serve-level test, not the code: it releases its hold right
+after the stop, so the start begins serving, and its `served` sets the flag the
+mutated watch then reads, before the watch's goroutine looks; the watch's own
+test, which ends its context with nothing serving, is the pin.
+
+### Checks
+
+- Before the change was committed: the slice of cmd/bridge's tests that
+  match the probation's names (`Probation|Crash|Refused|Rollback|Install|Stop|Restart|Panic|Count|Ready|Serving|Doctor|…`,
+  777 runs) passed in 230 s, and internal/updater whole, both with make's tags
+  and TMPDIR on this checkout's disk. Run with TMPDIR=/tmp first, it failed
+  `TestOutputPlayNamesTheHolderOfTheEndpointRefusedBusy` and hung
+  `TestServeDiscoveryRestartsWithStableIdentity`, at main 0fd7e3f8 as well:
+  this host's /tmp is a tmpfs, which the player's strict writer refuses (the
+  player not started, its Source never advertised), which is why make test
+  sets TMPDIR on disk; nothing of this change.
+- go1.27.3's gofmt (`go run cmd/gofmt -l`) on every Go file the change
+  touched: clean.
+- The rules patch's checks and the gates, inside the shared build slot,
+  follow in their own paragraph, once run.
+
+### For the owner
+
+- B660's records file one more item under B760 that this brief did not take;
+  it stays open there.
+- R3 counts a panic on serve's goroutine after a stop, which B660's second
+  round had accepted as uncounted; the rule's words say it now. The owner may
+  want that confirmed.
+- R4's deadline is the probation window, 10 minutes from the admission: a
+  healthy start whose migration runs longer is said not ready until its
+  confirmation clears it.
+- PROTOCOL.md's "Boot-time rollback" paragraph is not changed: its words hold
+  in substance, but "that start says why, records it, and goes on" does not
+  fit a start that refused its settings, which then refuses them; a change
+  there needs its iOS mirror, so it is the orchestrator's.
+
+### Gates
+
+At fdd74a31, on Go 1.27.3 (`GOTOOLCHAIN=go1.27.3`, go.mod's), TMPDIR under
+`.tmp/_b760`, in two sessions of the shared build slot, each started by a
+guard that waited for the slot (`.tmp/_b760/gates.py`):
+- Part a, in the slot from 14:11 after a 24-minute wait: `make fmt` changed
+  nothing; `make vet`, and with `GOOS=windows`, `GOOS=darwin` and
+  `GOOS=linux GOARCH=386`: ok; `make docs-check`: ok (CLAUDE.md 82.1 %, the
+  worst load 67.6 %); the qualification check
+  (`go run ./scripts/qualification-version -base 0fd7e3f8 -head HEAD`):
+  `qualification version OK`; `make test TEST_PKGS='./cmd/bridge/...
+  ./internal/updater/...'` (race, `-p 4`, `-timeout 30m`, the Makefile's tags):
+  ok, cmd/bridge 1,254 s, internal/updater 29 s.
+- Part b: in the slot from 15:46, the guard's first try having given up at 15:26
+  with the slot held by other workers since 14:33: `make fmt vet test build-all`
+  (race, `-p 4`, `-timeout 30m`, the Makefile's tags): ok in 37 minutes, 89
+  packages ok and 14 without tests, the Linux-only ones run rather than vetted
+  (internal/alsa 1.8 s, internal/alsapcm 82 s, internal/atomicwrite's durable
+  writer 20 s, internal/backup's identity paths 291 s; cmd/bridge 1,375 s,
+  internal/manifest 1,685 s, internal/admin 1,055 s, internal/updater 32 s),
+  `make fmt` changing nothing, `make build-all`'s build-tag check and its six
+  targets; `git status` empty after.
+- `rules-b760.patch` (59,583 bytes), built by a script on a copy of the
+  tracked files at fdd74a31 (`.tmp/_b760/build_rules_patch.py`): `git apply
+  --check` takes it over the worktree; on a copy it is applied to, make
+  docs-check's four commands pass (config-lifecycle.md 98,149 bytes of its
+  100,000, cli-serve.md 50,605, the worst load 67.3 %), and
+  `TestEveryCitedTestNameExists` passes there and fails on a ghost citation
+  planted in the copy's History file. `verify_moves.py --base HEAD` passes
+  for the move alone (a copy holding `move_entry.py`'s move only); over the
+  whole patch, with the cli-serve bullet, B660's *The count.* and its *Left.*
+  declared as edits, it lists MISSING only the two copies of B613's line, the
+  rules line and its long form's verbatim head, rewritten alike, which `--edit`
+  cannot declare (it pairs one gone block a prefix), each one's successor
+  present in its file (`.tmp/_b760/verify_moves_two_ways.py`).
+
+Not run here: macOS and Windows natively (Windows is vetted by
+`GOOS=windows make vet` and cross-compiled by `make build-all`;
+`rollback_running_windows_test.go` runs only there), CI's runners, and a
+by-hand run with real release builds.
+
+## 2026-11-08 — B760 round 2: a count again only after a take-back that reached its write, the open windows named by B760 alone, a refused start that says why
+
+Worker b760, legion0 (Ubuntu 26.04, linux/amd64, go1.27.3, `GOTOOLCHAIN=local`,
+`GOPROXY=off`), branch `fix/b760-probation-windows` (PR #1442) from its round 1
+head 348a0548 (round 1 merged with main 3d0a0d05 and the orchestrator's rules
+commit), on the orchestrator's round 2 brief with Codex's and Claude's
+reviews of round 1 and of the brief's draft folded in. Commits: the
+reproduction 939294a9 (red, with the seams its tests need, nil in
+production), the change 15c167a5, the public text 7d7233f5, then this record.
+The rules' words go in `rules-b760-r2.patch`, made against the final head:
+B760's line in `config-lifecycle.md` and its verbatim copy in the long form,
+`cli-serve.md`'s serve bullet, and B660's and B760's long forms in
+`ops/History-rules-config-lifecycle.md`. Each point was confirmed red first.
+
+### Point 1. A count again of a start whose count never landed (fixed)
+
+`stopTakeBack.countAgain` asked only that a take-back had begun, and
+`updater.CountFailedStartAgain` writes where the marker holds the count the
+admission tried less one, which a take-back's write leaves and which an
+admission's count that never published leaves too: a start whose count's
+write failed before it published, ready, stopped, its armed take-back finding
+no count of its own and writing nothing, then a panic in its teardown, was
+counted, and serve said its stop had taken the count back. A take-back read
+by its last answer alone would fail the other way: a write that publishes and
+then fails its directory barrier is followed by an ask that finds no count of
+its own and answers no write and no error.
+
+*The change.* `updater.TakeBackFailedStart` reports whether it reached its
+write, the marker holding the start's count, whatever the write answered, and
+takes a save (nil is `SaveState`, as `AdmitBoot`'s is). Serve's take-back
+latches that answer across its asks under its lock (`stopTakeBack.reached`),
+and `countAgain` asks the latch in place of `began`.
+`CountFailedStartAgain`'s doc states the precondition its caller establishes,
+and `countAgain`'s the latched condition. Where the count again has no answer,
+serve's line says the stop *may have* taken the count back, since the latch
+does not say the write published. Two seams, nil in production:
+`serveOpts.saveTakeBack` (the take-back's save) and `takeBackAsked` (told each
+answer, so a test knows the armed take-back ran before it lets the teardown
+panic: a panic before the stop's notice reached the take-back leaves none
+begun).
+
+*Red first* at 939294a9, the predictions in `.tmp/_b760/r2/predictions-red.txt`
+before the run, the Makefile's tags, race, `-p 4`, `-timeout 30m`, TMPDIR on
+this checkout's disk:
+`TestAPanicAfterTheStopOfAStartWhoseCountNeverLandedCountsNothing` (case a: the
+admission's write refused by `saveUpdateState`, a store at the ladder's top,
+an hour's probation window) failed: `update-state.json` changed (the count
+written from 1 to 2), and serve printed `updater: this start panicked after its
+stop had taken its count of the install's starts back, so it is counted
+again`. Its second check, that no such line is printed, asked for "counted
+again", which the admission's own line held then, so it would have failed
+without the false line: 15c167a5 asks for
+countAgain's own words ("panicked after its stop"), and control N1 below shows
+that check red on its own.
+`TestATakeBackSaysItReachedItsWriteWhateverTheWriteAnswered` (internal/updater:
+published and then the barrier failed, through `SetMarkerBarrierForTest`;
+failed before it published; a count that never landed) failed its two
+write-failure cases (reached false), and
+`TestATakeBackWhoseWriteIsRefusedKeepsTheCount`, its assertion now that the
+refused write was reached, failed as well.
+`TestAPanicAfterATakeBackWhoseWritePublishedThenFailedCountsTheStartAgainOnce`
+(case b: the take-back's save publishes and then answers an error, its second
+ask answers no write and no error, the count is restored once) passed at
+939294a9, as predicted: round 1 counted again on `began`, which holds there;
+it guards the fix against a latch on the last answer (N2, N3, N4 below). R5's
+sibling, `TestACountThatFailedBeforeItPublishedLeavesItsStartUncounted`, its
+body unchanged, passed at both (its doc changed with point 2).
+
+### Point 2. The windows left open, named by B760 alone
+
+Every passage that described a window B760 leaves open now names backlog B760
+instead, and keeps what B760 closes: committed, the take-back comment in
+`main.go`, `startWatch`'s doc, the docs of `AdmitBoot`, `disarmUnlocked`,
+`DisarmResult.CountMissed`, `TakeBackFailedStart` and `carryCapabilities`, the
+docs of `serve_count_writes_test.go` (the file's and two tests'),
+`serve_not_serving_test.go`'s and `TestATakeBackWhoseWriteIsRefusedKeepsTheCount`'s,
+three passages of `ops/deployment-runbook.md`, three of B660's records here
+and seven of round 1's (in its R3, R4 and R5 sections, three of its headings
+among them, and its owner note); in the rules patch, B760's line and its copy, its long form's
+R3, R4 and R5 paragraphs and its *Left.*, and four passages of B660's long
+form. The passages removed, each with its file and its lines at 15c167a5, are
+kept outside the repository for the backlog's B760 entry. Kept as they are:
+the binding rules' own words (B760's "reporting only" and "don't count a start
+for not serving"), the tests' names (the brief asks that R5's sibling run
+unchanged), the program's own lines the runbook quotes, and `PROTOCOL.md`,
+whose probation paragraph describes the design and is the iOS app's mirror.
+
+### Point 3. A refused start's lock failure said nothing (fixed)
+
+At the crash rollback's limit, where `updater.CrashRollback` refuses (a
+migration of the store begun), a start that refused its settings and could
+not take the data dir's lock (another process holding it) exited 2 saying
+nothing of the install: `recoverCrashedRefusedInstall`'s lock-failure branch
+called `sayCrashRollbackNeedsTheDataDir`, which speaks only where the crash
+rollback would run, and the early rollback's `noRollback`, which spoke there
+before B760, is no longer reached. The branch now reads the marker again and
+says the crash rollback's own refusal (`crashRollbackLine`, ending
+`crashRollbackRefusedStart`), writing nothing; otherwise it calls the shared
+helper as before, unchanged, so its other caller, a start whose settings load,
+prints what it printed.
+
+*Red first* at 939294a9:
+`TestARefusedStartBesideTheDataDirsHolderSaysWhyTheCrashRollbackLeavesTheInstall`
+(the data dir's lock held from another open, `holdTheDataDirsLockAsACommand`)
+failed its migration case (no line); its case where the crash rollback would
+run, which pins the helper's line word for word, passed at both; both cases
+require the binaries and the marker unchanged.
+`TestACrashRollbackNeedsBothLocks`, the helper's other caller, passes at the
+fix and under N5.
+
+### Negative controls
+
+Each alone on 15c167a5, applied once (each replaced text asserted to occur
+once) by `.tmp/_b760/r2/controls_r2.py`, the package's test binary built with
+make's tags, the named tests run with TMPDIR on this checkout's disk, the bytes
+put back from memory and compared after each, predicted by name in
+`.tmp/_b760/r2/predictions-controls.txt` before the run. All seven came out as
+predicted, and `git status` was clean after.
+
+| | Mutation | Red | Green beside it |
+|---|---|---|---|
+| N1 | `countAgain` keyed on `began` (round 1's condition) | case a, both checks (the marker; the line) | case b, `TestAPanicInTheTeardownOfAReadyStartsStopCountsItAgain` |
+| N2 | the latch set only by an ask that wrote with no error | case b (the count 0 after the panic, no line) | case a, the ready-panic test |
+| N3 | `TakeBackFailedStart` reports no write reached where its write fails | the updater test's two write-failure cases, `TestATakeBackWhoseWriteIsRefusedKeepsTheCount`, case b | the updater test's third case, case a |
+| N4 | the latch never set | case b, the ready-panic test | case a |
+| N5 | the lock-failure branch says only the shared helper's line (round 1's) | point 3's migration case | its would-run case, `TestACrashRollbackNeedsBothLocks` |
+| N6 | the branch records the refusal it says | point 3's migration case (the marker changed) | its would-run case |
+| N7 | the refusal said with the line of a start that goes on | point 3's migration case | its would-run case |
+
+### Checks
+
+- `go vet` of internal/updater and cmd/bridge, and go1.27.3's gofmt
+  (`go run cmd/gofmt -l`) on every Go file the round touched: clean.
+- The named tests with the Makefile's flags, at the fix: internal/updater's
+  take-back and count-again tests, and cmd/bridge's
+  `TestAPanic|TestACount|TestARefused|TestACrashRollbackNeedsBothLocks|TestAStop|TestARestartRequest|TestATakeBack|TestAServeKilled|TestAPreReadyStop`
+  slice (50 tests), green but for case a's substring check, then case a,
+  case b and the ready-panic test green again on the corrected check.
+- `rules-b760-r2.patch`, built by `.tmp/_b760/r2/build_rules_patch_r2.py` on a
+  copy of the tracked files (each replaced text asserted once): `git apply
+  --check` takes it over the worktree; on the patched copy make docs-check's
+  four commands pass (config-lifecycle.md 98,294 bytes of its 100,000,
+  cli-serve.md 50,819, the worst load 67.5 %), and `TestEveryCitedTestNameExists`
+  passes there and fails on a ghost citation planted in the copy's History
+  file. No entry moves, so `verify_moves.py` has nothing to prove.
+- The gates, below.
+
+### Gates
+
+At 41a085d0, on Go 1.27.3 (`GOTOOLCHAIN=go1.27.3`, go.mod's), TMPDIR under
+`.tmp/_b760`, in one session of the shared build slot, started by a guard
+that waited for it (`.tmp/_b760/r2/gates_r2.py`; in the slot from 17:27 with
+no wait): `make fmt` changed nothing; `make vet`, and with `GOOS=windows`,
+`GOOS=darwin` and `GOOS=linux GOARCH=386`: ok; `make docs-check`: ok
+(CLAUDE.md 82.1 %, the worst load 67.4 %); the qualification check
+(`go run ./scripts/qualification-version -base 3d0a0d05 -head HEAD`):
+`qualification version OK`; `make test TEST_PKGS='./cmd/bridge/...
+./internal/updater/...'` (race, `-p 4`, `-timeout 30m`, the Makefile's tags):
+ok, cmd/bridge 1,265 s, internal/updater 29 s; `git status` empty after. Not
+run this round: the whole suite and `make build-all`, which round 1 ran at
+fdd74a31. This round's code is in cmd/bridge and internal/updater, whose
+suites ran whole, and `make vet` compiled every package and its tests for the
+four targets, `TakeBackFailedStart`'s new parameter among them.
+
+`rules-b760-r2.patch` (39,340 bytes, sha256 `09a0c97c…`) was built again on a
+copy of 41a085d0's tracked files, byte for byte the patch checked above, and
+`git apply --check` takes it over the final head, this record's commit, which
+changes no rules file.
+
+Not run here: macOS and Windows natively, CI's runners, and a by-hand run with
+real release builds.
+
+## 2026-11-08 — B760 round 3: the public-text sweep, finished
+
+Worker b760, legion0 (Ubuntu 26.04, linux/amd64, go1.27.3, `GOTOOLCHAIN=local`,
+`GOPROXY=off`), branch `fix/b760-probation-windows` (PR #1442) from 5b00b034
+(round 2, the orchestrator's rules commit for it and its rewording of three
+passages), on the orchestrator's round 3 brief with Codex's and Claude's
+reviews of that commit and of the brief's draft folded in. Commits: the sweep
+85452270, then this record. The rules' words go in `rules-b760-r3.patch`, made
+against the final head: B760's line in `config-lifecycle.md` and its verbatim
+copy in the long form, and B660's and B760's long forms in
+`ops/History-rules-config-lifecycle.md`.
+
+### The sweep
+
+Every passage that still described a window B760 leaves open now names backlog
+B760 alone, and keeps what B760 closes. The brief's list: B660's long form on a
+slow healthy teardown, the runbook's two paragraphs (the same teardown, and the
+take-back's quoted line), two passages of this log (the same teardown, and
+round 1's control row on R4's clean stop), the docs of
+`TestACountThatFailedBeforeItPublishedLeavesItsStartUncounted` and
+`TestATakeBackWhoseWriteIsRefusedKeepsTheCount`, `carryCapabilities`' last
+sentence, and seven passages of `disarm.go` (`CountTried`'s, `CountMissed`'s
+and `Start`'s docs, `AdmitBoot`'s and `disarmUnlocked`'s, and two comments in
+`disarmHeld`), where what B760 closes stays: the start keeps its hold and
+clears its token as it returns. What the sweep found beside them, changed the
+same way: `main.go`'s take-back comment; `sayTheAdmissionsCount`'s line
+(`serve_crashed_install.go`); the docs of eight test files
+(`serve_count_writes_test.go`'s first test, `serve_count_again_test.go`'s case
+(a) and a comment, `serve_failed_starts_test.go`, `serve_not_serving_test.go`'s
+two, `serve_probation_test.go`'s confirmation test, and internal/updater's
+`probation_test.go`, `probation_b760_test.go` and `probation_r4_test.go`); five
+passages of this log (B660's test list, its swap paragraph and its token
+paragraph, round 1's R5 item, round 2's red-first paragraph); and, in the
+patch, four of B660's long form (its count, the take-back's reason, the
+swap's attributes, the start's token), B760's R5 list, and B760's line and its
+copy. 48 hunks over 17 files in all; the passages removed, each with its file,
+its lines at 5b00b034 and its old text, are kept outside the repository for
+the backlog's entry.
+
+### The operator's lines
+
+The admission's line where its count's write answered an error or its lock
+was not taken (`DisarmResult.CountMissed`, said by `sayTheAdmissionsCount`),
+and serve's where a take-back had no answer within its budget, no longer say
+what came of the count. They say what the write or the take-back answered, and
+to run `bridge doctor`, whose install-probation line says where the install
+stands: `updater: the install marker's write of the count of this start of …
+answered an error: …; run bridge doctor, whose install-probation line says
+where the install stands`, the lock's `the install marker's lock was not taken
+for the count of this start of …: …`, and `updater: this start ended cleanly,
+and the take-back of its count of the install's starts had no answer within
+10s (…); run bridge doctor, …`. The four tests that asserted the admission's
+old words and the one that asserted the take-back's ask for the new ones
+(`write of the count of this start`, `had no answer within`), and two of those
+assertions' own failure texts changed with them; no state, exit-code or
+synchronisation assertion changed. The runbook quotes the take-back's new line.
+
+### Only text moved
+
+`.tmp/_b760/r3/ast_check.py` parses every Go file that differs from 5b00b034
+both ways, with comments, positions and resolver links stripped
+(`.tmp/_b760/r3/astcmp`: `go/parser` and a reflection walk of the tree that
+dumps every node's type and every leaf's value), and compares each file's
+`//go:` directive lines as text. Of the 13 files, six are identical but for
+comments (`serve_not_serving_test.go`, `probation_b760_test.go`,
+`probation_r4_test.go`, `probation_test.go`, `swap_capability_linux.go`,
+`takeback_write_test.go`); the other seven differ in string literals alone:
+`disarm.go`'s two `CountMissed` messages, `main.go`'s take-back line (its two
+pieces), `serve_crashed_install.go`'s line, the five expectations and the two
+failure texts above. No declaration, statement, expression, identifier or
+directive differs.
+
+### Kept
+
+`PROTOCOL.md`'s probation paragraph, which the iOS app mirrors byte for byte
+(a change there needs its pair); the tests' names, and two tests' failure
+texts that pair with no changed line (test code, which the brief leaves as it
+is); the binding rules' own words ("reporting only", "don't count a start for
+not serving"); and the contracts of `EndStart` and of `SaveState`'s barrier,
+which every marker writer relies on.
+
+### Checks
+
+- go1.27.3's gofmt (`go run cmd/gofmt -l`) on the 13 Go files: clean; `go vet`
+  of internal/updater and cmd/bridge with the Makefile's tags: ok.
+- The five tests whose expectations changed, race, `-p 4`, `-timeout 30m`, the
+  Makefile's tags, TMPDIR on this checkout's disk: ok.
+- `rules-b760-r3.patch`, built by `.tmp/_b760/r3/build_rules_patch_r3.py` on a
+  copy of the tracked files (each replaced text asserted once, and the rules
+  line and its long form's copy asserted to stay verbatim twins): checked
+  under the gates.
+
+### Gates
+
+At 6a72b6c1, on Go 1.27.3 (`GOTOOLCHAIN=go1.27.3`, go.mod's), TMPDIR under
+`.tmp/_b760`, in one session of the shared build slot, started by a guard that
+waited for it (`.tmp/_b760/r3/gates_r3.py`; in the slot from 19:45, after 14
+minutes behind another worker's gate): `make fmt` changed nothing; `make vet`,
+and with `GOOS=windows`, `GOOS=darwin` and `GOOS=linux GOARCH=386`: ok;
+`make test TEST_PKGS='./cmd/bridge/... ./internal/updater/...'` (race, `-p 4`,
+`-timeout 30m`, the Makefile's tags): ok, cmd/bridge 1,268 s,
+internal/updater 30 s; `git status` empty after.
+
+`rules-b760-r3.patch` (18,170 bytes, sha256 `3317ea12…`), built again on a
+copy of 6a72b6c1's tracked files byte for byte as first built: `git apply
+--check` takes it over the final head, this record's commit, which changes no
+rules file; on the patched copy `make -s docs-check` passes (config-lifecycle.md
+98,444 bytes of its 100,000, the worst load 67.5 %), and
+`TestEveryCitedTestNameExists` passes there and fails on a ghost citation
+planted in its History file.
+
+Not run here: the whole suite and `make build-all` (round 1 ran them at
+fdd74a31; this round changed comments and string literals alone, as the AST
+check shows), macOS and Windows natively, and CI's runners.
 ## 2026-11-08 — B741: the data dir's record gains an identity
 
 Worker b741, legion0, branch `fix/b741-data-dir-identity` from main's 7c1db6dd. Commits: 7bb7d84b (the
