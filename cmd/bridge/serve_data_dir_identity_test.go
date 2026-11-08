@@ -497,10 +497,13 @@ func TestServeRefusesAnIdentityThatDoesNotRead(t *testing.T) {
 }
 
 // TestServeRefusesWhatItCannotRead: a record or a marker that is there and
-// that this user may not read is refused as one that does not read, saying
-// to make it readable by the user the service runs as; bridge doctor, which
-// may run as another user than the service, says it is not checked, a warn,
-// as it says of a data dir it may not inspect (B659).
+// that this user may not read is refused as one that does not read, serve
+// saying to make it readable by the user the service runs as, and a command,
+// which may be run by another user than the service, saying to run it as that
+// user; bridge doctor, which may run as another user too, says it is not
+// checked, a warn, as it says of a data dir it may not inspect (B659), and
+// its store probes, which open nothing there, say this user cannot read it,
+// never that serve refuses it (B741's round 2, the Claude API on #1441).
 func TestServeRefusesWhatItCannotRead(t *testing.T) {
 	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
 		t.Skip("needs a file whose mode refuses this user a read")
@@ -539,9 +542,19 @@ func TestServeRefusesWhatItCannotRead(t *testing.T) {
 			if !strings.HasPrefix(c.Summary, "not checked: "+tc.lead(v)) {
 				t.Errorf("the data-dir line says %q, want it not checked, saying %q", c.Summary, tc.lead(v))
 			}
+			probe, ok := said.cli["sidecar-paths"]
+			switch {
+			case !ok:
+				t.Error("bridge doctor has no sidecar-paths line over a data dir that holds its database")
+			case strings.Contains(probe.Hint, "serve refuses") || !strings.Contains(probe.Hint, "this user cannot read"):
+				t.Errorf("the sidecar-paths line says %q, want it to say this user cannot read the data dir's record or identity", probe.Hint)
+			}
 			code, out := runCLI(t, "scan", "--config", v.cfg)
-			if code != 1 || !strings.Contains(out, "scan: "+tc.lead(v)) {
+			switch {
+			case code != 1 || !strings.Contains(out, "scan: "+tc.lead(v)):
 				t.Errorf("bridge scan exited %d, want 1 and the refusal of %s:\n%s", code, tc.name, out)
+			case !strings.Contains(out, "run bridge scan as the user the service runs as"):
+				t.Errorf("bridge scan's refusal does not say to run it as the user the service runs as:\n%s", out)
 			}
 		})
 	}
