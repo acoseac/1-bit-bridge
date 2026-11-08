@@ -120,6 +120,10 @@ type nativeSeams struct {
 	open func(Endpoint, Config) (*Device, error)
 	now  func() time.Time
 	at   func(time.Time) (<-chan time.Time, func())
+	// lifeEnded, nil but in a test, runs on the goroutine that revokes the
+	// sink once its life, the open's context, has ended, just before the
+	// revocation: a test parks it there, as a scheduler can leave it (B765).
+	lifeEnded func()
 }
 
 // OpenDSDSink opens an inert native sink. Activate is mandatory. A cancelled
@@ -229,6 +233,9 @@ func openDSDSink(ctx context.Context, c DSDConfig, h nativeSeams) (*DSDSink, err
 	go func() {
 		select {
 		case <-ctx.Done():
+			if h.lifeEnded != nil {
+				h.lifeEnded()
+			}
 			s.Revoke()
 		case <-s.done:
 		}

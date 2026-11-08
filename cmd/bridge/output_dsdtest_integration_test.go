@@ -202,33 +202,137 @@ func TestNativeIntegrationStopEveryLeg(t *testing.T) {
 	}
 }
 
+// nativeReleaseHold is the sink the harness's releases go through in
+// TestNativeIntegrationNextInsideFinish: each TrackChange release's answer
+// goes to answers, and escalate, when set, runs as the harness asks for an
+// Immediate release, before the sink has it: a test's hold on a Stop's
+// escalation, where a scheduler can leave it (B765).
+type nativeReleaseHold struct {
+	nativeTestSink
+	answers  chan error
+	escalate func()
+}
+
+func (s *nativeReleaseHold) Release(ctx context.Context, m alsapcm.ReleaseMode) error {
+	if m == alsapcm.Immediate && s.escalate != nil {
+		s.escalate()
+	}
+	e := s.nativeTestSink.Release(ctx, m)
+	if m == alsapcm.TrackChange {
+		s.answers <- e
+	}
+	return e
+}
+
+// nativeHold is a gate: hold blocks its callers until release, and parked
+// is closed once the first is held.
+func nativeHold() (hold func(), parked <-chan struct{}, release func()) {
+	entered, gate := make(chan struct{}), make(chan struct{})
+	var in, out sync.Once
+	return func() { in.Do(func() { close(entered) }); <-gate }, entered, func() { out.Do(func() { close(gate) }) }
+}
+
+// nativeAwait waits for parked under the fake kernel's watchdog, failing at
+// once, with what the run said, when the run ends first.
+func nativeAwait(t *testing.T, parked <-chan struct{}, answer chan int, diagnostics *lockedBuffer, what string) {
+	t.Helper()
+	timer := time.NewTimer(alsapcm.Watchdog())
+	defer timer.Stop()
+	select {
+	case <-parked:
+	case code := <-answer:
+		answer <- code
+		t.Fatalf("the run ended (exit %d: %q) before %s", code, diagnostics.String(), what)
+	case <-timer.C:
+		alsapcm.LogGoroutines(t)
+		t.Fatalf("waited %v for %s", alsapcm.Watchdog(), what)
+	}
+}
+
+// TestNativeIntegrationNextInsideFinish: a next while the native sink's
+// Finish waits, its TrackChange release then played out (natural), or a Stop
+// landing in each window of that release, each forced: cutoff, after the
+// cutoff and before the tail write, the sink's writer held in the write the
+// cutoff interrupted until the Stop has ended the sink's life and both the
+// life's revocation and the harness's Immediate release wait, so the writer
+// reaches the tail write first, as a scheduler can run it (B765: the tail
+// write took the cancellation the ended life made for a release failure,
+// ErrReleaseUnconfirmed, an exit 1); tail, while the tail write waits for
+// room; drain, while the drain waits. A Stop's run exits 0 as stopped, its
+// cleanup confirmed, the node's close held until the Stop has reached it;
+// and the TrackChange release the harness waits on answers with the sink's
+// own outcome, never the Stop's cancellation (B765: select could take that
+// answer for the release's when both were ready).
 func TestNativeIntegrationNextInsideFinish(t *testing.T) {
-	for _, stopAt := range []string{"natural", "tail", "drain"} {
+	for _, stopAt := range []string{"natural", "cutoff", "tail", "drain"} {
 		t.Run(stopAt, func(t *testing.T) {
 			h, k, w := realNativeRig(t)
 			h.args = setNativeArg(h.args, "tail-ms", "1")
 			h.contact.Tuple.TailMS = 1
 			b, _ := json.Marshal(h.contact)
 			_ = os.WriteFile(filepath.Join(h.dir, "contact.json"), b, 0600)
+			sink := &nativeReleaseHold{answers: make(chan error, 1)}
+			open := h.env.open
+			h.env.open = func(ctx context.Context, c alsapcm.DSDConfig) (nativeTestSink, error) {
+				s, e := open(ctx, c)
+				if e != nil {
+					return nil, e
+				}
+				sink.nativeTestSink = s
+				return sink, nil
+			}
+			var written, revoking, escalating <-chan struct{}
+			var write, revoke, escalate func()
+			if stopAt == "cutoff" {
+				written, write = k.ParkNextWrite()
+				revoking, revoke = k.ParkNextLifeEnd()
+				sink.escalate, escalating, escalate = nativeHold()
+				t.Cleanup(func() { write(); revoke(); escalate() })
+			}
 			answer := make(chan int, 1)
 			diagnostics := &lockedBuffer{}
 			go func() { answer <- runOutputDSDTest(context.Background(), h.args, h.env, io.Discard, diagnostics) }()
 			harnessEvent(t, h, "finish")
-			k.Await(t, "native buffer held", func(v alsapcm.KernelView) bool { return v.State == "RUNNING" && v.Starved })
+			if stopAt == "cutoff" {
+				nativeAwait(t, written, answer, diagnostics, "the writer held in its first write")
+			} else {
+				k.Await(t, "native buffer held", func(v alsapcm.KernelView) bool { return v.State == "RUNNING" && v.Starved })
+			}
 			prefix := len(k.Given())
 			nativeKey(w, 'n')
 			harnessEvent(t, h, "cutoff")
 			harnessEvent(t, h, "finish-return")
-			end := "complete"
-			if stopAt == "natural" {
+			end := "stopped"
+			switch stopAt {
+			case "natural":
+				end = "complete"
 				k.Free()
-			} else {
+			case "cutoff":
+				closing, closed := k.ParkNextClose()
+				t.Cleanup(closed)
+				nativeKey(w, 's')
+				nativeAwait(t, revoking, answer, diagnostics, "the Stop ending the sink's life, its revocation held")
+				nativeAwait(t, escalating, answer, diagnostics, "the Stop's Immediate release, held")
+				write()
+				nativeAwait(t, closing, answer, diagnostics, "the writer's release reaching the node's close")
+				escalate()
+				revoke()
+				closed()
+			default:
 				if stopAt == "drain" {
 					k.Grant(100 * time.Millisecond)
 					k.Await(t, "drain waiting", func(v alsapcm.KernelView) bool { return v.Drains > 0 && v.Starved })
+				} else {
+					// No content write waits once the cutoff has cancelled it,
+					// and a wait whose context ended is not starved: a writer
+					// waiting for time waits in the tail write.
+					k.Await(t, "the tail write waiting for room", func(v alsapcm.KernelView) bool { return v.Starved })
 				}
+				closing, closed := k.ParkNextClose()
+				t.Cleanup(closed)
 				nativeKey(w, 's')
-				end = "stopped"
+				nativeAwait(t, closing, answer, diagnostics, "the Stop's release reaching the node's close")
+				closed()
 			}
 			nativeReportResult(t, h, answer, diagnostics, 0, end)
 			if k.View().Opens != 1 {
@@ -239,6 +343,14 @@ func TestNativeIntegrationNextInsideFinish(t *testing.T) {
 				if !bytes.Equal(k.Given(), want) {
 					t.Fatalf("Finish cancellation lost qualified tail: got %d bytes want %d", len(k.Given()), len(want))
 				}
+			}
+			select {
+			case e := <-sink.answers:
+				if e != nil {
+					t.Errorf("the TrackChange release the harness waited on answered %q; want the sink's release, confirmed", e)
+				}
+			case <-time.After(alsapcm.Watchdog()):
+				t.Error("the TrackChange release the harness waited on never answered")
 			}
 			k.CheckClosedEach(t)
 		})
