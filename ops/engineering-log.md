@@ -86726,3 +86726,16 @@ paused, is possible there (read, not run).
 sink's answers to its activation, and its tests); no DSD byte changes. The branch holds 46 and
 main 45 (a77578f8), so the check against main passes and it stays 46, the runbook's 46
 paragraph saying round 4. B765, unmerged, takes 47: a merge after it needs the next free one.
+
+Round 4's gates, on f7cd1251 at legion0, each through the build slot: `make fmt` left the
+tree clean; `make vet` passed for linux/amd64, `GOOS=windows`, `GOOS=darwin` and `GOOS=linux
+GOARCH=386`; `go test -race` on the packages round 4 touched (playback, alsapcm,
+qualification) passed (81 s), and the round's cases passed 20 times running under `-race`;
+the native overlay's two runs passed, each case CI names among them; `make test` passed, 89
+packages ok and none failing (2,063 s), the Linux-only tests run here; `make build-all` and
+`make docs-check` passed, docs-check again on a copy of the branch with the rules patch
+applied, where the guards that read the tracked docs passed too
+(`TestEveryCitedTestNameExists`, `TestEveryBridgeWordIsInTheProtocol`,
+`TestNoDocblockNamesAnotherDeclaration`, the endpoint and error-table guards,
+`TestDSDOutputProtocolTokens` and `TestQualificationRunbookVersion`); and the qualification
+check against main, the merge base CI takes (a77578f8), passed at 46.
