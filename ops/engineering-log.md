@@ -85277,3 +85277,169 @@ leave untouched outside `internal/player/playback` and this log, so it predates 
 passed in the cmd/bridge race run above. `make test` run again in the slot passed, 89 packages
 ok (2,060 s), the Linux-only tests run here. alsa-abi did not run: no ABI definition or
 `scripts/alsa-abi` file changed.
+
+## 2026-11-08 — B765: a Stop inside a native track change's release
+
+Worker b765, legion0, branch `fix/b765-tail-stop` from main's 98edead3. Commits: 0cd3cc95 (the
+integration tests say why an exit differs; qualificationVersion 47), d2d0fd67 (each window
+forced, red), 20b81fc7 (the fixes), ffe0f304 (the runbook's version 47), then this record. The
+rule changes through `rules-b765.patch`: one line in `player.md` and its long form in
+`History-rules-player.md`.
+
+### The failure
+
+CI's "Real-sink native harness integration" step failed run 42332814420's first attempt (B10's
+#1426 at bf0568ce, 2026-11-07): `TestNativeIntegrationNextInsideFinish/tail`, `exit=1 want=0`
+and nothing more; the second attempt passed. The test needs no device: the real `DSDSink` over
+the fake kernel, `runOutputDSDTest` on a goroutine of the test. Its tail case sends `n` while the
+sink's Finish waits, waits for the cutoff and for Finish's return, and sends `s` at once, so
+nothing showed where the release was when the Stop landed.
+
+### Making it say why
+
+`nativeReportResult` printed the report's Error only when End differed, and every run's errout
+was `io.Discard`, so an exit 1 with End `stopped` said nothing. Each run it checks now writes its
+errout to a `lockedBuffer`, and an exit it did not want prints End, Error and that buffer. At
+GOMAXPROCS 2 beside 16 busy processes, 5 of 300 tail runs then failed with `End=stopped
+Error="native release unconfirmed"`. Both suspected windows strip to that text
+(`withoutNativeCancellation` keeps ErrReleaseUnconfirmed and drops the cancellations beside it),
+so a build with a print in each window (the source restored from memory, `git status` empty
+after) ran 400 tail runs under the same load: 7 failed, all 7 in the sink's window; the harness's
+select took the release's answer with the run stopped twice, both times a confirmed nil, and both
+runs passed.
+
+### The two windows
+
+1. The sink, CI's failure. The harness's Stop cancels the run's context, which is the native
+   sink's life: `openDSDSink` takes the open's context, and the life's watcher revokes the sink,
+   Immediate, on the goroutine the life's end wakes. A scheduler can run the writer first. After
+   the cutoff (TrackChange) it then created the tail write's context with the life ended and the
+   release still TrackChange; `nativeContext` cancels a context whose sink's life has ended, so
+   `Device.Write` returned the cancellation at once, `expectedReleaseCancellation` refused it
+   (Immediate's alone are expected), and the writer recorded ErrReleaseUnconfirmed, which the
+   Stop's Immediate release then answered: exit 1. Serve's player cannot reach it: a backend
+   sink's life is a context of its own, which `closeOutput` cancels once the sink is Done.
+2. The harness. `nativeTrackRelease` waited on `Release(ctx, TrackChange)` with the run's context,
+   so a Stop made that wait answer ErrReleaseUnconfirmed with the cancellation whenever the sink
+   had not finished. With that answer and the Stop both ready, select picks at random, and the
+   release's arm returned the answer, an exit 1, without the Immediate cleanup the cancellation's
+   arm does. The harness reaches its select microseconds after the cutoff, so it takes a scheduler
+   that stops it in between: the loaded loop saw that arm taken twice in 400 runs, each time on a
+   confirmed answer.
+
+A user's Stop reaches both: Stop pressed while a navigation's tail plays, or just after the `n`.
+Both fixes are in the production path, and no test-side barrier stands in for either.
+
+### As built
+
+- `nativeContext` begins the Immediate release itself, under the sink's lock, when it sees the
+  life ended, before any write sees the context the life cancels: the cancellation is then the
+  revocation's, expected, and the watcher's revocation after it changes nothing. A device fault
+  or a failed close is still an error. A content write's or a prefill's context born after the
+  life's end is the revocation's in the same step, where the watcher made it so a moment later
+  before (the writer spun on cancelled content writes until it did).
+- `nativeTrackRelease` waits on `Release(context.Background(), TrackChange)`: its answer is the
+  sink's own outcome, confirmed, or unconfirmed by the sink's own two-second budget, and the
+  Stop's arm escalates and confirms, as before. Not taken: also checking the run's context in the
+  release's arm. With the wait on no context a Stop ends, that arm carries the sink's own outcome
+  alone, and the check would only decide which of a finished navigation and a Stop wins when both
+  land at once, in a moment no park reaches (between the goroutine's start and the select), so
+  nothing could pin it.
+- A seam, `nativeSeams.lifeEnded` (nil outside a test), runs on the life's watcher between the
+  life's end and its revocation; `FakeKernel.ParkNextLifeEnd`, in alsapcm's test export, which
+  the overlay lends cmd/bridge, parks the next native sink's watcher there.
+
+### Each window forced
+
+`TestNativeIntegrationNextInsideFinish` runs natural, cutoff, tail and drain, nothing left to the
+scheduler:
+- cutoff: the writer held in its first content write (`ParkNextWrite`) through the cutoff; the
+  Stop sent; once the life's watcher is parked before its revocation (`ParkNextLifeEnd`) and the
+  harness's Immediate release is held (`nativeReleaseHold`, the test's wrapper of the sink), the
+  writer goes on and reaches the tail write with the life ended and nothing escalated, the window
+  CI's failure needed;
+- tail: the Stop once the writer waits in the tail write (after the cutoff no content write waits,
+  and a wait whose context ended is not starved, so a starved writer is the tail write's);
+- drain: the Stop while the drain waits, as before.
+
+Every Stop holds the node's close (`ParkNextClose`) until the Stop's release reaches it, and every
+case requires the TrackChange release the harness waited on to answer with the sink's confirmed
+release. `TestNativeTailCancelledByItsEndedLifeIsNoFailure` forces the sink's window in alsapcm's
+own suite, which `make test` runs.
+
+Select picks at random among ready cases, so no park can make the old harness take the release's
+arm every time. The tests force the state that made its wrong answer possible, the release
+answering with a Stop's cancellation, and require the sink's own answer, which fails every time
+without the fix.
+
+### Red first
+
+At d2d0fd67, the tests without either fix, predicted in `.tmp/_b765/predictions-red.txt`, with
+`-count 5`: `TestNativeTailCancelledByItsEndedLifeIsNoFailure` failed 5 of 5 ("native release
+unconfirmed"); cutoff failed 5 of 5 (exit 1, End stopped, Error "native release unconfirmed", and
+the release answering "native release unconfirmed / context canceled"); tail and drain failed 5 of
+5 on the release's answer alone, exit 0; natural passed 5 of 5.
+
+### Negative controls
+
+At 20b81fc7, each an exact-once mutation predicted by name in
+`.tmp/_b765/predictions-controls.txt` before it ran, the overlay regenerated after it, the source
+restored from memory and `git status` empty after each, `-count 5`.
+
+| | mutation | red |
+|---|---|---|
+| C1 | `nativeContext` without the life's escalation | as predicted: the alsapcm test 5/5 and cutoff 5/5 (exit 1, "native release unconfirmed", the release answering with the cancelled write); natural, tail and drain green |
+| C2 | the TrackChange wait on the run's context again | as predicted: cutoff, tail and drain 5/5 on the release's answer ("native release unconfirmed / context canceled"), exit 0; natural and the alsapcm test green |
+| C3 | C1's mutation with the life's hold inert (the seam's call removed, the test's wait for it skipped) | as predicted: cutoff green 5/5; with the watcher free to revoke at the Stop the window is the hold's, not the scheduler's |
+
+### Load, as context
+
+The tail case as it stood (the Stop sent at once after Finish's return), beside 16 busy
+processes, 300 runs each from prebuilt race binaries inside the build slot: before, main's code
+with the diagnostics; after, the fixes with that tail case put back.
+
+| GOMAXPROCS | before | after |
+|---|---|---|
+| 1 | 28 of 300 exit 1 | 0 of 300 |
+| 2 | 9 of 300 exit 1 (5 of 300 in an earlier run) | 0 of 300 |
+
+Every failure before was `exit=1 want=0: End=stopped Error="native release unconfirmed"`.
+Without the busy processes, 300 runs at GOMAXPROCS 4 passed before the fix. The committed
+windows under GOMAXPROCS 2 and the same load passed 100 of 100 each (natural, cutoff, tail,
+drain).
+
+### Checked, and not a window
+
+A Stop while the native activation's admission reads the controls looked like the same class:
+the writer's fence answers "native activation fenced", not a cancellation. Forced with a scratch
+test, never committed (the third controls read held, the life's revocation held, the Stop sent,
+then the read let go), 20 runs passed: the harness waits in `DSDSink.Activate`'s select from
+before the Stop, and that select's cancellation arm revokes the sink at once, so the fence's
+error is neither the harness's answer nor recorded in the sink's result.
+
+### Qualification
+
+The dsd-test files and `internal/alsapcm/` are guarded. B9 (#1434, not merged) holds 46 on its
+branch, so this takes 47; the orchestrator reconciles at merge. The runbook's five current
+references move with it, and its record says what 47 covers. `LegacyVersion` stays 35.
+
+### Gates
+
+At ffe0f304, inside the build slot, on Go 1.27.3: `make fmt` changed nothing; `make vet` and its
+windows, darwin and linux/386 legs passed; `make docs-check` passed on the tree (player.md
+99.2 %) and on a copy with `rules-b765.patch` applied (CLAUDE.md 82.1 %, player.md 99.6 %, the
+worst load 67.1 %), where `verify_moves.py --base HEAD` passed with the line and its long form as
+the two new blocks and no citation broken; `scripts/qualification-version` passed against main's
+98edead3 (45 there, 47 at HEAD); `go test -race` passed for cmd/bridge with CI's tags and the
+native-integration overlay (1,237 s) and for alsapcm, qualification and playback; CI's two
+native-integration invocations passed, every case the job names: cmd/bridge 74 of 74, the four
+windows of `TestNativeIntegrationNextInsideFinish` among them, and playback 79 of 79; `make
+build-all` passed. The first `make test` failed in one subtest outside the player,
+`TestAMatchWhoseReQueueDidNotLandIsReQueuedByTheNextSweep/cancelled_inside_the_reset_by_a_switch-off`
+("the first sweep's re-queue landed: the case tests nothing"), the fingerprint sweep's timing
+precondition that B762's round 3 measured failing 1 of 40 at its base, 88 packages ok; alone
+under `-race` it passed 80 of 80 at HEAD and 80 of 80 on a copy of main's 98edead3, and nothing
+this change touches reaches it. `make test` run again in the slot passed, 89 packages ok (2,035
+s), its TMPDIR under `.tmp/_b765`, the Linux-only tests (ALSA, alsapcm, the durable writer, the
+identity paths) run here. alsa-abi did not run: no ABI definition or `scripts/alsa-abi` file
+changed.
