@@ -86435,3 +86435,165 @@ clean; the qualification check against main (`scripts/qualification-version
 (admin-console.md 82,699 bytes; the worst load 67.3%) and whose cited test
 names `TestEveryCitedTestNameExists` finds declared; `git status` clean
 after. internal/admin's race run is `make test`'s, with node absent.
+
+## 2026-11-08 — B797 round 3: a late or failed read of the upload list
+
+Round 3 of backlog B797 on `fix/b797-upload-ownership`, PR #1440, after the
+orchestrator took round 2 (63b570ba); worker b797 on legion0 (Ubuntu 26.04,
+linux/amd64, go1.27.3, `GOTOOLCHAIN=local`, `GOPROXY=off`). Of the two
+reviews of round 2, Codex's found one defect, a read of the list of
+interrupted uploads erasing the session Stop had just put on it, and Claude's
+left open whether a read answered after a commit lists the committed session
+again. One point; it holds at 63b570ba by a trace of the code. Commits: the
+red tests 4cc88320, the fix d4452ba7, this record, and the gates' results
+added to it after. The rule goes through `rules-b797-r3.patch`
+(admin-console.md's B797 bullet).
+
+### The defect
+
+`refreshResumable` replaced the page's list with each read's answer whole,
+and with `[]` when the read failed. Round 2 put a stopped session on the list
+at once, before the read Stop asks for, and three answers then took it off
+or put a gone session back on:
+
+- the page-load read, answered by the server before Stop's session existed
+  and delivered after Stop: the list emptied, and the same files chosen
+  again started over in a second session (Codex's finding);
+- Stop's own read failing: `[]`, and the same;
+- a read answered before a commit and delivered after it: the committed
+  session listed again, so the same files chosen again read a session the
+  server no longer holds (404) and Discard it deletes one (404). The same
+  from the read of the page shown since a navigation, asked before the
+  commit of the upload the left page ran, and from Stop's read held across
+  the resume and commit of the session it lists.
+
+A Discard it or a commit followed by a failed read emptied the list, which
+was right where nothing else was listed and wrong where another session was.
+
+### The fix
+
+The list has a generation (`resumableReads`). The page changes the list
+itself where it knows the server's answer has changed before a read could
+say so: Stop puts its session on it, at the end, or in place of the copy the
+list holds (a resume's, Try again's); a commit, once answered, takes its
+session off whatever its files' outcomes (`upload.Manager.Commit` removes the
+session after any commit it answers), and does so whether or not its run
+still owns the page, since the list is the console's and outlives a
+navigation; Discard it takes its session off once its delete has answered,
+before the read after it; and so does the delete of the session the
+pre-flight found already in the library. Each change advances the generation
+and draws the banner again from the list's first session, the one Discard it
+takes (`changeResumable`, `forgetResumable`, `renderResumable`).
+
+A read records the generation it is asked under and its ticket. One asked
+under an older generation, or older than the newest the list took, or one
+that fails, changes nothing; one asked under the current generation is the
+server's word and replaces the list, a session deleted elsewhere going with
+it. A merge keyed by session id was not taken: it lists again a committed
+session from a read held across its commit, and keeps one another tab
+deleted. A stale read that finds no read asked since the change asks one: a
+commit that lands after its page was left changes the list and asks none, and
+the page shown since then had only its own read, asked before the change.
+
+The banner reads `files[].size` and `files[].offset` of the list's first
+session. The create's answer carries both (`uploadFileDTO`, no `omitempty`),
+but a stopped session's offsets were the create's or the resume's read, not
+what its chunks answered: `transferAll` now moves each file's offset with its
+chunk's answer, so a stopped session's banner says what the server holds
+("16 B of 32 B" after two chunks of four).
+
+The newest-taken rule (`believed`) is defensive. With these callers every
+read but a page's first follows a change of the list, and the first read's
+banner goes with its page, so no two reads of one generation are out on one
+page; it is pinned structurally, and no node case reaches it. The banner of
+the page shown since a navigation is drawn by a change the left page's run
+makes (a late commit), from the console's list: the run says nothing there,
+its report and its scan note staying unsaid.
+
+### The tests
+
+Red at 4cc88320, green at d4452ba7: the new
+`TestTheListOfInterruptedUploadsTakesNoReadOlderThanThePagesOwnChange`
+(the generation, a read's record before it goes out, the failed read's catch,
+the stale and older checks before the list is replaced, the stale read's ask,
+the change's advance and its draw, the banner from the first session, Stop's
+change in place or at the end, a chunk's answer kept on the session, each
+commit's take-off as the statement after its answer and before the run's
+ask, the pre-flight's and Discard it's), and round 2's pin on
+`showUploadStopped` in `TestTheUploadPageRefusesAnotherUploadWhileARunOwnsIt`,
+which now asks for the change. `awaitsUnasked` passes over one
+`forgetResumable(...)` statement between an await and the run's ask, and
+asks of the statement after it what it asks of any (R3-C16).
+
+The node cases, in the new
+`TestALateOrFailedReadOfTheListKeepsWhatThePageChanged`, skip here (node is
+not installed on legion0). The rig gains `HoldAnswer`, a rule that serves a
+request as it arrives and holds its answer until the script lets it go (the
+server's word at that moment, delivered late), and `/__test/abandon`, a
+session deleted as another tab would; the harness's fetch counts by method
+and by method and path, and a page's first read of the list is what `ready`
+waits for. The cases: (a) the page-load read delivered after Stop's read;
+(b) the page-load read delivered while Stop's read is out, the same files
+chosen before it answers; (c) Stop's read failing, with the banner's words;
+(d) Discard it, then a failed read; (e) the same with another session
+listed; (f) a commit, then a failed read, and the same files chosen again;
+(g) two sessions, one stopped, deleted elsewhere, then a read; (h) a commit
+landing after its page was left, the page shown since having read the list
+before it, and a session that page's list held deleted elsewhere; (i) Stop's
+read delivered after the commit of the session it lists. By trace, red at
+4cc88320: (a) and (b) two sessions, (c) two sessions and the banner hidden,
+(e) the other session gone, (h) and (i) the committed session listed again;
+green there: (d) and (f), where round 2's `[]` on a failed read coincides
+with the right list, and (g), since a read replaced the list in round 2 as
+well (it is the control on a merge). All green at d4452ba7.
+What stands in for the runs: `requireCarried` on the assembled script at
+4cc88320 and at d4452ba7, and the scratch lexer on it, on B776's two
+harnesses and on app.js; B776's two harnesses declare `resumableReads` now,
+which their scripts read (checked by requireCarried's first half on both).
+
+### Negative controls
+
+Seventeen, predicted by name in `.tmp/_b797/controls-r3.predictions.txt`
+before the run, on d4452ba7 (`.tmp/_b797/controls_r3.py`, the bytes put back
+from memory); the baseline green before and after, `git status` clean after.
+O1 is `TestAnUploadRunOwnsThePageFromItsFirstAwait`, O3
+`TestTheUploadPageRefusesAnotherUploadWhileARunOwnsIt`, O4
+`TestTheListOfInterruptedUploadsTakesNoReadOlderThanThePagesOwnChange`; the
+runner's eight other tests (named in the predictions file, among them
+`TestResumeBannerIsWiredBothWays`) and the seven node tests (skipping) as the
+baseline throughout but where named.
+
+| Control | Red here | Under node (predicted, not run here) |
+|---|---|---|
+| R3-C1 a stale read taken | O4 | (b), (h), (i); (a) holds by the newest-taken check |
+| R3-C2 a failed read empties the list | O4 | (c), (e) |
+| R3-C3 no newest-taken check | O4 | none (no case reaches it) |
+| R3-C4 a stale read asks no read | O4 | (h) |
+| R3-C5 a change advances no generation | O4 | (b), (h), (i) |
+| R3-C6 a change draws no banner | O4 | (b), (c), (d), (e), (f) |
+| R3-C7 the banner from the list's last | O4 | (e) |
+| R3-C8 Stop's session by assignment (round 2) | O3, O4 | (b), (c) |
+| R3-C9 a listed stopped session keeps the list's copy | O4 | none |
+| R3-C10 a chunk's answer leaves the session's offsets | O4 | (c), the banner's words |
+| R3-C11 startUpload's commit takes nothing off | O4 | (f), (h), (i) |
+| R3-C12 its take-off only where the run owns the page | O4 | (h) |
+| R3-C13 retryUpload's commit takes nothing off | O4 | none |
+| R3-C14 Discard it takes nothing off | O4 | (d), (e) |
+| R3-C15 the pre-flight's delete takes nothing off | O4 | none |
+| R3-C16 a run's statement between the commit and its ask | O1, O4 | none |
+| R3-C17 (test) the harness declares no generation | the seven node tests, here | the same |
+
+All seventeen as predicted. R3-C11's first run named a line without its
+comment marker and applied nothing (reported INVALID, counted neither way);
+rerun with the line as written, it went red as predicted. R3-C17 is red here
+because `requireCarried` runs before node is looked for: a harness that does
+not declare the generation fails on a host without node.
+
+### What the orchestrator runs where node is installed
+
+Red at 4cc88320 in the cases named above, green at d4452ba7:
+
+    go test ./internal/admin/ -count=1 -v -timeout 900s -run '^(TestALateOrFailedReadOfTheListKeepsWhatThePageChanged|TestARetrySendsOnlyTheFilesItBeganWith|TestASiblingSendsNothingOnceAnotherWorkersChunkFailed|TestStopAndCancelEndARunWhereverItIs|TestNoContinuationTouchesAPageItNoLongerOwns|TestTheResumePathIsRefusedWhileARetryRuns|TestAnOrdinaryUploadRetryResumeAndStopAreUnchanged|TestTheConsoleRetriesARefusedCommitWithItsSessionOnceTheVolumeIsBack|TestTheConsoleSettlesAFailedTransferBeforeItOffersItsRetry)$'
+
+A case that waits out a read it expects (a commit landing after its page was
+left, red at 4cc88320) takes ten seconds more there.
