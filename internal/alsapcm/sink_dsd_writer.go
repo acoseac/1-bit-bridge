@@ -23,13 +23,17 @@ func (s *DSDSink) loopNative() {
 		s.released = true
 		s.active = false
 		if s.activation != nil {
-			// The writer ends with an activation it never ran: the sink's own
-			// fence when the release that ended it found nothing wrong, the
-			// failure's otherwise (B728 B9 round 4), answered as the life's
-			// cancellation once that life has ended (fenced, B765).
-			e := error(ErrActivationFenced)
+			// The writer ends with an activation it never ran (B728 B9 round
+			// 4), answered as fenced answers every command (round 8): a failure
+			// the writer or its release recorded, its device's or a close that
+			// failed (ErrReleaseUnconfirmed), joined to the words of its own,
+			// never to the sink's fence, which a caller takes for its drop's,
+			// and never dropped for the life's cancellation; with none, the
+			// sink's own fence while its life runs, and that life's
+			// cancellation once it has ended (B765).
+			e := ErrActivationFenced
 			if s.err != nil {
-				e = errors.Join(errors.New("native activation cancelled"), s.err)
+				e = errors.New("native activation cancelled")
 			}
 			s.activation.reply <- s.fenced("native activation", e)
 			s.activation = nil
@@ -93,14 +97,21 @@ func (s *DSDSink) loopNative() {
 				// can make after this: begun here, on one read of the life,
 				// before the error is classified and answered (B765 rounds 2
 				// and 3). What that end caused, a fence it tripped or a wait
-				// it ended, is no fault, and the caller's answer is the life's
-				// cancellation, whichever arm of its select takes the reply: a
-				// harness the life stopped took "native activation fenced" for
-				// a failure. Anything else, a device's or an admission's
-				// failure, stays the sink's fault, though the release has
-				// begun. While the life runs a release in progress excuses
-				// what it met, as ever, and a refused reopen while paused is
-				// held for the next resume; a terminal error is recorded above.
+				// it ended, is no fault, and is answered as the life's
+				// cancellation: a harness the life stopped took "native
+				// activation fenced" for a failure. Nothing is recorded yet
+				// then: a request is admitted only while the sink has recorded
+				// no failure, and the writer records one only here or as it
+				// ends, so this answer drops none, the rule fenced answers by
+				// (B728 B9 round 8). A caller whose own context's arm took the
+				// life's end waits for the writer's end and answers what it
+				// recorded (abandoned). Anything else, a device's or an
+				// admission's failure, stays the sink's fault, though the
+				// release has begun, and is the answer itself. While the life
+				// runs a release in progress excuses what it met, as ever, and
+				// a refused reopen while paused is held for the next resume; a
+				// terminal error is recorded above and answered as it is,
+				// ErrReleaseUnconfirmed kept.
 				end := s.life.Err()
 				if end != nil {
 					s.beginReleaseLocked(Immediate)

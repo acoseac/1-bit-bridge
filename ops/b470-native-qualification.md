@@ -1,6 +1,6 @@
 # B470 native qualification — owner approval and provisional evidence
 
-QualificationVersion is **48**. All older evidence must be rerun for the harness, native included. The
+QualificationVersion is **49**. All older evidence must be rerun for the harness, native included. The
 harness never creates approval. Since B728 no production path reads an approval record or a candidate:
 the player plays DSD by its effective policy (`ops/plan-b728-dsd-capability-design.md`). This runbook
 is the engineering harness's. Its evidence binds `qualificationVersion`, whose guard covers the DSD byte
@@ -249,7 +249,7 @@ GOTOOLCHAIN=go1.27.3 go test -race -tags ts_omit_webclient,ts_omit_debugeventbus
 
 ## Round 3 evidence rules
 
-Historical round 3 used qualificationVersion 4; current version is **48**. A native contact's
+Historical round 3 used qualificationVersion 4; current version is **49**. A native contact's
 Contact.SchemaVersion remains **2**; a DoP contact's is **3**. All older
 contacts are invalid; repeat contact on this build. Required Device and Subdevice
 fields bind the configured PCM endpoint, including a nonzero subdevice, before
@@ -338,7 +338,7 @@ still resolve inside it). `dsdMode: native` or `auto` enables only approved nati
 
 The Go contracts are `qualification.Approval`, `ApprovalBody`, `ApprovedPolicy`, `Edge`
 and `Evidence` in `internal/player/qualification/approval.go`. JSON uses those exact
-exported field names. SchemaVersion=1, or 2 with Transitions and QualifiedOn (2d.2, below); QualificationVersion=48; Revision is the owner's
+exported field names. SchemaVersion=1, or 2 with Transitions and QualifiedOn (2d.2, below); QualificationVersion=49; Revision is the owner's
 revision; Identity is the observed VID/ProductID/manufacturer/product/bcdDevice,
 anchored controller/port, interface, device and subdevice. No serial or card number is
 persistent identity. Unchanged descriptors may retain approval after replug/restart;
@@ -386,7 +386,7 @@ At least one native fixture must finish with measured playback of that tuple.
 NativeTuple and NativeCompleted record that execution; PCM-only lists or completion
 cannot qualify it. LifecycleActions count observed native outcomes: pause/resume,
 release/reopen, navigation between native occurrences, Stop, and natural completion.
-An admitted command alone is insufficient. Version 48 invalidates older evidence.
+An admitted command alone is insufficient. Version 49 invalidates older evidence.
 List all candidate directional edges explicitly. No command generates that record.
 
 ```sh
@@ -425,7 +425,7 @@ or evidence names resolving to the state directory itself before any ancestor
 walk. Native monitoring remains fail-closed without a grace period. The overlay
 generator requires both integration suites before publishing its overlay.
 Guarded API, config, extractor, output-play and approval paths changed; rerun
-qualification with version 48. ExtractorVersion 30 retains the first parsed DFF
+qualification with version 49. ExtractorVersion 30 retains the first parsed DFF
 PROP's known format facts when a later PROP makes compression unsupported.
 
 Version 13 also covers the deterministic PCM trace capture test. It changes no
@@ -1044,3 +1044,29 @@ harness's approval admission reads a record of version 48
 alone; the migration reads an owner's record of 35 to 48 (`LegacyVersion` stays 35). For
 owners: what 46 and 47 say, and nothing more plays differently. Every earlier version's
 harness evidence is stale to the harness, as at every bump.
+
+Version 49 is B728 B9's round 8: a failure the native sink recorded survives every answer
+its ended life gives. The writer and its release record a device's failure (a STATUS that
+returns EIO in a pause's watch) or a close at the writer's end that fails
+(`ErrReleaseUnconfirmed`); until 49, once the sink's life had ended, the writer's reply to
+a request it never ran and the refusals of Activate, Resume, ActivatePaused, Pause and
+WriteDSD answered that life's cancellation alone (`fenced`), and a request whose caller's
+context is that life, as the harness's is, answered its plain cancellation at once, before
+the release had recorded anything. Now `fenced` joins a recorded failure to the command's
+own refusal, the life running or ended, the life's cancellation answering only where none
+was recorded; and a request whose caller's context ends (`await`) answers that end with the
+recorded failure joined, waiting for the writer's end within the release's budget once the
+sink's life has ended too (`abandoned`). Under the prefix the sink's tests gain two cases
+and ten failure rows of the five commands (`sink_dsd_life_test.go`), and the backend's
+converted install-held case holds Revoke until its producer has stopped
+(`playback_dsd_choice_round7_test.go`, over the backend's new `Seams.ProducerStep`, outside
+the guard). No packer, plan, harness reader or record changes. The harness's approval
+admission reads a record of version 49 alone; the migration reads an owner's record of 35
+to 49 (`LegacyVersion` stays 35). For owners: a Stop pressed while the DAC fails a STATUS,
+or while its node's close fails, ends the run reporting that failure, exit 1, as the
+harness's own release reported it before, and a command answered beside that Stop (an
+activation, a pause or a resume) now carries the failure too; a clean Stop still ends the
+run as stopped, exit 0, and nothing plays differently.
+Serve's player, whose sinks' lives end only after their release, answers as before, but
+that a refusal of a sink that failed carries the failure beside its own words. Every
+earlier version's harness evidence is stale to the harness, as at every bump.

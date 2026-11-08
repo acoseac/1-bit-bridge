@@ -27,14 +27,17 @@ var ErrReleaseUnconfirmed = errors.New("native release unconfirmed")
 // released or being released (an Immediate release cuts a prefill short, the
 // cancellation joined to this) or paused, before or while the activation was
 // asked, at its admission's end, or before its writer ran it, while the sink's
-// life runs: once that life has ended, the fence answers the life's
-// cancellation instead (fenced, lifeCancelled; B765), which a caller the life
-// stopped takes for the stop it is. It is never the device's answer: an
-// admission the check refused, a write that failed and a reopen whose geometry
-// changed are returned as they are, and so is a sink that failed before the
-// activation, and a cleanup that failed is joined to it
-// (ErrReleaseUnconfirmed). A caller that dropped what it was activating tells
-// by it that the failure was the drop's.
+// life runs and the sink has recorded no failure: once that life has ended,
+// the fence answers the life's cancellation instead (fenced, lifeCancelled;
+// B765), which a caller the life stopped takes for the stop it is, and a
+// failure the sink recorded, its device's or its release's, is answered as
+// neither, but joined to the command's own refusal (fenced, B728 B9 round 8).
+// It is never the device's answer: an admission the check refused, a write
+// that failed and a reopen whose geometry changed are returned as they are,
+// and so is a sink that failed before the activation, and a cleanup of the
+// fence's own that failed is joined to it (ErrReleaseUnconfirmed). A caller
+// that dropped what it was activating tells by it that the failure was the
+// drop's.
 var ErrActivationFenced = errors.New("native activation fenced")
 
 const nativeReleaseBudget = 2 * time.Second
@@ -278,7 +281,9 @@ func (s *DSDSink) interrupt() {
 // be reactivated. A pause racing the admission check wins before the first write.
 // One the sink's own fence ends answers ErrActivationFenced, and, once the
 // sink's life has ended, a refusal and the fence answer that life's
-// cancellation (fenced, B765).
+// cancellation (fenced, B765), a failure the sink recorded joined to the
+// refusal instead (B728 B9 round 8). A caller whose context ends first
+// revokes the sink (await, abandoned).
 func (s *DSDSink) Activate(ctx context.Context, gen uint64) error {
 	if e := ctx.Err(); e != nil {
 		s.Revoke()
@@ -299,15 +304,60 @@ func (s *DSDSink) Activate(ctx context.Context, gen uint64) error {
 	s.activation = r
 	s.interrupt()
 	s.mu.Unlock()
+	return s.await(ctx, r)
+}
+
+// await is a request's wait for the writer's answer (Activate, Resume,
+// ActivatePaused): its reply, which the writer also sends as it ends, or its
+// caller's context's end, which revokes the sink and is answered by
+// abandoned.
+func (s *DSDSink) await(ctx context.Context, r *nativeRequest) error {
 	select {
 	case e := <-r.reply:
 		return e
 	case <-ctx.Done():
 		s.Revoke()
-		return ctx.Err()
+		return s.abandoned(ctx.Err())
 	case <-s.done:
 		return <-r.reply
 	}
+}
+
+// abandoned is the answer of a request whose caller's context ended (cause)
+// before the writer answered it, the sink revoked: that cause, with the
+// failure the sink recorded joined (B728 B9 round 8). While the sink's life
+// runs, the caller's own cancellation returns at once, with what is recorded
+// by then. Once the life has ended too, as it has for a caller on that life
+// (the harness's: a Stop ends both), the writer is ending, and what its
+// release records, its device's failure or a close that failed
+// (ErrReleaseUnconfirmed), is this answer's as it is the loop-end reply's
+// (fenced): the caller waits for the writer's end, within the release's
+// budget, and past it answers the release unconfirmed.
+func (s *DSDSink) abandoned(cause error) error {
+	s.mu.Lock()
+	ended, expired := s.life.Err() != nil, s.releaseExpired
+	s.mu.Unlock()
+	unconfirmed := false
+	if ended {
+		select {
+		case <-s.done:
+		case <-expired:
+			select {
+			case <-s.done:
+			default:
+				unconfirmed = true
+			}
+		}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	switch {
+	case unconfirmed:
+		return errors.Join(cause, ErrReleaseUnconfirmed, s.err)
+	case s.err != nil:
+		return errors.Join(cause, s.err)
+	}
+	return cause
 }
 
 // Revoke permanently cancels activation and begins Immediate cleanup.
@@ -322,10 +372,18 @@ func (s *DSDSink) lifeCancelled(op string, end error) error {
 	return &Error{Reason: ReasonCancelled, Op: op, Endpoint: s.params.Endpoint, Detail: "the sink's life ended", Err: end}
 }
 
-// fenced is a command's refusal: its own while the sink's life runs, and the
-// life's cancellation once that has ended, which releases the sink whatever
-// the command met first. With s.mu held.
+// fenced is a command's refusal, refusal, by the one rule every command's
+// refusal and the writer's loop-end reply answer by (B728 B9 round 8): a
+// failure the sink recorded (s.err: its device's, or its release's,
+// ErrReleaseUnconfirmed) is joined to the refusal whether or not the sink's
+// life has ended, so a caller the life stopped still sees it; with none, the
+// refusal itself while the life runs, and the life's cancellation once that
+// has ended, which releases the sink whatever the command met first (B765).
+// With s.mu held.
 func (s *DSDSink) fenced(op string, refusal error) error {
+	if s.err != nil {
+		return errors.Join(refusal, s.err)
+	}
 	if end := s.life.Err(); end != nil {
 		return s.lifeCancelled(op, end)
 	}
@@ -596,15 +654,7 @@ func (s *DSDSink) Resume(ctx context.Context) error {
 	s.activation = r
 	s.interrupt()
 	s.mu.Unlock()
-	select {
-	case e := <-r.reply:
-		return e
-	case <-ctx.Done():
-		s.Revoke()
-		return ctx.Err()
-	case <-s.done:
-		return <-r.reply
-	}
+	return s.await(ctx, r)
 }
 
 // Committed is true once any hardware frame, even silence, was accepted.
@@ -700,15 +750,7 @@ func (s *DSDSink) ActivatePaused(ctx context.Context) error {
 	s.activation = r
 	s.interrupt()
 	s.mu.Unlock()
-	select {
-	case e := <-r.reply:
-		return e
-	case <-ctx.Done():
-		s.Revoke()
-		return ctx.Err()
-	case <-s.done:
-		return <-r.reply
-	}
+	return s.await(ctx, r)
 }
 
 // CleanupResult reports only failures to relinquish the device. Done must close
