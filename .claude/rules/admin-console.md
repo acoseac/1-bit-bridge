@@ -501,12 +501,33 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   the first, then reads the list back (`showUploadStopped`): choosing the
   same files carries the session on, as the stop's words say, even before
   that read answers (round 2: the controls came back first, and a pick in
-  between started over in a second session). Cancel while a run prepares
+  between started over in a second session). That list is the console's,
+  kept across a navigation, and has a generation (`resumableReads`, round
+  3): the page changes the list itself where the server's answer has
+  changed before a read could say so, Stop putting its session on it (in
+  place of the copy the list holds already, if any) and taking off, once
+  answered, a commit's session whatever its files' outcomes and whether or
+  not the run still owns the page, Discard it's, and the one the pre-flight
+  deleted; each change advances the generation and draws the banner again
+  from the list's first session (`changeResumable`, `forgetResumable`,
+  `renderResumable`). A read asked under an older generation, or older
+  than one the list took, or one that fails, changes nothing; a read asked
+  under the current generation is the server's word and replaces the list,
+  a session deleted elsewhere going with it; and a stale read that finds no
+  read asked since the change asks one (a commit landing after its page was
+  left changes the list and asks none). A session's offsets follow its
+  chunks' answers (`transferAll`), so a stopped session's banner says what
+  the server holds. Before round 3 the page-load read, answered before
+  Stop's session existed and delivered after Stop, took the session off
+  the list, a failed read emptied it, and the same files chosen again
+  started over in a second session; and a read answered before a commit
+  listed the committed session again. Cancel while a run prepares
   stops it and clears the page at once, a session the server made meanwhile
   left an interrupted upload; a
   navigation (wireUpload's abort) stops the run and clears the page's upload,
-  and the library root's read, `refreshResumable` and `discardResumable`
-  touch only the page they were asked on. **Don't read `uploadState` in a
+  and the library root's read, a read of the list and what Discard it says
+  touch only the page they were asked on, while a change of the list draws
+  the banner of the page shown. **Don't read `uploadState` in a
   run's chain, take a run's files or session after its first await, touch the
   page or the state after an await without the run's ask, make a request
   without `uploadCheckpoint` right before it, send a chunk without asking
@@ -514,16 +535,24 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   again, Discard it or the drop target live while a run owns the page,
   stage a dropped folder whose reading saw a run begin or the page's upload
   change, give a stop's controls back before its session is on the page's
-  list, supersede a running upload with a pick, or let a run that lost the
-  page speak or give back controls.** `TestAnUploadRunOwnsThePageFromItsFirstAwait`,
-  `TestAnUploadRunSendsNothingOnceItMayNotGoOn` and
-  `TestTheUploadPageRefusesAnotherUploadWhileARunOwnsIt` pin the shape;
+  list, let a read of the list asked before the page's own change of it,
+  or one that fails, change it, merge a read into the list by session id
+  (a read held across a commit lists the committed session again), leave
+  a session the server no longer holds on the list until a read, draw the
+  banner from anything but the list's first session, supersede a running
+  upload with a pick, or let a run that lost the page speak or give back
+  controls.** `TestAnUploadRunOwnsThePageFromItsFirstAwait`,
+  `TestAnUploadRunSendsNothingOnceItMayNotGoOn`,
+  `TestTheUploadPageRefusesAnotherUploadWhileARunOwnsIt` and
+  `TestTheListOfInterruptedUploadsTakesNoReadOlderThanThePagesOwnChange`
+  pin the shape;
   `TestARetrySendsOnlyTheFilesItBeganWith`,
   `TestASiblingSendsNothingOnceAnotherWorkersChunkFailed`,
   `TestStopAndCancelEndARunWhereverItIs`,
   `TestNoContinuationTouchesAPageItNoLongerOwns`,
-  `TestTheResumePathIsRefusedWhileARetryRuns` and
-  `TestAnOrdinaryUploadRetryResumeAndStopAreUnchanged` run the page under
+  `TestTheResumePathIsRefusedWhileARetryRuns`,
+  `TestAnOrdinaryUploadRetryResumeAndStopAreUnchanged` and
+  `TestALateOrFailedReadOfTheListKeepsWhatThePageChanged` run the page under
   node, where node is installed, through its wired events, against the
   console's real handlers.
 
