@@ -932,16 +932,25 @@ run's) ended: on `nativeContext`'s one read of the life, before a write's contex
 made, so a tail write the Stop cancels is the revocation's and never a release failure;
 and before it classifies an activation's or a resume's error, so the fences an ended
 life trips ("native activation fenced", "native resume fenced after status") and a
-prefill's cancellation are the revocation's too, never the sink's fault. A seam,
-`nativeSeams.lifeEnded`, nil outside a test, parks the life's watcher in the tests. The
-harness's TrackChange wait (`nativeTrackRelease`) takes no context a Stop ends, so its
-answer is the sink's own outcome. The real-sink integration tests print the report's End
-and Error and the run's diagnostics on an exit they did not want. B9 holds 46 on its
-branch, so this takes 47. The harness's approval admission reads a record of version 47
-alone; the migration reads an owner's record of 35 to 47 (`LegacyVersion` stays 35). For
-owners: Stop or quit pressed while a navigation's release plays its tail or drains, while
-the native sink activates, or while a kernel pause resumes, ends the run as stopped, exit
-0, where it could exit 1 with `native release unconfirmed`, `native activation fenced` or
-`native resume fenced after status`; nothing plays differently, and serve's player, whose
-sinks' lives end only after their release, is unaffected. Every earlier version's harness
-evidence is stale to the harness, as at every bump.
+prefill's cancellation are the revocation's too, never the sink's fault. Round 3: only
+what the ended life caused is excused there; a device's or an admission's own failure
+beside it (a check after open that fails, a STATUS that returns EIO) is the sink's fault,
+recorded and reported. And what the ended life caused answers as that life's
+cancellation: the writer's reply to an activation or a resume, one it releases without
+running included, and the refusals of Activate, Resume, ActivatePaused, Pause and
+WriteDSD once the life has ended. A seam, `nativeSeams.lifeEnded`, nil outside a test,
+parks the life's watcher in the tests. The harness's TrackChange wait
+(`nativeTrackRelease`) takes no context a Stop ends, so its answer is the sink's own
+outcome. The real-sink integration tests print the report's End and Error and the run's
+diagnostics on an exit they did not want. B9 holds 46 on its branch, so this takes 47.
+The harness's approval admission reads a record of version 47 alone; the migration reads
+an owner's record of 35 to 47 (`LegacyVersion` stays 35). For owners: Stop or quit
+pressed while a navigation's release plays its tail or drains, while the native sink
+activates, while a kernel pause resumes, or right after a space that pauses or resumes,
+ends the run as stopped, exit 0, where it could exit 1 with `native release
+unconfirmed`, `native activation fenced`, `native resume fenced after status`, `native
+releasing` or `native resume fenced`; a DAC that fails its admission or a STATUS while
+Stop is pressed is reported, exit 1, where the run could end as a clean stop. Nothing
+plays differently, and serve's player, whose sinks' lives end only after their release,
+is unaffected. Every earlier version's harness evidence is stale to the harness, as at
+every bump.
