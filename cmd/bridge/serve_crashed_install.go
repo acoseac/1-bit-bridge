@@ -300,8 +300,8 @@ func recoverCrashedRefusedInstall(ctx context.Context, dataDir, configPath strin
 
 // sayTheAdmissionsCount says what the boot's admission counted (backlog
 // B660): one line where starts before this one did not end cleanly, in
-// updater.ProbationStatus's words for this start, and one where this start
-// could not be counted.
+// updater.ProbationStatus's words for this start, and one where its count's
+// write answered an error, with what to check (backlog B760).
 func sayTheAdmissionsCount(res updater.DisarmResult, stderr io.Writer) {
 	if res.CountMissed != nil {
 		fmt.Fprintf(stderr, "updater: %v; run bridge doctor, whose install-probation line says where the install stands\n", res.CountMissed)
