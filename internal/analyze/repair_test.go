@@ -257,11 +257,10 @@ func TestARepairWritesNothingIntoAWaveformDirectoryThatWent(t *testing.T) {
 	})
 	t.Run("gone altogether", func(t *testing.T) {
 		f := newRepairFixture(t)
-		_, err := runWaveformRepair(context.Background(), f.spec, fakeCurveSource(48000, func() {
-			if err := os.Remove(f.dir); err != nil {
-				t.Fatal(err)
-			}
-		}))
+		if err := os.Remove(f.dir); err != nil {
+			t.Fatal(err)
+		}
+		_, err := runWaveformRepair(context.Background(), f.spec, fakeCurveSource(48000, nil))
 		requireNoStrikeFor(t, err)
 		if _, serr := os.Lstat(f.dir); !errors.Is(serr, fs.ErrNotExist) {
 			t.Errorf("the waveform directory is at its path again after the repair (%v): a repair never "+
