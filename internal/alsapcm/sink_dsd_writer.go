@@ -83,6 +83,16 @@ func (s *DSDSink) loopNative() {
 			s.mu.Unlock()
 			if e != nil {
 				s.mu.Lock()
+				// The life's end is the sink's revocation, which its watcher
+				// can make after this: begun here before the error is
+				// classified, so an activation or a resume the ended life
+				// fenced or cancelled ("native activation fenced", a prefill's
+				// cancellation) records no fault and holds no refused reopen
+				// for a resume that cannot come (B765 round 2). A terminal
+				// error stays recorded above.
+				if s.life.Err() != nil {
+					s.beginReleaseLocked(Immediate)
+				}
 				terminal := errors.Is(e, ErrReleaseUnconfirmed)
 				held := s.paused && !s.releasing && !terminal
 				if !terminal && !held && !s.releasing {
@@ -248,11 +258,15 @@ func (s *DSDSink) activateNative(r *nativeRequest) error {
 // (openDSDSink) on a goroutine a scheduler can run after this one: the
 // Immediate release is established here, under that lock, before a write
 // sees the context the life cancels, so the cancellation is the
-// revocation's, expected, and never a release failure (B765).
+// revocation's, expected, and never a release failure (B765). One read of
+// the life decides both: a second could see an end the first did not, and
+// cancel the write with the release still TrackChange (round 2). A tail
+// write's context descends from releaseCtx, which the life does not end.
 func (s *DSDSink) nativeContext(tail, allowPaused bool) (context.Context, context.CancelFunc) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.life.Err() != nil {
+	ended := s.life.Err() != nil
+	if ended {
 		s.beginReleaseLocked(Immediate)
 	}
 	parent := s.life
@@ -262,7 +276,7 @@ func (s *DSDSink) nativeContext(tail, allowPaused bool) (context.Context, contex
 	ctx, cancel := context.WithCancel(parent)
 	s.waitIdle = false
 	s.waitCancel = cancel
-	if s.life.Err() != nil || (s.releasing && (!tail || s.mode == Immediate)) || s.revoked || (s.paused && !allowPaused) {
+	if ended || (s.releasing && (!tail || s.mode == Immediate)) || s.revoked || (s.paused && !allowPaused) {
 		cancel()
 	}
 	return ctx, cancel
