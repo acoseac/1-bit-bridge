@@ -280,15 +280,22 @@ func (w *writeSeams) waitAwaitedOr(t *testing.T, d *dsdRig, o engine.OccurrenceI
 	}
 }
 
-// waitedOrActivated waits until a step of o's waited for a write or o was
-// activated, whichever comes first.
-func (w *writeSeams) waitedOrActivated(t *testing.T, o engine.OccurrenceID) {
+// waitedUnactivated waits until a step of o's waited for a write, and fails
+// t where o's activation had begun by then (B728 B9 round 3, point 2): the
+// first such wait of an occurrence whose own sink opened beside the write is
+// that sink's adoption's, which comes before the activation, so an adoption
+// that did not wait reaches the activation first, whose own wait for the
+// write (awaitWrite) comes after it, and the activation stays unreached while
+// the write is held.
+func (w *writeSeams) waitedUnactivated(t *testing.T, o engine.OccurrenceID) {
 	t.Helper()
-	waitOn(t, fmt.Sprintf("occurrence %d to wait for the write or be activated", o), w.ch, func() bool {
-		w.mu.Lock()
-		defer w.mu.Unlock()
-		return slices.Contains(w.awaited, o) || slices.Contains(w.activated, o)
-	})
+	w.waitAwaited(t, o, 1)
+	w.mu.Lock()
+	activated := slices.Contains(w.activated, o)
+	w.mu.Unlock()
+	if activated {
+		t.Fatalf("occurrence %d's activation began before it waited for the write: its sink's adoption did not wait for a write pending", o)
+	}
 }
 
 // heldStore is the player's DSD state in memory whose next write, once
@@ -384,8 +391,9 @@ func wantPlayedAsItWas(t *testing.T, d *dsdRig, s *engine.Snapshot) {
 // own once the sink before it drained, and an open under way while a write
 // classifies what it would interrupt is the write's to count: the step that
 // found no write pending claims the occurrence, so the write takes it as
-// reaching a sink, and the sink's adoption and the occurrence's activation
-// wait for the write. Without the go-ahead the write answers would_interrupt,
+// reaching a sink, and the sink's adoption waits for the write, the
+// occurrence's activation unreached while the write is held (round 3, point
+// 2), as the activation waits too. Without the go-ahead the write answers would_interrupt,
 // whether the open returned before the state's write or inside it, where a
 // refresh reading the state waits for that write's lock, and b plays as it
 // was; with the go-ahead the write lands and b is handed off again before a
@@ -433,7 +441,7 @@ func TestASuccessorsOpenBesideAWriteIsCountedAndWaitsForIt(t *testing.T) {
 			res := d.choose(req)
 			reachedGate(t, stop, res, "the write's hold")
 			letAdmit()
-			w.waitedOrActivated(t, ob)
+			w.waitedUnactivated(t, ob)
 			stop.letGo()
 			got := answer(t, res)
 			switch {
@@ -553,8 +561,9 @@ func resumeIn(t *testing.T, resumed <-chan error) {
 // itself, under a claim it takes in the step that found no write pending, so
 // a write classifying beside that open counts b as reaching its sink, and
 // without the go-ahead answers would_interrupt; the sink the resume hands
-// the producer is adopted and activated once the write settles, and b plays
-// as it was.
+// the producer is adopted, its adoption waiting while the write is held and
+// b's activation unreached till then (round 3, point 2), and activated once
+// the write settles, and b plays as it was.
 func TestAResumesOpenBetweenTransportsBesideAWriteIsCounted(t *testing.T) {
 	w := newWriteSeams()
 	d, ob, _ := pausedBetween(t, w)
@@ -567,7 +576,7 @@ func TestAResumesOpenBetweenTransportsBesideAWriteIsCounted(t *testing.T) {
 	res := d.choose(choiceReq(t, d, dsdstate.ModeNative, 1, capAt(playbacktest.DSD64)))
 	reachedGate(t, stop, res, "the write's pending window")
 	letAdmit()
-	w.waitedOrActivated(t, ob)
+	w.waitedUnactivated(t, ob)
 	stop.letGo()
 	if got := answer(t, res); got.Outcome != playback.ChoiceWouldInterrupt {
 		t.Fatalf("the write beside the resume's open of b's sink: %s, want would_interrupt", got.Outcome)
