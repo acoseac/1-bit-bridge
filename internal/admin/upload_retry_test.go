@@ -37,11 +37,17 @@ func TestARefusalTheReviewHidOffersARetryOfTheSameSession(t *testing.T) {
 		t.Error("the retry block is inside #upload-review, which a refusal after the review collapsed leaves hidden")
 	}
 
+	// A run's failure is said through showUploadRunEnd, which hands one that
+	// is not a stop to showUploadFailure with the run's own upload (backlog
+	// B797: a run works on what it took, never the page's later pick).
 	js := readFile(t, "static/app.js")
 	start := stripJSComments(extractJSFunction(t, js, "startUpload"))
 	catchAt := strings.Index(start, "} catch (e) {")
-	if catchAt < 0 || !strings.Contains(start[catchAt:], "showUploadFailure(e);") {
-		t.Error("startUpload's catch does not show its error through showUploadFailure, which offers the retry")
+	if catchAt < 0 || !strings.Contains(start[catchAt:], "showUploadRunEnd(run, e);") {
+		t.Error("startUpload's catch does not show its error through showUploadRunEnd and showUploadFailure, which offers the retry")
+	}
+	if end, ok := extractJSFunctionIfPresent(js, "showUploadRunEnd"); !ok || !strings.Contains(stripJSComments(end), "showUploadFailure(e, run.state);") {
+		t.Error("showUploadRunEnd does not hand a failure to showUploadFailure with the run's own upload")
 	}
 
 	failure, ok := extractJSFunctionIfPresent(js, "showUploadFailure")
@@ -52,7 +58,7 @@ func TestARefusalTheReviewHidOffersARetryOfTheSameSession(t *testing.T) {
 	for _, want := range []string{
 		"showUploadError(",
 		`e?.code === "root_not_mounted"`,
-		"uploadState?.session",
+		"state?.session",
 		`getElementById("upload-retry").hidden = false;`,
 	} {
 		if !strings.Contains(failure, want) {
@@ -68,9 +74,9 @@ func TestARefusalTheReviewHidOffersARetryOfTheSameSession(t *testing.T) {
 	for _, want := range []string{
 		"uploadState?.session?.id",
 		"API.get(`/api/upload/sessions/${encodeURIComponent(sid)}`)",
-		"await transferAll(session);",
+		"await transferAll(run, session);",
 		"API.post(`/api/upload/sessions/${encodeURIComponent(sid)}/commit`)",
-		"showUploadFailure(e);",
+		"showUploadRunEnd(run, e);",
 	} {
 		if !strings.Contains(retryFn, want) {
 			t.Errorf("retryUpload has no %s", want)
@@ -155,6 +161,7 @@ globalThis.document = {
 let uploadState = null;
 let resumableSessions = [];
 let uploadAwaitingScan = false;
+const resumableDiscarding = new Set();
 const shown = () => ({
   reviewHidden: pageEls.get("upload-review").hidden,
   error: pageEls.get("upload-error").hidden ? "" : pageEls.get("upload-error").textContent,
@@ -252,7 +259,7 @@ func TestTheConsoleRetriesARefusedCommitWithItsSessionOnceTheVolumeIsBack(t *tes
 
 	src := readConsoleJS(t, "static/app.js")
 	prelude := extractJSConst(t, src, "API")
-	for _, c := range []string{"const BYTE_UNITS = ", "const UPLOAD_PARALLEL_FILES = ", "const UPLOAD_DIGEST_RETRIES = ", "const UPLOAD_JUNK_NAMES = "} {
+	for _, c := range []string{"const BYTE_UNITS = ", "const UPLOAD_PARALLEL_FILES = ", "const UPLOAD_DIGEST_RETRIES = ", "const UPLOAD_JUNK_NAMES = ", "const resumableReads = "} {
 		prelude += jsStatement(t, src, c)
 	}
 	script := withReachedFunctions(t, prelude+uploadRetryRun, src,

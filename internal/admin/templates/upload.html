@@ -67,6 +67,14 @@
           <input type="file" id="upload-folder" webkitdirectory multiple class="sr-only">
         </label>
       </div>
+      {{- /* Shown while an upload, a retry or a resume owns the page (backlog
+          B797, app.js setUploadBusy): the pickers, Upload, Try again and
+          Discard it are disabled then, and a drop is refused, since a pick
+          would replace the files the running upload sends. */ -}}
+      <p class="hint" id="upload-busy" hidden>
+        An upload is running. Choose more files once it has finished, or once
+        you have stopped it.
+      </p>
     </div>
 
     <div id="upload-review" hidden>
