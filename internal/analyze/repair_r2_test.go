@@ -57,31 +57,74 @@ func requireBody(t *testing.T, path, want string) {
 // scratch, removal and rename of the repair goes through that root. A folder
 // put at the path after that check, holding a scratch and a curve at the
 // repair's own names, is left exactly as it was put there: nothing made in
-// it, nothing removed, both of them intact. Red at round 1's code, whose
-// stale-scratch removal by path deleted the scratch there (backlog B652,
-// round 2).
+// it, nothing removed, both of them intact; an empty one gets nothing; and
+// one put there between the last check and the rename keeps its scratch and
+// its curve, the rename landing in the directory the repair was admitted on.
+// Red at round 1's code for the first, whose stale-scratch removal by path
+// deleted the scratch there (backlog B652, round 2).
 func TestARepairWorksOnlyThroughTheDirectoryItWasAdmittedOn(t *testing.T) {
-	f := newRepairFixture(t)
-	final := f.spec.SidecarPath()
-	scratch := final + AnalysisTmpSuffix
-	hooks := &repairHooks{beforeMkdir: func() {
-		f.replaceDir(t)
-		writeSentinel(t, scratch, "a scratch at the repair's own name")
-		writeSentinel(t, final, "a curve at the repair's own name")
-	}}
-	_, err := runWaveformRepairWith(context.Background(), f.spec, fakeCurveSource(48000, nil), hooks)
-	if !errors.Is(err, ErrWaveformDirAway) || CountsAgainstTheCurve(err) {
-		t.Errorf("repair error = %v, want ErrWaveformDirAway counting nothing", err)
+	// sentinels puts a scratch and a curve at the repair's own names in the
+	// folder now at the path.
+	sentinels := func(t *testing.T, f *repairFixture) {
+		t.Helper()
+		writeSentinel(t, f.spec.SidecarPath()+AnalysisTmpSuffix, "a scratch at the repair's own name")
+		writeSentinel(t, f.spec.SidecarPath(), "a curve at the repair's own name")
 	}
-	want := []string{"Artist", "Artist/Album", "Artist/Album/01.wav.waveform.bin", "Artist/Album/01.wav.waveform.bin.tmp"}
-	if got := entriesUnder(t, f.dir); !reflect.DeepEqual(got, want) {
-		t.Errorf("the folder now at the path holds %v, want only what was put there: %v", got, want)
+	requireSentinels := func(t *testing.T, f *repairFixture) {
+		t.Helper()
+		want := []string{"Artist", "Artist/Album", "Artist/Album/01.wav.waveform.bin", "Artist/Album/01.wav.waveform.bin.tmp"}
+		if got := entriesUnder(t, f.dir); !reflect.DeepEqual(got, want) {
+			t.Errorf("the folder now at the path holds %v, want only what was put there: %v", got, want)
+		}
+		requireBody(t, f.spec.SidecarPath()+AnalysisTmpSuffix, "a scratch at the repair's own name")
+		requireBody(t, f.spec.SidecarPath(), "a curve at the repair's own name")
 	}
-	requireBody(t, scratch, "a scratch at the repair's own name")
-	requireBody(t, final, "a curve at the repair's own name")
-	if left := regularFilesUnder(t, f.dir+".volume"); len(left) != 0 {
-		t.Errorf("the directory the repair was admitted on holds %v after a refused repair, want no curve and no scratch", left)
-	}
+	t.Run("a folder holding a scratch and a curve at its names", func(t *testing.T) {
+		f := newRepairFixture(t)
+		hooks := &repairHooks{beforeMkdir: func() {
+			f.replaceDir(t)
+			sentinels(t, f)
+		}}
+		_, err := runWaveformRepairWith(context.Background(), f.spec, fakeCurveSource(48000, nil), hooks)
+		if !errors.Is(err, ErrWaveformDirAway) || CountsAgainstTheCurve(err) {
+			t.Errorf("repair error = %v, want ErrWaveformDirAway counting nothing", err)
+		}
+		requireSentinels(t, f)
+		if left := regularFilesUnder(t, f.dir+".volume"); len(left) != 0 {
+			t.Errorf("the directory the repair was admitted on holds %v after a refused repair, want no curve and no scratch", left)
+		}
+	})
+	t.Run("an empty folder", func(t *testing.T) {
+		f := newRepairFixture(t)
+		hooks := &repairHooks{beforeMkdir: func() { f.replaceDir(t) }}
+		_, err := runWaveformRepairWith(context.Background(), f.spec, fakeCurveSource(48000, nil), hooks)
+		if !errors.Is(err, ErrWaveformDirAway) || CountsAgainstTheCurve(err) {
+			t.Errorf("repair error = %v, want ErrWaveformDirAway counting nothing", err)
+		}
+		if left := entriesUnder(t, f.dir); len(left) != 0 {
+			t.Errorf("the repair made %v in the folder now at the path", left)
+		}
+	})
+	t.Run("a folder put there between the last check and the rename", func(t *testing.T) {
+		// The rename itself goes through the root: the curve lands in the
+		// directory the repair was admitted on, now moved aside, and the
+		// scratch and curve at its names in the folder now at the path stay
+		// as they are. The pool's check before the commit refuses the commit.
+		f := newRepairFixture(t)
+		hooks := &repairHooks{atRename: func() {
+			f.replaceDir(t)
+			sentinels(t, f)
+		}}
+		res, err := runWaveformRepairWith(context.Background(), f.spec, fakeCurveSource(48000, nil), hooks)
+		if err != nil {
+			t.Fatalf("repair: %v", err)
+		}
+		requireSentinels(t, f)
+		moved := filepath.Join(f.dir+".volume", "Artist", "Album", "01.wav.waveform.bin")
+		if got, err := os.ReadFile(moved); err != nil || int64(len(got)) != res.WaveformSize {
+			t.Errorf("the curve in the directory the repair was admitted on: %d bytes (%v), want the %d it wrote", len(got), err, res.WaveformSize)
+		}
+	})
 }
 
 // repairPool is a pool over f's store whose repairs render through the fake

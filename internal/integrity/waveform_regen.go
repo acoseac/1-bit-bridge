@@ -107,9 +107,10 @@ type WaveformJudgeOptions struct {
 	// rest), and is Undecided otherwise: it never admits.
 	MaxRows int
 
-	// afterProbe, a test's seam, runs once the probe that begins the
-	// judgment has passed, before any row is classified.
-	afterProbe func()
+	// afterProbe and beforeLastLook, a test's seams, run once the probe that
+	// begins the judgment has passed, before any row is classified, and just
+	// before the tree is looked at the last time.
+	afterProbe, beforeLastLook func()
 }
 
 // WaveformJudgment is one look at the whole waveform catalog.
@@ -251,7 +252,11 @@ func JudgeWaveformCatalog(ctx context.Context, dir string, rows []WaveformSnapsh
 	// curves to render again, and the ratio, below its floor, looks at
 	// nothing. A tree that holds no curve now, while the rows record one, is
 	// refused as the probe refuses it, a judgment its budget stops included
-	// (backlog B652, round 2).
+	// (backlog B652, round 2). The curve it finds must be in the directory
+	// whose identity the jobs carry.
+	if opts.beforeLastLook != nil {
+		opts.beforeLastLook()
+	}
 	if last := WaveformDirSweepBlock(dir); last.Reason != "" {
 		j.Refusal, j.Reason = refusalOfBlock(last)
 		j.Reason = "looked at again before admitting: " + j.Reason

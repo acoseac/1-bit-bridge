@@ -54,6 +54,9 @@ func TestALinkIsNeverACurve(t *testing.T) {
 // throughout, so neither identity check sees it, and the ratio, below its
 // floor, looks at nothing. Refused at the last look, as a tree holding no
 // curve while the rows record one; a judgment its budget stops is told so too.
+// And the curve the last look finds must be in the directory the judgment
+// began on: another at the path by then, holding curves of its own, is a
+// volume away.
 func TestTheTreeIsLookedAtAgainBeforeAnyAdmission(t *testing.T) {
 	ctx := context.Background()
 	for _, tc := range []struct {
@@ -79,6 +82,20 @@ func TestTheTreeIsLookedAtAgainBeforeAnyAdmission(t *testing.T) {
 			}
 		})
 	}
+	t.Run("another directory at the path by the last look", func(t *testing.T) {
+		// Holding curves of its own: the last look finds one, in a directory
+		// that is not the one whose identity the jobs would carry.
+		c := newWaveformCatalog(t, 3)
+		c.remove(t, 1)
+		opts := WaveformJudgeOptions{MaxMissingPercent: WaveformRegenMaxMissingPercent,
+			beforeLastLook: func() {
+				if err := os.Rename(c.dir, c.dir+".volume"); err != nil {
+					t.Error(err)
+				}
+				writeCurveFixture(t, filepath.Join(c.dir, "Other", "x.flac.waveform.bin"), 24)
+			}}
+		requireRefused(t, JudgeWaveformCatalog(ctx, c.dir, c.rows, opts), WaveformRefusalDirAway, c.rows[0].SourcePath)
+	})
 	t.Run("a curve still there admits", func(t *testing.T) {
 		c := newWaveformCatalog(t, 3)
 		c.remove(t, 1)

@@ -137,10 +137,12 @@ func runWaveformRepair(ctx context.Context, spec RepairSpec, src curveSource) (R
 // repairHooks are a test's view inside one repair: beforeMkdir runs once the
 // repair's root is open and checked, before its first directory is made;
 // beforeRename once the curve is in its scratch beside its place, before the
-// check that precedes the rename. Nil in production.
+// check that precedes the rename; atRename once that check has passed, just
+// before the rename itself. Nil in production.
 type repairHooks struct {
 	beforeMkdir  func()
 	beforeRename func(tmp, final string)
+	atRename     func()
 }
 
 // runWaveformRepairWith is runWaveformRepair with a test's hooks.
@@ -210,6 +212,9 @@ func runWaveformRepairWith(ctx context.Context, spec RepairSpec, src curveSource
 	// row finds it, so the directory at the path must still be the root.
 	if err := d.atPath(); err != nil {
 		return RepairResult{}, err
+	}
+	if hooks != nil && hooks.atRename != nil {
+		hooks.atRename()
 	}
 	if err := atomicwrite.RenameInRootCtx(ctx, root, tmpRel, finalRel); err != nil {
 		return RepairResult{}, writeFailure(ctx, d, err)
