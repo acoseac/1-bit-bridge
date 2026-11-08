@@ -130,21 +130,42 @@ func SameAsRecorded(recorded, now string, folding []CaseFolding) bool {
 		return recorded == now
 	}
 	r, n := absElements(recorded), absElements(now)
-	if len(r) != len(n) {
+	if len(r) != len(n) || !strings.EqualFold(r[0], n[0]) {
 		return false
 	}
-	ofThisPath := len(folding) == len(r)-1
-	for i := range r {
-		switch {
-		case r[i] == n[i]:
-		case !strings.EqualFold(r[i], n[i]):
-			return false
-		case i == 0:
-		case ofThisPath && folding[i-1] == CaseSensitive:
+	folding = foldingOf(folding, len(r))
+	for i := 1; i < len(r); i++ {
+		if !alikeByRecord(folding, r, i, n[i]) {
 			return false
 		}
 	}
 	return true
+}
+
+// foldingOf is folding where it holds one answer for each folder a spelling
+// of that many elements (absElements) passes through, and nil where it does
+// not: a folding of another spelling, its resolution among them, or none,
+// says nothing of any of them, each CaseUnknown.
+func foldingOf(folding []CaseFolding, elements int) []CaseFolding {
+	if len(folding) != elements-1 {
+		return nil
+	}
+	return folding
+}
+
+// alikeByRecord reports whether name, looked up in the folder recorded's i-th
+// element is looked up in (i at least 1, after the volume's root), names what
+// that element names there by the record: the same name, or the same but for
+// case where folding (foldingOf's of recorded) does not hold that folder as
+// CaseSensitive.
+func alikeByRecord(folding []CaseFolding, recorded []string, i int, name string) bool {
+	switch {
+	case recorded[i] == name:
+		return true
+	case !strings.EqualFold(recorded[i], name):
+		return false
+	}
+	return folding == nil || folding[i-1] != CaseSensitive
 }
 
 // absElements is the clean absolute path p's elements: its volume's root

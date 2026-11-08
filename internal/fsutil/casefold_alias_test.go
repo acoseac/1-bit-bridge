@@ -1,8 +1,10 @@
 package fsutil
 
 import (
+	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -126,4 +128,67 @@ func TestARecordedPathComparesThroughAnAliasOfItsAncestors(t *testing.T) {
 				recorded, now, FormatFolding(resolved))
 		}
 	})
+}
+
+// TestARecordedPathComparesAsWindowsResolvesIt stands in, on any host, for
+// how Windows resolves a path (resolveLinks there): a folder that is there is
+// named by its long name in the case its volume keeps, whatever spelling
+// reaches it, its short (8.3) name or one in another case, and what is not
+// there does not resolve. A path recorded by a folder's short name and
+// compared by its long one, or the reverse, is judged by the letter of the
+// folder the leaf is looked up in, never read as two folders; a folder that is
+// there, spelled in another case, is one folder whatever the letter of the
+// folder above it; a difference below it, not there, is the letters'.
+// TestARecordedPathComparesThroughAShortName and
+// TestACaseOnlyDifferenceInAFolderThatIsThere ask Windows itself.
+func TestARecordedPathComparesAsWindowsResolvesIt(t *testing.T) {
+	j := filepath.Join
+	root := volumeRoot()
+	users := j(root, "Users")
+	long, short := j(users, "runneradmin"), j(users, "RUNNER~1")
+	mnt, shortMnt := j(long, "usb"), j(short, "usb")
+	// Each folder that is there, by each spelling that reaches it, as the
+	// volume folds it, and its name on disk.
+	there := map[string]string{}
+	for _, f := range [][2]string{{root, root}, {users, users}, {long, long}, {short, long}, {mnt, mnt}, {shortMnt, mnt}} {
+		there[strings.ToLower(f[0])] = f[1]
+	}
+	windows := func(p string) (string, error) {
+		if onDisk, ok := there[strings.ToLower(p)]; ok {
+			return onDisk, nil
+		}
+		return "", &fs.PathError{Op: "resolve", Path: p, Err: fs.ErrNotExist}
+	}
+	const (
+		I = CaseInsensitive
+		S = CaseSensitive
+	)
+	for _, tc := range []struct {
+		name          string
+		recorded, now string
+		letters       map[string]CaseFolding
+		same          bool
+	}{
+		{"recorded by the short name, the leaf's folder folding case",
+			j(shortMnt, "Bridge"), j(mnt, "bridge"), map[string]CaseFolding{shortMnt: I}, true},
+		{"recorded by the short name, the leaf's folder keeping case",
+			j(shortMnt, "Bridge"), j(mnt, "bridge"), map[string]CaseFolding{shortMnt: S}, false},
+		{"compared by the short name in another case, the leaf's folder folding case",
+			j(mnt, "Bridge"), j(users, "runner~1", "USB", "bridge"), map[string]CaseFolding{mnt: I}, true},
+		{"compared by the short name in another case, the leaf's folder keeping case",
+			j(mnt, "Bridge"), j(users, "runner~1", "USB", "bridge"), map[string]CaseFolding{mnt: S}, false},
+		{"a folder that is there in another case, its folder recorded as keeping case",
+			j(mnt, "Bridge"), j(long, "USB", "Bridge"), map[string]CaseFolding{long: S}, true},
+		{"a case-only difference below the folder that is there, its folder keeping case",
+			j(mnt, "Sub", "Bridge"), j(long, "USB", "SUB", "Bridge"), map[string]CaseFolding{long: S, mnt: S}, false},
+		{"a case-only difference below the folder that is there, its folder folding case",
+			j(mnt, "Sub", "Bridge"), j(long, "USB", "SUB", "Bridge"), map[string]CaseFolding{long: S, mnt: I}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			folding := FoldingOnTheWay(tc.recorded, lettersOf(tc.letters), map[string]CaseFolding{})
+			if got := sameAbsAsRecorded(tc.recorded, tc.now, folding, windows); got != tc.same {
+				t.Errorf("sameAbsAsRecorded(%q, %q, %s) as Windows resolves = %v, want %v", tc.recorded, tc.now, FormatFolding(folding), got, tc.same)
+			}
+		})
+	}
 }

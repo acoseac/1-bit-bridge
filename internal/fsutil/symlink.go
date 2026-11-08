@@ -67,19 +67,68 @@ func SamePath(a, b string) bool {
 }
 
 // SamePathAsRecorded is SamePath for a path recorded earlier together with
-// how each folder on its way compared names then (FoldingOnTheWay): recorded
-// and now name one path where each resolves, as EvalSymlinksOrClean resolves
-// it, to one string, or where recorded as written and now, as written or as
-// it resolves, are alike by that folding (SameAsRecorded). How a volume
-// compares names is never probed here, unlike SamePath: recorded's folders
-// may be on a volume that is away, and a probe then answers for the folder
-// left at its mount point, on the volume above (backlog B741's gap 3).
+// how each folder on its way compared names then (FoldingOnTheWay), probing
+// nothing. Two absolute paths name one path where two of their folders, as
+// many names above each path's end, resolve (ResolveLinks) to one directory,
+// and below the deepest two that do each name now gives is alike, by that
+// folding, with the one recorded gives in its place (alikeByRecord: the same,
+// or the same but for case where the folder recorded's spelling looks it up
+// in was not read as case-sensitive); and where no two resolve to one (a
+// drive that is not there), where the two are alike as written
+// (SameAsRecorded). The resolved folders are compared exactly and the names
+// below them as written, so a link on the way to another depth (macOS's
+// /var, a link to /private/var one folder deeper) moves the folders above
+// where it leads and never a letter: each name below is recorded's own,
+// judged by the letter recorded for the folder it is looked up in. A folding
+// that does not hold one letter for each folder recorded's spelling passes
+// through (foldingOf: one of another spelling, its resolution's among them)
+// says nothing of any, each CaseUnknown. B741's round 4: recorded as written
+// was compared with now as it resolved, whole, which laid the letters over
+// the resolution, shifted by the folders a link added or took away, and on
+// Windows read a short (8.3) name and its long one as two folders.
+//
+// What a resolution does with case decides a folder that is there spelled in
+// another case: on Windows it names each folder that is there by its name on
+// disk, its long name in the case its volume keeps, so the two spellings
+// resolve to one directory and name one folder whatever its letter; on Linux
+// and macOS it keeps the spelling it is given, so they resolve apart and the
+// letter of the folder above decides, as for a folder that is not there. How
+// a volume compares names is never probed here, unlike SamePath: recorded's
+// folders may be on a volume that is away, and a probe then answers for the
+// folder left at its mount point, on the volume above (backlog B741's gap 3).
+// A path that is not absolute is one with another where both resolve, as
+// EvalSymlinksOrClean resolves them, to one string.
 func SamePathAsRecorded(recorded, now string, folding []CaseFolding) bool {
-	rn := EvalSymlinksOrClean(now)
-	if EvalSymlinksOrClean(recorded) == rn {
+	recorded, now = filepath.Clean(recorded), filepath.Clean(now)
+	if recorded == now {
 		return true
 	}
-	return SameAsRecorded(recorded, now, folding) || SameAsRecorded(recorded, rn, folding)
+	if !filepath.IsAbs(recorded) || !filepath.IsAbs(now) {
+		return EvalSymlinksOrClean(recorded) == EvalSymlinksOrClean(now)
+	}
+	return sameAbsAsRecorded(recorded, now, folding, ResolveLinks)
+}
+
+// sameAbsAsRecorded is SamePathAsRecorded for two clean absolute paths, by
+// resolve, ResolveLinks or a test's stand-in for what this host's volumes do
+// not do (a drive that is not there, Windows' short names and case on disk).
+func sameAbsAsRecorded(recorded, now string, folding []CaseFolding, resolve func(string) (string, error)) bool {
+	r, n := absElements(recorded), absElements(now)
+	folding = foldingOf(folding, len(r))
+	// below is how many names of each path lie below the pair of folders
+	// asked, from the leaves up: a name unalike is below every pair above it
+	// too, so none of those can make the two one path.
+	for below := 0; below < len(r) && below < len(n); below++ {
+		if below > 0 && !alikeByRecord(folding, r, len(r)-below, n[len(n)-below]) {
+			return false
+		}
+		a, errA := resolve(filepath.Join(r[:len(r)-below]...))
+		b, errB := resolve(filepath.Join(n[:len(n)-below]...))
+		if errA == nil && errB == nil && a == b {
+			return true
+		}
+	}
+	return SameAsRecorded(recorded, now, folding)
 }
 
 // IsUnderAny reports whether candidate resolves AT or UNDER any of roots,

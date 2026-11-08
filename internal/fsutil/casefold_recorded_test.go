@@ -1,6 +1,7 @@
 package fsutil
 
 import (
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -227,6 +228,75 @@ func TestACaseOnlyDifferenceInAFolderThatIsThere(t *testing.T) {
 				t.Errorf("SamePathAsRecorded(%q, %q, %s) = %v, want %v (%s)", recorded, tc.now, FormatFolding(folding), got, tc.same, runtime.GOOS)
 			}
 		})
+	}
+}
+
+// TestFoldersThatDifferInCaseAloneResolveApart: where a volume keeps case and
+// holds two folders whose names differ in case alone, the two resolve apart,
+// their resolutions compared exactly, and the record decides at the folder
+// above them, as for a folder that is not there: two paths where it was
+// recorded as keeping case, and one where it was recorded as folding case,
+// since the record decides and the volume is never asked (two taken for one
+// is the direction that refuses). A volume that folds case makes no second
+// folder, and the case skips saying so.
+func TestFoldersThatDifferInCaseAloneResolveApart(t *testing.T) {
+	base := t.TempDir()
+	for _, name := range []string{"Music", "MUSIC"} {
+		if err := os.Mkdir(filepath.Join(base, name), 0o755); err != nil {
+			t.Skipf("this volume makes no second folder of a name in another case: %v", err)
+		}
+	}
+	recorded, now := filepath.Join(base, "Music", "Bridge"), filepath.Join(base, "MUSIC", "Bridge")
+	for _, tc := range []struct {
+		letter CaseFolding
+		same   bool
+	}{{CaseSensitive, false}, {CaseInsensitive, true}} {
+		t.Run("the folder above recorded as "+tc.letter.String(), func(t *testing.T) {
+			folding := FoldingOnTheWay(recorded, lettersOf(map[string]CaseFolding{base: tc.letter}), map[string]CaseFolding{})
+			if got := SamePathAsRecorded(recorded, now, folding); got != tc.same {
+				t.Errorf("SamePathAsRecorded(%q, %q, %s) = %v, want %v", recorded, now, FormatFolding(folding), got, tc.same)
+			}
+		})
+	}
+}
+
+// TestAPathNoFolderOfWhichResolvesIsComparedAsWritten: where no folder of
+// either path resolves (a drive that is not there), the two are compared as
+// written, by the record's letters (SameAsRecorded): one path where the
+// folder a name differs in case in was recorded as folding case, two where it
+// was recorded as keeping case, and two where a name differs otherwise or the
+// paths are of two depths; a volume's root alike but for case.
+func TestAPathNoFolderOfWhichResolvesIsComparedAsWritten(t *testing.T) {
+	nothing := func(p string) (string, error) {
+		return "", &fs.PathError{Op: "resolve", Path: p, Err: fs.ErrNotExist}
+	}
+	root := volumeRoot()
+	mnt := filepath.Join(root, "mnt", "usb")
+	recorded := filepath.Join(mnt, "Bridge")
+	for _, tc := range []struct {
+		name   string
+		now    string
+		letter CaseFolding // the folder Bridge is looked up in
+		same   bool
+	}{
+		{"another case, its folder recorded as folding case", filepath.Join(mnt, "bridge"), CaseInsensitive, true},
+		{"another case, its folder recorded as keeping case", filepath.Join(mnt, "bridge"), CaseSensitive, false},
+		{"another name", filepath.Join(mnt, "Bridges"), CaseInsensitive, false},
+		{"a path of another depth", filepath.Join(mnt, "x", "bridge"), CaseInsensitive, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			folding := FoldingOnTheWay(recorded, lettersOf(map[string]CaseFolding{mnt: tc.letter}), map[string]CaseFolding{})
+			if got := sameAbsAsRecorded(recorded, tc.now, folding, nothing); got != tc.same {
+				t.Errorf("sameAbsAsRecorded(%q, %q, %s) with nothing resolving = %v, want %v", recorded, tc.now, FormatFolding(folding), got, tc.same)
+			}
+		})
+	}
+	if runtime.GOOS == "windows" {
+		lower := strings.ToLower(root[:1]) + root[1:]
+		folding := FoldingOnTheWay(recorded, lettersOf(nil), map[string]CaseFolding{})
+		if !sameAbsAsRecorded(recorded, filepath.Join(lower, "mnt", "usb", "Bridge"), folding, nothing) {
+			t.Errorf("a drive spelled in another case, with nothing resolving, read as another volume")
+		}
 	}
 }
 

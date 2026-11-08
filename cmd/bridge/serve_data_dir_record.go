@@ -112,13 +112,14 @@ type dataDirRecord struct {
 // names reports whether the record names dataDir, by either of its
 // spellings: each is compared with dataDir as the directory they name, never
 // as a string alone. A record serve wrote since B741 is compared by how its
-// folders compared names (fsutil.SamePathAsRecorded: what resolves on either
-// side resolved, and a spelling in another case taken for one where its
-// folder was not read as case-sensitive, or where the record holds no folding
-// of that spelling's folders), probing nothing; only a record written before
-// B741, which holds neither an identity nor any folding, by a probe of what is
-// there now (fsutil.SamePath), which with the volume away answers for the
-// folder at the mount point.
+// folders compared names (fsutil.SamePathAsRecorded: below the deepest folders
+// of the two that resolve to one directory, a name in another case taken for
+// the same where the folder the record's spelling looks it up in was not read
+// as case-sensitive, or where the record holds no folding of that spelling's
+// folders), probing nothing; only a record written before B741, which holds
+// neither an identity nor any folding, by a probe of what is there now
+// (fsutil.SamePath), which with the volume away answers for the folder at the
+// mount point.
 func (r dataDirRecord) names(dataDir string) bool {
 	byProbe := r.ID == "" && r.DataDirFolding == "" && r.ResolvedFolding == ""
 	for _, s := range [...]struct{ spelling, folding string }{{r.DataDir, r.DataDirFolding}, {r.Resolved, r.ResolvedFolding}} {
