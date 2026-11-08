@@ -85277,3 +85277,172 @@ leave untouched outside `internal/player/playback` and this log, so it predates 
 passed in the cmd/bridge race run above. `make test` run again in the slot passed, 89 packages
 ok (2,060 s), the Linux-only tests run here. alsa-abi did not run: no ABI definition or
 `scripts/alsa-abi` file changed.
+
+## 2026-11-08 — B761: a rewrite keeps the enrich bases, and a save keeps the file's own values
+
+Worker b761, legion0 (Ubuntu 26.04, linux/amd64, go1.27.3, `GOTOOLCHAIN=local`,
+`GOPROXY=off`), branch `fix/b761-enrich-followups` from main 98edead3, the
+orchestrator's brief: two of the B617 follow-ups B761 holds, and a check of a
+third. Commits: the rewrite's red tests 16cbc7c5, the rewrite 65f4d313, its
+credential rows split fec652e5, the save's red tests 3613f91e, the save
+82f12f8c, the Settings page's word pinned 0b52881a, then this record. The
+rules' words go in `rules-b761.patch`: `cli-serve.md`'s rewrite line and its
+long form, a new line in `config-lifecycle.md` with its long form, and two
+phrases of `enrichment.md`'s B617 bullet (this worker cannot write `.claude/`).
+Left in B761, as the brief says: the Deezer switch's re-queue (a durable
+marker, a schema decision) and an off switch for the update check (the
+privacy page, the owner's call).
+
+### 1. A rewrite keeps the enrich bases
+
+`bridge init --force` keeps the enrich block's two base URLs now, each on its
+own and in either posture, beside the opt-outs B617 keeps: a base names the
+mirror the operator set up, with any credential it carries, and init asks for
+neither. A base Load takes that is not the default is written as Load keeps it
+(trimmed, with no trailing slash); one written empty, or as the default
+(`config.DefaultMusicBrainzBaseURL` and `DefaultCoverArtBaseURL`, new, held to
+the enricher's `DefaultMusicBrainzBase` and `DefaultCoverArtBase` by
+`TestEnrichBaseDefaultsAgree`, since config imports no feature package), is
+written as no key, as a first install writes it.
+
+`priorEnrich` reads each base from the file's bytes, on its own, through the
+block's `yaml.Node` decode that already read the two switches, never through
+Load, so no variable's value reaches the file. Load's own check, called
+through config (`config.NormalizeEnrichBaseURL`, a wrapper of
+`normalizeBaseURL`), decides what is refused. A base it refuses, or one that
+does not read as text (a list, a block), is not kept, and the run names it by
+its line with a fixed reason, never its value: the check's own refusal names
+the value's scheme and host (`urlFieldForLog`), which the line leaves out. A
+valid base beside such a sibling, or beside switches that do not read, is
+kept. `warnEnrichNotKept` takes the block's record now and says what each kind
+costs: its heading says settings, a switch not kept is on now, and for a base
+not kept "the default is used now"; the block's own line, for a value that does
+not read as a block, says none of its switches or base URLs is kept.
+`printKept` lists a kept base whole only where it carries no user information,
+query or fragment, and "set (not shown)" where it carries any, each being a
+place a mirror's credential can ride (B54, B69); the list's key column widens
+to 25 for `enrich.musicbrainzBaseURL`. The header's keep-list in
+`init_rewrite.go` states the rule.
+
+*Red first.* At 16cbc7c5, main's code with the new tests, nine subtests of
+`TestARewriteKeepsTheEnrichmentBases` failed: both postures' "both kept" and
+"one kept beside one Load refuses", the base beside switches that do not read,
+the credential row as it then was, the refused base then a rewrite that loads,
+the block that is no block, and the file's bases over the environment's. Green
+there, as the brief asks: the two explicit-default rows (`https://musicbrainz.org/ws/2`
+beside `""`, and `"  "` beside `https://coverartarchive.org/`) and
+`TestARewriteOverTheDefaultsWritesWhatAFirstInstallWrites`, a rewrite over a
+first install's config, given its answers, writing the first init's bytes in
+both postures. The credential row put a password and a query in one base, so a
+`printKept` that showed a query beside no user information would have passed
+it; fec652e5 split it into three rows, each base carrying one part alone, and
+controls P1d to P1f below are their red.
+
+### 2. A save keeps the file's own value for each leaf a variable set
+
+Load applies the `BRIDGE_*` variables over the file, and every console save
+(the settings PATCH, the variants folder, the roots, the player's three writes,
+the UPnP servers) goes through `RuntimeConfig.UpdateChecked`, which wrote the
+holder's snapshot, the variables' values in it; B617 kept the two opt-outs as
+the file holds them (`filedSwitches`). It fits at that one boundary, inside the
+holder's turn of the file's lock and after its changed-file refusal, with no
+rework of the config layer:
+
+- `applyEnvOverrides` records the yaml path of each leaf it set
+  (`Config.envSet`, sorted, an unexported field beside `playerGOOS` and
+  `legacyDSD`). `applyEnvValue` reports whether it set its leaf, so a value it
+  ignores (a boolean or a whole number that does not read, an opt-out's white
+  space) records nothing, and a legacy alias records the path it sets. `Clone`
+  copies the record, so the snapshot an update publishes keeps the boot
+  load's.
+- `filedEnvValues` runs beside `filedSwitches` over the copy the holder saves
+  (`saved := *next`, changed through a pointer, so the config writers' sweep
+  still reads the save as the snapshot the holder's `bytes.Equal` refusal
+  guards, B617 round 2's shape: `TestEveryConfigWriterTakesTheConfigLock`
+  passes). For each recorded leaf but the two opt-outs, a save that left it at
+  its live value writes the file's own value, decoded by `DecodeFile`, Load's
+  own decode, from the bytes the turn found (`FileLock.Found`): the file's own
+  spelling, a relative path included, and the field's zero value where the
+  file writes none, which writes no key where the field omits an empty one.
+  Bytes that do not decode, which only a holder told nothing of its file can
+  meet, leave the live value as it is. Each leaf of the copy is set by
+  assignment to its own field (`envLeaf`: every step a struct held by value),
+  never through a pointer the published snapshot holds.
+- A save that changes such a leaf writes and publishes the change, `live` or
+  `restart` as the field's row says, and the variable sets the leaf again at
+  the next start. The Settings page says so under its lede, and so do
+  `docs/docker.md`'s environment section and `ops/settings-apply-semantics.md`
+  (a section, and the `enrichEnabled` row's pointer).
+
+The opt-outs' skip in `filedEnvValues` is not load-bearing (control P2g): an
+unchanged switch gets the same file value from either writer, and the
+comparison leaves a changed one to `filedSwitches`. It stays, so that the two
+switches have one writer.
+
+*Red first.* At 3613f91e, main's code with the new tests, every row of
+`TestASaveKeepsTheFilesOwnValueForEachVariable` failed (an integer, a pointer
+to an integer the file does not write, a pointer to a boolean, a list, a string
+and a legacy alias, each through serve's own boot read, `LoadFileAt` and
+`RecordFile`, and two saves of another setting: the file held the variable's
+value, and a start without the variable read it), and so did
+`TestAConsoleSaveKeepsTheFilesOwnValueForEachVariable` in cmd/bridge, through
+the real console (the variants folder's `POST /api/upscale/variants-dir`, which
+is not `/api/settings`, and the settings form's save, each sending the shown
+values). Green there, as guards of what the change keeps:
+`TestASaveThatChangesAVariablesSettingWritesAndPublishesTheChange`,
+`TestASaveOverAFileThatDoesNotDecodeWritesTheLiveValue` and
+`TestTheOptOutsVariablesAreStillWrittenAsTheirSwitchesAre` (`BRIDGE_ENRICH_ENABLED`
+as B617 writes it: a save of another setting writes no key, a change to on no
+key, a change to off false).
+
+### 3. iTunes, checked, nothing edited
+
+`PROTOCOL.md` names iTunes in two lines, both tag fields of the explicit flag:
+`ITUNESADVISORY` (and `ITUNES_ADVISORY`, which is not that field) at line 427,
+and `ITUNESRATING`, not read, at line 430. None names iTunes as a service the
+bridge asks, and its Apple mentions are ATS, the Watch app's scheme and the
+App Store link. `Enricher.WithITunes` and `NewITunesClient` are called from
+`internal/enrich/enrich_test.go` alone; `TestNoProductionPathAsksITunes`, which
+`cmd/bridge/itunes_unwired_test.go` holds, passes.
+
+### Negative controls (each on the committed tree, restored after)
+
+Predicted by name in `.tmp/_b761/controls.predictions.txt` before the run, then
+applied once each by `.tmp/_b761/controls.py`, which rebuilt the package's test
+binary, ran the run list (the rewrite's five tests; config's four save tests;
+cmd/bridge's two console-save tests; admin's hint and anchor tests) and put the
+file's bytes back from memory; a baseline run with no mutation came first and
+passed, and `git status` was empty after.
+
+| Mutation | Predicted red | Held |
+|---|---|---|
+| (P1a) `keepFromPrior` drops both bases | both "both kept", both "one kept beside one Load refuses", beside switches, the three credential rows, the environment row | yes |
+| (P1b) `readBase` keeps a base the check refuses | both "one kept beside one Load refuses" (the rewrite exits 1 at validate), the refused-then-loads row | yes |
+| (P1c) `readBase` keeps a base written as the default | the two explicit-default rows | yes |
+| (P1d) `keptBaseShown` shows every base whole | the three credential rows | yes |
+| (P1e) it ignores the query and the fragment | the three credential rows | yes |
+| (P1f) it ignores the user information | the three credential rows | yes, on a rerun: the first mutation left `u` unused and did not build; the rerun kept it used with `u == nil`, never true after a parse that succeeded |
+| (P1g) `warnEnrichNotKept` drops the base line | both "one kept beside one Load refuses", beside switches, refused-then-loads, the no-block row | yes |
+| (P1h) the block's line back to "neither of its switches" | the no-block row alone | yes |
+| (P1i) a base that does not read as text dropped without a line | the beside-switches row alone | yes |
+| (P1j) the refusal's line carries the raw value | both "one kept beside one Load refuses", refused-then-loads | yes |
+| (P1k) config's cover-art default drifts to a trailing slash | `TestEnrichBaseDefaultsAgree`, the second explicit-default row | yes |
+| (P2a) `UpdateChecked` does not call `filedEnvValues` | the six save rows, the console test | yes |
+| (P2b) `applyEnvOverrides` records nothing | the six save rows, the console test | yes |
+| (P2c) `Clone` drops the record | the six save rows (at the second save, over the clone the first published), the console test (its second save) | yes |
+| (P2d) the file's own value written whatever the update did | the three change rows, the console test (its interval change) | yes |
+| (P2e) the zero value written in place of the file's own | five save rows, the pointer the file does not write green; the console test | yes |
+| (P2f) bytes that do not decode decoded anyway | the undecodable-file test alone | yes |
+| (P2g) the opt-outs taken by `filedEnvValues` too | nothing: the skip is not load-bearing | yes, all green |
+| (P2i) the Settings page's hint removed | `TestTheSettingsPageSaysASaveKeepsTheFilesOwnValueForAVariable` | yes |
+| (P2j) a legacy alias's leaf not recorded | the legacy-alias save row alone | yes |
+
+Every control built (P1f on its rerun), and every prediction held.
+
+### Qualification
+
+No guarded path changed (`cmd/bridge/init*.go`, `internal/config`,
+`internal/admin`, `docs/docker.md` and `ops/settings-apply-semantics.md` are
+outside `version_gate.go`'s paths and prefixes):
+`go run ./scripts/qualification-version -base 98edead3 -head HEAD` passed, and
+`qualificationVersion` stays 45.
