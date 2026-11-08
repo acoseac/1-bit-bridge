@@ -86027,7 +86027,8 @@ process's unexplained points first: the converter is about half of what the Pi m
 Backlog B797 on `fix/b797-upload-ownership` from main a77578f8, worker b797 on
 legion0 (Ubuntu 26.04, linux/amd64, go1.27.3, `GOTOOLCHAIN=local`,
 `GOPROXY=off`). Commits: the red tests 254afba0 and ef75e41f, the fix
-7bc1b781, this record, and the gates' results added to it after. The rule
+7bc1b781, this record 7d79927e, the node cases' constant typed for a 32-bit
+build 7558c041, and the gates' results added to it after. The rule
 goes into `.claude/rules/admin-console.md` (beside B776's bullet, whose
 mention of the page's stop flag it corrects) and `build-ci-tests.md` (the
 harness's blind spot) through `rules-b797.patch`, since this worker cannot
@@ -86264,3 +86265,33 @@ And at 7bc1b781 the console's other node tests the fix touches, green:
     go test ./internal/admin/ -count=1 -v -timeout 600s -run '^(TestTheConsoleRetriesARefusedCommitWithItsSessionOnceTheVolumeIsBack|TestTheConsoleSettlesAFailedTransferBeforeItOffersItsRetry|TestUploadSHA256MatchesNode|TestANewSessionReadsOnlyTheFingerprint|TestASameSizeEditDoesNotResume|TestClientChunkDigestIsAcceptedByTheServerParser)$'
 
 CI's Linux, macOS and Windows legs have node, so they run all of these.
+
+### The gates
+
+At 7d79927e (the fix and this record), through the shared build lock in one
+run (`.tmp/_b797/gate.sh`), on go1.27.3, go.mod's: `make fmt` rewrote
+nothing; `make vet` clean, and so with `GOOS=windows` and `GOOS=darwin`;
+`GOOS=linux GOARCH=386 make vet` refused the node cases' `ownershipModified`
+(`File.lastModified` in milliseconds, past 2^31, an untyped constant that a
+map of any makes an int), typed int64 at 7558c041; `make test` (`-race`,
+`-timeout 30m`) green, 89 packages, among them internal/admin in 1057 s and
+cmd/bridge in 1324 s, and the packages that test Linux alone run here for
+real (internal/alsa, internal/alsapcm on this host's ALSA,
+internal/atomicwrite, internal/player/hotplug, internal/usbid); `make
+build-all`, its build-tag census included, and `make docs-check` clean; the
+qualification check against main (`scripts/qualification-version -base
+a77578f8 -head HEAD`) answers OK, no guarded path changed; `git status` clean
+after.
+
+At 7558c041, the branch's code as it ships (the commit after it adds this
+section alone), in one more run (`.tmp/_b797/gate2.sh`): `make fmt` rewrote
+nothing; `make vet` clean, and so with `GOOS=windows`, `GOOS=darwin` and
+`GOOS=linux GOARCH=386`; `go test -race ./internal/admin/...` green in 972 s;
+B797's three structural tests and the moved B776 pin pass, on linux/amd64 and
+on linux/386 (legion0 runs 386 binaries natively); cmd/bridge's
+`TestEveryCitedTestNameExists` green, and green again on a copy of the tree
+with `rules-b797.patch` applied, whose budgets hold (admin-console.md 81,623
+bytes, build-ci-tests.md 29,918; the worst load 67.3%); `make docs-check` and
+the qualification check clean; `git status` clean after. The node tests,
+these five and the console's others, skip in every run here: node is not
+installed on this host.
