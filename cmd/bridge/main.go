@@ -2964,13 +2964,15 @@ type serveOpts struct {
 	// or record what the call found. Per invocation for tailscaleCLI's
 	// reason.
 	playerStatePreflight func(dataDir string, lockHeld bool) error
-	// dataDirWrites stands in for serve's writes of its data dir's identity,
-	// the marker in the data dir and the record beside the config
-	// (recordServeDataDir). Nil fields, the writers of their own, in
-	// production; a boot test fails either, as a start interrupted between
-	// them leaves them (backlog B741). Per invocation for tailscaleCLI's
-	// reason.
-	dataDirWrites dataDirWrites
+	// dataDirRecording stands in for serve's writes of its data dir's
+	// identity, the marker in the data dir and the record beside the config,
+	// and for the probe of how each folder on the data dir's way compares
+	// names, which the record keeps (recordServeDataDir). Nil fields, the
+	// ones of their own, in production; a boot test fails either write, as a
+	// start interrupted between them leaves them, and answers for a folder as
+	// a volume this host does not have would (backlog B741). Per invocation
+	// for tailscaleCLI's reason.
+	dataDirRecording dataDirRecording
 	// localOutputsGOOS stands in for runtime.GOOS in the localOutputs
 	// gate (api.LocalOutputsConfig.GOOS), which GET /v1/outputs and the
 	// loopback track route answer to and which is true on Linux only.
@@ -3825,7 +3827,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	// beside the file the boot read was of names this data dir for the check
 	// at the next start (backlog B651), and holds its identity, which the
 	// marker in it holds first (backlog B741).
-	recordServeDataDir(dataDirRecord, cfg.DataDir, opts.dataDirWrites)
+	recordServeDataDir(dataDirRecord, cfg.DataDir, opts.dataDirRecording)
 	// bgWriters tracks the background goroutines that WRITE the manifest store
 	// (periodic scanner, enricher, fs watcher, atlas harvester, and the admin
 	// server whose bgScans drain is the SQLite guard). On shutdown they MUST

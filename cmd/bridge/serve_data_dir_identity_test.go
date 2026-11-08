@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/acoseac/1-bit-bridge/internal/doctor"
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/logging/loggingtest"
 )
 
@@ -887,7 +888,7 @@ func TestAStartWhoseMarkerCannotBeWrittenGoesOnWithoutAnIdentity(t *testing.T) {
 	dataDir := filepath.Join(base, "data")
 	cfg := writeIdentityConfig(t, filepath.Join(base, "bridge.yaml"), lib, dataDir)
 	rec := loggingtest.Record(t)
-	stopServed(t, serveWithOpts(t, serveOpts{configPath: cfg, dataDirWrites: dataDirWrites{
+	stopServed(t, serveWithOpts(t, serveOpts{configPath: cfg, dataDirRecording: dataDirRecording{
 		marker: func(string, string) error { return errors.New("the test's marker that cannot be written") }}}))
 	if lines := rec.Carrying("could not record the data directory's identity in it"); len(lines) != 1 || !strings.HasPrefix(lines[0], "WARN") {
 		t.Errorf("the start said it could not write its marker %d time(s), want once at Warn:\n%s", len(lines), strings.Join(rec.All(), "\n"))
@@ -915,7 +916,7 @@ func TestAStartWhoseRecordCannotBeWrittenLeavesItsMarkerToTheNext(t *testing.T) 
 	mkdirs(t, lib)
 	dataDir := filepath.Join(base, "data")
 	cfg := writeIdentityConfig(t, filepath.Join(base, "bridge.yaml"), lib, dataDir)
-	stopServed(t, serveWithOpts(t, serveOpts{configPath: cfg, dataDirWrites: dataDirWrites{
+	stopServed(t, serveWithOpts(t, serveOpts{configPath: cfg, dataDirRecording: dataDirRecording{
 		record: func(string, []byte) error { return errors.New("the test's record that cannot be written") }}}))
 	marked := identityOf(t, dataDir)
 	if !isIdentity(marked) {
@@ -944,7 +945,7 @@ func TestTheMarkerHoldsTheIdentityBeforeTheRecordDoes(t *testing.T) {
 	// What each write saw, kept on serve's goroutine and read once serve has
 	// exited.
 	var writes []string
-	stopServed(t, serveWithOpts(t, serveOpts{configPath: cfg, dataDirWrites: dataDirWrites{
+	stopServed(t, serveWithOpts(t, serveOpts{configPath: cfg, dataDirRecording: dataDirRecording{
 		marker: func(dataDir, id string) error {
 			writes = append(writes, "marker "+id)
 			return writeDataDirMarker(dataDir, id)
@@ -962,6 +963,92 @@ func TestTheMarkerHoldsTheIdentityBeforeTheRecordDoes(t *testing.T) {
 	want := []string{"marker " + id, fmt.Sprintf("record %s, the marker holding {\"id\":%q} (<nil>)", id, id)}
 	if !slices.Equal(writes, want) {
 		t.Errorf("serve wrote %q, want %q", writes, want)
+	}
+}
+
+// recordedFolding is how the record beside cfg says each folder on its data
+// dir's way compared names, by folder.
+func recordedFolding(t *testing.T, cfg string) map[string]string {
+	t.Helper()
+	b, err := os.ReadFile(dataDirRecordFile(cfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var r struct {
+		Folding map[string]string `json:"folding"`
+	}
+	if err := json.Unmarshal(b, &r); err != nil {
+		t.Fatalf("the record beside %s does not read: %v (%q)", cfg, err, b)
+	}
+	return r.Folding
+}
+
+// TestServeRecordsHowEachFolderOnItsDataDirsWayComparesNames is gap 3's
+// write: serve's record holds, for every folder on the data dir's way, how it
+// compares the names in it, as asked while the data dir is there (here, a
+// stand-in for a volume at `usb` that folds case, which this host does not
+// have, and the host's own folders above it); once that volume is away, a
+// config naming the data dir in another case below the mount point is
+// refused, though the folder left there keeps case.
+func TestServeRecordsHowEachFolderOnItsDataDirsWayComparesNames(t *testing.T) {
+	base := t.TempDir()
+	lib, mnt := filepath.Join(base, "Music"), filepath.Join(base, "usb")
+	mkdirs(t, lib, mnt)
+	dataDir := filepath.Join(mnt, "Bridge")
+	cfg := writeIdentityConfig(t, filepath.Join(base, "bridge.yaml"), lib, dataDir)
+	probe := func(dir string) fsutil.CaseFolding {
+		if dir == mnt {
+			return fsutil.CaseInsensitive
+		}
+		return fsutil.FoldingIn(dir)
+	}
+	stopServed(t, serveWithOpts(t, serveOpts{configPath: cfg, dataDirRecording: dataDirRecording{folding: probe}}))
+	got := recordedFolding(t, cfg)
+	for child := dataDir; ; {
+		parent := filepath.Dir(child)
+		if parent == child {
+			break
+		}
+		if want := probe(parent).String(); got[parent] != want {
+			t.Errorf("the record says %s compares names %q, want %q", parent, got[parent], want)
+		}
+		child = parent
+	}
+
+	if err := os.Rename(dataDir, filepath.Join(base, "volume")); err != nil {
+		t.Fatal(err)
+	}
+	configured := filepath.Join(mnt, "bridge")
+	writeIdentityConfig(t, cfg, lib, configured)
+	requireServeRefuses(t, cfg, mnt, "the data directory "+configured+" held this bridge's database")
+}
+
+// TestARecordItsReaderWouldRefuseKeepsNoFolding: a record whose folding would
+// make it longer than its reader takes, which would refuse every start after
+// it, is written without its folding, and reads.
+func TestARecordItsReaderWouldRefuseKeepsNoFolding(t *testing.T) {
+	r := dataDirRecord{DataDir: "/mnt/usb/bridge", ID: "0123456789abcdef0123456789abcdef", Folding: map[string]string{}}
+	for i := 0; len(r.Folding)*64 <= dataDirRecordMax; i++ {
+		r.Folding[fmt.Sprintf("/mnt/%060d", i)] = fsutil.CaseSensitive.String()
+	}
+	b, err := marshalDataDirRecord(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), ".bridge.yaml.datadir")
+	if err := os.WriteFile(path, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err := readDataDirRecord(path)
+	switch {
+	case !ok || err != nil:
+		t.Errorf("the record written does not read: ok %v, %v (%d bytes)", ok, err, len(b))
+	case got.Folding != nil || got.DataDir != r.DataDir || got.ID != r.ID:
+		t.Errorf("the record written reads as %+v, want its data dir and its identity, and no folding", got)
+	}
+	r.Folding = map[string]string{"/mnt/usb": fsutil.CaseInsensitive.String()}
+	if b, err := marshalDataDirRecord(r); err != nil || !strings.Contains(string(b), `"folding"`) {
+		t.Errorf("a record of its reader's size lost its folding: %q, %v", b, err)
 	}
 }
 

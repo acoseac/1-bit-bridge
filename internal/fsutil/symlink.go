@@ -66,6 +66,22 @@ func SamePath(a, b string) bool {
 	return caseInsensitiveFS(ra) && strings.ToLower(ra) == strings.ToLower(rb)
 }
 
+// SamePathAsRecorded is SamePath for a path recorded earlier together with
+// how each folder on its way compared names then (FoldingOnTheWay): recorded
+// and now name one path where each resolves, as EvalSymlinksOrClean resolves
+// it, to one string, or where recorded as written and now, as written or as
+// it resolves, are alike by that folding (SameAsRecorded). How a volume
+// compares names is never probed here, unlike SamePath: recorded's folders
+// may be on a volume that is away, and a probe then answers for the folder
+// left at its mount point, on the volume above (backlog B741's gap 3).
+func SamePathAsRecorded(recorded, now string, folding map[string]CaseFolding) bool {
+	rn := EvalSymlinksOrClean(now)
+	if EvalSymlinksOrClean(recorded) == rn {
+		return true
+	}
+	return SameAsRecorded(recorded, now, folding) || SameAsRecorded(recorded, rn, folding)
+}
+
 // IsUnderAny reports whether candidate resolves AT or UNDER any of roots,
 // resolving links (symlinks, and on Windows junctions and mounted folders)
 // on BOTH sides via EvalSymlinksOrClean before the filepath.Rel comparison. Returns the resolved (cleaned) root it matched, or

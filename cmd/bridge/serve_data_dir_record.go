@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -29,10 +30,11 @@ import (
 // config lands in (fsutil.ResolveParent, where the config's lock is), named
 // after it: `.bridge.yaml.datadir` beside bridge.yaml, holding the data dir's
 // path as its config gave it and where that led, and since B741 its identity,
-// which a marker in the data dir holds too (dataDirRecord,
-// serve_data_dir_identity.go). Serve's is beside the file its boot read of
-// the config was of (serveDataDirRecord), for its check and its write alike,
-// never beside the file the config's name opens by then.
+// which a marker in the data dir holds too, and how each folder on its way
+// compared names (dataDirRecord, serve_data_dir_identity.go). Serve's is
+// beside the file its boot read of the config was of (serveDataDirRecord),
+// for its check and its write alike, never beside the file the config's name
+// opens by then.
 //
 // Serve writes it once its database is open and its lock file is there
 // (recordServeDataDir), and, before it prepares the data dir, refuses one the
@@ -86,20 +88,70 @@ type dataDirRecord struct {
 	// database there, and kept by every start after it. "" in a record
 	// written before B741, or by a start that could not write the marker.
 	ID string `json:"id,omitempty"`
+	// Folding is how each folder on the way of DataDir and Resolved compared
+	// the names in it when serve wrote the record (fsutil.FoldingOnTheWay,
+	// fsutil.FoldingIn's answer as CaseFolding names it), keyed by the folder
+	// as they spell it (backlog B741's gap 3): once the volume is away, the
+	// folders below its mount point are gone, and a probe answers for the
+	// folder left at the mount point instead, on the volume above. A record
+	// written before B741 holds none.
+	Folding map[string]string `json:"folding,omitempty"`
 }
 
 // names reports whether the record names dataDir, by either of its
-// spellings: each is compared with dataDir as the directory they name
-// (fsutil.SamePath, which resolves what still resolves on either side, a link
-// at the mount point among it with the volume away, and the strings are equal
-// where nothing does).
+// spellings: each is compared with dataDir as the directory they name, never
+// as a string alone. Where the record holds how its folders compared names,
+// by that (fsutil.SamePathAsRecorded: what resolves on either side resolved,
+// and a spelling in another case taken for one where its folder was not read
+// as case-sensitive); where it holds none, a record written before B741, by
+// a probe of what is there now (fsutil.SamePath), which with the volume away
+// answers for the folder at the mount point.
 func (r dataDirRecord) names(dataDir string) bool {
+	folding, recorded := r.folding()
 	for _, spelling := range []string{r.DataDir, r.Resolved} {
-		if spelling != "" && fsutil.SamePath(spelling, dataDir) {
+		switch {
+		case spelling == "":
+		case recorded && fsutil.SamePathAsRecorded(spelling, dataDir, folding):
+			return true
+		case !recorded && fsutil.SamePath(spelling, dataDir):
 			return true
 		}
 	}
 	return false
+}
+
+// folding is the record's Folding as fsutil reads it, a word it does not
+// know read as CaseUnknown, and whether the record holds any.
+func (r dataDirRecord) folding() (map[string]fsutil.CaseFolding, bool) {
+	if len(r.Folding) == 0 {
+		return nil, false
+	}
+	m := make(map[string]fsutil.CaseFolding, len(r.Folding))
+	for dir, word := range r.Folding {
+		m[dir] = fsutil.ParseCaseFolding(word)
+	}
+	return m, true
+}
+
+// marshalDataDirRecord is the record r as its file holds it, a line of JSON.
+// One its own reader would refuse for its size (readDataDirRecord), which
+// would refuse every start after it, is written without its folding, which
+// alone can grow so, with a path nested deep enough.
+func marshalDataDirRecord(r dataDirRecord) ([]byte, error) {
+	b, err := json.Marshal(r)
+	if err == nil && len(b)+1 > dataDirRecordMax {
+		r.Folding = nil
+		b, err = json.Marshal(r)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return append(b, '\n'), nil
+}
+
+// same reports whether r holds exactly what o holds.
+func (r dataDirRecord) same(o dataDirRecord) bool {
+	return r.DataDir == o.DataDir && r.Resolved == o.Resolved && r.ID == o.ID && maps.Equal(r.Folding, o.Folding)
 }
 
 // dataDirRecordPath is where the record of the config at cfgFile is: beside
@@ -442,42 +494,68 @@ func checkServeDataDirRecord(path, dataDir string) error {
 	return gone
 }
 
-// dataDirWrites are recordServeDataDir's writes: the marker in the data dir
-// (writeDataDirMarker) and the record beside the config. A nil field is the
-// writer of its own; a boot test fails either, as a start interrupted between
-// them leaves them (serveOpts.dataDirWrites).
-type dataDirWrites struct {
-	marker func(dataDir, id string) error
-	record func(path string, data []byte) error
+// dataDirRecording is what recordServeDataDir writes and reads: the marker
+// in the data dir (writeDataDirMarker), the record beside the config, and how
+// a folder on the data dir's way compares the names in it (fsutil.FoldingIn).
+// A nil field is the one of its own; a boot test fails either write, as a
+// start interrupted between them leaves them, and answers for a folder as a
+// volume this host does not have would (serveOpts.dataDirRecording).
+type dataDirRecording struct {
+	marker  func(dataDir, id string) error
+	record  func(path string, data []byte) error
+	folding func(dir string) fsutil.CaseFolding
 }
 
-func (w dataDirWrites) writeMarker(dataDir, id string) error {
+func (w dataDirRecording) writeMarker(dataDir, id string) error {
 	if w.marker != nil {
 		return w.marker(dataDir, id)
 	}
 	return writeDataDirMarker(dataDir, id)
 }
 
-func (w dataDirWrites) writeRecord(path string, data []byte) error {
+func (w dataDirRecording) writeRecord(path string, data []byte) error {
 	if w.record != nil {
 		return w.record(path, data)
 	}
 	return atomicwrite.WriteBytes(path, data, ".bridge-datadir-*.tmp")
 }
 
+// foldingOnTheWay is how each folder on the way of each of spellings
+// compares the names in it, by CaseFolding's names, keyed by the folder as
+// it spells it (dataDirRecord.Folding).
+func (w dataDirRecording) foldingOnTheWay(spellings ...string) map[string]string {
+	probe := w.folding
+	if probe == nil {
+		probe = fsutil.FoldingIn
+	}
+	folding := map[string]fsutil.CaseFolding{}
+	for _, s := range spellings {
+		if s != "" {
+			fsutil.FoldingOnTheWay(s, probe, folding)
+		}
+	}
+	words := make(map[string]string, len(folding))
+	for dir, f := range folding {
+		words[dir] = f.String()
+	}
+	return words
+}
+
 // recordServeDataDir writes the record at path naming dataDir, once serve's
 // database is open there and its lock file is too: dataDir as its config gave
-// it and where it leads now, through its links, while the volume it is on is
-// there to resolve them (dataDirRecord), and the data dir's identity (backlog
-// B741), which its marker holds before the record does. The identity is the
-// marker's where the data dir holds one; else the record's own where it names
-// this data dir (never a second one minted beside it), else a new one; and a
-// marker that is not there is written first, durably (writeDataDirMarker),
-// the record gaining the identity only once it is. It writes the record only
-// when it does not hold exactly what it is to hold already, so a record that
-// names the data dir in another spelling, or in one alone (a record written
-// before B651's fifth round), or with no identity (one written before B741),
-// is written again.
+// it and where it leads now, through its links, and how each folder on the
+// way of both compares the names in it, while the volume it is on is there
+// to resolve them and to ask (dataDirRecord), and the data dir's identity
+// (backlog B741), which its marker holds before the record does. The identity
+// is the marker's where the data dir holds one; else the record's own where
+// it names this data dir (never a second one minted beside it), else a new
+// one; and a marker that is not there is written first, durably
+// (writeDataDirMarker), the record gaining the identity only once it is. It
+// writes the record only when it does not hold exactly what it is to hold
+// already, so a record that names the data dir in another spelling, or in one
+// alone (a record written before B651's fifth round), or with no identity or
+// folding (one written before B741), is written again. A record its own
+// reader would refuse for its size keeps no folding.
 //
 // Nothing it cannot write refuses the start, which goes on, and each is said
 // at Warn: no path (a boot read that resolved no file) or a record serve
@@ -487,7 +565,7 @@ func (w dataDirWrites) writeRecord(path string, data []byte) error {
 // tells the data dir by its database and its lock file alone, as before B741.
 // A record that does not read is left as it is, never replaced unread: the
 // check before the preparation refused it, so it went that way since.
-func recordServeDataDir(path, dataDir string, w dataDirWrites) {
+func recordServeDataDir(path, dataDir string, w dataDirRecording) {
 	if path == "" {
 		logger.Warn("could not record the data directory beside the config: serve's boot read resolved no file for the config's name, so a later start cannot tell the data directory's volume missing from a fresh install",
 			"dataDir", dataDir)
@@ -532,12 +610,13 @@ func recordServeDataDir(path, dataDir string, w dataDirWrites) {
 	if resolved, err := fsutil.ResolveLinks(dataDir); err == nil {
 		want.Resolved = resolved
 	}
-	if ok && had == want {
+	want.Folding = w.foldingOnTheWay(want.DataDir, want.Resolved)
+	if ok && had.same(want) {
 		return
 	}
-	b, err := json.Marshal(want)
+	b, err := marshalDataDirRecord(want)
 	if err == nil {
-		err = w.writeRecord(path, append(b, '\n'))
+		err = w.writeRecord(path, b)
 	}
 	if err != nil {
 		logger.Warn("could not record the data directory beside the config: a later start cannot tell the data directory's volume missing from a fresh install",
