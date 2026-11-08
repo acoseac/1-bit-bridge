@@ -120,6 +120,16 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   before believing a green suite about UI. `document.visibilityState` is
   `"hidden"` in an automated tab, so `loading="lazy"` images never load and any
   perceived-performance claim measured that way is suspect.
+- **A node harness that `withReachedFunctions` assembles carries a function
+  called only inside another call's parentheses (`stageFiles(collectFromInput(…))`)
+  only when the harness names it as an entry: the call scan consumes the
+  character before a name, so it misses the inner call, and node answers the
+  first event that reaches it with a ReferenceError, at the defect and at the
+  fix alike** (2026-11-08, backlog B797). `requireCarried` checks an assembled
+  script before node is looked for (a top-level binding of app.js its functions
+  read that the harness does not declare, a name it calls that it neither
+  declares nor has as a global), so a host without node catches it. **Don't
+  take a node test that skips for one whose script would run.**
 - **A field deliberately left unsynchronised binds TESTS too.** → History-rules-build-ci-tests.md
 - **…and a test that starts the loop decides what the loop's own sends do** (2026-09-28) → History-rules-build-ci-tests.md
 - **Putting back slog's previous default does not put back the `log` package, so a capture goes through `loggingtest.SetDefault`** (2026-09-28) → History-rules-build-ci-tests.md
