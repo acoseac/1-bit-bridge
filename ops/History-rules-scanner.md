@@ -3126,9 +3126,11 @@
   and every other command that makes, opens or writes the data dir
   (`refuseDataDirAway`), refuses, before it makes or writes anything there, a
   data dir the record beside the config names (`.bridge.yaml.datadir`) that
-  holds neither `bridge.db` nor `server.lock`** (2026-11-04, backlog B651;
-  Codex's and Argon's notes on the brief; B727, 2026-11-07; B776 and B777,
-  2026-11-07, the two entries after this one). What stays open is named by
+  holds neither `bridge.db` nor `server.lock`, and since B741 one that does
+  not hold the identity the record holds (cli-serve.md's B741 bullet)**
+  (2026-11-04, backlog B651; Codex's and Argon's notes on the brief; B727,
+  2026-11-07; B776 and B777, 2026-11-07, the two entries after this one;
+  B741, 2026-11-08, the entry after them). What stays open is named by
   backlog B776 and B777. On a NAS reboot systemd or Docker can start the
   bridge before a USB, RAID or network volume is mounted, so a path on it is
   not there (a directory on the volume) or reads as the bare mount point,
@@ -3423,8 +3425,10 @@
   keep the record in the data dir or in bridge.yaml, or of one spelling of the
   data dir alone (it holds the configured one and where it led), check or
   write serve's record beside any file but the one its boot read was of,
-  refuse a data dir its record does not name or one whose lock file is there
-  (the `rm bridge.db*` reset), or prepare the data dir before the check.**
+  refuse a data dir its record does not name, or one holding the identity its
+  record holds or, under a record written before B741, which holds none, its
+  lock file (the `rm bridge.db*` reset keeps both), or prepare the data dir
+  before the check.**
   Tests:
   `TestAScanSparesARootBelowAVolumeThatIsNotMountedYet`,
   `TestTheWatcherWaitsForAnUnmountedRootAndWatchesWhatIsMountedThere`,
@@ -3520,6 +3524,18 @@
   `TestTheWatcherDispatchesNoScanForARootWhoseOnlyFileWent` deletes a file,
   which Windows allows under a watch. The record is in
   `ops/engineering-log.md`, 2026-11-07, B727.
+
+  **B741** (2026-11-08) took up three gaps B651 left, each checked at its
+  head: a lock file or a database in the bare mount point read as the data
+  dir served from (gap 2), closed by an identity the record and a marker in
+  the data dir hold (cli-serve.md's B741 bullet, its long form in
+  `History-rules-cli-serve.md`); the record and the config spelling the data
+  dir in two cases, compared by a probe that answers for the bare mount point
+  once the volume is away (gap 3), closed by the folding the record keeps
+  (the entry after B777's here); and an install with no record yet started on
+  the bare mount point (gap 1), which stays open: nothing outside the volume
+  tells it from a fresh install. The record is in `ops/engineering-log.md`,
+  2026-11-08, B741.
 - **A console write under a library root asks first, of the deepest configured
   root that owns each path it would write as the path's elements spell it and
   of the deepest that owns where the write lands, the look the watcher holds a
@@ -3719,3 +3735,41 @@
   `TestTheWatcherWatchesTheVolumeMountedOverARootItWatchedBare`,
   `TestTheWatcherWatchesTheVolumeMountedOverANestedRootItWatchedBare` and
   `TestTheWatcherWatchesARootRemountedInsideTheDebounce`.
+
+- **A data dir's record keeps how each folder on the way of its two spellings compared the names in it when serve wrote it (`fsutil.FoldingOnTheWay` over `fsutil.FoldingIn`, CaseUnknown included), and the check compares a spelling of the data dir in another case by that, probing nothing (`fsutil.SameAsRecorded`, `SamePathAsRecorded`): once the volume is away every folder below its mount point is gone, and a probe answers for the folder left at the mount point, on the volume above; a folder not read as case-sensitive takes two spellings for one, the direction that refuses; a record written before B741 holds none and is compared by the probe (`fsutil.SamePath`) until a start with the volume there writes it again, and a record its own reader would refuse for its size keeps none** (2026-11-08, backlog B741's gap 3; the identity is cli-serve.md's B741 bullet). **Don't probe a record's folders at the check where the record says how they compared names, take a folder read as case-sensitive for one that folds, or write a record its reader refuses.** `TestARecordedFoldingDecidesACaseOnlyDifference` (its case-sensitive sibling the control), `TestFoldingOnTheWayAsksEachFolderOnce`, `TestSamePathAsRecordedProbesNoVolume`, `TestServeRefusesTheDataDirItRecordedInAnotherCaseWhereItsFolderFoldsCase`, `TestServeRecordsHowEachFolderOnItsDataDirsWayComparesNames`, `TestARecordItsReaderWouldRefuseKeepsNoFolding` and, on a volume that folds case, `TestServeRefusesTheDataDirInAnotherCaseOnACaseInsensitiveVolume` (`BRIDGE_TEST_CASE_INSENSITIVE_DIR`) pin it.
+  B651's check compared the record's spellings with the config's as the
+  directory they name, through `fsutil.SamePath`, which folds a case-only
+  difference where `caseInsensitiveFS` finds the volume holding the path
+  folds case: an Lstat of the nearest existing ancestor's own name and of its
+  case-swapped sibling. With the data dir's volume away, every folder below
+  the mount point is gone, the nearest ancestor is the bare mount point, and
+  the probe looks its name up in the folder above, on the volume the mount
+  point is on: a case-insensitive exFAT or vfat stick mounted on ext4 read as
+  case-sensitive, so a record of `usb/Bridge` and a config naming
+  `usb/bridge` since read as two data dirs, the refusal was skipped, and serve
+  made the data dir in the bare mount point. Storing, not probing: serve's
+  record holds, for every folder on the way of both its spellings, the
+  folder's answer to `fsutil.FoldingIn` at the write, while the volume is
+  there (`fsutil.FoldingOnTheWay`; the folder a name is looked up in, so the
+  mount point is asked of the mounted volume's names), and the check compares
+  element by element by that (`fsutil.SameAsRecorded`), a case-only
+  difference one data dir where its folder was not read as case-sensitive:
+  read as folding case, read as unknown, or not recorded. That is the
+  direction that refuses: B651's protection is the refusal, and a data dir set
+  on purpose to a directory that differs from the recorded one in case alone,
+  in a folder that could not tell, is refused, its refusal saying how to go
+  on. `fsutil.SamePathAsRecorded` keeps SamePath's resolution of what still
+  resolves (a link at the mount point, outside the volume) and compares the
+  recorded spelling with the config's as written and as it resolves. A
+  record without the folding, written before B741, falls back to the probe,
+  and the gap stays open for it until a start with the volume there writes
+  the record again. The comparison takes the stored folding as an input, so
+  a unit test covers it on every host with a case-sensitive sibling as its
+  control; a serve test stands a probe in for a volume that folds case
+  (`dataDirRecording.folding`); and a real one is an opt-in case behind
+  `BRIDGE_TEST_CASE_INSENSITIVE_DIR`, a directory on a volume that folds case
+  whose own name its folder above compares with case, which skips naming the
+  variable (legion0 can make none without root). A record whose folding would
+  make it longer than its reader takes (64 KiB, a path nested past a hundred
+  levels) is written without it, since a record that does not read refuses
+  every start. The record is in `ops/engineering-log.md`, 2026-11-08, B741.
