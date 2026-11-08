@@ -1854,13 +1854,8 @@ func ownershipScript(t *testing.T) (script, node string) {
 	t.Helper()
 	src := readConsoleJS(t, "static/app.js")
 	harness := extractJSConst(t, src, "API")
-	for _, c := range []string{"const BYTE_UNITS = ", "const UPLOAD_PARALLEL_FILES = ", "const UPLOAD_DIGEST_RETRIES = ", "const UPLOAD_JUNK_NAMES = "} {
+	for _, c := range []string{"const BYTE_UNITS = ", "const UPLOAD_PARALLEL_FILES = ", "const UPLOAD_DIGEST_RETRIES = ", "const UPLOAD_JUNK_NAMES = ", "const resumableReads = "} {
 		harness += jsStatement(t, src, c)
-	}
-	// The list's generation (B797's round 3), where app.js has one yet, so
-	// that the cases run against the console before it too.
-	if strings.Contains(src, "\nconst resumableReads = ") {
-		harness += jsStatement(t, src, "const resumableReads = ")
 	}
 	harness += ownershipRun
 	script = withReachedFunctions(t, harness, src, "wireUpload", "stageFiles", "collectFromInput",

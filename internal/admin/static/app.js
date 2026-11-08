@@ -2008,19 +2008,75 @@ function wireUpload(signal) {
 
 let resumableSessions = [];
 
+// resumableReads orders the page's reads of that list against the changes the
+// page makes to it itself (B797's round 3). The page changes the list where
+// it knows the server's answer has changed before a read could say so: Stop
+// puts its session on it (showUploadStopped), and a commit or Discard it,
+// once answered, takes its session off (forgetResumable). Each change
+// advances the generation. A read asked under an older generation may have
+// been answered before the change, a session not made yet or not committed
+// yet, so its answer changes nothing; nor does a read answered after a newer
+// one was taken (believed), or a read that fails. A read asked under the
+// current generation is the server's word and replaces the list, a session
+// another tab deleted or the server swept going with it. Before this the
+// page-load read, answered before Stop's session existed and delivered after
+// Stop put it on the list, took it off again, a failed read emptied the
+// list, and the same files chosen again started over in a second session;
+// and a read answered before a commit listed the committed session again.
+// The list and this are the console's, kept across a boosted navigation.
+const resumableReads = { generation: 0, asked: 0, askedIn: 0, believed: 0 };
+
 async function refreshResumable() {
   const banner = document.getElementById("upload-resume");
   if (!banner) return;
+  const read = { n: ++resumableReads.asked, generation: resumableReads.generation };
+  resumableReads.askedIn = read.generation;
   let sessions;
   try {
     sessions = (await API.get("/api/upload/sessions")) || [];
   } catch {
-    sessions = [];
+    // A read that fails says nothing of the list, which stays as it was.
+    return;
   }
   // A navigation since the read took the page this banner was on, and the
   // page now shown reads its own.
   if (!banner.isConnected) return;
+  if (read.generation !== resumableReads.generation) {
+    // The page changed the list since this read was asked. Where no read has
+    // been asked since (a commit that lands after its page was left changes
+    // the list and asks none), one is asked now, for the server's word.
+    if (resumableReads.askedIn !== resumableReads.generation) refreshResumable();
+    return;
+  }
+  if (read.n < resumableReads.believed) return;
+  resumableReads.believed = read.n;
   resumableSessions = sessions;
+  renderResumable();
+}
+
+// changeResumable is the page's own change of the list (resumableReads): it
+// advances the list's generation, so that no read asked before it changes the
+// list back, and draws the banner again.
+function changeResumable(sessions) {
+  resumableReads.generation += 1;
+  resumableSessions = sessions;
+  renderResumable();
+}
+
+// forgetResumable takes off the list a session the server no longer holds: a
+// commit's once it has answered, whatever its files' outcomes (the server
+// removes the session after any commit it answers), Discard it's, and the one
+// a pre-flight deleted.
+function forgetResumable(id) {
+  changeResumable(resumableSessions.filter((s) => s.id !== id));
+}
+
+// renderResumable draws the banner from the list's first session, the one
+// Discard it takes: every change of the list, the page's own or a read's,
+// draws it again.
+function renderResumable() {
+  const banner = document.getElementById("upload-resume");
+  if (!banner) return;
   if (!resumableSessions.length) {
     banner.hidden = true;
     return;
@@ -2238,9 +2294,11 @@ function findFilesOnlyMatch(picked) {
 
 async function discardResumable() {
   // ONLY the session the banner is describing. The banner shows
-  // resumableSessions[0]; discarding the whole list would throw away staged
-  // progress for uploads the operator never saw, let alone chose to abandon.
-  // Re-reading afterwards lets the next one surface.
+  // resumableSessions[0] (every change of the list draws it again); discarding
+  // the whole list would throw away staged progress for uploads the operator
+  // never saw, let alone chose to abandon. Once the delete has answered the
+  // session leaves the list at once, before the read after it, which lets the
+  // next one surface and, should it fail, changes nothing (B797's round 3).
   //
   // Refused while a run owns the page (Discard it is disabled then), whose
   // session this may be. What it says comes after a request, so it is said
@@ -2254,6 +2312,7 @@ async function discardResumable() {
     if (banner?.isConnected && !uploadState?.run) showUploadError(e?.message ? e.message : String(e));
     return;
   }
+  forgetResumable(s.id);
   await refreshResumable();
   if (banner?.isConnected && !uploadState?.run) showUploadResult("Discarded the interrupted upload.");
 }
@@ -2444,14 +2503,22 @@ function showUploadRunEnd(run, e) {
 // at once, since one made since the page's last read is in none, and the
 // controls come back as the run ends, before the list read below answers
 // (B797's round 2: the same files chosen in between started over in a second
-// session). It goes at the list's end, so the session the banner shows, the
-// one Discard it takes, stays the first; the read then lists it with its
-// offsets, and the banner shows it.
+// session). It goes there as the page's own change of the list
+// (changeResumable), so that no read asked before the stop takes it off
+// again, nor a read that fails (round 3: the page-load read, answered before
+// the session existed, did). It goes at the list's end, so the session the
+// banner shows, the one Discard it takes, stays the first; a session the list
+// holds already (a resume's, Try again's) takes its place. Its offsets are
+// what its chunks answered (transferAll), which the banner says.
 function showUploadStopped(run) {
   showUploadResult("Upload stopped. Staged progress is kept — start again to resume.");
   const s = run.session;
-  if (s?.id && !resumableSessions.some((x) => x.id === s.id)) {
-    resumableSessions = [...resumableSessions, s];
+  if (s?.id) {
+    changeResumable(
+      resumableSessions.some((x) => x.id === s.id)
+        ? resumableSessions.map((x) => (x.id === s.id ? s : x))
+        : [...resumableSessions, s],
+    );
   }
   refreshResumable();
 }
@@ -2516,6 +2583,9 @@ async function startUpload() {
         `library (for example ${dupes[0].duplicateOf}) and will be skipped. ` +
         `Tick "Replace files that already exist" if you meant to overwrite them.`;
       await API.delete(`/api/upload/sessions/${encodeURIComponent(session.id)}`);
+      // Gone from the server: off the page's list too, should a read have
+      // listed it meanwhile.
+      forgetResumable(session.id);
       uploadCheckpoint(run);
       if (!keep.length) {
         document.getElementById("upload-review").hidden = true;
@@ -2536,6 +2606,11 @@ async function startUpload() {
     await transferAll(run, session);
     uploadCheckpoint(run);
     const res = await API.post(`/api/upload/sessions/${encodeURIComponent(session.id)}/commit`);
+    // The server removes a session after any commit it answers, whatever its
+    // files' outcomes: it leaves the page's list at once, whether or not the
+    // page is still the run's, so that no read answered before the commit
+    // lists it again (the list is the console's, kept across a navigation).
+    forgetResumable(session.id);
     // A commit already asked for may land after Cancel or a navigation took
     // the page; it is said only on the page it was asked from.
     if (!uploadOwns(run)) return;
@@ -2594,6 +2669,8 @@ async function retryUpload() {
     await transferAll(run, session);
     uploadCheckpoint(run);
     const res = await API.post(`/api/upload/sessions/${encodeURIComponent(sid)}/commit`);
+    // Off the page's list at once, as startUpload's commit.
+    forgetResumable(sid);
     if (!uploadOwns(run)) return;
     reportCommit(run.state, res);
   } catch (e) {
@@ -2677,6 +2754,9 @@ async function transferAll(run, session) {
         const res = await putUploadChunkVerified(run, session.id, meta.id, offset, bytes, failed);
         doneBytes += res.offset - offset;
         offset = res.offset;
+        // The session's own record follows, so that a stop puts it on the
+        // page's list with what it holds (showUploadStopped).
+        meta.offset = offset;
         paint();
       }
     }

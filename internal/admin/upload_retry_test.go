@@ -258,7 +258,7 @@ func TestTheConsoleRetriesARefusedCommitWithItsSessionOnceTheVolumeIsBack(t *tes
 
 	src := readConsoleJS(t, "static/app.js")
 	prelude := extractJSConst(t, src, "API")
-	for _, c := range []string{"const BYTE_UNITS = ", "const UPLOAD_PARALLEL_FILES = ", "const UPLOAD_DIGEST_RETRIES = ", "const UPLOAD_JUNK_NAMES = "} {
+	for _, c := range []string{"const BYTE_UNITS = ", "const UPLOAD_PARALLEL_FILES = ", "const UPLOAD_DIGEST_RETRIES = ", "const UPLOAD_JUNK_NAMES = ", "const resumableReads = "} {
 		prelude += jsStatement(t, src, c)
 	}
 	script := withReachedFunctions(t, prelude+uploadRetryRun, src,
