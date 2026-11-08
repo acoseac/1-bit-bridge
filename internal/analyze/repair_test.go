@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -526,15 +527,20 @@ func TestTransientRepairFailuresEarnNoStrike(t *testing.T) {
 	})
 	t.Run("a shutdown", func(t *testing.T) {
 		f := newRepairPoolFixture(t)
+		var started atomic.Bool
 		p := NewPool(f.store, 1, 4, WithFsync(noFsync),
 			WithRepairRunner(func(ctx context.Context, _ RepairSpec) (RepairResult, error) {
+				started.Store(true)
 				<-ctx.Done()
 				return RepairResult{}, markUnreadable(errors.New("sox: killed"))
 			}))
 		if err := p.EnqueueRepair(f.spec); err != nil {
 			t.Fatal(err)
 		}
-		waitForPool(t, p, "the repair running", func(st PoolStats) bool { return st.QueueLen == 0 })
+		// The repair running, or a pool with nothing to run.
+		waitForPool(t, p, "the repair running", func(st PoolStats) bool {
+			return started.Load() || st.Inflight == 0 && st.Done+st.Failed+st.Dropped >= st.Enqueued
+		})
 		p.Stop()
 		requireNoStrike(t, f)
 	})
