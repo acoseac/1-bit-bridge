@@ -38,53 +38,93 @@ func (c CaseFolding) String() string {
 	return "unknown"
 }
 
-// ParseCaseFolding is the CaseFolding String names s, and CaseUnknown for
-// any other word.
-func ParseCaseFolding(s string) CaseFolding {
-	switch s {
-	case CaseSensitive.String():
-		return CaseSensitive
-	case CaseInsensitive.String():
-		return CaseInsensitive
+// FormatFolding is folding as one letter a folder, in its order: s for
+// CaseSensitive, i for CaseInsensitive and u for CaseUnknown. A data dir's
+// record keeps it (backlog B741's round 2): keyed by each folder's whole
+// path, as round 1 kept it, a record grew as the square of its data dir's
+// depth, past what its reader takes at a depth an ordinary path reaches
+// (Codex on #1441: 66,186 bytes for a path of 495 bytes in 240 folders),
+// where one letter a folder grows with the path alone.
+func FormatFolding(folding []CaseFolding) string {
+	b := make([]byte, len(folding))
+	for i, f := range folding {
+		switch f {
+		case CaseSensitive:
+			b[i] = 's'
+		case CaseInsensitive:
+			b[i] = 'i'
+		default:
+			b[i] = 'u'
+		}
 	}
-	return CaseUnknown
+	return string(b)
 }
 
-// FoldingOnTheWay records in folding how each folder on the way to the path p
-// compares the names in it, as probe answers (FoldingIn, but for a test's
-// stand-in), keyed by the folder as p spells it: the directory each of p's
-// names is looked up in, from p's own folder up to its volume's root, each
-// asked once, a folder folding holds already not again. A folder is asked
-// where its names are compared, so the folder a volume is mounted on is asked
-// of the mounted volume's names, never of its own name in the folder above.
-// It is what SameAsRecorded compares a case-only difference by, read while the
-// folders are there: once a volume is away every folder below its mount point
-// is gone with it, and a probe then answers for the folder left at the mount
-// point, on the volume above (backlog B741's gap 3).
-func FoldingOnTheWay(p string, probe func(dir string) CaseFolding, folding map[string]CaseFolding) {
-	for child := filepath.Clean(p); ; {
-		parent := filepath.Dir(child)
-		if parent == child {
-			return
-		}
-		if _, ok := folding[parent]; !ok {
-			folding[parent] = probe(parent)
-		}
-		child = parent
+// ParseFolding reads what FormatFolding writes, a letter it does not know as
+// CaseUnknown.
+func ParseFolding(s string) []CaseFolding {
+	if s == "" {
+		return nil
 	}
+	folding := make([]CaseFolding, len(s))
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case 's':
+			folding[i] = CaseSensitive
+		case 'i':
+			folding[i] = CaseInsensitive
+		}
+	}
+	return folding
+}
+
+// FoldingOnTheWay is how each folder on the way to the absolute path p
+// compares the names in it, as probe answers (FoldingIn, but for a test's
+// stand-in): one answer a folder, from p's volume's root down to p's own
+// folder, the i-th the folder p's (i+1)-th name is looked up in (absElements:
+// filepath.Join of p's first i+1 elements); nil for a path that is not
+// absolute. A folder is asked where its names are compared, so the folder a
+// volume is mounted on is asked of the mounted volume's names, never of its
+// own name in the folder above. Each folder is asked once, from p's own up:
+// asked keeps the answers given, keyed by the folder as p spells it, and a
+// folder it holds is not asked again (a second spelling of one data dir
+// shares the folders above where the two part).
+//
+// It is what SameAsRecorded compares a case-only difference by, read while
+// the folders are there: once a volume is away every folder below its mount
+// point is gone with it, and a probe then answers for the folder left at the
+// mount point, on the volume above (backlog B741's gap 3).
+func FoldingOnTheWay(p string, probe func(dir string) CaseFolding, asked map[string]CaseFolding) []CaseFolding {
+	p = filepath.Clean(p)
+	if !filepath.IsAbs(p) {
+		return nil
+	}
+	e := absElements(p)
+	folding := make([]CaseFolding, len(e)-1)
+	for i := len(e) - 1; i >= 1; i-- {
+		dir := filepath.Join(e[:i]...)
+		f, ok := asked[dir]
+		if !ok {
+			f = probe(dir)
+			asked[dir] = f
+		}
+		folding[i-1] = f
+	}
+	return folding
 }
 
 // SameAsRecorded reports whether the absolute path now names the absolute
 // path recorded, by the folding recorded of recorded's folders
 // (FoldingOnTheWay), probing nothing: element by element alike, or alike but
-// for case where the folder the element is looked up in, as recorded spells
-// it, was not read as case-sensitive (one read as folding case, one that
-// could not tell, CaseUnknown, and one folding holds nothing of: two
-// spellings that may name one directory are taken for one, for a refusal
-// that protects a data dir whose volume is away); a volume's root, which
-// Windows never tells apart by case, alike but for case. A path that is not
-// absolute is alike only as written.
-func SameAsRecorded(recorded, now string, folding map[string]CaseFolding) bool {
+// for case where the folder the element is looked up in was not read as
+// case-sensitive (one read as folding case, and one that could not tell,
+// CaseUnknown: two spellings that may name one directory are taken for one,
+// for a refusal that protects a data dir whose volume is away); a volume's
+// root, which Windows never tells apart by case, alike but for case. A
+// folding that does not hold one answer for each of recorded's folders (none,
+// or one of another path) says nothing of any of them: each is CaseUnknown. A
+// path that is not absolute is alike only as written.
+func SameAsRecorded(recorded, now string, folding []CaseFolding) bool {
 	recorded, now = filepath.Clean(recorded), filepath.Clean(now)
 	if !filepath.IsAbs(recorded) || !filepath.IsAbs(now) {
 		return recorded == now
@@ -93,13 +133,14 @@ func SameAsRecorded(recorded, now string, folding map[string]CaseFolding) bool {
 	if len(r) != len(n) {
 		return false
 	}
+	ofThisPath := len(folding) == len(r)-1
 	for i := range r {
 		switch {
 		case r[i] == n[i]:
 		case !strings.EqualFold(r[i], n[i]):
 			return false
 		case i == 0:
-		case folding[filepath.Join(r[:i]...)] == CaseSensitive:
+		case ofThisPath && folding[i-1] == CaseSensitive:
 			return false
 		}
 	}

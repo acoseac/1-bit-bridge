@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -68,8 +67,12 @@ import (
 // data dir it served from.
 const dataDirRecordSuffix = ".datadir"
 
-// dataDirRecordMax is the most of a record readDataDirRecord reads.
-const dataDirRecordMax = 64 << 10
+// dataDirRecordMax is the most of a record readDataDirRecord reads: past the
+// record of any path an OS takes, both spellings at Windows' 32,767 UTF-16
+// units included, each escaped as JSON escapes it at most (B741's round 2: at
+// 64 KiB, a record keeping each folder's whole path outgrew it at a depth an
+// ordinary path reaches, and one letter a folder no longer can).
+const dataDirRecordMax = 2 << 20
 
 // errLinkToNothing is why a record that is a link whose target is not there
 // does not read (readDataDirRecord): never fs.ErrNotExist, the absence of a
@@ -94,70 +97,83 @@ type dataDirRecord struct {
 	// database there, and kept by every start after it. "" in a record
 	// written before B741, or by a start that could not write the marker.
 	ID string `json:"id,omitempty"`
-	// Folding is how each folder on the way of DataDir and Resolved compared
-	// the names in it when serve wrote the record (fsutil.FoldingOnTheWay,
-	// fsutil.FoldingIn's answer as CaseFolding names it), keyed by the folder
-	// as they spell it (backlog B741's gap 3): once the volume is away, the
-	// folders below its mount point are gone, and a probe answers for the
-	// folder left at the mount point instead, on the volume above. A record
-	// written before B741 holds none.
-	Folding map[string]string `json:"folding,omitempty"`
+	// DataDirFolding and ResolvedFolding are how each folder on the way of
+	// DataDir and of Resolved compared the names in it when serve wrote the
+	// record (fsutil.FoldingOnTheWay), one letter a folder from the volume's
+	// root down (fsutil.FormatFolding), so that the record grows with its
+	// paths alone, however deep (backlog B741's gap 3, and its round 2): once
+	// the volume is away, the folders below its mount point are gone, and a
+	// probe answers for the folder left at the mount point instead, on the
+	// volume above. A record written before B741 holds neither.
+	DataDirFolding  string `json:"dataDirFolding,omitempty"`
+	ResolvedFolding string `json:"resolvedFolding,omitempty"`
 }
 
 // names reports whether the record names dataDir, by either of its
 // spellings: each is compared with dataDir as the directory they name, never
-// as a string alone. Where the record holds how its folders compared names,
-// by that (fsutil.SamePathAsRecorded: what resolves on either side resolved,
-// and a spelling in another case taken for one where its folder was not read
-// as case-sensitive); where it holds none, a record written before B741, by
-// a probe of what is there now (fsutil.SamePath), which with the volume away
-// answers for the folder at the mount point.
+// as a string alone. A record serve wrote since B741 is compared by how its
+// folders compared names (fsutil.SamePathAsRecorded: what resolves on either
+// side resolved, and a spelling in another case taken for one where its
+// folder was not read as case-sensitive, or where the record holds no folding
+// of that spelling's folders), probing nothing; only a record written before
+// B741, which holds neither an identity nor any folding, by a probe of what is
+// there now (fsutil.SamePath), which with the volume away answers for the
+// folder at the mount point.
 func (r dataDirRecord) names(dataDir string) bool {
-	folding, recorded := r.folding()
-	for _, spelling := range []string{r.DataDir, r.Resolved} {
+	byProbe := r.ID == "" && r.DataDirFolding == "" && r.ResolvedFolding == ""
+	for _, s := range [...]struct{ spelling, folding string }{{r.DataDir, r.DataDirFolding}, {r.Resolved, r.ResolvedFolding}} {
 		switch {
-		case spelling == "":
-		case recorded && fsutil.SamePathAsRecorded(spelling, dataDir, folding):
+		case s.spelling == "":
+		case byProbe && fsutil.SamePath(s.spelling, dataDir):
 			return true
-		case !recorded && fsutil.SamePath(spelling, dataDir):
+		case !byProbe && fsutil.SamePathAsRecorded(s.spelling, dataDir, fsutil.ParseFolding(s.folding)):
 			return true
 		}
 	}
 	return false
 }
 
-// folding is the record's Folding as fsutil reads it, a word it does not
-// know read as CaseUnknown, and whether the record holds any.
-func (r dataDirRecord) folding() (map[string]fsutil.CaseFolding, bool) {
-	if len(r.Folding) == 0 {
-		return nil, false
-	}
-	m := make(map[string]fsutil.CaseFolding, len(r.Folding))
-	for dir, word := range r.Folding {
-		m[dir] = fsutil.ParseCaseFolding(word)
-	}
-	return m, true
-}
+// errRecordTooLong is marshalDataDirRecord's refusal of a record longer than
+// its reader takes, which no path an OS takes makes (dataDirRecordMax).
+var errRecordTooLong = errors.New("longer than a record is read")
 
-// marshalDataDirRecord is the record r as its file holds it, a line of JSON.
-// One its own reader would refuse for its size (readDataDirRecord), which
-// would refuse every start after it, is written without its folding, which
-// alone can grow so, with a path nested deep enough.
+// marshalDataDirRecord is the record r as its file holds it, a line of JSON,
+// never one its reader refuses for its size (readDataDirRecord), which would
+// refuse every start after it. One whose folding takes it past that is
+// written with each spelling's folding the one letter u, which the
+// comparison reads as no folding of any folder, every one CaseUnknown: two
+// spellings in another case taken for one, the direction that refuses, and
+// nothing probed; and one longer than that without it is refused
+// (errRecordTooLong), never written. Neither is a record of a path an OS
+// takes: one letter a folder is less than half a path's bytes, and the paths
+// themselves are under the reader's bound (dataDirRecordMax).
 func marshalDataDirRecord(r dataDirRecord) ([]byte, error) {
 	b, err := json.Marshal(r)
 	if err == nil && len(b)+1 > dataDirRecordMax {
-		r.Folding = nil
+		r.DataDirFolding, r.ResolvedFolding = unknownFolding(r.DataDirFolding), unknownFolding(r.ResolvedFolding)
 		b, err = json.Marshal(r)
 	}
-	if err != nil {
+	switch {
+	case err != nil:
 		return nil, err
+	case len(b)+1 > dataDirRecordMax:
+		return nil, errRecordTooLong
 	}
 	return append(b, '\n'), nil
 }
 
+// unknownFolding is the one letter u in place of the folding letters, which
+// says nothing of any folder, and "" for none.
+func unknownFolding(letters string) string {
+	if letters == "" {
+		return ""
+	}
+	return fsutil.FormatFolding([]fsutil.CaseFolding{fsutil.CaseUnknown})
+}
+
 // same reports whether r holds exactly what o holds.
 func (r dataDirRecord) same(o dataDirRecord) bool {
-	return r.DataDir == o.DataDir && r.Resolved == o.Resolved && r.ID == o.ID && maps.Equal(r.Folding, o.Folding)
+	return r == o
 }
 
 // dataDirRecordPath is where the record of the config at cfgFile is: beside
@@ -560,24 +576,23 @@ func (w dataDirRecording) writeRecord(path string, data []byte) error {
 }
 
 // foldingOnTheWay is how each folder on the way of each of spellings
-// compares the names in it, by CaseFolding's names, keyed by the folder as
-// it spells it (dataDirRecord.Folding).
-func (w dataDirRecording) foldingOnTheWay(spellings ...string) map[string]string {
+// compares the names in it, one string of letters a spelling
+// (fsutil.FormatFolding of fsutil.FoldingOnTheWay; dataDirRecord's
+// DataDirFolding and ResolvedFolding), "" for a spelling that is "": a folder
+// on the way of both is asked once.
+func (w dataDirRecording) foldingOnTheWay(spellings ...string) []string {
 	probe := w.folding
 	if probe == nil {
 		probe = fsutil.FoldingIn
 	}
-	folding := map[string]fsutil.CaseFolding{}
-	for _, s := range spellings {
+	asked := map[string]fsutil.CaseFolding{}
+	letters := make([]string, len(spellings))
+	for i, s := range spellings {
 		if s != "" {
-			fsutil.FoldingOnTheWay(s, probe, folding)
+			letters[i] = fsutil.FormatFolding(fsutil.FoldingOnTheWay(s, probe, asked))
 		}
 	}
-	words := make(map[string]string, len(folding))
-	for dir, f := range folding {
-		words[dir] = f.String()
-	}
-	return words
+	return letters
 }
 
 // recordServeDataDir writes the record at path naming dataDir, once serve's
@@ -593,8 +608,8 @@ func (w dataDirRecording) foldingOnTheWay(spellings ...string) map[string]string
 // writes the record only when it does not hold exactly what it is to hold
 // already, so a record that names the data dir in another spelling, or in one
 // alone (a record written before B651's fifth round), or with no identity or
-// folding (one written before B741), is written again. A record its own
-// reader would refuse for its size keeps no folding.
+// folding (one written before B741), is written again. It never writes one
+// its reader would refuse for its size (marshalDataDirRecord).
 //
 // Nothing it cannot write refuses the start, which goes on, and each is said
 // at Warn: no path (a boot read that resolved no file) or a record serve
@@ -649,7 +664,8 @@ func recordServeDataDir(path, dataDir string, w dataDirRecording) {
 	if resolved, err := fsutil.ResolveLinks(dataDir); err == nil {
 		want.Resolved = resolved
 	}
-	want.Folding = w.foldingOnTheWay(want.DataDir, want.Resolved)
+	folding := w.foldingOnTheWay(want.DataDir, want.Resolved)
+	want.DataDirFolding, want.ResolvedFolding = folding[0], folding[1]
 	if ok && had.same(want) {
 		return
 	}

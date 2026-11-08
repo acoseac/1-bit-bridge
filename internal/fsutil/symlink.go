@@ -74,7 +74,7 @@ func SamePath(a, b string) bool {
 // compares names is never probed here, unlike SamePath: recorded's folders
 // may be on a volume that is away, and a probe then answers for the folder
 // left at its mount point, on the volume above (backlog B741's gap 3).
-func SamePathAsRecorded(recorded, now string, folding map[string]CaseFolding) bool {
+func SamePathAsRecorded(recorded, now string, folding []CaseFolding) bool {
 	rn := EvalSymlinksOrClean(now)
 	if EvalSymlinksOrClean(recorded) == rn {
 		return true

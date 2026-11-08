@@ -25,36 +25,43 @@ func volumeRoot() string {
 
 // TestARecordedFoldingDecidesACaseOnlyDifference: two absolute spellings that
 // differ in case alone are one path where the folder the differing name is
-// looked up in was recorded as folding case, or as unknown, or not recorded
-// at all, and two where it was recorded as keeping case, the case-sensitive
-// sibling; a difference that is not of case alone, a path of another length,
-// and a relative path compared but as written are never one.
+// looked up in was recorded as folding case, or as unknown, or where the
+// folding recorded is not one of this path's folders (none, or one of a path
+// of another depth), and two where it was recorded as keeping case, the
+// case-sensitive sibling; a difference that is not of case alone, a path of
+// another length, and a relative path compared but as written are never one.
 func TestARecordedFoldingDecidesACaseOnlyDifference(t *testing.T) {
 	root := volumeRoot()
 	mnt := filepath.Join(root, "mnt", "usb")
 	recorded := filepath.Join(mnt, "Bridge")
+	// The folding of recorded's three folders, root first: root, root/mnt
+	// and root/mnt/usb, where Bridge is looked up.
+	of := func(root, mntDir, usb CaseFolding) []CaseFolding { return []CaseFolding{root, mntDir, usb} }
 	for _, tc := range []struct {
 		name    string
 		now     string
-		folding map[string]CaseFolding
+		folding []CaseFolding
 		same    bool
 	}{
-		{"the same spelling", recorded, map[string]CaseFolding{mnt: CaseSensitive}, true},
+		{"the same spelling", recorded, of(CaseSensitive, CaseSensitive, CaseSensitive), true},
 		{"another case in a folder recorded as folding case", filepath.Join(mnt, "bridge"),
-			map[string]CaseFolding{mnt: CaseInsensitive}, true},
+			of(CaseSensitive, CaseSensitive, CaseInsensitive), true},
 		{"another case in a folder recorded as keeping case", filepath.Join(mnt, "bridge"),
-			map[string]CaseFolding{mnt: CaseSensitive}, false},
+			of(CaseInsensitive, CaseInsensitive, CaseSensitive), false},
 		{"another case in a folder recorded as unknown", filepath.Join(mnt, "bridge"),
-			map[string]CaseFolding{mnt: CaseUnknown}, true},
-		{"another case in a folder the record says nothing of", filepath.Join(mnt, "bridge"),
-			map[string]CaseFolding{filepath.Join(root, "mnt"): CaseSensitive}, true},
+			of(CaseSensitive, CaseSensitive, CaseUnknown), true},
+		{"another case where nothing is recorded", filepath.Join(mnt, "bridge"), nil, true},
+		{"another case by the folding of a shorter path", filepath.Join(mnt, "bridge"),
+			[]CaseFolding{CaseSensitive, CaseSensitive}, true},
+		{"another case by the folding of a longer path", filepath.Join(mnt, "bridge"),
+			[]CaseFolding{CaseSensitive, CaseSensitive, CaseSensitive, CaseSensitive}, true},
 		{"another case above, in a folder recorded as keeping case", filepath.Join(root, "MNT", "usb", "Bridge"),
-			map[string]CaseFolding{root: CaseSensitive, mnt: CaseInsensitive}, false},
+			of(CaseSensitive, CaseSensitive, CaseInsensitive), false},
 		{"another case above, in a folder recorded as folding case", filepath.Join(root, "MNT", "usb", "Bridge"),
-			map[string]CaseFolding{root: CaseInsensitive, mnt: CaseSensitive}, true},
-		{"another name", filepath.Join(mnt, "Bridges"), map[string]CaseFolding{mnt: CaseInsensitive}, false},
-		{"a path below it", filepath.Join(mnt, "Bridge", "x"), map[string]CaseFolding{mnt: CaseInsensitive}, false},
-		{"a path above it", mnt, map[string]CaseFolding{mnt: CaseInsensitive}, false},
+			of(CaseInsensitive, CaseSensitive, CaseSensitive), true},
+		{"another name", filepath.Join(mnt, "Bridges"), of(CaseInsensitive, CaseInsensitive, CaseInsensitive), false},
+		{"a path below it", filepath.Join(mnt, "Bridge", "x"), of(CaseInsensitive, CaseInsensitive, CaseInsensitive), false},
+		{"a path above it", mnt, of(CaseInsensitive, CaseInsensitive, CaseInsensitive), false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := SameAsRecorded(recorded, tc.now, tc.folding); got != tc.same {
@@ -62,7 +69,7 @@ func TestARecordedFoldingDecidesACaseOnlyDifference(t *testing.T) {
 			}
 		})
 	}
-	everyFolds := map[string]CaseFolding{".": CaseInsensitive, "usb": CaseInsensitive}
+	everyFolds := []CaseFolding{CaseInsensitive, CaseInsensitive}
 	if SameAsRecorded(filepath.Join("usb", "Bridge"), filepath.Join("usb", "bridge"), everyFolds) {
 		t.Error("two relative spellings in another case read as one path")
 	}
@@ -71,7 +78,7 @@ func TestARecordedFoldingDecidesACaseOnlyDifference(t *testing.T) {
 	}
 	if runtime.GOOS == "windows" {
 		lower := strings.ToLower(root[:1]) + root[1:]
-		if !SameAsRecorded(filepath.Join(root, "x"), filepath.Join(lower, "x"), map[string]CaseFolding{}) {
+		if !SameAsRecorded(filepath.Join(root, "x"), filepath.Join(lower, "x"), []CaseFolding{CaseSensitive}) {
 			t.Errorf("a drive spelled in another case read as another volume")
 		}
 	}
@@ -79,8 +86,10 @@ func TestARecordedFoldingDecidesACaseOnlyDifference(t *testing.T) {
 
 // TestFoldingOnTheWayAsksEachFolderOnce: FoldingOnTheWay asks the probe of
 // each folder from the path's own up to its volume's root, keyed as
-// filepath.Dir spells it, and none it holds already; what it records is what
-// SameAsRecorded compares by.
+// filepath.Dir spells it, and none it was asked of already; it answers one
+// folding a folder, the root's first, which is what SameAsRecorded compares
+// by; and a path 2,000 folders deep is asked of each folder once and kept in
+// a letter a folder (backlog B741's round 2).
 func TestFoldingOnTheWayAsksEachFolderOnce(t *testing.T) {
 	root := volumeRoot()
 	mnt := filepath.Join(root, "mnt", "usb")
@@ -92,21 +101,45 @@ func TestFoldingOnTheWayAsksEachFolderOnce(t *testing.T) {
 		}
 		return CaseSensitive
 	}
-	folding := map[string]CaseFolding{}
-	FoldingOnTheWay(filepath.Join(mnt, "Bridge"), probe, folding)
+	memo := map[string]CaseFolding{}
+	recorded := filepath.Join(mnt, "Bridge")
+	folding := FoldingOnTheWay(recorded, probe, memo)
 	if want := []string{mnt, filepath.Join(root, "mnt"), root}; !slices.Equal(asked, want) {
 		t.Errorf("asked %q, want %q", asked, want)
 	}
-	asked = nil
-	FoldingOnTheWay(filepath.Join(mnt, "other", "x"), probe, folding)
-	if want := []string{filepath.Join(mnt, "other")}; !slices.Equal(asked, want) {
-		t.Errorf("a second path asked %q, want %q, the folder not recorded yet", asked, want)
+	if want := []CaseFolding{CaseSensitive, CaseSensitive, CaseInsensitive}; !slices.Equal(folding, want) {
+		t.Errorf("FoldingOnTheWay(%q) = %v, want %v, the root's first", recorded, folding, want)
 	}
-	if !SameAsRecorded(filepath.Join(mnt, "Bridge"), filepath.Join(mnt, "BRIDGE"), folding) {
+	asked = nil
+	other := FoldingOnTheWay(filepath.Join(mnt, "other", "x"), probe, memo)
+	if want := []string{filepath.Join(mnt, "other")}; !slices.Equal(asked, want) {
+		t.Errorf("a second path asked %q, want %q, the folder not asked yet", asked, want)
+	}
+	if want := []CaseFolding{CaseSensitive, CaseSensitive, CaseInsensitive, CaseSensitive}; !slices.Equal(other, want) {
+		t.Errorf("the second path's folding is %v, want %v", other, want)
+	}
+	if !SameAsRecorded(recorded, filepath.Join(mnt, "BRIDGE"), folding) {
 		t.Error("two spellings in a folder recorded as folding case read as two paths")
 	}
-	if SameAsRecorded(filepath.Join(mnt, "Bridge"), filepath.Join(root, "MNT", "usb", "Bridge"), folding) {
+	if SameAsRecorded(recorded, filepath.Join(root, "MNT", "usb", "Bridge"), folding) {
 		t.Error("two spellings in a folder recorded as keeping case read as one path")
+	}
+	if got := FoldingOnTheWay(filepath.Join("usb", "Bridge"), probe, memo); got != nil {
+		t.Errorf("a relative path's folding is %v, want none", got)
+	}
+
+	deep := root
+	for i := 0; i < 2000; i++ {
+		deep = filepath.Join(deep, "d")
+	}
+	asked = nil
+	letters := FormatFolding(FoldingOnTheWay(deep, func(dir string) CaseFolding {
+		asked = append(asked, dir)
+		return CaseInsensitive
+	}, map[string]CaseFolding{}))
+	if len(asked) != 2000 || len(letters) != 2000 || strings.Trim(letters, "i") != "" {
+		t.Errorf("a path 2,000 folders deep asked %d folders and kept %d letters (%.20q…), want each folder once and a letter each",
+			len(asked), len(letters), letters)
 	}
 }
 
@@ -123,13 +156,12 @@ func TestSamePathAsRecordedProbesNoVolume(t *testing.T) {
 		t.Fatal(err)
 	}
 	recorded, now := filepath.Join(mnt, "Bridge"), filepath.Join(mnt, "bridge")
-	folding := map[string]CaseFolding{}
-	FoldingOnTheWay(recorded, func(dir string) CaseFolding {
+	folding := FoldingOnTheWay(recorded, func(dir string) CaseFolding {
 		if dir == mnt {
 			return CaseInsensitive
 		}
 		return CaseSensitive
-	}, folding)
+	}, map[string]CaseFolding{})
 	if !SamePathAsRecorded(recorded, now, folding) {
 		t.Errorf("SamePathAsRecorded(%q, %q) = false where the record says its folder folded case", recorded, now)
 	}
@@ -139,7 +171,7 @@ func TestSamePathAsRecordedProbesNoVolume(t *testing.T) {
 			t.Errorf("SamePathAsRecorded(%q, %q) = false: a link to the mount point resolves now", recorded, through)
 		}
 	}
-	folding[mnt] = CaseSensitive
+	folding[len(folding)-1] = CaseSensitive
 	if SamePathAsRecorded(recorded, now, folding) {
 		t.Errorf("SamePathAsRecorded(%q, %q) = true where the record says its folder kept case", recorded, now)
 	}
@@ -148,15 +180,22 @@ func TestSamePathAsRecordedProbesNoVolume(t *testing.T) {
 	}
 }
 
-// TestParseCaseFoldingReadsWhatStringWrites: every CaseFolding reads back
-// from its name, and any other word reads as CaseUnknown.
-func TestParseCaseFoldingReadsWhatStringWrites(t *testing.T) {
-	for _, c := range []CaseFolding{CaseUnknown, CaseSensitive, CaseInsensitive} {
-		if got := ParseCaseFolding(c.String()); got != c {
-			t.Errorf("ParseCaseFolding(%q) = %v, want %v", c.String(), got, c)
-		}
+// TestParseFoldingReadsWhatFormatFoldingWrites: a folding reads back from
+// its letters, each CaseFolding its own letter, and a letter ParseFolding
+// does not know reads as CaseUnknown.
+func TestParseFoldingReadsWhatFormatFoldingWrites(t *testing.T) {
+	folding := []CaseFolding{CaseSensitive, CaseInsensitive, CaseUnknown, CaseSensitive}
+	letters := FormatFolding(folding)
+	if letters != "sius" {
+		t.Errorf("FormatFolding(%v) = %q, want %q", folding, letters, "sius")
 	}
-	if got := ParseCaseFolding("folds"); got != CaseUnknown {
-		t.Errorf("ParseCaseFolding of a word it does not know = %v, want unknown", got)
+	if got := ParseFolding(letters); !slices.Equal(got, folding) {
+		t.Errorf("ParseFolding(%q) = %v, want %v", letters, got, folding)
+	}
+	if got := ParseFolding("sx"); !slices.Equal(got, []CaseFolding{CaseSensitive, CaseUnknown}) {
+		t.Errorf("ParseFolding of a letter it does not know = %v, want it unknown", got)
+	}
+	if got := ParseFolding(""); got != nil {
+		t.Errorf("ParseFolding of nothing = %v, want none", got)
 	}
 }

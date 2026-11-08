@@ -726,24 +726,27 @@ func TestADataDirSetToANewDirectoryOnPurposeStarts(t *testing.T) {
 // but the folder folds, which compared them without case.
 func foldingRecordBody(t *testing.T, recorded, folds string, insensitive bool) []byte {
 	t.Helper()
-	folding := map[string]string{}
+	var folding []fsutil.CaseFolding
 	for child := recorded; ; {
 		parent := filepath.Dir(child)
 		if parent == child {
 			break
 		}
-		folding[parent] = "case-sensitive"
+		f := fsutil.CaseSensitive
+		if insensitive && parent == folds {
+			f = fsutil.CaseInsensitive
+		}
+		folding = append([]fsutil.CaseFolding{f}, folding...)
 		child = parent
 	}
-	if insensitive {
-		folding[folds] = "case-insensitive"
-	}
+	letters := fsutil.FormatFolding(folding)
 	b, err := json.Marshal(struct {
-		DataDir  string            `json:"dataDir"`
-		Resolved string            `json:"resolved"`
-		ID       string            `json:"id"`
-		Folding  map[string]string `json:"folding"`
-	}{recorded, recorded, "00112233445566778899aabbccddeeff", folding})
+		DataDir         string `json:"dataDir"`
+		Resolved        string `json:"resolved"`
+		ID              string `json:"id"`
+		DataDirFolding  string `json:"dataDirFolding"`
+		ResolvedFolding string `json:"resolvedFolding"`
+	}{recorded, recorded, "00112233445566778899aabbccddeeff", letters, letters})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -989,20 +992,21 @@ func TestTheMarkerHoldsTheIdentityBeforeTheRecordDoes(t *testing.T) {
 }
 
 // recordedFolding is how the record beside cfg says each folder on its data
-// dir's way compared names, by folder.
-func recordedFolding(t *testing.T, cfg string) map[string]string {
+// dir's way, as its config spells it, compared names: one letter a folder,
+// its volume's root first (fsutil.FormatFolding).
+func recordedFolding(t *testing.T, cfg string) string {
 	t.Helper()
 	b, err := os.ReadFile(dataDirRecordFile(cfg))
 	if err != nil {
 		t.Fatal(err)
 	}
 	var r struct {
-		Folding map[string]string `json:"folding"`
+		DataDirFolding string `json:"dataDirFolding"`
 	}
 	if err := json.Unmarshal(b, &r); err != nil {
 		t.Fatalf("the record beside %s does not read: %v (%q)", cfg, err, b)
 	}
-	return r.Folding
+	return r.DataDirFolding
 }
 
 // TestServeRecordsHowEachFolderOnItsDataDirsWayComparesNames is gap 3's
@@ -1025,16 +1029,17 @@ func TestServeRecordsHowEachFolderOnItsDataDirsWayComparesNames(t *testing.T) {
 		return fsutil.FoldingIn(dir)
 	}
 	stopServed(t, serveWithOpts(t, serveOpts{configPath: cfg, dataDirRecording: dataDirRecording{folding: probe}}))
-	got := recordedFolding(t, cfg)
+	var want []fsutil.CaseFolding
 	for child := dataDir; ; {
 		parent := filepath.Dir(child)
 		if parent == child {
 			break
 		}
-		if want := probe(parent).String(); got[parent] != want {
-			t.Errorf("the record says %s compares names %q, want %q", parent, got[parent], want)
-		}
+		want = append([]fsutil.CaseFolding{probe(parent)}, want...)
 		child = parent
+	}
+	if got, want := recordedFolding(t, cfg), fsutil.FormatFolding(want); got != want {
+		t.Errorf("the record says the folders on %s's way compare names %q, want %q, the root's first", dataDir, got, want)
 	}
 
 	if err := os.Rename(dataDir, filepath.Join(base, "volume")); err != nil {
@@ -1046,14 +1051,26 @@ func TestServeRecordsHowEachFolderOnItsDataDirsWayComparesNames(t *testing.T) {
 }
 
 // TestARecordItsReaderWouldRefuseKeepsNoFolding: a record whose folding would
-// make it longer than its reader takes, which would refuse every start after
-// it, is written without its folding, and reads.
+// take it past what its reader takes, which would refuse every start after
+// it, is written keeping no folding, each spelling's the one letter u, and
+// reads; a record holding that compares a spelling in another case as one
+// whose folders could not tell, taking it for the data dir, the direction
+// that refuses, and probes nothing (B741's round 2: round 1 wrote such a
+// record with no folding at all, which the check compared by the probe, and
+// with the volume away a probe answers for the folder left at the mount
+// point; Codex on #1441). A record longer than its reader takes without its
+// folding is not written. Neither is the record of a path an OS takes: one
+// letter a folder keeps a data dir 2,000 folders deep, in both its
+// spellings, in a few kilobytes.
 func TestARecordItsReaderWouldRefuseKeepsNoFolding(t *testing.T) {
-	r := dataDirRecord{DataDir: "/mnt/usb/bridge", ID: "0123456789abcdef0123456789abcdef", Folding: map[string]string{}}
-	for i := 0; len(r.Folding)*64 <= dataDirRecordMax; i++ {
-		r.Folding[fmt.Sprintf("/mnt/%060d", i)] = fsutil.CaseSensitive.String()
+	const id = "0123456789abcdef0123456789abcdef"
+	// "/mnt" and n folders below it: n+1 folders on the way, 2n+4 bytes.
+	deepAs := func(n int) (string, string) {
+		return "/mnt" + strings.Repeat("/d", n), strings.Repeat("s", n+1)
 	}
-	b, err := marshalDataDirRecord(r)
+	// Its paths under the bound, its folding past it.
+	dir, letters := deepAs(dataDirRecordMax * 2 / 5)
+	b, err := marshalDataDirRecord(dataDirRecord{DataDir: dir, ID: id, DataDirFolding: letters})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1065,12 +1082,33 @@ func TestARecordItsReaderWouldRefuseKeepsNoFolding(t *testing.T) {
 	switch {
 	case !ok || err != nil:
 		t.Errorf("the record written does not read: ok %v, %v (%d bytes)", ok, err, len(b))
-	case got.Folding != nil || got.DataDir != r.DataDir || got.ID != r.ID:
-		t.Errorf("the record written reads as %+v, want its data dir and its identity, and no folding", got)
+	case got.DataDir != dir || got.ID != id || got.DataDirFolding != "u" || got.ResolvedFolding != "":
+		t.Errorf("the record written reads with its folding %.20q and its identity %q, want the one letter u and %q", got.DataDirFolding, got.ID, id)
 	}
-	r.Folding = map[string]string{"/mnt/usb": fsutil.CaseInsensitive.String()}
-	if b, err := marshalDataDirRecord(r); err != nil || !strings.Contains(string(b), `"folding"`) {
-		t.Errorf("a record of its reader's size lost its folding: %q, %v", b, err)
+
+	// A spelling in another case, by a record keeping no folding of its
+	// folders, and by one keeping each folder's.
+	usb := filepath.Join(filepath.VolumeName(os.TempDir())+string(filepath.Separator), "mnt", "usb")
+	kept := dataDirRecord{DataDir: filepath.Join(usb, "Bridge"), ID: id, DataDirFolding: "u"}
+	if !kept.names(filepath.Join(usb, "bridge")) {
+		t.Error("a record keeping no folding of its folders read a spelling in another case as another data dir")
+	}
+	kept.DataDirFolding = "sss"
+	if kept.names(filepath.Join(usb, "bridge")) {
+		t.Error("a record keeping its folders as case-sensitive read a spelling in another case as its data dir")
+	}
+
+	// Longer than the bound without its folding: refused, never written.
+	dir, letters = deepAs(dataDirRecordMax / 2)
+	if b, err := marshalDataDirRecord(dataDirRecord{DataDir: dir, ID: id, DataDirFolding: letters}); !errors.Is(err, errRecordTooLong) {
+		t.Errorf("a record longer than its reader takes was made (%d bytes, %v), want errRecordTooLong", len(b), err)
+	}
+
+	// A data dir 2,000 folders deep, in both its spellings.
+	dir, letters = deepAs(2000)
+	r := dataDirRecord{DataDir: dir, Resolved: dir, ID: id, DataDirFolding: letters, ResolvedFolding: letters}
+	if b, err := marshalDataDirRecord(r); err != nil || len(b) > 16<<10 || !strings.Contains(string(b), letters) {
+		t.Errorf("the record of a data dir 2,000 folders deep is %d bytes (%v), want its folding kept in a few kilobytes", len(b), err)
 	}
 }
 
