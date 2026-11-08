@@ -4,6 +4,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -61,8 +62,12 @@ func lettersOf(letters map[string]CaseFolding) func(string) CaseFolding {
 // temporary directory taken by its real path so that it is one: macOS spells
 // that directory through /var, a link to /private/var (one folder deeper),
 // which TestSamePathAsRecordedProbesNoVolume compares through as the host
-// spells it. A folding as long as the resolved spelling's folders, not the
-// recorded one's, is no folding of the recorded path: each of its folders is
+// spells it; so is recorded by the real path with its last folder in another
+// case (`x/REAL`, not there where the volume keeps case), compared through
+// the alias, which off Windows only the comparison with now as it resolves
+// takes. A
+// folding as long as the resolved spelling's folders, not the recorded
+// one's, is no folding of the recorded path: each of its folders is
 // CaseUnknown.
 func TestARecordedPathComparesThroughAnAliasOfItsAncestors(t *testing.T) {
 	base, err := filepath.EvalSymlinks(t.TempDir())
@@ -78,6 +83,11 @@ func TestARecordedPathComparesThroughAnAliasOfItsAncestors(t *testing.T) {
 		S = CaseSensitive
 	)
 	mixed := map[string]CaseFolding{deepAlias: S, j(deepAlias, "One"): I, j(deepAlias, "One", "Two"): S}
+	// The target's folder spelled in another case: on Windows the folder that
+	// is there, whatever the letter (TestACaseOnlyDifferenceInAFolderThatIsThere).
+	x, upper := j(base, "x"), j(base, "x", "REAL")
+	_, err = os.Stat(upper)
+	oneFolder := runtime.GOOS == "windows" && err == nil
 	for _, tc := range []struct {
 		name          string
 		recorded, now string
@@ -108,6 +118,10 @@ func TestARecordedPathComparesThroughAnAliasOfItsAncestors(t *testing.T) {
 			j(deepTarget, "Bridge"), j(deepAlias, "bridge"), map[string]CaseFolding{deepTarget: I}, true},
 		{"recorded by the real path, compared through the alias, keeping case (a guard)",
 			j(deepTarget, "Bridge"), j(deepAlias, "bridge"), map[string]CaseFolding{deepTarget: S}, false},
+		{"recorded in another case than the folder the alias leads to, its folder folding case (a guard)",
+			j(upper, "Bridge"), j(deepAlias, "bridge"), map[string]CaseFolding{x: I, upper: I}, true},
+		{"recorded in another case than the folder the alias leads to, its folder keeping case (a guard)",
+			j(upper, "Bridge"), j(deepAlias, "bridge"), map[string]CaseFolding{x: S, upper: I}, oneFolder},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			folding := FoldingOnTheWay(tc.recorded, lettersOf(tc.letters), map[string]CaseFolding{})

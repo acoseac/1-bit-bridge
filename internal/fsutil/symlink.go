@@ -31,7 +31,13 @@ import (
 // admin.assertNotUnderLibraryRoots, and the `bridge variants move` CLI —
 // stay in lockstep. Previously duplicated byte-for-byte in config + admin.
 func EvalSymlinksOrClean(p string) string {
-	if resolved, err := ResolveLinks(p); err == nil {
+	return resolvedOrClean(p, ResolveLinks)
+}
+
+// resolvedOrClean is EvalSymlinksOrClean by resolve, ResolveLinks or the
+// stand-in a test of sameAbsAsRecorded passes it.
+func resolvedOrClean(p string, resolve func(string) (string, error)) string {
+	if resolved, err := resolve(p); err == nil {
 		return resolved
 	}
 	p = filepath.Clean(p)
@@ -44,7 +50,7 @@ func EvalSymlinksOrClean(p string) string {
 			return p
 		}
 		missing = filepath.Join(filepath.Base(cur), missing)
-		if resolved, err := ResolveLinks(parent); err == nil {
+		if resolved, err := resolve(parent); err == nil {
 			return filepath.Join(resolved, missing)
 		}
 		cur = parent
@@ -73,19 +79,24 @@ func SamePath(a, b string) bool {
 // and below the deepest two that do each name now gives is alike, by that
 // folding, with the one recorded gives in its place (alikeByRecord: the same,
 // or the same but for case where the folder recorded's spelling looks it up
-// in was not read as case-sensitive); and where no two resolve to one (a
-// drive that is not there), where the two are alike as written
-// (SameAsRecorded). The resolved folders are compared exactly and the names
-// below them as written, so a link on the way to another depth (macOS's
-// /var, a link to /private/var one folder deeper) moves the folders above
-// where it leads and never a letter: each name below is recorded's own,
-// judged by the letter recorded for the folder it is looked up in. A folding
-// that does not hold one letter for each folder recorded's spelling passes
-// through (foldingOf: one of another spelling, its resolution's among them)
-// says nothing of any, each CaseUnknown. B741's round 4: recorded as written
-// was compared with now as it resolved, whole, which laid the letters over
-// the resolution, shifted by the folders a link added or took away, and on
-// Windows read a short (8.3) name and its long one as two folders.
+// in was not read as case-sensitive). The resolved folders are compared
+// exactly and the names below them as written, so a link on the way to
+// another depth (macOS's /var, a link to /private/var one folder deeper)
+// moves the folders above where it leads and never a letter: each name below
+// is recorded's own, judged by the letter recorded for the folder it is
+// looked up in. Where that finds no such two, recorded as written is compared
+// with now as written and as it resolves (EvalSymlinksOrClean), name by name
+// from the volume's root (SameAsRecorded), as before, which takes a drive
+// that is not there, and a record that spells a folder in another case than
+// the folder a link in now leads to: with every name alike with the one in
+// its place, each letter stays on its folder. A folding that does not hold
+// one letter for each folder recorded's spelling passes through (foldingOf:
+// one of another spelling, its resolution's among them) says nothing of any,
+// each CaseUnknown. B741's round 4: those comparisons alone, beside the two
+// resolved whole and compared exactly, took a spelling through a link to
+// another depth for another path, recorded's letters, one a folder of its own
+// spelling, not lining up with a resolution's folders, and on Windows a short
+// (8.3) name and its long one for two folders.
 //
 // What a resolution does with case decides a folder that is there spelled in
 // another case: on Windows it names each folder that is there by its name on
@@ -120,7 +131,7 @@ func sameAbsAsRecorded(recorded, now string, folding []CaseFolding, resolve func
 	// too, so none of those can make the two one path.
 	for below := 0; below < len(r) && below < len(n); below++ {
 		if below > 0 && !alikeByRecord(folding, r, len(r)-below, n[len(n)-below]) {
-			return false
+			break
 		}
 		a, errA := resolve(filepath.Join(r[:len(r)-below]...))
 		b, errB := resolve(filepath.Join(n[:len(n)-below]...))
@@ -128,7 +139,7 @@ func sameAbsAsRecorded(recorded, now string, folding []CaseFolding, resolve func
 			return true
 		}
 	}
-	return SameAsRecorded(recorded, now, folding)
+	return SameAsRecorded(recorded, now, folding) || SameAsRecorded(recorded, resolvedOrClean(now, resolve), folding)
 }
 
 // IsUnderAny reports whether candidate resolves AT or UNDER any of roots,
