@@ -103,27 +103,27 @@ func TestTheActivationsOwnFenceIsErrActivationFenced(t *testing.T) {
 		s := nativeSink(t, k, nativeConfig())
 		// The activation asked, as Activate asks it, and the sink's release
 		// begun before its writer took it: the writer ends without running it.
-		r := &nativeRequest{ctx: context.Background(), gen: 1, reply: make(chan error, 1)}
+		r := &nativeRequest{ctx: context.Background(), gen: 1, reply: make(chan nativeAnswer, 1)}
 		s.mu.Lock()
 		s.activation = r
 		s.beginReleaseLocked(Immediate)
 		s.mu.Unlock()
-		if e := receive(t, r.reply, "the activation's answer as the writer ends"); !errors.Is(e, ErrActivationFenced) {
-			t.Fatalf("an activation its writer ended before running: %v, want ErrActivationFenced", e)
+		if a := receive(t, r.reply, "the activation's answer as the writer ends"); !errors.Is(a.err, ErrActivationFenced) || a.kind != answerNeverRan {
+			t.Fatalf("an activation its writer ended before running: %v (%v), want ErrActivationFenced, a request never run", a.err, a.kind)
 		}
 	})
 	t.Run("ended by a failure with the activation asked and not yet run", func(t *testing.T) {
 		k := nativeKernel(t)
 		s := nativeSink(t, k, nativeConfig())
 		failed := errors.New("the writer failed")
-		r := &nativeRequest{ctx: context.Background(), gen: 1, reply: make(chan error, 1)}
+		r := &nativeRequest{ctx: context.Background(), gen: 1, reply: make(chan nativeAnswer, 1)}
 		s.mu.Lock()
 		s.activation = r
 		s.err = failed
 		s.beginReleaseLocked(Immediate)
 		s.mu.Unlock()
-		if e := receive(t, r.reply, "the activation's answer as the writer ends"); errors.Is(e, ErrActivationFenced) || !errors.Is(e, failed) {
-			t.Fatalf("an activation a failing writer ended before running: %v, want the failure, not the fence", e)
+		if a := receive(t, r.reply, "the activation's answer as the writer ends"); errors.Is(a.err, ErrActivationFenced) || !errors.Is(a.err, failed) || a.kind != answerNeverRan {
+			t.Fatalf("an activation a failing writer ended before running: %v (%v), want the failure, not the fence, a request never run", a.err, a.kind)
 		}
 	})
 	t.Run("the admission's refusal beside a revocation", func(t *testing.T) {

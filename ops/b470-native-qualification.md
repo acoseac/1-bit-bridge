@@ -1,6 +1,6 @@
 # B470 native qualification — owner approval and provisional evidence
 
-QualificationVersion is **50**. All older evidence must be rerun for the harness, native included. The
+QualificationVersion is **51**. All older evidence must be rerun for the harness, native included. The
 harness never creates approval. Since B728 no production path reads an approval record or a candidate:
 the player plays DSD by its effective policy (`ops/plan-b728-dsd-capability-design.md`). This runbook
 is the engineering harness's. Its evidence binds `qualificationVersion`, whose guard covers the DSD byte
@@ -249,7 +249,7 @@ GOTOOLCHAIN=go1.27.3 go test -race -tags ts_omit_webclient,ts_omit_debugeventbus
 
 ## Round 3 evidence rules
 
-Historical round 3 used qualificationVersion 4; current version is **50**. A native contact's
+Historical round 3 used qualificationVersion 4; current version is **51**. A native contact's
 Contact.SchemaVersion remains **2**; a DoP contact's is **3**. All older
 contacts are invalid; repeat contact on this build. Required Device and Subdevice
 fields bind the configured PCM endpoint, including a nonzero subdevice, before
@@ -338,7 +338,7 @@ still resolve inside it). `dsdMode: native` or `auto` enables only approved nati
 
 The Go contracts are `qualification.Approval`, `ApprovalBody`, `ApprovedPolicy`, `Edge`
 and `Evidence` in `internal/player/qualification/approval.go`. JSON uses those exact
-exported field names. SchemaVersion=1, or 2 with Transitions and QualifiedOn (2d.2, below); QualificationVersion=50; Revision is the owner's
+exported field names. SchemaVersion=1, or 2 with Transitions and QualifiedOn (2d.2, below); QualificationVersion=51; Revision is the owner's
 revision; Identity is the observed VID/ProductID/manufacturer/product/bcdDevice,
 anchored controller/port, interface, device and subdevice. No serial or card number is
 persistent identity. Unchanged descriptors may retain approval after replug/restart;
@@ -386,7 +386,7 @@ At least one native fixture must finish with measured playback of that tuple.
 NativeTuple and NativeCompleted record that execution; PCM-only lists or completion
 cannot qualify it. LifecycleActions count observed native outcomes: pause/resume,
 release/reopen, navigation between native occurrences, Stop, and natural completion.
-An admitted command alone is insufficient. Version 50 invalidates older evidence.
+An admitted command alone is insufficient. Version 51 invalidates older evidence.
 List all candidate directional edges explicitly. No command generates that record.
 
 ```sh
@@ -425,7 +425,7 @@ or evidence names resolving to the state directory itself before any ancestor
 walk. Native monitoring remains fail-closed without a grace period. The overlay
 generator requires both integration suites before publishing its overlay.
 Guarded API, config, extractor, output-play and approval paths changed; rerun
-qualification with version 50. ExtractorVersion 30 retains the first parsed DFF
+qualification with version 51. ExtractorVersion 30 retains the first parsed DFF
 PROP's known format facts when a later PROP makes compression unsupported.
 
 Version 13 also covers the deterministic PCM trace capture test. It changes no
@@ -1098,3 +1098,40 @@ stopped activation's or resume's own answer as in the run's report; a clean Stop
 the run as stopped, exit 0, and nothing plays differently. Serve's player, whose sinks'
 lives end only after their release, answers as before. Every earlier version's harness
 evidence is stale to the harness, as at every bump.
+
+Version 51 is B728 B9's round 10: one verdict for every arm that answers a request whose
+life ended. 50's record said a failed cleanup's answer drops a cancellation and the sink's
+fence: that held on the writer's reply and its end, not on the caller's own context's arm,
+which answered the failure beside its context's cancellation and lost a refusal the writer
+had held; not where the writer had recorded the fence, an activation's own context having
+ended it, which every arm answered; and not for a TrackChange drain the release's deadline
+cut, recorded beside `ErrReleaseUnconfirmed`, whose cancellation every arm answered with its
+chain. And a refusal the writer held was answered as it was where nothing was recorded,
+though the ended life answers what it fenced as its cancellation (B765). Now one function
+(`verdict`) decides every answer once the sink's life has ended, from what the request was
+answered (a success, a fault of its own, a refusal held, the fence, a request never run,
+none) and the cleanup's record, in four states: nothing recorded, a success stays one and a
+fault itself, the rest the life's typed cancellation; a device's failure, the release
+confirmed, that failure beside the request's own fault or held refusal, with no
+`ErrReleaseUnconfirmed` it does not carry; a close that failed, that failure with
+`ErrReleaseUnconfirmed`; the release's budget passed, the writer still in its cleanup,
+`ErrReleaseUnconfirmed` beside the request's own fault or held refusal and what is recorded
+by then. A failure answered carries no cancellation and not the sink's fence: those a record
+holds keep their words and lose their chain, and a record of nothing but those is nothing
+recorded. Every arm of a request's wait (the writer's reply, its end, the request's own
+context's end, the release's deadline) reads the reply the writer sent, and the entries of
+Activate, Resume and ActivatePaused answer by the same verdict. Under the prefix the sink's
+tests gain the verdict's table and five cases over the arms and the entries
+(`sink_dsd_verdict_test.go`, `sink_dsd_entry_test.go`), and a test seam that fixes the arm a
+request's wait takes (`nativeSeams.arm`, nil outside a test); the writer's reply carries
+what it is beside its error (`nativeAnswer`). No packer, plan, harness reader or record
+changes. The harness's approval admission reads a record of version 51 alone; the migration
+reads an owner's record of 35 to 51 (`LegacyVersion` stays 35). For owners: a resume the
+DAC's check refused while the run played, beside a Stop that came before its answer was
+taken, now answers the stop, so the run ends as stopped, exit 0, whichever way its wait took
+the answer (50 answered the refusal, exit 1, on all but its context's arm); a Stop while the
+DAC's node fails to close still ends the run reporting that failure, exit 1, the stopped
+command's own answer carrying it without a cancellation whichever way its wait took it; and
+nothing plays differently. Serve's player, whose sinks' lives end only after their release,
+answers as before. Every earlier version's harness evidence is stale to the harness, as at
+every bump.

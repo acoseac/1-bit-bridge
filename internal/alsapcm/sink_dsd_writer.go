@@ -24,21 +24,20 @@ func (s *DSDSink) loopNative() {
 		s.active = false
 		if s.activation != nil {
 			// The writer ends with an activation it never ran (B728 B9 round
-			// 4), its one answer, sent here after the writer's own close, so it
-			// carries the cleanup's verdict, by fenced (round 8): a failure the
-			// writer or its release recorded, its device's or a close that
-			// failed (ErrReleaseUnconfirmed), joined to the words of its own,
-			// never to the sink's fence, which a caller takes for its drop's,
-			// and never dropped for the life's cancellation; with none, the
-			// sink's own fence while its life runs, and that life's
-			// cancellation once it has ended (B765). Its caller takes it
-			// whole, or, past the release's deadline, has answered already
-			// (await, round 9).
+			// 4), its one answer, sent here after the writer's own close: while
+			// the sink's life runs, by fenced (round 8), a failure the writer
+			// or its release recorded, its device's or a close that failed
+			// (ErrReleaseUnconfirmed), joined to the words of its own, never
+			// to the sink's fence, which a caller takes for its drop's, and,
+			// with none, the sink's own fence; once the life has ended, the
+			// verdict reads it as a request never run and the record beside it
+			// (answerNeverRan; round 10). Its caller takes it whole, or, past
+			// the release's deadline, has answered already (await, round 9).
 			e := ErrActivationFenced
 			if s.err != nil {
 				e = errNativeActivationCancelled
 			}
-			s.activation.reply <- s.fenced("native activation", e)
+			s.activation.reply <- nativeAnswer{err: s.fenced("native activation", e), kind: answerNeverRan, op: "native activation"}
 			s.activation = nil
 		}
 		if s.releaseCancel != nil {
@@ -106,12 +105,12 @@ func (s *DSDSink) loopNative() {
 				// recorded as it is sent (a request is admitted only while the
 				// sink has recorded no failure, and the writer records one only
 				// here or as it ends), and not what the Immediate release this
-				// begins records after it, a close that fails: that reaches
-				// the caller through its wait, which settles a reply taken
-				// once the life has ended by the cleanup's verdict, the
-				// writer's end awaited within the release's budget (settled,
-				// abandoned; B728 B9 rounds 8 and 9). So does a success or any
-				// other answer sent here. Anything else, a device's or an
+				// begins records after it, a close that fails: once the life
+				// has ended its caller is answered by the verdict, from what
+				// this reply is (replied: a success, a fault, a refusal held,
+				// the fence) and the cleanup's record, the writer's end awaited
+				// within the release's budget, whichever arm of its wait took
+				// it (B728 B9 rounds 8 to 10). Anything else, a device's or an
 				// admission's failure, stays the sink's fault, though the
 				// release has begun, and is the answer itself. While the life
 				// runs a release in progress excuses what it met, as ever, and
@@ -134,7 +133,7 @@ func (s *DSDSink) loopNative() {
 					e = s.lifeCancelled("native activation", end)
 				}
 			}
-			r.reply <- e
+			r.reply <- replied(e, held)
 			s.notify()
 			s.mu.Unlock()
 			if e != nil && !held {

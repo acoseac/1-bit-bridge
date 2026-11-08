@@ -27,18 +27,19 @@ var ErrReleaseUnconfirmed = errors.New("native release unconfirmed")
 // released or being released (an Immediate release cuts a prefill short, the
 // cancellation joined to this) or paused, before or while the activation was
 // asked, at its admission's end, or before its writer ran it, while the sink's
-// life runs and the sink has recorded no failure: once that life has ended,
-// the fence answers the life's cancellation instead (fenced, lifeCancelled;
-// B765), which a caller the life stopped takes for the stop it is, and a
-// failure the sink recorded, its device's or its release's, is answered as
-// neither, but joined to the command's own refusal (fenced, B728 B9 round 8),
-// and, the life ended, to the cleanup's verdict once the writer has ended
-// (settled, round 9). It is never the device's answer: an admission the check
-// refused, a write that failed and a reopen whose geometry changed are
-// returned as they are, and so is a sink that failed before the activation;
-// and a fence whose own close failed, a reopened node's, is that failure
-// (ErrReleaseUnconfirmed), never this (round 9). A caller that dropped what it
-// was activating tells by it that the failure was the drop's.
+// life runs and the sink has recorded no failure, a failure it recorded then
+// joined to the command's own refusal (fenced, B728 B9 round 8). Once that
+// life has ended the fence is never answered: the verdict answers the life's
+// cancellation where the cleanup recorded no failure (B765), which a caller
+// the life stopped takes for the stop it is, and the failure otherwise, this
+// fence's chain dropped from it where the sink recorded the fence too
+// (verdict, failureOf; rounds 9 and 10). It is never the device's answer: an
+// admission the check refused, a write that failed and a reopen whose
+// geometry changed are returned as they are, and so is a sink that failed
+// before the activation; and a fence whose own close failed, a reopened
+// node's, is that failure (ErrReleaseUnconfirmed), never this (round 9). A
+// caller that dropped what it was activating tells by it that the failure was
+// the drop's.
 var ErrActivationFenced = errors.New("native activation fenced")
 
 const nativeReleaseBudget = 2 * time.Second
@@ -84,7 +85,9 @@ type nativeRequest struct {
 	gen        uint64
 	resume     bool
 	pauseEpoch uint64
-	reply      chan error
+	// reply is the writer's one answer, what it is beside its error
+	// (nativeAnswer), buffered so the writer never waits on its caller.
+	reply chan nativeAnswer
 }
 
 // DSDSink owns native data separately from the unchanged PCM sink. Its writer
@@ -332,31 +335,35 @@ func (s *DSDSink) interrupt() {
 // Activate rechecks admission before the first write, including silence. gen
 // must increase for a new activation after pause/release; a revoked sink cannot
 // be reactivated. A pause racing the admission check wins before the first write.
-// One the sink's own fence ends answers ErrActivationFenced, and, once the
-// sink's life has ended, a refusal and the fence answer that life's
-// cancellation (fenced, B765), a failure the sink recorded joined to the
-// refusal instead (B728 B9 round 8). A caller whose context has ended, or
-// ends first, revokes the sink (await, abandoned); once the life has ended,
-// every answer carries the cleanup's verdict (settled, round 9).
+// One the sink's own fence ends answers ErrActivationFenced while the sink's
+// life runs, a failure the sink recorded joined to a refusal (fenced, B728 B9
+// round 8). A caller whose context has ended, or ends first, revokes the sink
+// (await, abandoned); once the life has ended, every answer, at the entry and
+// through the wait alike, is the verdict's (settled, verdict; rounds 9 and
+// 10).
 func (s *DSDSink) Activate(ctx context.Context, gen uint64) error {
 	if e := ctx.Err(); e != nil {
-		// The revocation ends the writer, whatever the life: it waits for
-		// that end only once the life has ended (abandoned, B728 B9 round 9).
+		// The revocation ends the writer, whatever the life: the answer
+		// waits for that end only once the life has ended (B728 B9 round 9),
+		// the request refused at its entry (round 10).
 		s.Revoke()
-		return s.abandoned(e)
+		if s.life.Err() == nil {
+			return s.abandoned(e)
+		}
+		return s.settled(refusedAnswer("native activation", e))
 	}
 	s.mu.Lock()
 	if s.err != nil || s.activation != nil || gen == 0 || gen <= s.generation {
 		e := s.fenced("native activation", errors.New("native activation refused"))
 		s.mu.Unlock()
-		return s.settled(e)
+		return s.settled(refusedAnswer("native activation", e))
 	}
 	if s.released || s.revoked || s.releasing || s.paused {
 		e := s.fenced("native activation", ErrActivationFenced)
 		s.mu.Unlock()
-		return s.settled(e)
+		return s.settled(refusedAnswer("native activation", e))
 	}
-	r := &nativeRequest{ctx: ctx, gen: gen, reply: make(chan error, 1)}
+	r := &nativeRequest{ctx: ctx, gen: gen, reply: make(chan nativeAnswer, 1)}
 	s.activation = r
 	s.interrupt()
 	s.mu.Unlock()
@@ -365,138 +372,329 @@ func (s *DSDSink) Activate(ctx context.Context, gen uint64) error {
 
 // await is a request's wait for its answer (Activate, Resume,
 // ActivatePaused): the writer's reply, which it also sends as it ends,
-// settled by the cleanup's verdict once the sink's life has ended (settled);
-// its caller's context's end, which revokes the sink and is answered by
-// abandoned; or the release's shared deadline passing with the request
-// unanswered, the writer still in its cleanup, which stays the writer's: the
-// release unconfirmed, so no caller, on the life or off it, waits past that
-// deadline (B728 B9 round 9).
+// after its close; the writer's end; its caller's context's end, which
+// revokes the sink; or the release's shared deadline passing, the writer
+// still in its cleanup, which stays the writer's. While the sink's life runs
+// the reply is the answer, a context's end its cancellation at once
+// (abandoned) and the deadline the release unconfirmed (B728 B9 rounds 8 and
+// 9). Once the life has ended every arm answers by one verdict, the reply
+// the writer sent read whichever arm won, without waiting where the writer
+// has ended or the budget passed, so no caller, on the life or off it, waits
+// past that deadline, and none is answered by the arm a scheduler picked
+// (verdict, round 10).
 func (s *DSDSink) await(ctx context.Context, r *nativeRequest) error {
 	if h := s.seams.awaiting; h != nil {
 		h()
 	}
-	reply, cancelled, done, expired := (<-chan error)(r.reply), ctx.Done(), (<-chan struct{})(s.done), (<-chan struct{})(s.releaseExpired)
+	reply, cancelled, done, expired := (<-chan nativeAnswer)(r.reply), ctx.Done(), (<-chan struct{})(s.done), (<-chan struct{})(s.releaseExpired)
 	if pick := s.seams.arm; pick != nil {
 		reply, cancelled, done, expired = armOnly(pick(), reply, cancelled, done, expired)
 	}
 	select {
-	case e := <-reply:
-		return s.settled(e)
-	case <-cancelled:
-		s.Revoke()
-		return s.abandoned(ctx.Err())
+	case a := <-reply:
+		return s.settled(a)
 	case <-done:
 		return s.settled(<-r.reply)
-	case <-expired:
-		select {
-		case e := <-r.reply:
-			return s.settled(e)
-		default:
+	case <-cancelled:
+		s.Revoke()
+		if s.life.Err() == nil {
+			return s.abandoned(ctx.Err())
 		}
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		return errors.Join(ErrReleaseUnconfirmed, s.err)
-	}
-}
-
-// errNativeActivationCancelled is the words of a request's answer that
-// carries the failures the sink recorded where nothing of its own is one: a
-// success, the life's cancellation or the sink's fence, which the failure
-// replaces (B728 B9 rounds 4 and 9).
-var errNativeActivationCancelled = errors.New("native activation cancelled")
-
-// endOfLife is the cleanup's verdict once the sink's life has ended: the
-// life's Immediate release, begun here if no one has, waited for, the
-// writer's end within the release's shared budget, no lock held while it
-// waits, and then what the sink recorded (s.err: every failure of the writer
-// and of its release is joined there, a failed close's with
-// ErrReleaseUnconfirmed, cleanupErr holding the closes' alone), final once
-// the writer has ended; with the budget passed first, the writer still in
-// its cleanup, ErrReleaseUnconfirmed beside what is recorded by then
-// (B728 B9 round 9).
-func (s *DSDSink) endOfLife() error {
-	s.Revoke()
-	select {
-	case <-s.done:
-	case <-s.releaseExpired:
-		select {
-		case <-s.done:
-		default:
+	case <-expired:
+		if s.life.Err() == nil {
+			if a, ok := sent(r); ok {
+				return a.err
+			}
 			s.mu.Lock()
 			defer s.mu.Unlock()
 			return errors.Join(ErrReleaseUnconfirmed, s.err)
 		}
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.err
-}
-
-// isFault says whether e, a request's answer, is a failure of its own: not a
-// success, the sink's own fence (ErrActivationFenced, errNativeResumeFenced)
-// or a cancellation (lifeCaused's words).
-func isFault(e error) bool {
-	return e != nil && !errors.Is(e, ErrActivationFenced) && !errors.Is(e, errNativeResumeFenced) &&
-		!errors.Is(e, context.Canceled) && ReasonOf(e) != ReasonCancelled
-}
-
-// settled is the answer of a request of Activate, Resume or ActivatePaused
-// whose answer so far is e, the writer's reply or a refusal at its entry: e
-// as it is while the sink's life runs; once the life has ended, the cleanup's
-// verdict (endOfLife) decides it (B728 B9 round 9). Nothing recorded: e as it
-// is, the life's typed cancellation among them. A failure recorded that e
-// carries already (the loop-end reply, a refusal after the writer's end), or
-// e itself all that is recorded with the release confirmed: e. Otherwise the
-// recorded failure, ErrReleaseUnconfirmed where the release failed or is
-// past its budget, beside e where e is a fault of its own, which is kept, or
-// beside fixed words where e is a success, the life's cancellation or the
-// sink's fence, none of which the answer then carries, so a caller never
-// takes a cleanup's failure for a cancellation (ReasonOf) or its drop's
-// fence. Pause's and WriteDSD's own waits are not settled: they answer their
-// caller's context, and their refusals what is recorded as they answer.
-func (s *DSDSink) settled(e error) error {
-	if s.life.Err() == nil {
-		return e
-	}
 	rec := s.endOfLife()
-	switch {
-	case rec == nil:
-		return e
-	case isFault(e) && (errors.Is(e, rec) || !errors.Is(rec, ErrReleaseUnconfirmed) && errors.Is(rec, e)):
-		return e
-	case isFault(e) && errors.Is(rec, e):
-		return rec
-	case isFault(e):
-		return errors.Join(e, rec)
-	}
-	return errors.Join(errNativeActivationCancelled, rec)
+	a, _ := sent(r)
+	return verdict(a, rec)
 }
 
-// abandoned is the answer of a request whose caller's context ended (cause),
-// at Activate's entry or before the writer answered it, the sink revoked:
-// that cause, with the failure the sink recorded joined (B728 B9 round 8).
-// While the sink's life runs, the caller's own cancellation returns at once,
-// with what is recorded by then: its revocation ends the writer, which it
-// does not wait for. Once the life has ended too, as it has for a caller on
-// that life (the harness's: a Stop ends both), the answer carries the
-// cleanup's verdict (endOfLife, round 9): the cause beside what the writer and
-// its release recorded, or, with nothing recorded, the life's typed
-// cancellation.
-func (s *DSDSink) abandoned(cause error) error {
-	if s.life.Err() == nil {
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		if s.err != nil {
-			return errors.Join(cause, s.err)
-		}
-		return cause
+// sent is the writer's answer to r where it has sent one, read without
+// waiting; with none sent, answerNone.
+func sent(r *nativeRequest) (nativeAnswer, bool) {
+	select {
+	case a := <-r.reply:
+		return a, true
+	default:
+		return nativeAnswer{kind: answerNone, op: "native activation"}, false
 	}
-	if rec := s.endOfLife(); rec != nil {
-		return errors.Join(cause, rec)
+}
+
+// errNativeActivationCancelled is the words of the writer's answer to a
+// request it ended without running where the sink recorded a failure, the
+// failure joined to it, never the sink's fence (B728 B9 rounds 4 and 8).
+var errNativeActivationCancelled = errors.New("native activation cancelled")
+
+// answerKind is what the answer to a request of Activate, Resume or
+// ActivatePaused is, by which its verdict reads it once the sink's life has
+// ended (verdict, B728 B9 round 10).
+type answerKind int
+
+const (
+	// answerNone is no answer: the release's budget passed with the request
+	// unanswered, the writer still in its cleanup.
+	answerNone answerKind = iota
+	// answerSuccess is the request done: an activation or a resume the
+	// writer ran to its end, or a resume of a sink not paused.
+	answerSuccess
+	// answerFault is a failure of the request's own (its device's, its
+	// admission's, its reopen's), which the writer records but where a
+	// release it did not cause excused it, the life running.
+	answerFault
+	// answerHeld is a paused sink's resume, or its first activation, refused
+	// while the life runs: a refusal the writer holds for the next resume and
+	// records nowhere.
+	answerHeld
+	// answerFenced is the sink's fence (ErrActivationFenced,
+	// errNativeResumeFenced), a cancellation the life or a release caused,
+	// the life's typed one among them, or a refusal at a command's entry,
+	// which no writer ran.
+	answerFenced
+	// answerNeverRan is the writer's answer to a request it ended without
+	// running, sent as it ends, after its close.
+	answerNeverRan
+)
+
+// nativeAnswer is the answer to a request: its error, which its caller is
+// answered while the sink's life runs; what it is (kind), by which the
+// verdict reads it once that life has ended; and the command that asked
+// (op), for that life's typed cancellation.
+type nativeAnswer struct {
+	err  error
+	kind answerKind
+	op   string
+}
+
+// replied is the writer's answer to a request it ran, e its error, held
+// where the writer holds the refusal for the next resume.
+func replied(e error, held bool) nativeAnswer {
+	a := nativeAnswer{err: e, kind: answerFenced, op: "native activation"}
+	switch {
+	case e == nil:
+		a.kind = answerSuccess
+	case held:
+		a.kind = answerHeld
+	case failureOf(e) != nil:
+		a.kind = answerFault
+	}
+	return a
+}
+
+// refusedAnswer is a command's answer at its entry, e its refusal, or its
+// caller's context already ended: no writer ran it, so the verdict reads it
+// as the sink's fence.
+func refusedAnswer(op string, e error) nativeAnswer {
+	return nativeAnswer{err: e, kind: answerFenced, op: op}
+}
+
+// nativeRecord is what the cleanup recorded once the sink's life has ended
+// (endOfLife): s.err (err), where every failure of the writer and of its
+// release is joined, a failed close's with ErrReleaseUnconfirmed, final where
+// the writer has ended (ended) and so far where the release's budget passed
+// first; and the life's end and the endpoint, for that life's typed
+// cancellation.
+type nativeRecord struct {
+	err      error
+	ended    bool
+	end      error
+	endpoint Endpoint
+}
+
+// endOfLife is the cleanup's record once the sink's life has ended: the
+// life's Immediate release, begun here if no one has, waited for, the
+// writer's end within the release's shared budget, no lock held while it
+// waits; the writer has ended where its end is there once the wait is over,
+// so where its end and the deadline are both there the completed cleanup
+// decides (B728 B9 rounds 9 and 10). cleanupErr holds the closes' failures
+// alone, which CleanupResult reports.
+func (s *DSDSink) endOfLife() nativeRecord {
+	s.Revoke()
+	select {
+	case <-s.done:
+	case <-s.releaseExpired:
+	}
+	ended := false
+	select {
+	case <-s.done:
+		ended = true
+	default:
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.lifeCancelled("native activation", s.life.Err())
+	return nativeRecord{err: s.err, ended: ended, end: s.life.Err(), endpoint: s.params.Endpoint}
+}
+
+// verdict is the answer to a request of Activate, Resume or ActivatePaused
+// whose sink's life has ended (B728 B9 round 10): the one rule every arm that
+// answers such a request answers by, its wait's (await: the writer's reply,
+// the writer's end, the request's own context's end, the release's deadline,
+// the reply read whichever won) and its command's entry's (Activate's on a
+// context already ended and its refusals, Resume's refusal and its answer to
+// a sink not paused, ActivatePaused's refusal and the Resume it hands to:
+// settled), from what the request was answered (a) and what the cleanup
+// recorded (rec), in four states:
+//
+//   - nothing recorded, the writer ended: a success stays a success and a
+//     fault of the request's own stays itself, as they were where nothing
+//     failed; a refusal the writer held, the sink's fence and a request the
+//     writer never ran answer the life's typed cancellation (B765), as does
+//     a request no answer reached;
+//   - a device's failure recorded, the release confirmed: that failure,
+//     beside the request's own fault or held refusal where the record does
+//     not carry it, and no ErrReleaseUnconfirmed the record does not carry;
+//   - a close that failed: that failure, ErrReleaseUnconfirmed with it,
+//     beside the request's own fault or held refusal;
+//   - the release's budget passed, the writer still in its cleanup, which
+//     stays its own, its late outcome landing in cleanupErr:
+//     ErrReleaseUnconfirmed, beside the request's own fault or held refusal
+//     and what is recorded by then.
+//
+// A failure answered carries no cancellation and not the sink's fence: those
+// a record holds (a TrackChange drain the deadline cut, recorded beside
+// ErrReleaseUnconfirmed; a fence its request's own context's end made the
+// writer record) keep their words and lose their chain (failureOf), so its
+// caller never takes a failure for a stop (context.Canceled, ReasonOf) or for
+// its drop's fence; a record of nothing but those is nothing recorded.
+func verdict(a nativeAnswer, rec nativeRecord) error {
+	fault := failureOf(rec.err)
+	var own error
+	if (a.kind == answerFault || a.kind == answerHeld) && !errors.Is(rec.err, a.err) {
+		own = failureOf(a.err)
+	}
+	switch {
+	case !rec.ended && errors.Is(fault, ErrReleaseUnconfirmed):
+		return errors.Join(own, fault)
+	case !rec.ended:
+		return errors.Join(ErrReleaseUnconfirmed, own, fault)
+	case fault != nil && own != nil:
+		return errors.Join(own, fault)
+	case fault != nil:
+		return fault
+	case a.kind == answerSuccess:
+		return nil
+	case a.kind == answerFault:
+		return a.err
+	}
+	return lifeCancelledAt(a.op, rec.endpoint, rec.end)
+}
+
+// failureOf is the failure e carries, in e's own words: e itself where it
+// reaches no cancellation and not the sink's fence; otherwise e's words
+// (%v, never %w), with what of it is neither (ErrReleaseUnconfirmed, a
+// device's failure, a close's) as their chain and the rest's chain dropped;
+// nil where e is nothing but those, or nil (B728 B9 round 10).
+func failureOf(e error) error {
+	if !stopsOrFences(e) {
+		return e
+	}
+	parts := failures(e)
+	if len(parts) == 0 {
+		return nil
+	}
+	return &nativeFailure{words: e.Error(), parts: parts}
+}
+
+// stopsOrFences says whether e reaches a cancellation (context.Canceled, or
+// an error of ReasonCancelled anywhere in its chain, where ReasonOf reads the
+// first error's reason alone) or the sink's fence (ErrActivationFenced,
+// errNativeResumeFenced).
+func stopsOrFences(e error) bool {
+	if e == nil {
+		return false
+	}
+	return errors.Is(e, context.Canceled) || errors.Is(e, ErrActivationFenced) || errors.Is(e, errNativeResumeFenced) || cancelledIn(e)
+}
+
+// cancelledIn says whether an error of ReasonCancelled is in e's chain.
+func cancelledIn(e error) bool {
+	if x, ok := e.(*Error); ok && x != nil && x.Reason == ReasonCancelled {
+		return true
+	}
+	switch u := e.(type) {
+	case interface{ Unwrap() error }:
+		if w := u.Unwrap(); w != nil {
+			return cancelledIn(w)
+		}
+	case interface{ Unwrap() []error }:
+		for _, w := range u.Unwrap() {
+			if w != nil && cancelledIn(w) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// failures is what of e is no cancellation and not the sink's fence: e where
+// it reaches neither; otherwise what of each error it wraps is neither; and
+// nothing of a cancellation or the fence itself, an error of ReasonCancelled
+// with the context's error it wraps (its chain goes whole).
+func failures(e error) []error {
+	if e == nil {
+		return nil
+	}
+	if !stopsOrFences(e) {
+		return []error{e}
+	}
+	if x, ok := e.(*Error); ok && x != nil && x.Reason == ReasonCancelled {
+		return nil
+	}
+	switch u := e.(type) {
+	case interface{ Unwrap() []error }:
+		var parts []error
+		for _, w := range u.Unwrap() {
+			parts = append(parts, failures(w)...)
+		}
+		return parts
+	case interface{ Unwrap() error }:
+		return failures(u.Unwrap())
+	}
+	return nil
+}
+
+// nativeFailure is a failure failureOf re-expressed: the words of what the
+// sink recorded or answered, and as its chain the failures among what that
+// wrapped, so errors.Is finds each of them and none of what it dropped.
+type nativeFailure struct {
+	words string
+	parts []error
+}
+
+func (f *nativeFailure) Error() string   { return f.words }
+func (f *nativeFailure) Unwrap() []error { return f.parts }
+
+// settled is the answer to a request of Activate, Resume or ActivatePaused
+// answered a, by the writer or at its command's entry: a's error while the
+// sink's life runs; once the life has ended, the verdict's, the cleanup's
+// record awaited (endOfLife; B728 B9 rounds 9 and 10). Pause's and WriteDSD's
+// own waits are not settled: they answer their caller's context, and their
+// refusals what is recorded as they answer.
+func (s *DSDSink) settled(a nativeAnswer) error {
+	if s.life.Err() == nil {
+		return a.err
+	}
+	return verdict(a, s.endOfLife())
+}
+
+// abandoned is the answer, while the sink's life runs, to a request whose
+// caller's context ended (cause), at Activate's entry or before the writer
+// answered it, the sink revoked: that cause, with the failure the sink
+// recorded joined, at once (B728 B9 rounds 8 and 9): its revocation ends the
+// writer, which it does not wait for. Once the life has ended the verdict
+// answers it (await, Activate; round 10).
+func (s *DSDSink) abandoned(cause error) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.err != nil {
+		return errors.Join(cause, s.err)
+	}
+	return cause
 }
 
 // Revoke permanently cancels activation and begins Immediate cleanup.
@@ -508,7 +706,12 @@ func (s *DSDSink) Revoke() { s.beginRelease(Immediate) }
 // stop it is, whatever refusal of its own the command met (B765 round 3).
 // With s.mu held.
 func (s *DSDSink) lifeCancelled(op string, end error) error {
-	return &Error{Reason: ReasonCancelled, Op: op, Endpoint: s.params.Endpoint, Detail: "the sink's life ended", Err: end}
+	return lifeCancelledAt(op, s.params.Endpoint, end)
+}
+
+// lifeCancelledAt is lifeCancelled's error for the endpoint ep.
+func lifeCancelledAt(op string, ep Endpoint, end error) error {
+	return &Error{Reason: ReasonCancelled, Op: op, Endpoint: ep, Detail: "the sink's life ended", Err: end}
 }
 
 // fenced is a command's refusal, refusal, by the one rule every command's
@@ -777,18 +980,20 @@ func (s *DSDSink) Pause(ctx context.Context) error {
 }
 
 // Resume revalidates a released endpoint before resuming retained content.
+// Once the sink's life has ended its answers are the verdict's, a sink not
+// paused answered as a success (settled, verdict; B728 B9 round 10).
 func (s *DSDSink) Resume(ctx context.Context) error {
 	s.mu.Lock()
 	if s.generation == 0 || s.releasing || s.revoked || s.err != nil || s.activation != nil {
 		e := s.fenced("native resume", errors.New("native resume fenced"))
 		s.mu.Unlock()
-		return s.settled(e)
+		return s.settled(refusedAnswer("native resume", e))
 	}
 	if !s.paused {
 		s.mu.Unlock()
-		return s.settled(nil)
+		return s.settled(nativeAnswer{kind: answerSuccess, op: "native resume"})
 	}
-	r := &nativeRequest{ctx: ctx, gen: s.generation + 1, resume: true, pauseEpoch: s.pauseEpoch, reply: make(chan error, 1)}
+	r := &nativeRequest{ctx: ctx, gen: s.generation + 1, resume: true, pauseEpoch: s.pauseEpoch, reply: make(chan nativeAnswer, 1)}
 	s.activation = r
 	s.interrupt()
 	s.mu.Unlock()
@@ -872,7 +1077,10 @@ func (s *DSDSink) Cut(at int64) (bool, error) {
 }
 
 // ActivatePaused grants initial activation to a sink installed while paused.
-// Resume alone deliberately cannot activate an inert sink.
+// Resume alone deliberately cannot activate an inert sink. Once the sink's
+// life has ended its answers are the verdict's, the Resume it hands an
+// activated sink to answering by it too (settled, verdict; B728 B9 round
+// 10).
 func (s *DSDSink) ActivatePaused(ctx context.Context) error {
 	s.mu.Lock()
 	if s.generation != 0 {
@@ -882,9 +1090,9 @@ func (s *DSDSink) ActivatePaused(ctx context.Context) error {
 	if !s.paused || s.releasing || s.revoked || s.err != nil || s.activation != nil {
 		e := s.fenced("native activation", errors.New("native initial paused activation fenced"))
 		s.mu.Unlock()
-		return s.settled(e)
+		return s.settled(refusedAnswer("native activation", e))
 	}
-	r := &nativeRequest{ctx: ctx, gen: 1, resume: true, pauseEpoch: s.pauseEpoch, reply: make(chan error, 1)}
+	r := &nativeRequest{ctx: ctx, gen: 1, resume: true, pauseEpoch: s.pauseEpoch, reply: make(chan nativeAnswer, 1)}
 	s.activation = r
 	s.interrupt()
 	s.mu.Unlock()

@@ -3,6 +3,7 @@ package alsapcm
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -37,6 +38,192 @@ var armName = map[awaitArm]string{
 	armDone:     "through the writer's end",
 	armContext:  "through its caller's context",
 	armDeadline: "at the release's deadline",
+}
+
+// cancelledAnywhere says whether an error of ReasonCancelled is anywhere in
+// e's chain, the test's own walk: ReasonOf reads the first error's reason
+// alone.
+func cancelledAnywhere(e error) bool {
+	if x, ok := e.(*Error); ok && x.Reason == ReasonCancelled {
+		return true
+	}
+	if u, ok := e.(interface{ Unwrap() []error }); ok {
+		for _, w := range u.Unwrap() {
+			if cancelledAnywhere(w) {
+				return true
+			}
+		}
+	}
+	if u, ok := e.(interface{ Unwrap() error }); ok && u.Unwrap() != nil {
+		return cancelledAnywhere(u.Unwrap())
+	}
+	return false
+}
+
+// TestNativeTheVerdictOfARequestWhoseLifeEnded (B728 B9 round 10, both
+// reviews of this round's brief): the verdict alone, deterministic, over
+// every answer a request of Activate, Resume or ActivatePaused can have been
+// given by the time its life has ended (a success; a fault of its own; a
+// refusal, or a cancellation, the writer held; the sink's fence in each of
+// its forms; the life's typed cancellation; a refusal at a command's entry; a
+// request the writer never ran; no answer) crossed with every state of the
+// cleanup's record (nothing recorded, or nothing but the fence; a device's
+// failure or the request's own fault, the release confirmed; a close that
+// failed, alone or beside the fence or the request's own fault; a TrackChange
+// drain the deadline cut, alone or after a device's failure, by a
+// cancellation's error ReasonOf does not read first; and, past the release's
+// budget with the writer still in its cleanup, nothing yet, a device's
+// failure, a cut drain), the whole answer asserted against the four states:
+// with nothing recorded a success is nil, a fault of the request's own is
+// itself, and anything else is the life's typed cancellation of its command;
+// with a failure recorded, or the budget passed, the answer is that failure
+// (and ErrReleaseUnconfirmed past the budget, which it carries otherwise only
+// where the record does), beside the request's own fault or held refusal,
+// its words once, where the record does not carry it, the record's words
+// kept, never a cancellation, an error of ReasonCancelled anywhere in its
+// chain or the sink's fence, and nothing else of what the request was
+// answered.
+func TestNativeTheVerdictOfARequestWhoseLifeEnded(t *testing.T) {
+	ep := testEndpoint
+	fault := &Error{Reason: ReasonWrongDevice, Op: "native activation", Endpoint: ep, Detail: "the check after open refused the node", Err: errors.New("the controls changed")}
+	held := &Error{Reason: ReasonNotLocated, Op: "native reopen", Endpoint: ep, Detail: "the binding resolves to no unit"}
+	xrun := &Error{Reason: ReasonXrun, Op: "native status", Endpoint: ep, Detail: "the stream underran"}
+	closeFailed := errors.New("the node's close failed")
+	cut := &Error{Reason: ReasonCancelled, Op: "drain", Endpoint: ep, Err: context.Canceled}
+	cutByItsDeadline := &Error{Reason: ReasonCancelled, Op: "drain", Endpoint: ep, Err: context.DeadlineExceeded}
+	prefillCut := &Error{Reason: ReasonCancelled, Op: "write", Endpoint: ep, Err: context.Canceled}
+	entryRefusal := errors.New("native resume fenced")
+	record := func(ended bool, e error) nativeRecord {
+		return nativeRecord{err: e, ended: ended, end: context.Canceled, endpoint: ep}
+	}
+	for _, c := range []struct {
+		name string
+		rec  nativeRecord
+		// failure is what of the record the answer carries; none: nothing
+		// recorded that is a failure.
+		failure []error
+		// unconfirmed: the record carries ErrReleaseUnconfirmed.
+		unconfirmed bool
+		// dropped is what of the record no answer carries: a cancellation's
+		// chain, gone whole.
+		dropped []error
+	}{
+		{"nothing recorded", record(true, nil), nil, false, nil},
+		{"the fence alone recorded", record(true, errors.Join(ErrActivationFenced)), nil, false, nil},
+		{"a device's failure recorded, the release confirmed", record(true, errors.Join(xrun)), []error{xrun}, false, nil},
+		{"the request's own fault recorded, the release confirmed", record(true, errors.Join(fault)), []error{fault}, false, nil},
+		{"a close that failed", record(true, errors.Join(errors.Join(ErrReleaseUnconfirmed, closeFailed))), []error{ErrReleaseUnconfirmed, closeFailed}, true, nil},
+		{"the fence recorded, then a close that failed", record(true, errors.Join(errors.Join(ErrActivationFenced), errors.Join(ErrReleaseUnconfirmed, closeFailed))), []error{ErrReleaseUnconfirmed, closeFailed}, true, nil},
+		{"the request's own fault recorded, then a close that failed", record(true, errors.Join(errors.Join(fault), errors.Join(ErrReleaseUnconfirmed, closeFailed))), []error{fault, ErrReleaseUnconfirmed, closeFailed}, true, nil},
+		{"a TrackChange drain the deadline cut", record(true, errors.Join(errors.Join(ErrReleaseUnconfirmed, cut))), []error{ErrReleaseUnconfirmed}, true, []error{cut}},
+		{"a device's failure, then a drain cut by a deadline of its own", record(true, errors.Join(xrun, errors.Join(ErrReleaseUnconfirmed, cutByItsDeadline))), []error{xrun, ErrReleaseUnconfirmed}, true,
+			[]error{cutByItsDeadline, context.DeadlineExceeded}},
+		// The release out of time before its drain: no cancellation, a
+		// failure whose deadline is its own, kept.
+		{"a TrackChange release out of time before its drain", record(true, errors.Join(errors.Join(ErrReleaseUnconfirmed, context.DeadlineExceeded))), []error{ErrReleaseUnconfirmed, context.DeadlineExceeded}, true, nil},
+		{"past the budget, nothing recorded yet", record(false, nil), nil, false, nil},
+		{"past the budget, a device's failure recorded", record(false, errors.Join(xrun)), []error{xrun}, false, nil},
+		{"past the budget, a TrackChange drain the deadline cut", record(false, errors.Join(errors.Join(ErrReleaseUnconfirmed, cut))), []error{ErrReleaseUnconfirmed}, true, []error{cut}},
+	} {
+		for _, r := range []struct {
+			name string
+			// own is the request's own failure, which the answer keeps beside
+			// a failure; nil where the request was answered none.
+			own error
+			// not is what of the request's answer no failure answered may
+			// carry.
+			not error
+			of  func(rec nativeRecord) nativeAnswer
+		}{
+			{"a success", nil, nil, func(nativeRecord) nativeAnswer { return nativeAnswer{kind: answerSuccess, op: "native activation"} }},
+			{"a fault of its own", fault, nil, func(nativeRecord) nativeAnswer {
+				return nativeAnswer{err: fault, kind: answerFault, op: "native activation"}
+			}},
+			{"a refusal the writer held", held, nil, func(nativeRecord) nativeAnswer {
+				return nativeAnswer{err: held, kind: answerHeld, op: "native activation"}
+			}},
+			{"a cancellation the writer held", nil, nil, func(nativeRecord) nativeAnswer {
+				return nativeAnswer{err: context.Canceled, kind: answerHeld, op: "native activation"}
+			}},
+			{"the sink's fence", nil, nil, func(nativeRecord) nativeAnswer {
+				return nativeAnswer{err: ErrActivationFenced, kind: answerFenced, op: "native activation"}
+			}},
+			{"a prefill the release cut", nil, nil, func(nativeRecord) nativeAnswer {
+				return nativeAnswer{err: fmt.Errorf("%w: the prefill was cut short: %w", ErrActivationFenced, prefillCut), kind: answerFenced, op: "native activation"}
+			}},
+			{"a resume's fence", nil, nil, func(nativeRecord) nativeAnswer {
+				return nativeAnswer{err: errNativeResumeFenced, kind: answerFenced, op: "native activation"}
+			}},
+			{"the life's cancellation", nil, nil, func(nativeRecord) nativeAnswer {
+				return nativeAnswer{err: lifeCancelledAt("native activation", ep, context.Canceled), kind: answerFenced, op: "native activation"}
+			}},
+			{"a refusal at its entry", nil, entryRefusal, func(nativeRecord) nativeAnswer {
+				return nativeAnswer{err: entryRefusal, kind: answerFenced, op: "native resume"}
+			}},
+			{"a request never run", nil, errNativeActivationCancelled, func(rec nativeRecord) nativeAnswer {
+				// The writer's reply as it ends: fenced, the record joined.
+				e := error(lifeCancelledAt("native activation", ep, context.Canceled))
+				if rec.err != nil {
+					e = errors.Join(errNativeActivationCancelled, rec.err)
+				}
+				return nativeAnswer{err: e, kind: answerNeverRan, op: "native activation"}
+			}},
+			{"no answer", nil, nil, func(nativeRecord) nativeAnswer { return nativeAnswer{kind: answerNone, op: "native activation"} }},
+		} {
+			t.Run(r.name+", "+c.name, func(t *testing.T) {
+				a := r.of(c.rec)
+				e := verdict(a, c.rec)
+				if c.rec.ended && c.failure == nil {
+					switch a.kind {
+					case answerSuccess:
+						if e != nil {
+							t.Errorf("answered %v; want the success it was", e)
+						}
+					case answerFault:
+						if e != a.err {
+							t.Errorf("answered %v; want the fault itself, %v", e, a.err)
+						}
+					default:
+						var x *Error
+						if !errors.As(e, &x) || x.Reason != ReasonCancelled || x.Op != a.op || x.Endpoint != ep || !errors.Is(e, context.Canceled) ||
+							errors.Is(e, ErrReleaseUnconfirmed) || errors.Is(e, ErrActivationFenced) || errors.Is(e, errNativeResumeFenced) || errors.Is(e, held) {
+							t.Errorf("answered %v; want the ended life's typed cancellation of %s, alone", e, a.op)
+						}
+					}
+					return
+				}
+				if e == nil {
+					t.Fatal("answered nil; want the failure")
+				}
+				for _, f := range c.failure {
+					if !errors.Is(e, f) {
+						t.Errorf("answered %v; want %v in it", e, f)
+					}
+				}
+				if want := c.unconfirmed || !c.rec.ended; errors.Is(e, ErrReleaseUnconfirmed) != want {
+					t.Errorf("answered %v; want ErrReleaseUnconfirmed in it %v", e, want)
+				}
+				if errors.Is(e, context.Canceled) || cancelledAnywhere(e) || ReasonOf(e) == ReasonCancelled ||
+					errors.Is(e, ErrActivationFenced) || errors.Is(e, errNativeResumeFenced) {
+					t.Errorf("answered %v; want no cancellation and not the sink's fence", e)
+				}
+				if r.own != nil && (!errors.Is(e, r.own) || strings.Count(e.Error(), r.own.Error()) != 1) {
+					t.Errorf("answered %v; want the request's own %v in it, once", e, r.own)
+				}
+				if r.not != nil && errors.Is(e, r.not) {
+					t.Errorf("answered %v; want nothing of %v in it", e, r.not)
+				}
+				for _, d := range c.dropped {
+					if errors.Is(e, d) {
+						t.Errorf("answered %v; want the cancellation's chain dropped, %v not in it", e, d)
+					}
+				}
+				if c.rec.err != nil && c.failure != nil && !strings.Contains(e.Error(), c.rec.err.Error()) {
+					t.Errorf("answered %q; want the record's words, %q, in it", e, c.rec.err)
+				}
+			})
+		}
+	}
 }
 
 // TestNativeAHeldRefusalIsAnsweredByOneVerdictOnEveryArm (B728 B9 round 10,
