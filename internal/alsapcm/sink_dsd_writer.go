@@ -23,7 +23,14 @@ func (s *DSDSink) loopNative() {
 		s.released = true
 		s.active = false
 		if s.activation != nil {
-			s.activation.reply <- errors.New("native activation cancelled")
+			// The writer ends with an activation it never ran: the sink's own
+			// fence when the release that ended it found nothing wrong, the
+			// failure's otherwise (B728 B9 round 4).
+			e := error(ErrActivationFenced)
+			if s.err != nil {
+				e = errors.Join(errors.New("native activation cancelled"), s.err)
+			}
+			s.activation.reply <- e
 			s.activation = nil
 		}
 		if s.releaseCancel != nil {
@@ -205,9 +212,9 @@ func (s *DSDSink) activateNative(r *nativeRequest) error {
 	if ctx.Err() != nil || s.life.Err() != nil || s.revoked || s.releasing || (s.paused && (!r.resume || r.pauseEpoch != s.pauseEpoch)) {
 		s.mu.Unlock()
 		if reopened {
-			return nativeCleanupError(errors.New("native activation fenced"), s.closeNative())
+			return nativeCleanupError(ErrActivationFenced, s.closeNative())
 		}
-		return errors.New("native activation fenced")
+		return ErrActivationFenced
 	}
 	wasActive := s.active
 	s.active = true
@@ -235,9 +242,16 @@ func (s *DSDSink) activateNative(r *nativeRequest) error {
 	}
 	if !wasActive || reopened {
 		// A new hardware run: its DoP markers start at 05, before its prefill,
-		// and the retained canonical content is packed from there.
+		// and the retained canonical content is packed from there. A prefill
+		// an Immediate release (a revocation) cuts short is the sink's own
+		// fence, the cancellation beside it (B728 B9 round 4): a device's
+		// failure established before that release is returned as it is.
 		s.dopPhase = 0x05
-		return s.nativeSilence(nativeFrames(s.params.RateHz, s.cfg.Prefill), false, false)
+		e := s.nativeSilence(nativeFrames(s.params.RateHz, s.cfg.Prefill), false, false)
+		if e != nil && s.expectedReleaseCancellation(e) {
+			return fmt.Errorf("%w: the prefill was cut short: %w", ErrActivationFenced, e)
+		}
+		return e
 	}
 	return nil
 }

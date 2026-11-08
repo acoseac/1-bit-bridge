@@ -604,24 +604,35 @@ func (s *session) transition(o *occ) bool {
 			s.currentLocked(o, out, sinkPaused)
 			l.unlock()
 			err := s.activateOutput(s.ctx, o, out)
-			if errors.Is(err, errReplanned) {
-				return s.unadopt(o, out)
-			}
 			l.lock()
 			o.claimed = false
-			released := s.releasedLocked()
+			released, revoked := s.releasedLocked(), s.nativeRevoked
+			taken := (o.dropped || o.stale) && !o.leading && (errors.Is(err, errReplanned) || errors.Is(err, alsapcm.ErrActivationFenced))
 			l.unlock()
-			if err != nil && released {
-				// Its release came while the sink was activated, which the
-				// activation's fence answers, before the session's life has ended:
-				// the session ends, no fault (B728 B9 round 3).
+			// A failed activation is judged by its cause, in this order (B728 B9
+			// round 4, point 1). A release, which the activation's fence answers
+			// before the session's life has ended, ends the session, no fault,
+			// beside a drop too (round 3). A revocation of the session's DSD
+			// keeps its fault. An occurrence dropped or handed off again whose
+			// activation answered that drop's own fence, the backend's
+			// (errReplanned) or its sink's (alsapcm.ErrActivationFenced: the drop,
+			// dropLocked, or the hand-off, reconcileDSD, revoked the sink, at its
+			// admission or in its prefill), is taken back from the sink with none
+			// of its content written, and the session goes on. Any other failure,
+			// the device's refusal beside a drop among them, is the session's
+			// fault.
+			switch {
+			case err == nil:
+				return true
+			case released:
 				s.b.fenced("activate")
 				return false
-			}
-			if err != nil {
+			case revoked:
 				return s.openFailed(o, err)
+			case taken:
+				return s.unadopt(o, out)
 			}
-			return true
+			return s.openFailed(o, err)
 		}
 		cmd := out.sink.Pause
 		if sinkPaused {
@@ -649,13 +660,15 @@ func (s *session) transition(o *occ) bool {
 // unadopt takes back out, the sink just opened and made current for o,
 // once o's activation found it handed off again while a choice's write it
 // waited for settled, or dropped (its replacement, an edit's, a cut: B728 B9
-// round 3, point 1), errReplanned: no frame of o reached the sink, so it is
-// closed unwritten, nothing is current, and the producer's next step waits
-// for o's replacement or goes on to what follows. A dropped o's decoder and
-// content are closed here: the drop left them to the producer, o being the
-// occurrence it writes (dropLocked), and nothing else closes them until the
-// session's end. A session paused meanwhile is paused holding no device, its
-// release reported as such a pause's is.
+// round 3, point 1), errReplanned, or the sink's activation answered its own
+// fence for such a drop or hand-off, which revoked it at its admission or in
+// its prefill (alsapcm.ErrActivationFenced, round 4): none of o's content
+// reached the sink, so it is closed, nothing is current, and the producer's
+// next step waits for o's replacement or goes on to what follows. A dropped
+// o's decoder and content are closed here: the drop left them to the
+// producer, o being the occurrence it writes (dropLocked), and nothing else
+// closes them until the session's end. A session paused meanwhile is paused
+// holding no device, its release reported as such a pause's is.
 func (s *session) unadopt(o *occ, out *output) bool {
 	s.mu.Lock()
 	if s.cur == out {

@@ -22,6 +22,18 @@ const (
 // open a successor on this answer; Done is the actual cleanup completion fence.
 var ErrReleaseUnconfirmed = errors.New("native release unconfirmed")
 
+// ErrActivationFenced is an activation the sink's own fence ended before its
+// run's prefill was written whole (B728 B9 round 4): the sink revoked,
+// released or being released (an Immediate release cuts a prefill short, the
+// cancellation joined to this), paused, or its life over, before or while the
+// activation was asked, at its admission's end, or before its writer ran it.
+// It is never the device's answer: an admission the check refused, a write
+// that failed and a reopen whose geometry changed are returned as they are,
+// and so is a sink that failed before the activation, and a cleanup that
+// failed is joined to it (ErrReleaseUnconfirmed). A caller that dropped what
+// it was activating tells by it that the failure was the drop's.
+var ErrActivationFenced = errors.New("native activation fenced")
+
 const nativeReleaseBudget = 2 * time.Second
 const nativeCloseMargin = 500 * time.Millisecond
 const nativeLedgerMax = 1024
@@ -254,15 +266,20 @@ func (s *DSDSink) interrupt() {
 // Activate rechecks admission before the first write, including silence. gen
 // must increase for a new activation after pause/release; a revoked sink cannot
 // be reactivated. A pause racing the admission check wins before the first write.
+// One the sink's own fence ends answers ErrActivationFenced.
 func (s *DSDSink) Activate(ctx context.Context, gen uint64) error {
 	if e := ctx.Err(); e != nil {
 		s.Revoke()
 		return e
 	}
 	s.mu.Lock()
-	if s.err != nil || s.released || s.revoked || s.releasing || s.paused || s.activation != nil || gen == 0 || gen <= s.generation {
+	if s.err != nil || s.activation != nil || gen == 0 || gen <= s.generation {
 		s.mu.Unlock()
-		return errors.New("native activation fenced")
+		return errors.New("native activation refused")
+	}
+	if s.released || s.revoked || s.releasing || s.paused {
+		s.mu.Unlock()
+		return ErrActivationFenced
 	}
 	r := &nativeRequest{ctx: ctx, gen: gen, reply: make(chan error, 1)}
 	s.activation = r

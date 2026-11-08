@@ -827,10 +827,12 @@ func (s *session) judgeDSDLocked(o *occ, next *dsdSet, replans bool) dsdJudgemen
 // reconcileDSD judges each of s's DSD occurrences against next
 // (judgeDSDLocked, over policy.Reconcile): one next still plays on its
 // identity is kept and counts under next from now on; one to re-plan is held
-// back from the sink (stale) and the engine is asked to hand it off again
-// (ReplanEvents), the path an edit after hand-off takes, so it is admitted
-// under next as any hand-off is, a session's first occurrence and one a
-// session being released holds excepted, which are revoked; one to revoke
+// back from the sink (stale), the sink of its own an activation is under way
+// for revoked as a drop revokes it (B728 B9 round 4), and the engine is asked
+// to hand it off again (ReplanEvents), the path an edit after hand-off takes,
+// so it is admitted under next as any hand-off is, a session's first
+// occurrence and one a session being released holds excepted, which are
+// revoked; one to revoke
 // stops the session's DSD at once (Revoke). An occurrence whose sink has
 // played everything it was given (drained) or is closed sounds no more, and
 // nothing of it can reach the DAC again, so no change of the set can make it
@@ -858,6 +860,15 @@ func (s *session) reconcileDSD(next *dsdSet) {
 			o.admitted = next
 		case j.stale:
 			o.stale = true
+			if o.claimed && o.out != nil && o.out.native != nil {
+				// Its own sink's activation is under way (B728 B9 round 4): the
+				// sink is revoked, as a drop revokes it (dropLocked), so the
+				// activation answers the sink's own fence, at its admission or in
+				// its prefill, and the sink is taken back with none of the
+				// occurrence written; its replacement opens one of its own.
+				o.out.native.Revoke()
+				o.out.drained = true
+			}
 			if j.revoke != "" {
 				noReplan = j.revoke
 				continue
@@ -884,7 +895,8 @@ func (s *session) reconcileDSD(next *dsdSet) {
 
 // errReplanned is an activation finding its occurrence being handed off
 // again (checkDSDActivation) or dropped (activateOutput's fence, B728 B9
-// round 3): its sink is taken back unwritten (unadopt), never a fault.
+// round 3): its sink is taken back unwritten (unadopt), never a fault, as one
+// whose sink answers its own fence for such a drop is (transition, round 4).
 var errReplanned = errors.New("player backend: the occurrence is being handed off again")
 
 // checkDSDActivation is a native, DoP or converted occurrence's check as its
