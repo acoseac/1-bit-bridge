@@ -289,14 +289,17 @@ func writeDataDirMarker(dataDir, id string, d markerDurability) (err error) {
 }
 
 // syncMarkerFile syncs the marker at path where it is, its bytes and its own
-// metadata, through a handle of its own, opened for writing since on Windows
-// Sync is FlushFileBuffers, which needs that, and which commits the file's
-// metadata, the rename that put it there among it, to NTFS's journal before
-// it answers (B741's round 2, the Claude API on #1441: the rename alone left
-// that to the journal's own flush, so a record on another volume could reach
-// its disk first).
+// metadata, through a handle of its own (openMarkerForSync): opened for
+// reading as a file off Windows, which syncs a descriptor opened so and where
+// a plain open for reading would wait on a named pipe; and for writing on
+// Windows, whose Sync is FlushFileBuffers, which needs that, and which
+// commits the file's metadata, the rename that put it there among it, to
+// NTFS's journal before it answers (B741's round 2, the Claude API on #1441:
+// the rename alone left that to the journal's own flush, so a record on
+// another volume could reach its disk first). A marker serve may not write
+// is therefore synced, and taken up, off Windows alone (round 3).
 func syncMarkerFile(path string) error {
-	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	f, err := openMarkerForSync(path)
 	if err != nil {
 		return err
 	}
