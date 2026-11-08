@@ -86306,3 +86306,118 @@ sink's life ends only after Done. `make test` passed, 89 packages ok (2,093 s), 
 `.tmp/_b765`, the Linux-only tests (ALSA, alsapcm, the durable writer, the identity paths) run
 here; `make build-all` passed. alsa-abi did not run: no ABI definition or `scripts/alsa-abi` file
 changed.
+
+## 2026-11-08 — B765 round 3: the ended life excuses only what it caused, and answers what it fenced as its cancellation
+
+Worker b765, legion0, branch `fix/b765-tail-stop` (#1438), after round 2's rules patch was applied
+(ef4d61ba). Commits: d01b31dd (the tests, red), cda8b0b0 (the fix), 8c643057 (the runbook's version
+47), then this record. The rule change goes through `rules-b765-r3.patch`: round 2's line in
+`player.md`, reworded, and its long form in `History-rules-player.md`.
+
+### The reviews' points, each confirmed red first
+
+1. **A device's failure beside the ended life was hidden** (Claude's review; Codex's second point).
+   Round 2's early Immediate release made the classification's `!s.releasing` false for every error
+   once the life had ended, so an admission's failure, or a resume's STATUS failing, beside a Stop was
+   recorded nowhere: `Result()` and `CleanupResult()` nil, and the run exited 0. Red 3/3:
+   `TestNativeActivationErrorAfterItsLifeEndsIsTheSinksFault` (the check after open fails after the
+   life's end, its watcher held) and `TestNativeResumeErrorAfterItsLifeEndsIsTheSinksFault` (the life
+   ends right after the resume's fence reads it, through `endingLife`, and its STATUS returns EIO
+   through the fake kernel's `fail` map); each answer carried the failure, each outcome was nil.
+2. **The reply still carried the plain fences** (Codex's first point). A caller whose select took the
+   reply, ready beside its cancellation, returned "native activation fenced" or "native resume fenced
+   after status", which the harness keeps: an exit 1 though cleanup succeeded. Red 3/3: round 2's
+   `TestNativeActivationFencedByItsEndedLifeIsNoFailure` and
+   `TestNativeResumeFencedByItsEndedLifeIsNoFailure`, whose caller waits on a context the life does
+   not end (the reply is its answer), now require that answer to be the life's cancellation; and the
+   answered cases of `TestNativeIntegrationStopInsideActivation`, whose `nativeEscalationHold` returns
+   the sink's own answer as a select that took the reply does, exited 1.
+
+### Found beside them: the same class
+
+The reply has a second path: a resume the writer releases without running answered "native
+activation cancelled" (`TestNativeResumeTheEndedLifeNeverRanAnswersItsCancellation`, red 3/3: the
+writer held in its pause's watch, the resume's request taken by no one when the life ends and its
+watcher revokes the sink). And the commands' own refusals: once the life's watcher has revoked the
+sink, Activate, Resume, ActivatePaused, Pause and WriteDSD refused in words of their own ("native
+activation fenced", "native resume fenced", "native initial paused activation fenced", "native
+releasing", "native admission closed"; `TestNativeCommandsAfterTheLifeEndsAnswerItsCancellation`,
+each of its five cases red 3/3). The harness's console cancels the run on an s at once while a space
+read just before is already the command loop's, so a space and an s typed together reach Pause or
+Resume after the revocation: `TestNativeIntegrationStopBesideAPauseOrResume` holds the command until
+the Stop's revocation reaches the node's close, and both exited 1, 3/3 ("native releasing", "native
+resume fenced"). The feeder's WriteDSD reads its context before it takes the sink's lock, a window no
+harness case forces. Cut, which the harness never calls, keeps its refusal.
+
+### As built
+
+- The activation block reads the life once and decides the release, the record and the answer under
+  one lock: the reply now goes after the classification.
+- Once the life has ended, only what that end caused is excused (`lifeCaused`: the two fences, now
+  the sentinels `errNativeActivationFenced` and `errNativeResumeFenced`; the life's own error; a
+  cancellation; a cancelled device call); anything else is recorded as the sink's fault, though the
+  release has begun.
+- While the life runs nothing changes: a release in progress excuses what it met, and a refused
+  reopen while paused is held. Not made general, since serve's backend refuses an admission with
+  `errReleased` once a session's release is taken (`output.admit`), which is no cancellation:
+  recorded, it would raise a spurious fault through `Result()` (the reporter, `closeOutput`). Serve's
+  sinks' lives end only after Done, so the life-ended branch never runs there.
+- What the ended life caused answers as its cancellation: `lifeCancelled` (ReasonCancelled, the
+  endpoint, "the sink's life ended", the life's error), in the writer's reply, in its reply to an
+  activation it releases without running, and, through `fenced`, in the five commands' refusals. A
+  terminal error keeps ErrReleaseUnconfirmed.
+
+### Red first
+
+At d01b31dd, predicted in `.tmp/_b765/predictions-r3-red.txt`, `-count 3`, alsapcm with `-watchdog
+10s`, the harness with the overlay: every prediction held. In alsapcm, the five tests above and each
+of the Commands test's five cases red 3/3 with the predicted words; round 2's tail, prefill and
+reopen tests green. In the harness, the two answered cases and both StopBesideAPauseOrResume cases
+exit 1 3/3 (End stopped, the plain refusal for Error); round 2's three StopInsideActivation cases and
+NextInsideFinish's four green.
+
+### Negative controls
+
+At cda8b0b0, each an exact-once mutation predicted by name in
+`.tmp/_b765/predictions-r3-controls.txt`, made in memory and restored from it, the overlay
+regenerated after it, `git status` empty after; `-count 3` over the ten life tests and the harness's
+three tests.
+
+| | mutation | red |
+|---|---|---|
+| C1 | the record condition back to round 2's (`!s.releasing`) | as predicted: the two error tests 3/3 (outcome nil); the rest green |
+| C1b | the life-caused excuse removed | as predicted: the activation, resume, prefill and reopen tests 3/3 (each "faulted the sink"); the harness's activation, resume and both answered cases 3/3 (exit 1, the recorded fence in Release's answer); its prefill green (the recorded cancellation is stripped) |
+| C2 | the reply's normalisation removed | as predicted: the activation and resume fence tests 3/3 (the plain fence answered); both answered cases 3/3 (exit 1) |
+| C3 | the deferred reply plain | as predicted: the resume never run, 3/3 |
+| C4a to C4e | each command's refusal plain: Activate, Resume, ActivatePaused, Pause, WriteDSD | as predicted: each its own Commands case 3/3; C4b and C4d also StopBesideAPauseOrResume/resume and /pause 3/3 (exit 1) |
+
+Each control was run again against both whole suites as gate.yml runs them (cmd/bridge and playback,
+`-count 1`), the overlay regenerated after the mutation, predicted in
+`.tmp/_b765/predictions-r3-controls-full.txt`: cmd/bridge red only where predicted (C1b the
+activation, resume and both answered cases; C2 both answered cases; C4b and C4d their
+StopBesideAPauseOrResume case; under the other five, 83 of 83), and playback 79 of 79 under every
+one, since a backend sink's life ends only after Done.
+
+### Qualification
+
+`internal/alsapcm/` and the dsd-test files are guarded, and this round changes both; 47 stays (main
+is at 45, B9 holds 46). The runbook's record of 47 now says what round 3 adds.
+
+### Gates (round 3)
+
+At 8c643057, inside the build slot, on Go 1.27.3, in two sessions as round 2's (part a had the slot
+after 460 s, part b after 2,240 s, the queue another worker's). `make fmt` changed nothing; `make vet`
+and its windows, darwin and linux/386 legs passed; `make docs-check` passed (player.md 99.9 %); the
+qualification check passed against main's a77578f8 (45 there, 47 at HEAD); `go test -race` passed
+for alsapcm and qualification without the overlay (74 s), and for cmd/bridge with CI's tags and the
+overlay (1,246 s); CI's two native-integration invocations passed, cmd/bridge 83 of 83 (its five
+StopInsideActivation cases, the two StopBesideAPauseOrResume cases and NextInsideFinish's four among
+them) and playback 79 of 79. `make test` passed, 89 packages ok (2,056 s), its TMPDIR under
+`.tmp/_b765`, the Linux-only tests run here; `make build-all` passed. Before the gates, the whole
+alsapcm suite passed without the overlay (852 tests) and the whole playback suite with `-race`.
+`rules-b765-r3.patch` applies to HEAD (`git apply --check`); on a copy of HEAD with it applied,
+`make docs-check`'s steps passed (CLAUDE.md 82.1 %, player.md 100.0 %, 99,966 of its 100,000 bytes,
+which the check calls close to its budget: the next rule there moves an entry out first; the worst
+load 67.3 %), and `verify_moves.py --base HEAD` found round 2's line and its long form gone beside
+their two rewordings and nothing else, no citation broken. alsa-abi did not run: no ABI definition or
+`scripts/alsa-abi` file changed.
