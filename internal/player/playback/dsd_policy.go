@@ -841,7 +841,11 @@ func (s *session) judgeDSDLocked(o *occ, next *dsdSet, replans bool) dsdJudgemen
 // as a re-plan's is (B728 B9 round 6): the activation then answers errReplanned
 // or the sink's own fence, and a take-back of the occurrence, or its sink's
 // close, can no longer come before the fault, which Revoke, finding the
-// session's fault there, does not record again. An occurrence whose sink has
+// session's fault there, does not record again. A converted occurrence's PCM
+// sink is not fenced, and needs none (round 7): it admits its node at its open,
+// before its output is adopted, and at a resume's reopen, never in an
+// activation, writes nothing of its own, and is written by the producer alone,
+// whose next step stops on the recorded fault. An occurrence whose sink has
 // played everything it was given (drained) or is closed sounds no more, and
 // nothing of it can reach the DAC again, so no change of the set can make it
 // unsafe: it is not judged, which would revoke the session's DSD and with it
