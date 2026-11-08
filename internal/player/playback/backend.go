@@ -88,6 +88,12 @@ type Seams struct {
 	// one, before the producer closes it and records the occurrence it opens
 	// a sink for next.
 	TransportDrained func()
+	// ProducerStep runs on session s's producer once it has decided its next
+	// step (next), with no lock held, before it takes the step (B728 B9 round
+	// 8): step is "stop" (the session faulted or ends), "write", "wait",
+	// "transition" or "finish", and o the occurrence the step is for, 0 for
+	// none. It may block, holding the producer there.
+	ProducerStep func(s engine.SessionID, step string, o engine.OccurrenceID)
 	// Fenced runs where the backend finds the session released, by its
 	// Release or by the engine's taking it before that Release came
 	// (engine.StartRequest.Released), at a step that would acquire, open,
@@ -287,6 +293,17 @@ func (b *Backend) pauseRefused() {
 func (b *Backend) transportDrained() {
 	if sm := b.cfg.Seams; sm != nil && sm.TransportDrained != nil {
 		sm.TransportDrained()
+	}
+}
+
+// producerStep is the ProducerStep seam, for session id's step st.
+func (b *Backend) producerStep(id engine.SessionID, st step) {
+	if sm := b.cfg.Seams; sm != nil && sm.ProducerStep != nil {
+		var o engine.OccurrenceID
+		if st.o != nil {
+			o = st.o.id
+		}
+		sm.ProducerStep(id, st.kind.String(), o)
 	}
 }
 

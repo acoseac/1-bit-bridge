@@ -20,7 +20,8 @@ import (
 // fails its Start, naming the revocation, before anything is launched; and a
 // converted successor's PCM sink, which the reconciliation does not fence, is
 // given nothing whether the revocation comes at its admission or at its
-// activation's last step.
+// activation's last step, where the producer's own stop on the recorded fault
+// is what keeps its bytes off the node (round 8).
 
 // installHold holds, once armed, the backend's note that an occurrence's
 // sink installed it (playback.Config.Installed), on the goroutine that
@@ -135,14 +136,79 @@ func TestARevocationOnceTheFirstOccurrencesSinkActivatedFailsItsStart(t *testing
 	}
 }
 
-// convertedRig is a rig, its seams w's and its installs inst's, whose DSD
-// state converts every rate, its engine handing nothing off again: a (PCM),
-// then b (DSD128) and c (DSD64), each converted to the PCM a transport of its
-// own after a's. It answers the entries.
-func convertedRig(t *testing.T, w *writeSeams, inst *installHold, log *stopsLog) (*dsdRig, []uint32) {
+// producerSteps records, once armed, the steps the session's producer
+// decides (playback.Seams.ProducerStep), in order: a test reads what the
+// producer did next from its own goroutine, never from the reporter's.
+type producerSteps struct {
+	mu sync.Mutex
+	ch chan string
+}
+
+// arm records the steps decided from now on, on the channel it answers.
+func (p *producerSteps) arm() <-chan string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.ch = make(chan string, 64)
+	return p.ch
+}
+
+// note is the seam. It never blocks: a step past the channel's room is not
+// recorded, and nothing reads that far.
+func (p *producerSteps) note(_ engine.SessionID, step string, _ engine.OccurrenceID) {
+	p.mu.Lock()
+	ch := p.ch
+	p.mu.Unlock()
+	if ch == nil {
+		return
+	}
+	select {
+	case ch <- step:
+	default:
+	}
+}
+
+// producerStopped waits, under the watchdog, for the first step the producer
+// decides on steps (producerSteps.arm): its stop, the session's fault
+// recorded. Any other first step fails t at once, but a write, which the
+// wait follows with the kernel free until b's node, the second opened, is
+// given a byte: that fails t too, saying how many.
+func (d *dsdRig) producerStopped(steps <-chan string, what string) {
+	d.t.Helper()
+	given := d.k.When(func(v alsapcm.KernelView) bool { return len(v.OpenAt) >= 2 && v.GivenBytes > v.OpenAt[1] })
+	deadline := time.After(alsapcm.Watchdog())
+	var seen []string
+	for {
+		select {
+		case st := <-steps:
+			seen = append(seen, st)
+			switch {
+			case len(seen) == 1 && st == "stop":
+				return
+			case seen[0] != "write":
+				d.t.Fatalf("the producer's steps were %q: want its stop on the recorded fault first", seen)
+			}
+		case <-given:
+			v := d.k.View()
+			d.t.Fatalf("b's node was given %d bytes, the producer's steps %q: it wrote past the recorded fault", v.GivenBytes-v.OpenAt[1], seen)
+		case <-deadline:
+			alsapcm.LogGoroutines(d.t)
+			d.t.Fatalf("waited %v for %s (the producer's steps %q)", alsapcm.Watchdog(), what, seen)
+		}
+	}
+}
+
+// convertedRig is a rig, its seams w's, its installs inst's and its
+// producer's steps steps's (none for nil), whose DSD state converts every
+// rate, its engine handing nothing off again: a (PCM), then b (DSD128) and c
+// (DSD64), each converted to the PCM a transport of its own after a's. It
+// answers the entries.
+func convertedRig(t *testing.T, w *writeSeams, inst *installHold, log *stopsLog, steps *producerSteps) (*dsdRig, []uint32) {
 	t.Helper()
 	d := newDSDRigWith(t, playbacktest.ChoiceState(dsdstate.ModeConvert), func(p *playback.DSDPolicy) { p.Log = log }, func(o *rigOptions) {
 		o.seams, o.noReplan, o.installed = w.seams(nil), true, inst.note
+		if steps != nil {
+			o.seams.ProducerStep = steps.note
+		}
 	})
 	d.files.add("a", wav(44100, 16, pattern(1, 4410, 16)))
 	d.files.add("b", dsd(playbacktest.DSD128, 0.25))
@@ -162,16 +228,20 @@ func convertedRig(t *testing.T, w *writeSeams, inst *installHold, log *stopsLog)
 // fault and marks it stale, its sink's adoption closes the sink unwritten,
 // and Revoke drops it, refused native_revoked, nothing faulted. Held at its
 // activation's last step, its install, the occurrence claimed with its sink
-// adopted: the reconciliation records the revocation, once. Either way, once
-// the rig has stopped, b's node was given nothing and every node is closed.
-// (The second lets the reconciliation go on to Revoke as soon as the install
-// is let go, so Revoke's drop of the PCM sink can come before the producer's
-// next step: it does not tell that step's own stop on the recorded fault, which
-// the code makes before it writes, from that drop; round 7's control K3.)
+// adopted: the reconciliation records the revocation, once, and the producer's
+// own step keeps b's bytes off the node (round 8). The reconciliation is held
+// before Revoke until the producer has decided its next step, the kernel free
+// so that a write would land, and that step is the producer's stop on the
+// recorded fault, b's node given nothing then: until round 8 the case let the
+// reconciliation go on to Revoke with the install, and Revoke's drop of b's
+// PCM sink, which can come before the producer's step, kept the node
+// unwritten with the producer's checks removed (round 7's control K3). Either
+// way, once the rig has stopped, b's node was given nothing and every node is
+// closed.
 func TestARevocationOfAConvertedSuccessorGivesItsNodeNothing(t *testing.T) {
 	t.Run("held at its PCM sink's admission", func(t *testing.T) {
 		w, log, inst := newWriteSeams(), &stopsLog{}, &installHold{}
-		d, ids := convertedRig(t, w, inst, log)
+		d, ids := convertedRig(t, w, inst, log, nil)
 		ob := d.occurrenceOf(ids[1])
 		admit, letAdmit := d.unit.holdNextAdmit()
 		t.Cleanup(letAdmit)
@@ -202,8 +272,8 @@ func TestARevocationOfAConvertedSuccessorGivesItsNodeNothing(t *testing.T) {
 		wantUnwritten(t, d, 2, "b's")
 	})
 	t.Run("held as its activation installs it", func(t *testing.T) {
-		w, log, inst := newWriteSeams(), &stopsLog{}, &installHold{}
-		d, ids := convertedRig(t, w, inst, log)
+		w, log, inst, steps := newWriteSeams(), &stopsLog{}, &installHold{}, &producerSteps{}
+		d, ids := convertedRig(t, w, inst, log, steps)
 		ob := d.occurrenceOf(ids[1])
 		installed := inst.arm(t, ob)
 		d.k.Free()
@@ -215,7 +285,17 @@ func TestARevocationOfAConvertedSuccessorGivesItsNodeNothing(t *testing.T) {
 		log.arm(stops)
 		res := d.choose(choiceReq(t, d, dsdstate.ModeOff, 1, goAhead))
 		reachedGate(t, stops, res, "the reconciliation's revocation of the session's DSD, before its call to Revoke")
+		// The install let go with the reconciliation still held before Revoke,
+		// so nothing but the producer's own step decides whether b's frames
+		// reach its sink, and the kernel free, so a write would reach the node:
+		// the producer's next step is its stop on the recorded fault.
+		next := steps.arm()
 		installed.letGo()
+		d.k.Free()
+		d.producerStopped(next, "b's producer stopping on the recorded fault, Revoke held")
+		if v := d.k.View(); v.GivenBytes != v.OpenAt[1] {
+			t.Fatalf("the producer stopped with b's node given %d bytes, want none", v.GivenBytes-v.OpenAt[1])
+		}
 		stops.letGo()
 		if got := answer(t, res); got.Outcome != playback.ChoiceWritten {
 			t.Fatalf("DSD off with the go-ahead: %s, want written", got.Outcome)

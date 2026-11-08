@@ -23,6 +23,23 @@ const (
 	stepFinish                     // play out the last content: finished, or the decode failure's fault
 )
 
+// String names k as the ProducerStep seam says it.
+func (k stepKind) String() string {
+	switch k {
+	case stepStop:
+		return "stop"
+	case stepWrite:
+		return "write"
+	case stepWait:
+		return "wait"
+	case stepTransition:
+		return "transition"
+	case stepFinish:
+		return "finish"
+	}
+	return "unknown"
+}
+
 type step struct {
 	install bool
 	// decided is a converted occurrence's join window decided (holdLocked):
@@ -52,6 +69,7 @@ func (s *session) produce() {
 	packed := make([]byte, chunkFrames*alsapcm.Channels*4)
 	for {
 		st := s.next()
+		s.b.producerStep(s.id, st)
 		switch st.kind {
 		case stepWrite:
 			if st.install {
