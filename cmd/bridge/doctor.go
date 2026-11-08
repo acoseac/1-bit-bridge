@@ -421,7 +421,18 @@ func buildDoctorDepsWith(cfgPath string, absentIsPreSetup bool, dacHost dacAcces
 			// open that migrates records it in the install marker beside it
 			// (TestEveryStoreTheBridgeOpensIsItsDataDirsDatabase).
 			dbPath := manifest.DefaultDBPath(cfg.DataDir)
+			// No probe opens the database of a data directory serve refuses
+			// (backlog B741): one its record names may hold a database that
+			// is not this bridge's (one a start or a command made in the bare
+			// mount point, another data dir's), which a store open migrates.
+			// Until B741 a refused data dir held none, so no probe reached a
+			// store there (B727). The data-dir line says why; each probe's
+			// line says the store was not read.
+			refused := dataDirAway(d.ConfigFile.Path, cfg.DataDir) != nil
 			d.LibraryHasCodec = func(ctx context.Context, codec string) (bool, error) {
+				if refused {
+					return false, errStoreOfARefusedDataDir
+				}
 				// The stat looks redundant against OpenStore's own error and
 				// was flagged as such — it is NOT. `OpenStore` on a missing
 				// path SUCCEEDS and CREATES the database (verified), so
@@ -461,17 +472,26 @@ func buildDoctorDepsWith(cfgPath string, absentIsPreSetup bool, dacHost dacAcces
 			maxDeletePercent := cfg.VariantSweepMaxDeletePercent()
 			if _, err := os.Stat(dbPath); !os.IsNotExist(err) {
 				d.RelocatedSidecars = func(ctx context.Context) (doctor.RelocatedSidecars, error) {
+					if refused {
+						return doctor.RelocatedSidecars{}, errStoreOfARefusedDataDir
+					}
 					return relocatedSidecarCounts(ctx, dbPath, variantsDir, waveformDir)
 				}
 				// The other direction: files the catalog no longer
 				// describes. Same lazy open, same reasons; the walk it
 				// adds is bounded — see doctorVariantsIndexBudget.
 				d.VariantsIndex = func(ctx context.Context) (doctor.VariantsIndex, error) {
+					if refused {
+						return doctor.VariantsIndex{}, errStoreOfARefusedDataDir
+					}
 					return variantsIndexCounts(ctx, dbPath, variantsDir, maxDeletePercent, doctorVariantsIndexBudget)
 				}
 				// Names in one folder the app reads as one (backlog B420):
 				// the same lazy open, over the indexed paths alone.
 				d.NameCollisions = func(ctx context.Context) (doctor.NameCollisions, error) {
+					if refused {
+						return doctor.NameCollisions{}, errStoreOfARefusedDataDir
+					}
 					return nameCollisionGroups(ctx, dbPath, doctorNameCollisionGroups)
 				}
 			}
@@ -541,6 +561,11 @@ func asWrittenOrAsGiven(p string) string {
 	}
 	return p
 }
+
+// errStoreOfARefusedDataDir is a store probe's answer where serve refuses the
+// data dir whose database it would read (dataDirAway): it opens nothing, and
+// its line says the store was not read.
+var errStoreOfARefusedDataDir = errors.New("bridge doctor opens no database in a data directory serve refuses (the data-dir line says why)")
 
 // relocatedSidecarCounts opens the manifest for one doctor probe and
 // counts the rows of each sidecar table recorded outside its current
