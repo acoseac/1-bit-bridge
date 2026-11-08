@@ -86952,3 +86952,18 @@ the record for native sinks alone: the converted case red. C8, the first occurre
 claimed: its case red, the prefill given. Every other case stayed green. The first runs of R0
 to C3 found the two test faults above; the tests were fixed and committed (50b33f14) and
 every control run again, each red where predicted, by the predicted message.
+
+Round 6's gates, on 8bab3242 at legion0, in one call of the build slot (entered at 12:31,
+the slot held by another worker for the 20 minutes before): `make fmt` left the tree clean;
+`make vet` passed for linux/amd64, `GOOS=windows`, `GOOS=darwin` and `GOOS=linux
+GOARCH=386`; `go test -race` on the packages round 6 touched (playback, alsapcm,
+qualification) passed (90 s), the round's cases and round 4's and 5's activation cases
+passed 20 times running under `-race` (57 s), and the internal one-fault case with
+`TestTheWriteAsksWhatReconciliationDoes` 20 times; the native overlay's two runs passed;
+`make test` passed, 89 packages ok and none failing (2,075 s), the Linux-only tests run
+here; `make build-all` and `make docs-check` passed, docs-check again on a copy of the
+branch with the rules patch applied, where the guards that read the tracked docs passed too
+(`TestEveryCitedTestNameExists`, `TestEveryBridgeWordIsInTheProtocol`,
+`TestNoDocblockNamesAnotherDeclaration`, the endpoint and error-table guards,
+`TestDSDOutputProtocolTokens` and `TestQualificationRunbookVersion`); and the
+qualification check against main, the merge base CI takes (a77578f8), passed at 46.
