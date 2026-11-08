@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/netip"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/updater"
@@ -35,7 +36,9 @@ import (
 // reads as dead, and a restart cannot fix that), the tailnet, the player,
 // DLNA. So a slow first scan cannot delay the confirmation, and a no never
 // rolls anything back: a start that never answers is never confirmed and
-// keeps running, and says so once, recording NotReady.
+// keeps running, and says so once, recording NotReady. A counted start that
+// has not begun serving within its deadline from its admission says so too,
+// and records the same (startWatch; backlog B760).
 
 // probationSeams is a boot test's hold on the confirmation of an install of
 // this version (backlog B660). Nil in production.
@@ -51,21 +54,26 @@ type probationSeams struct {
 	// beforeReady runs once a round has first answered as ready, before this
 	// start counts as ready (backlog B660's third round).
 	beforeReady func()
+	// beforeServing runs on serve's goroutine just before it begins serving
+	// (ServeTLS): a boot test's hold on a start that has not begun serving
+	// (backlog B760).
+	beforeServing func()
 }
 
 // probationTiming is the confirmation's clock: the window one start stays up
 // for once it has answered as ready (updater.ProbationWindow), how often it
 // asks before its first yes, how often after a no at the window's end (and
-// after the window's first lapse with no yes), and one round's bound. Timers
-// and time.Since read the monotonic clock: a box with no RTC boots with a
-// stale date, and nothing here reads the wall clock.
+// after the window's first lapse with no yes), one round's bound, and how
+// long a start has from its admission to begin serving (updater.ProbationWindow
+// too; backlog B760). Timers and time.Since read the monotonic clock: a box
+// with no RTC boots with a stale date, and nothing here reads the wall clock.
 type probationTiming struct {
-	window, ask, retry, round time.Duration
+	window, ask, retry, round, serve time.Duration
 }
 
 // productionProbation is production's timing.
 var productionProbation = probationTiming{window: updater.ProbationWindow, ask: 5 * time.Second,
-	retry: 30 * time.Second, round: 5 * time.Second}
+	retry: 30 * time.Second, round: 5 * time.Second, serve: updater.ProbationWindow}
 
 // orProduction is t with each zero field production's.
 func (t probationTiming) orProduction() probationTiming {
@@ -81,6 +89,9 @@ func (t probationTiming) orProduction() probationTiming {
 	if t.round <= 0 {
 		t.round = productionProbation.round
 	}
+	if t.serve <= 0 {
+		t.serve = productionProbation.serve
+	}
 	return t
 }
 
@@ -94,8 +105,9 @@ const (
 	probationWindow
 	// probationConfirmed: the install was stamped installed.
 	probationConfirmed
-	// probationNotReady: the window lapsed with no confirmation, said once
-	// and recorded in the marker.
+	// probationNotReady: the window lapsed with no confirmation, or the start
+	// had not begun serving by its deadline (startWatch; backlog B760), said
+	// once and recorded in the marker.
 	probationNotReady
 	// probationUnconfirmed: a confirmation that could not be made at this
 	// ask (its lock, its write), asked again at the next, or never where
@@ -103,6 +115,9 @@ const (
 	probationUnconfirmed
 	// probationEnded: the confirmation's goroutine returned.
 	probationEnded
+	// probationServing: the start began serving, which ended the watch on it
+	// from its admission (backlog B760).
+	probationServing
 )
 
 // probationEvent is one thing the confirmation did.
@@ -557,4 +572,74 @@ func (p *serveProbation) confirm(ctx context.Context) bool {
 		p.current, err, p.timing.retry)
 	p.note(probationEvent{kind: probationUnconfirmed, why: err.Error()})
 	return false
+}
+
+// startWatch is the watch on a counted start's beginning to serve (backlog
+// B760). The confirmation begins once ServeTLS runs, so until B760 a start
+// that had not begun serving was never said not to be ready, and the doctor
+// read "ok, on probation" throughout. Armed at the admission, it says once
+// that the start has not begun serving and records NotReady
+// (updater.RecordNotReady), which the doctor and the console fail on and the
+// next start's admission and the confirmation clear, where the start has not
+// begun serving within timing.serve of its admission (updater.ProbationWindow
+// in production), on the monotonic clock. Reporting only: it writes no count
+// (backlog B760).
+type startWatch struct {
+	cancel  context.CancelFunc
+	done    chan struct{}
+	serving atomic.Bool
+}
+
+// watchTheStart arms the watch on the start of current in dataDir, its
+// timing and observer seams' (production's where seams is nil), until the
+// start begins serving (served), ctx ends (serve's stop, and runServe's own
+// end), or the teardown ends it (end).
+func watchTheStart(ctx context.Context, dataDir, current string, seams *probationSeams, stderr io.Writer) *startWatch {
+	timing := productionProbation
+	var observe func(probationEvent)
+	if seams != nil {
+		timing, observe = seams.timing.orProduction(), seams.observe
+	}
+	note := func(e probationEvent) {
+		if observe != nil {
+			observe(e)
+		}
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	w := &startWatch{cancel: cancel, done: make(chan struct{})}
+	go func() {
+		defer close(w.done)
+		if !sleepUnlessStopped(ctx, timing.serve) {
+			if w.serving.Load() {
+				note(probationEvent{kind: probationServing})
+			}
+			return
+		}
+		fmt.Fprintf(stderr, "updater: %s has not begun serving within %s of its start, so its install is not confirmed: "+
+			"it goes on starting, and a start that answers as ready and stays up for %s confirms it\n", current, timing.serve, timing.window)
+		if _, err := updater.RecordNotReady(ctx, dataDir, current); err != nil && ctx.Err() == nil {
+			fmt.Fprintf(stderr, "updater: the install marker does not record that this start has not answered as ready: %v\n", err)
+		}
+		note(probationEvent{kind: probationNotReady, why: fmt.Sprintf("this start has not begun serving within %s of its start", timing.serve)})
+	}()
+	return w
+}
+
+// served is told that the start begins serving: the watch ends there, joined.
+// Safe on nil.
+func (w *startWatch) served() {
+	if w == nil {
+		return
+	}
+	w.serving.Store(true)
+	w.end()
+}
+
+// end ends the watch and joins it. Safe on nil, and more than once.
+func (w *startWatch) end() {
+	if w == nil {
+		return
+	}
+	w.cancel()
+	<-w.done
 }

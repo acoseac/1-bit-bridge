@@ -116,13 +116,21 @@ func KeepsNoLocks(err error) bool {
 // earlier start's count goes with this one. The same write clears the start's
 // token (State.RunningStart, which the count's write carried; backlog B660's
 // third round), so no reader after it takes the start, still tearing down, for
-// one running. It reports whether it wrote. A take-back that does not land
-// leaves one count, which errs toward a rollback of an install whose starts
-// did end cleanly; the next start that ends cleanly does not take it back, and
-// the confirmation clears it.
-func TakeBackFailedStart(ctx context.Context, dataDir, current string, counted int) (bool, error) {
+// one running. It reports whether it reached its write: where it did, the
+// marker held the count this start wrote, so that count had landed, and the
+// write, with an error or without, may have taken it back, since SaveState
+// renames before its barrier, and the next ask then finds no count of its own
+// and answers no write and no error; serve counts a start again after a panic
+// only where some ask of its take-back reached its write
+// (CountFailedStartAgain; backlog B760's second round). What a take-back that
+// does not land leaves is backlog B760's. save writes the marker; nil is
+// SaveState, as AdmitBoot's is.
+func TakeBackFailedStart(ctx context.Context, dataDir, current string, counted int, save func(dataDir string, st State) error) (bool, error) {
 	if counted <= 0 {
 		return false, nil
+	}
+	if save == nil {
+		save = SaveState
 	}
 	lock, err := LockState(ctx, dataDir)
 	if err != nil {
@@ -138,6 +146,46 @@ func TakeBackFailedStart(ctx context.Context, dataDir, current string, counted i
 	}
 	st.FailedStarts--
 	st.RunningStart = ""
+	if err := save(dataDir, st); err != nil {
+		return true, markerIOError{err}
+	}
+	return true, nil
+}
+
+// CountFailedStartAgain counts again a start of current whose stop took its
+// count back (TakeBackFailedStart) and which then did not end cleanly after
+// all, counted being what its admission tried to write (backlog B760): serve
+// calls it where a panic on its own goroutine ends a start whose take-back,
+// begun as its stop arrived, the start having answered as ready, had an ask
+// that reached its write, holding the data dir's lock. That is the caller's
+// to establish, and asking it otherwise is wrong: the marker at counted less
+// one is what a take-back's write leaves and what a count that never landed
+// leaves too, which this cannot tell apart (backlog B760's second round, where
+// a start whose count never landed was counted here). ctx bounds the wait for
+// the install marker's lock, as the take-back's does; on a filesystem that
+// keeps none it goes on without it. It reads the marker again and writes only
+// where the marker is still an install of current that the start counted
+// against (countsStart) and holds what the take-back left, counted less one,
+// so it undoes that take-back and nothing else: a take-back whose write
+// published nothing, a confirmation and an install of another version since
+// leave it nothing to write. It reports whether it wrote.
+func CountFailedStartAgain(ctx context.Context, dataDir, current string, counted int) (bool, error) {
+	if counted <= 0 {
+		return false, nil
+	}
+	lock, err := LockState(ctx, dataDir)
+	if err != nil {
+		return false, err
+	}
+	defer lock.Release()
+	st, err := LoadState(dataDir)
+	if err != nil {
+		return false, fmt.Errorf("the install marker cannot be read: %w", markerIOError{err})
+	}
+	if !countsStart(st, current) || st.FailedStarts != counted-1 {
+		return false, nil
+	}
+	st.FailedStarts = counted
 	if err := SaveState(dataDir, st); err != nil {
 		return false, markerIOError{err}
 	}
