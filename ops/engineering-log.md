@@ -87713,3 +87713,173 @@ changes, clean; `rules-b652.patch` applied to a `git archive` copy of the
 final HEAD, where `make docs-check` passes (CLAUDE.md 82.1%, the worst load
 67.7%; jobs.md 27,191 bytes) and cmd/bridge's `TestEveryCitedTestNameExists`
 passes, git reading this worktree's index; `git status` clean after.
+
+## 2026-11-08 — B652 round 2: the guard counts curves, not links; a repair works through the directory it judged and commits only while it and the source are the ones it read
+
+Backlog B652's second round on `fix/b652-waveform-regen` (PR #1443), from
+27dbabd9 (round 1 and the rules commit on it), worker b652 on legion0
+(Ubuntu 26.04, linux/amd64, go1.27.3, `GOTOOLCHAIN=local`, `GOPROXY=off`).
+Seven points, from round 1's two reviews and the two reviews of the brief.
+Commits: the fix and its tests 5a9dcf6e; two seams and three subtests that
+pin rooted operations no other test reached (e531b1ce); the named-pipe test
+(46efd48b); and this record. The rules go into `.claude/rules/jobs.md` and
+`ops/History-rules-jobs.md` through `rules-b652-r2.patch`, which this worker
+cannot commit.
+
+### Before point 1: no path of the bridge's own removes a curve and keeps its row
+
+The last look below refuses a tree holding no curve while rows record one,
+so a path that removed curves and kept their rows' waveform fields would be
+refused for good. Read in the tree at 27dbabd9: `track_analysis.source_path`
+references `tracks(path)` `ON DELETE CASCADE`, and every store path that
+unlinks curves lists the curves of the rows it deletes, by its own DELETE's
+predicate, and unlinks them once the rows are gone: `DeleteTrack` (one
+path), `DeleteTracksByPrefix` (the same byte range), `DeleteTracksBatch`
+(the same chunk, in its transaction), the threshold reap
+(`IncrementMissingTracks`, its `waveformWhere` shared with the DELETE, B186),
+`WipeAllTracks` and `WipeFilesystemTracks` (every curve; the latter spares
+the UPnP-routed rows, and the analysis enumerates local rows alone,
+`TrackPathsLocal`'s anti-join, so no routed row records a curve).
+`bridge analyze --gc` unlinks only files no row records (`KnownSidecarKey`,
+`ReclaimOrphan`'s re-check), the background orphan sweep walks the variants
+directory alone, and `RunAnalysis` and the repair replace a curve by a
+rename, removing only their own scratch. So there is nothing to clear.
+
+### Reds first, at round 1's code
+
+The new tests, with the two seams they need (integrity's `afterProbe`,
+analyze's `beforeMkdir`) and no fix, on 27dbabd9, predicted in
+`.tmp/_b652/r2/reds.predictions.txt` before the run: 23 verdicts, all as
+predicted.
+
+| Test | At 27dbabd9 |
+|---|---|
+| integrity `TestALinkIsNeverACurve`, a link to an empty folder | admitted: Missing 3, no refusal |
+| …, a link to a curve-named file | the link counted as a curve: Present 1, admitted |
+| `TestTheTreeIsLookedAtAgainBeforeAnyAdmission`, a whole judgment | two rows below the floor, the second curve deleted after the probe: Missing 2, admitted |
+| …, a bounded judgment | undecided (Looked 1), never refused |
+| `TestAGuardWhoseLogIsBlockedStillAnswersAndCloses`, an ask and the close | each waited on the lock the judgment logged its refusal under |
+| analyze `TestARepairWorksOnlyThroughTheDirectoryItWasAdmittedOn` | the stale scratch's removal by path deleted the scratch sentinel in the folder put at the path |
+| `TestARepairCommitsOnlyWhileItsDirectoryAndItsSourceAreTheOnesItRead`, both cases | committed (Done 1), the row moved |
+| `TestASyncFailureIsClassifiedAsEveryWriteFailureIs`, after the folder was replaced | counted: "the curve could not be written: input/output error" |
+| `TestASourceItCannotReadIsUnreachable`, its three cases | the source at mode 0 decoded, "sox FAIL formats: can't open input file" counted, a strike through the pool |
+| `TestARepairWritesNothingIntoAWaveformDirectoryThatWent`, before the rename (its new assertion) | the scratch left in the directory moved aside |
+| cmd/bridge `TestNoCurveIsRenderedAgainOverAWaveformDirectoryGoneAwayOrEmptied`, only a link to an empty folder | 1 repair enqueued and run, its curve written, `Album/` made through the link |
+| `TestTheDoctorReportsWhatTheRegenerationGuardJudges`, the directory gone, and doctor's `TestTheWaveformRegenerationLineSaysEachStateApart`, a refusal before any row was looked at | "(the first 0 of 3 row(s))" after the refusal |
+
+Green there, as predicted: a curve still there admits; a sync failure with
+the folder as it was is counted; the doctor's undecided line; and
+`TestTheRepairKeepsTheOwnersOfWhatItMakes`'s two simulated cases, since
+round 1's `fsutil.Mkdir` and `KeepOwner` keep the owners by path and the
+test guards that the calls through the root keep them too (its controls
+below are its red). Its as-root case skips here, where the suite runs as a
+user. The pins added after the fix (another directory by the last look, an
+empty folder, a folder put there between the last check and the rename, the
+named pipe) were not run at round 1's code: their controls below (R2b, R3c,
+R3e, R6c) are their red.
+
+### What round 2 built
+
+1. **A curve is a file.** `sidecarFamily.links`: true for the variants (a
+   link to a directory may lead to renditions the scan does not follow, a
+   link to a rendition counts), false for the curves, whose probe counts
+   regular files alone, a link nothing to it. And the judgment looks at the
+   tree once more, after its second identity check and before it admits or
+   says it is undecided, whatever the floor and the ratio said: a tree
+   holding no curve then, while the rows record one, is refused as the
+   probe refuses it ("looked at again before admitting: …"), and one in
+   another directory than the judgment began on is a volume away
+   (`os.SameFile` with the first probe's handle).
+2. **One root per repair** (`repairDir`). The path is asked against the
+   job's identity before the source is opened; once the decode is done the
+   directory is opened as an `os.Root` and compared with that identity
+   (`rootIdentity`, from a handle opened through the root, since a stat by
+   path on Windows reads the identity at the comparison); and through the
+   root go every directory (`fsutil.MkdirIn`), the scratch (`root.OpenFile`,
+   `fsutil.KeepOwnerIn`), the stale scratch's removal and the deferred
+   cleanup (`root.Remove`), the rename (`atomicwrite.RenameInRootCtx`, on
+   RenameWithRetry's schedule, without `commitDirEntry`, which would sync the
+   directory at the path) and the pool's sync (`fsutil.FsyncInRoot`: the
+   file and its directory, opened through the root). As root, `MkdirIn`
+   gives a new directory the owner of the one it is made in and
+   `KeepOwnerIn` gives the scratch the owner of the entry it replaces, or of
+   its directory, each read through the root. The pool makes the job's
+   `repairDir` and hands it to the runner (`RepairSpec.dir`), so the
+   runner's writes and the pool's sync and checks share one root; a repair
+   run by itself opens its own.
+3. **The commit's checks** (`Pool.beforeCommit`): the sync through the
+   root, then the directory at the path compared with the root
+   (`repairDir.atPath`), then the source's mtime and size with the job's
+   (`sourceStillDescribed`). A mismatch commits nothing and counts nothing:
+   the directory's is `ErrWaveformDirAway`, the source's `ErrSourceChanged`,
+   which leaves it to ordinary analysis. A rewrite that keeps both is not
+   seen, as the analysis skip gate does not see one.
+4. **The sync's failure** goes through `writeFailure`: with the directory at
+   the path no longer the root it is the directory's refusal, a cancellation
+   is the context's, and anything else is `ErrCurveNotWritten`, counted.
+5. **A source the repair cannot read** (`sourceReadable`, before the probe
+   and again before a decoder's `SourceUnreadable` verdict is returned): a
+   regular file of the row's size and mtime (`sourceStillDescribed`, which
+   refuses anything else as `ErrSourceChanged` before anything opens it),
+   opened as a file (`fsutil.OpenAsFile`) and read for one byte. A failed
+   open or read is `ErrSourceUnreachable`, counting nothing; an empty read of
+   a file whose size said otherwise is another version.
+6. **No log under the lock.** `noteLocked` updates the refusal latch under
+   the guard's lock and returns the line to say, which `judge` says once the
+   lock is let go; `Close` says that its grace ran out from a goroutine of
+   its own, so it returns within `stopGrace` whatever the log does.
+7. **The doctor's scope**, "the first N of M row(s)", is said only where
+   0 < Looked < Rows.
+
+`internal/integrity/waveform.go`'s package comment says what this built: a
+volume that goes before the decode is done gets nothing and no strike; one
+that goes after the root opened gets nothing at its path and no strike, and
+what the root reached meanwhile (the curve's directories, at most the curve)
+is in the directory it opened, which no row records.
+
+### Negative controls
+
+Twenty-six, on 46efd48b, predicted by name in
+`.tmp/_b652/r2/controls.predictions.txt` before the first ran (70 verdicts).
+`.tmp/_b652/r2/controls.py` applied each control's edit to a copy of the
+tree, never the worktree, the edit with the one match it had to find
+(checked beforehand, with each mutated file parsing, by `check_counts.py`),
+ran the named tests in each named package and put the copy's bytes back
+before the next. All 70 as predicted; `git status` clean after.
+
+| Control | Removed | Red, and what it showed |
+|---|---|---|
+| R1 | the curves' no-links case | both link cases admitted (Missing 3; Present 1); cmd/bridge's link case: 1 repair run, `Album/` made through the link. Green: the variant probe's link cases, the last curve deleted |
+| R1v | the variants' `links: true` | the variant probe's "a link to a directory keeps it healthy" and "a link to a rendition counts" ("holds no rendition"). Green: the curves' link cases |
+| R2 | the last look's refusal | the whole judgment admitted and the bounded one undecided. Green: another directory by the last look (its identity check), a curve still there |
+| R2b | the last look's identity comparison | another directory at the path, holding a curve of its own, admitted |
+| R3a | the stale scratch's removal through the root (by path instead) | the scratch sentinel in the folder at the path deleted |
+| R3b | the deferred cleanup through the root (by path) | the scratch sentinel deleted, and the scratch left in the directory the repair was admitted on; the "before the rename" case the same |
+| R3c | `fsutil.MkdirIn` (`os.Mkdir` by path) | an empty folder put at the path got `Artist` and `Artist/Album`; as root no directory given its parent's owner |
+| R3d | the scratch's create through the root (by path) | the scratch sentinel overwritten with the curve's bytes |
+| R3e | the rename through the root (`RenameWithRetryCtx` by path) | the scratch sentinel renamed over the curve sentinel, and no curve in the directory the repair was admitted on |
+| R3f | the root's comparison with the job's identity | a folder put at the path during the decode got the curve and its directories |
+| R3g | the check of the path before the rename | the curve renamed into the directory moved aside |
+| R4a | the check of the directory before the commit | committed (Done 1) after the folder was replaced past a successful sync. Green: the source's case, the sync failure's |
+| R4b | the check of the source before the commit | committed (Done 1) with the source's mtime moved during the sync. Green: the folder's case |
+| R5 | `writeFailure` for the sync (`curveNotWritten` instead) | a sync failing once the folder was replaced counted ("the curve could not be written"). Green: with the folder as it was |
+| R6a | the open and the read before the probe (the stat alone) | a decoder started over the mode-0 source. Green: the source made unreadable during the decode and the pool's case, which the check before a verdict catches, and the named pipe |
+| R6b | the check before a verdict | a source made unreadable during the decode: "sox FAIL formats: can't open input file", counted |
+| R6c | the regular-file check | the named pipe opened: "the source could not be reached: open: named pipe is not a file", where the stat's refusal is wanted |
+| R7a | the line said once the lock is let go (said under it) | the ask and the close each waited on the blocked sink |
+| R7b | Close's warning on a goroutine of its own | the close waited on the blocked sink. Green: the ask |
+| R8 | the scope's lower bound | "(the first 0 of 3 row(s))" on the doctor's line, in internal/doctor and in cmd/bridge. Green: undecided |
+| F1 | `MkdirIn`'s owner as root | no owner given: `TestMkdirInMakesTheDirectoryThroughItsRoot` and the repair's new curve. Green: a partial copy replaced, its directories there already |
+| F1b | `MkdirIn` as root through the root (by path) | `a` made at the path, so `a/b` could not be made in the directory the root opened |
+| F2 | `KeepOwnerIn` as root | no owner given: fsutil's test and the repair's two simulated cases |
+| F2b | `KeepOwnerIn`'s lookup through the root (by path) | the replaced entry's owner read at the path: 4001, want 4999 |
+| F3 | `FsyncInRoot`'s open through the root (by path) | the root's own file not synced, and a file only the path's directory holds synced |
+| A1 | `RenameInRootCtx` through the root (by path) | the rename failed: the scratch is not at the path |
+
+Every point has its controls: point 1 R1, R1v, R2 and R2b; point 2 R3a to
+R3g, F1 to F3 and A1; point 3 R4a and R4b; point 4 R5; point 5 R6a to R6c;
+point 6 R7a and R7b; point 7 R8. Two of the changes no test here can see:
+`syncDirIn`'s reach (a directory synced at the path rather than through the
+root shows nothing), and `sourceReadable`'s one-byte read past an open that
+succeeded (no portable way to make a regular file open and then fail its
+read).
