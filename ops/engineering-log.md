@@ -86746,7 +86746,8 @@ Worker b728-b9, legion0 (Ubuntu 26.04, Linux 7.0, Go 1.27.3), branch
 `feat/b728-b9-choice` at 9950ca63 (round 4's rules, which matched round 4's resolution byte
 for byte once applied). The reviews of round 4: Codex's one point, Claude's three. Commits:
 f5bf4929 (the round's tests, red), d9091a62 (point 1), 02b0f456 (transition's comment, points
-2 and 4), and this record. The rules are a patch the orchestrator applies (`output.md`'s
+2 and 4), this record (3cff0151), 3db5f7e8 (the reopen case's wait), and the record's
+additions after it. The rules are a patch the orchestrator applies (`output.md`'s
 bullet on the write beside what plays, and its long form).
 
 **Point 1 (Codex): confirmed, red first.** Round 4's early cancellation in `reconcileDSD`
@@ -86788,7 +86789,13 @@ release unconfirmed, nothing opened for c); and the review's own sequence, b's s
 before its adoption and released after 30 s, the resume reopening it, b's entry deleted while
 the reopen's check is held, the reopened node's DROP failing (the resume refused, the sink's
 end the session's fault, nothing opened for c). A paused sink's waits take granted time
-alone, free or not, so the pause's 30 s is a 31 s grant.
+alone, free or not, so the pause's 30 s is a 31 s grant. The first gates found that case
+flaky under the race detector's load (2 runs of 20, and one in the package's run): b is all in
+its paused sink before the resume, so the engine had already handed off c after b, and the
+case's wait for a Prepare naming another occurrence than b found that one, letting the reopen
+go on before the edit dropped b. The case now waits for the edit's own call, a cut of b or a
+Prepare after a naming another (3db5f7e8), and passed 40 runs alone and 20 among the round's
+cases under `-race`.
 
 **Point 3 (Claude): a test gap, confirmed by its control.** The cut case at the sink's
 admission let the admission go only after the edit that deletes b's entry, whose own drop
@@ -86811,7 +86818,9 @@ sink's unconfirmed end the session's fault: red in the take-back's close case al
 opened; P2b, the reporter not faulting on the current sink's end: red in the reopen's case
 alone, the session left paused; P3, the backend's Cut answering true and cutting nothing:
 red in the cut case, b's node given its prefill, while round 4's cut case as it was (a
-temporary copy) passed. Every other case stayed green.
+temporary copy) passed. Every other case stayed green. Run again on 3db5f7e8, once the reopen
+case's wait was fixed, each was red where predicted by the same message, P2b with its resume
+refused.
 
 **The qualification version.** Round 5 changes the `internal/alsapcm/` prefix's tests alone
 (and `internal/player/playback`, unguarded); no DSD byte changes. The branch holds 46 and main
