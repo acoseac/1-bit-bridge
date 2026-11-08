@@ -857,6 +857,32 @@
   since B528, a fraction in `scanIntervalSec` beside a block kept whole,
   and the fraction rows of the rewrite tables, a `loopbackPort: 7795.5`
   not kept and a fraction in a merged block, which keeps nothing.)
+  **So are the enrich block's two base URLs, each on its own, in either
+  posture** (2026-11-08, backlog B761): each names the mirror the operator
+  set up, with any credential it carries, and init asks for neither. A base
+  Load takes that is not the default (`config.DefaultMusicBrainzBaseURL` and
+  `DefaultCoverArtBaseURL`, held to the enricher's own by
+  `TestEnrichBaseDefaultsAgree`) is kept as Load keeps it, trimmed and with
+  no trailing slash; one written empty, or as the default, is written as no
+  key, as a first install writes it. `priorEnrich` reads each from the
+  file's bytes on its own, never through Load, so no variable's value
+  reaches the file, and a base beside a sibling or a switch that does not
+  read is still kept. Load's own check, called through config
+  (`config.NormalizeEnrichBaseURL`), decides what is refused: a base it
+  refuses, or one that does not read as text, is not kept, and the run
+  names it by its line with a fixed reason, never its value (the check's
+  own words name the value's scheme and host). `warnEnrichNotKept` says
+  what each kind costs (a switch not kept is on now; for a base not kept
+  the default is used now), and the block's own line names both kinds.
+  `printKept` lists a kept base whole only where it carries no user
+  information, query or fragment, each of which can carry a credential
+  (B54, B69), and as "set (not shown)" where it does. **Don't drop an
+  enrich base Load takes, keep one it refuses, or print a kept base's user
+  information, query or fragment.** (`TestARewriteKeepsTheEnrichmentBases`,
+  whose credential rows put a credential in one part of a base alone, so
+  that each part is shown or not on its own, and
+  `TestARewriteOverTheDefaultsWritesWhatAFirstInstallWrites`, a rewrite
+  over the defaults writing the bytes the first init wrote.)
   `TestInitRewriteKeepsTheTLSPairItsConfigNames` and its siblings run the
   real initCmd twice over one `--dir` and assert the exit code, the saved
   config and the fingerprint at the paths `resolveCertPaths` finds.

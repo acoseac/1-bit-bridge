@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"slices"
 	"strconv"
@@ -110,6 +111,17 @@ type Config struct {
 	// (WarnLegacyDSDKeysIn), nil for a config no start gave one: Clone keeps
 	// it, shared, since it is the start's and not the value's.
 	legacyDSD *LegacyDSDWarnings
+	// envSet is the yaml path of each leaf a BRIDGE_* variable set at the
+	// load that made this config (applyEnvOverrides), sorted, nil for a
+	// config no load made: the live holder's save writes the file's own
+	// value for each one an update left as it was (filedEnvValues, backlog
+	// B761). Clone copies it.
+	envSet []string
+	// filed is the yaml path of each of those leaves that the holder's save
+	// writes as the file holds it, which that save writes as no key at its
+	// zero value, whatever the field's tag (filedEnvValues, marshal). It is
+	// set on that save's copy alone, and Clone drops it.
+	filed []string
 }
 
 // OutputConfig is the bridge reporting the player beside it. MPD is
@@ -510,10 +522,10 @@ type EnrichConfig struct {
 	// it. Read through EffectiveDeezerEnabled, never directly.
 	DeezerEnabled *bool `yaml:"deezerEnabled,omitempty"`
 	// MusicBrainzBaseURL overrides the MusicBrainz ws/2 API root.
-	// Default (empty): https://musicbrainz.org/ws/2.
+	// Default (empty): DefaultMusicBrainzBaseURL.
 	MusicBrainzBaseURL string `yaml:"musicbrainzBaseURL,omitempty"`
 	// CoverArtBaseURL overrides the Cover Art Archive root.
-	// Default (empty): https://coverartarchive.org.
+	// Default (empty): DefaultCoverArtBaseURL.
 	CoverArtBaseURL string `yaml:"coverArtBaseURL,omitempty"`
 	// CoverSize is the pixel tier the enricher fetches NEW album covers
 	// at (CAA's native tiers: 250 / 500 / 1200). Default (0): 1200 —
@@ -526,6 +538,19 @@ type EnrichConfig struct {
 	// ladder serves whichever tier exists.
 	CoverSize int `yaml:"coverSize,omitempty"`
 }
+
+// DefaultMusicBrainzBaseURL and DefaultCoverArtBaseURL are what an empty
+// enrich base stands for: the public MusicBrainz ws/2 root and the Cover Art
+// Archive's, which the enricher asks where no mirror is set.
+// internal/enrich's DefaultMusicBrainzBase and DefaultCoverArtBase are the
+// source of truth, written out here rather than imported, since this package
+// depends on no feature package; cmd/bridge, which imports both, pins the two
+// pairs equal (TestEnrichBaseDefaultsAgree). bridge init's rewrite writes no
+// key for a base the config it replaces gives as either.
+const (
+	DefaultMusicBrainzBaseURL = "https://musicbrainz.org/ws/2"
+	DefaultCoverArtBaseURL    = "https://coverartarchive.org"
+)
 
 // EffectiveCoverSize resolves CoverSize's zero default (1200). Values
 // are validated at load (Config.Validate) so this stays a pure default
@@ -3256,6 +3281,17 @@ func normalizeBaseURL(field, raw string) (string, error) {
 	return v, nil
 }
 
+// NormalizeEnrichBaseURL is Load's own check of an enrich base URL, raw
+// written for field (enrich.musicbrainzBaseURL or enrich.coverArtBaseURL),
+// and the form Load keeps it in (normalizeBaseURL): trimmed, with no trailing
+// slash, "" for an empty one, and Load's refusal for one that is not an
+// absolute http(s) URL with a host, which names the value by its field, its
+// scheme and its host alone. bridge init's rewrite keeps a base the config it
+// replaces writes only where this takes it (backlog B761).
+func NormalizeEnrichBaseURL(field, raw string) (string, error) {
+	return normalizeBaseURL(field, raw)
+}
+
 // maxIntervalSeconds and maxIntervalHours cap the cadence + TTL config
 // fields at one year, expressed in each field's own unit. Above this
 // ceiling the `time.Duration(n) * time.Second` (or `* time.Hour`)
@@ -4840,7 +4876,7 @@ func (c *Config) save(l *FileLock, unchanged func(context.Context) error) ([]byt
 	if err := l.heldFor(); err != nil {
 		return nil, err
 	}
-	data, err := yaml.Marshal(c)
+	data, err := c.marshal()
 	if err != nil {
 		return nil, fmt.Errorf("marshal config: %w", err)
 	}
@@ -4848,4 +4884,40 @@ func (c *Config) save(l *FileLock, unchanged func(context.Context) error) ([]byt
 		return nil, err
 	}
 	return data, nil
+}
+
+// marshal is the YAML a save of c writes: yaml.Marshal's of c, and where c
+// records leaves it writes as the file holds them (filed), yaml.Marshal's of
+// a copy of c whose type gives each such field of Config's own omitempty, so
+// that a field whose tag writes its zero value as a key (scanIntervalSec,
+// libraryRoots) is written as no key at that value, as one that omits an
+// empty value is, and at any other value as it is; everything else is the
+// same encoder's over the same values. A leaf below the top level is written
+// as no key at its zero value by its own tag: every leaf a variable sets whose
+// tag writes its zero value as a key is a field of Config itself
+// (TestEveryLeafWhoseZeroIsAKeyIsAtTheTopLevel).
+func (c *Config) marshal() ([]byte, error) {
+	if len(c.filed) == 0 {
+		return yaml.Marshal(c)
+	}
+	v := reflect.ValueOf(c).Elem()
+	var fields []reflect.StructField
+	var values []reflect.Value
+	for i := range v.NumField() {
+		f := v.Type().Field(i)
+		if !f.IsExported() {
+			continue
+		}
+		tag := f.Tag.Get("yaml")
+		if key, opts, _ := strings.Cut(tag, ","); slices.Contains(c.filed, key) && !slices.Contains(strings.Split(opts, ","), "omitempty") {
+			f.Tag = reflect.StructTag(`yaml:"` + tag + `,omitempty"`)
+		}
+		fields = append(fields, reflect.StructField{Name: f.Name, Type: f.Type, Tag: f.Tag})
+		values = append(values, v.Field(i))
+	}
+	out := reflect.New(reflect.StructOf(fields)).Elem()
+	for i, fv := range values {
+		out.Field(i).Set(fv)
+	}
+	return yaml.Marshal(out.Interface())
 }

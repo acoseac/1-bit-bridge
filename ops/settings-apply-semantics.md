@@ -83,6 +83,26 @@ additive; widening a string into an object is not.
 
 ---
 
+## A setting a variable sets
+
+`Load` applies a `BRIDGE_*` variable over the file, and `GET /api/settings`
+shows the value it set. Every console save (this PATCH, the variants folder,
+the roots, the player's writes, the UPnP servers) goes through
+`CfgHolder.UpdateChecked`, which writes, for each leaf a variable set at the
+start that the save left at that value (compared by value: an empty list is
+none), the file's own value, read from the bytes the save's turn of the
+file's lock found, by `Load`'s own decode, and no key where that is the
+leaf's zero value, what a file that writes none gives, whatever the field's
+tag; so the variable never lands in the file, nor a key the file did not
+write, and a start without it reads what the file said
+(`config.filedEnvValues`, `Config.marshal`, backlog B761). A save that
+changes such a leaf writes and runs the change, `live` or `restart` as its
+row says, and the variable sets the leaf again at the next start: the
+Settings page says so. The two enrichment switches keep their own rule
+(`config.filedSwitches`, B617): a change to on writes no key.
+
+---
+
 ## Two rules that keep the report honest
 
 ### 1. Never split a field's halves
@@ -157,7 +177,7 @@ Classes describe *how the value is consumed*, not how important it is.
 | `optimizeEnabled` | **A** | `live` (+reason when sox is unusable) | Health advertisement, the console's optimize kind (batch submit and projection) the pre-generation sweeper and the pool's take of a queued `optimize` job (backlog B155) all read it live, through one closure: the upscale gate AND this flag (`carPlayOptimizeActiveFn`). The sweeper is wired unconditionally, like the pool. |
 | `dsdRenderEnabled` | **A** | `live` (+reason when ffmpeg lacks the DSD decoders) | Every DSD gate — the `dsdRender` health flag, the `pcm` kind, the enqueuer, the coordinator walks, the sweeper's candidate query, the admin coverage mirrors and the pool's take of a queued DSD job (backlog B155) — reads one live caps closure (the flag ∧ the cached ffmpeg probe). A flip also nudges the auto-optimize sweeper. A restart would not install ffmpeg, so `live` + reason is the honest answer when the toolchain is missing. |
 | `libraryWatchEnabled` | C | `restart` | fsnotify watcher with a `scanWG` / `closing` drain contract guarding a SQLite-corruption vector. |
-| `enrichEnabled` | **A** | `live` | `enrich.enabled` (backlog B617). The enricher, the fingerprint gate and its sweep, the artwork and artist-image misses and the manifest's `enrichmentProgress` read it per use through serve's two live closures. Off refuses every MusicBrainz, Cover Art Archive, Deezer, AcoustID and Atlas premium-cover request that starts after it (the harvest's covers included), a mirror's included, takes no answer whose headers arrive after it, and cuts one on the wire off within a second (`internal/enrichgate`): what an answer that finished inside that second gives may still be written locally (a cover, a portrait), and nothing further goes out, since the switch is about what goes out; a refusal is no answer and no miss, so nothing is lost once it is on again. What a pass writes asks the switch again at the write. On resumes at the enricher's next poll (15 s). Only off is written: on clears the key, so the file stays one an older binary loads. `BRIDGE_ENRICH_ENABLED` sets it at every start, read as the key is (a value that reads as neither is off), and the console shows what the live config holds; a console save writes the switch only when it changes it, and the file's own value otherwise, so the variable never lands in the file (`config.filedSwitches`; the other variables are still written back, B761). |
+| `enrichEnabled` | **A** | `live` | `enrich.enabled` (backlog B617). The enricher, the fingerprint gate and its sweep, the artwork and artist-image misses and the manifest's `enrichmentProgress` read it per use through serve's two live closures. Off refuses every MusicBrainz, Cover Art Archive, Deezer, AcoustID and Atlas premium-cover request that starts after it (the harvest's covers included), a mirror's included, takes no answer whose headers arrive after it, and cuts one on the wire off within a second (`internal/enrichgate`): what an answer that finished inside that second gives may still be written locally (a cover, a portrait), and nothing further goes out, since the switch is about what goes out; a refusal is no answer and no miss, so nothing is lost once it is on again. What a pass writes asks the switch again at the write. On resumes at the enricher's next poll (15 s). Only off is written: on clears the key, so the file stays one an older binary loads. `BRIDGE_ENRICH_ENABLED` sets it at every start, read as the key is (a value that reads as neither is off), and the console shows what the live config holds; a console save writes the switch only when it changes it, and the file's own value otherwise, so the variable never lands in the file (`config.filedSwitches`; every other variable's leaf is kept the same way, "A setting a variable sets" below). |
 | `enrichDeezerEnabled` | **A** | `live` | `enrich.deezerEnabled`: the Deezer portrait lookups alone. Each of the two requests a portrait takes runs on a context of its own that the switch cancels, and Deezer's client asks it at the send and at the answer, so off sends no new request and cuts one under way off within a second, leaving the batch's other requests running. Written as `enrichEnabled` is; `BRIDGE_ENRICH_DEEZER_ENABLED` likewise. |
 | `enrichMusicBrainzBaseURL` | **A** | `live` | Read per use, and the politeness pacing **re-derives from the same live value** — see below. |
 | `enrichCoverArtBaseURL` | **A** | `live` | As above. |

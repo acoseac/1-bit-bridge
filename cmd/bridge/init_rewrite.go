@@ -81,6 +81,19 @@ import (
 //     a word, and init asks for neither. One written on is the default, which
 //     a first install writes no key for. One that does not read is not kept,
 //     and the run says which (priorEnrich, warnEnrichNotKept).
+//   - enrich.musicbrainzBaseURL and enrich.coverArtBaseURL, each on its own,
+//     where the config writes a base Load takes that is not the default, in
+//     either posture (backlog B761), as Load keeps it: each names the mirror
+//     the operator set up, with any credential it carries, and init asks for
+//     neither. One written empty, or as the default (config's
+//     DefaultMusicBrainzBaseURL and DefaultCoverArtBaseURL), is written as
+//     no key, as a first install writes it. One that does not read, or that
+//     Load's own check refuses (config.NormalizeEnrichBaseURL), is not kept,
+//     and the run names it by its line, never its value, and says the
+//     default is used in its place (priorEnrich, warnEnrichNotKept).
+//     printKept shows a kept base only where it carries no user information,
+//     query or fragment, which a credential can ride in, and "set (not
+//     shown)" where it does.
 //
 // Everything else is this run's value or the default, which is the
 // documented overwrite: features and cadences. The ports are kept under
@@ -116,39 +129,56 @@ type priorInstallFile struct {
 	ListenAddress string `yaml:"listenAddress"`
 	AdminAddress  string `yaml:"adminAddress,omitempty"`
 	// Enrich is the enrich block's two switches, which a rewrite keeps where
-	// the file writes them off (priorEnrich).
+	// the file writes them off, and its two base URLs, which it keeps where
+	// Load takes them (priorEnrich).
 	Enrich priorEnrich `yaml:"enrich"`
 }
 
 // priorEnrich is what a rewrite reads of the enrich block of the config it
-// replaces: its two switches (backlog B617). Its UnmarshalYAML reads each
-// switch on its own and never fails the file's decode, so a switch that does
-// not read costs the rewrite nothing else the file gives up: the switch is
-// left out, and notKept says which and on what line, never its value. Its
-// exported fields' yaml keys and types are config.EnrichConfig's
+// replaces: its two switches (backlog B617) and its two base URLs (backlog
+// B761). Its UnmarshalYAML reads each setting on its own and never fails the
+// file's decode, so a setting that does not read, or a base Load refuses,
+// costs the rewrite nothing else the file gives up: the setting is left out,
+// and notKept says which and on what line, never its value. Its exported
+// fields' yaml keys and types are config.EnrichConfig's
 // (TestPriorInstallTagsAreConfigs).
 type priorEnrich struct {
 	Enabled       *bool `yaml:"enabled"`
 	DeezerEnabled *bool `yaml:"deezerEnabled"`
-	notKept       []string
+	// MusicBrainzBaseURL and CoverArtBaseURL are each base as the rewrite
+	// keeps it (readBase): as Load keeps it, where Load takes it and it is
+	// not the default, and "" otherwise, which the rewrite writes as no key.
+	MusicBrainzBaseURL string `yaml:"musicbrainzBaseURL"`
+	CoverArtBaseURL    string `yaml:"coverArtBaseURL"`
+	// notKept is a line for each setting the rewrite does not keep, or for
+	// the block; switchesLost and basesLost say whether a switch, and a
+	// base, is among them, for what warnEnrichNotKept says each costs.
+	notKept                 []string
+	switchesLost, basesLost bool
 }
 
 // UnmarshalYAML reads the block as the decoder hands it, through an alias or
-// a merge key as the decoder reads them, a value that is not a block of
-// settings keeping neither switch, and each switch as Load's decoder reads
-// it into config.EnrichConfig, null read as no key. It never returns an
-// error.
+// a merge key as the decoder reads them, a value that does not read as a
+// block of settings keeping none of its settings, and each setting as Load's
+// decoder reads it into config.EnrichConfig, null read as no key. It never
+// returns an error.
 func (e *priorEnrich) UnmarshalYAML(n *yaml.Node) error {
 	var each struct {
-		Enabled       yaml.Node `yaml:"enabled"`
-		DeezerEnabled yaml.Node `yaml:"deezerEnabled"`
+		Enabled            yaml.Node `yaml:"enabled"`
+		DeezerEnabled      yaml.Node `yaml:"deezerEnabled"`
+		MusicBrainzBaseURL yaml.Node `yaml:"musicbrainzBaseURL"`
+		CoverArtBaseURL    yaml.Node `yaml:"coverArtBaseURL"`
 	}
 	if err := n.Decode(&each); err != nil {
-		e.notKept = []string{fmt.Sprintf("enrich (line %d): it is not a block of settings, so neither of its switches is kept", n.Line)}
+		e.notKept = []string{fmt.Sprintf("enrich (line %d): it does not read as a block of settings, "+
+			"so none of its switches or base URLs is kept", n.Line)}
+		e.switchesLost, e.basesLost = true, true
 		return nil
 	}
 	e.Enabled = e.readSwitch("enrich.enabled", &each.Enabled)
 	e.DeezerEnabled = e.readSwitch("enrich.deezerEnabled", &each.DeezerEnabled)
+	e.MusicBrainzBaseURL = e.readBase("enrich.musicbrainzBaseURL", config.DefaultMusicBrainzBaseURL, &each.MusicBrainzBaseURL)
+	e.CoverArtBaseURL = e.readBase("enrich.coverArtBaseURL", config.DefaultCoverArtBaseURL, &each.CoverArtBaseURL)
 	return nil
 }
 
@@ -162,9 +192,44 @@ func (e *priorEnrich) readSwitch(setting string, v *yaml.Node) *bool {
 	var on *bool
 	if err := v.Decode(&on); err != nil {
 		e.notKept = append(e.notKept, fmt.Sprintf("%s (line %d): it does not read as on or off, so it is not kept", setting, v.Line))
+		e.switchesLost = true
 		return nil
 	}
 	return on
+}
+
+// readBase is the base the node v holds for setting, whose default is def,
+// as the rewrite keeps it: "" where the block writes no such key, or writes
+// it null, empty or as the default, which a first install writes no key for;
+// the base as Load keeps it where Load's own check takes it
+// (config.NormalizeEnrichBaseURL); and "", said in notKept by its line and
+// never its value, where it does not read as text or that check refuses it.
+// A refusal is the check's alone: its words, which name the value's scheme
+// and host, are not printed.
+func (e *priorEnrich) readBase(setting, def string, v *yaml.Node) string {
+	if v.Kind == 0 {
+		return ""
+	}
+	var raw *string
+	if err := v.Decode(&raw); err != nil {
+		e.notKept = append(e.notKept, fmt.Sprintf("%s (line %d): it does not read as a URL, so it is not kept", setting, v.Line))
+		e.basesLost = true
+		return ""
+	}
+	if raw == nil {
+		return ""
+	}
+	base, err := config.NormalizeEnrichBaseURL(setting, *raw)
+	if err != nil {
+		e.notKept = append(e.notKept, fmt.Sprintf("%s (line %d): it is not an absolute http(s) URL "+
+			"(http(s)://host[:port][/path]), which the bridge refuses, so it is not kept", setting, v.Line))
+		e.basesLost = true
+		return ""
+	}
+	if base == def {
+		return ""
+	}
+	return base
 }
 
 // optedOut is what a rewrite writes for a switch the config it replaces
@@ -424,10 +489,11 @@ func managedControlsSaid(d config.DeploymentConfig) string {
 
 // keepFromPrior sets on cfg what a rewrite keeps from prior that has not
 // reached it already: the TLS pair, the enrichment switches written off,
-// and a loopback install's custom endpoints on a loopback rewrite. The data
-// dir, the roots and the name reach cfg through baseConfig: initCmd decides
-// the first two before the preflight, which uses the data dir, and the name
-// at its prompt. It reports whether it kept the endpoints, for printKept.
+// the enrich bases Load takes that are not the default, and a loopback
+// install's custom endpoints on a loopback rewrite. The data dir, the roots
+// and the name reach cfg through baseConfig: initCmd decides the first two
+// before the preflight, which uses the data dir, and the name at its prompt.
+// It reports whether it kept the endpoints, for printKept.
 func keepFromPrior(cfg *config.Config, prior *priorInstallFile) (endpointsKept bool) {
 	if prior == nil {
 		return false
@@ -435,6 +501,8 @@ func keepFromPrior(cfg *config.Config, prior *priorInstallFile) (endpointsKept b
 	cfg.TLSCertPath, cfg.TLSKeyPath = prior.TLSCertPath, prior.TLSKeyPath
 	cfg.Enrich.Enabled = optedOut(prior.Enrich.Enabled)
 	cfg.Enrich.DeezerEnabled = optedOut(prior.Enrich.DeezerEnabled)
+	cfg.Enrich.MusicBrainzBaseURL = prior.Enrich.MusicBrainzBaseURL
+	cfg.Enrich.CoverArtBaseURL = prior.Enrich.CoverArtBaseURL
 	if cfg.IsPublic() || !prior.loopback() || len(prior.CustomEndpoints) == 0 {
 		return false
 	}
@@ -604,10 +672,18 @@ func printKept(w io.Writer, cfg *config.Config, initDataDir string, rootsKept, n
 	if cfg.Enrich.DeezerEnabled != nil {
 		add("enrich.deezerEnabled", strconv.FormatBool(*cfg.Enrich.DeezerEnabled))
 	}
+	// Nor an enrich base, so one in cfg was kept (readBase), shown without
+	// what a credential can ride in (keptBaseShown).
+	if cfg.Enrich.MusicBrainzBaseURL != "" {
+		add("enrich.musicbrainzBaseURL", keptBaseShown(cfg.Enrich.MusicBrainzBaseURL))
+	}
+	if cfg.Enrich.CoverArtBaseURL != "" {
+		add("enrich.coverArtBaseURL", keptBaseShown(cfg.Enrich.CoverArtBaseURL))
+	}
 	if len(lines) == 0 {
 		return
 	}
-	// Sixteen columns, or the longest key's (enrich.deezerEnabled is 20).
+	// Sixteen columns, or the longest key's (enrich.musicbrainzBaseURL is 25).
 	width := 16
 	for _, l := range lines {
 		width = max(width, len(l[0]))
@@ -969,16 +1045,38 @@ func warnOutputNotKept(w io.Writer, notKept []string) {
 	fmt.Fprintln(w, "the config did not load with them either. Set them again in bridge.yaml if you want them.")
 }
 
+// keptBaseShown is a kept enrich base as printKept shows it: as kept where
+// it carries no user information, query or fragment, and "set (not shown)"
+// where it carries any, since a mirror's credential can ride in each (a
+// password, a token written as the user name, an API key in the query), and
+// what the run prints holds no credential (backlog B54, B69).
+func keptBaseShown(base string) string {
+	u, err := url.Parse(base)
+	if err != nil || u.User != nil || strings.ContainsAny(base, "?#") {
+		return "set (not shown)"
+	}
+	return base
+}
+
 // warnEnrichNotKept names, once the rewrite is saved, the enrichment
-// switches it could not keep (priorEnrich), so none is dropped without a
-// word: each is on in the config the run wrote.
-func warnEnrichNotKept(w io.Writer, notKept []string) {
-	if len(notKept) == 0 {
+// settings it could not keep (priorEnrich), so none is dropped without a
+// word, and says what each kind costs in the config the run wrote: a switch
+// is on there, and the default is used in a base's place.
+func warnEnrichNotKept(w io.Writer, e priorEnrich) {
+	if len(e.notKept) == 0 {
 		return
 	}
-	fmt.Fprintln(w, "warning: enrichment switches in the config this run replaced do not read, so the rewrite did not keep them:")
-	for _, s := range notKept {
+	fmt.Fprintln(w, "warning: enrichment settings in the config this run replaced do not read, or the bridge refuses them, "+
+		"so the rewrite did not keep them:")
+	for _, s := range e.notKept {
 		fmt.Fprintf(w, "  %s\n", s)
 	}
-	fmt.Fprintln(w, "the config did not load with them either, and each is on now: set it again in bridge.yaml to turn it off.")
+	fmt.Fprintln(w, "the config did not load with them either.")
+	if e.switchesLost {
+		fmt.Fprintln(w, "a switch not kept is on now: set it again in bridge.yaml to turn it off.")
+	}
+	if e.basesLost {
+		fmt.Fprintln(w, "for a base URL not kept, the default is used now: set it again in bridge.yaml, "+
+			"as an absolute http(s) URL, to use your mirror.")
+	}
 }
