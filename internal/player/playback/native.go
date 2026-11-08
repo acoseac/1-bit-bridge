@@ -445,7 +445,9 @@ func (b *Backend) EscalateNative(r engine.ReleaseRequest) {
 // prepared converted occurrence is dropped with the native ones, and a PCM
 // sink holding a converted occurrence's frames that it has not played is
 // dropped at once, as a native sink is released, the session faulting; a PCM
-// sink holds no such frames while it plays PCM alone, and plays on.
+// sink holds no such frames while it plays PCM alone, and plays on. The fault
+// is the session's one: a fault there already, a reconciliation's own record
+// of this revocation among them (B728 B9 round 6), is never replaced.
 func (b *Backend) Revoke(r engine.RevokeInput) {
 	s := b.known(r.Session)
 	if s == nil {

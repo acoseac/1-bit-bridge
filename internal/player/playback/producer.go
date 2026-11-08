@@ -613,15 +613,18 @@ func (s *session) transition(o *occ) bool {
 			// round 4, point 1). A release, which the activation's fence answers
 			// before the session's life has ended, ends the session, no fault,
 			// beside a drop too (round 3). A revocation of the session's DSD
-			// keeps its fault, which Backend.Revoke records while the sink is
-			// the session's, so the session ends with it however the failure is
-			// judged; its sink and decoder are left to the teardown. An
-			// occurrence dropped or handed off again whose activation answered
-			// that drop's own fence, the backend's (errReplanned) or its sink's
-			// (alsapcm.ErrActivationFenced: the drop, dropLocked, or the
-			// hand-off, reconcileDSD, revoked the sink, at its admission or in its
-			// prefill), is taken back from the sink with none of its content
-			// written, and the session goes on; the take-back's close waits for
+			// keeps its fault, so the session ends with it however the failure is
+			// judged: Backend.Revoke records it while a sink is open, and a
+			// revocation of o, claimed, is recorded in the reconciliation's own
+			// step before o is marked stale (round 6); once Revoke has run, the
+			// sink and decoder are left to the teardown. An occurrence dropped or
+			// handed off again, or revoked before Revoke ran, whose activation
+			// answered that drop's own fence, the backend's (errReplanned) or its
+			// sink's (alsapcm.ErrActivationFenced: the drop, dropLocked, or the
+			// reconciliation, reconcileDSD, revoked the sink, at its admission or in
+			// its prefill), is taken back from the sink with none of its content
+			// written, and the session goes on, or, revoked, stops at the next
+			// step on the fault already recorded; the take-back's close waits for
 			// the sink's end, and a release the sink cannot confirm is the
 			// session's fault (closeOutput), so nothing follows a node whose
 			// close failed (round 5). Any other failure, the device's refusal

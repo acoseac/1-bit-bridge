@@ -89,7 +89,10 @@ type occ struct {
 	// that plays its rate otherwise (the producer's transition, a resume
 	// between transports) to the end of its sink's activation, or of an open
 	// that failed (B728 B9 round 2, point 1): a write's classification counts
-	// it as reaching its sink (judgeDSDLocked).
+	// it as reaching its sink (judgeDSDLocked). A session's first occurrence
+	// is claimed in its Start from its sink's adoption to the end of its
+	// activation; with its output adopted, a claimed occurrence's revocation
+	// records its fault in the reconciliation's step (reconcileDSD, round 6).
 	claimed bool
 	conversion
 	reservation *engine.OccurrenceReservation

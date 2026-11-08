@@ -833,7 +833,15 @@ func (s *session) judgeDSDLocked(o *occ, next *dsdSet, replans bool) dsdJudgemen
 // so it is admitted under next as any hand-off is, a session's first
 // occurrence and one a session being released holds excepted, which are
 // revoked; one to revoke
-// stops the session's DSD at once (Revoke). An occurrence whose sink has
+// stops the session's DSD at once (Revoke). A revocation of an occurrence
+// whose own sink's activation is under way (claimed, its output adopted: a
+// successor's in the producer's transition, a session's first occurrence's in
+// its Start) records its fault on the session in this step, before anything is
+// marked stale, for the reason Revoke is given, and its native sink is fenced
+// as a re-plan's is (B728 B9 round 6): the activation then answers errReplanned
+// or the sink's own fence, and a take-back of the occurrence, or its sink's
+// close, can no longer come before the fault, which Revoke, finding the
+// session's fault there, does not record again. An occurrence whose sink has
 // played everything it was given (drained) or is closed sounds no more, and
 // nothing of it can reach the DAC again, so no change of the set can make it
 // unsafe: it is not judged, which would revoke the session's DSD and with it
@@ -852,43 +860,66 @@ func (s *session) reconcileDSD(next *dsdSet) {
 	var replan []engine.OccurrenceID
 	s.mu.Lock()
 	re, replans := s.ev.(engine.ReplanEvents)
+	js := make([]dsdJudgement, len(s.chain))
 	noReplan := ""
-	for _, o := range s.chain {
+	for i, o := range s.chain {
 		j := s.judgeDSDLocked(o, next, replans)
+		js[i] = j
 		switch {
-		case j.keep:
-			o.admitted = next
+		case j.revoke == "":
 		case j.stale:
-			o.stale = true
-			if j.revoke == "" && o.claimed && o.out != nil && o.out.native != nil {
-				// Its own sink's activation is under way and the engine hands it
-				// off again (B728 B9 round 4): the sink is revoked, as a drop
-				// revokes it (dropLocked), so the activation answers the sink's own
-				// fence, at its admission or in its prefill, and the sink is taken
-				// back with none of the occurrence written; its replacement opens
-				// one of its own. Where the engine hands nothing off again the
-				// session's DSD is revoked instead, and its sinks are Revoke's to
-				// stop, after the fault it records (round 5): stopped here first,
-				// the sink taken back could be closed before Revoke ran, which then
-				// found no sink to stop and recorded no fault.
-				o.out.native.Revoke()
-				o.out.drained = true
-			}
-			if j.revoke != "" {
-				noReplan = j.revoke
-				continue
-			}
-			replan = append(replan, o.id)
-		case j.revoke != "":
+			noReplan = j.revoke
+		default:
 			revoke = append(revoke, j.revoke)
+		}
+	}
+	if noReplan != "" {
+		revoke = append(revoke, noReplan)
+	}
+	// What an activation under way does is decided before anything is marked
+	// stale (B728 B9 round 6). An occurrence whose own sink's activation is
+	// under way (claimed, the output adopted) and whose DSD is revoked records
+	// the revocation's fault first, the one Revoke is given (revoke[0]), unless
+	// the session has a fault already: the activation's check finds it stale and
+	// answers errReplanned, or its sink's own fence, and its take-back closes
+	// the sink, either of which could come before Revoke, which records its
+	// fault only while a sink is open. A session being released records none:
+	// its release ends it.
+	activating := func(o *occ, j dsdJudgement) bool {
+		return (j.stale || j.revoke != "") && !s.releasing && o.claimed && o.out != nil
+	}
+	for i, o := range s.chain {
+		if j := js[i]; j.revoke != "" && activating(o, j) && s.fault == nil {
+			s.fault = &engine.Fault{Reason: "native_revoked", Detail: revoke[0]}
+		}
+	}
+	for i, o := range s.chain {
+		j := js[i]
+		if j.keep {
+			o.admitted = next
+			continue
+		}
+		if j.stale {
+			o.stale = true
+		}
+		if activating(o, j) && o.out.native != nil {
+			// Its own sink's activation is under way (B728 B9 round 4): the sink
+			// is revoked, as a drop revokes it (dropLocked), so the activation
+			// answers the sink's own fence, at its admission or in its prefill,
+			// and the sink is taken back with none of the occurrence written; a
+			// re-plan's replacement opens one of its own. A revocation's fault is
+			// already the session's (round 6): left to Revoke, the sink wrote its
+			// prefill at the rate next takes away until Revoke stopped it (round 5).
+			o.out.native.Revoke()
+			o.out.drained = true
+		}
+		if j.stale && j.revoke == "" {
+			replan = append(replan, o.id)
 		}
 	}
 	s.mu.Unlock()
 	for _, id := range replan {
 		re.Replan(s.id, id, "its DSD plan left the effective set")
-	}
-	if noReplan != "" {
-		revoke = append(revoke, noReplan)
 	}
 	if len(revoke) > 0 {
 		s.b.dsdLog().Warn("player: the effective DSD set no longer plays what this session holds: its DSD stops", "session", uint64(s.id), "generation", next.gen, "why", revoke[0])

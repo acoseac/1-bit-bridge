@@ -592,9 +592,22 @@ func (s *session) start(ctx context.Context, req engine.StartRequest) (err error
 	s.cur = out
 	s.currentNative = out.native != nil
 	first.out, first.start, first.transport = out, 0, out.transport
+	// Its own sink's activation is under way (claimed) until it answers, as a
+	// successor's is in the producer's transition: a reconciliation that
+	// revokes the session's DSD meanwhile records its fault and fences the sink
+	// in its own step (B728 B9 round 6), and the Start's failure then says so.
+	first.claimed = true
 	s.writing = first
 	s.mu.Unlock()
-	if err := s.activateOutput(cctx, first, out); err != nil {
+	err = s.activateOutput(cctx, first, out)
+	s.mu.Lock()
+	first.claimed = false
+	f := s.fault
+	s.mu.Unlock()
+	if err != nil {
+		if f != nil && f.Reason == "native_revoked" {
+			return fmt.Errorf("player backend: the session's DSD was revoked as its first occurrence's sink activated (%s: %s): %w", f.Reason, f.Detail, err)
+		}
 		return err
 	}
 	s.mu.Lock()
