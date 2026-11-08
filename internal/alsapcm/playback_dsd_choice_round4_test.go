@@ -150,16 +150,16 @@ func TestASuccessorDroppedAtItsSinksAdmissionIsTakenBackUnwritten(t *testing.T) 
 	})
 }
 
-// TestASuccessorDroppedWhileItsSinkWritesItsPrefillIsTakenBack (B728 B9
-// round 4, point 1): a native activation writes the run's prefill, the DSD
-// silence the profile gives (up to 5 s), before it answers, as fast as the DAC
-// plays it, so a successor whose entry is deleted then has its sink revoked
-// mid-prefill: the activation answers its own fence, the prefill cut short,
-// and b is taken back with none of its content written, its node given that
-// silence alone, its decoder closed, and the session goes on to c. a is PCM,
-// which has no prefill, so its start answers with the DAC held.
-func TestASuccessorDroppedWhileItsSinkWritesItsPrefillIsTakenBack(t *testing.T) {
-	w := newWriteSeams()
+// prefillRig is a rig, its seams w's, playing a (PCM, which has no prefill,
+// so its start answers with the DAC held), then b (DSD128) and c (DSD64)
+// natively under a profile whose prefill is a second, past the hardware
+// buffer, b's activation let go once its sink was adopted, the DAC held. With
+// park, the first write of b's prefill is held inside the kernel, and the
+// function that lets it go is answered; without, the prefill has filled the
+// buffer, the stream has started and the writer waits on the DAC for room. It
+// answers the entries and b's occurrence too.
+func prefillRig(t *testing.T, w *writeSeams, park bool) (*dsdRig, []uint32, engine.OccurrenceID, func()) {
+	t.Helper()
 	d := newDSDRigWith(t, playbacktest.ChoiceState(dsdstate.ModeNative), func(p *playback.DSDPolicy) {
 		p.Profiles = playbacktest.KnownProfiles(&dacprofile.Timing{DSDPrefillMs: 1000})
 	}, func(o *rigOptions) { o.seams = w.seams(nil) })
@@ -173,17 +173,36 @@ func TestASuccessorDroppedWhileItsSinkWritesItsPrefillIsTakenBack(t *testing.T) 
 	d.k.Free()
 	awaitHeld(t, "b's activation, its sink adopted", act.in)
 	d.k.Hold()
+	if !park {
+		act.letGo()
+		d.k.Await(t, "b's prefill filling its node's buffer, the writer waiting on the DAC", func(v alsapcm.KernelView) bool { return v.Opens == 2 && runningAndWaiting(v) })
+		return d, ids, ob, func() {}
+	}
+	parked, letWrite := d.k.ParkNextWrite()
+	t.Cleanup(letWrite)
 	act.letGo()
-	// A second's prefill at DSD128 is past the hardware buffer: the stream
-	// starts once the buffer is full, and the writer waits on the DAC for room.
-	d.k.Await(t, "b's prefill filling its node's buffer, the writer waiting on the DAC", func(v alsapcm.KernelView) bool { return v.Opens == 2 && runningAndWaiting(v) })
+	awaitHeld(t, "the first write of b's prefill, held inside the kernel", parked)
+	return d, ids, ob, letWrite
+}
+
+// silence reports whether b holds DSD silence (0x69) alone, and some.
+func silence(b []byte) bool { return len(b) > 0 && bytes.Equal(b, bytes.Repeat([]byte{0x69}, len(b))) }
+
+// TestASuccessorDroppedWhileItsSinkWritesItsPrefillIsTakenBack (B728 B9
+// round 4, point 1): a native activation writes the run's prefill, the DSD
+// silence the profile gives (up to 5 s), before it answers, as fast as the DAC
+// plays it, so a successor whose entry is deleted then has its sink revoked
+// mid-prefill: the activation answers its own fence, the prefill cut short,
+// and b is taken back with none of its content written, its node given that
+// silence alone, its decoder closed, and the session goes on to c.
+func TestASuccessorDroppedWhileItsSinkWritesItsPrefillIsTakenBack(t *testing.T) {
+	w := newWriteSeams()
+	d, ids, ob, _ := prefillRig(t, w, false)
 	if err := d.eng.Delete(bg, ids[1]); err != nil {
 		t.Fatalf("deleting b's entry: %v", err)
 	}
 	d.replaced(ob, "c handed off in b's place")
-	wentOnGiven(t, d, ids, "its prefill's DSD silence alone", func(b []byte) bool {
-		return len(b) > 0 && bytes.Equal(b, bytes.Repeat([]byte{0x69}, len(b)))
-	})
+	wentOnGiven(t, d, ids, "its prefill's DSD silence alone", silence)
 }
 
 // droppedAtAdmission is heldAdmission with b's entry deleted and c handed off
@@ -203,9 +222,11 @@ func droppedAtAdmission(t *testing.T, w *writeSeams) (*dsdRig, engine.Occurrence
 // point 1): an activation that fails while its successor is dropped is taken
 // back only where its failure is the drop's own: a release in the admission
 // ends the session there, the admission and the activation refused for it,
-// nothing opened for c and no fault; a revocation of the session's DSD keeps
-// its fault, c never activated; and the device's own refusal of the node at
-// the admission is the fault it was, the session going no further.
+// nothing opened for c and no fault; so does a release while b's prefill is
+// written, b dropped beside it, where the activation answers the sink's own
+// fence for both and the release comes first; a revocation of the session's
+// DSD keeps its fault, c never activated; and the device's own refusal of the
+// node at the admission is the fault it was, the session going no further.
 func TestAnActivationsFailureBesideADropIsJudgedByItsCause(t *testing.T) {
 	t.Run("a release", func(t *testing.T) {
 		w := newWriteSeams()
@@ -243,6 +264,46 @@ func TestAnActivationsFailureBesideADropIsJudgedByItsCause(t *testing.T) {
 		}
 		if w.activatedOf(oc) {
 			t.Errorf("c's activation began in a session being released")
+		}
+	})
+	t.Run("a release while b's prefill is written, b dropped beside it", func(t *testing.T) {
+		w := newWriteSeams()
+		d, ids, ob, letWrite := prefillRig(t, w, true)
+		if err := d.eng.Delete(bg, ids[1]); err != nil {
+			t.Fatalf("deleting b's entry: %v", err)
+		}
+		d.replaced(ob, "c handed off in b's place")
+		rel := w.holdReleasing(t)
+		stopped := make(chan error, 1)
+		go func() { stopped <- d.eng.Stop(bg) }()
+		awaitHeld(t, "the session's release", rel.in)
+		// b dropped and the session released, its life not ended yet (its
+		// release is held at the Releasing seam): the prefill's write the
+		// kernel held returns, and the activation answers the sink's own fence,
+		// which the drop and the release both revoked.
+		letWrite()
+		waitOn(t, "a step refused for the release", d.rec.ch, func() bool { return len(d.rec.fencedSteps()) > 0 })
+		rel.letGo()
+		select {
+		case err := <-stopped:
+			if err != nil {
+				t.Fatalf("the stop: %v", err)
+			}
+		case <-time.After(alsapcm.Watchdog()):
+			alsapcm.LogGoroutines(t)
+			t.Fatalf("the stop was not answered within %v", alsapcm.Watchdog())
+		}
+		if got := d.rec.fencedSteps(); !slices.Equal(got, []string{"activate"}) {
+			t.Errorf("the steps refused for the release: %q, want b's activation's alone, nothing opened for c", got)
+		}
+		if v := d.k.View(); v.Opens != 2 || v.Open || !silence(d.k.Given()[v.OpenAt[1]:]) {
+			t.Errorf("after the release: %d opens, open %v; want a's and b's opens alone, every node closed, b's node given its prefill's silence alone", v.Opens, v.Open)
+		}
+		if !d.files.firstClosed("b") {
+			t.Errorf("b's decoder and content are open once the release was acknowledged")
+		}
+		if s := d.eng.Snapshot(); len(s.Faults()) != 0 || count(d.rec.events(), "fault", 0) != 0 {
+			t.Errorf("the release faulted: %+v; events %s", s.Faults(), kinds(d.rec.events()))
 		}
 	})
 	t.Run("a revocation of the session's DSD", func(t *testing.T) {
