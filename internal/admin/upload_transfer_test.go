@@ -126,6 +126,7 @@ globalThis.document = {
 let uploadState = null;
 let resumableSessions = [];
 let uploadAwaitingScan = false;
+const resumableDiscarding = new Set();
 const shown = () => ({
   reviewHidden: pageEls.get("upload-review").hidden,
   error: pageEls.get("upload-error").hidden ? "" : pageEls.get("upload-error").textContent,
@@ -271,7 +272,7 @@ func TestTheConsoleSettlesAFailedTransferBeforeItOffersItsRetry(t *testing.T) {
 
 	src := readConsoleJS(t, "static/app.js")
 	prelude := extractJSConst(t, src, "API")
-	for _, c := range []string{"const BYTE_UNITS = ", "const UPLOAD_PARALLEL_FILES = ", "const UPLOAD_DIGEST_RETRIES = ", "const UPLOAD_JUNK_NAMES = "} {
+	for _, c := range []string{"const BYTE_UNITS = ", "const UPLOAD_PARALLEL_FILES = ", "const UPLOAD_DIGEST_RETRIES = ", "const UPLOAD_JUNK_NAMES = ", "const resumableReads = "} {
 		prelude += jsStatement(t, src, c)
 	}
 	script := withReachedFunctions(t, prelude+uploadOverlapRun, src,

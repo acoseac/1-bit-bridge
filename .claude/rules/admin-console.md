@@ -429,9 +429,10 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   offered no Try again), and a transfer that fails answers only once every
   worker has settled, its other workers stopped at their next chunk
   (`transferAll`), so Try again never runs beside an old worker; a worker's
-  failure no longer sets `uploadState.aborted`, the operator's Stop, which the
-  retry cleared and an old worker's late failure had turned into a stop of the
-  retry. The first upload or restore into a fresh, empty root on a healthy
+  failure no longer sets the operator's Stop (then `uploadState.aborted`, a
+  run's own flag since B797, the next bullet), which the retry cleared and an
+  old worker's late failure had turned into a stop of the retry. The first
+  upload or restore into a fresh, empty root on a healthy
   disk, which the index holds nothing of, is never refused; a configured root
   whose path is not there at all, the index holding none of its rows, takes
   its first upload, which makes its folder (round 2; a public serve starts
@@ -465,6 +466,105 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   `TestAPublicBridgesFirstUploadIntoARootNotMadeYetMakesIt`,
   `TestAPublicBridgeRefusesAnUploadIntoAGoneRootTheIndexHoldsRowsUnder` and
   `TestALoopbackServeRefusesARootWhosePathIsNotThere` pin it.
+
+- **One upload owns the upload page at a time, from before its first await**
+  (2026-11-08, backlog B797). A run, Upload's (a new upload or the resume of
+  an interrupted one) or Try again's, takes the page, its files and its
+  session in `beginUploadRun`, before its first await, and works on what it
+  took (`run.picked`, `run.session`, `run.state`), never on `uploadState`,
+  which a later pick replaces: Try again read its session before it read the
+  files to send, and a batch picked meanwhile with the same path and size and
+  other bytes was what the old session was then sent, a splice no chunk digest
+  sees and no whole-file digest is declared to catch. After every await a run
+  asks whether it may go on (`uploadCheckpoint`), and right before each
+  request whether it may still send: each chunk after its read and hash, a
+  digest mismatch's re-send included, and its session's create; a chunk's
+  request asks too whether its transfer has failed (`failed`, round 2): a
+  worker reading or hashing its chunk when a sibling's chunk failed sends
+  nothing more. A commit already asked for may land; its report is said
+  only where the run still
+  owns the page (`uploadOwns`), and its catch and finally go through
+  `showUploadRunEnd` and `endUploadRun`, which ask first. Refused, not
+  superseded, since a superseded run would leave its session with no control
+  on the page: while a run owns it, both pickers, Upload, Try again and
+  Discard it are disabled (`setUploadBusy`, the pickers' labels dimmed),
+  `stageFiles` refuses, the drop target's handler refuses a drop (a div no
+  disabled state stops), and the note in the drop zone (`upload-busy`) says
+  why. A dropped folder is staged only where the page holds the same upload,
+  with the same count of runs (`runs`, counted in `beginUploadRun`), as when
+  its reading began (round 2): a run begun since, under way or ended (its
+  report, or the Try again it offers, the page's now, since an ended run
+  leaves its upload in place), a pick, Cancel, a commit's report and a
+  navigation each refuse it. Stop is offered from Try again's start, and a
+  stop puts its session on the page's list of interrupted uploads at once,
+  at the list's end so the banner's session, the one Discard it takes, stays
+  the first, then reads the list back (`showUploadStopped`): choosing the
+  same files carries the session on, as the stop's words say, even before
+  that read answers (round 2: the controls came back first, and a pick in
+  between started over in a second session). That list is the console's,
+  kept across a navigation, and has a generation (`resumableReads`, round
+  3): the page changes the list itself where the server's answer has
+  changed before a read could say so, Stop putting its session on it (in
+  place of the copy the list holds already, if any) and taking off, once
+  answered, a commit's session whatever its files' outcomes and whether or
+  not the run still owns the page, Discard it's, and the one the pre-flight
+  deleted; each change advances the generation and draws the banner again
+  from the list's first session (`changeResumable`, `forgetResumable`,
+  `renderResumable`). A read asked under an older generation, or older
+  than one the list took, or one that fails, changes nothing; a read asked
+  under the current generation is the server's word and replaces the list,
+  a session deleted elsewhere going with it; a page draws the list as it
+  stands before its first read (`wireUpload`, round 4: a boosted navigation
+  keeps the list while the new page's banner starts hidden, so a failed
+  first read left the list holding a session the banner never showed, and
+  Discard it out of reach); a session Discard it is deleting is passed over
+  by both resume matches until its delete answers (`resumableDiscarding`,
+  round 5: the same files chosen meanwhile resumed the session being
+  deleted), and a refused delete gives it back; while it is pending a second
+  Discard it asks nothing, the banner says the upload is being discarded,
+  and Try again refuses that session and goes once it is deleted (round 6);
+  and a stale read that finds no
+  read asked since the change asks one (a commit landing after its page was
+  left changes the list and asks none). A session's offsets follow its
+  chunks' answers (`transferAll`), so a stopped session's banner says what
+  the server holds. Before round 3 the page-load read, answered before
+  Stop's session existed and delivered after Stop, took the session off
+  the list, a failed read emptied it, and the same files chosen again
+  started over in a second session; and a read answered before a commit
+  listed the committed session again. Cancel while a run prepares
+  stops it and clears the page at once, a session the server made meanwhile
+  left an interrupted upload; a
+  navigation (wireUpload's abort) stops the run and clears the page's upload,
+  and the library root's read, a read of the list and what Discard it says
+  touch only the page they were asked on, while a change of the list draws
+  the banner of the page shown. **Don't read `uploadState` in a
+  run's chain, take a run's files or session after its first await, touch the
+  page or the state after an await without the run's ask, make a request
+  without `uploadCheckpoint` right before it, send a chunk without asking
+  its transfer's `failed` right before it, leave a picker, Upload, Try
+  again, Discard it or the drop target live while a run owns the page,
+  stage a dropped folder whose reading saw a run begin or the page's upload
+  change, give a stop's controls back before its session is on the page's
+  list, let a read of the list asked before the page's own change of it,
+  or one that fails, change it, merge a read into the list by session id
+  (a read held across a commit lists the committed session again), leave
+  a session the server no longer holds on the list until a read, draw the
+  banner from anything but the list's first session, supersede a running
+  upload with a pick, or let a run that lost the page speak or give back
+  controls.** `TestAnUploadRunOwnsThePageFromItsFirstAwait`,
+  `TestAnUploadRunSendsNothingOnceItMayNotGoOn`,
+  `TestTheUploadPageRefusesAnotherUploadWhileARunOwnsIt` and
+  `TestTheListOfInterruptedUploadsTakesNoReadOlderThanThePagesOwnChange`
+  pin the shape;
+  `TestARetrySendsOnlyTheFilesItBeganWith`,
+  `TestASiblingSendsNothingOnceAnotherWorkersChunkFailed`,
+  `TestStopAndCancelEndARunWhereverItIs`,
+  `TestNoContinuationTouchesAPageItNoLongerOwns`,
+  `TestTheResumePathIsRefusedWhileARetryRuns`,
+  `TestAnOrdinaryUploadRetryResumeAndStopAreUnchanged` and
+  `TestALateOrFailedReadOfTheListKeepsWhatThePageChanged` run the page under
+  node, where node is installed, through its wired events, against the
+  console's real handlers.
 
 - **A CSS grid with no `grid-template-columns` sizes its track to the WIDEST
   item's max-content, and no Go guard can see the result.** `.deleted-list`

@@ -3221,6 +3221,12 @@ label.checkbox.tray-switch {
   flex-wrap: wrap;
   margin-top: 0.75rem;
 }
+/* A picker refused while an upload owns the page (app.js setUploadBusy) looks
+   it, as a disabled .btn does: the label is what reads as the control. */
+.upload-pick label:has(input:disabled) {
+  opacity: 0.5;
+  cursor: default;
+}
 .upload-preview {
   list-style: none;
   padding: 0.5rem 0.75rem;
