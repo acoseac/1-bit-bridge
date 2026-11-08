@@ -86295,3 +86295,121 @@ bytes, build-ci-tests.md 29,918; the worst load 67.3%); `make docs-check` and
 the qualification check clean; `git status` clean after. The node tests,
 these five and the console's others, skip in every run here: node is not
 installed on this host.
+
+## 2026-11-08 — B797 round 2: Stop's session, a sibling's send, a drop's read across a whole run
+
+Round 2 of backlog B797 on `fix/b797-upload-ownership`, PR #1440, after the
+orchestrator applied round 1's rules patch (1365731c); worker b797 on legion0
+(Ubuntu 26.04, linux/amd64, go1.27.3, `GOTOOLCHAIN=local`, `GOPROXY=off`).
+Two reviews (Codex's, which probed the page under node with held answers, and
+Claude's) found four points; each holds at 1365731c by a trace of the code,
+and the Codex points by its probes too. Commits: the red tests a200f1a5, the
+fix 6fa4bafd, this record, and the gates' results added to it after. The rule
+goes through `rules-b797-r2.patch` (admin-console.md's B797 bullet).
+
+### 1. Stop could restart into a second session
+
+`showUploadStopped` asked for the page's list of interrupted uploads again,
+not awaited, and the run's end gave the controls back at once: the same files
+chosen again before that read answered found no session on the page's list
+(one made since the page's last read is in none) and started over in a second
+session, every chunk sent again. Codex's held-answer probe made one. The
+stopped session now goes on the page's list at once, before the read, at the
+list's end so the session the banner shows (the one Discard it takes) stays
+the first; the read then lists it with its offsets and the banner shows it.
+Holding the controls until the read answered was the other way the brief
+offered, and was not taken: a slow read would leave a stopped upload's page
+saying an upload is running. Residual: a read that fails empties the list
+(`refreshResumable`'s catch), and two reads in flight answer in whatever order
+they land; both predate B797.
+
+### 2. A sibling sent after another worker's refusal
+
+A worker checks the transfer's failure (`stopped()`) at the head of its loop,
+then awaits its chunk's read and its digest; the check right before the
+request asked whether the run was stopped or had lost the page, never whether
+the transfer had failed. A worker reading or hashing its chunk when a
+sibling's chunk failed sent its chunk anyway (Codex's probe: B's read held
+until A failed, B's PUT made). It predates B797, on main too. transferAll's
+`failed()` is handed to `putUploadChunkVerified` and `putUploadChunk`, and
+asked right after `uploadCheckpoint`; a worker stopped there ends as stopped,
+the transfer answering the first failure once every worker has settled, as
+before.
+
+### 3. A dropped folder whose reading outlived a whole run
+
+The check after a dropped folder's read refused only a run still under way:
+a run that began and ended while the folder was read (refused with Try again,
+or committed) left no run on the page, and the folder was staged over its Try
+again (`stageFiles` hides it, the session gone from the page) or under its
+report. A staged upload now counts its runs (`runs`, from 0 in `stageFiles`,
+counted in `beginUploadRun`), and the folder is staged only where the page
+holds the same upload, with the same count, as when its reading began: the
+upload object alone could not tell, since an ended run leaves its upload in
+place. A pick, Cancel, a commit's report and a navigation during the read
+refuse it too. The refusal says nothing: the run's report or Try again stays,
+and dropping the folder again stages it.
+
+### 4. The runtime Stop case passed without the check before the request
+
+The node case "Stop during a transfer" stops while a chunk's request is held
+at the server, already sent, so the check right before a request was never
+what stopped it. `stop-before-send` holds the second chunk's read at the page
+(a file whose read of a given range waits for the script), stops there, and
+requires that chunk unsent.
+
+### The tests
+
+Red at a200f1a5, green at 6fa4bafd: the structural pins
+(`TestAnUploadRunSendsNothingOnceItMayNotGoOn`: `failed()` asked between the
+hash and the request, handed through; `TestTheUploadPageRefusesAnotherUploadWhileARunOwnsIt`:
+the drop's upload and run count compared across the read, `runs` counted, the
+stopped session on the list before the read, at its end). The node cases,
+skipped here (node is not installed on legion0): `stop-repick` in
+`TestStopAndCancelEndARunWhereverItIs` (the list's read after the stop held,
+the same files chosen and Upload pressed: one session, read once, sent the
+two chunks it lacked); `stop-before-send` there; the new
+`TestASiblingSendsNothingOnceAnotherWorkersChunkFailed` (two files, B's first
+read held until A's first chunk is refused and the page has read that answer,
+which the harness's fetch reports; B's chunks are Try again's alone); and
+`drop-outlives-refusal` and `drop-outlives-success` in
+`TestNoContinuationTouchesAPageItNoLongerOwns`. By trace at a200f1a5: the
+sibling case, `stop-repick` and both drop cases red, `stop-before-send` green
+(its red is the control below); all green at 6fa4bafd. What stands in for the
+runs: `requireCarried` on the assembled script at a200f1a5 and at 6fa4bafd,
+and the scratch lexer on both and on B776's two harnesses.
+
+### Negative controls
+
+Nine, predicted by name in `.tmp/_b797/controls-r2.predictions.txt` before
+the run, on 6fa4bafd, as in round 1 (`.tmp/_b797/controls_r2.py`); the
+baseline green before and after, `git status` clean after. O2 is
+`TestAnUploadRunSendsNothingOnceItMayNotGoOn`, O3
+`TestTheUploadPageRefusesAnotherUploadWhileARunOwnsIt`; every other test of
+round 1's set, and the six node tests (skipping), as the baseline throughout.
+
+| Control | Red here | Under node (predicted, not run here) |
+|---|---|---|
+| R2-C1 the stopped session not put on the list | O3 | `stop-repick` |
+| R2-C1b put at the list's head | O3 | none |
+| R2-C1c `showUploadStopped` handed no run | O3 | every stop |
+| R2-C2 the send gate does not ask `failed()` | O2 | the sibling case |
+| R2-C2b a `failed()` never true handed down | O2 | the sibling case |
+| R2-C3 the drop does not compare the run count | O3 | `drop-outlives-refusal` |
+| R2-C3b the drop does not compare the upload | O3 | none |
+| R2-C3c `beginUploadRun` counts no run | O3 | `drop-outlives-refusal` |
+| R2-C4 the send gate's `uploadCheckpoint(run)` removed | O2 | `stop-before-send` |
+
+All nine as predicted here. R2-C4 is point 4's red: under node
+`stop-before-send` sends the second chunk with that check removed, which the
+case round 1 had could not show.
+
+### What the orchestrator runs where node is installed
+
+Red at a200f1a5 in the cases named above, green at 6fa4bafd:
+
+    go test ./internal/admin/ -count=1 -v -timeout 600s -run '^(TestARetrySendsOnlyTheFilesItBeganWith|TestASiblingSendsNothingOnceAnotherWorkersChunkFailed|TestStopAndCancelEndARunWhereverItIs|TestNoContinuationTouchesAPageItNoLongerOwns|TestTheResumePathIsRefusedWhileARetryRuns|TestAnOrdinaryUploadRetryResumeAndStopAreUnchanged)$'
+
+And R2-C4 under node: with `uploadCheckpoint(run);` taken out of
+`putUploadChunk`, `TestStopAndCancelEndARunWhereverItIs`'s "Stop while a chunk
+is read, before its request" goes red (the second chunk sent).
