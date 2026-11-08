@@ -87862,3 +87862,95 @@ changes no rules file.
 
 Not run here: macOS and Windows natively, CI's runners, and a by-hand run with
 real release builds.
+
+## 2026-11-08 — B760 round 3: the public-text sweep, finished
+
+Worker b760, legion0 (Ubuntu 26.04, linux/amd64, go1.27.3, `GOTOOLCHAIN=local`,
+`GOPROXY=off`), branch `fix/b760-probation-windows` (PR #1442) from 5b00b034
+(round 2, the orchestrator's rules commit for it and its rewording of three
+passages), on the orchestrator's round 3 brief with Codex's and Claude's
+reviews of that commit and of the brief's draft folded in. Commits: the sweep
+85452270, then this record. The rules' words go in `rules-b760-r3.patch`, made
+against the final head: B760's line in `config-lifecycle.md` and its verbatim
+copy in the long form, and B660's and B760's long forms in
+`ops/History-rules-config-lifecycle.md`.
+
+### The sweep
+
+Every passage that still described a window B760 leaves open now names backlog
+B760 alone, and keeps what B760 closes. The brief's list: B660's long form on a
+slow healthy teardown, the runbook's two paragraphs (the same teardown, and the
+take-back's quoted line), two passages of this log (the same teardown, and
+round 1's control row on R4's clean stop), the docs of
+`TestACountThatFailedBeforeItPublishedLeavesItsStartUncounted` and
+`TestATakeBackWhoseWriteIsRefusedKeepsTheCount`, `carryCapabilities`' last
+sentence, and seven passages of `disarm.go` (`CountTried`'s, `CountMissed`'s
+and `Start`'s docs, `AdmitBoot`'s and `disarmUnlocked`'s, and two comments in
+`disarmHeld`), where what B760 closes stays: the start keeps its hold and
+clears its token as it returns. What the sweep found beside them, changed the
+same way: `main.go`'s take-back comment; `sayTheAdmissionsCount`'s line
+(`serve_crashed_install.go`); the docs of eight test files
+(`serve_count_writes_test.go`'s first test, `serve_count_again_test.go`'s case
+(a) and a comment, `serve_failed_starts_test.go`, `serve_not_serving_test.go`'s
+two, `serve_probation_test.go`'s confirmation test, and internal/updater's
+`probation_test.go`, `probation_b760_test.go` and `probation_r4_test.go`); five
+passages of this log (B660's test list, its swap paragraph and its token
+paragraph, round 1's R5 item, round 2's red-first paragraph); and, in the
+patch, four of B660's long form (its count, the take-back's reason, the
+swap's attributes, the start's token), B760's R5 list, and B760's line and its
+copy. 48 hunks over 17 files in all; the passages removed, each with its file,
+its lines at 5b00b034 and its old text, are kept outside the repository for
+the backlog's entry.
+
+### The operator's lines
+
+The admission's line where its count's write answered an error or its lock
+was not taken (`DisarmResult.CountMissed`, said by `sayTheAdmissionsCount`),
+and serve's where a take-back had no answer within its budget, no longer say
+what came of the count. They say what the write or the take-back answered, and
+to run `bridge doctor`, whose install-probation line says where the install
+stands: `updater: the install marker's write of the count of this start of …
+answered an error: …; run bridge doctor, whose install-probation line says
+where the install stands`, the lock's `the install marker's lock was not taken
+for the count of this start of …: …`, and `updater: this start ended cleanly,
+and the take-back of its count of the install's starts had no answer within
+10s (…); run bridge doctor, …`. The four tests that asserted the admission's
+old words and the one that asserted the take-back's ask for the new ones
+(`write of the count of this start`, `had no answer within`), and two of those
+assertions' own failure texts changed with them; no state, exit-code or
+synchronisation assertion changed. The runbook quotes the take-back's new line.
+
+### Only text moved
+
+`.tmp/_b760/r3/ast_check.py` parses every Go file that differs from 5b00b034
+both ways, with comments, positions and resolver links stripped
+(`.tmp/_b760/r3/astcmp`: `go/parser` and a reflection walk of the tree that
+dumps every node's type and every leaf's value), and compares each file's
+`//go:` directive lines as text. Of the 13 files, six are identical but for
+comments (`serve_not_serving_test.go`, `probation_b760_test.go`,
+`probation_r4_test.go`, `probation_test.go`, `swap_capability_linux.go`,
+`takeback_write_test.go`); the other seven differ in string literals alone:
+`disarm.go`'s two `CountMissed` messages, `main.go`'s take-back line (its two
+pieces), `serve_crashed_install.go`'s line, the five expectations and the two
+failure texts above. No declaration, statement, expression, identifier or
+directive differs.
+
+### Kept
+
+`PROTOCOL.md`'s probation paragraph, which the iOS app mirrors byte for byte
+(a change there needs its pair); the tests' names, and two tests' failure
+texts that pair with no changed line (test code, which the brief leaves as it
+is); the binding rules' own words ("reporting only", "don't count a start for
+not serving"); and the contracts of `EndStart` and of `SaveState`'s barrier,
+which every marker writer relies on.
+
+### Checks
+
+- go1.27.3's gofmt (`go run cmd/gofmt -l`) on the 13 Go files: clean; `go vet`
+  of internal/updater and cmd/bridge with the Makefile's tags: ok.
+- The five tests whose expectations changed, race, `-p 4`, `-timeout 30m`, the
+  Makefile's tags, TMPDIR on this checkout's disk: ok.
+- `rules-b760-r3.patch`, built by `.tmp/_b760/r3/build_rules_patch_r3.py` on a
+  copy of the tracked files (each replaced text asserted once, and the rules
+  line and its long form's copy asserted to stay verbatim twins): checked
+  below, with the gates.
