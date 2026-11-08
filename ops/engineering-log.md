@@ -87388,3 +87388,21 @@ page's first read (`wireUpload`); green, and red again with that line removed
 (the red run is the control). Cancel was checked as the review asked: it
 deletes nothing on the server, and its session stays listed until Discard it,
 so the list needs no change there.
+
+## 2026-11-08 — B797 round 5 (the orchestrator, where node runs)
+
+CodeRabbit on #1440: an Upload started while Discard it's delete is pending
+matched the session being deleted (`findResumable`), read it and sent it a
+chunk, and a 404 followed once the delete landed. Red first (the new case
+"Upload while Discard it is pending": no new session, one read and one chunk
+sent to the discarded session); fixed by a set of the sessions being
+discarded (`resumableDiscarding`), which both resume matches pass over until
+the delete answers, a refused delete giving the session back. The
+files-only match (`findFilesOnlyMatch`) needed the same, or it said
+"Starting over rather than resuming" about the session going. A second case
+pins the refusal ("Discard it refused, then the same files": the session is
+carried on). Controls, each red as predicted: the pending check dropped from
+`findResumable` (the pending case), the give-back dropped (the refused case).
+Gemini's note on `requireFilePuts`: its condition can't panic (`||`
+short-circuits before the slice), but its message sliced from a negative
+offset; clamped. internal/admin green with node present.

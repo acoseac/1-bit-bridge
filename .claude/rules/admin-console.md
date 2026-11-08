@@ -517,7 +517,10 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   stands before its first read (`wireUpload`, round 4: a boosted navigation
   keeps the list while the new page's banner starts hidden, so a failed
   first read left the list holding a session the banner never showed, and
-  Discard it out of reach); and a stale read that finds no
+  Discard it out of reach); a session Discard it is deleting is passed over
+  by both resume matches until its delete answers (`resumableDiscarding`,
+  round 5: the same files chosen meanwhile resumed the session being
+  deleted), and a refused delete gives it back; and a stale read that finds no
   read asked since the change asks one (a commit landing after its page was
   left changes the list and asks none). A session's offsets follow its
   chunks' answers (`transferAll`), so a stopped session's banner says what
