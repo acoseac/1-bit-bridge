@@ -585,9 +585,14 @@ func nativePCMCall(ctx context.Context, env outputDSDTestEnv, play func(context.
 
 // nativeTrackRelease keeps Stop/quit live while the same sink drains its bounded
 // prefix. Other keys are retained in a bounded queue for the next command loop.
+// The release it waits on takes no context a Stop ends, so its answer is the
+// sink's own outcome, confirmed or unconfirmed by the sink's budget, never a
+// Stop's cancellation, which select could take for the release's failure
+// (ErrReleaseUnconfirmed, an exit 1) when both are ready; the Stop's own arm
+// escalates to Immediate and waits for that cleanup to confirm (B765).
 func nativeTrackRelease(ctx context.Context, s nativeTestSink, keys <-chan byte, report *nativeReport) (bool, []byte, error) {
 	released := make(chan error, 1)
-	go func() { released <- s.Release(ctx, alsapcm.TrackChange) }()
+	go func() { released <- s.Release(context.Background(), alsapcm.TrackChange) }()
 	var pending []byte
 	for {
 		select {

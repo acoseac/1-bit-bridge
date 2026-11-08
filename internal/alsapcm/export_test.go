@@ -27,6 +27,7 @@ type FakeKernel struct {
 
 	mu        sync.Mutex
 	commanded func(SinkConfig, string) // OnCommand's
+	lifeEnded func()                   // ParkNextLifeEnd's, for the next OpenNativeSink
 }
 
 // NewFakeKernel is a fake node with the playback model on and the kernel's
@@ -318,7 +319,25 @@ func (tk *FakeKernel) HardwareFormats(codes ...uint32) {
 
 // OpenNativeSink is the real native sink over the same simulated kernel.
 func (tk *FakeKernel) OpenNativeSink(ctx context.Context, c DSDConfig) (*DSDSink, error) {
-	return openNativeBounded(ctx, c, nativeSeams{open: func(ep Endpoint, c Config) (*Device, error) { return openNative(tk.k, tk.k.now, ep, c) }, now: tk.k.now, at: tk.k.nativeAt})
+	tk.mu.Lock()
+	lifeEnded := tk.lifeEnded
+	tk.lifeEnded = nil
+	tk.mu.Unlock()
+	return openNativeBounded(ctx, c, nativeSeams{open: func(ep Endpoint, c Config) (*Device, error) { return openNative(tk.k, tk.k.now, ep, c) }, now: tk.k.now, at: tk.k.nativeAt, lifeEnded: lifeEnded})
+}
+
+// ParkNextLifeEnd parks the goroutine that revokes the next native sink
+// OpenNativeSink opens, once that sink's life (the open's context) has
+// ended and before it revokes the sink, until release: the moment a
+// scheduler can leave between a life's end and its revocation, in which the
+// sink's writer sees its life ended and no Immediate release begun (B765).
+func (tk *FakeKernel) ParkNextLifeEnd() (parked <-chan struct{}, release func()) {
+	entered, gate := make(chan struct{}), make(chan struct{})
+	tk.mu.Lock()
+	tk.lifeEnded = func() { close(entered); <-gate }
+	tk.mu.Unlock()
+	var once sync.Once
+	return entered, func() { once.Do(func() { close(gate) }) }
 }
 
 // ParkNextOpen blocks the real opener below negotiation until released.

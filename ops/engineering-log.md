@@ -86447,6 +86447,755 @@ the join windows rest on, or keeping two code paths for two architectures. The b
 nibble-table patch are kept outside the repository. If margin is ever needed, profile the whole
 process's unexplained points first: the converter is about half of what the Pi measured.
 
+## 2026-11-08 — B765: a Stop inside a native track change's release
+
+Worker b765, legion0, branch `fix/b765-tail-stop` from main's 98edead3. Commits: 0cd3cc95 (the
+integration tests say why an exit differs; qualificationVersion 47), d2d0fd67 (each window
+forced, red), 20b81fc7 (the fixes), ffe0f304 (the runbook's version 47), then this record. The
+rule changes through `rules-b765.patch`: one line in `player.md` and its long form in
+`History-rules-player.md`.
+
+### The failure
+
+CI's "Real-sink native harness integration" step failed run 42332814420's first attempt (B10's
+#1426 at bf0568ce, 2026-11-07): `TestNativeIntegrationNextInsideFinish/tail`, `exit=1 want=0`
+and nothing more; the second attempt passed. The test needs no device: the real `DSDSink` over
+the fake kernel, `runOutputDSDTest` on a goroutine of the test. Its tail case sends `n` while the
+sink's Finish waits, waits for the cutoff and for Finish's return, and sends `s` at once, so
+nothing showed where the release was when the Stop landed.
+
+### Making it say why
+
+`nativeReportResult` printed the report's Error only when End differed, and every run's errout
+was `io.Discard`, so an exit 1 with End `stopped` said nothing. Each run it checks now writes its
+errout to a `lockedBuffer`, and an exit it did not want prints End, Error and that buffer. At
+GOMAXPROCS 2 beside 16 busy processes, 5 of 300 tail runs then failed with `End=stopped
+Error="native release unconfirmed"`. Both suspected windows strip to that text
+(`withoutNativeCancellation` keeps ErrReleaseUnconfirmed and drops the cancellations beside it),
+so a build with a print in each window (the source restored from memory, `git status` empty
+after) ran 400 tail runs under the same load: 7 failed, all 7 in the sink's window; the harness's
+select took the release's answer with the run stopped twice, both times a confirmed nil, and both
+runs passed.
+
+### The two windows
+
+1. The sink, CI's failure. The harness's Stop cancels the run's context, which is the native
+   sink's life: `openDSDSink` takes the open's context, and the life's watcher revokes the sink,
+   Immediate, on the goroutine the life's end wakes. A scheduler can run the writer first. After
+   the cutoff (TrackChange) it then created the tail write's context with the life ended and the
+   release still TrackChange; `nativeContext` cancels a context whose sink's life has ended, so
+   `Device.Write` returned the cancellation at once, `expectedReleaseCancellation` refused it
+   (Immediate's alone are expected), and the writer recorded ErrReleaseUnconfirmed, which the
+   Stop's Immediate release then answered: exit 1. Serve's player cannot reach it: a backend
+   sink's life is a context of its own, which `closeOutput` cancels once the sink is Done.
+2. The harness. `nativeTrackRelease` waited on `Release(ctx, TrackChange)` with the run's context,
+   so a Stop made that wait answer ErrReleaseUnconfirmed with the cancellation whenever the sink
+   had not finished. With that answer and the Stop both ready, select picks at random, and the
+   release's arm returned the answer, an exit 1, without the Immediate cleanup the cancellation's
+   arm does. The harness reaches its select microseconds after the cutoff, so it takes a scheduler
+   that stops it in between: the loaded loop saw that arm taken twice in 400 runs, each time on a
+   confirmed answer.
+
+A user's Stop reaches both: Stop pressed while a navigation's tail plays, or just after the `n`.
+Both fixes are in the production path, and no test-side barrier stands in for either.
+
+### As built
+
+- `nativeContext` begins the Immediate release itself, under the sink's lock, when it sees the
+  life ended, before any write sees the context the life cancels: the cancellation is then the
+  revocation's, expected, and the watcher's revocation after it changes nothing. A device fault
+  or a failed close is still an error. A content write's or a prefill's context born after the
+  life's end is the revocation's in the same step, where the watcher made it so a moment later
+  before (the writer spun on cancelled content writes until it did).
+- `nativeTrackRelease` waits on `Release(context.Background(), TrackChange)`: its answer is the
+  sink's own outcome, confirmed, or unconfirmed by the sink's own two-second budget, and the
+  Stop's arm escalates and confirms, as before. Not taken: also checking the run's context in the
+  release's arm. With the wait on no context a Stop ends, that arm carries the sink's own outcome
+  alone, and the check would only decide which of a finished navigation and a Stop wins when both
+  land at once, in a moment no park reaches (between the goroutine's start and the select), so
+  nothing could pin it.
+- A seam, `nativeSeams.lifeEnded` (nil outside a test), runs on the life's watcher between the
+  life's end and its revocation; `FakeKernel.ParkNextLifeEnd`, in alsapcm's test export, which
+  the overlay lends cmd/bridge, parks the next native sink's watcher there.
+
+### Each window forced
+
+`TestNativeIntegrationNextInsideFinish` runs natural, cutoff, tail and drain, nothing left to the
+scheduler:
+- cutoff: the writer held in its first content write (`ParkNextWrite`) through the cutoff; the
+  Stop sent; once the life's watcher is parked before its revocation (`ParkNextLifeEnd`) and the
+  harness's Immediate release is held (`nativeReleaseHold`, the test's wrapper of the sink), the
+  writer goes on and reaches the tail write with the life ended and nothing escalated, the window
+  CI's failure needed;
+- tail: the Stop once the writer waits in the tail write (after the cutoff no content write waits,
+  and a wait whose context ended is not starved, so a starved writer is the tail write's);
+- drain: the Stop while the drain waits, as before.
+
+Every Stop holds the node's close (`ParkNextClose`) until the Stop's release reaches it, and every
+case requires the TrackChange release the harness waited on to answer with the sink's confirmed
+release. `TestNativeTailCancelledByItsEndedLifeIsNoFailure` forces the sink's window in alsapcm's
+own suite, which `make test` runs.
+
+Select picks at random among ready cases, so no park can make the old harness take the release's
+arm every time. The tests force the state that made its wrong answer possible, the release
+answering with a Stop's cancellation, and require the sink's own answer, which fails every time
+without the fix.
+
+### Red first
+
+At d2d0fd67, the tests without either fix, predicted in `.tmp/_b765/predictions-red.txt`, with
+`-count 5`: `TestNativeTailCancelledByItsEndedLifeIsNoFailure` failed 5 of 5 ("native release
+unconfirmed"); cutoff failed 5 of 5 (exit 1, End stopped, Error "native release unconfirmed", and
+the release answering "native release unconfirmed / context canceled"); tail and drain failed 5 of
+5 on the release's answer alone, exit 0; natural passed 5 of 5.
+
+### Negative controls
+
+At 20b81fc7, each an exact-once mutation predicted by name in
+`.tmp/_b765/predictions-controls.txt` before it ran, the overlay regenerated after it, the source
+restored from memory and `git status` empty after each, `-count 5`.
+
+| | mutation | red |
+|---|---|---|
+| C1 | `nativeContext` without the life's escalation | as predicted: the alsapcm test 5/5 and cutoff 5/5 (exit 1, "native release unconfirmed", the release answering with the cancelled write); natural, tail and drain green |
+| C2 | the TrackChange wait on the run's context again | as predicted: cutoff, tail and drain 5/5 on the release's answer ("native release unconfirmed / context canceled"), exit 0; natural and the alsapcm test green |
+| C3 | C1's mutation with the life's hold inert (the seam's call removed, the test's wait for it skipped) | as predicted: cutoff green 5/5; with the watcher free to revoke at the Stop the window is the hold's, not the scheduler's |
+
+### Load, as context
+
+The tail case as it stood (the Stop sent at once after Finish's return), beside 16 busy
+processes, 300 runs each from prebuilt race binaries inside the build slot: before, main's code
+with the diagnostics; after, the fixes with that tail case put back.
+
+| GOMAXPROCS | before | after |
+|---|---|---|
+| 1 | 28 of 300 exit 1 | 0 of 300 |
+| 2 | 9 of 300 exit 1 (5 of 300 in an earlier run) | 0 of 300 |
+
+Every failure before was `exit=1 want=0: End=stopped Error="native release unconfirmed"`.
+Without the busy processes, 300 runs at GOMAXPROCS 4 passed before the fix. The committed
+windows under GOMAXPROCS 2 and the same load passed 100 of 100 each (natural, cutoff, tail,
+drain).
+
+### Checked, and not a window
+
+A Stop while the native activation's admission reads the controls looked like the same class:
+the writer's fence answers "native activation fenced", not a cancellation. Forced with a scratch
+test, never committed (the third controls read held, the life's revocation held, the Stop sent,
+then the read let go), 20 runs passed: the harness waits in `DSDSink.Activate`'s select from
+before the Stop, and that select's cancellation arm revokes the sink at once, so the fence's
+error is neither the harness's answer nor recorded in the sink's result.
+Round 2 found this wrong: that arm is one goroutine of several the Stop wakes, and the scratch
+test let the writer go only once it had run. With it held, the run exits 1 (B765 round 2, below).
+
+### Qualification
+
+The dsd-test files and `internal/alsapcm/` are guarded. B9 (#1434, not merged) holds 46 on its
+branch, so this takes 47; the orchestrator reconciles at merge. The runbook's five current
+references move with it, and its record says what 47 covers. `LegacyVersion` stays 35.
+
+### Gates
+
+At ffe0f304, inside the build slot, on Go 1.27.3: `make fmt` changed nothing; `make vet` and its
+windows, darwin and linux/386 legs passed; `make docs-check` passed on the tree (player.md
+99.2 %) and on a copy with `rules-b765.patch` applied (CLAUDE.md 82.1 %, player.md 99.6 %, the
+worst load 67.1 %), where `verify_moves.py --base HEAD` passed with the line and its long form as
+the two new blocks and no citation broken; `scripts/qualification-version` passed against main's
+98edead3 (45 there, 47 at HEAD); `go test -race` passed for cmd/bridge with CI's tags and the
+native-integration overlay (1,237 s) and for alsapcm, qualification and playback; CI's two
+native-integration invocations passed, every case the job names: cmd/bridge 74 of 74, the four
+windows of `TestNativeIntegrationNextInsideFinish` among them, and playback 79 of 79; `make
+build-all` passed. The first `make test` failed in one subtest outside the player,
+`TestAMatchWhoseReQueueDidNotLandIsReQueuedByTheNextSweep/cancelled_inside_the_reset_by_a_switch-off`
+("the first sweep's re-queue landed: the case tests nothing"), the fingerprint sweep's timing
+precondition that B762's round 3 measured failing 1 of 40 at its base, 88 packages ok; alone
+under `-race` it passed 80 of 80 at HEAD and 80 of 80 on a copy of main's 98edead3, and nothing
+this change touches reaches it. `make test` run again in the slot passed, 89 packages ok (2,035
+s), its TMPDIR under `.tmp/_b765`, the Linux-only tests (ALSA, alsapcm, the durable writer, the
+identity paths) run here. alsa-abi did not run: no ABI definition or `scripts/alsa-abi` file
+changed.
+
+## 2026-11-08 — B765 round 2: the life's other windows, one read, and the harness's TrackChange context
+
+Worker b765, legion0, branch `fix/b765-tail-stop` (#1438), after round 1's rules patch was applied
+(e6baae14) and main merged in (79e6781b). Commits: 3c41b8fc (the tests, red), 70989901 (the
+fixes), 2a445bc3 (the runbook's version 47), then this record. The rule changes through
+`rules-b765-r2.patch`: round 1's line in `player.md`, reworded, and its long form in
+`History-rules-player.md`.
+
+### The reviews' points, each checked
+
+0. **A tail write or drain already waiting** (Claude's review of round 1). `beginReleaseLocked`
+   makes `releaseCtx` with `context.WithCancel(context.Background())` (`sink_dsd.go:448`); a tail
+   write's context descends from it and the drain waits on it, so the life's end cancels neither:
+   only the Immediate release, its mode set first under the same lock, or the release budget's
+   timer does. No window, so no fix and no test for it.
+1. **Between `nativeContext`'s two reads of the life** (Codex). Confirmed: the first read began no
+   release, the second cancelled the write, and a tail write so cancelled, the release still
+   TrackChange, was recorded as ErrReleaseUnconfirmed. One read decides both now.
+   `TestNativeTailWhoseLifeEndsAfterItsReadIsNoFailure` ends the life inside the tail write's read
+   (`endingLife`, a context whose armed `Err` reads the life live and ends it before returning, as
+   a Stop landing just after that read would; contract-true, since the answer was true when read),
+   the watcher held: red before, the writer then draining until the revocation after.
+2. **The activation's classification** (the brief's review). The brief's two cases do not hold as
+   it put them. A reopen's cancelled `Locate` is `held`: `paused` stays set until the reopen's
+   activation succeeds, so nothing is recorded, and the sink waits paused for its watcher (the
+   harness's DSDConfig sets no `Locate` at all). A prefill's cancellation is recorded, but as a
+   plain one (`*alsapcm.Error` with ReasonCancelled unwraps to `context.Canceled`), which the
+   harness's `withoutNativeCancellation` strips: a Stop there exits 0, red at the sink alone. The
+   same block does record what is no cancellation: the fences an ended life trips, "native
+   activation fenced" (the activation's, after its admission) and "native resume fenced after
+   status" (a resume's, after its STATUS, `paused` already cleared), whenever the writer reaches
+   the classification before every escalation of the Stop (the life's watcher, and Activate's,
+   Resume's or Finish's own cancellation arm). A Stop's run then exits 1. The writer now begins the
+   Immediate release under the sink's lock before that classification once the life has ended; a
+   terminal error is recorded before it, as ever.
+3. **The harness case passes with its context fix reverted** (Codex). Confirmed by reading: a
+   TrackChange release that ran only once the sink was Done answered nil through `waitRelease`'s
+   first check, whatever its context, so round 1's C2 was red only as the scheduler allowed.
+   `nativeReleaseHold` now hands the test the context the harness gives that release, and every
+   Stop case requires it live with the node's close still held.
+
+**Round 1's record was wrong** under "Checked, and not a window": a Stop in the activation's
+admission is a window. That scratch test let the writer go only once the harness's own escalation
+(Activate's cancellation arm) had run, so it tested the order that passes.
+`TestNativeIntegrationStopInsideActivation` holds that escalation and found exit 1.
+
+### As built
+
+- `nativeContext` reads the life once (`ended`), for the Immediate release it begins and for the
+  write's cancellation.
+- `loopNative`'s activation block begins the Immediate release under the sink's lock before its
+  terminal and held classification once the life has ended.
+- Tests in alsapcm, each with the life's watcher held (`lifeSink`, over `nativeSeams.lifeEnded`)
+  and a caller on a context the life does not end, so the writer meets the ended life before any
+  escalation: `TestNativeTailWhoseLifeEndsAfterItsReadIsNoFailure`,
+  `TestNativeActivationFencedByItsEndedLifeIsNoFailure` (the life ends in the activation's admission),
+  `TestNativeResumeFencedByItsEndedLifeIsNoFailure` (at the resume's STATUS, `parkNextStatus`),
+  `TestNativePrefillCancelledByItsEndedLifeIsNoFailure` (a prefill longer than the buffer, waiting for
+  room) and `TestNativeReopenWhoseLifeEndsInLocateReleases` (a resume after the pause's release, its
+  `Locate` waiting).
+- In the harness, `TestNativeIntegrationStopInsideActivation` (activation, prefill, resume): the
+  writer where the Stop lands (the activation's controls read held; the prefill waiting for room;
+  the resume's STATUS parked after a kernel pause), every escalation held (`ParkNextLifeEnd`, and
+  `nativeEscalationHold`, which runs the harness's Activate, Resume and Finish on a context the Stop
+  does not end and escalates only once released, as their own cancellation arms do), the node's
+  close reached while they are held. The resume case needs Finish held too: the feeder waits in it,
+  and its cancellation escalates (`cancelFinish`).
+
+### Red first
+
+At 3c41b8fc, predicted in `.tmp/_b765/predictions-r2-red.txt`, `-count 3`, alsapcm with
+`-watchdog 10s`: the two-read case 3/3 red ("native release unconfirmed"), the activation 3/3
+("native activation fenced"), the resume 3/3 ("native resume fenced after status"), the prefill
+3/3 (a plain "write: cancelled (context canceled)", its answer no ErrReleaseUnconfirmed), the
+reopen 3/3 by the watchdog (held, waiting for the watcher); round 1's tail case green. In the
+harness, activation and resume 3/3 red (exit=1, End stopped, those Errors), prefill 3/3 green
+(exit 0: the brief's red there does not hold), NextInsideFinish 3/3 green.
+
+### Negative controls
+
+At 70989901, each an exact-once mutation predicted by name in
+`.tmp/_b765/predictions-r2-controls.txt`, the overlay regenerated, the source restored from memory,
+`git status` empty after; `-count 3`.
+
+| | mutation | red |
+|---|---|---|
+| C1 | `nativeContext`'s cancel reads the life again | as predicted: the two-read case 3/3; the rest green |
+| C2 | the classification's escalation removed | as predicted: activation, resume, prefill and reopen in alsapcm 3/3 each (the reopen by the watchdog); the harness's activation and resume 3/3 (exit 1), its prefill green |
+| C3 | `nativeTrackRelease` on `Release(ctx, TrackChange)` again | as predicted: cutoff, tail and drain 3/3 each, on the context (9 of 9) and on the answer (9 of 9); natural green |
+| C4 | `nativeContext`'s escalation removed, the one read kept | as predicted: round 1's tail case 3/3 and cutoff 3/3 (exit 1); the rest green |
+| C5 | C2's mutation with `nativeEscalationHold` escalating at once, the test's wait for it skipped | predicted green 3/3; activation and prefill were, and resume went red in 1 of 3: without the hold the order is the scheduler's, which is what the hold takes away |
+
+### Qualification
+
+`internal/alsapcm/` and the dsd-test files are guarded, and this round changes both; 47 stays (main
+is at 45, B9 holds 46). The runbook's record of 47 now says what round 2 adds.
+
+### Gates (round 2)
+
+At 2a445bc3, inside the build slot, on Go 1.27.3, in two sessions: a single one that waited 45
+minutes for the slot would have outrun its background call's two hours, and gave the slot up
+unrun. `make fmt` changed nothing; `make vet` and its windows, darwin and linux/386 legs passed;
+`make docs-check` passed on the tree (player.md 99.6 %) and on a copy with `rules-b765-r2.patch`
+applied (CLAUDE.md 82.1 %, player.md 99.9 %, the worst load 67.2 %), where `verify_moves.py --base
+HEAD` found the reworded line and its long form gone beside their two successors and nothing else,
+no citation broken (no `--edit` prefix can pair a reworded title: it must start both blocks); the
+qualification check passed against main's a77578f8 (45 there, 47 at HEAD); `go test -race` passed
+for alsapcm and qualification without the overlay and for cmd/bridge with CI's tags and the overlay
+(1,239 s); CI's two native-integration invocations passed, cmd/bridge 78 of 78 (NextInsideFinish's
+four windows and StopInsideActivation's three among them) and playback 79 of 79. Each of C1 to C4
+was run again against both whole suites as gate.yml runs them, the overlay regenerated after the
+mutation: cmd/bridge red only where predicted, playback 79 of 79 under every one, since a backend
+sink's life ends only after Done. `make test` passed, 89 packages ok (2,093 s), its TMPDIR under
+`.tmp/_b765`, the Linux-only tests (ALSA, alsapcm, the durable writer, the identity paths) run
+here; `make build-all` passed. alsa-abi did not run: no ABI definition or `scripts/alsa-abi` file
+changed.
+
+## 2026-11-08 — B765 round 3: the ended life excuses only what it caused, and answers what it fenced as its cancellation
+
+Worker b765, legion0, branch `fix/b765-tail-stop` (#1438), after round 2's rules patch was applied
+(ef4d61ba). Commits: d01b31dd (the tests, red), cda8b0b0 (the fix), 8c643057 (the runbook's version
+47), then this record. The rule change goes through `rules-b765-r3.patch`: round 2's line in
+`player.md`, reworded, and its long form in `History-rules-player.md`.
+
+### The reviews' points, each confirmed red first
+
+1. **A device's failure beside the ended life was hidden** (Claude's review; Codex's second point).
+   Round 2's early Immediate release made the classification's `!s.releasing` false for every error
+   once the life had ended, so an admission's failure, or a resume's STATUS failing, beside a Stop was
+   recorded nowhere: `Result()` and `CleanupResult()` nil, and the run exited 0. Red 3/3:
+   `TestNativeActivationErrorAfterItsLifeEndsIsTheSinksFault` (the check after open fails after the
+   life's end, its watcher held) and `TestNativeResumeErrorAfterItsLifeEndsIsTheSinksFault` (the life
+   ends right after the resume's fence reads it, through `endingLife`, and its STATUS returns EIO
+   through the fake kernel's `fail` map); each answer carried the failure, each outcome was nil.
+2. **The reply still carried the plain fences** (Codex's first point). A caller whose select took the
+   reply, ready beside its cancellation, returned "native activation fenced" or "native resume fenced
+   after status", which the harness keeps: an exit 1 though cleanup succeeded. Red 3/3: round 2's
+   `TestNativeActivationFencedByItsEndedLifeIsNoFailure` and
+   `TestNativeResumeFencedByItsEndedLifeIsNoFailure`, whose caller waits on a context the life does
+   not end (the reply is its answer), now require that answer to be the life's cancellation; and the
+   answered cases of `TestNativeIntegrationStopInsideActivation`, whose `nativeEscalationHold` returns
+   the sink's own answer as a select that took the reply does, exited 1.
+
+### Found beside them: the same class
+
+The reply has a second path: a resume the writer releases without running answered "native
+activation cancelled" (`TestNativeResumeTheEndedLifeNeverRanAnswersItsCancellation`, red 3/3: the
+writer held in its pause's watch, the resume's request taken by no one when the life ends and its
+watcher revokes the sink). And the commands' own refusals: once the life's watcher has revoked the
+sink, Activate, Resume, ActivatePaused, Pause and WriteDSD refused in words of their own ("native
+activation fenced", "native resume fenced", "native initial paused activation fenced", "native
+releasing", "native admission closed"; `TestNativeCommandsAfterTheLifeEndsAnswerItsCancellation`,
+each of its five cases red 3/3). The harness's console cancels the run on an s at once while a space
+read just before is already the command loop's, so a space and an s typed together reach Pause or
+Resume after the revocation: `TestNativeIntegrationStopBesideAPauseOrResume` holds the command until
+the Stop's revocation reaches the node's close, and both exited 1, 3/3 ("native releasing", "native
+resume fenced"). The feeder's WriteDSD reads its context before it takes the sink's lock, a window no
+harness case forces. Cut, which the harness never calls, keeps its refusal.
+
+### As built
+
+- The activation block reads the life once and decides the release, the record and the answer under
+  one lock: the reply now goes after the classification.
+- Once the life has ended, only what that end caused is excused (`lifeCaused`: the two fences, now
+  the sentinels `errNativeActivationFenced` and `errNativeResumeFenced`; the life's own error; a
+  cancellation; a cancelled device call); anything else is recorded as the sink's fault, though the
+  release has begun.
+- While the life runs nothing changes: a release in progress excuses what it met, and a refused
+  reopen while paused is held. Not made general, since serve's backend refuses an admission with
+  `errReleased` once a session's release is taken (`output.admit`), which is no cancellation:
+  recorded, it would raise a spurious fault through `Result()` (the reporter, `closeOutput`). Serve's
+  sinks' lives end only after Done, so the life-ended branch never runs there.
+- What the ended life caused answers as its cancellation: `lifeCancelled` (ReasonCancelled, the
+  endpoint, "the sink's life ended", the life's error), in the writer's reply, in its reply to an
+  activation it releases without running, and, through `fenced`, in the five commands' refusals. A
+  terminal error keeps ErrReleaseUnconfirmed.
+
+### Red first
+
+At d01b31dd, predicted in `.tmp/_b765/predictions-r3-red.txt`, `-count 3`, alsapcm with `-watchdog
+10s`, the harness with the overlay: every prediction held. In alsapcm, the five tests above and each
+of the Commands test's five cases red 3/3 with the predicted words; round 2's tail, prefill and
+reopen tests green. In the harness, the two answered cases and both StopBesideAPauseOrResume cases
+exit 1 3/3 (End stopped, the plain refusal for Error); round 2's three StopInsideActivation cases and
+NextInsideFinish's four green.
+
+### Negative controls
+
+At cda8b0b0, each an exact-once mutation predicted by name in
+`.tmp/_b765/predictions-r3-controls.txt`, made in memory and restored from it, the overlay
+regenerated after it, `git status` empty after; `-count 3` over the ten life tests and the harness's
+three tests.
+
+| | mutation | red |
+|---|---|---|
+| C1 | the record condition back to round 2's (`!s.releasing`) | as predicted: the two error tests 3/3 (outcome nil); the rest green |
+| C1b | the life-caused excuse removed | as predicted: the activation, resume, prefill and reopen tests 3/3 (each "faulted the sink"); the harness's activation, resume and both answered cases 3/3 (exit 1, the recorded fence in Release's answer); its prefill green (the recorded cancellation is stripped) |
+| C2 | the reply's normalisation removed | as predicted: the activation and resume fence tests 3/3 (the plain fence answered); both answered cases 3/3 (exit 1) |
+| C3 | the deferred reply plain | as predicted: the resume never run, 3/3 |
+| C4a to C4e | each command's refusal plain: Activate, Resume, ActivatePaused, Pause, WriteDSD | as predicted: each its own Commands case 3/3; C4b and C4d also StopBesideAPauseOrResume/resume and /pause 3/3 (exit 1) |
+
+Each control was run again against both whole suites as gate.yml runs them (cmd/bridge and playback,
+`-count 1`), the overlay regenerated after the mutation, predicted in
+`.tmp/_b765/predictions-r3-controls-full.txt`: cmd/bridge red only where predicted (C1b the
+activation, resume and both answered cases; C2 both answered cases; C4b and C4d their
+StopBesideAPauseOrResume case; under the other five, 83 of 83), and playback 79 of 79 under every
+one, since a backend sink's life ends only after Done.
+
+### Qualification
+
+`internal/alsapcm/` and the dsd-test files are guarded, and this round changes both; 47 stays (main
+is at 45, B9 holds 46). The runbook's record of 47 now says what round 3 adds.
+
+### Gates (round 3)
+
+At 8c643057, inside the build slot, on Go 1.27.3, in two sessions as round 2's (part a had the slot
+after 460 s, part b after 2,240 s, the queue another worker's). `make fmt` changed nothing; `make vet`
+and its windows, darwin and linux/386 legs passed; `make docs-check` passed (player.md 99.9 %); the
+qualification check passed against main's a77578f8 (45 there, 47 at HEAD); `go test -race` passed
+for alsapcm and qualification without the overlay (74 s), and for cmd/bridge with CI's tags and the
+overlay (1,246 s); CI's two native-integration invocations passed, cmd/bridge 83 of 83 (its five
+StopInsideActivation cases, the two StopBesideAPauseOrResume cases and NextInsideFinish's four among
+them) and playback 79 of 79. `make test` passed, 89 packages ok (2,056 s), its TMPDIR under
+`.tmp/_b765`, the Linux-only tests run here; `make build-all` passed. Before the gates, the whole
+alsapcm suite passed without the overlay (852 tests) and the whole playback suite with `-race`.
+`rules-b765-r3.patch` applies to HEAD (`git apply --check`); on a copy of HEAD with it applied,
+`make docs-check`'s steps passed (CLAUDE.md 82.1 %, player.md 100.0 %, 99,966 of its 100,000 bytes,
+which the check calls close to its budget: the next rule there moves an entry out first; the worst
+load 67.3 %), and `verify_moves.py --base HEAD` found round 2's line and its long form gone beside
+their two rewordings and nothing else, no citation broken. alsa-abi did not run: no ABI definition or
+`scripts/alsa-abi` file changed.
+## 2026-11-08 — B761: a rewrite keeps the enrich bases, and a save keeps the file's own values
+
+Worker b761, legion0 (Ubuntu 26.04, linux/amd64, go1.27.3, `GOTOOLCHAIN=local`,
+`GOPROXY=off`), branch `fix/b761-enrich-followups` from main 98edead3, the
+orchestrator's brief: two of the B617 follow-ups B761 holds, and a check of a
+third. Commits: the rewrite's red tests 16cbc7c5, the rewrite 65f4d313, its
+credential rows split fec652e5, the save's red tests 3613f91e, the save
+82f12f8c, the Settings page's word pinned 0b52881a, then this record. The
+rules' words go in `rules-b761.patch`: `cli-serve.md`'s rewrite line and its
+long form, a new line in `config-lifecycle.md` with its long form, and two
+phrases of `enrichment.md`'s B617 bullet (this worker cannot write `.claude/`).
+Left in B761, as the brief says: the Deezer switch's re-queue (a durable
+marker, a schema decision) and an off switch for the update check (the
+privacy page, the owner's call).
+
+### 1. A rewrite keeps the enrich bases
+
+`bridge init --force` keeps the enrich block's two base URLs now, each on its
+own and in either posture, beside the opt-outs B617 keeps: a base names the
+mirror the operator set up, with any credential it carries, and init asks for
+neither. A base Load takes that is not the default is written as Load keeps it
+(trimmed, with no trailing slash); one written empty, or as the default
+(`config.DefaultMusicBrainzBaseURL` and `DefaultCoverArtBaseURL`, new, held to
+the enricher's `DefaultMusicBrainzBase` and `DefaultCoverArtBase` by
+`TestEnrichBaseDefaultsAgree`, since config imports no feature package), is
+written as no key, as a first install writes it.
+
+`priorEnrich` reads each base from the file's bytes, on its own, through the
+block's `yaml.Node` decode that already read the two switches, never through
+Load, so no variable's value reaches the file. Load's own check, called
+through config (`config.NormalizeEnrichBaseURL`, a wrapper of
+`normalizeBaseURL`), decides what is refused. A base it refuses, or one that
+does not read as text (a list, a block), is not kept, and the run names it by
+its line with a fixed reason, never its value: the check's own refusal names
+the value's scheme and host (`urlFieldForLog`), which the line leaves out. A
+valid base beside such a sibling, or beside switches that do not read, is
+kept. `warnEnrichNotKept` takes the block's record now and says what each kind
+costs: its heading says settings, a switch not kept is on now, and for a base
+not kept "the default is used now"; the block's own line, for a value that does
+not read as a block, says none of its switches or base URLs is kept.
+`printKept` lists a kept base whole only where it carries no user information,
+query or fragment, and "set (not shown)" where it carries any, each being a
+place a mirror's credential can ride (B54, B69); the list's key column widens
+to 25 for `enrich.musicbrainzBaseURL`. The header's keep-list in
+`init_rewrite.go` states the rule.
+
+*Red first.* At 16cbc7c5, main's code with the new tests, nine subtests of
+`TestARewriteKeepsTheEnrichmentBases` failed: both postures' "both kept" and
+"one kept beside one Load refuses", the base beside switches that do not read,
+the credential row as it then was, the refused base then a rewrite that loads,
+the block that is no block, and the file's bases over the environment's. Green
+there, as the brief asks: the two explicit-default rows (`https://musicbrainz.org/ws/2`
+beside `""`, and `"  "` beside `https://coverartarchive.org/`) and
+`TestARewriteOverTheDefaultsWritesWhatAFirstInstallWrites`, a rewrite over a
+first install's config, given its answers, writing the first init's bytes in
+both postures. The credential row put a password and a query in one base, so a
+`printKept` that showed a query beside no user information would have passed
+it; fec652e5 split it into three rows, each base carrying one part alone, and
+controls P1d to P1f below are their red.
+
+### 2. A save keeps the file's own value for each leaf a variable set
+
+Load applies the `BRIDGE_*` variables over the file, and every console save
+(the settings PATCH, the variants folder, the roots, the player's three writes,
+the UPnP servers) goes through `RuntimeConfig.UpdateChecked`, which wrote the
+holder's snapshot, the variables' values in it; B617 kept the two opt-outs as
+the file holds them (`filedSwitches`). It fits at that one boundary, inside the
+holder's turn of the file's lock and after its changed-file refusal, with no
+rework of the config layer:
+
+- `applyEnvOverrides` records the yaml path of each leaf it set
+  (`Config.envSet`, sorted, an unexported field beside `playerGOOS` and
+  `legacyDSD`). `applyEnvValue` reports whether it set its leaf, so a value it
+  ignores (a boolean or a whole number that does not read, an opt-out's white
+  space) records nothing, and a legacy alias records the path it sets. `Clone`
+  copies the record, so the snapshot an update publishes keeps the boot
+  load's.
+- `filedEnvValues` runs beside `filedSwitches` over the copy the holder saves
+  (`saved := *next`, changed through a pointer, so the config writers' sweep
+  still reads the save as the snapshot the holder's `bytes.Equal` refusal
+  guards, B617 round 2's shape: `TestEveryConfigWriterTakesTheConfigLock`
+  passes). For each recorded leaf but the two opt-outs, a save that left it at
+  its live value writes the file's own value, decoded by `DecodeFile`, Load's
+  own decode, from the bytes the turn found (`FileLock.Found`): the file's own
+  spelling, a relative path included, and the field's zero value where the
+  file writes none, which writes no key where the field omits an empty one.
+  Bytes that do not decode, which only a holder told nothing of its file can
+  meet, leave the live value as it is. Each leaf of the copy is set by
+  assignment to its own field (`envLeaf`: every step a struct held by value),
+  never through a pointer the published snapshot holds.
+- A save that changes such a leaf writes and publishes the change, `live` or
+  `restart` as the field's row says, and the variable sets the leaf again at
+  the next start. The Settings page says so under its lede, and so do
+  `docs/docker.md`'s environment section and `ops/settings-apply-semantics.md`
+  (a section, and the `enrichEnabled` row's pointer).
+
+The opt-outs' skip in `filedEnvValues` is not load-bearing (control P2g): an
+unchanged switch gets the same file value from either writer, and the
+comparison leaves a changed one to `filedSwitches`. It stays, so that the two
+switches have one writer.
+
+*Red first.* At 3613f91e, main's code with the new tests, every row of
+`TestASaveKeepsTheFilesOwnValueForEachVariable` failed (an integer, a pointer
+to an integer the file does not write, a pointer to a boolean, a list, a string
+and a legacy alias, each through serve's own boot read, `LoadFileAt` and
+`RecordFile`, and two saves of another setting: the file held the variable's
+value, and a start without the variable read it), and so did
+`TestAConsoleSaveKeepsTheFilesOwnValueForEachVariable` in cmd/bridge, through
+the real console (the variants folder's `POST /api/upscale/variants-dir`, which
+is not `/api/settings`, and the settings form's save, each sending the shown
+values). Green there, as guards of what the change keeps:
+`TestASaveThatChangesAVariablesSettingWritesAndPublishesTheChange`,
+`TestASaveOverAFileThatDoesNotDecodeWritesTheLiveValue` and
+`TestTheOptOutsVariablesAreStillWrittenAsTheirSwitchesAre` (`BRIDGE_ENRICH_ENABLED`
+as B617 writes it: a save of another setting writes no key, a change to on no
+key, a change to off false).
+
+### 3. iTunes, checked, nothing edited
+
+`PROTOCOL.md` names iTunes in two lines, both tag fields of the explicit flag:
+`ITUNESADVISORY` (and `ITUNES_ADVISORY`, which is not that field) at line 427,
+and `ITUNESRATING`, not read, at line 430. None names iTunes as a service the
+bridge asks, and its Apple mentions are ATS, the Watch app's scheme and the
+App Store link. `Enricher.WithITunes` and `NewITunesClient` are called from
+`internal/enrich/enrich_test.go` alone; `TestNoProductionPathAsksITunes`, which
+`cmd/bridge/itunes_unwired_test.go` holds, passes.
+
+### Negative controls (each on the committed tree, restored after)
+
+Predicted by name in `.tmp/_b761/controls.predictions.txt` before the run, then
+applied once each by `.tmp/_b761/controls.py`, which rebuilt the package's test
+binary, ran the run list (the rewrite's five tests; config's four save tests;
+cmd/bridge's two console-save tests; admin's hint and anchor tests) and put the
+file's bytes back from memory; a baseline run with no mutation came first and
+passed, and `git status` was empty after.
+
+| Mutation | Predicted red | Held |
+|---|---|---|
+| (P1a) `keepFromPrior` drops both bases | both "both kept", both "one kept beside one Load refuses", beside switches, the three credential rows, the environment row | yes |
+| (P1b) `readBase` keeps a base the check refuses | both "one kept beside one Load refuses" (the rewrite exits 1 at validate), the refused-then-loads row | yes |
+| (P1c) `readBase` keeps a base written as the default | the two explicit-default rows | yes |
+| (P1d) `keptBaseShown` shows every base whole | the three credential rows | yes |
+| (P1e) it ignores the query and the fragment | the three credential rows | yes |
+| (P1f) it ignores the user information | the three credential rows | yes, on a rerun: the first mutation left `u` unused and did not build; the rerun kept it used with `u == nil`, never true after a parse that succeeded |
+| (P1g) `warnEnrichNotKept` drops the base line | both "one kept beside one Load refuses", beside switches, refused-then-loads, the no-block row | yes |
+| (P1h) the block's line back to "neither of its switches" | the no-block row alone | yes |
+| (P1i) a base that does not read as text dropped without a line | the beside-switches row alone | yes |
+| (P1j) the refusal's line carries the raw value | both "one kept beside one Load refuses", refused-then-loads | yes |
+| (P1k) config's cover-art default drifts to a trailing slash | `TestEnrichBaseDefaultsAgree`, the second explicit-default row | yes |
+| (P2a) `UpdateChecked` does not call `filedEnvValues` | the six save rows, the console test | yes |
+| (P2b) `applyEnvOverrides` records nothing | the six save rows, the console test | yes |
+| (P2c) `Clone` drops the record | the six save rows (at the second save, over the clone the first published), the console test (its second save) | yes |
+| (P2d) the file's own value written whatever the update did | the three change rows, the console test (its interval change) | yes |
+| (P2e) the zero value written in place of the file's own | five save rows, the pointer the file does not write green; the console test | yes |
+| (P2f) bytes that do not decode decoded anyway | the undecodable-file test alone | yes |
+| (P2g) the opt-outs taken by `filedEnvValues` too | nothing: the skip is not load-bearing | yes, all green |
+| (P2i) the Settings page's hint removed | `TestTheSettingsPageSaysASaveKeepsTheFilesOwnValueForAVariable` | yes |
+| (P2j) a legacy alias's leaf not recorded | the legacy-alias save row alone | yes |
+
+Every control built (P1f on its rerun), and every prediction held.
+
+### Qualification
+
+No guarded path changed (`cmd/bridge/init*.go`, `internal/config`,
+`internal/admin`, `docs/docker.md` and `ops/settings-apply-semantics.md` are
+outside `version_gate.go`'s paths and prefixes):
+`go run ./scripts/qualification-version -base 98edead3 -head HEAD` passed, and
+`qualificationVersion` stays 45.
+
+### Gates
+
+At cf2c935a, inside the build slot, on Go 1.27.3: `make fmt` changed nothing;
+`make vet` and its windows, darwin and linux/386 legs passed; `make docs-check`
+passed on the tree (player.md 99.2 %, the worst load 67.0 %), and the budgets
+measured with `rules-b761.patch`'s three rules files in place passed
+(config-lifecycle.md 99,051 bytes of its 100,000, the next rule there moving an
+entry out first; enrichment.md 45,011; cli-serve.md 49,857; the worst load
+67.2 %), where `git apply --check` takes the patch and
+`TestEveryCitedTestNameExists` passed on a patched copy of the tree and failed
+a ghost citation planted in the copy's History file. The first gate run waited
+1 h 57 min for the slot and was stopped at its tool's two-hour limit three
+minutes into `make test`, after fmt, the vets and docs-check had passed; `make
+test` and `make build-all` then ran again in the slot. `make test` (race, the
+Makefile's tags, `-timeout 30m`) passed, 89 packages ok, the Linux-only ones run
+rather than vetted (alsapcm 84 s, the durable writer 20 s, the identity's backup
+290 s; cmd/bridge 1,338 s, internal/admin 1,044 s, internal/manifest 1,615 s,
+internal/config 13 s), and `make build-all` passed. Nothing on the wire
+changed, so neither `PROTOCOL.md` nor the iOS app's mirror is touched. Not run
+here: macOS and Windows natively, CI's runners and the console in a browser.
+
+## 2026-11-08 — B761 round 2: a save writes no key the file lacks, and compares a list by its entries
+
+Worker b761, legion0 (Ubuntu 26.04, linux/amd64, go1.27.3, `GOTOOLCHAIN=local`,
+`GOPROXY=off`), branch `fix/b761-enrich-followups` at ea962f19 (round 1, its
+rules applied as b6a76061, main a77578f8 merged), the orchestrator's brief on
+the two findings of Codex's review of round 1 (Claude's review found none).
+Commits: the red tests 408af06f, the fix 520238d6, the every-leaf test's
+fixture 384e2719, two more tests f30eceb5, the second decode removed 446703db,
+then this record. The rules' words go in `rules-b761-r2.patch`:
+`config-lifecycle.md`'s B761 line and its long form.
+
+### 1. A leaf the file does not write is written as no key
+
+Round 1 wrote a leaf a variable set, which the save left as it was, as the
+file's own value decoded by `DecodeFile`, and where the file writes no value
+for it, as its zero value: no key where the field omits an empty value, but
+five fields write theirs as a key, `libraryRoots`, `listenAddress`, `dataDir`,
+`scanIntervalSec` and `libraryName`, each a field of Config's own (the only
+leaves a variable sets without `omitempty`, read off the type). With
+`scanIntervalSec` absent and `BRIDGE_SCAN_INTERVAL_SEC=120`, a save of another
+setting wrote `scanIntervalSec: 0`.
+
+*Red first.* At 408af06f, ea962f19's code with the new tests, every row of
+`TestASaveWritesNoKeyTheFileDoesNotWrite` failed at both saves
+(`scanIntervalSec = 0`, `listenAddress = ""`, `dataDir = ""`,
+`libraryName = ""`, `libraryRoots = []`). The brief's other half held there: a
+start without the variable read each one's default, since Load's defaults and
+`Normalize` read those zeros as unset, so what the defect broke was the file,
+given a key it never had, and not what the next start read.
+
+*The fix.* `filedEnvValues` records each leaf it gives the file's own value
+(`Config.filed`, an unexported field set on the save's copy alone; `Clone`
+drops it), and `Config.save` writes through `Config.marshal`: with nothing
+recorded, `yaml.Marshal(c)` as before; otherwise `yaml.Marshal` of a copy whose
+type (`reflect.StructOf`, the same exported fields, names, order and tags)
+gives each recorded field of Config's own `omitempty`. Such a leaf is written
+as no key at its zero value and as it is at any other, and the rest of the
+text is the same encoder's over the same values, byte for byte. Load decodes
+the file into a zero config (`loadData`: `var cfg Config`, then `DecodeFile`),
+so a leaf's zero value is what a file gives that writes no value for it,
+writes it as null, or writes the zero itself (`scanIntervalSec: 0`,
+`libraryRoots: []`), all of which a start reads alike: the save writes all of
+them as no key. Every leaf a variable sets whose tag writes its zero value is
+a field of Config's own, so the copy rebuilds no section and loses no
+section's method (`PlayerConfig`'s `MarshalYAML` and `IsZero`);
+`TestEveryLeafWhoseZeroIsAKeyIsAtTheTopLevel` holds it.
+
+*Two shapes tried and dropped.* First, a `yaml.Node` round trip
+(`Node.Encode`, the key removed, the node marshalled):
+`TestASavesTextIsYAMLMarshalsWithoutTheKeysItLeavesOut`, over a config with
+every field set and strings YAML must quote, escape, fold or encode, found it
+is not byte for byte, yaml.v3 re-encoding a plain `<<` string as
+`!!merge <<`. Second, at 520238d6, a decode of the turn's bytes into a config
+whose leaves held a mark (`markLeaf`), to record only the leaves the file does
+not write: its two negative controls (the decode reading every leaf as
+written, and none) turned nothing red, because `omitempty` leaves out a zero
+value alone and a start reads an explicit zero as it reads none, so the decode
+told only an explicit zero key from no key. 446703db removed it, and records
+every leaf the save gives the file's own value.
+
+### 2. An unchanged empty list is no edit
+
+`BRIDGE_METRICS_ALLOW_CIDRS=","` loads an empty list (`applyEnvValue` makes a
+non-nil empty slice), `Clone` makes it nil, and `filedEnvValues`'s
+`reflect.DeepEqual` took the difference for an edit, so the save wrote the
+update's none over the file's `metrics.allowCidrs`, which a start without the
+variable then no longer read.
+
+*Red first.* At 408af06f `TestAnEmptyListOverrideASaveLeftKeepsTheFilesList`
+failed: both saves left no `metrics.allowCidrs`, and a start without the
+variable read none.
+
+*The fix.* The comparison is by value (`sameValue`): a list by its entries, so
+an empty list and none are one value; any other leaf as `reflect.DeepEqual`
+compares it, a pointer by what it points to. `Clone` is left as it is: the
+comparison holds whatever a clone makes of an empty list.
+
+### Tests
+
+`TestASaveWritesNoKeyTheFileDoesNotWrite` (the five, each absent from the
+file and written as its zero value, through serve's boot read, `LoadFileAt`
+and `RecordFile`, two saves and a start without the variable),
+`TestAnEmptyListOverrideASaveLeftKeepsTheFilesList`,
+`TestASaveWritesNoKeyForAnyLeafTheFileDoesNotWrite` (each of the 120 leaves a
+variable sets but the opt-outs, on a config with every other field set so that
+every section is written, over an empty file, an empty mapping and a file
+writing another setting alone, through `filedEnvValues` and `marshal`),
+`TestASavesTextIsYAMLMarshalsWithoutTheKeysItLeavesOut`,
+`TestEveryLeafWhoseZeroIsAKeyIsAtTheTopLevel`,
+`TestASaveKeepsALeafAMergeKeyWrites` (the file's own value is what Load's
+decode reads: `<<: {scanIntervalSec: 300}` is written back as 300, which a
+lookup of the file's own keys would lose) and `TestACloneCarriesNoSavesRecord`.
+Round 1's tests pass unchanged, and `ops/settings-apply-semantics.md`'s section
+on a setting a variable sets says the new rule.
+
+### Negative controls (each on the committed tree, restored after)
+
+Predicted by name in a file before each set ran
+(`.tmp/_b761/controls2.predictions.txt`, `controls2.predictions.v2.txt`), then
+applied once each by `.tmp/_b761/controls2.py` and `controls3.py` over the
+round-2 and round-1 save tests of config, `TestConfigCloneIsDeep`, and
+cmd/bridge's two console saves and the config writers' sweep: each rebuilt the
+test binaries, ran the list and put the file's bytes back from memory. A
+baseline with no mutation came first in every run and passed, and `git status`
+was empty after.
+
+The first set, at f30eceb5:
+
+| Mutation | Predicted red | Held |
+|---|---|---|
+| (R2a) `marshal` ignores the record | the five rows, the five keyed leaves of the every-leaf test, the text test | yes |
+| (R2b) the second decode reads every leaf as written | the five rows, the five keyed leaves | yes |
+| (R2c) the second decode reads no leaf as written | round 1's integer and string rows, the merge test, the console test | no: nothing red |
+| (R2d) `markLeaf` marks nothing | the five rows, all 120 leaves of the every-leaf test | yes |
+| (R2e) an unchanged leaf compared by `reflect.DeepEqual` | the empty-list test | yes |
+| (R2f) presence by a lookup of the file's own keys | the merge test | no: nothing red |
+| (R2g) `Clone` keeps the record | the clone test | yes |
+| (R2h) `upscale.variantsDir` loses `omitempty` | the top-level test, the every-leaf test's `upscale.variantsDir` | yes |
+
+R2c and R2f were wrong predictions, and right about the code: a recorded leaf
+not at its zero value is written as it is, so reading a written leaf as
+unwritten changed no text a start reads otherwise, and the decode they mutated
+was removed (446703db). The second set, at 446703db:
+
+| Mutation | Predicted red | Held |
+|---|---|---|
+| (V1) `marshal` ignores the record | the five rows, absent and as their zero value; the five keyed leaves; the text test | yes |
+| (V2) `filedEnvValues` records nothing | the five rows, absent and as their zero value; the five keyed leaves | yes |
+| (V3) a recorded field written as no key whatever its value (`yaml:"-"` for `omitempty`) | round 1's integer and string rows, the merge test, the text test, the console test | yes |
+| (V4) the file's own value by a lookup of the file's own keys (a leaf no mapping holds literally given its zero value) | the merge test | yes |
+| (V5) an unchanged leaf compared by `reflect.DeepEqual` | the empty-list test | yes |
+| (V6) `Clone` keeps the record | the clone test | yes |
+| (V7) `upscale.variantsDir` loses `omitempty` | the top-level test, the every-leaf test's `upscale.variantsDir` | yes |
+
+### Qualification
+
+No guarded path changed (`internal/config` and `ops/settings-apply-semantics.md`
+are outside `version_gate.go`'s paths and prefixes):
+`go run ./scripts/qualification-version -base a77578f8 -head HEAD` passed at
+446703db, and `qualificationVersion` stays 45.
+
+### Gates
+
+At 90935a2e, inside the build slot (taken at 08:30 after a 42-minute wait), on
+Go 1.27.3: `make fmt` changed nothing; `make vet` and its windows, darwin and
+linux/386 legs passed; `make docs-check` passed on the tree (player.md 99.2 %,
+the worst load 67.3 %), and the budgets measured with `rules-b761-r2.patch`'s
+rules file in place passed (config-lifecycle.md 99,532 bytes of its 100,000:
+the next rule there moves an entry out first; the worst load 67.4 %), where
+`git apply --check` takes the patch and `TestEveryCitedTestNameExists` passed
+on a patched copy of the tree and failed a ghost citation planted in the
+copy's History file. `go test -race` of internal/config passed alone before
+the gate. `make test` (race, the Makefile's tags, `-timeout 30m`) passed, 89
+packages ok in 35 minutes, the Linux-only ones run rather than vetted (alsapcm
+82 s, the durable writer 20 s, the identity's backup 269 s; cmd/bridge
+1,311 s, internal/admin 1,048 s, internal/manifest 1,640 s, internal/config
+15 s), and `make build-all` passed. Nothing on the wire changed, so neither
+`PROTOCOL.md` nor the iOS app's mirror is touched. Not run here: macOS and
+Windows natively, CI's runners and the console in a browser.
+
 ## 2026-11-07 — B728 B9: main merged (B762)
 
 Worker b728-b9, legion0, branch `feat/b728-b9-choice` at 07a4b511 (round 2 and its

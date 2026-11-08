@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -230,12 +231,18 @@ func envBindings() []envBinding {
 // the variable alone (unparseableBoolEnv, unparseableIntEnv). The opt-outs
 // (switchEnvPaths) read the other way: off is what they are for, so they
 // take the file's spellings of on and off, and anything else as off.
+//
+// It records in c the yaml path of each leaf a variable set (envSet): the
+// live holder's save writes the file's own value for each one an update
+// left as it was, so a save does not write a variable's value into the
+// file (filedEnvValues, backlog B761).
 func (c *Config) applyEnvOverrides() {
 	byPath := make(map[string]envBinding, 128)
+	set := map[string]bool{}
 	for _, b := range envBindings() {
 		byPath[b.YAMLPath] = b
-		if v, ok := os.LookupEnv(b.EnvVar); ok && v != "" {
-			c.applyEnvValue(b, b.EnvVar, v)
+		if v, ok := os.LookupEnv(b.EnvVar); ok && v != "" && c.applyEnvValue(b, b.EnvVar, v) {
+			set[b.YAMLPath] = true
 		}
 	}
 	// Legacy names last so an explicitly-set legacy variable wins over
@@ -250,10 +257,15 @@ func (c *Config) applyEnvOverrides() {
 				"var", name, "path", path)
 			continue
 		}
-		if v, ok := os.LookupEnv(name); ok && v != "" {
-			c.applyEnvValue(b, name, v)
+		if v, ok := os.LookupEnv(name); ok && v != "" && c.applyEnvValue(b, name, v) {
+			set[path] = true
 		}
 	}
+	c.envSet = nil
+	for path := range set {
+		c.envSet = append(c.envSet, path)
+	}
+	slices.Sort(c.envSet)
 }
 
 // The warnings for a BRIDGE_* variable that does not read as its setting's
@@ -321,13 +333,14 @@ func EnrichEnabledFromEnv() (on, set bool) {
 	return readSwitchEnv(name, v)
 }
 
-func (c *Config) applyEnvValue(b envBinding, name, raw string) {
-	fv := reflect.ValueOf(c).Elem()
-	for _, i := range b.index {
-		fv = fv.Field(i)
-	}
+// applyEnvValue sets the leaf b names from raw, the value of the variable
+// name, and reports whether it set it: false for a value it ignores (one
+// that does not read as the leaf's boolean or whole number, an opt-out's
+// white space) and for a leaf it cannot set.
+func (c *Config) applyEnvValue(b envBinding, name, raw string) bool {
+	fv := envLeaf(c, b)
 	if !fv.CanSet() {
-		return
+		return false
 	}
 	switch b.kind {
 	case reflect.String:
@@ -336,41 +349,44 @@ func (c *Config) applyEnvValue(b envBinding, name, raw string) {
 		v, err := strconv.ParseBool(raw)
 		if err != nil {
 			validateLogger.Warn(unparseableBoolEnv, "var", name)
-			return
+			return false
 		}
 		fv.SetBool(v)
 	case reflect.Pointer:
 		switch b.elemKind {
 		case reflect.Bool:
 			if switchEnvPaths[b.YAMLPath] {
-				if on, set := readSwitchEnv(name, raw); set {
+				on, set := readSwitchEnv(name, raw)
+				if set {
 					fv.Set(reflect.ValueOf(&on))
 				}
-				return
+				return set
 			}
 			v, err := strconv.ParseBool(raw)
 			if err != nil {
 				validateLogger.Warn(unparseableBoolEnv, "var", name)
-				return
+				return false
 			}
 			fv.Set(reflect.ValueOf(&v))
 		case reflect.Int, reflect.Int64:
 			n, err := strconv.ParseInt(raw, 10, 64)
 			if err != nil {
 				validateLogger.Warn(unparseableIntEnv, "var", name)
-				return
+				return false
 			}
 			// Allocate through the field's own element type so an
 			// *int and an *int64 field each get the right pointee.
 			ptr := reflect.New(fv.Type().Elem())
 			ptr.Elem().SetInt(n)
 			fv.Set(ptr)
+		default:
+			return false
 		}
 	case reflect.Int, reflect.Int64:
 		v, err := strconv.ParseInt(raw, 10, 64)
 		if err != nil {
 			validateLogger.Warn(unparseableIntEnv, "var", name)
-			return
+			return false
 		}
 		fv.SetInt(v)
 	case reflect.Slice:
@@ -382,7 +398,21 @@ func (c *Config) applyEnvValue(b envBinding, name, raw string) {
 			}
 		}
 		fv.Set(reflect.ValueOf(out))
+	default:
+		return false
 	}
+	return true
+}
+
+// envLeaf is the field b names in c, settable through c: every step on its
+// way is a struct field held by value (envBindings walks no pointer to a
+// struct), so setting it changes c alone.
+func envLeaf(c *Config, b envBinding) reflect.Value {
+	fv := reflect.ValueOf(c).Elem()
+	for _, i := range b.index {
+		fv = fv.Field(i)
+	}
+	return fv
 }
 
 // EnvOverrideDocs renders the recognised variables, one per line, for

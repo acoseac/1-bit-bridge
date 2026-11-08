@@ -25,13 +25,16 @@ var ErrReleaseUnconfirmed = errors.New("native release unconfirmed")
 // ErrActivationFenced is an activation the sink's own fence ended before its
 // run's prefill was written whole (B728 B9 round 4): the sink revoked,
 // released or being released (an Immediate release cuts a prefill short, the
-// cancellation joined to this), paused, or its life over, before or while the
-// activation was asked, at its admission's end, or before its writer ran it.
-// It is never the device's answer: an admission the check refused, a write
-// that failed and a reopen whose geometry changed are returned as they are,
-// and so is a sink that failed before the activation, and a cleanup that
-// failed is joined to it (ErrReleaseUnconfirmed). A caller that dropped what
-// it was activating tells by it that the failure was the drop's.
+// cancellation joined to this) or paused, before or while the activation was
+// asked, at its admission's end, or before its writer ran it, while the sink's
+// life runs: once that life has ended, the fence answers the life's
+// cancellation instead (fenced, lifeCancelled; B765), which a caller the life
+// stopped takes for the stop it is. It is never the device's answer: an
+// admission the check refused, a write that failed and a reopen whose geometry
+// changed are returned as they are, and so is a sink that failed before the
+// activation, and a cleanup that failed is joined to it
+// (ErrReleaseUnconfirmed). A caller that dropped what it was activating tells
+// by it that the failure was the drop's.
 var ErrActivationFenced = errors.New("native activation fenced")
 
 const nativeReleaseBudget = 2 * time.Second
@@ -132,6 +135,10 @@ type nativeSeams struct {
 	open func(Endpoint, Config) (*Device, error)
 	now  func() time.Time
 	at   func(time.Time) (<-chan time.Time, func())
+	// lifeEnded, nil but in a test, runs on the goroutine that revokes the
+	// sink once its life, the open's context, has ended, just before the
+	// revocation: a test parks it there, as a scheduler can leave it (B765).
+	lifeEnded func()
 }
 
 // OpenDSDSink opens an inert native sink. Activate is mandatory. A cancelled
@@ -241,6 +248,9 @@ func openDSDSink(ctx context.Context, c DSDConfig, h nativeSeams) (*DSDSink, err
 	go func() {
 		select {
 		case <-ctx.Done():
+			if h.lifeEnded != nil {
+				h.lifeEnded()
+			}
 			s.Revoke()
 		case <-s.done:
 		}
@@ -266,7 +276,9 @@ func (s *DSDSink) interrupt() {
 // Activate rechecks admission before the first write, including silence. gen
 // must increase for a new activation after pause/release; a revoked sink cannot
 // be reactivated. A pause racing the admission check wins before the first write.
-// One the sink's own fence ends answers ErrActivationFenced.
+// One the sink's own fence ends answers ErrActivationFenced, and, once the
+// sink's life has ended, a refusal and the fence answer that life's
+// cancellation (fenced, B765).
 func (s *DSDSink) Activate(ctx context.Context, gen uint64) error {
 	if e := ctx.Err(); e != nil {
 		s.Revoke()
@@ -274,12 +286,14 @@ func (s *DSDSink) Activate(ctx context.Context, gen uint64) error {
 	}
 	s.mu.Lock()
 	if s.err != nil || s.activation != nil || gen == 0 || gen <= s.generation {
+		e := s.fenced("native activation", errors.New("native activation refused"))
 		s.mu.Unlock()
-		return errors.New("native activation refused")
+		return e
 	}
 	if s.released || s.revoked || s.releasing || s.paused {
+		e := s.fenced("native activation", ErrActivationFenced)
 		s.mu.Unlock()
-		return ErrActivationFenced
+		return e
 	}
 	r := &nativeRequest{ctx: ctx, gen: gen, reply: make(chan error, 1)}
 	s.activation = r
@@ -298,6 +312,25 @@ func (s *DSDSink) Activate(ctx context.Context, gen uint64) error {
 
 // Revoke permanently cancels activation and begins Immediate cleanup.
 func (s *DSDSink) Revoke() { s.beginRelease(Immediate) }
+
+// lifeCancelled is the answer of a command the sink's ended life (end, its
+// error) fenced or cancelled: that life's cancellation, typed as the
+// package's cancellations are, so a caller the life stopped takes it for the
+// stop it is, whatever refusal of its own the command met (B765 round 3).
+// With s.mu held.
+func (s *DSDSink) lifeCancelled(op string, end error) error {
+	return &Error{Reason: ReasonCancelled, Op: op, Endpoint: s.params.Endpoint, Detail: "the sink's life ended", Err: end}
+}
+
+// fenced is a command's refusal: its own while the sink's life runs, and the
+// life's cancellation once that has ended, which releases the sink whatever
+// the command met first. With s.mu held.
+func (s *DSDSink) fenced(op string, refusal error) error {
+	if end := s.life.Err(); end != nil {
+		return s.lifeCancelled(op, end)
+	}
+	return refusal
+}
 
 // WriteDSD returns accepted logical bits PER CHANNEL, including bits in the
 // partial-word carry. validBits is a count starting at offset in each equally
@@ -318,8 +351,9 @@ func (s *DSDSink) WriteDSD(ctx context.Context, id uint64, left, right []byte, o
 		}
 		s.mu.Lock()
 		if s.releasing || s.revoked || s.finishing || s.err != nil {
+			e := s.fenced("native write", errors.New("native admission closed"))
 			s.mu.Unlock()
-			return accepted, errors.New("native admission closed")
+			return accepted, e
 		}
 		if s.ledgerN == 0 || s.ledger[s.ledgerN-1].id != id {
 			if s.ledgerN == s.cfg.LedgerLimit {
@@ -520,8 +554,9 @@ func (s *DSDSink) result() error { s.mu.Lock(); defer s.mu.Unlock(); return s.er
 func (s *DSDSink) Pause(ctx context.Context) error {
 	s.mu.Lock()
 	if s.releasing {
+		e := s.fenced("native pause", errors.New("native releasing"))
 		s.mu.Unlock()
-		return errors.New("native releasing")
+		return e
 	}
 	if !s.paused {
 		s.pauseAt = s.seams.now()
@@ -549,8 +584,9 @@ func (s *DSDSink) Pause(ctx context.Context) error {
 func (s *DSDSink) Resume(ctx context.Context) error {
 	s.mu.Lock()
 	if s.generation == 0 || s.releasing || s.revoked || s.err != nil || s.activation != nil {
+		e := s.fenced("native resume", errors.New("native resume fenced"))
 		s.mu.Unlock()
-		return errors.New("native resume fenced")
+		return e
 	}
 	if !s.paused {
 		s.mu.Unlock()
@@ -656,8 +692,9 @@ func (s *DSDSink) ActivatePaused(ctx context.Context) error {
 		return s.Resume(ctx)
 	}
 	if !s.paused || s.releasing || s.revoked || s.err != nil || s.activation != nil {
+		e := s.fenced("native activation", errors.New("native initial paused activation fenced"))
 		s.mu.Unlock()
-		return errors.New("native initial paused activation fenced")
+		return e
 	}
 	r := &nativeRequest{ctx: ctx, gen: 1, resume: true, pauseEpoch: s.pauseEpoch, reply: make(chan error, 1)}
 	s.activation = r
