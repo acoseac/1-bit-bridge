@@ -87662,3 +87662,54 @@ clean after. All 133 verdicts as predicted.
 Every guard above has its controls (C1 to C6, C8 to C15 and C23), and so
 do the reds' and the serve test's load-bearing assertions (C7, C16 to C22
 and C24 to C29).
+
+### The gates
+
+Through the shared build lock, on go1.27.3, go.mod's.
+
+At 531277a0 (the gate in `.tmp/_b652/controls.py`, after the controls):
+`make test` (`-race`, `-timeout 30m`) over the brief's six package trees
+and internal/fsutil, internal/transcode and internal/admin, every package
+green but cmd/bridge, where five tests that pin the store ladder's last
+step failed, as they ask a new migration to answer for itself:
+`requireTheLatestSchema` looked for v61's column, which a store one step
+behind now holds, and the crash rollback's obstacle stood in v61's way with
+the store one step behind (`TestAMigrationThatFailsStillRefusesTheRollback`,
+`TestAMigrationWhoseRecordCannotBeWrittenDoesNotRun`,
+`TestALateFirstStartOfTheInstalledVersionCompletesItsInstall`,
+`TestATargetWhoseSettingsAreFixedConfirmsAnInterruptedRollback`,
+`TestALaterCommandOfTheVersionRolledBackRefusesToMigrateOnceThePreviousVersionBoots`).
+43d83fa5 names v62's table in `latestSchemaPresent`, which
+`requireTheLatestSchema` and the refused record's check ask, and keeps the
+obstacle in v61's way with the store put at v60, since v62, one `CREATE
+TABLE`, changes nothing before it can fail; the five, and
+`TestACommandsMigrationRefusesTheRollbackToo`, green with `-race`. In the
+same run the new tests by name with `-race` (43 tests and 68 subtests,
+green), `make vet` for linux/amd64, windows, darwin and linux/386, and
+`make build-all`, its build-tag census included, clean.
+
+At d9e0dc65 (`.tmp/_b652/gate2.py`): `make test` over every package, 88 of
+89 green (internal/manifest in 1631 s, internal/admin in 1057 s,
+internal/backup in 271 s, internal/updater in 31 s; the Linux-only ones run
+for real here: internal/alsa, internal/alsapcm on this host's ALSA,
+internal/atomicwrite, internal/player/hotplug, internal/usbid, and
+internal/fsutil's identity paths), and cmd/bridge, in 1345 s, red in one
+subtest, `TestAMatchWhoseReQueueDidNotLandIsReQueuedByTheNextSweep`'s
+"cancelled inside the reset by a switch-off", whose fixture refused its own
+timing ("the first sweep's re-queue landed: the case tests nothing"): the
+fingerprint sweep's, nothing this change touches, green in the first run's
+cmd/bridge and five times of five alone under `-race`. The four vets and
+`make build-all` clean.
+
+At d9e0dc65 again (`.tmp/_b652/gate2.py brief`), the brief's gate as
+written, `GOTOOLCHAIN=go1.27.3 make test TEST_PKGS='./internal/integrity/...
+./internal/analyze/... ./internal/api/... ./internal/manifest/...
+./internal/doctor/... ./cmd/bridge/...'` with TMPDIR on this disk: green,
+every package (internal/integrity 5 s, internal/analyze 54 s, internal/api
+146 s, internal/manifest 1614 s, internal/doctor 7 s, cmd/bridge 1301 s).
+
+Outside the lock: go1.27.3's own gofmt over every Go file the branch
+changes, clean; `rules-b652.patch` applied to a `git archive` copy of the
+final HEAD, where `make docs-check` passes (CLAUDE.md 82.1%, the worst load
+67.7%; jobs.md 27,191 bytes) and cmd/bridge's `TestEveryCitedTestNameExists`
+passes, git reading this worktree's index; `git status` clean after.
