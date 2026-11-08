@@ -304,10 +304,16 @@ func requireServeRefuses(t *testing.T, cfg, dir, first string) {
 
 // requireBothDoctorsFail requires bridge doctor and the console's doctor to
 // fail their data-dir line over cfg, saying bridge serve will not start and
-// first, with the record beside cfg as the one to remove in its fix.
-func requireBothDoctorsFail(t *testing.T, cfg, first string) {
+// first, with the record beside cfg as the one to remove in its fix, and to
+// leave what is under dir as it was: a data dir serve refuses may hold a
+// database that is not this bridge's, which a store open would migrate.
+func requireBothDoctorsFail(t *testing.T, cfg, dir, first string) {
 	t.Helper()
+	before := treeOf(t, dir)
 	said := askBothDoctors(t, cfg)
+	if after := treeOf(t, dir); !slices.Equal(before, after) {
+		t.Errorf("the doctors changed what is under %s:\nbefore %.600q\nafter  %.600q", dir, before, after)
+	}
 	c := said.requireLine(t, dataDirCheckSlug, doctor.Fail)
 	if want := "bridge serve will not start: " + first; !strings.HasPrefix(c.Summary, want) {
 		t.Errorf("the data-dir line says %q, want it to start %q", c.Summary, want)
@@ -383,7 +389,7 @@ func TestServeRefusesWhatTheBareMountPointHoldsOnceItsRecordHoldsAnIdentity(t *t
 			}
 			first := noIdentityLine(v.dataDir, tc.holds)
 			requireServeRefuses(t, v.cfg, v.mnt, first)
-			requireBothDoctorsFail(t, v.cfg, first)
+			requireBothDoctorsFail(t, v.cfg, v.mnt, first)
 			requireScanRefuses(t, v.cfg, v.mnt, first)
 		})
 	}
@@ -407,7 +413,7 @@ func TestServeRefusesADataDirHoldingAnotherDataDirsIdentity(t *testing.T) {
 	}
 	first := otherIdentityLine(v.dataDir)
 	requireServeRefuses(t, v.cfg, v.mnt, first)
-	requireBothDoctorsFail(t, v.cfg, first)
+	requireBothDoctorsFail(t, v.cfg, v.mnt, first)
 	requireScanRefuses(t, v.cfg, v.mnt, first)
 
 	// The volume it served from, mounted again, is the data dir it served
@@ -453,13 +459,16 @@ func TestServeRefusesARecordThatDoesNotRead(t *testing.T) {
 		t.Errorf("serve wrote the record that does not read again: %q", got)
 	}
 
+	before := treeOf(t, v.dataDir)
 	said := askBothDoctors(t, v.cfg)
 	c := said.requireLine(t, dataDirCheckSlug, doctor.Fail)
 	if !strings.HasPrefix(c.Summary, "bridge serve will not start: "+unreadableRecordLead(v.dataDir)) || !strings.Contains(c.Summary, why) {
 		t.Errorf("the data-dir line says %q, want the record's refusal", c.Summary)
 	}
+	if after := treeOf(t, v.dataDir); !slices.Equal(before, after) {
+		t.Errorf("the doctors changed the data dir:\nbefore %.600q\nafter  %.600q", before, after)
+	}
 
-	before := treeOf(t, v.dataDir)
 	code, out := runCLI(t, "scan", "--config", v.cfg)
 	if code != 1 || !strings.Contains(out, "scan: "+unreadableRecordLead(v.dataDir)) {
 		t.Errorf("bridge scan exited %d over a record that does not read, want 1 and the record's refusal:\n%s", code, out)
@@ -483,7 +492,7 @@ func TestServeRefusesAnIdentityThatDoesNotRead(t *testing.T) {
 	}
 	first := unreadableIdentityLine(v.dataDir, "does not read as one")
 	requireServeRefuses(t, v.cfg, v.dataDir, first)
-	requireBothDoctorsFail(t, v.cfg, first)
+	requireBothDoctorsFail(t, v.cfg, v.dataDir, first)
 	requireScanRefuses(t, v.cfg, v.dataDir, first)
 }
 
