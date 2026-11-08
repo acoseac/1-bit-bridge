@@ -313,6 +313,11 @@ The bridge picks up these env vars at startup, **after** loading
 `bridge.yaml`. Env wins over YAML; YAML wins over hardcoded
 defaults. Empty / unset env = no change.
 
+The admin console shows a setting a variable sets with the variable's
+value, and a save in the console keeps `bridge.yaml`'s own value for it
+unless you change that setting there: a change made in the console is
+saved, and the variable sets the setting again at the next start.
+
 | Variable | YAML field | Notes |
 |---|---|---|
 | `BRIDGE_LISTEN_ADDRESS` | `listenAddress` | Main HTTPS bind, e.g. `:7788`. |
