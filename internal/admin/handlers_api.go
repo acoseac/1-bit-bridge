@@ -4004,10 +4004,12 @@ func (s *Server) lockSettingsWrite() {
 // the install marker's lock it could not hold (`marker-locked`), a crash
 // rollback the off would keep from its backup (`update-checks-off-refused`)
 // and a backup that did not answer or an install marker that could not be
-// read (`update-checks-off-unchecked`); 503
-// `stopping` for a wait the request's end stopped, which on Windows is the
-// stop of this service by a `bridge update` past its decision; anything else
-// a 500 in words, logged whole.
+// read (`update-checks-off-unchecked`); 503 `stopping` for a wait the
+// request's end stopped (serve's stop, which the console's requests take, or
+// the client's), in words that say only that it was stopped and what to do,
+// since the end does not say what stopped it (round 4: a `bridge update`
+// whose swap stops the bridge's Windows service is one such stop, backlog
+// B831); anything else a 500 in words, logged whole.
 func writeUpdateChecksOffRefusal(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, ErrUpdateChecksOffLocked):
@@ -4018,9 +4020,8 @@ func writeUpdateChecksOffRefusal(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusConflict, "update-checks-off-unchecked", err.Error())
 	case errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded):
 		writeError(w, http.StatusServiceUnavailable, "stopping",
-			"update checks were not turned off: the save was stopped while it waited for an install's swap, which on "+
-				"Windows stops the bridge, so nothing was saved and the bridge starts again with update checks as they "+
-				"were: turn them off again once it is back")
+			"update checks were not turned off: the save was stopped before the off was decided, and nothing was "+
+				"saved; once the bridge answers, check the switch and turn them off again if they are on")
 	default:
 		logger.Error("admin: an off of the update check's switch was not decided", "err", err)
 		writeError(w, http.StatusInternalServerError, "save-config",

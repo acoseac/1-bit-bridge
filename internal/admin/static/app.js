@@ -4591,16 +4591,17 @@ function applyTrayManaged(entry) {
 
 // updateChecksOffLost is what a settings save that sent update checks off
 // (sent, its body) adds to its failure where the bridge gave no answer at
-// all, err carrying no status (backlog B761's round 3). The off waits for an
-// install of another process that is past its decision, and on Windows that
-// install's swap stops the bridge, so the off is lost with the stop and the
-// version it installs starts with update checks as they were. A refusal the
-// bridge answered says what happened in its own words, and gets nothing.
+// all, err carrying no status (backlog B761's round 3): with no answer, the
+// console cannot tell whether the off was saved or what stopped it, so the
+// words claim no cause and say to check the switch once the bridge answers.
+// The off waits for an install of another process that is past its decision
+// and is saved after its swap, but where the swap stops the bridge's Windows
+// service (round 4: backlog B831). A refusal the bridge answered, the 503 of a
+// stop among them, says what happened in its own words, and gets nothing.
 function updateChecksOffLost(sent, err) {
   if (sent?.updateCheckEnabled !== false || err?.status) return "";
-  return " If a `bridge update` was installing a new version, which on Windows stops " +
-    "the bridge to swap it in, update checks were not turned off: once the bridge " +
-    "is back, check the switch and turn them off again.";
+  return "; update checks may not have been turned off: once the bridge answers, " +
+    "check the switch and turn them off again if they are on.";
 }
 
 async function saveTrayField(ctl, status) {

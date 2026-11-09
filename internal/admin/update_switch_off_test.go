@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -142,19 +143,24 @@ func (e *wordedRefusal) Is(target error) bool { return target == e.sentinel }
 // the install marker's lock that could not be held (409 marker-locked), the
 // crash rollback the off would keep from its backup (409
 // update-checks-off-refused), a backup that did not answer (409
-// update-checks-off-unchecked), a wait the request's end stopped (503
-// stopping, saying an off waiting for an install's swap on Windows is lost
-// with the stop), and anything else (500 save-config, its error in the log
-// alone). Nothing is saved, the other field beside it included, the live
-// settings stay as they were and the updater is told nothing.
+// update-checks-off-unchecked), a wait the request's end stopped, cancelled
+// or past a deadline (503 stopping, in words that say only that it was
+// stopped and what to do: a stop does not say what stopped it, so they claim
+// no swap and no Windows service, backlog B761's round 4), and anything else
+// (500 save-config, its error in the log alone). Nothing is saved, the other
+// field beside it included, the live settings stay as they were and the
+// updater is told nothing.
 func TestAnOffTheInstallMarkersLockOrItsDecisionRefusesSavesNothing(t *testing.T) {
 	const secret = "/srv/private/update-state.lock"
+	stopped := []string{"update checks were not turned off", "stopped before the off was decided", "nothing was saved",
+		"once the bridge answers", "check the switch", "turn them off again"}
+	claimsNoCause := []string{"Windows", "SCM", "swap", "B831"}
 	for _, tc := range []struct {
 		name         string
 		refuse       error
 		status       int
 		code         string
-		says         []string
+		says, never  []string
 		logged, hide string
 	}{
 		{name: "the install marker's lock cannot be held", refuse: &wordedRefusal{ErrUpdateChecksOffLocked,
@@ -167,8 +173,9 @@ func TestAnOffTheInstallMarkersLockOrItsDecisionRefusesSavesNothing(t *testing.T
 			"update checks were not turned off: its backup did not answer; nothing was saved"},
 			status: http.StatusConflict, code: "update-checks-off-unchecked", says: []string{"did not answer", "nothing was saved"}},
 		{name: "the wait was stopped", refuse: context.Canceled, status: http.StatusServiceUnavailable, code: "stopping",
-			says: []string{"stopped while it waited for an install's swap", "on Windows", "nothing was saved",
-				"starts again with update checks as they were", "turn them off again"}},
+			says: stopped, never: claimsNoCause},
+		{name: "the wait ran past a deadline", refuse: fmt.Errorf("the install marker's lock: %w", context.DeadlineExceeded),
+			status: http.StatusServiceUnavailable, code: "stopping", says: stopped, never: claimsNoCause},
 		{name: "anything else", refuse: errors.New("the lock file " + secret + " could not be opened"),
 			status: http.StatusInternalServerError, code: "save-config",
 			says:   []string{"update checks were not turned off", "nothing was saved", "the bridge log says why"},
@@ -189,6 +196,11 @@ func TestAnOffTheInstallMarkersLockOrItsDecisionRefusesSavesNothing(t *testing.T
 			for _, says := range tc.says {
 				if !strings.Contains(body.Message, says) {
 					t.Errorf("the answer does not say %q: %q", says, body.Message)
+				}
+			}
+			for _, claim := range tc.never {
+				if strings.Contains(body.Message, claim) {
+					t.Errorf("the answer claims %q, which a stopped wait does not show: %q", claim, body.Message)
 				}
 			}
 			if tc.hide != "" && strings.Contains(body.Message, tc.hide) {

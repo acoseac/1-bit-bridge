@@ -142,9 +142,9 @@ the install, unless `BRIDGE_UPDATE_CHECK_ENABLED` in the command's own
 environment says on, which overrides the file; an off set only in the
 service's environment (a systemd unit, a compose file) must be in your
 shell's too for the command to see it. An off saved in the console while a
-`bridge update` is swapping a new version in waits for the swap; on Windows,
-where the swap stops the bridge, the off is lost with the stop, so turn it
-off again once the bridge is back.
+`bridge update` is swapping a new version in waits for the swap and is saved
+once it is done; a swap that stops the bridge's Windows service is the
+exception, backlog B831: there, check the switch once the bridge is back.
 
 A release from before the switch refuses settings that write
 `update.checkEnabled`: before rolling back to one, turn the checks on in the

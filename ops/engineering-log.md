@@ -89730,13 +89730,13 @@ holder past the wait, every try answering ENOLCK, and any other failure are
 
 The bound is `LockState`'s wait, 30 s, which covers an install's hold with
 `scmStopWait` (15 s, held to half the wait by
-`TestAnSCMStopFitsInsideTheMarkersLockWait`). On Windows a `bridge update`
-past its decision stops the service that serves the save: the console's
-requests take serve's context, so the save's wait ends with the stop and
-answers 503 `stopping` (or nothing, where the connection goes first), the off
-lost, and the version installed starts with the checks as they were. The
-docs say so, and the console's failed save of an off with no answer says it
-may have been lost to an update's swap (`updateChecksOffLost`).
+`TestAnSCMStopFitsInsideTheMarkersLockWait`). The console's requests take
+serve's context, so a stop of serve ends the save's wait, nothing saved: 503
+`stopping`, or no answer where the connection goes first, which the
+console's failed save of an off adds words to (`updateChecksOffLost`). A
+`bridge update` whose swap stops the bridge's Windows service is backlog
+B831 (round 4 corrected this paragraph, which said it of every Windows
+install).
 
 The cases: the updater's `TestAnOffSavedAfterAnInstallsRereadLandsAfterItsSwap`
 (the CLI parked after its reread, `InstallOptions.holdAfterReread`, a seam
