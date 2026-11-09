@@ -98,8 +98,8 @@ func writeBundle(t *testing.T, root string, place int, age time.Duration, kind s
 // whose database FAILED or did not finish, one at most, and every PENDING
 // its bound has not passed. A files verdict of FAILED leaves a database
 // VERIFIED the recovery point. Red on main, which kept the keep newest and
-// nothing else, in every row but retention off's, which is the rule's
-// unchanged half.
+// nothing else, in every row but retention off's and keep 1 over verified
+// snapshots alone, the two the rule leaves as they were.
 func TestThePruneKeepsWhatRecoveryNeeds(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
