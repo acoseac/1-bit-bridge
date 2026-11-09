@@ -1302,6 +1302,14 @@ type TailscaleStatus struct {
 	// true. `omitempty` keeps the existing admin-tile JSON shape
 	// unchanged when a source has none to report.
 	TailscaleIPs []string `json:"tailscaleIPs,omitempty"`
+
+	// UploadsHeldOff says, in tsnet mode, what holds the embedded node's
+	// diagnostic-log uploads off where tailscale.uploadDiagnosticLogs allows
+	// them (the launch environment, this process earlier, or something else
+	// in it), and what makes the setting apply; empty where the setting does
+	// not allow them or nothing holds them off. A line of its own in the
+	// tile, so a node the tailnet accepted keeps its badge (backlog B749).
+	UploadsHeldOff string `json:"uploadsHeldOff,omitempty"`
 }
 
 // UpdateProvider is the read-side of the updater used by the admin

@@ -24,6 +24,7 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/logging/loggingtest"
 	"github.com/acoseac/1-bit-bridge/internal/metrics"
+	"github.com/acoseac/1-bit-bridge/internal/tsnet"
 	"github.com/quic-go/quic-go/http3"
 	"tailscale.com/ipn/ipnstate"
 )
@@ -569,6 +570,12 @@ func (n *fakeTsnetNode) Status(context.Context) (*ipnstate.Status, error) {
 }
 
 func (n *fakeTsnetNode) CertDomains() []string { return nil }
+
+func (n *fakeTsnetNode) LastStartError() error { return nil }
+
+func (n *fakeTsnetNode) Uploads() tsnet.Uploads { return tsnet.Uploads{} }
+
+func (n *fakeTsnetNode) LogsRequired(*ipnstate.Status) error { return nil }
 
 func (n *fakeTsnetNode) ListenTLS(string) (net.Listener, error) {
 	defer n.listenDoneOnce.Do(func() { close(n.listenReturned) })
