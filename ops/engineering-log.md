@@ -89164,3 +89164,26 @@ clean, and `go vet` of the two packages for the same four targets, clean;
 `rules-b652-r4.patch` applied to a `git archive` copy of this record's
 commit, where `make docs-check` and `TestEveryCitedTestNameExists` pass;
 `git status` clean after. Windows is not run here.
+
+## 2026-11-09 — B652 round 5: the Windows refusal the skips rest on, pinned
+
+Backlog B652's fifth round on `fix/b652-waveform-regen` (PR #1443), from
+12af8076 (round 4 and its rules), by the orchestrator, from round 4's Claude
+review: the skips' reason and the rules line said why Windows refuses the
+folder's rename while the repair's root is open, the root's handle sharing
+no delete, and no test showed it.
+
+Go 1.27.3's source does. `os.OpenRoot` (`src/os/root_windows.go`,
+`openRootNolog`) opens the directory with `syscall.Open`, whose share mode is
+`FILE_SHARE_READ | FILE_SHARE_WRITE` (`src/syscall/syscall_windows.go`,
+`Open`); `Root.OpenRoot`'s sub-roots (`rootOpenDir`) do share delete. The
+repair opens its root with `os.OpenRoot` (`internal/analyze/repair.go`).
+`TestAnOpenRootHoldsItsDirectory` (`internal/atomicwrite`, Windows only) now
+pins the refusal: a rename and a removal of a directory a root holds fail
+with a sharing violation, the directory stands after both, and the rename
+goes through once the root is closed. The rules line in
+`.claude/rules/build-ci-tests.md` names it, and its History says what it
+holds for.
+
+Windows was not run here: CI runs it. Checks here: gofmt over the new file,
+`go vet` of `internal/atomicwrite` for `GOOS=windows`, `make docs-check`.

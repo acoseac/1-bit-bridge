@@ -1366,7 +1366,7 @@ bound removed) are red there and green on every case whose step succeeds,
 which is why the check is there: a case whose step succeeds cannot see the
 path that hung.
 
-- **A case that renames or deletes a directory an `os.Root` holds open skips on Windows, by `runtime.GOOS` as its first statement, before any setup, naming why and the backlog id of the coverage it leaves: the root's handle there shares no delete, so Windows refuses that rename while the root is open** (2026-11-09, backlog B652's round 4). **Don't decide the skip by the rename's error, after the case's setup, or on another goroutine than the test's.** → History-rules-build-ci-tests.md
+- **A case that renames or deletes a directory an `os.Root` holds open skips on Windows, by `runtime.GOOS` as its first statement, before any setup, naming why and the backlog id of the coverage it leaves: the root's handle there shares no delete, so Windows refuses that rename while the root is open** (2026-11-09, backlog B652's round 4; round 5's `TestAnOpenRootHoldsItsDirectory`, in `internal/atomicwrite`, pins the refusal on Windows). **Don't decide the skip by the rename's error, after the case's setup, or on another goroutine than the test's.** → History-rules-build-ci-tests.md
 
 Go 1.27.3's `os.OpenRoot` on Windows opens the directory with
 `syscall.Open`, whose share mode is `FILE_SHARE_READ | FILE_SHARE_WRITE`;
@@ -1379,7 +1379,15 @@ the case's setup leaves the root open first; and a skip from the pool's
 worker ends that goroutine alone, as `t.Fatal` did. B652's round 4 skips
 six of the repair's cases and atomicwrite's root-rename case so
 (`whileTheRootIsOpen`), fsutil's root tests being `!windows` already.
-Record: `ops/engineering-log.md`, 2026-11-09, B652 round 4.
+Round 5 pins the refusal itself: `TestAnOpenRootHoldsItsDirectory`
+(`internal/atomicwrite`, Windows only) opens a root on an empty directory
+and requires a rename and a removal of that directory to fail with a
+sharing violation while the root is open, the directory to stand after
+both, and the rename to go through once the root is closed, so a Go
+release whose `os.OpenRoot` shares delete there turns it red. It holds
+for a root `os.OpenRoot` opens, as the repair's is (`Root.OpenRoot`'s
+sub-roots share delete).
+Records: `ops/engineering-log.md`, 2026-11-09, B652 rounds 4 and 5.
 
 ## B514 — deterministic medium evidence and controls (2026-10-23)
 
