@@ -276,6 +276,61 @@ func writeWaveformTmp(tmpPath, finalPath string, data []byte) error {
 	return nil
 }
 
+// curveProbe is what the probe before a decode decided: the channel count to
+// decode at and whether it is known, the decoder, and the probed duration and
+// the allowance the truncation check reads (probeChannels).
+type curveProbe struct {
+	channels                      int
+	channelsOK                    bool
+	tool                          decoderTool
+	expectedSec, primingAllowance float64
+}
+
+// curveSource is how a curve's samples are read: the probe, and the
+// streaming decode it chooses. toolchainSource is the one production source;
+// a test hands runAnalysis and runWaveformRepair one of its own, since a
+// host's tests may have no sox.
+type curveSource struct {
+	probe  func(ctx context.Context, srcAbs string) curveProbe
+	decode func(ctx context.Context, srcAbs string, pr curveProbe, onFrame func(frame []float64)) (totalFrames int64, err error)
+}
+
+// toolchainSource decodes through sox, or ffmpeg where sox cannot read the
+// source (probeChannels, decodeFrames).
+var toolchainSource = curveSource{
+	probe: func(ctx context.Context, srcAbs string) curveProbe {
+		channels, ok, tool, expectedSec, primingAllowance := probeChannels(ctx, srcAbs)
+		return curveProbe{channels: channels, channelsOK: ok, tool: tool,
+			expectedSec: expectedSec, primingAllowance: primingAllowance}
+	},
+	decode: func(ctx context.Context, srcAbs string, pr curveProbe, onFrame func(frame []float64)) (int64, error) {
+		return decodeFrames(ctx, srcAbs, pr.channels, pr.tool, pr.expectedSec, pr.primingAllowance, onFrame)
+	},
+}
+
+// decodeCurve decodes srcAbs through src and returns the `1BWF` bytes of its
+// peak envelope and how many buckets it holds: the ONE body RunAnalysis and
+// RunWaveformRepair render a curve with, the decode at the source's channel
+// count and its mono downmix, so a curve rendered again is the curve the
+// analysis rendered, byte for byte, and keeps its tag (backlog B652). also,
+// when set, is handed each frame and its downmix after the peaker has it:
+// RunAnalysis's measurements ride the same decode.
+func decodeCurve(ctx context.Context, src curveSource, srcAbs string, pr curveProbe, also func(frame []float64, mono float32)) (data []byte, buckets int, err error) {
+	pk := newPeaker(waveformBucketSamples)
+	total, err := src.decode(ctx, srcAbs, pr, func(frame []float64) {
+		mono := downmixFrame(frame)
+		pk.add(mono)
+		if also != nil {
+			also(frame, mono)
+		}
+	})
+	if err != nil {
+		return nil, 0, err
+	}
+	pk.finish()
+	return encodeWaveform(pk, AnalysisSampleRate, waveformBucketSamples, total), pk.count(), nil
+}
+
 // RunAnalysis decodes the source via sox, computes the peak waveform +
 // EBU R128 loudness, and writes the sidecar atomically (tmp + rename),
 // returning its path, content tag, size, and loudness. The pool fsyncs
@@ -288,6 +343,11 @@ func writeWaveformTmp(tmpPath, finalPath string, data []byte) error {
 // only the first N seconds. Cancellation flows via ctx →
 // exec.CommandContext (decodeFrames kills + reaps sox).
 func RunAnalysis(ctx context.Context, spec AnalyzeSpec) (Result, error) {
+	return runAnalysis(ctx, spec, toolchainSource)
+}
+
+// runAnalysis is RunAnalysis over src.
+func runAnalysis(ctx context.Context, spec AnalyzeSpec, src curveSource) (Result, error) {
 	finalPath := spec.SidecarPath()
 	// fsutil.MkdirAll and the KeepOwner below: a `sudo bridge analyze`
 	// over a service install left the waveform tree root's 0700 and every
@@ -310,8 +370,8 @@ func RunAnalysis(ctx context.Context, spec AnalyzeSpec) (Result, error) {
 	// (full interleaved frame — channel-aware R128). channelsOK is false
 	// when sox couldn't report the layout; we still decode (mono) for the
 	// waveform but skip loudness so a biased value is never stored.
-	channels, channelsOK, tool, expectedSec, primingAllowance := probeChannels(ctx, spec.SourceAbsPath)
-	pk := newPeaker(waveformBucketSamples)
+	pr := src.probe(ctx, spec.SourceAbsPath)
+	channels, channelsOK, tool := pr.channels, pr.channelsOK, pr.tool
 	// Allocate the loudness meter only when the channel layout is known — it
 	// holds a multi-second sliding K-weighting window (~150 KB), and every
 	// meter access below is already channelsOK-gated, so an unknown layout
@@ -328,9 +388,10 @@ func RunAnalysis(ctx context.Context, spec AnalyzeSpec) (Result, error) {
 	// honestly.
 	tp := newTruePeakMeter(channels)
 	dr := newDRMeter(channels)
-	total, err := decodeFrames(ctx, spec.SourceAbsPath, channels, tool, expectedSec, primingAllowance, func(frame []float64) {
-		mono := downmixFrame(frame)
-		pk.add(mono)
+	// The curve itself is decodeCurve's, which the waveform-only repair
+	// renders a missing curve with (RunWaveformRepair); the measurements ride
+	// the same frames.
+	data, buckets, err := decodeCurve(ctx, src, spec.SourceAbsPath, pr, func(frame []float64, mono float32) {
 		if channelsOK {
 			// Skip the per-sample K-weighting biquads when the channel layout
 			// is unknown — the loudness result is discarded below in that case.
@@ -343,8 +404,6 @@ func RunAnalysis(ctx context.Context, spec AnalyzeSpec) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	pk.finish()
-	data := encodeWaveform(pk, AnalysisSampleRate, waveformBucketSamples, total)
 
 	if err := writeWaveformTmp(tmpPath, finalPath, data); err != nil {
 		return Result{}, err
@@ -393,7 +452,7 @@ func RunAnalysis(ctx context.Context, spec AnalyzeSpec) (Result, error) {
 	}
 	logger.Debug("analyze ok",
 		"path", spec.SourceLibraryRel,
-		"buckets", pk.count(),
+		"buckets", buckets,
 		"bytes", len(data),
 		"channels", channels,
 		"loudness", res.HasLoudness,

@@ -88392,3 +88392,798 @@ on Linux; go1.27.3's gofmt is clean. The rules patch: `git apply --check` clean;
 43.6 KB) and `verify_moves.py --base HEAD` found no citation broken, its MISSING exactly the two blocks the
 patch edits (the gap-3 line, and its twin with the long form); every test name the patch cites exists. Not
 run here: the Windows cases, which CI's Windows leg runs, and macOS.
+## 2026-11-08 — B652: a waveform curve proven missing is rendered again on access, waveform only
+
+Backlog B652 on `fix/b652-waveform-regen` from main 3d0a0d05, worker b652 on
+legion0 (Ubuntu 26.04, linux/amd64, go1.27.3, `GOTOOLCHAIN=local`,
+`GOPROXY=off`). Commits: the fix and its tests 57081f5e; three to the tests
+alone, so that the guards run on the base-behaviour copy below (8d42fda3:
+the analysis pool's repair tests settle the pool before they assert its
+outcome, since on that copy no outcome comes; 4c25a675: "gone altogether"
+removes the waveform directory before the repair begins, since there no
+decode runs; 531277a0: the shutdown case waits for its repair to run, or
+for a pool with none); the five tests that pin the ladder's last step
+moved to v62 (43d83fa5, the gates below); and this record. The rules go into
+`.claude/rules/jobs.md` and `ops/History-rules-jobs.md` through
+`rules-b652.patch`, which this worker cannot commit.
+
+### What happened at main
+
+A curve moved with the data directory was adopted on its first lookup
+(#954), but one genuinely gone (ENOENT at the path its row records and at
+its canonical place under the waveform directory) stayed gone: every
+`GET /v1/waveform` answered 410, and the analysis skip gate, which keys on
+the source's mtime and size, never offered the track again, so only
+`bridge analyze --force`, a decode of the whole library, brought the curve
+back. `bridge doctor`'s `sidecar-paths` hint pointed there.
+
+### What counts as missing, and each verdict's action
+
+`integrity.DecideWaveform`, the one place a verdict becomes an action
+(the serve lookup, the catalog's judgment and the doctor read it alike):
+
+| `LocateWaveform`'s verdict | Action |
+|---|---|
+| present: the recorded path holds the curve | serve it |
+| relocated: the recorded path gone, the canonical one holding a file of the recorded size | adopt (#954, unchanged) |
+| missing: ENOENT at both | render again at the canonical path |
+| mismatched: the recorded path gone, a file of another size at the canonical one | render again, written beside it and renamed over it, never deleted first |
+| unknown: a stat that failed otherwise (EACCES, EIO, a wedged mount) | leave the row and the disk as they are |
+
+A missing curve with no waveform directory known leaves too: nowhere to put
+one.
+
+### The guard
+
+The judgment is the variant reapers' own decision over the waveform family.
+`sidecarFamily` parameterises the mount-loss probe (`dirSweepBlock`, its
+answer `SidecarDirBlock`, `VariantsDirBlock` until now), the walk behind it
+(`scanForSidecars`), the relocation decision (`massMissingRefusal`) and the
+identity check (`dirChanged`, over `fsutil.DirStillIs`, new); the variant
+entry points (`VariantsDirSweepBlock`, `MassDeleteRefusal`,
+`TreeHoldsVariantSidecars`, `scanForRenditions`, `VariantsDirChanged`)
+answer word for word as before, and the existing variant suites pass
+unchanged. `WaveformDirSweepBlock`, `WaveformDirChanged` and
+`ConsiderWaveformSidecar` are the waveform family's (`analyze --gc` weighs
+its files by the last two now, so a file the probe counts as a curve is a
+file the GC reclaims).
+
+`JudgeWaveformCatalog` judges every row that records a curve, never the one
+a lookup sees: over a directory emptied by hand every lookup proves its own
+row missing, and judged a row at a time browsing the library would be the
+mass re-analysis the reapers' guards refuse, one track at a time. It
+refuses while the directory is missing, holds no curve (a volume that is
+away; the last curve's deletion looks the same and is refused with it,
+while one deletion beside other curves proceeds), cannot be read, or has
+lost more than 20% of the rows' curves (missing or a partial copy) past the
+floor of ten while it holds others, and asks the directory again by
+identity after the rows (a volume that went during the classification
+leaves every later row reading as missing) and after the ratio's own walk.
+A judgment that admits names the rows it found to be regenerated and the
+directory it saw. `WaveformRegenGuard` makes it on a goroutine of its own,
+before the first regeneration and then at most once an hour; a lookup is
+answered from the judgment that stands, or is told to the next one's Admit;
+a row gone after a judgment waits for the next. Refusals log through the
+variant watcher's `refusalLatch`.
+
+### Who may ask, and the write path
+
+`GET /v1/waveform` looks its row up through `api.AnalysisStore.LookupWaveform`,
+`GET /v1/spectrum` through `LookupAnalysis`, which asks for nothing. The
+lookup answers as it always has (410 for a curve that is gone) and asks
+cmd/bridge's `waveformRegenerator`, which checks, at the lookup and again
+when the guard admits a row it was asked for while it judged: the live
+analysis gate; the row read again by its own source path and its verdict
+again; `collectAnalysisCandidates`' own rules for the source, factored out
+of it (`analysisSourceSkip`: no DSD, WavPack or Monkey's Audio file,
+nothing missing or a directory, no zero-byte file); its freshness
+(`analysisRowFresh`: only a row the walk skips as fresh is repaired, a row
+the walk offers goes through ordinary analysis); the analysis-failure
+suppression against the live stat (`analysisSuppressedNow`); the curve's
+stop; then the guard. The job is keyed on the row's source path and carries
+the directory's identity the judgment saw (`RepairSpec.OutputDirIdentity`).
+
+`analyze.RunWaveformRepair` asks that identity before it opens the source,
+the source's version before and after the decode, the identity again before
+it makes a directory (`mkdirBelow`, never the waveform directory itself)
+and just before its rename; it renders through `decodeCurve`, the body
+`RunAnalysis` renders with since this change, so a curve rendered again from
+an unchanged source is the analysis's byte for byte
+(`TestTheRepairRendersTheCurveTheAnalysisRenders`). `Pool.EnqueueRepair`
+shares the analysis queue, dedup, live gate, timeout and counting.
+`Store.CommitWaveformRepair` writes `waveform_path`, `waveform_tag` and
+`waveform_size` alone, compare-and-swap on the waveform columns, the source
+version, the schema and `created_at`, and advances `indexed_at` only when the
+tag changed.
+
+### The retry bound
+
+`waveform_regen_failures` (migration v62, keyed on the analysis row, `ON
+DELETE CASCADE`), apart from `analysis_failure.go`'s debounce, which is
+untouched: a failure on the curve's own account (`CountsAgainstTheCurve`:
+the decoder's verdict on a source still there and unchanged, or a curve
+rendered and not written, a failed fsync included) is counted against the
+build (`waveformRegenBuild`: `version.ServerVersion`, `+` and the commit,
+`-modified` for a modified tree) and the source's mtime and size; two stop
+the curve until either changes; a curve written again, by a repair or an
+analysis, clears the record. The per-job timeout, a shutdown, an
+unreachable or changed source, the waveform directory gone, a decoder that
+could not run and a refused commit count nothing.
+
+### The doctor
+
+`waveform-regeneration`, after `variants-index`: the curves proven missing
+(at neither location, or a partial copy), the relocated ones apart, a
+refusal by its kind in the guard's words with its reason, a judgment its
+budget stopped as undecided, and the curves whose regeneration stopped
+under this build, named; analysis off said in the hint. Warn, never fail.
+`internal/integrity`'s waveform.go package comment is rewritten for the
+verdicts' actions and the guard; `sidecar-paths`' waveform hint now says the
+next lookup renders such a curve again.
+
+### Reds and guards, against 3d0a0d05's behaviour
+
+3d0a0d05 has none of the fix's API, so the new tests do not build there.
+They ran on a copy of the tree at 43d83fa5 with the fix's entry points put
+back to what 3d0a0d05 does on these paths, the API kept so the tests
+compile (`.tmp/_b652/base_run.py`, predicted in
+`.tmp/_b652/base.predictions.txt` before its first run, at 4c25a675, which
+gave the same verdicts): B1 `LookupWaveform` asks the regenerator nothing;
+B2 `runWaveformRepairWith` renders and writes nothing; B3 `EnqueueRepair`
+queues nothing; B4 the store's repair commit and the five
+regeneration-failure methods record and find nothing; B5 `/v1/waveform`
+asks `LookupAnalysis`. All as predicted, every subtest included.
+
+Reds, each failing there with its count:
+
+| Test | On the base-behaviour copy |
+|---|---|
+| cmd/bridge `TestADeletedCurveIsRenderedAgainOnItsLookupKeepingItsMeasurements` | Enqueued 0, Done 0; want exactly 1 and done |
+| cmd/bridge `TestTwoCountedFailuresStopTheCurveAcrossARestart` | Enqueued 0, Failed 0 after three lookups; want exactly 2 |
+| cmd/bridge `TestAPartialCopyAtTheCanonicalPlaceIsReplaced` | Enqueued 0, 0 specs; want one repair of the canonical place |
+| cmd/bridge `TestARepairCarriesTheWaveformDirectoryItsJudgmentSaw` | 0 repairs; want 1 |
+| analyze `TestTheRepairReplacesAPartialCopyAtomically` | the repair renders nothing |
+| analyze `TestARepairThatFailsOnTheCurvesAccountIsCounted`, both subtests | Enqueued 0, Failed 0; want 1 and 1 |
+| analyze `TestARepairRecordsTheCurveAndNothingElse` | Enqueued 0, Done 0; want 1 and 1 |
+| manifest `TestARepairsCommitWritesTheWaveformAlone` | no bump; the waveform columns unchanged (`0badc0de`, 99) |
+| manifest `TestARepairMovesIndexedAtOnlyWhenTheTagChanges` | the changed tag's half: `indexed_at` unmoved, bumped false |
+| manifest `TestTheRegenerationFailureCountPersistsAndResets` | failure 1 counted 0; want 1 |
+| api `TestOnlyAWaveformRequestAsksForItsCurveToBeRenderedAgain` | after a waveform request, 2 LookupAnalysis and 0 LookupWaveform; want 1 and 1 |
+
+With the negative controls below, the same copy (control B) ran the
+positive tests this table leaves out, red as predicted:
+`TestAStoppedCurveOfAChangedSourceIsAnalysedAgain` (Enqueued 0; want the
+new version's curve rendered), analyze's
+`TestTheRepairRendersTheCurveTheAnalysisRenders`, the four cases of
+`TestARepairRefusesASourceThatIsNotItsRowsVersion` and two of
+`TestWhatARepairCountsAgainstTheCurve` (the repair renders nothing, so no
+refusal or verdict is the one wanted; its third case, a decoder that could
+not run, is green there, a failure that counts nothing), and manifest's
+`TestARepairsCommitWritesNothingOverARowThatChanged` (all four: nil, want
+`ErrAnalysisChanged`) and `TestARegenerationFailureMovesNothingAClientSees`
+(no record).
+
+Guards, green there: cmd/bridge
+`TestNoCurveIsRenderedAgainOverAWaveformDirectoryGoneAwayOrEmptied` (4
+subtests), `TestMixedCaseConcurrentLookupsEnqueueOnce`,
+`TestNoCurveIsRenderedAgainWithAnalysisOff`,
+`TestNoCurveOfASourceTheAnalysisSkipsIsRenderedAgain` (7),
+`TestARelocatedCurveIsAdoptedNotRenderedAgain`,
+`TestASpectrumLookupRendersNothing`,
+`TestTransientRepairFailuresEarnNoStrikeThroughTheLookup` (4),
+`TestARepairWritesNothingIntoAWaveformVolumeThatWentAfterItsLookup` (2, the
+real repair through a stand-in sox) and the shipped
+`TestAnalysisStoreAdapterAdoptsARelocatedWaveform`; analyze
+`TestARepairWritesNothingIntoAWaveformDirectoryThatWent` (5) and
+`TestTransientRepairFailuresEarnNoStrike` (6). Each asserts only what must
+not happen (an enqueue, a repair run, a curve or a directory made, a
+strike), so it is green where nothing is regenerated, and its negative
+controls below show the forbidden effect once its guard is removed.
+
+`TestServeRendersADeletedCurveAgainOnItsLookup` boots the real serve and
+waits for its analysis pool to take a job: on the copy none comes, so it
+was not run there; C24 below is its control.
+
+### Negative controls
+
+Thirty, on 531277a0, predicted by name in
+`.tmp/_b652/controls.predictions.txt` before the first ran (133 verdicts,
+each red or green). `.tmp/_b652/controls.py` applied each control's edits to
+a copy of the tree, never the worktree, each edit with the number of
+matches it had to find, ran the named tests with `go test -run` in each
+named package, and put the copy's bytes back before the next; `git status`
+clean after. All 133 verdicts as predicted.
+
+| Control | Removed | Red, and what it showed |
+|---|---|---|
+| C1 | the judgment's mount-loss probe | cmd/bridge's "a volume away" (1 repair enqueued and run, `Artist/` made in the mountpoint's own directory) and "the last curve deleted" (1 repair); the doctor's "the directory gone" (refused as away, not gone); integrity's three probe cases; `TestTheGuardsRefusalStandsForItsInterval`. Green: "the directory removed" (the identity recheck refuses it) and "emptied past the threshold" (the ratio) |
+| C2 | the emptied ratio | "emptied past the threshold" (11 repairs enqueued and run); the doctor's line (12 curves proven missing, no refusal); integrity's three ratio cases |
+| C3 | C1, and both identity rechecks | "the directory removed" (1 repair; the waveform directory made again); integrity's "the directory gone" |
+| C4 | the repair's directory check | analyze's five cases (a decode over a directory that went; `Artist/Album/01.wav.waveform.bin` made in the directory now at the path; a strike for "gone altogether" and "before the rename"; a repair carrying no identity writing its curve), `TestARepairOverAWaveformDirectoryThatWentSaysSo`, cmd/bridge's two volume cases (a curve made; a strike) |
+| C5 | C4, and `fsutil.MkdirAll` for `mkdirBelow` | "gone altogether" and cmd/bridge's "removed": the waveform directory made again |
+| C6 | the pool's dedup | 12 repairs for one curve asked under 4 spellings; 3 for the one deleted curve (2 failing on the moved row); `TestPoolDedupAndQueueFull` |
+| C7 | the job keyed on the row's path (the request's spelling instead) | `TestARepairCarriesTheWaveformDirectoryItsJudgmentSaw`: 0 repairs for an upper-case request; never more jobs (`TestMixedCaseConcurrentLookupsEnqueueOnce` green) |
+| C8 | the regenerator's live analysis gate | analysis off: 1 repair enqueued (the pool's own gate drops it, a second layer) and the catalog judged |
+| C9 | `analysisSourceSkip`'s DSD, WavPack, Monkey's Audio and zero-byte skips | a DSF, a DFF, a WavPack, a Monkey's Audio and a zero-byte source: 1 repair each, its curve written |
+| C10 | the analysis-failure suppression | a suppressed source: 1 repair |
+| C11 | the freshness check | a source changed since its row: 1 repair |
+| C12 | a relocated curve's adoption (read as missing) | `TestARelocatedCurveIsAdoptedNotRenderedAgain`, the shipped `TestAnalysisStoreAdapterAdoptsARelocatedWaveform`, `TestEveryWaveformVerdictHasItsAction` |
+| C13 | what counts (every failure counted) | analyze's four transient cases strike (the timeout and the shutdown stay green, their own layers), and so do the directory and source cases through `CountsAgainstTheCurve`; cmd/bridge's four transient cases strike through the lookup |
+| C14 | the per-job timeout's layer | the timed-out repair counted (`Failures:1`, `sox: killed`) |
+| C15 | the shutdown's layer | the stopped repair counted (the same) |
+| C16 | the waveform-only commit (a whole analysis row instead) | the measurements gone, in analyze, through the lookup and through serve |
+| C17 | the tag's condition on `indexed_at` | an unchanged tag moved it |
+| C18 | the compare-and-swap (the source path alone) | commits over a row an analysis rewrote, an adoption moved or a changed source rewrote: nil, want `ErrAnalysisChanged` (a deleted row still refused, green) |
+| C19 | the stop (`StopsFor` answers false) | 3 repairs in three lookups, want 2; the record stops nothing |
+| C20 | the interval | a judgment at every ask; a refusal that does not stand |
+| C21 | the admissions of the rows asked while a judgment ran | none admitted; 0 repairs (a lookup after the judgment is still admitted from it, green) |
+| C22 | `/v1/spectrum`'s lookup (asking `LookupWaveform`) | 0 LookupAnalysis and 1 LookupWaveform for a spectrum request |
+| C23 | the spectrum lookup's silence (`LookupAnalysis` regenerating) | the spectrum lookup enqueued a repair |
+| C24 | serve's wiring of the regenerator | serve's pool took no job (Enqueued 0) by the test's give-up, 120 s in |
+| C25 | the identity the job carries | the spec without it; through serve, the real repair refuses the job (Enqueued 1, Failed 1) |
+| C26 | the build in `StopsFor` | under a new build nothing rendered again (Enqueued 0); build-a's record stops build-b |
+| C27 | the source's version in `StopsFor` | the changed source's curve not rendered again (Enqueued 2, want 3) |
+| C28 | the count's restart for another build or version | a new build's failure counted 3, a changed source's 4 |
+| C29 | the standing judgment's own rows (`Ask` admits any) | a curve gone after the judgment admitted at once, want it left to the next |
+
+Every guard above has its controls (C1 to C6, C8 to C15 and C23), and so
+do the reds' and the serve test's load-bearing assertions (C7, C16 to C22
+and C24 to C29).
+
+### The gates
+
+Through the shared build lock, on go1.27.3, go.mod's.
+
+At 531277a0 (the gate in `.tmp/_b652/controls.py`, after the controls):
+`make test` (`-race`, `-timeout 30m`) over the brief's six package trees
+and internal/fsutil, internal/transcode and internal/admin, every package
+green but cmd/bridge, where five tests that pin the store ladder's last
+step failed, as they ask a new migration to answer for itself:
+`requireTheLatestSchema` looked for v61's column, which a store one step
+behind now holds, and the crash rollback's obstacle stood in v61's way with
+the store one step behind (`TestAMigrationThatFailsStillRefusesTheRollback`,
+`TestAMigrationWhoseRecordCannotBeWrittenDoesNotRun`,
+`TestALateFirstStartOfTheInstalledVersionCompletesItsInstall`,
+`TestATargetWhoseSettingsAreFixedConfirmsAnInterruptedRollback`,
+`TestALaterCommandOfTheVersionRolledBackRefusesToMigrateOnceThePreviousVersionBoots`).
+43d83fa5 names v62's table in `latestSchemaPresent`, which
+`requireTheLatestSchema` and the refused record's check ask, and keeps the
+obstacle in v61's way with the store put at v60, since v62, one `CREATE
+TABLE`, changes nothing before it can fail; the five, and
+`TestACommandsMigrationRefusesTheRollbackToo`, green with `-race`. In the
+same run the new tests by name with `-race` (43 tests and 68 subtests,
+green), `make vet` for linux/amd64, windows, darwin and linux/386, and
+`make build-all`, its build-tag census included, clean.
+
+At d9e0dc65 (`.tmp/_b652/gate2.py`): `make test` over every package, 88 of
+89 green (internal/manifest in 1631 s, internal/admin in 1057 s,
+internal/backup in 271 s, internal/updater in 31 s; the Linux-only ones run
+for real here: internal/alsa, internal/alsapcm on this host's ALSA,
+internal/atomicwrite, internal/player/hotplug, internal/usbid, and
+internal/fsutil's identity paths), and cmd/bridge, in 1345 s, red in one
+subtest, `TestAMatchWhoseReQueueDidNotLandIsReQueuedByTheNextSweep`'s
+"cancelled inside the reset by a switch-off", whose fixture refused its own
+timing ("the first sweep's re-queue landed: the case tests nothing"): the
+fingerprint sweep's, nothing this change touches, green in the first run's
+cmd/bridge and five times of five alone under `-race`. The four vets and
+`make build-all` clean.
+
+At d9e0dc65 again (`.tmp/_b652/gate2.py brief`), the brief's gate as
+written, `GOTOOLCHAIN=go1.27.3 make test TEST_PKGS='./internal/integrity/...
+./internal/analyze/... ./internal/api/... ./internal/manifest/...
+./internal/doctor/... ./cmd/bridge/...'` with TMPDIR on this disk: green,
+every package (internal/integrity 5 s, internal/analyze 54 s, internal/api
+146 s, internal/manifest 1614 s, internal/doctor 7 s, cmd/bridge 1301 s).
+
+Outside the lock: go1.27.3's own gofmt over every Go file the branch
+changes, clean; `rules-b652.patch` applied to a `git archive` copy of the
+final HEAD, where `make docs-check` passes (CLAUDE.md 82.1%, the worst load
+67.7%; jobs.md 27,191 bytes) and cmd/bridge's `TestEveryCitedTestNameExists`
+passes, git reading this worktree's index; `git status` clean after.
+
+## 2026-11-08 — B652 round 2: the guard counts curves, not links; a repair works through the directory it judged and commits only while it and the source are the ones it read
+
+Backlog B652's second round on `fix/b652-waveform-regen` (PR #1443), from
+27dbabd9 (round 1 and the rules commit on it), worker b652 on legion0
+(Ubuntu 26.04, linux/amd64, go1.27.3, `GOTOOLCHAIN=local`, `GOPROXY=off`).
+Seven points, from round 1's two reviews and the two reviews of the brief.
+Commits: the fix and its tests 5a9dcf6e; two seams and three subtests that
+pin rooted operations no other test reached (e531b1ce); the named-pipe test
+(46efd48b); and this record. The rules go into `.claude/rules/jobs.md` and
+`ops/History-rules-jobs.md` through `rules-b652-r2.patch`, which this worker
+cannot commit.
+
+### Before point 1: no path of the bridge's own removes a curve and keeps its row
+
+The last look below refuses a tree holding no curve while rows record one,
+so a path that removed curves and kept their rows' waveform fields would be
+refused for good. Read in the tree at 27dbabd9: `track_analysis.source_path`
+references `tracks(path)` `ON DELETE CASCADE`, and every store path that
+unlinks curves lists the curves of the rows it deletes, by its own DELETE's
+predicate, and unlinks them once the rows are gone: `DeleteTrack` (one
+path), `DeleteTracksByPrefix` (the same byte range), `DeleteTracksBatch`
+(the same chunk, in its transaction), the threshold reap
+(`IncrementMissingTracks`, its `waveformWhere` shared with the DELETE, B186),
+`WipeAllTracks` and `WipeFilesystemTracks` (every curve; the latter spares
+the UPnP-routed rows, and the analysis enumerates local rows alone,
+`TrackPathsLocal`'s anti-join, so no routed row records a curve).
+`bridge analyze --gc` unlinks only files no row records (`KnownSidecarKey`,
+`ReclaimOrphan`'s re-check), the background orphan sweep walks the variants
+directory alone, and `RunAnalysis` and the repair replace a curve by a
+rename, removing only their own scratch. So there is nothing to clear.
+
+### Reds first, at round 1's code
+
+The new tests, with the two seams they need (integrity's `afterProbe`,
+analyze's `beforeMkdir`) and no fix, on 27dbabd9, predicted in
+`.tmp/_b652/r2/reds.predictions.txt` before the run: 23 verdicts, all as
+predicted.
+
+| Test | At 27dbabd9 |
+|---|---|
+| integrity `TestALinkIsNeverACurve`, a link to an empty folder | admitted: Missing 3, no refusal |
+| …, a link to a curve-named file | the link counted as a curve: Present 1, admitted |
+| `TestTheTreeIsLookedAtAgainBeforeAnyAdmission`, a whole judgment | two rows below the floor, the second curve deleted after the probe: Missing 2, admitted |
+| …, a bounded judgment | undecided (Looked 1), never refused |
+| `TestAGuardWhoseLogIsBlockedStillAnswersAndCloses`, an ask and the close | each waited on the lock the judgment logged its refusal under |
+| analyze `TestARepairWorksOnlyThroughTheDirectoryItWasAdmittedOn` | the stale scratch's removal by path deleted the scratch sentinel in the folder put at the path |
+| `TestARepairCommitsOnlyWhileItsDirectoryAndItsSourceAreTheOnesItRead`, both cases | committed (Done 1), the row moved |
+| `TestASyncFailureIsClassifiedAsEveryWriteFailureIs`, after the folder was replaced | counted: "the curve could not be written: input/output error" |
+| `TestASourceItCannotReadIsUnreachable`, its three cases | the source at mode 0 decoded, "sox FAIL formats: can't open input file" counted, a strike through the pool |
+| `TestARepairWritesNothingIntoAWaveformDirectoryThatWent`, before the rename (its new assertion) | the scratch left in the directory moved aside |
+| cmd/bridge `TestNoCurveIsRenderedAgainOverAWaveformDirectoryGoneAwayOrEmptied`, only a link to an empty folder | 1 repair enqueued and run, its curve written, `Album/` made through the link |
+| `TestTheDoctorReportsWhatTheRegenerationGuardJudges`, the directory gone, and doctor's `TestTheWaveformRegenerationLineSaysEachStateApart`, a refusal before any row was looked at | "(the first 0 of 3 row(s))" after the refusal |
+
+Green there, as predicted: a curve still there admits; a sync failure with
+the folder as it was is counted; the doctor's undecided line; and
+`TestTheRepairKeepsTheOwnersOfWhatItMakes`'s two simulated cases, since
+round 1's `fsutil.Mkdir` and `KeepOwner` keep the owners by path and the
+test guards that the calls through the root keep them too (its controls
+below are its red). Its as-root case skips here, where the suite runs as a
+user. The pins added after the fix (another directory by the last look, an
+empty folder, a folder put there between the last check and the rename, the
+named pipe) were not run at round 1's code: their controls below (R2b, R3c,
+R3e, R6c) are their red.
+
+### What round 2 built
+
+1. **A curve is a file.** `sidecarFamily.links`: true for the variants (a
+   link to a directory may lead to renditions the scan does not follow, a
+   link to a rendition counts), false for the curves, whose probe counts
+   regular files alone, a link nothing to it. And the judgment looks at the
+   tree once more, after its second identity check and before it admits or
+   says it is undecided, whatever the floor and the ratio said: a tree
+   holding no curve then, while the rows record one, is refused as the
+   probe refuses it ("looked at again before admitting: …"), and one in
+   another directory than the judgment began on is a volume away
+   (`os.SameFile` with the first probe's handle).
+2. **One root per repair** (`repairDir`). The path is asked against the
+   job's identity before the source is opened; once the decode is done the
+   directory is opened as an `os.Root` and compared with that identity
+   (`rootIdentity`, from a handle opened through the root, since a stat by
+   path on Windows reads the identity at the comparison); and through the
+   root go every directory (`fsutil.MkdirIn`), the scratch (`root.OpenFile`,
+   `fsutil.KeepOwnerIn`), the stale scratch's removal and the deferred
+   cleanup (`root.Remove`), the rename (`atomicwrite.RenameInRootCtx`, on
+   RenameWithRetry's schedule, without `commitDirEntry`, which would sync the
+   directory at the path) and the pool's sync (`fsutil.FsyncInRoot`: the
+   file and its directory, opened through the root). As root, `MkdirIn`
+   gives a new directory the owner of the one it is made in and
+   `KeepOwnerIn` gives the scratch the owner of the entry it replaces, or of
+   its directory, each read through the root. The pool makes the job's
+   `repairDir` and hands it to the runner (`RepairSpec.dir`), so the
+   runner's writes and the pool's sync and checks share one root; a repair
+   run by itself opens its own.
+3. **The commit's checks** (`Pool.beforeCommit`): the sync through the
+   root, then the directory at the path compared with the root
+   (`repairDir.atPath`), then the source's mtime and size with the job's
+   (`sourceStillDescribed`). A mismatch commits nothing and counts nothing:
+   the directory's is `ErrWaveformDirAway`, the source's `ErrSourceChanged`,
+   which leaves it to ordinary analysis (backlog B819).
+4. **The sync's failure** goes through `writeFailure`: with the directory at
+   the path no longer the root it is the directory's refusal, a cancellation
+   is the context's, and anything else is `ErrCurveNotWritten`, counted.
+5. **A source the repair cannot read** (`sourceReadable`, before the probe
+   and again before a decoder's `SourceUnreadable` verdict is returned): a
+   regular file of the row's size and mtime (`sourceStillDescribed`, which
+   refuses anything else as `ErrSourceChanged` before anything opens it),
+   opened as a file (`fsutil.OpenAsFile`) and read for one byte. A failed
+   open or read is `ErrSourceUnreachable`, counting nothing; an empty read of
+   a file whose size said otherwise is another version.
+6. **No log under the lock.** `noteLocked` updates the refusal latch under
+   the guard's lock and returns the line to say, which `judge` says once the
+   lock is let go; `Close` says that its grace ran out from a goroutine of
+   its own, so it returns within `stopGrace` whatever the log does.
+7. **The doctor's scope**, "the first N of M row(s)", is said only where
+   0 < Looked < Rows.
+
+`internal/integrity/waveform.go`'s package comment says what this built: a
+volume that goes before the decode is done gets nothing and no strike; one
+that goes after the root opened gets nothing at its path and no strike
+(backlog B819).
+
+### Negative controls
+
+Twenty-six, on 46efd48b, predicted by name in
+`.tmp/_b652/r2/controls.predictions.txt` before the first ran (70 verdicts).
+`.tmp/_b652/r2/controls.py` applied each control's edit to a copy of the
+tree, never the worktree, the edit with the one match it had to find
+(checked beforehand, with each mutated file parsing, by `check_counts.py`),
+ran the named tests in each named package and put the copy's bytes back
+before the next. All 70 as predicted; `git status` clean after.
+
+| Control | Removed | Red, and what it showed |
+|---|---|---|
+| R1 | the curves' no-links case | both link cases admitted (Missing 3; Present 1); cmd/bridge's link case: 1 repair run, `Album/` made through the link. Green: the variant probe's link cases, the last curve deleted |
+| R1v | the variants' `links: true` | the variant probe's "a link to a directory keeps it healthy" and "a link to a rendition counts" ("holds no rendition"). Green: the curves' link cases |
+| R2 | the last look's refusal | the whole judgment admitted and the bounded one undecided. Green: another directory by the last look (its identity check), a curve still there |
+| R2b | the last look's identity comparison | another directory at the path, holding a curve of its own, admitted |
+| R3a | the stale scratch's removal through the root (by path instead) | the scratch sentinel in the folder at the path deleted |
+| R3b | the deferred cleanup through the root (by path) | the scratch sentinel deleted, and the scratch left in the directory the repair was admitted on; the "before the rename" case the same |
+| R3c | `fsutil.MkdirIn` (`os.Mkdir` by path) | an empty folder put at the path got `Artist` and `Artist/Album`; as root no directory given its parent's owner |
+| R3d | the scratch's create through the root (by path) | the scratch sentinel overwritten with the curve's bytes |
+| R3e | the rename through the root (`RenameWithRetryCtx` by path) | the scratch sentinel renamed over the curve sentinel, and no curve in the directory the repair was admitted on |
+| R3f | the root's comparison with the job's identity | a folder put at the path during the decode got the curve and its directories |
+| R3g | the check of the path before the rename | the curve renamed into the directory moved aside |
+| R4a | the check of the directory before the commit | committed (Done 1) after the folder was replaced past a successful sync. Green: the source's case, the sync failure's |
+| R4b | the check of the source before the commit | committed (Done 1) with the source's mtime moved during the sync. Green: the folder's case |
+| R5 | `writeFailure` for the sync (`curveNotWritten` instead) | a sync failing once the folder was replaced counted ("the curve could not be written"). Green: with the folder as it was |
+| R6a | the open and the read before the probe (the stat alone) | a decoder started over the mode-0 source. Green: the source made unreadable during the decode and the pool's case, which the check before a verdict catches, and the named pipe |
+| R6b | the check before a verdict | a source made unreadable during the decode: "sox FAIL formats: can't open input file", counted |
+| R6c | the regular-file check | the named pipe opened: "the source could not be reached: open: named pipe is not a file", where the stat's refusal is wanted |
+| R7a | the line said once the lock is let go (said under it) | the ask and the close each waited on the blocked sink |
+| R7b | Close's warning on a goroutine of its own | the close waited on the blocked sink. Green: the ask |
+| R8 | the scope's lower bound | "(the first 0 of 3 row(s))" on the doctor's line, in internal/doctor and in cmd/bridge. Green: undecided |
+| F1 | `MkdirIn`'s owner as root | no owner given: `TestMkdirInMakesTheDirectoryThroughItsRoot` and the repair's new curve. Green: a partial copy replaced, its directories there already |
+| F1b | `MkdirIn` as root through the root (by path) | `a` made at the path, so `a/b` could not be made in the directory the root opened |
+| F2 | `KeepOwnerIn` as root | no owner given: fsutil's test and the repair's two simulated cases |
+| F2b | `KeepOwnerIn`'s lookup through the root (by path) | the replaced entry's owner read at the path: 4001, want 4999 |
+| F3 | `FsyncInRoot`'s open through the root (by path) | the root's own file not synced, and a file only the path's directory holds synced |
+| A1 | `RenameInRootCtx` through the root (by path) | the rename failed: the scratch is not at the path |
+
+Every point has its controls: point 1 R1, R1v, R2 and R2b; point 2 R3a to
+R3g, F1 to F3 and A1; point 3 R4a and R4b; point 4 R5; point 5 R6a to R6c;
+point 6 R7a and R7b; point 7 R8. Two of the changes no test here can see:
+`syncDirIn`'s reach (a directory synced at the path rather than through the
+root shows nothing), and `sourceReadable`'s one-byte read past an open that
+succeeded (no portable way to make a regular file open and then fail its
+read).
+
+### The gates
+
+Through the shared build lock, on go1.27.3, go.mod's, with TMPDIR on this
+disk (`.tmp/_b652/r2/gate.py`, two sessions).
+
+At c27f5610, the brief's gate as written, `GOTOOLCHAIN=go1.27.3 make test
+TEST_PKGS='./internal/integrity/... ./internal/analyze/... ./internal/api/...
+./internal/manifest/... ./internal/doctor/... ./cmd/bridge/...'`: green,
+every package, in 1656 s (internal/integrity 6 s, internal/analyze 61 s,
+internal/api 151 s, internal/manifest 1641 s, internal/doctor 7 s,
+cmd/bridge 1331 s). Then the round's new and changed tests by name with
+`-race` in the six packages that hold them (20 tests, 75 subtests): green,
+the as-root ownership case skipped, saying why.
+
+At 65105d14, which changes a test's comment and nothing else: `make test`
+over every other package of the module (61, 14 with no tests), green,
+internal/fsutil's identity and rooted paths, internal/atomicwrite's durable
+writer and rename, internal/alsa and internal/alsapcm (this host's ALSA)
+and internal/player/hotplug among them, run here for real (internal/admin
+1034 s, internal/backup 276 s, internal/transcode 206 s, internal/alsapcm
+86 s, internal/atomicwrite 20 s); `make vet` for linux/amd64, windows,
+darwin and linux/386; and `make build-all`, its build-tag census included:
+all clean.
+
+Outside the lock: go1.27.3's own gofmt over every Go file round 2 changes,
+clean; `rules-b652-r2.patch` applied to a `git archive` copy of 65105d14,
+where `make docs-check` passes (CLAUDE.md 82.1%, the worst load 67.7%;
+jobs.md 30,722 bytes) and cmd/bridge's `TestEveryCitedTestNameExists`
+passes, git reading this worktree's index, and fails, naming the file, once
+a name no test has is planted in the copy's jobs.md; `git status` clean
+after.
+
+## 2026-11-09 — B652 round 3: one check before a countable verdict; the parent's barrier and both reads pinned
+
+Backlog B652's third round on `fix/b652-waveform-regen` (PR #1443), from
+b5b17337 (round 2, its rules commit, and main merged in), worker b652 on
+legion0 (Ubuntu 26.04, linux/amd64, go1.27.3, `GOTOOLCHAIN=local`,
+`GOPROXY=off`). Five points, from round 2's two reviews and the two reviews
+of the brief. Commits: the fix and its tests 2e4d11b3, and this record. The
+rules go into `.claude/rules/jobs.md` and `ops/History-rules-jobs.md`
+through `rules-b652-r3.patch`. What this round leaves open is backlog B819.
+
+### Reds first
+
+Point 1 at round 2's code, b5b17337 with the round's two seams and its
+tests and no fix, predicted in `.tmp/_b652/r3/reds.predictions.txt` before
+the run: 16 verdicts, all as predicted.
+
+| Test | At b5b17337 |
+|---|---|
+| analyze `TestADecodersVerdictCountsOnlyOverTheFolderItWasAdmittedOn`, the runner | "sox FAIL formats: can't open input file", counted, where `ErrWaveformDirAway` is wanted |
+| …, through the pool | a failure recorded against the curve (Failures 1) |
+| `TestAFailedSyncCountsOnlyWhileTheSourceIsTheOneRead`: the source rewritten, removed, no longer opened, no longer read | a failure recorded in each: "the curve could not be written: input/output error" |
+
+Green there, as predicted: the new tests of points 2 to 4, which pin what
+round 2 built, and their neighbours. Their reds are mutations of the code
+each pins, on a copy of that tree (`.tmp/_b652/r3/reds_mut.predictions.txt`,
+12 verdicts, all as predicted):
+
+| Mutation | Red, and what it showed |
+|---|---|
+| M2: the parent opened by its path | "the barrier synced the directory at the path, not the one the root holds"; round 2's `TestFsyncInRootSyncsTheFileItsRootHolds` green under it, as the review said |
+| M3a: the read before the probe removed | a source whose read fails decoded and its curve written; through the pool committed (Done 1) |
+| M3b: the read before a verdict counts removed | "sox FAIL formats: can't read input file", counted; through the pool a failure recorded |
+| M4: links counted as curves | the guard answering admitted and the doctor's line "2 curve(s) proven missing", beside the subtest's round-2 assertions |
+
+On point 4: round 2's own assertions in that subtest fail under links
+counted too (round 2's R1: one repair run, `Album/` made through the link),
+because this fixture's runner writes by path (`writeRepairedCurve`), not
+through the real repair's root, whose steps the review traced. The new
+assertions fail under M4 on their own.
+
+### What round 3 built
+
+1. **One check before a countable verdict** (`askBeforeCounting`), wherever
+   a race can reach one: the directory at the path still the repair's (its
+   root once open, the job's identity before), else `ErrWaveformDirAway`;
+   the job not cancelled, else the context's, as `writeFailure` answered it,
+   before the source is opened; and the source still its row's version and
+   readable (`sourceReadable`: its stat, its open and a byte read), else
+   its refusal. It runs before a decoder's `SourceUnreadable` verdict is
+   returned and in `writeFailure`, which every write's failure and the
+   pool's sync go through. The two returns of `repairDir.rel` are path
+   arithmetic, which no race changes, and are not asked;
+   `CountsAgainstTheCurve`'s doc says so. A decoder's verdict on a job
+   already cancelled is now the context's, which the pool counted no more
+   than before (a shutdown by `p.closed`, the timeout before asking).
+2. **The parent's barrier observed**: `dirSyncSeen` shows a test each
+   descriptor `syncDirIn` syncs, and
+   `TestFsyncInRootSyncsTheParentItsRootHolds` compares it, by identity,
+   with the directory the root holds and the one at the path, both there.
+3. **Both reads pinned on every host**: `RepairSpec.open` is the repair's
+   own open of its source (`openSourceFile` in production), which a test
+   makes fail at the open or at the read, as root and on Windows alike, and
+   `TestBothReadsOfTheSourceAreAskedOnEveryHost` asks each read alone.
+4. **The link rule's own assertion**: the subtest asks the guard's answer
+   (refused, a volume away), the doctor's whole line, and that no failure is
+   recorded against any of the three curves.
+5. **The words**: B819 by its id alone in `ErrSourceChanged`'s doc, the
+   waveform package doc, `Pool.beforeCommit`'s doc, three test docblocks
+   and the two passages of round 2's record above; the rules and History
+   through the patch.
+
+### Negative controls
+
+Eight, on 2e4d11b3, predicted by name in
+`.tmp/_b652/r3/controls.predictions.txt` before the first ran (40
+verdicts), each edit with the one match it had to find, on a copy of the
+tree: all 40 as predicted, every red a test failure; `git status` clean
+after.
+
+| Control | Removed | Red, and what it showed |
+|---|---|---|
+| C1a | the one check's directory step | the verdict over a replaced folder counted, in the runner and through the pool; round 2's sync failure after the folder was replaced counted again. Green: the source's cases, both reads |
+| C1b | the one check before a verdict (round 2's source check alone) | the verdict over a replaced folder counted, both ways. Green: the sync's cases, both reads |
+| C1c | the one check in `writeFailure` (round 2's directory and cancellation alone) | a failure recorded for each of the four source cases. Green: the decoder's, round 2's sync test |
+| C2 | the parent's open through the root | "the barrier synced the directory at the path". Green: round 2's file test |
+| C3a | the read before the probe | a decoder started and the curve written for a source whose read fails; round 2's mode-0 case's decoder started too. Green: the read before a verdict |
+| C3b | the read before a verdict counts, and in `writeFailure` with it | the verdict counted, both ways; the sync's no-longer-opened and no-longer-read cases recorded; round 2's mode-0 case made unreadable during the decode counted. Green: the read before the probe, the rewritten and removed cases (the stat sees them) |
+| C3c | the read itself, at both sites, the open kept | both read cases and the sync's no-longer-read case. Green: the no-longer-opened case, round 2's mode-0 cases (the open sees them) |
+| C4 | the curves' no-links case (links counted as curves again) | the subtest's new assertions and its round-2 ones, and `TestALinkIsNeverACurve`. Green: the last curve deleted |
+
+Point 5 has no behaviour of its own to mutate: no committed text outside
+the rules and History, which the patch changes, describes what B819 holds.
+
+### The merge's interaction: the doctor's gate (8ac59de9)
+
+The first gate run, at e6bd7544, failed in cmd/bridge alone, in a test of
+main's B741: `TestServeRefusesWhatTheBareMountPointHoldsOnceItsRecordHoldsAnIdentity`,
+its database cases, "the doctors changed what is under" the bare mount
+point, its empty `bridge.db` turned into a SQLite file. B741 has every store
+probe of `bridge doctor` ask `doctorStoreGate` before it opens the store;
+B652's `waveform-regeneration` probe, from before B741, asked nothing, and
+opened (and migrated) the stray database. Red alone at e6bd7544 and on an
+archive copy of the merge, b5b17337, green on main's side, 9d59c8f6: the
+merge's interaction, not this round's change. 8ac59de9 has the probe ask the
+gate as its siblings do, and lists it in the gate's doc. Its control, C5
+(the probe's gate removed, on a copy of 8ac59de9, predicted first): the
+database cases red, the lock-file case and
+`TestTheDoctorReportsWhatTheRegenerationGuardJudges` green, as predicted.
+
+### The gates
+
+Through the shared build lock, on go1.27.3, go.mod's, with TMPDIR on this
+disk (`.tmp/_b652/r3/gate.py`), at 8ac59de9: the brief's gate as written,
+`GOTOOLCHAIN=go1.27.3 make test TEST_PKGS='./internal/integrity/...
+./internal/analyze/... ./internal/fsutil/... ./internal/doctor/...
+./cmd/bridge/...'`, green, every package, in 1365 s (internal/integrity
+6 s, internal/analyze 63 s, internal/fsutil 4 s, internal/doctor 7 s,
+cmd/bridge 1343 s), internal/fsutil's identity and rooted paths run here
+for real; the round's new and changed tests by name with `-race` (11
+tests, 42 subtests), green, none skipped; `make vet` for linux/amd64,
+windows, darwin and linux/386, and `make build-all`, its build-tag census
+included: clean. The first run, at e6bd7544, was the same but for
+cmd/bridge's failure above.
+
+Outside the lock: go1.27.3's own gofmt over every Go file round 3 changes,
+clean; `rules-b652-r3.patch` applied to a `git archive` copy of 8ac59de9,
+where `make docs-check` passes (CLAUDE.md 82.1%, the worst load 67.5%;
+jobs.md 31,848 bytes); `git status` clean after.
+
+## 2026-11-09 — B652 round 4: the folder-replacement cases on Windows, and no wait without a bound
+
+Backlog B652's fourth round on `fix/b652-waveform-regen` (PR #1443), from
+14098634 (round 3 and its rules), worker b652 on legion0 (Ubuntu 26.04,
+linux/amd64, go1.27.3, `GOTOOLCHAIN=local`, `GOPROXY=off`), from CI run
+42560924562, red on `test (windows-latest)` alone, and the two reviews of
+the brief. Commits: the skips, the hooks' failures and the waits' bound
+fc54d4ef, the pool stop's bound a8b454b7, and this record. The rules go into
+`.claude/rules/jobs.md`, `.claude/rules/build-ci-tests.md` and their History
+files through `rules-b652-r4.patch`. Windows was not run here: CI runs it.
+
+### What CI showed, and why
+
+On windows-latest the three cases of
+`TestARepairWorksOnlyThroughTheDirectoryItWasAdmittedOn` failed at the
+test's own rename of the waveform folder, "The process cannot access the
+file because it is being used by another process" (ERROR_SHARING_VIOLATION),
+and `TestARepairCommitsOnlyWhileItsDirectoryAndItsSourceAreTheOnesItRead`'s
+case "the folder replaced after a successful sync" hung until the package's
+30-minute timeout, so no test after it in `internal/analyze`, those of
+`repair_r3_test.go` and `repair_test.go` among them, ran there.
+
+*The refusal.* Go 1.27.3's `os.OpenRoot` on Windows opens the directory
+with `syscall.Open(path, O_RDONLY|O_CLOEXEC, 0)` (`src/os/root_windows.go`,
+`openRootNolog`), whose share mode is `FILE_SHARE_READ | FILE_SHARE_WRITE`
+(`src/syscall/syscall_windows.go`), with no FILE_SHARE_DELETE; a rename or a
+deletion of the directory opens it for delete access, which Windows refuses
+while that handle is open. The handle is the root's: on Linux, at each point
+where a case renames the folder (before the curve's first directory is made,
+before the check that precedes the rename, at the rename, and in the pool's
+sync), exactly one descriptor is open on the folder or below it, on the
+folder itself, opened after the decode and closed when the repair returns,
+and none is open during the decode (a probe of `/proc/self/fd` on a copy of
+fc54d4ef); the scratch is closed by then (`writeWaveformTmpIn`).
+
+*The hang.* The sync hook runs on the pool's worker and called `t.Fatal`
+when its rename failed. `t.Fatal` ends the goroutine it is called on, here
+the worker: `processJob`'s deferred `finishJob` ran with the job uncounted,
+and `waitForPoolSettled`, bounded by `t.Deadline()`, waited for a count that
+could not come until the binary's 30 minutes were up.
+
+*Before the fix*, on a copy of 14098634 with the replacement's rename made
+to fail, as Windows' does, each case alone under `-timeout 120s`, predicted
+first (`.tmp/_b652/r4/inject_pre.predictions.txt`): the two pool cases timed
+out, at 122.2 s and 120.4 s, after the worker's `t.Fatal` had printed the
+rename's error; a case whose hook runs on the test's goroutine failed in
+0.4 s. 3 of 3 as predicted.
+
+### What round 4 built
+
+1. **The skips.** While the repair's root is open the folder it holds
+   cannot be renamed on Windows, so the replacement these cases make cannot
+   happen there. Seven cases skip on Windows, each with
+   `if runtime.GOOS == "windows" { t.Skipf(...) }` as its first statement,
+   before any setup, decided by the platform and never by an observed
+   error, the reason naming the root's handle and backlog B819: the three
+   of `TestARepairWorksOnlyThroughTheDirectoryItWasAdmittedOn`;
+   `TestARepairCommitsOnlyWhileItsDirectoryAndItsSourceAreTheOnesItRead`'s
+   "the folder replaced after a successful sync";
+   `TestASyncFailureIsClassifiedAsEveryWriteFailureIs`'s "after the folder
+   was replaced"; `TestARepairWritesNothingIntoAWaveformDirectoryThatWent`'s
+   "before the rename"; and atomicwrite's
+   `TestRenameInRootRenamesInTheDirectoryItsRootHolds`, which renames a
+   directory its own root holds. A search of the tests of analyze, fsutil,
+   integrity, atomicwrite and cmd/bridge's waveform files for every rename or
+   removal of a waveform folder, or of a root's directory, found no other
+   while a root or any handle is open: fsutil's root tests and cmd/bridge's
+   serve test are `!windows` already, and the other renames come before a
+   root opens. The cases that replace the folder before the repair or during
+   the decode, before the root opens, run on Windows too.
+2. **A hook's failure reaches the test's goroutine.** `hookFaults` keeps
+   the first failure of a fixture's own step in a hook, and
+   `repairFixture.fault` reports one: the sync hooks' replacement
+   (`replaceDirInHook`), the source's mtime moved, rewritten and removed, and
+   the decoder's replacement report theirs and return, so the repair runs to
+   its end and closes its root. `repairFixture.settle` waits for the pool to
+   settle and answers the hook's failure ahead of anything else; `settled`
+   ends the case with it on the test's goroutine, before the counts are
+   asserted, which are asserted as before; and `requireNoFault` does the
+   same once a repair run on the test's goroutine has returned. A hook on the
+   test's goroutine keeps `t.Fatal` (`replaceDir`): the repair's deferred
+   steps close its root as the goroutine unwinds.
+3. **Every wait bounded.** `awaitPool` gives up at `poolWaitEnd`: `poolWait`
+   (two minutes, far past a repair's milliseconds on a starved runner) from
+   the wait's start, or 10 s before the binary's deadline where that is
+   sooner. `waitForPool`, `waitForPoolSettled` and `settle` wait through it,
+   and every pool stop in the repair's tests goes through `stopPool`, over
+   `stopWithin`, which gives up at the same bound and hands back the stop's
+   completion.
+4. **The forced check, on every platform**:
+   `TestAHookWhoseOwnStepFailsEndsItsCase`. A sync hook whose own step, the
+   cases' replacement of a folder that is not there, fails on the worker is
+   answered as that failure, the job counted; a runner that ends its
+   goroutine as `t.Fatal` does, its job never counted, is given up on at a
+   200 ms bound; and a stop while a job the stop's cancel does not end runs
+   gives up at its bound, the stop it left running returning once the job
+   is released.
+
+### After the fix
+
+The same injection on a copy of fc54d4ef, predicted first
+(`inject_post.predictions.txt`): every case whose hook replaces the folder
+failed at once, the hook's own error its one failure, in 0.4 to 2.2 s (the
+first including the build): the two pool sync cases and the decoder's pool
+case through `hookFaults` once the pool had settled ("a hook's own step
+failed: replace the waveform folder: rename …: no such file or directory"),
+the decoder's runner case through `requireNoFault`, and the three cases
+whose hooks run on the test's goroutine by `t.Fatal`; the forced check
+passed. 8 of 8 as predicted.
+
+The skips' own path, on a copy of fc54d4ef with their condition turned to
+"linux" at exactly the seven sites, predicted first
+(`skipdemo.predictions.txt`): the seven skipped before any setup, each
+giving its reason, and every other case of the tests that hold them passed.
+17 of 17 as predicted.
+
+### Negative controls
+
+Four, on a8b454b7, predicted in `.tmp/_b652/r4/controls.predictions.txt`
+before the first ran (8 verdicts), each edit with the one match it had to
+find, on a copy of the tree: all 8 as predicted, every red a test failure or
+the binary's timeout; `git status` clean after.
+
+| Control | Removed | Red, and what it showed |
+|---|---|---|
+| N1 | `hookFaults.report`'s keep | the forced check's worker case: "the wait answered <nil>, want the hook's failed replacement". Green: the folder replaced after a successful sync, whose step succeeds here |
+| N2 | `settle`'s ask of the hook's failure | the same red, and the same green |
+| N3 | `awaitPool`'s bound | the never-counted case, the binary's 30 s timeout. Green: the worker case |
+| N4 | `stopWithin`'s bound | the stop case, the binary's 30 s timeout. Green: the never-counted case |
+
+The greens are what the review of the brief said: a case whose step
+succeeds cannot see the path that hung, which is why the forced check is
+there.
+
+### The gates
+
+Through the shared build lock, on go1.27.3, go.mod's, with TMPDIR on this
+disk (`.tmp/_b652/r4/gate.py`), at a8b454b7, the tree dirty with this record
+alone: the brief's gate as written, `GOTOOLCHAIN=go1.27.3 make test
+TEST_PKGS='./internal/analyze/... ./internal/fsutil/... ./internal/integrity/...'`,
+green (internal/analyze 64 s, internal/fsutil 3 s, internal/integrity 5 s),
+fsutil's identity and rooted paths run here for real; the touched tests by
+name with `-race -timeout 120s`, the repair's 19 tests and atomicwrite's
+one, 66 verdicts, green, the one skip the owner test's case that needs root;
+atomicwrite's whole package under `make test`, its durable writer's Linux
+paths run here, green in 20 s; `make vet` for linux/amd64, windows, darwin
+and linux/386, and `make build-all`: clean. The same gate at fc54d4ef, before
+the stop's bound, was green too.
+
+Outside the lock: go1.27.3's own gofmt over every Go file round 4 changes,
+clean, and `go vet` of the two packages for the same four targets, clean;
+`rules-b652-r4.patch` applied to a `git archive` copy of this record's
+commit, where `make docs-check` and `TestEveryCitedTestNameExists` pass;
+`git status` clean after. Windows is not run here.
+
+## 2026-11-09 — B652 round 5: the Windows refusal the skips rest on, pinned
+
+Backlog B652's fifth round on `fix/b652-waveform-regen` (PR #1443), from
+12af8076 (round 4 and its rules), by the orchestrator, from round 4's Claude
+review: the skips' reason and the rules line said why Windows refuses the
+folder's rename while the repair's root is open, the root's handle sharing
+no delete, and no test showed it.
+
+Go 1.27.3's source does. `os.OpenRoot` (`src/os/root_windows.go`,
+`openRootNolog`) opens the directory with `syscall.Open`, whose share mode is
+`FILE_SHARE_READ | FILE_SHARE_WRITE` (`src/syscall/syscall_windows.go`,
+`Open`); `Root.OpenRoot`'s sub-roots (`rootOpenDir`) do share delete. The
+repair opens its root with `os.OpenRoot` (`internal/analyze/repair.go`).
+`TestAnOpenRootHoldsItsDirectory` (`internal/atomicwrite`, Windows only) now
+pins the refusal: a rename and a removal of a directory a root holds fail
+with a sharing violation, the directory stands after both, and the rename
+goes through once the root is closed. The rules line in
+`.claude/rules/build-ci-tests.md` names it, and its History says what it
+holds for.
+
+Windows was not run here: CI runs it. Checks here: gofmt over the new file,
+`go vet` of `internal/atomicwrite` for `GOOS=windows`, `make docs-check`.

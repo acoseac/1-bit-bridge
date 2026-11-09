@@ -372,8 +372,11 @@ func runAnalyzeGC(ctx context.Context, stdout, stderr io.Writer, store analysisR
 	inv, invErr := integrity.TakeSidecarInventory(ctx, outputDir, known, integrity.SidecarInventoryOptions{
 		// analyze's own constants, not a literal: a sweep whose idea of
 		// the extension drifts from the writer's manages nothing, and
-		// says so by reporting zero of everything.
-		Consider: func(name string) bool { return strings.HasSuffix(name, analyze.WaveformExt) },
+		// says so by reporting zero of everything. The waveform
+		// family's recogniser, which the regeneration guard's probe walks
+		// the tree with too, so a file one counts as a curve is a file
+		// this sweep weighs (backlog B652).
+		Consider: integrity.ConsiderWaveformSidecar,
 		Scratch: func(name string) bool {
 			return strings.HasSuffix(name, analyze.WaveformExt+analyze.AnalysisTmpSuffix)
 		},
@@ -466,10 +469,14 @@ var analyzeGCBeforeSweep func()
 // index across scratch files and then orphans. Nil in production.
 var analyzeGCBeforeUnlink func(index int)
 
-// gcWaveformDirChanged is gcDirChanged with the variants-directory wording
-// read as the waveform directory.
+// gcWaveformDirChanged is gcDirChanged for the waveform directory, in its
+// words (integrity.WaveformDirChanged, the variant check's own body over the
+// waveform family). A nil start skips the check.
 func gcWaveformDirChanged(dir string, start os.FileInfo) string {
-	return strings.ReplaceAll(gcDirChanged(dir, start), "variants directory", "waveform directory")
+	if start == nil {
+		return ""
+	}
+	return integrity.WaveformDirChanged(dir, start)
 }
 
 // removeAnalysisGCFiles removes the scratch files and orphans an analyze
@@ -597,60 +604,25 @@ func collectAnalysisCandidates(ctx context.Context, store *manifest.Store, resol
 		if filter != "" && !strings.Contains(rel, filter) {
 			continue
 		}
-		// DSD is out of scope — sox can't decode 1-bit DSD streams.
-		switch strings.ToLower(filepath.Ext(rel)) {
-		case ".dsf", ".dff":
+		skip, abs, info := analysisSourceSkip(rel, resolver)
+		switch skip {
+		case analysisSkipDSD:
 			res.dsdSkipped++
 			continue
-		}
-		// So are WavPack and Monkey's Audio (backlog B489), by the path as
-		// the client format gate reads it: the bridge serves them as they
-		// are and decodes nothing of theirs. No decoder of this pipeline
-		// is proven on them, and ffmpeg decodes a hybrid WavPack file
-		// without its correction file, so it would analyse lossy audio as
-		// the file's. Skipped here, before any resolve, so a library of
-		// them costs no decode and no strike on any sweep;
-		// Store.AnalysisCoverage counts them apart in the same order.
-		if formatgate.Gated(rel) {
+		case analysisSkipWavPackAPE:
 			res.wavpackApeSkipped++
 			continue
-		}
-		abs, info, rerr := resolver.ResolveChecked(rel)
-		if rerr != nil || info.IsDir() {
+		case analysisSkipMissing:
 			res.missing++
 			continue
-		}
-		// A zero-byte source can never produce a waveform: sox can't probe
-		// it and the ffmpeg fallback fails with "Cannot determine format …
-		// after EOF". These are failed/incomplete uploads (e.g. a truncated
-		// B2 sync), so skip them at collection time — otherwise the sweeper
-		// re-enqueues + re-fails them on every tick (recurring "analyze:
-		// failed" log noise). A re-upload makes size > 0 and the file flows
-		// through normally on the next sweep. Skipped even under --force,
-		// since force bypasses the freshness gate, not unanalyzability — and
-		// the check stays mtime/size-driven so it can't suppress a real file
-		// that's only TRANSIENTLY failing (those keep a non-zero size).
-		if info.Size() == 0 {
+		case analysisSkipEmpty:
 			res.emptySkipped++
 			continue
 		}
 		if !force {
-			// WantsAudioMD5Retry is the one thing here that is not a
-			// freshness check. mtime, size and schema version are all
-			// unchanged for a row whose audio-MD5 pass failed for a
-			// reason that says nothing about the file — a pipe or spawn
-			// failure under load, a faulted read, a killed child — so
-			// without it the row is skipped forever and a one-second
-			// blip is permanently recorded as "unverifiable". The
-			// counter behind it is capped (AudioMD5MaxAttempts), so
-			// this re-enqueues a bounded number of times and then stops
-			// asking; each retry is a full re-analysis, since the
-			// pipeline is one decode rather than resumable stages.
-			if existing, gerr := store.GetAnalysis(ctx, rel); gerr == nil && existing != nil &&
-				existing.SourceMTimeNS == info.ModTime().UnixNano() &&
-				existing.SourceSize == info.Size() &&
-				existing.SchemaVersion == analyze.WaveformSchemaVersion &&
-				!existing.WantsAudioMD5Retry() {
+			// The freshness gate (analysisRowFresh, whose docblock says why
+			// it asks the audio MD5 too).
+			if existing, gerr := store.GetAnalysis(ctx, rel); gerr == nil && analysisRowFresh(existing, info) {
 				res.skipped++
 				continue
 			}
@@ -681,8 +653,7 @@ func collectAnalysisCandidates(ctx context.Context, store *manifest.Store, resol
 		// replacing the file and the next scan it describes the old one, so
 		// a mismatch means the thing that was refused is not the thing on
 		// disk, and the file is analysed.
-		if sup, ok := suppressed[rel]; ok &&
-			sup.SizeBytes == info.Size() && sup.MTimeNS == info.ModTime().UnixNano() {
+		if sup, ok := suppressed[rel]; analysisSuppressedNow(sup, ok, info) {
 			res.unreadable++
 			continue
 		}
@@ -695,6 +666,98 @@ func collectAnalysisCandidates(ctx context.Context, store *manifest.Store, resol
 		})
 	}
 	return res, nil
+}
+
+// analysisSkip is why a library path is no analysis's source, before its
+// freshness gate and its suppression (analysisSourceSkip).
+type analysisSkip uint8
+
+const (
+	analysisSourceEligible analysisSkip = iota
+	analysisSkipDSD
+	analysisSkipWavPackAPE
+	analysisSkipMissing
+	analysisSkipEmpty
+)
+
+// analysisSourceSkip is collectAnalysisCandidates' verdict on one library
+// path, in its order, before the freshness gate: the rules every decode of a
+// source for analysis passes, the walk's and the waveform regeneration's
+// alike (waveformRegenerator, backlog B652), so the two cannot disagree about
+// which sources the analysis decodes. abs and info are the resolved source
+// when it is eligible.
+//
+// DSD is out of scope — sox can't decode 1-bit DSD streams.
+//
+// So are WavPack and Monkey's Audio (backlog B489), by the path as
+// the client format gate reads it: the bridge serves them as they
+// are and decodes nothing of theirs. No decoder of this pipeline
+// is proven on them, and ffmpeg decodes a hybrid WavPack file
+// without its correction file, so it would analyse lossy audio as
+// the file's. Skipped here, before any resolve, so a library of
+// them costs no decode and no strike on any sweep;
+// Store.AnalysisCoverage counts them apart in the same order.
+//
+// A path that does not resolve, or resolves to a directory, is missing.
+//
+// A zero-byte source can never produce a waveform: sox can't probe
+// it and the ffmpeg fallback fails with "Cannot determine format …
+// after EOF". These are failed/incomplete uploads (e.g. a truncated
+// B2 sync), so skip them at collection time — otherwise the sweeper
+// re-enqueues + re-fails them on every tick (recurring "analyze:
+// failed" log noise). A re-upload makes size > 0 and the file flows
+// through normally on the next sweep. Skipped even under --force,
+// since force bypasses the freshness gate, not unanalyzability — and
+// the check stays mtime/size-driven so it can't suppress a real file
+// that's only TRANSIENTLY failing (those keep a non-zero size).
+func analysisSourceSkip(rel string, resolver *bridgefs.Resolver) (skip analysisSkip, abs string, info os.FileInfo) {
+	switch strings.ToLower(filepath.Ext(rel)) {
+	case ".dsf", ".dff":
+		return analysisSkipDSD, "", nil
+	}
+	if formatgate.Gated(rel) {
+		return analysisSkipWavPackAPE, "", nil
+	}
+	abs, info, rerr := resolver.ResolveChecked(rel)
+	if rerr != nil || info.IsDir() {
+		return analysisSkipMissing, "", nil
+	}
+	if info.Size() == 0 {
+		return analysisSkipEmpty, "", nil
+	}
+	return analysisSourceEligible, abs, info
+}
+
+// analysisRowFresh is the freshness gate, the scan-skip gate's question of
+// an existing row: it describes the source on disk now (its mtime and size,
+// exactly), at the current schema, with nothing left to ask of its audio
+// MD5. The walk skips such a row; the waveform regeneration renders a missing
+// curve of exactly such a row, since nothing else offers it again, and leaves
+// every other row to the walk, which offers it for a whole analysis.
+//
+// WantsAudioMD5Retry is the one thing here that is not a
+// freshness check. mtime, size and schema version are all
+// unchanged for a row whose audio-MD5 pass failed for a
+// reason that says nothing about the file — a pipe or spawn
+// failure under load, a faulted read, a killed child — so
+// without it the row is skipped forever and a one-second
+// blip is permanently recorded as "unverifiable". The
+// counter behind it is capped (AudioMD5MaxAttempts), so
+// this re-enqueues a bounded number of times and then stops
+// asking; each retry is a full re-analysis, since the
+// pipeline is one decode rather than resumable stages.
+func analysisRowFresh(existing *manifest.AnalysisRow, info os.FileInfo) bool {
+	return existing != nil &&
+		existing.SourceMTimeNS == info.ModTime().UnixNano() &&
+		existing.SourceSize == info.Size() &&
+		existing.SchemaVersion == analyze.WaveformSchemaVersion &&
+		!existing.WantsAudioMD5Retry()
+}
+
+// analysisSuppressedNow is the suppression's check against the live stat:
+// the source the decoders refused (sup, found) is the file on disk now.
+func analysisSuppressedNow(sup manifest.AnalysisSuppression, found bool, info os.FileInfo) bool {
+	return found && sup.SizeBytes == info.Size() && sup.MTimeNS == info.ModTime().UnixNano()
 }
 
 // analysisSweeperSettleDelay is the serve-side sweeper's startup settle

@@ -271,7 +271,13 @@ func resolveSidecarRoot(dir string) (string, error) {
 // sidecars all sort after it was refused for that error rather than for
 // its sidecars.
 func TreeHoldsVariantSidecars(dir string) (bool, error) {
-	scan, err := scanForRenditions(dir)
+	return treeHoldsSidecars(dir, variantSidecars)
+}
+
+// treeHoldsSidecars is TreeHoldsVariantSidecars for fam's files: the waveform
+// guard asks it of the waveform directory, by the same walk.
+func treeHoldsSidecars(dir string, fam sidecarFamily) (bool, error) {
+	scan, err := scanForSidecars(dir, fam)
 	if scan.rendition {
 		return true, nil
 	}
@@ -310,20 +316,33 @@ const massDeleteFloor = 10
 // from it tells the operator what was seen rather than that something
 // was refused.
 func MassDeleteRefusal(variantsDir string, missing, total, maxDeletePercent int) string {
+	return massMissingRefusal(variantsDir, variantSidecars, missing, total, maxDeletePercent)
+}
+
+// massMissingRefusal is MassDeleteRefusal for fam's directory, the one
+// decision under the variant reapers' relocation guard and the waveform
+// regeneration's emptied guard (JudgeWaveformCatalog, backlog B652): a
+// catalog more than maxPercent of whose rows have no file at either
+// location, past massDeleteFloor, while the directory still holds the
+// family's files, is a tree that is there but not what the rows describe.
+// For a variants directory that is a relocation, and the rows are kept; for
+// the waveform directory it is a tree emptied by hand or restored from
+// another, and its curves are not rendered again one lookup at a time.
+func massMissingRefusal(dir string, fam sidecarFamily, missing, total, maxPercent int) string {
 	if missing < massDeleteFloor || total <= 0 {
 		return ""
 	}
-	if missing*100 <= maxDeletePercent*total {
+	if missing*100 <= maxPercent*total {
 		return ""
 	}
-	holds, err := TreeHoldsVariantSidecars(variantsDir)
+	holds, err := treeHoldsSidecars(dir, fam)
 	if err != nil {
-		return fmt.Sprintf("%d of %d rows (%d%%) have no sidecar at either location, over the %d%% threshold, and the variants directory could not be read (%v)",
-			missing, total, missing*100/total, maxDeletePercent, err)
+		return fmt.Sprintf("%d of %d rows (%d%%) have no %s at either location, over the %d%% threshold, and the %s could not be read (%v)",
+			missing, total, missing*100/total, fam.rowFile, maxPercent, fam.dir, err)
 	}
 	if !holds {
 		return ""
 	}
-	return fmt.Sprintf("%d of %d rows (%d%%) have no sidecar at either location, over the %d%% threshold, while the variants directory still holds sidecar files",
-		missing, total, missing*100/total, maxDeletePercent)
+	return fmt.Sprintf("%d of %d rows (%d%%) have no %s at either location, over the %d%% threshold, while the %s still holds %s",
+		missing, total, missing*100/total, fam.rowFile, maxPercent, fam.dir, fam.files)
 }

@@ -2691,6 +2691,41 @@ var migrations = []migration{
 			return restartCoverageOverGatedPaths(db)
 		},
 	},
+	{
+		// v62 records, per analysed track, the regenerations of its waveform
+		// curve that failed on their own account (backlog B652): a curve
+		// proven missing is rendered again on access, waveform only, and two
+		// failures of it against one build and one version of the source
+		// stop it until either changes (WaveformRegenStopAfter). Kept beside
+		// the analysis row, never on it: an ordinary analysis rewrites that
+		// row whole, and the record must survive a restart for the stop to
+		// mean anything, and be read by `bridge doctor`.
+		//
+		// `source_path` references `track_analysis(source_path)` ON DELETE
+		// CASCADE, so the record goes with its analysis row, and with its
+		// track through that row's own cascade. `build` is the bridge build
+		// the failures were counted under, `source_mtime_ns` and
+		// `source_size` the source's version; a failure against another of
+		// either starts the count again at one. Column-only: nothing here
+		// reaches the wire.
+		//
+		// Append-only / idempotent per the ladder contract.
+		version: 62,
+		name:    "waveform_regen_failures (a curve's failed regenerations, per build and source version)",
+		sql: `
+		CREATE TABLE IF NOT EXISTS waveform_regen_failures (
+			source_path      TEXT PRIMARY KEY,
+			build            TEXT NOT NULL,
+			source_mtime_ns  INTEGER NOT NULL,
+			source_size      INTEGER NOT NULL,
+			failures         INTEGER NOT NULL,
+			first_at         INTEGER NOT NULL,
+			last_at          INTEGER NOT NULL,
+			reason           TEXT NOT NULL DEFAULT '',
+			FOREIGN KEY (source_path) REFERENCES track_analysis(source_path) ON DELETE CASCADE
+		);
+		`,
+	},
 }
 
 // healTransitionBandBandwidths is migration v34's post(): every wf7

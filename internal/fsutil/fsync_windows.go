@@ -2,6 +2,8 @@
 
 package fsutil
 
+import "os"
+
 // SyncsParentDir is false here: SyncParentDir is a no-op on Windows, so a
 // write is atomic but never made durable by it. A caller that must not
 // count a write as durable without the barrier
@@ -26,3 +28,6 @@ func SyncParentDir(filePath string) error {
 	_ = filePath
 	return nil
 }
+
+// syncDirIn is a no-op on Windows, as SyncParentDir is.
+func syncDirIn(*os.Root, string) error { return nil }
