@@ -1247,8 +1247,12 @@ watcher can meet that end in, by barriers, and judge the sink again once the wat
 returned; `TestAGaplessSuccessorWaitsForAWriteNoLongerThanTheSinksLookahead` holds the producer
 in its first occurrence until the write is pending, and forces the DAC's time to the sink's
 floor before the sink's measurement of it (`ParkStatusAfterPlayed`, which parks a STATUS of the
-fake kernel by the frames its DAC has played); every wait at a forced ordering is bounded by a
-few seconds. No packer, plan, harness reader or record changes, and nothing plays differently.
+fake kernel by the frames its DAC has played), and ends in two orders, each forced: the write
+answered before the DAC lets the drain for b's transport end, where no sink opens for b, and
+the drain ending with the write held between its publish and its reconciliation
+(`playback.Seams.Published`), where b's own sink opens and its activation takes it back
+unwritten; every wait at a forced ordering is bounded by a few seconds. No packer, plan,
+harness reader or record changes, and nothing plays differently.
 The harness's approval admission reads a record of version 57 alone; the migration reads an
 owner's record of 35 to 57 (`LegacyVersion` stays 35). Every earlier version's harness evidence
 is stale to the harness, as at every bump.
