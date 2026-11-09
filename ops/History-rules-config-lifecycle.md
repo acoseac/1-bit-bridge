@@ -3327,7 +3327,7 @@ pin it. The records, with their negative controls, are in
 
 ## The update check's off switch (backlog B761's PR 1, 2026-11-09)
 
-- **`update.checkEnabled` off asks GitHub nothing and installs nothing new: a check (the start's, a tick's, Check now) and an install are admitted only while it is on, and an install again at its decision under the install marker's lock (`commit`), past which its swap finishes; the off transition (`Updater.ChecksSwitched`, once a settings save is published) stops every check and every install before that decision through its own context; a tick while it is off asks nothing and fires only the restart the auto-installer deferred after a swap that committed, through its gates; on again, the cadence's wait starts over and asks nothing; the status masks what a check found (`Status.CheckEnabled`); a status, a rollback and the probation are never refused** (2026-11-09, backlog B761's PR 1). **Don't read the switch for an admission or a decision outside `gateMu`, stop a check or an install with a cancel that carries a cause, stop an install past its decision or commit one the off transition stopped, ask GitHub at a tick or a wake while the switch is off or because it came on, let the auto-installer begin an install with the switch off, leave a committed swap's deferred restart to a check, show a cached release as current while off, or refuse a status, a rollback or the probation for the switch.**
+- **`update.checkEnabled` off asks GitHub nothing and installs nothing new: a check (the start's, a tick's, Check now) and an install are admitted only while it is on, and an install again at its decision under the install marker's lock (`commit`), past which its swap finishes; the off transition (`Updater.ChecksSwitched`, once a settings save is published) stops every check and every install before that decision through its own context; a tick checks only where the switch was on when its wait was armed and no transition came since (the poll loop's `schedule`, against `switchGen`, which every `ChecksSwitched` advances under `gateMu`), and otherwise fires only the restart the auto-installer deferred after a swap that committed, through its gates; on again, the cadence's wait starts over and asks nothing; an install whose process took the switch as it started reads it again as it begins and at its decision (`InstallOptions.RereadSwitch`: `bridge update`'s, the file it resolved and its environment), settings that no longer load refusing it in their load's words; the status masks what a check found (`Status.CheckEnabled`); a status, every rollback (the console's and a start's) and the probation are never refused, and a release from before the switch refuses settings that write its key** (2026-11-09, backlog B761's PR 1, two rounds). **Don't read the switch for an admission or a decision outside `gateMu`, or a file's reread under it, stop a check or an install with a cancel that carries a cause, stop an install past its decision or commit one the off transition stopped, let a tick ask GitHub whose wait was armed while the switch was off or before a transition, ask at a wake or because the switch came on, let the auto-installer begin an install with the switch off, take a reread that failed for an off or find the config again to reread it, leave a committed swap's deferred restart to a check, show a cached release as current while off, refuse a status, a rollback or the probation for the switch, or advise writing the key true where taking it out turns the checks on.**
 
 *What goes out.* While update checks are on, the default, the updater sends
 one unauthenticated GET of GitHub's latest release at its start and once
@@ -3344,7 +3344,8 @@ holder's save writes it as they are written (`filedSwitches`). The `updates`
 managed control owns `updateCheckEnabled`, the `restart` control not: neither
 direction restarts anything. `Options.CheckEnabled` hands the updater the
 switch, nil reading as on: serve's reads the live holder, `bridge update`'s
-the config it loaded.
+the config it loaded, a copy taken as it started, which its install's reread
+(`InstallOptions.RereadSwitch`, round 2, below) asks again.
 
 *Admission.* Every check (the start's, each tick's, Check now's) and every
 install begins with `admit`, which under `gateMu` reads the switch and,
@@ -3377,6 +3378,28 @@ the switch on again by then (control C7), its context being cancelled;
 `installStopped` gives a stopped install's answer the switch's words
 whatever the stop made of its own error: nothing was installed.
 
+*A running CLI (round 2).* `bridge update` took the switch from the config
+it loaded as it started, so a command left at its install prompt, or
+downloading, when the console's switch went off read on at its admission
+and at `commit`, and swapped (Codex and the Claude review on #1446); the
+service's registry of admissions does not reach another process.
+`InstallOptions.RereadSwitch`, nil in serve, whose switch is the live holder,
+is asked as the install begins and first in `decideUnderLock`, before
+`commit`, outside `gateMu`, which is never held across a file's read; its
+error refuses the install, saying where it was found and that nothing was
+installed. `bridge update`'s, `rereadUpdateSwitch`, loads the file the
+command resolved as it started, never found again (a discovery could find
+another installation's), through `config.LoadFile`, the file and the
+command's environment as at its start: off is `ErrUpdateChecksOff` naming
+its source, and settings that no longer load are a `*settingsRereadError`
+naming the path and the load's own error, never an off, since failing open
+would install past an off and failing closed would claim an off nobody set
+(both reviews of the round's brief). The refusal says the running bridge is
+unchanged and how to turn the checks on: unset the variable where it is the
+source, since it overrides the file and the console's switch, and otherwise
+the console's switch, or the key taken out of the file, never written true,
+which a release from before the switch refuses as it refuses false.
+
 *The auto-installer and the deferred restart.* `maybeAutoInstall` reads the
 switch again at its top, so a check that answered just before the switch
 went off leaves its candidate cached and nothing installs it (the post-poll
@@ -3396,6 +3419,23 @@ poll loop's `wake` (buffered 1): its wait starts again at a full interval,
 asking nothing and installing nothing (controls C4 and C5). The loop's timer
 is a seam (`Updater.after`, `time.After` in production), so that a test
 reaches a tick with no real hour.
+A wait armed before a transition is no wait for the switch as it stands
+(round 2: Codex on #1446, and both reviews of the round's brief): its tick
+and the notification can be ready at one select, which picks at random,
+and the settings save publishes the switch before it calls
+`ChecksSwitched`, so a tick in between reads it on. The old timer cannot be
+stopped and drained (`time.After` cannot be stopped, and the wait is
+`Run`'s local). The loop takes a `schedule` at each arming (`arm`, under
+`gateMu`): the switch's answer then and `switchGen`, which every
+`ChecksSwitched` advances under the same lock, in either direction;
+`admitScheduled` admits a tick only where the switch was on at its arming,
+no transition came since and it reads on now, and any other tick fires only
+the deferred restart. The off transition rearms nothing, so a wait armed
+with the switch on stays the loop's wait through an off, and only the
+generation refuses its tick when the switch reads on again before the
+notification. The seam gives each wait a channel of its own and can hold
+the loop between an arming and its select (`build-ci-tests.md`'s bullet on
+a select between ready cases).
 
 *What the status says.* `Status.CheckEnabled` is the switch's answer when
 the status is read. While it is off, `shown` empties `LatestVersion`,
@@ -3406,7 +3446,16 @@ way; the auto-installer and an install read the cached status (`cached`).
 
 *Never refused.* A status, the console's rollback (`bridge update` has
 none), the boot's early and crash rollbacks, the install's probation and its
-confirmation: none of them asks the switch.
+confirmation: none of them asks the switch. A release from before the switch
+refuses settings that write its key (its loader's `KnownFields` decode, there
+since the first loader), so while the key is written a crash rollback,
+which asks its backup's settings check (B660), leaves such a backup and
+says why, and the console's rollback asks its backup none: the docs say to
+turn the checks on in the console, which takes the key out, or to delete
+it, before going back to one (round 2, the Claude review's Medium on
+#1446). Taking a refusal whose only reason is the key was not chosen: the
+binary put back would refuse the same settings at its own start, and the
+crash rollback writes no settings (B613).
 
 `TestNoRequestAtTheStartOrATickWhileUpdateChecksAreOff` (whose tick turns red
 with the tick's gate alone reverted), `TestARequestAtTheStartAndAtATickWhileUpdateChecksAreOn`,
@@ -3421,10 +3470,21 @@ with the tick's gate alone reverted), `TestARequestAtTheStartAndAtATickWhileUpda
 `TestTurningUpdateChecksOffDuringADownloadStopsTheInstall`,
 `TestUpdateChecksTurnedOffJustBeforeAnInstallsDecisionStopItBeforeItsSwap`,
 `TestASwapPastItsDecisionFinishesWhenUpdateChecksGoOff`,
-`TestARestartDeferredAfterACommittedSwapFiresWhileUpdateChecksAreOff` and
-`TestAManualInstallGainsNoRestartWhileUpdateChecksAreOff` (internal/updater)
-pin it. The record, with its negative controls, is in
-`ops/engineering-log.md`, 2026-11-09, B761 PR 1.
+`TestARestartDeferredAfterACommittedSwapFiresWhileUpdateChecksAreOff`,
+`TestAManualInstallGainsNoRestartWhileUpdateChecksAreOff`,
+`TestATickArmedWhileUpdateChecksWereOffAsksNothingOnceTheyAreOn`,
+`TestATickArmedBeforeUpdateChecksWentOffAsksNothingOnceTheyAreOnAgain`,
+`TestAWakeAndAnOldTickReadyTogetherAskNothing` and
+`TestAnInstallReadsTheSwitchAgainAsItBeginsAndAtItsDecision`
+(internal/updater), and cmd/bridge's
+`TestBridgeUpdateReadsTheSwitchAgainOnceItsPromptIsAnswered`,
+`TestBridgeUpdateRefusesItsInstallWhereTheSettingsNoLongerRead`,
+`TestAStartsCrashRollbackRunsWithUpdateChecksOff`,
+`TestAStartsBootRollbackRunsWithUpdateChecksOff`,
+`TestTheConsolesRollbackRunsWithUpdateChecksOff` and
+`TestACrashRollbackToAReleaseBeforeTheSwitchNeedsItOn` pin it. The record,
+with its negative controls, is in `ops/engineering-log.md`, 2026-11-09,
+B761 PR 1 and its round 2.
 
 ## Config, settings and process lifecycle
 
