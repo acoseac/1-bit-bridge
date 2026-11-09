@@ -89412,3 +89412,16 @@ window, asked for the log host at 2.22 s, named the node after the library, and 
 bytes; run again on a copy of that data dir it asked at 0.11 s; this build on the data dir itself asked for it never in
 60 s, named the node `1-bit-bridge`, and left the buffer at 92 bytes, its no-op transport having taken what waited.
 The coordination server's CONNECTs came in every run, 25 to 27 a window, and the updater's one to api.github.com.
+
+### Gates
+
+At e9823a17, in the build slot: `make test TEST_PKGS='./internal/tsnet/... ./internal/config/... ./cmd/bridge/...'`
+(the release tags, `-race -timeout 30m -p 4`) ok: internal/tsnet 1.5 s, internal/config 14.5 s, cmd/bridge 1,348 s.
+Before it: `go vet` of internal/tsnet and cmd/bridge clean; go1.27.3's gofmt lists none of the changed Go files; the
+build-site census's tests and its tree check (`check-build-tags: OK`) pass over the new script and its README; and
+`TestEveryCitedTestNameExists` and `TestNoBlankKeepers` pass. The rules patch applies to HEAD (`git apply --check`). On a
+git-archive copy of HEAD with it applied, `make docs-check` passes, and `TestEveryCitedTestNameExists` is green there and
+red with a name cited that no test defines. `verify_moves.py --base HEAD`, with an `--edit` for each block the patch
+edits, reports one MISSING pair alone: the B749 line's old text in `cli-serve.md` and in its long form, beside its new
+text in both. The tool cannot pair a line edited with its verbatim twin, and the two new lines are one line byte for
+byte (3,925 bytes).
