@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // namesItsCommand fails the test unless e, a request's answer, names the
@@ -191,6 +192,102 @@ func TestNativeAnAnswerNamesTheCommandThatAsked(t *testing.T) {
 					namesItsCommand(t, e, command.op, what)
 				}
 				await(t, s.Done(), "the sink's release")
+				noFailure(t, s, what)
+				k.checkClosedEach(t)
+			})
+		}
+	}
+}
+
+// TestNativeAnAnswerTheWriterSentAsItEndedWaitsForItsEnd (B728 B9 round 11):
+// the writer answers a request it never ran after its close and just before
+// its end, so a caller that takes that answer with the release past its
+// budget waits for the end within nativeEndAfterReply, on the sink's clock,
+// before it reads the record. The writer held between that answer and its
+// end (nativeSeams.ending), its close confirmed late: let go within the
+// bound, the caller answers the completed cleanup's verdict, the life's typed
+// cancellation; the bound passing first (the fake clock moved past it), the
+// release unconfirmed, the writer's end still to come. Through the writer's
+// reply (its caller off the life) and the deadline's arm (held before it
+// reads the reply, nativeSeams.recorded) alike. A pin of the wait, not a red.
+func TestNativeAnAnswerTheWriterSentAsItEndedWaitsForItsEnd(t *testing.T) {
+	for _, arm := range []awaitArm{armReply, armDeadline} {
+		for _, boundFirst := range []bool{false, true} {
+			name := armName[arm] + ", the writer's end within the bound"
+			if boundFirst {
+				name = armName[arm] + ", the bound passing first"
+			}
+			t.Run(name, func(t *testing.T) {
+				k := nativeKernel(t)
+				f := newCleanupFault(t, k)
+				pick := &armPick{}
+				recorded, ending := newCallerHold(t), newCallerHold(t)
+				// The clock's second deadline asked is the bound's: the first is
+				// the release's.
+				boundAsked := make(chan struct{})
+				var asks atomic.Int32
+				life, end := context.WithCancel(context.Background())
+				defer end()
+				s, revoking, revoke := lifeSinkOn(t, k, f, nativeConfig(), life, pick.hook, func(h *nativeSeams) {
+					h.recorded, h.ending = recorded.awaiting, ending.awaiting
+					at := h.at
+					h.at = func(when time.Time) (<-chan time.Time, func()) {
+						if asks.Add(1) == 2 {
+							close(boundAsked)
+						}
+						return at(when)
+					}
+				})
+				if e := s.Activate(context.Background(), 1); e != nil {
+					t.Fatal(e)
+				}
+				// The pause's first STATUS: the writer's next poll is then its
+				// pause's watch.
+				statusing, status := k.parkNextStatus()
+				defer status()
+				paused := make(chan error, 1)
+				go func() { paused <- s.Pause(context.Background()) }()
+				await(t, statusing, "the pause's STATUS")
+				polling, poll := k.parkNextPoll()
+				defer poll()
+				status()
+				if e := receive(t, paused, "the pause"); e != nil {
+					t.Fatal(e)
+				}
+				await(t, polling, "the writer in its pause's watch")
+				pick.set(arm)
+				recorded.armed.Store(arm == armDeadline)
+				ending.armed.Store(true)
+				answer := queueResume(t, s, life, false)
+				f.hold.Store(true)
+				end()
+				revokeEnded(t, s, revoking, revoke, false)
+				poll()
+				await(t, f.held, "the writer's release in its close, held")
+				pastBudget(t, k, s)
+				if arm == armDeadline {
+					await(t, recorded.in, "the resume's caller, its wait over, held before it reads the reply")
+				}
+				f.release()
+				await(t, ending.in, "the writer, its answer to the resume sent, held before its end")
+				recorded.release()
+				await(t, boundAsked, "the resume's caller, its answer taken, waiting for the writer's end within the bound")
+				what := "the resume the writer never ran, " + name
+				if boundFirst {
+					k.advanceNow(nativeEndAfterReply)
+					e := receive(t, answer, "the resume's answer at the bound")
+					theSinksFailure(t, e, ErrReleaseUnconfirmed, what)
+					select {
+					case <-s.Done():
+						t.Error("the writer ended before it was let go")
+					default:
+					}
+					ending.release()
+					await(t, s.Done(), "the writer's end")
+				} else {
+					ending.release()
+					theLifesCancellation(t, receive(t, answer, "the resume's answer"), what)
+				}
 				noFailure(t, s, what)
 				k.checkClosedEach(t)
 			})

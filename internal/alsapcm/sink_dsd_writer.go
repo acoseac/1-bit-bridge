@@ -45,6 +45,9 @@ func (s *DSDSink) loopNative() {
 		}
 		s.notify()
 		s.mu.Unlock()
+		if h := s.seams.ending; h != nil {
+			h()
+		}
 		close(s.done)
 	}()
 	for {

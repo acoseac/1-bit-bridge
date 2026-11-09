@@ -176,6 +176,12 @@ type nativeSeams struct {
 	// the writer's late close lands and the writer answers, as a scheduler
 	// can leave it (B728 B9 round 11).
 	recorded func()
+	// ending, nil but in a test, runs on the writer as it ends, after its
+	// last answer and before its end (done), the sink's lock let go: a test
+	// holds the writer there, as a scheduler can leave it, while a caller
+	// takes that answer and waits for the end within its bound (record,
+	// B728 B9 round 11).
+	ending func()
 }
 
 // awaitArm is an arm of a request's wait (await), for a test that fixes
