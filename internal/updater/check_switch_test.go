@@ -485,6 +485,45 @@ func TestATickArmedWhileUpdateChecksWereOffAsksNothingOnceTheyAreOn(t *testing.T
 	}
 }
 
+// TestATickArmedBeforeUpdateChecksWentOffAsksNothingOnceTheyAreOnAgain: the
+// off transition rearms nothing, so the wait the loop armed while update
+// checks were on is still its wait while they are off; when they read on
+// again, published before the updater is told, that wait's tick asks GitHub
+// nothing, though it was armed with the switch on: a transition came between
+// (the schedule's generation). The notification then rearms a full interval,
+// and that wait's tick checks.
+func TestATickArmedBeforeUpdateChecksWentOffAsksNothingOnceTheyAreOnAgain(t *testing.T) {
+	gh := newReleaseStandIn(t, "v9.9.9")
+	sw := &testSwitch{}
+	u, ticks := switchedUpdater(t, gh, sw, Options{LiveCheckInterval: func() time.Duration { return 3 * time.Hour }})
+	runLoop(t, u)
+	armedOn := ticks.waitArmed(t) // the start's check is done; this wait is armed with checks on
+	if n := gh.requests.Load(); n != 1 {
+		t.Fatalf("the start asked GitHub %d time(s) with update checks on, want 1", n)
+	}
+
+	sw.off.Store(true)
+	u.ChecksSwitched()  // off: nothing under way, and the loop keeps its wait
+	sw.off.Store(false) // on again, published; the updater not told yet
+	armedOn.fire()
+	ticks.waitArmed(t) // the tick is done
+	if n := gh.requests.Load(); n != 1 {
+		t.Fatalf("the tick of a wait armed before update checks went off asked GitHub %d more time(s) once they read on "+
+			"again, before the updater was told; want none", n-1)
+	}
+	u.ChecksSwitched()
+	rearmed := ticks.waitArmed(t)
+	if rearmed.d != 3*time.Hour || gh.requests.Load() != 1 {
+		t.Fatalf("the wait armed for checks turned on again = %v after %d request(s), want a full interval, 3h, and only "+
+			"the start's", rearmed.d, gh.requests.Load())
+	}
+	rearmed.fire()
+	ticks.waitArmed(t)
+	if n := gh.requests.Load(); n != 2 {
+		t.Errorf("the tick a full interval after checks were turned on again asked GitHub %d time(s) in all, want 2", n)
+	}
+}
+
 // TestAWakeAndAnOldTickReadyTogetherAskNothing: the loop armed a wait while
 // update checks were off, and before its select both that wait's tick and the
 // notification that they are on are ready (the seam holds the loop between
