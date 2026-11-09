@@ -88409,6 +88409,12 @@ History-rules-cli-serve.md, admin-console.md's B604 bullet corrected and a
 line for the console's backups, and scanner.md's glob for
 `internal/manifest/ladder_schema*.go` with a line on the generated schema.
 
+Its second round, the entry after this one, changes what this one says of a
+backups folder that grants no lock, of what keeps a `PENDING` from the
+prune, of the startup snapshot's skip, of the path `bridge backup --verify`
+locks, of a write that leaves a `VERIFIED` behind, and of the console's
+create; where the two differ, the second is what is built.
+
 ### What main did
 
 `Snapshot` copied the database by `VACUUM INTO` and the other files by a
@@ -88663,8 +88669,9 @@ missing core table, and an empty library passing),
 `priority_linux_test.go`'s check of the thread's nice value),
 `TestAPrunerRacingAVerificationSkipsItsRound` (through the lock, the
 verification parked under it at `SetAfterCheckForTest`),
-`TestTwoVerificationsOfOneSnapshotWriteOneAtATime`,
-`TestAVerificationGrantedNoLockStillVerifies` and
+`TestTwoVerificationsOfOneSnapshotWriteOneAtATime`, a test that a
+verification granted no lock still verified (the second round made it the
+refusal's, `TestNoLockNoProtectedWork`) and
 `TestThePruneKeepsWhatRecoveryNeeds` (retention off, keep 1, several newer
 `FAILED` bundles, only legacy ones beside more new `FAILED` ones than
 `keep`, a files `FAILED` beside a verified database, young and stale
@@ -88674,7 +88681,8 @@ In internal/admin: `TestTheDoctorTheAPIAndThePrunerAgreeOnEveryState`,
 `TestACancelledCreateRequestLeavesTheVerdictToCome`,
 `TestTheCreateAnswersWithTheSnapshotsNameAndNoPath` and
 `TestRepeatedFailedVerificationsThroughTheConsolesCreateStillPrune`. In
-cmd/bridge: `TestStartupSnapshotShouldSkip_OnlyForARecentVerifiedDatabase`,
+cmd/bridge: the startup skip's table (the second round's
+`TestTheStartupPassFollowsTheNewestRecentSnapshot`),
 `TestBridgeBackupVerifiesWhatItKeepsAndSaysSo`,
 `TestRepeatedFailedVerificationsThroughTheTickerAndBridgeBackupStillPrune`,
 `TestBridgeBackupVerifyRecordsAndSaysTheVerdict`,
@@ -88870,9 +88878,8 @@ On 0d9142d0, go1.27.3, each run inside the build slot (`buildslot.py b653`,
 ### Follow-ups
 
 The backlog file is not on legion0, so these go to the PR's report: a
-restore reads no snapshot's verdict yet (the next two PRs' ground); no test
-runs `bridge backup --verify` in a process of its own beside serve's
+restore reads no snapshot's verdict yet (the next two PRs' ground); and no
+test runs `bridge backup --verify` in a process of its own beside serve's
 verification, the cross-process lock being pinned through the pruner and
-`--verify`'s busy answer; and a verification queued behind more than two
-others in one process can outlast `PendingBound`, its snapshot then read as
-interrupted until its verdict is written.
+`--verify`'s busy answer. A third, the review's, is the second round's
+first point.

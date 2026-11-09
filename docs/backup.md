@@ -27,33 +27,49 @@ records, never replacing them, and records two verdicts in the manifest:
 A verdict is `VERIFIED`, `FAILED` with a reason code (`hash-mismatch`,
 `quick-check`, `schema-newer` and so on), or `INCOMPLETE` when the check did
 not finish (the bridge stopped, or the check ran past its deadline). A
-snapshot whose check has not run reads `PENDING`, and one left `PENDING` long
-after its check would have ended reads `INCOMPLETE`. A snapshot taken by an
-earlier version records no sizes or hashes and reads `UNVERIFIED`: neither
-verified nor known to be damaged, its files are checked for presence only.
+snapshot whose check is still to come, or under way, reads `PENDING`; one
+whose bridge stopped before its check ended reads `INCOMPLETE`. A snapshot
+taken by an earlier version records no sizes or hashes and reads
+`UNVERIFIED`: neither verified nor known to be damaged, its files are checked
+for presence only.
 
 One check runs at a time, at the lowest priority the platform gives a
 thread, its reads paced. A check removes nothing, whatever it finds.
 
 `bridge backup` says what it kept and both verdicts, and exits 0 only when
 both are `VERIFIED` (for an install with no database yet, when its files
-are). `bridge backup --verify <snapshot-dir> [--full]` checks
-a snapshot already taken and records its verdict; a quick check never
+are). `bridge backup [--config bridge.yaml] --verify <snapshot-dir> [--full]`
+checks a snapshot already taken in the backups folder of the install the
+configuration names, however the path is written (`.` inside the snapshot, a
+link to it), and records its verdict; a copy of a snapshot kept elsewhere is
+refused, so copy it back into that folder to check it. A quick check never
 replaces the verdict of a full one unless it finds the snapshot worse.
 `bridge doctor` and the console (Jobs, and Settings → Backups) show the
 newest snapshot written and the newest whose database is verified, apart,
 with both verdicts; they read the snapshots' manifests and run no check.
-The startup snapshot is skipped only when a snapshot from the last day has a
-verified database.
+
+When the bridge starts, it takes no snapshot when one from the last day has
+a verified database. Nor does it take one when the newest snapshot from the
+last day is still waiting for its check: it runs that check instead, and
+takes a new snapshot only when the check finds the database damaged. So a
+bridge that keeps restarting before its check ends keeps one snapshot, not
+one per start, and the first start that lasts long enough verifies it.
 
 With retention on (`backup.keep` above 0), the prune after each snapshot
 keeps the `keep` newest, and beside them, even when older: the newest
 snapshot whose database is `VERIFIED`; while none is, the newest one taken
 by an earlier version; the newest whose database check `FAILED` or did not
-finish, as evidence, one at most; and every snapshot whose check is still
-pending. Every other snapshot is kept or removed by `keep`, as before. The
-prune runs after every snapshot taken, whatever its verdict. With retention
-off, every snapshot stays.
+finish, as evidence, one at most; and every snapshot whose check is still to
+come or under way, however long it waits its turn. Every other snapshot is
+kept or removed by `keep`, as before. The prune runs after every snapshot
+taken, whatever its verdict. With retention off, every snapshot stays.
+
+Checks and prunes take a lock in the backups folder, and none runs where
+the storage grants no file lock: there the bridge checks and prunes nothing,
+takes no scheduled snapshot while the newest one waits for its check, and
+`bridge doctor`'s `backup-lock` line says so. Put the data directory on
+storage that grants file locks (a local disk, or a network share whose lock
+service runs).
 
 ## Restore
 
