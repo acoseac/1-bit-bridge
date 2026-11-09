@@ -317,8 +317,9 @@ func TestAnOccurrenceBesideAWriteIsNotRevoked(t *testing.T) {
 // Once, which the parked write held until that cleanup let it go, after. The
 // case runs on a goroutine of this test's, so that a cleanup that waits fails
 // this test within twice the watchdog, past any bound of the cleanup's own,
-// and this test then lets the write go itself, so that the case ends: its
-// cleanup's other waits and its rig's stop are each bounded.
+// and this test then lets the write go itself, apart from the cleanup, so
+// that the case ends: its cleanup's other waits and its rig's stop are each
+// bounded.
 func TestACaseEndingWithItsWriteParkedLetsItGo(t *testing.T) {
 	p := newParkedWrite()
 	var res <-chan playback.ChoiceResult
@@ -341,7 +342,9 @@ func TestACaseEndingWithItsWriteParkedLetsItGo(t *testing.T) {
 	case <-time.After(2 * alsapcm.Watchdog()):
 		alsapcm.LogGoroutines(t)
 		t.Errorf("a case that ended with its write parked did not end within %v: its cleanup waits for the parked write", 2*alsapcm.Watchdog())
-		p.letGo()
+		// The write let go apart from letGo, the case's cleanup, in which a
+		// cleanup that waits may wait: out closed through its own Once alone.
+		p.freed.Do(func() { close(p.out) })
 		<-ended
 	}
 	if res == nil {
