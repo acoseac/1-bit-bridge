@@ -1216,8 +1216,7 @@ type TailscaleConfig struct {
 	// is built, and once a node has run with it off the process keeps the
 	// uploads off until it exits, so a change takes a restart of the
 	// bridge's process (the menu's Start now, and the start bridge init
-	// offers, run serve in their own). Turning it off does not stop a node
-	// already running with it on from uploading until that node stops.
+	// offers, run serve in their own). What stays open is backlog B830.
 	// Never turned on by the bridge itself.
 	UploadDiagnosticLogs bool `yaml:"uploadDiagnosticLogs,omitempty"`
 }

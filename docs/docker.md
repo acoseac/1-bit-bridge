@@ -756,13 +756,18 @@ Notes:
   a new one registers as `1-bit-bridge`; a library rename never renames it.
 - The node uploads **no Tailscale diagnostic logs** (and no network flow
   logs) unless `tailscale.uploadDiagnosticLogs: true` (or
-  `BRIDGE_TAILSCALE_UPLOAD_DIAGNOSTIC_LOGS=true`) allows them, and a
+  `BRIDGE_TAILSCALE_UPLOAD_DIAGNOSTIC_LOGS=true`, which the shipped
+  `compose.yaml` forwards from `.env`) allows them, and a
   `TS_NO_LOGS_NO_SUPPORT=true` passed to the container keeps them off even
   then. It still talks to Tailscale's coordination server and relays, as any
-  Tailscale client does. A change takes a restart of the container: once the
-  node has run with the key off, the uploads stay off until the bridge's
-  process exits. A tailnet that requires the logs refuses a node without them,
-  and the admin tile says what to change.
+  Tailscale client does. The consent applies when the bridge's process builds
+  its node: a change in `bridge.yaml` takes a restart of the container
+  (`docker restart`), and a change of `BRIDGE_TAILSCALE_UPLOAD_DIAGNOSTIC_LOGS`,
+  or removing a `TS_NO_LOGS_NO_SUPPORT` passed to the container, takes
+  recreating it (`docker compose up -d`, or `docker rm` and `docker run`
+  again), since a restart keeps the container's environment. A tailnet that
+  requires the logs refuses a node without them, and the admin tile says what
+  to change.
 - iOS pairs against the node's MagicDNS name
   (`https://onebit-bridge.<your-tailnet>.ts.net`); the bridge serves a real
   Let's Encrypt cert for `.ts.net` **in-process** (no on-disk cert material,

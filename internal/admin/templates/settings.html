@@ -647,12 +647,14 @@
           Upload Tailscale's diagnostic logs (tsnet mode) <span class="badge warn">restart</span>
         </label>
         <small class="hint">
-          In <code>tsnet</code> mode the bridge's embedded Tailscale node sends Tailscale its diagnostic logs only while
-          this is on. Off, the default, it sends none. A tailnet that requires those logs refuses the node until this is
-          on. A change takes effect when the bridge's process restarts: once the bridge has run its node with this off,
-          the uploads stay off until that process exits, so quit the bridge, its menu included, and launch it again, or
-          restart its service; stopping it and choosing Start now in the menu runs it in the same process. A node already
-          running when this is turned off keeps uploading until it stops.
+          In <code>tsnet</code> mode this is your consent to the bridge's embedded Tailscale node sending Tailscale its
+          diagnostic logs; without it, the default, the node sends none. The consent applies when the bridge's process
+          builds its node, so a change takes a restart of that process: quit the bridge, its menu included, and launch
+          it again, or restart its service (stopping it and choosing Start now in its menu runs it in the same
+          process). Two things keep the uploads off even with the consent: <code>TS_NO_LOGS_NO_SUPPORT=true</code> in
+          the environment the bridge was launched with, and this process having built its node without the consent,
+          until the process exits; the Tailscale panel below says which. A tailnet that requires those logs refuses
+          the node until they are on. What stays open is backlog B830.
         </small>
       </div>
 

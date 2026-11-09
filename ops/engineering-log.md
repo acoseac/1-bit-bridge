@@ -89372,8 +89372,7 @@ README, the README, the release notes, round 1's entry corrected). The rules cha
   have named a variable nobody set. 2664276c: the policy keeps what it found before it first set the variable
   (`policyRecord`), reads that as the inherited value while the variable holds the true it set, and hands it back
   (`putBackNoLogsEnv`) where a later config allows the uploads; a value anything else put there since, upstream's own
-  setter included, stays. Putting the value back at `Close` was rejected: `Close` returns while a `Start` may still be
-  building its node, so a put-back could reach a start that has not chosen its log transport.
+  setter included, stays. Putting the value back at `Close` was rejected (backlog B830).
   `ForgetUploadPolicyForTest` starts a test case as a process that has built no node.
 
 ### Red first and the controls
@@ -89438,11 +89437,10 @@ record. The rules changes ship as `rules-b749-r3.patch` (`cli-serve.md`'s B749 l
 
 ### The findings
 
-- **Codex P2: a hand-back overlaps an earlier node's unfinished start.** It held. `tsnetFront.stop` stops waiting for
-  the node at its deadline, and `Server.Close` cancels a `Start` it has not published and returns without joining it,
-  so a start of the menu's first serve could resume after its second serve had handed the inherited value back, and
-  build an uploading transport under a config that forbade it. Round 2's tests finished the first start before the
-  second node was built, so they could not see it. Removed with the hand-back.
+- **Codex P2: a hand-back overlaps an earlier node's unfinished start.** It held, on what backlog B830 holds open: a
+  start of the menu's first serve could find the inherited value its second serve handed back, and build an uploading
+  transport under a config that forbade it. Round 2's tests finished the first start before the second node was built,
+  so they could not see it. Removed with the hand-back.
 - **Codex P2: upstream's true taken for the bridge's.** It held: the policy writes the variable through
   `envknob.SetNoLogsNoSupport`, as the coordination server's `DisableLogTail` message does, so round 2's ownership
   check could not tell the two `true`s apart, and a later allowing node erased upstream's beside the
@@ -89471,8 +89469,7 @@ line of its own (`admin.TailscaleStatus.UploadsHeldOff`, a "Diagnostic logs" row
 empty, written as text), for a node the tailnet accepted, whose badge, backend state and endpoints are unchanged, as
 for one it refused, whose `LastError` carries the same words. The README, the settings page's hint, the settings
 semantics, the release notes, the field's comment, the env example and the Docker and VPS notes say "process
-restart" plainly (6a6fff09), and the limit the consult named: setting the variable does not take back an earlier
-consenting node's transport, which uploads under that consent until its teardown. Round 2's two tests became
+restart" plainly (6a6fff09), and what stays open, backlog B830. Round 2's two tests became
 `TestOnceThisProcessTurnsTheUploadsOffTheyStayOff` and `TestAServeRunAgainInTheSameProcessKeepsTheUploadsOff`; round
 2's entry in this log names them so, and the rules patch renames their citations.
 
