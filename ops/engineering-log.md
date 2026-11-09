@@ -88883,3 +88883,223 @@ test runs `bridge backup --verify` in a process of its own beside serve's
 verification, the cross-process lock being pinned through the pruner and
 `--verify`'s busy answer. A third, the review's, is the second round's
 first point.
+
+## 2026-11-09 — B653 PR 1 round 2: one snapshot per restart loop, the backups folder's lock resolved and always taken, no VERIFIED left that a check did not find
+
+The second round of backlog B653's first PR, on `feat/b653-snapshot-verify`
+(PR #1444) from the first round with main merged in (d3216d39); worker b653
+on legion0 (Ubuntu 26.04, linux/amd64, go1.27.3, `GOTOOLCHAIN=local`,
+`GOPROXY=off`). It answers Codex's and the Claude API's review of the first
+round and both reviews of its brief. Commits: the code and its tests 3525c819, the page and round 1's record d4e812c3, then the tests the controls and the reds asked for (02fe7715, 9100ae00, a5e49f05, e79b830e, e4eeb910), and this record. The rules go through
+`rules-b653-r2.patch`: cli-serve.md's three B653 lines and their long form in
+History-rules-cli-serve.md, with a paragraph of the second round's, and
+admin-console.md's B653 bullet.
+
+### The six points, as built
+
+1. **A restart loop takes one snapshot.** A capture owns its snapshot from
+   right after it makes the folder until its verification ends
+   (`backup.CaptureSnapshot`, `owner.go`): the kernel's lock on
+   `.verification.lock` in the snapshot (`fsutil.OpenLockFile`, which gives
+   it the folder's owner as root, and `fsutil.TryLock`), which a dead
+   process lets go. A reader asks it of a record holding a `PENDING`
+   (`probeOwner`, a shared try, which another reader's probe does not
+   refuse): held, the `PENDING` is under way however old; there and held by
+   nobody, it reads `INCOMPLETE` (`interrupted`) at once; not there (a
+   snapshot written before owners were kept, or by `Snapshot`, which owes no
+   verification) it reads by its age as before. The prune keeps every
+   snapshot a reader reads `PENDING`, and just before each removal asks the
+   owner again with an exclusive try (`ownedNow`), which keeps a claimed
+   snapshot whose record holds no `PENDING`; the orphan sweep spares a
+   capture under way. The startup pass is one rule (`decideStartupPass`):
+   no snapshot where one from the last day has a database `VERIFIED`; nor
+   where the newest from the last day owes its check (its database
+   `PENDING` or `INCOMPLETE`), which it leaves to the live owner that holds
+   it, or else claims under the folder's lock (`backup.Claim`) and verifies
+   in place (`FinishCapture`), taking a snapshot after it only where that
+   check finds the database `FAILED`; otherwise a snapshot (none from the
+   last day, or the newest `FAILED`, legacy, or of a record this bridge
+   cannot read). The end state of a loop whose boots die before their
+   check ends: one snapshot, verified by the first boot that lives, not
+   pruned.
+2. **No `VERIFIED` a check did not find.** A write goes behind its veto
+   wherever the record it replaces or the one it writes holds a
+   `VERIFIED`; the veto is made in the bundle, or beside it in the backups
+   folder (`.verdict-unsynced-<snapshot>`) where the bundle takes no file,
+   which every reader asks too, and is kept where its owner cannot be given
+   (root_squash). Where neither can be made, a record that held a
+   `VERIFIED` is written over all the same, and only a write that fails
+   then too keeps it: the one case a reader still reads it, said to the
+   caller as `ErrRecordKept`, and only on a folder that takes no new file
+   in the bundle or beside it and no manifest's replacement.
+3. **The lock is the backups folder's, resolved.** `resolveSnapshotIn`
+   resolves the snapshot (`filepath.Abs`, `fsutil.ResolveLinks`) and the
+   configured backups folder and compares the snapshot's parent with it by
+   `os.SameFile`; the lock is taken in the resolved folder, the prune's
+   too, and an in-process token per resolved folder comes first.
+   `bridge backup --verify` loads the install's config (`loadCLIConfig`,
+   `refuseDataDirAway`) and refuses, exit 2, a snapshot outside its backups
+   folder (`ErrOutsideBackups`): a copy elsewhere is copied back to be
+   checked. A config that does not load is exit 2, as for every other
+   subcommand.
+4. **No lock, no protected work.** A try answered as no lock granted
+   (`fsutil.KeepsNoLocks`, ENOLCK included) gives `ErrBackupsUnlocked`:
+   the verification writes nothing, a claim is refused, and the prune with
+   its orphan sweep, which now runs under the lock, keep<=0 included, is
+   skipped (`PruneResult.SkippedFor`). A capture needs no folder lock (it
+   takes its own owner lock); so that a folder that never grants one does
+   not grow by a snapshot a pass, the ticker takes none while the folder
+   grants no lock (`backup.ProbeBackupsLock`, which opens only a lock file
+   there already and makes nothing) and the newest snapshot owes its check,
+   and `bridge doctor` warns (`backup-lock`).
+5. **Everything inside the bound.** One worker goroutine runs every step
+   that can wait on a filesystem, holding the slot, the lock and the
+   ownership until it ends; its caller answers within `StopWriteBound` of
+   a stop, or past its own bound (its lock wait, its deadline and twice
+   `StopWriteBound`). The choice of folded item 4: an abandoned step keeps
+   its hold until it ends, so nothing protected runs beside it; a lock
+   opened or taken after the stop is let go at once. `runCheck` gives a
+   check up half of `StopWriteBound` past its context's end, the deadline
+   included, and records `INCOMPLETE` (`deadline`). The startup claim runs
+   under the same bound.
+6. **The tests pin what they claim.** Below.
+
+### The reds at the round before
+
+On a copy of d3216d39 (`git archive`) with the second round's tests in it
+and a scratch shim, never committed, giving the round before the names and
+none of the behaviour: `Capture` over `Snapshot`, `FinishCapture` over
+`Finish`, a `Claim` that claims nothing, the new seams as no-ops, the new
+errors, `PruneResult.SkippedFor`, `SnapshotStatus.Owned` and
+`VerifyOptions.BackupsRoot` set by nothing, `decideStartupPass` as the
+round before decided (the skip for a recent verified database, else a
+capture), and `doctor.BackupChecks` called with its four arguments.
+Predictions written first; each test run alone under a timeout of its own.
+
+Every result was as predicted:
+
+- internal/backup: `TestADeadCaptureIsPrunedAndALiveOneIsKept` (`a capture
+  whose owner is gone: database PENDING [], want INCOMPLETE "interrupted"`);
+  `TestAQueuedVerificationKeepsItsCaptureFromThePrune` (the first prune
+  removed a queued capture, whose verification then answered `read the
+  snapshot's manifest`); `TestTheReaperSparesACaptureUnderWay` (`reaped 1`);
+  `TestThePruneKeepsWhatRecoveryNeeds` on its owners' row alone (`kept
+  [bundle-00 bundle-01 bundle-02 bundle-03], want [bundle-00 bundle-01
+  bundle-03]`, a dead capture kept by its age); `TestNoLockNoProtectedWork`
+  for each of its three answers (`a verification granted no lock answered
+  <nil>, recorded true`);
+  `TestAStopWhileTheManifestReadHangsReturnsWithinItsBoundAndKeepsTheLock`
+  (`did not return within 13s of its stop`, the caller reading the manifest
+  itself); `TestAVerificationPastItsDeadlineReturnsWithItsCallerStillWaiting`
+  (`did not return within 12.3s`: the round before gave a check up on its
+  caller's stop alone, and its deadline is a constant no test can shorten);
+  and `TestAVerifiedRecordLeftForAFailedOneIsVetoedWhereItsBundleTakesNoFile`,
+  with no seam (`after the error, the pruner reads VERIFIED/VERIFIED; the
+  console's reading takes it for the newest verified; the doctor's newest
+  line reads it verified`).
+- cmd/bridge: `TestARestartLoopTakesOneSnapshotAndTheFirstBootThatSurvivesVerifiesIt`
+  (`after 2 boots that died: 2 snapshots, want 1`);
+  `TestTheStartupPassFollowsTheNewestRecentSnapshot` on the four rows whose
+  newest snapshot owes its check;
+  `TestBridgeBackupVerifyTakesTheBackupsFoldersLockWhateverPathItIsGiven` on
+  `.` (the prune beside it ran, and `.backups.lock` was made in the
+  snapshot) and on the link (`.backups.lock` made beside the link);
+  `TestBridgeBackupVerifyRefusesWhatIsNotInItsInstallsBackupsFolder`
+  (`--verify of a copy elsewhere = 0`);
+  `TestABackupsFolderGrantingNoLockGrowsByOneSnapshotAndTheDoctorSaysWhy`
+  (its first pass verified with no lock granted); and
+  `TestTheDoctorsVerifyHintsAreCommandsTheCLITakes` (`backup: unexpected
+  argument`, exit 2).
+- internal/admin: `TestALeftVerifiedThatCannotBeRecordedReadsAsNotVerifiedEverywhere`'s
+  case with no seam (the API, the doctor and the cached Jobs card all
+  reading `VERIFIED` after the error).
+
+Not reds, as predicted, and why: a relative path and a data dir reached
+through a link took the pruner's lock at the round before too (`Skipped:
+true`, their failure there the `SkippedFor` the shim leaves unset), since a
+relative path's parent is the backups folder however it is spelled and a
+link reaches the same lock file; they pin the resolution point 3's refusal
+needs, and the control comparing spellings is their red.
+`TestAStopWhileTheLocksOpenHangsReturnsWithinItsBoundAndTakesNoLockLate`,
+`TestAClaimStoppedWhileItsLockOpenHangsReturnsWithinItsBound` and the
+ticker's bound test wait at seams the round before had not got: no object
+on a local disk hangs a lock file's open, and the manifest read's red is the
+named pipe's above, so theirs are the controls.
+`TestTwoVerificationsOfOneSnapshotWriteOneAtATime` passes in one process
+there (its slot held), and point 6's red is its controls;
+`TestAVerdictWrittenByAnotherCallerShowsOnTheJobsCardAtTheNextPoll` passes
+there (the round before stamped a write that landed), and its red is the
+stamp's control; and the claim's tests name an API the round before had
+not got.
+
+### Negative controls
+
+Each mutates one site of the committed tree, runs the tests named, and puts
+the committed bytes back, compared with HEAD's blob before each mutation and
+after each restore (a runner in the scratch folder; the predictions written
+to a file before the first run). All 28 went red:
+
+- one snapshot per restart loop: the startup pass capturing beside a
+  snapshot that owes its check (P1a: `after 2 boots that died: 2 snapshots,
+  want 1`, and the table's four rows; its first form deleted a variable's
+  only use and did not build, and was rewritten to keep it read); a
+  `PENDING` whose owner is gone read by its age (P1b); one its owner holds
+  read by its age (P1c: `a capture whose owner holds it: database
+  INCOMPLETE [interrupted], want PENDING`); the capture taking no owner lock
+  (P1d); the orphan sweep asking no owner (P1e: `reaped 1`); the
+  keep-policy asking no owner before a removal (P1f: `the prune removed a
+  snapshot claimed for its check`, the test 9100ae00 wrote when the list of
+  controls found none for that ask).
+- no `VERIFIED` left: a veto only over a record that would hold one, the
+  round before's rule (P2a: the pruner, the console, the doctor and the API
+  reading `VERIFIED` after the error); no veto beside the bundle (P2b); a
+  veto whose owner cannot be given dropped (P2c: the veto then beside the
+  bundle, want in it); a write that keeps the `VERIFIED` not saying so
+  (P2d); no write where no veto can be made (P2e); the veto's making
+  stamping nothing (P2f: the Jobs card still reading `VERIFIED`).
+- the lock resolved: the snapshot's path not resolved (P3a: `--verify .`
+  refused as outside, and the link); the backups folder compared by its
+  spelling (P3b: the data dir reached through a link refused); `--verify`
+  given no backups folder (P3c: the copy elsewhere verified, exit 0).
+- no lock, no protected work: a try granted no lock going on (P4a, in both
+  packages); the orphan sweep before the lock (P4b: the orphan reaped); the
+  ticker capturing whatever the lock says (P4c: `2 snapshots, want 1`); the
+  doctor saying nothing (P4d).
+- the bound: the manifest's read on the caller (P5a) and the lock's open on
+  the caller (P5b), each red in internal/backup and at the ticker (`the
+  ticker did not return while its manifest's read hung`, by its 300 s
+  timeout there); the worker never letting the lock go (P5c: a prune once
+  the abandoned verification ended still skipped); the check with no
+  deadline (P5d); the claim on its caller's goroutine (P5e).
+- the tests' pins: no slot (P6a: `the second verification waited at the
+  wrong place while the first held its turn; want its wait at the slot`); no
+  kernel lock, a held one taken all the same (P6b: `the second verification
+  ended … while the first was parked holding its turn`); a verdict's write
+  stamping nothing (P6c: `the next poll after another caller's verdict reads
+  "PENDING", want FAILED`); and the doctor's hint putting `--full` first
+  (P7).
+
+Three of them found tests that did not pin what they said, each fixed
+before its control ran again: P6b went red by its timeout alone, its second
+verification waiting inside the first's `sync.Once` in the park hook rather
+than at a lock (a5e49f05: the park is a compare-and-swap); P6c stayed green
+twice over, first because a verdict that passes is stamped when its veto is
+made (a5e49f05 adds a failing verdict), then because a verification's first
+take of the folder's lock makes `.backups.lock`, which moves the folder's
+time (e79b830e makes it first), and a database that fails beside files that
+pass still holds a `VERIFIED`, whose write takes a veto (e4eeb910 fails
+both).
+
+### The gates
+
+The gates' numbers follow in the next commit.
+
+### Follow-ups
+
+The backlog file is not on legion0, so these go to the PR's report: a
+restore reads no snapshot's verdict yet (the next two PRs' ground); a case
+of two processes is a second open of the lock file in this one (flock and
+LockFileEx exclude it as another process's open would), but the restart
+loop's boots are processes of their own, killed; and no case runs on a
+network mount, where a lock is a POSIX record lock, which this process's
+own records of what it holds stand in for.
