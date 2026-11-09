@@ -60,7 +60,7 @@ func requireWaits(t *testing.T, upd *Updater, auto InstallOptions) {
 	if why := upd.Status().DeferredReason; !strings.Contains(why, "awaits its confirmation") {
 		t.Errorf("the auto-installer's deferred reason = %q, want it waiting for 0.0.1's confirmation", why)
 	}
-	if err := upd.decideUnderLock(auto, "9.9.9"); !errors.Is(err, ErrInstallAwaitsConfirmation) {
+	if err := upd.decideUnderLock(admitted(t, upd), auto, "9.9.9"); !errors.Is(err, ErrInstallAwaitsConfirmation) {
 		t.Errorf("the decision under the lock = %v, want it waiting", err)
 	}
 }
@@ -73,7 +73,7 @@ func requireNoWait(t *testing.T, upd *Updater, auto InstallOptions) {
 	if why := upd.Status().DeferredReason; strings.Contains(why, "awaits its confirmation") {
 		t.Errorf("the auto-installer waits: %q", why)
 	}
-	if err := upd.decideUnderLock(auto, "9.9.9"); errors.Is(err, ErrInstallAwaitsConfirmation) {
+	if err := upd.decideUnderLock(admitted(t, upd), auto, "9.9.9"); errors.Is(err, ErrInstallAwaitsConfirmation) {
 		t.Errorf("the decision under the lock = %v, want no wait", err)
 	}
 }
@@ -88,7 +88,7 @@ func TestTheAutoInstallerWaitsForTheRunningInstallsProbation(t *testing.T) {
 	requireWaits(t, upd, auto)
 	manual := auto
 	manual.Automatic = false
-	if err := upd.decideUnderLock(manual, "9.9.9"); err != nil {
+	if err := upd.decideUnderLock(admitted(t, upd), manual, "9.9.9"); err != nil {
 		t.Errorf("the decision under the lock for a manual install = %v, want none", err)
 	}
 }

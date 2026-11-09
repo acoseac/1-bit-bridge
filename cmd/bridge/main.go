@@ -2332,7 +2332,7 @@ func (a updateInfoAdapter) backupPresent() bool {
 }
 
 func (a updateInfoAdapter) CheckNow(ctx context.Context) admin.UpdateStatus {
-	a.u.CheckNow(ctx)
+	_, _ = a.u.CheckNow(ctx)
 	return a.Status()
 }
 

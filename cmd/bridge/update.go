@@ -92,7 +92,7 @@ func updateCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stde
 		TokenSnapshot: tokenSnapshot,
 		Client:        updateReleases,
 	})
-	st := upd.CheckNow(ctx)
+	st, _ := upd.CheckNow(ctx)
 
 	fmt.Fprintf(stdout, "Current: %s (channel %s)\n", st.CurrentVersion, st.Channel)
 	if st.LastError != "" {

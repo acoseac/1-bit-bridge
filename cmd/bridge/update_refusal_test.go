@@ -36,8 +36,8 @@ func fakeLatestRelease(t *testing.T, tag string) *updater.Updater {
 		RepoOverride: "fake/repo",
 		Client:       updater.NewClient("fake/repo", 5*time.Second).WithBaseURL(srv.URL),
 	})
-	if st := upd.CheckNow(t.Context()); !st.UpdateAvailable {
-		t.Fatalf("the fake release %s is not an update: %+v", tag, st)
+	if st, err := upd.CheckNow(t.Context()); err != nil || !st.UpdateAvailable {
+		t.Fatalf("the fake release %s is not an update: %+v (%v)", tag, st, err)
 	}
 	return upd
 }

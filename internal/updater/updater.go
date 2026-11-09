@@ -129,6 +129,15 @@ type Status struct {
 	// the candidate was installed without its settings check, because it
 	// predates the check. Never set on the cached status.
 	InstallWarning string
+
+	// CheckEnabled is whether update checks are on (update.checkEnabled,
+	// backlog B761), as the switch answers when the status is read
+	// (Options.CheckEnabled). While it is false nothing is asked of GitHub
+	// and nothing new is installed, and the status shows nothing a check
+	// found before, which is not current: LatestVersion, UpdateAvailable,
+	// ReleaseNotesURL, DeferredReason and LastError are empty, and LastCheck
+	// is the last check that answered.
+	CheckEnabled bool
 }
 
 // Options configures a new Updater. Zero values pick sane defaults so
@@ -241,6 +250,19 @@ type Options struct {
 	// (ProbationHolds; backlog B660). Nil is the time since New, on the
 	// monotonic clock. Tests inject one.
 	Uptime func() time.Duration
+
+	// CheckEnabled is the update check's switch (update.checkEnabled,
+	// backlog B761), nil for on: asked at every check's admission, the
+	// scheduled ones, the one at the start and "Check now", at every
+	// install's start and again at its decision under the install marker's
+	// lock, by the auto-installer before it begins one, and by Status. While
+	// it answers false the updater asks GitHub nothing and installs nothing
+	// new; a status, a rollback and a restart the auto-installer deferred
+	// after a swap that committed go on. cmd/bridge wires serve's to the live
+	// config holder, and `bridge update` to the config it loaded. A caller
+	// whose answer can change while the updater runs tells it of each change
+	// through ChecksSwitched, which stops what an off stops.
+	CheckEnabled func() bool
 }
 
 // Updater owns the cached status and the polling goroutine.
@@ -318,6 +340,46 @@ type Updater struct {
 	// restamp's write of the marker (refreshInstallAttemptedAt): a test's
 	// stand-in for a write that is under way when a stop lands.
 	restampSave func(dataDir string, st State) error
+
+	// checkEnabled is Options.CheckEnabled, the update check's switch
+	// (checksEnabled reads it).
+	checkEnabled func() bool
+
+	// gateMu orders the switch's admissions against its off transition
+	// (backlog B761): every check and every install not yet past its
+	// decision is admitted, and registered in active, holding it (admit),
+	// and the off transition stops what active holds, holding it
+	// (ChecksSwitched); an install's decision leaves active holding it too
+	// (commit). Never held across a request or a file's write.
+	gateMu sync.Mutex
+	active map[*admission]struct{}
+
+	// wake is the switch's own rearm: turned on, the poll loop's wait starts
+	// again at a full interval, asking nothing (ChecksSwitched). Buffered 1.
+	wake chan struct{}
+
+	// after is the poll loop's timer, time.After in production: a test's
+	// stand-in records each wait the loop asks for and fires a tick with no
+	// real hour.
+	after func(time.Duration) <-chan time.Time
+}
+
+// ErrUpdateChecksOff means update checks are off (update.checkEnabled,
+// backlog B761): the check or the install asked for was refused before
+// anything was asked of GitHub, or one under way was stopped as they were
+// turned off, and nothing was installed for it. The remedy is the switch.
+var ErrUpdateChecksOff = errors.New("update checks are off")
+
+// admission is one check or install admitted while update checks were on:
+// the cancel of its context, which the off transition calls (ChecksSwitched),
+// and whether it did. The cancel is a plain one, its cause context.Canceled:
+// net/http answers a request a cause stopped with the cause itself, not
+// context.Canceled, and every caller that tells a stop from a failure
+// (ctxerr.WithoutCancellation) asks for the cancellation, so a check the
+// switch stopped would be logged and recorded as one that failed.
+type admission struct {
+	cancel  context.CancelFunc
+	stopped atomic.Bool
 }
 
 // New builds an Updater. The poller is not started — call Run on it
@@ -374,6 +436,10 @@ func New(opts Options) *Updater {
 		tokenSnapshot:      opts.TokenSnapshot,
 		now:                now,
 		uptime:             uptime,
+		checkEnabled:       opts.CheckEnabled,
+		active:             map[*admission]struct{}{},
+		wake:               make(chan struct{}, 1),
+		after:              time.After,
 		status: Status{
 			CurrentVersion: version.ServerVersion,
 			Channel:        channel,
@@ -400,37 +466,147 @@ func New(opts Options) *Updater {
 // Designed to be invoked as `go updater.Run(scanCtx)` from serveCmd
 // alongside the periodic scanner — same lifetime, same cancellation
 // semantics.
+//
+// While update checks are off (backlog B761) the start asks nothing, and
+// the timer keeps ticking with no request at all, each tick firing only the
+// restart an automatic install deferred after its swap had committed
+// (tick). Turned on, the wait starts again at a full interval, asking
+// nothing (ChecksSwitched).
 func (u *Updater) Run(ctx context.Context) {
 	// Initial check on startup so the admin UI has something to show
 	// before the first interval elapses. Best-effort; errors are
-	// captured in Status.LastError.
+	// captured in Status.LastError. Admitted only while update checks are
+	// on (admit): off, the start asks GitHub nothing.
 	//
 	// maybeAutoInstall ONLY runs after a successful checkOnce — a
 	// failed poll (GitHub down, rate-limited, transient network
 	// blip) leaves the previous poll's cached UpdateAvailable=true
 	// untouched, so an unconditional call would fire auto-install
 	// off stale state. Caught in PR #43 review (CodeRabbit).
-	if u.checkOnce(ctx) {
-		u.maybeAutoInstall(ctx)
+	if cctx, a, ok := u.admit(ctx); ok {
+		polled := u.checkOnce(cctx)
+		u.done(a)
+		if polled {
+			u.maybeAutoInstall(ctx)
+		}
 	}
 
 	// A fresh timer per iteration rather than one ticker: a ticker cannot
 	// change period, and re-reading the cadence is what makes
 	// update.checkIntervalHours hot.
 	for {
-		t := time.NewTimer(u.checkInterval())
+		wait := u.after(u.checkInterval())
 		select {
 		case <-ctx.Done():
-			t.Stop()
 			return
-		case <-t.C:
-			if u.checkOnce(ctx) {
-				u.maybeAutoInstall(ctx)
-			}
+		case <-wait:
+			u.tick(ctx)
 		case <-u.rearm:
 			// Cadence changed; re-read it on the next iteration.
 			// Deliberately no poll — see Options.Rearm.
-			t.Stop()
+		case <-u.wake:
+			// Update checks turned on (ChecksSwitched): a full interval
+			// from now, and deliberately no poll and no install.
+		}
+	}
+}
+
+// tick is one turn of the poll loop's timer: a check while update checks are
+// on, and the auto-installer after a check that answered; while they are off
+// (backlog B761), no request at all, and only the restart an automatic
+// install deferred after its swap had committed (finishDeferredRestart). Its
+// gate is its own admission, apart from the start's in Run.
+func (u *Updater) tick(ctx context.Context) {
+	cctx, a, ok := u.admit(ctx)
+	if !ok {
+		u.finishDeferredRestart(ctx)
+		return
+	}
+	polled := u.checkOnce(cctx)
+	u.done(a)
+	if polled {
+		u.maybeAutoInstall(ctx)
+	}
+}
+
+// checksEnabled is the update check's switch as it answers now
+// (Options.CheckEnabled), on where none was given.
+func (u *Updater) checksEnabled() bool {
+	return u.checkEnabled == nil || u.checkEnabled()
+}
+
+// admit admits a check or an install while update checks are on (backlog
+// B761): a context of parent's that the switch's off transition cancels,
+// marking the admission stopped, and the admission to end with done; ok is
+// false, nothing registered and parent handed back, while they are off. The
+// switch is read and the admission registered in one hold of gateMu, which
+// the off transition takes too, so an admission either comes after an off,
+// which it then refuses, or is registered before it, which then stops it.
+func (u *Updater) admit(parent context.Context) (context.Context, *admission, bool) {
+	u.gateMu.Lock()
+	defer u.gateMu.Unlock()
+	if !u.checksEnabled() {
+		return parent, nil, false
+	}
+	ctx, cancel := context.WithCancel(parent)
+	a := &admission{cancel: cancel}
+	u.active[a] = struct{}{}
+	return ctx, a, true
+}
+
+// done ends an admission: no longer the off transition's to stop, and its
+// context let go. A refused admission, nil, is nothing to end.
+func (u *Updater) done(a *admission) {
+	if a == nil {
+		return
+	}
+	u.gateMu.Lock()
+	delete(u.active, a)
+	u.gateMu.Unlock()
+	a.cancel()
+}
+
+// commit is an install's decision under the install marker's lock, the
+// switch's boundary (backlog B761): true while update checks are on and the
+// off transition has not stopped the install, and from then on no off
+// transition stops it, so its swap finishes; false, the install to be
+// refused, once either has happened.
+func (u *Updater) commit(a *admission) bool {
+	u.gateMu.Lock()
+	defer u.gateMu.Unlock()
+	if _, live := u.active[a]; !live || !u.checksEnabled() {
+		return false
+	}
+	delete(u.active, a)
+	return true
+}
+
+// ChecksSwitched is told that the update check's switch may have changed
+// (Options.CheckEnabled, backlog B761): serve's settings save calls it once a
+// change of update.checkEnabled is saved and published, and never for a save
+// that failed, which changed nothing. Off, it stops every check under way,
+// scheduled or "Check now", and every install not yet past its decision
+// under the install marker's lock, each through its own context (admit), its
+// request ended where it is on the wire; an install past its decision is not
+// stopped, and finishes its swap. On, the poll loop's wait starts again at a
+// full interval (wake), asking nothing and installing nothing. It reads the
+// switch as it stands, so calls in any number and order leave what the
+// switch says.
+func (u *Updater) ChecksSwitched() {
+	u.gateMu.Lock()
+	on := u.checksEnabled()
+	if !on {
+		for a := range u.active {
+			a.stopped.Store(true)
+			a.cancel()
+			delete(u.active, a)
+		}
+	}
+	u.gateMu.Unlock()
+	if on {
+		select {
+		case u.wake <- struct{}{}:
+		default: // buffered 1: a wake already pending covers this one
 		}
 	}
 }
@@ -484,42 +660,20 @@ func (u *Updater) checkInterval() time.Duration {
 // All conditional gates log at info level (so the operator can
 // audit "why didn't auto-install fire") but never escalate to
 // stderr; a deferred install is a normal state.
+//
+// While update checks are off (backlog B761) it begins no install: a check
+// that answered just before the switch went off leaves its candidate cached,
+// and nothing installs it; only the restart a swap that committed deferred
+// fires, as at every tick while they are off (finishDeferredRestart). Install
+// asks the switch again, at its start and at its decision under the install
+// marker's lock.
 func (u *Updater) maybeAutoInstall(ctx context.Context) {
-	if !u.autoInstallEnabled() {
+	if !u.checksEnabled() {
+		u.finishDeferredRestart(ctx)
 		return
 	}
-	// Reset DeferredReason at the start of each cycle so a stale
-	// "would orphan device X" from the previous attempt doesn't
-	// linger after X updates or disconnects. The Install path
-	// re-sets it on this cycle's gate decision if applicable.
-	u.clearDeferredReason()
-	if u.autoInstallOpts == nil || u.autoInstallRestart == nil {
-		// Defensive: the configuration says auto-install is on but
-		// the wiring is incomplete. Likely a programming error in
-		// cmd/bridge — log loudly so it's visible.
-		logger.Warn("autoInstall=true but install opts/restart callback are missing; skipping")
-		return
-	}
-	st := u.Status()
-	if !st.UpdateAvailable || st.LatestVersion == "" {
-		return
-	}
-	// The rejection gate, ahead of every other gate INCLUDING the
-	// pending-restart fast path: a rejected release must not be
-	// re-installed, and a restart still pending for one must not fire. A
-	// release the operator rolled back is held until a newer one; one that
-	// refused this bridge's settings, until they change (HeldBack).
-	if hold := u.heldBack(st.LatestVersion); hold.Version != "" {
-		u.recordDeferredReason(hold.Reason)
-		why := "operator rolled this release back"
-		if hold.Recorded {
-			why = "this release refuses the settings, or predates their check"
-		}
-		logger.Info(autoInstallDeferredMessage, "reason", why, "version", hold.Version)
-		return
-	}
-	if !u.inAllowedWindow(u.now()) {
-		logger.Info(autoInstallDeferredMessage, "reason", "outside quiet-hours window")
+	st, ok := u.autoInstallGate()
+	if !ok {
 		return
 	}
 	// Pending-restart fast path: a previous cycle already installed
@@ -567,8 +721,9 @@ func (u *Updater) maybeAutoInstall(ctx context.Context) {
 			}
 			u.recordDeferredReason(reason)
 			logger.Info(autoInstallDeferredMessage, "err", err)
-		} else if errors.Is(err, ErrCompatGateRefused) || errors.Is(err, ErrInstallPendingRestart) {
-			// Both are normal deferred states, not failures.
+		} else if errors.Is(err, ErrCompatGateRefused) || errors.Is(err, ErrInstallPendingRestart) ||
+			errors.Is(err, ErrUpdateChecksOff) {
+			// All three are normal deferred states, not failures.
 			//
 			// ErrInstallPendingRestart is reachable here BECAUSE intent
 			// and state are separate: an operator's manual install sets
@@ -576,7 +731,9 @@ func (u *Updater) maybeAutoInstall(ctx context.Context) {
 			// pendingRestart (so this path does not take the fast path
 			// above and tries an install). Logging that at Error would
 			// put a line in the journal every poll cycle for a bridge
-			// that is simply waiting to be restarted.
+			// that is simply waiting to be restarted. ErrUpdateChecksOff
+			// is the switch turned off while the install ran, before its
+			// decision (backlog B761): nothing was installed.
 			logger.Info(autoInstallDeferredMessage, "err", err)
 		} else if failure := ctxerr.WithoutCancellation(ctx, err); failure != nil {
 			// An install the shutdown stopped is not a failed one: the
@@ -596,6 +753,75 @@ func (u *Updater) maybeAutoInstall(ctx context.Context) {
 	// gates at entry, and the auto-installer's opts carry
 	// Force=false). Restarting now would kill it — defer to the next
 	// poll cycle, which takes the pending-restart fast path above.
+	u.restartWhenDrained(ctx)
+}
+
+// autoInstallGate is the auto-installer's gates ahead of any install or
+// restart, in their order: auto-install on and wired, a candidate cached,
+// that candidate not held back, and the quiet hours. It answers the status as
+// the last check left it, and whether every gate let it through, saying why
+// where one did not. The candidate is read as cached (cached), whatever the
+// switch says: the deferred restart a swap that committed leaves runs with
+// update checks off (finishDeferredRestart).
+func (u *Updater) autoInstallGate() (Status, bool) {
+	if !u.autoInstallEnabled() {
+		return Status{}, false
+	}
+	// Reset DeferredReason at the start of each cycle so a stale
+	// "would orphan device X" from the previous attempt doesn't
+	// linger after X updates or disconnects. The Install path
+	// re-sets it on this cycle's gate decision if applicable.
+	u.clearDeferredReason()
+	if u.autoInstallOpts == nil || u.autoInstallRestart == nil {
+		// Defensive: the configuration says auto-install is on but
+		// the wiring is incomplete. Likely a programming error in
+		// cmd/bridge — log loudly so it's visible.
+		logger.Warn("autoInstall=true but install opts/restart callback are missing; skipping")
+		return Status{}, false
+	}
+	st := u.cached()
+	if !st.UpdateAvailable || st.LatestVersion == "" {
+		return st, false
+	}
+	// The rejection gate, ahead of every other gate INCLUDING the
+	// pending-restart fast path: a rejected release must not be
+	// re-installed, and a restart still pending for one must not fire. A
+	// release the operator rolled back is held until a newer one; one that
+	// refused this bridge's settings, until they change (HeldBack).
+	if hold := u.heldBack(st.LatestVersion); hold.Version != "" {
+		u.recordDeferredReason(hold.Reason)
+		why := "operator rolled this release back"
+		if hold.Recorded {
+			why = "this release refuses the settings, or predates their check"
+		}
+		logger.Info(autoInstallDeferredMessage, "reason", why, "version", hold.Version)
+		return st, false
+	}
+	if !u.inAllowedWindow(u.now()) {
+		logger.Info(autoInstallDeferredMessage, "reason", "outside quiet-hours window")
+		return st, false
+	}
+	return st, true
+}
+
+// finishDeferredRestart fires the restart an automatic install deferred
+// once its swap had committed (pendingRestart: a download in flight held it
+// back, or the quiet hours), and does nothing else, asking GitHub nothing: a
+// tick while update checks are off calls it, and the auto-installer while
+// they are off (backlog B761). The restart is the pending-restart fast
+// path's, through the auto-installer's own gates (autoInstallGate:
+// auto-install on, the version not held back, the quiet hours) and
+// restartWhenDrained's (no download in flight, the marker's restamp, a stop).
+// Before B761 only that fast path fired it, after a check that answered, so
+// with checks off it never would, and the install would sit swapped and
+// unrestarted while the windows that run from its marker's time ran out.
+func (u *Updater) finishDeferredRestart(ctx context.Context) {
+	if !u.pendingRestart.Load() {
+		return
+	}
+	if _, ok := u.autoInstallGate(); !ok {
+		return
+	}
 	u.restartWhenDrained(ctx)
 }
 
@@ -619,8 +845,10 @@ func (u *Updater) inflightSessions() int64 {
 // Read at the gate rather than cached on the Updater: the gate runs at
 // most once per poll interval (6 h by default), so the cost is one tiny
 // file read and a digest of the settings, and there is no cache to go
-// stale against a rollback performed by the `bridge update` CLI in another
-// process, or against settings an operator just fixed.
+// stale against a hold another process recorded (a `bridge update` whose
+// candidate refused the settings, in a process of its own: it has no
+// rollback, which is the console's and a start's), or against settings an
+// operator just fixed.
 func (u *Updater) heldBack(candidate string) Hold {
 	if u.autoInstallOpts == nil {
 		return Hold{}
@@ -879,21 +1107,54 @@ func inWindow(startMin, endMin, now int) bool {
 }
 
 // CheckNow forces a poll outside the regular schedule. Used by the
-// admin "Check now" button. Returns the post-check status — same as
-// the next Status() call would return. Discards the success bool
-// because the admin UI reads success/failure from the returned
-// Status.LastError field.
-func (u *Updater) CheckNow(ctx context.Context) Status {
-	_ = u.checkOnce(ctx)
-	return u.Status()
+// admin "Check now" button and `bridge update`. Returns the post-check
+// status — same as the next Status() call would return. A poll that failed
+// upstream is no error here: the admin UI reads success/failure from the
+// returned Status.LastError field.
+//
+// While update checks are off (backlog B761) it asks GitHub nothing and
+// answers ErrUpdateChecksOff, and so it answers a check the switch's off
+// transition stopped under way.
+func (u *Updater) CheckNow(ctx context.Context) (Status, error) {
+	cctx, a, ok := u.admit(ctx)
+	if !ok {
+		return u.Status(), fmt.Errorf("%w: nothing was asked of GitHub", ErrUpdateChecksOff)
+	}
+	_ = u.checkOnce(cctx)
+	u.done(a)
+	if a.stopped.Load() {
+		return u.Status(), fmt.Errorf("%w: they were turned off while it asked GitHub, and the check was stopped", ErrUpdateChecksOff)
+	}
+	return u.Status(), nil
 }
 
-// Status returns a copy of the cached status. Cheap; safe to call
-// from request handlers.
+// Status returns a copy of the cached status, as it is shown (shown).
+// Cheap; safe to call from request handlers.
 func (u *Updater) Status() Status {
+	return u.shown(u.cached())
+}
+
+// cached is the status as the last check left it, whatever the switch says:
+// the auto-installer's own read of its candidate, and an install's.
+func (u *Updater) cached() Status {
 	u.mu.RLock()
 	defer u.mu.RUnlock()
 	return u.status
+}
+
+// shown is st as a caller is shown it (backlog B761): CheckEnabled the
+// switch's answer now, and while update checks are off none of what a check
+// found, which is not current while nothing checks: no version, no update
+// available, no release notes, no deferred reason and no error, LastCheck
+// the last check that answered. On again, the last check's answer shows
+// again until the next one, as after a check that failed.
+func (u *Updater) shown(st Status) Status {
+	st.CheckEnabled = u.checksEnabled()
+	if !st.CheckEnabled {
+		st.LatestVersion, st.UpdateAvailable, st.ReleaseNotesURL = "", false, ""
+		st.DeferredReason, st.LastError = "", ""
+	}
+	return st
 }
 
 // checkOnce hits the GitHub Releases API and updates the cached
@@ -913,10 +1174,12 @@ func (u *Updater) checkOnce(ctx context.Context) bool {
 
 	if err != nil {
 		// A poll that was STOPPED says nothing about GitHub. Shutdown
-		// cancels Run's context, and "Check now" polls on the admin
-		// request's, which the client can leave. The status keeps what
-		// the last poll that answered found, and nothing is logged. It
-		// is still not a successful poll, so no auto-install runs off it.
+		// cancels Run's context, "Check now" polls on the admin
+		// request's, which the client can leave, and the update check's
+		// switch turned off stops either through the check's own context
+		// (admit, backlog B761). The status keeps what the last poll that
+		// answered found, and nothing is logged. It is still not a
+		// successful poll, so no auto-install runs off it.
 		failure := ctxerr.WithoutCancellation(ctx, err)
 		if failure == nil {
 			return false

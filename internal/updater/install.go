@@ -97,6 +97,11 @@ type InstallOptions struct {
 	// holdBeforeSwap, nil in production, runs in Install just before the
 	// swap, its marker armed: a test's hold on an install there.
 	holdBeforeSwap func()
+
+	// holdBeforeDecision, nil in production, runs in Install once it holds
+	// the install marker's lock, just before its decision under it
+	// (decideUnderLock): a test's hold on an install there.
+	holdBeforeDecision func()
 }
 
 // Install downloads, verifies, swaps, and arms the rollback marker
@@ -133,6 +138,10 @@ type InstallOptions struct {
 //     ErrInstallHeldBack and ErrInstallAwaitsConfirmation (each a
 //     holdError), when the decision made again under that lock refuses
 //     (decideUnderLock).
+//   - ErrUpdateChecksOff while update checks are off, at the start, and
+//     for an install the switch's off transition stopped before its
+//     decision or that found the switch off at it (backlog B761): nothing
+//     armed or swapped.
 //   - Any download / verify / swap / state-save error returned verbatim
 //     with a wrapped context prefix.
 //
@@ -161,8 +170,42 @@ type InstallOptions struct {
 // or recorded a hold meanwhile. Where the lock cannot be held it
 // refuses with ErrMarkerLockUnavailable, nothing armed or swapped; a
 // stop in its wait returns ctx's error.
+//
+// The update check's switch (backlog B761) is asked at the start, where off
+// refuses with ErrUpdateChecksOff before anything, a candidate a check found
+// earlier included, and again at the decision under the install marker's
+// lock, which is its boundary (commit): before it, the switch's off
+// transition stops the install through its own context, its download, its
+// check or its wait for the lock, and the decision refuses where the switch
+// is off then, each answering ErrUpdateChecksOff with nothing armed or
+// swapped; from it, the install is the switch's no longer, and its marker's
+// writes and its swap finish whatever the switch says. The answer's status
+// is shown as Status shows it.
 func (u *Updater) Install(ctx context.Context, opts InstallOptions) (Status, error) {
-	status := u.Status()
+	ictx, a, ok := u.admit(ctx)
+	if !ok {
+		return u.Status(), fmt.Errorf("%w: no release is installed while they are off", ErrUpdateChecksOff)
+	}
+	defer u.done(a)
+	st, err := u.install(ictx, a, opts)
+	return u.shown(st), installStopped(a, err)
+}
+
+// installStopped is err, an install's answer, as its caller is told it: the
+// switch's refusal where the off transition stopped the install before its
+// decision (a.stopped; no transition stops one past it, commit), which says
+// nothing was installed, and err as it is otherwise.
+func installStopped(a *admission, err error) error {
+	if err == nil || errors.Is(err, ErrUpdateChecksOff) || !a.stopped.Load() {
+		return err
+	}
+	return fmt.Errorf("%w: they were turned off while the install was under way, and it stopped before its swap; "+
+		"nothing was installed", ErrUpdateChecksOff)
+}
+
+// install is Install's body, on the install's own context, a its admission.
+func (u *Updater) install(ctx context.Context, a *admission, opts InstallOptions) (Status, error) {
+	status := u.cached()
 	if !status.UpdateAvailable || status.LatestVersion == "" {
 		return status, ErrNoUpdate
 	}
@@ -398,7 +441,10 @@ func (u *Updater) Install(ctx context.Context, opts InstallOptions) (Status, err
 	}
 	defer lock.Release()
 	prior, priorErr := LoadState(opts.DataDir)
-	if err := u.decideUnderLock(opts, status.LatestVersion); err != nil {
+	if opts.holdBeforeDecision != nil {
+		opts.holdBeforeDecision()
+	}
+	if err := u.decideUnderLock(a, opts, status.LatestVersion); err != nil {
 		return status, err
 	}
 
@@ -838,7 +884,17 @@ func (u *Updater) swapAwaitingRestart(dataDir, target string) bool {
 // beside opts.BinaryPath, which a crash rollback would put back, with the
 // unconfirmed running version. A manual install is not held by it. The lock
 // is the caller's.
-func (u *Updater) decideUnderLock(opts InstallOptions, target string) error {
+//
+// First of all it asks the update check's switch again (backlog B761),
+// through the install's admission a: where update checks are off, or the
+// switch's off transition stopped the install, it refuses with
+// ErrUpdateChecksOff; otherwise the install is committed, and from here no
+// off transition stops it (commit), so the marker's writes and the swap that
+// follow finish.
+func (u *Updater) decideUnderLock(a *admission, opts InstallOptions, target string) error {
+	if !u.commit(a) {
+		return fmt.Errorf("%w: they are off at the install's decision, before its swap; nothing was installed", ErrUpdateChecksOff)
+	}
 	if u.swapAwaitingRestart(opts.DataDir, target) {
 		return fmt.Errorf("%w: %s is already staged on disk", ErrInstallPendingRestart, target)
 	}
@@ -846,7 +902,7 @@ func (u *Updater) decideUnderLock(opts InstallOptions, target string) error {
 		if hold := HeldBack(opts.DataDir, opts.ConfigPath, target); hold.Version != "" {
 			return &holdError{sentinel: ErrInstallHeldBack, reason: hold.Reason}
 		}
-		if why := u.probationHolds(opts.DataDir, opts.BinaryPath, u.Status().CurrentVersion); why != "" {
+		if why := u.probationHolds(opts.DataDir, opts.BinaryPath, u.cached().CurrentVersion); why != "" {
 			return &holdError{sentinel: ErrInstallAwaitsConfirmation, reason: why}
 		}
 	}
