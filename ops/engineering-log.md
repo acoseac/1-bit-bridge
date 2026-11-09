@@ -89009,3 +89009,158 @@ Outside the lock: go1.27.3's own gofmt over every Go file round 3 changes,
 clean; `rules-b652-r3.patch` applied to a `git archive` copy of 8ac59de9,
 where `make docs-check` passes (CLAUDE.md 82.1%, the worst load 67.5%;
 jobs.md 31,848 bytes); `git status` clean after.
+
+## 2026-11-09 — B652 round 4: the folder-replacement cases on Windows, and no wait without a bound
+
+Backlog B652's fourth round on `fix/b652-waveform-regen` (PR #1443), from
+14098634 (round 3 and its rules), worker b652 on legion0 (Ubuntu 26.04,
+linux/amd64, go1.27.3, `GOTOOLCHAIN=local`, `GOPROXY=off`), from CI run
+42560924562, red on `test (windows-latest)` alone, and the two reviews of
+the brief. Commits: the skips, the hooks' failures and the waits' bound
+fc54d4ef, the pool stop's bound a8b454b7, and this record. The rules go into
+`.claude/rules/jobs.md`, `.claude/rules/build-ci-tests.md` and their History
+files through `rules-b652-r4.patch`. Windows was not run here: CI runs it.
+
+### What CI showed, and why
+
+On windows-latest the three cases of
+`TestARepairWorksOnlyThroughTheDirectoryItWasAdmittedOn` failed at the
+test's own rename of the waveform folder, "The process cannot access the
+file because it is being used by another process" (ERROR_SHARING_VIOLATION),
+and `TestARepairCommitsOnlyWhileItsDirectoryAndItsSourceAreTheOnesItRead`'s
+case "the folder replaced after a successful sync" hung until the package's
+30-minute timeout, so no test after it in `internal/analyze`, those of
+`repair_r3_test.go` and `repair_test.go` among them, ran there.
+
+*The refusal.* Go 1.27.3's `os.OpenRoot` on Windows opens the directory
+with `syscall.Open(path, O_RDONLY|O_CLOEXEC, 0)` (`src/os/root_windows.go`,
+`openRootNolog`), whose share mode is `FILE_SHARE_READ | FILE_SHARE_WRITE`
+(`src/syscall/syscall_windows.go`), with no FILE_SHARE_DELETE; a rename or a
+deletion of the directory opens it for delete access, which Windows refuses
+while that handle is open. The handle is the root's: on Linux, at each point
+where a case renames the folder (before the curve's first directory is made,
+before the check that precedes the rename, at the rename, and in the pool's
+sync), exactly one descriptor is open on the folder or below it, on the
+folder itself, opened after the decode and closed when the repair returns,
+and none is open during the decode (a probe of `/proc/self/fd` on a copy of
+fc54d4ef); the scratch is closed by then (`writeWaveformTmpIn`).
+
+*The hang.* The sync hook runs on the pool's worker and called `t.Fatal`
+when its rename failed. `t.Fatal` ends the goroutine it is called on, here
+the worker: `processJob`'s deferred `finishJob` ran with the job uncounted,
+and `waitForPoolSettled`, bounded by `t.Deadline()`, waited for a count that
+could not come until the binary's 30 minutes were up.
+
+*Before the fix*, on a copy of 14098634 with the replacement's rename made
+to fail, as Windows' does, each case alone under `-timeout 120s`, predicted
+first (`.tmp/_b652/r4/inject_pre.predictions.txt`): the two pool cases timed
+out, at 122.2 s and 120.4 s, after the worker's `t.Fatal` had printed the
+rename's error; a case whose hook runs on the test's goroutine failed in
+0.4 s. 3 of 3 as predicted.
+
+### What round 4 built
+
+1. **The skips.** While the repair's root is open the folder it holds
+   cannot be renamed on Windows, so the replacement these cases make cannot
+   happen there. Seven cases skip on Windows, each with
+   `if runtime.GOOS == "windows" { t.Skipf(...) }` as its first statement,
+   before any setup, decided by the platform and never by an observed
+   error, the reason naming the root's handle and backlog B819: the three
+   of `TestARepairWorksOnlyThroughTheDirectoryItWasAdmittedOn`;
+   `TestARepairCommitsOnlyWhileItsDirectoryAndItsSourceAreTheOnesItRead`'s
+   "the folder replaced after a successful sync";
+   `TestASyncFailureIsClassifiedAsEveryWriteFailureIs`'s "after the folder
+   was replaced"; `TestARepairWritesNothingIntoAWaveformDirectoryThatWent`'s
+   "before the rename"; and atomicwrite's
+   `TestRenameInRootRenamesInTheDirectoryItsRootHolds`, which renames a
+   directory its own root holds. A search of the tests of analyze, fsutil,
+   integrity, atomicwrite and cmd/bridge's waveform files for every rename or
+   removal of a waveform folder, or of a root's directory, found no other
+   while a root or any handle is open: fsutil's root tests and cmd/bridge's
+   serve test are `!windows` already, and the other renames come before a
+   root opens. The cases that replace the folder before the repair or during
+   the decode, before the root opens, run on Windows too.
+2. **A hook's failure reaches the test's goroutine.** `hookFaults` keeps
+   the first failure of a fixture's own step in a hook, and
+   `repairFixture.fault` reports one: the sync hooks' replacement
+   (`replaceDirInHook`), the source's mtime moved, rewritten and removed, and
+   the decoder's replacement report theirs and return, so the repair runs to
+   its end and closes its root. `repairFixture.settle` waits for the pool to
+   settle and answers the hook's failure ahead of anything else; `settled`
+   ends the case with it on the test's goroutine, before the counts are
+   asserted, which are asserted as before; and `requireNoFault` does the
+   same once a repair run on the test's goroutine has returned. A hook on the
+   test's goroutine keeps `t.Fatal` (`replaceDir`): the repair's deferred
+   steps close its root as the goroutine unwinds.
+3. **Every wait bounded.** `awaitPool` gives up at `poolWaitEnd`: `poolWait`
+   (two minutes, far past a repair's milliseconds on a starved runner) from
+   the wait's start, or 10 s before the binary's deadline where that is
+   sooner. `waitForPool`, `waitForPoolSettled` and `settle` wait through it,
+   and every pool stop in the repair's tests goes through `stopPool`, over
+   `stopWithin`, which gives up at the same bound and hands back the stop's
+   completion.
+4. **The forced check, on every platform**:
+   `TestAHookWhoseOwnStepFailsEndsItsCase`. A sync hook whose own step, the
+   cases' replacement of a folder that is not there, fails on the worker is
+   answered as that failure, the job counted; a runner that ends its
+   goroutine as `t.Fatal` does, its job never counted, is given up on at a
+   200 ms bound; and a stop while a job the stop's cancel does not end runs
+   gives up at its bound, the stop it left running returning once the job
+   is released.
+
+### After the fix
+
+The same injection on a copy of fc54d4ef, predicted first
+(`inject_post.predictions.txt`): every case whose hook replaces the folder
+failed at once, the hook's own error its one failure, in 0.4 to 2.2 s (the
+first including the build): the two pool sync cases and the decoder's pool
+case through `hookFaults` once the pool had settled ("a hook's own step
+failed: replace the waveform folder: rename …: no such file or directory"),
+the decoder's runner case through `requireNoFault`, and the three cases
+whose hooks run on the test's goroutine by `t.Fatal`; the forced check
+passed. 8 of 8 as predicted.
+
+The skips' own path, on a copy of fc54d4ef with their condition turned to
+"linux" at exactly the seven sites, predicted first
+(`skipdemo.predictions.txt`): the seven skipped before any setup, each
+giving its reason, and every other case of the tests that hold them passed.
+17 of 17 as predicted.
+
+### Negative controls
+
+Four, on a8b454b7, predicted in `.tmp/_b652/r4/controls.predictions.txt`
+before the first ran (8 verdicts), each edit with the one match it had to
+find, on a copy of the tree: all 8 as predicted, every red a test failure or
+the binary's timeout; `git status` clean after.
+
+| Control | Removed | Red, and what it showed |
+|---|---|---|
+| N1 | `hookFaults.report`'s keep | the forced check's worker case: "the wait answered <nil>, want the hook's failed replacement". Green: the folder replaced after a successful sync, whose step succeeds here |
+| N2 | `settle`'s ask of the hook's failure | the same red, and the same green |
+| N3 | `awaitPool`'s bound | the never-counted case, the binary's 30 s timeout. Green: the worker case |
+| N4 | `stopWithin`'s bound | the stop case, the binary's 30 s timeout. Green: the never-counted case |
+
+The greens are what the review of the brief said: a case whose step
+succeeds cannot see the path that hung, which is why the forced check is
+there.
+
+### The gates
+
+Through the shared build lock, on go1.27.3, go.mod's, with TMPDIR on this
+disk (`.tmp/_b652/r4/gate.py`), at a8b454b7, the tree dirty with this record
+alone: the brief's gate as written, `GOTOOLCHAIN=go1.27.3 make test
+TEST_PKGS='./internal/analyze/... ./internal/fsutil/... ./internal/integrity/...'`,
+green (internal/analyze 64 s, internal/fsutil 3 s, internal/integrity 5 s),
+fsutil's identity and rooted paths run here for real; the touched tests by
+name with `-race -timeout 120s`, the repair's 19 tests and atomicwrite's
+one, 66 verdicts, green, the one skip the owner test's case that needs root;
+atomicwrite's whole package under `make test`, its durable writer's Linux
+paths run here, green in 20 s; `make vet` for linux/amd64, windows, darwin
+and linux/386, and `make build-all`: clean. The same gate at fc54d4ef, before
+the stop's bound, was green too.
+
+Outside the lock: go1.27.3's own gofmt over every Go file round 4 changes,
+clean, and `go vet` of the two packages for the same four targets, clean;
+`rules-b652-r4.patch` applied to a `git archive` copy of this record's
+commit, where `make docs-check` and `TestEveryCitedTestNameExists` pass;
+`git status` clean after. Windows is not run here.
