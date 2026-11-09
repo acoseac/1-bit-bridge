@@ -111,6 +111,10 @@ type InstallOptions struct {
 	// swap, its marker armed: a test's hold on an install there.
 	holdBeforeSwap func()
 
+	// swap, nil in production (swapBinary), is the install's swap: a test's
+	// swap that fails.
+	swap func(dst, newBinary, backupExt string, markSwapStarted func() error) error
+
 	// holdBeforeDecision, nil in production, runs in Install once it holds
 	// the install marker's lock, just before its decision under it
 	// (decideUnderLock): a test's hold on an install there.
@@ -510,7 +514,11 @@ func (u *Updater) install(ctx context.Context, a *admission, opts InstallOptions
 	if opts.holdBeforeSwap != nil {
 		opts.holdBeforeSwap()
 	}
-	if err := swapBinary(opts.BinaryPath, candidate, ".bak", markSwapStarted); err != nil {
+	swap := opts.swap
+	if swap == nil {
+		swap = swapBinary
+	}
+	if err := swap(opts.BinaryPath, candidate, ".bak", markSwapStarted); err != nil {
 		// Swap failed — the marker back as this install read it under the
 		// lock, so the next boot doesn't roll back something that didn't
 		// actually change, and a hold or a veto it carried stays (backlog

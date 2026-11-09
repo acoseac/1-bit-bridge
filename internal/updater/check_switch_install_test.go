@@ -373,29 +373,60 @@ func TestAnInstallReadsTheSwitchAgainAsItBeginsAndAtItsDecision(t *testing.T) {
 }
 
 // TestASwapPastItsDecisionFinishesWhenUpdateChecksGoOff: past the decision,
-// its marker armed and just before its swap, the install is committed, and an
-// off transition then stops nothing of it: the swap finishes.
+// its marker armed and just before its swap, the install is committed: it is
+// no longer among the admissions the off transition stops, and an off then
+// stops nothing of it. The swap finishes; and a swap that fails after the
+// off answers its own error, never relabelled as the switch's stop (which
+// would say nothing was installed over an armed marker).
 func TestASwapPastItsDecisionFinishesWhenUpdateChecksGoOff(t *testing.T) {
-	s := newSwitchedInstall(t, "0.1.0", "0.2.0", nil)
-	park := newParked(t)
-	opts := s.manual()
-	opts.holdBeforeSwap = park.hook
-	answered := s.installInBackground(opts)
-	waitFor(t, park.reached, "the install's swap")
-	s.turnOff()
-	park.let()
-	if err := answerOf(t, answered); err != nil {
-		t.Fatalf("the install committed before the switch went off answered %v, want its swap", err)
+	committed := func(t *testing.T, s *switchedInstall) {
+		t.Helper()
+		s.upd.gateMu.Lock()
+		n := len(s.upd.active)
+		s.upd.gateMu.Unlock()
+		if n != 0 {
+			t.Errorf("past its decision the install is still among %d admission(s) the off transition stops, want none", n)
+		}
 	}
-	if got, err := os.ReadFile(s.livePath); err != nil || string(got) != "bridge-binary-0.2.0" {
-		t.Errorf("the binary = %q (%v), want 0.2.0's", got, err)
-	}
-	if got, err := os.ReadFile(s.livePath + ".bak"); err != nil || string(got) != "bridge-binary-0.1.0" {
-		t.Errorf("the backup = %q (%v), want 0.1.0's", got, err)
-	}
-	if st, err := LoadState(s.dir); err != nil || st.Status != "installing" || !st.SwapStarted || st.TargetVersion != "0.2.0" {
-		t.Errorf("the install marker = %+v (%v), want 0.2.0 installing, swapped", st, err)
-	}
+	t.Run("the swap finishes", func(t *testing.T) {
+		s := newSwitchedInstall(t, "0.1.0", "0.2.0", nil)
+		park := newParked(t)
+		opts := s.manual()
+		opts.holdBeforeSwap = park.hook
+		answered := s.installInBackground(opts)
+		waitFor(t, park.reached, "the install's swap")
+		committed(t, s)
+		s.turnOff()
+		park.let()
+		if err := answerOf(t, answered); err != nil {
+			t.Fatalf("the install committed before the switch went off answered %v, want its swap", err)
+		}
+		if got, err := os.ReadFile(s.livePath); err != nil || string(got) != "bridge-binary-0.2.0" {
+			t.Errorf("the binary = %q (%v), want 0.2.0's", got, err)
+		}
+		if got, err := os.ReadFile(s.livePath + ".bak"); err != nil || string(got) != "bridge-binary-0.1.0" {
+			t.Errorf("the backup = %q (%v), want 0.1.0's", got, err)
+		}
+		if st, err := LoadState(s.dir); err != nil || st.Status != "installing" || !st.SwapStarted || st.TargetVersion != "0.2.0" {
+			t.Errorf("the install marker = %+v (%v), want 0.2.0 installing, swapped", st, err)
+		}
+	})
+	t.Run("a swap that fails answers its own error", func(t *testing.T) {
+		s := newSwitchedInstall(t, "0.1.0", "0.2.0", nil)
+		park := newParked(t)
+		errSwap := errors.New("the swap could not rename the candidate into place")
+		opts := s.manual()
+		opts.holdBeforeSwap = park.hook
+		opts.swap = func(string, string, string, func() error) error { return errSwap }
+		answered := s.installInBackground(opts)
+		waitFor(t, park.reached, "the install's swap")
+		committed(t, s)
+		s.turnOff()
+		park.let()
+		if err := answerOf(t, answered); !errors.Is(err, errSwap) || errors.Is(err, ErrUpdateChecksOff) {
+			t.Errorf("the committed install whose swap failed after the switch went off answered %v, want the swap's own error", err)
+		}
+	})
 }
 
 // TestARestartDeferredAfterACommittedSwapFiresWhileUpdateChecksAreOff: the

@@ -20,6 +20,7 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/supervision"
 	"github.com/acoseac/1-bit-bridge/internal/updater"
+	"github.com/acoseac/1-bit-bridge/internal/version"
 )
 
 // The update check's switch through serve and the CLI (backlog B761): serve's
@@ -459,6 +460,16 @@ func TestServeStopsAnUpdateCheckUnderWayWhenChecksGoOff(t *testing.T) {
 	if n := gh.asked.Load(); n != 2 {
 		t.Errorf("the releases API was asked %d time(s), want 2: the start's and the stopped Check now", n)
 	}
+	// The panel hides what a check found while the checks are off, a recorded
+	// error included, so the stop is asked as no failure once they are on
+	// again: the last check's answer shows, and no error beside it.
+	gh.holding.Store(false)
+	if code, resp := patchSettings(t, b, `{"updateCheckEnabled":true}`); code != http.StatusOK {
+		t.Fatalf("PATCH updateCheckEnabled true = %d %s", code, resp)
+	}
+	if p := readUpdatesPanel(t, b); !p.CheckEnabled || !p.UpdateAvailable || p.LastError != "" {
+		t.Errorf("the Updates panel with checks on again = %+v, want the start's 99.0.0 and no error: the stopped Check now recorded one", p)
+	}
 }
 
 // TestAConsoleSaveKeepsTheFilesOwnUpdateCheckSwitchThroughServe boots serve
@@ -542,10 +553,11 @@ func consolePage(t *testing.T, b *consoleBridge, path string) string {
 
 // TestAStartsCrashRollbackRunsWithUpdateChecksOff: the rollbacks a start
 // makes are not the update check's switch's (backlog B761), any more than the
-// console's is: `bridge update` has no rollback of its own, and an install
-// whose starts crashed is rolled back by the start after them, with update
-// checks off in the settings as with them on: the backup is put back and the
-// start exits 75 for its service manager.
+// console's is (`bridge update` has no rollback of its own): an install whose
+// starts crashed is rolled back by the start after them (runServe's crash
+// rollback, recoverCrashedInstall), with update checks off in the settings as
+// with them on: the backup is put back and the start exits 75 for its service
+// manager.
 func TestAStartsCrashRollbackRunsWithUpdateChecksOff(t *testing.T) {
 	r := newRefusedInstall(t, "update:\n  checkEnabled: false\n")
 	for start := 1; start <= updater.ProbationFailedStarts; start++ {
@@ -559,4 +571,89 @@ func TestAStartsCrashRollbackRunsWithUpdateChecksOff(t *testing.T) {
 	if got := reportedVersion(t, r.bin); !strings.Contains(got, previousVersion) {
 		t.Errorf("the binary reports %q after the rollback, want %s", got, previousVersion)
 	}
+}
+
+// TestAStartsBootRollbackRunsWithUpdateChecksOff: the other rollback a start
+// makes, its boot's (maybeRollbackOnBoot, once the store has opened), puts the
+// backup back where a version other than the install's target came up, with
+// update checks off in the settings: the start that is the previous version
+// finds the install's target never ran, restores the backup and serves.
+func TestAStartsBootRollbackRunsWithUpdateChecksOff(t *testing.T) {
+	persistentMedium(t)
+	r := newRefusedInstall(t, "update:\n  checkEnabled: false\n")
+	// An install of 9.9.9 over this version, swapped, whose target never
+	// came up: this version starts again.
+	r.marker.TargetVersion, r.marker.PreviousVersion = "9.9.9", version.ServerVersion
+	r.saveMarker(t, r.dataDir)
+	code, stderr, served := serveToItsEnd(t, serveOpts{configPath: r.cfg, binaryPath: r.bin})
+	if !served || code != 0 {
+		t.Fatalf("the start after an install whose target never came up = %d (served %v), want it served; stderr=%s", code, served, stderr)
+	}
+	if !strings.Contains(stderr, "rolling back to .bak") {
+		t.Errorf("the start did not say it rolled the install back; stderr=%s", stderr)
+	}
+	if got := reportedVersion(t, r.bin); !strings.Contains(got, previousVersion) {
+		t.Errorf("the binary reports %q after the boot's rollback, want the backup's %s", got, previousVersion)
+	}
+}
+
+// TestTheConsolesRollbackRunsWithUpdateChecksOff: serve started with update
+// checks off in the settings asks the releases API nothing, and the console's
+// Roll back (POST /api/updates/rollback) is not the switch's: it answers 204
+// and puts the backup back.
+func TestTheConsolesRollbackRunsWithUpdateChecksOff(t *testing.T) {
+	persistentMedium(t)
+	t.Setenv(updateCheckVar, "")
+	os.Unsetenv(updateCheckVar)
+	gh := newReleasesStandIn(t)
+	var bin string
+	b := startConsoleBridge(t, "update:\n  checkEnabled: false\n", nil, func(o *serveOpts) {
+		o.updateReleases = gh.client(t)
+		bin, _ = layOutRollback(t, filepath.Dir(o.configPath), true)
+		o.binaryPath = bin
+	})
+	if p := readUpdatesPanel(t, b); p.CheckEnabled || !p.CanRollback {
+		t.Fatalf("the Updates panel = %+v, want update checks off and Roll back offered", p)
+	}
+	if code, short, msg := postRollback(t, b); code != http.StatusNoContent {
+		t.Fatalf("POST /api/updates/rollback with update checks off = %d %s %q, want 204", code, short, msg)
+	}
+	if got, err := os.ReadFile(bin); err != nil || string(got) != "the previous bridge binary" {
+		t.Errorf("the binary after the rollback = %q (%v), want the backup put back", got, err)
+	}
+	if n := gh.asked.Load(); n != 0 {
+		t.Errorf("serve with update checks off asked the releases API %d time(s), want 0", n)
+	}
+}
+
+// TestACrashRollbackToAReleaseBeforeTheSwitchNeedsItOn: a release from
+// before update.checkEnabled refuses settings that write the key (its strict
+// decoder knows no such field), so with update checks turned off, the key
+// written false, a start's crash rollback does not put a backup of such a
+// release back, saying the backup refuses the settings on the key's line,
+// and leaves the backup beside the binary; with them on, the key gone, it
+// puts it back. Turning them on before such a rollback is what the docs say
+// (B761's round 2).
+func TestACrashRollbackToAReleaseBeforeTheSwitchNeedsItOn(t *testing.T) {
+	t.Run("the key written", func(t *testing.T) {
+		r := newRefusedInstall(t, "update:\n  checkEnabled: false\n")
+		refusedCrashRollback(t, r, func() { t.Setenv(runAsBridgeCheckEnv, "predatesUpdateSwitch") },
+			"refuses this bridge's settings", "refuses this bridge's settings, so it would not start on them: line 8: field checkEnabled not found")
+		requireBackupThere(t, r)
+	})
+	t.Run("the key gone", func(t *testing.T) {
+		r := newRefusedInstall(t, "")
+		t.Setenv(runAsBridgeCheckEnv, "predatesUpdateSwitch")
+		for start := 1; start <= updater.ProbationFailedStarts; start++ {
+			r.startThatPanics(t)
+		}
+		code, stderr, served := serveToItsEnd(t, serveOpts{configPath: r.cfg, binaryPath: r.bin})
+		if served || code != supervision.RestartExitCode {
+			t.Fatalf("the start after the crashes, the key gone = %d (served %v), want %d before it served; stderr=%s",
+				code, served, supervision.RestartExitCode, stderr)
+		}
+		if got := reportedVersion(t, r.bin); !strings.Contains(got, previousVersion) {
+			t.Errorf("the binary reports %q after the rollback, want %s", got, previousVersion)
+		}
+	})
 }

@@ -285,8 +285,19 @@ func TestTheUpdatesPanelScriptSaysUpdateChecksAreOff(t *testing.T) {
 	if line := stripJSComments(extractJSFunction(t, src, "updateStatusLine")); !strings.Contains(line, `if (r.checkEnabled === false) return "update checks off";`) {
 		t.Error("updateStatusLine does not say update checks are off")
 	}
-	if cards := stripJSComments(extractJSFunction(t, src, "renderJobCards")); !strings.Contains(cards, `if (updCheck) updCheck.hidden = updChecksOff;`) {
+	cards := stripJSComments(extractJSFunction(t, src, "renderJobCards"))
+	if !strings.Contains(cards, `if (updCheck) updCheck.hidden = updChecksOff;`) {
 		t.Error("renderJobCards does not hide the Jobs card's Check now while update checks are off")
+	}
+	// The button it hides is the card's own: the id it looks up is the one
+	// jobs.html gives the card's Check now.
+	m := regexp.MustCompile(`const updCheck = document\.getElementById\("([^"]+)"\);`).FindStringSubmatch(cards)
+	jobs, err := os.ReadFile("templates/jobs.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m == nil || !regexp.MustCompile(`<button [^>]*id="`+regexp.QuoteMeta(m[1])+`"[^>]*>Check now</button>`).Match(jobs) {
+		t.Errorf("renderJobCards hides %v, which is not the Jobs card's Check now in jobs.html", m)
 	}
 	// The Settings form's save of the switch redraws the panel from a whole
 	// status, read once the save has answered live.
