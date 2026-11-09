@@ -66,18 +66,34 @@ func bootThatDies(t *testing.T, dataDir string) string {
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
-	lines := make(chan string)
+	// The reader hands the boot's lines over until it is told to stop, then
+	// reads the pipe to its end, which the kill brings.
+	lines, stop, done := make(chan string), make(chan struct{}), make(chan struct{})
 	go func() {
+		defer close(done)
 		defer close(lines)
 		sc := bufio.NewScanner(stdout)
 		for sc.Scan() {
-			lines <- sc.Text()
+			select {
+			case lines <- sc.Text():
+			case <-stop:
+				for sc.Scan() {
+				}
+				return
+			}
 		}
 	}()
+	var halted sync.Once
+	halt := func() {
+		halted.Do(func() {
+			close(stop)
+			_ = cmd.Process.Kill()
+		})
+	}
+	drainLoopOnCleanup(t, halt, done, "a boot's output reader")
 	kill := func() {
-		_ = cmd.Process.Kill()
-		for range lines {
-		}
+		halt()
+		<-done
 		_ = cmd.Wait()
 	}
 	var out strings.Builder
