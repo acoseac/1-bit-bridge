@@ -1375,3 +1375,54 @@ reconciliation held above the floor, and held where it has asked the engine to
 hand f off again), `TestAResumeBetweenTransportsWaitsForTheReconciliationsVerdict`
 and `TestAnOccurrenceBesideAWriteIsNotRevoked` (no wait for an occurrence
 admitted under the set published) pin it.
+
+Round 18 (2026-11-09, the reviews of round 17). The converted join window's
+decision (`holdLocked`) read the set published first, its settled check, and
+the choice's write pending after it (`pendingFor`, which read the set again).
+A write registers its pending set, publishes with no session's lock held, has
+every session reconciled and only then lets its pending go, so a decision
+whose reads fell on either side of the publish found the write's set
+published and nothing pending for its successor, the write still registered
+or, past a panic between its publish and its reconciliation, let go, and
+continued the window into the successor's bits above the floor, the
+reconciliation then revoking the session's DSD (Codex's review). Reading the
+set once was not enough (Claude's review of the brief): the decision reads the
+write pending first and the set published once after it, for the settled
+check, the write's change and the verdict's wait. A publish before the second
+read leaves the successor admitted under the set it replaced, and the verdict
+is waited for; a write registered before the first read is waited for; one
+registered after it publishes after the decision, its classification waiting
+for the session's lock. Making the publish and the unregister atomic with
+respect to the session's lock was the other way, not taken: the publish would
+take every session's lock under the refreshes', for one reader. `next()`, the
+transition and the resume read the write pending first (`pendingFor`) and the
+set after (`unjudgedLocked`) already. A decision made just before a publish is
+the accepted order: the write's reconciliation finds the predecessor's frames
+the kernel's at the rate the write takes away and revokes the session's DSD
+(`policy.Reconcile`'s Revoke), the window decided, and asks no cut through it.
+A refresh that published and panicked before its reconciliation returned left
+its set published and unjudged, and the next refresh, finding the set the
+same, returned: a wait for the verdict ended only at the floor or the
+session's end, and the occurrence played on under a set that no longer played
+it. The backend keeps the set its last reconciliation that returned judged by
+(`dsdJudged`, under the refreshes' lock), and a refresh that finds the set the
+same reconciles it once more when it is not that one, a verdict and never a
+channel closed with nothing judged: the session monitor's next tick, at most
+100 ms later while a session holds DSD, gives it. That reconciliation is
+recorded before it runs: one that panics every time (a hand-off or Revoke
+that panics) is run twice, not by every refresh after it, where every new
+session's first admission would meet it.
+`TestAConvertedJoinWindowWaitsForAWriteThatChangesItsSuccessor` forces the
+publish, and a panic at the publish, between the decision's reads
+(`Seams.Deciding`), the lookahead above the floor, each red at round 17's head
+and at round 16's, where CI's red was (run 42619003055); the panic then the
+monitor's unchanged refresh, red at round 17's head; the decision made before
+the write; and a wait no write ends (the write held before its publish, or
+between its publish and its reconciliation) ending at the floor at the first
+reporter step after the floor's measurement. Round 17's boundary case guards
+an ordering, and says which: the replacement's admission seen to begin while
+the revocation is held (`Seams.Admitting`), its open not ended, no end named
+after the predecessor and its window undecided then; a lock-free admission
+failed it 20 times in 20. `TestAWriteThatPanicsLeavesNothingPending` (after its
+publish) pins the record, and `TestALostReconciliationIsTriedOnceMore` the
+reconciliation once more and no more.
