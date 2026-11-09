@@ -605,6 +605,20 @@ type Deps struct {
 	// switch is live regardless, since the updater asks it at every check.
 	UpdateChecksSwitched func()
 
+	// UpdateChecksOffSave is asked by the settings PATCH before anything else
+	// of it, for a save that turns update checks off as the live config
+	// stands (backlog B761's round 3; updater.LockForChecksOff and
+	// updater.ChecksOffRefused in serve): it takes the install marker's lock,
+	// waiting as long as an install's swap may hold it, and decides under it
+	// whether the off may be saved; release lets the lock go, once the save
+	// is published and UpdateChecksSwitched told. It is taken before the
+	// console's lock and the holder's, never under either. Its refusals wrap
+	// ErrUpdateChecksOffLocked, ErrUpdateChecksOffRefused or
+	// ErrUpdateChecksOffUnchecked, whose words say what to do and name no path;
+	// a context's error is a stop. Nil when no updater is wired (tests): the
+	// off is saved with no lock.
+	UpdateChecksOffSave func(ctx context.Context) (release func(), err error)
+
 	// TriggerDuplicatesPass nudges the duplicates stamping sweeper
 	// (cmd/bridge runDuplicatesSweeper) to re-evaluate suppression under
 	// the CURRENT duplicates.filter policy — the hot-apply half of the
@@ -1381,6 +1395,22 @@ var (
 	// rollback, a status and the install's probation are never refused for
 	// it.
 	ErrUpdateChecksOff = errors.New("update checks are off")
+	// ErrUpdateChecksOffLocked: a save that turns update checks off could not
+	// hold the install marker's lock (another holder past its wait, or the
+	// lock failed), so nothing was saved (backlog B761's round 3). A 409,
+	// `marker-locked`, B692's code for the same lock.
+	ErrUpdateChecksOffLocked = errors.New("the install marker's lock cannot be held for the off")
+	// ErrUpdateChecksOffRefused: an off saved now would keep a crash rollback
+	// from putting back a backup that refuses settings that write
+	// update.checkEnabled, so nothing was saved (backlog B761's round 3). A
+	// 409, `update-checks-off-refused`; the words say when it can be saved,
+	// and how to turn the checks off without writing the key.
+	ErrUpdateChecksOffRefused = errors.New("an off saved now would keep a crash rollback from putting the backup back")
+	// ErrUpdateChecksOffUnchecked: whether an off saved now would keep a crash
+	// rollback from putting the backup back could not be told, the backup's
+	// check not answering, so nothing was saved, failing closed (backlog
+	// B761's round 3). A 409, `update-checks-off-unchecked`.
+	ErrUpdateChecksOffUnchecked = errors.New("whether an off saved now would keep a crash rollback from putting the backup back could not be told")
 )
 
 // UpdateStatus is the wire shape /api/updates returns. Decoupled from
@@ -1499,6 +1529,12 @@ type Server struct {
 	// (lockPlayerWrite). Tests only: nil in production, and set before the
 	// server serves anything, as the two fields above are.
 	testPlayerWriteWaits func()
+
+	// testSettingsWriteWaits, when set, is told each time a settings PATCH
+	// finds mu held and is about to wait for it (lockSettingsWrite), after
+	// its look at the update check's switch. Tests only: nil in production,
+	// and set before the server serves anything, as the fields above are.
+	testSettingsWriteWaits func()
 
 	// testNow, when set, is the clock the smart mixes' views read to mark
 	// the Christmas family out of season (now). Tests only: nil in

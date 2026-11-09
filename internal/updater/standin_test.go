@@ -22,7 +22,10 @@ import (
 // The script is files in that directory:
 //
 //   - check: what `serve --validate-config` does: valid, refuse, old (a
-//     serve that does not define the flag), hang, or exit:<n>
+//     serve that does not define the flag), hang, exit:<n>, or refuse-key (a
+//     release from before update.checkEnabled, whose strict decoder refuses
+//     the key on its line where the settings write it, and takes them
+//     otherwise; backlog B761's round 3)
 //   - refusal: the reasons a refusing check gives, one a line
 //   - version: the version `version` names
 //   - silent: how long `version` says nothing before it answers, a duration
@@ -68,7 +71,7 @@ func runCandidateStandIn(dir string, args []string) int {
 	mode := script("check")
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
-	fs.String("config", "", "")
+	configPath := fs.String("config", "", "")
 	fs.String("addr", "", "")
 	fs.Bool("init-if-missing", false, "")
 	var validate *bool
@@ -90,6 +93,12 @@ func runCandidateStandIn(dir string, args []string) int {
 			fmt.Fprintln(os.Stderr, ConfigRefusedPrefix+line)
 		}
 		return ConfigCheckRefusedExit
+	case mode == "refuse-key":
+		if line := checkEnabledLine(*configPath); line > 0 {
+			fmt.Fprintf(os.Stderr, "%sline %d: field checkEnabled not found in type config.UpdateConfig\n", ConfigRefusedPrefix, line)
+			return ConfigCheckRefusedExit
+		}
+		return ConfigCheckValidExit
 	case mode == "hang":
 		time.Sleep(time.Hour)
 		return 0
@@ -102,6 +111,22 @@ func runCandidateStandIn(dir string, args []string) int {
 	}
 	fmt.Fprintln(os.Stderr, "stand-in: no check scripted")
 	return 4
+}
+
+// checkEnabledLine is the line of the settings at path that writes a key
+// named checkEnabled, as the stand-in's refuse-key mode finds it, 0 where
+// none does or the file cannot be read.
+func checkEnabledLine(path string) int {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return 0
+	}
+	for i, line := range strings.Split(string(raw), "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "checkEnabled:") {
+			return i + 1
+		}
+	}
+	return 0
 }
 
 // candidateStandIn makes the directory that scripts the stand-in, points

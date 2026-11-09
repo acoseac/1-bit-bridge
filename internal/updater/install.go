@@ -119,6 +119,12 @@ type InstallOptions struct {
 	// the install marker's lock, just before its decision under it
 	// (decideUnderLock): a test's hold on an install there.
 	holdBeforeDecision func()
+
+	// holdAfterReread, nil in production, runs in decideUnderLock between
+	// the reread of the switch (RereadSwitch) and the commit, the window an
+	// off saved by the console must not land in (backlog B761's round 3):
+	// a test's hold on an install there.
+	holdAfterReread func()
 }
 
 // Install downloads, verifies, swaps, and arms the rollback marker
@@ -931,10 +937,18 @@ func (u *Updater) swapAwaitingRestart(dataDir, target string) bool {
 // a: where update checks are off, or the switch's off transition stopped the
 // install, it refuses with ErrUpdateChecksOff; otherwise the install is
 // committed, and from here no off transition stops it (commit), so the
-// marker's writes and the swap that follow finish.
+// marker's writes and the swap that follow finish. The reread and the commit
+// run under the install's hold of the marker lock, which the console's save
+// of an off takes too (LockForChecksOff, B761's round 3): an off lands before
+// the reread or after the swap, never between the two. The lock is never
+// asked for again here, since this path holds it already and would wait on
+// itself.
 func (u *Updater) decideUnderLock(a *admission, opts InstallOptions, target string) error {
 	if err := rereadSwitch(opts, "at the install's decision, before its swap"); err != nil {
 		return err
+	}
+	if opts.holdAfterReread != nil {
+		opts.holdAfterReread()
 	}
 	if !u.commit(a) {
 		return fmt.Errorf("%w: they are off at the install's decision, before its swap; nothing was installed", ErrUpdateChecksOff)

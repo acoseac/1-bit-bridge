@@ -6430,7 +6430,10 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		// stops every check and install under way for an off, and rearms
 		// its cadence for an on.
 		UpdateChecksSwitched: upd.ChecksSwitched,
-		DuplicatesSweepRun:   jobRunClosure(duplicatesSweepState),
+		// A save that turns update checks off takes the install marker's lock
+		// first, and is decided under it (backlog B761's round 3).
+		UpdateChecksOffSave: updateChecksOffSave(cfg.DataDir, binaryPath, *configPath, opts.backupProbeTimeout),
+		DuplicatesSweepRun:  jobRunClosure(duplicatesSweepState),
 		// The orphan sweep's and the variant watcher's refusal latches, so
 		// the Jobs card says each is refusing rather than "on" (nil when the
 		// sweep does not run).
