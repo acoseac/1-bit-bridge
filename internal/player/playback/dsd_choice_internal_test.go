@@ -607,6 +607,51 @@ func TestAWriteThatPanicsLeavesNothingPending(t *testing.T) {
 	}
 }
 
+// panicReplans is replans whose hand-off panics once counted: a reconciliation
+// that panics after it has let the session's lock go.
+type panicReplans struct{ replans }
+
+func (r *panicReplans) Replan(s engine.SessionID, o engine.OccurrenceID, why string) {
+	r.replans.Replan(s, o, why)
+	panic("the test's panic in a reconciliation's hand-off")
+}
+
+// TestALostReconciliationIsTriedOnceMore (B728 B9 round 18): a refresh whose
+// reconciliation does not return, here a hand-off that panics inside it once
+// the session's lock is let go, leaves its set published and the occurrence
+// it was judging unjudged; the next refresh, finding the set the same,
+// reconciles it once more, recording it judged first, so a reconciliation
+// that panics again is not run by every refresh after it.
+func TestALostReconciliationIsTriedOnceMore(t *testing.T) {
+	b, store := choiceSessionBackend(t)
+	s := b.session(1)
+	defer s.cancel()
+	ev := &panicReplans{}
+	s.ev = ev
+	s.chain = []*occ{openedOcc(b, 2)}
+	refresh := func() (panicked bool) {
+		defer func() { panicked = recover() != nil }()
+		b.RefreshDSD(true)
+		return false
+	}
+	if err := store.Update(func(st *dsdstate.State) error {
+		st.DACs[0].Choice.Mode = dsdstate.ModeConvert
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var got []bool
+	for range 3 {
+		got = append(got, refresh())
+	}
+	if want := []bool{true, true, false}; fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("the refreshes panicked %v, want %v: the publish's reconciliation, once more, then nothing", got, want)
+	}
+	if n := len(ev.asked()); n != 2 {
+		t.Errorf("the occurrence was handed off again %d times, want 2: the publish's reconciliation and the next refresh's", n)
+	}
+}
+
 // TestTheChoiceWritesLockOrderHolds (binding note 3): a choice write takes the
 // writes' turn, then the refreshes' lock, then each session's; a refresh the
 // refreshes' lock, then each session's; the state's store is taken alone, its

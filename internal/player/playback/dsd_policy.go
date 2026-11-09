@@ -565,12 +565,15 @@ func (b *Backend) setOver(r *dsdReading, st dsdstate.State) (*dsdSet, DSDView) {
 // session's admission, its activation and its monitor ask it, and the
 // supervisor's RefreshDSD, on a goroutine of the backend's
 // (RequestRefreshDSD, B762). A set published whose reconciliation did not
-// return (a refresh that panicked between the two, a choice's write's among
-// them) is reconciled by the next refresh, which finds it the same set
-// (dsdJudged, B728 B9 round 18): every occurrence still admitted under the set
-// it replaced is judged then, kept, handed off again or its session's DSD
-// revoked, and what waits for that verdict (unjudgedLocked) has it; the next
-// refresh is at most a session monitor's tick away while a session holds DSD.
+// return (a refresh that panicked between the two or inside the
+// reconciliation, a choice's write's among them) is reconciled once more by
+// the next refresh, which finds it the same set (dsdJudged, B728 B9 round 18):
+// every occurrence still admitted under the set it replaced is judged then,
+// kept, handed off again or its session's DSD revoked, and what waits for that
+// verdict (unjudgedLocked) has it; the next refresh is at most a session
+// monitor's tick away while a session holds DSD. That reconciliation is
+// recorded before it runs, so one that panics again is not run by every
+// refresh after it.
 func (b *Backend) refreshDSD() *dsdSet {
 	b.dsdMu.Lock()
 	defer b.dsdMu.Unlock()
@@ -582,8 +585,8 @@ func (b *Backend) refreshDSD() *dsdSet {
 			b.dsdPub.Store(&dsdPublished{set: cur, view: view})
 		}
 		if b.dsdJudged != cur {
-			b.reconcileDSD(cur)
 			b.dsdJudged = cur
+			b.reconcileDSD(cur)
 		}
 		return cur
 	}

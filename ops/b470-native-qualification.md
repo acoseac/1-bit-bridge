@@ -1297,11 +1297,13 @@ and asked about the write after, which read the set again, so a decision whose r
 either side of a write's publish (the publish takes no session's lock) found the write's set
 published and nothing pending for its successor and continued the window into the successor's
 bits, the reconciliation then revoking the session's DSD. In `dsd_policy.go` a refresh that finds
-the set the same reconciles it where no reconciliation of it returned (`dsdJudged`): a refresh
-that published and panicked before its reconciliation (a choice's write's among them) left an
-occurrence admitted under the set it replaced unjudged, playing on until the set changed again
-or the session ended; the next refresh, the session monitor's at most 100 ms later while a session
-holds DSD, judges it now, keeping it, handing it off again or revoking its session's DSD. Two test
+the set the same reconciles it once more where no reconciliation of it returned (`dsdJudged`): a
+refresh that published and panicked before its reconciliation returned (a choice's write's among
+them) left an occurrence admitted under the set it replaced unjudged, playing on until the set
+changed again or the session ended; the next refresh, the session monitor's at most 100 ms later
+while a session holds DSD, judges it now, keeping it, handing it off again or revoking its
+session's DSD, recording the set first so a reconciliation that panics again is not run by every
+refresh after it. Two test
 seams are nil in production (`Seams.Deciding`, `Seams.Admitting`). Under the prefix,
 `TestAConvertedJoinWindowWaitsForAWriteThatChangesItsSuccessor` forces the write's publish, and its
 panic at its publish, between the decision's two reads, the sink's lookahead above its floor;

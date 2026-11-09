@@ -420,12 +420,12 @@ type Backend struct {
 	// when the read side alone changes. Neither is nil once New has returned,
 	// for a backend with a DSD policy. dsdMu serializes the refreshes that swap
 	// them, dsdRead is when the last one read the policy, dsdJudged is the set
-	// the last reconciliation that returned judged every session by, under
-	// dsdMu (B728 B9 round 18: a set published whose reconciliation did not
-	// return, a refresh that panicked between the two, is reconciled by the next
-	// refresh, which finds it the same), dsdFenceOnce says once that the state's
-	// writes are fenced, and probeState is the silent probe's bookkeeping
-	// (ProbeDSD).
+	// the last reconciliation that returned judged every session by, or the
+	// one a refresh reconciles once more, under dsdMu (B728 B9 round 18: a set
+	// published whose reconciliation did not return, its refresh having
+	// panicked, is reconciled once more by the next refresh, which finds it the
+	// same), dsdFenceOnce says once that the state's writes are fenced, and
+	// probeState is the silent probe's bookkeeping (ProbeDSD).
 	dsd          atomic.Pointer[dsdSet]
 	dsdPub       atomic.Pointer[dsdPublished]
 	dsdMu        sync.Mutex
