@@ -88397,13 +88397,19 @@ run here: the Windows cases, which CI's Windows leg runs, and macOS.
 
 Worker b749, legion0, branch `fix/b749-tsnet-logs` from main 9d59c8f6. Commits 891f82d6 (the change, its tests, the
 console's key, the docs, the evidence script), e56e1ca0 (a path that starts no node fails its test instead of hanging
-it), 07ad1cf7 (a row for a current profile the known profiles do not list), then this record. The rules line and its
+it), 07ad1cf7 (a row for a current profile the known profiles do not list), c02ed861 (this record), eca5959a (a backup
+does not carry the node's state; the README's sentence on the evidence), then the gates below. The rules line and its
 long form ship as `rules-b749.patch` (`cli-serve.md`, `ops/History-rules-cli-serve.md`, and the import-keeper long form
 in `ops/History-rules-build-ci-tests.md`).
 
 ### What was true
 
-Checked against tailscale.com v1.104.2 in the module cache, every fact of the brief held. `tsnet.Server.Start` runs
+Checked against tailscale.com v1.104.2 in the module cache, every fact of the brief about upstream held; one about this
+tree did not: a restore from backup does not give the node "the restored profile's name". `backup.Snapshot` never copies
+`<dataDir>/tailscale` (it holds the database, the tokens, the TLS pair, bridge.yaml, the console account, the harvest
+state, and the player's identity, its ID floor and its DSD state), and a restore writes only what the snapshot holds, so
+on the box it ran on the node stays as it was, its name included, and on another box the node is new and authenticates
+again; eca5959a corrects the field comment and the README, which had taken the brief's word. `tsnet.Server.Start` runs
 `startLogger` outside a test binary, whose logtail transport is a no-op only while `envknob.NoLogsNoSupport()` reads
 `TS_NO_LOGS_NO_SUPPORT` true through `os.Getenv` (a value `strconv.ParseBool` refuses is `log.Fatalf`); the bridge never
 set it, so every tsnet-mode bridge uploaded its node's logs, and named the node after the library. Five things beside
@@ -88501,3 +88507,15 @@ the line).
 | C21 | the console's PATCH answers `live` | the console's test, the matrix doc test, the page's badge test |
 | C22 | the console's PATCH saves nothing | the console's test |
 | C23 | the config key renamed | the three config tests |
+
+### Gates
+
+At eca5959a, in the build slot (`.tmp/_b749/gates.py`), with the Makefile's tags: `go vet ./...` clean; `go test -race
+-timeout 30m` ok for `./internal/tsnet/...` and `./internal/config/...` (1.6 s and 14.7 s), `./cmd/bridge/...` (1,317 s)
+and `./internal/admin/` (999 s; the console's key); the build-site census's own tests ok; the new tests by name under
+`-race -count=20` ok in each package (internal/tsnet 9 s, cmd/bridge 218 s with the two keeper tests, internal/config
+2 s, internal/admin 19 s); `make build-all` ok. `go vet` of those four packages for windows, darwin, linux/386 and
+linux/arm clean, and go1.27.3's gofmt lists none of the 17 Go files the branch changes. The rules patch applies to HEAD
+(`git apply --check`); on a git-archive copy of HEAD with it applied, `make docs-check` and `verify_moves.py --base HEAD
+--edit` (the import keeper's line, whose long form the patch edits) pass, and `TestEveryCitedTestNameExists` is green
+there and red with a name cited that no test defines.
