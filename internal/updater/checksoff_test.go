@@ -604,8 +604,10 @@ func TestTheOffsDecisionAsksTheBackupItself(t *testing.T) {
 			}
 			installCandidateCopy(t, c.bin+".bak")
 			script := candidateStandIn(t, map[string]string{"check": tc.check, "version": tc.version})
+			// A bound past what three starts of a race-built copy take on a
+			// loaded host: the bound is TestTheOffsDecisionKeepsItsBound's.
 			err := ChecksOffRefused(context.Background(), ChecksOffSave{DataDir: c.dir, BinaryPath: c.bin, ConfigPath: c.cfg,
-				Current: "0.2.4"})
+				Current: "0.2.4", Within: 2 * time.Minute})
 			if tc.refused != errors.Is(err, ErrChecksOffKeepsTheBackup) || (!tc.refused && err != nil) {
 				t.Fatalf("the off's decision = %v, want refused %v", err, tc.refused)
 			}
