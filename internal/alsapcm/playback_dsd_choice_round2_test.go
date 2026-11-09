@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -655,6 +656,29 @@ func pausedBetween(t *testing.T, w *writeSeams, pubs ...*publishHold) (*dsdRig, 
 	return d, ob, ids
 }
 
+// resumeOrEnd waits for the answer of a resume whose session holds nothing
+// to play once its last entry is refused, a write having landed beside it:
+// nil, or the engine's refusal of a resume the end of the queue superseded
+// (B728 B9 round 18). The backend's Resume returns once the reconciliation
+// has judged the entry, and its Finished, the hand-off's replacement refused
+// and skipped, can reach the engine first: the engine then answers the resume
+// under way superseded by "the last entry played out" (releaseSession), which
+// a loaded run of TestAResumeBetweenTransportsWaitsForTheReconciliationsVerdict
+// met once in 200. Either is right; anything else fails.
+func resumeOrEnd(t *testing.T, resumed <-chan error) {
+	t.Helper()
+	select {
+	case err := <-resumed:
+		var e *engine.Error
+		if err != nil && !(errors.As(err, &e) && e.Reason == engine.ReasonSuperseded && strings.HasSuffix(e.Detail, "the last entry played out")) {
+			t.Fatalf("the resume: %v; want it answered, or superseded by the end of the queue", err)
+		}
+	case <-time.After(alsapcm.Watchdog()):
+		alsapcm.LogGoroutines(t)
+		t.Fatalf("the resume was not answered within %v", alsapcm.Watchdog())
+	}
+}
+
 // resumeIn waits for a resume's answer.
 func resumeIn(t *testing.T, resumed <-chan error) {
 	t.Helper()
@@ -744,7 +768,7 @@ func TestAResumeWaitsForEveryWriteThatChangesWhatItOpens(t *testing.T) {
 	if got := answer(t, resB); got.Outcome != playback.ChoiceWritten {
 		t.Fatalf("write B: %s, want written", got.Outcome)
 	}
-	resumeIn(t, resumed)
+	resumeOrEnd(t, resumed)
 	s := d.waitEnded()
 	d.rig.stop()
 	if f := s.Faults(); len(f) != 0 {
@@ -785,7 +809,7 @@ func TestAResumeBetweenTransportsWaitsForTheReconciliationsVerdict(t *testing.T)
 	if got := answerWithin(t, alsapcm.Ordered(), res); got.Outcome != playback.ChoiceWritten {
 		t.Fatalf("the cap: %s, want written", got.Outcome)
 	}
-	resumeIn(t, resumed)
+	resumeOrEnd(t, resumed)
 	s := d.waitEnded()
 	d.rig.stop()
 	if f := s.Faults(); len(f) != 0 {

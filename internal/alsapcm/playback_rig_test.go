@@ -456,6 +456,9 @@ type recorder struct {
 	// fault is the next fault a session reports to hold short of the engine
 	// (holdNextFault).
 	fault *heldCall
+	// resumed is the backend's next Resume answer to hold short of the engine
+	// (holdNextResumeAnswer, B728 B9 round 18).
+	resumed *heldCall
 	// fenced is the steps the backend refused for a session released
 	// (playback.Seams.Fenced), in order.
 	fenced []string
@@ -520,6 +523,15 @@ func (r *recorder) holdNextCut() (held <-chan struct{}, letGo func()) { return r
 // has its deadline (engine.CallTimeout): a test lets it go well within it.
 func (r *recorder) holdNextPrepare() (held <-chan struct{}, letGo func()) {
 	return r.holdCall(&r.prepare)
+}
+
+// holdNextResumeAnswer holds the backend's next Resume answer, the backend's
+// Resume returned and its answer recorded, short of the engine until letGo
+// (B728 B9 round 18): what the backend reports meanwhile reaches the engine
+// first. The engine's call has its deadline (engine.CallTimeout): a test lets
+// it go well within it.
+func (r *recorder) holdNextResumeAnswer() (held <-chan struct{}, letGo func()) {
+	return r.holdCall(&r.resumed)
 }
 
 // holdNextFault holds the next fault a session reports, recorded, short of
@@ -816,10 +828,12 @@ func (b tee) Release(ctx context.Context, s engine.SessionID) error {
 	return b.Backend.Release(ctx, s)
 }
 
-// Resume is the backend's, its answer recorded.
+// Resume is the backend's, its answer recorded, then held short of the engine
+// when a test holds it (holdNextResumeAnswer).
 func (b tee) Resume(ctx context.Context, s engine.SessionID) (engine.ResumeResult, error) {
 	how, err := b.Backend.Resume(ctx, s)
 	b.r.note(func() { b.r.calls = append(b.r.calls, call{kind: "resume", s: s, how: how, err: err}) })
+	b.r.take(&b.r.resumed)
 	return how, err
 }
 
