@@ -587,6 +587,50 @@ func TestACancelledVerificationWritesIncomplete(t *testing.T) {
 	requireVerdict(t, "a stopped check", listed(t, dir), backup.StateIncomplete, backup.ReasonCancelled, backup.StateIncomplete, backup.ReasonCancelled)
 }
 
+// TestAStoppedCheckNeverReplacesACompletedVerdict: a check that did not end
+// writes INCOMPLETE over a PENDING or an INCOMPLETE alone, so a snapshot
+// whose database is VERIFIED and whose files FAILED keeps both verdicts
+// through a verification stopped before it began.
+func TestAStoppedCheckNeverReplacesACompletedVerdict(t *testing.T) {
+	src := storeWithTracks(t, 10)
+	dir, err := backup.Snapshot(t.Context(), src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokens := filepath.Join(dir, "tokens.json")
+	data := readBytes(t, tokens)
+	data[0] ^= 1
+	if err := os.WriteFile(tokens, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	verifyT(t, dir, backup.CheckQuick)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, err := backup.VerifySnapshot(ctx, dir, backup.VerifyOptions{}); !errors.Is(err, context.Canceled) {
+		t.Errorf("a verification stopped before it began answered %v, want the stop", err)
+	}
+	requireVerdict(t, "the verdicts after a stopped check", listed(t, dir), backup.StateVerified, "", backup.StateFailed, backup.ReasonHash)
+}
+
+// TestABundleThatChangesWhileItIsCheckedFails: an entry that appears in the
+// bundle while SQLite has its database open, as a -shm would beside an open
+// that is not immutable, FAILS the database's verdict (bundle-changed), so
+// a check passes only the bundle it found.
+func TestABundleThatChangesWhileItIsCheckedFails(t *testing.T) {
+	src := storeWithTracks(t, 10)
+	dir, err := backup.Snapshot(t.Context(), src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(backup.SetOnDatabaseOpenForTest(func() {
+		if err := os.WriteFile(filepath.Join(dir, "stray"), nil, 0o600); err != nil {
+			t.Error(err)
+		}
+	}))
+	res := verifyT(t, dir, backup.CheckQuick)
+	requireVerdict(t, "a bundle that changed while it was checked", res.Record, backup.StateFailed, backup.ReasonBundleChanged, backup.StateVerified, "")
+}
+
 // TestAStopWithABlockedSyncReturnsWithinItsBound is the brief's shutdown
 // red: a verification stopped while its verdict's write is held in a sync
 // that never answers returns within StopWriteBound of the stop, abandoning
