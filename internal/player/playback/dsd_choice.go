@@ -467,14 +467,14 @@ func (b *Backend) pendingFor(o *occ) *pendingChoice {
 // the set published alone cannot say whether o is kept, handed off again or
 // the session's DSD revoked: the reconciliation decides that in one step
 // under s.mu (reconcileDSD), after which o is admitted under the set
-// published or stale, the revocation's fault recorded where a sink plays the
-// session's DSD, and Revoke, just after, drops what the revocation takes,
-// each step closing s.judged. What would open o's own sink, join o to a sink
-// or end a window before it waits for them (s.judged); one admitted under
-// the set published now waits for nothing, and one still opening is its
-// open's end's to admit again (readmitDSDLocked), never a reconciliation's.
-// Every caller asks it of an occurrence no sink of its own holds, which every
-// reconciliation judges once its open has ended. s.mu is held.
+// published or stale, and Revoke, just after, drops what a revocation takes
+// and records its fault, each closing s.judged. What would open o's own
+// sink, join o to a sink or end a window before it waits for them
+// (s.judged); one admitted under the set published now waits for nothing,
+// and one still opening is its open's end's to admit again
+// (readmitDSDLocked), never a reconciliation's. Every caller asks it of an
+// occurrence no sink of its own holds, which every reconciliation judges
+// once its open has ended. s.mu is held.
 func (s *session) unjudgedLocked(o *occ) bool {
 	return o.opened() && o.admitted != nil && o.admitted != s.b.dsd.Load() && !o.stale && !o.dropped
 }
