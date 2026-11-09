@@ -546,12 +546,14 @@ func TestDLNAVariantLocatorAdoptsARelocatedSidecar(t *testing.T) {
 }
 
 // TestAnalysisStoreAdapterAdoptsARelocatedWaveform — the waveform half
-// of the relocation story (#938), and the one with no second chance.
+// of the relocation story (#938).
 //
-// Nothing reaps a `track_analysis` row and nothing regenerates one: the
-// analysis skip gate keys on the SOURCE's mtime and size, which a host
-// move leaves untouched, so a stranded curve is a 410 that stays a 410
-// for the lifetime of the install.
+// Nothing reaps a `track_analysis` row, and the analysis skip gate keys on
+// the SOURCE's mtime and size, which a host move leaves untouched, so the
+// candidate walk never offers the track again: a moved curve is adopted
+// here, with nothing re-decoded. A curve at neither place is rendered again
+// on its lookup since backlog B652 (TestADeletedCurveIsRenderedAgainOnItsLookupKeepingItsMeasurements),
+// and a relocated one never is (TestARelocatedCurveIsAdoptedNotRenderedAgain).
 func TestAnalysisStoreAdapterAdoptsARelocatedWaveform(t *testing.T) {
 	oldData := filepath.Join(t.TempDir(), "old-data")
 	newData := filepath.Join(t.TempDir(), "new-data")

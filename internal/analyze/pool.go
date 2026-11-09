@@ -3,6 +3,8 @@ package analyze
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -102,10 +104,17 @@ type Pool struct {
 	// Injectable seams (set via PoolOption before workers start so
 	// there's no data race with the worker goroutines). Production uses
 	// the defaults wired in NewPool.
-	runner     func(ctx context.Context, spec AnalyzeSpec) (Result, error)
-	jobTimeout time.Duration
-	fsyncFn    func(path string) error
-	now        func() time.Time
+	runner func(ctx context.Context, spec AnalyzeSpec) (Result, error)
+	// repairRunner renders a waveform-only repair's curve (EnqueueRepair):
+	// RunWaveformRepair in production.
+	repairRunner func(ctx context.Context, spec RepairSpec) (RepairResult, error)
+	jobTimeout   time.Duration
+	fsyncFn      func(path string) error
+	// syncIn is a waveform-only repair's durability barrier, through the
+	// root the curve was written through (fsutil.FsyncInRoot): name is
+	// relative to it.
+	syncIn func(root *os.Root, name string) error
+	now    func() time.Time
 	// liveGate is the live analysis gate, asked when a worker takes a job
 	// (WithLiveGate). Nil reads as open: `bridge analyze` builds its own
 	// pool, with none, for a run the operator asked for.
@@ -127,6 +136,9 @@ type Pool struct {
 type poolJob struct {
 	spec  AnalyzeSpec
 	dedup string
+	// repair, when set, makes the job a waveform-only repair of spec's curve
+	// (EnqueueRepair) rather than an analysis.
+	repair *RepairSpec
 }
 
 // PoolOption customises a Pool at construction (before workers start).
@@ -138,10 +150,20 @@ func WithRunner(fn func(ctx context.Context, spec AnalyzeSpec) (Result, error)) 
 	return func(p *Pool) { p.runner = fn }
 }
 
+// WithRepairRunner overrides the waveform-only repair's runner (tests inject
+// a stub). Production uses RunWaveformRepair.
+func WithRepairRunner(fn func(ctx context.Context, spec RepairSpec) (RepairResult, error)) PoolOption {
+	return func(p *Pool) { p.repairRunner = fn }
+}
+
 // WithFsync overrides the durability-barrier fsync (tests inject a
-// no-op or a failure stub).
+// no-op or a failure stub). A waveform-only repair's barrier, made through
+// its root in production, calls fn with the curve's path, at the same point.
 func WithFsync(fn func(path string) error) PoolOption {
-	return func(p *Pool) { p.fsyncFn = fn }
+	return func(p *Pool) {
+		p.fsyncFn = fn
+		p.syncIn = func(root *os.Root, name string) error { return fn(filepath.Join(root.Name(), name)) }
+	}
 }
 
 // WithJobTimeout overrides the per-job deadline (tests shrink it to
@@ -194,8 +216,10 @@ func NewPool(store *manifest.Store, workers, queueCap int, opts ...PoolOption) *
 		stopCtx:         stopCtx,
 		stopCancel:      stopCancel,
 		runner:          RunAnalysis,
+		repairRunner:    RunWaveformRepair,
 		jobTimeout:      defaultJobTimeout,
 		fsyncFn:         fsutil.FsyncFileAndParent,
+		syncIn:          fsutil.FsyncInRoot,
 		now:             time.Now,
 		stateChangeChan: make(chan struct{}, 1),
 	}
@@ -219,10 +243,24 @@ func NewPool(store *manifest.Store, workers, queueCap int, opts ...PoolOption) *
 // closing the jobs channel and only closes stateChangeChan afterward
 // (post wg.Wait), so neither send can race a close and panic.
 func (p *Pool) Enqueue(spec AnalyzeSpec) error {
+	return p.enqueue(poolJob{spec: spec, dedup: spec.SourceLibraryRel})
+}
+
+// EnqueueRepair submits a waveform-only repair (RunWaveformRepair) to the
+// pool, on Enqueue's terms and in the same queue: its dedup key is the
+// row's source path, so a repair and an analysis of one source are never
+// queued or running at once, and a second lookup of a curve already being
+// rendered again answers ErrDuplicateInflight.
+func (p *Pool) EnqueueRepair(spec RepairSpec) error {
+	return p.enqueue(poolJob{spec: spec.AnalyzeSpec, dedup: spec.SourceLibraryRel, repair: &spec})
+}
+
+// enqueue is Enqueue's body, for either kind of job.
+func (p *Pool) enqueue(job poolJob) error {
 	if p.closed.Load() {
 		return ErrPoolClosed
 	}
-	dedup := spec.SourceLibraryRel
+	dedup := job.dedup
 	p.mu.Lock()
 	if p.closed.Load() {
 		p.mu.Unlock()
@@ -234,7 +272,7 @@ func (p *Pool) Enqueue(spec AnalyzeSpec) error {
 	}
 	p.inflight[dedup] = struct{}{} // optimistic claim; rolled back on full
 	select {
-	case p.jobs <- poolJob{spec: spec, dedup: dedup}:
+	case p.jobs <- job:
 		p.enqueuedCnt++
 		p.drops.AcceptedLocked()
 		// fireStateChange BEFORE the unlock — mirrors internal/transcode
@@ -440,6 +478,13 @@ func (p *Pool) processJob(job poolJob) {
 	p.drops.Ran()
 	decided = true
 
+	if job.repair != nil {
+		// A waveform-only repair: the same gate, timeout, shutdown and
+		// counting as an analysis, and the same one exit above.
+		outcome = p.processRepair(*job.repair)
+		return
+	}
+
 	jobCtx, cancel := context.WithTimeout(p.stopCtx, p.jobTimeout)
 	defer cancel()
 
@@ -548,6 +593,13 @@ func (p *Pool) processJob(job poolJob) {
 	defer clearCancel()
 	if err := p.store.ClearAnalysisFailure(clearCtx, job.spec.SourceLibraryRel); err != nil {
 		logger.Warn("analyze: clear failure marker",
+			"path", job.spec.SourceLibraryRel, "err", err)
+	}
+	// The curve is written again, so a regeneration of it that failed
+	// before stops nothing now: the count is of consecutive failures
+	// (processRepair).
+	if err := p.store.ClearWaveformRegenFailure(clearCtx, job.spec.SourceLibraryRel); err != nil {
+		logger.Warn("analyze: clear waveform regeneration failures",
 			"path", job.spec.SourceLibraryRel, "err", err)
 	}
 	outcome = outcomeDone

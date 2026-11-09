@@ -26,6 +26,13 @@ import (
 // wiring point.
 type AnalysisStore interface {
 	LookupAnalysis(ctx context.Context, sourcePath string) (*AnalysisRecord, error)
+	// LookupWaveform is LookupAnalysis for GET /v1/waveform alone: the
+	// same row, and, where the store can, a curve proven missing asked to
+	// be rendered again (cmd/bridge's analysisStoreAdapter, backlog B652).
+	// The request is answered as before either way (a 410 for a curve that
+	// is gone); the curve is there for a later request. /v1/spectrum asks
+	// LookupAnalysis, so a spectrum request renders nothing.
+	LookupWaveform(ctx context.Context, sourcePath string) (*AnalysisRecord, error)
 }
 
 // AnalysisRecord is the minimum metadata the waveform handler needs:
@@ -92,7 +99,12 @@ const analysisSourceMTimeToleranceNS int64 = 2_000_000_000
 // PAYLOAD check stays with the caller: what counts as "present" differs (a
 // sidecar path vs. bytes on the row), and it is deliberately made BEFORE the
 // freshness gate so a row with no payload reads 404 rather than 410.
-func (s *Server) lookupAnalysisForRequest(w http.ResponseWriter, r *http.Request, kind string) (*AnalysisRecord, os.FileInfo, bool) {
+//
+// lookup is the store's method the endpoint asks the row of:
+// AnalysisStore.LookupWaveform for /v1/waveform, which may ask for a missing
+// curve to be rendered again, and AnalysisStore.LookupAnalysis for
+// /v1/spectrum, which never does (backlog B652).
+func (s *Server) lookupAnalysisForRequest(w http.ResponseWriter, r *http.Request, kind string, lookup func(AnalysisStore, context.Context, string) (*AnalysisRecord, error)) (*AnalysisRecord, os.FileInfo, bool) {
 	if s.analysisStore == nil {
 		writeError(w, http.StatusNotFound, kind+"_not_found", "audio analysis is not enabled on this bridge")
 		return nil, nil, false
@@ -112,7 +124,7 @@ func (s *Server) lookupAnalysisForRequest(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, "bad_request", "path is a directory")
 		return nil, nil, false
 	}
-	rec, err := s.analysisStore.LookupAnalysis(r.Context(), clientPath)
+	rec, err := lookup(s.analysisStore, r.Context(), clientPath)
 	if err != nil {
 		writeErrorLog(w, r, http.StatusInternalServerError, "internal",
 			"the bridge couldn't look up this "+kind, err)
@@ -133,7 +145,7 @@ func analysisSourceDrifted(rec *AnalysisRecord, info os.FileInfo) bool {
 }
 
 func (s *Server) waveform(w http.ResponseWriter, r *http.Request) {
-	rec, info, ok := s.lookupAnalysisForRequest(w, r, "waveform")
+	rec, info, ok := s.lookupAnalysisForRequest(w, r, "waveform", AnalysisStore.LookupWaveform)
 	if !ok {
 		return
 	}
@@ -151,7 +163,9 @@ func (s *Server) waveform(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			// Sidecar gone (manual wipe, partial --gc) — 410 so iOS
-			// drops it; the next `bridge analyze` regenerates.
+			// drops it. The lookup above has asked for it to be rendered
+			// again where the store can (LookupWaveform), under the
+			// catalog's guard, so a later request finds it.
 			writeError(w, http.StatusGone, "waveform_missing_on_disk",
 				"waveform sidecar is missing on disk")
 			return
