@@ -83,14 +83,14 @@ func TestAProbeHeldBeforeItsUnlockIsNoRunningStart(t *testing.T) {
 
 // TestATakeBackPastItsDeadlineStillTriesTheLockOnce: a take-back whose
 // context has ended still tries the install marker's lock once, as LockState
-// tries before it waits: it lands where the lock is free, and gives up at once
-// where another holds it.
+// tries before it waits, and lands where the lock is free; where another
+// holds it, backlog B760.
 func TestATakeBackPastItsDeadlineStillTriesTheLockOnce(t *testing.T) {
 	ended, cancel := context.WithCancel(context.Background())
 	cancel()
 	free := t.TempDir()
 	mustSave(t, free, probationMarker(1))
-	if took, err := TakeBackFailedStart(ended, free, "0.2.4", 1); err != nil || !took {
+	if took, err := TakeBackFailedStart(ended, free, "0.2.4", 1, nil); err != nil || !took {
 		t.Errorf("a take-back past its deadline, the lock free = %v, %v; want it landed", took, err)
 	}
 	held := t.TempDir()
@@ -101,7 +101,7 @@ func TestATakeBackPastItsDeadlineStillTriesTheLockOnce(t *testing.T) {
 	}
 	t.Cleanup(l.Release)
 	asked := time.Now()
-	if took, err := TakeBackFailedStart(ended, held, "0.2.4", 1); err == nil || took {
+	if took, err := TakeBackFailedStart(ended, held, "0.2.4", 1, nil); err == nil || took {
 		t.Errorf("a take-back past its deadline, the lock held = %v, %v; want it given up", took, err)
 	}
 	if waited := time.Since(asked); waited > time.Second {

@@ -27,7 +27,7 @@ func TestTheDoctorsOutputsBuilderReadsNoHostTree(t *testing.T) {
 	before := len(hostReads())
 	none := 0
 	cfg := &config.Config{DataDir: t.TempDir(), ListenAddress: "127.0.0.1:0", Output: config.OutputConfig{MPD: "on", LoopbackPort: &none}}
-	checks := doctorOutputChecklist(cfg, func(c *api.LocalOutputsConfig) {
+	checks := doctorOutputChecklist("", cfg, func(c *api.LocalOutputsConfig) {
 		c.GOOS = "linux"
 		c.Inspect = func(context.Context, mpd.Options) mpd.Report { return mpd.Report{} }
 		c.Greet = func(context.Context, string) bool { return false }

@@ -324,8 +324,8 @@ func TestProbationStatusSaysWhereAnInstallStands(t *testing.T) {
 // TestTheAdmissionCountsTheStartsOfTheInstallsVersion: serve's admission adds
 // one to the count where its version is the install's target, in its one
 // write with its record, clears NotReady, and counts nothing of another
-// version; the count's own write failing, or its lock not taken, is a line
-// (CountMissed), never a refusal, while the barrier before it still refuses.
+// version; the count's own write failing, or its lock not taken, is
+// CountMissed's (backlog B760), while the barrier before it still refuses.
 func TestTheAdmissionCountsTheStartsOfTheInstallsVersion(t *testing.T) {
 	t.Run("with its record", func(t *testing.T) {
 		dir := t.TempDir()
@@ -614,7 +614,7 @@ func TestATakeBackWritesOnlyTheCountItsStartWrote(t *testing.T) {
 			dir := t.TempDir()
 			mustSave(t, dir, tc.st)
 			before := mustLoad(t, dir)
-			took, err := TakeBackFailedStart(t.Context(), dir, "0.2.4", tc.counted)
+			took, err := TakeBackFailedStart(t.Context(), dir, "0.2.4", tc.counted, nil)
 			if err != nil || took != tc.takes {
 				t.Fatalf("TakeBackFailedStart = %v, %v; want %v", took, err, tc.takes)
 			}
@@ -631,7 +631,7 @@ func TestATakeBackWritesOnlyTheCountItsStartWrote(t *testing.T) {
 		dir := t.TempDir()
 		mustSave(t, dir, probationMarker(1))
 		t.Cleanup(SetStateTryLockForTest(func(*os.File) error { return syscall.EOPNOTSUPP }))
-		if took, err := TakeBackFailedStart(t.Context(), dir, "0.2.4", 1); err != nil || !took {
+		if took, err := TakeBackFailedStart(t.Context(), dir, "0.2.4", 1, nil); err != nil || !took {
 			t.Fatalf("TakeBackFailedStart where no lock is kept = %v, %v; want it taken back, as a disarm goes on", took, err)
 		}
 	})

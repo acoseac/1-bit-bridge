@@ -220,8 +220,9 @@ func doctorChecks(lines []outputcheck.Line) []doctor.Check {
 //
 // seam, when not nil, edits the builder's config before it is built: a
 // test stands in for Linux and for the box's MPD and cards there.
-// Production passes nil.
-func doctorOutputChecklist(cfg *config.Config, seam func(*api.LocalOutputsConfig)) func(context.Context) []doctor.Check {
+// Production passes nil. cfgFile is the file cfg was loaded from, beside
+// which the record of its data dir is ("" for none).
+func doctorOutputChecklist(cfgFile string, cfg *config.Config, seam func(*api.LocalOutputsConfig)) func(context.Context) []doctor.Check {
 	return func(ctx context.Context) []doctor.Check {
 		route := &loopbackAnswer{ask: func() (string, error) {
 			return probeLoopbackRoute(ctx, cfg.Output.EffectiveLoopbackPort())
@@ -234,7 +235,13 @@ func doctorOutputChecklist(cfg *config.Config, seam func(*api.LocalOutputsConfig
 			Tracks: func(ctx context.Context) ([]string, error) {
 				// Opened per call and closed at once, as the other doctor
 				// probes open it: `bridge serve` may hold the same store, and
-				// a missing database is not created by a diagnostic.
+				// a missing database is not created by a diagnostic. Nor is
+				// one opened in a data dir the record refuses, which may hold
+				// a database that is not this bridge's (B741's round 2, Codex
+				// on #1441): MPD need not answer for the path rules to ask.
+				if err := doctorStoreGate(cfgFile, cfg.DataDir); err != nil {
+					return nil, err
+				}
 				if _, err := os.Stat(dbPath); err != nil {
 					return nil, err
 				}

@@ -3411,7 +3411,7 @@ writer's side is `ops/History-rules-config-lifecycle.md`, B603.
 
 ## B659 — bridge doctor's data-dir line (2026-11-02)
 
-- **`bridge doctor`'s `data-dir` line says, for every config that loads, whether serve's preparation (`prepareServeDataDir`) can make or use the data dir, from what stands on its path by Lstat and Stat with no write, one source for the CLI and the console's doctor (`doctorDataDir` in `buildDoctorDepsFor`, `doctor.Deps.DataDirPreparation`), placed right after config-dir: each shape serve refuses (a regular file, a link to one, a link to nothing, at the data dir or above it) is a fail saying bridge serve will not start, naming the entry in the way and its fix; a directory, a link to one, and a data dir not made yet below either are ok, unless the record beside the config names that data dir and it holds neither its database nor its lock file, a fail in serve's refusal's words (B651, scanner.md); a walk that an error other than an entry's absence stops (a permission error, a link cycle) is not checked, a warn; a config found or named that does not load is not checked, a warn, in config-file's terms (`doctor.ConfigFile.NotGradedReason`); a run that finds no config, and init's preflight, have no line; serve's refusal and both doctor lines read one walk, `fsutil.NotADirectory` and `fsutil.BlockingEntry`, which asks os.Stat, as os.MkdirAll does, whether an entry leads to a directory** (2026-11-02, backlog B659; an ancestor that is a regular file a fail by the owner's decision; Codex's check on the brief). **Don't give the line a write or a walk of its own, judge a data dir from a config that did not load, fail a permission or inspection error, or ask whether the data dir can be written (serve's preparation does not).**
+- **`bridge doctor`'s `data-dir` line says, for every config that loads, whether serve's preparation (`prepareServeDataDir`) can make or use the data dir, from what stands on its path by Lstat and Stat with no write, one source for the CLI and the console's doctor (`doctorDataDir` in `buildDoctorDepsFor`, `doctor.Deps.DataDirPreparation`), placed right after config-dir: each shape serve refuses (a regular file, a link to one, a link to nothing, at the data dir or above it) is a fail saying bridge serve will not start, naming the entry in the way and its fix; a directory, a link to one, and a data dir not made yet below either are ok, unless the record beside the config names that data dir and it holds neither its database nor its lock file, or since B741 not the identity the record holds, or the record or the marker does not read, a fail in serve's refusal's words (B651, scanner.md; a record or a marker this user cannot read a warn, not checked); a walk that an error other than an entry's absence stops (a permission error, a link cycle) is not checked, a warn; a config found or named that does not load is not checked, a warn, in config-file's terms (`doctor.ConfigFile.NotGradedReason`); a run that finds no config, and init's preflight, have no line; serve's refusal and both doctor lines read one walk, `fsutil.NotADirectory` and `fsutil.BlockingEntry`, which asks os.Stat, as os.MkdirAll does, whether an entry leads to a directory** (2026-11-02, backlog B659; an ancestor that is a regular file a fail by the owner's decision; Codex's check on the brief). **Don't give the line a write or a walk of its own, judge a data dir from a config that did not load, fail a permission or inspection error, or ask whether the data dir can be written (serve's preparation does not).**
 
 *The gap* (B606's follow-up). bridge doctor had no line on the data
 directory as such. The player-storage line, which since B606 fails a data
@@ -3721,7 +3721,7 @@ non-durable as well (C745-2) every row does, with the DSD state's own
 refusal tests. The record is in `ops/engineering-log.md`, 2026-11-07, B745.
 ## B727 — every command asks the data dir's record, and serve says its refusal once (2026-11-07)
 
-- **Every command but serve that makes, opens or writes the data dir asks the check serve makes of the record beside its config, right after its config loads (`refuseDataDirAway`: the record beside the file the config's name opens, as bridge doctor reads it, and `checkServeDataDirRecord`), and refuses a data dir the record names that holds neither `bridge.db` nor `server.lock`, exit 1, in serve's first sentence under its own name, saying that it makes and writes nothing there, to mount the volume and run it again, and how to go on from a data dir moved on purpose (set `dataDir` to where it is now, which the record does not name) or removed on purpose (remove the record): scan, the render commands, analyze, variants move, artwork, enrichment misses and retry, duplicates, library add and remove, pair, token rotate, expire and revoke, admin reset-password, sign-out-everywhere and login-link, cert rotate, backup, tsnet auth, status and logout, update but under `--check`, init's rewrite before its preflight, and, through `holdDataDirForMutation` before it prepares and locks, restore, reset-player, manifest clear-missing and the DAC bind; and serve says its own refusal once per state: a note beside the record (`.bridge.yaml.datadir.refused`), written only into the directory the record was read from (`atomicwrite.WriteBytesInExisting`), names the data dir refused and when it was said, a start says the refusal where the note names another data dir or none or is a day old, and always to a terminal, and the first start after it that gets past the data dir's preparation and its lock removes the note and says at Info how the refusal ended: that the data dir holds its database or its lock file again where the note names the data dir its config names and that data dir held one of them before the preparation (`dataDirBack`), and otherwise that the refusal no longer applies** (2026-11-07, backlog B727 items 2 and 5, and its round 2). **Don't let a command make, open or write the data dir before the check, ask it of a read (doctor, status, logs, token list, cert info, update --check, init keeping the config), ask it in `manifest.OpenStore`, tell the operator of a data dir moved on purpose to remove the record, keep the note in the data dir or write it through a writer that makes its directory, let the note's write decide what serve refuses or how it exits, say how a refusal ended before the data dir is prepared and its lock taken, or say a data dir is back that the note does not name or that held neither file before the preparation.** `TestEveryCommandThatWritesTheDataDirRefusesItWhileItsVolumeIsAway` (tsnet auth and status run whole, their tsnet server stood in for: `tsnetCommandServer`), `TestTheDiagnosticsStayAvailableWhileTheDataDirsVolumeIsAway`, `TestACommandOverAnInstallWithNoRecordMakesItsDataDirAsBefore`, `TestUpdateAsksTheRecordBeforeItAsksForARelease`, `TestServeSaysItsRefusalOncePerState`, `TestServeSaysTheRefusalOfADataDirItsNoteDoesNotName`, `TestServeSaysItsRefusalToATerminalAtEveryStart` (Linux), `TestAStartThatCannotRemoveTheNoteSaysSo`, `TestServeSaysItsRefusalAtEveryStartWhereItCannotKeepTheNote`, `TestTheRefusalsNoteMakesNoDirectory`, `TestTheEndOfARefusalIsSaidAsItIs` and `TestTheEndOfARefusalCallsBackOnlyTheDataDirItRefused` pin it.
+- **Every command but serve that makes, opens or writes the data dir asks the check serve makes of the record beside its config, right after its config loads (`refuseDataDirAway`: the record beside the file the config's name opens, as bridge doctor reads it, and `checkServeDataDirRecord`), and refuses a data dir the record names that holds neither `bridge.db` nor `server.lock` (and since B741 every other cause of the check's, the next bullet), exit 1, in serve's first sentence under its own name, saying that it makes and writes nothing there, to mount the volume and run it again, and how to go on from a data dir moved on purpose (set `dataDir` to where it is now, which the record does not name) or removed on purpose (remove the record): scan, the render commands, analyze, variants move, artwork, enrichment misses and retry, duplicates, library add and remove, pair, token rotate, expire and revoke, admin reset-password, sign-out-everywhere and login-link, cert rotate, backup, tsnet auth, status and logout, update but under `--check`, init's rewrite before its preflight, and, through `holdDataDirForMutation` before it prepares and locks, restore, reset-player, manifest clear-missing and the DAC bind; and serve says its own refusal once per state: a note beside the record (`.bridge.yaml.datadir.refused`), written only into the directory the record was read from (`atomicwrite.WriteBytesInExisting`), names the data dir refused, its cause and the identity its record held (B741), and when it was said, a start says the refusal where the note names another data dir, cause or identity, or none, or is a day old, and always to a terminal, and the first start after it that gets past the data dir's preparation and its lock removes the note and says at Info how the refusal ended: that the data dir is back where the note names the data dir its config names and that data dir held before the preparation the identity the refusal was of, or, for a record that held none, its database or its lock file (`dataDirBack`), and otherwise that the refusal no longer applies** (2026-11-07, backlog B727 items 2 and 5, and its round 2). **Don't let a command make, open or write the data dir before the check, ask it of a read (doctor, status, logs, token list, cert info, update --check, init keeping the config), ask it in `manifest.OpenStore`, tell the operator of a data dir moved on purpose to remove the record, keep the note in the data dir or write it through a writer that makes its directory, let the note's write decide what serve refuses or how it exits, say how a refusal ended before the data dir is prepared and its lock taken, or say a data dir is back that the note does not name or that held neither file, or since B741 not the refused identity, before the preparation.** `TestEveryCommandThatWritesTheDataDirRefusesItWhileItsVolumeIsAway` (tsnet auth and status run whole, their tsnet server stood in for: `tsnetCommandServer`), `TestTheDiagnosticsStayAvailableWhileTheDataDirsVolumeIsAway`, `TestACommandOverAnInstallWithNoRecordMakesItsDataDirAsBefore`, `TestUpdateAsksTheRecordBeforeItAsksForARelease`, `TestServeSaysItsRefusalOncePerState`, `TestServeSaysTheRefusalOfADataDirItsNoteDoesNotName`, `TestServeSaysItsRefusalToATerminalAtEveryStart` (Linux), `TestAStartThatCannotRemoveTheNoteSaysSo`, `TestServeSaysItsRefusalAtEveryStartWhereItCannotKeepTheNote`, `TestTheRefusalsNoteMakesNoDirectory`, `TestTheEndOfARefusalIsSaidAsItIs` and `TestTheEndOfARefusalCallsBackOnlyTheDataDirItRefused` pin it.
 
 *The gap* (B727's second item). B651 gave serve the refusal and left every
 other command as it was. Over an install whose record names its data dir,
@@ -3831,7 +3831,9 @@ and update --check (its release check asked of a server of the test's own,
 nothing, exits as it would, and makes nothing under the bare mount point.
 The doctor reaches no store open in the refused state, so its open needs no
 gate on the data-dir line: every open asks first whether `bridge.db` is
-there, and the refusal is of a data dir that holds none.
+there, and the refusal is of a data dir that holds none. (B741 made this
+false: a data dir it refuses can hold a database, and the doctor's store
+probes now open nothing in a data dir the record refuses: B741's entry.)
 
 *tsnet auth and status as they exit.* The table's tsnet row called the gate
 the two share and mapped its error to exit 1 itself, so it could not see
@@ -3843,6 +3845,223 @@ in production), so a gate that let one through brings no node up on the
 tailnet, makes no state dir in the data dir, and fails its row. The refusal
 names the subcommand, since bare `bridge tsnet` is no command to run again.
 The record is in `ops/engineering-log.md`, 2026-11-07, B727's round 2.
+
+## B741 — the data dir's record gains an identity (2026-11-08)
+
+- **Serve keeps the data dir's identity, a random id minted once, in a marker in the data dir (`data-dir-id.json`, readable by its group and others) and in the record beside the config: the marker written durably once the database is open and before the record gains the identity (staged, its bytes synced, renamed, synced where it is through a handle of its own, opened for reading as a file off Windows (`fsutil.OpenAsFile`, which refuses a named pipe at once) and for writing on Windows, whose `FlushFileBuffers` needs it, so that there alone a marker serve may not write is never taken up, and its directory synced: `markerDurability`, each step a seam on the serve instance), the identity the one the marker or the record holds, never a second one minted, a marker a start before left taken up only once synced where it is, and only serve writing the marker; a marker or a record serve cannot write never refuses the start, which goes on with B651's protection alone and says so at Warn, and no write of the record drops or replaces the identity it holds of its data dir or follows a marker that does not read or cannot be inspected at the write: each leaves the record as it was. The check, still keyed on the record naming the data dir, refuses one holding `server.lock` or `bridge.db` and no marker while the record holds an identity (gap 2), one holding another identity, a marker that does not read, and a record that does not read (a link to nothing among them, `errLinkToNothing`, an entry a read missed and its lookup then found read again once first, and looked up once more where that read misses too, `readAgain`), its own state and never no record, each through `dataDirGoneError` with a cause and words of its own beside today's recovery advice, in serve, both doctors and every command `refuseDataDirAway` guards, a record or a marker this user cannot read being bridge doctor's warn, not checked, and a command's refusal saying to run it as the user the service runs as (serve's, to make it readable by that user), and no doctor probe, the player checklist's proof of the library's paths among them, opening the database of a data dir the record refuses (`doctorStoreGate`, asked at each call: `errStoreOfARefusedDataDir`, or `errStoreNotChecked` where this user cannot read the record or the marker; a stray database in the bare mount point, which a store open migrates); the refusal note is keyed on the data dir, the cause and the identity, and the end of a refusal calls back only a data dir holding the identity it was of. A record written before B741 holds none and is taken up at its first start, so the `rm bridge.db*` reset still starts and gap 2 closes from the first marker on; what stays open is named by backlog B813** (2026-11-08, backlog B741; Codex's, the Claude API's and Argon's review of its design, the two reviews of its brief, Codex's and the Claude API's of #1441's first round, and the Claude API's of its second). **Don't mint an identity where the marker or the record holds one, let the record gain one before the marker holds it durably (one a start before left included), drop a step of the marker's durability from what its test records, refuse a start over a marker or a record it could not write, write the marker anywhere but serve's start, take a record or a marker that does not read for none or replace it unread, take a link to nothing for no record, write the record past a marker that does not read or so that it drops or replaces the identity it holds of its data dir, refuse a data dir the record does not name (dataDir set to a new directory on purpose), refuse a record written before B741 over its lock file or its database, let a doctor probe open the database of a data dir the record refuses, open the marker for its sync for writing off Windows or by an open that waits on a named pipe, answer a read of the record that missed an entry its lookup then finds without reading it again, name what stays open but as backlog B813, tell a command run by another user than the service's only to make readable what the service's user may read already, key the refusal note on the data dir alone, or call back a data dir that does not hold the refused identity.** `TestServeKeepsAnIdentityInTheDataDirAndItsRecord`, `TestServeRefusesWhatTheBareMountPointHoldsOnceItsRecordHoldsAnIdentity`, `TestServeRefusesADataDirHoldingAnotherDataDirsIdentity`, `TestServeRefusesARecordThatDoesNotRead`, `TestServeRefusesARecordThatIsALinkToNothing`, `TestServeRefusesAnIdentityThatDoesNotRead`, `TestServeRefusesWhatItCannotRead`, `TestServeTakesUpTheRecordOfAServeBeforeIt`, `TestServeTakesTheIdentityItsMarkerHolds`, `TestAStartWhoseMarkerCannotBeWrittenGoesOnWithoutAnIdentity`, `TestAStartWhoseRecordCannotBeWrittenLeavesItsMarkerToTheNext`, `TestTheMarkerHoldsTheIdentityBeforeTheRecordDoes` (each step of the marker's durability in its order), `TestAMarkerThisUserMayNotWriteIsTakenUp`, `TestTheMarkersSyncWaitsForNoNamedPipe`, `TestAReadOnlyMarkerIsNeverTakenUpOnWindows` (Windows), `TestAMarkerWhoseBarrierFailedIsTakenUpOnceDurable`, `TestADataDirWhoseIdentityDoesNotReadKeepsItsRecordAsItWas`, `TestARecordKeepsItsIdentityWhereTheMarkerCannotBeReadAtItsWrite`, `TestNoWriteOfTheRecordDropsOrReplacesItsIdentity`, `TestTheMarkerIsReadableByWhoeverReadsTheDatabase`, `TestACommandThatOpensTheStoreMakesNoMarker`, `TestARestoreKeepsTheDataDirsIdentity`, `TestADatabaseRemovedOnPurposeKeepsItsDataDirsIdentity`, `TestADataDirMovedOnPurposeKeepsItsIdentity`, `TestADataDirSetToANewDirectoryOnPurposeStarts`, `TestTheCheckDecidesByTheIdentity`, `TestTheRecordReadsOnlyAsOne`, `TestARecordReadThatRacesAWriteReadsAgain`, `TestTheMarkerReadsOnlyAsOne`, `TestEachRefusalSaysWhatItIsAndHowToGoOn`, `TestTheDoctorsChecklistOpensNoStoreInARefusedDataDir`, `TestTheRefusalNoteIsOfOneState`, `TestServeSaysItsRefusalAgainWhenItsCauseChanges` and `TestTheEndOfARefusalCallsBackOnlyTheDataDirHoldingItsIdentity` pin it.
+
+*The gaps.* B651's record named the data dir serve served from, and serve
+took the data dir at that path for it wherever it held its database or its
+lock file. Three gaps were left. (1) Backlog B813, which stays open. (2)
+`server.lock` was evidence too, and the lock is made before the database
+opens: a start on the bare mount point before any record was written that
+failed between the two left one, as did a database a command made there
+before B727, and every start after the volume went took it for the data dir
+(`checkServeDataDirRecord` asked an Lstat of each). (3) `fsutil.SamePath`
+probes how the folder holding a path compares names now, so with the volume
+away a record and a config that differ in case alone read as two data dirs,
+and the refusal was skipped (scanner.md's B741 entry).
+
+*The identity.* The record and a marker in the data dir, `data-dir-id.json`,
+hold one random id, 16 bytes in lower-case hex (`mintDataDirIdentity`).
+Serve writes it once its database is open and its lock file is there
+(`recordServeDataDir`): the marker first, staged beside its place, fsynced,
+renamed with Windows' retries and no barrier of the rename's own, then
+synced where it is, its own bytes and metadata through a handle of its own
+and then the data dir, that barrier's failure the write's (`writeDataDirMarker`,
+the updater marker's shape; a directory fsync the filesystem cannot make,
+EINVAL, ENOTSUP or EOPNOTSUPP, taken as made, and none asked on Windows,
+where the marker's own sync, `FlushFileBuffers`, commits its rename to
+NTFS's journal: round 1 said the journal kept the rename, which it does only
+at its own flush, round 2 below); the record gains the identity only after.
+The order is load-bearing: a record holding an identity over a data dir whose
+marker a crash took is refused at every start, which a service manager then
+loops on; a marker whose record never gained it is taken up by the next start.
+The identity is the marker's where the data dir holds one, else the record's
+own where it names this data dir, else a new one: never a second one minted
+beside one held (until B741 the write rebuilt the record fresh and rewrote it
+on any difference, which would drop or remint it). A marker serve cannot write
+leaves the record without an identity, said at Warn, so the next start is
+judged as before B741 and starts; a record it cannot write leaves the marker
+for the next start to take up. Only serve writes the marker: a command that
+opens the store makes the data dir and a database, and its data dir gains a
+marker at the next serve. Backup does not carry it, so a restore keeps the
+marker of the data dir it restores into.
+
+*The check*, still keyed on the record naming the data dir, so that `dataDir`
+set on purpose to a new directory, empty or not made yet, is refused nothing
+and gains an identity of its own. Of a data dir the record names: a marker of
+the record's identity is the data dir served from, whatever else it holds (its
+database removed on purpose, its lock file too); a marker of another identity
+is refused (`otherIdentity`), and so is one that does not read
+(`identityUnreadable`); with no marker, neither file is B651's refusal
+(`dataDirNotThere`), and either file under a record holding an identity is
+refused (`noIdentity`, gap 2), under a record holding none taken up. A record
+that does not read is refused whatever the data dir (`recordUnreadable`): until
+B741 it named nothing, and a fresh data dir in the bare mount point followed
+from a torn or unreadable record exactly as from none. An error other than an
+entry's absence on the way to what the data dir holds is still no refusal:
+serve's preparation, its lock and its store answer it.
+
+*A record written before B741* holds no identity, and its first start takes
+it up, so the supported reset (`rm bridge.db*`, the lock file kept) still
+starts. Gap 2 is closed from the first marker on; what stays open is backlog
+B813.
+
+*The words.* Every cause goes through `dataDirGoneError`, its `cause`, so that
+serve, bridge doctor and the console's doctor, which share `dataDirCheck`, and
+every command `refuseDataDirAway` guards (`dataDirAway` recognises the type,
+whatever the cause) refuse each alike, nothing written. Each first sentence
+names the data dir as its config gives it and says what it is; only B651's
+says it holds neither file, which the others would make false; each ends in
+today's recovery advice (`recovery`: set `dataDir` to where a data dir moved
+on purpose is now; remove the record for one removed on purpose, or for the
+data dir to serve from now), a marker that does not read moved aside first,
+and a record or a marker this user may not read made readable first, by
+serve's account; a command and bridge doctor, which may run as another user
+than the service, are told to run as the user the service runs as, and to
+make it readable by that user if it is not (round 2). bridge doctor says that
+is not checked, a warn, as B659 says of a data dir it may not inspect.
+
+*The doctor's store probes.* The codec probe behind the ALAC and DSD lines,
+sidecar-paths, variants-index and name-collisions, and since round 2 the
+player checklist's proof of the library's paths, open the data dir's
+`bridge.db` wherever it is there, and a store open migrates what it opens.
+B727 left them ungated, since the data dir it refused held no database; a
+data dir B741 refuses can hold one, and both doctors migrated a stray 0-byte
+`bridge.db` in the bare mount point (red: a whole schema written where the
+data-dir line said bridge serve will not start). Where the record refuses the
+data dir, whatever the cause (`dataDirAway`, asked as each doctor builds its
+report), each probe opens nothing and answers `errStoreOfARefusedDataDir`, so
+its line says the store was not read; a database at this version, which no
+open migrates, was read and left as it was before, and is not opened now
+either.
+
+*The note and the end of a refusal.* The note beside the record keeps the
+cause and the identity beside the data dir, so a refusal of the same data dir
+for another cause, or under another identity, is said again; a note written
+before B741 holds neither and is said again once. `dataDirBack` calls a data
+dir back only where it holds, before the preparation, the identity the refusal
+was of (`dataDirEvidence`, read before the preparation and the lock, which
+make no marker), said in a line of its own, `holds its identity again`; a
+refusal whose record held none keeps B727's rule and line. A lock file in the
+bare mount point, with the record removed and the volume still away, ends the
+refusal as no longer applying, never as the data dir back.
+
+*Not taken.* A mount check: B651's reasons stand. Refusing a start over a
+marker or a record serve could not write: the brief's rule that such a write
+never refuses a healthy start. Adopting a record that does not read from a
+marker that does: the marker at the path may be another volume's. The record
+in the data dir, or the identity in bridge.yaml: B651's reasons stand.
+
+*Red first, and the controls.* The tests through serve's real start, both
+doctors and bridge scan were written as files and committed red at main's
+code (each fails as predicted but B651's two refusals and the case-sensitive
+sibling, which pass as controls); the seams (`dataDirRecording`) and the unit
+tests came with the fix. Fifteen negative controls, each predicted by name,
+each turned its tests red, every file restored. The record is in
+`ops/engineering-log.md`, 2026-11-08, B741.
+
+*Round 2: Codex's and the Claude API's reviews of #1441.* Every finding
+was real but one.
+
+The player checklist that `bridge doctor` prints on a box with
+`output.mpd: on` proves the library's paths to MPD from the indexed
+tracks, which it asks for whether MPD answers or not, and its `Tracks`
+opened the data dir's database with no regard to the record: a stray
+0-byte `bridge.db` in the bare mount point was migrated while the data-dir
+line said serve would not start there, and the identity tests, which set
+MPD off, never reached it (Codex P1). The probes and the checklist ask one
+gate, `doctorStoreGate`, at each call, which answers
+`errStoreOfARefusedDataDir`, or `errStoreNotChecked` where this user cannot
+read the record or the marker: the probes' words had said serve refuses
+a healthy data dir that a group member could not read.
+
+A record that is a link to nothing, as a record kept on the volume with a
+link to it beside the config leaves it with the volume away, read as no
+record: `fsutil.OpenAsFile` answers the open of such a link with
+`ENOENT`, and serve took the data dir it found, made it in the bare mount
+point and renamed a fresh record over the link (Codex P2). The record's
+absence is its entry's (`os.Lstat`), and a link to nothing is
+`errLinkToNothing`, which is no `fs.ErrNotExist`.
+
+The marker's write. A marker that does not read, or cannot be inspected,
+at the record's write had serve write the record naming its data dir with
+no identity: dataDir set on purpose to a data dir with a torn marker then
+started once and was refused at every start after, and a marker an EIO
+hid at the write dropped the record's identity, so that the record read as
+one written before B741 (backlog B813; the Claude API, Low 1). Such a
+marker leaves the record as it was,
+and so does every write that would drop or replace the identity the
+record holds of its data dir (a marker gone since the check that cannot be
+written again, one of another identity): the next start is judged as this
+one was. The marker's durability was its writer's alone, so a test saw the
+order of the marker and the record and no sync: dropping both left it
+green (Codex's test gap, confirmed on a copy of 9527b2a0). Its steps are
+seams on the serve instance (`markerDurability`: the staged bytes' sync,
+the rename, the marker's own sync in place and its directory's), recorded
+in order before the record's write; a failure after the rename leaves the
+marker in place and the record without its identity, and the next start
+takes the marker up only once its own sync in place has answered. On
+Windows `fsutil.SyncParentDir` does nothing, so the rename reached the disk
+at NTFS's own flush, and a record on another volume could reach its disk
+first (the Claude API, Low 2): the marker's own sync in place opens it for
+writing and syncs it, `FlushFileBuffers`, which commits its metadata to the
+journal. And the marker was the owner's alone, CreateTemp's 0600 (Low 3):
+it is 0644, since it holds no secret. The record stays 0600, as B651 wrote
+it: a command run as another user that cannot read it is refused, saying to
+run it as the service's user.
+
+Not a defect: the Claude API asked whether a restore keeps the marker, and
+whether the read-only commands open a store. A restore writes a snapshot's
+files in place and no snapshot carries the marker
+(`TestARestoreKeepsTheDataDirsIdentity`, green before and after); `token
+list`, `status`, `cert info` and `logs` open none, and every other store
+open in cmd/bridge is behind `refuseDataDirAway`: the doctor's checklist
+was the one read that opened one. The case-folding finding is scanner.md's
+gap-3 entry. Each fix's tests were red first at 9527b2a0, and sixteen
+negative controls, each predicted by name, turned their tests red. The
+record is in `ops/engineering-log.md`, 2026-11-08, B741 round 2.
+
+*Round 3: the Claude API's review of round 2, Codex's of its PR body, and
+the two reviews of round 3's brief.* Three points, each red first but the
+first, which is wording.
+
+What this change leaves open is named in public records by its backlog id
+alone, B813. Round 1 had written it out, here and in scanner.md's entry,
+their long forms, the identity file's header, two test docs, the runbook
+and the engineering log, and the refusal of a data dir holding no identity
+explained it to the operator in an aside; that refusal says what to do and
+no more (`TestEachRefusalSaysWhatItIsAndHowToGoOn` pins the advice, and no
+aside in any cause's).
+
+The marker's sync in place opened it for writing on every OS, where only
+Windows needs that, its `FlushFileBuffers`: a marker serve may read and not
+write (another user's, as where root owns the data dir and a member of its
+group serves it, or an immutable one) was never synced, so its identity
+was never taken up, every start writing the record without it (red:
+`TestAMarkerThisUserMayNotWriteIsTakenUp`, a 0444 marker under no record
+and under a record written before B741, its sync's open answering EACCES).
+Off Windows the open is `fsutil.OpenAsFile`'s, for reading, which syncs,
+and refuses a named pipe at once where a plain open for reading would wait
+for a writer and hold serve's start (`TestTheMarkersSyncWaitsForNoNamedPipe`);
+on Windows it stays for writing, so a read-only marker there, its attribute
+or an ACL, is still never taken up
+(`TestAReadOnlyMarkerIsNeverTakenUpOnWindows`, CI's Windows leg).
+
+A read of the record that missed, and whose lookup then found an entry,
+answered at once: a regular file with the miss's ENOENT, a link with
+`errLinkToNothing`, though the record may have just been written there
+(serve's first, beside bridge doctor or a command) or a link's target just
+mounted, so the doctor or the command refused the data dir for a record
+that does not read. The entry is read again, once (`readAgain`), and where
+that read misses too, looked up once more: no record only where no entry
+is left, `errLinkToNothing` only where a link still is (red:
+`TestARecordReadThatRacesAWriteReadsAgain`, through steps a parameter of
+`readDataDirRecordWith` takes, never a package variable parallel runs
+race on). Five negative controls, each predicted by name, turned their
+tests red. The record is in `ops/engineering-log.md`, 2026-11-08, B741
+round 3.
 
 ## B653 — each snapshot is verified, its verdicts kept with it and shown; the prune keeps what recovery needs (2026-11-09)
 
