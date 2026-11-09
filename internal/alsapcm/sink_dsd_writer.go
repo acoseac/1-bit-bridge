@@ -37,7 +37,7 @@ func (s *DSDSink) loopNative() {
 			if s.err != nil {
 				e = errNativeActivationCancelled
 			}
-			s.activation.reply <- nativeAnswer{err: s.fenced("native activation", e), kind: answerNeverRan, op: "native activation"}
+			s.activation.reply <- nativeAnswer{err: s.fenced(s.activation.op, e), kind: answerNeverRan, op: s.activation.op}
 			s.activation = nil
 		}
 		if s.releaseCancel != nil {
@@ -130,10 +130,10 @@ func (s *DSDSink) loopNative() {
 					s.active = false
 				}
 				if caused && !terminal {
-					e = s.lifeCancelled("native activation", end)
+					e = s.lifeCancelled(r.op, end)
 				}
 			}
-			r.reply <- replied(e, held)
+			r.reply <- replied(r.op, e, held)
 			s.notify()
 			s.mu.Unlock()
 			if e != nil && !held {
@@ -236,7 +236,7 @@ func (s *DSDSink) activateNative(r *nativeRequest) error {
 		s.params = p
 		s.mu.Unlock()
 	}
-	if e := admit(s.cfg.Check, s.dev, s.dev.Params().Endpoint, "native activation"); e != nil {
+	if e := admit(s.cfg.Check, s.dev, s.dev.Params().Endpoint, r.op); e != nil {
 		if reopened {
 			if ce := s.closeNative(); ce != nil {
 				return errors.Join(ErrReleaseUnconfirmed, e, ce)

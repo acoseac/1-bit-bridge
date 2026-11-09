@@ -43,6 +43,14 @@ var ErrReleaseUnconfirmed = errors.New("native release unconfirmed")
 var ErrActivationFenced = errors.New("native activation fenced")
 
 const nativeReleaseBudget = 2 * time.Second
+
+// nativeEndAfterReply bounds a wait for the writer's end once its answer to
+// a request it never ran is taken: it sends that answer after its close, its
+// last device call, and closes done right after, with no device call
+// between, so a caller that took it reads the completed cleanup's record but
+// where the scheduler has not yet run the writer that far (record, B728 B9
+// round 11).
+const nativeEndAfterReply = 100 * time.Millisecond
 const nativeCloseMargin = 500 * time.Millisecond
 const nativeLedgerMax = 1024
 
@@ -85,6 +93,10 @@ type nativeRequest struct {
 	gen        uint64
 	resume     bool
 	pauseEpoch uint64
+	// op is the command that asked ("native activation", "native resume"),
+	// which every answer and admission the writer builds for the request
+	// names (B728 B9 round 11).
+	op string
 	// reply is the writer's one answer, what it is beside its error
 	// (nativeAnswer), buffered so the writer never waits on its caller.
 	reply chan nativeAnswer
@@ -370,7 +382,7 @@ func (s *DSDSink) Activate(ctx context.Context, gen uint64) error {
 		s.mu.Unlock()
 		return s.settled(refusedAnswer("native activation", e))
 	}
-	r := &nativeRequest{ctx: ctx, gen: gen, reply: make(chan nativeAnswer, 1)}
+	r := &nativeRequest{ctx: ctx, gen: gen, op: "native activation", reply: make(chan nativeAnswer, 1)}
 	s.activation = r
 	s.interrupt()
 	s.mu.Unlock()
@@ -388,7 +400,9 @@ func (s *DSDSink) Activate(ctx context.Context, gen uint64) error {
 // the writer sent read whichever arm won, without waiting where the writer
 // has ended or the budget passed, so no caller, on the life or off it, waits
 // past that deadline, and none is answered by the arm a scheduler picked
-// (verdict, round 10).
+// (verdict, round 10); the reply read after the wait is judged with the
+// record read after it, so a reply the writer sent once the wait was over is
+// judged with what the writer recorded before it (record, round 11).
 func (s *DSDSink) await(ctx context.Context, r *nativeRequest) error {
 	if h := s.seams.awaiting; h != nil {
 		h()
@@ -417,12 +431,12 @@ func (s *DSDSink) await(ctx context.Context, r *nativeRequest) error {
 			return errors.Join(ErrReleaseUnconfirmed, s.err)
 		}
 	}
-	rec := s.endOfLife()
+	s.endOfLife()
 	if h := s.seams.recorded; h != nil {
 		h()
 	}
 	a, _ := sent(r)
-	return verdict(a, rec)
+	return verdict(a, s.record(a))
 }
 
 // sent is the writer's answer to r where it has sent one, read without
@@ -432,7 +446,7 @@ func sent(r *nativeRequest) (nativeAnswer, bool) {
 	case a := <-r.reply:
 		return a, true
 	default:
-		return nativeAnswer{kind: answerNone, op: "native activation"}, false
+		return nativeAnswer{kind: answerNone, op: r.op}, false
 	}
 }
 
@@ -482,9 +496,10 @@ type nativeAnswer struct {
 }
 
 // replied is the writer's answer to a request it ran, e its error, held
-// where the writer holds the refusal for the next resume.
-func replied(e error, held bool) nativeAnswer {
-	a := nativeAnswer{err: e, kind: answerFenced, op: "native activation"}
+// where the writer holds the refusal for the next resume, op the command
+// that asked.
+func replied(op string, e error, held bool) nativeAnswer {
+	a := nativeAnswer{err: e, kind: answerFenced, op: op}
 	switch {
 	case e == nil:
 		a.kind = answerSuccess
@@ -504,7 +519,7 @@ func refusedAnswer(op string, e error) nativeAnswer {
 }
 
 // nativeRecord is what the cleanup recorded once the sink's life has ended
-// (endOfLife): s.err (err), where every failure of the writer and of its
+// (record): s.err (err), where every failure of the writer and of its
 // release is joined, a failed close's with ErrReleaseUnconfirmed, final where
 // the writer has ended (ended) and so far where the release's budget passed
 // first; and the life's end and the endpoint, for that life's typed
@@ -516,18 +531,39 @@ type nativeRecord struct {
 	endpoint Endpoint
 }
 
-// endOfLife is the cleanup's record once the sink's life has ended: the
+// endOfLife is the wait for the cleanup once the sink's life has ended: the
 // life's Immediate release, begun here if no one has, waited for, the
 // writer's end within the release's shared budget, no lock held while it
-// waits; the writer has ended where its end is there once the wait is over,
-// so where its end and the deadline are both there the completed cleanup
-// decides (B728 B9 rounds 9 and 10). cleanupErr holds the closes' failures
-// alone, which CleanupResult reports.
-func (s *DSDSink) endOfLife() nativeRecord {
+// waits (B728 B9 rounds 9 and 10). What the cleanup recorded is read after
+// it, and after the request's answer is read (record).
+func (s *DSDSink) endOfLife() {
 	s.Revoke()
 	select {
 	case <-s.done:
 	case <-s.releaseExpired:
+	}
+}
+
+// record is the cleanup's record as it stands, read after the request's
+// answer a, so it holds whatever the writer recorded before it sent a: the
+// writer has ended where its end is there, so where its end and the deadline
+// are both there the completed cleanup decides; and a request the writer
+// never ran, answered after the writer's close, waits for the writer's end
+// within nativeEndAfterReply first, which comes right after that answer
+// (B728 B9 rounds 10 and 11). No lock is held while it waits. cleanupErr
+// holds the closes' failures alone, which CleanupResult reports.
+func (s *DSDSink) record(a nativeAnswer) nativeRecord {
+	if a.kind == answerNeverRan {
+		select {
+		case <-s.done:
+		default:
+			ticks, stop := s.seams.at(s.seams.now().Add(nativeEndAfterReply))
+			select {
+			case <-s.done:
+			case <-ticks:
+			}
+			stop()
+		}
 	}
 	ended := false
 	select {
@@ -681,15 +717,17 @@ func (f *nativeFailure) Unwrap() []error { return f.parts }
 
 // settled is the answer to a request of Activate, Resume or ActivatePaused
 // answered a, by the writer or at its command's entry: a's error while the
-// sink's life runs; once the life has ended, the verdict's, the cleanup's
-// record awaited (endOfLife; B728 B9 rounds 9 and 10). Pause's and WriteDSD's
+// sink's life runs; once the life has ended, the verdict's, the cleanup
+// awaited and its record read after a (endOfLife, record; B728 B9 rounds 9 to
+// 11). Pause's and WriteDSD's
 // own waits are not settled: they answer their caller's context, and their
 // refusals what is recorded as they answer.
 func (s *DSDSink) settled(a nativeAnswer) error {
 	if s.life.Err() == nil {
 		return a.err
 	}
-	return verdict(a, s.endOfLife())
+	s.endOfLife()
+	return verdict(a, s.record(a))
 }
 
 // abandoned is the answer, while the sink's life runs, to a request whose
@@ -1003,7 +1041,7 @@ func (s *DSDSink) Resume(ctx context.Context) error {
 		s.mu.Unlock()
 		return s.settled(nativeAnswer{kind: answerSuccess, op: "native resume"})
 	}
-	r := &nativeRequest{ctx: ctx, gen: s.generation + 1, resume: true, pauseEpoch: s.pauseEpoch, reply: make(chan nativeAnswer, 1)}
+	r := &nativeRequest{ctx: ctx, gen: s.generation + 1, resume: true, pauseEpoch: s.pauseEpoch, op: "native resume", reply: make(chan nativeAnswer, 1)}
 	s.activation = r
 	s.interrupt()
 	s.mu.Unlock()
@@ -1102,7 +1140,7 @@ func (s *DSDSink) ActivatePaused(ctx context.Context) error {
 		s.mu.Unlock()
 		return s.settled(refusedAnswer("native activation", e))
 	}
-	r := &nativeRequest{ctx: ctx, gen: 1, resume: true, pauseEpoch: s.pauseEpoch, reply: make(chan nativeAnswer, 1)}
+	r := &nativeRequest{ctx: ctx, gen: 1, resume: true, pauseEpoch: s.pauseEpoch, op: "native activation", reply: make(chan nativeAnswer, 1)}
 	s.activation = r
 	s.interrupt()
 	s.mu.Unlock()
