@@ -96,7 +96,7 @@ func TestOnlyAWriteThatInterruptsNeedsTheGoAhead(t *testing.T) {
 	t.Run("a cap above the rate heard", func(t *testing.T) {
 		d, _ := heard(t)
 		before := d.be.Policy()
-		res := d.be.ChooseDSD(bg, choiceReq(t, d, dsdstate.ModeNative, 1, func(r *playback.ChoiceRequest) { r.Choice.MaxBitRate = playbacktest.DSD128 }))
+		res := answer(t, d.choose(choiceReq(t, d, dsdstate.ModeNative, 1, func(r *playback.ChoiceRequest) { r.Choice.MaxBitRate = playbacktest.DSD128 })))
 		wantOutcome(t, res, playback.ChoiceWritten)
 		if res.Policy.Generation != before.Generation+1 {
 			t.Errorf("the cap published generation %d after %d, want the next", res.Policy.Generation, before.Generation)
@@ -106,7 +106,7 @@ func TestOnlyAWriteThatInterruptsNeedsTheGoAhead(t *testing.T) {
 	t.Run("the choice written again, while the successor plays", func(t *testing.T) {
 		d, _ := heard(t)
 		before := d.be.Policy()
-		res := d.be.ChooseDSD(bg, choiceReq(t, d, dsdstate.ModeNative, 1))
+		res := answer(t, d.choose(choiceReq(t, d, dsdstate.ModeNative, 1)))
 		wantOutcome(t, res, playback.ChoiceWritten)
 		if res.Policy.Generation != before.Generation || !reflect.DeepEqual(res.Policy.Tuples, before.Tuples) {
 			t.Errorf("a write that leaves what plays as it was moved the set: generation %d after %d", res.Policy.Generation, before.Generation)
@@ -119,7 +119,7 @@ func TestOnlyAWriteThatInterruptsNeedsTheGoAhead(t *testing.T) {
 	t.Run("a change of what is heard", func(t *testing.T) {
 		d, _ := heard(t)
 		state, writes, published := d.store.State(), d.store.Writes(), d.be.Policy()
-		res := d.be.ChooseDSD(bg, choiceReq(t, d, dsdstate.ModeConvert, 1))
+		res := answer(t, d.choose(choiceReq(t, d, dsdstate.ModeConvert, 1)))
 		wantOutcome(t, res, playback.ChoiceWouldInterrupt)
 		if d.store.Writes() != writes || !reflect.DeepEqual(d.store.State(), state) {
 			t.Errorf("a write refused as would_interrupt changed the state: %+v", d.store.State())
@@ -130,7 +130,7 @@ func TestOnlyAWriteThatInterruptsNeedsTheGoAhead(t *testing.T) {
 		if evs := d.rec.events(); count(evs, "fault", 0) != 0 {
 			t.Fatalf("a refused write stopped what plays: %s", kinds(evs))
 		}
-		res = d.be.ChooseDSD(bg, choiceReq(t, d, dsdstate.ModeConvert, 1, func(r *playback.ChoiceRequest) { r.Interrupt = true }))
+		res = answer(t, d.choose(choiceReq(t, d, dsdstate.ModeConvert, 1, func(r *playback.ChoiceRequest) { r.Interrupt = true })))
 		wantOutcome(t, res, playback.ChoiceWritten)
 		s := d.tickUntilStopped(engine.ReasonFault)
 		if f := s.Faults(); len(f) != 1 || f[0].Reason != "native_revoked" {
@@ -308,44 +308,104 @@ func TestAnOccurrenceBesideAWriteIsNotRevoked(t *testing.T) {
 	})
 }
 
-// TestACaseEndingWithItsWriteParkedLetsItGo (B728 B9 round 13): a case of
-// TestAnOccurrenceBesideAWriteIsNotRevoked's that ends while its write is
-// parked in its seam, as one that fails there ends, lets the write go in its
-// cleanup at once: the case ends, its rig stops as every rig does, and the
-// write is answered. CI's macOS run of that test's first case waited out the
-// package's 30 minutes there (run 42558744822): its cleanup asked the seam's
-// Once, which the parked write held until that cleanup let it go, after. The
-// case runs on a goroutine of this test's, so that a cleanup that waits fails
-// this test within twice the watchdog, past any bound of the cleanup's own,
-// and this test then lets the write go itself, apart from the cleanup, so
-// that the case ends: its cleanup's other waits and its rig's stop are each
-// bounded.
+// TestACaseEndingWithItsWriteParkedLetsItGo (B728 B9 rounds 13 and 14): a
+// case of TestAnOccurrenceBesideAWriteIsNotRevoked's that ends while its
+// write is parked in its seam, as one that fails there ends, lets the write
+// go in its cleanup at once: the case ends, its rig stops as every rig does,
+// and the write is answered. CI's macOS run of that test's first case waited
+// out the package's 30 minutes there (run 42558744822): its cleanup asked the
+// seam's Once, which the parked write held until that cleanup let it go,
+// after. The case runs on a goroutine of this test's, which follows it phase
+// by phase, each within a bound of its own, W the watchdog (round 14: one
+// bound of 2W from the case's start timed its setup and its body as the
+// cleanup's):
+//
+//   - its body, its rig's setup and its write's park, until a mark its
+//     cleanups run first: within the sum of the body's own waits (available,
+//     insert's one ref and reached, W each; newDSDRig waits on nothing else)
+//     and W of margin for its steps that wait on nothing, 4W. A case that ends
+//     before the mark, its rig skipped or its body failed before its write
+//     parked, keeps its skip or its failure;
+//   - the property: the write's gate closed by letGo within W of the mark,
+//     which nothing else closes. Past that this test lets the write go
+//     itself, through park's escape, abort, which no Once guards;
+//   - its shutdown: the rest of its cleanups, its rig's stop, which waits for
+//     the engine's Run and the backend's goroutines, W each (newDSDRig and the
+//     fake kernel register none), within 2W and W of margin, 3W. A case that
+//     has not ended by then cannot be ended, since t.FailNow cannot unblock
+//     its goroutine, so this test panics, naming the phase that holds it.
 func TestACaseEndingWithItsWriteParkedLetsItGo(t *testing.T) {
+	w := alsapcm.Watchdog()
+	bodyBound, shutdownBound := 4*w, 3*w
 	p := newParkedWrite()
 	var res <-chan playback.ChoiceResult
-	ended := make(chan bool, 1)
+	var passed bool
+	marked, done := make(chan struct{}), make(chan struct{})
 	go func() {
-		ended <- t.Run("its write parked after the state's write", func(t *testing.T) {
+		defer close(done)
+		passed = t.Run("its write parked after the state's write", func(t *testing.T) {
 			d := besideAWrite(t, &playback.Seams{ChoiceWritten: func(err error) {
 				if err == nil {
 					p.park()
 				}
 			}})
 			t.Cleanup(p.letGo)
+			// The body's end, registered after letGo so that it runs first.
+			t.Cleanup(func() { close(marked) })
 			res = d.choose(choiceReq(t, d, dsdstate.ModeConvert, 1))
 			p.reached(t, res, "the window between its state's write and its publish")
 			// The case ends here, its write parked, as one that fails here does.
 		})
 	}()
+	closed := func(c <-chan struct{}) bool {
+		select {
+		case <-c:
+			return true
+		default:
+			return false
+		}
+	}
+	aborted := false
+	abort := func() {
+		if !aborted {
+			aborted = true
+			close(p.abort)
+		}
+	}
 	select {
-	case <-ended:
-	case <-time.After(2 * alsapcm.Watchdog()):
+	case <-marked:
+	case <-done:
+	case <-time.After(bodyBound):
 		alsapcm.LogGoroutines(t)
-		t.Errorf("a case that ended with its write parked did not end within %v: its cleanup waits for the parked write", 2*alsapcm.Watchdog())
-		// The write let go apart from letGo, the case's cleanup, in which a
-		// cleanup that waits may wait: out closed through its own Once alone.
-		p.freed.Do(func() { close(p.out) })
-		<-ended
+		t.Errorf("the case's body, its rig's setup and its write's park, did not end within %v, its waits' bounds and one of margin", bodyBound)
+		abort()
+	}
+	if closed(marked) {
+		select {
+		case <-p.out:
+		case <-time.After(w):
+			alsapcm.LogGoroutines(t)
+			t.Errorf("the cleanup letting the parked write go did not within %v of the case's body's end: p.out is still open", w)
+			abort()
+		}
+	}
+	// Ended before its mark, the case keeps its result: its rig skipped, or
+	// its body failed before its write parked.
+	select {
+	case <-done:
+	case <-time.After(shutdownBound):
+		alsapcm.LogGoroutines(t)
+		stuck := "the rig's stop has not returned: the engine's Run or the backend's goroutines, after letGo closed p.out"
+		switch {
+		case !closed(marked):
+			stuck = "the mark was never seen: the case's body has not ended"
+		case !closed(p.out):
+			stuck = "letGo has not returned: p.out is still open, and abort let the write go"
+		}
+		panic(fmt.Sprintf("the case did not end within %v of its write's release: %s; t.FailNow cannot end a case whose goroutine is stuck", shutdownBound, stuck))
+	}
+	if !passed {
+		return
 	}
 	if res == nil {
 		t.Skip("the case's rig did not start, so no write was made: its skip says why")
@@ -381,16 +441,19 @@ func notRevoked(t *testing.T, d *dsdRig, s *engine.Snapshot) {
 // parked, and letGo has a Once of its own, so letting it go asks nothing of
 // the seam (B728 B9 round 13: the first case's cleanup asked the seam's Once
 // first, which the parked write held until that cleanup let it go, after).
+// abort is the write's escape that no Once guards, closed by
+// TestACaseEndingWithItsWriteParkedLetsItGo alone when the cleanup it pins
+// has not let the write go (round 14).
 type parkedWrite struct {
-	parked, freed sync.Once
-	in, out       chan struct{}
+	parked, freed  sync.Once
+	in, out, abort chan struct{}
 }
 
 func newParkedWrite() *parkedWrite {
-	return &parkedWrite{in: make(chan struct{}), out: make(chan struct{})}
+	return &parkedWrite{in: make(chan struct{}), out: make(chan struct{}), abort: make(chan struct{})}
 }
 
-// park is the seam's: its first call parks the write.
+// park is the seam's: its first call parks the write, until letGo or abort.
 func (p *parkedWrite) park() {
 	first := false
 	p.parked.Do(func() {
@@ -398,7 +461,10 @@ func (p *parkedWrite) park() {
 		close(p.in)
 	})
 	if first {
-		<-p.out
+		select {
+		case <-p.out:
+		case <-p.abort:
+		}
 	}
 }
 
