@@ -315,6 +315,7 @@ func TestVerifyBesideTheTickersVerificationOfOneSnapshot(t *testing.T) {
 				select {
 				case <-waiting:
 				case code := <-verified:
+					close(release) // the ticker's park, which the drain would wait on
 					t.Fatalf("--verify returned %d before it waited its turn\n%s%s", code, vout.String(), verr.String())
 				}
 				close(release)
