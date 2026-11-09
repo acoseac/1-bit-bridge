@@ -87719,3 +87719,192 @@ bound is never pruned); `primeLiveState` makes a real store now, so a
 snapshot of it passes the schema check, and the two root-owner tests keep
 the database that predates the ladder (`primePreLadderLiveState`), whose
 restore makes the ladder's and the install marker's locks they count.
+
+### After the record: four more tests, and a seam for a wait
+
+Writing the controls found three refusals no test went red without, each
+given a test since this record was first committed (774e8f34): 1ed70204,
+`TestAStoppedCheckNeverReplacesACompletedVerdict` (a
+verified database and failed files keep both verdicts through a
+verification stopped before it began) and
+`TestABundleThatChangesWhileItIsCheckedFails` (an entry that appears while
+SQLite has the database open fails it, `bundle-changed`); c5f55129,
+`TestACheckThatAnswersAnythingButOkFails`, since `TestADamagedDatabasePageFails`'s
+damage ends SQLite's check in an error and a check that took any answer but
+an error passed it (control A4, below). Its fixture is a NULL in
+`scan_state.v`, a NOT NULL column, written while the schema said otherwise
+(`writable_schema`), which `quick_check` and `integrity_check` both answer
+as the row `NULL value in scan_state.v` with no error (measured 2026-11-09
+with a throwaway probe: a trailing page nothing references, the other
+candidate, both checks answered `ok`). 79f3d52b and d4f9c4cf:
+`TestVerifyBesideTheTickersVerificationOfOneSnapshot` slept 100 ms for
+`--verify` to reach its wait behind the ticker's verification; that wait is
+this process's slot, not the lock file, and a verification that finds the
+slot held now says so through `SetOnSlotWaitForTest` before it waits, which
+the test waits for, failing at once (and letting the ticker's park go
+first) where `--verify` returns before it waited its turn. 02f84ace
+corrects the table's comment on which of its rows main passes, and bd613325
+the page's word for what `quick_check` answers.
+
+The first full `make test` over the five package groups failed in
+cmd/bridge on three of the tree's own sweeps, which no package run of the
+change had reached (0d9142d0 fixes all three, and each sweep red on the
+commit before it is that fix's control):
+`TestJobWritersKeepTheInstallOwner`, because `writeVeto` made its file with
+no owner step, so a `bridge backup --verify` run as root left a root-owned
+0600 veto in a service's snapshot, which the service could not open again
+for its next `VERIFIED` (the veto takes the manifest's owner now through
+`fsutil.KeepOwner`, and one there already, of any owner, is kept, its
+presence alone being the veto); `TestEveryConfigWriterTakesTheConfigLock`,
+because the sweep knows this tree's write helpers by name and the
+snapshot's copies now go through `copyFileHashed` and `writeFromHashed`, so
+it no longer saw `Snapshot` write and called its excuse stale (both are
+listed now, and the excuse holds again); and
+`TestEveryStoreTheBridgeOpensIsItsDataDirsDatabase`, because
+`backuptest.WriteSource` opened a store at the path it was handed (it
+requires that path to be a data dir's database now, and opens it as
+`manifest.DefaultDBPath` of its folder).
+
+### The measurement
+
+One verification of the largest fixture built here: a store of 1,000,000
+synthetic tracks (each with a path, title, artist, album artist, album,
+genre, numbers and a duration; built by `UpsertTrackBatch` in 2 min 10 s),
+whose snapshot's database is 1,601,323,008 bytes (`Snapshot`, the copy and
+its baseline's hash, in 4.5 s; the live file 1,675,710,464). Each verification ran in a process of its own,
+inside the build slot, on legion0 (16 threads, 30 GB, the worktree on an
+ext-family filesystem over LVM: statfs gives the family's magic, which does
+not tell ext4 apart); peak memory is the process's VmHWM, which stood at about 13.6 MB
+before the verification began:
+
+- the default check (`quick_check`) at the production pace, 32 MiB/s: 2 min
+  38 s (157.8 s), VmHWM 24.2 MB, `VERIFIED`, `tracks 1000000`;
+- the same unpaced (`SetVerifyReadRateForTest(0)`): 7.2 s, VmHWM 21.8 MB;
+- `--full` (`integrity_check` and `foreign_key_check`) at the production
+  pace: 2 min 51 s (170.6 s), VmHWM 26.2 MB.
+
+Those are 0d9142d0's; the same three on bd613325, before the veto's owner
+step, gave 157.8 s and 24.9 MB, 7.1 s and 22.5 MB, 170.7 s and 26.4 MB.
+
+At 32 MiB/s the hash alone takes 47.7 s of that by arithmetic; the rest is
+SQLite's reads through the same pacer (the check, the schema's reads and
+the core tables' counts), not measured apart. Memory hardly grows with the
+database: the 32 MB database of a 20,000-track trial peaked at 22 MB at the
+same pace, with SQLite's default page cache and the hash reading 1 MiB at a
+time.
+
+### The reds at main
+
+On a copy of main (`git archive 3d0a0d05`) with the new tests in it.
+`TestThePruneKeepsWhatRecoveryNeeds` builds on main as it is and fails seven
+of its nine rows (main kept the `keep` newest and nothing else: `kept
+[bundle-00], want [bundle-00 bundle-01]` for keep 1 over FAILED, VERIFIED,
+VERIFIED, legacy); the two it passes, retention off and keep 1 over verified
+snapshots alone, are the halves the rule leaves as they were. Every other
+new test names what main does not have, so a scratch shim, never committed,
+gave main the names and none of the behaviour: HEAD's `verify.go`,
+`words.go` and `status.go` (types, constants and words nothing at main calls
+but the tests), the test seams as variables nothing reads, `VerifySnapshot`
+verifying nothing, `SnapshotAndVerify` and `Finish` as main's callers did
+(the snapshot, then the prune), the manifest's, the listing's and the
+prune's new fields set by nothing, the console's payload fields set by
+nothing, `WaitForBackupJobs` waiting for nothing (main's create ran no job),
+`doctor.BackupChecks` saying nothing and `Deps.Backups` set by nothing, and
+`backupCmdContext` main's `backupCmd`. On it every new test fails, each run
+alone under a timeout of its own: internal/backup's 25 (`0 baselines for 5
+files`; `VerifySnapshot recorded nothing`; a stopped verification
+`answered <nil>, want the stop`; `TestAStopWithABlockedSyncReturnsWithinItsBound`
+by its deadline, the sync it holds never reached), cmd/bridge's 7 (the
+startup skip's `skip = true (err <nil>), want false`, main skipping for a
+recent snapshot whose database is not verified; `run 0: exit 0`, `bridge
+backup` exiting 0 over a database that fails its check; `--verify --full =
+2`, a flag main does not have; `TestVerifyBesideTheTickersVerificationOfOneSnapshot`
+by its deadline, at a park main never reaches) and internal/admin's 5 (the
+create answering `snapshotDir`, a path; the API's database verdict `""`;
+`TestACancelledCreateRequestLeavesTheVerdictToCome` by its deadline).
+`TestTheLadderSchemaIsTheLadders` pins a generated file main does not have,
+and is no red.
+
+### Negative controls
+
+Each mutates one site of the committed tree, runs the tests named, and puts
+the committed bytes back, compared with HEAD's blob before each mutation and
+after each restore (a runner in a scratch folder; the predictions written
+to a file before the first run). All 31 went red:
+
+- the check's refusals: the sidecar refusal removed (A1: `a -wal beside the
+  database: database VERIFIED`); the database's not-regular refusal removed
+  (A2: a link at the database FAILS by its size instead, `size-mismatch`,
+  want `not-regular`); `immutable=1` dropped (A3: through the one-file VFS
+  the WAL-headed database's check answers `quick-check`, want `VERIFIED`);
+  quick_check's answer taken whatever it says but an error (A4: green on
+  `TestADamagedDatabasePageFails` alone, and red on the test written for
+  it, `a NULL where the schema says NOT NULL: database VERIFIED`); the
+  database's hash not compared (A5: the damage is then quick_check's,
+  `quick-check`, want `hash-mismatch`); a newer `user_version` taken (A6);
+  a missing table taken (A7); the other files' hash not compared (A8); the
+  bundle not compared after the close (A9); a legacy manifest read as
+  verified (A10); the check's thread not lowered (A11: `nice 0, want 19`);
+  the reads not paced (A12: 626,825 bytes at 1 MiB/s in 19 ms). A4 and A5
+  first deleted a variable's only use and did not build; each was rewritten
+  to keep it read.
+- the record, the lock and the prune: no veto before the rename (B1) and
+  the veto not read (B2), each `List's reading: database VERIFIED, want
+  INCOMPLETE "unsynced"`; a quick `VERIFIED` replacing a full one (B3); an
+  `INCOMPLETE` replacing anything (B4); a stale `PENDING` read as under way
+  (B5); the newest verified snapshot not kept (B6), a young `PENDING` not
+  kept (B7), no evidence kept (B8); the prune taking no lock (B9) and a
+  verification taking none (B10), each a prune beside a held verification
+  that did not skip; a stopped write waited for whatever it takes (B11:
+  `Finish did not return after the stop while its write was held in a
+  sync`); the newest verified read off both verdicts (B12).
+- the callers and the readers: the startup snapshot skipped for any recent
+  snapshot (C1); `bridge backup` exiting 0 for an unverified snapshot (C2);
+  no prune after a verdict that does not pass (C3: `four failed snapshots at
+  --keep 2 left 4, want 2`, through `bridge backup` and the console's
+  create); the console verifying on the request's context (C4: by the
+  test's deadline, the handler parked in the check the test lets go only
+  once the create has answered); the create naming the snapshot's path
+  (C5); the API's database verdict the files' (C6); and no slot, this
+  process's verifications beside each other (D1: `--verify returned 1
+  before it waited its turn`, busy on the lock the parked ticker holds).
+- and the three sweeps 0d9142d0 answers, each red on bd613325, the tree
+  before its fix (the full `make test` above).
+
+### The gates
+
+On 0d9142d0, go1.27.3, each run inside the build slot (`buildslot.py b653`,
+22 and 35 minutes in its queue):
+
+- `make test TEST_PKGS='./internal/backup/... ./internal/doctor/...
+  ./internal/admin/... ./internal/atomicwrite/... ./cmd/bridge/...'` with
+  `TMPDIR` on disk (under the worktree's `.tmp`), the race detector, `-p 4`,
+  `-timeout 30m`: ok, internal/backup 380.5 s, internal/doctor 6.8 s,
+  internal/admin 1036.0 s, internal/atomicwrite 20.0 s, cmd/bridge 1294.3 s
+  (backuptest has no tests). The run before it, on bd613325, failed on the
+  three sweeps above, every package else ok.
+- the 38 new tests by name, `-race -count=1`: all pass (internal/backup
+  66.4 s, internal/manifest 8.4 s, internal/admin 23.0 s, cmd/bridge 20.5
+  s), the Linux priority check among them reading the thread's nice value
+  as 19.
+- `make vet`, `GOOS=linux GOARCH=386 make vet`, and `go vet` of the six
+  package trees the branch touches for windows and darwin: nothing
+  reported. `make build-all`: the six targets built, the build-site census
+  first (`check-build-tags`: OK).
+- the pinned gofmt (`go run cmd/gofmt -l`) over every Go file the branch
+  changed: nothing listed.
+- `rules-b653.patch` applied to a copy of HEAD: `make docs-check` passes
+  there (cli-serve.md 56,946 bytes, admin-console.md 87,262, scanner.md
+  40,291; the worst load 67.7%), the census passes there, every test name
+  it cites is declared, and `rules-for.py` names scanner.md for
+  `internal/manifest/ladder_schema*.go`.
+
+### Follow-ups
+
+The backlog file is not on legion0, so these go to the PR's report: a
+restore reads no snapshot's verdict yet (the next two PRs' ground); no test
+runs `bridge backup --verify` in a process of its own beside serve's
+verification, the cross-process lock being pinned through the pruner and
+`--verify`'s busy answer; and a verification queued behind more than two
+others in one process can outlast `PendingBound`, its snapshot then read as
+interrupted until its verdict is written.
