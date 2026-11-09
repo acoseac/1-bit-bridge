@@ -38,13 +38,11 @@ type DisarmResult struct {
 	Counted bool
 	// CountTried is the count the admission tried to write, 0 where it did
 	// not try one. A start that tried takes its count back when it ends
-	// cleanly (TakeBackFailedStart), whether or not its write answered,
-	// since SaveState publishes the marker before its barrier can fail.
+	// cleanly (TakeBackFailedStart; backlog B760).
 	CountTried int
-	// CountMissed is why the count was not written, where the count was the
-	// admission's only write (its lock not taken, or its save failed): a line
-	// for the caller to say, never a refusal, since a missed count errs
-	// toward not rolling back.
+	// CountMissed is the line the caller says where the count was the
+	// admission's only write and its lock was not taken or its save answered
+	// an error (backlog B760).
 	CountMissed error
 	// Permit is serve's admission's permission to migrate the store at its
 	// own start (MigrationPermit), the zero value but from AdmitBoot.
@@ -52,8 +50,10 @@ type DisarmResult struct {
 	// Start is the counted start's hold on its own lock, whose token the
 	// count's write carried (StartHold, State.RunningStart; backlog B660's
 	// third round): nil where the admission counted nothing, or could not
-	// take one, which leaves the start read as not running. The start lets
-	// go of it as it returns, once its token is cleared (EndStart).
+	// take one, which leaves the start read as not running. It is kept where
+	// the count was the admission's only write and that write failed
+	// (CountMissed; backlog B760). The start lets go of it as it returns, once
+	// its token is cleared (EndStart).
 	Start *StartHold
 	// State is the marker as the disarm left it: as it wrote it, or as it
 	// read it where it wrote nothing.
@@ -159,9 +159,8 @@ func MigrationVetoed(st State, current string) bool {
 // a crash, a kill or a panic leaves it, and ProbationFailedStarts of them roll
 // the install back at the next start where CrashRollback allows it. Where the
 // count is all it has to write, the barrier still runs first and still
-// refuses, and the count's own write failing, or its lock not taken, is a
-// line for the caller (CountMissed), never a refusal: a missed count errs
-// toward not rolling back. A crash before the admission is not counted: a
+// refuses; the count's own write failing, or its lock not taken, is
+// CountMissed's (backlog B760). A crash before the admission is not counted: a
 // candidate that never runs is what the settings check before the swap sees
 // (CheckConfig), and a start refused for its settings has the early
 // rollback (EarlyRollback).
@@ -272,9 +271,8 @@ func migrationHeldError(why string) error {
 // write, after the barrier; it refuses where it would record over an armed
 // install, record a migration begun, lift a veto of current's migrations, or
 // remove a marker it cannot read, and a migration refuses under that veto as
-// it does with the lock. An admission's count is the one write it goes on
-// without: a line (CountMissed), since a missed count errs toward not rolling
-// back.
+// it does with the lock. An admission's count without the lock is
+// CountMissed's (backlog B760).
 func disarmUnlocked(dataDir, current string, migrating bool, gate migrationGate, lockErr error) (DisarmResult, error) {
 	st, err := LoadState(dataDir)
 	held := ""
@@ -303,7 +301,7 @@ func disarmUnlocked(dataDir, current string, migrating bool, gate migrationGate,
 	}
 	res := DisarmResult{State: st}
 	if !migrating && countsStart(st, current) {
-		res.CountMissed = fmt.Errorf("this start of %s was not counted against its install, since the install marker's lock cannot be taken: %w",
+		res.CountMissed = fmt.Errorf("the install marker's lock was not taken for the count of this start of %s: %w",
 			current, lockErr)
 	}
 	return res, nil
@@ -365,7 +363,7 @@ func disarmHeld(dataDir, current string, save func(dataDir string, st State) err
 		if !count {
 			return DisarmResult{State: st}, nil
 		}
-		// The count alone: its failure is a line, never a refusal.
+		// The count alone (backlog B760).
 		next := st
 		next.FailedStarts++
 		next.NotReady = false
@@ -374,8 +372,11 @@ func disarmHeld(dataDir, current string, save func(dataDir string, st State) err
 		callBeforeDisarmRecord(dataDir)
 		res := DisarmResult{CountTried: next.FailedStarts, State: st}
 		if err := save(dataDir, next); err != nil {
-			hold.Release()
-			res.CountMissed = fmt.Errorf("this start of %s was not counted against its install: %w", current, markerIOError{err})
+			// The start keeps its hold, and clears its token as it returns
+			// (backlog B760; until then the hold went here).
+			res.CountMissed = fmt.Errorf("the install marker's write of the count of this start of %s answered an error: %w",
+				current, markerIOError{err})
+			res.Start = hold
 			return res, nil
 		}
 		res.Counted, res.State, res.Start = true, next, hold

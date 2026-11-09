@@ -303,7 +303,7 @@ func TestBridgeDoctorCountsOnlyAPhoneThatUsedItsToken(t *testing.T) {
 	cfg := &config.Config{DataDir: data, ListenAddress: "127.0.0.1:0", Output: config.OutputConfig{MPD: "on", LoopbackPort: &none}}
 	phone := func() doctor.Check {
 		t.Helper()
-		checks := doctorOutputChecklist(cfg, linuxBoxSeam(data))(context.Background())
+		checks := doctorOutputChecklist("", cfg, linuxBoxSeam(data))(context.Background())
 		return findCheck(t, doctor.Report{Checks: checks}, "phone")
 	}
 	if p := phone(); p.Status != doctor.Warn || !strings.Contains(p.Summary, "1 device token is issued, but no phone uses it") {
@@ -402,7 +402,7 @@ func TestBridgeDoctorSaysTheLoopbackRouteIsNotServing(t *testing.T) {
 		ListenAddress: "127.0.0.1:0",
 		Output:        config.OutputConfig{MPD: "on", LoopbackPort: &port},
 	}
-	checks := doctorOutputChecklist(cfg, linuxBoxSeam(music))(context.Background())
+	checks := doctorOutputChecklist("", cfg, linuxBoxSeam(music))(context.Background())
 	line := findCheck(t, doctor.Report{Checks: checks}, "music")
 	if line.Status != doctor.Fail || !strings.Contains(line.Summary, "answers but is not serving") ||
 		!strings.Contains(line.Hint, "Restart the bridge") {
@@ -449,7 +449,7 @@ func TestBridgeDoctorPrintsThePlayerChecklist(t *testing.T) {
 	if d.OutputChecklist == nil {
 		t.Fatal("bridge doctor does not ask for the player checklist")
 	}
-	d.OutputChecklist = doctorOutputChecklist(mustLoadConfig(t, path), linuxBoxSeam(music))
+	d.OutputChecklist = doctorOutputChecklist(path, mustLoadConfig(t, path), linuxBoxSeam(music))
 	report := doctor.Run(context.Background(), d)
 	for _, want := range []struct {
 		name    string
@@ -469,7 +469,7 @@ func TestBridgeDoctorPrintsThePlayerChecklist(t *testing.T) {
 // here one off Linux, prints no checklist.
 func TestBridgeDoctorPrintsNoChecklistOffAPlayer(t *testing.T) {
 	path, _ := writePlayerConfig(t)
-	off := doctorOutputChecklist(mustLoadConfig(t, path), func(c *api.LocalOutputsConfig) { c.GOOS = "darwin" })
+	off := doctorOutputChecklist(path, mustLoadConfig(t, path), func(c *api.LocalOutputsConfig) { c.GOOS = "darwin" })
 	if lines := off(context.Background()); len(lines) != 0 {
 		t.Fatalf("a bridge off Linux printed %d checklist lines", len(lines))
 	}
@@ -482,7 +482,7 @@ func TestBridgeDoctorCallsAPlayerWithNoLibraryReady(t *testing.T) {
 	path, _ := writePlayerConfig(t)
 	cfg := mustLoadConfig(t, path)
 	cfg.LibraryRoots = nil
-	checks := doctorOutputChecklist(cfg, linuxBoxSeam(""))(context.Background())
+	checks := doctorOutputChecklist(path, cfg, linuxBoxSeam(""))(context.Background())
 	music := findCheck(t, doctor.Report{Checks: checks}, "music")
 	if music.Status != doctor.OK || music.Summary != "Ready: can play music from another bridge or NAS" || music.Hint != "" {
 		t.Fatalf("music line of a player with no library: %+v", music)

@@ -909,14 +909,18 @@ reached.
   as soon as it arrives once the start has answered as ready, so a stop the
   service manager has to finish with SIGKILL (past systemd's
   `TimeoutStopSec`, launchd's `ExitTimeOut`) is taken back already, and a
-  crash in the teardown after it is not counted. Before the start has
+  panic of serve's own in the teardown after it asks to count the start
+  again: an `updater:` line says so where it was counted again or could
+  not be, and there is none where the take-back's write never landed (the
+  start still counted) (backlog B760). Before
+  the start has
   answered, a stop takes it back only once its teardown has run: a version
   that hangs before it is ready, which the service manager stops and then
   kills, counts, and the third such start's successor tries the rollback
   below (by hand with real builds: three hung starts, each killed three
-  seconds after its SIGTERM, then exit 75 and 0.2.3 back). The cost, taken
-  on purpose: a slow but healthy start killed in a slow teardown before it
-  was ready counts too. Whether an end is a stop is asked of the stop itself
+  seconds after its SIGTERM, then exit 75 and 0.2.3 back). A slow but
+  healthy start killed in a slow teardown before it was ready is backlog
+  B760's. Whether an end is a stop is asked of the stop itself
   once the teardown has run, so a stop followed at once by an error (a TLS
   pair that will not load) is a stop. An API or console address another
   process holds, one the host does not have (a static address not up yet
@@ -932,10 +936,10 @@ reached.
   the take-back together, inside the SCM's 15 s (the updater's wait for a
   service to stop), launchd's 20 s and systemd's 90 s, neither of which the
   plist or the unit changes, a take-back begun once a teardown longer than
-  that has run asking for 2 s more, never past 14 s from the stop's arrival;
-  one that never has it leaves the count
-  (`updater: this start ended cleanly and its count … was not taken back
-  within 10s …`). Once one start has not ended cleanly,
+  that has run asking for 2 s more, never past 14 s from the stop's arrival,
+  and one with no answer says so and where to look (`updater: this start
+  ended cleanly, and the take-back of its count … had no answer within 10s
+  …; run bridge doctor, …`; backlog B760). Once one start has not ended cleanly,
   each start after it says how many came before it. A start that ends before
   it counts itself (its settings refused, say) is not counted: the early
   rollback above answers that case.
@@ -1030,9 +1034,9 @@ reached.
   `.bak` still carries them (`updater: the backup beside this binary carries
   file capabilities this binary does not …`), so three such starts put `.bak`
   back. Run `setcap` on the new binary after such an update, or update with
-  `sudo bridge update`. An SELinux label set by hand (`chcon`) is not carried
-  either: the new binary takes the label the policy gives a new file in its
-  directory (`restorecon`'s; backlog B760).
+  `sudo bridge update`. On an SELinux host whose policy labels the binary,
+  run `restorecon` on it after an update. What else an update does not carry
+  is backlog B760's.
 
 **A data dir whose filesystem cannot fsync a directory.** Linux's NFS and
 CIFS/SMB clients treat a directory's fsync as a successful no-op, and its
@@ -1118,9 +1122,9 @@ bridge does about it:
   not refused, and the volume, once mounted, hides it (backlog B776, item 7):
   before the first upload into a root nothing has been indexed under, check
   that its volume is mounted.
-- **The data dir on that volume.** From the second start of that release,
-  serve keeps a record of the data dir it opened its database in, beside the
-  config: `.bridge.yaml.datadir`. A start that finds that data dir holding
+- **The data dir on that volume.** From that release, serve keeps a record
+  of the data dir it opened its database in, beside the config:
+  `.bridge.yaml.datadir`. A start that finds that data dir holding
   neither `bridge.db` nor `server.lock` refuses before it makes or writes
   anything there (no new TLS pair, no empty token store): `serve: the data
   directory … held this bridge's database, and holds neither bridge.db nor
@@ -1153,6 +1157,25 @@ bridge does about it:
   reset) still starts and makes a new database. A system unit can order the start after
   the mount instead (`RequiresMountsFor=<mount point>` in a drop-in); a user
   unit cannot, its manager not seeing the system's mount units.
+  **From the release that carries B741 the data dir has an identity**: a
+  random id serve writes into the data dir, `data-dir-id.json`, and into the
+  record, the marker first. A start refuses a data dir the record names
+  that holds `server.lock` or `bridge.db` and not that identity (`the data
+  directory … holds server.lock but not the identity of the data directory
+  this bridge served from (data-dir-id.json): …`: a start or a command made
+  those in the bare mount point once, which B651 took for the data dir), one
+  holding another data dir's identity (another volume mounted there), and a
+  record or a marker that does not read (a record that is a link to nothing
+  among them); each says how to go on, and the doctor and every command
+  refuse the same. Leave `data-dir-id.json` where it is, and move it with the
+  data dir. The marker is readable by everyone who can reach the data dir,
+  and the record by its owner alone: run a command as the user the service
+  runs as, since one run as another user that cannot read either refuses,
+  saying so, and `bridge doctor` says the data dir is not checked and opens
+  no database there. A data dir refused for holding no identity that is the
+  one to serve from, its volume mounted: remove `.bridge.yaml.datadir` and
+  start again, and serve takes it as its own. What stays open is backlog
+  B813.
 - **The variants directory on that volume.** Since B727 a render (the
   console's, a download's, the auto-optimize sweep's, `bridge upscale`,
   `optimize` and `render`) writes nothing into a variants directory that is
