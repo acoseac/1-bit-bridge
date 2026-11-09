@@ -91347,3 +91347,193 @@ subtest passing 200 times, none skipped (1322 s); `TestEveryCitedTestNameExists`
 qualification check at the head. The rules patch applied to a disposable copy of the final head
 passed `make docs-check` and those guards with `TestQualificationRunbookVersion`. Windows was not
 run here; the rig skips there as before.
+
+## 2026-11-09 — B728 B9 round 18: the converted window reads the write pending before the set published; a lost reconciliation is the next refresh's
+
+Worker b728-b9, legion0 (Ubuntu 26.04, Linux 7.0, Go 1.27.3, 16 cores), branch
+`feat/b728-b9-choice` at a4028a40 (round 17, its rules applied). The brief, round 17's two
+reviews (Codex: the window decided between a publish and its unregister, the late step's wait,
+the case's header; Claude: the late step's wait, the header and the boundary case, the version
+58 record), and the two reviews of the brief's draft, folded into it. Commits: bcf3e230 (the
+fix and its tests), 0f9d5a1a (qualification 59, version 58's record corrected), 704cd0e3 (a
+lost reconciliation run once more, not by every refresh), 0892b9bf (the case's header says so),
+c19fef35 (a resume whose last entry is refused may be superseded by the queue's end) and this
+record. The rules are a patch the orchestrator applies (`rules-b728-b9-r18.patch`): `output.md`'s
+second B9 line and its long form, and a bullet in `build-ci-tests.md`.
+
+**Point 1, the order confirmed.** `chooseDSD` stores its pending set (`b.pending.Store`)
+before it classifies what the set would interrupt and writes the state; `refreshDSD` then
+publishes (`b.dsd.Store`, no session's lock), runs the `Published` seam and reconciles every
+session under that session's lock; only then does `settleChoice` let the pending go
+(`CompareAndSwap`, `close(done)`), and a panic's deferred settle lets it go with nothing
+reconciled. `holdLocked` read the set published first (its settled check) and the write pending
+after it (`pendingFor`, which read the set again), and `unjudgedLocked` read the set a third
+time: a decision whose first read came before the publish and whose second came after found the
+write's set the one published and nothing pending, the write registered still or let go by a
+panic, and continued a's chain into f's bits above the floor.
+
+**The fix, by order.** `holdLocked` reads the write pending first and the set published once
+after it, for the settled check, the write's change and the verdict's wait (`unjudgedAt`). A
+publish before the second read leaves f admitted under the set it replaced, and the verdict is
+waited for; a write registered before the first read is waited for; one registered after it
+classifies only once the decision has let the session's lock go, and publishes after the
+decision. Making the publish and the unregister atomic with respect to `s.mu` was not taken: the
+publish would take every session's lock under the refreshes', for one reader. `next()`, the
+transition and the resume already ask `pendingFor` (the registry, then the set) before
+`unjudgedLocked` (the set after).
+
+**A publish after the decision, the accepted order.** A decision made before the write
+registered continues a's chain with nothing pending; the write classifies the decided window
+(f's bits in a's window interrupt, the go-ahead given), publishes, and its reconciliation finds
+a's frames the kernel's at the rate the write takes away and revokes the session's DSD
+(`policy.Reconcile`'s Revoke for an occurrence with frames written): Revoke stops the session,
+`native_revoked`, the window decided, CI's symptom from a decision made before the write. No cut
+through the window (`windowCutLocked`) is needed for it, and none stops the sound: the
+revocation does, at once. `the write settling first` tells the two apart: its write registers
+before the window's first decision and the DAC plays nothing, and its judgement reads, from the
+marks the seams leave, whether the decision's first read came after the write's pending window
+(a read the write's publish made stale) or before it (the accepted order, which the case does
+not give). Controls K10 and K11, below, show each branch of that judgement.
+
+**CI's red, explained.** CI's red on round 16's head (run 42619003055) was `the write settling
+first`: a's window decided, the session's one fault `native_revoked`. Round 17's record ruled out
+every branch but one it had not considered: a decision whose reads straddle the write's publish,
+which round 16's `holdLocked` allowed as round 17's did, the same lines in the same order. In
+that case nothing else decides a's window above the floor before the reconciliation (round 17's
+record: the floor never comes, the end named after a waits for the refreshes' lock through
+Revoke). Forced at round 16's head and at round 17's, the straddle gives CI's decision; with the
+fix it waits for the verdict. So the fix explains CI's red. What put the producer's evaluation
+across the publish on CI, a wake the reporter left while the producer was held at the window
+point or another, CI's log cannot show.
+
+**The reds** (`r18-red.predictions.txt`, written first; `reds_r18.py`, each a copy with round
+18's tests of `internal/alsapcm`, `Seams.Deciding` and `Seams.Admitting` names-only shims,
+`deciding()` placed after the old decision's first read). At round 17's head: the publish
+between the decision's reads, 'a's window was decided above the floor with the write's publish
+between its reads, its reconciliation held: a decision from a read the write's publish made
+stale'; the panic at the publish between them, the same; the panic at the publish then the
+monitor's unchanged refresh, 'waited 5s for playback to stop: fault'; the five other converted
+cases and every gapless case passed. At round 16's head (`Seams.Unjudged` shimmed too): both
+straddles decided, as CI did; the panic's case and the reconciliation held above the floor at
+their verdict waits, which round 16 had not. And round 17's late-step branch, given a reporter's
+step once the floor's measurement is established and the drain it begins: 'waited 5s for the
+writer back on the DAC, the measurement at a's last frames established' (Claude's finding).
+Every prediction held.
+
+**Point 2, the late step proven taken.** `toFloor` holds the producer at its wait
+(`producerHold.holdWait`, on `Seams.ProducerStep`) from before the floor's measurement is let go
+until the case lets it go: a reporter's step that comes meanwhile, one `tickWithin`'s second
+send began late included, leaves a wake and drains nothing. With `lateStep` the case sends one
+tick once the measurement is established, lets the producer go and waits for the drain before
+its look; without, it looks first and lets the producer go after. The look waits for the writer
+back on the DAC or the drain, and asserts the arm its order gives. A seam holding the reporter was
+written first and taken out before it ran: a wake that a step before the hold left could still
+have the producer read the floor. K5 (the late tick removed: the late-step case fails at the
+drain's wait), K6 (the
+producer let go after a tick before the look: the five cases without the late step fail at the
+look) and K7 (a step forced once the measurement is established, in every case: all pass) show
+it.
+
+**Point 3, the case says what it pins.** The header now follows the History: no fault from the
+reconciliation's own step (tried in round 17 and taken out), CI's branch not found by round 17.
+`Seams.Admitting` runs at `admitDSD`'s entry, before it reads the set or takes the refreshes'
+lock; the boundary case waits for the replacement's admission to begin while the revocation is
+held, takes one reporter step, and finds a's window undecided, no end named after a and the
+replacement's open not ended. It guards an ordering, and says so; with the admission's wait for
+the refreshes' lock removed (K4) it failed 20 times in 20, the replacement's open ended while the
+revocation was held, twice with a's window decided too.
+
+**Point 4.** Version 58's record named one change to what plays. It now names `next()`'s too: a
+gapless successor, native, DoP or converted (a converted one's transport is PCM), admitted under
+the set a publish replaced, was held out of the sink it would join with no floor until the
+reconciliation woke the producer, and now waits only above the floor, the sink draining there
+for its own transport, after any refresh's publish and not only a choice's write; and,
+separately, a converted window waiting for that verdict ends at the floor zero-padded, its
+successor abutting in the same sink where the transport is the same. Version 59 records round 18.
+
+**Point 5, a write that never settles.** Confirmed in the code: `next()` rejects a dropped
+successor (`toWriteLocked` skips it) and a stale one (`if o.stale`) before its gapless guard; the
+reporter wakes the producer at each of its steps while it holds a converted window
+(`holdingLocked`) or a successor out of its sink (`awaitingWrite`), whatever channel the wait is
+on, `waitWake` selecting on the wake beside it (K9a and K9b, below); `reconcileDSD` has no early
+return and closes `judged` in its step, and Revoke's only early return is a session the backend
+no longer knows, whose waits end with its context. A refresh that published and panicked before
+its reconciliation left its set unjudged, and the next refresh, finding the set the same,
+returned: the case of a panic at `Published` then the monitor's unchanged refresh ended only at
+the floor or the session's end at round 17's head. Now it ends in recovery: the backend keeps the
+set its last reconciliation that returned judged by (`dsdJudged`, under the refreshes' lock), the
+monitor's refresh reconciles the set it finds the same once more when it is not that one, and the
+session's DSD is revoked, a real verdict, `judged` closed only by a reconciliation or Revoke. As
+bcf3e230 had it, that run once more was recorded only once it returned, so a reconciliation that
+panicked every time (a hand-off or Revoke that panics) ran again at every refresh after it, every
+new session's first admission among them; 704cd0e3 records the set before the run once more, so
+one that panics again gets no third (`TestALostReconciliationIsTriedOnceMore`: the publish's
+reconciliation and one more, two hand-offs, then nothing). The bound,
+where neither `judged` nor `pend.done` closes (the write held at its pending window; the write
+held between its publish and its reconciliation): the window ends, zero-padded, at the first
+reporter step after the sink's measurement shows the floor, one tick within `alsapcm.Ordered`; in
+production within one sink measurement (about a hardware period) and one `MeasureEvery` (50 ms)
+of the lookahead reaching `windowFloor` (100 ms).
+
+**Controls** (`r18-controls.predictions.txt`, written first; `controls_r18.py`, each mutation's
+bytes restored from memory, `-watchdog 20s`). K1, the set read before the write pending: both
+straddles decided ('a decision from a read the write's publish made stale'). K2, no
+reconciliation of a set found the same: the two panic cases failed at 'waited 5s for playback to
+stop: fault'; K2p, the same in `TestAWriteThatPanicsLeavesNothingPending`: 'the refresh after the
+panic left the set published unreconciled'. K3, `dsdJudged` not recorded after a normal
+reconciliation: the two cases before the publish failed ('before the next refresh, the set
+published reconciled false, want true'), the one after its state's write also at the refresh that
+publishes it. K4 above. K5 to K7 above. K8a and K8b, the window's verdict wait and its write wait
+taken before the floor's check: each floor case failed at 'waited 5s for a's window ended at the
+first reporter step after the floor's measurement'. K9a, no wake for a held window: the floor
+cases and the straddles failed (the above-floor case earlier, at its verdict wait); K9b, no wake
+for a successor out of its sink: every gapless case through `toFloor` failed at its first held
+wait. K10, the straddle forced in `the write settling first` on K1's code: 'from a read made once
+the write had registered: a decision from a read the write's publish made stale'. K11, the
+accepted order judged as the other cases are: 'from a read made before the write registered,
+which the case's order does not give'. K12, the run once more recorded after it returns: 'the
+refreshes panicked [true true true], want [true true false]', three hand-offs; K13, the
+publish's own reconciliation recorded before it runs: '[true false false]', one. K2, K2p and K3
+were run again on 704cd0e3, with the same results. Every prediction held, but for two details:
+K3 failed its second case at the refresh that publishes the written state too, and K9a the
+above-floor case at its verdict wait, before the floor.
+
+**The loaded soak's find.** `TestAResumeBetweenTransportsWaitsForTheReconciliationsVerdict`
+(round 17's) failed once in 200 at GOMAXPROCS=3 beside 20 busy processes: the resume answered
+'superseded: replaced before playback resumed: the last entry played out'. Once the
+reconciliation hands b off again, its replacement is refused under the cap and skipped, the queue
+ends, and the backend's Finished can reach the engine before its Resume's answer: the engine then
+answers the resume under way superseded by that end (`releaseSession`), as it is built to; the
+other 199 runs had the answer first, and the case asserted that order alone. c19fef35 lets the two
+resume cases whose last entry is refused accept that answer beside nil, and nothing else
+(`resumeOrEnd`), and the rig can hold a Resume's answer short of the engine
+(`holdNextResumeAnswer`). K14, that order forced (the answer held until the engine stopped): the
+case passes; with round 17's `resumeIn`, 'the resume: player: play: superseded: replaced before
+playback resumed: the last entry played out', the soak's failure.
+
+**The gates**, at legion0, through the build slot. A first session on 0f9d5a1a passed every step
+as predicted; 704cd0e3 changed production after it, and its edit sat in the tree for some minutes
+of that session's race run before it was set aside, so the gate of record is the second, on
+0892b9bf with the record in the tree: `make fmt` changed nothing; `make vet` passed for
+linux/amd64, `GOOS=windows`, `GOOS=darwin` and `GOOS=linux GOARCH=386`; `go test -race` on
+`./internal/alsapcm/...`, `./internal/player/...` and `./cmd/bridge/...` passed (1422 s); CI's two
+native-integration runs passed under the overlay, every name CI requires among them; and the
+qualification check passed at 59 against the merge base of each main ref, 9d59c8f6, 0fd7e3f8,
+7c1db6dd, 3d0a0d05 and 71f707ab, and against round 17's head, a4028a40, while bcf3e230 against
+a4028a40 failed it ('guarded code changed without qualificationVersion increase (58 -> 58)'), so
+59 is this round's own. In the same slot: the round's five tests by name, `-race -count=200 -v`,
+each test and each of their nineteen subtests an explicit PASS 200 times, none skipped (852 s);
+`TestAWriteThatPanicsLeavesNothingPending` and `TestALostReconciliationIsTriedOnceMore` 200 times;
+the five again from a race binary at GOMAXPROCS=3 beside 20 busy processes (CI's three-core macOS
+leg approximated), every one passing 200 times but the resume case's one failure above (2047 s);
+`TestEveryCitedTestNameExists`, `TestEveryBridgeWordIsInTheProtocol`,
+`TestNoDocblockNamesAnotherDeclaration`, `TestDSDOutputProtocolTokens` and the qualification
+package; `make docs-check`; and the rules patch, applied to a disposable copy of the head, passed
+`make docs-check` and those guards with `TestQualificationRunbookVersion`.
+On c19fef35, the record in the tree: `go test -race` on `./internal/alsapcm/...` passed (84 s);
+the five tests and the two other resume cases by name, `-race -count=200 -v`, each test and each
+of their nineteen subtests an explicit PASS 200 times, none skipped (869 s), and again from a race
+binary at GOMAXPROCS=3 beside 20 busy processes, every one passing 200 times (2098 s); the guards
+that read the tracked docs, `make docs-check` and the qualification check at the head against
+a4028a40 passed. macOS was not run: there is no Mac here, and the loaded run stands in for CI's
+three-core leg. Windows was not run here; the rig skips there as before.
