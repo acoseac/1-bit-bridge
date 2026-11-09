@@ -641,6 +641,24 @@
         </small>
       </div>
 
+      <div class="field">
+        <label class="checkbox">
+          <input type="checkbox" role="switch" name="tailscaleUploadDiagnosticLogs" {{if .Data.TailscaleUploadDiagnosticLogs}}checked{{end}}>
+          Upload Tailscale's diagnostic logs (tsnet mode) <span class="badge warn">restart</span>
+        </label>
+        <small class="hint">
+          In <code>tsnet</code> mode this is your consent to the bridge's embedded Tailscale node sending Tailscale its
+          diagnostic logs; without it, the default, the node sends none. The consent applies when the bridge's process
+          builds its node, so a change takes a restart of that process: quit the bridge, its menu included, and launch
+          it again, or restart its service (stopping it and choosing Start now in its menu runs it in the same
+          process). Three things keep the uploads off even with the consent: <code>TS_NO_LOGS_NO_SUPPORT=true</code> in
+          the environment the bridge was launched with; this process having built its node without the consent, until
+          the process exits; and something else in this process turning them off (Tailscale's coordination server
+          can), which a new launch may undo. The Tailscale panel below says which. A tailnet that requires those logs
+          refuses the node until they are on. What stays open is backlog B830.
+        </small>
+      </div>
+
       <div class="field" {{if .Data.IsPublic}}hidden{{end}}>
         <label class="checkbox">
           <input type="checkbox" role="switch" name="mdnsEnabled" {{if .Data.MDNSEnabled}}checked{{end}}>
@@ -713,6 +731,8 @@
           <dd id="tailscale-node">—</dd>
           <dt>Cert</dt>
           <dd id="tailscale-cert">—</dd>
+          <dt id="tailscale-uploads-label" hidden>Diagnostic logs</dt>
+          <dd id="tailscale-uploads" hidden></dd>
         </dl>
         <p class="panel-note" id="tailscale-note">Tailscale provisions a Let's Encrypt certificate for this bridge's MagicDNS hostname. iOS clients reach the bridge over Tailscale at <code id="tailscale-magicdns-url">—</code>.</p>
       </div>

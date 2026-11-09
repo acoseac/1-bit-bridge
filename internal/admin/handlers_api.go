@@ -442,6 +442,10 @@ type settingsResponse struct {
 	// deployment posture so the UI can show a "default disabled
 	// in public mode" caption without re-querying.
 	TailscaleMode string `json:"tailscaleMode"`
+	// TailscaleUploadDiagnosticLogs is tailscale.uploadDiagnosticLogs:
+	// whether the embedded node (tsnet mode) may upload Tailscale's
+	// diagnostic logs. Off unless the config says true (backlog B749).
+	TailscaleUploadDiagnosticLogs bool `json:"tailscaleUploadDiagnosticLogs"`
 	// MDNSEnabled reflects EffectiveMDNSEnabled — the resolved
 	// posture-aware value, not the raw pointer. Loopback
 	// defaults true; public defaults false. Validate refuses
@@ -2341,6 +2345,7 @@ func settingsResponseFromConfig(cfg *config.Config, isSupervised bool) settingsR
 
 		RetentionPlaybackHistoryDays:    cfg.Retention.PlaybackHistoryDays,
 		RetentionDeviceRegistrationDays: cfg.Retention.DeviceRegistrationDays,
+		TailscaleUploadDiagnosticLogs:   cfg.Tailscale.UploadDiagnosticLogs,
 		MDNSEnabled:                     cfg.EffectiveMDNSEnabled(),
 		IsPublic:                        cfg.IsPublic(),
 		DLNAEnabled:                     cfg.DLNA.Enabled,
@@ -2553,6 +2558,12 @@ type settingsPatch struct {
 	//   - cli ↔ tsnet:       RestartRequired:true (same rewiring as
 	//                        above; both modes are wired at startup).
 	TailscaleMode *string `json:"tailscaleMode,omitempty"`
+	// TailscaleUploadDiagnosticLogs sets tailscale.uploadDiagnosticLogs,
+	// the operator's consent to the embedded node uploading Tailscale's
+	// diagnostic logs (backlog B749). Restart-required: the node applies
+	// it to the process (TS_NO_LOGS_NO_SUPPORT) when it is built at
+	// startup, and upstream chooses its log transport as the node starts.
+	TailscaleUploadDiagnosticLogs *bool `json:"tailscaleUploadDiagnosticLogs,omitempty"`
 	// PR 4: MDNSEnabled checkbox. Hot-reloadable in BOTH
 	// directions — main.go's mdnsLifecycle.Set(enabled) starts
 	// or stops the Bonjour advertiser without a restart.
@@ -3257,6 +3268,17 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 					"the %s → %s transition rewires the Tailscale auto-pilot and the "+
 						"listener composition, both of which are built at startup",
 					prevMode, newMode))
+			}
+		}
+		// The embedded node reads the consent as it is built at startup,
+		// and upstream picks its log transport as the node starts, so a
+		// change waits for a restart in every mode.
+		if p.TailscaleUploadDiagnosticLogs != nil {
+			if *p.TailscaleUploadDiagnosticLogs != next.Tailscale.UploadDiagnosticLogs {
+				next.Tailscale.UploadDiagnosticLogs = *p.TailscaleUploadDiagnosticLogs
+				report.restart("tailscaleUploadDiagnosticLogs")
+			} else {
+				report.unchanged("tailscaleUploadDiagnosticLogs")
 			}
 		}
 		if p.DLNAEnabled != nil {
