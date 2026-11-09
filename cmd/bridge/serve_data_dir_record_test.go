@@ -398,10 +398,13 @@ func TestTheRecordNamesItsDataDirInAnySpellingOfIt(t *testing.T) {
 }
 
 // TestTheRecordRefusesOnlyTheDataDirItNamesWhileItHoldsNeitherFile pins the
-// check's answers: no record, one that does not read (a torn write, a hand
-// edit) and one naming another data dir (the config's dataDir changed) refuse
-// nothing; the data dir the record names refuses while it holds neither its
-// database nor its lock file, and not once either is there.
+// check's answers of a record written before B741, which holds no identity:
+// no record and one naming another data dir (the config's dataDir changed)
+// refuse nothing; one that does not read (a torn write, a hand edit) refuses
+// whatever data dir the config names, for its own cause (backlog B741: until
+// then it named nothing); the data dir the record names refuses while it
+// holds neither its database nor its lock file, and not once either is
+// there.
 func TestTheRecordRefusesOnlyTheDataDirItNamesWhileItHoldsNeitherFile(t *testing.T) {
 	base := t.TempDir()
 	cfg := filepath.Join(base, "bridge.yaml")
@@ -424,8 +427,9 @@ func TestTheRecordRefusesOnlyTheDataDirItNamesWhileItHoldsNeitherFile(t *testing
 	if err := os.WriteFile(dataDirRecordFile(cfg), []byte("{\"dataDir\": "), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if refused() {
-		t.Error("the check refused on a record that does not read")
+	var gone *dataDirGoneError
+	if err := checkServeDataDirRecord(dataDirRecordFile(cfg), dataDir); !errors.As(err, &gone) || gone.cause != recordUnreadable {
+		t.Errorf("the check over a record that does not read answered %v, want its own refusal", err)
 	}
 	writeDataDirRecord(t, cfg, filepath.Join(base, "elsewhere"))
 	if refused() {

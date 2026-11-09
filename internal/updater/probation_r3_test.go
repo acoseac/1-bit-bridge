@@ -152,7 +152,7 @@ func TestAMigrationReadsTheRunningStartUnderTheMarkersLock(t *testing.T) {
 func TestTheTakeBackClearsItsStartsToken(t *testing.T) {
 	dir := t.TempDir()
 	mustSave(t, dir, withToken(probationMarker(2), aStartsToken))
-	took, err := TakeBackFailedStart(t.Context(), dir, "0.2.4", 2)
+	took, err := TakeBackFailedStart(t.Context(), dir, "0.2.4", 2, nil)
 	if err != nil || !took {
 		t.Fatalf("the take-back = %v, %v; want it written", took, err)
 	}

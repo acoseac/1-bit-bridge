@@ -93,6 +93,17 @@ func servingBinaryPath(opts serveOpts, stderr io.Writer) string {
 // dir's lock, which comes before serve's first write, so no migration of this
 // version's can have run in this start, and disarmEarlyRollback covers the
 // earlier ones.
+//
+// Where the early rollback leaves the install and its count asks for the
+// crash rollback (updater.CrashRollback answers yes, or why not: an install
+// marker, or the crash rollback's own record whose rename did not land, with
+// updater.ProbationFailedStarts starts of this version that did not end
+// cleanly, each of which recorded that this version opened the data dir, so
+// the early rollback refuses it), the crash rollback answers instead, whole
+// (recoverCrashedRefusedInstall; backlog B760): until B760 such a start
+// exited 2 at every start while its settings stayed refused, its crash
+// rollback never asked. The early rollback is asked first, and decides
+// wherever it would put the backup back.
 func recoverRefusedInstall(ctx context.Context, configPath string, reasons []string, opts serveOpts, stderr io.Writer) (code int, acted bool) {
 	dataDir, err := config.DataDirOf(configPath)
 	if err != nil {
@@ -103,6 +114,11 @@ func recoverRefusedInstall(ctx context.Context, configPath string, reasons []str
 		return 0, false
 	}
 	if ok, why := updater.EarlyRollback(st, version.ServerVersion, time.Now().UTC()); !ok {
+		// An install whose count asks for the crash rollback is that
+		// rollback's, which answers it whole, or says why not (backlog B760).
+		if crash, crashWhy := updater.CrashRollback(st, version.ServerVersion); crash || crashWhy != "" {
+			return recoverCrashedRefusedInstall(ctx, dataDir, configPath, opts, stderr)
+		}
 		noRollback(stderr, st, why)
 		return 0, false
 	}

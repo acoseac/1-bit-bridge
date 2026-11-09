@@ -111,6 +111,8 @@ func (k probationEventKind) String() string {
 		return "unconfirmed"
 	case probationEnded:
 		return "end"
+	case probationServing:
+		return "serving"
 	}
 	return fmt.Sprintf("kind %d", int(k))
 }
@@ -772,9 +774,8 @@ func holdTheMarkersLock(t *testing.T, dataDir string) (*updater.StateLock, <-cha
 
 // TestAStopWhileAConfirmationWaitsWritesNothing: a stop that lands while the
 // confirmation waits for the install marker's lock ends it, and serve, with
-// nothing written: the marker byte for byte as it was, since the take-back,
-// which asks for the lock for the rest of the stop's budget (stopBudget),
-// finds it held throughout, and says so.
+// nothing written, the marker byte for byte as it was; what the take-back
+// beside it says is backlog B760's.
 func TestAStopWhileAConfirmationWaitsWritesNothing(t *testing.T) {
 	r := newRefusedInstall(t, "")
 	events, seams := newProbationWatch(probationTiming{window: 200 * time.Millisecond, ask: 20 * time.Millisecond,
@@ -798,8 +799,8 @@ func TestAStopWhileAConfirmationWaitsWritesNothing(t *testing.T) {
 		t.Fatalf("serve's stop waited for the install marker's lock; stderr=%s", sb.stderr.String())
 	}
 	marker.requireUnchanged(t)
-	if !strings.Contains(sb.stderr.String(), "was not taken back") {
-		t.Errorf("serve did not say its count was left; stderr=%s", sb.stderr.String())
+	if !strings.Contains(sb.stderr.String(), "had no answer within") {
+		t.Errorf("serve did not say its take-back had no answer; stderr=%s", sb.stderr.String())
 	}
 	held.Release()
 }

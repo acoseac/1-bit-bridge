@@ -234,10 +234,8 @@ func TestAPanicInServeIsAFailedStart(t *testing.T) {
 	r.requireCount(t, 2, "after two starts that panicked")
 }
 
-// TestACountPublishedBeforeItsBarrierFailedIsTakenBack: the marker's write
-// publishes before its directory barrier, so a count whose barrier failed may
-// stand in the marker all the same; the start said so, went on, and takes it
-// back at its stop as it would a count that landed.
+// TestACountPublishedBeforeItsBarrierFailedIsTakenBack: a start whose count's
+// barrier failed says so, and its stop takes its count back (backlog B760).
 func TestACountPublishedBeforeItsBarrierFailedIsTakenBack(t *testing.T) {
 	r := newRefusedInstall(t, "")
 	// A start of this version opened the data dir before, so this start's
@@ -261,7 +259,7 @@ func TestACountPublishedBeforeItsBarrierFailedIsTakenBack(t *testing.T) {
 	}))
 	_, seams := newProbationWatch(longProbation)
 	sb := r.bootWith(t, serveOpts{probation: seams})
-	if !strings.Contains(sb.stderr.String(), "was not counted against its install") {
+	if !strings.Contains(sb.stderr.String(), "write of the count of this start") {
 		t.Errorf("serve did not say its count's write failed; stderr=%s", sb.stderr.String())
 	}
 	if armed.Load() {

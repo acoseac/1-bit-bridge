@@ -81436,8 +81436,8 @@ store open, which takes it out of the crash rollback's reach.
 - Not ready is never proof: a start that serves but never answers is not
   confirmed, keeps running, says so once and records `NotReady`; nothing
   rolls it back, and the auto-installer stops waiting on it after 20 minutes.
-- A take-back that cannot hold the marker's lock within 2 s leaves its count,
-  which errs toward a rollback; the confirmation clears it.
+- What a take-back that cannot hold the marker's lock leaves is backlog
+  B760's.
 - What the target wrote without a migration goes back under the backup
   unchecked (the History section lists each file and what the backup does
   with it); none of it stops the backup starting, so none is a refusal.
@@ -81512,8 +81512,8 @@ the red four above; readiness:
 `TestAPortAnotherProcessHoldsIsNotAFailedStart` (the API's and the
 console's, and an address the host does not have, which stays counted),
 `TestAStoreThatWillNotOpenIsAFailedStart`, `TestAPanicInServeIsAFailedStart`,
-`TestACountPublishedBeforeItsBarrierFailedIsTakenBack` (the count's own
-barrier failing after its rename); the rollback:
+`TestACountPublishedBeforeItsBarrierFailedIsTakenBack` (backlog B760); the
+rollback:
 `TestAMigrationThatFailsStillRefusesTheRollback` (a step that adds its
 columns and fails at its index, `user_version` unmoved),
 `TestACommandsMigrationRefusesTheRollbackToo` (`bridge doctor`'s open),
@@ -81727,8 +81727,8 @@ unregisters it, ends and joins it (`finish`: a stop that arrives after it
 starts nothing), all before the data dir's lock is let go, and the
 take-back after the teardown runs where a host's refusal ended the start or
 the stop's never had its answer, writing nothing where the stop's landed
-(`FailedStarts == CountTried` no longer holds). Accepted, as the review
-said: a crash in the teardown after a stop is not counted. The test binary's
+(`FailedStarts == CountTried` no longer holds). What it accepted, as the
+review said, is backlog B760's. The test binary's
 re-exec now stops on SIGINT and SIGTERM as main does, which the process test
 needs.
 
@@ -81816,10 +81816,10 @@ serve that refuses with one start before it and migrates with none
 (`TestACommandBesideAStartingServe`), and the updater's, the store's and
 restore's own.
 
-**6. A permission refusal and a tailnet failure** (confirmed). What the
-swap carries: `dst`'s mode alone (`installedMode`); the owner is the
-process's (the staged file is created by it), and no extended attribute was
-read. So an operator's setcap went with an update, the new binary's bind
+**6. A permission refusal and a tailnet failure** (confirmed). The swap
+carried `dst`'s mode alone (`installedMode`; the rest of what it does with
+`dst`'s attributes is backlog B760's), so an operator's setcap went with an
+update, the new binary's bind
 below 1024 was refused for a permission, and the start was taken back as the
 host's. `carryCapabilities` now gives the staged binary `dst`'s
 `security.capability` before the rename, which only a process with
@@ -81827,10 +81827,8 @@ CAP_SETFCAP may set (`sudo bridge update`); where it cannot (the service
 user's auto-installer, the console's install), the swap goes on, and
 `bindRefusalIsTheHosts` counts a permission refusal where `.bak` carries
 capabilities the binary does not (`updater.FileCapabilities`, Linux's one
-small `getxattr`; elsewhere none), saying so. An SELinux label is not
-carried: the staged binary takes the label the policy gives a new file in
-its directory (`restorecon`'s), so a hand-set label goes with the update;
-that is backlog B760. The tailnet: `tailnetNetworkFailure` takes back a
+small `getxattr`; elsewhere none), saying so. What else the swap does not
+carry is backlog B760's. The tailnet: `tailnetNetworkFailure` takes back a
 `*net.OpError` (tsnet's netstack listener answers a closed or reset
 endpoint as one) or `net.ErrClosed` (tsnet's listener once its node stops),
 and counts anything else its `Serve` returns; the `tsnet listener: …` line
@@ -82022,8 +82020,7 @@ whose teardown hangs and is killed stays counted. The start says that it
 has answered (`updater: this start of … has answered as ready (its API
 listener, /v1/health and its store): its install is confirmed once it has
 stayed up for 10m0s`). A slow but healthy start killed in a slow teardown
-before it was ready counts too, the cost the review accepted; it is said in
-PROTOCOL.md, the runbook and the long form. The second round's three early
+before it was ready is backlog B760's. The second round's three early
 take-back tests wait for the window first, the stop-while-starting test that
 waited for an early take-back is removed, replaced by the two above, the
 subprocess kill test waits for the readiness line (the copy asks every
@@ -82076,9 +82073,9 @@ held; `RunningServeCounted` needs the token and that lock held, tried
 without waiting, and a command never takes such a lock, so `server.lock`
 is not read at all, nor the registry, which goes. The take-back clears the
 token in its decrement's write; every return of `runServe` clears it where
-the marker still names it, keeping the count where it was not taken back
-(`updater.EndStart`, within the stop's budget: the launcher's serve returns
-to its menu with the process alive), and lets the lock go; the confirmation
+the marker still names it (`updater.EndStart`, within the stop's budget:
+the launcher's serve returns to its menu with the process alive), and lets
+the lock go; the confirmation
 clears it. A migrating open reads the running start of the marker it reads
 under the install marker's lock (`migrationGate.holds`), so the count and
 the token are read together, and the try of the start's lock never waits,
@@ -87425,6 +87422,976 @@ decided while the delete was pending, and the message clamps both bounds.
 Controls, each red as predicted: the duplicate guard removed (the twice case),
 the pending banner's words removed (the pending case).
 
+## 2026-11-08 — B760: the probation's narrow windows, B660's residuals
+
+Worker b760, legion0 (Ubuntu 26.04, linux/amd64, go1.27.3, `GOTOOLCHAIN=local`,
+`GOPROXY=off`), branch `fix/b760-probation-windows` from main 0fd7e3f8, on the
+orchestrator's brief with Codex's and Claude's reviews of its draft folded in.
+Commits: the reproduction afbd45bb (red, with the seams its tests need, read
+by nothing or nil in production), the change b8bd6ce5, then this record. The
+rules' words go in `rules-b760.patch`: a B760 line in `config-lifecycle.md`,
+B613's line where it said the early rollback is the only way a refused start
+puts the backup back (the line and its long form), `cli-serve.md`'s serve
+bullet, B660's long form where it said a panic after a stop is not counted,
+and B760's long form in `ops/History-rules-config-lifecycle.md`; and, since
+`config-lifecycle.md` stood at 99,532 bytes of its 100,000, the long form of
+#1047's line moved out first by `move_entry.py` (its line kept as a pointer).
+
+Each residual was looked at first, in the code, then fixed where the fix is
+contained and provable, or kept with the test that shows the window.
+
+### R1. A start that refuses its settings never reached the crash rollback (fixed)
+
+The crash rollback runs after the data dir's lock (main.go, after
+`lockServeDataDirWith`), and every refusal serve makes from its config alone
+comes before that lock, where `recoverRefusedInstall` asks the early rollback
+alone. `updater.EarlyRollback` refuses wherever `DataDirOpenedBy` is set
+(configcheck.go:493), and every counted start writes it in its admission's one
+write (`disarmHeld`, `ArmsDataDirRecord`), so an install with three starts that
+crashed, and then settings this version refuses, exited 2 at every start while
+they stayed refused: the crash rollback was never asked, the install neither
+rolled back nor confirmed. The same for a crash rollback's own record whose
+rename had not landed (`CrashRollbackRecord` keeps `DataDirOpenedBy`), its
+backup not back and this version's migrations vetoed; and for a marker past
+the early rollback's 6 h window, which the crash rollback does not ask.
+
+*The change.* Where the early rollback refuses on its first read and the count
+asks for the crash rollback (`updater.CrashRollback` answers yes, or why not),
+`recoverRefusedInstall` hands the start to `recoverCrashedRefusedInstall`,
+which takes the data dir's lock as the early rollback does and runs
+`recoverCrashedInstall` whole: the install marker's lock from its read through
+the rename, `CrashRollback` again under it (a migration begun refusing), the
+backup a regular file, its version (`ProbeVersionWithin`), its settings check
+(`CheckConfig`) of the settings as they are now, the hold and the veto durable
+before the rename, exit 75. Where it leaves the install it says why and
+records it (`RollbackRefused`) as at any start, and the start refuses its
+settings as before, exit 2. `recoverCrashedInstall` and its line helpers take
+what the start does next, so a refused start's lines end
+`this start refuses its settings, as it did before, and is not counted`
+(`crashRollbackRefusedStart`) where a start whose settings load says it goes
+on and counts itself (`crashRollbackGoesOn`). `EarlyRollback` is unchanged and
+asked first.
+
+*Red first* at afbd45bb (the stand-in backup given a check mode that takes the
+settings this version refuses, "takes", as 0.2.1 took the leading zero 0.2.2
+refuses): `TestARefusedStartPutsTheBackupBackWhereItsCountAsksForTheCrashRollback`
+exited 2 in each case (the load's refusal, serve's own, a marker past the
+window), want 75; `TestARefusedStartFinishesACrashRollbackWhoseRenameDidNotLand`
+exited 2 over the record a nil-returning restore left (no timing);
+`TestARefusedStartWhoseCrashRollbackRefusesKeepsTheInstall` said only the early
+rollback's reason (`0.0.1 has already opened the data dir, so its store may
+hold changes 0.0.0-previous does not know`) and recorded nothing, for a backup
+that refuses the settings too (over the marker and over the record) and for a
+migration begun. `TestARefusedStartBelowTheCrashRollbacksLimitLeavesTheInstall`,
+a guard, passed on both.
+
+### R2. A bind refused with EADDRNOTAVAIL (left as it is)
+
+The host's refusal since B660's second round (`bindRefusedByTheHost`,
+`doctor.IsAddrNotAvail`, and the four starts over TEST-NET-1 in
+`TestAPortAnotherProcessHoldsIsNotAFailedStart`): nothing of it is left.
+
+### R3. A panic in the teardown was taken back as a clean end (fixed)
+
+The take-back's defer read the end by `stopped.Err()`, the restart request and
+`notAFailedStart`, never whether serve's goroutine was panicking, so three
+cases took a panic's count back: a stop of a start not yet ready whose
+teardown then panicked (the take-back begun once the teardown had run); a
+panic after the stop's cancel and before serve's select read it; and a panic
+in the teardown of a ready start, whose take-back had begun, and landed, as
+the stop arrived (`stopTakeBack.arrived`), which no classification at the end
+can undo.
+
+*The change.* The take-back's defer recovers a panic, reads the end as no
+clean one (`finish(false)`: nothing begun), and where a take-back began as the
+stop arrived counts the start again (`stopTakeBack.countAgain`,
+`updater.CountFailedStartAgain`: under the install marker's lock, writing only
+where the marker holds what that take-back left, the count less one, within
+`finishTakeBackDeadline`'s deadline, said on a line), clears the token and lets
+the start's lock go as before, and raises the panic again as it was. Go
+1.27.3 prints it `panic: … [recovered, repanicked]`, the goroutine's stack
+from the panic's own site (measured with a throwaway program in
+`.tmp/_b760/panicdemo`: the trace held `main.teardown()` at its line). The
+ready-stop-then-kill behaviour is unchanged: a kill is no panic, and
+`TestAServeKilledWhileItDrainsHasTakenItsCountBack` passes.
+
+*Kept:* what R3 leaves is backlog B760's.
+
+*Red first* at afbd45bb: `TestAPanicInTheTeardownOfAStopBeforeReadyStaysCounted`
+(the marker after the panic `FailedStarts:0`, want 1),
+`TestAPanicAfterAStopBeforeServesStopBranchStaysCounted` (0, want 1) and
+`TestAPanicInTheTeardownOfAReadyStartsStopCountsItAgain` (0 after the panic,
+the stop's take-back seen landing while the teardown was held, want 1, and no
+line). Each requires the panic raised again as it was, which passed on both.
+
+### R4. A counted start that had not begun serving was never said not ready (reporting added)
+
+The confirmation starts once `ServeTLS` runs (`newServeProbation` after the
+`go ServeTLS` line), and `probationSeams` acted after it, so a start that had
+not begun serving was never said not ready, and `bridge doctor` read
+`ok … is on probation` throughout. The change reports only (backlog B760).
+`startWatch`, armed at the admission of a
+counted start on serve's own context, ends where the start begins serving
+(`served`, just before `ServeTLS`) and at the teardown (`end`), joined each
+time; at `probationTiming.serve` from its admission (production's
+`updater.ProbationWindow`, monotonic) it says once
+`<version> has not begun serving within 10m0s of its start, so its install is
+not confirmed` and records NotReady (`updater.RecordNotReady`), which the
+doctor's install-probation line and the console's Probation row fail on, and
+which the next start's admission and the confirmation clear. A hold of the
+start just before it begins serving is the test's seam
+(`probationSeams.beforeServing`, nil in production).
+
+*Red first* at afbd45bb: `TestAStartThatHasNotBegunServingIsSaidNotReady` (held
+before serving, a 200 ms deadline: no not-ready event within 20 s, nothing on
+stderr) and `TestAStartThatBeginsServingEndsItsWatch` (no watch event before
+the first round). `TestAStartStoppedBeforeItsDeadlineIsNotSaidNotReady`, a
+guard, passed on both. Through the fix the held test reads, while held,
+NotReady and the doctor's fail; after the clean stop, NotReady kept and the
+fail kept (the count: backlog B760); and beside a later start that serves, NotReady cleared
+at its admission and the doctor ok.
+
+### R5. The take-back's and the count's write failures (one fixed)
+
+Restated against the budget the take-back has had since B660's third round:
+it asks for the marker's lock a wait at a time and asks again after a write
+that fails, until it lands or `stopBudget` (10 s from the stop's arrival)
+ends, one begun once a teardown past the budget has run asking 2 s still
+(`finishTakeBackFloor`), never past `updater.SCMStopWait` less a second; one
+with no answer is backlog B760's (`TestAStopWhileAConfirmationWaitsWritesNothing`,
+`TestATakeBackWhoseWriteIsRefusedKeepsTheCount`). A take-back write that
+published and failed its barrier is answered by its next ask. The count's
+three writes:
+- *Failed before it published* (kept, backlog B760):
+  `TestACountThatFailedBeforeItPublishedLeavesItsStartUncounted`, a guard,
+  green on both.
+- *A count's write that failed, and the start's hold* (fixed): the admission
+  let go of the start's hold at the failed write, so `RunningServeCounted`
+  read the running start as one that did not end cleanly (the doctor counting
+  it, a command's migration held on it), and its return cleared no token
+  (`EndStart` was given ""). The start keeps its hold now (`DisarmResult.Start`).
+  Red first at afbd45bb: `TestACountWhoseBarrierFailedKeepsItsStartsHold`.
+- *The admission's one write of its record and its count*, which refuses the
+  start (kept, backlog B760): every later start while the barrier fails
+  refuses before it writes (`syncMarkerDir` first).
+  `TestARefusedAdmissionLeavesAtMostOneCount`, a guard, green on both.
+
+### The red run
+
+At afbd45bb, cmd/bridge and internal/updater, the predictions in
+`.tmp/_b760/predictions-red.txt` before the run: every test predicted red was
+red for the reason predicted (above), and every guard beside them green
+(`TestARefusedStartBelowTheCrashRollbacksLimitLeavesTheInstall`,
+`TestAStartStoppedBeforeItsDeadlineIsNotSaidNotReady`,
+`TestACountThatFailedBeforeItPublishedLeavesItsStartUncounted`,
+`TestARefusedAdmissionLeavesAtMostOneCount`,
+`TestATakeBackWhoseWriteIsRefusedKeepsTheCount`, and ten existing probation,
+crash-rollback and refused-install tests).
+
+### Negative controls
+
+Each alone on b8bd6ce5, applied once (each replaced text asserted to occur
+once) by `.tmp/_b760/controls.py`, the package's test binary rebuilt with
+make's tags, the listed tests run with TMPDIR on this checkout's disk, the
+bytes put back from memory and compared after each, predicted by name in
+`.tmp/_b760/predictions-controls.txt` before the run; `git status` was clean
+after. Thirteen came out as predicted; one prediction was wrong (4d).
+
+| | Mutation | Red | Green beside it |
+|---|---|---|---|
+| (1a) | the refused start never hands over to the crash rollback | the put-back test (its three cases), the record's test, the refusals' test (its three) | the below-the-limit guard, `TestServeRollsBackAnInstallWhoseVersionRefusesItsSettings`, `TestServeLeavesAnInstallItCannotProveAsItIs`, `TestAStartFinishesARollbackStoppedBeforeItsRename` |
+| (1b) | the hand-over only where the crash rollback answers yes, never on its why | the refusals' test, a migration begun | its two backup cases, the put-back and record tests |
+| (1c) | the refused start's crash rollback without the backup's settings check | the refusals' test, both backup cases (exit 75) | a migration begun, `TestABackupThatRefusesTheSettingsIsNotPutBack`, the put-back test |
+| (1d) | the refused start's lines say it goes on and counts itself | the refusals' test, its three cases (the words) | the put-back test |
+| (3a) | the take-back's defer recovers nothing (HEAD's classification) | the three R3 tests | `TestAPanicInServeIsAFailedStart`, `TestAStopTakesItsCountBackAsItArrives`, `TestAStopIsNotAFailedStart`, `TestAStopBeforeReadyStaysCountedUntilItsTeardownHasRun` |
+| (3b) | the panic recovered and not raised again | the three R3 tests (no panic), `TestAPanicInServeIsAFailedStart` | `TestAStopTakesItsCountBackAsItArrives`, `TestAStopIsNotAFailedStart` |
+| (3c) | no count again after a ready start's take-back | `TestAPanicInTheTeardownOfAReadyStartsStopCountsItAgain` | the other two R3 tests |
+| (3d) | the count again asked where no take-back began | `TestACountThatFailedBeforeItPublishedLeavesItsStartUncounted` (a start counted late) | the three R3 tests, `TestAPanicInServeIsAFailedStart` |
+| (3e) | `CountFailedStartAgain` without its comparison with what the take-back left | `TestCountingAStartAgainUndoesItsTakeBackAlone`, a take-back that never landed | its six other cases |
+| (4a) | the watch never armed | the held test, `TestAStartThatBeginsServingEndsItsWatch` | the stopped test, `TestTheStartWatchFiresOnlyWhileTheStartHasNotBegunServing` |
+| (4b) | `served` does not end the watch | the watch's unit test, the start begins serving; `TestAStartThatBeginsServingEndsItsWatch` | its two other cases, the held and stopped tests |
+| (4c) | the count of a start the watch found not serving, at its stop (backlog B760) | the held test | the stopped test, `TestAStopIsNotAFailedStart`, `TestAStartThatBeginsServingEndsItsWatch` |
+| (4d) | the watch says the start has not begun serving at serve's stop | the watch's unit test, serve's stop | its two other cases, the held test, `TestAStartThatBeginsServingEndsItsWatch`; and, against the prediction, the stopped test |
+| (5a) | the admission lets go of the start's hold at a failed count write again | `TestTheAdmissionKeepsItsStartsHoldWhereItsCountsWriteFailed` (both), `TestACountWhoseBarrierFailedKeepsItsStartsHold` | `TestTheAdmissionCountsTheStartsOfTheInstallsVersion`, `TestACountPublishedBeforeItsBarrierFailedIsTakenBack`, `TestACountThatFailedBeforeItPublishedLeavesItsStartUncounted` |
+
+(4d)'s miss is the serve-level test, not the code: it releases its hold right
+after the stop, so the start begins serving, and its `served` sets the flag the
+mutated watch then reads, before the watch's goroutine looks; the watch's own
+test, which ends its context with nothing serving, is the pin.
+
+### Checks
+
+- Before the change was committed: the slice of cmd/bridge's tests that
+  match the probation's names (`Probation|Crash|Refused|Rollback|Install|Stop|Restart|Panic|Count|Ready|Serving|Doctor|…`,
+  777 runs) passed in 230 s, and internal/updater whole, both with make's tags
+  and TMPDIR on this checkout's disk. Run with TMPDIR=/tmp first, it failed
+  `TestOutputPlayNamesTheHolderOfTheEndpointRefusedBusy` and hung
+  `TestServeDiscoveryRestartsWithStableIdentity`, at main 0fd7e3f8 as well:
+  this host's /tmp is a tmpfs, which the player's strict writer refuses (the
+  player not started, its Source never advertised), which is why make test
+  sets TMPDIR on disk; nothing of this change.
+- go1.27.3's gofmt (`go run cmd/gofmt -l`) on every Go file the change
+  touched: clean.
+- The rules patch's checks and the gates, inside the shared build slot,
+  follow in their own paragraph, once run.
+
+### For the owner
+
+- B660's records file one more item under B760 that this brief did not take;
+  it stays open there.
+- R3 counts a panic on serve's goroutine after a stop, which B660's second
+  round had accepted as uncounted; the rule's words say it now. The owner may
+  want that confirmed.
+- R4's deadline is the probation window, 10 minutes from the admission: a
+  healthy start whose migration runs longer is said not ready until its
+  confirmation clears it.
+- PROTOCOL.md's "Boot-time rollback" paragraph is not changed: its words hold
+  in substance, but "that start says why, records it, and goes on" does not
+  fit a start that refused its settings, which then refuses them; a change
+  there needs its iOS mirror, so it is the orchestrator's.
+
+### Gates
+
+At fdd74a31, on Go 1.27.3 (`GOTOOLCHAIN=go1.27.3`, go.mod's), TMPDIR under
+`.tmp/_b760`, in two sessions of the shared build slot, each started by a
+guard that waited for the slot (`.tmp/_b760/gates.py`):
+- Part a, in the slot from 14:11 after a 24-minute wait: `make fmt` changed
+  nothing; `make vet`, and with `GOOS=windows`, `GOOS=darwin` and
+  `GOOS=linux GOARCH=386`: ok; `make docs-check`: ok (CLAUDE.md 82.1 %, the
+  worst load 67.6 %); the qualification check
+  (`go run ./scripts/qualification-version -base 0fd7e3f8 -head HEAD`):
+  `qualification version OK`; `make test TEST_PKGS='./cmd/bridge/...
+  ./internal/updater/...'` (race, `-p 4`, `-timeout 30m`, the Makefile's tags):
+  ok, cmd/bridge 1,254 s, internal/updater 29 s.
+- Part b: in the slot from 15:46, the guard's first try having given up at 15:26
+  with the slot held by other workers since 14:33: `make fmt vet test build-all`
+  (race, `-p 4`, `-timeout 30m`, the Makefile's tags): ok in 37 minutes, 89
+  packages ok and 14 without tests, the Linux-only ones run rather than vetted
+  (internal/alsa 1.8 s, internal/alsapcm 82 s, internal/atomicwrite's durable
+  writer 20 s, internal/backup's identity paths 291 s; cmd/bridge 1,375 s,
+  internal/manifest 1,685 s, internal/admin 1,055 s, internal/updater 32 s),
+  `make fmt` changing nothing, `make build-all`'s build-tag check and its six
+  targets; `git status` empty after.
+- `rules-b760.patch` (59,583 bytes), built by a script on a copy of the
+  tracked files at fdd74a31 (`.tmp/_b760/build_rules_patch.py`): `git apply
+  --check` takes it over the worktree; on a copy it is applied to, make
+  docs-check's four commands pass (config-lifecycle.md 98,149 bytes of its
+  100,000, cli-serve.md 50,605, the worst load 67.3 %), and
+  `TestEveryCitedTestNameExists` passes there and fails on a ghost citation
+  planted in the copy's History file. `verify_moves.py --base HEAD` passes
+  for the move alone (a copy holding `move_entry.py`'s move only); over the
+  whole patch, with the cli-serve bullet, B660's *The count.* and its *Left.*
+  declared as edits, it lists MISSING only the two copies of B613's line, the
+  rules line and its long form's verbatim head, rewritten alike, which `--edit`
+  cannot declare (it pairs one gone block a prefix), each one's successor
+  present in its file (`.tmp/_b760/verify_moves_two_ways.py`).
+
+Not run here: macOS and Windows natively (Windows is vetted by
+`GOOS=windows make vet` and cross-compiled by `make build-all`;
+`rollback_running_windows_test.go` runs only there), CI's runners, and a
+by-hand run with real release builds.
+
+## 2026-11-08 — B760 round 2: a count again only after a take-back that reached its write, the open windows named by B760 alone, a refused start that says why
+
+Worker b760, legion0 (Ubuntu 26.04, linux/amd64, go1.27.3, `GOTOOLCHAIN=local`,
+`GOPROXY=off`), branch `fix/b760-probation-windows` (PR #1442) from its round 1
+head 348a0548 (round 1 merged with main 3d0a0d05 and the orchestrator's rules
+commit), on the orchestrator's round 2 brief with Codex's and Claude's
+reviews of round 1 and of the brief's draft folded in. Commits: the
+reproduction 939294a9 (red, with the seams its tests need, nil in
+production), the change 15c167a5, the public text 7d7233f5, then this record.
+The rules' words go in `rules-b760-r2.patch`, made against the final head:
+B760's line in `config-lifecycle.md` and its verbatim copy in the long form,
+`cli-serve.md`'s serve bullet, and B660's and B760's long forms in
+`ops/History-rules-config-lifecycle.md`. Each point was confirmed red first.
+
+### Point 1. A count again of a start whose count never landed (fixed)
+
+`stopTakeBack.countAgain` asked only that a take-back had begun, and
+`updater.CountFailedStartAgain` writes where the marker holds the count the
+admission tried less one, which a take-back's write leaves and which an
+admission's count that never published leaves too: a start whose count's
+write failed before it published, ready, stopped, its armed take-back finding
+no count of its own and writing nothing, then a panic in its teardown, was
+counted, and serve said its stop had taken the count back. A take-back read
+by its last answer alone would fail the other way: a write that publishes and
+then fails its directory barrier is followed by an ask that finds no count of
+its own and answers no write and no error.
+
+*The change.* `updater.TakeBackFailedStart` reports whether it reached its
+write, the marker holding the start's count, whatever the write answered, and
+takes a save (nil is `SaveState`, as `AdmitBoot`'s is). Serve's take-back
+latches that answer across its asks under its lock (`stopTakeBack.reached`),
+and `countAgain` asks the latch in place of `began`.
+`CountFailedStartAgain`'s doc states the precondition its caller establishes,
+and `countAgain`'s the latched condition. Where the count again has no answer,
+serve's line says the stop *may have* taken the count back, since the latch
+does not say the write published. Two seams, nil in production:
+`serveOpts.saveTakeBack` (the take-back's save) and `takeBackAsked` (told each
+answer, so a test knows the armed take-back ran before it lets the teardown
+panic: a panic before the stop's notice reached the take-back leaves none
+begun).
+
+*Red first* at 939294a9, the predictions in `.tmp/_b760/r2/predictions-red.txt`
+before the run, the Makefile's tags, race, `-p 4`, `-timeout 30m`, TMPDIR on
+this checkout's disk:
+`TestAPanicAfterTheStopOfAStartWhoseCountNeverLandedCountsNothing` (case a: the
+admission's write refused by `saveUpdateState`, a store at the ladder's top,
+an hour's probation window) failed: `update-state.json` changed (the count
+written from 1 to 2), and serve printed `updater: this start panicked after its
+stop had taken its count of the install's starts back, so it is counted
+again`. Its second check, that no such line is printed, asked for "counted
+again", which the admission's own line held then, so it would have failed
+without the false line: 15c167a5 asks for
+countAgain's own words ("panicked after its stop"), and control N1 below shows
+that check red on its own.
+`TestATakeBackSaysItReachedItsWriteWhateverTheWriteAnswered` (internal/updater:
+published and then the barrier failed, through `SetMarkerBarrierForTest`;
+failed before it published; a count that never landed) failed its two
+write-failure cases (reached false), and
+`TestATakeBackWhoseWriteIsRefusedKeepsTheCount`, its assertion now that the
+refused write was reached, failed as well.
+`TestAPanicAfterATakeBackWhoseWritePublishedThenFailedCountsTheStartAgainOnce`
+(case b: the take-back's save publishes and then answers an error, its second
+ask answers no write and no error, the count is restored once) passed at
+939294a9, as predicted: round 1 counted again on `began`, which holds there;
+it guards the fix against a latch on the last answer (N2, N3, N4 below). R5's
+sibling, `TestACountThatFailedBeforeItPublishedLeavesItsStartUncounted`, its
+body unchanged, passed at both (its doc changed with point 2).
+
+### Point 2. The windows left open, named by B760 alone
+
+Every passage that described a window B760 leaves open now names backlog B760
+instead, and keeps what B760 closes: committed, the take-back comment in
+`main.go`, `startWatch`'s doc, the docs of `AdmitBoot`, `disarmUnlocked`,
+`DisarmResult.CountMissed`, `TakeBackFailedStart` and `carryCapabilities`, the
+docs of `serve_count_writes_test.go` (the file's and two tests'),
+`serve_not_serving_test.go`'s and `TestATakeBackWhoseWriteIsRefusedKeepsTheCount`'s,
+three passages of `ops/deployment-runbook.md`, three of B660's records here
+and seven of round 1's (in its R3, R4 and R5 sections, three of its headings
+among them, and its owner note); in the rules patch, B760's line and its copy, its long form's
+R3, R4 and R5 paragraphs and its *Left.*, and four passages of B660's long
+form. The passages removed, each with its file and its lines at 15c167a5, are
+kept outside the repository for the backlog's B760 entry. Kept as they are:
+the binding rules' own words (B760's "reporting only" and "don't count a start
+for not serving"), the tests' names (the brief asks that R5's sibling run
+unchanged), the program's own lines the runbook quotes, and `PROTOCOL.md`,
+whose probation paragraph describes the design and is the iOS app's mirror.
+
+### Point 3. A refused start's lock failure said nothing (fixed)
+
+At the crash rollback's limit, where `updater.CrashRollback` refuses (a
+migration of the store begun), a start that refused its settings and could
+not take the data dir's lock (another process holding it) exited 2 saying
+nothing of the install: `recoverCrashedRefusedInstall`'s lock-failure branch
+called `sayCrashRollbackNeedsTheDataDir`, which speaks only where the crash
+rollback would run, and the early rollback's `noRollback`, which spoke there
+before B760, is no longer reached. The branch now reads the marker again and
+says the crash rollback's own refusal (`crashRollbackLine`, ending
+`crashRollbackRefusedStart`), writing nothing; otherwise it calls the shared
+helper as before, unchanged, so its other caller, a start whose settings load,
+prints what it printed.
+
+*Red first* at 939294a9:
+`TestARefusedStartBesideTheDataDirsHolderSaysWhyTheCrashRollbackLeavesTheInstall`
+(the data dir's lock held from another open, `holdTheDataDirsLockAsACommand`)
+failed its migration case (no line); its case where the crash rollback would
+run, which pins the helper's line word for word, passed at both; both cases
+require the binaries and the marker unchanged.
+`TestACrashRollbackNeedsBothLocks`, the helper's other caller, passes at the
+fix and under N5.
+
+### Negative controls
+
+Each alone on 15c167a5, applied once (each replaced text asserted to occur
+once) by `.tmp/_b760/r2/controls_r2.py`, the package's test binary built with
+make's tags, the named tests run with TMPDIR on this checkout's disk, the bytes
+put back from memory and compared after each, predicted by name in
+`.tmp/_b760/r2/predictions-controls.txt` before the run. All seven came out as
+predicted, and `git status` was clean after.
+
+| | Mutation | Red | Green beside it |
+|---|---|---|---|
+| N1 | `countAgain` keyed on `began` (round 1's condition) | case a, both checks (the marker; the line) | case b, `TestAPanicInTheTeardownOfAReadyStartsStopCountsItAgain` |
+| N2 | the latch set only by an ask that wrote with no error | case b (the count 0 after the panic, no line) | case a, the ready-panic test |
+| N3 | `TakeBackFailedStart` reports no write reached where its write fails | the updater test's two write-failure cases, `TestATakeBackWhoseWriteIsRefusedKeepsTheCount`, case b | the updater test's third case, case a |
+| N4 | the latch never set | case b, the ready-panic test | case a |
+| N5 | the lock-failure branch says only the shared helper's line (round 1's) | point 3's migration case | its would-run case, `TestACrashRollbackNeedsBothLocks` |
+| N6 | the branch records the refusal it says | point 3's migration case (the marker changed) | its would-run case |
+| N7 | the refusal said with the line of a start that goes on | point 3's migration case | its would-run case |
+
+### Checks
+
+- `go vet` of internal/updater and cmd/bridge, and go1.27.3's gofmt
+  (`go run cmd/gofmt -l`) on every Go file the round touched: clean.
+- The named tests with the Makefile's flags, at the fix: internal/updater's
+  take-back and count-again tests, and cmd/bridge's
+  `TestAPanic|TestACount|TestARefused|TestACrashRollbackNeedsBothLocks|TestAStop|TestARestartRequest|TestATakeBack|TestAServeKilled|TestAPreReadyStop`
+  slice (50 tests), green but for case a's substring check, then case a,
+  case b and the ready-panic test green again on the corrected check.
+- `rules-b760-r2.patch`, built by `.tmp/_b760/r2/build_rules_patch_r2.py` on a
+  copy of the tracked files (each replaced text asserted once): `git apply
+  --check` takes it over the worktree; on the patched copy make docs-check's
+  four commands pass (config-lifecycle.md 98,294 bytes of its 100,000,
+  cli-serve.md 50,819, the worst load 67.5 %), and `TestEveryCitedTestNameExists`
+  passes there and fails on a ghost citation planted in the copy's History
+  file. No entry moves, so `verify_moves.py` has nothing to prove.
+- The gates, below.
+
+### Gates
+
+At 41a085d0, on Go 1.27.3 (`GOTOOLCHAIN=go1.27.3`, go.mod's), TMPDIR under
+`.tmp/_b760`, in one session of the shared build slot, started by a guard
+that waited for it (`.tmp/_b760/r2/gates_r2.py`; in the slot from 17:27 with
+no wait): `make fmt` changed nothing; `make vet`, and with `GOOS=windows`,
+`GOOS=darwin` and `GOOS=linux GOARCH=386`: ok; `make docs-check`: ok
+(CLAUDE.md 82.1 %, the worst load 67.4 %); the qualification check
+(`go run ./scripts/qualification-version -base 3d0a0d05 -head HEAD`):
+`qualification version OK`; `make test TEST_PKGS='./cmd/bridge/...
+./internal/updater/...'` (race, `-p 4`, `-timeout 30m`, the Makefile's tags):
+ok, cmd/bridge 1,265 s, internal/updater 29 s; `git status` empty after. Not
+run this round: the whole suite and `make build-all`, which round 1 ran at
+fdd74a31. This round's code is in cmd/bridge and internal/updater, whose
+suites ran whole, and `make vet` compiled every package and its tests for the
+four targets, `TakeBackFailedStart`'s new parameter among them.
+
+`rules-b760-r2.patch` (39,340 bytes, sha256 `09a0c97c…`) was built again on a
+copy of 41a085d0's tracked files, byte for byte the patch checked above, and
+`git apply --check` takes it over the final head, this record's commit, which
+changes no rules file.
+
+Not run here: macOS and Windows natively, CI's runners, and a by-hand run with
+real release builds.
+
+## 2026-11-08 — B760 round 3: the public-text sweep, finished
+
+Worker b760, legion0 (Ubuntu 26.04, linux/amd64, go1.27.3, `GOTOOLCHAIN=local`,
+`GOPROXY=off`), branch `fix/b760-probation-windows` (PR #1442) from 5b00b034
+(round 2, the orchestrator's rules commit for it and its rewording of three
+passages), on the orchestrator's round 3 brief with Codex's and Claude's
+reviews of that commit and of the brief's draft folded in. Commits: the sweep
+85452270, then this record. The rules' words go in `rules-b760-r3.patch`, made
+against the final head: B760's line in `config-lifecycle.md` and its verbatim
+copy in the long form, and B660's and B760's long forms in
+`ops/History-rules-config-lifecycle.md`.
+
+### The sweep
+
+Every passage that still described a window B760 leaves open now names backlog
+B760 alone, and keeps what B760 closes. The brief's list: B660's long form on a
+slow healthy teardown, the runbook's two paragraphs (the same teardown, and the
+take-back's quoted line), two passages of this log (the same teardown, and
+round 1's control row on R4's clean stop), the docs of
+`TestACountThatFailedBeforeItPublishedLeavesItsStartUncounted` and
+`TestATakeBackWhoseWriteIsRefusedKeepsTheCount`, `carryCapabilities`' last
+sentence, and seven passages of `disarm.go` (`CountTried`'s, `CountMissed`'s
+and `Start`'s docs, `AdmitBoot`'s and `disarmUnlocked`'s, and two comments in
+`disarmHeld`), where what B760 closes stays: the start keeps its hold and
+clears its token as it returns. What the sweep found beside them, changed the
+same way: `main.go`'s take-back comment; `sayTheAdmissionsCount`'s line
+(`serve_crashed_install.go`); the docs of eight test files
+(`serve_count_writes_test.go`'s first test, `serve_count_again_test.go`'s case
+(a) and a comment, `serve_failed_starts_test.go`, `serve_not_serving_test.go`'s
+two, `serve_probation_test.go`'s confirmation test, and internal/updater's
+`probation_test.go`, `probation_b760_test.go` and `probation_r4_test.go`); five
+passages of this log (B660's test list, its swap paragraph and its token
+paragraph, round 1's R5 item, round 2's red-first paragraph); and, in the
+patch, four of B660's long form (its count, the take-back's reason, the
+swap's attributes, the start's token), B760's R5 list, and B760's line and its
+copy. 48 hunks over 17 files in all; the passages removed, each with its file,
+its lines at 5b00b034 and its old text, are kept outside the repository for
+the backlog's entry.
+
+### The operator's lines
+
+The admission's line where its count's write answered an error or its lock
+was not taken (`DisarmResult.CountMissed`, said by `sayTheAdmissionsCount`),
+and serve's where a take-back had no answer within its budget, no longer say
+what came of the count. They say what the write or the take-back answered, and
+to run `bridge doctor`, whose install-probation line says where the install
+stands: `updater: the install marker's write of the count of this start of …
+answered an error: …; run bridge doctor, whose install-probation line says
+where the install stands`, the lock's `the install marker's lock was not taken
+for the count of this start of …: …`, and `updater: this start ended cleanly,
+and the take-back of its count of the install's starts had no answer within
+10s (…); run bridge doctor, …`. The four tests that asserted the admission's
+old words and the one that asserted the take-back's ask for the new ones
+(`write of the count of this start`, `had no answer within`), and two of those
+assertions' own failure texts changed with them; no state, exit-code or
+synchronisation assertion changed. The runbook quotes the take-back's new line.
+
+### Only text moved
+
+`.tmp/_b760/r3/ast_check.py` parses every Go file that differs from 5b00b034
+both ways, with comments, positions and resolver links stripped
+(`.tmp/_b760/r3/astcmp`: `go/parser` and a reflection walk of the tree that
+dumps every node's type and every leaf's value), and compares each file's
+`//go:` directive lines as text. Of the 13 files, six are identical but for
+comments (`serve_not_serving_test.go`, `probation_b760_test.go`,
+`probation_r4_test.go`, `probation_test.go`, `swap_capability_linux.go`,
+`takeback_write_test.go`); the other seven differ in string literals alone:
+`disarm.go`'s two `CountMissed` messages, `main.go`'s take-back line (its two
+pieces), `serve_crashed_install.go`'s line, the five expectations and the two
+failure texts above. No declaration, statement, expression, identifier or
+directive differs.
+
+### Kept
+
+`PROTOCOL.md`'s probation paragraph, which the iOS app mirrors byte for byte
+(a change there needs its pair); the tests' names, and two tests' failure
+texts that pair with no changed line (test code, which the brief leaves as it
+is); the binding rules' own words ("reporting only", "don't count a start for
+not serving"); and the contracts of `EndStart` and of `SaveState`'s barrier,
+which every marker writer relies on.
+
+### Checks
+
+- go1.27.3's gofmt (`go run cmd/gofmt -l`) on the 13 Go files: clean; `go vet`
+  of internal/updater and cmd/bridge with the Makefile's tags: ok.
+- The five tests whose expectations changed, race, `-p 4`, `-timeout 30m`, the
+  Makefile's tags, TMPDIR on this checkout's disk: ok.
+- `rules-b760-r3.patch`, built by `.tmp/_b760/r3/build_rules_patch_r3.py` on a
+  copy of the tracked files (each replaced text asserted once, and the rules
+  line and its long form's copy asserted to stay verbatim twins): checked
+  under the gates.
+
+### Gates
+
+At 6a72b6c1, on Go 1.27.3 (`GOTOOLCHAIN=go1.27.3`, go.mod's), TMPDIR under
+`.tmp/_b760`, in one session of the shared build slot, started by a guard that
+waited for it (`.tmp/_b760/r3/gates_r3.py`; in the slot from 19:45, after 14
+minutes behind another worker's gate): `make fmt` changed nothing; `make vet`,
+and with `GOOS=windows`, `GOOS=darwin` and `GOOS=linux GOARCH=386`: ok;
+`make test TEST_PKGS='./cmd/bridge/... ./internal/updater/...'` (race, `-p 4`,
+`-timeout 30m`, the Makefile's tags): ok, cmd/bridge 1,268 s,
+internal/updater 30 s; `git status` empty after.
+
+`rules-b760-r3.patch` (18,170 bytes, sha256 `3317ea12…`), built again on a
+copy of 6a72b6c1's tracked files byte for byte as first built: `git apply
+--check` takes it over the final head, this record's commit, which changes no
+rules file; on the patched copy `make -s docs-check` passes (config-lifecycle.md
+98,444 bytes of its 100,000, the worst load 67.5 %), and
+`TestEveryCitedTestNameExists` passes there and fails on a ghost citation
+planted in its History file.
+
+Not run here: the whole suite and `make build-all` (round 1 ran them at
+fdd74a31; this round changed comments and string literals alone, as the AST
+check shows), macOS and Windows natively, and CI's runners.
+## 2026-11-08 — B741: the data dir's record gains an identity
+
+Worker b741, legion0, branch `fix/b741-data-dir-identity` from main's 7c1db6dd. Commits: 7bb7d84b (the
+tests, red), 4ec5f783 (the identity), f85a388b (gap 3), cdfe5415 (the runbook), 3c4f0226 (the doctors'
+writes, red), 995a25e0 (the doctors' fix), then this record. The rule changes through `rules-b741.patch`:
+`cli-serve.md`'s B741 line, its B727 and B659 lines corrected, `scanner.md`'s B651 line corrected and a
+gap-3 line with a path glob for `serve_data_dir_identity*.go`, and each one's long form.
+
+### The gaps
+
+B651's record (`.bridge.yaml.datadir`) refused a start whose recorded data dir held neither `bridge.db`
+nor `server.lock`. (1) Backlog B813, which this change leaves open. (2) `server.lock` was evidence, and it
+is made before the database opens: a start on the bare mount point before any record that failed between
+the two left one, and a database a command made there before B727 read the same way. (3)
+`fsutil.SamePath` probes how the folder holding a path compares names now; with the volume away the
+nearest folder is the bare mount point, whose own name the probe looks up in the folder above, so a
+record and a config that differ in case alone read as two data dirs and the refusal was skipped.
+
+### As built
+
+- **The identity.** 16 random bytes in lower-case hex, in a marker in the data dir (`data-dir-id.json`,
+  `{"id":…}`) and in the record. Serve writes it once its database is open and its lock file is there:
+  the marker first, staged beside its place, fsynced, renamed (Windows' retries, no barrier of the
+  rename's own), then the data dir fsynced, that barrier's failure the write's (a directory fsync the
+  filesystem cannot make, EINVAL, ENOTSUP or EOPNOTSUPP, taken as made, as the updater's marker takes it);
+  the record gains the identity after. The identity is the marker's, else the record's own where it names
+  this data dir, else minted. A marker serve cannot write leaves the record without an identity, said at
+  Warn; a record it cannot write leaves the marker for the next start. Only serve writes the marker.
+- **The check**, keyed on the record naming the data dir: a marker of the record's identity is the data
+  dir served from whatever else it holds; another identity, a marker that does not read, and a record that
+  does not read are refused, each with a cause of its own; with no marker, neither file is B651's refusal,
+  and either file under a record holding an identity is refused (`noIdentity`, gap 2), under a record from
+  before B741 taken up. An error other than an entry's absence on the way is still no refusal.
+- **One type, `dataDirGoneError`, with a `cause`**: serve, both doctors (`dataDirCheck`) and every command
+  `refuseDataDirAway` guards refuse each cause alike, nothing written; only B651's first sentence says the
+  data dir holds neither file; each keeps today's recovery advice, a marker that does not read moved aside
+  and a record or marker this user may not read made readable first. bridge doctor says a permission error
+  is not checked, a warn (B659's rule).
+- **The note and the end of a refusal**: the note holds the cause and the identity beside the data dir,
+  so a changed cause is said again; the end calls a data dir back only where it holds, before the
+  preparation, the identity the refusal was of (`dataDirEvidence`), in a line of its own; a refusal whose
+  record held none keeps B727's rule and line.
+- **Gap 3**: the record holds, for every folder on the way of both spellings, `fsutil.FoldingIn`'s answer
+  at the write (`fsutil.FoldingOnTheWay`), and the check compares by it, probing nothing
+  (`fsutil.SameAsRecorded`, `SamePathAsRecorded`): a case-only difference is one data dir where its
+  folder was not read as case-sensitive (read as folding, as unknown, or not recorded: the direction that
+  refuses). A record without it falls back to the probe until a start with the volume there writes it
+  again; one its reader would refuse for its size (64 KiB) is written without it.
+- **The doctors' store probes** (the codec probe behind the ALAC and DSD lines, sidecar-paths,
+  variants-index, name-collisions) open nothing in a data dir the record refuses, any cause
+  (`errStoreOfARefusedDataDir`). Found while the gates queued: a probe of the gap-2 state through both
+  doctors on a copy of the tree showed a stray 0-byte `bridge.db` in the bare mount point migrated to a
+  whole schema by the doctors, whose data-dir line said bridge serve will not start there. B727 had
+  reasoned that a refused data dir holds no database, which B741's refusals make false; its long form says
+  so now.
+
+### What stays open
+
+Backlog B813.
+
+### Red first
+
+At 7bb7d84b, the tests through serve's real start, both doctors and bridge scan, written as files so that
+they compile against main's code, predicted in `.tmp/_b741/predictions-red.txt`: 15 tests failed as
+predicted (the marker missing; serve served over a lock file, a database or both in the bare mount point,
+over another install's data dir, over a torn record, over a marker that does not read and over a record
+it cannot read; the record holding no identity after the upgrade's starts and an interrupted write; the
+case-folded record taken for another data dir; the stray lock served rather than said; the end of a refusal
+calling a lock file back), B651's two refusals of a legacy record and the case-sensitive sibling passed as
+controls, and the opt-in real-volume case skipped. The doctors' writes: at 3c4f0226 the gap-2 rows with a
+database failed ("the doctors changed what is under …"), the rest green.
+
+### Negative controls
+
+At f85a388b (C16 at 995a25e0), each an exact-once mutation predicted by name in
+`.tmp/_b741/predictions-controls.txt` before it ran, the test binary built and the data-dir set run (625
+tests of cmd/bridge; fsutil's casefold tests for C10 and C11), the source restored from memory and found
+equal to HEAD after each, `git status` empty after the set.
+
+| | mutation | red |
+|---|---|---|
+| C1 | the check takes a lock file or a database without a marker under a record holding an identity | the three gap-2 rows, the cause change, three matrix rows |
+| C2 | the check takes another identity | the other-identity test, its matrix row |
+| C3 | a record that does not read is no record again | the torn-record test, the unreadable-record row, nine matrix rows, the B651 check test |
+| C4 | a marker that does not read is no marker | the torn-marker test (refused in the no-identity words), the unreadable-marker row, two matrix rows |
+| C5 | the record keeps the identity when the marker could not be written | the marker-write-failure test |
+| C6 | serve mints anew where the marker holds an identity | six identity-keeping tests |
+| C7 | the marker written after the record | the order test, and the marker-write-failure test (not predicted: a failed marker write then leaves an identity-bearing record, the same defect) |
+| C8 | the end of a refusal calls a lock file back whatever the identity | the end-of-refusal test, three of four predicted unit rows (the fourth, a data dir holding its identity and its files, says back either way) |
+| C9 | the note keyed on the data dir alone | the cause-change test, the note's unit test |
+| C10 | a case-only difference never one data dir by the record | four fsutil rows, two fsutil tests, the folded-case serve row, the folding-write test |
+| C11 | the case-sensitive sibling: always one data dir | two fsutil rows, two fsutil tests, the case-kept serve row |
+| C12 | serve records no folding | the folding-write test |
+| C13 | the size guard removed | the size-guard test |
+| C14 | the doctor fails what this user cannot read | both rows of the unreadable test |
+| C15 | a record from before B741 over its lock file or database refused | three upgrade rows, three matrix rows, the B651 check test, and (not predicted) the marker-write-failure test's restart and the B651 doctor test's last step, both a record holding no identity over a database |
+| C16 | the doctors' store probes ungated | the two gap-2 rows with a database |
+
+The C3 run first used a pattern that did not match `TestServeRefusesWhatItCannotRead`, which I had
+predicted red; with the pattern widened it went red as predicted, and it is in every run after.
+
+### Not run here
+
+The real case-insensitive volume (`BRIDGE_TEST_CASE_INSENSITIVE_DIR`) skipped: legion0 cannot mount a vfat,
+exFAT or casefold filesystem without root, and the sandbox refuses `chattr +F` and `unshare`. The stand-in
+probe (`dataDirRecording.folding`) and the unit tests carry the case. Windows and macOS are vetted
+(`GOOS=… make vet`) and left to CI's legs.
+
+### Gates
+
+At 995a25e0, inside the build slot, on Go 1.27.3, in three sessions. The first: `go test -race
+-count=1 -timeout 30m` with CI's tags over `./cmd/bridge/... ./internal/fsutil/...` passed (cmd/bridge
+1,260 s, fsutil 2.9 s; the Linux-only tests, ALSA, alsapcm's, the durable writer's and the identity paths',
+run here); `make vet` passed, and with `GOOS=windows`, `GOOS=darwin` and `GOOS=linux GOARCH=386`; `make fmt`
+changed nothing. The second: `make build-all` and `make docs-check` passed; `make test` failed in one
+subtest outside this change,
+`TestAMatchWhoseReQueueDidNotLandIsReQueuedByTheNextSweep/cancelled_inside_the_reset_by_a_switch-off`
+("the first sweep's re-queue landed: the case tests nothing"), the fingerprint sweep's timing precondition
+B765's record names (1 of 40 at B762's base), 88 packages ok; alone under `-race` with CI's tags it passed
+40 of 40 at 995a25e0, and nothing this change touches reaches it. The third: `make test` again, 89
+packages ok (2,044 s; cmd/bridge 1,347 s), its TMPDIR under `.tmp/_b741`. `scripts/qualification-version`
+passed against main's 7c1db6dd (no guarded file changed). `make docs-check` passed on a `git archive` copy
+with `rules-b741.patch` applied (`git apply --check` clean; cli-serve.md 53.8 KB, scanner.md 41.1 KB; the
+worst load unchanged); `verify_moves.py --base HEAD` found no citation broken and lists the three entries
+the patch edits (B651's, B727's, B659's) as changed blocks, which it reports as missing since it checks
+moves, not edits. Every test name the patch cites exists (72 of 72).
+
+## 2026-11-08 — B741 round 2: the reviews' findings
+
+Worker b741, legion0, the same branch from 1d38f8ba (round 1, its rules, main merged). Commits: 9527b2a0
+(the findings, red), 199373f5 (the doctor's checklist), 32b83056 (a record that is a link to nothing),
+292290c4 (the folding however deep), 98cab473 (the marker's write, and the record kept), 3fb52355 (the sync
+in place as two steps), then this record. The rule changes through `rules-b741-r2.patch`: `cli-serve.md`'s
+B741 line and `scanner.md`'s gap-3 line, and each one's long form.
+
+### Each finding
+
+Codex's review of round 1 and the Claude API's, every finding real but the last:
+
+- **The doctor's player checklist opened a store in a refused data dir** (Codex P1). Its path rules ask for
+  the indexed tracks whether MPD answers or not, and `doctorOutputChecklist`'s `Tracks` opened the data
+  dir's database regardless of the record, so with `output.mpd: on` bridge doctor migrated a stray 0-byte
+  `bridge.db` in the bare mount point while its data-dir line said serve would not start there; round 1's
+  fixtures set MPD off. The callback asks `doctorStoreGate` first, as the four store probes do, each call.
+- **A record that is a link to nothing read as no record** (Codex P2): the open answers it as `ENOENT`, so
+  serve made the data dir in the bare mount point and renamed a fresh record over the link. Absence is the
+  entry's now (`os.Lstat`), and a link to nothing is `errLinkToNothing`, never `fs.ErrNotExist`: refused,
+  in every surface, as a record that cannot be read.
+- **The size fallback reopened gap 3** (Codex P2). Round 1 kept each folder's whole path, so the record grew
+  as the square of the depth (a direct path 200 folders deep: 45,510 bytes, 2,000 deep: 4,054,110; Codex
+  measured 66,186 for 495 bytes in 240), and past its reader's 64 KiB it was written without its folding,
+  which the check then compared by the probe. The folding is one letter a folder now, per spelling
+  (`dataDirFolding`, `resolvedFolding`; `fsutil.FormatFolding`, `FoldingOnTheWay`'s slice from the root
+  down): 1,320 and 12,120 bytes for the same two paths. The reader takes 2 MiB, past the record of any
+  path an OS takes; a record holding an identity or a folding is never compared by the probe; a folding
+  not of its spelling's folders says nothing of any, every folder `CaseUnknown`, the refusing direction;
+  a record whose folding alone would take it past the bound keeps the letter `u`, read that way, and one
+  longer without it is not written. `TestARecordItsReaderWouldRefuseKeepsNoFolding` keeps its name (the
+  rules cite it) and pins that.
+- **The marker's durability was unpinned** (Codex's test gap), confirmed at 9527b2a0: with both of the
+  marker's fsyncs dropped in a `git archive` copy, `TestTheMarkerHoldsTheIdentityBeforeTheRecordDoes`
+  passed. Its steps are the serve instance's seams now (`markerDurability`: the staged sync, the rename, the
+  marker's own sync in place, its directory's), and the test records each in order before the record's
+  write. A barrier that fails after the rename leaves the marker in place and the record without its
+  identity, and the next start takes the marker up only once its own sync in place has answered
+  (`TestAMarkerWhoseBarrierFailedIsTakenUpOnceDurable`).
+- **A marker that did not read at the record's write** (the Claude API, Low 1): serve wrote the record
+  naming the data dir with no identity, so the next start refused that data dir for its marker, or, the
+  record having held one, read it as a record written before B741 (backlog B813). A marker that does
+  not read or cannot be inspected leaves the record as it was, and no write drops or replaces the identity
+  the record holds of its data dir (a marker gone since the check that cannot be written again, one of
+  another identity: `TestNoWriteOfTheRecordDropsOrReplacesItsIdentity`).
+- **The Windows marker's rename was left to NTFS's own flush** (Low 2): `fsutil.SyncParentDir` does nothing
+  there. The marker is synced in place through a handle of its own (`syncMarkerFile`, opened for writing:
+  `Sync` is `FlushFileBuffers` on Windows, which commits the file's metadata, its rename among it, to the
+  journal). Vetted with `GOOS=windows`; CI's Windows leg runs the step test over the real steps.
+- **The marker was the owner's alone** (Low 3): every run by a member of the service's group read a
+  healthy data dir as one whose identity does not read. The marker is 0644 (`dataDirMarkerMode`); the
+  store probes say a record or a marker this user cannot read is not checked (`errStoreNotChecked`), never
+  refused; and a command or bridge doctor is told to run as the user the service runs as, and to make it
+  readable by that user if it is not, where serve alone is told to make it readable by that user. The
+  record stays 0600, as B651 wrote it: a command run by another user that cannot read it is refused, saying
+  so, which the runbook says.
+- **Restore and the read-only commands** (the Claude API's "not verifiable"): no defect. A restore writes a
+  snapshot's files in place and no snapshot carries the marker (`TestARestoreKeepsTheDataDirsIdentity`,
+  green at 9527b2a0 and after); `token list`, `status`, `cert info` and `logs` open no store, and every
+  other store open in cmd/bridge is behind `refuseDataDirAway`: the doctor's checklist was the one read
+  that opened one, Codex's P1.
+
+### Red first
+
+At 9527b2a0, against round 1's code, predicted in `.tmp/_b741/predictions-red-r2.txt`: the checklist's
+refused row failed (the bare mount point's tree changed) and its other row passed, the case reaching the
+store; the link to nothing served and was replaced; the deep data dir in another case served; the marker
+that does not read had its data dir's record rewritten, both ways; the marker was 0600; the unreadable
+rows' probe said serve refuses and scan said to make it readable; the restore passed, as predicted.
+
+### Negative controls
+
+At 3fb52355, each predicted by name in `.tmp/_b741/predictions-controls-r2.txt` before it ran: an
+exact-once mutation, the test binary built, the data-dir set run (645 tests of cmd/bridge; fsutil's 23 for
+R7), the source restored from memory and found equal to HEAD. Every control went red as predicted, nothing
+else failed, and the set with no mutation passed.
+
+| | mutation | red |
+|---|---|---|
+| R1 | the checklist's `Tracks` asks no gate | the checklist's refused row |
+| R2 | the gate never answers not checked | both rows of the unreadable test |
+| R3 | every command told to make it readable | the two permission rows of the words test, both unreadable rows |
+| R4 | an open's not-exist is no record | the link-to-nothing test, the record-read test |
+| R5 | a link to nothing keeps the open's `ENOENT` | the record-read test alone |
+| R6 | every record compared by the probe | the deep test, the folded-case row, the folding-write test, the size test |
+| R7 | a longer folding read as the path's | fsutil's longer-folding row |
+| R8 | the over-long record keeps no letter | the size test |
+| R9 | a marker that does not read goes on to the write | both marker-read tests |
+| R10 | a marker that cannot be written again drops the identity | its row of the identity-keeping test |
+| R11 | a marker of another identity replaces the record's | its row of the identity-keeping test |
+| R12 | the adoption takes no barrier | the barrier test |
+| R13 | the staged sync dropped | the step test, the barrier test |
+| R14 | the sync in place dropped | the step test, the barrier test |
+| R15 | the directory's sync dropped | the step test, the barrier test |
+| R16 | the marker's mode left at 0600 | the mode test |
+
+### Not run here
+
+As in round 1: no case-insensitive volume (the stand-in probe carries it); Windows' `FlushFileBuffers` and
+macOS run on CI's legs, vetted here.
+
+### Gates
+
+At a0a52240 (the code is 3fb52355's), inside the build slot, on Go 1.27.3, in two sessions. The first: `go
+test -race -count=1 -timeout 30m` with CI's tags over `./cmd/bridge/... ./internal/fsutil/...` passed
+(1,290 s; the Linux-only tests run here); `make vet` passed, and with `GOOS=windows`, `GOOS=darwin` and
+`GOOS=linux GOARCH=386`; `make fmt` changed nothing. The second: `make test` passed, 89 packages ok, none
+failed (2,092 s; cmd/bridge 1,368 s), its TMPDIR under `.tmp/_b741`; `make build-all` and `make docs-check`
+passed. `scripts/qualification-version` passed against main's 3d0a0d05, the merge's main parent. The rules
+patch: `git apply --check` clean, and on a `git archive` copy with it applied, its landing asserted in each
+of its four files (the first check ran `git apply` with its cwd in the copy, inside the worktree's `.tmp`,
+where git skips every path outside the cwd and exits 0, and `verify_moves` saw the tree unchanged; a
+ceiling, `GIT_CEILING_DIRECTORIES`, keeps it off the checkout), `check-doc-budgets.py` passed (cli-serve.md
+55.8 KB, scanner.md 42.2 KB, the worst load unchanged), the self-tests of `rules-for.py` and `move_entry.py`
+passed, and `verify_moves.py --base HEAD` found no citation broken, its MISSING exactly the seven blocks the
+patch edits, each one's successor there. Every test name the patch cites exists (55 of 55).
+
+## 2026-11-08 — B741 round 3: what stays open named only as B813, the marker's sync, a racing read
+
+Worker b741, legion0, the same branch from a62b01c2 (round 2 and its rules). Commits: 8a54aa93 (B813),
+f091ae87 (a marker this user may not write, red), 296684ef (its fix), 61e3e4a1 (a record read that races a
+write, red), d3179788 (its fix), then this record. The rule changes through `rules-b741-r3.patch`:
+`cli-serve.md`'s B741 line and `scanner.md`'s B651 line, and their long forms.
+
+### Each point
+
+- **What this change leaves open is named only as B813.** The project names a weakness still open by its
+  backlog id alone, and round 1 had written this one out, as its brief asked. The identity file's header,
+  two test docs, the runbook, round 1's and round 2's records here, and through the patch the rules and
+  their long forms now say B813 and no more; the text about the two gaps this change closes stays. The
+  refusal of a data dir holding no identity explained the window in an aside, on every surface it reaches
+  (serve's refusal, every command's, the doctor's hint): it says what to do, and no more, and
+  `TestEachRefusalSaysWhatItIsAndHowToGoOn` pins that advice and that no cause's advice holds an aside. What
+  was removed, the changed string, and the commits on the branch whose messages describe it are listed for
+  the orchestrator outside the repository.
+- **The marker's sync in place opened it for writing on every OS** (the Claude API on round 2), where only
+  Windows needs it, its `FlushFileBuffers`: a marker serve may read and not write (another user's, as where
+  root owns the data dir and a member of its group serves it, or an immutable one) was never synced, so its
+  identity was never taken up. Off Windows the open is `fsutil.OpenAsFile`'s, for reading, which syncs and
+  refuses a named pipe at once, where a plain open for reading would wait for a writer and hold serve's start
+  (`openMarkerForSync`); on Windows it stays for writing, so a read-only marker there, its attribute or an ACL,
+  is still never taken up (`TestAReadOnlyMarkerIsNeverTakenUpOnWindows`, which CI's Windows leg runs; vetted
+  here with `GOOS=windows`).
+- **A read of the record that raced a write** (the Claude API on round 2, and the reviews of round 3's
+  brief): a read that missed, whose lookup then found an entry, answered at once, a regular file with the
+  miss's ENOENT and a link with `errLinkToNothing`, though the record may have just been written there
+  (serve's first, beside bridge doctor or a command) or a link's target just mounted. The entry is read again
+  once (`readAgain`), and where that read misses too, looked up once more: no record only where no entry is
+  left, `errLinkToNothing` only where a link still is, and otherwise that read's own error. The cases take
+  their steps through `recordReadSteps`, a parameter of `readDataDirRecordWith`, never a package variable that
+  parallel `-race` runs race on.
+- **The checklist test's refused row** (the Claude API's note): `treeOf` reads every file's bytes, so the row
+  already sees a stray database migrated (round 2's control R1 turned it red); nothing changed.
+
+### Red first
+
+At f091ae87, `TestAMarkerThisUserMayNotWriteIsTakenUp` failed in both rows (no record, and a record written
+before B741: a 0444 marker, not root), the adoption's sync answering "open: permission denied" and the record
+written without the identity; `TestTheMarkersSyncWaitsForNoNamedPipe` passed there too, as a guard (an O_RDWR
+open of a named pipe returns at once on Linux; a plain open for reading would wait). At 61e3e4a1, through the
+seam alone, three of `TestARecordReadThatRacesAWriteReadsAgain`'s four rows failed as predicted: a record
+written after the read missed it answered ENOENT, a link whose target appeared then answered a link to
+nothing, and a record removed between the lookup and the read again answered ENOENT where no record was there;
+the link that stays one to nothing passed as the control. The first point is wording, with no red of its own:
+its evidence is the search, and its pin is new.
+
+### Negative controls
+
+At d3179788, each predicted by name in `.tmp/_b741/predictions-controls-r3.txt` before it ran: an exact-once
+mutation, the test binary built, the data-dir set run (654 tests of cmd/bridge), the source restored from
+memory and found equal to HEAD. Each went red as predicted and nothing else failed; the set with no mutation
+passed.
+
+| | mutation | red |
+|---|---|---|
+| T1 | the no-identity advice explains itself in an aside again | its row of the words test |
+| T2 | off Windows the sync opens the marker for writing again | both rows of the read-only marker test |
+| T3 | off Windows the sync opens the marker with a plain open | the named-pipe test, after its 10 s bound |
+| T4 | `readAgain` does not read again | the written-record and appeared-target rows |
+| T5 | `readAgain` does not look the entry up once more | the dangling-link and removed-record rows, the record-read test's link check |
+
+### Gates
+
+At 0d4d629d (the code is d3179788's), inside the build slot: `GOTOOLCHAIN=go1.27.3 make test
+TEST_PKGS='./cmd/bridge/... ./internal/doctor/...'` with TMPDIR on disk (`.tmp/_b741/gotmp-r3`) passed,
+cmd/bridge 1,266 s and internal/doctor 6.7 s; then the new and changed tests by name under `-race` passed, 14
+of 14 (the three new ones, the words test, the record-read and marker tests round 2 added, the upgrade's and
+the cited-names guard). `go vet ./cmd/bridge/` passed with `GOOS=windows`, `GOOS=darwin` and `GOOS=linux
+GOARCH=386`, the Windows-only test among what Windows vets. The rules patch: `git apply --check` clean;
+applied to a disposable `git archive` copy of HEAD (its landing asserted in each of its four files), where
+`make docs-check` passed (cli-serve.md 56.2 KB, scanner.md 42.2 KB, the worst load unchanged) and
+`verify_moves.py --base HEAD` found no citation broken, its MISSING exactly the eight blocks the patch
+edits, the open-gap paragraph among them, removed with no successor; every test name the patch cites exists
+(58 of 58). Not run here: the Windows test, which CI's Windows leg runs, and macOS.
+
+## 2026-11-08 — B741 round 4: a recorded path compared through an alias of its ancestors
+
+Worker b741, legion0, the same branch from 9a91a51b (round 3 and the orchestrator's commit on it). Commits:
+13e4bb90 (the cases, red), acd2ff60 (the comparison), 62294b1c (its fallback as before), then this record.
+The rule changes through `rules-b741-r4.patch`: `scanner.md`'s gap-3 line and its long form.
+
+### The defect
+
+CI was red on macOS and Windows in `TestSamePathAsRecordedProbesNoVolume`: a spelling through a link to the
+mount point read as another path ("a link to the mount point resolves now"). `SamePathAsRecorded` took two
+spellings for one where both resolved whole (`EvalSymlinksOrClean`) to one string, or where recorded as
+written was alike, by the record's letters, with now as written or as it resolved, name by name from the
+root (`SameAsRecorded`). The letters are one a folder of recorded's own spelling, and the test's temporary
+directory runs through an alias of its own on both hosts: macOS's /var is a link to /private/var, one
+folder deeper, so the resolution held one name more and nothing lined up; on Windows a short (8.3) name
+resolves to its long one, and every folder that is there to its case on disk. Reproduced here with TMPDIR
+through a link to a folder one deeper: the case failed in CI's words.
+
+### The comparison as built
+
+`SamePathAsRecorded` walks the two spellings from their ends up (`sameAbsAsRecorded`): at each pair of
+folders as many names above each end it resolves both (`ResolveLinks`), and the deepest pair that resolves
+to one directory decides, the names below it compared as written, each by the letter recorded for the
+folder recorded's own spelling looks it up in, counted from the end (`alikeByRecord`, which
+`SameAsRecorded` now shares); the resolved folders are compared exactly, and a name unalike ends the walk,
+since every pair above has it below. Where no pair resolves to one with the names below alike, recorded as
+written is compared with now as written and as it resolves, name by name from the root, as before: a drive
+that is not there, and a record that spells a folder in another case than the folder a link in now leads
+to, where every name alike with the one in its place keeps each letter on its folder (the walk alone,
+acd2ff60, parted those; control C8 below). A folding is checked against recorded's own spelling
+(`foldingOf`): one as long as a resolution's folders is no folding of it, every folder `CaseUnknown`.
+Nothing is probed. The resolution is a parameter (`sameAbsAsRecorded`, and `resolvedOrClean`, which
+`EvalSymlinksOrClean` now calls), so tests stand in for a drive that is not there and for Windows'
+resolution on every host.
+
+A case-only difference in a folder that is there: on Windows one folder whatever its letter, since the
+resolution names it by its name on disk; on Linux and macOS, whose resolution keeps the spelling it is
+given, the letter of the folder above decides, as for a folder that is not there
+(`TestACaseOnlyDifferenceInAFolderThatIsThere` states both; `TestFoldersThatDifferInCaseAloneResolveApart`
+holds two such folders where the volume keeps case, their resolutions compared exactly and the record
+deciding above them).
+
+### Red first
+
+At 13e4bb90, with TMPDIR on disk, five failed as predicted (`.tmp/_b741/predictions-red-r4.txt`): the four
+rows of `TestARecordedPathComparesThroughAnAliasOfItsAncestors` recorded through an alias with the leaf's
+folder folding case (a target deeper, one shallower, a case-only difference between the alias and the
+leaf, letters mixed), and its folding as long as the resolution's folders; every keeping-case row, the
+guards recorded by the real path, and the existing cases passed. With TMPDIR through a link to a folder one
+deeper (macOS's /var stood in for), `TestSamePathAsRecordedProbesNoVolume/through_a_link_to_the_mount_point`
+failed too, in CI's words. The keeping-case rows are what shows a letter stayed on its folder: a fix that
+gives the letters up where the depths differ turns every folding-case row green and every keeping-case row
+red (control C2). The link and alias cases skip, naming the error, where no link can be made.
+
+### Negative controls
+
+Each predicted by name in `.tmp/_b741/predictions-controls-r4.txt` before it ran: an exact-once mutation of
+internal/fsutil, its whole test binary run, the source restored from memory and found equal to HEAD. C1 to
+C7 ran at acd2ff60 and all eight again at 62294b1c, each red as predicted and nothing else; the run with no
+mutation passed (239 tests, the three skips older ones: two need root, one a volume that folds case).
+
+| | mutation | red |
+|---|---|---|
+| C1 | every case-only difference taken (the letters ignored) | every keeping-case row of the round's cases, and the older keeping-case assertions (SameAsRecorded's, FoldingOnTheWay's, the volume-away case's) |
+| C2 | the folding checked against now's spelling | the resolution-long folding, and the keeping-case alias rows whose spellings differ in depth |
+| C3 | the resolutions compared but for case | the two folders that differ in case alone, recorded as keeping case |
+| C4 | the first pair that resolves decides | the two folders that differ in case alone, recorded as folding case |
+| C5 | the names below the pair left unchecked | every keeping-case row with a folder both resolve to above its difference |
+| C6 | no comparison where no pair resolves to one | the drive that is not there, folding case; the record in another case than the alias's target |
+| C7 | the recorded side never resolved | the four folding-case rows recorded through an alias, the resolution-long folding, the short name stood in for; with TMPDIR through a link, the link case too |
+| C8 | no comparison with now as it resolves | the record in another case than the alias's target, folding case |
+
+### What Windows will exercise
+
+`TestARecordedPathComparesThroughAShortName` (a folder's short name from `GetShortPathName`, skipping
+with the reason where its volume makes no short names), `TestACaseOnlyDifferenceInAFolderThatIsThere`'s
+Windows answer, and the alias and link cases through symbolic links (skipping with the error where the
+runner may make none; round 3's link case ran there). `TestARecordedPathComparesAsWindowsResolvesIt` stands
+Windows' resolution in on every host. Vetted with `GOOS=windows` and `GOOS=darwin`; neither run here.
+
+### Gates
+
+At 8283d4d9 (the code is 62294b1c's), inside the build slot: `GOTOOLCHAIN=go1.27.3 make test
+TEST_PKGS='./internal/fsutil/... ./cmd/bridge/...'` with TMPDIR on disk (`.tmp/_b741/gotmp-r4`) passed,
+internal/fsutil 3.5 s and cmd/bridge 1,283 s; then the round's cases and the data dir's spelling cases by
+name under `-race` passed, 19 of 19 with their 94 subtests and none skipped, once with TMPDIR on disk and once
+through a link to a folder one deeper. internal/fsutil is vetted with `GOOS=windows`, `GOOS=darwin` and
+`GOOS=linux GOARCH=386`, the Windows-only case among what Windows vets, and cmd/bridge (a comment changed)
+on Linux; go1.27.3's gofmt is clean. The rules patch: `git apply --check` clean; applied to a disposable
+`git archive` copy of HEAD (its landing asserted in both files), where `make docs-check` passed (scanner.md
+43.6 KB) and `verify_moves.py --base HEAD` found no citation broken, its MISSING exactly the two blocks the
+patch edits (the gap-3 line, and its twin with the long form); every test name the patch cites exists. Not
+run here: the Windows cases, which CI's Windows leg runs, and macOS.
 ## 2026-11-08 — B652: a waveform curve proven missing is rendered again on access, waveform only
 
 Backlog B652 on `fix/b652-waveform-regen` from main 3d0a0d05, worker b652 on
