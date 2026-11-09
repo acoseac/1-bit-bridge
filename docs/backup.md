@@ -58,11 +58,31 @@ again: `bridge backup --verify` says so, and what its earlier check found.
 When a verdict cannot be written, `bridge backup --verify` says what the
 check found and, apart, what the record reads.
 
-A check that does not answer (storage that stops answering reads) is given
-up past its deadline and recorded as not finished. Until it ends, no other
-check or prune of those snapshots runs and no scheduled snapshot is taken;
-`bridge doctor`'s `backup-check` line names it, and restarting the bridge,
-or stopping the `bridge backup --verify` that runs it, ends it.
+On Windows no folder can be synced, so that mark cannot be kept, and a
+re-verification of a snapshot already verified is never recorded there: the
+check still runs, and `bridge backup --verify` says what it found, that it
+was not recorded, and what the record reads, which keeps the earlier
+verdict for the doctor, the console and the prune.
+
+Every step a check takes while it holds the backups folder (marking a
+snapshot as being checked again, the check, writing its verdict, the prune
+after it, reading the record back) has a bound, counted from the moment the
+check took the folder's lock. A step that does not answer within it
+(storage that stops answering) is given up, and nothing more is checked or
+pruned. The record is written once more, where that can still be done, to
+say the check did not finish, unless it holds the verdict of an earlier
+check that finished, which stays; `bridge backup --verify` and the
+scheduled snapshot say whether that write was made and what the record
+reads. A step that is slow and keeps within its bound changes nothing.
+
+Until a step given up ends, no other check or prune of those snapshots runs
+and no scheduled snapshot is taken. In the bridge that runs it they are
+refused at once, and `bridge doctor`'s `backup-check` line names the
+snapshot and its step, whatever the storage answers. Another process cannot
+read that it was given up from storage that does not take writes: it waits
+for the folder's lock and answers that the snapshots are busy. Restarting
+the bridge, or stopping the `bridge backup --verify` that runs it, ends the
+step (backlog B653).
 
 When the bridge starts, it takes no snapshot when one from the last day has
 a verified database. Nor does it take one when the newest snapshot from the
