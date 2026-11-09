@@ -88880,3 +88880,96 @@ jobs.md 30,722 bytes) and cmd/bridge's `TestEveryCitedTestNameExists`
 passes, git reading this worktree's index, and fails, naming the file, once
 a name no test has is planted in the copy's jobs.md; `git status` clean
 after.
+
+## 2026-11-09 — B652 round 3: one check before a countable verdict; the parent's barrier and both reads pinned
+
+Backlog B652's third round on `fix/b652-waveform-regen` (PR #1443), from
+b5b17337 (round 2, its rules commit, and main merged in), worker b652 on
+legion0 (Ubuntu 26.04, linux/amd64, go1.27.3, `GOTOOLCHAIN=local`,
+`GOPROXY=off`). Five points, from round 2's two reviews and the two reviews
+of the brief. Commits: the fix and its tests 2e4d11b3, and this record. The
+rules go into `.claude/rules/jobs.md` and `ops/History-rules-jobs.md`
+through `rules-b652-r3.patch`. What this round leaves open is backlog B819.
+
+### Reds first
+
+Point 1 at round 2's code, b5b17337 with the round's two seams and its
+tests and no fix, predicted in `.tmp/_b652/r3/reds.predictions.txt` before
+the run: 16 verdicts, all as predicted.
+
+| Test | At b5b17337 |
+|---|---|
+| analyze `TestADecodersVerdictCountsOnlyOverTheFolderItWasAdmittedOn`, the runner | "sox FAIL formats: can't open input file", counted, where `ErrWaveformDirAway` is wanted |
+| …, through the pool | a failure recorded against the curve (Failures 1) |
+| `TestAFailedSyncCountsOnlyWhileTheSourceIsTheOneRead`: the source rewritten, removed, no longer opened, no longer read | a failure recorded in each: "the curve could not be written: input/output error" |
+
+Green there, as predicted: the new tests of points 2 to 4, which pin what
+round 2 built, and their neighbours. Their reds are mutations of the code
+each pins, on a copy of that tree (`.tmp/_b652/r3/reds_mut.predictions.txt`,
+12 verdicts, all as predicted):
+
+| Mutation | Red, and what it showed |
+|---|---|
+| M2: the parent opened by its path | "the barrier synced the directory at the path, not the one the root holds"; round 2's `TestFsyncInRootSyncsTheFileItsRootHolds` green under it, as the review said |
+| M3a: the read before the probe removed | a source whose read fails decoded and its curve written; through the pool committed (Done 1) |
+| M3b: the read before a verdict counts removed | "sox FAIL formats: can't read input file", counted; through the pool a failure recorded |
+| M4: links counted as curves | the guard answering admitted and the doctor's line "2 curve(s) proven missing", beside the subtest's round-2 assertions |
+
+On point 4: round 2's own assertions in that subtest fail under links
+counted too (round 2's R1: one repair run, `Album/` made through the link),
+because this fixture's runner writes by path (`writeRepairedCurve`), not
+through the real repair's root, whose steps the review traced. The new
+assertions fail under M4 on their own.
+
+### What round 3 built
+
+1. **One check before a countable verdict** (`askBeforeCounting`), wherever
+   a race can reach one: the directory at the path still the repair's (its
+   root once open, the job's identity before), else `ErrWaveformDirAway`;
+   the job not cancelled, else the context's, as `writeFailure` answered it,
+   before the source is opened; and the source still its row's version and
+   readable (`sourceReadable`: its stat, its open and a byte read), else
+   its refusal. It runs before a decoder's `SourceUnreadable` verdict is
+   returned and in `writeFailure`, which every write's failure and the
+   pool's sync go through. The two returns of `repairDir.rel` are path
+   arithmetic, which no race changes, and are not asked;
+   `CountsAgainstTheCurve`'s doc says so. A decoder's verdict on a job
+   already cancelled is now the context's, which the pool counted no more
+   than before (a shutdown by `p.closed`, the timeout before asking).
+2. **The parent's barrier observed**: `dirSyncSeen` shows a test each
+   descriptor `syncDirIn` syncs, and
+   `TestFsyncInRootSyncsTheParentItsRootHolds` compares it, by identity,
+   with the directory the root holds and the one at the path, both there.
+3. **Both reads pinned on every host**: `RepairSpec.open` is the repair's
+   own open of its source (`openSourceFile` in production), which a test
+   makes fail at the open or at the read, as root and on Windows alike, and
+   `TestBothReadsOfTheSourceAreAskedOnEveryHost` asks each read alone.
+4. **The link rule's own assertion**: the subtest asks the guard's answer
+   (refused, a volume away), the doctor's whole line, and that no failure is
+   recorded against any of the three curves.
+5. **The words**: B819 by its id alone in `ErrSourceChanged`'s doc, the
+   waveform package doc, `Pool.beforeCommit`'s doc, three test docblocks
+   and the two passages of round 2's record above; the rules and History
+   through the patch.
+
+### Negative controls
+
+Eight, on 2e4d11b3, predicted by name in
+`.tmp/_b652/r3/controls.predictions.txt` before the first ran (40
+verdicts), each edit with the one match it had to find, on a copy of the
+tree: all 40 as predicted, every red a test failure; `git status` clean
+after.
+
+| Control | Removed | Red, and what it showed |
+|---|---|---|
+| C1a | the one check's directory step | the verdict over a replaced folder counted, in the runner and through the pool; round 2's sync failure after the folder was replaced counted again. Green: the source's cases, both reads |
+| C1b | the one check before a verdict (round 2's source check alone) | the verdict over a replaced folder counted, both ways. Green: the sync's cases, both reads |
+| C1c | the one check in `writeFailure` (round 2's directory and cancellation alone) | a failure recorded for each of the four source cases. Green: the decoder's, round 2's sync test |
+| C2 | the parent's open through the root | "the barrier synced the directory at the path". Green: round 2's file test |
+| C3a | the read before the probe | a decoder started and the curve written for a source whose read fails; round 2's mode-0 case's decoder started too. Green: the read before a verdict |
+| C3b | the read before a verdict counts, and in `writeFailure` with it | the verdict counted, both ways; the sync's no-longer-opened and no-longer-read cases recorded; round 2's mode-0 case made unreadable during the decode counted. Green: the read before the probe, the rewritten and removed cases (the stat sees them) |
+| C3c | the read itself, at both sites, the open kept | both read cases and the sync's no-longer-read case. Green: the no-longer-opened case, round 2's mode-0 cases (the open sees them) |
+| C4 | the curves' no-links case (links counted as curves again) | the subtest's new assertions and its round-2 ones, and `TestALinkIsNeverACurve`. Green: the last curve deleted |
+
+Point 5 has no behaviour of its own to mutate: no committed text outside
+the rules and History, which the patch changes, describes what B819 holds.
