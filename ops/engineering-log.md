@@ -89872,3 +89872,49 @@ docs-check` passed, and again on a copy of the branch with the rules patch appli
 main's tip's merge base, 9d59c8f6 (the main this round merged), and against 3d0a0d05's;
 `make test` passed, 89 packages ok and none failing (2,071 s), the Linux-only tests run
 here; and `make build-all` passed.
+
+## 2026-11-09 — B728 B9 round 12: the words say what round 11 built
+
+Worker b728-b9, legion0 (Ubuntu 26.04, Linux 7.0, Go 1.27.3), branch `feat/b728-b9-choice`
+at 610d6858 (round 11 taken, its rules applied). The reviews of round 11 (Codex's one
+finding, Claude's four) and the two reviews of this round's brief (Codex's three, Claude's
+six), folded into its two points. No code path changes. Commits: ba8bf676 (the sink's
+comments, the bound's test's ordering, qualification 53) and this record. The rules are a
+patch the orchestrator applies (`rules-b728-b9-r12.patch`): `player.md`'s B765 bullet, with
+its long form.
+
+**The words.** Round 11's claims went past what it built. A Stop past the release's budget
+is answered by what the cleanup's record shows once the wait has taken the writer's reply,
+or none: a close that failed by then answers that failure with `ErrReleaseUnconfirmed`; one
+confirmed by then with nothing recorded, the life's cancellation, a stopped run, exit 0; one
+still under way, `ErrReleaseUnconfirmed` alone, exit 1, whatever the close does after the
+caller has answered. A close that hangs for 3 s meets the deadline's arm at 2 s with no
+reply sent, so its end reaches no answer (Claude's review of round 11). Round 11's re-read
+changed the answer only where the close landed after the wait was over and before the record
+was read; qualification 52's record said it did whichever way the wait took the answer, and
+53's record narrows that claim. And round 10's "no caller waits past that deadline" no
+longer held: a caller that took the writer's answer to a request it never ran waits in
+`record` up to `nativeEndAfterReply` more, counted from when `record` begins (the sink's
+`now()`), not from the deadline, which the caller can be past by then (Codex's review, and
+both reviews of the brief). `await`'s comment, `nativeEndAfterReply`'s doc, the rules line
+and its long form say so now. Qualification 52's own list of its cases and seams said two
+and one; it is corrected in place to three cases (the third, round 11's pin of the bounded
+wait) and two seams, `nativeSeams.ending` beside `nativeSeams.recorded`, nil outside a test.
+
+**The bound's test.** `TestNativeAnAnswerTheWriterSentAsItEndedWaitsForItsEnd` signalled the
+bound's deadline before the fake clock held it; it now registers the deadline first
+(Claude's review of round 11). That is an ordering cleanup, not a fix: the fake clock's
+`when` checks a deadline at registration and answers one already passed with a closed
+channel, so the old order lost nothing (Codex's review of the brief). There is no red, and
+the test passed 20 times running under `-race` (80 rows).
+
+Round 12's gates, on ba8bf676 at legion0, through the build slot: `make fmt` left the tree
+clean; `make vet` passed for linux/amd64, `GOOS=windows`, `GOOS=darwin` and `GOOS=linux
+GOARCH=386`; `go test -race` on `./internal/alsapcm/...` and `./internal/player/...` passed
+(93 s); the round's cases with their neighbours passed 20 times running under `-race`; CI's
+two native-integration runs passed under the overlay, every name CI requires among them;
+`make docs-check` passed, and again on a copy of the branch with the rules patch applied,
+where `TestEveryCitedTestNameExists`, `TestNoDocblockNamesAnotherDeclaration`,
+`TestEveryBridgeWordIsInTheProtocol`, `TestDSDOutputProtocolTokens` and
+`TestQualificationRunbookVersion` passed too; and the qualification check passed at 53
+against main's tip's merge base, 9d59c8f6.
