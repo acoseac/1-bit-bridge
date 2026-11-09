@@ -89856,3 +89856,19 @@ K5 (the loop-end answer's command fixed) in 2, the overtaken resume's and hand-o
 (the admission's command fixed) in 2, their refused rows; K8 (Resume's request named an
 activation) in 8; K9 (ActivatePaused's first activation named a resume) in 6. Nothing
 differed from the predictions.
+
+Round 11's gates, on a28e4f37 at legion0, through the build slot in two sessions: `make fmt`
+left the tree clean; `make vet` passed for linux/amd64, `GOOS=windows`, `GOOS=darwin` and
+`GOOS=linux GOARCH=386`; `go test -race` on `./internal/alsapcm/...`,
+`./internal/player/...` and `./cmd/bridge/...` passed (1,386 s); the round's three cases
+with their neighbours (round 10's, 9's and 8's cases, B765's, round 4's fence case,
+`TestNativeTeardownOwnership` and `TestDoPPrecision`) passed 20 times running under `-race`,
+each of their 308 tests and subtests 20 times by a run with `-v` beside it; CI's two
+native-integration runs passed under the overlay, every name CI requires among them; `make
+docs-check` passed, and again on a copy of the branch with the rules patch applied, where
+`TestEveryCitedTestNameExists`, `TestNoDocblockNamesAnotherDeclaration`,
+`TestEveryBridgeWordIsInTheProtocol`, `TestDSDOutputProtocolTokens` and
+`TestQualificationRunbookVersion` passed too; the qualification check passed at 52 against
+main's tip's merge base, 9d59c8f6 (the main this round merged), and against 3d0a0d05's;
+`make test` passed, 89 packages ok and none failing (2,071 s), the Linux-only tests run
+here; and `make build-all` passed.
