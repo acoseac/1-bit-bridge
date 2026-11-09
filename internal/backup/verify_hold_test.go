@@ -494,21 +494,19 @@ func TestARecheckGivenUpLeavesTheVetoItMade(t *testing.T) {
 	}
 }
 
-// TestAStoppedVerificationMarksNothingUntilTheWriteItStartedOverruns: a
-// verification stopped before it took the lock starts the write of its
-// INCOMPLETE (abandonPending), which waits for the lock (another holder has
-// it for a while) and then hangs. Its caller gives the worker up while it
-// waits for that write, and nothing is marked, then or once the worker has
-// ended and let go of this process's slot, while the write's own hold is
-// within its bound: a wait that overran nothing marks nothing (backlog B653's
-// fifth round, the Claude API's Low on round 4; the fourth round marked the
-// folder there, naming the write). Once the write's own step overruns its
-// bound, its hold marks the folder, naming the write, until the write ends.
-// Red on the round before, whose worker's give-up marked the folder at once.
-func TestAStoppedVerificationMarksNothingUntilTheWriteItStartedOverruns(t *testing.T) {
+// stopWithItsWriteParked runs a verification of a capture stopped before it
+// took the lock, whose write of INCOMPLETE (abandonPending) waits for the lock
+// another holder keeps 1.5 s past the stop, so the write takes it late and its
+// own bound ends late, then hangs inside its staging until the test's end; the
+// worker's open of the lock file answers half a second late, so its caller
+// gives it up while it waits for that write. It answers the backups folder,
+// the parking the write hangs in, and the verification's answer; the test's
+// end lets everything go and waits for every hold to end.
+func stopWithItsWriteParked(t *testing.T) (root string, p *parking, err error) {
+	t.Helper()
 	src := storeWithTracks(t, 5)
 	c := captureT(t, src)
-	root := filepath.Dir(c.Dir)
+	root = filepath.Dir(c.Dir)
 	// Another holder of the folder's lock, which lets it go 1.5 s after the
 	// stop, so the write takes the lock late and its own bound ends late.
 	other, err := fsutil.OpenLockFile(root, backup.LockFileName)
@@ -535,7 +533,7 @@ func TestAStoppedVerificationMarksNothingUntilTheWriteItStartedOverruns(t *testi
 		}
 		return fsutil.OpenLockFile(dir, name)
 	}))
-	p := newParking()
+	p = newParking()
 	t.Cleanup(backup.SetVerdictWriteFailuresForTest(func(dir string) error {
 		if dir == c.Dir {
 			p.park()
@@ -550,7 +548,24 @@ func TestAStoppedVerificationMarksNothingUntilTheWriteItStartedOverruns(t *testi
 	stopped, cancel := context.WithCancel(context.Background())
 	cancel()
 	time.AfterFunc(1500*time.Millisecond, release)
-	if _, err := backup.VerifySnapshot(stopped, c.Dir, backup.VerifyOptions{BackupsRoot: root}); !errors.Is(err, context.Canceled) {
+	_, err = backup.VerifySnapshot(stopped, c.Dir, backup.VerifyOptions{BackupsRoot: root})
+	return root, p, err
+}
+
+// TestAStoppedVerificationMarksNothingUntilTheWriteItStartedOverruns: a
+// verification stopped before it took the lock starts the write of its
+// INCOMPLETE (abandonPending), which waits for the lock and then hangs
+// (stopWithItsWriteParked). Its caller gives the worker up while it waits for
+// that write, and nothing is marked, then or once the worker has ended and
+// let go of this process's slot, while the write's own hold is within its
+// bound: a wait that overran nothing marks nothing (backlog B653's fifth
+// round, the Claude API's Low on round 4; the fourth round marked the folder
+// there, naming the write). Once the write's own step overruns its bound, its
+// hold marks the folder, naming the write. Red on the round before, whose
+// worker's give-up marked the folder at once.
+func TestAStoppedVerificationMarksNothingUntilTheWriteItStartedOverruns(t *testing.T) {
+	root, p, err := stopWithItsWriteParked(t)
+	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("the stopped verification answered %v, want its stop", err)
 	}
 	if s, held := backup.StuckCheckHere(root); held {
@@ -572,6 +587,34 @@ func TestAStoppedVerificationMarksNothingUntilTheWriteItStartedOverruns(t *testi
 	if s := awaitMarkedWithin(t, root, 2*backup.StopWriteBound+3*time.Second); s.Step != "its write of INCOMPLETE" {
 		t.Errorf("once the write overran its bound, the folder is marked at %q, want the write of INCOMPLETE", s.Step)
 	}
+}
+
+// TestAStoppedVerificationsMarkStandsUntilTheWriteItStartedEnds: the write of
+// INCOMPLETE a stopped verification started (abandonPending) that overruns
+// its own bound marks the folder, naming that write, and the mark stands
+// while the write hangs, though the verification's worker has ended and let
+// go of this process's slot long before, and goes once the write ends
+// (backlog B653's fourth round, whose worker kept a mark of its own until
+// then; since the fifth round the write's own hold keeps it, and the worker
+// marks nothing: TestAStoppedVerificationMarksNothingUntilTheWriteItStartedOverruns).
+func TestAStoppedVerificationsMarkStandsUntilTheWriteItStartedEnds(t *testing.T) {
+	root, p, err := stopWithItsWriteParked(t)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("the stopped verification answered %v, want its stop", err)
+	}
+	if s := awaitMarkedWithin(t, root, 2*backup.StopWriteBound+3*time.Second); s.Step != "its write of INCOMPLETE" {
+		t.Fatalf("once the write overran its bound, the folder is marked at %q, want the write of INCOMPLETE", s.Step)
+	}
+	for end := time.Now().Add(time.Second); time.Now().Before(end); time.Sleep(50 * time.Millisecond) {
+		if _, held := backup.StuckCheckHere(root); !held {
+			t.Fatal("the mark went while the write it names still hung")
+		}
+	}
+	if backup.SlotHeldForTest() {
+		t.Error("the stopped verification's worker still holds this process's slot")
+	}
+	p.release()
+	awaitClean(t)
 }
 
 // TestARecheckWhereNoDirectoryCanBeSyncedChecksAndRecordsNothing is backlog
