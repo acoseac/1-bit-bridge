@@ -60,6 +60,11 @@ type RepairSpec struct {
 	// its commit go through the same root. Nil when RunWaveformRepair is
 	// called by itself, which then opens one of its own.
 	dir *repairDir
+	// open is how the repair opens its source to read it a byte
+	// (sourceReadable): nil in production, which opens it as a file
+	// (openSourceFile). A test's stands in for an open or a read that fails,
+	// on any host and as root, where a mode of 0 stops neither.
+	open func(path string) (io.ReadCloser, error)
 }
 
 // RepairResult is the curve a repair wrote.
@@ -78,8 +83,7 @@ var ErrWaveformDirAway = errors.New("the waveform directory is not the one the r
 
 // ErrSourceChanged is a repair's refusal when the source is not the version
 // its analysis describes, by its size and mtime, the bridge's identity of a
-// source everywhere (a rewrite that keeps both is not seen, as the analysis
-// skip gate does not see it): a changed source goes through ordinary
+// source everywhere (backlog B819): a changed source goes through ordinary
 // analysis, whose skip gate now offers it, and a curve of it here would
 // describe bytes the row's measurements do not. No failure of the curve.
 var ErrSourceChanged = errors.New("the source is not the version its analysis describes")
@@ -91,16 +95,22 @@ var ErrSourceUnreachable = errors.New("the source could not be reached")
 
 // ErrCurveNotWritten marks a repair that rendered the curve and could not
 // write it (a directory, its scratch, the rename or the fsync), the waveform
-// directory still the one it was admitted on: a failure of the curve, which
-// counts toward its stop (CountsAgainstTheCurve).
+// directory still the one it was admitted on and the source still the
+// version it read, readable: a failure of the curve, which counts toward its
+// stop (CountsAgainstTheCurve).
 var ErrCurveNotWritten = errors.New("the curve could not be written")
 
 // CountsAgainstTheCurve reports whether a repair's error is a failure on the
 // curve's own account, which counts toward manifest.WaveformRegenStopAfter:
-// the decoder's verdict on a source that is still there, unchanged and
-// readable (ErrSourceUnreadable), or a curve rendered and not written
-// (ErrCurveNotWritten). Everything else is transient and counts nothing: an
-// unreachable, unreadable or changed source, the waveform directory gone, a
+// the decoder's verdict on the source (ErrSourceUnreadable), or a curve
+// rendered and not written (ErrCurveNotWritten). The repair returns either
+// only once the one check a countable failure waits on has passed, wherever
+// a race can reach it (askBeforeCounting: the directory at the path still the
+// repair's, the job not cancelled, the source still its row's version and
+// readable); the two returns of a path that is not below the waveform
+// directory (repairDir.rel), arithmetic no race changes, are not asked.
+// Everything else is transient and counts nothing: an unreachable,
+// unreadable or changed source, the waveform directory gone or replaced, a
 // decoder that is missing or was killed, a cancellation. The pool also counts
 // nothing for its per-job timeout and for a shutdown, before asking.
 func CountsAgainstTheCurve(err error) bool {
@@ -117,14 +127,17 @@ func CountsAgainstTheCurve(err error) bool {
 // before the source is opened or a decoder started; the source whether it is
 // still the version the row describes and can be read (sourceReadable); the
 // curve is decoded as RunAnalysis decodes it (decodeCurve), and a decoder's
-// verdict counts only once the source is asked again and is still there,
-// unchanged and readable, since a mount that dropped or a permission that
-// changed during the decode answers as a verdict too; the source is asked
-// again after a clean decode; the directory is opened as the repair's root
-// and compared with the identity the job carries; every directory (never the
-// waveform directory itself, mkdirBelow), the scratch, its stale copy's
-// removal, its cleanup and the rename go through that root, and the path is
-// asked again, against the root, just before the rename.
+// verdict counts only past the one check a countable failure waits on
+// (askBeforeCounting: the directory, the job's cancellation and the source,
+// read for a byte, asked again), since a volume that went, a mount that
+// dropped or a permission that changed during the decode answers as a
+// verdict too; the source is asked again after a clean decode; the directory
+// is opened as the repair's root and compared with the identity the job
+// carries; every directory (never the waveform directory itself,
+// mkdirBelow), the scratch, its stale copy's removal, its cleanup and the
+// rename go through that root, a failure of each counting only past the same
+// check (writeFailure), and the path is asked again, against the root, just
+// before the rename.
 func RunWaveformRepair(ctx context.Context, spec RepairSpec) (RepairResult, error) {
 	return runWaveformRepair(ctx, spec, toolchainSource)
 }
@@ -155,7 +168,7 @@ func runWaveformRepairWith(ctx context.Context, spec RepairSpec, src curveSource
 	if err := d.atPath(); err != nil {
 		return RepairResult{}, err
 	}
-	if err := sourceReadable(spec.AnalyzeSpec); err != nil {
+	if err := sourceReadable(spec); err != nil {
 		return RepairResult{}, err
 	}
 	pr := src.probe(ctx, spec.SourceAbsPath)
@@ -168,9 +181,12 @@ func runWaveformRepairWith(ctx context.Context, spec RepairSpec, src curveSource
 	}
 	if err != nil {
 		if SourceUnreadable(err) {
-			// Nor is its refusal of a source it could not open: a permission
-			// that changed answers as a verdict too, and stats as before.
-			if rerr := sourceReadable(spec.AnalyzeSpec); rerr != nil {
+			// Nor is its refusal of a source it could not open, or over a
+			// folder that went: a permission that changed, or a volume that
+			// went, during the decode answers as a verdict too, and the stat
+			// reads as before. The verdict is the curve's only past the one
+			// check a countable failure waits on.
+			if rerr := askBeforeCounting(ctx, d, spec); rerr != nil {
 				return RepairResult{}, rerr
 			}
 		}
@@ -184,13 +200,15 @@ func runWaveformRepairWith(ctx context.Context, spec RepairSpec, src curveSource
 	finalPath := spec.SidecarPath()
 	finalRel, err := d.rel(finalPath)
 	if err != nil {
+		// Path arithmetic on the spec's own paths, which no race changes:
+		// not asked (askBeforeCounting is for what a race can reach).
 		return RepairResult{}, curveNotWritten{err}
 	}
 	if hooks != nil && hooks.beforeMkdir != nil {
 		hooks.beforeMkdir()
 	}
 	if err := mkdirBelow(root, filepath.Dir(finalRel)); err != nil {
-		return RepairResult{}, writeFailure(ctx, d, err)
+		return RepairResult{}, writeFailure(ctx, d, spec, err)
 	}
 	tmpRel := finalRel + AnalysisTmpSuffix
 	// Clear any stale tmp from a prior interrupted run, as RunAnalysis does,
@@ -203,7 +221,7 @@ func runWaveformRepairWith(ctx context.Context, spec RepairSpec, src curveSource
 		}
 	}()
 	if err := writeWaveformTmpIn(root, tmpRel, finalRel, data); err != nil {
-		return RepairResult{}, writeFailure(ctx, d, err)
+		return RepairResult{}, writeFailure(ctx, d, spec, err)
 	}
 	if hooks != nil && hooks.beforeRename != nil {
 		hooks.beforeRename(finalPath+AnalysisTmpSuffix, finalPath)
@@ -217,7 +235,7 @@ func runWaveformRepairWith(ctx context.Context, spec RepairSpec, src curveSource
 		hooks.atRename()
 	}
 	if err := atomicwrite.RenameInRootCtx(ctx, root, tmpRel, finalRel); err != nil {
-		return RepairResult{}, writeFailure(ctx, d, err)
+		return RepairResult{}, writeFailure(ctx, d, spec, err)
 	}
 	cleanup = false
 	return RepairResult{
@@ -373,17 +391,21 @@ func sourceStillDescribed(spec AnalyzeSpec) error {
 
 // sourceReadable asks whether the source can be read at all: still the
 // version the row describes (sourceStillDescribed, which refuses what is no
-// regular file before anything opens it), then opened as a file
-// (fsutil.OpenAsFile, which waits for no named pipe put there since) and read
-// for a byte. A failed open or read is unreachable, never a verdict on the
+// regular file before anything opens it), then opened by the job's own open
+// (RepairSpec.open: openSourceFile, as a file) and read for a byte. A failed
+// open or read is unreachable, never a verdict on the
 // curve: a permission that changed leaves the stat as it was, and the
 // decoder's refusal of a file it cannot open would otherwise count. An empty
 // read of a file whose size said otherwise is another version.
-func sourceReadable(spec AnalyzeSpec) error {
-	if err := sourceStillDescribed(spec); err != nil {
+func sourceReadable(spec RepairSpec) error {
+	if err := sourceStillDescribed(spec.AnalyzeSpec); err != nil {
 		return err
 	}
-	f, _, err := fsutil.OpenAsFile(spec.SourceAbsPath)
+	open := spec.open
+	if open == nil {
+		open = openSourceFile
+	}
+	f, err := open(spec.SourceAbsPath)
 	if err != nil {
 		return fmt.Errorf("%w: %s", ErrSourceUnreachable, pathless(err))
 	}
@@ -399,16 +421,41 @@ func sourceReadable(spec AnalyzeSpec) error {
 	return fmt.Errorf("%w: %s", ErrSourceUnreachable, pathless(err))
 }
 
-// writeFailure classifies an error writing the curve: the directory at the
-// path no longer the repair's (its root, or before it opens the identity the
-// job carries) is the directory's refusal, a cancellation is the context's,
-// and anything else is a failure of the curve (ErrCurveNotWritten).
-func writeFailure(ctx context.Context, d *repairDir, err error) error {
-	if derr := d.atPath(); derr != nil {
-		return derr
+// openSourceFile is the repair's own open of its source, as a file
+// (fsutil.OpenAsFile, which waits for no named pipe put there since).
+func openSourceFile(path string) (io.ReadCloser, error) {
+	f, _, err := fsutil.OpenAsFile(path)
+	if err != nil {
+		return nil, err
+	}
+	return f, nil
+}
+
+// askBeforeCounting is the one check a failure that would count against the
+// curve waits on, wherever a race can reach it: the decoder's verdict, and
+// every write's failure and the pool's sync's (writeFailure). In order: the
+// directory at the path still the repair's (its root once it is open, the
+// identity the job carries before), else the directory's refusal; the job
+// not cancelled, else the context's, as writeFailure answered it, before the
+// source is opened; and the source still the version the row describes and
+// readable (sourceReadable: its stat, its open and a byte read), else the
+// source's refusal. None of them counts. Nil leaves the failure the curve's.
+func askBeforeCounting(ctx context.Context, d *repairDir, spec RepairSpec) error {
+	if err := d.atPath(); err != nil {
+		return err
 	}
 	if ctx.Err() != nil {
 		return ctx.Err()
+	}
+	return sourceReadable(spec)
+}
+
+// writeFailure classifies an error writing the curve, or syncing it: what
+// askBeforeCounting refuses is that refusal, and anything else is a failure
+// of the curve (ErrCurveNotWritten).
+func writeFailure(ctx context.Context, d *repairDir, spec RepairSpec, err error) error {
+	if rerr := askBeforeCounting(ctx, d, spec); rerr != nil {
+		return rerr
 	}
 	return curveNotWritten{err}
 }

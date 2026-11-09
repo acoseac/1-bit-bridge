@@ -230,8 +230,8 @@ func openedIdentity(t *testing.T, path string) os.FileInfo {
 // again; or nothing at the path at all) makes no directory and no file at
 // the path, and what it answers counts nothing against the curve; one that
 // goes once the repair's root is open leaves no file in the directory the
-// root holds either, its scratch removed there (the curve's directories it
-// made there stay). Asked first, before the source is opened; again after
+// root holds either, its scratch removed there (backlog B819 has the rest).
+// Asked first, before the source is opened; again after
 // the decode, as the root opens on the job's identity; and again before the
 // rename. A guard: it asserts only what must not happen, so it is green on
 // 3d0a0d05, which has no repair, and its negative controls (the checks

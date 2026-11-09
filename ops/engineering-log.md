@@ -88779,8 +88779,7 @@ R3e, R6c) are their red.
    (`repairDir.atPath`), then the source's mtime and size with the job's
    (`sourceStillDescribed`). A mismatch commits nothing and counts nothing:
    the directory's is `ErrWaveformDirAway`, the source's `ErrSourceChanged`,
-   which leaves it to ordinary analysis. A rewrite that keeps both is not
-   seen, as the analysis skip gate does not see one.
+   which leaves it to ordinary analysis (backlog B819).
 4. **The sync's failure** goes through `writeFailure`: with the directory at
    the path no longer the root it is the directory's refusal, a cancellation
    is the context's, and anything else is `ErrCurveNotWritten`, counted.
@@ -88800,9 +88799,8 @@ R3e, R6c) are their red.
 
 `internal/integrity/waveform.go`'s package comment says what this built: a
 volume that goes before the decode is done gets nothing and no strike; one
-that goes after the root opened gets nothing at its path and no strike, and
-what the root reached meanwhile (the curve's directories, at most the curve)
-is in the directory it opened, which no row records.
+that goes after the root opened gets nothing at its path and no strike
+(backlog B819).
 
 ### Negative controls
 

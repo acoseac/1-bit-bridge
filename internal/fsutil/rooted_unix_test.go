@@ -130,3 +130,50 @@ func TestFsyncInRootSyncsTheFileItsRootHolds(t *testing.T) {
 		t.Error("FsyncInRoot reached a file only the path's directory holds")
 	}
 }
+
+// TestFsyncInRootSyncsTheParentItsRootHolds: the directory barrier reaches
+// the file's directory in the root, never the one at the path, though both
+// are there, so that an open of either succeeds: the descriptor each sync is
+// made through (dirSyncSeen) is compared with both candidates by identity.
+// Red with the parent opened by its path (backlog B652, round 3).
+func TestFsyncInRootSyncsTheParentItsRootHolds(t *testing.T) {
+	r, path, aside := rootThenReplace(t)
+	for _, dir := range []string{filepath.Join(aside, "a"), filepath.Join(path, "a")} {
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(aside, "a", "curve.bin"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var synced []os.FileInfo
+	seen := func(d *os.File) {
+		info, err := d.Stat()
+		if err != nil {
+			t.Errorf("stat the directory synced: %v", err)
+			return
+		}
+		synced = append(synced, info)
+	}
+	dirSyncSeen.Store(&seen)
+	t.Cleanup(func() { dirSyncSeen.Store(nil) })
+	if err := FsyncInRoot(r, filepath.Join("a", "curve.bin")); err != nil {
+		t.Fatalf("FsyncInRoot: %v", err)
+	}
+	inTheRoot, err := os.Stat(filepath.Join(aside, "a"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	atThePath, err := os.Stat(filepath.Join(path, "a"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	switch {
+	case len(synced) != 1:
+		t.Errorf("%d directories synced, want the file's one", len(synced))
+	case os.SameFile(synced[0], atThePath):
+		t.Error("the barrier synced the directory at the path, not the one the root holds")
+	case !os.SameFile(synced[0], inTheRoot):
+		t.Error("the barrier synced a directory that is not the file's in the root")
+	}
+}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 )
 
 // SyncsParentDir reports whether SyncParentDir is a barrier on this
@@ -48,6 +49,14 @@ func SyncParentDir(filePath string) (err error) {
 	return nil
 }
 
+// dirSyncSeen, a test's, is shown each directory syncDirIn is about to
+// sync, by the descriptor the sync is made through, so that a test can ask
+// which directory the barrier reaches (os.SameFile on the descriptor's
+// stat), where the directory the root holds and the one at its path are
+// both there. Nil outside a test; an atomic pointer, as activeOwnerSeams
+// is, since a sync can run on another goroutine while a test swaps it.
+var dirSyncSeen atomic.Pointer[func(d *os.File)]
+
 // syncDirIn is SyncParentDir's barrier through r: the directory dir in r,
 // opened through r and synced.
 func syncDirIn(r *os.Root, dir string) (err error) {
@@ -60,6 +69,9 @@ func syncDirIn(r *os.Root, dir string) (err error) {
 			err = fmt.Errorf("close dir: %w", cerr)
 		}
 	}()
+	if seen := dirSyncSeen.Load(); seen != nil {
+		(*seen)(d)
+	}
 	if syncErr := d.Sync(); syncErr != nil {
 		return fmt.Errorf("sync dir: %w", syncErr)
 	}

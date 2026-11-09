@@ -81,14 +81,15 @@ func (p *Pool) processRepair(spec RepairSpec) jobOutcome {
 // beforeCommit is what a repair's commit waits on. Durability first, as for
 // an analysis: the curve synced through the root it was written through
 // (p.syncIn), a failure of it classified as every write failure is
-// (writeFailure), so a sync that failed because the directory went is the
-// directory's refusal and no strike. The file is NOT removed on a failure:
-// its path is the curve's canonical one, which a row may name. Then, right
-// before the commit, the directory at the path is asked whether it is still
-// that root, and the source whether it is still the version the decode read:
-// a root keeps the directory it opened, so a directory replaced after the
-// write took the curve and its sync with it, and committed, the row would
-// name a curve that is not at its path; a source rewritten since is another
+// (writeFailure), so a sync that failed while the directory went, or the
+// source changed, went or could no longer be read, is that refusal and no
+// strike. The file is NOT removed on a failure: its path is the curve's
+// canonical one, which a row may name. Then, right before the commit, the
+// directory at the path is asked whether it is still that root, and the
+// source whether it is still the version the decode read: a directory at the
+// path that is not the root is not the one the curve was written into, and
+// committed, the row would name a curve that is not at its path (backlog
+// B819); a source rewritten since is another
 // version than the curve's, which ordinary analysis offers. Neither commits,
 // and neither counts. A runner of a test's that wrote without the job's root
 // has one opened here, on the same identity.
@@ -99,10 +100,11 @@ func (p *Pool) beforeCommit(ctx context.Context, spec RepairSpec, d *repairDir, 
 	}
 	rel, err := d.rel(res.WaveformPath)
 	if err != nil {
+		// Path arithmetic, as the runner's, which no race changes: not asked.
 		return curveNotWritten{err}
 	}
 	if err := p.syncIn(root, rel); err != nil {
-		return writeFailure(ctx, d, err)
+		return writeFailure(ctx, d, spec, err)
 	}
 	if err := d.atPath(); err != nil {
 		return err

@@ -586,6 +586,22 @@ func TestNoCurveIsRenderedAgainOverAWaveformDirectoryGoneAwayOrEmptied(t *testin
 		if left, err := os.ReadDir(elsewhere); err != nil || len(left) != 0 {
 			t.Errorf("the folder the link leads to holds %v (%v), want nothing made through the link", left, err)
 		}
+		// The refusal itself, as the guard and the doctor say it, and no
+		// failure recorded against any curve (round 3): with a link counted
+		// as a curve, the judgment admits the three rows.
+		if a := f.regen.guard.Ask(f.tracks[0]); a.Kind != integrity.WaveformRefused ||
+			a.Judgment.Refusal != integrity.WaveformRefusalDirAway {
+			t.Errorf("the guard answers %v (%+v), want the regeneration refused as a volume away", a.Kind, a.Judgment)
+		}
+		const refused = "regeneration refused: the waveform directory holds no curve, or changed while it was read (a volume that is away)"
+		if c := waveformRegenLine(t, doctorRegenInstall(t, f)); c.Status != doctor.Warn || c.Summary != refused {
+			t.Errorf("the doctor's line: %+v, want %q", c, refused)
+		}
+		for _, rel := range f.tracks {
+			if rec, err := f.store.GetWaveformRegenFailure(f.ctx, rel); err != nil || rec != nil {
+				t.Errorf("a regeneration failure is recorded for %s: %+v (%v), want none", rel, rec, err)
+			}
+		}
 	})
 	t.Run("emptied past the threshold", func(t *testing.T) {
 		f := newRegenFixture(t, 30)

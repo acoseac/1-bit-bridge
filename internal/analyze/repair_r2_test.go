@@ -59,7 +59,7 @@ func requireBody(t *testing.T, path, want string) {
 // repair's own names, is left exactly as it was put there: nothing made in
 // it, nothing removed, both of them intact; an empty one gets nothing; and
 // one put there between the last check and the rename keeps its scratch and
-// its curve, the rename landing in the directory the repair was admitted on.
+// its curve, the rename made through the root (backlog B819 has the rest).
 // Red at round 1's code for the first, whose stale-scratch removal by path
 // deleted the scratch there (backlog B652, round 2).
 func TestARepairWorksOnlyThroughTheDirectoryItWasAdmittedOn(t *testing.T) {
@@ -106,10 +106,9 @@ func TestARepairWorksOnlyThroughTheDirectoryItWasAdmittedOn(t *testing.T) {
 		}
 	})
 	t.Run("a folder put there between the last check and the rename", func(t *testing.T) {
-		// The rename itself goes through the root: the curve lands in the
-		// directory the repair was admitted on, now moved aside, and the
-		// scratch and curve at its names in the folder now at the path stay
-		// as they are. The pool's check before the commit refuses the commit.
+		// The rename itself goes through the root, and the scratch and curve
+		// at its names in the folder now at the path stay as they are. The
+		// pool's check before the commit refuses the commit (backlog B819).
 		f := newRepairFixture(t)
 		hooks := &repairHooks{atRename: func() {
 			f.replaceDir(t)
@@ -155,11 +154,12 @@ func requireRefusedBeforeItsCommit(t *testing.T, f *repairPoolFixture, p *Pool, 
 // TestARepairCommitsOnlyWhileItsDirectoryAndItsSourceAreTheOnesItRead: right
 // before the commit, the directory at the path is asked whether it is still
 // the root the curve was written into, and the source whether it is still the
-// version the decode read. A root keeps the folder it opened, so a folder
-// replaced after the curve's sync took the curve and the sync with it, and a
-// commit would record a curve that is not at its path; a source rewritten
-// during the sync is another version than the curve's. Neither commits, and
-// neither strikes. Red at round 1's code, which committed both.
+// version the decode read. A root keeps the folder it opened, so past a
+// folder replaced after the curve's sync the folder at the path is not the
+// one the curve was written into, and a commit would record a curve that is
+// not at its path (backlog B819); a source rewritten during the sync is
+// another version than the curve's. Neither commits, and neither strikes.
+// Red at round 1's code, which committed both.
 func TestARepairCommitsOnlyWhileItsDirectoryAndItsSourceAreTheOnesItRead(t *testing.T) {
 	t.Run("the folder replaced after a successful sync", func(t *testing.T) {
 		f := newRepairPoolFixture(t)

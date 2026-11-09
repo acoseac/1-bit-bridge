@@ -65,9 +65,9 @@ import (
 // directory, scratch, removal, rename and sync of the repair goes through
 // the root (analyze.RunWaveformRepair), which keeps the directory it
 // opened, and the path is compared with the root again before the rename
-// and right before the commit, which is refused; what the root reached
-// meanwhile (the curve's directories, at most the curve) is in the
-// directory it opened, and nothing records it.
+// and right before the commit, which is refused (backlog B819). A failure
+// counts against the curve only once the directory and the source are
+// asked again, wherever a race can reach it.
 //
 // Deliberately NOT a reaper. Nothing here deletes: LocateWaveform
 // classifies, the adapter adopts, and a repair only ever renames a curve
