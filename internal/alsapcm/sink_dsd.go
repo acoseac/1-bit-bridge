@@ -49,7 +49,8 @@ const nativeReleaseBudget = 2 * time.Second
 // last device call, and closes done right after, with no device call
 // between, so a caller that took it reads the completed cleanup's record but
 // where the scheduler has not yet run the writer that far (record, B728 B9
-// round 11).
+// round 11). It is counted from when record begins, not from the release's
+// deadline, which a caller can be past by then (round 12).
 const nativeEndAfterReply = 100 * time.Millisecond
 const nativeCloseMargin = 500 * time.Millisecond
 const nativeLedgerMax = 1024
@@ -404,11 +405,19 @@ func (s *DSDSink) Activate(ctx context.Context, gen uint64) error {
 // (abandoned) and the deadline the release unconfirmed (B728 B9 rounds 8 and
 // 9). Once the life has ended every arm answers by one verdict, the reply
 // the writer sent read whichever arm won, without waiting where the writer
-// has ended or the budget passed, so no caller, on the life or off it, waits
-// past that deadline, and none is answered by the arm a scheduler picked
-// (verdict, round 10); the reply read after the wait is judged with the
-// record read after it, so a reply the writer sent once the wait was over is
-// judged with what the writer recorded before it (record, round 11).
+// has ended or the budget passed, and none is answered by the arm a
+// scheduler picked (verdict, round 10); the reply read after the wait is
+// judged with the record read after it, so a reply the writer sent once the
+// wait was over is judged with what the writer recorded before it (record,
+// round 11). Past the release's budget, then, the answer is what that record
+// shows: a close that failed by then, that failure with
+// ErrReleaseUnconfirmed; one confirmed by then with nothing recorded, the
+// life's cancellation; one still under way, ErrReleaseUnconfirmed alone,
+// whatever the close does after the caller has answered. No caller waits
+// past the release's deadline but one that took the writer's answer to a
+// request it never ran: its record waits for the writer's end up to
+// nativeEndAfterReply more, counted from when record begins (the sink's
+// now()), not from that deadline (round 12).
 func (s *DSDSink) await(ctx context.Context, r *nativeRequest) error {
 	if h := s.seams.awaiting; h != nil {
 		h()
