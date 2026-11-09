@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -144,65 +145,108 @@ func TestOnlyAWriteThatInterruptsNeedsTheGoAhead(t *testing.T) {
 // TestAnOccurrenceBesideAWriteIsNotRevoked (B728 B9; binding note 3): an
 // occurrence that starts while a write is in flight is admitted under what
 // the write leaves published, and never revoked for it: one starting once
-// the state is durable and before the write publishes plays the new set; one
-// starting while a write that then fails is under way waits for it, outside
-// its session's lock, and plays the set as it was; one starting while a write
-// that lands and is not known to be durable is under way waits, and is then
-// refused before anything plays as dsd_choice_uncertain, which the
-// intersection of the two states publishes at its rate.
+// the state is durable and before the write publishes plays the new set,
+// converted, without waiting for the write; one starting while a write that
+// then fails is under way waits for it, outside its session's lock, and plays
+// the set as it was; one starting while a write that lands and is not known
+// to be durable is under way waits, and is then refused before anything
+// plays as dsd_choice_uncertain, which the intersection of the two states
+// publishes at its rate. The first is taken both ways round, each by
+// barriers alone (round 13): heard while the DAC holds it, its write parked,
+// then playing on as the write publishes; and played out, its session ended
+// and the track it heard cleared, before the case looks, as CI's macOS run
+// took it (run 42558744822), the case then reading only what stays. A
+// case's write is parked in its seam (parkedWrite) and let go by its cleanup
+// whatever the case did.
 func TestAnOccurrenceBesideAWriteIsNotRevoked(t *testing.T) {
-	t.Run("after the state's write and before the publish", func(t *testing.T) {
-		p := newParkedWrite()
-		d := besideAWrite(t, &playback.Seams{ChoiceWritten: func(err error) {
-			if err == nil {
-				p.park()
-			}
-		}})
-		t.Cleanup(p.cleanup(t))
+	// inTheWindow is a rig whose write of convert is parked once its state's
+	// write is durable and before it publishes, the write's answer, and a
+	// count of any occurrence's waits for a pending write.
+	inTheWindow := func(t *testing.T) (*dsdRig, *parkedWrite, <-chan playback.ChoiceResult, *atomic.Int32) {
+		t.Helper()
+		p, awaited := newParkedWrite(), &atomic.Int32{}
+		d := besideAWrite(t, &playback.Seams{
+			ChoiceWritten: func(err error) {
+				if err == nil {
+					p.park()
+				}
+			},
+			ChoiceAwaited: func(engine.OccurrenceID) { awaited.Add(1) },
+		})
+		t.Cleanup(p.letGo)
 		res := d.choose(choiceReq(t, d, dsdstate.ModeConvert, 1))
 		p.reached(t, res, "the window between its state's write and its publish")
-		d.k.Free()
-		d.play()
-		s := d.waitSnap("a heard", func(s *engine.Snapshot) bool { _, ok := s.Track(); return ok })
-		p.letGo()
-		wantOutcome(t, answer(t, res), playback.ChoiceWritten)
-		s = d.waitEnded()
-		notRevoked(t, d, s)
+		return d, p, res, awaited
+	}
+	// admittedInTheWindow fails t unless the occurrence was admitted under the
+	// new set, converted in one PCM sink, without waiting for the write, which
+	// is still parked: what it played, it played before the write published.
+	admittedInTheWindow := func(t *testing.T, d *dsdRig, res <-chan playback.ChoiceResult, awaited *atomic.Int32) {
+		t.Helper()
 		if got := d.openFormats(); len(got) != 0 || d.pcmOpens() != 1 {
 			t.Errorf("the occurrence opened DSD %v and %d PCM sinks, want it converted, in one PCM sink: the new set", got, d.pcmOpens())
+		}
+		if n := awaited.Load(); n != 0 {
+			t.Errorf("the occurrence waited %d times for the parked write, want none: admitted in the window, it waits for nothing", n)
+		}
+		select {
+		case r := <-res:
+			t.Fatalf("the write was answered (%s) while it was parked", r.Outcome)
+		default:
+		}
+	}
+	t.Run("after the state's write and before the publish", func(t *testing.T) {
+		d, p, res, awaited := inTheWindow(t)
+		// The DAC plays only what the case grants: the occurrence is heard 50 ms
+		// in and held there, so its session cannot end before the case looks.
+		d.play()
+		d.k.Await(t, "the occurrence's sink to fill the hardware buffer and wait on the DAC", runningAndWaiting)
+		d.k.Play(t, 50*time.Millisecond)
+		d.tick()
+		s := d.waitSnap("a heard, its Details known", func(s *engine.Snapshot) bool { tr, ok := s.Track(); return ok && tr.HasDetails })
+		if tr, _ := s.Track(); tr.Details.Lossless || tr.Details.Codec != "DSD" {
+			t.Errorf("the track heard has Details %+v, want it converted: DSD, not lossless", tr.Details)
+		}
+		admittedInTheWindow(t, d, res, awaited)
+		// The write publishes while the occurrence plays, and revokes nothing.
+		p.letGo()
+		wantOutcome(t, answer(t, res), playback.ChoiceWritten)
+		d.k.Free()
+		s = d.waitStopped(engine.ReasonEndOfQueue)
+		notRevoked(t, d, s)
+		if got := d.openFormats(); len(got) != 0 || d.pcmOpens() != 1 {
+			t.Errorf("the occurrence opened DSD %v and %d PCM sinks by its end, want its one PCM sink", got, d.pcmOpens())
 		}
 	})
 	t.Run("after the state's write and before the publish, played out before the case looks", func(t *testing.T) {
-		p := newParkedWrite()
-		d := besideAWrite(t, &playback.Seams{ChoiceWritten: func(err error) {
-			if err == nil {
-				p.park()
-			}
-		}})
-		t.Cleanup(p.cleanup(t))
-		res := d.choose(choiceReq(t, d, dsdstate.ModeConvert, 1))
-		p.reached(t, res, "the window between its state's write and its publish")
+		d, p, res, awaited := inTheWindow(t)
+		// The ordering CI's macOS run took, made the case's: the occurrence
+		// plays out and its session ends, the engine stopped and the track it
+		// heard cleared at the release, before the case looks. The case reads
+		// what stays: the tracks the engine heard, the backend's events and
+		// Details, the sinks opened.
 		d.k.Free()
 		d.play()
-		// The ordering CI's macOS run took (run 42558744822, B728 B9 round
-		// 13), made the case's: the occurrence plays out and its session ends,
-		// the engine stopped and the track it heard cleared at the release,
-		// before the case looks.
-		d.waitEnded()
-		s := d.waitSnap("a heard", func(s *engine.Snapshot) bool { _, ok := s.Track(); return ok })
+		s := d.waitStopped(engine.ReasonEndOfQueue)
+		if n := s.TrackCount(); n != 1 {
+			t.Errorf("the engine heard %d tracks, want a", n)
+		}
+		o := d.firstOcc()
+		if n := count(d.rec.events(), "audible", o); n != 1 {
+			t.Errorf("the backend reported occurrence %d heard %d times, want once: %s", o, n, kinds(d.rec.events()))
+		}
+		if det, ok := d.detailsOf(o); !ok || det.Lossless || det.Codec != "DSD" {
+			t.Errorf("the occurrence's Details %+v (reported: %v), want it converted: DSD, not lossless", det, ok)
+		}
+		notRevoked(t, d, s)
+		admittedInTheWindow(t, d, res, awaited)
 		p.letGo()
 		wantOutcome(t, answer(t, res), playback.ChoiceWritten)
-		s = d.waitEnded()
-		notRevoked(t, d, s)
-		if got := d.openFormats(); len(got) != 0 || d.pcmOpens() != 1 {
-			t.Errorf("the occurrence opened DSD %v and %d PCM sinks, want it converted, in one PCM sink: the new set", got, d.pcmOpens())
-		}
 	})
 	t.Run("while a write that fails is under way", func(t *testing.T) {
-		pending, release, waiting := make(chan struct{}), make(chan struct{}), make(chan engine.OccurrenceID, 1)
-		var once sync.Once
+		p, waiting := newParkedWrite(), make(chan engine.OccurrenceID, 1)
 		d := besideAWrite(t, &playback.Seams{
-			ChoicePending: func() { once.Do(func() { close(pending); <-release }) },
+			ChoicePending: p.park,
 			ChoiceAwaited: func(o engine.OccurrenceID) {
 				select {
 				case waiting <- o:
@@ -210,14 +254,14 @@ func TestAnOccurrenceBesideAWriteIsNotRevoked(t *testing.T) {
 				}
 			},
 		})
-		t.Cleanup(func() { closeOnce(release) })
+		t.Cleanup(p.letGo)
 		d.store.Fail(errors.New("no space left on device"))
 		res := d.choose(choiceReq(t, d, dsdstate.ModeConvert, 1))
-		reached(t, pending, res, "its pending window")
+		p.reached(t, res, "its pending window")
 		d.k.Free()
 		go func() { _ = d.eng.Play(bg) }()
 		awaitedBy(t, waiting, res)
-		closeOnce(release)
+		p.letGo()
 		wantOutcome(t, answer(t, res), playback.ChoicePersistFailed)
 		s := d.waitEnded()
 		notRevoked(t, d, s)
@@ -229,10 +273,9 @@ func TestAnOccurrenceBesideAWriteIsNotRevoked(t *testing.T) {
 		}
 	})
 	t.Run("while a write that lands is under way", func(t *testing.T) {
-		pending, release, waiting := make(chan struct{}), make(chan struct{}), make(chan engine.OccurrenceID, 1)
-		var once sync.Once
+		p, waiting := newParkedWrite(), make(chan engine.OccurrenceID, 1)
 		d := besideAWrite(t, &playback.Seams{
-			ChoicePending: func() { once.Do(func() { close(pending); <-release }) },
+			ChoicePending: p.park,
 			ChoiceAwaited: func(o engine.OccurrenceID) {
 				select {
 				case waiting <- o:
@@ -240,13 +283,13 @@ func TestAnOccurrenceBesideAWriteIsNotRevoked(t *testing.T) {
 				}
 			},
 		})
-		t.Cleanup(func() { closeOnce(release) })
+		t.Cleanup(p.letGo)
 		d.store.Land(fmt.Errorf("the directory's barrier failed: %w", atomicwrite.ErrLanded))
 		res := d.choose(choiceReq(t, d, dsdstate.ModeConvert, 1))
-		reached(t, pending, res, "its pending window")
+		p.reached(t, res, "its pending window")
 		go func() { _ = d.eng.Play(bg) }()
 		awaitedBy(t, waiting, res)
-		closeOnce(release)
+		p.letGo()
 		wantOutcome(t, answer(t, res), playback.ChoicePersistUncertain)
 		s := d.waitEnded()
 		notRevoked(t, d, s)
@@ -287,7 +330,7 @@ func TestACaseEndingWithItsWriteParkedLetsItGo(t *testing.T) {
 					p.park()
 				}
 			}})
-			t.Cleanup(p.cleanup(t))
+			t.Cleanup(p.letGo)
 			res = d.choose(choiceReq(t, d, dsdstate.ModeConvert, 1))
 			p.reached(t, res, "the window between its state's write and its publish")
 			// The case ends here, its write parked, as one that fails here does.
@@ -329,11 +372,15 @@ func notRevoked(t *testing.T, d *dsdRig, s *engine.Snapshot) {
 // parkedWrite is a choice's write parked in one of its seams
 // (Seams.ChoiceWritten or ChoicePending) until the test lets it go: the
 // seam's first call (park) closes in and waits until letGo. A case makes it
-// before its rig, whose seam parks in it, and registers its cleanup once the
-// rig is built, so that the cleanup runs before the rig's stop.
+// before its rig, whose seam parks in it, and registers letGo as its cleanup
+// once the rig is built, so that the write is let go before the rig's stop,
+// whatever the case did. The write waits outside the Once that marks it
+// parked, and letGo has a Once of its own, so letting it go asks nothing of
+// the seam (B728 B9 round 13: the first case's cleanup asked the seam's Once
+// first, which the parked write held until that cleanup let it go, after).
 type parkedWrite struct {
-	once    sync.Once
-	in, out chan struct{}
+	parked, freed sync.Once
+	in, out       chan struct{}
 }
 
 func newParkedWrite() *parkedWrite {
@@ -341,7 +388,16 @@ func newParkedWrite() *parkedWrite {
 }
 
 // park is the seam's: its first call parks the write.
-func (p *parkedWrite) park() { p.once.Do(func() { close(p.in); <-p.out }) }
+func (p *parkedWrite) park() {
+	first := false
+	p.parked.Do(func() {
+		first = true
+		close(p.in)
+	})
+	if first {
+		<-p.out
+	}
+}
 
 // reached waits for the write to park, failing t where it is answered first
 // or does not park within the watchdog.
@@ -350,27 +406,8 @@ func (p *parkedWrite) reached(t *testing.T, res <-chan playback.ChoiceResult, wh
 	reached(t, p.in, res, what)
 }
 
-// letGo lets the parked write go on.
-func (p *parkedWrite) letGo() { closeOnce(p.out) }
-
-// cleanup is the case's cleanup of its write: the seam's Once asked first,
-// within the watchdog, then the write let go.
-func (p *parkedWrite) cleanup(t *testing.T) func() {
-	return func() {
-		asked := make(chan struct{})
-		go func() {
-			p.once.Do(func() {})
-			close(asked)
-		}()
-		select {
-		case <-asked:
-		case <-time.After(alsapcm.Watchdog()):
-			alsapcm.LogGoroutines(t)
-			t.Errorf("the case's cleanup waited %v for its write's seam, whose Once the parked write holds until it is let go", alsapcm.Watchdog())
-		}
-		p.letGo()
-	}
-}
+// letGo lets the parked write go on, and every later call of its seam.
+func (p *parkedWrite) letGo() { p.freed.Do(func() { close(p.out) }) }
 
 // reached waits for a write to come to the seam that closes at, failing t
 // where it ends first or comes to none within the watchdog.
@@ -398,14 +435,5 @@ func awaitedBy(t *testing.T, waiting <-chan engine.OccurrenceID, res <-chan play
 	case <-time.After(alsapcm.Watchdog()):
 		alsapcm.LogGoroutines(t)
 		t.Fatalf("an occurrence whose rate the pending write changes did not wait for it within %v", alsapcm.Watchdog())
-	}
-}
-
-// closeOnce closes c unless it is closed.
-func closeOnce(c chan struct{}) {
-	select {
-	case <-c:
-	default:
-		close(c)
 	}
 }
