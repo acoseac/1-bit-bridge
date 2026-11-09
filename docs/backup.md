@@ -54,11 +54,17 @@ A snapshot already verified is marked, durably, as being checked again
 before its check begins, and until that check's verdict is written and
 durable no reader takes the snapshot for verified, whatever happens to the
 write. Only a check that finishes clears that mark: one that is stopped,
-runs past its deadline or fails on an error of the bridge's own leaves it.
-Where the storage cannot keep that mark, the snapshot is not checked again:
-`bridge backup --verify` says so, and what its earlier check found. When a
-verdict cannot be written, `bridge backup --verify` says what the check found
-and, apart, what the record reads.
+runs past its deadline or fails on an error of the bridge's own leaves it,
+and so does one given up (below), but for a clearing its storage had
+already begun when it was given up, which finishes, the snapshot then
+reading what that finished check found and wrote. Where the storage cannot
+keep that mark, the snapshot is not checked again: `bridge backup --verify`
+says so, and what its earlier check found. When a verdict cannot be
+written, `bridge backup --verify` says what the check found and, apart, what
+the record reads. When the record cannot be read back once the check has
+written it, or written nothing, `bridge backup --verify`, `bridge backup` and
+the scheduled snapshot say so and what the write did, and never take what
+the check found for the record; the command then exits 1.
 
 On Windows no folder can be synced, so that mark cannot be kept, and a
 re-verification of a snapshot already verified is never recorded there: the
@@ -75,12 +81,14 @@ the folder's lock) has a bound, counted from the moment the check took the
 folder's lock, and so does a prune run on its own. A step that does not
 answer within it (storage that stops answering) is given up, and nothing
 more is checked or pruned; a write given up writes nothing from then on,
-though one its storage had already carried out stays. The record is written
+though one its storage had already carried out stays, and a check given up
+before its verdict's write began writes no verdict. The record is written
 once more, where that can still be done, to say the check did not finish,
 unless it holds the verdict of an earlier check that finished, which stays.
 `bridge backup --verify` and the scheduled snapshot say how far that write
 went (it wrote nothing, it wrote its record, or its write did not finish)
-and what the record reads, or that it could not be read back. A step that is
+and what the record reads, or that it could not be read back, or that its
+read-back was given up. A step that is
 slow and keeps within its bound changes nothing.
 
 Until a step given up ends, no other check or prune of those snapshots runs
