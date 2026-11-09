@@ -90439,3 +90439,302 @@ The backlog file is not on legion0, so these go to the PR's report:
 under a verification's hold), holds the lock with no bound on its steps; a
 claim's step is bounded and no test hangs one; and what stays open of a
 hold given up is named here by its id alone, backlog B653.
+
+## 2026-11-09 — B653 PR 1 round 5: nothing lands after a give-up, no veto goes without a check that ended and earns it, no prune after a recheck that recorded nothing, every holder and every step bounded
+
+The fifth round of backlog B653's first PR, on `feat/b653-snapshot-verify`
+(PR #1444) from round 4's tip with its rules and `main` merged (56eb3bde);
+worker b653 on legion0 (Ubuntu 26.04, linux/amd64, go1.27.3,
+`GOTOOLCHAIN=local`, `GOPROXY=off`). It answers round 4's two reviews
+(Codex's findings and the Claude API's) and both reviews of the round's
+brief, which the brief folds in and decides between. Commits: atomicwrite's
+rename that asks a context 893e3503, the backup package's work and its
+tests 3958d77d, the reporters, the doctor and their tests 1725bb7e, the page
+c424489d, two comments ebeb6a30, what twenty runs under the race detector
+found 465186f7, the round-4 test name the citation guard asked to keep
+de0efc0d, and this record. The rules go through
+`rules-b653-r5.patch`: cli-serve.md's two B653 lines that changed and their
+verbatim copies in History-rules-cli-serve.md, each changed alike, and a
+paragraph of the fifth round's there.
+
+### The findings, as built
+
+- **A give-up stops the write; a stop does not** (Codex's P1, the Claude
+  API's Medium, both brief reviews). Each step under a hold has a give-up of
+  its own (`stepSignal`, made by `stepOf` and handed to the step beside the
+  hold's context), which only that step's give-up ends: its own bound, or its
+  holder's caller abandoning the hold while the step runs (`giveUp` ends the
+  step the hold is in). A verdict's write asks it before every attempt at its
+  rename, the first included (`atomicwrite.RenameWithRetryUnsyncedCtx`,
+  `stageAndRename`), and before it removes a veto, the unchanged record's
+  branch included (`publishVerdict`); `verifyHeld`'s write and
+  `abandonPending`'s each pass their own step's. A stop of the caller ends
+  the hold's context and not that signal, so the `INCOMPLETE` a stop leads to
+  is still written (`TestACancelledVerificationWritesIncomplete`, whose
+  control below makes the signal the caller's context). A rename already in
+  the kernel is not taken back: a write whose rename landed before its sync
+  stalled keeps its veto once the sync answers, and the reporters say the
+  write did not finish.
+- **A veto goes only with a check that ended and earns it** (Codex's P2, the
+  Claude API's Medium). `earnsClear` replaces round 4's `fresh || !doubted`:
+  never where what was found holds an `INCOMPLETE`; where what was found
+  replaced both verdicts; and where the record carries a verdict over, only
+  where no veto stood before the verification began and each verdict carried
+  over is a `VERIFIED` that what was found matched with one (a quick check
+  over a full one). `mergeVerdict` says which of the two verdicts it
+  replaced. `publishVerdict`'s `mayClear` went: a write after a give-up
+  writes the `INCOMPLETE` it was given up with, which never clears.
+- **No prune after a recheck that recorded nothing** (the Claude API's
+  High). Where no directory can be synced, a recheck that finds damage leaves
+  the `VERIFIED` by design, and round 4 pruned after it under the same hold,
+  trusting that `VERIFIED`: at `keep` 1 the older verified snapshot, the only
+  good one, went. Neither that branch nor a recheck refused for want of a
+  durable veto runs the prune now; `Result.PruneSkipped`'s doc names the
+  cause, and the ticker's and the CLI's skip line says it
+  (`pruneSkipWords`). The next snapshot's prune runs as usual.
+- **`abandonPending` keeps the platform rule** (Codex's P2): where no
+  directory can be synced it writes nothing over a record that holds a
+  `VERIFIED`; round 4 merged its `INCOMPLETE` into a mixed record and made a
+  veto there.
+- **Every holder and every step bounded** (Codex's P2s, the Claude API's
+  Mediums and Lows, the brief reviews).
+  - The prune run on its own (`PruneContext`) is a hold: its folder's
+    resolution, its lock and its step run on a goroutine of its own, its
+    caller's wait bounded as a verification's; the marker's clearing and the
+    removals are one step bounded `VerifyDeadline` from the lock, given up
+    past it (`ErrPruneGivenUp`), the folder marked as a prune's
+    (`StuckCheck.Pruning`), which the doctor's `backup-check` line and the
+    ticker's reason name as a prune.
+  - The release: a hold lets go of what `alsoLetGo` added (a snapshot's
+    ownership) after the steps it gave up have ended and before its lock,
+    each a step bounded `releaseBound`; then the lock, its let-go begun in
+    the section that takes the mark and the lock's release (`releasing`),
+    and bounded `releaseBound` too, past which the hold is given up
+    (`stepRelease`) and its mark stands in this process until the let-go
+    has ended. A give-up after the let-go began writes no marker.
+  - Ownership's let-go, every path: a capture's (`FinishCapture`'s onEnd)
+    by the worker's hold before the lock, rather than after the slot as in
+    round 4; a claim's that its caller stopped waiting for, handed over
+    through an unbuffered channel, the hold taking it where the caller is
+    gone; one a claim's step took once it was given up, through the step's
+    late answer, which the hold now waits for; and a verification refused
+    at once, holding nothing, lets its capture's ownership go within
+    `StopWriteBound` (`letGoWithin`).
+  - A stopped verification's worker that handed its `INCOMPLETE` to
+    `abandonPending` is marked by no give-up of its caller's from then on
+    (`handOff`, `abandon` through `giveUpAs`): round 4's mark there named a
+    wait that had overrun nothing. The write's own hold marks once its own
+    step overruns, and a step of the worker's release that overruns its
+    bound marks too: a hold raises its one mark at its first give-up that
+    marks, rather than at its first give-up.
+  - `spellingKey` makes a relative spelling absolute against the working
+    directory read once as the process started (`workDir`), never asking
+    `os.Getwd`, which stats the directory, at a key's use.
+  - `drop` ends the hold's context, and `verifyAndThen`'s early returns
+    drop their hold.
+  - The doctor keeps one read of a backups folder out at a time
+    (`backupsReadOf`): a run while one is out waits for it, and says the
+    folder did not answer where it still has not.
+- **The reporters say what happened** (Codex's P2). `VerifyResult.Write`
+  says how far the write went (none began, unchanged, recorded, written and
+  not known durable, failed, or did not finish), and `RecordRead` whether
+  the record was read back. A verification given up is said as "it wrote
+  nothing" only where no write began, "its write did not finish" where one
+  began and was given up, and a record not read back is said so after the
+  write's words, with nothing printed of it.
+- **Out of scope**: restore's lock on its source snapshot is backlog B826.
+
+Where this departs from the brief, or reads it:
+
+- The brief's rule for the prune is a recheck that recorded nothing; it
+  names the branch where no directory can be synced. The rule is applied
+  to a recheck refused for want of a durable veto too, which also recorded
+  nothing. It costs that round's prune on a folder that cannot keep a veto,
+  and a fresh snapshot, never a recheck, prunes as before.
+- The ownership's let-go comes after the steps given up have ended, within
+  the release, rather than as a step before the release, so a hold given up
+  keeps the ownership, as round 3 decided, until every step it gave up has
+  ended.
+- Where nothing was read back, the reporters say how far the write went,
+  which is the write step's own answer and no conclusion from the read.
+- The doctor's shared read is bounded by `doctorBackupsBound` and not by a
+  run's context, so a run that stops waiting ends no read another run waits
+  for.
+- "An `INCOMPLETE` never clears" is the brief's rule, and a record whose
+  database is `VERIFIED` beside files a check did not end, met by the same,
+  is the one case where only it refuses; no end-to-end path arranges that
+  case, so a table test of `earnsClear` pins it (and the control R2b).
+- A caller's abandon of a hold while its write runs ends that write's
+  signal: it is a give-up of that step.
+
+### The reds at the round before
+
+On a copy of 56eb3bde (`git archive`) with this round's new and changed
+tests in it, and a scratch shim, never committed, giving it the names and
+none of the behaviour: `ErrPruneGivenUp`, `StuckCheck.Pruning`, `workDir`,
+the setters of the new seams with each hook called where this round calls
+it (the folder lock's let-go, an owner's let-go, a claim's answer),
+`SetReleaseBoundForTest` over a value nothing reads, and in atomicwrite the
+base's unsynced rename under this round's name, asking no context.
+Predictions written first; every result was as predicted:
+
+- internal/backup: `TestAWriteGivenUpLandsNothingOnceItResumes` in all four
+  cases (the record changed, the veto removed, every reader reading
+  `VERIFIED`; `abandonPending`'s `INCOMPLETE` landed);
+  `TestARecheckThatDidNotEndLeavesTheVetoItMade` in all three (the veto
+  removed, the readers reading `VERIFIED`, the anchor pruned);
+  `TestARecheckThatRecordedNothingIsFollowedByNoPrune` in both (`prune
+  skipped false, deleted 1`);
+  `TestAStoppedVerificationRecordsNothingOverAVERIFIEDWhereNoDirectoryCanBeSynced`;
+  `TestAPruneThatDoesNotEndIsGivenUpAndMarked` (`did not return within
+  13.3s`); `TestALockThatDoesNotLetGoIsMarkedUntilItDoes` (no mark within
+  3 s); `TestAnOwnershipIsLetGoBeforeTheLock` in all four (the lock let go
+  while the ownership's let-go hung, no mark; the refused-at-once case did
+  not answer within 13 s);
+  `TestAStoppedVerificationMarksNothingUntilTheWriteItStartedOverruns`
+  (marked at once, naming the write);
+  `TestAGiveUpOnceTheLocksLetGoBeganWritesNoMarker` in both (a marker
+  written; the racing case red in its first round),
+  `TestASpellingIsKeyedAgainstTheDirectoryTheProcessStartedIn` and
+  `TestAHoldsContextEndsWithIt`.
+- internal/atomicwrite: `TestRenameWithRetryUnsyncedCtxRenamesNothingOnceItsContextEnds`
+  before the first attempt (renamed) and between attempts (five tried).
+- cmd/bridge: `TestBridgeBackupVerifySaysWhatAGivenUpVerificationsRecordReads`
+  in its four new or changed cases (`it wrote nothing` of a write that
+  began; no write's words before `could not be read back`);
+  `TestTheTickerSaysWhatAGivenUpVerificationsRecordReads` in its two;
+  `TestTheStartupPassSaysWhyARecheckThatRecordedNothingPrunedNothing` (no
+  skip line); `TestTheDoctorKeepsOneReadOfABackupsFolderThatDoesNotAnswer`
+  (`3 reads`); `TestTheTickerAndTheDoctorNameAPruneGivenUp` (`never given
+  up`).
+
+Not reds, as predicted: the two give-up reporters over a `PENDING`, whose
+words did not change, and the atomicwrite case with a live context.
+`TestAnUnchangedRecordKeepsItsVetoOnceItsWriteIsGivenUp` and
+`TestAVetoGoesOnlyWithACheckThatEndedAndEarnsIt` call the package's own
+functions, whose signatures the round changed, and were not run there;
+their controls are R1d and R2b to R2d.
+
+### Negative controls
+
+Each mutates one site of the committed tree, runs the tests named, and puts
+the committed bytes back, compared with HEAD's blob before each mutation and
+after each restore (a runner in the scratch folder, the predictions written
+to a file before the first run). All 33 went as predicted, two of them red
+by another path than the one predicted (R5d, R5n):
+
+- the give-up and the write: the write's signal taken from its caller's
+  context (R1a: red in `TestACancelledVerificationWritesIncomplete`, `a
+  stopped check: database PENDING`, the stop ending the write; green in the
+  write test, as predicted, the hold's context ending at a give-up too); the
+  rename asking no give-up (R1b: staging, rename and `abandonPending`'s write
+  landed); the veto removed after a write given up had landed (R1c: the sync
+  case); the unchanged record's veto (R1d); `abandonPending`'s write given no
+  signal (R1e); a give-up that ends no step's signal (R1f: all four).
+- the veto: round 4's clear (R2a: all three cases; green, as predicted, in
+  the table test, which asks `earnsClear` itself); an `INCOMPLETE` that
+  clears where the merge allows (R2b: the table's two cases; green end to
+  end, as predicted, the matched rule refusing there too); a veto that stood
+  before cleared over a match (R2c: the table, and the round-4 veto test's
+  quick-over-full case); a carried-over `FAILED` counted as matched (R2d).
+- the prune: after a recheck not recorded (R3a: in internal/backup, and the
+  startup pass's words), after a refused one (R3b), and the reporters naming
+  no such cause (R3c).
+- the platform rule: `abandonPending` writing over a `VERIFIED` where no
+  directory can be synced (R4a).
+- the bounds: the prune's removals run with no step (R5a: `returned 6.3s
+  after its stop; its bound is 3.3s`, and the doctor's line naming another
+  step); the lock's let-go with no bound (R5b: no mark within 3 s); a give-up
+  during the let-go writing a marker (R5c: both tests); a step's late answer
+  not waited for (R5d: red, though not where predicted: the hold read what it
+  lets go of before the late answer added the ownership, so that ownership
+  was never let go at all, `the ownership was never let go`, rather than let
+  go after the lock); the claim's answer left in a buffer (R5e: never let
+  go); the capture's ownership let go after the lock (R5f); a verification
+  refused at once letting its ownership go unbounded (R5g: `did not return
+  within 13s`); the ownership let go with no step (R5h: no mark); a wait that
+  overran nothing marking (R5i); the hand-off's quiet ending as the release
+  begins, the first fix (R5m); the release waiting for no step given up
+  (R5n: red, though not where predicted: the write's mark went at once, so
+  the test never saw it, `no hold given up held the backups folder within
+  7s`, rather than while it watched); `spellingKey` asking the working
+  directory (R5j); `drop` leaving the hold's context (R5k); the doctor
+  reading anew at each run (R5l: `3 reads`).
+- the reporters: a write that did not finish said to have written nothing
+  (R6a: the CLI's and the ticker's), an unchanged write (R6b), a failed one
+  (R6c: both), a record not read back printed (R6d), and a record read back
+  said not read (R6e).
+
+### What twenty runs under the race detector found
+
+The round's new and changed tests, run twenty times under the race detector
+(the gates, below), passed in atomicwrite (80 passes) and cmd/bridge (260,
+five tests), and in internal/backup failed once in 760:
+`TestAWriteGivenUpLandsNothingOnceItResumes`'s `abandonPending` case, `the
+folder is marked at "its wait for the snapshots' lock", want "its write of
+INCOMPLETE"`. A stopped verification's worker answers as its wait for
+`abandonPending` ends, and its caller's own bound, `StopWriteBound` after the
+stop, falls at the same moment, so the caller's select can find both ready
+and give the worker up while it is letting go of what it holds. The first
+form of the hand-off's quiet (3958d77d) ended as the release began, so that
+give-up marked the folder at the worker's last step, its wait for the lock,
+which had overrun nothing, and the test read that mark before the write's
+own. The quiet holds now for the caller's give-up alone (`abandon`, through
+`giveUpAs`), for the hold's whole life after its hand-off, and a step of its
+release that overruns marks the folder as before (465186f7).
+`TestACallersGiveUpAfterAHandOffMarksNothing` pins both deterministically:
+red on 3958d77d's `hold.go` in a copy of HEAD (`marked the folder:
+{Snapshot:snap Step:letting go of its snapshot's ownership …}`), green
+here, and R5m is its control. Run twenty times again, with that test among
+them: internal/backup 820 passes, cmd/bridge 260, no failure and no race.
+
+### A test name the citation guard kept
+
+The first `make test` failed one test of cmd/bridge's,
+`TestEveryCitedTestNameExists`: this round had renamed round 4's
+`TestAStoppedVerificationsMarkStandsUntilTheWriteItStartedEnds`, which
+cli-serve.md, its History and this log cite. A dated record is not
+rewritten, and the name still says something true: the write's own mark,
+once that write overruns its bound, stands while it hangs and goes as it
+ends. That test keeps the name, beside the new one for the quiet before the
+mark, both over one setup (`stopWithItsWriteParked`, de0efc0d); its control
+is R5n. Both passed twenty runs under the race detector (40 passes).
+
+### The gates
+
+go1.27.3, `TMPDIR` on disk under the worktree's `.tmp`:
+
+- `make test TEST_PKGS='./internal/backup/... ./internal/doctor/...
+  ./internal/admin/... ./internal/atomicwrite/... ./internal/fsutil/...
+  ./cmd/bridge/...'`, the race detector, `-p 4`, `-timeout 30m`, inside the
+  build slot (`buildslot.py b653`): on 465186f7 every package ok but
+  cmd/bridge, which failed `TestEveryCitedTestNameExists` (above); on
+  de0efc0d ok, 1524 s (internal/backup 604.2 s, internal/doctor 6.8 s,
+  internal/admin 1053.7 s, internal/atomicwrite 19.9 s, internal/fsutil
+  3.5 s, cmd/bridge 1507.6 s).
+- the round's new and changed tests by name, `-race -count=20`: as above,
+  the first run inside the build slot, the reruns beside it (single
+  packages): internal/atomicwrite 80 passes, internal/backup 820 and the
+  two tests de0efc0d split 40, cmd/bridge 260; no failure and no race but
+  the one the first run found.
+- `make vet`, `GOOS=linux GOARCH=386 make vet`, and `go vet` of the seven
+  package trees the branch touches for windows and darwin, on 465186f7:
+  nothing reported; de0efc0d changes one test file, vetted alone after it.
+  `make build-all` on 465186f7: the six targets built, the build-site census
+  first (`check-build-tags: OK`).
+- the pinned gofmt (`go run cmd/gofmt -l`) over every Go file the round
+  changed, on de0efc0d: nothing listed.
+- `rules-b653-r5.patch` applied to a copy of HEAD: it matches the
+  generator's files, `make docs-check` passes there (cli-serve.md 77,813
+  bytes, History-rules-cli-serve.md 350,662; the worst load 69.3%), the
+  census passes there, and each of the 83 test names it cites is declared.
+
+### Follow-ups
+
+The backlog file is not on legion0, so these go to the PR's report: the
+unchanged record's removal of a veto is reached with a clear only by a
+verdict equal to the record to its times, which no check produces, so its
+give-up gate has a unit test and no path; `RecordRead` tells apart no record
+a give-up can read back that `DatabaseState == ""` did not, and is kept
+explicit; and what stays open of a hold given up is named here by its id
+alone, backlog B653.
