@@ -588,20 +588,30 @@ func (f *repairFixture) settled(t *testing.T, p *Pool, what string) PoolStats {
 	return st
 }
 
-// stopPool stops p within the wait's bound, and fails the case where the
-// stop has not returned by then (a worker still in a job that does not end),
-// leaving the stop running: no case waits on its pool without a bound.
-func stopPool(t *testing.T, p *Pool) {
-	t.Helper()
-	stopped := make(chan struct{})
+// stopWithin stops p, and answers once the stop has returned, or at end where
+// it has not (a worker still in a job that does not end), the stop left
+// running; stopped closes when it returns.
+func stopWithin(p *Pool, end time.Time) (stopped <-chan struct{}, err error) {
+	done := make(chan struct{})
 	go func() {
-		defer close(stopped)
+		defer close(done)
 		p.Stop()
 	}()
 	select {
-	case <-stopped:
-	case <-time.After(time.Until(poolWaitEnd(t))):
-		t.Errorf("the pool had not stopped by the wait's bound: a worker is still in a job")
+	case <-done:
+		return done, nil
+	case <-time.After(time.Until(end)):
+		return done, errors.New("the pool had not stopped by the wait's bound: a worker is still in a job")
+	}
+}
+
+// stopPool stops p within the wait's bound (poolWaitEnd), and fails the case
+// where the stop has not returned by then: no case waits on its pool without
+// a bound.
+func stopPool(t *testing.T, p *Pool) {
+	t.Helper()
+	if _, err := stopWithin(p, poolWaitEnd(t)); err != nil {
+		t.Error(err)
 	}
 }
 
