@@ -354,6 +354,12 @@ type Updater struct {
 	gateMu sync.Mutex
 	active map[*admission]struct{}
 
+	// switchGen counts the switch's transitions (ChecksSwitched, either
+	// way), under gateMu: a wait of the poll loop polls at its tick only
+	// where it was armed with the switch on and no transition has come since
+	// (schedule, B761's round 2).
+	switchGen uint64
+
 	// wake is the switch's own rearm: turned on, the poll loop's wait starts
 	// again at a full interval, asking nothing (ChecksSwitched). Buffered 1.
 	wake chan struct{}
@@ -380,6 +386,27 @@ var ErrUpdateChecksOff = errors.New("update checks are off")
 type admission struct {
 	cancel  context.CancelFunc
 	stopped atomic.Bool
+}
+
+// schedule is what a wait of the poll loop was armed under (backlog B761's
+// round 2): the switch's generation (Updater.switchGen) and whether the
+// switch was on. Its tick polls only where both still hold (admitScheduled):
+// a wait armed while checks were off never polls, though the switch reads on
+// by its tick (the settings save publishes the switch before it tells the
+// updater, ChecksSwitched), and nor does one armed before a transition, which
+// a notification ready beside its tick could otherwise lose the select to.
+// Turning checks on so never asks GitHub before the full interval the
+// notification rearms.
+type schedule struct {
+	gen uint64
+	on  bool
+}
+
+// arm is the schedule a wait armed now is armed under.
+func (u *Updater) arm() schedule {
+	u.gateMu.Lock()
+	defer u.gateMu.Unlock()
+	return schedule{gen: u.switchGen, on: u.checksEnabled()}
 }
 
 // New builds an Updater. The poller is not started — call Run on it
@@ -471,7 +498,9 @@ func New(opts Options) *Updater {
 // the timer keeps ticking with no request at all, each tick firing only the
 // restart an automatic install deferred after its swap had committed
 // (tick). Turned on, the wait starts again at a full interval, asking
-// nothing (ChecksSwitched).
+// nothing (ChecksSwitched): each wait is armed under a schedule (arm), and
+// one armed while checks were off, or before a transition, does not poll at
+// its tick (B761's round 2).
 func (u *Updater) Run(ctx context.Context) {
 	// Initial check on startup so the admin UI has something to show
 	// before the first interval elapses. Best-effort; errors are
@@ -495,12 +524,13 @@ func (u *Updater) Run(ctx context.Context) {
 	// change period, and re-reading the cadence is what makes
 	// update.checkIntervalHours hot.
 	for {
+		sched := u.arm()
 		wait := u.after(u.checkInterval())
 		select {
 		case <-ctx.Done():
 			return
 		case <-wait:
-			u.tick(ctx)
+			u.tick(ctx, sched)
 		case <-u.rearm:
 			// Cadence changed; re-read it on the next iteration.
 			// Deliberately no poll — see Options.Rearm.
@@ -511,13 +541,15 @@ func (u *Updater) Run(ctx context.Context) {
 	}
 }
 
-// tick is one turn of the poll loop's timer: a check while update checks are
-// on, and the auto-installer after a check that answered; while they are off
-// (backlog B761), no request at all, and only the restart an automatic
-// install deferred after its swap had committed (finishDeferredRestart). Its
-// gate is its own admission, apart from the start's in Run.
-func (u *Updater) tick(ctx context.Context) {
-	cctx, a, ok := u.admit(ctx)
+// tick is one turn of the poll loop's timer, of a wait armed under sched: a
+// check while update checks are on, and the auto-installer after a check that
+// answered; while they are off (backlog B761), or where the wait was armed
+// while they were off or before a transition since (B761's round 2), no
+// request at all, and only the restart an automatic install deferred after
+// its swap had committed (finishDeferredRestart). Its gate is its own
+// admission (admitScheduled), apart from the start's in Run.
+func (u *Updater) tick(ctx context.Context, sched schedule) {
+	cctx, a, ok := u.admitScheduled(ctx, sched)
 	if !ok {
 		u.finishDeferredRestart(ctx)
 		return
@@ -548,6 +580,25 @@ func (u *Updater) admit(parent context.Context) (context.Context, *admission, bo
 	if !u.checksEnabled() {
 		return parent, nil, false
 	}
+	return u.register(parent)
+}
+
+// admitScheduled is admit for the tick of a wait armed under sched (B761's
+// round 2): refused too where the wait was armed while update checks were
+// off, or a transition has come since its arming, both read in the hold of
+// gateMu that ChecksSwitched takes to count one.
+func (u *Updater) admitScheduled(parent context.Context, sched schedule) (context.Context, *admission, bool) {
+	u.gateMu.Lock()
+	defer u.gateMu.Unlock()
+	if !sched.on || sched.gen != u.switchGen || !u.checksEnabled() {
+		return parent, nil, false
+	}
+	return u.register(parent)
+}
+
+// register registers an admission with a context of its own; gateMu is the
+// caller's.
+func (u *Updater) register(parent context.Context) (context.Context, *admission, bool) {
 	ctx, cancel := context.WithCancel(parent)
 	a := &admission{cancel: cancel}
 	u.active[a] = struct{}{}
@@ -589,11 +640,13 @@ func (u *Updater) commit(a *admission) bool {
 // under the install marker's lock, each through its own context (admit), its
 // request ended where it is on the wire; an install past its decision is not
 // stopped, and finishes its swap. On, the poll loop's wait starts again at a
-// full interval (wake), asking nothing and installing nothing. It reads the
-// switch as it stands, so calls in any number and order leave what the
-// switch says.
+// full interval (wake), asking nothing and installing nothing. Either way it
+// counts a transition (switchGen), so a wait the loop armed before it polls
+// at no tick (schedule, B761's round 2). It reads the switch as it stands,
+// so calls in any number and order leave what the switch says.
 func (u *Updater) ChecksSwitched() {
 	u.gateMu.Lock()
+	u.switchGen++
 	on := u.checksEnabled()
 	if !on {
 		for a := range u.active {

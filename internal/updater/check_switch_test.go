@@ -158,44 +158,92 @@ func (h heldRequest) waitEnded(t *testing.T) {
 	}
 }
 
-// tickSeam stands in for the poll loop's timer (Updater.after): it hands
-// the test each wait the loop asks for, as the loop asks it, and fires the
-// loop's tick when the test says.
+// tickSeam stands in for the poll loop's timer (Updater.after): every wait
+// the loop arms has a channel of its own, buffered 1, so that a test fires
+// one wait and not another, and the test is handed each wait as the loop
+// arms it. holdNext holds the loop at its next arming, its schedule taken
+// and its select not yet reached, so that a test can make a tick and a
+// notification ready together.
 type tickSeam struct {
-	asked chan time.Duration
-	tick  chan time.Time
+	asked chan armedWait
+	hold  atomic.Pointer[chan struct{}]
+
+	mu   sync.Mutex
+	last armedWait
+}
+
+// armedWait is one wait the loop armed: its length and its own channel.
+type armedWait struct {
+	d    time.Duration
+	tick chan time.Time
+}
+
+// fire hands w its tick, whether or not the loop still waits on it: a wait
+// the loop has left keeps the tick, and nobody reads it.
+func (w armedWait) fire() {
+	select {
+	case w.tick <- time.Now():
+	default:
+	}
 }
 
 func installTickSeam(u *Updater) *tickSeam {
-	s := &tickSeam{asked: make(chan time.Duration, 64), tick: make(chan time.Time)}
+	s := &tickSeam{asked: make(chan armedWait, 64)}
 	u.after = func(d time.Duration) <-chan time.Time {
-		s.asked <- d
-		return s.tick
+		w := armedWait{d: d, tick: make(chan time.Time, 1)}
+		s.asked <- w
+		if h := s.hold.Swap(nil); h != nil {
+			<-*h
+		}
+		return w.tick
 	}
 	return s
 }
 
-// waitAsked waits for the loop to ask for its next wait, which it does once
-// the turn before it is done, and returns the wait's length.
-func (s *tickSeam) waitAsked(t *testing.T) time.Duration {
+// holdNext holds the loop at its next arming, inside the seam's after, until
+// release (or the test's end). Called once the loop runs, so that the release
+// at the test's end comes before runLoop's stop.
+func (s *tickSeam) holdNext(t *testing.T) (release func()) {
+	ch := make(chan struct{})
+	var once sync.Once
+	release = func() { once.Do(func() { close(ch) }) }
+	t.Cleanup(release)
+	s.hold.Store(&ch)
+	return release
+}
+
+// waitArmed waits for the loop to arm its next wait, which it does once the
+// turn before it is done, and returns it; fire then fires it.
+func (s *tickSeam) waitArmed(t *testing.T) armedWait {
 	t.Helper()
 	select {
-	case d := <-s.asked:
-		return d
+	case w := <-s.asked:
+		s.mu.Lock()
+		s.last = w
+		s.mu.Unlock()
+		return w
 	case <-time.After(testWait):
 		t.Fatal("the poll loop never asked for its next wait")
-		return 0
+		return armedWait{}
 	}
 }
 
-// fire hands the wait the loop is in its tick.
+// waitAsked is waitArmed's wait's length.
+func (s *tickSeam) waitAsked(t *testing.T) time.Duration {
+	t.Helper()
+	return s.waitArmed(t).d
+}
+
+// fire hands the last wait the loop armed its tick.
 func (s *tickSeam) fire(t *testing.T) {
 	t.Helper()
-	select {
-	case s.tick <- time.Now():
-	case <-time.After(testWait):
-		t.Fatal("the poll loop was not waiting for a tick")
+	s.mu.Lock()
+	w := s.last
+	s.mu.Unlock()
+	if w.tick == nil {
+		t.Fatal("the poll loop has armed no wait to fire")
 	}
+	w.fire()
 }
 
 // switchedUpdater is an Updater that asks gh, its update check's switch sw,
@@ -401,6 +449,85 @@ func TestTurningUpdateChecksOnRearmsAFullWaitAndAsksNothing(t *testing.T) {
 	ticks.waitAsked(t)
 	if n := gh.requests.Load(); n != 1 {
 		t.Errorf("the tick after checks were turned on asked GitHub %d time(s), want 1", n)
+	}
+}
+
+// TestATickArmedWhileUpdateChecksWereOffAsksNothingOnceTheyAreOn: the
+// settings save publishes the switch on before it tells the updater
+// (ChecksSwitched), and a wait the loop armed while checks were off can end
+// in between: its tick asks GitHub nothing, though the switch reads on by
+// then, and the notification after it asks nothing either; the wait the loop
+// arms for it is a full interval, and its tick checks.
+func TestATickArmedWhileUpdateChecksWereOffAsksNothingOnceTheyAreOn(t *testing.T) {
+	gh := newReleaseStandIn(t, "v9.9.9")
+	sw := &testSwitch{}
+	sw.off.Store(true)
+	u, ticks := switchedUpdater(t, gh, sw, Options{LiveCheckInterval: func() time.Duration { return 3 * time.Hour }})
+	runLoop(t, u)
+	armedOff := ticks.waitArmed(t)
+
+	sw.off.Store(false) // published on; the updater not told yet
+	armedOff.fire()
+	ticks.waitArmed(t) // the tick is done
+	if n := gh.requests.Load(); n != 0 {
+		t.Fatalf("the tick of a wait armed while update checks were off asked GitHub %d time(s) once they read on, "+
+			"before the updater was told; want 0", n)
+	}
+	u.ChecksSwitched()
+	rearmed := ticks.waitArmed(t)
+	if rearmed.d != 3*time.Hour || gh.requests.Load() != 0 {
+		t.Fatalf("the wait armed for checks turned on = %v after %d request(s), want a full interval, 3h, and none", rearmed.d, gh.requests.Load())
+	}
+	rearmed.fire()
+	ticks.waitArmed(t)
+	if n := gh.requests.Load(); n != 1 {
+		t.Errorf("the tick a full interval after checks were turned on asked GitHub %d time(s), want 1", n)
+	}
+}
+
+// TestAWakeAndAnOldTickReadyTogetherAskNothing: the loop armed a wait while
+// update checks were off, and before its select both that wait's tick and the
+// notification that they are on are ready (the seam holds the loop between
+// its arming and its select). Whichever the select takes, nothing is asked of
+// GitHub: the old wait's tick is refused, being armed under another schedule,
+// and the notification rearms; the wait the loop then waits on is a full
+// interval, and its tick checks. Without the schedule the select takes the
+// tick about half the time, so a few runs show it.
+func TestAWakeAndAnOldTickReadyTogetherAskNothing(t *testing.T) {
+	gh := newReleaseStandIn(t, "v9.9.9")
+	sw := &testSwitch{}
+	sw.off.Store(true)
+	u, ticks := switchedUpdater(t, gh, sw, Options{LiveCheckInterval: func() time.Duration { return 3 * time.Hour }})
+	runLoop(t, u)
+	first := ticks.waitArmed(t)
+	release := ticks.holdNext(t)
+	first.fire() // a tick while off; the loop's next arming is held
+	old := ticks.waitArmed(t)
+
+	sw.off.Store(false)
+	u.ChecksSwitched() // the notification, ready
+	old.fire()         // and the old wait's tick, ready too
+	inspect := ticks.holdNext(t)
+	release()
+	next := ticks.waitArmed(t)
+	if n := gh.requests.Load(); n != 0 {
+		t.Fatalf("with the notification and a tick armed while off ready together GitHub was asked %d time(s), want 0", n)
+	}
+	// The loop is held at this arming: a notification it has not taken yet
+	// rearms it once more.
+	pending := len(u.wake) > 0
+	inspect()
+	if pending {
+		next = ticks.waitArmed(t)
+	}
+	if next.d != 3*time.Hour || gh.requests.Load() != 0 {
+		t.Fatalf("the wait armed for checks turned on = %v after %d request(s), want a full interval, 3h, and none", next.d, gh.requests.Load())
+	}
+	old.fire() // the obsolete wait again: nothing reads it
+	next.fire()
+	ticks.waitArmed(t)
+	if n := gh.requests.Load(); n != 1 {
+		t.Errorf("the tick a full interval after checks were turned on asked GitHub %d time(s), want 1", n)
 	}
 }
 
