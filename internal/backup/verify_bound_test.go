@@ -121,10 +121,13 @@ func TestAVerificationPastItsDeadlineReturnsWithItsCallerStillWaiting(t *testing
 	const deadline = 300 * time.Millisecond
 	t.Cleanup(backup.SetVerifyDeadlineForTest(deadline))
 	// The check's thread waits until the test ends, then ends without a
-	// check, touching nothing of the bundle the test's cleanup removes.
-	hung := make(chan struct{})
+	// check, touching nothing of the bundle the test's cleanup removes. It
+	// read the seam before it hung, so the seam's restore waits until it has
+	// entered (the repo's rule for a package-level seam).
+	entered, hung := make(chan struct{}), make(chan struct{})
 	t.Cleanup(func() { close(hung) })
 	t.Cleanup(backup.SetOnLowPriorityForTest(func() {
+		close(entered)
 		<-hung
 		runtime.Goexit()
 	}))
@@ -135,6 +138,7 @@ func TestAVerificationPastItsDeadlineReturnsWithItsCallerStillWaiting(t *testing
 		done <- err
 	}()
 	err = requireReturnedWithin(t, done, start, deadline+backup.StopWriteBound/2+time.Second, "a verification past its deadline")
+	<-entered
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Errorf("a verification past its deadline answered %v, want the deadline", err)
 	}
