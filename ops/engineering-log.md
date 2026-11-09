@@ -88973,3 +88973,39 @@ after.
 
 Point 5 has no behaviour of its own to mutate: no committed text outside
 the rules and History, which the patch changes, describes what B819 holds.
+
+### The merge's interaction: the doctor's gate (8ac59de9)
+
+The first gate run, at e6bd7544, failed in cmd/bridge alone, in a test of
+main's B741: `TestServeRefusesWhatTheBareMountPointHoldsOnceItsRecordHoldsAnIdentity`,
+its database cases, "the doctors changed what is under" the bare mount
+point, its empty `bridge.db` turned into a SQLite file. B741 has every store
+probe of `bridge doctor` ask `doctorStoreGate` before it opens the store;
+B652's `waveform-regeneration` probe, from before B741, asked nothing, and
+opened (and migrated) the stray database. Red alone at e6bd7544 and on an
+archive copy of the merge, b5b17337, green on main's side, 9d59c8f6: the
+merge's interaction, not this round's change. 8ac59de9 has the probe ask the
+gate as its siblings do, and lists it in the gate's doc. Its control, C5
+(the probe's gate removed, on a copy of 8ac59de9, predicted first): the
+database cases red, the lock-file case and
+`TestTheDoctorReportsWhatTheRegenerationGuardJudges` green, as predicted.
+
+### The gates
+
+Through the shared build lock, on go1.27.3, go.mod's, with TMPDIR on this
+disk (`.tmp/_b652/r3/gate.py`), at 8ac59de9: the brief's gate as written,
+`GOTOOLCHAIN=go1.27.3 make test TEST_PKGS='./internal/integrity/...
+./internal/analyze/... ./internal/fsutil/... ./internal/doctor/...
+./cmd/bridge/...'`, green, every package, in 1365 s (internal/integrity
+6 s, internal/analyze 63 s, internal/fsutil 4 s, internal/doctor 7 s,
+cmd/bridge 1343 s), internal/fsutil's identity and rooted paths run here
+for real; the round's new and changed tests by name with `-race` (11
+tests, 42 subtests), green, none skipped; `make vet` for linux/amd64,
+windows, darwin and linux/386, and `make build-all`, its build-tag census
+included: clean. The first run, at e6bd7544, was the same but for
+cmd/bridge's failure above.
+
+Outside the lock: go1.27.3's own gofmt over every Go file round 3 changes,
+clean; `rules-b652-r3.patch` applied to a `git archive` copy of 8ac59de9,
+where `make docs-check` passes (CLAUDE.md 82.1%, the worst load 67.5%;
+jobs.md 31,848 bytes); `git status` clean after.
