@@ -14,9 +14,10 @@ records, never replacing them, and records two verdicts in the manifest:
 
 - **the database's**: the copy has the size and SHA-256 it was written with;
   SQLite's `quick_check`, run over a read-only open that creates nothing in
-  the snapshot, finds every page well formed; and its `user_version` is one
-  this bridge's migrations reach, with that version's tables and columns
-  there. `quick_check` does not compare an index with its table:
+  the snapshot, answers exactly `ok` (its pages and records well formed, no
+  NULL where a column is NOT NULL); and its `user_version` is one this
+  bridge's migrations reach, with that version's tables and columns there.
+  `quick_check` does not compare an index with its table:
   `bridge backup --verify <snapshot-dir> --full` runs SQLite's
   `integrity_check` and `foreign_key_check` as well.
 - **the other files'** (the configuration, the token store, the TLS pair,
