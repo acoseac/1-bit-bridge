@@ -2802,7 +2802,13 @@ func (b BackupConfig) EffectiveKeep() int {
 // service takes at once; it reads this key and the variable again only at its
 // next start. Only an explicit false is written, since a release from before
 // the key refuses a file that names it: the console's save of on writes no
-// key. BRIDGE_UPDATE_CHECK_ENABLED reads as the key does, and a value that
+// key, its save of off is refused while an install on probation would roll
+// back to such a release (updater.ChecksOffRefused), and a writer outside the
+// live holder (Edit, the DAC bind) writes the file's own value, never this
+// process's variable (KeepFiledSwitches; B761's round 3). An install's
+// decision and the console's save of off take the install marker's lock, so
+// the off lands before the decision or after the swap.
+// BRIDGE_UPDATE_CHECK_ENABLED reads as the key does, and a value that
 // reads as neither on nor off is off. `bridge update` reads the same file and
 // variable through the same loader as it starts, and both again as its
 // install begins and at its decision, so an off set only in the service's

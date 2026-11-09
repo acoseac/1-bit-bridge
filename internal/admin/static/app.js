@@ -4589,6 +4589,20 @@ function applyTrayManaged(entry) {
   }
 }
 
+// updateChecksOffLost is what a settings save that sent update checks off
+// (sent, its body) adds to its failure where the bridge gave no answer at
+// all, err carrying no status (backlog B761's round 3). The off waits for an
+// install of another process that is past its decision, and on Windows that
+// install's swap stops the bridge, so the off is lost with the stop and the
+// version it installs starts with update checks as they were. A refusal the
+// bridge answered says what happened in its own words, and gets nothing.
+function updateChecksOffLost(sent, err) {
+  if (sent?.updateCheckEnabled !== false || err?.status) return "";
+  return " If a `bridge update` was installing a new version, which on Windows stops " +
+    "the bridge to swap it in, update checks were not turned off: once the bridge " +
+    "is back, check the switch and turn them off again.";
+}
+
 async function saveTrayField(ctl, status) {
   // The console sends only what it showed. A managed row is hidden and its
   // input disabled (applyTrayManaged), so only a change dispatched from
@@ -4647,7 +4661,8 @@ async function saveTrayField(ctl, status) {
     // showing the rejected value is the one outcome that lies.
     if (traySettings) trayApplyValue(ctl, traySettings[ctl.row.field]);
     status.dataset.tone = "err";
-    status.textContent = `Save failed: ${err.message || err}`;
+    status.textContent = `Save failed: ${err.message || err}` +
+      updateChecksOffLost({ [ctl.row.field]: value }, err);
   } finally {
     setDisabled(ctl.input, false);
   }
@@ -5359,7 +5374,7 @@ function initSettings() {
         void API.get("/api/updates").then(renderUpdateTile).catch(() => {});
       }
     } catch (err) {
-      showMsg(msg, "err", "Save failed: " + err.message);
+      showMsg(msg, "err", "Save failed: " + err.message + updateChecksOffLost(body, err));
     }
   });
 
@@ -6406,9 +6421,15 @@ function mountJobTrays() {
         // update.checkEnabled (backlog B761): live, and the card draws from
         // it, so a save redraws it (onSaved below).
         field: "updateCheckEnabled", type: "switch", label: "Check for updates",
+        // The rollbacks' claim carries its caveat (B761's round 3): a release
+        // from before the switch refuses the key an off writes.
         hint: "Off, the bridge asks GitHub nothing and installs nothing new; Roll " +
           "back, a start's rollback and an install past its decision to swap still " +
-          "work. Applies at once.",
+          "work. Applies at once. A release from before this switch does not start " +
+          "with the key this off writes: where the bridge may go back to one, keep " +
+          "the checks off by BRIDGE_UPDATE_CHECK_ENABLED=false in the service's " +
+          "environment instead, with update.checkEnabled out of bridge.yaml, and " +
+          "restart the service (that release ignores the variable).",
       },
       {
         field: "updateCheckIntervalHours", type: "number", min: 1,

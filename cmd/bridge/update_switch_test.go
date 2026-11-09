@@ -159,15 +159,21 @@ func updateCLIConfig(t *testing.T, tail string) string {
 // (--yes), exit 1, naming what turned the checks off, before anything is
 // asked of GitHub or written in the data dir: with the file saying on and the
 // variable off, which a unit or a compose file sets for the service and the
-// operator's shell must carry too, and with the file saying off. With the
-// checks on, --check asks once (the positive control).
+// operator's shell must carry too, and with the file saying off. Where the
+// file's key turned them off, the refusal says too that a release from before
+// the switch refuses the key, and how to keep the checks off without it
+// (B761's round 3). With the checks on, --check asks once (the positive
+// control).
 func TestBridgeUpdateRefusesItsCheckAndItsInstallWhileUpdateChecksAreOff(t *testing.T) {
 	for _, c := range []struct {
 		name, tail, env, says string
+		// keyCaveat: the refusal says what the key costs a rollback to a
+		// release from before the switch, and the variable's way round it.
+		keyCaveat bool
 	}{
 		{name: "the file on, the variable off", tail: "update:\n  checkEnabled: true\n", env: "false",
 			says: updateCheckVar + " in this environment says off"},
-		{name: "the file off", tail: "update:\n  checkEnabled: false\n", says: "update.checkEnabled is false in"},
+		{name: "the file off", tail: "update:\n  checkEnabled: false\n", says: "update.checkEnabled is false in", keyCaveat: true},
 	} {
 		for _, args := range [][]string{{"--check"}, {"--yes"}} {
 			t.Run(c.name+": "+strings.Join(args, " "), func(t *testing.T) {
@@ -187,6 +193,14 @@ func TestBridgeUpdateRefusesItsCheckAndItsInstallWhileUpdateChecksAreOff(t *test
 				if !strings.Contains(out, "update checks are off ("+c.says) ||
 					!strings.Contains(out, "neither asks GitHub for a release nor installs one") {
 					t.Errorf("the refusal does not say what is off and why (%q):\n%s", c.says, out)
+				}
+				caveat := strings.Contains(out, "a release from before the switch refuses settings that write update.checkEnabled") &&
+					strings.Contains(out, "take the key out of "+cfg) &&
+					strings.Contains(out, "set BRIDGE_UPDATE_CHECK_ENABLED=false in the service's environment and restart the service") &&
+					strings.Contains(out, "ignores the variable, so it checks for updates again")
+				if caveat != c.keyCaveat {
+					t.Errorf("the refusal says what the key costs a rollback to a release before the switch: %v, want %v:\n%s",
+						caveat, c.keyCaveat, out)
 				}
 				if n := gh.asked.Load(); n != 0 {
 					t.Errorf("bridge update asked the releases API %d time(s) with update checks off, want 0", n)

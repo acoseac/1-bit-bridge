@@ -258,13 +258,24 @@ func updateCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stde
 // refuseUpdateChecksOff says why `bridge update` asks nothing and installs
 // nothing while update checks are off (backlog B761), naming what turned them
 // off, the variable in this shell's environment or the file, how to turn them
-// on, and what the switch never refuses.
+// on, and what the switch never refuses; where the file's key turned them
+// off, also that a release from before the switch refuses the key, so going
+// back to one, by Roll back or a start's rollback, needs the key out of the
+// file and the checks kept off by the variable, which such a release ignores
+// (B761's round 3).
 func refuseUpdateChecksOff(stderr io.Writer, cfgPath string) {
 	fmt.Fprintf(stderr, "bridge update: update checks are off (%s), so this command neither asks GitHub for a "+
 		"release nor installs one.\n", updateChecksOffSource(cfgPath))
 	sayHowToTurnUpdateChecksOn(stderr, cfgPath)
 	fmt.Fprintln(stderr, "The switch never refuses the console's update status, its Roll back, or a start's rollback of an "+
 		"install that failed.")
+	if _, set := config.UpdateCheckEnabledFromEnv(); !set {
+		fmt.Fprintf(stderr, "But a release from before the switch refuses settings that write update.checkEnabled, so a "+
+			"rollback to one does not start, and a start's rollback refuses to put one back, while %s writes the key. "+
+			"To keep update checks off where the bridge may go back to such a release, take the key out of %s, set "+
+			"BRIDGE_UPDATE_CHECK_ENABLED=false in the service's environment and restart the service; that release "+
+			"ignores the variable, so it checks for updates again once it runs.\n", cfgPath, cfgPath)
+	}
 }
 
 // updateChecksOffSource names what turned update checks off for this command:

@@ -773,12 +773,18 @@
           that has not reached its decision to swap. Roll back, a start's rollback
           of an install that failed, the status and an update past its decision
           still work. This switch applies at once; turned back on, the next check
-          comes a full interval later. Before rolling back to a release older than
-          this switch, turn it on, which takes its key out of bridge.yaml: such a
-          release does not start on a bridge.yaml that names it. Where the
-          <code>BRIDGE_UPDATE_CHECK_ENABLED</code>
-          environment variable is set, it sets this switch at every start; a save
-          here writes the switch to bridge.yaml only when you change it.
+          comes a full interval later. An off waits for a <code>bridge update</code>
+          that is swapping a new version in, and on Windows, where that swap stops
+          the bridge, it is lost with the stop: turn it off again once the bridge
+          is back. A release from before this switch does not start with the key an
+          off writes: before rolling back to one, turn this switch on, which takes
+          the key out of bridge.yaml, and while a new version is on probation over
+          such a release, an off is refused. To keep the checks off there, set
+          <code>BRIDGE_UPDATE_CHECK_ENABLED=false</code> in the service's
+          environment, with the key out of bridge.yaml, and restart the service;
+          that release ignores the variable, so it checks again once it runs. Where
+          the variable is set, it sets this switch at every start; a save here
+          writes the switch to bridge.yaml only when you change it.
         </small>
       </div>
 
