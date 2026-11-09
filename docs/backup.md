@@ -46,7 +46,23 @@ refused, so copy it back into that folder to check it. A quick check never
 replaces the verdict of a full one unless it finds the snapshot worse.
 `bridge doctor` and the console (Jobs, and Settings → Backups) show the
 newest snapshot written and the newest whose database is verified, apart,
-with both verdicts; they read the snapshots' manifests and run no check.
+with both verdicts; they read the snapshots' manifests and run no check. A
+command the doctor suggests gives the configuration as `<bridge.yaml>`: use
+the one the doctor read.
+
+A snapshot already verified is marked, durably, as being checked again
+before its check begins, and until that check's verdict is written and
+durable no reader takes the snapshot for verified, whatever happens to the
+write. Where the storage cannot keep that mark, the snapshot is not checked
+again: `bridge backup --verify` says so, and what its earlier check found.
+When a verdict cannot be written, `bridge backup --verify` says what the
+check found and, apart, what the record reads.
+
+A check that does not answer (storage that stops answering reads) is given
+up past its deadline and recorded as not finished. Until it ends, no other
+check or prune of those snapshots runs and no scheduled snapshot is taken;
+`bridge doctor`'s `backup-check` line names it, and restarting the bridge,
+or stopping the `bridge backup --verify` that runs it, ends it.
 
 When the bridge starts, it takes no snapshot when one from the last day has
 a verified database. Nor does it take one when the newest snapshot from the
