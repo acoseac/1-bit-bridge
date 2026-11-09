@@ -163,6 +163,59 @@ func TestRenameWithRetryIfAsksNothingOfAContextAlreadyEnded(t *testing.T) {
 	requireNotRenamed(t, src, dst)
 }
 
+// TestRenameWithRetryUnsyncedCtxRenamesNothingOnceItsContextEnds: the
+// unsynced rename a backup verdict's write runs (backlog B653's fifth round)
+// asks its context before every attempt, the first included, so a write given
+// up while it staged renames nothing when it resumes, and one given up between
+// attempts tries none after it; with its context live it renames, and tries
+// its own failures again on RenameWithRetry's schedule.
+func TestRenameWithRetryUnsyncedCtxRenamesNothingOnceItsContextEnds(t *testing.T) {
+	t.Run("a context ended before the first attempt", func(t *testing.T) {
+		src, dst := stagedOver(t)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if err := RenameWithRetryUnsyncedCtx(ctx, src, dst); !errors.Is(err, context.Canceled) {
+			t.Errorf("RenameWithRetryUnsyncedCtx on an ended context = %v, want its end", err)
+		}
+		requireNotRenamed(t, src, dst)
+	})
+	t.Run("a context that ends between attempts", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		tried := 0
+		prev := SetRenameFuncForTest(func(string, string) error {
+			tried++
+			cancel()
+			return errRenameForTest
+		})
+		t.Cleanup(func() { SetRenameFuncForTest(prev) })
+		err := RenameWithRetryUnsyncedCtx(ctx, "src", "dst")
+		if !errors.Is(err, errRenameForTest) || !errors.Is(err, context.Canceled) {
+			t.Errorf("RenameWithRetryUnsyncedCtx = %v, want the rename's failure and the context's end", err)
+		}
+		if tried != 1 {
+			t.Errorf("%d renames were tried, want the one before the context ended", tried)
+		}
+	})
+	t.Run("a live context", func(t *testing.T) {
+		tried := 0
+		prev := SetRenameFuncForTest(func(src, dst string) error {
+			if tried++; tried == 1 {
+				return errRenameForTest
+			}
+			return os.Rename(src, dst)
+		})
+		t.Cleanup(func() { SetRenameFuncForTest(prev) })
+		src, dst := stagedOver(t)
+		if err := RenameWithRetryUnsyncedCtx(context.Background(), src, dst); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := os.ReadFile(dst); err != nil || string(got) != "new" || tried != 2 {
+			t.Errorf("after %d tries %s holds %q, %v; want the second to land the new bytes", tried, dst, got, err)
+		}
+	})
+}
+
 // TestRenameWithRetryIfRenames: with the condition holding, the rename lands
 // as RenameWithRetry's does.
 func TestRenameWithRetryIfRenames(t *testing.T) {
