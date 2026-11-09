@@ -13,6 +13,7 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/backup"
 	"github.com/acoseac/1-bit-bridge/internal/backup/backuptest"
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 )
 
 // TestABackupStoppedMidSnapshotReportsNothing drives the ticker's startup
@@ -123,11 +124,14 @@ func TestABackupCancelledBeforeItsPruneReportsNothing(t *testing.T) {
 // TestABackupCancelledMidPruneReportsWhatItDeleted cancels the prune
 // between two deletions, and requires the count of what it removed before it
 // stopped: those snapshots are gone, so "pruned N" is a fact about the pass,
-// and nothing is reported as a failure. PruneContext's loop has no place to
-// hold a goroutine between two removals, only the ctx.Err() check before
-// each one, so the pass's context cancels itself there: cancelWhenGone
-// cancels on the first Err after the first snapshot the prune deletes has
-// gone, which is the check before the second. (CodeRabbit, #998.)
+// and nothing is reported as a failure. The prune's loop asks its context
+// before each removal and then whether the snapshot is owned, which resolves
+// the snapshot's path: the pass's context is cancelled there, as the prune
+// asks it of the first snapshot it deletes, so that one is removed and the
+// check before the second sees the cancel. (CodeRabbit, #998. Until backlog
+// B653's fourth round the pass's context cancelled itself, from a custom Err,
+// on the first ask after that snapshot had gone; the prune runs on its hold's
+// context since, derived from the pass's, whose Err asks no parent's.)
 func TestABackupCancelledMidPruneReportsWhatItDeleted(t *testing.T) {
 	dataDir := t.TempDir()
 	src := backup.Sources{DataDir: dataDir, ManifestDB: filepath.Join(dataDir, "bridge.db")}
@@ -143,8 +147,14 @@ func TestABackupCancelledMidPruneReportsWhatItDeleted(t *testing.T) {
 		writeSnapshotDir(t, root, now.Add(-120*time.Hour)),
 	}
 
-	base, cancel := context.WithCancel(context.Background())
-	ctx := &cancelWhenGone{Context: base, cancel: cancel, path: old[0]}
+	ctx, cancel := context.WithCancel(context.Background())
+	var once sync.Once
+	t.Cleanup(backup.SetMetadataForTest(func(p string) (string, error) {
+		if filepath.Base(p) == filepath.Base(old[0]) {
+			once.Do(cancel)
+		}
+		return fsutil.ResolveLinks(p)
+	}, nil))
 	done := make(chan struct{})
 	drainLoopOnCleanup(t, cancel, done, "the backup ticker")
 	var stdout, stderr safeBuffer
@@ -166,25 +176,6 @@ func TestABackupCancelledMidPruneReportsWhatItDeleted(t *testing.T) {
 			t.Errorf("%s gone = %v, want %v: the prune stops after its first deletion", filepath.Base(dir), gone, i == 0)
 		}
 	}
-}
-
-// cancelWhenGone is a context that cancels itself the first time its Err is
-// asked after path has gone. It places a cancel between two filesystem
-// operations that have no hook between them, only a ctx.Err() check. Done
-// and every other method are the embedded context's own.
-type cancelWhenGone struct {
-	context.Context
-	cancel context.CancelFunc
-	path   string
-}
-
-// Err cancels the context once path no longer exists, then answers as the
-// embedded context does.
-func (c *cancelWhenGone) Err() error {
-	if _, err := os.Stat(c.path); errors.Is(err, os.ErrNotExist) {
-		c.cancel()
-	}
-	return c.Context.Err()
 }
 
 // TestABackupThatFailsIsStillReported is the control on the tests above.
