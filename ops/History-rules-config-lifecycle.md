@@ -3247,8 +3247,9 @@ the path it sets. `Clone` copies the record, so a snapshot an update
 published keeps the boot load's. A config no load made has none, and a
 save of it writes as it did.
 
-*The file's own value.* For each recorded leaf but the two opt-outs, whose
-rule stays `filedSwitches'` (a change to on writes no key), a save that
+*The file's own value.* For each recorded leaf but the opt-outs
+(`switchEnvPaths`: the two enrichment switches, and since B761's PR 1 the
+update check's), whose rule stays `filedSwitches'` (a change to on writes no key), a save that
 left the leaf at its live value writes the leaf as the bytes its turn found
 give it, decoded by `DecodeFile`, Load's own decode, before Load's
 defaults, its paths and its checks: the file's own spelling, a relative
@@ -3323,6 +3324,107 @@ sets but the opt-outs), `TestASavesTextIsYAMLMarshalsWithoutTheKeysItLeavesOut`,
 `TestTheSettingsPageSaysASaveKeepsTheFilesOwnValueForAVariable` (admin)
 pin it. The records, with their negative controls, are in
 `ops/engineering-log.md`, 2026-11-08, B761 and B761 round 2.
+
+## The update check's off switch (backlog B761's PR 1, 2026-11-09)
+
+- **`update.checkEnabled` off asks GitHub nothing and installs nothing new: a check (the start's, a tick's, Check now) and an install are admitted only while it is on, and an install again at its decision under the install marker's lock (`commit`), past which its swap finishes; the off transition (`Updater.ChecksSwitched`, once a settings save is published) stops every check and every install before that decision through its own context; a tick while it is off asks nothing and fires only the restart the auto-installer deferred after a swap that committed, through its gates; on again, the cadence's wait starts over and asks nothing; the status masks what a check found (`Status.CheckEnabled`); a status, a rollback and the probation are never refused** (2026-11-09, backlog B761's PR 1). **Don't read the switch for an admission or a decision outside `gateMu`, stop a check or an install with a cancel that carries a cause, stop an install past its decision or commit one the off transition stopped, ask GitHub at a tick or a wake while the switch is off or because it came on, let the auto-installer begin an install with the switch off, leave a committed swap's deferred restart to a check, show a cached release as current while off, or refuse a status, a rollback or the probation for the switch.**
+
+*What goes out.* While update checks are on, the default, the updater sends
+one unauthenticated GET of GitHub's latest release at its start and once
+every check interval (6 h, or `update.checkIntervalHours` with its 1 h
+floor), and one for each Check now and each `bridge update`, its User-Agent
+naming the bridge's version; an install asks for the release again and
+downloads its archive, `checksums.txt` and `release-meta.json`. Until B761
+nothing turned this off: `checkIntervalHours` only stretched it.
+
+*The switch.* `UpdateConfig.CheckEnabled`, a `*bool`, absent on
+(`EffectiveCheckEnabled`); `BRIDGE_UPDATE_CHECK_ENABLED` is derived from it
+and read as the enrichment opt-outs read theirs (`switchEnvPaths`), and the
+holder's save writes it as they are written (`filedSwitches`). The `updates`
+managed control owns `updateCheckEnabled`, the `restart` control not: neither
+direction restarts anything. `Options.CheckEnabled` hands the updater the
+switch, nil reading as on: serve's reads the live holder, `bridge update`'s
+the config it loaded.
+
+*Admission.* Every check (the start's, each tick's, Check now's) and every
+install begins with `admit`, which under `gateMu` reads the switch and,
+while it is on, registers an admission with a context of its own.
+`ChecksSwitched` takes `gateMu` too, so an admission either comes after an
+off, and is refused, or is registered before it, and is stopped by it: off,
+every registered admission is marked stopped (`admission.stopped`) and its
+context cancelled, its request ended where it is on the wire. The cancel is
+a plain `context.WithCancel`: net/http answers a request a cause stopped
+with the cause rather than `context.Canceled` (measured: under
+`WithCancelCause(ErrUpdateChecksOff)` the stopped check recorded a
+`LastError` of "github get: …: update checks are off" and logged an ERROR
+poll line, the record's control C39), and every caller that tells a stop
+from a failure asks `ctxerr.WithoutCancellation`, which reads the
+cancellation; the stop is told by the flag instead. `CheckNow` answers
+`ErrUpdateChecksOff` before asking anything, and for a check the switch
+stopped; the console answers it 409 `update-checks-off`, serve's adapter
+mapping it to `admin.ErrUpdateChecksOff`.
+
+*The install's boundary.* An install is refused at its start while the
+switch is off, before anything is asked, a candidate a check found earlier
+included. Admitted, it is the switch's to stop until its decision under the
+install marker's lock: `decideUnderLock` asks `commit` first, which, holding
+`gateMu`, takes the admission out of the registry only while the switch is
+on and the off transition has not stopped it. From there no off transition
+reaches the install, and its marker's writes and its swap finish. Before it,
+the stop cancels its download, its settings check or its wait for the lock,
+and the decision refuses an install the off transition stopped even with
+the switch on again by then (control C7), its context being cancelled;
+`installStopped` gives a stopped install's answer the switch's words
+whatever the stop made of its own error: nothing was installed.
+
+*The auto-installer and the deferred restart.* `maybeAutoInstall` reads the
+switch again at its top, so a check that answered just before the switch
+went off leaves its candidate cached and nothing installs it (the post-poll
+race, control C9). A swap that committed with its restart deferred
+(`pendingRestart`: a download in flight, the quiet hours) was restarted
+only by the pending-restart fast path, after a check that answered, and with
+checks off none answers. Each tick while they are off asks nothing and calls
+`finishDeferredRestart`: the auto-installer's gates (`autoInstallGate`:
+auto-install on and wired, the candidate cached and not held back, the
+quiet hours), then `restartWhenDrained` (no download in flight, the
+marker's restamp, a stop), so the windows that run from the marker's time
+do not run out under an install that sits swapped. A manual install never
+takes the auto-installer's restart intent and gains no restart.
+
+*On again, and the timer.* `ChecksSwitched` with the switch on sends the
+poll loop's `wake` (buffered 1): its wait starts again at a full interval,
+asking nothing and installing nothing (controls C4 and C5). The loop's timer
+is a seam (`Updater.after`, `time.After` in production), so that a test
+reaches a tick with no real hour.
+
+*What the status says.* `Status.CheckEnabled` is the switch's answer when
+the status is read. While it is off, `shown` empties `LatestVersion`,
+`UpdateAvailable`, `ReleaseNotesURL`, `DeferredReason` and `LastError`, none
+of which is current while nothing checks, and keeps `LastCheck`; on again
+the last check's answer shows again. An install's answer is shown the same
+way; the auto-installer and an install read the cached status (`cached`).
+
+*Never refused.* A status, the console's rollback (`bridge update` has
+none), the boot's early and crash rollbacks, the install's probation and its
+confirmation: none of them asks the switch.
+
+`TestNoRequestAtTheStartOrATickWhileUpdateChecksAreOff` (whose tick turns red
+with the tick's gate alone reverted), `TestARequestAtTheStartAndAtATickWhileUpdateChecksAreOn`,
+`TestCheckNowAsksNothingWhileUpdateChecksAreOff`,
+`TestTurningUpdateChecksOffStopsTheScheduledCheckUnderWay`,
+`TestTurningUpdateChecksOffStopsACheckNowUnderWayBesideTheScheduledOne`,
+`TestTurningUpdateChecksOnRearmsAFullWaitAndAsksNothing`,
+`TestUpdateChecksTurnedOffAndOnAgainQuickly`,
+`TestAStatusWhileUpdateChecksAreOffShowsNoUpdate`,
+`TestNoAutoInstallOfACandidateFoundBeforeUpdateChecksWentOff`,
+`TestAnInstallIsRefusedWhileUpdateChecksAreOff`,
+`TestTurningUpdateChecksOffDuringADownloadStopsTheInstall`,
+`TestUpdateChecksTurnedOffJustBeforeAnInstallsDecisionStopItBeforeItsSwap`,
+`TestASwapPastItsDecisionFinishesWhenUpdateChecksGoOff`,
+`TestARestartDeferredAfterACommittedSwapFiresWhileUpdateChecksAreOff` and
+`TestAManualInstallGainsNoRestartWhileUpdateChecksAreOff` (internal/updater)
+pin it. The record, with its negative controls, is in
+`ops/engineering-log.md`, 2026-11-09, B761 PR 1.
 
 ## Config, settings and process lifecycle
 
@@ -3560,3 +3662,36 @@ pin it. The records, with their negative controls, are in
   the abort removed, and count stagings now. The cause, a CLI run as root
   re-owning the file, was the runbook's "always as the service user" rule
   alone until the next bullet fixed it for this file.
+
+- **A CLI write run as root keeps the owner of the file it replaces**
+  (#1048). `sudo bridge pair`, `sudo bridge admin reset-password`,
+  `sign-out-everywhere` or `login-link`, `sudo bridge cert rotate`, `sudo
+  bridge update` and a `sudo bridge init --force` rewrite beside a service
+  install staged their file as root, 0600, and the bridge running as the
+  service user could no longer read it: #1044's 503 on every console
+  request, #1047's stale token list, and a restart that could not open the
+  store or load its key. Measured with the real CLI as root over an install
+  uid 4242 owns: exactly six files came back root's (`bridge.yaml`,
+  `tokens.json`, `adminauth.json`, `adminauth-tickets.json`, `server.crt`,
+  `server.key`). `fsutil.KeepOwner` runs on each staged file while it is
+  open, before the rename, as one more of the site's own steps (the Atomic
+  writes rule: no shared writer), and does something only when the process
+  is root: it gives the file the owner of the ENTRY it replaces (`os.Lstat`,
+  so a symlink's own owner, never its target's), or of the directory for a
+  new file, which every login ticket's file is since the shared tickets file
+  became one file per ticket (2026-09-28, under Auth, pairing, TLS). The
+  updater's `update-state.json` takes it too. **Keep, not
+  refuse**: a refusal keyed on who owns the data dir turns away a setup that
+  works (a container run as root over a bind mount another uid owns, whose
+  files the root service created), while the replaced file's own owner is
+  the evidence of who reads it. **A chown that fails abandons the write**
+  (root_squash NFS gives root's files to nobody), so the service keeps a
+  file it can read. The job and database CLIs (`scan`, `upscale` /
+  `optimize` / `render` / `analyze`, `artwork`, `backup` / `restore`,
+  `manifest`, an offline `library` change), which CREATE directories and
+  sidecars rather than replace one file, were this bullet's "not covered"
+  list until 2026-09-28; the next bullet covers them. Pinned per writer
+  through `fsutil.SimulateRootForTest` on every host, and as root by
+  `TestKeepOwnerAsRoot` and `TestCLIRunAsRootKeepsTheInstallOwner`, which CI
+  skips and dido's container runs. With the six writers reverted, the
+  end-to-end test names exactly those six files.
