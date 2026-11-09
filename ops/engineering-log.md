@@ -91035,3 +91035,138 @@ docs-check` passed, and again on a copy of the branch with the rules patch appli
 `TestEveryBridgeWordIsInTheProtocol`, `TestDSDOutputProtocolTokens` and
 `TestQualificationRunbookVersion` passed too; and the qualification check passed at 56
 against the merge base of each main ref, 9d59c8f6, 0fd7e3f8, 7c1db6dd and 3d0a0d05.
+
+## 2026-11-09 — B728 B9 round 16: the two hangs' orderings forced, and a third the loaded runs found
+
+Worker b728-b9, legion0 (Ubuntu 26.04, Linux 7.0, Go 1.27.3, 16 cores), branch
+`feat/b728-b9-choice` at da707dab (round 15, `main` merged in). The brief, CI's logs of run
+42590010542 (macOS, da707dab) and run 42582616668 (Windows, f9a86769), and the two reviews
+of the brief's draft (Codex's four points, Claude's five), folded into it. Commits: 08f88804
+(the two hangs' orderings forced, each wait at them bounded), fc9935e2 (qualification 57),
+92c10bb1 (the gapless successor's two endings beside the write, forced), 534b55ad (57's
+record names them) and this record. The rules are a patch the orchestrator applies
+(`rules-b728-b9-r16.patch`): a bullet in `build-ci-tests.md`.
+
+**The prefill's hang, a test defect.** `TestNativePrefillCancelledByItsEndedLifeIsNoFailure`
+waited at line 300 for the native watcher's revocation (`lifeEnded`) once the life had
+ended. Both CI dumps hold two goroutines, the test's and `testing.Run`'s: no writer, and no
+watcher, which `lifeEnded`'s hook would have held, so the watcher had returned by its other
+arm, the writer's end. The life's end reaches this writer first (its prefill's write, whose
+context descends from the life), which begins the Immediate release itself and ends the
+sink; a watcher not yet at its select then finds the life's end and the writer's both ready,
+and Go's select takes either. Codex's reading, confirmed. Both are legitimate, a Revoke of a
+sink done being nothing (the sink is releasing, Immediate, revoked already): no production
+contract is broken, and production takes both orders. Two other tests let the writer end the
+sink unheld once its life ends, the reopen whose Locate the life cancels and the resume
+whose STATUS fails after the life's end; every other wait for `revoking` in the package has
+its writer held (in a write, a STATUS, an admission, a parked poll) or idle (inert, or in a
+watch on `context.Background()`), so its watcher finds the life's end alone.
+
+**Its fix** (08f88804). `nativeSeams.watching` and `watched`, nil in production, run at the
+watcher's start and return, beside a comment on the two orders. The three tests run in both
+(`lifeOrders`, `lifeHold`): the watcher first, the writer held at its end (`ending`) until
+the watcher holds in `lifeEnded`, so the writer's own release is pinned without it as
+before; the writer first, the watcher held before its select until the writer has ended the
+sink, then let go to take either arm. Each judges the sink again once the watcher has
+returned. Every wait at these orders is within `ordered` (5 s, at most the watchdog),
+failing by its name with the goroutines.
+
+**The gapless successor's hang, a test defect too, of another cause.**
+`TestAGaplessSuccessorWaitsForAWriteNoLongerThanTheSinksLookahead` waited at line 1017 for a
+step of b's to wait for the write. Its dump: the write held at its pending window
+(`choicePending`), the producer in `finish` draining, the sink's writer waiting for room. b
+had been handed into a's sink gaplessly before the write went pending: nothing held the
+producer between b's open and the write (the sibling case holds it at a's join window).
+Production takes that order, the write counting b as in the sink. Not the prefill's cause,
+only its class: a wait for an ordering the code may skip. Codex's reading of the floor holds
+in kind, and was not CI's cause: the producer's floor is the sink's last STATUS
+(`Position`), which the reporter reads at its steps, and the DAC's time can reach the floor
+before that STATUS. a's 500 ms in a 200 ms buffer and 50 ms periods reach the kernel by 300
+ms, and the writer measures once a period from there, at 350 and 400 ms; the test's
+`Play(400ms)` returned past the 400 ms STATUS by the fake's geometry alone. Production takes
+the order: the measurement comes within a period and the reporter's step within
+`MeasureEvery`, each 50 ms, inside the 100 ms floor.
+
+**Its fix** (08f88804). The producer is held in a (`Seams.ProducerStep`, at its second write
+step, the first its Start does not wait for) until the write is pending, and
+`FakeKernel.ParkStatusAfterPlayed` holds the sink's STATUS at 400 ms played, the DAC at the
+floor: the reporter's step (`tickWithin`) has the producer read the measurement before it
+and hold b still, with no transition and no drain; let go, the writer is back on the DAC
+once it has established the measurement, and the reporter's next step has the producer
+transition and the sink drain.
+
+**A third ordering, which the loaded soak found** (below: 2 of 200 runs opened the node
+twice). A stack of every open, a temporary instrumentation restored after it, showed the
+producer's transition for b opening b's own sink: the drain had ended after the write
+published the set that refuses b and before its reconciliation marked b handed off again,
+where `pendingFor(b)` is nil (both sets refuse b's rate) and b is not stale. The activation,
+judging b under the set published, takes the sink back with nothing written (`errReplanned`,
+round 2's rule), so nothing played; round 15's code does the same (3 of 200 at GOMAXPROCS 2,
+below). A test defect: its 'no sink opened for b' held only where the write settled first.
+92c10bb1 makes the test its prefix (`atFloor`) and two endings, each forced: the write
+answered before the DAC lets the drain end, where no sink opens for b; and the drain ending
+with the write held where it has published and not reconciled (`Seams.Published`), b's own
+sink opened and its activation begun before the reconciliation is let go, where the sink is
+taken back given no byte. Production takes this order; a producer that waited here, as a
+gapless join waits for a set its occurrence was not admitted under, would save the open, and
+is not made, no rule being broken.
+
+**Controls**, predicted before each ran (`r16-controls.predictions.txt`, the misses and
+corrections in it as they came), each mutation's bytes restored after it: C1, the old wait
+for the revocation put first: each writer-first subtest failed within 5 s, 'waited 5s for
+the life's end, its revocation held', with a dump, and each watcher-first one passed. C2,
+the watcher let go as soon as the sink was done, then the old wait, `-count=20`: 22 of the
+60 writer-first runs failed so (5, 10 and 7 of 20), CI's mechanism, and no watcher-first run
+did. C3, the writer's own release on the life's end removed: every subtest passed, against
+its prediction, since round 9's `endOfLife` has the request's caller begin the Immediate
+release once the life has ended; C3b, that and `endOfLife`'s Revoke both removed: the reopen
+failed in both orders within 5 s, the others passed. C4, a Revoke of a sink done recording a
+failure: each watcher-first subtest failed at the judgement after the watcher's return; of
+the writer-first ones two failed though their watcher took the writer's end, against the
+prediction, the caller's own `endOfLife` having revoked the sink done. C5, the producer let
+go before the write and b's write into a's sink awaited first: failed within 5 s at 'a step
+of occurrence 2 to wait for the write (1)', its dump CI's state. C6, one tick while the
+STATUS is held, the STATUS let go and the drain awaited with no further step: a race and no
+deterministic red, the rig's tick's second send starting a reporter step that can land after
+the measurement: `-count=10`, 3 first endings and 6 second ones failed at 'the sink to drain
+at its floor'. C6b, the old `Play(400ms)` in place of the grant, the STATUS at the floor
+held: both endings failed within 5 s at 'waited 5s for the writer to use 400ms of play and
+wait for more', the old flow's own wait never returning while the STATUS that would publish
+the floor is held, the deterministic red of Codex's ordering. C7, the reporter no longer
+waking a producer that holds a successor for a write: both endings failed at '(3)'. C8, no
+gapless successor held for a write, its prediction corrected before it ran: both failed at
+'(1)', the transition draining first. C9, the window ending judged by the old assertion: '2
+opens, want a's alone', the other ending passing. C11, the take-back of a handed-off sink
+made a failure: the window ending faulted ('the occurrence is being handed off again'), the
+other passed; it had passed both until that ending waited for b's activation, which a
+reconciliation let go early could beat, the sink then closed at its adoption. C5 to C8 ran
+first against 08f88804's single case, failing at the same waits.
+
+**Unforced, on legion0.** Round 15's tests unmodified (da707dab), from a race binary beside
+16 busy processes: the prefill test hung at line 300 in 11 of 300 runs at GOMAXPROCS=1 and
+18 of 300 at 2; the gapless test hung at line 1017 in 2 of 200 at each, and at 2 it also
+opened the node twice in 3 of 200. CI's macOS leg (3 vCPUs, `-race`, packages in parallel)
+is approximated by GOMAXPROCS=3 beside 20 busy processes on the 16 cores, and Windows not at
+all.
+
+Round 16's gates, at legion0, through the build slot, in two sessions. On fc9935e2: `go test
+-race` on `./internal/alsapcm/...`, `./internal/player/...` and `./cmd/bridge/...` passed
+(1417 s); CI's two native-integration runs, `make docs-check` and the qualification checks
+below passed too; the loaded soak found the third ordering (2 of 200). On 534b55ad: `make
+fmt` left the tree clean; `make vet` passed for linux/amd64, `GOOS=windows`, `GOOS=darwin`
+and `GOOS=linux GOARCH=386`; `go test -race` on `./internal/alsapcm/...` and
+`./internal/player/...` passed (88 s); the four tests by name, `-race -count=200 -v`, each
+with an explicit PASS 200 times and each of their eight subtests, none skipped and none
+failed (42 s), the writer-first subtests' watchers taking the life's end 301 times and the
+writer's 299, TMPDIR on the worktree's ext4; the same 200 times from the race binary at
+GOMAXPROCS=3 beside 20 busy processes, every test and subtest passing 200 times, none
+skipped (the watchers taking the life's end 308 times and the writer's 292); the gapless
+test 400 times at GOMAXPROCS=2 beside 16, both endings passing 400 times; CI's two
+native-integration runs passed under the overlay, every name CI requires among them; `make
+docs-check` passed, and again on a copy of the branch with the rules patch applied, where
+`TestEveryCitedTestNameExists`, `TestNoDocblockNamesAnotherDeclaration`,
+`TestEveryBridgeWordIsInTheProtocol`, `TestDSDOutputProtocolTokens` and
+`TestQualificationRunbookVersion` passed too; and the qualification check passed at 57
+against the merge base of each main ref, 9d59c8f6, 0fd7e3f8, 7c1db6dd and 3d0a0d05, and
+against round 15's head, da707dab, while 08f88804 against da707dab failed it ('guarded code
+changed without qualificationVersion increase (56 -> 56)'), so 57 is this round's own.
