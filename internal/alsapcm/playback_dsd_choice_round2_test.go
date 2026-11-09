@@ -1114,8 +1114,8 @@ func TestNoSinkOpensForASuccessorWhileAWriteChangesItsRate(t *testing.T) {
 // stale (Codex's review of round 17); each waits for the reconciliation's
 // verdict now. A write's panic at its publish ends in a verdict, never in a
 // wait the session's end alone ends: the session's DSD monitor's next
-// refresh finds the set the same and reconciles it, which revokes the
-// session's DSD. A decision made before the write registered, the write
+// refresh finds the set the same and reconciles it once more, which revokes
+// the session's DSD. A decision made before the write registered, the write
 // publishing after it, is the order a decision made just before any publish
 // has: the write's reconciliation finds a's frames the kernel's at the rate
 // the write takes away and revokes the session's DSD, the window decided, the
