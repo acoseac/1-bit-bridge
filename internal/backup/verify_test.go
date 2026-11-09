@@ -599,7 +599,12 @@ func TestTheFullCheckEvaluatesTheExpressionIndexes(t *testing.T) {
 }
 
 // TestAQuickCheckNeverUndoesAFullOne pins the record's merge: a verdict
-// never replaces one of a higher check level unless it is worse. Where no
+// never replaces one of a higher check level unless it is worse. The quick
+// check that keeps the full one's database verdict lets the veto it made for
+// its own check go once its write is durable, though the record carries
+// that verdict over, since none stood before it (backlog B653's fourth
+// round: clearing a veto only where the record is wholly what the check
+// found would leave a routine quick recheck read INCOMPLETE). Where no
 // directory can be synced no check over a VERIFIED is recorded
 // (TestARecheckWhereNoDirectoryCanBeSyncedChecksAndRecordsNothing), so there
 // is no merge to pin.
@@ -615,6 +620,10 @@ func TestAQuickCheckNeverUndoesAFullOne(t *testing.T) {
 	if quick.Record.Level != backup.CheckFull || !quick.Record.CheckedAt.Equal(full.Record.CheckedAt) {
 		t.Errorf("a quick check over a full one left level %q checked at %v, want the full check's at %v",
 			quick.Record.Level, quick.Record.CheckedAt, full.Record.CheckedAt)
+	}
+	requireVerdict(t, "the record a quick check over a full one leaves", listed(t, dir), backup.StateVerified, "", backup.StateVerified, "")
+	if pathExists(t, filepath.Join(dir, backup.VetoFileName)) || pathExists(t, backup.RootVetoPath(dir)) {
+		t.Error("the quick check left the veto it made for its own check")
 	}
 	db := filepath.Join(dir, backup.ManifestDBFileName)
 	damagePage(t, db, tracksRootPage(t, db))
