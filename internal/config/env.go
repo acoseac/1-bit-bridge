@@ -283,12 +283,14 @@ const (
 // switchEnvPaths are the opt-outs whose variables read as the file reads
 // their keys, and as off where they read as neither (backlog B617):
 // enrich.enabled and enrich.deezerEnabled stop requests to services the
-// operator chose not to ask. Read as every other boolean variable is, by
-// strconv.ParseBool with a refusal ignored, `off` and `no` left them on, and
-// the bridge went on sending what the operator had asked it to stop.
+// operator chose not to ask, and update.checkEnabled stops the update check's
+// requests to GitHub (backlog B761). Read as every other boolean variable is,
+// by strconv.ParseBool with a refusal ignored, `off` and `no` left them on,
+// and the bridge went on sending what the operator had asked it to stop.
 var switchEnvPaths = map[string]bool{
 	"enrich.enabled":       true,
 	"enrich.deezerEnabled": true,
+	"update.checkEnabled":  true,
 }
 
 // parseSwitchEnv reads an opt-out's variable as yaml.v3 reads a bool key,
