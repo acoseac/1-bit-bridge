@@ -5,6 +5,7 @@ package updater
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -276,6 +277,99 @@ func TestUpdateChecksTurnedOffJustBeforeAnInstallsDecisionStopItBeforeItsSwap(t 
 			s.requireNothingInstalled(t, "0.1.0")
 		})
 	}
+}
+
+// rereadStandIn is a reread of the update check's switch, as `bridge update`
+// hands its install one (InstallOptions.RereadSwitch): off where off says,
+// and failing with fail where it is set.
+type rereadStandIn struct {
+	off  atomic.Bool
+	fail atomic.Pointer[error]
+}
+
+func (r *rereadStandIn) read() error {
+	if p := r.fail.Load(); p != nil {
+		return *p
+	}
+	if r.off.Load() {
+		return fmt.Errorf("%w: update.checkEnabled is false in the settings", ErrUpdateChecksOff)
+	}
+	return nil
+}
+
+// TestAnInstallReadsTheSwitchAgainAsItBeginsAndAtItsDecision: a process whose
+// switch is not the live holder's, `bridge update`, hands its install a
+// reread of the switch (InstallOptions.RereadSwitch, B761's round 2), which
+// the install asks as it begins and again at its decision under the install
+// marker's lock. Off as it begins, nothing is asked and nothing installed;
+// off only once the install holds the lock, just before its decision, it is
+// refused there, nothing armed, backed up or swapped; and a reread that
+// cannot read the settings refuses the install with its own error, at either
+// point, never as an off.
+func TestAnInstallReadsTheSwitchAgainAsItBeginsAndAtItsDecision(t *testing.T) {
+	unreadable := errors.New("the settings could not be read again: line 3: a word where a number goes")
+	t.Run("off as it begins", func(t *testing.T) {
+		s := newSwitchedInstall(t, "0.1.0", "0.2.0", nil)
+		var reread rereadStandIn
+		reread.off.Store(true)
+		opts := s.manual()
+		opts.RereadSwitch = reread.read
+		_, err := s.upd.Install(context.Background(), opts)
+		if !errors.Is(err, ErrUpdateChecksOff) || !strings.Contains(err.Error(), "as the install began") {
+			t.Errorf("an install whose switch reads off again as it begins = %v, want ErrUpdateChecksOff, read as it began", err)
+		}
+		if n := s.fix.requests.Load(); n != 0 {
+			t.Errorf("the install asked the release server %d time(s), want 0", n)
+		}
+		s.requireNothingInstalled(t, "0.1.0")
+	})
+	t.Run("off just before its decision", func(t *testing.T) {
+		s := newSwitchedInstall(t, "0.1.0", "0.2.0", nil)
+		var reread rereadStandIn
+		park := newParked(t)
+		opts := s.manual()
+		opts.RereadSwitch = reread.read
+		opts.holdBeforeDecision = park.hook
+		answered := s.installInBackground(opts)
+		waitFor(t, park.reached, "the install's decision")
+		reread.off.Store(true) // the console's off, saved while the install downloaded
+		park.let()
+		if err := answerOf(t, answered); !errors.Is(err, ErrUpdateChecksOff) || !strings.Contains(err.Error(), "at the install's decision") {
+			t.Errorf("an install whose switch reads off again at its decision = %v, want ErrUpdateChecksOff, read at the decision", err)
+		}
+		s.requireNothingInstalled(t, "0.1.0")
+	})
+	t.Run("the settings no longer read as it begins", func(t *testing.T) {
+		s := newSwitchedInstall(t, "0.1.0", "0.2.0", nil)
+		var reread rereadStandIn
+		reread.fail.Store(&unreadable)
+		opts := s.manual()
+		opts.RereadSwitch = reread.read
+		_, err := s.upd.Install(context.Background(), opts)
+		if !errors.Is(err, unreadable) || errors.Is(err, ErrUpdateChecksOff) {
+			t.Errorf("an install whose settings no longer read = %v, want their reread's own error, not an off", err)
+		}
+		if n := s.fix.requests.Load(); n != 0 {
+			t.Errorf("the install asked the release server %d time(s), want 0", n)
+		}
+		s.requireNothingInstalled(t, "0.1.0")
+	})
+	t.Run("the settings no longer read at its decision", func(t *testing.T) {
+		s := newSwitchedInstall(t, "0.1.0", "0.2.0", nil)
+		var reread rereadStandIn
+		park := newParked(t)
+		opts := s.manual()
+		opts.RereadSwitch = reread.read
+		opts.holdBeforeDecision = park.hook
+		answered := s.installInBackground(opts)
+		waitFor(t, park.reached, "the install's decision")
+		reread.fail.Store(&unreadable)
+		park.let()
+		if err := answerOf(t, answered); !errors.Is(err, unreadable) || errors.Is(err, ErrUpdateChecksOff) {
+			t.Errorf("an install whose settings no longer read at its decision = %v, want their reread's own error, not an off", err)
+		}
+		s.requireNothingInstalled(t, "0.1.0")
+	})
 }
 
 // TestASwapPastItsDecisionFinishesWhenUpdateChecksGoOff: past the decision,

@@ -83,6 +83,19 @@ type InstallOptions struct {
 	// Production leaves it nil; a test stands in for a candidate.
 	ConfigCheck func(ctx context.Context, candidate, configPath string) ConfigCheck
 
+	// RereadSwitch, nil in serve (whose switch, Options.CheckEnabled, is the
+	// live holder's, and whose off transition reaches its installs), reads the
+	// update check's switch again for a process that took it as it started:
+	// `bridge update`, from the settings file it loaded, through the loader
+	// the service reads it with (backlog B761's round 2). The install asks it
+	// as it begins and again at its decision under the install marker's lock,
+	// before the switch's commit, so an off saved while the command waited at
+	// its prompt or downloaded refuses the install, nothing armed or swapped.
+	// Its answer is the refusal: ErrUpdateChecksOff, naming what turned the
+	// checks off, or why the settings could not be read again, which the
+	// install never takes for an off.
+	RereadSwitch func() error
+
 	// RestoreBackup overrides the rename that puts the backup back over the
 	// binary in an operator's Rollback (RollbackBinary). Production leaves
 	// it nil; a test holds a rollback in it.
@@ -179,16 +192,33 @@ type InstallOptions struct {
 // check or its wait for the lock, and the decision refuses where the switch
 // is off then, each answering ErrUpdateChecksOff with nothing armed or
 // swapped; from it, the install is the switch's no longer, and its marker's
-// writes and its swap finish whatever the switch says. The answer's status
-// is shown as Status shows it.
+// writes and its swap finish whatever the switch says. A process that took
+// its switch as it started reads it again at both points (opts.RereadSwitch,
+// B761's round 2). The answer's status is shown as Status shows it.
 func (u *Updater) Install(ctx context.Context, opts InstallOptions) (Status, error) {
 	ictx, a, ok := u.admit(ctx)
 	if !ok {
 		return u.Status(), fmt.Errorf("%w: no release is installed while they are off", ErrUpdateChecksOff)
 	}
 	defer u.done(a)
+	if err := rereadSwitch(opts, "as the install began"); err != nil {
+		return u.Status(), err
+	}
 	st, err := u.install(ictx, a, opts)
 	return u.shown(st), installStopped(a, err)
+}
+
+// rereadSwitch asks opts.RereadSwitch, where one was given, and refuses the
+// install with its answer, saying where it was found and that nothing was
+// installed (B761's round 2).
+func rereadSwitch(opts InstallOptions, where string) error {
+	if opts.RereadSwitch == nil {
+		return nil
+	}
+	if err := opts.RereadSwitch(); err != nil {
+		return fmt.Errorf("%w (found %s); nothing was installed", err, where)
+	}
+	return nil
 }
 
 // installStopped is err, an install's answer, as its caller is told it: the
@@ -886,13 +916,18 @@ func (u *Updater) swapAwaitingRestart(dataDir, target string) bool {
 // unconfirmed running version. A manual install is not held by it. The lock
 // is the caller's.
 //
-// First of all it asks the update check's switch again (backlog B761),
-// through the install's admission a: where update checks are off, or the
-// switch's off transition stopped the install, it refuses with
-// ErrUpdateChecksOff; otherwise the install is committed, and from here no
-// off transition stops it (commit), so the marker's writes and the swap that
-// follow finish.
+// First of all it asks the update check's switch again (backlog B761): read
+// again from the settings where the process took it as it started
+// (opts.RereadSwitch, B761's round 2; outside gateMu, being a file's read),
+// whose answer refuses the install, and then through the install's admission
+// a: where update checks are off, or the switch's off transition stopped the
+// install, it refuses with ErrUpdateChecksOff; otherwise the install is
+// committed, and from here no off transition stops it (commit), so the
+// marker's writes and the swap that follow finish.
 func (u *Updater) decideUnderLock(a *admission, opts InstallOptions, target string) error {
+	if err := rereadSwitch(opts, "at the install's decision, before its swap"); err != nil {
+		return err
+	}
 	if !u.commit(a) {
 		return fmt.Errorf("%w: they are off at the install's decision, before its swap; nothing was installed", ErrUpdateChecksOff)
 	}

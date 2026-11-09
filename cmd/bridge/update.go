@@ -43,12 +43,20 @@ var updateReleases *updater.Client
 //	2 — usage error
 //
 // Update checks off (update.checkEnabled, backlog B761) refuse both things
-// this command does, the check and the install, before anything is asked of
-// GitHub or opened, read from the config the service loads through the same
-// loader, its file and BRIDGE_UPDATE_CHECK_ENABLED alike: an off set only in
-// the service's environment (a unit or a compose file) must be in this
-// shell's too for the command to see it. A rollback is the console's, and
-// the switch never refuses it.
+// this command does, the check and the install. The switch is read as the
+// command starts, before anything is asked of GitHub or opened, from the
+// settings the service loads, through the same loader: the file the command
+// names or finds, and BRIDGE_UPDATE_CHECK_ENABLED in this command's own
+// environment, which overrides the file. It is read again from that file as
+// the install begins and at its decision under the install marker's lock
+// (rereadUpdateSwitch; B761's round 2), so an off the console saved while the
+// command waited at its prompt, or downloaded, refuses the install, the
+// running bridge unchanged, and settings that no longer read refuse it with
+// their load's error. The service's own environment is not this command's:
+// an off set only there (a unit or a compose file) must be in this shell's
+// too for the command to see it. No status, rollback (the console's, or a
+// start's) or probation is the switch's to refuse; this command has none of
+// its own.
 //
 // Restart: the CLI does NOT trigger restart itself. After a
 // successful install the operator is told what to run; this keeps
@@ -177,6 +185,9 @@ func updateCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stde
 		Force:              true,
 		OverrideCompatGate: *overrideClientFloor,
 		ConfigPath:         cfgPath,
+		// The switch read again as the install begins and at its
+		// decision: this process's updater took it as the command started.
+		RereadSwitch: rereadUpdateSwitch(cfgPath),
 	})
 	if err != nil {
 		reportInstallFailure(stderr, err, cfgPath)
@@ -246,23 +257,91 @@ func updateCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stde
 
 // refuseUpdateChecksOff says why `bridge update` asks nothing and installs
 // nothing while update checks are off (backlog B761), naming what turned them
-// off, the variable in this shell's environment or the file, and how to turn
-// them on; the console's rollback is not refused.
+// off, the variable in this shell's environment or the file, how to turn them
+// on, and what the switch never refuses.
 func refuseUpdateChecksOff(stderr io.Writer, cfgPath string) {
-	source := fmt.Sprintf("update.checkEnabled is false in %s", cfgPath)
-	if _, set := config.UpdateCheckEnabledFromEnv(); set {
-		source = "BRIDGE_UPDATE_CHECK_ENABLED in this environment says off"
-	}
 	fmt.Fprintf(stderr, "bridge update: update checks are off (%s), so this command neither asks GitHub for a "+
-		"release nor installs one.\n", source)
-	fmt.Fprintln(stderr, "Turn them on in the console's Settings → Updates, or set update.checkEnabled: true and unset "+
-		"BRIDGE_UPDATE_CHECK_ENABLED, then run it again. A rollback, in the console, works with them off.")
+		"release nor installs one.\n", updateChecksOffSource(cfgPath))
+	sayHowToTurnUpdateChecksOn(stderr, cfgPath)
+	fmt.Fprintln(stderr, "The switch refuses no status, rollback or probation: bridge status, the console's Roll back and a "+
+		"start's crash rollback do not ask it.")
+}
+
+// updateChecksOffSource names what turned update checks off for this command:
+// BRIDGE_UPDATE_CHECK_ENABLED in its own environment, which overrides the
+// file, or update.checkEnabled in the file at path.
+func updateChecksOffSource(path string) string {
+	if _, set := config.UpdateCheckEnabledFromEnv(); set {
+		return "BRIDGE_UPDATE_CHECK_ENABLED in this environment says off"
+	}
+	return fmt.Sprintf("update.checkEnabled is false in %s", path)
+}
+
+// sayHowToTurnUpdateChecksOn says how to turn the checks on for this command:
+// the variable where it is what turned them off, since it overrides the file
+// and the console's switch alike, and otherwise the console's switch or the
+// file.
+func sayHowToTurnUpdateChecksOn(stderr io.Writer, path string) {
+	if _, set := config.UpdateCheckEnabledFromEnv(); set {
+		fmt.Fprintln(stderr, "BRIDGE_UPDATE_CHECK_ENABLED overrides bridge.yaml and the console's switch: unset it in this "+
+			"environment, or set it to true, then run this again.")
+		return
+	}
+	fmt.Fprintf(stderr, "Turn them on with the console's switch (Settings → Updates), or set update.checkEnabled: true in %s, "+
+		"then run this again.\n", path)
+}
+
+// settingsRereadError is the install's refusal where the reread of the switch
+// (rereadUpdateSwitch) could not read the settings again: their load's own
+// error, never taken for update checks turned off (B761's round 2).
+type settingsRereadError struct {
+	path string
+	err  error
+}
+
+func (e *settingsRereadError) Error() string {
+	return fmt.Sprintf("the settings at %s could not be read again: %v", e.path, e.err)
+}
+
+func (e *settingsRereadError) Unwrap() error { return e.err }
+
+// rereadUpdateSwitch is `bridge update`'s reread of the update check's switch
+// for its install (updater.InstallOptions.RereadSwitch; B761's round 2): the
+// file at path, the one the command resolved as it started (no other found),
+// loaded again as the service loads it, this command's environment included.
+// Off is updater.ErrUpdateChecksOff naming what turned the checks off;
+// settings that no longer load are a *settingsRereadError.
+func rereadUpdateSwitch(path string) func() error {
+	return func() error {
+		cfg, _, err := config.LoadFile(path)
+		if err != nil {
+			return &settingsRereadError{path: path, err: err}
+		}
+		if !cfg.Update.EffectiveCheckEnabled() {
+			return fmt.Errorf("%w: %s", updater.ErrUpdateChecksOff, updateChecksOffSource(path))
+		}
+		return nil
+	}
 }
 
 // reportInstallFailure prints why `bridge update` installed nothing, and what
 // to do: for a version that refuses the settings, each reason it gave by
-// line, and the file to fix (backlog B613).
+// line, and the file to fix (backlog B613); for update checks turned off, or
+// settings that no longer read, by the install's reread of the switch, what
+// it found (B761's round 2).
 func reportInstallFailure(stderr io.Writer, err error, cfgPath string) {
+	if errors.Is(err, updater.ErrUpdateChecksOff) {
+		fmt.Fprintf(stderr, "bridge update: %v\n", err)
+		fmt.Fprintln(stderr, "The running bridge is unchanged.")
+		sayHowToTurnUpdateChecksOn(stderr, cfgPath)
+		return
+	}
+	var reread *settingsRereadError
+	if errors.As(err, &reread) {
+		fmt.Fprintf(stderr, "Install refused: %v\n", err)
+		fmt.Fprintf(stderr, "The running bridge is unchanged. Fix %s, then run `bridge update` again.\n", cfgPath)
+		return
+	}
 	fmt.Fprintf(stderr, "Install failed: %v\n", err)
 	if errors.Is(err, updater.ErrConfigRefused) {
 		fmt.Fprintf(stderr, "The running bridge is unchanged. Fix %s, then run `bridge update` again.\n", cfgPath)

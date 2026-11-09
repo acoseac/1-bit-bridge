@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -207,6 +208,75 @@ func TestBridgeUpdateRefusesItsCheckAndItsInstallWhileUpdateChecksAreOff(t *test
 				code, gh.asked.Load(), out)
 		}
 	})
+}
+
+// answerAfter answers the install's prompt with what r gives, once do has
+// run: an operator's change made while the prompt waits. Read runs on the
+// test's goroutine, which runs the command.
+type answerAfter struct {
+	do   func()
+	r    io.Reader
+	once sync.Once
+}
+
+func (a *answerAfter) Read(p []byte) (int, error) {
+	a.once.Do(a.do)
+	return a.r.Read(p)
+}
+
+// TestBridgeUpdateReadsTheSwitchAgainOnceItsPromptIsAnswered: `bridge update`
+// found update checks on as it started, asked GitHub and found 99.0.0, and
+// while its prompt waits the console's save turns the checks off in the file.
+// Answered yes, the install reads the switch again from the settings the
+// command loaded (that file, through the loader the service reads it with;
+// B761's round 2), refuses saying what turned the checks off and that the
+// running bridge is unchanged, and asks GitHub nothing more.
+func TestBridgeUpdateReadsTheSwitchAgainOnceItsPromptIsAnswered(t *testing.T) {
+	t.Setenv(updateCheckVar, "")
+	os.Unsetenv(updateCheckVar)
+	gh := newReleasesStandIn(t)
+	gh.asCLIs(t)
+	cfg := updateCLIConfig(t, "")
+	answer := &answerAfter{r: strings.NewReader("y\n"), do: func() { appendToFile(t, cfg, "update:\n  checkEnabled: false\n") }}
+	var stdout, stderr bytes.Buffer
+	code := updateCmd(t.Context(), []string{"--config", cfg}, answer, &stdout, &stderr)
+	out := stdout.String() + stderr.String()
+	if code != 1 {
+		t.Errorf("bridge update answered yes after checks went off exited %d, want 1:\n%s", code, out)
+	}
+	if !strings.Contains(out, "update checks are off") || !strings.Contains(out, "update.checkEnabled is false in "+cfg) ||
+		!strings.Contains(out, "The running bridge is unchanged") {
+		t.Errorf("the install's refusal does not say the checks were turned off in the file and that nothing changed:\n%s", out)
+	}
+	if n := gh.asked.Load(); n != 1 {
+		t.Errorf("the releases API was asked %d time(s), want 1: the check before the prompt alone", n)
+	}
+}
+
+// TestBridgeUpdateRefusesItsInstallWhereTheSettingsNoLongerRead: while the
+// prompt waits the settings are left unreadable; answered yes, the install's
+// reread of the switch cannot read them and refuses with why, never as update
+// checks turned off, asking GitHub nothing more.
+func TestBridgeUpdateRefusesItsInstallWhereTheSettingsNoLongerRead(t *testing.T) {
+	t.Setenv(updateCheckVar, "")
+	os.Unsetenv(updateCheckVar)
+	gh := newReleasesStandIn(t)
+	gh.asCLIs(t)
+	cfg := updateCLIConfig(t, "")
+	answer := &answerAfter{r: strings.NewReader("y\n"), do: func() { appendToFile(t, cfg, "scanIntervalSec: [\n") }}
+	var stdout, stderr bytes.Buffer
+	code := updateCmd(t.Context(), []string{"--config", cfg}, answer, &stdout, &stderr)
+	out := stdout.String() + stderr.String()
+	if code != 1 {
+		t.Errorf("bridge update answered yes over settings that no longer read exited %d, want 1:\n%s", code, out)
+	}
+	if !strings.Contains(out, "could not be read again") || !strings.Contains(out, "The running bridge is unchanged") ||
+		strings.Contains(out, "update checks are off") {
+		t.Errorf("the install's refusal does not say the settings could not be read again (and nothing of an off):\n%s", out)
+	}
+	if n := gh.asked.Load(); n != 1 {
+		t.Errorf("the releases API was asked %d time(s), want 1: the check before the prompt alone", n)
+	}
 }
 
 // updatesPanelState is what GET /api/updates says of the update check and
