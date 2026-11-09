@@ -203,6 +203,8 @@ autocert:
 
 The bridge advertises the Tailscale magic-DNS URL via `/v1/health`, paired iOS devices use that URL, and the bridge stays unreachable from outside the tailnet.
 
+In `tsnet` mode the embedded node uploads no Tailscale diagnostic logs unless `tailscale.uploadDiagnosticLogs: true` allows it (a change takes a restart; a tailnet that requires the logs refuses the node until then, and the admin tile says so). Without `tailscale.hostname`, a registered node keeps its name and a new one registers as `1-bit-bridge`.
+
 ## Troubleshooting
 
 **"unauthorized" from iOS after pair**

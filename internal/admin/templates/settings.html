@@ -641,6 +641,18 @@
         </small>
       </div>
 
+      <div class="field">
+        <label class="checkbox">
+          <input type="checkbox" role="switch" name="tailscaleUploadDiagnosticLogs" {{if .Data.TailscaleUploadDiagnosticLogs}}checked{{end}}>
+          Upload Tailscale's diagnostic logs (tsnet mode) <span class="badge warn">restart</span>
+        </label>
+        <small class="hint">
+          In <code>tsnet</code> mode the bridge's embedded Tailscale node sends Tailscale its diagnostic logs only while
+          this is on. Off, the default, it sends none. A tailnet that requires those logs refuses the node until this is
+          on. The node reads it when it starts, so a change takes effect after a restart.
+        </small>
+      </div>
+
       <div class="field" {{if .Data.IsPublic}}hidden{{end}}>
         <label class="checkbox">
           <input type="checkbox" role="switch" name="mdnsEnabled" {{if .Data.MDNSEnabled}}checked{{end}}>

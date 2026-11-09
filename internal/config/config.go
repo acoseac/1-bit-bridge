@@ -1183,9 +1183,37 @@ type TailscaleConfig struct {
 	// Unused once tsnet has persisted state.
 	AuthKey string `yaml:"authKey,omitempty"`
 
-	// Hostname is the magic-DNS hostname tsnet will register with.
-	// Empty falls back to the bridge's deviceName / library name.
+	// Hostname is the name the embedded node (tsnet mode) registers with
+	// and keeps, its MagicDNS name's first label. Empty (backlog B749): a
+	// node registered in <dataDir>/tailscale keeps the name its saved
+	// profile carries, so neither an upgrade nor a library rename renames
+	// it (a rename can change its MagicDNS name and its certificate's,
+	// which paired apps hold); a new node is "1-bit-bridge", which
+	// Tailscale suffixes where another node has it; and a saved state that
+	// cannot be read keeps the library name earlier versions used, with a
+	// line at the start saying so. Never derived from the library, the
+	// host, its user or a path for a new node. After `bridge tsnet logout`
+	// the next node is new; a restored backup's is the restored profile's.
 	Hostname string `yaml:"hostname,omitempty"`
+
+	// UploadDiagnosticLogs lets the embedded node (tsnet mode) upload
+	// Tailscale's diagnostic logs to Tailscale (log.tailscale.com). Absent
+	// or false, the default: before the node is built the bridge sets
+	// TS_NO_LOGS_NO_SUPPORT=true for its process, so the node uploads no
+	// diagnostic logs and no network flow logs, and tells Tailscale's
+	// coordination server it runs that way. In tsnet mode the node still
+	// talks to Tailscale's coordination server (its name, keys and a
+	// description of the host, as every Tailscale client does), to
+	// Tailscale's DERP relays and their STUN probes, and, once it serves
+	// HTTPS, to Let's Encrypt for its *.ts.net certificate. True leaves the
+	// environment the bridge inherited as it
+	// is: TS_NO_LOGS_NO_SUPPORT=true there still keeps the uploads off,
+	// and false there never turns them on without this key. A tailnet
+	// that requires the logs refuses a node that does not upload them,
+	// and the bridge then says what to change. The node reads it when it
+	// is built, so a change takes a restart. Never turned on by the
+	// bridge itself.
+	UploadDiagnosticLogs bool `yaml:"uploadDiagnosticLogs,omitempty"`
 }
 
 // TailscaleMode is the typed representation of TailscaleConfig.Mode.

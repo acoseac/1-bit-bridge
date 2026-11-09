@@ -570,6 +570,10 @@ func (n *fakeTsnetNode) Status(context.Context) (*ipnstate.Status, error) {
 
 func (n *fakeTsnetNode) CertDomains() []string { return nil }
 
+func (n *fakeTsnetNode) LastStartError() error { return nil }
+
+func (n *fakeTsnetNode) LogsRequired(*ipnstate.Status) error { return nil }
+
 func (n *fakeTsnetNode) ListenTLS(string) (net.Listener, error) {
 	defer n.listenDoneOnce.Do(func() { close(n.listenReturned) })
 	defer n.enter("ListenTLS")()

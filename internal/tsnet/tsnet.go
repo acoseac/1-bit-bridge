@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"net"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -99,6 +98,10 @@ type Server struct {
 	// open.
 	newNode func(*tsnet.Server) node
 
+	// uploads is the diagnostic-log policy NewServer applied, which the
+	// refusal of a tailnet that requires the logs words its advice from.
+	uploads Uploads
+
 	// lifecycleMu protects everything from here to authMu.
 	lifecycleMu sync.Mutex
 	server      node
@@ -109,6 +112,10 @@ type Server struct {
 	// stops the start instead of waiting it out. Nil when no Start is
 	// in flight.
 	cancelStart context.CancelFunc
+	// lastStartErr is the error the last Start that ended returned, nil
+	// once one has succeeded: what the console's tile says after a start
+	// the tailnet refused, when Status has no node to ask.
+	lastStartErr error
 
 	// authMu protects authURL ONLY. Held briefly by userLogf
 	// (background goroutine, write) and AuthURL() (caller, read).
@@ -147,10 +154,20 @@ type Config struct {
 	//
 	// See startUnlocked for the resolution code.
 	AuthKey string
-	// Hostname is the magic-DNS hostname tsnet registers with.
-	// Empty falls back to the deviceName / library name supplied
-	// by the caller via this field.
+	// Hostname, when set, is the name the node registers with and keeps
+	// (tailscale.hostname), whatever its state holds. Empty, the state
+	// decides at each Start (startUnlocked, nodeName): a node registered in
+	// StateDir keeps the name its current profile carries, so neither an
+	// upgrade nor a library rename renames it (a rename can change its
+	// MagicDNS name and its certificate's, which paired apps hold); a node
+	// not registered yet is DefaultHostname; and a state that is there and
+	// cannot be read is UnreadableStateHostname, with one line saying why.
 	Hostname string
+	// UnreadableStateHostname is the name a Start gives the node when
+	// Hostname is empty and its state is there and cannot be read: the
+	// name the bridge gave every node before (the library's), which such a
+	// node most likely has. Empty: DefaultHostname.
+	UnreadableStateHostname string
 	// StateDir is the on-disk location of tsnet's state store.
 	// MUST be set explicitly — empty causes tsnet to fall into
 	// ephemeral mode (re-registers as a new device on every restart,
@@ -162,10 +179,32 @@ type Config struct {
 	// adapted into different slog levels — see logfFromSlog and
 	// noisyLogfFromSlog.
 	Logger *slog.Logger
+	// UploadDiagnosticLogs is tailscale.uploadDiagnosticLogs: whether the
+	// node may upload Tailscale's diagnostic logs. NewServer applies it to
+	// the process before the node is built (applyUploadPolicy): false sets
+	// NoLogsEnv true, which keeps the uploads, and the flow logs, off; true
+	// leaves the inherited environment as it is. Upstream reads the
+	// variable as the node starts and the logtail transport is chosen then,
+	// so a change takes a restart.
+	UploadDiagnosticLogs bool
+	// BeforeStart, when set, runs on the upstream server startUnlocked
+	// built, just before its Start, and an error from it ends the start
+	// there, the server closed unstarted. Nil in production: a test reads
+	// with it what the upstream start would see (the environment, the name)
+	// and stops the start before anything reaches the network.
+	BeforeStart StartHook
 }
 
-// NewServer validates the configuration and constructs an unstarted
-// Server. The actual tailnet-up dance happens in Start.
+// StartHook is Config.BeforeStart's type.
+type StartHook func(*tsnet.Server) error
+
+// NewServer validates the configuration, applies the diagnostic-log policy
+// to the process (Config.UploadDiagnosticLogs, applyUploadPolicy), and
+// constructs an unstarted Server. The actual tailnet-up dance happens in
+// Start. Every path that builds a node builds it here, after its mode gate,
+// on the caller's goroutine and before anything starts the node; an inherited
+// NoLogsEnv that does not read as a boolean is ErrNoLogsEnvUnreadable, with
+// nothing built and the environment as it was.
 func NewServer(cfg Config) (*Server, error) {
 	if cfg.Logger == nil {
 		return nil, errors.New("tsnet: Config.Logger is required")
@@ -179,10 +218,15 @@ func NewServer(cfg Config) (*Server, error) {
 		// Refuse loudly here.
 		return nil, errors.New("tsnet: Config.StateDir is required (empty triggers ephemeral mode)")
 	}
+	uploads, err := applyUploadPolicy(cfg.UploadDiagnosticLogs)
+	if err != nil {
+		return nil, err
+	}
 	return &Server{
 		cfg:     cfg,
 		log:     cfg.Logger,
 		newNode: func(ts *tsnet.Server) node { return ts },
+		uploads: uploads,
 	}, nil
 }
 
@@ -257,11 +301,29 @@ func (s *Server) Start(ctx context.Context) error {
 		if server != nil {
 			_ = server.Close()
 		}
+		// A tailnet that requires the logs this node does not upload
+		// refuses it here: in the bridge's words, which say what to
+		// change, never upstream's advice for tailscaled's command line.
+		if isLogsRequired(err.Error()) {
+			err = &LogsRequiredError{Uploads: s.uploads, err: err}
+		}
+		s.lastStartErr = err
 		return err
 	}
 	s.server = server
 	s.started = true
+	s.lastStartErr = nil
 	return nil
+}
+
+// LastStartError is the error the last Start that ended returned (a
+// *LogsRequiredError for a start the tailnet refused), or nil before any has
+// ended and once one has succeeded. A Start the caller's context or Close
+// stopped is kept too.
+func (s *Server) LastStartError() error {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	return s.lastStartErr
 }
 
 // startUnlocked does the I/O-heavy parts of Start without holding
@@ -292,20 +354,26 @@ func (s *Server) startUnlocked(ctx context.Context) (node, error) {
 		authKey = s.cfg.AuthKey
 	}
 
-	fresh := !hasPersistedTsnetState(s.cfg.StateDir)
-	if fresh && authKey == "" {
-		s.log.Warn("tsnet: no persisted state and no AuthKey — interactive auth required",
+	hostname, registered := s.nodeName()
+	if registered == stateNotRegistered && authKey == "" {
+		s.log.Warn("tsnet: no registered node in the state dir and no AuthKey — interactive auth required",
 			slog.String("stateDir", s.cfg.StateDir))
 	}
 
-	server := s.newNode(&tsnet.Server{
+	upstream := &tsnet.Server{
 		Dir:       s.cfg.StateDir,
-		Hostname:  s.cfg.Hostname,
+		Hostname:  hostname,
 		AuthKey:   authKey,
 		Ephemeral: false,
 		UserLogf:  s.userLogf(),
 		Logf:      noisyLogfFromSlog(s.log),
-	})
+	}
+	server := s.newNode(upstream)
+	if s.cfg.BeforeStart != nil {
+		if err := s.cfg.BeforeStart(upstream); err != nil {
+			return server, fmt.Errorf("tsnet: before start: %w", err)
+		}
+	}
 
 	if err := server.Start(); err != nil {
 		return server, fmt.Errorf("tsnet: server start: %w", err)
@@ -563,16 +631,51 @@ func extractTailscaleAuthURL(msg string) string {
 	return tail
 }
 
-// hasPersistedTsnetState reports whether the state dir holds an
-// already-authenticated tsnet identity. Used by the startup
-// misconfig sentinel to distinguish "first run, will need
-// interactive auth" from "state was deleted, will silently
-// re-register as new device" (a different operator-facing message
-// is appropriate for each).
+// registration is what a start knows of whether the state dir holds a
+// registered node.
+type registration int
+
+const (
+	stateNotRegistered registration = iota // no file, an empty one, "{}", an authentication that never finished
+	stateRegistered                        // the current profile carries a node identity
+	stateUnreadable                        // the state is there and could not be read for either answer
+)
+
+// nodeName is the name startUnlocked registers the node with, and what the
+// state dir says of its registration. Config.Hostname wins whatever the state
+// holds. Otherwise a registered node keeps the name its persisted current
+// profile carries, a node not registered yet is DefaultHostname, and a state
+// that is there and cannot be read is taken for neither: the start gives the
+// node Config.UnreadableStateHostname, the name earlier versions gave every
+// node, and says so in one line naming no path.
 //
-// tsnet's default FileStore writes its state to
-// <Dir>/tailscaled.state — file existence is the canonical signal.
-func hasPersistedTsnetState(stateDir string) bool {
-	_, err := os.Stat(filepath.Join(stateDir, "tailscaled.state"))
-	return err == nil
+// The state is not the file's existence: upstream writes "{}" before any
+// authentication, so a first start that failed, or an authentication that was
+// abandoned, leaves a file and no registered node (readNodeState).
+func (s *Server) nodeName() (string, registration) {
+	st, err := readNodeState(s.cfg.StateDir)
+	reg := stateNotRegistered
+	switch {
+	case err != nil:
+		reg = stateUnreadable
+	case st.registered:
+		reg = stateRegistered
+	}
+	if s.cfg.Hostname != "" {
+		return s.cfg.Hostname, reg
+	}
+	switch reg {
+	case stateRegistered:
+		return st.hostname, reg
+	case stateUnreadable:
+		name := s.cfg.UnreadableStateHostname
+		if name == "" {
+			name = DefaultHostname
+		}
+		s.log.Warn("tsnet: "+err.Error()+", so this start cannot tell which name the node has, and registers it as "+
+			"earlier versions did; set tailscale.hostname to choose the node's name",
+			slog.String("name", name))
+		return name, reg
+	}
+	return DefaultHostname, reg
 }

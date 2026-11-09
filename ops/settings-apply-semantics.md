@@ -159,6 +159,7 @@ Classes describe *how the value is consumed*, not how important it is.
 | `autoOptimizeEnabled` | A | `live` (+reason when sox is unusable) / `restart`+reason | Shared `enabledFn` read per sweep; nudged in both directions. `restart` with a reason when no sweeper is wired. The sweeper's gate is the CarPlay kind's live gate (the upscale gate, sox included) AND this flag; until 2026-09-28 it read the three switches alone, so on a bridge without sox every sweep queued jobs that failed and struck their files. |
 | `mdnsEnabled` | A | `live` / `restart`+reason | `mdnsLifecycle.Set(bool)` — a real start/stop. `restart` with a reason when no lifecycle is wired. |
 | `tailscaleMode` | A / C | `live` (cli→disabled) / `restart`+reason | Only `cli → disabled` hot-applies, via `TailscaleDisable`. Every other transition rewires the auto-pilot and the listener composition; the reason names which transition it was. |
+| `tailscaleUploadDiagnosticLogs` | D | `restart` | `tailscale.uploadDiagnosticLogs`, the operator's consent to the embedded node uploading Tailscale's diagnostic logs (backlog B749); off unless true. Serve applies it to its process (`TS_NO_LOGS_NO_SUPPORT`) as it builds the node at startup, and upstream chooses the node's log transport as the node starts, so a change waits for a restart in every mode, and does nothing outside `tsnet` mode. A tailnet that requires the logs refuses a node without them, and the Tailscale tile says what to change. |
 | `listenAddress` | D | `restart` | The `/v1` listener bind. While `output.player.openhome` is on, an address on the OpenHome surface's port is refused, 409 `openhome-port-clash`, nothing written: the next start would turn the player off over it (B612). |
 | `adminAddress` | D | `restart` | The admin listener bind, and the loopback-only enforcement point. Refused on the OpenHome surface's port as `listenAddress` is. |
 | `scanIntervalSec` | **A** | `live` | `RunPeriodic` and the analysis sweeper both re-read a provider before each wait; the cadence rearm wakes them so the new value binds now. |
@@ -523,7 +524,7 @@ process, `log-file-size`, the log export, and the Diagnostics `/metrics` pointer
 
 ## What a control plane must restart for
 
-**Six fields. Everything else applies live.**
+**Seven fields. Everything else applies live.**
 
 | Field | Why it stays restart-bound | Recommendation |
 |---|---|---|
@@ -533,8 +534,10 @@ process, `log-file-size`, the log export, and the Diagnostics `/metrics` pointer
 | `libraryWatchEnabled` | fsnotify watcher behind a `scanWG` / `closing` drain guarding a SQLite-corruption vector | The one deliberate maybe — see below |
 | `atlasEnabled` | An API field *and* a file-backed harvest state store; converting one half is what rule 1 forbids | Convertible, but as a whole-field lifecycle change |
 | `tailscaleMode` | Every transition except `cli → disabled` rewires the auto-pilot and the listener composition | Provisioning-time setting |
+| `tailscaleUploadDiagnosticLogs` | A process-wide setting of Tailscale's code, applied as serve builds the embedded node; upstream chooses the node's log transport as it starts | The operator's consent, provisioning-time |
 
-Two of them (`listenAddress`, `adminAddress`) will never convert. The rest are
+Two of them (`listenAddress`, `adminAddress`) will never convert, and
+`tailscaleUploadDiagnosticLogs` stays with the process it is applied to. The rest are
 **provisioning decisions per tenant rather than user-facing toggles**, so a
 supervised restart at provision time costs nothing — which is why the stack
 stopped here rather than taking on runtime pool teardown.

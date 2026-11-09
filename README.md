@@ -143,6 +143,10 @@ The bridge offers three Tailscale integration modes via the `tailscale.mode` key
 
 Mode changes require a bridge restart. The admin tile shows the current Tailscale state and any errors from the active path.
 
+In `tsnet` mode, what leaves the bridge for Tailscale is what any Tailscale client sends: the node's registration, keys and name and a description of the host to Tailscale's coordination server, traffic through Tailscale's DERP relays when peers cannot connect directly, and, once it serves HTTPS, the requests for its `*.ts.net` certificate. **Tailscale's diagnostic logs are not uploaded unless you allow them**: the bridge sets `TS_NO_LOGS_NO_SUPPORT=true` for the node unless `tailscale.uploadDiagnosticLogs: true` is in `bridge.yaml` (or ticked in Settings, Networking), which also keeps network flow logs off. The switch takes effect at the next restart. A `TS_NO_LOGS_NO_SUPPORT=true` in the bridge's own environment keeps the uploads off even with the key set. A tailnet whose policy requires those logs refuses a node without them; the admin tile then says what to change.
+
+The node's name is `tailscale.hostname` when set. Otherwise a node already registered keeps the name it has (a library rename no longer renames it, so its MagicDNS name stays what paired devices know), and a new node registers as `1-bit-bridge` (Tailscale adds a suffix if another node has that name). After `bridge tsnet logout` the next start is a new node; a restored backup's node keeps the name its restored state carries.
+
 ## Manual run (without `bridge init`)
 
 For anyone who wants to skip the service install or run the bridge out of an arbitrary directory:

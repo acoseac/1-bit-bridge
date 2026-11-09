@@ -5126,6 +5126,9 @@ function buildSettingsPayload(form, fd, enrichBases) {
     // pointer field is the honest way to say "not offered, so
     // not changed".
     tailscaleMode: fd.get("tailscaleMode") || "",
+    // The embedded node's diagnostic-log uploads (B749). Restart-required:
+    // the node reads the consent as it is built at startup.
+    tailscaleUploadDiagnosticLogs: fd.get("tailscaleUploadDiagnosticLogs") === "on",
     mdnsEnabled: fd.get("mdnsEnabled") === "on",
     // UPnP/DLNA toggle (restart-required). In public mode the checkbox
     // is rendered `disabled`, so omit the field entirely there (undefined

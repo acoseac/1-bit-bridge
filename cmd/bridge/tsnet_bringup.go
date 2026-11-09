@@ -29,6 +29,9 @@ type tsnetNode interface {
 	Close() error
 	Status(context.Context) (*ipnstate.Status, error)
 	CertDomains() []string
+	// The admin tile's reads of a tailnet's refusal (tsnetStatusSource).
+	LastStartError() error
+	LogsRequired(*ipnstate.Status) error
 	ListenTLS(addr string) (net.Listener, error)
 	ListenPacket(network, addr string) (net.PacketConn, error)
 	HTTP3TLSConfig() *tls.Config
