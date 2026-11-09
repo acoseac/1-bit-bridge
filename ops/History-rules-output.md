@@ -1026,7 +1026,15 @@ loop; a refusal
 of the policy's that a write or a later set lifts is asked again where the open
 ends, the content's checks with it (`settleOpen`, `refusedUnder`), a
 successor's DSD monitor starting once it is admitted; a gapless successor waits
-out of its sink only while that sink holds more than its floor; the write
+out of its sink only while that sink holds more than its floor; an occurrence
+admitted under a set a publish has replaced, a write's once it has published
+among them, waits for that publish's reconciliation to judge it
+(`unjudgedLocked`, the session's `judged`, closed in the reconciliation's step
+and by Revoke) before its own sink opens, a resume's open included, and before
+it joins a sink or a converted window it follows is decided only while that
+sink holds more than its floor, the wait woken, taken under neither the
+session's lock nor the refreshes', and ended by the session's stop or release
+(round 17); the write
 decides `would_interrupt` inside the store's closure, after the state's checks,
 from a classification made before it, answers an earlier landed write's fence
 first, and goes round at most eight times, then `persist_failed`; its answer's
@@ -1052,7 +1060,10 @@ device's failure as the native sink's own fence or that fence by a bare error,
 ask a decoder's
 refusal again or a policy's without the content's checks, compare a pending set
 with any set but the one published, hold a gapless successor past its sink's
-floor, take a session's lock inside the store's closure or answer
+floor, take a write's publish for its verdict on an occurrence the publish's
+reconciliation has not judged, wait for that verdict under a lock the
+reconciliation takes or past the sink's floor, take a session's lock inside
+the store's closure or answer
 `would_interrupt` before the state's checks, answer a write the state or the
 DAC kept moving under `stale`, read an answer's epoch after its turn, or judge
 a write on a reading the set published does not agree with.**
@@ -1138,7 +1149,7 @@ the box shows is published by a refresh, and the write's publish is one. The
 classification also counts a session being released, and an engine that
 hands nothing off again, as revocations (`TestAWriteBesideASessionBeingReleasedIsTold`,
 `TestAWriteBesideAnEngineThatHandsNothingOffAgainIsTold`, the rig's
-`noReplan`). `TestASuccessorsOpenBesideAWriteIsCountedAndWaitsForIt`, `TestAnActivationBesideAWriteWaitsForIt`, `TestASuccessorDroppedAtItsActivationIsTakenBackUnwritten`, `TestAReleaseWhileASuccessorsAdoptionWaitsLetsGoOfTheDevice`, `TestASuccessorDroppedAtItsSinksAdmissionIsTakenBackUnwritten`, `TestASuccessorDroppedWhileItsSinkWritesItsPrefillIsTakenBack`, `TestAnActivationsFailureBesideADropIsJudgedByItsCause`, `TestTheActivationsOwnFenceIsErrActivationFenced`, `TestARevocationWhileASuccessorsSinkActivatesKeepsItsFault`, `TestARevocationAtASuccessorsActivationCheckKeepsItsFault`, `TestARevocationThatRunsDuringATakeBackKeepsItsOneFault`, `TestARevocationOfAPreparedSuccessorLetsThePCMPlayOn`, `TestARevocationAtTheFirstOccurrencesActivationFencesItsSink`, `TestARevocationsFaultIsTheSessionsOneFault`, `TestARevocationOnceTheFirstOccurrencesSinkActivatedFailsItsStart`, `TestARevocationOfAConvertedSuccessorGivesItsNodeNothing`, `TestAResumesOpenBetweenTransportsBesideAWriteIsCounted`, `TestAResumeWaitsForEveryWriteThatChangesWhatItOpens`, `TestAPolicyRefusalAWriteLiftsIsAskedAgain`, `TestASuccessorWhoseOpenEndsBesideAWriteWaitsForIt`, `TestNoSinkOpensForASuccessorWhileAWriteChangesItsRate`, `TestAConvertedJoinWindowWaitsForAWriteThatChangesItsSuccessor`, `TestAGaplessSuccessorWaitsForAWriteNoLongerThanTheSinksLookahead`, `TestAWriteBesideAnEngineThatHandsNothingOffAgainIsTold`, `TestAWriteBesideASessionBeingReleasedIsTold`, `TestTheWritesChecksAreAnsweredInTheirOrder`, `TestAWriteTheStateKeepsMovingUnderIsNotMade`, `TestAStaleAnswerNeverCarriesARevisionAnotherWriteHasPassed`, `TestAWriteIsJudgedAgainstTheSetPublished` and `TestAWriteWhoseReadingNeverAgreesWithTheSetPublishedIsNotMade` pin it.
+`noReplan`). `TestASuccessorsOpenBesideAWriteIsCountedAndWaitsForIt`, `TestAnActivationBesideAWriteWaitsForIt`, `TestASuccessorDroppedAtItsActivationIsTakenBackUnwritten`, `TestAReleaseWhileASuccessorsAdoptionWaitsLetsGoOfTheDevice`, `TestASuccessorDroppedAtItsSinksAdmissionIsTakenBackUnwritten`, `TestASuccessorDroppedWhileItsSinkWritesItsPrefillIsTakenBack`, `TestAnActivationsFailureBesideADropIsJudgedByItsCause`, `TestTheActivationsOwnFenceIsErrActivationFenced`, `TestARevocationWhileASuccessorsSinkActivatesKeepsItsFault`, `TestARevocationAtASuccessorsActivationCheckKeepsItsFault`, `TestARevocationThatRunsDuringATakeBackKeepsItsOneFault`, `TestARevocationOfAPreparedSuccessorLetsThePCMPlayOn`, `TestARevocationAtTheFirstOccurrencesActivationFencesItsSink`, `TestARevocationsFaultIsTheSessionsOneFault`, `TestARevocationOnceTheFirstOccurrencesSinkActivatedFailsItsStart`, `TestARevocationOfAConvertedSuccessorGivesItsNodeNothing`, `TestAResumesOpenBetweenTransportsBesideAWriteIsCounted`, `TestAResumeWaitsForEveryWriteThatChangesWhatItOpens`, `TestAResumeBetweenTransportsWaitsForTheReconciliationsVerdict`, `TestAPolicyRefusalAWriteLiftsIsAskedAgain`, `TestASuccessorWhoseOpenEndsBesideAWriteWaitsForIt`, `TestNoSinkOpensForASuccessorWhileAWriteChangesItsRate`, `TestAConvertedJoinWindowWaitsForAWriteThatChangesItsSuccessor`, `TestAGaplessSuccessorWaitsForAWriteNoLongerThanTheSinksLookahead`, `TestAWriteBesideAnEngineThatHandsNothingOffAgainIsTold`, `TestAWriteBesideASessionBeingReleasedIsTold`, `TestTheWritesChecksAreAnsweredInTheirOrder`, `TestAWriteTheStateKeepsMovingUnderIsNotMade`, `TestAStaleAnswerNeverCarriesARevisionAnotherWriteHasPassed`, `TestAWriteIsJudgedAgainstTheSetPublished` and `TestAWriteWhoseReadingNeverAgreesWithTheSetPublishedIsNotMade` pin it.
 
 Round 3 (2026-11-08, the reviews of round 2 and of the merge). The activation's
 fence (`activateOutput`) answered a successor dropped while its sink was
@@ -1329,3 +1340,38 @@ fault is recorded, its adoption closes the sink unwritten and Revoke drops it,
 so the producer's stop is not what keeps that node unwritten, and the line says
 which guarantee holds where. `TestARevocationOfAConvertedSuccessorGivesItsNodeNothing`
 pins both.
+
+Round 17 (2026-11-09, the reviews of round 16). A choice's write is pending for
+an occurrence only until it publishes: `pendingFor` compares the set published,
+and the write's publish makes it play the occurrence's rate as the pending set
+does, while `pendingChoice.done` closes only once the reconciliation and Revoke
+have run. In that window nothing held an occurrence admitted under the set the
+write replaced, and round 16's case pinned the result as correct: the drain for
+a successor's own transport ending there, its own sink opened and its
+activation took it back. The set published alone cannot say whether the
+occurrence is kept, handed off again or its session's DSD revoked, so a wait
+re-judged at the publish was not taken; the reconciliation's step decides,
+under the session's lock, and closes `judged`, and Revoke closes it again once
+it has dropped what a revocation takes (an occurrence judged revoked is neither
+kept nor stale until then). The producer's transition waits for that verdict
+before it claims the occurrence's own sink, its sink before it drained, the
+session's stop or release then the bound; its gapless join and a converted join
+window wait only while the sink holds more than its floor, the reporter waking
+the producer at each measurement, so the floor still ends them and the sink
+never runs dry; a resume between transports waits in its loop beside a write's.
+Each wait takes `judged` under the session's lock and waits with the lock let
+go, never on the refreshes' lock, which the reconciliation holds, so the
+reconciliation never waits on the producer. A revocation's fault recorded in
+the reconciliation's own step wherever a sink plays the session's DSD was tried
+against CI's red on round 16's head and taken out: f's replacement cannot be
+judged before Revoke (its admission takes the refreshes' lock), and no test
+but its own needed it. That red's branch was not found (the engineering log's
+round 17 entry). `TestAGaplessSuccessorWaitsForAWriteNoLongerThanTheSinksLookahead`
+(the drain between the publish and the reconciliation, the reconciliation held
+above the floor, run beside a producer held at its wait and beside the engine's
+stop, b handed into a's sink before the write),
+`TestAConvertedJoinWindowWaitsForAWriteThatChangesItsSuccessor` (the
+reconciliation held above the floor, and held where it has asked the engine to
+hand f off again), `TestAResumeBetweenTransportsWaitsForTheReconciliationsVerdict`
+and `TestAnOccurrenceBesideAWriteIsNotRevoked` (no wait for an occurrence
+admitted under the set published) pin it.
