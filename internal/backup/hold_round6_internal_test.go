@@ -84,7 +84,11 @@ func TestTheVerdictsWriteIsAdmittedInOneSectionWithTheGiveUp(t *testing.T) {
 				return false
 			}
 		})
-		<-gaveUp
+		select {
+		case <-gaveUp:
+		case <-time.After(10 * time.Second):
+			t.Fatal("the give-up parked against the admission never ran: no section admitted the write")
+		}
 		if !admitted || !answered {
 			t.Fatalf("the write: admitted %v, answered %v; want it admitted, the give-up coming after its registration", admitted, answered)
 		}
