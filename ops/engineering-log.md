@@ -88701,3 +88701,107 @@ where `TestEveryCitedTestNameExists`, `TestNoDocblockNamesAnotherDeclaration`,
 `TestQualificationRunbookVersion` passed too; the qualification check against main's tip's
 merge base (3d0a0d05) passed at 50; `make test` passed, 89 packages ok and none failing
 (2,057 s), the Linux-only tests run here; and `make build-all` passed.
+
+## 2026-11-09 — B728 B9 round 10: one verdict for every arm that answers a request whose life ended
+
+Worker b728-b9, legion0 (Ubuntu 26.04, Linux 7.0, Go 1.27.3), branch `feat/b728-b9-choice`
+at 8c3bdb93 (round 9 taken, its rules applied). The reviews of round 9 (Codex's two
+findings, Claude's one) and the two reviews of this round's brief (Codex's four, Claude's
+six), folded into its rule. Commits: f1c0686b (the arm cases, red, with the test seam that
+fixes the arm), c7c3180e (the entry cases, red), a9d737a6 (the fix, its table and
+qualification 51), this record, and the gates' paragraph after it. The rules are a patch the
+orchestrator applies (`rules-b728-b9-r10.patch`): `player.md`'s B765 bullet, its round-9
+sentence and its Don'ts, with its long form.
+
+**The defect: confirmed, red first.** Once the life had ended, the answer was shaped in more
+than one place, and they disagreed. Red on f1c0686b, whose only code change is the test seam
+`nativeSeams.arm` (nil outside a test: it leaves one arm of a request's wait in its select,
+so a case takes the arm a scheduler may pick, deterministically), in 32 rows. The caller's
+own context's arm answered the failure beside its context's cancellation (`abandoned`)
+wherever a case asks it with the life ended: round 8's two never-run resumes, round 9's
+reply case's two rows and its deadline case's row on the life, and the held refusal's
+(Codex's first finding: a paused resume, or a paused inert sink's first activation, refused
+by its admission while the life runs, a refusal the writer holds and never records), where
+the refusal was lost too, beside a device's failure, a failed close or the budget passed.
+Activate on a context already ended answered its cancellation beside a failed close and
+beside a device's failure (Claude's finding, round 9's entry case, its row of a device's
+failure new here). The writer's reply and its end answered the held refusal as it was with
+nothing recorded, and so did the deadline's arm once the writer's late close had confirmed.
+A fence the writer recorded (Codex's second finding: an activation whose own context ended
+while the life ran, its caller held where it begins to wait, the fence recorded as the
+sink's at the writer's classification) reached every arm, beside fixed words, the failure or
+the context's cancellation. And a TrackChange drain the release's deadline cut, recorded as
+`Join(ErrReleaseUnconfirmed, <the drain's cancellation>)` (Claude's review of the brief),
+reached every arm with that chain, `ReasonOf` reading cancelled. Red on c7c3180e, whose tree
+is f1c0686b's with the entry case's file alone, in 7 of that case's 26 rows, shown before
+its commit on a copy of f1c0686b with the file (`redcopy_r10.py`): the refusals of Activate,
+Resume and ActivatePaused answered the recorded fence, and Activate on a context already
+ended answered its cancellation beside a device's failure, a failed close and the release
+past its budget. `theSinksFailure` now refuses any `context.Canceled`; `answeredBy`, which
+required the context arm's answer to carry its cancellation, went, its cases fixing their
+arm instead. One count in the red run's predictions was a slip: the held refusal's red rows
+were itemized as six an entry and counted as fourteen; the twelve itemized failed.
+
+**What the brief asked that held, and what it left open.** The arms were the brief's (the
+writer's reply, its end, the request's context, the deadline, and the entries); an unsent
+reply on the writer's end's arm is not reachable, the writer replying before it closes
+`done`, and is no case. `releaseExpired` needed no change: `beginReleaseLocked` arms its
+timer only under `!s.releasing`, which nothing resets, so the channel closes once;
+`TestNativeTheReleasesDeadlineIsArmedOnce` pins it (a TrackChange, its deadline passed with
+the close held, then two Immediate releases: one deadline asked of the clock, the channel
+closed, no panic), green before the fix. Two readings of the brief's states, stated here: a
+record of nothing but fences and cancellations (the fence a request's own context made the
+writer record, its release confirmed) is nothing recorded, so the request it fenced answers
+the life's typed cancellation, not a failure in the fence's words; and a held refusal is
+kept beside a device's failure as beside a failed close, where the brief named it for the
+latter. The re-expression drops a cancellation's chain whole: an error of `ReasonCancelled`
+goes with the context's error it wraps (a drain cut by a deadline of its own leaves no
+`DeadlineExceeded`), while a release out of time before its drain,
+`Join(ErrReleaseUnconfirmed, context.DeadlineExceeded)`, is a failure and is kept.
+
+**The fix (a9d737a6).** Once the sink's life has ended, one function, `verdict(a, rec)`,
+decides every answer of Activate, Resume and ActivatePaused: every arm of the wait (the
+writer's reply, its end, the request's own context's end, the release's deadline) reads the
+reply the writer sent, without waiting once the writer has ended or the budget passed, and
+the entries (Activate on an ended context and its refusals, Resume's refusal and its answer
+to a sink not paused, ActivatePaused's refusal and the Resume it hands to) answer by the
+same rule. The writer's reply carries what it is beside its error (`nativeAnswer`: a
+success, a fault of the request's own, a refusal held, the fence, a request never run, and
+none past the budget); the cleanup's record is `s.err`, final where the writer has ended
+(`nativeRecord`, `endOfLife`, where the writer's end and the deadline ready together let the
+completed cleanup decide). Four states: nothing recorded, a success and a fault of the
+request's own stay as they were and the rest is the life's typed cancellation of its command
+(B765); a device's failure, the release confirmed, that failure, beside the request's own
+fault or held refusal where the record does not carry it, with no `ErrReleaseUnconfirmed` it
+does not carry; a close that failed, that failure with `ErrReleaseUnconfirmed`, beside them;
+the budget passed with the writer still in its cleanup, which stays its own,
+`ErrReleaseUnconfirmed` beside them and what is recorded by then. A failure answered carries
+no `context.Canceled`, no error of `ReasonCancelled` anywhere in its chain (`ReasonOf` reads
+the first alone) and not the sink's fence: those keep their words (`%v`) and lose their
+chain (`failureOf`, `nativeFailure`). While the life runs nothing changes.
+`TestNativeTheVerdictOfARequestWhoseLifeEnded` runs the verdict alone over eleven answers by
+thirteen records, the deadline-cut drain and a drain cut by a deadline of its own among
+them, and asserts the whole answer. The qualification version moved to 51, its record
+correcting 50's: that a failed cleanup's answer drops a cancellation and the fence held on
+the reply's and the end's arms alone. `LegacyVersion` stays 35. Serve's sinks, whose lives
+end only after Done, answer as before.
+
+**Controls**, predicted by name and count before the runs (`r10-controls.predictions.txt`),
+the file's bytes restored after each, `-race`, `-watchdog 10s`, over the round's cases and
+their neighbours: V1 (the context's arm answering at once on an ended life) red in its 17
+rows; V2 (the reply unread after the wait) in 8, the held refusal's on the context's and the
+deadline's arms; V3 (the verdict without its re-expression) in 79: every recorded-fence and
+cut-drain row, the entry case's four fence rows and 62 of the table's, where the prediction
+said 61, having counted six clean failure records where the table has seven, so that "a
+cancellation the writer held" failed in twelve, not eleven; its first run also failed
+`TestNativeTeardownOwnership/drop` ("ioctl under native mutex"), whose sink's life never
+ends, so no verdict runs there: the barrier probe's `TryLock` met the test goroutine's own
+brief hold of the lock in `Release`, a race of the probe's (0 failures in 200 runs alone),
+and the rerun gave V3's 79 without it. V4 (a held refusal kept as it was with nothing
+recorded) red in 12; V5 (no fourth state) in 40; V7 (the deadline overriding a completed
+cleanup) in 2, the held refusal's rows confirmed late; V10 (every typed cancellation the
+activation's) in 4, Resume's; V11 (a `ReasonCancelled` error's chain recursed into) in 11
+and V12 (the walk replaced by `ReasonOf`) in 11, the drain cut by a deadline of its own; V14
+(the request's own fault joined though the record carries it) in 2; V15 (Resume of a sink
+not paused answering nil at once) in 6, by the watchdog where the sink then never ends; V16
+(ActivatePaused's refusal answered raw) in 2. Nothing else differed from the predictions.
