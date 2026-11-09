@@ -223,7 +223,7 @@ func TestNativeAnAnswerTheWriterSentAsItEndedWaitsForItsEnd(t *testing.T) {
 				pick := &armPick{}
 				recorded, ending := newCallerHold(t), newCallerHold(t)
 				// The clock's second deadline asked is the bound's: the first is
-				// the release's. Each is registered before it is signalled, so the
+				// the release's. The bound is registered before it is signalled, so the
 				// test moves the clock only past a deadline the fake already holds.
 				boundAsked := make(chan struct{})
 				var asks atomic.Int32
