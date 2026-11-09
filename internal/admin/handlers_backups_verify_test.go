@@ -394,14 +394,18 @@ func TestAVerdictWrittenByAnotherCallerShowsOnTheJobsCardAtTheNextPoll(t *testin
 				t.Fatal(err)
 			}
 			if tc.want == backup.StateFailed {
-				p := filepath.Join(dir, backup.ManifestDBFileName)
-				data, err := os.ReadFile(p)
-				if err != nil {
-					t.Fatal(err)
-				}
-				data[len(data)-1] ^= 0xFF
-				if err := os.WriteFile(p, data, 0o600); err != nil {
-					t.Fatal(err)
+				// Both verdicts FAILED, so the record holds no VERIFIED and its
+				// write takes no veto.
+				for _, name := range []string{backup.ManifestDBFileName, "server.crt"} {
+					p := filepath.Join(dir, name)
+					data, err := os.ReadFile(p)
+					if err != nil {
+						t.Fatal(err)
+					}
+					data[len(data)-1] ^= 0xFF
+					if err := os.WriteFile(p, data, 0o600); err != nil {
+						t.Fatal(err)
+					}
 				}
 			}
 			// The folder's lock file made first, as any check or prune before
