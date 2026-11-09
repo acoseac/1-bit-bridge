@@ -1043,11 +1043,20 @@ func (r *rig) stop() {
 	r.k.CheckClosedEach(r.t)
 }
 
+// within is a context the watchdog bounds, for a command the test waits on
+// the engine to answer: one its owner never answers fails as hung, never at
+// the package's timeout (B728 B9 round 13).
+func within() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(bg, alsapcm.Watchdog())
+}
+
 // available reports the output available, as the adapter does.
 func (r *rig) available() {
 	r.t.Helper()
 	r.outGen++
-	if err := r.eng.ReportOutput(bg, engine.OutputReport{Generation: r.outGen, Available: true}); err != nil {
+	ctx, cancel := within()
+	defer cancel()
+	if err := r.eng.ReportOutput(ctx, engine.OutputReport{Generation: r.outGen, Available: true}); err != nil {
 		r.t.Fatal(err)
 	}
 }
@@ -1060,12 +1069,14 @@ func (r *rig) insert(refs ...string) []uint32 {
 	if s := r.eng.Snapshot(); s.Len() > 0 {
 		after, _ = s.IDAt(s.Len() - 1)
 	}
+	ctx, cancel := within()
+	defer cancel()
 	for _, ref := range refs {
 		rf, err := engine.NewReference(ref)
 		if err != nil {
 			r.t.Fatal(err)
 		}
-		id, err := r.eng.InsertAfter(bg, after, rf, nil)
+		id, err := r.eng.InsertAfter(ctx, after, rf, nil)
 		if err != nil {
 			r.t.Fatalf("insert %s: %v", ref, err)
 		}
@@ -1075,10 +1086,13 @@ func (r *rig) insert(refs ...string) []uint32 {
 	return ids
 }
 
-// play plays and fails the test unless the engine took it.
+// play plays and fails the test unless the engine took it, within the
+// watchdog.
 func (r *rig) play() {
 	r.t.Helper()
-	if err := r.eng.Play(bg); err != nil {
+	ctx, cancel := within()
+	defer cancel()
+	if err := r.eng.Play(ctx); err != nil {
 		r.t.Fatalf("play: %v", err)
 	}
 }

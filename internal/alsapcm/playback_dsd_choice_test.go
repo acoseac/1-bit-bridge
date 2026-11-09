@@ -151,40 +151,21 @@ func TestOnlyAWriteThatInterruptsNeedsTheGoAhead(t *testing.T) {
 // refused before anything plays as dsd_choice_uncertain, which the
 // intersection of the two states publishes at its rate.
 func TestAnOccurrenceBesideAWriteIsNotRevoked(t *testing.T) {
-	// beside is a rig over a native choice whose seams are seams, a DSD64
-	// track "a" queued.
-	beside := func(t *testing.T, seams *playback.Seams) *dsdRig {
-		d := newDSDRig(t, playbacktest.ChoiceState(dsdstate.ModeNative), func(o *rigOptions) { o.seams = seams })
-		d.files.add("a", dsd(playbacktest.DSD64, 0.25))
-		d.insert("a")
-		d.be.RefreshDSD(true)
-		return d
-	}
-	// notRevoked fails t if s stopped for a fault, a revocation among them.
-	notRevoked := func(t *testing.T, d *dsdRig, s *engine.Snapshot) {
-		t.Helper()
-		if f := s.Faults(); len(f) != 0 || count(d.rec.events(), "fault", 0) != 0 {
-			t.Errorf("an occurrence beside a write faulted: %+v", f)
-		}
-	}
 	t.Run("after the state's write and before the publish", func(t *testing.T) {
-		inWindow, release := make(chan struct{}), make(chan struct{})
-		var once sync.Once
-		d := beside(t, &playback.Seams{ChoiceWritten: func(err error) {
+		p := newParkedWrite()
+		d := besideAWrite(t, &playback.Seams{ChoiceWritten: func(err error) {
 			if err == nil {
-				once.Do(func() { close(inWindow); <-release })
+				p.park()
 			}
 		}})
-		t.Cleanup(func() { once.Do(func() {}); closeOnce(release) })
-		res := make(chan playback.ChoiceResult, 1)
-		req := choiceReq(t, d, dsdstate.ModeConvert, 1)
-		go func() { res <- d.be.ChooseDSD(bg, req) }()
-		reached(t, inWindow, res, "the window between its state's write and its publish")
+		t.Cleanup(p.cleanup(t))
+		res := d.choose(choiceReq(t, d, dsdstate.ModeConvert, 1))
+		p.reached(t, res, "the window between its state's write and its publish")
 		d.k.Free()
 		d.play()
 		s := d.waitSnap("a heard", func(s *engine.Snapshot) bool { _, ok := s.Track(); return ok })
-		closeOnce(release)
-		wantOutcome(t, <-res, playback.ChoiceWritten)
+		p.letGo()
+		wantOutcome(t, answer(t, res), playback.ChoiceWritten)
 		s = d.waitEnded()
 		notRevoked(t, d, s)
 		if got := d.openFormats(); len(got) != 0 || d.pcmOpens() != 1 {
@@ -194,7 +175,7 @@ func TestAnOccurrenceBesideAWriteIsNotRevoked(t *testing.T) {
 	t.Run("while a write that fails is under way", func(t *testing.T) {
 		pending, release, waiting := make(chan struct{}), make(chan struct{}), make(chan engine.OccurrenceID, 1)
 		var once sync.Once
-		d := beside(t, &playback.Seams{
+		d := besideAWrite(t, &playback.Seams{
 			ChoicePending: func() { once.Do(func() { close(pending); <-release }) },
 			ChoiceAwaited: func(o engine.OccurrenceID) {
 				select {
@@ -205,21 +186,13 @@ func TestAnOccurrenceBesideAWriteIsNotRevoked(t *testing.T) {
 		})
 		t.Cleanup(func() { closeOnce(release) })
 		d.store.Fail(errors.New("no space left on device"))
-		res := make(chan playback.ChoiceResult, 1)
-		req := choiceReq(t, d, dsdstate.ModeConvert, 1)
-		go func() { res <- d.be.ChooseDSD(bg, req) }()
+		res := d.choose(choiceReq(t, d, dsdstate.ModeConvert, 1))
 		reached(t, pending, res, "its pending window")
 		d.k.Free()
 		go func() { _ = d.eng.Play(bg) }()
-		select {
-		case <-waiting:
-		case r := <-res:
-			t.Fatalf("the write ended (%s) before the occurrence beside it waited", r.Outcome)
-		case <-time.After(alsapcm.Watchdog()):
-			t.Fatal("an occurrence whose rate the pending write changes did not wait for it")
-		}
+		awaitedBy(t, waiting, res)
 		closeOnce(release)
-		wantOutcome(t, <-res, playback.ChoicePersistFailed)
+		wantOutcome(t, answer(t, res), playback.ChoicePersistFailed)
 		s := d.waitEnded()
 		notRevoked(t, d, s)
 		if got := d.openFormats(); !slices.Equal(got, []format.ALSAFormat{format.DSDU32BE}) || d.pcmOpens() != 0 {
@@ -232,7 +205,7 @@ func TestAnOccurrenceBesideAWriteIsNotRevoked(t *testing.T) {
 	t.Run("while a write that lands is under way", func(t *testing.T) {
 		pending, release, waiting := make(chan struct{}), make(chan struct{}), make(chan engine.OccurrenceID, 1)
 		var once sync.Once
-		d := beside(t, &playback.Seams{
+		d := besideAWrite(t, &playback.Seams{
 			ChoicePending: func() { once.Do(func() { close(pending); <-release }) },
 			ChoiceAwaited: func(o engine.OccurrenceID) {
 				select {
@@ -243,20 +216,12 @@ func TestAnOccurrenceBesideAWriteIsNotRevoked(t *testing.T) {
 		})
 		t.Cleanup(func() { closeOnce(release) })
 		d.store.Land(fmt.Errorf("the directory's barrier failed: %w", atomicwrite.ErrLanded))
-		res := make(chan playback.ChoiceResult, 1)
-		req := choiceReq(t, d, dsdstate.ModeConvert, 1)
-		go func() { res <- d.be.ChooseDSD(bg, req) }()
+		res := d.choose(choiceReq(t, d, dsdstate.ModeConvert, 1))
 		reached(t, pending, res, "its pending window")
 		go func() { _ = d.eng.Play(bg) }()
-		select {
-		case <-waiting:
-		case r := <-res:
-			t.Fatalf("the write ended (%s) before the occurrence beside it waited", r.Outcome)
-		case <-time.After(alsapcm.Watchdog()):
-			t.Fatal("an occurrence whose rate the pending write changes did not wait for it")
-		}
+		awaitedBy(t, waiting, res)
 		closeOnce(release)
-		wantOutcome(t, <-res, playback.ChoicePersistUncertain)
+		wantOutcome(t, answer(t, res), playback.ChoicePersistUncertain)
 		s := d.waitEnded()
 		notRevoked(t, d, s)
 		skips := s.Skips()
@@ -274,6 +239,71 @@ func TestAnOccurrenceBesideAWriteIsNotRevoked(t *testing.T) {
 	})
 }
 
+// besideAWrite is TestAnOccurrenceBesideAWriteIsNotRevoked's rig: one over a
+// native choice whose seams are seams, a DSD64 track "a" queued.
+func besideAWrite(t *testing.T, seams *playback.Seams) *dsdRig {
+	t.Helper()
+	d := newDSDRig(t, playbacktest.ChoiceState(dsdstate.ModeNative), func(o *rigOptions) { o.seams = seams })
+	d.files.add("a", dsd(playbacktest.DSD64, 0.25))
+	d.insert("a")
+	d.be.RefreshDSD(true)
+	return d
+}
+
+// notRevoked fails t if s stopped for a fault, a revocation among them.
+func notRevoked(t *testing.T, d *dsdRig, s *engine.Snapshot) {
+	t.Helper()
+	if f := s.Faults(); len(f) != 0 || count(d.rec.events(), "fault", 0) != 0 {
+		t.Errorf("an occurrence beside a write faulted: %+v", f)
+	}
+}
+
+// parkedWrite is a choice's write parked in one of its seams
+// (Seams.ChoiceWritten or ChoicePending) until the test lets it go: the
+// seam's first call (park) closes in and waits until letGo. A case makes it
+// before its rig, whose seam parks in it, and registers its cleanup once the
+// rig is built, so that the cleanup runs before the rig's stop.
+type parkedWrite struct {
+	once    sync.Once
+	in, out chan struct{}
+}
+
+func newParkedWrite() *parkedWrite {
+	return &parkedWrite{in: make(chan struct{}), out: make(chan struct{})}
+}
+
+// park is the seam's: its first call parks the write.
+func (p *parkedWrite) park() { p.once.Do(func() { close(p.in); <-p.out }) }
+
+// reached waits for the write to park, failing t where it is answered first
+// or does not park within the watchdog.
+func (p *parkedWrite) reached(t *testing.T, res <-chan playback.ChoiceResult, what string) {
+	t.Helper()
+	reached(t, p.in, res, what)
+}
+
+// letGo lets the parked write go on.
+func (p *parkedWrite) letGo() { closeOnce(p.out) }
+
+// cleanup is the case's cleanup of its write: the seam's Once asked first,
+// within the watchdog, then the write let go.
+func (p *parkedWrite) cleanup(t *testing.T) func() {
+	return func() {
+		asked := make(chan struct{})
+		go func() {
+			p.once.Do(func() {})
+			close(asked)
+		}()
+		select {
+		case <-asked:
+		case <-time.After(alsapcm.Watchdog()):
+			alsapcm.LogGoroutines(t)
+			t.Errorf("the case's cleanup waited %v for its write's seam, whose Once the parked write holds until it is let go", alsapcm.Watchdog())
+		}
+		p.letGo()
+	}
+}
+
 // reached waits for a write to come to the seam that closes at, failing t
 // where it ends first or comes to none within the watchdog.
 func reached(t *testing.T, at <-chan struct{}, res <-chan playback.ChoiceResult, what string) {
@@ -283,7 +313,23 @@ func reached(t *testing.T, at <-chan struct{}, res <-chan playback.ChoiceResult,
 	case r := <-res:
 		t.Fatalf("the write ended (%s) without coming to %s", r.Outcome, what)
 	case <-time.After(alsapcm.Watchdog()):
-		t.Fatalf("the write never came to %s", what)
+		alsapcm.LogGoroutines(t)
+		t.Fatalf("the write never came to %s within %v", what, alsapcm.Watchdog())
+	}
+}
+
+// awaitedBy waits until an occurrence waits for the pending write (waiting,
+// its ChoiceAwaited seam's), failing t where the write is answered first or
+// no occurrence waits for it within the watchdog.
+func awaitedBy(t *testing.T, waiting <-chan engine.OccurrenceID, res <-chan playback.ChoiceResult) {
+	t.Helper()
+	select {
+	case <-waiting:
+	case r := <-res:
+		t.Fatalf("the write ended (%s) before the occurrence beside it waited", r.Outcome)
+	case <-time.After(alsapcm.Watchdog()):
+		alsapcm.LogGoroutines(t)
+		t.Fatalf("an occurrence whose rate the pending write changes did not wait for it within %v", alsapcm.Watchdog())
 	}
 }
 
