@@ -244,25 +244,31 @@ func TestTurningUpdateChecksOffDuringADownloadStopsTheInstall(t *testing.T) {
 // the install has downloaded and checked its candidate and holds the install
 // marker's lock, just before its decision under it, when update checks are
 // turned off. The decision asks the switch again and refuses, whether the off
-// transition reached the install (signalled) or the switch alone moved: the
-// boundary is that decision, and nothing is swapped, backed up or armed.
+// transition reached the install or the switch alone moved: the boundary is
+// that decision, and nothing is swapped, backed up or armed. An install the
+// off transition stopped stays stopped with the checks on again before its
+// decision, since its context is cancelled: the decision refuses it too.
 func TestUpdateChecksTurnedOffJustBeforeAnInstallsDecisionStopItBeforeItsSwap(t *testing.T) {
-	for _, signalled := range []bool{false, true} {
-		name := "the switch alone moved"
-		if signalled {
-			name = "the off transition reached the install"
-		}
-		t.Run(name, func(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		move func(s *switchedInstall)
+	}{
+		{"the switch alone moved", func(s *switchedInstall) { s.sw.off.Store(true) }},
+		{"the off transition reached the install", func(s *switchedInstall) { s.turnOff() }},
+		{"off and on again before the decision", func(s *switchedInstall) {
+			s.turnOff()
+			s.sw.off.Store(false)
+			s.upd.ChecksSwitched()
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
 			s := newSwitchedInstall(t, "0.1.0", "0.2.0", nil)
 			park := newParked(t)
 			opts := s.manual()
 			opts.holdBeforeDecision = park.hook
 			answered := s.installInBackground(opts)
 			waitFor(t, park.reached, "the install's decision")
-			s.sw.off.Store(true)
-			if signalled {
-				s.upd.ChecksSwitched()
-			}
+			c.move(s)
 			park.let()
 			if err := answerOf(t, answered); !errors.Is(err, ErrUpdateChecksOff) {
 				t.Errorf("the install the switch stopped at its decision answered %v, want ErrUpdateChecksOff", err)

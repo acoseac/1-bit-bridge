@@ -193,10 +193,11 @@ func (u *Updater) Install(ctx context.Context, opts InstallOptions) (Status, err
 
 // installStopped is err, an install's answer, as its caller is told it: the
 // switch's refusal where the off transition stopped the install before its
-// decision (a.stopped; no transition stops one past it, commit), which says
-// nothing was installed, and err as it is otherwise.
+// decision (a.stopped; no transition stops one past it, commit), whatever
+// the stop made of the install's own error, which says nothing was
+// installed, and err as it is otherwise.
 func installStopped(a *admission, err error) error {
-	if err == nil || errors.Is(err, ErrUpdateChecksOff) || !a.stopped.Load() {
+	if err == nil || !a.stopped.Load() {
 		return err
 	}
 	return fmt.Errorf("%w: they were turned off while the install was under way, and it stopped before its swap; "+
