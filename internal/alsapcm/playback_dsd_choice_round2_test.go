@@ -609,12 +609,16 @@ func TestAnActivationBesideAWriteWaitsForIt(t *testing.T) {
 // natively: a's sink played out and closed and the pause's release of the
 // device reported, so a resume opens b's sink itself
 // (TestPlaybackReleaseWaitsForAResumesOpenBetweenTransports's way there). It
-// answers b's occurrence.
-func pausedBetween(t *testing.T, w *writeSeams) (*dsdRig, engine.OccurrenceID, []uint32) {
+// answers b's occurrence. A publish hold given is the rig's Published seam
+// (round 17).
+func pausedBetween(t *testing.T, w *writeSeams, pubs ...*publishHold) (*dsdRig, engine.OccurrenceID, []uint32) {
 	t.Helper()
 	tm := &timers{}
 	d := newDSDRig(t, playbacktest.ChoiceState(dsdstate.ModeNative), func(o *rigOptions) {
 		o.seams = w.seams(nil)
+		for _, p := range pubs {
+			o.seams.Published = p.seam
+		}
 		o.pauseRelease, o.afterFunc = time.Second, tm.afterFunc
 	})
 	d.files.add("a", wav(44100, 16, pattern(1, 1000, 16)))
@@ -735,6 +739,47 @@ func TestAResumeWaitsForEveryWriteThatChangesWhatItOpens(t *testing.T) {
 	}
 	if _, ok := s.Skipped(ids[1]); !ok {
 		t.Errorf("b's entry was not skipped: the cap refuses its DSD128 once B landed; skips %+v", s.Skips())
+	}
+}
+
+// TestAResumeBetweenTransportsWaitsForTheReconciliationsVerdict (B728 B9
+// round 17): paused between two transports, a resume opens b's own sink
+// itself; with a write that takes b's DSD128 away published and its
+// reconciliation held, the write no longer pending once its set is the one
+// published, the resume waits for that reconciliation's verdict on b before it
+// opens anything (round 16's opened b's node there). Let go, the
+// reconciliation hands b off again, the resume opens nothing, and no node
+// opens for b.
+func TestAResumeBetweenTransportsWaitsForTheReconciliationsVerdict(t *testing.T) {
+	w, pub := newWriteSeams(), &publishHold{}
+	d, ob, ids := pausedBetween(t, w, pub)
+	g := pub.arm(t)
+	res := d.choose(choiceReq(t, d, dsdstate.ModeNative, 1, capAt(playbacktest.DSD64)))
+	awaitOrdered(t, g.in, "the write's set published, its reconciliation held")
+	n, opens := w.verdictWaits(ob), d.k.View().Opens
+	resumed := make(chan error, 1)
+	go func() { resumed <- d.eng.Play(bg) }()
+	waitOrderedEither(t, "the resume to wait for the reconciliation's verdict on b, or b's node to open", w.ch,
+		func() <-chan struct{} { return d.k.When(func(v alsapcm.KernelView) bool { return v.Opens > opens }) },
+		func() bool { return w.verdictWaits(ob) > n || d.k.View().Opens > opens })
+	if v := d.k.View(); v.Opens != opens {
+		t.Fatalf("the resume opened b's node (%d opens after %d) while the reconciliation that judges b was held", v.Opens, opens)
+	}
+	g.letGo()
+	if got := answerWithin(t, alsapcm.Ordered(), res); got.Outcome != playback.ChoiceWritten {
+		t.Fatalf("the cap: %s, want written", got.Outcome)
+	}
+	resumeIn(t, resumed)
+	s := d.waitEnded()
+	d.rig.stop()
+	if f := s.Faults(); len(f) != 0 {
+		t.Errorf("the hand-off of b faulted: %+v", f)
+	}
+	if v := d.k.View(); v.Opens != 1 {
+		t.Errorf("%d opens, want a's alone: no node opened for b", v.Opens)
+	}
+	if _, ok := s.Skipped(ids[1]); !ok {
+		t.Errorf("b's entry was not skipped: the cap refuses its DSD128; skips %+v", s.Skips())
 	}
 }
 
