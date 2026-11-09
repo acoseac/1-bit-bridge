@@ -494,6 +494,79 @@ func TestARecheckGivenUpLeavesTheVetoItMade(t *testing.T) {
 	}
 }
 
+// TestAStoppedVerificationsMarkStandsUntilTheWriteItStartedEnds: a
+// verification stopped before it took the lock starts the write of its
+// INCOMPLETE (abandonPending), which waits for the lock (another holder has
+// it for a while) and then hangs. Its caller gives the worker up while it
+// waits for that write, naming that step, and once the worker has ended and
+// let go of this process's slot, the folder stays marked, though the write's
+// own hold is within its bound still, until the write ends (backlog B653's
+// fourth round: the step test's abandonPending case, run twenty times under
+// the race detector, once found no mark there, and once the worker's mark
+// naming its wait for the lock).
+func TestAStoppedVerificationsMarkStandsUntilTheWriteItStartedEnds(t *testing.T) {
+	src := storeWithTracks(t, 5)
+	c := captureT(t, src)
+	root := filepath.Dir(c.Dir)
+	// Another holder of the folder's lock, which lets it go 1.5 s after the
+	// stop, so the write takes the lock late and its own bound ends late.
+	other, err := fsutil.OpenLockFile(root, backup.LockFileName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fsutil.TryLock(other); err != nil {
+		t.Fatal(err)
+	}
+	var letGo sync.Once
+	release := func() {
+		letGo.Do(func() {
+			_ = fsutil.Unlock(other)
+			_ = other.Close()
+		})
+	}
+	t.Cleanup(release)
+	// The worker's open of the lock file answers half a second late, so its
+	// caller gives it up while it waits for the write, before it ends.
+	var opens atomic.Int32
+	t.Cleanup(backup.SetOpenBackupsLockForTest(func(dir, name string) (*os.File, error) {
+		if opens.Add(1) == 1 {
+			time.Sleep(500 * time.Millisecond)
+		}
+		return fsutil.OpenLockFile(dir, name)
+	}))
+	p := newParking()
+	t.Cleanup(backup.SetVerdictWriteFailuresForTest(func(dir string) error {
+		if dir == c.Dir {
+			p.park()
+		}
+		return nil
+	}, nil, nil))
+	t.Cleanup(func() {
+		release()
+		p.release()
+		awaitClean(t)
+	})
+	stopped, cancel := context.WithCancel(context.Background())
+	cancel()
+	time.AfterFunc(1500*time.Millisecond, release)
+	if _, err := backup.VerifySnapshot(stopped, c.Dir, backup.VerifyOptions{BackupsRoot: root}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("the stopped verification answered %v, want its stop", err)
+	}
+	select {
+	case <-p.entered:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the write of INCOMPLETE never began")
+	}
+	for deadline := time.Now().Add(30 * time.Second); backup.SlotHeldForTest(); time.Sleep(5 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("the worker never let go of the slot")
+		}
+	}
+	if s, held := backup.StuckCheckHere(root); !held || s.Step != "its write of INCOMPLETE" {
+		t.Errorf("once the worker had ended, the folder reads %+v, %v; want it marked, naming the write of INCOMPLETE", s, held)
+	}
+}
+
 // TestARecheckWhereNoDirectoryCanBeSyncedChecksAndRecordsNothing is backlog
 // B653's fourth round's red for a platform with no directory barrier (Codex's
 // P1 and the Claude API's Medium on round 3: Windows, where
