@@ -641,8 +641,8 @@ func TestATickerStoppedWhileItsProbeOfTheLockHangsReturnsWithinItsBound(t *testi
 	}))
 	var letGo sync.Once
 	release := func() { letGo.Do(func() { close(out) }) }
-	// Registered last, so run first: the probe let go and answered before the
-	// seam is put back.
+	// Registered after the seam, so run before its restore: the probe has
+	// answered.
 	t.Cleanup(func() {
 		release()
 		if parked.Load() {
@@ -651,7 +651,9 @@ func TestATickerStoppedWhileItsProbeOfTheLockHangsReturnsWithinItsBound(t *testi
 	})
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	drainLoopOnCleanup(t, cancel, done, "the backup ticker")
+	// The drain, run first, lets the probe go too, so a ticker held in it
+	// (a probe run on its own goroutine) ends.
+	drainLoopOnCleanup(t, func() { release(); cancel() }, done, "the backup ticker")
 	var stdout, stderr safeBuffer
 	go func() {
 		defer close(done)
