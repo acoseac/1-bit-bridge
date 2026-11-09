@@ -404,6 +404,12 @@ func TestAVerdictWrittenByAnotherCallerShowsOnTheJobsCardAtTheNextPoll(t *testin
 					t.Fatal(err)
 				}
 			}
+			// The folder's lock file made first, as any check or prune before
+			// this one made it: its making moves the folder's time too, and
+			// would stand in for the stamp.
+			if _, err := backup.Prune(filepath.Join(dataDir, backup.BackupsDirName), 0); err != nil {
+				t.Fatal(err)
+			}
 			if card := pastStamp(t, s, dataDir); !strings.HasPrefix(card.newestDatabase, string(backup.StatePending)) {
 				t.Fatalf("the card caches %q, want the snapshot's PENDING", card.newestDatabase)
 			}
