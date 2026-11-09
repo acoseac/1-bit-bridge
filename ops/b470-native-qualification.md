@@ -1,6 +1,6 @@
 # B470 native qualification — owner approval and provisional evidence
 
-QualificationVersion is **55**. All older evidence must be rerun for the harness, native included. The
+QualificationVersion is **56**. All older evidence must be rerun for the harness, native included. The
 harness never creates approval. Since B728 no production path reads an approval record or a candidate:
 the player plays DSD by its effective policy (`ops/plan-b728-dsd-capability-design.md`). This runbook
 is the engineering harness's. Its evidence binds `qualificationVersion`, whose guard covers the DSD byte
@@ -249,7 +249,7 @@ GOTOOLCHAIN=go1.27.3 go test -race -tags ts_omit_webclient,ts_omit_debugeventbus
 
 ## Round 3 evidence rules
 
-Historical round 3 used qualificationVersion 4; current version is **55**. A native contact's
+Historical round 3 used qualificationVersion 4; current version is **56**. A native contact's
 Contact.SchemaVersion remains **2**; a DoP contact's is **3**. All older
 contacts are invalid; repeat contact on this build. Required Device and Subdevice
 fields bind the configured PCM endpoint, including a nonzero subdevice, before
@@ -338,7 +338,7 @@ still resolve inside it). `dsdMode: native` or `auto` enables only approved nati
 
 The Go contracts are `qualification.Approval`, `ApprovalBody`, `ApprovedPolicy`, `Edge`
 and `Evidence` in `internal/player/qualification/approval.go`. JSON uses those exact
-exported field names. SchemaVersion=1, or 2 with Transitions and QualifiedOn (2d.2, below); QualificationVersion=55; Revision is the owner's
+exported field names. SchemaVersion=1, or 2 with Transitions and QualifiedOn (2d.2, below); QualificationVersion=56; Revision is the owner's
 revision; Identity is the observed VID/ProductID/manufacturer/product/bcdDevice,
 anchored controller/port, interface, device and subdevice. No serial or card number is
 persistent identity. Unchanged descriptors may retain approval after replug/restart;
@@ -386,7 +386,7 @@ At least one native fixture must finish with measured playback of that tuple.
 NativeTuple and NativeCompleted record that execution; PCM-only lists or completion
 cannot qualify it. LifecycleActions count observed native outcomes: pause/resume,
 release/reopen, navigation between native occurrences, Stop, and natural completion.
-An admitted command alone is insufficient. Version 55 invalidates older evidence.
+An admitted command alone is insufficient. Version 56 invalidates older evidence.
 List all candidate directional edges explicitly. No command generates that record.
 
 ```sh
@@ -425,7 +425,7 @@ or evidence names resolving to the state directory itself before any ancestor
 walk. Native monitoring remains fail-closed without a grace period. The overlay
 generator requires both integration suites before publishing its overlay.
 Guarded API, config, extractor, output-play and approval paths changed; rerun
-qualification with version 55. ExtractorVersion 30 retains the first parsed DFF
+qualification with version 56. ExtractorVersion 30 retains the first parsed DFF
 PROP's known format facts when a later PROP makes compression unsupported.
 
 Version 13 also covers the deterministic PCM trace capture test. It changes no
@@ -1219,3 +1219,18 @@ production file, packer, plan, harness reader or record changes, and nothing pla
 differently. The harness's approval admission reads a record of version 55 alone; the
 migration reads an owner's record of 35 to 55 (`LegacyVersion` stays 35). Every earlier
 version's harness evidence is stale to the harness, as at every bump.
+
+Version 56 is B728 B9's round 15: the backend's tests again, and no code path changes. Under
+the prefix `TestACaseEndingWithItsWriteParkedLetsItGo` times its case's body by the body's own
+exit, which a call the body defers before its rig's setup signals before any of its cleanups
+runs, with the time it exited, where the case's end, after every cleanup, had stood in for it:
+a case that failed before its write parked and was slow to clean up drew a parent error and a
+goroutine dump as a body that overran. After the exit the case is classified by what it
+signalled and when, never by which of two ready channels a select took: exited past its bound,
+or not by it, is the overrun; ended before the cleanup under test was registered keeps its skip
+or its failure with nothing reported; registered goes to the property and the shutdown, as in
+55. The timeline is written out beside it, its longest path within the package's timeout at
+the watchdog CI runs it with. No production file, packer, plan, harness reader or record
+changes, and nothing plays differently. The harness's approval admission reads a record of
+version 56 alone; the migration reads an owner's record of 35 to 56 (`LegacyVersion` stays
+35). Every earlier version's harness evidence is stale to the harness, as at every bump.
