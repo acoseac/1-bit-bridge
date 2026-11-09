@@ -1,6 +1,6 @@
 # B470 native qualification — owner approval and provisional evidence
 
-QualificationVersion is **53**. All older evidence must be rerun for the harness, native included. The
+QualificationVersion is **54**. All older evidence must be rerun for the harness, native included. The
 harness never creates approval. Since B728 no production path reads an approval record or a candidate:
 the player plays DSD by its effective policy (`ops/plan-b728-dsd-capability-design.md`). This runbook
 is the engineering harness's. Its evidence binds `qualificationVersion`, whose guard covers the DSD byte
@@ -249,7 +249,7 @@ GOTOOLCHAIN=go1.27.3 go test -race -tags ts_omit_webclient,ts_omit_debugeventbus
 
 ## Round 3 evidence rules
 
-Historical round 3 used qualificationVersion 4; current version is **53**. A native contact's
+Historical round 3 used qualificationVersion 4; current version is **54**. A native contact's
 Contact.SchemaVersion remains **2**; a DoP contact's is **3**. All older
 contacts are invalid; repeat contact on this build. Required Device and Subdevice
 fields bind the configured PCM endpoint, including a nonzero subdevice, before
@@ -338,7 +338,7 @@ still resolve inside it). `dsdMode: native` or `auto` enables only approved nati
 
 The Go contracts are `qualification.Approval`, `ApprovalBody`, `ApprovedPolicy`, `Edge`
 and `Evidence` in `internal/player/qualification/approval.go`. JSON uses those exact
-exported field names. SchemaVersion=1, or 2 with Transitions and QualifiedOn (2d.2, below); QualificationVersion=53; Revision is the owner's
+exported field names. SchemaVersion=1, or 2 with Transitions and QualifiedOn (2d.2, below); QualificationVersion=54; Revision is the owner's
 revision; Identity is the observed VID/ProductID/manufacturer/product/bcdDevice,
 anchored controller/port, interface, device and subdevice. No serial or card number is
 persistent identity. Unchanged descriptors may retain approval after replug/restart;
@@ -386,7 +386,7 @@ At least one native fixture must finish with measured playback of that tuple.
 NativeTuple and NativeCompleted record that execution; PCM-only lists or completion
 cannot qualify it. LifecycleActions count observed native outcomes: pause/resume,
 release/reopen, navigation between native occurrences, Stop, and natural completion.
-An admitted command alone is insufficient. Version 53 invalidates older evidence.
+An admitted command alone is insufficient. Version 54 invalidates older evidence.
 List all candidate directional edges explicitly. No command generates that record.
 
 ```sh
@@ -425,7 +425,7 @@ or evidence names resolving to the state directory itself before any ancestor
 walk. Native monitoring remains fail-closed without a grace period. The overlay
 generator requires both integration suites before publishing its overlay.
 Guarded API, config, extractor, output-play and approval paths changed; rerun
-qualification with version 53. ExtractorVersion 30 retains the first parsed DFF
+qualification with version 54. ExtractorVersion 30 retains the first parsed DFF
 PROP's known format facts when a later PROP makes compression unsupported.
 
 Version 13 also covers the deterministic PCM trace capture test. It changes no
@@ -1186,3 +1186,20 @@ of 35 to 53 (`LegacyVersion` stays 35). For owners: nothing plays or ends differ
 52, whose claim of a late close is narrowed here to what it does. Serve's player, whose
 sinks' lives end only after their release, answers as before. Every earlier version's
 harness evidence is stale to the harness, as at every bump.
+
+Version 54 is B728 B9's round 13: a case of the backend's tests that could hang on a loaded
+runner, and no code path changes. CI's macOS run of
+`TestAnOccurrenceBesideAWriteIsNotRevoked`'s first case waited out the package's 30
+minutes: the occurrence it started beside a parked write played out and its session was
+released, the track heard cleared, before the case first looked for it; its look waited out
+the watchdog, and its cleanup then waited on the seam's Once, which the parked write held
+until that cleanup let it go, after. Under the prefix the case takes its orderings by
+barriers alone: its first case is heard with the fake DAC held, and a fourth, played out
+before it looks, reads only what stays (the engine's track count, the backend's events and
+Details, the sinks opened); each case's write is parked through `parkedWrite`, whose cleanup
+lets it go asking nothing of the seam, which `TestACaseEndingWithItsWriteParkedLetsItGo`
+pins; and the rig's engine commands wait at most the watchdog. No production file, packer,
+plan, harness reader or record changes, and nothing plays differently. The harness's
+approval admission reads a record of version 54 alone; the migration reads an owner's record
+of 35 to 54 (`LegacyVersion` stays 35). Every earlier version's harness evidence is stale to
+the harness, as at every bump.
