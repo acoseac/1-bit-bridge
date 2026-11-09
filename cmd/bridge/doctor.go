@@ -489,6 +489,9 @@ func buildDoctorDepsWith(cfgPath string, absentIsPreSetup bool, dacHost dacAcces
 				// (backlog B652): the same judgment, over the same rows,
 				// bounded as the variants walk is.
 				d.WaveformRegeneration = func(ctx context.Context) (doctor.WaveformRegeneration, error) {
+					if err := doctorStoreGate(cfgFile, cfg.DataDir); err != nil {
+						return doctor.WaveformRegeneration{}, err
+					}
 					return waveformRegenerationReport(ctx, dbPath, waveformDir, doctorVariantsIndexBudget)
 				}
 				// Names in one folder the app reads as one (backlog B420):
@@ -586,8 +589,9 @@ var (
 // data dir held none, so no probe reached a store there (B727). A config
 // with no file ("": one built in memory) has no record, and refuses nothing.
 // Asked at each call of a probe that opens the store: the codec probe, the
-// sidecar-paths, variants-index and name-collisions probes, and the player
-// checklist's proof of the library's paths (doctorOutputChecklist).
+// sidecar-paths, variants-index, waveform-regeneration and name-collisions
+// probes, and the player checklist's proof of the library's paths
+// (doctorOutputChecklist).
 func doctorStoreGate(cfgFile, dataDir string) error {
 	if cfgFile == "" {
 		return nil
