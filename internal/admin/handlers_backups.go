@@ -277,7 +277,8 @@ func (s *Server) apiBackupsCreate(w http.ResponseWriter, r *http.Request) {
 // it. The prune runs whatever the verdict, with keep, the create's
 // retention, unconditionally (keep <= 0 disables the keep-policy, not the
 // crash-orphan sweep). What it found goes to the log, naming the snapshot
-// by its folder's name.
+// by its folder's name, and, of a verification that answered an error, how
+// far its write went, from the write's outcome, never from the error.
 func (s *Server) verifyInBackground(capture *backup.Capture, backupsRoot string, keep int) {
 	ctx := s.scanCtx()
 	dir := capture.Dir
@@ -290,6 +291,12 @@ func (s *Server) verifyInBackground(capture *backup.Capture, backupsRoot string,
 		v := res.Verify.Record
 		switch {
 		case res.VerifyErr != nil && ctx.Err() != nil:
+		case res.VerifyErr != nil && (res.Verify.Write == backup.WriteRecorded || res.Verify.Write == backup.WriteUnchanged):
+			// Its write ended without failing: the error is another step's, its
+			// record's read-back among them, and never says the verdict was not
+			// recorded (backlog B653's sixth round).
+			logger.Warn("admin: a snapshot's verification answered an error once its write had ended", "snapshot", name,
+				"write", res.Verify.Write.String(), "recordRead", res.Verify.RecordRead, "err", res.VerifyErr)
 		case res.VerifyErr != nil:
 			logger.Warn("admin: a snapshot's verdict was not recorded", "snapshot", name, "err", res.VerifyErr)
 		case v.Passes():

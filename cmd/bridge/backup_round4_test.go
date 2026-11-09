@@ -158,8 +158,9 @@ func TestBridgeBackupVerifySaysWhatARecheckFoundWhereItCannotBeRecorded(t *testi
 // write began; a write whose rename landed before its sync did not answer did
 // not finish, which says so, the record read back reading what it wrote; and
 // a record not read back is said so, after how far the write went, and never
-// printed. Red on the round before, which said "it wrote nothing" wherever
-// what was found was not recorded.
+// printed, its read-back given up said as that since the sixth round. Red on
+// the round before, which said "it wrote nothing" wherever what was found was
+// not recorded.
 func TestBridgeBackupVerifySaysWhatAGivenUpVerificationsRecordReads(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -171,7 +172,7 @@ func TestBridgeBackupVerifySaysWhatAGivenUpVerificationsRecordReads(t *testing.T
 		{"over a FAILED", "its write found nothing to change, and its record reads:", backup.StateFailed, backup.ReasonHash},
 		{"whose INCOMPLETE is not written", "its write failed, and its record reads:", backup.StatePending, ""},
 		{"whose write did not finish", "its write did not finish, and its record reads:", backup.StateIncomplete, backup.ReasonDeadline},
-		{"whose record was not read back", "it wrote its record; its record could not be read back", backup.StateIncomplete, backup.ReasonDeadline},
+		{"whose record was not read back", "it wrote its record; its read-back was given up, so its record was not read", backup.StateIncomplete, backup.ReasonDeadline},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfgPath, _, root := backupInstall(t)

@@ -198,24 +198,25 @@ func verifyCmd(ctx context.Context, configPath, path string, full bool, stdout, 
 // record holds now, on stdout, and why the verdict was not recorded or the
 // snapshot does not pass, on stderr, each line led by prefix. It reports
 // whether the snapshot passes: both verdicts VERIFIED (the database's
-// UNVERIFIED where the install had none to capture), recorded. Where the
-// verdict was not recorded it says the two apart: what this check found, and
-// what the record reads, as every reader reads it until a check is recorded;
-// of a snapshot not checked again (backup.ErrRecheckRefused), the record an
-// earlier check left, which this one did not repeat; of one checked again
-// where no check over its VERIFIED is recorded (backup.ErrRecheckNotRecorded:
-// Windows), what this check found and the record it leaves as it was; and of
-// a verification given up (backup.ErrCheckGivenUp), how far its write went
-// and what its record reads as read back, never what the INCOMPLETE it was
-// given up with would say (its merge keeps a completed verdict, and its
-// write may not have landed), and that the step still holds the snapshots.
-// A record that was not read back is said so (backup.VerifyResult.RecordRead),
-// never printed.
+// UNVERIFIED where the install had none to capture), recorded, and read
+// back. Where the verdict was not recorded it says the two apart: what this
+// check found, and what the record reads, as every reader reads it until a
+// check is recorded; of a snapshot not checked again
+// (backup.ErrRecheckRefused), the record an earlier check left, which this
+// one did not repeat; of one checked again where no check over its VERIFIED
+// is recorded (backup.ErrRecheckNotRecorded: Windows), what this check found
+// and the record it leaves as it was; and of a verification given up
+// (backup.ErrCheckGivenUp), how far its write went and what its record reads
+// as read back, never what the INCOMPLETE it was given up with would say (its
+// merge keeps a completed verdict, and its write may not have landed), and
+// that the step still holds the snapshots. How far a write went is said from
+// its outcome (backup.VerifyResult.Write), never from the error, and apart
+// from the read-back: a record that was not read back is said so in every
+// case, and why (readWords), never printed, and what the check found never
+// stands in for it, so a durable write whose read-back failed says it wrote
+// its record and that its record could not be read back, and fails (backlog
+// B653's sixth round).
 func reportVerdict(stdout, stderr io.Writer, prefix string, res backup.VerifyResult, err error) bool {
-	rec := res.Record
-	if !res.RecordRead {
-		rec = res.Found
-	}
 	switch {
 	case errors.Is(err, backup.ErrCheckGivenUp):
 		fmt.Fprintf(stderr, "%sthe verification was given up, and its step still holds the snapshots until it ends: %v\n", prefix, err)
@@ -224,36 +225,24 @@ func reportVerdict(stdout, stderr io.Writer, prefix string, res backup.VerifyRes
 	case errors.Is(err, backup.ErrRecheckNotRecorded):
 		fmt.Fprintf(stdout, "%sthis check found:\n", prefix)
 		describeVerdictLed(stdout, prefix+"  ", res.Found)
-		if res.RecordRead {
-			fmt.Fprintf(stdout, "%sits record, which this check leaves as it was, reads:\n", prefix)
-			describeVerdictLed(stdout, prefix+"  ", res.Record)
-		}
+		describeRecordOr(stdout, prefix, res, "its record, which this check leaves as it was, reads:")
 		fmt.Fprintf(stderr, "%swhat this check found was not recorded: %v\n", prefix, err)
 		return false
 	case errors.Is(err, backup.ErrRecheckRefused):
-		if res.RecordRead {
-			fmt.Fprintf(stdout, "%sits record, from an earlier check, which this one did not repeat:\n", prefix)
-			describeVerdictLed(stdout, prefix+"  ", res.Record)
-		}
+		describeRecordOr(stdout, prefix, res, "its record, from an earlier check, which this one did not repeat:")
 		fmt.Fprintf(stderr, "%sthe snapshot was not checked: %v\n", prefix, err)
 		return false
 	case err != nil && res.Found.DatabaseState != "":
 		fmt.Fprintf(stdout, "%sthis check found:\n", prefix)
 		describeVerdictLed(stdout, prefix+"  ", res.Found)
-		if res.RecordRead {
-			fmt.Fprintf(stdout, "%sits record reads, for every reader until a check is recorded:\n", prefix)
-			describeVerdictLed(stdout, prefix+"  ", res.Record)
-		}
-		if errors.Is(err, backup.ErrVerdictNotDurable) {
-			fmt.Fprintf(stderr, "%sthe snapshot was kept, and what this check found was written and is not known to survive a crash: %v\n", prefix, err)
-		} else {
-			fmt.Fprintf(stderr, "%sthe snapshot was kept, and what this check found was not recorded: %v\n", prefix, err)
-		}
+		describeRecordOr(stdout, prefix, res, "its record reads, for every reader until a check is recorded:")
+		fmt.Fprintf(stderr, "%sthe snapshot was kept, and %s: %v\n", prefix, keptWords(res), err)
 		return false
 	case err != nil:
 		fmt.Fprintf(stderr, "%sthe snapshot was kept, and its verdict was not recorded: %v\n", prefix, err)
 		return false
 	}
+	rec := res.Record
 	if res.Found.DatabaseState != "" {
 		describeVerdictLed(stdout, prefix, rec)
 	}
@@ -265,32 +254,75 @@ func reportVerdict(stdout, stderr io.Writer, prefix string, res backup.VerifyRes
 	return true
 }
 
-// describeRecordRead says how far a verification given up went with its
-// record and what that record reads as read back, its two verdicts, or that
-// it could not be read back, which says nothing of whether a write landed
-// (recordWords, backlog B653's fifth round).
-func describeRecordRead(w io.Writer, prefix string, res backup.VerifyResult) {
+// describeRecordOr prints the record as read back, led by lead, or says why
+// it was not read back (readWords).
+func describeRecordOr(w io.Writer, prefix string, res backup.VerifyResult, lead string) {
 	if !res.RecordRead {
-		fmt.Fprintf(w, "%s%s\n", prefix, recordWords(res.Write, false))
+		fmt.Fprintf(w, "%s%s\n", prefix, readWords(res))
 		return
 	}
-	fmt.Fprintf(w, "%s%s:\n", prefix, recordWords(res.Write, true))
+	fmt.Fprintf(w, "%s%s\n", prefix, lead)
+	describeVerdictLed(w, prefix+"  ", res.Record)
+}
+
+// describeRecordRead says how far a verification given up went with its
+// record and what that record reads as read back, its two verdicts, or why it
+// was not read back, which says nothing of whether a write landed
+// (recordWords, backlog B653's fifth and sixth rounds).
+func describeRecordRead(w io.Writer, prefix string, res backup.VerifyResult) {
+	if !res.RecordRead {
+		fmt.Fprintf(w, "%s%s\n", prefix, recordWords(res))
+		return
+	}
+	fmt.Fprintf(w, "%s%s:\n", prefix, recordWords(res))
 	describeVerdictLed(w, prefix+"  ", res.Record)
 }
 
 // recordWords says how far a verification's write of its record went
 // (writeWords), and leads into what its record reads as read back ("…
-// reads"), or says that it could not be read back.
-func recordWords(o backup.WriteOutcome, read bool) string {
+// reads"), or says why it was not read back (readWords).
+func recordWords(res backup.VerifyResult) string {
 	switch {
-	case !read:
-		return writeWords(o) + "; its record could not be read back"
-	case o == backup.WriteRecorded:
+	case !res.RecordRead:
+		return writeWords(res.Write) + "; " + readWords(res)
+	case res.Write == backup.WriteRecorded:
 		return "it wrote its record, which reads"
-	case o == backup.WriteNotDurable:
+	case res.Write == backup.WriteNotDurable:
 		return "it wrote its record, which is not known to survive a crash and reads"
 	}
-	return writeWords(o) + ", and its record reads"
+	return writeWords(res.Write) + ", and its record reads"
+}
+
+// keptWords says how far the write of what a check found went, of a kept
+// snapshot whose verification answered an error once its check had run: from
+// the write's outcome (res.Write), never from the error, which may be its
+// read-back's alone; and, where its record was not read back, that too, and
+// why (readWords).
+func keptWords(res backup.VerifyResult) string {
+	w := "what this check found was not recorded"
+	switch res.Write {
+	case backup.WriteNotDurable:
+		w = "what this check found was written and is not known to survive a crash"
+	case backup.WriteRecorded, backup.WriteUnchanged, backup.WriteUnfinished:
+		w = writeWords(res.Write)
+	}
+	if !res.RecordRead {
+		w += "; " + readWords(res)
+	}
+	return w
+}
+
+// readWords says why a verification's record was not read back: its
+// read-back was given up, or it read nothing (the error the verification
+// answers says why), or none was made.
+func readWords(res backup.VerifyResult) string {
+	switch {
+	case errors.Is(res.ReadErr, backup.ErrReadBackGivenUp):
+		return "its read-back was given up, so its record was not read"
+	case res.ReadErr != nil:
+		return "its record could not be read back"
+	}
+	return "its record was not read back"
 }
 
 // writeWords says how far a verification's write of its record went: "it
@@ -669,8 +701,12 @@ func runBackupTicker(ctx context.Context, src backup.Sources, keep func() int, i
 // no database to capture and its files are), on stderr otherwise, and
 // nothing for a verification the shutdown stopped, which wrote INCOMPLETE.
 // A verification given up is said by how far its write went and what its
-// record reads as read back, or that it could not be read back, and that its
-// step still holds the snapshots.
+// record reads as read back, and that its step still holds the snapshots; a
+// kept snapshot whose verification answered an error once its check had run,
+// by what its check found, how far its write went (keptWords' rule, from the
+// write's outcome alone) and what its record reads; and in each case a record
+// that was not read back is said so, and why (readWords), never printed
+// (backlog B653's sixth round).
 func reportTickerVerdict(ctx context.Context, stdout, stderr io.Writer, triggered string, res backup.Result) {
 	if res.VerifyErr != nil {
 		failure := ctxerr.WithoutCancellation(ctx, res.VerifyErr)
@@ -678,7 +714,7 @@ func reportTickerVerdict(ctx context.Context, stdout, stderr io.Writer, triggere
 		switch {
 		case failure == nil:
 		case errors.Is(failure, backup.ErrCheckGivenUp):
-			reads := recordWords(res.Verify.Write, read)
+			reads := recordWords(res.Verify)
 			if read {
 				reads = fmt.Sprintf("%s database %s, files %s", reads,
 					backup.StateWords(rec.DatabaseState, rec.DatabaseReasons), backup.FilesWords(rec))
@@ -689,11 +725,10 @@ func reportTickerVerdict(ctx context.Context, stdout, stderr io.Writer, triggere
 			fmt.Fprintf(stderr, "backup (%s): %s was not checked, and its record, from an earlier check, reads database %s, files %s: %v\n", triggered, res.Dir,
 				backup.StateWords(rec.DatabaseState, rec.DatabaseReasons), backup.FilesWords(rec), failure)
 		case errors.Is(failure, backup.ErrRecheckRefused):
-			fmt.Fprintf(stderr, "backup (%s): %s was not checked, and its record could not be read back: %v\n", triggered, res.Dir, failure)
-		case found.DatabaseState != "" && read:
-			fmt.Fprintf(stderr, "backup (%s): %s was kept, and its check found database %s, files %s, which was not recorded; its record reads database %s, files %s: %v\n", triggered, res.Dir,
-				backup.StateWords(found.DatabaseState, found.DatabaseReasons), backup.FilesWords(found),
-				backup.StateWords(rec.DatabaseState, rec.DatabaseReasons), backup.FilesWords(rec), failure)
+			fmt.Fprintf(stderr, "backup (%s): %s was not checked, and %s: %v\n", triggered, res.Dir, readWords(res.Verify), failure)
+		case found.DatabaseState != "":
+			fmt.Fprintf(stderr, "backup (%s): %s was kept, and its check found database %s, files %s, %s: %v\n", triggered, res.Dir,
+				backup.StateWords(found.DatabaseState, found.DatabaseReasons), backup.FilesWords(found), tickerKeptWords(res.Verify), failure)
 		default:
 			fmt.Fprintf(stderr, "backup (%s): %s was kept, and its verdict was not recorded: %v\n", triggered, res.Dir, failure)
 		}
@@ -710,6 +745,24 @@ func reportTickerVerdict(ctx context.Context, stdout, stderr io.Writer, triggere
 	}
 	fmt.Fprintf(stderr, "backup (%s): %s was kept, and it is not a verified recovery point: database %s, files %s\n",
 		triggered, res.Dir, backup.StateWords(v.DatabaseState, v.DatabaseReasons), backup.FilesWords(v))
+}
+
+// tickerKeptWords is keptWords in the ticker's one line, after what the check
+// found: how far its write went, from the write's outcome alone, then what
+// the record reads as read back, or why it was not read back.
+func tickerKeptWords(v backup.VerifyResult) string {
+	w := "which was not recorded"
+	switch v.Write {
+	case backup.WriteNotDurable:
+		w = "which was written and is not known to survive a crash"
+	case backup.WriteRecorded, backup.WriteUnchanged, backup.WriteUnfinished:
+		w = "and " + writeWords(v.Write)
+	}
+	if !v.RecordRead {
+		return w + "; " + readWords(v)
+	}
+	return fmt.Sprintf("%s; its record reads database %s, files %s", w,
+		backup.StateWords(v.Record.DatabaseState, v.Record.DatabaseReasons), backup.FilesWords(v.Record))
 }
 
 // pruneSkipWords says why a kept snapshot's prune did not run, from its
