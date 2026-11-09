@@ -259,6 +259,7 @@ func TestWhileCastingSeekIdStartsPlaybackFromEveryState(t *testing.T) {
 		letGo := p.be.holdStarts(t)
 		play := send(h, playlist, "Play")
 		p.be.callsBegun(t, "Start", 1)
+		p.startUnderWay()
 		if got := state(t, h); got != "Buffering" {
 			t.Fatalf("TransportState %s while the start is held", got)
 		}
