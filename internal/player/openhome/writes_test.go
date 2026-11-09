@@ -940,6 +940,9 @@ func TestARefusalAtTheOpenIsTheEnginesSkip(t *testing.T) {
 		if after == nil || after.Entry != c {
 			t.Fatalf("the successor after the refused one %+v, want c (%d)", after, c)
 		}
+		// The Prepare the fake has begun can come before the refusal's step is
+		// published (B827): the reads wait for the skip that step records.
+		p.waitSnap("y's refusal", func(sn *engine.Snapshot) bool { _, ok := sn.Skipped(y); return ok })
 		if got := read(t, h, playlist, "Id")["Value"]; got != u(a) {
 			t.Errorf("Id %s after the successor was refused, want a, still playing", got)
 		}
