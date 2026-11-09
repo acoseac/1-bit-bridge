@@ -1061,7 +1061,9 @@ func (r *rig) available() {
 	}
 }
 
-// insert queues refs in order and returns their IDs.
+// insert queues refs in order and returns their IDs, each ref's command
+// within a watchdog of its own (B728 B9 round 14: one bound for the loop
+// timed every ref against it), so n refs take at most n watchdogs.
 func (r *rig) insert(refs ...string) []uint32 {
 	r.t.Helper()
 	var ids []uint32
@@ -1069,17 +1071,21 @@ func (r *rig) insert(refs ...string) []uint32 {
 	if s := r.eng.Snapshot(); s.Len() > 0 {
 		after, _ = s.IDAt(s.Len() - 1)
 	}
-	ctx, cancel := within()
-	defer cancel()
 	for _, ref := range refs {
 		rf, err := engine.NewReference(ref)
 		if err != nil {
 			r.t.Fatal(err)
 		}
-		id, err := r.eng.InsertAfter(ctx, after, rf, nil)
-		if err != nil {
-			r.t.Fatalf("insert %s: %v", ref, err)
-		}
+		id := func() uint32 {
+			r.t.Helper()
+			ctx, cancel := within()
+			defer cancel()
+			id, err := r.eng.InsertAfter(ctx, after, rf, nil)
+			if err != nil {
+				r.t.Fatalf("insert %s: %v", ref, err)
+			}
+			return id
+		}()
 		ids = append(ids, id)
 		after = id
 	}
