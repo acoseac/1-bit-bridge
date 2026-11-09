@@ -196,6 +196,17 @@ func TestTheNodeNameIsTheRegisteredOneOrTheDefault(t *testing.T) {
 			f.register("Gone Node", "nStable1", nil)
 			f.logout()
 		}, DefaultHostname, false},
+		{"a current profile the known profiles do not list", "", func(t *testing.T, dir string) {
+			// Upstream's start takes such a profile for none
+			// (profileManager.findProfileByKey) and starts a new one.
+			f := newStateFixture(t, dir)
+			f.register("Unlisted Node", "nStable1", nil)
+			b, err := json.Marshal(map[ipn.ProfileID]ipn.LoginProfileView{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			f.write(ipn.KnownProfilesStateKey, b)
+		}, DefaultHostname, false},
 		{"a registered node", "", func(t *testing.T, dir string) {
 			f := newStateFixture(t, dir)
 			f.machineKey()
