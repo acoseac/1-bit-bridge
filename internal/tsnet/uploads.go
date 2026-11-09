@@ -29,82 +29,132 @@ var ErrNoLogsEnvUnreadable = errors.New("tsnet: " + NoLogsEnv + " in the bridge'
 	"such a value: set it to true, or remove it, and start again")
 
 // Uploads is what the node's diagnostic-log uploads come to in this
-// process, kept from the policy NewServer applies so that the refusal of a
-// tailnet that requires the logs can say what holds them off.
+// process: the config, and what holds them off where it allows them, kept
+// from the policy NewServer applies (Server.Uploads reads it, live), so that
+// the console's tile and a tailnet's refusal of the node can say it.
 type Uploads struct {
 	// Allowed is tailscale.uploadDiagnosticLogs: the config lets the node
 	// upload.
 	Allowed bool
-	// EnvOff is whether the environment the bridge inherited held NoLogsEnv
-	// true, which keeps the uploads off whatever the config allows.
+	// EnvOff is whether the environment the process was launched with held
+	// NoLogsEnv true, which keeps the uploads off whatever the config allows
+	// until the process is launched without it.
 	EnvOff bool
+	// LatchedOff is whether this process's policy turned the uploads off
+	// earlier, for a node built without the key, where the config allows
+	// them now: the variable stays set until the process exits, so the
+	// setting applies at the bridge's next launch.
+	LatchedOff bool
+	// OtherOff is whether something else in this process turned the uploads
+	// off where the config allows them: the variable reads true, and neither
+	// the launch environment nor this process's policy set it (upstream's own
+	// setter, which the coordination server's DisableLogTail message calls).
+	OtherOff bool
 }
 
 // Off reports whether the node uploads nothing.
-func (u Uploads) Off() bool { return !u.Allowed || u.EnvOff }
+func (u Uploads) Off() bool { return !u.Allowed || u.EnvOff || u.LatchedOff || u.OtherOff }
+
+// relaunch is what makes a change of the setting, or of the launch
+// environment, apply once this process has turned the uploads off: a new
+// launch of the bridge's process. The menu's "Start now", and bridge init's
+// start, run serve in their own process, so stopping serve and starting it
+// again from there is no new launch.
+const relaunch = "quit the bridge, its menu included, and launch it again, or restart its service"
+
+// HeldOff says what holds the uploads off where the config allows them, in
+// the words the console's tile and a tailnet's refusal give it, or "" where
+// the config does not allow them or nothing holds them off. The launch
+// environment comes first, since a new launch alone does not undo it.
+func (u Uploads) HeldOff() string {
+	switch {
+	case !u.Allowed:
+		return ""
+	case u.EnvOff:
+		return NoLogsEnv + "=true in the environment the bridge was launched with keeps them off: remove it from " +
+			"that environment, then " + relaunch
+	case u.LatchedOff:
+		return "this process turned them off when it built a node without the setting, and they stay off until it " +
+			"exits: the setting applies at the bridge's next launch, so " + relaunch
+	case u.OtherOff:
+		return "something in this process turned them off (Tailscale's coordination server can), and a new launch " +
+			"of the bridge may turn them back on: " + relaunch
+	}
+	return ""
+}
 
 // applyUploadPolicy is the bridge's diagnostic-log policy for the embedded
 // node, applied to the process before the node is built: NoLogsEnv set to
-// true through envknob unless allow, and the inherited environment left as
-// it is when allow. An inherited true still keeps the uploads off then, and
-// an inherited false never turns them on by itself, since a config that
-// does not allow them overrides it. A value that is set and does not read
-// as a boolean is ErrNoLogsEnvUnreadable, with the environment untouched;
-// an empty one is unset, as envknob reads it.
+// true through envknob unless allow, and the environment left as it is when
+// allow. An inherited true still keeps the uploads off then, and an
+// inherited false never turns them on by itself, since a config that does
+// not allow them overrides it. A value that is set and does not read as a
+// boolean is ErrNoLogsEnvUnreadable, with the environment untouched; an
+// empty one is unset, as envknob reads it.
 //
-// It runs once for each node a process builds (NewServer), on the
-// caller's goroutine, before anything starts the node; the variable is not
-// one of envknob's registered knobs, so no cache of it is read elsewhere,
-// and every reader of it in Tailscale's code asks os.Getenv.
+// It runs once for each node a process builds (NewServer), on the caller's
+// goroutine, before anything starts the node; the variable is not one of
+// envknob's registered knobs, so no cache of it is read elsewhere, and every
+// reader of it in Tailscale's code asks os.Getenv.
 //
-// A process can build a node again after one it built: the menu's "Start
-// now", and bridge init's start before it, run serve in the process, and the
-// menu runs it again after a stop. The inherited value is then the one the
-// policy found before it first set the variable (policyRecord), while the
-// variable still holds the true it set, so that a consent saved between the
-// two reaches the later node, which the policy hands the inherited value back
-// to, and the refusal's words name the variable only where the process's
-// environment holds the uploads off. A value anything else put there since
-// (upstream's own setter, which the coordination server's DisableLogTail
-// message calls) is the process's, and stays.
+// Once it has set the variable, the process keeps it set until it exits: the
+// menu's "Start now", and bridge init's start before it, run serve in the
+// process, and the menu runs it again after a stop, so a later node whose
+// config allows the uploads starts with them off, and the setting applies at
+// the bridge's next launch. Nothing is handed back: an earlier node's start
+// that resumes late (serve's stop waits for it only to its deadline, and
+// Close does not join a start it has not published) can never find the
+// uploads allowed, and upstream's own setter, which the coordination
+// server's DisableLogTail message calls, also disables logtail for the rest
+// of the process (logtail.Disable). What the process inherited is read once,
+// at the first application whatever allow is, so that the words name the
+// variable only where the launch environment held it.
 func applyUploadPolicy(allow bool) (Uploads, error) {
 	policyRecord.Lock()
 	defer policyRecord.Unlock()
-	value, present := os.LookupEnv(NoLogsEnv)
-	ours := policyRecord.set && present && value == "true"
-	if ours {
-		value, present = policyRecord.before, policyRecord.beforePresent
-	} else {
-		policyRecord.noLogsRecord = noLogsRecord{}
+	if !policyRecord.recorded {
+		policyRecord.inherited, policyRecord.recorded = os.Getenv(NoLogsEnv), true
 	}
-	var envOff bool
-	if value != "" {
-		v, err := strconv.ParseBool(value)
-		if err != nil {
-			return Uploads{}, ErrNoLogsEnvUnreadable
-		}
-		envOff = v
+	envOff, err := noLogsOff(policyRecord.inherited)
+	if err != nil {
+		return Uploads{}, err
 	}
-	switch {
-	case !allow:
-		if !policyRecord.set {
-			policyRecord.noLogsRecord = noLogsRecord{set: true, before: value, beforePresent: present}
-		}
+	now, err := noLogsOff(os.Getenv(NoLogsEnv))
+	if err != nil {
+		return Uploads{}, err
+	}
+	u := Uploads{Allowed: allow, EnvOff: envOff}
+	if !allow {
 		envknob.SetNoLogsNoSupport()
-	case ours:
-		putBackNoLogsEnv(value, present)
-		policyRecord.noLogsRecord = noLogsRecord{}
+		policyRecord.set = true
+		return u, nil
 	}
-	return Uploads{Allowed: allow, EnvOff: envOff}, nil
+	u.LatchedOff = now && policyRecord.set
+	u.OtherOff = now && !envOff && !policyRecord.set
+	return u, nil
 }
 
-// noLogsRecord is what applyUploadPolicy did to NoLogsEnv in this process:
-// whether it set the variable true, and what the variable held before it
-// first did (before, and whether it was set at all).
+// noLogsOff is a NoLogsEnv value as Tailscale's code reads it
+// (envknob.Bool: strconv.ParseBool, empty false), or ErrNoLogsEnvUnreadable
+// for one it would stop the process on.
+func noLogsOff(v string) (bool, error) {
+	if v == "" {
+		return false, nil
+	}
+	off, err := strconv.ParseBool(v)
+	if err != nil {
+		return false, ErrNoLogsEnvUnreadable
+	}
+	return off, nil
+}
+
+// noLogsRecord is what the process's policy knows of NoLogsEnv: whether it
+// has read what the process inherited, that value, and whether the policy
+// has set the variable, which it then keeps set until the process exits.
 type noLogsRecord struct {
-	set           bool
-	before        string
-	beforePresent bool
+	recorded  bool
+	inherited string
+	set       bool
 }
 
 // policyRecord is the process's noLogsRecord, which every application of the
@@ -114,24 +164,26 @@ var policyRecord struct {
 	noLogsRecord
 }
 
-// putBackNoLogsEnv sets NoLogsEnv back to what the process inherited, through
-// envknob, whose record of the knobs set follows it, and unset again where it
-// was not set at all. Should the unset fail (it can only on Windows, for a
-// name it refuses), the variable is empty, which every reader of it takes for
-// unset.
-func putBackNoLogsEnv(value string, present bool) {
-	if present {
-		envknob.Setenv(NoLogsEnv, value)
-		return
+// Uploads is the policy's status for this node, read now: what NewServer's
+// policy found, and, where the config allows the uploads and that found
+// nothing holding them off, whether something in this process has turned
+// them off since (the coordination server's DisableLogTail message can,
+// while the node runs). It reads the environment and nothing else.
+func (s *Server) Uploads() Uploads {
+	u := s.uploads
+	if u.Allowed && !u.Off() {
+		if now, err := noLogsOff(os.Getenv(NoLogsEnv)); err == nil && now {
+			u.OtherOff = true
+		}
 	}
-	envknob.Setenv(NoLogsEnv, "")
-	_ = os.Unsetenv(NoLogsEnv)
+	return u
 }
 
-// ForgetUploadPolicyForTest makes the policy forget what it did to NoLogsEnv
-// in this process, so that a test case which sets the variable as a process
-// would inherit it has it read that way (a test binary's cases share one
-// process); restore puts the record back. Tests only.
+// ForgetUploadPolicyForTest makes the policy forget what it knows of
+// NoLogsEnv in this process, so that a test case starts as a process that
+// has built no node and reads the variable as one it inherited (a test
+// binary's cases share one process); restore puts the record back. Tests
+// only.
 func ForgetUploadPolicyForTest() (restore func()) {
 	policyRecord.Lock()
 	saved := policyRecord.noLogsRecord
@@ -167,23 +219,25 @@ type LogsRequiredError struct {
 	err     error // upstream's, nil for a running node's health
 }
 
-// Error is the refusal's words.
+// Error is the refusal's words: what holds the uploads off in this process
+// (Uploads.HeldOff), or the setting, and that a new launch of the bridge is
+// what applies a change, never a restart of serve in its process.
 func (e *LogsRequiredError) Error() string {
 	var b strings.Builder
 	b.WriteString("this tailnet requires Tailscale's logs, and the embedded node runs on it only with their uploads on: ")
-	switch {
+	const set = "set tailscale.uploadDiagnosticLogs: true (in the console's Settings, under Networking, or in bridge.yaml)"
+	switch held := e.Uploads.HeldOff(); {
 	case !e.Uploads.Allowed && e.Uploads.EnvOff:
-		b.WriteString("set tailscale.uploadDiagnosticLogs: true (in the console's Settings, under Networking, or in " +
-			"bridge.yaml), also remove " + NoLogsEnv + "=true from the bridge's environment, and restart the bridge")
+		b.WriteString(set + ", remove " + NoLogsEnv + "=true from the environment the bridge was launched with, then " +
+			relaunch)
 	case !e.Uploads.Allowed:
-		b.WriteString("set tailscale.uploadDiagnosticLogs: true (in the console's Settings, under Networking, or in " +
-			"bridge.yaml) and restart the bridge")
-	case e.Uploads.EnvOff:
-		b.WriteString("tailscale.uploadDiagnosticLogs is true, and " + NoLogsEnv + "=true in the bridge's environment " +
-			"holds them off: remove it from the bridge's environment and restart the bridge")
+		b.WriteString(set + ", then " + relaunch + ": the setting applies at the bridge's next launch")
+	case held != "":
+		b.WriteString("tailscale.uploadDiagnosticLogs is true, but " + held)
 	default:
-		b.WriteString("tailscale.uploadDiagnosticLogs is true, and something in this process turned them off after it " +
-			"started (Tailscale's coordination server can): restart the bridge")
+		b.WriteString("tailscale.uploadDiagnosticLogs is true, and something in this process turned the uploads off " +
+			"after the node started (Tailscale's coordination server can), and a new launch of the bridge may turn " +
+			"them back on: " + relaunch)
 	}
 	b.WriteString("; the node then uploads Tailscale's diagnostic logs to Tailscale. The bridge never turns the uploads on itself")
 	return b.String()
@@ -202,7 +256,7 @@ func (s *Server) LogsRequired(st *ipnstate.Status) error {
 	}
 	for _, h := range st.Health {
 		if isLogsRequired(h) {
-			return &LogsRequiredError{Uploads: s.uploads}
+			return &LogsRequiredError{Uploads: s.Uploads()}
 		}
 	}
 	return nil

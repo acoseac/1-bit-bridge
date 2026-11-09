@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -114,71 +115,189 @@ func TestTheUploadPolicyByTheConfigAndTheInheritedValue(t *testing.T) {
 	}
 }
 
-// TestALaterNodeInTheSameProcessReadsTheInheritedValue: a process that builds
-// another node after one it built (the menu's "Start now" and bridge init's
-// start run serve in the process, and the menu runs it again after a stop)
-// reads NoLogsEnv as the process inherited it, never as an earlier node's
-// policy set it: a consent given in between reaches the later node, the
-// refusal's words name the variable only where the inherited environment
-// holds the uploads off, and a value the policy did not set is the process's.
-func TestALaterNodeInTheSameProcessReadsTheInheritedValue(t *testing.T) {
-	for _, c := range []struct {
+// held is what holds a node's uploads off, as the policy's status and a
+// tailnet's refusal say it.
+type held int
+
+const (
+	heldByNothing held = iota // the config allows them and nothing holds them off
+	heldByConfig              // the config does not allow them
+	heldByEnv                 // the environment the process was launched with
+	heldByLatch               // this process turned them off earlier, and they stay off
+	heldByOther               // something else in this process turned them off
+)
+
+// readsOff is NoLogsEnv's value as Tailscale's code reads it
+// (envknob.NoLogsNoSupport: strconv.ParseBool, empty or unset false).
+func readsOff(t *testing.T, v string) bool {
+	t.Helper()
+	if v == unset || v == "" {
+		return false
+	}
+	off, err := strconv.ParseBool(v)
+	if err != nil {
+		t.Fatalf("%s=%q does not read as Tailscale reads it: %v", NoLogsEnv, v, err)
+	}
+	return off
+}
+
+// TestOnceThisProcessTurnsTheUploadsOffTheyStayOff: once the policy has set
+// NoLogsEnv in this process, it stays set until the process exits. The menu's
+// "Start now", and bridge init's start before it, run serve in the process,
+// and the menu runs it again after a stop: a later node whose config allows
+// the uploads starts with them off all the same, and the policy says what
+// holds them off, in its status (Server.Uploads, Uploads.HeldOff, which the
+// console's tile shows) and in a tailnet's refusal of the node, each reason in
+// words of its own: the environment the process was launched with; this
+// process, earlier, which a new launch undoes; something else in this
+// process (upstream's own setter, which the coordination server's
+// DisableLogTail message calls), which a new launch may undo. Each inherited
+// value runs through each sequence, and the variable is read as Tailscale
+// reads it, never by its spelling.
+func TestOnceThisProcessTurnsTheUploadsOffTheyStayOff(t *testing.T) {
+	type row struct {
 		name      string
 		inherited string
 		allows    []bool // each node's config, in the order the nodes are built
 		between   func() // after the first node, what else in the process does
-		want      string // the variable the last node's upstream start sees
+		off       bool   // the last node's upstream start reads the uploads off
 		uploads   Uploads
-	}{
-		{"a consent given after a node without one", unset, []bool{false, true}, nil, unset, Uploads{Allowed: true}},
-		{"an inherited false and a consent given after", "false", []bool{false, true}, nil, "false", Uploads{Allowed: true}},
-		{"an inherited 1 and a consent given after", "1", []bool{false, true}, nil, "1", Uploads{Allowed: true, EnvOff: true}},
-		{"an inherited true and a consent given after", "true", []bool{false, true}, nil, "true", Uploads{Allowed: true, EnvOff: true}},
-		{"no consent twice", unset, []bool{false, false}, nil, "true", Uploads{}},
-		{"no consent, a consent, no consent", unset, []bool{false, true, false}, nil, "true", Uploads{}},
-		{"a consent withdrawn", unset, []bool{true, false}, nil, "true", Uploads{}},
-		{"a false set in the process after the policy's true", unset, []bool{false, true},
-			func() { _ = os.Setenv(NoLogsEnv, "false") }, "false", Uploads{Allowed: true}},
-		// Upstream's own setter, as the coordination server's DisableLogTail
-		// message calls it: a true the policy did not set stays.
-		{"a true upstream set itself", unset, []bool{true, true},
-			envknob.SetNoLogsNoSupport, "true", Uploads{Allowed: true, EnvOff: true}},
-	} {
+		held      held
+	}
+	var rows []row
+	for _, inherited := range []string{unset, "false", "true", "1"} {
+		envOff := inherited == "true" || inherited == "1"
+		allowedHeld := heldByLatch
+		if envOff {
+			allowedHeld = heldByEnv
+		}
+		label := strings.ReplaceAll(inherited, unset, "unset")
+		rows = append(rows,
+			row{"no then yes, inherited " + label, inherited, []bool{false, true}, nil, true,
+				Uploads{Allowed: true, EnvOff: envOff, LatchedOff: true}, allowedHeld},
+			row{"yes, no, then yes, inherited " + label, inherited, []bool{true, false, true}, nil, true,
+				Uploads{Allowed: true, EnvOff: envOff, LatchedOff: true}, allowedHeld},
+			row{"no then no, inherited " + label, inherited, []bool{false, false}, nil, true,
+				Uploads{EnvOff: envOff}, heldByConfig},
+		)
+	}
+	rows = append(rows,
+		row{"yes then yes, inherited unset", unset, []bool{true, true}, nil, false, Uploads{Allowed: true}, heldByNothing},
+		row{"yes then yes, inherited true", "true", []bool{true, true}, nil, true,
+			Uploads{Allowed: true, EnvOff: true}, heldByEnv},
+		row{"upstream's setter, then a node with the key", unset, []bool{true, true}, envknob.SetNoLogsNoSupport, true,
+			Uploads{Allowed: true, OtherOff: true}, heldByOther},
+		row{"upstream's setter, then a node without the key and one with it", unset, []bool{true, false, true},
+			envknob.SetNoLogsNoSupport, true, Uploads{Allowed: true, LatchedOff: true}, heldByLatch},
+		row{"a false set in the process after the policy's true", unset, []bool{false, true},
+			func() { _ = os.Setenv(NoLogsEnv, "false") }, false, Uploads{Allowed: true}, heldByNothing},
+	)
+	for _, c := range rows {
 		t.Run(c.name, func(t *testing.T) {
 			setInherited(t, c.inherited)
 			var last *Server
-			var seen string
+			var off bool
+			var startErr error
 			for i, allow := range c.allows {
 				if i == 1 && c.between != nil {
 					c.between()
 				}
+				reached := false
 				s, err := NewServer(Config{
 					Logger: silentLogger(), StateDir: filepath.Join(t.TempDir(), "tailscale"),
 					UploadDiagnosticLogs: allow,
 					BeforeStart: func(*tsnet.Server) error {
-						seen = envNow()
-						return errors.New("stopped before the upstream start")
+						reached, off = true, readsOff(t, envNow())
+						return nil
 					},
 				})
 				if err != nil {
 					t.Fatalf("node %d: NewServer: %v", i+1, err)
 				}
-				s.newNode = func(*tsnet.Server) node { return &fakeNode{} }
-				seen = "\x00not reached"
-				if err := s.Start(context.Background()); err == nil {
-					t.Fatalf("node %d: a start BeforeStart stopped succeeded", i+1)
+				s.newNode = func(*tsnet.Server) node {
+					return &fakeNode{up: func(context.Context) (*ipnstate.Status, error) {
+						return nil, fmt.Errorf("tsnet.Up: backend: %s", upstreamRefusal)
+					}}
 				}
+				startErr = s.Start(context.Background())
 				_ = s.Close()
+				if !reached {
+					t.Fatalf("node %d: the start ended before its upstream start", i+1)
+				}
 				last = s
 			}
-			if seen != c.want {
-				t.Errorf("the last node's upstream start would see %s=%q, want %q", NoLogsEnv,
-					strings.ReplaceAll(seen, unset, "unset"), strings.ReplaceAll(c.want, unset, "unset"))
+			if off != c.off {
+				t.Errorf("the last node's upstream start reads the uploads off: %v, want %v", off, c.off)
 			}
-			if last.uploads != c.uploads {
-				t.Errorf("the last node's policy kept %+v, want %+v", last.uploads, c.uploads)
+			got := last.Uploads()
+			if got != c.uploads {
+				t.Errorf("the last node's policy status is %+v, want %+v", got, c.uploads)
 			}
+			if got.Off() != (c.held != heldByNothing) {
+				t.Errorf("Off() = %v for %+v", got.Off(), got)
+			}
+			var refused *LogsRequiredError
+			if !errors.As(startErr, &refused) {
+				t.Fatalf("the last node's start = %v, want the tailnet's refusal in the bridge's words", startErr)
+			}
+			mustSayWhatHoldsTheUploadsOff(t, got.HeldOff(), refused.Error(), c.held, c.uploads.EnvOff)
 		})
+	}
+}
+
+// mustSayWhatHoldsTheUploadsOff fails the test unless status (the policy's
+// status, which the console's tile shows) and words (a tailnet's refusal) say
+// what holds the uploads off, each reason in its own words, and the advice is
+// a new launch of the bridge, never a restart of serve in its process.
+func mustSayWhatHoldsTheUploadsOff(t *testing.T, status, words string, h held, envOff bool) {
+	t.Helper()
+	mustSayTheRefusal(t, words, envOff)
+	switch h {
+	case heldByNothing, heldByConfig:
+		if status != "" {
+			t.Errorf("the status says the uploads are held off where only the config decides: %q", status)
+		}
+	}
+	switch h {
+	case heldByNothing:
+		if !strings.Contains(words, "tailscale.uploadDiagnosticLogs is true") || !strings.Contains(words, "after the node started") {
+			t.Errorf("the refusal of a node nothing held off does not say the uploads were turned off after it started: %q", words)
+		}
+	case heldByConfig:
+		if !strings.Contains(words, "set tailscale.uploadDiagnosticLogs: true") {
+			t.Errorf("the refusal of a node without the key does not say to set it: %q", words)
+		}
+	case heldByEnv:
+		for _, want := range []string{NoLogsEnv + "=true", "the environment the bridge was launched with", "launch it again"} {
+			if !strings.Contains(status, want) {
+				t.Errorf("the status does not say %q: %q", want, status)
+			}
+		}
+	case heldByLatch:
+		for _, want := range []string{"this process turned", "until it exits", "next launch", "launch it again"} {
+			if !strings.Contains(status, want) {
+				t.Errorf("the status does not say %q: %q", want, status)
+			}
+		}
+	case heldByOther:
+		for _, want := range []string{"something in this process turned", "may turn them back on", "launch it again"} {
+			if !strings.Contains(status, want) {
+				t.Errorf("the status does not say %q: %q", want, status)
+			}
+		}
+		if strings.Contains(status, "next launch") {
+			t.Errorf("the status promises the next launch for uploads something else in the process turned off: %q", status)
+		}
+	}
+	if h == heldByLatch || h == heldByOther {
+		if strings.Contains(status, NoLogsEnv) {
+			t.Errorf("the status tells the operator to remove a variable the launch environment did not hold: %q", status)
+		}
+	}
+	if h == heldByEnv || h == heldByLatch || h == heldByOther {
+		if !strings.Contains(words, status) {
+			t.Errorf("the refusal does not say what the status says.\nstatus: %q\nrefusal: %q", status, words)
+		}
 	}
 }
 
@@ -265,15 +384,19 @@ func TestARefusedStartSaysWhatTheTailnetRequires(t *testing.T) {
 
 // mustSayTheRefusal fails the test unless words are the bridge's refusal:
 // the config's switch named, the inherited variable named exactly where it
-// holds the uploads off, what the switch costs, and none of upstream's
-// tailscaled advice.
+// holds the uploads off, a new launch of the bridge as what makes a change
+// apply (never a restart of serve, which the menu makes in this process),
+// what the switch costs, and none of upstream's tailscaled advice.
 func mustSayTheRefusal(t *testing.T, words string, envNamed bool) {
 	t.Helper()
-	for _, want := range []string{"tailscale.uploadDiagnosticLogs", "restart", "uploads Tailscale's diagnostic logs",
-		"never turns the uploads on itself"} {
+	for _, want := range []string{"tailscale.uploadDiagnosticLogs", "launch it again", "restart its service",
+		"uploads Tailscale's diagnostic logs", "never turns the uploads on itself"} {
 		if !strings.Contains(words, want) {
 			t.Errorf("the refusal does not say %q: %q", want, words)
 		}
+	}
+	if strings.Contains(words, "restart the bridge") {
+		t.Errorf("the refusal advises a restart of the bridge, which the menu's Start now makes in this process: %q", words)
 	}
 	if named := strings.Contains(words, NoLogsEnv); named != envNamed {
 		t.Errorf("the refusal names %s: %v, want %v: %q", NoLogsEnv, named, envNamed, words)

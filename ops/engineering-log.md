@@ -89378,12 +89378,14 @@ README, the README, the release notes, round 1's entry corrected). The rules cha
 
 ### Red first and the controls
 
-With a names-only shim (`ForgetUploadPolicyForTest` doing nothing, the policy as round 1 left it):
-`TestALaterNodeInTheSameProcessReadsTheInheritedValue` red on five rows (a consent given after a node without one; an
+With a names-only shim (`ForgetUploadPolicyForTest` doing nothing, the policy as round 1 left it): internal/tsnet's
+later-node table (named for the hand-back it pinned; round 3 rewrote it for the latch as
+`TestOnceThisProcessTurnsTheUploadsOffTheyStayOff`) red on five rows (a consent given after a node without one; an
 inherited false, and an inherited 1, with a consent given after; no consent twice; no consent, a consent, no consent),
 green on the four that pin what must not change (an inherited true and a consent after, a consent withdrawn, a false
-set in the process after the policy's true, a true upstream set itself); `TestAServeRunAgainInTheSameProcessReadsTheInheritedValue`
-red on its two consent rows (unset and false inherited), green on the inherited true and the no-consent rows. Logs:
+set in the process after the policy's true, a true upstream set itself); cmd/bridge's serve run twice (round 3's
+`TestAServeRunAgainInTheSameProcessKeepsTheUploadsOff`) red on its two consent rows (unset and false inherited), green
+on the inherited true and the no-consent rows. Logs:
 `.tmp/_b749/r2-red-tsnet.log`, `.tmp/_b749/r2-red-cmd.log`. Controls, each predicted in
 `.tmp/_b749/controls2.predictions.txt` before it ran, the files put back from memory and the tree found equal to HEAD;
 the run with no mutation green:

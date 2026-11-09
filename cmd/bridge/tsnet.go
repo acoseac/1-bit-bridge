@@ -281,12 +281,15 @@ func (s tailscaleAdminSource) RefreshNow(ctx context.Context) admin.TailscaleSta
 // tsnetStatusSource is what the admin tile reads from the embedded node:
 // a tsnetNode, narrowed to its reads. LastStartError and LogsRequired are
 // how a tailnet that requires the logs this node does not upload reaches
-// the tile, after a start it refused and while the node runs.
+// the tile, after a start it refused and while the node runs; Uploads is
+// the upload policy's status, which the tile shows whatever the tailnet
+// says.
 type tsnetStatusSource interface {
 	Status(context.Context) (*ipnstate.Status, error)
 	CertDomains() []string
 	LastStartError() error
 	LogsRequired(*ipnstate.Status) error
+	Uploads() tsnet.Uploads
 }
 
 // tsnetAdminStatus translates the tsnet Server's live tailnet view
@@ -300,6 +303,12 @@ type tsnetStatusSource interface {
 // LastError: after a start it refused, when there is no node to ask for a
 // status, and while the node runs, from its status's health, beside the
 // backend state (Stopped) the status reports.
+//
+// What holds the node's diagnostic-log uploads off where the config allows
+// them (tsnet.Uploads.HeldOff: the launch environment, this process
+// earlier, or something else in it) is said in UploadsHeldOff, a line of
+// its own, for a node the tailnet accepted as for one it refused, so a
+// running node's badge, backend state and endpoints stay as they are.
 func tsnetAdminStatus(ctx context.Context, s tsnetStatusSource) admin.TailscaleStatus {
 	out := admin.TailscaleStatus{
 		// CLIAvailable lights the "I can talk to tailscale" indicator
@@ -307,6 +316,10 @@ func tsnetAdminStatus(ctx context.Context, s tsnetStatusSource) admin.TailscaleS
 		// true once Start has succeeded — we don't shell out so
 		// there's no CLI to "find".
 		CLIAvailable: true,
+	}
+	if held := s.Uploads().HeldOff(); held != "" {
+		out.UploadsHeldOff = "Tailscale's diagnostic log uploads are off, although tailscale.uploadDiagnosticLogs " +
+			"is true: " + held
 	}
 	var refused *tsnet.LogsRequiredError
 	if errors.As(s.LastStartError(), &refused) {

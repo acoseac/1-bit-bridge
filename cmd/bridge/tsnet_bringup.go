@@ -16,6 +16,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/ctxerr"
 	"github.com/acoseac/1-bit-bridge/internal/handshakelog"
 	"github.com/acoseac/1-bit-bridge/internal/metrics"
+	"github.com/acoseac/1-bit-bridge/internal/tsnet"
 	"github.com/quic-go/quic-go/http3"
 	"tailscale.com/ipn/ipnstate"
 )
@@ -29,9 +30,11 @@ type tsnetNode interface {
 	Close() error
 	Status(context.Context) (*ipnstate.Status, error)
 	CertDomains() []string
-	// The admin tile's reads of a tailnet's refusal (tsnetStatusSource).
+	// The admin tile's reads of a tailnet's refusal and of the upload
+	// policy's status (tsnetStatusSource).
 	LastStartError() error
 	LogsRequired(*ipnstate.Status) error
+	Uploads() tsnet.Uploads
 	ListenTLS(addr string) (net.Listener, error)
 	ListenPacket(network, addr string) (net.PacketConn, error)
 	HTTP3TLSConfig() *tls.Config

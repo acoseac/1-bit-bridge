@@ -182,11 +182,13 @@ type Config struct {
 	// UploadDiagnosticLogs is tailscale.uploadDiagnosticLogs: whether the
 	// node may upload Tailscale's diagnostic logs. NewServer applies it to
 	// the process before the node is built (applyUploadPolicy): false sets
-	// NoLogsEnv true, which keeps the uploads, and the flow logs, off; true
-	// leaves the inherited environment as it is, handing the inherited value
-	// back where an earlier node of this process set it. Upstream reads the
-	// variable as the node starts and the logtail transport is chosen then,
-	// so a change takes a restart.
+	// NoLogsEnv true, which keeps the uploads, and the flow logs, off, and
+	// the process keeps it set until it exits; true leaves the environment
+	// as it is, so a node built after one without the key starts with the
+	// uploads off all the same, and says why (Server.Uploads). Upstream
+	// reads the variable as the node starts and the logtail transport is
+	// chosen then, so a change takes a new launch of the bridge's process:
+	// the menu's "Start now" runs serve again in its own.
 	UploadDiagnosticLogs bool
 	// BeforeStart, when set, runs on the upstream server startUnlocked
 	// built, just before its Start, and an error from it ends the start
@@ -306,7 +308,7 @@ func (s *Server) Start(ctx context.Context) error {
 		// refuses it here: in the bridge's words, which say what to
 		// change, never upstream's advice for tailscaled's command line.
 		if isLogsRequired(err.Error()) {
-			err = &LogsRequiredError{Uploads: s.uploads, err: err}
+			err = &LogsRequiredError{Uploads: s.Uploads(), err: err}
 		}
 		s.lastStartErr = err
 		return err

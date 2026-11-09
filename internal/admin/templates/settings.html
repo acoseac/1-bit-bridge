@@ -649,7 +649,10 @@
         <small class="hint">
           In <code>tsnet</code> mode the bridge's embedded Tailscale node sends Tailscale its diagnostic logs only while
           this is on. Off, the default, it sends none. A tailnet that requires those logs refuses the node until this is
-          on. The node reads it when it starts, so a change takes effect after a restart.
+          on. A change takes effect when the bridge's process restarts: once the bridge has run its node with this off,
+          the uploads stay off until that process exits, so quit the bridge, its menu included, and launch it again, or
+          restart its service; stopping it and choosing Start now in the menu runs it in the same process. A node already
+          running when this is turned off keeps uploading until it stops.
         </small>
       </div>
 
@@ -725,6 +728,8 @@
           <dd id="tailscale-node">—</dd>
           <dt>Cert</dt>
           <dd id="tailscale-cert">—</dd>
+          <dt id="tailscale-uploads-label" hidden>Diagnostic logs</dt>
+          <dd id="tailscale-uploads" hidden></dd>
         </dl>
         <p class="panel-note" id="tailscale-note">Tailscale provisions a Let's Encrypt certificate for this bridge's MagicDNS hostname. iOS clients reach the bridge over Tailscale at <code id="tailscale-magicdns-url">—</code>.</p>
       </div>

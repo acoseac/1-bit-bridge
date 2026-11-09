@@ -1201,6 +1201,8 @@ function renderTailscaleTile(s) {
   const nodeEl = document.getElementById("tailscale-node");
   const certEl = document.getElementById("tailscale-cert");
   const noteEl = document.getElementById("tailscale-magicdns-url");
+  const uploadsEl = document.getElementById("tailscale-uploads");
+  const uploadsLabel = document.getElementById("tailscale-uploads-label");
 
   // Status badge — pick state machine first cell that matches.
   // Disabled-mode sentinel takes precedence over the generic "Error"
@@ -1260,6 +1262,15 @@ function renderTailscaleTile(s) {
       const badge = certExpiryBadge(left);
       certEl.innerHTML = `${badge}<span${tooltip}>${certValidityText(left, when)} (${when.toLocaleDateString()})</span>`;
     }
+  }
+
+  // What holds the embedded node's diagnostic-log uploads off where the
+  // setting allows them (backlog B749), in a row of its own, so a node the
+  // tailnet accepted keeps its badge. Text, never HTML.
+  if (uploadsEl && uploadsLabel) {
+    uploadsEl.textContent = s.uploadsHeldOff || "";
+    uploadsEl.hidden = !s.uploadsHeldOff;
+    uploadsLabel.hidden = !s.uploadsHeldOff;
   }
 
   if (noteEl) {

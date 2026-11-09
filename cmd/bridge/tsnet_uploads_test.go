@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/tsnet"
+	"tailscale.com/envknob"
 	"tailscale.com/ipn"
 	"tailscale.com/ipn/ipnstate"
 	"tailscale.com/ipn/store"
@@ -313,32 +315,60 @@ func serveOnceUntilItsTsnetStart(t *testing.T, cfgPath string, seen <-chan tsnet
 	return got
 }
 
-// TestAServeRunAgainInTheSameProcessReadsTheInheritedValue: the menu's "Start
+// readsOff is a TS_NO_LOGS_NO_SUPPORT value as Tailscale's code reads it
+// (envknob.NoLogsNoSupport: strconv.ParseBool, empty or unset false).
+func readsOff(t *testing.T, v string) bool {
+	t.Helper()
+	if v == noLogsUnset || v == "" {
+		return false
+	}
+	off, err := strconv.ParseBool(v)
+	if err != nil {
+		t.Fatalf("TS_NO_LOGS_NO_SUPPORT=%q does not read as Tailscale reads it: %v", v, err)
+	}
+	return off
+}
+
+// TestAServeRunAgainInTheSameProcessKeepsTheUploadsOff: the menu's "Start
 // now" (and bridge init's start, before it) runs serve in its own process,
-// and runs it again after a stop. The second serve's node reads
-// TS_NO_LOGS_NO_SUPPORT as the process inherited it, not as the first serve's
-// policy set it, so a consent saved between the two (the console's switch,
-// which takes a restart) reaches it, and an inherited true still holds the
-// uploads off.
-func TestAServeRunAgainInTheSameProcessReadsTheInheritedValue(t *testing.T) {
-	for _, c := range []struct{ inherited, key, want string }{
-		{noLogsUnset, "true", noLogsUnset},
-		{"false", "true", "false"},
-		{"true", "true", "true"},
-		{noLogsUnset, "", "true"},
-	} {
-		t.Run(fmt.Sprintf("inherited=%q then key=%q", strings.ReplaceAll(c.inherited, noLogsUnset, "unset"), c.key), func(t *testing.T) {
+// and runs it again after a stop. Once a serve in the process has built its
+// node without tailscale.uploadDiagnosticLogs, every later serve's node
+// starts with the uploads off, whatever its config says, until the process
+// exits: a consent saved between the two (the console's switch) applies at
+// the bridge's next launch. Each inherited value runs through each sequence,
+// and the variable is read as Tailscale reads it.
+func TestAServeRunAgainInTheSameProcessKeepsTheUploadsOff(t *testing.T) {
+	type row struct {
+		inherited string
+		keys      []string // each serve's tailscale.uploadDiagnosticLogs, "" for none
+		off       bool     // the last serve's upstream start reads the uploads off
+	}
+	var rows []row
+	for _, inherited := range []string{noLogsUnset, "false", "true", "1"} {
+		rows = append(rows,
+			row{inherited, []string{"", "true"}, true},
+			row{inherited, []string{"true", "", "true"}, true},
+			row{inherited, []string{"", ""}, true},
+		)
+	}
+	rows = append(rows,
+		row{noLogsUnset, []string{"true", "true"}, false},
+		row{"true", []string{"true", "true"}, true},
+	)
+	for _, c := range rows {
+		name := fmt.Sprintf("inherited=%q keys=%q", strings.ReplaceAll(c.inherited, noLogsUnset, "unset"), c.keys)
+		t.Run(name, func(t *testing.T) {
 			inheritNoLogsEnv(t, c.inherited)
 			seen := stopTsnetStarts(t, nil)
 			dir := t.TempDir()
-			cfgPath, _ := tsnetTestConfig{mode: "tsnet"}.write(t, dir)
-			if got := serveOnceUntilItsTsnetStart(t, cfgPath, seen); got.env != "true" {
-				t.Fatalf("the first serve's upstream start would see TS_NO_LOGS_NO_SUPPORT=%q, want true", got.env)
+			var got tsnetStartSeen
+			for _, key := range c.keys {
+				cfgPath, _ := tsnetTestConfig{mode: "tsnet", key: key}.write(t, dir)
+				got = serveOnceUntilItsTsnetStart(t, cfgPath, seen)
 			}
-			tsnetTestConfig{mode: "tsnet", key: c.key}.write(t, dir)
-			if got := serveOnceUntilItsTsnetStart(t, cfgPath, seen); got.env != c.want {
-				t.Errorf("the second serve's upstream start would see TS_NO_LOGS_NO_SUPPORT=%q, want %q",
-					strings.ReplaceAll(got.env, noLogsUnset, "unset"), strings.ReplaceAll(c.want, noLogsUnset, "unset"))
+			if off := readsOff(t, got.env); off != c.off {
+				t.Errorf("the last serve's upstream start reads the uploads off: %v (TS_NO_LOGS_NO_SUPPORT=%q), want %v",
+					off, strings.ReplaceAll(got.env, noLogsUnset, "unset"), c.off)
 			}
 		})
 	}
@@ -630,6 +660,135 @@ func mustSayWhatTheTailnetRequires(t *testing.T, lastError string, envNamed bool
 	}
 	if strings.Contains(lastError, "--no-logs-no-support") || strings.Contains(lastError, "called before Start") {
 		t.Errorf("the tile's LastError is not the bridge's words: %q", lastError)
+	}
+	if !strings.Contains(lastError, "launch it again") || strings.Contains(lastError, "restart the bridge") {
+		t.Errorf("the tile's LastError does not make a new launch of the bridge what applies a change: %q", lastError)
+	}
+}
+
+// buildTsnetNode builds the node from cfgPath as the commands do
+// (loadCLIConfig, newTsnetServer), which applies the upload policy, and
+// starts nothing.
+func buildTsnetNode(t *testing.T, cfgPath string) *tsnet.Server {
+	t.Helper()
+	cfg, _, err := loadCLIConfig(cfgPath)
+	if err != nil {
+		t.Fatalf("load %s: %v", cfgPath, err)
+	}
+	srv, err := newTsnetServer(cfg, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("newTsnetServer: %v", err)
+	}
+	t.Cleanup(func() { _ = srv.Close() })
+	return srv
+}
+
+// TestTheTileSaysWhatHoldsTheUploadsOff: the console's tile reads the upload
+// policy's status (tsnetStatusSource.Uploads) and says, in a line of its own
+// (UploadsHeldOff), what holds the uploads off where the config allows them:
+// the environment the bridge was launched with, this process earlier, or
+// something else in it. It says it for a node the tailnet accepted, whose
+// backend state and endpoints it shows as they are, and for a start the
+// tailnet refused, whose LastError says it too; where the config does not
+// allow the uploads, or nothing holds them off, it says nothing.
+func TestTheTileSaysWhatHoldsTheUploadsOff(t *testing.T) {
+	for _, c := range []struct {
+		name      string
+		inherited string
+		keys      []string // each node's tailscale.uploadDiagnosticLogs, "" for none, in order
+		between   func()   // after the first node, what else in the process does
+		says      []string // what the line says; nothing where it is empty
+		envNamed  bool
+	}{
+		{"the launch environment", "true", []string{"true"}, nil,
+			[]string{tsnet.NoLogsEnv + "=true", "the environment the bridge was launched with", "launch it again"}, true},
+		{"this process, earlier", noLogsUnset, []string{"", "true"}, nil,
+			[]string{"this process turned", "next launch", "launch it again"}, false},
+		{"something else in this process", noLogsUnset, []string{"true", "true"}, envknob.SetNoLogsNoSupport,
+			[]string{"something in this process turned", "may turn them back on", "launch it again"}, false},
+		{"the setting off", noLogsUnset, []string{""}, nil, nil, false},
+		{"nothing holding them off", noLogsUnset, []string{"true"}, nil, nil, false},
+	} {
+		build := func(t *testing.T, last func(t *testing.T, cfgPath string)) {
+			t.Helper()
+			dir := t.TempDir()
+			for i, key := range c.keys {
+				if i == 1 && c.between != nil {
+					c.between()
+				}
+				cfgPath, _ := tsnetTestConfig{mode: "tsnet", key: key}.write(t, dir)
+				if i < len(c.keys)-1 {
+					buildTsnetNode(t, cfgPath)
+					continue
+				}
+				last(t, cfgPath)
+			}
+		}
+		t.Run(c.name+", a node the tailnet accepted", func(t *testing.T) {
+			inheritNoLogsEnv(t, c.inherited)
+			build(t, func(t *testing.T, cfgPath string) {
+				ip := netip.MustParseAddr("100.64.0.7")
+				tile := tsnetAdminStatus(context.Background(), runningTsnetNode{Server: buildTsnetNode(t, cfgPath), st: &ipnstate.Status{
+					BackendState: "Running",
+					Self:         &ipnstate.PeerStatus{HostName: "1-bit-bridge", DNSName: "1-bit-bridge.example.ts.net.", TailscaleIPs: []netip.Addr{ip}},
+				}})
+				if tile.BackendState != "Running" || tile.NodeName != "1-bit-bridge" ||
+					tile.MagicDNSName != "1-bit-bridge.example.ts.net." || len(tile.TailscaleIPs) != 1 || tile.TailscaleIPs[0] != ip.String() {
+					t.Errorf("the tile changed what the running node reports: %+v", tile)
+				}
+				if tile.LastError != "" {
+					t.Errorf("the tile reports an error for a node the tailnet accepted: %q", tile.LastError)
+				}
+				mustSayWhatHoldsTheUploadsOffInTheTile(t, tile.UploadsHeldOff, c.says, c.envNamed)
+			})
+		})
+		t.Run(c.name+", a refused start", func(t *testing.T) {
+			inheritNoLogsEnv(t, c.inherited)
+			stopTsnetStarts(t, func(*upstreamtsnet.Server) error {
+				return fmt.Errorf("tsnet.Up: backend: %s", upstreamLogsRefusal)
+			})
+			build(t, func(t *testing.T, cfgPath string) {
+				srv, _, err := buildAndStartTsnet(t, cfgPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				tile := tsnetAdminStatus(context.Background(), srv)
+				mustSayWhatTheTailnetRequires(t, tile.LastError, c.envNamed)
+				mustSayWhatHoldsTheUploadsOffInTheTile(t, tile.UploadsHeldOff, c.says, c.envNamed)
+				for _, want := range c.says {
+					if !strings.Contains(tile.LastError, want) {
+						t.Errorf("the refusal in the tile does not say %q: %q", want, tile.LastError)
+					}
+				}
+			})
+		})
+	}
+}
+
+// mustSayWhatHoldsTheUploadsOffInTheTile fails the test unless the tile's
+// line on the uploads says each of says, or nothing where says is empty, and
+// names TS_NO_LOGS_NO_SUPPORT only where the launch environment held it.
+func mustSayWhatHoldsTheUploadsOffInTheTile(t *testing.T, line string, says []string, envNamed bool) {
+	t.Helper()
+	if len(says) == 0 {
+		if line != "" {
+			t.Errorf("the tile says the uploads are held off where nothing holds them against the setting: %q", line)
+		}
+		return
+	}
+	if !strings.Contains(line, "tailscale.uploadDiagnosticLogs") {
+		t.Errorf("the tile's line on the uploads does not name the setting: %q", line)
+	}
+	for _, want := range says {
+		if !strings.Contains(line, want) {
+			t.Errorf("the tile's line on the uploads does not say %q: %q", want, line)
+		}
+	}
+	if named := strings.Contains(line, tsnet.NoLogsEnv); named != envNamed {
+		t.Errorf("the tile's line names %s: %v, want %v: %q", tsnet.NoLogsEnv, named, envNamed, line)
+	}
+	if strings.Contains(line, "restart the bridge") {
+		t.Errorf("the tile's line advises a restart of the bridge, which the menu's Start now makes in this process: %q", line)
 	}
 }
 
