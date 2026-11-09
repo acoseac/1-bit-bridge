@@ -49,29 +49,70 @@ func awaitClean(t *testing.T) {
 	}
 }
 
-// stallMetadata stands a mount whose metadata does not answer in for what a
+// metadataStall stands a mount whose metadata stops answering in for what a
 // verification, a prune and a reader ask of a path (the resolution of its
-// links, the prune's Lstat, the listing, the lock's probe): every call parks
-// until the answer it returns releases them, and puts the seams back.
-func stallMetadata(t *testing.T) (unstall func()) {
+// links, the prune's Lstat, the listing, the lock's probe). Its seams are
+// installed before anything that calls them starts, passing every call to
+// the platform's own; once armed, every call parks until release, and
+// answers an error then; once released, every call is the platform's again.
+// The seams are put back at the test's end, once every hold has ended
+// (awaitClean, which a cleanup registered after the stall runs first).
+type metadataStall struct {
+	armed   atomic.Bool
+	p       *parking
+	restore func()
+}
+
+// stallMetadata installs a stall, not armed.
+func stallMetadata(t *testing.T) *metadataStall {
 	t.Helper()
-	p := newParking()
+	s := &metadataStall{p: newParking()}
 	stalled := errors.New("stalled")
-	restoreMeta := backup.SetMetadataForTest(func(string) (string, error) { p.park(); return "", stalled },
-		func(string) (os.FileInfo, error) { p.park(); return nil, stalled })
-	restoreDir := backup.SetReadDirForTest(func(string) ([]os.DirEntry, error) { p.park(); return nil, stalled })
-	restoreProbe := backup.SetOpenProbeForTest(func(string) (*os.File, error) { p.park(); return nil, stalled })
-	var once sync.Once
-	unstall = func() {
-		once.Do(func() {
-			p.release()
-			restoreProbe()
-			restoreDir()
-			restoreMeta()
-		})
+	restoreMeta := backup.SetMetadataForTest(func(p string) (string, error) {
+		if s.stalls() {
+			return "", stalled
+		}
+		return fsutil.ResolveLinks(p)
+	}, func(p string) (os.FileInfo, error) {
+		if s.stalls() {
+			return nil, stalled
+		}
+		return os.Lstat(p)
+	})
+	restoreDir := backup.SetReadDirForTest(func(p string) ([]os.DirEntry, error) {
+		if s.stalls() {
+			return nil, stalled
+		}
+		return os.ReadDir(p)
+	})
+	restoreProbe := backup.SetOpenProbeForTest(func(p string) (*os.File, error) {
+		if s.stalls() {
+			return nil, stalled
+		}
+		return os.OpenFile(p, os.O_RDWR, 0)
+	})
+	s.restore = func() { restoreProbe(); restoreDir(); restoreMeta() }
+	t.Cleanup(func() { s.restore() })
+	return s
+}
+
+// stalls parks a call while the stall is armed, until release, and reports
+// whether it parked.
+func (s *metadataStall) stalls() bool {
+	if !s.armed.Load() {
+		return false
 	}
-	t.Cleanup(unstall)
-	return unstall
+	s.p.park()
+	return true
+}
+
+// arm makes every call from now on park, until release.
+func (s *metadataStall) arm() { s.armed.Store(true) }
+
+// release lets every parked call answer, and passes every later one on.
+func (s *metadataStall) release() {
+	s.armed.Store(false)
+	s.p.release()
 }
 
 // requireDirectorySync skips a test of a recheck's veto where no directory
@@ -101,13 +142,11 @@ func answersWithin(t *testing.T, bound time.Duration, what string, ask func()) {
 }
 
 // requireRefusedNaming asks a second verification, a prune and the doctor's
-// reading of the backups folder at root, with its metadata stalled, while a
-// hold of the snapshot named holds it given up at the step named: each
-// answers at once, refusing for that hold and naming its snapshot.
+// reading of the backups folder at root, its metadata stalled by the caller,
+// while a hold of the snapshot named holds it given up at the step named:
+// each answers at once, refusing for that hold and naming its snapshot.
 func requireRefusedNaming(t *testing.T, root, second, name, step string) {
 	t.Helper()
-	unstall := stallMetadata(t)
-	defer unstall()
 	answersWithin(t, 2*time.Second, "a second verification", func() {
 		_, err := backup.VerifySnapshot(context.Background(), second, backup.VerifyOptions{BackupsRoot: root})
 		if !errors.Is(err, backup.ErrCheckStillRunning) || err == nil || !strings.Contains(err.Error(), name) {
@@ -135,12 +174,13 @@ func requireRefusedNaming(t *testing.T, root, second, name, step string) {
 // directory's sync), the verdict's write, the prune after it, and the write
 // of INCOMPLETE for a verification its caller stopped before it began
 // (abandonPending), is given up within its bound, counted from the lock, and
-// the folder marked at once, with no filesystem asked: with the metadata path
-// stalled too, a second verification is refused at once naming the snapshot,
-// a prune is skipped for it, and the doctor's reading names it and its step.
-// Once the hang ends, all it held is let go, no prune ran, and where the
-// veto's sync hung, no check ran either. Red on the round before, where only
-// the check was ever given up or marked.
+// the folder marked at once, with no filesystem asked: the metadata path
+// stalls too as soon as the step hangs, before the give-up, and the
+// verification still answers in its bound, a second verification is refused
+// at once naming the snapshot, a prune is skipped for it, and the doctor's
+// reading names it and its step. Once the hang ends, all it held is let go,
+// no prune ran, and where the veto's sync hung, no check ran either. Red on
+// the round before, where only the check was ever given up or marked.
 func TestEveryStepUnderTheLockIsBoundedAndMarked(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -188,9 +228,11 @@ func TestEveryStepUnderTheLockIsBoundedAndMarked(t *testing.T) {
 			}
 			checks := checksRun(t)
 			before := checks.Load()
-			// Registered last, so run first: the hang let go and the hold's end
-			// joined before any seam is put back.
+			stall := stallMetadata(t)
+			// Registered last, so run first: the stall and the hang let go and
+			// the hold's end joined before any seam is put back.
 			t.Cleanup(func() {
+				stall.release()
 				p.release()
 				awaitClean(t)
 			})
@@ -214,6 +256,8 @@ func TestEveryStepUnderTheLockIsBoundedAndMarked(t *testing.T) {
 				}()
 			}
 			<-p.entered
+			// The mount stops answering its metadata too, before the give-up.
+			stall.arm()
 			res := requireReturnedWithin(t, done, started, 300*time.Millisecond+backup.StopWriteBound+3*time.Second, "the verification whose step hangs")
 			if tc.name == "abandonPending's write" {
 				if !errors.Is(res.VerifyErr, context.Canceled) {
@@ -232,6 +276,7 @@ func TestEveryStepUnderTheLockIsBoundedAndMarked(t *testing.T) {
 				}
 			}
 			requireRefusedNaming(t, root, older, name, tc.step)
+			stall.release()
 			p.release()
 			awaitClean(t)
 			if !pathExists(t, oldest) {
@@ -390,6 +435,62 @@ func TestAVetoThatStoodBeforeAVerificationStaysOverTheVERIFIEDItCarries(t *testi
 				t.Error("the prune let the older verified snapshot go for one whose VERIFIED is in doubt")
 			}
 		})
+	}
+}
+
+// TestARecheckGivenUpLeavesTheVetoItMade: a recheck of a verified snapshot
+// whose check is given up (backlog B653's fourth round: once a step is given
+// up, nothing is written but its INCOMPLETE) leaves the veto it put in place
+// before its check, though none stood before it began and the record, whose
+// VERIFIED the merge keeps, is as it was: no check that finished has cleared
+// it, so no reader reads the snapshot verified and the prune keeps the older
+// verified one, until a check of it finishes, which lets the veto go.
+func TestARecheckGivenUpLeavesTheVetoItMade(t *testing.T) {
+	requireDirectorySync(t)
+	src := storeWithTracks(t, 20)
+	anchor := verifiedSnapshot(t, src)
+	time.Sleep(1100 * time.Millisecond)
+	dir := verifiedSnapshot(t, src)
+	vetoes := func() bool {
+		return pathExists(t, filepath.Join(dir, backup.VetoFileName)) || pathExists(t, backup.RootVetoPath(dir))
+	}
+	if vetoes() {
+		t.Fatal("a veto stands before the recheck: the test did not reach the case")
+	}
+	restoreDeadline := backup.SetVerifyDeadlineForTest(300 * time.Millisecond)
+	t.Cleanup(restoreDeadline)
+	p := newParking()
+	t.Cleanup(backup.SetOnDatabaseOpenForTest(p.park))
+	t.Cleanup(func() {
+		p.release()
+		awaitClean(t)
+	})
+	res, err := backup.VerifySnapshot(context.Background(), dir, backup.VerifyOptions{})
+	if !errors.Is(err, backup.ErrCheckGivenUp) {
+		t.Fatalf("the recheck answered %v; want it given up", err)
+	}
+	if res.Recorded {
+		t.Error("the recheck given up recorded what it was given up with, over the VERIFIED its record keeps")
+	}
+	p.release()
+	awaitClean(t)
+	if !vetoes() {
+		t.Error("the veto the recheck given up made was removed")
+	}
+	if got := readersVerified(t, dir); len(got) > 0 {
+		t.Errorf("after the recheck given up, %s", strings.Join(got, "; "))
+	}
+	if _, err := backup.Prune(filepath.Dir(dir), 1); err != nil {
+		t.Fatal(err)
+	}
+	if !pathExists(t, anchor) {
+		t.Error("the prune let the older verified snapshot go for one whose recheck did not finish")
+	}
+	// A check that finishes lets the veto go.
+	restoreDeadline()
+	requireVerdict(t, "the check that finished", verifyT(t, dir, backup.CheckQuick).Record, backup.StateVerified, "", backup.StateVerified, "")
+	if vetoes() {
+		t.Error("the check that finished left the veto")
 	}
 }
 
