@@ -90,6 +90,20 @@ func stopTsnetStarts(t *testing.T, also func(*upstreamtsnet.Server) error) <-cha
 	return seen
 }
 
+// startSeen is what the node's upstream start would have seen, once the path
+// that started it has returned (its start has ended by then, so the hook has
+// run if it was reached), and fails the test where no start reached it.
+func startSeen(t *testing.T, seen <-chan tsnetStartSeen, what string) tsnetStartSeen {
+	t.Helper()
+	select {
+	case s := <-seen:
+		return s
+	default:
+		t.Fatalf("%s returned without reaching its node's upstream start", what)
+		return tsnetStartSeen{}
+	}
+}
+
 // tsnetTestConfig is a bridge.yaml in a directory of its own: mode is
 // tailscale.mode, key tailscale.uploadDiagnosticLogs as written ("" for no
 // key), hostname tailscale.hostname ("" for none) and library libraryName.
@@ -186,7 +200,7 @@ func TestTheUploadPolicyByKeyAndInheritedValue(t *testing.T) {
 				if key == "true" {
 					want = inherited // left as inherited
 				}
-				if got := (<-seen).env; got != want {
+				if got := startSeen(t, seen, "the node's Start").env; got != want {
 					t.Errorf("the upstream start would see TS_NO_LOGS_NO_SUPPORT=%q, want %q",
 						strings.ReplaceAll(got, noLogsUnset, "unset"), strings.ReplaceAll(want, noLogsUnset, "unset"))
 				}
@@ -233,14 +247,14 @@ func TestEveryPathAppliesTheUploadPolicyBeforeTheUpstreamStart(t *testing.T) {
 			if code := tsnetCmd(context.Background(), []string{"auth", "--config", cfgPath}, strings.NewReader(""), &stdout, &stderr); code != 1 {
 				t.Fatalf("bridge tsnet auth = %d, want 1 (the start the hook stopped); stderr=%s", code, stderr.String())
 			}
-			return <-seen
+			return startSeen(t, seen, "bridge tsnet auth (stderr: "+stderr.String()+")")
 		},
 		"tsnet status": func(t *testing.T, cfgPath string, seen <-chan tsnetStartSeen) tsnetStartSeen {
 			var stdout, stderr bytes.Buffer
 			if code := tsnetCmd(context.Background(), []string{"status", "--config", cfgPath}, strings.NewReader(""), &stdout, &stderr); code != 1 {
 				t.Fatalf("bridge tsnet status = %d, want 1 (the start the hook stopped); stderr=%s", code, stderr.String())
 			}
-			return <-seen
+			return startSeen(t, seen, "bridge tsnet status (stderr: "+stderr.String()+")")
 		},
 	}
 	for name, run := range paths {
@@ -388,7 +402,7 @@ func TestTheNodesNameOnEveryStart(t *testing.T) {
 		if err != nil {
 			t.Fatalf("newTsnetServer: %v", err)
 		}
-		return (<-seen).hostname, stderr
+		return startSeen(t, seen, "the node's Start").hostname, stderr
 	}
 
 	t.Run("an explicit hostname", func(t *testing.T) {
@@ -424,7 +438,7 @@ func TestTheNodesNameOnEveryStart(t *testing.T) {
 		if _, _, err := buildAndStartTsnet(t, cfgPath); err != nil {
 			t.Fatal(err)
 		}
-		if first := (<-seen).hostname; first != tsnet.DefaultHostname {
+		if first := startSeen(t, seen, "the first start").hostname; first != tsnet.DefaultHostname {
 			t.Fatalf("the first start registers as %q, want %q", first, tsnet.DefaultHostname)
 		}
 		if _, err := os.Stat(filepath.Join(dataDir, "tailscale", "tailscaled.state")); err != nil {
@@ -501,7 +515,7 @@ func TestTheTileSaysWhatATailnetThatRequiresLogsNeeds(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			atStart := (<-seen).env
+			atStart := startSeen(t, seen, "the refused start").env
 			tile := tsnetAdminStatus(context.Background(), srv)
 			mustSayWhatTheTailnetRequires(t, tile.LastError, c.envNamed)
 			if got := noLogsEnvNow(); got != atStart {

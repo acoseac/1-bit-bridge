@@ -102,8 +102,13 @@ func TestTheUploadPolicyByTheConfigAndTheInheritedValue(t *testing.T) {
 			if err := s.Start(context.Background()); err == nil {
 				t.Fatal("a start BeforeStart stopped succeeded")
 			}
-			if got := <-seen; got != c.want {
-				t.Errorf("the upstream start would see %s=%q, want %q", NoLogsEnv, got, c.want)
+			select {
+			case got := <-seen:
+				if got != c.want {
+					t.Errorf("the upstream start would see %s=%q, want %q", NoLogsEnv, got, c.want)
+				}
+			default:
+				t.Error("the start ended without reaching the upstream start")
 			}
 		})
 	}
