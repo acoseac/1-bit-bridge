@@ -271,6 +271,52 @@ func TestADamagedDatabasePageFails(t *testing.T) {
 	}
 }
 
+// execSQL runs stmts over the database at path on one connection of its own.
+func execSQL(t *testing.T, path string, stmts ...string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", dsn.File(path, ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	for _, s := range stmts {
+		if _, err := db.Exec(s); err != nil {
+			t.Fatalf("%s: %v", s, err)
+		}
+	}
+}
+
+// TestACheckThatAnswersAnythingButOkFails: SQLite's check passes a database
+// only when it answers exactly one "ok". A NULL in a NOT NULL column, written
+// while the schema said otherwise, reads with no error, and quick_check (and
+// integrity_check) answer it as a row ("NULL value in scan_state.v"), never
+// as an error: FAILED, quick-check or integrity-check, at either level.
+func TestACheckThatAnswersAnythingButOkFails(t *testing.T) {
+	for _, level := range []backup.CheckLevel{backup.CheckQuick, backup.CheckFull} {
+		t.Run(string(level), func(t *testing.T) {
+			src := storeWithTracks(t, 10)
+			dir, err := backup.Snapshot(t.Context(), src)
+			if err != nil {
+				t.Fatal(err)
+			}
+			db := filepath.Join(dir, backup.ManifestDBFileName)
+			execSQL(t, db, "PRAGMA writable_schema=ON",
+				"UPDATE sqlite_master SET sql = replace(sql, 'v TEXT NOT NULL', 'v TEXT') WHERE name = 'scan_state'")
+			execSQL(t, db, "INSERT INTO scan_state (k, v) VALUES ('b653', NULL)")
+			execSQL(t, db, "PRAGMA writable_schema=ON",
+				"UPDATE sqlite_master SET sql = replace(sql, 'v TEXT', 'v TEXT NOT NULL') WHERE name = 'scan_state'")
+			rebaseline(t, dir, backup.ManifestDBFileName)
+			want := backup.ReasonQuickCheck
+			if level == backup.CheckFull {
+				want = backup.ReasonIntegrityCheck
+			}
+			res := verifyT(t, dir, level)
+			requireVerdict(t, "a NULL where the schema says NOT NULL", res.Record, backup.StateFailed, want, backup.StateVerified, "")
+		})
+	}
+}
+
 // TestAFileWithOneByteChangedFailsTheFilesVerdict is the brief's second
 // half of that red: a file the manifest lists, one byte changed and its size
 // kept, FAILS the files' verdict (hash-mismatch) naming the file, while the
