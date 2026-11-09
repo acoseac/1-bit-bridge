@@ -89442,3 +89442,242 @@ four declared edits (CLAUDE.md 82.1%; config-lifecycle.md 97.9%, after
 `move_entry.py` moved the KeepOwner entry's long form, #1048's, to its History
 file, since the new bullet would have taken the file 46 bytes past its budget),
 and the guard passes there too, a planted name going red.
+
+## 2026-11-09 — B761 PR 1 round 2: off holds for a CLI already running; on never polls at once
+
+Round 2 of #1446 on `feat/b761-update-switch`, worker b761u on legion0
+(go1.27.3, `GOTOOLCHAIN=local`, `GOPROXY=off`), from the PR's head 6614b61b,
+round 1's rules as the orchestrator committed them. The findings were Codex's
+three P2s and the Claude review's Medium, five Lows and two notes it could
+not verify from the diff, with the two reviews of this round's brief binding
+where they differ from it. Commits: the timer's schedule 4f7c24ff; the CLI's
+reread 2e865384; the tests that prove what they claim 3b15a616; the words
+4bf94c69; the generation's own case 95e88b56; and this record. The rules go
+into `config-lifecycle.md` and its History file, `cli-serve.md`,
+`admin-console.md` and `build-ci-tests.md` through `rules-b761-r2.patch`.
+
+### A CLI already running honours a later off
+
+Codex's first P2 and the Claude review's Low: `bridge update` handed its
+updater `cfg.Update.EffectiveCheckEnabled`, a method value over the config it
+loaded as it started, so a command left at its install prompt, or
+downloading, when the console's switch went off read on at its admission and
+at `commit`, and swapped. Serve's registry of admissions does not reach
+another process.
+
+`InstallOptions.RereadSwitch` (nil in serve, whose switch is the live holder)
+is asked as the install begins, after its admission, and first in
+`decideUnderLock`, before `commit`, outside `gateMu`, which is never held
+across a file's read (the Claude review of the brief asked that it be said).
+Its error refuses the install, naming where it was found and that nothing was
+installed. `bridge update` hands it `rereadUpdateSwitch(cfgPath)`: the file it
+resolved as it started, made absolute and never looked for again, since a
+discovery could select another installation (Codex's review of the brief),
+loaded through `config.LoadFile`, the file and the command's own environment
+as at its start. An off is `ErrUpdateChecksOff` naming its source; settings
+that no longer load are a `*settingsRereadError` naming the path and the
+load's error, "Install refused: … The running bridge is unchanged. Fix
+<path>, then run `bridge update` again.", never an off (both reviews of the
+brief: failing open installs past an off, failing closed claims an off nobody
+set). `reportInstallFailure` says the switch's refusal naming what turned
+the checks off, as the start's refusal does, that the running bridge is
+unchanged, and how to turn the checks on: the variable's remedy where the
+variable is the source, since it overrides the file and the console's switch
+(the Claude review of the brief), and the console's switch or the key taken
+out of the file otherwise.
+
+The cases: the updater's
+`TestAnInstallReadsTheSwitchAgainAsItBeginsAndAtItsDecision` (off as it
+begins: nothing asked; off just before its decision, parked at the hold
+before `decideUnderLock`, after its download and its settings check: the
+binary, the backup and the marker untouched, Codex's second point on the
+brief; settings that no longer read at either point: their own error), and
+cmd/bridge's `TestBridgeUpdateReadsTheSwitchAgainOnceItsPromptIsAnswered`
+(the console's off written to the file while the prompt is open) and
+`TestBridgeUpdateRefusesItsInstallWhereTheSettingsNoLongerRead`.
+
+### Switching on never polls at once
+
+Codex's second P2: the old wait's tick and the notification could both be
+ready at the loop's select, which picks at random, and a tick taken there
+checked at once, an auto-install with it. Both reviews of the brief added the
+publication window: the settings save publishes the switch before it calls
+`ChecksSwitched`, so a tick in between reads it on. Stopping and draining the
+old timer could not work: `time.After` cannot be stopped, and the wait is
+`Run`'s local (the Claude review of the brief).
+
+The loop takes a `schedule` at each arming (`arm`, under `gateMu`): the
+switch's answer then and `switchGen`, which every `ChecksSwitched` advances
+under the same lock, in either direction. `admitScheduled` admits a tick only
+where the switch was on at its arming, no transition came since, and it reads
+on now; any other tick fires only the deferred restart. The off transition
+rearms nothing, so a wait armed with the switch on stays the loop's wait
+through the off: only the generation refuses its tick when the switch reads on
+again before the notification. 4f7c24ff's cases armed their old wait while the
+switch was off, which `on` alone refuses, so 95e88b56 adds
+`TestATickArmedBeforeUpdateChecksWentOffAsksNothingOnceTheyAreOnAgain`.
+
+The timer seam (`tickSeam`) gives every wait a channel of its own, buffered 1,
+hands each to the test as the loop arms it, and can hold the loop between an
+arming and its select (`holdNext`), so a test fires an obsolete wait and not
+the current one, and makes the old tick and the notification ready before the
+select (Codex's review of the brief: the round-1 seam's one shared channel
+could not tell them apart). `TestATickArmedWhileUpdateChecksWereOffAsksNothingOnceTheyAreOn`
+parks between the publication and the notification;
+`TestAWakeAndAnOldTickReadyTogetherAskNothing` makes both ready: whichever the
+select takes, nothing is asked, the obsolete wait fired again is read by
+nobody, and the rearmed wait's tick checks.
+
+### The tests prove what they claim
+
+- `TestASwapPastItsDecisionFinishesWhenUpdateChecksGoOff` passed with
+  `commit`'s `delete(u.active, a)` reverted (the Claude review's Low): the
+  swap is file work that reads no context, so a committed install the off
+  transition still marked stopped finished, and `installStopped` returned its
+  nil. It now asks, at the hold before the swap, that the install has left the
+  admissions the off transition stops, and a second case fails the swap after
+  the off (`InstallOptions.swap`, a test's seam, nil in production): the
+  swap's own error answers, never relabelled as the switch's stop over an
+  armed marker. Red with the boundary reverted: control R9.
+- The rollbacks the docs say the switch never refuses, `bridge update` having
+  none (both reviews of the brief): a start's crash rollback
+  (`recoverCrashedInstall`, B660; `TestAStartsCrashRollbackRunsWithUpdateChecksOff`),
+  a start's boot rollback (`maybeRollbackOnBoot` in `runServe`;
+  `TestAStartsBootRollbackRunsWithUpdateChecksOff`) and the console's Roll
+  back from a serve started with checks off
+  (`TestTheConsolesRollbackRunsWithUpdateChecksOff`), each red with the switch
+  made to refuse it (R10, R11, R12).
+- The Claude review's Medium holds: a crash rollback to a release from before
+  the switch is refused while the key is written. B660's crash rollback asks
+  its backup's settings check, and that release's loader refuses a key it does
+  not know (`KnownFields`, since the first loader), so with the console's off
+  written the start says why and goes on with the install that crashed. The
+  review's first fix, taking a refusal whose only reason is this key, was not
+  taken: the binary put back would refuse the same settings at its own start;
+  and the crash rollback writes no settings (B613's rule), so it cannot drop
+  the key either. Its second fix is what was done: every surface says that a
+  release from before the switch refuses settings that write the key, and to
+  turn the checks on with the console's switch, which takes the key out, or
+  to delete it, before going back to one, by Roll back or by hand.
+  `TestACrashRollbackToAReleaseBeforeTheSwitchNeedsItOn` stands a backup in
+  for such a release (the run-as-bridge copy's `predatesUpdateSwitch` mode
+  answers the settings check as its loader would: refused on the key's line
+  where the file writes it, valid otherwise): with the key written the backup
+  stays and the marker records why; with the key gone it is put back, exit 75
+  (R13, R14). The console's Roll back asks its backup no settings check (B613
+  checks a candidate before its swap, B660 a backup before a crash rollback),
+  so the docs give it the same advice.
+- `TestServeStopsAnUpdateCheckUnderWayWhenChecksGoOff`'s `LastError` check
+  could not fail while checks were off, the status masking it (the Claude
+  review's note): it turns the checks on again and asks then (R16).
+- `renderJobCards` hides the card's Check now through `jobs-upd-check`, the
+  card's one id not `job-upd-*`, which no test held to jobs.html (the Claude
+  review's note): `TestTheUpdatesPanelScriptSaysUpdateChecksAreOff` now
+  requires the button with that id there (R15).
+
+### The words
+
+Codex's third P2 and the Claude review's Lows: PROTOCOL.md said `bridge.yaml`,
+the variable or the console's switch turned the checks off "at once and
+without a restart", where only the console's save is published to the running
+service and calls its off transition; the settings page put the boundary at
+the swap, where it is the decision to swap; the README, `docs/docker.md`, the
+YAML example and the Jobs tray said a rollback still works, which a release
+from before the switch does not while the key is written; the CLI's refusal
+named `bridge status`, which shows no update status, and advised writing the
+key true, which such a release refuses as it refuses false.
+
+Each surface now says: the console's switch applies at once, a hand edit of
+the key or a change of the variable at the service's next start, the variable
+overriding the file and the console's switch at every start; a new `bridge
+update` reads the settings as it starts, and a running one again as its
+install begins and at its decision; turned back on live, the next check waits
+a full interval, while a start with them on checks at once. PROTOCOL.md lists
+what the switch refuses (the start's and the scheduled checks, Check now and
+`bridge update --check`, every new install: the console's, the CLI's and the
+auto-installer's) and what it never refuses (the status, the console's Roll
+back, a start's rollbacks, the probation and its confirmation, a restart
+deferred after a committed swap), and what a release from before the switch
+does with the key and with the variable. `ops/settings-apply-semantics.md`'s
+row and `UpdateConfig`'s doc say the same.
+
+The Claude review's last Low, an off set only in the service's environment,
+which `bridge update` run from a shell does not see: kept, as the brief and
+its reviews ask, as the qualification each surface states.
+
+### Reds, before each fix
+
+At 6614b61b's code with the new tests and the seams in place
+(`.tmp/_b761u/reds-r2.md`):
+
+| Test | Red |
+|---|---|
+| updater `TestATickArmedWhileUpdateChecksWereOffAsksNothingOnceTheyAreOn` | 20 of 20: the tick of a wait armed while off asked GitHub once with the switch published on, before the updater was told |
+| updater `TestAWakeAndAnOldTickReadyTogetherAskNothing` | 10 of 20 (`-count=20`): the select took the tick and asked once |
+| updater `TestAnInstallReadsTheSwitchAgainAsItBeginsAndAtItsDecision` | all four cases swapped (`<nil>`, want `ErrUpdateChecksOff`); the two as it begins asked 3 times, want 0 |
+| cmd/bridge `TestBridgeUpdateReadsTheSwitchAgainOnceItsPromptIsAnswered`, `TestBridgeUpdateRefusesItsInstallWhereTheSettingsNoLongerRead` | the refusal not said; 2 requests, want 1 (the install asked for the release again, then failed on the stand-in's empty assets) |
+
+Written after their part was built, their reds the controls':
+`TestATickArmedBeforeUpdateChecksWentOffAsksNothingOnceTheyAreOnAgain` (R1,
+R2), the swap-past case's two (R9), the three rollback cases (R10 to R12), the
+release from before the switch (R10, R13, R14), the card's id (R15) and
+serve's error with checks on again (R16).
+
+### Negative controls
+
+Fifteen, at 95e88b56, predicted by name in `.tmp/_b761u/controls_r2.py`
+before the first ran, run as round 1's were (each edit's text found exactly
+once, the named tests of each named package, the bytes put back in a
+`finally`; `git status` clean after): fourteen as predicted, R12 with one
+more red.
+
+| Control | Mutation | Red, and what it showed |
+|---|---|---|
+| R1 | `admitScheduled` reverted to `admit`: no schedule (`-count=20`) | the publication window 20 of 20, the wait armed before the off 20 of 20, both ready 11 of 20: each tick asked once |
+| R2 | no `switchGen++` | the wait armed before the off alone: its tick asked once more with the switch on again |
+| R3 | the schedule does not ask whether the switch was on at arming | the publication window alone |
+| R4 | no reread as the install begins | the updater's two cases as it begins (refused only at its decision, after 3 requests); both CLI cases |
+| R5 | no reread at the decision | the updater's two decision cases (swapped: the binary 0.2.0, a backup, a marker); the CLI's, refused as they begin, green |
+| R6 | the CLI hands its install no reread (round 1's shape) | both CLI cases: the refusal not said, 2 requests |
+| R7 | the CLI's reread takes a load that failed for an off | the case of settings that no longer read: said as an off |
+| R9 | `commit` leaves the install among the admissions | both swap-past cases: still among 1 admission at the swap; the failed swap answered as the switch's stop |
+| R10 | the switch refuses a start's crash rollback | the crash rollback's case (served, exit 0); the earlier release's case with the key written (nothing recorded) |
+| R11 | the switch refuses a start's boot rollback | the boot rollback's case: no rollback said, the binary still the target's |
+| R12 | the switch refuses the console's Roll back | the console's case, 409 `update-checks-off`; and round 1's `TestServeTurnsUpdateChecksOffLiveAndShowsNoUpdate`, which posts the rollback with checks off too (unpredicted) |
+| R13 | the crash rollback asks its backup nothing of the settings | the earlier release put back with the key written, exit 75 |
+| R14 | the fixture's earlier release refuses settings whatever they write | both of its cases: the key gone stays refused, so the fixture tells the two apart |
+| R15 | the card's Check now looked up as `job-upd-check` | the structural test, naming the id |
+| R16 | a stopped check records its stop as its error | the updater's two stop cases; serve's panel with checks on again showed the cancellation |
+
+### The gates
+
+Through the shared build lock, on go1.27.3, with TMPDIR on this disk, at
+95e88b56 in one slot session (`.tmp/_b761u/gate_r2.py A`), all green:
+
+- `make test TEST_PKGS='-timeout 60m ./internal/updater/... ./internal/config/...
+  ./internal/admin/... ./internal/api/... ./cmd/bridge/...'`: the release
+  tags (`GO_TAGS`), `-race`, `-p 4`, and `-timeout 60m` after the Makefile's
+  30m (the later flag wins), so that cmd/bridge has room: 1424 s in all,
+  cmd/bridge 1385 s, internal/admin 1031 s, internal/api 148 s,
+  internal/updater 30 s and internal/config 15 s.
+- The round's tests by name with `-race -count=20`: internal/updater's
+  fourteen switch cases in 5 s, cmd/bridge's nine in 285 s, internal/admin's
+  two in 18 s.
+- `make vet` for linux/amd64, windows, darwin and linux/386, and `make
+  build-all`, its build-tag census included.
+
+The controls' runs were single packages without the race detector, outside
+the lock, as was go1.27.3's gofmt (`go run cmd/gofmt -l`) over the changed
+packages, clean. This record's commit changes `ops/engineering-log.md`
+alone.
+
+`TestEveryCitedTestNameExists` passes with this record. `rules-b761-r2.patch`,
+applied to a `git archive` copy of the final HEAD, passes `make docs-check`
+(config-lifecycle.md at 98.7%, 98,652 bytes) and `verify_moves.py --base
+HEAD` with its seven declared edits, but for the two blocks one `--edit`
+prefix cannot pair, the B761 line of `config-lifecycle.md` and its verbatim
+History twin, rewritten alike: each has its one successor in its file. The
+guard passes on that copy too.
+
+Not run here: the console's node-run tests, which skip without node; the iOS
+mirror of PROTOCOL.md, the orchestrator's.
