@@ -4114,7 +4114,7 @@ restart is the service manager's, from the unit's environment). The menu's
 "Start now" runs serve in its own process and again after a stop, as bridge
 init's start can before it. Round 2 handed the inherited value back to a
 later node whose config allowed the uploads; round 3 took that out on Codex's
-two P2s on #1445's round 2, one of them backlog B830's, the other that
+two P2s on #1445's round 2, one on the hand-back itself, the other that
 upstream's own true, which the coordination server's `DisableLogTail` message
 writes beside a `logtail.Disable` that lasts the process, was taken for the
 policy's and undone. Once the policy has set the variable, every later

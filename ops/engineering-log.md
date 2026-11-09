@@ -89437,7 +89437,7 @@ record. The rules changes ship as `rules-b749-r3.patch` (`cli-serve.md`'s B749 l
 
 ### The findings
 
-- **Codex P2: the hand-back, against backlog B830.** It held. Removed with the hand-back.
+- **Codex P2: the hand-back.** It held. Removed with the hand-back.
 - **Codex P2: upstream's true taken for the bridge's.** It held: the policy writes the variable through
   `envknob.SetNoLogsNoSupport`, as the coordination server's `DisableLogTail` message does, so round 2's ownership
   check could not tell the two `true`s apart, and a later allowing node erased upstream's beside the
@@ -89725,3 +89725,9 @@ of the changed Go files. On a git-archive copy of the final HEAD with the final 
 passes, `TestEveryCitedTestNameExists` is green there and red with a ghost name, and verify_moves, given an `--edit`
 for the policy and controls paragraphs and the rule line, reports the one MISSING pair it cannot pair: the B749 line's
 old text beside its new (5,658 bytes) in both files.
+
+### After the reviews
+
+Codex's review of round 5 (P2): round 3's entry here still named B830 beside the hand-back, and the History's account
+of round 3 counted one of round 2's P2s as B830's. Both now name the hand-back alone; B830 stays named, by its id, only
+where a text says what stays open. The Claude API's review of round 5 found nothing.
