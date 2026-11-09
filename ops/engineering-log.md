@@ -89619,3 +89619,109 @@ go1.27.3's gofmt lists none of the changed Go files. On a git-archive copy of th
 applied, `make docs-check` passes, `TestEveryCitedTestNameExists` is green there and red with a ghost name, and
 verify_moves, given an `--edit` for the policy and controls paragraphs and the rule line, reports the one MISSING pair
 it cannot pair: the B749 line's old text beside its new (4,794 bytes) in both files.
+
+## 2026-11-09 — B749 round 5: a value written in the process before any latch is read as Tailscale reads it, and refused in its own words
+
+Worker b749, legion0, branch `fix/b749-tsnet-logs` at #1445's head 1b4f2fbf (round 4 and its rules), against Codex's and
+the Claude API's reviews of round 4 and the two reviews of this round's brief. Commits 02f24c90 (the policy before any
+latch, its rows and its comments), 7306add3 (the hint's three reasons, backlog B830 by its id alone in this log, the
+empty override pinned) and the one that carries this record. The rules changes ship as `rules-b749-r5.patch`
+(`cli-serve.md`'s B749 line and its long form).
+
+### The findings
+
+- **Claude Low: a value written in the process before any latch, refused in the launch environment's words.** It
+  held: with nothing latched, round 4 parsed the value the variable held before either branch, so an unreadable value
+  written after a first node with the key made a node without the key refuse outright, though the policy was about to
+  set the variable to true, and a node with the key refuse with `ErrNoLogsEnvUnreadable`, whose words blame the
+  environment the bridge was launched with. The reviews of the brief added four points, each taken: with the key, such
+  a value must still refuse, since upstream's `envknob.Bool` ends the process on it, with an error of its own and never
+  as `OtherOff`, which would build the node; without the key the order is to record and parse the inherited value
+  (refusing an unreadable one with the environment untouched), then set, with no parse of the current value;
+  `OtherOff` stays gated on a parsed true, so a false or a 0 written over an unset or false value holds nothing, and a
+  false written over an inherited true lets the node upload where round 4 called it the launch environment's hold;
+  and every row starts from `setInherited`'s reset and writes with `t.Setenv`, the doc comments saying what the code
+  does.
+- **Claude Low: the settings hint counted two reasons where the status tells three apart.** It held: the hint left out
+  something else in the process turning the uploads off (upstream's setter, `OtherOff`), which the Tailscale panel
+  below it then reports. The hint names the three, the third with what a new launch may do.
+- **Codex P2, the Claude API's review and a review of the brief: B830 tied to what it holds open.** It held in three
+  places: the History's account of round 3 (the rules patch), round 3's entry in this log and `applyUploadPolicy`'s
+  comment. Each gives backlog B830 by its id alone, and `git grep B830` found one more: round 2's entry here, whose
+  parenthetical tied it to the alternative that entry rejected, now drops it. Every other hit already gave the id
+  alone.
+- **Claude Low: round 4's record missing from the reviewed diff.** No change, as the brief decided: round 4's entry is
+  in this log; the reviewed diff left the log out.
+- **The Claude API: the empty value `compose.yaml` forwards, unpinned.** It held as a gap in the tests, not the code:
+  `applyEnvOverrides` skips a variable set and empty, and nothing pinned that for this key.
+  `TestAnEmptyVariableLeavesTheFilesConsent` sets the variable empty with `t.Setenv` over a `bridge.yaml` that says
+  true and one that says false: each stands, and no leaf is recorded for the variable. It pins current behaviour, so
+  it is no red-first test.
+
+### As built
+
+`applyUploadPolicy` (02f24c90) reads what the process inherited first, at every application, and refuses a value that
+does not read as a boolean with `ErrNoLogsEnvUnreadable`, the environment untouched. Without the key it then sets the
+variable to true through envknob over whatever the process wrote there, unread, and latches. With the key and the latch
+set, it sets the variable again and reports `LatchedOff`, as round 4 did. With the key and nothing latched, the value
+the variable holds now decides, read as Tailscale reads it: a true holds the uploads off, the launch environment's
+(`EnvOff`) where that held a true too and something else's (`OtherOff`) where it did not; a false holds nothing, a false
+written over an inherited true included; and a value that does not read as a boolean is the new
+`ErrNoLogsEnvWrittenUnreadable`, refused before any node is built, whose words name the variable and not its value, say
+that something in the bridge's process set it since its launch, advise a new launch, and never mention the launch
+environment. `noLogsOff` answers whether a value reads at all, and `Server.Uploads` asks it as before. The comments on
+`ErrNoLogsEnvUnreadable`, `EnvOff`, `applyUploadPolicy`, `Config.UploadDiagnosticLogs` and `NewServer` say so, and
+`applyUploadPolicy`'s gives B830 as "What stays open is backlog B830." alone. The latch table's rows write with
+`t.Setenv`, its harness takes a row whose last `NewServer` must refuse (that error and not the launch environment's,
+nothing built, no upstream start reached, the variable as the process wrote it, and the words), and it gains eight rows:
+a first node without the key with nothing inherited (`EnvOff` false); a node without the key over an unreadable value
+written after a node with the key; a node with the key over one, inherited unset and true; a false written over an
+unset value, a 0 over an inherited false and a false over an inherited true, each holding nothing; and a 1 written over
+an inherited false (`OtherOff`). In 7306add3 the hint lists the three reasons, round 3's entry here gives B830 by its id
+alone and round 2's no longer names it, and `TestAnEmptyVariableLeavesTheFilesConsent` joins internal/config's tests.
+The rules patch rewords cli-serve.md's B749 line (the policy before any latch, the new error, Compose's empty forward,
+five more Don'ts) and its long form, whose account of round 3 gives B830 by its id alone.
+
+### Red first and the controls
+
+Round 5's latch table on round 4's code (1b4f2fbf's internal/tsnet in a copy, with a names-only shim declaring
+`ErrNoLogsEnvWrittenUnreadable`; `.tmp/_b749/r5-red-tsnet.log`, predicted in `r5red.predictions.txt` before it ran): red
+on the 4 rows predicted, green on the other 23. The node without the key over an unreadable value written in the process
+was refused in the launch environment's words; the node with the key over one, inherited unset and true, got
+`ErrNoLogsEnvUnreadable` and not the process's error; and the false written over an inherited true came out as
+`{Allowed:true EnvOff:true}`, in the launch environment's words, with a refusal that named the variable. The four pins
+(a first node without the key with nothing inherited; a false over unset; a 0 and a 1 over an inherited false) were
+green there, as predicted. Nine controls, each predicted in `.tmp/_b749/controls5.predictions.txt` before it ran, the
+files put back from memory and the tree found equal to HEAD, the runs with no mutation green; each came out as
+predicted:
+
+| | mutation | outcome |
+|---|---|---|
+| R01 | without the key, the current value read first, an unreadable one refused as the launch environment's (round 4's order there) | red: the latch row without the key over an unreadable value; the first-start table green |
+| R02 | the process's refusal is `ErrNoLogsEnvUnreadable` | red: the two rows with the key over an unreadable value |
+| R03 | `EnvOff` from the inherited value alone, with the key and nothing latched (round 4's reading) | red: the false written over an inherited true; the first-start table and the refused-start test green |
+| R04 | `OtherOff` from a byte difference, not a parsed true | red: the false over unset and the 0 over an inherited false |
+| R05 | without the key, the variable set before what the process inherited is recorded | red: 7 latch rows (no then yes and no then no, inherited unset and false; the first node without the key; the false and the unreadable value after the policy's true), 3 first-start rows (without the key, inherited unset, false and `maybe`, the last not refused) and the refused start without the key and nothing inherited (its words named the variable) |
+| R06 | without the key, the variable set after the record and before the inherited value is parsed | red: the first-start row without the key and inherited `maybe` (refused with the variable left true), and cmd/bridge's `TestTheUploadPolicyByKeyAndInheritedValue` on its two rows with `maybe` and the key absent or false; the latch table green |
+| R07 | an unreadable value written in the process taken for `OtherOff`, the node built | red: the two rows with the key over an unreadable value |
+| N01 | the loader reads an empty boolean variable as false | red: `TestAnEmptyVariableLeavesTheFilesConsent` on both rows, the true one on its value and its record, the false one on its record alone |
+| N02 | the empty check alone dropped | green, as predicted: `strconv.ParseBool` refuses an empty value, and the override is ignored with a warning and recorded nowhere |
+
+### Gates
+
+At 7306add3, in the build slot: `make test TEST_PKGS='./internal/tsnet/... ./internal/config/... ./internal/admin/...
+./cmd/bridge/...'` (the release tags, `-race -timeout 30m -p 4`, whose 1,800 s cover cmd/bridge's) on a git-archive
+copy of HEAD with `rules-b749-r5.patch` applied and git pointed at the worktree's index, as in round 4: internal/tsnet
+1.6 s, internal/config 14.9 s and internal/admin 1,033 s ok, and cmd/bridge red in one subtest, in 1,397 s:
+`TestAMatchWhoseReQueueDidNotLandIsReQueuedByTheNextSweep/cancelled_inside_the_reset_by_a_switch-off` ("the first
+sweep's re-queue landed: the case tests nothing"), the fingerprint sweep's timing precondition that B762's round 3
+measured failing 1 of 40 at its base, which nothing this round touches reaches. Run again in the slot, `make test`
+passed, cmd/bridge in 1,358 s and the other three packages from go's test cache, and that test alone under `-race`
+passed 40 of 40 in the worktree. The changed tests by name under `-race -count=50`, in the worktree, ok:
+internal/tsnet (the latch table, the first-start table, the refused start) 1.9 s, internal/config (the empty override)
+1.2 s, internal/admin (the settings prose beside its badge, the tile's line) 1.5 s, cmd/bridge (the policy table
+through every command path) 2.0 s. `go vet` of internal/tsnet and internal/config clean; go1.27.3's gofmt lists none
+of the changed Go files. On a git-archive copy of the final HEAD with the final patch applied, `make docs-check`
+passes, `TestEveryCitedTestNameExists` is green there and red with a ghost name, and verify_moves, given an `--edit`
+for the policy and controls paragraphs and the rule line, reports the one MISSING pair it cannot pair: the B749 line's
+old text beside its new (5,658 bytes) in both files.
