@@ -274,13 +274,15 @@ func TestVerifyBesideTheTickersVerificationOfOneSnapshot(t *testing.T) {
 			_, dataDir, root := backupInstall(t)
 			src := backup.Sources{DataDir: dataDir, ManifestDB: manifest.DefaultDBPath(dataDir)}
 			parked, release := make(chan string, 1), make(chan struct{})
-			var once sync.Once
+			waiting := make(chan struct{})
+			var once, waits sync.Once
 			if tickerFirst {
 				// The first verification to end its check, the ticker's, waits
 				// there holding the lock.
 				t.Cleanup(backup.SetAfterCheckForTest(func(dir string) {
 					once.Do(func() { parked <- dir; <-release })
 				}))
+				t.Cleanup(backup.SetOnSlotWaitForTest(func() { waits.Do(func() { close(waiting) }) }))
 			}
 			ctx, cancel := context.WithCancel(context.Background())
 			done := make(chan struct{})
@@ -307,9 +309,14 @@ func TestVerifyBesideTheTickersVerificationOfOneSnapshot(t *testing.T) {
 				go func() {
 					verified <- backupCmdContext(context.Background(), []string{"--verify", dir, "--full"}, &vout, &verr)
 				}()
-				// The --verify waits for the ticker's verification: give it the
-				// time to reach that wait, then let the ticker go on.
-				time.Sleep(100 * time.Millisecond)
+				// The --verify waits its turn behind the ticker's verification,
+				// this process's one at a time: once it is waiting, let the
+				// ticker go on.
+				select {
+				case <-waiting:
+				case code := <-verified:
+					t.Fatalf("--verify returned %d before it waited its turn\n%s%s", code, vout.String(), verr.String())
+				}
 				close(release)
 			} else {
 				// The ticker is held between its capture and its verification:

@@ -22,6 +22,19 @@ func SetAfterCheckForTest(fn func(dir string)) (restore func()) {
 	return func() { afterCheck = prev }
 }
 
+// onSlotWait, nil in production, runs when a verification finds this
+// process's slot held and begins to wait its turn.
+var onSlotWait func()
+
+// SetOnSlotWaitForTest sets the function a verification runs when it begins
+// to wait its turn behind another of this process's verifications, and
+// returns the restore.
+func SetOnSlotWaitForTest(fn func()) (restore func()) {
+	prev := onSlotWait
+	onSlotWait = fn
+	return func() { onSlotWait = prev }
+}
+
 // SetSyncVerdictForTest replaces the barrier a verdict's write runs once its
 // rename has landed (fsutil.SyncParentDir), and returns the restore.
 func SetSyncVerdictForTest(fn func(path string) error) (restore func()) {

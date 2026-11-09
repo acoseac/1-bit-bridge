@@ -100,11 +100,21 @@ func lockBackups(ctx context.Context, dir string, wait time.Duration) (release f
 // in the order the waits began, for as long as its context lasts.
 var verifySlot = make(chan struct{}, 1)
 
-// takeSlot waits for the slot until ctx ends, and answers its release.
+// takeSlot takes the slot, waiting for it while another verification holds
+// it until ctx ends, and answers its release.
 func takeSlot(ctx context.Context) (func(), error) {
+	release := func() { <-verifySlot }
 	select {
 	case verifySlot <- struct{}{}:
-		return func() { <-verifySlot }, nil
+		return release, nil
+	default:
+	}
+	if onSlotWait != nil {
+		onSlotWait()
+	}
+	select {
+	case verifySlot <- struct{}{}:
+		return release, nil
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
