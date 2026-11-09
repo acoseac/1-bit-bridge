@@ -88392,3 +88392,112 @@ on Linux; go1.27.3's gofmt is clean. The rules patch: `git apply --check` clean;
 43.6 KB) and `verify_moves.py --base HEAD` found no citation broken, its MISSING exactly the two blocks the
 patch edits (the gap-3 line, and its twin with the long form); every test name the patch cites exists. Not
 run here: the Windows cases, which CI's Windows leg runs, and macOS.
+
+## 2026-11-09 — B749 part 3: the embedded node uploads no logs unless the config allows it; a new node gets a generic name
+
+Worker b749, legion0, branch `fix/b749-tsnet-logs` from main 9d59c8f6. Commits 891f82d6 (the change, its tests, the
+console's key, the docs, the evidence script), e56e1ca0 (a path that starts no node fails its test instead of hanging
+it), 07ad1cf7 (a row for a current profile the known profiles do not list), then this record. The rules line and its
+long form ship as `rules-b749.patch` (`cli-serve.md`, `ops/History-rules-cli-serve.md`, and the import-keeper long form
+in `ops/History-rules-build-ci-tests.md`).
+
+### What was true
+
+Checked against tailscale.com v1.104.2 in the module cache, every fact of the brief held. `tsnet.Server.Start` runs
+`startLogger` outside a test binary, whose logtail transport is a no-op only while `envknob.NoLogsNoSupport()` reads
+`TS_NO_LOGS_NO_SUPPORT` true through `os.Getenv` (a value `strconv.ParseBool` refuses is `log.Fatalf`); the bridge never
+set it, so every tsnet-mode bridge uploaded its node's logs, and named the node after the library. Five things beside
+the brief: network flow logs (`feature/netlog`, linked into the bridge) run only while the variable is false, so it
+covers them too; `hostinfo.New` reports it to the coordination server; the coordination server can set it itself (its
+`DisableLogTail` debug message); v1.104.2 refuses to start on an empty state file (`maybeMigrateLocalStateFile` parses it
+before `NewFileStore`'s empty-file rule); and on Windows the profile manager starts from `ipn.ServerModeStartKey`, which
+tsnet never writes, while `_current-profile` is written as elsewhere. The refusal reaches `Status.Health` as the
+local-log warnable ("The local log is misconfigured: …") once the tracker's built-in warnables update. One doc claim was
+stale: `docs/docker.md` said tsnet mode cannot be set through a `BRIDGE_*` variable; `BRIDGE_TAILSCALE_MODE=tsnet` loads
+as tsnet (checked with `config.EnvOverrideDocs` and a load).
+
+### As built
+
+`tsnet.NewServer` applies the policy (`applyUploadPolicy`): unless `tailscale.uploadDiagnosticLogs` is true it sets the
+variable true through `envknob.SetNoLogsNoSupport`; true leaves the inherited environment alone; an inherited value
+ParseBool refuses is `ErrNoLogsEnvUnreadable`, the variable named and its value not, before any node is built; what it
+found is kept (`Uploads`) for the refusal's words. Serve, `bridge tsnet auth` and `status` build through
+`newTsnetServer` after their mode gates, on the caller's goroutine before anything starts the node; the variable is no
+registered envknob knob and every reader asks `os.Getenv`, so serve's earlier goroutines race nothing. The node's name:
+`tailscale.hostname`, else at each start `readNodeState` reads `tailscaled.state` read-only (`fsutil.OpenAsFile`, 16 MiB
+at most, never upstream's store constructor): the profile under `ipn.CurrentProfileStateKey`, listed under
+`ipn.KnownProfilesStateKey`, its prefs through `ipn.PrefsFromBytes` with an attestation key that takes any JSON; a node
+ID there is a registered node, which keeps its hostname; anything short of one is `tsnet.DefaultHostname`; a state that
+does not read keeps the library name with one Warn line naming no path. A start whose error carries upstream's "tailnet
+requires logging to be enabled" ends in `LogsRequiredError`, kept as the last start error under `lifecycleMu`;
+`tsnetAdminStatus` says it in LastError, and reads a running node's health through `Server.LogsRequired`.
+`tsnet.Config.BeforeStart` (`tsnetBeforeStart`, nil in production) is the seam just before the upstream start. The key
+is the console's `tailscaleUploadDiagnosticLogs` (`restart`, class D in `ops/settings-apply-semantics.md`), because
+`sqlite.md` asks for a patch field beside any config field an operator chooses. Typed errors in internal/tsnet met the
+one blank keeper's condition, so the keeper went and `allowedKeepers` is empty; the fixture test keeps the allowance's
+shape (`keeperFixtureAllowance`).
+
+### Red first
+
+The tests were run against main's behaviour in a copy of 9d59c8f6 holding HEAD's tests and a names-only shim
+(`.tmp/_b749/basecopy.py`: the seam called before the upstream start, the new names answering as main does, the config
+field set by nothing with `yaml:"-"`, so main's Load still refuses the key; `.tmp/_b749/reds.py`). 16 of the 21 new
+tests were red: every row of the name, policy, refusal, tile and console tests that differs from main (the name test 15
+of its 18 rows, the three explicit-hostname rows green), and the config tests and the CLI's save (main refuses the key
+at load). Green there, as expected: `TestTheCommandsThatBuildNoNodeLeaveTheEnvironmentAlone` (main never touches the
+variable; control C20 below shows it red), `TestBeforeStartRunsOnTheUpstreamServerAndCanStopIt` (the seam is the
+shim's; C15), the two pins of upstream (`TestTheLogsRequirementIsUpstreamsWords`, `TestTheNoLogsVariableIsUpstreams`;
+C13, C14), `TestAStartThatSucceedsClearsTheLastStartError` (main records nothing; C10), and the policy row main already
+meets (an inherited true with no key). The first red run found a defect in the new cmd/bridge test: a path that exited
+before its node's start (main refuses the key) left the test waiting on the hook's channel until the binary's deadline;
+e56e1ca0 makes it fail at once.
+
+### Evidence from a production binary
+
+`scripts/tsnet-uploads/evidence.py` on a release-shaped binary (CGO_ENABLED=0, the release tags, -trimpath) of 891f82d6.
+No unprivileged network namespace exists on legion0: `kernel.apparmor_restrict_unprivileged_userns=1` makes `unshare -rn`
+fail writing uid_map, and `systemd-run --user -p PrivateNetwork=yes` runs its unit in the host's network namespace (the
+probe that showed it made one TCP connect and sent one UDP datagram to a public resolver; nothing of the bridge's). The
+script confines the bridge with Landlock (TCP connect to the proxy's port alone, EACCES elsewhere) and seccomp (EPERM for
+every IPv4 and IPv6 socket but plain TCP, MPTCP and io_uring included), checks that from inside before any run, and
+routes HTTP and HTTPS through a proxy on 127.0.0.1 that logs each target and refuses all; `TS_DEBUG_ALWAYS_USE_DERP=1`
+lets the node start without UDP. Three rounds, 60 s windows: the key true, `CONNECT log.tailscale.com:443` first at 2.21
+to 2.33 s, two a window; the key absent, and the key true with `TS_NO_LOGS_NO_SUPPORT=true` inherited, none; the
+coordination server's CONNECTs (25 to 27) and the updater's one to api.github.com in every run; every start named the
+node `1-bit-bridge` (the library "B749 Evidence Library"), the second start of a node that registered nothing
+included. main's binary under the same script: with no key the log host at 2.29 s, and 0.08 s at its second start; the
+node named after the library; the key refused at load.
+
+### Negative controls
+
+Each predicted by name in `.tmp/_b749/controls.predictions.txt` before any ran (C05's prediction corrected, before any
+ran, once it showed the logout row could not catch it and a row was added): an exact-once mutation, each named test run
+alone from a fresh test binary, the files put back from memory and the tree found equal to HEAD. The run with no
+mutation was green. All 23 were red where predicted; C16 also turned the unreadable-state row red (an explicit name skips
+the line).
+
+| | mutation | red |
+|---|---|---|
+| C01 | no variable set without the key | the policy tables' rows without the key but an inherited true; every path's |
+| C02 | an unreadable inherited value taken as unset | the refused rows of both policy tables |
+| C03 | an inherited true turned off where the key allows | the key-true, inherited-true rows |
+| C04 | a profile with no node ID counted registered | that row |
+| C05 | the known profiles' listing skipped | the unlisted current profile's row |
+| C06 | an unreadable state given the default name | the five unreadable rows, the unreadable-to-this-user case, cmd/bridge's |
+| C07 | no line for an unreadable state | the same |
+| C08 | upstream's error kept for a refusal | the refused-start tests, the tile's refused-start rows |
+| C09 | no last start error kept | the same |
+| C10 | a start that succeeds leaves the last error | `TestAStartThatSucceedsClearsTheLastStartError` |
+| C11 | a running node's health not read | the running-node test and the tile's running rows |
+| C12 | the inherited variable left out of the words | the inherited-true refusal rows and tile rows |
+| C13 | the matched text off by a word | the pin, both refusal tests, the tile |
+| C14 | `NoLogsEnv` naming another variable | the variable's pin, the policy table |
+| C15 | the hook after the upstream Start | `TestBeforeStartRunsOnTheUpstreamServerAndCanStopIt` |
+| C16 | the node named after the library again | the fresh, failed-first-start and registered rows (and the unreadable row's line) |
+| C17 | the tile reads no last start error | the tile's refused-start rows |
+| C18 | the tile reads no health | the tile's running rows |
+| C19 | the config's key not passed to the node | the key-true rows of the policy table and of every path |
+| C20 | the auth and status gate sets the variable before refusing | the cli-mode rows of the no-node test |
+| C21 | the console's PATCH answers `live` | the console's test, the matrix doc test, the page's badge test |
+| C22 | the console's PATCH saves nothing | the console's test |
+| C23 | the config key renamed | the three config tests |
