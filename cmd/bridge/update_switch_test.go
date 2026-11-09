@@ -160,19 +160,33 @@ func updateCLIConfig(t *testing.T, tail string) string {
 // asked of GitHub or written in the data dir: with the file saying on and the
 // variable off, which a unit or a compose file sets for the service and the
 // operator's shell must carry too, and with the file saying off. Where the
-// file's key turned them off, the refusal says too that a release from before
-// the switch refuses the key, and how to keep the checks off without it
-// (B761's round 3). With the checks on, --check asks once (the positive
+// file writes the key, whatever its value and whatever turned the checks off,
+// the refusal says too that a release from before the switch refuses the key,
+// and how to keep the checks off without it (B761's round 3; round 4 for the
+// key beside the variable: an older release refuses the key before it reads
+// any variable, and a key written null decodes as no key but is written all
+// the same). With the variable off over settings that write no key it says
+// nothing of the kind. With the checks on, --check asks once (the positive
 // control).
 func TestBridgeUpdateRefusesItsCheckAndItsInstallWhileUpdateChecksAreOff(t *testing.T) {
+	const byTheVariable = updateCheckVar + " in this environment says off"
 	for _, c := range []struct {
 		name, tail, env, says string
 		// keyCaveat: the refusal says what the key costs a rollback to a
 		// release from before the switch, and the variable's way round it.
 		keyCaveat bool
 	}{
-		{name: "the file on, the variable off", tail: "update:\n  checkEnabled: true\n", env: "false",
-			says: updateCheckVar + " in this environment says off"},
+		{name: "the variable off over the key written true", tail: "update:\n  checkEnabled: true\n", env: "false",
+			says: byTheVariable, keyCaveat: true},
+		{name: "the variable off over the key written false", tail: "update:\n  checkEnabled: false\n", env: "false",
+			says: byTheVariable, keyCaveat: true},
+		{name: "the variable off over the key written null", tail: "update:\n  checkEnabled: null\n", env: "false",
+			says: byTheVariable, keyCaveat: true},
+		{name: "the variable off over a key with no value", tail: "update:\n  autoInstall: false\n  checkEnabled:\n", env: "false",
+			says: byTheVariable, keyCaveat: true},
+		{name: "the variable off over no key", tail: "update:\n  autoInstall: false\n", env: "false", says: byTheVariable},
+		{name: "the variable off over a key only a comment names", tail: "update:\n  # checkEnabled: false\n  autoInstall: false\n",
+			env: "false", says: byTheVariable},
 		{name: "the file off", tail: "update:\n  checkEnabled: false\n", says: "update.checkEnabled is false in", keyCaveat: true},
 	} {
 		for _, args := range [][]string{{"--check"}, {"--yes"}} {

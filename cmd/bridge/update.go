@@ -76,13 +76,13 @@ func updateCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stde
 		return 2
 	}
 
-	cfg, cfgPath, err := loadCLIConfig(*configPath)
+	cfg, cfgPath, raw, err := loadCLIConfigFile(*configPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "config load failed: %v\n", err)
 		return 2
 	}
 	if !cfg.Update.EffectiveCheckEnabled() {
-		refuseUpdateChecksOff(stderr, cfgPath)
+		refuseUpdateChecksOff(stderr, cfgPath, raw)
 		return 1
 	}
 	// An install writes its marker in the data dir, which would be made in
@@ -258,18 +258,24 @@ func updateCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stde
 // refuseUpdateChecksOff says why `bridge update` asks nothing and installs
 // nothing while update checks are off (backlog B761), naming what turned them
 // off, the variable in this shell's environment or the file, how to turn them
-// on, and what the switch never refuses; where the file's key turned them
-// off, also that a release from before the switch refuses the key, so going
-// back to one, by Roll back or a start's rollback, needs the key out of the
-// file and the checks kept off by the variable, which such a release ignores
-// (B761's round 3).
-func refuseUpdateChecksOff(stderr io.Writer, cfgPath string) {
+// on, and what the switch never refuses; and where the file writes the key,
+// whatever its value and whatever turned the checks off, that a release from
+// before the switch refuses the key, so going back to one, by Roll back or a
+// start's rollback, needs the key out of the file and the checks kept off by
+// the variable, which such a release ignores (B761's round 3; round 4 for a
+// key beside the variable). raw is the file's bytes as the command loaded its
+// settings from them (loadCLIConfigFile, which refuses a missing file before
+// the switch is read), so the key is the one the switch was read beside; the
+// key's presence is the document's own (config.WritesUpdateCheckKey: a key
+// written null counts, a commented one does not), and bytes that cannot be
+// read for it print the caveat, which cannot then be ruled out.
+func refuseUpdateChecksOff(stderr io.Writer, cfgPath string, raw []byte) {
 	fmt.Fprintf(stderr, "bridge update: update checks are off (%s), so this command neither asks GitHub for a "+
 		"release nor installs one.\n", updateChecksOffSource(cfgPath))
 	sayHowToTurnUpdateChecksOn(stderr, cfgPath)
 	fmt.Fprintln(stderr, "The switch never refuses the console's update status, its Roll back, or a start's rollback of an "+
 		"install that failed.")
-	if _, set := config.UpdateCheckEnabledFromEnv(); !set {
+	if written, err := config.WritesUpdateCheckKey(raw); written || err != nil {
 		fmt.Fprintf(stderr, "But a release from before the switch refuses settings that write update.checkEnabled, so a "+
 			"rollback to one does not start, and a start's rollback refuses to put one back, while %s writes the key. "+
 			"To keep update checks off where the bridge may go back to such a release, take the key out of %s, set "+

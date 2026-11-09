@@ -84,6 +84,44 @@ func TestWithUpdateChecksOffWritesTheKeyAndKeepsTheRest(t *testing.T) {
 	}
 }
 
+// TestWritesUpdateCheckKeyReadsTheDocumentsOwnKeys: whether settings write
+// update.checkEnabled is the document's own answer (backlog B761's round 4),
+// whatever the key's value, null and an empty value included, through an
+// alias or a merge key as yaml.v3 resolves them; a key a comment names, one
+// in another block, and settings that say nothing write none; settings that
+// do not parse, and an update block that is no mapping, are an error, the
+// caller's to take for a key written.
+func TestWritesUpdateCheckKeyReadsTheDocumentsOwnKeys(t *testing.T) {
+	for _, c := range []struct {
+		name, file string
+		written    bool
+	}{
+		{"true", "update:\n  checkEnabled: true\n", true},
+		{"false", "update:\n  checkEnabled: false\n", true},
+		{"null", "update:\n  checkEnabled: null\n", true},
+		{"no value", "update:\n  autoInstall: true\n  checkEnabled:\n", true},
+		{"a flow block", "update: {checkEnabled: false}\n", true},
+		{"through an alias", "base: &b\n  checkEnabled: false\nupdate: *b\n", true},
+		{"through a merge key", "base: &b\n  checkEnabled: false\nupdate:\n  <<: *b\n  autoInstall: true\n", true},
+		{"no key", "update:\n  autoInstall: true\n", false},
+		{"a key a comment names", "update:\n  # checkEnabled: false\n  autoInstall: true\n", false},
+		{"the key in another block", "enrich:\n  checkEnabled: false\n", false},
+		{"an update block that says nothing", "update:\n", false},
+		{"no update block", "libraryName: Hi-Fi\n", false},
+		{"an empty file", "", false},
+	} {
+		got, err := WritesUpdateCheckKey([]byte(c.file))
+		if err != nil || got != c.written {
+			t.Errorf("%s: WritesUpdateCheckKey = %v, %v; want %v", c.name, got, err, c.written)
+		}
+	}
+	for _, bad := range []string{"- a list\n", "update: [1, 2]\n", "update: a word\n", "update: *nowhere\n", "update: {\n"} {
+		if got, err := WritesUpdateCheckKey([]byte(bad)); err == nil {
+			t.Errorf("WritesUpdateCheckKey(%q) = %v, nil; want an error", bad, got)
+		}
+	}
+}
+
 // TestACLIWritersSaveKeepsTheFilesOwnSwitches: a writer outside the live
 // holder, config.Edit's (`bridge library add` and `remove`; `bridge output
 // dac bind` takes the same step), loads the file with this process's BRIDGE_*

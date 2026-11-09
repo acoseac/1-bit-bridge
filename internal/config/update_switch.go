@@ -53,6 +53,34 @@ func WithUpdateChecksOff(raw []byte) ([]byte, error) {
 	return yaml.Marshal(&doc)
 }
 
+// WritesUpdateCheckKey reports whether raw, a settings file's bytes, writes
+// update.checkEnabled at all, whatever its value: true, false, or none (a key
+// written `checkEnabled:` or `checkEnabled: null` decodes as the key left out,
+// and is written all the same), as a release from before the switch, whose
+// strict decoder refuses the key on its line before it reads any variable,
+// reads the file (backlog B761's round 4). It reads the document's own keys,
+// its aliases and merge keys resolved as yaml.v3 resolves them, never the
+// switch the settings decode to, nor the text (a key a comment names is no
+// key). Settings that do not parse, and an update block that is no mapping,
+// are an error, which a caller that cannot rule the key out takes for one
+// written; settings that say nothing write none.
+func WritesUpdateCheckKey(raw []byte) (bool, error) {
+	var doc map[string]any
+	if err := yaml.Unmarshal(raw, &doc); err != nil {
+		return false, ValueFreeYAMLError(err)
+	}
+	update, there := doc["update"]
+	if !there || update == nil {
+		return false, nil
+	}
+	block, ok := update.(map[string]any)
+	if !ok {
+		return false, errNoSettingsMapping
+	}
+	_, written := block["checkEnabled"]
+	return written, nil
+}
+
 // mappingValue is the value of the last key named name in the mapping m, as a
 // decoder reads a key written twice, nil where m has none.
 func mappingValue(m *yaml.Node, name string) *yaml.Node {
