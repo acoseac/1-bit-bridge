@@ -89733,10 +89733,9 @@ The bound is `LockState`'s wait, 30 s, which covers an install's hold with
 `TestAnSCMStopFitsInsideTheMarkersLockWait`). The console's requests take
 serve's context, so a stop of serve ends the save's wait, nothing saved: 503
 `stopping`, or no answer where the connection goes first, which the
-console's failed save of an off adds words to (`updateChecksOffLost`). A
-`bridge update` whose swap stops the bridge's Windows service is backlog
-B831 (round 4 corrected this paragraph, which said it of every Windows
-install).
+console's failed save of an off adds words to (`updateChecksOffLost`). What
+stays open here, for the bridge's Windows service, is backlog B831 (rounds 4
+and 5 corrected this paragraph, which said it of every Windows install).
 
 The cases: the updater's `TestAnOffSavedAfterAnInstallsRereadLandsAfterItsSwap`
 (the CLI parked after its reread, `InstallOptions.holdAfterReread`, a seam
@@ -89963,7 +89962,7 @@ passes on that copy too.
 Not run here: the console's node-run tests, which skip without node; the iOS
 mirror of PROTOCOL.md, the orchestrator's.
 
-## 2026-11-09 — B761 PR 1 round 4: the caveat follows the file's key; an install marker that cannot be read refuses the off; the Windows loss is B831 where it applies
+## 2026-11-09 — B761 PR 1 round 4: the caveat follows the file's key; an install marker that cannot be read refuses the off; B831 named where it applies
 
 Round 4 of #1446 on `feat/b761-update-switch`, worker b761u on legion0
 (go1.27.3, `GOTOOLCHAIN=local`, `GOPROXY=off`), from the PR's head bb96a259,
@@ -90036,20 +90035,21 @@ the real serve's
 answer: 409, its words, no empty version and no path, the file and the live
 switch as they were) and `TestTheOffsAskSaysWhatRefusedItInTheLog` pin it.
 
-### The Windows loss, where it applies, by its id
+### B831, where it applies, by its id
 
-Codex's second P2 and the Claude review's third finding: every text said an
-off waiting for a `bridge update`'s swap is lost on Windows. The swap stops
-the bridge only where it stops its Windows service through the SCM
-(`stopServiceIfRunning`: not where the process swapping is the service, nor
-without the rights to reach the SCM, with no service registered or with it
-stopped already); a Startup-folder install, or a swap run without those
-rights, stops nothing, and the off lands after the swap. README, PROTOCOL.md,
-the Settings page's hint, `updateChecksOffLost`'s comment and the docs of
+Codex's second P2 and the Claude review's third finding: every text spoke of
+B831's case as every Windows install's. The swap stops the bridge only where
+it stops its Windows service through the SCM (`stopServiceIfRunning`: not
+where the process swapping is the service, nor without the rights to reach
+the SCM, with no service registered or with it stopped already); a
+Startup-folder install, or a swap run without those rights, stops nothing,
+and the off lands after the swap. README, PROTOCOL.md, the Settings page's
+hint, `updateChecksOffLost`'s comment and the docs of
 `writeUpdateChecksOffRefusal` and `LockForChecksOff` now say the off is saved
-after the swap, the swap that stops the bridge's Windows service being the
-exception, named only as backlog B831; round 3's record of the bound and of
-its words is corrected the same way. A stopped wait does not show what
+after the swap. What stays open there, for the bridge's Windows service, is
+backlog B831, which each names (round 5 gave it a sentence of its own in
+each, and recast this paragraph). Round 3's record of the bound and of its
+words is corrected the same way. A stopped wait does not show what
 stopped it (serve's stop, which the console's requests take through the
 admin server's `BaseContext`, or the client's), so the 503's words, and the
 console's for a save that got no answer, now claim no cause: the off was

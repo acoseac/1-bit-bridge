@@ -84,12 +84,12 @@ func (e *ChecksOffLockError) Unwrap() error { return e.cause }
 // install's hold fits inside: its marker read, its two marker writes and its
 // swap, which first waits up to scmStopWait for the SCM to stop the bridge's
 // Windows service where it stops one (swap_windows.go's stopServiceIfRunning;
-// TestAnSCMStopFitsInsideTheMarkersLockWait holds it to half the wait). The
-// save's wait ends with serve's stop, which the console's requests take, and
-// nothing is saved; a swap that stops the bridge's Windows service serving the
-// save is backlog B831 (round 4). A swap that stops nothing (a Startup-folder
-// install's, or one run without the rights to stop the service) leaves the
-// save to take the lock once the swap is done.
+// TestAnSCMStopFitsInsideTheMarkersLockWait holds it to half the wait). A swap
+// that stops nothing (a Startup-folder install's, or one run without the
+// rights to stop the service) leaves the save to take the lock once the swap
+// is done. A stop of serve ends the wait as it ends every request of the
+// console's, which take serve's context, and a save it ends saves nothing.
+// What stays open here, for the bridge's Windows service, is backlog B831.
 //
 // On a filesystem that keeps no locks it answers a hold that is not held,
 // and no error: the save goes on, since no install commits on such a

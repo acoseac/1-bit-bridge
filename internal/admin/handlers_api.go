@@ -4007,9 +4007,9 @@ func (s *Server) lockSettingsWrite() {
 // read (`update-checks-off-unchecked`); 503 `stopping` for a wait the
 // request's end stopped (serve's stop, which the console's requests take, or
 // the client's), in words that say only that it was stopped and what to do,
-// since the end does not say what stopped it (round 4: a `bridge update`
-// whose swap stops the bridge's Windows service is one such stop, backlog
-// B831); anything else a 500 in words, logged whole.
+// since the end does not say what stopped it (round 4); anything else a 500
+// in words, logged whole. What stays open here, for the bridge's Windows
+// service, is backlog B831.
 func writeUpdateChecksOffRefusal(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, ErrUpdateChecksOffLocked):

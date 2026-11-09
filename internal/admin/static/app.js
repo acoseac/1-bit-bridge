@@ -4595,9 +4595,10 @@ function applyTrayManaged(entry) {
 // console cannot tell whether the off was saved or what stopped it, so the
 // words claim no cause and say to check the switch once the bridge answers.
 // The off waits for an install of another process that is past its decision
-// and is saved after its swap, but where the swap stops the bridge's Windows
-// service (round 4: backlog B831). A refusal the bridge answered, the 503 of a
-// stop among them, says what happened in its own words, and gets nothing.
+// and is saved after its swap (round 4). What stays open here, for the
+// bridge's Windows service, is backlog B831. A refusal the bridge answered,
+// the 503 of a stop among them, says what happened in its own words, and gets
+// nothing.
 function updateChecksOffLost(sent, err) {
   if (sent?.updateCheckEnabled !== false || err?.status) return "";
   return "; update checks may not have been turned off: once the bridge answers, " +
