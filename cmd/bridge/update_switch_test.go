@@ -239,6 +239,34 @@ func TestBridgeUpdateRefusesItsCheckAndItsInstallWhileUpdateChecksAreOff(t *test
 	})
 }
 
+// TestTheCaveatIsSaidWhereTheFilesKeyCannotBeRuledOut: the refusal says what
+// the key costs a rollback wherever config.WritesUpdateCheckKey cannot read
+// the bytes for the key, since the key cannot then be ruled out (B761's round
+// 4, the Claude review of its brief). `bridge update` loads its settings from
+// those bytes first, and a load refuses such bytes before the switch is read,
+// so no run of the command reaches the refusal over them: this holds the
+// refusal's own reading to the rule.
+func TestTheCaveatIsSaidWhereTheFilesKeyCannotBeRuledOut(t *testing.T) {
+	t.Setenv(updateCheckVar, "false")
+	for _, c := range []struct {
+		name, raw string
+		caveat    bool
+	}{
+		{name: "an update block that is no mapping", raw: "update: [1, 2]\n", caveat: true},
+		{name: "a document that does not parse", raw: "update: {\n", caveat: true},
+		{name: "no key", raw: "update:\n  autoInstall: false\n"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			var out strings.Builder
+			refuseUpdateChecksOff(&out, "bridge.yaml", []byte(c.raw))
+			said := strings.Contains(out.String(), "a release from before the switch refuses settings that write update.checkEnabled")
+			if said != c.caveat {
+				t.Errorf("the caveat over %q: %v, want %v:\n%s", c.raw, said, c.caveat, out.String())
+			}
+		})
+	}
+}
+
 // answerAfter answers the install's prompt with what r gives, once do has
 // run: an operator's change made while the prompt waits. Read runs on the
 // test's goroutine, which runs the command.
