@@ -36,10 +36,16 @@ func updateChecksOffSave(dataDir, binaryPath, configPath string, within time.Dur
 		})
 		if err != nil {
 			lock.Release()
+			// What failed, for the log alone, by the refusal's kind: the
+			// backup's check may name the bridge's own files, which a console
+			// body does not; the install marker's read error names no path
+			// even there (B761's round 4, B613's round 5 for the marker).
 			var unchecked *updater.ChecksOffUncheckedError
-			if errors.As(err, &unchecked) {
-				// What failed, for the log alone: it may name the bridge's own
-				// files, which a console body does not.
+			var unread *updater.ChecksOffMarkerError
+			switch {
+			case errors.As(err, &unread):
+				logger.Warn("an off of update checks was refused: the install marker could not be read", "detail", unread.Detail)
+			case errors.As(err, &unchecked):
 				logger.Warn("an off of update checks was refused: the backup did not answer its check", "detail", unchecked.Detail)
 			}
 			return nil, consoleChecksOffError(err)

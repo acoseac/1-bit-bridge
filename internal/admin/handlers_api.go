@@ -4003,7 +4003,8 @@ func (s *Server) lockSettingsWrite() {
 // refusal's code and its words, which name no path and say what to do, for
 // the install marker's lock it could not hold (`marker-locked`), a crash
 // rollback the off would keep from its backup (`update-checks-off-refused`)
-// and a backup that did not answer (`update-checks-off-unchecked`); 503
+// and a backup that did not answer or an install marker that could not be
+// read (`update-checks-off-unchecked`); 503
 // `stopping` for a wait the request's end stopped, which on Windows is the
 // stop of this service by a `bridge update` past its decision; anything else
 // a 500 in words, logged whole.

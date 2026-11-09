@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -366,7 +367,10 @@ func TestAnOffIsSavedWhereNoCrashRollbackWouldPutBackABackupThatRefusesTheKey(t 
 		setup func(t *testing.T, c offCase)
 	}{
 		{name: "no install marker"},
-		{name: "a marker that does not read", setup: func(t *testing.T, c offCase) {
+		// LoadState takes a marker that does not parse for none, with a Warn,
+		// and so does every start's read of it (recoverCrashedInstall,
+		// AdmitBoot): no crash rollback acts on it.
+		{name: "a marker that does not parse", setup: func(t *testing.T, c offCase) {
 			if err := os.WriteFile(StatePath(c.dir), []byte("{not json"), 0o600); err != nil {
 				t.Fatal(err)
 			}
@@ -499,6 +503,80 @@ func TestAnOffWhoseBackupDoesNotAnswerIsRefused(t *testing.T) {
 			t.Errorf("the backup was asked %q with no copy to read, want nothing", got)
 		}
 	})
+}
+
+// TestAnOffOverAnInstallMarkerThatCannotBeReadIsRefused: a marker LoadState
+// cannot read (a permission, a directory in its place), unlike one that is not
+// there or does not parse, refuses the off, failing closed (backlog B761's
+// round 4): this serve cannot tell whether a start reads it later, a start run
+// as another user or past an error that does not last, and such a start's crash
+// rollback may act on it. The refusal is the marker's own
+// (*ChecksOffMarkerError, matching ErrChecksOffUnchecked): its words say the
+// install marker could not be read and give the one way to turn the checks off
+// without the key, and name no version (none was read), no backup and no path;
+// its Detail is the read's error without its path, and Unwrap keeps the error
+// for code. The backup is asked nothing, and the settings are as they were.
+func TestAnOffOverAnInstallMarkerThatCannotBeReadIsRefused(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T, c offCase)
+		cause error
+	}{
+		{"a marker this user may not read", func(t *testing.T, c offCase) {
+			if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+				t.Skip("a file this user may not read needs POSIX modes and a user that is not root")
+			}
+			if err := os.Chmod(StatePath(c.dir), 0); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.Chmod(StatePath(c.dir), 0o600) })
+		}, fs.ErrPermission},
+		{"a directory where the marker goes", func(t *testing.T, c offCase) {
+			if err := os.Remove(StatePath(c.dir)); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(StatePath(c.dir), 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := probationMarker(1)
+			c := newOffCase(t, &st)
+			tc.setup(t, c)
+			b := refusesTheKey(c)
+			err := c.decide(context.Background(), b, 0)
+			var marker *ChecksOffMarkerError
+			if !errors.As(err, &marker) || !errors.Is(err, ErrChecksOffUnchecked) || errors.Is(err, ErrChecksOffKeepsTheBackup) {
+				t.Fatalf("the off's decision over a marker that cannot be read = %v, want a *ChecksOffMarkerError", err)
+			}
+			if tc.cause != nil && !errors.Is(err, tc.cause) {
+				t.Errorf("the refusal does not keep the read's error (%v) for code: %v", tc.cause, err)
+			}
+			words := err.Error()
+			for _, says := range []string{"update checks were not turned off", "the install marker could not be read",
+				"nothing was saved", "BRIDGE_UPDATE_CHECK_ENABLED=false", "restart the service"} {
+				if !strings.Contains(words, says) {
+					t.Errorf("the refusal does not say %q: %q", says, words)
+				}
+			}
+			for _, never := range []string{"probation", "0.2.", "backup,", "  ", " ,"} {
+				if strings.Contains(words, never) {
+					t.Errorf("the refusal says %q, of a marker it could not read: %q", never, words)
+				}
+			}
+			requireNoPathIn(t, err, c.dir)
+			if marker.Detail == "" || strings.Contains(marker.Detail, c.dir) {
+				t.Errorf("the refusal's detail = %q, want the read's error without its path", marker.Detail)
+			}
+			if got := b.askedOf(); got != "" {
+				t.Errorf("the backup was asked %q over a marker that was not read, want nothing", got)
+			}
+			if got, err := os.ReadFile(c.cfg); err != nil || string(got) != offSettings {
+				t.Errorf("the settings after the decision = %q (%v), want them as they were", got, err)
+			}
+		})
+	}
 }
 
 // requireUnchecked requires err to be the decision's refusal of an off it

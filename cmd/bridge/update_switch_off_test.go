@@ -2,16 +2,20 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
 	"testing"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/admin"
+	"github.com/acoseac/1-bit-bridge/internal/logging/loggingtest"
 	"github.com/acoseac/1-bit-bridge/internal/supervision"
 	"github.com/acoseac/1-bit-bridge/internal/updater"
 	"github.com/acoseac/1-bit-bridge/internal/version"
@@ -246,6 +250,97 @@ func TestTheConsolesOffIsRefusedWhileACrashRollbackWouldPutBackABackupThatRefuse
 		}
 		stopServed(t, sb)
 	})
+}
+
+// requirePOSIXReadRefusal skips a case that makes a file this user may not
+// read: mode 000 refuses nobody on Windows, nor root.
+func requirePOSIXReadRefusal(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("a file this user may not read needs POSIX modes and a user that is not root")
+	}
+}
+
+// unreadableMarker writes an install marker of an install of this version
+// over previousVersion into dataDir and makes it unreadable to this user,
+// for the rest of the test.
+func unreadableMarker(t *testing.T, dataDir string) {
+	t.Helper()
+	if err := updater.SaveState(dataDir, updater.State{Status: "installing", TargetVersion: version.ServerVersion,
+		PreviousVersion: previousVersion, SwapStarted: true, AttemptedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	marker := updater.StatePath(dataDir)
+	if err := os.Chmod(marker, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(marker, 0o600) })
+}
+
+// TestTheConsolesOffOverAnInstallMarkerThatCannotBeReadIsRefused: serve runs
+// with update checks on, and the install marker in its data dir is one its
+// user may not read; the console's off is refused, failing closed (backlog
+// B761's round 4), 409 update-checks-off-unchecked in the marker's own words:
+// the install marker could not be read, and the one way to turn the checks off
+// without the key, with no version (none was read, so none is empty either),
+// no backup and no path; the settings and the running switch stay as they
+// were.
+func TestTheConsolesOffOverAnInstallMarkerThatCannotBeReadIsRefused(t *testing.T) {
+	requirePOSIXReadRefusal(t)
+	b, cfgPath := offBridge(t)
+	before := readBytes(t, cfgPath)
+	unreadableMarker(t, b.dataDir)
+	a := patchSettingsAt(b.adminBase, `{"updateCheckEnabled":false}`)
+	if a.err != nil || a.status != http.StatusConflict || a.code != "update-checks-off-unchecked" {
+		t.Fatalf("the off over a marker that cannot be read = %d %s %q (%v), want 409 update-checks-off-unchecked",
+			a.status, a.code, a.message, a.err)
+	}
+	for _, says := range []string{"the install marker could not be read", "nothing was saved",
+		"BRIDGE_UPDATE_CHECK_ENABLED=false", "restart the service"} {
+		if !strings.Contains(a.message, says) {
+			t.Errorf("the refusal does not say %q: %q", says, a.message)
+		}
+	}
+	for _, never := range []string{"probation", previousVersion, "backup,", "  ", " ,", b.dataDir} {
+		if strings.Contains(a.message, never) {
+			t.Errorf("the refusal says %q, of a marker it could not read: %q", never, a.message)
+		}
+	}
+	requireOffNotSaved(t, cfgPath, before, b.adminBase)
+}
+
+// TestTheOffsAskSaysWhatRefusedItInTheLog: serve's ask for an off
+// (updateChecksOffSave) logs its refusal at Warn by its kind: over an install
+// marker it could not read, that the marker could not be read, with the read's
+// error and no path (an install marker's read error names none in a log line);
+// it answers the console's sentinel for it and lets the install marker's lock
+// go.
+func TestTheOffsAskSaysWhatRefusedItInTheLog(t *testing.T) {
+	requirePOSIXReadRefusal(t)
+	dir := t.TempDir()
+	dataDir := filepath.Join(dir, "data")
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	unreadableMarker(t, dataDir)
+	logs := loggingtest.Record(t)
+	release, err := updateChecksOffSave(dataDir, filepath.Join(dir, "bridge"), filepath.Join(dir, "bridge.yaml"), 0)(t.Context())
+	if release != nil || !errors.Is(err, admin.ErrUpdateChecksOffUnchecked) {
+		t.Fatalf("the ask over a marker that cannot be read = %v (a release %v), want admin.ErrUpdateChecksOffUnchecked",
+			err, release != nil)
+	}
+	lines := logs.Lines("an off of update checks was refused: the install marker could not be read")
+	if len(lines) != 1 || !strings.Contains(lines[0], syscall.EACCES.Error()) {
+		t.Errorf("the log's line for the refusal = %q, want one naming the read's error:\n%s", lines, strings.Join(logs.All(), "\n"))
+	}
+	if leaked := logs.Carrying(dataDir); len(leaked) != 0 {
+		t.Errorf("the log names the data dir: %q", leaked)
+	}
+	lock, err := updater.LockState(t.Context(), dataDir)
+	if err != nil || !lock.Held() {
+		t.Errorf("the install marker's lock after the refusal = %v (held %v), want it let go", err, lock.Held())
+	}
+	lock.Release()
 }
 
 // TestACrashRollbackWithTheVariableOffPutsAReleaseBeforeTheSwitchBack: update

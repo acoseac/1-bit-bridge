@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/config"
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 )
 
 // The console's save that turns update checks off (backlog B761's round 3).
@@ -186,6 +187,31 @@ func (e *ChecksOffUncheckedError) Error() string {
 // Is makes a *ChecksOffUncheckedError match ErrChecksOffUnchecked.
 func (e *ChecksOffUncheckedError) Is(target error) bool { return target == ErrChecksOffUnchecked }
 
+// ChecksOffMarkerError is ChecksOffRefused's refusal, failing closed, of an
+// off over an install marker it could not read (backlog B761's round 4): what
+// the boot's crash rollback would do cannot be told from a marker that was not
+// read, so its words name no version, no backup and no path, and give the one
+// way to turn the checks off without writing the key. Detail is the read's
+// error without its path, for the bridge's log alone (an install marker's read
+// error names no path in a refusal or a log line, B613's round 5), and Unwrap
+// keeps the error for code. It matches ErrChecksOffUnchecked.
+type ChecksOffMarkerError struct {
+	Detail string
+	err    error
+}
+
+func (e *ChecksOffMarkerError) Error() string {
+	return "update checks were not turned off: the install marker could not be read, so whether an off saved now " +
+		"would keep a crash rollback from putting a backup back cannot be told; nothing was saved. To turn the checks " +
+		"off without writing update.checkEnabled, set BRIDGE_UPDATE_CHECK_ENABLED=false in the service's environment " +
+		"and restart the service"
+}
+
+// Is makes a *ChecksOffMarkerError match ErrChecksOffUnchecked.
+func (e *ChecksOffMarkerError) Is(target error) bool { return target == ErrChecksOffUnchecked }
+
+func (e *ChecksOffMarkerError) Unwrap() error { return e.err }
+
 // ChecksOffRefused decides whether an off of update checks may be saved now,
 // under the install marker's lock its caller holds (LockForChecksOff), and
 // answers nil where it may (backlog B761's round 3, the Claude review's Medium
@@ -218,12 +244,27 @@ func (e *ChecksOffUncheckedError) Is(target error) bool { return target == ErrCh
 // The checks run within s.Within together, ChecksOffWithin by default. One
 // that does not answer within it, fails, or cannot be asked (the copy cannot
 // be written), refuses the off, failing closed (*ChecksOffUncheckedError); a
-// stop of ctx is ctx's error. A marker that cannot be read is no refusal: the
-// boot's admission removes it, and no crash rollback acts on one.
+// stop of ctx is ctx's error.
+//
+// The marker is read as every start reads it, through LoadState, which
+// answers a marker that is not there, and one that does not parse (with its
+// Warn), as no install: a zero State and no error. The boot does the same with
+// both: its crash rollback (cmd/bridge's recoverCrashedInstall) finds no
+// install armed in either, and its admission (AdmitBoot) records nothing over
+// them, so no crash rollback acts on either, and the off is saved. Any other
+// failure to read the marker (a permission, EIO, EMFILE, a directory in its
+// place) refuses the off, failing closed (*ChecksOffMarkerError, backlog
+// B761's round 4). A start that cannot read the marker either does nothing
+// with it but remove it (recoverCrashedInstall leaves it to its admission,
+// which removes it, durably), but this serve cannot tell whether the start
+// that reads it next fails too: an error that does not last (EMFILE on a busy
+// serve, EIO) passes, and a start run as another user, root among them, reads
+// what this one may not, and its crash rollback may then act on an install
+// the off kept from its backup.
 func ChecksOffRefused(ctx context.Context, s ChecksOffSave) error {
 	st, err := LoadState(s.DataDir)
 	if err != nil {
-		return nil
+		return &ChecksOffMarkerError{Detail: fsutil.ErrorWithoutPath(err), err: err}
 	}
 	if ok, _ := CrashRollbackAtLimit(st, s.Current); !ok || !backupBeside(s.BinaryPath) {
 		return nil

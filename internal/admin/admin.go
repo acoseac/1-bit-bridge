@@ -1408,8 +1408,9 @@ var (
 	ErrUpdateChecksOffRefused = errors.New("an off saved now would keep a crash rollback from putting the backup back")
 	// ErrUpdateChecksOffUnchecked: whether an off saved now would keep a crash
 	// rollback from putting the backup back could not be told, the backup's
-	// check not answering, so nothing was saved, failing closed (backlog
-	// B761's round 3). A 409, `update-checks-off-unchecked`.
+	// check not answering (backlog B761's round 3) or the install marker not
+	// read (its round 4), so nothing was saved, failing closed. A 409,
+	// `update-checks-off-unchecked`, in words of each case's own.
 	ErrUpdateChecksOffUnchecked = errors.New("whether an off saved now would keep a crash rollback from putting the backup back could not be told")
 )
 
