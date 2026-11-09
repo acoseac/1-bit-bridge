@@ -90738,3 +90738,231 @@ give-up gate has a unit test and no path; `RecordRead` tells apart no record
 a give-up can read back that `DatabaseState == ""` did not, and is kept
 explicit; and what stays open of a hold given up is named here by its id
 alone, backlog B653.
+
+## 2026-11-09 — B653 PR 1 round 6: a verdict's write admitted only before a give-up, no removal of a veto begun after one, the read-back said apart from the write
+
+The sixth round of backlog B653's first PR, on `feat/b653-snapshot-verify`
+(PR #1444) from round 5's tip with its rules (30ce9e29); worker b653 on
+legion0 (Ubuntu 26.04, linux/amd64, go1.27.3, `GOTOOLCHAIN=local`,
+`GOPROXY=off`). It answers round 5's two reviews (Codex's findings and the
+Claude API's) and both reviews of the round's brief. Commits: the backup
+package's work and its tests f0e5539b, the reporters and the console's log
+a1eb4ce9, the page 76532ea6, the admission test's bounded wait 15ddb078, the
+setAside test's question of what it tried c74c18ee, and this record. The
+rules go through `rules-b653-r6.patch`: cli-serve.md's two B653 lines and
+their verbatim copies in History-rules-cli-serve.md, each changed alike, a
+paragraph of the sixth round's there, and admin-console.md's backups bullet.
+
+### The findings, as built
+
+- **A verdict's write is admitted only before its hold's give-up** (Codex's
+  P1, the Claude API's High on the brief, Codex's review of the brief). The
+  fifth round's write took a fresh signal at its registration, which only a
+  give-up of that step ended, so a give-up between `verifyHeld`'s last
+  `gaveUp()` and the write's `stepOf` found no step of the write's to end:
+  the write ran on a live signal, published the check that had ended and
+  cleared the veto, after its caller was told the verification was given up.
+  `publishOf` (through `runStep`) reads `h.given` and registers the write's
+  step in one section of the hold's lock, with no I/O in it: given up
+  before, the write is not admitted and never runs, and the worker writes its
+  `INCOMPLETE` in a step of its own (`stepIncomplete`, whose fresh signal no
+  earlier give-up ended); given up after, `giveUpAs` ends the signal the
+  write was registered with. `stepOf` is `runStep` with no admission:
+  `stepIncomplete`, `stepReadBack` and every other step are unchanged.
+  `onAdmission`, nil in production, runs inside that section, so a test can
+  park a give-up against it. `stepSignal`'s doc no longer says "by nothing
+  else".
+- **No removal of a veto begins after a give-up** (Codex's P1, the Claude
+  API's Low, both brief reviews). `publishVerdict` takes a `publication`:
+  its step's signal, which its rename asks before every attempt, and its
+  hold's give-up (`hold.gaveUp`), which every removal of a veto asks beside
+  the signal, immediately before it (`removeVetoes`, `errVetoKept`), since a
+  write begun after the hold was given up, the `INCOMPLETE`'s, has a signal
+  no earlier give-up ended. The unchanged record's branch asks before its
+  lookup of the veto and again before each removal after it (`vetoedAt`'s
+  `Lstat` can wait on the folder). Never the hold's context. A removal
+  already inside the filesystem's when the give-up comes finishes, and the
+  record then reads what the check that ended found and the write made
+  durable; the rule and its History say so, and a lone veto's case pins what
+  the record reads (`VERIFIED`).
+- **setAside keeps what it made once its step is given up** (the Claude
+  API's Low, Codex's review of the brief). `setAside` takes its step's
+  signal (`stepVeto`'s, which a give-up of its hold ends while it runs, since
+  `giveUpAs` ends the step the hold is in): once it has ended, it tries no
+  further candidate and removes none it made, whatever a sync answers then.
+- **The read-back said apart from the write** (Codex's two P2s, the Claude
+  API's Low, Codex's review of the brief). The read-back says why it read
+  nothing (`VerifyResult.ReadErr`: its read's failure, or
+  `ErrReadBackGivenUp`), and the verification answers
+  `ErrRecordNotReadBack` beside whatever else it answers (`fmt.Errorf` with
+  two `%w`, so each keeps its identity), while `Write` still says what the
+  write did. `reportVerdict` no longer prints what the check found as the
+  record: a record not read back is said so, and why (`readWords`: "its
+  record could not be read back", or "its read-back was given up, so its
+  record was not read"), in the given-up, refused, not-recorded and
+  found-but-not-recorded cases alike, and the command exits 1; the
+  found-but-not-recorded arm words the write from its outcome
+  (`keptWords`), so a durable write whose read-back failed says "it wrote
+  its record; its record could not be read back" and never that it failed
+  or was not recorded. The ticker says the same in its one line
+  (`tickerKeptWords`), and the console's job logs a verification whose write
+  ended (recorded, or nothing to change) with an error as "answered an error
+  once its write had ended", with `write` (`WriteOutcome.String`) and
+  `recordRead`, never as a verdict not recorded.
+
+Where this departs from the brief, or reads it:
+
+- The brief's per-step flag "pre-cancels its signal" where the hold was
+  given up; a write run on that signal lands nothing, the `INCOMPLETE` its
+  case requires included. The flag refuses the write instead, which then
+  never runs, and the worker writes the `INCOMPLETE` in its own step; the
+  signal is ended all the same.
+- The removal already under way is the exception the brief allows to state,
+  not a design that keeps the veto until it settles: that would need a
+  removal no give-up can interrupt, and a write that waits on it past its
+  bound.
+- The CLI's arm for what a check found and did not record words the write
+  from its outcome in every case, not only where the read-back failed: a
+  check past its deadline whose `INCOMPLETE` was written now says it wrote
+  its record, where the fifth round said what it found was not recorded.
+  The ticker's line likewise.
+- The console's job, which the brief does not name, logs a write that ended
+  apart from one that did not, so a durable write whose read-back failed is
+  never logged as a verdict not recorded.
+- `ErrRecordNotReadBack`'s words do not say the verification had written,
+  since the refused and the not-recorded cases write nothing.
+- The ticker's cases beyond its own pass are a table over
+  `reportTickerVerdict` with the results built by hand, beside one real
+  pass through `runBackupTicker`.
+
+### The reds at the round before
+
+On a copy of 30ce9e29 (`git archive`) with this round's new and changed
+tests in it, and a scratch shim, never committed, giving it the names and
+none of the behaviour: the two new errors, `VerifyResult.ReadErr` as a field
+nothing sets, `WriteOutcome.String`, the setters of the three new seams with
+each hook called where the base does what it stands in for (`removeVetoes`'
+`os.Remove`, `vetoedAt`'s `os.Lstat`, the read-back's step, which reads
+nothing where the hook fails it, as the base's own failed read does),
+`publishOf` as the base's `stepOf` of the write, admitting it whatever the
+hold says, an `onAdmission` nothing calls, and `publishOver` over the
+base's `publishVerdict`, which asks its step's signal alone. Predictions
+written first; every result was as predicted:
+
+- internal/backup: `TestTheVerdictsWriteIsAdmittedInOneSectionWithTheGiveUp`
+  in both cases (`admitted true, answered true, ran true`; `the give-up
+  parked against the admission never ran`);
+  `TestNoVetoRemovalBeginsOnceItsHoldIsGivenUp` in both (the veto removed);
+  `TestAVerdictsWriteIsAdmittedOnlyBeforeAGiveUp` in both (`database
+  VERIFIED`, want `INCOMPLETE "cancelled"`; over the `VERIFIED` the record
+  rewritten and the veto removed; every reader reading it verified);
+  `TestNoVetoRemovalBeginsAfterItsWriteIsGivenUp`'s two removals (`the
+  removal of the veto beside the bundle began after the write was given
+  up`); `TestAVetoSetAsideIsKeptOnceItsStepIsGivenUp` (the veto removed,
+  the veto beside the bundle tried, every reader reading it verified: its
+  question of what was tried was added after the first run at the base, and
+  run there again); `TestARecordNotReadBackIsSaidApartFromItsWrite` in all
+  three (`<nil>`; the staging's error alone; `ErrCheckGivenUp` alone).
+- cmd/bridge: `TestBridgeBackupVerifySaysTheWriteAndTheReadBackApart` in all
+  six (the durable write, the quick check over a full `FAILED` and bridge
+  backup's own snapshot exited 0, printing what the check found as the
+  record; the refused, the not-recorded and the failed write never said the
+  record was not read back); `TestTheTickerSaysTheWriteAndTheReadBackApart`
+  in the pass's own snapshot (never said, 60 s: the base read the record it
+  had not read as no verified recovery point, with empty verdicts), and the
+  not-recorded, failed-write, durable-write and given-up cases;
+  `TestBridgeBackupVerifySaysWhatAGivenUpVerificationsRecordReads`'s
+  read-back given up (its new words).
+- internal/admin: `TestTheConsoleSaysARecordNotReadBackApartFromItsWrite`
+  (the base logged `a snapshot is not a verified recovery point` with
+  `database= files=`).
+
+Not reds, as predicted: `TestAnUnchangedRecordKeepsItsVetoOnceItsWriteIsGivenUp`
+(round 5's), the lone veto's removal under way (the exception holds at the
+base too), the ticker's refused recheck (the base had its words), and the
+other given-up cases.
+
+### Negative controls
+
+Each mutates one file of the committed tree at one site or two, runs the
+tests named, and puts the committed bytes back, compared with HEAD's blob
+before each mutation and after each restore (a runner in the scratch folder,
+the predictions written to a file before the first run). All sixteen went as
+predicted; B3 and B4's first form left `database` and `files` unused and did
+not build, which reads as no control, and they ran again with
+`earnsClear`'s call kept beside the forced value:
+
+- the admission: refusing nothing, item 1 reverted (A1: red in the section
+  test's give-up before the registration and in both end-to-end cases,
+  where the completed check landed; green, as predicted, in its give-up
+  during the registration); the check apart from the registration, unlocked
+  around the hook (A2: red in the give-up during the registration, `the
+  write's signal stayed live`; green elsewhere); no `INCOMPLETE` once the
+  write is refused (A3: red over a `PENDING`, which stayed `PENDING`; green
+  over a `VERIFIED`, whose `INCOMPLETE` changes nothing).
+- the removals: `removeVetoes` asking nothing before each removal (B1: red
+  in the two removals and the give-up during the lookup; green in the lone
+  veto and the hold's give-up, asked before the lookup); the hold's give-up
+  not asked (B2: red in the hold given up; green end to end, where the
+  step's own signal ends with the give-up); the `INCOMPLETE`'s path with
+  `clears` forced (B3: green in `TestARecheckGivenUpLeavesTheVetoItMade` and
+  the end-to-end case over a `VERIFIED`, the hold's give-up alone keeping
+  the veto) and with the hold's give-up not asked as well (B4: red in both).
+- `setAside`: its cleanup ignoring its signal (B5: the veto it made
+  removed, every reader reading it verified); its loop ignoring it (B6: the
+  veto beside the bundle tried after the give-up, the veto it made kept).
+- the read-back and the reporters: the read-back saying nothing of why (C1:
+  red in the backup test's three cases, the CLI's six, the given-up words
+  and the console's line); the verification's other error dropped (C2: red
+  in the failed write's and the given-up read-back's identities, and the
+  CLI's refused recheck and failed write; green in the durable writes and
+  the recheck not recorded, whose words coincide); the CLI wording the write
+  from the error (C3: the three durable writes); one word for both causes
+  (C4: the CLI's and the ticker's given-up read-back); the ticker printing a
+  record it did not read (C5: not recorded, the failed write, the durable
+  write); the CLI printing one (C6: all six); the console's line saying not
+  recorded (C7).
+
+### What twenty runs under the race detector found
+
+Nothing. The round's new and changed tests, twenty times each under the
+race detector, single packages beside the build slot: internal/backup 140
+passes (seven tests), cmd/bridge 60 (three), internal/admin 20 (one); no
+failure and no race.
+
+### The gates
+
+go1.27.3, `TMPDIR` on disk under the worktree's `.tmp`:
+
+- `make test TEST_PKGS='./internal/backup/... ./internal/doctor/...
+  ./internal/admin/... ./internal/atomicwrite/... ./internal/fsutil/...
+  ./cmd/bridge/...'`, the race detector, `-p 4`, `-timeout 30m`, inside the
+  build slot (`buildslot.py b653`, 37 min in its queue), on c74c18ee: ok,
+  1536 s (internal/backup 624.9 s, internal/doctor 6.9 s, internal/admin
+  1049.8 s, internal/atomicwrite 20.0 s, internal/fsutil 3.4 s, cmd/bridge
+  1506.4 s).
+- the round's new and changed tests by name, `-race -count=20`: as above.
+- `make vet`, `GOOS=linux GOARCH=386 make vet`, and `go vet` of the seven
+  package trees the branch touches for windows and darwin, inside the slot
+  (54 min in its queue), on c74c18ee: nothing reported; the three changed
+  packages had been vetted alone for windows, darwin and linux/386 before
+  it, with the same answer. `make build-all` there: the six targets built,
+  the build-site census first (`check-build-tags: OK`).
+- the pinned gofmt (`go run cmd/gofmt -l`) over every Go file the round
+  changed: nothing listed.
+- `rules-b653-r6.patch` applied to a copy of HEAD: it matches the
+  generator's files, `make docs-check` passes there (cli-serve.md 79,874
+  bytes, admin-console.md 87,853, History-rules-cli-serve.md 355,626; the
+  worst load 69.7%), the census passes there, and each of the 93 test names
+  it cites is declared.
+- cmd/bridge's `TestEveryCitedTestNameExists`, which reads this record, on
+  its commit: ok.
+
+### Follow-ups
+
+The backlog file is not on legion0, so these go to the PR's report: the
+console's job still logs a write not known durable as a verdict not
+recorded (its error says which), as it did before this round; and the
+unchanged record's removal of a veto is still reached with a clear only by
+a verdict equal to the record to its times. What stays open of a hold given
+up is named here by its id alone, backlog B653.
