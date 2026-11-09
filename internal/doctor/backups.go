@@ -51,9 +51,13 @@ func BackupChecks(st backup.Status, err, lockErr error, stuck *backup.StuckCheck
 		if stuck.Step != "" {
 			step = " (" + stuck.Step + ")"
 		}
+		what := "a verification of snapshot " + stuck.Snapshot
+		if stuck.Pruning() {
+			what = "a prune of the snapshots"
+		}
 		out = append(out, warn(checkNameBackupCheck,
-			fmt.Sprintf("a verification of snapshot %s did not end%s and was given up %s, and still holds the backups folder: no snapshot there is verified or pruned until it ends, and the scheduled snapshot waits",
-				stuck.Snapshot, step, agoWords(now.Sub(stuck.Since))),
+			fmt.Sprintf("%s did not end%s and was given up %s, and still holds the backups folder: no snapshot there is verified or pruned until it ends, and the scheduled snapshot waits",
+				what, step, agoWords(now.Sub(stuck.Since))),
 			"the end of the process that runs it ends it: restart the bridge, or stop the backup --verify command that runs it; if it comes back, the data directory's storage is not answering (backlog B653)"))
 	}
 	if err != nil {

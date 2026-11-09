@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -146,15 +147,19 @@ func TestBridgeBackupVerifySaysWhatARecheckFoundWhereItCannotBeRecorded(t *testi
 // B653's fourth round's red for what bridge backup --verify says of a
 // verification given up (the Claude API's Low on round 3, both reviews of the
 // round's brief): never what the INCOMPLETE it was given up with would say,
-// but whether it wrote its record and what that record reads as read back,
-// which every reader reads, and that its step still holds the snapshots.
-// Given up over a PENDING, it wrote INCOMPLETE; over a FAILED, whose merge
-// keeps the FAILED, it wrote nothing and the record reads FAILED; and where
-// its INCOMPLETE's write fails, it wrote nothing, says the write's failure,
-// and the record reads as before (the PENDING of a snapshot taken just now,
-// with no owner to ask, which reads by its age). Red on the round before,
-// which said of each what this check found and that it was not recorded,
-// whatever was written.
+// but how far its write went and what its record reads as read back, which
+// every reader reads, and that its step still holds the snapshots. Given up
+// over a PENDING, it wrote INCOMPLETE; over a FAILED, whose merge keeps the
+// FAILED, its write found nothing to change and the record reads FAILED; and
+// where its INCOMPLETE's write fails, its write failed, says why, and the
+// record reads as before (the PENDING of a snapshot taken just now, with no
+// owner to ask, which reads by its age). Its fifth round's red (Codex's P2 on
+// round 4, the review of the round's brief): "it wrote nothing" only where no
+// write began; a write whose rename landed before its sync did not answer did
+// not finish, which says so, the record read back reading what it wrote; and
+// a record not read back is said so, after how far the write went, and never
+// printed. Red on the round before, which said "it wrote nothing" wherever
+// what was found was not recorded.
 func TestBridgeBackupVerifySaysWhatAGivenUpVerificationsRecordReads(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -163,8 +168,10 @@ func TestBridgeBackupVerifySaysWhatAGivenUpVerificationsRecordReads(t *testing.T
 		why   backup.Reason
 	}{
 		{"over a PENDING", "it wrote its record, which reads:", backup.StateIncomplete, backup.ReasonDeadline},
-		{"over a FAILED", "it wrote nothing, and its record reads:", backup.StateFailed, backup.ReasonHash},
-		{"whose INCOMPLETE is not written", "it wrote nothing, and its record reads:", backup.StatePending, ""},
+		{"over a FAILED", "its write found nothing to change, and its record reads:", backup.StateFailed, backup.ReasonHash},
+		{"whose INCOMPLETE is not written", "its write failed, and its record reads:", backup.StatePending, ""},
+		{"whose write did not finish", "its write did not finish, and its record reads:", backup.StateIncomplete, backup.ReasonDeadline},
+		{"whose record was not read back", "it wrote its record; its record could not be read back", backup.StateIncomplete, backup.ReasonDeadline},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfgPath, _, root := backupInstall(t)
@@ -188,7 +195,33 @@ func TestBridgeBackupVerifySaysWhatAGivenUpVerificationsRecordReads(t *testing.T
 			case "whose INCOMPLETE is not written":
 				t.Cleanup(backup.SetVerdictWriteFailuresForTest(func(string) error { return errors.New("injected: the staging failed") }, nil, nil))
 			}
+			mpath := filepath.Join(dir, backup.ManifestFile)
+			stalled := make(chan struct{})
+			var letGo sync.Once
+			switch tc.name {
+			case "whose write did not finish":
+				// The rename lands, and the folder's sync after it does not
+				// answer until the test's end.
+				t.Cleanup(backup.SetSyncVerdictForTest(func(path string) error {
+					if path == mpath {
+						<-stalled
+					}
+					return fsutil.SyncParentDir(path)
+				}))
+			case "whose record was not read back":
+				// The verification reads the manifest a third time to read its
+				// record back, after its first read and its write's: that read
+				// does not answer until the test's end.
+				var reads atomic.Int32
+				t.Cleanup(backup.SetOnManifestReadForTest(func(path string) {
+					if path == mpath && reads.Add(1) == 3 {
+						<-stalled
+					}
+				}))
+			}
 			parkChecks(t, root)
+			// Registered after parkChecks, so run before its wait for the holds.
+			t.Cleanup(func() { letGo.Do(func() { close(stalled) }) })
 			var stdout, stderr bytes.Buffer
 			code := backupCmd([]string{"--config", cfgPath, "--verify", dir}, &stdout, &stderr)
 			out, errs := stdout.String(), stderr.String()
@@ -202,9 +235,19 @@ func TestBridgeBackupVerifySaysWhatAGivenUpVerificationsRecordReads(t *testing.T
 			}
 			reads := "database: " + backup.StateWords(tc.reads, whys)
 			at := strings.Index(out, tc.wrote)
-			if at < 0 || !strings.Contains(out[at:], reads) {
+			switch {
+			case tc.name == "whose record was not read back":
+				if at < 0 || strings.Contains(out, "database:") {
+					t.Errorf("the command did not say %q alone, with no record printed:\n%s", tc.wrote, out)
+				}
+				letGo.Do(func() { close(stalled) })
+			case at < 0 || !strings.Contains(out[at:], reads):
 				t.Errorf("the command did not say %q, then %q:\n%s", tc.wrote, reads, out)
 			}
+			if strings.Contains(out, "it wrote nothing") {
+				t.Errorf("the command said it wrote nothing of a write that began:\n%s", out)
+			}
+			letGo.Do(func() { close(stalled) })
 			for _, never := range []string{"this check found", "was not recorded"} {
 				if strings.Contains(out+errs, never) {
 					t.Errorf("the command said %q of a verification given up:\n%s%s", never, out, errs)
@@ -232,20 +275,23 @@ func TestBridgeBackupVerifySaysWhatAGivenUpVerificationsRecordReads(t *testing.T
 
 // TestTheTickerSaysWhatAGivenUpVerificationsRecordReads: the ticker's report
 // of a verification given up (backlog B653's fourth round, as bridge
-// backup's) says whether it wrote its record and what that record reads as
-// read back, and that its step still holds the snapshots: over the PENDING of
-// the snapshot its pass took, it wrote INCOMPLETE; where that write fails, it
-// wrote nothing, says the write's failure, and the record reads PENDING, its
-// owner, the pass's own capture, holding it still. A record over a FAILED is
-// not one a pass verifies. Red on the round before, which said only what the
-// record read.
+// backup's) says how far its write went and what its record reads as read
+// back, and that its step still holds the snapshots: over the PENDING of the
+// snapshot its pass took, it wrote INCOMPLETE; where that write fails, its
+// write failed, says why, and the record reads PENDING, its owner, the pass's
+// own capture, holding it still; and where its rename landed before its sync
+// did not answer, its write did not finish, and the record reads what it
+// wrote (the fifth round). A record over a FAILED is not one a pass
+// verifies. Red on the round before, which said "it wrote nothing" wherever
+// what was found was not recorded.
 func TestTheTickerSaysWhatAGivenUpVerificationsRecordReads(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		wrote string
 	}{
 		{"over a PENDING", "it wrote its record, which reads database INCOMPLETE: deadline, files INCOMPLETE: deadline"},
-		{"whose INCOMPLETE is not written", "it wrote nothing, and its record reads database PENDING, files PENDING"},
+		{"whose INCOMPLETE is not written", "its write failed, and its record reads database PENDING, files PENDING"},
+		{"whose write did not finish", "its write did not finish, and its record reads database INCOMPLETE: deadline, files INCOMPLETE: deadline"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, dataDir, root := backupInstall(t)
@@ -253,7 +299,23 @@ func TestTheTickerSaysWhatAGivenUpVerificationsRecordReads(t *testing.T) {
 			if tc.name == "whose INCOMPLETE is not written" {
 				t.Cleanup(backup.SetVerdictWriteFailuresForTest(func(string) error { return errors.New("injected: the staging failed") }, nil, nil))
 			}
+			stalled := make(chan struct{})
+			var letGo, first sync.Once
+			if tc.name == "whose write did not finish" {
+				// The first verdict's rename lands, and the folder's sync after
+				// it does not answer until the test's end.
+				t.Cleanup(backup.SetSyncVerdictForTest(func(path string) error {
+					stall := false
+					first.Do(func() { stall = true })
+					if stall {
+						<-stalled
+					}
+					return fsutil.SyncParentDir(path)
+				}))
+			}
 			parkChecks(t, root)
+			// Registered after parkChecks, so run before its wait for the holds.
+			t.Cleanup(func() { letGo.Do(func() { close(stalled) }) })
 			ctx, cancel := context.WithCancel(context.Background())
 			done := make(chan struct{})
 			drainLoopOnCleanup(t, cancel, done, "the backup ticker")
