@@ -564,7 +564,13 @@ func (b *Backend) setOver(r *dsdReading, st dsdstate.State) (*dsdSet, DSDView) {
 // the set published once it is done. It reads no file on the audio path: a
 // session's admission, its activation and its monitor ask it, and the
 // supervisor's RefreshDSD, on a goroutine of the backend's
-// (RequestRefreshDSD, B762).
+// (RequestRefreshDSD, B762). A set published whose reconciliation did not
+// return (a refresh that panicked between the two, a choice's write's among
+// them) is reconciled by the next refresh, which finds it the same set
+// (dsdJudged, B728 B9 round 18): every occurrence still admitted under the set
+// it replaced is judged then, kept, handed off again or its session's DSD
+// revoked, and what waits for that verdict (unjudgedLocked) has it; the next
+// refresh is at most a session monitor's tick away while a session holds DSD.
 func (b *Backend) refreshDSD() *dsdSet {
 	b.dsdMu.Lock()
 	defer b.dsdMu.Unlock()
@@ -575,6 +581,10 @@ func (b *Backend) refreshDSD() *dsdSet {
 		if pub := b.dsdPub.Load(); !reflect.DeepEqual(pub.view, view) {
 			b.dsdPub.Store(&dsdPublished{set: cur, view: view})
 		}
+		if b.dsdJudged != cur {
+			b.reconcileDSD(cur)
+			b.dsdJudged = cur
+		}
 		return cur
 	}
 	next.gen = cur.gen + 1
@@ -583,6 +593,7 @@ func (b *Backend) refreshDSD() *dsdSet {
 	b.logDSDSet(next)
 	b.published()
 	b.reconcileDSD(next)
+	b.dsdJudged = next
 	return next
 }
 
@@ -640,6 +651,7 @@ func (b *Backend) logDSDSet(d *dsdSet) {
 // under (refusedUnder), which a choice's write or a later set can lift
 // (settleOpen, B728 B9 round 2).
 func (b *Backend) admitDSD(o *occ, f format.NativeDSD) (engine.NativePlan, error) {
+	b.admitting(o.id)
 	cur := b.dsd.Load()
 	if o.leading || b.dsdStale() {
 		cur = b.refreshDSD()

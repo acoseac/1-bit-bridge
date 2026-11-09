@@ -528,16 +528,21 @@ func TestTheProducerHoldsAnOccurrenceAPendingWriteWouldReplan(t *testing.T) {
 // settles that set all the same and gives the writes' turn back, so no
 // occurrence waits for a write that will not publish and the next write is
 // made: before the state's write nothing is written, and after it the next
-// refresh publishes what was.
+// refresh publishes what was. After its publish (B728 B9 round 18), the set
+// is published and the next refresh finds it the same, and reconciles it,
+// none of its reconciliations having returned (dsdJudged).
 func TestAWriteThatPanicsLeavesNothingPending(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		seams func(panicNow func()) *Seams
-		// wrote is the mode the state holds after the panic.
+		// wrote is the mode the state holds after the panic, and lost a set
+		// published whose reconciliation did not return.
 		wrote string
+		lost  bool
 	}{
-		{"before the state's write", func(panicNow func()) *Seams { return &Seams{ChoicePending: panicNow} }, dsdstate.ModeNative},
-		{"after the state's write", func(panicNow func()) *Seams { return &Seams{ChoiceWritten: func(error) { panicNow() }} }, dsdstate.ModeConvert},
+		{"before the state's write", func(panicNow func()) *Seams { return &Seams{ChoicePending: panicNow} }, dsdstate.ModeNative, false},
+		{"after the state's write", func(panicNow func()) *Seams { return &Seams{ChoiceWritten: func(error) { panicNow() }} }, dsdstate.ModeConvert, false},
+		{"after its publish", func(panicNow func()) *Seams { return &Seams{Published: panicNow} }, dsdstate.ModeConvert, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			b, store := choiceSessionBackend(t)
@@ -579,7 +584,18 @@ func TestAWriteThatPanicsLeavesNothingPending(t *testing.T) {
 			if mode, _, _ := store.State().ChoiceFor(own); mode != tc.wrote {
 				t.Fatalf("the state holds %s after the panic, want %s", mode, tc.wrote)
 			}
+			judged := func() bool {
+				b.dsdMu.Lock()
+				defer b.dsdMu.Unlock()
+				return b.dsdJudged == b.dsd.Load()
+			}
+			if got := judged(); got == tc.lost {
+				t.Errorf("before the next refresh, the set published reconciled %v, want %v", got, !tc.lost)
+			}
 			b.RefreshDSD(true)
+			if !judged() {
+				t.Error("the refresh after the panic left the set published unreconciled")
+			}
 			pub := b.Policy().DSD.DAC.Choice
 			if pub.Mode != tc.wrote {
 				t.Errorf("the refresh after the panic publishes %s, want %s", pub.Mode, tc.wrote)

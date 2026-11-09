@@ -475,8 +475,13 @@ func (b *Backend) pendingFor(o *occ) *pendingChoice {
 // (readmitDSDLocked), never a reconciliation's. Every caller asks it of an
 // occurrence no sink of its own holds, which every reconciliation judges
 // once its open has ended. s.mu is held.
-func (s *session) unjudgedLocked(o *occ) bool {
-	return o.opened() && o.admitted != nil && o.admitted != s.b.dsd.Load() && !o.stale && !o.dropped
+func (s *session) unjudgedLocked(o *occ) bool { return unjudgedAt(o, s.b.dsd.Load()) }
+
+// unjudgedAt is unjudgedLocked against cur, a reading of the set published
+// that its caller made after its reading of the choice's write pending
+// (holdLocked, B728 B9 round 18). s.mu is held.
+func unjudgedAt(o *occ, cur *dsdSet) bool {
+	return o.opened() && o.admitted != nil && o.admitted != cur && !o.stale && !o.dropped
 }
 
 // settleOpen takes s.mu for the step that ends o's open, as lockSettled

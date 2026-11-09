@@ -190,16 +190,36 @@ func (a *afterFirst) ReadDSD(ctx context.Context, dst [][]byte) (int, error) {
 // a's chain (Continue): the window is computed with its first bits. The end
 // named after a, any other successor, or the sink's lookahead at its floor
 // while nothing has settled, ends the window zero-padded (End). s.mu is held.
+//
+// It reads the choice's write pending first and the set published after it,
+// once, for every check (B728 B9 round 18). A write registers its pending
+// set, publishes, has every session reconciled and only then lets its
+// pending go (chooseDSD), and its publish takes no session's lock: a
+// decision that read the set published before the publish and asked about
+// the pending write after it found the write's set the one published and
+// nothing pending, whether the write was still registered or had let its
+// pending go, and continued a's chain into the bits of an f still admitted
+// under the set the write replaced (Codex's review of round 17). Read in this
+// order, a publish before the second read leaves f admitted under a set it
+// replaced, whose reconciliation's verdict is waited for, the write pending
+// still or let go without reconciling (a panic between its publish and its
+// reconciliation, whose set the next refresh reconciles); a publish after it
+// finds a write registered at the first read waited for; and a write
+// registered after the first read publishes after the decision, which the
+// set published before it decides, as one made just before any publish is:
+// that publish's reconciliation judges what the decision did.
 func (s *session) holdLocked(a *occ) step {
 	f := s.followingLocked(a)
-	settled := f != nil && f.opened() && !f.stale && (f.admitted == nil || f.admitted == s.b.dsd.Load())
+	p := s.b.pending.Load()
+	s.b.deciding(a.id)
+	cur := s.b.dsd.Load()
+	settled := f != nil && f.opened() && !f.stale && (f.admitted == nil || f.admitted == cur)
 	var pend *pendingChoice
-	if settled {
+	if settled && p != nil && p.changes(cur, f) {
 		// A choice's write pending that plays f's rate otherwise (B728 B9) is
 		// waited for as an unsettled successor is, so f's first bits enter no
 		// window the write's publish would cut through.
-		pend = s.b.pendingFor(f)
-		settled = pend == nil
+		pend, settled = p, false
 	}
 	switch {
 	case f == nil && s.endAfter == a.id:
@@ -208,7 +228,7 @@ func (s *session) holdLocked(a *occ) step {
 			if pend != nil {
 				return step{kind: stepWait, wait: pend.done, awaits: f}
 			}
-			if f != nil && s.unjudgedLocked(f) {
+			if f != nil && unjudgedAt(f, cur) {
 				// Admitted under a set a publish has replaced: the window waits
 				// for that publish's reconciliation to judge f (B728 B9 round 17).
 				return step{kind: stepWait, wait: s.judged, verdict: f}

@@ -1154,7 +1154,13 @@ func (r *rig) waitStopped(why engine.Reason) *engine.Snapshot {
 // not for another reporter receive: the measurement can end the reporter.
 func (r *rig) tickUntilStopped(why engine.Reason) *engine.Snapshot {
 	r.t.Helper()
-	timer := time.NewTimer(alsapcm.Watchdog())
+	return r.tickUntilStoppedWithin(alsapcm.Watchdog(), why)
+}
+
+// tickUntilStoppedWithin is tickUntilStopped within bound (B728 B9 round 18).
+func (r *rig) tickUntilStoppedWithin(bound time.Duration, why engine.Reason) *engine.Snapshot {
+	r.t.Helper()
+	timer := time.NewTimer(bound)
 	defer timer.Stop()
 	for {
 		changed := r.eng.Changed()
@@ -1167,7 +1173,7 @@ func (r *rig) tickUntilStopped(why engine.Reason) *engine.Snapshot {
 		case r.ticks <- time.Time{}:
 		case <-timer.C:
 			alsapcm.LogGoroutines(r.t)
-			r.t.Fatalf("waited %v for playback to stop: %s", alsapcm.Watchdog(), why)
+			r.t.Fatalf("waited %v for playback to stop: %s", bound, why)
 		}
 	}
 }
@@ -1219,12 +1225,21 @@ func (r *rig) tick() {
 func (r *rig) tickWithin(bound time.Duration) {
 	r.t.Helper()
 	for range 2 {
-		select {
-		case r.ticks <- time.Time{}:
-		case <-time.After(bound):
-			alsapcm.LogGoroutines(r.t)
-			r.t.Fatalf("no reporter took a tick within %v", bound)
-		}
+		r.tickOnce(bound)
+	}
+}
+
+// tickOnce sends one tick, within bound, and returns once a reporter took it:
+// the step it begins has not ended, and no second step follows it (B728 B9
+// round 18: a step a case asks for alone, as the bound of a window's wait is
+// one).
+func (r *rig) tickOnce(bound time.Duration) {
+	r.t.Helper()
+	select {
+	case r.ticks <- time.Time{}:
+	case <-time.After(bound):
+		alsapcm.LogGoroutines(r.t)
+		r.t.Fatalf("no reporter took a tick within %v", bound)
 	}
 }
 

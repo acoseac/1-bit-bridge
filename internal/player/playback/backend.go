@@ -137,6 +137,15 @@ type Seams struct {
 	// predecessor's window, is handed to the producer, before the call waits
 	// for its answer.
 	Converting func(step string, o engine.OccurrenceID)
+	// Deciding runs on the producer in the decision of a converted occurrence
+	// o's join window (holdLocked), once it has read the choice's write
+	// pending and before it reads the set published, under the session's
+	// lock (B728 B9 round 18): the window in which a write publishes, or lets
+	// its pending go, between the decision's two reads. It may block, holding
+	// the producer there with that lock held, so nothing that takes the lock (a
+	// reconciliation, the reporter's step, a write's classification) goes on
+	// until it returns; it must not call the backend.
+	Deciding func(o engine.OccurrenceID)
 	// Activation runs on the activating goroutine as an occurrence's output
 	// is about to be activated, before the activation decides anything of
 	// the occurrence (B728 B11 round 2): a test holds it there while a
@@ -180,6 +189,13 @@ type Seams struct {
 	// window in which a choice's write publishes beside an open whose
 	// admission read the set before it. It may block.
 	Opened func(o engine.OccurrenceID, ref engine.Reference)
+	// Admitting runs on an opener's goroutine as DSD occurrence o's admission
+	// under the effective policy begins (admitDSD), before it reads the set
+	// published or asks whether that set is stale, which takes the refreshes'
+	// lock (B728 B9 round 18): a test knows by it that an admission a held
+	// refresh keeps from ending has begun. It must not block or call the
+	// backend.
+	Admitting func(o engine.OccurrenceID)
 	// Releasing runs in session s's Release once the session is marked
 	// released and its native sinks have begun their release, before its
 	// life ends, its lock let go (B728 B9 round 2): the window in which a
@@ -266,6 +282,20 @@ func (b *Backend) activation(o engine.OccurrenceID) {
 func (b *Backend) converting(step string, o engine.OccurrenceID) {
 	if sm := b.cfg.Seams; sm != nil && sm.Converting != nil {
 		sm.Converting(step, o)
+	}
+}
+
+// deciding is the Deciding seam.
+func (b *Backend) deciding(o engine.OccurrenceID) {
+	if sm := b.cfg.Seams; sm != nil && sm.Deciding != nil {
+		sm.Deciding(o)
+	}
+}
+
+// admitting is the Admitting seam.
+func (b *Backend) admitting(o engine.OccurrenceID) {
+	if sm := b.cfg.Seams; sm != nil && sm.Admitting != nil {
+		sm.Admitting(o)
 	}
 }
 
@@ -389,13 +419,18 @@ type Backend struct {
 	// that set and its read side (B728 B8), swapped right after it, and alone
 	// when the read side alone changes. Neither is nil once New has returned,
 	// for a backend with a DSD policy. dsdMu serializes the refreshes that swap
-	// them, dsdRead is when the last one read the policy, dsdFenceOnce says once
-	// that the state's writes are fenced, and probeState is the silent probe's
-	// bookkeeping (ProbeDSD).
+	// them, dsdRead is when the last one read the policy, dsdJudged is the set
+	// the last reconciliation that returned judged every session by, under
+	// dsdMu (B728 B9 round 18: a set published whose reconciliation did not
+	// return, a refresh that panicked between the two, is reconciled by the next
+	// refresh, which finds it the same), dsdFenceOnce says once that the state's
+	// writes are fenced, and probeState is the silent probe's bookkeeping
+	// (ProbeDSD).
 	dsd          atomic.Pointer[dsdSet]
 	dsdPub       atomic.Pointer[dsdPublished]
 	dsdMu        sync.Mutex
 	dsdRead      time.Time
+	dsdJudged    *dsdSet
 	dsdFenceOnce sync.Once
 	probeState   dsdProbe
 	// choiceTurn is the writes' turn: one choice write at a time (B728 B9,
@@ -516,6 +551,8 @@ func New(cfg Config) (*Backend, error) {
 		set.gen = 1
 		b.dsd.Store(set)
 		b.dsdPub.Store(&dsdPublished{set: set, view: view})
+		// No session yet, so nothing for a reconciliation to judge by it.
+		b.dsdJudged = set
 	}
 	return b, nil
 }
