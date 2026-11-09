@@ -172,6 +172,32 @@ func TestAnOccurrenceBesideAWriteIsNotRevoked(t *testing.T) {
 			t.Errorf("the occurrence opened DSD %v and %d PCM sinks, want it converted, in one PCM sink: the new set", got, d.pcmOpens())
 		}
 	})
+	t.Run("after the state's write and before the publish, played out before the case looks", func(t *testing.T) {
+		p := newParkedWrite()
+		d := besideAWrite(t, &playback.Seams{ChoiceWritten: func(err error) {
+			if err == nil {
+				p.park()
+			}
+		}})
+		t.Cleanup(p.cleanup(t))
+		res := d.choose(choiceReq(t, d, dsdstate.ModeConvert, 1))
+		p.reached(t, res, "the window between its state's write and its publish")
+		d.k.Free()
+		d.play()
+		// The ordering CI's macOS run took (run 42558744822, B728 B9 round
+		// 13), made the case's: the occurrence plays out and its session ends,
+		// the engine stopped and the track it heard cleared at the release,
+		// before the case looks.
+		d.waitEnded()
+		s := d.waitSnap("a heard", func(s *engine.Snapshot) bool { _, ok := s.Track(); return ok })
+		p.letGo()
+		wantOutcome(t, answer(t, res), playback.ChoiceWritten)
+		s = d.waitEnded()
+		notRevoked(t, d, s)
+		if got := d.openFormats(); len(got) != 0 || d.pcmOpens() != 1 {
+			t.Errorf("the occurrence opened DSD %v and %d PCM sinks, want it converted, in one PCM sink: the new set", got, d.pcmOpens())
+		}
+	})
 	t.Run("while a write that fails is under way", func(t *testing.T) {
 		pending, release, waiting := make(chan struct{}), make(chan struct{}), make(chan engine.OccurrenceID, 1)
 		var once sync.Once
@@ -237,6 +263,48 @@ func TestAnOccurrenceBesideAWriteIsNotRevoked(t *testing.T) {
 			t.Errorf("a refused occurrence opened DSD %v and %d PCM sinks", got, d.pcmOpens())
 		}
 	})
+}
+
+// TestACaseEndingWithItsWriteParkedLetsItGo (B728 B9 round 13): a case of
+// TestAnOccurrenceBesideAWriteIsNotRevoked's that ends while its write is
+// parked in its seam, as one that fails there ends, lets the write go in its
+// cleanup at once: the case ends, its rig stops as every rig does, and the
+// write is answered. CI's macOS run of that test's first case waited out the
+// package's 30 minutes there (run 42558744822): its cleanup asked the seam's
+// Once, which the parked write held until that cleanup let it go, after. The
+// case runs on a goroutine of this test's, so that a cleanup that waits fails
+// this test within twice the watchdog, past any bound of the cleanup's own,
+// and this test then lets the write go itself, so that the case ends: its
+// cleanup's other waits and its rig's stop are each bounded.
+func TestACaseEndingWithItsWriteParkedLetsItGo(t *testing.T) {
+	p := newParkedWrite()
+	var res <-chan playback.ChoiceResult
+	ended := make(chan bool, 1)
+	go func() {
+		ended <- t.Run("its write parked after the state's write", func(t *testing.T) {
+			d := besideAWrite(t, &playback.Seams{ChoiceWritten: func(err error) {
+				if err == nil {
+					p.park()
+				}
+			}})
+			t.Cleanup(p.cleanup(t))
+			res = d.choose(choiceReq(t, d, dsdstate.ModeConvert, 1))
+			p.reached(t, res, "the window between its state's write and its publish")
+			// The case ends here, its write parked, as one that fails here does.
+		})
+	}()
+	select {
+	case <-ended:
+	case <-time.After(2 * alsapcm.Watchdog()):
+		alsapcm.LogGoroutines(t)
+		t.Errorf("a case that ended with its write parked did not end within %v: its cleanup waits for the parked write", 2*alsapcm.Watchdog())
+		p.letGo()
+		<-ended
+	}
+	if res == nil {
+		t.Skip("the case's rig did not start, so no write was made: its skip says why")
+	}
+	wantOutcome(t, answer(t, res), playback.ChoiceWritten)
 }
 
 // besideAWrite is TestAnOccurrenceBesideAWriteIsNotRevoked's rig: one over a
