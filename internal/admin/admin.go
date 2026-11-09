@@ -594,6 +594,17 @@ type Deps struct {
 	// current wait.
 	TriggerCadenceRearm func()
 
+	// UpdateChecksSwitched tells the updater that update.checkEnabled
+	// changed (updater.Updater.ChecksSwitched, backlog B761). The settings
+	// PATCH calls it once, after a save that changed the switch is
+	// persisted and published, and never for a save that failed, which
+	// changed nothing: off, it stops every update check under way and every
+	// install not yet past its decision; on, it starts the poll loop's wait
+	// again at a full interval, asking nothing. Not the cadence rearm, which
+	// restarts every loop's wait. Nil when no updater is wired (tests): the
+	// switch is live regardless, since the updater asks it at every check.
+	UpdateChecksSwitched func()
+
 	// TriggerDuplicatesPass nudges the duplicates stamping sweeper
 	// (cmd/bridge runDuplicatesSweeper) to re-evaluate suppression under
 	// the CURRENT duplicates.filter policy — the hot-apply half of the
@@ -1311,15 +1322,17 @@ type TailscaleStatus struct {
 // Install and Rollback take the request's, which ends their wait for
 // the install marker's lock.
 //
-// Install and Rollback return errors the admin handler classifies
+// CheckNow, Install and Rollback return errors the admin handler classifies
 // via errors.Is against the package-level sentinels below
 // (ErrNoUpdate / ErrActiveSessions / ErrInstallNotSupported /
-// ErrPathNotWritable). The adapter is responsible for mapping
+// ErrPathNotWritable / ErrUpdateChecksOff). The adapter is responsible for mapping
 // internal/updater's typed errors onto these admin-facing sentinels
-// so this package stays decoupled from internal/updater's API.
+// so this package stays decoupled from internal/updater's API. CheckNow's
+// only error is ErrUpdateChecksOff (backlog B761): a check that failed
+// upstream answers its status, whose LastError says so.
 type UpdateProvider interface {
 	Status() UpdateStatus
-	CheckNow(ctx context.Context) UpdateStatus
+	CheckNow(ctx context.Context) (UpdateStatus, error)
 	Install(ctx context.Context, force bool) (UpdateStatus, error)
 	Rollback(ctx context.Context, force bool) error
 }
@@ -1361,6 +1374,13 @@ var (
 	// ErrUpdateRollbackRefused: the rollback would put the backup back over
 	// a store a newer version may have changed, so nothing was rolled back.
 	ErrUpdateRollbackRefused = errors.New("the rollback was refused")
+	// ErrUpdateChecksOff: update checks are off (update.checkEnabled,
+	// backlog B761), so a check or an install was refused, or stopped
+	// under way, with nothing asked of GitHub for it or installed. A 409,
+	// its own code: the switch is the remedy, and nothing went wrong. A
+	// rollback, a status and the install's probation are never refused for
+	// it.
+	ErrUpdateChecksOff = errors.New("update checks are off")
 )
 
 // UpdateStatus is the wire shape /api/updates returns. Decoupled from
@@ -1434,6 +1454,14 @@ type UpdateStatus struct {
 	// InstallWarning is set on an install's answer when the new version
 	// was installed without its settings check, because it predates it.
 	InstallWarning string `json:"installWarning,omitempty"`
+	// CheckEnabled is whether update checks are on (update.checkEnabled,
+	// backlog B761). While it is false the status shows nothing a check
+	// found before (no latest version, no update available, no notes, no
+	// held update, no last error), the Updates panel and the Jobs card say
+	// "update checks off" and offer neither Install nor Check now, and both
+	// answer 409 update-checks-off. Roll back, the Rollback and Probation
+	// rows are not the switch's.
+	CheckEnabled bool `json:"checkEnabled"`
 }
 
 // Server owns the admin listener + mux. One per process.

@@ -7,8 +7,9 @@ import "github.com/acoseac/1-bit-bridge/internal/config"
 // the Jobs card, and what the two retry routes run.
 
 // enrichSwitchValue is what the settings save writes for a switch the
-// operator set: off is written as false, and on clears the key, since absent
-// is on and a file without the key is one an older binary loads.
+// operator set, the enrichment switches and since B761 the update check's
+// (update.checkEnabled): off is written as false, and on clears the key,
+// since absent is on and a file without the key is one an older binary loads.
 func enrichSwitchValue(on bool) *bool {
 	if on {
 		return nil

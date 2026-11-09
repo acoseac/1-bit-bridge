@@ -35,6 +35,12 @@ func TestClassifyUpdateError(t *testing.T) {
 		// nothing was done.
 		{"marker-locked", ErrUpdateMarkerLocked, http.StatusConflict, "marker-locked"},
 		{"rollback-refused", ErrUpdateRollbackRefused, http.StatusConflict, "rollback-refused"},
+		// Update checks off (backlog B761): the switch refuses the check or
+		// the install, and nothing went wrong.
+		{"update-checks-off", ErrUpdateChecksOff, http.StatusConflict, "update-checks-off"},
+		{"wrapped update-checks-off",
+			fmt.Errorf("%w: no release is installed while they are off", ErrUpdateChecksOff),
+			http.StatusConflict, "update-checks-off"},
 		{"wrapped install-in-flight",
 			fmt.Errorf("%w: an install is already in progress", ErrUpdateInstallInFlight),
 			http.StatusConflict, "install-in-flight"},

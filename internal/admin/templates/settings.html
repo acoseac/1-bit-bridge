@@ -750,9 +750,33 @@
     <div id="settings-panel-updates" class="tab-pane" data-tab="updates">
       <h2 class="section-head">Updates</h2>
       <p class="lede">
-        The bridge polls the GitHub Releases API for new versions. Operator-triggered
-        install is always available on the dashboard; auto-install is opt-in.
+        While update checks are on, the bridge polls the GitHub Releases API for
+        new versions. Install is offered in the panel below when one is found;
+        auto-install is opt-in.
       </p>
+
+      {{/* update.checkEnabled (backlog B761). Applies at once, and only off
+           is written to bridge.yaml. */}}
+      <div class="field">
+        <label class="checkbox">
+          <input name="updateCheckEnabled" type="checkbox" role="switch" {{if .Data.UpdateCheckEnabled}}checked{{end}}>
+          Check for updates
+        </label>
+        <small class="hint">
+          On, the bridge asks the GitHub releases API for its latest release when
+          it starts and then once every check interval: one request each, naming
+          this bridge's version. Off, it asks nothing: no scheduled check, and
+          Check now and Install are refused, so no new release is installed, by
+          hand or automatically (auto-install keeps its setting and waits); a
+          check under way is stopped, and so is an install that has not reached
+          its swap. Roll back,
+          the status and an update already swapped in still work. Applies at
+          once; turned back on, the next check comes a full interval later.
+          Where the <code>BRIDGE_UPDATE_CHECK_ENABLED</code> environment variable
+          is set, it sets this switch at every start; a save here writes the
+          switch to bridge.yaml only when you change it.
+        </small>
+      </div>
 
       <div class="field">
         <label class="checkbox">
@@ -795,10 +819,12 @@
       <div class="panel-head">
         <h2>Updates</h2>
         <span class="panel-actions" data-supervised="{{if .Data.IsSupervised}}true{{else}}false{{end}}">
-          {{if and .Data.Update.UpdateAvailable .Data.Update.CanInstall}}
+          {{if and .Data.Update.UpdateAvailable .Data.Update.CanInstall .Data.Update.CheckEnabled}}
             <button type="button" id="update-install" class="btn btn-primary" data-supervised="{{if .Data.IsSupervised}}true{{else}}false{{end}}">Install &amp; {{if .Data.IsSupervised}}restart{{else}}stop{{end}}</button>
           {{end}}
-          <button type="button" id="update-check" class="btn">Check now</button>
+          {{/* Hidden, never left out, while update checks are off (backlog
+               B761): renderUpdateTile reveals it again when they are on. */}}
+          <button type="button" id="update-check" class="btn"{{if not .Data.Update.CheckEnabled}} hidden{{end}}>Check now</button>
           {{/* Rollback: revealed by renderUpdateTile only where the rollback
                would run: a .bak of the previous binary on disk, and an install
                marker that does not refuse it. POST /api/updates/rollback
@@ -837,7 +863,9 @@
               deliberate too: a Go template comment is ordinary text to
               an HTML parser, so a literal tag written inside one is
               parsed as a real element and its id counted. */ -}}
-          {{if .Data.Update.UpdateAvailable}}
+          {{if not .Data.Update.CheckEnabled}}
+            <span class="badge idle">update checks off</span>
+          {{else if .Data.Update.UpdateAvailable}}
             <span class="badge running">update available</span>
             <span>· <code>{{.Data.Update.LatestVersion}}</code></span>
             {{if .Data.Update.ReleaseNotesURL}}

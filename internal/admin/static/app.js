@@ -1468,6 +1468,14 @@ function renderUpdateTile(u) {
   const lastError = document.getElementById("update-last-error");
   if (!status) return;
 
+  // Update checks off (update.checkEnabled, backlog B761): the status says
+  // so, and the panel offers neither Check now nor Install, which the server
+  // refuses with 409 update-checks-off while they are off. Only an explicit
+  // false is off, as the server sends it. Roll back is not the switch's.
+  const checksOff = u?.checkEnabled === false;
+  const checkBtn = document.getElementById("update-check");
+  if (checkBtn) checkBtn.hidden = checksOff;
+
   // Add or remove the "Install & restart" button to match the
   // server-rendered first-paint logic. The button only exists when
   // the platform supports self-install AND an update is available.
@@ -1485,7 +1493,7 @@ function renderUpdateTile(u) {
   const actions = document.querySelector(".panel-head .panel-actions");
   let installBtn = document.getElementById("update-install");
   if (actions) {
-    const should = u?.updateAvailable && u?.canInstall;
+    const should = u?.updateAvailable && u?.canInstall && !checksOff;
     if (should && !installBtn) {
       // Mirror the supervision-aware label + dataset attribute the
       // server-rendered first-paint path emits — without this the
@@ -1510,7 +1518,9 @@ function renderUpdateTile(u) {
     }
   }
 
-  if (u?.updateAvailable && u?.latestVersion) {
+  if (checksOff) {
+    status.innerHTML = `<span class="badge idle">update checks off</span>`;
+  } else if (u?.updateAvailable && u?.latestVersion) {
     status.innerHTML = `<span class="badge running">update available</span><span>· <code>${escapeHTML(u.latestVersion)}</code></span>`;
     if (u.releaseNotesURL) {
       const notes = document.createElement("a");
@@ -5048,6 +5058,8 @@ function buildSettingsPayload(form, fd, enrichBases) {
     updateAutoInstall: fd.get("updateAutoInstall") === "on",
     updateQuietHours: fd.get("updateQuietHours") || "",
     updateCheckIntervalHours: parseInt(fd.get("updateCheckIntervalHours") || "0", 10),
+    // update.checkEnabled (backlog B761), the same checkbox coercion.
+    updateCheckEnabled: fd.get("updateCheckEnabled") === "on",
     // Custom endpoints come in as a single textarea string ("URL\n
     // URL\n…"). Send the textarea form — the server splits on
     // newlines or commas and validates each entry. Sending the
@@ -6381,9 +6393,16 @@ function mountJobTrays() {
 
   attachFeatureTray(head("job-upd-card"), {
     title: "Update checks",
-    blurb: "How often the bridge asks GitHub for a newer release, and whether it " +
-      "installs one on its own.",
+    blurb: "Whether and how often the bridge asks GitHub for a newer release, and " +
+      "whether it installs one on its own.",
     rows: [
+      {
+        // update.checkEnabled (backlog B761): live, and the card draws from
+        // it, so a save redraws it (onSaved below).
+        field: "updateCheckEnabled", type: "switch", label: "Check for updates",
+        hint: "Off, the bridge asks GitHub nothing and installs nothing new; a " +
+          "rollback and an update already swapped in still work.",
+      },
       {
         field: "updateCheckIntervalHours", type: "number", min: 1,
         label: "Check every", unit: "hours", placeholder: "6 (default)",
@@ -6402,6 +6421,9 @@ function mountJobTrays() {
       },
     ],
     link: { href: "/settings?tab=updates", text: "Update settings →" },
+    onSaved: (field) => {
+      if (field === "updateCheckEnabled") void jobsSnapshotRefresh().catch(() => {});
+    },
   });
 }
 
@@ -6754,10 +6776,19 @@ function renderJobCards(j) {
   setText("job-backup-next", bk.run ? formatInFuture(bk.run.nextDueAt) : "—");
   setText("job-backup-keep", bk.keep > 0 ? `keep last ${bk.keep}` : "keep all");
 
-  // Updates.
+  // Updates. With update checks off (backlog B761) the card says so in place
+  // of the cadence, auto-install keeps its setting and waits, and Check now
+  // is hidden: the server refuses it while they are off. Only an explicit
+  // false is off, as the server sends it.
   const upd = j.updates || {};
-  setText("job-upd-cadence", upd.checkIntervalHours ? `every ${upd.checkIntervalHours} h` : "—");
-  setText("job-upd-auto", upd.autoInstall ? "on" : "off — install from the Dashboard");
+  const updChecksOff = upd.checkEnabled === false;
+  setText("job-upd-cadence", updChecksOff ? "update checks off"
+    : (upd.checkIntervalHours ? `every ${upd.checkIntervalHours} h` : "—"));
+  setText("job-upd-auto", upd.autoInstall
+    ? (updChecksOff ? "on — waits while update checks are off" : "on")
+    : "off — install from Settings → Updates");
+  const updCheck = document.getElementById("jobs-upd-check");
+  if (updCheck) updCheck.hidden = updChecksOff;
 
   // Maintenance + UPnP.
   const mt = j.maintenance || {};
@@ -7057,6 +7088,8 @@ async function unreadableRefresh() {
 
 function updateStatusLine(r) {
   if (!r) return "—";
+  // Update checks off (backlog B761): an explicit false, as the server sends.
+  if (r.checkEnabled === false) return "update checks off";
   if (r.updateAvailable) return `update available: ${r.latestVersion || "?"}`;
   if (r.lastError) return `check failed: ${r.lastError}`;
   return "up to date";

@@ -335,6 +335,21 @@ func EnrichEnabledFromEnv() (on, set bool) {
 	return readSwitchEnv(name, v)
 }
 
+// UpdateCheckEnabledFromEnv is update.checkEnabled as
+// BRIDGE_UPDATE_CHECK_ENABLED alone sets it, read as Load reads it (a value
+// that reads as neither on nor off is off) but without Load's warning, which
+// the load before it has said; set is false where the variable is absent or
+// says nothing. For `bridge update`, to say which of the variable and the
+// file turned the update check off (backlog B761).
+func UpdateCheckEnabledFromEnv() (on, set bool) {
+	v, ok := os.LookupEnv(envName("update.checkEnabled"))
+	if !ok || strings.TrimSpace(v) == "" {
+		return false, false
+	}
+	on, _ = parseSwitchEnv(v)
+	return on, true
+}
+
 // applyEnvValue sets the leaf b names from raw, the value of the variable
 // name, and reports whether it set it: false for a value it ignores (one
 // that does not read as the leaf's boolean or whole number, an opt-out's

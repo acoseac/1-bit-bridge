@@ -22,6 +22,7 @@ var controlImpliedFields = []struct {
 	{config.ManagedControlUpdates, "updateAutoInstall", `{"updateAutoInstall":true}`},
 	{config.ManagedControlUpdates, "updateCheckIntervalHours", `{"updateCheckIntervalHours":1}`},
 	{config.ManagedControlUpdates, "updateQuietHours", `{"updateQuietHours":"01:00-02:00"}`},
+	{config.ManagedControlUpdates, "updateCheckEnabled", `{"updateCheckEnabled":false}`},
 	{config.ManagedControlRestart, "updateAutoInstall", `{"updateAutoInstall":true}`},
 	{config.ManagedControlBackups, "backupIntervalHours", `{"backupIntervalHours":1}`},
 	{config.ManagedControlBackups, "backupKeep", `{"backupKeep":10000}`},

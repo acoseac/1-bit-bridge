@@ -323,6 +323,10 @@ type settingsResponse struct {
 	UpdateAutoInstall        bool   `json:"updateAutoInstall"`
 	UpdateQuietHours         string `json:"updateQuietHours,omitempty"`
 	UpdateCheckIntervalHours int    `json:"updateCheckIntervalHours,omitempty"`
+	// UpdateCheckEnabled is update.checkEnabled RESOLVED (absent is on):
+	// whether the bridge checks for updates and installs a new release
+	// (backlog B761).
+	UpdateCheckEnabled bool `json:"updateCheckEnabled"`
 	// v1.2 Upscale settings — operator opt-in flag for the
 	// offline PCM-upscaling feature. Disabled by default per
 	// the bridge.yaml schema; flipping this here writes the
@@ -2314,6 +2318,7 @@ func settingsResponseFromConfig(cfg *config.Config, isSupervised bool) settingsR
 		UpdateAutoInstall:        cfg.Update.AutoInstall,
 		UpdateQuietHours:         cfg.Update.QuietHours,
 		UpdateCheckIntervalHours: cfg.Update.CheckIntervalHours,
+		UpdateCheckEnabled:       cfg.Update.EffectiveCheckEnabled(),
 		UpscaleEnabled:           cfg.Upscale.Enabled,
 		UpscaleStoragePath:       cfg.Upscale.EffectiveVariantsDir(cfg.DataDir),
 		AnalysisEnabled:          cfg.Analysis.Enabled,
@@ -2448,6 +2453,9 @@ type settingsPatch struct {
 	UpdateAutoInstall               *bool   `json:"updateAutoInstall,omitempty"`
 	UpdateQuietHours                *string `json:"updateQuietHours,omitempty"`
 	UpdateCheckIntervalHours        *int    `json:"updateCheckIntervalHours,omitempty"`
+	// UpdateCheckEnabled sets update.checkEnabled (backlog B761), compared
+	// against the RESOLVED value, since absent is on; only off is written.
+	UpdateCheckEnabled *bool `json:"updateCheckEnabled,omitempty"`
 	// CustomEndpoints accepts the array form (programmatic clients)
 	// or the textarea form via CustomEndpointsText (web UI). Sending
 	// both is supported but redundant; the array form wins.
@@ -2662,6 +2670,9 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 		// cadenceChanged: a background loop's schedule changed, so the
 		// rearm fan-out should wake them to re-read it.
 		cadenceChanged bool
+		// updateChecksSwitched: update.checkEnabled changed, so the
+		// updater is told once the save is published (backlog B761).
+		updateChecksSwitched bool
 		// fingerprintOn / upscaleOn / analysisOn / optimizeOn /
 		// autoOptimizeOn: the toggle was switched ON, so the post-commit
 		// block below can check whether the toolchain will actually let
@@ -2852,6 +2863,22 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 				report.live("updateCheckIntervalHours")
 			} else {
 				report.unchanged("updateCheckIntervalHours")
+			}
+		}
+		// update.checkEnabled (backlog B761), compared against the RESOLVED
+		// value, since absent is on. HOT: the updater asks the live config at
+		// every check's admission and every install's start and decision,
+		// and is told of the change once it is published (below), which
+		// stops a check or an install under way when it goes off and rearms
+		// the poll loop's cadence, asking nothing, when it goes on. Only off
+		// is written: on clears the key.
+		if p.UpdateCheckEnabled != nil {
+			if *p.UpdateCheckEnabled != next.Update.EffectiveCheckEnabled() {
+				next.Update.CheckEnabled = enrichSwitchValue(*p.UpdateCheckEnabled)
+				updateChecksSwitched = true
+				report.live("updateCheckEnabled")
+			} else {
+				report.unchanged("updateCheckEnabled")
 			}
 		}
 		// Custom endpoints: array form takes precedence; textarea form is
@@ -3359,6 +3386,13 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 	if cadenceChanged && s.deps.TriggerCadenceRearm != nil {
 		s.deps.TriggerCadenceRearm()
 	}
+	// The update check's switch, likewise only once the change is saved and
+	// published (backlog B761): a save that failed returned above, having
+	// changed nothing, and the updater reads the switch from the config it
+	// is told of.
+	if updateChecksSwitched && s.deps.UpdateChecksSwitched != nil {
+		s.deps.UpdateChecksSwitched()
+	}
 	// Fingerprint turned ON: the setting applied, but whether anything
 	// will RUN depends on a toolchain this bridge may not have. Say so
 	// here rather than leaving the operator to notice on the Jobs card
@@ -3777,12 +3811,23 @@ func (s *Server) getUpdatesSnapshot() UpdateStatus {
 //
 // Uses r.Context() so a browser disconnect cancels the (potentially
 // slow) GitHub call rather than letting it run uselessly to completion.
+//
+// While update checks are off (backlog B761) it asks nothing and answers
+// 409 `update-checks-off`, and so does a check the switch stopped under way.
+// A check that failed upstream is still a 200, its status's lastError
+// saying why.
 func (s *Server) apiUpdatesCheck(w http.ResponseWriter, r *http.Request) {
 	if s.deps.Updater == nil {
 		writeError(w, http.StatusServiceUnavailable, errCodeNoUpdater, errMsgUpdaterNotConfig)
 		return
 	}
-	writeJSON(w, http.StatusOK, s.deps.Updater.CheckNow(r.Context()))
+	st, err := s.deps.Updater.CheckNow(r.Context())
+	if err != nil {
+		code, short := classifyUpdateError(err)
+		writeError(w, code, short, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, st)
 }
 
 // --- POST /api/updates/install[?force=1] ---
@@ -3803,7 +3848,8 @@ func (s *Server) apiUpdatesCheck(w http.ResponseWriter, r *http.Request) {
 //     another install is already in progress (retry once it finishes),
 //     or the install marker's lock cannot be held (`marker-locked`:
 //     another process holds it, or the data dir's filesystem keeps no
-//     locks; backlog B692)
+//     locks; backlog B692), or update checks are off, or were turned off
+//     before the install's swap (`update-checks-off`, backlog B761)
 //   - 501 on Windows (Phase B is darwin/linux; Windows is a follow-up)
 //   - 403 when the binary path isn't writable (system install needs sudo)
 //   - 502 on download / verify / swap failures
@@ -3893,6 +3939,11 @@ func classifyUpdateError(err error) (status int, short string) {
 		// 409: a newer version opened the data dir, so putting the backup
 		// back would be a downgrade past its store; nothing was done.
 		return http.StatusConflict, "rollback-refused"
+	case errors.Is(err, ErrUpdateChecksOff):
+		// 409: update checks are off (backlog B761), so the check or the
+		// install was refused, or stopped before its swap; the switch is
+		// the remedy, and nothing went wrong.
+		return http.StatusConflict, "update-checks-off"
 	default:
 		return http.StatusBadGateway, "install-failed"
 	}

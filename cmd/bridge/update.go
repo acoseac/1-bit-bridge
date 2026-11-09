@@ -13,6 +13,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/acoseac/1-bit-bridge/internal/auth"
+	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/packaging"
 	"github.com/acoseac/1-bit-bridge/internal/updater"
@@ -38,8 +39,16 @@ var updateReleases *updater.Client
 // Subcommand exits:
 //
 //	0 — success (or "no update available" with --check)
-//	1 — install failed
+//	1 — install failed, or update checks are off
 //	2 — usage error
+//
+// Update checks off (update.checkEnabled, backlog B761) refuse both things
+// this command does, the check and the install, before anything is asked of
+// GitHub or opened, read from the config the service loads through the same
+// loader, its file and BRIDGE_UPDATE_CHECK_ENABLED alike: an off set only in
+// the service's environment (a unit or a compose file) must be in this
+// shell's too for the command to see it. A rollback is the console's, and
+// the switch never refuses it.
 //
 // Restart: the CLI does NOT trigger restart itself. After a
 // successful install the operator is told what to run; this keeps
@@ -63,6 +72,10 @@ func updateCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stde
 	if err != nil {
 		fmt.Fprintf(stderr, "config load failed: %v\n", err)
 		return 2
+	}
+	if !cfg.Update.EffectiveCheckEnabled() {
+		refuseUpdateChecksOff(stderr, cfgPath)
+		return 1
 	}
 	// An install writes its marker in the data dir, which would be made in
 	// its place where its volume is not mounted (backlog B727); --check reads.
@@ -91,8 +104,16 @@ func updateCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stde
 	upd := updater.New(updater.Options{
 		TokenSnapshot: tokenSnapshot,
 		Client:        updateReleases,
+		// The switch as the config loaded says it, which the refusal above
+		// read: the updater's own gates ask it too.
+		CheckEnabled: cfg.Update.EffectiveCheckEnabled,
 	})
-	st, _ := upd.CheckNow(ctx)
+	st, err := upd.CheckNow(ctx)
+	if err != nil {
+		// The switch's refusal, the one error a check answers.
+		fmt.Fprintf(stderr, "bridge update: %v\n", err)
+		return 1
+	}
 
 	fmt.Fprintf(stdout, "Current: %s (channel %s)\n", st.CurrentVersion, st.Channel)
 	if st.LastError != "" {
@@ -221,6 +242,21 @@ func updateCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stde
 	fmt.Fprintln(stdout, "\nRestart the bridge to load the new binary:")
 	printManualRestartHint(stdout, kind)
 	return 0
+}
+
+// refuseUpdateChecksOff says why `bridge update` asks nothing and installs
+// nothing while update checks are off (backlog B761), naming what turned them
+// off, the variable in this shell's environment or the file, and how to turn
+// them on; the console's rollback is not refused.
+func refuseUpdateChecksOff(stderr io.Writer, cfgPath string) {
+	source := fmt.Sprintf("update.checkEnabled is false in %s", cfgPath)
+	if _, set := config.UpdateCheckEnabledFromEnv(); set {
+		source = "BRIDGE_UPDATE_CHECK_ENABLED in this environment says off"
+	}
+	fmt.Fprintf(stderr, "bridge update: update checks are off (%s), so this command neither asks GitHub for a "+
+		"release nor installs one.\n", source)
+	fmt.Fprintln(stderr, "Turn them on in the console's Settings → Updates, or set update.checkEnabled: true and unset "+
+		"BRIDGE_UPDATE_CHECK_ENABLED, then run it again. A rollback, in the console, works with them off.")
 }
 
 // reportInstallFailure prints why `bridge update` installed nothing, and what
