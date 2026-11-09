@@ -298,6 +298,16 @@ type Deps struct {
 	// turn a diagnostic into a load source.
 	VariantsIndex func(ctx context.Context) (VariantsIndex, error)
 
+	// WaveformRegeneration judges the waveform catalog as the regeneration
+	// guard does — see checkWaveformRegeneration: the curves proven missing,
+	// the relocated ones apart, whether the bridge would render the missing
+	// ones again or refuses (the directory gone, away, unreadable or
+	// emptied), and the ones whose regeneration stopped. Optional on the same
+	// terms: nil skips the check, an error is reported rather than answered
+	// as fine. It stats the rows it classifies, so the probe bounds itself
+	// as VariantsIndex's walk does.
+	WaveformRegeneration func(ctx context.Context) (WaveformRegeneration, error)
+
 	// NameCollisions compares the indexed track paths for names in one
 	// folder that differ only in case or Unicode composition — see
 	// checkNameCollisions. Optional on the same terms: nil skips the check,
@@ -473,6 +483,7 @@ func Run(ctx context.Context, d Deps) Report {
 		checkLogSize,
 		checkSidecarPaths,
 		checkVariantsIndex,
+		checkWaveformRegeneration,
 		checkNameCollisions,
 	}
 	out := make([]Check, 0, len(head)+len(checks)+5)

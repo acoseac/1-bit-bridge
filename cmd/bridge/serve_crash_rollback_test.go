@@ -22,16 +22,26 @@ import (
 // version and the backup's settings check all allow it, and otherwise the
 // start says why, records it, and goes on.
 
-// withAStepThatFailsMidway puts the store in r's data dir one step behind,
-// with the deletion journal gone, so the last step adds its column and then
-// fails looking for gated-format rows, user_version unmoved: a migration
-// begun and not finished.
+// withAStepThatFailsMidway puts the store in r's data dir at v60, made with no
+// install armed, arms r's marker again, and drops the deletion journal, so
+// v61, the first step the next open runs, adds its column and then fails
+// looking for gated-format rows, user_version unmoved: a migration begun and
+// not finished. At v60, not a step behind the ladder's end, since B652: v62,
+// the last step, is one CREATE TABLE, which changes nothing before it can
+// fail, and a store a version skipped meets every step after its own, as one
+// a version behind meets the last.
 func (r *refusedInstall) withAStepThatFailsMidway(t *testing.T) {
 	t.Helper()
-	if latest := latestStoreVersion(t); latest != 61 {
-		t.Fatalf("the obstacle stands in migration 61's way, and the ladder ends at %d: give the last step an obstacle of its own", latest)
+	if latest := latestStoreVersion(t); latest < 61 {
+		t.Fatalf("the obstacle stands in migration 61's way, and the ladder ends at %d", latest)
 	}
-	r.withAnOlderStore(t)
+	if err := updater.ClearState(r.dataDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := manifest.WriteDatabaseAtVersionForTest(manifest.DefaultDBPath(r.dataDir), 60); err != nil {
+		t.Fatal(err)
+	}
+	r.saveMarker(t, r.dataDir)
 	db := openRawStore(t, r.dataDir)
 	if _, err := db.Exec(`DROP TABLE manifest_deletions`); err != nil {
 		t.Fatal(err)
@@ -172,9 +182,9 @@ func TestAMigrationWhoseRecordCannotBeWrittenDoesNotRun(t *testing.T) {
 	if !armed.Load() {
 		t.Fatal("the migration's record was never written: the test shows nothing")
 	}
-	if v := storeVersion(t, r.dataDir); v != behind || tracksHasColumn(t, r.dataDir, "correction_key") {
-		t.Errorf("the store after a refused record: user_version %d (want %d), the step's columns there %v (want false)",
-			v, behind, tracksHasColumn(t, r.dataDir, "correction_key"))
+	if v := storeVersion(t, r.dataDir); v != behind || latestSchemaPresent(t, r.dataDir) {
+		t.Errorf("the store after a refused record: user_version %d (want %d), the step's table there %v (want false)",
+			v, behind, latestSchemaPresent(t, r.dataDir))
 	}
 }
 

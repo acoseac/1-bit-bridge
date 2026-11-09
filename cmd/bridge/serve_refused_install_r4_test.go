@@ -25,28 +25,32 @@ import (
 // record.
 
 // requireTheLatestSchema checks whether the store in dataDir has what this
-// build's last migration adds (v61: tracks.correction_key, backlog B489;
-// v60's sample-kind stat columns and index until then), present or not: a
-// store genuinely older than this build lacks it. A new migration names its
-// own here.
+// build's last migration adds, present or not (latestSchemaPresent): a store
+// genuinely older than this build lacks it.
 func requireTheLatestSchema(t *testing.T, dataDir string, present bool) {
+	t.Helper()
+	if got := latestSchemaPresent(t, dataDir); got != present {
+		t.Errorf("the store has v62's table: %v, want %v", got, present)
+	}
+}
+
+// latestSchemaPresent reports whether the store in dataDir has what this
+// build's last migration adds (v62: the waveform_regen_failures table,
+// backlog B652; v61's tracks.correction_key, backlog B489, until then, and
+// v60's sample-kind stat columns and index before it). A new migration
+// names its own here.
+func latestSchemaPresent(t *testing.T, dataDir string) bool {
 	t.Helper()
 	raw, err := sql.Open("sqlite", dsn.File(manifest.DefaultDBPath(dataDir), "_pragma=busy_timeout(5000)"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer raw.Close()
-	var columns int
-	if err := raw.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('tracks') WHERE name = 'correction_key'`).Scan(&columns); err != nil {
+	var tables int
+	if err := raw.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'waveform_regen_failures'`).Scan(&tables); err != nil {
 		t.Fatal(err)
 	}
-	want := 0
-	if present {
-		want = 1
-	}
-	if columns != want {
-		t.Errorf("the store has %d of v61's one column, want %d", columns, want)
-	}
+	return tables == 1
 }
 
 // openStoreIn opens dataDir's store on a goroutine of the test's, as a

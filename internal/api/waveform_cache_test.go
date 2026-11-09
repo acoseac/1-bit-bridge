@@ -22,6 +22,10 @@ func (s stubAnalysisStore) LookupAnalysis(ctx context.Context, sourcePath string
 	return s.rec, nil
 }
 
+func (s stubAnalysisStore) LookupWaveform(ctx context.Context, sourcePath string) (*AnalysisRecord, error) {
+	return s.rec, nil
+}
+
 // waveformFixture stages a source track plus a sidecar whose recorded
 // mtime/size match it (so the freshness gate passes) and wires an
 // AnalysisStore that points at both.

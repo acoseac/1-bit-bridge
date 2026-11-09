@@ -88,7 +88,7 @@ type VariantDeleter interface {
 }
 
 // VariantSidecarStoreState is the variants directory's state at one
-// probe — api's projection of integrity.VariantsDirBlock, translated at
+// probe — api's projection of integrity.SidecarDirBlock, translated at
 // the wiring point for the reason VariantSidecarPlacement is.
 type VariantSidecarStoreState struct {
 	// Available reports whether a MISSING sidecar is evidence about the

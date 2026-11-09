@@ -20,6 +20,14 @@ func mkdir(path string, perm os.FileMode, _ dirOwnerPolicy, _ string, _ bool) er
 	return os.Mkdir(path, perm)
 }
 
+// mkdirIn is r.Mkdir on Windows. See the POSIX version.
+func mkdirIn(r *os.Root, name string, perm os.FileMode) error {
+	return r.Mkdir(name, perm)
+}
+
+// keepOwnerIn does nothing on Windows, as keepOwner does.
+func keepOwnerIn(*os.Root, *os.File, string) error { return nil }
+
 // precreate does nothing on Windows, where whatever a writer creates takes
 // its directory's ACL. See the POSIX version.
 func precreate(string, os.FileMode, string) error { return nil }
