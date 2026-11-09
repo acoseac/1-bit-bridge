@@ -37,9 +37,10 @@ type hold struct {
 	waits     []<-chan struct{}
 	markWaits []<-chan struct{}
 	given     bool
-	// markless: a give-up of the hold raises no mark, since the holder waits
-	// for a write it handed to a hold of its own (handOff), until it begins
-	// its release.
+	// markless: a give-up of the hold by its caller (abandon) raises no mark,
+	// since the holder waits for a write it handed to a hold of its own
+	// (handOff), or has ended its wait; a step of the hold that overruns marks
+	// all the same.
 	markless bool
 	// releasing: the hold has begun to let its lock go (release); a give-up
 	// after it marks the folder in this process alone, writing no marker.
@@ -105,10 +106,11 @@ func (h *hold) held(unlock func(), root, key, snapshot string) {
 }
 
 // handOff records that the holder now waits for a write it handed to a hold
-// of its own (abandonPending): a give-up of this hold by its caller meanwhile
-// raises no mark, since nothing this hold took overran, and the other hold
-// marks the folder itself once its own step overruns. A step of this hold's
-// release that overruns marks the folder all the same.
+// of its own (abandonPending): a give-up of this hold by its caller from then
+// on raises no mark, since nothing this hold took overran (its caller's
+// give-up may come as the holder answers, and find it letting go), and the
+// other hold marks the folder itself once its own step overruns. A step of
+// this hold's release that overruns marks the folder all the same.
 func (h *hold) handOff() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -134,10 +136,16 @@ func (h *hold) track(done <-chan struct{}) {
 // that step's goroutine ends, which the hold then waits for: the step it is
 // in given up with it (its stepSignal ended), the hold's context ended, and
 // the folder marked, once, with no filesystem asked (markStuck), unless every
-// hold is let go already, or the holder waits for a write it handed off
-// (handOff); once the hold has begun to let its lock go, the mark is this
-// process's alone, with no marker written.
+// hold is let go already; once the hold has begun to let its lock go, the
+// mark is this process's alone, with no marker written.
 func (h *hold) giveUp(done <-chan struct{}, step string) {
+	h.giveUpAs(done, step, false)
+}
+
+// giveUpAs is giveUp, byCaller saying the give-up is the holder's caller's
+// (abandon), which raises no mark where the holder handed its write off
+// (handOff).
+func (h *hold) giveUpAs(done <-chan struct{}, step string, byCaller bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if done != nil {
@@ -150,7 +158,7 @@ func (h *hold) giveUp(done <-chan struct{}, step string) {
 		h.given = true
 		h.cancel()
 	}
-	if h.mark != nil || h.ended || h.markless {
+	if h.mark != nil || h.ended || (byCaller && h.markless) {
 		return
 	}
 	keys := append([]string(nil), h.spellings...)
@@ -170,7 +178,7 @@ func (h *hold) abandon() {
 	h.mu.Lock()
 	step := h.at
 	h.mu.Unlock()
-	h.giveUp(nil, step)
+	h.giveUpAs(nil, step, true)
 }
 
 // gaveUp reports whether the hold was given up.
@@ -231,9 +239,6 @@ func (h *hold) waitTracked() {
 // (releaseBound) too, past which the hold is given up (stepRelease), its mark
 // standing in this process until they have ended (keepMarkUntil).
 func (h *hold) release() {
-	h.mu.Lock()
-	h.markless = false
-	h.mu.Unlock()
 	h.waitTracked()
 	h.mu.Lock()
 	ends := h.ends

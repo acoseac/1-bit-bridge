@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 )
 
 // TestAGiveUpOnceTheLocksLetGoBeganWritesNoMarker is backlog B653's fifth
@@ -66,6 +67,44 @@ func TestAGiveUpOnceTheLocksLetGoBeganWritesNoMarker(t *testing.T) {
 		if _, err := os.Lstat(filepath.Join(root, stuckMarkerName)); err == nil {
 			t.Error("a marker was left beside a lock no hold holds")
 		}
+	})
+}
+
+// TestACallersGiveUpAfterAHandOffMarksNothing: a holder that handed its
+// write to a hold of its own (handOff: a stopped verification's worker, whose
+// INCOMPLETE abandonPending writes) is given up by its caller, as its caller's
+// bound and its own answer land together, while it lets go of what it holds:
+// that give-up overran nothing and marks nothing, while a step of the same
+// release that overruns its own bound marks the folder all the same. Twenty
+// runs under the race detector found the caller's give-up landing there and
+// marking the folder at the worker's last step, its wait for the lock, once
+// in twenty (backlog B653's fifth round), where the hand-off's quiet ended as
+// the release began.
+func TestACallersGiveUpAfterAHandOffMarksNothing(t *testing.T) {
+	t.Run("the caller's give-up as the holder lets go", func(t *testing.T) {
+		h := newHold(context.Background(), "snap", t.TempDir())
+		h.handOff()
+		h.alsoLetGo(func() { h.abandon() })
+		h.release()
+		if check, marked := h.marked(); marked {
+			t.Errorf("the caller's give-up of a holder letting go after its hand-off marked the folder: %+v", check)
+		}
+		h.drop()
+	})
+	t.Run("a step of the release that overruns", func(t *testing.T) {
+		prev := releaseBound
+		releaseBound = 50 * time.Millisecond
+		defer func() { releaseBound = prev }()
+		h := newHold(context.Background(), "snap", t.TempDir())
+		h.handOff()
+		out := make(chan struct{})
+		h.alsoLetGo(func() { <-out })
+		time.AfterFunc(300*time.Millisecond, func() { close(out) })
+		h.release()
+		if check, marked := h.marked(); !marked || check.Step != stepOwnership {
+			t.Errorf("an ownership's let-go past its bound after a hand-off marked %+v, %v; want the folder marked at it", check, marked)
+		}
+		h.drop()
 	})
 }
 
