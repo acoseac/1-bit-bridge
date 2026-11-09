@@ -183,12 +183,13 @@ type Config struct {
 	// node may upload Tailscale's diagnostic logs. NewServer applies it to
 	// the process before the node is built (applyUploadPolicy): false sets
 	// NoLogsEnv true, which keeps the uploads, and the flow logs, off, and
-	// the process keeps it set until it exits; true leaves the environment
-	// as it is, so a node built after one without the key starts with the
-	// uploads off all the same, and says why (Server.Uploads). Upstream
-	// reads the variable as the node starts and the logtail transport is
-	// chosen then, so a change takes a new launch of the bridge's process:
-	// the menu's "Start now" runs serve again in its own.
+	// every later NewServer sets it again until the process exits; true
+	// leaves the environment as it is until then, so a node built after one
+	// without the key starts with the uploads off all the same, and says why
+	// (Server.Uploads). Upstream reads the variable as the node starts and
+	// the logtail transport is chosen then, so a change takes a new launch of
+	// the bridge's process: the menu's "Start now" runs serve again in its
+	// own.
 	UploadDiagnosticLogs bool
 	// BeforeStart, when set, runs on the upstream server startUnlocked
 	// built, just before its Start, and an error from it ends the start
@@ -206,7 +207,9 @@ type StartHook func(*tsnet.Server) error
 // constructs an unstarted Server. The actual tailnet-up dance happens in
 // Start. Every path that builds a node builds it here, after its mode gate,
 // on the caller's goroutine and before anything starts the node; an inherited
-// NoLogsEnv that does not read as a boolean is ErrNoLogsEnvUnreadable, with
+// NoLogsEnv that does not read as a boolean is ErrNoLogsEnvUnreadable, and,
+// where the config allows the uploads and nothing has set the variable, one
+// written in the process since is ErrNoLogsEnvWrittenUnreadable, each with
 // nothing built and the environment as it was.
 func NewServer(cfg Config) (*Server, error) {
 	if cfg.Logger == nil {

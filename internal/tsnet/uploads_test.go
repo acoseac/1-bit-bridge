@@ -158,25 +158,44 @@ func readsOff(t *testing.T, v string) bool {
 // new launch undoes; something else in this process (upstream's own setter,
 // which the coordination server's DisableLogTail message calls), which a new
 // launch may undo, read when the status is asked for, so a setter that runs
-// after the node is built shows. Each inherited value runs through each
-// sequence, and the variable is read as Tailscale reads it, never by its
-// spelling: right after the last node's NewServer and at its upstream start.
+// after the node is built shows. Before anything has set the variable, what
+// something in the process wrote there is read as Tailscale reads it: a node
+// without the key sets the variable over it, whatever it is; a node with the
+// key starts as it reads, a true holding the uploads off (the launch
+// environment's only where that held a true too) and a false holding
+// nothing, one written over an inherited true included; and a value that
+// does not read as a boolean is refused before anything starts the node, in
+// words that blame this process and not its launch environment. Each
+// inherited value runs through each sequence, every value is set with
+// t.Setenv (setInherited starts the row with the variable unset and the
+// policy's record forgotten, both put back when it ends), and the variable is
+// read as Tailscale reads it, never by its spelling: right after the last
+// node's NewServer and at its upstream start.
 func TestOnceThisProcessTurnsTheUploadsOffTheyStayOff(t *testing.T) {
 	type row struct {
 		name      string
 		inherited string
-		allows    []bool // each node's config, in the order the nodes are built
-		between   func() // after the first node, what else in the process does
-		afterLast func() // after the last node's NewServer, what else in the process does
-		newOff    bool   // right after the last node's NewServer the variable reads the uploads off
-		off       bool   // the last node's upstream start reads the uploads off
+		allows    []bool             // each node's config, in the order the nodes are built
+		between   func(t *testing.T) // after the first node, what else in the process does
+		afterLast func(t *testing.T) // after the last node's NewServer, what else in the process does
+		newOff    bool               // right after the last node's NewServer the variable reads the uploads off
+		off       bool               // the last node's upstream start reads the uploads off
 		uploads   Uploads
 		held      held
+		// refused is what the last node's NewServer refuses with, before
+		// anything starts the node, over the value between wrote (written).
+		refused error
+		written string
 	}
-	r := func(name, inherited string, allows []bool, between func(), off bool, u Uploads, h held) row {
+	r := func(name, inherited string, allows []bool, between func(*testing.T), off bool, u Uploads, h held) row {
 		return row{name: name, inherited: inherited, allows: allows, between: between, newOff: off, off: off,
 			uploads: u, held: h}
 	}
+	// writes is something in the process writing v to the variable; upstream's
+	// setter is upstream's own.
+	writes := func(v string) func(*testing.T) { return func(t *testing.T) { t.Setenv(NoLogsEnv, v) } }
+	upstreamSetter := func(*testing.T) { envknob.SetNoLogsNoSupport() }
+	const unreadable = "yes"
 	var rows []row
 	for _, inherited := range []string{unset, "false", "true", "1"} {
 		envOff := inherited == "true" || inherited == "1"
@@ -198,17 +217,35 @@ func TestOnceThisProcessTurnsTheUploadsOffTheyStayOff(t *testing.T) {
 		r("yes then yes, inherited unset", unset, []bool{true, true}, nil, false, Uploads{Allowed: true}, heldByNothing),
 		r("yes then yes, inherited true", "true", []bool{true, true}, nil, true,
 			Uploads{Allowed: true, EnvOff: true}, heldByEnv),
-		r("upstream's setter, then a node with the key", unset, []bool{true, true}, envknob.SetNoLogsNoSupport, true,
+		r("upstream's setter, then a node with the key", unset, []bool{true, true}, upstreamSetter, true,
 			Uploads{Allowed: true, OtherOff: true}, heldByOther),
 		r("upstream's setter, then a node without the key and one with it", unset, []bool{true, false, true},
-			envknob.SetNoLogsNoSupport, true, Uploads{Allowed: true, LatchedOff: true}, heldByLatch),
+			upstreamSetter, true, Uploads{Allowed: true, LatchedOff: true}, heldByLatch),
 		r("a false set in the process after the policy's true", unset, []bool{false, true},
-			func() { _ = os.Setenv(NoLogsEnv, "false") }, true, Uploads{Allowed: true, LatchedOff: true}, heldByLatch),
+			writes("false"), true, Uploads{Allowed: true, LatchedOff: true}, heldByLatch),
 		r("an unreadable value set in the process after the policy's true", unset, []bool{false, true},
-			func() { _ = os.Setenv(NoLogsEnv, "yes") }, true, Uploads{Allowed: true, LatchedOff: true}, heldByLatch),
+			writes(unreadable), true, Uploads{Allowed: true, LatchedOff: true}, heldByLatch),
 		row{name: "upstream's setter after a node with the key is built", inherited: unset, allows: []bool{true},
-			afterLast: envknob.SetNoLogsNoSupport, newOff: false, off: true,
+			afterLast: upstreamSetter, newOff: false, off: true,
 			uploads: Uploads{Allowed: true, OtherOff: true}, held: heldByOther},
+		// Values written in the process before anything has set the variable.
+		r("a first node without the key, inherited unset", unset, []bool{false}, nil, true, Uploads{}, heldByConfig),
+		r("a node without the key over an unreadable value written in the process", unset, []bool{true, false},
+			writes(unreadable), true, Uploads{}, heldByConfig),
+		row{name: "a node with the key over an unreadable value written in the process", inherited: unset,
+			allows: []bool{true, true}, between: writes(unreadable), refused: ErrNoLogsEnvWrittenUnreadable,
+			written: unreadable},
+		row{name: "a node with the key over an unreadable value written in the process, inherited true",
+			inherited: "true", allows: []bool{true, true}, between: writes(unreadable),
+			refused: ErrNoLogsEnvWrittenUnreadable, written: unreadable},
+		r("a false written in the process over an unset one, with the key", unset, []bool{true, true},
+			writes("false"), false, Uploads{Allowed: true}, heldByNothing),
+		r("a 0 written in the process over an inherited false, with the key", "false", []bool{true, true},
+			writes("0"), false, Uploads{Allowed: true}, heldByNothing),
+		r("a false written in the process over an inherited true, with the key", "true", []bool{true, true},
+			writes("false"), false, Uploads{Allowed: true}, heldByNothing),
+		r("a 1 written in the process over an inherited false, with the key", "false", []bool{true, true},
+			writes("1"), true, Uploads{Allowed: true, OtherOff: true}, heldByOther),
 	)
 	for _, c := range rows {
 		t.Run(c.name, func(t *testing.T) {
@@ -218,7 +255,7 @@ func TestOnceThisProcessTurnsTheUploadsOffTheyStayOff(t *testing.T) {
 			var startErr error
 			for i, allow := range c.allows {
 				if i == 1 && c.between != nil {
-					c.between()
+					c.between(t)
 				}
 				reached := false
 				s, err := NewServer(Config{
@@ -229,6 +266,13 @@ func TestOnceThisProcessTurnsTheUploadsOffTheyStayOff(t *testing.T) {
 						return nil
 					},
 				})
+				if i == len(c.allows)-1 && c.refused != nil {
+					mustRefuseTheValueWrittenInTheProcess(t, s, err, c.refused, c.written)
+					if reached {
+						t.Error("a NewServer that refused reached an upstream start")
+					}
+					return
+				}
 				if err != nil {
 					t.Fatalf("node %d: NewServer: %v", i+1, err)
 				}
@@ -238,7 +282,7 @@ func TestOnceThisProcessTurnsTheUploadsOffTheyStayOff(t *testing.T) {
 							got, c.newOff)
 					}
 					if c.afterLast != nil {
-						c.afterLast()
+						c.afterLast(t)
 					}
 				}
 				s.newNode = func(*tsnet.Server) node {
@@ -269,6 +313,36 @@ func TestOnceThisProcessTurnsTheUploadsOffTheyStayOff(t *testing.T) {
 			}
 			mustSayWhatHoldsTheUploadsOff(t, got.HeldOff(), refused.Error(), c.held, c.uploads.EnvOff)
 		})
+	}
+}
+
+// mustRefuseTheValueWrittenInTheProcess fails the test unless NewServer
+// refused with want, which is not the launch environment's refusal, and built
+// nothing, left the variable as the process wrote it, and said so in words
+// that name the variable and not its value and blame this process, never the
+// environment the bridge was launched with.
+func mustRefuseTheValueWrittenInTheProcess(t *testing.T, s *Server, err, want error, written string) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("NewServer built a node over %s=%q, a value Tailscale's code stops the process on", NoLogsEnv, envNow())
+	}
+	if !errors.Is(err, want) || errors.Is(err, ErrNoLogsEnvUnreadable) {
+		t.Fatalf("NewServer = %v, want %v and not the launch environment's refusal", err, want)
+	}
+	if s != nil {
+		t.Error("a NewServer that refused built a node")
+	}
+	if got := envNow(); got != written {
+		t.Errorf("a refused NewServer left %s as %q, want it as the process wrote it, %q", NoLogsEnv, got, written)
+	}
+	words := err.Error()
+	for _, w := range []string{NoLogsEnv, "the bridge's process", "launch it again"} {
+		if !strings.Contains(words, w) {
+			t.Errorf("the refusal does not say %q: %q", w, words)
+		}
+	}
+	if strings.Contains(words, written) || strings.Contains(words, "environment") {
+		t.Errorf("the refusal prints the value, or blames the environment the bridge was launched with: %q", words)
 	}
 }
 
