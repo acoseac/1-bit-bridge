@@ -188,3 +188,47 @@ func TestAClaimTakesOnlyWhatNoLiveOwnerHolds(t *testing.T) {
 	}
 	requireVerdict(t, "the claimed snapshot once checked", listed(t, c.Dir), backup.StateVerified, "", backup.StateVerified, "")
 }
+
+// TestAClaimedSnapshotIsKeptFromThePrune: a snapshot claimed for its check
+// whose record holds no PENDING (an INCOMPLETE a stopped check wrote, which
+// the startup pass claims to finish) is owed its check all the same, and
+// the prune asks its owner just before it would remove it: kept while the
+// claim holds it, past keep and past the evidence it keeps, and pruned as
+// any other once the claim lets it go.
+func TestAClaimedSnapshotIsKeptFromThePrune(t *testing.T) {
+	src := storeWithTracks(t, 5)
+	stopped := captureT(t, src)
+	stopped.Release()
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	// A check stopped before it began writes INCOMPLETE over the PENDING.
+	_, _ = backup.VerifySnapshot(ctx, stopped.Dir, backup.VerifyOptions{})
+	requireVerdict(t, "the stopped one", listed(t, stopped.Dir), backup.StateIncomplete, backup.ReasonCancelled,
+		backup.StateIncomplete, backup.ReasonCancelled)
+	time.Sleep(1100 * time.Millisecond)
+	newer := captureT(t, src)
+	newer.Release()
+	_, _ = backup.VerifySnapshot(ctx, newer.Dir, backup.VerifyOptions{})
+	time.Sleep(1100 * time.Millisecond)
+	newest := verifiedSnapshot(t, src)
+	root := filepath.Dir(newest)
+	claimed, err := backup.Claim(t.Context(), stopped.Dir, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// keep 1: the newest stays, and the newer INCOMPLETE is the evidence;
+	// the claimed one is neither.
+	if _, err := backup.Prune(root, 1); err != nil {
+		t.Fatal(err)
+	}
+	if !pathExists(t, stopped.Dir) {
+		t.Fatal("the prune removed a snapshot claimed for its check")
+	}
+	claimed.Release()
+	if _, err := backup.Prune(root, 1); err != nil {
+		t.Fatal(err)
+	}
+	if pathExists(t, stopped.Dir) {
+		t.Error("the prune kept a snapshot once its claim let it go, past keep and the evidence")
+	}
+}
