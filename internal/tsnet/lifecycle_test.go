@@ -192,9 +192,16 @@ type fakeNode struct {
 
 	mu      sync.Mutex
 	builds  int  // times newNode handed this node to a start
+	starts  int  // Start calls
 	running int  // Start or Up calls that have not returned
 	closes  int  // Close calls
 	overlap bool // Close ran while Start or Up was running
+}
+
+func (n *fakeNode) startCalls() int {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.starts
 }
 
 func (n *fakeNode) enter() {
@@ -218,6 +225,9 @@ func (n *fakeNode) built() int {
 func (n *fakeNode) Start() error {
 	n.enter()
 	defer n.leave()
+	n.mu.Lock()
+	n.starts++
+	n.mu.Unlock()
 	return nil
 }
 

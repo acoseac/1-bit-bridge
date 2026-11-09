@@ -90,10 +90,27 @@ func loadConfigAndRequireTsnetMode(cmd string, args []string, stderr io.Writer) 
 // there.
 var tsnetCommandServer = newTsnetServer
 
-// newTsnetServer builds a configured *tsnet.Server from cfg. Returns
-// an error if state-dir setup fails AT CONSTRUCTION (perms / path).
-// The actual tailnet-Up dance happens in Server.Start, called from
-// runServe's listener-spawn goroutine.
+// tsnetBeforeStart is the hook every node newTsnetServer builds runs just
+// before its upstream start (tsnet.Config.BeforeStart), on all three paths
+// that build one: serve, bridge tsnet auth and bridge tsnet status. Nil in
+// production; a test sets it to read what the upstream start would see (the
+// environment, the node's name) and to stop the start there.
+var tsnetBeforeStart tsnet.StartHook
+
+// newTsnetServer builds a configured *tsnet.Server from cfg, which applies
+// the diagnostic-log policy to the process (tailscale.uploadDiagnosticLogs:
+// TS_NO_LOGS_NO_SUPPORT set true unless it is, before anything starts the
+// node) and refuses an inherited TS_NO_LOGS_NO_SUPPORT that does not read as
+// a boolean, naming it. Each of its callers runs it once, after the mode gate
+// (serve's switch on the mode, and loadConfigAndRequireTsnetMode for auth and
+// status), on the caller's goroutine and before anything starts the node. The
+// actual tailnet-Up dance happens in Server.Start, called from runServe's
+// listener-spawn goroutine.
+//
+// The node's name is tailscale.hostname, else what the state dir says at the
+// start: a registered node keeps its name, a new one is
+// tsnet.DefaultHostname, and a state that cannot be read keeps the library
+// name earlier versions gave every node (backlog B749).
 //
 // Logger writes to stderr at debug level — production routes this
 // through the bridge's existing slog setup (cfg.LogLevel) once the
@@ -103,18 +120,17 @@ var tsnetCommandServer = newTsnetServer
 // firehose.
 func newTsnetServer(cfg *config.Config, stderr io.Writer) (*tsnet.Server, error) {
 	stateDir := filepath.Join(cfg.DataDir, "tailscale")
-	hostname := cfg.Tailscale.Hostname
-	if hostname == "" {
-		hostname = cfg.LibraryName
-	}
 	logger := slog.New(slog.NewTextHandler(stderr, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
 	}))
 	return tsnet.NewServer(tsnet.Config{
-		AuthKey:  cfg.Tailscale.AuthKey,
-		Hostname: hostname,
-		StateDir: stateDir,
-		Logger:   logger,
+		AuthKey:                 cfg.Tailscale.AuthKey,
+		Hostname:                cfg.Tailscale.Hostname,
+		UnreadableStateHostname: cfg.LibraryName,
+		StateDir:                stateDir,
+		Logger:                  logger,
+		UploadDiagnosticLogs:    cfg.Tailscale.UploadDiagnosticLogs,
+		BeforeStart:             tsnetBeforeStart,
 	})
 }
 
@@ -262,18 +278,37 @@ func (s tailscaleAdminSource) RefreshNow(ctx context.Context) admin.TailscaleSta
 	return s.Status()
 }
 
+// tsnetStatusSource is what the admin tile reads from the embedded node:
+// a tsnetNode, narrowed to its reads. LastStartError and LogsRequired are
+// how a tailnet that requires the logs this node does not upload reaches
+// the tile, after a start it refused and while the node runs; Uploads is
+// the upload policy's status, which the tile shows whatever the tailnet
+// says.
+type tsnetStatusSource interface {
+	Status(context.Context) (*ipnstate.Status, error)
+	CertDomains() []string
+	LastStartError() error
+	LogsRequired(*ipnstate.Status) error
+	Uploads() tsnet.Uploads
+}
+
 // tsnetAdminStatus translates the tsnet Server's live tailnet view
 // into admin.TailscaleStatus. Maps the upstream ipnstate.Status
 // fields onto the admin tile shape — keeping the tile rendering
 // code path-agnostic. Honours `ctx` so admin handlers can bound
 // the live LocalClient call.
-// tsnetStatusSource is what the admin tile reads from the embedded node:
-// a tsnetNode, narrowed to the two reads.
-type tsnetStatusSource interface {
-	Status(context.Context) (*ipnstate.Status, error)
-	CertDomains() []string
-}
-
+//
+// A tailnet that requires Tailscale's logs, which this node does not
+// upload, is said in the bridge's words (tsnet.LogsRequiredError) in
+// LastError: after a start it refused, when there is no node to ask for a
+// status, and while the node runs, from its status's health, beside the
+// backend state (Stopped) the status reports.
+//
+// What holds the node's diagnostic-log uploads off where the config allows
+// them (tsnet.Uploads.HeldOff: the launch environment, this process
+// earlier, or something else in it) is said in UploadsHeldOff, a line of
+// its own, for a node the tailnet accepted as for one it refused, so a
+// running node's badge, backend state and endpoints stay as they are.
 func tsnetAdminStatus(ctx context.Context, s tsnetStatusSource) admin.TailscaleStatus {
 	out := admin.TailscaleStatus{
 		// CLIAvailable lights the "I can talk to tailscale" indicator
@@ -282,10 +317,22 @@ func tsnetAdminStatus(ctx context.Context, s tsnetStatusSource) admin.TailscaleS
 		// there's no CLI to "find".
 		CLIAvailable: true,
 	}
+	if held := s.Uploads().HeldOff(); held != "" {
+		out.UploadsHeldOff = "Tailscale's diagnostic log uploads are off, although tailscale.uploadDiagnosticLogs " +
+			"is true: " + held
+	}
+	var refused *tsnet.LogsRequiredError
+	if errors.As(s.LastStartError(), &refused) {
+		out.LastError = refused.Error()
+		return out
+	}
 	st, err := s.Status(ctx)
 	if err != nil {
 		out.LastError = fmt.Sprintf("tsnet status: %v", err)
 		return out
+	}
+	if err := s.LogsRequired(st); err != nil {
+		out.LastError = err.Error()
 	}
 	// Surface BackendState unconditionally so consumers (api layer's
 	// `/v1/health.endpoints` advertising in particular) can gate on

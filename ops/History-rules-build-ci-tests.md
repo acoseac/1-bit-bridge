@@ -201,17 +201,23 @@
   local form is not read in a file with a dot import, and cgo's `C` is
   never read as an import (its import carries the preamble). Two keepers of
   one package are not each other's use (update.go's pair).
-  **The one allowance stands on its stated CONDITION, not its path**:
-  `allowedKeepers` holds internal/tsnet's `var _ = errors.Is` while its doc
-  says "Don't remove until typed errors land.", `typedErrorIn` finds no
+  **An allowance stands on its stated CONDITION, not its path**:
+  `allowedKeepers` held internal/tsnet's `var _ = errors.Is` while its doc
+  said "Don't remove until typed errors land.", `typedErrorIn` found no
   sentinel, `Error() string` method or error interface there, and the file
-  uses `errors` nowhere else. Any of those failing is reported, and so is
-  an entry whose keeper is gone. On a clean tree the sweep reports nothing, so
-  `TestBlankKeeperScanOnFixtures` pins every shape, refused shape, scope
-  rule, skip rule and allowance state: 49 of 51 mutations turn it red, and
-  five turn the tree red. Of the two that stay green, one drops the CRLF
-  normalisation (the scan is CRLF-safe without it) and one widens a check
-  that `keep` makes again.
+  used `errors` nowhere else. Any of those failing is reported, and so is
+  an entry whose keeper is gone. Backlog B749's typed errors
+  (`tsnet.ErrNoLogsEnvUnreadable`, `tsnet.LogsRequiredError`, 2026-11-09)
+  met the condition: the keeper went, and `allowedKeepers` is empty. On a
+  clean tree the sweep reports nothing, so `TestBlankKeeperScanOnFixtures`
+  pins every shape, refused shape, scope rule, skip rule and allowance state,
+  the last with that allowance's shape kept as a fixture
+  (`keeperFixtureAllowance`). Measured on 9f49ab2f, before B749 removed the
+  keeper and its allowance, and not since: 49 of 51 mutations turned it
+  red, and five turned the tree red, one of them (NC18) by mutating the
+  real allowance's condition text, which no longer exists. Of the two
+  that stayed green, one drops the CRLF normalisation (the scan is
+  CRLF-safe without it) and one widens a check that `keep` makes again.
 
 - **A test that sweeps this repo's own files decides from the NAME what it
   opens, before it opens anything** (#993). Emacs locks a file it is editing

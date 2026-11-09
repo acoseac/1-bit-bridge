@@ -55,6 +55,11 @@ services:
       # enabling it without one degrades to off with a line in the log.
       BRIDGE_FINGERPRINT_ENABLED: "${BRIDGE_FINGERPRINT_ENABLED:-false}"
       ACOUSTID_API_KEY: "${ACOUSTID_API_KEY:-}"
+      # tsnet mode: consent to the embedded Tailscale node uploading Tailscale's
+      # diagnostic logs (tailscale.uploadDiagnosticLogs). Empty leaves what
+      # bridge.yaml says. A change takes recreating the container
+      # (docker compose up -d); a restart keeps its environment.
+      BRIDGE_TAILSCALE_UPLOAD_DIAGNOSTIC_LOGS: "${BRIDGE_TAILSCALE_UPLOAD_DIAGNOSTIC_LOGS:-}"
       # Set true to disable HTTP/3 entirely (also drop the /udp port above).
       BRIDGE_DISABLE_HTTP3: "${BRIDGE_DISABLE_HTTP3:-false}"
       # Local timezone for the auto-updater quiet-hours window.

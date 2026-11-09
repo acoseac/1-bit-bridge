@@ -3,7 +3,6 @@ package tsnet
 import (
 	"bytes"
 	"context"
-	"errors"
 	"io"
 	"log/slog"
 	"os"
@@ -220,26 +219,6 @@ func TestNoisyLogfFromSlogPropagatesErrors(t *testing.T) {
 	}
 }
 
-// TestHasPersistedTsnetStateDetectsTailscaledState — the file
-// `<stateDir>/tailscaled.state` is the canonical signal that tsnet
-// has persisted machine identity. The startup misconfig sentinel
-// uses this to distinguish "first run, will need interactive auth"
-// from "state was wiped, will silently re-register" (different
-// operator-facing log message for each).
-func TestHasPersistedTsnetStateDetectsTailscaledState(t *testing.T) {
-	dir := t.TempDir()
-	if hasPersistedTsnetState(dir) {
-		t.Errorf("empty state dir reports persisted state")
-	}
-	stateFile := filepath.Join(dir, "tailscaled.state")
-	if err := os.WriteFile(stateFile, []byte("{}"), 0o600); err != nil {
-		t.Fatalf("write state file: %v", err)
-	}
-	if !hasPersistedTsnetState(dir) {
-		t.Errorf("state file present, hasPersistedTsnetState = false")
-	}
-}
-
 // TestAssertSecureDirMissingPath — non-existent state dir surfaces
 // the underlying os.Stat error. Caller is expected to MkdirAll
 // before calling assertSecureDir; this tests the error shape when
@@ -370,10 +349,3 @@ func TestUserLogfRaceFreeWithAuthURL(t *testing.T) {
 		t.Errorf("AuthURL after concurrent writes = %q", got)
 	}
 }
-
-// This blank reference keeps `errors` from being elided when test
-// imports change. errors.Is is the kind of check we'll want as
-// soon as Status / ListenTLS gain typed errors — currently the
-// stub-shape return `errors.New(...)` strings are matched by
-// substring. Don't remove until typed errors land.
-var _ = errors.Is
