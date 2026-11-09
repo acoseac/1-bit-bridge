@@ -317,6 +317,74 @@ func TestARecheckWithNoDurableVetoIsRefusedBeforeItsCheck(t *testing.T) {
 	}
 }
 
+// TestANewVerifiedIsNotWrittenWhereNoVetoCanBeHad: a fresh snapshot's check
+// that finds it VERIFIED, where no veto can be made in the bundle or beside
+// it, writes nothing (a write of a VERIFIED is made behind its veto or not at
+// all, backlog B653's third round), its error says so, and once its owner is
+// gone no reader reads it verified.
+func TestANewVerifiedIsNotWrittenWhereNoVetoCanBeHad(t *testing.T) {
+	src := storeWithTracks(t, 5)
+	c := captureT(t, src)
+	mpath := filepath.Join(c.Dir, backup.ManifestFile)
+	before := readBytes(t, mpath)
+	restore := backup.SetVerdictWriteFailuresForTest(nil, nil, func(string) error { return errors.New("injected") })
+	res := backup.FinishCapture(t.Context(), c, nil, backup.VerifyOptions{})
+	restore()
+	if res.Verify.Found.DatabaseState != backup.StateVerified {
+		t.Fatalf("the check found %s, want VERIFIED: the test did not reach the case", res.Verify.Found.DatabaseState)
+	}
+	if res.VerifyErr == nil || res.Verify.Recorded {
+		t.Errorf("a VERIFIED with no veto to be had answered %v, recorded %v; want it not written", res.VerifyErr, res.Verify.Recorded)
+	}
+	if got := readBytes(t, mpath); !bytes.Equal(got, before) {
+		t.Error("a VERIFIED with no veto to be had was written")
+	}
+	if got := readersVerified(t, c.Dir); len(got) > 0 {
+		t.Errorf("once its owner is gone, %s", strings.Join(got, "; "))
+	}
+}
+
+// TestARecordCopiedIntoAnotherFolderReadsUnverified: a snapshot's record
+// names the folder it was written for (backlog B653's third round, the review
+// of its brief: a record bound to another snapshot is not trusted), so a
+// verified snapshot's folder copied whole under another name reads UNVERIFIED
+// (other-snapshot) to every reader, the original VERIFIED as before, and the
+// prune does not take the copy for the newest verified snapshot.
+func TestARecordCopiedIntoAnotherFolderReadsUnverified(t *testing.T) {
+	src := storeWithTracks(t, 5)
+	dir := verifiedSnapshot(t, src)
+	root := filepath.Dir(dir)
+	copied := filepath.Join(root, "2999-01-01T00-00-00Z")
+	if err := os.MkdirAll(copied, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if !e.Type().IsRegular() {
+			continue
+		}
+		if err := os.WriteFile(filepath.Join(copied, e.Name()), readBytes(t, filepath.Join(dir, e.Name())), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	requireVerdict(t, "the copy", listed(t, copied), backup.StateUnverified, backup.ReasonOtherSnapshot,
+		backup.StateUnverified, backup.ReasonOtherSnapshot)
+	requireVerdict(t, "the original", listed(t, dir), backup.StateVerified, "", backup.StateVerified, "")
+	st, err := backup.ReadStatus(t.Context(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nv, ok := st.NewestVerified(); !ok || nv.DirName != filepath.Base(dir) {
+		t.Errorf("the newest verified snapshot is %q, want the original %q", nv.DirName, filepath.Base(dir))
+	}
+	if got := readersVerified(t, copied); len(got) > 0 {
+		t.Errorf("the copy: %s", strings.Join(got, "; "))
+	}
+}
+
 // firstReason is reasons' first, or none.
 func firstReason(reasons []backup.Reason) backup.Reason {
 	if len(reasons) == 0 {

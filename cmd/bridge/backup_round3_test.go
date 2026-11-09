@@ -37,16 +37,20 @@ const (
 )
 
 // The lines a stuck check's process prints once its check is parked, and
-// once its verification has answered.
+// once its verification has answered; and the line a verification's process
+// prints once its check has ended, before its verdict is written.
 const (
-	stuckParked  = "stuck check parked"
-	stuckGivenUp = "stuck check given up:"
+	stuckParked   = "stuck check parked"
+	stuckGivenUp  = "stuck check given up:"
+	verifyChecked = "verification checked"
 )
 
 // runVerifyWithFault is the re-exec'd test binary's whole run as one bridge
 // backup with a fault in its verdict's write: stage (the staging refused),
 // unsynced (the folder's sync once the rename has landed), noveto (no veto
-// can be made) or vetosync (a veto made does not sync).
+// can be made), vetosync (a veto made does not sync), or killed (the process
+// parks once its check has ended, until its standard input ends, for the
+// test to kill it there).
 func runVerifyWithFault() int {
 	injected := errors.New("injected: " + os.Getenv(verifyFaultEnv))
 	always := func(string) error { return injected }
@@ -59,6 +63,11 @@ func runVerifyWithFault() int {
 		backup.SetVerdictWriteFailuresForTest(nil, nil, always)
 	case "vetosync":
 		backup.SetSyncVetoForTest(always)
+	case "killed":
+		backup.SetAfterCheckForTest(func(string) {
+			fmt.Fprintln(os.Stdout, verifyChecked)
+			_, _ = io.Copy(io.Discard, os.Stdin)
+		})
 	default:
 		fmt.Fprintln(os.Stderr, "no such fault")
 		return 99
@@ -125,6 +134,51 @@ func backupLines(t *testing.T, cfgPath string) []doctor.Check {
 	return doctorBackups(cfg)(t.Context())
 }
 
+// killedOnceChecked starts cmd, a verification's process that parks once its
+// check has ended (the killed fault), and kills it there; a process the test
+// leaves goes on once its standard input ends, and ends by itself.
+func killedOnceChecked(t *testing.T, cmd *exec.Cmd) {
+	t.Helper()
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stderr safeBuffer
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	checked, done := make(chan struct{}), make(chan struct{})
+	t.Cleanup(func() { _ = cmd.Wait() })
+	drainLoopOnCleanup(t, func() { _ = stdin.Close() }, done, "the verification's output reader")
+	go func() {
+		defer close(done)
+		sc := bufio.NewScanner(stdout)
+		for sc.Scan() {
+			if sc.Text() == verifyChecked {
+				close(checked)
+				break
+			}
+		}
+		_, _ = io.Copy(io.Discard, stdout)
+	}()
+	select {
+	case <-checked:
+	case <-done:
+		t.Fatalf("the verification's process ended before its check did: %s", stderr.String())
+	case <-time.After(2 * time.Minute):
+		t.Fatalf("the verification's check never ended: %s", stderr.String())
+	}
+	_ = cmd.Process.Kill()
+	<-done
+	// Reaped, so every file it held is closed, its locks with them.
+	_ = cmd.Wait()
+}
+
 // TestAFreshProcessReadsNoVerifiedAVerificationCouldNotRecord is backlog
 // B653's third round's red for what a verification that could not record
 // leaves the next process (Claude's first finding on round 2, and the
@@ -133,9 +187,10 @@ func backupLines(t *testing.T, cfgPath string) []doctor.Check {
 // bridge backup --verify of its own process, whose write of what it found
 // fails (its staging refused; its folder's sync failing once the rename has
 // landed, and the rename then lost to a crash, its record put back), or that
-// can put no veto in place durably (none made; one made that does not sync).
-// Each says, apart, what its check found and what the record reads, or that
-// it checked nothing and what the earlier check's record says, and exits 1.
+// can put no veto in place durably (none made; one made that does not sync),
+// or that is killed once its check has ended, before its write. Each but the
+// killed one says, apart, what its check found and what the record reads, or
+// that it checked nothing and what the earlier check's record says, and exits 1.
 // Then a fresh process reads it: where a check completed, no reader (the
 // pruner's List, the doctor's lines, the console's ReadStatus) reads a
 // VERIFIED, and the prune keeps the older verified snapshot; where none ran,
@@ -159,6 +214,9 @@ func TestAFreshProcessReadsNoVerifiedAVerificationCouldNotRecord(t *testing.T) {
 		{fault: "unsynced", checked: true, crash: true, said: []string{"this check found:", "database: FAILED", "not known to survive a crash"}},
 		{fault: "noveto", said: []string{"was not checked", "from an earlier check, which this one did not repeat", "database: VERIFIED"}},
 		{fault: "vetosync", said: []string{"was not checked", "from an earlier check, which this one did not repeat", "database: VERIFIED"}},
+		// Killed once its check has found the database FAILED, before its
+		// write: says nothing, exits by the kill.
+		{fault: "killed", checked: true},
 	} {
 		t.Run(tc.fault, func(t *testing.T) {
 			cfgPath, _, root := backupInstall(t)
@@ -185,17 +243,21 @@ func TestAFreshProcessReadsNoVerifiedAVerificationCouldNotRecord(t *testing.T) {
 			}
 			cmd := exec.Command(exe, "-test.run=^$")
 			cmd.Env = append(os.Environ(), verifyFaultEnv+"="+tc.fault, verifyArgsEnv+"="+string(args))
-			var stdout, stderr bytes.Buffer
-			cmd.Stdout, cmd.Stderr = &stdout, &stderr
-			err = cmd.Run()
-			var exit *exec.ExitError
-			if !errors.As(err, &exit) || exit.ExitCode() != 1 {
-				t.Fatalf("the verification's process: %v, want exit 1\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
-			}
-			said := stdout.String() + stderr.String()
-			for _, want := range tc.said {
-				if !strings.Contains(said, want) {
-					t.Errorf("the verification did not say %q:\n%s", want, said)
+			if tc.fault == "killed" {
+				killedOnceChecked(t, cmd)
+			} else {
+				var stdout, stderr bytes.Buffer
+				cmd.Stdout, cmd.Stderr = &stdout, &stderr
+				err = cmd.Run()
+				var exit *exec.ExitError
+				if !errors.As(err, &exit) || exit.ExitCode() != 1 {
+					t.Fatalf("the verification's process: %v, want exit 1\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+				}
+				said := stdout.String() + stderr.String()
+				for _, want := range tc.said {
+					if !strings.Contains(said, want) {
+						t.Errorf("the verification did not say %q:\n%s", want, said)
+					}
 				}
 			}
 			if tc.crash {

@@ -117,9 +117,13 @@ func TestAnAbandonedCheckKeepsItsHoldsUntilItsCheckerEnds(t *testing.T) {
 		backup.StateIncomplete, backup.ReasonDeadline)
 	recorded := readBytes(t, filepath.Join(c.Dir, backup.ManifestFile))
 
-	// The slot: a verification in another backups folder.
+	// The slot: a verification in another backups folder, which would wait
+	// its turn for ten seconds at most.
 	asked := time.Now()
-	if _, err := backup.VerifySnapshot(t.Context(), other, backup.VerifyOptions{BackupsRoot: otherRoot}); !errors.Is(err, backup.ErrCheckStillRunning) {
+	slotCtx, cancelSlot := context.WithTimeout(t.Context(), 10*time.Second)
+	_, err = backup.VerifySnapshot(slotCtx, other, backup.VerifyOptions{BackupsRoot: otherRoot})
+	cancelSlot()
+	if !errors.Is(err, backup.ErrCheckStillRunning) {
 		t.Errorf("a verification in another backups folder beside the check that runs on answered %v, want ErrCheckStillRunning", err)
 	}
 	if took := time.Since(asked); took > 2*time.Second {
