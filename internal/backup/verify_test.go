@@ -887,9 +887,11 @@ func TestTwoVerificationsOfOneSnapshotWriteOneAtATime(t *testing.T) {
 	}
 }
 
-// TestAFilesystemThatKeepsNoLocksStillVerifies: where the lock cannot be
-// had at all (ENOLCK, EOPNOTSUPP), a verification goes on without it.
-func TestAFilesystemThatKeepsNoLocksStillVerifies(t *testing.T) {
+// TestAVerificationGrantedNoLockStillVerifies: where the try is answered as
+// a filesystem or a platform that gives no lock answers (fsutil.KeepsNoLocks:
+// ENOLCK, EOPNOTSUPP, errors.ErrUnsupported), a verification goes on without
+// the lock.
+func TestAVerificationGrantedNoLockStillVerifies(t *testing.T) {
 	src := storeWithTracks(t, 5)
 	dir, err := backup.Snapshot(t.Context(), src)
 	if err != nil {

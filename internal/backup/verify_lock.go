@@ -41,19 +41,21 @@ const (
 )
 
 // tryLockBackups is the try a wait makes: fsutil.TryLock, and a test's
-// stand-in for what a filesystem that keeps no locks answers.
+// stand-in for a try no lock is granted to.
 var tryLockBackups = fsutil.TryLock
 
-// noLocksOnce says once per process that the backups folder's filesystem
-// keeps no locks.
+// noLocksOnce says once per process that no lock was granted on the backups
+// folder's lock file.
 var noLocksOnce sync.Once
 
 // lockBackups takes the lock in dir, the folder that holds the snapshots,
 // waiting while another open holds it, for at most wait (0: one try), and
 // answers the release. ErrBackupsBusy when the wait ends with the lock held,
-// ctx's error when ctx ends first. Where the filesystem keeps no locks
-// (fsutil.KeepsNoLocks) it goes on without one, said once: the pruner and a
-// verification then run as they did before the lock, beside each other.
+// ctx's error when ctx ends first. Where the try's answer is one
+// fsutil.KeepsNoLocks reads (a filesystem or a platform that gave no lock)
+// it goes on without one, said once, in words that claim nothing of the
+// filesystem, since ENOLCK does not show that it keeps none: the pruner and
+// a verification then run as they did before the lock, beside each other.
 func lockBackups(ctx context.Context, dir string, wait time.Duration) (release func(), err error) {
 	f, err := fsutil.OpenLockFile(dir, LockFileName)
 	if err != nil {
@@ -70,7 +72,7 @@ func lockBackups(ctx context.Context, dir string, wait time.Duration) (release f
 			}, nil
 		case fsutil.KeepsNoLocks(err):
 			noLocksOnce.Do(func() {
-				logging.Component("backup").Warn("the backups folder's filesystem keeps no locks: verifications and the prune run without one",
+				logging.Component("backup").Warn("no lock was granted on the backups folder: another process may still hold one, and verifications and the prune run without exclusive use of the snapshots",
 					"err", fsutil.ErrorWithoutPath(err))
 			})
 			return func() { _ = f.Close() }, nil
