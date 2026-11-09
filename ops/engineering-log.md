@@ -89187,3 +89187,257 @@ holds for.
 
 Windows was not run here: CI runs it. Checks here: gofmt over the new file,
 `go vet` of `internal/atomicwrite` for `GOOS=windows`, `make docs-check`.
+
+## 2026-11-09 — B761 PR 1: an off switch for the update check
+
+Backlog B761's first PR on `feat/b761-update-switch` from main 71f707ab,
+worker b761u on legion0 (Ubuntu 26.04, linux/amd64, go1.27.3,
+`GOTOOLCHAIN=local`, `GOPROXY=off`). Commits: the config's key 48f6f54f;
+the updater's switch ad9a64ad; serve, the console, `/v1/health` and the CLI
+c2656e38; the docs and the panel's redraw 434eb7c2; an install the switch
+stopped stays stopped with the checks on again 77386550; the tests' waits on
+the switch alone 656bbc06 (two negative controls' misses, below); the
+example config's `update:` section c3477ca7; and this record. The rules go
+into `.claude/rules/config-lifecycle.md`, `wire.md`, `admin-console.md`,
+`cli-serve.md` and their History files through `rules-b761.patch`, which
+this worker cannot commit. B761's other part, the Deezer re-queue, is a
+later PR.
+
+### What happened at main
+
+The updater asked GitHub's releases API at every start and every check
+interval (6 h by default; `update.checkIntervalHours` only stretched it, to a
+1 h floor), "Check now" and `bridge update` asked whatever the settings said,
+and an install of a cached candidate needed nothing more. Nothing turned the
+traffic off, and the docs said that the bridge polls but not what it sends or
+how to stop it: one unauthenticated GET of the latest release, its User-Agent
+naming the bridge's version, and on an install the archive, `checksums.txt`
+and `release-meta.json`. A restart the
+auto-installer deferred after its swap had committed (`pendingRestart`: a
+download in flight, the quiet hours) fired only through the pending-restart
+fast path of `maybeAutoInstall`, after a check that answered.
+
+### The switch
+
+`update.checkEnabled` (`UpdateConfig.CheckEnabled`, a `*bool`, absent on,
+`EffectiveCheckEnabled`); `BRIDGE_UPDATE_CHECK_ENABLED` is derived and read as
+the enrichment opt-outs read theirs (`switchEnvPaths`: the file's on and off
+words in any case, anything else off with a Warn naming the variable); the
+holder's save writes it as the file holds it unless the save changed it, then
+off as false and on as no key (`filedSwitches`), and `Clone` copies it. The
+`updates` managed control owns `updateCheckEnabled`, the `restart` control
+not. `bridge init --force` keeps it written off (`priorUpdate`, through
+`readPriorSwitch`, which `priorEnrich` now shares), names a value that does not
+read by its line and keeps nothing of it (`warnUpdateNotKept`), and writes no
+variable's value.
+
+### The updater
+
+- **Admission.** `Options.CheckEnabled` (nil on) is read by `admit` under
+  `gateMu`, which registers each admitted check or install with a context of
+  its own; `ChecksSwitched`, under the same lock, marks every registered
+  admission stopped and cancels its context when the switch reads off, so an
+  admission is either refused after an off or stopped by it. The start's
+  check, each tick's (`tick`) and Check now are admitted so; an install is
+  admitted at its start.
+- **A plain cancel.** The admission's context is `context.WithCancel`, the
+  stop told by `admission.stopped`: under `WithCancelCause(ErrUpdateChecksOff)`
+  net/http answered the stopped request with the cause itself, the check
+  recorded `LastError` "github get: …: update checks are off" and logged an
+  ERROR poll line, since `ctxerr.WithoutCancellation` reads the cancellation
+  (control C39).
+- **The install's boundary.** `decideUnderLock` asks `commit` first, holding
+  the install marker's lock: only an admission still registered, with the
+  switch on, is committed, and from there no off transition reaches the
+  install, whose marker's writes and swap finish. Before it, the stop cancels
+  the download, the settings check or the wait for the lock, and the decision
+  refuses an install the off transition stopped even with the switch on again
+  (control C7). `installStopped` words a stopped install's answer "nothing was
+  installed" whatever the stop made of its own error.
+- **The auto-installer.** `maybeAutoInstall` reads the switch again at its
+  top, so a candidate a check found just before the switch went off is not
+  installed (the post-poll race); its gates moved into `autoInstallGate`, and
+  `ErrUpdateChecksOff` is a deferred state, logged at Info.
+- **The deferred restart.** A tick while off asks nothing and calls
+  `finishDeferredRestart`: a restart pending from a committed swap, through
+  `autoInstallGate` (auto-install on and wired, the candidate cached and not
+  held back, the quiet hours) and `restartWhenDrained` (no download in
+  flight, the marker's restamp, a stop). A manual install gains none.
+- **On again.** `ChecksSwitched` sends the loop's `wake` (buffered 1): the
+  wait starts again at a full interval, asking nothing. The loop's timer is a
+  seam, `Updater.after` (`time.After` in production).
+- **The status.** `Status.CheckEnabled`; while off, `shown` empties
+  `LatestVersion`, `UpdateAvailable`, `ReleaseNotesURL`, `DeferredReason` and
+  `LastError` and keeps `LastCheck`; on again they show again. The
+  auto-installer and an install read `cached`. `CheckNow` answers
+  `(Status, error)`: `ErrUpdateChecksOff` before asking, and for a check the
+  switch stopped.
+- **Never refused:** a status, the console's rollback, the boot's early and
+  crash rollbacks, the probation and its confirmation. `bridge update` has no
+  rollback of its own (it never had one; `git log -S` on its source), so the
+  brief's "rollback by the CLI" is pinned by the console's rollback through
+  serve and by the start's crash rollback with checks off in the settings
+  (`TestAStartsCrashRollbackRunsWithUpdateChecksOff`).
+
+### Serve, the console, health and the CLI
+
+Serve's updater reads the switch off the live holder and asks the releases API
+`serveOpts.updateReleases` names (a boot test's; GitHub's otherwise); the
+console's `Deps.UpdateChecksSwitched` is `upd.ChecksSwitched`. The settings
+GET and PATCH carry `updateCheckEnabled` resolved, `live`, only off written,
+and the updater is told once a save that changed it is published, never for
+one that failed. Check now and Install answer 409 `update-checks-off`
+(`admin.ErrUpdateChecksOff`; `UpdateProvider.CheckNow` answers an error now),
+the rollback 204. The status DTO carries `checkEnabled`; the Settings page's
+Updates panel and the Jobs card say "update checks off" and offer neither
+Check now nor Install, the card's tray carries the switch, and the Settings
+form's save of it redraws the panel from `GET /api/updates`. `/v1/health`
+advertises no update while off (`api.UpdateInfo.ChecksOff`): `updateAvailable`
+false, no version and no notes, `minClientVersion` still sent. `bridge update`
+loads through `loadCLIConfig`, the file and the variable as serve reads them,
+and refuses `--check` and `--yes`, exit 1, before anything is asked or
+written, naming the variable in this environment or the file
+(`config.UpdateCheckEnabledFromEnv`).
+
+PROTOCOL.md's health paragraph and Updates section say it all (the
+orchestrator mirrors PROTOCOL.md to the iOS repo); the README has an Updates
+section, `docs/docker.md` the variable and its reading, `docs/release-process.md`
+a checklist item for what the bridge sends out and the switch for each, and
+`ops/settings-apply-semantics.md` the field's row. The site's privacy page is
+the orchestrator's.
+
+### Reds, before each part was built
+
+Written first and run against the surface alone (the key, the options and the
+seams present, nothing reading them; `.tmp/_b761u/reds.md`):
+
+| Test | Red |
+|---|---|
+| config `TestTheUpdateCheckSwitchLoads` | the opt-out spellings beyond ParseBool's read on ("update checks on = true, want false"); an unreadable value warned 0 times |
+| config `TestTheUpdateCheckSwitchSavesReloadsAndClones` | turned on, the file held `true`, want no key; a clone shared the pointer |
+| config `TestAConsoleSaveKeepsTheFilesOwnUpdateCheckSwitch` | a change to on wrote `true`; the variable's spellings did not set the switch |
+| config `TestTheUpdatesControlOwnsTheUpdateCheckSwitch` | the updates control did not own `updateCheckEnabled` |
+| config `TestConfigCloneIsDeep` | `Config.Update.CheckEnabled: shared pointer` |
+| cmd/bridge `TestARewriteKeepsTheUpdateCheckSwitchWrittenOff` | off not kept in either posture, the file's off not kept, an unreadable value not named, a block that is no block not said (the on-is-default and environment cases green, as guards) |
+| updater `TestNoRequestAtTheStartOrATickWhileUpdateChecksAreOff` | the start asked GitHub 1 time with checks off |
+| updater `TestARequestAtTheStartAndAtATickWhileUpdateChecksAreOn` | the counts right (1, 2), red only on the status's `CheckEnabled` |
+| updater `TestCheckNowAsksNothingWhileUpdateChecksAreOff` | nil, want `ErrUpdateChecksOff`; 1 request |
+| updater `TestTurningUpdateChecksOffStopsTheScheduledCheckUnderWay` | the held request ended at its client's timeout, recorded as an error; 3 requests, want 2 |
+| updater `TestTurningUpdateChecksOffStopsACheckNowUnderWayBesideTheScheduledOne` | the Check now answered nil |
+| updater `TestTurningUpdateChecksOnRearmsAFullWaitAndAsksNothing`, `TestUpdateChecksTurnedOffAndOnAgainQuickly` | the loop never asked for its next wait |
+| updater `TestAStatusWhileUpdateChecksAreOffShowsNoUpdate` | `CheckEnabled` false with checks on, nothing masked |
+| updater `TestNoAutoInstallOfACandidateFoundBeforeUpdateChecksWentOff` | swapped to 0.2.0, the backup and the marker written, 3 more requests, "auto-installing", one restart |
+| updater `TestAnInstallIsRefusedWhileUpdateChecksAreOff` | nil, 3 requests, swapped |
+| updater `TestTurningUpdateChecksOffDuringADownloadStopsTheInstall` | the held download never stopped |
+| updater `TestUpdateChecksTurnedOffJustBeforeAnInstallsDecisionStopItBeforeItsSwap` | swapped, in both of its first two cases |
+| updater `TestARestartDeferredAfterACommittedSwapFiresWhileUpdateChecksAreOff` | 5 requests after checks went off |
+| api `TestHealthAdvertisesNoUpdateWhileUpdateChecksAreOff` | `updateAvailable` true, the version and the notes advertised |
+| admin `TestTheSettingsCarryTheUpdateCheckSwitch`, `TestTurningUpdateChecksOnWritesNoKeyAndTellsTheUpdater` | the PATCH's field unreported (`{Status: Reason:}`, want live) |
+
+Green there, as guards: `TestASwapPastItsDecisionFinishesWhenUpdateChecksGoOff`
+and `TestAManualInstallGainsNoRestartWhileUpdateChecksAreOff`. The first red
+run of the updater's install tests hung 15 minutes: the download's hold waited
+on its request alone, and the fixture server's Close waited on the hold; every
+hold now also ends at the test's cleanup and answers nothing
+(`panic(http.ErrAbortHandler)`).
+
+Written after their part was built, their reds the negative controls': admin's
+`TestTheUpdateEndpointsAnswerTheSwitchsRefusalWithItsCode`,
+`TestTheSettingsPageSaysUpdateChecksAreOff`,
+`TestTheJobsCardCarriesTheUpdateCheckSwitch` and
+`TestTheUpdatesPanelScriptSaysUpdateChecksAreOff`; cmd/bridge's
+`TestBridgeUpdateRefusesItsCheckAndItsInstallWhileUpdateChecksAreOff`,
+`TestServeTurnsUpdateChecksOffLiveAndShowsNoUpdate`,
+`TestServeStopsAnUpdateCheckUnderWayWhenChecksGoOff` and
+`TestAConsoleSaveKeepsTheFilesOwnUpdateCheckSwitchThroughServe`; the updater's
+"off and on again before the decision" case.
+`TestAStartsCrashRollbackRunsWithUpdateChecksOff` is a guard with no control
+(no part of the crash rollback asks the switch).
+`TestTheUpdatesPanelShowsUpdateChecksOff` runs the panel under node, which
+this host does not have: it skipped here.
+
+### Negative controls
+
+Forty-three, at 77386550, predicted by name in `.tmp/_b761u/controls.py`
+before the first ran: each mutated committed files in place, every edit's text
+found exactly once, ran the named tests of each named package with `go test
+-run`, and put the files' bytes back in a `finally` (and from a copy written
+first); `git status` clean after each batch. 36 as predicted; 5 with more reds
+than predicted (C11, C13, C26, C27, C29); 2 that missed a test, C3 and C32,
+both the tests' fault and both fixed in 656bbc06, where they ran again with
+the six other controls of the tests that commit touched (C14, C33, C35, C36,
+C37, C39): all eight as predicted, C39 with one more red, the off-and-on
+case now asking for no error:
+
+| Control | Mutation | Red, and what it showed |
+|---|---|---|
+| C1 | the tick's gate reverted alone, the start's kept | the off case's tick 1 asked GitHub once; the deferred restart's case 4 requests; the scheduled stop's 3, want 2 |
+| C2 | the start's gate reverted alone | the start asked once with checks off; turning on asked once; the deferred restart's case 1 request |
+| C3 | the off transition cancels nothing | the held check, Check now and download never stopped (each "never stopped" within the minute), the off-and-on case, serve's Check now. First run: the off-and-on case and serve's were green, each held request ended within the wait by its client's 30 s timeout (the stand-ins', and the console client's for serve's Check now); 656bbc06 gives those clients timeouts past every wait |
+| C4 | no wake | the loop never asked for its next wait (both on cases) |
+| C5 | turning on ticks at once | turning on asked once; the off-and-on case asked twice across the switch |
+| C6 | the decision does not ask the switch | "the switch alone moved": swapped, nil |
+| C7 | the decision does not ask whether the off transition stopped the install | "off and on again before the decision": swapped, nil |
+| C8 | an install's start does not ask the switch | refused only at the decision, after 3 requests |
+| C9 | the auto-installer does not read the switch again after its poll | "auto-installing" logged with checks off (the install's own admission still refused it: no swap, no request) |
+| C10 | a tick while off fires no deferred restart | restarts 0, want 1, the marker not restamped |
+| C11 | no masking | the status and a refused install's answer showed 9.9.9; serve's panel showed 99.0.0, and after the stop too (unpredicted) |
+| C13 | no masking, and serve's adapter not saying the switch to health | `/v1/health` advertised 99.0.0 and `updateAvailable` true; serve's panel, before and after the stop (the second unpredicted) |
+| C12 | health's gate | `updateAvailable` true, the version and the notes advertised |
+| C14 | the save tells the updater nothing | the updater told nothing; serve's held Check now never stopped |
+| C15 | the updater told inside the change, before the save | told twice, the first with the live config still on; told for the save that failed |
+| C16 | the switch's refusal classified as an install failure | 502 `install-failed` from the console and through serve; `TestClassifyUpdateError` |
+| C17 | serve's adapter not mapping the updater's refusal | 502 `install-failed` through serve |
+| C18, C19, C20 | the Settings page: Install offered, Check now not hidden, no "update checks off" | each in the page test; C19 and C20 through serve too |
+| C21 | the Jobs card's `checkEnabled` not set | false where the config says nothing, want true |
+| C22, C23, C24, C44 | the panel's script: Install offered, no redraw on the form's save, the card's status line, the card's Check now | the structural test, each line by name |
+| C25 | the form does not send the switch | `TestEverySettingsInputReachesThePayload` |
+| C26 | the variable read by ParseBool | every opt-out spelling but ParseBool's; the save test's variable cases too (unpredicted) |
+| C27 | no `filedSwitch` for the switch | turned on wrote `true`; an unrelated save wrote the variable's `false` into a file that said nothing (unpredicted: `filedEnvValues` leaves the opt-outs to `filedSwitches`) |
+| C28 | `Clone` shares the pointer | both clone tests |
+| C29 | the updates control does not own the switch | config's test; the PATCH accepted it on a managed bridge; the console told without it (unpredicted) |
+| C30, C31 | init's rewrite does not keep the switch, or does not say the one it did not keep | the rewrite test's cases |
+| C32 | the CLI's refusal names the file whatever the variable says | first run green: the test asked only that the variable be named, which the refusal's remedy does whatever turned the checks off; 656bbc06 holds it to the first sentence's source |
+| C33, C34 | the CLI's own refusal removed; and its updater without the switch too | the wording alone (the updater's own refusal still stopped it, nothing asked); with both, `--check` asked and exited 0, `--yes` asked twice |
+| C35 | serve's updater given no switch | every serve case: the panel, the page, health, the held Check now, the saves' requests |
+| C36 | serve's console not wired to tell the updater | serve's held Check now never stopped |
+| C37 | a stopped Check now answers success | nil in the updater, 200 through serve |
+| C38 | `installStopped` removed | the stopped download answered "context canceled", not the switch |
+| C39 | the cancel carries the switch's error as its cause (the rejected alternative) | the stopped checks logged as failed polls and recorded as errors |
+| C40 | the deferred restart without the auto-installer's gates | restarted outside the quiet hours and while held back |
+| C41 | the save writes on as `true` and the holder's `filedSwitch` removed (either alone writes on as no key) | the file held `true` |
+| C43 | the settings GET shows the raw key | `false` where the file says nothing; the page's switch unchecked |
+
+### The gates
+
+Through the shared build lock, on go1.27.3, go.mod's, with TMPDIR on this
+disk.
+
+At c3477ca7 (`.tmp/_b761u/gate.py A`): `make test` (`-race`, `-timeout 30m`,
+`-p 4`) over every package, green: 89 packages and 14 with no test files, in
+2112 s. The brief's five trees among them: cmd/bridge in 1444 s,
+internal/admin 1077 s, internal/api 153 s, internal/config 16 s and
+internal/updater 31 s; the Linux-only ones run for real here: internal/alsa,
+internal/alsapcm on this host's ALSA (82 s), internal/atomicwrite,
+internal/fsutil's identity paths, internal/player/hotplug and internal/usbid.
+
+At c3477ca7 too (`gate.py B`), green: the new tests by name with `-race
+-count=20` (internal/updater's 15 in 6 s, internal/config's 4 in 7 s,
+internal/admin's 7 in 105 s, internal/api's 1 in 1 s and cmd/bridge's 6 in
+162 s), `make vet` for linux/amd64, windows, darwin and linux/386, and `make
+build-all`, its build-tag census included. This record's commit changes
+`ops/engineering-log.md` alone.
+
+Not run here: the node-run panel test
+(`TestTheUpdatesPanelShowsUpdateChecksOff`), which skips without node, as
+do the console's other node tests; the structural tests of the same script
+ran in the gate. Outside the lock:
+go1.27.3's gofmt (`go run cmd/gofmt -l`) over `internal` and `cmd`, clean.
+
+`TestEveryCitedTestNameExists` passes with this record, git reading the
+worktree's index; `rules-b761.patch` applied to a `git archive` copy of the
+final HEAD passes `make docs-check` and `verify_moves.py --base HEAD` with its
+four declared edits (CLAUDE.md 82.1%; config-lifecycle.md 97.9%, after
+`move_entry.py` moved the KeepOwner entry's long form, #1048's, to its History
+file, since the new bullet would have taken the file 46 bytes past its budget),
+and the guard passes there too, a planted name going red.
