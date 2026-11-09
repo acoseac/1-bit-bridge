@@ -111,9 +111,10 @@ func startSeen(t *testing.T, seen <-chan tsnetStartSeen, what string) tsnetStart
 
 // tsnetTestConfig is a bridge.yaml in a directory of its own: mode is
 // tailscale.mode, key tailscale.uploadDiagnosticLogs as written ("" for no
-// key), hostname tailscale.hostname ("" for none) and library libraryName.
+// key), hostname tailscale.hostname ("" for none), library libraryName and
+// admin adminAddress ("" for 127.0.0.1:0).
 type tsnetTestConfig struct {
-	mode, key, hostname, library string
+	mode, key, hostname, library, admin string
 }
 
 // write writes c into dir (a fresh temp dir where dir is "") and returns the
@@ -128,8 +129,12 @@ func (c tsnetTestConfig) write(t *testing.T, dir string) (cfgPath, dataDir strin
 		t.Fatal(err)
 	}
 	dataDir = filepath.Join(dir, "data")
+	admin := c.admin
+	if admin == "" {
+		admin = "127.0.0.1:0"
+	}
 	body := "libraryRoots:\n  - " + strconv.Quote(lib) + "\ndataDir: " + strconv.Quote(dataDir) +
-		"\nlistenAddress: 127.0.0.1:0\nadminAddress: 127.0.0.1:0\ndisableHttp3: true\nmdns:\n    enabled: false\n"
+		"\nlistenAddress: 127.0.0.1:0\nadminAddress: " + admin + "\ndisableHttp3: true\nmdns:\n    enabled: false\n"
 	if c.library != "" {
 		body += "libraryName: " + strconv.Quote(c.library) + "\n"
 	}
@@ -837,7 +842,11 @@ func mustSayWhatHoldsTheUploadsOffInTheTile(t *testing.T, line string, says []st
 // TestALibraryChangeKeepsTheUploadConsent: a CLI save of bridge.yaml keeps
 // tailscale.uploadDiagnosticLogs as the file holds it.
 func TestALibraryChangeKeepsTheUploadConsent(t *testing.T) {
-	cfgPath, _ := tsnetTestConfig{mode: "tsnet", key: "true"}.write(t, "")
+	// library add probes the admin address first and refuses while it can't
+	// tell that no bridge is serving there: a closed port answers refused on
+	// every OS, where port 0 does only on Linux (macOS and Windows answer that
+	// the address can't be assigned, which the probe takes as possibly live).
+	cfgPath, _ := tsnetTestConfig{mode: "tsnet", key: "true", admin: closedAdminAddr(t)}.write(t, "")
 	lib2 := filepath.Join(t.TempDir(), "More")
 	if err := os.MkdirAll(lib2, 0o755); err != nil {
 		t.Fatal(err)

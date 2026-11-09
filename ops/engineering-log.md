@@ -89731,3 +89731,9 @@ old text beside its new (5,658 bytes) in both files.
 Codex's review of round 5 (P2): round 3's entry here still named B830 beside the hand-back, and the History's account
 of round 3 counted one of round 2's P2s as B830's. Both now name the hand-back alone; B830 stays named, by its id, only
 where a text says what stays open. The Claude API's review of round 5 found nothing.
+
+CI on f06b3b1f failed `TestALibraryChangeKeepsTheUploadConsent` on macOS and Windows alone: `bridge library add` probes
+the admin address before an offline write and refuses while it can't tell that no bridge serves there, and the test's
+config gave `adminAddress: 127.0.0.1:0`, which dials as refused on Linux but as an address that can't be assigned on
+macOS and Windows. The fixture takes an admin address now, and this test gives it `closedAdminAddr`'s closed port, which
+dials as refused everywhere: red on macOS before (CI's words), green three of three after.
