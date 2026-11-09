@@ -218,6 +218,13 @@ func (w *writeSeams) holdReleasing(t *testing.T) *gate {
 	return g
 }
 
+// activatedNow reports whether o's activation has begun (B728 B9 round 16).
+func (w *writeSeams) activatedNow(o engine.OccurrenceID) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return slices.Contains(w.activated, o)
+}
+
 // awaits is how many times a step of o's waited for a write.
 func (w *writeSeams) awaits(o engine.OccurrenceID) int {
 	w.mu.Lock()
@@ -374,12 +381,18 @@ func (d *dsdRig) choose(req playback.ChoiceRequest) <-chan playback.ChoiceResult
 // answer waits for a write's answer.
 func answer(t *testing.T, res <-chan playback.ChoiceResult) playback.ChoiceResult {
 	t.Helper()
+	return answerWithin(t, alsapcm.Watchdog(), res)
+}
+
+// answerWithin is answer within bound (B728 B9 round 16).
+func answerWithin(t *testing.T, bound time.Duration, res <-chan playback.ChoiceResult) playback.ChoiceResult {
+	t.Helper()
 	select {
 	case r := <-res:
 		return r
-	case <-time.After(alsapcm.Watchdog()):
+	case <-time.After(bound):
 		alsapcm.LogGoroutines(t)
-		t.Fatalf("the write was not answered within %v", alsapcm.Watchdog())
+		t.Fatalf("the write was not answered within %v", bound)
 	}
 	return playback.ChoiceResult{}
 }
@@ -1052,6 +1065,21 @@ func (p *producerHold) has(step string, o engine.OccurrenceID) bool {
 	return slices.Contains(p.steps, fmt.Sprintf("%s %d", step, o))
 }
 
+// publishHold holds the next refresh that publishes a set, once armed, where
+// it has published and has not reconciled (playback.Seams.Published), until
+// let go (B728 B9 round 16). It runs under the refreshes' lock, and calls
+// nothing of the backend.
+type publishHold struct {
+	armed atomic.Bool
+	gate  *gate
+}
+
+func (h *publishHold) seam() {
+	if h.armed.CompareAndSwap(true, false) {
+		h.gate.pass()
+	}
+}
+
 // TestAGaplessSuccessorWaitsForAWriteNoLongerThanTheSinksLookahead (B728 B9
 // round 2): a successor on its predecessor's transport (PCM at 176.4 kHz / 24
 // bits, then DSD64 converted to it) waits out of the sink for a write pending
@@ -1060,80 +1088,134 @@ func (p *producerHold) has(step string, o engine.OccurrenceID) bool {
 // holds, an honest gap, rather than run dry beside a producer that waits, and
 // the successor waits for the write before a sink of its own opens; the
 // write, which interrupts nothing, lands and hands it off again, nothing
-// faulting. Round 16 forces its two orderings, each wait at them within a few
+// faulting. Round 16 forces its orderings, each wait at them within a few
 // seconds: the write pending before the producer decides what follows a (the
 // producer held in a until then; unheld, it could hand b into a's sink first,
-// and the wait for b's wait hung, CI on round 15's head); and the DAC's time
-// at the floor before the sink publishes the measurement that shows it (that
+// and the wait for b's wait hung, CI on round 15's head); the DAC's time at
+// the floor before the sink publishes the measurement that shows it (that
 // STATUS held, Codex's review of round 16's brief): the floor is the sink's
 // measurement's, which the producer reads at the reporter's steps, and never
-// the DAC's time.
+// the DAC's time; and where the drain for b's transport ends beside the
+// write's landing, which runs under load found unforced (a second open in
+// about one run in a hundred, round 15's code and round 16's alike). The
+// write answered before the drain ends, b is handed off again and no sink
+// opens for it; the drain ending once the write has published the set that
+// refuses b and before its reconciliation has judged b, b's own sink opens,
+// and its activation, judging b under that set, takes it back with nothing
+// written (errReplanned, round 2's rule).
 func TestAGaplessSuccessorWaitsForAWriteNoLongerThanTheSinksLookahead(t *testing.T) {
 	const rate = 176400
 	const aFrames, floor = rate / 2, rate / 10 // a's 500 ms, the sink's floor's 100 ms
-	w, p := newWriteSeams(), newProducerHold(t)
-	d := newConvRig(t, func(o *rigOptions) {
-		o.seams = w.seams(nil)
-		o.seams.ProducerStep = p.note
+	// atFloor plays a and b with the write of DSD off pending, b held out of
+	// a's sink for it until the sink's measurement shows its floor, and has the
+	// sink drain there for b's own transport, the DAC holding that drain: it
+	// answers the rig, its write seams, the write's hold, its answer and the
+	// entries.
+	atFloor := func(t *testing.T, pub *publishHold) (*dsdRig, *writeSeams, *gate, <-chan playback.ChoiceResult, []uint32) {
+		t.Helper()
+		w, p := newWriteSeams(), newProducerHold(t)
+		d := newConvRig(t, func(o *rigOptions) {
+			o.seams = w.seams(nil)
+			o.seams.ProducerStep = p.note
+			if pub != nil {
+				o.seams.Published = pub.seam
+			}
+		})
+		d.files.add("a", wav(rate, 24, pattern(1, aFrames, 24)))
+		d.files.add("b", track(playbacktest.DSD64, 0.25, noise(2)))
+		ids := d.insert("a", "b")
+		d.play()
+		awaitOrdered(t, p.gate.in, "the producer, held in a before it decides what follows a")
+		ob := d.preparedOcc(ids[1])
+		stop := w.holdPending(t)
+		res := d.choose(choiceReq(t, d, dsdstate.ModeOff, 0))
+		reachedGateWithin(t, alsapcm.Ordered(), stop, res, "the write's pending window")
+		// Let go with the write pending, the producer writes the rest of a into
+		// the sink and holds b out of it, the sink's lookahead above its floor.
+		p.gate.letGo()
+		w.waitAwaitedWithin(t, alsapcm.Ordered(), ob, 1)
+		awaitOrdered(t, d.k.When(runningAndWaiting), "the writer to fill the hardware buffer and wait on the DAC")
+		// 400 ms of a's 500 played: the DAC at the floor, and the sink's STATUS
+		// there, the measurement that shows it, held. a's last frames reached the
+		// kernel at 300 ms (a buffer of 200 ms), and the writer, with nothing to
+		// write, has measured each 50 ms period since: the producer, woken by
+		// the reporter, reads the measurement before, 350 ms, and holds b out of
+		// the sink still.
+		statusing, status := d.k.ParkStatusAfterPlayed(aFrames - floor)
+		defer status()
+		d.k.Grant(400 * time.Millisecond)
+		awaitOrdered(t, statusing, "the sink's STATUS once the DAC played 400 ms of a")
+		if v := d.k.View(); v.Consumed != aFrames-floor || v.Appl != aFrames {
+			t.Fatalf("the DAC had played %d of the %d frames written at the STATUS held; want %d of a's %d, the sink at its floor (the test's premise)", v.Consumed, v.Appl, aFrames-floor, aFrames)
+		}
+		n := w.awaits(ob)
+		d.tickWithin(alsapcm.Ordered())
+		w.waitAwaitedWithin(t, alsapcm.Ordered(), ob, n+1)
+		if p.has("transition", ob) || d.k.View().Drains != 0 {
+			t.Fatal("the producer let b's wait for the write go before the sink's measurement showed its floor")
+		}
+		// The measurement established (the writer back on the DAC once it has),
+		// the reporter's next step has the producer read it: at the floor the
+		// sink drains for b's own transport, an honest gap, b still waiting for
+		// the write. A producer that waited past it would let the sink run dry.
+		status()
+		awaitOrdered(t, d.k.When(runningAndWaiting), "the writer back on the DAC, the measurement at a's last frames established")
+		d.tickWithin(alsapcm.Ordered())
+		waitOrdered(t, "the producer's transition for b at the sink's measured floor", p.ch, func() bool { return p.has("transition", ob) })
+		awaitOrdered(t, d.k.When(func(v alsapcm.KernelView) bool { return v.Drains >= 1 }), "the sink to drain at its floor, b still waiting for the write")
+		return d, w, stop, res, ids
+	}
+	// played takes the session's end, the write answered, and judges what
+	// every order leaves alike: nothing faulting and b's entry skipped. It
+	// answers the fake kernel as the rig's stop left it.
+	played := func(t *testing.T, d *dsdRig, ids []uint32) alsapcm.KernelView {
+		t.Helper()
+		s := d.waitEnded()
+		d.rig.stop()
+		if f := s.Faults(); len(f) != 0 {
+			t.Errorf("faults %+v: the sink ran dry while b waited for the write", f)
+		}
+		if _, ok := s.Skipped(ids[1]); !ok {
+			t.Errorf("b's entry was not skipped; skips %+v", s.Skips())
+		}
+		return d.k.View()
+	}
+	written := func(t *testing.T, res <-chan playback.ChoiceResult) {
+		t.Helper()
+		if got := answerWithin(t, alsapcm.Ordered(), res); got.Outcome != playback.ChoiceWritten {
+			t.Fatalf("DSD off beside a PCM track: %s, want written", got.Outcome)
+		}
+	}
+	t.Run("the write answered before the drain ends", func(t *testing.T) {
+		d, _, stop, res, ids := atFloor(t, nil)
+		// The write published, reconciled (b handed off again) and settled
+		// while the DAC holds the drain; then the drain ends.
+		stop.letGo()
+		written(t, res)
+		d.k.Free()
+		if v := played(t, d, ids); v.Opens != 1 {
+			t.Errorf("%d opens, want a's alone: b handed off again, no sink opened for it", v.Opens)
+		}
 	})
-	d.files.add("a", wav(rate, 24, pattern(1, aFrames, 24)))
-	d.files.add("b", track(playbacktest.DSD64, 0.25, noise(2)))
-	ids := d.insert("a", "b")
-	d.play()
-	awaitOrdered(t, p.gate.in, "the producer, held in a before it decides what follows a")
-	ob := d.preparedOcc(ids[1])
-	stop := w.holdPending(t)
-	res := d.choose(choiceReq(t, d, dsdstate.ModeOff, 0))
-	reachedGateWithin(t, alsapcm.Ordered(), stop, res, "the write's pending window")
-	// Let go with the write pending, the producer writes the rest of a into
-	// the sink and holds b out of it, the sink's lookahead above its floor.
-	p.gate.letGo()
-	w.waitAwaitedWithin(t, alsapcm.Ordered(), ob, 1)
-	awaitOrdered(t, d.k.When(runningAndWaiting), "the writer to fill the hardware buffer and wait on the DAC")
-	// 400 ms of a's 500 played: the DAC at the floor, and the sink's STATUS
-	// there, the measurement that shows it, held. a's last frames reached the
-	// kernel at 300 ms (a buffer of 200 ms), and the writer, with nothing to
-	// write, has measured each 50 ms period since: the producer, woken by the
-	// reporter, reads the measurement before, 350 ms, and holds b out of the
-	// sink still.
-	statusing, status := d.k.ParkStatusAfterPlayed(aFrames - floor)
-	defer status()
-	d.k.Grant(400 * time.Millisecond)
-	awaitOrdered(t, statusing, "the sink's STATUS once the DAC played 400 ms of a")
-	if v := d.k.View(); v.Consumed != aFrames-floor || v.Appl != aFrames {
-		t.Fatalf("the DAC had played %d of the %d frames written at the STATUS held; want %d of a's %d, the sink at its floor (the test's premise)", v.Consumed, v.Appl, aFrames-floor, aFrames)
-	}
-	n := w.awaits(ob)
-	d.tickWithin(alsapcm.Ordered())
-	w.waitAwaitedWithin(t, alsapcm.Ordered(), ob, n+1)
-	if p.has("transition", ob) || d.k.View().Drains != 0 {
-		t.Fatal("the producer let b's wait for the write go before the sink's measurement showed its floor")
-	}
-	// The measurement established (the writer back on the DAC once it has),
-	// the reporter's next step has the producer read it: at the floor the sink
-	// drains for b's own transport, an honest gap, b still waiting for the
-	// write. A producer that waited past it would let the sink run dry.
-	status()
-	awaitOrdered(t, d.k.When(runningAndWaiting), "the writer back on the DAC, the measurement at a's last frames established")
-	d.tickWithin(alsapcm.Ordered())
-	waitOrdered(t, "the producer's transition for b at the sink's measured floor", p.ch, func() bool { return p.has("transition", ob) })
-	awaitOrdered(t, d.k.When(func(v alsapcm.KernelView) bool { return v.Drains >= 1 }), "the sink to drain at its floor, b still waiting for the write")
-	d.k.Free()
-	stop.letGo()
-	if got := answer(t, res); got.Outcome != playback.ChoiceWritten {
-		t.Fatalf("DSD off beside a PCM track: %s, want written", got.Outcome)
-	}
-	s := d.waitEnded()
-	d.rig.stop()
-	if f := s.Faults(); len(f) != 0 {
-		t.Errorf("faults %+v: the sink ran dry while b waited for the write", f)
-	}
-	if v := d.k.View(); v.Opens != 1 {
-		t.Errorf("%d opens, want a's alone: b handed off again, no sink opened for it", v.Opens)
-	}
-	if _, ok := s.Skipped(ids[1]); !ok {
-		t.Errorf("b's entry was not skipped; skips %+v", s.Skips())
-	}
+	t.Run("the drain ending between the write's publish and its reconciliation", func(t *testing.T) {
+		pub := &publishHold{gate: newGate(t)}
+		d, w, stop, res, ids := atFloor(t, pub)
+		pub.armed.Store(true)
+		stop.letGo()
+		awaitOrdered(t, pub.gate.in, "the write's set published, its reconciliation held")
+		d.k.Free()
+		awaitOrdered(t, d.k.When(func(v alsapcm.KernelView) bool { return v.Opens >= 2 }), "b's own sink opened, the set that refuses b published and not yet reconciled")
+		// Its activation begun, its read of the policy waits for the write's
+		// refresh, which reconciles b once let go: the activation then judges b
+		// handed off again.
+		ob := d.occurrenceOf(ids[1])
+		waitOrdered(t, "b's activation in its own sink begun", w.ch, func() bool { return w.activatedNow(ob) })
+		pub.gate.letGo()
+		written(t, res)
+		if v := played(t, d, ids); v.Opens != 2 || len(v.OpenAt) != 2 || v.OpenAt[1] != v.GivenBytes {
+			t.Errorf("%d opens at %v of the %d bytes given: want a's and b's own, b's given nothing, taken back unwritten", v.Opens, v.OpenAt, v.GivenBytes)
+		}
+	})
 }
 
 // TestAWriteBesideAnEngineThatHandsNothingOffAgainIsTold (B728 B9 round 2,
