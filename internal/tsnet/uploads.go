@@ -42,8 +42,9 @@ type Uploads struct {
 	EnvOff bool
 	// LatchedOff is whether this process's policy turned the uploads off
 	// earlier, for a node built without the key, where the config allows
-	// them now: the variable stays set until the process exits, so the
-	// setting applies at the bridge's next launch.
+	// them now: the policy sets the variable again at every NewServer after
+	// that, until the process exits, so the setting applies at the bridge's
+	// next launch.
 	LatchedOff bool
 	// OtherOff is whether something else in this process turned the uploads
 	// off where the config allows them: the variable reads true, and neither
@@ -85,30 +86,32 @@ func (u Uploads) HeldOff() string {
 
 // applyUploadPolicy is the bridge's diagnostic-log policy for the embedded
 // node, applied to the process before the node is built: NoLogsEnv set to
-// true through envknob unless allow, and the environment left as it is when
-// allow. An inherited true still keeps the uploads off then, and an
-// inherited false never turns them on by itself, since a config that does
-// not allow them overrides it. A value that is set and does not read as a
-// boolean is ErrNoLogsEnvUnreadable, with the environment untouched; an
-// empty one is unset, as envknob reads it.
+// true through envknob unless allow, and, with allow, the environment left as
+// it is until this process's policy has set the variable. An inherited true
+// still keeps the uploads off then, and an inherited false never turns them
+// on by itself, since a config that does not allow them overrides it. A
+// value that is set and does not read as a boolean is ErrNoLogsEnvUnreadable,
+// with the environment untouched; an empty one is unset, as envknob reads it.
 //
 // It runs once for each node a process builds (NewServer), on the caller's
 // goroutine, before anything starts the node; the variable is not one of
 // envknob's registered knobs, so no cache of it is read elsewhere, and every
 // reader of it in Tailscale's code asks os.Getenv.
 //
-// Once it has set the variable, the process keeps it set until it exits: the
-// menu's "Start now", and bridge init's start before it, run serve in the
+// Once it has set the variable, every later application sets it again,
+// through envknob, before it reads it, whatever anything in the process has
+// written there since, a false or a value that does not read as a boolean:
+// the menu's "Start now", and bridge init's start before it, run serve in the
 // process, and the menu runs it again after a stop, so a later node whose
 // config allows the uploads starts with them off, and the setting applies at
-// the bridge's next launch. Nothing is handed back: an earlier node's start
-// that resumes late (serve's stop waits for it only to its deadline, and
-// Close does not join a start it has not published) can never find the
-// uploads allowed, and upstream's own setter, which the coordination
-// server's DisableLogTail message calls, also disables logtail for the rest
-// of the process (logtail.Disable). What the process inherited is read once,
-// at the first application whatever allow is, so that the words name the
-// variable only where the launch environment held it.
+// the bridge's next launch. It sets the variable again only there, at the
+// next NewServer: between a write elsewhere in the process and that call,
+// the variable reads as the write left it. Nothing is handed back (backlog
+// B830), and upstream's own setter, which the coordination server's
+// DisableLogTail message calls, also disables logtail for the rest of the
+// process (logtail.Disable). What the process inherited is read once, at the
+// first application whatever allow is, so that the words name the variable
+// only where the launch environment held it.
 func applyUploadPolicy(allow bool) (Uploads, error) {
 	policyRecord.Lock()
 	defer policyRecord.Unlock()
@@ -118,6 +121,9 @@ func applyUploadPolicy(allow bool) (Uploads, error) {
 	envOff, err := noLogsOff(policyRecord.inherited)
 	if err != nil {
 		return Uploads{}, err
+	}
+	if policyRecord.set {
+		envknob.SetNoLogsNoSupport()
 	}
 	now, err := noLogsOff(os.Getenv(NoLogsEnv))
 	if err != nil {
@@ -129,7 +135,7 @@ func applyUploadPolicy(allow bool) (Uploads, error) {
 		policyRecord.set = true
 		return u, nil
 	}
-	u.LatchedOff = now && policyRecord.set
+	u.LatchedOff = policyRecord.set
 	u.OtherOff = now && !envOff && !policyRecord.set
 	return u, nil
 }
@@ -150,7 +156,8 @@ func noLogsOff(v string) (bool, error) {
 
 // noLogsRecord is what the process's policy knows of NoLogsEnv: whether it
 // has read what the process inherited, that value, and whether the policy
-// has set the variable, which it then keeps set until the process exits.
+// has set the variable, which it then sets again at every application until
+// the process exits.
 type noLogsRecord struct {
 	recorded  bool
 	inherited string

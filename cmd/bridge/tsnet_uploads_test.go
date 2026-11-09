@@ -201,13 +201,14 @@ func TestTheUploadPolicyByKeyAndInheritedValue(t *testing.T) {
 				if err != nil {
 					t.Fatalf("newTsnetServer: %v", err)
 				}
-				want := "true"
-				if key == "true" {
-					want = inherited // left as inherited
-				}
-				if got := startSeen(t, seen, "the node's Start").env; got != want {
-					t.Errorf("the upstream start would see TS_NO_LOGS_NO_SUPPORT=%q, want %q",
-						strings.ReplaceAll(got, noLogsUnset, "unset"), strings.ReplaceAll(want, noLogsUnset, "unset"))
+				got := startSeen(t, seen, "the node's Start").env
+				switch {
+				case key != "true" && !readsOff(t, got):
+					t.Errorf("the upstream start would read TS_NO_LOGS_NO_SUPPORT=%q as the uploads on, want them off",
+						strings.ReplaceAll(got, noLogsUnset, "unset"))
+				case key == "true" && got != inherited:
+					t.Errorf("the upstream start would see TS_NO_LOGS_NO_SUPPORT=%q, want it as inherited, %q",
+						strings.ReplaceAll(got, noLogsUnset, "unset"), strings.ReplaceAll(inherited, noLogsUnset, "unset"))
 				}
 			})
 		}
@@ -263,14 +264,18 @@ func TestEveryPathAppliesTheUploadPolicyBeforeTheUpstreamStart(t *testing.T) {
 		},
 	}
 	for name, run := range paths {
-		for _, c := range []struct{ key, want string }{{"", "true"}, {"true", "false"}} {
-			t.Run(fmt.Sprintf("%s key=%q", name, c.key), func(t *testing.T) {
+		for _, key := range []string{"", "true"} {
+			t.Run(fmt.Sprintf("%s key=%q", name, key), func(t *testing.T) {
 				inheritNoLogsEnv(t, "false")
 				seen := stopTsnetStarts(t, nil)
-				cfgPath, dataDir := tsnetTestConfig{mode: "tsnet", key: c.key}.write(t, "")
+				cfgPath, dataDir := tsnetTestConfig{mode: "tsnet", key: key}.write(t, "")
 				got := run(t, cfgPath, seen)
-				if got.env != c.want {
-					t.Errorf("%s: the upstream start would see TS_NO_LOGS_NO_SUPPORT=%q, want %q", name, got.env, c.want)
+				switch {
+				case key == "" && !readsOff(t, got.env):
+					t.Errorf("%s: the upstream start would read TS_NO_LOGS_NO_SUPPORT=%q as the uploads on, want them off",
+						name, got.env)
+				case key == "true" && got.env != "false":
+					t.Errorf("%s: the upstream start would see TS_NO_LOGS_NO_SUPPORT=%q, want the inherited false", name, got.env)
 				}
 				if got.dir != filepath.Join(dataDir, "tailscale") {
 					t.Errorf("%s: the node's state dir is %q, want the data dir's tailscale folder", name, got.dir)
@@ -763,6 +768,43 @@ func TestTheTileSaysWhatHoldsTheUploadsOff(t *testing.T) {
 			})
 		})
 	}
+}
+
+// TestTheTileReadsWhatHoldsTheUploadsOffWhenItAsks: the policy's status is
+// read when the tile asks for it, never kept from the node's construction. A
+// node built with the key, whose uploads something in the process turns off
+// afterwards (upstream's own setter, which the coordination server's
+// DisableLogTail message calls while the node runs), says so: in its status,
+// in the tile's line for a node the tailnet accepted, and in a tailnet's
+// refusal of its start.
+func TestTheTileReadsWhatHoldsTheUploadsOffWhenItAsks(t *testing.T) {
+	inheritNoLogsEnv(t, noLogsUnset)
+	stopTsnetStarts(t, func(*upstreamtsnet.Server) error {
+		return fmt.Errorf("tsnet.Up: backend: %s", upstreamLogsRefusal)
+	})
+	cfgPath, _ := tsnetTestConfig{mode: "tsnet", key: "true"}.write(t, "")
+	srv := buildTsnetNode(t, cfgPath)
+	if got := srv.Uploads(); got != (tsnet.Uploads{Allowed: true}) {
+		t.Fatalf("before anything turns the uploads off, the node's status is %+v, want them allowed and nothing holding them", got)
+	}
+	envknob.SetNoLogsNoSupport()
+	if got := srv.Uploads(); got != (tsnet.Uploads{Allowed: true, OtherOff: true}) {
+		t.Errorf("once something in the process turned the uploads off, the node's status is %+v, want OtherOff", got)
+	}
+	says := []string{"something in this process turned", "may turn them back on", "launch it again"}
+	accepted := tsnetAdminStatus(context.Background(), runningTsnetNode{Server: srv, st: &ipnstate.Status{BackendState: "Running"}})
+	mustSayWhatHoldsTheUploadsOffInTheTile(t, accepted.UploadsHeldOff, says, false)
+	if err := srv.Start(context.Background()); err == nil {
+		t.Fatal("a start the tailnet refused succeeded")
+	}
+	refused := tsnetAdminStatus(context.Background(), srv)
+	mustSayWhatTheTailnetRequires(t, refused.LastError, false)
+	for _, want := range says {
+		if !strings.Contains(refused.LastError, want) {
+			t.Errorf("the refusal in the tile does not say %q: %q", want, refused.LastError)
+		}
+	}
+	mustSayWhatHoldsTheUploadsOffInTheTile(t, refused.UploadsHeldOff, says, false)
 }
 
 // mustSayWhatHoldsTheUploadsOffInTheTile fails the test unless the tile's

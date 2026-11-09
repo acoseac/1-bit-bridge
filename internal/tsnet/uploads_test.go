@@ -55,14 +55,14 @@ func TestTheUploadPolicyByTheConfigAndTheInheritedValue(t *testing.T) {
 	for _, c := range []struct {
 		allow     bool
 		inherited string
-		want      string // the variable when upstream would start
+		want      string // with allow, the variable as inherited, byte for byte; without, it reads true
 		uploads   Uploads
 		refused   bool
 	}{
-		{false, unset, "true", Uploads{}, false},
-		{false, "true", "true", Uploads{EnvOff: true}, false},
-		{false, "false", "true", Uploads{}, false},
-		{false, "1", "true", Uploads{EnvOff: true}, false},
+		{false, unset, "", Uploads{}, false},
+		{false, "true", "", Uploads{EnvOff: true}, false},
+		{false, "false", "", Uploads{}, false},
+		{false, "1", "", Uploads{EnvOff: true}, false},
 		{false, "maybe", "", Uploads{}, true},
 		{true, unset, unset, Uploads{Allowed: true}, false},
 		{true, "true", "true", Uploads{Allowed: true, EnvOff: true}, false},
@@ -105,8 +105,11 @@ func TestTheUploadPolicyByTheConfigAndTheInheritedValue(t *testing.T) {
 			}
 			select {
 			case got := <-seen:
-				if got != c.want {
-					t.Errorf("the upstream start would see %s=%q, want %q", NoLogsEnv, got, c.want)
+				switch {
+				case !c.allow && !readsOff(t, got):
+					t.Errorf("the upstream start would read %s=%q as the uploads on, want them off", NoLogsEnv, got)
+				case c.allow && got != c.want:
+					t.Errorf("the upstream start would see %s=%q, want it as inherited, %q", NoLogsEnv, got, c.want)
 				}
 			default:
 				t.Error("the start ended without reaching the upstream start")
@@ -142,27 +145,37 @@ func readsOff(t *testing.T, v string) bool {
 }
 
 // TestOnceThisProcessTurnsTheUploadsOffTheyStayOff: once the policy has set
-// NoLogsEnv in this process, it stays set until the process exits. The menu's
-// "Start now", and bridge init's start before it, run serve in the process,
-// and the menu runs it again after a stop: a later node whose config allows
-// the uploads starts with them off all the same, and the policy says what
-// holds them off, in its status (Server.Uploads, Uploads.HeldOff, which the
-// console's tile shows) and in a tailnet's refusal of the node, each reason in
-// words of its own: the environment the process was launched with; this
-// process, earlier, which a new launch undoes; something else in this
-// process (upstream's own setter, which the coordination server's
-// DisableLogTail message calls), which a new launch may undo. Each inherited
-// value runs through each sequence, and the variable is read as Tailscale
-// reads it, never by its spelling.
+// NoLogsEnv in this process, every later NewServer sets it again before
+// anything reads it, until the process exits. The menu's "Start now", and
+// bridge init's start before it, run serve in the process, and the menu runs
+// it again after a stop: a later node whose config allows the uploads starts
+// with them off all the same, whatever anything in the process wrote to the
+// variable since (a false, or a value Tailscale's code would stop the process
+// on), and the policy says what holds them off, in its status
+// (Server.Uploads, Uploads.HeldOff, which the console's tile shows) and in a
+// tailnet's refusal of the node, each reason in words of its own: the
+// environment the process was launched with; this process, earlier, which a
+// new launch undoes; something else in this process (upstream's own setter,
+// which the coordination server's DisableLogTail message calls), which a new
+// launch may undo, read when the status is asked for, so a setter that runs
+// after the node is built shows. Each inherited value runs through each
+// sequence, and the variable is read as Tailscale reads it, never by its
+// spelling: right after the last node's NewServer and at its upstream start.
 func TestOnceThisProcessTurnsTheUploadsOffTheyStayOff(t *testing.T) {
 	type row struct {
 		name      string
 		inherited string
 		allows    []bool // each node's config, in the order the nodes are built
 		between   func() // after the first node, what else in the process does
+		afterLast func() // after the last node's NewServer, what else in the process does
+		newOff    bool   // right after the last node's NewServer the variable reads the uploads off
 		off       bool   // the last node's upstream start reads the uploads off
 		uploads   Uploads
 		held      held
+	}
+	r := func(name, inherited string, allows []bool, between func(), off bool, u Uploads, h held) row {
+		return row{name: name, inherited: inherited, allows: allows, between: between, newOff: off, off: off,
+			uploads: u, held: h}
 	}
 	var rows []row
 	for _, inherited := range []string{unset, "false", "true", "1"} {
@@ -173,24 +186,29 @@ func TestOnceThisProcessTurnsTheUploadsOffTheyStayOff(t *testing.T) {
 		}
 		label := strings.ReplaceAll(inherited, unset, "unset")
 		rows = append(rows,
-			row{"no then yes, inherited " + label, inherited, []bool{false, true}, nil, true,
-				Uploads{Allowed: true, EnvOff: envOff, LatchedOff: true}, allowedHeld},
-			row{"yes, no, then yes, inherited " + label, inherited, []bool{true, false, true}, nil, true,
-				Uploads{Allowed: true, EnvOff: envOff, LatchedOff: true}, allowedHeld},
-			row{"no then no, inherited " + label, inherited, []bool{false, false}, nil, true,
-				Uploads{EnvOff: envOff}, heldByConfig},
+			r("no then yes, inherited "+label, inherited, []bool{false, true}, nil, true,
+				Uploads{Allowed: true, EnvOff: envOff, LatchedOff: true}, allowedHeld),
+			r("yes, no, then yes, inherited "+label, inherited, []bool{true, false, true}, nil, true,
+				Uploads{Allowed: true, EnvOff: envOff, LatchedOff: true}, allowedHeld),
+			r("no then no, inherited "+label, inherited, []bool{false, false}, nil, true,
+				Uploads{EnvOff: envOff}, heldByConfig),
 		)
 	}
 	rows = append(rows,
-		row{"yes then yes, inherited unset", unset, []bool{true, true}, nil, false, Uploads{Allowed: true}, heldByNothing},
-		row{"yes then yes, inherited true", "true", []bool{true, true}, nil, true,
-			Uploads{Allowed: true, EnvOff: true}, heldByEnv},
-		row{"upstream's setter, then a node with the key", unset, []bool{true, true}, envknob.SetNoLogsNoSupport, true,
-			Uploads{Allowed: true, OtherOff: true}, heldByOther},
-		row{"upstream's setter, then a node without the key and one with it", unset, []bool{true, false, true},
-			envknob.SetNoLogsNoSupport, true, Uploads{Allowed: true, LatchedOff: true}, heldByLatch},
-		row{"a false set in the process after the policy's true", unset, []bool{false, true},
-			func() { _ = os.Setenv(NoLogsEnv, "false") }, false, Uploads{Allowed: true}, heldByNothing},
+		r("yes then yes, inherited unset", unset, []bool{true, true}, nil, false, Uploads{Allowed: true}, heldByNothing),
+		r("yes then yes, inherited true", "true", []bool{true, true}, nil, true,
+			Uploads{Allowed: true, EnvOff: true}, heldByEnv),
+		r("upstream's setter, then a node with the key", unset, []bool{true, true}, envknob.SetNoLogsNoSupport, true,
+			Uploads{Allowed: true, OtherOff: true}, heldByOther),
+		r("upstream's setter, then a node without the key and one with it", unset, []bool{true, false, true},
+			envknob.SetNoLogsNoSupport, true, Uploads{Allowed: true, LatchedOff: true}, heldByLatch),
+		r("a false set in the process after the policy's true", unset, []bool{false, true},
+			func() { _ = os.Setenv(NoLogsEnv, "false") }, true, Uploads{Allowed: true, LatchedOff: true}, heldByLatch),
+		r("an unreadable value set in the process after the policy's true", unset, []bool{false, true},
+			func() { _ = os.Setenv(NoLogsEnv, "yes") }, true, Uploads{Allowed: true, LatchedOff: true}, heldByLatch),
+		row{name: "upstream's setter after a node with the key is built", inherited: unset, allows: []bool{true},
+			afterLast: envknob.SetNoLogsNoSupport, newOff: false, off: true,
+			uploads: Uploads{Allowed: true, OtherOff: true}, held: heldByOther},
 	)
 	for _, c := range rows {
 		t.Run(c.name, func(t *testing.T) {
@@ -213,6 +231,15 @@ func TestOnceThisProcessTurnsTheUploadsOffTheyStayOff(t *testing.T) {
 				})
 				if err != nil {
 					t.Fatalf("node %d: NewServer: %v", i+1, err)
+				}
+				if i == len(c.allows)-1 {
+					if got := readsOff(t, envNow()); got != c.newOff {
+						t.Errorf("right after the last node's NewServer the variable reads the uploads off: %v, want %v",
+							got, c.newOff)
+					}
+					if c.afterLast != nil {
+						c.afterLast()
+					}
 				}
 				s.newNode = func(*tsnet.Server) node {
 					return &fakeNode{up: func(context.Context) (*ipnstate.Status, error) {
@@ -495,8 +522,9 @@ func TestTheLogsRequirementIsUpstreamsWords(t *testing.T) {
 func TestTheNoLogsVariableIsUpstreams(t *testing.T) {
 	setInherited(t, unset)
 	envknob.SetNoLogsNoSupport()
-	if got := envNow(); got != "true" {
-		t.Errorf("envknob.SetNoLogsNoSupport set %s to %q: the bridge's constant names another variable", NoLogsEnv, got)
+	if got := envNow(); !readsOff(t, got) {
+		t.Errorf("envknob.SetNoLogsNoSupport left %s=%q, which reads as the uploads on: the bridge's constant names "+
+			"another variable", NoLogsEnv, got)
 	}
 	t.Setenv(NoLogsEnv, "false")
 	if envknob.NoLogsNoSupport() {
