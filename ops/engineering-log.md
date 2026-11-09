@@ -90043,3 +90043,115 @@ the branch with the rules patch applied, where `TestEveryCitedTestNameExists`,
 `TestDSDOutputProtocolTokens` and `TestQualificationRunbookVersion` passed too; and the
 qualification check passed at 54 against the merge base of each main ref, 9d59c8f6,
 0fd7e3f8, 7c1db6dd and 3d0a0d05.
+
+## 2026-11-09 — B728 B9 round 14: the regression pin times only the cleanup's release of the write
+
+Worker b728-b9, legion0 (Ubuntu 26.04, Linux 7.0, Go 1.27.3), branch `feat/b728-b9-choice`
+at ca49b21a (round 13 taken, its rules applied). The brief, round 13's two reviews (Codex's
+one finding, Claude's three) and the two reviews of the brief's draft (Codex's five points,
+Claude's six), folded into it. Tests only; no production change. Commits: b26950ed (the
+rig's `insert` bounds each ref), b30bb42a (the pin by phases and `parkedWrite`'s escape; it
+also routes `TestOnlyAWriteThatInterruptsNeedsTheGoAhead`'s four writes through `d.choose`
+and `answer`, which its message does not say), 0885198f (qualification 55) and this record.
+The rules are a patch the orchestrator applies (`rules-b728-b9-r14.patch`): two bullets in
+`build-ci-tests.md`.
+
+**Where it was** (confirmed at ca49b21a): `park` ran `p.parked.Do` only to close `p.in` and
+set `first`, and waited on `<-p.out` after that `Do` had returned; `letGo` closed `p.out`
+inside `p.freed.Do`; `TestACaseEndingWithItsWriteParkedLetsItGo`'s bound of 2W (W the
+watchdog) started with `t.Run`, so it timed the case's setup and body as its cleanup's; and
+its fallback freed the write through the same `p.freed.Do`, then waited on `<-ended` with no
+bound.
+
+**Reds first, against ca49b21a**, predicted in `r14-pre.predictions.txt`, the pin alone
+under `-race -watchdog=10s`, TMPDIR on the worktree's ext4 but for (d), each mutation's
+bytes restored after it: (a) the original deadlock (`park` waiting inside `p.parked` again,
+`letGo` asking it first) red at 20 s, "its cleanup waits for the parked write", round 13's
+own catch; (b) a `letGo` that never lets go (`p.freed.Do(func() { select {} })`) gave that
+20 s line and then hung to "panic: test timed out after 1m0s" (`-timeout 60s`), the parent
+in `sync.Mutex.Lock` under `Once.doSlow` at the fallback (`:347`), behind the case's cleanup
+in `letGo`'s `select {}` inside the same Once (`:413`), the write parked at `:401`; (c) a
+slow but healthy run (9 s, 0.9W, slept before `available`'s command, before `insert`'s, in
+the seam before the write parks, and before the rig's stop) falsely red at 20 s, "its
+cleanup waits for the parked write", while the case itself passed, in 36 s; (d) a case whose
+rig skipped (TMPDIR on tmpfs, where the engine refuses its data directory and `newRig`
+skips) skipped, and the parent with it: (d)'s red does not hold before the fix, round 13
+already selecting on the case's end, and it guards the new body phase.
+
+**The phases** (b30bb42a). The case runs on a goroutine of the test's, its result and `res`
+read only after the join, each phase within a bound of its own. The body, the rig's setup
+and the write's park, ends at a mark the case registers right after `t.Cleanup(p.letGo)` and
+before `d.choose`, so that its cleanups run it first; the parent selects on the mark or the
+case's end, within the sum of the body's own waits (`available`, `insert`'s one ref and
+`p.reached`, W each; `newDSDRig` waits on nothing else) and W of margin for its steps that
+wait on nothing (the engine's reservation fsyncs, the backend's build, the policy's refresh,
+the write up to its park), 4W. A case that ends before the mark keeps its skip or its
+failure. The property: within W of the mark, a receive on `p.out`, which `letGo` alone
+closes; past that the test fails "the cleanup letting the parked write go" and frees the
+write through `park`'s new escape, `p.abort`, which no Once guards and only that fallback
+closes (`park` waits on `p.out` or `p.abort`). The shutdown: after the write's release, by
+`letGo` or by `abort`, a join on the case's end within the rest of its cleanups' bounds (the
+rig's stop: the engine's Run and the backend's goroutines, W each; `newDSDRig` and the fake
+kernel register no cleanup) and W of margin, 3W; past that the test logs the goroutines and
+panics, naming the phase that holds the case (the mark never seen, `letGo` not returned with
+`p.out` still open, or the rig's stop), since `t.FailNow` cannot unblock the case's
+goroutine; the testing package recovers it, runs the test's own cleanups (it has none) and
+re-panics ("[recovered, repanicked]") without waiting for the stuck case, so the binary ends
+there. Each bound is the sum of its phase's own waits' bounds and one of margin, so a panic
+needs a wait past its own bound, or more than a watchdog spent in steps that wait on
+nothing. `insert` gives each ref's command a context of its own, in a func literal whose
+deferred cancel runs when its `Fatalf` does: n refs, n watchdogs (b26950ed).
+
+**The cases' waits, each bounded** (file:line at 0885198f): `answer`
+(playback_dsd_choice_round2_test.go:363, its watchdog at :368); `d.choose` (:356) waits for
+nothing, its answer a buffered send; `waitSnap` (playback_rig_test.go:1107), `waitStopped`
+(:1114), `waitEvents` (:1148) and `waitCall` (:1155, through which `firstOcc`,
+playback_convert_test.go:331) through `waitOn` (:39, its timer at :41); `d.waitEnded`
+(playback_dsd_policy_test.go:167) and `d.waitState` (:160) through `waitOn`; `d.playedOut`
+(:150) through `play`, `files.fed` (playback_rig_test.go:209, `waitOn`) and `k.Play`
+(export_test.go:101, fake_test.go:669: a grant and `await`); `k.Await` (export_test.go:185)
+through `await` (fake_test.go:782) and `receive` (:788, its timer at :790);
+`d.tickUntilStopped` (playback_rig_test.go:1127, its timer at :1129); `d.tick` (:1173, at
+:1178); `available` (:1054), `insert` (:1067, each ref at :1081) and `play` (:1097) through
+`within` (:1049); `reached` (playback_dsd_choice_test.go:483, at :489), with `p.reached`
+(:473); `awaitedBy` (:498, at :504); and the rig's stop (playback_rig_test.go:1025: Run at
+:1030, the backend's goroutines at :1034). None was a bare receive or select.
+`TestOnlyAWriteThatInterruptsNeedsTheGoAhead`'s four writes were synchronous calls with the
+background context, whose wait for the writes' turn nothing bounded; they go through
+`d.choose` and `answer` now. The siblings' `go func() { _ = d.eng.Play(bg) }()` are not
+waited for: they end with the engine at the rig's stop. `park` waits until `letGo` or
+`abort`, by design.
+
+**Controls against the new code** (b30bb42a), predicted in `r14-post.predictions.txt`, the
+pin alone under `-race -watchdog=10s` (body 40 s, property 10 s, shutdown 30 s), TMPDIR on
+ext4 but for (d) and (d'): (a) the original deadlock (the write waiting inside `p.parked`,
+the escape kept; `letGo` asking it first) red by the property alone at 10 s, "the cleanup
+letting the parked write go did not within 10s of the case's body's end: p.out is still
+open"; `abort` freed the write, its Once completed, `letGo` closed `p.out`, the case PASSED,
+the write was answered written, no panic; (b) a `letGo` that never lets go: the same
+property line at 10 s, `abort`, then at 30 s "panic: the case did not end within 30s of its
+write's release: letGo has not returned: p.out is still open, and abort let the write go",
+the binary ending there, 40 s into the test, no package timeout; (c) the slow but healthy
+run: PASS, the case and its parent, 36 s; (d) the skipping case: SKIP, the case and its
+parent, at once; (d') the same with the body phase blind to the case's end: the parent
+waited out the body's 40 s and FAILED, "the case's body ... did not end within 40s", while
+the case had skipped at once: the select on the case's end is load-bearing; (e) a rig stop
+that never returns: the property held, and at 30 s "panic: ... the rig's stop has not
+returned"; (f) a body that never reaches its mark: "the case's body ... did not end within
+40s", `abort`, and at 70 s "panic: ... the mark was never seen: the case's body has not
+ended". Each as predicted; the tree clean after each.
+
+Round 14's gates, on 0885198f at legion0, through the build slot: `make fmt` left the tree
+clean; `make vet` passed for linux/amd64, `GOOS=windows`, `GOOS=darwin` and `GOOS=linux
+GOARCH=386`; `go test -race` on `./internal/alsapcm/...` and `./internal/player/...` passed
+(92 s), every rig test meeting the per-ref `insert`; the round's three tests by name, `-race
+-count=200 -v -timeout 60m -run
+'^(TestACaseEndingWithItsWriteParkedLetsItGo|TestAnOccurrenceBesideAWriteIsNotRevoked|TestOnlyAWriteThatInterruptsNeedsTheGoAhead)$'
+./internal/alsapcm/`, each with an explicit PASS 200 times, and each of their eight
+subtests, none skipped and none failed (263 s), TMPDIR on the worktree's ext4; CI's two
+native-integration runs passed under the overlay, every name CI requires among them; `make
+docs-check` passed, and again on a copy of the branch with the rules patch applied, where
+`TestEveryCitedTestNameExists`, `TestNoDocblockNamesAnotherDeclaration`,
+`TestEveryBridgeWordIsInTheProtocol`, `TestDSDOutputProtocolTokens` and
+`TestQualificationRunbookVersion` passed too; and the qualification check passed at 55
+against the merge base of each main ref, 9d59c8f6, 0fd7e3f8, 7c1db6dd and 3d0a0d05.
