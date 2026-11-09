@@ -109,7 +109,7 @@ func publishVerdict(dir string, found Verification) (Verification, error) {
 	m.Verification = &merged
 	veto := filepath.Join(dir, vetoFileName)
 	if merged.DatabaseState == StateVerified || merged.FilesState == StateVerified {
-		if err := writeVeto(veto); err != nil {
+		if err := writeVeto(veto, mpath); err != nil {
 			return Verification{}, fmt.Errorf("the verdict was not written: put its veto in place: %w", err)
 		}
 	}
@@ -131,10 +131,25 @@ func publishVerdict(dir string, found Verification) (Verification, error) {
 	return merged, nil
 }
 
-// writeVeto puts the veto at path: an empty file, made or truncated.
-func writeVeto(path string) error {
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+// writeVeto puts the veto at path, an empty file whose presence alone is the
+// veto: one there already, of any owner, is kept as it is, and one it makes
+// takes the owner of the manifest at ref (fsutil.KeepOwner), so a
+// verification run as root over a service's snapshot leaves the service a
+// veto it can make and remove as its own.
+func writeVeto(path, ref string) error {
+	if _, err := os.Lstat(path); err == nil {
+		return nil
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if errors.Is(err, os.ErrExist) {
+		return nil
+	}
 	if err != nil {
+		return err
+	}
+	if err := fsutil.KeepOwner(f, ref); err != nil {
+		_ = f.Close()
+		_ = os.Remove(path)
 		return err
 	}
 	return f.Close()

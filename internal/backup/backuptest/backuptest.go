@@ -16,6 +16,7 @@ package backuptest
 import (
 	"database/sql"
 	"fmt"
+	"path/filepath"
 	"testing"
 
 	"github.com/acoseac/1-bit-bridge/internal/dsn"
@@ -36,13 +37,22 @@ const sourceRows = 32
 // It opens the database in WAL mode, as the bridge opens its own manifest
 // database.
 //
+// path is a data dir's database, manifest.DefaultDBPath of the folder it is
+// in, which is where every store the bridge opens lives (cmd/bridge's
+// TestEveryStoreTheBridgeOpensIsItsDataDirsDatabase), and it is opened as
+// that.
+//
 // Call it before ParkVacuum: writing the rows compares keys too.
 func WriteSource(t testing.TB, path string) {
 	t.Helper()
 	if sqlitetest.Armed() {
 		t.Fatal("backuptest: WriteSource with a Park armed would park its own inserts")
 	}
-	st, err := manifest.OpenStore(path)
+	dataDir := filepath.Dir(path)
+	if manifest.DefaultDBPath(dataDir) != filepath.Clean(path) {
+		t.Fatalf("backuptest: %s is not a data dir's database (%s)", path, manifest.DefaultDBPath(dataDir))
+	}
+	st, err := manifest.OpenStore(manifest.DefaultDBPath(dataDir))
 	if err != nil {
 		t.Fatalf("backuptest: open the store %s: %v", path, err)
 	}
