@@ -41,26 +41,16 @@ func openerFailingAs(state *atomic.Int32) func(string) (io.ReadCloser, error) {
 	}
 }
 
-// replaceDirFromAnyGoroutine is replaceDir for a hook that may run on the
-// pool's worker: a failure is reported without ending that goroutine.
-func replaceDirFromAnyGoroutine(t *testing.T, f *repairFixture) {
-	if err := os.Rename(f.dir, f.dir+".volume"); err != nil {
-		t.Error(err)
-		return
-	}
-	if err := os.Mkdir(f.dir, 0o700); err != nil {
-		t.Error(err)
-	}
-}
-
 // verdictReplacingTheFolder is a decoder that replaces the waveform directory
 // as it decodes, then refuses the source with verdict, the source still
 // readable and unchanged: the verdict lands on a folder the repair was not
-// admitted on.
-func verdictReplacingTheFolder(t *testing.T, f *repairFixture, verdict error) curveSource {
+// admitted on. The decode may run on the pool's worker, so a failure of the
+// replacement is reported to f (replaceDirInHook). The repair's root is not
+// open yet during the decode, so the case runs on Windows too.
+func verdictReplacingTheFolder(f *repairFixture, verdict error) curveSource {
 	src := failingCurveSource(verdict)
 	src.decode = func(context.Context, string, curveProbe, func([]float64)) (int64, error) {
-		replaceDirFromAnyGoroutine(t, f)
+		f.replaceDirInHook()
 		return 0, verdict
 	}
 	return src
@@ -77,7 +67,8 @@ func TestADecodersVerdictCountsOnlyOverTheFolderItWasAdmittedOn(t *testing.T) {
 	verdict := markUnreadable(errors.New("sox FAIL formats: can't open input file"))
 	t.Run("the runner", func(t *testing.T) {
 		f := newRepairFixture(t)
-		_, err := runWaveformRepair(context.Background(), f.spec, verdictReplacingTheFolder(t, f, verdict))
+		_, err := runWaveformRepair(context.Background(), f.spec, verdictReplacingTheFolder(f, verdict))
+		f.requireNoFault(t)
 		if !errors.Is(err, ErrWaveformDirAway) || CountsAgainstTheCurve(err) {
 			t.Errorf("repair error = %v (counts: %t), want ErrWaveformDirAway counting nothing", err, CountsAgainstTheCurve(err))
 		}
@@ -86,9 +77,9 @@ func TestADecodersVerdictCountsOnlyOverTheFolderItWasAdmittedOn(t *testing.T) {
 		f := newRepairPoolFixture(t)
 		p := NewPool(f.store, 1, 4, WithFsync(noFsync),
 			WithRepairRunner(func(ctx context.Context, spec RepairSpec) (RepairResult, error) {
-				return runWaveformRepair(ctx, spec, verdictReplacingTheFolder(t, f.repairFixture, verdict))
+				return runWaveformRepair(ctx, spec, verdictReplacingTheFolder(f.repairFixture, verdict))
 			}))
-		t.Cleanup(p.Stop)
+		t.Cleanup(func() { stopPool(t, p) })
 		requireRefusedBeforeItsCommit(t, f, p, "a verdict over a folder replaced during the decode")
 	})
 }
@@ -102,23 +93,20 @@ func TestADecodersVerdictCountsOnlyOverTheFolderItWasAdmittedOn(t *testing.T) {
 func TestAFailedSyncCountsOnlyWhileTheSourceIsTheOneRead(t *testing.T) {
 	cases := []struct {
 		name string
-		// during runs inside the sync that fails: the source as it is then.
-		during func(t *testing.T, f *repairPoolFixture, state *atomic.Int32)
+		// during runs inside the sync that fails, on the pool's worker: the
+		// source as it is then, a step's failure reported to f (fault).
+		during func(f *repairPoolFixture, state *atomic.Int32)
 	}{
-		{"the source rewritten", func(t *testing.T, f *repairPoolFixture, _ *atomic.Int32) {
-			if err := os.WriteFile(f.spec.SourceAbsPath, []byte("another version, longer"), 0o644); err != nil {
-				t.Error(err)
-			}
+		{"the source rewritten", func(f *repairPoolFixture, _ *atomic.Int32) {
+			f.fault("rewrite the source", os.WriteFile(f.spec.SourceAbsPath, []byte("another version, longer"), 0o644))
 		}},
-		{"the source removed", func(t *testing.T, f *repairPoolFixture, _ *atomic.Int32) {
-			if err := os.Remove(f.spec.SourceAbsPath); err != nil {
-				t.Error(err)
-			}
+		{"the source removed", func(f *repairPoolFixture, _ *atomic.Int32) {
+			f.fault("remove the source", os.Remove(f.spec.SourceAbsPath))
 		}},
-		{"the source no longer opened", func(_ *testing.T, _ *repairPoolFixture, state *atomic.Int32) {
+		{"the source no longer opened", func(_ *repairPoolFixture, state *atomic.Int32) {
 			state.Store(sourceOpenFails)
 		}},
-		{"the source no longer read", func(_ *testing.T, _ *repairPoolFixture, state *atomic.Int32) {
+		{"the source no longer read", func(_ *repairPoolFixture, state *atomic.Int32) {
 			state.Store(sourceReadFails)
 		}},
 	}
@@ -128,7 +116,7 @@ func TestAFailedSyncCountsOnlyWhileTheSourceIsTheOneRead(t *testing.T) {
 			var state atomic.Int32
 			f.spec.open = openerFailingAs(&state)
 			p := repairPool(t, f, func(string) error {
-				tc.during(t, f, &state)
+				tc.during(f, &state)
 				return syscall.EIO
 			})
 			requireRefusedBeforeItsCommit(t, f, p, "a sync that failed with "+tc.name)
@@ -204,7 +192,7 @@ func TestBothReadsOfTheSourceAreAskedOnEveryHost(t *testing.T) {
 			WithRepairRunner(func(ctx context.Context, spec RepairSpec) (RepairResult, error) {
 				return runWaveformRepair(ctx, spec, verdictThenReadFails(&state))
 			}))
-		t.Cleanup(p.Stop)
+		t.Cleanup(func() { stopPool(t, p) })
 		requireRefusedBeforeItsCommit(t, f, p, "a verdict over a source whose read fails after it")
 	})
 }

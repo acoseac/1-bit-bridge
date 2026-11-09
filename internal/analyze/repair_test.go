@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"math"
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -54,6 +56,53 @@ func failingCurveSource(err error) curveSource {
 type repairFixture struct {
 	root, dir string
 	spec      RepairSpec
+	// faults keeps the first failure of the fixture's own step in a hook
+	// (fault), for the test's goroutine.
+	faults hookFaults
+}
+
+// hookFaults keeps the first failure of a fixture's own step taken in a hook,
+// for the test's goroutine to fail the case with. A hook may run on the
+// pool's worker, where t.Fatal ends that goroutine alone: the job was never
+// counted, and the wait for it ran to the test binary's deadline (backlog
+// B652, round 4). So a hook reports its failure here and returns, the repair
+// runs to its end and closes its root, and the case fails with the failure
+// once the pool has settled (repairFixture.settle), or once the repair has
+// returned, before anything else is asserted.
+type hookFaults struct {
+	mu  sync.Mutex
+	err error
+}
+
+func (h *hookFaults) report(err error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.err == nil {
+		h.err = err
+	}
+}
+
+func (h *hookFaults) first() error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.err
+}
+
+// fault reports the failure of the fixture's own step in a hook, named by
+// step, to the test's goroutine; a nil err is no failure.
+func (f *repairFixture) fault(step string, err error) {
+	if err != nil {
+		f.faults.report(fmt.Errorf("%s: %w", step, err))
+	}
+}
+
+// requireNoFault fails the case with the first failure of a hook's own step,
+// on the test's goroutine, before anything else is asserted.
+func (f *repairFixture) requireNoFault(t *testing.T) {
+	t.Helper()
+	if err := f.faults.first(); err != nil {
+		t.Fatalf("a hook's own step failed: %v", err)
+	}
 }
 
 func newRepairFixture(t *testing.T) *repairFixture {
@@ -88,17 +137,42 @@ func newRepairFixture(t *testing.T) *repairFixture {
 	}}
 }
 
-// replaceDir stands in for a volume that went: the directory moved aside and
-// another, empty, made at its path (a mountpoint the local directory again).
+// replaceFolder stands in for a volume that went: dir moved aside, to
+// dir+".volume", and another, empty, made at its path (a mountpoint the local
+// directory again).
+func replaceFolder(dir string) error {
+	if err := os.Rename(dir, dir+".volume"); err != nil {
+		return err
+	}
+	return os.Mkdir(dir, 0o700)
+}
+
+// replaceDir replaces the waveform directory (replaceFolder) on the test's
+// goroutine, where a failure ends the case at once: inside a repair run
+// there, the repair's deferred steps close its root as the goroutine unwinds.
 func (f *repairFixture) replaceDir(t *testing.T) {
 	t.Helper()
-	if err := os.Rename(f.dir, f.dir+".volume"); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Mkdir(f.dir, 0o700); err != nil {
+	if err := replaceFolder(f.dir); err != nil {
 		t.Fatal(err)
 	}
 }
+
+// replaceDirInHook replaces the waveform directory in a hook that may run on
+// the pool's worker: a failure is reported to the test's goroutine (fault),
+// never ended there.
+func (f *repairFixture) replaceDirInHook() {
+	f.fault("replace the waveform folder", replaceFolder(f.dir))
+}
+
+// whileTheRootIsOpen is why a case that renames the waveform folder while the
+// repair's root is open skips on Windows: the root's handle (os.OpenRoot's,
+// opened without FILE_SHARE_DELETE) keeps Windows from renaming or deleting
+// the folder it holds for as long as the root is open, so the replacement the
+// case makes cannot happen there. The cases that replace the folder before
+// the root opens run on every platform.
+const whileTheRootIsOpen = "on Windows the repair's root holds its folder: the root's handle shares no delete, " +
+	"so the folder cannot be renamed while the root is open, which this case does; " +
+	"backlog B819 holds the coverage this leaves there"
 
 // entriesUnder lists what is below dir, relative to it.
 func entriesUnder(t *testing.T, dir string) []string {
@@ -235,7 +309,8 @@ func openedIdentity(t *testing.T, path string) os.FileInfo {
 // the decode, as the root opens on the job's identity; and again before the
 // rename. A guard: it asserts only what must not happen, so it is green on
 // 3d0a0d05, which has no repair, and its negative controls (the checks
-// removed) show the directory and the curve made.
+// removed) show the directory and the curve made. The case that replaces the
+// folder before the rename skips on Windows (whileTheRootIsOpen).
 func TestARepairWritesNothingIntoAWaveformDirectoryThatWent(t *testing.T) {
 	t.Run("before the repair began", func(t *testing.T) {
 		f := newRepairFixture(t)
@@ -272,6 +347,9 @@ func TestARepairWritesNothingIntoAWaveformDirectoryThatWent(t *testing.T) {
 		}
 	})
 	t.Run("before the rename", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skipf(whileTheRootIsOpen)
+		}
 		f := newRepairFixture(t)
 		final := f.spec.SidecarPath()
 		_, err := runWaveformRepairWith(context.Background(), f.spec, fakeCurveSource(48000, nil),
@@ -423,33 +501,107 @@ func TestWhatARepairCountsAgainstTheCurve(t *testing.T) {
 	})
 }
 
-// waitForPoolSettled waits, until the test binary's deadline, for the pool
-// to have finished every job it took: none at all, on a tree that queues no
-// repair.
-func waitForPoolSettled(t *testing.T, p *Pool, what string) PoolStats {
-	t.Helper()
-	return waitForPool(t, p, what, func(st PoolStats) bool {
-		return st.QueueLen == 0 && st.Inflight == 0 && st.Done+st.Failed+st.Dropped >= st.Enqueued
-	})
+// poolWait bounds each wait of these tests on a pool, and poolWaitMargin
+// keeps a wait's own failure ahead of the test binary's timeout. A repair here
+// takes milliseconds, so two minutes is far past a starved runner's slowest
+// and far inside the binary's deadline: a job that is never counted fails its
+// own case by name, and the package's later tests still run. A wait to the
+// binary's deadline let one case's hang on Windows take every test after it
+// (backlog B652, round 4).
+const (
+	poolWait       = 2 * time.Minute
+	poolWaitMargin = 10 * time.Second
+)
+
+// poolWaitEnd is when a wait on a pool that starts now gives up: poolWait
+// from now, or poolWaitMargin before the test binary's deadline where that is
+// sooner.
+func poolWaitEnd(t *testing.T) time.Time {
+	end := time.Now().Add(poolWait)
+	if deadline, ok := t.Deadline(); ok && deadline.Add(-poolWaitMargin).Before(end) {
+		end = deadline.Add(-poolWaitMargin)
+	}
+	return end
 }
 
-// waitForPool waits, until the test binary's deadline, for cond on the pool's
-// counters.
-func waitForPool(t *testing.T, p *Pool, what string, cond func(PoolStats) bool) PoolStats {
-	t.Helper()
-	deadline, ok := t.Deadline()
-	if !ok {
-		deadline = time.Now().Add(time.Minute)
-	}
+// poolSettled is a pool that has finished every job it took: none at all, on
+// a tree that queues no repair.
+func poolSettled(st PoolStats) bool {
+	return st.QueueLen == 0 && st.Inflight == 0 && st.Done+st.Failed+st.Dropped >= st.Enqueued
+}
+
+// awaitPool waits for cond on the pool's counters until end, and says so
+// when they had not got there by then.
+func awaitPool(p *Pool, end time.Time, cond func(PoolStats) bool) (PoolStats, error) {
 	for {
 		st := p.Stats()
 		if cond(st) {
-			return st
+			return st, nil
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("%s: the pool's counters never got there: %+v", what, st)
+		if time.Now().After(end) {
+			return st, fmt.Errorf("the pool's counters had not got there by the wait's bound: %+v", st)
 		}
 		time.Sleep(2 * time.Millisecond)
+	}
+}
+
+// waitForPoolSettled waits, within the wait's bound (poolWaitEnd), for the
+// pool to have finished every job it took.
+func waitForPoolSettled(t *testing.T, p *Pool, what string) PoolStats {
+	t.Helper()
+	return waitForPool(t, p, what, poolSettled)
+}
+
+// waitForPool waits, within the wait's bound (poolWaitEnd), for cond on the
+// pool's counters.
+func waitForPool(t *testing.T, p *Pool, what string, cond func(PoolStats) bool) PoolStats {
+	t.Helper()
+	st, err := awaitPool(p, poolWaitEnd(t), cond)
+	if err != nil {
+		t.Fatalf("%s: %v", what, err)
+	}
+	return st
+}
+
+// settle waits, within the wait's bound, for the pool to have finished every
+// job it took, the repair a hook's failure came from included, and answers
+// the first failure of a hook's own step ahead of the wait's.
+func (f *repairFixture) settle(t *testing.T, p *Pool) (PoolStats, error) {
+	st, err := awaitPool(p, poolWaitEnd(t), poolSettled)
+	if ferr := f.faults.first(); ferr != nil {
+		if err != nil {
+			return st, fmt.Errorf("a hook's own step failed: %w; and %v", ferr, err)
+		}
+		return st, fmt.Errorf("a hook's own step failed: %w", ferr)
+	}
+	return st, err
+}
+
+// settled is settle on the test's goroutine: a hook's failure, or a pool that
+// did not settle, ends the case, before anything else is asserted of it.
+func (f *repairFixture) settled(t *testing.T, p *Pool, what string) PoolStats {
+	t.Helper()
+	st, err := f.settle(t, p)
+	if err != nil {
+		t.Fatalf("%s: %v", what, err)
+	}
+	return st
+}
+
+// stopPool stops p within the wait's bound, and fails the case where the
+// stop has not returned by then (a worker still in a job that does not end),
+// leaving the stop running: no case waits on its pool without a bound.
+func stopPool(t *testing.T, p *Pool) {
+	t.Helper()
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		p.Stop()
+	}()
+	select {
+	case <-stopped:
+	case <-time.After(time.Until(poolWaitEnd(t))):
+		t.Errorf("the pool had not stopped by the wait's bound: a worker is still in a job")
 	}
 }
 
@@ -512,7 +664,7 @@ func TestTransientRepairFailuresEarnNoStrike(t *testing.T) {
 			f := newRepairPoolFixture(t)
 			p := NewPool(f.store, 1, 4, WithFsync(noFsync),
 				WithRepairRunner(func(context.Context, RepairSpec) (RepairResult, error) { return RepairResult{}, tc.err }))
-			defer p.Stop()
+			t.Cleanup(func() { stopPool(t, p) })
 			if err := p.EnqueueRepair(f.spec); err != nil {
 				t.Fatal(err)
 			}
@@ -527,7 +679,7 @@ func TestTransientRepairFailuresEarnNoStrike(t *testing.T) {
 				<-ctx.Done()
 				return RepairResult{}, markUnreadable(errors.New("sox: killed"))
 			}))
-		defer p.Stop()
+		t.Cleanup(func() { stopPool(t, p) })
 		if err := p.EnqueueRepair(f.spec); err != nil {
 			t.Fatal(err)
 		}
@@ -543,6 +695,7 @@ func TestTransientRepairFailuresEarnNoStrike(t *testing.T) {
 				<-ctx.Done()
 				return RepairResult{}, markUnreadable(errors.New("sox: killed"))
 			}))
+		t.Cleanup(func() { stopPool(t, p) })
 		if err := p.EnqueueRepair(f.spec); err != nil {
 			t.Fatal(err)
 		}
@@ -550,7 +703,7 @@ func TestTransientRepairFailuresEarnNoStrike(t *testing.T) {
 		waitForPool(t, p, "the repair running", func(st PoolStats) bool {
 			return started.Load() || st.Inflight == 0 && st.Done+st.Failed+st.Dropped >= st.Enqueued
 		})
-		p.Stop()
+		stopPool(t, p)
 		requireNoStrike(t, f)
 	})
 }
@@ -570,7 +723,7 @@ func TestARepairThatFailsOnTheCurvesAccountIsCounted(t *testing.T) {
 			f := newRepairPoolFixture(t)
 			p := NewPool(f.store, 1, 4, WithFsync(noFsync),
 				WithRepairRunner(func(context.Context, RepairSpec) (RepairResult, error) { return RepairResult{}, counted.err }))
-			defer p.Stop()
+			t.Cleanup(func() { stopPool(t, p) })
 			if err := p.EnqueueRepair(f.spec); err != nil {
 				t.Fatal(err)
 			}
@@ -633,7 +786,7 @@ func TestARepairRecordsTheCurveAndNothingElse(t *testing.T) {
 		WithRepairRunner(func(ctx context.Context, spec RepairSpec) (RepairResult, error) {
 			return runWaveformRepair(ctx, spec, fakeCurveSource(48000, nil))
 		}))
-	defer p.Stop()
+	t.Cleanup(func() { stopPool(t, p) })
 	if err := p.EnqueueRepair(f.spec); err != nil {
 		t.Fatal(err)
 	}

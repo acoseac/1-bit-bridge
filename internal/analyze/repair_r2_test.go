@@ -61,7 +61,9 @@ func requireBody(t *testing.T, path, want string) {
 // one put there between the last check and the rename keeps its scratch and
 // its curve, the rename made through the root (backlog B819 has the rest).
 // Red at round 1's code for the first, whose stale-scratch removal by path
-// deleted the scratch there (backlog B652, round 2).
+// deleted the scratch there (backlog B652, round 2). Each case skips on
+// Windows, where the root keeps its folder from being renamed while it is
+// open (whileTheRootIsOpen).
 func TestARepairWorksOnlyThroughTheDirectoryItWasAdmittedOn(t *testing.T) {
 	// sentinels puts a scratch and a curve at the repair's own names in the
 	// folder now at the path.
@@ -80,6 +82,9 @@ func TestARepairWorksOnlyThroughTheDirectoryItWasAdmittedOn(t *testing.T) {
 		requireBody(t, f.spec.SidecarPath(), "a curve at the repair's own name")
 	}
 	t.Run("a folder holding a scratch and a curve at its names", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skipf(whileTheRootIsOpen)
+		}
 		f := newRepairFixture(t)
 		hooks := &repairHooks{beforeMkdir: func() {
 			f.replaceDir(t)
@@ -95,6 +100,9 @@ func TestARepairWorksOnlyThroughTheDirectoryItWasAdmittedOn(t *testing.T) {
 		}
 	})
 	t.Run("an empty folder", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skipf(whileTheRootIsOpen)
+		}
 		f := newRepairFixture(t)
 		hooks := &repairHooks{beforeMkdir: func() { f.replaceDir(t) }}
 		_, err := runWaveformRepairWith(context.Background(), f.spec, fakeCurveSource(48000, nil), hooks)
@@ -106,6 +114,9 @@ func TestARepairWorksOnlyThroughTheDirectoryItWasAdmittedOn(t *testing.T) {
 		}
 	})
 	t.Run("a folder put there between the last check and the rename", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skipf(whileTheRootIsOpen)
+		}
 		// The rename itself goes through the root, and the scratch and curve
 		// at its names in the folder now at the path stay as they are. The
 		// pool's check before the commit refuses the commit (backlog B819).
@@ -127,25 +138,27 @@ func TestARepairWorksOnlyThroughTheDirectoryItWasAdmittedOn(t *testing.T) {
 }
 
 // repairPool is a pool over f's store whose repairs render through the fake
-// source and whose durability barrier is sync, the WithFsync seam.
+// source and whose durability barrier is sync, the WithFsync seam. sync runs
+// on the pool's worker: a step of its own reports its failure to f (fault).
 func repairPool(t *testing.T, f *repairPoolFixture, sync func(string) error) *Pool {
 	t.Helper()
 	p := NewPool(f.store, 1, 4, WithFsync(sync),
 		WithRepairRunner(func(ctx context.Context, spec RepairSpec) (RepairResult, error) {
 			return runWaveformRepair(ctx, spec, fakeCurveSource(48000, nil))
 		}))
-	t.Cleanup(p.Stop)
+	t.Cleanup(func() { stopPool(t, p) })
 	return p
 }
 
 // requireRefusedBeforeItsCommit runs f's repair through p and requires it
-// refused before its commit: failed, the row as it was, no strike.
+// refused before its commit: failed, the row as it was, no strike; a hook's
+// own step that failed ends the case first (repairFixture.settled).
 func requireRefusedBeforeItsCommit(t *testing.T, f *repairPoolFixture, p *Pool, what string) {
 	t.Helper()
 	if err := p.EnqueueRepair(f.spec); err != nil {
 		t.Fatal(err)
 	}
-	if st := waitForPoolSettled(t, p, what); st.Enqueued != 1 || st.Done != 0 || st.Failed != 1 {
+	if st := f.settled(t, p, what); st.Enqueued != 1 || st.Done != 0 || st.Failed != 1 {
 		t.Errorf("%s: pool = %+v, want the one repair refused before its commit", what, st)
 	}
 	requireNoStrike(t, f)
@@ -159,12 +172,17 @@ func requireRefusedBeforeItsCommit(t *testing.T, f *repairPoolFixture, p *Pool, 
 // one the curve was written into, and a commit would record a curve that is
 // not at its path (backlog B819); a source rewritten during the sync is
 // another version than the curve's. Neither commits, and neither strikes.
-// Red at round 1's code, which committed both.
+// Red at round 1's code, which committed both. The folder's case skips on
+// Windows, where the root's handle keeps the folder from being renamed while
+// the root is open, as it is during the sync (whileTheRootIsOpen).
 func TestARepairCommitsOnlyWhileItsDirectoryAndItsSourceAreTheOnesItRead(t *testing.T) {
 	t.Run("the folder replaced after a successful sync", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skipf(whileTheRootIsOpen)
+		}
 		f := newRepairPoolFixture(t)
 		p := repairPool(t, f, func(string) error {
-			f.replaceDir(t)
+			f.replaceDirInHook()
 			return nil
 		})
 		requireRefusedBeforeItsCommit(t, f, p, "replaced after the sync")
@@ -173,7 +191,8 @@ func TestARepairCommitsOnlyWhileItsDirectoryAndItsSourceAreTheOnesItRead(t *test
 		f := newRepairPoolFixture(t)
 		later := time.Unix(0, f.spec.SourceMTimeNS).Add(time.Hour)
 		p := repairPool(t, f, func(string) error {
-			return os.Chtimes(f.spec.SourceAbsPath, later, later)
+			f.fault("move the source's mtime", os.Chtimes(f.spec.SourceAbsPath, later, later))
+			return nil
 		})
 		requireRefusedBeforeItsCommit(t, f, p, "the source moved")
 	})
@@ -183,12 +202,18 @@ func TestARepairCommitsOnlyWhileItsDirectoryAndItsSourceAreTheOnesItRead(t *test
 // failure is a write's failure (writeFailure): with the folder at the path no
 // longer the one written into, it is the directory's refusal and counts
 // nothing; with the folder as it was, it is a curve not written, counted.
-// Red at round 1's code for the first, which counted every sync failure.
+// Red at round 1's code for the first, which counted every sync failure. The
+// first skips on Windows, where the root's handle keeps the folder from being
+// renamed while the root is open, as it is during the sync
+// (whileTheRootIsOpen).
 func TestASyncFailureIsClassifiedAsEveryWriteFailureIs(t *testing.T) {
 	t.Run("after the folder was replaced", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skipf(whileTheRootIsOpen)
+		}
 		f := newRepairPoolFixture(t)
 		p := repairPool(t, f, func(string) error {
-			f.replaceDir(t)
+			f.replaceDirInHook()
 			return syscall.EIO
 		})
 		requireRefusedBeforeItsCommit(t, f, p, "a sync that failed once the folder was replaced")
@@ -199,7 +224,7 @@ func TestASyncFailureIsClassifiedAsEveryWriteFailureIs(t *testing.T) {
 		if err := p.EnqueueRepair(f.spec); err != nil {
 			t.Fatal(err)
 		}
-		if st := waitForPoolSettled(t, p, "a sync that failed"); st.Failed != 1 {
+		if st := f.settled(t, p, "a sync that failed"); st.Failed != 1 {
 			t.Fatalf("pool = %+v, want the repair failed", st)
 		}
 		rec, err := f.store.GetWaveformRegenFailure(context.Background(), f.spec.SourceLibraryRel)
@@ -268,7 +293,7 @@ func TestASourceItCannotReadIsUnreachable(t *testing.T) {
 			WithRepairRunner(func(ctx context.Context, spec RepairSpec) (RepairResult, error) {
 				return runWaveformRepair(ctx, spec, failingCurveSource(verdict))
 			}))
-		t.Cleanup(p.Stop)
+		t.Cleanup(func() { stopPool(t, p) })
 		requireRefusedBeforeItsCommit(t, f, p, "an unreadable source")
 	})
 }

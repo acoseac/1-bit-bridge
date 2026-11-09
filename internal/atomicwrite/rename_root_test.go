@@ -4,13 +4,21 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
 // TestRenameInRootRenamesInTheDirectoryItsRootHolds: the rename lands in the
 // directory the root opened, with the path naming another directory, which
-// is left as it was (backlog B652, round 2).
+// is left as it was (backlog B652, round 2). It skips on Windows, where the
+// root's handle keeps the directory it holds from being renamed while the
+// root is open (backlog B652, round 4).
 func TestRenameInRootRenamesInTheDirectoryItsRootHolds(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skipf("on Windows a root holds its directory: the root's handle shares no delete, " +
+			"so the directory cannot be renamed while the root is open, which this case does; " +
+			"backlog B819 holds the coverage this leaves there")
+	}
 	path := filepath.Join(t.TempDir(), "waveforms")
 	if err := os.Mkdir(path, 0o700); err != nil {
 		t.Fatal(err)
