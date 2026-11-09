@@ -223,6 +223,32 @@ func SetReleaseBoundForTest(d time.Duration) (restore func()) {
 	return func() { releaseBound = prev }
 }
 
+// SetRemoveVetoForTest replaces the removal of a veto (os.Remove), given the
+// veto's path, and returns the restore: a test stands a removal that does not
+// answer in for it.
+func SetRemoveVetoForTest(fn func(path string) error) (restore func()) {
+	prev := removeVeto
+	removeVeto = fn
+	return func() { removeVeto = prev }
+}
+
+// SetLookupVetoForTest replaces a reader's lookup of a veto by its name
+// (os.Lstat), and returns the restore.
+func SetLookupVetoForTest(fn func(path string) (os.FileInfo, error)) (restore func()) {
+	prev := lookupVeto
+	lookupVeto = fn
+	return func() { lookupVeto = prev }
+}
+
+// SetReadBackFailureForTest sets the failure a verification's read-back of
+// its record meets, given the snapshot (nil for none), and returns the
+// restore.
+func SetReadBackFailureForTest(fn func(dir string) error) (restore func()) {
+	prev := failReadBack
+	failReadBack = fn
+	return func() { failReadBack = prev }
+}
+
 // TakeOwnerForTest takes the owner lock of the snapshot in dir as a capture
 // does, so the snapshot reads as one whose verification is still owed, and
 // answers its release.

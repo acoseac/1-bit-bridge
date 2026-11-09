@@ -50,41 +50,51 @@ func TestAVetoGoesOnlyWithACheckThatEndedAndEarnsIt(t *testing.T) {
 	}
 }
 
+// unchangedRecord is a snapshot folder whose record holds the VERIFIED it
+// answers, a verdict that merges into it with no change, and a veto in the
+// bundle beside it: the branch of a verdict's write that removes a veto over a
+// record it leaves as it is (publishVerdict). A check that ended always moves
+// the record's times, so that branch removes a veto only for a verdict equal
+// to the record, which this writes by hand.
+func unchangedRecord(t *testing.T) (dir string, v Verification) {
+	t.Helper()
+	dir = filepath.Join(t.TempDir(), "20260101T000000Z")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	at := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	v = Verification{
+		Format: verificationFormat, Snapshot: filepath.Base(dir), Level: CheckQuick,
+		DatabaseState: StateVerified, FilesState: StateVerified, CheckedAt: at, FilesCheckedAt: at,
+	}
+	data, err := json.MarshalIndent(Manifest{Verification: &v}, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ManifestFile), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, vetoFileName), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return dir, v
+}
+
 // TestAnUnchangedRecordKeepsItsVetoOnceItsWriteIsGivenUp: a write whose merge
 // leaves the record as it is removes the veto beside it only while its step
 // has not been given up (backlog B653's fifth round: the give-up is asked
-// before every removal of a veto, the unchanged record's included). A check
-// that ended always moves the record's times, so this branch removes a veto
-// only for a verdict equal to the record, which the test writes by hand.
+// before every removal of a veto, the unchanged record's included).
 func TestAnUnchangedRecordKeepsItsVetoOnceItsWriteIsGivenUp(t *testing.T) {
 	for _, tc := range []string{"given up", "not given up"} {
 		t.Run(tc, func(t *testing.T) {
-			dir := filepath.Join(t.TempDir(), "20260101T000000Z")
-			if err := os.Mkdir(dir, 0o700); err != nil {
-				t.Fatal(err)
-			}
-			at := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-			v := Verification{
-				Format: verificationFormat, Snapshot: filepath.Base(dir), Level: CheckQuick,
-				DatabaseState: StateVerified, FilesState: StateVerified, CheckedAt: at, FilesCheckedAt: at,
-			}
-			data, err := json.MarshalIndent(Manifest{Verification: &v}, "", "  ")
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(filepath.Join(dir, ManifestFile), data, 0o600); err != nil {
-				t.Fatal(err)
-			}
+			dir, v := unchangedRecord(t)
 			veto := filepath.Join(dir, vetoFileName)
-			if err := os.WriteFile(veto, nil, 0o600); err != nil {
-				t.Fatal(err)
-			}
 			given, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			if tc == "given up" {
 				cancel()
 			}
-			_, written, err := publishVerdict(dir, v, nil, false, given)
+			_, written, err := publishOver(dir, v, given, nil)
 			if err != nil || written {
 				t.Fatalf("publishVerdict = written %v, %v; want nothing written: the test did not reach the unchanged record", written, err)
 			}

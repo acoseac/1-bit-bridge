@@ -330,12 +330,16 @@ func readVerdict(m Manifest, now time.Time, vetoed bool, own Ownership, named st
 // or one Lstat cannot tell is not there, reads as one.
 func vetoedAt(dir string) bool {
 	for _, p := range []string{filepath.Join(dir, vetoFileName), rootVetoPath(dir)} {
-		if _, err := os.Lstat(p); !errors.Is(err, os.ErrNotExist) {
+		if _, err := lookupVeto(p); !errors.Is(err, os.ErrNotExist) {
 			return true
 		}
 	}
 	return false
 }
+
+// lookupVeto is vetoedAt's Lstat of a veto's name, and a test's stand-in for
+// a lookup that does not answer (SetLookupVetoForTest).
+var lookupVeto = os.Lstat
 
 // hasPending reports whether either verdict of m's record is PENDING as
 // written: the one record a reader asks the owner lock about.

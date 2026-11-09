@@ -23,7 +23,9 @@ import (
 // landed, and then every reader already reads the new record while the write
 // answers an error; and a write that fails before its rename leaves the
 // record it would have replaced. A write its holder gave up renames nothing
-// and removes no veto from then on (publishVerdict's given).
+// and begins no removal of a veto from then on (publishVerdict's
+// publication), and a verdict's write is admitted only where its hold was not
+// given up before it (publishOf, hold.go).
 //
 // So a VERIFIED is never in doubt where a reader can read it (backlog B653,
 // and its second to fourth rounds), by one veto, vetoFileName in the bundle,
@@ -44,9 +46,12 @@ import (
 //     the veto too, and with none to be had writes nothing;
 //   - the veto goes only once the record that replaces it is durable (the
 //     folder's sync after the rename has answered), and only where a check
-//     that ended earns it (earnsClear): never for an INCOMPLETE, never once
-//     the write was given up, and a veto that stood before the verification
-//     began stays over a VERIFIED the record carries over.
+//     that ended earns it (earnsClear): never for an INCOMPLETE, and no
+//     removal begins once the write or its hold was given up (one already
+//     inside the filesystem's removal finishes, the record then reading what
+//     a check that ended found and the write made durable); a veto that stood
+//     before the verification began stays over a VERIFIED the record carries
+//     over.
 //
 // A veto made whose owner could not be given (root_squash) is kept as it is:
 // its presence alone is the veto, and the service may remove it. Each change
@@ -188,12 +193,21 @@ var ErrRecheckNotRecorded = errors.New("no check of a snapshot whose record hold
 // there already or one made, its folder synced, or, where that cannot be had,
 // beside the bundle in the backups folder, alike. A veto not known durable is
 // no veto: where none is, those made here go again, so the record reads as it
-// did, and the error is the refusal's (ErrRecheckRefused).
-func setAside(dir string) error {
+// did, and the error is the refusal's (ErrRecheckRefused). given is the
+// give-up of the step it runs in (stepVeto), which a give-up of its hold ends
+// while it runs (giveUpAs ends the step the hold is in): once it has ended,
+// no further veto is tried and none made here is removed, whatever a sync
+// answers then, so the record reads after its holder has answered as its
+// read-back read it (backlog B653's sixth round).
+func setAside(dir string, given context.Context) error {
 	root := filepath.Dir(dir)
 	var madeHere []string
 	var causes []error
 	for _, c := range []struct{ path, ref string }{{filepath.Join(dir, vetoFileName), dir}, {rootVetoPath(dir), root}} {
+		if given.Err() != nil {
+			causes = append(causes, fmt.Errorf("its step was given up: %w", given.Err()))
+			break
+		}
 		made, err := writeVeto(c.path, c.ref)
 		if made {
 			madeHere = append(madeHere, c.path)
@@ -210,14 +224,40 @@ func setAside(dir string) error {
 		}
 		return nil
 	}
+	removed := false
 	for _, p := range madeHere {
-		_ = os.Remove(p)
+		if given.Err() != nil {
+			// Given up: what it made stays, the conservative end.
+			break
+		}
+		_ = removeVeto(p)
+		removed = true
 	}
-	if len(madeHere) > 0 {
+	if removed {
 		stampChange(root)
 	}
 	return fmt.Errorf("%w: %w", ErrRecheckRefused, errors.Join(causes...))
 }
+
+// publication is what a verdict's write asks before each change it makes
+// (publishVerdict): given, the give-up of its step (stepOf, publishOf), which
+// its rename asks before every attempt, and held, its hold's give-up
+// (hold.gaveUp), which every removal of a veto asks beside given, since a
+// step begun after its hold was given up (the write of an INCOMPLETE) is
+// given a signal no earlier give-up ended. Neither is ever the caller's stop.
+type publication struct {
+	given context.Context
+	held  func() bool
+}
+
+// givenUp reports whether the write was given up, its step or its hold.
+func (p publication) givenUp() bool {
+	return p.given.Err() != nil || (p.held != nil && p.held())
+}
+
+// errVetoKept says a removal of a veto was not begun, its write given up
+// (removeVetoes): the veto stays.
+var errVetoKept = errors.New("the veto was kept: its write was given up")
 
 // publishVerdict writes found into the record of the snapshot at dir, and
 // answers the record as it now stands and whether it was written: found
@@ -226,11 +266,15 @@ func setAside(dir string) error {
 // prior, with the record its manifest holds now. Its caller holds the backups
 // folder's lock. A merge that changes nothing writes nothing.
 //
-// given is the give-up of the step the write is (stepOf, hold.go), which
-// ends once that step is given up and at nothing else, its caller's stop
-// included: once it has ended, no rename is tried (stageAndRename) and no
-// veto removed, so a write given up lands nothing after its holder has
-// answered, but a rename already in the kernel, which nothing takes back.
+// p is what the write asks of its give-up (publication): once its step's
+// give-up has ended, no rename is tried (stageAndRename), and once its step
+// or its hold is given up, no removal of a veto begins (removeVetoes, asked
+// before each, and after the unchanged record's lookup of the veto), so a
+// write given up lands nothing after its holder has answered, but a rename
+// already in the kernel, which nothing takes back, and a removal already
+// inside the filesystem's: the record then reads what a check that ended
+// found and this write made durable (backlog B653's sixth round). The caller's
+// stop is no give-up: a stop still writes its INCOMPLETE.
 //
 // A veto goes, once the write is durable, only where the check earns it
 // (earnsClear, backlog B653's fourth and fifth rounds): never for an
@@ -239,7 +283,7 @@ func setAside(dir string) error {
 // verification's own, made for its check alone) and what the record carries
 // over is a VERIFIED found matched. A veto that stood before it, a write's
 // that failed, stays over a VERIFIED the record carries over.
-func publishVerdict(dir string, found Verification, prior *Verification, doubted bool, given context.Context) (_ Verification, written bool, _ error) {
+func publishVerdict(dir string, found Verification, prior *Verification, doubted bool, p publication) (_ Verification, written bool, _ error) {
 	mpath := filepath.Join(dir, ManifestFile)
 	m, err := readRecord(dir)
 	if err != nil {
@@ -257,9 +301,10 @@ func publishVerdict(dir string, found Verification, prior *Verification, doubted
 	if stored != nil && reflect.DeepEqual(*stored, merged) {
 		// Nothing to write: a veto of this verification's own goes, the
 		// record as every reader read it before, unless the write was given
-		// up.
-		if clears && given.Err() == nil && vetoedAt(dir) {
-			_ = removeVetoes(dir)
+		// up, asked again once the veto has been looked up (vetoedAt can wait
+		// on the folder) and before each removal.
+		if clears && !p.givenUp() && vetoedAt(dir) {
+			_ = removeVetoes(dir, p.givenUp)
 			stampChange(root)
 		}
 		return merged, false, nil
@@ -281,7 +326,7 @@ func publishVerdict(dir string, found Verification, prior *Verification, doubted
 	if err != nil {
 		return Verification{}, false, err
 	}
-	if err := stageAndRename(given, mpath, data); err != nil {
+	if err := stageAndRename(p.given, mpath, data); err != nil {
 		return Verification{}, false, fmt.Errorf("the verdict was not written: %w", err)
 	}
 	// The record readers read has changed, whatever follows.
@@ -289,11 +334,14 @@ func publishVerdict(dir string, found Verification, prior *Verification, doubted
 	if err := syncVerdictDir(mpath); err != nil {
 		return merged, true, fmt.Errorf("%w: %w", ErrVerdictNotDurable, err)
 	}
-	if !clears || given.Err() != nil {
-		// A write given up once its rename had landed keeps its veto.
+	if !clears {
 		return merged, true, nil
 	}
-	if err := removeVetoes(dir); err != nil {
+	switch err := removeVetoes(dir, p.givenUp); {
+	case errors.Is(err, errVetoKept):
+		// A write given up once its rename had landed keeps its veto.
+		return merged, true, nil
+	case err != nil:
 		return merged, true, fmt.Errorf("%w: its veto could not be removed, so it reads INCOMPLETE: %w", ErrVerdictNotDurable, err)
 	}
 	return merged, true, nil
@@ -382,16 +430,25 @@ func writeVeto(path, ref string) (made bool, err error) {
 }
 
 // removeVetoes removes the snapshot in dir's veto, in the bundle and beside
-// it; one not there is no error.
-func removeVetoes(dir string) error {
+// it; one not there is no error. givenUp is asked immediately before each
+// removal: once it answers true, no removal begins and the answer is
+// errVetoKept, though one already under way when the give-up came finishes.
+func removeVetoes(dir string, givenUp func() bool) error {
 	var errs []error
 	for _, p := range []string{filepath.Join(dir, vetoFileName), rootVetoPath(dir)} {
-		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if givenUp() {
+			return errors.Join(append(errs, errVetoKept)...)
+		}
+		if err := removeVeto(p); err != nil && !errors.Is(err, os.ErrNotExist) {
 			errs = append(errs, err)
 		}
 	}
 	return errors.Join(errs...)
 }
+
+// removeVeto removes the veto at path: os.Remove, and a test's stand-in for a
+// removal that does not answer (SetRemoveVetoForTest).
+var removeVeto = os.Remove
 
 // stageAndRename stages data beside path, with the owner of the file it
 // replaces (a root verification over a service's snapshot), and renames it

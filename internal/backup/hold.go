@@ -52,10 +52,12 @@ type hold struct {
 }
 
 // stepSignal is the give-up of one step under a hold: ended once that step
-// is given up, by its own bound or by its holder's caller, and by nothing
-// else, so a write that asks it (publishVerdict) still lands its INCOMPLETE
-// after its caller's stop or another step's give-up, and lands nothing once
-// it is given up itself.
+// is given up, by its own bound or by its holder's caller while it runs, and,
+// for a verdict's write alone (publishOf), at its admission where the hold was
+// given up before it: never by its caller's stop, so the write of an
+// INCOMPLETE (stepIncomplete), begun after another step's give-up, still
+// lands, and the record is still read back (stepReadBack), while a write that
+// asks it (publishVerdict) lands nothing once it is given up itself.
 type stepSignal struct {
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -311,6 +313,32 @@ func (h *hold) drop() {
 // late is dropped, or handed to late where that is set, which h waits for
 // too. A panic in the step is raised again on the caller's goroutine.
 func stepOf[T any](h *hold, by time.Time, words string, step func(ctx, given context.Context) T, late func(T)) (T, bool) {
+	v, _, answered := runStep(h, by, words, false, step, late)
+	return v, answered
+}
+
+// publishOf runs a verdict's write, write, as a step of h (stepWrite), as
+// stepOf does, admitted only where h was not given up as the step is
+// registered (backlog B653's sixth round): the check of the give-up and the
+// registration of the step's signal are one section of the hold's lock, with
+// no I/O in it, so a give-up comes either before it, and the write is not
+// admitted (admitted false: write never runs, and its holder writes its
+// INCOMPLETE in a step of its own), or after it, and ends the write's signal
+// (giveUpAs), which write asks before its rename and before each removal of a
+// veto.
+func publishOf[T any](h *hold, by time.Time, write func(given context.Context) T) (v T, admitted, answered bool) {
+	return runStep(h, by, stepWrite, true, func(_, given context.Context) T { return write(given) }, nil)
+}
+
+// onAdmission, nil in production, runs while a verdict's write is admitted,
+// inside the section of the hold's lock that decides it, between the check of
+// the give-up and the registration of the step: a test parks a give-up
+// against it, which must wait for the section to end.
+var onAdmission func()
+
+// runStep is stepOf, and publishOf where publish is set: a verdict's write,
+// admitted only where the hold is not given up as its step is registered.
+func runStep[T any](h *hold, by time.Time, words string, publish bool, step func(ctx, given context.Context) T, late func(T)) (v T, admitted, answered bool) {
 	type answer struct {
 		v        T
 		panicked any
@@ -319,6 +347,14 @@ func stepOf[T any](h *hold, by time.Time, words string, step func(ctx, given con
 	sig := &stepSignal{}
 	sig.ctx, sig.cancel = context.WithCancel(context.Background())
 	h.mu.Lock()
+	if publish && h.given {
+		h.mu.Unlock()
+		sig.cancel()
+		return v, false, true
+	}
+	if publish && onAdmission != nil {
+		onAdmission()
+	}
 	h.at, h.step = words, sig
 	h.mu.Unlock()
 	out := make(chan answer, 1)
@@ -347,7 +383,7 @@ func stepOf[T any](h *hold, by time.Time, words string, step func(ctx, given con
 			if !a.ok {
 				panic(a.panicked)
 			}
-			return a.v, true
+			return a.v, true, true
 		case <-stop:
 			stop = nil
 			if time.Until(by) > StopWriteBound {
@@ -365,8 +401,7 @@ func stepOf[T any](h *hold, by time.Time, words string, step func(ctx, given con
 				h.track(lateDone)
 			}
 			h.giveUp(done, words)
-			var zero T
-			return zero, false
+			return v, true, false
 		}
 	}
 }

@@ -50,8 +50,15 @@ type VerifyResult struct {
 	// the zero Verification where nothing was read back (RecordRead).
 	Record Verification
 	// RecordRead says the record was read back: false where its read failed,
-	// was given up, or was never made, and Record then says nothing.
+	// was given up, or was never made, and Record then says nothing. A
+	// verification that answers no error has read its record back.
 	RecordRead bool
+	// ReadErr says why a read-back that was made read nothing: its read's
+	// failure, or ErrReadBackGivenUp; nil where the record was read back or
+	// no read-back was made. The verification's error then wraps
+	// ErrRecordNotReadBack too, beside any other it answers, whatever its
+	// write did (Write).
+	ReadErr error
 	// Write is how far the write of what was found into the record went.
 	Write WriteOutcome
 	// Recorded says what was found was written into the record, durably,
@@ -67,6 +74,17 @@ type VerifyResult struct {
 	// were checked for presence alone, and nothing was recorded.
 	Legacy bool
 }
+
+// ErrRecordNotReadBack marks a verification whose read-back of its record
+// read nothing (VerifyResult.ReadErr says why): what its write did is
+// VerifyResult.Write, which this error never says failed, and what every
+// reader reads of the record is not known here. It is joined to any other
+// error the verification answers, each keeping its identity.
+var ErrRecordNotReadBack = errors.New("the snapshot's record could not be read back")
+
+// ErrReadBackGivenUp is VerifyResult.ReadErr where the read-back's own step
+// did not end within its bound and was given up.
+var ErrReadBackGivenUp = errors.New("the read-back did not end within its bound and was given up")
 
 // WriteOutcome is how far a verification's write of its record went.
 type WriteOutcome int
@@ -90,6 +108,23 @@ const (
 	// is not known.
 	WriteUnfinished
 )
+
+// String names the outcome in a log's words.
+func (o WriteOutcome) String() string {
+	switch o {
+	case WriteUnchanged:
+		return "unchanged"
+	case WriteRecorded:
+		return "recorded"
+	case WriteNotDurable:
+		return "not-durable"
+	case WriteFailed:
+		return "failed"
+	case WriteUnfinished:
+		return "unfinished"
+	}
+	return "none"
+}
 
 // published is what a verdict's write answered (publishVerdict).
 type published struct {
@@ -125,7 +160,10 @@ func (p published) outcome(answered bool) WriteOutcome {
 // ErrRecheckRefused (nothing checked), ErrRecheckNotRecorded (checked, and
 // what it found not recorded over a VERIFIED where no directory can be
 // synced), a stop (ctx's error), the deadline, ErrCheckGivenUp (a step given
-// up), the write's failure (ErrVerdictNotDurable among them).
+// up), the write's failure (ErrVerdictNotDurable among them); or that the
+// record was not read back once the verification had done what it did
+// (ErrRecordNotReadBack, joined to any of those, or alone where the write
+// ended without failing: VerifyResult.Write says what it did).
 func VerifySnapshot(ctx context.Context, dir string, o VerifyOptions) (VerifyResult, error) {
 	res, err, _ := verifyAndThen(ctx, dir, o, nil, nil)
 	return res, err
@@ -134,6 +172,11 @@ func VerifySnapshot(ctx context.Context, dir string, o VerifyOptions) (VerifyRes
 // onManifestRead, nil in production, runs before each read of a snapshot's
 // manifest a verification makes (SetOnManifestReadForTest).
 var onManifestRead func(path string)
+
+// failReadBack, nil in production, answers the failure a test puts at a
+// verification's read-back of its record, given the snapshot
+// (SetReadBackFailureForTest).
+var failReadBack func(dir string) error
 
 // readRecord reads the manifest of the snapshot in dir for a verification.
 func readRecord(dir string) (Manifest, error) {
@@ -304,10 +347,13 @@ func (h *hold) givenUp(ctx context.Context, werr error) error {
 // runs no check and no prune, writes nothing but its INCOMPLETE, whose merge
 // keeps a completed verdict and clears no veto, reads the record back, and
 // answers ErrCheckGivenUp naming the step; a step given up that resumes
-// runs nothing further, a write given up renames nothing and removes no veto
-// from then on, and what a step answers late is dropped. A check given up
-// past its deadline records INCOMPLETE (deadline), and one its caller stopped
-// INCOMPLETE (cancelled), the stop being no give-up of the write. What the
+// runs nothing further, the verdict's write is not admitted once the hold was
+// given up before it (publishOf), a write given up renames nothing and begins
+// no removal of a veto from then on, and what a step answers late is dropped.
+// A check given up past its deadline records INCOMPLETE (deadline), and one
+// its caller stopped INCOMPLETE (cancelled), the stop being no give-up of the
+// write. A read-back that reads nothing is said beside whatever else the
+// worker answers (ErrRecordNotReadBack, VerifyResult.ReadErr). What the
 // worker holds is in h, which its caller lets go of once it has answered.
 func verifyHeld(ctx context.Context, dir string, o VerifyOptions, after func(context.Context, string), h *hold) (res VerifyResult, err error) {
 	snap, root, err := resolveSnapshotIn(dir, o.BackupsRoot)
@@ -348,25 +394,52 @@ func verifyHeld(ctx context.Context, dir string, o VerifyOptions, after func(con
 			return struct{}{}
 		}, nil)
 	}
-	// readBack is the record as a reader reads it now, and whether it was
-	// read: a read that fails or is given up reads nothing.
-	readBack := func() (Verification, bool) {
+	// readBack reads the record as a reader reads it now into res, or why it
+	// read nothing (res.ReadErr): its read's failure, or its step's give-up
+	// (ErrReadBackGivenUp). It reads after a give-up too, its step's signal
+	// its own.
+	readBack := func() {
 		type read struct {
-			v  Verification
-			ok bool
+			v   Verification
+			err error
 		}
-		r, _ := stepOf(h, laterBound(deadline), stepReadBack, func(context.Context, context.Context) read {
+		r, answered := stepOf(h, laterBound(deadline), stepReadBack, func(context.Context, context.Context) read {
+			if failReadBack != nil {
+				if err := failReadBack(snap); err != nil {
+					return read{err: err}
+				}
+			}
 			now, err := readRecord(snap)
 			if err != nil {
-				return read{}
+				return read{err: fmt.Errorf("read the snapshot's manifest: %w", err)}
 			}
 			own := OwnerNone
 			if now.hasPending() {
 				own = probeOwner(snap)
 			}
-			return read{readVerdict(now, time.Now(), vetoedAt(snap), own, boundName(snap)), true}
+			return read{v: readVerdict(now, time.Now(), vetoedAt(snap), own, boundName(snap))}
 		}, nil)
-		return r.v, r.ok
+		switch {
+		case !answered:
+			res.ReadErr = ErrReadBackGivenUp
+		case r.err != nil:
+			res.ReadErr = r.err
+		default:
+			res.Record, res.RecordRead = r.v, true
+		}
+	}
+	// answer is what the worker answers once it has read the record back:
+	// err, and ErrRecordNotReadBack beside it where that read read nothing,
+	// each keeping its identity (backlog B653's sixth round).
+	answer := func(err error) (VerifyResult, error) {
+		if res.ReadErr == nil {
+			return res, err
+		}
+		notRead := fmt.Errorf("%w: %w", ErrRecordNotReadBack, res.ReadErr)
+		if err == nil {
+			return res, notRead
+		}
+		return res, fmt.Errorf("%w; %w", err, notRead)
 	}
 	// The record, and whether a veto stands beside it before this
 	// verification begins: a write's that failed, which only a verdict wholly
@@ -402,19 +475,21 @@ func verifyHeld(ctx context.Context, dir string, o VerifyOptions, after func(con
 	recheck := holdsVerified(prior) && !m.legacy()
 	noBarrier := recheck && !syncsParentDir
 	if recheck && !noBarrier {
-		refused, ok := stepOf(h, early, stepVeto, func(context.Context, context.Context) error { return setAside(snap) }, nil)
+		// The step's own give-up, which a give-up of the hold while the step
+		// runs ends too, keeps the veto it made once it has ended.
+		refused, ok := stepOf(h, early, stepVeto, func(_, given context.Context) error { return setAside(snap, given) }, nil)
 		switch {
 		case !ok || h.gaveUp():
 			// No check: its INCOMPLETE, merged over the VERIFIED, changes
 			// nothing, so nothing is written.
-			res.Record, res.RecordRead = readBack()
-			return res, h.givenUp(ctx, nil)
+			readBack()
+			return answer(h.givenUp(ctx, nil))
 		case refused != nil:
-			res.Record, res.RecordRead = readBack()
+			readBack()
 			if h.gaveUp() {
-				return res, h.givenUp(ctx, nil)
+				return answer(h.givenUp(ctx, nil))
 			}
-			return res, refused
+			return answer(refused)
 		}
 	}
 	checkCtx, cancel := context.WithDeadline(h.ctx, deadline)
@@ -436,51 +511,61 @@ func verifyHeld(ctx context.Context, dir string, o VerifyOptions, after func(con
 	if m.legacy() {
 		// Nothing to record: a reader reads of it what it would write.
 		res.Legacy = true
-		res.Record, res.RecordRead = readBack()
+		readBack()
 		thenUnder()
 		if h.gaveUp() {
-			return res, h.givenUp(ctx, nil)
+			return answer(h.givenUp(ctx, nil))
 		}
-		return res, nil
+		return answer(nil)
 	}
 	if noBarrier {
-		res.Record, res.RecordRead = readBack()
+		readBack()
 		if h.gaveUp() {
-			return res, h.givenUp(ctx, nil)
+			return answer(h.givenUp(ctx, nil))
 		}
-		return res, ErrRecheckNotRecorded
+		return answer(ErrRecheckNotRecorded)
 	}
-	// The write is given its step's own give-up (given), never the caller's
-	// stop: a stop still writes its INCOMPLETE, and a write given up lands
-	// nothing from then on (publishVerdict).
-	pub, wrote := stepOf(h, laterBound(deadline), stepWrite, func(_, given context.Context) published {
-		_, written, err := publishVerdict(snap, found, prior, op.doubted, given)
+	// The verdict's write is admitted only where the hold was not given up as
+	// its step is registered (publishOf, backlog B653's sixth round): given
+	// up before, what is written is its INCOMPLETE, in a step of its own whose
+	// signal no earlier give-up ended (stepIncomplete); given up after, the
+	// write's own give-up ends. Each write asks its step's give-up and its
+	// hold's (publication), never the caller's stop: a stop still writes its
+	// INCOMPLETE, and a write given up lands nothing from then on.
+	pub, admitted, wrote := publishOf(h, laterBound(deadline), func(given context.Context) published {
+		_, written, err := publishVerdict(snap, found, prior, op.doubted, publication{given: given, held: h.gaveUp})
 		return published{written: written, err: err}
-	}, nil)
+	})
+	if !admitted {
+		pub, wrote = stepOf(h, laterBound(deadline), stepIncomplete, func(_, given context.Context) published {
+			_, written, err := publishVerdict(snap, incompleteOf(checkCtx), prior, op.doubted, publication{given: given, held: h.gaveUp})
+			return published{written: written, err: err}
+		}, nil)
+	}
 	res.Write = pub.outcome(wrote)
 	res.Recorded = res.Write == WriteRecorded
 	// Whatever the write answered: a kept bundle is followed by its prune,
 	// which reads the record as it now stands; but never once a step was
 	// given up.
 	thenUnder()
-	res.Record, res.RecordRead = readBack()
+	readBack()
 	if h.gaveUp() {
 		var werr error
 		if wrote {
 			werr = pub.err
 		}
-		return res, h.givenUp(ctx, werr)
+		return answer(h.givenUp(ctx, werr))
 	}
 	if pub.err != nil {
-		return res, pub.err
+		return answer(pub.err)
 	}
 	if err := ctx.Err(); err != nil && found.DatabaseState == StateIncomplete {
-		return res, err
+		return answer(err)
 	}
 	if err := checkCtx.Err(); err != nil && found.DatabaseState == StateIncomplete {
-		return res, err
+		return answer(err)
 	}
-	return res, nil
+	return answer(nil)
 }
 
 // incompleteOf is the verdict of a check ctx stopped.
@@ -541,7 +626,7 @@ func abandonPending(dir, backupsRoot string, ctx context.Context, onEnd func(), 
 			if err != nil || m.legacy() || (holdsVerified(m.Verification) && !syncsParentDir) {
 				return struct{}{}
 			}
-			_, _, _ = publishVerdict(snap, incompleteOf(ctx), nil, vetoedAt(snap), given)
+			_, _, _ = publishVerdict(snap, incompleteOf(ctx), nil, vetoedAt(snap), publication{given: given, held: h.gaveUp})
 			return struct{}{}
 		}, nil)
 	}()
