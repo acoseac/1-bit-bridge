@@ -90155,3 +90155,88 @@ docs-check` passed, and again on a copy of the branch with the rules patch appli
 `TestEveryBridgeWordIsInTheProtocol`, `TestDSDOutputProtocolTokens` and
 `TestQualificationRunbookVersion` passed too; and the qualification check passed at 55
 against the merge base of each main ref, 9d59c8f6, 0fd7e3f8, 7c1db6dd and 3d0a0d05.
+
+## 2026-11-09 — B728 B9 round 15: the pin times the body by the body's own exit
+
+Worker b728-b9, legion0 (Ubuntu 26.04, Linux 7.0, Go 1.27.3), branch `feat/b728-b9-choice`
+at f9a86769 (round 14 taken, its rules applied). The brief, round 14's two reviews (Codex's
+none, Claude's one Low) and the two reviews of the brief's draft (Codex's three points,
+Claude's five), folded into it. Tests only; no production change. Commits: 06528157 (the pin
+timed by its body's own exit), 69ef94d9 (qualification 56) and this record. The rules are a
+patch the orchestrator applies (`rules-b728-b9-r15.patch`): round 14's bullet in
+`build-ci-tests.md`, whose account of the body's phase this round replaced.
+
+**The defect** (Claude's review of round 14). `TestACaseEndingWithItsWriteParkedLetsItGo`'s
+first select waited up to the body's bound, 4W (W the watchdog), for the mark or for the
+case's end, `done`, which closes only after every cleanup, the rig's stop included: a case
+that failed before its write parked and was slow to clean up drew a goroutine dump, a parent
+error "the case's body ... did not end within 4W" and a needless `abort()` (which only
+closes `p.abort`; the binary ended only if the shutdown's wait then expired too), its own
+failure standing beside them. And it decided by which ready channel its select took, under a
+bound computed afresh at the select, so a parent that looked late could take a late mark for
+an early end.
+
+**Reds first, against f9a86769**, predicted in `r15-pre.predictions.txt`, the pin alone
+under `-race -watchdog=10s` (body 40 s, shutdown 30 s), TMPDIR on the worktree's ext4 but
+for the skip, each mutation's bytes restored after it, judged by the parent's lines (the
+overrun, the goroutine dump, a panic), never by PASS or FAIL alone, since the case fails
+either way: (a) an early failure with long cleanups (a cleanup sleeping 4W + W registered as
+the case's first statement, so it runs last, and `t.Fatal` right after `besideAWrite`) drew
+the dump and "did not end within 40s" beside the case's own Fatal line, `done` coming at 50
+s; (b1) a late mark (45 s slept right after `besideAWrite`), the parent prompt, was reported
+as an overrun: b1's red does not hold; (b2) the same late mark with the parent's first
+select delayed 60 s, so that the mark and `done` were both ready when it looked, went
+unreported, the parent PASSING: its 4W timer, computed at the select, had not fired, and the
+select took the mark or the end; (c) a body that never exits was reported at 40 s and
+panicked at 70 s; (d) the healthy case passed and the skip (TMPDIR on tmpfs) skipped.
+
+**The fix** (06528157). The body's exit is a channel the case's body closes in a call it
+defers as its first statement, before its rig's setup, so it is signalled as the body
+returns or fails, before any cleanup (a cleanup registered after `letGo` checks it, and
+fails the case if not), with the time it exited. The mark is closed in the body once the
+cleanup under test is registered (`t.Cleanup(p.letGo)`), no longer by a cleanup. The parent
+waits for the exit until 4W from the case's start and decides by what the case signalled and
+when, never by which case a select took: not exited by 4W, or exited after it (the recorded
+time against the deadline, which a parent that looks late still reads), is the overrun (the
+dump, the error, `abort()`, which now logs that it let the write go), and the case must then
+end by 7W; exited unmarked keeps its skip or its failure with nothing reported, its cleanups
+having until 7W, what is left of the body's bound and the shutdown's; exited marked at e
+goes to the property (`p.out` closed by e + W) and the shutdown (the case's end within 3W of
+the write's release). The timeline is written out in the test's doc; its longest path, a
+body exiting marked at 4W whose `letGo` never closes the gate, panics at 8W: 8 minutes at
+the watchdog CI runs this package with (the flag's default, a minute:
+`.github/scripts/test-shard.sh`'s `RACE_FLAGS` and the Makefile's `test` target pass none),
+under the package's `-timeout 30m`. The panic names the phase: the body not exited, the
+cleanups of a case that ended before its mark, `letGo` not returned, or the rig's stop.
+
+**Controls against the new code** (06528157), predicted in `r15-post.predictions.txt`, the
+same way: (a) the early failure with long cleanups: only the case's own Fatal line, no
+overrun line, no dump, no abort line, no panic, `done` at 50 s inside 70 s; (b1) the late
+mark, the parent prompt: the dump, "did not exit within 40s" and the abort line, the case
+passing and ending by 70 s, its write answered written; (b2) the late mark with the parent's
+first wait delayed 60 s, the exit, the mark and the end all ready: the overrun reported from
+the exit's recorded time, 45 s against the 40 s deadline, and again in 10 runs of 10 at a 2
+s watchdog (the select inside the wait finding the exit and its timer both ready in each);
+(c) the body that never exits: the overrun at 40 s, then at 70 s "panic: the case did not
+end by 1m10s from its start: the case's body has not exited"; (d) the healthy case PASSED
+with no line, and the skip SKIPPED with no overrun line or dump; (e) an early failure whose
+cleanups never end (the rig's stop blocking for good): no overrun, no abort, and at 70 s a
+panic naming "the cleanups of a case that ended before its mark"; and round 14's two
+property controls, unchanged: the write held inside `p.parked` with `letGo` asking it first
+failed the property 10 s after the body's exit, `abort` freed the write and the case passed
+with no panic, and a `letGo` that never lets go failed the property and panicked at 40 s
+naming `letGo`. Each as predicted; the tree clean after each.
+
+Round 15's gates, on 69ef94d9 at legion0, through the build slot: `make fmt` left the tree
+clean; `make vet` passed for linux/amd64, `GOOS=windows`, `GOOS=darwin` and `GOOS=linux
+GOARCH=386`; `go test -race` on `./internal/alsapcm/...` and `./internal/player/...` passed
+(91 s); the file's three tests by name, `-race -count=200 -v -timeout 60m -run
+'^(TestACaseEndingWithItsWriteParkedLetsItGo|TestAnOccurrenceBesideAWriteIsNotRevoked|TestOnlyAWriteThatInterruptsNeedsTheGoAhead)$'
+./internal/alsapcm/`, each with an explicit PASS 200 times, and each of their eight
+subtests, none skipped and none failed (263 s), TMPDIR on the worktree's ext4; CI's two
+native-integration runs passed under the overlay, every name CI requires among them; `make
+docs-check` passed, and again on a copy of the branch with the rules patch applied, where
+`TestEveryCitedTestNameExists`, `TestNoDocblockNamesAnotherDeclaration`,
+`TestEveryBridgeWordIsInTheProtocol`, `TestDSDOutputProtocolTokens` and
+`TestQualificationRunbookVersion` passed too; and the qualification check passed at 56
+against the merge base of each main ref, 9d59c8f6, 0fd7e3f8, 7c1db6dd and 3d0a0d05.
