@@ -89,6 +89,7 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   strip; and anchor on an IDENTIFIER, never a string literal, because
   `stripGoComments` blanks literals too.
 - **A fixture that omits a live gate describes a different bridge than production.** → History-rules-build-ci-tests.md
+- **A stand-in for an older release shows only what it was written to do: what that release does with something the stand-in never reads (an environment variable, a file it does not open) is shown by that release built from its tag's tree (`git archive <sha>`, its own make tags and version stamp), and the record names the runs** (2026-11-09, backlog B761's round 3: the run-as-bridge copy's `predatesUpdateSwitch` reads the settings file and nothing of the environment, so the claim that 0.2.3 ignores `BRIDGE_UPDATE_CHECK_ENABLED` took 0.2.3 itself, its settings check run with the variable off and with a garbage value, beside a variable it binds as the control). **Don't take a stand-in's green for a claim about what it does not model.**
 - **Commit BEFORE the negative control.** `git checkout --` and
   `git restore --source=HEAD` revert the whole file, so a control run against an
   uncommitted round silently takes the round with it. This file already recorded
