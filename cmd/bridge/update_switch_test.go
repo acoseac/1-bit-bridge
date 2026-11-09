@@ -93,11 +93,17 @@ func newReleasesStandIn(t *testing.T) *releasesStandIn {
 	return s
 }
 
-// client is a releases client that asks s, on a transport of its own.
+// client is a releases client that asks s. It shares the default transport,
+// which every answer of s's allows, each carrying a body (B456's rule is for
+// an answer with none). Its timeout outlasts every wait here, so that a
+// request s holds ends within one only where its check is stopped.
 func (s *releasesStandIn) client(t *testing.T) *updater.Client {
 	t.Helper()
-	return updater.NewClient(updater.DefaultRepo, 30*time.Second).WithBaseURL(s.srv.URL)
+	return updater.NewClient(updater.DefaultRepo, 2*releasesWait).WithBaseURL(s.srv.URL)
 }
+
+// releasesWait bounds each wait for an event at the stand-in.
+const releasesWait = time.Minute
 
 // asCLIs points `bridge update`'s client at s for the test's length.
 func (s *releasesStandIn) asCLIs(t *testing.T) {
@@ -112,7 +118,7 @@ func (s *releasesStandIn) waitHeld(t *testing.T) releasesHeld {
 	select {
 	case h := <-s.held:
 		return h
-	case <-time.After(time.Minute):
+	case <-time.After(releasesWait):
 		t.Fatal("no request reached the releases API")
 		return releasesHeld{}
 	}
@@ -122,7 +128,7 @@ func (h releasesHeld) waitEnded(t *testing.T) {
 	t.Helper()
 	select {
 	case <-h.ended:
-	case <-time.After(time.Minute):
+	case <-time.After(releasesWait):
 		t.Fatal("the request held was never stopped: it stayed on the wire")
 	}
 }
@@ -157,7 +163,8 @@ func TestBridgeUpdateRefusesItsCheckAndItsInstallWhileUpdateChecksAreOff(t *test
 	for _, c := range []struct {
 		name, tail, env, says string
 	}{
-		{name: "the file on, the variable off", tail: "update:\n  checkEnabled: true\n", env: "false", says: updateCheckVar},
+		{name: "the file on, the variable off", tail: "update:\n  checkEnabled: true\n", env: "false",
+			says: updateCheckVar + " in this environment says off"},
 		{name: "the file off", tail: "update:\n  checkEnabled: false\n", says: "update.checkEnabled is false in"},
 	} {
 		for _, args := range [][]string{{"--check"}, {"--yes"}} {
@@ -173,7 +180,9 @@ func TestBridgeUpdateRefusesItsCheckAndItsInstallWhileUpdateChecksAreOff(t *test
 				if code != 1 {
 					t.Errorf("bridge update %s with update checks off exited %d, want 1:\n%s", strings.Join(args, " "), code, out)
 				}
-				if !strings.Contains(out, "update checks are off") || !strings.Contains(out, c.says) ||
+				// The source is the one the refusal's first sentence names: the
+				// remedy after it names the variable whatever turned them off.
+				if !strings.Contains(out, "update checks are off ("+c.says) ||
 					!strings.Contains(out, "neither asks GitHub for a release nor installs one") {
 					t.Errorf("the refusal does not say what is off and why (%q):\n%s", c.says, out)
 				}
@@ -338,15 +347,19 @@ func TestServeStopsAnUpdateCheckUnderWayWhenChecksGoOff(t *testing.T) {
 	eventually(t, func() bool { return readUpdatesPanel(t, b).UpdateAvailable }, "the start's check, which the failed save left running, to answer")
 
 	// The Check now on a goroutine of its own, which hands its answer back
-	// rather than fail the test from there.
+	// rather than fail the test from there, on a client whose timeout
+	// outlasts the waits: a request the console's own gave up on would
+	// end the check held, as the switch must.
 	type answer struct {
 		code  int
 		short string
 		err   error
 	}
 	answered := make(chan answer, 1)
+	patient := *b.console
+	patient.Timeout = 2 * releasesWait
 	go func() {
-		resp, err := b.console.Post(b.adminBase+"/api/updates/check", "application/json", nil)
+		resp, err := patient.Post(b.adminBase+"/api/updates/check", "application/json", nil)
 		if err != nil {
 			answered <- answer{err: err}
 			return
@@ -367,7 +380,7 @@ func TestServeStopsAnUpdateCheckUnderWayWhenChecksGoOff(t *testing.T) {
 		if got.err != nil || got.code != http.StatusConflict || got.short != "update-checks-off" {
 			t.Errorf("the Check now the switch stopped answered %d %s (%v), want 409 update-checks-off", got.code, got.short, got.err)
 		}
-	case <-time.After(time.Minute):
+	case <-time.After(releasesWait):
 		t.Fatal("the Check now the switch stopped never answered")
 	}
 	if p := readUpdatesPanel(t, b); p.CheckEnabled || p.UpdateAvailable || p.LastError != "" {

@@ -123,10 +123,12 @@ func newReleaseStandIn(t *testing.T, tag string) *releaseStandIn {
 	return s
 }
 
-// client is an updater Client that asks s, on a transport of its own.
+// client is an updater Client that asks s, on a transport of its own. Its
+// timeout outlasts every wait here, so that a request s holds ends within
+// one only where its check is stopped.
 func (s *releaseStandIn) client(t *testing.T) *Client {
 	t.Helper()
-	c := NewClient("fake/repo", 30*time.Second).WithBaseURL(s.srv.URL)
+	c := NewClient("fake/repo", 2*testWait).WithBaseURL(s.srv.URL)
 	tr := &http.Transport{}
 	c.http.Transport = tr
 	c.download.Transport = tr
@@ -424,7 +426,7 @@ func TestUpdateChecksTurnedOffAndOnAgainQuickly(t *testing.T) {
 	if n := gh.requests.Load(); n != 1 {
 		t.Errorf("GitHub was asked %d time(s) across the switch, want only the stopped check's", n)
 	}
-	if st := u.cached(); !st.LastCheck.IsZero() || st.UpdateAvailable {
+	if st := u.cached(); !st.LastCheck.IsZero() || st.UpdateAvailable || st.LastError != "" {
 		t.Errorf("the stopped check was recorded: %+v", st)
 	}
 
