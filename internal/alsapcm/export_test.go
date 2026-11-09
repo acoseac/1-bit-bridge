@@ -41,6 +41,10 @@ func FakeEndpoint() Endpoint { return testEndpoint }
 // it a hang (-watchdog).
 func Watchdog() time.Duration { return *watchdog }
 
+// Ordered is how long a wait at an ordering a test forces waits: a few
+// seconds, at most the watchdog (B728 B9 round 16).
+func Ordered() time.Duration { return ordered() }
+
 // OpenSink opens a sink on the fake node, on the fake's clock: what the
 // player's backend takes as its Config.OpenSink.
 func (tk *FakeKernel) OpenSink(ctx context.Context, cfg SinkConfig) (*Sink, error) {
@@ -284,6 +288,17 @@ func (tk *FakeKernel) ParkStatusAfterWritten(frames uint64) (parked <-chan struc
 			k.statusGate, k.statusParked = gate, arrived
 		}})
 	})
+	var once sync.Once
+	return arrived, func() { once.Do(func() { close(gate) }) }
+}
+
+// ParkStatusAfterPlayed parks the first STATUS once the DAC has played frames
+// frames of its run (since the last PREPARE), before that STATUS reads the
+// pointers: a sink's measurement of a point the DAC's time has reached, held
+// (B728 B9 round 16).
+func (tk *FakeKernel) ParkStatusAfterPlayed(frames uint64) (parked <-chan struct{}, release func()) {
+	gate, arrived := make(chan struct{}), make(chan struct{})
+	tk.k.inspect(func(k *fakeKernel) { k.statusPlayed = &fakeStatusAt{frames: frames, gate: gate, parked: arrived} })
 	var once sync.Once
 	return arrived, func() { once.Do(func() { close(gate) }) }
 }

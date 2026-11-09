@@ -51,13 +51,19 @@ func (g *gate) letGo() { g.freed.Do(func() { close(g.out) }) }
 // answer, comes first, or nothing comes within the watchdog.
 func reachedGate(t *testing.T, g *gate, res <-chan playback.ChoiceResult, what string) {
 	t.Helper()
+	reachedGateWithin(t, alsapcm.Watchdog(), g, res, what)
+}
+
+// reachedGateWithin is reachedGate within bound (B728 B9 round 16).
+func reachedGateWithin(t *testing.T, bound time.Duration, g *gate, res <-chan playback.ChoiceResult, what string) {
+	t.Helper()
 	select {
 	case <-g.in:
 	case r := <-res:
 		t.Fatalf("the write ended (%s) before %s", r.Outcome, what)
-	case <-time.After(alsapcm.Watchdog()):
+	case <-time.After(bound):
 		alsapcm.LogGoroutines(t)
-		t.Fatalf("waited %v for %s", alsapcm.Watchdog(), what)
+		t.Fatalf("waited %v for %s", bound, what)
 	}
 }
 
@@ -228,7 +234,13 @@ func (w *writeSeams) awaits(o engine.OccurrenceID) int {
 // waitAwaited waits until steps of o's waited for a write n times.
 func (w *writeSeams) waitAwaited(t *testing.T, o engine.OccurrenceID, n int) {
 	t.Helper()
-	waitOn(t, fmt.Sprintf("a step of occurrence %d to wait for the write (%d)", o, n), w.ch, func() bool { return w.awaits(o) >= n })
+	w.waitAwaitedWithin(t, alsapcm.Watchdog(), o, n)
+}
+
+// waitAwaitedWithin is waitAwaited within bound (B728 B9 round 16).
+func (w *writeSeams) waitAwaitedWithin(t *testing.T, bound time.Duration, o engine.OccurrenceID, n int) {
+	t.Helper()
+	waitWithin(t, bound, fmt.Sprintf("a step of occurrence %d to wait for the write (%d)", o, n), w.ch, func() bool { return w.awaits(o) >= n })
 }
 
 // waitOnEither waits until cond holds, asked again whenever a or b changes.
@@ -994,6 +1006,52 @@ func TestAConvertedJoinWindowWaitsForAWriteThatChangesItsSuccessor(t *testing.T)
 	})
 }
 
+// producerHold holds a session's producer at its second write step, the
+// first its Start does not wait for (the first frames are Start's answer): a
+// step of the first occurrence's, before the producer decides what follows
+// it, held there until let go; and records every step the producer decides
+// (playback.Seams.ProducerStep, B728 B9 round 16).
+type producerHold struct {
+	mu      sync.Mutex
+	writes  int
+	steps   []string
+	changed chan struct{}
+	gate    *gate
+}
+
+func newProducerHold(t *testing.T) *producerHold {
+	return &producerHold{changed: make(chan struct{}), gate: newGate(t)}
+}
+
+// note is the seam.
+func (p *producerHold) note(_ engine.SessionID, step string, o engine.OccurrenceID) {
+	p.mu.Lock()
+	p.steps = append(p.steps, fmt.Sprintf("%s %d", step, o))
+	if step == "write" {
+		p.writes++
+	}
+	hold := step == "write" && p.writes == 2
+	close(p.changed)
+	p.changed = make(chan struct{})
+	p.mu.Unlock()
+	if hold {
+		p.gate.pass()
+	}
+}
+
+func (p *producerHold) ch() <-chan struct{} {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.changed
+}
+
+// has reports whether the producer decided step for o.
+func (p *producerHold) has(step string, o engine.OccurrenceID) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return slices.Contains(p.steps, fmt.Sprintf("%s %d", step, o))
+}
+
 // TestAGaplessSuccessorWaitsForAWriteNoLongerThanTheSinksLookahead (B728 B9
 // round 2): a successor on its predecessor's transport (PCM at 176.4 kHz / 24
 // bits, then DSD64 converted to it) waits out of the sink for a write pending
@@ -1002,26 +1060,64 @@ func TestAConvertedJoinWindowWaitsForAWriteThatChangesItsSuccessor(t *testing.T)
 // holds, an honest gap, rather than run dry beside a producer that waits, and
 // the successor waits for the write before a sink of its own opens; the
 // write, which interrupts nothing, lands and hands it off again, nothing
-// faulting.
+// faulting. Round 16 forces its two orderings, each wait at them within a few
+// seconds: the write pending before the producer decides what follows a (the
+// producer held in a until then; unheld, it could hand b into a's sink first,
+// and the wait for b's wait hung, CI on round 15's head); and the DAC's time
+// at the floor before the sink publishes the measurement that shows it (that
+// STATUS held, Codex's review of round 16's brief): the floor is the sink's
+// measurement's, which the producer reads at the reporter's steps, and never
+// the DAC's time.
 func TestAGaplessSuccessorWaitsForAWriteNoLongerThanTheSinksLookahead(t *testing.T) {
-	w := newWriteSeams()
-	d := newConvRig(t, func(o *rigOptions) { o.seams = w.seams(nil) })
-	d.files.add("a", wav(176400, 24, pattern(1, 176400/2, 24)))
+	const rate = 176400
+	const aFrames, floor = rate / 2, rate / 10 // a's 500 ms, the sink's floor's 100 ms
+	w, p := newWriteSeams(), newProducerHold(t)
+	d := newConvRig(t, func(o *rigOptions) {
+		o.seams = w.seams(nil)
+		o.seams.ProducerStep = p.note
+	})
+	d.files.add("a", wav(rate, 24, pattern(1, aFrames, 24)))
 	d.files.add("b", track(playbacktest.DSD64, 0.25, noise(2)))
 	ids := d.insert("a", "b")
 	d.play()
+	awaitOrdered(t, p.gate.in, "the producer, held in a before it decides what follows a")
 	ob := d.preparedOcc(ids[1])
 	stop := w.holdPending(t)
 	res := d.choose(choiceReq(t, d, dsdstate.ModeOff, 0))
-	reachedGate(t, stop, res, "the write's pending window")
-	w.waitAwaited(t, ob, 1)
-	// 400 ms of a's 500 played: the sink's lookahead at its floor, which the
-	// reporter's next measurement reads. A producer that waited past it would
-	// let the sink run dry; this one drains it for b's own transport.
-	d.k.Await(t, "the writer to fill the hardware buffer and wait on the DAC", runningAndWaiting)
-	d.k.Play(t, 400*time.Millisecond)
-	d.tick()
-	d.k.Await(t, "the sink to drain once its lookahead fell to its floor, b still waiting for the write", func(v alsapcm.KernelView) bool { return v.Drains >= 1 })
+	reachedGateWithin(t, alsapcm.Ordered(), stop, res, "the write's pending window")
+	// Let go with the write pending, the producer writes the rest of a into
+	// the sink and holds b out of it, the sink's lookahead above its floor.
+	p.gate.letGo()
+	w.waitAwaitedWithin(t, alsapcm.Ordered(), ob, 1)
+	awaitOrdered(t, d.k.When(runningAndWaiting), "the writer to fill the hardware buffer and wait on the DAC")
+	// 400 ms of a's 500 played: the DAC at the floor, and the sink's STATUS
+	// there, the measurement that shows it, held. a's last frames reached the
+	// kernel at 300 ms (a buffer of 200 ms), and the writer, with nothing to
+	// write, has measured each 50 ms period since: the producer, woken by the
+	// reporter, reads the measurement before, 350 ms, and holds b out of the
+	// sink still.
+	statusing, status := d.k.ParkStatusAfterPlayed(aFrames - floor)
+	defer status()
+	d.k.Grant(400 * time.Millisecond)
+	awaitOrdered(t, statusing, "the sink's STATUS once the DAC played 400 ms of a")
+	if v := d.k.View(); v.Consumed != aFrames-floor || v.Appl != aFrames {
+		t.Fatalf("the DAC had played %d of the %d frames written at the STATUS held; want %d of a's %d, the sink at its floor (the test's premise)", v.Consumed, v.Appl, aFrames-floor, aFrames)
+	}
+	n := w.awaits(ob)
+	d.tickWithin(alsapcm.Ordered())
+	w.waitAwaitedWithin(t, alsapcm.Ordered(), ob, n+1)
+	if p.has("transition", ob) || d.k.View().Drains != 0 {
+		t.Fatal("the producer let b's wait for the write go before the sink's measurement showed its floor")
+	}
+	// The measurement established (the writer back on the DAC once it has),
+	// the reporter's next step has the producer read it: at the floor the sink
+	// drains for b's own transport, an honest gap, b still waiting for the
+	// write. A producer that waited past it would let the sink run dry.
+	status()
+	awaitOrdered(t, d.k.When(runningAndWaiting), "the writer back on the DAC, the measurement at a's last frames established")
+	d.tickWithin(alsapcm.Ordered())
+	waitOrdered(t, "the producer's transition for b at the sink's measured floor", p.ch, func() bool { return p.has("transition", ob) })
+	awaitOrdered(t, d.k.When(func(v alsapcm.KernelView) bool { return v.Drains >= 1 }), "the sink to drain at its floor, b still waiting for the write")
 	d.k.Free()
 	stop.letGo()
 	if got := answer(t, res); got.Outcome != playback.ChoiceWritten {

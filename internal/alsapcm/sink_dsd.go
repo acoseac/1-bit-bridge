@@ -183,6 +183,13 @@ type nativeSeams struct {
 	// takes that answer and waits for the end within its bound (record,
 	// B728 B9 round 11).
 	ending func()
+	// watching and watched, nil but in a test, run on the goroutine that
+	// revokes the sink once its life has ended (lifeEnded's): watching as it
+	// begins, before it waits for that end or the writer's, and watched as it
+	// returns, whichever it took. A test holds it before its wait, as a
+	// scheduler can leave it, while the writer ends the sink on its own, and
+	// knows when it has gone (B728 B9 round 16).
+	watching, watched func()
 }
 
 // awaitArm is an arm of a request's wait (await), for a test that fixes
@@ -330,7 +337,19 @@ func openDSDSink(ctx context.Context, c DSDConfig, h nativeSeams) (*DSDSink, err
 	// from before the release begins (await, B728 B9 round 9).
 	s := &DSDSink{life: ctx, cfg: c, seams: h, devCfg: dc, params: p, dev: d, word: w * 8, ring: newRing(int64(c.RingBytes/(2*w)), 2*w, int64(p.BufferFrames)), changed: make(chan struct{}), kick: make(chan struct{}, 1), done: make(chan struct{}), releaseExpired: make(chan struct{}), scratch: make([]byte, scratchBytes), dopScratch: make([]byte, packedBytes), dopPhase: 0x05}
 	go s.loopNative()
+	// The sink's revocation once its life ends. Where that end reaches the
+	// writer first (a write or a Locate it cancels, a read of the life that
+	// sees it), the writer begins the Immediate release itself and can end
+	// the sink before this goroutine has looked: with both ready the select
+	// takes either, and a Revoke of a sink done records nothing and closes
+	// nothing (B728 B9 round 16).
 	go func() {
+		if h.watched != nil {
+			defer h.watched()
+		}
+		if h.watching != nil {
+			h.watching()
+		}
 		select {
 		case <-ctx.Done():
 			if h.lifeEnded != nil {

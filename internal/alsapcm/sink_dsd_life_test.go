@@ -40,6 +40,97 @@ func lifeSinkOn(t *testing.T, k *fakeKernel, sy sys, c DSDConfig, life context.C
 	return s, in, revoke
 }
 
+// lifeOrder is an order in which the two ends of a native sink whose writer
+// ends it on its own once its life has ended meet (B728 B9 round 16): the
+// writer's own release, and its watcher, the goroutine that revokes the sink
+// once its life ends (openDSDSink), whose select takes the life's end or the
+// writer's. Watcher first, the writer is held at its end (ending) until the
+// watcher has taken the life's end, held before its revocation (lifeEnded):
+// the writer's release goes on without it, as B765 pinned. Writer first, the
+// watcher is held before its wait (watching) until the writer has ended the
+// sink, then let go to find both ends ready, as one a scheduler ran late
+// finds them, and its select takes either: a test that waited for its
+// revocation then waited for good (rounds 14 and 15's CI hang, the watcher
+// gone by the writer's end).
+type lifeOrder struct {
+	name         string
+	watcherFirst bool
+}
+
+var lifeOrders = []lifeOrder{{"the watcher first", true}, {"the writer first", false}}
+
+// lifeHold is a lifeOrder's hold on a sink lifeSinkOn opens (hook): the
+// writer at its end or the watcher before its wait, held once there until
+// letGo; and gone, closed as the watcher returns.
+type lifeHold struct {
+	lifeOrder
+	held, gate, gone chan struct{}
+	once             sync.Once
+}
+
+func newLifeHold(t *testing.T, o lifeOrder) *lifeHold {
+	h := &lifeHold{lifeOrder: o, held: make(chan struct{}), gate: make(chan struct{}), gone: make(chan struct{})}
+	t.Cleanup(h.letGo)
+	return h
+}
+
+func (h *lifeHold) hook(s *nativeSeams) {
+	hold := func() { close(h.held); <-h.gate }
+	if h.watcherFirst {
+		s.ending = hold
+	} else {
+		s.watching = hold
+	}
+	s.watched = func() { close(h.gone) }
+}
+
+func (h *lifeHold) letGo() { h.once.Do(func() { close(h.gate) }) }
+
+// ready is called before the life ends: writer first, it waits for the
+// watcher to be held before its wait, so the life's end reaches the writer
+// alone.
+func (h *lifeHold) ready(t *testing.T) {
+	t.Helper()
+	if !h.watcherFirst {
+		awaitOrdered(t, h.held, "the watcher, held before its wait")
+	}
+}
+
+// ended takes the sink through the rest of h's order once its life has ended
+// (or ends in the writer, as it is called): the answer to the command that
+// end reached, which answered judges; the writer's own release, after which
+// judge judges the sink; and the watcher's return, after which judge judges
+// it again, the watcher's revocation of the sink done, where it made one,
+// having recorded nothing.
+func (h *lifeHold) ended(t *testing.T, s *DSDSink, revoking <-chan struct{}, revoke func(), answer <-chan error, answered func(error), judge func()) {
+	t.Helper()
+	released := "the writer's own release, its watcher not yet looking"
+	if h.watcherFirst {
+		awaitOrdered(t, h.held, "the writer at its end, the sink not yet done")
+		awaitOrdered(t, revoking, "the watcher taking the life's end, its revocation held")
+		h.letGo()
+		released = "the writer's own release, its watcher still held"
+	}
+	answered(receiveOrdered(t, answer, "the answer of the command the life's end reached"))
+	awaitOrdered(t, s.Done(), released)
+	judge()
+	// Writer first, the gate open before the watcher is let go: whichever end
+	// its select takes, it does not wait.
+	revoke()
+	h.letGo()
+	awaitOrdered(t, h.gone, "the watcher's return")
+	if !h.watcherFirst {
+		took := "the writer's end"
+		select {
+		case <-revoking:
+			took = "the life's end, and revoked the sink done"
+		default:
+		}
+		t.Logf("the watcher, let go once the sink was done, took %s", took)
+	}
+	judge()
+}
+
 // statusFault is the fake's node with its next STATUS, once armed, held in
 // the call until letGo is closed, then answered err without reaching the
 // fake, as a device that fails the STATUS a wait of the writer's ended in
@@ -285,26 +376,34 @@ func TestNativeResumeFencedByItsEndedLifeIsNoFailure(t *testing.T) {
 // ErrReleaseUnconfirmed; the writer begins the Immediate release before it
 // classifies it, and records no fault (B765 round 2: it recorded that
 // cancellation as the sink's fault, which the harness strips: a Stop there
-// exited 0 all the same).
+// exited 0 all the same). The writer ends the sink on its own here, so the
+// test runs in both orders its watcher can meet that end in (lifeOrders, B728
+// B9 round 16): until then it waited for the watcher's revocation, which a
+// watcher that found the sink done never made, and hung (CI, rounds 14 and
+// 15).
 func TestNativePrefillCancelledByItsEndedLifeIsNoFailure(t *testing.T) {
-	k := nativeKernel(t)
-	c := nativeConfig()
-	c.Prefill = 100 * time.Millisecond // past the 40 ms buffer, so it waits for room
-	life, end := context.WithCancel(context.Background())
-	defer end()
-	s, revoking, revoke := lifeSink(t, k, c, life)
-	answer := make(chan error, 1)
-	go func() { answer <- s.Activate(context.Background(), 1) }()
-	await(t, k.when(func(k *fakeKernel) bool { return k.state == stateRunning && starved(k) }), "the prefill waiting for room")
-	end()
-	await(t, revoking, "the life's end, its revocation held")
-	if e := receive(t, answer, "the activation's answer"); !errors.Is(e, context.Canceled) || errors.Is(e, ErrReleaseUnconfirmed) {
-		t.Errorf("the prefill's activation answered %v; want the life's plain cancellation", e)
+	for _, order := range lifeOrders {
+		t.Run(order.name, func(t *testing.T) {
+			k := nativeKernel(t)
+			c := nativeConfig()
+			c.Prefill = 100 * time.Millisecond // past the 40 ms buffer, so it waits for room
+			life, end := context.WithCancel(context.Background())
+			defer end()
+			h := newLifeHold(t, order)
+			s, revoking, revoke := lifeSinkOn(t, k, k, c, life, h.hook)
+			answer := make(chan error, 1)
+			go func() { answer <- s.Activate(context.Background(), 1) }()
+			awaitOrdered(t, k.when(func(k *fakeKernel) bool { return k.state == stateRunning && starved(k) }), "the prefill waiting for room")
+			h.ready(t)
+			end()
+			h.ended(t, s, revoking, revoke, answer, func(e error) {
+				if !errors.Is(e, context.Canceled) || errors.Is(e, ErrReleaseUnconfirmed) {
+					t.Errorf("the prefill's activation answered %v; want the life's plain cancellation", e)
+				}
+			}, func() { noFailure(t, s, "the prefill the ended life cancelled") })
+			k.checkClosedEach(t)
+		})
 	}
-	await(t, s.Done(), "the writer's own release, its watcher still held")
-	noFailure(t, s, "the prefill the ended life cancelled")
-	revoke()
-	k.checkClosedEach(t)
 }
 
 // TestNativeReopenWhoseLifeEndsInLocateReleases: a resume after the pause's
@@ -314,40 +413,45 @@ func TestNativePrefillCancelledByItsEndedLifeIsNoFailure(t *testing.T) {
 // takes the life's end for the revocation it is: it begins the Immediate
 // release itself and the sink ends, no fault recorded, without its watcher
 // (B765 round 2: the reopen's refusal was held, recording nothing, and the
-// sink waited, paused, for the watcher).
+// sink waited, paused, for the watcher). In both orders its watcher can meet
+// that end in (lifeOrders, B728 B9 round 16).
 func TestNativeReopenWhoseLifeEndsInLocateReleases(t *testing.T) {
-	k := nativeKernel(t)
-	c := nativeConfig()
-	locating := make(chan struct{})
-	c.Locate = func(ctx context.Context) (Endpoint, error) {
-		close(locating)
-		<-ctx.Done()
-		return Endpoint{}, ctx.Err()
+	for _, order := range lifeOrders {
+		t.Run(order.name, func(t *testing.T) {
+			k := nativeKernel(t)
+			c := nativeConfig()
+			locating := make(chan struct{})
+			c.Locate = func(ctx context.Context) (Endpoint, error) {
+				close(locating)
+				<-ctx.Done()
+				return Endpoint{}, ctx.Err()
+			}
+			life, end := context.WithCancel(context.Background())
+			defer end()
+			h := newLifeHold(t, order)
+			s, revoking, revoke := lifeSinkOn(t, k, k, c, life, h.hook)
+			if e := s.Activate(context.Background(), 1); e != nil {
+				t.Fatal(e)
+			}
+			if e := s.Pause(context.Background()); e != nil {
+				t.Fatal(e)
+			}
+			k.grant(31 * time.Second)
+			nativeWait(t, s, "the pause's release", func() bool { return s.released })
+			k.revoke()
+			answer := make(chan error, 1)
+			go func() { answer <- s.Resume(context.Background()) }()
+			awaitOrdered(t, locating, "the reopen locating its endpoint")
+			h.ready(t)
+			end()
+			h.ended(t, s, revoking, revoke, answer, func(e error) {
+				if !errors.Is(e, context.Canceled) || errors.Is(e, ErrReleaseUnconfirmed) {
+					t.Errorf("the reopen's resume answered %v; want the life's plain cancellation", e)
+				}
+			}, func() { noFailure(t, s, "the reopen the ended life cancelled") })
+			k.checkClosedEach(t)
+		})
 	}
-	life, end := context.WithCancel(context.Background())
-	defer end()
-	s, revoking, revoke := lifeSink(t, k, c, life)
-	if e := s.Activate(context.Background(), 1); e != nil {
-		t.Fatal(e)
-	}
-	if e := s.Pause(context.Background()); e != nil {
-		t.Fatal(e)
-	}
-	k.grant(31 * time.Second)
-	nativeWait(t, s, "the pause's release", func() bool { return s.released })
-	k.revoke()
-	answer := make(chan error, 1)
-	go func() { answer <- s.Resume(context.Background()) }()
-	await(t, locating, "the reopen locating its endpoint")
-	end()
-	await(t, revoking, "the life's end, its revocation held")
-	if e := receive(t, answer, "the resume's answer"); !errors.Is(e, context.Canceled) || errors.Is(e, ErrReleaseUnconfirmed) {
-		t.Errorf("the reopen's resume answered %v; want the life's plain cancellation", e)
-	}
-	await(t, s.Done(), "the writer's own release, its watcher still held")
-	noFailure(t, s, "the reopen the ended life cancelled")
-	revoke()
-	k.checkClosedEach(t)
 }
 
 // TestNativeActivationErrorAfterItsLifeEndsIsTheSinksFault: the life ends
@@ -403,39 +507,48 @@ func TestNativeActivationErrorAfterItsLifeEndsIsTheSinksFault(t *testing.T) {
 // watcher held), and its STATUS then fails with EIO, the device's own
 // failure: the sink's fault, recorded and answered, though the ended life
 // began the release (B765 round 3, Codex's example: the writer recorded no
-// error once the life had ended).
+// error once the life had ended). The writer ends the sink on its own, so in
+// both orders its watcher can meet that end in (lifeOrders, B728 B9 round
+// 16).
 func TestNativeResumeErrorAfterItsLifeEndsIsTheSinksFault(t *testing.T) {
 	const eio errno = 5 // EIO, asm-generic's: an errno this package does not tell apart
-	k := nativeKernel(t)
-	ctx, end := context.WithCancel(context.Background())
-	defer end()
-	life := &endingLife{Context: ctx, end: end}
-	s, revoking, revoke := lifeSink(t, k, nativeConfig(), life)
-	if e := s.Activate(context.Background(), 1); e != nil {
-		t.Fatal(e)
+	for _, order := range lifeOrders {
+		t.Run(order.name, func(t *testing.T) {
+			k := nativeKernel(t)
+			ctx, end := context.WithCancel(context.Background())
+			defer end()
+			life := &endingLife{Context: ctx, end: end}
+			h := newLifeHold(t, order)
+			s, revoking, revoke := lifeSinkOn(t, k, k, nativeConfig(), life, h.hook)
+			if e := s.Activate(context.Background(), 1); e != nil {
+				t.Fatal(e)
+			}
+			if e := s.Pause(context.Background()); e != nil {
+				t.Fatal(e)
+			}
+			// The pause's own STATUS calls came before it was applied: the next
+			// is the resume's, after its fence, the writer's next read of the
+			// life, which ends it.
+			k.inspect(func(k *fakeKernel) { k.fail[ioctlStatus] = eio })
+			h.ready(t)
+			life.armed.Store(true)
+			answer := make(chan error, 1)
+			go func() { answer <- s.Resume(context.Background()) }()
+			h.ended(t, s, revoking, revoke, answer, func(e error) {
+				if !errors.Is(e, eio) {
+					t.Errorf("the resume answered %v; want its STATUS's EIO", e)
+				}
+			}, func() {
+				if e := s.Result(); !errors.Is(e, eio) {
+					t.Errorf("the sink's outcome is %v; want the STATUS's EIO, its fault", e)
+				}
+				if e := s.CleanupResult(); e != nil {
+					t.Errorf("the release's cleanup failed: %v", e)
+				}
+			})
+			k.checkClosedEach(t)
+		})
 	}
-	if e := s.Pause(context.Background()); e != nil {
-		t.Fatal(e)
-	}
-	// The pause's own STATUS calls came before it was applied: the next is
-	// the resume's, after its fence, the writer's next read of the life.
-	k.inspect(func(k *fakeKernel) { k.fail[ioctlStatus] = eio })
-	life.armed.Store(true)
-	answer := make(chan error, 1)
-	go func() { answer <- s.Resume(context.Background()) }()
-	await(t, revoking, "the life ended right after the resume's fence read it, its revocation held")
-	if e := receive(t, answer, "the resume's answer"); !errors.Is(e, eio) {
-		t.Errorf("the resume answered %v; want its STATUS's EIO", e)
-	}
-	await(t, s.Done(), "the writer's own release, its watcher still held")
-	if e := s.Result(); !errors.Is(e, eio) {
-		t.Errorf("the sink's outcome is %v; want the STATUS's EIO, its fault", e)
-	}
-	if e := s.CleanupResult(); e != nil {
-		t.Errorf("the release's cleanup failed: %v", e)
-	}
-	revoke()
-	k.checkClosedEach(t)
 }
 
 // TestNativeResumeTheEndedLifeNeverRanAnswersItsCancellation: a resume whose

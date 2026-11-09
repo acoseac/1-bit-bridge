@@ -38,7 +38,21 @@ var bg = context.Background()
 // closes, under the watchdog.
 func waitOn(t *testing.T, what string, changed func() <-chan struct{}, cond func() bool) {
 	t.Helper()
-	timer := time.NewTimer(alsapcm.Watchdog())
+	waitWithin(t, alsapcm.Watchdog(), what, changed, cond)
+}
+
+// waitOrdered is waitOn at an ordering the test forces: within
+// alsapcm.Ordered, a few seconds, failing by its name and the goroutines,
+// never at the watchdog (B728 B9 round 16).
+func waitOrdered(t *testing.T, what string, changed func() <-chan struct{}, cond func() bool) {
+	t.Helper()
+	waitWithin(t, alsapcm.Ordered(), what, changed, cond)
+}
+
+// waitWithin is waitOn within bound.
+func waitWithin(t *testing.T, bound time.Duration, what string, changed func() <-chan struct{}, cond func() bool) {
+	t.Helper()
+	timer := time.NewTimer(bound)
 	defer timer.Stop()
 	for {
 		ch := changed()
@@ -49,8 +63,22 @@ func waitOn(t *testing.T, what string, changed func() <-chan struct{}, cond func
 		case <-ch:
 		case <-timer.C:
 			alsapcm.LogGoroutines(t)
-			t.Fatalf("waited %v for %s", alsapcm.Watchdog(), what)
+			t.Fatalf("waited %v for %s", bound, what)
 		}
+	}
+}
+
+// awaitOrdered waits for ch at an ordering the test forces, as waitOrdered
+// does (B728 B9 round 16).
+func awaitOrdered(t *testing.T, ch <-chan struct{}, what string) {
+	t.Helper()
+	timer := time.NewTimer(alsapcm.Ordered())
+	defer timer.Stop()
+	select {
+	case <-ch:
+	case <-timer.C:
+		alsapcm.LogGoroutines(t)
+		t.Fatalf("waited %v for %s", alsapcm.Ordered(), what)
 	}
 }
 
@@ -1172,12 +1200,18 @@ func (r *rig) waitCall(what string, cond func(call) bool) call {
 // asked (the barrier).
 func (r *rig) tick() {
 	r.t.Helper()
+	r.tickWithin(alsapcm.Watchdog())
+}
+
+// tickWithin is tick, each send within bound (B728 B9 round 16).
+func (r *rig) tickWithin(bound time.Duration) {
+	r.t.Helper()
 	for range 2 {
 		select {
 		case r.ticks <- time.Time{}:
-		case <-time.After(alsapcm.Watchdog()):
+		case <-time.After(bound):
 			alsapcm.LogGoroutines(r.t)
-			r.t.Fatalf("no reporter took a tick within %v", alsapcm.Watchdog())
+			r.t.Fatalf("no reporter took a tick within %v", bound)
 		}
 	}
 }
