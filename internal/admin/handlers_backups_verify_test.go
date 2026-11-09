@@ -372,24 +372,48 @@ func pastStamp(t *testing.T, s *Server, dataDir string) backupCard {
 // its modification time moves, and a verdict written inside a snapshot by
 // another caller (the ticker, bridge backup --verify, another process)
 // moves nothing of the folder's own, so without the stamp the card kept
-// the PENDING it had cached until its TTL. Red with the stamp removed.
+// the PENDING it had cached until its TTL. A verdict that passes is stamped
+// when its veto is made, as well as at the write's end; one that fails,
+// which takes no veto, is stamped at the end alone, which it pins: red with
+// that stamp removed.
 func TestAVerdictWrittenByAnotherCallerShowsOnTheJobsCardAtTheNextPoll(t *testing.T) {
-	s, _, _ := newTestServer(t)
-	dataDir := t.TempDir()
-	src := liveStore(t, dataDir)
-	s.deps.BackupSources = src
-	dir, err := backup.Snapshot(t.Context(), src)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if card := pastStamp(t, s, dataDir); !strings.HasPrefix(card.newestDatabase, string(backup.StatePending)) {
-		t.Fatalf("the card caches %q, want the snapshot's PENDING", card.newestDatabase)
-	}
-	if _, err := backup.VerifySnapshot(t.Context(), dir, backup.VerifyOptions{}); err != nil {
-		t.Fatal(err)
-	}
-	if card := s.getBackupCard(t.Context()); card.newestDatabase != string(backup.StateVerified) || card.lastVerifiedAt == nil {
-		t.Errorf("the next poll after another caller's verdict reads %q (last verified %v), want VERIFIED", card.newestDatabase, card.lastVerifiedAt)
+	for _, tc := range []struct {
+		name string
+		want backup.State
+	}{
+		{"a verdict that passes", backup.StateVerified},
+		{"a verdict that fails", backup.StateFailed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, _, _ := newTestServer(t)
+			dataDir := t.TempDir()
+			src := liveStore(t, dataDir)
+			s.deps.BackupSources = src
+			dir, err := backup.Snapshot(t.Context(), src)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.want == backup.StateFailed {
+				p := filepath.Join(dir, backup.ManifestDBFileName)
+				data, err := os.ReadFile(p)
+				if err != nil {
+					t.Fatal(err)
+				}
+				data[len(data)-1] ^= 0xFF
+				if err := os.WriteFile(p, data, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if card := pastStamp(t, s, dataDir); !strings.HasPrefix(card.newestDatabase, string(backup.StatePending)) {
+				t.Fatalf("the card caches %q, want the snapshot's PENDING", card.newestDatabase)
+			}
+			if _, err := backup.VerifySnapshot(t.Context(), dir, backup.VerifyOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			if card := s.getBackupCard(t.Context()); !strings.HasPrefix(card.newestDatabase, string(tc.want)) {
+				t.Errorf("the next poll after another caller's verdict reads %q, want %s", card.newestDatabase, tc.want)
+			}
+		})
 	}
 }
 

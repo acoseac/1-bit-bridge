@@ -14,6 +14,7 @@ import (
 	"slices"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -971,12 +972,16 @@ func TestTwoVerificationsOfOneSnapshotWriteOneAtATime(t *testing.T) {
 				t.Fatal(err)
 			}
 			parked, release := make(chan struct{}), make(chan struct{})
-			var first sync.Once
+			// The first to end its check parks; any other passes at once, as a
+			// sync.Once would not let it (a second Do waits for the first's
+			// function), so that a second verification the slot and the lock
+			// do not hold back ends while the first is parked, as it would.
+			var first atomic.Bool
 			t.Cleanup(backup.SetAfterCheckForTest(func(string) {
-				first.Do(func() {
+				if first.CompareAndSwap(false, true) {
 					close(parked)
 					<-release
-				})
+				}
 			}))
 			slotWait, lockWait := make(chan struct{}, 1), make(chan struct{}, 1)
 			signal := func(ch chan struct{}) func() {
