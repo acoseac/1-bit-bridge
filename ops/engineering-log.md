@@ -89132,3 +89132,193 @@ LockFileEx exclude it as another process's open would), but the restart
 loop's boots are processes of their own, killed; and no case runs on a
 network mount, where a lock is a POSIX record lock, which this process's
 own records of what it holds stand in for.
+
+## 2026-11-09 — B653 PR 1 round 3: a check given up holds the folder until it ends, a recheck sets its VERIFIED aside first, no VERIFIED survives a failed write
+
+The third round of backlog B653's first PR, on `feat/b653-snapshot-verify`
+(PR #1444) from round 2's tip with its rules applied (49c9e873); worker b653
+on legion0 (Ubuntu 26.04, linux/amd64, go1.27.3, `GOTOOLCHAIN=local`,
+`GOPROXY=off`). It answers Codex's four findings and the Claude API's three
+on round 2, and both reviews of the round's brief, taken together as one
+binding set. Commits: the code and its tests c5bcaea1, the page e6d8547d,
+the pins the controls asked for 71b0ccae and 728969a3, and this record. The
+rules go through `rules-b653-r3.patch`: cli-serve.md's three B653 lines and
+their verbatim copies in History-rules-cli-serve.md, each changed alike, and
+a paragraph of the third round's there.
+
+### The findings, as built
+
+- **A check given up keeps its holds until it ends** (Codex P1; the brief
+  reviews on delivery, exclusivity and fail-fast). The worker answers its
+  caller first, then lets go of what it holds, each once (`held.release`):
+  the folder's lock only once the check's goroutine has ended
+  (`runLowPriority` answers a channel that closes then), then this process's
+  slot, then the capture's ownership. A check given up records the
+  `INCOMPLETE` it was given up with, runs no prune (the own prune is skipped,
+  not deferred: nothing would hold it once the caller has gone), drops what
+  the check answers later, and answers `ErrCheckGivenUp`, wrapping the stop's
+  or the deadline's error. While it runs the folder is marked (`stuck.go`): a
+  wait for the slot, the token or the kernel's lock answers
+  `ErrCheckStillRunning` at once, a wait for the slot that began before the
+  give-up included (the mark closes a notice the waiters select on), in this
+  process by the mark and in another by a marker beside the lock
+  (`.check-still-running`, written on a goroutine of its own, read only while
+  the lock is held, asked once a second during a wait, and removed by the
+  next holder of the lock); a prune behind it is skipped for it, and both
+  doctors' `backup-check` line names it. A shutdown does not wait: the
+  verification has answered already, and the process's end ends the check
+  and lets the kernel's locks go. A panic in the check is recovered into
+  `INCOMPLETE` (`aborted`), one in the worker's own steps answers an error,
+  and either lets go of all the same. What stays open is backlog B653's.
+- **No `VERIFIED` survives a failed write** (the Claude API's Medium; Codex P1
+  on mixed verdicts; the brief reviews' durable invalidation). Before a check
+  of a snapshot whose record holds a `VERIFIED`, its veto is put in place and
+  its folder synced (`setAside`: in the bundle, or beside it where that cannot
+  be had); where neither is durable the verification checks nothing and
+  writes nothing (`ErrRecheckRefused`), removing a veto it made, so the
+  record reads as it did. A write of a record that holds or replaces a
+  `VERIFIED` needs the veto or writes nothing; `ErrRecordKept` is gone. The
+  veto goes only once the rename and its folder's sync have answered. The
+  record names its folder (`snapshot`) and a reader reads one of another
+  folder as `UNVERIFIED` (`other-snapshot`); a record has no generation of its
+  own, since a crash that brings an old one back finds the durable veto beside
+  it. Mixed verdicts take the same path: refused where no veto can be had,
+  recorded behind one where it can. The pruner, the startup rule and the
+  doctor all read through `readVerdict`, so a record behind a veto, of another
+  folder, missing or unreadable is never the recovery point; the console's
+  cache moves with the folder's stamp, which the veto's making and its
+  removal both move.
+- **What the check found, apart from what the record reads** (Codex P1's
+  second half). `bridge backup --verify` and the ticker say, where a verdict
+  was not recorded, what the check found and, apart, what every reader reads
+  of the record; of a refused recheck, that nothing was checked, and the
+  record an earlier check left; of a write not known durable, that it was
+  written.
+- **The ticker's reads before a capture are bounded** (Codex P2): its startup
+  listing (`ReadStatus`), the lock's probe (`ProbeBackupsLock`, whose open is
+  a seam now) and the stuck check's read each run on a goroutine of its own
+  (`readBounded`), waited for until they answer or `StopWriteBound` past the
+  stop. The ticker also takes no snapshot while a check that did not end
+  holds the folder, since its verification would be refused and nothing
+  pruned.
+- **Public text names the open weakness by its id alone** (Codex P2):
+  verify_record.go's header and the veto test were rewritten, and the code no
+  longer has the case they described.
+- **The startup check in place decides on what it found** (the Claude API's
+  Low): `res.Verify.Found`, whether or not its record could be written.
+- **The doctor's hints are commands as worded** (the Claude API's Low; the
+  brief review's placeholder): `bridge backup --config <bridge.yaml> --verify
+  <snapshot-dir> [--full]`, and the two that advise a snapshot, each saying
+  `<bridge.yaml>` is the config the doctor read; the test fills each
+  placeholder as one argument, in an install whose folder's name has spaces
+  and an apostrophe, and adds nothing.
+
+### The reds at the round before
+
+On a copy of 49c9e873 (`git archive`) with this round's new and changed
+tests in it, and a scratch shim, never committed, giving it the names and
+none of the behaviour: the three new errors, the two new reasons,
+`StuckCheck` and a `StuckCheckOf` that finds none, the marker's name, and the
+two new seams as no-ops; `doctor.BackupChecks` called with its five
+arguments. Predictions written first; every result was as predicted:
+
+- internal/backup: `TestAnAbandonedCheckKeepsItsHoldsUntilItsCheckerEnds`
+  (`the verification's own prune ran beside the check it gave up:
+  {Deleted:1 …}`, `a verification in another backups folder beside the check
+  that runs on answered <nil>`, no marker); `TestAVerificationWaitingItsTurnHearsOfACheckGivenUp`;
+  `TestAPanicInAVerificationLetsGoOfWhatItHolds`, each case alone, by a
+  crash of the test binary (`panic: injected`);
+  `TestAVerificationPastItsDeadlineReturnsWithItsCallerStillWaiting` on its
+  error alone; `TestARecheckWithNoDurableVetoIsRefusedBeforeItsCheck` in all
+  four cases (the round before checked, and over mixed verdicts answered
+  `the verdict was not written: put its veto in place` with the database
+  still read `VERIFIED`); and `TestARecordCopiedIntoAnotherFolderReadsUnverified`
+  (`the copy: database VERIFIED`).
+- cmd/bridge: `TestAFreshProcessReadsNoVerifiedAVerificationCouldNotRecord`
+  in all five cases, its killed recheck with every reader (`the pruner reads
+  VERIFIED/VERIFIED after a check whose record was not written`, the console's
+  newest verified the damaged one, the doctor's newest line) and the prune,
+  which removed the older verified snapshot; the four others on the CLI's
+  words, and the veto's sync on its seam;
+  `TestACheckThatDidNotEndInAnotherProcessHoldsTheFolderUntilItEnds` and
+  `TestTheTickerTakesNoSnapshotWhileACheckThatDidNotEndHoldsTheFolder` (no
+  check given up); `TestAStartupCheckThatFindsTheDatabaseFailedTakesASnapshotWhetherOrNotItsRecordIsWritten`
+  (`left 1 snapshots, want 2`);
+  `TestATickerStoppedWhileItsStartupListingReadsANamedPipeReturnsWithinItsBound`
+  (`the ticker did not return`, a real object); and
+  `TestTheDoctorsVerifyHintsAreCommandsTheCLITakes` (every hint with no
+  `--config` and no word of which config).
+
+Not reds, as predicted, and why:
+`TestAVerifiedRecordLeftForAFailedOneIsVetoedWhenItsWriteFails` passes at
+the round before, whose veto covered each of its cases (a pin of what this
+round keeps; its reds are its controls), and so does
+`TestANewVerifiedIsNotWrittenWhereNoVetoCanBeHad`, which the round before
+refused as well; `TestATickerStoppedWhileItsProbeOfTheLockHangsReturnsWithinItsBound`
+is red there only through the shim (no object on a local disk hangs a lock
+file's open), and its red is its control.
+
+### Negative controls
+
+Each mutates one site of the committed tree, runs the tests named, and puts
+the committed bytes back, compared with HEAD's blob before each mutation and
+after each restore (a runner in the scratch folder, the predictions written
+to a file before the first run). All 29 went red as predicted:
+
+- the holds (each asked apart): the release as round 2 made it, at the
+  answer (Q1a: in internal/backup and at another process's `--verify`); the
+  slot alone let go at the answer (Q1b: the other folder's verification
+  proceeds, and nothing else is red); the lock alone (Q1c: a verification as
+  another process proceeds, and the prune); the ownership alone (Q1d: the
+  owner lock let go); the own prune beside a check given up (Q1e:
+  `{Deleted:1 …}`); a slot's wait that hears no notice (Q1f); a slot held by
+  a check given up waited for (Q1g: the other folder's verification waits out
+  its ten seconds); another process's marker never asked (Q1h:
+  `ErrBackupsBusy`, both); and the check's late result recorded (Q1i).
+- the records: no veto set aside before a recheck (Q2a); a refused recheck
+  leaving the veto it made (Q2b); the recheck's veto taken unsynced (Q2c);
+  the veto removed where the write is not durable (Q2d: the lost renames read
+  `VERIFIED`, and the fresh process's prune let the anchor go) or where it
+  fails before its rename (Q2e: and the console's); a `VERIFIED` written with
+  no veto to be had (Q2f); and a record bound to no folder (Q2g).
+- the ticker, the CLI and the doctor: the startup listing (Q3a) and the
+  lock's probe (Q3b) on the ticker's own goroutine; a capture beside a check
+  that did not end (Q3c: `2 snapshots, want 1`); the check in place decided
+  on its record and no error (Q4: `left 1 snapshots, want 2`); a hint with
+  no `--config` (Q5a) or not saying which (Q5b); what the check found not said
+  apart (Q6a) and a refusal said as a failed write (Q6b); and the doctor
+  saying nothing of a check that did not end (Q7a, both tests) or of another
+  process's (Q7b).
+- a panic in the check (Q8a) or in the worker (Q8b) not recovered: the
+  binary crashes; and the give-up's error not saying it (Q9).
+
+Q3b went red first by the test's deadline alone: its drain waited for a
+ticker still held in the probe, which the test let go only after the drain
+(728969a3 lets the drain go of the probe first; red again in 20 s).
+
+### The gates
+
+go1.27.3, each run inside the build slot (`buildslot.py b653`, its queue 5
+minutes and 0), `TMPDIR` on disk under the worktree's `.tmp`:
+
+- `make test TEST_PKGS='./internal/backup/... ./internal/doctor/...
+  ./internal/admin/... ./internal/atomicwrite/... ./cmd/bridge/...'`, the
+  race detector, `-p 4`, `-timeout 30m`, on 728969a3: ok, 1475 s
+  (internal/backup 482.8 s, internal/doctor 6.8 s, internal/admin 1068.0 s,
+  internal/atomicwrite 20.1 s, cmd/bridge 1449.6 s).
+- the 18 new and changed tests by name, `-race -count=1`: all pass (60 s).
+- `make vet`, `GOOS=linux GOARCH=386 make vet`, and `go vet` of the six
+  package trees the branch touches for windows and darwin: nothing reported.
+  `make build-all`: the six targets built, the build-site census first
+  (`check-build-tags: OK`).
+- the pinned gofmt (`go run cmd/gofmt -l`) over every Go file the round
+  changed: nothing listed.
+- `rules-b653-r3.patch` applied to a copy of HEAD: it matches the
+  generator's files, `make docs-check` passes there (cli-serve.md 71,762
+  bytes, History-rules-cli-serve.md 336,547; the worst load 67.7%), the
+  census passes there, and each of the 65 test names it cites is declared.
+
+### Follow-ups
+
+The backlog file is not on legion0, so these go to the PR's report, and what
+stays open of a check given up is named here by its id alone: backlog B653.
