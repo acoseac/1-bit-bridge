@@ -89092,7 +89092,36 @@ both).
 
 ### The gates
 
-The gates' numbers follow in the next commit.
+go1.27.3, each run inside the build slot (`buildslot.py b653`, its queue 0
+and 2 minutes), `TMPDIR` on disk under the worktree's `.tmp`:
+
+- `make test TEST_PKGS='./internal/backup/... ./internal/doctor/...
+  ./internal/admin/... ./internal/atomicwrite/... ./cmd/bridge/...'`, the
+  race detector, `-p 4`, `-timeout 30m`, on a9d488c4: internal/doctor ok
+  6.9 s, internal/atomicwrite ok 20.0 s, internal/admin ok 1053.0 s;
+  internal/backup failed 440.7 s on one test,
+  `TestAVerificationPastItsDeadlineReturnsWithItsCallerStillWaiting`, a
+  race between the hung check's read of its seam and the test's restore of
+  it (9a5235dc makes the restore wait for the read); cmd/bridge failed
+  1402.6 s on `TestEveryCitedTestNameExists` alone, which names exactly the
+  two tests this round renames, cited only by cli-serve.md and
+  History-rules-cli-serve.md, which the rules patch rewrites: on a copy of
+  HEAD with the patch applied it passes. The first launch of this gate was
+  stopped five minutes in, after a run of cmd/bridge's sweeps alone found
+  two of them failing over this round's moves (a9d488c4 answers both).
+- `make test TEST_PKGS=./internal/backup/...` again on 9a5235dc: ok,
+  428.2 s.
+- the 33 new and changed tests by name, `-race -count=1`: all pass (77 s).
+- `make vet`, `GOOS=linux GOARCH=386 make vet`, and `go vet` of the six
+  package trees the branch touches for windows and darwin: nothing reported.
+  `make build-all`: the six targets built, the build-site census first
+  (`check-build-tags: OK`).
+- the pinned gofmt (`go run cmd/gofmt -l`) over every Go file the round
+  changed: nothing listed.
+- `rules-b653-r2.patch` applied to a copy of HEAD: `make docs-check` passes
+  there (cli-serve.md 68,967 bytes, History-rules-cli-serve.md 330,302,
+  admin-console.md 87,574; the worst load 67.5%), the census passes there,
+  and every test name it cites is declared.
 
 ### Follow-ups
 
