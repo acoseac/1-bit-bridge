@@ -494,17 +494,18 @@ func TestARecheckGivenUpLeavesTheVetoItMade(t *testing.T) {
 	}
 }
 
-// TestAStoppedVerificationsMarkStandsUntilTheWriteItStartedEnds: a
+// TestAStoppedVerificationMarksNothingUntilTheWriteItStartedOverruns: a
 // verification stopped before it took the lock starts the write of its
 // INCOMPLETE (abandonPending), which waits for the lock (another holder has
 // it for a while) and then hangs. Its caller gives the worker up while it
-// waits for that write, naming that step, and once the worker has ended and
-// let go of this process's slot, the folder stays marked, though the write's
-// own hold is within its bound still, until the write ends (backlog B653's
-// fourth round: the step test's abandonPending case, run twenty times under
-// the race detector, once found no mark there, and once the worker's mark
-// naming its wait for the lock).
-func TestAStoppedVerificationsMarkStandsUntilTheWriteItStartedEnds(t *testing.T) {
+// waits for that write, and nothing is marked, then or once the worker has
+// ended and let go of this process's slot, while the write's own hold is
+// within its bound: a wait that overran nothing marks nothing (backlog B653's
+// fifth round, the Claude API's Low on round 4; the fourth round marked the
+// folder there, naming the write). Once the write's own step overruns its
+// bound, its hold marks the folder, naming the write, until the write ends.
+// Red on the round before, whose worker's give-up marked the folder at once.
+func TestAStoppedVerificationMarksNothingUntilTheWriteItStartedOverruns(t *testing.T) {
 	src := storeWithTracks(t, 5)
 	c := captureT(t, src)
 	root := filepath.Dir(c.Dir)
@@ -552,6 +553,9 @@ func TestAStoppedVerificationsMarkStandsUntilTheWriteItStartedEnds(t *testing.T)
 	if _, err := backup.VerifySnapshot(stopped, c.Dir, backup.VerifyOptions{BackupsRoot: root}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("the stopped verification answered %v, want its stop", err)
 	}
+	if s, held := backup.StuckCheckHere(root); held {
+		t.Errorf("once its caller gave the worker up, the folder reads %+v: a wait that overran nothing marked it", s)
+	}
 	select {
 	case <-p.entered:
 	case <-time.After(30 * time.Second):
@@ -562,8 +566,11 @@ func TestAStoppedVerificationsMarkStandsUntilTheWriteItStartedEnds(t *testing.T)
 			t.Fatal("the worker never let go of the slot")
 		}
 	}
-	if s, held := backup.StuckCheckHere(root); !held || s.Step != "its write of INCOMPLETE" {
-		t.Errorf("once the worker had ended, the folder reads %+v, %v; want it marked, naming the write of INCOMPLETE", s, held)
+	if s, held := backup.StuckCheckHere(root); held {
+		t.Errorf("once the worker had ended, within the write's own bound, the folder reads %+v; want it unmarked", s)
+	}
+	if s := awaitMarkedWithin(t, root, 2*backup.StopWriteBound+3*time.Second); s.Step != "its write of INCOMPLETE" {
+		t.Errorf("once the write overran its bound, the folder is marked at %q, want the write of INCOMPLETE", s.Step)
 	}
 }
 

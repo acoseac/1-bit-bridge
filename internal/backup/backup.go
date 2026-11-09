@@ -1015,6 +1015,18 @@ func Prune(backupsRoot string, keep int) (PruneResult, error) {
 // path to one folder prunes under one lock, tried once: a round that finds
 // it held (another process verifying or pruning), or where no lock is
 // granted, removes nothing and says so (PruneResult.Skipped, SkippedFor).
+//
+// It holds the lock as every holder does (hold.go, backlog B653's fifth
+// round): everything that can wait on a filesystem, the folder's resolution
+// and the lock's open included, runs on a goroutine of its own, which its
+// caller waits for until it answers, or, once ctx has ended or the prune's
+// own bound (verifyDeadline and watchdogSlack) has passed, StopWriteBound
+// more, as a verification's caller does; and under the lock, the marker's
+// clearing and the prune run as one step, bounded verifyDeadline from the
+// lock and StopWriteBound past the caller's stop, given up past it: the
+// folder is marked until the step has ended, a verification, a claim or a
+// prune behind it answering ErrCheckStillRunning, and the prune answers
+// ErrPruneGivenUp, what it removed not known.
 func PruneContext(ctx context.Context, backupsRoot string, keep int) (PruneResult, error) {
 	// An empty root is the sweep's refusal, as before, before anything
 	// resolves it into the working directory.
@@ -1029,6 +1041,55 @@ func PruneContext(ctx context.Context, backupsRoot string, keep int) (PruneResul
 	if check, held := stuckBy(backupsRoot); held {
 		return PruneResult{Skipped: true, SkippedFor: stillRunning(check)}, nil
 	}
+	type answer struct {
+		res PruneResult
+		err error
+	}
+	done := make(chan answer, 1)
+	h := newHold(ctx, "", backupsRoot)
+	go func() {
+		defer h.drop()
+		defer h.release()
+		res, err := pruneUnder(ctx, backupsRoot, keep, h)
+		done <- answer{res, err}
+	}()
+	stop := ctx.Done()
+	watchdog := time.NewTimer(verifyDeadline + watchdogSlack)
+	defer watchdog.Stop()
+	var expire <-chan time.Time
+	for {
+		select {
+		case a := <-done:
+			return a.res, a.err
+		case <-stop:
+			stop = nil
+			if expire == nil {
+				expire = time.After(StopWriteBound)
+			}
+		case <-watchdog.C:
+			if expire == nil {
+				expire = time.After(StopWriteBound)
+			}
+		case <-expire:
+			h.abandon()
+			why := ctx.Err()
+			if why == nil {
+				why = context.DeadlineExceeded
+			}
+			return PruneResult{}, fmt.Errorf("%w: it was left to end on its own, holding the snapshots' lock until it does (%w)", ErrPruneGivenUp, why)
+		}
+	}
+}
+
+// ErrPruneGivenUp is a prune's answer once it was given up (PruneContext):
+// its removals, or a step before them, did not end within its bound, what it
+// removed is not known, and it holds the backups folder until it ends
+// (ErrCheckStillRunning, stuck.go).
+var ErrPruneGivenUp = errors.New("the prune did not end within its bound and was given up, and holds the snapshots until it ends")
+
+// pruneUnder is PruneContext's work, on a goroutine of its own, its hold h,
+// which that goroutine lets go of once its caller has the answer.
+func pruneUnder(ctx context.Context, backupsRoot string, keep int, h *hold) (PruneResult, error) {
 	// A folder not made yet holds nothing to prune, and no lock to take.
 	if _, err := lstat(backupsRoot); errors.Is(err, os.ErrNotExist) {
 		return PruneResult{}, nil
@@ -1037,16 +1098,36 @@ func PruneContext(ctx context.Context, backupsRoot string, keep int) (PruneResul
 	if err != nil {
 		return PruneResult{}, fmt.Errorf("find the backups folder: %w", err)
 	}
-	unlock, err := lockBackups(ctx, root, 0)
+	key := ownerKey(root)
+	unlock, err := lockBackupsWith(ctx, root, 0, folderToken(key))
 	if errors.Is(err, ErrBackupsBusy) || errors.Is(err, ErrBackupsUnlocked) || errors.Is(err, ErrCheckStillRunning) {
 		return PruneResult{Skipped: true, SkippedFor: err}, nil
 	}
 	if err != nil {
 		return PruneResult{}, err
 	}
-	defer unlock()
-	clearStaleMarker(root)
-	return pruneHeld(ctx, root, keep)
+	h.held(unlock, root, key, "")
+	if h.gaveUp() {
+		// Its caller gave it up while it took the lock: nothing runs.
+		return PruneResult{}, fmt.Errorf("%w: its caller stopped waiting before it began", ErrPruneGivenUp)
+	}
+	type pruned struct {
+		res PruneResult
+		err error
+	}
+	p, ok := stepOf(h, h.lockedAt().Add(verifyDeadline), stepPruning, func(c, _ context.Context) pruned {
+		clearStaleMarker(root)
+		res, err := pruneHeld(c, root, keep)
+		return pruned{res, err}
+	}, nil)
+	if !ok {
+		why := ctx.Err()
+		if why == nil {
+			why = context.DeadlineExceeded
+		}
+		return PruneResult{}, fmt.Errorf("%w: %s did not end within its bound (%w)", ErrPruneGivenUp, stepPruning, why)
+	}
+	return p.res, p.err
 }
 
 // reap is the orphan sweep every prune runs first: crash-orphaned partial

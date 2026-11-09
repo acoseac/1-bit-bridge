@@ -1,6 +1,7 @@
 package backup
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,11 +18,12 @@ import (
 // under the backups folder's lock, so the lock's holder is the record's one
 // writer: the manifest is read again, the verdict merged into its record
 // (mergeVerdict), and the manifest staged beside itself and renamed over
-// itself through atomicwrite (RenameWithRetryUnsynced), then its folder
+// itself through atomicwrite (RenameWithRetryUnsyncedCtx), then its folder
 // synced (syncVerdictDir). That last sync can fail once the rename has
 // landed, and then every reader already reads the new record while the write
 // answers an error; and a write that fails before its rename leaves the
-// record it would have replaced.
+// record it would have replaced. A write its holder gave up renames nothing
+// and removes no veto from then on (publishVerdict's given).
 //
 // So a VERIFIED is never in doubt where a reader can read it (backlog B653,
 // and its second to fourth rounds), by one veto, vetoFileName in the bundle,
@@ -41,9 +43,10 @@ import (
 //   - a write of a record that holds a VERIFIED, or that replaces one, needs
 //     the veto too, and with none to be had writes nothing;
 //   - the veto goes only once the record that replaces it is durable (the
-//     folder's sync after the rename has answered), and only where the record
-//     keeps no VERIFIED in doubt (publishVerdict): a veto that stood before
-//     the verification began stays over a VERIFIED the record carries over.
+//     folder's sync after the rename has answered), and only where a check
+//     that ended earns it (earnsClear): never for an INCOMPLETE, never once
+//     the write was given up, and a veto that stood before the verification
+//     began stays over a VERIFIED the record carries over.
 //
 // A veto made whose owner could not be given (root_squash) is kept as it is:
 // its presence alone is the veto, and the service may remove it. Each change
@@ -84,31 +87,31 @@ var (
 // a quick check never undoes a full one unless it fails; the files' check,
 // which is the same at every level, replaces a completed one with the
 // latest. The record's PENDING time goes once nothing in it is PENDING. It
-// answers too whether found's two verdicts both replaced stored's (fresh):
-// the record is then wholly what the check found, and carries nothing over.
-func mergeVerdict(stored *Verification, found Verification) (out Verification, fresh bool) {
+// answers too which of found's two verdicts replaced stored's (database,
+// files): where both did, the record is wholly what the check found, and
+// carries nothing over.
+func mergeVerdict(stored *Verification, found Verification) (out Verification, database, files bool) {
 	if stored == nil {
 		out = found
 		out.Format = verificationFormat
-		return out, true
+		return out, true, true
 	}
 	out = *stored
 	out.Format = verificationFormat
-	completed := func(s State) bool { return s == StateVerified || s == StateFailed }
 	replaces := func(old, s State) bool {
 		if s == StateIncomplete {
 			return old == StatePending || old == StateIncomplete || !known(old)
 		}
 		return s != StatePending
 	}
-	database := replaces(stored.DatabaseState, found.DatabaseState) &&
+	database = replaces(stored.DatabaseState, found.DatabaseState) &&
 		!(found.DatabaseState == StateVerified && completed(stored.DatabaseState) && stored.Level.rank() > found.Level.rank())
 	if database {
 		out.DatabaseState, out.DatabaseReasons = found.DatabaseState, found.DatabaseReasons
 		out.Level, out.CheckedAt, out.DurationMS = found.Level, found.CheckedAt, found.DurationMS
 		out.UserVersion, out.Counts = found.UserVersion, found.Counts
 	}
-	files := replaces(stored.FilesState, found.FilesState)
+	files = replaces(stored.FilesState, found.FilesState)
 	if files {
 		out.FilesState, out.FilesReasons, out.FilesFailed = found.FilesState, found.FilesReasons, found.FilesFailed
 		out.FilesCheckedAt = found.FilesCheckedAt
@@ -116,7 +119,34 @@ func mergeVerdict(stored *Verification, found Verification) (out Verification, f
 	if out.DatabaseState != StatePending && out.FilesState != StatePending {
 		out.PendingSince = time.Time{}
 	}
-	return out, database && files
+	return out, database, files
+}
+
+// completed reports whether s is the verdict of a check that ended.
+func completed(s State) bool { return s == StateVerified || s == StateFailed }
+
+// earnsClear says whether the verdict found, merged over base (database and
+// files saying which of its two verdicts replaced base's: mergeVerdict),
+// earns the removal of the veto beside the record (backlog B653's fifth
+// round): never where found holds an INCOMPLETE, which no check ended, so a
+// check stopped, past its deadline or that panicked leaves the veto it made
+// before it; where both of found's verdicts replaced base's, the record is
+// wholly what the check found; and where base's is carried over, only where
+// no veto stood before the verification began (doubted false) and each
+// verdict carried over is a VERIFIED that found matched with a VERIFIED of
+// its own (a quick check over a full one), so a veto a failed write left
+// stays over a VERIFIED a later verification carries over.
+func earnsClear(found Verification, base *Verification, database, files, doubted bool) bool {
+	if found.DatabaseState == StateIncomplete || found.FilesState == StateIncomplete {
+		return false
+	}
+	if database && files {
+		return true
+	}
+	matched := func(kept, s State) bool { return kept == StateVerified && s == StateVerified }
+	return !doubted && base != nil &&
+		(database || matched(base.DatabaseState, found.DatabaseState)) &&
+		(files || matched(base.FilesState, found.FilesState))
 }
 
 // known reports whether s is a state a record holds.
@@ -196,15 +226,20 @@ func setAside(dir string) error {
 // prior, with the record its manifest holds now. Its caller holds the backups
 // folder's lock. A merge that changes nothing writes nothing.
 //
-// A veto goes, once the write is durable, only where mayClear and the record
-// keeps no VERIFIED in doubt (backlog B653's fourth round): where the record
-// is wholly what found says (mergeVerdict's fresh), or where no veto stood
-// before this verification began (doubted false: the veto is this
-// verification's own, made for its check alone, and what the record carries
-// over is what every reader read before it). A veto that stood before it, a
-// write's that failed, stays over a VERIFIED the record carries over, which a
-// check that did not end, or one of a lower level, cannot clear.
-func publishVerdict(dir string, found Verification, prior *Verification, doubted, mayClear bool) (_ Verification, written bool, _ error) {
+// given is the give-up of the step the write is (stepOf, hold.go), which
+// ends once that step is given up and at nothing else, its caller's stop
+// included: once it has ended, no rename is tried (stageAndRename) and no
+// veto removed, so a write given up lands nothing after its holder has
+// answered, but a rename already in the kernel, which nothing takes back.
+//
+// A veto goes, once the write is durable, only where the check earns it
+// (earnsClear, backlog B653's fourth and fifth rounds): never for an
+// INCOMPLETE; where the record is wholly what found says; or where no veto
+// stood before this verification began (doubted false: the veto is this
+// verification's own, made for its check alone) and what the record carries
+// over is a VERIFIED found matched. A veto that stood before it, a write's
+// that failed, stays over a VERIFIED the record carries over.
+func publishVerdict(dir string, found Verification, prior *Verification, doubted bool, given context.Context) (_ Verification, written bool, _ error) {
 	mpath := filepath.Join(dir, ManifestFile)
 	m, err := readRecord(dir)
 	if err != nil {
@@ -215,14 +250,15 @@ func publishVerdict(dir string, found Verification, prior *Verification, doubted
 	if prior != nil {
 		base = prior
 	}
-	merged, fresh := mergeVerdict(base, found)
+	merged, database, files := mergeVerdict(base, found)
 	merged.Snapshot = boundName(dir)
-	clears := mayClear && (fresh || !doubted)
+	clears := earnsClear(found, base, database, files, doubted)
 	root := filepath.Dir(dir)
 	if stored != nil && reflect.DeepEqual(*stored, merged) {
 		// Nothing to write: a veto of this verification's own goes, the
-		// record as every reader read it before.
-		if clears && vetoedAt(dir) {
+		// record as every reader read it before, unless the write was given
+		// up.
+		if clears && given.Err() == nil && vetoedAt(dir) {
 			_ = removeVetoes(dir)
 			stampChange(root)
 		}
@@ -245,7 +281,7 @@ func publishVerdict(dir string, found Verification, prior *Verification, doubted
 	if err != nil {
 		return Verification{}, false, err
 	}
-	if err := stageAndRename(mpath, data); err != nil {
+	if err := stageAndRename(given, mpath, data); err != nil {
 		return Verification{}, false, fmt.Errorf("the verdict was not written: %w", err)
 	}
 	// The record readers read has changed, whatever follows.
@@ -253,7 +289,8 @@ func publishVerdict(dir string, found Verification, prior *Verification, doubted
 	if err := syncVerdictDir(mpath); err != nil {
 		return merged, true, fmt.Errorf("%w: %w", ErrVerdictNotDurable, err)
 	}
-	if !clears {
+	if !clears || given.Err() != nil {
+		// A write given up once its rename had landed keeps its veto.
 		return merged, true, nil
 	}
 	if err := removeVetoes(dir); err != nil {
@@ -359,8 +396,10 @@ func removeVetoes(dir string) error {
 // stageAndRename stages data beside path, with the owner of the file it
 // replaces (a root verification over a service's snapshot), and renames it
 // over path, with no barrier of its own: publishVerdict runs the one that
-// decides.
-func stageAndRename(path string, data []byte) error {
+// decides. given is asked before every attempt at the rename, the first
+// included (atomicwrite.RenameWithRetryUnsyncedCtx): a write given up while
+// it staged, or while it waited to rename, renames nothing when it resumes.
+func stageAndRename(given context.Context, path string, data []byte) error {
 	if failStage != nil {
 		if err := failStage(filepath.Dir(path)); err != nil {
 			return err
@@ -398,7 +437,7 @@ func stageAndRename(path string, data []byte) error {
 			return err
 		}
 	}
-	if err := atomicwrite.RenameWithRetryUnsynced(tmpName, path); err != nil {
+	if err := atomicwrite.RenameWithRetryUnsyncedCtx(given, tmpName, path); err != nil {
 		return err
 	}
 	committed = true

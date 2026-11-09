@@ -46,18 +46,71 @@ type VerifyResult struct {
 	Found Verification
 	// Record is the snapshot's record as a reader reads it once the
 	// verification has written (readVerdict): Found merged with what it held,
-	// so a quick check over a full one keeps the full one's verdict.
+	// so a quick check over a full one keeps the full one's verdict. It is
+	// the zero Verification where nothing was read back (RecordRead).
 	Record Verification
+	// RecordRead says the record was read back: false where its read failed,
+	// was given up, or was never made, and Record then says nothing.
+	RecordRead bool
+	// Write is how far the write of what was found into the record went.
+	Write WriteOutcome
 	// Recorded says what was found was written into the record, durably,
-	// merged with what it held (mergeVerdict): false where the snapshot
-	// predates verification (Legacy), the merge changed nothing so nothing
-	// was written (a check given up over a completed verdict, which it keeps),
-	// or the write failed, was not known durable, or was given up. Record is
-	// what every reader reads either way.
+	// merged with what it held (mergeVerdict): Write is WriteRecorded. It is
+	// false where the snapshot predates verification (Legacy), the merge
+	// changed nothing so nothing was written (a check given up over a
+	// completed verdict, which it keeps), and where the write failed, was not
+	// known durable, did not finish or never began, which Write tells apart:
+	// a write that did not finish may have landed. Record, where it was read
+	// back, is what every reader reads either way.
 	Recorded bool
 	// Legacy says the snapshot was written before verification: its files
 	// were checked for presence alone, and nothing was recorded.
 	Legacy bool
+}
+
+// WriteOutcome is how far a verification's write of its record went.
+type WriteOutcome int
+
+const (
+	// WriteNone: no write began (a snapshot from before verification, a
+	// recheck refused or not recorded, a step given up before the write).
+	WriteNone WriteOutcome = iota
+	// WriteUnchanged: the write ended having written nothing, the merge
+	// changing nothing.
+	WriteUnchanged
+	// WriteRecorded: the write ended, its record written and durable.
+	WriteRecorded
+	// WriteNotDurable: the write ended, its record written and not known to
+	// be durable (ErrVerdictNotDurable).
+	WriteNotDurable
+	// WriteFailed: the write ended on an error, nothing written.
+	WriteFailed
+	// WriteUnfinished: the write began and was given up before it ended: it
+	// renames nothing from then on, and whether a rename of it landed before
+	// is not known.
+	WriteUnfinished
+)
+
+// published is what a verdict's write answered (publishVerdict).
+type published struct {
+	written bool
+	err     error
+}
+
+// outcome is how far the write went, answered being whether it answered
+// before its step was given up.
+func (p published) outcome(answered bool) WriteOutcome {
+	switch {
+	case !answered:
+		return WriteUnfinished
+	case p.err != nil && p.written:
+		return WriteNotDurable
+	case p.err != nil:
+		return WriteFailed
+	case p.written:
+		return WriteRecorded
+	}
+	return WriteUnchanged
 }
 
 // VerifySnapshot checks the snapshot in dir and records its verdict, under
@@ -127,13 +180,15 @@ const watchdogSlack = 2 * StopWriteBound
 // go at once.
 //
 // The worker answers its caller as soon as it can, and only then lets go of
-// what it holds, each once, in this order: the steps it gave up waited for,
-// the marker removed and the lock let go, then the slot, then the ownership,
-// and last the mark of a hold given up, which stands until all of them are
-// let go (stuck.go). A panic in the check is recorded as its INCOMPLETE
+// what it holds, each once, in this order (hold.release): the steps it gave
+// up waited for, the ownership (onEnd) let go as a step of its own, bounded,
+// the marker removed and the lock let go, bounded too, then the slot, and
+// last the mark of a hold given up, which stands until all of them are let go
+// (stuck.go). A panic in the check is recorded as its INCOMPLETE
 // (ReasonAborted), one in the worker's own steps answers an error, and
 // either lets go of all the same. A verification of a folder a hold given up
-// still holds is refused at once, asking no filesystem.
+// still holds is refused at once, asking no filesystem, the ownership let go
+// within StopWriteBound (letGoWithin).
 func verifyAndThen(ctx context.Context, dir string, o VerifyOptions, after func(context.Context, string), onEnd func()) (res VerifyResult, err error, abandoned bool) {
 	if o.Level == "" {
 		o.Level = CheckQuick
@@ -141,14 +196,9 @@ func verifyAndThen(ctx context.Context, dir string, o VerifyOptions, after func(
 	if o.LockWait == 0 {
 		o.LockWait = AutoLockWait
 	}
-	end := func() {
-		if onEnd != nil {
-			onEnd()
-		}
-	}
 	parent := filepath.Dir(dir)
 	if check, held := stuckBy(parent, o.BackupsRoot); held {
-		end()
+		letGoWithin(onEnd)
 		return res, stillRunning(check), false
 	}
 	h := newHold(ctx, filepath.Base(spellingKey(dir)), parent, o.BackupsRoot)
@@ -159,18 +209,20 @@ func verifyAndThen(ctx context.Context, dir string, o VerifyOptions, after func(
 		case errors.Is(err, ErrCheckStillRunning):
 			// Nothing was begun: its record says what it said, its owner's
 			// end aside.
-			end()
+			h.drop()
+			letGoWithin(onEnd)
 			return res, err, false
 		case err != nil:
-			abandonPending(dir, o.BackupsRoot, ctx, end)
+			h.drop()
+			abandonPending(dir, o.BackupsRoot, ctx, onEnd)
 			return res, err, false
 		}
 		releaseSlot = release
 	}
+	h.alsoLetGo(onEnd)
 	done := make(chan outcome, 1)
 	go func() {
 		defer h.drop()
-		defer end()
 		defer releaseSlot()
 		defer h.release()
 		defer func() {
@@ -252,9 +304,11 @@ func (h *hold) givenUp(ctx context.Context, werr error) error {
 // runs no check and no prune, writes nothing but its INCOMPLETE, whose merge
 // keeps a completed verdict and clears no veto, reads the record back, and
 // answers ErrCheckGivenUp naming the step; a step given up that resumes
-// runs nothing further, and what it answers late is dropped. A check given up
-// past its deadline records INCOMPLETE (deadline). What the worker holds is
-// in h, which its caller lets go of once it has answered.
+// runs nothing further, a write given up renames nothing and removes no veto
+// from then on, and what a step answers late is dropped. A check given up
+// past its deadline records INCOMPLETE (deadline), and one its caller stopped
+// INCOMPLETE (cancelled), the stop being no give-up of the write. What the
+// worker holds is in h, which its caller lets go of once it has answered.
 func verifyHeld(ctx context.Context, dir string, o VerifyOptions, after func(context.Context, string), h *hold) (res VerifyResult, err error) {
 	snap, root, err := resolveSnapshotIn(dir, o.BackupsRoot)
 	if err != nil {
@@ -268,13 +322,13 @@ func verifyHeld(ctx context.Context, dir string, o VerifyOptions, after func(con
 	unlock, err := lockBackupsWith(ctx, root, o.LockWait, token)
 	if err != nil {
 		if ctx.Err() != nil && !errors.Is(err, ErrBackupsUnlocked) && !errors.Is(err, ErrCheckStillRunning) {
-			// The worker waits for that write now, and its caller, giving it
-			// up there, names it so; a mark it raises stands until the write
-			// has ended, though the slot goes as the worker ends, so the
-			// folder that write holds is never left unmarked between the two
-			// holds' ends.
-			h.in(stepIncomplete)
-			h.keepMarkUntil(abandonPending(snap, root, ctx, nil, h.spellings...))
+			// The worker waits for that write now, and a give-up of it by its
+			// caller meanwhile marks nothing: its wait overran nothing, and
+			// the write's own hold marks the folder, under this worker's
+			// spellings too, once its own step overruns (backlog B653's fifth
+			// round). The slot goes as the worker ends.
+			h.handOff()
+			abandonPending(snap, root, ctx, nil, h.spellings...)
 		}
 		return res, err
 	}
@@ -289,24 +343,30 @@ func verifyHeld(ctx context.Context, dir string, o VerifyOptions, after func(con
 		if after == nil || ctx.Err() != nil || h.gaveUp() {
 			return
 		}
-		stepOf(h, laterBound(deadline), stepPrune, func(c context.Context) struct{} {
+		stepOf(h, laterBound(deadline), stepPrune, func(c, _ context.Context) struct{} {
 			after(c, root)
 			return struct{}{}
 		}, nil)
 	}
-	readBack := func() Verification {
-		v, _ := stepOf(h, laterBound(deadline), stepReadBack, func(context.Context) Verification {
+	// readBack is the record as a reader reads it now, and whether it was
+	// read: a read that fails or is given up reads nothing.
+	readBack := func() (Verification, bool) {
+		type read struct {
+			v  Verification
+			ok bool
+		}
+		r, _ := stepOf(h, laterBound(deadline), stepReadBack, func(context.Context, context.Context) read {
 			now, err := readRecord(snap)
 			if err != nil {
-				return Verification{}
+				return read{}
 			}
 			own := OwnerNone
 			if now.hasPending() {
 				own = probeOwner(snap)
 			}
-			return readVerdict(now, time.Now(), vetoedAt(snap), own, boundName(snap))
+			return read{readVerdict(now, time.Now(), vetoedAt(snap), own, boundName(snap)), true}
 		}, nil)
-		return v
+		return r.v, r.ok
 	}
 	// The record, and whether a veto stands beside it before this
 	// verification begins: a write's that failed, which only a verdict wholly
@@ -317,7 +377,7 @@ func verifyHeld(ctx context.Context, dir string, o VerifyOptions, after func(con
 		err     error
 		doubted bool
 	}
-	op, ok := stepOf(h, early, stepReadRecord, func(context.Context) opened {
+	op, ok := stepOf(h, early, stepReadRecord, func(context.Context, context.Context) opened {
 		clearStaleMarker(root)
 		m, err := readRecord(snap)
 		return opened{m: m, err: err, doubted: vetoedAt(snap)}
@@ -334,22 +394,23 @@ func verifyHeld(ctx context.Context, dir string, o VerifyOptions, after func(con
 	}
 	m, prior := op.m, op.m.Verification
 	// The record before the check, which the verdict merges with: a VERIFIED
-	// in it is set aside first, durably, or nothing is checked; the bundle is
-	// followed by its prune all the same. Where no directory can be synced,
-	// no veto is made, and what the check finds is not recorded over it.
+	// in it is set aside first, durably, or nothing is checked. Where no
+	// directory can be synced, no veto is made, and what the check finds is
+	// not recorded over it. A recheck that recorded nothing, either way, is
+	// followed by no prune, which would trust the VERIFIED it was to check
+	// (backlog B653's fifth round).
 	recheck := holdsVerified(prior) && !m.legacy()
 	noBarrier := recheck && !syncsParentDir
 	if recheck && !noBarrier {
-		refused, ok := stepOf(h, early, stepVeto, func(context.Context) error { return setAside(snap) }, nil)
+		refused, ok := stepOf(h, early, stepVeto, func(context.Context, context.Context) error { return setAside(snap) }, nil)
 		switch {
 		case !ok || h.gaveUp():
 			// No check: its INCOMPLETE, merged over the VERIFIED, changes
 			// nothing, so nothing is written.
-			res.Record = readBack()
+			res.Record, res.RecordRead = readBack()
 			return res, h.givenUp(ctx, nil)
 		case refused != nil:
-			res.Record = readBack()
-			thenUnder()
+			res.Record, res.RecordRead = readBack()
 			if h.gaveUp() {
 				return res, h.givenUp(ctx, nil)
 			}
@@ -375,7 +436,7 @@ func verifyHeld(ctx context.Context, dir string, o VerifyOptions, after func(con
 	if m.legacy() {
 		// Nothing to record: a reader reads of it what it would write.
 		res.Legacy = true
-		res.Record = readBack()
+		res.Record, res.RecordRead = readBack()
 		thenUnder()
 		if h.gaveUp() {
 			return res, h.givenUp(ctx, nil)
@@ -383,39 +444,36 @@ func verifyHeld(ctx context.Context, dir string, o VerifyOptions, after func(con
 		return res, nil
 	}
 	if noBarrier {
-		res.Record = readBack()
-		thenUnder()
+		res.Record, res.RecordRead = readBack()
 		if h.gaveUp() {
 			return res, h.givenUp(ctx, nil)
 		}
 		return res, ErrRecheckNotRecorded
 	}
-	mayClear := !h.gaveUp()
-	type published struct {
-		written bool
-		err     error
-	}
-	pub, wrote := stepOf(h, laterBound(deadline), stepWrite, func(context.Context) published {
-		_, written, err := publishVerdict(snap, found, prior, op.doubted, mayClear)
+	// The write is given its step's own give-up (given), never the caller's
+	// stop: a stop still writes its INCOMPLETE, and a write given up lands
+	// nothing from then on (publishVerdict).
+	pub, wrote := stepOf(h, laterBound(deadline), stepWrite, func(_, given context.Context) published {
+		_, written, err := publishVerdict(snap, found, prior, op.doubted, given)
 		return published{written: written, err: err}
 	}, nil)
+	res.Write = pub.outcome(wrote)
+	res.Recorded = res.Write == WriteRecorded
 	// Whatever the write answered: a kept bundle is followed by its prune,
 	// which reads the record as it now stands; but never once a step was
 	// given up.
 	thenUnder()
-	res.Record = readBack()
+	res.Record, res.RecordRead = readBack()
 	if h.gaveUp() {
 		var werr error
 		if wrote {
 			werr = pub.err
 		}
-		res.Recorded = wrote && pub.written && pub.err == nil
 		return res, h.givenUp(ctx, werr)
 	}
 	if pub.err != nil {
 		return res, pub.err
 	}
-	res.Recorded = pub.written
 	if err := ctx.Err(); err != nil && found.DatabaseState == StateIncomplete {
 		return res, err
 	}
@@ -441,24 +499,27 @@ func incompleteOf(ctx context.Context) Verification {
 // abandonPending writes INCOMPLETE over the PENDING of the snapshot in dir
 // whose verification its caller stopped before it began (a shutdown while it
 // waited its turn), within StopWriteBound, and abandons the write past it,
-// on a goroutine that holds what it takes until it ends and runs onEnd then.
-// The lock is tried until then: the verification that holds it is ending too.
-// Once it holds the lock, its one step (the record's read and the write) is
-// bounded as a verification's are, StopWriteBound from the lock (hold.go),
-// and given up past it, the folder marked until the step has ended. Where no
-// lock is granted it writes nothing. A record that holds a verdict keeps it
-// (mergeVerdict), and a veto that stood beside a VERIFIED stays (doubted).
-// Its mark stands under the spellings given too, its caller's. It answers a
-// channel that closes once its goroutine has ended.
+// on a goroutine that holds what it takes until it ends, and lets go of
+// onEnd, a capture's ownership, before its lock as a bounded step of its
+// hold (hold.release). The lock is tried until then: the verification that
+// holds it is ending too. Once it holds the lock, its one step (the record's
+// read and the write) is bounded as a verification's are, StopWriteBound
+// from the lock (hold.go), and given up past it, the folder marked until the
+// step has ended, the write renaming nothing from then on. Where no lock is
+// granted it writes nothing; nor over a VERIFIED where no directory can be
+// synced (verifyHeld's rule: no veto there would be durable). A record that
+// holds a verdict keeps it (mergeVerdict), and a veto beside a VERIFIED
+// stays (earnsClear: an INCOMPLETE clears none). Its mark stands under the
+// spellings given too, its caller's. It answers a channel that closes once
+// its goroutine has ended.
 func abandonPending(dir, backupsRoot string, ctx context.Context, onEnd func(), spellings ...string) <-chan struct{} {
 	done := make(chan struct{})
-	h := newHold(context.Background(), filepath.Base(spellingKey(dir)), append(spellings, filepath.Dir(dir), backupsRoot)...)
+	keys := append(append([]string(nil), spellings...), filepath.Dir(dir), backupsRoot)
+	h := newHold(context.Background(), filepath.Base(spellingKey(dir)), keys...)
+	h.alsoLetGo(onEnd)
 	go func() {
 		defer close(done)
 		defer h.drop()
-		if onEnd != nil {
-			defer onEnd()
-		}
 		defer h.release()
 		wait, cancel := context.WithTimeout(context.Background(), StopWriteBound)
 		defer cancel()
@@ -472,12 +533,15 @@ func abandonPending(dir, backupsRoot string, ctx context.Context, onEnd func(), 
 			return
 		}
 		h.held(unlock, root, key, filepath.Base(snap))
-		stepOf(h, h.lockedAt().Add(StopWriteBound), stepIncomplete, func(context.Context) struct{} {
+		stepOf(h, h.lockedAt().Add(StopWriteBound), stepIncomplete, func(_, given context.Context) struct{} {
 			clearStaleMarker(root)
-			// A snapshot from before verification takes no record.
-			if m, err := readRecord(snap); err == nil && !m.legacy() {
-				_, _, _ = publishVerdict(snap, incompleteOf(ctx), nil, vetoedAt(snap), true)
+			// A snapshot from before verification takes no record, and a
+			// VERIFIED none where no directory can be synced.
+			m, err := readRecord(snap)
+			if err != nil || m.legacy() || (holdsVerified(m.Verification) && !syncsParentDir) {
+				return struct{}{}
 			}
+			_, _, _ = publishVerdict(snap, incompleteOf(ctx), nil, vetoedAt(snap), given)
 			return struct{}{}
 		}, nil)
 	}()
@@ -488,6 +552,28 @@ func abandonPending(dir, backupsRoot string, ctx context.Context, onEnd func(), 
 	case <-t.C:
 	}
 	return done
+}
+
+// letGoWithin runs end, a capture's ownership let go (Capture.Release), on a
+// goroutine of its own, and waits for it StopWriteBound at most: the end of
+// a verification refused before it held anything, which a filesystem that
+// does not answer must not hold up; past it, end is left to end on its own,
+// holding nothing else. A nil end does nothing.
+func letGoWithin(end func()) {
+	if end == nil {
+		return
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		end()
+	}()
+	t := time.NewTimer(StopWriteBound)
+	defer t.Stop()
+	select {
+	case <-done:
+	case <-t.C:
+	}
 }
 
 // runCheck runs checkBundle on a goroutine of its own whose OS thread takes
@@ -569,8 +655,11 @@ type Result struct {
 	// VerifyErr is why its verdict was not recorded, or not durably.
 	VerifyErr error
 	// Prune is the prune after the bundle, which runs whatever its verdict;
-	// PruneErr its keep-policy's error, PruneSkipped a prune that did not run
-	// (the lock held elsewhere, or none granted: VerifyErr says which).
+	// PruneErr its keep-policy's error, PruneSkipped a prune that did not run:
+	// the lock held elsewhere or none granted, a step given up, or a recheck
+	// of a VERIFIED that recorded nothing (ErrRecheckNotRecorded,
+	// ErrRecheckRefused), whose record no prune may trust; VerifyErr says
+	// which, and a stop prunes nothing either.
 	Prune        PruneResult
 	PruneErr     error
 	PruneSkipped bool
@@ -625,7 +714,8 @@ func FinishCapture(ctx context.Context, c *Capture, keep func() int, o VerifyOpt
 // lock: so no other process's prune runs between the verdict and this one,
 // and the prune keeps what recovery needs (PruneContext). A verification
 // that cannot take the lock prunes nothing this round; one its caller
-// stopped prunes nothing either.
+// stopped prunes nothing either, nor does a recheck of a VERIFIED that
+// recorded nothing (backlog B653's fifth round).
 func Finish(ctx context.Context, dir string, keep func() int, o VerifyOptions) Result {
 	return finish(ctx, dir, keep, o, nil)
 }
@@ -651,8 +741,8 @@ func finish(ctx context.Context, dir string, keep func() int, o VerifyOptions, o
 		res.Prune, res.PruneErr = prune, pruneErr
 	default:
 		// No prune ran: the lock was held elsewhere or none was granted, the
-		// caller stopped, or the verification was left to end on its own,
-		// the prune perhaps still to come.
+		// caller stopped, a recheck recorded nothing, or the verification was
+		// left to end on its own, the prune perhaps still to come.
 		res.PruneSkipped = !abandoned
 	}
 	return res

@@ -71,6 +71,10 @@ var openBackupsLock = fsutil.OpenLockFile
 // held by another open (SetOnLockWaitForTest).
 var onLockWait func()
 
+// onLockRelease, nil in production, runs as a holder lets the lock go,
+// before its unlock, given the folder (SetOnLockReleaseForTest).
+var onLockRelease func(dir string)
+
 // folderTokens is this process's one holder of each backups folder's lock,
 // by its resolved path: taken before the lock file is opened, and given
 // back once it is closed, so that two holders in one process never open the
@@ -181,8 +185,13 @@ func lockBackupsWith(ctx context.Context, dir string, wait time.Duration, token 
 				return nil, err
 			}
 			// A marker left beside the lock its holder's first step removes,
-			// bounded (clearStaleMarker).
+			// bounded (clearStaleMarker). The release's unlock and close can
+			// wait on the folder's filesystem: a holder runs it bounded
+			// (hold.release).
 			return func() {
+				if onLockRelease != nil {
+					onLockRelease(dir)
+				}
 				_ = fsutil.Unlock(f)
 				closeAll()
 			}, nil

@@ -188,6 +188,41 @@ func SetVerdictWriteFailuresForTest(stage func(dir string) error, rename func(pa
 	return func() { failStage, failRename, failVeto = prevStage, prevRename, prevVeto }
 }
 
+// SetOnLockReleaseForTest sets the function a holder of the backups folder's
+// lock runs as it lets the lock go, before its unlock, given the folder, and
+// returns the restore: a test stands an unlock that does not answer in.
+func SetOnLockReleaseForTest(fn func(dir string)) (restore func()) {
+	prev := onLockRelease
+	onLockRelease = fn
+	return func() { onLockRelease = prev }
+}
+
+// SetOnOwnerReleaseForTest sets the function a snapshot's owner lock runs as
+// it is let go, before its unlock, given the snapshot's resolved path, and
+// returns the restore.
+func SetOnOwnerReleaseForTest(fn func(dir string)) (restore func()) {
+	prev := onOwnerRelease
+	onOwnerRelease = fn
+	return func() { onOwnerRelease = prev }
+}
+
+// SetOnClaimAnswerForTest sets the function a claim runs once its claim has
+// answered, before its caller is handed the answer, and returns the restore.
+func SetOnClaimAnswerForTest(fn func()) (restore func()) {
+	prev := onClaimAnswer
+	onClaimAnswer = fn
+	return func() { onClaimAnswer = prev }
+}
+
+// SetReleaseBoundForTest sets how long a holder's letting go of an ownership
+// or of the backups folder's lock may take before its hold is given up
+// (StopWriteBound), and returns the restore.
+func SetReleaseBoundForTest(d time.Duration) (restore func()) {
+	prev := releaseBound
+	releaseBound = d
+	return func() { releaseBound = prev }
+}
+
 // TakeOwnerForTest takes the owner lock of the snapshot in dir as a capture
 // does, so the snapshot reads as one whose verification is still owed, and
 // answers its release.

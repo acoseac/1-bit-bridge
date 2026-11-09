@@ -62,11 +62,20 @@ type owner struct {
 	f   *os.File
 }
 
+// onOwnerRelease, nil in production, runs as an owner lock is let go, before
+// its unlock, given the snapshot's resolved path (SetOnOwnerReleaseForTest).
+var onOwnerRelease func(dir string)
+
 // release lets the lock go, and this process's record of it; a nil owner,
-// or one let go already, does nothing.
+// or one let go already, does nothing. Its unlock and close can wait on the
+// snapshot's filesystem: a holder lets an ownership go as a bounded step of
+// its hold, before the backups folder's lock (hold.release).
 func (o *owner) release() {
 	if o == nil || o.key == "" {
 		return
+	}
+	if onOwnerRelease != nil {
+		onOwnerRelease(o.key)
 	}
 	if o.f != nil {
 		_ = fsutil.Unlock(o.f)
@@ -219,12 +228,14 @@ const (
 // ErrBackupsUnlocked, ErrCheckStillRunning) where that cannot be had. Every
 // step that can wait on a filesystem runs on a goroutine of its own, which
 // its caller waits for until it answers, or, once ctx has ended, for
-// StopWriteBound more, as a verification's caller does (verifyAndThen); a
-// claim that lands after its caller stopped waiting lets its ownership go at
-// once. Under the lock its steps are bounded, StopWriteBound from the lock,
-// as every holder's are (hold.go), and given up past it, ErrCheckGivenUp, the
-// folder marked until they have ended; a folder a hold given up still holds
-// is refused at once, asking no filesystem.
+// StopWriteBound more, as a verification's caller does (verifyAndThen). An
+// ownership its caller does not take, one the claim takes once it was given
+// up or once its caller stopped waiting, its hold lets go before the lock, a
+// bounded step of its own (hold.release), so none outlives the lock. Under
+// the lock its steps are bounded, StopWriteBound from the lock, as every
+// holder's are (hold.go), and given up past it, ErrCheckGivenUp, the folder
+// marked until they have ended; a folder a hold given up still holds is
+// refused at once, asking no filesystem.
 func Claim(ctx context.Context, dir, backupsRoot string) (*Capture, error) {
 	if check, held := stuckBy(filepath.Dir(dir), backupsRoot); held {
 		return nil, stillRunning(check)
@@ -233,13 +244,25 @@ func Claim(ctx context.Context, dir, backupsRoot string) (*Capture, error) {
 		c   *Capture
 		err error
 	}
-	done := make(chan answer, 1)
+	// done is handed over, never left in a buffer: the claim's answer is its
+	// caller's, or, once gone is closed, its hold's to let go.
+	done := make(chan answer)
+	gone := make(chan struct{})
 	h := newHold(ctx, filepath.Base(spellingKey(dir)), filepath.Dir(dir), backupsRoot)
 	go func() {
 		defer h.drop()
 		defer h.release()
 		c, err := claim(ctx, dir, backupsRoot, h)
-		done <- answer{c, err}
+		if onClaimAnswer != nil {
+			onClaimAnswer()
+		}
+		select {
+		case done <- answer{c, err}:
+		case <-gone:
+			if c != nil {
+				h.alsoLetGo(c.Release)
+			}
+		}
 	}()
 	select {
 	case a := <-done:
@@ -253,10 +276,15 @@ func Claim(ctx context.Context, dir, backupsRoot string) (*Capture, error) {
 		return a.c, a.err
 	case <-t.C:
 		h.abandon()
-		go func() { (<-done).c.Release() }()
+		close(gone)
 		return nil, fmt.Errorf("the claim was left to end on its own %s after its stop: %w", StopWriteBound, ctx.Err())
 	}
 }
+
+// onClaimAnswer, nil in production, runs on a claim's goroutine once its
+// claim has answered, before its caller is handed the answer
+// (SetOnClaimAnswerForTest).
+var onClaimAnswer func()
 
 // claim is Claim's work, on its own goroutine, its hold h, which its caller
 // lets go of once it has answered.
@@ -280,19 +308,25 @@ func claim(ctx context.Context, dir, backupsRoot string, h *hold) (*Capture, err
 		if h.gaveUp() {
 			return nil, h.givenUp(ctx, nil)
 		}
-		t, ok := stepOf(h, by, stepClaim, func(context.Context) took {
+		t, ok := stepOf(h, by, stepClaim, func(context.Context, context.Context) took {
 			if try == 1 {
 				clearStaleMarker(root)
 			}
 			o, err := takeOwner(snap)
 			return took{o: o, err: err}
-		}, func(late took) { late.o.release() })
+		}, func(late took) {
+			// Taken once the step was given up: the hold lets it go, bounded,
+			// before its lock.
+			if late.o != nil {
+				h.alsoLetGo(late.o.release)
+			}
+		})
 		if !ok {
 			return nil, h.givenUp(ctx, nil)
 		}
 		switch {
 		case t.err == nil && h.gaveUp():
-			t.o.release()
+			h.alsoLetGo(t.o.release)
 			return nil, h.givenUp(ctx, nil)
 		case t.err == nil:
 			return &Capture{Dir: snap, owner: t.o}, nil

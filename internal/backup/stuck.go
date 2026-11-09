@@ -43,25 +43,33 @@ import (
 // ErrCheckStillRunning is the answer of a verification, a claim and a prune
 // behind a hold given up that still holds the backups folder: until its step
 // ends, or until the process that runs it does.
-var ErrCheckStillRunning = errors.New("a verification of these snapshots that did not end still holds them, until it ends or its process does")
+var ErrCheckStillRunning = errors.New("a verification or prune of these snapshots that did not end still holds them, until it ends or its process does")
 
 // StuckCheck is a hold given up that still holds a backups folder: its
-// snapshot's folder name, the step it did not end, in words (Step), and when
-// it was given up.
+// snapshot's folder name, "" for a prune's (Pruning), the step it did not
+// end, in words (Step), and when it was given up.
 type StuckCheck struct {
 	Snapshot string    `json:"snapshot"`
 	Step     string    `json:"step,omitempty"`
 	Since    time.Time `json:"since"`
 }
 
+// Pruning reports whether the hold given up is a prune's (PruneContext),
+// which names no snapshot.
+func (c StuckCheck) Pruning() bool { return c.Snapshot == "" }
+
 // stillRunning is ErrCheckStillRunning for the hold given up that check is,
-// naming its snapshot and its step.
+// naming its snapshot, or the prune it is, and its step.
 func stillRunning(check StuckCheck) error {
 	step := ""
 	if check.Step != "" {
 		step = " in " + check.Step
 	}
-	return fmt.Errorf("%w (snapshot %s, given up%s at %s)", ErrCheckStillRunning, check.Snapshot, step,
+	what := "snapshot " + check.Snapshot
+	if check.Pruning() {
+		what = "a prune"
+	}
+	return fmt.Errorf("%w (%s, given up%s at %s)", ErrCheckStillRunning, what, step,
 		check.Since.Format(time.RFC3339))
 }
 
@@ -197,14 +205,24 @@ func stuckAt(key string) (StuckCheck, bool) {
 	return StuckCheck{}, false
 }
 
+// workDir is the working directory as the process started, which a relative
+// spelling is keyed against (spellingKey); "" where it could not be had.
+var workDir = func() string {
+	wd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	return wd
+}()
+
 // spellingKey is p as the record of holds given up keys a spelling: made
-// absolute (os.Getwd, for a relative p) and clean, no link resolved, so no
-// filesystem is asked of the folder.
+// absolute against the working directory the process started in (workDir),
+// never asked again (os.Getwd stats the directory), and clean, no link
+// resolved, so no filesystem is asked of anything (backlog B653's fifth
+// round).
 func spellingKey(p string) string {
-	if !filepath.IsAbs(p) {
-		if abs, err := filepath.Abs(p); err == nil {
-			p = abs
-		}
+	if !filepath.IsAbs(p) && workDir != "" {
+		p = filepath.Join(workDir, p)
 	}
 	return filepath.Clean(p)
 }
