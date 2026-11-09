@@ -1213,8 +1213,12 @@ type TailscaleConfig struct {
 	// and false there never turns them on without this key. A tailnet
 	// that requires the logs refuses a node that does not upload them,
 	// and the bridge then says what to change. The node reads it when it
-	// is built, so a change takes a restart. Never turned on by the
-	// bridge itself.
+	// is built, and once a node has run with it off the process keeps the
+	// uploads off until it exits, so a change takes a restart of the
+	// bridge's process (the menu's Start now, and the start bridge init
+	// offers, run serve in their own). Turning it off does not stop a node
+	// already running with it on from uploading until that node stops.
+	// Never turned on by the bridge itself.
 	UploadDiagnosticLogs bool `yaml:"uploadDiagnosticLogs,omitempty"`
 }
 
