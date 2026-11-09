@@ -29,6 +29,7 @@ type hold struct {
 	locked    time.Time
 	unlock    func()
 	waits     []<-chan struct{}
+	markWaits []<-chan struct{}
 	given     bool
 	mark      *stuckMark
 	ended     bool
@@ -68,6 +69,14 @@ func (h *hold) held(unlock func(), root, key, snapshot string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.unlock, h.root, h.key, h.snapshot, h.locked = unlock, root, key, snapshot, time.Now()
+}
+
+// in records the step the holder is in, outside stepOf, which a give-up by
+// its caller names (abandon).
+func (h *hold) in(step string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.at = step
 }
 
 // lockedAt is when the hold took the folder's lock.
@@ -156,10 +165,26 @@ func (h *hold) release() {
 	}
 }
 
-// drop takes the hold's mark out of this process's record, and keeps one
-// from being raised after it: the last thing its holder does, once every
-// hold, the slot and the ownership included, is let go.
+// keepMarkUntil keeps a mark the hold raises standing until done closes,
+// though the hold itself is let go: a write its holder started and left to
+// end on its own (abandonPending) holds the folder past it.
+func (h *hold) keepMarkUntil(done <-chan struct{}) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.markWaits = append(h.markWaits, done)
+}
+
+// drop takes the hold's mark out of this process's record, once whatever
+// keepMarkUntil names has ended, and keeps one from being raised after it:
+// the last thing its holder does, once every hold, the slot and the
+// ownership included, is let go.
 func (h *hold) drop() {
+	h.mu.Lock()
+	waits := h.markWaits
+	h.mu.Unlock()
+	for _, w := range waits {
+		<-w
+	}
 	h.mu.Lock()
 	h.ended = true
 	mark := h.mark
@@ -180,9 +205,7 @@ func stepOf[T any](h *hold, by time.Time, words string, step func(context.Contex
 		panicked any
 		ok       bool
 	}
-	h.mu.Lock()
-	h.at = words
-	h.mu.Unlock()
+	h.in(words)
 	out := make(chan answer, 1)
 	done := make(chan struct{})
 	go func() {

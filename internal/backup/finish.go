@@ -268,7 +268,13 @@ func verifyHeld(ctx context.Context, dir string, o VerifyOptions, after func(con
 	unlock, err := lockBackupsWith(ctx, root, o.LockWait, token)
 	if err != nil {
 		if ctx.Err() != nil && !errors.Is(err, ErrBackupsUnlocked) && !errors.Is(err, ErrCheckStillRunning) {
-			abandonPending(snap, root, ctx, nil, h.spellings...)
+			// The worker waits for that write now, and its caller, giving it
+			// up there, names it so; a mark it raises stands until the write
+			// has ended, though the slot goes as the worker ends, so the
+			// folder that write holds is never left unmarked between the two
+			// holds' ends.
+			h.in(stepIncomplete)
+			h.keepMarkUntil(abandonPending(snap, root, ctx, nil, h.spellings...))
 		}
 		return res, err
 	}
@@ -442,8 +448,9 @@ func incompleteOf(ctx context.Context) Verification {
 // and given up past it, the folder marked until the step has ended. Where no
 // lock is granted it writes nothing. A record that holds a verdict keeps it
 // (mergeVerdict), and a veto that stood beside a VERIFIED stays (doubted).
-// Its mark stands under the spellings given too, its caller's.
-func abandonPending(dir, backupsRoot string, ctx context.Context, onEnd func(), spellings ...string) {
+// Its mark stands under the spellings given too, its caller's. It answers a
+// channel that closes once its goroutine has ended.
+func abandonPending(dir, backupsRoot string, ctx context.Context, onEnd func(), spellings ...string) <-chan struct{} {
 	done := make(chan struct{})
 	h := newHold(context.Background(), filepath.Base(spellingKey(dir)), append(spellings, filepath.Dir(dir), backupsRoot)...)
 	go func() {
@@ -480,6 +487,7 @@ func abandonPending(dir, backupsRoot string, ctx context.Context, onEnd func(), 
 	case <-done:
 	case <-t.C:
 	}
+	return done
 }
 
 // runCheck runs checkBundle on a goroutine of its own whose OS thread takes

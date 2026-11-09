@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"time"
 
@@ -78,7 +79,14 @@ type stuckMark struct {
 
 // stuck is this process's holds given up, by every key they stand under: the
 // folder's resolved key and the spellings it was reached by (spellingKey).
-var stuck sync.Map
+// A key keeps every mark that stands under it, since two holds of one folder
+// can be given up at once (a verification's worker, which holds the slot, and
+// the write of INCOMPLETE it starts, which holds the lock), and a mark's end
+// takes its own alone; the lock is never held across a filesystem's call.
+var (
+	stuckMu sync.Mutex
+	stuck   = map[string][]*stuckMark{}
+)
 
 // stuckMarkerName is the marker a hold given up leaves in its backups folder
 // for another process to read.
@@ -105,10 +113,17 @@ func stuckNotice() <-chan struct{} {
 // of before it lets the lock go (removeMarker) and drops once every hold is
 // let go (drop).
 func markStuck(keys []string, root string, check StuckCheck) *stuckMark {
-	mark := &stuckMark{check: check, keys: keys}
+	mark := &stuckMark{check: check}
 	for _, k := range keys {
-		stuck.Store(k, mark)
+		if !slices.Contains(mark.keys, k) {
+			mark.keys = append(mark.keys, k)
+		}
 	}
+	stuckMu.Lock()
+	for _, k := range mark.keys {
+		stuck[k] = append(stuck[k], mark)
+	}
+	stuckMu.Unlock()
 	noticeMu.Lock()
 	close(notice)
 	notice = make(chan struct{})
@@ -154,15 +169,32 @@ func (mark *stuckMark) removeMarker() {
 	_ = os.Remove(mark.marker)
 }
 
-// drop takes the mark out of this process's record, under each key that
-// holds it still; a nil mark does nothing.
+// drop takes the mark out of this process's record, under each key it stands
+// under, leaving every other mark there; a nil mark does nothing.
 func (mark *stuckMark) drop() {
 	if mark == nil {
 		return
 	}
+	stuckMu.Lock()
+	defer stuckMu.Unlock()
 	for _, k := range mark.keys {
-		stuck.CompareAndDelete(k, mark)
+		marks := slices.DeleteFunc(stuck[k], func(m *stuckMark) bool { return m == mark })
+		if len(marks) == 0 {
+			delete(stuck, k)
+		} else {
+			stuck[k] = marks
+		}
 	}
+}
+
+// stuckAt is a mark that stands under key, if any.
+func stuckAt(key string) (StuckCheck, bool) {
+	stuckMu.Lock()
+	defer stuckMu.Unlock()
+	if marks := stuck[key]; len(marks) > 0 {
+		return marks[0].check, true
+	}
+	return StuckCheck{}, false
 }
 
 // spellingKey is p as the record of holds given up keys a spelling: made
@@ -184,8 +216,8 @@ func stuckBy(paths ...string) (StuckCheck, bool) {
 		if p == "" {
 			continue
 		}
-		if v, held := stuck.Load(spellingKey(p)); held {
-			return v.(*stuckMark).check, true
+		if check, held := stuckAt(spellingKey(p)); held {
+			return check, true
 		}
 	}
 	return StuckCheck{}, false
@@ -193,15 +225,14 @@ func stuckBy(paths ...string) (StuckCheck, bool) {
 
 // stuckAnywhere is one of this process's holds given up, if any.
 func stuckAnywhere() (StuckCheck, bool) {
-	var found *stuckMark
-	stuck.Range(func(_, v any) bool {
-		found = v.(*stuckMark)
-		return false
-	})
-	if found == nil {
-		return StuckCheck{}, false
+	stuckMu.Lock()
+	defer stuckMu.Unlock()
+	for _, marks := range stuck {
+		if len(marks) > 0 {
+			return marks[0].check, true
+		}
 	}
-	return found.check, true
+	return StuckCheck{}, false
 }
 
 // clearStaleMarker removes a marker left in the backups folder at root, which
@@ -243,8 +274,8 @@ func StuckCheckOf(backupsRoot string) (StuckCheck, bool) {
 	if check, held := stuckBy(backupsRoot); held {
 		return check, true
 	}
-	if v, held := stuck.Load(ownerKey(backupsRoot)); held {
-		return v.(*stuckMark).check, true
+	if check, held := stuckAt(ownerKey(backupsRoot)); held {
+		return check, true
 	}
 	mark, ok := stuckMarker(backupsRoot)
 	if !ok {
