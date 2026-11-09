@@ -50,8 +50,9 @@ func backupCmd(args []string, stdout, stderr io.Writer) int {
 // an install that has no database yet, whose files are).
 //
 // `bridge backup --verify <snapshot> [--full]` takes no snapshot: it checks
-// the one given, under the lock of the folder that holds it, records its
-// verdict and says it (verifyCmd). --full runs SQLite's integrity_check and
+// the one given, which must be a snapshot in the backups folder of the
+// install its config names, under that folder's lock, records its verdict
+// and says it (verifyCmd). --full runs SQLite's integrity_check and
 // foreign_key_check where the default runs quick_check.
 func backupCmdContext(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("backup", flag.ContinueOnError)
@@ -75,7 +76,7 @@ func backupCmdContext(ctx context.Context, args []string, stdout, stderr io.Writ
 		fmt.Fprintln(stderr, "backup: --full goes with --verify <snapshot-dir>")
 		return 2
 	case *verify != "":
-		return verifyCmd(ctx, *verify, *full, stdout, stderr)
+		return verifyCmd(ctx, *configPath, *verify, *full, stdout, stderr)
 	}
 
 	cfg, resolvedCfgPath, err := loadCLIConfig(*configPath)
@@ -123,7 +124,7 @@ func backupCmdContext(ctx context.Context, args []string, stdout, stderr io.Writ
 		fmt.Fprintf(stderr, "prune: %v\n", res.PruneErr)
 		return 1
 	case res.PruneSkipped && ctx.Err() == nil:
-		fmt.Fprintln(stdout, "Prune skipped: another verification or prune of the snapshots held their lock; the next snapshot prunes.")
+		fmt.Fprintf(stdout, "Prune skipped: %s.\n", pruneSkipWords(res.VerifyErr))
 	case res.Prune.Deleted > 0:
 		fmt.Fprintf(stdout, "Pruned %d older snapshot(s) (kept %d most recent, and what recovery needs).\n", res.Prune.Deleted, *keep)
 	}
@@ -135,26 +136,48 @@ func backupCmdContext(ctx context.Context, args []string, stdout, stderr io.Writ
 // test shortens.
 var verifyCmdLockWait = backup.VerifyCmdLockWait
 
-// verifyCmd is `bridge backup --verify <snapshot> [--full]`: the snapshot's
-// check, under the lock of the folder that holds it, waiting for another
-// verification or prune at most verifyCmdLockWait, its verdict recorded and
-// said. 0 for a snapshot both of whose verdicts are VERIFIED once the record
-// is written, 1 otherwise, 2 for a path that holds no snapshot.
-func verifyCmd(ctx context.Context, path string, full bool, stdout, stderr io.Writer) int {
+// verifyCmd is `bridge backup [--config X] --verify <snapshot> [--full]`: the
+// check of a snapshot in the backups folder of the install the config names,
+// under that folder's lock, however the path names it (a relative path, `.`,
+// a link: backup resolves each, and the folder, before it compares them),
+// waiting for another verification or prune at most verifyCmdLockWait, its
+// verdict recorded and said. 0 for a snapshot both of whose verdicts are
+// VERIFIED once the record is written, 1 otherwise, 2 for a path that holds no
+// snapshot of that install, or a config that does not load.
+func verifyCmd(ctx context.Context, configPath, path string, full bool, stdout, stderr io.Writer) int {
 	dir := backup.CleanSnapshotPath(path)
 	if !backup.LooksLikeSnapshotDir(dir) {
 		fmt.Fprintf(stderr, "backup: %q is not a recognized snapshot directory (no readable manifest.json with a supported schema)\n", dir)
 		return 2
 	}
+	// The install's config says where its backups folder is, whose lock the
+	// prune takes: a snapshot is verified there and nowhere else.
+	cfg, resolvedCfgPath, err := loadCLIConfig(configPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "config load failed: %v\n", err)
+		return 2
+	}
+	if refuseDataDirAway("backup", resolvedCfgPath, cfg.DataDir, stderr) {
+		return 1
+	}
+	backupsRoot := filepath.Join(cfg.DataDir, backup.BackupsDirName)
 	level := backup.CheckQuick
 	if full {
 		level = backup.CheckFull
 	}
 	fmt.Fprintf(stdout, "Verifying %s (%s check)…\n", dir, level)
-	res, err := backup.VerifySnapshot(ctx, dir, backup.VerifyOptions{Level: level, LockWait: verifyCmdLockWait})
-	if errors.Is(err, backup.ErrBackupsBusy) {
+	res, err := backup.VerifySnapshot(ctx, dir, backup.VerifyOptions{Level: level, LockWait: verifyCmdLockWait, BackupsRoot: backupsRoot})
+	switch {
+	case errors.Is(err, backup.ErrOutsideBackups):
+		fmt.Fprintf(stderr, "backup: %q is not a snapshot in the backups folder of the install %s configures (%s); a copy elsewhere is not verified in place: copy it into that folder, or name its own install's config with --config\n",
+			dir, resolvedCfgPath, backupsRoot)
+		return 2
+	case errors.Is(err, backup.ErrBackupsBusy):
 		fmt.Fprintf(stderr, "backup: another verification or prune of these snapshots held their lock for %s (a serving bridge's, or another command's); run this again once it ends\n",
 			verifyCmdLockWait)
+		return 1
+	case errors.Is(err, backup.ErrBackupsUnlocked):
+		fmt.Fprintf(stderr, "backup: nothing was verified: %v; with no lock nothing would keep a prune from removing the snapshot under its check. Put the data directory on a filesystem that grants file locks (a local disk, or a network mount whose lock service runs).\n", err)
 		return 1
 	}
 	if res.Legacy {
@@ -366,15 +389,19 @@ func buildBackupSources(cfg *config.Config, configPath string) backup.Sources {
 const startupBackupSkipThreshold = 24 * time.Hour
 
 // runBackupTicker is the periodic snapshot loop wired into serveCmd.
-// With the cadence on, it runs an immediate snapshot on startup unless a
-// recent one whose database is verified already exists (so an operator who
-// just finished `bridge init` has a baseline before any pairings, but a
-// debugging restart loop doesn't cost one snapshot per boot), and then on
-// the configured interval. Each pass takes the one path every snapshot
-// takes (backup.SnapshotAndVerify: the capture, its verification, the prune
-// after it whatever the verdict). With the cadence off at boot it takes no snapshot and prunes
-// nothing (backlog B209). All errors are logged to stderr — never fatal,
-// since a failed backup must never take down the running bridge.
+// With the cadence on, its boot pass follows the startup rule
+// (decideStartupPass: a snapshot on startup unless one from the last day is
+// verified, or the newest of them still owes its check, which the boot
+// finishes in its place), so an operator who just finished `bridge init` has
+// a baseline before any pairings, but a restart loop doesn't cost one
+// snapshot per boot; and then a snapshot on the configured interval. Each
+// snapshot takes the one path every snapshot takes (backup.SnapshotAndVerify:
+// the capture, its verification, the prune after it whatever the verdict),
+// and none is taken while the backups folder grants no lock and its newest
+// snapshot owes its check (captureHeldBack). With the cadence off at boot it
+// takes no snapshot and prunes nothing (backlog B209). All errors are logged
+// to stderr — never fatal, since a failed backup must never take down the
+// running bridge.
 // runBackupTicker takes its cadence AND its retention as providers,
 // re-read per use rather than captured once.
 //
@@ -393,7 +420,41 @@ const startupBackupSkipThreshold = 24 * time.Hour
 // rather than after the old interval — up to a day, on the 24 h default.
 func runBackupTicker(ctx context.Context, src backup.Sources, keep func() int, interval func() time.Duration, rearm <-chan struct{}, stdout, stderr io.Writer, status *sweepStatus[struct{}]) {
 	backupsRoot := filepath.Join(src.DataDir, backup.BackupsDirName)
+	// report says what a pass's kept snapshot's verification and the prune
+	// after it did.
+	report := func(triggered string, res backup.Result) {
+		reportTickerVerdict(ctx, stdout, stderr, triggered, res)
+		// Warning, not a failure — see the same handling in
+		// backupCmd. Pre-split this early-returned and suppressed
+		// the "pruned N" line on every tick, forever.
+		if problem := ctxerr.WithoutCancellation(ctx, res.Prune.ReapErr); problem != nil {
+			fmt.Fprintf(stderr, "backup (%s): orphan sweep reported a problem (prune unaffected): %v\n", triggered, problem)
+		}
+		// A prune the cancel stopped falls through to the count: the
+		// snapshots it removed before stopping are gone, and saying so is
+		// a fact about this pass
+		// (TestABackupCancelledMidPruneReportsWhatItDeleted).
+		if failure := ctxerr.WithoutCancellation(ctx, res.PruneErr); failure != nil {
+			fmt.Fprintf(stderr, "backup (%s): prune failed: %v\n", triggered, failure)
+			return
+		}
+		switch {
+		case res.PruneSkipped && ctx.Err() == nil:
+			fmt.Fprintf(stdout, "backup (%s): prune skipped: %s\n", triggered, pruneSkipWords(res.VerifyErr))
+		case res.Prune.Deleted > 0:
+			fmt.Fprintf(stdout, "backup (%s): pruned %d older snapshot(s)\n", triggered, res.Prune.Deleted)
+		}
+	}
 	doSnapshot := func(triggered string) {
+		// Where no lock is granted on the backups folder nothing there is
+		// verified or pruned, so a capture each pass would grow it without
+		// end: while its newest snapshot still owes its check, no other is
+		// taken (backlog B653's second round), and bridge doctor says why.
+		if newest, held := captureHeldBack(ctx, backupsRoot); held {
+			fmt.Fprintf(stderr, "backup (%s): no snapshot taken: no lock is granted on the backups folder, so its newest snapshot, %s, has not been verified and nothing there is pruned; none is taken until a lock is (bridge doctor's backup-lock line)\n",
+				triggered, newest)
+			return
+		}
 		status.sweepStarted()
 		// The one path every snapshot takes (backlog B653): the capture,
 		// its verification, and the prune after it whatever the verdict,
@@ -421,52 +482,62 @@ func runBackupTicker(ctx context.Context, src backup.Sources, keep func() int, i
 			return
 		}
 		defer status.sweepFinished(&struct{}{})
-		reportTickerVerdict(ctx, stdout, stderr, triggered, res)
-		// Warning, not a failure — see the same handling in
-		// backupCmd. Pre-split this early-returned and suppressed
-		// the "pruned N" line on every tick, forever.
-		if problem := ctxerr.WithoutCancellation(ctx, res.Prune.ReapErr); problem != nil {
-			fmt.Fprintf(stderr, "backup (%s): orphan sweep reported a problem (prune unaffected): %v\n", triggered, problem)
+		report(triggered, res)
+	}
+	// verifyInPlace finishes the check the newest snapshot owes in place of
+	// a new snapshot (startupVerifyInPlace), claimed under the backups
+	// folder's lock so no prune removes it before its check, and reports
+	// whether that check found its database FAILED, which leaves no recovery
+	// point from the last day and takes a new snapshot after it.
+	verifyInPlace := func(name string) (failed bool) {
+		dir := filepath.Join(backupsRoot, name)
+		c, err := backup.Claim(ctx, dir, backupsRoot)
+		if err != nil {
+			if failure := ctxerr.WithoutCancellation(ctx, err); failure != nil {
+				fmt.Fprintf(stderr, "backup (startup): %s owes its check, which was not begun: %v\n", dir, failure)
+			}
+			return false
 		}
-		// A prune the cancel stopped falls through to the count: the
-		// snapshots it removed before stopping are gone, and saying so is
-		// a fact about this pass
-		// (TestABackupCancelledMidPruneReportsWhatItDeleted).
-		if failure := ctxerr.WithoutCancellation(ctx, res.PruneErr); failure != nil {
-			fmt.Fprintf(stderr, "backup (%s): prune failed: %v\n", triggered, failure)
-			return
-		}
-		switch {
-		case res.PruneSkipped && ctx.Err() == nil:
-			fmt.Fprintf(stdout, "backup (%s): prune skipped: another verification or prune of the snapshots held their lock\n", triggered)
-		case res.Prune.Deleted > 0:
-			fmt.Fprintf(stdout, "backup (%s): pruned %d older snapshot(s)\n", triggered, res.Prune.Deleted)
-		}
+		status.sweepStarted()
+		defer status.sweepFinished(&struct{}{})
+		fmt.Fprintf(stdout, "backup (startup): %s owes its check: verifying it in place of a new snapshot\n", dir)
+		res := backup.FinishCapture(ctx, c, keep, backup.VerifyOptions{BackupsRoot: backupsRoot})
+		report("startup", res)
+		return res.VerifyErr == nil && res.Verify.Record.DatabaseState == backup.StateFailed
 	}
 
 	// The startup snapshot and the scheduled ones differ, so the loop's
 	// single `sweep` closure takes the loop's word for which pass is the
 	// boot one. Never "the first call": with the cadence off at boot the
 	// loop takes no boot pass, and the first call is a scheduled pass after
-	// a 0 → N rearm, which the throttle below would have skipped.
+	// a 0 → N rearm, which the startup rule below would have skipped.
 	//
-	// Throttle on the boot pass: if a snapshot exists within the skip
-	// threshold, the startup one is redundant. List errors are non-fatal
-	// (rare; surfaces a misconfig or disk problem the user should see)
-	// and fall through to writing the snapshot anyway.
+	// The boot pass follows the startup rule (decideStartupPass). A listing
+	// that fails is non-fatal (rare; it surfaces a misconfig or disk problem
+	// the user should see) and falls through to writing the snapshot anyway.
 	sweep := func(boot bool) {
 		if !boot {
 			doSnapshot("scheduled")
 			return
 		}
-		skip, latest, err := startupSnapshotShouldSkip(backupsRoot, time.Now().UTC(), startupBackupSkipThreshold)
-		switch {
-		case err != nil:
+		st, err := backup.ReadStatus(ctx, backupsRoot)
+		if err != nil {
 			fmt.Fprintf(stderr, "backup (startup): list existing snapshots: %v (writing anyway)\n", err)
 			doSnapshot("startup")
-		case skip:
+			return
+		}
+		pass := decideStartupPass(st, time.Now().UTC(), startupBackupSkipThreshold)
+		switch pass.action {
+		case startupSkipVerified:
 			fmt.Fprintf(stdout, "backup (startup): recent verified snapshot at %s — skipping (threshold %s)\n",
-				latest.Format(time.RFC3339), startupBackupSkipThreshold)
+				pass.snapshot.CreatedAt.Format(time.RFC3339), startupBackupSkipThreshold)
+		case startupSkipOwned:
+			fmt.Fprintf(stdout, "backup (startup): the newest snapshot, %s, has its check queued or under way — skipping\n",
+				pass.snapshot.DirName)
+		case startupVerifyInPlace:
+			if verifyInPlace(pass.snapshot.DirName) {
+				doSnapshot("startup")
+			}
 		default:
 			doSnapshot("startup")
 		}
@@ -510,30 +581,121 @@ func reportTickerVerdict(ctx context.Context, stdout, stderr io.Writer, triggere
 		triggered, res.Dir, backup.StateWords(v.DatabaseState, v.DatabaseReasons), backup.FilesWords(v))
 }
 
-// startupSnapshotShouldSkip reports whether a snapshot under backupsRoot
-// younger than threshold has a database whose verdict is VERIFIED (backlog
-// B653): a recovery point recent enough that a startup snapshot would be
-// redundant. A recent snapshot whose database FAILED, did not finish, waits
-// for its check or was written before verification is no such point, and
-// the startup snapshot is taken. Returns that snapshot's CreatedAt on a hit
-// so the caller can log it. Returns (false, zero, err) on a List failure —
-// caller should fall back to writing the snapshot.
-func startupSnapshotShouldSkip(backupsRoot string, now time.Time, threshold time.Duration) (bool, time.Time, error) {
-	entries, err := backup.List(backupsRoot)
-	if err != nil {
-		return false, time.Time{}, err
+// pruneSkipWords says why a kept snapshot's prune did not run, from its
+// verification's error.
+func pruneSkipWords(verifyErr error) string {
+	if errors.Is(verifyErr, backup.ErrBackupsUnlocked) {
+		return "no lock is granted on the backups folder, so nothing there is verified or pruned (bridge doctor's backup-lock line)"
 	}
-	// backup.List sorts newest-first: past the first one older than the
-	// threshold, every one is.
-	for _, e := range entries {
-		if e.CreatedAt.IsZero() || now.Sub(e.CreatedAt) >= threshold {
+	return "another verification or prune of the snapshots held their lock; the next snapshot prunes"
+}
+
+// startupAction is what the ticker's boot pass does (decideStartupPass).
+type startupAction int
+
+const (
+	// startupCapture takes a snapshot.
+	startupCapture startupAction = iota
+	// startupSkipVerified takes none: a snapshot from the last day has a
+	// database VERIFIED.
+	startupSkipVerified
+	// startupSkipOwned takes none: the newest snapshot from the last day
+	// has its check queued or under way, its owner live.
+	startupSkipOwned
+	// startupVerifyInPlace takes none, and finishes the check the newest
+	// snapshot from the last day owes in its place.
+	startupVerifyInPlace
+)
+
+// String names the action, for a log or a test's failure.
+func (a startupAction) String() string {
+	switch a {
+	case startupCapture:
+		return "capture"
+	case startupSkipVerified:
+		return "skip for a recent verified snapshot"
+	case startupSkipOwned:
+		return "skip for a check queued or under way"
+	case startupVerifyInPlace:
+		return "verify the newest snapshot in place"
+	}
+	return fmt.Sprintf("startupAction(%d)", int(a))
+}
+
+// startupPass is the boot pass's decision, and the snapshot it is about.
+type startupPass struct {
+	action   startupAction
+	snapshot backup.SnapshotStatus
+}
+
+// decideStartupPass is the startup rule (backlog B653 and its second round),
+// over the snapshots as a reader reads them (backup.ReadStatus) at now, the
+// last day being threshold (startupBackupSkipThreshold). Where a snapshot
+// from the last day has a database VERIFIED, the boot takes none. Otherwise,
+// where the newest from the last day still owes its check (owesCheck: its
+// database PENDING, or INCOMPLETE, a check that did not end or a capture whose
+// process died before it), the boot takes none either: it skips where a live
+// owner holds that snapshot, its check queued or under way, in this process
+// or another, and otherwise finishes the check in place, taking a snapshot
+// after it only where that check finds the database FAILED. Otherwise, no
+// snapshot from the last day, or the newest of them FAILED, written before
+// verification or holding a record this bridge cannot read, the boot takes
+// one. So a restart loop whose boots die before their verification ends
+// keeps one snapshot, not one per boot, and the first boot that lives long
+// enough verifies it.
+func decideStartupPass(st backup.Status, now time.Time, threshold time.Duration) startupPass {
+	recent := func(sn backup.SnapshotStatus) bool {
+		return !sn.CreatedAt.IsZero() && now.Sub(sn.CreatedAt) < threshold
+	}
+	// Newest first: past the first one older than the threshold, every one
+	// is.
+	for _, sn := range st.Snapshots {
+		if !recent(sn) {
 			break
 		}
-		if e.Verdict.DatabaseState == backup.StateVerified {
-			return true, e.CreatedAt, nil
+		if sn.Verdict.DatabaseState == backup.StateVerified {
+			return startupPass{action: startupSkipVerified, snapshot: sn}
 		}
 	}
-	return false, time.Time{}, nil
+	newest, found := st.Newest()
+	switch {
+	case !found || !recent(newest) || !owesCheck(newest):
+		return startupPass{action: startupCapture}
+	case newest.Owned:
+		return startupPass{action: startupSkipOwned, snapshot: newest}
+	}
+	return startupPass{action: startupVerifyInPlace, snapshot: newest}
+}
+
+// owesCheck reports whether sn's check is still to be finished: a snapshot
+// this bridge verifies whose database a reader reads PENDING or INCOMPLETE.
+func owesCheck(sn backup.SnapshotStatus) bool {
+	if sn.Legacy {
+		return false
+	}
+	switch sn.Verdict.DatabaseState {
+	case backup.StatePending, backup.StateIncomplete:
+		return true
+	}
+	return false
+}
+
+// captureHeldBack reports whether the ticker takes no snapshot this pass,
+// and names the snapshot that holds it back: no lock is granted on the
+// backups folder (backup.ProbeBackupsLock), so nothing there is verified or
+// pruned, and its newest snapshot still owes its check.
+func captureHeldBack(ctx context.Context, backupsRoot string) (string, bool) {
+	if !errors.Is(backup.ProbeBackupsLock(backupsRoot), backup.ErrBackupsUnlocked) {
+		return "", false
+	}
+	st, err := backup.ReadStatus(ctx, backupsRoot)
+	if err != nil {
+		return "", false
+	}
+	if newest, found := st.Newest(); found && owesCheck(newest) {
+		return newest.DirName, true
+	}
+	return "", false
 }
 
 // buildRestoreTargets is the inverse of buildBackupSources — points

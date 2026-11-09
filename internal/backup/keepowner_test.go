@@ -41,6 +41,9 @@ func TestSnapshotAndRestoreAsRootKeepTheInstallOwner(t *testing.T) {
 	wantSnapshot := []string{
 		filepath.Join(dataDir, backup.BackupsDirName),
 		snap,
+		// The capture's owner lock (backlog B653's second round): left
+		// root's, the service's prune could not ask it.
+		filepath.Join(snap, backup.OwnerLockName),
 		filepath.Join(snap, backup.ManifestDBFileName),
 		filepath.Join(snap, "tokens.json"),
 		filepath.Join(snap, "server.crt"),
@@ -122,6 +125,7 @@ func TestSnapshotAndRestoreAsRootKeepTheConsoleAccountAndHarvestState(t *testing
 	wantSnapshot := []string{
 		filepath.Join(dataDir, backup.BackupsDirName),
 		snap,
+		filepath.Join(snap, backup.OwnerLockName),
 		filepath.Join(snap, backup.ManifestDBFileName),
 		filepath.Join(snap, "tokens.json"),
 		filepath.Join(snap, "server.crt"),

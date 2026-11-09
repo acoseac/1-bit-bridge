@@ -185,15 +185,17 @@ func TestRepeatedFailedVerificationsThroughTheTickerAndBridgeBackupStillPrune(t 
 // (nothing recorded), 2 for a folder that holds no snapshot or its flags
 // misused, and says when another verification holds the snapshots' lock.
 func TestBridgeBackupVerifyRecordsAndSaysTheVerdict(t *testing.T) {
-	_, dataDir, root := backupInstall(t)
+	cfgPath, dataDir, root := backupInstall(t)
 	src := backup.Sources{DataDir: dataDir, ManifestDB: manifest.DefaultDBPath(dataDir)}
 	dir, err := backup.Snapshot(t.Context(), src)
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Each run names the install's config, whose backups folder the
+	// snapshot must be in (backlog B653's second round).
 	run := func(args ...string) (int, string, string) {
 		var stdout, stderr bytes.Buffer
-		code := backupCmd(args, &stdout, &stderr)
+		code := backupCmd(append([]string{"--config", cfgPath}, args...), &stdout, &stderr)
 		return code, stdout.String(), stderr.String()
 	}
 	if code, out, errs := run("--verify", dir, "--full"); code != 0 || !strings.Contains(out, "database: VERIFIED (full check") {
@@ -271,7 +273,7 @@ func TestBridgeBackupVerifyRecordsAndSaysTheVerdict(t *testing.T) {
 func TestVerifyBesideTheTickersVerificationOfOneSnapshot(t *testing.T) {
 	for _, tickerFirst := range []bool{true, false} {
 		t.Run(fmt.Sprintf("ticker first %v", tickerFirst), func(t *testing.T) {
-			_, dataDir, root := backupInstall(t)
+			cfgPath, dataDir, root := backupInstall(t)
 			src := backup.Sources{DataDir: dataDir, ManifestDB: manifest.DefaultDBPath(dataDir)}
 			parked, release := make(chan string, 1), make(chan struct{})
 			waiting := make(chan struct{})
@@ -307,7 +309,7 @@ func TestVerifyBesideTheTickersVerificationOfOneSnapshot(t *testing.T) {
 				stdout.letGo()
 				<-parked
 				go func() {
-					verified <- backupCmdContext(context.Background(), []string{"--verify", dir, "--full"}, &vout, &verr)
+					verified <- backupCmdContext(context.Background(), []string{"--config", cfgPath, "--verify", dir, "--full"}, &vout, &verr)
 				}()
 				// The --verify waits its turn behind the ticker's verification,
 				// this process's one at a time: once it is waiting, let the
@@ -322,7 +324,7 @@ func TestVerifyBesideTheTickersVerificationOfOneSnapshot(t *testing.T) {
 			} else {
 				// The ticker is held between its capture and its verification:
 				// the --verify runs first, whole.
-				code := backupCmdContext(context.Background(), []string{"--verify", dir, "--full"}, &vout, &verr)
+				code := backupCmdContext(context.Background(), []string{"--config", cfgPath, "--verify", dir, "--full"}, &vout, &verr)
 				verified <- code
 				stdout.letGo()
 			}

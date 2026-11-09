@@ -56,148 +56,130 @@ func writeSnapshotDirAt(t *testing.T, root string, createdAt time.Time, rec *bac
 	return dir
 }
 
-func TestStartupSnapshotShouldSkip_NoExistingSnapshots(t *testing.T) {
-	root := t.TempDir()
-	skip, latest, err := startupSnapshotShouldSkip(root, time.Now().UTC(), 24*time.Hour)
+// startupPassOver is the boot pass's decision over the snapshots under root
+// at now, as the ticker reads them (backup.ReadStatus, decideStartupPass).
+func startupPassOver(t *testing.T, root string, now time.Time) startupPass {
+	t.Helper()
+	st, err := backup.ReadStatus(t.Context(), root)
 	if err != nil {
-		t.Fatalf("err = %v, want nil", err)
+		t.Fatalf("ReadStatus: %v", err)
 	}
-	if skip {
-		t.Errorf("skip = true, want false (no snapshots exist; the very first startup MUST write a baseline)")
-	}
-	if !latest.IsZero() {
-		t.Errorf("latest = %v, want zero time", latest)
+	return decideStartupPass(st, now, startupBackupSkipThreshold)
+}
+
+// TestTheStartupPassCapturesWhereThereIsNoSnapshot: the very first start,
+// its backups folder not made yet or empty, takes a baseline.
+func TestTheStartupPassCapturesWhereThereIsNoSnapshot(t *testing.T) {
+	for _, root := range []string{t.TempDir(), filepath.Join(t.TempDir(), "does-not-exist")} {
+		if pass := startupPassOver(t, root, time.Now().UTC()); pass.action != startupCapture {
+			t.Errorf("over %s the startup pass is %v, want a capture: the very first start MUST write a baseline", filepath.Base(root), pass.action)
+		}
 	}
 }
 
-func TestStartupSnapshotShouldSkip_RecentSnapshotWithinThreshold(t *testing.T) {
-	root := t.TempDir()
-	now := time.Now().UTC()
-	writeVerifiedSnapshotDir(t, root, now.Add(-2*time.Hour))
-
-	skip, latest, err := startupSnapshotShouldSkip(root, now, 24*time.Hour)
-	if err != nil {
-		t.Fatalf("err = %v, want nil", err)
-	}
-	if !skip {
-		t.Errorf("skip = false, want true (a snapshot 2h old is well inside the 24h threshold)")
-	}
-	if latest.IsZero() {
-		t.Errorf("latest = zero, want the recent snapshot's timestamp")
-	}
-}
-
-func TestStartupSnapshotShouldSkip_OldSnapshotPastThreshold(t *testing.T) {
-	root := t.TempDir()
-	now := time.Now().UTC()
-	writeVerifiedSnapshotDir(t, root, now.Add(-26*time.Hour))
-
-	skip, _, err := startupSnapshotShouldSkip(root, now, 24*time.Hour)
-	if err != nil {
-		t.Fatalf("err = %v, want nil", err)
-	}
-	if skip {
-		t.Errorf("skip = true, want false (a 26h-old snapshot is past the 24h threshold; baseline should refresh)")
-	}
-}
-
-func TestStartupSnapshotShouldSkip_SnapshotExactlyAtThresholdDoesNotSkip(t *testing.T) {
-	// Boundary case (CodeRabbit on PR #101): the helper uses a strict
-	// `<` comparison, so a snapshot whose age equals the threshold
-	// exactly should NOT be treated as recent. Pin the boundary
-	// behaviour here so a future drift to `<=` doesn't silently
-	// re-introduce the "we wrote a snapshot exactly 24h ago, no need
-	// to write another one ever again" failure mode under the perfect
-	// edge alignment a constant-cadence ticker would hit.
-	root := t.TempDir()
-	now := time.Now().UTC()
-	writeVerifiedSnapshotDir(t, root, now.Add(-24*time.Hour))
-
-	skip, _, err := startupSnapshotShouldSkip(root, now, 24*time.Hour)
-	if err != nil {
-		t.Fatalf("err = %v, want nil", err)
-	}
-	if skip {
-		t.Errorf("skip = true, want false (exactly-at-threshold must not be treated as recent)")
-	}
-}
-
-func TestStartupSnapshotShouldSkip_PicksMostRecentNotOldest(t *testing.T) {
-	// backup.List sorts newest-first; the throttle must consult that
-	// ordering so a one-week-old snapshot doesn't shadow a two-hour-
-	// old one.
+// TestTheStartupPassSkipsForARecentVerifiedSnapshot: a snapshot from the
+// last day whose database is VERIFIED is a recovery point recent enough,
+// the newest of them named, an older one never shadowing a newer one.
+func TestTheStartupPassSkipsForARecentVerifiedSnapshot(t *testing.T) {
 	root := t.TempDir()
 	now := time.Now().UTC()
 	writeVerifiedSnapshotDir(t, root, now.Add(-7*24*time.Hour))
 	writeVerifiedSnapshotDir(t, root, now.Add(-2*time.Hour))
-
-	skip, latest, err := startupSnapshotShouldSkip(root, now, 24*time.Hour)
-	if err != nil {
-		t.Fatalf("err = %v, want nil", err)
+	pass := startupPassOver(t, root, now)
+	if pass.action != startupSkipVerified {
+		t.Fatalf("the startup pass is %v, want the skip for a recent verified snapshot", pass.action)
 	}
-	if !skip {
-		t.Errorf("skip = false, want true (most recent is 2h old, well inside 24h)")
-	}
-	if age := now.Sub(latest); age > 3*time.Hour {
-		t.Errorf("latest age = %v, want close to 2h (helper picked the older snapshot)", age)
+	if age := now.Sub(pass.snapshot.CreatedAt); age > 3*time.Hour {
+		t.Errorf("the skip names a snapshot %v old, want the one 2h old", age)
 	}
 }
 
-// TestStartupSnapshotShouldSkip_OnlyForARecentVerifiedDatabase is the
-// brief's red for the skip (backlog B653): a recent snapshot whose
-// database FAILED, did not finish, waits for its check or predates
-// verification is no recovery point, so the startup snapshot is taken; a
-// recent one whose database is VERIFIED skips it, whatever its files say, a
-// newer failed one beside it included. Red on main: any recent snapshot
-// skipped.
-func TestStartupSnapshotShouldSkip_OnlyForARecentVerifiedDatabase(t *testing.T) {
+// TestTheStartupPassCapturesPastTheThreshold: a verified snapshot older
+// than the last day, or exactly a day old (a strict comparison: CodeRabbit
+// on PR #101, so a constant-cadence ticker's perfect edge alignment never
+// reads a snapshot taken exactly 24h ago as recent), is no recent recovery
+// point, and the boot takes one.
+func TestTheStartupPassCapturesPastTheThreshold(t *testing.T) {
 	now := time.Now().UTC()
+	for _, age := range []time.Duration{26 * time.Hour, 24 * time.Hour} {
+		root := t.TempDir()
+		writeVerifiedSnapshotDir(t, root, now.Add(-age))
+		if pass := startupPassOver(t, root, now); pass.action != startupCapture {
+			t.Errorf("a verified snapshot %v old: the startup pass is %v, want a capture", age, pass.action)
+		}
+	}
+}
+
+// TestTheStartupPassFollowsTheNewestRecentSnapshot is the startup rule's
+// table (decideStartupPass, backlog B653 and its second round), each row a
+// backups folder whose newest snapshot from the last day is of a kind: a
+// recent database VERIFIED skips the capture, whatever its files say and
+// whatever newer snapshot stands beside it; otherwise a newest recent one
+// whose check is owed skips it too, waiting where a live owner holds that
+// snapshot and verifying it in place where none does; and a newest recent
+// one that FAILED, was written before verification or holds a record this
+// bridge cannot read is no reason to skip. Red on main (the round before),
+// which captured beside every recent snapshot that was not verified, a
+// restart loop's dead captures included.
+func TestTheStartupPassFollowsTheNewestRecentSnapshot(t *testing.T) {
+	now := time.Now().UTC()
+	rec := func(db backup.State, files backup.State, reasons ...backup.Reason) *backup.Verification {
+		return &backup.Verification{Format: 1, DatabaseState: db, DatabaseReasons: reasons, FilesState: files}
+	}
+	pending := &backup.Verification{Format: 1, DatabaseState: backup.StatePending, FilesState: backup.StatePending, PendingSince: now.Add(-time.Hour)}
 	for _, tc := range []struct {
-		name string
-		rec  *backup.Verification
-		skip bool
+		name  string
+		rec   *backup.Verification
+		owner string // "live", "gone", or "" for no owner lock
+		older *backup.Verification
+		want  startupAction
 	}{
-		{"written before verification", nil, false},
-		{"its database failed", &backup.Verification{Format: 1, DatabaseState: backup.StateFailed,
-			DatabaseReasons: []backup.Reason{backup.ReasonQuickCheck}, FilesState: backup.StateVerified}, false},
-		{"its check did not finish", &backup.Verification{Format: 1, DatabaseState: backup.StateIncomplete,
-			DatabaseReasons: []backup.Reason{backup.ReasonCancelled}, FilesState: backup.StateIncomplete}, false},
-		{"its check is pending", &backup.Verification{Format: 1, DatabaseState: backup.StatePending,
-			FilesState: backup.StatePending, PendingSince: now}, false},
-		{"its database verified and a file not", &backup.Verification{Format: 1, DatabaseState: backup.StateVerified,
-			FilesState: backup.StateFailed, FilesReasons: []backup.Reason{backup.ReasonHash}}, true},
+		{name: "written before verification", rec: nil, want: startupCapture},
+		{name: "its database failed", rec: rec(backup.StateFailed, backup.StateVerified, backup.ReasonQuickCheck), want: startupCapture},
+		{name: "a record this bridge cannot read", rec: &backup.Verification{Format: 99, DatabaseState: backup.StateVerified,
+			FilesState: backup.StateVerified}, want: startupCapture},
+		{name: "its check did not finish", rec: rec(backup.StateIncomplete, backup.StateIncomplete, backup.ReasonCancelled),
+			want: startupVerifyInPlace},
+		{name: "its check is pending with no owner to ask", rec: pending, want: startupVerifyInPlace},
+		{name: "its capture died before its check", rec: pending, owner: "gone", want: startupVerifyInPlace},
+		{name: "its check is queued or under way", rec: pending, owner: "live", want: startupSkipOwned},
+		{name: "its database verified and a file not", rec: rec(backup.StateVerified, backup.StateFailed),
+			want: startupSkipVerified},
+		{name: "a newer failed one beside an older verified one", rec: rec(backup.StateFailed, backup.StateVerified,
+			backup.ReasonHash), older: rec(backup.StateVerified, backup.StateVerified), want: startupSkipVerified},
+		{name: "a newer pending one beside an older verified one", rec: pending, older: rec(backup.StateVerified,
+			backup.StateVerified), want: startupSkipVerified},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root := t.TempDir()
-			writeSnapshotDirAt(t, root, now.Add(-2*time.Hour), tc.rec)
-			skip, _, err := startupSnapshotShouldSkip(root, now, 24*time.Hour)
-			if err != nil || skip != tc.skip {
-				t.Errorf("skip = %v (err %v), want %v", skip, err, tc.skip)
+			if tc.older != nil {
+				writeSnapshotDirAt(t, root, now.Add(-5*time.Hour), tc.older)
+			}
+			dir := writeSnapshotDirAt(t, root, now.Add(-time.Hour), tc.rec)
+			switch tc.owner {
+			case "live":
+				release, err := backup.TakeOwnerForTest(dir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(release)
+			case "gone":
+				release, err := backup.TakeOwnerForTest(dir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				release()
+			}
+			pass := startupPassOver(t, root, now)
+			if pass.action != tc.want {
+				t.Errorf("the startup pass is %v, want %v", pass.action, tc.want)
+			}
+			if tc.want == startupVerifyInPlace || tc.want == startupSkipOwned {
+				if pass.snapshot.DirName != filepath.Base(dir) {
+					t.Errorf("the pass is about %q, want the newest recent snapshot %q", pass.snapshot.DirName, filepath.Base(dir))
+				}
 			}
 		})
-	}
-	t.Run("a newer failed one beside an older verified one", func(t *testing.T) {
-		root := t.TempDir()
-		writeVerifiedSnapshotDir(t, root, now.Add(-5*time.Hour))
-		writeSnapshotDirAt(t, root, now.Add(-1*time.Hour), &backup.Verification{Format: 1,
-			DatabaseState: backup.StateFailed, DatabaseReasons: []backup.Reason{backup.ReasonHash}, FilesState: backup.StateVerified})
-		skip, latest, err := startupSnapshotShouldSkip(root, now, 24*time.Hour)
-		if err != nil || !skip || now.Sub(latest) < 4*time.Hour {
-			t.Errorf("skip = %v at %v (err %v), want the verified one's skip", skip, latest, err)
-		}
-	})
-}
-
-func TestStartupSnapshotShouldSkip_MissingBackupsRootIsNotAnError(t *testing.T) {
-	// First-ever startup: no `<dataDir>/backups/` exists yet. List
-	// returns (nil, nil) on ErrNotExist — the throttle must treat
-	// that as "no snapshots, write the baseline" not as a failure.
-	skip, _, err := startupSnapshotShouldSkip(filepath.Join(t.TempDir(), "does-not-exist"), time.Now().UTC(), 24*time.Hour)
-	if err != nil {
-		t.Fatalf("err = %v, want nil (missing backups dir is not an error)", err)
-	}
-	if skip {
-		t.Errorf("skip = true, want false (no snapshots → MUST write the first one)")
 	}
 }
 

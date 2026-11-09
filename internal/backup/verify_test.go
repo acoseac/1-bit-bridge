@@ -744,8 +744,11 @@ func TestAStopWithABlockedSyncReturnsWithinItsBound(t *testing.T) {
 }
 
 // TestAStalePendingReadsIncompleteAndAYoungOneSurvivesAPrune: a PENDING
-// older than PendingBound reads INCOMPLETE (interrupted) wherever it is
-// read, and one younger is never pruned, beyond keep or not.
+// with no owner lock to ask (as a snapshot written before owners were kept
+// holds, and Snapshot, which owes no verification, leaves) reads by its age:
+// older than PendingBound INCOMPLETE (interrupted) wherever it is read, and
+// one younger is never pruned, beyond keep or not. A snapshot this bridge
+// captures holds its owner lock, and reads by it (verify_owner_test.go).
 func TestAStalePendingReadsIncompleteAndAYoungOneSurvivesAPrune(t *testing.T) {
 	src := storeWithTracks(t, 5)
 	stale, err := backup.Snapshot(t.Context(), src)
@@ -942,52 +945,162 @@ func TestAPrunerRacingAVerificationSkipsItsRound(t *testing.T) {
 }
 
 // TestTwoVerificationsOfOneSnapshotWriteOneAtATime: two verifications of one
-// snapshot in one process run one after the other, and neither loses or
-// downgrades the other's verdict: whichever order, the record ends at the
-// full check's.
+// snapshot write one at a time, and neither loses or downgrades the other's
+// verdict, the record ending at the full check's. The first is parked
+// between its check and its write, holding what it took, and the second is
+// watched by barriers, never by time (backlog B653's second round): in one
+// process the second waits for this process's slot and reaches no wait for
+// the lock (red with the slot taken out, when it waits at the lock instead);
+// run as another process's, outside the slot and this process's holder of
+// the folder, it waits for the kernel's lock on LockFileName and ends only
+// once the first has (red with the lock taken out, when it writes while the
+// first is parked).
 func TestTwoVerificationsOfOneSnapshotWriteOneAtATime(t *testing.T) {
-	src := storeWithTracks(t, 30)
-	dir, err := backup.Snapshot(t.Context(), src)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var wg sync.WaitGroup
-	errs := make(chan error, 2)
-	for _, level := range []backup.CheckLevel{backup.CheckQuick, backup.CheckFull} {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			res, err := backup.VerifySnapshot(context.Background(), dir, backup.VerifyOptions{Level: level})
-			if err == nil && !res.Recorded {
-				err = fmt.Errorf("the %s check recorded nothing", level)
+	for _, tc := range []struct {
+		name   string
+		second func(context.Context, string, backup.VerifyOptions) (backup.VerifyResult, error)
+		waits  string // where the second must wait: "slot" or "lock"
+	}{
+		{"in one process", backup.VerifySnapshot, "slot"},
+		{"from another process", backup.VerifySnapshotAsAnotherProcessForTest, "lock"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			src := storeWithTracks(t, 30)
+			dir, err := backup.Snapshot(t.Context(), src)
+			if err != nil {
+				t.Fatal(err)
 			}
-			errs <- err
-		}()
-	}
-	wg.Wait()
-	close(errs)
-	for err := range errs {
-		if err != nil {
-			t.Error(err)
-		}
-	}
-	rec := readManifestT(t, dir).Verification
-	if rec.DatabaseState != backup.StateVerified || rec.Level != backup.CheckFull {
-		t.Errorf("the record ends %s at %q, want VERIFIED at the full check's level", rec.DatabaseState, rec.Level)
+			parked, release := make(chan struct{}), make(chan struct{})
+			var first sync.Once
+			t.Cleanup(backup.SetAfterCheckForTest(func(string) {
+				first.Do(func() {
+					close(parked)
+					<-release
+				})
+			}))
+			slotWait, lockWait := make(chan struct{}, 1), make(chan struct{}, 1)
+			signal := func(ch chan struct{}) func() {
+				return func() {
+					select {
+					case ch <- struct{}{}:
+					default:
+					}
+				}
+			}
+			t.Cleanup(backup.SetOnSlotWaitForTest(signal(slotWait)))
+			t.Cleanup(backup.SetOnLockWaitForTest(signal(lockWait)))
+			type outcome struct {
+				res backup.VerifyResult
+				err error
+			}
+			firstDone, secondDone := make(chan outcome, 1), make(chan outcome, 1)
+			go func() {
+				res, err := backup.VerifySnapshot(context.Background(), dir, backup.VerifyOptions{Level: backup.CheckQuick})
+				firstDone <- outcome{res, err}
+			}()
+			<-parked
+			go func() {
+				res, err := tc.second(context.Background(), dir, backup.VerifyOptions{Level: backup.CheckFull})
+				secondDone <- outcome{res, err}
+			}()
+			want, other := slotWait, lockWait
+			if tc.waits == "lock" {
+				want, other = lockWait, slotWait
+			}
+			select {
+			case <-want:
+			case <-other:
+				t.Fatalf("the second verification waited at the wrong place while the first held its turn; want its wait at the %s", tc.waits)
+			case o := <-secondDone:
+				close(release)
+				t.Fatalf("the second verification ended (%+v, %v) while the first was parked holding its turn", o.res.Record, o.err)
+			}
+			if tc.waits == "slot" {
+				// In one process the slot alone keeps the second back: it
+				// never comes to the lock while the first holds the slot.
+				select {
+				case <-lockWait:
+					t.Error("the second verification came to the lock while the first held the slot")
+				default:
+				}
+			}
+			select {
+			case o := <-secondDone:
+				t.Fatalf("the second verification ended (%+v, %v) while the first was parked", o.res.Record, o.err)
+			default:
+			}
+			close(release)
+			for _, o := range []outcome{<-firstDone, <-secondDone} {
+				if o.err != nil || !o.res.Recorded {
+					t.Errorf("a verification answered %v, recorded %v", o.err, o.res.Recorded)
+				}
+			}
+			rec := readManifestT(t, dir).Verification
+			if rec.DatabaseState != backup.StateVerified || rec.Level != backup.CheckFull {
+				t.Errorf("the record ends %s at %q, want VERIFIED at the full check's level", rec.DatabaseState, rec.Level)
+			}
+		})
 	}
 }
 
-// TestAVerificationGrantedNoLockStillVerifies: where the try is answered as
-// a filesystem or a platform that gives no lock answers (fsutil.KeepsNoLocks:
-// ENOLCK, EOPNOTSUPP, errors.ErrUnsupported), a verification goes on without
-// the lock.
-func TestAVerificationGrantedNoLockStillVerifies(t *testing.T) {
-	src := storeWithTracks(t, 5)
-	dir, err := backup.Snapshot(t.Context(), src)
-	if err != nil {
-		t.Fatal(err)
+// TestNoLockNoProtectedWork is backlog B653's second round's red for a
+// folder that grants no lock: where the try is answered as a filesystem or a
+// platform that keeps none answers (fsutil.KeepsNoLocks: ENOLCK, EOPNOTSUPP,
+// errors.ErrUnsupported), nothing protected runs without it. A verification
+// answers ErrBackupsUnlocked and writes no verdict, the PENDING record left
+// byte for byte; a prune is skipped, saying why, and removes nothing, a
+// snapshot past keep and a crash orphan the sweep would reap included; a
+// claim is refused; and a snapshot through the one path keeps its bundle,
+// says why it was not verified and prunes nothing. Red on main, which
+// verified without the lock, and pruned the orphan before trying it.
+func TestNoLockNoProtectedWork(t *testing.T) {
+	for _, tc := range noLockAnswers() {
+		t.Run(tc.name, func(t *testing.T) {
+			src := storeWithTracks(t, 5)
+			old := verifiedSnapshot(t, src)
+			time.Sleep(1100 * time.Millisecond)
+			dir, err := backup.Snapshot(t.Context(), src)
+			if err != nil {
+				t.Fatal(err)
+			}
+			root := filepath.Dir(dir)
+			orphan := filepath.Join(root, "2020-01-01T00-00-00Z")
+			if err := os.MkdirAll(orphan, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			aged := time.Now().Add(-48 * time.Hour)
+			if err := os.Chtimes(orphan, aged, aged); err != nil {
+				t.Fatal(err)
+			}
+			before := readBytes(t, filepath.Join(dir, backup.ManifestFile))
+			t.Cleanup(backup.SetTryLockBackupsForTest(func(*os.File) error { return tc.err }))
+
+			res, err := backup.VerifySnapshot(t.Context(), dir, backup.VerifyOptions{})
+			if !errors.Is(err, backup.ErrBackupsUnlocked) || res.Recorded {
+				t.Errorf("a verification granted no lock answered %v, recorded %v; want ErrBackupsUnlocked and nothing recorded", err, res.Recorded)
+			}
+			if string(readBytes(t, filepath.Join(dir, backup.ManifestFile))) != string(before) {
+				t.Error("a verification granted no lock wrote the snapshot's record")
+			}
+			pr, err := backup.Prune(root, 1)
+			if err != nil || !pr.Skipped || !errors.Is(pr.SkippedFor, backup.ErrBackupsUnlocked) || pr.Deleted != 0 || pr.Reaped != 0 {
+				t.Errorf("a prune granted no lock: %+v, %v; want it skipped for ErrBackupsUnlocked, nothing removed", pr, err)
+			}
+			if !pathExists(t, old) || !pathExists(t, orphan) {
+				t.Errorf("a prune granted no lock removed something: the older snapshot there %v, the orphan there %v",
+					pathExists(t, old), pathExists(t, orphan))
+			}
+			if _, err := backup.Claim(t.Context(), dir, root); !errors.Is(err, backup.ErrBackupsUnlocked) {
+				t.Errorf("a claim granted no lock answered %v, want ErrBackupsUnlocked", err)
+			}
+			one := backup.SnapshotAndVerify(t.Context(), src, backup.SnapshotOptions{Keep: func() int { return 1 }})
+			if !one.Kept() || !errors.Is(one.VerifyErr, backup.ErrBackupsUnlocked) || !one.PruneSkipped || one.Prune.Deleted != 0 {
+				t.Errorf("a snapshot granted no lock: kept %v, %v, prune skipped %v, deleted %d; want kept, unlocked, skipped, nothing",
+					one.Kept(), one.VerifyErr, one.PruneSkipped, one.Prune.Deleted)
+			}
+			if !pathExists(t, old) || !pathExists(t, orphan) {
+				t.Error("the snapshot's prune granted no lock removed something")
+			}
+		})
 	}
-	t.Cleanup(backup.SetTryLockBackupsForTest(func(*os.File) error { return errors.ErrUnsupported }))
-	res := verifyT(t, dir, "")
-	requireVerdict(t, "a verification without locks", res.Record, backup.StateVerified, "", backup.StateVerified, "")
 }

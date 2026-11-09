@@ -6,6 +6,15 @@ import (
 	"os"
 )
 
+// VerifySnapshotAsAnotherProcessForTest is VerifySnapshot as another
+// process's verification runs: outside this process's slot and its holder
+// of the backups folder, so the kernel's lock on LockFileName alone keeps it
+// from this process's.
+func VerifySnapshotAsAnotherProcessForTest(ctx context.Context, dir string, o VerifyOptions) (VerifyResult, error) {
+	o.asAnotherProcess = true
+	return VerifySnapshot(ctx, dir, o)
+}
+
 // SetAfterIdentityCopyForTest sets the hook Snapshot calls between copying
 // the player's UUID and reading its floor, and returns the restore.
 func SetAfterIdentityCopyForTest(fn func()) (restore func()) {

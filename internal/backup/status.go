@@ -19,6 +19,9 @@ type SnapshotStatus struct {
 	// Legacy says it was written before verification: no baselines, no
 	// record, both verdicts UNVERIFIED.
 	Legacy bool
+	// Owned says a live owner holds its PENDING, whose verification is still
+	// to come or under way, in this process or another (owner.go).
+	Owned bool
 }
 
 // Status is the backups folder as the doctor and the console read it
@@ -64,6 +67,7 @@ func ReadStatus(ctx context.Context, backupsRoot string) (Status, error) {
 			Files:         slices.Clone(e.Files),
 			Verdict:       e.Verdict,
 			Legacy:        e.legacy(),
+			Owned:         e.Owner == OwnerLive,
 		})
 	}
 	return out, nil

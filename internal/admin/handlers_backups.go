@@ -239,12 +239,13 @@ func (s *Server) apiBackupsCreate(w http.ResponseWriter, r *http.Request) {
 	// (verifyInBackground), so a request that goes away once its snapshot
 	// is written leaves the verdict to come as it would have come.
 	src := s.deps.BackupSources
-	dst, err := backup.Snapshot(r.Context(), src)
+	capture, err := backup.CaptureSnapshot(r.Context(), src)
 	if err != nil {
 		logger.Error("admin: no snapshot was taken", "err", err)
 		writeError(w, http.StatusInternalServerError, "snapshot-failed", snapshotRefusal(err))
 		return
 	}
+	dst := capture.Dir
 	// The jobs card caches what the backups folder holds; drop it so the
 	// operator who just pressed this sees their snapshot on the next poll
 	// rather than up to a TTL later. The job drops it again once its verdict
@@ -255,7 +256,7 @@ func (s *Server) apiBackupsCreate(w http.ResponseWriter, r *http.Request) {
 	if body.Keep != nil {
 		keep = *body.Keep
 	}
-	s.verifyInBackground(dst, keep)
+	s.verifyInBackground(capture, filepath.Join(src.DataDir, backup.BackupsDirName), keep)
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"dirName":      filepath.Base(dst),
 		"verification": backup.StatePending,
@@ -263,24 +264,28 @@ func (s *Server) apiBackupsCreate(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// verifyInBackground runs the kept snapshot in dir's verification and the
-// prune after it (backup.Finish) as a job on the server's own context
-// (Deps.ScanCtx, which serve's shutdown cancels), never the request's,
-// joined in ServeListener's drain with the background scans: queued behind
-// this process's other verifications while one runs (backup's slot), and on
+// verifyInBackground runs the kept capture's verification and the prune
+// after it (backup.FinishCapture, under the lock of the install's backups
+// folder, backupsRoot) as a job on the server's own context (Deps.ScanCtx,
+// which serve's shutdown cancels), never the request's, joined in
+// ServeListener's drain with the background scans: queued behind this
+// process's other verifications while one runs (backup's slot), the capture
+// owning its snapshot until the verification has ended, so no prune removes
+// it while its check is still to come (backlog B653's second round), and on
 // a shutdown its verdict, INCOMPLETE, is written within
 // backup.StopWriteBound, so no snapshot is left PENDING with no one to finish
 // it. The prune runs whatever the verdict, with keep, the create's
 // retention, unconditionally (keep <= 0 disables the keep-policy, not the
 // crash-orphan sweep). What it found goes to the log, naming the snapshot
 // by its folder's name.
-func (s *Server) verifyInBackground(dir string, keep int) {
+func (s *Server) verifyInBackground(capture *backup.Capture, backupsRoot string, keep int) {
 	ctx := s.scanCtx()
+	dir := capture.Dir
 	s.bgBackups.Add(1)
 	go func() {
 		defer s.bgBackups.Done()
 		defer s.invalidateLastBackup()
-		res := backup.Finish(ctx, dir, func() int { return keep }, backup.VerifyOptions{})
+		res := backup.FinishCapture(ctx, capture, func() int { return keep }, backup.VerifyOptions{BackupsRoot: backupsRoot})
 		name := filepath.Base(dir)
 		v := res.Verify.Record
 		switch {

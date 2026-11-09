@@ -1,6 +1,9 @@
 package backup
 
-import "os"
+import (
+	"os"
+	"time"
+)
 
 // Test seams for packages that drive a verification through their own
 // callers (cmd/bridge's ticker and CLI, the console). Each is process-global:
@@ -78,3 +81,63 @@ func SetOnDatabaseOpenForTest(fn func()) (restore func()) {
 // VetoFileName is the file a verdict's write keeps in the bundle while the
 // write is not known to be durable.
 const VetoFileName = vetoFileName
+
+// OwnerLockName is the file in a snapshot whose lock its owner holds.
+const OwnerLockName = ownerLockName
+
+// RootVetoPath is where a verdict's write keeps the veto of the snapshot in
+// dir when it cannot keep it in the bundle.
+func RootVetoPath(dir string) string { return rootVetoPath(dir) }
+
+// SetOnManifestReadForTest sets the function a verification runs before each
+// read of a snapshot's manifest, and returns the restore.
+func SetOnManifestReadForTest(fn func(path string)) (restore func()) {
+	prev := onManifestRead
+	onManifestRead = fn
+	return func() { onManifestRead = prev }
+}
+
+// SetOpenBackupsLockForTest replaces the open of the backups folder's lock
+// file (fsutil.OpenLockFile), and returns the restore.
+func SetOpenBackupsLockForTest(fn func(dir, name string) (*os.File, error)) (restore func()) {
+	prev := openBackupsLock
+	openBackupsLock = fn
+	return func() { openBackupsLock = prev }
+}
+
+// SetVerifyDeadlineForTest sets a verification's deadline (VerifyDeadline),
+// and returns the restore.
+func SetVerifyDeadlineForTest(d time.Duration) (restore func()) {
+	prev := verifyDeadline
+	verifyDeadline = d
+	return func() { verifyDeadline = prev }
+}
+
+// SetOnLockWaitForTest sets the function a wait for the backups folder's
+// lock runs once it finds the lock held, and returns the restore.
+func SetOnLockWaitForTest(fn func()) (restore func()) {
+	prev := onLockWait
+	onLockWait = fn
+	return func() { onLockWait = prev }
+}
+
+// SetVerdictWriteFailuresForTest sets the failures a verdict's write meets:
+// at its staging (given the bundle), its rename (given the manifest's path)
+// and the making of a veto (given the veto's path), each nil for none, and
+// returns the restore.
+func SetVerdictWriteFailuresForTest(stage func(dir string) error, rename func(path string) error, veto func(path string) error) (restore func()) {
+	prevStage, prevRename, prevVeto := failStage, failRename, failVeto
+	failStage, failRename, failVeto = stage, rename, veto
+	return func() { failStage, failRename, failVeto = prevStage, prevRename, prevVeto }
+}
+
+// TakeOwnerForTest takes the owner lock of the snapshot in dir as a capture
+// does, so the snapshot reads as one whose verification is still owed, and
+// answers its release.
+func TakeOwnerForTest(dir string) (release func(), err error) {
+	o, err := takeOwner(dir)
+	if err != nil {
+		return nil, err
+	}
+	return o.release, nil
+}

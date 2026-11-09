@@ -349,6 +349,28 @@ func SimulateRootForTest(uid, gid int) (changes func() []OwnerChange, restore fu
 		}
 }
 
+// SimulateRootRefusingForTest is SimulateRootForTest whose chown is refused,
+// with err, for every destination refuse names (a root_squash NFS mount, where
+// root's files belong to nobody), and recorded as SimulateRootForTest records
+// it for every other: a test of a writer that keeps, or abandons, a file it
+// could not give away. Tests only; a no-op on Windows.
+func SimulateRootRefusingForTest(uid, gid int, refuse func(dst string) bool, err error) (restore func()) {
+	_, restoreRoot := SimulateRootForTest(uid, gid)
+	s := *activeOwnerSeams.Load()
+	given := s.chown
+	s.chown = func(f *os.File, dst string, o fileOwner) error {
+		if refuse(dst) {
+			return err
+		}
+		return given(f, dst, o)
+	}
+	prev := activeOwnerSeams.Swap(&s)
+	return func() {
+		activeOwnerSeams.Store(prev)
+		restoreRoot()
+	}
+}
+
 // SimulateRootOwnersForTest is SimulateRootForTest over entries that have
 // owners of their own: ownerOf answers the owner of each path it is asked
 // about, and a destination's owner is looked up as KeepOwner looks it up,

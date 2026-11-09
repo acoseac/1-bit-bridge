@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"errors"
 	"fmt"
 	"time"
 
@@ -15,30 +16,40 @@ import (
 // whose database's verdict is VERIFIED, the recovery point, and its age. A
 // snapshot is named by its folder's name, a time stamp, and no line names a
 // path. cmd/bridge's doctorBackups feeds them, for bridge doctor and the
-// console's doctor alike.
+// console's doctor alike. And backup-lock, a warn shown only where the backups
+// folder grants no lock (backup.ProbeBackupsLock answers ErrBackupsUnlocked),
+// where nothing is verified or pruned (backlog B653's second round).
 const (
 	checkNameBackupNewest   = "backup-newest"
 	checkNameBackupVerified = "backup-verified"
+	checkNameBackupLock     = "backup-lock"
 )
 
 // BackupChecks are the backups' lines for st, the backups folder as its
-// manifests read at now, or for err, the listing's failure; scheduled says
-// the bridge takes snapshots on a cadence.
-func BackupChecks(st backup.Status, err error, scheduled bool, now time.Time) []Check {
+// manifests read at now, or for err, the listing's failure; lockErr is what
+// backup.ProbeBackupsLock answered for the folder; scheduled says the bridge
+// takes snapshots on a cadence.
+func BackupChecks(st backup.Status, err, lockErr error, scheduled bool, now time.Time) []Check {
+	var out []Check
+	if errors.Is(lockErr, backup.ErrBackupsUnlocked) {
+		out = append(out, warn(checkNameBackupLock,
+			"no lock is granted on the backups folder, so no snapshot there is verified or pruned, and the scheduled snapshot waits while the newest one owes its check",
+			"put the data directory on a filesystem that grants file locks: a local disk, or a network mount whose lock service runs"))
+	}
 	if err != nil {
-		return []Check{warn(checkNameBackupNewest,
+		return append(out, warn(checkNameBackupNewest,
 			fmt.Sprintf("not checked: the snapshots could not be listed (%s)", fsutil.ErrorWithoutPath(err)),
-			"give the user the bridge runs as read access to the backups folder in its data directory")}
+			"give the user the bridge runs as read access to the backups folder in its data directory"))
 	}
 	newest, found := st.Newest()
 	if !found {
 		if !scheduled {
-			return []Check{ok(checkNameBackupNewest, "no snapshot: scheduled snapshots are off")}
+			return append(out, ok(checkNameBackupNewest, "no snapshot: scheduled snapshots are off"))
 		}
-		return []Check{warn(checkNameBackupNewest, "no snapshot yet",
-			"bridge serve takes one at its next start; or run bridge backup")}
+		return append(out, warn(checkNameBackupNewest, "no snapshot yet",
+			"bridge serve takes one at its next start; or run bridge backup"))
 	}
-	return []Check{newestLine(newest, now), verifiedLine(st, now)}
+	return append(out, newestLine(newest, now), verifiedLine(st, now))
 }
 
 // newestLine is backup-newest: ok while both verdicts of the newest snapshot
@@ -65,7 +76,7 @@ func newestLine(sn backup.SnapshotStatus, now time.Time) Check {
 			"its check did not finish; run bridge backup --verify <snapshot-dir> on it, or wait for the next snapshot")
 	}
 	return warn(checkNameBackupNewest, summary,
-		"its database failed its check: the live database may be damaged; run bridge backup --verify --full <snapshot-dir>, and keep the snapshots that are verified")
+		"its database failed its check: the live database may be damaged; run bridge backup --verify <snapshot-dir> --full, and keep the snapshots that are verified")
 }
 
 // verifiedLine is backup-verified: ok naming the newest snapshot whose
@@ -83,7 +94,7 @@ func verifiedLine(st backup.Status, now time.Time) Check {
 	for _, sn := range st.Snapshots {
 		if sn.Verdict.DatabaseState == backup.StateFailed {
 			return fail(checkNameBackupVerified, "no snapshot's database is verified, and one has failed its check",
-				"the live database may be damaged: run bridge backup, then bridge backup --verify --full on the snapshot it writes")
+				"the live database may be damaged: run bridge backup, then bridge backup --verify <snapshot-dir> --full on the snapshot it writes")
 		}
 	}
 	return warn(checkNameBackupVerified, "no snapshot's database is verified yet",

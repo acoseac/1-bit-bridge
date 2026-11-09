@@ -56,6 +56,10 @@ func TestMain(m *testing.M) {
 	if os.Getenv(runAsBridgeEnv) != "" {
 		os.Exit(runAsBridge())
 	}
+	// A boot of the backup ticker that the restart loop's test kills.
+	if os.Getenv(backupBootEnv) != "" {
+		os.Exit(runBackupBoot())
+	}
 	adminauth.SetTestHashCost(bcrypt.MinCost)
 	trees, treesDir, err := emptyHostTrees()
 	if err != nil {

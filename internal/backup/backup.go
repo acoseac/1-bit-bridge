@@ -210,21 +210,51 @@ type Targets struct {
 // refuses to remove from under it.
 var afterIdentityCopy func()
 
-// Snapshot captures every present file in `src` into a fresh
-// timestamped directory under `<src.DataDir>/backups/`. Returns the
-// absolute path of the created directory.
+// Snapshot is CaptureSnapshot whose caller owes the snapshot no
+// verification: it lets the capture's ownership go, and removes its owner
+// lock with it, so the PENDING it publishes reads by its age (readVerdict)
+// and the prune keeps it no longer than any other. Every caller that
+// verifies what it captures takes CaptureSnapshot instead.
+func Snapshot(ctx context.Context, src Sources) (string, error) {
+	c, err := CaptureSnapshot(ctx, src)
+	if err != nil {
+		return "", err
+	}
+	c.Release()
+	_ = os.Remove(filepath.Join(c.Dir, ownerLockName))
+	return c.Dir, nil
+}
+
+// CaptureSnapshot captures every present file in `src` into a fresh
+// timestamped directory under `<src.DataDir>/backups/`, and answers it as a
+// Capture whose verification its caller owes: the snapshot's owner lock,
+// taken right after the directory is made and before anything is copied
+// into it, is held until FinishCapture has verified it, or Release gives it
+// up (backlog B653's second round), so neither the prune nor the orphan
+// sweep removes it meanwhile, in any process.
 //
 // The manifest it publishes records each captured file's size and SHA-256
 // (Manifest.Baselines: the copies' as they stream, the database's by one
 // read once VACUUM INTO has written it) and carries the bundle's
 // verification record already PENDING (backlog B653), so no bundle is ever
-// without one. Every caller verifies the bundle next and prunes after it
-// (SnapshotAndVerify, Finish).
+// without one.
 //
 // `ctx` is forwarded to the SQLite VACUUM INTO step and read retries so the
 // periodic ticker can cancel an in-flight snapshot on bridge shutdown. Pass
 // `context.Background()` if you don't have a richer scope.
-func Snapshot(ctx context.Context, src Sources) (snapDir string, retErr error) {
+func CaptureSnapshot(ctx context.Context, src Sources) (*Capture, error) {
+	var own *owner
+	dst, err := captureInto(ctx, src, &own)
+	if err != nil {
+		own.release()
+		return nil, err
+	}
+	return &Capture{Dir: dst, owner: own}, nil
+}
+
+// captureInto is the capture itself, its owner lock put in *own as soon as
+// the directory is made.
+func captureInto(ctx context.Context, src Sources, own **owner) (snapDir string, retErr error) {
 	if src.PlayerUUID != "" {
 		if err := completeCapturedPlayerSeal(filepath.Dir(src.PlayerUUID)); err != nil {
 			// Local repair is not part of a snapshot. The captured UUID/floor
@@ -253,12 +283,22 @@ func Snapshot(ctx context.Context, src Sources) (snapDir string, retErr error) {
 	// cancelled snapshot never wrote `manifest.json`, and `List` skips
 	// manifest-less dirs — so without this cleanup the partial dir
 	// (containing a full DB copy) would be invisible to Prune forever
-	// and accumulate unbounded across failures.
+	// and accumulate unbounded across failures. Its owner lock is let go
+	// first: Windows removes no file a handle holds open.
 	defer func() {
 		if retErr != nil {
+			(*own).release()
+			*own = nil
 			_ = os.RemoveAll(dst)
 		}
 	}()
+	// The snapshot is this capture's until its verification ends: owned
+	// before anything is copied into it or its manifest is published.
+	o, err := takeOwner(dst)
+	if err != nil {
+		return "", fmt.Errorf("own the snapshot: %w", err)
+	}
+	*own = o
 
 	var captured []string
 	// Each captured file's size and SHA-256 as it is written (backlog
@@ -915,10 +955,13 @@ type PruneResult struct {
 	// ReapErr is the orphan sweep's non-fatal outcome. Never nil-checked
 	// as a prune failure — see the type docblock.
 	ReapErr error
-	// Skipped says the keep-policy did not run this round: another
-	// process's verification or prune held the backups folder's lock
-	// (backlog B653). The next round prunes.
-	Skipped bool
+	// Skipped says the prune did not run this round, its orphan sweep
+	// included, and SkippedFor why (backlog B653): another process's
+	// verification or prune held the backups folder's lock (ErrBackupsBusy),
+	// and the next round prunes; or no lock was granted on it at all
+	// (ErrBackupsUnlocked), and no round prunes until one is.
+	Skipped    bool
+	SkippedFor error
 }
 
 // Prune is PruneContext with a background context. Kept for the CLI and
@@ -954,37 +997,48 @@ func Prune(backupsRoot string, keep int) (PruneResult, error) {
 // before, and beside them, beyond `keep` if they must, the newest snapshot
 // whose database is VERIFIED; while none is, the newest snapshot written
 // before verification (a legacy one, UNVERIFIED); the newest whose database
-// is FAILED or INCOMPLETE, as evidence, one at most; and every PENDING
-// younger than PendingBound, whose check may be under way. Every other
-// snapshot is kept or pruned by `keep` as before. It runs holding the
-// backups folder's lock (LockFileName) across its listing and its
-// deletions, tried once: a round that finds it held (another process
-// verifying or pruning) prunes nothing and says so (PruneResult.Skipped).
-// The orphan sweep runs first, as before, without it.
+// is FAILED or INCOMPLETE, as evidence, one at most; and every snapshot a
+// reader reads PENDING: one whose owner still owes it its verification
+// (owner.go: its capture's, or a claim's, queued or under way, however old),
+// or, with no owner lock to ask (a snapshot written before owners were
+// kept), one younger than PendingBound. A PENDING whose owner is gone reads
+// INCOMPLETE and is kept or pruned as one (backlog B653's second round), so a
+// capture whose process died before its verification is pruned by the next
+// round past `keep`. Every other snapshot is kept or pruned by `keep` as
+// before, and none is removed whose owner holds it as it is removed
+// (ownedNow).
+//
+// The whole prune, its orphan sweep included, runs holding the lock of the
+// backups folder (LockFileName) where it resolves (resolveDir), so every
+// path to one folder prunes under one lock, tried once: a round that finds
+// it held (another process verifying or pruning), or where no lock is
+// granted, removes nothing and says so (PruneResult.Skipped, SkippedFor).
 func PruneContext(ctx context.Context, backupsRoot string, keep int) (PruneResult, error) {
-	res := reap(ctx, backupsRoot)
-	if keep <= 0 {
-		return res, nil
+	// An empty root is the sweep's refusal, as before, before anything
+	// resolves it into the working directory.
+	if strings.TrimSpace(backupsRoot) == "" {
+		return reap(ctx, backupsRoot), nil
 	}
 	if err := ctx.Err(); err != nil {
-		return res, err
+		return PruneResult{}, err
 	}
 	// A folder not made yet holds nothing to prune, and no lock to take.
 	if _, err := os.Lstat(backupsRoot); errors.Is(err, os.ErrNotExist) {
-		return res, nil
+		return PruneResult{}, nil
 	}
-	unlock, err := lockBackups(ctx, backupsRoot, 0)
-	if errors.Is(err, ErrBackupsBusy) {
-		res.Skipped = true
-		return res, nil
+	root, err := resolveDir(backupsRoot)
+	if err != nil {
+		return PruneResult{}, fmt.Errorf("find the backups folder: %w", err)
+	}
+	unlock, err := lockBackups(ctx, root, 0)
+	if errors.Is(err, ErrBackupsBusy) || errors.Is(err, ErrBackupsUnlocked) {
+		return PruneResult{Skipped: true, SkippedFor: err}, nil
 	}
 	if err != nil {
-		return res, err
+		return PruneResult{}, err
 	}
 	defer unlock()
-	n, err := pruneKeepPolicy(ctx, backupsRoot, keep)
-	res.Deleted = n
-	return res, err
+	return pruneHeld(ctx, root, keep)
 }
 
 // reap is the orphan sweep every prune runs first: crash-orphaned partial
@@ -999,9 +1053,9 @@ func reap(ctx context.Context, backupsRoot string) PruneResult {
 	return PruneResult{Reaped: reaped, ReapErr: reapErr}
 }
 
-// pruneHeld is PruneContext for a caller that holds the backups folder's
-// lock already: a verification's Finish, which prunes under the hold its
-// verdict was written in.
+// pruneHeld is PruneContext for a caller that holds the lock of the backups
+// folder, given where it resolves: PruneContext's own, and a verification's
+// Finish, which prunes under the hold its verdict was written in.
 func pruneHeld(ctx context.Context, backupsRoot string, keep int) (PruneResult, error) {
 	res := reap(ctx, backupsRoot)
 	if keep <= 0 {
@@ -1045,6 +1099,14 @@ func pruneKeepPolicy(ctx context.Context, backupsRoot string, keep int) (int, er
 			return deleted, errors.Join(errors.Join(errs...), err)
 		}
 		full := filepath.Join(backupsRoot, m.DirName)
+		// A snapshot claimed for its check whose record holds no PENDING
+		// (one read INCOMPLETE) is owed it all the same.
+		if held, err := ownedNow(full); held {
+			if err != nil {
+				errs = append(errs, fmt.Errorf("ask whether %s is owed its check: %w", full, err))
+			}
+			continue
+		}
 		if err := os.RemoveAll(full); err != nil {
 			// Best-effort: a single locked / permission-drifted snapshot
 			// dir must not block reclaiming the older ones behind it, or
@@ -1054,6 +1116,7 @@ func pruneKeepPolicy(ctx context.Context, backupsRoot string, keep int) (int, er
 			errs = append(errs, fmt.Errorf("remove %s: %w", full, err))
 			continue
 		}
+		_ = os.Remove(rootVetoPath(full))
 		deleted++
 	}
 	return deleted, errors.Join(errs...)
@@ -1063,8 +1126,8 @@ func pruneKeepPolicy(ctx context.Context, backupsRoot string, keep int) (int, er
 // reader reads) the keep-policy keeps: the `keep` newest, and beside them
 // the newest whose database is VERIFIED, or while none is the newest written
 // before verification, the newest whose database is FAILED or INCOMPLETE,
-// and every PENDING (one PendingBound has not passed: readVerdict reads an
-// older one INCOMPLETE).
+// and every one a reader reads PENDING (readVerdict: its owner holds it, or
+// it has no owner lock to ask and PendingBound has not passed).
 func keptByRecovery(manifests []snapshotEntry, keep int) map[int]bool {
 	kept := make(map[int]bool, len(manifests))
 	for i := 0; i < keep && i < len(manifests); i++ {
@@ -1201,10 +1264,20 @@ func reapOrphans(ctx context.Context, backupsRoot string, grace time.Duration) (
 		if grace > 0 && now.Sub(info.ModTime()) < grace {
 			continue
 		}
+		// And one whose capture still holds it, however long it takes
+		// (backlog B653's second round): its owner lock is taken right after
+		// the directory is made, before anything is copied into it.
+		if held, err := ownedNow(dir); held {
+			if err != nil {
+				errs = append(errs, fmt.Errorf("ask whether %s is a capture under way: %w", dir, err))
+			}
+			continue
+		}
 		if err := os.RemoveAll(dir); err != nil {
 			errs = append(errs, fmt.Errorf("reap orphan %s: %w", dir, err))
 			continue
 		}
+		_ = os.Remove(rootVetoPath(dir))
 		reaped++
 	}
 	return reaped, errors.Join(errs...)
@@ -1214,13 +1287,16 @@ func reapOrphans(ctx context.Context, backupsRoot string, grace time.Duration) (
 // directory path so callers (admin UI, prune) can act on the entry
 // without re-reading the directory list — and the verdict a reader reads in
 // its record as it was listed (readVerdict: a snapshot with no record
-// UNVERIFIED, a PENDING past PendingBound INCOMPLETE, a VERIFIED beside the
-// bundle's veto INCOMPLETE), the one reading the pruner, the startup skip,
-// the doctor and the console take (backlog B653).
+// UNVERIFIED, a PENDING whose owner is gone, or with no owner lock past
+// PendingBound, INCOMPLETE, a VERIFIED beside the bundle's veto INCOMPLETE),
+// the one reading the pruner, the startup pass, the doctor and the console
+// take (backlog B653), with what its owner lock said, asked of a record that
+// holds a PENDING alone (probeOwner; OwnerNone otherwise).
 type snapshotEntry struct {
 	Manifest
 	DirName string       `json:"dirName"`
 	Verdict Verification `json:"-"`
+	Owner   Ownership    `json:"-"`
 }
 
 // List returns the snapshots under `backupsRoot`, newest-first.
@@ -1303,7 +1379,11 @@ func ListContext(ctx context.Context, backupsRoot string) ([]snapshotEntry, erro
 		if err != nil {
 			continue
 		}
-		out = append(out, snapshotEntry{Manifest: m, DirName: e.Name(), Verdict: readVerdict(m, now, vetoedAt(dir))})
+		own := OwnerNone
+		if m.hasPending() {
+			own = probeOwner(dir)
+		}
+		out = append(out, snapshotEntry{Manifest: m, DirName: e.Name(), Verdict: readVerdict(m, now, vetoedAt(dir), own), Owner: own})
 	}
 	sort.Slice(out, func(i, j int) bool {
 		return out[i].CreatedAt.After(out[j].CreatedAt)

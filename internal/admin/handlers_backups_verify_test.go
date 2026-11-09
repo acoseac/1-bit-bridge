@@ -43,11 +43,13 @@ func backupsBody(t *testing.T, s *Server) (string, backupsListResponse) {
 }
 
 // doctorLines are the doctor's backups lines for dataDir, as cmd/bridge's
-// doctorBackups builds them: backup.ReadStatus worded by doctor.BackupChecks.
+// doctorBackups builds them: backup.ReadStatus and the folder's lock probe,
+// worded by doctor.BackupChecks.
 func doctorLines(t *testing.T, dataDir string) []doctor.Check {
 	t.Helper()
-	st, err := backup.ReadStatus(t.Context(), filepath.Join(dataDir, backup.BackupsDirName))
-	return doctor.BackupChecks(st, err, true, time.Now())
+	root := filepath.Join(dataDir, backup.BackupsDirName)
+	st, err := backup.ReadStatus(t.Context(), root)
+	return doctor.BackupChecks(st, err, backup.ProbeBackupsLock(root), true, time.Now())
 }
 
 // lineNamed is the doctor's line named name.
@@ -345,5 +347,103 @@ func TestRepeatedFailedVerificationsThroughTheConsolesCreateStillPrune(t *testin
 		if b.DatabaseState != string(backup.StateFailed) || !slices.Contains(b.DatabaseReasons, string(backup.ReasonSchemaNewer)) {
 			t.Errorf("%s reads database %s %v, want FAILED schema-newer", b.DirName, b.DatabaseState, b.DatabaseReasons)
 		}
+	}
+}
+
+// pastStamp puts the backups folder's modification time an hour back and
+// fills the jobs card's cache over it, so that only a change the write
+// itself stamps can be what makes the next poll read the folder again,
+// whatever the filesystem's granularity, and answers the card as cached.
+func pastStamp(t *testing.T, s *Server, dataDir string) backupCard {
+	t.Helper()
+	root := filepath.Join(dataDir, backup.BackupsDirName)
+	past := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(root, past, past); err != nil {
+		t.Fatal(err)
+	}
+	s.invalidateLastBackup()
+	return s.getBackupCard(t.Context())
+}
+
+// TestAVerdictWrittenByAnotherCallerShowsOnTheJobsCardAtTheNextPoll pins
+// the stamp a verdict's write leaves on the backups folder (backup's
+// stampChange): the console's Jobs card caches what the folder holds until
+// its modification time moves, and a verdict written inside a snapshot by
+// another caller (the ticker, bridge backup --verify, another process)
+// moves nothing of the folder's own, so without the stamp the card kept
+// the PENDING it had cached until its TTL. Red with the stamp removed.
+func TestAVerdictWrittenByAnotherCallerShowsOnTheJobsCardAtTheNextPoll(t *testing.T) {
+	s, _, _ := newTestServer(t)
+	dataDir := t.TempDir()
+	src := liveStore(t, dataDir)
+	s.deps.BackupSources = src
+	dir, err := backup.Snapshot(t.Context(), src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if card := pastStamp(t, s, dataDir); !strings.HasPrefix(card.newestDatabase, string(backup.StatePending)) {
+		t.Fatalf("the card caches %q, want the snapshot's PENDING", card.newestDatabase)
+	}
+	if _, err := backup.VerifySnapshot(t.Context(), dir, backup.VerifyOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if card := s.getBackupCard(t.Context()); card.newestDatabase != string(backup.StateVerified) || card.lastVerifiedAt == nil {
+		t.Errorf("the next poll after another caller's verdict reads %q (last verified %v), want VERIFIED", card.newestDatabase, card.lastVerifiedAt)
+	}
+}
+
+// TestALeftVerifiedThatCannotBeRecordedReadsAsNotVerifiedEverywhere is
+// backlog B653's second round's red for a VERIFIED a later check did not
+// find, through the console and the doctor: a verified snapshot whose
+// database and files fail when checked again, and whose verdict's write
+// fails before its rename, keeps its VERIFIED record behind a veto, and GET
+// /api/backups, the doctor's lines and the Jobs card, cached as VERIFIED
+// before the write, each read it as not verified after the error. The
+// veto's own making moves the backups folder's modification time, so the
+// card reads the folder again (folded item 3). Red on the round before,
+// which put no veto over a record that would hold no VERIFIED.
+func TestALeftVerifiedThatCannotBeRecordedReadsAsNotVerifiedEverywhere(t *testing.T) {
+	s, _, _ := newTestServer(t)
+	dataDir := t.TempDir()
+	src := liveStore(t, dataDir)
+	s.deps.BackupSources = src
+	res := backup.SnapshotAndVerify(t.Context(), src, backup.SnapshotOptions{})
+	if !res.Verify.Record.Passes() {
+		t.Fatalf("the snapshot did not verify: %+v %v", res.Verify.Record, res.VerifyErr)
+	}
+	for _, name := range []string{backup.ManifestDBFileName, "server.crt"} {
+		p := filepath.Join(res.Dir, name)
+		data, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		data[len(data)-1] ^= 0xFF
+		if err := os.WriteFile(p, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if card := pastStamp(t, s, dataDir); card.newestDatabase != string(backup.StateVerified) {
+		t.Fatalf("the card caches %q, want VERIFIED", card.newestDatabase)
+	}
+	restore := backup.SetVerdictWriteFailuresForTest(func(string) error { return errors.New("injected: the staging failed") }, nil, nil)
+	_, err := backup.VerifySnapshot(t.Context(), res.Dir, backup.VerifyOptions{})
+	restore()
+	if err == nil {
+		t.Fatal("a verification whose write failed answered no error")
+	}
+	_, api := backupsBody(t, s)
+	if len(api.Backups) != 1 {
+		t.Fatalf("the API lists %+v", api.Backups)
+	}
+	if got := api.Backups[0]; got.DatabaseState == string(backup.StateVerified) || got.FilesState == string(backup.StateVerified) || api.NewestVerified != nil {
+		t.Errorf("the API reads the snapshot as %s/%s, newest verified %+v", got.DatabaseState, got.FilesState, api.NewestVerified)
+	}
+	for _, c := range doctorLines(t, dataDir) {
+		if c.Name == "backup-newest" && strings.Contains(c.Summary, "database VERIFIED") || c.Name == "backup-verified" && c.Status == doctor.OK {
+			t.Errorf("the doctor's %s line reads it verified: %q", c.Name, c.Summary)
+		}
+	}
+	if card := s.getBackupCard(t.Context()); card.newestDatabase == string(backup.StateVerified) || card.lastVerifiedAt != nil {
+		t.Errorf("the Jobs card still reads %q (last verified %v) after the failed write", card.newestDatabase, card.lastVerifiedAt)
 	}
 }

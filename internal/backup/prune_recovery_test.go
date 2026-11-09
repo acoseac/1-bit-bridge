@@ -24,6 +24,11 @@ const (
 	bundleLegacy     = "legacy"
 	bundlePending    = "PENDING, young"
 	bundleStale      = "PENDING, past its bound"
+	// The two that ask an owner lock (backlog B653's second round): one
+	// whose owner still owes it its check, however old its PENDING, and one
+	// whose owner's process is gone, however young.
+	bundleOwned    = "PENDING, past its bound, its owner live"
+	bundleOrphaned = "PENDING, young, its owner gone"
 )
 
 // writeBundle writes, under root, a snapshot of kind created age ago, named
@@ -63,11 +68,11 @@ func writeBundle(t *testing.T, root string, place int, age time.Duration, kind s
 		v := record("INCOMPLETE", "INCOMPLETE", "cancelled")
 		v["filesReasons"] = []string{"cancelled"}
 		m["verification"] = v
-	case bundlePending:
+	case bundlePending, bundleOrphaned:
 		v := record("PENDING", "PENDING")
 		v["pendingSince"] = created
 		m["verification"] = v
-	case bundleStale:
+	case bundleStale, bundleOwned:
 		v := record("PENDING", "PENDING")
 		v["pendingSince"] = time.Now().UTC().Add(-3 * time.Hour)
 		m["verification"] = v
@@ -87,6 +92,17 @@ func writeBundle(t *testing.T, root string, place int, age time.Duration, kind s
 	if err := os.WriteFile(filepath.Join(dir, backup.ManifestFile), data, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if kind == bundleOwned || kind == bundleOrphaned {
+		release, err := backup.TakeOwnerForTest(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if kind == bundleOrphaned {
+			release()
+		} else {
+			t.Cleanup(release)
+		}
+	}
 	return name
 }
 
@@ -95,11 +111,15 @@ func writeBundle(t *testing.T, root string, place int, age time.Duration, kind s
 // every snapshot stays; with it on the keep newest stay, and beside them,
 // beyond keep if they must, the newest snapshot whose database is VERIFIED,
 // while none is the newest written before verification (legacy), the newest
-// whose database FAILED or did not finish, one at most, and every PENDING
-// its bound has not passed. A files verdict of FAILED leaves a database
-// VERIFIED the recovery point. Red on main, which kept the keep newest and
-// nothing else, in every row but retention off's and keep 1 over verified
-// snapshots alone, the two the rule leaves as they were.
+// whose database FAILED or did not finish, one at most, and every PENDING a
+// reader reads as one: its owner live, however old (backlog B653's second
+// round), or, with no owner lock to ask, its bound not passed; a PENDING
+// whose owner is gone reads INCOMPLETE, however young. A files verdict of
+// FAILED leaves a database VERIFIED the recovery point. Red on main, which
+// kept the keep newest and nothing else, in every row but retention off's
+// and keep 1 over verified snapshots alone, the two the rule leaves as they
+// were; the owners' row is red on the round before, which read every PENDING
+// by its age.
 func TestThePruneKeepsWhatRecoveryNeeds(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -160,6 +180,12 @@ func TestThePruneKeepsWhatRecoveryNeeds(t *testing.T) {
 			keep:    1,
 			bundles: []string{bundleVerified, bundlePending, bundlePending, bundleStale, bundleFailed},
 			kept:    []int{0, 1, 2, 3},
+		},
+		{
+			name:    "an owner keeps its pending one however old and one whose owner is gone is evidence",
+			keep:    1,
+			bundles: []string{bundleVerified, bundleOrphaned, bundleOrphaned, bundleOwned, bundleFailed},
+			kept:    []int{0, 1, 3},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -215,12 +215,14 @@ func plainName(name string) bool {
 		filepath.Base(name) == name && !filepath.IsAbs(name) && filepath.VolumeName(name) == ""
 }
 
-// PendingBound is how long a PENDING stands before a reader takes it for an
-// INCOMPLETE whose check no one is finishing (ReasonInterrupted): longer than
-// a verification's deadline (VerifyDeadline) and the wait for the backups
-// folder's lock that comes first (AutoLockWait), with ten minutes to spare,
-// so a check under way, or one waiting its turn behind another process's, is
-// never read so. A PENDING younger than it is never pruned.
+// PendingBound is how long a PENDING with no owner lock to ask (one written
+// before owners were kept, or whose lock could not be asked) stands before a
+// reader takes it for an INCOMPLETE whose check no one is finishing
+// (ReasonInterrupted): longer than a verification's deadline (VerifyDeadline)
+// and the wait for the backups folder's lock that comes first
+// (AutoLockWait), with ten minutes to spare. A PENDING whose owner lock is
+// asked is read by its owner instead, and no age keeps one from the prune
+// (backlog B653's second round): its owner does.
 const PendingBound = VerifyDeadline + AutoLockWait + 10*time.Minute
 
 // VerifyDeadline is how long a verification may run: past it the check
@@ -228,20 +230,30 @@ const PendingBound = VerifyDeadline + AutoLockWait + 10*time.Minute
 const VerifyDeadline = 30 * time.Minute
 
 // vetoFileName is the file a verdict's write puts in the bundle before it
-// publishes a VERIFIED state and removes once the write is durable
-// (verify_record.go): while it stands, a reader reads that state as
-// INCOMPLETE (ReasonUnsynced), so a verification that returned an error
-// never leaves a VERIFIED any reader reads.
+// renames a record that holds a VERIFIED state, or one over a record that
+// holds one, and removes once the write is durable (verify_record.go): while
+// it stands, a reader reads a VERIFIED as INCOMPLETE (ReasonUnsynced), so a
+// verification that returned an error never leaves a VERIFIED any reader
+// reads. Where it cannot be made in the bundle, it is made beside it in the
+// backups folder (rootVetoPath).
 const vetoFileName = ".verdict-unsynced"
+
+// rootVetoPath is the veto of the snapshot in dir made beside it, in the
+// backups folder, where none can be made in the bundle.
+func rootVetoPath(dir string) string {
+	return filepath.Join(filepath.Dir(dir), vetoFileName+"-"+filepath.Base(dir))
+}
 
 // readVerdict is what a reader reads in m's record at now: the record as
 // written, but a snapshot with no record (written before verification) reads
 // UNVERIFIED (ReasonNoBaseline), a record whose format or states this bridge
-// does not know reads UNVERIFIED (ReasonUnknownRecord), a PENDING older than
-// PendingBound reads INCOMPLETE (ReasonInterrupted), and a VERIFIED beside the
-// bundle's veto (vetoed) reads INCOMPLETE (ReasonUnsynced). It is the one
-// reading the pruner, the startup skip, the doctor and the console take.
-func readVerdict(m Manifest, now time.Time, vetoed bool) Verification {
+// does not know reads UNVERIFIED (ReasonUnknownRecord), a PENDING whose
+// owner is gone (own, probeOwner) INCOMPLETE (ReasonInterrupted) at once,
+// one with no owner lock, or one that could not be asked, by its age: older
+// than PendingBound INCOMPLETE (ReasonInterrupted); and a VERIFIED beside its
+// veto (vetoed) reads INCOMPLETE (ReasonUnsynced). It is the one reading the
+// pruner, the startup pass, the doctor and the console take.
+func readVerdict(m Manifest, now time.Time, vetoed bool, own Ownership) Verification {
 	if m.Verification == nil {
 		return Verification{
 			Format: verificationFormat, DatabaseState: StateUnverified, DatabaseReasons: []Reason{ReasonNoBaseline},
@@ -264,7 +276,10 @@ func readVerdict(m Manifest, now time.Time, vetoed bool) Verification {
 	read := func(s State, reasons []Reason) (State, []Reason) {
 		switch s {
 		case StatePending:
-			if stale {
+			switch {
+			case own == OwnerLive:
+				return s, reasons
+			case own == OwnerGone || stale:
 				return StateIncomplete, []Reason{ReasonInterrupted}
 			}
 			return s, reasons
@@ -283,11 +298,22 @@ func readVerdict(m Manifest, now time.Time, vetoed bool) Verification {
 	return v
 }
 
-// vetoedAt reports whether the bundle at dir holds a verdict's veto: any
-// entry by that name, or one Lstat cannot tell is not there, reads as one.
+// vetoedAt reports whether the snapshot at dir stands behind a verdict's
+// veto, in its bundle or beside it (rootVetoPath): any entry by either name,
+// or one Lstat cannot tell is not there, reads as one.
 func vetoedAt(dir string) bool {
-	_, err := os.Lstat(filepath.Join(dir, vetoFileName))
-	return !errors.Is(err, os.ErrNotExist)
+	for _, p := range []string{filepath.Join(dir, vetoFileName), rootVetoPath(dir)} {
+		if _, err := os.Lstat(p); !errors.Is(err, os.ErrNotExist) {
+			return true
+		}
+	}
+	return false
+}
+
+// hasPending reports whether either verdict of m's record is PENDING as
+// written: the one record a reader asks the owner lock about.
+func (m Manifest) hasPending() bool {
+	return m.Verification != nil && (m.Verification.DatabaseState == StatePending || m.Verification.FilesState == StatePending)
 }
 
 // legacy reports whether m is a snapshot written before verification: one
