@@ -755,8 +755,9 @@
         auto-install is opt-in.
       </p>
 
-      {{/* update.checkEnabled (backlog B761). Applies at once, and only off
-           is written to bridge.yaml. */}}
+      {{/* update.checkEnabled (backlog B761). The one place it applies at once
+           (a hand edit of bridge.yaml or the variable waits for a restart),
+           and only off is written to bridge.yaml. */}}
       <div class="field">
         <label class="checkbox">
           <input name="updateCheckEnabled" type="checkbox" role="switch" {{if .Data.UpdateCheckEnabled}}checked{{end}}>
@@ -766,15 +767,18 @@
           On, the bridge asks the GitHub releases API for its latest release when
           it starts and then once every check interval: one request each, naming
           this bridge's version. Off, it asks nothing: no scheduled check, and
-          Check now and Install are refused, so no new release is installed, by
-          hand or automatically (auto-install keeps its setting and waits); a
-          check under way is stopped, and so is an install that has not reached
-          its swap. Roll back,
-          the status and an update already swapped in still work. Applies at
-          once; turned back on, the next check comes a full interval later.
-          Where the <code>BRIDGE_UPDATE_CHECK_ENABLED</code> environment variable
-          is set, it sets this switch at every start; a save here writes the
-          switch to bridge.yaml only when you change it.
+          Check now, Install and <code>bridge update</code> are refused, so no new
+          release is installed, by hand or automatically (auto-install keeps its
+          setting and waits); a check under way is stopped, and so is an install
+          that has not reached its decision to swap. Roll back, a start's rollback
+          of an install that failed, the status and an update past its decision
+          still work. This switch applies at once; turned back on, the next check
+          comes a full interval later. Before rolling back to a release older than
+          this switch, turn it on, which takes its key out of bridge.yaml: such a
+          release does not start on a bridge.yaml that names it. Where the
+          <code>BRIDGE_UPDATE_CHECK_ENABLED</code>
+          environment variable is set, it sets this switch at every start; a save
+          here writes the switch to bridge.yaml only when you change it.
         </small>
       </div>
 

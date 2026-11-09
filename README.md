@@ -124,13 +124,25 @@ and `bridge update` does the same from a shell; auto-install
 (`update.autoInstall`) is off unless you turn it on.
 
 To turn the checks off, switch off **Check for updates** in Settings → Updates,
-or set `update.checkEnabled: false` in `bridge.yaml`, or
-`BRIDGE_UPDATE_CHECK_ENABLED=false` in the service's environment. Off, the
-bridge asks GitHub nothing and installs nothing new, by hand or automatically
-(auto-install keeps its setting and waits); a rollback still works.
-`bridge update` reads the same file and variable, so an off set only in the
-service's environment (a systemd unit, a compose file) must be in your
-shell's too for the command to see it. The full behaviour is in
+which applies at once; or set `update.checkEnabled: false` in `bridge.yaml`,
+or `BRIDGE_UPDATE_CHECK_ENABLED=false` in the service's environment, either of
+which takes effect when the service next starts. The variable, where it is
+set, overrides the file and the console's switch at every start. Off, the
+bridge asks GitHub nothing and installs nothing new: no check at its start or
+on its schedule, no Check now, no Install, no `bridge update`, and no
+automatic install (auto-install keeps its setting and waits). The update
+status, the console's Roll back, a start's rollback of an install that
+failed, and a new version's probation are never refused. Turned back on in
+the console, the next check comes a full interval later; a bridge started
+with them on checks at once.
+
+`bridge update` reads the file and the variable when it starts, and again
+before it installs, so an off saved in the console while it waits refuses
+the install; an off set only in the service's environment (a systemd unit, a
+compose file) must be in your shell's too for the command to see it. A
+release from before the switch refuses settings that write
+`update.checkEnabled`: before rolling back to one, turn the checks on in the
+console, which removes the key. The full behaviour is in
 [`PROTOCOL.md`](PROTOCOL.md#updates).
 
 ## Build from source

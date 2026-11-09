@@ -2794,16 +2794,20 @@ func (b BackupConfig) EffectiveKeep() int {
 // "Check now" asks once more. False, it asks nothing: no scheduled check, none
 // at the start, no "Check now", and no new install, by hand or automatic, of a
 // release a check found before; autoInstall keeps its setting and is
-// suspended. Status, the operator's rollback and the install's own probation
-// and confirmation go on. A swap already past its decision still finishes,
-// and a restart the auto-installer deferred after its swap still fires once
-// no download is in flight, inside the quiet hours, asking GitHub nothing.
-// Only an explicit false is written: the console's save
-// of on writes no key. BRIDGE_UPDATE_CHECK_ENABLED reads as the key does, and
-// a value that reads as neither on nor off is off. `bridge update` reads the
-// same file and variable through the same loader, so an off set only in the
-// service's environment (a unit or compose file) must be in the shell's too
-// for the CLI to refuse.
+// suspended. Status, every rollback (the console's and a start's) and the
+// install's own probation and confirmation go on. A swap already past its
+// decision still finishes, and a restart the auto-installer deferred after its
+// swap still fires once no download is in flight, inside the quiet hours,
+// asking GitHub nothing. The console's save is the one change the running
+// service takes at once; it reads this key and the variable again only at its
+// next start. Only an explicit false is written, since a release from before
+// the key refuses a file that names it: the console's save of on writes no
+// key. BRIDGE_UPDATE_CHECK_ENABLED reads as the key does, and a value that
+// reads as neither on nor off is off. `bridge update` reads the same file and
+// variable through the same loader as it starts, and both again as its
+// install begins and at its decision, so an off set only in the service's
+// environment (a unit or compose file) must be in the shell's too for the CLI
+// to refuse.
 //
 // Default state: CheckEnabled on, AutoInstall=false (operator-triggered
 // only). The admin Settings UI exposes these for hand-edit; YAML-direct edits

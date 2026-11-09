@@ -197,13 +197,19 @@ libraryName: "My Music Library"
 #   and once for each "Check now" and each `bridge update`: one request, with
 #   no credential, naming the bridge's version and nothing of the library. An
 #   install downloads the release's archive and checksums from GitHub too.
-#   checkEnabled: false stops all of it at once (the admin console's switch,
-#   Settings -> Updates, writes only an off; also BRIDGE_UPDATE_CHECK_ENABLED):
-#   no check, no "Check now", and no new release installed, by hand or
-#   automatically (autoInstall keeps its setting and waits); a rollback still
-#   works. `bridge update` reads this file and that variable as the service
-#   does, so an off set only in the service's environment (a systemd unit, a
-#   compose file) must be in your shell's too for the command to see it.
+#   checkEnabled: false stops all of it: no check, no "Check now", and no new
+#   release installed, by hand or automatically (autoInstall keeps its setting
+#   and waits); the update status, the console's Roll back and a start's
+#   rollback of an install that failed are never refused. Written here, it
+#   takes effect when the service next starts; the admin console's switch,
+#   Settings -> Updates, applies at once and writes only an off here.
+#   BRIDGE_UPDATE_CHECK_ENABLED, where it is set, overrides this key and the
+#   console's switch at every start. `bridge update` reads this file and that
+#   variable when it starts and again before it installs, so an off set only
+#   in the service's environment (a systemd unit, a compose file) must be in
+#   your shell's too for the command to see it. A release from before this key
+#   refuses a file that writes it: delete the key, or turn the checks on in the
+#   console, before rolling back to one.
 #   autoInstall (off by default) installs what a check finds, inside
 #   quietHours ("HH:MM-HH:MM", local time) when they are set.
 # update:

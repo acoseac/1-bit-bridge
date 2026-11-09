@@ -6406,8 +6406,9 @@ function mountJobTrays() {
         // update.checkEnabled (backlog B761): live, and the card draws from
         // it, so a save redraws it (onSaved below).
         field: "updateCheckEnabled", type: "switch", label: "Check for updates",
-        hint: "Off, the bridge asks GitHub nothing and installs nothing new; a " +
-          "rollback and an update already swapped in still work.",
+        hint: "Off, the bridge asks GitHub nothing and installs nothing new; Roll " +
+          "back, a start's rollback and an install past its decision to swap still " +
+          "work. Applies at once.",
       },
       {
         field: "updateCheckIntervalHours", type: "number", min: 1,

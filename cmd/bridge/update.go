@@ -263,8 +263,8 @@ func refuseUpdateChecksOff(stderr io.Writer, cfgPath string) {
 	fmt.Fprintf(stderr, "bridge update: update checks are off (%s), so this command neither asks GitHub for a "+
 		"release nor installs one.\n", updateChecksOffSource(cfgPath))
 	sayHowToTurnUpdateChecksOn(stderr, cfgPath)
-	fmt.Fprintln(stderr, "The switch refuses no status, rollback or probation: bridge status, the console's Roll back and a "+
-		"start's crash rollback do not ask it.")
+	fmt.Fprintln(stderr, "The switch never refuses the console's update status, its Roll back, or a start's rollback of an "+
+		"install that failed.")
 }
 
 // updateChecksOffSource names what turned update checks off for this command:
@@ -280,15 +280,16 @@ func updateChecksOffSource(path string) string {
 // sayHowToTurnUpdateChecksOn says how to turn the checks on for this command:
 // the variable where it is what turned them off, since it overrides the file
 // and the console's switch alike, and otherwise the console's switch or the
-// file.
+// key taken out of the file, never written true: a release from before the
+// switch refuses a file that names it, and the console's on writes no key.
 func sayHowToTurnUpdateChecksOn(stderr io.Writer, path string) {
 	if _, set := config.UpdateCheckEnabledFromEnv(); set {
 		fmt.Fprintln(stderr, "BRIDGE_UPDATE_CHECK_ENABLED overrides bridge.yaml and the console's switch: unset it in this "+
 			"environment, or set it to true, then run this again.")
 		return
 	}
-	fmt.Fprintf(stderr, "Turn them on with the console's switch (Settings → Updates), or set update.checkEnabled: true in %s, "+
-		"then run this again.\n", path)
+	fmt.Fprintf(stderr, "Turn them on with the console's switch (Settings → Updates), or take update.checkEnabled out of %s "+
+		"(a file without it is on), then run this again.\n", path)
 }
 
 // settingsRereadError is the install's refusal where the reread of the switch
