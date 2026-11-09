@@ -507,10 +507,12 @@ func TestAnOffWhoseBackupDoesNotAnswerIsRefused(t *testing.T) {
 
 // TestAnOffOverAnInstallMarkerThatCannotBeReadIsRefused: a marker LoadState
 // cannot read (a permission, a directory in its place), unlike one that is not
-// there or does not parse, refuses the off, failing closed (backlog B761's
-// round 4): this serve cannot tell whether a start reads it later, a start run
-// as another user or past an error that does not last, and such a start's crash
-// rollback may act on it. The refusal is the marker's own
+// there or does not parse, refuses the off beside a backup (newOffCase's, and
+// TestAnUnreadableMarkerRefusesTheOffOnlyWhereABackupMayStand for the backup's
+// other places), failing closed (backlog B761's round 4): this serve cannot
+// tell whether a start reads it later, a start run as another user or past an
+// error that does not last, and such a start's crash rollback may act on it.
+// The refusal is the marker's own
 // (*ChecksOffMarkerError, matching ErrChecksOffUnchecked): its words say the
 // install marker could not be read and give the one way to turn the checks off
 // without the key, and name no version (none was read), no backup, no path and
@@ -572,6 +574,151 @@ func TestAnOffOverAnInstallMarkerThatCannotBeReadIsRefused(t *testing.T) {
 			}
 			if strings.Contains(words, marker.Detail) {
 				t.Errorf("the refusal's words carry its detail, which is the log's: %q", words)
+			}
+			if got := b.askedOf(); got != "" {
+				t.Errorf("the backup was asked %q over a marker that was not read, want nothing", got)
+			}
+			if got, err := os.ReadFile(c.cfg); err != nil || string(got) != offSettings {
+				t.Errorf("the settings after the decision = %q (%v), want them as they were", got, err)
+			}
+		})
+	}
+}
+
+// markerAsADirectory puts a directory where c's install marker goes: a marker
+// LoadState cannot read whatever the user, root included.
+func markerAsADirectory(t *testing.T, c offCase) {
+	t.Helper()
+	if err := os.Remove(StatePath(c.dir)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(StatePath(c.dir), 0o700); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// backupCases are the places of the backup beside an offCase's binary, as the
+// off's decision over a marker it cannot read finds them (backupAt): there
+// says a backup stands (a regular file at the binary's path and .bak), and
+// cause, where not nil, is the lookup's failure otherwise than finding
+// nothing. place arranges c, which comes with a backup (newOffCase), before
+// the decision.
+var backupCases = []struct {
+	name  string
+	place func(t *testing.T, c *offCase)
+	there bool
+	cause error
+}{
+	{name: "no backup", place: func(t *testing.T, c *offCase) {
+		if err := os.Remove(c.bin + ".bak"); err != nil {
+			t.Fatal(err)
+		}
+	}},
+	{name: "a directory where the backup goes", place: func(t *testing.T, c *offCase) {
+		if err := os.Remove(c.bin + ".bak"); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(c.bin+".bak", 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}},
+	{name: "a binary path that is not absolute", place: func(t *testing.T, c *offCase) { c.bin = "bridge" }},
+	{name: "a backup", there: true},
+	{name: "a backup in a directory this user may not search", cause: fs.ErrPermission, place: func(t *testing.T, c *offCase) {
+		if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+			t.Skip("a directory this user may not search needs POSIX modes and a user that is not root")
+		}
+		locked := filepath.Join(t.TempDir(), "locked")
+		if err := os.Mkdir(locked, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		c.bin = filepath.Join(locked, "bridge")
+		if err := os.WriteFile(c.bin+".bak", []byte("bridge-binary-0.2.3"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(locked, 0); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(locked, 0o700) })
+	}},
+	{name: "a link loop on the backup's way", cause: syscall.ELOOP, place: func(t *testing.T, c *offCase) {
+		if runtime.GOOS == "windows" {
+			t.Skip("a link loop needs symbolic links, which Windows gives only with a privilege")
+		}
+		dir := t.TempDir()
+		if err := os.Symlink("loop", filepath.Join(dir, "loop")); err != nil {
+			t.Fatal(err)
+		}
+		c.bin = filepath.Join(dir, "loop", "bridge")
+	}},
+}
+
+// TestTheBackupsLookupTellsWhatIsNotThereFromWhatCannotBeLookedUp: backupAt
+// answers a backup there for a regular file at the binary's path and .bak,
+// none for nothing there, an entry that is no regular file or a binary path
+// that is not absolute, and the lookup's error for a lookup that fails
+// otherwise (a permission, a link loop: backlog B761's round 5), while
+// backupBeside, which the crash rollback's own requirement reads, answers as
+// it did: true for the regular file alone.
+func TestTheBackupsLookupTellsWhatIsNotThereFromWhatCannotBeLookedUp(t *testing.T) {
+	for _, tc := range backupCases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newOffCase(t, nil)
+			if tc.place != nil {
+				tc.place(t, &c)
+			}
+			there, err := backupAt(c.bin)
+			if there != tc.there || (tc.cause == nil) != (err == nil) || (tc.cause != nil && !errors.Is(err, tc.cause)) {
+				t.Errorf("backupAt = %v, %v; want %v, the lookup's error %v", there, err, tc.there, tc.cause)
+			}
+			if got := backupBeside(c.bin); got != tc.there {
+				t.Errorf("backupBeside = %v, want %v as before", got, tc.there)
+			}
+		})
+	}
+}
+
+// TestAnUnreadableMarkerRefusesTheOffOnlyWhereABackupMayStand: over an
+// install marker the decision cannot read whatever the user (a directory in
+// its place), the off is refused only where a backup stands beside the binary
+// serve runs as, or where the backup's lookup fails otherwise than finding
+// nothing (backlog B761's round 5: the Claude review's Low on round 4, and
+// the two reviews of its brief). With nothing there, or no regular file, or a
+// binary path that names none, no crash rollback can put a backup back, and a
+// backup appears only through a later install, which writes a fresh marker of
+// its own and backs up a release that takes the key: the off is saved. A
+// lookup that fails cannot tell, and refuses in the marker's words, its Detail
+// naming the lookup's failure without a path. The backup is asked nothing, and
+// the settings are as they were, either way.
+func TestAnUnreadableMarkerRefusesTheOffOnlyWhereABackupMayStand(t *testing.T) {
+	for _, tc := range backupCases {
+		t.Run(tc.name, func(t *testing.T) {
+			st := probationMarker(1)
+			c := newOffCase(t, &st)
+			markerAsADirectory(t, c)
+			if tc.place != nil {
+				tc.place(t, &c)
+			}
+			b := refusesTheKey(c)
+			err := c.decide(context.Background(), b, 0)
+			refused := tc.there || tc.cause != nil
+			var marker *ChecksOffMarkerError
+			switch {
+			case !refused && err != nil:
+				t.Errorf("the off's decision over a marker it cannot read, with %s = %v, want it saved", tc.name, err)
+			case refused && (!errors.As(err, &marker) || !errors.Is(err, ErrChecksOffUnchecked)):
+				t.Fatalf("the off's decision over a marker it cannot read, with %s = %v, want the marker's refusal", tc.name, err)
+			case refused:
+				if !strings.Contains(err.Error(), "the install marker could not be read") {
+					t.Errorf("the refusal is not in the marker's words: %v", err)
+				}
+				requireNoPathIn(t, err, c.dir, filepath.Dir(c.bin))
+				if strings.Contains(marker.Detail, c.dir) || strings.Contains(marker.Detail, filepath.Dir(c.bin)) {
+					t.Errorf("the refusal's detail names a path: %q", marker.Detail)
+				}
+				if tc.cause != nil && (!strings.Contains(marker.Detail, "the backup could not be looked up") || !errors.Is(err, tc.cause)) {
+					t.Errorf("the refusal's detail (%q) and its causes do not keep the lookup's failure, %v", marker.Detail, tc.cause)
+				}
 			}
 			if got := b.askedOf(); got != "" {
 				t.Errorf("the backup was asked %q over a marker that was not read, want nothing", got)

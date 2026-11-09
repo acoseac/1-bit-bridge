@@ -190,13 +190,16 @@ func (e *ChecksOffUncheckedError) Error() string {
 func (e *ChecksOffUncheckedError) Is(target error) bool { return target == ErrChecksOffUnchecked }
 
 // ChecksOffMarkerError is ChecksOffRefused's refusal, failing closed, of an
-// off over an install marker it could not read (backlog B761's round 4): what
-// the boot's crash rollback would do cannot be told from a marker that was not
-// read, so its words name no version, no backup and no path, and give the one
-// way to turn the checks off without writing the key. Detail is the read's
-// error without its path, for the bridge's log alone (an install marker's read
-// error names no path in a refusal or a log line, B613's round 5), and Unwrap
-// keeps the error for code. It matches ErrChecksOffUnchecked.
+// off over an install marker it could not read while a backup stands beside
+// the binary, or its lookup fails (backlog B761's rounds 4 and 5): what the
+// boot's crash rollback would do with that backup cannot be told from a
+// marker that was not read, so its words name no version, no backup and no
+// path, and give the one way to turn the checks off without writing the key.
+// With no backup there the off is saved (ChecksOffRefused). Detail is the
+// read's error without its path, and the lookup's where it failed, for the
+// bridge's log alone (an install marker's read error names no path in a
+// refusal or a log line, B613's round 5), and Unwrap keeps the errors for
+// code. It matches ErrChecksOffUnchecked.
 type ChecksOffMarkerError struct {
 	Detail string
 	err    error
@@ -256,17 +259,33 @@ func (e *ChecksOffMarkerError) Unwrap() error { return e.err }
 // them, so no crash rollback acts on either, and the off is saved. Any other
 // failure to read the marker (a permission, EIO, EMFILE, a directory in its
 // place) refuses the off, failing closed (*ChecksOffMarkerError, backlog
-// B761's round 4). A start that cannot read the marker either does nothing
-// with it but remove it (recoverCrashedInstall leaves it to its admission,
-// which removes it, durably), but this serve cannot tell whether the start
-// that reads it next fails too: an error that does not last (EMFILE on a busy
-// serve, EIO) passes, and a start run as another user, root among them, reads
-// what this one may not, and its crash rollback may then act on an install
-// the off kept from its backup.
+// B761's round 4), where a backup stands beside BinaryPath or its lookup fails
+// otherwise than finding nothing there (backupAt). A start that cannot read
+// the marker either does nothing with it but remove it (recoverCrashedInstall
+// leaves it to its admission, which removes it, durably), but this serve
+// cannot tell whether the start that reads it next fails too: an error that
+// does not last (EMFILE on a busy serve, EIO) passes, and a start run as
+// another user, root among them, reads what this one may not, and its crash
+// rollback may then act on an install the off kept from its backup. Where no
+// backup stands there (nothing at its path, an entry that is no regular file,
+// a binary path that names none, as backupBeside reads one), the off is saved
+// over such a marker too (round 5, the Claude review's Low): no crash rollback
+// puts back a backup that is not there, and a backup appears only through a
+// later install, which waits for this decision's hold of the install marker's
+// lock, writes a fresh marker of its own and backs up the bridge installed
+// then, a release with the switch that takes the key.
 func ChecksOffRefused(ctx context.Context, s ChecksOffSave) error {
 	st, err := LoadState(s.DataDir)
 	if err != nil {
-		return &ChecksOffMarkerError{Detail: fsutil.ErrorWithoutPath(err), err: err}
+		there, lookErr := backupAt(s.BinaryPath)
+		if !there && lookErr == nil {
+			return nil
+		}
+		detail := fsutil.ErrorWithoutPath(err)
+		if lookErr != nil {
+			detail += "; the backup could not be looked up: " + fsutil.ErrorWithoutPath(lookErr)
+		}
+		return &ChecksOffMarkerError{Detail: detail, err: errors.Join(err, lookErr)}
 	}
 	if ok, _ := CrashRollbackAtLimit(st, s.Current); !ok || !backupBeside(s.BinaryPath) {
 		return nil
