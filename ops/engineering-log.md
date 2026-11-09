@@ -87883,3 +87883,35 @@ point 6 R7a and R7b; point 7 R8. Two of the changes no test here can see:
 root shows nothing), and `sourceReadable`'s one-byte read past an open that
 succeeded (no portable way to make a regular file open and then fail its
 read).
+
+### The gates
+
+Through the shared build lock, on go1.27.3, go.mod's, with TMPDIR on this
+disk (`.tmp/_b652/r2/gate.py`, two sessions).
+
+At c27f5610, the brief's gate as written, `GOTOOLCHAIN=go1.27.3 make test
+TEST_PKGS='./internal/integrity/... ./internal/analyze/... ./internal/api/...
+./internal/manifest/... ./internal/doctor/... ./cmd/bridge/...'`: green,
+every package, in 1656 s (internal/integrity 6 s, internal/analyze 61 s,
+internal/api 151 s, internal/manifest 1641 s, internal/doctor 7 s,
+cmd/bridge 1331 s). Then the round's new and changed tests by name with
+`-race` in the six packages that hold them (20 tests, 75 subtests): green,
+the as-root ownership case skipped, saying why.
+
+At 65105d14, which changes a test's comment and nothing else: `make test`
+over every other package of the module (61, 14 with no tests), green,
+internal/fsutil's identity and rooted paths, internal/atomicwrite's durable
+writer and rename, internal/alsa and internal/alsapcm (this host's ALSA)
+and internal/player/hotplug among them, run here for real (internal/admin
+1034 s, internal/backup 276 s, internal/transcode 206 s, internal/alsapcm
+86 s, internal/atomicwrite 20 s); `make vet` for linux/amd64, windows,
+darwin and linux/386; and `make build-all`, its build-tag census included:
+all clean.
+
+Outside the lock: go1.27.3's own gofmt over every Go file round 2 changes,
+clean; `rules-b652-r2.patch` applied to a `git archive` copy of 65105d14,
+where `make docs-check` passes (CLAUDE.md 82.1%, the worst load 67.7%;
+jobs.md 30,722 bytes) and cmd/bridge's `TestEveryCitedTestNameExists`
+passes, git reading this worktree's index, and fails, naming the file, once
+a name no test has is planted in the copy's jobs.md; `git status` clean
+after.
