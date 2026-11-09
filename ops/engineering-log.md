@@ -89207,12 +89207,15 @@ on the box it ran on the node stays as it was, its name included, and on another
 again; eca5959a corrects the field comment and the README, which had taken the brief's word. `tsnet.Server.Start` runs
 `startLogger` outside a test binary, whose logtail transport is a no-op only while `envknob.NoLogsNoSupport()` reads
 `TS_NO_LOGS_NO_SUPPORT` true through `os.Getenv` (a value `strconv.ParseBool` refuses is `log.Fatalf`); the bridge never
-set it, so every tsnet-mode bridge uploaded its node's logs, and named the node after the library. Five things beside
+set it, so every tsnet-mode bridge uploaded its node's logs, and named the node after the library. Four things beside
 the brief: network flow logs (`feature/netlog`, linked into the bridge) run only while the variable is false, so it
 covers them too; `hostinfo.New` reports it to the coordination server; the coordination server can set it itself (its
-`DisableLogTail` debug message); v1.104.2 refuses to start on an empty state file (`maybeMigrateLocalStateFile` parses it
-before `NewFileStore`'s empty-file rule); and on Windows the profile manager starts from `ipn.ServerModeStartKey`, which
-tsnet never writes, while `_current-profile` is written as elsewhere. The refusal reaches `Status.Health` as the
+`DisableLogTail` debug message); and tsnet starts its profile manager without an OS
+(`controlclient.LocalBackendStartKeyOSNeutral`, which `ipnlocal.NewLocalBackend` turns into an empty OS for
+`newProfileManagerWithGOOS`), so upstream's start key is `_current-profile` on Windows too, the key the reading takes.
+Until round 2 this said that on Windows the profile manager starts from `ipn.ServerModeStartKey`, read from
+`readAutoStartKey` without tsnet's flag (Codex on #1445). Backlog B828 and B829 name what stays open of the reading.
+The refusal reaches `Status.Health` as the
 local-log warnable ("The local log is misconfigured: …") once the tracker's built-in warnables update. One doc claim was
 stale: `docs/docker.md` said tsnet mode cannot be set through a `BRIDGE_*` variable; `BRIDGE_TAILSCALE_MODE=tsnet` loads
 as tsnet (checked with `config.EnvOverrideDocs` and a load).
@@ -89259,9 +89262,11 @@ e56e1ca0 makes it fail at once.
 No unprivileged network namespace exists on legion0: `kernel.apparmor_restrict_unprivileged_userns=1` makes `unshare -rn`
 fail writing uid_map, and `systemd-run --user -p PrivateNetwork=yes` runs its unit in the host's network namespace (the
 probe that showed it made one TCP connect and sent one UDP datagram to a public resolver; nothing of the bridge's). The
-script confines the bridge with Landlock (TCP connect to the proxy's port alone, EACCES elsewhere) and seccomp (EPERM for
-every IPv4 and IPv6 socket but plain TCP, MPTCP and io_uring included), checks that from inside before any run, and
-routes HTTP and HTTPS through a proxy on 127.0.0.1 that logs each target and refuses all; `TS_DEBUG_ALWAYS_USE_DERP=1`
+script confines the bridge by port, not by address, with Landlock (TCP connects to the proxy's port number alone, at any
+address, EACCES for every other port) and seccomp (EPERM for every IPv4 and IPv6 socket but plain TCP, MPTCP and io_uring
+included), checks that from inside before any run (in round 1 taking any refusal; round 2 requires each mechanism's own
+errno), and routes HTTP and HTTPS through a proxy on 127.0.0.1 that logs each target and refuses all; a connection to the
+proxy's port number at another address would not have been prevented, nor logged. `TS_DEBUG_ALWAYS_USE_DERP=1`
 lets the node start without UDP. Three rounds, 60 s windows: the key true, `CONNECT log.tailscale.com:443` first at 2.21
 to 2.33 s, two a window; the key absent, and the key true with `TS_NO_LOGS_NO_SUPPORT=true` inherited, none; the
 coordination server's CONNECTs (25 to 27) and the updater's one to api.github.com in every run; every start named the
@@ -89314,3 +89319,96 @@ linux/arm clean, and go1.27.3's gofmt lists none of the 17 Go files the branch c
 (`git apply --check`); on a git-archive copy of HEAD with it applied, `make docs-check` and `verify_moves.py --base HEAD
 --edit` (the import keeper's line, whose long form the patch edits) pass, and `TestEveryCitedTestNameExists` is green
 there and red with a name cited that no test defines.
+
+## 2026-11-09 — B749 round 2: the evidence claims what it shows, an upgraded install checked, a node built again in one process, the record exact
+
+Worker b749, legion0, branch `fix/b749-tsnet-logs` at #1445's head 7382e659 (main 71f707ab merged in), against
+Codex's and the Claude API's reviews of #1445 and the two reviews of this round's brief. Commits 2664276c (a node built
+again in the same process reads the inherited value) and the one that carries this record (the evidence script, its
+README, the README, the release notes, round 1's entry corrected). The rules changes ship as `rules-b749-r2.patch`
+(`cli-serve.md`'s B749 line and its long form, and the import keeper's long form).
+
+### The findings, each checked in the code first
+
+- **Codex P2: the sandbox's claim.** It held. Landlock's network rule (`LANDLOCK_RULE_NET_PORT`, whose attribute is an
+  access right and a port) names no address, so the confinement let the bridge connect to the proxy's port number at
+  any address, and the self-check took any socket error for a refusal. No mechanism that confines by address is open to
+  an unprivileged process here: a network namespace is refused (round 1's entry), and a cgroup connect hook needs
+  CAP_BPF and CAP_NET_ADMIN. So the claim is now what holds, in `evidence.py`'s module and `apply_sandbox` docstrings,
+  its README, the README's sentence and round 1's entry (corrected in place): confined by port, not by address, and the
+  proxy's record of every request it receives. The self-check now requires each mechanism's own errno, inside and out:
+  inside, a connection to another port with a listener there, on 127.0.0.1 and on ::1, is refused with Landlock's
+  EACCES, and every IPv4 and IPv6 socket but plain TCP with the filter's EPERM; outside, the same connections are made
+  and the UDP sockets created (and the ICMP, SCTP and MPTCP ones; a raw socket is refused there too, for want of a
+  privilege). The proxy's port at ::1, where nothing listens, gets the kernel's ECONNREFUSED inside, never EACCES: the
+  claim's limit, shown. Controls on copies of the script, each predicted: Landlock never enforced (S1) fails the EACCES
+  line and the filter never installed (S2) the EPERM line, each with exit 2 and no bridge run.
+- **Claude 1: an upgraded install.** It held: every run started from a fresh install. `--previous` now adds one, the
+  setup no arm and every expectation its own. The earlier build runs once on a fresh install without the key and must
+  run its whole window, ask for `log.tailscale.com`, and leave a non-empty `tailscaled.log*.txt` in the node's state
+  dir; it runs again on a copy of that data dir and must ask again (the positive control on that state); this build
+  then runs on the data dir itself, without the key, for the whole window, and must not ask. Every check of this
+  build's runs is over its runs alone (`binary`), so the earlier build's uploads and its library-named node are no
+  failure of those checks. `write_install` refuses a work dir that already holds the install, and the second start
+  is watched for the whole window, not 20 s (the brief's reviews).
+- **Claude 2: rollback.** It held: round 1's red run saw main refuse the key at load, and `DecodeFile`'s known-fields
+  decode refuses an unknown key whatever its value. One line in the release notes and the README: remove
+  `tailscale.uploadDiagnosticLogs` from `bridge.yaml` before going back, and the older version uploads unless
+  `TS_NO_LOGS_NO_SUPPORT=true` is in its environment.
+- **Codex P3: the Windows explanation.** It held. tsnet passes `controlclient.LocalBackendStartKeyOSNeutral`
+  (tsnet.go, line 970), `ipnlocal.NewLocalBackend` turns it into an empty OS (local.go, 560 to 564), and
+  `readAutoStartKey` then takes `ipn.CurrentProfileStateKey` on every OS (profiles.go, 898 to 910): round 1 read that
+  function without tsnet's flag. Corrected in the long form and in round 1's entry.
+- **Claude 3: two open items in prose.** Named as backlog B828 and B829, by those ids alone, in the long form and in
+  round 1's entry.
+- **Claude 4: the keeper's counts.** They were measured on 9f49ab2f, and one of the five tree reds, NC18, mutated the
+  real allowance's condition text, which B749 removed. Not run again; the long form says they were measured before B749.
+- **The Claude API's question: a bridge started again with the variable this process set.** Nothing re-executes the
+  bridge with it: serve builds its node once, every child process serve starts is a tool or `serve --validate-config`
+  (`updater.CheckConfig`), which builds no node, and a restart is the service manager's, from the unit's environment.
+  The same harm came by another road: the menu's "Start now" runs `runServe` in the menu's process and runs it again
+  after a stop (`actStartNow`), as bridge init's start can before it, and the second node read the true the first
+  node's policy had set as inherited: a consent saved between the two never reached it, and a tailnet's refusal would
+  have named a variable nobody set. 2664276c: the policy keeps what it found before it first set the variable
+  (`policyRecord`), reads that as the inherited value while the variable holds the true it set, and hands it back
+  (`putBackNoLogsEnv`) where a later config allows the uploads; a value anything else put there since, upstream's own
+  setter included, stays. Putting the value back at `Close` was rejected: `Close` returns while a `Start` may still be
+  building its node, so a put-back could reach a start that has not chosen its log transport.
+  `ForgetUploadPolicyForTest` starts a test case as a process that has built no node.
+
+### Red first and the controls
+
+With a names-only shim (`ForgetUploadPolicyForTest` doing nothing, the policy as round 1 left it):
+`TestALaterNodeInTheSameProcessReadsTheInheritedValue` red on five rows (a consent given after a node without one; an
+inherited false, and an inherited 1, with a consent given after; no consent twice; no consent, a consent, no consent),
+green on the four that pin what must not change (an inherited true and a consent after, a consent withdrawn, a false
+set in the process after the policy's true, a true upstream set itself); `TestAServeRunAgainInTheSameProcessReadsTheInheritedValue`
+red on its two consent rows (unset and false inherited), green on the inherited true and the no-consent rows. Logs:
+`.tmp/_b749/r2-red-tsnet.log`, `.tmp/_b749/r2-red-cmd.log`. Controls, each predicted in
+`.tmp/_b749/controls2.predictions.txt` before it ran, the files put back from memory and the tree found equal to HEAD;
+the run with no mutation green:
+
+| | mutation | red |
+|---|---|---|
+| R01 | the record never taken as the variable's owner | the five rows above; the serve test's two |
+| R02 | no put-back | four rows (one more than predicted: the third node of "no consent, a consent, no consent" reads the true left behind); the serve test's two |
+| R03 | ownership by the record alone, not the value it set | the false set after the policy's true |
+| R04 | the record keeps the true it wrote, not the value before | the five rows; the serve test's two |
+| R05 | the test reset forgets nothing | none, against the prediction: each row's cleanup restores the record as the row found it |
+| R05b | R05 over the whole internal/tsnet package | as re-predicted: the two inherited-true rows of the policy table and of the refusal test, and the inherited true with a consent after (lifecycle_test.go and tsnet_test.go build nodes without the helper first) |
+| R06 | cmd/bridge's `inheritNoLogsEnv` without the reset | the tile's key-true, inherited-true refused start |
+
+### Evidence from a production binary
+
+Release-shaped binaries (CGO_ENABLED=0, the release tags, -trimpath) built from git archives: this build at 2664276c
+(sha256 af5734b2…, "bridge-2664276c"), and main before this PR at 71f707ab (sha256 cb9fe668…, "bridge-main-71f707ab")
+for `--previous`. The first attempt exited every bridge at once ("no config at …"): a relative `--work` gave each
+bridge a config path relative to a folder it did not run in, which round 1 never met, its `--work` being absolute; the
+script now makes `--work` absolute. The run after it, three rounds of 60 s windows, every check held (exit 0;
+`.tmp/_b749/ev-r2/full2/evidence.json`). The self-check as described above. The key true: `CONNECT
+log.tailscale.com:443` first at 2.25, 2.30 and 2.23 s, two a window; the key absent, its second start (now 60 s), and
+the key true with `TS_NO_LOGS_NO_SUPPORT=true` inherited: none. The upgraded install: the earlier build ran its whole
+window, asked for the log host at 2.22 s, named the node after the library, and left `tailscaled.log2.txt` at 22,304
+bytes; run again on a copy of that data dir it asked at 0.11 s; this build on the data dir itself asked for it never in
+60 s, named the node `1-bit-bridge`, and left the buffer at 92 bytes, its no-op transport having taken what waited.
+The coordination server's CONNECTs came in every run, 25 to 27 a window, and the updater's one to api.github.com.
