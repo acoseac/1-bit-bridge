@@ -89787,3 +89787,72 @@ docs-check` passed, and again on a copy of the branch with the rules patch appli
 `TestQualificationRunbookVersion` passed too; the qualification check against main's tip's
 merge base (3d0a0d05) passed at 51; `make test` passed, 89 packages ok and none failing
 (2,080 s), the Linux-only tests run here; and `make build-all` passed.
+
+## 2026-11-09 — B728 B9 round 11: a reply the wait took is judged with the record read again; an answer names its command
+
+Worker b728-b9, legion0 (Ubuntu 26.04, Linux 7.0, Go 1.27.3), branch `feat/b728-b9-choice`
+at 175e3e0f (round 10 taken, main merged in). The reviews of round 10 (Codex's one finding,
+Claude's one) and the two reviews of this round's brief (Codex's four, Claude's five),
+folded into its two points. Commits: 1a58ac40 (the cases, red, with the test seam on a
+caller after its wait), 4de1b497 (the fix and qualification 52), 136a2102 (the pin of the
+fix's bounded wait, with its writer-side seam), this record, and the gates' paragraph after
+it. The rules are a patch the orchestrator applies (`rules-b728-b9-r11.patch`):
+`player.md`'s B765 bullet, with its long form.
+
+**The defects: confirmed, red first.** Red on 1a58ac40, whose only code change is the test
+seam `nativeSeams.recorded` (nil outside a test: it runs on a request's caller once its wait
+on its context's or the deadline's arm, the life ended, has waited for the writer's end, and
+before it reads the reply), in 12 rows, each predicted by name before the run
+(`r11-red.predictions.txt`). A resume the writer never ran, its caller on the deadline's arm
+(off the life) or its context's (on it) held there while the writer's late close failed or
+confirmed and the writer answered it as it ended, was judged with the record read before
+that reply and answered `ErrReleaseUnconfirmed` alone, the close's failure lost where it
+failed and in place of the life's typed cancellation where it confirmed (Codex's review of
+round 10; 4 rows). And the writer named a resume's answers "native activation": its
+admission's refusal while the life runs (`admit`), its answer as the writer ends (the
+loop-end reply) and its held refusal's typed cancellation (`replied`), and the same through
+ActivatePaused handing an activated sink to Resume, against the entry's "native resume"
+(Claude's review of round 10, and both reviews of the brief: the admission and the loop-end
+paths are Codex's; 8 rows). ActivatePaused of a sink never activated named "native
+activation" already, as it should: two pins.
+
+**What the brief asked that held, and what it left open.** The verdict was not widened to
+read a never-run answer's error, which carries `errNativeActivationCancelled` with the
+record joined; the record is read again instead, and the verdict's table stays as round 10
+built it. The writer's re-typing of what the ended life caused (`lifeCancelled(r.op, end)`)
+now names the command too, but nothing sees it: once the life has ended the verdict builds
+the typed cancellation from the answer's command; changed for consistency, as `sent`'s none
+is, with no red. And one addition the brief did not ask for: no case reached the fix's
+bounded wait for the writer's end, every caller meeting `done` closed, so a removal of it
+passed the suite; `TestNativeAnAnswerTheWriterSentAsItEndedWaitsForItsEnd` pins it, with a
+second test seam (`nativeSeams.ending`, nil outside a test) that holds the writer between
+its last answer and its end.
+
+**The fix (4de1b497).** Once the sink's life has ended, a request's answer is judged with
+the cleanup's record read after its reply. `endOfLife` is the wait alone (the life's
+Immediate release begun where no one has, the writer's end awaited within the release's
+shared budget), and `record` reads what the sink recorded (its locked section, `ended` read
+first): on every arm of the wait and at every entry, after the answer is read, so a reply
+the writer sent once the wait was over is judged with what the writer recorded before it. A
+request the writer never ran is answered after the writer's close, its last device call, and
+just before its end, so `record` waits for that end within `nativeEndAfterReply` (100 ms,
+through the sink's clock seam) first; past that bound the record reads as the writer's still
+in its cleanup, the release unconfirmed. Every answer and admission the writer builds for a
+request names the command that asked, carried on the request (`nativeRequest.op`): Resume's
+"native resume", ActivatePaused's hand-off to Resume included; Activate's and
+ActivatePaused's first activation "native activation"; in `replied`, the loop-end answer,
+the admission's error and `sent`'s none. The qualification version moved to 52, its record
+correcting 51's (that a failed close reached the stopped command's own answer whichever way
+its wait took it: not on the context's and deadline's arms in that window); `LegacyVersion`
+stays 35. Serve's sinks, whose lives end only after Done, answer as before.
+
+**Controls**, predicted by name and count before the runs (`r11-controls.predictions.txt`),
+the files' bytes restored after each, `-race`, `-watchdog 10s`, over the round's cases and
+their neighbours: K1 (the record read before the reply) red in 6, the re-read case's four
+rows and the pin's two on the deadline's arm; K2 (no wait for the writer's end on a loop-end
+answer) in 4, every row of the pin, by the watchdog; K3 (that wait unbounded) in 2, the
+pin's bound-first rows; K4 (`replied`'s command fixed) in 4, the held refusal's resume rows;
+K5 (the loop-end answer's command fixed) in 2, the overtaken resume's and hand-off's; K6
+(the admission's command fixed) in 2, their refused rows; K8 (Resume's request named an
+activation) in 8; K9 (ActivatePaused's first activation named a resume) in 6. Nothing
+differed from the predictions.
