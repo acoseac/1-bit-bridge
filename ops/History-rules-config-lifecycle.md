@@ -3327,7 +3327,7 @@ pin it. The records, with their negative controls, are in
 
 ## The update check's off switch (backlog B761's PR 1, 2026-11-09)
 
-- **`update.checkEnabled` off asks GitHub nothing and installs nothing new: a check (the start's, a tick's, Check now) and an install are admitted only while it is on, and an install again at its decision under the install marker's lock (`commit`), past which its swap finishes; the off transition (`Updater.ChecksSwitched`, once a settings save is published) stops every check and every install before that decision through its own context; a tick checks only where the switch was on when its wait was armed and no transition came since (the poll loop's `schedule`, against `switchGen`, which every `ChecksSwitched` advances under `gateMu`), and otherwise fires only the restart the auto-installer deferred after a swap that committed, through its gates; on again, the cadence's wait starts over and asks nothing; an install whose process took the switch as it started reads it again as it begins and at its decision (`InstallOptions.RereadSwitch`: `bridge update`'s, the file it resolved and its environment), settings that no longer load refusing it in their load's words; the console's save of an off holds the install marker's lock until the updater is told (`updater.LockForChecksOff`), taken before the holder's lock, `gateMu` after both, so it lands before an install's decision or after its swap; the status masks what a check found (`Status.CheckEnabled`); a status, every rollback (the console's and a start's) and the probation are never refused, and a release from before the switch refuses settings that write its key, so the console's off is refused while the boot's crash rollback would put back such a backup (`updater.ChecksOffRefused`, failing closed), and no writer outside the holder writes the key from its environment (`KeepFiledSwitches`)** (2026-11-09, backlog B761's PR 1, three rounds). **Don't read the switch for an admission or a decision outside `gateMu`, or a file's reread under it, stop a check or an install with a cancel that carries a cause, stop an install past its decision or commit one the off transition stopped, let a tick ask GitHub whose wait was armed while the switch was off or before a transition, ask at a wake or because the switch came on, let the auto-installer begin an install with the switch off, take a reread that failed for an off or find the config again to reread it, leave a committed swap's deferred restart to a check, show a cached release as current while off, refuse a status, a rollback or the probation for the switch, or advise writing the key true where taking it out turns the checks on. Don't save the console's off but under the install marker's lock (without it only where the filesystem keeps none), take that lock under the holder's or the console's lock, ask for it again on a path that holds it, decide the probation's refusal but by the boot's own predicate and the backup's own answers, or take a check that did not answer for a yes.**
+- **`update.checkEnabled` off asks GitHub nothing and installs nothing new: a check (the start's, a tick's, Check now) and an install are admitted only while it is on, and an install again at its decision under the install marker's lock (`commit`), past which its swap finishes; the off transition (`Updater.ChecksSwitched`, once a settings save is published) stops every check and every install before that decision through its own context; a tick checks only where the switch was on when its wait was armed and no transition came since (the poll loop's `schedule`, against `switchGen`, which every `ChecksSwitched` advances under `gateMu`), and otherwise fires only the restart the auto-installer deferred after a swap that committed, through its gates; on again, the cadence's wait starts over and asks nothing; an install whose process took the switch as it started reads it again as it begins and at its decision (`InstallOptions.RereadSwitch`: `bridge update`'s, the file it resolved and its environment), settings that no longer load refusing it in their load's words; the console's save of an off holds the install marker's lock until the updater is told (`updater.LockForChecksOff`), taken before the holder's lock, `gateMu` after both, so it lands before an install's decision or after its swap; the status masks what a check found (`Status.CheckEnabled`); a status, every rollback (the console's and a start's) and the probation are never refused, and a release from before the switch refuses settings that write its key, so the console's off is refused while the boot's crash rollback would put back such a backup, or while the install marker cannot be read (`updater.ChecksOffRefused`, failing closed; one not there or not parsing is no install, as at a start), and no writer outside the holder writes the key from its environment (`KeepFiledSwitches`)** (2026-11-09, backlog B761's PR 1, four rounds). **Don't read the switch for an admission or a decision outside `gateMu`, or a file's reread under it, stop a check or an install with a cancel that carries a cause, stop an install past its decision or commit one the off transition stopped, let a tick ask GitHub whose wait was armed while the switch was off or before a transition, ask at a wake or because the switch came on, let the auto-installer begin an install with the switch off, take a reread that failed for an off or find the config again to reread it, leave a committed swap's deferred restart to a check, show a cached release as current while off, refuse a status, a rollback or the probation for the switch, or advise writing the key true where taking it out turns the checks on. Don't save the console's off but under the install marker's lock (without it only where the filesystem keeps none), take that lock under the holder's or the console's lock, ask for it again on a path that holds it, decide the probation's refusal but by the boot's own predicate and the backup's own answers, or take a check that did not answer, or a marker that could not be read, for a yes.**
 
 *What goes out.* While update checks are on, the default, the updater sends
 one unauthenticated GET of GitHub's latest release at its start and once
@@ -3473,11 +3473,12 @@ serve's own install takes `gateMu` in `commit` under the marker lock, the
 same order. Two takers in one process exclude each other as two processes
 do (flock and LockFileEx lock an open file), so `decideUnderLock`, under the
 install's hold, never asks for it again. The wait is `LockState`'s 30 s,
-which an install's hold fits inside (`scmStopWait` held to half of it); on
-Windows a `bridge update`'s swap stops the service serving the save, whose
-wait ends with serve's context, which the console's requests take, and the
-console answers 503 `stopping`: the off is lost with the stop, as the docs
-and the console's words say. A holder past the wait or a lock that fails is
+which an install's hold fits inside (`scmStopWait` held to half of it); the
+save's wait ends with serve's context, which the console's requests take,
+and the console answers 503 `stopping`, nothing saved, in words that claim
+no cause, since a stop does not say what stopped it (round 4); a
+`bridge update` whose swap stops the bridge's Windows service is backlog
+B831. A holder past the wait or a lock that fails is
 409 `marker-locked`, nothing saved; a filesystem that keeps no locks saves
 the off at once, since no install commits there (`lockMarkerForUpdate`
 refuses it). The PATCH looks at the switch before the console's lock and
@@ -3512,6 +3513,25 @@ whose copy cannot be made refuses, failing closed (`ChecksOffUncheckedError`,
 (`config.Edit`, the DAC bind) wrote this process's variables into the file,
 the key true among them, which such a release refuses as it refuses false;
 it saves the file's own opt-outs now (`KeepFiledSwitches`).
+
+*The marker the off could not read (round 4).* The Claude review of round
+3: `ChecksOffRefused` took any `LoadState` error for no install, and the
+off was saved. `LoadState` answers a marker that is not there, and one that
+does not parse (with its Warn), as a zero State and no error, and the boot
+does the same with both (`recoverCrashedInstall` finds no install armed in
+either; `AdmitBoot` records nothing over them), so those still save. Any
+other failure to read the marker (a permission, EIO, EMFILE, a directory in
+its place) refuses the off, failing closed: a start that cannot read it
+either only removes it, but serve cannot tell whether the start that reads
+it next fails too (an error that does not last; a start run as another
+user, root among them), and that start's crash rollback may then act on
+an install the off kept from its backup. The refusal is the marker's own
+(`ChecksOffMarkerError`, matching `ErrChecksOffUnchecked`, 409
+`update-checks-off-unchecked`): its words say the install marker could not
+be read, nothing was saved, and give the variable's route alone, naming no
+version (none was read), no backup, no path and not the read's error,
+which is its `Detail`, without its path, for serve's log line of its own
+(B613's round 5 rule for the marker's errors).
 
 `TestNoRequestAtTheStartOrATickWhileUpdateChecksAreOff` (whose tick turns red
 with the tick's gate alone reverted), `TestARequestAtTheStartAndAtATickWhileUpdateChecksAreOn`,
@@ -3557,6 +3577,12 @@ Round 3's: internal/updater's `TestTheOffSaveHoldsTheInstallMarkersLock`,
 `TestNoCLIWriterWritesTheOptOutsFromItsEnvironment`; internal/config's
 `TestACLIWritersSaveKeepsTheFilesOwnSwitches`. Their reds and controls are
 in `ops/engineering-log.md`, 2026-11-09, B761 PR 1 round 3.
+
+Round 4's: internal/updater's
+`TestAnOffOverAnInstallMarkerThatCannotBeReadIsRefused`; cmd/bridge's
+`TestTheConsolesOffOverAnInstallMarkerThatCannotBeReadIsRefused` and
+`TestTheOffsAskSaysWhatRefusedItInTheLog`. Their reds and controls are in
+`ops/engineering-log.md`, 2026-11-09, B761 PR 1 round 4.
 
 ## Config, settings and process lifecycle
 
