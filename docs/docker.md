@@ -769,7 +769,9 @@ Notes:
   requires the logs refuses a node without them, and the admin tile says what
   to change.
 - iOS pairs against the node's MagicDNS name
-  (`https://onebit-bridge.<your-tailnet>.ts.net`); the bridge serves a real
+  (`https://onebit-bridge.<your-tailnet>.ts.net` with the `hostname` above,
+  `https://1-bit-bridge.<your-tailnet>.ts.net` for a new node without one);
+  the bridge serves a real
   Let's Encrypt cert for `.ts.net` **in-process** (no on-disk cert material,
   nothing to publish). Your tailnet must have HTTPS certificates enabled.
 - HTTP/3 works over the tailnet too, but the tsnet socket is userspace, so
