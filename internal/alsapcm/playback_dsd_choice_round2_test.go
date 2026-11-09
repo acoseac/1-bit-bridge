@@ -1503,15 +1503,19 @@ func TestAGaplessSuccessorWaitsForAWriteNoLongerThanTheSinksLookahead(t *testing
 		pub := &publishHold{}
 		d, w, p, stop, res, ids, ob := pending(t, floorOpts{pub: pub})
 		g := pub.arm(t)
-		n, waits := w.verdictWaits(ob), p.waits()
+		n := w.verdictWaits(ob)
 		stop.letGo()
 		awaitOrdered(t, g.in, "the write's set published, its reconciliation held")
+		// The reporter's steps have the producer ask b again, the set published
+		// and its reconciliation held: toFloor's own waits for that come long
+		// after the publish, so each is one the publish's verdict decides (a
+		// wait for the write itself, which the reporter can wake the producer
+		// into as the write publishes, is not counted there).
 		d.tickWithin(alsapcm.Ordered())
-		waitOrdered(t, "the producer to hold b out of a's sink again at the reporter's step, the write published", p.ch, func() bool { return p.waits() > waits })
-		if got := w.verdictWaits(ob); got <= n {
-			t.Errorf("b's wait once the write published was for no reconciliation's verdict (%d such waits)", got-n)
-		}
 		toFloor(t, d, p, ob, false)
+		if got := w.verdictWaits(ob); got <= n {
+			t.Errorf("b's waits out of a's sink once the write published were for no reconciliation's verdict (%d such waits)", got-n)
+		}
 		v := w.verdictWaits(ob)
 		d.k.Free()
 		w.waitVerdictWaits(t, ob, v+1, "b's transition, the drain ended, to wait for the reconciliation's verdict")
