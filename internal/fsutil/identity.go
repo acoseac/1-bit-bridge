@@ -1,6 +1,9 @@
 package fsutil
 
-import "os"
+import (
+	"errors"
+	"os"
+)
 
 // DirIdentity returns the directory at dir as it is NOW, for an os.SameFile
 // comparison made later: does the path still name that directory? A volume
@@ -33,4 +36,28 @@ func DirIdentity(dir string) (os.FileInfo, error) {
 	}
 	defer func() { _ = f.Close() }()
 	return f.Stat()
+}
+
+// ErrDirReplaced is DirStillIs's answer when dir names a directory that is
+// not the one its start was taken from.
+var ErrDirReplaced = errors.New("the directory at the path is another one")
+
+// DirStillIs reports whether dir still names the directory start was taken
+// from (DirIdentity), compared with os.SameFile: nil while it does,
+// DirIdentity's own error when the path cannot be opened as a directory now
+// (one wrapping fs.ErrNotExist when nothing is there), and ErrDirReplaced
+// when it names another directory. A nil start is never the same. The one
+// comparison the integrity sweeps' identity checks make (integrity's
+// VariantsDirChanged) and the analysis pool's waveform-only repair makes
+// before it writes and before it publishes (backlog B652), so the two
+// cannot disagree about what a volume that went looks like.
+func DirStillIs(dir string, start os.FileInfo) error {
+	now, err := DirIdentity(dir)
+	if err != nil {
+		return err
+	}
+	if start == nil || !os.SameFile(start, now) {
+		return ErrDirReplaced
+	}
+	return nil
 }

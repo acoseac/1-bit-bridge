@@ -469,6 +469,17 @@ func RenameWithRetryCtx(ctx context.Context, src, dst string) error {
 	return nil
 }
 
+// RenameInRootCtx is RenameWithRetryCtx through r: src and dst, relative to
+// r, renamed by r's own descriptors on RenameWithRetry's schedule, so the
+// rename lands in the directory r opened whatever its path names now. No
+// directory barrier follows it: commitDirEntry's would sync the directory
+// at the path, which may by then be another, and a caller that renames
+// through a root syncs through it (fsutil.FsyncInRoot), as the analysis
+// pool's waveform-only repair does (backlog B652, round 2).
+func RenameInRootCtx(ctx context.Context, r *os.Root, src, dst string) error {
+	return retryIO(ctx, func() error { return r.Rename(src, dst) }, func(error) bool { return true })
+}
+
 // RenameWithRetryUnsynced is RenameWithRetry without its directory barrier
 // (commitDirEntry): the rename and its retries alone, on RenameWithRetry's
 // schedule, for a caller that fsyncs dst's directory itself once the rename

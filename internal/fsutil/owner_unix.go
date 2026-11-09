@@ -24,7 +24,10 @@ type fileOwner struct{ uid, gid int }
 type ownerSeams struct {
 	euid   func() int
 	target func(dst string) (fileOwner, error)
-	chown  func(f *os.File, dst string, o fileOwner) error
+	// targetIn is target for a destination named through a root (KeepOwnerIn):
+	// dst is relative to r.
+	targetIn func(r *os.Root, dst string) (fileOwner, error)
+	chown    func(f *os.File, dst string, o fileOwner) error
 	// dirTarget answers which owner a directory created in r's directory
 	// takes, under policy; last reports whether it is the last directory
 	// of the path the caller asked for.
@@ -37,7 +40,10 @@ type ownerSeams struct {
 var realOwnerSeams = &ownerSeams{
 	euid:   os.Geteuid,
 	target: targetOwner,
-	chown:  func(f *os.File, _ string, o fileOwner) error { return f.Chown(o.uid, o.gid) },
+	targetIn: func(r *os.Root, dst string) (fileOwner, error) {
+		return targetOwnerFrom(dst, r.Lstat, r.Stat)
+	},
+	chown: func(f *os.File, _ string, o fileOwner) error { return f.Chown(o.uid, o.gid) },
 	dirTarget: func(r *os.Root, policy dirOwnerPolicy, last bool, ref string) (fileOwner, error) {
 		// "." through the root is the directory the new one was created
 		// in, by its descriptor: the owner is read from where the
@@ -76,6 +82,26 @@ func keepOwner(staged *os.File, dst string) error {
 	if err != nil {
 		return fmt.Errorf("find the owner of %s, which its replacement keeps: %w", dst, err)
 	}
+	return giveStaged(s, staged, dst, want)
+}
+
+// keepOwnerIn is keepOwner with dst's owner looked up through r. The path a
+// record or an error names is r's own spelling of it.
+func keepOwnerIn(r *os.Root, staged *os.File, dst string) error {
+	s := currentOwnerSeams()
+	if s.euid() != 0 {
+		return nil
+	}
+	shown := filepath.Join(r.Name(), dst)
+	want, err := s.targetIn(r, dst)
+	if err != nil {
+		return fmt.Errorf("find the owner of %s, which its replacement keeps: %w", shown, err)
+	}
+	return giveStaged(s, staged, shown, want)
+}
+
+// giveStaged gives the staged file the owner want, unless it has it already.
+func giveStaged(s *ownerSeams, staged *os.File, dst string, want fileOwner) error {
 	have, err := stagedOwner(staged)
 	if err != nil {
 		return fmt.Errorf("stat the file staged for %s: %w", dst, err)
@@ -98,11 +124,11 @@ func targetOwner(dst string) (fileOwner, error) {
 }
 
 // targetOwnerFrom is targetOwner over injected stat functions, so a test
-// can pin the precedence without files owned by two different users. dst
-// is looked up with lstat: a symlink at dst is the entry the rename
-// replaces, so its own owner is the one kept, never its target's. The
-// directory is looked up with stat, because the file is created in the
-// directory the path resolves to.
+// can pin the precedence without files owned by two different users, and
+// KeepOwnerIn can look dst up through a root. dst is looked up with lstat:
+// a symlink at dst is the entry the rename replaces, so its own owner is the
+// one kept, never its target's. The directory is looked up with stat,
+// because the file is created in the directory the path resolves to.
 func targetOwnerFrom(dst string, lstat, stat func(string) (fs.FileInfo, error)) (fileOwner, error) {
 	info, err := lstat(dst)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -233,6 +259,35 @@ func mkdirAsRoot(s *ownerSeams, path string, perm os.FileMode, policy dirOwnerPo
 		return mkdirErr(err, path)
 	}
 	defer r.Close()
+	return mkdirInParent(s, r, name, path, perm, policy, ref, last)
+}
+
+// mkdirIn is MkdirIn: name made in its directory in r, which is reached
+// through r (a root of its own on it, for the owner's read), never a path.
+func mkdirIn(r *os.Root, name string, perm os.FileMode) error {
+	s := currentOwnerSeams()
+	if s.euid() != 0 {
+		return r.Mkdir(name, perm)
+	}
+	clean := filepath.Clean(name)
+	shown := filepath.Join(r.Name(), clean)
+	parent := r
+	if dir := filepath.Dir(clean); dir != "." {
+		pr, err := r.OpenRoot(dir)
+		if err != nil {
+			return mkdirErr(err, shown)
+		}
+		defer pr.Close()
+		parent = pr
+	}
+	return mkdirInParent(s, parent, filepath.Base(clean), shown, perm, dirOwnerParent, "", true)
+}
+
+// mkdirInParent creates the one directory name in the directory r holds and
+// gives it the owner dirTarget names, read through r; path is the directory
+// as the caller spelled it, for errors and records. Anything it cannot
+// finish leaves no directory of its own behind.
+func mkdirInParent(s *ownerSeams, r *os.Root, name, path string, perm os.FileMode, policy dirOwnerPolicy, ref string, last bool) error {
 	if err := r.Mkdir(name, perm); err != nil {
 		// os.Mkdir's error, whose os.ErrExist a caller may test for:
 		// an entry somebody else made is not ours to give away.
@@ -325,8 +380,9 @@ func SimulateRootForTest(uid, gid int) (changes func() []OwnerChange, restore fu
 		got = append(got, OwnerChange{Dst: dst, UID: o.uid, GID: o.gid})
 	}
 	s := &ownerSeams{
-		euid:   func() int { return 0 },
-		target: func(string) (fileOwner, error) { return fileOwner{uid: uid, gid: gid}, nil },
+		euid:     func() int { return 0 },
+		target:   func(string) (fileOwner, error) { return fileOwner{uid: uid, gid: gid}, nil },
+		targetIn: func(*os.Root, string) (fileOwner, error) { return fileOwner{uid: uid, gid: gid}, nil },
 		chown: func(_ *os.File, dst string, o fileOwner) error {
 			record(dst, o)
 			return nil
@@ -400,6 +456,14 @@ func SimulateRootOwnersForTest(ownerOf func(path string) (uid, gid int)) (change
 				return fileOwner{}, err
 			}
 			return owner(filepath.Dir(dst)), nil
+		},
+		targetIn: func(r *os.Root, dst string) (fileOwner, error) {
+			if _, err := r.Lstat(dst); err == nil {
+				return owner(filepath.Join(r.Name(), dst)), nil
+			} else if !errors.Is(err, fs.ErrNotExist) {
+				return fileOwner{}, err
+			}
+			return owner(filepath.Join(r.Name(), filepath.Dir(dst))), nil
 		},
 		chown: func(_ *os.File, dst string, o fileOwner) error {
 			record(dst, o)

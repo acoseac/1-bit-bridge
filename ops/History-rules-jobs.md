@@ -1579,10 +1579,12 @@
   rewritten, no `indexed_at` bump, nothing re-decoded. There is no
   proactive waveform sweep, so it heals when the track is next asked for
   and not before, and the analysis skip gate still reads the row rather
-  than the file — which is why a curve at NEITHER location stays silent
-  and needs `bridge analyze --force`. `bridge doctor`'s `sidecar-paths`
-  check reports both tables; the schema-relative follow-up is still #938.
-  (#937, #954)
+  than the file — which is why a curve at NEITHER location stayed silent
+  and needed `bridge analyze --force` until B652 (2026-11-08), since when
+  its next `/v1/waveform` lookup renders it again, waveform only, under
+  the catalog's guard (the B652 section at the end of this file). `bridge
+  doctor`'s `sidecar-paths` check reports both tables; the schema-relative
+  follow-up is still #938. (#937, #954)
 
 - **…and the watcher's refusal goes through the orphan sweep's latch**
   (2026-09-29, backlog B65). `VariantWatcher` logged the relocation
@@ -1648,7 +1650,8 @@
   made every later row read as a rendition that is gone, the relocation
   check walked that directory and found no sidecars, and the tick deleted
   the rows: 39 of 40, through the real watcher. The tick keeps the probe's
-  view of the directory (`VariantsDirBlock.Info`) and asks
+  view of the directory (`VariantsDirBlock.Info`, `SidecarDirBlock.Info`
+  since B652) and asks
   `VariantsDirChanged` as each row reads as missing (`classify`: the one
   verdict that leads to a deletion, so a tick whose rows are where they
   belong pays nothing, and a volume that goes and comes back inside the
@@ -2125,8 +2128,9 @@
   before the run whose row committed after the listing, and a `.tmp`
   still being written were all unlinked (a row with no file; the render
   still writing fails at its rename and strikes a good file), and the
-  waveforms likewise, which nothing brings back but `bridge analyze
-  --force` (the skip gate reads the row). The review's scratch test left
+  waveforms likewise, which nothing brought back but `bridge analyze
+  --force` (the skip gate reads the row) until B652, whose lookup renders
+  such a curve again under the catalog's guard. The review's scratch test left
   11 of 21 renditions published during a run with a row and no file.
   Both sweeps now hand each listed path, by its walked spelling, to
   `integrity.ReclaimOrphan`, the background sweep's re-check, exported
@@ -2339,7 +2343,8 @@ recorded sidecar path, folded where the volumes fold case since round 2),
 so a fresh install, or a variants directory just
 set to a new place, renders as before. The refusal
 (`transcode.VariantsDirAwayError`) names the directory by its role, says
-what the probe found (`VariantsDirBlock.Missing`, new, tells not there from
+what the probe found (`VariantsDirBlock.Missing`, new then, `SidecarDirBlock`'s
+since B652, tells not there from
 holding no rendition), to mount the volume, and that `bridge upscale --gc
 --allow-mass-delete` drops the rows of renditions removed on purpose. Run
 marks it a fault of the output (`outputAway`): it strikes no source, and
@@ -2388,3 +2393,308 @@ into a variants directory on a volume that is away, its rows recorded:
 nothing is made at the mount point, one Warn says the output is away, and
 the rows survive. The record is in `ops/engineering-log.md`, 2026-11-07,
 B727's round 2.
+
+## B652 — a waveform curve proven missing, rendered again on access (2026-11-08)
+
+- **A waveform curve proven missing, ENOENT at its recorded path and at its canonical one, is rendered again at the canonical path on its track's next `/v1/waveform` lookup, waveform only, and only while a judgment of the WHOLE catalog admits it: `integrity.DecideWaveform` gives each `SidecarLocation` verdict its action (present serves, relocated adopts as #954 does, missing regenerates, a partial copy at the canonical path is replaced, and unknown, a stat that failed otherwise, leaves the row and the disk as they are); `JudgeWaveformCatalog` is the variant guards' own decision over the waveform family (`sidecarFamily`: the probe `WaveformDirSweepBlock`, the ratio `massMissingRefusal`, the identity check `WaveformDirChanged`), in which a curve is a regular file and a link is nothing, whatever it leads to (`sidecarFamily.links`, true for the variants alone), refusing while the waveform directory is missing, holds no curve (a volume away; the last curve's deletion reads the same and is refused with it, while one deletion beside other curves proceeds), cannot be read, or has lost more than `WaveformRegenMaxMissingPercent` (20) of the rows' curves, past the floor of ten, while it holds others, asking the directory again by identity after the rows and after the ratio, and looking at the tree once more just before it admits or answers undecided, whatever the floor and the ratio said: a tree holding no curve then is refused as the probe refuses it, and one in another directory than the judgment began on is a volume away; no path of the bridge's own removes a curve and keeps its row (each unlink of one is of a row the same pass deletes, and `analyze --gc` unlinks only what no row records); `WaveformRegenGuard` judges off the request path, before the first regeneration and then at most once per `WaveformRegenInterval` (an hour), admits only the rows its judgment found to be regenerated, updates its refusal latch under its lock and logs once it has let the lock go, and returns from `Close` within `stopGrace` whatever its log does, saying that the grace ran out from a goroutine of its own; cmd/bridge's `waveformRegenerator`, which `analysisStoreAdapter.LookupWaveform` asks and `/v1/spectrum`'s lookup never does, checks the live analysis gate, `collectAnalysisCandidates`' own rules (`analysisSourceSkip`, `analysisRowFresh`, `analysisSuppressedNow`), the curve's stop and then the guard, and keys the job on the row's own source path; the request answers 410 as before, and the analysis pool renders the curve** (2026-11-08, backlog B652, and its round 2). **Don't decide a regeneration from one row's evidence, on a judgment past its interval or for a row it did not find, over a waveform directory the probe, the ratio, the identity check or the last look refuses, from `/v1/spectrum`, with analysis off, for a source the analysis would not decode or a row its walk offers, or keyed on the request's spelling; don't count a link as a curve or as a tree that may hold one, remove a curve anywhere and keep its row's waveform fields, log under the guard's lock or let `Close` wait on the log; and don't decode in the request.** `TestADeletedCurveIsRenderedAgainOnItsLookupKeepingItsMeasurements`, `TestAPartialCopyAtTheCanonicalPlaceIsReplaced`, `TestNoCurveIsRenderedAgainOverAWaveformDirectoryGoneAwayOrEmptied`, `TestMixedCaseConcurrentLookupsEnqueueOnce`, `TestNoCurveIsRenderedAgainWithAnalysisOff`, `TestNoCurveOfASourceTheAnalysisSkipsIsRenderedAgain`, `TestARelocatedCurveIsAdoptedNotRenderedAgain`, `TestASpectrumLookupRendersNothing`, `TestServeRendersADeletedCurveAgainOnItsLookup`, integrity's `TestEveryWaveformVerdictHasItsAction`, `TestTheJudgmentRefusesWhatLooksLikeAVolumeAwayOrATreeEmptied`, `TestALinkIsNeverACurve`, `TestTheTreeIsLookedAtAgainBeforeAnyAdmission`, `TestTheGuardJudgesBeforeTheFirstRegenerationAndThenOnceAnInterval` and `TestAGuardWhoseLogIsBlockedStillAnswersAndCloses`, and api's `TestOnlyAWaveformRequestAsksForItsCurveToBeRenderedAgain` pin it. → History-rules-jobs.md
+
+- **…and the repair writes the curve alone, into the waveform directory its judgment saw, through one handle on it: the job carries that directory's identity (`RepairSpec.OutputDirIdentity`, from the handle the probe read it with), and `analyze.RunWaveformRepair` asks the path against it (`fsutil.DirStillIs`) before it opens the source; asks the source to be a regular file of the row's size and mtime that opens (the job's own open, `RepairSpec.open`: `fsutil.OpenAsFile`, but in a test) and yields a byte (`sourceReadable`: what is no regular file is `ErrSourceChanged` and never opened, a failed open or read `ErrSourceUnreachable`), before the probe, and again, with the directory and the job's cancellation, before a decoder's verdict counts (`askBeforeCounting`, the one check a countable failure waits on wherever a race can reach it, which `writeFailure` asks too for every write's failure and the pool's sync; the two returns of `repairDir.rel`, path arithmetic no race changes, are not asked), and its version again after the decode; then opens the directory as an `os.Root`, compared with that identity (`repairDir`: one for each job, made by the pool and handed to the runner), and makes every file operation through it: the curve's directories, never the waveform directory itself (`mkdirBelow`, `fsutil.MkdirIn`, which as root gives a new directory the owner of the one it is made in), the scratch (`fsutil.KeepOwnerIn`: the owner of the entry it replaces, or of its directory), its stale copy's removal and its cleanup, the rename (`atomicwrite.RenameInRootCtx`, with no barrier at the path) and the pool's sync (`fsutil.FsyncInRoot`), the path asked against the root just before the rename; it renders through `decodeCurve`, the one body `RunAnalysis` renders a curve with, so a curve rendered again from the same source is the analysis's byte for byte, and writes it beside its place and renames it over whatever is there; the pool, right before its commit, asks the directory at the path against the root and the source's mtime and size against the job's (`Pool.beforeCommit`; backlog B819), a mismatch committing nothing and counting nothing, and classifies a failed sync as every write failure is (`writeFailure`); `Store.CommitWaveformRepair` writes `waveform_path`, `waveform_tag` and `waveform_size` and nothing else, compare-and-swap on the row's waveform columns, its source version, its schema and its `created_at` (`ErrAnalysisChanged`: nothing written, no strike), and moves `indexed_at` only when the tag changed; on Windows the root's handle shares no delete (`os.OpenRoot`'s), so while the root is open, from the decode's end to the job's, the folder it holds can be neither renamed nor deleted there, and the cases that replace it by a rename while the root is open skip there (backlog B819), those that replace it before the root opens running there too** (2026-11-08, backlog B652, and its rounds 2 to 4). **Don't make the waveform directory, reach it but through the job's root (by a path, or a root opened before the decode or on a directory the job's identity is not), rename or commit without asking the path against the root, commit for a source whose size or mtime moved, open a source that is no regular file, count a decoder's verdict, a write's failure or a failed sync past a directory, a cancellation or a source `askBeforeCounting` refuses (one that cannot be opened and read among them), or ask that check of the source's size and mtime alone, delete a partial copy first, render a curve by another body than the analysis's, write a measurement, commit over a row another writer moved, or move `indexed_at` for an unchanged tag.** `TestARepairCarriesTheWaveformDirectoryItsJudgmentSaw`, `TestARepairWritesNothingIntoAWaveformVolumeThatWentAfterItsLookup`, analyze's `TestTheRepairRendersTheCurveTheAnalysisRenders`, `TestTheRepairReplacesAPartialCopyAtomically`, `TestARepairWritesNothingIntoAWaveformDirectoryThatWent`, `TestARepairWorksOnlyThroughTheDirectoryItWasAdmittedOn`, `TestARepairCommitsOnlyWhileItsDirectoryAndItsSourceAreTheOnesItRead`, `TestASyncFailureIsClassifiedAsEveryWriteFailureIs`, `TestARepairRefusesASourceThatIsNotItsRowsVersion`, `TestASourceItCannotReadIsUnreachable`, `TestASourceThatIsNoRegularFileIsNeverOpened`, `TestADecodersVerdictCountsOnlyOverTheFolderItWasAdmittedOn`, `TestAFailedSyncCountsOnlyWhileTheSourceIsTheOneRead`, `TestBothReadsOfTheSourceAreAskedOnEveryHost`, `TestTheRepairKeepsTheOwnersOfWhatItMakes` and `TestARepairRecordsTheCurveAndNothingElse`, fsutil's `TestMkdirInMakesTheDirectoryThroughItsRoot`, `TestKeepOwnerInLooksTheReplacedEntryUpThroughTheRoot`, `TestFsyncInRootSyncsTheFileItsRootHolds` and `TestFsyncInRootSyncsTheParentItsRootHolds`, atomicwrite's `TestRenameInRootRenamesInTheDirectoryItsRootHolds`, and manifest's `TestARepairsCommitWritesTheWaveformAlone`, `TestARepairMovesIndexedAtOnlyWhenTheTagChanges` and `TestARepairsCommitWritesNothingOverARowThatChanged` pin it. → History-rules-jobs.md
+
+- **…and a curve whose regeneration failed twice on its own account stops until a new build or a changed source, counted apart from the analysis-failure debounce: only `CountsAgainstTheCurve`'s two (the decoder's verdict and a curve rendered and not written, each only past `askBeforeCounting`: the directory still the repair's, the job not cancelled, the source still its row's version and readable) are recorded, in `waveform_regen_failures` (migration v62) against the build (`waveformRegenBuild`: the release and the commit, marked when modified) and the source's mtime and size, durable across a restart; `WaveformRegenStopAfter` (2) of them stop it (`StopsFor`), a record of another build or version counts again from one, and a curve written again clears it; the per-job timeout, a shutdown, an unreachable, unreadable or changed source, the waveform directory gone or no longer the one the curve was written into (a decoder's verdict, a write or a sync that failed then included), a write or a sync that failed while the source changed, went or could no longer be read, and a decoder that could not run count nothing; and `bridge doctor`'s `waveform-regeneration` line says the curves proven missing, a refusal by its kind, the scope of a judgment its budget stopped (only where it looked at some rows and not all) and the curves whose regeneration stopped, apart from the relocated ones, its probe asking `doctorStoreGate` before it opens the store, as every store probe of the doctor does since B741** (2026-11-08, backlog B652, and its rounds 2 and 3). **Don't count a failure that is not the curve's (one `askBeforeCounting` refuses), strike the source's analysis for one, stop a curve for another build's or another version's failures, keep counting once its curve is written, name a budget's scope beside a refusal that looked at no row, or open the store of a data dir the record refuses.** `TestTwoCountedFailuresStopTheCurveAcrossARestart`, `TestAStoppedCurveOfAChangedSourceIsAnalysedAgain`, `TestTransientRepairFailuresEarnNoStrikeThroughTheLookup`, `TestTheDoctorReportsWhatTheRegenerationGuardJudges`, `TestServeRefusesWhatTheBareMountPointHoldsOnceItsRecordHoldsAnIdentity`, analyze's `TestTransientRepairFailuresEarnNoStrike`, `TestARepairThatFailsOnTheCurvesAccountIsCounted` and `TestWhatARepairCountsAgainstTheCurve`, manifest's `TestTheRegenerationFailureCountPersistsAndResets`, and doctor's `TestTheWaveformRegenerationLineSaysEachStateApart` pin it. → History-rules-jobs.md
+
+*The gap.* A curve moved with the data directory was adopted on its first
+lookup (#954), but one genuinely gone, ENOENT at its recorded path and at
+its canonical one, stayed gone: `/v1/waveform` answered 410 on every
+request, and the analysis skip gate, which keys on the source's mtime and
+size, never offered the track again, so only `bridge analyze --force`, a
+decode of the whole library, brought it back (the mass-delete bullet's long
+form above said so until B652).
+
+*Why the whole catalog.* A lookup sees one row, and over a waveform
+directory emptied by hand (an `rm`, a restore of an older tree) every
+lookup proves its own row missing: judged a row at a time, browsing the
+library would be the mass re-analysis the reapers' guards refuse, one track
+at a time. So the decision is the reapers' own, over the waveform family:
+`sidecarFamily` parameterises the probe (`dirSweepBlock`, whose answer is
+`SidecarDirBlock`, `VariantsDirBlock` until B652), the walk behind it
+(`scanForSidecars`), the relocation decision (`massMissingRefusal`) and the
+identity check (`dirChanged`), and the variant entry points
+(`VariantsDirSweepBlock`, `MassDeleteRefusal`, `TreeHoldsVariantSidecars`,
+`VariantsDirChanged`) answer as before, word for word.
+`ConsiderWaveformSidecar` is the recogniser the probe and `analyze --gc`
+share, so a file one counts as a curve is a file the other reclaims; a
+curve's scratch is not a curve.
+
+*The last curve.* A waveform directory holding no curve while the catalog
+records curves is what a volume that is away looks like, and what the last
+curve's deletion looks like too. The directory alone cannot tell them
+apart, so both are refused, conservatively: a library whose every curve was
+deleted is what `bridge analyze --force` is for. One curve deleted while
+others remain proceeds.
+
+*The judgment, off the request path.* A judgment stats every row, minutes
+on a slow volume and a large library, so it is never made per lookup:
+`WaveformRegenGuard.Ask` answers from the judgment that stands, or starts
+one on a goroutine of its own and has the row told when it admits it; one
+judgment runs at a time and stands for `WaveformRegenInterval`, the variant
+watcher's default hour. It admits only the rows it found to be
+regenerated: a row whose curve went after it waits for the next judgment,
+which weighs it with the rest. The request that proves the curve missing
+still answers 410; the analysis pool renders it, never the request (no
+decode in a request path), and the next request serves it. Refusals log
+through the variant watcher's `refusalLatch`: one WARN as a streak starts or
+changes kind, at most one a day while it lasts, and an Info line once it
+lifts.
+
+*Who may ask.* Only `/v1/waveform` (`api.AnalysisStore.LookupWaveform`);
+`/v1/spectrum` reads the same row through `LookupAnalysis` and asks for
+nothing. The regenerator checks what a whole analysis of the source would
+pass, with the fresh-row skip alone set aside: the live gate,
+`analysisSourceSkip`'s DSD, WavPack, Monkey's Audio, missing and zero-byte
+skips (factored out of `collectAnalysisCandidates`, which calls them in the
+same order), and the analysis-failure suppression against the live stat.
+Only a row the walk skips as fresh is repaired, since nothing else offers it
+again; a row the walk offers (a changed source, another schema, an audio MD5
+still to ask) goes through ordinary analysis, which writes its curve with the
+rest. The job is keyed on the row's own source path, so a folded request
+names the same job and the pool's dedup holds one repair, or one analysis,
+of a source at a time. `internal/analyze` imports no `internal/integrity`
+(which imports it): the proof is integrity's, the enqueue cmd/bridge's.
+
+*The write path.* `RunWaveformRepair`'s order, each a refusal that writes
+nothing: the waveform directory at its path against the identity the job
+carries, before the source is opened or a decoder started; the source
+against the version the row describes, opened and read for a byte; the
+decode, whose verdict counts only once the source is asked again and can
+still be read, unchanged (a mount that dropped, or a permission that
+changed, during the decode answers as a verdict too); then the directory
+opened as the repair's root, compared with the job's identity, and every
+operation from there on through that root (round 2, below): `mkdirBelow`
+makes the curve's directories below the waveform directory and never that
+directory itself, since one that is not there is a volume that went, and
+making it would put the curve on the disk under the mountpoint, where the
+next judgment would find a directory holding one curve; the curve written
+beside its place (`AnalysisTmpSuffix`) and renamed over whatever is there, a
+partial copy included, which is never deleted first; the path asked against
+the root just before the rename. The commit writes the waveform columns
+alone, so a decode that could not measure what the analysis measured takes
+no measurement away, and a build that would measure it otherwise does not
+rewrite one behind a curve.
+
+*Byte for byte.* `decodeCurve` is the one body `RunAnalysis` and the repair
+render a curve with (the decode at the source's channel count, its mono
+downmix, the peaker), so a curve rendered again from an unchanged source by
+the same decoder is the analysis's, its tag the row's, and `indexed_at`
+does not move: a client keys its cached curve on the tag, and a delta for a
+curve it already holds is a fetch for nothing. A tag that changed moves
+`indexed_at` in the commit's transaction (`bumpIndexedAtByPathSQL`), so a
+client fetches the new curve.
+
+*The count.* A curve that cannot be rendered again would cost a decode at
+every lookup. `waveform_regen_failures` (v62, keyed on the analysis row,
+`ON DELETE CASCADE`) counts the failures on the curve's own account against
+the build and the source's version; two stop it, a new build or a changed
+source starts it again, and a curve written again, by a repair or an
+analysis, clears it. It is not `analysis_failure.go`'s debounce, whose
+verdicts and seven-day TTL decide whether a source is offered for analysis
+at all: a curve that could not be written says nothing about the source, and
+a repair's failure strikes no analysis. The build is `version.ServerVersion`
+and the commit the binary was built from, marked when its tree was modified,
+so a fix built between two releases starts the count again. What counts
+nothing: the pool's per-job timeout (a hung mount and a pathological file
+look the same from there), a shutdown (`p.closed`), an unreachable,
+unreadable or changed source, the waveform directory gone or no longer the
+one the curve was written into (a decoder's verdict, a write or a sync that
+failed then included), a write or a sync that failed while the source
+changed, went or could no longer be read (round 3), a decoder that is
+missing or was killed, a cancellation, and a commit refused because the row
+moved.
+
+*The doctor.* `waveform-regeneration` judges the catalog as the guard does,
+bounded as `variants-index`'s walk is: the curves proven missing (at neither
+location, or a partial copy at the canonical one), the relocated ones
+apart, a refusal in the guard's words with its reason, a judgment its budget
+stopped as undecided, its scope ("the first N of M row(s)") named only where
+it looked at some rows and not all, and the curves whose regeneration
+stopped under this build (`StoppedWaveformRegens`), named. Warn, never fail.
+`sidecar-paths`'
+waveform hint says the next lookup renders such a curve again, and that
+`--force` reaches every one.
+
+*Rejected.* A regeneration decided per lookup (the mass decode one track at
+a time, above); a proactive sweep regenerating curves nobody asked for (a
+decode per curve on a timer, and a second walk of the catalog beside the
+judgment; the lookup is the trigger, as it is for adoption); the
+analysis-failure debounce for the count (above); and a decode in the
+request.
+
+*Round 2: a curve is a file.* Round 1's probe was the variants' walk, which
+takes a link to a directory as a tree that may hold renditions (the scan
+does not look behind it, and their reapers must not read it as empty) and a
+link resolving to a file of a rendition's name as a rendition. Over the
+waveform directory a tree holding only a link to an empty folder admitted
+every row as missing, and one link to a file of a curve's name counted as a
+curve. The curves' family counts regular files alone (`sidecarFamily.links`
+false), so a link is nothing to it; the variants' family keeps its links.
+
+*The last look.* Below the floor of ten the ratio looks at nothing, and a
+tree emptied in place keeps its identity, so neither identity check sees
+it: two rows, one curve missing at the first probe and the other deleted
+after it, were both admitted. The judgment now looks at the tree once more,
+after its second identity check and before it admits or answers undecided:
+a tree holding no curve then is refused as the probe refuses it ("looked at
+again before admitting"), and one in another directory than the first
+probe's (a volume put back with curves of its own) is a volume away, since
+the jobs carry the first directory's identity. The look can refuse only
+what the bridge itself never makes: no path of the bridge's own removes a
+curve and keeps its row (each unlink of one is of a row the same pass
+deletes, by the predicate of its DELETE and `track_analysis`'s cascade, and
+`analyze --gc` unlinks only what no row records), so a path that ever did
+would have to clear the row's waveform fields as it unlinks.
+
+*One root.* Round 1 asked the directory's identity at each step and then
+made, wrote, removed and renamed by path, so a folder put at the path
+between a check and the operation after it took the operation: a stale
+scratch's removal by path deleted a file of that folder's. A repair now
+opens the directory once, after the decode, as an `os.Root` compared with
+the job's identity (`repairDir`; its own identity read from a handle opened
+through the root, since on Windows a stat by path reads the identity at the
+comparison), and every operation goes through the root's descriptors, so
+nothing is made, removed, renamed or synced anywhere but the directory the
+judgment saw, whatever the path names. `fsutil.MkdirIn` and `KeepOwnerIn`
+keep `fsutil.Mkdir`'s and `KeepOwner`'s owners as root, read through the
+root (`mkdirInParent` and `giveStaged`, the bodies they share);
+`atomicwrite.RenameInRootCtx` renames on RenameWithRetry's schedule with no
+`commitDirEntry`, which would sync the directory at the path;
+`fsutil.FsyncInRoot` syncs the file and, on POSIX, its directory, both
+opened through the root. The pool makes the job's `repairDir` and hands it
+to the runner, so its sync and its checks before the commit use the root
+the curve was written through.
+
+*The commit's checks.* A root keeps the directory it opened: past a folder
+replaced after the rename, the folder at the path is not the one the curve
+was written into, and a commit would record a curve that is not at its path
+(backlog B819). So right before the commit the directory at the path is
+compared with the root, and the source's mtime and size with the job's,
+the bridge's identity of a source everywhere (backlog B819); a mismatch
+commits nothing and counts nothing, the directory's as its refusal, the
+source's for ordinary analysis, whose skip gate offers it now. A sync that
+fails is classified as every write failure is: with the directory at the
+path no longer the root, it is the directory's refusal, never a curve not
+written, and since round 3, with the source changed, gone or no longer
+readable, the source's.
+
+*A source it cannot read.* Round 1 asked only whether the source could be
+stat'ed, so a permission that changed (a mode of 0, a mount's credentials
+gone) let the decoder refuse a file it could not open, which counted as the
+curve's verdict: two of them stopped the curve until a new build.
+`sourceReadable` asks, before the probe and again before a decoder's
+verdict is taken, that the source be a regular file still of the row's size
+and mtime (anything else is another version, refused from the stat and
+never opened) and that it open as a file (`fsutil.OpenAsFile`, which waits
+for no named pipe) and yield a byte; a failed open or read is unreachable,
+counting nothing.
+
+*The guard's log.* Round 1 logged the refusal under the guard's lock, so a
+log sink that blocked held every `Ask`, a request's lookup among them, and
+`Close`, which takes the lock. `noteLocked` updates the latch under the lock
+and returns the line, which is said once the lock is let go, and `Close`
+says that its grace ran out from a goroutine of its own, so it returns
+within `stopGrace` whatever the log does; nothing it was handed is lost once
+the sink answers.
+
+*The doctor's scope.* "the first N of M row(s)" is a budget's: a refusal at
+the probe looked at no row, and a scope beside it read as a judgment
+stopped after none.
+
+*Rejected in round 2.* Round 1's check at the path before each operation,
+which leaves the operation to whatever is at the path once its check has
+passed; a root opened before the decode, which would hold the directory,
+and a volume's unmount, for the decode's length; and clearing a row's
+waveform fields where a curve is unlinked, since no path of the bridge's own
+unlinks a curve whose row it keeps.
+
+*Round 3: one check before a countable verdict.* Round 2 asked the source
+again before a decoder's verdict counted, and the directory before a
+write's failure counted, each path its own check: a folder replaced during
+the decode, the source readable, left the verdict to count, and a sync that
+failed while the source changed, went or could no longer be read counted
+too. `askBeforeCounting` is the one check both paths wait on: the directory
+at the path still the repair's (its root once open, the job's identity
+before); the job not cancelled, answered as the context's before the source
+is opened, as `writeFailure` answered it; and the source its row's version
+and readable (`sourceReadable`: its stat, its open and a byte read, never
+its size and mtime alone, which a permission that changed leaves as they
+were). It runs before a decoder's verdict is returned and in
+`writeFailure`, which every write's failure and the pool's sync go through.
+The two returns of `repairDir.rel`, a path that is not below the waveform
+directory, are arithmetic on the spec's own paths, which no race changes,
+and are left as they were. A decoder's verdict on a job already cancelled
+is now the context's, which the pool counted no more than before (a
+shutdown by `p.closed`, the timeout before it asks).
+
+*The barrier's directory and the source's reads, observed.* Round 2's test
+of `FsyncInRoot` had both candidate parents there, so an open of the parent
+by its path passed it: `dirSyncSeen` shows a test the descriptor each
+directory sync is made through, and the test compares it by identity with
+the directory the root holds and the one at the path. Round 2's tests of
+the one-byte read failed the open with a mode of 0, which stops nothing on
+Windows or for root and leaves the read itself unasked: `RepairSpec.open`,
+the job's own open of its source (`openSourceFile` in production), lets a
+test fail the open or the read alone on every host, and each of the two
+reads is asked by a case of its own, red with that read removed.
+
+*The link rule's own assertion.* The link subtest of
+`TestNoCurveIsRenderedAgainOverAWaveformDirectoryGoneAwayOrEmptied` asks
+the refusal itself, the guard's answer (refused, a volume away) and the
+doctor's whole line, and that no failure is recorded against any curve; it
+fails on those with links counted as curves again, whatever the fixture's
+runner does.
+
+*The doctor's gate.* Main's B741 has every store probe of `bridge doctor`
+ask `doctorStoreGate` before it opens the store, so that none opens, and
+migrates, a database in a data dir the record refuses. The
+`waveform-regeneration` probe, written before it, asked nothing, and once
+main was merged the doctors turned a stray `bridge.db` in a bare mount
+point into a SQLite file
+(`TestServeRefusesWhatTheBareMountPointHoldsOnceItsRecordHoldsAnIdentity`'s
+database cases, red at the merge and green on main's side). The probe asks
+the gate as its siblings do.
+
+*Rejected in round 3.* The one check's source half as the size and the
+mtime alone (`sourceStillDescribed`), which would have counted the verdict
+on a source whose permission changed during the decode, the case the read
+exists for (a review of the brief caught it); and the check on the two
+`repairDir.rel` returns, which no race reaches.
+
+*Round 4: the root on Windows.* On windows-latest the cases that replace
+the waveform folder by a rename while the repair's root is open failed at
+that rename, "The process cannot access the file because it is being used
+by another process" (CI run 42560924562). Go 1.27.3's `os.OpenRoot` opens
+the directory there with `syscall.Open`, whose share mode is
+`FILE_SHARE_READ | FILE_SHARE_WRITE`, with no FILE_SHARE_DELETE, and a
+rename or a deletion of the directory opens it for delete access, which
+Windows refuses while that handle is open. The handle is the root's: on
+Linux, at each point where those cases rename the folder, the one
+descriptor open on the folder or below it is the folder's own, opened after
+the decode and closed when the repair returns. So on Windows, while the
+root is open, from the decode's end to the job's, the folder it holds can
+be neither renamed nor deleted; that is all this says. Before the root
+opens and after it closes nothing holds the folder, and the checks at the
+path stand there on every platform. The seven cases that rename a folder a
+root holds open (six of the repair's, one of `RenameInRootCtx`'s) skip on
+Windows, by `runtime.GOOS` as their first statement, naming the root's
+handle and backlog B819, which holds the coverage that leaves there; the
+cases that replace the folder before the repair or during the decode, before
+the root opens, run there too. Round 3's hang there, and the bounds that
+end it, are under **Build, CI, and test discipline**
+(`ops/History-rules-build-ci-tests.md`).
+
+*Open.* What rounds 3 and 4 leave open is backlog B819.
+
+*Rejected in round 4.* A skip decided by the rename's error, which would
+also skip wherever the rename fails for another reason and hide a
+regression there; and a replacement Windows allows while the root is open,
+which could not be run here, so that CI alone would run it first. The
+records are in `ops/engineering-log.md`: 2026-11-08, B652 and B652 round
+2; 2026-11-09, B652 rounds 3 and 4.

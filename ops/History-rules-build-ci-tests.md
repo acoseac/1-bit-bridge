@@ -1334,6 +1334,61 @@ darwin/arm64 with Go 1.27.3. The logging negative control in
 the bound-IP probe, and passed after restoration. A separate restricted
 run with all four binds denied exercised the local-skip and CI-fatal paths.
 
+### B652 round 4 — a hook off the test's goroutine, the waits' bound, a root's directory on Windows (2026-11-09)
+
+- **A hook that the code under test runs on a goroutine of its own, a pool's worker, never ends the case there: it hands its step's failure to the test's goroutine, which fails the case with it once the work the hook ran in has returned; and every wait on that work, and every stop of it, is bounded by a budget of its own, capped before the binary's deadline** (2026-11-09, backlog B652's round 4). **Don't call `t.Fatal`, `t.FailNow`, `t.Skip` or `t.SkipNow` from a hook another goroutine runs, and don't wait on a pool's job, or stop its pool, without a bound or until the binary's deadline.** → History-rules-build-ci-tests.md
+
+On windows-latest (CI run 42560924562) a sync hook that the analysis pool's
+worker runs called `t.Fatal` when its rename of the waveform folder failed.
+`t.Fatal` ends the goroutine it is called on: the worker's `processJob`
+counted the job nowhere, and `waitForPoolSettled`, bounded by
+`t.Deadline()`, waited for a count that could not come until the package's
+30-minute timeout, so no test after it in the package ran there. Reproduced
+on Linux with the rename made to fail: 122.2 s and 120.4 s, to a
+`-timeout 120s` panic. A hook now reports its own step's failure
+(`hookFaults`, `repairFixture.fault`) and returns, the repair runs to its
+end and closes what it holds, and the case fails with that failure once the
+pool has settled (`repairFixture.settled`), before any count is asserted:
+the same injection fails each case in about half a second, with the hook's
+error. A hook on the test's goroutine keeps `t.Fatal`: the work it is in
+unwinds with the goroutine, running its deferred steps. Every wait on the
+pool gives up at `poolWaitEnd`, two minutes from its start (a repair there
+takes milliseconds) or 10 s before the binary's deadline where that is
+sooner, so a job that is never counted fails its own case by name, and
+every stop of the pool gives up at the same bound (`stopWithin`). A serve
+test's waits keep B63's rule, the binary's deadline less a reserve: what
+they wait on has no bound a starved host keeps to, where a pool job's here
+is milliseconds. `TestAHookWhoseOwnStepFailsEndsItsCase` pins the three on
+every platform: a hook's step that fails on the worker, a job that ends its
+goroutine as `t.Fatal` does, and a stop while a job the stop does not end
+runs. Its negative controls (the failure kept nowhere, or not asked; either
+bound removed) are red there and green on every case whose step succeeds,
+which is why the check is there: a case whose step succeeds cannot see the
+path that hung.
+
+- **A case that renames or deletes a directory a root from `os.OpenRoot` holds open skips on Windows, by `runtime.GOOS` as its first statement, before any setup, naming why and the backlog id of the coverage it leaves: that root's handle there shares no delete, so Windows refuses that rename while the root is open; a `Root.OpenRoot` sub-root shares delete and needs no skip** (2026-11-09, backlog B652's round 4; round 5's `TestAnOpenRootHoldsItsDirectory`, in `internal/atomicwrite`, pins the refusal on Windows). **Don't decide the skip by the rename's error, after the case's setup, or on another goroutine than the test's.** → History-rules-build-ci-tests.md
+
+Go 1.27.3's `os.OpenRoot` on Windows opens the directory with
+`syscall.Open`, whose share mode is `FILE_SHARE_READ | FILE_SHARE_WRITE`;
+a rename or a deletion of the directory opens it for delete access, which
+Windows refuses while a handle without FILE_SHARE_DELETE is open on it
+("The process cannot access the file because it is being used by another
+process"). A skip decided by that error would also skip wherever the
+rename fails for another reason, hiding a regression there; a skip after
+the case's setup leaves the root open first; and a skip from the pool's
+worker ends that goroutine alone, as `t.Fatal` did. B652's round 4 skips
+six of the repair's cases and atomicwrite's root-rename case so
+(`whileTheRootIsOpen`), fsutil's root tests being `!windows` already.
+Round 5 pins the refusal itself: `TestAnOpenRootHoldsItsDirectory`
+(`internal/atomicwrite`, Windows only) opens a root on an empty directory
+and requires a rename and a removal of that directory to fail with a
+sharing violation while the root is open, the directory to stand after
+both, and the rename to go through once the root is closed, so a Go
+release whose `os.OpenRoot` shares delete there turns it red. It holds
+for a root `os.OpenRoot` opens, as the repair's is (`Root.OpenRoot`'s
+sub-roots share delete).
+Records: `ops/engineering-log.md`, 2026-11-09, B652 rounds 4 and 5.
+
 ## B514 — deterministic medium evidence and controls (2026-10-23)
 
 Mount tables, device identities and statfs sequences are explicit fixtures.
