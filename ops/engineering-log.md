@@ -89918,3 +89918,128 @@ where `TestEveryCitedTestNameExists`, `TestNoDocblockNamesAnotherDeclaration`,
 `TestEveryBridgeWordIsInTheProtocol`, `TestDSDOutputProtocolTokens` and
 `TestQualificationRunbookVersion` passed too; and the qualification check passed at 53
 against main's tip's merge base, 9d59c8f6.
+
+## 2026-11-09 — B728 B9 round 13: a case that could hang on a loaded runner
+
+Worker b728-b9, legion0 (Ubuntu 26.04, Linux 7.0, Go 1.27.3), branch `feat/b728-b9-choice`
+at 3547e9f4 (round 12 taken, with the orchestrator's comment fix). The brief and its two
+reviews (Codex's three points, Claude's six). No production file changes. Commits: 057c6c19
+(every wait of the case bounded), 9d36eb37 (the orderings forced, red), 080cd8bb (the fix),
+0c7931b4 (the regression's escape apart from the cleanup it tests), 29914552 (qualification
+54) and this record. The rules are a patch the orchestrator applies
+(`rules-b728-b9-r13.patch`): two bullets in `build-ci-tests.md`.
+
+**The wait that hung, and the ordering.** CI's macOS leg (run 42558744822, attempt 2):
+`TestAnOccurrenceBesideAWriteIsNotRevoked/after_the_state's_write_and_before_the_publish`
+ran 29m49s, to the package's timeout. The dump the orchestrator quoted: the write in its
+ChoiceWritten seam, inside `sync.(*Once).doSlow` at `playback_dsd_choice_test.go:175`,
+waiting for `release`, from `Backend.choiceWritten` (`dsd_choice.go:590`) in `chooseDSD`
+(`:302`), for 29 minutes; the engine's loop idle in its select (`owner.go:249`), 29 minutes;
+the case's own goroutine in `sync.Mutex.Lock`, 28 minutes. The case had failed and was in
+its cleanup, `once.Do(func() {}); closeOnce(release)`: the Once's mutex was the seam's,
+whose call waited for the `release` only that cleanup's next statement would close. The
+minute between the two is the look's watchdog: `waitSnap("a heard")` waited for a snapshot
+whose `Track()` names the occurrence heard, a track the engine clears when its session is
+released (`Engine.releaseSession`'s `hear(nil)`). With the fake DAC free from before the
+play, the converted DSD64 track of 0.25 s could play out, the reporter send its Audible and
+its Finished (one `reportStep` can carry both), and the engine take both before the case
+first looked, after which no change sets the track again. The trigger is normal completion
+outrunning a test's look at a transient field; the hang is the test's cleanup.
+
+**Reproduced, at the base and under load.** In a copy of 3547e9f4 with that ordering forced
+(the case waits for the session's end, `waitEnded`, before it looks), `-watchdog=5s
+-timeout=45s`: "waited 5s for a heard", then "panic: test timed out after 45s" with CI's
+dump (the case in `sync.Mutex.Lock` under `Once.doSlow` from its cleanup at `:178`, the
+write in the seam's `doSlow` at `:175`, the engine's loop idle), and at the watchdog no
+session goroutine left: the session had played out and been released. Unforced, commit 1's
+test binary, the first case still looking with the DAC free and the waits now bounded,
+failed once in 150 runs at `GOMAXPROCS=1` beside 16 busy processes (in the build slot), the
+same way: "waited 5s for a heard", its cleanup's bounded wait after it, no session goroutine
+at the watchdog, 10.1 s where CI's took 29m49s.
+
+**Production cannot take it.** The seams are nil outside a test, so no write is ever parked:
+a write publishes and settles its pending set at every end of the write (`settleChoice`,
+deferred, a panic's included). An occurrence started once the state is durable and before
+the publish waits for nothing: a session's first occurrence reads the policy afresh
+(`admitDSD`'s `o.leading`), so it is admitted under the set the durable state gives, which
+the pending set plays alike (`pendingFor` finds nothing to wait for); control K4 below shows
+the case catching the contrary within its bound. And a track is no longer heard once its
+session is released, by design: a controller that polls after a track ended sees none. The
+only wait that could hang was the test's, and the ordering at fault the test's look at a
+transient field.
+
+**Commit 1, every wait bounded** (057c6c19), with nothing that runs changed: the first
+case's park and cleanup as a helper, `parkedWrite`, its cleanup still asking the seam's Once
+first, within the watchdog now; every wait for the write's answer through round 2's
+`answer`; `reached` and `awaitedBy` (the siblings' wait for an occurrence to wait on the
+write) logging the goroutines at the watchdog; the rig's engine commands (`available`,
+`insert`, `play`) on a context the watchdog bounds (`within`). The siblings are the case's
+other subtests and the helpers they share, `besideAWrite`, `notRevoked`, `reached`,
+`awaitedBy`, round 2's `answer` and `choose`, and the rig's `waitSnap`, `waitEnded` and
+`waitStopped`, which the watchdog bounded already. The case passed 10 runs under `-race`,
+and the package passed.
+
+**Commit 2, the orderings forced, red** (9d36eb37), each within the bounds: a fourth case,
+the first case's occurrence played out before the case looks (CI's ordering, by a barrier:
+the session's end awaited while the write is parked), its look still the snapshot's
+`Track()`; and `TestACaseEndingWithItsWriteParkedLetsItGo`, a case that ends with its write
+parked, as a failure ends it, run on a goroutine of the test's so that a cleanup that waits
+fails within twice the watchdog. Red under `-race -watchdog=10s`: "waited 10s for a heard",
+then "the case's cleanup waited 10s for its write's seam, whose Once the parked write holds
+until it is let go" (20.2 s), the regression's case failing on the cleanup's line alone
+(10.0 s), the other three subtests passing, no timeout.
+
+**Commit 3, barriers alone** (080cd8bb). The first case plays, waits for its sink to fill
+the hardware buffer and wait on the DAC (`runningAndWaiting`), grants 50 ms, ticks the
+reporter and reads the track heard, which nothing can clear now (the DAC holds the rest of
+the track, so its session cannot end); with the write still parked it checks what proves the
+admission in the window: converted (the track's Details DSD, not lossless), one PCM sink and
+no DSD sink, no wait for the write (`ChoiceAwaited` counted), the write unanswered. The
+write then publishes while the occurrence plays, which plays out unrevoked to the end of the
+queue. The forced case reads only what stays: the engine's `TrackCount`, the backend's
+audible event and Details for the session's first occurrence, the sinks opened, the stop's
+reason, the waits for the write, the write unanswered until let go. `parkedWrite`'s write
+waits outside the Once that marks it parked and `letGo` has a Once of its own, so a case's
+cleanup, `letGo`, asks nothing of the seam; the siblings park their writes in it too, and
+`closeOnce` goes. 0c7931b4: the regression's escape closes the write's gate through its own
+Once, apart from `letGo`, the cleanup it tests. Green: 20 runs under `-race`, 140 PASS, no
+SKIP. Reverting only the fix (HEAD with the case's file as 9d36eb37 left it; 0c7931b4 builds
+on the fix's `parkedWrite` and goes with it), under the default watchdog: "waited 1m0s for a
+heard" and the cleanup's "waited 1m0s" twice, 186 s, no timeout: the bounded red, never a
+hang.
+
+**Controls**, predicted before the runs (`r13-controls.predictions.txt`), the files' bytes
+restored after each, `-race -watchdog=10s`: K1 (the base's park and cleanup: the write held
+inside the Once, `letGo` asking that Once first) red in the regression at 20.0 s, "a case
+that ended with its write parked did not end within 20s: its cleanup waits for the parked
+write", its escape letting the write go; K2 (the forced case looking for the track heard
+after the stop) red in that case alone, "waited 10s for a heard", once; K4 (production,
+`dsd_policy.go`: a session's first occurrence admitted under the set published without
+reading the policy afresh, which the policy's fixed clock leaves unrefreshed after the rig's
+refresh) red in both window cases at 5.0 s, "play: player: play: backend_timeout: start did
+not answer within its deadline": the occurrence waited for the parked write until the
+engine's Start deadline. K4's prediction had the forced case fail at its wait for the stop;
+it failed at its play, as the first case did. Nothing else differed.
+
+**The platform.** The fix orders the case by the fake kernel's grants and the reporter's
+tick (the occurrence cannot end before the case looks: the DAC is given no time to play it)
+and, the other way round, by the session's end before the look; no scheduler, loaded or
+idle, on macOS or Linux, reorders a barrier, so a Linux run shows what a macOS one would.
+The load comparison is Linux's reach of CI's ordering: one failure in 150 at commit 1, none
+in 150 at HEAD.
+
+Round 13's gates, on 29914552 at legion0, through the build slot: `make fmt` left the tree
+clean; `make vet` passed for linux/amd64, `GOOS=windows`, `GOOS=darwin` and `GOOS=linux
+GOARCH=386`; `go test -race` on `./internal/alsapcm/...` and `./internal/player/...` passed
+(86 s); `go test -race -count=200 -v -timeout 60m -run
+'^(TestAnOccurrenceBesideAWriteIsNotRevoked|TestACaseEndingWithItsWriteParkedLetsItGo)$'
+./internal/alsapcm/` passed, an explicit PASS 200 times for each of the case's four subtests
+and the regression's case and none skipped (122 s), with `TMPDIR` on the worktree's ext4:
+`/tmp` is tmpfs on legion0, where the rig's engine refuses its data directory and every rig
+case skips; the load comparison above; CI's two native-integration runs passed under the
+overlay, every name CI requires among them; `make docs-check` passed, and again on a copy of
+the branch with the rules patch applied, where `TestEveryCitedTestNameExists`,
+`TestNoDocblockNamesAnotherDeclaration`, `TestEveryBridgeWordIsInTheProtocol`,
+`TestDSDOutputProtocolTokens` and `TestQualificationRunbookVersion` passed too; and the
+qualification check passed at 54 against the merge base of each main ref, 9d59c8f6,
+0fd7e3f8, 7c1db6dd and 3d0a0d05.
