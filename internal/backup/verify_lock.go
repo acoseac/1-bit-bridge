@@ -39,8 +39,13 @@ var ErrBackupsBusy = errors.New("another verification or prune of these snapshot
 // from it.
 var ErrBackupsUnlocked = errors.New("no lock was granted on the backups folder, so nothing was verified or pruned")
 
-// lockPoll is how often a wait for the lock tries it.
-const lockPoll = 50 * time.Millisecond
+// lockPoll is how often a wait for the lock tries it, and markerPoll how
+// often a wait for another process's hold asks whether it is a check that
+// did not end (stuckMarker).
+const (
+	lockPoll   = 50 * time.Millisecond
+	markerPoll = time.Second
+)
 
 // AutoLockWait is how long a verification the bridge makes (the scheduled
 // one, the console's, the one bridge backup makes of its snapshot) waits for
@@ -118,7 +123,8 @@ func lockBackupsWith(ctx context.Context, dir string, wait time.Duration, token 
 			return true, nil
 		}
 	}
-	// The token first: another holder in this process is a lock held.
+	// The token first: another holder in this process is a lock held, and one
+	// that is a check that did not end is not waited for.
 	takeToken := func() error {
 		if token == nil {
 			return nil
@@ -128,6 +134,9 @@ func lockBackupsWith(ctx context.Context, dir string, wait time.Duration, token 
 			case token <- struct{}{}:
 				return nil
 			default:
+			}
+			if stuckHere(dir) {
+				return ErrCheckStillRunning
 			}
 			sawWait()
 			ok, err := pause()
@@ -160,6 +169,7 @@ func lockBackupsWith(ctx context.Context, dir string, wait time.Duration, token 
 		closeAll()
 		return nil, err
 	}
+	var askedMarker time.Time
 	for {
 		err := tryLockBackups(f)
 		switch {
@@ -169,6 +179,9 @@ func lockBackupsWith(ctx context.Context, dir string, wait time.Duration, token 
 				closeAll()
 				return nil, err
 			}
+			// Held here, the lock holds no check that did not end: a marker
+			// of one is a process's that has ended.
+			_ = os.Remove(filepath.Join(dir, stuckMarkerName))
 			return func() {
 				_ = fsutil.Unlock(f)
 				closeAll()
@@ -179,6 +192,15 @@ func lockBackupsWith(ctx context.Context, dir string, wait time.Duration, token 
 		case !errors.Is(err, fsutil.ErrLocked):
 			closeAll()
 			return nil, fmt.Errorf("lock the snapshots: %w", err)
+		}
+		// Held by another process: one whose check did not end, then or
+		// since, is not waited for; its marker is asked once a second.
+		if time.Since(askedMarker) >= markerPoll {
+			askedMarker = time.Now()
+			if _, ok := stuckMarker(dir); ok {
+				closeAll()
+				return nil, ErrCheckStillRunning
+			}
 		}
 		sawWait()
 		ok, perr := pause()
@@ -207,7 +229,7 @@ func ProbeBackupsLock(backupsRoot string) error {
 		return nil
 	}
 	defer func() { <-token }()
-	f, err := os.OpenFile(filepath.Join(backupsRoot, LockFileName), os.O_RDWR, 0)
+	f, err := openProbe(filepath.Join(backupsRoot, LockFileName))
 	if err != nil {
 		return nil
 	}
@@ -221,13 +243,20 @@ func ProbeBackupsLock(backupsRoot string) error {
 	return nil
 }
 
+// openProbe opens a lock file there already for a probe's try, making none:
+// os.OpenFile for writing, as an exclusive lock on a network mount wants, and
+// a test's stand-in for an open that hangs (SetOpenProbeForTest).
+var openProbe = func(path string) (*os.File, error) { return os.OpenFile(path, os.O_RDWR, 0) }
+
 // verifySlot is this process's one verification at a time, taken before the
 // backups folder's lock: a verification that finds it taken waits its turn,
 // in the order the waits began, for as long as its context lasts.
 var verifySlot = make(chan struct{}, 1)
 
 // takeSlot takes the slot, waiting for it while another verification holds
-// it until ctx ends, and answers its release.
+// it until ctx ends, and answers its release; a slot a check that did not end
+// holds, from before the wait or from during it, answers ErrCheckStillRunning
+// at once.
 func takeSlot(ctx context.Context) (func(), error) {
 	release := func() { <-verifySlot }
 	select {
@@ -238,10 +267,17 @@ func takeSlot(ctx context.Context) (func(), error) {
 	if onSlotWait != nil {
 		onSlotWait()
 	}
-	select {
-	case verifySlot <- struct{}{}:
-		return release, nil
-	case <-ctx.Done():
-		return nil, ctx.Err()
+	for {
+		notice := stuckNotice()
+		if stuckHere("") {
+			return nil, ErrCheckStillRunning
+		}
+		select {
+		case verifySlot <- struct{}{}:
+			return release, nil
+		case <-notice:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
 	}
 }

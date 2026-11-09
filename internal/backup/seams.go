@@ -46,6 +46,23 @@ func SetSyncVerdictForTest(fn func(path string) error) (restore func()) {
 	return func() { syncVerdictDir = prev }
 }
 
+// SetSyncVetoForTest replaces the barrier that makes the veto of a snapshot
+// about to be checked again durable (fsutil.SyncParentDir), and returns the
+// restore.
+func SetSyncVetoForTest(fn func(path string) error) (restore func()) {
+	prev := syncVetoDir
+	syncVetoDir = fn
+	return func() { syncVetoDir = prev }
+}
+
+// SetOpenProbeForTest replaces the open a probe of the backups folder's lock
+// makes (ProbeBackupsLock, StuckCheckOf), and returns the restore.
+func SetOpenProbeForTest(fn func(path string) (*os.File, error)) (restore func()) {
+	prev := openProbe
+	openProbe = fn
+	return func() { openProbe = prev }
+}
+
 // SetVerifyReadRateForTest sets how many bytes a second a verification
 // reads at most (0: unpaced), and returns the restore.
 func SetVerifyReadRateForTest(rate int64) (restore func()) {

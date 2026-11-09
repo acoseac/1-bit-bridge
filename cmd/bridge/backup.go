@@ -179,6 +179,9 @@ func verifyCmd(ctx context.Context, configPath, path string, full bool, stdout, 
 	case errors.Is(err, backup.ErrBackupsUnlocked):
 		fmt.Fprintf(stderr, "backup: nothing was verified: %v; with no lock nothing would keep a prune from removing the snapshot under its check. Put the data directory on a filesystem that grants file locks (a local disk, or a network mount whose lock service runs).\n", err)
 		return 1
+	case errors.Is(err, backup.ErrCheckStillRunning):
+		fmt.Fprintf(stderr, "backup: nothing was verified: %v. The end of the process that runs it ends it (bridge doctor's backup-check line names its snapshot): restart the bridge, or stop the bridge backup --verify that runs it, then run this again.\n", err)
+		return 1
 	}
 	if res.Legacy {
 		describeVerdict(stdout, res.Found)
@@ -195,18 +198,43 @@ func verifyCmd(ctx context.Context, configPath, path string, full bool, stdout, 
 // record holds now, on stdout, and why the verdict was not recorded or the
 // snapshot does not pass, on stderr, each line led by prefix. It reports
 // whether the snapshot passes: both verdicts VERIFIED (the database's
-// UNVERIFIED where the install had none to capture), recorded.
+// UNVERIFIED where the install had none to capture), recorded. Where the
+// verdict was not recorded it says the two apart: what this check found, and
+// what the record reads, as every reader reads it until a check is recorded;
+// and of a snapshot not checked again (backup.ErrRecheckRefused), the record
+// an earlier check left, which this one did not repeat.
 func reportVerdict(stdout, stderr io.Writer, prefix string, res backup.VerifyResult, err error) bool {
 	rec := res.Record
 	if rec.DatabaseState == "" {
 		rec = res.Found
 	}
-	if res.Found.DatabaseState != "" {
-		describeVerdictLed(stdout, prefix, rec)
-	}
-	if err != nil {
+	switch {
+	case errors.Is(err, backup.ErrRecheckRefused):
+		if res.Record.DatabaseState != "" {
+			fmt.Fprintf(stdout, "%sits record, from an earlier check, which this one did not repeat:\n", prefix)
+			describeVerdictLed(stdout, prefix+"  ", res.Record)
+		}
+		fmt.Fprintf(stderr, "%sthe snapshot was not checked: %v\n", prefix, err)
+		return false
+	case err != nil && res.Found.DatabaseState != "":
+		fmt.Fprintf(stdout, "%sthis check found:\n", prefix)
+		describeVerdictLed(stdout, prefix+"  ", res.Found)
+		if res.Record.DatabaseState != "" {
+			fmt.Fprintf(stdout, "%sits record reads, for every reader until a check is recorded:\n", prefix)
+			describeVerdictLed(stdout, prefix+"  ", res.Record)
+		}
+		if errors.Is(err, backup.ErrVerdictNotDurable) {
+			fmt.Fprintf(stderr, "%sthe snapshot was kept, and what this check found was written and is not known to survive a crash: %v\n", prefix, err)
+		} else {
+			fmt.Fprintf(stderr, "%sthe snapshot was kept, and what this check found was not recorded: %v\n", prefix, err)
+		}
+		return false
+	case err != nil:
 		fmt.Fprintf(stderr, "%sthe snapshot was kept, and its verdict was not recorded: %v\n", prefix, err)
 		return false
+	}
+	if res.Found.DatabaseState != "" {
+		describeVerdictLed(stdout, prefix, rec)
 	}
 	if !rec.Passes() {
 		fmt.Fprintf(stderr, "%sthe snapshot was kept, and it is not a verified recovery point: database %s, files %s\n",
@@ -449,10 +477,12 @@ func runBackupTicker(ctx context.Context, src backup.Sources, keep func() int, i
 		// Where no lock is granted on the backups folder nothing there is
 		// verified or pruned, so a capture each pass would grow it without
 		// end: while its newest snapshot still owes its check, no other is
-		// taken (backlog B653's second round), and bridge doctor says why.
-		if newest, held := captureHeldBack(ctx, backupsRoot); held {
-			fmt.Fprintf(stderr, "backup (%s): no snapshot taken: no lock is granted on the backups folder, so its newest snapshot, %s, has not been verified and nothing there is pruned; none is taken until a lock is (bridge doctor's backup-lock line)\n",
-				triggered, newest)
+		// taken (backlog B653's second round), nor while a check that did not
+		// end holds the folder (its third round), and bridge doctor says why.
+		if why, held := captureHeldBack(ctx, backupsRoot); held {
+			if why != "" {
+				fmt.Fprintf(stderr, "backup (%s): no snapshot taken: %s\n", triggered, why)
+			}
 			return
 		}
 		status.sweepStarted()
@@ -488,7 +518,9 @@ func runBackupTicker(ctx context.Context, src backup.Sources, keep func() int, i
 	// a new snapshot (startupVerifyInPlace), claimed under the backups
 	// folder's lock so no prune removes it before its check, and reports
 	// whether that check found its database FAILED, which leaves no recovery
-	// point from the last day and takes a new snapshot after it.
+	// point from the last day and takes a new snapshot after it: what the
+	// check found, whether or not its record could be written (backlog B653's
+	// third round).
 	verifyInPlace := func(name string) (failed bool) {
 		dir := filepath.Join(backupsRoot, name)
 		c, err := backup.Claim(ctx, dir, backupsRoot)
@@ -503,7 +535,7 @@ func runBackupTicker(ctx context.Context, src backup.Sources, keep func() int, i
 		fmt.Fprintf(stdout, "backup (startup): %s owes its check: verifying it in place of a new snapshot\n", dir)
 		res := backup.FinishCapture(ctx, c, keep, backup.VerifyOptions{BackupsRoot: backupsRoot})
 		report("startup", res)
-		return res.VerifyErr == nil && res.Verify.Record.DatabaseState == backup.StateFailed
+		return res.Verify.Found.DatabaseState == backup.StateFailed
 	}
 
 	// The startup snapshot and the scheduled ones differ, so the loop's
@@ -520,7 +552,14 @@ func runBackupTicker(ctx context.Context, src backup.Sources, keep func() int, i
 			doSnapshot("scheduled")
 			return
 		}
-		st, err := backup.ReadStatus(ctx, backupsRoot)
+		read, answered := readBounded(ctx, func() statusRead {
+			st, err := backup.ReadStatus(ctx, backupsRoot)
+			return statusRead{st, err}
+		})
+		if !answered {
+			return
+		}
+		st, err := read.st, read.err
 		if err != nil {
 			fmt.Fprintf(stderr, "backup (startup): list existing snapshots: %v (writing anyway)\n", err)
 			doSnapshot("startup")
@@ -563,7 +602,18 @@ func runBackupTicker(ctx context.Context, src backup.Sources, keep func() int, i
 // nothing for a verification the shutdown stopped, which wrote INCOMPLETE.
 func reportTickerVerdict(ctx context.Context, stdout, stderr io.Writer, triggered string, res backup.Result) {
 	if res.VerifyErr != nil {
-		if failure := ctxerr.WithoutCancellation(ctx, res.VerifyErr); failure != nil {
+		failure := ctxerr.WithoutCancellation(ctx, res.VerifyErr)
+		found, rec := res.Verify.Found, res.Verify.Record
+		switch {
+		case failure == nil:
+		case errors.Is(failure, backup.ErrRecheckRefused):
+			fmt.Fprintf(stderr, "backup (%s): %s was not checked, and its record, from an earlier check, reads database %s, files %s: %v\n", triggered, res.Dir,
+				backup.StateWords(rec.DatabaseState, rec.DatabaseReasons), backup.FilesWords(rec), failure)
+		case found.DatabaseState != "" && rec.DatabaseState != "":
+			fmt.Fprintf(stderr, "backup (%s): %s was kept, and its check found database %s, files %s, which was not recorded; its record reads database %s, files %s: %v\n", triggered, res.Dir,
+				backup.StateWords(found.DatabaseState, found.DatabaseReasons), backup.FilesWords(found),
+				backup.StateWords(rec.DatabaseState, rec.DatabaseReasons), backup.FilesWords(rec), failure)
+		default:
 			fmt.Fprintf(stderr, "backup (%s): %s was kept, and its verdict was not recorded: %v\n", triggered, res.Dir, failure)
 		}
 		return
@@ -584,8 +634,11 @@ func reportTickerVerdict(ctx context.Context, stdout, stderr io.Writer, triggere
 // pruneSkipWords says why a kept snapshot's prune did not run, from its
 // verification's error.
 func pruneSkipWords(verifyErr error) string {
-	if errors.Is(verifyErr, backup.ErrBackupsUnlocked) {
+	switch {
+	case errors.Is(verifyErr, backup.ErrBackupsUnlocked):
 		return "no lock is granted on the backups folder, so nothing there is verified or pruned (bridge doctor's backup-lock line)"
+	case errors.Is(verifyErr, backup.ErrCheckGivenUp), errors.Is(verifyErr, backup.ErrCheckStillRunning):
+		return "a check that did not end holds the snapshots until it ends; the first snapshot after it prunes (bridge doctor's backup-check line)"
 	}
 	return "another verification or prune of the snapshots held their lock; the next snapshot prunes"
 }
@@ -680,20 +733,80 @@ func owesCheck(sn backup.SnapshotStatus) bool {
 	return false
 }
 
+// statusRead is a bounded read of the backups folder's status.
+type statusRead struct {
+	st  backup.Status
+	err error
+}
+
+// readBounded runs read, a read of the backups folder that can wait on a
+// filesystem (a hung mount; a named pipe where a manifest goes), on a
+// goroutine of its own, and waits for it until it answers, or, once ctx has
+// ended, for backup.StopWriteBound more: answered false then, the read left to
+// end on its own, so a stop of the ticker never waits on it longer (backlog
+// B653's third round). The read only reads, and holds nothing past its
+// return.
+func readBounded[T any](ctx context.Context, read func() T) (v T, answered bool) {
+	out := make(chan T, 1)
+	go func() { out <- read() }()
+	select {
+	case v = <-out:
+		return v, true
+	case <-ctx.Done():
+	}
+	t := time.NewTimer(backup.StopWriteBound)
+	defer t.Stop()
+	select {
+	case v = <-out:
+		return v, true
+	case <-t.C:
+		return v, false
+	}
+}
+
 // captureHeldBack reports whether the ticker takes no snapshot this pass,
-// and names the snapshot that holds it back: no lock is granted on the
-// backups folder (backup.ProbeBackupsLock), so nothing there is verified or
-// pruned, and its newest snapshot still owes its check.
-func captureHeldBack(ctx context.Context, backupsRoot string) (string, bool) {
-	if !errors.Is(backup.ProbeBackupsLock(backupsRoot), backup.ErrBackupsUnlocked) {
+// and why, in its log line's words: a check that did not end holds the
+// backups folder still (backup.StuckCheckOf), so nothing there is verified or
+// pruned until it ends; or no lock is granted on the folder
+// (backup.ProbeBackupsLock), so nothing there is verified or pruned, and its
+// newest snapshot still owes its check. Each read is bounded by the stop
+// (readBounded); one the stop came first to holds the pass back, why "".
+func captureHeldBack(ctx context.Context, backupsRoot string) (why string, held bool) {
+	type stuckRead struct {
+		check backup.StuckCheck
+		held  bool
+	}
+	stuck, answered := readBounded(ctx, func() stuckRead {
+		c, held := backup.StuckCheckOf(backupsRoot)
+		return stuckRead{c, held}
+	})
+	switch {
+	case !answered:
+		return "", true
+	case stuck.held:
+		return fmt.Sprintf("a check of %s that did not end still holds the backups folder, so nothing there is verified or pruned; none is taken until it ends (bridge doctor's backup-check line)",
+			stuck.check.Snapshot), true
+	}
+	lockErr, answered := readBounded(ctx, func() error { return backup.ProbeBackupsLock(backupsRoot) })
+	switch {
+	case !answered:
+		return "", true
+	case !errors.Is(lockErr, backup.ErrBackupsUnlocked):
 		return "", false
 	}
-	st, err := backup.ReadStatus(ctx, backupsRoot)
-	if err != nil {
+	read, answered := readBounded(ctx, func() statusRead {
+		st, err := backup.ReadStatus(ctx, backupsRoot)
+		return statusRead{st, err}
+	})
+	switch {
+	case !answered:
+		return "", true
+	case read.err != nil:
 		return "", false
 	}
-	if newest, found := st.Newest(); found && owesCheck(newest) {
-		return newest.DirName, true
+	if newest, found := read.st.Newest(); found && owesCheck(newest) {
+		return fmt.Sprintf("no lock is granted on the backups folder, so its newest snapshot, %s, has not been verified and nothing there is pruned; none is taken until a lock is (bridge doctor's backup-lock line)",
+			newest.DirName), true
 	}
 	return "", false
 }

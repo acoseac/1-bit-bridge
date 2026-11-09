@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -111,7 +112,11 @@ func TestAStopWhileTheLocksOpenHangsReturnsWithinItsBoundAndTakesNoLockLate(t *t
 // deadline frees a check its context cannot reach (a read of a hung mount,
 // here a check whose thread does not return): the verification answers its
 // caller, whose own context never ends, within its deadline and half of
-// StopWriteBound, and records INCOMPLETE (deadline).
+// StopWriteBound, saying its check was given up (ErrCheckGivenUp, the
+// deadline's), and records INCOMPLETE (deadline). The check's thread ends,
+// without a check, once the test lets it go, and the test joins the
+// verification's worker, which keeps this process's slot until then, before
+// it puts either seam back (backlog B653's third round).
 func TestAVerificationPastItsDeadlineReturnsWithItsCallerStillWaiting(t *testing.T) {
 	src := storeWithTracks(t, 5)
 	dir, err := backup.Snapshot(t.Context(), src)
@@ -120,17 +125,24 @@ func TestAVerificationPastItsDeadlineReturnsWithItsCallerStillWaiting(t *testing
 	}
 	const deadline = 300 * time.Millisecond
 	t.Cleanup(backup.SetVerifyDeadlineForTest(deadline))
-	// The check's thread waits until the test ends, then ends without a
-	// check, touching nothing of the bundle the test's cleanup removes. It
-	// read the seam before it hung, so the seam's restore waits until it has
-	// entered (the repo's rule for a package-level seam).
+	// The check's thread waits until it is let go, then ends without a
+	// check, touching nothing of the bundle.
 	entered, hung := make(chan struct{}), make(chan struct{})
-	t.Cleanup(func() { close(hung) })
+	var parked atomic.Bool
 	t.Cleanup(backup.SetOnLowPriorityForTest(func() {
-		close(entered)
-		<-hung
-		runtime.Goexit()
+		if parked.CompareAndSwap(false, true) {
+			close(entered)
+			<-hung
+			runtime.Goexit()
+		}
 	}))
+	// Registered last, so run first: the thread let go and the worker
+	// joined before the seams are put back.
+	letGo := sync.OnceFunc(func() { close(hung) })
+	t.Cleanup(func() {
+		letGo()
+		awaitSlotFree(t)
+	})
 	done := make(chan error, 1)
 	start := time.Now()
 	go func() {
@@ -139,12 +151,17 @@ func TestAVerificationPastItsDeadlineReturnsWithItsCallerStillWaiting(t *testing
 	}()
 	err = requireReturnedWithin(t, done, start, deadline+backup.StopWriteBound/2+time.Second, "a verification past its deadline")
 	<-entered
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Errorf("a verification past its deadline answered %v, want the deadline", err)
+	if !errors.Is(err, backup.ErrCheckGivenUp) || !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("a verification past its deadline answered %v, want its check given up at the deadline", err)
 	}
 	v := listed(t, dir)
 	if v.DatabaseState != backup.StateIncomplete || !slices.Contains(v.DatabaseReasons, backup.ReasonDeadline) {
 		t.Errorf("the record reads %s %v, want INCOMPLETE (deadline)", v.DatabaseState, v.DatabaseReasons)
+	}
+	letGo()
+	awaitSlotFree(t)
+	if _, held := backup.StuckCheckOf(filepath.Dir(dir)); held {
+		t.Error("the check reads as one still running once its thread has ended")
 	}
 }
 

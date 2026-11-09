@@ -18,23 +18,39 @@ import (
 // path. cmd/bridge's doctorBackups feeds them, for bridge doctor and the
 // console's doctor alike. And backup-lock, a warn shown only where the backups
 // folder grants no lock (backup.ProbeBackupsLock answers ErrBackupsUnlocked),
-// where nothing is verified or pruned (backlog B653's second round).
+// where nothing is verified or pruned (backlog B653's second round); and
+// backup-check, a warn shown only while a check that did not end holds the
+// backups folder (backup.StuckCheckOf, its third round). A hint that advises
+// a bridge backup command gives its config as the placeholder <bridge.yaml>,
+// and says to use the config this doctor read: the doctor names no path.
 const (
 	checkNameBackupNewest   = "backup-newest"
 	checkNameBackupVerified = "backup-verified"
 	checkNameBackupLock     = "backup-lock"
+	checkNameBackupCheck    = "backup-check"
 )
+
+// sameConfig is what a hint that advises a bridge backup command says of its
+// --config.
+const sameConfig = "<bridge.yaml> being the config this doctor read"
 
 // BackupChecks are the backups' lines for st, the backups folder as its
 // manifests read at now, or for err, the listing's failure; lockErr is what
-// backup.ProbeBackupsLock answered for the folder; scheduled says the bridge
-// takes snapshots on a cadence.
-func BackupChecks(st backup.Status, err, lockErr error, scheduled bool, now time.Time) []Check {
+// backup.ProbeBackupsLock answered for the folder; stuck, when not nil, the
+// check that did not end and holds it still (backup.StuckCheckOf); scheduled
+// says the bridge takes snapshots on a cadence.
+func BackupChecks(st backup.Status, err, lockErr error, stuck *backup.StuckCheck, scheduled bool, now time.Time) []Check {
 	var out []Check
 	if errors.Is(lockErr, backup.ErrBackupsUnlocked) {
 		out = append(out, warn(checkNameBackupLock,
 			"no lock is granted on the backups folder, so no snapshot there is verified or pruned, and the scheduled snapshot waits while the newest one owes its check",
 			"put the data directory on a filesystem that grants file locks: a local disk, or a network mount whose lock service runs"))
+	}
+	if stuck != nil {
+		out = append(out, warn(checkNameBackupCheck,
+			fmt.Sprintf("the check of snapshot %s did not end and was given up %s, and still holds the backups folder: no snapshot there is verified or pruned until it ends, and the scheduled snapshot waits",
+				stuck.Snapshot, agoWords(now.Sub(stuck.Since))),
+			"the end of the process that runs it ends it: restart the bridge, or stop the backup --verify command that runs it; if it comes back, the data directory's storage is not answering its reads"))
 	}
 	if err != nil {
 		return append(out, warn(checkNameBackupNewest,
@@ -47,7 +63,7 @@ func BackupChecks(st backup.Status, err, lockErr error, scheduled bool, now time
 			return append(out, ok(checkNameBackupNewest, "no snapshot: scheduled snapshots are off"))
 		}
 		return append(out, warn(checkNameBackupNewest, "no snapshot yet",
-			"bridge serve takes one at its next start; or run bridge backup"))
+			"bridge serve takes one at its next start; or run bridge backup --config <bridge.yaml>, "+sameConfig))
 	}
 	return append(out, newestLine(newest, now), verifiedLine(st, now))
 }
@@ -73,10 +89,10 @@ func newestLine(sn backup.SnapshotStatus, now time.Time) Check {
 			"a file of the snapshot is not the one it captured; its database is still a recovery point, and the next snapshot captures the files again")
 	case v.DatabaseState == backup.StateIncomplete:
 		return warn(checkNameBackupNewest, summary,
-			"its check did not finish; run bridge backup --verify <snapshot-dir> on it, or wait for the next snapshot")
+			"its check did not finish; run bridge backup --config <bridge.yaml> --verify <snapshot-dir> on it, "+sameConfig+", or wait for the next snapshot")
 	}
 	return warn(checkNameBackupNewest, summary,
-		"its database failed its check: the live database may be damaged; run bridge backup --verify <snapshot-dir> --full, and keep the snapshots that are verified")
+		"its database failed its check: the live database may be damaged; run bridge backup --config <bridge.yaml> --verify <snapshot-dir> --full, "+sameConfig+", and keep the snapshots that are verified")
 }
 
 // verifiedLine is backup-verified: ok naming the newest snapshot whose
@@ -94,11 +110,11 @@ func verifiedLine(st backup.Status, now time.Time) Check {
 	for _, sn := range st.Snapshots {
 		if sn.Verdict.DatabaseState == backup.StateFailed {
 			return fail(checkNameBackupVerified, "no snapshot's database is verified, and one has failed its check",
-				"the live database may be damaged: run bridge backup, then bridge backup --verify <snapshot-dir> --full on the snapshot it writes")
+				"the live database may be damaged: run bridge backup --config <bridge.yaml>, then bridge backup --config <bridge.yaml> --verify <snapshot-dir> --full on the snapshot it writes, "+sameConfig)
 		}
 	}
 	return warn(checkNameBackupVerified, "no snapshot's database is verified yet",
-		"the next snapshot is verified as it is taken; or run bridge backup")
+		"the next snapshot is verified as it is taken; or run bridge backup --config <bridge.yaml>, "+sameConfig)
 }
 
 // agoWords says how long ago d was, in the largest whole unit.

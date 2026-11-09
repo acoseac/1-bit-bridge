@@ -21,40 +21,42 @@ import (
 // synced (syncVerdictDir). That last sync can fail once the rename has
 // landed, and then every reader already reads the new record while the write
 // answers an error; and a write that fails before its rename leaves the
-// record it would have replaced. So a record written while either the record
-// it replaces or the new one holds a VERIFIED state goes behind a veto
-// (backlog B653, and its second round for a VERIFIED left behind): before
-// the staging the write puts vetoFileName in the bundle, its folder synced,
-// and only once the folder's sync after the rename has answered does it
-// remove it; while the veto stands, every reader (readVerdict) reads a
-// VERIFIED as INCOMPLETE (ReasonUnsynced). Each change of the veto moves the
-// backups folder's modification time (stampChange), so a reader that caches
-// what the folder holds (the console's Jobs card) reads it again.
+// record it would have replaced.
 //
-// What a write that answered an error leaves, as built:
-//   - no reader reads a VERIFIED, whichever step failed, the veto's own
-//     removal included, while the veto could be made in the bundle or, where
-//     it could not (a bundle this process may not write in), beside it in
-//     the backups folder (rootVetoPath), which every reader asks too;
-//   - where neither could be made, a new VERIFIED is not written at all
-//     (the error says so), and a record that held a VERIFIED is still
-//     written over, the error saying, if that write failed too, that the
-//     record keeps the verdict it held: the one case a reader still reads
-//     the VERIFIED a later check did not find;
-//   - a veto made whose owner could not be given (root_squash) is kept as it
-//     is: its presence alone is the veto, and the service may remove it.
+// So a VERIFIED is never in doubt where a reader can read it (backlog B653,
+// and its second and third rounds), by one veto, vetoFileName in the bundle,
+// or beside it in the backups folder (rootVetoPath) where the bundle takes no
+// file, which every reader asks (vetoedAt) and beside which it reads a
+// VERIFIED as INCOMPLETE (ReasonUnsynced):
+//   - before a verification checks a snapshot whose record holds a VERIFIED,
+//     it puts the veto in place and syncs its folder (setAside), so that
+//     neither a write that then fails, nor a crash at any point after, a
+//     write's lost rename included, leaves a reader the VERIFIED this check
+//     may disprove; where no veto can be put in place durably, the snapshot
+//     is not checked again (ErrRecheckRefused), and its record, which no
+//     check has disproved, stays as it was;
+//   - a write of a record that holds a VERIFIED, or that replaces one, needs
+//     the veto too, and with none to be had writes nothing;
+//   - the veto goes only once the record that replaces it is durable (the
+//     folder's sync after the rename has answered).
 //
-// A crash meanwhile leaves the previous record behind its veto, or the new
-// one, with or without it; each reads VERIFIED only from a check that
-// passed. Where no directory can be synced (Windows, fsutil.SyncParentDir a
-// no-op), the write is atomic and is not known to be durable: a crash can
-// leave the previous record, PENDING among them, which reads INCOMPLETE once
-// its owner is gone, and never a VERIFIED from a check that did not pass.
+// A veto made whose owner could not be given (root_squash) is kept as it is:
+// its presence alone is the veto, and the service may remove it. Each change
+// of the veto, and each write, moves the backups folder's modification time
+// (stampChange), so a reader that caches what the folder holds (the console's
+// Jobs card) reads it again. Where no directory can be synced (Windows,
+// fsutil.SyncParentDir a no-op), a write and a veto are atomic and are not
+// known to be durable.
 
 // syncVerdictDir is the barrier a verdict's write runs once its rename has
 // landed, given the manifest's path: fsutil.SyncParentDir. A test seam
 // (SetSyncVerdictForTest).
 var syncVerdictDir = fsutil.SyncParentDir
+
+// syncVetoDir is the barrier that makes the veto of a snapshot about to be
+// checked again durable, given the veto's path: fsutil.SyncParentDir. A test
+// seam (SetSyncVetoForTest).
+var syncVetoDir = fsutil.SyncParentDir
 
 // failStage, failRename and failVeto, nil in production, answer the failure
 // a test puts at a verdict's staging, its rename, or the making of a veto
@@ -123,38 +125,81 @@ func holdsVerified(v *Verification) bool {
 // while it holds a VERIFIED, and whether it survives a crash is not known.
 var ErrVerdictNotDurable = errors.New("the verdict was written and is not known to be durable")
 
-// ErrRecordKept marks a verdict's write that failed where no veto could be
-// made beside the snapshot: its record keeps the VERIFIED it held, which a
-// reader still reads, though the check just made did not find it.
-var ErrRecordKept = errors.New("the snapshot's record keeps the verified verdict it held, which this check did not find")
+// ErrRecheckRefused marks a verification that did not check its snapshot:
+// the snapshot's record holds a VERIFIED, and no veto could be put in place
+// durably beside it first (setAside), so a check that disproved it could not
+// be kept from a reader. Nothing was checked or written; the record, which no
+// check has disproved, is as it was.
+var ErrRecheckRefused = errors.New("the snapshot was not checked again: its record holds a verified verdict, and no veto could be put in place durably before the check")
 
-// publishVerdict writes found into the record of the snapshot at dir, merged
-// with the one its manifest holds now, and answers the record as written.
-// Its caller holds the backups folder's lock. A merge that changes nothing
-// writes nothing.
-func publishVerdict(dir string, found Verification) (Verification, error) {
+// setAside puts the veto of the snapshot in dir in place, durably, before a
+// check of a snapshot whose record holds a VERIFIED: in the bundle, the one
+// there already or one made, its folder synced, or, where that cannot be had,
+// beside the bundle in the backups folder, alike. A veto not known durable is
+// no veto: where none is, those made here go again, so the record reads as it
+// did, and the error is the refusal's (ErrRecheckRefused).
+func setAside(dir string) error {
+	root := filepath.Dir(dir)
+	var madeHere []string
+	var causes []error
+	for _, c := range []struct{ path, ref string }{{filepath.Join(dir, vetoFileName), dir}, {rootVetoPath(dir), root}} {
+		made, err := writeVeto(c.path, c.ref)
+		if made {
+			madeHere = append(madeHere, c.path)
+			// A reader's VERIFIED reads INCOMPLETE from now on.
+			stampChange(root)
+		}
+		if err != nil {
+			causes = append(causes, err)
+			continue
+		}
+		if err := syncVetoDir(c.path); err != nil {
+			causes = append(causes, fmt.Errorf("sync the veto: %w", err))
+			continue
+		}
+		return nil
+	}
+	for _, p := range madeHere {
+		_ = os.Remove(p)
+	}
+	if len(madeHere) > 0 {
+		stampChange(root)
+	}
+	return fmt.Errorf("%w: %w", ErrRecheckRefused, errors.Join(causes...))
+}
+
+// publishVerdict writes found into the record of the snapshot at dir and
+// answers the record as written: found merged with prior, the record as it
+// stood before its check (a verification's own, read under the same hold of
+// the lock), or, for a nil prior, with the record its manifest holds now. Its
+// caller holds the backups folder's lock. A merge that changes nothing writes
+// nothing, a veto aside.
+func publishVerdict(dir string, found Verification, prior *Verification) (Verification, error) {
 	mpath := filepath.Join(dir, ManifestFile)
 	m, err := readRecord(dir)
 	if err != nil {
 		return Verification{}, fmt.Errorf("read the snapshot's manifest: %w", err)
 	}
-	merged := mergeVerdict(m.Verification, found)
-	if m.Verification != nil && reflect.DeepEqual(*m.Verification, merged) && !vetoedAt(dir) {
+	stored := m.Verification
+	base := stored
+	if prior != nil {
+		base = prior
+	}
+	merged := mergeVerdict(base, found)
+	merged.Snapshot = boundName(dir)
+	if stored != nil && reflect.DeepEqual(*stored, merged) && !vetoedAt(dir) {
 		return merged, nil
 	}
-	stored := m.Verification
 	m.Verification = &merged
 	root := filepath.Dir(dir)
-	// unvetoed is why no veto stands over a record that held a VERIFIED.
-	var unvetoed error
+	// A record that holds a VERIFIED, or replaces one, is written behind its
+	// veto, and with none to be had not at all.
 	if holdsVerified(stored) || holdsVerified(&merged) {
 		made, err := putVeto(dir)
-		switch {
-		case err != nil && holdsVerified(&merged):
+		if err != nil {
 			return Verification{}, fmt.Errorf("the verdict was not written: put its veto in place: %w", err)
-		case err != nil:
-			unvetoed = err
-		case made:
+		}
+		if made {
 			// A reader's VERIFIED reads INCOMPLETE from now on.
 			stampChange(root)
 		}
@@ -164,9 +209,6 @@ func publishVerdict(dir string, found Verification) (Verification, error) {
 		return Verification{}, err
 	}
 	if err := stageAndRename(mpath, data); err != nil {
-		if unvetoed != nil {
-			return Verification{}, fmt.Errorf("%w: the verdict was not written (%w), and no veto could be put in place (%w)", ErrRecordKept, err, unvetoed)
-		}
 		return Verification{}, fmt.Errorf("the verdict was not written: %w", err)
 	}
 	// The record readers read has changed, whatever follows.
@@ -180,13 +222,38 @@ func publishVerdict(dir string, found Verification) (Verification, error) {
 	return merged, nil
 }
 
+// boundName is the name the backups folder lists the snapshot in dir by: the
+// entry of its parent that is that folder (os.SameFile), so a path spelled in
+// another case, on a folder that does not tell case apart, binds the record
+// to the name every reader lists; filepath.Base(dir) where none is found.
+func boundName(dir string) string {
+	base := filepath.Base(dir)
+	info, err := os.Stat(dir)
+	if err != nil {
+		return base
+	}
+	parent := filepath.Dir(dir)
+	entries, err := readDir(parent)
+	if err != nil {
+		return base
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		if fi, err := os.Stat(filepath.Join(parent, e.Name())); err == nil && os.SameFile(fi, info) {
+			return e.Name()
+		}
+	}
+	return base
+}
+
 // putVeto puts the veto of the snapshot in dir in place, and answers
 // whether it made one: one there already, in the bundle or beside it, of
 // any owner, is kept as it is (made false); otherwise it is made in the
 // bundle, and where that cannot be (a bundle this process may not write in),
 // beside it in the backups folder (rootVetoPath), each with its folder
-// synced where it can be, so that a crash keeps it; neither made is the
-// error.
+// synced where it can be; neither made is the error.
 func putVeto(dir string) (made bool, err error) {
 	inBundle, beside := filepath.Join(dir, vetoFileName), rootVetoPath(dir)
 	for _, p := range []string{inBundle, beside} {
@@ -194,13 +261,15 @@ func putVeto(dir string) (made bool, err error) {
 			return false, nil
 		}
 	}
-	bundleErr := writeVeto(inBundle, dir)
-	if bundleErr == nil {
-		return true, nil
+	madeIn, bundleErr := writeVeto(inBundle, dir)
+	if bundleErr == nil || madeIn {
+		_ = fsutil.SyncParentDir(inBundle)
+		return madeIn, nil
 	}
-	besideErr := writeVeto(beside, filepath.Dir(dir))
-	if besideErr == nil {
-		return true, nil
+	madeBeside, besideErr := writeVeto(beside, filepath.Dir(dir))
+	if besideErr == nil || madeBeside {
+		_ = fsutil.SyncParentDir(beside)
+		return madeBeside, nil
 	}
 	return false, fmt.Errorf("in the snapshot: %w; beside it: %w", bundleErr, besideErr)
 }
@@ -209,30 +278,30 @@ func putVeto(dir string) (made bool, err error) {
 // the veto, with the owner of the folder ref (fsutil.KeepOwner), so that a
 // verification run as root over a service's snapshot leaves the service a
 // veto it can remove; one whose owner could not be given is kept as root's
-// all the same, since its presence is all it says and its folder's owner
-// may remove it. Its folder is synced, best effort: a veto there protects
-// every reader whether or not that sync answers, and a folder that will not
-// sync fails the verdict's own sync after its rename, which leaves the veto
-// standing. One there already is no error.
-func writeVeto(path, ref string) error {
+// all the same, since its presence is all it says and its folder's owner may
+// remove it. It answers whether it made one there (made, its error aside):
+// one there already is kept, no error. Its caller syncs its folder as it
+// needs: a veto before a write of a new VERIFIED protects every reader
+// whether or not that sync answers, and one before a recheck is no veto until
+// it has (setAside).
+func writeVeto(path, ref string) (made bool, err error) {
+	if _, err := os.Lstat(path); err == nil {
+		return false, nil
+	}
 	if failVeto != nil {
 		if err := failVeto(path); err != nil {
-			return err
+			return false, err
 		}
 	}
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if errors.Is(err, os.ErrExist) {
-		return nil
+		return false, nil
 	}
 	if err != nil {
-		return err
+		return false, err
 	}
 	_ = fsutil.KeepOwner(f, ref)
-	if err := f.Close(); err != nil {
-		return err
-	}
-	_ = fsutil.SyncParentDir(path)
-	return nil
+	return true, f.Close()
 }
 
 // removeVetoes removes the snapshot in dir's veto, in the bundle and beside

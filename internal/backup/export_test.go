@@ -2,8 +2,12 @@ package backup
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
+	"path/filepath"
+
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 )
 
 // VerifySnapshotAsAnotherProcessForTest is VerifySnapshot as another
@@ -13,6 +17,41 @@ import (
 func VerifySnapshotAsAnotherProcessForTest(ctx context.Context, dir string, o VerifyOptions) (VerifyResult, error) {
 	o.asAnotherProcess = true
 	return VerifySnapshot(ctx, dir, o)
+}
+
+// OwnerHeldAsAnotherProcessForTest reports whether the owner lock of the
+// snapshot in dir is held, asked as another process asks it: an exclusive try
+// on a file of its own, never this process's record (ownedHere).
+func OwnerHeldAsAnotherProcessForTest(dir string) bool {
+	f, err := os.OpenFile(filepath.Join(dir, ownerLockName), os.O_RDWR, 0)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	switch err := fsutil.TryLock(f); {
+	case err == nil:
+		_ = fsutil.Unlock(f)
+		return false
+	case errors.Is(err, fsutil.ErrLocked):
+		return true
+	}
+	return false
+}
+
+// StuckMarkerName is the marker a check that did not end leaves in its
+// backups folder.
+const StuckMarkerName = stuckMarkerName
+
+// SlotHeldForTest reports whether a verification holds this process's slot:
+// a try on it, given back at once.
+func SlotHeldForTest() bool {
+	select {
+	case verifySlot <- struct{}{}:
+		<-verifySlot
+		return false
+	default:
+		return true
+	}
 }
 
 // SetAfterIdentityCopyForTest sets the hook Snapshot calls between copying

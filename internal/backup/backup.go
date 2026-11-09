@@ -441,7 +441,7 @@ func captureInto(ctx context.Context, src Sources, own **owner) (snapDir string,
 		Files:               captured,
 		PlayerFloorRequired: true,
 		Baselines:           baselines,
-		Verification:        pendingRecord(now, slices.Contains(captured, ManifestDBFileName)),
+		Verification:        pendingRecord(now, slices.Contains(captured, ManifestDBFileName), filepath.Base(dst)),
 	}
 	if err := writeManifest(filepath.Join(dst, ManifestFile), m); err != nil {
 		return "", fmt.Errorf("write snapshot manifest: %w", err)
@@ -958,8 +958,10 @@ type PruneResult struct {
 	// Skipped says the prune did not run this round, its orphan sweep
 	// included, and SkippedFor why (backlog B653): another process's
 	// verification or prune held the backups folder's lock (ErrBackupsBusy),
-	// and the next round prunes; or no lock was granted on it at all
-	// (ErrBackupsUnlocked), and no round prunes until one is.
+	// and the next round prunes; a check that did not end holds it still
+	// (ErrCheckStillRunning), and the first round after it ends prunes; or no
+	// lock was granted on it at all (ErrBackupsUnlocked), and no round prunes
+	// until one is.
 	Skipped    bool
 	SkippedFor error
 }
@@ -1031,7 +1033,7 @@ func PruneContext(ctx context.Context, backupsRoot string, keep int) (PruneResul
 		return PruneResult{}, fmt.Errorf("find the backups folder: %w", err)
 	}
 	unlock, err := lockBackups(ctx, root, 0)
-	if errors.Is(err, ErrBackupsBusy) || errors.Is(err, ErrBackupsUnlocked) {
+	if errors.Is(err, ErrBackupsBusy) || errors.Is(err, ErrBackupsUnlocked) || errors.Is(err, ErrCheckStillRunning) {
 		return PruneResult{Skipped: true, SkippedFor: err}, nil
 	}
 	if err != nil {
@@ -1383,7 +1385,7 @@ func ListContext(ctx context.Context, backupsRoot string) ([]snapshotEntry, erro
 		if m.hasPending() {
 			own = probeOwner(dir)
 		}
-		out = append(out, snapshotEntry{Manifest: m, DirName: e.Name(), Verdict: readVerdict(m, now, vetoedAt(dir), own), Owner: own})
+		out = append(out, snapshotEntry{Manifest: m, DirName: e.Name(), Verdict: readVerdict(m, now, vetoedAt(dir), own, e.Name()), Owner: own})
 	}
 	sort.Slice(out, func(i, j int) bool {
 		return out[i].CreatedAt.After(out[j].CreatedAt)

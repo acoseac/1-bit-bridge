@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -504,13 +505,19 @@ func awaitVerificationsEnd(t *testing.T, root string) {
 	}
 }
 
-// TestTheDoctorsVerifyHintsAreCommandsTheCLITakes: each bridge backup
-// --verify the doctor's backups lines advise, its <snapshot-dir> filled in,
-// is a command bridge backup takes: --verify takes the folder as its value,
-// so --full goes after it, never between. Red on the round before, whose
-// hint put --full first, which the CLI refuses.
+// TestTheDoctorsVerifyHintsAreCommandsTheCLITakes: each bridge backup command
+// the doctor's backups lines advise, run as the hint words it with its
+// placeholders filled in (<bridge.yaml> the config the doctor read,
+// <snapshot-dir> the snapshot, each one argument) and nothing added, is a
+// command bridge backup takes: it names its config with --config, which the
+// hint says is the one the doctor read, naming no path, and --verify takes
+// the folder as its value, so --full goes after it, never between (backlog
+// B653's second and third rounds; Claude's third finding on round 2). The
+// install's folder has spaces in its name. Red on the round before, whose
+// hints named no config, which this test then put in front of each, and on
+// the round before that, whose hint put --full first.
 func TestTheDoctorsVerifyHintsAreCommandsTheCLITakes(t *testing.T) {
-	cfgPath, dataDir, _ := backupInstall(t)
+	cfgPath, dataDir := backupInstallIn(t, filepath.Join(t.TempDir(), "my bridge's config"))
 	src := backup.Sources{DataDir: dataDir, ManifestDB: manifest.DefaultDBPath(dataDir)}
 	dir, err := backup.Snapshot(t.Context(), src)
 	if err != nil {
@@ -518,37 +525,59 @@ func TestTheDoctorsVerifyHintsAreCommandsTheCLITakes(t *testing.T) {
 	}
 	now := time.Now().UTC()
 	var hints []string
-	for _, rec := range []*backup.Verification{
-		{Format: 1, DatabaseState: backup.StateFailed, DatabaseReasons: []backup.Reason{backup.ReasonQuickCheck}, FilesState: backup.StateVerified},
-		{Format: 1, DatabaseState: backup.StateIncomplete, DatabaseReasons: []backup.Reason{backup.ReasonCancelled},
-			FilesState: backup.StateIncomplete, FilesReasons: []backup.Reason{backup.ReasonCancelled}},
+	for _, st := range []backup.Status{
+		{},
+		{Snapshots: []backup.SnapshotStatus{{DirName: "x", CreatedAt: now, Verdict: backup.Verification{Format: 1,
+			DatabaseState: backup.StateFailed, DatabaseReasons: []backup.Reason{backup.ReasonQuickCheck}, FilesState: backup.StateVerified}}}},
+		{Snapshots: []backup.SnapshotStatus{{DirName: "x", CreatedAt: now, Verdict: backup.Verification{Format: 1,
+			DatabaseState: backup.StateIncomplete, DatabaseReasons: []backup.Reason{backup.ReasonCancelled},
+			FilesState: backup.StateIncomplete, FilesReasons: []backup.Reason{backup.ReasonCancelled}}}}},
 	} {
-		st := backup.Status{Snapshots: []backup.SnapshotStatus{{DirName: "x", CreatedAt: now, Verdict: *rec}}}
-		for _, c := range doctor.BackupChecks(st, nil, nil, true, now) {
-			hints = append(hints, c.Hint)
+		for _, c := range doctor.BackupChecks(st, nil, nil, nil, true, now) {
+			if strings.Contains(c.Hint, "bridge backup") {
+				hints = append(hints, c.Hint)
+			}
 		}
 	}
-	var commands []string
+	verifies := 0
 	for _, h := range hints {
-		for _, part := range strings.Split(h, "bridge backup --verify")[1:] {
-			fields := strings.Fields(strings.ReplaceAll(part, ",", " "))
-			args := []string{"--config", cfgPath, "--verify"}
-			for _, f := range fields {
-				if f == "<snapshot-dir>" {
-					f = dir
-				} else if !strings.HasPrefix(f, "--") {
-					break
-				}
-				args = append(args, f)
+		if !strings.Contains(h, "the config this doctor read") {
+			t.Errorf("the hint %q does not say which config to give", h)
+		}
+		for _, part := range strings.Split(h, "bridge backup")[1:] {
+			// A command ends at the hint's first comma or semicolon, or at
+			// its first word that is neither a flag nor a placeholder.
+			if i := strings.IndexAny(part, ",;"); i >= 0 {
+				part = part[:i]
 			}
-			commands = append(commands, strings.Join(args[2:], " "))
+			var args []string
+		words:
+			for _, f := range strings.Fields(part) {
+				switch {
+				case f == "<bridge.yaml>":
+					args = append(args, cfgPath)
+				case f == "<snapshot-dir>":
+					args = append(args, dir)
+				case strings.HasPrefix(f, "--"):
+					args = append(args, f)
+				default:
+					break words
+				}
+			}
+			if !slices.Contains(args, "--config") {
+				t.Errorf("the doctor advises bridge backup%s with no --config", part)
+				continue
+			}
+			if slices.Contains(args, "--verify") {
+				verifies++
+			}
 			var stdout, stderr bytes.Buffer
 			if code := backupCmd(args, &stdout, &stderr); code == 2 {
-				t.Errorf("the doctor advises %q, which bridge backup refuses: %s", "bridge backup --verify"+part, stderr.String())
+				t.Errorf("the doctor advises bridge backup%s, which bridge backup refuses run as %q: %s", part, args, stderr.String())
 			}
 		}
 	}
-	if len(commands) < 2 {
-		t.Fatalf("the doctor's hints advise %d --verify commands (%q), want the failed and the unfinished one's", len(commands), hints)
+	if verifies < 3 {
+		t.Fatalf("the doctor's hints advise %d --verify commands (%q), want the failed and the unfinished one's, and the one after a snapshot", verifies, hints)
 	}
 }

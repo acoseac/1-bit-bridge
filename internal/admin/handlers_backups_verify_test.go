@@ -44,13 +44,17 @@ func backupsBody(t *testing.T, s *Server) (string, backupsListResponse) {
 }
 
 // doctorLines are the doctor's backups lines for dataDir, as cmd/bridge's
-// doctorBackups builds them: backup.ReadStatus and the folder's lock probe,
-// worded by doctor.BackupChecks.
+// doctorBackups builds them: backup.ReadStatus, the folder's lock probe and
+// the check that did not end, if one holds it, worded by doctor.BackupChecks.
 func doctorLines(t *testing.T, dataDir string) []doctor.Check {
 	t.Helper()
 	root := filepath.Join(dataDir, backup.BackupsDirName)
 	st, err := backup.ReadStatus(t.Context(), root)
-	return doctor.BackupChecks(st, err, backup.ProbeBackupsLock(root), true, time.Now())
+	var stuck *backup.StuckCheck
+	if s, held := backup.StuckCheckOf(root); held {
+		stuck = &s
+	}
+	return doctor.BackupChecks(st, err, backup.ProbeBackupsLock(root), stuck, true, time.Now())
 }
 
 // lineNamed is the doctor's line named name.

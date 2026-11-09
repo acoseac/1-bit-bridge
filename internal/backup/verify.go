@@ -102,15 +102,24 @@ const (
 	// a cancelled command) or ran past its deadline.
 	ReasonCancelled Reason = "cancelled"
 	ReasonDeadline  Reason = "deadline"
-	// ReasonInterrupted: a reader's word for a PENDING older than
-	// PendingBound, whose check no one is finishing.
+	// ReasonInterrupted: a reader's word for a PENDING whose owner is gone, or
+	// one with no owner to ask older than PendingBound, whose check no one is
+	// finishing.
 	ReasonInterrupted Reason = "interrupted"
-	// ReasonUnsynced: a reader's word for a verdict whose write did not
-	// become durable (the bundle holds the verdict's veto).
+	// ReasonUnsynced: a reader's word for a VERIFIED beside its veto: a check
+	// of the snapshot under way, or one whose verdict's write did not become
+	// durable (verify_record.go).
 	ReasonUnsynced Reason = "unsynced"
 	// ReasonUnknownRecord: a reader's word for a record this bridge cannot
 	// read (a newer format, a state it does not know).
 	ReasonUnknownRecord Reason = "unknown-record"
+	// ReasonOtherSnapshot: a reader's word for a record written for a
+	// snapshot in another folder (a manifest copied into this one), which says
+	// nothing of this one's files.
+	ReasonOtherSnapshot Reason = "other-snapshot"
+	// ReasonAborted: the check stopped on an error of the bridge's own (a
+	// panic in it), and found nothing of the snapshot.
+	ReasonAborted Reason = "aborted"
 )
 
 // Reasons is every reason code a verdict can carry, for a surface that words
@@ -121,6 +130,7 @@ func Reasons() []Reason {
 		ReasonSize, ReasonHash, ReasonUnreadable, ReasonOpenFailed, ReasonQuickCheck, ReasonIntegrityCheck,
 		ReasonForeignKeyCheck, ReasonSchemaVersion, ReasonSchemaNewer, ReasonSchemaTable, ReasonSchemaColumn,
 		ReasonBundleChanged, ReasonCancelled, ReasonDeadline, ReasonInterrupted, ReasonUnsynced, ReasonUnknownRecord,
+		ReasonOtherSnapshot, ReasonAborted,
 	}
 }
 
@@ -172,8 +182,13 @@ const verificationFormat = 1
 // user_version read and the core tables' row counts, which are information,
 // 0 a valid count) and the other files' (FilesState, its reasons, the files
 // that failed). PendingSince is when the PENDING it holds was written.
+// Snapshot is the name of the folder it was written for (backlog B653's third
+// round): a record copied with its manifest into another folder says nothing
+// of that one's files, and a reader reads it so (ReasonOtherSnapshot). A
+// record written before the third round names none, and is read as written.
 type Verification struct {
 	Format          int              `json:"format"`
+	Snapshot        string           `json:"snapshot,omitempty"`
 	DatabaseState   State            `json:"databaseState"`
 	DatabaseReasons []Reason         `json:"databaseReasons,omitempty"`
 	Level           CheckLevel       `json:"level,omitempty"`
@@ -188,9 +203,10 @@ type Verification struct {
 	PendingSince    time.Time        `json:"pendingSince,omitzero"`
 }
 
-// pendingRecord is the record Snapshot publishes with a bundle.
-func pendingRecord(now time.Time, hasDatabase bool) *Verification {
-	v := &Verification{Format: verificationFormat, DatabaseState: StatePending, FilesState: StatePending, PendingSince: now}
+// pendingRecord is the record Snapshot publishes with a bundle, bound to the
+// folder it is published in, named.
+func pendingRecord(now time.Time, hasDatabase bool, named string) *Verification {
+	v := &Verification{Format: verificationFormat, Snapshot: named, DatabaseState: StatePending, FilesState: StatePending, PendingSince: now}
 	if !hasDatabase {
 		v.DatabaseState, v.DatabaseReasons = StateUnverified, []Reason{ReasonNoDatabase}
 	}
@@ -229,13 +245,15 @@ const PendingBound = VerifyDeadline + AutoLockWait + 10*time.Minute
 // stops, INCOMPLETE (ReasonDeadline).
 const VerifyDeadline = 30 * time.Minute
 
-// vetoFileName is the file a verdict's write puts in the bundle before it
-// renames a record that holds a VERIFIED state, or one over a record that
-// holds one, and removes once the write is durable (verify_record.go): while
-// it stands, a reader reads a VERIFIED as INCOMPLETE (ReasonUnsynced), so a
-// verification that returned an error never leaves a VERIFIED any reader
-// reads. Where it cannot be made in the bundle, it is made beside it in the
-// backups folder (rootVetoPath).
+// vetoFileName is the file a verification puts in the bundle, durably, before
+// it checks a snapshot whose record holds a VERIFIED, and a verdict's write
+// before it renames a record that holds one, and that each removes only once
+// the record that replaces it is durable (verify_record.go): while it stands,
+// a reader reads a VERIFIED as INCOMPLETE (ReasonUnsynced), so a verification
+// that returned an error, or a crash at any point of one, never leaves a
+// VERIFIED any reader reads that the check did not find. Where it cannot be
+// made in the bundle, it is made beside it in the backups folder
+// (rootVetoPath).
 const vetoFileName = ".verdict-unsynced"
 
 // rootVetoPath is the veto of the snapshot in dir made beside it, in the
@@ -244,16 +262,19 @@ func rootVetoPath(dir string) string {
 	return filepath.Join(filepath.Dir(dir), vetoFileName+"-"+filepath.Base(dir))
 }
 
-// readVerdict is what a reader reads in m's record at now: the record as
-// written, but a snapshot with no record (written before verification) reads
-// UNVERIFIED (ReasonNoBaseline), a record whose format or states this bridge
-// does not know reads UNVERIFIED (ReasonUnknownRecord), a PENDING whose
-// owner is gone (own, probeOwner) INCOMPLETE (ReasonInterrupted) at once,
-// one with no owner lock, or one that could not be asked, by its age: older
-// than PendingBound INCOMPLETE (ReasonInterrupted); and a VERIFIED beside its
-// veto (vetoed) reads INCOMPLETE (ReasonUnsynced). It is the one reading the
-// pruner, the startup pass, the doctor and the console take.
-func readVerdict(m Manifest, now time.Time, vetoed bool, own Ownership) Verification {
+// readVerdict is what a reader reads in m's record at now, for the snapshot
+// in the folder named: the record as written, but a snapshot with no record
+// (written before verification) reads UNVERIFIED (ReasonNoBaseline), a record
+// whose format or states this bridge does not know reads UNVERIFIED
+// (ReasonUnknownRecord), one written for a snapshot in another folder reads
+// UNVERIFIED (ReasonOtherSnapshot), a PENDING whose owner is gone (own,
+// probeOwner) INCOMPLETE (ReasonInterrupted) at once, one with no owner lock,
+// or one that could not be asked, by its age: older than PendingBound
+// INCOMPLETE (ReasonInterrupted); and a VERIFIED beside its veto (vetoed)
+// reads INCOMPLETE (ReasonUnsynced). It is the one reading the pruner, the
+// startup pass, the doctor and the console take: none trusts a VERIFIED it
+// cannot read, or one not this snapshot's.
+func readVerdict(m Manifest, now time.Time, vetoed bool, own Ownership, named string) Verification {
 	if m.Verification == nil {
 		return Verification{
 			Format: verificationFormat, DatabaseState: StateUnverified, DatabaseReasons: []Reason{ReasonNoBaseline},
@@ -267,6 +288,12 @@ func readVerdict(m Manifest, now time.Time, vetoed bool, own Ownership) Verifica
 	if v.Format > verificationFormat || v.Format < 1 {
 		v.DatabaseState, v.DatabaseReasons = StateUnverified, []Reason{ReasonUnknownRecord}
 		v.FilesState, v.FilesReasons = StateUnverified, []Reason{ReasonUnknownRecord}
+		return v
+	}
+	if v.Snapshot != "" && v.Snapshot != named {
+		v.DatabaseState, v.DatabaseReasons = StateUnverified, []Reason{ReasonOtherSnapshot}
+		v.FilesState, v.FilesReasons = StateUnverified, []Reason{ReasonOtherSnapshot}
+		v.FilesFailed = nil
 		return v
 	}
 	// A PENDING with no time, or one further than the bound from now either

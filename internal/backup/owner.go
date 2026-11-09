@@ -216,11 +216,12 @@ const (
 // second round), under the backups folder's lock, so that no prune removes
 // it between the claim and its check: ErrClaimedElsewhere where another
 // verification holds it, the folder's lock's own answer (ErrBackupsBusy,
-// ErrBackupsUnlocked) where that cannot be had. Every step that can wait on
-// a filesystem runs on a goroutine of its own, which its caller waits for
-// until it answers, or, once ctx has ended, for StopWriteBound more, as a
-// verification's caller does (verifyAndThen); a claim that lands after its
-// caller stopped waiting lets its ownership go at once.
+// ErrBackupsUnlocked, ErrCheckStillRunning) where that cannot be had. Every
+// step that can wait on a filesystem runs on a goroutine of its own, which
+// its caller waits for until it answers, or, once ctx has ended, for
+// StopWriteBound more, as a verification's caller does (verifyAndThen); a
+// claim that lands after its caller stopped waiting lets its ownership go at
+// once.
 func Claim(ctx context.Context, dir, backupsRoot string) (*Capture, error) {
 	type answer struct {
 		c   *Capture

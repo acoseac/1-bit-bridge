@@ -60,6 +60,14 @@ func TestMain(m *testing.M) {
 	if os.Getenv(backupBootEnv) != "" {
 		os.Exit(runBackupBoot())
 	}
+	// A verification with a fault in its write, and one whose check does
+	// not end, each a process of its own.
+	if os.Getenv(verifyFaultEnv) != "" {
+		os.Exit(runVerifyWithFault())
+	}
+	if os.Getenv(stuckCheckEnv) != "" {
+		os.Exit(runStuckCheck())
+	}
 	adminauth.SetTestHashCost(bcrypt.MinCost)
 	trees, treesDir, err := emptyHostTrees()
 	if err != nil {

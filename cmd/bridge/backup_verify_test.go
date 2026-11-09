@@ -25,7 +25,14 @@ import (
 // answers the config's path, the data dir and its backups folder.
 func backupInstall(t *testing.T) (cfgPath, dataDir, root string) {
 	t.Helper()
-	dir := t.TempDir()
+	cfgPath, dataDir = backupInstallIn(t, t.TempDir())
+	return cfgPath, dataDir, filepath.Join(dataDir, backup.BackupsDirName)
+}
+
+// backupInstallIn is backupInstall's install in the folder dir, which it
+// makes where it is missing, and which is the install's data dir.
+func backupInstallIn(t *testing.T, dir string) (cfgPath, dataDir string) {
+	t.Helper()
 	lib := filepath.Join(dir, "library")
 	if err := os.MkdirAll(lib, 0o700); err != nil {
 		t.Fatal(err)
@@ -35,7 +42,7 @@ func backupInstall(t *testing.T) (cfgPath, dataDir, root string) {
 	if err := os.WriteFile(cfgPath, []byte("dataDir: "+yamlStr(dir)+"\nlibraryRoots:\n  - "+yamlStr(lib)+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	return cfgPath, dir, filepath.Join(dir, backup.BackupsDirName)
+	return cfgPath, dir
 }
 
 // makeStoreNewer stamps the store at path with a user_version past this
