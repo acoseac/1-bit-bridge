@@ -5352,6 +5352,12 @@ function initSettings() {
       } else if (!restartPending()) {
         if (restartBtn) restartBtn.hidden = true;
       }
+      // The update check's switch changed (backlog B761): the Updates panel
+      // shows it now, from a whole status, rather than at the next updates
+      // frame (renderUpdateTile writes every row from what it is handed).
+      if (r?.fields?.updateCheckEnabled?.status === "live") {
+        void API.get("/api/updates").then(renderUpdateTile).catch(() => {});
+      }
     } catch (err) {
       showMsg(msg, "err", "Save failed: " + err.message);
     }

@@ -49,6 +49,14 @@ privacy, link-rendering, and anchor-target issues. The HTML-rendering items now 
 - **Privacy policy (cross-repo).** If logging / storage / lookup-data behaviour changed this
   release, run the logging audit below, then reflect the result in the `1bitapp` repo's
   `src/pages/bridge/privacy.astro` — bump its "Last updated" date **only** on a real content change.
+- **What the bridge sends out, and the switch for each.** Check the release against the outbound
+  services and their off switches, and let the privacy page say each as the release does: the
+  update check (one unauthenticated request to GitHub's releases API at the start and once every
+  `update.checkIntervalHours`, 6 h by default, naming the bridge's version; off with
+  `update.checkEnabled: false` or `BRIDGE_UPDATE_CHECK_ENABLED=false`, which stops every new
+  install too, since backlog B761), enrichment (`enrich.enabled`, `enrich.deezerEnabled`), the
+  Atlas harvest and certificate renewal. `PROTOCOL.md`'s Updates section and the README's Updates
+  section are this repo's statement of the update check.
 - **`docs/docker.md`, `docs/deployment/*`** — operator/dev docs that stayed here; update if the
   container or VPS flow changed. The env-var table on `1-bit.app/bridge/features/` mirrors
   `internal/config/config.go` — keep them in sync when new env-var overrides land.

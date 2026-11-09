@@ -264,9 +264,11 @@ func TestTheJobsCardCarriesTheUpdateCheckSwitch(t *testing.T) {
 // TestTheUpdatesPanelScriptSaysUpdateChecksAreOff pins, without node, what
 // the panel's script does with a status whose checks are off: renderUpdateTile
 // takes only an explicit false for off, says so in the status row, hides Check
-// now and offers no Install; updateStatusLine says it on the Jobs card, and
-// renderJobCards hides the card's Check now. TestTheUpdatesPanelShowsUpdateChecksOff
-// runs the panel under node where node is installed.
+// now and offers no Install; updateStatusLine says it on the Jobs card,
+// renderJobCards hides the card's Check now, and the Settings form's save of
+// the switch redraws the panel at once, from a whole status it reads.
+// TestTheUpdatesPanelShowsUpdateChecksOff runs the panel under node where
+// node is installed.
 func TestTheUpdatesPanelScriptSaysUpdateChecksAreOff(t *testing.T) {
 	src := readConsoleJS(t, "static/app.js")
 	tile := stripJSComments(extractJSFunction(t, src, "renderUpdateTile"))
@@ -285,6 +287,13 @@ func TestTheUpdatesPanelScriptSaysUpdateChecksAreOff(t *testing.T) {
 	}
 	if cards := stripJSComments(extractJSFunction(t, src, "renderJobCards")); !strings.Contains(cards, `if (updCheck) updCheck.hidden = updChecksOff;`) {
 		t.Error("renderJobCards does not hide the Jobs card's Check now while update checks are off")
+	}
+	// The Settings form's save of the switch redraws the panel from a whole
+	// status, read once the save has answered live.
+	settings := stripJSComments(extractJSFunction(t, src, "initSettings"))
+	if !strings.Contains(settings, `if (r?.fields?.updateCheckEnabled?.status === "live") {`) ||
+		!strings.Contains(settings, `void API.get("/api/updates").then(renderUpdateTile).catch(() => {});`) {
+		t.Error("the Settings form's save of updateCheckEnabled does not redraw the Updates panel from a status it reads")
 	}
 }
 

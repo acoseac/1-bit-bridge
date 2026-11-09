@@ -332,15 +332,17 @@ saved, and the variable sets the setting again at the next start.
 | `ACOUSTID_API_KEY` | `fingerprint.apiKey` | Free application key from [acoustid.org/new-application](https://acoustid.org/new-application). Secret — keep it out of version control. |
 | `BRIDGE_ENRICH_ENABLED` | `enrich.enabled` | On when unset or empty. Read as the YAML key is, in any case: `true`, `yes`, `on`, `y`, `t` or `1` is on; `false`, `no`, `off`, `n`, `f` or `0` is off, and so is any other value, with a warning naming the variable. Off stops the background enricher: no new request goes to MusicBrainz, the Cover Art Archive, Deezer, a mirror set below, or Atlas for a premium cover, the harvest's included, one already under way is cut off within a second, and acoustic fingerprinting stops with it. Covers, IDs and artist photos already fetched stay, and the bridge still serves them; what was waiting is enriched once it is on again. The rest of the Atlas harvest and its lyrics, the update check and certificate renewal are separate, and go on. The console's switch governs the running bridge; `bridge fingerprint`, run from a shell, reads the variable, or else the config (the one `--config` names, or the one at the default path), as it starts and once a second while it runs: it refuses a lookup while off, and stops within a second of being switched off, or of a config it read going away or no longer loading. |
 | `BRIDGE_ENRICH_DEEZER_ENABLED` | `enrich.deezerEnabled` | Read as `BRIDGE_ENRICH_ENABLED` is, on when unset or empty. Off stops only the Deezer artist-photo lookups, which no mirror takes over. |
+| `BRIDGE_UPDATE_CHECK_ENABLED` | `update.checkEnabled` | On when unset or empty, read as `BRIDGE_ENRICH_ENABLED` is (a value that reads as neither on nor off is off). On, the bridge sends one request to the GitHub releases API when it starts and then once every check interval (6 h by default), naming its version. Off, it asks GitHub nothing and installs nothing new, by hand or automatically (`update.autoInstall` keeps its setting and waits); the console's Check now and Install answer that update checks are off, and a rollback still works. The console's switch (Settings → Updates) governs the running bridge. `bridge update` reads this variable and `bridge.yaml` as the service does, so run it where the variable is set: `docker exec <container> bridge update` inherits the container's environment, while a `bridge update` run anywhere else needs `BRIDGE_UPDATE_CHECK_ENABLED=false` in its own environment, or `update.checkEnabled: false` in the file, to refuse. |
 | `BRIDGE_MUSICBRAINZ_BASE_URL` | `enrich.musicbrainzBaseURL` | Advanced. Point enrichment at a self-hosted Atlas metadata service instead of public MusicBrainz. Set together with the CoverArt override below. The Deezer artist-photo lookups still go to Deezer. |
 | `BRIDGE_COVERART_BASE_URL` | `enrich.coverArtBaseURL` | Advanced. Cover-art source base URL; pair it with the MusicBrainz override above. |
 
 The `true`/`false` variables above are parsed with Go's `strconv.ParseBool`:
 `true`/`false` (also `1`/`0`, `t`/`f`). A value it can't parse — `yes`,
 `on` — is ignored, with a warning in the log naming the variable, leaving
-the YAML/default in place. The two enrichment switches are the exception:
-they read as their YAML keys do, and a value they cannot read turns them
-off, since an opt-out misread as on would send what you asked it to stop.
+the YAML/default in place. The two enrichment switches and the update
+check's are the exception: they read as their YAML keys do, and a value they
+cannot read turns them off, since an opt-out misread as on would send what
+you asked it to stop.
 
 Beyond the config-mapping vars above, the container also honours a few
 non-config env vars: **`TS_AUTHKEY`** (Tailscale `tsnet` headless auth — see

@@ -113,6 +113,26 @@ Stop the service before `bridge restore`. When moving to another box, stop
 the source too: two boxes running one identity at once are unsupported.
 Prefer the newest snapshot; see the [backup guide](docs/backup.md).
 
+## Updates
+
+The bridge checks GitHub for a newer release, on by default: one request to
+`https://api.github.com/repos/acoseac/1-bit-bridge/releases/latest` when it
+starts and then once every check interval (6 h unless
+`update.checkIntervalHours` says otherwise), naming the bridge's version and
+nothing of your library. The console's Settings → Updates offers the install,
+and `bridge update` does the same from a shell; auto-install
+(`update.autoInstall`) is off unless you turn it on.
+
+To turn the checks off, switch off **Check for updates** in Settings → Updates,
+or set `update.checkEnabled: false` in `bridge.yaml`, or
+`BRIDGE_UPDATE_CHECK_ENABLED=false` in the service's environment. Off, the
+bridge asks GitHub nothing and installs nothing new, by hand or automatically
+(auto-install keeps its setting and waits); a rollback still works.
+`bridge update` reads the same file and variable, so an off set only in the
+service's environment (a systemd unit, a compose file) must be in your
+shell's too for the command to see it. The full behaviour is in
+[`PROTOCOL.md`](PROTOCOL.md#updates).
+
 ## Build from source
 
 Requires Go 1.27.3+.
