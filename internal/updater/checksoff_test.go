@@ -513,9 +513,10 @@ func TestAnOffWhoseBackupDoesNotAnswerIsRefused(t *testing.T) {
 // rollback may act on it. The refusal is the marker's own
 // (*ChecksOffMarkerError, matching ErrChecksOffUnchecked): its words say the
 // install marker could not be read and give the one way to turn the checks off
-// without the key, and name no version (none was read), no backup and no path;
-// its Detail is the read's error without its path, and Unwrap keeps the error
-// for code. The backup is asked nothing, and the settings are as they were.
+// without the key, and name no version (none was read), no backup, no path and
+// not the read's error, which is its Detail, without its path, for the log
+// alone; Unwrap keeps the error for code. The backup is asked nothing, and the
+// settings are as they were.
 func TestAnOffOverAnInstallMarkerThatCannotBeReadIsRefused(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -568,6 +569,9 @@ func TestAnOffOverAnInstallMarkerThatCannotBeReadIsRefused(t *testing.T) {
 			requireNoPathIn(t, err, c.dir)
 			if marker.Detail == "" || strings.Contains(marker.Detail, c.dir) {
 				t.Errorf("the refusal's detail = %q, want the read's error without its path", marker.Detail)
+			}
+			if strings.Contains(words, marker.Detail) {
+				t.Errorf("the refusal's words carry its detail, which is the log's: %q", words)
 			}
 			if got := b.askedOf(); got != "" {
 				t.Errorf("the backup was asked %q over a marker that was not read, want nothing", got)
