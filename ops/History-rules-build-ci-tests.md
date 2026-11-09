@@ -1366,7 +1366,7 @@ bound removed) are red there and green on every case whose step succeeds,
 which is why the check is there: a case whose step succeeds cannot see the
 path that hung.
 
-- **A case that renames or deletes a directory an `os.Root` holds open skips on Windows, by `runtime.GOOS` as its first statement, before any setup, naming why and the backlog id of the coverage it leaves: the root's handle there shares no delete, so Windows refuses that rename while the root is open** (2026-11-09, backlog B652's round 4; round 5's `TestAnOpenRootHoldsItsDirectory`, in `internal/atomicwrite`, pins the refusal on Windows). **Don't decide the skip by the rename's error, after the case's setup, or on another goroutine than the test's.** → History-rules-build-ci-tests.md
+- **A case that renames or deletes a directory a root from `os.OpenRoot` holds open skips on Windows, by `runtime.GOOS` as its first statement, before any setup, naming why and the backlog id of the coverage it leaves: that root's handle there shares no delete, so Windows refuses that rename while the root is open; a `Root.OpenRoot` sub-root shares delete and needs no skip** (2026-11-09, backlog B652's round 4; round 5's `TestAnOpenRootHoldsItsDirectory`, in `internal/atomicwrite`, pins the refusal on Windows). **Don't decide the skip by the rename's error, after the case's setup, or on another goroutine than the test's.** → History-rules-build-ci-tests.md
 
 Go 1.27.3's `os.OpenRoot` on Windows opens the directory with
 `syscall.Open`, whose share mode is `FILE_SHARE_READ | FILE_SHARE_WRITE`;
