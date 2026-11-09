@@ -89877,8 +89877,10 @@ having no key to cost. PROTOCOL.md and the README said, unqualified, that the
 console's off refuses a waiting `bridge update`: unless the variable in the
 command's environment says on, which overrides the file. They,
 `docs/docker.md`, `UpdateConfig`'s doc and the settings matrix's row also
-say what this round built: the off under the install marker's lock, its loss
-with the service's stop on Windows, its 409s, and the probation's refusal.
+say what this round built: the off under the install marker's lock, its 409s,
+and the probation's refusal (round 4 corrected what they said of a swap that
+stops the bridge's Windows service, which they said of every Windows install:
+backlog B831).
 `TestBridgeUpdateRefusesItsCheckAndItsInstallWhileUpdateChecksAreOff` now
 requires the caveat where the file's key turned the checks off and its
 absence where the variable did; `TestEveryRollbackClaimOfTheSwitchSaysWhatTheKeyCosts`
@@ -89960,3 +89962,194 @@ passes on that copy too.
 
 Not run here: the console's node-run tests, which skip without node; the iOS
 mirror of PROTOCOL.md, the orchestrator's.
+
+## 2026-11-09 — B761 PR 1 round 4: the caveat follows the file's key; an install marker that cannot be read refuses the off; the Windows loss is B831 where it applies
+
+Round 4 of #1446 on `feat/b761-update-switch`, worker b761u on legion0
+(go1.27.3, `GOTOOLCHAIN=local`, `GOPROXY=off`), from the PR's head bb96a259,
+round 3 and its rules. The findings were Codex's two P2s and the Claude
+review's three on round 3, with the two reviews of this round's brief folded
+into it. Commits: the caveat b2e16f00; the marker 7d633ba2; the words
+cfeb10b6; the caveat's arm no run reaches, held by a test of its own,
+5603d5bf; the marker refusal's words held free of the read's error d16557df;
+and this record. The rules go into `config-lifecycle.md` and its History
+file, `cli-serve.md` and `admin-console.md` through `rules-b761-r4.patch`.
+
+### The caveat follows the file's key
+
+Codex's first P2 and the Claude review's first finding: `bridge update`'s
+refusal said what the key costs a rollback only where
+`BRIDGE_UPDATE_CHECK_ENABLED` was unset, round 3 reasoning that the
+variable's case has no key to cost. The file can write the key beside the
+variable, and a release from before the switch refuses the key at its load,
+before it reads any variable. The refusal now asks the file's own YAML
+(`config.WritesUpdateCheckKey`, over the bytes the command loaded its
+settings from): the key counts at any value, `null` and no value included,
+which decode like no key into the switch's pointer but break an older strict
+decoder all the same; a comment does not count; aliases and merge keys are
+resolved as yaml.v3 resolves them; and bytes it cannot read count, since the
+key cannot then be ruled out. A missing file never reaches the refusal:
+`loadCLIConfigFile` refuses it first, and a load refuses bytes the reading
+cannot read, so that arm is held by a test of the refusal itself.
+`TestBridgeUpdateRefusesItsCheckAndItsInstallWhileUpdateChecksAreOff` gains
+the variable off over the key written true, false, null and with no value
+(the caveat) and over no key and a key only a comment names (none);
+`TestTheCaveatIsSaidWhereTheFilesKeyCannotBeRuledOut` and
+`TestWritesUpdateCheckKeyReadsTheDocumentsOwnKeys` (thirteen documents, five
+errors) hold the rest.
+
+### An install marker that cannot be read refuses the off
+
+The Claude review's second finding: `ChecksOffRefused` took any `LoadState`
+error for no install, so an off was saved over a marker it could not read.
+`LoadState` (state.go) answers a marker that is not there as a zero State and
+no error (`errors.Is(err, os.ErrNotExist)` on its `os.ReadFile`), and one
+that does not parse the same, with a Warn; any other read error it wraps and
+returns. The boot does the same with both: `recoverCrashedInstall` returns at
+its first read on an error ("the admission removes a marker it cannot read")
+and finds no install armed in the two `LoadState` reads as none, and
+`AdmitBoot` records nothing over them. So the absent and the malformed marker
+still save the off, and every other read failure (a permission, EIO, EMFILE,
+a directory in the marker's place) refuses it, failing closed. The boot
+discards a marker it cannot read too, but serve cannot tell whether the start
+that reads it next fails as well: an error that does not last passes, and a
+start run as another user, root among them, reads what this one may not, and
+its crash rollback may then act on an install the off kept from its backup.
+
+The refusal is the marker's own, `ChecksOffMarkerError`, matching
+`ErrChecksOffUnchecked` (409 `update-checks-off-unchecked`): the backup's
+refusal is built from the marker's versions and claims a probation, and over
+a marker that was not read it would say "update checks were not turned off:
+ is on probation since its install, and its backup, , did not answer…"
+(CTL-2b below). Its words say the install marker could not be read and
+nothing was saved, and give the variable's route alone, naming no version,
+backup or path, and not the read's error, which is its `Detail`, without its
+path (`fsutil.ErrorWithoutPath`, B613's round 5 rule for the marker's
+errors), for serve's Warn line of its own; `Unwrap` keeps the error for code.
+The updater's `TestAnOffOverAnInstallMarkerThatCannotBeReadIsRefused` (mode
+000, skipped on Windows and as root, and a directory where the marker goes,
+which runs everywhere), with
+`TestAnOffIsSavedWhereNoCrashRollbackWouldPutBackABackupThatRefusesTheKey`'s
+"no install marker" and "a marker that does not parse" cases still saving,
+the real serve's
+`TestTheConsolesOffOverAnInstallMarkerThatCannotBeReadIsRefused` (the PATCH's
+answer: 409, its words, no empty version and no path, the file and the live
+switch as they were) and `TestTheOffsAskSaysWhatRefusedItInTheLog` pin it.
+
+### The Windows loss, where it applies, by its id
+
+Codex's second P2 and the Claude review's third finding: every text said an
+off waiting for a `bridge update`'s swap is lost on Windows. The swap stops
+the bridge only where it stops its Windows service through the SCM
+(`stopServiceIfRunning`: not where the process swapping is the service, nor
+without the rights to reach the SCM, with no service registered or with it
+stopped already); a Startup-folder install, or a swap run without those
+rights, stops nothing, and the off lands after the swap. README, PROTOCOL.md,
+the Settings page's hint, `updateChecksOffLost`'s comment and the docs of
+`writeUpdateChecksOffRefusal` and `LockForChecksOff` now say the off is saved
+after the swap, the swap that stops the bridge's Windows service being the
+exception, named only as backlog B831; round 3's record of the bound and of
+its words is corrected the same way. A stopped wait does not show what
+stopped it (serve's stop, which the console's requests take through the
+admin server's `BaseContext`, or the client's), so the 503's words, and the
+console's for a save that got no answer, now claim no cause: the off was
+not, or may not have been, saved, and the switch is to be checked once the
+bridge answers. PROTOCOL.md and the settings matrix name the marker's
+refusal beside the backup's.
+`TestAnOffTheInstallMarkersLockOrItsDecisionRefusesSavesNothing`'s stopped
+wait (cancelled, and now past a deadline) asks for those words and none of
+`Windows`, `SCM`, `swap` and `B831`;
+`TestTheConsolesSavesSayAnOffThatGotNoAnswerMayBeLost` the same of
+`updateChecksOffLost`; `TestASwapThatStopsTheWindowsServiceIsNamedOnlyAsB831`
+holds the six texts to the case and its id, none saying it of Windows as a
+whole.
+
+### Checked, not changed
+
+- The off-save's settings path: serve hands `updateChecksOffSave`
+  `*configPath`, which runServe sets to the resolved, absolute name
+  (`resolveConfigPath`, `fsutil.AbsAsWritten`) and then to the file its boot
+  read was of (`loadServeConfigFile`'s answer), never the empty `--config`
+  default.
+- The console's two saves declare `body` and `value` before their `try`, so
+  the catch's `updateChecksOffLost` reads what was sent.
+- `Updater.Install` and `Rollback` hold no `Server.mu`.
+
+### Reds and negative controls
+
+Twenty runs, predicted by name in `.tmp/_b761u/controls_r4.py` before the
+first ran (a baseline with no mutation, then nineteen), at d16557df, run as
+round 3's were (each literal edit's text found exactly once; item 3's
+restorations taken hunk by hunk with git from round 3's texts at 7d633ba2,
+never typed again; the named tests of each named package, the bytes put back
+in a `finally`; `git status` clean after): nineteen as predicted, and CTL-2e
+red where predicted and in one subtest more, below. The RED rows take one of
+the round's fixes out; the CTL rows mutate something else a test leans on.
+
+| Control | Mutation | Red, and what it showed |
+|---|---|---|
+| BASE | none | every run green |
+| RED-1a | round 3's condition, the caveat only where the variable is unset | the CLI's eight variable-over-the-key subtests (true, false, null, no value; `--check` and `--yes`) and both unreadable-bytes cases |
+| CTL-1b | a key written null or with no value counted as none, the decoded pointer's view | config's null and no-value documents; the CLI's four null and no-value subtests |
+| CTL-1c | bytes that cannot be read taken as no key | both unreadable-bytes cases |
+| CTL-1d | the key's presence by a text match | config's comment and other-block documents and all five errors; the CLI's comment subtests; both unreadable-bytes cases |
+| RED-2a | round 3's rule, a marker that cannot be read is no refusal | the updater's two cases (nil); serve's PATCH (200) and its ask (nil, a release) |
+| CTL-2b | the marker's refusal in the backup's words | the updater's two (no `*ChecksOffMarkerError`); serve's PATCH (" is on probation", "its backup, ,"), and its ask's log (no marker line) |
+| CTL-2c | the detail keeps the read error's path | the updater's two (the path in `Detail`); the ask's log line naming the data dir |
+| CTL-2d | serve's ask logs nothing of the marker | the ask's log case |
+| CTL-2e | a marker that is not there, or does not parse, refuses too (any `Status ""`) | the updater's absent and malformed cases; serve's off once the lock was let go, its live off and its off with an invalid cadence, each 409; and, unpredicted, the updater's case of the crash rollback's own record with its rename not landed, which carries `Status ""` (B613): the mutation's predicate reached past the two reads it stands for, and refused that record in the marker's words where the probation's refusal is due |
+| CTL-2f | the marker refusal's words carry its detail | the updater's two (the words free of the read's error, d16557df) |
+| RED-3a | the 503's words as round 3 left them | the console's cancelled and deadline cases; the B831 test (the words claim `Windows` and `swap`) |
+| RED-3b | `updateChecksOffLost`'s words as round 3 left them | its structural test |
+| RED-3c | README's sentence as round 3 left it | the B831 test |
+| RED-3d | PROTOCOL.md's paragraph as round 3 left it | the B831 test |
+| RED-3e | the Settings page's hint as round 3 left it | the B831 test, the rollback-claim test green beside it |
+| RED-3f | `LockForChecksOff`'s doc as round 3 left it | the B831 test |
+| RED-3g | `writeUpdateChecksOffRefusal`'s doc as round 3 left it | the B831 test |
+| RED-3h | `updateChecksOffLost`'s comment as round 3 left it | the B831 test |
+| CTL-3i | a wait past a deadline answers 500 | the console's deadline case |
+
+Before each fix, its new and changed tests ran against the code as it stood
+and went red as the RED rows show (round 3's caveat: the eight
+variable-over-the-key subtests; the marker: nil from the decision, 200 from
+the PATCH; the words: the old 503's, `updateChecksOffLost`'s and the six
+texts). `TestAnOffThatGotNoAnswerIsSaidMayBeLostOnlyThen` runs
+`updateChecksOffLost` under node and skips here, where no JavaScript engine
+is installed: it runs on CI's legs that have node.
+
+### The gates
+
+Through the shared build lock, on go1.27.3, with TMPDIR on this disk, in one
+slot session at d16557df (`.tmp/_b761u/gate_r4.py`), all green:
+
+- `make test TEST_PKGS='-timeout 60m ./internal/updater/... ./internal/config/...
+  ./internal/admin/... ./internal/api/... ./cmd/bridge/...'`, the release tags
+  (`GO_TAGS`), `-race`, `-p 4`, and `-timeout 60m` after the Makefile's 30m
+  (the later flag wins), so that cmd/bridge has room: 1430 s in all,
+  cmd/bridge 1407 s, internal/admin 1031 s, internal/api 145 s,
+  internal/updater 36 s and internal/config 15 s.
+- The round's tests by name with `-race -count=20` and the release tags,
+  each passing twenty times: internal/updater's six in 106 s, cmd/bridge's
+  four in 45 s, internal/admin's three in 107 s (the node-run case skipping
+  each time) and internal/config's one in 3 s; `make vet` for linux/amd64,
+  windows, darwin and linux/386; `make build-all`, its build-tag census
+  included; and go1.27.3's gofmt (`go run cmd/gofmt -l`) over `cmd`,
+  `internal` and `scripts`, listing nothing.
+
+The reds and controls were single packages without the race detector,
+outside the lock. This record's commit changes `ops/engineering-log.md`
+alone: the record, and round 3's paragraph on its words (cfeb10b6 corrected
+its paragraph on the bound).
+
+`TestEveryCitedTestNameExists` passes with this record. `rules-b761-r4.patch`,
+applied to a `git archive` copy of the final HEAD, passes `make docs-check`
+(config-lifecycle.md at 99,848 bytes, 99.8%: the next rule there moves an
+entry out first, `move_entry.py --largest`) and `verify_moves.py --base HEAD`
+with its four declared edits, but for the two blocks one `--edit` prefix
+cannot pair, the B761 line of `config-lifecycle.md` and its verbatim History
+twin, rewritten alike: each has its one successor in its file, the line its
+twin and the pointer. The guard passes on that copy too.
+
+Not run here: the console's node-run tests, which skip without node; the
+mode-000 marker cases on Windows, where they skip and the directory cases
+run (CI's windows leg); the iOS mirror of PROTOCOL.md, the orchestrator's.
