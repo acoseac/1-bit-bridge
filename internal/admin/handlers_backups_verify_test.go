@@ -21,6 +21,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/backup"
 	"github.com/acoseac/1-bit-bridge/internal/doctor"
 	"github.com/acoseac/1-bit-bridge/internal/dsn"
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
@@ -443,10 +444,16 @@ func TestAVerdictWrittenByAnotherCallerShowsOnTheJobsCardAtTheNextPoll(t *testin
 // the folder again (folded item 3); and, with no seam, a bundle that takes
 // no new file (mode 0500, Unix and not as root), its veto then beside it.
 // Red on the round before, which put no veto over a record that would hold
-// no VERIFIED.
+// no VERIFIED. Where no directory can be synced no veto is made and no check
+// over a VERIFIED is recorded (backup's
+// TestARecheckWhereNoDirectoryCanBeSyncedChecksAndRecordsNothing), so it
+// skips there.
 func TestALeftVerifiedThatCannotBeRecordedReadsAsNotVerifiedEverywhere(t *testing.T) {
 	for _, how := range []string{"its staging is refused", "its bundle takes no file"} {
 		t.Run(how, func(t *testing.T) {
+			if !fsutil.SyncsParentDir {
+				t.Skip("no directory can be synced here, so no check over a VERIFIED is recorded")
+			}
 			if how == "its bundle takes no file" && (runtime.GOOS == "windows" || os.Geteuid() == 0) {
 				t.Skip("a folder's mode 0500 refuses nothing on Windows or to root")
 			}

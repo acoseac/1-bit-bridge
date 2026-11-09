@@ -85,7 +85,10 @@ func checksRun(t *testing.T) *atomic.Int32 {
 // files VERIFIED (Codex on round 2), take the same path, and a write that
 // lands records them, the database FAILED. Every case here finds a veto to be
 // had: where none is, the check is refused (the next test), which round 2,
-// writing over the VERIFIED with none, was red on.
+// writing over the VERIFIED with none, was red on. Where no directory can be
+// synced no veto is made and no check over a VERIFIED is recorded
+// (TestARecheckWhereNoDirectoryCanBeSyncedChecksAndRecordsNothing), so it
+// skips there.
 func TestAVerifiedRecordLeftForAFailedOneIsVetoedWhenItsWriteFails(t *testing.T) {
 	injected := errors.New("injected: the write failed here")
 	inBundle := func(dir string) func(string) error {
@@ -128,6 +131,7 @@ func TestAVerifiedRecordLeftForAFailedOneIsVetoedWhenItsWriteFails(t *testing.T)
 		{name: "mixed verdicts whose write lands", filesKept: true, lands: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			requireDirectorySync(t)
 			if tc.ownerRefused && runtime.GOOS == "windows" {
 				t.Skip("a file takes its directory's ACL on Windows; no owner is given there")
 			}
@@ -249,7 +253,10 @@ func TestAVerifiedRecordLeftForAFailedOneIsVetoedWhenItsWriteFails(t *testing.T)
 // left stays. Mixed verdicts, the database alone damaged (Codex on round 2),
 // are refused alike. Red at round 2, which checked such a snapshot, and wrote
 // over its VERIFIED with no veto, or returned before its rename with the
-// database read VERIFIED.
+// database read VERIFIED. Where no directory can be synced no veto is made
+// at all, and the check runs and records nothing
+// (TestARecheckWhereNoDirectoryCanBeSyncedChecksAndRecordsNothing), so it
+// skips there.
 func TestARecheckWithNoDurableVetoIsRefusedBeforeItsCheck(t *testing.T) {
 	injected := errors.New("injected")
 	always := func(string) error { return injected }
@@ -268,6 +275,7 @@ func TestARecheckWithNoDurableVetoIsRefusedBeforeItsCheck(t *testing.T) {
 		{name: "a veto an earlier write left does not sync", sync: always, left: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			requireDirectorySync(t)
 			src := storeWithTracks(t, 20)
 			dir := verifiedSnapshot(t, src)
 			flipLastByte(t, dir, backup.ManifestDBFileName)

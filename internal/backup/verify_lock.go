@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
@@ -124,7 +125,7 @@ func lockBackupsWith(ctx context.Context, dir string, wait time.Duration, token 
 		}
 	}
 	// The token first: another holder in this process is a lock held, and one
-	// that is a check that did not end is not waited for.
+	// given up (stuck.go) is not waited for, asked of no filesystem.
 	takeToken := func() error {
 		if token == nil {
 			return nil
@@ -135,8 +136,8 @@ func lockBackupsWith(ctx context.Context, dir string, wait time.Duration, token 
 				return nil
 			default:
 			}
-			if stuckHere(dir) {
-				return ErrCheckStillRunning
+			if check, held := stuckBy(dir); held {
+				return stillRunning(check)
 			}
 			sawWait()
 			ok, err := pause()
@@ -179,9 +180,8 @@ func lockBackupsWith(ctx context.Context, dir string, wait time.Duration, token 
 				closeAll()
 				return nil, err
 			}
-			// Held here, the lock holds no check that did not end: a marker
-			// of one is a process's that has ended.
-			_ = os.Remove(filepath.Join(dir, stuckMarkerName))
+			// A marker left beside the lock its holder's first step removes,
+			// bounded (clearStaleMarker).
 			return func() {
 				_ = fsutil.Unlock(f)
 				closeAll()
@@ -193,13 +193,13 @@ func lockBackupsWith(ctx context.Context, dir string, wait time.Duration, token 
 			closeAll()
 			return nil, fmt.Errorf("lock the snapshots: %w", err)
 		}
-		// Held by another process: one whose check did not end, then or
-		// since, is not waited for; its marker is asked once a second.
+		// Held by another process: one given up, then or since, is not
+		// waited for; its marker is asked once a second.
 		if time.Since(askedMarker) >= markerPoll {
 			askedMarker = time.Now()
-			if _, ok := stuckMarker(dir); ok {
+			if check, ok := stuckMarker(dir); ok {
 				closeAll()
-				return nil, ErrCheckStillRunning
+				return nil, stillRunning(check)
 			}
 		}
 		sawWait()
@@ -253,14 +253,22 @@ var openProbe = func(path string) (*os.File, error) { return os.OpenFile(path, o
 // in the order the waits began, for as long as its context lasts.
 var verifySlot = make(chan struct{}, 1)
 
-// takeSlot takes the slot, waiting for it while another verification holds
-// it until ctx ends, and answers its release; a slot a check that did not end
-// holds, from before the wait or from during it, answers ErrCheckStillRunning
-// at once.
-func takeSlot(ctx context.Context) (func(), error) {
-	release := func() { <-verifySlot }
+// slotHolder is the hold of the verification that has the slot, if any.
+var slotHolder atomic.Pointer[hold]
+
+// takeSlot takes the slot for the verification whose hold is h, waiting for
+// it while another verification holds it until ctx ends, and answers its
+// release; a slot held by a verification given up (stuck.go), from before the
+// wait or from during it, answers ErrCheckStillRunning at once, naming its
+// snapshot, and asks no filesystem.
+func takeSlot(ctx context.Context, h *hold) (func(), error) {
+	release := func() {
+		slotHolder.CompareAndSwap(h, nil)
+		<-verifySlot
+	}
 	select {
 	case verifySlot <- struct{}{}:
+		slotHolder.Store(h)
 		return release, nil
 	default:
 	}
@@ -269,11 +277,14 @@ func takeSlot(ctx context.Context) (func(), error) {
 	}
 	for {
 		notice := stuckNotice()
-		if stuckHere("") {
-			return nil, ErrCheckStillRunning
+		if holder := slotHolder.Load(); holder != nil {
+			if check, marked := holder.marked(); marked {
+				return nil, stillRunning(check)
+			}
 		}
 		select {
 		case verifySlot <- struct{}{}:
+			slotHolder.Store(h)
 			return release, nil
 		case <-notice:
 		case <-ctx.Done():

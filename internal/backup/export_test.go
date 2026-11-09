@@ -42,6 +42,13 @@ func OwnerHeldAsAnotherProcessForTest(dir string) bool {
 // backups folder.
 const StuckMarkerName = stuckMarkerName
 
+// StuckAnywhereForTest reports whether any hold given up in this process is
+// marked still.
+func StuckAnywhereForTest() bool {
+	_, held := stuckAnywhere()
+	return held
+}
+
 // SlotHeldForTest reports whether a verification holds this process's slot:
 // a try on it, given back at once.
 func SlotHeldForTest() bool {
@@ -73,14 +80,6 @@ func SetTryLockForTest(fn func(*os.File) error) (restore func()) {
 // ErrNotADirectory is what a listing of the backups folder answers when
 // something that is not a folder stands where it goes.
 var ErrNotADirectory = errNotADirectory
-
-// SetReadDirForTest replaces the listing of the backups folder List and the
-// orphan sweep take, and returns the restore.
-func SetReadDirForTest(fn func(name string) ([]os.DirEntry, error)) (restore func()) {
-	prev := readDir
-	readDir = fn
-	return func() { readDir = prev }
-}
 
 // CompletePlayerSeal is completePlayerSeal, driven directly where a backup's
 // lock open would fail first.

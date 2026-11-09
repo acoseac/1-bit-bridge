@@ -55,6 +55,46 @@ func SetSyncVetoForTest(fn func(path string) error) (restore func()) {
 	return func() { syncVetoDir = prev }
 }
 
+// SetSyncsParentDirForTest sets whether a directory can be synced here, as a
+// verification asks before it sets a VERIFIED aside (fsutil.SyncsParentDir:
+// false on Windows), and returns the restore.
+func SetSyncsParentDirForTest(syncs bool) (restore func()) {
+	prev := syncsParentDir
+	syncsParentDir = syncs
+	return func() { syncsParentDir = prev }
+}
+
+// SetMetadataForTest replaces what a verification, a prune and a reader ask
+// of a path's metadata (the resolution of its links, the prune's Lstat of
+// its folder), each nil for the platform's own, and returns the restore: a
+// test stands a mount whose metadata does not answer in for them.
+func SetMetadataForTest(resolve func(string) (string, error), lstatFn func(string) (os.FileInfo, error)) (restore func()) {
+	prevResolve, prevLstat := resolveLinks, lstat
+	if resolve != nil {
+		resolveLinks = resolve
+	}
+	if lstatFn != nil {
+		lstat = lstatFn
+	}
+	return func() { resolveLinks, lstat = prevResolve, prevLstat }
+}
+
+// SetReadDirForTest replaces the listing of the backups folder List,
+// ReadStatus and the orphan sweep take, and returns the restore.
+func SetReadDirForTest(fn func(name string) ([]os.DirEntry, error)) (restore func()) {
+	prev := readDir
+	readDir = fn
+	return func() { readDir = prev }
+}
+
+// SetOnPruneForTest sets the function a prune runs as it begins, under the
+// backups folder's lock, and returns the restore.
+func SetOnPruneForTest(fn func()) (restore func()) {
+	prev := onPrune
+	onPrune = fn
+	return func() { onPrune = prev }
+}
+
 // SetOpenProbeForTest replaces the open a probe of the backups folder's lock
 // makes (ProbeBackupsLock, StuckCheckOf), and returns the restore.
 func SetOpenProbeForTest(fn func(path string) (*os.File, error)) (restore func()) {

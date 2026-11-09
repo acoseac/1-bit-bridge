@@ -201,14 +201,34 @@ func verifyCmd(ctx context.Context, configPath, path string, full bool, stdout, 
 // UNVERIFIED where the install had none to capture), recorded. Where the
 // verdict was not recorded it says the two apart: what this check found, and
 // what the record reads, as every reader reads it until a check is recorded;
-// and of a snapshot not checked again (backup.ErrRecheckRefused), the record
-// an earlier check left, which this one did not repeat.
+// of a snapshot not checked again (backup.ErrRecheckRefused), the record an
+// earlier check left, which this one did not repeat; of one checked again
+// where no check over its VERIFIED is recorded (backup.ErrRecheckNotRecorded:
+// Windows), what this check found and the record it leaves as it was; and of
+// a verification given up (backup.ErrCheckGivenUp), whether it wrote its
+// record and what that record reads as read back, never what the INCOMPLETE
+// it was given up with would say (its merge keeps a completed verdict, and
+// its write may not have landed), and that the step still holds the
+// snapshots.
 func reportVerdict(stdout, stderr io.Writer, prefix string, res backup.VerifyResult, err error) bool {
 	rec := res.Record
 	if rec.DatabaseState == "" {
 		rec = res.Found
 	}
 	switch {
+	case errors.Is(err, backup.ErrCheckGivenUp):
+		fmt.Fprintf(stderr, "%sthe verification was given up, and its step still holds the snapshots until it ends: %v\n", prefix, err)
+		describeRecordRead(stdout, prefix, res)
+		return false
+	case errors.Is(err, backup.ErrRecheckNotRecorded):
+		fmt.Fprintf(stdout, "%sthis check found:\n", prefix)
+		describeVerdictLed(stdout, prefix+"  ", res.Found)
+		if res.Record.DatabaseState != "" {
+			fmt.Fprintf(stdout, "%sits record, which this check leaves as it was, reads:\n", prefix)
+			describeVerdictLed(stdout, prefix+"  ", res.Record)
+		}
+		fmt.Fprintf(stderr, "%swhat this check found was not recorded: %v\n", prefix, err)
+		return false
 	case errors.Is(err, backup.ErrRecheckRefused):
 		if res.Record.DatabaseState != "" {
 			fmt.Fprintf(stdout, "%sits record, from an earlier check, which this one did not repeat:\n", prefix)
@@ -242,6 +262,22 @@ func reportVerdict(stdout, stderr io.Writer, prefix string, res backup.VerifyRes
 		return false
 	}
 	return true
+}
+
+// describeRecordRead says whether a verification given up wrote its record
+// (res.Recorded) and what that record reads as read back, its two verdicts,
+// or that it could not read it back.
+func describeRecordRead(w io.Writer, prefix string, res backup.VerifyResult) {
+	switch {
+	case res.Record.DatabaseState == "":
+		fmt.Fprintf(w, "%sits record could not be read back\n", prefix)
+		return
+	case res.Recorded:
+		fmt.Fprintf(w, "%sit wrote its record, which reads:\n", prefix)
+	default:
+		fmt.Fprintf(w, "%sit wrote nothing, and its record reads:\n", prefix)
+	}
+	describeVerdictLed(w, prefix+"  ", res.Record)
 }
 
 // describeVerdict prints v's two verdicts, a line each.
@@ -600,12 +636,26 @@ func runBackupTicker(ctx context.Context, src backup.Sources, keep func() int, i
 // found: on stdout when both its verdicts are VERIFIED (or the install had
 // no database to capture and its files are), on stderr otherwise, and
 // nothing for a verification the shutdown stopped, which wrote INCOMPLETE.
+// A verification given up is said by whether it wrote its record and what
+// that record reads as read back, and that its step still holds the
+// snapshots.
 func reportTickerVerdict(ctx context.Context, stdout, stderr io.Writer, triggered string, res backup.Result) {
 	if res.VerifyErr != nil {
 		failure := ctxerr.WithoutCancellation(ctx, res.VerifyErr)
 		found, rec := res.Verify.Found, res.Verify.Record
 		switch {
 		case failure == nil:
+		case errors.Is(failure, backup.ErrCheckGivenUp):
+			reads := "its record could not be read back"
+			if rec.DatabaseState != "" {
+				wrote := "it wrote nothing, and its record reads"
+				if res.Verify.Recorded {
+					wrote = "it wrote its record, which reads"
+				}
+				reads = fmt.Sprintf("%s database %s, files %s", wrote, backup.StateWords(rec.DatabaseState, rec.DatabaseReasons), backup.FilesWords(rec))
+			}
+			fmt.Fprintf(stderr, "backup (%s): the verification of %s was given up, and its step still holds the snapshots until it ends; %s: %v\n",
+				triggered, res.Dir, reads, failure)
 		case errors.Is(failure, backup.ErrRecheckRefused):
 			fmt.Fprintf(stderr, "backup (%s): %s was not checked, and its record, from an earlier check, reads database %s, files %s: %v\n", triggered, res.Dir,
 				backup.StateWords(rec.DatabaseState, rec.DatabaseReasons), backup.FilesWords(rec), failure)

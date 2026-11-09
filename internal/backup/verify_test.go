@@ -20,6 +20,7 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/backup"
 	"github.com/acoseac/1-bit-bridge/internal/dsn"
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
@@ -476,7 +477,9 @@ func TestALinkInTheBundleFailsBeforeSQLiteOpens(t *testing.T) {
 // the live store's is; VACUUM INTO's own copy is in rollback mode) verifies
 // VERIFIED twice, and neither run creates a file in the bundle: a mode=ro
 // open alone creates a -shm and a -wal beside it, which the second run would
-// then refuse as sidecars.
+// then refuse as sidecars. Where no directory can be synced, the second run,
+// a check over the VERIFIED the first recorded, finds VERIFIED and records
+// nothing (ErrRecheckNotRecorded), and creates no file either.
 func TestVerifyingAWALHeaderDatabaseTwiceCreatesNoFile(t *testing.T) {
 	src := storeWithTracks(t, 25)
 	dir, err := backup.Snapshot(t.Context(), src)
@@ -494,8 +497,16 @@ func TestVerifyingAWALHeaderDatabaseTwiceCreatesNoFile(t *testing.T) {
 	rebaseline(t, dir, backup.ManifestDBFileName)
 	before := names(t, dir)
 	for run := 1; run <= 2; run++ {
-		res := verifyT(t, dir, backup.CheckQuick)
-		requireVerdict(t, fmt.Sprintf("run %d", run), res.Record, backup.StateVerified, "", backup.StateVerified, "")
+		if run == 2 && !fsutil.SyncsParentDir {
+			res, err := backup.VerifySnapshot(t.Context(), dir, backup.VerifyOptions{Level: backup.CheckQuick})
+			if !errors.Is(err, backup.ErrRecheckNotRecorded) {
+				t.Fatalf("run 2 answered %v, want ErrRecheckNotRecorded where no directory can be synced", err)
+			}
+			requireVerdict(t, "run 2 found", res.Found, backup.StateVerified, "", backup.StateVerified, "")
+		} else {
+			res := verifyT(t, dir, backup.CheckQuick)
+			requireVerdict(t, fmt.Sprintf("run %d", run), res.Record, backup.StateVerified, "", backup.StateVerified, "")
+		}
 		if got := names(t, dir); fmt.Sprint(got) != fmt.Sprint(before) {
 			t.Fatalf("run %d left the bundle holding %v, it held %v", run, got, before)
 		}
@@ -588,8 +599,12 @@ func TestTheFullCheckEvaluatesTheExpressionIndexes(t *testing.T) {
 }
 
 // TestAQuickCheckNeverUndoesAFullOne pins the record's merge: a verdict
-// never replaces one of a higher check level unless it is worse.
+// never replaces one of a higher check level unless it is worse. Where no
+// directory can be synced no check over a VERIFIED is recorded
+// (TestARecheckWhereNoDirectoryCanBeSyncedChecksAndRecordsNothing), so there
+// is no merge to pin.
 func TestAQuickCheckNeverUndoesAFullOne(t *testing.T) {
+	requireDirectorySync(t)
 	src := storeWithTracks(t, 50)
 	dir, err := backup.Snapshot(t.Context(), src)
 	if err != nil {
@@ -1035,14 +1050,24 @@ func TestTwoVerificationsOfOneSnapshotWriteOneAtATime(t *testing.T) {
 			default:
 			}
 			close(release)
-			for _, o := range []outcome{<-firstDone, <-secondDone} {
+			level := backup.CheckFull
+			for i, o := range []outcome{<-firstDone, <-secondDone} {
+				if i == 1 && !fsutil.SyncsParentDir {
+					// Where no directory can be synced, the second, a check over
+					// the VERIFIED the first recorded, runs and records nothing.
+					if !errors.Is(o.err, backup.ErrRecheckNotRecorded) || o.res.Found.DatabaseState != backup.StateVerified {
+						t.Errorf("the second verification answered %v, found %s; want its VERIFIED found and not recorded", o.err, o.res.Found.DatabaseState)
+					}
+					level = backup.CheckQuick
+					continue
+				}
 				if o.err != nil || !o.res.Recorded {
 					t.Errorf("a verification answered %v, recorded %v", o.err, o.res.Recorded)
 				}
 			}
 			rec := readManifestT(t, dir).Verification
-			if rec.DatabaseState != backup.StateVerified || rec.Level != backup.CheckFull {
-				t.Errorf("the record ends %s at %q, want VERIFIED at the full check's level", rec.DatabaseState, rec.Level)
+			if rec.DatabaseState != backup.StateVerified || rec.Level != level {
+				t.Errorf("the record ends %s at %q, want VERIFIED at %q", rec.DatabaseState, rec.Level, level)
 			}
 		})
 	}

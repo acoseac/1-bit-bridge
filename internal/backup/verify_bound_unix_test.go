@@ -40,10 +40,11 @@ func fifoWriter(t *testing.T, path string) *os.File {
 // reads: a verification stopped while its read of the snapshot's manifest
 // does not answer (the manifest a named pipe no one writes, as a read of a
 // hung mount waits) answers its caller within StopWriteBound, and the step
-// it abandons keeps its hold until it ends, so a prune meanwhile is skipped,
-// and runs once the read has answered and the verification has ended, the
-// record then saying the check did not end. Red on the round before, whose
-// caller read the manifest itself, outside any bound.
+// it abandons keeps its hold until it ends, given up and marked since the
+// fourth round (hold.go), so a prune meanwhile is skipped for it, and runs
+// once the read has answered and the verification has ended, the record then
+// saying the check did not end. Red on the round before, whose caller read
+// the manifest itself, outside any bound.
 func TestAStopWhileTheManifestReadHangsReturnsWithinItsBoundAndKeepsTheLock(t *testing.T) {
 	src := storeWithTracks(t, 5)
 	c := captureT(t, src)
@@ -74,8 +75,8 @@ func TestAStopWhileTheManifestReadHangsReturnsWithinItsBoundAndKeepsTheLock(t *t
 	cancel()
 	requireReturnedWithin(t, done, stoppedAt, backup.StopWriteBound+time.Second, "a verification stopped in its manifest's read")
 	pr, err := backup.Prune(filepath.Dir(c.Dir), 7)
-	if err != nil || !pr.Skipped || !errors.Is(pr.SkippedFor, backup.ErrBackupsBusy) {
-		t.Errorf("a prune beside the abandoned verification: %+v, %v; want it skipped, the hold kept", pr, err)
+	if err != nil || !pr.Skipped || !errors.Is(pr.SkippedFor, backup.ErrCheckStillRunning) {
+		t.Errorf("a prune beside the abandoned verification: %+v, %v; want it skipped for the hold given up", pr, err)
 	}
 	// The manifest a file again for every read after this one; the reader's
 	// open of the pipe is answered by the writer.

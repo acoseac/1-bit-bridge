@@ -3,6 +3,7 @@ package backup
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -11,51 +12,80 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 )
 
-// A check that did not end (backlog B653's third round). A verification
-// gives its check up once the check's context has ended (its caller's stop,
-// or its deadline) and the check has not returned within half of
-// StopWriteBound after: a read its context cannot reach, a hung mount. It
-// then answers its caller and records INCOMPLETE, and its worker keeps all it
-// holds, this process's verification slot, the backups folder's lock and the
-// snapshot's ownership, until the check's goroutine has ended, so no other
-// verification or prune runs beside a check that still has the bundle's files
-// open, in this process or another. Its late result is dropped: an abandoned
-// check records nothing but the INCOMPLETE it was given up with, and its
-// verification runs no prune after it.
+// A hold given up (backlog B653's third and fourth rounds). Every holder of a
+// backups folder's lock runs each step it takes under the lock bounded
+// (hold.go): a verification (finish.go), the write of INCOMPLETE for a
+// verification its caller stopped before it began (abandonPending) and a
+// claim (owner.go). A step that overruns its bound is given up: its holder
+// answers its caller, runs no check and no prune, writes nothing but the
+// INCOMPLETE of a verification it gave up, and keeps all it holds (the lock,
+// and a verification's slot and the snapshot's ownership) until every step it
+// gave up has ended, so nothing protected runs beside a step that may still
+// have the bundle's files open, in this process or another. What a step given
+// up answers late is dropped.
 //
-// While it runs it is marked (stuck), and a verification, a claim or a prune
-// that would wait behind it answers ErrCheckStillRunning at once: in this
-// process by the mark, in another by the marker it writes beside the folder's
-// lock (stuckMarkerName), best effort, which counts only while that lock is
-// held. The doctor says so (StuckCheckOf). A shutdown does not wait for it:
-// the verification has answered its caller already, serve goes on to its end,
-// and the process's end ends the check and lets the kernel's locks go, the
-// marker left behind for the next holder of the lock to remove. What stays
-// open here is backlog B653's.
+// A hold given up is marked, with no filesystem asked, under the folder's
+// resolved key and every spelling it was reached by, and the mark stands
+// until every hold is let go; it is raised only by an overrun, never by a hold
+// that keeps within its bound. Behind it, a verification, a claim or a prune
+// answers ErrCheckStillRunning at once, naming the snapshot: in this process
+// by the mark, which each asks before any filesystem for a spelling the hold
+// was reached by (stuckBy), and in another by the marker the hold writes
+// beside the folder's lock (stuckMarkerName), best effort, which counts only
+// while that lock is held. On a mount that answers nothing that marker cannot
+// be written or read, and another process's wait ends ErrBackupsBusy. The
+// doctor says so (StuckCheckHere, StuckCheckOf). A shutdown does not wait for
+// it: the process's end ends the step and lets the kernel's locks go, a
+// marker left behind removed by the next holder of the lock. What stays open
+// here is backlog B653's.
 
 // ErrCheckStillRunning is the answer of a verification, a claim and a prune
-// that would wait behind a check that did not end and is still running: it
-// holds the backups folder until it ends, or until the process that runs it
-// does.
-var ErrCheckStillRunning = errors.New("a check of these snapshots that did not end is still running, and holds them until it ends or its process does")
+// behind a hold given up that still holds the backups folder: until its step
+// ends, or until the process that runs it does.
+var ErrCheckStillRunning = errors.New("a verification of these snapshots that did not end still holds them, until it ends or its process does")
 
-// StuckCheck is a check that did not end and still holds a backups folder:
-// its snapshot's folder name, and when its verification gave it up.
+// StuckCheck is a hold given up that still holds a backups folder: its
+// snapshot's folder name, the step it did not end, in words (Step), and when
+// it was given up.
 type StuckCheck struct {
 	Snapshot string    `json:"snapshot"`
+	Step     string    `json:"step,omitempty"`
 	Since    time.Time `json:"since"`
 }
 
-// stuck is this process's checks that did not end, by their backups folder's
-// resolved path (ownerKey). There is at most one: the slot is one.
+// stillRunning is ErrCheckStillRunning for the hold given up that check is,
+// naming its snapshot and its step.
+func stillRunning(check StuckCheck) error {
+	step := ""
+	if check.Step != "" {
+		step = " in " + check.Step
+	}
+	return fmt.Errorf("%w (snapshot %s, given up%s at %s)", ErrCheckStillRunning, check.Snapshot, step,
+		check.Since.Format(time.RFC3339))
+}
+
+// stuckMark is a hold given up as this process keeps it: what it says, the
+// keys it stands under, and its marker, whose write and removal take turns
+// under mu, so that no write lands once its holder has removed it.
+type stuckMark struct {
+	check   StuckCheck
+	keys    []string
+	marker  string
+	ref     string
+	mu      sync.Mutex
+	removed bool
+}
+
+// stuck is this process's holds given up, by every key they stand under: the
+// folder's resolved key and the spellings it was reached by (spellingKey).
 var stuck sync.Map
 
-// stuckMarkerName is the marker a check that did not end leaves in its
-// backups folder for another process to read.
+// stuckMarkerName is the marker a hold given up leaves in its backups folder
+// for another process to read.
 const stuckMarkerName = ".check-still-running"
 
 // notice is closed, and replaced, at each mark, so a wait for the slot that
-// began before a check was given up hears of it (takeSlot).
+// began before a hold was given up hears of it (takeSlot).
 var (
 	noticeMu sync.Mutex
 	notice   = make(chan struct{})
@@ -68,62 +98,117 @@ func stuckNotice() <-chan struct{} {
 	return notice
 }
 
-// markStuck marks the check of the snapshot named in the backups folder at
-// root as one that did not end, and writes its marker, on a goroutine of its
-// own (the folder may not answer), and answers the mark's clearing, which its
-// worker runs once the check has ended and before it lets the lock go.
-func markStuck(root, snapshot string) (clear func()) {
-	key := ownerKey(root)
-	mark := StuckCheck{Snapshot: snapshot, Since: time.Now().UTC()}
-	stuck.Store(key, mark)
+// markStuck marks a hold given up: check under every one of keys, asking no
+// filesystem, the notice closed; and, where root names the folder as
+// resolved, its marker written there on a goroutine of its own (the folder
+// may not answer). It answers the mark, which its holder removes the marker
+// of before it lets the lock go (removeMarker) and drops once every hold is
+// let go (drop).
+func markStuck(keys []string, root string, check StuckCheck) *stuckMark {
+	mark := &stuckMark{check: check, keys: keys}
+	for _, k := range keys {
+		stuck.Store(k, mark)
+	}
 	noticeMu.Lock()
 	close(notice)
 	notice = make(chan struct{})
 	noticeMu.Unlock()
-	marker := filepath.Join(root, stuckMarkerName)
-	go writeStuckMarker(key, marker, root, mark)
-	return func() {
-		stuck.Delete(key)
-		_ = os.Remove(marker)
+	if root != "" {
+		mark.marker, mark.ref = filepath.Join(root, stuckMarkerName), root
+		go mark.writeMarker()
 	}
+	return mark
 }
 
-// writeStuckMarker writes mark into the marker at path, with the owner of the
-// backups folder at root, unless the mark has been cleared since.
-func writeStuckMarker(key, path, root string, mark StuckCheck) {
-	if _, still := stuck.Load(key); !still {
-		return
-	}
-	data, err := json.Marshal(mark)
+// writeMarker writes the mark into its marker, with the owner of its backups
+// folder, unless its holder has removed it already.
+func (mark *stuckMark) writeMarker() {
+	data, err := json.Marshal(mark.check)
 	if err != nil {
 		return
 	}
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	mark.mu.Lock()
+	defer mark.mu.Unlock()
+	if mark.removed {
+		return
+	}
+	f, err := os.OpenFile(mark.marker, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
 	if err != nil {
 		return
 	}
-	_ = fsutil.KeepOwner(f, root)
+	_ = fsutil.KeepOwner(f, mark.ref)
 	_, _ = f.Write(data)
 	_ = f.Close()
-	// Cleared meanwhile: the marker is the cleared mark's.
-	if _, still := stuck.Load(key); !still {
-		_ = os.Remove(path)
+}
+
+// removeMarker removes the mark's marker, once its write has ended, and keeps
+// any write after it from making one; a nil mark, or one with none, does
+// nothing.
+func (mark *stuckMark) removeMarker() {
+	if mark == nil || mark.marker == "" {
+		return
+	}
+	mark.mu.Lock()
+	defer mark.mu.Unlock()
+	mark.removed = true
+	_ = os.Remove(mark.marker)
+}
+
+// drop takes the mark out of this process's record, under each key that
+// holds it still; a nil mark does nothing.
+func (mark *stuckMark) drop() {
+	if mark == nil {
+		return
+	}
+	for _, k := range mark.keys {
+		stuck.CompareAndDelete(k, mark)
 	}
 }
 
-// stuckHere reports whether this process runs a check that did not end, and
-// with root (non-empty) whether it holds that backups folder.
-func stuckHere(root string) bool {
-	if root != "" {
-		_, held := stuck.Load(ownerKey(root))
-		return held
+// spellingKey is p as the record of holds given up keys a spelling: made
+// absolute (os.Getwd, for a relative p) and clean, no link resolved, so no
+// filesystem is asked of the folder.
+func spellingKey(p string) string {
+	if !filepath.IsAbs(p) {
+		if abs, err := filepath.Abs(p); err == nil {
+			p = abs
+		}
 	}
-	found := false
-	stuck.Range(func(_, _ any) bool {
-		found = true
+	return filepath.Clean(p)
+}
+
+// stuckBy is the hold given up that holds the folder one of paths names, by
+// the spelling it is given in, asking no filesystem.
+func stuckBy(paths ...string) (StuckCheck, bool) {
+	for _, p := range paths {
+		if p == "" {
+			continue
+		}
+		if v, held := stuck.Load(spellingKey(p)); held {
+			return v.(*stuckMark).check, true
+		}
+	}
+	return StuckCheck{}, false
+}
+
+// stuckAnywhere is one of this process's holds given up, if any.
+func stuckAnywhere() (StuckCheck, bool) {
+	var found *stuckMark
+	stuck.Range(func(_, v any) bool {
+		found = v.(*stuckMark)
 		return false
 	})
-	return found
+	if found == nil {
+		return StuckCheck{}, false
+	}
+	return found.check, true
+}
+
+// clearStaleMarker removes a marker left in the backups folder at root, which
+// its holder's first step runs: held here, the lock holds no hold given up,
+// so a marker there is a process's that has ended.
+func clearStaleMarker(root string) {
+	_ = os.Remove(filepath.Join(root, stuckMarkerName))
 }
 
 // stuckMarker reads the marker in the backups folder at root, if any: a file,
@@ -140,14 +225,26 @@ func stuckMarker(root string) (StuckCheck, bool) {
 	return mark, true
 }
 
-// StuckCheckOf is the check that did not end and still holds the backups
-// folder at backupsRoot, if one does: this process's own, or another's whose
-// marker is there while the folder's lock is held (a marker beside a lock
-// nobody holds is a process's that has ended). For the doctor; it makes
-// nothing, and lets go at once of the lock it tries.
+// StuckCheckHere is this process's hold given up that still holds the
+// backups folder at backupsRoot, by the spelling it is given in: it asks no
+// filesystem, so the doctor asks it first, whatever the folder answers.
+func StuckCheckHere(backupsRoot string) (StuckCheck, bool) {
+	return stuckBy(backupsRoot)
+}
+
+// StuckCheckOf is the hold given up that still holds the backups folder at
+// backupsRoot, if one does: this process's own (StuckCheckHere, then by the
+// folder as resolved), or another's whose marker is there while the folder's
+// lock is held (a marker beside a lock nobody holds is a process's that has
+// ended). Past this process's own by the spelling given, it asks the folder,
+// which may not answer: the doctor bounds it. It makes nothing, and lets go
+// at once of the lock it tries.
 func StuckCheckOf(backupsRoot string) (StuckCheck, bool) {
+	if check, held := stuckBy(backupsRoot); held {
+		return check, true
+	}
 	if v, held := stuck.Load(ownerKey(backupsRoot)); held {
-		return v.(StuckCheck), true
+		return v.(*stuckMark).check, true
 	}
 	mark, ok := stuckMarker(backupsRoot)
 	if !ok {

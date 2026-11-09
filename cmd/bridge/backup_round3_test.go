@@ -37,12 +37,14 @@ const (
 )
 
 // The lines a stuck check's process prints once its check is parked, and
-// once its verification has answered; and the line a verification's process
-// prints once its check has ended, before its verdict is written.
+// once its verification has answered; the line a verification's process
+// prints once its check has ended, before its verdict is written; and the
+// one it prints as its check begins, on its thread.
 const (
 	stuckParked   = "stuck check parked"
 	stuckGivenUp  = "stuck check given up:"
 	verifyChecked = "verification checked"
+	verifyBegan   = "verification began its check"
 )
 
 // runVerifyWithFault is the re-exec'd test binary's whole run as one bridge
@@ -50,10 +52,12 @@ const (
 // unsynced (the folder's sync once the rename has landed), noveto (no veto
 // can be made), vetosync (a veto made does not sync), or killed (the process
 // parks once its check has ended, until its standard input ends, for the
-// test to kill it there).
+// test to kill it there). Whatever the fault, it says when its check begins
+// (verifyBegan).
 func runVerifyWithFault() int {
 	injected := errors.New("injected: " + os.Getenv(verifyFaultEnv))
 	always := func(string) error { return injected }
+	backup.SetOnLowPriorityForTest(func() { fmt.Fprintln(os.Stdout, verifyBegan) })
 	switch os.Getenv(verifyFaultEnv) {
 	case "stage":
 		backup.SetVerdictWriteFailuresForTest(always, nil, nil)
@@ -190,14 +194,29 @@ func killedOnceChecked(t *testing.T, cmd *exec.Cmd) {
 // can put no veto in place durably (none made; one made that does not sync),
 // or that is killed once its check has ended, before its write. Each but the
 // killed one says, apart, what its check found and what the record reads, or
-// that it checked nothing and what the earlier check's record says, and exits 1.
-// Then a fresh process reads it: where a check completed, no reader (the
-// pruner's List, the doctor's lines, the console's ReadStatus) reads a
-// VERIFIED, and the prune keeps the older verified snapshot; where none ran,
-// the record reads as it did. Red at round 2, which with no veto to be had
-// wrote over the VERIFIED, or kept it beside a check that found it FAILED,
-// and whose lost rename brought a VERIFIED back.
+// that it checked nothing and what the earlier check's record says, and exits 1;
+// a process that put no veto in place never begins its check, nor says what
+// a check found. Then a fresh process reads it: where a check
+// completed, no reader (the pruner's List, the doctor's lines, the console's
+// ReadStatus) reads a VERIFIED, and the prune keeps the older verified
+// snapshot; where none ran, the record reads as it did.
+//
+// What round 2 did with each (measured on its tip with these cases, round 3's
+// record, backlog B653): round 2 put a veto in place, synced, before its write
+// wherever the record held a VERIFIED, after its check. So stage and unsynced
+// are green there on every reader, the lost rename included (the veto stood),
+// and red on the words alone; noveto checked, then refused the write, the
+// record kept VERIFIED: green on the record, red on the words, and on the
+// check the refused process began; vetosync had no seam there, its check
+// writing FAILED over the VERIFIED, which is red through the shim alone, not
+// round 2's answer to that fault; and killed, between round 2's check and the
+// veto its write made, left the VERIFIED with none: red on every reader, and
+// on the prune, which removed the older verified snapshot. Where no directory
+// can be synced no veto is made and no check over a VERIFIED is recorded
+// (TestBridgeBackupVerifySaysWhatARecheckFoundWhereItCannotBeRecorded), so it
+// skips there.
 func TestAFreshProcessReadsNoVerifiedAVerificationCouldNotRecord(t *testing.T) {
+	requireDirectorySync(t)
 	exe, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
@@ -258,6 +277,12 @@ func TestAFreshProcessReadsNoVerifiedAVerificationCouldNotRecord(t *testing.T) {
 					if !strings.Contains(said, want) {
 						t.Errorf("the verification did not say %q:\n%s", want, said)
 					}
+				}
+				if began := strings.Contains(stdout.String(), verifyBegan); began != tc.checked {
+					t.Errorf("the verification's process began its check %v, want %v:\n%s", began, tc.checked, said)
+				}
+				if !tc.checked && strings.Contains(said, "this check found") {
+					t.Errorf("a process that checked nothing said what a check found:\n%s", said)
 				}
 			}
 			if tc.crash {

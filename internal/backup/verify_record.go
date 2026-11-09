@@ -24,7 +24,7 @@ import (
 // record it would have replaced.
 //
 // So a VERIFIED is never in doubt where a reader can read it (backlog B653,
-// and its second and third rounds), by one veto, vetoFileName in the bundle,
+// and its second to fourth rounds), by one veto, vetoFileName in the bundle,
 // or beside it in the backups folder (rootVetoPath) where the bundle takes no
 // file, which every reader asks (vetoedAt) and beside which it reads a
 // VERIFIED as INCOMPLETE (ReasonUnsynced):
@@ -34,19 +34,23 @@ import (
 //     write's lost rename included, leaves a reader the VERIFIED this check
 //     may disprove; where no veto can be put in place durably, the snapshot
 //     is not checked again (ErrRecheckRefused), and its record, which no
-//     check has disproved, stays as it was;
+//     check has disproved, stays as it was; and where no directory can be
+//     synced at all (fsutil.SyncsParentDir false: Windows), no veto is made,
+//     the check runs, and what it found is said and never recorded over the
+//     VERIFIED (ErrRecheckNotRecorded);
 //   - a write of a record that holds a VERIFIED, or that replaces one, needs
 //     the veto too, and with none to be had writes nothing;
 //   - the veto goes only once the record that replaces it is durable (the
-//     folder's sync after the rename has answered).
+//     folder's sync after the rename has answered), and only where the record
+//     keeps no VERIFIED in doubt (publishVerdict): a veto that stood before
+//     the verification began stays over a VERIFIED the record carries over.
 //
 // A veto made whose owner could not be given (root_squash) is kept as it is:
 // its presence alone is the veto, and the service may remove it. Each change
 // of the veto, and each write, moves the backups folder's modification time
 // (stampChange), so a reader that caches what the folder holds (the console's
-// Jobs card) reads it again. Where no directory can be synced (Windows,
-// fsutil.SyncParentDir a no-op), a write and a veto are atomic and are not
-// known to be durable.
+// Jobs card) reads it again. Where no directory can be synced, a write is
+// atomic and is not known to be durable.
 
 // syncVerdictDir is the barrier a verdict's write runs once its rename has
 // landed, given the manifest's path: fsutil.SyncParentDir. A test seam
@@ -57,6 +61,11 @@ var syncVerdictDir = fsutil.SyncParentDir
 // checked again durable, given the veto's path: fsutil.SyncParentDir. A test
 // seam (SetSyncVetoForTest).
 var syncVetoDir = fsutil.SyncParentDir
+
+// syncsParentDir says whether syncVetoDir is a barrier at all here:
+// fsutil.SyncsParentDir, false where fsutil.SyncParentDir is a no-op
+// (Windows), and a test's stand-in (SetSyncsParentDirForTest).
+var syncsParentDir = fsutil.SyncsParentDir
 
 // failStage, failRename and failVeto, nil in production, answer the failure
 // a test puts at a verdict's staging, its rename, or the making of a veto
@@ -74,14 +83,16 @@ var (
 // anything but a completed check (VERIFIED or FAILED) of a higher level, so
 // a quick check never undoes a full one unless it fails; the files' check,
 // which is the same at every level, replaces a completed one with the
-// latest. The record's PENDING time goes once nothing in it is PENDING.
-func mergeVerdict(stored *Verification, found Verification) Verification {
+// latest. The record's PENDING time goes once nothing in it is PENDING. It
+// answers too whether found's two verdicts both replaced stored's (fresh):
+// the record is then wholly what the check found, and carries nothing over.
+func mergeVerdict(stored *Verification, found Verification) (out Verification, fresh bool) {
 	if stored == nil {
-		out := found
+		out = found
 		out.Format = verificationFormat
-		return out
+		return out, true
 	}
-	out := *stored
+	out = *stored
 	out.Format = verificationFormat
 	completed := func(s State) bool { return s == StateVerified || s == StateFailed }
 	replaces := func(old, s State) bool {
@@ -90,20 +101,22 @@ func mergeVerdict(stored *Verification, found Verification) Verification {
 		}
 		return s != StatePending
 	}
-	if replaces(stored.DatabaseState, found.DatabaseState) &&
-		!(found.DatabaseState == StateVerified && completed(stored.DatabaseState) && stored.Level.rank() > found.Level.rank()) {
+	database := replaces(stored.DatabaseState, found.DatabaseState) &&
+		!(found.DatabaseState == StateVerified && completed(stored.DatabaseState) && stored.Level.rank() > found.Level.rank())
+	if database {
 		out.DatabaseState, out.DatabaseReasons = found.DatabaseState, found.DatabaseReasons
 		out.Level, out.CheckedAt, out.DurationMS = found.Level, found.CheckedAt, found.DurationMS
 		out.UserVersion, out.Counts = found.UserVersion, found.Counts
 	}
-	if replaces(stored.FilesState, found.FilesState) {
+	files := replaces(stored.FilesState, found.FilesState)
+	if files {
 		out.FilesState, out.FilesReasons, out.FilesFailed = found.FilesState, found.FilesReasons, found.FilesFailed
 		out.FilesCheckedAt = found.FilesCheckedAt
 	}
 	if out.DatabaseState != StatePending && out.FilesState != StatePending {
 		out.PendingSince = time.Time{}
 	}
-	return out
+	return out, database && files
 }
 
 // known reports whether s is a state a record holds.
@@ -131,6 +144,14 @@ var ErrVerdictNotDurable = errors.New("the verdict was written and is not known 
 // be kept from a reader. Nothing was checked or written; the record, which no
 // check has disproved, is as it was.
 var ErrRecheckRefused = errors.New("the snapshot was not checked again: its record holds a verified verdict, and no veto could be put in place durably before the check")
+
+// ErrRecheckNotRecorded marks a verification of a snapshot whose record holds
+// a VERIFIED where no directory can be synced (syncsParentDir false:
+// Windows), so no veto can be made durable: no veto is made, the check runs,
+// and what it found (VerifyResult.Found, which its caller says) is not
+// recorded, the record left as it was, which no reader then takes for what
+// the check found.
+var ErrRecheckNotRecorded = errors.New("no check of a snapshot whose record holds a verified verdict is recorded here: no directory can be synced, so no veto beside the record would be durable")
 
 // setAside puts the veto of the snapshot in dir in place, durably, before a
 // check of a snapshot whose record holds a VERIFIED: in the bundle, the one
@@ -168,36 +189,52 @@ func setAside(dir string) error {
 	return fmt.Errorf("%w: %w", ErrRecheckRefused, errors.Join(causes...))
 }
 
-// publishVerdict writes found into the record of the snapshot at dir and
-// answers the record as written: found merged with prior, the record as it
-// stood before its check (a verification's own, read under the same hold of
-// the lock), or, for a nil prior, with the record its manifest holds now. Its
-// caller holds the backups folder's lock. A merge that changes nothing writes
-// nothing, a veto aside.
-func publishVerdict(dir string, found Verification, prior *Verification) (Verification, error) {
+// publishVerdict writes found into the record of the snapshot at dir, and
+// answers the record as it now stands and whether it was written: found
+// merged with prior, the record as it stood before its check (a
+// verification's own, read under the same hold of the lock), or, for a nil
+// prior, with the record its manifest holds now. Its caller holds the backups
+// folder's lock. A merge that changes nothing writes nothing.
+//
+// A veto goes, once the write is durable, only where mayClear and the record
+// keeps no VERIFIED in doubt (backlog B653's fourth round): where the record
+// is wholly what found says (mergeVerdict's fresh), or where no veto stood
+// before this verification began (doubted false: the veto is this
+// verification's own, made for its check alone, and what the record carries
+// over is what every reader read before it). A veto that stood before it, a
+// write's that failed, stays over a VERIFIED the record carries over, which a
+// check that did not end, or one of a lower level, cannot clear.
+func publishVerdict(dir string, found Verification, prior *Verification, doubted, mayClear bool) (_ Verification, written bool, _ error) {
 	mpath := filepath.Join(dir, ManifestFile)
 	m, err := readRecord(dir)
 	if err != nil {
-		return Verification{}, fmt.Errorf("read the snapshot's manifest: %w", err)
+		return Verification{}, false, fmt.Errorf("read the snapshot's manifest: %w", err)
 	}
 	stored := m.Verification
 	base := stored
 	if prior != nil {
 		base = prior
 	}
-	merged := mergeVerdict(base, found)
+	merged, fresh := mergeVerdict(base, found)
 	merged.Snapshot = boundName(dir)
-	if stored != nil && reflect.DeepEqual(*stored, merged) && !vetoedAt(dir) {
-		return merged, nil
+	clears := mayClear && (fresh || !doubted)
+	root := filepath.Dir(dir)
+	if stored != nil && reflect.DeepEqual(*stored, merged) {
+		// Nothing to write: a veto of this verification's own goes, the
+		// record as every reader read it before.
+		if clears && vetoedAt(dir) {
+			_ = removeVetoes(dir)
+			stampChange(root)
+		}
+		return merged, false, nil
 	}
 	m.Verification = &merged
-	root := filepath.Dir(dir)
 	// A record that holds a VERIFIED, or replaces one, is written behind its
 	// veto, and with none to be had not at all.
 	if holdsVerified(stored) || holdsVerified(&merged) {
 		made, err := putVeto(dir)
 		if err != nil {
-			return Verification{}, fmt.Errorf("the verdict was not written: put its veto in place: %w", err)
+			return Verification{}, false, fmt.Errorf("the verdict was not written: put its veto in place: %w", err)
 		}
 		if made {
 			// A reader's VERIFIED reads INCOMPLETE from now on.
@@ -206,20 +243,23 @@ func publishVerdict(dir string, found Verification, prior *Verification) (Verifi
 	}
 	data, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
-		return Verification{}, err
+		return Verification{}, false, err
 	}
 	if err := stageAndRename(mpath, data); err != nil {
-		return Verification{}, fmt.Errorf("the verdict was not written: %w", err)
+		return Verification{}, false, fmt.Errorf("the verdict was not written: %w", err)
 	}
 	// The record readers read has changed, whatever follows.
 	defer stampChange(root)
 	if err := syncVerdictDir(mpath); err != nil {
-		return merged, fmt.Errorf("%w: %w", ErrVerdictNotDurable, err)
+		return merged, true, fmt.Errorf("%w: %w", ErrVerdictNotDurable, err)
+	}
+	if !clears {
+		return merged, true, nil
 	}
 	if err := removeVetoes(dir); err != nil {
-		return merged, fmt.Errorf("%w: its veto could not be removed, so it reads INCOMPLETE: %w", ErrVerdictNotDurable, err)
+		return merged, true, fmt.Errorf("%w: its veto could not be removed, so it reads INCOMPLETE: %w", ErrVerdictNotDurable, err)
 	}
-	return merged, nil
+	return merged, true, nil
 }
 
 // boundName is the name the backups folder lists the snapshot in dir by: the

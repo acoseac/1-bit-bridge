@@ -22,8 +22,13 @@ func resolveDir(p string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return fsutil.ResolveLinks(abs)
+	return resolveLinks(abs)
 }
+
+// resolveLinks is fsutil.ResolveLinks, which asks the filesystem of every
+// element of a path, and a test's stand-in for a metadata path that does not
+// answer (SetMetadataForTest).
+var resolveLinks = fsutil.ResolveLinks
 
 // resolveSnapshotIn is the snapshot at dir and the backups folder that holds
 // it, each where it resolves (backlog B653's second round), so that `.`

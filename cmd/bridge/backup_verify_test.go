@@ -211,9 +211,13 @@ func TestBridgeBackupVerifyRecordsAndSaysTheVerdict(t *testing.T) {
 	if rec := recordOf(t, dir); rec.Level != backup.CheckFull || !rec.Passes() {
 		t.Errorf("the record after --full is %+v", rec)
 	}
-	// A quick run over the full one keeps the full one's verdict.
-	if code, out, errs := run("--verify", dir); code != 0 || !strings.Contains(out, "full check") {
-		t.Errorf("--verify after --full = %d\n%s%s", code, out, errs)
+	// A quick run over the full one keeps the full one's verdict; where no
+	// directory can be synced no check over a VERIFIED is recorded
+	// (TestBridgeBackupVerifySaysWhatARecheckFoundWhereItCannotBeRecorded).
+	if fsutil.SyncsParentDir {
+		if code, out, errs := run("--verify", dir); code != 0 || !strings.Contains(out, "full check") {
+			t.Errorf("--verify after --full = %d\n%s%s", code, out, errs)
+		}
 	}
 	for _, tc := range []struct {
 		args []string
@@ -229,6 +233,8 @@ func TestBridgeBackupVerifyRecordsAndSaysTheVerdict(t *testing.T) {
 		}
 	}
 	t.Run("a snapshot that fails", func(t *testing.T) {
+		// Its record holds the VERIFIED of the check above.
+		requireDirectorySync(t)
 		crt := filepath.Join(dir, backup.ManifestDBFileName)
 		data, err := os.ReadFile(crt)
 		if err != nil {
@@ -276,8 +282,12 @@ func TestBridgeBackupVerifyRecordsAndSaysTheVerdict(t *testing.T) {
 // verification of the snapshot it just wrote, in either order, run one
 // after the other, each recording its verdict, and the record ends at the
 // full check's: neither verdict is lost, and the quick one never downgrades
-// the full one.
+// the full one. The second of the two checks a VERIFIED, which where no
+// directory can be synced is not recorded
+// (TestBridgeBackupVerifySaysWhatARecheckFoundWhereItCannotBeRecorded), so it
+// skips there.
 func TestVerifyBesideTheTickersVerificationOfOneSnapshot(t *testing.T) {
+	requireDirectorySync(t)
 	for _, tickerFirst := range []bool{true, false} {
 		t.Run(fmt.Sprintf("ticker first %v", tickerFirst), func(t *testing.T) {
 			cfgPath, dataDir, root := backupInstall(t)

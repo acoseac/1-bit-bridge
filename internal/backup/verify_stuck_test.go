@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/backup"
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 )
 
 // awaitSlotFree waits until no verification holds this process's slot,
@@ -169,7 +170,10 @@ func TestAnAbandonedCheckKeepsItsHoldsUntilItsCheckerEnds(t *testing.T) {
 	if _, err := backup.VerifySnapshot(t.Context(), other, backup.VerifyOptions{BackupsRoot: otherRoot}); err != nil {
 		t.Errorf("a verification in another backups folder once the check ended: %v", err)
 	}
-	if _, err := backup.VerifySnapshotAsAnotherProcessForTest(t.Context(), older, backup.VerifyOptions{}); err != nil {
+	// older's record holds a VERIFIED: where no directory can be synced, its
+	// check runs and records nothing, which is that answer.
+	if _, err := backup.VerifySnapshotAsAnotherProcessForTest(t.Context(), older, backup.VerifyOptions{}); err != nil &&
+		(fsutil.SyncsParentDir || !errors.Is(err, backup.ErrRecheckNotRecorded)) {
 		t.Errorf("a verification as another process once the check ended: %v", err)
 	}
 	if backup.OwnerHeldAsAnotherProcessForTest(c.Dir) {

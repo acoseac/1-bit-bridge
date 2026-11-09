@@ -47,10 +47,14 @@ func BackupChecks(st backup.Status, err, lockErr error, stuck *backup.StuckCheck
 			"put the data directory on a filesystem that grants file locks: a local disk, or a network mount whose lock service runs"))
 	}
 	if stuck != nil {
+		step := ""
+		if stuck.Step != "" {
+			step = " (" + stuck.Step + ")"
+		}
 		out = append(out, warn(checkNameBackupCheck,
-			fmt.Sprintf("the check of snapshot %s did not end and was given up %s, and still holds the backups folder: no snapshot there is verified or pruned until it ends, and the scheduled snapshot waits",
-				stuck.Snapshot, agoWords(now.Sub(stuck.Since))),
-			"the end of the process that runs it ends it: restart the bridge, or stop the backup --verify command that runs it; if it comes back, the data directory's storage is not answering its reads"))
+			fmt.Sprintf("a verification of snapshot %s did not end%s and was given up %s, and still holds the backups folder: no snapshot there is verified or pruned until it ends, and the scheduled snapshot waits",
+				stuck.Snapshot, step, agoWords(now.Sub(stuck.Since))),
+			"the end of the process that runs it ends it: restart the bridge, or stop the backup --verify command that runs it; if it comes back, the data directory's storage is not answering (backlog B653)"))
 	}
 	if err != nil {
 		return append(out, warn(checkNameBackupNewest,

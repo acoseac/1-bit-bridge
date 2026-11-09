@@ -83,7 +83,7 @@ func ownerKey(dir string) string {
 	if err != nil {
 		abs = filepath.Clean(dir)
 	}
-	if real, err := fsutil.ResolveLinks(abs); err == nil {
+	if real, err := resolveLinks(abs); err == nil {
 		return real
 	}
 	return abs
@@ -221,15 +221,24 @@ const (
 // its caller waits for until it answers, or, once ctx has ended, for
 // StopWriteBound more, as a verification's caller does (verifyAndThen); a
 // claim that lands after its caller stopped waiting lets its ownership go at
-// once.
+// once. Under the lock its steps are bounded, StopWriteBound from the lock,
+// as every holder's are (hold.go), and given up past it, ErrCheckGivenUp, the
+// folder marked until they have ended; a folder a hold given up still holds
+// is refused at once, asking no filesystem.
 func Claim(ctx context.Context, dir, backupsRoot string) (*Capture, error) {
+	if check, held := stuckBy(filepath.Dir(dir), backupsRoot); held {
+		return nil, stillRunning(check)
+	}
 	type answer struct {
 		c   *Capture
 		err error
 	}
 	done := make(chan answer, 1)
+	h := newHold(ctx, filepath.Base(spellingKey(dir)), filepath.Dir(dir), backupsRoot)
 	go func() {
-		c, err := claim(ctx, dir, backupsRoot)
+		defer h.drop()
+		defer h.release()
+		c, err := claim(ctx, dir, backupsRoot, h)
 		done <- answer{c, err}
 	}()
 	select {
@@ -243,29 +252,52 @@ func Claim(ctx context.Context, dir, backupsRoot string) (*Capture, error) {
 	case a := <-done:
 		return a.c, a.err
 	case <-t.C:
+		h.abandon()
 		go func() { (<-done).c.Release() }()
 		return nil, fmt.Errorf("the claim was left to end on its own %s after its stop: %w", StopWriteBound, ctx.Err())
 	}
 }
 
-// claim is Claim's work, on its own goroutine.
-func claim(ctx context.Context, dir, backupsRoot string) (*Capture, error) {
+// claim is Claim's work, on its own goroutine, its hold h, which its caller
+// lets go of once it has answered.
+func claim(ctx context.Context, dir, backupsRoot string, h *hold) (*Capture, error) {
 	snap, root, err := resolveSnapshotIn(dir, backupsRoot)
 	if err != nil {
 		return nil, err
 	}
-	unlock, err := lockBackups(ctx, root, claimLockWait)
+	key := ownerKey(root)
+	unlock, err := lockBackupsWith(ctx, root, claimLockWait, folderToken(key))
 	if err != nil {
 		return nil, err
 	}
-	defer unlock()
+	h.held(unlock, root, key, filepath.Base(snap))
+	by := h.lockedAt().Add(StopWriteBound)
+	type took struct {
+		o   *owner
+		err error
+	}
 	for try := 1; ; try++ {
-		o, err := takeOwner(snap)
+		if h.gaveUp() {
+			return nil, h.givenUp(ctx, nil)
+		}
+		t, ok := stepOf(h, by, stepClaim, func(context.Context) took {
+			if try == 1 {
+				clearStaleMarker(root)
+			}
+			o, err := takeOwner(snap)
+			return took{o: o, err: err}
+		}, func(late took) { late.o.release() })
+		if !ok {
+			return nil, h.givenUp(ctx, nil)
+		}
 		switch {
-		case err == nil:
-			return &Capture{Dir: snap, owner: o}, nil
-		case !errors.Is(err, ErrClaimedElsewhere) || try == claimTries:
-			return nil, err
+		case t.err == nil && h.gaveUp():
+			t.o.release()
+			return nil, h.givenUp(ctx, nil)
+		case t.err == nil:
+			return &Capture{Dir: snap, owner: t.o}, nil
+		case !errors.Is(t.err, ErrClaimedElsewhere) || try == claimTries:
+			return nil, t.err
 		}
 		select {
 		case <-ctx.Done():

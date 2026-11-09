@@ -1024,8 +1024,13 @@ func PruneContext(ctx context.Context, backupsRoot string, keep int) (PruneResul
 	if err := ctx.Err(); err != nil {
 		return PruneResult{}, err
 	}
+	// A folder a hold given up still holds is skipped at once, asking it
+	// nothing (stuck.go).
+	if check, held := stuckBy(backupsRoot); held {
+		return PruneResult{Skipped: true, SkippedFor: stillRunning(check)}, nil
+	}
 	// A folder not made yet holds nothing to prune, and no lock to take.
-	if _, err := os.Lstat(backupsRoot); errors.Is(err, os.ErrNotExist) {
+	if _, err := lstat(backupsRoot); errors.Is(err, os.ErrNotExist) {
 		return PruneResult{}, nil
 	}
 	root, err := resolveDir(backupsRoot)
@@ -1040,6 +1045,7 @@ func PruneContext(ctx context.Context, backupsRoot string, keep int) (PruneResul
 		return PruneResult{}, err
 	}
 	defer unlock()
+	clearStaleMarker(root)
 	return pruneHeld(ctx, root, keep)
 }
 
@@ -1055,10 +1061,17 @@ func reap(ctx context.Context, backupsRoot string) PruneResult {
 	return PruneResult{Reaped: reaped, ReapErr: reapErr}
 }
 
+// onPrune, nil in production, runs as a prune begins, under the lock
+// (SetOnPruneForTest).
+var onPrune func()
+
 // pruneHeld is PruneContext for a caller that holds the lock of the backups
 // folder, given where it resolves: PruneContext's own, and a verification's
 // Finish, which prunes under the hold its verdict was written in.
 func pruneHeld(ctx context.Context, backupsRoot string, keep int) (PruneResult, error) {
+	if onPrune != nil {
+		onPrune()
+	}
 	res := reap(ctx, backupsRoot)
 	if keep <= 0 {
 		return res, nil
@@ -1318,6 +1331,11 @@ func List(backupsRoot string) ([]snapshotEntry, error) {
 // orphan sweep take. A test lists through it as Windows lists a path that
 // is not a folder (SetReadDirForTest).
 var readDir = os.ReadDir
+
+// lstat is os.Lstat, the prune's look at whether its backups folder is
+// there, and a test's stand-in for a metadata path that does not answer
+// (SetMetadataForTest).
+var lstat = os.Lstat
 
 // errNotADirectory is what a listing of the backups folder answers when
 // something that is not a folder stands where it goes. It is never
