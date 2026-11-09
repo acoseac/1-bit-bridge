@@ -3126,10 +3126,12 @@
   and every other command that makes, opens or writes the data dir
   (`refuseDataDirAway`), refuses, before it makes or writes anything there, a
   data dir the record beside the config names (`.bridge.yaml.datadir`) that
-  holds neither `bridge.db` nor `server.lock`** (2026-11-04, backlog B651;
-  Codex's and Argon's notes on the brief; B727, 2026-11-07; B776 and B777,
-  2026-11-07, the two entries after this one). What stays open is named by
-  backlog B776 and B777. On a NAS reboot systemd or Docker can start the
+  holds neither `bridge.db` nor `server.lock`, and since B741 one that does
+  not hold the identity the record holds (cli-serve.md's B741 bullet)**
+  (2026-11-04, backlog B651; Codex's and Argon's notes on the brief; B727,
+  2026-11-07; B776 and B777, 2026-11-07, the two entries after this one;
+  B741, 2026-11-08, the entry after them). What stays open is named by
+  backlog B776, B777 and B813. On a NAS reboot systemd or Docker can start the
   bridge before a USB, RAID or network volume is mounted, so a path on it is
   not there (a directory on the volume) or reads as the bare mount point,
   empty. **The scan** needed nothing new: walkRoot's upfront
@@ -3387,7 +3389,8 @@
   the record does not name (B727: this said to remove the record for a move
   as well, which has the next command make an empty data dir at the old
   path). The record is plain file I/O, so Windows behaves alike,
-  a record that does not read names nothing, and a config directory serve
+  a record that does not read named nothing (since B741 it is refused,
+  cli-serve.md's B741 bullet), and a config directory serve
   cannot write keeps none, said once a start. `bridge doctor`'s data-dir line
   fails the same state in the refusal's words (cli-serve.md, B659's line).
   In a container whose config and data dir share one volume (the image's
@@ -3423,8 +3426,10 @@
   keep the record in the data dir or in bridge.yaml, or of one spelling of the
   data dir alone (it holds the configured one and where it led), check or
   write serve's record beside any file but the one its boot read was of,
-  refuse a data dir its record does not name or one whose lock file is there
-  (the `rm bridge.db*` reset), or prepare the data dir before the check.**
+  refuse a data dir its record does not name, or one holding the identity its
+  record holds or, under a record written before B741, which holds none, its
+  lock file (the `rm bridge.db*` reset keeps both), or prepare the data dir
+  before the check.**
   Tests:
   `TestAScanSparesARootBelowAVolumeThatIsNotMountedYet`,
   `TestTheWatcherWaitsForAnUnmountedRootAndWatchesWhatIsMountedThere`,
@@ -3520,6 +3525,16 @@
   `TestTheWatcherDispatchesNoScanForARootWhoseOnlyFileWent` deletes a file,
   which Windows allows under a watch. The record is in
   `ops/engineering-log.md`, 2026-11-07, B727.
+
+  **B741** (2026-11-08) took up three gaps B651 left, each checked at its
+  head: a lock file or a database in the bare mount point read as the data
+  dir served from (gap 2), closed by an identity the record and a marker in
+  the data dir hold (cli-serve.md's B741 bullet, its long form in
+  `History-rules-cli-serve.md`); the record and the config spelling the data
+  dir in two cases, compared by a probe that answers for the bare mount point
+  once the volume is away (gap 3), closed by the folding the record keeps
+  (the entry after B777's here); and backlog B813, which stays open. The
+  record is in `ops/engineering-log.md`, 2026-11-08, B741.
 - **A console write under a library root asks first, of the deepest configured
   root that owns each path it would write as the path's elements spell it and
   of the deepest that owns where the write lands, the look the watcher holds a
@@ -3719,3 +3734,98 @@
   `TestTheWatcherWatchesTheVolumeMountedOverARootItWatchedBare`,
   `TestTheWatcherWatchesTheVolumeMountedOverANestedRootItWatchedBare` and
   `TestTheWatcherWatchesARootRemountedInsideTheDebounce`.
+
+- **A data dir's record keeps how each folder on the way of each of its two spellings compared the names in it when serve wrote it, one letter a folder from the volume's root down (`dataDirFolding`, `resolvedFolding`: `fsutil.FormatFolding` of `fsutil.FoldingOnTheWay` over `fsutil.FoldingIn`, CaseUnknown included), so that the record grows with its paths alone, however deep, and the check compares a spelling of the data dir in another case by that, probing nothing (`fsutil.SameAsRecorded`, `SamePathAsRecorded`): once the volume is away every folder below its mount point is gone, and a probe answers for the folder left at the mount point, on the volume above; a folder not read as case-sensitive takes two spellings for one, the direction that refuses, and so does every folder of a spelling whose folding is not one of its folders, a folding checked against its own spelling alone; the two spellings are compared below the deepest two of their folders, as many names above each end, that resolve to one directory, each name below by the letter of the folder the record's own spelling looks it up in, counted from its end, the resolved folders compared exactly, and where no two do, as written and with the config's as it resolves, name by name from the root (`fsutil.SamePathAsRecorded`), so that a link on the way to another depth, macOS's /var or a Windows short name, moves no letter off its folder; a folder that is there spelled in another case is one folder on Windows, whose resolution names it as it is on disk, whatever its letter, and on Linux and macOS is the letter's; a record holding an identity or a folding is never compared by the probe, and one written before B741, which holds neither, is (`fsutil.SamePath`) until a start with the volume there writes it again; the reader takes 2 MiB, past the record of any path an OS takes, and a record whose folding alone would take it past that keeps the letter u, every folder unknown, one longer without it never written** (2026-11-08, backlog B741's gap 3, and its round 2, Codex on #1441: keyed by each folder's whole path the record grew as the square of the depth, and past its reader's 64 KiB was written without its folding, which the check compared by the probe; and its round 4, CI's macOS and Windows legs on #1441: the letters laid over a resolution of another depth read a spelling through a link to the mount point as another data dir; the identity is cli-serve.md's B741 bullet). **Don't probe a record's folders at the check where the record holds an identity or a folding, key a folder's folding by its path, take a folder read as case-sensitive for one that folds, read a folding that is not of its spelling's folders as any of them, check a folding against any spelling but its own, lay its letters over a resolution, compare two resolved folders but exactly, or write a record its reader refuses.** `TestARecordedFoldingDecidesACaseOnlyDifference` (its case-sensitive sibling the control), `TestFoldingOnTheWayAsksEachFolderOnce`, `TestSamePathAsRecordedProbesNoVolume`, `TestARecordedPathComparesThroughAnAliasOfItsAncestors`, `TestARecordedPathComparesAsWindowsResolvesIt`, `TestARecordedPathComparesThroughAShortName` (Windows), `TestACaseOnlyDifferenceInAFolderThatIsThere`, `TestFoldersThatDifferInCaseAloneResolveApart`, `TestAPathNoFolderOfWhichResolvesIsComparedAsWritten`, `TestParseFoldingReadsWhatFormatFoldingWrites`, `TestServeRefusesTheDataDirItRecordedInAnotherCaseWhereItsFolderFoldsCase`, `TestServeRecordsHowEachFolderOnItsDataDirsWayComparesNames`, `TestServeKeepsTheFoldingOfADataDirHoweverDeep`, `TestARecordItsReaderWouldRefuseKeepsNoFolding` and, on a volume that folds case, `TestServeRefusesTheDataDirInAnotherCaseOnACaseInsensitiveVolume` (`BRIDGE_TEST_CASE_INSENSITIVE_DIR`) pin it.
+  B651's check compared the record's spellings with the config's as the
+  directory they name, through `fsutil.SamePath`, which folds a case-only
+  difference where `caseInsensitiveFS` finds the volume holding the path
+  folds case: an Lstat of the nearest existing ancestor's own name and of its
+  case-swapped sibling. With the data dir's volume away, every folder below
+  the mount point is gone, the nearest ancestor is the bare mount point, and
+  the probe looks its name up in the folder above, on the volume the mount
+  point is on: a case-insensitive exFAT or vfat stick mounted on ext4 read as
+  case-sensitive, so a record of `usb/Bridge` and a config naming
+  `usb/bridge` since read as two data dirs, the refusal was skipped, and serve
+  made the data dir in the bare mount point. Storing, not probing: serve's
+  record holds, for every folder on the way of both its spellings, the
+  folder's answer to `fsutil.FoldingIn` at the write, while the volume is
+  there (`fsutil.FoldingOnTheWay`; the folder a name is looked up in, so the
+  mount point is asked of the mounted volume's names), and the check compares
+  element by element by that (`fsutil.SameAsRecorded`), a case-only
+  difference one data dir where its folder was not read as case-sensitive:
+  read as folding case, read as unknown, or not recorded (a folding that is
+  not of the spelling's folders says nothing of any of them). That is the
+  direction that refuses: B651's protection is the refusal, and a data dir set
+  on purpose to a directory that differs from the recorded one in case alone,
+  in a folder that could not tell, is refused, its refusal saying how to go
+  on. `fsutil.SamePathAsRecorded` keeps SamePath's resolution of what still
+  resolves (a link at the mount point, outside the volume): since round 4
+  (below) it compares below the deepest two folders of the two spellings
+  that resolve to one directory, and where no two do, the recorded spelling
+  with the config's as written and as it resolves. A
+  record holding neither an identity nor a folding, written before B741,
+  falls back to the probe, and the gap stays open for it until a start with
+  the volume there writes the record again; one holding either never does.
+  The comparison takes the stored folding as an input, so
+  a unit test covers it on every host with a case-sensitive sibling as its
+  control; a serve test stands a probe in for a volume that folds case
+  (`dataDirRecording.folding`); and a real one is an opt-in case behind
+  `BRIDGE_TEST_CASE_INSENSITIVE_DIR`, a directory on a volume that folds case
+  whose own name its folder above compares with case, which skips naming the
+  variable (legion0 can make none without root). The record is in
+  `ops/engineering-log.md`, 2026-11-08, B741.
+
+  Round 2 (Codex on #1441). Round 1 kept each folder's folding keyed by the
+  folder's whole path, so the record grew as the square of the data dir's
+  depth (45,510 bytes for a direct path 200 folders deep; Codex measured
+  66,186 for a path of 495 bytes in 240), and a record past its reader's
+  64 KiB was written without its folding, which the check then compared by
+  the probe: the gap open again at a depth an ordinary path reaches. The
+  folding is one letter a folder now (`fsutil.FormatFolding`: s, i or u),
+  one string a spelling (`dataDirFolding`, `resolvedFolding`), aligned with
+  the spelling's folders from its volume's root down
+  (`fsutil.FoldingOnTheWay` answers a slice, a folder shared by both
+  spellings asked once): 1,320 bytes for the same 200 folders. A folding
+  not of its spelling's folders (none, or another path's) says nothing of
+  any of them, every folder CaseUnknown, the refusing direction; a record
+  holding an identity or a folding is never compared by the probe. The
+  reader takes 2 MiB, past the record of any path an OS takes (both
+  spellings at Windows' 32,767 units, each escaped as JSON escapes at
+  most); a record whose folding alone would take it past that keeps the
+  letter u for each spelling, read as every folder unknown, and one longer
+  without it is not written, never one its reader refuses. The record is
+  in `ops/engineering-log.md`, 2026-11-08, B741 round 2.
+
+  Round 4 (CI's macOS and Windows legs on #1441). The comparison took two
+  spellings for one where both resolved whole to one string, or where the
+  recorded spelling was alike, by its letters, with the config's as written
+  or as it resolved, name by name from the root. The letters are one a
+  folder of the recorded spelling, and a link on the way to another depth
+  left nothing to lay them over: macOS's /var is a link to /private/var,
+  one folder deeper, and on Windows a short (8.3) name resolves to its long
+  one and every folder that is there to its case on disk, so a spelling
+  through a link to the mount point read as another data dir wherever the
+  temporary directory itself ran through an alias. The two spellings are
+  now walked from their ends up, a pair of folders as many names above each
+  end at a time, and the deepest pair that resolves to one directory
+  decides: the names below it compared as written, each by the letter the
+  record holds for the folder its own spelling looks it up in, counted from
+  its end, and the resolved folders exactly; a name unalike ends the walk,
+  since every pair above has it below. Where no pair resolves to one, the
+  comparison as written and with the config's as it resolves stands, which
+  takes a drive that is not there and a record that spells a folder in
+  another case than the one a link in the config's spelling leads to. A
+  folding as long as a resolution's folders is no folding of the recorded
+  spelling. A folder that is there spelled in another case is one folder
+  on Windows, whose resolution names it as it is on disk, whatever its
+  letter, and on Linux and macOS, whose resolution keeps the spelling it is
+  given, the letter of the folder above decides, as for a folder that is
+  not there. Nothing is probed. The resolution is a parameter, so tests
+  stand in for a drive that is not there and for Windows' resolution on
+  every host; the Windows cases themselves, a folder's short and long names
+  and the folder that is there, run on CI's Windows leg, and the link and
+  alias cases skip, naming the error, where no link can be made. The cases
+  were red first (here, and with TMPDIR through a link to a folder one
+  deeper, CI's failure in its words), and eight negative controls, each
+  predicted by name, turned their tests red. The record is in
+  `ops/engineering-log.md`, 2026-11-08, B741 round 4.

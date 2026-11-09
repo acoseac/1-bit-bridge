@@ -2964,6 +2964,15 @@ type serveOpts struct {
 	// or record what the call found. Per invocation for tailscaleCLI's
 	// reason.
 	playerStatePreflight func(dataDir string, lockHeld bool) error
+	// dataDirRecording stands in for serve's writes of its data dir's
+	// identity, the marker in the data dir and the record beside the config,
+	// and for the probe of how each folder on the data dir's way compares
+	// names, which the record keeps (recordServeDataDir). Nil fields, the
+	// ones of their own, in production; a boot test fails either write, as a
+	// start interrupted between them leaves them, and answers for a folder as
+	// a volume this host does not have would (backlog B741). Per invocation
+	// for tailscaleCLI's reason.
+	dataDirRecording dataDirRecording
 	// localOutputsGOOS stands in for runtime.GOOS in the localOutputs
 	// gate (api.LocalOutputsConfig.GOOS), which GET /v1/outputs and the
 	// loopback track route answer to and which is true on Linux only.
@@ -3508,10 +3517,13 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	// its lock file is refused, never made: that is a volume not mounted yet
 	// (a NAS that starts the bridge before its disks), which a fresh data dir
 	// on the system disk would hide under a new TLS pair and no paired device
-	// (backlog B651, serve_data_dir_record.go). Its service manager starts
-	// serve again until the volume is there. The record is the one beside the
-	// file the boot read was of, here and where serve writes it below, never
-	// beside the file the config's name opens by then (serveDataDirRecord).
+	// (backlog B651, serve_data_dir_record.go); and so is one that does not
+	// hold the identity the record holds, and a record or a marker that does
+	// not read (backlog B741, serve_data_dir_identity.go). Its service
+	// manager starts serve again until the volume is there. The record is
+	// the one beside the file the boot read was of, here and where serve
+	// writes it below, never beside the file the config's name opens by then
+	// (serveDataDirRecord).
 	// The refusal is said once per state, not at every start of the service
 	// manager's retries (serve_data_dir_refusal.go, backlog B727).
 	dataDirRecord := serveDataDirRecord(cfgBootFile)
@@ -3525,8 +3537,9 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		return 1
 	}
 	// Read before the preparation and the lock make the data dir and its lock
-	// file: a start calls back only a data dir that held them before it.
-	refusedIsBack := dataDirBack(cfg.DataDir)
+	// file: a start calls back only a data dir that held its identity, or for a
+	// record that held none its database or its lock file, before it.
+	heldBefore := dataDirEvidenceOf(cfg.DataDir)
 	if err := prepareServeDataDir(cfg.DataDir); err != nil {
 		fmt.Fprintf(stderr, "serve: %v; bridge serve starts only on a data directory it can make or use: "+
 			"move what stands in its way, or set dataDir in bridge.yaml to a directory\n", err)
@@ -3563,7 +3576,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	// and its lock taken, or serve goes on without it: said here, never at
 	// the record's check, which the preparation and the lock can still
 	// overrule (B727's round 2).
-	endServeRefusal(dataDirRecord, cfg.DataDir, refusedIsBack)
+	endServeRefusal(dataDirRecord, cfg.DataDir, heldBefore)
 	// Shared with the player, which lets go of its share once nothing it
 	// started may still write the data dir: an engine's state write that
 	// outlived its stop keeps the lock past this return (dataDirHold).
@@ -3843,8 +3856,9 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	}
 	// The database is there now, and the lock file beside it: the record
 	// beside the file the boot read was of names this data dir for the check
-	// at the next start (backlog B651).
-	recordServeDataDir(dataDirRecord, cfg.DataDir)
+	// at the next start (backlog B651), and holds its identity, which the
+	// marker in it holds first (backlog B741).
+	recordServeDataDir(dataDirRecord, cfg.DataDir, opts.dataDirRecording)
 	// bgWriters tracks the background goroutines that WRITE the manifest store
 	// (periodic scanner, enricher, fs watcher, atlas harvester, and the admin
 	// server whose bgScans drain is the SQLite guard). On shutdown they MUST

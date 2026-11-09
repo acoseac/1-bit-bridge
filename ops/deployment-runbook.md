@@ -1122,9 +1122,9 @@ bridge does about it:
   not refused, and the volume, once mounted, hides it (backlog B776, item 7):
   before the first upload into a root nothing has been indexed under, check
   that its volume is mounted.
-- **The data dir on that volume.** From the second start of that release,
-  serve keeps a record of the data dir it opened its database in, beside the
-  config: `.bridge.yaml.datadir`. A start that finds that data dir holding
+- **The data dir on that volume.** From that release, serve keeps a record
+  of the data dir it opened its database in, beside the config:
+  `.bridge.yaml.datadir`. A start that finds that data dir holding
   neither `bridge.db` nor `server.lock` refuses before it makes or writes
   anything there (no new TLS pair, no empty token store): `serve: the data
   directory … held this bridge's database, and holds neither bridge.db nor
@@ -1157,6 +1157,25 @@ bridge does about it:
   reset) still starts and makes a new database. A system unit can order the start after
   the mount instead (`RequiresMountsFor=<mount point>` in a drop-in); a user
   unit cannot, its manager not seeing the system's mount units.
+  **From the release that carries B741 the data dir has an identity**: a
+  random id serve writes into the data dir, `data-dir-id.json`, and into the
+  record, the marker first. A start refuses a data dir the record names
+  that holds `server.lock` or `bridge.db` and not that identity (`the data
+  directory … holds server.lock but not the identity of the data directory
+  this bridge served from (data-dir-id.json): …`: a start or a command made
+  those in the bare mount point once, which B651 took for the data dir), one
+  holding another data dir's identity (another volume mounted there), and a
+  record or a marker that does not read (a record that is a link to nothing
+  among them); each says how to go on, and the doctor and every command
+  refuse the same. Leave `data-dir-id.json` where it is, and move it with the
+  data dir. The marker is readable by everyone who can reach the data dir,
+  and the record by its owner alone: run a command as the user the service
+  runs as, since one run as another user that cannot read either refuses,
+  saying so, and `bridge doctor` says the data dir is not checked and opens
+  no database there. A data dir refused for holding no identity that is the
+  one to serve from, its volume mounted: remove `.bridge.yaml.datadir` and
+  start again, and serve takes it as its own. What stays open is backlog
+  B813.
 - **The variants directory on that volume.** Since B727 a render (the
   console's, a download's, the auto-optimize sweep's, `bridge upscale`,
   `optimize` and `render`) writes nothing into a variants directory that is

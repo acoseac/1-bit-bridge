@@ -30,6 +30,12 @@ import (
 // dir the record beside the config at cfg names.
 func refusalNoteFile(cfg string) string { return dataDirRecordFile(cfg) + ".refused" }
 
+// refusedBackLine is what serve says once the data dir it refused is back,
+// in either of its lines: that it holds its identity again, or, for a
+// refusal whose record held none (one written before B741), its database or
+// its lock file.
+const refusedBackLine = "the data directory serve refused while its volume was away holds its"
+
 // saidAtOf reads the note beside cfg's record: the data dir it names and
 // when the refusal was said.
 func saidAtOf(t *testing.T, cfg string) (dataDir string, at time.Time) {
@@ -123,7 +129,7 @@ func TestServeSaysItsRefusalOncePerState(t *testing.T) {
 	if _, err := os.Stat(refusalNoteFile(cfg)); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("the note outlived the start that found the data dir: %v", err)
 	}
-	if lines := rec.Carrying("holds its database or its lock file again"); len(lines) != 1 {
+	if lines := rec.Carrying(refusedBackLine); len(lines) != 1 {
 		t.Errorf("the start that found the data dir again said so %d time(s), want once:\n%s", len(lines), strings.Join(lines, "\n"))
 	}
 
@@ -148,7 +154,7 @@ func TestServeSaysItsRefusalOncePerState(t *testing.T) {
 // said the data dir was back, before its preparation and its lock, and
 // removed the note.
 func TestTheEndOfARefusalIsSaidAsItIs(t *testing.T) {
-	const back, over = "holds its database or its lock file again", "no longer applies"
+	const back, over = refusedBackLine, "no longer applies"
 	type setup struct{ base, lib, dataDir, volume, cfg string }
 	for _, tc := range []struct {
 		name   string
@@ -232,29 +238,47 @@ func TestTheEndOfARefusalIsSaidAsItIs(t *testing.T) {
 
 // TestTheEndOfARefusalCallsBackOnlyTheDataDirItRefused: the line that a
 // refused data dir is back is said only where the note names the data dir
-// this start's config names and that data dir held its database or its lock
-// file before this start's preparation; a data dir that held neither (the
-// record removed with the volume still away), and a note naming another data
-// dir (one a start that could not remove it left), end in the line that the
-// refusal no longer applies.
+// this start's config names and that data dir held, before this start's
+// preparation, the identity the refusal's record held (backlog B741), or,
+// where that record held none, its database or its lock file; a data dir that
+// held neither (the record removed with the volume still away), one holding
+// a lock file but not the identity, or another, and a note naming another
+// data dir (one a start that could not remove it left), end in the line that
+// the refusal no longer applies.
 func TestTheEndOfARefusalCallsBackOnlyTheDataDirItRefused(t *testing.T) {
-	const back, over = "holds its database or its lock file again", "no longer applies"
+	const (
+		backLegacy   = "holds its database or its lock file again"
+		backIdentity = "holds its identity again"
+		over         = "no longer applies"
+		id, other    = "0123456789abcdef0123456789abcdef", "fedcba9876543210fedcba9876543210"
+	)
 	for _, tc := range []struct {
 		name              string
 		refused, startsOn string
-		held              bool
+		identity          string
+		held              dataDirEvidence
 		says              string
 	}{
-		{"the data dir the note names, back", "/mnt/usb/bridge", "/mnt/usb/bridge", true, back},
-		{"the data dir the note names, holding neither file", "/mnt/usb/bridge", "/mnt/usb/bridge", false, over},
-		{"another data dir than the note names, holding its files", "/mnt/nas/bridge", "/mnt/usb/bridge", true, over},
+		{"the data dir the note names, back", "/mnt/usb/bridge", "/mnt/usb/bridge", "", dataDirEvidence{held: true}, backLegacy},
+		{"the data dir the note names, holding neither file", "/mnt/usb/bridge", "/mnt/usb/bridge", "", dataDirEvidence{}, over},
+		{"another data dir than the note names, holding its files", "/mnt/nas/bridge", "/mnt/usb/bridge", "", dataDirEvidence{held: true}, over},
+		{"the data dir the note names, holding its identity", "/mnt/usb/bridge", "/mnt/usb/bridge", id,
+			dataDirEvidence{held: true, identity: id}, backIdentity},
+		{"the data dir the note names, holding its identity alone", "/mnt/usb/bridge", "/mnt/usb/bridge", id,
+			dataDirEvidence{identity: id}, backIdentity},
+		{"the data dir the note names, holding a lock file and no identity", "/mnt/usb/bridge", "/mnt/usb/bridge", id,
+			dataDirEvidence{held: true}, over},
+		{"the data dir the note names, holding another identity", "/mnt/usb/bridge", "/mnt/usb/bridge", id,
+			dataDirEvidence{held: true, identity: other}, over},
+		{"another data dir than the note names, holding its identity", "/mnt/nas/bridge", "/mnt/usb/bridge", id,
+			dataDirEvidence{held: true, identity: id}, over},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			record := filepath.Join(t.TempDir(), ".bridge.yaml.datadir")
-			sayServeRefusal(&dataDirGoneError{dataDir: tc.refused, record: record}, io.Discard, time.Now())
+			sayServeRefusal(&dataDirGoneError{dataDir: tc.refused, record: record, identity: tc.identity}, io.Discard, time.Now())
 			rec := loggingtest.Record(t)
 			endServeRefusal(record, tc.startsOn, tc.held)
-			for _, line := range []string{back, over} {
+			for _, line := range []string{backLegacy, backIdentity, over} {
 				want := 0
 				if line == tc.says {
 					want = 1
@@ -329,11 +353,11 @@ func TestAStartThatCannotRemoveTheNoteSaysSo(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
 	rec := loggingtest.Record(t)
-	endServeRefusal(record, "/mnt/usb/bridge", true)
+	endServeRefusal(record, "/mnt/usb/bridge", dataDirEvidence{held: true})
 	if lines := rec.Carrying("could not remove the note that serve refused its data directory"); len(lines) != 1 || !strings.HasPrefix(lines[0], "WARN") {
 		t.Errorf("a start that could not remove the note said so %d time(s), want once at Warn:\n%s", len(lines), strings.Join(rec.All(), "\n"))
 	}
-	if lines := rec.Carrying("holds its database or its lock file again"); len(lines) != 0 {
+	if lines := rec.Carrying(refusedBackLine); len(lines) != 0 {
 		t.Errorf("a start that could not remove the note said the refusal was over:\n%s", strings.Join(lines, "\n"))
 	}
 	if _, err := os.Stat(record + dataDirRefusalSuffix); err != nil {

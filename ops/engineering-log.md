@@ -87977,3 +87977,418 @@ planted in its History file.
 Not run here: the whole suite and `make build-all` (round 1 ran them at
 fdd74a31; this round changed comments and string literals alone, as the AST
 check shows), macOS and Windows natively, and CI's runners.
+## 2026-11-08 — B741: the data dir's record gains an identity
+
+Worker b741, legion0, branch `fix/b741-data-dir-identity` from main's 7c1db6dd. Commits: 7bb7d84b (the
+tests, red), 4ec5f783 (the identity), f85a388b (gap 3), cdfe5415 (the runbook), 3c4f0226 (the doctors'
+writes, red), 995a25e0 (the doctors' fix), then this record. The rule changes through `rules-b741.patch`:
+`cli-serve.md`'s B741 line, its B727 and B659 lines corrected, `scanner.md`'s B651 line corrected and a
+gap-3 line with a path glob for `serve_data_dir_identity*.go`, and each one's long form.
+
+### The gaps
+
+B651's record (`.bridge.yaml.datadir`) refused a start whose recorded data dir held neither `bridge.db`
+nor `server.lock`. (1) Backlog B813, which this change leaves open. (2) `server.lock` was evidence, and it
+is made before the database opens: a start on the bare mount point before any record that failed between
+the two left one, and a database a command made there before B727 read the same way. (3)
+`fsutil.SamePath` probes how the folder holding a path compares names now; with the volume away the
+nearest folder is the bare mount point, whose own name the probe looks up in the folder above, so a
+record and a config that differ in case alone read as two data dirs and the refusal was skipped.
+
+### As built
+
+- **The identity.** 16 random bytes in lower-case hex, in a marker in the data dir (`data-dir-id.json`,
+  `{"id":…}`) and in the record. Serve writes it once its database is open and its lock file is there:
+  the marker first, staged beside its place, fsynced, renamed (Windows' retries, no barrier of the
+  rename's own), then the data dir fsynced, that barrier's failure the write's (a directory fsync the
+  filesystem cannot make, EINVAL, ENOTSUP or EOPNOTSUPP, taken as made, as the updater's marker takes it);
+  the record gains the identity after. The identity is the marker's, else the record's own where it names
+  this data dir, else minted. A marker serve cannot write leaves the record without an identity, said at
+  Warn; a record it cannot write leaves the marker for the next start. Only serve writes the marker.
+- **The check**, keyed on the record naming the data dir: a marker of the record's identity is the data
+  dir served from whatever else it holds; another identity, a marker that does not read, and a record that
+  does not read are refused, each with a cause of its own; with no marker, neither file is B651's refusal,
+  and either file under a record holding an identity is refused (`noIdentity`, gap 2), under a record from
+  before B741 taken up. An error other than an entry's absence on the way is still no refusal.
+- **One type, `dataDirGoneError`, with a `cause`**: serve, both doctors (`dataDirCheck`) and every command
+  `refuseDataDirAway` guards refuse each cause alike, nothing written; only B651's first sentence says the
+  data dir holds neither file; each keeps today's recovery advice, a marker that does not read moved aside
+  and a record or marker this user may not read made readable first. bridge doctor says a permission error
+  is not checked, a warn (B659's rule).
+- **The note and the end of a refusal**: the note holds the cause and the identity beside the data dir,
+  so a changed cause is said again; the end calls a data dir back only where it holds, before the
+  preparation, the identity the refusal was of (`dataDirEvidence`), in a line of its own; a refusal whose
+  record held none keeps B727's rule and line.
+- **Gap 3**: the record holds, for every folder on the way of both spellings, `fsutil.FoldingIn`'s answer
+  at the write (`fsutil.FoldingOnTheWay`), and the check compares by it, probing nothing
+  (`fsutil.SameAsRecorded`, `SamePathAsRecorded`): a case-only difference is one data dir where its
+  folder was not read as case-sensitive (read as folding, as unknown, or not recorded: the direction that
+  refuses). A record without it falls back to the probe until a start with the volume there writes it
+  again; one its reader would refuse for its size (64 KiB) is written without it.
+- **The doctors' store probes** (the codec probe behind the ALAC and DSD lines, sidecar-paths,
+  variants-index, name-collisions) open nothing in a data dir the record refuses, any cause
+  (`errStoreOfARefusedDataDir`). Found while the gates queued: a probe of the gap-2 state through both
+  doctors on a copy of the tree showed a stray 0-byte `bridge.db` in the bare mount point migrated to a
+  whole schema by the doctors, whose data-dir line said bridge serve will not start there. B727 had
+  reasoned that a refused data dir holds no database, which B741's refusals make false; its long form says
+  so now.
+
+### What stays open
+
+Backlog B813.
+
+### Red first
+
+At 7bb7d84b, the tests through serve's real start, both doctors and bridge scan, written as files so that
+they compile against main's code, predicted in `.tmp/_b741/predictions-red.txt`: 15 tests failed as
+predicted (the marker missing; serve served over a lock file, a database or both in the bare mount point,
+over another install's data dir, over a torn record, over a marker that does not read and over a record
+it cannot read; the record holding no identity after the upgrade's starts and an interrupted write; the
+case-folded record taken for another data dir; the stray lock served rather than said; the end of a refusal
+calling a lock file back), B651's two refusals of a legacy record and the case-sensitive sibling passed as
+controls, and the opt-in real-volume case skipped. The doctors' writes: at 3c4f0226 the gap-2 rows with a
+database failed ("the doctors changed what is under …"), the rest green.
+
+### Negative controls
+
+At f85a388b (C16 at 995a25e0), each an exact-once mutation predicted by name in
+`.tmp/_b741/predictions-controls.txt` before it ran, the test binary built and the data-dir set run (625
+tests of cmd/bridge; fsutil's casefold tests for C10 and C11), the source restored from memory and found
+equal to HEAD after each, `git status` empty after the set.
+
+| | mutation | red |
+|---|---|---|
+| C1 | the check takes a lock file or a database without a marker under a record holding an identity | the three gap-2 rows, the cause change, three matrix rows |
+| C2 | the check takes another identity | the other-identity test, its matrix row |
+| C3 | a record that does not read is no record again | the torn-record test, the unreadable-record row, nine matrix rows, the B651 check test |
+| C4 | a marker that does not read is no marker | the torn-marker test (refused in the no-identity words), the unreadable-marker row, two matrix rows |
+| C5 | the record keeps the identity when the marker could not be written | the marker-write-failure test |
+| C6 | serve mints anew where the marker holds an identity | six identity-keeping tests |
+| C7 | the marker written after the record | the order test, and the marker-write-failure test (not predicted: a failed marker write then leaves an identity-bearing record, the same defect) |
+| C8 | the end of a refusal calls a lock file back whatever the identity | the end-of-refusal test, three of four predicted unit rows (the fourth, a data dir holding its identity and its files, says back either way) |
+| C9 | the note keyed on the data dir alone | the cause-change test, the note's unit test |
+| C10 | a case-only difference never one data dir by the record | four fsutil rows, two fsutil tests, the folded-case serve row, the folding-write test |
+| C11 | the case-sensitive sibling: always one data dir | two fsutil rows, two fsutil tests, the case-kept serve row |
+| C12 | serve records no folding | the folding-write test |
+| C13 | the size guard removed | the size-guard test |
+| C14 | the doctor fails what this user cannot read | both rows of the unreadable test |
+| C15 | a record from before B741 over its lock file or database refused | three upgrade rows, three matrix rows, the B651 check test, and (not predicted) the marker-write-failure test's restart and the B651 doctor test's last step, both a record holding no identity over a database |
+| C16 | the doctors' store probes ungated | the two gap-2 rows with a database |
+
+The C3 run first used a pattern that did not match `TestServeRefusesWhatItCannotRead`, which I had
+predicted red; with the pattern widened it went red as predicted, and it is in every run after.
+
+### Not run here
+
+The real case-insensitive volume (`BRIDGE_TEST_CASE_INSENSITIVE_DIR`) skipped: legion0 cannot mount a vfat,
+exFAT or casefold filesystem without root, and the sandbox refuses `chattr +F` and `unshare`. The stand-in
+probe (`dataDirRecording.folding`) and the unit tests carry the case. Windows and macOS are vetted
+(`GOOS=… make vet`) and left to CI's legs.
+
+### Gates
+
+At 995a25e0, inside the build slot, on Go 1.27.3, in three sessions. The first: `go test -race
+-count=1 -timeout 30m` with CI's tags over `./cmd/bridge/... ./internal/fsutil/...` passed (cmd/bridge
+1,260 s, fsutil 2.9 s; the Linux-only tests, ALSA, alsapcm's, the durable writer's and the identity paths',
+run here); `make vet` passed, and with `GOOS=windows`, `GOOS=darwin` and `GOOS=linux GOARCH=386`; `make fmt`
+changed nothing. The second: `make build-all` and `make docs-check` passed; `make test` failed in one
+subtest outside this change,
+`TestAMatchWhoseReQueueDidNotLandIsReQueuedByTheNextSweep/cancelled_inside_the_reset_by_a_switch-off`
+("the first sweep's re-queue landed: the case tests nothing"), the fingerprint sweep's timing precondition
+B765's record names (1 of 40 at B762's base), 88 packages ok; alone under `-race` with CI's tags it passed
+40 of 40 at 995a25e0, and nothing this change touches reaches it. The third: `make test` again, 89
+packages ok (2,044 s; cmd/bridge 1,347 s), its TMPDIR under `.tmp/_b741`. `scripts/qualification-version`
+passed against main's 7c1db6dd (no guarded file changed). `make docs-check` passed on a `git archive` copy
+with `rules-b741.patch` applied (`git apply --check` clean; cli-serve.md 53.8 KB, scanner.md 41.1 KB; the
+worst load unchanged); `verify_moves.py --base HEAD` found no citation broken and lists the three entries
+the patch edits (B651's, B727's, B659's) as changed blocks, which it reports as missing since it checks
+moves, not edits. Every test name the patch cites exists (72 of 72).
+
+## 2026-11-08 — B741 round 2: the reviews' findings
+
+Worker b741, legion0, the same branch from 1d38f8ba (round 1, its rules, main merged). Commits: 9527b2a0
+(the findings, red), 199373f5 (the doctor's checklist), 32b83056 (a record that is a link to nothing),
+292290c4 (the folding however deep), 98cab473 (the marker's write, and the record kept), 3fb52355 (the sync
+in place as two steps), then this record. The rule changes through `rules-b741-r2.patch`: `cli-serve.md`'s
+B741 line and `scanner.md`'s gap-3 line, and each one's long form.
+
+### Each finding
+
+Codex's review of round 1 and the Claude API's, every finding real but the last:
+
+- **The doctor's player checklist opened a store in a refused data dir** (Codex P1). Its path rules ask for
+  the indexed tracks whether MPD answers or not, and `doctorOutputChecklist`'s `Tracks` opened the data
+  dir's database regardless of the record, so with `output.mpd: on` bridge doctor migrated a stray 0-byte
+  `bridge.db` in the bare mount point while its data-dir line said serve would not start there; round 1's
+  fixtures set MPD off. The callback asks `doctorStoreGate` first, as the four store probes do, each call.
+- **A record that is a link to nothing read as no record** (Codex P2): the open answers it as `ENOENT`, so
+  serve made the data dir in the bare mount point and renamed a fresh record over the link. Absence is the
+  entry's now (`os.Lstat`), and a link to nothing is `errLinkToNothing`, never `fs.ErrNotExist`: refused,
+  in every surface, as a record that cannot be read.
+- **The size fallback reopened gap 3** (Codex P2). Round 1 kept each folder's whole path, so the record grew
+  as the square of the depth (a direct path 200 folders deep: 45,510 bytes, 2,000 deep: 4,054,110; Codex
+  measured 66,186 for 495 bytes in 240), and past its reader's 64 KiB it was written without its folding,
+  which the check then compared by the probe. The folding is one letter a folder now, per spelling
+  (`dataDirFolding`, `resolvedFolding`; `fsutil.FormatFolding`, `FoldingOnTheWay`'s slice from the root
+  down): 1,320 and 12,120 bytes for the same two paths. The reader takes 2 MiB, past the record of any
+  path an OS takes; a record holding an identity or a folding is never compared by the probe; a folding
+  not of its spelling's folders says nothing of any, every folder `CaseUnknown`, the refusing direction;
+  a record whose folding alone would take it past the bound keeps the letter `u`, read that way, and one
+  longer without it is not written. `TestARecordItsReaderWouldRefuseKeepsNoFolding` keeps its name (the
+  rules cite it) and pins that.
+- **The marker's durability was unpinned** (Codex's test gap), confirmed at 9527b2a0: with both of the
+  marker's fsyncs dropped in a `git archive` copy, `TestTheMarkerHoldsTheIdentityBeforeTheRecordDoes`
+  passed. Its steps are the serve instance's seams now (`markerDurability`: the staged sync, the rename, the
+  marker's own sync in place, its directory's), and the test records each in order before the record's
+  write. A barrier that fails after the rename leaves the marker in place and the record without its
+  identity, and the next start takes the marker up only once its own sync in place has answered
+  (`TestAMarkerWhoseBarrierFailedIsTakenUpOnceDurable`).
+- **A marker that did not read at the record's write** (the Claude API, Low 1): serve wrote the record
+  naming the data dir with no identity, so the next start refused that data dir for its marker, or, the
+  record having held one, read it as a record written before B741 (backlog B813). A marker that does
+  not read or cannot be inspected leaves the record as it was, and no write drops or replaces the identity
+  the record holds of its data dir (a marker gone since the check that cannot be written again, one of
+  another identity: `TestNoWriteOfTheRecordDropsOrReplacesItsIdentity`).
+- **The Windows marker's rename was left to NTFS's own flush** (Low 2): `fsutil.SyncParentDir` does nothing
+  there. The marker is synced in place through a handle of its own (`syncMarkerFile`, opened for writing:
+  `Sync` is `FlushFileBuffers` on Windows, which commits the file's metadata, its rename among it, to the
+  journal). Vetted with `GOOS=windows`; CI's Windows leg runs the step test over the real steps.
+- **The marker was the owner's alone** (Low 3): every run by a member of the service's group read a
+  healthy data dir as one whose identity does not read. The marker is 0644 (`dataDirMarkerMode`); the
+  store probes say a record or a marker this user cannot read is not checked (`errStoreNotChecked`), never
+  refused; and a command or bridge doctor is told to run as the user the service runs as, and to make it
+  readable by that user if it is not, where serve alone is told to make it readable by that user. The
+  record stays 0600, as B651 wrote it: a command run by another user that cannot read it is refused, saying
+  so, which the runbook says.
+- **Restore and the read-only commands** (the Claude API's "not verifiable"): no defect. A restore writes a
+  snapshot's files in place and no snapshot carries the marker (`TestARestoreKeepsTheDataDirsIdentity`,
+  green at 9527b2a0 and after); `token list`, `status`, `cert info` and `logs` open no store, and every
+  other store open in cmd/bridge is behind `refuseDataDirAway`: the doctor's checklist was the one read
+  that opened one, Codex's P1.
+
+### Red first
+
+At 9527b2a0, against round 1's code, predicted in `.tmp/_b741/predictions-red-r2.txt`: the checklist's
+refused row failed (the bare mount point's tree changed) and its other row passed, the case reaching the
+store; the link to nothing served and was replaced; the deep data dir in another case served; the marker
+that does not read had its data dir's record rewritten, both ways; the marker was 0600; the unreadable
+rows' probe said serve refuses and scan said to make it readable; the restore passed, as predicted.
+
+### Negative controls
+
+At 3fb52355, each predicted by name in `.tmp/_b741/predictions-controls-r2.txt` before it ran: an
+exact-once mutation, the test binary built, the data-dir set run (645 tests of cmd/bridge; fsutil's 23 for
+R7), the source restored from memory and found equal to HEAD. Every control went red as predicted, nothing
+else failed, and the set with no mutation passed.
+
+| | mutation | red |
+|---|---|---|
+| R1 | the checklist's `Tracks` asks no gate | the checklist's refused row |
+| R2 | the gate never answers not checked | both rows of the unreadable test |
+| R3 | every command told to make it readable | the two permission rows of the words test, both unreadable rows |
+| R4 | an open's not-exist is no record | the link-to-nothing test, the record-read test |
+| R5 | a link to nothing keeps the open's `ENOENT` | the record-read test alone |
+| R6 | every record compared by the probe | the deep test, the folded-case row, the folding-write test, the size test |
+| R7 | a longer folding read as the path's | fsutil's longer-folding row |
+| R8 | the over-long record keeps no letter | the size test |
+| R9 | a marker that does not read goes on to the write | both marker-read tests |
+| R10 | a marker that cannot be written again drops the identity | its row of the identity-keeping test |
+| R11 | a marker of another identity replaces the record's | its row of the identity-keeping test |
+| R12 | the adoption takes no barrier | the barrier test |
+| R13 | the staged sync dropped | the step test, the barrier test |
+| R14 | the sync in place dropped | the step test, the barrier test |
+| R15 | the directory's sync dropped | the step test, the barrier test |
+| R16 | the marker's mode left at 0600 | the mode test |
+
+### Not run here
+
+As in round 1: no case-insensitive volume (the stand-in probe carries it); Windows' `FlushFileBuffers` and
+macOS run on CI's legs, vetted here.
+
+### Gates
+
+At a0a52240 (the code is 3fb52355's), inside the build slot, on Go 1.27.3, in two sessions. The first: `go
+test -race -count=1 -timeout 30m` with CI's tags over `./cmd/bridge/... ./internal/fsutil/...` passed
+(1,290 s; the Linux-only tests run here); `make vet` passed, and with `GOOS=windows`, `GOOS=darwin` and
+`GOOS=linux GOARCH=386`; `make fmt` changed nothing. The second: `make test` passed, 89 packages ok, none
+failed (2,092 s; cmd/bridge 1,368 s), its TMPDIR under `.tmp/_b741`; `make build-all` and `make docs-check`
+passed. `scripts/qualification-version` passed against main's 3d0a0d05, the merge's main parent. The rules
+patch: `git apply --check` clean, and on a `git archive` copy with it applied, its landing asserted in each
+of its four files (the first check ran `git apply` with its cwd in the copy, inside the worktree's `.tmp`,
+where git skips every path outside the cwd and exits 0, and `verify_moves` saw the tree unchanged; a
+ceiling, `GIT_CEILING_DIRECTORIES`, keeps it off the checkout), `check-doc-budgets.py` passed (cli-serve.md
+55.8 KB, scanner.md 42.2 KB, the worst load unchanged), the self-tests of `rules-for.py` and `move_entry.py`
+passed, and `verify_moves.py --base HEAD` found no citation broken, its MISSING exactly the seven blocks the
+patch edits, each one's successor there. Every test name the patch cites exists (55 of 55).
+
+## 2026-11-08 — B741 round 3: what stays open named only as B813, the marker's sync, a racing read
+
+Worker b741, legion0, the same branch from a62b01c2 (round 2 and its rules). Commits: 8a54aa93 (B813),
+f091ae87 (a marker this user may not write, red), 296684ef (its fix), 61e3e4a1 (a record read that races a
+write, red), d3179788 (its fix), then this record. The rule changes through `rules-b741-r3.patch`:
+`cli-serve.md`'s B741 line and `scanner.md`'s B651 line, and their long forms.
+
+### Each point
+
+- **What this change leaves open is named only as B813.** The project names a weakness still open by its
+  backlog id alone, and round 1 had written this one out, as its brief asked. The identity file's header,
+  two test docs, the runbook, round 1's and round 2's records here, and through the patch the rules and
+  their long forms now say B813 and no more; the text about the two gaps this change closes stays. The
+  refusal of a data dir holding no identity explained the window in an aside, on every surface it reaches
+  (serve's refusal, every command's, the doctor's hint): it says what to do, and no more, and
+  `TestEachRefusalSaysWhatItIsAndHowToGoOn` pins that advice and that no cause's advice holds an aside. What
+  was removed, the changed string, and the commits on the branch whose messages describe it are listed for
+  the orchestrator outside the repository.
+- **The marker's sync in place opened it for writing on every OS** (the Claude API on round 2), where only
+  Windows needs it, its `FlushFileBuffers`: a marker serve may read and not write (another user's, as where
+  root owns the data dir and a member of its group serves it, or an immutable one) was never synced, so its
+  identity was never taken up. Off Windows the open is `fsutil.OpenAsFile`'s, for reading, which syncs and
+  refuses a named pipe at once, where a plain open for reading would wait for a writer and hold serve's start
+  (`openMarkerForSync`); on Windows it stays for writing, so a read-only marker there, its attribute or an ACL,
+  is still never taken up (`TestAReadOnlyMarkerIsNeverTakenUpOnWindows`, which CI's Windows leg runs; vetted
+  here with `GOOS=windows`).
+- **A read of the record that raced a write** (the Claude API on round 2, and the reviews of round 3's
+  brief): a read that missed, whose lookup then found an entry, answered at once, a regular file with the
+  miss's ENOENT and a link with `errLinkToNothing`, though the record may have just been written there
+  (serve's first, beside bridge doctor or a command) or a link's target just mounted. The entry is read again
+  once (`readAgain`), and where that read misses too, looked up once more: no record only where no entry is
+  left, `errLinkToNothing` only where a link still is, and otherwise that read's own error. The cases take
+  their steps through `recordReadSteps`, a parameter of `readDataDirRecordWith`, never a package variable that
+  parallel `-race` runs race on.
+- **The checklist test's refused row** (the Claude API's note): `treeOf` reads every file's bytes, so the row
+  already sees a stray database migrated (round 2's control R1 turned it red); nothing changed.
+
+### Red first
+
+At f091ae87, `TestAMarkerThisUserMayNotWriteIsTakenUp` failed in both rows (no record, and a record written
+before B741: a 0444 marker, not root), the adoption's sync answering "open: permission denied" and the record
+written without the identity; `TestTheMarkersSyncWaitsForNoNamedPipe` passed there too, as a guard (an O_RDWR
+open of a named pipe returns at once on Linux; a plain open for reading would wait). At 61e3e4a1, through the
+seam alone, three of `TestARecordReadThatRacesAWriteReadsAgain`'s four rows failed as predicted: a record
+written after the read missed it answered ENOENT, a link whose target appeared then answered a link to
+nothing, and a record removed between the lookup and the read again answered ENOENT where no record was there;
+the link that stays one to nothing passed as the control. The first point is wording, with no red of its own:
+its evidence is the search, and its pin is new.
+
+### Negative controls
+
+At d3179788, each predicted by name in `.tmp/_b741/predictions-controls-r3.txt` before it ran: an exact-once
+mutation, the test binary built, the data-dir set run (654 tests of cmd/bridge), the source restored from
+memory and found equal to HEAD. Each went red as predicted and nothing else failed; the set with no mutation
+passed.
+
+| | mutation | red |
+|---|---|---|
+| T1 | the no-identity advice explains itself in an aside again | its row of the words test |
+| T2 | off Windows the sync opens the marker for writing again | both rows of the read-only marker test |
+| T3 | off Windows the sync opens the marker with a plain open | the named-pipe test, after its 10 s bound |
+| T4 | `readAgain` does not read again | the written-record and appeared-target rows |
+| T5 | `readAgain` does not look the entry up once more | the dangling-link and removed-record rows, the record-read test's link check |
+
+### Gates
+
+At 0d4d629d (the code is d3179788's), inside the build slot: `GOTOOLCHAIN=go1.27.3 make test
+TEST_PKGS='./cmd/bridge/... ./internal/doctor/...'` with TMPDIR on disk (`.tmp/_b741/gotmp-r3`) passed,
+cmd/bridge 1,266 s and internal/doctor 6.7 s; then the new and changed tests by name under `-race` passed, 14
+of 14 (the three new ones, the words test, the record-read and marker tests round 2 added, the upgrade's and
+the cited-names guard). `go vet ./cmd/bridge/` passed with `GOOS=windows`, `GOOS=darwin` and `GOOS=linux
+GOARCH=386`, the Windows-only test among what Windows vets. The rules patch: `git apply --check` clean;
+applied to a disposable `git archive` copy of HEAD (its landing asserted in each of its four files), where
+`make docs-check` passed (cli-serve.md 56.2 KB, scanner.md 42.2 KB, the worst load unchanged) and
+`verify_moves.py --base HEAD` found no citation broken, its MISSING exactly the eight blocks the patch
+edits, the open-gap paragraph among them, removed with no successor; every test name the patch cites exists
+(58 of 58). Not run here: the Windows test, which CI's Windows leg runs, and macOS.
+
+## 2026-11-08 — B741 round 4: a recorded path compared through an alias of its ancestors
+
+Worker b741, legion0, the same branch from 9a91a51b (round 3 and the orchestrator's commit on it). Commits:
+13e4bb90 (the cases, red), acd2ff60 (the comparison), 62294b1c (its fallback as before), then this record.
+The rule changes through `rules-b741-r4.patch`: `scanner.md`'s gap-3 line and its long form.
+
+### The defect
+
+CI was red on macOS and Windows in `TestSamePathAsRecordedProbesNoVolume`: a spelling through a link to the
+mount point read as another path ("a link to the mount point resolves now"). `SamePathAsRecorded` took two
+spellings for one where both resolved whole (`EvalSymlinksOrClean`) to one string, or where recorded as
+written was alike, by the record's letters, with now as written or as it resolved, name by name from the
+root (`SameAsRecorded`). The letters are one a folder of recorded's own spelling, and the test's temporary
+directory runs through an alias of its own on both hosts: macOS's /var is a link to /private/var, one
+folder deeper, so the resolution held one name more and nothing lined up; on Windows a short (8.3) name
+resolves to its long one, and every folder that is there to its case on disk. Reproduced here with TMPDIR
+through a link to a folder one deeper: the case failed in CI's words.
+
+### The comparison as built
+
+`SamePathAsRecorded` walks the two spellings from their ends up (`sameAbsAsRecorded`): at each pair of
+folders as many names above each end it resolves both (`ResolveLinks`), and the deepest pair that resolves
+to one directory decides, the names below it compared as written, each by the letter recorded for the
+folder recorded's own spelling looks it up in, counted from the end (`alikeByRecord`, which
+`SameAsRecorded` now shares); the resolved folders are compared exactly, and a name unalike ends the walk,
+since every pair above has it below. Where no pair resolves to one with the names below alike, recorded as
+written is compared with now as written and as it resolves, name by name from the root, as before: a drive
+that is not there, and a record that spells a folder in another case than the folder a link in now leads
+to, where every name alike with the one in its place keeps each letter on its folder (the walk alone,
+acd2ff60, parted those; control C8 below). A folding is checked against recorded's own spelling
+(`foldingOf`): one as long as a resolution's folders is no folding of it, every folder `CaseUnknown`.
+Nothing is probed. The resolution is a parameter (`sameAbsAsRecorded`, and `resolvedOrClean`, which
+`EvalSymlinksOrClean` now calls), so tests stand in for a drive that is not there and for Windows'
+resolution on every host.
+
+A case-only difference in a folder that is there: on Windows one folder whatever its letter, since the
+resolution names it by its name on disk; on Linux and macOS, whose resolution keeps the spelling it is
+given, the letter of the folder above decides, as for a folder that is not there
+(`TestACaseOnlyDifferenceInAFolderThatIsThere` states both; `TestFoldersThatDifferInCaseAloneResolveApart`
+holds two such folders where the volume keeps case, their resolutions compared exactly and the record
+deciding above them).
+
+### Red first
+
+At 13e4bb90, with TMPDIR on disk, five failed as predicted (`.tmp/_b741/predictions-red-r4.txt`): the four
+rows of `TestARecordedPathComparesThroughAnAliasOfItsAncestors` recorded through an alias with the leaf's
+folder folding case (a target deeper, one shallower, a case-only difference between the alias and the
+leaf, letters mixed), and its folding as long as the resolution's folders; every keeping-case row, the
+guards recorded by the real path, and the existing cases passed. With TMPDIR through a link to a folder one
+deeper (macOS's /var stood in for), `TestSamePathAsRecordedProbesNoVolume/through_a_link_to_the_mount_point`
+failed too, in CI's words. The keeping-case rows are what shows a letter stayed on its folder: a fix that
+gives the letters up where the depths differ turns every folding-case row green and every keeping-case row
+red (control C2). The link and alias cases skip, naming the error, where no link can be made.
+
+### Negative controls
+
+Each predicted by name in `.tmp/_b741/predictions-controls-r4.txt` before it ran: an exact-once mutation of
+internal/fsutil, its whole test binary run, the source restored from memory and found equal to HEAD. C1 to
+C7 ran at acd2ff60 and all eight again at 62294b1c, each red as predicted and nothing else; the run with no
+mutation passed (239 tests, the three skips older ones: two need root, one a volume that folds case).
+
+| | mutation | red |
+|---|---|---|
+| C1 | every case-only difference taken (the letters ignored) | every keeping-case row of the round's cases, and the older keeping-case assertions (SameAsRecorded's, FoldingOnTheWay's, the volume-away case's) |
+| C2 | the folding checked against now's spelling | the resolution-long folding, and the keeping-case alias rows whose spellings differ in depth |
+| C3 | the resolutions compared but for case | the two folders that differ in case alone, recorded as keeping case |
+| C4 | the first pair that resolves decides | the two folders that differ in case alone, recorded as folding case |
+| C5 | the names below the pair left unchecked | every keeping-case row with a folder both resolve to above its difference |
+| C6 | no comparison where no pair resolves to one | the drive that is not there, folding case; the record in another case than the alias's target |
+| C7 | the recorded side never resolved | the four folding-case rows recorded through an alias, the resolution-long folding, the short name stood in for; with TMPDIR through a link, the link case too |
+| C8 | no comparison with now as it resolves | the record in another case than the alias's target, folding case |
+
+### What Windows will exercise
+
+`TestARecordedPathComparesThroughAShortName` (a folder's short name from `GetShortPathName`, skipping
+with the reason where its volume makes no short names), `TestACaseOnlyDifferenceInAFolderThatIsThere`'s
+Windows answer, and the alias and link cases through symbolic links (skipping with the error where the
+runner may make none; round 3's link case ran there). `TestARecordedPathComparesAsWindowsResolvesIt` stands
+Windows' resolution in on every host. Vetted with `GOOS=windows` and `GOOS=darwin`; neither run here.
+
+### Gates
+
+At 8283d4d9 (the code is 62294b1c's), inside the build slot: `GOTOOLCHAIN=go1.27.3 make test
+TEST_PKGS='./internal/fsutil/... ./cmd/bridge/...'` with TMPDIR on disk (`.tmp/_b741/gotmp-r4`) passed,
+internal/fsutil 3.5 s and cmd/bridge 1,283 s; then the round's cases and the data dir's spelling cases by
+name under `-race` passed, 19 of 19 with their 94 subtests and none skipped, once with TMPDIR on disk and once
+through a link to a folder one deeper. internal/fsutil is vetted with `GOOS=windows`, `GOOS=darwin` and
+`GOOS=linux GOARCH=386`, the Windows-only case among what Windows vets, and cmd/bridge (a comment changed)
+on Linux; go1.27.3's gofmt is clean. The rules patch: `git apply --check` clean; applied to a disposable
+`git archive` copy of HEAD (its landing asserted in both files), where `make docs-check` passed (scanner.md
+43.6 KB) and `verify_moves.py --base HEAD` found no citation broken, its MISSING exactly the two blocks the
+patch edits (the gap-3 line, and its twin with the long form); every test name the patch cites exists. Not
+run here: the Windows cases, which CI's Windows leg runs, and macOS.

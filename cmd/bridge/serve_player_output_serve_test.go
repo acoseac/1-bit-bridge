@@ -447,7 +447,7 @@ func TestBridgeDoctorStaysMPDs(t *testing.T) {
 			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			checks := doctorOutputChecklist(mustLoadConfig(t, path), linuxBoxSeam(music))(context.Background())
+			checks := doctorOutputChecklist(path, mustLoadConfig(t, path), linuxBoxSeam(music))(context.Background())
 			if mode == "off" && len(checks) != 0 {
 				t.Fatalf("the player alone printed %d checklist lines", len(checks))
 			}
