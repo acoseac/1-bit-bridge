@@ -718,9 +718,9 @@ Two things to know first:
   `tailscale.mode: cli` (which shells out to a host `tailscaled`) is a silent
   no-op in a container — the LAN listener still serves, but no tailnet node
   comes up. Use **`tailscale.mode: tsnet`** instead.
-- `tsnet` mode isn't expressible through the `BRIDGE_*` env vars, so set it in
-  `bridge.yaml` (via `bridge init` or a hand-written file) and supply the auth
-  key headlessly through the **`TS_AUTHKEY`** env var.
+- Set the mode in `bridge.yaml` (via `bridge init` or a hand-written file) or
+  with `BRIDGE_TAILSCALE_MODE=tsnet`, and supply the auth key headlessly
+  through the **`TS_AUTHKEY`** env var.
 
 Minimal `bridge.yaml` (drop it into the `/data` volume, or generate with
 `bridge init`):
@@ -732,7 +732,8 @@ listenAddress: ":7788"
 adminAddress: "127.0.0.1:7789"
 tailscale:
   mode: tsnet
-  hostname: onebit-bridge      # the node name that appears in your tailnet
+  hostname: onebit-bridge      # optional: the node's name in your tailnet
+  # uploadDiagnosticLogs: true # optional: let the node upload Tailscale's diagnostic logs
 ```
 
 Then start with a Tailscale auth key (generate a reusable/ephemeral key at
@@ -751,8 +752,26 @@ Notes:
 - The tailnet identity persists at `<dataDir>/tailscale` on the `/data`
   volume, so `TS_AUTHKEY` is only needed on the **first** start — later
   restarts reuse the saved node state.
+- Without `tailscale.hostname`, a node already registered keeps its name and
+  a new one registers as `1-bit-bridge`; a library rename never renames it.
+- The node uploads **no Tailscale diagnostic logs** (and no network flow
+  logs) unless `tailscale.uploadDiagnosticLogs: true` (or
+  `BRIDGE_TAILSCALE_UPLOAD_DIAGNOSTIC_LOGS=true`, which the shipped
+  `compose.yaml` forwards from `.env`) allows them, and a
+  `TS_NO_LOGS_NO_SUPPORT=true` passed to the container keeps them off even
+  then. It still talks to Tailscale's coordination server and relays, as any
+  Tailscale client does. The consent applies when the bridge's process builds
+  its node: a change in `bridge.yaml` takes a restart of the container
+  (`docker restart`), and a change of `BRIDGE_TAILSCALE_UPLOAD_DIAGNOSTIC_LOGS`,
+  or removing a `TS_NO_LOGS_NO_SUPPORT` passed to the container, takes
+  recreating it (`docker compose up -d`, or `docker rm` and `docker run`
+  again), since a restart keeps the container's environment. A tailnet that
+  requires the logs refuses a node without them, and the admin tile says what
+  to change.
 - iOS pairs against the node's MagicDNS name
-  (`https://onebit-bridge.<your-tailnet>.ts.net`); the bridge serves a real
+  (`https://onebit-bridge.<your-tailnet>.ts.net` with the `hostname` above,
+  `https://1-bit-bridge.<your-tailnet>.ts.net` for a new node without one);
+  the bridge serves a real
   Let's Encrypt cert for `.ts.net` **in-process** (no on-disk cert material,
   nothing to publish). Your tailnet must have HTTPS certificates enabled.
 - HTTP/3 works over the tailnet too, but the tsnet socket is userspace, so

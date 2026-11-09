@@ -89187,3 +89187,553 @@ holds for.
 
 Windows was not run here: CI runs it. Checks here: gofmt over the new file,
 `go vet` of `internal/atomicwrite` for `GOOS=windows`, `make docs-check`.
+
+## 2026-11-09 — B749 part 3: the embedded node uploads no logs unless the config allows it; a new node gets a generic name
+
+Worker b749, legion0, branch `fix/b749-tsnet-logs` from main 9d59c8f6. Commits 891f82d6 (the change, its tests, the
+console's key, the docs, the evidence script), e56e1ca0 (a path that starts no node fails its test instead of hanging
+it), 07ad1cf7 (a row for a current profile the known profiles do not list), c02ed861 (this record), eca5959a (a backup
+does not carry the node's state; the README's sentence on the evidence), then the gates below. The rules line and its
+long form ship as `rules-b749.patch` (`cli-serve.md`, `ops/History-rules-cli-serve.md`, and the import-keeper long form
+in `ops/History-rules-build-ci-tests.md`).
+
+### What was true
+
+Checked against tailscale.com v1.104.2 in the module cache, every fact of the brief about upstream held; one about this
+tree did not: a restore from backup does not give the node "the restored profile's name". `backup.Snapshot` never copies
+`<dataDir>/tailscale` (it holds the database, the tokens, the TLS pair, bridge.yaml, the console account, the harvest
+state, and the player's identity, its ID floor and its DSD state), and a restore writes only what the snapshot holds, so
+on the box it ran on the node stays as it was, its name included, and on another box the node is new and authenticates
+again; eca5959a corrects the field comment and the README, which had taken the brief's word. `tsnet.Server.Start` runs
+`startLogger` outside a test binary, whose logtail transport is a no-op only while `envknob.NoLogsNoSupport()` reads
+`TS_NO_LOGS_NO_SUPPORT` true through `os.Getenv` (a value `strconv.ParseBool` refuses is `log.Fatalf`); the bridge never
+set it, so every tsnet-mode bridge uploaded its node's logs, and named the node after the library. Four things beside
+the brief: network flow logs (`feature/netlog`, linked into the bridge) run only while the variable is false, so it
+covers them too; `hostinfo.New` reports it to the coordination server; the coordination server can set it itself (its
+`DisableLogTail` debug message); and tsnet starts its profile manager without an OS
+(`controlclient.LocalBackendStartKeyOSNeutral`, which `ipnlocal.NewLocalBackend` turns into an empty OS for
+`newProfileManagerWithGOOS`), so upstream's start key is `_current-profile` on Windows too, the key the reading takes.
+Until round 2 this said that on Windows the profile manager starts from `ipn.ServerModeStartKey`, read from
+`readAutoStartKey` without tsnet's flag (Codex on #1445). Backlog B828 and B829 name what stays open of the reading.
+The refusal reaches `Status.Health` as the
+local-log warnable ("The local log is misconfigured: …") once the tracker's built-in warnables update. One doc claim was
+stale: `docs/docker.md` said tsnet mode cannot be set through a `BRIDGE_*` variable; `BRIDGE_TAILSCALE_MODE=tsnet` loads
+as tsnet (checked with `config.EnvOverrideDocs` and a load).
+
+### As built
+
+`tsnet.NewServer` applies the policy (`applyUploadPolicy`): unless `tailscale.uploadDiagnosticLogs` is true it sets the
+variable true through `envknob.SetNoLogsNoSupport`; true leaves the inherited environment alone; an inherited value
+ParseBool refuses is `ErrNoLogsEnvUnreadable`, the variable named and its value not, before any node is built; what it
+found is kept (`Uploads`) for the refusal's words. Serve, `bridge tsnet auth` and `status` build through
+`newTsnetServer` after their mode gates, on the caller's goroutine before anything starts the node; the variable is no
+registered envknob knob and every reader asks `os.Getenv`, so serve's earlier goroutines race nothing. The node's name:
+`tailscale.hostname`, else at each start `readNodeState` reads `tailscaled.state` read-only (`fsutil.OpenAsFile`, 16 MiB
+at most, never upstream's store constructor): the profile under `ipn.CurrentProfileStateKey`, listed under
+`ipn.KnownProfilesStateKey`, its prefs through `ipn.PrefsFromBytes` with an attestation key that takes any JSON; a node
+ID there is a registered node, which keeps its hostname; anything short of one is `tsnet.DefaultHostname`; a state that
+does not read keeps the library name with one Warn line naming no path. A start whose error carries upstream's "tailnet
+requires logging to be enabled" ends in `LogsRequiredError`, kept as the last start error under `lifecycleMu`;
+`tsnetAdminStatus` says it in LastError, and reads a running node's health through `Server.LogsRequired`.
+`tsnet.Config.BeforeStart` (`tsnetBeforeStart`, nil in production) is the seam just before the upstream start. The key
+is the console's `tailscaleUploadDiagnosticLogs` (`restart`, class D in `ops/settings-apply-semantics.md`), because
+`sqlite.md` asks for a patch field beside any config field an operator chooses. Typed errors in internal/tsnet met the
+one blank keeper's condition, so the keeper went and `allowedKeepers` is empty; the fixture test keeps the allowance's
+shape (`keeperFixtureAllowance`).
+
+### Red first
+
+The tests were run against main's behaviour in a copy of 9d59c8f6 holding HEAD's tests and a names-only shim
+(`.tmp/_b749/basecopy.py`: the seam called before the upstream start, the new names answering as main does, the config
+field set by nothing with `yaml:"-"`, so main's Load still refuses the key; `.tmp/_b749/reds.py`). 16 of the 21 new
+tests were red: every row of the name, policy, refusal, tile and console tests that differs from main (the name test 15
+of its 18 rows, the three explicit-hostname rows green), and the config tests and the CLI's save (main refuses the key
+at load). Green there, as expected: `TestTheCommandsThatBuildNoNodeLeaveTheEnvironmentAlone` (main never touches the
+variable; control C20 below shows it red), `TestBeforeStartRunsOnTheUpstreamServerAndCanStopIt` (the seam is the
+shim's; C15), the two pins of upstream (`TestTheLogsRequirementIsUpstreamsWords`, `TestTheNoLogsVariableIsUpstreams`;
+C13, C14), `TestAStartThatSucceedsClearsTheLastStartError` (main records nothing; C10), and the policy row main already
+meets (an inherited true with no key). The first red run found a defect in the new cmd/bridge test: a path that exited
+before its node's start (main refuses the key) left the test waiting on the hook's channel until the binary's deadline;
+e56e1ca0 makes it fail at once.
+
+### Evidence from a production binary
+
+`scripts/tsnet-uploads/evidence.py` on a release-shaped binary (CGO_ENABLED=0, the release tags, -trimpath) of 891f82d6.
+No unprivileged network namespace exists on legion0: `kernel.apparmor_restrict_unprivileged_userns=1` makes `unshare -rn`
+fail writing uid_map, and `systemd-run --user -p PrivateNetwork=yes` runs its unit in the host's network namespace (the
+probe that showed it made one TCP connect and sent one UDP datagram to a public resolver; nothing of the bridge's). The
+script confines the bridge by port, not by address, with Landlock (TCP connects to the proxy's port number alone, at any
+address, EACCES for every other port) and seccomp (EPERM for every IPv4 and IPv6 socket but plain TCP, MPTCP and io_uring
+included), checks that from inside before any run (in round 1 taking any refusal; round 2 requires each mechanism's own
+errno), and routes HTTP and HTTPS through a proxy on 127.0.0.1 that logs each target and refuses all; a connection to the
+proxy's port number at another address would not have been prevented, nor logged. `TS_DEBUG_ALWAYS_USE_DERP=1`
+lets the node start without UDP. Three rounds, 60 s windows: the key true, `CONNECT log.tailscale.com:443` first at 2.21
+to 2.33 s, two a window; the key absent, and the key true with `TS_NO_LOGS_NO_SUPPORT=true` inherited, none; the
+coordination server's CONNECTs (25 to 27) and the updater's one to api.github.com in every run; every start named the
+node `1-bit-bridge` (the library "B749 Evidence Library"), the second start of a node that registered nothing
+included. main's binary under the same script: with no key the log host at 2.29 s, and 0.08 s at its second start; the
+node named after the library; the key refused at load.
+
+### Negative controls
+
+Each predicted by name in `.tmp/_b749/controls.predictions.txt` before any ran (C05's prediction corrected, before any
+ran, once it showed the logout row could not catch it and a row was added): an exact-once mutation, each named test run
+alone from a fresh test binary, the files put back from memory and the tree found equal to HEAD. The run with no
+mutation was green. All 23 were red where predicted; C16 also turned the unreadable-state row red (an explicit name skips
+the line).
+
+| | mutation | red |
+|---|---|---|
+| C01 | no variable set without the key | the policy tables' rows without the key but an inherited true; every path's |
+| C02 | an unreadable inherited value taken as unset | the refused rows of both policy tables |
+| C03 | an inherited true turned off where the key allows | the key-true, inherited-true rows |
+| C04 | a profile with no node ID counted registered | that row |
+| C05 | the known profiles' listing skipped | the unlisted current profile's row |
+| C06 | an unreadable state given the default name | the five unreadable rows, the unreadable-to-this-user case, cmd/bridge's |
+| C07 | no line for an unreadable state | the same |
+| C08 | upstream's error kept for a refusal | the refused-start tests, the tile's refused-start rows |
+| C09 | no last start error kept | the same |
+| C10 | a start that succeeds leaves the last error | `TestAStartThatSucceedsClearsTheLastStartError` |
+| C11 | a running node's health not read | the running-node test and the tile's running rows |
+| C12 | the inherited variable left out of the words | the inherited-true refusal rows and tile rows |
+| C13 | the matched text off by a word | the pin, both refusal tests, the tile |
+| C14 | `NoLogsEnv` naming another variable | the variable's pin, the policy table |
+| C15 | the hook after the upstream Start | `TestBeforeStartRunsOnTheUpstreamServerAndCanStopIt` |
+| C16 | the node named after the library again | the fresh, failed-first-start and registered rows (and the unreadable row's line) |
+| C17 | the tile reads no last start error | the tile's refused-start rows |
+| C18 | the tile reads no health | the tile's running rows |
+| C19 | the config's key not passed to the node | the key-true rows of the policy table and of every path |
+| C20 | the auth and status gate sets the variable before refusing | the cli-mode rows of the no-node test |
+| C21 | the console's PATCH answers `live` | the console's test, the matrix doc test, the page's badge test |
+| C22 | the console's PATCH saves nothing | the console's test |
+| C23 | the config key renamed | the three config tests |
+
+### Gates
+
+At eca5959a, in the build slot (`.tmp/_b749/gates.py`), with the Makefile's tags: `go vet ./...` clean; `go test -race
+-timeout 30m` ok for `./internal/tsnet/...` and `./internal/config/...` (1.6 s and 14.7 s), `./cmd/bridge/...` (1,317 s)
+and `./internal/admin/` (999 s; the console's key); the build-site census's own tests ok; the new tests by name under
+`-race -count=20` ok in each package (internal/tsnet 9 s, cmd/bridge 218 s with the two keeper tests, internal/config
+2 s, internal/admin 19 s); `make build-all` ok. `go vet` of those four packages for windows, darwin, linux/386 and
+linux/arm clean, and go1.27.3's gofmt lists none of the 17 Go files the branch changes. The rules patch applies to HEAD
+(`git apply --check`); on a git-archive copy of HEAD with it applied, `make docs-check` and `verify_moves.py --base HEAD
+--edit` (the import keeper's line, whose long form the patch edits) pass, and `TestEveryCitedTestNameExists` is green
+there and red with a name cited that no test defines.
+
+## 2026-11-09 — B749 round 2: the evidence claims what it shows, an upgraded install checked, a node built again in one process, the record exact
+
+Worker b749, legion0, branch `fix/b749-tsnet-logs` at #1445's head 7382e659 (main 71f707ab merged in), against
+Codex's and the Claude API's reviews of #1445 and the two reviews of this round's brief. Commits 2664276c (a node built
+again in the same process reads the inherited value) and the one that carries this record (the evidence script, its
+README, the README, the release notes, round 1's entry corrected). The rules changes ship as `rules-b749-r2.patch`
+(`cli-serve.md`'s B749 line and its long form, and the import keeper's long form).
+
+### The findings, each checked in the code first
+
+- **Codex P2: the sandbox's claim.** It held. Landlock's network rule (`LANDLOCK_RULE_NET_PORT`, whose attribute is an
+  access right and a port) names no address, so the confinement let the bridge connect to the proxy's port number at
+  any address, and the self-check took any socket error for a refusal. No mechanism that confines by address is open to
+  an unprivileged process here: a network namespace is refused (round 1's entry), and a cgroup connect hook needs
+  CAP_BPF and CAP_NET_ADMIN. So the claim is now what holds, in `evidence.py`'s module and `apply_sandbox` docstrings,
+  its README, the README's sentence and round 1's entry (corrected in place): confined by port, not by address, and the
+  proxy's record of every request it receives. The self-check now requires each mechanism's own errno, inside and out:
+  inside, a connection to another port with a listener there, on 127.0.0.1 and on ::1, is refused with Landlock's
+  EACCES, and every IPv4 and IPv6 socket but plain TCP with the filter's EPERM; outside, the same connections are made
+  and the UDP sockets created (and the ICMP, SCTP and MPTCP ones; a raw socket is refused there too, for want of a
+  privilege). The proxy's port at ::1, where nothing listens, gets the kernel's ECONNREFUSED inside, never EACCES: the
+  claim's limit, shown. Controls on copies of the script, each predicted: Landlock never enforced (S1) fails the EACCES
+  line and the filter never installed (S2) the EPERM line, each with exit 2 and no bridge run.
+- **Claude 1: an upgraded install.** It held: every run started from a fresh install. `--previous` now adds one, the
+  setup no arm and every expectation its own. The earlier build runs once on a fresh install without the key and must
+  run its whole window, ask for `log.tailscale.com`, and leave a non-empty `tailscaled.log*.txt` in the node's state
+  dir; it runs again on a copy of that data dir and must ask again (the positive control on that state); this build
+  then runs on the data dir itself, without the key, for the whole window, and must not ask. Every check of this
+  build's runs is over its runs alone (`binary`), so the earlier build's uploads and its library-named node are no
+  failure of those checks. `write_install` refuses a work dir that already holds the install, and the second start
+  is watched for the whole window, not 20 s (the brief's reviews).
+- **Claude 2: rollback.** It held: round 1's red run saw main refuse the key at load, and `DecodeFile`'s known-fields
+  decode refuses an unknown key whatever its value. One line in the release notes and the README: remove
+  `tailscale.uploadDiagnosticLogs` from `bridge.yaml` before going back, and the older version uploads unless
+  `TS_NO_LOGS_NO_SUPPORT=true` is in its environment.
+- **Codex P3: the Windows explanation.** It held. tsnet passes `controlclient.LocalBackendStartKeyOSNeutral`
+  (tsnet.go, line 970), `ipnlocal.NewLocalBackend` turns it into an empty OS (local.go, 560 to 564), and
+  `readAutoStartKey` then takes `ipn.CurrentProfileStateKey` on every OS (profiles.go, 898 to 910): round 1 read that
+  function without tsnet's flag. Corrected in the long form and in round 1's entry.
+- **Claude 3: two open items in prose.** Named as backlog B828 and B829, by those ids alone, in the long form and in
+  round 1's entry.
+- **Claude 4: the keeper's counts.** They were measured on 9f49ab2f, and one of the five tree reds, NC18, mutated the
+  real allowance's condition text, which B749 removed. Not run again; the long form says they were measured before B749.
+- **The Claude API's question: a bridge started again with the variable this process set.** Nothing re-executes the
+  bridge with it: serve builds its node once, every child process serve starts is a tool or `serve --validate-config`
+  (`updater.CheckConfig`), which builds no node, and a restart is the service manager's, from the unit's environment.
+  The same harm came by another road: the menu's "Start now" runs `runServe` in the menu's process and runs it again
+  after a stop (`actStartNow`), as bridge init's start can before it, and the second node read the true the first
+  node's policy had set as inherited: a consent saved between the two never reached it, and a tailnet's refusal would
+  have named a variable nobody set. 2664276c: the policy keeps what it found before it first set the variable
+  (`policyRecord`), reads that as the inherited value while the variable holds the true it set, and hands it back
+  (`putBackNoLogsEnv`) where a later config allows the uploads; a value anything else put there since, upstream's own
+  setter included, stays. Putting the value back at `Close` was rejected.
+  `ForgetUploadPolicyForTest` starts a test case as a process that has built no node.
+
+### Red first and the controls
+
+With a names-only shim (`ForgetUploadPolicyForTest` doing nothing, the policy as round 1 left it): internal/tsnet's
+later-node table (named for the hand-back it pinned; round 3 rewrote it for the latch as
+`TestOnceThisProcessTurnsTheUploadsOffTheyStayOff`) red on five rows (a consent given after a node without one; an
+inherited false, and an inherited 1, with a consent given after; no consent twice; no consent, a consent, no consent),
+green on the four that pin what must not change (an inherited true and a consent after, a consent withdrawn, a false
+set in the process after the policy's true, a true upstream set itself); cmd/bridge's serve run twice (round 3's
+`TestAServeRunAgainInTheSameProcessKeepsTheUploadsOff`) red on its two consent rows (unset and false inherited), green
+on the inherited true and the no-consent rows. Logs:
+`.tmp/_b749/r2-red-tsnet.log`, `.tmp/_b749/r2-red-cmd.log`. Controls, each predicted in
+`.tmp/_b749/controls2.predictions.txt` before it ran, the files put back from memory and the tree found equal to HEAD;
+the run with no mutation green:
+
+| | mutation | red |
+|---|---|---|
+| R01 | the record never taken as the variable's owner | the five rows above; the serve test's two |
+| R02 | no put-back | four rows (one more than predicted: the third node of "no consent, a consent, no consent" reads the true left behind); the serve test's two |
+| R03 | ownership by the record alone, not the value it set | the false set after the policy's true |
+| R04 | the record keeps the true it wrote, not the value before | the five rows; the serve test's two |
+| R05 | the test reset forgets nothing | none, against the prediction: each row's cleanup restores the record as the row found it |
+| R05b | R05 over the whole internal/tsnet package | as re-predicted: the two inherited-true rows of the policy table and of the refusal test, and the inherited true with a consent after (lifecycle_test.go and tsnet_test.go build nodes without the helper first) |
+| R06 | cmd/bridge's `inheritNoLogsEnv` without the reset | the tile's key-true, inherited-true refused start |
+
+### Evidence from a production binary
+
+Release-shaped binaries (CGO_ENABLED=0, the release tags, -trimpath) built from git archives: this build at 2664276c
+(sha256 af5734b2…, "bridge-2664276c"), and main before this PR at 71f707ab (sha256 cb9fe668…, "bridge-main-71f707ab")
+for `--previous`. The first attempt exited every bridge at once ("no config at …"): a relative `--work` gave each
+bridge a config path relative to a folder it did not run in, which round 1 never met, its `--work` being absolute; the
+script now makes `--work` absolute. The run after it, three rounds of 60 s windows, every check held (exit 0;
+`.tmp/_b749/ev-r2/full2/evidence.json`). The self-check as described above. The key true: `CONNECT
+log.tailscale.com:443` first at 2.25, 2.30 and 2.23 s, two a window; the key absent, its second start (now 60 s), and
+the key true with `TS_NO_LOGS_NO_SUPPORT=true` inherited: none. The upgraded install: the earlier build ran its whole
+window, asked for the log host at 2.22 s, named the node after the library, and left `tailscaled.log2.txt` at 22,304
+bytes; run again on a copy of that data dir it asked at 0.11 s; this build on the data dir itself asked for it never in
+60 s, named the node `1-bit-bridge`, and left the buffer at 92 bytes, its no-op transport having taken what waited.
+The coordination server's CONNECTs came in every run, 25 to 27 a window, and the updater's one to api.github.com.
+
+### Gates
+
+At e9823a17, in the build slot: `make test TEST_PKGS='./internal/tsnet/... ./internal/config/... ./cmd/bridge/...'`
+(the release tags, `-race -timeout 30m -p 4`) ok: internal/tsnet 1.5 s, internal/config 14.5 s, cmd/bridge 1,348 s.
+Before it: `go vet` of internal/tsnet and cmd/bridge clean; go1.27.3's gofmt lists none of the changed Go files; the
+build-site census's tests and its tree check (`check-build-tags: OK`) pass over the new script and its README; and
+`TestEveryCitedTestNameExists` and `TestNoBlankKeepers` pass. The rules patch applies to HEAD (`git apply --check`). On a
+git-archive copy of HEAD with it applied, `make docs-check` passes, and `TestEveryCitedTestNameExists` is green there and
+red with a name cited that no test defines. `verify_moves.py --base HEAD`, with an `--edit` for each block the patch
+edits, reports one MISSING pair alone: the B749 line's old text in `cli-serve.md` and in its long form, beside its new
+text in both. The tool cannot pair a line edited with its verbatim twin, and the two new lines are one line byte for
+byte (3,925 bytes).
+
+## 2026-11-09 — B749 round 3: once this process turns the diagnostic uploads off, it never turns them on again
+
+Worker b749, legion0, branch `fix/b749-tsnet-logs` at #1445's head f2b6c5cf (round 2 and its rules), against Codex's and
+the Claude API's reviews of round 2, the two reviews of this round's brief, and the design consult that decided it:
+option B, no hand-back in a process; the draft's tracking of every node until its teardown was dropped. Commits
+3978e495 (the latch, its reasons and the tile, with their tests), 6a6fff09 (the docs) and the one that carries this
+record. The rules changes ship as `rules-b749-r3.patch` (`cli-serve.md`'s B749 line and its long form).
+
+### The findings
+
+- **Codex P2: the hand-back.** It held. Removed with the hand-back.
+- **Codex P2: upstream's true taken for the bridge's.** It held: the policy writes the variable through
+  `envknob.SetNoLogsNoSupport`, as the coordination server's `DisableLogTail` message does, so round 2's ownership
+  check could not tell the two `true`s apart, and a later allowing node erased upstream's beside the
+  `logtail.Disable` that lasts the process. No ownership is needed once nothing is handed back.
+- **Claude Medium: the Windows correction, B828, B829 and the mutation counts missing.** No change, as the brief
+  decided: the review's diff ended before the rules patch, and f2b6c5cf carries them.
+- **Claude Low: a backlog id for the evidence's port-not-address scope.** No change: that text states what the
+  evidence shows, as round 2 required; it is no weakness of the bridge.
+
+### As built
+
+`applyUploadPolicy` (3978e495): once it has set `TS_NO_LOGS_NO_SUPPORT`, the process keeps it set until it exits;
+nothing is handed back or unset. It reads what the process inherited once, at its first application whatever the
+config says (`policyRecord`), so the environment's words appear only where the launch environment held the variable.
+`Uploads` tells three reasons apart, all in `Off()`: `EnvOff` (the launch environment held it), `LatchedOff` (this
+process turned the uploads off earlier, for a node without the key, and the config allows them now), and `OtherOff`
+(the variable reads true, neither inherited true nor set by the policy: upstream's own setter). `Server.Uploads` is
+the policy's status, read live, so a `DisableLogTail` that comes while a node runs shows as `OtherOff`, and a refusal
+takes it. `Uploads.HeldOff` says each reason in its words: the environment, remove it from the environment the bridge
+was launched with and launch again; this process, the setting applies at the bridge's next launch; something else, a
+new launch may turn them back on, with no promise about the coordination server. Every piece of advice is a new
+launch ("quit the bridge, its menu included, and launch it again, or restart its service"), never "restart the
+bridge", which the menu's Start now (`menu.go`, `actStartNow`) and the start `bridge init` offers (`init.go`) make in
+their own process. The console's tile reads the status through `tsnetStatusSource.Uploads` and shows the reason on a
+line of its own (`admin.TailscaleStatus.UploadsHeldOff`, a "Diagnostic logs" row in the Tailscale panel, hidden while
+empty, written as text), for a node the tailnet accepted, whose badge, backend state and endpoints are unchanged, as
+for one it refused, whose `LastError` carries the same words. The README, the settings page's hint, the settings
+semantics, the release notes, the field's comment, the env example and the Docker and VPS notes say "process
+restart" plainly (6a6fff09), and what stays open, backlog B830. Round 2's two tests became
+`TestOnceThisProcessTurnsTheUploadsOffTheyStayOff` and `TestAServeRunAgainInTheSameProcessKeepsTheUploadsOff`; round
+2's entry in this log names them so, and the rules patch renames their citations.
+
+### Red first and the controls
+
+On round 2's code, with a names-only shim (the new fields, `HeldOff` answering "", `Server.Uploads` the kept value,
+the tile's field never set; `.tmp/_b749/r3-red-*.log`): `TestOnceThisProcessTurnsTheUploadsOffTheyStayOff` red on all
+17 rows. The four where a later allowing node was handed the inherited value back (no then yes, and yes, no, then yes,
+with unset and false inherited) failed on the variable itself; those, the inherited true and 1 rows and both of
+upstream's rows (round 2 called upstream's true the launch environment's) on the reasons; every row on the words.
+`TestAServeRunAgainInTheSameProcessKeepsTheUploadsOff` red on its four hand-back rows, green on the other ten.
+`TestTheTileSaysWhatHoldsTheUploadsOff` red on every reason subtest and on the controls' refused starts (their words),
+green on the controls' accepted nodes; internal/admin's `TestTheTailscaleTileShowsWhatHoldsTheUploadsOff` red on the
+row. Controls, each predicted in `.tmp/_b749/controls3.predictions.txt` before it ran, every file put back from memory
+and the tree found equal to HEAD; the run with no mutation green; all seven red exactly where predicted:
+
+| | mutation | red |
+|---|---|---|
+| L01 | the hand-back restored | 9 rows of the latch table (every no then yes and yes, no, then yes; upstream's, without the key then with it), the serve test's 4 hand-back rows, the tile's "this process" |
+| L02 | the inherited value read at every application | 8 rows (the latch rows and no then no with unset and false inherited, both upstream rows); the tile's "this process" and "something else"; the serve test green (it reads the variable alone) |
+| L03 | the inherited value recorded only by a node without the key | the inherited-true yes then yes row and upstream's, without then with; the policy table's and the refusal test's allow=true inherited=true; the tile's "launch environment" |
+| L04 | `Off()` without `LatchedOff` | 5 rows; the tile green (`HeldOff` says the latch first) |
+| L05 | the tile reads no status | its 6 reason subtests |
+| L06 | the latch's words a "restart the bridge" | 5 rows; the tile's "this process" |
+| L07 | something else's true reported as the launch environment's | upstream's row with the key; the tile's "something else" |
+
+### Evidence from a production binary
+
+The change touches the start path every arm of `scripts/tsnet-uploads/evidence.py` runs: `applyUploadPolicy`, in
+`NewServer`, once per fresh process. A fresh process's first application writes what round 2's did, since a process
+of one node is handed nothing back, so the arms' outcomes could not change, and they ran again on a release-shaped
+binary of 6a6fff09 (sha256 a015520b…), main's 71f707ab as `--previous`, three rounds of 60 s windows, every check held
+(`.tmp/_b749/ev-r3/full/evidence.json`): the self-check as round 2's; the key true, `CONNECT log.tailscale.com:443`
+first at 2.21, 2.22 and 2.24 s; the key absent, its second start, and the inherited true, none; the earlier build
+asked at 2.21 s and left 20,161 bytes of buffer, asked again at 0.12 s on the copy, and this build on its data dir
+never asked in 60 s; the coordination server's CONNECTs 26 or 27 a window; every start of this build named the node
+`1-bit-bridge`. No arm builds a second node in one process, which is where the latch acts: its evidence is the tests
+above.
+
+### Gates
+
+At 6a6fff09, in the build slot: `make test TEST_PKGS='./internal/tsnet/... ./internal/config/... ./internal/admin/...
+./cmd/bridge/...'` (the release tags, `-race -timeout 30m -p 4`) ok, internal/tsnet 1.6 s, internal/config 14.9 s,
+internal/admin 1,029 s, cmd/bridge 1,414 s. It ran on a git-archive copy of HEAD with `rules-b749-r3.patch` applied,
+git pointed at the worktree's index: round 3 renames two tests the tree's rules file cites, which the patch renames
+there, and without it `TestEveryCitedTestNameExists` names them. The changed tests by name under `-race -count=50`, in
+the worktree, ok: internal/tsnet (the latch table, the policy table, the refused start, the running node) 1.7 s,
+cmd/bridge (the serve run again, the tile's two tests) 814 s, internal/admin (the tile's guard) 1.1 s. `go vet` of the
+four packages clean; go1.27.3's gofmt lists none of the changed Go files. On the patched copy `make docs-check`
+passes, `TestEveryCitedTestNameExists` is green there and red with a ghost name, and verify_moves, given an `--edit`
+for the policy and controls paragraphs and the rule line, reports the one MISSING pair it cannot pair: the B749 line's
+old text beside its new (4,740 bytes) in both files.
+
+## 2026-11-09 — B749 round 4: the policy sets the variable again before it reads it, and the open item is named by its id
+
+Worker b749, legion0, branch `fix/b749-tsnet-logs` at #1445's head 909f6204 (round 3 and its rules), against Codex's and
+the Claude API's reviews of round 3 and the two reviews of this round's brief. Commits 0676a389 (the variable set again,
+the live read pinned, the tests reading the variable as Tailscale does), c9270bca (backlog B830 by its id, the settings
+hint, Compose) and the one that carries this record. The rules changes ship as `rules-b749-r4.patch` (`cli-serve.md`'s
+B749 line and its long form).
+
+### The findings
+
+- **Claude Medium: a later node can upload after the policy set the variable, and a row pinned it.** It held: round 3
+  never unset `TS_NO_LOGS_NO_SUPPORT` and set it again only for a node without the key, so after a false written in the
+  process a later node with the key started with the uploads on, its status naming nothing that held them off, which the
+  row "a false set in the process after the policy's true" asserted. The reviews of the brief added three points, each
+  taken: the row reads the variable right after `NewServer`, since a fix that reports `LatchedOff` and sets nothing
+  passes on the status alone; the setter runs before the current value is parsed, since a value written there that does
+  not read as a boolean made the next `NewServer` refuse, blaming the launch environment; and the comments on
+  `applyUploadPolicy` and `LatchedOff`, which said the environment is left as it is, say what the code does.
+- **Claude Medium, and both reviews of the brief: an open weakness described in public text.** It held. The README,
+  the release notes, the settings hint, the settings semantics, the field's comment, `applyUploadPolicy`'s comment,
+  the rule line and its History copy, the History's paragraphs and round 2's and round 3's entries in this log give it
+  as backlog B830, by its id alone.
+- **Codex P2: the live status read unpinned.** It held: every case ran upstream's setter before it built the node it
+  inspected, so an `Uploads()` returning what `NewServer` found passed them all.
+- **Codex P3: tests that read the variable by its spelling.** It held: the first-start tables of both packages and the
+  every-path test compared the variable with `"true"`, which a `1`, read alike by Tailscale, fails. A review of the
+  brief added that the one parser, `noLogsOff`, is internal/tsnet's and unexported, so each package's tests need a
+  helper of their own that fails on a value that does not parse; each has had one, `readsOff`, since round 3.
+- **Codex's review of the brief, P2: the settings hint claimed an immediate effect.** It held: "only while this is on"
+  and "Off, the default, it sends none" read as if a save changed the running node.
+- **Claude Low, and both reviews of the brief: Docker.** It held: `docker restart` keeps a container's environment, so
+  neither a change of `BRIDGE_TAILSCALE_UPLOAD_DIAGNOSTIC_LOGS` nor the removal of a `TS_NO_LOGS_NO_SUPPORT=true`,
+  which the refusal's words advise, applies on a restart, and `compose.yaml` forwarded no Tailscale variable and loads
+  no `env_file`, so the `.env` entry `.env.example` documents reached no container.
+
+### As built
+
+`applyUploadPolicy` (0676a389): once the policy has set `TS_NO_LOGS_NO_SUPPORT`, every later application sets it again
+through `envknob.SetNoLogsNoSupport` before it parses the current value, and a node whose config allows the uploads
+reports `LatchedOff`, whatever was written since. It sets it again only there, at a `NewServer`: between a write
+elsewhere in the process and the next one, the variable reads as the write left it, which the doc comment and
+`LatchedOff`'s now say. A fresh process's first application is round 3's, since the re-set needs a set that only an
+earlier application makes, so the evidence arms, each one node in a fresh process, did not run again. The latch
+table's row for a false written after the policy's true expects the uploads off, `LatchedOff` and the latch's words; a
+new row for a value written there that does not read as a boolean expects the same; every row reads the variable right
+after the last `NewServer` as well as at its upstream start; and a row builds a node with the key and runs upstream's
+setter after its `NewServer` (`OtherOff`, its words, the refusal). cmd/bridge's
+`TestTheTileReadsWhatHoldsTheUploadsOffWhenItAsks` builds a node with the key as serve does, checks that nothing holds
+its uploads off, runs upstream's setter, and asks that same node for its status (`OtherOff`), the tile's line on a node
+the tailnet accepted, and the refusal of its start (the tile's `LastError` and its line), each in the words of
+something else in the process. The tests read the upload state through their package's `readsOff`
+(`strconv.ParseBool`, as `envknob.Bool` reads it; a value that does not parse fails the test), exact text staying where
+a test checks the environment is kept: a key true leaves the inherited value, and the commands that build no node
+leave it alone. The docs (c9270bca): the settings hint says the consent applies when the bridge's process builds its
+node, so a change takes a restart of that process (quit the bridge, its menu included, and launch it again, or restart
+its service; the menu's Start now runs it in the same process), names the two things that keep the uploads off even
+with the consent (`TS_NO_LOGS_NO_SUPPORT=true` in the launch environment, and this process having built its node
+without the consent, until it exits), and says the Tailscale panel tells which. `compose.yaml` forwards
+`BRIDGE_TAILSCALE_UPLOAD_DIAGNOSTIC_LOGS` as `${BRIDGE_TAILSCALE_UPLOAD_DIAGNOSTIC_LOGS:-}`, empty leaving what
+`bridge.yaml` says (an override takes no empty value, `internal/config/env.go`), and `docs/docker.md`, `.env.example`
+and the file's own comment say a `bridge.yaml` change takes a restart of the container, while a change of that
+variable, or removing a `TS_NO_LOGS_NO_SUPPORT` passed to the container, takes recreating it (`docker compose up -d`).
+
+### Red first and the controls
+
+On round 3's code (909f6204) with this round's tests (`.tmp/_b749/r4-red-tsnet.log`): the latch table red on its two
+rows "a false set in the process after the policy's true" (the variable read the uploads on right after the last
+`NewServer` and at its upstream start, and the status held no `LatchedOff`) and "an unreadable value set in the process
+after the policy's true" (`NewServer` refused, blaming the launch environment). The live-read cases were green there,
+since round 3 already read the status live: control M02 is their red. Codex's P3, in copies of 909f6204 and of c9270bca
+whose policy writes `1` wherever it writes `true` (`.tmp/_b749/p3demo.log`, predicted in `p3demo.predictions.txt`
+before it ran): round 3's tests red on 13 rows, each "the upstream start would see TS_NO_LOGS_NO_SUPPORT="1", want
+"true"" (internal/tsnet's first-start table without the key, its 4 rows; cmd/bridge's first-start table with the key
+absent or false, 6 rows; the every-path test without the key, its 3 paths), and round 4's green on every test of
+internal/tsnet and every B749 test of cmd/bridge. Round 3's `TestTheNoLogsVariableIsUpstreams` compared upstream's own
+setter's value with `"true"`, which no change of the bridge's can redden; it reads it through `readsOff` now. Controls,
+each predicted in `.tmp/_b749/controls4.predictions.txt` before it ran, the file put back from memory and the tree found
+equal to HEAD; the run with no mutation green; all three red exactly where predicted:
+
+| | mutation | red |
+|---|---|---|
+| M01 | the latch's setter alone reverted, `LatchedOff` still reported | the false row, on its read right after `NewServer` ("reads the uploads off: false, want true") and at its upstream start, and the unreadable row, on its refusal; the live-read test green |
+| M02 | `Server.Uploads` returning what `NewServer`'s policy found | internal/tsnet's live-read row and `TestTheTileReadsWhatHoldsTheUploadsOffWhenItAsks`; `TestTheTileSaysWhatHoldsTheUploadsOff` green (its setter runs before the node it reads is built) |
+| M03 | the setter after the parse | the unreadable row alone |
+
+### Gates
+
+At c9270bca, in the build slot: `make test TEST_PKGS='./internal/tsnet/... ./internal/config/... ./internal/admin/...
+./cmd/bridge/...'` (the release tags, `-race -timeout 30m -p 4`, whose 1,800 s cover cmd/bridge's) ok, internal/tsnet
+1.6 s, internal/config 14.8 s, internal/admin 1,019 s, cmd/bridge 1,387 s, on a git-archive copy of HEAD with
+`rules-b749-r4.patch` applied and git pointed at the worktree's index, as in round 3; the copy carried the patch before
+its History paragraphs gained the P3 sentence and a rewrapped line, which the checks on the final patch below cover. The
+changed tests by name under `-race -count=50`, in the worktree, ok: internal/tsnet (the latch table, the first-start
+table, the variable's name) 1.7 s, cmd/bridge (the live read, the first-start table, the every-path test) 100 s,
+internal/admin (the tile's line, the settings prose beside the badge) 1.5 s. `go vet` of the four packages clean;
+go1.27.3's gofmt lists none of the changed Go files. On a git-archive copy of the final HEAD with the final patch
+applied, `make docs-check` passes, `TestEveryCitedTestNameExists` is green there and red with a ghost name, and
+verify_moves, given an `--edit` for the policy and controls paragraphs and the rule line, reports the one MISSING pair
+it cannot pair: the B749 line's old text beside its new (4,794 bytes) in both files.
+
+## 2026-11-09 — B749 round 5: a value written in the process before any latch is read as Tailscale reads it, and refused in its own words
+
+Worker b749, legion0, branch `fix/b749-tsnet-logs` at #1445's head 1b4f2fbf (round 4 and its rules), against Codex's and
+the Claude API's reviews of round 4 and the two reviews of this round's brief. Commits 02f24c90 (the policy before any
+latch, its rows and its comments), 7306add3 (the hint's three reasons, backlog B830 by its id alone in this log, the
+empty override pinned) and the one that carries this record. The rules changes ship as `rules-b749-r5.patch`
+(`cli-serve.md`'s B749 line and its long form).
+
+### The findings
+
+- **Claude Low: a value written in the process before any latch, refused in the launch environment's words.** It
+  held: with nothing latched, round 4 parsed the value the variable held before either branch, so an unreadable value
+  written after a first node with the key made a node without the key refuse outright, though the policy was about to
+  set the variable to true, and a node with the key refuse with `ErrNoLogsEnvUnreadable`, whose words blame the
+  environment the bridge was launched with. The reviews of the brief added four points, each taken: with the key, such
+  a value must still refuse, since upstream's `envknob.Bool` ends the process on it, with an error of its own and never
+  as `OtherOff`, which would build the node; without the key the order is to record and parse the inherited value
+  (refusing an unreadable one with the environment untouched), then set, with no parse of the current value;
+  `OtherOff` stays gated on a parsed true, so a false or a 0 written over an unset or false value holds nothing, and a
+  false written over an inherited true lets the node upload where round 4 called it the launch environment's hold;
+  and every row starts from `setInherited`'s reset and writes with `t.Setenv`, the doc comments saying what the code
+  does.
+- **Claude Low: the settings hint counted two reasons where the status tells three apart.** It held: the hint left out
+  something else in the process turning the uploads off (upstream's setter, `OtherOff`), which the Tailscale panel
+  below it then reports. The hint names the three, the third with what a new launch may do.
+- **Codex P2, the Claude API's review and a review of the brief: B830 tied to what it holds open.** It held in three
+  places: the History's account of round 3 (the rules patch), round 3's entry in this log and `applyUploadPolicy`'s
+  comment. Each gives backlog B830 by its id alone, and `git grep B830` found one more: round 2's entry here, whose
+  parenthetical tied it to the alternative that entry rejected, now drops it. Every other hit already gave the id
+  alone.
+- **Claude Low: round 4's record missing from the reviewed diff.** No change, as the brief decided: round 4's entry is
+  in this log; the reviewed diff left the log out.
+- **The Claude API: the empty value `compose.yaml` forwards, unpinned.** It held as a gap in the tests, not the code:
+  `applyEnvOverrides` skips a variable set and empty, and nothing pinned that for this key.
+  `TestAnEmptyVariableLeavesTheFilesConsent` sets the variable empty with `t.Setenv` over a `bridge.yaml` that says
+  true and one that says false: each stands, and no leaf is recorded for the variable. It pins current behaviour, so
+  it is no red-first test.
+
+### As built
+
+`applyUploadPolicy` (02f24c90) reads what the process inherited first, at every application, and refuses a value that
+does not read as a boolean with `ErrNoLogsEnvUnreadable`, the environment untouched. Without the key it then sets the
+variable to true through envknob over whatever the process wrote there, unread, and latches. With the key and the latch
+set, it sets the variable again and reports `LatchedOff`, as round 4 did. With the key and nothing latched, the value
+the variable holds now decides, read as Tailscale reads it: a true holds the uploads off, the launch environment's
+(`EnvOff`) where that held a true too and something else's (`OtherOff`) where it did not; a false holds nothing, a false
+written over an inherited true included; and a value that does not read as a boolean is the new
+`ErrNoLogsEnvWrittenUnreadable`, refused before any node is built, whose words name the variable and not its value, say
+that something in the bridge's process set it since its launch, advise a new launch, and never mention the launch
+environment. `noLogsOff` answers whether a value reads at all, and `Server.Uploads` asks it as before. The comments on
+`ErrNoLogsEnvUnreadable`, `EnvOff`, `applyUploadPolicy`, `Config.UploadDiagnosticLogs` and `NewServer` say so, and
+`applyUploadPolicy`'s gives B830 as "What stays open is backlog B830." alone. The latch table's rows write with
+`t.Setenv`, its harness takes a row whose last `NewServer` must refuse (that error and not the launch environment's,
+nothing built, no upstream start reached, the variable as the process wrote it, and the words), and it gains eight rows:
+a first node without the key with nothing inherited (`EnvOff` false); a node without the key over an unreadable value
+written after a node with the key; a node with the key over one, inherited unset and true; a false written over an
+unset value, a 0 over an inherited false and a false over an inherited true, each holding nothing; and a 1 written over
+an inherited false (`OtherOff`). In 7306add3 the hint lists the three reasons, round 3's entry here gives B830 by its id
+alone and round 2's no longer names it, and `TestAnEmptyVariableLeavesTheFilesConsent` joins internal/config's tests.
+The rules patch rewords cli-serve.md's B749 line (the policy before any latch, the new error, Compose's empty forward,
+five more Don'ts) and its long form, whose account of round 3 gives B830 by its id alone.
+
+### Red first and the controls
+
+Round 5's latch table on round 4's code (1b4f2fbf's internal/tsnet in a copy, with a names-only shim declaring
+`ErrNoLogsEnvWrittenUnreadable`; `.tmp/_b749/r5-red-tsnet.log`, predicted in `r5red.predictions.txt` before it ran): red
+on the 4 rows predicted, green on the other 23. The node without the key over an unreadable value written in the process
+was refused in the launch environment's words; the node with the key over one, inherited unset and true, got
+`ErrNoLogsEnvUnreadable` and not the process's error; and the false written over an inherited true came out as
+`{Allowed:true EnvOff:true}`, in the launch environment's words, with a refusal that named the variable. The four pins
+(a first node without the key with nothing inherited; a false over unset; a 0 and a 1 over an inherited false) were
+green there, as predicted. Nine controls, each predicted in `.tmp/_b749/controls5.predictions.txt` before it ran, the
+files put back from memory and the tree found equal to HEAD, the runs with no mutation green; each came out as
+predicted:
+
+| | mutation | outcome |
+|---|---|---|
+| R01 | without the key, the current value read first, an unreadable one refused as the launch environment's (round 4's order there) | red: the latch row without the key over an unreadable value; the first-start table green |
+| R02 | the process's refusal is `ErrNoLogsEnvUnreadable` | red: the two rows with the key over an unreadable value |
+| R03 | `EnvOff` from the inherited value alone, with the key and nothing latched (round 4's reading) | red: the false written over an inherited true; the first-start table and the refused-start test green |
+| R04 | `OtherOff` from a byte difference, not a parsed true | red: the false over unset and the 0 over an inherited false |
+| R05 | without the key, the variable set before what the process inherited is recorded | red: 7 latch rows (no then yes and no then no, inherited unset and false; the first node without the key; the false and the unreadable value after the policy's true), 3 first-start rows (without the key, inherited unset, false and `maybe`, the last not refused) and the refused start without the key and nothing inherited (its words named the variable) |
+| R06 | without the key, the variable set after the record and before the inherited value is parsed | red: the first-start row without the key and inherited `maybe` (refused with the variable left true), and cmd/bridge's `TestTheUploadPolicyByKeyAndInheritedValue` on its two rows with `maybe` and the key absent or false; the latch table green |
+| R07 | an unreadable value written in the process taken for `OtherOff`, the node built | red: the two rows with the key over an unreadable value |
+| N01 | the loader reads an empty boolean variable as false | red: `TestAnEmptyVariableLeavesTheFilesConsent` on both rows, the true one on its value and its record, the false one on its record alone |
+| N02 | the empty check alone dropped | green, as predicted: `strconv.ParseBool` refuses an empty value, and the override is ignored with a warning and recorded nowhere |
+
+### Gates
+
+At 7306add3, in the build slot: `make test TEST_PKGS='./internal/tsnet/... ./internal/config/... ./internal/admin/...
+./cmd/bridge/...'` (the release tags, `-race -timeout 30m -p 4`, whose 1,800 s cover cmd/bridge's) on a git-archive
+copy of HEAD with `rules-b749-r5.patch` applied and git pointed at the worktree's index, as in round 4: internal/tsnet
+1.6 s, internal/config 14.9 s and internal/admin 1,033 s ok, and cmd/bridge red in one subtest, in 1,397 s:
+`TestAMatchWhoseReQueueDidNotLandIsReQueuedByTheNextSweep/cancelled_inside_the_reset_by_a_switch-off` ("the first
+sweep's re-queue landed: the case tests nothing"), the fingerprint sweep's timing precondition that B762's round 3
+measured failing 1 of 40 at its base, which nothing this round touches reaches. Run again in the slot, `make test`
+passed, cmd/bridge in 1,358 s and the other three packages from go's test cache, and that test alone under `-race`
+passed 40 of 40 in the worktree. The changed tests by name under `-race -count=50`, in the worktree, ok:
+internal/tsnet (the latch table, the first-start table, the refused start) 1.9 s, internal/config (the empty override)
+1.2 s, internal/admin (the settings prose beside its badge, the tile's line) 1.5 s, cmd/bridge (the policy table
+through every command path) 2.0 s. `go vet` of internal/tsnet and internal/config clean; go1.27.3's gofmt lists none
+of the changed Go files. On a git-archive copy of the final HEAD with the final patch applied, `make docs-check`
+passes, `TestEveryCitedTestNameExists` is green there and red with a ghost name, and verify_moves, given an `--edit`
+for the policy and controls paragraphs and the rule line, reports the one MISSING pair it cannot pair: the B749 line's
+old text beside its new (5,658 bytes) in both files.
+
+### After the reviews
+
+Codex's review of round 5 (P2): round 3's entry here still named B830 beside the hand-back, and the History's account
+of round 3 counted one of round 2's P2s as B830's. Both now name the hand-back alone; B830 stays named, by its id, only
+where a text says what stays open. The Claude API's review of round 5 found nothing.
+
+CI on f06b3b1f failed `TestALibraryChangeKeepsTheUploadConsent` on macOS and Windows alone: `bridge library add` probes
+the admin address before an offline write and refuses while it can't tell that no bridge serves there, and the test's
+config gave `adminAddress: 127.0.0.1:0`, which dials as refused on Linux but as an address that can't be assigned on
+macOS and Windows. The fixture takes an admin address now, and this test gives it `closedAdminAddr`'s closed port, which
+dials as refused everywhere: red on macOS before (CI's words), green three of three after.

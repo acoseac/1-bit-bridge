@@ -54,12 +54,19 @@ type allowedKeeper struct {
 	conditionMet func(root string) (string, error)
 }
 
-// allowedKeepers lists the one keeper whose doc names a condition not yet
-// met. internal/tsnet still returns errors.New strings from Status and
-// ListenTLS, and its tests match them by substring; the keeper waits for the
-// typed errors errors.Is could match. typedErrorIn decides when they have
-// landed.
-var allowedKeepers = []allowedKeeper{{
+// allowedKeepers lists the keepers whose doc names a condition not yet met:
+// none since backlog B749. Its one entry was internal/tsnet's, which waited
+// for the typed errors errors.Is could match; B749's (ErrNoLogsEnvUnreadable,
+// LogsRequiredError) met it, and the keeper went with it.
+// TestBlankKeeperScanOnFixtures walks an allowance of that shape through every
+// state it can be in (keeperFixtureAllowance).
+var allowedKeepers []allowedKeeper
+
+// keeperFixtureAllowance is the allowance internal/tsnet's keeper had until
+// its condition was met, which TestBlankKeeperScanOnFixtures scans its
+// synthetic trees with: typedErrorIn decides when typed errors have landed in
+// the fixture's internal/tsnet.
+var keeperFixtureAllowance = []allowedKeeper{{
 	file:    "internal/tsnet/tsnet_test.go",
 	src:     "errors.Is",
 	docSays: "Don't remove until typed errors land.",
@@ -731,8 +738,8 @@ var (
 // none: a sentinel (a var or const named ErrX or errX, or initialised by
 // errors.New, errors.Join, fmt.Errorf or another package's sentinel), or a
 // method `Error() string`, which makes its receiver an error type. An
-// errors.New inside a function, which is what internal/tsnet returns today,
-// is neither.
+// errors.New inside a function, as internal/tsnet's Status and ListenTLS
+// still return, is neither.
 //
 // It lists the directory rather than globbing it: under a checkout whose path
 // holds `[`, the root joins the pattern, matches nothing, and reads as "no
@@ -870,8 +877,8 @@ func isSentinelValue(e ast.Expr) bool {
 	return ok && sentinelName.MatchString(sel.Sel.Name)
 }
 
-// TestBlankKeeperScanOnFixtures runs scanBlankKeepers, with the real
-// allowedKeepers, over synthetic trees whose findings are known. On this
+// TestBlankKeeperScanOnFixtures runs scanBlankKeepers, with
+// keeperFixtureAllowance, over synthetic trees whose findings are known. On this
 // repo's own tree a clean scan reports nothing, so a change that lost a
 // shape, a skip rule, the scope check or an allowance's condition would pass
 // there unseen. The quiet shapes are the ones the scan must leave alone, each
@@ -921,7 +928,7 @@ func TestBlankKeeperScanOnFixtures(t *testing.T) {
 			root := filepath.Join(t.TempDir(), "clone[1]")
 			writeFixtureTree(t, root, keeperFixtureTree, c.changes, c.crlf)
 			rec := &docScanRecorder{t: t}
-			verdicts := scanBlankKeepers(rec, root, allowedKeepers, false)
+			verdicts := scanBlankKeepers(rec, root, keeperFixtureAllowance, false)
 			checkKeeperVerdicts(t, rec, verdicts, append(append([]string(nil), keeperFixtureVerdicts...), tsnetKeeper+c.tsnet))
 		})
 	}
