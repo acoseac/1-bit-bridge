@@ -13,23 +13,26 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 )
 
-// A hold given up (backlog B653's third and fourth rounds). Every holder of a
+// A hold given up (backlog B653's third to fifth rounds). Every holder of a
 // backups folder's lock runs each step it takes under the lock bounded
 // (hold.go): a verification (finish.go), the write of INCOMPLETE for a
-// verification its caller stopped before it began (abandonPending) and a
-// claim (owner.go). A step that overruns its bound is given up: its holder
-// answers its caller, runs no check and no prune, writes nothing but the
-// INCOMPLETE of a verification it gave up, and keeps all it holds (the lock,
-// and a verification's slot and the snapshot's ownership) until every step it
-// gave up has ended, so nothing protected runs beside a step that may still
-// have the bundle's files open, in this process or another. What a step given
-// up answers late is dropped.
+// verification its caller stopped before it began (abandonPending), a claim
+// (owner.go) and a prune (PruneContext); and what it lets go of at its end,
+// the snapshot's ownership and the lock, is bounded too. A step that overruns
+// its bound is given up: its holder answers its caller, runs no check and no
+// prune, writes nothing but the INCOMPLETE of a verification it gave up, a
+// write given up renaming nothing from then on, and keeps all it holds (the
+// lock, and a verification's slot and the snapshot's ownership) until every
+// step it gave up has ended, so nothing protected runs beside a step that may
+// still have the bundle's files open, in this process or another. What a step
+// given up answers late is dropped.
 //
 // A hold given up is marked, with no filesystem asked, under the folder's
 // resolved key and every spelling it was reached by, and the mark stands
 // until every hold is let go; it is raised only by an overrun, never by a hold
-// that keeps within its bound. Behind it, a verification, a claim or a prune
-// answers ErrCheckStillRunning at once, naming the snapshot: in this process
+// that keeps within its bound, nor by a wait that overran nothing. Behind it,
+// a verification, a claim or a prune answers ErrCheckStillRunning at once,
+// naming the snapshot, or the prune: in this process
 // by the mark, which each asks before any filesystem for a spelling the hold
 // was reached by (stuckBy), and in another by the marker the hold writes
 // beside the folder's lock (stuckMarkerName), best effort, which counts only

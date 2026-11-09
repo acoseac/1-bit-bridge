@@ -19,10 +19,11 @@ import (
 // console's doctor alike. And backup-lock, a warn shown only where the backups
 // folder grants no lock (backup.ProbeBackupsLock answers ErrBackupsUnlocked),
 // where nothing is verified or pruned (backlog B653's second round); and
-// backup-check, a warn shown only while a check that did not end holds the
-// backups folder (backup.StuckCheckOf, its third round). A hint that advises
-// a bridge backup command gives its config as the placeholder <bridge.yaml>,
-// and says to use the config this doctor read: the doctor names no path.
+// backup-check, a warn shown only while a check, or a prune, that did not end
+// holds the backups folder (backup.StuckCheckOf, its third and fifth rounds).
+// A hint that advises a bridge backup command gives its config as the
+// placeholder <bridge.yaml>, and says to use the config this doctor read: the
+// doctor names no path.
 const (
 	checkNameBackupNewest   = "backup-newest"
 	checkNameBackupVerified = "backup-verified"
