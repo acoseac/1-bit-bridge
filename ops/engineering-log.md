@@ -89199,8 +89199,9 @@ stopped stays stopped with the checks on again 77386550; the tests' waits on
 the switch alone 656bbc06 (two negative controls' misses, below); the
 example config's `update:` section c3477ca7; and this record. The rules go
 into `.claude/rules/config-lifecycle.md`, `wire.md`, `admin-console.md`,
-`cli-serve.md` and their History files through `rules-b761.patch`, which
-this worker cannot commit. B761's other part, the Deezer re-queue, is a
+`cli-serve.md`, `build-ci-tests.md` (a wait for a held request's stop,
+from the controls' two misses) and their History files through
+`rules-b761.patch`, which this worker cannot commit. B761's other part, the Deezer re-queue, is a
 later PR.
 
 ### What happened at main
