@@ -91170,3 +91170,180 @@ docs-check` passed, and again on a copy of the branch with the rules patch appli
 against the merge base of each main ref, 9d59c8f6, 0fd7e3f8, 7c1db6dd and 3d0a0d05, and
 against round 15's head, da707dab, while 08f88804 against da707dab failed it ('guarded code
 changed without qualificationVersion increase (56 -> 56)'), so 57 is this round's own.
+
+## 2026-11-09 — B728 B9 round 17: an occurrence a write still has to judge waits for that judgement
+
+Worker b728-b9, legion0 (Ubuntu 26.04, Linux 7.0, Go 1.27.3, 16 cores), branch
+`feat/b728-b9-choice` at 179459a1 (round 16, its rules applied). The brief, round 16's two
+reviews (Codex: a missed wake in the floor's measurement, the cleanup order; Claude: the
+drain ending between a write's publish and its reconciliation pinned as correct, the C5
+ordering excluded rather than forced, two waits bounded by the watchdog alone), CI's red on
+round 16's head (run 42619003055, `test -race (rest)`), and the two reviews of the brief's
+draft, folded into it. Commits: 42ba64e7 (the wait for the reconciliation's verdict, and the
+tests), bad4cf37 (qualification 58), 8b95c3d6 (the above-floor case's count, which the loaded
+soak broke), e622d159 (a comment that still named the fault-in-step taken out below), 7401bc31
+(the resume's case) and this record. The rules are a patch the orchestrator applies
+(`rules-b728-b9-r17.patch`): `output.md`'s second B9 line and its long form, and a bullet in
+`build-ci-tests.md`.
+
+**The window, confirmed.** `pendingChoice.done` closes after `refreshDSD` returns, its
+reconciliation and Revoke included (`chooseDSD`'s written path: `oweProbe`, `refreshDSD`,
+`settleChoice`). But `pendingFor` answers nil once the set published plays the occurrence's
+rate as the pending one does, which the write's own publish makes so: from that publish to
+the reconciliation's step nothing held an occurrence admitted under the set the write
+replaced. Round 16's case pinned the consequence, against its own docstring: the drain for
+b's transport ending there, the producer's transition claimed b and opened its own sink
+(`Opens` 2), whose activation took it back unwritten. Re-judging at the publish was not taken:
+the set published alone cannot say whether the occurrence is kept, handed off again or its
+session's DSD revoked, which the reconciliation decides in one step under the session's lock.
+
+**The fix** (42ba64e7). An occurrence admitted under a set a publish has replaced, opened,
+neither stale nor dropped (`unjudgedLocked`), waits for that publish's reconciliation, which
+every refresh runs under the refreshes' lock: the session's `judged`, closed and made anew in
+the reconciliation's step and again by Revoke once it has dropped what a revocation takes (an
+occurrence the step judged revoked is neither kept nor stale until Revoke drops it). The
+producer's transition waits for it before it claims the occurrence's own sink, the sink before
+it drained, bounded then by the session's stop or release, its context; its gapless join and a
+converted join window wait for it only while the sink holds more than its floor, the reporter
+waking the producer at each measurement (`awaitingWrite`, `holdingLocked`), so the floor still
+ends the wait: past it the sink drains for the occurrence's own transport, an honest gap, and
+the transition waits there; a resume between transports waits for it in its loop beside a
+write's. Each wait takes `judged` under the session's lock, lets the lock go and waits on it
+(`waitWake` beside `wakeP` and the session's context; the resume's select beside its call's
+context and the session's), so a close between the two is not missed, and none blocks under
+the session's lock or on the refreshes' (`dsdMu`), which the reconciliation takes; the
+reconciliation waits on nothing of the producer's. An occurrence admitted under the set
+published waits for nothing: `TestAnOccurrenceBesideAWriteIsNotRevoked` counts its verdict
+waits with its write waits, and both stay at zero. `Seams.Unjudged`, nil in production, runs
+where each wait begins, its lock let go.
+
+**Tried and taken out: the revocation's fault in the reconciliation's own step.** The first
+reading of CI's red took the engine's hand-off for its cause (below), and the fix recorded a
+revocation's fault in the reconciliation's step wherever a sink plays the session's DSD, as
+round 6 does for an activating occurrence's. It answered no path round 16 left open (f's
+replacement cannot be judged before Revoke, below), and a control that removed it again (M9)
+left every test of `internal/player/playback` passing (223) and every one of
+`internal/alsapcm` but the subtest written for it: it is not in 42ba64e7.
+
+**CI's red, its branch not found.** `TestAConvertedJoinWindowWaitsForAWriteThatChangesItsSuccessor/the_write_settling_first`
+failed at line 997 on round 16's head: a's window decided, the session's one fault
+`native_revoked` (line 993 passed). CI checked out 893025b7, the merge of 179459a1 into main
+at 71f707ab, which is an ancestor of 179459a1: round 16's tree. What was ruled out, each with
+its evidence. The decided step is `holdLocked`'s alone (`git grep` of `decided: true`), and
+`holdLocked` runs from `next()` alone, which stops first on a recorded fault; the fault is
+Revoke's (the reconciliation's other record is an activating occurrence's, and neither a nor f
+activates), recorded under the session's lock inside the write's refresh. So the decision
+came in a step before Revoke. Before the write publishes, the pending write holds the window
+(the trace below: the window's two evaluations, both waiting on it). From the publish to the
+reconciliation's step, f admitted under the replaced set is unsettled; after the step it is
+stale, or replaced by an occurrence still opening. The end named after a needs f's
+replacement refused and its entry skipped: held where the reconciliation has asked the engine
+to hand f off again and has not called Revoke (its line saying the session's DSD stops, the
+boundary CI's log names: the engine's line of the hand-off came before that line there), the
+replacement was prepared and its open waited in `admitDSD`'s `dsdStale` for the refreshes'
+lock, which the write's refresh holds through Revoke: no refusal, no end, no decision in 5 s
+(the dump, round 16's code). A round of the write, its pending settled before the next is
+stored, would leave f settled, but needs the state to move between the write's reading and its
+closure, and nothing writes it in a converted session (`noteDriverAccepted` comes from a
+native open alone, `noteStreamingObserved` needs a native or DoP plan); every traced write
+took one round. The floor: the fake DAC plays only what a test grants, and the trace shows the
+lookahead at 88,128 frames (a's 88,200 less its window of 72) at both evaluations; `Submitted`
+is what the producer handed the sink. A rig content open that could refuse a second open of
+one file: the resolver hands out one per open. A trace of every evaluation of the window in a
+quiet run, and 2,400 runs of round 16's case (GOMAXPROCS 4 and 2 beside 8 busy processes) with
+a random pause (a sleep below 1.5 ms, or a yield) at eight boundaries (the reconciliation's
+unlock, its revocation's line, Revoke's entry, the write's settle, the backend's Prepare, an
+open's end, the producer's and the reporter's loops) and every decision printed: no decision,
+no failure, one round each; and 1,250 runs from the first diagnostic (GOMAXPROCS 1 and 2
+beside 16), none. Production is not changed for it. The boundary is a case of its own, the
+engine's hand-off answered before the revocation (the line held, the replacement's Prepare
+awaited, a's window not decided, then the session's fault), which passes on round 16's code
+as on round 17's: it guards the ordering, and is no red of CI's.
+
+**The orderings forced, and their reds on round 16's head** (a copy of 179459a1 with round 17's
+test files and a names-only `Seams.Unjudged`). The drain ending between the write's publish and
+its reconciliation, `occurrenceOf` before the hold: the case waits for b's verdict wait, or b's
+own sink, and finds a's open alone, b's activation not begun; then the reconciliation's
+hand-off, `Opens` 1 and b skipped (round 16: '2 opens, b's activation begun false'). The
+write's reconciliation held above the floor, the gapless case: b waits for the verdict, asked
+again at each reporter's step, and the sink drains at its floor, b's own sink waiting for the
+verdict, one open, one drain, no fault (round 16: 'waited 5s for the producer to hold b out of
+a's sink again at the reporter's step, the measurement at 350 ms': the B7 guard's wait was
+woken by nothing past the publish). The converted case of it: a's window waits for f's verdict
+above the floor and is decided at it, the sink never dry (round 16 waited on the reporter's
+wakes, the case red there only for want of the seam; its control is M1). The reconciliation
+run with the producer held at its verdict wait (`holdUnjudged`): the write answers within the
+bound while the producer is held. The engine's stop with the reconciliation held: the stop
+answers, and the backend's goroutines end within the bound, the reconciliation still held.
+b handed into a's sink before the write (C5): the producer let go first, b's write step in a's
+sink with no drain and one open; DSD off without the go-ahead answers `would_interrupt`, no
+choice written, b plays as it was, never waiting for the write. And a resume between transports,
+the write that caps b's rate published and its reconciliation held
+(`TestAResumeBetweenTransportsWaitsForTheReconciliationsVerdict`, 7401bc31): the resume waits for
+b's verdict and opens nothing; let go, b is handed off again, and only a's node ever opened
+(round 16: 'the resume opened b's node (2 opens after 1) while the reconciliation that judges b
+was held').
+
+**Point 2, the floor's measurement looked for by what stays.** The case looked for the writer
+back on the DAC once the measurement's STATUS was let go; the reporter's step that
+`tickWithin`'s second send begins can come after it, waking the producer, which reads the
+floor and has the sink drain before the look, and the writer then never shows waiting again
+(round 16's own control C6 met the same step). It now looks for the writer back on the DAC or
+the drain begun, either of which stays. Forced on round 16's tests (the late step made the
+case's own: one tick once the writer is back, the drain awaited): 'waited 5s for the writer
+back on the DAC, the measurement at a's last frames established'; the case of it on round
+17's passes.
+
+**Point 3, the cleanup order.** Four gates were made before their rigs, so their release ran
+after the rig's stop: `TestNoSinkOpensForASuccessorWhileAWriteChangesItsRate`'s drained hold,
+the converted window's producer hold (`newConvSteps`), the gapless test's producer hold and its
+publish hold. Each is let go before the rig stops now: the release registered again after the
+rig, and the publish hold's gate made by `arm`, once the rig is built.
+
+**Point 5, the bound.** `occurrenceOfWithin`, `preparedOccWithin` (on `waitCallWithin`,
+`waitEventsWithin`), `heldWithin` and `waitOrderedEither`; every wait in the round's cases at a
+forced ordering is within `alsapcm.Ordered`.
+
+**Controls**, predicted before each ran (`r17-predictions.txt`), each mutation's bytes
+restored from memory, `-watchdog 20s` (`Ordered` 5 s). P3a to P3c, a case failed while its
+gate holds: on round 17's code each ended in under 0.4 s with no dump; on round 16's each
+waited out the rig's stop, about 22 s, its goroutines unjoined and a content never closed.
+P3d, failed while the publish holds: both ended at once, the publish's hold never blocking a
+stop. P5, b's open held so it is never prepared while the producer is held: round 17's failed
+at 'waited 5s for the successor prepared', round 16's at 20 s, then 22 s more in the stop. M1,
+the window's verdict wait taken before the floor's check: the converted above-floor case
+failed at 'waited 5s for a's window decided at the floor, the reconciliation held'. M2, the
+gapless verdict wait without its floor: the gapless above-floor case failed at 'waited 5s for
+the producer's transition for b at the sink's measured floor'. M3, no verdict wait in the
+transition: the drain case failed at '2 opens'. M4, the verdict seam taken under the session's
+lock: the case with the producer held failed at 'the write was not answered within 5s'. M5,
+the transition's verdict wait deaf to the session's end: the stop case failed at the backend's
+goroutines, '3 goroutines still run'. M8, a successor in a's sink not counted by the write:
+the C5 case failed at 'written, want would_interrupt'. M9 is above.
+
+**The loaded soak's find.** The round's four tests `-count=200 -race`, beside the chaos
+diagnostic's load: the gapless above-floor case failed 92 times in 200, at its own check
+(an `Errorf`; the case otherwise passed). It took any producer wait after the publish, from a
+count made before it, for the verdict's, and the reporter can wake the producer into a wait for
+the write itself as the write publishes. 8b95c3d6 counts the verdict's waits once `toFloor`'s
+own, which come long after the publish, have passed: 200 in 200 then, and red still on round
+16's head, at `toFloor`'s wait at the reporter's step.
+
+Round 17's gates, at legion0, through the build slot, in two sessions on 7401bc31. The first:
+`make fmt` left the tree clean; `make vet` passed for linux/amd64, `GOOS=windows`,
+`GOOS=darwin` and `GOOS=linux GOARCH=386`; `go test -race` on `./internal/alsapcm/...`,
+`./internal/player/...` and `./cmd/bridge/...` passed (1424 s); CI's two native-integration
+runs passed under the overlay, every name CI requires among them; and the qualification check
+passed at 58 against the merge base of each main ref, 9d59c8f6, 0fd7e3f8, 7c1db6dd, 3d0a0d05
+and 71f707ab, and against round 16's head, 179459a1, while 42ba64e7 against 179459a1 failed it
+('guarded code changed without qualificationVersion increase (57 -> 57)'), so 58 is this
+round's own. The second: the round's five tests by name, `-race -count=200 -v`, each test and
+each of their fifteen subtests with an explicit PASS 200 times, none skipped and none failed
+(557 s); the same 200 times from a race binary at GOMAXPROCS=3 beside 20 busy processes (CI's
+macOS leg, three cores with packages in parallel, approximated on the 16), every test and
+subtest passing 200 times, none skipped (1322 s); `TestEveryCitedTestNameExists`,
+`TestEveryBridgeWordIsInTheProtocol`, `TestNoDocblockNamesAnotherDeclaration`,
+`TestDSDOutputProtocolTokens` and the qualification package; `make docs-check`; and the
+qualification check at the head. The rules patch applied to a disposable copy of the final head
+passed `make docs-check` and those guards with `TestQualificationRunbookVersion`. Windows was not
+run here; the rig skips there as before.
