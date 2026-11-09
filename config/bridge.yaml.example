@@ -191,6 +191,24 @@ libraryName: "My Music Library"
 #   enabled: false
 #   deezerEnabled: false
 
+# update: the update check. While it is on, the default, the bridge asks
+#   GitHub's releases API for its latest release when it starts and then once
+#   every check interval (6 h; checkIntervalHours sets another, 1 h at least),
+#   and once for each "Check now" and each `bridge update`: one request, with
+#   no credential, naming the bridge's version and nothing of the library. An
+#   install downloads the release's archive and checksums from GitHub too.
+#   checkEnabled: false stops all of it at once (the admin console's switch,
+#   Settings -> Updates, writes only an off; also BRIDGE_UPDATE_CHECK_ENABLED):
+#   no check, no "Check now", and no new release installed, by hand or
+#   automatically (autoInstall keeps its setting and waits); a rollback still
+#   works. `bridge update` reads this file and that variable as the service
+#   does, so an off set only in the service's environment (a systemd unit, a
+#   compose file) must be in your shell's too for the command to see it.
+#   autoInstall (off by default) installs what a check finds, inside
+#   quietHours ("HH:MM-HH:MM", local time) when they are set.
+# update:
+#   checkEnabled: false
+
 # atlas: optional RICH-tier metadata (artist bios, album descriptions, genres).
 #   Disabled by default. Distinct from `enrich` above (artwork + MusicBrainz
 #   source): when enabled, the bridge accepts metadata pushed by the 1-bit app
