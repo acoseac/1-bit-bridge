@@ -212,10 +212,12 @@
   clean tree the sweep reports nothing, so `TestBlankKeeperScanOnFixtures`
   pins every shape, refused shape, scope rule, skip rule and allowance state,
   the last with that allowance's shape kept as a fixture
-  (`keeperFixtureAllowance`): 49 of 51 mutations turn it red, and
-  five turn the tree red. Of the two that stay green, one drops the CRLF
-  normalisation (the scan is CRLF-safe without it) and one widens a check
-  that `keep` makes again.
+  (`keeperFixtureAllowance`). Measured on 9f49ab2f, before B749 removed the
+  keeper and its allowance, and not since: 49 of 51 mutations turned it
+  red, and five turned the tree red, one of them (NC18) by mutating the
+  real allowance's condition text, which no longer exists. Of the two
+  that stayed green, one drops the CRLF normalisation (the scan is
+  CRLF-safe without it) and one widens a check that `keep` makes again.
 
 - **A test that sweeps this repo's own files decides from the NAME what it
   opens, before it opens anything** (#993). Emacs locks a file it is editing
