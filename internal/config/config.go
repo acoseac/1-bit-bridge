@@ -1193,7 +1193,9 @@ type TailscaleConfig struct {
 	// cannot be read keeps the library name earlier versions used, with a
 	// line at the start saying so. Never derived from the library, the
 	// host, its user or a path for a new node. After `bridge tsnet logout`
-	// the next node is new; a restored backup's is the restored profile's.
+	// the next node is new. A backup does not carry <dataDir>/tailscale: a
+	// restore leaves the node on that box as it was, and on a box without
+	// that state the node is new.
 	Hostname string `yaml:"hostname,omitempty"`
 
 	// UploadDiagnosticLogs lets the embedded node (tsnet mode) upload
