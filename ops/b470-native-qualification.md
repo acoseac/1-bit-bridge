@@ -1,6 +1,6 @@
 # B470 native qualification — owner approval and provisional evidence
 
-QualificationVersion is **58**. All older evidence must be rerun for the harness, native included. The
+QualificationVersion is **59**. All older evidence must be rerun for the harness, native included. The
 harness never creates approval. Since B728 no production path reads an approval record or a candidate:
 the player plays DSD by its effective policy (`ops/plan-b728-dsd-capability-design.md`). This runbook
 is the engineering harness's. Its evidence binds `qualificationVersion`, whose guard covers the DSD byte
@@ -249,7 +249,7 @@ GOTOOLCHAIN=go1.27.3 go test -race -tags ts_omit_webclient,ts_omit_debugeventbus
 
 ## Round 3 evidence rules
 
-Historical round 3 used qualificationVersion 4; current version is **58**. A native contact's
+Historical round 3 used qualificationVersion 4; current version is **59**. A native contact's
 Contact.SchemaVersion remains **2**; a DoP contact's is **3**. All older
 contacts are invalid; repeat contact on this build. Required Device and Subdevice
 fields bind the configured PCM endpoint, including a nonzero subdevice, before
@@ -338,7 +338,7 @@ still resolve inside it). `dsdMode: native` or `auto` enables only approved nati
 
 The Go contracts are `qualification.Approval`, `ApprovalBody`, `ApprovedPolicy`, `Edge`
 and `Evidence` in `internal/player/qualification/approval.go`. JSON uses those exact
-exported field names. SchemaVersion=1, or 2 with Transitions and QualifiedOn (2d.2, below); QualificationVersion=58; Revision is the owner's
+exported field names. SchemaVersion=1, or 2 with Transitions and QualifiedOn (2d.2, below); QualificationVersion=59; Revision is the owner's
 revision; Identity is the observed VID/ProductID/manufacturer/product/bcdDevice,
 anchored controller/port, interface, device and subdevice. No serial or card number is
 persistent identity. Unchanged descriptors may retain approval after replug/restart;
@@ -386,7 +386,7 @@ At least one native fixture must finish with measured playback of that tuple.
 NativeTuple and NativeCompleted record that execution; PCM-only lists or completion
 cannot qualify it. LifecycleActions count observed native outcomes: pause/resume,
 release/reopen, navigation between native occurrences, Stop, and natural completion.
-An admitted command alone is insufficient. Version 58 invalidates older evidence.
+An admitted command alone is insufficient. Version 59 invalidates older evidence.
 List all candidate directional edges explicitly. No command generates that record.
 
 ```sh
@@ -425,7 +425,7 @@ or evidence names resolving to the state directory itself before any ancestor
 walk. Native monitoring remains fail-closed without a grace period. The overlay
 generator requires both integration suites before publishing its overlay.
 Guarded API, config, extractor, output-play and approval paths changed; rerun
-qualification with version 58. ExtractorVersion 30 retains the first parsed DFF
+qualification with version 59. ExtractorVersion 30 retains the first parsed DFF
 PROP's known format facts when a later PROP makes compression unsupported.
 
 Version 13 also covers the deterministic PCM trace capture test. It changes no
@@ -1273,8 +1273,47 @@ the engine to hand an occurrence off again; a successor handed into its predeces
 before the write; and a reporter's step that comes once the floor's measurement is
 established. Every gate a case makes before its rig is let go before the rig stops, and every
 wait at a forced ordering is bounded by a few seconds. No packer, plan, harness reader or record
-changes. What plays changes in one window alone: between a publish and its reconciliation a
-successor's own sink no longer opens, to be taken back unwritten. The harness's approval
+changes. What plays changes in two ways, each between a publish and its reconciliation, after
+any refresh's publish and not only a choice's write (this sentence corrected with version 59's
+record, round 18: it named the first alone). A successor's own sink no longer opens there, to
+be taken back unwritten. And `next()`'s gapless join: a successor, native, DoP or converted (a
+converted one's transport is PCM), admitted under the set the publish replaced, was held out
+of the sink it would join until the reconciliation woke the producer, with no floor, however
+long the sink ran on what it held; it now waits only while that sink holds more than its floor,
+and at the floor the sink drains and the successor's own sink opens once the reconciliation has
+judged it: an honest gap where a gapless join was meant. Apart from both, a converted join
+window waiting for that verdict ends at the floor, zero-padded, as one waiting for a successor
+that has not settled always did, and its successor, once judged and settled, abuts it in the
+same sink, with no drain or reopen, where the transport is the same. The harness's approval
 admission reads a record of version 58 alone; the migration reads an owner's record of 35 to 58
 (`LegacyVersion` stays 35). Every earlier version's harness evidence is stale to the harness,
 as at every bump.
+
+Version 59 is B728 B9's round 18: the converted join window's decision, the reconciliation of a
+set whose refresh did not return, and the tests that force both. In
+`internal/player/playback/convert.go` the window's decision (`holdLocked`) reads the choice's
+write pending first and the set published once after it, for every check: it read the set first
+and asked about the write after, which read the set again, so a decision whose reads fell on
+either side of a write's publish (the publish takes no session's lock) found the write's set
+published and nothing pending for its successor and continued the window into the successor's
+bits, the reconciliation then revoking the session's DSD. In `dsd_policy.go` a refresh that finds
+the set the same reconciles it where no reconciliation of it returned (`dsdJudged`): a refresh
+that published and panicked before its reconciliation (a choice's write's among them) left an
+occurrence admitted under the set it replaced unjudged, playing on until the set changed again
+or the session ended; the next refresh, the session monitor's at most 100 ms later while a session
+holds DSD, judges it now, keeping it, handing it off again or revoking its session's DSD. Two test
+seams are nil in production (`Seams.Deciding`, `Seams.Admitting`). Under the prefix,
+`TestAConvertedJoinWindowWaitsForAWriteThatChangesItsSuccessor` forces the write's publish, and its
+panic at its publish, between the decision's two reads, the sink's lookahead above its floor;
+the panic at the publish then the monitor's unchanged refresh; the decision made before the write,
+which the write's reconciliation answers by revoking the session's DSD; the floor ending a wait no
+write ends, at the first reporter step after the floor's measurement; and the replacement's
+admission seen to begin while a reconciliation is held. `TestAGaplessSuccessorWaitsForAWriteNoLongerThanTheSinksLookahead`
+holds the producer at its wait across the floor's measurement, so each order of a reporter's step
+and the case's look is forced and asserted. No packer, plan, harness reader or record changes.
+What plays changes in two windows: a converted window decided between a write's publish and its
+reconciliation waits for the verdict instead, and ends at the floor as before if none comes; and
+an occurrence a lost reconciliation left unjudged is judged by the next refresh. The harness's
+approval admission reads a record of version 59 alone; the migration reads an owner's record of
+35 to 59 (`LegacyVersion` stays 35). Every earlier version's harness evidence is stale to the
+harness, as at every bump.
