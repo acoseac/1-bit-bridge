@@ -459,6 +459,26 @@ func (b *Backend) pendingFor(o *occ) *pendingChoice {
 	return nil
 }
 
+// unjudgedLocked reports whether o, a DSD occurrence admitted under a set,
+// was admitted under one a publish has replaced since, which that publish's
+// reconciliation has not judged yet (B728 B9 round 17). A choice's write
+// publishes before it reconciles, as every refresh does, and is pending for
+// o only until it publishes (pendingFor compares the set published), while
+// the set published alone cannot say whether o is kept, handed off again or
+// the session's DSD revoked: the reconciliation decides that in one step
+// under s.mu (reconcileDSD), after which o is admitted under the set
+// published or stale, the revocation's fault recorded where a sink plays the
+// session's DSD, and Revoke, just after, drops what the revocation takes,
+// each step closing s.judged. What would open o's own sink, join o to a sink
+// or end a window before it waits for them (s.judged); one admitted under
+// the set published now waits for nothing, and one still opening is its
+// open's end's to admit again (readmitDSDLocked), never a reconciliation's.
+// Every caller asks it of an occurrence no sink of its own holds, which every
+// reconciliation judges once its open has ended. s.mu is held.
+func (s *session) unjudgedLocked(o *occ) bool {
+	return o.opened() && o.admitted != nil && o.admitted != s.b.dsd.Load() && !o.stale && !o.dropped
+}
+
 // settleOpen takes s.mu for the step that ends o's open, as lockSettled
 // does, and asks again, its lock let go, an admission the effective policy
 // refused under a set that is not the one published now (B728 B9 round 2,

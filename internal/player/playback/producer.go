@@ -52,6 +52,10 @@ type step struct {
 	// awaits is the occurrence a wait is for while a choice's write is
 	// pending that plays its rate otherwise (the ChoiceAwaited seam).
 	awaits *occ
+	// verdict is the occurrence a wait is for while the reconciliation of a
+	// set published since its admission has yet to judge it (unjudgedLocked,
+	// the Unjudged seam, B728 B9 round 17).
+	verdict *occ
 }
 
 // produce is the session's producer, the one goroutine that decodes, packs
@@ -84,6 +88,9 @@ func (s *session) produce() {
 		case stepWait:
 			if st.awaits != nil {
 				s.b.choiceAwaited(st.awaits.id)
+			}
+			if st.verdict != nil {
+				s.b.unjudged(st.verdict.id)
 			}
 			if !s.waitWake(st.wait) {
 				return
@@ -187,13 +194,21 @@ func (s *session) next() step {
 			wake(s.wakeR)
 			return step{kind: stepFinish}
 		}
-		if o.admitted != nil && o.admitted != s.b.dsd.Load() {
+		if s.unjudgedLocked(o) {
 			// A gapless DSD successor joins only under the set published now,
 			// asked with no file read or lock on the audio path (B728 B7): one
-			// admitted under a set a refresh has replaced waits for that
-			// refresh's reconciliation, which keeps it under the new set or
-			// hands it off again, and wakes the producer.
-			return step{kind: stepWait}
+			// admitted under a set a refresh, or a choice's write, has replaced
+			// waits for that publish's reconciliation, which keeps it under the
+			// new set, hands it off again or revokes the session's DSD, and wakes
+			// the producer (judged). Only while its sink holds more than its floor
+			// (B728 B9 round 17), as for a write pending: past it the sink would
+			// run dry, so it drains for the successor's own transport, whose sink
+			// opens once the successor is judged (transition).
+			if outFloorLocked(c) {
+				return step{kind: stepTransition, o: o}
+			}
+			s.awaitingWrite = true
+			return step{kind: stepWait, wait: s.judged, verdict: o}
 		}
 		if o.plan != nil && o.permission != nil {
 			s.mu.Unlock()
@@ -548,6 +563,23 @@ func (s *session) transition(o *occ) bool {
 			case <-pend.done:
 				s.b.choiceWoke(o.id)
 			case <-s.ctx.Done():
+				return false
+			}
+		case s.unjudgedLocked(o):
+			// Admitted under a set a publish has replaced since, which that
+			// publish's reconciliation has not judged yet (B728 B9 round 17): a
+			// choice's write is pending only until it publishes, and no sink of
+			// its own opens until the reconciliation has judged it, so one the
+			// set refuses is handed off again, or its session's DSD revoked,
+			// before any device opens for it. Its sink before it has drained, so
+			// nothing plays out meanwhile; the reconciliation, which every
+			// publish runs and which never waits on the producer, ends the wait
+			// (judged), and so does the session's stop or release (its
+			// context).
+			judged := s.judged
+			l.unlock()
+			s.b.unjudged(o.id)
+			if !s.waitWake(judged) {
 				return false
 			}
 		default:

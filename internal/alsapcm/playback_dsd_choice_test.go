@@ -172,6 +172,9 @@ func TestAnOccurrenceBesideAWriteIsNotRevoked(t *testing.T) {
 				}
 			},
 			ChoiceAwaited: func(engine.OccurrenceID) { awaited.Add(1) },
+			// A wait for a reconciliation's verdict counts too (round 17):
+			// admitted under the set published, the occurrence waits for none.
+			Unjudged: func(engine.OccurrenceID) { awaited.Add(1) },
 		})
 		t.Cleanup(p.letGo)
 		res := d.choose(choiceReq(t, d, dsdstate.ModeConvert, 1))

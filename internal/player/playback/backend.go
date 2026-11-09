@@ -166,6 +166,14 @@ type Seams struct {
 	// write is pending, its session's lock let go (B728 B9 round 2). It may
 	// block, holding that goroutine there.
 	ChoiceWoke func(o engine.OccurrenceID)
+	// Unjudged runs where a step of occurrence o's waits for the
+	// reconciliation of a set published since o was admitted to judge it
+	// (unjudgedLocked, B728 B9 round 17): the producer's transition before it
+	// opens o's own sink, its gapless join and a converted join window above
+	// the sink's floor, and a resume's open between transports, its session's
+	// lock let go, before the wait. It may block, holding that goroutine
+	// there.
+	Unjudged func(o engine.OccurrenceID)
 	// Opened runs on an opener's goroutine once occurrence o's open, of
 	// ref's content, has returned, its admission made or refused, before the
 	// step that ends the open takes the session's lock (B728 B9 round 2): the
@@ -209,6 +217,13 @@ func (b *Backend) releasingSeam(s engine.SessionID) {
 func (b *Backend) choiceWoke(o engine.OccurrenceID) {
 	if sm := b.cfg.Seams; sm != nil && sm.ChoiceWoke != nil {
 		sm.ChoiceWoke(o)
+	}
+}
+
+// unjudged is the Unjudged seam.
+func (b *Backend) unjudged(o engine.OccurrenceID) {
+	if sm := b.cfg.Seams; sm != nil && sm.Unjudged != nil {
+		sm.Unjudged(o)
 	}
 }
 

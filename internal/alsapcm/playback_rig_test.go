@@ -1175,15 +1175,27 @@ func (r *rig) tickUntilStopped(why engine.Reason) *engine.Snapshot {
 // waitEvents waits until the events reported satisfy cond.
 func (r *rig) waitEvents(what string, cond func([]event) bool) []event {
 	r.t.Helper()
-	waitOn(r.t, what, r.rec.ch, func() bool { return cond(r.rec.events()) })
+	return r.waitEventsWithin(alsapcm.Watchdog(), what, cond)
+}
+
+// waitEventsWithin is waitEvents within bound (B728 B9 round 17).
+func (r *rig) waitEventsWithin(bound time.Duration, what string, cond func([]event) bool) []event {
+	r.t.Helper()
+	waitWithin(r.t, bound, what, r.rec.ch, func() bool { return cond(r.rec.events()) })
 	return r.rec.events()
 }
 
 // waitCall waits until the engine has made a call that satisfies cond.
 func (r *rig) waitCall(what string, cond func(call) bool) call {
 	r.t.Helper()
+	return r.waitCallWithin(alsapcm.Watchdog(), what, cond)
+}
+
+// waitCallWithin is waitCall within bound (B728 B9 round 17).
+func (r *rig) waitCallWithin(bound time.Duration, what string, cond func(call) bool) call {
+	r.t.Helper()
 	var got call
-	waitOn(r.t, what, r.rec.ch, func() bool {
+	waitWithin(r.t, bound, what, r.rec.ch, func() bool {
 		for _, c := range r.rec.callList() {
 			if cond(c) {
 				got = c

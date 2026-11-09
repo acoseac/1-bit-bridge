@@ -863,7 +863,10 @@ func (s *session) judgeDSDLocked(o *occ, next *dsdSet, replans bool) dsdJudgemen
 // (policy.Plan.Same), its frames PCM frames. A change of the set never asks a
 // user's consent here: the safety changes (the gain leaving unity, the
 // identity changing, the DAC leaving, the state no longer reading) act at
-// once; a choice's write (B9) asks first, by the same classification.
+// once; a choice's write (B9) asks first, by the same classification. The
+// step that judged the session closes judged, and so does Revoke once it has
+// dropped what the revocation takes (round 17): what waits for a
+// reconciliation's verdict (unjudgedLocked) asks again at each.
 func (s *session) reconcileDSD(next *dsdSet) {
 	var revoke []string
 	var replan []engine.OccurrenceID
@@ -926,6 +929,11 @@ func (s *session) reconcileDSD(next *dsdSet) {
 			replan = append(replan, o.id)
 		}
 	}
+	// The session judged: what waited for this reconciliation's verdict
+	// (unjudgedLocked, B728 B9 round 17) asks again, finding what it waited
+	// for kept, held back (stale), or still to be dropped by Revoke, below.
+	close(s.judged)
+	s.judged = make(chan struct{})
 	s.mu.Unlock()
 	for _, id := range replan {
 		re.Replan(s.id, id, "its DSD plan left the effective set")

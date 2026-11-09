@@ -59,10 +59,19 @@ type session struct {
 	chain   []*occ
 	writing *occ // the occurrence the producer writes, nil between occurrences
 	// awaitingWrite is the producer holding a successor out of its sink
-	// while a choice's write pending plays its rate otherwise (next, B728 B9
-	// round 2): the reporter wakes it at each measurement, so the sink's
-	// lookahead is read as the sink plays and the wait ends at its floor.
+	// while a choice's write pending plays its rate otherwise, or while the
+	// reconciliation of a set published since the successor's admission has
+	// yet to judge it (next, B728 B9 rounds 2 and 17): the reporter wakes it
+	// at each measurement, so the sink's lookahead is read as the sink plays
+	// and the wait ends at its floor.
 	awaitingWrite bool
+	// judged is closed, and made anew, each time a reconciliation has judged
+	// the session's occurrences against the set it published, in the step
+	// that judged them (reconcileDSD, B728 B9 round 17), and again once
+	// Revoke has dropped what a revocation takes: a wait for that judgement
+	// (unjudgedLocked) takes it under s.mu, lets the lock go, waits on it, and
+	// asks again.
+	judged chan struct{}
 	// endAfter is the occurrence nothing follows (a Prepare with no
 	// successor), 0 for none.
 	endAfter engine.OccurrenceID
@@ -278,7 +287,7 @@ func newSession(b *Backend, id engine.SessionID) *session {
 	return &session{
 		b: b, id: id, ctx: ctx, cancel: cancel,
 		startDone: make(chan struct{}), down: make(chan struct{}), firstIn: make(chan struct{}),
-		wakeP: make(chan struct{}, 1), wakeR: make(chan struct{}, 1),
+		wakeP: make(chan struct{}, 1), wakeR: make(chan struct{}, 1), judged: make(chan struct{}),
 	}
 }
 
@@ -1501,23 +1510,39 @@ func (s *session) resume(ctx context.Context) (how engine.ResumeResult, err erro
 	// sink exists to close the node with the session's life. Every choice's
 	// write pending that plays its rate otherwise is waited for first, asked
 	// again under the session's lock each time one settles (B728 B9 round 2,
-	// point 1: another may be pending by then), until the call's context or
-	// the session's release ends the wait; in the step that finds none the
-	// open is claimed, so a write that classifies beside it counts the
-	// occurrence as reaching its sink. An occurrence a write left being
-	// handed off again opens nothing here: the producer waits for its
-	// replacement, which opens its own sink.
+	// point 1: another may be pending by then), and so is the reconciliation
+	// of a set a publish has put in place of the one the occurrence was
+	// admitted under, a write's once it has published among them (round 17,
+	// unjudgedLocked), until the call's context or the session's release ends
+	// the wait; in the step that finds neither the open is claimed, so a write
+	// that classifies beside it counts the occurrence as reaching its sink. An
+	// occurrence a write left being handed off again opens nothing here: the
+	// producer waits for its replacement, which opens its own sink; nor does
+	// one a revocation dropped.
 	l.lock()
 	if err := s.callableLocked(); err != nil {
 		l.unlock()
 		return 0, err
 	}
-	for p := s.b.pendingFor(between); p != nil; p = s.b.pendingFor(between) {
+	for {
+		var settledW, judged <-chan struct{}
+		if p := s.b.pendingFor(between); p != nil {
+			settledW = p.done
+		} else if s.unjudgedLocked(between) {
+			judged = s.judged
+		} else {
+			break
+		}
 		l.unlock()
-		s.b.choiceAwaited(between.id)
+		if settledW != nil {
+			s.b.choiceAwaited(between.id)
+		} else {
+			s.b.unjudged(between.id)
+		}
 		select {
-		case <-p.done:
+		case <-settledW:
 			s.b.choiceWoke(between.id)
+		case <-judged:
 		case <-ctx.Done():
 			return 0, ctx.Err()
 		case <-s.ctx.Done():

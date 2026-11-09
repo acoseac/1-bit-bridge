@@ -447,7 +447,9 @@ func (b *Backend) EscalateNative(r engine.ReleaseRequest) {
 // dropped at once, as a native sink is released, the session faulting; a PCM
 // sink holds no such frames while it plays PCM alone, and plays on. The fault
 // is the session's one: a fault there already, a reconciliation's own record
-// of this revocation among them (B728 B9 round 6), is never replaced.
+// of this revocation among them (B728 B9 round 6), is never replaced. What it
+// drops was judged by the reconciliation that revoked it: what waited for that
+// verdict (unjudgedLocked, round 17) asks again.
 func (b *Backend) Revoke(r engine.RevokeInput) {
 	s := b.known(r.Session)
 	if s == nil {
@@ -485,6 +487,8 @@ func (b *Backend) Revoke(r engine.RevokeInput) {
 	if active && s.fault == nil {
 		s.fault = &engine.Fault{Reason: "native_revoked", Detail: r.Reason}
 	}
+	close(s.judged)
+	s.judged = make(chan struct{})
 	s.mu.Unlock()
 	for _, sink := range sinks {
 		sink.Revoke()

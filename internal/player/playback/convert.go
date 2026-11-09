@@ -208,6 +208,11 @@ func (s *session) holdLocked(a *occ) step {
 			if pend != nil {
 				return step{kind: stepWait, wait: pend.done, awaits: f}
 			}
+			if f != nil && s.unjudgedLocked(f) {
+				// Admitted under a set a publish has replaced: the window waits
+				// for that publish's reconciliation to judge f (B728 B9 round 17).
+				return step{kind: stepWait, wait: s.judged, verdict: f}
+			}
 			return step{kind: stepWait}
 		}
 	case f.conv != nil && a.out != nil && a.out.transport.Join(f.transport).Gapless &&
