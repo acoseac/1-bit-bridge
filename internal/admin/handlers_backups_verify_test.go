@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -398,52 +399,70 @@ func TestAVerdictWrittenByAnotherCallerShowsOnTheJobsCardAtTheNextPoll(t *testin
 // database and files fail when checked again, and whose verdict's write
 // fails before its rename, keeps its VERIFIED record behind a veto, and GET
 // /api/backups, the doctor's lines and the Jobs card, cached as VERIFIED
-// before the write, each read it as not verified after the error. The
-// veto's own making moves the backups folder's modification time, so the
-// card reads the folder again (folded item 3). Red on the round before,
-// which put no veto over a record that would hold no VERIFIED.
+// before the write, each read it as not verified after the error: the
+// staging refused through the write's seam, its veto then in the bundle,
+// where only the veto's own stamp on the backups folder makes the card read
+// the folder again (folded item 3); and, with no seam, a bundle that takes
+// no new file (mode 0500, Unix and not as root), its veto then beside it.
+// Red on the round before, which put no veto over a record that would hold
+// no VERIFIED.
 func TestALeftVerifiedThatCannotBeRecordedReadsAsNotVerifiedEverywhere(t *testing.T) {
-	s, _, _ := newTestServer(t)
-	dataDir := t.TempDir()
-	src := liveStore(t, dataDir)
-	s.deps.BackupSources = src
-	res := backup.SnapshotAndVerify(t.Context(), src, backup.SnapshotOptions{})
-	if !res.Verify.Record.Passes() {
-		t.Fatalf("the snapshot did not verify: %+v %v", res.Verify.Record, res.VerifyErr)
-	}
-	for _, name := range []string{backup.ManifestDBFileName, "server.crt"} {
-		p := filepath.Join(res.Dir, name)
-		data, err := os.ReadFile(p)
-		if err != nil {
-			t.Fatal(err)
-		}
-		data[len(data)-1] ^= 0xFF
-		if err := os.WriteFile(p, data, 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if card := pastStamp(t, s, dataDir); card.newestDatabase != string(backup.StateVerified) {
-		t.Fatalf("the card caches %q, want VERIFIED", card.newestDatabase)
-	}
-	restore := backup.SetVerdictWriteFailuresForTest(func(string) error { return errors.New("injected: the staging failed") }, nil, nil)
-	_, err := backup.VerifySnapshot(t.Context(), res.Dir, backup.VerifyOptions{})
-	restore()
-	if err == nil {
-		t.Fatal("a verification whose write failed answered no error")
-	}
-	_, api := backupsBody(t, s)
-	if len(api.Backups) != 1 {
-		t.Fatalf("the API lists %+v", api.Backups)
-	}
-	if got := api.Backups[0]; got.DatabaseState == string(backup.StateVerified) || got.FilesState == string(backup.StateVerified) || api.NewestVerified != nil {
-		t.Errorf("the API reads the snapshot as %s/%s, newest verified %+v", got.DatabaseState, got.FilesState, api.NewestVerified)
-	}
-	for _, c := range doctorLines(t, dataDir) {
-		if c.Name == "backup-newest" && strings.Contains(c.Summary, "database VERIFIED") || c.Name == "backup-verified" && c.Status == doctor.OK {
-			t.Errorf("the doctor's %s line reads it verified: %q", c.Name, c.Summary)
-		}
-	}
-	if card := s.getBackupCard(t.Context()); card.newestDatabase == string(backup.StateVerified) || card.lastVerifiedAt != nil {
-		t.Errorf("the Jobs card still reads %q (last verified %v) after the failed write", card.newestDatabase, card.lastVerifiedAt)
+	for _, how := range []string{"its staging is refused", "its bundle takes no file"} {
+		t.Run(how, func(t *testing.T) {
+			if how == "its bundle takes no file" && (runtime.GOOS == "windows" || os.Geteuid() == 0) {
+				t.Skip("a folder's mode 0500 refuses nothing on Windows or to root")
+			}
+			s, _, _ := newTestServer(t)
+			dataDir := t.TempDir()
+			src := liveStore(t, dataDir)
+			s.deps.BackupSources = src
+			res := backup.SnapshotAndVerify(t.Context(), src, backup.SnapshotOptions{})
+			if !res.Verify.Record.Passes() {
+				t.Fatalf("the snapshot did not verify: %+v %v", res.Verify.Record, res.VerifyErr)
+			}
+			for _, name := range []string{backup.ManifestDBFileName, "server.crt"} {
+				p := filepath.Join(res.Dir, name)
+				data, err := os.ReadFile(p)
+				if err != nil {
+					t.Fatal(err)
+				}
+				data[len(data)-1] ^= 0xFF
+				if err := os.WriteFile(p, data, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if card := pastStamp(t, s, dataDir); card.newestDatabase != string(backup.StateVerified) {
+				t.Fatalf("the card caches %q, want VERIFIED", card.newestDatabase)
+			}
+			restore := func() {}
+			if how == "its staging is refused" {
+				restore = backup.SetVerdictWriteFailuresForTest(func(string) error { return errors.New("injected: the staging failed") }, nil, nil)
+			} else {
+				if err := os.Chmod(res.Dir, 0o500); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = os.Chmod(res.Dir, 0o700) })
+			}
+			_, err := backup.VerifySnapshot(t.Context(), res.Dir, backup.VerifyOptions{})
+			restore()
+			if err == nil {
+				t.Fatal("a verification whose write failed answered no error")
+			}
+			_, api := backupsBody(t, s)
+			if len(api.Backups) != 1 {
+				t.Fatalf("the API lists %+v", api.Backups)
+			}
+			if got := api.Backups[0]; got.DatabaseState == string(backup.StateVerified) || got.FilesState == string(backup.StateVerified) || api.NewestVerified != nil {
+				t.Errorf("the API reads the snapshot as %s/%s, newest verified %+v", got.DatabaseState, got.FilesState, api.NewestVerified)
+			}
+			for _, c := range doctorLines(t, dataDir) {
+				if c.Name == "backup-newest" && strings.Contains(c.Summary, "database VERIFIED") || c.Name == "backup-verified" && c.Status == doctor.OK {
+					t.Errorf("the doctor's %s line reads it verified: %q", c.Name, c.Summary)
+				}
+			}
+			if card := s.getBackupCard(t.Context()); card.newestDatabase == string(backup.StateVerified) || card.lastVerifiedAt != nil {
+				t.Errorf("the Jobs card still reads %q (last verified %v) after the failed write", card.newestDatabase, card.lastVerifiedAt)
+			}
+		})
 	}
 }
