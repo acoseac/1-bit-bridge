@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -208,8 +209,10 @@ func TestAVetoSetAsideIsKeptOnceItsStepIsGivenUp(t *testing.T) {
 		t.Fatal("a veto stands before the recheck: the test did not reach the case")
 	}
 	t.Cleanup(backup.SetVerifyDeadlineForTest(300 * time.Millisecond))
+	var triedBeside atomic.Bool
 	t.Cleanup(backup.SetVerdictWriteFailuresForTest(nil, nil, func(path string) error {
 		if path == beside {
+			triedBeside.Store(true)
 			return errors.New("injected: no veto can be made beside the bundle")
 		}
 		return nil
@@ -248,6 +251,9 @@ func TestAVetoSetAsideIsKeptOnceItsStepIsGivenUp(t *testing.T) {
 	awaitClean(t)
 	if !pathExists(t, inBundle) {
 		t.Error("the veto the step made was removed once its sync answered, after the step was given up")
+	}
+	if triedBeside.Load() {
+		t.Error("a veto beside the bundle was tried after the step was given up")
 	}
 	if got := readersVerified(t, dir); len(got) > 0 {
 		t.Errorf("after the recheck given up, %s", strings.Join(got, "; "))
