@@ -651,10 +651,11 @@
           diagnostic logs; without it, the default, the node sends none. The consent applies when the bridge's process
           builds its node, so a change takes a restart of that process: quit the bridge, its menu included, and launch
           it again, or restart its service (stopping it and choosing Start now in its menu runs it in the same
-          process). Two things keep the uploads off even with the consent: <code>TS_NO_LOGS_NO_SUPPORT=true</code> in
-          the environment the bridge was launched with, and this process having built its node without the consent,
-          until the process exits; the Tailscale panel below says which. A tailnet that requires those logs refuses
-          the node until they are on. What stays open is backlog B830.
+          process). Three things keep the uploads off even with the consent: <code>TS_NO_LOGS_NO_SUPPORT=true</code> in
+          the environment the bridge was launched with; this process having built its node without the consent, until
+          the process exits; and something else in this process turning them off (Tailscale's coordination server
+          can), which a new launch may undo. The Tailscale panel below says which. A tailnet that requires those logs
+          refuses the node until they are on. What stays open is backlog B830.
         </small>
       </div>
 

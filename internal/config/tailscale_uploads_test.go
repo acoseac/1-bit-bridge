@@ -1,6 +1,9 @@
 package config
 
 import (
+	"fmt"
+	"os"
+	"slices"
 	"testing"
 )
 
@@ -80,6 +83,33 @@ func TestTheUploadConsentSurvivesEverySave(t *testing.T) {
 			}
 			if v, ok := fileLeaf(t, path, "tailscale.uploadDiagnosticLogs"); !ok || v != true {
 				t.Errorf("the saved file writes uploadDiagnosticLogs as %v (present %v), want true", v, ok)
+			}
+		})
+	}
+}
+
+// TestAnEmptyVariableLeavesTheFilesConsent: compose.yaml forwards
+// BRIDGE_TAILSCALE_UPLOAD_DIAGNOSTIC_LOGS as
+// "${BRIDGE_TAILSCALE_UPLOAD_DIAGNOSTIC_LOGS:-}", so a container whose .env
+// leaves it out gets it set and empty, never unset: the load takes that for
+// no override, leaving what bridge.yaml says, a true and a false alike, and
+// records no leaf for it. It pins what the overrides do (an empty variable is
+// a no-op, applyEnvOverrides), not a change.
+func TestAnEmptyVariableLeavesTheFilesConsent(t *testing.T) {
+	const variable = "BRIDGE_TAILSCALE_UPLOAD_DIAGNOSTIC_LOGS"
+	for _, file := range []bool{true, false} {
+		t.Run(fmt.Sprintf("bridge.yaml says %v", file), func(t *testing.T) {
+			path := envSaveConfig(t, fmt.Sprintf("tailscale:\n  mode: tsnet\n  uploadDiagnosticLogs: %v\n", file))
+			t.Setenv(variable, "")
+			if v, ok := os.LookupEnv(variable); !ok || v != "" {
+				t.Fatalf("%s is %q (set: %v), want it set and empty", variable, v, ok)
+			}
+			cfg := loadAt(t, path)
+			if got := cfg.Tailscale.UploadDiagnosticLogs; got != file {
+				t.Errorf("with %s set and empty, uploadDiagnosticLogs = %v, want bridge.yaml's %v", variable, got, file)
+			}
+			if slices.Contains(cfg.envSet, "tailscale.uploadDiagnosticLogs") {
+				t.Errorf("the load records the empty %s as setting the key", variable)
 			}
 		})
 	}

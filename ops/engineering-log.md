@@ -89372,7 +89372,7 @@ README, the README, the release notes, round 1's entry corrected). The rules cha
   have named a variable nobody set. 2664276c: the policy keeps what it found before it first set the variable
   (`policyRecord`), reads that as the inherited value while the variable holds the true it set, and hands it back
   (`putBackNoLogsEnv`) where a later config allows the uploads; a value anything else put there since, upstream's own
-  setter included, stays. Putting the value back at `Close` was rejected (backlog B830).
+  setter included, stays. Putting the value back at `Close` was rejected.
   `ForgetUploadPolicyForTest` starts a test case as a process that has built no node.
 
 ### Red first and the controls
@@ -89437,10 +89437,7 @@ record. The rules changes ship as `rules-b749-r3.patch` (`cli-serve.md`'s B749 l
 
 ### The findings
 
-- **Codex P2: a hand-back overlaps an earlier node's unfinished start.** It held, on what backlog B830 holds open: a
-  start of the menu's first serve could find the inherited value its second serve handed back, and build an uploading
-  transport under a config that forbade it. Round 2's tests finished the first start before the second node was built,
-  so they could not see it. Removed with the hand-back.
+- **Codex P2: the hand-back, against backlog B830.** It held. Removed with the hand-back.
 - **Codex P2: upstream's true taken for the bridge's.** It held: the policy writes the variable through
   `envknob.SetNoLogsNoSupport`, as the coordination server's `DisableLogTail` message does, so round 2's ownership
   check could not tell the two `true`s apart, and a later allowing node erased upstream's beside the
