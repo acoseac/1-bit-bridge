@@ -5,6 +5,57 @@ database, pairing tokens, TLS pair, configuration, console account, harvest
 state and player identity with its counter floor, when present. A running
 service can be backed up. Protect snapshots: they contain credentials.
 
+## Verified snapshots
+
+Each snapshot is checked as it is taken. The snapshot records every file's
+size and SHA-256 as it writes it, and its `manifest.json` says the check is
+pending until the check has run. The check compares the snapshot with those
+records, never replacing them, and records two verdicts in the manifest:
+
+- **the database's**: the copy has the size and SHA-256 it was written with;
+  SQLite's `quick_check`, run over a read-only open that creates nothing in
+  the snapshot, finds every page well formed; and its `user_version` is one
+  this bridge's migrations reach, with that version's tables and columns
+  there. `quick_check` does not compare an index with its table:
+  `bridge backup --verify <snapshot-dir> --full` runs SQLite's
+  `integrity_check` and `foreign_key_check` as well.
+- **the other files'** (the configuration, the token store, the TLS pair,
+  the console account, the harvest state and the player's files): each is
+  there, a regular file, with the size and SHA-256 it was written with.
+
+A verdict is `VERIFIED`, `FAILED` with a reason code (`hash-mismatch`,
+`quick-check`, `schema-newer` and so on), or `INCOMPLETE` when the check did
+not finish (the bridge stopped, or the check ran past its deadline). A
+snapshot whose check has not run reads `PENDING`, and one left `PENDING` long
+after its check would have ended reads `INCOMPLETE`. A snapshot taken by an
+earlier version records no sizes or hashes and reads `UNVERIFIED`: neither
+verified nor known to be damaged, its files are checked for presence only.
+
+One check runs at a time, at the lowest priority the platform gives a
+thread, its reads paced. A check removes nothing, whatever it finds.
+
+`bridge backup` says what it kept and both verdicts, and exits 0 only when
+both are `VERIFIED` (for an install with no database yet, when its files
+are). `bridge backup --verify <snapshot-dir> [--full]` checks
+a snapshot already taken and records its verdict; a quick check never
+replaces the verdict of a full one unless it finds the snapshot worse.
+`bridge doctor` and the console (Jobs, and Settings → Backups) show the
+newest snapshot written and the newest whose database is verified, apart,
+with both verdicts; they read the snapshots' manifests and run no check.
+The startup snapshot is skipped only when a snapshot from the last day has a
+verified database.
+
+With retention on (`backup.keep` above 0), the prune after each snapshot
+keeps the `keep` newest, and beside them, even when older: the newest
+snapshot whose database is `VERIFIED`; while none is, the newest one taken
+by an earlier version; the newest whose database check `FAILED` or did not
+finish, as evidence, one at most; and every snapshot whose check is still
+pending. Every other snapshot is kept or removed by `keep`, as before. The
+prune runs after every snapshot taken, whatever its verdict. With retention
+off, every snapshot stays.
+
+## Restore
+
 Stop the service, then run
 `bridge restore --config /path/to/bridge.yaml /path/to/snapshot`.
 Restore holds the data directory's exclusive lock and refuses while the

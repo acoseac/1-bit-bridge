@@ -87424,3 +87424,298 @@ session's create until the delete is released, so the upload is shown to have
 decided while the delete was pending, and the message clamps both bounds.
 Controls, each red as predicted: the duplicate guard removed (the twice case),
 the pending banner's words removed (the pending case).
+
+## 2026-11-09 — B653 PR 1: each snapshot is verified, its verdicts kept with it and shown; pruning keeps what recovery needs
+
+Backlog B653's first PR of three, on `feat/b653-snapshot-verify` from main
+3d0a0d05; worker b653 on legion0 (Ubuntu 26.04, linux/amd64, go1.27.3,
+`GOTOOLCHAIN=local`, `GOPROXY=off`). The other two (a consented offline
+database-only restore that keeps the original files; serve's recovery hint
+after a database it cannot open) are not built here, and nothing here offers
+them. Commits: the store's tables and columns at each ladder version
+67acaeec, the verification and its callers b281790e, the keep-policy's table
+a6393428, the lock's line in words that claim nothing of the filesystem
+729b06c7, then this record and `docs/backup.md`. The rules go through
+`rules-b653.patch`: three lines in cli-serve.md with their long form in
+History-rules-cli-serve.md, admin-console.md's B604 bullet corrected and a
+line for the console's backups, and scanner.md's glob for
+`internal/manifest/ladder_schema*.go` with a line on the generated schema.
+
+### What main did
+
+`Snapshot` copied the database by `VACUUM INTO` and the other files by a
+read and a write, and published a manifest that named the files and said
+nothing of their bytes. Nothing read a snapshot back, so a copy damaged on
+its way to the disk, or since, was found by the restore that needed it. The
+prune kept the `keep` newest by `CreatedAt` and deleted the rest whatever
+they held, so a run of bad snapshots pruned the last good one; the startup
+snapshot was skipped for any snapshot younger than a day; `bridge doctor`
+said nothing of the backups; `GET /api/backups` answered the names and the
+backups folder's path.
+
+### The record
+
+`Snapshot` hashes each file as it copies it and the database by one read
+once `VACUUM INTO` has written it, and publishes the manifest with
+`baselines` (name, size, SHA-256) and a `verification` record already
+`PENDING` (`pendingSince`), so no bundle it keeps is without one. The record
+holds two verdicts, `databaseState` and `filesState`, each `PENDING`,
+`VERIFIED`, `FAILED` or `INCOMPLETE` (and `UNVERIFIED` for a database the
+install did not have, `no-database`), each with reason codes from a closed
+list (`backup.Reasons`) that names no path; the database's with the check's
+level, time and duration, the `user_version` read and the core tables'
+counts (tracks, folders, playlists, playlist_items; information, 0 a valid
+count); the files' with the names, in the bundle, of the files that failed.
+The keys are camelCase, as every manifest key and console field is; the
+brief wrote `database_state` and `files_state`. A verification never touches
+`baselines`. A manifest with neither, one written before this, reads
+`UNVERIFIED` (`no-baseline`): `--verify` checks its files for presence and
+records nothing. A reader (`readVerdict`, the one every reader takes) reads
+a `PENDING` older than `PendingBound` as `INCOMPLETE` (`interrupted`), a
+record of a newer format or a state it does not know as `UNVERIFIED`
+(`unknown-record`), and a `VERIFIED` beside the bundle's veto as
+`INCOMPLETE` (`unsynced`, below).
+
+### The database's check
+
+In order: a `-wal`, `-shm` or `-journal` beside the database, of any kind,
+fails it (`sidecar`) before anything is opened; the database must be a
+regular file by Lstat (`not-regular`, `missing`) of its baseline's size; the
+bundle's entries are listed (kind, size, modification time); the file is
+opened and must be the file Lstat saw (`os.SameFile`, else
+`bundle-changed`); its SHA-256, read through the pacer, must be the
+baseline's (`size-mismatch`, `hash-mismatch`); then SQLite reads that same
+open through modernc's read-only VFS (`modernc.org/sqlite/vfs`, in the
+module already, v1.61.0: no dependency added) over a filesystem that serves
+that one file under one name and answers every other as not there (`dbFS`),
+with `mode=ro&immutable=1&_pragma=temp_store(2)`, on a connection of its
+own, never `manifest.OpenStore`; `PRAGMA quick_check` must answer exactly
+one `ok` (`--full`: `integrity_check`, and `foreign_key_check` with no row);
+`user_version` must be one the ladder reaches (`schema-version` below its
+first step, `schema-newer` past its top), with every table and column that
+version requires (`schema-table`, `schema-column`), from
+`manifest.RequiredSchema`; and once the database and the VFS are closed the
+bundle's entries must be as they were (`bundle-changed`). The expression
+indexes' functions (`unicode_lower`, `mix_week_hash`) are registered for
+every connection by internal/manifest, which internal/backup imports, so
+`--full`'s `integrity_check` evaluates them
+(`TestTheFullCheckEvaluatesTheExpressionIndexes`).
+
+Measured with the module's SQLite (2026-11-08, re-run 2026-11-09, a
+throwaway probe): a live store's header says WAL (bytes 18 and 19: 2, 2) and
+`VACUUM INTO`'s output says rollback (1, 1); a copy of the WAL-header file
+alone in a folder, opened `mode=ro`, answers `quick_check` `ok` and leaves
+`bridge.db-shm` and `bridge.db-wal` beside it after the close, and opened
+`mode=ro&immutable=1` leaves nothing. Through the VFS over one file of a
+500-track store: `quick_check` and `integrity_check` `ok`,
+`foreign_key_check` no row, a write refused (`attempt to write a readonly
+database`), a statement whose reads fail ending with the context's error,
+and the folder holding `bridge.db` alone after. A snapshot's database is
+never WAL-headed as `VACUUM INTO` writes it, so
+`TestVerifyingAWALHeaderDatabaseTwiceCreatesNoFile` flips the header to WAL
+and records it as the baseline.
+
+`manifest.RequiredSchema(v)` is a table generated from the ladder itself
+(`ladder_schema_gen.go`: 267 columns, each with the first and last version
+that holds it, up to version 61), which `TestTheLadderSchemaIsTheLadders`
+writes by running the steps one at a time over an empty database, as
+`migrate` runs them, and compares on every run; `BRIDGE_UPDATE_LADDER_SCHEMA=1`
+writes it again. It says what must be there, never all that may be, so a
+store holding a table a rolled-back binary's step added still passes.
+
+### The other files
+
+Presence, a regular file inside the bundle (a name with a separator, `.` or
+`..` is `bad-name`; a link or another kind `not-regular`), its size and its
+SHA-256 against its baseline, read through the same pacer. Nothing more: a
+file of the wrong content with the right hash is not this check's concern.
+
+### One lock, one writer
+
+`.backups.lock` in the backups folder, opened through `fsutil.OpenLockFile`
+and taken with `fsutil.TryLock` (flock, LockFileEx: the open file's, so two
+opens in one process exclude each other too), is taken by every
+verification from before it reads the manifest it checks until its verdict
+is written (so it is the record's one writer), by `bridge backup --verify`,
+and by the prune's keep-policy across its listing and its deletions. A
+verification waits for it, polling every 50 ms, for `AutoLockWait` (the
+bridge's own: `VerifyDeadline`, 30 min, so a fresh snapshot's check waits
+behind another process's rather than leave it `PENDING`) or
+`VerifyCmdLockWait` (`--verify`, 15 s), then answers `ErrBackupsBusy`; the
+prune tries it once and skips the round (`PruneResult.Skipped`). Before the
+lock a verification takes this process's one slot, in the order the waits
+began, so the bridge runs one verifier at a time. Where the try is answered
+as a filesystem or a platform that gives no lock answers
+(`fsutil.KeepsNoLocks`), both go on without it, as before the lock, said
+once in words that claim nothing of the filesystem, since ENOLCK does not
+show that it keeps none. `List` and the orphan sweep pass over the lock file: neither looks
+at anything but folders.
+
+A verdict merges into the record under the lock (`mergeVerdict`): an
+`INCOMPLETE` replaces only a `PENDING` or an `INCOMPLETE`; a `FAILED`
+replaces anything; a database `VERIFIED` replaces anything but a completed
+check (`VERIFIED` or `FAILED`) of a higher level, so a quick check never
+undoes a full one unless it fails; the files' check, the same at every
+level, replaces a completed one with the latest. `pendingSince` goes once
+nothing in the record is pending.
+
+### Publication
+
+The manifest is staged beside itself (the replaced file's owner kept), synced,
+and renamed over itself through `atomicwrite.RenameWithRetryUnsynced`, then
+its folder synced (`fsutil.SyncParentDir`). Once the rename has landed every
+reader reads the new record, so a sync that fails after it cannot be undone
+by an error return, and a `VERIFIED` read after that error would be a
+recovery point nobody knows survives a crash. So a record holding a
+`VERIFIED` state is written behind a veto: `.verdict-unsynced` is put in the
+bundle before the rename and removed only once the sync has answered, and
+while it stands every reader reads that `VERIFIED` as `INCOMPLETE`
+(`unsynced`). Whichever step fails, the veto's own removal included, the
+write answers an error and no reader, the doctor, the console or the pruner,
+reads `VERIFIED` (`TestASyncFailureAfterTheVerdictsRenameReadsAsNotVerified`,
+and `TestAnUnsyncedVerdictReadsAsNotVerifiedEverywhere` through the API, the
+doctor and the prune). A crash meanwhile leaves the previous record or the
+new one, with or without the veto, and each reads `VERIFIED` only from a
+check that passed. Where no directory can be synced (Windows, where
+`SyncParentDir` does nothing), the write is atomic and not known to be
+durable: a crash can leave the previous record, a `PENDING` among them,
+which reads `INCOMPLETE` once `PendingBound` has passed, and never a
+`VERIFIED` from a check that did not pass. A merge that changes nothing
+writes nothing. Each write moves the backups folder's modification time
+(`stampChange`), which a verdict written inside a bundle does not, so the
+console's Jobs card, which caches what the folder holds, sees it.
+
+Rejected: writing `VERIFIED` only after a sync, since the rename is what
+makes it visible and the sync comes after it; a second state (`VERIFIED`
+not yet durable) rewritten once synced, which needs a second rename and a
+second sync and has the same window; a sync of the staged file alone, which
+says nothing of the folder's entry.
+
+### A stop
+
+A verification has a deadline (`VerifyDeadline`) and every read asks its
+context (the pacer's `admit`, before each read of the hash and of SQLite), so
+a stop is seen at the next read. Stopped, it has one bound, `StopWriteBound`
+(2 s), counted from the first wait that sees the stop and shared by the
+check's return and the verdict's write: within it the check's verdict, or
+`INCOMPLETE` (`cancelled`, `deadline`), is written; past it the write is
+abandoned to land or not, and the verification returns. Serve's wait for
+the backup ticker (`backupShutdownWait`, 45 s) is far longer, and the
+console's jobs are joined in `ServeListener`'s drain. A verification stopped
+before it began (in the slot's queue, or waiting for the lock) writes
+`INCOMPLETE` over its `PENDING` within the same bound (`abandonPending`).
+`PendingBound` is `VerifyDeadline` plus `AutoLockWait` plus ten minutes
+(70 min), so a check under way, or one waiting its turn behind another
+process's, is never read as interrupted, and a `PENDING` younger than it is
+never pruned.
+
+### One path, every caller
+
+`backup.SnapshotAndVerify` is the capture and then, for a kept bundle,
+`Finish`: its verification and, under the same hold of the lock, the prune
+after it, whatever the verdict; its `Result` tells a failed capture (no
+bundle, `CaptureErr`) from a kept bundle whose verification failed or did
+not finish (`Dir`, `Verify`, `VerifyErr`), and a prune the lock refused
+(`PruneSkipped`). The ticker and `bridge backup` take it; the console's
+create takes `Snapshot`, answers 201 once it is written, and runs `Finish`
+as a job on the server's own context (`verifyInBackground`, `Deps.ScanCtx`),
+never the request's, queued behind the slot, joined at shutdown, so no
+console snapshot is left `PENDING` with no one to finish it. Each says what
+it kept: `bridge backup` prints the snapshot, then both verdicts, and exits
+0 only where both are `VERIFIED` (the database's `UNVERIFIED` where the
+install had none), 1 for a kept snapshot that is not a verified recovery
+point, saying it was kept; `bridge backup --verify <snapshot> [--full]`
+exits 0, 1 (not verified, not recorded, or busy past its wait, saying so)
+or 2 (no snapshot there). The check runs on a goroutine locked to an OS
+thread it never unlocks, so the thread ends with it, whose priority it
+lowers first: Linux `setpriority` to nice 19 and `ioprio_set` to the idle
+class by thread ID, Darwin `PRIO_DARWIN_BG`, Windows
+`THREAD_MODE_BACKGROUND_BEGIN`, best effort. Its reads, the hash's and
+SQLite's, are paced at 32 MiB/s by one pacer (`verifyReadRate`).
+
+### The keep-policy
+
+Retention off (`keep <= 0`): nothing changes, every snapshot stays and the
+orphans are reaped. On (`keptByRecovery`): the `keep` newest stay, and
+beside them, beyond `keep` if they must, the newest snapshot whose database
+is `VERIFIED`; while none is, the newest legacy one; the newest whose
+database is `FAILED` or `INCOMPLETE`, as evidence, one at most; and every
+`PENDING` its bound has not passed. Everything else is kept or pruned by
+`keep` as before. Every decision reads the database's verdict alone: a
+snapshot whose files failed and whose database is `VERIFIED` is a recovery
+point (`TestACertificateThatDoesNotMatchItsBaselineStillAnchorsRecovery`).
+
+### The readers
+
+`backup.ReadStatus` reads the manifests and nothing else, and every surface
+reads it: `bridge doctor` (and the console's doctor) has two lines,
+`backup-newest` (the newest snapshot written, its age, both verdicts with
+their reasons; ok while its check is under way or it passes, a warn naming
+what failed otherwise) and `backup-verified` (the newest whose database is
+`VERIFIED`, its age and level; a fail where none is and one has `FAILED`, a
+warn where none is otherwise); `GET /api/backups` answers each snapshot's
+two verdicts with their reasons, level and check time, the files that
+failed by their names in the bundle, and apart `newest` and
+`newestVerified`; the Jobs card shows the newest's two verdicts and the
+newest verified's age; the Settings page's Backups panel the same. No line
+or body names a path: a snapshot is named by its folder's name, a time
+stamp. `startupSnapshotShouldSkip` skips only for a snapshot younger than a
+day whose database is `VERIFIED`.
+
+### Where this departs from what was there
+
+- `GET /api/backups` no longer answers `backupsRoot`, and the create's 201
+  answers `dirName`, `verification` (`PENDING`) and `sensitivity`, where it
+  answered `snapshotDir`, or a 200 with `pruneWarning`: the prune runs in
+  the job now, and its warning goes to the log. admin-console.md's B604
+  bullet, which kept those paths in success bodies, is corrected in the
+  patch.
+- `bridge backup` exits 1 for a snapshot it kept that is not a verified
+  recovery point, which it says, where it exited 0 for any snapshot written.
+
+### The tests
+
+In internal/backup: `TestASnapshotRecordsItsBaselinesAndPublishesPending`,
+`TestAVerifiedSnapshotRecordsItsCheck`, `TestADamagedDatabasePageFails`,
+`TestAFileWithOneByteChangedFailsTheFilesVerdict`,
+`TestACertificateThatDoesNotMatchItsBaselineStillAnchorsRecovery`,
+`TestASidecarBesideTheDatabaseFailsBeforeSQLiteOpens`,
+`TestALinkInTheBundleFailsBeforeSQLiteOpens`,
+`TestVerifyingAWALHeaderDatabaseTwiceCreatesNoFile`,
+`TestTheDatabaseMustBeASchemaThisBridgeKnows` (a newer `user_version`, a
+missing core table, and an empty library passing),
+`TestTheFullCheckEvaluatesTheExpressionIndexes`,
+`TestAQuickCheckNeverUndoesAFullOne`,
+`TestACancelledVerificationWritesIncomplete`,
+`TestAStopWithABlockedSyncReturnsWithinItsBound`,
+`TestAStalePendingReadsIncompleteAndAYoungOneSurvivesAPrune`,
+`TestASyncFailureAfterTheVerdictsRenameReadsAsNotVerified`,
+`TestALegacyManifestReadsUnverified`, `TestTheReadsArePaced`,
+`TestTheVerificationRunsOnAThreadOfItsOwn` (and, on Linux,
+`priority_linux_test.go`'s check of the thread's nice value),
+`TestAPrunerRacingAVerificationSkipsItsRound` (through the lock, the
+verification parked under it at `SetAfterCheckForTest`),
+`TestTwoVerificationsOfOneSnapshotWriteOneAtATime`,
+`TestAVerificationGrantedNoLockStillVerifies` and
+`TestThePruneKeepsWhatRecoveryNeeds` (retention off, keep 1, several newer
+`FAILED` bundles, only legacy ones beside more new `FAILED` ones than
+`keep`, a files `FAILED` beside a verified database, young and stale
+`PENDING` ones). In internal/manifest: `TestTheLadderSchemaIsTheLadders`.
+In internal/admin: `TestTheDoctorTheAPIAndThePrunerAgreeOnEveryState`,
+`TestAnUnsyncedVerdictReadsAsNotVerifiedEverywhere`,
+`TestACancelledCreateRequestLeavesTheVerdictToCome`,
+`TestTheCreateAnswersWithTheSnapshotsNameAndNoPath` and
+`TestRepeatedFailedVerificationsThroughTheConsolesCreateStillPrune`. In
+cmd/bridge: `TestStartupSnapshotShouldSkip_OnlyForARecentVerifiedDatabase`,
+`TestBridgeBackupVerifiesWhatItKeepsAndSaysSo`,
+`TestRepeatedFailedVerificationsThroughTheTickerAndBridgeBackupStillPrune`,
+`TestBridgeBackupVerifyRecordsAndSaysTheVerdict`,
+`TestVerifyBesideTheTickersVerificationOfOneSnapshot` (one writer, no
+verdict lost or downgraded),
+`TestATickerStoppedWhileItsVerdictsSyncHangsReturnsWithinItsBound` and
+`TestBothDoctorsCarryTheBackupLines`. Existing tests that took a snapshot
+for a prune now verify it as every caller does (a `PENDING` younger than its
+bound is never pruned); `primeLiveState` makes a real store now, so a
+snapshot of it passes the schema check, and the two root-owner tests keep
+the database that predates the ladder (`primePreLadderLiveState`), whose
+restore makes the ladder's and the install marker's locks they count.
