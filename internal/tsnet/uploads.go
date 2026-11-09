@@ -5,6 +5,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 
 	"tailscale.com/envknob"
 	"tailscale.com/ipn/ipnstate"
@@ -55,19 +56,92 @@ func (u Uploads) Off() bool { return !u.Allowed || u.EnvOff }
 // caller's goroutine, before anything starts the node; the variable is not
 // one of envknob's registered knobs, so no cache of it is read elsewhere,
 // and every reader of it in Tailscale's code asks os.Getenv.
+//
+// A process can build a node again after one it built: the menu's "Start
+// now", and bridge init's start before it, run serve in the process, and the
+// menu runs it again after a stop. The inherited value is then the one the
+// policy found before it first set the variable (policyRecord), while the
+// variable still holds the true it set, so that a consent saved between the
+// two reaches the later node, which the policy hands the inherited value back
+// to, and the refusal's words name the variable only where the process's
+// environment holds the uploads off. A value anything else put there since
+// (upstream's own setter, which the coordination server's DisableLogTail
+// message calls) is the process's, and stays.
 func applyUploadPolicy(allow bool) (Uploads, error) {
+	policyRecord.Lock()
+	defer policyRecord.Unlock()
+	value, present := os.LookupEnv(NoLogsEnv)
+	ours := policyRecord.set && present && value == "true"
+	if ours {
+		value, present = policyRecord.before, policyRecord.beforePresent
+	} else {
+		policyRecord.noLogsRecord = noLogsRecord{}
+	}
 	var envOff bool
-	if inherited := os.Getenv(NoLogsEnv); inherited != "" {
-		v, err := strconv.ParseBool(inherited)
+	if value != "" {
+		v, err := strconv.ParseBool(value)
 		if err != nil {
 			return Uploads{}, ErrNoLogsEnvUnreadable
 		}
 		envOff = v
 	}
-	if !allow {
+	switch {
+	case !allow:
+		if !policyRecord.set {
+			policyRecord.noLogsRecord = noLogsRecord{set: true, before: value, beforePresent: present}
+		}
 		envknob.SetNoLogsNoSupport()
+	case ours:
+		putBackNoLogsEnv(value, present)
+		policyRecord.noLogsRecord = noLogsRecord{}
 	}
 	return Uploads{Allowed: allow, EnvOff: envOff}, nil
+}
+
+// noLogsRecord is what applyUploadPolicy did to NoLogsEnv in this process:
+// whether it set the variable true, and what the variable held before it
+// first did (before, and whether it was set at all).
+type noLogsRecord struct {
+	set           bool
+	before        string
+	beforePresent bool
+}
+
+// policyRecord is the process's noLogsRecord, which every application of the
+// policy reads and writes under its lock.
+var policyRecord struct {
+	sync.Mutex
+	noLogsRecord
+}
+
+// putBackNoLogsEnv sets NoLogsEnv back to what the process inherited, through
+// envknob, whose record of the knobs set follows it, and unset again where it
+// was not set at all. Should the unset fail (it can only on Windows, for a
+// name it refuses), the variable is empty, which every reader of it takes for
+// unset.
+func putBackNoLogsEnv(value string, present bool) {
+	if present {
+		envknob.Setenv(NoLogsEnv, value)
+		return
+	}
+	envknob.Setenv(NoLogsEnv, "")
+	_ = os.Unsetenv(NoLogsEnv)
+}
+
+// ForgetUploadPolicyForTest makes the policy forget what it did to NoLogsEnv
+// in this process, so that a test case which sets the variable as a process
+// would inherit it has it read that way (a test binary's cases share one
+// process); restore puts the record back. Tests only.
+func ForgetUploadPolicyForTest() (restore func()) {
+	policyRecord.Lock()
+	saved := policyRecord.noLogsRecord
+	policyRecord.noLogsRecord = noLogsRecord{}
+	policyRecord.Unlock()
+	return func() {
+		policyRecord.Lock()
+		policyRecord.noLogsRecord = saved
+		policyRecord.Unlock()
+	}
 }
 
 // logsRequiredText is the part of upstream's refusal of a node that does not

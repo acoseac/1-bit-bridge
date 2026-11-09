@@ -183,7 +183,8 @@ type Config struct {
 	// node may upload Tailscale's diagnostic logs. NewServer applies it to
 	// the process before the node is built (applyUploadPolicy): false sets
 	// NoLogsEnv true, which keeps the uploads, and the flow logs, off; true
-	// leaves the inherited environment as it is. Upstream reads the
+	// leaves the inherited environment as it is, handing the inherited value
+	// back where an earlier node of this process set it. Upstream reads the
 	// variable as the node starts and the logtail transport is chosen then,
 	// so a change takes a restart.
 	UploadDiagnosticLogs bool

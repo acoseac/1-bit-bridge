@@ -126,14 +126,17 @@ func (k *testAttestationKey) Clone() key.HardwareAttestationKey { return k }
 func (*testAttestationKey) IsZero() bool                        { return false }
 
 // keepNoLogsEnv makes the test's changes to NoLogsEnv its own: NewServer
-// applies the upload policy, and the variable is put back as it was when the
-// test ends.
+// applies the upload policy, and the variable, and what the policy keeps of
+// what it did to it in this process, are put back as they were when the test
+// ends. The test starts as a process that inherited no NoLogsEnv and has
+// built no node.
 func keepNoLogsEnv(t *testing.T) {
 	t.Helper()
 	t.Setenv(NoLogsEnv, "")
 	if err := os.Unsetenv(NoLogsEnv); err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(ForgetUploadPolicyForTest())
 }
 
 // startForName runs one Start of a server on stateDir built from cfg, its

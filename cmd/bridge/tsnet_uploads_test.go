@@ -57,10 +57,13 @@ func noLogsEnvNow() string {
 }
 
 // inheritNoLogsEnv sets TS_NO_LOGS_NO_SUPPORT as the bridge's environment
-// holds it when the process starts, put back as it was when the test ends.
+// holds it when the process starts, in a process that has built no node yet;
+// the variable, and what the upload policy keeps of what it did to it, are
+// put back as they were when the test ends.
 func inheritNoLogsEnv(t *testing.T, v string) {
 	t.Helper()
 	t.Setenv(tsnet.NoLogsEnv, "")
+	t.Cleanup(tsnet.ForgetUploadPolicyForTest())
 	if v == noLogsUnset {
 		if err := os.Unsetenv(tsnet.NoLogsEnv); err != nil {
 			t.Fatal(err)
@@ -272,6 +275,72 @@ func TestEveryPathAppliesTheUploadPolicyBeforeTheUpstreamStart(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// serveOnceUntilItsTsnetStart is serveUntilItsTsnetStart for a serve the test
+// then stops, as the menu's Ctrl+C does before its "Start now" runs serve
+// again in the same process: what the node's upstream start would have seen,
+// once serve has returned 0.
+func serveOnceUntilItsTsnetStart(t *testing.T, cfgPath string, seen <-chan tsnetStartSeen) tsnetStartSeen {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	stderr := &safeBuffer{}
+	done := make(chan int, 1)
+	exited := make(chan struct{})
+	go func() {
+		defer close(exited)
+		done <- runServe(ctx, serveOpts{configPath: cfgPath, addrOverride: "127.0.0.1:0"}, &safeBuffer{}, stderr)
+	}()
+	drainServeOnCleanup(t, cancel, exited, done, stderr)
+	var got tsnetStartSeen
+	select {
+	case got = <-seen:
+	case <-exited:
+		t.Fatalf("serve exited with code %d before its tsnet start; stderr=%s", <-done, stderr.String())
+	case <-serveGiveUp(t):
+		t.Fatalf("serve never reached its tsnet start; stderr=%s", stderr.String())
+	}
+	cancel()
+	select {
+	case <-exited:
+	case <-serveGiveUp(t):
+		t.Fatalf("serve did not stop; stderr=%s\nserve's goroutines:\n%s", stderr.String(), serveStacks())
+	}
+	if code := <-done; code != 0 {
+		t.Fatalf("serve exit code = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	return got
+}
+
+// TestAServeRunAgainInTheSameProcessReadsTheInheritedValue: the menu's "Start
+// now" (and bridge init's start, before it) runs serve in its own process,
+// and runs it again after a stop. The second serve's node reads
+// TS_NO_LOGS_NO_SUPPORT as the process inherited it, not as the first serve's
+// policy set it, so a consent saved between the two (the console's switch,
+// which takes a restart) reaches it, and an inherited true still holds the
+// uploads off.
+func TestAServeRunAgainInTheSameProcessReadsTheInheritedValue(t *testing.T) {
+	for _, c := range []struct{ inherited, key, want string }{
+		{noLogsUnset, "true", noLogsUnset},
+		{"false", "true", "false"},
+		{"true", "true", "true"},
+		{noLogsUnset, "", "true"},
+	} {
+		t.Run(fmt.Sprintf("inherited=%q then key=%q", strings.ReplaceAll(c.inherited, noLogsUnset, "unset"), c.key), func(t *testing.T) {
+			inheritNoLogsEnv(t, c.inherited)
+			seen := stopTsnetStarts(t, nil)
+			dir := t.TempDir()
+			cfgPath, _ := tsnetTestConfig{mode: "tsnet"}.write(t, dir)
+			if got := serveOnceUntilItsTsnetStart(t, cfgPath, seen); got.env != "true" {
+				t.Fatalf("the first serve's upstream start would see TS_NO_LOGS_NO_SUPPORT=%q, want true", got.env)
+			}
+			tsnetTestConfig{mode: "tsnet", key: c.key}.write(t, dir)
+			if got := serveOnceUntilItsTsnetStart(t, cfgPath, seen); got.env != c.want {
+				t.Errorf("the second serve's upstream start would see TS_NO_LOGS_NO_SUPPORT=%q, want %q",
+					strings.ReplaceAll(got.env, noLogsUnset, "unset"), strings.ReplaceAll(c.want, noLogsUnset, "unset"))
+			}
+		})
 	}
 }
 

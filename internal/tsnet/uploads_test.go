@@ -114,6 +114,74 @@ func TestTheUploadPolicyByTheConfigAndTheInheritedValue(t *testing.T) {
 	}
 }
 
+// TestALaterNodeInTheSameProcessReadsTheInheritedValue: a process that builds
+// another node after one it built (the menu's "Start now" and bridge init's
+// start run serve in the process, and the menu runs it again after a stop)
+// reads NoLogsEnv as the process inherited it, never as an earlier node's
+// policy set it: a consent given in between reaches the later node, the
+// refusal's words name the variable only where the inherited environment
+// holds the uploads off, and a value the policy did not set is the process's.
+func TestALaterNodeInTheSameProcessReadsTheInheritedValue(t *testing.T) {
+	for _, c := range []struct {
+		name      string
+		inherited string
+		allows    []bool // each node's config, in the order the nodes are built
+		between   func() // after the first node, what else in the process does
+		want      string // the variable the last node's upstream start sees
+		uploads   Uploads
+	}{
+		{"a consent given after a node without one", unset, []bool{false, true}, nil, unset, Uploads{Allowed: true}},
+		{"an inherited false and a consent given after", "false", []bool{false, true}, nil, "false", Uploads{Allowed: true}},
+		{"an inherited 1 and a consent given after", "1", []bool{false, true}, nil, "1", Uploads{Allowed: true, EnvOff: true}},
+		{"an inherited true and a consent given after", "true", []bool{false, true}, nil, "true", Uploads{Allowed: true, EnvOff: true}},
+		{"no consent twice", unset, []bool{false, false}, nil, "true", Uploads{}},
+		{"no consent, a consent, no consent", unset, []bool{false, true, false}, nil, "true", Uploads{}},
+		{"a consent withdrawn", unset, []bool{true, false}, nil, "true", Uploads{}},
+		{"a false set in the process after the policy's true", unset, []bool{false, true},
+			func() { _ = os.Setenv(NoLogsEnv, "false") }, "false", Uploads{Allowed: true}},
+		// Upstream's own setter, as the coordination server's DisableLogTail
+		// message calls it: a true the policy did not set stays.
+		{"a true upstream set itself", unset, []bool{true, true},
+			envknob.SetNoLogsNoSupport, "true", Uploads{Allowed: true, EnvOff: true}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			setInherited(t, c.inherited)
+			var last *Server
+			var seen string
+			for i, allow := range c.allows {
+				if i == 1 && c.between != nil {
+					c.between()
+				}
+				s, err := NewServer(Config{
+					Logger: silentLogger(), StateDir: filepath.Join(t.TempDir(), "tailscale"),
+					UploadDiagnosticLogs: allow,
+					BeforeStart: func(*tsnet.Server) error {
+						seen = envNow()
+						return errors.New("stopped before the upstream start")
+					},
+				})
+				if err != nil {
+					t.Fatalf("node %d: NewServer: %v", i+1, err)
+				}
+				s.newNode = func(*tsnet.Server) node { return &fakeNode{} }
+				seen = "\x00not reached"
+				if err := s.Start(context.Background()); err == nil {
+					t.Fatalf("node %d: a start BeforeStart stopped succeeded", i+1)
+				}
+				_ = s.Close()
+				last = s
+			}
+			if seen != c.want {
+				t.Errorf("the last node's upstream start would see %s=%q, want %q", NoLogsEnv,
+					strings.ReplaceAll(seen, unset, "unset"), strings.ReplaceAll(c.want, unset, "unset"))
+			}
+			if last.uploads != c.uploads {
+				t.Errorf("the last node's policy kept %+v, want %+v", last.uploads, c.uploads)
+			}
+		})
+	}
+}
+
 // TestBeforeStartRunsOnTheUpstreamServerAndCanStopIt: the hook gets the
 // upstream server Start built, just before its Start, and an error from it
 // ends the start there, the node closed unstarted.
