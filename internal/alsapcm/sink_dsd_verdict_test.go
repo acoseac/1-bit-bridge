@@ -239,22 +239,26 @@ func TestNativeTheVerdictOfARequestWhoseLifeEnded(t *testing.T) {
 // that failure (ErrReleaseUnconfirmed) beside the refusal; past the release's
 // budget, the writer in its close, the release unconfirmed beside the
 // refusal; and with that close let go, confirmed, before the caller takes the
-// deadline's arm, the completed cleanup's answer, as with nothing recorded.
-// Until round 10 the caller's own context's arm answered its cancellation
-// beside the failure, the refusal lost, and the writer's reply and its end
-// answered the refusal as it was where nothing was recorded.
+// deadline's arm, the completed cleanup's answer, as with nothing recorded,
+// that cancellation naming the command that asked (round 11). Until round 10
+// the caller's own context's arm answered its cancellation beside the
+// failure, the refusal lost, and the writer's reply and its end answered the
+// refusal as it was where nothing was recorded; until round 11 the
+// cancellation named a resume "native activation".
 func TestNativeAHeldRefusalIsAnsweredByOneVerdictOnEveryArm(t *testing.T) {
 	const eio errno = 5 // EIO, asm-generic's: an errno this package does not tell apart
 	refused := errors.New("the controls changed")
 	for _, entry := range []struct {
 		name string
+		// op is the command that asked, which its answer names.
+		op string
 		// refusal is the check after open the entry's admission is: the
 		// open's is the first.
 		refusal int32
 		prepare func(*testing.T, *DSDSink)
 		call    func(*DSDSink, context.Context) error
 	}{
-		{"a resume", 3, func(t *testing.T, s *DSDSink) {
+		{"a resume", "native resume", 3, func(t *testing.T, s *DSDSink) {
 			if e := s.Activate(context.Background(), 1); e != nil {
 				t.Fatal(e)
 			}
@@ -262,7 +266,7 @@ func TestNativeAHeldRefusalIsAnsweredByOneVerdictOnEveryArm(t *testing.T) {
 				t.Fatal(e)
 			}
 		}, func(s *DSDSink, ctx context.Context) error { return s.Resume(ctx) }},
-		{"a paused activation", 2, func(t *testing.T, s *DSDSink) {
+		{"a paused activation", "native activation", 2, func(t *testing.T, s *DSDSink) {
 			if e := s.Pause(context.Background()); e != nil {
 				t.Fatal(e)
 			}
@@ -341,6 +345,7 @@ func TestNativeAHeldRefusalIsAnsweredByOneVerdictOnEveryArm(t *testing.T) {
 					if errors.Is(e, refused) || errors.Is(e, ErrActivationFenced) {
 						t.Errorf("%s answered %v; want the ended life's cancellation alone, not the refusal it fenced or the sink's fence", what, e)
 					}
+					namesItsCommand(t, e, entry.op, what)
 					noFailure(t, s, what)
 				case "a device's failure recorded":
 					theSinksFailure(t, e, eio, what)

@@ -157,6 +157,13 @@ type nativeSeams struct {
 	// scheduler may pick among the ready ones, and knows which it took
 	// (B728 B9 round 10).
 	arm func() awaitArm
+	// recorded, nil but in a test, runs on a request's caller once its wait
+	// on its own context's or the deadline's arm, the life ended, has waited
+	// for the writer's end (endOfLife), and before it reads the writer's
+	// reply and the cleanup's record: a test holds the caller there while
+	// the writer's late close lands and the writer answers, as a scheduler
+	// can leave it (B728 B9 round 11).
+	recorded func()
 }
 
 // awaitArm is an arm of a request's wait (await), for a test that fixes
@@ -411,6 +418,9 @@ func (s *DSDSink) await(ctx context.Context, r *nativeRequest) error {
 		}
 	}
 	rec := s.endOfLife()
+	if h := s.seams.recorded; h != nil {
+		h()
+	}
 	a, _ := sent(r)
 	return verdict(a, rec)
 }
