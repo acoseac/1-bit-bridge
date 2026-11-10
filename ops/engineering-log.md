@@ -91308,3 +91308,138 @@ The engine-routing test needs directory fsync and explicitly skips Windows,
 matching the existing engine integration storage requirement. It opens no audio
 node. All other added cases are portable, using fake hardware or staged state;
 no new Linux-only test was added. Qualification remains 48 within this PR.
+
+## 2026-11-10 — B728 B9 PR 1 round 3: a recorded clean-up failure wins while the life runs, and the red-first runs rounds 2 and 3 owed
+
+The rule and its reasoning are in `output.md` (Native lifecycle and policy
+containment) and `ops/History-b470-native.md` ("Round 3"). This entry is the
+evidence. Every run below is on macOS arm64, Go 1.27.3, the fake kernel.
+
+### Where the record holds a cleanup failure while the life runs
+
+From `sink_dsd_writer.go`: a TrackChange tail write or drain the release's
+deadline cut (`releaseCancel` at expiry, mode still TrackChange, so not an
+expected cancellation: `ErrReleaseUnconfirmed` joined with the cut's
+`ReasonCancelled`/`context.Canceled`); a TrackChange with no time left for its
+drain (with `context.DeadlineExceeded`); a tail or drain its device failed; the
+writer's final close failing after any release (`setNativeError` beside
+`cleanupErr`); a pause's 30-second release whose close failed (`pauseNative`);
+and a refused reopen whose close failed (the activation's terminal error). Every
+`cleanupErr` is mirrored into `err`, so the record's `err` is the one place
+`nativeRecord.failed` reads, beside a release past its budget and not ended.
+
+### Red-first: round 2's cases on round 1's code
+
+The scratch worktree prepared at 4cd0fa90 was outside this session's sandbox (a
+`cd` or read there was refused), so the same tree was built under the ignored
+`.tmp/` of this worktree: round 2's tree with round 1's production files and
+`fake_test.go` written back from 4cd0fa90 by `git show`, `diff -rq` against a
+4cd0fa90 extract showing only round 2's five test files differ. Everything
+compiled there. Each case went red at its predicted assertion:
+
+- `TestNativeWaitingCommandsAnswerTheEndedLifesFailure`: all four at
+  `theSinksFailure` (ring and Pause context: bare `context canceled`; Pause done
+  and changed: the record with the drain's cancellation).
+- `TestNativeEveryEntryOnAnEndedLifeAnswersByTheVerdict`'s new rows: 15 of the
+  24 Pause and WriteDSD rows red (the fence alone at `theLifesCancellation` and
+  "not the sink's fence"; past the budget and the drain at `theSinksFailure`;
+  every WriteDSD row on an ended context, raw cancellation). The other nine
+  (nothing recorded, a device's failure, a failing close, for the entry
+  refusals) and the other entries' drain rows passed: `fenced` already answered
+  them, so they are positive controls, as the round-2 entry said.
+- `TestNativePausedInitialActivationKeepsItsOwnFence`: "answered native initial
+  paused activation fenced". `TestOrderedWaitHonorsALargerWatchdog`: "5s with
+  watchdog 17s". `TestFailedResumeClosesTheOutputItCouldNotHandOff`: two opens,
+  one close, the node open.
+- `TestRepeatedContainmentKeepsOneDropPastCallerCancellation`: 33 goroutines and
+  33 Drops. `TestContainmentFencesAnAdmissionWithoutWaitingForIt`: both cases at
+  `checkContained` (the pending session skipped).
+  `TestFinalReportRecoveryReachesTheEngineOnBothSidesOfCutoff`: both sides lost
+  the worker's fault. `TestFinalReportRecoveryContainsItsFaultCallback`: no
+  fallback attempted in three cases, temporary routing left in the fourth.
+
+### Red-first: round 3's cases on round 2's code
+
+7c2601a9's tree with round 3's two alsapcm test files (before the `meeting`
+seam, which round 2 has not): exactly the 24 live-life rows (12 entries in the
+two live columns) and both `TestNativeAWaitOnALiveLifeAnswersItsReleasesFailure`
+cases failed, all at `theSinksFailure`; every ended-life row, the staged wait
+cases and the occurrence-budget case passed there, round 2 already settling
+those returns, so their evidence is the controls below.
+
+### Controls on round 3
+
+Each mutation was made on a committed tree, run, and undone with `git restore`,
+the source text checked by grep and `git diff --quiet HEAD`:
+
+- `settled`'s live path answering `a.err` again: exactly the 22 live rows that
+  settle through it (all but the abandoned activation's).
+- `abandoned` back to round 2's form: exactly its three cases (the live budget
+  row at its wait for the command, the live drain row and the live wait's
+  context arm at `theSinksFailure`).
+- `overBudget` back to the raw reply: exactly the live wait's deadline arm
+  (it answered the writer's fence).
+- `settled`'s live wait removed: exactly the 11 live budget rows through it, at
+  "waited 5s for the entry waiting for the release's outcome" (`-watchdog=5s`).
+  `abandoned`'s wait removed: exactly its one row there.
+- Pause's completion back to `nil`: "Pause changed" failed 20 of 20 at
+  `answered <nil>` (`-count=20`). Round 2's own case, which closed `done` beside
+  `changed`, passed the same mutation 17 times in 20 (7c2601a9's tree).
+- WriteDSD's completion back to `nil`: exactly the six zero-bit rows, five of
+  five each (five at the answer; "nothing recorded" at the sink's end, since the
+  unsettled write never releases the ended sink). Its first run also turned
+  "WriteDSD refused at its entry, past the release's budget" red two runs in
+  five: that column called the entry beside the watcher's revocation, so a
+  write could pass its refusal to its completion. The column now calls the
+  entry once the revocation holds the close (df4bb12f); five more runs then
+  turned only the zero-bit rows red.
+- The invalid counts back to a raw `errors.New`: exactly the eight
+  different-lengths rows. The occurrence budget raw: exactly
+  `TestNativeAWriteOverItsOccurrenceBudgetAnswersTheCleanup`, at the answer and
+  the close's failure.
+- The Drop guard cleared once `call` returns: 20 of 20 at the Drop count (16 also
+  at the goroutine count). Round 2's test failed that mutation 20 of 20 on this
+  host too, but only by the scheduler: with 50 ms slept between `call`'s return
+  and the clearing (a scheduler's delay), round 2's test passed 20 of 20 and
+  round 3's failed 20 of 20 at both assertions (scratch trees of 7c2601a9 and
+  df4bb12f).
+
+### Round 2's listed controls, run on round 3
+
+- Pause's entry refusal raw: its ten rows in the fence, budget and drain
+  columns, ended and live. Pause's context arm raw: "Pause context" alone; its
+  done arm raw: "Pause done" alone. WriteDSD's context check raw: the eight
+  ended-context rows; its admission refusal raw: its five refusal rows and
+  "WriteDSD ring woken, then refused"; the ring's context arm raw: "WriteDSD ring
+  context" alone. Each three of three.
+- Initial ActivatePaused's unnamed fence: its case alone. `min(5s, watchdog)`:
+  "5s with watchdog 17s". The failed resume without its claim clear and close:
+  two opens, one close.
+- stopDSD's unconditional spawn: five of five at both assertions.
+- `holdsDSD` without the pending admission: both cases at `checkContained`. The
+  completion fence removed: the pending case alone (answered nil, published a
+  set); the inside case's refusal is its own refresh's. Containment waiting for
+  the admission: the pending case at the refresh's wait ("containment did not
+  stop the sink"), the inside case at "containment waited for its own
+  admission".
+- The final report recording only: both engine cases, and three callback cases
+  at no attempt ("fault callback itself" stays green: its one attempt is the
+  worker's). Ordinary events forced: after cutoff alone. Token events forced:
+  before cutoff alone. `finalFault` without its recovery: three cases with down
+  open and the reservation charged. Without `faultSent`: "fault callback itself"
+  at two attempts. The recovery overwriting the worker's fault: both engine cases
+  and three callback cases ("report panic replaced the worker's fault").
+
+### The gates
+
+On the final tree (df4bb12f and these docs), through the build lock: `go vet
+./...` clean, `GOOS=linux go vet` of `./internal/alsapcm/...` and
+`./internal/player/...` clean, and `go test -race` of the same, all 16 packages
+ok (alsapcm 79 s); the round 2 and round 3 cases `-race -count=20`, ok; `make
+docs-check` clean, and `verify_moves.py --base df4bb12f` passes with the
+output.md line declared an edit. `player.md` was 100,110
+bytes: the state owner's `Backend` contract entry moved to
+`History-rules-player.md` with a pointer that keeps its binding rules beside its
+Don't sentence (99,137 bytes). Linux alone runs `alsapcm`'s real kernel seam;
+these cases use the fake kernel on every OS, and CI's Linux race leg is their
+Linux evidence.

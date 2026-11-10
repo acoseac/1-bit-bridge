@@ -504,3 +504,56 @@ version remains 48 for this PR (the base is 47); LegacyVersion stays 35.
 No builds, tests or negative controls were run by this editing worker. The
 regression assertions and exact negative-control mutations are handed to the
 orchestrator in the round-2 engineering-log entry.
+
+### Round 3: a recorded cleanup failure wins while the life runs too
+
+Round 2 gave the verdict to the ended life alone: `settled` answered `a.err`
+while the sink's life ran, `abandoned` joined the command's cancellation with
+the record, and `await`'s deadline arm answered the writer's reply as sent.
+The record can hold a cleanup failure with the life running: a TrackChange
+tail or drain its deadline cut (`ErrReleaseUnconfirmed` beside the cut's
+cancellation), one with no time left for its drain (beside
+`context.DeadlineExceeded`) or one its device failed, the writer's last close
+failing after any release, a pause's 30-second release whose close failed, and
+a refused reopen whose close failed. The first is a natural track end or a
+session's TrackChange release that a stalled DAC holds past two seconds, and
+Pause, WriteDSD on an ended context and Activate then answered the drain's
+cancellation, which a caller takes for its own stop.
+
+While the life runs, `settled`, `abandoned` and `await`'s live arms now read a
+snapshot of the record (`nativeRecord.failed`: `ErrReleaseUnconfirmed` in the
+record, or a release whose budget passed before it ended) and answer by the
+verdict when it fails: the failure, without cancellation or activation-fence
+identity, on every return of Activate, ActivatePaused, Resume, Pause and
+WriteDSD. A command that meets a release under way waits for its outcome within
+the release's budget (`releaseOutcome`, the bound the ended life already waited
+within) and answers by the same rule. A command whose own cancellation revokes
+the sink waits only for a release begun before its revocation (`found`): an
+activation abandoned on an inert sink still answers its own cancellation at
+once, its close held, and `Done` stays the fence. A release past its budget and
+still unconfirmed answers `ErrReleaseUnconfirmed` where it answered the writer's
+fence. A confirmed release with nothing failed in its record leaves every live
+answer as it was.
+
+The entry matrix gains two live-life columns, the deadline-cut drain and the
+session's own release past its budget, and two WriteDSD entries, planes of
+different lengths (the first return) and no bits (the completion's return).
+The live budget column waits, through `nativeSeams.meeting`, until its command
+waits on the release before passing the budget, so a command that answered
+without waiting fails at that wait. The ended budget column calls its entry
+only once the watcher's revocation holds the close: called first, a Pause or a
+WriteDSD went past its refusal to its completion's return. The staged wait
+cases make one arm alone ready: "Pause changed" closes `releaseExpired` rather
+than `done` beside `changed`, which its select took half the time, and the
+ring wake-up case is named for the refusal it reaches after waking. WriteDSD's
+occurrence budget has a case of its own, the ledger filled while admission is
+open and the new occurrence written once the life has ended with its watcher
+held, so the budget's settle begins the release and answers its close's
+failure. `TestNativeAWaitOnALiveLifeAnswersItsReleasesFailure` takes `await`'s
+deadline and context arms with the life running.
+
+The containment Drop test waited on `SinkCall`'s seam, which runs inside
+`call`; a guard cleared once `call` returned could clear after the test's 32
+refreshes had run. `Seams.ContainCalled` runs on the containment goroutine after
+everything it does, and the test waits on it. `finalNativeReport` reads `s.ev`
+under the session's lock, as every write of it is made.
