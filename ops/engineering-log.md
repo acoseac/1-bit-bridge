@@ -93052,3 +93052,50 @@ Windows claims remain code inspection only: `ResolveLinks` uses
 publication returns `WriteRecorded` because `SyncParentDir` returns nil.
 The existing-VERIFIED recheck's `SyncsParentDir` branch is a different case.
 No native Windows or Linux execution was performed in this round.
+
+
+Round 9 controls were run only after commit `e8bab780`, through Go overlays
+stored outside the worktree. All six compiled and failed at the intended
+assertions: a 500 ms step-mark threshold marked the parked veto during its
+1.2 s poll; `WriteNone` at outer expiry lost Unknown; suppressing the
+`stepIncomplete` publication left PENDING after recovery was released;
+bypassing cancellation filtering printed both cancellation-only cases;
+silencing every shutdown error dropped the given-up step, unread record and
+write failure; and replacing the no-read wording with a failed-read claim
+failed both reporters and both wording helpers. No control altered the
+committed source. These are regression-test repairs and documentation
+corrections, so there was no production bug fix with a failing baseline;
+the red evidence is those six mutations, followed by clean-tree greens.
+
+After the red controls, the two backup regressions, two reporter tests and
+console handoff test each passed three race-enabled repetitions (15
+top-level runs). The initial focused backup and reporter runs also passed.
+
+
+Final full-package validation: macOS arm64, Go 1.27.3, with the repository's
+`ts_omit_webclient,ts_omit_debugeventbus` build tags and `-race -json`.
+Backup and atomicwrite used `-count=2`; the others `-count=1`. The package
+timeout was 30 minutes, except admin's requested 40 minutes. Counts below
+are top-level executions; manifest includes 24 fuzz seed runners (no fuzz
+campaign), so its 1,549 passes comprise 1,525 ordinary tests and those 24.
+
+| Package | Repetitions | Passed | Skipped | Seconds |
+|---|---:|---:|---:|---:|
+| `internal/backup` | 2 | 502 | 0 | 952.111 |
+| `internal/atomicwrite` | 2 | 182 | 0 | 30.989 |
+| `internal/admin` | 1 | 951 | 0 | 1108.151 |
+| `cmd/bridge` | 1 | 1,504 | 6 | 1439.101 |
+| `internal/manifest` | 1 | 1,549 | 8 | 1412.568 |
+
+All five full packages passed, with no assertion failures or races. The
+backup runs are 251 tests each, atomicwrite 91 each. The CLI's six skips
+require sox, root or an explicitly configured case-folding-directory fixture.
+Manifest's eight concern case/composition-distinct folders, real SACD images,
+a kqueue watch that remained after unmount, or a remount that kept the same
+device and inode (B777). These skips are not passing evidence for those cases.
+`go vet ./...` with the same tags, pinned-toolchain formatting and
+`make docs-check` passed. No Windows or Linux runtime was available: native
+Windows path resolution, no-directory-sync outcomes and sharing behavior,
+and Linux lock/prune and thread-priority behavior still need native CI.
+No production implementation was changed, no commit amended or rebased,
+and nothing was pushed.
