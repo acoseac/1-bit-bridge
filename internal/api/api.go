@@ -498,7 +498,9 @@ type MBIDProbe interface {
 // The `MinClientVersion` returned here is read from
 // `version.MinClientVersion` so it advertises the floor THIS bridge
 // needs from its iOS clients (not the floor a candidate update would
-// require — that's a Phase B / C concern).
+// require — that's a Phase B / C concern). While update checks are off
+// (UpdateInfo.ChecksOff, backlog B761) health advertises no update:
+// `updateAvailable` false, no version and no notes.
 type UpdaterStatus interface {
 	UpdateInfo() UpdateInfo
 }
@@ -512,6 +514,11 @@ type UpdateInfo struct {
 	UpdateAvailable  bool
 	ReleaseNotesURL  string
 	MinClientVersion string
+	// ChecksOff says update checks are off (update.checkEnabled, backlog
+	// B761): health then advertises no update, whatever the fields above
+	// hold. Off rather than on, so that an UpdateInfo that says nothing of
+	// the switch reads as checks on, as before it.
+	ChecksOff bool
 }
 
 // New constructs a Server. fingerprint is the SHA-256 of the TLS cert, used
@@ -1913,12 +1920,18 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 		// with the three fields that do get withheld.
 		resp.MinClientVersion = info.MinClientVersion
 		if authed {
-			resp.LatestServerVersion = info.LatestVersion
+			// While update checks are off (backlog B761) nothing a check
+			// found before is current, and none is advertised: an explicit
+			// false, as for a bridge that has checked and found none, and
+			// no version or notes. The client's floor above is no update.
+			updateAvail := info.UpdateAvailable && !info.ChecksOff
+			if !info.ChecksOff {
+				resp.LatestServerVersion = info.LatestVersion
+				resp.UpdateReleaseNotesURL = info.ReleaseNotesURL
+			}
 			// Local copy's address, not &info.UpdateAvailable directly —
 			// robust if UpdateInfo ever returns a reused/looped struct.
-			updateAvail := info.UpdateAvailable
 			resp.UpdateAvailable = &updateAvail
-			resp.UpdateReleaseNotesURL = info.ReleaseNotesURL
 		}
 	}
 	// Capability flag — non-nil pointer so the wire shape says

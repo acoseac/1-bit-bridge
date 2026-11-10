@@ -883,6 +883,17 @@
   that each part is shown or not on its own, and
   `TestARewriteOverTheDefaultsWritesWhatAFirstInstallWrites`, a rewrite
   over the defaults writing the bytes the first init wrote.)
+  **So is the update check's switch written off** (2026-11-09, backlog
+  B761's PR 1), as the enrichment switches are: `priorUpdate` reads
+  `update.checkEnabled` from the file's bytes on its own (`readPriorSwitch`,
+  which `priorEnrich` reads its two switches with), so no variable's value
+  reaches the file; a false is kept as false and a true written as no key,
+  as a first install writes it; one that does not read, or a block that is
+  no block, keeps nothing and is named by its line, never its value, and
+  `warnUpdateNotKept` says update checks are on now and how to turn them
+  off; `printKept` lists the switch kept. **Don't drop an opt-out written
+  off: the enrichment switches, or the update check's.**
+  (`TestARewriteKeepsTheUpdateCheckSwitchWrittenOff`.)
   `TestInitRewriteKeepsTheTLSPairItsConfigNames` and its siblings run the
   real initCmd twice over one `--dir` and assert the exit code, the saved
   config and the fingerprint at the paths `resolveCertPaths` finds.

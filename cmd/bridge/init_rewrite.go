@@ -94,6 +94,15 @@ import (
 //     printKept shows a kept base only where it carries no user information,
 //     query or fragment, which a credential can ride in, and "set (not
 //     shown)" where it does.
+//   - update.checkEnabled, where the config writes it off, in either posture
+//     (backlog B761), for the reason the enrichment switches are kept: it is
+//     the operator's opt-out of the update check's requests to GitHub, which
+//     the default, on, would turn back on without a word, and init asks for
+//     it no more than for them. One written on is the default, which a first
+//     install writes no key for. One that does not read is not kept, and the
+//     run says so and that the check is on now (priorUpdate,
+//     warnUpdateNotKept). The auto-installer's own settings are features and
+//     cadences, and take the overwrite below.
 //
 // Everything else is this run's value or the default, which is the
 // documented overwrite: features and cadences. The ports are kept under
@@ -132,6 +141,58 @@ type priorInstallFile struct {
 	// the file writes them off, and its two base URLs, which it keeps where
 	// Load takes them (priorEnrich).
 	Enrich priorEnrich `yaml:"enrich"`
+	// Update is the update block's check switch, which a rewrite keeps where
+	// the file writes it off (priorUpdate).
+	Update priorUpdate `yaml:"update"`
+}
+
+// priorUpdate is what a rewrite reads of the update block of the config it
+// replaces: its check switch (backlog B761). Its UnmarshalYAML reads the
+// switch on its own and never fails the file's decode, so a switch that does
+// not read, or a block that is no block, costs the rewrite nothing else the
+// file gives up: the switch is left out, and notKept says so and on what
+// line, never its value. Its exported field's yaml key and type are
+// config.UpdateConfig's (TestPriorInstallTagsAreConfigs).
+type priorUpdate struct {
+	CheckEnabled *bool `yaml:"checkEnabled"`
+	// notKept is a line for the switch, or the block, the rewrite does not
+	// keep.
+	notKept []string
+}
+
+// UnmarshalYAML reads the block as the decoder hands it, a value that does
+// not read as a block of settings keeping nothing, and the switch as Load's
+// decoder reads it into config.UpdateConfig, null read as no key. It never
+// returns an error.
+func (u *priorUpdate) UnmarshalYAML(n *yaml.Node) error {
+	var each struct {
+		CheckEnabled yaml.Node `yaml:"checkEnabled"`
+	}
+	if err := n.Decode(&each); err != nil {
+		u.notKept = []string{fmt.Sprintf("update (line %d): it does not read as a block of settings, "+
+			"so its check switch is not kept", n.Line)}
+		return nil
+	}
+	var notKept string
+	u.CheckEnabled, notKept = readPriorSwitch("update.checkEnabled", &each.CheckEnabled)
+	if notKept != "" {
+		u.notKept = append(u.notKept, notKept)
+	}
+	return nil
+}
+
+// readPriorSwitch is the value of setting the node v holds, nil where the
+// block writes no such key or writes it null, and nil with a line saying so,
+// by the setting's line and never its value, where it does not read as on or
+// off.
+func readPriorSwitch(setting string, v *yaml.Node) (on *bool, notKept string) {
+	if v.Kind == 0 {
+		return nil, ""
+	}
+	if err := v.Decode(&on); err != nil {
+		return nil, fmt.Sprintf("%s (line %d): it does not read as on or off, so it is not kept", setting, v.Line)
+	}
+	return on, ""
 }
 
 // priorEnrich is what a rewrite reads of the enrich block of the config it
@@ -184,16 +245,12 @@ func (e *priorEnrich) UnmarshalYAML(n *yaml.Node) error {
 
 // readSwitch is the value of setting the node v holds, nil where the block
 // writes no such key or writes it null, and nil, said in notKept, where it
-// does not read as on or off.
+// does not read as on or off (readPriorSwitch).
 func (e *priorEnrich) readSwitch(setting string, v *yaml.Node) *bool {
-	if v.Kind == 0 {
-		return nil
-	}
-	var on *bool
-	if err := v.Decode(&on); err != nil {
-		e.notKept = append(e.notKept, fmt.Sprintf("%s (line %d): it does not read as on or off, so it is not kept", setting, v.Line))
+	on, notKept := readPriorSwitch(setting, v)
+	if notKept != "" {
+		e.notKept = append(e.notKept, notKept)
 		e.switchesLost = true
-		return nil
 	}
 	return on
 }
@@ -488,12 +545,12 @@ func managedControlsSaid(d config.DeploymentConfig) string {
 }
 
 // keepFromPrior sets on cfg what a rewrite keeps from prior that has not
-// reached it already: the TLS pair, the enrichment switches written off,
-// the enrich bases Load takes that are not the default, and a loopback
-// install's custom endpoints on a loopback rewrite. The data dir, the roots
-// and the name reach cfg through baseConfig: initCmd decides the first two
-// before the preflight, which uses the data dir, and the name at its prompt.
-// It reports whether it kept the endpoints, for printKept.
+// reached it already: the TLS pair, the enrichment switches and the update
+// check's written off, the enrich bases Load takes that are not the default,
+// and a loopback install's custom endpoints on a loopback rewrite. The data
+// dir, the roots and the name reach cfg through baseConfig: initCmd decides
+// the first two before the preflight, which uses the data dir, and the name
+// at its prompt. It reports whether it kept the endpoints, for printKept.
 func keepFromPrior(cfg *config.Config, prior *priorInstallFile) (endpointsKept bool) {
 	if prior == nil {
 		return false
@@ -503,6 +560,7 @@ func keepFromPrior(cfg *config.Config, prior *priorInstallFile) (endpointsKept b
 	cfg.Enrich.DeezerEnabled = optedOut(prior.Enrich.DeezerEnabled)
 	cfg.Enrich.MusicBrainzBaseURL = prior.Enrich.MusicBrainzBaseURL
 	cfg.Enrich.CoverArtBaseURL = prior.Enrich.CoverArtBaseURL
+	cfg.Update.CheckEnabled = optedOut(prior.Update.CheckEnabled)
 	if cfg.IsPublic() || !prior.loopback() || len(prior.CustomEndpoints) == 0 {
 		return false
 	}
@@ -679,6 +737,10 @@ func printKept(w io.Writer, cfg *config.Config, initDataDir string, rootsKept, n
 	}
 	if cfg.Enrich.CoverArtBaseURL != "" {
 		add("enrich.coverArtBaseURL", keptBaseShown(cfg.Enrich.CoverArtBaseURL))
+	}
+	// Nor the update check's switch, so one in cfg was kept, off (optedOut).
+	if cfg.Update.CheckEnabled != nil {
+		add("update.checkEnabled", strconv.FormatBool(*cfg.Update.CheckEnabled))
 	}
 	if len(lines) == 0 {
 		return
@@ -1079,4 +1141,21 @@ func warnEnrichNotKept(w io.Writer, e priorEnrich) {
 		fmt.Fprintln(w, "for a base URL not kept, the default is used now: set it again in bridge.yaml, "+
 			"as an absolute http(s) URL, to use your mirror.")
 	}
+}
+
+// warnUpdateNotKept names, once the rewrite is saved, the update check's
+// switch it could not keep (priorUpdate), so it is not dropped without a
+// word, and says what that costs in the config the run wrote: the check is
+// on there.
+func warnUpdateNotKept(w io.Writer, u priorUpdate) {
+	if len(u.notKept) == 0 {
+		return
+	}
+	fmt.Fprintln(w, "warning: the update check's switch in the config this run replaced does not read, "+
+		"so the rewrite did not keep it:")
+	for _, s := range u.notKept {
+		fmt.Fprintf(w, "  %s\n", s)
+	}
+	fmt.Fprintln(w, "the config did not load with it either. update checks are on now: "+
+		"set update.checkEnabled: false in bridge.yaml to turn them off.")
 }

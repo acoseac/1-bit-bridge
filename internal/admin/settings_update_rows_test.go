@@ -13,8 +13,10 @@ import (
 // stubUpdater drives the two conditional Update rows on the Settings page.
 type stubUpdater struct{ st UpdateStatus }
 
-func (s stubUpdater) Status() UpdateStatus                  { return s.st }
-func (s stubUpdater) CheckNow(context.Context) UpdateStatus { return s.st }
+func (s stubUpdater) Status() UpdateStatus { return s.st }
+func (s stubUpdater) CheckNow(context.Context) (UpdateStatus, error) {
+	return s.st, nil
+}
 func (s stubUpdater) Install(context.Context, bool) (UpdateStatus, error) {
 	return s.st, nil
 }

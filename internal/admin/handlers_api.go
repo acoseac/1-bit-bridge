@@ -323,6 +323,10 @@ type settingsResponse struct {
 	UpdateAutoInstall        bool   `json:"updateAutoInstall"`
 	UpdateQuietHours         string `json:"updateQuietHours,omitempty"`
 	UpdateCheckIntervalHours int    `json:"updateCheckIntervalHours,omitempty"`
+	// UpdateCheckEnabled is update.checkEnabled RESOLVED (absent is on):
+	// whether the bridge checks for updates and installs a new release
+	// (backlog B761).
+	UpdateCheckEnabled bool `json:"updateCheckEnabled"`
 	// v1.2 Upscale settings — operator opt-in flag for the
 	// offline PCM-upscaling feature. Disabled by default per
 	// the bridge.yaml schema; flipping this here writes the
@@ -2318,6 +2322,7 @@ func settingsResponseFromConfig(cfg *config.Config, isSupervised bool) settingsR
 		UpdateAutoInstall:        cfg.Update.AutoInstall,
 		UpdateQuietHours:         cfg.Update.QuietHours,
 		UpdateCheckIntervalHours: cfg.Update.CheckIntervalHours,
+		UpdateCheckEnabled:       cfg.Update.EffectiveCheckEnabled(),
 		UpscaleEnabled:           cfg.Upscale.Enabled,
 		UpscaleStoragePath:       cfg.Upscale.EffectiveVariantsDir(cfg.DataDir),
 		AnalysisEnabled:          cfg.Analysis.Enabled,
@@ -2453,6 +2458,9 @@ type settingsPatch struct {
 	UpdateAutoInstall               *bool   `json:"updateAutoInstall,omitempty"`
 	UpdateQuietHours                *string `json:"updateQuietHours,omitempty"`
 	UpdateCheckIntervalHours        *int    `json:"updateCheckIntervalHours,omitempty"`
+	// UpdateCheckEnabled sets update.checkEnabled (backlog B761), compared
+	// against the RESOLVED value, since absent is on; only off is written.
+	UpdateCheckEnabled *bool `json:"updateCheckEnabled,omitempty"`
 	// CustomEndpoints accepts the array form (programmatic clients)
 	// or the textarea form via CustomEndpointsText (web UI). Sending
 	// both is supported but redundant; the array form wins.
@@ -2644,7 +2652,30 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.mu.Lock()
+	// An off of the update check's switch is decided and saved under the
+	// install marker's lock (backlog B761's round 3; updater's checksoff.go
+	// for the one order of B761's locks), taken here, before the console's
+	// lock and the holder's, never under either, and let go once the updater
+	// has been told (the deferred release runs after s.mu's unlock): the off
+	// lands before an install's decision, which then reads it and refuses, or
+	// after its swap, never between the two, and it is refused while the crash
+	// rollback of an install on probation would put back a backup that
+	// refuses the key. Asked for a PATCH that turns the switch off as the live
+	// config stands; the switch turned on by another save between that look
+	// and the turn refuses this off in the turn (offGuarded).
+	offGuarded := false
+	if p.UpdateCheckEnabled != nil && !*p.UpdateCheckEnabled && s.deps.UpdateChecksOffSave != nil &&
+		s.deps.CfgHolder.Load().Update.EffectiveCheckEnabled() {
+		release, err := s.deps.UpdateChecksOffSave(r.Context())
+		if err != nil {
+			writeUpdateChecksOffRefusal(w, err)
+			return
+		}
+		defer release()
+		offGuarded = true
+	}
+
+	s.lockSettingsWrite()
 	defer s.mu.Unlock()
 
 	// Mutate + persist via CfgHolder.Update: the clone-from-live →
@@ -2673,6 +2704,9 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 		// cadenceChanged: a background loop's schedule changed, so the
 		// rearm fan-out should wake them to re-read it.
 		cadenceChanged bool
+		// updateChecksSwitched: update.checkEnabled changed, so the
+		// updater is told once the save is published (backlog B761).
+		updateChecksSwitched bool
 		// fingerprintOn / upscaleOn / analysisOn / optimizeOn /
 		// autoOptimizeOn: the toggle was switched ON, so the post-commit
 		// block below can check whether the toolchain will actually let
@@ -2863,6 +2897,30 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 				report.live("updateCheckIntervalHours")
 			} else {
 				report.unchanged("updateCheckIntervalHours")
+			}
+		}
+		// update.checkEnabled (backlog B761), compared against the RESOLVED
+		// value, since absent is on. HOT: the updater asks the live config at
+		// every check's admission and every install's start and decision,
+		// and is told of the change once it is published (below), which
+		// stops a check or an install under way when it goes off and rearms
+		// the poll loop's cadence, asking nothing, when it goes on. Only off
+		// is written: on clears the key.
+		if p.UpdateCheckEnabled != nil {
+			if *p.UpdateCheckEnabled != next.Update.EffectiveCheckEnabled() {
+				// An off whose decision under the install marker's lock was
+				// not made, the switch read off before the turn and turned
+				// on by another save since (B761's round 3): refused whole.
+				if !*p.UpdateCheckEnabled && s.deps.UpdateChecksOffSave != nil && !offGuarded {
+					return &cfgAbort{status: http.StatusConflict, code: "update-checks-changed",
+						msg: "updateCheckEnabled: update checks were turned on by another save while this one was made, " +
+							"so this off was not decided under the install marker's lock; nothing was saved: save it again"}
+				}
+				next.Update.CheckEnabled = enrichSwitchValue(*p.UpdateCheckEnabled)
+				updateChecksSwitched = true
+				report.live("updateCheckEnabled")
+			} else {
+				report.unchanged("updateCheckEnabled")
 			}
 		}
 		// Custom endpoints: array form takes precedence; textarea form is
@@ -3381,6 +3439,13 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 	if cadenceChanged && s.deps.TriggerCadenceRearm != nil {
 		s.deps.TriggerCadenceRearm()
 	}
+	// The update check's switch, likewise only once the change is saved and
+	// published (backlog B761): a save that failed returned above, having
+	// changed nothing, and the updater reads the switch from the config it
+	// is told of.
+	if updateChecksSwitched && s.deps.UpdateChecksSwitched != nil {
+		s.deps.UpdateChecksSwitched()
+	}
 	// Fingerprint turned ON: the setting applied, but whether anything
 	// will RUN depends on a toolchain this bridge may not have. Say so
 	// here rather than leaving the operator to notice on the Jobs card
@@ -3799,12 +3864,23 @@ func (s *Server) getUpdatesSnapshot() UpdateStatus {
 //
 // Uses r.Context() so a browser disconnect cancels the (potentially
 // slow) GitHub call rather than letting it run uselessly to completion.
+//
+// While update checks are off (backlog B761) it asks nothing and answers
+// 409 `update-checks-off`, and so does a check the switch stopped under way.
+// A check that failed upstream is still a 200, its status's lastError
+// saying why.
 func (s *Server) apiUpdatesCheck(w http.ResponseWriter, r *http.Request) {
 	if s.deps.Updater == nil {
 		writeError(w, http.StatusServiceUnavailable, errCodeNoUpdater, errMsgUpdaterNotConfig)
 		return
 	}
-	writeJSON(w, http.StatusOK, s.deps.Updater.CheckNow(r.Context()))
+	st, err := s.deps.Updater.CheckNow(r.Context())
+	if err != nil {
+		code, short := classifyUpdateError(err)
+		writeError(w, code, short, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, st)
 }
 
 // --- POST /api/updates/install[?force=1] ---
@@ -3825,7 +3901,8 @@ func (s *Server) apiUpdatesCheck(w http.ResponseWriter, r *http.Request) {
 //     another install is already in progress (retry once it finishes),
 //     or the install marker's lock cannot be held (`marker-locked`:
 //     another process holds it, or the data dir's filesystem keeps no
-//     locks; backlog B692)
+//     locks; backlog B692), or update checks are off, or were turned off
+//     before the install's swap (`update-checks-off`, backlog B761)
 //   - 501 on Windows (Phase B is darwin/linux; Windows is a follow-up)
 //   - 403 when the binary path isn't writable (system install needs sudo)
 //   - 502 on download / verify / swap failures
@@ -3915,8 +3992,63 @@ func classifyUpdateError(err error) (status int, short string) {
 		// 409: a newer version opened the data dir, so putting the backup
 		// back would be a downgrade past its store; nothing was done.
 		return http.StatusConflict, "rollback-refused"
+	case errors.Is(err, ErrUpdateChecksOff):
+		// 409: update checks are off (backlog B761), so the check or the
+		// install was refused, or stopped before its swap; the switch is
+		// the remedy, and nothing went wrong.
+		return http.StatusConflict, "update-checks-off"
 	default:
 		return http.StatusBadGateway, "install-failed"
+	}
+}
+
+// lockSettingsWrite takes the console's lock (Server.mu) for a settings PATCH,
+// after its look at the update check's switch and, where that look asked for
+// it, the install marker's lock. A test that holds the lock is told, through
+// testSettingsWriteWaits, that the PATCH found it held and waits: the window
+// between the look and the turn, in which another save can turn the switch on
+// (B761's round 3). A lock it finds free tells the test nothing. With no
+// hook, as in production, it is mu.Lock.
+func (s *Server) lockSettingsWrite() {
+	if waits := s.testSettingsWriteWaits; waits != nil {
+		if s.mu.TryLock() {
+			return
+		}
+		waits()
+	}
+	s.mu.Lock()
+}
+
+// writeUpdateChecksOffRefusal answers a settings PATCH whose off of the update
+// check's switch Deps.UpdateChecksOffSave refused (backlog B761's round 3),
+// nothing saved, the live settings and the updater as they were: 409 with the
+// refusal's code and its words, which name no path and say what to do, for
+// the install marker's lock it could not hold (`marker-locked`), a crash
+// rollback the off would keep from its backup (`update-checks-off-refused`)
+// and a backup that did not answer or an install marker that could not be
+// read (`update-checks-off-unchecked`); 503 `stopping` for a wait the
+// request's end stopped (serve's stop, which the console's requests take, or
+// the client's), in words that say only that it was stopped and what to do,
+// since the end does not say what stopped it (round 4); anything else a 500
+// in words, logged whole. What stays open here, for the bridge's Windows
+// service, is backlog B831.
+func writeUpdateChecksOffRefusal(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, ErrUpdateChecksOffLocked):
+		writeError(w, http.StatusConflict, "marker-locked", err.Error())
+	case errors.Is(err, ErrUpdateChecksOffRefused):
+		writeError(w, http.StatusConflict, "update-checks-off-refused", err.Error())
+	case errors.Is(err, ErrUpdateChecksOffUnchecked):
+		writeError(w, http.StatusConflict, "update-checks-off-unchecked", err.Error())
+	case errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded):
+		writeError(w, http.StatusServiceUnavailable, "stopping",
+			"update checks were not turned off: the save was stopped before the off was decided, and nothing was "+
+				"saved; once the bridge answers, check the switch and turn them off again if they are on")
+	default:
+		logger.Error("admin: an off of the update check's switch was not decided", "err", err)
+		writeError(w, http.StatusInternalServerError, "save-config",
+			"update checks were not turned off: whether the off could be saved was not decided, and nothing was saved; "+
+				"the bridge log says why")
 	}
 }
 

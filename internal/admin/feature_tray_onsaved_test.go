@@ -83,6 +83,7 @@ var trayHarnessFunctions = []string{
 	"escapeHTML", "pruneDetachedTrays", "traySettingsSnapshot", "trayFieldManaged",
 	"buildFeatureTray", "buildTrayRow", "trayControlFor", "trayLabelFor", "trayValueOf",
 	"trayApplyValue", "syncTray", "applyTrayManaged", "applyStatusFor", "saveTrayField", "setDisabled",
+	"updateChecksOffLost",
 }
 
 // trayHarnessRun builds one tray per case with the shipped buildFeatureTray,
