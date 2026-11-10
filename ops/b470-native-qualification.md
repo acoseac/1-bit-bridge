@@ -1,6 +1,6 @@
 # B470 native qualification — owner approval and provisional evidence
 
-QualificationVersion is **59**. All older evidence must be rerun for the harness, native included. The
+QualificationVersion is **60**. All older evidence must be rerun for the harness, native included. The
 harness never creates approval. Since B728 no production path reads an approval record or a candidate:
 the player plays DSD by its effective policy (`ops/plan-b728-dsd-capability-design.md`). This runbook
 is the engineering harness's. Its evidence binds `qualificationVersion`, whose guard covers the DSD byte
@@ -249,7 +249,7 @@ GOTOOLCHAIN=go1.27.3 go test -race -tags ts_omit_webclient,ts_omit_debugeventbus
 
 ## Round 3 evidence rules
 
-Historical round 3 used qualificationVersion 4; current version is **59**. A native contact's
+Historical round 3 used qualificationVersion 4; current version is **60**. A native contact's
 Contact.SchemaVersion remains **2**; a DoP contact's is **3**. All older
 contacts are invalid; repeat contact on this build. Required Device and Subdevice
 fields bind the configured PCM endpoint, including a nonzero subdevice, before
@@ -338,7 +338,7 @@ still resolve inside it). `dsdMode: native` or `auto` enables only approved nati
 
 The Go contracts are `qualification.Approval`, `ApprovalBody`, `ApprovedPolicy`, `Edge`
 and `Evidence` in `internal/player/qualification/approval.go`. JSON uses those exact
-exported field names. SchemaVersion=1, or 2 with Transitions and QualifiedOn (2d.2, below); QualificationVersion=59; Revision is the owner's
+exported field names. SchemaVersion=1, or 2 with Transitions and QualifiedOn (2d.2, below); QualificationVersion=60; Revision is the owner's
 revision; Identity is the observed VID/ProductID/manufacturer/product/bcdDevice,
 anchored controller/port, interface, device and subdevice. No serial or card number is
 persistent identity. Unchanged descriptors may retain approval after replug/restart;
@@ -386,7 +386,7 @@ At least one native fixture must finish with measured playback of that tuple.
 NativeTuple and NativeCompleted record that execution; PCM-only lists or completion
 cannot qualify it. LifecycleActions count observed native outcomes: pause/resume,
 release/reopen, navigation between native occurrences, Stop, and natural completion.
-An admitted command alone is insufficient. Version 59 invalidates older evidence.
+An admitted command alone is insufficient. Version 60 invalidates older evidence.
 List all candidate directional edges explicitly. No command generates that record.
 
 ```sh
@@ -425,7 +425,7 @@ or evidence names resolving to the state directory itself before any ancestor
 walk. Native monitoring remains fail-closed without a grace period. The overlay
 generator requires both integration suites before publishing its overlay.
 Guarded API, config, extractor, output-play and approval paths changed; rerun
-qualification with version 59. ExtractorVersion 30 retains the first parsed DFF
+qualification with version 60. ExtractorVersion 30 retains the first parsed DFF
 PROP's known format facts when a later PROP makes compression unsupported.
 
 Version 13 also covers the deterministic PCM trace capture test. It changes no
@@ -1300,10 +1300,15 @@ bits, the reconciliation then revoking the session's DSD. In `dsd_policy.go` a r
 the set the same reconciles it once more where no reconciliation of it returned (`dsdJudged`): a
 refresh that published and panicked before its reconciliation returned (a choice's write's among
 them) left an occurrence admitted under the set it replaced unjudged, playing on until the set
-changed again or the session ended; the next refresh, the session monitor's at most 100 ms later
-while a session holds DSD, judges it now, keeping it, handing it off again or revoking its
-session's DSD, recording the set first so a reconciliation that panics again is not run by every
-refresh after it. Two test
+changed again or the session ended; the next refresh judges it now, keeping it, handing it off
+again or revoking its session's DSD. (Corrected with version 60's record, round 19: version 59
+recorded the set judged before that reconciliation ran, so one that panicked again was never
+tried after it and the occurrence it failed on played on unjudged; a panic in a session's
+reconciliation reached the refresh's caller, an admission, an activation or the monitor, and
+left every session after it in the loop unjudged; a panic in the monitor's own refresh ended the
+monitor, whose recover was outside its loop, so "the next refresh, the session monitor's at most
+100 ms later" held only until a refresh panicked; and a panic in a reading of the policy was
+bounded by nothing. Version 60 contains and bounds each.) Two test
 seams are nil in production (`Seams.Deciding`, `Seams.Admitting`). Under the prefix,
 `TestAConvertedJoinWindowWaitsForAWriteThatChangesItsSuccessor` forces the write's publish, and its
 panic at its publish, between the decision's two reads, the sink's lookahead above its floor;
@@ -1319,3 +1324,33 @@ an occurrence a lost reconciliation left unjudged is judged by the next refresh.
 approval admission reads a record of version 59 alone; the migration reads an owner's record of
 35 to 59 (`LegacyVersion` stays 35). Every earlier version's harness evidence is stale to the
 harness, as at every bump.
+
+Version 60 is B728 B9's round 19: a reconciliation or a reading of the effective DSD policy that
+panics is contained and bounded, the session's monitor goes on past a panic, and the tests that
+force the converted window's floor and its straddles. In `internal/player/playback/native.go`,
+Revoke holds the session's lock through a lockHold, so a panic in its locked section lets the
+lock go, and a test seam nil in production (`Seams.Revoking`) runs there. In `dsd_policy.go` and
+`dsd_contain.go`, each session's reconciliation is contained, its judgement under a lockHold: a
+panic in its judgement, the engine's hand-off or Revoke is logged and every other session is
+judged. A set is recorded judged only once every session's reconciliation against it has
+completed; the next refresh tries a failed one once more, judging only the sessions it failed in
+and asking only the hand-offs that did not return; that retry's failure is terminal (two
+attempts): each session it failed in stops with its fault (backend_failed), its DSD revoked
+unless Revoke is what panicked, and the set is recorded judged. A panic in a reading of the
+policy (the binding, the box, the controls, the state) or in a publish reaches only a choice's
+write; every other caller (a session's admission and activation, its monitor, the supervisor's
+refresh, the silent probe's) contains it: the first of a run is logged, and from the second in a
+row until a reading completes every session that holds DSD stops with its fault, its DSD
+revoked, and an admission or an activation whose reading failed refuses. The monitor recovers
+each tick's panic within these bounds and takes its next tick; a panic outside them stops its
+session with its fault. Under the prefix,
+`TestAConvertedJoinWindowWaitsForAWriteThatChangesItsSuccessor`'s straddle cases are decided by
+the reporter's tick or the decision reaching its gate, whichever comes first, and its floor cases
+park the sink's 400 ms STATUS before granting the time, hold the producer at its wait across
+that measurement, and hold what the kernel was given of the track to its conversion alone,
+zero-padded. No packer, plan, harness reader or record changes. What plays changes only where a
+panic comes: a reconciliation's no longer leaves the sessions after it unjudged, and stops its
+own session if it comes again on the retry; a reading's, twice in a row, stops every session
+that holds DSD; and the monitor no longer ends at one. The harness's approval admission reads a
+record of version 60 alone; the migration reads an owner's record of 35 to 60 (`LegacyVersion`
+stays 35). Every earlier version's harness evidence is stale to the harness, as at every bump.
