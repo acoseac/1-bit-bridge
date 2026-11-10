@@ -1046,7 +1046,15 @@ func (s *DSDSink) waitRelease(ctx context.Context) error {
 func (s *DSDSink) result() error { s.mu.Lock(); defer s.mu.Unlock(); return s.err }
 
 // Pause freezes content progress; after thirty seconds hardware is released.
+// A Pause whose own context has ended answers that stop (stopped) and changes
+// nothing: it reads its context before it takes the sink's lock, and again
+// after its wait, where a change can be taken beside the stop (B728 B9 PR 1
+// round 5: an inert or already-paused sink skipped the wait, and the wait
+// could take the change, so a cancelled Pause answered success).
 func (s *DSDSink) Pause(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return s.stopped("native pause", err)
+	}
 	s.mu.Lock()
 	if s.releasing {
 		e := s.fenced("native pause", errors.New("native releasing"))
@@ -1072,6 +1080,9 @@ func (s *DSDSink) Pause(ctx context.Context) error {
 		s.mu.Lock()
 	}
 	s.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return s.stopped("native pause", err)
+	}
 	return s.settle(ctx, nativeAnswer{kind: answerSuccess, op: "native pause"})
 }
 
