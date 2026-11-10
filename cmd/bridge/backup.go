@@ -701,9 +701,9 @@ func runBackupTicker(ctx context.Context, src backup.Sources, keep func() int, i
 // reportTickerVerdict says what the pass's kept snapshot's verification
 // found: on stdout when both its verdicts are VERIFIED (or the install had
 // no database to capture and its files are), on stderr otherwise, and
-// nothing for cancellation alone: neither verdict FAILED, at least one
-// INCOMPLETE, and every INCOMPLETE due only to cancellation. Aborts and
-// deadlines are reported.
+// nothing at shutdown for a cancellation-only error whose found verdict is
+// unknown, passing or CancelledOnly. Without an error, a stopped context
+// silences only a CancelledOnly record. Known aborts and deadlines are reported.
 // A verification given up is said by how far its write went and what its
 // record reads as read back, and that its step still holds the snapshots; a
 // kept snapshot whose verification answered an error once its check had run,
@@ -715,8 +715,15 @@ func reportTickerVerdict(ctx context.Context, stdout, stderr io.Writer, triggere
 	if res.VerifyErr != nil {
 		failure := ctxerr.WithoutCancellation(ctx, res.VerifyErr)
 		found, rec, read := res.Verify.Found, res.Verify.Record, res.Verify.RecordRead
+		if failure == nil {
+			if found.DatabaseState == "" || found.Passes() || found.CancelledOnly() {
+				return
+			}
+			// The verdict still needs reporting. Keep the stop's own error
+			// beside it without changing the error shared with other callers.
+			failure = res.VerifyErr
+		}
 		switch {
-		case failure == nil:
 		case errors.Is(failure, backup.ErrCheckGivenUp):
 			reads := recordWords(res.Verify)
 			if read {

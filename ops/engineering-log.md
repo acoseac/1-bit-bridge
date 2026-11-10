@@ -93148,11 +93148,87 @@ exception, deferred-cancel guidance, slow-step bound and Windows
 round 10 has separate bullets and History entries. Placement and content
 inspection, not a behavioral control, checks this correction.
 
-Validation handoff: no builds, tests, negative controls or state-changing
-git commands ran in this edit-only round. For item 1, restore the error
-branch's bare cancellation return and the no-error branch's database-only
-silence separately: respectively the before-publication panic case and
-the after-answer panic / failed-or-aborted-files cases must fail their stderr
-assertions. For item 2, mutate the shared constructor as above. Items 3 and
-4 have only the stated source/text checks. The orchestrator runs all gates
-and records their results separately.
+The edit-only worker ran no builds, tests, negative controls or
+state-changing git commands. The orchestrator subsequently validated the
+rows against the old behavior and all three controls; each turned red:
+
+- Control A restored `verifyHeld`'s bare cancellation return: the
+  before-publication panic case failed its stderr assertion.
+- Control B restored the no-error branch's database-only shutdown silence:
+  the after-answer panic, aborted/deadline/absent/extra-reason rows and the
+  cancelled database beside failed or aborted files failed their stderr
+  assertions. The files-only cancellation rows (verified or no-database
+  database) also turned red, because the old branch reported them instead
+  of remaining silent. The original handoff understated that control's rows.
+- Control C added a non-cancellation cause to the shared expiry constructor:
+  the outer-expiration row failed its empty-output assertion.
+
+The orchestrator's full race runs passed. The prune tests passed ×30 after
+the additional wait in `TestAClaimedSnapshotIsKeptFromThePrune`, committed
+as `bc5b95a8`. The first `awaitClean` drains the claim's folder-lock hold;
+the second drains the first prune's hold, because `PruneContext` sends its
+answer before its deferred `h.release` completes. Round 11 corrects the
+comment that incorrectly attributed the second wait to the claim. Cleanup
+ordering and History placement received source/text checks only.
+
+
+## 2026-11-10 — B653 PR 1 round 11: the ticker decides shutdown silence from the verdict
+
+Starting HEAD: `bc5b95a8`. Both `verifyHeld` stop branches again return their
+own context error. Round 10's joined verdict text changed the shared error
+seen by CLI and console callers and covered only the first stop branch.
+The ticker now decides silence itself: with an error,
+`ctxerr.WithoutCancellation` must leave nothing and `Found` must be empty,
+passing or `CancelledOnly`. An empty found verdict at outer expiry is
+unknown; shutdown still silences that cancellation-only wrapper. Otherwise
+the found verdict is reported with its write/read-back words, ending with
+`res.VerifyErr` when no other failure remains, never `<nil>`. Without an
+error, silence still requires a stopped context and a `CancelledOnly`
+read-back record.
+
+`CancelledOnly` now admits only database VERIFIED, UNVERIFIED with only
+`no-database`, or INCOMPLETE with only `cancelled`; files VERIFIED or
+INCOMPLETE with only `cancelled`; and at least one cancelled INCOMPLETE.
+PENDING and other UNVERIFIED states cannot hide beside cancellation.
+The guide, short CLI rules and their binding History state both branches,
+the unknown-verdict exception and the same stricter predicate together.
+
+Cases expected red on `bc5b95a8`, not executed in this edit-only round:
+
+- `TestTheTickerReportsFoundVerdictsBesideCancellation`: bare cancellation
+  beside database INCOMPLETE: aborted, INCOMPLETE: deadline or FAILED:
+  hash-mismatch must print those found verdicts on stderr, with files
+  VERIFIED, unknown-write and unread-record words, and end with the stop's
+  own error. Stdout must stay empty; `<nil>` is forbidden. Cancelled, empty
+  and passing found verdicts are silent contrasts expected green on that head.
+- `TestTheTickerReportsAPanickedCheckAtShutdown`'s before-publication case
+  now requires `verifyErr == context.Canceled`, not just `errors.Is`, while
+  retaining both aborted-verdict stderr assertions. Round 10's join fails
+  that exact-error assertion.
+- `TestTheTickerSilencesOnlyCancelledRecordsAtShutdown`: database PENDING,
+  UNVERIFIED: no-baseline, unknown-record or other-snapshot beside cancelled
+  files, and files PENDING or UNVERIFIED: no-baseline beside a cancelled
+  database. Each must name its non-cancellation verdict on stderr, with no
+  stdout. All six are expected red on the starting head.
+
+Controls for the orchestrator, each independent with the other fixes kept:
+
+- Restore only round 10's join in `verifyHeld`: the before-publication panic
+  case must fail its bare-error assertion even though the ticker reports it.
+- Restore only the ticker's old `case failure == nil` silence, removing the
+  new verdict-aware pre-switch block: the aborted, deadline and FAILED
+  error-table rows and before-publication panic stderr assertions must fail.
+- Loosen only the database guard in `CancelledOnly` to reject FAILED and
+  non-cancelled INCOMPLETE, accepting other database states: the four new
+  database rows must fail their stderr assertions.
+- Loosen only the files guard the same way, keeping the database guard
+  strict: the two new files rows must fail their stderr assertions.
+
+The prune-wait comment now names the first prune's deferred release, and
+round 10's record includes the orchestrator validation and `bc5b95a8` above.
+These and the aligned guide/rules/History receive text checks only (items 3
+and 4); no new behavioral test is claimed for them. No builds, tests,
+negative controls or state-changing git commands ran in round 11's
+edit-only pass. The orchestrator owns those runs and records their outcomes
+after execution; the expected red cases and controls here are a handoff,
+not measured results.

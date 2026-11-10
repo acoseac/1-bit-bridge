@@ -1736,9 +1736,31 @@ separately, after the worker answer. Both require database and files
 INCOMPLETE: aborted on stderr, with no stdout. The no-error table in
 `TestTheTickerSilencesOnlyCancelledRecordsAtShutdown` checks both states,
 absent and additional reasons, deadlines and aborts, and cancellation alone.
-Restore the error-branch cancellation alone and the old database-only
-no-error silence separately to exercise each regression. These controls
-and all test execution are left to the orchestrator in this edit-only round.
+Round 10's controls restored the shared error's bare cancellation and the
+old database-only no-error silence separately. The orchestrator ran those
+controls and the expiry-constructor control: each turned red, including
+the files-only cancellation rows under the database-only control. The full
+race runs and prune tests ×30 passed, recorded in `ops/engineering-log.md`.
+
+The wait added in `bc5b95a8` to
+`TestAClaimedSnapshotIsKeptFromThePrune` drains the first prune's hold:
+`PruneContext` sends its answer before its deferred `h.release` finishes.
+The earlier `awaitClean` already drains the claim's folder-lock hold, and
+`claimed.Release()` synchronously releases ownership. Round 11 corrects the
+second wait's comment; no new behavioral test is needed for that text.
+
+Round 11 removes the shared error join and tests the ticker's verdict-aware
+error branch directly. The before-publication panic case requires exactly
+`context.Canceled`, so restoring only the join fails even with the ticker
+fixed. Restoring only the old ticker error silence fails the aborted,
+deadline and FAILED found-verdict rows in
+`TestTheTickerReportsFoundVerdictsBesideCancellation`. The record table
+adds database PENDING or UNVERIFIED (no-baseline, unknown-record,
+other-snapshot) beside cancelled files, and files PENDING or UNVERIFIED
+beside a cancelled database. Loosen the database and files restrictions in
+`CancelledOnly` independently: each side's rows must fail their stderr
+assertions. These round-11 controls and execution remain the orchestrator's
+handoff, not measured results from the edit-only worker.
 
 Round 9's handoff exception, deferred-cancel guidance, slow-step bound and
 Windows publication notes belong under round 9, not round 8. Their placement

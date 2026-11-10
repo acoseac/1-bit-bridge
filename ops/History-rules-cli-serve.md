@@ -4805,10 +4805,11 @@ asserts the outer-expiry hook and Unknown while the record is PENDING, then
 releases recovery and reads INCOMPLETE from disk before releasing the answer.
 The original worker-answer case still proves the shorter check deadline.
 
-The ticker suppresses a shutdown error only when `ctxerr.WithoutCancellation`
-leaves nothing: a cancellation-only outcome, including the outer expiry's
-cancellation wrapper. A step given up, a record not read back, or a write
-failure accompanying cancellation is still reported. The contrasting cases
+The ticker suppresses an outer expiry's shutdown error when
+`ctxerr.WithoutCancellation` leaves nothing and `Found` is empty: its verdict
+is unknown. Round 11 below supplies the rule when a verdict is known.
+A step given up, a record not read back, or a write failure accompanying
+cancellation is still reported. The contrasting cases
 are in `TestTheTickerSilencesOnlyCancellationWithoutAnotherFailure`.
 `TestTheReportersSayWhenAnIncompletePublicationWasNeverReadBack` uses
 `abandonPending`'s actual shape (INCOMPLETE Found, WriteRecorded, RecordRead
@@ -4816,28 +4817,51 @@ false, ReadErr nil): it says "its record was not read back", never "could
 not be read back". No reporter behavior changes in this round.
 
 
-*The tenth round* (2026-11-10). A shutdown that overlaps an INCOMPLETE
-result must not turn an aborted check into cancellation alone. `verifyHeld`
-joins a non-cancellation verdict to its context error, retaining the context
-error's identity and the database/files verdicts. The ticker's error filter
-then keeps that verdict. `TestTheTickerReportsAPanickedCheckAtShutdown`
-reproduces the overlap by panicking in the real database check and cancelling
-through `SetAfterCheckForTest`, and requires INCOMPLETE: aborted on stderr.
-Its second case stops after the worker answer, exercising the no-error path.
+*The tenth and eleventh rounds* (2026-11-10). The ticker decides shutdown
+silence from the verdict. Round 10 joined a non-cancellation verdict to the
+context error in one `verifyHeld` stop branch. Round 11 removes that join:
+both stop branches return the stop's own error, preserving CLI and console
+behavior and covering a stop that arrives between those branches.
 
-For a non-passing record returned without an error, the ticker's shutdown
-silence requires neither database nor files FAILED, at least one INCOMPLETE,
-and every INCOMPLETE carrying `ReasonCancelled` as its only reason
-(`Verification.CancelledOnly`). `ReasonAborted` and `ReasonDeadline` are
-always reported. `TestTheTickerSilencesOnlyCancelledRecordsAtShutdown`
-includes a cancelled database beside failed or aborted files, along with
-cancellation-only contrasts, missing reasons and extra reasons. Never decide
-silence from the database's state alone or from the context ending alone.
+With an error, the ticker is silent only when `ctxerr.WithoutCancellation`
+leaves nothing AND `Found` is empty, passing or `CancelledOnly`. An empty
+`Found` at outer expiry means the verdict is unknown, even if the worker
+later publishes an aborted or expired verdict. A known non-cancellation
+verdict is reported by the found-verdict branch with its write words; when
+no other failure remains, the line ends with `res.VerifyErr`, never `<nil>`.
+With no error, silence requires a stopped context and a `CancelledOnly`
+read-back `Record`; passing records still use the normal success output.
+
+`Verification.CancelledOnly` requires the database to be VERIFIED,
+UNVERIFIED with only `ReasonNoDatabase`, or INCOMPLETE with only
+`ReasonCancelled`; the files must be VERIFIED or INCOMPLETE with only
+`ReasonCancelled`; at least one must be that cancelled INCOMPLETE. Anything
+else is reported, including PENDING or any other UNVERIFIED beside a
+cancelled verdict. Never decide silence from the database's state alone,
+from the context ending alone, or from the error without its found verdict.
+
+`TestTheTickerReportsAPanickedCheckAtShutdown` reproduces the overlap by
+panicking in the real database check and cancelling through
+`SetAfterCheckForTest`, requires bare `context.Canceled` (not merely
+`errors.Is`) and database/files INCOMPLETE: aborted on stderr. Its second
+case stops after the worker answer, exercising the no-error path.
+`TestTheTickerReportsFoundVerdictsBesideCancellation` requires aborted,
+deadline and FAILED found verdicts beside bare cancellation to reach stderr
+with the write/read-back words and the stop's own error; cancelled, empty
+and passing found verdicts stay silent.
+`TestTheTickerSilencesOnlyCancelledRecordsAtShutdown` includes a cancelled
+database beside failed or aborted files, cancellation-only contrasts,
+missing and extra reasons, and round 11's database PENDING, no-baseline,
+unknown-record or other-snapshot beside cancelled files, plus files PENDING
+or UNVERIFIED beside a cancelled database. Each non-cancellation row requires
+its verdict on stderr with no stdout.
 
 The expiry error is built by `verifyExpiryError` in production and exposed
 through `VerifyExpiryErrorForTest` for the outer-expiration reporter case.
 A change in its wrapped causes must reach that case; its control adds a
 non-cancellation cause to the constructor and requires silence to fail.
-The supporting record and expected controls are in `ops/engineering-log.md`;
-no validation was run by this edit-only worker. The round-9 rule is tagged
-round 9, and this changed shutdown rule is recorded separately as round 10.
+The supporting record, round-10 orchestrator validation and round-11
+control handoff are in `ops/engineering-log.md`. Round 11's controls restore
+only the shared join, only the old ticker error branch, and loosen each side
+of `CancelledOnly` separately. No round-11 execution is claimed by the
+edit-only worker.

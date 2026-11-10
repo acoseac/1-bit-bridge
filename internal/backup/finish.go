@@ -582,12 +582,6 @@ func verifyHeld(ctx context.Context, dir string, o VerifyOptions, after func(con
 		return answer(pub.err)
 	}
 	if err := ctx.Err(); err != nil && found.DatabaseState == StateIncomplete {
-		// A stop after the check ended must not turn an aborted check (or
-		// a files failure beside cancellation) into cancellation alone.
-		if !found.CancelledOnly() {
-			err = errors.Join(err, fmt.Errorf("the check found database %s, files %s",
-				StateWords(found.DatabaseState, found.DatabaseReasons), FilesWords(found)))
-		}
 		return answer(err)
 	}
 	if err := checkCtx.Err(); err != nil && found.DatabaseState == StateIncomplete {

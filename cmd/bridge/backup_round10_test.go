@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"errors"
 	"strings"
 	"testing"
 
@@ -43,8 +42,8 @@ func TestTheTickerReportsAPanickedCheckAtShutdown(t *testing.T) {
 			t.Cleanup(func() { cancel(); awaitVerificationsEnd(t, root) })
 			v, verifyErr := backup.VerifySnapshot(ctx, dir, backup.VerifyOptions{})
 			if when == "after check before publication" {
-				if ctx.Err() == nil || !errors.Is(verifyErr, context.Canceled) {
-					t.Fatalf("after-check stop was not returned: context %v, verification %v", ctx.Err(), verifyErr)
+				if ctx.Err() != context.Canceled || verifyErr != context.Canceled {
+					t.Fatalf("after-check stop was not bare context.Canceled: context %v, verification %v", ctx.Err(), verifyErr)
 				}
 			} else {
 				if verifyErr != nil {
@@ -84,6 +83,12 @@ func TestTheTickerSilencesOnlyCancelledRecordsAtShutdown(t *testing.T) {
 		{"both cancelled", backup.StateIncomplete, backup.StateIncomplete, cancelled, cancelled, ""},
 		{"files cancellation alone", backup.StateVerified, backup.StateIncomplete, nil, cancelled, ""},
 		{"no database and files cancelled", backup.StateUnverified, backup.StateIncomplete, []backup.Reason{backup.ReasonNoDatabase}, cancelled, ""},
+		{"pending database and cancelled files", backup.StatePending, backup.StateIncomplete, nil, cancelled, "database PENDING"},
+		{"no baseline and cancelled files", backup.StateUnverified, backup.StateIncomplete, []backup.Reason{backup.ReasonNoBaseline}, cancelled, "database UNVERIFIED: no-baseline"},
+		{"unknown record and cancelled files", backup.StateUnverified, backup.StateIncomplete, []backup.Reason{backup.ReasonUnknownRecord}, cancelled, "database UNVERIFIED: unknown-record"},
+		{"other snapshot and cancelled files", backup.StateUnverified, backup.StateIncomplete, []backup.Reason{backup.ReasonOtherSnapshot}, cancelled, "database UNVERIFIED: other-snapshot"},
+		{"cancelled database and pending files", backup.StateIncomplete, backup.StatePending, cancelled, nil, "files PENDING"},
+		{"cancelled database and unverified files", backup.StateIncomplete, backup.StateUnverified, cancelled, []backup.Reason{backup.ReasonNoBaseline}, "files UNVERIFIED: no-baseline"},
 		{"cancelled database and failed files", backup.StateIncomplete, backup.StateFailed, cancelled, []backup.Reason{backup.ReasonHash}, "files FAILED: hash-mismatch"},
 		{"cancelled database and aborted files", backup.StateIncomplete, backup.StateIncomplete, cancelled, aborted, "files INCOMPLETE: aborted"},
 		{"cancelled database and expired files", backup.StateIncomplete, backup.StateIncomplete, cancelled, deadline, "files INCOMPLETE: deadline"},
@@ -114,6 +119,59 @@ func TestTheTickerSilencesOnlyCancelledRecordsAtShutdown(t *testing.T) {
 				}
 			} else if !strings.Contains(errs.String(), tc.want) {
 				t.Errorf("shutdown hid %q: stderr %q", tc.want, errs.String())
+			}
+		})
+	}
+}
+
+// TestTheTickerReportsFoundVerdictsBesideCancellation pins the error branch:
+// a stop's error cannot hide a known non-cancellation verdict.
+func TestTheTickerReportsFoundVerdictsBesideCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	for _, tc := range []struct {
+		name  string
+		state backup.State
+		why   backup.Reason
+		want  string
+	}{
+		{"aborted", backup.StateIncomplete, backup.ReasonAborted, "database INCOMPLETE: aborted"},
+		{"deadline", backup.StateIncomplete, backup.ReasonDeadline, "database INCOMPLETE: deadline"},
+		{"failed", backup.StateFailed, backup.ReasonHash, "database FAILED: hash-mismatch"},
+		{"cancelled", backup.StateIncomplete, backup.ReasonCancelled, ""},
+		{"unknown", "", "", ""},
+		{"passing", backup.StateVerified, "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var found backup.Verification
+			if tc.state != "" {
+				found.DatabaseState = tc.state
+				found.FilesState = backup.StateVerified
+				if tc.why != "" {
+					found.DatabaseReasons = []backup.Reason{tc.why}
+				}
+			}
+			var out, errs bytes.Buffer
+			reportTickerVerdict(ctx, &out, &errs, "shutdown", backup.Result{
+				Dir: "snapshot", VerifyErr: context.Canceled,
+				Verify: backup.VerifyResult{Found: found, Write: backup.WriteUnknown},
+			})
+			if out.Len() != 0 {
+				t.Errorf("cancellation error printed on stdout: %q", out.String())
+			}
+			if tc.want == "" {
+				if errs.Len() != 0 {
+					t.Errorf("shutdown printed a cancelled, unknown or passing verdict: %q", errs.String())
+				}
+				return
+			}
+			for _, want := range []string{tc.want, "files VERIFIED", "its write outcome is unknown", "its record was not read back"} {
+				if !strings.Contains(errs.String(), want) {
+					t.Errorf("shutdown lost %q: stderr %q", want, errs.String())
+				}
+			}
+			if !strings.HasSuffix(errs.String(), ": "+context.Canceled.Error()+"\n") || strings.Contains(errs.String(), "<nil>") {
+				t.Errorf("found verdict did not end with the stop's own error: %q", errs.String())
 			}
 		})
 	}
