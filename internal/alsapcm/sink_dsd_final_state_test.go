@@ -314,6 +314,26 @@ func TestNativeAWriteOrAPauseStoppedByItsOwnContextAnswersAtOnce(t *testing.T) {
 	}
 }
 
+// TestNativeAWriteOfNoBitsChecksItsContext: a write of no bits skips the
+// write's loop, and with nothing under way and the life running it answers
+// its own context's end all the same, and the success it is on a context
+// running (B728 B9 PR 1 round 4: it answered nil on an ended context).
+func TestNativeAWriteOfNoBitsChecksItsContext(t *testing.T) {
+	k := nativeKernel(t)
+	s := nativeSink(t, k, nativeConfig())
+	ended, stop := context.WithCancel(context.Background())
+	stop()
+	if _, e := s.WriteDSD(ended, 1, nil, nil, 0, 0); !errors.Is(e, context.Canceled) || errors.Is(e, ErrReleaseUnconfirmed) {
+		t.Errorf("a write of no bits on its own context ended answered %v; want that cancellation", e)
+	}
+	if _, e := s.WriteDSD(context.Background(), 1, nil, nil, 0, 0); e != nil {
+		t.Errorf("a write of no bits answered %v; want the success it is", e)
+	}
+	s.Revoke()
+	await(t, s.Done(), "the sink's release")
+	k.checkClosedEach(t)
+}
+
 // TestNativeAWriteStoppedOnceATrackChangeBeganKeepsItsPrefixAndTail: the
 // session begins a TrackChange release, its tail held in the kernel's poll,
 // and ends its producer's context, as playback's release does: the
