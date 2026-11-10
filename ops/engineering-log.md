@@ -93688,3 +93688,68 @@ no protocol edit, schema change, or mirror is required for this fix.
 
 Focused green: six new top-level tests plus the extended existing MP4 log-path
 test pass. Negative controls and full-check results follow in the validation entry.
+
+### B428 validation: negative controls
+
+Baseline committed as `4a7d513a` before **each** control. Every replacement
+asserted exactly one original occurrence before writing; `rg -c` then counted
+the mutated line. Every test command used `-count=1`, built successfully and
+exited 1 on assertions. Each source file was restored from that commit and
+`test -z "$(git status --porcelain)"` passed before the next control.
+
+All commands used Go 1.27.3 on PATH, `GOTOOLCHAIN=local`, and
+`TMPDIR=$HOME/onebit/codex/b428-scratch/tmp`:
+
+- **A, no ©wrk read:** the kinds list became `[]string{"----"}` (one match).
+  `go test -tags ts_omit_webclient,ts_omit_debugeventbus -timeout 30m -count=1 ./internal/manifest -run 'TestExtractMP4Work|TestScanner_V33'`
+  failed six table cases: atom alone, atom beside blank/empty WORK, long title,
+  exactly 64 KiB, and oversized other-mean WORK beside the atom. Also red:
+  `TestExtractMP4Work_DhowdenFailureStillWalks` and the atom row in
+  `TestScanner_V33_MP4WorkReReadsV32Rows` (missing work/delta/enrichment reset).
+- **B, no version bump:** `const ExtractorVersion = 32` (one match).
+  `go test -tags ts_omit_webclient,ts_omit_debugeventbus -timeout 30m -count=1 ./internal/manifest -run TestScanner_V33`
+  failed `TestScanner_V33_MP4WorkReReadsV32Rows`: both newly supported sources
+  stayed empty and neither row advanced indexed_at or reset enrichment.
+- **C, a blank counts as present:** the work reader returned
+  `return value, true, nil` instead of testing non-empty (two matching lines
+  after mutation: this one and the pre-existing integer reader's return).
+  `go test -tags ts_omit_webclient,ts_omit_debugeventbus -timeout 30m -count=1 ./internal/manifest -run TestExtractMP4Work`
+  failed `TestExtractMP4Work/blank_atom_beside_WORK` and
+  `TestExtractMP4Work/empty_atom_beside_WORK`, on the explicit no-candidate
+  assertion. The final work remains correct through freeform precedence;
+  testing only that final value would miss this presence-policy violation.
+
+The local backlog file named by CLAUDE.md is absent on this host; the adjacent
+findings above are recorded here for handoff, with no substitute backlog made.
+
+### B428 validation: final checks
+
+Every Go/make invocation used `/opt/homebrew/bin/go` (1.27.3),
+`GOTOOLCHAIN=local`, and `TMPDIR=$HOME/onebit/codex/b428-scratch/tmp`.
+The race run used the restored implementation at `4a7d513a`; only this record
+changed afterward. No other package's tests directly read ExtractorVersion
+(the matches outside manifest are comments); the repository guards ran too.
+
+| Command | Result / tally |
+|---|---|
+| `gofmt -l .` | Exit 0, zero files listed across the repository; the five changed Go files were also checked separately. |
+| `make vet` | Exit 0; host-wide `go vet -tags ts_omit_webclient,ts_omit_debugeventbus ./...`. |
+| `GOOS=windows go vet -tags ts_omit_webclient,ts_omit_debugeventbus ./...` | Exit 0, no diagnostics (arm64, compile/vet only). |
+| `GOOS=linux go vet -tags ts_omit_webclient,ts_omit_debugeventbus ./...` | Exit 0, no diagnostics (arm64, compile/vet only). |
+| `go test -tags ts_omit_webclient,ts_omit_debugeventbus -timeout 30m -count=1 ./internal/manifest -run 'TestExtractMP4Work\|TestReadMP4WorkText\|TestScanner_V33\|TestAnMP4Walk'` | Focused green, exit 0, 7 top-level tests including the existing warning-path test, 0.577 s. |
+| `go test -tags ts_omit_webclient,ts_omit_debugeventbus -race -timeout 30m -count=1 -json ./internal/manifest/...` | Full, unfiltered race suite: exit 0, one package, 1299.044 s. 1,531 top-level tests and 24 fuzz targets' ordinary seed runs passed; 8 top-level tests skipped. Including subtests/seeds: 3,638 pass, 10 skip, 0 fail. |
+| `go test -tags ts_omit_webclient,ts_omit_debugeventbus -race -timeout 30m -count=1 -json ./cmd/bridge -run 'TestEveryCitedTestNameExists\|TestNoDocblockNamesAnotherDeclaration\|TestNoBlankKeepers'` | Exit 0, 3 tests passed, 0 skipped/failed. |
+| `make docs-check` | Exit 0, all four stages pass (budget self-test, budgets, rules-for's 49 checks, split-tool self-test); rerun after this record. |
+| `git diff --check` | Exit 0. |
+| `python3 scripts/rules-for.py --changed` | Required scanner/build-ci-tests rules read; final change is this log alone. No origin/main ref in this worker, so the tool lists uncommitted paths. |
+
+The ten skip entries are seven cases requiring case- or composition-sensitive
+folder names this volume cannot stage, the optional real-SACD test (fixture
+paths unset), the watcher test whose lost-watch premise does not hold on
+kqueue, and a remount watcher fixture whose root kept the same device/inode
+(B777 item 3). None is a new M4A test. No fuzz campaign or cross-platform runtime
+run is claimed; ordinary fuzz seeds and cross-platform vet are counted above.
+
+All six new top-level tests passed under race. PROTOCOL.md, wire types and
+ProtocolVersion are unchanged. The branch is committed locally; no push, PR,
+`gh`, or deployment was performed.
