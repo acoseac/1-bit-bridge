@@ -388,3 +388,57 @@ and reasons, the modes and the transports (`dsdstate`), the modes an option
 is listed for (`optionModes`), the caveat codes and the transports the lint
 lets a caveat name (`dacprofile`), the gain check's words that block DoP and
 first use's states.
+
+## Native lifecycle fences and containment — 2026-11-10
+
+A queue deletion or cut can reach a successor after its output was adopted but
+before activation completed. The backend takes that occurrence back only for
+`errReplanned` or `ErrActivationFenced`, closes its content and sink, and continues
+with the replacement. A device refusal or unconfirmed close remains a fault.
+Release wins over take-back. Reconciliation records `native_revoked` before it
+fences an activating output, while the occurrence is still claimed; delayed
+`Revoke` cannot lose or replace that fault after take-back closes the output.
+The same claim covers the first occurrence through the activation answer: a
+successful activation followed by revocation still fails Start before workers run.
+Converted output is kept unwritten by the producer's first fault check.
+
+`nativeAnswer` distinguishes a command's own failure, held refusal, success,
+fence, and request never run. After the sink's life ends, `verdict` reads that
+answer together with a fresh `nativeRecord`: device and cleanup failures retain
+their error identities but cannot match cancellation or the activation fence.
+Successful requests remain successful only after confirmed fault-free cleanup;
+other clean stops carry the named command's typed cancellation. The release
+budget is established once, including when its caller abandons a wait. A reply
+sent before writer completion is not proof of completion: `Done` owns that proof.
+The writer's final close failure reaches both its outcome and pending requests.
+
+An occurrence admitted under an older published set waits on the session's
+`judged` channel before opening its own output, resuming between transports, or
+joining its predecessor. Reconciliation and revocation each notify judgement.
+A gapless join waits only above the sink's measured 100 ms floor; at the floor it
+drains for an honest transport gap. A converted join window ends zero-padded at
+the floor. Positions use logical bits for native DSD, PCM frames otherwise.
+
+`refreshDSD` contains the first policy-read or publish panic and returns
+`errDSDUnread`; every session holding DSD, including a retiring native tail, is
+stopped immediately. A session reconciliation contains its own judgement,
+hand-off, and revocation callbacks; its first failure stops that session while
+other sessions receive their verdict. There is no retry counter or grace period.
+Containment does not call a failed Revoke again or read positions to discover
+which outputs need stopping. Native outputs begin Immediate release; PCM outputs
+are dropped through counted calls. Teardown still joins real writer completion.
+An output remembers its first position-callback panic, retaining only its last
+measured prefix and an error thereafter. Cleanup never calls that observer again;
+a failed final report cannot strand teardown after the outputs have closed.
+
+The portable fake-kernel suites cover activation/admission/prefill deletions,
+release and failure precedence, first and successor activation, converted output,
+revocation before and during take-back, all native command verdict/wait arms,
+re-read records, watcher-first and writer-first endings, fixed release deadlines,
+and reconciliation waits at resume, transport, gapless and converted-window
+boundaries. Hotplug capability changes run through the real refresh and
+reconciliation; ordering tests retain the barriers before delayed Revoke. The
+floor tests check the 350/400 ms measurement boundary and compare the converted
+window's samples with an independently converted zero-padded ending.
+Qualification version 48 invalidates earlier harness evidence; LegacyVersion
+remains 35. Test and negative-control evidence is in `ops/engineering-log.md`.

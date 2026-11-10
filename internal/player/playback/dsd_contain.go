@@ -1,0 +1,135 @@
+package playback
+
+import (
+	"errors"
+	"reflect"
+	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/alsapcm"
+)
+
+var errDSDUnread = errors.New("player backend: the effective DSD policy did not read; the bridge's log has why")
+
+const (
+	dsdStepJudge  = "its judgement"
+	dsdStepReplan = "the engine's hand-off"
+	dsdStepRevoke = "the revocation"
+)
+
+// refreshDSD reads and reconciles under one lock. The first failed reading
+// stops every session holding DSD and refuses admission; no failed operation
+// is retried. A subsequent independent reading may establish a fresh policy.
+func (b *Backend) refreshDSD(where string) (d *dsdSet, err error) {
+	b.dsdMu.Lock()
+	defer b.dsdMu.Unlock()
+	defer func() {
+		if r := recover(); r != nil {
+			b.dsdRead = time.Time{}
+			b.logPanic("the effective DSD policy's reading ("+where+")", r)
+			b.mu.Lock()
+			ss := make([]*session, 0, len(b.sessions))
+			for _, s := range b.sessions {
+				ss = append(ss, s)
+			}
+			b.mu.Unlock()
+			for _, s := range ss {
+				if s.holdsDSD() {
+					s.stopDSD("the effective DSD policy's reading")
+				}
+			}
+			b.dsdJudged = b.dsd.Load()
+			d, err = b.dsd.Load(), errDSDUnread
+		}
+	}()
+	return b.refreshDSDLocked(), nil
+}
+func (b *Backend) refreshDSDLocked() *dsdSet {
+	read := b.dsdNow()
+	next, view := b.readDSD()
+	b.dsdRead = read
+	cur := b.dsd.Load()
+	if cur.same(next) {
+		if pub := b.dsdPub.Load(); !reflect.DeepEqual(pub.view, view) {
+			b.dsdPub.Store(&dsdPublished{set: cur, view: view})
+		}
+		if b.dsdJudged != cur {
+			b.reconcileDSD(cur)
+		}
+		return cur
+	}
+	next.gen = cur.gen + 1
+	b.dsd.Store(next)
+	b.dsdPub.Store(&dsdPublished{set: next, view: view})
+	b.logDSDSet(next)
+	b.published()
+	b.reconcileDSD(next)
+	return next
+}
+
+// holdsDSD includes retiring outputs, without consulting a potentially
+// failed position callback. A closed output needs no further containment.
+func (s *session) holdsDSD() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, o := range s.chain {
+		if o.admitted != nil && (!o.dropped || o.out != nil && !o.out.closed) {
+			return true
+		}
+	}
+	for _, out := range s.outs {
+		if out.native != nil && !out.closed {
+			return true
+		}
+	}
+	return false
+}
+
+// stopDSD records one fault and stops the actual outputs, including retiring
+// tails. It does not re-enter Revoke or read a sink: either may be the callback
+// that failed. The ordinary teardown still joins the writers and their close.
+func (s *session) stopDSD(where string) {
+	s.faulted(where)
+	s.mu.Lock()
+	s.nativeRevoked = true
+	outs := append([]*output(nil), s.outs...)
+	for _, o := range s.chain {
+		if o.admitted != nil {
+			o.stale = true
+		}
+	}
+	close(s.judged)
+	s.judged = make(chan struct{})
+	s.mu.Unlock()
+	for _, out := range outs {
+		if out.native != nil {
+			out.native.BeginRelease(alsapcm.Immediate)
+		} else {
+			s.b.spawn(func() { _ = s.call(s.ctx, out.sink.Drop) })
+		}
+	}
+	wake(s.wakeP)
+	wake(s.wakeR)
+}
+
+// position calls a sink's observer at most until its first panic. The last
+// measured prefix remains available to teardown, but it cannot become new
+// playback evidence. Reconciliation's recoverer stops the real sink; a
+// later reporter or cleanup never invokes the failed observer again.
+func (o *output) position() (p alsapcm.Position) {
+	o.posMu.Lock()
+	defer o.posMu.Unlock()
+	if o.positionFailed {
+		return o.lastPosition
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			o.positionFailed = true
+			o.lastPosition.State = alsapcm.SinkEnded
+			o.lastPosition.Err = errors.New("player backend: the sink's position callback panicked")
+			panic(r)
+		}
+	}()
+	p = o.sink.Position()
+	o.lastPosition = p
+	return p
+}

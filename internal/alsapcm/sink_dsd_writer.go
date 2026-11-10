@@ -23,7 +23,11 @@ func (s *DSDSink) loopNative() {
 		s.released = true
 		s.active = false
 		if s.activation != nil {
-			s.activation.reply <- s.fenced("native activation", errors.New("native activation cancelled"))
+			e := ErrActivationFenced
+			if s.err != nil {
+				e = errNativeActivationCancelled
+			}
+			s.activation.reply <- nativeAnswer{err: s.fenced(s.activation.op, e), kind: answerNeverRan, op: s.activation.op}
 			s.activation = nil
 		}
 		if s.releaseCancel != nil {
@@ -31,6 +35,9 @@ func (s *DSDSink) loopNative() {
 		}
 		s.notify()
 		s.mu.Unlock()
+		if h := s.seams.ending; h != nil {
+			h()
+		}
 		close(s.done)
 	}()
 	for {
@@ -106,10 +113,10 @@ func (s *DSDSink) loopNative() {
 					s.active = false
 				}
 				if caused && !terminal {
-					e = s.lifeCancelled("native activation", end)
+					e = s.lifeCancelled(r.op, end)
 				}
 			}
-			r.reply <- e
+			r.reply <- replied(r.op, e, held)
 			s.notify()
 			s.mu.Unlock()
 			if e != nil && !held {
@@ -212,7 +219,7 @@ func (s *DSDSink) activateNative(r *nativeRequest) error {
 		s.params = p
 		s.mu.Unlock()
 	}
-	if e := admit(s.cfg.Check, s.dev, s.dev.Params().Endpoint, "native activation"); e != nil {
+	if e := admit(s.cfg.Check, s.dev, s.dev.Params().Endpoint, r.op); e != nil {
 		if reopened {
 			if ce := s.closeNative(); ce != nil {
 				return errors.Join(ErrReleaseUnconfirmed, e, ce)
@@ -224,9 +231,11 @@ func (s *DSDSink) activateNative(r *nativeRequest) error {
 	if ctx.Err() != nil || s.life.Err() != nil || s.revoked || s.releasing || (s.paused && (!r.resume || r.pauseEpoch != s.pauseEpoch)) {
 		s.mu.Unlock()
 		if reopened {
-			return nativeCleanupError(errNativeActivationFenced, s.closeNative())
+			if ce := s.closeNative(); ce != nil {
+				return errors.Join(errReopenFenced, ErrReleaseUnconfirmed, ce)
+			}
 		}
-		return errNativeActivationFenced
+		return ErrActivationFenced
 	}
 	wasActive := s.active
 	s.active = true
@@ -256,7 +265,11 @@ func (s *DSDSink) activateNative(r *nativeRequest) error {
 		// A new hardware run: its DoP markers start at 05, before its prefill,
 		// and the retained canonical content is packed from there.
 		s.dopPhase = 0x05
-		return s.nativeSilence(nativeFrames(s.params.RateHz, s.cfg.Prefill), false, false)
+		e := s.nativeSilence(nativeFrames(s.params.RateHz, s.cfg.Prefill), false, false)
+		if e != nil && s.expectedReleaseCancellation(e) {
+			return fmt.Errorf("%w: the prefill was cut short: %w", ErrActivationFenced, e)
+		}
+		return e
 	}
 	return nil
 }
@@ -491,13 +504,9 @@ func (s *DSDSink) expectedReleaseCancellation(e error) bool {
 	return s.immediate() && (errors.Is(e, context.Canceled) || ReasonOf(e) == ReasonCancelled)
 }
 
-// The fences an activation or a resume meets once a release, a pause or the
-// sink's ended life has overtaken it, which the writer tells from a device's
-// failure (lifeCaused).
-var (
-	errNativeActivationFenced = errors.New("native activation fenced")
-	errNativeResumeFenced     = errors.New("native resume fenced after status")
-)
+var errNativeResumeFenced = errors.New("native resume fenced after status")
+
+var errReopenFenced = errors.New("native reopen fenced")
 
 // lifeCaused says whether e is what the sink's ended life (end, its error)
 // made of an activation or a resume: a fence it tripped, or a wait it ended,
@@ -505,5 +514,5 @@ var (
 // admission's failure, which is the sink's fault whenever it comes (B765
 // round 3).
 func lifeCaused(e, end error) bool {
-	return errors.Is(e, errNativeActivationFenced) || errors.Is(e, errNativeResumeFenced) || errors.Is(e, end) || errors.Is(e, context.Canceled) || ReasonOf(e) == ReasonCancelled
+	return errors.Is(e, ErrActivationFenced) || errors.Is(e, errNativeResumeFenced) || errors.Is(e, end) || errors.Is(e, context.Canceled) || ReasonOf(e) == ReasonCancelled
 }

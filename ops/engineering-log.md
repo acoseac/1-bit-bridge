@@ -91081,3 +91081,46 @@ to a copy of the tracked tree at this record's commit: `make docs-check`
 passes, and `TestEveryCitedTestNameExists` passes there and fails, naming
 it, on a ghost citation planted in the patched History bullet. `git status`
 clean after.
+
+## 2026-11-10 — native lifecycle fences and first-failure containment
+
+Base: fa5fec545fa8062de465686a0235cc9cd865cdd7. Extracted the native sink's
+structured command/cleanup verdict, activation/drop fencing, fault preservation,
+and playback reconciliation barriers. Policy reads and per-session reconciliation
+now stop affected DSD immediately on their first panic; no retry bookkeeping.
+Retiring outputs really stop. A failed position observer is never called again,
+and a final-report panic no longer strands teardown after close. Qualification
+version advances 47 to 48; the runbook and subsystem rules travel with the fix.
+
+Baseline checks use an archive of that exact commit, with the regression tests
+and passive test observation seams overlaid, without lifecycle fixes. All runs
+use Go 1.27.3, the Makefile's ts_omit_webclient,ts_omit_debugeventbus tags, and
+-race. Compiler failures are not counted as evidence. Named baseline failures:
+
+- TestNativeEndedLifePreservesCleanupAtEveryEntry: all four entries returned
+  cancellation instead of the recorded failed close.
+- TestNativeQueuedResumePreservesCleanup: both independent and life-bound
+  callers lost the queued request's failed close; the latter returned plain
+  context.Canceled.
+- TestASuccessorDroppedAtItsActivationIsTakenBackUnwritten: deletion and cut
+  faulted with native activation fenced instead of continuing to the successor.
+- TestARevocationAtASuccessorsActivationCheckKeepsItsFault: native, native
+  followed by PCM, and converted cases failed at the bounded take-back barrier.
+- TestARevocationThatRunsDuringATakeBackKeepsItsOneFault: the revoked second
+  node received bytes; it must remain unwritten.
+- TestAResumeBetweenTransportsWaitsForTheReconciliationsVerdict: the resume
+  opened the second node while reconciliation was held.
+- TestNoSinkOpensBeforeReconciliationJudgesItsSuccessor: the producer did not
+  wait for judgement before opening the successor.
+- TestAGaplessSuccessorWaitsForJudgementOnlyAboveTheSinksFloor: neither reporter
+  ordering woke the waiting producer at the next measurement. The baseline
+  overlay observes its existing wait without changing the wait predicate.
+- The converted-window floor case also runs against the baseline as a positive
+  control: its old floor handling was already correct. The extracted case adds
+  the explicit judgement notification and retains the independent sample check.
+
+The portable lifecycle, sink-verdict, barrier and containment suites pass after
+the fix. The real reconciliation ordering tests change device capabilities and
+run RefreshDSD, holding the actual judgement/activation/take-back boundaries;
+they do not replace reconciliation with a direct revocation. Negative controls
+and final gate results are recorded below after the committed checkpoint.

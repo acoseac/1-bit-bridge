@@ -79,6 +79,7 @@ type occ struct {
 	leading    bool
 	stale      bool
 	observed   bool
+	claimed    bool
 	conversion
 	reservation *engine.OccurrenceReservation
 	id          engine.OccurrenceID

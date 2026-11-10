@@ -278,10 +278,14 @@ func (s *session) activateOutput(ctx context.Context, o *occ, out *output) error
 	}
 	s.mu.Lock()
 	fenced := s.releasing || s.nativeRevoked || o.dropped || s.cur != out
+	replanned := o.dropped && !o.leading && !s.releasing && !s.nativeRevoked
 	paused := s.paused
 	s.mu.Unlock()
 	if fenced {
 		out.native.Revoke()
+		if replanned {
+			return errReplanned
+		}
 		return errors.New("native activation fenced")
 	}
 	if o.permission != nil {
@@ -441,7 +445,10 @@ func (b *Backend) Revoke(r engine.RevokeInput) {
 	if s == nil {
 		return
 	}
-	s.mu.Lock()
+	l := s.hold()
+	defer l.release()
+	l.lock()
+	b.revoking(r.Session)
 	s.nativeRevoked = true
 	if s.permission != nil {
 		s.permission.revoked.Store(true)
@@ -465,7 +472,7 @@ func (b *Backend) Revoke(r engine.RevokeInput) {
 			continue
 		}
 		if out := o.out; o.conv != nil && out.native == nil && !out.closed && !out.drained && !slices.Contains(pcm, out) &&
-			!(o.eof && out.sink.Position().Played >= o.start+o.written) {
+			!(o.eof && out.position().Played >= o.start+o.written) {
 			active = true
 			pcm = append(pcm, out)
 		}
@@ -473,7 +480,9 @@ func (b *Backend) Revoke(r engine.RevokeInput) {
 	if active && s.fault == nil {
 		s.fault = &engine.Fault{Reason: "native_revoked", Detail: r.Reason}
 	}
-	s.mu.Unlock()
+	close(s.judged)
+	s.judged = make(chan struct{})
+	l.unlock()
 	for _, sink := range sinks {
 		sink.Revoke()
 		sink.BeginRelease(alsapcm.Immediate)
@@ -516,9 +525,11 @@ func (v retiringEvents) Fault(_ engine.SessionID, f engine.Fault) {
 // native writer has accounted its accepted prefix and finished cleanup. Its
 // callbacks enter the engine mailbox before either acknowledgement path.
 func (s *session) finalNativeReport() {
-	s.mu.Lock()
+	l := s.hold()
+	defer l.release()
+	l.lock()
 	if s.nativeRelease == nil {
-		s.mu.Unlock()
+		l.unlock()
 		return
 	}
 	token := s.nativeRelease.Token
@@ -530,7 +541,7 @@ func (s *session) finalNativeReport() {
 		if o.dropped || o.out == nil {
 			continue
 		}
-		end := min(o.start+o.written, o.out.sink.Position().Written)
+		end := min(o.start+o.written, o.out.position().Written)
 		if end > o.start {
 			prefixes = append(prefixes, engine.NativePrefix{Occurrence: o.id, Start: o.start, End: end})
 		}
@@ -543,15 +554,15 @@ func (s *session) finalNativeReport() {
 	if s.releaseErr != nil && s.fault == nil {
 		s.fault = &engine.Fault{Reason: faultReason(s.releaseErr), Detail: s.releaseErr.Error()}
 	}
-	s.mu.Unlock()
+	l.unlock()
 	if to, ok := ev.(engine.NativeReleaseEvents); ok {
 		to.Retiring(token, engine.NativeEvent{Kind: "cutoff", Prefixes: prefixes})
 	}
 	s.reportStep()
-	s.mu.Lock()
+	l.lock()
 	s.ev = ev
 	s.finalReport = false
-	s.mu.Unlock()
+	l.unlock()
 }
 
 func (o *output) activate(ctx context.Context) error {

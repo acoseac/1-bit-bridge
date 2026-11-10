@@ -72,6 +72,14 @@ type fakeAt struct {
 	do     func(k *fakeKernel)
 }
 
+// fakeStatusAt is a STATUS to park once the DAC has played frames frames of
+// its run: gate and parked become the next STATUS's statusGate and
+// statusParked.
+type fakeStatusAt struct {
+	frames       uint64
+	gate, parked chan struct{}
+}
+
 // fakeCond is a condition a test waits for (when): its channel is closed
 // the first time the condition holds after a call into the fake kernel.
 type fakeCond struct {
@@ -173,6 +181,9 @@ type fakeKernel struct {
 	drainGate, drainParked   chan struct{}
 	statusGate, statusParked chan struct{}
 	pollGate, pollParked     chan struct{}
+	// statusPlayed, when set, arms statusGate at the first STATUS once the DAC
+	// has consumed its frames of the run (ParkStatusAfterPlayed).
+	statusPlayed *fakeStatusAt
 
 	// The record. opened is every open asked for, refused ones included, and
 	// opens the ones that opened.
@@ -800,6 +811,31 @@ func receive[T any](t *testing.T, ch <-chan T, what string) T {
 	return zero
 }
 
+func ordered() time.Duration { return min(5*time.Second, *watchdog) }
+
+// awaitOrdered is await within ordered.
+func awaitOrdered(t *testing.T, ch <-chan struct{}, what string) {
+	t.Helper()
+	receiveOrdered(t, ch, what)
+}
+
+// receiveOrdered is receive within ordered.
+func receiveOrdered[T any](t *testing.T, ch <-chan T, what string) T {
+	t.Helper()
+	bound := ordered()
+	timer := time.NewTimer(bound)
+	defer timer.Stop()
+	select {
+	case v := <-ch:
+		return v
+	case <-timer.C:
+		LogGoroutines(t)
+		t.Fatalf("waited %v for %s", bound, what)
+	}
+	var zero T
+	return zero
+}
+
 func (k *fakeKernel) ioctl(fd int, req uint32, arg unsafe.Pointer) error {
 	k.mu.Lock()
 	defer k.mu.Unlock()
@@ -890,6 +926,10 @@ func (k *fakeKernel) ioctl(fd int, req uint32, arg unsafe.Pointer) error {
 		}
 		return errnoEAGAIN
 	case ioctlStatus:
+		if a := k.statusPlayed; a != nil && k.consumed >= a.frames {
+			k.statusPlayed = nil
+			k.statusGate, k.statusParked = a.gate, a.parked
+		}
 		if g := k.statusGate; g != nil {
 			parked := k.statusParked
 			k.statusGate, k.statusParked = nil, nil

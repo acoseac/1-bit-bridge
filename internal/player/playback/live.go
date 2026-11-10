@@ -77,7 +77,7 @@ func (b *Backend) Facts() (PlayerPolicy, *PlaybackFacts) {
 		v.Converted = &cp
 	}
 	if v.State != "revoked" && b.liveOutput != nil && b.liveOutput.sink != nil {
-		switch b.liveOutput.sink.Position().State {
+		switch b.liveOutput.position().State {
 		case alsapcm.SinkReleased, alsapcm.SinkStopped, alsapcm.SinkEnded:
 			v.State = "released"
 		}
@@ -105,7 +105,7 @@ func (s *session) observeOccurrence(o *occ, out *output) {
 	}
 	state := "open"
 	if out.sink != nil {
-		switch out.sink.Position().State {
+		switch out.position().State {
 		case alsapcm.SinkReleased, alsapcm.SinkStopped, alsapcm.SinkEnded:
 			state = "released"
 		}

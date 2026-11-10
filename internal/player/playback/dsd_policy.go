@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -497,48 +496,6 @@ func (b *Backend) readDSD() (*dsdSet, DSDView) {
 	return d, viewOf(d, st, m.USB)
 }
 
-// refreshDSD computes the effective set from fresh inputs (readDSD) and,
-// when it publishes or admits anything another way than the one published
-// (dsdSet.same), publishes it at the next generation, in one swap that
-// selection sees and then one that publication sees, the pair with its read
-// side (dsdPublished), then reconciles every session's DSD occurrences
-// against it (policy.Reconcile). One that plays and admits what the published
-// one does is not stored: the set published stays, pointer and generation,
-// and what the reading says of the DAC (its read side: first use observed, an
-// evidence step, the choice's revision, a warning), when it says another
-// thing, is published beside it (B728 B8). The epoch a client's grant keys on
-// is what plays, the design's section 7.1 putting the tuples and the
-// converted rates under it, and the set an occurrence was admitted under is
-// still the one published, so nothing is reconciled (round 2: a new set
-// stored for a view-only change, which no reconciliation followed, left every
-// occurrence admitted under the old one outside the set published, and the
-// producer waited at the gapless join for good). Refreshes run one at a time,
-// so what they publish is in the order their readings were taken; it answers
-// the set published once it is done. It reads no file on the audio path: a
-// session's admission, its activation and its monitor ask it, and the
-// supervisor's RefreshDSD, on a goroutine of the backend's
-// (RequestRefreshDSD, B762).
-func (b *Backend) refreshDSD() *dsdSet {
-	b.dsdMu.Lock()
-	defer b.dsdMu.Unlock()
-	b.dsdRead = b.dsdNow()
-	next, view := b.readDSD()
-	cur := b.dsd.Load()
-	if cur.same(next) {
-		if pub := b.dsdPub.Load(); !reflect.DeepEqual(pub.view, view) {
-			b.dsdPub.Store(&dsdPublished{set: cur, view: view})
-		}
-		return cur
-	}
-	next.gen = cur.gen + 1
-	b.dsd.Store(next)
-	b.dsdPub.Store(&dsdPublished{set: next, view: view})
-	b.logDSDSet(next)
-	b.published()
-	b.reconcileDSD(next)
-	return next
-}
-
 // RefreshDSD is the supervisor's refresh (the design's section 3.5): it
 // reads the policy again, and publishes and reconciles a change as every
 // refresh does, when force says an input changed (a snapshot of the
@@ -559,7 +516,7 @@ func (b *Backend) RefreshDSD(force bool) {
 			return
 		}
 	}
-	b.refreshDSD()
+	b.refreshDSD("the supervisor refresh")
 }
 
 // logDSDSet says what the set published plays at each rate, one Info line a
@@ -590,9 +547,13 @@ func (b *Backend) logDSDSet(d *dsdSet) {
 // reconciliation compare with. A converted rate answers no native plan: the
 // occurrence converts (occ.converts, B728 B11).
 func (b *Backend) admitDSD(o *occ, f format.NativeDSD) (engine.NativePlan, error) {
+	b.admitting(o.id)
 	cur := b.dsd.Load()
 	if o.leading || b.dsdStale() {
-		cur = b.refreshDSD()
+		var err error
+		if cur, err = b.refreshDSD("an admission"); err != nil {
+			return engine.NativePlan{}, &engine.Unplayable{Reason: ReasonDACUnread, Detail: err.Error()}
+		}
 	}
 	plan, pp, err := cur.selectFor(f)
 	if err != nil {
@@ -679,6 +640,7 @@ func (s *session) startDSDMonitor() {
 		defer func() {
 			if r := recover(); r != nil {
 				s.b.logPanic("the DSD policy's monitor", r)
+				s.faulted("the DSD policy's monitor")
 			}
 		}()
 		for {
@@ -686,13 +648,14 @@ func (s *session) startDSDMonitor() {
 			case <-s.down:
 				return
 			case <-ticks:
-				s.b.refreshDSD()
+				_, _ = s.b.refreshDSD("a session's monitor")
 			}
 		}
 	})
 }
 
-// reconcileDSD judges every session's DSD occurrences against next.
+// reconcileDSD contains each session independently, so one failure cannot
+// prevent the remaining sessions from receiving the published verdict.
 func (b *Backend) reconcileDSD(next *dsdSet) {
 	b.mu.Lock()
 	ss := make([]*session, 0, len(b.sessions))
@@ -701,8 +664,18 @@ func (b *Backend) reconcileDSD(next *dsdSet) {
 	}
 	b.mu.Unlock()
 	for _, s := range ss {
-		s.reconcileDSD(next)
+		if step := s.reconcileDSD(next); step != "" {
+			s.stopDSD("the effective DSD set's reconciliation (" + step + ")")
+		}
 	}
+	b.dsdJudged = next
+}
+
+// playedOutLocked reports whether o sounds no more: its sink drained or
+// closed, or its every frame played with its end in its sink. s.mu is held.
+func (o *occ) playedOutLocked() bool {
+	out := o.out
+	return out != nil && (out.drained || out.closed || o.eof && out.position().Played >= o.start+o.written)
 }
 
 // occurrenceFactsLocked is what policy.Reconcile reads of o, each apart (the
@@ -714,7 +687,7 @@ func (s *session) occurrenceFactsLocked(o *occ) policy.Occurrence {
 	f := policy.Occurrence{Plan: o.policyPlan, Audible: o.crossed}
 	if out := o.out; out != nil {
 		f.Submitted = o.written
-		pos := out.sink.Position()
+		pos := out.position()
 		f.Written = min(max(pos.Written-o.start, 0), o.written)
 		f.Played = min(max(pos.Played-o.start, 0), o.written)
 		f.Retiring = s.releasing && !out.closed
@@ -723,69 +696,117 @@ func (s *session) occurrenceFactsLocked(o *occ) policy.Occurrence {
 	return f
 }
 
-// reconcileDSD judges each of s's DSD occurrences against next
-// (policy.Reconcile): one next still plays on its identity is kept and
-// counts under next from now on; one to re-plan is held back from the sink
-// (stale) and the engine is asked to hand it off again (ReplanEvents), the
-// path an edit after hand-off takes, so it is admitted under next as any
-// hand-off is, a session's first occurrence and one a session being released
-// holds excepted, which are revoked; one to revoke stops the session's DSD at
-// once (Revoke). An occurrence whose sink has played everything it was given
-// (drained) or is closed sounds no more, and nothing of it can reach the DAC
-// again, so no change of the set can make it unsafe: it is not judged, which
-// would revoke the session's DSD and with it a successor the set still plays
-// in a sink of its own (a DoP occurrence played out, the native one after it
-// filling its prefill; round 2). Nor is one whose every frame the sink has
-// played, its end in it, which a sink shared with what follows it (a
-// converted occurrence's, PCM after it on the same transport, B728 B11) does
-// not drain: judged, it would stop that PCM. A converted occurrence is judged
-// as native and DoP are, its plan its target (policy.Plan.Same), its frames
-// PCM frames. A change of the set never asks a user's consent here: the
-// safety changes (the gain leaving unity, the identity changing, the DAC
-// leaving, the state no longer reading) act at once, and B7 makes no other;
-// B9's write asks first with the same predicate.
-func (s *session) reconcileDSD(next *dsdSet) {
-	var revoke []string
-	var replan []engine.OccurrenceID
-	s.mu.Lock()
-	for _, o := range s.chain {
-		if !o.opened() || o.admitted == nil || o.dropped || o.admitted == next {
-			continue
-		}
-		if out := o.out; out != nil && (out.drained || out.closed || o.eof && out.sink.Position().Played >= o.start+o.written) {
-			continue
-		}
-		v := policy.Reconcile(next.set, s.occurrenceFactsLocked(o))
-		switch v.Action {
-		case policy.Keep:
-			o.admitted = next
-		case policy.Replan:
-			if o.leading || s.releasing {
-				revoke = append(revoke, fmt.Sprintf("occurrence %d's DSD plan left the effective set before any of it played", o.id))
-				continue
-			}
-			o.stale = true
-			replan = append(replan, o.id)
-		default:
-			revoke = append(revoke, fmt.Sprintf("occurrence %d's DSD plan left the effective set, or its DAC changed, while it played", o.id))
-		}
+type dsdJudgement struct {
+	keep, stale bool
+	revoke      string
+}
+
+func (s *session) judgeDSDLocked(o *occ, next *dsdSet, replans bool) dsdJudgement {
+	if !o.opened() || o.admitted == nil || o.dropped || o.admitted == next || o.playedOutLocked() {
+		return dsdJudgement{}
 	}
-	ev := s.ev
-	s.mu.Unlock()
-	if re, ok := ev.(engine.ReplanEvents); ok {
-		for _, id := range replan {
-			re.Replan(s.id, id, "its DSD plan left the effective set")
+	v := policy.Reconcile(next.set, s.occurrenceFactsLocked(o))
+	switch v.Action {
+	case policy.Keep:
+		return dsdJudgement{keep: true}
+	case policy.Replan:
+		switch {
+		case o.leading || s.releasing:
+			return dsdJudgement{revoke: fmt.Sprintf("occurrence %d's DSD plan left the effective set before any of it played", o.id)}
+		case !replans:
+			return dsdJudgement{stale: true, revoke: "an occurrence's DSD plan left the effective set, and the engine hands nothing off again"}
 		}
-	} else if len(replan) > 0 {
-		revoke = append(revoke, "an occurrence's DSD plan left the effective set, and the engine hands nothing off again")
+		return dsdJudgement{stale: true}
+	}
+	return dsdJudgement{revoke: fmt.Sprintf("occurrence %d's DSD plan left the effective set, or its DAC changed, while it played", o.id)}
+}
+
+// reconcileDSD contains a session's judgement, hand-offs and revocation.
+// The backend stops a failed session immediately and continues with others.
+func (s *session) reconcileDSD(next *dsdSet) (failed string) {
+	step := dsdStepJudge
+	defer func() {
+		if r := recover(); r != nil {
+			s.b.logPanic("the effective DSD set's reconciliation ("+step+")", r)
+			failed = step
+		}
+		wake(s.wakeP)
+		wake(s.wakeR)
+	}()
+	revoke, replan, re := s.judgeDSDStep(next)
+	step = dsdStepReplan
+	for _, o := range replan {
+		re.Replan(s.id, o.id, "its DSD plan left the effective set")
 	}
 	if len(revoke) > 0 {
+		step = dsdStepRevoke
 		s.b.dsdLog().Warn("player: the effective DSD set no longer plays what this session holds: its DSD stops", "session", uint64(s.id), "generation", next.gen, "why", revoke[0])
 		s.b.Revoke(engine.RevokeInput{Session: s.id, Reason: revoke[0]})
 	}
-	wake(s.wakeP)
-	wake(s.wakeR)
+	return ""
 }
+
+// judgeDSDStep is a reconciliation's one step under s's lock (reconcileDSD):
+// each DSD occurrence judged against next, a revocation's fault recorded and
+// an activating sink fenced, each re-plan held back (stale), judged closed. It
+// answers the reasons to revoke the session's DSD, the occurrences to hand off
+// again, and the engine's
+// re-plan events. The lock is held through a lockHold, so a panic in the step
+// (a sink's read or its revocation) lets it go.
+func (s *session) judgeDSDStep(next *dsdSet) (revoke []string, replan []*occ, re engine.ReplanEvents) {
+	l := s.hold()
+	defer l.release()
+	l.lock()
+	re, replans := s.ev.(engine.ReplanEvents)
+	js := make([]dsdJudgement, len(s.chain))
+	noReplan := ""
+	for i, o := range s.chain {
+		j := s.judgeDSDLocked(o, next, replans)
+		js[i] = j
+		switch {
+		case j.revoke == "":
+		case j.stale:
+			noReplan = j.revoke
+		default:
+			revoke = append(revoke, j.revoke)
+		}
+	}
+	if noReplan != "" {
+		revoke = append(revoke, noReplan)
+	}
+	// Record the fault before fencing: take-back can finish before Revoke.
+	activating := func(o *occ, j dsdJudgement) bool {
+		return (j.stale || j.revoke != "") && !s.releasing && o.claimed && o.out != nil
+	}
+	for i, o := range s.chain {
+		if j := js[i]; j.revoke != "" && activating(o, j) && s.fault == nil {
+			s.fault = &engine.Fault{Reason: "native_revoked", Detail: revoke[0]}
+		}
+	}
+	for i, o := range s.chain {
+		j := js[i]
+		if j.keep {
+			o.admitted = next
+			continue
+		}
+		if j.stale {
+			o.stale = true
+		}
+		if activating(o, j) && o.out.native != nil {
+			o.out.native.Revoke()
+			o.out.drained = true
+		}
+		if j.stale && j.revoke == "" {
+			replan = append(replan, o)
+		}
+	}
+	close(s.judged)
+	s.judged = make(chan struct{})
+	l.unlock()
+	return revoke, replan, re
+}
+
+var errReplanned = errors.New("player backend: the occurrence is being handed off again")
 
 // checkDSDActivation is a native, DoP or converted occurrence's check as its
 // sink is about to write to the DAC (the design's section 3.5: every
@@ -802,12 +823,19 @@ func (s *session) reconcileDSD(next *dsdSet) {
 // occurrence as reconciliation judges any. Never a fallback: an occurrence
 // the set published now does not keep is refused, never played another way.
 func (s *session) checkDSDActivation(o *occ) error {
-	s.b.refreshDSD()
+	if _, err := s.b.refreshDSD("an activation"); err != nil {
+		return err
+	}
 	s.b.activating()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.fault != nil && s.fault.Reason == ReasonFailed {
+		return errors.New(s.fault.Detail)
+	}
 	cur := s.b.dsd.Load()
 	switch {
+	case (o.stale || o.dropped) && !o.leading:
+		return errReplanned
 	case o.stale || o.dropped || o.admitted == nil:
 	case o.admitted == cur:
 		return nil
@@ -1045,7 +1073,7 @@ func (ps *dsdProbe) owe() {
 func (b *Backend) ProbeDSD(ctx context.Context, cond ProbeConditions) (pending bool) {
 	pending, refresh := b.probeDSD(ctx, cond)
 	if refresh {
-		b.refreshDSD()
+		b.refreshDSD("the supervisor refresh")
 	}
 	return pending
 }
@@ -1280,4 +1308,12 @@ func (b *Backend) ForgetDSDProbe(key dacprofile.Key) {
 	}
 	ps.gen++
 	ps.forced, ps.pending = true, true
+}
+
+// unjudgedLocked reports that a newer published set has not judged o yet.
+// The caller holds s.mu; reconciliation closes s.judged after its decision.
+func (s *session) unjudgedLocked(o *occ) bool { return unjudgedAt(o, s.b.dsd.Load()) }
+
+func unjudgedAt(o *occ, cur *dsdSet) bool {
+	return o.opened() && o.admitted != nil && o.admitted != cur && !o.stale && !o.dropped
 }

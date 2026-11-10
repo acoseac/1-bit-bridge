@@ -23,6 +23,23 @@ const (
 	stepFinish                     // play out the last content: finished, or the decode failure's fault
 )
 
+// String names k as the ProducerStep seam says it.
+func (k stepKind) String() string {
+	switch k {
+	case stepStop:
+		return "stop"
+	case stepWrite:
+		return "write"
+	case stepWait:
+		return "wait"
+	case stepTransition:
+		return "transition"
+	case stepFinish:
+		return "finish"
+	}
+	return "unknown"
+}
+
 type step struct {
 	install bool
 	// decided is a converted occurrence's join window decided (holdLocked):
@@ -32,6 +49,7 @@ type step struct {
 	kind    stepKind
 	o       *occ
 	wait    <-chan struct{}
+	verdict *occ
 }
 
 // produce is the session's producer, the one goroutine that decodes, packs
@@ -49,6 +67,7 @@ func (s *session) produce() {
 	packed := make([]byte, chunkFrames*alsapcm.Channels*4)
 	for {
 		st := s.next()
+		s.b.producerStep(s.id, st)
 		switch st.kind {
 		case stepWrite:
 			if st.install {
@@ -61,6 +80,9 @@ func (s *session) produce() {
 				return
 			}
 		case stepWait:
+			if st.verdict != nil {
+				s.b.unjudged(st.verdict.id)
+			}
 			if !s.waitWake(st.wait) {
 				return
 			}
@@ -96,6 +118,7 @@ func (s *session) next() step {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.serveLocked()
+	s.awaitingJudgement = false
 	if s.ctx.Err() != nil || s.fault != nil {
 		return step{kind: stepStop}
 	}
@@ -137,20 +160,21 @@ func (s *session) next() step {
 	// tells same-carrier PCM from DoP by kind, valid bits, logical rate and
 	// packing version, never by format and rate alone; a DSD successor
 	// joins only under its sink's policy too.
-	if c := s.cur; c != nil && !c.drained && !c.closed && c.transport.Join(o.transport).Gapless && (o.plan == nil || c.policyID == o.plan.PolicyID) {
+	c := s.cur
+	gapless := c != nil && !c.drained && !c.closed && c.transport.Join(o.transport).Gapless && (o.plan == nil || c.policyID == o.plan.PolicyID)
+	if gapless {
 		if err := s.b.checkEdge(o.transport, o.plan, o.permission); err != nil {
 			o.refused = &engine.Unplayable{Reason: "transition_unapproved", Detail: err.Error()}
 			o.dropped = true
 			wake(s.wakeR)
 			return step{kind: stepFinish}
 		}
-		if o.admitted != nil && o.admitted != s.b.dsd.Load() {
-			// A gapless DSD successor joins only under the set published now,
-			// asked with no file read or lock on the audio path (B728 B7): one
-			// admitted under a set a refresh has replaced waits for that
-			// refresh's reconciliation, which keeps it under the new set or
-			// hands it off again, and wakes the producer.
-			return step{kind: stepWait}
+		if s.unjudgedLocked(o) {
+			if outFloorLocked(c) {
+				return step{kind: stepTransition, o: o}
+			}
+			s.awaitingJudgement = true
+			return step{kind: stepWait, wait: s.judged, verdict: o}
 		}
 		if o.plan != nil && o.permission != nil {
 			s.mu.Unlock()
@@ -477,11 +501,26 @@ func (s *session) transition(o *occ) bool {
 			if !s.waitWake(nil) {
 				return false
 			}
+		case o.stale:
+			// Being handed off again (B728 B7): the engine's replacement drops
+			// it, and the producer's next step waits for that.
+			l.unlock()
+			return true
+		case s.unjudgedLocked(o):
+			judged := s.judged
+			l.unlock()
+			s.b.unjudged(o.id)
+			if !s.waitWake(judged) {
+				return false
+			}
 		default:
-			s.between = nil
+			s.between, o.claimed = nil, true
 			l.unlock()
 			var err error
 			if out, err = s.openOutput(s.ctx, o); err != nil {
+				l.lock()
+				o.claimed = false
+				l.unlock()
 				return s.openFailed(o, err)
 			}
 		}
@@ -515,13 +554,32 @@ func (s *session) transition(o *occ) bool {
 			s.closeOutput(out)
 			s.b.fenced("adopt")
 			return false
+		case o.stale:
+			o.claimed = false
+			l.unlock()
+			s.closeOutput(out)
+			return true
 		case s.paused == sinkPaused:
 			s.currentLocked(o, out, sinkPaused)
 			l.unlock()
-			if err := s.activateOutput(s.ctx, o, out); err != nil {
+			err := s.activateOutput(s.ctx, o, out)
+			l.lock()
+			o.claimed = false
+			released, revoked := s.releasedLocked(), s.nativeRevoked
+			taken := (o.dropped || o.stale) && !o.leading && (errors.Is(err, errReplanned) || errors.Is(err, alsapcm.ErrActivationFenced))
+			l.unlock()
+			switch {
+			case err == nil:
+				return true
+			case released:
+				s.b.fenced("activate")
+				return false
+			case revoked:
 				return s.openFailed(o, err)
+			case taken:
+				return s.unadopt(o, out)
 			}
-			return true
+			return s.openFailed(o, err)
 		}
 		cmd := out.sink.Pause
 		if sinkPaused {
@@ -538,11 +596,36 @@ func (s *session) transition(o *occ) bool {
 			// The sink took neither (it ended: the reporter reads why from its
 			// state). It is current as it is.
 			s.currentLocked(o, out, false)
+			o.claimed = false
 			l.unlock()
 			return true
 		}
 		sinkPaused = !sinkPaused
 	}
+}
+
+// unadopt closes an output fenced before content reached it and resumes
+// the queue. Its close still determines whether the device was released.
+func (s *session) unadopt(o *occ, out *output) bool {
+	s.mu.Lock()
+	if s.cur == out {
+		s.cur, s.currentNative = nil, false
+	}
+	if s.writing == o {
+		s.writing = nil
+		if o.dropped {
+			s.closeOcc(o)
+		}
+	}
+	o.out, o.claimed = nil, false
+	if s.paused {
+		_ = s.pausedLocked(true)
+	}
+	s.mu.Unlock()
+	s.closeOutput(out)
+	wake(s.wakeP)
+	wake(s.wakeR)
+	return true
 }
 
 // currentLocked makes out, the sink just opened for o, the current one,

@@ -41,6 +41,8 @@ func FakeEndpoint() Endpoint { return testEndpoint }
 // it a hang (-watchdog).
 func Watchdog() time.Duration { return *watchdog }
 
+func Ordered() time.Duration { return ordered() }
+
 // OpenSink opens a sink on the fake node, on the fake's clock: what the
 // player's backend takes as its Config.OpenSink.
 func (tk *FakeKernel) OpenSink(ctx context.Context, cfg SinkConfig) (*Sink, error) {
@@ -288,6 +290,13 @@ func (tk *FakeKernel) ParkStatusAfterWritten(frames uint64) (parked <-chan struc
 	return arrived, func() { once.Do(func() { close(gate) }) }
 }
 
+func (tk *FakeKernel) ParkStatusAfterPlayed(frames uint64) (parked <-chan struct{}, release func()) {
+	gate, arrived := make(chan struct{}), make(chan struct{})
+	tk.k.inspect(func(k *fakeKernel) { k.statusPlayed = &fakeStatusAt{frames: frames, gate: gate, parked: arrived} })
+	var once sync.Once
+	return arrived, func() { once.Do(func() { close(gate) }) }
+}
+
 // AdvanceUnwatched lets the DAC play d while a kernel call is parked,
 // before a wake-up reaches the writer, without waking a poll.
 func (tk *FakeKernel) AdvanceUnwatched(d time.Duration) { tk.k.advanceUnwatched(d) }
@@ -354,6 +363,10 @@ func (tk *FakeKernel) ParkNextClose() (<-chan struct{}, func()) {
 	tk.k.inspect(func(k *fakeKernel) { k.closeParked, k.closeGate = entered, gate })
 	var once sync.Once
 	return entered, func() { once.Do(func() { close(gate) }) }
+}
+
+func (tk *FakeKernel) FailDrops() {
+	tk.k.inspect(func(k *fakeKernel) { k.fail[ioctlDrop] = errno(5) })
 }
 
 // OpenNativeSinkWithCleanupError injects a teardown failure after a real open.

@@ -1,7 +1,7 @@
 package qualification
 
 // qualificationVersion changes whenever a guarded implementation changes.
-const qualificationVersion = 47
+const qualificationVersion = 48
 
 // Version binds the harness's reports and records to this implementation
 // (ReadApproval, ReadCandidate): the harness (bridge output dsd-test, and
