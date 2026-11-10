@@ -202,8 +202,8 @@ func TestOnlyACompletedFailureDisprovesAVerifiedComponent(t *testing.T) {
 		{Verification{DatabaseState: StateVerified}, Verification{DatabaseState: StateFailed, FilesState: StateVerified}, true},
 		{Verification{FilesState: StateVerified}, Verification{DatabaseState: StateUnverified, FilesState: StateFailed}, true},
 		{Verification{FilesState: StateVerified}, Verification{DatabaseState: StateFailed, FilesState: StateVerified}, false},
-		{Verification{DatabaseState: StateVerified}, Verification{DatabaseState: StateFailed, FilesState: StateIncomplete}, false},
-		{Verification{FilesState: StateVerified}, Verification{DatabaseState: StateIncomplete, FilesState: StateFailed}, false},
+		{Verification{DatabaseState: StateVerified}, Verification{DatabaseState: StateFailed, FilesState: StateIncomplete}, true},
+		{Verification{FilesState: StateVerified}, Verification{DatabaseState: StateIncomplete, FilesState: StateFailed}, true},
 	} {
 		if got := disproves(&tc.prior, tc.found); got != tc.want {
 			t.Errorf("prior %+v, found %+v: disproves %v, want %v", tc.prior, tc.found, got, tc.want)

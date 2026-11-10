@@ -1567,6 +1567,11 @@ func writeFrom(dstPath string, r io.Reader, mode os.FileMode) error {
 // writeFromHashed is writeFrom answering the size and SHA-256 (hex) of the
 // bytes it wrote, hashed as they stream into the temp file.
 func writeFromHashed(dstPath string, r io.Reader, mode os.FileMode) (int64, string, error) {
+	return writeFromHashedWithHook(dstPath, r, mode, nil)
+}
+
+// writeFromHashedWithHook exposes the staged pathname immediately before chmod.
+func writeFromHashedWithHook(dstPath string, r io.Reader, mode os.FileMode, beforeMode func(string)) (int64, string, error) {
 	tmp, err := os.CreateTemp(filepath.Dir(dstPath), ".bridge-bak-*")
 	if err != nil {
 		return 0, "", err
@@ -1593,14 +1598,17 @@ func writeFromHashed(dstPath string, r io.Reader, mode os.FileMode) (int64, stri
 		_ = tmp.Close()
 		return 0, "", err
 	}
+	if beforeMode != nil {
+		beforeMode(tmpName)
+	}
+	if err := tmp.Chmod(mode); err != nil {
+		return 0, "", err
+	}
 	if err := tmp.Sync(); err != nil {
 		_ = tmp.Close()
 		return 0, "", err
 	}
 	if err := tmp.Close(); err != nil {
-		return 0, "", err
-	}
-	if err := os.Chmod(tmpName, mode); err != nil {
 		return 0, "", err
 	}
 	if err := atomicwrite.RenameWithRetry(tmpName, dstPath); err != nil {
@@ -1672,11 +1680,16 @@ func snapshotPlayerUUID(srcPath string) (id string, read bool, err error) {
 // reaped after the grace) or a complete one. There is no truncated state
 // to produce.
 //
-// Mirrors copyFile's shape in this package (CreateTemp → write → Sync →
-// Chmod → atomicwrite.RenameWithRetry, which absorbs the Windows
+// Mirrors copyFile's shape in this package (CreateTemp → write → Chmod →
+// Sync → close → atomicwrite.RenameWithRetry, which absorbs the Windows
 // AV-scan-on-close rename window). The distinct temp prefix makes a stray
 // temp identifiable as manifest-side rather than file-copy-side.
 func writeManifest(path string, m Manifest) error {
+	return writeManifestWithHook(path, m, nil)
+}
+
+// writeManifestWithHook exposes the staged pathname immediately before chmod.
+func writeManifestWithHook(path string, m Manifest, beforeMode func(string)) error {
 	data, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
 		return err
@@ -1703,14 +1716,17 @@ func writeManifest(path string, m Manifest) error {
 		_ = tmp.Close()
 		return err
 	}
+	if beforeMode != nil {
+		beforeMode(tmpName)
+	}
+	if err := tmp.Chmod(0o600); err != nil {
+		return err
+	}
 	if err := tmp.Sync(); err != nil {
 		_ = tmp.Close()
 		return err
 	}
 	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Chmod(tmpName, 0o600); err != nil {
 		return err
 	}
 	if err := atomicwrite.RenameWithRetry(tmpName, path); err != nil {

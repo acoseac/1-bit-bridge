@@ -503,6 +503,9 @@ func checkBundle(ctx context.Context, dir string, m Manifest, level CheckLevel) 
 		v.UserVersion, v.Counts = db.userVersion, db.counts
 		v.Level = level
 	}
+	if beforeFilesCheck != nil {
+		beforeFilesCheck(dir)
+	}
 	files := checkFiles(ctx, dir, m, p)
 	v.FilesState, v.FilesReasons, v.FilesFailed = files.state, files.reasons, files.failed
 	now := time.Now().UTC()

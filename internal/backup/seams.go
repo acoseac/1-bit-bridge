@@ -314,3 +314,14 @@ func SetStepBoundForTest(dir string, within time.Duration, steps ...string) func
 	prev := stepBoundForTest.Swap(fixture)
 	return func() { stepBoundForTest.Store(prev) }
 }
+
+// beforeFilesCheck is the test seam between the two component checks.
+var beforeFilesCheck func(string)
+
+// SetBeforeFilesCheckForTest installs a hook after the database check and before
+// the files check. Restore it only after all verification holds have ended.
+func SetBeforeFilesCheckForTest(fn func(string)) func() {
+	prev := beforeFilesCheck
+	beforeFilesCheck = fn
+	return func() { beforeFilesCheck = prev }
+}

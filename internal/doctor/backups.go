@@ -32,6 +32,9 @@ const (
 	checkNameBackupCheck    = "backup-check"
 )
 
+// backupsSyncsParentDir lets tests select the platform's directory barrier.
+var backupsSyncsParentDir = fsutil.SyncsParentDir
+
 // sameConfig is what a hint that advises a bridge backup command says of its
 // --config.
 const sameConfig = "<bridge.yaml> being the config this doctor read"
@@ -94,6 +97,9 @@ func newestLine(sn backup.SnapshotStatus, now time.Time) Check {
 	case sn.Legacy:
 		return warn(checkNameBackupNewest, summary,
 			"it was written before snapshots were verified; the next snapshot is verified as it is taken")
+	case !backupsSyncsParentDir && (slices.Contains(v.DatabaseReasons, backup.ReasonUnsynced) || slices.Contains(v.FilesReasons, backup.ReasonUnsynced)):
+		return warn(checkNameBackupNewest, summary,
+			"this record cannot be trusted or re-recorded on this platform; take a fresh snapshot with bridge backup --config <bridge.yaml>, "+sameConfig)
 	case v.DatabaseState == backup.StateFailed:
 		return warn(checkNameBackupNewest, summary,
 			"its database failed its check: the live database may be damaged; run bridge backup --config <bridge.yaml> --verify <snapshot-dir> --full, "+sameConfig+", and keep the snapshots that are verified")

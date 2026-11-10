@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -622,11 +623,12 @@ func runBackupTicker(ctx context.Context, src backup.Sources, keep func() int, i
 	// verifyInPlace finishes the check the newest snapshot owes in place of
 	// a new snapshot (startupVerifyInPlace), claimed under the backups
 	// folder's lock so no prune removes it before its check, and reports
-	// whether that check found its database FAILED, which leaves no recovery
+	// whether that check found its database FAILED or could not re-record a
+	// vetoed record on this platform. Either leaves no trusted recovery
 	// point from the last day and takes a new snapshot after it: what the
 	// check found, whether or not its record could be written (backlog B653's
 	// third round).
-	verifyInPlace := func(name string) (failed bool) {
+	verifyInPlace := func(name string) bool {
 		dir := filepath.Join(backupsRoot, name)
 		c, err := backup.Claim(ctx, dir, backupsRoot)
 		if err != nil {
@@ -640,7 +642,10 @@ func runBackupTicker(ctx context.Context, src backup.Sources, keep func() int, i
 		fmt.Fprintf(stdout, "backup (startup): %s owes its check: verifying it in place of a new snapshot\n", dir)
 		res := backup.FinishCapture(ctx, c, keep, backup.VerifyOptions{BackupsRoot: backupsRoot})
 		report("startup", res)
-		return res.Verify.Found.DatabaseState == backup.StateFailed
+		return res.Verify.Found.DatabaseState == backup.StateFailed ||
+			(errors.Is(res.VerifyErr, backup.ErrRecheckNotRecorded) && res.Verify.RecordRead &&
+				(slices.Contains(res.Verify.Record.DatabaseReasons, backup.ReasonUnsynced) ||
+					slices.Contains(res.Verify.Record.FilesReasons, backup.ReasonUnsynced)))
 	}
 
 	// The startup snapshot and the scheduled ones differ, so the loop's
@@ -842,7 +847,8 @@ type startupPass struct {
 // process died before it), the boot takes none either: it skips where a live
 // owner holds that snapshot, its check queued or under way, in this process
 // or another, and otherwise finishes the check in place, taking a snapshot
-// after it only where that check finds the database FAILED. Otherwise, no
+// after it where that check finds the database FAILED, or cannot re-record a
+// vetoed record on a platform without a directory barrier. Otherwise, no
 // snapshot from the last day, or the newest of them FAILED, written before
 // verification or holding a record this bridge cannot read, the boot takes
 // one. So a restart loop whose boots die before their verification ends

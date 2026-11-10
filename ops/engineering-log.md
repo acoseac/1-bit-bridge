@@ -93370,3 +93370,118 @@ Files changed, grouped by purpose:
 
 No pacing change (4509212196, 4509212200), and no rework of the earlier
 capture-bound or ticker write-outcome fixes (4509969905, 4510798630).
+
+
+## 2026-11-10 — B653 PR 1 round 13: independent disproofs and guarded veto outcomes
+
+Starting HEAD was read as `275a3a21d5715b74bacce85026aa9f34c36a6abc`.
+This round is edit-only. No builds, tests, formatting tools, negative
+controls or state-changing git commands were run. All expected-red claims
+below await the orchestrator's execution, with test seams retained when
+restoring earlier production behavior. No protocol shape changes.
+
+1. `disproves` now judges database and files independently. Both existing
+   FAILED-beside-INCOMPLETE rows in
+   `TestOnlyACompletedFailureDisprovesAVerifiedComponent` expect true.
+   `TestADisprovedNoBarrierRecordCannotAnchorAFreshProcessPrune` adds
+   "database failed beside incomplete files": real database damage is
+   detected, then `SetBeforeFilesCheckForTest` cancels before the files
+   phase. It requires FAILED/INCOMPLETE findings, an INCOMPLETE read-back
+   and listing, the older genuine NewestVerified, no startup skip for the
+   disputed record, and, after pruning in a new process, the older anchor
+   present and the intermediate FAILED snapshot gone. Expected red at
+   `275a3a21`: both predicate rows and those mixed-case trust/retention
+   assertions. Control: restore the early return when either found
+   component is INCOMPLETE, leaving the new cancellation seam and tests.
+
+2. `writeManifest` and `writeFromHashed` chmod their open temp files before
+   sync/close. `vacuumInto` uses a no-follow output open and descriptor
+   regular-file validation, then descriptor chmod. Unix's nonblocking
+   open also avoids waiting on a substituted pipe; Windows opens the
+   reparse entry itself. `TestEverySnapshotWriterChmodsOnlyItsOwnFile`
+   has manifest/copy/vacuum rows. At a seam immediately before mode
+   handling each removes the exact output pathname and installs a symlink
+   to a 0644 target; its MODE must remain 0644. Vacuum must refuse the
+   substituted link. All three MODE assertions are expected red with
+   `275a3a21`'s pathname chmods and the seams transplanted. These Unix-mode
+   replacement cases explicitly skip Windows; native Windows open/handle
+   semantics still require CI. `TestVacuumModeRefusesANonRegularOutput`
+   additionally requires refusal without changing a directory's mode.
+   Control: replace the three descriptor-mode operations with pathname
+   `os.Chmod` at their test seams. A further focused control for vacuum is
+   to replace its no-follow open with `os.Open`, preserving the fstat;
+   the symlink target then looks regular and the MODE assertion must fail.
+
+3. Both veto callers use guarded `putVeto`: the no-barrier worker through
+   `vetoDisproved`, and `publishVerdict`. The step and hold are checked
+   before each bundle/root lookup/create, and the root is tried only after
+   bundle failure. Successful creation or existing presence is independent
+   of the cache stamp. The latter checks give-up separately and, if skipped,
+   says the record is vetoed and the console may retain its cached reading
+   until expiry or a backups-folder change. A failed veto remains reported
+   and skips the immediate prune. Recovery-INCOMPLETE still follows the
+   existing admission and merge rules.
+
+   `TestBothVetoCallersGuardEveryAttemptAndReportSkippedStamps` exercises
+   each caller with independent step/hold signals, before its first
+   attempt, after a failed bundle, after a created or existing bundle,
+   and after a created root. It requires zero lookup/create calls after
+   initial give-up, exactly one bundle attempt with no root after its
+   failure/give-up, veto presence after success, unsynced read-back,
+   skipped-stamp words without a false failed-veto claim, and no movement
+   of a planted old root stamp for the bundle cases. The root-created
+   case intentionally does not claim an unchanged root mtime.
+   `TestTheNoBarrierWorkerReportsAVetoAcrossGiveUp` also drives the actual
+   `verifyHeld` worker through its bounded veto step, abandons its real hold
+   at the attempt seam, and requires one attempt, no prune, correct
+   read-back and the successful-veto/skipped-stamp or failed-veto words in
+   the worker's returned error. The hold is marked as handed off solely
+   to keep the overrun marker's I/O out of this cache-stamp fixture.
+   These guard and reporting assertions are expected red on the earlier
+   unguarded implementation with seams retained.
+
+   `TestTheConsoleCacheExpiresAfterAnUnstampedBundleVeto` drives the real
+   list and card over the resulting unstamped bundle-veto disk state. The
+   list must reject VERIFIED immediately, the card must retain its primed
+   reading before expiry, and, with its age moved beyond the TTL, reject
+   VERIFIED too. This pins the existing cache consequence, not a claim of
+   baseline-red behavior. Control for item 3: bypass putVeto's give-up
+   checks for attempts and stamping while leaving publication's later
+   guards intact; the fallback count, old-stamp and skipped-stamp assertions
+   must fail. Removing only the attempt guard isolates the forbidden root
+   creation; removing only the stamp guard isolates the false cache claim.
+
+4. Doctor's platform seam defaults to `fsutil.SyncsParentDir`. On a
+   no-barrier platform a record carrying `ReasonUnsynced` gets neutral
+   fresh-snapshot advice, not a claim of damage or an unfinished check.
+   `TestTheDoctorReplacesAnUnsyncedRecordWithoutInferringDamage` creates
+   both a files disproof and a successful initial verification whose veto
+   removal fails. Each must advise `bridge backup --config <bridge.yaml>`,
+   say the record cannot be trusted or re-recorded here, and contain none
+   of "did not finish", "disproved", "damaged" or "--verify". The same
+   record on a barrier platform keeps recheck advice. Both no-barrier hints
+   are expected red at `275a3a21`.
+
+   The startup rule's in-place result now triggers a fresh capture when
+   ErrRecheckNotRecorded accompanies an unsynced read-back, as well as for
+   a FAILED database. `TestStartupReplacesAVetoedSnapshotEvenWhenItsDatabasePasses`
+   damages the snapshot's config only, asserts VERIFIED database / FAILED
+   files, vetoes it, and drives the real ticker. It requires two snapshots,
+   the mixed finding in its report, and a subsequent startup decision that
+   skips the fresh verified snapshot. Expected red at `275a3a21`: no second
+   snapshot arrives. Control: remove the new ErrRecheckNotRecorded arm from
+   the in-place result and the doctor's no-barrier unsynced branch; retain
+   the tests and platform seam. Database-FAILED replacement remains the
+   passing contrast.
+
+The public guide, CLI and console rules, and History-rules-cli-serve.md
+now carry the component rule, all descriptor-mode sites, guarded veto and
+stamp outcomes with the cache limitation, and neutral replacement advice.
+The changed production files are internal/backup/{backup,finish,seams,
+verify_db,verify_record,vacuum,vacuum_open_unix,vacuum_open_windows}.go,
+internal/doctor/backups.go and cmd/bridge/backup.go. Regression additions
+are verify_round13_internal_test.go, backups_round13_test.go,
+backup_round13_test.go and handlers_backups_round13_test.go in their
+respective packages; the round-12 predicate and fresh-process tests were
+updated in place. The orchestrator must format, run the gates and controls,
+and supply native-platform results before recording validation as passed.

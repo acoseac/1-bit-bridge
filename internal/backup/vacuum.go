@@ -147,6 +147,11 @@ func vacuumTarget(_ *sqlite.FunctionContext, args []driver.Value) (driver.Value,
 // WAL-mode database, and stops when ctx is cancelled, wherever the copy is
 // but in the commit's last 64 KB (the notes at the top of this file).
 func vacuumInto(ctx context.Context, srcDB, dstDB string) error {
+	return vacuumIntoWithHook(ctx, srcDB, dstDB, nil)
+}
+
+// vacuumIntoWithHook exposes SQLite's output pathname before opening it for chmod.
+func vacuumIntoWithHook(ctx context.Context, srcDB, dstDB string, beforeMode func(string)) error {
 	db, err := sql.Open("sqlite", dsn.File(srcDB, snapshotSourceQuery))
 	if err != nil {
 		return err
@@ -199,7 +204,10 @@ func vacuumInto(ctx context.Context, srcDB, dstDB string) error {
 	// and is sensitive enough to warrant the same 0600 the rest of
 	// the snapshot uses. Chmod after the write so a tester reading
 	// `ls -l` sees consistent perms across the bundle.
-	if err := os.Chmod(dstDB, 0o600); err != nil {
+	if beforeMode != nil {
+		beforeMode(dstDB)
+	}
+	if err := chmodVacuumOutput(dstDB); err != nil {
 		// Don't leave a 0644 copy of token-hash data behind if we
 		// couldn't lock it down — unlink it and surface the error.
 		closeDB()
@@ -256,4 +264,22 @@ func retryWhileBusy(ctx context.Context, attempt func() error) error {
 func isBusy(err error) bool {
 	var se *sqlite.Error
 	return errors.As(err, &se) && se.Code()&0xff == sqlite3.SQLITE_BUSY
+}
+
+// chmodVacuumOutput refuses a link or non-regular output before changing its
+// mode. The no-follow open and descriptor stat bind chmod to the opened file.
+func chmodVacuumOutput(path string) error {
+	f, err := openVacuumOutput(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("vacuum output is not a regular file: %s", path)
+	}
+	return f.Chmod(0o600)
 }

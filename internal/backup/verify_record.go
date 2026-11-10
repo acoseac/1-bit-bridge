@@ -46,7 +46,7 @@ import (
 //     VERIFIED component leaves a veto before read-back, without a crash
 //     durability promise. If neither location can be written the error says
 //     so; the immediate prune is skipped, but a later process can still
-//     trust the stale VERIFIED. An INCOMPLETE recheck changes nothing;
+//     trust the stale VERIFIED. An INCOMPLETE component disproves nothing;
 //   - a write of a record that holds a VERIFIED, or that replaces one, needs
 //     the veto too, and with none to be had writes nothing;
 //   - the veto goes only once the record that replaces it is durable (the
@@ -63,7 +63,9 @@ import (
 // its presence alone is the veto, and the service may remove it. Each change
 // of the veto, and each write, moves the backups folder's modification time
 // (stampChange), so a reader that caches what the folder holds (the console's
-// Jobs card) reads it again. Where no directory can be synced, a write is
+// Jobs card) reads it again. A give-up skips putVeto's stamp and reports that
+// the console may keep its cached reading until expiry or a folder change.
+// Where no directory can be synced, a write is
 // atomic and is not known to be durable.
 
 // syncVerdictDir is the barrier a verdict's write runs once its rename has
@@ -191,7 +193,7 @@ var ErrRecheckRefused = errors.New("the snapshot was not checked again: its reco
 // Windows), so no veto can be made durable. The check runs and its verdict
 // is not recorded. A completed finding that disproves a VERIFIED component
 // vetoes the unchanged record before read-back; failure to make that veto
-// is reported beside this error. An INCOMPLETE recheck leaves it alone.
+// is reported beside this error. An INCOMPLETE component alone leaves it alone.
 var ErrRecheckNotRecorded = errors.New("no check of a snapshot whose record holds a verified verdict is recorded here: no directory can be synced, so no veto beside the record would be durable")
 
 // setAside puts the veto of the snapshot in dir in place, durably, before a
@@ -290,7 +292,7 @@ var errVetoKept = errors.New("the veto was kept: its write was given up")
 // verification's own, made for its check alone) and what the record carries
 // over is a VERIFIED found matched. A veto that stood before it, a write's
 // that failed, stays over a VERIFIED the record carries over.
-func publishVerdict(dir string, found Verification, prior *Verification, doubted bool, p publication) (_ Verification, written bool, _ error) {
+func publishVerdict(dir string, found Verification, prior *Verification, doubted bool, p publication) (_ Verification, written bool, resultErr error) {
 	mpath := filepath.Join(dir, ManifestFile)
 	m, err := readRecord(dir)
 	if err != nil {
@@ -320,14 +322,13 @@ func publishVerdict(dir string, found Verification, prior *Verification, doubted
 	// A record that holds a VERIFIED, or replaces one, is written behind its
 	// veto, and with none to be had not at all.
 	if holdsVerified(stored) || holdsVerified(&merged) {
-		made, err := putVeto(dir)
-		if err != nil {
+		veto, err := putVeto(dir, p)
+		if !veto.present {
 			return Verification{}, false, fmt.Errorf("the verdict was not written: put its veto in place: %w", err)
 		}
-		if made {
-			// A reader's VERIFIED reads INCOMPLETE from now on.
-			stampChange(root)
-		}
+		// A veto already made remains effective even if give-up skips its
+		// cache stamp. Preserve that outcome beside any later write error.
+		defer func() { resultErr = errors.Join(resultErr, veto.stampError()) }()
 	}
 	data, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
@@ -337,7 +338,13 @@ func publishVerdict(dir string, found Verification, prior *Verification, doubted
 		return Verification{}, false, fmt.Errorf("the verdict was not written: %w", err)
 	}
 	// The record readers read has changed, whatever follows.
-	defer stampChange(root)
+	defer func() {
+		if p.givenUp() {
+			resultErr = errors.Join(resultErr, errCacheStampSkipped)
+		} else {
+			stampChange(root)
+		}
+	}()
 	if err := syncVerdictDir(mpath); err != nil {
 		return merged, true, fmt.Errorf("%w: %w", ErrVerdictNotDurable, err)
 	}
@@ -380,31 +387,70 @@ func boundName(dir string) string {
 	return base
 }
 
-// putVeto puts the veto of the snapshot in dir in place, and answers
-// whether it made one: one there already, in the bundle or beside it, of
-// any owner, is kept as it is (made false); otherwise it is made in the
-// bundle, and where that cannot be (a bundle this process may not write in),
-// beside it in the backups folder (rootVetoPath), each with its folder
-// synced where it can be; neither made is the error.
-func putVeto(dir string) (made bool, err error) {
-	inBundle, beside := filepath.Join(dir, vetoFileName), rootVetoPath(dir)
-	for _, p := range []string{inBundle, beside} {
-		if _, err := os.Lstat(p); !errors.Is(err, os.ErrNotExist) {
-			return false, nil
-		}
-	}
-	madeIn, bundleErr := writeVeto(inBundle, dir)
-	if bundleErr == nil || madeIn {
-		_ = fsutil.SyncParentDir(inBundle)
-		return madeIn, nil
-	}
-	madeBeside, besideErr := writeVeto(beside, filepath.Dir(dir))
-	if besideErr == nil || madeBeside {
-		_ = fsutil.SyncParentDir(beside)
-		return madeBeside, nil
-	}
-	return false, fmt.Errorf("in the snapshot: %w; beside it: %w", bundleErr, besideErr)
+// vetoPlacement separates the veto's presence from its cache invalidation.
+// An existing veto is just as effective as one this attempt created.
+type vetoPlacement struct {
+	present bool
+	stamped bool
 }
+
+var errCacheStampSkipped = errors.New("the cache stamp was skipped after give-up; the console may retain its cached reading until its cache expires or the backups folder changes")
+
+func (v vetoPlacement) stampError() error {
+	if v.present && !v.stamped {
+		return fmt.Errorf("the record is vetoed: %w", errCacheStampSkipped)
+	}
+	return nil
+}
+
+// afterVetoAttempt is a test seam after an attempt, before any next filesystem
+// operation. Production leaves it nil.
+var afterVetoAttempt func(path string, present bool)
+
+// putVeto tries the bundle, then the root only if that attempt failed. Each
+// attempt checks BOTH give-ups before even looking up the path (writeVeto).
+// Presence is success even if give-up then prevents syncing or stamping it.
+// These checks do not revoke an operation that already passed its guard.
+func putVeto(dir string, p publication) (v vetoPlacement, err error) {
+	root := filepath.Dir(dir)
+	var causes []error
+	for _, c := range []struct{ path, ref string }{{filepath.Join(dir, vetoFileName), dir}, {rootVetoPath(dir), root}} {
+		if p.givenUp() {
+			return v, errors.Join(append(causes, ErrCheckGivenUp)...)
+		}
+		made, attemptErr := writeVeto(c.path, c.ref)
+		v.present = made || attemptErr == nil
+		if afterVetoAttempt != nil {
+			afterVetoAttempt(c.path, v.present)
+		}
+		if !v.present {
+			causes = append(causes, attemptErr)
+			continue
+		}
+		if !p.givenUp() {
+			_ = fsutil.SyncParentDir(c.path)
+		}
+		if !p.givenUp() {
+			stampChange(root)
+			v.stamped = true
+		}
+		return v, nil
+	}
+	return v, errors.Join(causes...)
+}
+
+// vetoDisproved disqualifies a no-barrier recheck's completed disproof. A
+// failed creation and a successful veto with a skipped cache stamp differ.
+func vetoDisproved(dir string, p publication) error {
+	v, err := putVeto(dir, p)
+	if !v.present {
+		return fmt.Errorf("the disproved record could not be vetoed; a later process may still trust its VERIFIED verdict: %w", err)
+	}
+	return v.stampError()
+}
+
+// lookupVetoForWrite is the existence check inside a guarded creation attempt.
+var lookupVetoForWrite = os.Lstat
 
 // writeVeto makes the veto at path, an empty file whose presence alone is
 // the veto, with the owner of the folder ref (fsutil.KeepOwner), so that a
@@ -417,7 +463,7 @@ func putVeto(dir string) (made bool, err error) {
 // whether or not that sync answers, and one before a recheck is no veto until
 // it has (setAside).
 func writeVeto(path, ref string) (made bool, err error) {
-	if _, err := os.Lstat(path); err == nil {
+	if _, err := lookupVetoForWrite(path); err == nil {
 		return false, nil
 	}
 	if failVeto != nil {

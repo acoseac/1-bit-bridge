@@ -23,7 +23,8 @@ func TestTheConsoleNamesVerificationAdmissionRefusals(t *testing.T) {
 			if len(lines) != 1 || !strings.Contains(lines[0], refusal.Error()) {
 				t.Errorf("missing admission and its reason: %v", logs.All())
 			}
-			if len(logs.Lines("verdict was not recorded")) != 0 {
+			// Lines matches a record's whole message: name the console's exact words.
+			if len(logs.Lines("admin: a snapshot's verdict was not recorded")) != 0 {
 				t.Errorf("claimed a finding from a refused check: %v", logs.All())
 			}
 		})

@@ -58,7 +58,7 @@ func TestADisprovedNoBarrierRecordCannotAnchorAFreshProcessPrune(t *testing.T) {
 		}
 		return
 	}
-	for _, placement := range []string{"bundle", "root fallback"} {
+	for _, placement := range []string{"bundle", "root fallback", "database failed beside incomplete files"} {
 		t.Run(placement, func(t *testing.T) {
 			cfgPath, _, root := backupInstall(t)
 			t.Cleanup(func() { awaitHoldsLetGo(t, root) })
@@ -102,10 +102,23 @@ func TestADisprovedNoBarrierRecordCannotAnchorAFreshProcessPrune(t *testing.T) {
 				}))
 			}
 			t.Cleanup(func() { awaitHoldsLetGo(t, root) })
-			res, err := backup.VerifySnapshot(t.Context(), dir, backup.VerifyOptions{BackupsRoot: root})
+			checkCtx, cancelCheck := context.WithCancel(context.Background())
+			defer cancelCheck()
+			if placement == "database failed beside incomplete files" {
+				t.Cleanup(backup.SetBeforeFilesCheckForTest(func(path string) {
+					if path == dir {
+						cancelCheck()
+					}
+				}))
+				t.Cleanup(func() { awaitHoldsLetGo(t, root) })
+			}
+			res, err := backup.VerifySnapshot(checkCtx, dir, backup.VerifyOptions{BackupsRoot: root})
 			awaitHoldsLetGo(t, root)
 			if !errors.Is(err, backup.ErrRecheckNotRecorded) || res.Found.DatabaseState != backup.StateFailed {
 				t.Fatalf("disproving recheck: %+v, %v", res, err)
+			}
+			if placement == "database failed beside incomplete files" && res.Found.FilesState != backup.StateIncomplete {
+				t.Fatalf("files phase did not end INCOMPLETE: %+v", res.Found)
 			}
 			if res.Record.DatabaseState != backup.StateIncomplete {
 				t.Errorf("disproved record still trusted at read-back: %+v", res.Record)

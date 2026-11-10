@@ -552,13 +552,8 @@ func verifyHeld(ctx context.Context, dir string, o VerifyOptions, after func(con
 			// This is disqualification of a completed finding, not publication
 			// of a new verdict. Keep the veto even though no crash barrier is
 			// available. Every reader must stop trusting the disproved record.
-			vetoErr, _ = stepOf(h, laterBound(deadline), stepVeto, func(context.Context, context.Context) error {
-				_, err := putVeto(snap)
-				stampChange(root)
-				if err != nil {
-					return fmt.Errorf("the disproved record could not be vetoed; a later process may still trust its VERIFIED verdict: %w", err)
-				}
-				return nil
+			vetoErr, _ = stepOf(h, laterBound(deadline), stepVeto, func(_, given context.Context) error {
+				return vetoDisproved(snap, publication{given: given, held: h.gaveUp})
 			}, nil)
 		}
 		readBack()
@@ -611,10 +606,10 @@ func verifyHeld(ctx context.Context, dir string, o VerifyOptions, after func(con
 	return answer(nil)
 }
 
-// disproves requires a completed recheck and a FAILED component previously
-// VERIFIED. An interrupted check supplies no evidence against the old record.
+// disproves judges each component independently: a completed FAILED disproves
+// its prior VERIFIED even if the other component is INCOMPLETE.
 func disproves(prior *Verification, found Verification) bool {
-	if prior == nil || found.DatabaseState == StateIncomplete || found.FilesState == StateIncomplete {
+	if prior == nil {
 		return false
 	}
 	return prior.DatabaseState == StateVerified && found.DatabaseState == StateFailed ||
