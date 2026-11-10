@@ -91127,7 +91127,7 @@ and final gate results are recorded below after the committed checkpoint.
 
 Further baseline failures pin containment and the cleanup deadline:
 `TestPolicyReadPanicIsContainedOnItsFirstCall` and
-`TestReconciliationPanicIsContainedOnItsFirstCall` catch the escaping panic and
+`TestFirstReconciliationPanicIsContainedAndStopsItsSession` catch the escaping panic and
 observe no stopped/faulted session. `TestRetiringPositionFailureDoesNotStrandTeardown`
 observes the final position panic stranding teardown and its mutex after close.
 `TestNativeQueuedResumeHonorsCleanupDeadline` holds close and advances the fake
@@ -91168,3 +91168,64 @@ Reproduction scripts and complete logs are in the worker scratch directory
 `~/onebit/codex/b9pr1-scratch` (controls.py, controls.json, control-*.log,
 red-*.log). Converted-window floor handling was already correct on the baseline;
 its positive control is not claimed as a newly exposed defect.
+
+The baseline's first-occurrence success-then-revocation case reports a successful
+Start and non-silent writes; the fixed case fails Start before workers launch.
+The successor activation case delivers 1,416 bytes to the revoked node on the
+baseline. The converted-successor case takes a producer wait instead of its first
+fault-stop step, or misses the held-adoption close. These are the named assertions
+in `red-activation.log`.
+
+The public queued-resume deadline regression was committed at 9b2ca75d before
+its additional control. Removing only endOfLife's release-expired wait arm makes
+it fail at the same bounded answer assertion; restoring the file leaves
+`git diff --exit-code` clean. This is an eighteenth negative-control run.
+
+Linux-only handoff for the touched packages and their dependents:
+
+- internal/alsapcm: sys_linux_test.go, probe_linux_test.go.
+- internal/player/hotplug: source_linux_test.go, source_cred_linux_test.go.
+- internal/api: outputs_hint_r5_linux_test.go.
+- cmd/bridge: doctor_player_dac_linux_test.go, snapshot_hold_linux_test.go.
+
+All other new sink and playback lifecycle tests use fake hardware and run here
+on Darwin with -race; no Linux exemption applies to them.
+
+The extraction inventory was compared by test function against the source tip:
+every lifecycle test from the source's rounds 3–7 and every native sink test is
+retained. Later reconciliation-barrier cases use policy changes with no pending
+write. Containment cases replace first-failure grace/retry expectations with
+immediate-stop assertions. The required runbook test caught two missed current
+version references (header and schema); both now name 48 and the qualification
+package's full race suite passes.
+
+The full dependent race run found one source-census incompatibility:
+TestDSDOutputProtocolTokens mistook lastPosition.State's numeric SinkEnded value
+for a wire string. The guard already excludes alsapcm.Sink* assignments to the
+adapter's lowercase state; it now applies that same numeric-only exclusion to
+State fields. Every string observation still has to resolve and match PROTOCOL.md.
+No DTO, endpoint, protocol text or emitted token changed. CLI (1,554s), admin
+(1,300s), ALSA (69s), and every other dependent package passed that run; API was
+rerun in full after this test-only correction.
+
+Final checks on Darwin/arm64, Go 1.27.3, using
+`-tags ts_omit_webclient,ts_omit_debugeventbus` throughout:
+
+- `go vet ./...`: PASS.
+- `go test -race -p 2 -timeout 30m` for all touched packages and their reverse
+  import dependents: PASS after the runbook and census corrections above.
+  Packages: cmd/bridge; internal/admin, alsapcm, api, backup, config;
+  internal/player/binding, dsdstate, hotplug, library, playback, playback/playbacktest,
+  policy, qualification; scripts/qualification/listening-verify and qualification-version.
+  The two packages with no test files compile. API's full rerun passed in 124.883s;
+  the final touched-package checks passed ALSA in 91.027s, playback in 6.773s and
+  qualification in 20.917s. Complete outputs: race-final.log,
+  race-api-final.log, race-touched-final.log and race-qualification-final.log.
+- `make docs-check`, changed-file gofmt check and `git diff --check`: PASS.
+- `go run ./scripts/qualification-version -base fa5fec54 -head HEAD`: PASS,
+  qualification 47 to 48.
+
+An earlier `./...` race run was stopped after the final production checkpoint
+changed, to avoid duplicating expensive tests on the loaded host. It is not
+claimed as a completed full-repository gate. The required final dependency run
+above completed, and only the listed Linux-tagged cases remain for orchestration.

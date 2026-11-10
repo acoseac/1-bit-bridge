@@ -1,6 +1,6 @@
 # B470 native qualification — owner approval and provisional evidence
 
-QualificationVersion is **47**. All older evidence must be rerun for the harness, native included. The
+QualificationVersion is **48**. All older evidence must be rerun for the harness, native included. The
 harness never creates approval. Since B728 no production path reads an approval record or a candidate:
 the player plays DSD by its effective policy (`ops/plan-b728-dsd-capability-design.md`). This runbook
 is the engineering harness's. Its evidence binds `qualificationVersion`, whose guard covers the DSD byte
@@ -338,7 +338,7 @@ still resolve inside it). `dsdMode: native` or `auto` enables only approved nati
 
 The Go contracts are `qualification.Approval`, `ApprovalBody`, `ApprovedPolicy`, `Edge`
 and `Evidence` in `internal/player/qualification/approval.go`. JSON uses those exact
-exported field names. SchemaVersion=1, or 2 with Transitions and QualifiedOn (2d.2, below); QualificationVersion=47; Revision is the owner's
+exported field names. SchemaVersion=1, or 2 with Transitions and QualifiedOn (2d.2, below); QualificationVersion=48; Revision is the owner's
 revision; Identity is the observed VID/ProductID/manufacturer/product/bcdDevice,
 anchored controller/port, interface, device and subdevice. No serial or card number is
 persistent identity. Unchanged descriptors may retain approval after replug/restart;
