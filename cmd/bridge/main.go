@@ -2203,6 +2203,7 @@ func (a updateInfoAdapter) UpdateInfo() api.UpdateInfo {
 		UpdateAvailable:  s.UpdateAvailable,
 		ReleaseNotesURL:  s.ReleaseNotesURL,
 		MinClientVersion: version.MinClientVersion,
+		ChecksOff:        !s.CheckEnabled,
 	}
 }
 
@@ -2228,6 +2229,7 @@ func (a updateInfoAdapter) Status() admin.UpdateStatus {
 		DeferredReason:   a.deferredReason(s),
 		RejectedVersion:  m.st.RejectedVersion,
 		RejectedReason:   m.st.RejectedReason,
+		CheckEnabled:     s.CheckEnabled,
 	}
 }
 
@@ -2331,9 +2333,12 @@ func (a updateInfoAdapter) backupPresent() bool {
 	return err == nil && !fi.IsDir()
 }
 
-func (a updateInfoAdapter) CheckNow(ctx context.Context) admin.UpdateStatus {
-	a.u.CheckNow(ctx)
-	return a.Status()
+// CheckNow is the console's Check now: the status as it stands after the
+// check, and the updater's refusal while update checks are off, or of a
+// check they stopped, as admin.ErrUpdateChecksOff (backlog B761).
+func (a updateInfoAdapter) CheckNow(ctx context.Context) (admin.UpdateStatus, error) {
+	_, err := a.u.CheckNow(ctx)
+	return a.Status(), mapUpdaterError(err)
 }
 
 func (a updateInfoAdapter) Install(ctx context.Context, force bool) (admin.UpdateStatus, error) {
@@ -2372,6 +2377,7 @@ func (a updateInfoAdapter) Install(ctx context.Context, force bool) (admin.Updat
 		RejectedVersion:  m.st.RejectedVersion,
 		RejectedReason:   m.st.RejectedReason,
 		InstallWarning:   st.InstallWarning,
+		CheckEnabled:     st.CheckEnabled,
 	}, mapUpdaterError(err)
 }
 
@@ -2422,6 +2428,10 @@ func mapUpdaterError(err error) error {
 		return detailError{sentinel: admin.ErrUpdateMarkerLocked, msg: err.Error()}
 	case errors.Is(err, updater.ErrRollbackRefused):
 		return detailError{sentinel: admin.ErrUpdateRollbackRefused, msg: err.Error()}
+	case errors.Is(err, updater.ErrUpdateChecksOff):
+		// The updater's sentence says what was refused or stopped, and
+		// that nothing was asked or installed (backlog B761).
+		return detailError{sentinel: admin.ErrUpdateChecksOff, msg: err.Error()}
 	default:
 		return err
 	}
@@ -3081,6 +3091,11 @@ type serveOpts struct {
 	// boot test can make either fail. Nil (the updater's) in production.
 	restoreBackup   func(dst, backupExt string) error
 	saveUpdateState func(dataDir string, st updater.State) error
+	// updateReleases is the releases API serve's updater asks (its Client):
+	// nil, GitHub's, everywhere but the boot tests, which point it at a
+	// server of their own and count what it is asked (backlog B761). Per
+	// invocation for tailscaleCLI's reason.
+	updateReleases *updater.Client
 	// backupProbeTimeout is how long the early rollback gives its backup to
 	// say its version (backupProbeBound). Zero in production, which gives it
 	// updater.VersionProbeTimeout. A boot test whose backup is a fresh copy
@@ -4405,6 +4420,14 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 			return time.Duration(liveCfg().Update.CheckIntervalHours) * time.Hour
 		},
 		Rearm: updateRearm,
+		// The update check's switch (backlog B761), off the live holder:
+		// the console's settings save tells the updater of a change once it
+		// is published (admin.Deps.UpdateChecksSwitched, below), which stops
+		// what an off stops and rearms the cadence for an on.
+		CheckEnabled: func() bool { return liveCfg().Update.EffectiveCheckEnabled() },
+		// The releases API serve asks: nil, GitHub's, but in a boot test,
+		// which counts what is asked of a server of its own.
+		Client: opts.updateReleases,
 		// Compat-gate token snapshot. The updater calls this on each
 		// install attempt to decide whether the candidate's
 		// MinClientVersion would orphan a still-paired older client.
@@ -6403,7 +6426,14 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 				}
 			}
 		}(cadenceRearms),
-		DuplicatesSweepRun: jobRunClosure(duplicatesSweepState),
+		// The update check's switch changed (backlog B761): the updater
+		// stops every check and install under way for an off, and rearms
+		// its cadence for an on.
+		UpdateChecksSwitched: upd.ChecksSwitched,
+		// A save that turns update checks off takes the install marker's lock
+		// first, and is decided under it (backlog B761's round 3).
+		UpdateChecksOffSave: updateChecksOffSave(cfg.DataDir, binaryPath, *configPath, opts.backupProbeTimeout),
+		DuplicatesSweepRun:  jobRunClosure(duplicatesSweepState),
 		// The orphan sweep's and the variant watcher's refusal latches, so
 		// the Jobs card says each is refusing rather than "on" (nil when the
 		// sweep does not run).

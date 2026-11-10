@@ -940,6 +940,9 @@ func TestARefusalAtTheOpenIsTheEnginesSkip(t *testing.T) {
 		if after == nil || after.Entry != c {
 			t.Fatalf("the successor after the refused one %+v, want c (%d)", after, c)
 		}
+		// The Prepare the fake has begun can come before the refusal's step is
+		// published (B827): the reads wait for the skip that step records.
+		p.waitSnap("y's refusal", func(sn *engine.Snapshot) bool { _, ok := sn.Skipped(y); return ok })
 		if got := read(t, h, playlist, "Id")["Value"]; got != u(a) {
 			t.Errorf("Id %s after the successor was refused, want a, still playing", got)
 		}
@@ -1024,7 +1027,9 @@ func TestOnlyXMLTextIsMetadata(t *testing.T) {
 // limits (Write 2 s, a budget of 1 s), a Play whose session's Start the
 // backend holds answers success at the budget's end (the engine answers it
 // cancelled, without ErrNotAdmitted: it may yet run), and the reads that
-// follow show the start under way, then the session once the hold is let go.
+// follow show the start under way once the engine has published it (the
+// success is the admission's alone, which comes before that, B827), then the
+// session once the hold is let go.
 func TestATransportWriteAdmittedPastItsBudgetIsSuccess(t *testing.T) {
 	p := newTestPlayer(t)
 	spy := newSpy(p.eng)
@@ -1041,6 +1046,7 @@ func TestATransportWriteAdmittedPastItsBudgetIsSuccess(t *testing.T) {
 	if got := spy.answered("Play"); len(got) != 1 || engine.ReasonOf(got[0]) != engine.ReasonCancelled || errors.Is(got[0], engine.ErrNotAdmitted) {
 		t.Fatalf("the engine answered %v, want a cancellation of a command it admitted", got)
 	}
+	p.startUnderWay()
 	if got := read(t, h, playlist, "TransportState")["Value"]; got != "Buffering" {
 		t.Errorf("TransportState %s while the start is held, want Buffering", got)
 	}

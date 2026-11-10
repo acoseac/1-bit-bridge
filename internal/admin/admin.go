@@ -594,6 +594,31 @@ type Deps struct {
 	// current wait.
 	TriggerCadenceRearm func()
 
+	// UpdateChecksSwitched tells the updater that update.checkEnabled
+	// changed (updater.Updater.ChecksSwitched, backlog B761). The settings
+	// PATCH calls it once, after a save that changed the switch is
+	// persisted and published, and never for a save that failed, which
+	// changed nothing: off, it stops every update check under way and every
+	// install not yet past its decision; on, it starts the poll loop's wait
+	// again at a full interval, asking nothing. Not the cadence rearm, which
+	// restarts every loop's wait. Nil when no updater is wired (tests): the
+	// switch is live regardless, since the updater asks it at every check.
+	UpdateChecksSwitched func()
+
+	// UpdateChecksOffSave is asked by the settings PATCH before anything else
+	// of it, for a save that turns update checks off as the live config
+	// stands (backlog B761's round 3; updater.LockForChecksOff and
+	// updater.ChecksOffRefused in serve): it takes the install marker's lock,
+	// waiting as long as an install's swap may hold it, and decides under it
+	// whether the off may be saved; release lets the lock go, once the save
+	// is published and UpdateChecksSwitched told. It is taken before the
+	// console's lock and the holder's, never under either. Its refusals wrap
+	// ErrUpdateChecksOffLocked, ErrUpdateChecksOffRefused or
+	// ErrUpdateChecksOffUnchecked, whose words say what to do and name no path;
+	// a context's error is a stop. Nil when no updater is wired (tests): the
+	// off is saved with no lock.
+	UpdateChecksOffSave func(ctx context.Context) (release func(), err error)
+
 	// TriggerDuplicatesPass nudges the duplicates stamping sweeper
 	// (cmd/bridge runDuplicatesSweeper) to re-evaluate suppression under
 	// the CURRENT duplicates.filter policy — the hot-apply half of the
@@ -1319,15 +1344,17 @@ type TailscaleStatus struct {
 // Install and Rollback take the request's, which ends their wait for
 // the install marker's lock.
 //
-// Install and Rollback return errors the admin handler classifies
+// CheckNow, Install and Rollback return errors the admin handler classifies
 // via errors.Is against the package-level sentinels below
 // (ErrNoUpdate / ErrActiveSessions / ErrInstallNotSupported /
-// ErrPathNotWritable). The adapter is responsible for mapping
+// ErrPathNotWritable / ErrUpdateChecksOff). The adapter is responsible for mapping
 // internal/updater's typed errors onto these admin-facing sentinels
-// so this package stays decoupled from internal/updater's API.
+// so this package stays decoupled from internal/updater's API. CheckNow's
+// only error is ErrUpdateChecksOff (backlog B761): a check that failed
+// upstream answers its status, whose LastError says so.
 type UpdateProvider interface {
 	Status() UpdateStatus
-	CheckNow(ctx context.Context) UpdateStatus
+	CheckNow(ctx context.Context) (UpdateStatus, error)
 	Install(ctx context.Context, force bool) (UpdateStatus, error)
 	Rollback(ctx context.Context, force bool) error
 }
@@ -1369,6 +1396,30 @@ var (
 	// ErrUpdateRollbackRefused: the rollback would put the backup back over
 	// a store a newer version may have changed, so nothing was rolled back.
 	ErrUpdateRollbackRefused = errors.New("the rollback was refused")
+	// ErrUpdateChecksOff: update checks are off (update.checkEnabled,
+	// backlog B761), so a check or an install was refused, or stopped
+	// under way, with nothing asked of GitHub for it or installed. A 409,
+	// its own code: the switch is the remedy, and nothing went wrong. A
+	// rollback, a status and the install's probation are never refused for
+	// it.
+	ErrUpdateChecksOff = errors.New("update checks are off")
+	// ErrUpdateChecksOffLocked: a save that turns update checks off could not
+	// hold the install marker's lock (another holder past its wait, or the
+	// lock failed), so nothing was saved (backlog B761's round 3). A 409,
+	// `marker-locked`, B692's code for the same lock.
+	ErrUpdateChecksOffLocked = errors.New("the install marker's lock cannot be held for the off")
+	// ErrUpdateChecksOffRefused: an off saved now would keep a crash rollback
+	// from putting back a backup that refuses settings that write
+	// update.checkEnabled, so nothing was saved (backlog B761's round 3). A
+	// 409, `update-checks-off-refused`; the words say when it can be saved,
+	// and how to turn the checks off without writing the key.
+	ErrUpdateChecksOffRefused = errors.New("an off saved now would keep a crash rollback from putting the backup back")
+	// ErrUpdateChecksOffUnchecked: whether an off saved now would keep a crash
+	// rollback from putting the backup back could not be told, the backup's
+	// check not answering (backlog B761's round 3) or the install marker not
+	// read (its round 4), so nothing was saved, failing closed. A 409,
+	// `update-checks-off-unchecked`, in words of each case's own.
+	ErrUpdateChecksOffUnchecked = errors.New("whether an off saved now would keep a crash rollback from putting the backup back could not be told")
 )
 
 // UpdateStatus is the wire shape /api/updates returns. Decoupled from
@@ -1442,6 +1493,14 @@ type UpdateStatus struct {
 	// InstallWarning is set on an install's answer when the new version
 	// was installed without its settings check, because it predates it.
 	InstallWarning string `json:"installWarning,omitempty"`
+	// CheckEnabled is whether update checks are on (update.checkEnabled,
+	// backlog B761). While it is false the status shows nothing a check
+	// found before (no latest version, no update available, no notes, no
+	// held update, no last error), the Updates panel and the Jobs card say
+	// "update checks off" and offer neither Install nor Check now, and both
+	// answer 409 update-checks-off. Roll back, the Rollback and Probation
+	// rows are not the switch's.
+	CheckEnabled bool `json:"checkEnabled"`
 }
 
 // Server owns the admin listener + mux. One per process.
@@ -1479,6 +1538,12 @@ type Server struct {
 	// (lockPlayerWrite). Tests only: nil in production, and set before the
 	// server serves anything, as the two fields above are.
 	testPlayerWriteWaits func()
+
+	// testSettingsWriteWaits, when set, is told each time a settings PATCH
+	// finds mu held and is about to wait for it (lockSettingsWrite), after
+	// its look at the update check's switch. Tests only: nil in production,
+	// and set before the server serves anything, as the fields above are.
+	testSettingsWriteWaits func()
 
 	// testNow, when set, is the clock the smart mixes' views read to mark
 	// the Christmas family out of season (now). Tests only: nil in

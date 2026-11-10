@@ -156,6 +156,10 @@ type backupCard struct {
 type jobsUpdates struct {
 	CheckIntervalHours int  `json:"checkIntervalHours"`
 	AutoInstall        bool `json:"autoInstall"`
+	// CheckEnabled is update.checkEnabled, resolved (backlog B761): off,
+	// the card says "update checks off", hides Check now, and calls
+	// auto-install suspended.
+	CheckEnabled bool `json:"checkEnabled"`
 }
 
 // jobsMaintenance — the low-key maintenance sweepers: whether each runs
@@ -365,6 +369,7 @@ func (s *Server) getJobsSnapshot(ctx context.Context) jobsSnapshotResponse {
 	resp.Updates = jobsUpdates{
 		CheckIntervalHours: cfg.Update.CheckIntervalHours,
 		AutoInstall:        cfg.Update.AutoInstall,
+		CheckEnabled:       cfg.Update.EffectiveCheckEnabled(),
 	}
 	if resp.Updates.CheckIntervalHours <= 0 {
 		resp.Updates.CheckIntervalHours = 6

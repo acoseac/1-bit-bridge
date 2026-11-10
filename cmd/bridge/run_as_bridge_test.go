@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/acoseac/1-bit-bridge/internal/updater"
 	"github.com/acoseac/1-bit-bridge/internal/version"
 )
@@ -36,7 +38,10 @@ const (
 	// package's own words and exit 2; "fails" exits 1, a check that did not
 	// answer; "takes" loads them, exit 0, as a backup of a version that takes
 	// what this one refuses does (backlog B760: 0.2.1 took the leading zero
-	// 0.2.2 refuses). Empty is the code that ships.
+	// 0.2.2 refuses); "predatesUpdateSwitch" answers as a release from before
+	// update.checkEnabled (backlog B761's round 2), whose strict decoder
+	// refuses the key on its line where the settings write it, and takes
+	// them otherwise. Empty is the code that ships.
 	runAsBridgeCheckEnv = "CMDBRIDGE_TEST_RUN_AS_BRIDGE_CHECK"
 	// runAsBridgeProbationAskEnv, a duration, is how often the copy's serve
 	// asks whether its start is ready before its first yes (probationTiming's
@@ -68,6 +73,13 @@ func runAsBridge() int {
 		case "takes":
 			fmt.Fprintf(os.Stdout, "config ok: 1-bit-bridge %s loads these settings\n", version.ServerVersion)
 			return updater.ConfigCheckValidExit
+		case "predatesUpdateSwitch":
+			if line := updateSwitchLine(os.Args[1:]); line > 0 {
+				fmt.Fprintf(os.Stderr, "%sline %d: field checkEnabled not found in type config.UpdateConfig\n", updater.ConfigRefusedPrefix, line)
+				return updater.ConfigCheckRefusedExit
+			}
+			fmt.Fprintf(os.Stdout, "config ok: 1-bit-bridge %s loads these settings\n", version.ServerVersion)
+			return updater.ConfigCheckValidExit
 		}
 	}
 	// A stop by SIGINT or SIGTERM, as main gives the bridge one, so that a
@@ -75,6 +87,41 @@ func runAsBridge() int {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	return run(ctx, os.Args[1:], os.Stdout, os.Stderr)
+}
+
+// updateSwitchLine is the line update.checkEnabled is written on in the
+// settings file args name after --config, as a release from before the key
+// finds it; 0 where the file writes none, or cannot be read.
+func updateSwitchLine(args []string) int {
+	i := slices.Index(args, "--config")
+	if i < 0 || i+1 >= len(args) {
+		return 0
+	}
+	raw, err := os.ReadFile(args[i+1])
+	if err != nil {
+		return 0
+	}
+	var doc yaml.Node
+	if yaml.Unmarshal(raw, &doc) != nil || len(doc.Content) == 0 {
+		return 0
+	}
+	// entry is the key named name in the mapping m, and its value.
+	entry := func(m *yaml.Node, name string) (key, value *yaml.Node) {
+		if m == nil || m.Kind != yaml.MappingNode {
+			return nil, nil
+		}
+		for j := 0; j+1 < len(m.Content); j += 2 {
+			if m.Content[j].Value == name {
+				return m.Content[j], m.Content[j+1]
+			}
+		}
+		return nil, nil
+	}
+	_, block := entry(doc.Content[0], "update")
+	if k, _ := entry(block, "checkEnabled"); k != nil {
+		return k.Line
+	}
+	return 0
 }
 
 // installBridgeCopy puts a copy of the running test binary at path, which

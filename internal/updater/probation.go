@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"time"
@@ -456,13 +457,32 @@ func ProbationHolds(st State, current, binaryPath string, uptime time.Duration) 
 
 // backupBeside reports whether a backup a crash rollback could put back
 // stands beside binaryPath: a regular file at binaryPath+".bak", as the crash
-// rollback requires it. A path that is not absolute names no backup.
+// rollback requires it. A path that is not absolute names no backup, and a
+// lookup that fails reads as none here (backupAt tells the two apart).
 func backupBeside(binaryPath string) bool {
+	there, err := backupAt(binaryPath)
+	return there && err == nil
+}
+
+// backupAt is backupBeside's lookup, telling what is not there from what
+// cannot be looked up (backlog B761's round 5): a backup there, a regular
+// file at binaryPath+".bak"; none, with no error, for nothing at that path,
+// an entry there that is no regular file, or a binary path that is not
+// absolute; and none with the lookup's error where it failed otherwise than
+// finding nothing there (a permission, EIO, a link loop on the way), where
+// whether a backup stands cannot be told.
+func backupAt(binaryPath string) (bool, error) {
 	if !filepath.IsAbs(binaryPath) {
-		return false
+		return false, nil
 	}
 	fi, err := os.Lstat(binaryPath + ".bak")
-	return err == nil && fi.Mode().IsRegular()
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return false, nil
+	case err != nil:
+		return false, err
+	}
+	return fi.Mode().IsRegular(), nil
 }
 
 // MigrationHeld says why a store open of current other than serve's own

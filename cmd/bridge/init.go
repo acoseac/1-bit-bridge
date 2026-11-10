@@ -942,6 +942,7 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	warnOutputNotKept(stderr, outputNotKept)
 	if prior != nil {
 		warnEnrichNotKept(stderr, prior.Enrich)
+		warnUpdateNotKept(stderr, prior.Update)
 	}
 
 	if !*publicMode {

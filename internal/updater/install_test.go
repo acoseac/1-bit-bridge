@@ -42,6 +42,13 @@ type installFixture struct {
 	archiveBytes   []byte
 	checksumsBytes []byte
 	archiveFetches atomic.Int32
+	// requests counts every request the server is asked, the release's
+	// and its assets' alike, and mux is its routes, which a test adds to.
+	requests atomic.Int32
+	mux      *http.ServeMux
+	// archiveHold, when set, runs in the archive's handler before it
+	// answers: a test's hold on an install's download.
+	archiveHold atomic.Pointer[func(*http.Request)]
 }
 
 func newInstallFixture(t *testing.T, latestVersion string) *installFixture {
@@ -98,12 +105,19 @@ func newInstallFixtureWith(t *testing.T, latestVersion string, binaryBody []byte
 	})
 	mux.HandleFunc("/asset/"+archiveName, func(w http.ResponseWriter, r *http.Request) {
 		fix.archiveFetches.Add(1)
+		if hold := fix.archiveHold.Load(); hold != nil {
+			(*hold)(r)
+		}
 		w.Write(archiveBytes)
 	})
 	mux.HandleFunc("/asset/checksums.txt", func(w http.ResponseWriter, r *http.Request) {
 		w.Write(checksumsBytes)
 	})
-	srv := httptest.NewServer(mux)
+	fix.mux = mux
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fix.requests.Add(1)
+		mux.ServeHTTP(w, r)
+	}))
 	t.Cleanup(srv.Close)
 	fix.server = srv
 	allowTestAssetHost(t, srv.URL)
@@ -418,7 +432,7 @@ func TestInstall_CompatGateRefusesOrphanRelease(t *testing.T) {
 	// Augment the fixture: serve release-meta.json under /asset/,
 	// and re-publish the release JSON with the new asset attached.
 	metaBody := []byte(`{"version":"0.2.0","minClientVersion":"1.5.0","protocolVersion":1}`)
-	fix.server.Config.Handler.(*http.ServeMux).HandleFunc(
+	fix.mux.HandleFunc(
 		"/asset/release-meta.json",
 		func(w http.ResponseWriter, r *http.Request) { w.Write(metaBody) },
 	)
@@ -490,7 +504,7 @@ func TestInstall_CompatGateRefusesOrphanRelease(t *testing.T) {
 func TestInstall_CompatGateOverrideAllowsOrphanRelease(t *testing.T) {
 	fix := newInstallFixture(t, "0.2.0")
 	metaBody := []byte(`{"version":"0.2.0","minClientVersion":"1.5.0","protocolVersion":1}`)
-	fix.server.Config.Handler.(*http.ServeMux).HandleFunc(
+	fix.mux.HandleFunc(
 		"/asset/release-meta.json",
 		func(w http.ResponseWriter, r *http.Request) { w.Write(metaBody) },
 	)

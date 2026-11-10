@@ -83,6 +83,19 @@ type InstallOptions struct {
 	// Production leaves it nil; a test stands in for a candidate.
 	ConfigCheck func(ctx context.Context, candidate, configPath string) ConfigCheck
 
+	// RereadSwitch, nil in serve (whose switch, Options.CheckEnabled, is the
+	// live holder's, and whose off transition reaches its installs), reads the
+	// update check's switch again for a process that took it as it started:
+	// `bridge update`, from the settings file it loaded, through the loader
+	// the service reads it with (backlog B761's round 2). The install asks it
+	// as it begins and again at its decision under the install marker's lock,
+	// before the switch's commit, so an off saved while the command waited at
+	// its prompt or downloaded refuses the install, nothing armed or swapped.
+	// Its answer is the refusal: ErrUpdateChecksOff, naming what turned the
+	// checks off, or why the settings could not be read again, which the
+	// install never takes for an off.
+	RereadSwitch func() error
+
 	// RestoreBackup overrides the rename that puts the backup back over the
 	// binary in an operator's Rollback (RollbackBinary). Production leaves
 	// it nil; a test holds a rollback in it.
@@ -97,6 +110,21 @@ type InstallOptions struct {
 	// holdBeforeSwap, nil in production, runs in Install just before the
 	// swap, its marker armed: a test's hold on an install there.
 	holdBeforeSwap func()
+
+	// swap, nil in production (swapBinary), is the install's swap: a test's
+	// swap that fails.
+	swap func(dst, newBinary, backupExt string, markSwapStarted func() error) error
+
+	// holdBeforeDecision, nil in production, runs in Install once it holds
+	// the install marker's lock, just before its decision under it
+	// (decideUnderLock): a test's hold on an install there.
+	holdBeforeDecision func()
+
+	// holdAfterReread, nil in production, runs in decideUnderLock between
+	// the reread of the switch (RereadSwitch) and the commit, the window an
+	// off saved by the console must not land in (backlog B761's round 3):
+	// a test's hold on an install there.
+	holdAfterReread func()
 }
 
 // Install downloads, verifies, swaps, and arms the rollback marker
@@ -133,6 +161,10 @@ type InstallOptions struct {
 //     ErrInstallHeldBack and ErrInstallAwaitsConfirmation (each a
 //     holdError), when the decision made again under that lock refuses
 //     (decideUnderLock).
+//   - ErrUpdateChecksOff while update checks are off, at the start, and
+//     for an install the switch's off transition stopped before its
+//     decision or that found the switch off at it (backlog B761): nothing
+//     armed or swapped.
 //   - Any download / verify / swap / state-save error returned verbatim
 //     with a wrapped context prefix.
 //
@@ -161,8 +193,60 @@ type InstallOptions struct {
 // or recorded a hold meanwhile. Where the lock cannot be held it
 // refuses with ErrMarkerLockUnavailable, nothing armed or swapped; a
 // stop in its wait returns ctx's error.
+//
+// The update check's switch (backlog B761) is asked at the start, where off
+// refuses with ErrUpdateChecksOff before anything, a candidate a check found
+// earlier included, and again at the decision under the install marker's
+// lock, which is its boundary (commit): before it, the switch's off
+// transition stops the install through its own context, its download, its
+// check or its wait for the lock, and the decision refuses where the switch
+// is off then, each answering ErrUpdateChecksOff with nothing armed or
+// swapped; from it, the install is the switch's no longer, and its marker's
+// writes and its swap finish whatever the switch says. A process that took
+// its switch as it started reads it again at both points (opts.RereadSwitch,
+// B761's round 2). The answer's status is shown as Status shows it.
 func (u *Updater) Install(ctx context.Context, opts InstallOptions) (Status, error) {
-	status := u.Status()
+	ictx, a, ok := u.admit(ctx)
+	if !ok {
+		return u.Status(), fmt.Errorf("%w: no release is installed while they are off", ErrUpdateChecksOff)
+	}
+	defer u.done(a)
+	if err := rereadSwitch(opts, "as the install began"); err != nil {
+		return u.Status(), err
+	}
+	st, err := u.install(ictx, a, opts)
+	return u.shown(st), installStopped(a, err)
+}
+
+// rereadSwitch asks opts.RereadSwitch, where one was given, and refuses the
+// install with its answer, saying where it was found and that nothing was
+// installed (B761's round 2).
+func rereadSwitch(opts InstallOptions, where string) error {
+	if opts.RereadSwitch == nil {
+		return nil
+	}
+	if err := opts.RereadSwitch(); err != nil {
+		return fmt.Errorf("%w (found %s); nothing was installed", err, where)
+	}
+	return nil
+}
+
+// installStopped is err, an install's answer, as its caller is told it: the
+// switch's refusal where the off transition stopped the install before its
+// decision (a.stopped; no transition stops one past it, commit), whatever
+// the stop made of the install's own error, which says nothing was
+// installed, and err as it is otherwise.
+func installStopped(a *admission, err error) error {
+	if err == nil || !a.stopped.Load() {
+		return err
+	}
+	return fmt.Errorf("%w: they were turned off while the install was under way, and it stopped before its swap; "+
+		"nothing was installed", ErrUpdateChecksOff)
+}
+
+// install is Install's body, on the install's own context, a its admission.
+func (u *Updater) install(ctx context.Context, a *admission, opts InstallOptions) (Status, error) {
+	status := u.cached()
 	if !status.UpdateAvailable || status.LatestVersion == "" {
 		return status, ErrNoUpdate
 	}
@@ -398,7 +482,10 @@ func (u *Updater) Install(ctx context.Context, opts InstallOptions) (Status, err
 	}
 	defer lock.Release()
 	prior, priorErr := LoadState(opts.DataDir)
-	if err := u.decideUnderLock(opts, status.LatestVersion); err != nil {
+	if opts.holdBeforeDecision != nil {
+		opts.holdBeforeDecision()
+	}
+	if err := u.decideUnderLock(a, opts, status.LatestVersion); err != nil {
 		return status, err
 	}
 
@@ -433,7 +520,11 @@ func (u *Updater) Install(ctx context.Context, opts InstallOptions) (Status, err
 	if opts.holdBeforeSwap != nil {
 		opts.holdBeforeSwap()
 	}
-	if err := swapBinary(opts.BinaryPath, candidate, ".bak", markSwapStarted); err != nil {
+	swap := opts.swap
+	if swap == nil {
+		swap = swapBinary
+	}
+	if err := swap(opts.BinaryPath, candidate, ".bak", markSwapStarted); err != nil {
 		// Swap failed — the marker back as this install read it under the
 		// lock, so the next boot doesn't roll back something that didn't
 		// actually change, and a hold or a veto it carried stays (backlog
@@ -838,7 +929,30 @@ func (u *Updater) swapAwaitingRestart(dataDir, target string) bool {
 // beside opts.BinaryPath, which a crash rollback would put back, with the
 // unconfirmed running version. A manual install is not held by it. The lock
 // is the caller's.
-func (u *Updater) decideUnderLock(opts InstallOptions, target string) error {
+//
+// First of all it asks the update check's switch again (backlog B761): read
+// again from the settings where the process took it as it started
+// (opts.RereadSwitch, B761's round 2; outside gateMu, being a file's read),
+// whose answer refuses the install, and then through the install's admission
+// a: where update checks are off, or the switch's off transition stopped the
+// install, it refuses with ErrUpdateChecksOff; otherwise the install is
+// committed, and from here no off transition stops it (commit), so the
+// marker's writes and the swap that follow finish. The reread and the commit
+// run under the install's hold of the marker lock, which the console's save
+// of an off takes too (LockForChecksOff, B761's round 3): an off lands before
+// the reread or after the swap, never between the two. The lock is never
+// asked for again here, since this path holds it already and would wait on
+// itself.
+func (u *Updater) decideUnderLock(a *admission, opts InstallOptions, target string) error {
+	if err := rereadSwitch(opts, "at the install's decision, before its swap"); err != nil {
+		return err
+	}
+	if opts.holdAfterReread != nil {
+		opts.holdAfterReread()
+	}
+	if !u.commit(a) {
+		return fmt.Errorf("%w: they are off at the install's decision, before its swap; nothing was installed", ErrUpdateChecksOff)
+	}
 	if u.swapAwaitingRestart(opts.DataDir, target) {
 		return fmt.Errorf("%w: %s is already staged on disk", ErrInstallPendingRestart, target)
 	}
@@ -846,7 +960,7 @@ func (u *Updater) decideUnderLock(opts InstallOptions, target string) error {
 		if hold := HeldBack(opts.DataDir, opts.ConfigPath, target); hold.Version != "" {
 			return &holdError{sentinel: ErrInstallHeldBack, reason: hold.Reason}
 		}
-		if why := u.probationHolds(opts.DataDir, opts.BinaryPath, u.Status().CurrentVersion); why != "" {
+		if why := u.probationHolds(opts.DataDir, opts.BinaryPath, u.cached().CurrentVersion); why != "" {
 			return &holdError{sentinel: ErrInstallAwaitsConfirmation, reason: why}
 		}
 	}

@@ -691,7 +691,12 @@ func runDACBind(ctx context.Context, args []string, env outputBindEnv, stdout, s
 			return 1
 		}
 	}
+	before := config.Clone(cfg)
 	cfg.Output.Player.Device = dev
+	// The three opt-outs as the file holds them: the load put this shell's
+	// BRIDGE_* variables over the file, and bind changes none of them
+	// (backlog B761's round 3; config.KeepFiledSwitches).
+	cfg.KeepFiledSwitches(before, read)
 	if env.beforeSave != nil {
 		env.beforeSave()
 	}

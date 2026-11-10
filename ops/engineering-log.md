@@ -89737,6 +89737,1351 @@ the admin address before an offline write and refuses while it can't tell that n
 config gave `adminAddress: 127.0.0.1:0`, which dials as refused on Linux but as an address that can't be assigned on
 macOS and Windows. The fixture takes an admin address now, and this test gives it `closedAdminAddr`'s closed port, which
 dials as refused everywhere: red on macOS before (CI's words), green three of three after.
+## 2026-11-09 — B761 PR 1: an off switch for the update check
+
+Backlog B761's first PR on `feat/b761-update-switch` from main 71f707ab,
+worker b761u on legion0 (Ubuntu 26.04, linux/amd64, go1.27.3,
+`GOTOOLCHAIN=local`, `GOPROXY=off`). Commits: the config's key 48f6f54f;
+the updater's switch ad9a64ad; serve, the console, `/v1/health` and the CLI
+c2656e38; the docs and the panel's redraw 434eb7c2; an install the switch
+stopped stays stopped with the checks on again 77386550; the tests' waits on
+the switch alone 656bbc06 (two negative controls' misses, below); the
+example config's `update:` section c3477ca7; and this record. The rules go
+into `.claude/rules/config-lifecycle.md`, `wire.md`, `admin-console.md`,
+`cli-serve.md`, `build-ci-tests.md` (a wait for a held request's stop,
+from the controls' two misses) and their History files through
+`rules-b761.patch`, which this worker cannot commit. B761's other part, the Deezer re-queue, is a
+later PR.
+
+### What happened at main
+
+The updater asked GitHub's releases API at every start and every check
+interval (6 h by default; `update.checkIntervalHours` only stretched it, to a
+1 h floor), "Check now" and `bridge update` asked whatever the settings said,
+and an install of a cached candidate needed nothing more. Nothing turned the
+traffic off, and the docs said that the bridge polls but not what it sends or
+how to stop it: one unauthenticated GET of the latest release, its User-Agent
+naming the bridge's version, and on an install the archive, `checksums.txt`
+and `release-meta.json`. A restart the
+auto-installer deferred after its swap had committed (`pendingRestart`: a
+download in flight, the quiet hours) fired only through the pending-restart
+fast path of `maybeAutoInstall`, after a check that answered.
+
+### The switch
+
+`update.checkEnabled` (`UpdateConfig.CheckEnabled`, a `*bool`, absent on,
+`EffectiveCheckEnabled`); `BRIDGE_UPDATE_CHECK_ENABLED` is derived and read as
+the enrichment opt-outs read theirs (`switchEnvPaths`: the file's on and off
+words in any case, anything else off with a Warn naming the variable); the
+holder's save writes it as the file holds it unless the save changed it, then
+off as false and on as no key (`filedSwitches`), and `Clone` copies it. The
+`updates` managed control owns `updateCheckEnabled`, the `restart` control
+not. `bridge init --force` keeps it written off (`priorUpdate`, through
+`readPriorSwitch`, which `priorEnrich` now shares), names a value that does not
+read by its line and keeps nothing of it (`warnUpdateNotKept`), and writes no
+variable's value.
+
+### The updater
+
+- **Admission.** `Options.CheckEnabled` (nil on) is read by `admit` under
+  `gateMu`, which registers each admitted check or install with a context of
+  its own; `ChecksSwitched`, under the same lock, marks every registered
+  admission stopped and cancels its context when the switch reads off, so an
+  admission is either refused after an off or stopped by it. The start's
+  check, each tick's (`tick`) and Check now are admitted so; an install is
+  admitted at its start.
+- **A plain cancel.** The admission's context is `context.WithCancel`, the
+  stop told by `admission.stopped`: under `WithCancelCause(ErrUpdateChecksOff)`
+  net/http answered the stopped request with the cause itself, the check
+  recorded `LastError` "github get: …: update checks are off" and logged an
+  ERROR poll line, since `ctxerr.WithoutCancellation` reads the cancellation
+  (control C39).
+- **The install's boundary.** `decideUnderLock` asks `commit` first, holding
+  the install marker's lock: only an admission still registered, with the
+  switch on, is committed, and from there no off transition reaches the
+  install, whose marker's writes and swap finish. Before it, the stop cancels
+  the download, the settings check or the wait for the lock, and the decision
+  refuses an install the off transition stopped even with the switch on again
+  (control C7). `installStopped` words a stopped install's answer "nothing was
+  installed" whatever the stop made of its own error.
+- **The auto-installer.** `maybeAutoInstall` reads the switch again at its
+  top, so a candidate a check found just before the switch went off is not
+  installed (the post-poll race); its gates moved into `autoInstallGate`, and
+  `ErrUpdateChecksOff` is a deferred state, logged at Info.
+- **The deferred restart.** A tick while off asks nothing and calls
+  `finishDeferredRestart`: a restart pending from a committed swap, through
+  `autoInstallGate` (auto-install on and wired, the candidate cached and not
+  held back, the quiet hours) and `restartWhenDrained` (no download in
+  flight, the marker's restamp, a stop). A manual install gains none.
+- **On again.** `ChecksSwitched` sends the loop's `wake` (buffered 1): the
+  wait starts again at a full interval, asking nothing. The loop's timer is a
+  seam, `Updater.after` (`time.After` in production).
+- **The status.** `Status.CheckEnabled`; while off, `shown` empties
+  `LatestVersion`, `UpdateAvailable`, `ReleaseNotesURL`, `DeferredReason` and
+  `LastError` and keeps `LastCheck`; on again they show again. The
+  auto-installer and an install read `cached`. `CheckNow` answers
+  `(Status, error)`: `ErrUpdateChecksOff` before asking, and for a check the
+  switch stopped.
+- **Never refused:** a status, the console's rollback, the boot's early and
+  crash rollbacks, the probation and its confirmation. `bridge update` has no
+  rollback of its own (it never had one; `git log -S` on its source), so the
+  brief's "rollback by the CLI" is pinned by the console's rollback through
+  serve and by the start's crash rollback with checks off in the settings
+  (`TestAStartsCrashRollbackRunsWithUpdateChecksOff`).
+
+### Serve, the console, health and the CLI
+
+Serve's updater reads the switch off the live holder and asks the releases API
+`serveOpts.updateReleases` names (a boot test's; GitHub's otherwise); the
+console's `Deps.UpdateChecksSwitched` is `upd.ChecksSwitched`. The settings
+GET and PATCH carry `updateCheckEnabled` resolved, `live`, only off written,
+and the updater is told once a save that changed it is published, never for
+one that failed. Check now and Install answer 409 `update-checks-off`
+(`admin.ErrUpdateChecksOff`; `UpdateProvider.CheckNow` answers an error now),
+the rollback 204. The status DTO carries `checkEnabled`; the Settings page's
+Updates panel and the Jobs card say "update checks off" and offer neither
+Check now nor Install, the card's tray carries the switch, and the Settings
+form's save of it redraws the panel from `GET /api/updates`. `/v1/health`
+advertises no update while off (`api.UpdateInfo.ChecksOff`): `updateAvailable`
+false, no version and no notes, `minClientVersion` still sent. `bridge update`
+loads through `loadCLIConfig`, the file and the variable as serve reads them,
+and refuses `--check` and `--yes`, exit 1, before anything is asked or
+written, naming the variable in this environment or the file
+(`config.UpdateCheckEnabledFromEnv`).
+
+PROTOCOL.md's health paragraph and Updates section say it all (the
+orchestrator mirrors PROTOCOL.md to the iOS repo); the README has an Updates
+section, `docs/docker.md` the variable and its reading, `docs/release-process.md`
+a checklist item for what the bridge sends out and the switch for each, and
+`ops/settings-apply-semantics.md` the field's row. The site's privacy page is
+the orchestrator's.
+
+### Reds, before each part was built
+
+Written first and run against the surface alone (the key, the options and the
+seams present, nothing reading them; `.tmp/_b761u/reds.md`):
+
+| Test | Red |
+|---|---|
+| config `TestTheUpdateCheckSwitchLoads` | the opt-out spellings beyond ParseBool's read on ("update checks on = true, want false"); an unreadable value warned 0 times |
+| config `TestTheUpdateCheckSwitchSavesReloadsAndClones` | turned on, the file held `true`, want no key; a clone shared the pointer |
+| config `TestAConsoleSaveKeepsTheFilesOwnUpdateCheckSwitch` | a change to on wrote `true`; the variable's spellings did not set the switch |
+| config `TestTheUpdatesControlOwnsTheUpdateCheckSwitch` | the updates control did not own `updateCheckEnabled` |
+| config `TestConfigCloneIsDeep` | `Config.Update.CheckEnabled: shared pointer` |
+| cmd/bridge `TestARewriteKeepsTheUpdateCheckSwitchWrittenOff` | off not kept in either posture, the file's off not kept, an unreadable value not named, a block that is no block not said (the on-is-default and environment cases green, as guards) |
+| updater `TestNoRequestAtTheStartOrATickWhileUpdateChecksAreOff` | the start asked GitHub 1 time with checks off |
+| updater `TestARequestAtTheStartAndAtATickWhileUpdateChecksAreOn` | the counts right (1, 2), red only on the status's `CheckEnabled` |
+| updater `TestCheckNowAsksNothingWhileUpdateChecksAreOff` | nil, want `ErrUpdateChecksOff`; 1 request |
+| updater `TestTurningUpdateChecksOffStopsTheScheduledCheckUnderWay` | the held request ended at its client's timeout, recorded as an error; 3 requests, want 2 |
+| updater `TestTurningUpdateChecksOffStopsACheckNowUnderWayBesideTheScheduledOne` | the Check now answered nil |
+| updater `TestTurningUpdateChecksOnRearmsAFullWaitAndAsksNothing`, `TestUpdateChecksTurnedOffAndOnAgainQuickly` | the loop never asked for its next wait |
+| updater `TestAStatusWhileUpdateChecksAreOffShowsNoUpdate` | `CheckEnabled` false with checks on, nothing masked |
+| updater `TestNoAutoInstallOfACandidateFoundBeforeUpdateChecksWentOff` | swapped to 0.2.0, the backup and the marker written, 3 more requests, "auto-installing", one restart |
+| updater `TestAnInstallIsRefusedWhileUpdateChecksAreOff` | nil, 3 requests, swapped |
+| updater `TestTurningUpdateChecksOffDuringADownloadStopsTheInstall` | the held download never stopped |
+| updater `TestUpdateChecksTurnedOffJustBeforeAnInstallsDecisionStopItBeforeItsSwap` | swapped, in both of its first two cases |
+| updater `TestARestartDeferredAfterACommittedSwapFiresWhileUpdateChecksAreOff` | 5 requests after checks went off |
+| api `TestHealthAdvertisesNoUpdateWhileUpdateChecksAreOff` | `updateAvailable` true, the version and the notes advertised |
+| admin `TestTheSettingsCarryTheUpdateCheckSwitch`, `TestTurningUpdateChecksOnWritesNoKeyAndTellsTheUpdater` | the PATCH's field unreported (`{Status: Reason:}`, want live) |
+
+Green there, as guards: `TestASwapPastItsDecisionFinishesWhenUpdateChecksGoOff`
+and `TestAManualInstallGainsNoRestartWhileUpdateChecksAreOff`. The first red
+run of the updater's install tests hung 15 minutes: the download's hold waited
+on its request alone, and the fixture server's Close waited on the hold; every
+hold now also ends at the test's cleanup and answers nothing
+(`panic(http.ErrAbortHandler)`).
+
+Written after their part was built, their reds the negative controls': admin's
+`TestTheUpdateEndpointsAnswerTheSwitchsRefusalWithItsCode`,
+`TestTheSettingsPageSaysUpdateChecksAreOff`,
+`TestTheJobsCardCarriesTheUpdateCheckSwitch` and
+`TestTheUpdatesPanelScriptSaysUpdateChecksAreOff`; cmd/bridge's
+`TestBridgeUpdateRefusesItsCheckAndItsInstallWhileUpdateChecksAreOff`,
+`TestServeTurnsUpdateChecksOffLiveAndShowsNoUpdate`,
+`TestServeStopsAnUpdateCheckUnderWayWhenChecksGoOff` and
+`TestAConsoleSaveKeepsTheFilesOwnUpdateCheckSwitchThroughServe`; the updater's
+"off and on again before the decision" case.
+`TestAStartsCrashRollbackRunsWithUpdateChecksOff` is a guard with no control
+(no part of the crash rollback asks the switch).
+`TestTheUpdatesPanelShowsUpdateChecksOff` runs the panel under node, which
+this host does not have: it skipped here.
+
+### Negative controls
+
+Forty-three, at 77386550, predicted by name in `.tmp/_b761u/controls.py`
+before the first ran: each mutated committed files in place, every edit's text
+found exactly once, ran the named tests of each named package with `go test
+-run`, and put the files' bytes back in a `finally` (and from a copy written
+first); `git status` clean after each batch. 36 as predicted; 5 with more reds
+than predicted (C11, C13, C26, C27, C29); 2 that missed a test, C3 and C32,
+both the tests' fault and both fixed in 656bbc06, where they ran again with
+the six other controls of the tests that commit touched (C14, C33, C35, C36,
+C37, C39): all eight as predicted, C39 with one more red, the off-and-on
+case now asking for no error:
+
+| Control | Mutation | Red, and what it showed |
+|---|---|---|
+| C1 | the tick's gate reverted alone, the start's kept | the off case's tick 1 asked GitHub once; the deferred restart's case 4 requests; the scheduled stop's 3, want 2 |
+| C2 | the start's gate reverted alone | the start asked once with checks off; turning on asked once; the deferred restart's case 1 request |
+| C3 | the off transition cancels nothing | the held check, Check now and download never stopped (each "never stopped" within the minute), the off-and-on case, serve's Check now. First run: the off-and-on case and serve's were green, each held request ended within the wait by its client's 30 s timeout (the stand-ins', and the console client's for serve's Check now); 656bbc06 gives those clients timeouts past every wait |
+| C4 | no wake | the loop never asked for its next wait (both on cases) |
+| C5 | turning on ticks at once | turning on asked once; the off-and-on case asked twice across the switch |
+| C6 | the decision does not ask the switch | "the switch alone moved": swapped, nil |
+| C7 | the decision does not ask whether the off transition stopped the install | "off and on again before the decision": swapped, nil |
+| C8 | an install's start does not ask the switch | refused only at the decision, after 3 requests |
+| C9 | the auto-installer does not read the switch again after its poll | "auto-installing" logged with checks off (the install's own admission still refused it: no swap, no request) |
+| C10 | a tick while off fires no deferred restart | restarts 0, want 1, the marker not restamped |
+| C11 | no masking | the status and a refused install's answer showed 9.9.9; serve's panel showed 99.0.0, and after the stop too (unpredicted) |
+| C13 | no masking, and serve's adapter not saying the switch to health | `/v1/health` advertised 99.0.0 and `updateAvailable` true; serve's panel, before and after the stop (the second unpredicted) |
+| C12 | health's gate | `updateAvailable` true, the version and the notes advertised |
+| C14 | the save tells the updater nothing | the updater told nothing; serve's held Check now never stopped |
+| C15 | the updater told inside the change, before the save | told twice, the first with the live config still on; told for the save that failed |
+| C16 | the switch's refusal classified as an install failure | 502 `install-failed` from the console and through serve; `TestClassifyUpdateError` |
+| C17 | serve's adapter not mapping the updater's refusal | 502 `install-failed` through serve |
+| C18, C19, C20 | the Settings page: Install offered, Check now not hidden, no "update checks off" | each in the page test; C19 and C20 through serve too |
+| C21 | the Jobs card's `checkEnabled` not set | false where the config says nothing, want true |
+| C22, C23, C24, C44 | the panel's script: Install offered, no redraw on the form's save, the card's status line, the card's Check now | the structural test, each line by name |
+| C25 | the form does not send the switch | `TestEverySettingsInputReachesThePayload` |
+| C26 | the variable read by ParseBool | every opt-out spelling but ParseBool's; the save test's variable cases too (unpredicted) |
+| C27 | no `filedSwitch` for the switch | turned on wrote `true`; an unrelated save wrote the variable's `false` into a file that said nothing (unpredicted: `filedEnvValues` leaves the opt-outs to `filedSwitches`) |
+| C28 | `Clone` shares the pointer | both clone tests |
+| C29 | the updates control does not own the switch | config's test; the PATCH accepted it on a managed bridge; the console told without it (unpredicted) |
+| C30, C31 | init's rewrite does not keep the switch, or does not say the one it did not keep | the rewrite test's cases |
+| C32 | the CLI's refusal names the file whatever the variable says | first run green: the test asked only that the variable be named, which the refusal's remedy does whatever turned the checks off; 656bbc06 holds it to the first sentence's source |
+| C33, C34 | the CLI's own refusal removed; and its updater without the switch too | the wording alone (the updater's own refusal still stopped it, nothing asked); with both, `--check` asked and exited 0, `--yes` asked twice |
+| C35 | serve's updater given no switch | every serve case: the panel, the page, health, the held Check now, the saves' requests |
+| C36 | serve's console not wired to tell the updater | serve's held Check now never stopped |
+| C37 | a stopped Check now answers success | nil in the updater, 200 through serve |
+| C38 | `installStopped` removed | the stopped download answered "context canceled", not the switch |
+| C39 | the cancel carries the switch's error as its cause (the rejected alternative) | the stopped checks logged as failed polls and recorded as errors |
+| C40 | the deferred restart without the auto-installer's gates | restarted outside the quiet hours and while held back |
+| C41 | the save writes on as `true` and the holder's `filedSwitch` removed (either alone writes on as no key) | the file held `true` |
+| C43 | the settings GET shows the raw key | `false` where the file says nothing; the page's switch unchecked |
+
+### The gates
+
+Through the shared build lock, on go1.27.3, go.mod's, with TMPDIR on this
+disk.
+
+At c3477ca7 (`.tmp/_b761u/gate.py A`): `make test` (`-race`, `-timeout 30m`,
+`-p 4`) over every package, green: 89 packages and 14 with no test files, in
+2112 s. The brief's five trees among them: cmd/bridge in 1444 s,
+internal/admin 1077 s, internal/api 153 s, internal/config 16 s and
+internal/updater 31 s; the Linux-only ones run for real here: internal/alsa,
+internal/alsapcm on this host's ALSA (82 s), internal/atomicwrite,
+internal/fsutil's identity paths, internal/player/hotplug and internal/usbid.
+
+At c3477ca7 too (`gate.py B`), green: the new tests by name with `-race
+-count=20` (internal/updater's 15 in 6 s, internal/config's 4 in 7 s,
+internal/admin's 7 in 105 s, internal/api's 1 in 1 s and cmd/bridge's 6 in
+162 s), `make vet` for linux/amd64, windows, darwin and linux/386, and `make
+build-all`, its build-tag census included. This record's commit changes
+`ops/engineering-log.md` alone.
+
+Not run here: the node-run panel test
+(`TestTheUpdatesPanelShowsUpdateChecksOff`), which skips without node, as
+do the console's other node tests; the structural tests of the same script
+ran in the gate. Outside the lock:
+go1.27.3's gofmt (`go run cmd/gofmt -l`) over `internal` and `cmd`, clean.
+
+`TestEveryCitedTestNameExists` passes with this record, git reading the
+worktree's index; `rules-b761.patch` applied to a `git archive` copy of the
+final HEAD passes `make docs-check` and `verify_moves.py --base HEAD` with its
+four declared edits (CLAUDE.md 82.1%; config-lifecycle.md 97.9%, after
+`move_entry.py` moved the KeepOwner entry's long form, #1048's, to its History
+file, since the new bullet would have taken the file 46 bytes past its budget),
+and the guard passes there too, a planted name going red.
+
+## 2026-11-09 — B761 PR 1 round 2: off holds for a CLI already running; on never polls at once
+
+Round 2 of #1446 on `feat/b761-update-switch`, worker b761u on legion0
+(go1.27.3, `GOTOOLCHAIN=local`, `GOPROXY=off`), from the PR's head 6614b61b,
+round 1's rules as the orchestrator committed them. The findings were Codex's
+three P2s and the Claude review's Medium, five Lows and two notes it could
+not verify from the diff, with the two reviews of this round's brief binding
+where they differ from it. Commits: the timer's schedule 4f7c24ff; the CLI's
+reread 2e865384; the tests that prove what they claim 3b15a616; the words
+4bf94c69; the generation's own case 95e88b56; and this record. The rules go
+into `config-lifecycle.md` and its History file, `cli-serve.md`,
+`admin-console.md` and `build-ci-tests.md` through `rules-b761-r2.patch`.
+
+### A CLI already running honours a later off
+
+Codex's first P2 and the Claude review's Low: `bridge update` handed its
+updater `cfg.Update.EffectiveCheckEnabled`, a method value over the config it
+loaded as it started, so a command left at its install prompt, or
+downloading, when the console's switch went off read on at its admission and
+at `commit`, and swapped. Serve's registry of admissions does not reach
+another process.
+
+`InstallOptions.RereadSwitch` (nil in serve, whose switch is the live holder)
+is asked as the install begins, after its admission, and first in
+`decideUnderLock`, before `commit`, outside `gateMu`, which is never held
+across a file's read (the Claude review of the brief asked that it be said).
+Its error refuses the install, naming where it was found and that nothing was
+installed. `bridge update` hands it `rereadUpdateSwitch(cfgPath)`: the file it
+resolved as it started, made absolute and never looked for again, since a
+discovery could select another installation (Codex's review of the brief),
+loaded through `config.LoadFile`, the file and the command's own environment
+as at its start. An off is `ErrUpdateChecksOff` naming its source; settings
+that no longer load are a `*settingsRereadError` naming the path and the
+load's error, "Install refused: … The running bridge is unchanged. Fix
+<path>, then run `bridge update` again.", never an off (both reviews of the
+brief: failing open installs past an off, failing closed claims an off nobody
+set). `reportInstallFailure` says the switch's refusal naming what turned
+the checks off, as the start's refusal does, that the running bridge is
+unchanged, and how to turn the checks on: the variable's remedy where the
+variable is the source, since it overrides the file and the console's switch
+(the Claude review of the brief), and the console's switch or the key taken
+out of the file otherwise.
+
+The cases: the updater's
+`TestAnInstallReadsTheSwitchAgainAsItBeginsAndAtItsDecision` (off as it
+begins: nothing asked; off just before its decision, parked at the hold
+before `decideUnderLock`, after its download and its settings check: the
+binary, the backup and the marker untouched, Codex's second point on the
+brief; settings that no longer read at either point: their own error), and
+cmd/bridge's `TestBridgeUpdateReadsTheSwitchAgainOnceItsPromptIsAnswered`
+(the console's off written to the file while the prompt is open) and
+`TestBridgeUpdateRefusesItsInstallWhereTheSettingsNoLongerRead`.
+
+### Switching on never polls at once
+
+Codex's second P2: the old wait's tick and the notification could both be
+ready at the loop's select, which picks at random, and a tick taken there
+checked at once, an auto-install with it. Both reviews of the brief added the
+publication window: the settings save publishes the switch before it calls
+`ChecksSwitched`, so a tick in between reads it on. Stopping and draining the
+old timer could not work: `time.After` cannot be stopped, and the wait is
+`Run`'s local (the Claude review of the brief).
+
+The loop takes a `schedule` at each arming (`arm`, under `gateMu`): the
+switch's answer then and `switchGen`, which every `ChecksSwitched` advances
+under the same lock, in either direction. `admitScheduled` admits a tick only
+where the switch was on at its arming, no transition came since, and it reads
+on now; any other tick fires only the deferred restart. The off transition
+rearms nothing, so a wait armed with the switch on stays the loop's wait
+through the off: only the generation refuses its tick when the switch reads on
+again before the notification. 4f7c24ff's cases armed their old wait while the
+switch was off, which `on` alone refuses, so 95e88b56 adds
+`TestATickArmedBeforeUpdateChecksWentOffAsksNothingOnceTheyAreOnAgain`.
+
+The timer seam (`tickSeam`) gives every wait a channel of its own, buffered 1,
+hands each to the test as the loop arms it, and can hold the loop between an
+arming and its select (`holdNext`), so a test fires an obsolete wait and not
+the current one, and makes the old tick and the notification ready before the
+select (Codex's review of the brief: the round-1 seam's one shared channel
+could not tell them apart). `TestATickArmedWhileUpdateChecksWereOffAsksNothingOnceTheyAreOn`
+parks between the publication and the notification;
+`TestAWakeAndAnOldTickReadyTogetherAskNothing` makes both ready: whichever the
+select takes, nothing is asked, the obsolete wait fired again is read by
+nobody, and the rearmed wait's tick checks.
+
+### The tests prove what they claim
+
+- `TestASwapPastItsDecisionFinishesWhenUpdateChecksGoOff` passed with
+  `commit`'s `delete(u.active, a)` reverted (the Claude review's Low): the
+  swap is file work that reads no context, so a committed install the off
+  transition still marked stopped finished, and `installStopped` returned its
+  nil. It now asks, at the hold before the swap, that the install has left the
+  admissions the off transition stops, and a second case fails the swap after
+  the off (`InstallOptions.swap`, a test's seam, nil in production): the
+  swap's own error answers, never relabelled as the switch's stop over an
+  armed marker. Red with the boundary reverted: control R9.
+- The rollbacks the docs say the switch never refuses, `bridge update` having
+  none (both reviews of the brief): a start's crash rollback
+  (`recoverCrashedInstall`, B660; `TestAStartsCrashRollbackRunsWithUpdateChecksOff`),
+  a start's boot rollback (`maybeRollbackOnBoot` in `runServe`;
+  `TestAStartsBootRollbackRunsWithUpdateChecksOff`) and the console's Roll
+  back from a serve started with checks off
+  (`TestTheConsolesRollbackRunsWithUpdateChecksOff`), each red with the switch
+  made to refuse it (R10, R11, R12).
+- The Claude review's Medium holds: a crash rollback to a release from before
+  the switch is refused while the key is written. B660's crash rollback asks
+  its backup's settings check, and that release's loader refuses a key it does
+  not know (`KnownFields`, since the first loader), so with the console's off
+  written the start says why and goes on with the install that crashed. The
+  review's first fix, taking a refusal whose only reason is this key, was not
+  taken: the binary put back would refuse the same settings at its own start;
+  and the crash rollback writes no settings (B613's rule), so it cannot drop
+  the key either. Its second fix is what was done: every surface says that a
+  release from before the switch refuses settings that write the key, and to
+  turn the checks on with the console's switch, which takes the key out, or
+  to delete it, before going back to one, by Roll back or by hand.
+  `TestACrashRollbackToAReleaseBeforeTheSwitchNeedsItOn` stands a backup in
+  for such a release (the run-as-bridge copy's `predatesUpdateSwitch` mode
+  answers the settings check as its loader would: refused on the key's line
+  where the file writes it, valid otherwise): with the key written the backup
+  stays and the marker records why; with the key gone it is put back, exit 75
+  (R13, R14). The console's Roll back asks its backup no settings check (B613
+  checks a candidate before its swap, B660 a backup before a crash rollback),
+  so the docs give it the same advice.
+- `TestServeStopsAnUpdateCheckUnderWayWhenChecksGoOff`'s `LastError` check
+  could not fail while checks were off, the status masking it (the Claude
+  review's note): it turns the checks on again and asks then (R16).
+- `renderJobCards` hides the card's Check now through `jobs-upd-check`, the
+  card's one id not `job-upd-*`, which no test held to jobs.html (the Claude
+  review's note): `TestTheUpdatesPanelScriptSaysUpdateChecksAreOff` now
+  requires the button with that id there (R15).
+
+### The words
+
+Codex's third P2 and the Claude review's Lows: PROTOCOL.md said `bridge.yaml`,
+the variable or the console's switch turned the checks off "at once and
+without a restart", where only the console's save is published to the running
+service and calls its off transition; the settings page put the boundary at
+the swap, where it is the decision to swap; the README, `docs/docker.md`, the
+YAML example and the Jobs tray said a rollback still works, which a release
+from before the switch does not while the key is written; the CLI's refusal
+named `bridge status`, which shows no update status, and advised writing the
+key true, which such a release refuses as it refuses false.
+
+Each surface now says: the console's switch applies at once, a hand edit of
+the key or a change of the variable at the service's next start, the variable
+overriding the file and the console's switch at every start; a new `bridge
+update` reads the settings as it starts, and a running one again as its
+install begins and at its decision; turned back on live, the next check waits
+a full interval, while a start with them on checks at once. PROTOCOL.md lists
+what the switch refuses (the start's and the scheduled checks, Check now and
+`bridge update --check`, every new install: the console's, the CLI's and the
+auto-installer's) and what it never refuses (the status, the console's Roll
+back, a start's rollbacks, the probation and its confirmation, a restart
+deferred after a committed swap), and what a release from before the switch
+does with the key and with the variable. `ops/settings-apply-semantics.md`'s
+row and `UpdateConfig`'s doc say the same.
+
+The Claude review's last Low, an off set only in the service's environment,
+which `bridge update` run from a shell does not see: kept, as the brief and
+its reviews ask, as the qualification each surface states.
+
+### Reds, before each fix
+
+At 6614b61b's code with the new tests and the seams in place
+(`.tmp/_b761u/reds-r2.md`):
+
+| Test | Red |
+|---|---|
+| updater `TestATickArmedWhileUpdateChecksWereOffAsksNothingOnceTheyAreOn` | 20 of 20: the tick of a wait armed while off asked GitHub once with the switch published on, before the updater was told |
+| updater `TestAWakeAndAnOldTickReadyTogetherAskNothing` | 10 of 20 (`-count=20`): the select took the tick and asked once |
+| updater `TestAnInstallReadsTheSwitchAgainAsItBeginsAndAtItsDecision` | all four cases swapped (`<nil>`, want `ErrUpdateChecksOff`); the two as it begins asked 3 times, want 0 |
+| cmd/bridge `TestBridgeUpdateReadsTheSwitchAgainOnceItsPromptIsAnswered`, `TestBridgeUpdateRefusesItsInstallWhereTheSettingsNoLongerRead` | the refusal not said; 2 requests, want 1 (the install asked for the release again, then failed on the stand-in's empty assets) |
+
+Written after their part was built, their reds the controls':
+`TestATickArmedBeforeUpdateChecksWentOffAsksNothingOnceTheyAreOnAgain` (R1,
+R2), the swap-past case's two (R9), the three rollback cases (R10 to R12), the
+release from before the switch (R10, R13, R14), the card's id (R15) and
+serve's error with checks on again (R16).
+
+### Negative controls
+
+Fifteen, at 95e88b56, predicted by name in `.tmp/_b761u/controls_r2.py`
+before the first ran, run as round 1's were (each edit's text found exactly
+once, the named tests of each named package, the bytes put back in a
+`finally`; `git status` clean after): fourteen as predicted, R12 with one
+more red.
+
+| Control | Mutation | Red, and what it showed |
+|---|---|---|
+| R1 | `admitScheduled` reverted to `admit`: no schedule (`-count=20`) | the publication window 20 of 20, the wait armed before the off 20 of 20, both ready 11 of 20: each tick asked once |
+| R2 | no `switchGen++` | the wait armed before the off alone: its tick asked once more with the switch on again |
+| R3 | the schedule does not ask whether the switch was on at arming | the publication window alone |
+| R4 | no reread as the install begins | the updater's two cases as it begins (refused only at its decision, after 3 requests); both CLI cases |
+| R5 | no reread at the decision | the updater's two decision cases (swapped: the binary 0.2.0, a backup, a marker); the CLI's, refused as they begin, green |
+| R6 | the CLI hands its install no reread (round 1's shape) | both CLI cases: the refusal not said, 2 requests |
+| R7 | the CLI's reread takes a load that failed for an off | the case of settings that no longer read: said as an off |
+| R9 | `commit` leaves the install among the admissions | both swap-past cases: still among 1 admission at the swap; the failed swap answered as the switch's stop |
+| R10 | the switch refuses a start's crash rollback | the crash rollback's case (served, exit 0); the earlier release's case with the key written (nothing recorded) |
+| R11 | the switch refuses a start's boot rollback | the boot rollback's case: no rollback said, the binary still the target's |
+| R12 | the switch refuses the console's Roll back | the console's case, 409 `update-checks-off`; and round 1's `TestServeTurnsUpdateChecksOffLiveAndShowsNoUpdate`, which posts the rollback with checks off too (unpredicted) |
+| R13 | the crash rollback asks its backup nothing of the settings | the earlier release put back with the key written, exit 75 |
+| R14 | the fixture's earlier release refuses settings whatever they write | both of its cases: the key gone stays refused, so the fixture tells the two apart |
+| R15 | the card's Check now looked up as `job-upd-check` | the structural test, naming the id |
+| R16 | a stopped check records its stop as its error | the updater's two stop cases; serve's panel with checks on again showed the cancellation |
+
+### The gates
+
+Through the shared build lock, on go1.27.3, with TMPDIR on this disk, at
+95e88b56 in one slot session (`.tmp/_b761u/gate_r2.py A`), all green:
+
+- `make test TEST_PKGS='-timeout 60m ./internal/updater/... ./internal/config/...
+  ./internal/admin/... ./internal/api/... ./cmd/bridge/...'`: the release
+  tags (`GO_TAGS`), `-race`, `-p 4`, and `-timeout 60m` after the Makefile's
+  30m (the later flag wins), so that cmd/bridge has room: 1424 s in all,
+  cmd/bridge 1385 s, internal/admin 1031 s, internal/api 148 s,
+  internal/updater 30 s and internal/config 15 s.
+- The round's tests by name with `-race -count=20`: internal/updater's
+  fourteen switch cases in 5 s, cmd/bridge's nine in 285 s, internal/admin's
+  two in 18 s.
+- `make vet` for linux/amd64, windows, darwin and linux/386, and `make
+  build-all`, its build-tag census included.
+
+The controls' runs were single packages without the race detector, outside
+the lock, as was go1.27.3's gofmt (`go run cmd/gofmt -l`) over the changed
+packages, clean. This record's commit changes `ops/engineering-log.md`
+alone.
+
+`TestEveryCitedTestNameExists` passes with this record. `rules-b761-r2.patch`,
+applied to a `git archive` copy of the final HEAD, passes `make docs-check`
+(config-lifecycle.md at 98.7%, 98,652 bytes) and `verify_moves.py --base
+HEAD` with its seven declared edits, but for the two blocks one `--edit`
+prefix cannot pair, the B761 line of `config-lifecycle.md` and its verbatim
+History twin, rewritten alike: each has its one successor in its file. The
+guard passes on that copy too.
+
+Not run here: the console's node-run tests, which skip without node; the iOS
+mirror of PROTOCOL.md, the orchestrator's.
+
+## 2026-11-09 — B761 PR 1 round 3: the console's off waits for an install past its decision; no off saved in the console disables the crash rollback
+
+Round 3 of #1446 on `feat/b761-update-switch`, worker b761u on legion0
+(go1.27.3, `GOTOOLCHAIN=local`, `GOPROXY=off`), from the PR's head d625d8b6,
+round 2 and its rules. The findings were Codex's P2 and the Claude review's
+Medium and two Lows on round 2, with the two reviews of this round's brief
+folded into it. Commits: the CLI writers and the settings with the key
+written 5f55002e; the off under the install marker's lock and the
+probation's refusal 5675fa41; the words 5b2a8cb7; a bound of its own for the
+decision's case over a real backup bdc38557; and this record. The rules
+go into `config-lifecycle.md` and its History file, `cli-serve.md`,
+`admin-console.md` and `build-ci-tests.md` through `rules-b761-r3.patch`.
+
+### The off under the install marker's lock
+
+Codex's P2: `bridge update`'s final reread of the switch (round 2's
+`RereadSwitch`, first in `decideUnderLock`) could read on, the console then
+save an off, and `u.commit(a)` swap anyway: the reread and the commit are two
+steps, and only the install held the marker lock between them.
+
+The console's save of an off now takes the install marker's lock first
+(`updater.LockForChecksOff`, asked through `admin.Deps.UpdateChecksOffSave`,
+serve's `updateChecksOffSave`), before the console's lock (`Server.mu`) and
+the holder's turn, and lets it go once the save is published and
+`ChecksSwitched` has run: it lands before an install's decision, which then
+reads it and refuses, or after the swap. Install already held the lock
+through `decideUnderLock`, `SaveState` and the swap (B692), so only the save
+is new, and `decideUnderLock` never asks for it again: flock and LockFileEx
+lock an open file, so a second take in the same process waits on the first.
+The order, written once in `checksoff.go`: the marker lock, then the config
+holder's lock (`RuntimeConfig`'s mutex and bridge.yaml's turn), then the
+switch's gate (`gateMu`). Nothing in-process is held while the marker lock
+is waited for; it is taken before `UpdateChecked`, never inside its
+callback; and serve's own install takes `gateMu` in `commit` while holding
+the marker lock, the same order.
+
+The PATCH asks only for an off of a switch that is on as the live config
+stands; one found off at that look and turned on by another save before the
+turn is refused in the turn, 409 `update-checks-changed`
+(`TestAnOffWhoseSwitchWasTurnedOnSinceItsLookIsRefused` parks the PATCH at
+the console's lock through `testSettingsWriteWaits`, the Player page's
+seam's twin). The lock is verified held (`StateLock.Held`): on a filesystem
+that keeps no locks the off is saved, since no install commits there; a
+holder past the wait, every try answering ENOLCK, and any other failure are
+409 `marker-locked`, nothing saved, the switch and the updater untouched.
+
+The bound is `LockState`'s wait, 30 s, which covers an install's hold with
+`scmStopWait` (15 s, held to half the wait by
+`TestAnSCMStopFitsInsideTheMarkersLockWait`). The console's requests take
+serve's context, so a stop of serve ends the save's wait, nothing saved: 503
+`stopping`, or no answer where the connection goes first, which the
+console's failed save of an off adds words to (`updateChecksOffLost`). What
+stays open here, for the bridge's Windows service, is backlog B831 (rounds 4
+and 5 corrected this paragraph, which said it of every Windows install).
+
+The cases: the updater's `TestAnOffSavedAfterAnInstallsRereadLandsAfterItsSwap`
+(the CLI parked after its reread, `InstallOptions.holdAfterReread`, a seam
+between the reread and `commit`: the save waits, and lands with 0.2.0 already
+in place), `TestAnInstallWaitingBehindAnOffSaveReadsItAndRefuses` (the save
+holds the lock: the install waits, reads off at its decision, nothing
+installed), `TestServesOwnInstallAndAnOffSaveTakeTheLocksInOneOrder` (serve's
+own install, its switch a real `RuntimeConfig` holder: parked at its decision
+the save waits holding nothing else, the console's stand-in lock free; the
+save parked inside the holder's turn, the install waits holding nothing while
+a status, the switch and a snapshot answer, and the notice stops it) and
+`TestTheOffSaveHoldsTheInstallMarkersLock` (every answer of the lock: held,
+held past the wait, ENOLCK, EIO, EOPNOTSUPP, ErrUnsupported, a stop in the
+wait, a context ended before an uncontended take); the console's
+`TestAnOffOfUpdateChecksIsDecidedUnderTheInstallMarkersLockFirst` and
+`TestAnOffTheInstallMarkersLockOrItsDecisionRefusesSavesNothing`; and the
+real serve's `TestTheConsolesOffWaitsForTheInstallMarkersLockAndLandsAfter`
+(another holder of the lock in serve's data dir: nothing saved or published
+while it holds, the key written once it lets go) and
+`TestTheConsolesOffWhereTheInstallMarkersLockIsNotKept` (EOPNOTSUPP saves;
+EIO and a holder past a 300 ms wait are 409 `marker-locked`, the file and the
+switch as they were).
+
+### The probation's refusal
+
+The Claude review's Medium: an off saved during the probation of an install
+whose backup predates the switch wrote `update.checkEnabled: false`, which
+that release's strict decoder refuses, so the crash rollback's settings check
+failed and the bridge went on into the version that kept crashing.
+
+Under the marker lock, `updater.ChecksOffRefused` asks what the boot asks
+before its crash rollback acts: the marker at the crash rollback's own checks
+at their limit (`CrashRollbackAtLimit`, whatever the count, a crash
+rollback's own record of an install included), never `probationHolds`, which
+gates only the auto-installer; then a regular file at the backup's place.
+Either ruling the rollback out, the off is saved. Otherwise it decides "the
+backup would refuse the key" the way the crash rollback does, by the backup's
+own settings check (`CheckConfig`) of the settings the save would write: a
+copy of the file with the key written false (`config.WithUpdateChecksOff`,
+through `yaml.Node`, so the copy differs from the file by the key alone),
+made beside the settings so that relative paths read as they do there, and
+removed after. A backup that takes the copy, or predates the check (which the
+crash rollback refuses whatever the settings), takes nothing from the
+rollback. One that refuses it is asked its version (`ProbeVersionWithin`) and
+the settings as they are: of the marker's `PreviousVersion` and taking them,
+the key is what it refuses, and the off is refused, 409
+`update-checks-off-refused`; of another version, or refusing the settings
+already, the crash rollback refuses it whatever the off, and the off is
+saved. The version is asked only to know the rollback would act. The three
+checks run within 10 s together (`ChecksOffWithin`; serve passes its probe
+bound, which tests lengthen), a third of the lock's wait; one that fails,
+times out, or whose copy cannot be made refuses, failing closed, 409
+`update-checks-off-unchecked`, its detail in the log alone. The refusal's
+words say when the off can be saved (once the install is confirmed) and the
+guidance below, and name no path.
+
+The cases: `TestAnOffIsRefusedWhileACrashRollbackWouldPutBackABackupThatRefusesTheKey`
+(counts 0, 1, at the limit, and the crash rollback's record; the copy beside
+the settings, holding the key and the rest, gone after; nothing written),
+`TestAnOffIsSavedWhereNoCrashRollbackWouldPutBackABackupThatRefusesTheKey`
+(ten rule-outs, the backup asked nothing; four verdicts, each asked exactly
+what it needs), `TestAnOffWhoseBackupDoesNotAnswerIsRefused`,
+`TestTheOffsDecisionKeepsItsBound` and `TestTheOffsDecisionAsksTheBackupItself`
+(a copy of the test binary as the backup, its stand-in's new `refuse-key`
+mode refusing the key on its line as such a release's loader does, through
+the real `CheckConfig` and `ProbeVersionWithin`); and the real serve's
+`TestTheConsolesOffIsRefusedWhileACrashRollbackWouldPutBackABackupThatRefusesTheKey`:
+on probation over a backup that is the run-as-bridge copy in its
+`predatesUpdateSwitch` mode, the store at the ladder's top so that no
+migration rules the rollback out, the off is 409 `update-checks-off-refused`
+with the file and the switch as they were and the backup beside the binary;
+once a short probation has confirmed the install, and over a backup that is
+this tree's bridge, the off is saved.
+
+### Every save that writes the key
+
+- The console's save (the holder's): an off writes `false`, now refused
+  during such a probation; an on writes no key (round 1's
+  `TestTurningUpdateChecksOnWritesNoKeyAndTellsTheUpdater`); a save that
+  leaves the switch writes the file's own (`filedSwitches`).
+- `bridge library add` and `remove` (`config.Edit`) and `bridge output dac
+  bind` saved what they loaded, this shell's `BRIDGE_*` variables over the
+  file, so `BRIDGE_UPDATE_CHECK_ENABLED=true` in the shell wrote
+  `checkEnabled: true` into a file that said nothing, which such a release
+  refuses as it refuses false, and `false` likewise; B617's two switches the
+  same. They save the file's own now (`Config.KeepFiledSwitches`, the
+  holder's `filedSwitches` over the turn's bytes).
+  `TestNoCLIWriterWritesTheOptOutsFromItsEnvironment` runs every writer
+  `configWriterCases` names with the three variables set true and false: no
+  key written.
+- `bridge init`'s rewrite keeps a `false` the file already holds (round 1),
+  and writes none from the environment (the same test's init cases); serve's
+  seed writes none; `bridge restore` writes the snapshot's bytes, the
+  operator's own file at the snapshot's time.
+
+No save writes a `true` the file did not hold.
+
+### 0.2.3 and the variable
+
+The guidance to keep the checks off without the key rests on a release from
+before the switch ignoring `BRIDGE_UPDATE_CHECK_ENABLED`. The run-as-bridge
+copy's `predatesUpdateSwitch` mode never loads the environment, so it cannot
+show it. 0.2.3 itself does: the tag v0.2.3 is 0ddb8c72 (the runbook's rollout
+table); `git archive 0ddb8c72` into a scratch directory, built with that
+tree's make tags (`ts_omit_webclient,ts_omit_debugeventbus`) and
+`-X …/internal/version.ServerVersion=0.2.3`, `bridge version` answering
+`1-bit-bridge 0.2.3 (protocol v1)`, then `serve --validate-config` over loopback
+settings (`.tmp/_b761u/prove023.py`, its record beside it):
+
+| Settings | Environment | Answer |
+|---|---|---|
+| no update key | `BRIDGE_UPDATE_CHECK_ENABLED=false` | exit 0, `config ok: 1-bit-bridge 0.2.3 loads these settings` |
+| no update key | `BRIDGE_UPDATE_CHECK_ENABLED=garbage` | exit 0, nothing said of the variable |
+| no update key | none | exit 0 |
+| `update.checkEnabled: false` | none | exit 78, `config refused: line 10: that key is not a field of type config.UpdateConfig` |
+| no update key | `BRIDGE_SCAN_INTERVAL_SEC=garbage` (the control: a variable 0.2.3 binds) | exit 0, Warn `ignoring unparseable integer env var` naming it |
+| no update key | `BRIDGE_ENRICH_ENABLED=garbage` | exit 0, nothing said: 0.2.3 predates B617's switch too |
+
+Its loader looks up only the names it derives from its own `Config` fields
+and two legacy aliases (`envBindings`, `applyEnvOverrides` at 0ddb8c72), so
+a variable for a field it lacks is never read. A crash rollback to it with
+the key out of the file and the variable set off therefore puts it back
+(`TestACrashRollbackWithTheVariableOffPutsAReleaseBeforeTheSwitchBack`: three
+starts that crashed, then exit 75 and the backup's version), and it checks
+for updates again once it runs, which every surface says.
+`TestACrashRollbackToAReleaseBeforeTheSwitchNeedsItOn` is as round 2 left it.
+
+### The words
+
+The Claude review's Lows. `bridge update`'s refusal and the Jobs card's tray
+said a start's rollback works while checks are off with no caveat: both, and
+the Settings page, now say that a release from before the switch does not
+start with the key an off writes, and how to keep the checks off without it
+(the key out of `bridge.yaml`, `BRIDGE_UPDATE_CHECK_ENABLED=false` in the
+service's environment, a restart; that release ignoring the variable). The
+CLI says it where the file's key turned the checks off, the variable's case
+having no key to cost. PROTOCOL.md and the README said, unqualified, that the
+console's off refuses a waiting `bridge update`: unless the variable in the
+command's environment says on, which overrides the file. They,
+`docs/docker.md`, `UpdateConfig`'s doc and the settings matrix's row also
+say what this round built: the off under the install marker's lock, its 409s,
+and the probation's refusal (round 4 corrected what they said of a swap that
+stops the bridge's Windows service, which they said of every Windows install:
+backlog B831).
+`TestBridgeUpdateRefusesItsCheckAndItsInstallWhileUpdateChecksAreOff` now
+requires the caveat where the file's key turned the checks off and its
+absence where the variable did; `TestEveryRollbackClaimOfTheSwitchSaysWhatTheKeyCosts`
+holds the tray's hint and the Settings page to it.
+
+### Reds and negative controls
+
+Twenty-two, predicted by name in `.tmp/_b761u/controls_r3.py` before the first
+ran (two predictions corrected before any run, each a test the mutation also
+reaches: the decision's verdict cases require what the backup was asked, and
+the copy's placement reaches the read-only settings directory), at 5b2a8cb7,
+bdc38557 changing only a test's bound none of them turns on,
+run as round 2's were (each edit's text found exactly once, the named tests
+of each named package, the bytes put back in a `finally`; `git status` clean
+after): all twenty-two as predicted. The RED rows take one of the round's
+fixes out, the red each finding's tests show without it; the CTL rows
+mutate something else a test leans on.
+
+| Control | Mutation | Red, and what it showed |
+|---|---|---|
+| RED-1a | `LockForChecksOff` takes no lock | the updater's four lock cases (the save landed with the binary still 0.1.0 between the reread and the swap; the install did not wait and installed; both arrivals of serve's own install; every answer of the lock) and serve's three (200 while another held the lock, 200 for a lock that fails and one held past the wait, 200 during the probation, its decision skipped for a hold not held) |
+| RED-1b | the console's PATCH asks nothing and keeps no in-turn guard (round 2's handler) | the console's three handler cases (asked 0 times; every refusal answered 200) and serve's three |
+| RED-1c | serve wires no ask (`UpdateChecksOffSave` nil) | serve's three: the wiring is load-bearing |
+| RED-1d | the in-turn guard alone | the case of a switch turned on after the look |
+| CTL-1e | a filesystem that keeps no locks refuses the off | serve's no-locks case |
+| CTL-1f | a stopped wait answers 500 `save-config` | the console's `stopping` case |
+| RED-2a | the decision taken out (`ChecksOffRefused` answers nil) | all five decision tests (nil for a refusal, nothing asked, nil for an unchecked backup and for a stop) and serve's probation case, 200 |
+| RED-2b | serve's ask decides nothing | serve's probation case |
+| CTL-2c | failing open on a backup that does not answer | the unchecked cases and the bound's two |
+| CTL-2d | the copy made in the temporary directory | the refusal's copy check, the real backup's three, and the read-only settings directory, which no longer stops the copy |
+| CTL-2e | no regular file asked at the backup's place | the no-backup and directory rule-outs |
+| CTL-2f | the boot's predicate skipped | the marker rule-outs, and serve's confirmed install refused 409 |
+| CTL-2g | a refusal of the settings as they are taken for unchecked | the verdict of a backup that refuses them already |
+| CTL-2h | the backup's version not compared | the other-version verdict, and the real backup of 0.2.2 refused |
+| CTL-2i | the stand-in refuses settings whatever they write | the real backup's case: nil where a refusal was due, so the stand-in tells the two apart |
+| CTL-2j | the crash rollback test writes the key | it served (exit 0) with the backup refused: the test turns on the key's absence |
+| RED-3a | `config.Edit` saves what it loaded | config's case (true and false written from the environment, true over the file's false) and library add and remove for both values |
+| RED-3b | the DAC bind saves what it loaded | bind for both values |
+| RED-4a | the CLI's refusal without the caveat | its file-off cases |
+| RED-4b | the tray's hint as round 2 left it | the rollback-claim test |
+| RED-4c | the Settings page's hint as round 2 left it | the rollback-claim test |
+| CTL-4d | the Settings form's failure without `updateChecksOffLost` | its structural test |
+
+`TestAnOffThatGotNoAnswerIsSaidMayBeLostOnlyThen` runs `updateChecksOffLost`
+under node and skips here, where no JavaScript engine is installed: it runs
+on CI's legs that have node.
+
+### The gates
+
+Through the shared build lock, on go1.27.3, with TMPDIR on this disk, in two
+slot sessions (`.tmp/_b761u/gate_r3.py`), all green:
+
+- Session A at bdc38557: `make test TEST_PKGS='-timeout 60m ./internal/updater/...
+  ./internal/config/... ./internal/admin/... ./internal/api/... ./cmd/bridge/...'`,
+  the release tags (`GO_TAGS`), `-race`, `-p 4`, and `-timeout 60m` after the
+  Makefile's 30m (the later flag wins), so that cmd/bridge has room: 1484 s in
+  all, cmd/bridge 1440 s, internal/admin 1054 s, internal/api 149 s,
+  internal/updater 36 s and internal/config 15 s.
+- Session B at bdc38557: the round's tests by name with `-race -count=20`
+  and the release tags, each passing twenty times: internal/updater's nine in
+  121 s, cmd/bridge's six in 408 s, internal/admin's six in 120 s (the
+  node-run case skipping, below) and internal/config's two in 3 s; `make vet`
+  for linux/amd64, windows, darwin and linux/386; and `make build-all`, its
+  build-tag census included.
+
+The reds and controls were single packages without the race detector,
+outside the lock, as were go1.27.3's gofmt (`go run cmd/gofmt -l`) over the
+changed packages, clean, and the 0.2.3 build. This record's commit changes
+`ops/engineering-log.md` alone.
+
+`TestEveryCitedTestNameExists` passes with this record. `rules-b761-r3.patch`,
+applied to a `git archive` copy of the final HEAD, passes `make docs-check`
+(config-lifecycle.md at 99.7%, 99,709 bytes: the next rule there moves an
+entry out first, `move_entry.py --largest`) and `verify_moves.py --base HEAD`
+with its four declared edits, but for the two blocks one `--edit` prefix
+cannot pair, the B761 line of `config-lifecycle.md` and its verbatim History
+twin, rewritten alike: each has its one successor in its file. The guard
+passes on that copy too.
+
+Not run here: the console's node-run tests, which skip without node; the iOS
+mirror of PROTOCOL.md, the orchestrator's.
+
+## 2026-11-09 — B761 PR 1 round 4: the caveat follows the file's key; an install marker that cannot be read refuses the off; B831 named where it applies
+
+Round 4 of #1446 on `feat/b761-update-switch`, worker b761u on legion0
+(go1.27.3, `GOTOOLCHAIN=local`, `GOPROXY=off`), from the PR's head bb96a259,
+round 3 and its rules. The findings were Codex's two P2s and the Claude
+review's three on round 3, with the two reviews of this round's brief folded
+into it. Commits: the caveat b2e16f00; the marker 7d633ba2; the words
+cfeb10b6; the caveat's arm no run reaches, held by a test of its own,
+5603d5bf; the marker refusal's words held free of the read's error d16557df;
+and this record. The rules go into `config-lifecycle.md` and its History
+file, `cli-serve.md` and `admin-console.md` through `rules-b761-r4.patch`.
+
+### The caveat follows the file's key
+
+Codex's first P2 and the Claude review's first finding: `bridge update`'s
+refusal said what the key costs a rollback only where
+`BRIDGE_UPDATE_CHECK_ENABLED` was unset, round 3 reasoning that the
+variable's case has no key to cost. The file can write the key beside the
+variable, and a release from before the switch refuses the key at its load,
+before it reads any variable. The refusal now asks the file's own YAML
+(`config.WritesUpdateCheckKey`, over the bytes the command loaded its
+settings from): the key counts at any value, `null` and no value included,
+which decode like no key into the switch's pointer but break an older strict
+decoder all the same; a comment does not count; aliases and merge keys are
+resolved as yaml.v3 resolves them; and bytes it cannot read count, since the
+key cannot then be ruled out. A missing file never reaches the refusal:
+`loadCLIConfigFile` refuses it first, and a load refuses bytes the reading
+cannot read, so that arm is held by a test of the refusal itself.
+`TestBridgeUpdateRefusesItsCheckAndItsInstallWhileUpdateChecksAreOff` gains
+the variable off over the key written true, false, null and with no value
+(the caveat) and over no key and a key only a comment names (none);
+`TestTheCaveatIsSaidWhereTheFilesKeyCannotBeRuledOut` and
+`TestWritesUpdateCheckKeyReadsTheDocumentsOwnKeys` (thirteen documents, five
+errors) hold the rest.
+
+### An install marker that cannot be read refuses the off
+
+The Claude review's second finding: `ChecksOffRefused` took any `LoadState`
+error for no install, so an off was saved over a marker it could not read.
+`LoadState` (state.go) answers a marker that is not there as a zero State and
+no error (`errors.Is(err, os.ErrNotExist)` on its `os.ReadFile`), and one
+that does not parse the same, with a Warn; any other read error it wraps and
+returns. The boot does the same with both: `recoverCrashedInstall` returns at
+its first read on an error ("the admission removes a marker it cannot read")
+and finds no install armed in the two `LoadState` reads as none, and
+`AdmitBoot` records nothing over them. So the absent and the malformed marker
+still save the off, and every other read failure (a permission, EIO, EMFILE,
+a directory in the marker's place) refuses it, failing closed. The boot
+discards a marker it cannot read too, but serve cannot tell whether the start
+that reads it next fails as well: an error that does not last passes, and a
+start run as another user, root among them, reads what this one may not, and
+its crash rollback may then act on an install the off kept from its backup.
+
+The refusal is the marker's own, `ChecksOffMarkerError`, matching
+`ErrChecksOffUnchecked` (409 `update-checks-off-unchecked`): the backup's
+refusal is built from the marker's versions and claims a probation, and over
+a marker that was not read it would say "update checks were not turned off:
+ is on probation since its install, and its backup, , did not answer…"
+(CTL-2b below). Its words say the install marker could not be read and
+nothing was saved, and give the variable's route alone, naming no version,
+backup or path, and not the read's error, which is its `Detail`, without its
+path (`fsutil.ErrorWithoutPath`, B613's round 5 rule for the marker's
+errors), for serve's Warn line of its own; `Unwrap` keeps the error for code.
+The updater's `TestAnOffOverAnInstallMarkerThatCannotBeReadIsRefused` (mode
+000, skipped on Windows and as root, and a directory where the marker goes,
+which runs everywhere), with
+`TestAnOffIsSavedWhereNoCrashRollbackWouldPutBackABackupThatRefusesTheKey`'s
+"no install marker" and "a marker that does not parse" cases still saving,
+the real serve's
+`TestTheConsolesOffOverAnInstallMarkerThatCannotBeReadIsRefused` (the PATCH's
+answer: 409, its words, no empty version and no path, the file and the live
+switch as they were) and `TestTheOffsAskSaysWhatRefusedItInTheLog` pin it.
+
+### B831, where it applies, by its id
+
+Codex's second P2 and the Claude review's third finding: every text spoke of
+B831's case as every Windows install's. The swap stops the bridge only where
+it stops its Windows service through the SCM (`stopServiceIfRunning`: not
+where the process swapping is the service, nor without the rights to reach
+the SCM, with no service registered or with it stopped already); a
+Startup-folder install, or a swap run without those rights, stops nothing,
+and the off lands after the swap. README, PROTOCOL.md, the Settings page's
+hint, `updateChecksOffLost`'s comment and the docs of
+`writeUpdateChecksOffRefusal` and `LockForChecksOff` now say the off is saved
+after the swap. What stays open there, for the bridge's Windows service, is
+backlog B831, which each names (round 5 gave it a sentence of its own in
+each, and recast this paragraph). Round 3's record of the bound and of its
+words is corrected the same way. A stopped wait does not show what
+stopped it (serve's stop, which the console's requests take through the
+admin server's `BaseContext`, or the client's), so the 503's words, and the
+console's for a save that got no answer, now claim no cause: the off was
+not, or may not have been, saved, and the switch is to be checked once the
+bridge answers. PROTOCOL.md and the settings matrix name the marker's
+refusal beside the backup's.
+`TestAnOffTheInstallMarkersLockOrItsDecisionRefusesSavesNothing`'s stopped
+wait (cancelled, and now past a deadline) asks for those words and none of
+`Windows`, `SCM`, `swap` and `B831`;
+`TestTheConsolesSavesSayAnOffThatGotNoAnswerMayBeLost` the same of
+`updateChecksOffLost`; `TestASwapThatStopsTheWindowsServiceIsNamedOnlyAsB831`
+holds the six texts to the case and its id, none saying it of Windows as a
+whole.
+
+### Checked, not changed
+
+- The off-save's settings path: serve hands `updateChecksOffSave`
+  `*configPath`, which runServe sets to the resolved, absolute name
+  (`resolveConfigPath`, `fsutil.AbsAsWritten`) and then to the file its boot
+  read was of (`loadServeConfigFile`'s answer), never the empty `--config`
+  default.
+- The console's two saves declare `body` and `value` before their `try`, so
+  the catch's `updateChecksOffLost` reads what was sent.
+- `Updater.Install` and `Rollback` hold no `Server.mu`.
+
+### Reds and negative controls
+
+Twenty runs, predicted by name in `.tmp/_b761u/controls_r4.py` before the
+first ran (a baseline with no mutation, then nineteen), at d16557df, run as
+round 3's were (each literal edit's text found exactly once; item 3's
+restorations taken hunk by hunk with git from round 3's texts at 7d633ba2,
+never typed again; the named tests of each named package, the bytes put back
+in a `finally`; `git status` clean after): nineteen as predicted, and CTL-2e
+red where predicted and in one subtest more, below. The RED rows take one of
+the round's fixes out; the CTL rows mutate something else a test leans on.
+
+| Control | Mutation | Red, and what it showed |
+|---|---|---|
+| BASE | none | every run green |
+| RED-1a | round 3's condition, the caveat only where the variable is unset | the CLI's eight variable-over-the-key subtests (true, false, null, no value; `--check` and `--yes`) and both unreadable-bytes cases |
+| CTL-1b | a key written null or with no value counted as none, the decoded pointer's view | config's null and no-value documents; the CLI's four null and no-value subtests |
+| CTL-1c | bytes that cannot be read taken as no key | both unreadable-bytes cases |
+| CTL-1d | the key's presence by a text match | config's comment and other-block documents and all five errors; the CLI's comment subtests; both unreadable-bytes cases |
+| RED-2a | round 3's rule, a marker that cannot be read is no refusal | the updater's two cases (nil); serve's PATCH (200) and its ask (nil, a release) |
+| CTL-2b | the marker's refusal in the backup's words | the updater's two (no `*ChecksOffMarkerError`); serve's PATCH (" is on probation", "its backup, ,"), and its ask's log (no marker line) |
+| CTL-2c | the detail keeps the read error's path | the updater's two (the path in `Detail`); the ask's log line naming the data dir |
+| CTL-2d | serve's ask logs nothing of the marker | the ask's log case |
+| CTL-2e | a marker that is not there, or does not parse, refuses too (any `Status ""`) | the updater's absent and malformed cases; serve's off once the lock was let go, its live off and its off with an invalid cadence, each 409; and, unpredicted, the updater's case of the crash rollback's own record with its rename not landed, which carries `Status ""` (B613): the mutation's predicate reached past the two reads it stands for, and refused that record in the marker's words where the probation's refusal is due |
+| CTL-2f | the marker refusal's words carry its detail | the updater's two (the words free of the read's error, d16557df) |
+| RED-3a | the 503's words as round 3 left them | the console's cancelled and deadline cases; the B831 test (the words claim `Windows` and `swap`) |
+| RED-3b | `updateChecksOffLost`'s words as round 3 left them | its structural test |
+| RED-3c | README's sentence as round 3 left it | the B831 test |
+| RED-3d | PROTOCOL.md's paragraph as round 3 left it | the B831 test |
+| RED-3e | the Settings page's hint as round 3 left it | the B831 test, the rollback-claim test green beside it |
+| RED-3f | `LockForChecksOff`'s doc as round 3 left it | the B831 test |
+| RED-3g | `writeUpdateChecksOffRefusal`'s doc as round 3 left it | the B831 test |
+| RED-3h | `updateChecksOffLost`'s comment as round 3 left it | the B831 test |
+| CTL-3i | a wait past a deadline answers 500 | the console's deadline case |
+
+Before each fix, its new and changed tests ran against the code as it stood
+and went red as the RED rows show (round 3's caveat: the eight
+variable-over-the-key subtests; the marker: nil from the decision, 200 from
+the PATCH; the words: the old 503's, `updateChecksOffLost`'s and the six
+texts). `TestAnOffThatGotNoAnswerIsSaidMayBeLostOnlyThen` runs
+`updateChecksOffLost` under node and skips here, where no JavaScript engine
+is installed: it runs on CI's legs that have node.
+
+### The gates
+
+Through the shared build lock, on go1.27.3, with TMPDIR on this disk, in one
+slot session at d16557df (`.tmp/_b761u/gate_r4.py`), all green:
+
+- `make test TEST_PKGS='-timeout 60m ./internal/updater/... ./internal/config/...
+  ./internal/admin/... ./internal/api/... ./cmd/bridge/...'`, the release tags
+  (`GO_TAGS`), `-race`, `-p 4`, and `-timeout 60m` after the Makefile's 30m
+  (the later flag wins), so that cmd/bridge has room: 1430 s in all,
+  cmd/bridge 1407 s, internal/admin 1031 s, internal/api 145 s,
+  internal/updater 36 s and internal/config 15 s.
+- The round's tests by name with `-race -count=20` and the release tags,
+  each passing twenty times: internal/updater's six in 106 s, cmd/bridge's
+  four in 45 s, internal/admin's three in 107 s (the node-run case skipping
+  each time) and internal/config's one in 3 s; `make vet` for linux/amd64,
+  windows, darwin and linux/386; `make build-all`, its build-tag census
+  included; and go1.27.3's gofmt (`go run cmd/gofmt -l`) over `cmd`,
+  `internal` and `scripts`, listing nothing.
+
+The reds and controls were single packages without the race detector,
+outside the lock. This record's commit changes `ops/engineering-log.md`
+alone: the record, and round 3's paragraph on its words (cfeb10b6 corrected
+its paragraph on the bound).
+
+`TestEveryCitedTestNameExists` passes with this record. `rules-b761-r4.patch`,
+applied to a `git archive` copy of the final HEAD, passes `make docs-check`
+(config-lifecycle.md at 99,848 bytes, 99.8%: the next rule there moves an
+entry out first, `move_entry.py --largest`) and `verify_moves.py --base HEAD`
+with its four declared edits, but for the two blocks one `--edit` prefix
+cannot pair, the B761 line of `config-lifecycle.md` and its verbatim History
+twin, rewritten alike: each has its one successor in its file, the line its
+twin and the pointer. The guard passes on that copy too.
+
+Not run here: the console's node-run tests, which skip without node; the
+mode-000 marker cases on Windows, where they skip and the directory cases
+run (CI's windows leg); the iOS mirror of PROTOCOL.md, the orchestrator's.
+
+## 2026-11-10 — B761 PR 1 round 5: an unreadable marker with no backup lets the off through; B831 stands apart from the stop
+
+Round 5 of #1446 on `feat/b761-update-switch`, worker b761u on legion0
+(go1.27.3, `GOTOOLCHAIN=local`, `GOPROXY=off`), from the PR's head aa28f704,
+round 4 and its rules. The findings were the Claude review's Low and Codex's
+P2 on round 4, with the two reviews of this round's brief folded into it.
+Commits: the marker beside the backup 9e1601f5; B831 apart from the stop
+5b9f59cd; and this record. The rules go into `config-lifecycle.md` and its
+History file, `cli-serve.md` and `admin-console.md` through
+`rules-b761-r5.patch`.
+
+### No backup, no refusal; an unknown backup still refuses
+
+The Claude review's Low: `ChecksOffRefused` refused an off over an install
+marker it could not read before it asked whether a backup stands beside the
+binary, so with no `bridge.bak` (a root-run `bridge update --yes` that
+failed before its swap, its root-owned 0600 marker unreadable to serve) the
+off was refused though no crash rollback could put anything back. Codex's
+review of the brief: `backupBeside` answers false for a lookup that fails
+(a permission, EIO) as for nothing there, so asking it first would let an
+off through beside a backup this user cannot see.
+
+`backupAt` is `backupBeside`'s lookup, three ways: a regular file at the
+binary's path and `.bak` is a backup; nothing there (`fs.ErrNotExist`), an
+entry that is no regular file, or a binary path that is not absolute is
+none, with no error; any other `Lstat` failure is none with its error, where
+whether a backup stands cannot be told. `backupBeside` reads through it and
+answers as before, so `ProbationHolds` and the decision's later check over
+a marker it read are unchanged. Over a marker it cannot read, the decision
+saves the off where no backup stands, and refuses it in the marker's words
+beside a backup or a failed lookup, the lookup's failure in the refusal's
+`Detail` without a path and among its causes (`errors.Join`). A backup
+appears only through a later install, which waits for the decision's hold
+of the install marker's lock, writes a fresh marker of its own and backs up
+the bridge installed then, a release with the switch that takes the key, so
+the no-backup case keeps nothing from a rollback. The docs of
+`ChecksOffRefused` and `ChecksOffMarkerError`, PROTOCOL.md's
+`update-checks-off-unchecked` sentence (the answer only narrows: no
+protocol version change) and the settings matrix say so.
+
+The tests read a marker no user can read as one, root included: a
+directory in its place. `TestTheBackupsLookupTellsWhatIsNotThereFromWhatCannotBeLookedUp`
+walks the backup's six places (none, a directory, a binary path that is not
+absolute, a backup, a backup in a directory this user may not search,
+skipped on Windows and as root, and a link loop on the way, skipped on
+Windows) through `backupAt` and `backupBeside`;
+`TestAnUnreadableMarkerRefusesTheOffOnlyWhereABackupMayStand` takes the
+decision over each; and the real serve's
+`TestTheConsolesOffOverAMarkerItCannotReadIsSavedWhereNoBackupStands` saves
+the off with no backup (the file writes the key false and the live switch
+is off) and refuses it beside one. Of the round's marker tests, the
+updater's `TestAnOffOverAnInstallMarkerThatCannotBeReadIsRefused` expects
+the marker's refusal and already ran beside a backup (`newOffCase`'s);
+cmd/bridge's `TestTheConsolesOffOverAnInstallMarkerThatCannotBeReadIsRefused`
+and `TestTheOffsAskSaysWhatRefusedItInTheLog` take the marker path (a 0600
+marker made unreadable, `ChecksOffMarkerError`) and expect its refusal and
+its log line, so each now runs beside a backup (`runningAs`, a `.bak`).
+
+### B831 apart from the stop
+
+Codex's P2: `LockForChecksOff`'s doc named backlog B831 in a clause of the
+sentence that gave the stop's generic contract. That contract, a stop of
+serve ending the wait as it ends every request of the console's and a save
+it ends saving nothing, has a sentence of its own now. B831 is named apart,
+only where it applies: "What stays open here, for the bridge's Windows
+service, is backlog B831." README, PROTOCOL.md, the
+Settings page's hint, `updateChecksOffLost`'s comment,
+`writeUpdateChecksOffRefusal`'s doc and the settings matrix's row take the
+same sentence, and this log's records of rounds 3 and 4 are recast to
+match. `TestASwapThatStopsTheWindowsServiceIsNamedOnlyAsB831` keeps its
+round-4 checks, reads the settings matrix's row too, and fails a sentence
+that names B831 and says what a stop does to a save (a save's fate, its
+wait ending, the 503: a semicolon or a colon joins clauses of one
+sentence).
+
+### Reds and negative controls
+
+Fifteen runs, predicted by name in `.tmp/_b761u/controls_r5.py` before the
+first ran (a baseline with no mutation, then fourteen), at 5b9f59cd, run as
+round 4's were (each literal edit's text found exactly once; item 2's
+restorations taken hunk by hunk with git from round 4's texts at aa28f704;
+the named tests of each named package, the bytes put back in a `finally`;
+`git status` clean after): all fifteen as predicted.
+
+| Control | Mutation | Red, and what it showed |
+|---|---|---|
+| BASE | none | every run green |
+| RED-1a | round 4's branch: any unreadable marker refuses | the decision's three no-backup places (refused) and both failed lookups (no lookup in the detail); serve's no-backup case (409) |
+| RED-1b | the review's first sketch: `backupBeside` before the marker | the decision's two failed lookups, saved |
+| CTL-1c | failing open: an unreadable marker always saves | the decision beside a backup and over failed lookups; the updater's marker test; serve's backup case, its 0600 case and the ask's log case |
+| CTL-1d | `backupAt` takes every failed lookup for nothing there | the lookup's two failure rows; the decision's two, saved |
+| CTL-1e | `backupBeside` takes a failed lookup for a backup | the lookup test's `backupBeside` rows; the six probation-hold tests green beside it |
+| CTL-1f | the detail says nothing of the failed lookup | the decision's two failed lookups |
+| CTL-1g | the causes keep the marker's error alone | the decision's two failed lookups |
+| RED-2a | `LockForChecksOff`'s doc as round 4 left it | the B831 test |
+| RED-2b | README's sentence as round 4 left it | the B831 test |
+| RED-2c | the Settings page's hint as round 4 left it | the B831 test |
+| RED-2d | `updateChecksOffLost`'s comment as round 4 left it | the B831 test |
+| RED-2e | `writeUpdateChecksOffRefusal`'s doc as round 4 left it | the B831 test |
+| RED-2f | the settings matrix's row as round 4 left it | the B831 test |
+| CTL-2g | PROTOCOL.md's paragraph as round 4 left it | none, as predicted: its B831 sentence said nothing of what a stop does to a save; its recast is for one sentence in every text |
+
+Before each fix, its new and changed tests ran against the code as it stood
+and went red as the RED rows show (the decision's three no-backup places
+refused and its two failed lookups unsaid in the detail, the lookup's two
+failure rows answered as nothing there through a names-only `backupAt`;
+serve's no-backup case 409; the B831 test over six of the seven texts).
+
+### The gates
+
+Through the shared build lock, on go1.27.3, with TMPDIR on this disk, in one
+slot session at 5b9f59cd (`.tmp/_b761u/gate_r5.py`), all green:
+
+- `make test TEST_PKGS='-timeout 60m ./internal/updater/... ./internal/admin/...
+  ./internal/api/... ./cmd/bridge/...'`, the release tags (`GO_TAGS`),
+  `-race`, `-p 4`, and `-timeout 60m` after the Makefile's 30m (the later flag
+  wins), so that cmd/bridge has room: 1418 s in all, cmd/bridge 1407 s,
+  internal/admin 1031 s, internal/api 145 s and internal/updater 36 s.
+- The round's tests by name with `-race -count=20` and the release tags,
+  each passing twenty times: internal/updater's five in 10 s, cmd/bridge's
+  three in 85 s and internal/admin's one in 8 s; `make vet` for linux/amd64,
+  windows, darwin and linux/386; `make build-all`, its build-tag census
+  included; and go1.27.3's gofmt (`go run cmd/gofmt -l`) over `cmd`,
+  `internal` and `scripts`, listing nothing.
+
+The reds and controls were single packages without the race detector,
+outside the lock. This record's commit changes `ops/engineering-log.md`
+alone.
+
+`TestEveryCitedTestNameExists` passes with this record. `rules-b761-r5.patch`,
+applied to a `git archive` copy of the final HEAD, passes `make docs-check`
+(config-lifecycle.md at 99,932 bytes, 99.9%: the next rule there moves an
+entry out first, `move_entry.py --largest`) and `verify_moves.py --base HEAD`
+with its four declared edits, but for the two blocks one `--edit` prefix
+cannot pair, the B761 line of `config-lifecycle.md` and its verbatim History
+twin, rewritten alike: each has its one successor in its file, the line its
+twin and the pointer. The guard passes on that copy too.
+
+Not run here: the console's node-run tests, which skip without node; the
+cases skipped on Windows and as root (a directory this user may not search,
+a link loop, a 0600 marker made unreadable), whose directory-in-place
+siblings run everywhere; the iOS mirror of PROTOCOL.md, the orchestrator's.
+
+CI on 81e0996d failed `TestATrayCallsOnSavedOnlyAfterASaveTheServerAppliedLive` on every runner that has node (macOS,
+Windows, the Linux admin shard): the tray's failed save now adds `updateChecksOffLost`'s words (round 4), and the test's
+harness runs only the app.js functions it names, so the extracted save threw "updateChecksOffLost is not defined". The
+console was right (the function is a global of app.js); the harness's list was short. `updateChecksOffLost` joins
+`trayHarnessFunctions`: red under node before, in CI's words, green three of three after. The worker's host has no
+JavaScript engine, where the test skips, which is how the round's gates passed.
+
+## 2026-11-09 — B827: an OpenHome test reads the published state only once the engine has published it
+
+Backlog B827 on `fix/b827-published-state`, from 71f707ab, by worker b827
+on a Linux box (Ubuntu 26.04, linux/amd64, go1.27.3, `GOTOOLCHAIN=local`,
+`GOPROXY=off`), from CI run 42590010542 (the Linux race job; the player
+packages main's) and the two rounds of review of its brief. Commits: the
+two tests the class made red, 9b6ab412; a third read of the class, blind
+rather than red, ac59234e; and this record. The rule goes into
+`.claude/rules/openhome.md` and its History through `rules-b827.patch`: no
+engine-package test was converted.
+
+### What CI showed
+
+The buffering case of `TestWhileCastingSeekIdStartsPlaybackFromEveryState`
+failed in 0.00 s at its first read, `onebit_test.go:263`, "TransportState
+Stopped while the start is held". The case holds every Start
+(`fakeBackend.holdStarts`), sends Play on a goroutine of its own, waits until
+the fake backend has begun the Start (`callsBegun`), and read TransportState
+at once. The whole test took 2.06 s; the "release was not confirmed by its
+deadline (2s)" warnings beside it name session 1 of the unconfirmed-release
+case, which holds its release past that deadline by design, and come in a
+run of main here too (the same two lines, that case's alone). No deadline
+expired in the failing case: the brief's first draft blamed the Start's 5 s
+deadline, which the 0.00 s rules out.
+
+### The cause
+
+The engine's owner runs one step at a time (`loop`): it admits a command or
+handles a message, then `advance` runs the parked commands it can
+(`drainParked`), settles the seek and the waiters, publishes the step's
+snapshot (`publishIfDirty`, `publish`) and sends the step's replies
+(`sendReplies`). A Start is spawned inside the step (`startSession`,
+`call`, `spawn`), on a goroutine of its own, from any of three places:
+`admit` then `dispatch` (a Play from Stopped), `handle` (a release's
+acknowledgement starting the pending session, `afterRelease`) and
+`drainParked` (a parked Play, at the top of `advance`). So the fake backend
+can count the Start begun, and `callsBegun` return, while the published
+snapshot still says Stopped; `-race` on a loaded runner widens the window.
+A begun backend call is not the published state.
+
+### Step 1: what Play waits for, and where TransportState is read
+
+Play is a transport write (`writes.go`'s `transport`): `Engine.Play` under
+the write's budget (`Limits.writeBudget`, 9 s by default), waiting in `do`
+for the engine's reply. `answer` only queues a reply, `sendReplies` sends it
+after the step's publish, and a Play from Stopped is a waiter answered once
+the transport settles (`settleWaiters`: no start and no release under way),
+so its reply follows the publish of the step that took its Start's answer.
+Past its budget, a command the engine admitted answers success on the
+admission alone (`transportFault`: `ReasonCancelled` without
+`ErrNotAdmitted`), which the owner marks (the compare-and-swap in `admit`,
+`noteAdmission`) before `dispatch` and the step's publish, so that success
+can precede the publish: the documented contract ("it may yet run, which the
+reads show", openhome.md's write actions), not a gap (Codex's review of the
+brief's second draft). TransportState is answered from the engine's current
+snapshot, synchronously
+(`act`, `handler.snapshot`, `Engine.Snapshot`, an atomic load;
+`transportState` over State, Starting and Pending); nothing caches it and no
+subscriber fills anything. So a control point never reads, after Play's own
+reply, a state from before its step: the stale read was the test's, and the
+fix is the tests'.
+
+### The reproduction
+
+A disposable copy of the tree (never committed) with a hold: `call` arms it
+as a Start is spawned, before the call's goroutine is, so a begun Start
+always finds it standing, and `advance` waits at it immediately before the
+step's first `publishIfDirty`, whichever of the three paths spawned the
+Start. It is released by the test's signal through the fixtures' hooks (a
+read through the handler, recorded with its values as made while the hold
+stood; a wait on the snapshot that found its condition false; an answer the
+test waits for), by a command the test's own goroutine waits on that cannot
+end before the bound, by cleanup, or by a bound of 1.5 s, under the
+release's 2 s and the Start's 5 s (and no release is pending during a step
+that spawns a Start: the owner starts a session only once every release is
+acknowledged); a release by the bound is no reproduction in that step. The
+case's setup makes no backend call, so the hold never fires there.
+
+- The buffering case at main's tests, `-race -count=20 -v`: 20 of 20 red at
+  `onebit_test.go:263` in CI's words, each hold released by that read of
+  Stopped, 0.3 to 1.1 ms after its arming, none by the bound. The same copy
+  without the hold: 20 of 20 green. The whole test under the hold: the
+  buffering case alone red, and the warnings main's.
+- `TestATransportWriteAdmittedPastItsBudgetIsSuccess` (its Play's budget 1 s,
+  through `Limits{Write: 2 s}`) at main's tests: 20 of 20 red at
+  `writes_test.go:1045`, "TransportState Stopped while the start is held, want
+  Buffering", each read at the budget's end, 1.0 s after the hold's arming,
+  while it stood.
+
+### The fix
+
+`startUnderWay`, in the OpenHome fixture, waits until the engine has
+published a start under way, State Playing and Starting, which
+`transportState` answers Buffering: `waitSnap`, bounded by `testWait` and on
+`Engine.Changed`, which `publish` closes at every publish (`publish` is
+`snap.Store`'s one caller, through `publishIfDirty`, which publishes
+whenever the step is dirty, a `touched` change's as well as a `visible`
+one's). The buffering case waits for it after `callsBegun`, the budget test
+after its Play's success, and each then reads TransportState as before.
+Under the hold, `-race -count=20`: 20 of 20 green each, every hold released
+by the wait after it met the snapshot from before the step, and the
+buffering case's second Start (the SeekId's) by the test's wait for Play's
+answer; none by the bound.
+
+### The census
+
+Every OpenHome and engine test that reads the published state after
+something that precedes the publish: a fake's begun call (`callsBegun`,
+`session`, `successor`; the engine fake's `nth`, `prepared`, `waitFor`; the
+files' `waitFor`), an admission (`admitted`, `waitApplied("admitted …")`,
+`waitingStops`), an admission-only success, or a backend event the test
+posts. Found two ways: a static scan of both packages' tests for a read with
+no reply or wait between it and such an event, each hit read; and every test
+of both packages run under the hold, each read the hold saw recorded with
+its test. Then a wider hold over every step that admits a command or spawns
+any call, since a read after an admission or another call is the same
+class: at 1.5 s, stopped at `TestACommandWaitsForAReservationThatHasNotLanded`,
+whose 4,096 inserts each wait out the bound, then at 300 ms with that test
+skipped by name and read instead.
+
+Under the Start hold the engine's 170 tests (435 cases) were green with no
+read while a hold stood (394 holds, 63 released by the bound), and the
+OpenHome package's 118 (572 cases) green but the two above, the only reads
+while a hold stood (91 holds, 4 by the bound); without the hold the same copy
+is 435 and 572 green. Under the wider hold at 300 ms: the engine 169 tests
+(434 cases) green, 13,875 holds, three reads while one stood; the OpenHome
+package the buffering case red, `TestATransportWriteAdmittedPastItsBudgetIsSuccess`
+green (the 300 ms bound releases its hold before its 1 s budget), 2,334 holds,
+three reads.
+
+- Exposed, red 20 of 20 before and green 20 of 20 after, converted
+  (9b6ab412): the buffering case of `TestWhileCastingSeekIdStartsPlaybackFromEveryState`
+  (a begun Start) and `TestATransportWriteAdmittedPastItsBudgetIsSuccess`
+  (an admission-only success).
+- Blind, converted (ac59234e): the prefetched-successor case of
+  `TestARefusalAtTheOpenIsTheEnginesSkip` posts y's refusal and read Id and
+  TransportState once the fake had begun the next Prepare. When the first
+  Prepare has answered before the refusal is handled, that Prepare is spawned
+  in the refusal's own step, so the reads could take the snapshot from before
+  the refusal; they assert the refusal moves neither, so they never go red,
+  and read that early they would pass whatever it did. Shown with a bug
+  injected in a copy (a refusal moves the selection to the refused entry),
+  `-count=20`: main's test catches it 20 of 20 without a hold and misses it 20
+  of 20 under the wider hold (each run's Id read while the refusal's step
+  stood); with the wait for y's skip it is caught 20 of 20 with the hold and
+  without; with no bug, 20 of 20 green under the hold, each wait meeting the
+  snapshot from before the refusal. Converted because the rule this round
+  adds forbids that read in the file that carries the rule.
+- Blind, not converted, a follow-up: `TestAdvanceFollowsAudibleReportsNotHandOff`
+  reads the selection at lines 28 and 37 right after `prepared` (a Prepare
+  the step that handled the hand-off's Submitted spawned) to assert the
+  hand-off did not move it. With a bug injected (Submitted moves the selection):
+  caught 20 of 20 without a hold, missed 20 of 20 under the wider hold, both
+  reads taken while that step stood. `player.md`'s B605 and B709 bullets
+  already say a fake's record of a call comes before the step's end; the
+  remedy is a mark and `waitApplied("handled submitted", mark)` before each
+  read.
+- Of another mechanism, not converted, a follow-up: `TestPCMLookaheadHasNoNativeBudget`
+  posts the eighth Submitted and then sends `SetRepeat` as a barrier; the
+  owner's select takes a command and a message in no fixed order, so the
+  barrier's reply can come before that Submitted's step, and the no-fault
+  read after it can miss that step (seen once under the wider hold, the read
+  made while a later Prepare's step stood). Not red: no fault comes.
+- Not exposed, reading what an earlier step published (after a reply) while
+  a later step that leaves it alone stood: `TestWhileCastingTheQueueEdits`
+  (Id after DeleteId's reply, the next session's Start held),
+  `TestDeletingTheSelection/while_playing_plays_the_next` and
+  `TestTheTrackIsTheOccurrencesOwnCopy` (the selection, and the track and its
+  count, after Delete's reply, the next Start held), and
+  `TestACommandWaitsForAReservationThatHasNotLanded` (the queue's length and
+  token while an output report's step stood).
+- Not exposed, found by the scan: the Stops' tests (`stillWaiting` reads
+  Releasing after a later Stop's admission: the first Stop's step published
+  it before any later command was admitted, the owner taking one command a
+  step, and the later Stops change only the intent); the generation read
+  for `EnterMaintenance` after a parked insert's reservation write began
+  (`TestEnteringMaintenanceDoesNotWaitForAHungReservationWrite`: a park moves
+  no generation); `TestSeveralShortEntriesCrossedInOneUpdate`'s generation
+  after the end's Prepare (a touched step: the same either side, and a stale
+  one could only make its count stricter);
+  `TestAStopOvertakesTheTransportCommandsWaitingWithoutRunningThem`'s
+  generation after parked admissions; and the successor case of
+  `TestAnUnplayableEntryIsSkippedWithItsReason` (the engine's fake posts
+  Refused inside its Prepare, so the refusal's step, the skip with it, is
+  published a step before the one that spawns the Prepare the test waits
+  for). The scan's other hits read after a command's reply, the event between
+  them a `session` or `nth` of a session that reply had already started.
+- Already waiting, unchanged: every other test the scan named, with a
+  `waitSnap`, `heardNow`, `measured`, `detailed`, `waitAttempt`, an answer,
+  or an applied or handled note between the event and the read.
+- Not a finding: under the wider hold at 1.5 s
+  `TestNativeEscalationDoesNotBlockOwner` was red, "escalation blocked
+  owner": it measures that the owner admits a command within 1 s while a
+  Stop's escalation is held, and the hold blocks the owner by design; green
+  at 300 ms and under the Start hold.
+
+### The margin
+
+The fixture's engine runs on the real clock, so a held Start still expires
+at `StartTimeout`, 5 s after its spawn; this round does not change that.
+Under `-race`, 50 runs each: the buffering case 0.04 to 0.09 s, the budget
+test (its Start held through its 1 s budget) 1.02 to 1.07 s, the prefetched
+successor 0.04 to 0.10 s. Beside sixteen busy processes on the box's sixteen
+CPUs, at GOMAXPROCS 1 and 2 (race binaries, inside the build lock): the
+buffering case 300 of 300 green at each, at most 0.08 s; the budget test 30
+of 30, at most 1.04 s; the prefetched successor 200 of 200, at most 0.07 s.
+So each held Start is let go at least 3.9 s before its deadline, and no
+assertion needs more. The same load did not bring CI's red back unforced:
+main's buffering case passed 300 of 300 at each setting, so the hold is the
+reproduction.
+
+### The gates
+
+Inside the build lock, at ac59234e: `make test
+TEST_PKGS='./internal/player/...'` (the release tags, `-race`, `-timeout
+30m`, `GOFLAGS=-v`, a TMPDIR on disk): every package ok, 2,344 cases
+passed, none failed, five skipped by their own gates (a private corpus, the
+ALAC reference file, the kernel's quirks file, `BRIDGE_DSD_FIXTURE_TESTS`,
+`-capture-uevents`), none of them this round's; and the loaded runs above.
+Outside it, single packages: the three changed tests by name, `-race
+-count=50 -v`, 650 cases passed and none skipped; the whole OpenHome
+package, `-race -count=5 -v`, 2,860 cases passed and none skipped; `go vet`
+of the package for windows/amd64, darwin/arm64, linux/386 and linux/arm64;
+go1.27.3's gofmt over the changed files, clean. `rules-b827.patch` applied
+to a copy of the tracked tree at this record's commit: `make docs-check`
+passes, and `TestEveryCitedTestNameExists` passes there and fails, naming
+it, on a ghost citation planted in the patched History bullet. `git status`
+clean after.
+
 ## 2026-11-09 — B653 PR 1: each snapshot is verified, its verdicts kept with it and shown; pruning keeps what recovery needs
 
 Backlog B653's first PR of three, on `feat/b653-snapshot-verify` from main

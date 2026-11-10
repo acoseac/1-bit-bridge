@@ -245,7 +245,7 @@ func (r *RuntimeConfig) UpdateChecked(path string, fn func(next *Config, check f
 	if err := fn(next, check); err != nil {
 		return err
 	}
-	// The snapshot, with the two opt-outs and every other leaf a variable
+	// The snapshot, with the three opt-outs and every other leaf a variable
 	// set as the file is to hold them; the live values are what is
 	// published.
 	saved := *next
@@ -260,24 +260,29 @@ func (r *RuntimeConfig) UpdateChecked(path string, fn func(next *Config, check f
 	return nil
 }
 
-// filedSwitches sets, in saved, a copy of an Update's next, the two opt-outs
-// (switchEnvPaths: enrich.enabled, enrich.deezerEnabled) as the file is to
-// hold them, where next holds the live values, BRIDGE_ENRICH_ENABLED's or
-// BRIDGE_ENRICH_DEEZER_ENABLED's where set (backlog B617). A switch the
-// update left as it was in before, the snapshot it cloned, is written as the
-// file holds it (file, the bytes the turn read), so a save of any other
-// setting writes no variable's value into the file, and a start without the
-// variable finds what the operator chose; a switch the update changed is
-// written as the change, off as false and on as no key. The snapshot
-// published is next, the live values. Every other leaf a variable set is
-// filedEnvValues' (B761). Only these two fields of saved are set: what is
-// saved is the snapshot the holder compared with the turn's bytes.
+// filedSwitches sets, in saved, a copy of an Update's next, the three
+// opt-outs (switchEnvPaths: enrich.enabled, enrich.deezerEnabled,
+// update.checkEnabled) as the file is to hold them, where next holds the live
+// values, BRIDGE_ENRICH_ENABLED's, BRIDGE_ENRICH_DEEZER_ENABLED's or
+// BRIDGE_UPDATE_CHECK_ENABLED's where set (backlog B617; the update check's
+// since B761). A switch the update left as it was in before, the snapshot it
+// cloned, is written as the file holds it (file, the bytes the turn read), so
+// a save of any other setting writes no variable's value into the file, and
+// a start without the variable finds what the operator chose; a switch the
+// update changed is written as the change, off as false and on as no key.
+// The snapshot published is next, the live values. Every other leaf a
+// variable set is filedEnvValues' (B761). Only these three fields of saved
+// are set: what is saved is the snapshot the holder compared with the turn's
+// bytes.
 func filedSwitches(saved, before *Config, file []byte) {
 	var own struct {
 		Enrich struct {
 			Enabled       *bool `yaml:"enabled"`
 			DeezerEnabled *bool `yaml:"deezerEnabled"`
 		} `yaml:"enrich"`
+		Update struct {
+			CheckEnabled *bool `yaml:"checkEnabled"`
+		} `yaml:"update"`
 	}
 	if err := yaml.Unmarshal(file, &own); err != nil {
 		// The bytes loaded once (the holder's own read or write, or a file
@@ -287,6 +292,7 @@ func filedSwitches(saved, before *Config, file []byte) {
 	}
 	saved.Enrich.Enabled = filedSwitch(saved.Enrich.EffectiveEnabled(), before.Enrich.EffectiveEnabled(), own.Enrich.Enabled)
 	saved.Enrich.DeezerEnabled = filedSwitch(saved.Enrich.EffectiveDeezerEnabled(), before.Enrich.EffectiveDeezerEnabled(), own.Enrich.DeezerEnabled)
+	saved.Update.CheckEnabled = filedSwitch(saved.Update.EffectiveCheckEnabled(), before.Update.EffectiveCheckEnabled(), own.Update.CheckEnabled)
 }
 
 // filedSwitch is one opt-out as an Update writes it: the file's own value
@@ -305,7 +311,7 @@ func filedSwitch(now, was bool, filed *bool) *bool {
 
 // filedEnvValues sets, in saved, a copy of an Update's next, each leaf a
 // BRIDGE_* variable set at the load the holder's snapshot came from
-// (before's envSet), the two opt-outs aside (filedSwitches writes them), as
+// (before's envSet), the three opt-outs aside (filedSwitches writes them), as
 // the file is to hold it (backlog B761): where the update left the leaf at
 // its live value, the variable's, compared by value (sameValue: an empty list
 // is the same as none, which Clone makes of it), the file's own value, read
@@ -474,6 +480,10 @@ func Clone(cfg *Config) *Config {
 	if cfg.Enrich.DeezerEnabled != nil {
 		v := *cfg.Enrich.DeezerEnabled
 		out.Enrich.DeezerEnabled = &v
+	}
+	if cfg.Update.CheckEnabled != nil {
+		v := *cfg.Update.CheckEnabled
+		out.Update.CheckEnabled = &v
 	}
 	if cfg.Output.LoopbackPort != nil {
 		v := *cfg.Output.LoopbackPort
