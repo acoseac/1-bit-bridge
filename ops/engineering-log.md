@@ -93829,7 +93829,7 @@ each, the mutated file was restored from HEAD and an empty `git status
 
 | Mutation | Selection in ./internal/manifest | Result |
 |---|---|---|
-| Remove the exact-mean check block once | `TestExtractMP4Work/other_mean|TestScanner_V33` | Three other-mean cases return Mass again; other.m4a gains work and is rewritten instead of only stamped. Oversized foreign WORK remains green. 10 pass, 5 fail events including parents. |
+| Remove the exact-mean check block once | `TestExtractMP4Work/other_mean\|TestScanner_V33` | Three other-mean cases return Mass again; other.m4a gains work and is rewritten instead of only stamped. Oversized foreign WORK remains green. 10 pass, 5 fail events including parents. |
 | Remove the work-preservation guard once | `^TestExtractMP4Work_PreservesDhowden$/last_duplicate` | Production returns First instead of dhowden's Last. 2 fail events including parent. |
 | Return on the first data child unconditionally once | `^TestExtractMP4Work_MultipleDataChildren$` | Non-text, empty and oversized leading children hide the later valid value in both ©wrk and freeform WORK: six child failures plus parent; both all-unusable cases still pass. |
 
