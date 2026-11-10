@@ -283,12 +283,14 @@ const (
 // switchEnvPaths are the opt-outs whose variables read as the file reads
 // their keys, and as off where they read as neither (backlog B617):
 // enrich.enabled and enrich.deezerEnabled stop requests to services the
-// operator chose not to ask. Read as every other boolean variable is, by
-// strconv.ParseBool with a refusal ignored, `off` and `no` left them on, and
-// the bridge went on sending what the operator had asked it to stop.
+// operator chose not to ask, and update.checkEnabled stops the update check's
+// requests to GitHub (backlog B761). Read as every other boolean variable is,
+// by strconv.ParseBool with a refusal ignored, `off` and `no` left them on,
+// and the bridge went on sending what the operator had asked it to stop.
 var switchEnvPaths = map[string]bool{
 	"enrich.enabled":       true,
 	"enrich.deezerEnabled": true,
+	"update.checkEnabled":  true,
 }
 
 // parseSwitchEnv reads an opt-out's variable as yaml.v3 reads a bool key,
@@ -331,6 +333,21 @@ func EnrichEnabledFromEnv() (on, set bool) {
 		return false, false
 	}
 	return readSwitchEnv(name, v)
+}
+
+// UpdateCheckEnabledFromEnv is update.checkEnabled as
+// BRIDGE_UPDATE_CHECK_ENABLED alone sets it, read as Load reads it (a value
+// that reads as neither on nor off is off) but without Load's warning, which
+// the load before it has said; set is false where the variable is absent or
+// says nothing. For `bridge update`, to say which of the variable and the
+// file turned the update check off (backlog B761).
+func UpdateCheckEnabledFromEnv() (on, set bool) {
+	v, ok := os.LookupEnv(envName("update.checkEnabled"))
+	if !ok || strings.TrimSpace(v) == "" {
+		return false, false
+	}
+	on, _ = parseSwitchEnv(v)
+	return on, true
 }
 
 // applyEnvValue sets the leaf b names from raw, the value of the variable

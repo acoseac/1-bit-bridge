@@ -113,6 +113,48 @@ Stop the service before `bridge restore`. When moving to another box, stop
 the source too: two boxes running one identity at once are unsupported.
 Prefer the newest snapshot; see the [backup guide](docs/backup.md).
 
+## Updates
+
+The bridge checks GitHub for a newer release, on by default: one request to
+`https://api.github.com/repos/acoseac/1-bit-bridge/releases/latest` when it
+starts and then once every check interval (6 h unless
+`update.checkIntervalHours` says otherwise), naming the bridge's version and
+nothing of your library. The console's Settings → Updates offers the install,
+and `bridge update` does the same from a shell; auto-install
+(`update.autoInstall`) is off unless you turn it on.
+
+To turn the checks off, switch off **Check for updates** in Settings → Updates,
+which applies at once; or set `update.checkEnabled: false` in `bridge.yaml`,
+or `BRIDGE_UPDATE_CHECK_ENABLED=false` in the service's environment, either of
+which takes effect when the service next starts. The variable, where it is
+set, overrides the file and the console's switch at every start. Off, the
+bridge asks GitHub nothing and installs nothing new: no check at its start or
+on its schedule, no Check now, no Install, no `bridge update`, and no
+automatic install (auto-install keeps its setting and waits). The update
+status, the console's Roll back, a start's rollback of an install that
+failed, and a new version's probation are never refused. Turned back on in
+the console, the next check comes a full interval later; a bridge started
+with them on checks at once.
+
+`bridge update` reads the file and the variable when it starts, and again
+before it installs, so an off saved in the console while it waits refuses
+the install, unless `BRIDGE_UPDATE_CHECK_ENABLED` in the command's own
+environment says on, which overrides the file; an off set only in the
+service's environment (a systemd unit, a compose file) must be in your
+shell's too for the command to see it. An off saved in the console while a
+`bridge update` is swapping a new version in waits for the swap and is saved
+once it is done. What stays open here, for the bridge's Windows service, is
+backlog B831.
+
+A release from before the switch refuses settings that write
+`update.checkEnabled`: before rolling back to one, turn the checks on in the
+console, which removes the key, and while a new version is on probation over
+such a release the console refuses an off. To keep the checks off there,
+leave the key out of `bridge.yaml`, set `BRIDGE_UPDATE_CHECK_ENABLED=false`
+in the service's environment and restart the service; that release ignores
+the variable, so it checks for updates again once it runs. The full
+behaviour is in [`PROTOCOL.md`](PROTOCOL.md#updates).
+
 ## Build from source
 
 Requires Go 1.27.3+.

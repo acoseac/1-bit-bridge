@@ -213,6 +213,7 @@ for (const step of input.steps) {
     deferred: panelRow("update-deferred"),
     refusal: panelRow("update-rollback-refused"),
     checkButton: check.textContent + (check.disabled ? " (disabled)" : ""),
+    checkHidden: check.hidden,
     posts: panelPosts.join(" | "),
   });
 }
@@ -257,6 +258,7 @@ type updatesPanelShown struct {
 	Deferred       updatesPanelRow `json:"deferred"`
 	Refusal        updatesPanelRow `json:"refusal"`
 	CheckButton    string          `json:"checkButton"`
+	CheckHidden    bool            `json:"checkHidden"`
 	Posts          string          `json:"posts"`
 }
 
@@ -432,6 +434,8 @@ func TestACheckNowThatFailsKeepsTheRowsTheLastStatusRendered(t *testing.T) {
 	offered := UpdateStatus{
 		CurrentVersion: "0.2.4", LatestVersion: "0.2.5", UpdateAvailable: true, Channel: "stable",
 		LastCheck: &checked, CanInstall: true, CanRollback: true, DeferredReason: reasonHeld,
+		// Update checks on (backlog B761): off, the panel offers no Install.
+		CheckEnabled: true,
 	}
 	refused := offered
 	refused.CanRollback, refused.RollbackRefusal = false, reasonOpened

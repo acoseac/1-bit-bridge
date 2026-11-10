@@ -383,6 +383,7 @@ Audited PR-by-PR; verified clean at the time of this section's introduction. Re-
   withholding them fails decoding on every shipped app. An invalid token is
   unauthenticated, never 401 — a client holding a revoked token still needs the
   endpoint list to reconnect.
+- **…and advertises no update to any caller while update checks are off (`update.checkEnabled`, backlog B761): `updateAvailable` an explicit `false` and no `latestServerVersion` or `updateReleaseNotesURL`, whatever a check found before, `minClientVersion` still sent** (`api.UpdateInfo.ChecksOff`, whose zero value is checks on; PROTOCOL.md's health fields and its Updates section). **Don't advertise a cached release while the checks are off.** `TestHealthAdvertisesNoUpdateWhileUpdateChecksAreOff` and `TestServeTurnsUpdateChecksOffLiveAndShowsNoUpdate` pin it.
 - **Long-lived and streaming routes need their own deadlines**:
   `/v1/booklet/{mbid}` and `/v1/download` are `streamingRoute`; the two
   synchronous upscale operations carry a 15-minute `writeDeadline` because

@@ -1404,11 +1404,16 @@ const (
 //
 // updateAutoInstall appears under BOTH controls because it performs both
 // halves; a bridge declaring either one alone still refuses it, which is
-// the fail-closed direction. roots and variantsDir imply nothing: neither
-// has a settingsPatch field, so there is no second path to them.
+// the fail-closed direction. updateCheckEnabled, the update check's off
+// switch (backlog B761), is the updates control's alone: whether the bridge
+// asks GitHub and installs is the fleet's, and neither direction restarts
+// anything (on rearms the cadence and asks nothing). roots and variantsDir
+// imply nothing: neither has a settingsPatch field, so there is no second
+// path to them.
 var managedControlSettings = map[string][]string{
 	ManagedControlUpdates: {
 		"updateAutoInstall",
+		"updateCheckEnabled",
 		"updateCheckIntervalHours",
 		"updateQuietHours",
 	},
@@ -2809,15 +2814,50 @@ func (b BackupConfig) EffectiveKeep() int {
 	return b.Keep
 }
 
-// UpdateConfig configures the Phase C opt-in auto-installer. The
-// safeties from Phase B (stream-active gate, signature verification,
-// rollback marker) ALWAYS apply — these toggles only decide whether
-// auto-install is attempted at all and within what time window.
+// UpdateConfig configures the update check and the Phase C opt-in
+// auto-installer. The safeties from Phase B (stream-active gate, signature
+// verification, rollback marker) ALWAYS apply — these toggles only decide
+// whether the bridge asks for a newer release at all, whether auto-install is
+// attempted, and within what time window.
 //
-// Default state: AutoInstall=false (operator-triggered only). The
-// admin Settings UI exposes these for hand-edit; YAML-direct edits
+// checkEnabled is the off switch for the update check (backlog B761). On,
+// the default, the bridge asks the GitHub releases API for the latest release
+// once at its start and then once every checkIntervalHours (6 h by default),
+// one request each, carrying a User-Agent that names the bridge's version, and
+// "Check now" asks once more. False, it asks nothing: no scheduled check, none
+// at the start, no "Check now", and no new install, by hand or automatic, of a
+// release a check found before; autoInstall keeps its setting and is
+// suspended. Status, every rollback (the console's and a start's) and the
+// install's own probation and confirmation go on. A swap already past its
+// decision still finishes, and a restart the auto-installer deferred after its
+// swap still fires once no download is in flight, inside the quiet hours,
+// asking GitHub nothing. The console's save is the one change the running
+// service takes at once; it reads this key and the variable again only at its
+// next start. Only an explicit false is written, since a release from before
+// the key refuses a file that names it: the console's save of on writes no
+// key, its save of off is refused while an install on probation would roll
+// back to such a release (updater.ChecksOffRefused), and a writer outside the
+// live holder (Edit, the DAC bind) writes the file's own value, never this
+// process's variable (KeepFiledSwitches; B761's round 3). An install's
+// decision and the console's save of off take the install marker's lock, so
+// the off lands before the decision or after the swap.
+// BRIDGE_UPDATE_CHECK_ENABLED reads as the key does, and a value that
+// reads as neither on nor off is off. `bridge update` reads the same file and
+// variable through the same loader as it starts, and both again as its
+// install begins and at its decision, so an off set only in the service's
+// environment (a unit or compose file) must be in the shell's too for the CLI
+// to refuse.
+//
+// Default state: CheckEnabled on, AutoInstall=false (operator-triggered
+// only). The admin Settings UI exposes these for hand-edit; YAML-direct edits
 // are also supported.
 type UpdateConfig struct {
+	// CheckEnabled turns the update check on or off. Nil (the default) and
+	// true are on; only an explicit false stops it. A pointer so an absent key
+	// is told apart from an explicit false, the shape EnrichConfig.Enabled
+	// has. Read through EffectiveCheckEnabled, never directly.
+	CheckEnabled *bool `yaml:"checkEnabled,omitempty"`
+
 	// AutoInstall enables the poll-loop's automatic install attempt.
 	// Off by default — the operator must opt in. Even when on, the
 	// stream-active gate refuses if any /v1/download is in flight,
@@ -2838,6 +2878,14 @@ type UpdateConfig struct {
 	// uplinks. Values below 1h are clamped at runtime by the updater.
 	// Zero = use the package default.
 	CheckIntervalHours int `yaml:"checkIntervalHours,omitempty"`
+}
+
+// EffectiveCheckEnabled resolves CheckEnabled's nil-means-on default:
+// whether the bridge checks for updates and installs a new release. Every
+// reader goes through it, since a bare nil check would read a config that
+// says nothing as off.
+func (u UpdateConfig) EffectiveCheckEnabled() bool {
+	return u.CheckEnabled == nil || *u.CheckEnabled
 }
 
 // Defaults applied when a field is absent or zero-valued.

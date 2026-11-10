@@ -669,7 +669,11 @@ func warnUnlocked(path string, err error) {
 // file the turn found. An error of fn's is returned as it is, and nothing is
 // saved. Loading in the turn is the point: a copy read before the turn can be
 // older than what another writer saved in between, and saving it would write
-// over that writer's change.
+// over that writer's change. The three opt-outs are saved as the file holds
+// them where fn left them as they loaded (KeepFiledSwitches): the load put
+// this process's BRIDGE_* variables over the file, and a variable set in the
+// shell that runs the command is no setting of the file's (backlog B761's
+// round 3).
 func Edit(path string, fn func(cfg *Config) (save bool, err error)) error {
 	l, err := LockFile(path)
 	if err != nil {
@@ -680,10 +684,13 @@ func Edit(path string, fn func(cfg *Config) (save bool, err error)) error {
 	if err != nil {
 		return err
 	}
+	before := Clone(cfg)
 	save, err := fn(cfg)
 	if err != nil || !save {
 		return err
 	}
+	found, _ := l.Found()
+	cfg.KeepFiledSwitches(before, found)
 	return cfg.Save(l)
 }
 

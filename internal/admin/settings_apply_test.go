@@ -347,7 +347,9 @@ func currentValuesForEveryPatchField(t *testing.T, cfg *config.Config) map[strin
 		"updateAutoInstall":        cfg.Update.AutoInstall,
 		"updateQuietHours":         cfg.Update.QuietHours,
 		"updateCheckIntervalHours": cfg.Update.CheckIntervalHours,
-		"customEndpoints":          cfg.CustomEndpoints,
+		// Resolved, not raw: absent is on.
+		"updateCheckEnabled": cfg.Update.EffectiveCheckEnabled(),
+		"customEndpoints":    cfg.CustomEndpoints,
 		// Present so the exemption is exercised rather than assumed.
 		"customEndpointsText":      strings.Join(cfg.CustomEndpoints, "\n"),
 		"uploadEnabled":            cfg.Upload.Enabled,
@@ -529,13 +531,14 @@ func differentValueFor(t *testing.T, field string) (any, bool) {
 	t.Helper()
 	switch field {
 	// Every tray toggle: the fixture leaves these at their zero/default,
-	// and `true` differs from all of them EXCEPT smartPlaylistsEnabled
-	// and optimizeEnabled, which default ON.
+	// and `true` differs from all of them EXCEPT the ones that default ON:
+	// smartPlaylistsEnabled, optimizeEnabled, the two enrichment switches
+	// and updateCheckEnabled.
 	case "libraryWatchEnabled", "atlasEnabled", "atlasLyricsEnabled", "analysisEnabled",
 		"fingerprintEnabled", "upscaleEnabled", "autoOptimizeEnabled",
 		"dsdRenderEnabled", "updateAutoInstall", "dlnaEnabled", "tailscaleUploadDiagnosticLogs":
 		return true, true
-	case "smartPlaylistsEnabled", "optimizeEnabled", "enrichEnabled", "enrichDeezerEnabled":
+	case "smartPlaylistsEnabled", "optimizeEnabled", "enrichEnabled", "enrichDeezerEnabled", "updateCheckEnabled":
 		return false, true
 	// Numbers, all clear of their validation floors.
 	case "scanIntervalSec":

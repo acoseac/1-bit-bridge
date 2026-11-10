@@ -87,7 +87,7 @@ func TestUpdaterDetectsNewRelease(t *testing.T) {
 		RepoOverride: "fake/repo",
 		Client:       NewClient("fake/repo", time.Second).WithBaseURL(srv.URL),
 	})
-	got := u.CheckNow(context.Background())
+	got := checkNow(t, u)
 	if got.LatestVersion != "9.9.9" {
 		t.Errorf("LatestVersion = %q, want 9.9.9", got.LatestVersion)
 	}
@@ -117,7 +117,7 @@ func TestUpdaterReportsUpToDate(t *testing.T) {
 		RepoOverride: "fake/repo",
 		Client:       NewClient("fake/repo", time.Second).WithBaseURL(srv.URL),
 	})
-	got := u.CheckNow(context.Background())
+	got := checkNow(t, u)
 	if got.UpdateAvailable {
 		t.Errorf("UpdateAvailable = true on equal version (%q == %q)",
 			got.LatestVersion, got.CurrentVersion)
@@ -141,7 +141,7 @@ func TestUpdaterIgnoresPrereleaseAndDraft(t *testing.T) {
 				RepoOverride: "fake/repo",
 				Client:       NewClient("fake/repo", time.Second).WithBaseURL(srv.URL),
 			})
-			got := u.CheckNow(context.Background())
+			got := checkNow(t, u)
 			if got.UpdateAvailable {
 				t.Errorf("UpdateAvailable = true for %s release", c.name)
 			}
@@ -163,7 +163,7 @@ func TestUpdaterRecordsRateLimit(t *testing.T) {
 		RepoOverride: "fake/repo",
 		Client:       NewClient("fake/repo", time.Second).WithBaseURL(srv.URL),
 	})
-	got := u.CheckNow(context.Background())
+	got := checkNow(t, u)
 	if got.LastError == "" {
 		t.Error("LastError empty on rate-limited response")
 	}
@@ -186,7 +186,7 @@ func TestUpdaterSurfaces404AsLastError(t *testing.T) {
 		RepoOverride: "fake/repo",
 		Client:       NewClient("fake/repo", time.Second).WithBaseURL(srv.URL),
 	})
-	got := u.CheckNow(context.Background())
+	got := checkNow(t, u)
 	if got.LastError != ErrNoReleasesPublished.Error() {
 		t.Errorf("LastError = %q, want %q",
 			got.LastError, ErrNoReleasesPublished.Error())
@@ -216,7 +216,7 @@ func TestUpdaterClearsCachedAvailabilityOn404(t *testing.T) {
 		RepoOverride: "fake/repo",
 		Client:       NewClient("fake/repo", time.Second).WithBaseURL(first.URL),
 	})
-	got := u.CheckNow(context.Background())
+	got := checkNow(t, u)
 	if !got.UpdateAvailable || got.LatestVersion != "9.9.9" {
 		t.Fatalf("first poll should surface update; got %+v", got)
 	}
@@ -225,7 +225,7 @@ func TestUpdaterClearsCachedAvailabilityOn404(t *testing.T) {
 	// Second poll: 404 (repo went private OR releases removed).
 	second, _ := fakeReleasesServer(t, 404, nil)
 	u.client = NewClient("fake/repo", time.Second).WithBaseURL(second.URL)
-	got = u.CheckNow(context.Background())
+	got = checkNow(t, u)
 	if got.LastError != ErrNoReleasesPublished.Error() {
 		t.Errorf("LastError = %q, want sentinel", got.LastError)
 	}
@@ -282,7 +282,7 @@ func TestUpdaterSurfacesPrereleaseAsLastError(t *testing.T) {
 		RepoOverride: "fake/repo",
 		Client:       NewClient("fake/repo", time.Second).WithBaseURL(srv.URL),
 	})
-	got := u.CheckNow(context.Background())
+	got := checkNow(t, u)
 	if got.LastError != ErrNoReleasesPublished.Error() {
 		t.Errorf("LastError = %q, want sentinel for prerelease", got.LastError)
 	}

@@ -1479,6 +1479,14 @@ function renderUpdateTile(u) {
   const lastError = document.getElementById("update-last-error");
   if (!status) return;
 
+  // Update checks off (update.checkEnabled, backlog B761): the status says
+  // so, and the panel offers neither Check now nor Install, which the server
+  // refuses with 409 update-checks-off while they are off. Only an explicit
+  // false is off, as the server sends it. Roll back is not the switch's.
+  const checksOff = u?.checkEnabled === false;
+  const checkBtn = document.getElementById("update-check");
+  if (checkBtn) checkBtn.hidden = checksOff;
+
   // Add or remove the "Install & restart" button to match the
   // server-rendered first-paint logic. The button only exists when
   // the platform supports self-install AND an update is available.
@@ -1496,7 +1504,7 @@ function renderUpdateTile(u) {
   const actions = document.querySelector(".panel-head .panel-actions");
   let installBtn = document.getElementById("update-install");
   if (actions) {
-    const should = u?.updateAvailable && u?.canInstall;
+    const should = u?.updateAvailable && u?.canInstall && !checksOff;
     if (should && !installBtn) {
       // Mirror the supervision-aware label + dataset attribute the
       // server-rendered first-paint path emits — without this the
@@ -1521,7 +1529,9 @@ function renderUpdateTile(u) {
     }
   }
 
-  if (u?.updateAvailable && u?.latestVersion) {
+  if (checksOff) {
+    status.innerHTML = `<span class="badge idle">update checks off</span>`;
+  } else if (u?.updateAvailable && u?.latestVersion) {
     status.innerHTML = `<span class="badge running">update available</span><span>· <code>${escapeHTML(u.latestVersion)}</code></span>`;
     if (u.releaseNotesURL) {
       const notes = document.createElement("a");
@@ -4590,6 +4600,22 @@ function applyTrayManaged(entry) {
   }
 }
 
+// updateChecksOffLost is what a settings save that sent update checks off
+// (sent, its body) adds to its failure where the bridge gave no answer at
+// all, err carrying no status (backlog B761's round 3): with no answer, the
+// console cannot tell whether the off was saved or what stopped it, so the
+// words claim no cause and say to check the switch once the bridge answers.
+// The off waits for an install of another process that is past its decision
+// and is saved after its swap (round 4). What stays open here, for the
+// bridge's Windows service, is backlog B831. A refusal the bridge answered,
+// the 503 of a stop among them, says what happened in its own words, and gets
+// nothing.
+function updateChecksOffLost(sent, err) {
+  if (sent?.updateCheckEnabled !== false || err?.status) return "";
+  return "; update checks may not have been turned off: once the bridge answers, " +
+    "check the switch and turn them off again if they are on.";
+}
+
 async function saveTrayField(ctl, status) {
   // The console sends only what it showed. A managed row is hidden and its
   // input disabled (applyTrayManaged), so only a change dispatched from
@@ -4648,7 +4674,8 @@ async function saveTrayField(ctl, status) {
     // showing the rejected value is the one outcome that lies.
     if (traySettings) trayApplyValue(ctl, traySettings[ctl.row.field]);
     status.dataset.tone = "err";
-    status.textContent = `Save failed: ${err.message || err}`;
+    status.textContent = `Save failed: ${err.message || err}` +
+      updateChecksOffLost({ [ctl.row.field]: value }, err);
   } finally {
     setDisabled(ctl.input, false);
   }
@@ -5059,6 +5086,8 @@ function buildSettingsPayload(form, fd, enrichBases) {
     updateAutoInstall: fd.get("updateAutoInstall") === "on",
     updateQuietHours: fd.get("updateQuietHours") || "",
     updateCheckIntervalHours: parseInt(fd.get("updateCheckIntervalHours") || "0", 10),
+    // update.checkEnabled (backlog B761), the same checkbox coercion.
+    updateCheckEnabled: fd.get("updateCheckEnabled") === "on",
     // Custom endpoints come in as a single textarea string ("URL\n
     // URL\n…"). Send the textarea form — the server splits on
     // newlines or commas and validates each entry. Sending the
@@ -5354,8 +5383,14 @@ function initSettings() {
       } else if (!restartPending()) {
         if (restartBtn) restartBtn.hidden = true;
       }
+      // The update check's switch changed (backlog B761): the Updates panel
+      // shows it now, from a whole status, rather than at the next updates
+      // frame (renderUpdateTile writes every row from what it is handed).
+      if (r?.fields?.updateCheckEnabled?.status === "live") {
+        void API.get("/api/updates").then(renderUpdateTile).catch(() => {});
+      }
     } catch (err) {
-      showMsg(msg, "err", "Save failed: " + err.message);
+      showMsg(msg, "err", "Save failed: " + err.message + updateChecksOffLost(body, err));
     }
   });
 
@@ -6395,9 +6430,23 @@ function mountJobTrays() {
 
   attachFeatureTray(head("job-upd-card"), {
     title: "Update checks",
-    blurb: "How often the bridge asks GitHub for a newer release, and whether it " +
-      "installs one on its own.",
+    blurb: "Whether and how often the bridge asks GitHub for a newer release, and " +
+      "whether it installs one on its own.",
     rows: [
+      {
+        // update.checkEnabled (backlog B761): live, and the card draws from
+        // it, so a save redraws it (onSaved below).
+        field: "updateCheckEnabled", type: "switch", label: "Check for updates",
+        // The rollbacks' claim carries its caveat (B761's round 3): a release
+        // from before the switch refuses the key an off writes.
+        hint: "Off, the bridge asks GitHub nothing and installs nothing new; Roll " +
+          "back, a start's rollback and an install past its decision to swap still " +
+          "work. Applies at once. A release from before this switch does not start " +
+          "with the key this off writes: where the bridge may go back to one, keep " +
+          "the checks off by BRIDGE_UPDATE_CHECK_ENABLED=false in the service's " +
+          "environment instead, with update.checkEnabled out of bridge.yaml, and " +
+          "restart the service (that release ignores the variable).",
+      },
       {
         field: "updateCheckIntervalHours", type: "number", min: 1,
         label: "Check every", unit: "hours", placeholder: "6 (default)",
@@ -6416,6 +6465,9 @@ function mountJobTrays() {
       },
     ],
     link: { href: "/settings?tab=updates", text: "Update settings →" },
+    onSaved: (field) => {
+      if (field === "updateCheckEnabled") void jobsSnapshotRefresh().catch(() => {});
+    },
   });
 }
 
@@ -6768,10 +6820,19 @@ function renderJobCards(j) {
   setText("job-backup-next", bk.run ? formatInFuture(bk.run.nextDueAt) : "—");
   setText("job-backup-keep", bk.keep > 0 ? `keep last ${bk.keep}` : "keep all");
 
-  // Updates.
+  // Updates. With update checks off (backlog B761) the card says so in place
+  // of the cadence, auto-install keeps its setting and waits, and Check now
+  // is hidden: the server refuses it while they are off. Only an explicit
+  // false is off, as the server sends it.
   const upd = j.updates || {};
-  setText("job-upd-cadence", upd.checkIntervalHours ? `every ${upd.checkIntervalHours} h` : "—");
-  setText("job-upd-auto", upd.autoInstall ? "on" : "off — install from the Dashboard");
+  const updChecksOff = upd.checkEnabled === false;
+  setText("job-upd-cadence", updChecksOff ? "update checks off"
+    : (upd.checkIntervalHours ? `every ${upd.checkIntervalHours} h` : "—"));
+  setText("job-upd-auto", upd.autoInstall
+    ? (updChecksOff ? "on — waits while update checks are off" : "on")
+    : "off — install from Settings → Updates");
+  const updCheck = document.getElementById("jobs-upd-check");
+  if (updCheck) updCheck.hidden = updChecksOff;
 
   // Maintenance + UPnP.
   const mt = j.maintenance || {};
@@ -7071,6 +7132,8 @@ async function unreadableRefresh() {
 
 function updateStatusLine(r) {
   if (!r) return "—";
+  // Update checks off (backlog B761): an explicit false, as the server sends.
+  if (r.checkEnabled === false) return "update checks off";
   if (r.updateAvailable) return `update available: ${r.latestVersion || "?"}`;
   if (r.lastError) return `check failed: ${r.lastError}`;
   return "up to date";
