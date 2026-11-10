@@ -104,8 +104,8 @@ const (
 	// WriteFailed: the write ended on an error, nothing written.
 	WriteFailed
 	// WriteUnfinished: the write began and was given up before it ended: it
-	// renames nothing from then on, and whether a rename of it landed before
-	// is not known.
+	// checks its signal before each further rename attempt; an attempt that
+	// passed that check can still land, so publication is not known.
 	WriteUnfinished
 )
 
@@ -346,10 +346,10 @@ func (h *hold) givenUp(ctx context.Context, werr error) error {
 // stop. Once one is given up (or its caller gives the worker up), the worker
 // runs no check and no prune, writes nothing but its INCOMPLETE, whose merge
 // keeps a completed verdict and clears no veto, reads the record back, and
-// answers ErrCheckGivenUp naming the step; a step given up that resumes
-// runs nothing further, the verdict's write is not admitted once the hold was
-// given up before it (publishOf), a write given up renames nothing and begins
-// no removal of a veto from then on, and what a step answers late is dropped.
+// answers ErrCheckGivenUp naming the step. A completed verdict's write is
+// not admitted after the hold is given up (publishOf). Each rename attempt
+// and veto removal checks immediately before its call; an operation that
+// passed that check may finish afterward. A step's late answer is dropped.
 // A check given up past its deadline records INCOMPLETE (deadline), and one
 // its caller stopped INCOMPLETE (cancelled), the stop being no give-up of the
 // write. A read-back that reads nothing is said beside whatever else the
@@ -475,9 +475,11 @@ func verifyHeld(ctx context.Context, dir string, o VerifyOptions, after func(con
 	recheck := holdsVerified(prior) && !m.legacy()
 	noBarrier := recheck && !syncsParentDir
 	if recheck && !noBarrier {
-		// The step's own give-up, which a give-up of the hold while the step
-		// runs ends too, keeps the veto it made once it has ended.
-		refused, ok := stepOf(h, early, stepVeto, func(_, given context.Context) error { return setAside(snap, given) }, nil)
+		// Each veto attempt and cleanup removal asks both the step and the
+		// hold: the hold may have been given up before this step registered.
+		refused, ok := stepOf(h, early, stepVeto, func(_, given context.Context) error {
+			return setAside(snap, publication{given: given, held: h.gaveUp})
+		}, nil)
 		switch {
 		case !ok || h.gaveUp():
 			// No check: its INCOMPLETE, merged over the VERIFIED, changes
@@ -531,7 +533,8 @@ func verifyHeld(ctx context.Context, dir string, o VerifyOptions, after func(con
 	// signal no earlier give-up ended (stepIncomplete); given up after, the
 	// write's own give-up ends. Each write asks its step's give-up and its
 	// hold's (publication), never the caller's stop: a stop still writes its
-	// INCOMPLETE, and a write given up lands nothing from then on.
+	// INCOMPLETE. A rename attempt or veto removal that passed its last
+	// give-up check may still finish afterward (publishVerdict).
 	pub, admitted, wrote := publishOf(h, laterBound(deadline), func(given context.Context) published {
 		_, written, err := publishVerdict(snap, found, prior, op.doubted, publication{given: given, held: h.gaveUp})
 		return published{written: written, err: err}
@@ -590,7 +593,8 @@ func incompleteOf(ctx context.Context) Verification {
 // holds it is ending too. Once it holds the lock, its one step (the record's
 // read and the write) is bounded as a verification's are, StopWriteBound
 // from the lock (hold.go), and given up past it, the folder marked until the
-// step has ended, the write renaming nothing from then on. Where no lock is
+// step has ended. Each rename attempt checks its step's give-up; one that
+// passed that check may finish afterward. Where no lock is
 // granted it writes nothing; nor over a VERIFIED where no directory can be
 // synced (verifyHeld's rule: no veto there would be durable). A record that
 // holds a verdict keeps it (mergeVerdict), and a veto beside a VERIFIED

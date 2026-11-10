@@ -91515,3 +91515,69 @@ recorded (its error says which), as it did before this round; and the
 unchanged record's removal of a veto is still reached with a clear only by
 a verdict equal to the record to its times. What stays open of a hold given
 up is named here by its id alone, backlog B653.
+
+
+## 2026-11-10 — B653 PR 1 round 7: hold-aware veto attempts, explicit late-operation limits, and accurate console write outcomes
+
+This is an edit-only round. No builds, tests, negative controls, race runs or
+`make docs-check` were run; validation and commits belong to the orchestrator.
+No validation result is claimed below.
+
+The round's DECISIONS keep the checks immediately before filesystem calls,
+with no new `h.mu` admission for removal, rename or veto creation. The code
+comments, CLI rule and its History, and `docs/backup.md` now state the actual
+limit: check and call are separate; a give-up between them still lets that
+operation run. A removal, rename attempt or veto creation already begun
+when the give-up lands finishes afterward. This corrects the stronger
+filesystem-start promises in earlier rounds' records. In a refused recheck,
+only successful removal of the last effective veto restores the earlier
+check's record as it stood before the recheck. Another veto or failed
+removal preserves the conservative reading; read-back reports what it read
+at that time.
+
+`setAside` takes the step and hold signals through `publication`, asking
+both before each candidate (bundle then root) and cleanup removal. This
+covers a hold abandoned before the veto step registered with a fresh
+signal. `stepOf` itself is unchanged: `stepIncomplete`, `stepReadBack` and
+`abandonPending`'s INCOMPLETE write remain runnable after a give-up.
+
+The admission test adds `onAdmissionLocked`, a nil production seam before
+the protected check. The case lets abandonment take the actual lock there
+and reacquires it before proceeding: moving the check to `h.gaveUp()`
+immediately before `h.mu.Lock()` samples false too early and should fail.
+The registration case observes the abandonment blocked on the mutex through
+its goroutine stack, replacing the 200 ms wait that did not prove it tried.
+No I/O was added under the production admission lock.
+
+The console switches on `Verify.Write` for every verification error,
+including shutdown. Only none/failed say not recorded; not-durable says
+written, not known durable; unfinished says it did not finish before
+give-up; recorded/unchanged retain the write-ended message. Every branch
+logs `write` and `recordRead`.
+
+Cases added or extended, awaiting orchestrator validation:
+
+- `TestTheVerdictsWriteIsAdmittedInOneSectionWithTheGiveUp`: the check under
+  the lock and the blocked abandonment during registration.
+- `TestSetAsideAsksItsHoldBeforeEachVetoAttempt`: abandonment before a fresh
+  veto step, before the root candidate, and before cleanup, isolating the
+  hold's check from the step's signal; a creation that passes its check
+  before abandonment still creates its veto.
+- `TestRecoveryStepsKeepFreshSignalsAfterTheHoldIsGivenUp`: recovery steps
+  still run with live signals.
+- `TestSetAsideRemovalFinishesAfterGiveUp`: parks bundle-veto cleanup after
+  failed syncs; one veto restores the old VERIFIED, two keep INCOMPLETE.
+- `TestTheConsoleSaysAVerdictWasWrittenButNotDurable`: damages both captured
+  verdicts over PENDING, injects `SetSyncVerdictForTest`, observes FAILED
+  already published at the directory sync, then requires
+  `write=not-durable`, `recordRead=true`, no “not recorded”, and FAILED from
+  the console's read.
+- `TestRenameWithRetryUnsyncedCtxRenamesNothingOnceItsContextEnds`: existing
+  cases cover before the first attempt and between retries; the added case
+  ends the context after the check, before the syscall, and expects the
+  admitted attempt to land. Only this helper's documentation changed.
+
+The pending gates include `internal/atomicwrite` alongside backup, admin
+and cmd/bridge, named regressions under `-race -count=20`, the requested
+negative controls, and docs-check. Rules and History were edited directly;
+no patch artifact or git state change was made.

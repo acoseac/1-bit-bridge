@@ -21,7 +21,8 @@ import (
 // the snapshot's ownership and the lock, is bounded too. A step that overruns
 // its bound is given up: its holder answers its caller, runs no check and no
 // prune, writes nothing but the INCOMPLETE of a verification it gave up, a
-// write given up renaming nothing from then on, and keeps all it holds (the
+// write checking its give-up before each rename attempt (an attempt that
+// passed the check may finish afterward), and keeps all it holds (the
 // lock, and a verification's slot and the snapshot's ownership) until every
 // step it gave up has ended, so nothing protected runs beside a step that may
 // still have the bundle's files open, in this process or another. What a step

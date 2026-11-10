@@ -197,6 +197,25 @@ func TestRenameWithRetryUnsyncedCtxRenamesNothingOnceItsContextEnds(t *testing.T
 			t.Errorf("%d renames were tried, want the one before the context ended", tried)
 		}
 	})
+	t.Run("an attempt that passed the check finishes after cancellation", func(t *testing.T) {
+		src, dst := stagedOver(t)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		tried := 0
+		prev := SetRenameFuncForTest(func(src, dst string) error {
+			tried++
+			// The context check has passed, but the syscall has not begun.
+			cancel()
+			return os.Rename(src, dst)
+		})
+		t.Cleanup(func() { SetRenameFuncForTest(prev) })
+		if err := RenameWithRetryUnsyncedCtx(ctx, src, dst); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := os.ReadFile(dst); err != nil || string(got) != "new" || tried != 1 {
+			t.Errorf("after cancellation: %d attempts, destination %q, %v; want the admitted attempt to land", tried, got, err)
+		}
+	})
 	t.Run("a live context", func(t *testing.T) {
 		tried := 0
 		prev := SetRenameFuncForTest(func(src, dst string) error {

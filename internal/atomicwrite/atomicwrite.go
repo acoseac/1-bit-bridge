@@ -492,13 +492,13 @@ func RenameWithRetryUnsynced(src, dst string) error {
 	return renameRetry(context.Background(), src, dst)
 }
 
-// RenameWithRetryUnsyncedCtx is RenameWithRetryUnsynced asking ctx before
-// every attempt, the first included, and in each wait between them: no
-// rename is tried once ctx has ended (renameStopped: its end, wrapping the
-// last rename's failure where one failed). A caller whose rename must not
-// land once it has given up passes that give-up as ctx (a backup verdict's
-// write its hold gave up, internal/backup). A rename already in the kernel is
-// not taken back.
+// RenameWithRetryUnsyncedCtx is RenameWithRetryUnsynced asking ctx immediately
+// before every attempt, the first included, and in each wait between them.
+// If the check observes ctx ended it skips the attempt (renameStopped wraps
+// the last failure). The check and rename have no atomic admission: ctx can
+// end between them and that attempt still runs. A rename attempt already
+// begun when cancellation lands finishes afterward; it is not taken back.
+// A backup verdict's write passes its step's give-up as ctx.
 func RenameWithRetryUnsyncedCtx(ctx context.Context, src, dst string) error {
 	var err error
 	for _, d := range renameBackoff {

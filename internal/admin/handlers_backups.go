@@ -290,15 +290,20 @@ func (s *Server) verifyInBackground(capture *backup.Capture, backupsRoot string,
 		name := filepath.Base(dir)
 		v := res.Verify.Record
 		switch {
-		case res.VerifyErr != nil && ctx.Err() != nil:
-		case res.VerifyErr != nil && (res.Verify.Write == backup.WriteRecorded || res.Verify.Write == backup.WriteUnchanged):
-			// Its write ended without failing: the error is another step's, its
-			// record's read-back among them, and never says the verdict was not
-			// recorded (backlog B653's sixth round).
-			logger.Warn("admin: a snapshot's verification answered an error once its write had ended", "snapshot", name,
-				"write", res.Verify.Write.String(), "recordRead", res.Verify.RecordRead, "err", res.VerifyErr)
 		case res.VerifyErr != nil:
-			logger.Warn("admin: a snapshot's verdict was not recorded", "snapshot", name, "err", res.VerifyErr)
+			var words string
+			switch res.Verify.Write {
+			case backup.WriteNone, backup.WriteFailed:
+				words = "admin: a snapshot's verdict was not recorded"
+			case backup.WriteNotDurable:
+				words = "admin: a snapshot's verdict was written, not known durable"
+			case backup.WriteUnfinished:
+				words = "admin: a snapshot's verdict write did not finish before it was given up"
+			default: // WriteRecorded or WriteUnchanged.
+				words = "admin: a snapshot's verification answered an error once its write had ended"
+			}
+			logger.Warn(words, "snapshot", name,
+				"write", res.Verify.Write.String(), "recordRead", res.Verify.RecordRead, "err", res.VerifyErr)
 		case v.Passes():
 			logger.Info("admin: snapshot verified", "snapshot", name, "database", backup.StateWords(v.DatabaseState, v.DatabaseReasons),
 				"files", backup.FilesWords(v))

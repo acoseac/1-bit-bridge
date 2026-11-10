@@ -55,11 +55,19 @@ before its check begins, and until that check's verdict is written and
 durable no reader takes the snapshot for verified, whatever happens to the
 write. Only a check that finishes clears that mark: one that is stopped,
 runs past its deadline or fails on an error of the bridge's own leaves it,
-and so does one given up (below), but for a clearing its storage had
-already begun when it was given up, which finishes, the snapshot then
-reading what that finished check found and wrote. Where the storage cannot
-keep that mark, the snapshot is not checked again: `bridge backup --verify`
-says so, and what its earlier check found. When a verdict cannot be
+and so does one given up (below), subject to an operation that already
+passed its last check for give-up. Each removal, rename attempt and creation
+of the mark before a recheck checks immediately before its call. The check
+and call are not atomic: a give-up between them still lets the call run.
+A removal, rename attempt or mark creation already begun when the give-up
+lands finishes afterward. Removal of the last effective mark exposes what
+the finished check found and wrote. Where the storage cannot keep that mark, the snapshot is not checked again: `bridge backup --verify`
+says so, and what its earlier check found. If that refusal is cleaning up
+a mark it created when it is given up, a removal already begun can finish
+after the caller has answered. Successful removal of the last effective
+mark restores the earlier check's record as it stood before the recheck;
+another mark or a failed removal keeps the conservative reading. The
+reported read-back is what was read then. When a verdict cannot be
 written, `bridge backup --verify` says what the check found and, apart, what
 the record reads. When the record cannot be read back once the check has
 written it, or written nothing, `bridge backup --verify`, `bridge backup` and
@@ -80,10 +88,10 @@ after it, reading the record back, and letting go of the snapshot and of
 the folder's lock) has a bound, counted from the moment the check took the
 folder's lock, and so does a prune run on its own. A step that does not
 answer within it (storage that stops answering) is given up, and nothing
-more is checked or pruned; a write given up writes nothing from then on,
-though one its storage had already carried out stays, and a check given up
-before its verdict's write began writes no verdict. The record is written
-once more, where that can still be done, to say the check did not finish,
+more is checked or pruned. Each further write attempt checks for give-up
+as described above; an operation that passed its check may still finish.
+A check given up before its verdict's write is admitted writes no completed
+verdict. The record is written once more, where that can still be done, to say the check did not finish,
 unless it holds the verdict of an earlier check that finished, which stays.
 `bridge backup --verify` and the scheduled snapshot say how far that write
 went (it wrote nothing, it wrote its record, or its write did not finish)

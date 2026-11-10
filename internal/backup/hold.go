@@ -57,7 +57,8 @@ type hold struct {
 // given up before it: never by its caller's stop, so the write of an
 // INCOMPLETE (stepIncomplete), begun after another step's give-up, still
 // lands, and the record is still read back (stepReadBack), while a write that
-// asks it (publishVerdict) lands nothing once it is given up itself.
+// asks it (publishVerdict) checks before each rename attempt: a call that
+// passed its check can finish after the give-up.
 type stepSignal struct {
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -336,6 +337,12 @@ func publishOf[T any](h *hold, by time.Time, write func(given context.Context) T
 // against it, which must wait for the section to end.
 var onAdmission func()
 
+// onAdmissionLocked, nil in production, runs just after the admission lock
+// is taken, before its give-up check. A test lets an abandonment take the
+// lock here, then reacquires it: the check must read that give-up, not a
+// value sampled before the lock. No state has been read or registered yet.
+var onAdmissionLocked func()
+
 // runStep is stepOf, and publishOf where publish is set: a verdict's write,
 // admitted only where the hold is not given up as its step is registered.
 func runStep[T any](h *hold, by time.Time, words string, publish bool, step func(ctx, given context.Context) T, late func(T)) (v T, admitted, answered bool) {
@@ -347,6 +354,9 @@ func runStep[T any](h *hold, by time.Time, words string, publish bool, step func
 	sig := &stepSignal{}
 	sig.ctx, sig.cancel = context.WithCancel(context.Background())
 	h.mu.Lock()
+	if publish && onAdmissionLocked != nil {
+		onAdmissionLocked()
+	}
 	if publish && h.given {
 		h.mu.Unlock()
 		sig.cancel()

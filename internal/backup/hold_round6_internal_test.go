@@ -4,6 +4,8 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -56,6 +58,26 @@ func TestTheVerdictsWriteIsAdmittedInOneSectionWithTheGiveUp(t *testing.T) {
 			t.Error("the write refused was registered as the hold's step")
 		}
 	})
+	t.Run("the give-up is read under the admission lock", func(t *testing.T) {
+		h := heldForTest(t)
+		onAdmissionLocked = func() {
+			// Let abandonment take the actual lock after its acquisition,
+			// before any protected state is read. A check moved immediately
+			// before h.mu.Lock has already sampled false and must fail here.
+			h.mu.Unlock()
+			h.abandon()
+			h.mu.Lock()
+		}
+		t.Cleanup(func() { onAdmissionLocked = nil })
+		ran := false
+		_, admitted, answered := publishOf(h, time.Now().Add(time.Minute), func(context.Context) bool {
+			ran = true
+			return true
+		})
+		if admitted || !answered || ran {
+			t.Errorf("the check sampled before the admission lock: admitted %v, answered %v, ran %v", admitted, answered, ran)
+		}
+	})
 	t.Run("a give-up during the registration", func(t *testing.T) {
 		h := heldForTest(t)
 		gaveUp := make(chan struct{})
@@ -66,12 +88,32 @@ func TestTheVerdictsWriteIsAdmittedInOneSectionWithTheGiveUp(t *testing.T) {
 					h.abandon()
 					close(gaveUp)
 				}()
-				// The give-up takes the hold's lock, which the section holds:
-				// it ends only once the section has, the write's step
-				// registered. Where it ends first, the section was not one.
-				select {
-				case <-gaveUp:
-				case <-time.After(200 * time.Millisecond):
+				// Observe the abandonment actually blocked on this lock;
+				// elapsed time alone does not establish that it tried it.
+				deadline := time.Now().Add(5 * time.Second)
+				blocked := false
+				for time.Now().Before(deadline) {
+					buf := make([]byte, 1<<20)
+					n := runtime.Stack(buf, true)
+					for _, stack := range strings.Split(string(buf[:n]), "\n\n") {
+						if strings.Contains(stack, "[sync.Mutex.Lock]") && strings.Contains(stack, "backup.(*hold).abandon(") &&
+							strings.Contains(stack, "TestTheVerdictsWriteIsAdmittedInOneSectionWithTheGiveUp") {
+							blocked = true
+						}
+					}
+					if blocked {
+						break
+					}
+					select {
+					case <-gaveUp:
+						t.Error("abandonment acquired the lock before the write's registration")
+						return
+					default:
+					}
+					runtime.Gosched()
+				}
+				if !blocked {
+					t.Error("abandonment never reached the admission lock")
 				}
 			})
 		}
@@ -101,10 +143,10 @@ func TestTheVerdictsWriteIsAdmittedInOneSectionWithTheGiveUp(t *testing.T) {
 // TestNoVetoRemovalBeginsOnceItsHoldIsGivenUp is backlog B653's sixth round's
 // red for the removals a write begins over a record it leaves as it is
 // (Codex's P1 on round 5, the Claude API's Low, both reviews of the round's
-// brief): no removal of a veto begins once the write's hold was given up,
+// brief): each removal checks whether the write's hold was given up,
 // though the write's own step was not (an INCOMPLETE's write, begun after the
-// give-up, is handed a signal no earlier give-up ended), nor once the write
-// was given up while the veto's lookup was under way (vetoedAt's Lstat can
+// give-up, is handed a signal no earlier give-up ended), and asks again if
+// the write was given up during the veto's lookup (vetoedAt's Lstat can
 // wait on the folder): the give-up is asked again right before each removal,
 // after the lookup. Red on the round before, which asked the write's signal
 // alone, and once, before the lookup.
