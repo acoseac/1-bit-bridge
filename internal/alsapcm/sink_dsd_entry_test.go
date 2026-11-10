@@ -183,10 +183,18 @@ func TestNativeEveryEntryOnAnEndedLifeAnswersByTheVerdict(t *testing.T) {
 					end()
 					await(t, revoking, "the life's end, its revocation held")
 					if !entry.notPaused {
+						// The watcher's revocation in the close before the call,
+						// so the entry meets the release it names: called first,
+						// a Pause or a WriteDSD went past its entry's refusal to
+						// another return (round 3).
 						revoke()
+						await(t, f.held, "the release's close, held")
+						go func() { answer <- entry.call(s) }()
+					} else {
+						// Its sink's revocation is the entry's own.
+						go func() { answer <- entry.call(s) }()
+						await(t, f.held, "the release's close, held")
 					}
-					go func() { answer <- entry.call(s) }()
-					await(t, f.held, "the release's close, held")
 					pastBudget(t, k, s)
 				default:
 					f.failing.Store(cleanup == "its close failing")
