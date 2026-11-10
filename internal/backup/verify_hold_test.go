@@ -735,6 +735,9 @@ func TestAGivenUpVerificationReadsItsRecordBack(t *testing.T) {
 				if !res.Recorded || res.Record.DatabaseState != backup.StateIncomplete {
 					t.Errorf("given up over a PENDING: recorded %v, the record reads %s; want its INCOMPLETE recorded", res.Recorded, res.Record.DatabaseState)
 				}
+				if strings.Contains(err.Error(), "cache stamp was skipped") {
+					t.Errorf("the live recovery step skipped its cache stamp: %v", err)
+				}
 			case "over a FAILED":
 				if res.Recorded || res.Record.DatabaseState != backup.StateFailed {
 					t.Errorf("given up over a FAILED: recorded %v, the record reads %s; want nothing recorded and FAILED read", res.Recorded, res.Record.DatabaseState)

@@ -258,6 +258,10 @@ func setAside(dir string, p publication) error {
 type publication struct {
 	given context.Context
 	held  func() bool
+	// recovery is the INCOMPLETE step registered after publication admission
+	// was refused. Only its post-rename stamp uses the fresh step's signal
+	// alone; every veto operation still checks both signals.
+	recovery bool
 }
 
 // givenUp reports whether the write was given up, its step or its hold.
@@ -340,9 +344,11 @@ func publishVerdict(dir string, found Verification, prior *Verification, doubted
 	if err := stageAndRename(p.given, mpath, data); err != nil {
 		return Verification{}, false, fmt.Errorf("the verdict was not written: %w", err)
 	}
-	// The record readers read has changed, whatever follows.
+	// The record readers read has changed, whatever follows. Recovery starts
+	// after the hold's give-up by design; its fresh step may still stamp.
+	// Ordinary publications retain both guards, as do all veto operations.
 	defer func() {
-		if p.givenUp() {
+		if p.given.Err() != nil || (!p.recovery && p.givenUp()) {
 			resultErr = errors.Join(resultErr, errCacheStampSkipped)
 		} else {
 			stampChange(root)

@@ -220,6 +220,9 @@ func TestBridgeBackupVerifySaysWhatAGivenUpVerificationsRecordReads(t *testing.T
 			var stdout, stderr bytes.Buffer
 			code := backupCmd([]string{"--config", cfgPath, "--verify", dir}, &stdout, &stderr)
 			out, errs := stdout.String(), stderr.String()
+			if (tc.name == "over a PENDING" || tc.name == "whose record was not read back") && strings.Contains(out+errs, "cache stamp was skipped") {
+				t.Errorf("the live recovery step skipped its cache stamp:\n%s%s", out, errs)
+			}
 			if code != 1 || !strings.Contains(errs, "the verification was given up, and its step still holds the snapshots until it ends") ||
 				!strings.Contains(errs, backup.ErrCheckGivenUp.Error()) {
 				t.Fatalf("bridge backup --verify = %d, want 1 and its verification given up\n%s%s", code, out, errs)
@@ -329,6 +332,9 @@ func TestTheTickerSaysWhatAGivenUpVerificationsRecordReads(t *testing.T) {
 			errs := stderr.String()
 			if !strings.Contains(errs, "its step still holds the snapshots until it ends; "+tc.wrote) {
 				t.Errorf("the pass did not say %q:\n%s", tc.wrote, errs)
+			}
+			if tc.name == "over a PENDING" && strings.Contains(errs, "cache stamp was skipped") {
+				t.Errorf("the live recovery step skipped its cache stamp:\n%s", errs)
 			}
 			if tc.name == "whose INCOMPLETE is not written" && !strings.Contains(errs, "injected: the staging failed") {
 				t.Errorf("the pass did not say its write failed:\n%s", errs)
@@ -440,5 +446,33 @@ func TestTheDoctorNamesAHoldGivenUpWhileTheBackupsFolderDoesNotAnswer(t *testing
 	}
 	if !strings.Contains(newest.Summary, "did not answer") {
 		t.Errorf("backup-newest = %+v; want it saying the folder did not answer", newest)
+	}
+}
+
+// TestTheReportersKeepARecordedRecoveryAndItsCacheWarning separates the
+// durable record from the console's possibly stale cached reading.
+func TestTheReportersKeepARecordedRecoveryAndItsCacheWarning(t *testing.T) {
+	v := backup.VerifyResult{
+		Write: backup.WriteRecorded, Recorded: true, RecordRead: true,
+		Record: backup.Verification{
+			DatabaseState: backup.StateIncomplete, DatabaseReasons: []backup.Reason{backup.ReasonDeadline},
+			FilesState: backup.StateIncomplete, FilesReasons: []backup.Reason{backup.ReasonDeadline},
+		},
+	}
+	warning := "the cache stamp was skipped after give-up; the console may retain its cached reading until its cache expires or the backups folder changes"
+	err := errors.Join(backup.ErrCheckGivenUp, errors.New(warning))
+	var out, errs bytes.Buffer
+	if reportVerdict(&out, &errs, "", v, err) {
+		t.Error("a given-up recovery passed")
+	}
+	cli := out.String() + errs.String()
+	out.Reset()
+	errs.Reset()
+	reportTickerVerdict(context.Background(), &out, &errs, "startup", backup.Result{Dir: "snapshot", Verify: v, VerifyErr: err})
+	for _, words := range []string{cli, out.String() + errs.String()} {
+		if !strings.Contains(words, "it wrote its record") || !strings.Contains(words, warning) ||
+			strings.Contains(words, "not known to survive a crash") || strings.Contains(words, "not recorded") {
+			t.Errorf("recorded recovery or cache warning lost: %s", words)
+		}
 	}
 }

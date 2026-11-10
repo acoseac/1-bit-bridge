@@ -146,8 +146,17 @@ answer within it (storage that stops answering) is given up, and nothing
 more is checked or pruned. Each further write attempt checks for give-up
 as described above; an operation that passed its check may still finish.
 A check given up before its verdict's write is admitted writes no completed
-verdict. The record is written once more, where that can still be done, to say the check did not finish,
-unless it holds the verdict of an earlier check that finished, which stays.
+verdict. A separate recovery step writes INCOMPLETE over a pending or
+incomplete record, then reads it back. Its own give-up signal controls the
+cache update: the earlier give-up does not prevent that update. If the
+recovery step itself is given up after its write and sync finish, its
+record is still reported as written, with a separate warning that the
+console may retain its cached reading until expiry or a backups-folder
+change. A failed sync still means the write is not known to survive a crash.
+A completed verdict stays. If either component is VERIFIED and the merge
+would change the other, recovery needs a veto; the earlier give-up prevents
+that veto from being confirmed or created, even if one already exists.
+Recovery then writes nothing and reports that refusal beside the read-back.
 `bridge backup --verify` and the scheduled snapshot say how far that write
 went (it wrote nothing, it wrote its record, or its write did not finish)
 and what the record reads, or that it could not be read back, or that its

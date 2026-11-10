@@ -151,6 +151,10 @@ func (p published) outcome(answered bool) WriteOutcome {
 	switch {
 	case !answered:
 		return WriteUnfinished
+	case p.written && cacheStampWarningOnly(p.err):
+		// Cache invalidation says nothing about the record's durability.
+		// Keep the warning in p.err for the reporters.
+		return WriteRecorded
 	case p.err != nil && p.written:
 		return WriteNotDurable
 	case p.err != nil:
@@ -159,6 +163,26 @@ func (p published) outcome(answered bool) WriteOutcome {
 		return WriteRecorded
 	}
 	return WriteUnchanged
+}
+
+// cacheStampWarningOnly recognizes a skipped stamp, including wrappers and
+// joins containing only that warning. A joined sync or other failure must
+// still make a written record WriteNotDurable.
+func cacheStampWarningOnly(err error) bool {
+	if !errors.Is(err, errCacheStampSkipped) {
+		return false
+	}
+	switch e := err.(type) {
+	case interface{ Unwrap() error }:
+		return cacheStampWarningOnly(e.Unwrap())
+	case interface{ Unwrap() []error }:
+		for _, child := range e.Unwrap() {
+			if child != nil && !cacheStampWarningOnly(child) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // VerifySnapshot checks the snapshot in dir and records its verdict, under
@@ -176,7 +200,8 @@ func (p published) outcome(answered bool) WriteOutcome {
 // up), the write's failure (ErrVerdictNotDurable among them); or that the
 // record was not read back once the verification had done what it did
 // (ErrRecordNotReadBack, joined to any of those, or alone where the write
-// ended without failing: VerifyResult.Write says what it did).
+// ended without failing: VerifyResult.Write says what it did); or a separate
+// cache warning, which alone does not change a recorded write's durability.
 func VerifySnapshot(ctx context.Context, dir string, o VerifyOptions) (VerifyResult, error) {
 	res, err, _ := verifyAndThen(ctx, dir, o, nil, nil)
 	return res, err
@@ -576,7 +601,7 @@ func verifyHeld(ctx context.Context, dir string, o VerifyOptions, after func(con
 	})
 	if !admitted {
 		pub, wrote = stepOf(h, laterBound(deadline), stepIncomplete, func(_, given context.Context) published {
-			_, written, err := publishVerdict(snap, incompleteOf(checkCtx), prior, op.doubted, publication{given: given, held: h.gaveUp})
+			_, written, err := publishVerdict(snap, incompleteOf(checkCtx), prior, op.doubted, publication{given: given, held: h.gaveUp, recovery: true})
 			return published{written: written, err: err}
 		}, nil)
 	}
@@ -793,7 +818,8 @@ type Result struct {
 	CaptureErr error
 	// Verify is the kept bundle's verification.
 	Verify VerifyResult
-	// VerifyErr is why its verdict was not recorded, or not durably.
+	// VerifyErr reports verification, publication or read-back failures,
+	// including a cache warning that alone leaves a durable write recorded.
 	VerifyErr error
 	// Prune is the prune after the bundle, which runs whatever its verdict;
 	// PruneErr its keep-policy's error, PruneSkipped a prune that did not run:

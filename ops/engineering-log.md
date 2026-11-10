@@ -93553,3 +93553,79 @@ form state the resulting behavior and the permission boundary.
    renameable tree is out of scope. Documentation correction only, with
    no baseline-red runtime claim or new anchoring. Both staged helpers
    already defer Close before removal; the leak finding requires no edit.
+
+
+## 2026-11-10 — B653 PR 1 round 15: restore recovery publication and separate cache warnings
+
+Starting HEAD was checked as `802a641936ccb33ce1ceab6b2fb66838070f1dd4`.
+The brief and its two reviews were read in full; its DECISIONS govern this
+round. This worker edited files only and formatted the changed Go files
+with the installed go1.27.3 gofmt. No builds, tests, negative controls or
+state-changing git commands were run; the orchestrator owns validation.
+
+Cause: round 13's post-rename stamp used `p.givenUp()`, which includes the
+already-abandoned hold, so PENDING-to-INCOMPLETE recovery returned
+`errCacheStampSkipped` even after its rename and sync succeeded.
+`published.outcome` mapped every written result with an error to
+`WriteNotDurable`, making `Recorded` false, though this recovery never
+entered `putVeto`.
+
+The recovery call after refused `publishOf` admission now sets
+`publication.recovery`: only that publication's post-rename stamp uses its
+fresh step's give-up alone. Ordinary publications still guard their stamp
+with both step and hold. This explicit distinction preserves round 13's
+hold-only give-up cases; changing every publication's stamp to step-only
+would break them. Every veto guard and ordinary publication admission stay
+unchanged. A recovery step subsequently given up skips its stamp too.
+
+A written record whose only error is the skipped-stamp warning remains
+`WriteRecorded`; its error is preserved for the reporters' separate console
+cache warning. Wrapped/joined warnings are recognized without hiding a
+joined sync or other error. Real sync failure is still `WriteNotDurable`.
+An unanswered step is still `WriteUnfinished`, and a warning never makes an
+unwritten record recorded. Recovery changing a record holding a VERIFIED
+component still needs a veto, which the abandoned hold refuses to confirm
+or create even when one exists. It writes nothing, returns `WriteFailed`
+and `Recorded` false, says the veto could not be confirmed, and reads back
+what stands. Rules, the public guide and History state that limit.
+
+Added `TestRecoveryPublicationSeparatesItsCacheStampFromDurability` drives
+`verifyHeld` and its actual fallback with the existing after-check and sync
+seams: live recovery invalidates the planted old root stamp; give-up of the
+fresh step skips it but keeps a synced write recorded with the warning;
+sync failure alone or joined to that warning remains not durable; and
+mixed records with and without a veto refuse without a placement lookup
+past abandonment. No prune runs in any row. The planted stamp is an hour
+old, avoiding clock-granularity assumptions; retained holds are drained
+before seams are restored. No new seam was added.
+`TestACacheWarningNeverHidesAPublicationFailure` covers error trees and the
+unanswered/unwritten cases. `TestTheReportersKeepARecordedRecoveryAndItsCacheWarning`
+requires both CLI and ticker to retain recorded-write words and the full
+cache warning without claiming lost durability.
+
+The original four regression cases must pass:
+- `TestAGivenUpVerificationReadsItsRecordBack/over_a_PENDING`;
+- `TestBridgeBackupVerifySaysWhatAGivenUpVerificationsRecordReads/over_a_PENDING`;
+- `TestBridgeBackupVerifySaysWhatAGivenUpVerificationsRecordReads/whose_record_was_not_read_back`;
+- `TestTheTickerSaysWhatAGivenUpVerificationsRecordReads/over_a_PENDING`.
+They now also reject a skipped-stamp warning for their live recovery step.
+Negative control for the orchestrator: replace only the post-rename stamp
+condition in `publishVerdict` with `p.givenUp()`. All four must fail their
+new no-skipped-stamp assertions, and the live-stamp worker case must fail.
+With the warning-only outcome fix retained, the four's original recording
+assertions alone would no longer be red; reverting both production changes
+reproduces their original failures. Leave the tests and all seams in place.
+
+Preservation coverage that must stay green includes round 13/14's
+`TestBothVetoCallersGuardEveryAttemptAndReportSkippedStamps` (especially the
+ordinary publication's hold-only give-up and existing-root cases),
+`TestTheNoBarrierWorkerReportsAVetoAcrossGiveUp`,
+`TestOnlyACompletedFailureDisprovesAVerifiedComponent` and
+`TestADisprovedNoBarrierRecordCannotAnchorAFreshProcessPrune`, plus ordinary
+admission and recovery-signal coverage in
+`TestTheVerdictsWriteIsAdmittedInOneSectionWithTheGiveUp`,
+`TestAVerdictsWriteIsAdmittedOnlyBeforeAGiveUp`,
+`TestNoVetoRemovalBeginsOnceItsHoldIsGivenUp` and
+`TestRecoveryStepsKeepFreshSignalsAfterTheHoldIsGivenUp`.
+Round 13/14's descriptor-mode, doctor advice, console cache expiry and
+startup replacement cases are unchanged and must remain green too.
