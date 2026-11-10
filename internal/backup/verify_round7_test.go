@@ -41,13 +41,19 @@ func TestSetAsideRemovalFinishesAfterGiveUp(t *testing.T) {
 				}
 				return os.Remove(path)
 			}))
-			t.Cleanup(func() { p.release(); awaitClean(t) })
+			callerDone := make(chan struct{})
+			t.Cleanup(func() {
+				p.release()
+				waitCaller(t, callerDone)
+				awaitClean(t)
+			})
 			type answer struct {
 				res backup.VerifyResult
 				err error
 			}
 			done := make(chan answer, 1)
 			go func() {
+				defer close(callerDone)
 				res, err := backup.VerifySnapshot(context.Background(), dir, backup.VerifyOptions{BackupsRoot: root})
 				done <- answer{res, err}
 			}()

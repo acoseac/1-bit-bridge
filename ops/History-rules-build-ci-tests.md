@@ -1645,3 +1645,42 @@ with runtime.Version(), not merely a compatible major.minor. check-go-version
 compares full versions, and check-build-tags requires the generator, final-stage
 COPY and full toolchain pin. Release validation compares the image's notice
 bytes with a fresh generation, for both published image architectures.
+
+
+## B653 PR 1 round 8: resolved fixtures and joined verification callers (2026-11-10)
+
+`VerifySnapshot` resolves directories before calling path-sensitive hooks.
+Fixtures now resolve their directories once through `fsutil.ResolveLinks`
+before deriving hook paths. This covers macOS's `/var` alias and Windows
+short names and junctions. The stopped-write, staging/rename/sync, veto and
+late-removal fixtures had compared the resolved hook argument with the raw
+temporary directory; the hook never parked or injected its failure. An
+unbounded wait for that park could time out the whole test binary.
+
+An outer verification result precedes its worker's release of the slot and
+folder lock. A claim also answers before its hold has finished releasing.
+The dead-capture and claimed-snapshot prune cases must drain those holds
+before asking a prune to run, and assert that the prune was not skipped.
+Skipping for a busy folder is valid production behavior, not a prune error.
+
+For cleanup, release all stalls and cancel, join each outer caller through
+a completion channel, then await retained holds before restoring seams or
+closing fixtures. Apply this to `VerifySnapshot`, `FinishCapture`, console
+jobs and tickers alike. Register this cleanup after the seams it protects:
+LIFO runs it first. `ActiveHoldsForTest` counts even a cancellation handoff
+with no verification slot or overrun mark; a zero count alone is not a
+caller join. `backuptest.AwaitIdle` must follow that join.
+
+Admission hooks receive `*hold`, live in atomic pointers and return unless
+the hold is their test's. The admission test observes a failed `TryLock`
+through `onAbandonBlocked`, proving contention without matching runtime
+stack strings. The production path still acquires the same mutex and runs
+no filesystem operation inside admission.
+
+The post-answer release window is pinned by
+`TestAnAnsweredVerificationOrClaimCanStillHoldTheFolder`. Keep fixture
+creation outside shortened verification deadlines. Tests aimed at a write
+stall use `SetStepBoundForTest` for that snapshot and the named steps,
+leaving the real check its normal deadline; the slow-step case parks until
+another caller is demonstrably waiting, then releases it inside a generous
+bound instead of spending that bound on repeated sleeps.

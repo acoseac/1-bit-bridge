@@ -178,6 +178,7 @@ func TestAVerifiedRecordLeftForAFailedOneIsVetoedWhenItsWriteFails(t *testing.T)
 				}, syscall.EPERM))
 			}
 			res, err := backup.VerifySnapshot(t.Context(), dir, backup.VerifyOptions{})
+			awaitClean(t)
 			restore()
 			if res.Found.DatabaseState != backup.StateFailed || res.Found.FilesState != wantFiles {
 				t.Fatalf("the check found %s/%s, want FAILED/%s: the test did not reach the case", res.Found.DatabaseState, res.Found.FilesState, wantFiles)
@@ -298,6 +299,7 @@ func TestARecheckWithNoDurableVetoIsRefusedBeforeItsCheck(t *testing.T) {
 				restore = func() { restoreSync(); prev() }
 			}
 			res, err := backup.VerifySnapshot(t.Context(), dir, backup.VerifyOptions{})
+			awaitClean(t)
 			restore()
 			if !errors.Is(err, backup.ErrRecheckRefused) {
 				t.Fatalf("a recheck with no durable veto answered %v, want ErrRecheckRefused", err)
@@ -337,6 +339,7 @@ func TestANewVerifiedIsNotWrittenWhereNoVetoCanBeHad(t *testing.T) {
 	before := readBytes(t, mpath)
 	restore := backup.SetVerdictWriteFailuresForTest(nil, nil, func(string) error { return errors.New("injected") })
 	res := backup.FinishCapture(t.Context(), c, nil, backup.VerifyOptions{})
+	awaitClean(t)
 	restore()
 	if res.Verify.Found.DatabaseState != backup.StateVerified {
 		t.Fatalf("the check found %s, want VERIFIED: the test did not reach the case", res.Verify.Found.DatabaseState)

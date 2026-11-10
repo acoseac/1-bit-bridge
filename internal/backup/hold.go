@@ -3,6 +3,7 @@ package backup
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -86,10 +87,14 @@ const (
 // (SetReleaseBoundForTest).
 var releaseBound = StopWriteBound
 
+// activeHolds includes workers that have neither a slot nor an overrun mark.
+var activeHolds atomic.Int64
+
 // newHold is a hold for the snapshot named, on the folder reached by the
 // spellings given (spellingKey's), its caller's context ctx; no lock is held
 // yet (held).
 func newHold(ctx context.Context, snapshot string, spellings ...string) *hold {
+	activeHolds.Add(1)
 	h := &hold{snapshot: snapshot, at: stepLockWait, stop: ctx.Done()}
 	h.ctx, h.cancel = context.WithCancel(ctx)
 	for _, s := range spellings {
@@ -178,7 +183,12 @@ func (h *hold) giveUpAs(done <-chan struct{}, step string, byCaller bool) {
 // abandon is the caller's give-up of a holder it stopped waiting for, at the
 // step it is in.
 func (h *hold) abandon() {
-	h.mu.Lock()
+	if !h.mu.TryLock() {
+		if hook := onAbandonBlocked.Load(); hook != nil {
+			(*hook)(h)
+		}
+		h.mu.Lock()
+	}
 	step := h.at
 	h.mu.Unlock()
 	h.giveUpAs(nil, step, true)
@@ -298,11 +308,16 @@ func (h *hold) drop() {
 		<-w
 	}
 	h.mu.Lock()
+	if h.ended {
+		h.mu.Unlock()
+		return
+	}
 	h.ended = true
 	mark := h.mark
 	h.mu.Unlock()
 	mark.drop()
 	h.cancel()
+	activeHolds.Add(-1)
 }
 
 // stepOf runs step under h on a goroutine of its own, the step named words,
@@ -335,13 +350,17 @@ func publishOf[T any](h *hold, by time.Time, write func(given context.Context) T
 // inside the section of the hold's lock that decides it, between the check of
 // the give-up and the registration of the step: a test parks a give-up
 // against it, which must wait for the section to end.
-var onAdmission func()
+var onAdmission atomic.Pointer[func(*hold)]
 
 // onAdmissionLocked, nil in production, runs just after the admission lock
 // is taken, before its give-up check. A test lets an abandonment take the
 // lock here, then reacquires it: the check must read that give-up, not a
 // value sampled before the lock. No state has been read or registered yet.
-var onAdmissionLocked func()
+var onAdmissionLocked atomic.Pointer[func(*hold)]
+
+// onAbandonBlocked observes an actual failed try of the admission mutex.
+// It is nil in production and scoped to the hold by its test callback.
+var onAbandonBlocked atomic.Pointer[func(*hold)]
 
 // runStep is stepOf, and publishOf where publish is set: a verdict's write,
 // admitted only where the hold is not given up as its step is registered.
@@ -354,18 +373,21 @@ func runStep[T any](h *hold, by time.Time, words string, publish bool, step func
 	sig := &stepSignal{}
 	sig.ctx, sig.cancel = context.WithCancel(context.Background())
 	h.mu.Lock()
-	if publish && onAdmissionLocked != nil {
-		onAdmissionLocked()
+	if hook := onAdmissionLocked.Load(); publish && hook != nil {
+		(*hook)(h)
 	}
 	if publish && h.given {
 		h.mu.Unlock()
 		sig.cancel()
 		return v, false, true
 	}
-	if publish && onAdmission != nil {
-		onAdmission()
+	if hook := onAdmission.Load(); publish && hook != nil {
+		(*hook)(h)
 	}
 	h.at, h.step = words, sig
+	if fixture := stepBoundForTest.Load(); fixture != nil && fixture.root == h.root && fixture.snapshot == h.snapshot && fixture.steps[words] {
+		by = time.Now().Add(fixture.within)
+	}
 	h.mu.Unlock()
 	out := make(chan answer, 1)
 	done := make(chan struct{})

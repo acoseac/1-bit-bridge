@@ -96,8 +96,10 @@ unless it holds the verdict of an earlier check that finished, which stays.
 `bridge backup --verify` and the scheduled snapshot say how far that write
 went (it wrote nothing, it wrote its record, or its write did not finish)
 and what the record reads, or that it could not be read back, or that its
-read-back was given up. A step that is
-slow and keeps within its bound changes nothing.
+read-back was given up. If the caller stops waiting before the write's
+outcome arrives, it says that the write outcome is unknown: the verdict
+may already have been written. A step that is slow and keeps within its
+bound changes nothing.
 
 Until a step given up ends, no other check or prune of those snapshots runs
 and no scheduled snapshot is taken. In the bridge that runs it they are

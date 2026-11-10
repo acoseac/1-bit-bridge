@@ -2,6 +2,8 @@ package backup
 
 import (
 	"os"
+	"path/filepath"
+	"sync/atomic"
 	"time"
 )
 
@@ -258,4 +260,50 @@ func TakeOwnerForTest(dir string) (release func(), err error) {
 		return nil, err
 	}
 	return o.release, nil
+}
+
+// onVerifyAnswer and onVerifyExpired synchronize tests with the two outcome
+// handoffs. Their callbacks must return unless dir is the test's snapshot.
+var onVerifyAnswer atomic.Pointer[func(string)]
+var onVerifyExpired atomic.Pointer[func(string)]
+
+// SetVerifyHandoffForTest installs hooks before a worker hands its answer to
+// its caller and once the caller chooses expiration, and returns the restore.
+func SetVerifyHandoffForTest(answer, expired func(string)) func() {
+	var a, e *func(string)
+	if answer != nil {
+		a = &answer
+	}
+	if expired != nil {
+		e = &expired
+	}
+	oldAnswer, oldExpired := onVerifyAnswer.Swap(a), onVerifyExpired.Swap(e)
+	return func() { onVerifyAnswer.Store(oldAnswer); onVerifyExpired.Store(oldExpired) }
+}
+
+// ActiveHoldsForTest counts workers still retaining a hold, including a
+// cancellation handoff that has neither a slot nor an overrun mark yet.
+// Tests join their callers before waiting for this count to reach zero.
+func ActiveHoldsForTest() int64 { return activeHolds.Load() }
+
+// stepBoundFixture shortens only named steps of one snapshot in a test;
+// setup and the real SQLite check keep their normal deadline.
+type stepBoundFixture struct {
+	root, snapshot string
+	within         time.Duration
+	steps          map[string]bool
+}
+
+var stepBoundForTest atomic.Pointer[stepBoundFixture]
+
+// SetStepBoundForTest bounds the named steps from their admission for the
+// resolved snapshot dir. It returns a restore to run after callers and holds
+// have ended. Other snapshots and steps keep their production bounds.
+func SetStepBoundForTest(dir string, within time.Duration, steps ...string) func() {
+	fixture := &stepBoundFixture{root: filepath.Dir(dir), snapshot: filepath.Base(dir), within: within, steps: make(map[string]bool, len(steps))}
+	for _, step := range steps {
+		fixture.steps[step] = true
+	}
+	prev := stepBoundForTest.Swap(fixture)
+	return func() { stepBoundForTest.Store(prev) }
 }

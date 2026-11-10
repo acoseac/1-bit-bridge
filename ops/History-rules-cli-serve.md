@@ -4758,3 +4758,24 @@ barrier with `SetSyncVerdictForTest`, observes FAILED already published,
 and checks the log and subsequent console read. Validation is delegated to
 the orchestrator; this edit-only round ran no builds, tests or docs checks.
 The record is in `ops/engineering-log.md`, 2026-11-10, B653 PR 1 round 7.
+
+
+*The eighth round* (2026-11-10). A caller that stops waiting cannot infer
+that nothing was written. `verifyAndThen` returns `WriteUnknown` when its
+outer expiration wins, or a recovered worker panic leaves no outcome.
+`abandonPending` returns its completed INCOMPLETE publication's outcome to
+both cancellation handoffs (slot queue and folder-lock wait); a missing
+answer is unknown. These handoffs do not invent a record read-back. Every
+consumer uses `Write`, including CLI and ticker errors with empty `Found`.
+The console logs shutdown errors with `write` and `recordRead`, and calls an
+unknown outcome unknown. Its deterministic outer-expiration case parks the
+worker answer and asserts the expiration hook; a separate uncancelled case
+lets the worker report its unfinished write. Both observe FAILED already
+published before the directory sync stalls. Additional cases cancel
+`ScanCtx` during the check and give up a staged write.
+
+Pins: `TestAStopBeforeVerificationReportsItsIncompleteWrite`,
+`TestTheConsoleReportsCancellationAndEveryWriteHandoff`, and
+`TestTheReportersKeepWriteProgressWithoutAFoundVerdict`. The fixture and
+cleanup invariants are in `History-rules-build-ci-tests.md`'s eighth-round
+entry; the supporting record is in `ops/engineering-log.md`.

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/backup"
+	"github.com/acoseac/1-bit-bridge/internal/backup/backuptest"
 	"github.com/acoseac/1-bit-bridge/internal/doctor"
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
@@ -251,7 +252,11 @@ func TestBridgeBackupVerifyTakesTheBackupsFoldersLockWhateverPathItIsGiven(t *te
 			parked, release := parkVerification(t)
 			code := make(chan int, 1)
 			var out, errs safeBuffer
+			callerDone := make(chan struct{})
+			drainLoopOnCleanup(t, release, callerDone, "backup verify")
+			t.Cleanup(func() { release(); waitClosed(t, callerDone, "backup verify"); awaitVerificationsEnd(t, root) })
 			go func() {
+				defer close(callerDone)
 				code <- backupCmdContext(context.Background(), []string{"--config", cfgPath, "--verify", arg}, &out, &errs)
 			}()
 			select {
@@ -435,12 +440,6 @@ func TestATickerStoppedWhileAVerificationsStepHangsReturnsWithinItsBound(t *test
 				})
 			}
 			letGo := func() { released.Do(func() { close(release) }) }
-			// Registered first, so it runs last: the abandoned worker, which
-			// read the seam, has ended before the seam is put back.
-			t.Cleanup(func() {
-				letGo()
-				awaitVerificationsEnd(t, root)
-			})
 			if step == "its manifest's read" {
 				t.Cleanup(backup.SetOnManifestReadForTest(func(string) { hang() }))
 			} else {
@@ -452,6 +451,7 @@ func TestATickerStoppedWhileAVerificationsStepHangsReturnsWithinItsBound(t *test
 			ctx, cancel := context.WithCancel(context.Background())
 			done := make(chan struct{})
 			drainLoopOnCleanup(t, cancel, done, "the backup ticker")
+			t.Cleanup(func() { letGo(); cancel(); waitClosed(t, done, "the backup ticker"); awaitVerificationsEnd(t, root) })
 			var stdout, stderr safeBuffer
 			go func() {
 				defer close(done)
@@ -486,6 +486,7 @@ func TestATickerStoppedWhileAVerificationsStepHangsReturnsWithinItsBound(t *test
 // once its verification, abandoned or not, has ended and let its lock go.
 func awaitVerificationsEnd(t *testing.T, root string) {
 	t.Helper()
+	backuptest.AwaitIdle(t)
 	deadline := time.Now().Add(30 * time.Second)
 	for _, dir := range snapshotDirs(t, root) {
 		for {

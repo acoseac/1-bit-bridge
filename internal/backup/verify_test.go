@@ -28,7 +28,7 @@ import (
 // snapshot's database has b-tree pages a damaged one can be one of.
 func storeWithTracks(t *testing.T, n int) backup.Sources {
 	t.Helper()
-	dataDir := t.TempDir()
+	dataDir := resolvedTestDir(t, t.TempDir())
 	src := primeLiveState(t, dataDir)
 	st, err := manifest.OpenStore(src.ManifestDB)
 	if err != nil {
@@ -109,6 +109,7 @@ func listed(t *testing.T, dir string) backup.Verification {
 func verifyT(t *testing.T, dir string, level backup.CheckLevel) backup.VerifyResult {
 	t.Helper()
 	res, err := backup.VerifySnapshot(t.Context(), dir, backup.VerifyOptions{Level: level})
+	awaitClean(t)
 	if err != nil {
 		t.Fatalf("VerifySnapshot: %v", err)
 	}
@@ -646,11 +647,16 @@ func TestACancelledVerificationWritesIncomplete(t *testing.T) {
 	var once sync.Once
 	t.Cleanup(backup.SetOnLowPriorityForTest(func() { once.Do(func() { close(started) }) }))
 	ctx, cancel := context.WithCancel(t.Context())
-	go func() {
-		<-started
+	callers := joinBackupCallers(t, cancel)
+	callers.start(func() {
+		select {
+		case <-ctx.Done():
+			return
+		case <-started:
+		}
 		time.Sleep(50 * time.Millisecond)
 		cancel()
-	}()
+	})
 	_, err = backup.VerifySnapshot(ctx, dir, backup.VerifyOptions{})
 	if !errors.Is(err, context.Canceled) {
 		t.Errorf("a stopped verification answered %v, want the stop", err)
@@ -718,7 +724,7 @@ func TestAStopWithABlockedSyncReturnsWithinItsBound(t *testing.T) {
 			inSync := make(chan struct{}, 1)
 			entered := make(chan struct{})
 			var enter sync.Once
-			t.Cleanup(func() { close(release) })
+			letGo := sync.OnceFunc(func() { close(release) })
 			t.Cleanup(backup.SetSyncVerdictForTest(func(string) error {
 				enter.Do(func() { close(entered) })
 				select {
@@ -739,21 +745,39 @@ func TestAStopWithABlockedSyncReturnsWithinItsBound(t *testing.T) {
 			}()
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
+			var callers *backupCallers
 			if stopDuring == "the check" {
 				t.Cleanup(backup.SetVerifyReadRateForTest(1))
 				started := make(chan struct{})
 				var once sync.Once
 				t.Cleanup(backup.SetOnLowPriorityForTest(func() { once.Do(func() { close(started) }) }))
-				go func() { <-started; time.Sleep(20 * time.Millisecond); cancel() }()
+				callers = joinBackupCallers(t, func() { letGo(); cancel() })
+				callers.start(func() {
+					select {
+					case <-ctx.Done():
+						return
+					case <-started:
+					}
+					time.Sleep(20 * time.Millisecond)
+					cancel()
+				})
 			} else {
-				go func() { <-inSync; cancel() }()
+				callers = joinBackupCallers(t, func() { letGo(); cancel() })
+				callers.start(func() {
+					select {
+					case <-ctx.Done():
+						return
+					case <-inSync:
+					}
+					cancel()
+				})
 			}
 			done := make(chan time.Time, 1)
 			var stoppedAt time.Time
-			go func() {
+			callers.start(func() {
 				_ = backup.Finish(ctx, dir, func() int { return 1 }, backup.VerifyOptions{})
 				done <- time.Now()
-			}()
+			})
 			<-ctx.Done()
 			stoppedAt = time.Now()
 			select {
@@ -948,21 +972,24 @@ func TestAPrunerRacingAVerificationSkipsItsRound(t *testing.T) {
 		close(parked)
 		<-release
 	}))
+	letGo := sync.OnceFunc(func() { close(release) })
+	callers := joinBackupCallers(t, letGo)
 	done := make(chan error, 1)
-	go func() {
+	callers.start(func() {
 		_, err := backup.VerifySnapshot(context.Background(), dir, backup.VerifyOptions{})
 		done <- err
-	}()
+	})
 	<-parked
 	res, err := backup.Prune(filepath.Dir(dir), 1)
 	if err != nil || !res.Skipped || res.Deleted != 0 || !pathExists(t, old) {
 		t.Errorf("a prune beside a verification holding the lock: %+v, %v, the older snapshot there %v; want skipped, nothing deleted",
 			res, err, pathExists(t, old))
 	}
-	close(release)
+	letGo()
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
+	awaitClean(t)
 	res, err = backup.Prune(filepath.Dir(dir), 1)
 	if err != nil || res.Skipped || res.Deleted != 1 || pathExists(t, old) {
 		t.Errorf("the prune after the verification: %+v, %v; want the older snapshot deleted", res, err)
@@ -1022,16 +1049,18 @@ func TestTwoVerificationsOfOneSnapshotWriteOneAtATime(t *testing.T) {
 				res backup.VerifyResult
 				err error
 			}
+			letGo := sync.OnceFunc(func() { close(release) })
+			callers := joinBackupCallers(t, letGo)
 			firstDone, secondDone := make(chan outcome, 1), make(chan outcome, 1)
-			go func() {
+			callers.start(func() {
 				res, err := backup.VerifySnapshot(context.Background(), dir, backup.VerifyOptions{Level: backup.CheckQuick})
 				firstDone <- outcome{res, err}
-			}()
+			})
 			<-parked
-			go func() {
+			callers.start(func() {
 				res, err := tc.second(context.Background(), dir, backup.VerifyOptions{Level: backup.CheckFull})
 				secondDone <- outcome{res, err}
-			}()
+			})
 			want, other := slotWait, lockWait
 			if tc.waits == "lock" {
 				want, other = lockWait, slotWait
@@ -1041,7 +1070,7 @@ func TestTwoVerificationsOfOneSnapshotWriteOneAtATime(t *testing.T) {
 			case <-other:
 				t.Fatalf("the second verification waited at the wrong place while the first held its turn; want its wait at the %s", tc.waits)
 			case o := <-secondDone:
-				close(release)
+				letGo()
 				t.Fatalf("the second verification ended (%+v, %v) while the first was parked holding its turn", o.res.Record, o.err)
 			}
 			if tc.waits == "slot" {
@@ -1058,7 +1087,7 @@ func TestTwoVerificationsOfOneSnapshotWriteOneAtATime(t *testing.T) {
 				t.Fatalf("the second verification ended (%+v, %v) while the first was parked", o.res.Record, o.err)
 			default:
 			}
-			close(release)
+			letGo()
 			level := backup.CheckFull
 			for i, o := range []outcome{<-firstDone, <-secondDone} {
 				if i == 1 && !fsutil.SyncsParentDir {
@@ -1142,4 +1171,15 @@ func TestNoLockNoProtectedWork(t *testing.T) {
 			}
 		})
 	}
+}
+
+// resolvedTestDir names a fixture as verification's filesystem hooks see it,
+// including /private/var on macOS and expanded temporary paths on Windows.
+func resolvedTestDir(t *testing.T, dir string) string {
+	t.Helper()
+	resolved, err := fsutil.ResolveLinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resolved
 }

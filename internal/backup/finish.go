@@ -107,11 +107,17 @@ const (
 	// checks its signal before each further rename attempt; an attempt that
 	// passed that check can still land, so publication is not known.
 	WriteUnfinished
+	// WriteUnknown: the caller stopped waiting before the worker handed back
+	// its outcome. A write may have published; absence of a result is no
+	// evidence that nothing was recorded.
+	WriteUnknown
 )
 
 // String names the outcome in a log's words.
 func (o WriteOutcome) String() string {
 	switch o {
+	case WriteUnknown:
+		return "unknown"
 	case WriteUnchanged:
 		return "unchanged"
 	case WriteRecorded:
@@ -257,7 +263,7 @@ func verifyAndThen(ctx context.Context, dir string, o VerifyOptions, after func(
 			return res, err, false
 		case err != nil:
 			h.drop()
-			abandonPending(dir, o.BackupsRoot, ctx, onEnd)
+			res = abandonPending(dir, o.BackupsRoot, ctx, onEnd)
 			return res, err, false
 		}
 		releaseSlot = release
@@ -270,10 +276,13 @@ func verifyAndThen(ctx context.Context, dir string, o VerifyOptions, after func(
 		defer h.release()
 		defer func() {
 			if r := recover(); r != nil {
-				done <- outcome{err: fmt.Errorf("the verification stopped on an error of the bridge's own: %v", r)}
+				done <- outcome{res: VerifyResult{Write: WriteUnknown}, err: fmt.Errorf("the verification stopped on an error of the bridge's own: %v", r)}
 			}
 		}()
 		r, e := verifyHeld(ctx, dir, o, after, h)
+		if hook := onVerifyAnswer.Load(); hook != nil {
+			(*hook)(dir)
+		}
 		done <- outcome{r, e}
 	}()
 	stop := ctx.Done()
@@ -295,6 +304,10 @@ func verifyAndThen(ctx context.Context, dir string, o VerifyOptions, after func(
 			}
 		case <-expire:
 			h.abandon()
+			res.Write = WriteUnknown
+			if hook := onVerifyExpired.Load(); hook != nil {
+				(*hook)(dir)
+			}
 			why, when := ctx.Err(), "its stop"
 			if why == nil {
 				why, when = context.DeadlineExceeded, "its deadline"
@@ -374,7 +387,7 @@ func verifyHeld(ctx context.Context, dir string, o VerifyOptions, after func(con
 			// spellings too, once its own step overruns (backlog B653's fifth
 			// round). The slot goes as the worker ends.
 			h.handOff()
-			abandonPending(snap, root, ctx, nil, h.spellings...)
+			res = abandonPending(snap, root, ctx, nil, h.spellings...)
 		}
 		return res, err
 	}
@@ -599,17 +612,18 @@ func incompleteOf(ctx context.Context) Verification {
 // synced (verifyHeld's rule: no veto there would be durable). A record that
 // holds a verdict keeps it (mergeVerdict), and a veto beside a VERIFIED
 // stays (earnsClear: an INCOMPLETE clears none). Its mark stands under the
-// spellings given too, its caller's. It answers a channel that closes once
-// its goroutine has ended.
-func abandonPending(dir, backupsRoot string, ctx context.Context, onEnd func(), spellings ...string) <-chan struct{} {
-	done := make(chan struct{})
+// spellings given too, its caller's. It reports the write's outcome when
+// answered, and WriteUnknown if the caller stops waiting before that handoff.
+func abandonPending(dir, backupsRoot string, ctx context.Context, onEnd func(), spellings ...string) VerifyResult {
+	out := make(chan VerifyResult, 1)
 	keys := append(append([]string(nil), spellings...), filepath.Dir(dir), backupsRoot)
 	h := newHold(context.Background(), filepath.Base(spellingKey(dir)), keys...)
 	h.alsoLetGo(onEnd)
 	go func() {
-		defer close(done)
 		defer h.drop()
 		defer h.release()
+		res := VerifyResult{}
+		defer func() { out <- res }()
 		wait, cancel := context.WithTimeout(context.Background(), StopWriteBound)
 		defer cancel()
 		snap, root, err := resolveSnapshotIn(dir, backupsRoot)
@@ -622,25 +636,31 @@ func abandonPending(dir, backupsRoot string, ctx context.Context, onEnd func(), 
 			return
 		}
 		h.held(unlock, root, key, filepath.Base(snap))
-		stepOf(h, h.lockedAt().Add(StopWriteBound), stepIncomplete, func(_, given context.Context) struct{} {
+		progress, answered := stepOf(h, h.lockedAt().Add(StopWriteBound), stepIncomplete, func(_, given context.Context) VerifyResult {
 			clearStaleMarker(root)
-			// A snapshot from before verification takes no record, and a
-			// VERIFIED none where no directory can be synced.
 			m, err := readRecord(snap)
 			if err != nil || m.legacy() || (holdsVerified(m.Verification) && !syncsParentDir) {
-				return struct{}{}
+				return VerifyResult{}
 			}
-			_, _, _ = publishVerdict(snap, incompleteOf(ctx), nil, vetoedAt(snap), publication{given: given, held: h.gaveUp})
-			return struct{}{}
+			found := incompleteOf(ctx)
+			_, written, err := publishVerdict(snap, found, nil, vetoedAt(snap), publication{given: given, held: h.gaveUp})
+			write := (published{written: written, err: err}).outcome(true)
+			return VerifyResult{Found: found, Write: write, Recorded: write == WriteRecorded}
 		}, nil)
+		if answered {
+			res = progress
+		} else {
+			res.Write = WriteUnknown
+		}
 	}()
 	t := time.NewTimer(StopWriteBound)
 	defer t.Stop()
 	select {
-	case <-done:
+	case res := <-out:
+		return res
 	case <-t.C:
+		return VerifyResult{Write: WriteUnknown}
 	}
-	return done
 }
 
 // letGoWithin runs end, a capture's ownership let go (Capture.Release), on a

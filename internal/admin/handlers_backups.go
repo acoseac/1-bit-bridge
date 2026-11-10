@@ -297,6 +297,8 @@ func (s *Server) verifyInBackground(capture *backup.Capture, backupsRoot string,
 				words = "admin: a snapshot's verdict was not recorded"
 			case backup.WriteNotDurable:
 				words = "admin: a snapshot's verdict was written, not known durable"
+			case backup.WriteUnknown:
+				words = "admin: a snapshot's write outcome is unknown"
 			case backup.WriteUnfinished:
 				words = "admin: a snapshot's verdict write did not finish before it was given up"
 			default: // WriteRecorded or WriteUnchanged.

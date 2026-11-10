@@ -21,6 +21,7 @@ func captureT(t *testing.T, src backup.Sources) *backup.Capture {
 		t.Fatalf("CaptureSnapshot: %v", err)
 	}
 	t.Cleanup(c.Release)
+	c.Dir = resolvedTestDir(t, c.Dir)
 	return c
 }
 
@@ -61,7 +62,7 @@ func TestADeadCaptureIsPrunedAndALiveOneIsKept(t *testing.T) {
 
 	time.Sleep(1100 * time.Millisecond)
 	newest := verifiedSnapshot(t, src)
-	if _, err := backup.Prune(filepath.Dir(newest), 1); err != nil {
+	if pr, err := backup.Prune(filepath.Dir(newest), 1); err != nil || pr.Skipped {
 		t.Fatal(err)
 	}
 	for i, dir := range dead {
@@ -103,8 +104,10 @@ func TestAQueuedVerificationKeepsItsCaptureFromThePrune(t *testing.T) {
 	waits := make(chan struct{}, 2)
 	t.Cleanup(backup.SetOnSlotWaitForTest(func() { waits <- struct{}{} }))
 	keep := func() int { return 1 }
+	letGo := sync.OnceFunc(func() { close(release) })
+	callers := joinBackupCallers(t, letGo)
 	results := make(chan backup.Result, 3)
-	go func() { results <- backup.FinishCapture(context.Background(), first, keep, backup.VerifyOptions{}) }()
+	callers.start(func() { results <- backup.FinishCapture(context.Background(), first, keep, backup.VerifyOptions{}) })
 	<-parked
 	var queued []*backup.Capture
 	for i := 0; i < 2; i++ {
@@ -112,10 +115,10 @@ func TestAQueuedVerificationKeepsItsCaptureFromThePrune(t *testing.T) {
 		c := captureT(t, src)
 		agePending(t, c.Dir)
 		queued = append(queued, c)
-		go func() { results <- backup.FinishCapture(context.Background(), c, keep, backup.VerifyOptions{}) }()
+		callers.start(func() { results <- backup.FinishCapture(context.Background(), c, keep, backup.VerifyOptions{}) })
 		<-waits
 	}
-	close(release)
+	letGo()
 	verified := map[string]bool{}
 	for i := 0; i < 3; i++ {
 		res := <-results
@@ -216,17 +219,19 @@ func TestAClaimedSnapshotIsKeptFromThePrune(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(claimed.Release)
+	awaitClean(t)
 	// keep 1: the newest stays, and the newer INCOMPLETE is the evidence;
 	// the claimed one is neither.
-	if _, err := backup.Prune(root, 1); err != nil {
-		t.Fatal(err)
+	if pr, err := backup.Prune(root, 1); err != nil || pr.Skipped {
+		t.Fatalf("prune: %+v, %v; want it run", pr, err)
 	}
 	if !pathExists(t, stopped.Dir) {
 		t.Fatal("the prune removed a snapshot claimed for its check")
 	}
 	claimed.Release()
-	if _, err := backup.Prune(root, 1); err != nil {
-		t.Fatal(err)
+	if pr, err := backup.Prune(root, 1); err != nil || pr.Skipped {
+		t.Fatalf("prune: %+v, %v; want it run", pr, err)
 	}
 	if pathExists(t, stopped.Dir) {
 		t.Error("the prune kept a snapshot once its claim let it go, past keep and the evidence")

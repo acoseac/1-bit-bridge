@@ -41,6 +41,7 @@ func requireReturnedWithin[T any](t *testing.T, done <-chan T, from time.Time, b
 // comes after its lock is), failing the test past a deadline.
 func awaitVerificationEnd(t *testing.T, dir string) {
 	t.Helper()
+	awaitClean(t)
 	deadline := time.Now().Add(30 * time.Second)
 	for {
 		release, err := backup.TakeOwnerForTest(dir)
@@ -72,13 +73,7 @@ func TestAStopWhileTheLocksOpenHangsReturnsWithinItsBoundAndTakesNoLockLate(t *t
 	c := captureT(t, src)
 	entered, release := make(chan struct{}), make(chan struct{})
 	var once sync.Once
-	t.Cleanup(func() {
-		select {
-		case <-release:
-		default:
-			close(release)
-		}
-	})
+	letGo := sync.OnceFunc(func() { close(release) })
 	t.Cleanup(backup.SetOpenBackupsLockForTest(func(dir, name string) (*os.File, error) {
 		once.Do(func() {
 			close(entered)
@@ -88,8 +83,9 @@ func TestAStopWhileTheLocksOpenHangsReturnsWithinItsBoundAndTakesNoLockLate(t *t
 	}))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	callers := joinBackupCallers(t, func() { letGo(); cancel() })
 	done := make(chan backup.Result, 1)
-	go func() { done <- backup.FinishCapture(ctx, c, keepOne, backup.VerifyOptions{}) }()
+	callers.start(func() { done <- backup.FinishCapture(ctx, c, keepOne, backup.VerifyOptions{}) })
 	<-entered
 	stoppedAt := time.Now()
 	cancel()
@@ -97,7 +93,7 @@ func TestAStopWhileTheLocksOpenHangsReturnsWithinItsBoundAndTakesNoLockLate(t *t
 	if res.VerifyErr == nil {
 		t.Error("a verification stopped in its lock's open answered no error")
 	}
-	close(release)
+	letGo()
 	awaitVerificationEnd(t, c.Dir)
 	pr, err := backup.Prune(filepath.Dir(c.Dir), 7)
 	if err != nil || pr.Skipped {
@@ -143,12 +139,13 @@ func TestAVerificationPastItsDeadlineReturnsWithItsCallerStillWaiting(t *testing
 		letGo()
 		awaitSlotFree(t)
 	})
+	callers := joinBackupCallers(t, letGo)
 	done := make(chan error, 1)
 	start := time.Now()
-	go func() {
+	callers.start(func() {
 		_, err := backup.VerifySnapshot(context.Background(), dir, backup.VerifyOptions{})
 		done <- err
-	}()
+	})
 	err = requireReturnedWithin(t, done, start, deadline+backup.StopWriteBound/2+time.Second, "a verification past its deadline")
 	<-entered
 	if !errors.Is(err, backup.ErrCheckGivenUp) || !errors.Is(err, context.DeadlineExceeded) {
@@ -195,11 +192,12 @@ func TestAClaimStoppedWhileItsLockOpenHangsReturnsWithinItsBound(t *testing.T) {
 		c   *backup.Capture
 		err error
 	}
+	callers := joinBackupCallers(t, func() { letGo(); cancel() })
 	done := make(chan answer, 1)
-	go func() {
+	callers.start(func() {
 		claimed, err := backup.Claim(ctx, c.Dir, filepath.Dir(c.Dir))
 		done <- answer{claimed, err}
-	}()
+	})
 	<-entered
 	stoppedAt := time.Now()
 	cancel()

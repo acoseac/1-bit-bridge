@@ -4,8 +4,6 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"runtime"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -60,7 +58,10 @@ func TestTheVerdictsWriteIsAdmittedInOneSectionWithTheGiveUp(t *testing.T) {
 	})
 	t.Run("the give-up is read under the admission lock", func(t *testing.T) {
 		h := heldForTest(t)
-		onAdmissionLocked = func() {
+		hook := func(hh *hold) {
+			if hh != h {
+				return
+			}
 			// Let abandonment take the actual lock after its acquisition,
 			// before any protected state is read. A check moved immediately
 			// before h.mu.Lock has already sampled false and must fail here.
@@ -68,7 +69,8 @@ func TestTheVerdictsWriteIsAdmittedInOneSectionWithTheGiveUp(t *testing.T) {
 			h.abandon()
 			h.mu.Lock()
 		}
-		t.Cleanup(func() { onAdmissionLocked = nil })
+		prev := onAdmissionLocked.Swap(&hook)
+		t.Cleanup(func() { onAdmissionLocked.Store(prev) })
 		ran := false
 		_, admitted, answered := publishOf(h, time.Now().Add(time.Minute), func(context.Context) bool {
 			ran = true
@@ -82,42 +84,42 @@ func TestTheVerdictsWriteIsAdmittedInOneSectionWithTheGiveUp(t *testing.T) {
 		h := heldForTest(t)
 		gaveUp := make(chan struct{})
 		var once sync.Once
-		onAdmission = func() {
+		blocked := make(chan struct{})
+		var observed sync.Once
+		blockedHook := func(hh *hold) {
+			if hh == h {
+				observed.Do(func() { close(blocked) })
+			}
+		}
+		prevBlocked := onAbandonBlocked.Swap(&blockedHook)
+		t.Cleanup(func() { onAbandonBlocked.Store(prevBlocked) })
+		hook := func(hh *hold) {
+			if hh != h {
+				return
+			}
 			once.Do(func() {
 				go func() {
 					h.abandon()
 					close(gaveUp)
 				}()
-				// Observe the abandonment actually blocked on this lock;
-				// elapsed time alone does not establish that it tried it.
-				deadline := time.Now().Add(5 * time.Second)
-				blocked := false
-				for time.Now().Before(deadline) {
-					buf := make([]byte, 1<<20)
-					n := runtime.Stack(buf, true)
-					for _, stack := range strings.Split(string(buf[:n]), "\n\n") {
-						if strings.Contains(stack, "[sync.Mutex.Lock]") && strings.Contains(stack, "backup.(*hold).abandon(") &&
-							strings.Contains(stack, "TestTheVerdictsWriteIsAdmittedInOneSectionWithTheGiveUp") {
-							blocked = true
-						}
-					}
-					if blocked {
-						break
-					}
-					select {
-					case <-gaveUp:
-						t.Error("abandonment acquired the lock before the write's registration")
-						return
-					default:
-					}
-					runtime.Gosched()
-				}
-				if !blocked {
+				select {
+				case <-blocked:
+				case <-gaveUp:
+					t.Error("abandonment acquired the lock before the write's registration")
+				case <-time.After(5 * time.Second):
 					t.Error("abandonment never reached the admission lock")
 				}
 			})
 		}
-		t.Cleanup(func() { onAdmission = nil })
+		prev := onAdmission.Swap(&hook)
+		t.Cleanup(func() { onAdmission.Store(prev) })
+		t.Cleanup(func() {
+			select {
+			case <-gaveUp:
+			case <-time.After(10 * time.Second):
+				t.Error("abandonment never ended")
+			}
+		})
 		heard, admitted, answered := publishOf(h, time.Now().Add(time.Minute), func(given context.Context) bool {
 			select {
 			case <-given.Done():

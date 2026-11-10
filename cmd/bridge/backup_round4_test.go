@@ -79,16 +79,18 @@ func awaitMarked(t *testing.T, root string) backup.StuckCheck {
 // 300 ms, so each is given up; the test's end lets them go and waits for
 // every hold they left in the backups folder at root to end, before the
 // seams are put back.
-func parkChecks(t *testing.T, root string) {
+func parkChecks(t *testing.T, root string) func() {
 	t.Helper()
 	t.Cleanup(backup.SetVerifyDeadlineForTest(300 * time.Millisecond))
 	out := make(chan struct{})
 	t.Cleanup(backup.SetOnLowPriorityForTest(func() { <-out }))
 	var once sync.Once
+	release := func() { once.Do(func() { close(out) }) }
 	t.Cleanup(func() {
-		once.Do(func() { close(out) })
+		release()
 		awaitHoldsLetGo(t, root)
 	})
+	return release
 }
 
 // TestBridgeBackupVerifySaysWhatARecheckFoundWhereItCannotBeRecorded is
@@ -314,12 +316,12 @@ func TestTheTickerSaysWhatAGivenUpVerificationsRecordReads(t *testing.T) {
 					return fsutil.SyncParentDir(path)
 				}))
 			}
-			parkChecks(t, root)
+			releaseChecks := parkChecks(t, root)
 			// Registered after parkChecks, so run before its wait for the holds.
 			t.Cleanup(func() { letGo.Do(func() { close(stalled) }) })
 			ctx, cancel := context.WithCancel(context.Background())
 			done := make(chan struct{})
-			drainLoopOnCleanup(t, cancel, done, "the backup ticker")
+			drainLoopOnCleanup(t, func() { letGo.Do(func() { close(stalled) }); releaseChecks(); cancel() }, done, "the backup ticker")
 			var stdout, stderr safeBuffer
 			go func() {
 				defer close(done)
@@ -374,13 +376,18 @@ func TestTheDoctorNamesAHoldGivenUpWhileTheBackupsFolderDoesNotAnswer(t *testing
 		}
 		return nil
 	}, nil, nil))
+	callerDone := make(chan struct{})
 	release := func() {
 		letGo.Do(func() { close(out) })
+		waitClosed(t, callerDone, "finish capture")
 		awaitHoldsLetGo(t, root)
 	}
-	t.Cleanup(release)
+	drainLoopOnCleanup(t, release, callerDone, "finish capture")
 	done := make(chan backup.Result, 1)
-	go func() { done <- backup.FinishCapture(context.Background(), c, nil, backup.VerifyOptions{}) }()
+	go func() {
+		defer close(callerDone)
+		done <- backup.FinishCapture(context.Background(), c, nil, backup.VerifyOptions{})
+	}()
 	<-entered
 	select {
 	case res := <-done:
@@ -401,11 +408,13 @@ func TestTheDoctorNamesAHoldGivenUpWhileTheBackupsFolderDoesNotAnswer(t *testing
 	readEnded := make(chan struct{})
 	doctorBackupsBound, onDoctorBackupsReadEnd = 300*time.Millisecond, func() { close(readEnded) }
 	t.Cleanup(func() { doctorBackupsBound, onDoctorBackupsReadEnd = prevBound, prevEnd })
+	doctorDone := make(chan struct{})
 	// Registered last, so run first: the folder answers again, the doctor's
 	// read left on it ends, and the write is let go and its hold has ended,
 	// before a stand-in is put back.
 	t.Cleanup(func() {
 		close(stalled)
+		waitClosed(t, doctorDone, "backup doctor")
 		select {
 		case <-readEnded:
 		case <-time.After(30 * time.Second):
@@ -415,7 +424,7 @@ func TestTheDoctorNamesAHoldGivenUpWhileTheBackupsFolderDoesNotAnswer(t *testing
 	})
 	asked := time.Now()
 	answered := make(chan []doctor.Check, 1)
-	go func() { answered <- doctorBackups(cfg)(context.Background()) }()
+	go func() { defer close(doctorDone); answered <- doctorBackups(cfg)(context.Background()) }()
 	var lines []doctor.Check
 	select {
 	case lines = <-answered:

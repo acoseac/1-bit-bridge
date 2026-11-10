@@ -91581,3 +91581,97 @@ The pending gates include `internal/atomicwrite` alongside backup, admin
 and cmd/bridge, named regressions under `-race -count=20`, the requested
 negative controls, and docs-check. Rules and History were edited directly;
 no patch artifact or git state change was made.
+
+## 2026-11-10 — B653 PR 1 round 8: outcome handoffs and portable verification fixtures
+
+The outer expiration in `verifyAndThen` returned `WriteNone` even after a
+verdict's rename. Round 7's shutdown logging exposed that older empty-result
+handoff as “not recorded.” It now returns `WriteUnknown`; the recovered
+worker-panic handoff does too. Both pre-verification cancellations (slot
+queue and folder-lock wait) return `abandonPending`'s completed INCOMPLETE
+publication outcome, or unknown if it has not answered. Console, CLI and
+ticker distinguish that uncertainty from a write that never began, even
+with empty `Found`, and do not imply that the record was read back.
+
+`TestTheConsoleReportsCancellationAndEveryWriteHandoff` observes FAILED
+already on disk before sync stalls, parks read-back and the worker's answer,
+and asserts the outer expiration seam. Its separate worker-answer case
+asserts that expiration did not win; the other cases cancel `ScanCtx`
+during the check and give up a write. `TestAStopBeforeVerificationReportsItsIncompleteWrite`
+checks both cancellation handoffs; `TestTheReportersKeepWriteProgressWithoutAFoundVerdict`
+checks the CLI and ticker's empty-found branches.
+
+The missed hooks were fixture defects in this PR: macOS temporary paths
+under `/var` were compared with the verifier's `/private/var` paths.
+`storeWithTracks`, `captureT`, `verifiedSnapshot` and `backupInstall` now
+resolve fixture directories through `fsutil.ResolveLinks` before deriving
+hook paths. This repairs the stopped-write marks, staged/renamed/synced
+writes, veto creation/removal, and round 7's one/two-veto late-removal case.
+The verdict-write case of `TestEveryStepUnderTheLockIsBoundedAndMarked`
+also now bounds its wait for the hook, so a missed hook names its failure
+instead of hanging the binary. Windows short names and junctions can cause
+the same mismatch in the startup-check and two CLI given-up-write cases;
+the fixture resolution uses the same Windows path implementation as the
+verifier. Existing no-directory-sync refusal and admitted rename behavior
+remain covered; no new Windows production fault was isolated locally.
+
+The Linux prune failures were another PR fixture race: verification and
+claim deliver their result before releasing the backups-folder lock. A
+following prune can validly skip with no error. The dead-capture and
+claimed-snapshot cases now wait for retained holds and assert that the
+prune actually ran. `TestAnAnsweredVerificationOrClaimCanStillHoldTheFolder`
+deterministically parks release after each answer, observes the skipped
+prune, then releases the hold and observes a prune that runs.
+
+Cleanup now releases stalls, cancels and joins outer callers, and drains
+retained holds before restoring hooks, including older `FinishCapture`,
+console and ticker cases. `activeHolds` counts even a pending cancellation
+handoff with no slot or mark. Atomic admission hooks receive their hold and
+ignore others; `onAbandonBlocked` observes failed mutex acquisition in place
+of runtime stack-text polling.
+
+Repeated race testing under host contention also exposed fixture timing
+assumptions: a third verified snapshot was built under a 300 ms deadline,
+and one-second checks could expire before the intended write stall. Setup
+now precedes the short deadline. Increasing write-stall cases to five
+seconds still let a stressed SQLite check expire first, so
+`SetStepBoundForTest` scopes an atomic fixture to one resolved snapshot and
+its named steps: only the parked step gets a short bound, from admission.
+The real check keeps its normal deadline. The slow-step case uses an
+explicit waiter and release instead of repeated sleeps under a four-second
+deadline. `TestAnAbandonedCheckKeepsItsHoldsUntilItsCheckerEnds` also
+restores its normal deadline, after joining the abandoned caller and
+retained work, before verifying the follow-up snapshots. Its old 300 ms
+deadline could turn that normal verification INCOMPLETE and change the
+prune anchor. Production bounds are unchanged.
+
+The ladder failure is this PR's integration debt: merge `56eb3bde` brought
+main's migration v62 (`71f707ab`, waveform regeneration failures), while
+B653's generated schema still described v61. Regeneration through
+`BRIDGE_UPDATE_LADDER_SCHEMA=1` adds the eight `waveform_regen_failures`
+columns and advances the generated top to 62. The existing
+`TestTheLadderSchemaIsTheLadders` failed before regeneration and passes
+after it; the scanner rule now explicitly covers integrating ladder changes.
+
+Overlay negative controls restore the old zero-result handoffs without
+changing the worktree. Both queued-slot and folder-lock cancellation cases
+then fail with `Write:none`; the forced outer-expiration console case fails
+with the old “not recorded” line despite observing the published verdict.
+These are assertion failures, not compile failures.
+
+Final validation on macOS arm64, Go 1.27.3, with `-race` and a 30-minute
+package timeout (counts are top-level test runs): the full `internal/backup`
+package passed 251 tests in 540.067 s; the full `internal/atomicwrite`
+package passed 91. The affected console backup suite passed 11 tests and
+the CLI backup suite plus its cleanup guard passed 49. Thirteen backup
+regressions passed three repetitions each (39 runs); three admission,
+cancellation and release-window tests passed 20 each (60 runs). The new
+console handoff test passed 20 repetitions, and three CLI regression/report
+cases passed 20 each (60 runs). The manifest ladder test passed 20
+repetitions. The three overlay negative controls failed at their intended
+assertions. `go vet ./...`, formatting and `make docs-check` passed.
+All five packages' test binaries compile for Windows/amd64 and Linux/amd64;
+no native Windows or Linux runtime was available, so those CI executions
+remain to be confirmed. The exploratory runs that exposed fixture timing
+failures were superseded by these passes; unrelated broad admin, CLI and
+manifest runs were stopped in favor of the affected suites above.

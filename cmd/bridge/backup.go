@@ -239,7 +239,7 @@ func reportVerdict(stdout, stderr io.Writer, prefix string, res backup.VerifyRes
 		fmt.Fprintf(stderr, "%sthe snapshot was kept, and %s: %v\n", prefix, keptWords(res), err)
 		return false
 	case err != nil:
-		fmt.Fprintf(stderr, "%sthe snapshot was kept, and its verdict was not recorded: %v\n", prefix, err)
+		fmt.Fprintf(stderr, "%sthe snapshot was kept, and %s: %v\n", prefix, keptWords(res), err)
 		return false
 	}
 	rec := res.Record
@@ -303,7 +303,7 @@ func keptWords(res backup.VerifyResult) string {
 	switch res.Write {
 	case backup.WriteNotDurable:
 		w = "what this check found was written and is not known to survive a crash"
-	case backup.WriteRecorded, backup.WriteUnchanged, backup.WriteUnfinished:
+	case backup.WriteRecorded, backup.WriteUnchanged, backup.WriteUnfinished, backup.WriteUnknown:
 		w = writeWords(res.Write)
 	}
 	if !res.RecordRead {
@@ -340,6 +340,8 @@ func writeWords(o backup.WriteOutcome) string {
 		return "its write failed"
 	case backup.WriteUnfinished:
 		return "its write did not finish"
+	case backup.WriteUnknown:
+		return "its write outcome is unknown"
 	}
 	return "it wrote nothing"
 }
@@ -730,7 +732,7 @@ func reportTickerVerdict(ctx context.Context, stdout, stderr io.Writer, triggere
 			fmt.Fprintf(stderr, "backup (%s): %s was kept, and its check found database %s, files %s, %s: %v\n", triggered, res.Dir,
 				backup.StateWords(found.DatabaseState, found.DatabaseReasons), backup.FilesWords(found), tickerKeptWords(res.Verify), failure)
 		default:
-			fmt.Fprintf(stderr, "backup (%s): %s was kept, and its verdict was not recorded: %v\n", triggered, res.Dir, failure)
+			fmt.Fprintf(stderr, "backup (%s): %s was kept, and %s: %v\n", triggered, res.Dir, keptWords(res.Verify), failure)
 		}
 		return
 	}
@@ -755,7 +757,7 @@ func tickerKeptWords(v backup.VerifyResult) string {
 	switch v.Write {
 	case backup.WriteNotDurable:
 		w = "which was written and is not known to survive a crash"
-	case backup.WriteRecorded, backup.WriteUnchanged, backup.WriteUnfinished:
+	case backup.WriteRecorded, backup.WriteUnchanged, backup.WriteUnfinished, backup.WriteUnknown:
 		w = "and " + writeWords(v.Write)
 	}
 	if !v.RecordRead {

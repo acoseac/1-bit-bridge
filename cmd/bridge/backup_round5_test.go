@@ -53,6 +53,7 @@ func TestTheStartupPassSaysWhyARecheckThatRecordedNothingPrunedNothing(t *testin
 		t.Fatal(err)
 	}
 	t.Cleanup(backup.SetSyncsParentDirForTest(false))
+	t.Cleanup(func() { awaitHoldsLetGo(t, root) })
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	drainLoopOnCleanup(t, cancel, done, "the backup ticker")
@@ -159,12 +160,16 @@ func TestTheTickerAndTheDoctorNameAPruneGivenUp(t *testing.T) {
 	stalled := make(chan struct{})
 	var letGo sync.Once
 	t.Cleanup(backup.SetOnPruneForTest(func() { <-stalled }))
+	callerDone := make(chan struct{})
+	drainLoopOnCleanup(t, func() { letGo.Do(func() { close(stalled) }) }, callerDone, "backup prune")
 	t.Cleanup(func() {
 		letGo.Do(func() { close(stalled) })
+		waitClosed(t, callerDone, "backup prune")
 		awaitHoldsLetGo(t, root)
 	})
 	pruned := make(chan error, 1)
 	go func() {
+		defer close(callerDone)
 		_, err := backup.Prune(root, 1)
 		pruned <- err
 	}()

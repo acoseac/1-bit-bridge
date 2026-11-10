@@ -4,7 +4,7 @@ package manifest
 
 // ladderSchemaTop is the ladder's top when ladderColumns was written; the
 // test that writes it fails while it is not LadderTop().
-const ladderSchemaTop = 61
+const ladderSchemaTop = 62
 
 // ladderColumns is every column of every table the ladder makes, with the
 // first and last version that has it (ladderColumn).
@@ -276,4 +276,12 @@ var ladderColumns = []ladderColumn{
 	{"upscale_batches", "target_rate", 6, 0},
 	{"upscale_batches", "total_files", 6, 0},
 	{"upscale_batches", "updated_at", 6, 0},
+	{"waveform_regen_failures", "build", 62, 0},
+	{"waveform_regen_failures", "failures", 62, 0},
+	{"waveform_regen_failures", "first_at", 62, 0},
+	{"waveform_regen_failures", "last_at", 62, 0},
+	{"waveform_regen_failures", "reason", 62, 0},
+	{"waveform_regen_failures", "source_mtime_ns", 62, 0},
+	{"waveform_regen_failures", "source_path", 62, 0},
+	{"waveform_regen_failures", "source_size", 62, 0},
 }

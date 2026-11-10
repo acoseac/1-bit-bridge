@@ -25,7 +25,11 @@ import (
 // answers the config's path, the data dir and its backups folder.
 func backupInstall(t *testing.T) (cfgPath, dataDir, root string) {
 	t.Helper()
-	cfgPath, dataDir = backupInstallIn(t, t.TempDir())
+	dir, err := fsutil.ResolveLinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfgPath, dataDir = backupInstallIn(t, dir)
 	return cfgPath, dataDir, filepath.Join(dataDir, backup.BackupsDirName)
 }
 
@@ -303,11 +307,22 @@ func TestVerifyBesideTheTickersVerificationOfOneSnapshot(t *testing.T) {
 				}))
 				t.Cleanup(backup.SetOnSlotWaitForTest(func() { waits.Do(func() { close(waiting) }) }))
 			}
+			releaseCheck := sync.OnceFunc(func() { close(release) })
 			ctx, cancel := context.WithCancel(context.Background())
 			done := make(chan struct{})
 			drainLoopOnCleanup(t, cancel, done, "the backup ticker")
 			stdout := holdOn("wrote ")
-			t.Cleanup(stdout.letGo)
+			var callerDone chan struct{}
+			t.Cleanup(func() {
+				stdout.letGo()
+				releaseCheck()
+				cancel()
+				waitClosed(t, done, "the backup ticker")
+				if callerDone != nil {
+					waitClosed(t, callerDone, "backup verify")
+				}
+				awaitVerificationsEnd(t, root)
+			})
 			var stderr safeBuffer
 			status := &sweepStatus[struct{}]{}
 			go func() {
@@ -325,7 +340,9 @@ func TestVerifyBesideTheTickersVerificationOfOneSnapshot(t *testing.T) {
 			if tickerFirst {
 				stdout.letGo()
 				<-parked
+				callerDone = make(chan struct{})
 				go func() {
+					defer close(callerDone)
 					verified <- backupCmdContext(context.Background(), []string{"--config", cfgPath, "--verify", dir, "--full"}, &vout, &verr)
 				}()
 				// The --verify waits its turn behind the ticker's verification,
@@ -334,10 +351,10 @@ func TestVerifyBesideTheTickersVerificationOfOneSnapshot(t *testing.T) {
 				select {
 				case <-waiting:
 				case code := <-verified:
-					close(release) // the ticker's park, which the drain would wait on
+					releaseCheck() // the ticker's park, which the drain would wait on
 					t.Fatalf("--verify returned %d before it waited its turn\n%s%s", code, vout.String(), verr.String())
 				}
-				close(release)
+				releaseCheck()
 			} else {
 				// The ticker is held between its capture and its verification:
 				// the --verify runs first, whole.
@@ -381,12 +398,12 @@ func TestVerifyBesideTheTickersVerificationOfOneSnapshot(t *testing.T) {
 // answers, the ticker returns within backup.StopWriteBound of the stop,
 // abandoning the write, and says nothing of the stop.
 func TestATickerStoppedWhileItsVerdictsSyncHangsReturnsWithinItsBound(t *testing.T) {
-	_, dataDir, _ := backupInstall(t)
+	_, dataDir, root := backupInstall(t)
 	src := backup.Sources{DataDir: dataDir, ManifestDB: manifest.DefaultDBPath(dataDir)}
 	release := make(chan struct{})
 	entered := make(chan struct{})
 	var enter sync.Once
-	t.Cleanup(func() { close(release) })
+	letGo := sync.OnceFunc(func() { close(release) })
 	t.Cleanup(backup.SetSyncVerdictForTest(func(string) error {
 		enter.Do(func() { close(entered) })
 		<-release
@@ -395,6 +412,7 @@ func TestATickerStoppedWhileItsVerdictsSyncHangsReturnsWithinItsBound(t *testing
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	drainLoopOnCleanup(t, cancel, done, "the backup ticker")
+	t.Cleanup(func() { letGo(); cancel(); waitClosed(t, done, "the backup ticker"); awaitVerificationsEnd(t, root) })
 	var stdout, stderr safeBuffer
 	go func() {
 		defer close(done)

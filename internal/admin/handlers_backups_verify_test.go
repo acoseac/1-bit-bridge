@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/backup"
+	"github.com/acoseac/1-bit-bridge/internal/backup/backuptest"
 	"github.com/acoseac/1-bit-bridge/internal/doctor"
 	"github.com/acoseac/1-bit-bridge/internal/dsn"
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
@@ -234,6 +235,7 @@ func TestAnUnsyncedVerdictReadsAsNotVerifiedEverywhere(t *testing.T) {
 	}
 	restore := backup.SetSyncVerdictForTest(func(string) error { return errors.New("injected: the folder would not sync") })
 	_, err = backup.VerifySnapshot(t.Context(), dir, backup.VerifyOptions{})
+	backuptest.AwaitIdle(t)
 	restore()
 	if !errors.Is(err, backup.ErrVerdictNotDurable) {
 		t.Fatalf("the verification answered %v, want ErrVerdictNotDurable", err)
@@ -282,12 +284,14 @@ func TestACancelledCreateRequestLeavesTheVerdictToCome(t *testing.T) {
 		})
 	}))
 	ctx, cancel := context.WithCancel(context.Background())
+	release := sync.OnceFunc(func() { close(goOn) })
+	t.Cleanup(func() { release(); cancel(); s.WaitForBackupJobs(); backuptest.AwaitIdle(t) })
 	if code := doJSONContext(t, s.Handler(), ctx, http.MethodPost, "/api/backups", map[string]any{}); code != http.StatusCreated {
 		t.Fatalf("POST /api/backups = %d, want 201", code)
 	}
 	<-started
 	cancel()
-	close(goOn)
+	release()
 	s.WaitForBackupJobs()
 	_, api := backupsBody(t, s)
 	if len(api.Backups) != 1 {
@@ -489,6 +493,7 @@ func TestALeftVerifiedThatCannotBeRecordedReadsAsNotVerifiedEverywhere(t *testin
 				t.Cleanup(func() { _ = os.Chmod(res.Dir, 0o700) })
 			}
 			_, err := backup.VerifySnapshot(t.Context(), res.Dir, backup.VerifyOptions{})
+			backuptest.AwaitIdle(t)
 			restore()
 			if err == nil {
 				t.Fatal("a verification whose write failed answered no error")

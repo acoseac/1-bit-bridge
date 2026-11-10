@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/acoseac/1-bit-bridge/internal/backup"
+	"github.com/acoseac/1-bit-bridge/internal/backup/backuptest"
 	"github.com/acoseac/1-bit-bridge/internal/logging/loggingtest"
 )
 
@@ -22,6 +23,7 @@ func TestTheConsoleSaysARecordNotReadBackApartFromItsWrite(t *testing.T) {
 	s.deps.BackupSources = liveStore(t, t.TempDir())
 	t.Cleanup(backup.SetReadBackFailureForTest(func(string) error { return errors.New("injected: the read-back failed") }))
 	logs := loggingtest.Record(t)
+	t.Cleanup(func() { s.WaitForBackupJobs(); backuptest.AwaitIdle(t) })
 	if code := doJSON(t, s.Handler(), http.MethodPost, "/api/backups", map[string]any{}, nil); code != http.StatusCreated {
 		t.Fatalf("POST /api/backups = %d, want 201", code)
 	}

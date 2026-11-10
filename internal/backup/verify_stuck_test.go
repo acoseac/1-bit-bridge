@@ -100,12 +100,14 @@ func TestAnAbandonedCheckKeepsItsHoldsUntilItsCheckerEnds(t *testing.T) {
 	}
 	otherRoot := filepath.Dir(other)
 	const deadline = 300 * time.Millisecond
-	t.Cleanup(backup.SetVerifyDeadlineForTest(deadline))
+	restoreDeadline := backup.SetVerifyDeadlineForTest(deadline)
+	t.Cleanup(restoreDeadline)
 	entered, release := parkCheck(t, c.Dir)
 
+	callers := joinBackupCallers(t, release)
 	done := make(chan backup.Result, 1)
 	start := time.Now()
-	go func() { done <- backup.FinishCapture(context.Background(), c, keepOne, backup.VerifyOptions{}) }()
+	callers.start(func() { done <- backup.FinishCapture(context.Background(), c, keepOne, backup.VerifyOptions{}) })
 	<-entered
 	res := requireReturnedWithin(t, done, start, deadline+backup.StopWriteBound/2+2*time.Second, "a verification whose check was given up")
 	if !errors.Is(res.VerifyErr, backup.ErrCheckGivenUp) || !errors.Is(res.VerifyErr, context.DeadlineExceeded) {
@@ -153,8 +155,11 @@ func TestAnAbandonedCheckKeepsItsHoldsUntilItsCheckerEnds(t *testing.T) {
 	}
 
 	release()
+	callers.wait(t)
 	awaitVerificationEnd(t, c.Dir)
 	awaitSlotFree(t)
+	// Only the parked check was supposed to expire.
+	restoreDeadline()
 
 	if got := readBytes(t, filepath.Join(c.Dir, backup.ManifestFile)); !bytes.Equal(got, recorded) {
 		t.Errorf("the check's own result was recorded once it ended:\n%s", got)
@@ -203,18 +208,19 @@ func TestAVerificationWaitingItsTurnHearsOfACheckGivenUp(t *testing.T) {
 	waiting := make(chan struct{})
 	var waited sync.Once
 	t.Cleanup(backup.SetOnSlotWaitForTest(func() { waited.Do(func() { close(waiting) }) }))
-	entered, _ := parkCheck(t, "")
+	entered, release := parkCheck(t, "")
+	callers := joinBackupCallers(t, release)
 	firstDone := make(chan error, 1)
-	go func() {
+	callers.start(func() {
 		_, err := backup.VerifySnapshot(context.Background(), first, backup.VerifyOptions{})
 		firstDone <- err
-	}()
+	})
 	<-entered
 	secondDone := make(chan error, 1)
-	go func() {
+	callers.start(func() {
 		_, err := backup.VerifySnapshot(context.Background(), other, backup.VerifyOptions{BackupsRoot: filepath.Dir(other)})
 		secondDone <- err
-	}()
+	})
 	<-waiting
 	err = requireReturnedWithin(t, firstDone, time.Now(), deadline+backup.StopWriteBound/2+2*time.Second, "the verification whose check is given up")
 	if !errors.Is(err, backup.ErrCheckGivenUp) {

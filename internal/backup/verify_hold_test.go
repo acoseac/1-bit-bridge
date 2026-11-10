@@ -41,7 +41,7 @@ func (p *parking) release() { p.leaving.Do(func() { close(p.out) }) }
 func awaitClean(t *testing.T) {
 	t.Helper()
 	deadline := time.Now().Add(30 * time.Second)
-	for backup.SlotHeldForTest() || backup.StuckAnywhereForTest() {
+	for backup.ActiveHoldsForTest() != 0 {
 		if time.Now().After(deadline) {
 			t.Fatal("a hold given up was never let go")
 		}
@@ -127,9 +127,10 @@ func requireDirectorySync(t *testing.T) {
 
 // answersWithin runs ask, failing the test where it has not answered within
 // bound.
-func answersWithin(t *testing.T, bound time.Duration, what string, ask func()) {
+func answersWithin(t *testing.T, bound time.Duration, what string, release, ask func()) {
 	t.Helper()
 	done := make(chan struct{})
+	t.Cleanup(func() { release(); waitCaller(t, done); awaitClean(t) })
 	go func() {
 		defer close(done)
 		ask()
@@ -145,21 +146,21 @@ func answersWithin(t *testing.T, bound time.Duration, what string, ask func()) {
 // reading of the backups folder at root, its metadata stalled by the caller,
 // while a hold of the snapshot named holds it given up at the step named:
 // each answers at once, refusing for that hold and naming its snapshot.
-func requireRefusedNaming(t *testing.T, root, second, name, step string) {
+func requireRefusedNaming(t *testing.T, root, second, name, step string, release func()) {
 	t.Helper()
-	answersWithin(t, 2*time.Second, "a second verification", func() {
+	answersWithin(t, 2*time.Second, "a second verification", release, func() {
 		_, err := backup.VerifySnapshot(context.Background(), second, backup.VerifyOptions{BackupsRoot: root})
 		if !errors.Is(err, backup.ErrCheckStillRunning) || err == nil || !strings.Contains(err.Error(), name) {
 			t.Errorf("a second verification answered %v, want ErrCheckStillRunning naming %s", err, name)
 		}
 	})
-	answersWithin(t, 2*time.Second, "a prune", func() {
+	answersWithin(t, 2*time.Second, "a prune", release, func() {
 		pr, err := backup.Prune(root, 1)
 		if err != nil || !pr.Skipped || !errors.Is(pr.SkippedFor, backup.ErrCheckStillRunning) {
 			t.Errorf("a prune answered %+v, %v; want it skipped for the hold given up", pr, err)
 		}
 	})
-	answersWithin(t, 2*time.Second, "the doctor's reading", func() {
+	answersWithin(t, 2*time.Second, "the doctor's reading", release, func() {
 		s, held := backup.StuckCheckOf(root)
 		if !held || s.Snapshot != name || s.Step != step {
 			t.Errorf("StuckCheckOf = %+v, %v; want %s given up at %q", s, held, name, step)
@@ -201,7 +202,6 @@ func TestEveryStepUnderTheLockIsBoundedAndMarked(t *testing.T) {
 			older := verifiedSnapshot(t, src)
 			time.Sleep(1100 * time.Millisecond)
 			root := filepath.Dir(older)
-			t.Cleanup(backup.SetVerifyDeadlineForTest(300 * time.Millisecond))
 			p := newParking()
 			var target string
 			var c *backup.Capture
@@ -226,14 +226,17 @@ func TestEveryStepUnderTheLockIsBoundedAndMarked(t *testing.T) {
 					t.Cleanup(backup.SetOnPruneForTest(p.park))
 				}
 			}
+			t.Cleanup(backup.SetStepBoundForTest(target, 300*time.Millisecond, tc.step, "its read of the record after it"))
 			checks := checksRun(t)
 			before := checks.Load()
 			stall := stallMetadata(t)
 			// Registered last, so run first: the stall and the hang let go and
 			// the hold's end joined before any seam is put back.
+			callerDone := make(chan struct{})
 			t.Cleanup(func() {
 				stall.release()
 				p.release()
+				waitCaller(t, callerDone)
 				awaitClean(t)
 			})
 			name := filepath.Base(target)
@@ -243,11 +246,13 @@ func TestEveryStepUnderTheLockIsBoundedAndMarked(t *testing.T) {
 				stopped, cancel := context.WithCancel(context.Background())
 				cancel()
 				go func() {
+					defer close(callerDone)
 					res, err := backup.VerifySnapshot(stopped, target, backup.VerifyOptions{BackupsRoot: root})
 					done <- backup.Result{Dir: target, Verify: res, VerifyErr: err}
 				}()
 			} else {
 				go func() {
+					defer close(callerDone)
 					if c != nil {
 						done <- backup.FinishCapture(context.Background(), c, keepOne, backup.VerifyOptions{})
 					} else {
@@ -255,10 +260,14 @@ func TestEveryStepUnderTheLockIsBoundedAndMarked(t *testing.T) {
 					}
 				}()
 			}
-			<-p.entered
+			select {
+			case <-p.entered:
+			case <-time.After(30 * time.Second):
+				t.Fatal("the step never reached its parking hook")
+			}
 			// The mount stops answering its metadata too, before the give-up.
 			stall.arm()
-			res := requireReturnedWithin(t, done, started, 300*time.Millisecond+backup.StopWriteBound+3*time.Second, "the verification whose step hangs")
+			res := requireReturnedWithin(t, done, started, 5*time.Second+backup.StopWriteBound+3*time.Second, "the verification whose step hangs")
 			if tc.name == "abandonPending's write" {
 				if !errors.Is(res.VerifyErr, context.Canceled) {
 					t.Errorf("the stopped verification answered %v, want its stop", res.VerifyErr)
@@ -275,7 +284,7 @@ func TestEveryStepUnderTheLockIsBoundedAndMarked(t *testing.T) {
 					t.Fatal("the hold that hangs was never marked")
 				}
 			}
-			requireRefusedNaming(t, root, older, name, tc.step)
+			requireRefusedNaming(t, root, older, name, tc.step, func() { stall.release(); p.release() })
 			stall.release()
 			p.release()
 			awaitClean(t)
@@ -295,8 +304,8 @@ func TestEveryStepUnderTheLockIsBoundedAndMarked(t *testing.T) {
 }
 
 // TestASlowStepWithinItsBoundLeavesNoMark: a step under the lock that is
-// slow and keeps within its bound (the veto's sync taking a second of a
-// four-second deadline) raises no mark, and a verification waiting its turn
+// slow and keeps within its bound (the veto's sync parked until a second
+// verification is waiting) raises no mark, and a verification waiting its turn
 // meanwhile gets it and records its verdict (backlog B653's fourth round, the
 // review of its brief: a mark only for an overrun).
 func TestASlowStepWithinItsBoundLeavesNoMark(t *testing.T) {
@@ -308,37 +317,43 @@ func TestASlowStepWithinItsBoundLeavesNoMark(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(backup.SetVerifyDeadlineForTest(4 * time.Second))
-	slow := make(chan struct{})
+	t.Cleanup(backup.SetVerifyDeadlineForTest(30 * time.Second))
+	p := newParking()
 	var once sync.Once
 	t.Cleanup(backup.SetSyncVetoForTest(func(path string) error {
-		once.Do(func() { close(slow) })
-		time.Sleep(1200 * time.Millisecond)
+		once.Do(p.park)
 		return fsutil.SyncParentDir(path)
 	}))
 	waiting := make(chan struct{})
 	var waited sync.Once
 	t.Cleanup(backup.SetOnSlotWaitForTest(func() { waited.Do(func() { close(waiting) }) }))
-	t.Cleanup(func() { awaitClean(t) })
+	callers := joinBackupCallers(t, p.release)
 	first := make(chan error, 1)
-	go func() {
+	callers.start(func() {
 		_, err := backup.VerifySnapshot(context.Background(), target, backup.VerifyOptions{BackupsRoot: root})
 		first <- err
-	}()
-	<-slow
+	})
+	select {
+	case <-p.entered:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the slow sync never began")
+	}
 	second := make(chan backup.VerifyResult, 1)
 	secondErr := make(chan error, 1)
-	go func() {
+	callers.start(func() {
 		res, err := backup.VerifySnapshot(context.Background(), other, backup.VerifyOptions{BackupsRoot: filepath.Dir(other)})
 		second <- res
 		secondErr <- err
-	}()
-	<-waiting
-	for end := time.Now().Add(time.Second); time.Now().Before(end); time.Sleep(20 * time.Millisecond) {
-		if s, held := backup.StuckCheckHere(root); held {
-			t.Fatalf("a step within its bound was marked: %+v", s)
-		}
+	})
+	select {
+	case <-waiting:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the second verification never waited")
 	}
+	if s, held := backup.StuckCheckHere(root); held {
+		t.Fatalf("a step within its bound was marked: %+v", s)
+	}
+	p.release()
 	if err := <-first; err != nil {
 		t.Errorf("the slow verification answered %v", err)
 	}
@@ -375,6 +390,7 @@ func TestAVetoThatStoodBeforeAVerificationStaysOverTheVERIFIEDItCarries(t *testi
 				// An earlier write failed: its veto stays beside the VERIFIED.
 				restore := backup.SetVerdictWriteFailuresForTest(func(string) error { return errors.New("injected") }, nil, nil)
 				_, err := backup.VerifySnapshot(t.Context(), dir, backup.VerifyOptions{})
+				awaitClean(t)
 				restore()
 				if err == nil {
 					t.Fatal("the earlier write did not fail")
@@ -735,4 +751,42 @@ func TestAGivenUpVerificationReadsItsRecordBack(t *testing.T) {
 			}
 		})
 	}
+}
+
+// waitCaller joins the outer caller as well as its worker: a free slot alone
+// does not synchronize with the caller's watchdog setup or result handling.
+func waitCaller(t *testing.T, done <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the verification caller did not end")
+	}
+}
+
+// backupCallers joins all outer callers even when an assertion exits early.
+// The release unblocks every seam before callers and retained work are joined.
+type backupCallers struct{ wg sync.WaitGroup }
+
+func joinBackupCallers(t *testing.T, release func()) *backupCallers {
+	t.Helper()
+	c := &backupCallers{}
+	t.Cleanup(func() {
+		release()
+		c.wait(t)
+		awaitClean(t)
+	})
+	return c
+}
+
+func (c *backupCallers) start(fn func()) {
+	c.wg.Add(1)
+	go func() { defer c.wg.Done(); fn() }()
+}
+
+func (c *backupCallers) wait(t *testing.T) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() { c.wg.Wait(); close(done) }()
+	waitCaller(t, done)
 }

@@ -136,3 +136,5 @@ its twin.** The top list is older, shorter, and read first.
 - **Shutdown joins every background writer**, and the wait must be written INLINE in the defer, never routed through a variable assigned later in `runServe`; both this wait and the watcher's are grace-BOUNDED. → History-rules-cli-serve.md
 
 - **`backup.EnsurePlayerUUID` is the sole UUID minter; the retired config minter must not return.** Its reservation writer checks the medium before UUID publication; keep minting tests in backup's tests to avoid config's import cycle, including v4 shape, persistence, non-file kinds and a refusing medium leaving no final UUID on either attempt (B544). → History-rules-cli-serve.md
+
+- **A verification outcome handoff preserves known write progress; an outer expiration or other missing worker answer is `WriteUnknown`, never `WriteNone`. Both cancellations before verification starts return `abandonPending`'s INCOMPLETE publication outcome. Console, CLI and ticker say unknown explicitly, including when `Found` is empty; no read-back is implied.** (2026-11-10, B653 PR 1 round 8). → History-rules-cli-serve.md

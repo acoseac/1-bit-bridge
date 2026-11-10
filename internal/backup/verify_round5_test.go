@@ -79,8 +79,8 @@ func TestAWriteGivenUpLandsNothingOnceItResumes(t *testing.T) {
 			root := filepath.Dir(c.Dir)
 			mpath := filepath.Join(c.Dir, backup.ManifestFile)
 			before := readBytes(t, mpath)
-			// Long enough for the check to end: the write is the step given up.
-			t.Cleanup(backup.SetVerifyDeadlineForTest(time.Second))
+			// The real check keeps its bound; only the parked write expires.
+			t.Cleanup(backup.SetStepBoundForTest(c.Dir, 300*time.Millisecond, "its verdict's write", "its write of INCOMPLETE"))
 			p := newParking()
 			var stage, rename func(string) error
 			switch tc {
@@ -109,8 +109,10 @@ func TestAWriteGivenUpLandsNothingOnceItResumes(t *testing.T) {
 			t.Cleanup(backup.SetVerdictWriteFailuresForTest(stage, rename, nil))
 			// Registered last, so run first: the stall let go and the hold's
 			// end joined before any seam is put back.
+			callerDone := make(chan struct{})
 			t.Cleanup(func() {
 				p.release()
+				waitCaller(t, callerDone)
 				awaitClean(t)
 			})
 			done := make(chan backup.Result, 1)
@@ -119,18 +121,22 @@ func TestAWriteGivenUpLandsNothingOnceItResumes(t *testing.T) {
 				stopped, cancel := context.WithCancel(context.Background())
 				cancel()
 				go func() {
+					defer close(callerDone)
 					res, err := backup.VerifySnapshot(stopped, c.Dir, backup.VerifyOptions{BackupsRoot: root})
 					done <- backup.Result{Verify: res, VerifyErr: err}
 				}()
 			} else {
-				go func() { done <- backup.FinishCapture(context.Background(), c, nil, backup.VerifyOptions{}) }()
+				go func() {
+					defer close(callerDone)
+					done <- backup.FinishCapture(context.Background(), c, nil, backup.VerifyOptions{})
+				}()
 			}
 			select {
 			case <-p.entered:
 			case <-time.After(30 * time.Second):
 				t.Fatal("the write never began")
 			}
-			res := requireReturnedWithin(t, done, started, time.Second+2*backup.StopWriteBound+3*time.Second, "the verification whose write stalls")
+			res := requireReturnedWithin(t, done, started, 5*time.Second+2*backup.StopWriteBound+3*time.Second, "the verification whose write stalls")
 			step := "its verdict's write"
 			if tc == "abandonPending's write" {
 				step = "its write of INCOMPLETE"
@@ -344,13 +350,16 @@ func TestAPruneThatDoesNotEndIsGivenUpAndMarked(t *testing.T) {
 	t.Cleanup(backup.SetVerifyDeadlineForTest(300 * time.Millisecond))
 	p := newParking()
 	t.Cleanup(backup.SetOnPruneForTest(p.park))
+	callerDone := make(chan struct{})
 	t.Cleanup(func() {
 		p.release()
+		waitCaller(t, callerDone)
 		awaitClean(t)
 	})
 	done := make(chan error, 1)
 	started := time.Now()
 	go func() {
+		defer close(callerDone)
 		_, err := backup.Prune(root, 1)
 		done <- err
 	}()
@@ -365,13 +374,13 @@ func TestAPruneThatDoesNotEndIsGivenUpAndMarked(t *testing.T) {
 	if s, held := backup.StuckCheckHere(root); !held || !s.Pruning() || s.Step != "its removals" {
 		t.Errorf("the folder reads %+v, %v; want it marked by the prune, at its removals", s, held)
 	}
-	answersWithin(t, 2*time.Second, "a verification behind the prune", func() {
+	answersWithin(t, 2*time.Second, "a verification behind the prune", p.release, func() {
 		_, err := backup.VerifySnapshot(context.Background(), dir, backup.VerifyOptions{BackupsRoot: root})
 		if !errors.Is(err, backup.ErrCheckStillRunning) || !strings.Contains(err.Error(), "a prune") {
 			t.Errorf("a verification behind the prune answered %v, want ErrCheckStillRunning naming the prune", err)
 		}
 	})
-	answersWithin(t, 2*time.Second, "a prune behind the prune", func() {
+	answersWithin(t, 2*time.Second, "a prune behind the prune", p.release, func() {
 		if pr, err := backup.Prune(root, 1); err != nil || !pr.Skipped || !errors.Is(pr.SkippedFor, backup.ErrCheckStillRunning) {
 			t.Errorf("a prune behind the prune answered %+v, %v; want it skipped for the hold given up", pr, err)
 		}
@@ -433,7 +442,7 @@ func TestALockThatDoesNotLetGoIsMarkedUntilItDoes(t *testing.T) {
 	if pathExists(t, filepath.Join(root, backup.StuckMarkerName)) {
 		t.Error("a marker was written beside the lock once its let-go had begun")
 	}
-	answersWithin(t, 2*time.Second, "a verification behind the let-go", func() {
+	answersWithin(t, 2*time.Second, "a verification behind the let-go", p.release, func() {
 		if _, err := backup.VerifySnapshot(context.Background(), other, backup.VerifyOptions{BackupsRoot: filepath.Dir(other)}); !errors.Is(err, backup.ErrCheckStillRunning) {
 			t.Errorf("a verification behind the let-go answered %v, want ErrCheckStillRunning", err)
 		}
@@ -562,18 +571,16 @@ func TestAnOwnershipIsLetGoBeforeTheLock(t *testing.T) {
 				t.Cleanup(backup.SetVerifyDeadlineForTest(300 * time.Millisecond))
 				checkOut := newParking()
 				t.Cleanup(backup.SetOnLowPriorityForTest(checkOut.park))
-				t.Cleanup(func() {
-					checkOut.release()
-					ownerOut.release()
-					awaitClean(t)
-				})
+				callers := joinBackupCallers(t, func() { checkOut.release(); ownerOut.release() })
 				if _, err := backup.VerifySnapshot(context.Background(), blocker, backup.VerifyOptions{BackupsRoot: root}); !errors.Is(err, backup.ErrCheckGivenUp) {
 					t.Fatalf("the blocking verification answered %v, want it given up", err)
 				}
 				awaitMarkedWithin(t, root, 3*time.Second)
 				done := make(chan backup.Result, 1)
 				started := time.Now()
-				go func() { done <- backup.FinishCapture(context.Background(), c, nil, backup.VerifyOptions{}) }()
+				callers.start(func() {
+					done <- backup.FinishCapture(context.Background(), c, nil, backup.VerifyOptions{})
+				})
 				res := requireReturnedWithin(t, done, started, backup.StopWriteBound+time.Second, "a verification refused at once whose ownership's let-go hangs")
 				if !errors.Is(res.VerifyErr, backup.ErrCheckStillRunning) {
 					t.Errorf("the verification answered %v, want ErrCheckStillRunning", res.VerifyErr)

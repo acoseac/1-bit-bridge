@@ -58,19 +58,28 @@ func TestAStopWhileTheManifestReadHangsReturnsWithinItsBoundAndKeepsTheLock(t *t
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	done := make(chan backup.Result, 1)
-	go func() { done <- backup.FinishCapture(ctx, c, keepOne, backup.VerifyOptions{}) }()
-	w := fifoWriter(t, mpath)
+	var w *os.File
 	fed := false
 	feed := func() {
-		if !fed {
+		if !fed && w != nil {
 			fed = true
 			_, _ = w.Write(data)
 			_ = w.Close()
 		}
 	}
-	// Whatever fails, the read is answered before the test's end.
-	t.Cleanup(feed)
+	callers := joinBackupCallers(t, func() {
+		// If waiting for the reader failed, unblock a pending FIFO open too.
+		if w == nil {
+			w, _ = os.OpenFile(mpath, os.O_RDWR|syscall.O_NONBLOCK, 0)
+		}
+		_ = os.Remove(mpath)
+		_ = os.WriteFile(mpath, data, 0o600)
+		feed()
+		cancel()
+	})
+	done := make(chan backup.Result, 1)
+	callers.start(func() { done <- backup.FinishCapture(ctx, c, keepOne, backup.VerifyOptions{}) })
+	w = fifoWriter(t, mpath)
 	stoppedAt := time.Now()
 	cancel()
 	requireReturnedWithin(t, done, stoppedAt, backup.StopWriteBound+time.Second, "a verification stopped in its manifest's read")

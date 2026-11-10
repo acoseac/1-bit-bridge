@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/acoseac/1-bit-bridge/internal/backup"
+	"github.com/acoseac/1-bit-bridge/internal/backup/backuptest"
 	"github.com/acoseac/1-bit-bridge/internal/logging/loggingtest"
 )
 
@@ -53,6 +54,7 @@ func TestTheConsoleSaysAVerdictWasWrittenButNotDurable(t *testing.T) {
 		return errors.New("injected: the verdict's directory sync failed")
 	}))
 	logs := loggingtest.Record(t)
+	t.Cleanup(func() { s.WaitForBackupJobs(); backuptest.AwaitIdle(t) })
 	s.verifyInBackground(capture, filepath.Dir(capture.Dir), 0)
 	s.WaitForBackupJobs()
 	if !published {

@@ -53,14 +53,17 @@ func TestAVerdictsWriteIsAdmittedOnlyBeforeAGiveUp(t *testing.T) {
 			}))
 			// Registered last, so run first: the park let go and the hold's end
 			// joined before the seam is put back.
+			callerDone := make(chan struct{})
 			t.Cleanup(func() {
 				p.release()
+				waitCaller(t, callerDone)
 				awaitClean(t)
 			})
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			done := make(chan error, 1)
 			go func() {
+				defer close(callerDone)
 				_, err := backup.VerifySnapshot(ctx, dir, backup.VerifyOptions{BackupsRoot: root})
 				done <- err
 			}()
@@ -131,8 +134,8 @@ func TestNoVetoRemovalBeginsAfterItsWriteIsGivenUp(t *testing.T) {
 					}
 				}
 			}
-			// Long enough for the check to end: the write is the step given up.
-			t.Cleanup(backup.SetVerifyDeadlineForTest(time.Second))
+			// The real check keeps its bound; only the parked write expires.
+			t.Cleanup(backup.SetStepBoundForTest(dir, 300*time.Millisecond, "its verdict's write"))
 			p := newParking()
 			t.Cleanup(backup.SetRemoveVetoForTest(func(path string) error {
 				if path == inBundle {
@@ -140,8 +143,10 @@ func TestNoVetoRemovalBeginsAfterItsWriteIsGivenUp(t *testing.T) {
 				}
 				return os.Remove(path)
 			}))
+			callerDone := make(chan struct{})
 			t.Cleanup(func() {
 				p.release()
+				waitCaller(t, callerDone)
 				awaitClean(t)
 			})
 			type answer struct {
@@ -151,6 +156,7 @@ func TestNoVetoRemovalBeginsAfterItsWriteIsGivenUp(t *testing.T) {
 			done := make(chan answer, 1)
 			started := time.Now()
 			go func() {
+				defer close(callerDone)
 				res, err := backup.VerifySnapshot(context.Background(), dir, backup.VerifyOptions{BackupsRoot: root})
 				done <- answer{res, err}
 			}()
@@ -159,7 +165,7 @@ func TestNoVetoRemovalBeginsAfterItsWriteIsGivenUp(t *testing.T) {
 			case <-time.After(30 * time.Second):
 				t.Fatal("the write never began to remove a veto")
 			}
-			a := requireReturnedWithin(t, done, started, time.Second+2*backup.StopWriteBound+3*time.Second, "the verification whose veto's removal stalls")
+			a := requireReturnedWithin(t, done, started, 5*time.Second+2*backup.StopWriteBound+3*time.Second, "the verification whose veto's removal stalls")
 			if a.res.Found.DatabaseState != backup.StateVerified || a.res.Found.FilesState != backup.StateVerified {
 				t.Fatalf("the check found %s/%s, want VERIFIED: the test did not reach the case", a.res.Found.DatabaseState, a.res.Found.FilesState)
 			}
@@ -225,13 +231,16 @@ func TestAVetoSetAsideIsKeptOnceItsStepIsGivenUp(t *testing.T) {
 		}
 		return fsutil.SyncParentDir(path)
 	}))
+	callerDone := make(chan struct{})
 	t.Cleanup(func() {
 		p.release()
+		waitCaller(t, callerDone)
 		awaitClean(t)
 	})
 	done := make(chan error, 1)
 	started := time.Now()
 	go func() {
+		defer close(callerDone)
 		_, err := backup.VerifySnapshot(context.Background(), dir, backup.VerifyOptions{BackupsRoot: root})
 		done <- err
 	}()
@@ -284,7 +293,7 @@ func TestARecordNotReadBackIsSaidApartFromItsWrite(t *testing.T) {
 			stageFailed := errors.New("injected: the staging failed")
 			switch tc {
 			case "a read-back given up":
-				t.Cleanup(backup.SetVerifyDeadlineForTest(time.Second))
+				t.Cleanup(backup.SetStepBoundForTest(dir, 300*time.Millisecond, "its read of the record after it"))
 				p := newParking()
 				t.Cleanup(backup.SetReadBackFailureForTest(func(string) error {
 					p.park()

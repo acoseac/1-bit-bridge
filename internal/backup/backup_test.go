@@ -1333,6 +1333,7 @@ func primePreLadderLiveState(t *testing.T, dataDir string) backup.Sources {
 func verifiedSnapshot(t *testing.T, src backup.Sources) string {
 	t.Helper()
 	res := backup.SnapshotAndVerify(t.Context(), src, backup.SnapshotOptions{})
+	awaitClean(t)
 	if !res.Kept() || res.VerifyErr != nil {
 		t.Fatalf("SnapshotAndVerify: kept %v, capture %v, verification %v", res.Kept(), res.CaptureErr, res.VerifyErr)
 	}
@@ -1340,7 +1341,7 @@ func verifiedSnapshot(t *testing.T, src backup.Sources) string {
 		t.Fatalf("the snapshot reads database %s %v, files %s %v; want both VERIFIED",
 			v.DatabaseState, v.DatabaseReasons, v.FilesState, v.FilesReasons)
 	}
-	return res.Dir
+	return resolvedTestDir(t, res.Dir)
 }
 
 func pathExists(t *testing.T, p string) bool {

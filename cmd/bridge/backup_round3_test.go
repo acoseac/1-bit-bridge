@@ -501,21 +501,22 @@ func TestTheTickerTakesNoSnapshotWhileACheckThatDidNotEndHoldsTheFolder(t *testi
 	var letGo sync.Once
 	release := func() { letGo.Do(func() { close(out) }) }
 	verified := make(chan error, 1)
+	callerDone := make(chan struct{})
 	// Registered last, so run first: the check let go and its verification
 	// answered before the seams are put back.
 	t.Cleanup(func() {
 		release()
-		<-verified
+		waitClosed(t, callerDone, "backup verify")
 		awaitVerificationsEnd(t, root)
 	})
 	go func() {
+		defer close(callerDone)
 		_, err := backup.VerifySnapshot(context.Background(), dir, backup.VerifyOptions{BackupsRoot: root})
 		verified <- err
 	}()
 	<-entered
 	select {
 	case err := <-verified:
-		verified <- err
 		if !errors.Is(err, backup.ErrCheckGivenUp) {
 			t.Fatalf("the verification answered %v, want its check given up", err)
 		}
@@ -605,6 +606,7 @@ func TestAStartupCheckThatFindsTheDatabaseFailedTakesASnapshotWhetherOrNotItsRec
 		}
 		return nil
 	}, nil, nil))
+	t.Cleanup(func() { awaitHoldsLetGo(t, root) })
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	drainLoopOnCleanup(t, cancel, done, "the backup ticker")

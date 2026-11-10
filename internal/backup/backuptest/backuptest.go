@@ -18,7 +18,9 @@ import (
 	"fmt"
 	"path/filepath"
 	"testing"
+	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/backup"
 	"github.com/acoseac/1-bit-bridge/internal/dsn"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/sqlitetest"
@@ -85,4 +87,17 @@ func WriteSource(t testing.TB, path string) {
 func ParkVacuum(t testing.TB) *sqlitetest.Park {
 	t.Helper()
 	return sqlitetest.Arm(t)
+}
+
+// AwaitIdle waits for retained backup workers after their callers have been
+// joined. Call it before restoring process-wide seams or closing fixtures.
+func AwaitIdle(t testing.TB) {
+	t.Helper()
+	by := time.Now().Add(30 * time.Second)
+	for backup.ActiveHoldsForTest() != 0 {
+		if time.Now().After(by) {
+			t.Fatal("backup workers did not release their holds")
+		}
+		time.Sleep(time.Millisecond)
+	}
 }
