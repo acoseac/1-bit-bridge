@@ -811,7 +811,7 @@ func receive[T any](t *testing.T, ch <-chan T, what string) T {
 	return zero
 }
 
-func ordered() time.Duration { return min(5*time.Second, *watchdog) }
+func ordered() time.Duration { return *watchdog }
 
 // awaitOrdered is await within ordered.
 func awaitOrdered(t *testing.T, ch <-chan struct{}, what string) {

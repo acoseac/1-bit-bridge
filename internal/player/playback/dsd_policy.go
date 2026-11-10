@@ -547,6 +547,22 @@ func (b *Backend) logDSDSet(d *dsdSet) {
 // reconciliation compare with. A converted rate answers no native plan: the
 // occurrence converts (occ.converts, B728 B11).
 func (b *Backend) admitDSD(o *occ, f format.NativeDSD) (engine.NativePlan, error) {
+	// Mark before a refresh: refreshDSD contains failures while holding
+	// dsdMu, so it must never wait for this admission to finish.
+	if s := o.owner; s != nil {
+		s.mu.Lock()
+		if s.nativeRevoked {
+			s.mu.Unlock()
+			return engine.NativePlan{}, &engine.Unplayable{Reason: ReasonDACUnread, Detail: errDSDUnread.Error()}
+		}
+		o.admitting = true
+		s.mu.Unlock()
+		defer func() {
+			s.mu.Lock()
+			o.admitting = false
+			s.mu.Unlock()
+		}()
+	}
 	b.admitting(o.id)
 	cur := b.dsd.Load()
 	if o.leading || b.dsdStale() {
@@ -558,6 +574,13 @@ func (b *Backend) admitDSD(o *occ, f format.NativeDSD) (engine.NativePlan, error
 	plan, pp, err := cur.selectFor(f)
 	if err != nil {
 		return engine.NativePlan{}, err
+	}
+	if s := o.owner; s != nil {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if s.nativeRevoked {
+			return engine.NativePlan{}, &engine.Unplayable{Reason: ReasonDACUnread, Detail: errDSDUnread.Error()}
+		}
 	}
 	o.admitted, o.policyPlan = cur, pp
 	return plan, nil

@@ -72,7 +72,7 @@ func (s *session) holdsDSD() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, o := range s.chain {
-		if o.admitted != nil && (!o.dropped || o.out != nil && !o.out.closed) {
+		if o.admitting || o.admitted != nil && (!o.dropped || o.out != nil && !o.out.closed) {
 			return true
 		}
 	}
@@ -91,9 +91,18 @@ func (s *session) stopDSD(where string) {
 	s.faulted(where)
 	s.mu.Lock()
 	s.nativeRevoked = true
-	outs := append([]*output(nil), s.outs...)
+	var outs []*output
+	for _, out := range s.outs {
+		if out.native == nil {
+			if out.containDrop {
+				continue
+			}
+			out.containDrop = true
+		}
+		outs = append(outs, out)
+	}
 	for _, o := range s.chain {
-		if o.admitted != nil {
+		if o.admitting || o.admitted != nil {
 			o.stale = true
 		}
 	}
@@ -104,7 +113,17 @@ func (s *session) stopDSD(where string) {
 		if out.native != nil {
 			out.native.BeginRelease(alsapcm.Immediate)
 		} else {
-			s.b.spawn(func() { _ = s.call(s.ctx, out.sink.Drop) })
+			s.b.spawn(func() {
+				_ = s.call(s.ctx, func() error {
+					// call may return on cancellation before Drop does.
+					defer func() {
+						s.mu.Lock()
+						out.containDrop = false
+						s.mu.Unlock()
+					}()
+					return out.sink.Drop()
+				})
+			})
 		}
 	}
 	wake(s.wakeP)

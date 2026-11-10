@@ -20,6 +20,16 @@ func TestNativeEveryEntryOnAnEndedLifeAnswersByTheVerdict(t *testing.T) {
 		notPaused bool
 		call      func(*DSDSink) error
 	}{
+		{"Pause refused at its entry", "native pause", false, func(s *DSDSink) error { return s.Pause(context.Background()) }},
+		{"Pause on a context already ended", "native pause", false, func(s *DSDSink) error { return s.Pause(ended) }},
+		{"WriteDSD refused at its entry", "native write", false, func(s *DSDSink) error {
+			_, err := s.WriteDSD(context.Background(), 1, []byte{1}, []byte{2}, 0, 8)
+			return err
+		}},
+		{"WriteDSD on a context already ended", "native write", false, func(s *DSDSink) error {
+			_, err := s.WriteDSD(ended, 1, []byte{1}, []byte{2}, 0, 8)
+			return err
+		}},
 		{"Activate refused at its entry", "native activation", false, func(s *DSDSink) error { return s.Activate(context.Background(), 1) }},
 		{"Activate on a context already ended", "native activation", false, func(s *DSDSink) error { return s.Activate(ended, 1) }},
 		{"Resume refused at its entry", "native resume", false, func(s *DSDSink) error { return s.Resume(context.Background()) }},
@@ -27,7 +37,7 @@ func TestNativeEveryEntryOnAnEndedLifeAnswersByTheVerdict(t *testing.T) {
 		{"ActivatePaused refused at its entry", "native activation", false, func(s *DSDSink) error { return s.ActivatePaused(context.Background()) }},
 		{"ActivatePaused handing an activated sink to Resume", "native resume", true, func(s *DSDSink) error { return s.ActivatePaused(context.Background()) }},
 	} {
-		for _, cleanup := range []string{"nothing recorded", "a device's failure recorded", "the fence alone recorded", "its close failing", "past the release's budget"} {
+		for _, cleanup := range []string{"nothing recorded", "a device's failure recorded", "the fence alone recorded", "its close failing", "past the release's budget", "a deadline-cut drain"} {
 			if entry.notPaused && (cleanup == "a device's failure recorded" || cleanup == "the fence alone recorded") {
 				continue
 			}
@@ -62,6 +72,31 @@ func TestNativeEveryEntryOnAnEndedLifeAnswersByTheVerdict(t *testing.T) {
 				}
 				answer := make(chan error, 1)
 				switch cleanup {
+				case "a deadline-cut drain":
+					if !entry.notPaused {
+						if err := s.Activate(context.Background(), 1); err != nil {
+							t.Fatal(err)
+						}
+					}
+					statusing, status := k.parkNextStatus()
+					defer status()
+					if _, err := s.WriteDSD(context.Background(), 1, []byte{1, 2, 3, 4}, []byte{5, 6, 7, 8}, 0, 32); err != nil {
+						t.Fatal(err)
+					}
+					await(t, statusing, "content STATUS before TrackChange")
+					s.BeginRelease(TrackChange)
+					polling, poll := k.parkNextPoll()
+					defer poll()
+					status()
+					await(t, polling, "TrackChange drain in its poll")
+					pastBudget(t, k, s)
+					poll()
+					await(t, s.Done(), "deadline-cut drain cleanup")
+					if rec := s.Result(); !errors.Is(rec, context.Canceled) || !errors.Is(rec, ErrReleaseUnconfirmed) {
+						t.Fatalf("record %v; want unconfirmed drain with cancellation, the premise", rec)
+					}
+					end()
+					answer <- entry.call(s)
 				case "a device's failure recorded":
 					// An inert sink's writer makes no call until it is paused,
 					// whose STATUS then fails: the writer ends on it, its release
@@ -135,6 +170,8 @@ func TestNativeEveryEntryOnAnEndedLifeAnswersByTheVerdict(t *testing.T) {
 					if errors.Is(e, ErrReleaseUnconfirmed) {
 						t.Errorf("%s answered %v; the release was confirmed, want no ErrReleaseUnconfirmed", what, e)
 					}
+				case "a deadline-cut drain":
+					theSinksFailure(t, e, ErrReleaseUnconfirmed, what)
 				case "its close failing":
 					theSinksFailure(t, e, ErrReleaseUnconfirmed, what)
 					if !errors.Is(e, f.err) {

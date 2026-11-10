@@ -137,9 +137,10 @@ type output struct {
 	policyID       string
 	transport      alsapcm.Transport
 	// Under the session's lock.
-	submitted int64 // content frames handed to the sink, less those a cut dropped
-	drained   bool  // a drain played everything submitted
-	closed    bool  // its Close was called
+	submitted   int64 // content frames handed to the sink, less those a cut dropped
+	drained     bool  // a drain played everything submitted
+	closed      bool  // its Close was called
+	containDrop bool  // a containment Drop is still inside the sink
 
 	umu  sync.Mutex
 	unit Unit // where it is open: Locate moves it at a reopen
@@ -407,7 +408,7 @@ func (s *session) call(ctx context.Context, f func() error) (err error) {
 
 // newOccLocked appends an occurrence to the chain. s.mu is held.
 func (s *session) newOccLocked(eo engine.Occurrence) *occ {
-	o := &occ{permission: s.permission, dsdRefusal: s.dsdRefusal, reservation: eo.Reservation, id: eo.ID, entry: eo.Entry, ref: eo.Ref, pos: len(s.chain), done: make(chan struct{})}
+	o := &occ{owner: s, permission: s.permission, dsdRefusal: s.dsdRefusal, reservation: eo.Reservation, id: eo.ID, entry: eo.Entry, ref: eo.Ref, pos: len(s.chain), done: make(chan struct{})}
 	s.chain = append(s.chain, o)
 	return o
 }
@@ -1572,6 +1573,9 @@ func (s *session) resume(ctx context.Context) (how engine.ResumeResult, err erro
 		return engine.ResumeContinued, nil
 	}
 	if err := s.unpausedLocked(); err != nil {
+		between.claimed = false
+		l.unlock()
+		s.closeOutput(next)
 		return 0, err
 	}
 	// The claim stays with the sink handed to the producer, whose adoption and
@@ -1680,15 +1684,7 @@ func (s *session) teardown() {
 		}
 		s.closeAtTeardown(out)
 	}
-	func() {
-		defer func() {
-			if r := recover(); r != nil {
-				s.b.logPanic("the final native report", r)
-				s.faulted("the final native report")
-			}
-		}()
-		s.finalNativeReport()
-	}()
+	s.finalNativeReport()
 	for _, o := range s.chain {
 		o.reservation.ReleaseBackend()
 	}

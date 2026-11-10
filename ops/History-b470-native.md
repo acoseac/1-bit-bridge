@@ -442,3 +442,65 @@ floor tests check the 350/400 ms measurement boundary and compare the converted
 window's samples with an independently converted zero-padded ending.
 Qualification version 48 invalidates earlier harness evidence; LegacyVersion
 remains 35. Test and negative-control evidence is in `ops/engineering-log.md`.
+
+### Round 2: admission, containment and final answers
+
+The DECISIONS for this round are nonblocking admission containment, one actual
+PCM Drop per output in flight, event routing at the cutoff, and cleanup failures
+preceding cancellation on every Pause/WriteDSD return. Confirmed, fault-free
+cleanup still answers a refused or cancelled command with its life's typed
+cancellation. Successful commands remain successful only after fault-free cleanup.
+
+An occurrence keeps its owning session. Before any admission callback or policy
+read, it marks admission pending under that session's mutex; the initial set and
+plan are published under the same mutex used by holdsDSD and stopDSD. Containment
+counts a pending admission and fences its session. Admission completion refuses
+that fence even if a later reading succeeds. Containment never waits for an
+opener: refreshDSD owns dsdMu, which the opener itself needs, including when the
+failed refresh originated inside that admission. Reconciliation still waits for
+the ordinary completed-open publication before reading decoder-owned fields.
+
+The per-output containment Drop guard is set before spawning and cleared inside
+the sink-operation closure, after Drop returns or panics. Clearing it when call
+returns would allow another Drop while its abandoned goroutine remains in the
+kernel. Further failed readings preserve the first fault and wake waiters without
+starting another operation against that output. The guard does not pretend the
+writer or Close completed: teardown still joins actual ownership release.
+
+The final report owns its recovery. It records a cleanup fault before reading
+positions, leaves ordinary events installed until cutoff publication returns,
+and then uses token-bearing retiring events. Recovery sends an unattempted fault
+through whichever channel is valid at that boundary without invoking the failed
+observer again. The fault attempt is marked before its callback, so even a Fault
+callback that panics is attempted only once. A separate recovery contains that
+callback; reporter state is restored, reservations are released, and down closes.
+The engine accepts ordinary retiring faults only before cutoff and token faults
+only after it; callback counts alone cannot establish delivery. The routing case
+uses the real engine and checks its recorded worker fault on both sides.
+
+Pause and WriteDSD settle their entry refusals, command-context cancellation,
+wait-loop returns and completion outside mu. The existing verdict strips
+cancellation and activation-fence identities from a real cleanup failure. The
+entry matrix includes both commands with a fence-only record and a real
+TrackChange drain cut by its deadline; select-arm unit cases isolate the ring
+context, Pause context, Pause done, and Pause's changed/completion paths with a
+staged cleanup record. These unit cases model the record and the chosen select
+arm, not hardware progress; the entry matrix establishes that record with the
+fake kernel.
+
+Initial ActivatePaused refuses with ErrActivationFenced, so a stale or dropped
+successor can be taken back under the same rule as Activate. The claimed
+post-STATUS initial-activation path is unreachable: activateNative enters that
+block only for wasActive, while an initial paused activation has never been
+active; once generation is nonzero ActivatePaused delegates to Resume. Its
+errNativeResumeFenced remains correct there. Take-back also covers errReplanned
+and stale successors, with release and real failures retaining precedence.
+
+The ordering watchdog now follows -watchdog without a five-second ceiling.
+The failed resume handoff clears its claim and closes the newly acquired output;
+its case checks closure before session release can hide a leak. Qualification
+version remains 48 for this PR (the base is 47); LegacyVersion stays 35.
+
+No builds, tests or negative controls were run by this editing worker. The
+regression assertions and exact negative-control mutations are handed to the
+orchestrator in the round-2 engineering-log entry.

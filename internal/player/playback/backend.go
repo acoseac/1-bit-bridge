@@ -140,7 +140,7 @@ type Seams struct {
 	Unjudged func(o engine.OccurrenceID)
 	// Opened runs after content admission and before the opener takes the session lock.
 	Opened func(o engine.OccurrenceID, ref engine.Reference)
-	// Admitting observes entry to policy admission; it must not block or call the backend.
+	// Admitting observes pending policy admission outside all locks; it may block.
 	Admitting func(o engine.OccurrenceID)
 	// Revoking runs under the session lock before revocation; it must not call the backend.
 	Revoking func(s engine.SessionID)

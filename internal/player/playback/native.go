@@ -526,11 +526,28 @@ func (v retiringEvents) Fault(_ engine.SessionID, f engine.Fault) {
 // callbacks enter the engine mailbox before either acknowledgement path.
 func (s *session) finalNativeReport() {
 	l := s.hold()
-	defer l.release()
+	ev := s.ev
+	reportEv := ev
+	defer func() {
+		// Release the lock before recovery: position callbacks run under it.
+		l.release()
+		if r := recover(); r != nil {
+			s.b.logPanic("the final native report", r)
+			s.faulted("the final native report")
+			s.finalFault(reportEv)
+		}
+		s.mu.Lock()
+		s.ev = ev
+		s.finalReport = false
+		s.mu.Unlock()
+	}()
 	l.lock()
 	if s.nativeRelease == nil {
 		l.unlock()
 		return
+	}
+	if s.releaseErr != nil && s.fault == nil {
+		s.fault = &engine.Fault{Reason: faultReason(s.releaseErr), Detail: s.releaseErr.Error()}
 	}
 	token := s.nativeRelease.Token
 	if s.cur != nil && s.cur.native != nil {
@@ -546,23 +563,44 @@ func (s *session) finalNativeReport() {
 			prefixes = append(prefixes, engine.NativePrefix{Occurrence: o.id, Start: o.start, End: end})
 		}
 	}
-	ev := s.ev
-	if to, ok := ev.(engine.NativeReleaseEvents); ok {
-		s.ev = retiringEvents{Events: ev, to: to, token: token}
-	}
 	s.finalReport = true
-	if s.releaseErr != nil && s.fault == nil {
-		s.fault = &engine.Fault{Reason: faultReason(s.releaseErr), Detail: s.releaseErr.Error()}
-	}
 	l.unlock()
 	if to, ok := ev.(engine.NativeReleaseEvents); ok {
 		to.Retiring(token, engine.NativeEvent{Kind: "cutoff", Prefixes: prefixes})
+		// The engine accepts token events only after the cutoff was posted.
+		// Before that point recovery must use ordinary events.
+		reportEv = retiringEvents{Events: ev, to: to, token: token}
 	}
-	s.reportStep()
 	l.lock()
-	s.ev = ev
-	s.finalReport = false
+	s.ev = reportEv
 	l.unlock()
+	s.reportStep()
+}
+
+// finalFault delivers the unreached fault without consulting the observer that
+// failed. Both workers have joined. An attempted callback is never retried, and
+// even a broken Fault callback cannot prevent reservations and down releasing.
+func (s *session) finalFault(ev engine.Events) {
+	defer func() {
+		if r := recover(); r != nil {
+			s.b.logPanic("the final report's report of its fault", r)
+		}
+	}()
+	s.mu.Lock()
+	if s.fault == nil || s.faultSent || ev == nil {
+		s.mu.Unlock()
+		return
+	}
+	f := *s.fault
+	if f.Occurrence == 0 {
+		f.Occurrence, f.Frames = s.posOcc, s.posFrames
+		if f.Occurrence == 0 && len(s.chain) > 0 {
+			f.Occurrence = s.chain[0].id
+		}
+	}
+	s.faultSent = true
+	s.mu.Unlock()
+	ev.Fault(s.id, f)
 }
 
 func (o *output) activate(ctx context.Context) error {

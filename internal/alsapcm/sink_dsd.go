@@ -653,25 +653,25 @@ func (s *DSDSink) fenced(op string, refusal error) error {
 // Finish, not a zero-bit Write, declares final EOF.
 func (s *DSDSink) WriteDSD(ctx context.Context, id uint64, left, right []byte, offset, validBits int) (int, error) {
 	if len(left) != len(right) || offset < 0 || validBits < 0 || offset/8 > len(left) || int64(validBits) > int64(len(left))*8-int64(offset) {
-		return 0, errors.New("invalid native bit counts")
+		return 0, s.settled(refusedAnswer("native write", errors.New("invalid native bit counts")))
 	}
 	s.producer.Lock()
 	defer s.producer.Unlock()
 	accepted := 0
 	for accepted < validBits {
 		if err := ctx.Err(); err != nil {
-			return accepted, err
+			return accepted, s.settled(refusedAnswer("native write", err))
 		}
 		s.mu.Lock()
 		if s.releasing || s.revoked || s.finishing || s.err != nil {
 			e := s.fenced("native write", errors.New("native admission closed"))
 			s.mu.Unlock()
-			return accepted, e
+			return accepted, s.settled(refusedAnswer("native write", e))
 		}
 		if s.ledgerN == 0 || s.ledger[s.ledgerN-1].id != id {
 			if s.ledgerN == s.cfg.LedgerLimit {
 				s.mu.Unlock()
-				return accepted, errors.New("native occurrence budget exceeded")
+				return accepted, s.settled(refusedAnswer("native write", errors.New("native occurrence budget exceeded")))
 			}
 			s.ledger[s.ledgerN] = nativeOccurrence{id: id, end: s.submitted}
 			s.ledgerN++
@@ -681,7 +681,7 @@ func (s *DSDSink) WriteDSD(ctx context.Context, id uint64, left, right []byte, o
 			s.mu.Unlock()
 			select {
 			case <-ctx.Done():
-				return accepted, ctx.Err()
+				return accepted, s.settled(refusedAnswer("native write", ctx.Err()))
 			case <-ch:
 			}
 			continue
@@ -712,7 +712,7 @@ func (s *DSDSink) WriteDSD(ctx context.Context, id uint64, left, right []byte, o
 		s.notify()
 		s.mu.Unlock()
 	}
-	return accepted, nil
+	return accepted, s.settled(nativeAnswer{kind: answerSuccess, op: "native write"})
 }
 func (s *DSDSink) flushCarry() {
 	var b [8]byte
@@ -868,7 +868,7 @@ func (s *DSDSink) Pause(ctx context.Context) error {
 	if s.releasing {
 		e := s.fenced("native pause", errors.New("native releasing"))
 		s.mu.Unlock()
-		return e
+		return s.settled(refusedAnswer("native pause", e))
 	}
 	if !s.paused {
 		s.pauseAt = s.seams.now()
@@ -881,15 +881,15 @@ func (s *DSDSink) Pause(ctx context.Context) error {
 		s.mu.Unlock()
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return s.settled(refusedAnswer("native pause", ctx.Err()))
 		case <-s.done:
-			return s.result()
+			return s.settled(refusedAnswer("native pause", s.result()))
 		case <-ch:
 		}
 		s.mu.Lock()
 	}
 	s.mu.Unlock()
-	return nil
+	return s.settled(nativeAnswer{kind: answerSuccess, op: "native pause"})
 }
 
 // Resume revalidates a released endpoint before resuming retained content.
@@ -996,7 +996,7 @@ func (s *DSDSink) ActivatePaused(ctx context.Context) error {
 		return s.Resume(ctx)
 	}
 	if !s.paused || s.releasing || s.revoked || s.err != nil || s.activation != nil {
-		e := s.fenced("native activation", errors.New("native initial paused activation fenced"))
+		e := s.fenced("native activation", ErrActivationFenced)
 		s.mu.Unlock()
 		return s.settled(refusedAnswer("native activation", e))
 	}

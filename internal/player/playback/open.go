@@ -59,6 +59,8 @@ const chunkFrames = 4096
 
 // occ is one occurrence the engine handed the session, in play order.
 type occ struct {
+	owner      *session // immutable; nil only for isolated admission fixtures
+	admitting  bool     // under owner.mu, before the policy read can fail
 	permission *permission
 	// dsdRefusal is the session's DSD refusal while its approval did not
 	// read: DSD content of the occurrence is refused with it.
@@ -69,9 +71,9 @@ type occ struct {
 	// below holds for native and DoP alone. They are what the check after
 	// open compares the opened node with, what its activation and
 	// reconciliation judge it by; nil for PCM and for the harness's
-	// admission. admitted is repointed to each set reconciliation keeps it
-	// under, under the session's lock. leading is a session's first
-	// occurrence, whose admission reads the policy afresh; stale is one
+	// admission. Initial publication and each reconciliation repoint are
+	// under the owning session's lock, as are containment's reads. leading is
+	// a session's first occurrence, whose admission reads the policy afresh; stale is one
 	// reconciliation is handing off again, which the producer holds back from
 	// the sink; and observed is one whose streaming_observed was recorded.
 	admitted   *dsdSet

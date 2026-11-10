@@ -91229,3 +91229,82 @@ An earlier `./...` race run was stopped after the final production checkpoint
 changed, to avoid duplicating expensive tests on the loaded host. It is not
 claimed as a completed full-repository gate. The required final dependency run
 above completed, and only the listed Linux-tagged cases remain for orchestration.
+
+
+## 2026-11-10 — B728 B9 PR 1 round 2: containment and final answers
+
+File-editing pass only; no builds, tests, negative controls, commits or other
+state-changing git commands run. Go 1.27.3 gofmt formatted the edited Go files.
+The rules in output.md and player.md, History-b470-native.md's lifecycle section,
+and History-rules-player.md's pause entry describe the changes with their code.
+The DECISIONS require nonblocking pending admission, a guard around the actual
+Drop, fault routing across cutoff, and cleanup failures taking precedence on all
+Pause/WriteDSD exits. No wire or choice machinery changed.
+
+Expected negative controls for orchestration (not measured results):
+
+- `TestRepeatedContainmentKeepsOneDropPastCallerCancellation`: on round 1,
+  repeated failed refreshes accumulate more than two backend goroutines around
+  the held Drop; after unblocking and joining, Drop's count exceeds one. Restore
+  stopDSD's unconditional spawn, or clear the guard when call returns rather
+  than in its inner sink closure. Both must fail these assertions.
+- `TestContainmentFencesAnAdmissionWithoutWaitingForIt`: the external-refresh
+  case must find a fault and nativeRevoked while admission is parked, then
+  refuse its completion without publishing admitted. The inside-admission case
+  must return its unread-policy refusal and contain both its own session and
+  the other DSD holder. On round 1 the pending session is skipped. Remove pending
+  admission from holdsDSD and remove the completion fence separately. Run the
+  admission/containment cases under the race detector as well; their explicit
+  barriers pin the containment behavior, not a race-detector scheduling outcome.
+  An admission-wait mutation must time out at the named refresh/admission wait.
+- `TestFinalReportRecoveryReachesTheEngineOnBothSidesOfCutoff`: on round 1 the
+  engine never records the worker's original xrun, before or after cutoff.
+  Restore the old record-only recovery; separately force fallback to ordinary
+  events (after-cutoff case loses it) or token events (before-cutoff case loses
+  it). These are engine snapshot assertions, not observer counts.
+- `TestFinalReportRecoveryContainsItsFaultCallback`: before/after-cutoff and
+  new-backend-fault cases expect exactly one attempted fallback; round 1 makes
+  none. The fault-callback-itself case expects the original event object and
+  finalReport=false restored; round 1 leaves temporary routing installed.
+  Remove finalFault's recovery separately: the panicking callback must leave
+  down open and the reservation charged. Remove its faultSent check separately:
+  the callback-itself case must count two attempts. The first worker fault must
+  remain unchanged; without one the recovered report panic is backend_failed.
+- `TestNativeEveryEntryOnAnEndedLifeAnswersByTheVerdict`: new Pause/WriteDSD
+  fence-only rows must match typed cancellation and no activation fence; their
+  real deadline-cut drain rows must match ErrReleaseUnconfirmed and no
+  cancellation identity. WriteDSD with an already-ended command context must
+  retain the recorded device or close failure. Those assertions fail on round
+  1. Restore each command's old refusal/context returns separately. Other
+  existing rows remain positive controls and are not all claimed red.
+- `TestNativeWaitingCommandsAnswerTheEndedLifesFailure`: ring context and Pause
+  context, done and changed/completion cases must return ErrReleaseUnconfirmed
+  without cancellation identity. Round 1 returns raw context cancellation, the
+  cancellation-bearing record, or nil. Restore each matching return separately;
+  for the changed case repeat with -count=20 because done is also ready. These
+  are deterministic record/select fixtures apart from that disclosed select,
+  while the entry matrix uses actual fake-kernel cleanup.
+- `TestNativePausedInitialActivationKeepsItsOwnFence`: the refused initial
+  paused activation must match ErrActivationFenced; round 1 returns the unnamed
+  initial paused fence. Restore that refusal to its old errors.New value.
+- `TestFailedResumeClosesTheOutputItCouldNotHandOff`: with no engine to release
+  on the fault, Resume must answer the timer-stop fault with both fake device
+  opens already closed. Round 1 leaves its second output open. Remove the
+  unpausedLocked-failure branch's claim clear and close to reproduce it.
+- `TestOrderedWaitHonorsALargerWatchdog`: a 17-second watchdog must produce a
+  17-second ordering bound. Restore min(5s, watchdog): it reports five seconds.
+
+Review findings verified against the code: faulted records under the mutex and
+never invokes Events, so stopDSD itself does not synchronously call a panicking
+Fault callback. The missing final fallback is now protected explicitly. The
+resume already defers wg.Done; its defect was the claim/output retained after
+unpausedLocked failed. Initial ActivatePaused can meet its entry fence, now the
+shared sentinel; its alleged post-STATUS path cannot run until the sink was
+active, by which point ActivatePaused delegates to Resume. No change to that
+writer branch was warranted. The stale/replanned take-back rule is corrected to
+match producer.transition. All five referenced reviews were read in full.
+
+The engine-routing test needs directory fsync and explicitly skips Windows,
+matching the existing engine integration storage requirement. It opens no audio
+node. All other added cases are portable, using fake hardware or staged state;
+no new Linux-only test was added. Qualification remains 48 within this PR.
