@@ -269,6 +269,9 @@ var onVerifyExpired atomic.Pointer[func(string)]
 
 // SetVerifyHandoffForTest installs hooks before a worker hands its answer to
 // its caller and once the caller chooses expiration, and returns the restore.
+// Both hooks receive the caller's dir as passed to VerifySnapshot or
+// FinishCapture: expiration can precede the worker's path resolution. This
+// handoff seam is the exception to hooks that receive resolved snapshot paths.
 func SetVerifyHandoffForTest(answer, expired func(string)) func() {
 	var a, e *func(string)
 	if answer != nil {

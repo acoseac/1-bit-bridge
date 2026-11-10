@@ -305,7 +305,8 @@ func TestEveryStepUnderTheLockIsBoundedAndMarked(t *testing.T) {
 
 // TestASlowStepWithinItsBoundLeavesNoMark: a step under the lock that is
 // slow and keeps within its bound (the veto's sync parked until a second
-// verification is waiting) raises no mark, and a verification waiting its turn
+// verification is waiting, then for at least 1.2 s of its explicit 3 s bound)
+// raises no mark, and a verification waiting its turn
 // meanwhile gets it and records its verdict (backlog B653's fourth round, the
 // review of its brief: a mark only for an overrun).
 func TestASlowStepWithinItsBoundLeavesNoMark(t *testing.T) {
@@ -317,7 +318,7 @@ func TestASlowStepWithinItsBoundLeavesNoMark(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(backup.SetVerifyDeadlineForTest(30 * time.Second))
+	t.Cleanup(backup.SetStepBoundForTest(target, 3*time.Second, "putting its veto in place"))
 	p := newParking()
 	var once sync.Once
 	t.Cleanup(backup.SetSyncVetoForTest(func(path string) error {
@@ -350,8 +351,13 @@ func TestASlowStepWithinItsBoundLeavesNoMark(t *testing.T) {
 	case <-time.After(30 * time.Second):
 		t.Fatal("the second verification never waited")
 	}
-	if s, held := backup.StuckCheckHere(root); held {
-		t.Fatalf("a step within its bound was marked: %+v", s)
+	for until := time.Now().Add(1200 * time.Millisecond); ; time.Sleep(10 * time.Millisecond) {
+		if s, held := backup.StuckCheckHere(root); held {
+			t.Fatalf("a step within its bound was marked: %+v", s)
+		}
+		if !time.Now().Before(until) {
+			break
+		}
 	}
 	p.release()
 	if err := <-first; err != nil {

@@ -33,6 +33,7 @@ func TestTheConsoleReportsCancellationAndEveryWriteHandoff(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			capture.Dir = dir
 			mpath := filepath.Join(dir, backup.ManifestFile)
 			// FAILED/FAILED needs no veto and reaches the write on every platform.
 			for _, name := range []string{backup.ManifestDBFileName, "server.crt"} {
@@ -84,11 +85,11 @@ func TestTheConsoleReportsCancellationAndEveryWriteHandoff(t *testing.T) {
 				}))
 			}
 			t.Cleanup(backup.SetVerifyHandoffForTest(func(path string) {
-				if path == capture.Dir && mode == "published then outer expiration" {
+				if path == dir && mode == "published then outer expiration" {
 					<-release
 				}
 			}, func(path string) {
-				if path == capture.Dir {
+				if path == dir {
 					expired.Store(true)
 				}
 			}))

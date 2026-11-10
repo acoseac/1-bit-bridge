@@ -1649,10 +1649,15 @@ bytes with a fresh generation, for both published image architectures.
 
 ## B653 PR 1 round 8: resolved fixtures and joined verification callers (2026-11-10)
 
-`VerifySnapshot` resolves directories before calling path-sensitive hooks.
-Fixtures now resolve their directories once through `fsutil.ResolveLinks`
-before deriving hook paths. This covers macOS's `/var` alias and Windows
-short names and junctions. The stopped-write, staging/rename/sync, veto and
+`VerifySnapshot` resolves directories before calling snapshot-path hooks,
+except `SetVerifyHandoffForTest`: its hooks keep the caller's `dir` as passed,
+because outer expiry may precede the worker's resolution. The console test
+passes its once-resolved `capture.Dir` into the caller and compares that one
+form in every hook. Fixtures resolve directories through `fsutil.ResolveLinks`
+before deriving hook paths. This fixes the measured macOS `/var` alias.
+On Windows, that resolver uses `GetFinalPathNameByHandle`, with
+`EvalSymlinks` as fallback (`internal/fsutil/resolve_windows.go`); no Windows
+execution of these fixtures has been verified yet. The stopped-write, staging/rename/sync, veto and
 late-removal fixtures had compared the resolved hook argument with the raw
 temporary directory; the hook never parked or injected its failure. An
 unbounded wait for that park could time out the whole test binary.
@@ -1667,7 +1672,9 @@ For cleanup, release all stalls and cancel, join each outer caller through
 a completion channel, then await retained holds before restoring seams or
 closing fixtures. Apply this to `VerifySnapshot`, `FinishCapture`, console
 jobs and tickers alike. Register this cleanup after the seams it protects:
-LIFO runs it first. `ActiveHoldsForTest` counts even a cancellation handoff
+LIFO runs it first. Do not pair this with a deferred cancel, which runs
+before cleanup releases the stalls: put cancellation in the release callback,
+or register `t.Cleanup(cancel)` before the joining cleanup. `ActiveHoldsForTest` counts even a cancellation handoff
 with no verification slot or overrun mark; a zero count alone is not a
 caller join. `backuptest.AwaitIdle` must follow that join.
 
@@ -1681,6 +1688,12 @@ The post-answer release window is pinned by
 `TestAnAnsweredVerificationOrClaimCanStillHoldTheFolder`. Keep fixture
 creation outside shortened verification deadlines. Tests aimed at a write
 stall use `SetStepBoundForTest` for that snapshot and the named steps,
-leaving the real check its normal deadline; the slow-step case parks until
-another caller is demonstrably waiting, then releases it inside a generous
-bound instead of spending that bound on repeated sleeps.
+leaving the real check its normal deadline. The slow-step case parks until
+another caller is demonstrably waiting, then polls `StuckCheckHere` for at
+least 1.2 s inside an explicit 3 s bound on the resolved snapshot's veto
+step. A threshold below that duration must fail the test.
+
+A fresh INCOMPLETE publication keeps its `WriteRecorded` expectation on
+Windows: `SyncParentDir` returns nil. The `SyncsParentDir` branch in the
+sibling recheck test concerns an existing VERIFIED record, not this fresh
+publication. These are code-inspection findings, not Windows runtime results.

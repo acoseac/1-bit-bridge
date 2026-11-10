@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -42,5 +43,65 @@ func TestTheReportersKeepWriteProgressWithoutAFoundVerdict(t *testing.T) {
 				t.Error("unknown write used the default wording")
 			}
 		})
+	}
+}
+
+// TestTheTickerSilencesOnlyCancellationWithoutAnotherFailure pins shutdown's
+// cancellation-only silence, including an outer-expiration wrapper.
+func TestTheTickerSilencesOnlyCancellationWithoutAnotherFailure(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	for _, tc := range []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"cancellation alone", context.Canceled, ""},
+		{"outer expiration", fmt.Errorf("the verification was left to end on its own: %w", context.Canceled), ""},
+		{"given-up step", errors.Join(context.Canceled, backup.ErrCheckGivenUp), "was given up"},
+		{"unread record", errors.Join(context.Canceled, backup.ErrRecordNotReadBack), "record could not be read back"},
+		{"write failure", errors.Join(context.Canceled, errors.New("injected write failure")), "injected write failure"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var out, errs bytes.Buffer
+			reportTickerVerdict(ctx, &out, &errs, "shutdown", backup.Result{
+				Dir: "snapshot", Verify: backup.VerifyResult{Write: backup.WriteUnknown}, VerifyErr: tc.err,
+			})
+			words := out.String() + errs.String()
+			if tc.want == "" {
+				if words != "" {
+					t.Errorf("cancellation-only shutdown printed %q", words)
+				}
+			} else if !strings.Contains(words, tc.want) || !strings.Contains(words, "its write outcome is unknown") {
+				t.Errorf("shutdown lost accompanying failure %q or write outcome: %s", tc.want, words)
+			}
+		})
+	}
+}
+
+// TestTheReportersSayWhenAnIncompletePublicationWasNeverReadBack uses
+// abandonPending's actual result shape: a published INCOMPLETE, no read made.
+func TestTheReportersSayWhenAnIncompletePublicationWasNeverReadBack(t *testing.T) {
+	v := backup.VerifyResult{
+		Found: backup.Verification{
+			DatabaseState: backup.StateIncomplete, DatabaseReasons: []backup.Reason{backup.ReasonCancelled},
+			FilesState: backup.StateIncomplete, FilesReasons: []backup.Reason{backup.ReasonCancelled},
+		},
+		Write: backup.WriteRecorded, Recorded: true,
+	}
+	var out, errs bytes.Buffer
+	if reportVerdict(&out, &errs, "", v, context.Canceled) {
+		t.Error("an unread record passed")
+	}
+	cli := out.String() + errs.String()
+	out.Reset()
+	errs.Reset()
+	// A live ticker reports a cancelled operation; shutdown-only silence is
+	// covered separately above.
+	reportTickerVerdict(context.Background(), &out, &errs, "startup", backup.Result{Dir: "snapshot", Verify: v, VerifyErr: context.Canceled})
+	for _, words := range []string{cli, out.String() + errs.String(), keptWords(v), tickerKeptWords(v)} {
+		if !strings.Contains(words, "it wrote its record") || !strings.Contains(words, "its record was not read back") || strings.Contains(words, "could not be read back") {
+			t.Errorf("publication with no read-back misreported: %s", words)
+		}
 	}
 }

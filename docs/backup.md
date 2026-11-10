@@ -97,9 +97,13 @@ unless it holds the verdict of an earlier check that finished, which stays.
 went (it wrote nothing, it wrote its record, or its write did not finish)
 and what the record reads, or that it could not be read back, or that its
 read-back was given up. If the caller stops waiting before the write's
-outcome arrives, it says that the write outcome is unknown: the verdict
-may already have been written. A step that is slow and keeps within its
-bound changes nothing.
+outcome arrives, it says that the write outcome is unknown: a record may
+have been written, or may still be: the verdict, or INCOMPLETE once the
+stalled step ends. During shutdown, the scheduled snapshot is silent only
+for a cancellation-only outcome, including the outer expiry's cancellation
+wrapper. An accompanying failure (a step given up, a record not read back,
+or a write failure) is still reported. A step that is slow and keeps within
+its bound changes nothing.
 
 Until a step given up ends, no other check or prune of those snapshots runs
 and no scheduled snapshot is taken. In the bridge that runs it they are

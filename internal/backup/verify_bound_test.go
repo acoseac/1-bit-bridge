@@ -82,7 +82,7 @@ func TestAStopWhileTheLocksOpenHangsReturnsWithinItsBoundAndTakesNoLockLate(t *t
 		return fsutil.OpenLockFile(dir, name)
 	}))
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	t.Cleanup(cancel)
 	callers := joinBackupCallers(t, func() { letGo(); cancel() })
 	done := make(chan backup.Result, 1)
 	callers.start(func() { done <- backup.FinishCapture(ctx, c, keepOne, backup.VerifyOptions{}) })
@@ -112,54 +112,114 @@ func TestAStopWhileTheLocksOpenHangsReturnsWithinItsBoundAndTakesNoLockLate(t *t
 // deadline's), and records INCOMPLETE (deadline). The check's thread ends,
 // without a check, once the test lets it go, and the test joins the
 // verification's worker, which keeps this process's slot until then, before
-// it puts either seam back (backlog B653's third round).
+// it puts either seam back (backlog B653's third round). The outer-expiry
+// case blocks recovery and the answer independently, proves Unknown at expiry,
+// then releases recovery and reads INCOMPLETE from disk (ninth round).
 func TestAVerificationPastItsDeadlineReturnsWithItsCallerStillWaiting(t *testing.T) {
-	src := storeWithTracks(t, 5)
-	dir, err := backup.Snapshot(t.Context(), src)
-	if err != nil {
-		t.Fatal(err)
-	}
-	const deadline = 300 * time.Millisecond
-	t.Cleanup(backup.SetVerifyDeadlineForTest(deadline))
-	// The check's thread waits until it is let go, then ends without a
-	// check, touching nothing of the bundle.
-	entered, hung := make(chan struct{}), make(chan struct{})
-	var parked atomic.Bool
-	t.Cleanup(backup.SetOnLowPriorityForTest(func() {
-		if parked.CompareAndSwap(false, true) {
-			close(entered)
-			<-hung
-			runtime.Goexit()
+	t.Run("worker answer", func(t *testing.T) {
+		src := storeWithTracks(t, 5)
+		dir, err := backup.Snapshot(t.Context(), src)
+		if err != nil {
+			t.Fatal(err)
 		}
-	}))
-	// Registered last, so run first: the thread let go and the worker
-	// joined before the seams are put back.
-	letGo := sync.OnceFunc(func() { close(hung) })
-	t.Cleanup(func() {
+		const deadline = 300 * time.Millisecond
+		t.Cleanup(backup.SetVerifyDeadlineForTest(deadline))
+		// The check's thread waits until it is let go, then ends without a
+		// check, touching nothing of the bundle.
+		entered, hung := make(chan struct{}), make(chan struct{})
+		var parked atomic.Bool
+		t.Cleanup(backup.SetOnLowPriorityForTest(func() {
+			if parked.CompareAndSwap(false, true) {
+				close(entered)
+				<-hung
+				runtime.Goexit()
+			}
+		}))
+		// Registered last, so run first: the thread let go and the worker
+		// joined before the seams are put back.
+		letGo := sync.OnceFunc(func() { close(hung) })
+		t.Cleanup(func() {
+			letGo()
+			awaitSlotFree(t)
+		})
+		callers := joinBackupCallers(t, letGo)
+		done := make(chan error, 1)
+		start := time.Now()
+		callers.start(func() {
+			_, err := backup.VerifySnapshot(context.Background(), dir, backup.VerifyOptions{})
+			done <- err
+		})
+		err = requireReturnedWithin(t, done, start, deadline+backup.StopWriteBound/2+time.Second, "a verification past its deadline")
+		<-entered
+		if !errors.Is(err, backup.ErrCheckGivenUp) || !errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("a verification past its deadline answered %v, want its check given up at the deadline", err)
+		}
+		v := listed(t, dir)
+		if v.DatabaseState != backup.StateIncomplete || !slices.Contains(v.DatabaseReasons, backup.ReasonDeadline) {
+			t.Errorf("the record reads %s %v, want INCOMPLETE (deadline)", v.DatabaseState, v.DatabaseReasons)
+		}
 		letGo()
 		awaitSlotFree(t)
+		if _, held := backup.StuckCheckOf(filepath.Dir(dir)); held {
+			t.Error("the check reads as one still running once its thread has ended")
+		}
 	})
-	callers := joinBackupCallers(t, letGo)
-	done := make(chan error, 1)
-	start := time.Now()
-	callers.start(func() {
-		_, err := backup.VerifySnapshot(context.Background(), dir, backup.VerifyOptions{})
-		done <- err
+	t.Run("outer expiration before recovery", func(t *testing.T) {
+		c := captureT(t, storeWithTracks(t, 5))
+		const deadline = 300 * time.Millisecond
+		t.Cleanup(backup.SetVerifyDeadlineForTest(deadline))
+		check, recovery, answer := newParking(), newParking(), newParking()
+		t.Cleanup(backup.SetOnLowPriorityForTest(check.park))
+		// Block the worker before publishOf can reject its completed verdict and
+		// fall back to stepIncomplete. Its answer has an independent barrier.
+		t.Cleanup(backup.SetAfterCheckForTest(func(dir string) {
+			if dir == c.Dir {
+				recovery.park()
+			}
+		}))
+		var expired atomic.Bool
+		t.Cleanup(backup.SetVerifyHandoffForTest(func(dir string) {
+			if dir == c.Dir {
+				answer.park()
+			}
+		}, func(dir string) {
+			if dir == c.Dir {
+				expired.Store(true)
+			}
+		}))
+		callers := joinBackupCallers(t, func() { check.release(); recovery.release(); answer.release() })
+		done := make(chan backup.Result, 1)
+		start := time.Now()
+		callers.start(func() {
+			done <- backup.FinishCapture(context.Background(), c, nil, backup.VerifyOptions{LockWait: time.Millisecond})
+		})
+		select {
+		case <-recovery.entered:
+		case <-time.After(30 * time.Second):
+			t.Fatal("worker never reached the recovery barrier")
+		}
+		res := requireReturnedWithin(t, done, start, deadline+3*backup.StopWriteBound+time.Second, "outer expiration")
+		if !expired.Load() || res.Verify.Write != backup.WriteUnknown || !errors.Is(res.VerifyErr, context.DeadlineExceeded) {
+			t.Fatalf("want forced outer expiry with unknown write and deadline, got expired=%v, %+v", expired.Load(), res)
+		}
+		if res.Verify.RecordRead {
+			t.Error("outer expiry invented a record read-back")
+		}
+		if v := listed(t, c.Dir); v.DatabaseState != backup.StatePending {
+			t.Fatalf("recovery wrote before release: %+v", v)
+		}
+		recovery.release()
+		select {
+		case <-answer.entered:
+		case <-time.After(30 * time.Second):
+			t.Fatal("worker never reached its independent answer barrier")
+		}
+		requireVerdict(t, "recovery after outer expiry", listed(t, c.Dir), backup.StateIncomplete, backup.ReasonDeadline, backup.StateIncomplete, backup.ReasonDeadline)
+		check.release()
+		answer.release()
+		callers.wait(t)
+		awaitClean(t)
 	})
-	err = requireReturnedWithin(t, done, start, deadline+backup.StopWriteBound/2+time.Second, "a verification past its deadline")
-	<-entered
-	if !errors.Is(err, backup.ErrCheckGivenUp) || !errors.Is(err, context.DeadlineExceeded) {
-		t.Errorf("a verification past its deadline answered %v, want its check given up at the deadline", err)
-	}
-	v := listed(t, dir)
-	if v.DatabaseState != backup.StateIncomplete || !slices.Contains(v.DatabaseReasons, backup.ReasonDeadline) {
-		t.Errorf("the record reads %s %v, want INCOMPLETE (deadline)", v.DatabaseState, v.DatabaseReasons)
-	}
-	letGo()
-	awaitSlotFree(t)
-	if _, held := backup.StuckCheckOf(filepath.Dir(dir)); held {
-		t.Error("the check reads as one still running once its thread has ended")
-	}
 }
 
 // TestAClaimStoppedWhileItsLockOpenHangsReturnsWithinItsBound: the startup
@@ -187,7 +247,7 @@ func TestAClaimStoppedWhileItsLockOpenHangsReturnsWithinItsBound(t *testing.T) {
 		return fsutil.OpenLockFile(dir, name)
 	}))
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	t.Cleanup(cancel)
 	type answer struct {
 		c   *backup.Capture
 		err error

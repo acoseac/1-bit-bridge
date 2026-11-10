@@ -744,7 +744,7 @@ func TestAStopWithABlockedSyncReturnsWithinItsBound(t *testing.T) {
 				}
 			}()
 			ctx, cancel := context.WithCancel(t.Context())
-			defer cancel()
+			t.Cleanup(cancel)
 			var callers *backupCallers
 			if stopDuring == "the check" {
 				t.Cleanup(backup.SetVerifyReadRateForTest(1))

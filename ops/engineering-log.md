@@ -92957,7 +92957,9 @@ also now bounds its wait for the hook, so a missed hook names its failure
 instead of hanging the binary. Windows short names and junctions can cause
 the same mismatch in the startup-check and two CLI given-up-write cases;
 the fixture resolution uses the same Windows path implementation as the
-verifier. Existing no-directory-sync refusal and admitted rename behavior
+verifier: `fsutil.ResolveLinks` uses `GetFinalPathNameByHandle`, with
+`EvalSymlinks` as fallback. No Windows run of these fixtures has been
+verified; the statement is from reading `resolve_windows.go`. Existing no-directory-sync refusal and admitted rename behavior
 remain covered; no new Windows production fault was isolated locally.
 
 The Linux prune failures were another PR fixture race: verification and
@@ -93020,3 +93022,33 @@ no native Windows or Linux runtime was available, so those CI executions
 remain to be confirmed. The exploratory runs that exposed fixture timing
 failures were superseded by these passes; unrelated broad admin, CLI and
 manifest runs were stopped in favor of the affected suites above.
+
+
+## 2026-11-10 — B653 PR 1 round 9: precise shutdown and expiry claims
+
+The ticker's shutdown silence is only for an error from which
+`ctxerr.WithoutCancellation` removes everything, including an outer-expiry
+wrapper around cancellation. New contrasting reporter cases retain an
+accompanying given-up step, unread record or write failure. The real
+`abandonPending` shape says the record was not read back, claiming no failed
+read. Production behavior is unchanged.
+
+Outer expiry stays `WriteUnknown`: a rejected publication can still write
+recovery INCOMPLETE through `stepIncomplete`, and a late lock failure can
+hand off to `abandonPending`. The deadline regression now forces and asserts
+outer expiry, parks recovery and the worker answer independently, observes
+Unknown and the still-PENDING record, then releases recovery and reads its
+INCOMPLETE before allowing the answer through.
+
+The slow veto sync remains parked for at least 1.2 s, polling for a mark
+throughout, inside a 3 s step bound on the resolved snapshot. The console
+passes its resolved capture directory to every hook and the verification.
+The handoff seam documents its caller-form exception: expiry may precede
+resolution. Five deferred cancels paired with joined callers became earlier
+cleanup registrations, preserving release-before-cancel ordering on failure.
+
+Windows claims remain code inspection only: `ResolveLinks` uses
+`GetFinalPathNameByHandle`, falling back to `EvalSymlinks`; fresh INCOMPLETE
+publication returns `WriteRecorded` because `SyncParentDir` returns nil.
+The existing-VERIFIED recheck's `SyncsParentDir` branch is a different case.
+No native Windows or Linux execution was performed in this round.

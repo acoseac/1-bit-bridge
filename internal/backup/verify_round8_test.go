@@ -21,7 +21,7 @@ func TestAStopBeforeVerificationReportsItsIncompleteWrite(t *testing.T) {
 			c := captureT(t, storeWithTracks(t, 5))
 			root := filepath.Dir(c.Dir)
 			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
+			t.Cleanup(cancel)
 			release := func() {}
 			if where == "queued for the slot" {
 				blocker := captureT(t, storeWithTracks(t, 5))

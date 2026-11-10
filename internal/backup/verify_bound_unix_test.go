@@ -57,7 +57,7 @@ func TestAStopWhileTheManifestReadHangsReturnsWithinItsBoundAndKeepsTheLock(t *t
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	t.Cleanup(cancel)
 	var w *os.File
 	fed := false
 	feed := func() {

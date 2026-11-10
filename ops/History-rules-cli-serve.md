@@ -4790,3 +4790,27 @@ Pins: `TestAStopBeforeVerificationReportsItsIncompleteWrite`,
 `TestTheReportersKeepWriteProgressWithoutAFoundVerdict`. The fixture and
 cleanup invariants are in `History-rules-build-ci-tests.md`'s eighth-round
 entry; the supporting record is in `ops/engineering-log.md`.
+
+
+*The ninth round* (2026-11-10). An outer expiry remains `WriteUnknown`:
+a record may have been written, or may still be: the verdict, or INCOMPLETE
+once the stalled step ends. Rejected publication falls back to
+`stepIncomplete` with a fresh signal, and a blocked lock attempt can still
+hand off to `abandonPending`. Never infer `WriteNone` from the absence of an
+admitted verdict write at expiry.
+
+`TestAVerificationPastItsDeadlineReturnsWithItsCallerStillWaiting` now also
+parks recovery before publication and independently parks the worker answer,
+asserts the outer-expiry hook and Unknown while the record is PENDING, then
+releases recovery and reads INCOMPLETE from disk before releasing the answer.
+The original worker-answer case still proves the shorter check deadline.
+
+The ticker suppresses a shutdown error only when `ctxerr.WithoutCancellation`
+leaves nothing: a cancellation-only outcome, including the outer expiry's
+cancellation wrapper. A step given up, a record not read back, or a write
+failure accompanying cancellation is still reported. The contrasting cases
+are in `TestTheTickerSilencesOnlyCancellationWithoutAnotherFailure`.
+`TestTheReportersSayWhenAnIncompletePublicationWasNeverReadBack` uses
+`abandonPending`'s actual shape (INCOMPLETE Found, WriteRecorded, RecordRead
+false, ReadErr nil): it says "its record was not read back", never "could
+not be read back". No reporter behavior changes in this round.
