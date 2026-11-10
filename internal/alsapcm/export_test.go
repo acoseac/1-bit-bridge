@@ -41,6 +41,7 @@ func FakeEndpoint() Endpoint { return testEndpoint }
 // it a hang (-watchdog).
 func Watchdog() time.Duration { return *watchdog }
 
+// Ordered is the bound an ordered wait uses: the watchdog itself (ordered).
 func Ordered() time.Duration { return ordered() }
 
 // OpenSink opens a sink on the fake node, on the fake's clock: what the
@@ -290,6 +291,8 @@ func (tk *FakeKernel) ParkStatusAfterWritten(frames uint64) (parked <-chan struc
 	return arrived, func() { once.Do(func() { close(gate) }) }
 }
 
+// ParkStatusAfterPlayed holds the next STATUS once the kernel has played
+// frames: parked closes when it is held, and release lets it answer.
 func (tk *FakeKernel) ParkStatusAfterPlayed(frames uint64) (parked <-chan struct{}, release func()) {
 	gate, arrived := make(chan struct{}), make(chan struct{})
 	tk.k.inspect(func(k *fakeKernel) { k.statusPlayed = &fakeStatusAt{frames: frames, gate: gate, parked: arrived} })
@@ -365,6 +368,7 @@ func (tk *FakeKernel) ParkNextClose() (<-chan struct{}, func()) {
 	return entered, func() { once.Do(func() { close(gate) }) }
 }
 
+// FailDrops makes every later DROP fail with EIO.
 func (tk *FakeKernel) FailDrops() {
 	tk.k.inspect(func(k *fakeKernel) { k.fail[ioctlDrop] = errno(5) })
 }
