@@ -506,7 +506,14 @@ func checkBundle(ctx context.Context, dir string, m Manifest, level CheckLevel) 
 	if beforeFilesCheck != nil {
 		beforeFilesCheck(dir)
 	}
-	files := checkFiles(ctx, dir, m, p)
+	filesCtx := ctx
+	if target := filesCheckIncompleteForTest.Load(); target != nil && *target == dir {
+		var cancel context.CancelFunc
+		filesCtx, cancel = context.WithDeadline(ctx, time.Time{})
+		defer cancel()
+		p = newPacer(filesCtx)
+	}
+	files := checkFiles(filesCtx, dir, m, p)
 	v.FilesState, v.FilesReasons, v.FilesFailed = files.state, files.reasons, files.failed
 	now := time.Now().UTC()
 	v.CheckedAt, v.FilesCheckedAt = now, now

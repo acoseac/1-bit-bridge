@@ -79,12 +79,17 @@ func TestEverySnapshotWriterChmodsOnlyItsOwnFile(t *testing.T) {
 func TestBothVetoCallersGuardEveryAttemptAndReportSkippedStamps(t *testing.T) {
 	for _, caller := range []string{"no barrier recheck", "publication"} {
 		for _, signal := range []string{"step", "hold"} {
-			for _, when := range []string{"before first attempt", "failed bundle", "created bundle", "existing bundle", "created root"} {
+			for _, when := range []string{"before first attempt", "failed bundle", "existing root after failed bundle", "both attempts failed", "created bundle", "existing bundle", "created root"} {
 				t.Run(caller+"/"+signal+"/"+when, func(t *testing.T) {
 					dir, prior := unchangedRecord(t)
 					bundle, root := filepath.Join(dir, vetoFileName), filepath.Dir(dir)
 					if when != "existing bundle" {
 						if err := os.Remove(bundle); err != nil {
+							t.Fatal(err)
+						}
+					}
+					if when == "existing root after failed bundle" {
+						if err := os.WriteFile(rootVetoPath(dir), nil, 0o600); err != nil {
 							t.Fatal(err)
 						}
 					}
@@ -122,13 +127,18 @@ func TestBothVetoCallersGuardEveryAttemptAndReportSkippedStamps(t *testing.T) {
 					}
 					failVeto = func(path string) error {
 						attempts++
-						if path == bundle && (when == "failed bundle" || when == "created root") {
+						if when == "both attempts failed" {
+							// An error carrying give-up is not proof that the loop
+							// skipped an attempt: both locations must be tried.
+							return errors.Join(errors.New("veto refused"), ErrCheckGivenUp)
+						}
+						if path == bundle && (when == "failed bundle" || when == "existing root after failed bundle" || when == "created root") {
 							return errors.New("bundle refused")
 						}
 						return nil
 					}
 					afterVetoAttempt = func(path string, present bool) {
-						if when != "created root" || path == rootVetoPath(dir) {
+						if when != "both attempts failed" && (when != "created root" || path == rootVetoPath(dir)) {
 							giveUp()
 						}
 					}
@@ -148,24 +158,31 @@ func TestBothVetoCallersGuardEveryAttemptAndReportSkippedStamps(t *testing.T) {
 						wantLookups, wantAttempts = 0, 0
 					case "existing bundle":
 						wantAttempts = 0
-					case "created root":
+					case "created root", "both attempts failed":
 						wantLookups, wantAttempts = 2, 2
 					}
 					if lookups != wantLookups || attempts != wantAttempts {
 						t.Errorf("lookups/creates = %d/%d, want %d/%d", lookups, attempts, wantLookups, wantAttempts)
 					}
-					present := when == "created bundle" || when == "existing bundle" || when == "created root"
+					confirmed := when == "created bundle" || when == "existing bundle" || when == "created root"
+					present := confirmed || when == "existing root after failed bundle"
 					if vetoedAt(dir) != present {
 						t.Errorf("veto presence = %v, want %v", vetoedAt(dir), present)
 					}
-					if !present {
-						if err == nil || !errors.Is(err, ErrCheckGivenUp) {
-							t.Errorf("failed veto: %v", err)
+					if !confirmed {
+						wantWords, falseWords := "the veto could not be confirmed", "could not be vetoed"
+						if when == "both attempts failed" {
+							wantWords, falseWords = falseWords, wantWords
+						}
+						if err == nil || !errors.Is(err, ErrCheckGivenUp) || !strings.Contains(err.Error(), wantWords) || strings.Contains(err.Error(), falseWords) {
+							t.Errorf("unconfirmed or failed veto misreported: %v; want %q", err, wantWords)
 						}
 					} else {
 						if err == nil || !strings.Contains(err.Error(), "record is vetoed") || !strings.Contains(err.Error(), "cache stamp was skipped") || !strings.Contains(err.Error(), "console may retain") || strings.Contains(err.Error(), "could not be vetoed") {
 							t.Errorf("successful veto/skipped stamp misreported: %v", err)
 						}
+					}
+					if present {
 						record, readErr := readRecord(dir)
 						if readErr != nil {
 							t.Fatal(readErr)
@@ -188,11 +205,18 @@ func TestBothVetoCallersGuardEveryAttemptAndReportSkippedStamps(t *testing.T) {
 }
 
 func TestTheNoBarrierWorkerReportsAVetoAcrossGiveUp(t *testing.T) {
-	for _, created := range []bool{false, true} {
-		t.Run(map[bool]string{false: "failed bundle stops before root", true: "created bundle skips stamp"}[created], func(t *testing.T) {
+	for _, when := range []string{"failed bundle stops before root", "created bundle skips stamp", "existing root after failed bundle"} {
+		t.Run(when, func(t *testing.T) {
+			created := when == "created bundle skips stamp"
+			existingRoot := when == "existing root after failed bundle"
 			dir, prior := unchangedRecord(t)
 			if err := os.Remove(filepath.Join(dir, vetoFileName)); err != nil {
 				t.Fatal(err)
+			}
+			if existingRoot {
+				if err := os.WriteFile(rootVetoPath(dir), nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
 			}
 			// The recorded database is missing: a completed failure before
 			// the no-barrier worker reaches its guarded veto step.
@@ -204,14 +228,20 @@ func TestTheNoBarrierWorkerReportsAVetoAcrossGiveUp(t *testing.T) {
 			root := filepath.Dir(dir)
 			h := newHold(context.Background(), filepath.Base(dir), root)
 			h.handOff() // Isolate the veto's stamp from the overrun marker's I/O.
-			prevSyncs, prevFail, prevAfter := syncsParentDir, failVeto, afterVetoAttempt
-			t.Cleanup(func() { syncsParentDir, failVeto, afterVetoAttempt = prevSyncs, prevFail, prevAfter })
+			prevSyncs, prevFail, prevAfter, prevLookup := syncsParentDir, failVeto, afterVetoAttempt, lookupVetoForWrite
+			t.Cleanup(func() {
+				syncsParentDir, failVeto, afterVetoAttempt, lookupVetoForWrite = prevSyncs, prevFail, prevAfter, prevLookup
+			})
 			t.Cleanup(func() {
 				h.release()
 				h.drop()
 			})
 			syncsParentDir = false
-			attempts := 0
+			attempts, lookups := 0, 0
+			lookupVetoForWrite = func(path string) (os.FileInfo, error) {
+				lookups++
+				return os.Lstat(path)
+			}
 			failVeto = func(string) error {
 				attempts++
 				if !created {
@@ -239,8 +269,8 @@ func TestTheNoBarrierWorkerReportsAVetoAcrossGiveUp(t *testing.T) {
 			if hookErr != nil {
 				t.Fatal(hookErr)
 			}
-			if attempts != 1 || pruned || !errors.Is(err, ErrCheckGivenUp) {
-				t.Fatalf("attempts %d, pruned %v, result %+v, error %v", attempts, pruned, res, err)
+			if lookups != 1 || attempts != 1 || pruned || !errors.Is(err, ErrCheckGivenUp) {
+				t.Fatalf("lookups %d, attempts %d, pruned %v, result %+v, error %v", lookups, attempts, pruned, res, err)
 			}
 			if !res.RecordRead || res.Found.DatabaseState != StateFailed {
 				t.Fatalf("worker did not reach its completed failure and read-back: %+v", res)
@@ -249,8 +279,17 @@ func TestTheNoBarrierWorkerReportsAVetoAcrossGiveUp(t *testing.T) {
 				if res.Record.DatabaseState != StateIncomplete || !strings.Contains(err.Error(), "record is vetoed") || !strings.Contains(err.Error(), "cache stamp was skipped") || strings.Contains(err.Error(), "could not be vetoed") {
 					t.Errorf("successful veto misreported: %+v, %v", res, err)
 				}
-			} else if res.Record.DatabaseState != StateVerified || !strings.Contains(err.Error(), "could not be vetoed") {
-				t.Errorf("failed veto misreported: %+v, %v", res, err)
+			} else {
+				want := StateVerified
+				if existingRoot {
+					want = StateIncomplete
+				}
+				if res.Record.DatabaseState != want || !strings.Contains(err.Error(), "the veto could not be confirmed") || strings.Contains(err.Error(), "could not be vetoed") {
+					t.Errorf("unconfirmed veto misreported: %+v, %v", res, err)
+				}
+				if existingRoot && !slices.Contains(res.Record.DatabaseReasons, ReasonUnsynced) {
+					t.Errorf("read-back lost the existing root veto: %+v", res.Record)
+				}
 			}
 			info, statErr := os.Stat(root)
 			if statErr != nil || !info.ModTime().Equal(stamp) {
@@ -266,8 +305,8 @@ func TestVacuumModeRefusesANonRegularOutput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := chmodVacuumOutput(dir); err == nil {
-		t.Fatal("accepted a directory as SQLite's output")
+	if err := chmodVacuumOutput(dir); err == nil || !strings.Contains(err.Error(), "vacuum output is not a regular file") {
+		t.Fatalf("directory refusal = %v, want not a regular file", err)
 	}
 	after, err := os.Stat(dir)
 	if err != nil {
@@ -275,5 +314,33 @@ func TestVacuumModeRefusesANonRegularOutput(t *testing.T) {
 	}
 	if before.Mode() != after.Mode() {
 		t.Errorf("changed a non-regular output's mode: %v -> %v", before.Mode(), after.Mode())
+	}
+}
+
+func TestVacuumModeRefusesADirectorySymlink(t *testing.T) {
+	dir := t.TempDir()
+	link := filepath.Join(t.TempDir(), "output")
+	if err := os.Symlink(dir, link); err != nil {
+		t.Skipf("directory symlink unavailable: %v", err)
+	}
+	before, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = chmodVacuumOutput(link)
+	if err == nil {
+		t.Fatal("accepted a directory symlink as SQLite's output")
+	}
+	// Unix refuses the link in open itself; Windows opens the reparse entry
+	// so the descriptor's kind supplies this diagnostic.
+	if runtime.GOOS == "windows" && !strings.Contains(err.Error(), "vacuum output is not a regular file") {
+		t.Errorf("directory symlink refusal = %v, want not a regular file", err)
+	}
+	after, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before.Mode() != after.Mode() {
+		t.Errorf("changed directory symlink target mode: %v -> %v", before.Mode(), after.Mode())
 	}
 }

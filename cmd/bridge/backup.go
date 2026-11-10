@@ -623,11 +623,10 @@ func runBackupTicker(ctx context.Context, src backup.Sources, keep func() int, i
 	// verifyInPlace finishes the check the newest snapshot owes in place of
 	// a new snapshot (startupVerifyInPlace), claimed under the backups
 	// folder's lock so no prune removes it before its check, and reports
-	// whether that check found its database FAILED or could not re-record a
-	// vetoed record on this platform. Either leaves no trusted recovery
-	// point from the last day and takes a new snapshot after it: what the
-	// check found, whether or not its record could be written (backlog B653's
-	// third round).
+	// whether that check found its database FAILED, regardless of recording,
+	// or found a FAILED component while its vetoed record could not be
+	// re-recorded on this platform. A leftover veto alone is no reason to
+	// capture again: failed veto removal would add a snapshot at every start.
 	verifyInPlace := func(name string) bool {
 		dir := filepath.Join(backupsRoot, name)
 		c, err := backup.Claim(ctx, dir, backupsRoot)
@@ -643,9 +642,10 @@ func runBackupTicker(ctx context.Context, src backup.Sources, keep func() int, i
 		res := backup.FinishCapture(ctx, c, keep, backup.VerifyOptions{BackupsRoot: backupsRoot})
 		report("startup", res)
 		return res.Verify.Found.DatabaseState == backup.StateFailed ||
-			(errors.Is(res.VerifyErr, backup.ErrRecheckNotRecorded) && res.Verify.RecordRead &&
-				(slices.Contains(res.Verify.Record.DatabaseReasons, backup.ReasonUnsynced) ||
-					slices.Contains(res.Verify.Record.FilesReasons, backup.ReasonUnsynced)))
+			(errors.Is(res.VerifyErr, backup.ErrRecheckNotRecorded) &&
+				(res.Verify.Found.DatabaseState == backup.StateFailed || res.Verify.Found.FilesState == backup.StateFailed) &&
+				res.Verify.RecordRead && (slices.Contains(res.Verify.Record.DatabaseReasons, backup.ReasonUnsynced) ||
+				slices.Contains(res.Verify.Record.FilesReasons, backup.ReasonUnsynced)))
 	}
 
 	// The startup snapshot and the scheduled ones differ, so the loop's

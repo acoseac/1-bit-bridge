@@ -324,7 +324,10 @@ func publishVerdict(dir string, found Verification, prior *Verification, doubted
 	if holdsVerified(stored) || holdsVerified(&merged) {
 		veto, err := putVeto(dir, p)
 		if !veto.present {
-			return Verification{}, false, fmt.Errorf("the verdict was not written: put its veto in place: %w", err)
+			if veto.unconfirmed {
+				return Verification{}, false, fmt.Errorf("the verdict was not written: the veto could not be confirmed: %w", err)
+			}
+			return Verification{}, false, fmt.Errorf("the verdict was not written: the record could not be vetoed: %w", err)
 		}
 		// A veto already made remains effective even if give-up skips its
 		// cache stamp. Preserve that outcome beside any later write error.
@@ -392,6 +395,8 @@ func boundName(dir string) string {
 type vetoPlacement struct {
 	present bool
 	stamped bool
+	// unconfirmed means give-up prevented trying every candidate location.
+	unconfirmed bool
 }
 
 var errCacheStampSkipped = errors.New("the cache stamp was skipped after give-up; the console may retain its cached reading until its cache expires or the backups folder changes")
@@ -416,6 +421,7 @@ func putVeto(dir string, p publication) (v vetoPlacement, err error) {
 	var causes []error
 	for _, c := range []struct{ path, ref string }{{filepath.Join(dir, vetoFileName), dir}, {rootVetoPath(dir), root}} {
 		if p.givenUp() {
+			v.unconfirmed = true
 			return v, errors.Join(append(causes, ErrCheckGivenUp)...)
 		}
 		made, attemptErr := writeVeto(c.path, c.ref)
@@ -444,6 +450,9 @@ func putVeto(dir string, p publication) (v vetoPlacement, err error) {
 func vetoDisproved(dir string, p publication) error {
 	v, err := putVeto(dir, p)
 	if !v.present {
+		if v.unconfirmed {
+			return fmt.Errorf("the veto could not be confirmed; a later process may still trust the disproved VERIFIED verdict: %w", err)
+		}
 		return fmt.Errorf("the disproved record could not be vetoed; a later process may still trust its VERIFIED verdict: %w", err)
 	}
 	return v.stampError()

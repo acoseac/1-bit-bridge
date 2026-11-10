@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -105,11 +106,7 @@ func TestADisprovedNoBarrierRecordCannotAnchorAFreshProcessPrune(t *testing.T) {
 			checkCtx, cancelCheck := context.WithCancel(context.Background())
 			defer cancelCheck()
 			if placement == "database failed beside incomplete files" {
-				t.Cleanup(backup.SetBeforeFilesCheckForTest(func(path string) {
-					if path == dir {
-						cancelCheck()
-					}
-				}))
+				t.Cleanup(backup.SetFilesCheckIncompleteForTest(dir))
 				t.Cleanup(func() { awaitHoldsLetGo(t, root) })
 			}
 			res, err := backup.VerifySnapshot(checkCtx, dir, backup.VerifyOptions{BackupsRoot: root})
@@ -117,7 +114,11 @@ func TestADisprovedNoBarrierRecordCannotAnchorAFreshProcessPrune(t *testing.T) {
 			if !errors.Is(err, backup.ErrRecheckNotRecorded) || res.Found.DatabaseState != backup.StateFailed {
 				t.Fatalf("disproving recheck: %+v, %v", res, err)
 			}
-			if placement == "database failed beside incomplete files" && res.Found.FilesState != backup.StateIncomplete {
+			if checkCtx.Err() != nil {
+				t.Fatalf("the files seam stopped the verification caller: %v", checkCtx.Err())
+			}
+			if placement == "database failed beside incomplete files" &&
+				(res.Found.FilesState != backup.StateIncomplete || !slices.Equal(res.Found.FilesReasons, []backup.Reason{backup.ReasonDeadline})) {
 				t.Fatalf("files phase did not end INCOMPLETE: %+v", res.Found)
 			}
 			if res.Record.DatabaseState != backup.StateIncomplete {

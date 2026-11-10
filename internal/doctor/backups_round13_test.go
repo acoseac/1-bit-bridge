@@ -73,3 +73,22 @@ func TestTheDoctorReplacesAnUnsyncedRecordWithoutInferringDamage(t *testing.T) {
 		})
 	}
 }
+
+func TestTheDoctorKeepsDatabaseDamageAdviceBesideUnsyncedFiles(t *testing.T) {
+	prev := backupsSyncsParentDir
+	backupsSyncsParentDir = false
+	t.Cleanup(func() { backupsSyncsParentDir = prev })
+	sn := backup.SnapshotStatus{CreatedAt: time.Now(), Verdict: backup.Verification{
+		DatabaseState: backup.StateFailed,
+		FilesState:    backup.StateIncomplete, FilesReasons: []backup.Reason{backup.ReasonUnsynced},
+	}}
+	line := newestLine(sn, time.Now())
+	if !strings.Contains(line.Hint, "the live database may be damaged") ||
+		!strings.Contains(line.Hint, "--verify <snapshot-dir> --full") ||
+		!strings.Contains(line.Hint, "keep the snapshots that are verified") {
+		t.Errorf("lost database-failure advice beside unsynced files: %q", line.Hint)
+	}
+	if strings.Contains(line.Hint, "take a fresh snapshot") {
+		t.Errorf("advised capturing a possibly damaged database: %q", line.Hint)
+	}
+}

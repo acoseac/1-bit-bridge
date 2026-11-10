@@ -93485,3 +93485,71 @@ backup_round13_test.go and handlers_backups_round13_test.go in their
 respective packages; the round-12 predicate and fresh-process tests were
 updated in place. The orchestrator must format, run the gates and controls,
 and supply native-platform results before recording validation as passed.
+
+## 2026-11-10 — B653 PR 1 round 14: replacement evidence and veto uncertainty
+
+Edit-only round based on 29bf1e6f. No builds, tests or negative controls were
+run by this worker; the orchestrator owns validation and the root-run
+follow-up backlog item. The public guide, CLI rules and their History long
+form state the resulting behavior and the permission boundary.
+
+1. The doctor checks database FAILED before no-barrier unsynced advice.
+   `TestTheDoctorKeepsDatabaseDamageAdviceBesideUnsyncedFiles` is expected
+   red on 29bf1e6f: it requires "the live database may be damaged", the
+   full-check command and keeping verified snapshots, and rejects "take a
+   fresh snapshot". Negative control: restore the unsynced branch ahead
+   of the database-FAILED branch. The existing passing-database neutral
+   advice cases remain preservation coverage.
+
+2. Startup retains unconditional replacement for its own FAILED database.
+   The ErrRecheckNotRecorded arm now requires a FAILED component in Found,
+   not an unsynced read-back. The real ticker's two-start cases use keep 0
+   and wait for the next interval request after the complete boot pass.
+   `TestStartupKeepsALeftoverVetoWithoutAddingSnapshots` is expected red
+   on 29bf1e6f: persistent veto-removal failure must leave only the initial
+   snapshot after each start, with VERIFIED/VERIFIED findings reported.
+   The disproof case requires exactly one replacement across two starts
+   and is preservation coverage at this baseline. Negative control:
+   remove only the added Found-component condition, restoring the
+   original RecordRead/unsynced branch; extra snapshots must fail the count. Keep the existing unconditional
+   database-failure test as a separate guard against over-narrowing.
+
+3. putVeto records unconfirmed explicitly if give-up skips a candidate.
+   Both callers and the real no-barrier worker have existing-root cases:
+   failed bundle, give-up at afterVetoAttempt, one lookup/creation attempt,
+   no root placement lookup, "the veto could not be confirmed", and root
+   veto read-back still INCOMPLETE/unsynced. The existing no-root stopped
+   case requires the same words. These wording assertions are expected
+   red on 29bf1e6f; skipped calls and conservative read-back are preserved.
+   Both-attempts-failed rows retain definitive "could not be vetoed"
+   words even with ErrCheckGivenUp carried by the injected error. The
+   worker and existing failed-veto Finish case require no prune. Negative
+   control: stop assigning unconfirmed in putVeto's give-up branch; both
+   callers and worker must fail their uncertainty-word assertions.
+
+4. The mixed disproof fixture uses SetFilesCheckIncompleteForTest on its
+   resolved snapshot. Only the files phase gets an expired internal
+   context/pacer; VerifySnapshot's caller stays live and awaits the worker.
+   It requires ErrRecheckNotRecorded, FAILED database, INCOMPLETE files
+   with only deadline, vetoed read-back/listing, no startup skip, the older
+   verified anchor and removal of the intermediate failure by a fresh
+   process. This corrects a timing-dependent test at 29bf1e6f, not a new
+   deterministic production failure on that baseline. Negative control:
+   restore disproves' early return when either found component is
+   INCOMPLETE, retaining the seam; the read-back and anchor assertions
+   must fail. Cancelling the caller is not a valid control fixture.
+
+5. Windows vacuum reopen adds BACKUP_SEMANTICS. The directory, directory
+   symlink (where permitted) and junction tests require the explicit
+   "vacuum output is not a regular file" refusal and unchanged mode.
+   Expected red on native Windows at 29bf1e6f: access denied instead of
+   the explicit refusal. Negative control: remove only BACKUP_SEMANTICS;
+   retain OPEN_REPARSE_POINT. Unix remains preservation coverage.
+
+6. The documented permission guarantee is only final-component symlink or
+   reparse redirection during chmod. Another regular file or hard link,
+   a parent replaced by a link and SQLite's pathname VACUUM INTO are
+   explicitly outside it; root-run backup/restore over an untrusted
+   renameable tree is out of scope. Documentation correction only, with
+   no baseline-red runtime claim or new anchoring. Both staged helpers
+   already defer Close before removal; the leak finding requires no edit.

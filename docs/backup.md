@@ -90,16 +90,19 @@ checks give-up first: if skipped, the error says the record is vetoed but
 the console may retain its cached reading until its cache expires or the
 backups folder changes. This is not a failed veto. An INCOMPLETE component
 disproves nothing; it does not negate a completed failure of the other one.
-The veto cannot be made crash-durable on Windows. If neither location takes
-the veto, the error explicitly says the disproved record could not be vetoed
+The veto cannot be made crash-durable on Windows. If both placement
+attempts fail, the error explicitly says the disproved record could not be vetoed
 and this verification skips its prune; a later process can still trust the
-stale VERIFIED. A recheck that records no new verdict is followed by no
-prune. After a successful veto, later prunes apply the usual retention policy
+stale VERIFIED. If give-up stops the attempts before every location was
+tried, the error instead says "the veto could not be confirmed": an
+uninspected location may already hold one. This also skips the prune.
+A recheck that records no new verdict is followed by no prune. After a successful veto, later prunes apply the usual retention policy
 below, protecting the older trustworthy recovery point without keeping every
 intermediate failure.
 
-On a platform without folder sync, the doctor's advice for `unsynced` is to
-take a fresh snapshot with `bridge backup --config <bridge.yaml>`, using the
+A FAILED database keeps the doctor's damaged-database advice first, even
+when the files read `unsynced`. Otherwise, on a platform without folder
+sync, the doctor's advice for `unsynced` is to take a fresh snapshot with `bridge backup --config <bridge.yaml>`, using the
 config the doctor read. The record cannot be trusted or re-recorded here.
 `unsynced` alone does not prove damage: a successful check can leave a veto
 when its removal fails or its process ends, and a failed veto lookup also
@@ -120,11 +123,19 @@ INCOMPLETE still reports that write's actual outcome.
 
 The staged manifests and copied files have their permissions set through
 their open files before sync and close. SQLite's captured database is opened
-without following a symbolic link and validated as a regular file before
-its permissions are changed through that descriptor. A stuck-check marker
-replaces an existing entry by removing it and creating a new file
-exclusively; a racing replacement is refused. None of these mode changes
-or marker creations follows a substituted symbolic link.
+without following a final-component symbolic link or reparse point and
+validated as a regular file before its permissions are changed through
+that descriptor. On Windows, directories, directory symlinks and junctions
+are opened as entries and refused as "not a regular file".
+
+This protects the staged and vacuum files' permission changes against
+final-component symlink or reparse-point redirection. It does not protect
+against replacement with another regular file or a hard link, a parent
+directory replaced with a link, or SQLite's own `VACUUM INTO` write, which
+uses a path. A root-run backup or restore over a tree an untrusted account
+can rename is outside this protection. A stuck-check marker removes an
+existing entry and creates a new file exclusively, refusing a racing
+replacement at that final entry; its parent traversal is not anchored.
 
 Every step a check takes while it holds the backups folder (marking a
 snapshot as being checked again, the check, writing its verdict, the prune
@@ -168,9 +179,13 @@ runs it, ends the step (backlog B653).
 When the bridge starts, it takes no snapshot when one from the last day has
 a verified database. Nor does it take one when the newest snapshot from the
 last day is still waiting for its check: it runs that check instead, and
-takes a new snapshot when the check finds the database damaged, or cannot
-re-record a vetoed record on this platform. The latter also replaces a
-snapshot whose database passes but whose files fail. A bridge that keeps
+takes a new snapshot whenever the check finds the database FAILED, whether
+or not its record could be written. A recheck that cannot record a verdict
+on this platform also takes a replacement when the read-back remains vetoed
+and its own finding has a FAILED component, including VERIFIED database /
+FAILED files. A leftover veto
+alone, with a passing check, takes no replacement: failed veto removal
+must not add a snapshot at every start. A bridge that keeps
 restarting before its check ends keeps one snapshot, not
 one per start, and the first start that lasts long enough verifies it.
 

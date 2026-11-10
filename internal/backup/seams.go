@@ -325,3 +325,16 @@ func SetBeforeFilesCheckForTest(fn func(string)) func() {
 	beforeFilesCheck = fn
 	return func() { beforeFilesCheck = prev }
 }
+
+// filesCheckIncompleteForTest names one resolved snapshot whose files check
+// expires internally, leaving the verification caller's context untouched.
+var filesCheckIncompleteForTest atomic.Pointer[string]
+
+// SetFilesCheckIncompleteForTest makes the files check of the resolved snapshot
+// dir answer INCOMPLETE with ReasonDeadline through its own check context.
+// Resolve dir before installing the seam, as for SetStepBoundForTest. Restore
+// only after all callers and verification holds have ended.
+func SetFilesCheckIncompleteForTest(dir string) (restore func()) {
+	prev := filesCheckIncompleteForTest.Swap(&dir)
+	return func() { filesCheckIncompleteForTest.Store(prev) }
+}
