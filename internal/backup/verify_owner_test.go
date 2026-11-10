@@ -230,6 +230,9 @@ func TestAClaimedSnapshotIsKeptFromThePrune(t *testing.T) {
 		t.Fatal("the prune removed a snapshot claimed for its check")
 	}
 	claimed.Release()
+	// The claim's hold lets go of the folder's lock after Release returns:
+	// wait for it, as before the first prune (Linux race CI, 2026-11-10).
+	awaitClean(t)
 	if pr, err := backup.Prune(root, 1); err != nil || pr.Skipped {
 		t.Fatalf("prune: %+v, %v; want it run", pr, err)
 	}
