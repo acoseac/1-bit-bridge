@@ -90852,3 +90852,232 @@ harness runs only the app.js functions it names, so the extracted save threw "up
 console was right (the function is a global of app.js); the harness's list was short. `updateChecksOffLost` joins
 `trayHarnessFunctions`: red under node before, in CI's words, green three of three after. The worker's host has no
 JavaScript engine, where the test skips, which is how the round's gates passed.
+
+## 2026-11-09 — B827: an OpenHome test reads the published state only once the engine has published it
+
+Backlog B827 on `fix/b827-published-state`, from 71f707ab, by worker b827
+on a Linux box (Ubuntu 26.04, linux/amd64, go1.27.3, `GOTOOLCHAIN=local`,
+`GOPROXY=off`), from CI run 42590010542 (the Linux race job; the player
+packages main's) and the two rounds of review of its brief. Commits: the
+two tests the class made red, 9b6ab412; a third read of the class, blind
+rather than red, ac59234e; and this record. The rule goes into
+`.claude/rules/openhome.md` and its History through `rules-b827.patch`: no
+engine-package test was converted.
+
+### What CI showed
+
+The buffering case of `TestWhileCastingSeekIdStartsPlaybackFromEveryState`
+failed in 0.00 s at its first read, `onebit_test.go:263`, "TransportState
+Stopped while the start is held". The case holds every Start
+(`fakeBackend.holdStarts`), sends Play on a goroutine of its own, waits until
+the fake backend has begun the Start (`callsBegun`), and read TransportState
+at once. The whole test took 2.06 s; the "release was not confirmed by its
+deadline (2s)" warnings beside it name session 1 of the unconfirmed-release
+case, which holds its release past that deadline by design, and come in a
+run of main here too (the same two lines, that case's alone). No deadline
+expired in the failing case: the brief's first draft blamed the Start's 5 s
+deadline, which the 0.00 s rules out.
+
+### The cause
+
+The engine's owner runs one step at a time (`loop`): it admits a command or
+handles a message, then `advance` runs the parked commands it can
+(`drainParked`), settles the seek and the waiters, publishes the step's
+snapshot (`publishIfDirty`, `publish`) and sends the step's replies
+(`sendReplies`). A Start is spawned inside the step (`startSession`,
+`call`, `spawn`), on a goroutine of its own, from any of three places:
+`admit` then `dispatch` (a Play from Stopped), `handle` (a release's
+acknowledgement starting the pending session, `afterRelease`) and
+`drainParked` (a parked Play, at the top of `advance`). So the fake backend
+can count the Start begun, and `callsBegun` return, while the published
+snapshot still says Stopped; `-race` on a loaded runner widens the window.
+A begun backend call is not the published state.
+
+### Step 1: what Play waits for, and where TransportState is read
+
+Play is a transport write (`writes.go`'s `transport`): `Engine.Play` under
+the write's budget (`Limits.writeBudget`, 9 s by default), waiting in `do`
+for the engine's reply. `answer` only queues a reply, `sendReplies` sends it
+after the step's publish, and a Play from Stopped is a waiter answered once
+the transport settles (`settleWaiters`: no start and no release under way),
+so its reply follows the publish of the step that took its Start's answer.
+Past its budget, a command the engine admitted answers success on the
+admission alone (`transportFault`: `ReasonCancelled` without
+`ErrNotAdmitted`), which the owner marks (the compare-and-swap in `admit`,
+`noteAdmission`) before `dispatch` and the step's publish, so that success
+can precede the publish: the documented contract ("it may yet run, which the
+reads show", openhome.md's write actions), not a gap (Codex's review of the
+brief's second draft). TransportState is answered from the engine's current
+snapshot, synchronously
+(`act`, `handler.snapshot`, `Engine.Snapshot`, an atomic load;
+`transportState` over State, Starting and Pending); nothing caches it and no
+subscriber fills anything. So a control point never reads, after Play's own
+reply, a state from before its step: the stale read was the test's, and the
+fix is the tests'.
+
+### The reproduction
+
+A disposable copy of the tree (never committed) with a hold: `call` arms it
+as a Start is spawned, before the call's goroutine is, so a begun Start
+always finds it standing, and `advance` waits at it immediately before the
+step's first `publishIfDirty`, whichever of the three paths spawned the
+Start. It is released by the test's signal through the fixtures' hooks (a
+read through the handler, recorded with its values as made while the hold
+stood; a wait on the snapshot that found its condition false; an answer the
+test waits for), by a command the test's own goroutine waits on that cannot
+end before the bound, by cleanup, or by a bound of 1.5 s, under the
+release's 2 s and the Start's 5 s (and no release is pending during a step
+that spawns a Start: the owner starts a session only once every release is
+acknowledged); a release by the bound is no reproduction in that step. The
+case's setup makes no backend call, so the hold never fires there.
+
+- The buffering case at main's tests, `-race -count=20 -v`: 20 of 20 red at
+  `onebit_test.go:263` in CI's words, each hold released by that read of
+  Stopped, 0.3 to 1.1 ms after its arming, none by the bound. The same copy
+  without the hold: 20 of 20 green. The whole test under the hold: the
+  buffering case alone red, and the warnings main's.
+- `TestATransportWriteAdmittedPastItsBudgetIsSuccess` (its Play's budget 1 s,
+  through `Limits{Write: 2 s}`) at main's tests: 20 of 20 red at
+  `writes_test.go:1045`, "TransportState Stopped while the start is held, want
+  Buffering", each read at the budget's end, 1.0 s after the hold's arming,
+  while it stood.
+
+### The fix
+
+`startUnderWay`, in the OpenHome fixture, waits until the engine has
+published a start under way, State Playing and Starting, which
+`transportState` answers Buffering: `waitSnap`, bounded by `testWait` and on
+`Engine.Changed`, which `publish` closes at every publish (`publish` is
+`snap.Store`'s one caller, through `publishIfDirty`, which publishes
+whenever the step is dirty, a `touched` change's as well as a `visible`
+one's). The buffering case waits for it after `callsBegun`, the budget test
+after its Play's success, and each then reads TransportState as before.
+Under the hold, `-race -count=20`: 20 of 20 green each, every hold released
+by the wait after it met the snapshot from before the step, and the
+buffering case's second Start (the SeekId's) by the test's wait for Play's
+answer; none by the bound.
+
+### The census
+
+Every OpenHome and engine test that reads the published state after
+something that precedes the publish: a fake's begun call (`callsBegun`,
+`session`, `successor`; the engine fake's `nth`, `prepared`, `waitFor`; the
+files' `waitFor`), an admission (`admitted`, `waitApplied("admitted …")`,
+`waitingStops`), an admission-only success, or a backend event the test
+posts. Found two ways: a static scan of both packages' tests for a read with
+no reply or wait between it and such an event, each hit read; and every test
+of both packages run under the hold, each read the hold saw recorded with
+its test. Then a wider hold over every step that admits a command or spawns
+any call, since a read after an admission or another call is the same
+class: at 1.5 s, stopped at `TestACommandWaitsForAReservationThatHasNotLanded`,
+whose 4,096 inserts each wait out the bound, then at 300 ms with that test
+skipped by name and read instead.
+
+Under the Start hold the engine's 170 tests (435 cases) were green with no
+read while a hold stood (394 holds, 63 released by the bound), and the
+OpenHome package's 118 (572 cases) green but the two above, the only reads
+while a hold stood (91 holds, 4 by the bound); without the hold the same copy
+is 435 and 572 green. Under the wider hold at 300 ms: the engine 169 tests
+(434 cases) green, 13,875 holds, three reads while one stood; the OpenHome
+package the buffering case red, `TestATransportWriteAdmittedPastItsBudgetIsSuccess`
+green (the 300 ms bound releases its hold before its 1 s budget), 2,334 holds,
+three reads.
+
+- Exposed, red 20 of 20 before and green 20 of 20 after, converted
+  (9b6ab412): the buffering case of `TestWhileCastingSeekIdStartsPlaybackFromEveryState`
+  (a begun Start) and `TestATransportWriteAdmittedPastItsBudgetIsSuccess`
+  (an admission-only success).
+- Blind, converted (ac59234e): the prefetched-successor case of
+  `TestARefusalAtTheOpenIsTheEnginesSkip` posts y's refusal and read Id and
+  TransportState once the fake had begun the next Prepare. When the first
+  Prepare has answered before the refusal is handled, that Prepare is spawned
+  in the refusal's own step, so the reads could take the snapshot from before
+  the refusal; they assert the refusal moves neither, so they never go red,
+  and read that early they would pass whatever it did. Shown with a bug
+  injected in a copy (a refusal moves the selection to the refused entry),
+  `-count=20`: main's test catches it 20 of 20 without a hold and misses it 20
+  of 20 under the wider hold (each run's Id read while the refusal's step
+  stood); with the wait for y's skip it is caught 20 of 20 with the hold and
+  without; with no bug, 20 of 20 green under the hold, each wait meeting the
+  snapshot from before the refusal. Converted because the rule this round
+  adds forbids that read in the file that carries the rule.
+- Blind, not converted, a follow-up: `TestAdvanceFollowsAudibleReportsNotHandOff`
+  reads the selection at lines 28 and 37 right after `prepared` (a Prepare
+  the step that handled the hand-off's Submitted spawned) to assert the
+  hand-off did not move it. With a bug injected (Submitted moves the selection):
+  caught 20 of 20 without a hold, missed 20 of 20 under the wider hold, both
+  reads taken while that step stood. `player.md`'s B605 and B709 bullets
+  already say a fake's record of a call comes before the step's end; the
+  remedy is a mark and `waitApplied("handled submitted", mark)` before each
+  read.
+- Of another mechanism, not converted, a follow-up: `TestPCMLookaheadHasNoNativeBudget`
+  posts the eighth Submitted and then sends `SetRepeat` as a barrier; the
+  owner's select takes a command and a message in no fixed order, so the
+  barrier's reply can come before that Submitted's step, and the no-fault
+  read after it can miss that step (seen once under the wider hold, the read
+  made while a later Prepare's step stood). Not red: no fault comes.
+- Not exposed, reading what an earlier step published (after a reply) while
+  a later step that leaves it alone stood: `TestWhileCastingTheQueueEdits`
+  (Id after DeleteId's reply, the next session's Start held),
+  `TestDeletingTheSelection/while_playing_plays_the_next` and
+  `TestTheTrackIsTheOccurrencesOwnCopy` (the selection, and the track and its
+  count, after Delete's reply, the next Start held), and
+  `TestACommandWaitsForAReservationThatHasNotLanded` (the queue's length and
+  token while an output report's step stood).
+- Not exposed, found by the scan: the Stops' tests (`stillWaiting` reads
+  Releasing after a later Stop's admission: the first Stop's step published
+  it before any later command was admitted, the owner taking one command a
+  step, and the later Stops change only the intent); the generation read
+  for `EnterMaintenance` after a parked insert's reservation write began
+  (`TestEnteringMaintenanceDoesNotWaitForAHungReservationWrite`: a park moves
+  no generation); `TestSeveralShortEntriesCrossedInOneUpdate`'s generation
+  after the end's Prepare (a touched step: the same either side, and a stale
+  one could only make its count stricter);
+  `TestAStopOvertakesTheTransportCommandsWaitingWithoutRunningThem`'s
+  generation after parked admissions; and the successor case of
+  `TestAnUnplayableEntryIsSkippedWithItsReason` (the engine's fake posts
+  Refused inside its Prepare, so the refusal's step, the skip with it, is
+  published a step before the one that spawns the Prepare the test waits
+  for). The scan's other hits read after a command's reply, the event between
+  them a `session` or `nth` of a session that reply had already started.
+- Already waiting, unchanged: every other test the scan named, with a
+  `waitSnap`, `heardNow`, `measured`, `detailed`, `waitAttempt`, an answer,
+  or an applied or handled note between the event and the read.
+- Not a finding: under the wider hold at 1.5 s
+  `TestNativeEscalationDoesNotBlockOwner` was red, "escalation blocked
+  owner": it measures that the owner admits a command within 1 s while a
+  Stop's escalation is held, and the hold blocks the owner by design; green
+  at 300 ms and under the Start hold.
+
+### The margin
+
+The fixture's engine runs on the real clock, so a held Start still expires
+at `StartTimeout`, 5 s after its spawn; this round does not change that.
+Under `-race`, 50 runs each: the buffering case 0.04 to 0.09 s, the budget
+test (its Start held through its 1 s budget) 1.02 to 1.07 s, the prefetched
+successor 0.04 to 0.10 s. Beside sixteen busy processes on the box's sixteen
+CPUs, at GOMAXPROCS 1 and 2 (race binaries, inside the build lock): the
+buffering case 300 of 300 green at each, at most 0.08 s; the budget test 30
+of 30, at most 1.04 s; the prefetched successor 200 of 200, at most 0.07 s.
+So each held Start is let go at least 3.9 s before its deadline, and no
+assertion needs more. The same load did not bring CI's red back unforced:
+main's buffering case passed 300 of 300 at each setting, so the hold is the
+reproduction.
+
+### The gates
+
+Inside the build lock, at ac59234e: `make test
+TEST_PKGS='./internal/player/...'` (the release tags, `-race`, `-timeout
+30m`, `GOFLAGS=-v`, a TMPDIR on disk): every package ok, 2,344 cases
+passed, none failed, five skipped by their own gates (a private corpus, the
+ALAC reference file, the kernel's quirks file, `BRIDGE_DSD_FIXTURE_TESTS`,
+`-capture-uevents`), none of them this round's; and the loaded runs above.
+Outside it, single packages: the three changed tests by name, `-race
+-count=50 -v`, 650 cases passed and none skipped; the whole OpenHome
+package, `-race -count=5 -v`, 2,860 cases passed and none skipped; `go vet`
+of the package for windows/amd64, darwin/arm64, linux/386 and linux/arm64;
+go1.27.3's gofmt over the changed files, clean. `rules-b827.patch` applied
+to a copy of the tracked tree at this record's commit: `make docs-check`
+passes, and `TestEveryCitedTestNameExists` passes there and fails, naming
+it, on a ghost citation planted in the patched History bullet. `git status`
+clean after.

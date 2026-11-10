@@ -549,6 +549,18 @@ func (p *testPlayer) heardNow(o engine.OccurrenceID) *engine.Snapshot {
 	})
 }
 
+// startUnderWay waits until the engine has published a start under way: the
+// transport Playing with nothing of the session audible yet (Starting), which
+// TransportState answers Buffering. A Start the fake has begun is not that,
+// nor is a write's success past its budget (B827): the owner spawns the call,
+// and marks the command admitted, before it publishes the step's snapshot.
+func (p *testPlayer) startUnderWay() *engine.Snapshot {
+	p.tb.Helper()
+	return p.waitSnap("the start under way", func(s *engine.Snapshot) bool {
+		return s.State() == engine.Playing && s.Starting()
+	})
+}
+
 // must fails the test on err.
 func must(tb testing.TB, what string, err error) {
 	tb.Helper()
