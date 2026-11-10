@@ -93817,3 +93817,49 @@ Only tests were changed for the first run. All Go/make commands use
 With the exact-mean check implemented, the same selection plus
 `TestAnMP4Walk` passed: 64 test/subtest events, no skips or failures (12 top-level
 tests). Raw JSON run evidence is in the worker scratch directory's r2 folder.
+
+### Round-2 negative controls
+
+Each control started from committed `8817721f` with a clean tree. The mutation
+script asserted exactly one source occurrence before replacing it and checked
+the resulting occurrence count. All runs used the same environment/tags above
+and `-timeout 30m -count=1 -json`; each built and exited 1 on assertions. After
+each, the mutated file was restored from HEAD and an empty `git status
+--porcelain` was asserted before continuing.
+
+| Mutation | Selection in ./internal/manifest | Result |
+|---|---|---|
+| Remove the exact-mean check block once | `TestExtractMP4Work/other_mean|TestScanner_V33` | Three other-mean cases return Mass again; other.m4a gains work and is rewritten instead of only stamped. Oversized foreign WORK remains green. 10 pass, 5 fail events including parents. |
+| Remove the work-preservation guard once | `^TestExtractMP4Work_PreservesDhowden$/last_duplicate` | Production returns First instead of dhowden's Last. 2 fail events including parent. |
+| Return on the first data child unconditionally once | `^TestExtractMP4Work_MultipleDataChildren$` | Non-text, empty and oversized leading children hide the later valid value in both ©wrk and freeform WORK: six child failures plus parent; both all-unusable cases still pass. |
+
+The implementation and tests were restored before the unfiltered race suite.
+
+### Round-2 final checks
+
+The full race run used restored implementation/test commit `8817721f`; only this
+validation record changed afterward. Every Go/make invocation kept the scratch
+TMPDIR, local toolchain and Makefile tags stated above. All checks exited 0.
+
+| Check | Result / tally |
+|---|---|
+| `make fmt`; `gofmt -l .` | No formatting changes; zero files listed across the repository. |
+| `make vet` | Host-wide tagged vet, no diagnostics. |
+| `GOOS=windows go vet -tags ts_omit_webclient,ts_omit_debugeventbus ./...` | No diagnostics; arm64, compile/vet only. |
+| `GOOS=linux go vet -tags ts_omit_webclient,ts_omit_debugeventbus ./...` | No diagnostics; arm64, compile/vet only. |
+| Focused green selection above, `-count=1` | 12 top-level tests, 64 total test/subtest passes, no skips or failures. |
+| `go test -tags ts_omit_webclient,ts_omit_debugeventbus -race -timeout 30m -count=1 -json ./internal/manifest/...` | Full unfiltered suite, one package, 1306.629 s: 1,536 top-level tests and 24 fuzz targets' ordinary seed runs passed; 8 top-level tests skipped. Including subtests/seeds: 3,667 pass, 10 skip, 0 fail. No race reported. |
+| `go test -tags ts_omit_webclient,ts_omit_debugeventbus -race -timeout 30m -count=1 -json ./cmd/bridge -run 'TestEveryCitedTestNameExists\|TestNoDocblockNamesAnotherDeclaration\|TestNoBlankKeepers'` | 3 tests passed, no skips/failures; also rerun over this final record. |
+| `make docs-check` | Four stages passed: budget self-test, budgets, rules-for's 49 checks, split-tool self-test; rerun over this final record. |
+| `git diff --check` | No whitespace errors. |
+| `python3 scripts/rules-for.py --changed` | Required scanner/build-ci-tests rules read before edits and before the implementation commit; final change is this log alone. No origin/main ref in this worker, so the tool lists uncommitted paths. |
+
+The ten skip entries are seven case/composition-sensitive filesystem cases this
+volume cannot stage, the optional real-SACD fixture with paths unset, and two
+watcher premises absent on this host (kqueue's retained watches and a remount
+retaining device/inode). No M4A test skipped. Cross-platform runtime and fuzz
+campaigns are not claimed. The pre-existing dhowden mean/duplicate answers,
+unsupported-mean sibling skip, workOf item-order difference and app display
+cleaning difference are unchanged; no adjacent implementation was altered.
+Only new local commits were made, with no amend, rebase, push, PR operation,
+`gh` invocation or deployment.
