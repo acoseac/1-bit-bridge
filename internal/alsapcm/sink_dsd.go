@@ -145,7 +145,13 @@ type nativeSeams struct {
 	// overBudget, nil but in a test, runs in a request's wait once the
 	// release's deadline has passed and the life was read running, before the
 	// answer is read from the record: a test ends the life there.
-	overBudget        func()
+	overBudget func()
+	// pauseLocking, nil but in a test, runs on a Pause's goroutine once its
+	// first read of its own context found it running, just before it takes
+	// the sink's lock: a test holds that lock and ends the context there, as
+	// the writer or another command holding the lock can make Pause wait
+	// (B728 B9 PR 1 round 6).
+	pauseLocking      func()
 	awaiting          func()
 	arm               func() awaitArm
 	recorded          func()
@@ -1046,22 +1052,33 @@ func (s *DSDSink) waitRelease(ctx context.Context) error {
 func (s *DSDSink) result() error { s.mu.Lock(); defer s.mu.Unlock(); return s.err }
 
 // Pause freezes content progress; after thirty seconds hardware is released.
-// A Pause whose own context has ended never answers success: it answers that
-// end (stopped). It reads its context before it takes the sink's lock, so one
-// called on an ended context changes nothing (its pause, epoch and moment),
-// and again after its wait, which can take the change that applies its pause
-// beside that end (B728 B9 PR 1 round 5: an inert or already-paused sink
-// skipped the wait, and the wait could take the change, so a cancelled Pause
-// answered success, having paused an inert sink or moved the epoch).
+// It reads its own context again after every point it may wait at, and an
+// end it finds there answers through stopped: after it takes the sink's lock,
+// before it changes anything, so a Pause whose context ended before it had
+// the lock changes nothing (its pause, epoch and moment); after it takes that
+// lock again in its wait for the writer, so it never waits twice; and after
+// settle, whose waits (a release met, the cleanup an ended life waits for,
+// the sink's lock its reads take) are its last, so a context that ended
+// before that read never answers success (B728 B9 PR 1 round 6: a Pause that
+// waited for the lock changed the sink after its context ended, and one whose
+// context ended in settle's cleanup wait answered nil; round 5 read it only
+// at its entry and after its wait). A context that ends after the pause is
+// registered leaves it registered.
 func (s *DSDSink) Pause(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return s.stopped("native pause", err)
 	}
+	if h := s.seams.pauseLocking; h != nil {
+		h()
+	}
 	s.mu.Lock()
+	if ended, e := s.pauseEnded(ctx); ended {
+		return e
+	}
 	if s.releasing {
 		e := s.fenced("native pause", errors.New("native releasing"))
 		s.mu.Unlock()
-		return s.settle(ctx, refusedAnswer("native pause", e))
+		return s.pauseSettled(ctx, refusedAnswer("native pause", e))
 	}
 	if !s.paused {
 		s.pauseAt = s.seams.now()
@@ -1076,16 +1093,42 @@ func (s *DSDSink) Pause(ctx context.Context) error {
 		case <-ctx.Done():
 			return s.stopped("native pause", ctx.Err())
 		case <-s.done:
-			return s.settle(ctx, refusedAnswer("native pause", s.result()))
+			return s.pauseSettled(ctx, refusedAnswer("native pause", s.result()))
 		case <-ch:
 		}
 		s.mu.Lock()
+		if ended, e := s.pauseEnded(ctx); ended {
+			return e
+		}
 	}
 	s.mu.Unlock()
-	if err := ctx.Err(); err != nil {
-		return s.stopped("native pause", err)
+	return s.pauseSettled(ctx, nativeAnswer{kind: answerSuccess, op: "native pause"})
+}
+
+// pauseEnded reads a Pause's own context with the sink's lock held, just
+// taken, which Pause may have waited for: once that context has ended, the
+// lock is let go (stopped's snapshot takes it) and the answer is stopped's,
+// nothing changed in this hold (B728 B9 PR 1 round 6).
+func (s *DSDSink) pauseEnded(ctx context.Context) (bool, error) {
+	err := ctx.Err()
+	if err == nil {
+		return false, nil
 	}
-	return s.settle(ctx, nativeAnswer{kind: answerSuccess, op: "native pause"})
+	s.mu.Unlock()
+	return true, s.stopped("native pause", err)
+}
+
+// pauseSettled is settle's answer to a Pause read against Pause's own context
+// once settle's waits are done: a context that ended during them answers
+// through stopped, a recorded cleanup failure still winning there, never as
+// settle answered (B728 B9 PR 1 round 6: a success, or a refusal over a
+// writer's clean end, answered nil). Every settle of Pause's goes through it.
+func (s *DSDSink) pauseSettled(ctx context.Context, a nativeAnswer) error {
+	e := s.settle(ctx, a)
+	if err := ctx.Err(); err != nil {
+		return s.stopped(a.op, err)
+	}
+	return e
 }
 
 // Resume revalidates a released endpoint before resuming retained content.

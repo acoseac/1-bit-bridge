@@ -125,7 +125,9 @@ func TestNativeAPauseOnItsOwnEndedContextChangesNothing(t *testing.T) {
 // there, its end real all the same), and the Pause, its pause applied, answers
 // its context's end, never the success it would have been on a context
 // running (B728 B9 PR 1 round 5: whichever arm the select took decided, and
-// the change answered nil). A staged sink, as in
+// the change answered nil). Since round 6 the read of the context as Pause
+// takes its lock again answers it, and the read after settle stands behind
+// that one. A staged sink, as in
 // TestNativeWaitingCommandsAnswerTheEndedLifesFailure: no goroutine owns it.
 func TestNativeAPauseWhoseContextEndsBesideItsChangeAnswersTheCancellation(t *testing.T) {
 	life, end := context.WithCancel(context.Background())
