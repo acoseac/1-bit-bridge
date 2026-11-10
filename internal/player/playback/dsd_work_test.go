@@ -29,8 +29,9 @@ import (
 // current, a Start beside it, and the goroutine that runs it counted from the
 // ask.
 
-// watchdog bounds each wait on a goroutine of the backend's, and askWithin an
-// ask's return, which takes a lock and starts a goroutine: watchdogs, never a
+// watchdog bounds each wait on a goroutine of the backend's, and on anything
+// else a test is sure comes (B9's choice tests too), and askWithin an ask's
+// return, which takes a lock and starts a goroutine: watchdogs, never a
 // timing a test depends on.
 const (
 	watchdog  = time.Minute
@@ -429,13 +430,15 @@ func (r *probeRig) ask(t *testing.T, ctx context.Context, cond playback.ProbeCon
 
 // TestAStaleProbeKeepsNothingAndStaysOwed (B762): the silent probe's
 // answers are taken in one step once it ends, and only while they are still
-// current: a choice written for the DAC while it ran (ForgetDSDProbe), or the
-// DAC enumerated anew, drops them, so the probe's cache keeps nothing under
-// the unit it probed, no driver_accepted is written into the player's DSD
-// state, and the probe is still owed; the next ask runs it, and keeps its
+// current: a migration's part for the DAC made while it ran (ForgetDSDProbe),
+// or the DAC enumerated anew, drops them, so the probe's cache keeps nothing
+// under the unit it probed, no driver_accepted is written into the player's
+// DSD state, and the probe is still owed; the next ask runs it, and keeps its
 // answers. A probe that met a busy node (MPD's) answers nothing for the cache
-// to refuse, so a choice written while it ran is known by the probe's
-// generation alone: it leaves the probe asked anew, which runs. And the
+// to refuse, so a migration's part made while it ran is known by the probe's
+// generation alone: it leaves the probe asked anew, which runs. (A choice
+// written while a probe runs drops nothing and moves no generation, B728 B9:
+// TestAChoiceWrittenBesideAProbeDropsNothingAndStaysAsked.) And the
 // cache's own epoch, moved while the probe ran with neither the generation
 // nor the binding moved, is known by the cache's refusal of the report alone
 // (round 2: every case before moved one of the two, so the refusal was never
@@ -447,8 +450,8 @@ func TestAStaleProbeKeepsNothingAndStaysOwed(t *testing.T) {
 		during func(r *probeRig)
 		now    int // the enumeration the next ask probes
 	}{
-		{"a choice written for the DAC while it ran", false, func(r *probeRig) { r.b.ForgetDSDProbe(playbacktest.DACKey()) }, 2},
-		{"a choice written while a probe that met a busy node ran", true, func(r *probeRig) { r.b.ForgetDSDProbe(playbacktest.DACKey()) }, 2},
+		{"a migration's part for the DAC made while it ran", false, func(r *probeRig) { r.b.ForgetDSDProbe(playbacktest.DACKey()) }, 2},
+		{"a migration's part made while a probe that met a busy node ran", true, func(r *probeRig) { r.b.ForgetDSDProbe(playbacktest.DACKey()) }, 2},
 		{"the DAC enumerated anew while it ran", false, func(r *probeRig) { r.bound.replug(r.box, 3) }, 3},
 		{"the probe cache's epoch moved alone while it ran", false, func(r *probeRig) { r.pol.Probes.Forget(playbacktest.DACKey().Canonical()) }, 2},
 	} {

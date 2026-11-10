@@ -562,12 +562,13 @@ func (p *bridgePlayer) watch(ctx context.Context) {
 	// where an input changed (a snapshot, a migration's part for a DAC) and
 	// otherwise at most once a dsdIdle; and the silent probe, at a snapshot
 	// that resolves the boot binding, and while one is owed (a migration's
-	// part for a DAC changed the state, the device slot refused it, its
-	// answers were dropped) at each tick until it runs. Both run on the
-	// backend's goroutines, and this loop only asks (B762): a read of the box
-	// or an open the kernel holds never holds a report, the live config or the
-	// engine's end. What it asked ends with it, whichever way it leaves (work),
-	// a panic in it included, before its shutdown waits for the backend.
+	// part for a DAC changed the state, a choice was written for it (B728 B9),
+	// the device slot refused it, its answers were dropped) at each tick until
+	// it runs. Both run on the backend's goroutines, and this loop only asks
+	// (B762): a read of the box or an open the kernel holds never holds a
+	// report, the live config or the engine's end. What it asked ends with it,
+	// whichever way it leaves (work), a panic in it included, before its
+	// shutdown waits for the backend.
 	be, _ := p.be.(*playback.Backend)
 	work, endWork := context.WithCancel(ctx)
 	defer endWork()

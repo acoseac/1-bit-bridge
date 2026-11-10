@@ -187,7 +187,7 @@ type route struct {
 // gets a too-aggressive write deadline AND a test failure if
 // they bypass `routeRegistry` entirely).
 func (s *Server) routeRegistry() []route {
-	return []route{
+	routes := []route{
 		// /v1/health is unauthed; everything below is authed.
 		// 2 s ctx-timeout: health probe must NEVER block more than
 		// ~the iOS UI's "still alive?" poll interval. A wedged
@@ -354,4 +354,15 @@ func (s *Server) routeRegistry() []route {
 		{pattern: "GET /v1/pairing/{requestID}", kind: boundedRoute, rateClass: rateNone, handler: s.pairingPoll},
 		{pattern: "DELETE /v1/pairing/{requestID}", kind: boundedRoute, rateClass: rateNone, handler: s.pairingDelete},
 	}
+	if cfg := s.cfgHolder.Load(); cfg == nil || !cfg.IsPublic() {
+		// The bound DAC's DSD choice for the bridge's own player (B728 B9), a
+		// small JSON body and one durable write of the player's DSD state: the
+		// write's turn waits at most the 15 s, and a write once begun is the
+		// state's fsync and a read of the box. Never on a public bridge, whose
+		// player never runs; every other bridge serves it, and it answers the
+		// gates' 404s while they are shut, as GET /v1/outputs does.
+		routes = append(routes, route{pattern: "PUT /v1/outputs/{id}/dsd", kind: boundedRoute, rateClass: rateWrite,
+			handler: withCtxTimeout(15*time.Second, s.authed(s.rateLimitWrite(s.putOutputDSD)))})
+	}
+	return routes
 }

@@ -182,20 +182,57 @@ func (a *afterFirst) ReadDSD(ctx context.Context, dst [][]byte) (int, error) {
 // holdLocked is the producer's next step for a, a converted occurrence at
 // its window point (the design's section 4.7). Its window waits while what
 // follows has not settled: no successor named and no end, or one still
-// opening, being handed off again (stale), or admitted under a set a refresh
-// has replaced, which that refresh's reconciliation keeps or hands off. A
+// opening, being handed off again (stale), admitted under a set a refresh
+// has replaced, which that refresh's reconciliation keeps or hands off, or at
+// a rate a choice's write pending plays otherwise (B728 B9), until it settles. A
 // settled successor converted at a's DSD rate under a's plan, which
 // dsdconv.Continuous takes and which follows on a's transport, continues
 // a's chain (Continue): the window is computed with its first bits. The end
 // named after a, any other successor, or the sink's lookahead at its floor
 // while nothing has settled, ends the window zero-padded (End). s.mu is held.
+//
+// It reads the choice's write pending first and the set published after it,
+// once, for every check (B728 B9 round 18). A write registers its pending
+// set, publishes, has every session reconciled and only then lets its
+// pending go (chooseDSD), and its publish takes no session's lock: a
+// decision that read the set published before the publish and asked about
+// the pending write after it found the write's set the one published and
+// nothing pending, whether the write was still registered or had let its
+// pending go, and continued a's chain into the bits of an f still admitted
+// under the set the write replaced (Codex's review of round 17). Read in this
+// order, a publish before the second read leaves f admitted under a set it
+// replaced, whose reconciliation's verdict is waited for, the write pending
+// still or let go without reconciling (a panic between its publish and its
+// reconciliation, whose set the next refresh reconciles); a publish after it
+// finds a write registered at the first read waited for; and a write
+// registered after the first read publishes after the decision, which the
+// set published before it decides, as one made just before any publish is:
+// that publish's reconciliation judges what the decision did.
 func (s *session) holdLocked(a *occ) step {
 	f := s.followingLocked(a)
-	settled := f != nil && f.opened() && !f.stale && (f.admitted == nil || f.admitted == s.b.dsd.Load())
+	p := s.b.pending.Load()
+	s.b.deciding(a.id)
+	cur := s.b.dsd.Load()
+	settled := f != nil && f.opened() && !f.stale && (f.admitted == nil || f.admitted == cur)
+	var pend *pendingChoice
+	if settled && p != nil && p.changes(cur, f) {
+		// A choice's write pending that plays f's rate otherwise (B728 B9) is
+		// waited for as an unsettled successor is, so f's first bits enter no
+		// window the write's publish would cut through.
+		pend, settled = p, false
+	}
 	switch {
 	case f == nil && s.endAfter == a.id:
 	case !settled:
 		if !s.floorLocked(a) {
+			if pend != nil {
+				return step{kind: stepWait, wait: pend.done, awaits: f}
+			}
+			if f != nil && unjudgedAt(f, cur) {
+				// Admitted under a set a publish has replaced: the window waits
+				// for that publish's reconciliation to judge f (B728 B9 round 17).
+				return step{kind: stepWait, wait: s.judged, verdict: f}
+			}
 			return step{kind: stepWait}
 		}
 	case f.conv != nil && a.out != nil && a.out.transport.Join(f.transport).Gapless &&
@@ -217,15 +254,19 @@ func (s *session) holdLocked(a *occ) step {
 }
 
 // floorLocked reports whether the sink a plays in has at most windowFloor of
-// lookahead left: what was handed to it and is not played. A sink that is
-// gone has none. s.mu is held.
-func (s *session) floorLocked(a *occ) bool {
-	out := a.out
+// lookahead left. s.mu is held.
+func (s *session) floorLocked(a *occ) bool { return outFloorLocked(a.out) }
+
+// outFloorLocked reports whether out has at most windowFloor of lookahead
+// left: what was handed to it and is not played, in its own positions'
+// unit (a native sink's count logical bits). A sink that is gone has none.
+// s.mu is held.
+func outFloorLocked(out *output) bool {
 	if out == nil || out.closed || out.drained {
 		return true
 	}
 	p := out.sink.Position()
-	return p.Submitted-p.Played <= int64(out.transport.RateHz)*int64(windowFloor)/int64(time.Second)
+	return p.Submitted-p.Played <= int64(out.logicalRate())*int64(windowFloor)/int64(time.Second)
 }
 
 // holdingLocked reports whether the producer holds a converted occurrence's

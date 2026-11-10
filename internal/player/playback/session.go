@@ -58,6 +58,20 @@ type session struct {
 
 	chain   []*occ
 	writing *occ // the occurrence the producer writes, nil between occurrences
+	// awaitingWrite is the producer holding a successor out of its sink
+	// while a choice's write pending plays its rate otherwise, or while the
+	// reconciliation of a set published since the successor's admission has
+	// yet to judge it (next, B728 B9 rounds 2 and 17): the reporter wakes it
+	// at each measurement, so the sink's lookahead is read as the sink plays
+	// and the wait ends at its floor.
+	awaitingWrite bool
+	// judged is closed, and made anew, each time a reconciliation has judged
+	// the session's occurrences against the set it published, in the step
+	// that judged them (reconcileDSD, B728 B9 round 17), and again once
+	// Revoke has dropped what a revocation takes: a wait for that judgement
+	// (unjudgedLocked) takes it under s.mu, lets the lock go, waits on it, and
+	// asks again.
+	judged chan struct{}
 	// endAfter is the occurrence nothing follows (a Prepare with no
 	// successor), 0 for none.
 	endAfter engine.OccurrenceID
@@ -81,6 +95,11 @@ type session struct {
 	// dsdMonitor is the session's monitor of the effective DSD policy
 	// started (startDSDMonitor), once it holds a DSD occurrence.
 	dsdMonitor bool
+	// dsdJudged is the set the session's last reconciliation that completed
+	// judged it by, under the backend's dsdMu: the retry of a set's
+	// reconciliation judges only the sessions it failed in (B728 B9 round 19,
+	// Backend.reconcileDSD).
+	dsdJudged *dsdSet
 
 	paused bool
 	// pausedFlag is paused as a reader that may not take the session's lock
@@ -273,7 +292,7 @@ func newSession(b *Backend, id engine.SessionID) *session {
 	return &session{
 		b: b, id: id, ctx: ctx, cancel: cancel,
 		startDone: make(chan struct{}), down: make(chan struct{}), firstIn: make(chan struct{}),
-		wakeP: make(chan struct{}, 1), wakeR: make(chan struct{}, 1),
+		wakeP: make(chan struct{}, 1), wakeR: make(chan struct{}, 1), judged: make(chan struct{}),
 	}
 }
 
@@ -504,6 +523,7 @@ func (s *session) start(ctx context.Context, req engine.StartRequest) (err error
 		s.monitorPermission()
 	}
 	s.b.open(cctx, first)
+	s.b.opened(first)
 	// Admitted under a set a refresh may have replaced while its first chunk
 	// was read, which no reconciliation reaches while the open is under way:
 	// admitted again under the set published now, in the step that ends the
@@ -511,12 +531,16 @@ func (s *session) start(ctx context.Context, req engine.StartRequest) (err error
 	// it under that set and a reconciliation after it judges it (B728 B7, round
 	// 2). Once its done is closed, reconciliation repoints its set and a
 	// revocation refuses it, under this lock, so what decides the DSD monitor
-	// and the open's refusal is read in that step too (round 3).
-	s.mu.Lock()
+	// and the open's refusal is read in that step too (round 3). A choice's
+	// write pending that plays its rate otherwise is waited for first, the
+	// lock let go, so the write either judged it opened or it is admitted under
+	// what the write left, and a refusal of the policy's a later set lifts is
+	// asked again (settleOpen, B728 B9).
+	s.settleOpen(cctx, first)
 	s.readmitDSDLocked(first)
 	s.makeConverterLocked(first)
 	close(first.done)
-	monitor, refused := first.admitted != nil, first.refused
+	monitor, refused := first.admitted != nil && first.refused == nil, first.refused
 	if refused != nil {
 		first.dropped = true
 	}
@@ -582,9 +606,31 @@ func (s *session) start(ctx context.Context, req engine.StartRequest) (err error
 	s.cur = out
 	s.currentNative = out.native != nil
 	first.out, first.start, first.transport = out, 0, out.transport
+	// Its own sink's activation is under way (claimed) until the Start has
+	// taken its answer, as a successor's is in the producer's transition: a
+	// reconciliation that revokes the session's DSD meanwhile records its fault
+	// and fences the sink in its own step (B728 B9 round 6), whether or not the
+	// activation succeeded first, and the Start then fails saying so, the claim
+	// given up in the step that reads the fault, before anything is launched
+	// (round 7: read beside an activation's error alone, a fault recorded after
+	// the activation succeeded let the Start launch its producer, which stopped
+	// on it, and its reporter, and fail in words that named no revocation).
+	first.claimed = true
 	s.writing = first
 	s.mu.Unlock()
-	if err := s.activateOutput(cctx, first, out); err != nil {
+	err = s.activateOutput(cctx, first, out)
+	s.mu.Lock()
+	first.claimed = false
+	f := s.fault
+	s.mu.Unlock()
+	if f != nil && f.Reason == "native_revoked" {
+		why := fmt.Sprintf("player backend: the session's DSD was revoked as its first occurrence's sink activated (%s: %s)", f.Reason, f.Detail)
+		if err != nil {
+			return fmt.Errorf("%s: %w", why, err)
+		}
+		return errors.New(why)
+	}
+	if err != nil {
 		return err
 	}
 	s.mu.Lock()
@@ -873,25 +919,34 @@ func (s *session) callableLocked() error {
 func (s *session) openSuccessor(ctx context.Context, o *occ) {
 	defer o.cancel()
 	s.b.open(ctx, o)
-	if o.admitted != nil {
-		s.startDSDMonitor()
-	}
-	s.mu.Lock()
+	s.b.opened(o)
+	s.settleOpen(ctx, o)
+	monitor := false
 	defer func() {
 		close(o.done)
 		s.mu.Unlock()
+		if monitor {
+			// The session's DSD monitor, once a DSD occurrence of it is
+			// admitted: a PCM session's first, asked again where a write lifted
+			// its refusal, among them (B728 B9 round 2).
+			s.startDSDMonitor()
+		}
 		wake(s.wakeP)
 		wake(s.wakeR)
 	}()
 	// Admitted under a set a refresh has replaced since, which no
 	// reconciliation reaches while the open is under way: admitted again under
 	// the set published now, before its Prepared is reported (B728 B7), and
-	// its converter made for the plan it is admitted under (B11).
+	// its converter made for the plan it is admitted under (B11); a choice's
+	// write pending that plays its rate otherwise waited for first, and a
+	// refusal of the policy's a later set lifts asked again (settleOpen, B728
+	// B9).
 	s.readmitDSDLocked(o)
 	s.makeConverterLocked(o)
 	if s.nativeRevoked && (o.plan != nil || o.converts()) && o.refused == nil {
 		o.refused = &engine.Unplayable{Reason: "native_revoked", Detail: "DSD permission revoked"}
 	}
+	monitor = o.admitted != nil && o.refused == nil && !o.dropped
 	if o.dropped {
 		// Dropped while it opened: nothing of it plays or is reported, and
 		// it leaves the chain with its opener, which retirement passed over
@@ -1457,12 +1512,63 @@ func (s *session) resume(ctx context.Context) (how engine.ResumeResult, err erro
 	// and leaves the session paused. The open is the session's while it
 	// runs (s.wg), joined by its release, which is never acknowledged while
 	// a node this open holds is open: until the check after open answers no
-	// sink exists to close the node with the session's life.
+	// sink exists to close the node with the session's life. Every choice's
+	// write pending that plays its rate otherwise is waited for first, asked
+	// again under the session's lock each time one settles (B728 B9 round 2,
+	// point 1: another may be pending by then), and so is the reconciliation
+	// of a set a publish has put in place of the one the occurrence was
+	// admitted under, a write's once it has published among them (round 17,
+	// unjudgedLocked), until the call's context or the session's release ends
+	// the wait; in the step that finds neither the open is claimed, so a write
+	// that classifies beside it counts the occurrence as reaching its sink. An
+	// occurrence a write left being handed off again opens nothing here: the
+	// producer waits for its replacement, which opens its own sink; nor does
+	// one a revocation dropped.
 	l.lock()
 	if err := s.callableLocked(); err != nil {
 		l.unlock()
 		return 0, err
 	}
+	for {
+		var settledW, judged <-chan struct{}
+		if p := s.b.pendingFor(between); p != nil {
+			settledW = p.done
+		} else if s.unjudgedLocked(between) {
+			judged = s.judged
+		} else {
+			break
+		}
+		l.unlock()
+		if settledW != nil {
+			s.b.choiceAwaited(between.id)
+		} else {
+			s.b.unjudged(between.id)
+		}
+		select {
+		case <-settledW:
+			s.b.choiceWoke(between.id)
+		case <-judged:
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		case <-s.ctx.Done():
+			return 0, errReleased
+		}
+		l.lock()
+		if err := s.callableLocked(); err != nil {
+			l.unlock()
+			return 0, err
+		}
+	}
+	if between.stale || between.dropped || s.between != between {
+		if err := s.unpausedLocked(); err != nil {
+			return 0, err
+		}
+		l.unlock()
+		wake(s.wakeP)
+		wake(s.wakeR)
+		return engine.ResumeContinued, nil
+	}
+	between.claimed = true
 	s.wg.Add(1)
 	l.unlock()
 	defer s.wg.Done()
@@ -1475,6 +1581,11 @@ func (s *session) resume(ctx context.Context) (how engine.ResumeResult, err erro
 		}
 		var te *transportError
 		if !errors.As(err, &te) {
+			// Refused, the session left paused: nothing opens for it until a
+			// resume claims it again.
+			l.lock()
+			between.claimed = false
+			l.unlock()
 			return 0, resumeError(err)
 		}
 		l.lock()
@@ -1501,6 +1612,7 @@ func (s *session) resume(ctx context.Context) (how engine.ResumeResult, err erro
 		return 0, errReleased
 	}
 	if s.between != between || between.dropped {
+		between.claimed = false
 		l.unlock()
 		s.closeOutput(next)
 		l.lock()
@@ -1514,6 +1626,8 @@ func (s *session) resume(ctx context.Context) (how engine.ResumeResult, err erro
 	if err := s.unpausedLocked(); err != nil {
 		return 0, err
 	}
+	// The claim stays with the sink handed to the producer, whose adoption and
+	// activation of it give it up (transition).
 	s.handed = next
 	l.unlock()
 	wake(s.wakeP)
@@ -1549,6 +1663,9 @@ func (s *session) release(ctx context.Context) error {
 		return nil
 	}
 	s.mu.Unlock()
+	if first {
+		s.b.releasingSeam(s.id)
+	}
 	// The session's life ends: its sinks drop their streams and close their
 	// devices on their own, and its goroutines return.
 	s.cancel()

@@ -15,6 +15,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/alsapcm"
 	"github.com/acoseac/1-bit-bridge/internal/logging"
 	"github.com/acoseac/1-bit-bridge/internal/player/decode"
+	"github.com/acoseac/1-bit-bridge/internal/player/dsdstate"
 	"github.com/acoseac/1-bit-bridge/internal/player/engine"
 	"github.com/acoseac/1-bit-bridge/internal/player/format"
 )
@@ -87,12 +88,19 @@ type Seams struct {
 	// one, before the producer closes it and records the occurrence it opens
 	// a sink for next.
 	TransportDrained func()
+	// ProducerStep runs on session s's producer once it has decided its next
+	// step (next), with no lock held, before it takes the step (B728 B9 round
+	// 8): step is "stop" (the session faulted or ends), "write", "wait",
+	// "transition" or "finish", and o the occurrence the step is for, 0 for
+	// none. It may block, holding the producer there.
+	ProducerStep func(s engine.SessionID, step string, o engine.OccurrenceID)
 	// Fenced runs where the backend finds the session released, by its
 	// Release or by the engine's taking it before that Release came
 	// (engine.StartRequest.Released), at a step that would acquire, open,
-	// admit, adopt, resume, write or cut, and refuses that step (B674 round
-	// 3): step names it ("start", "open", "admit", "adopt", "resume",
-	// "write", "cut"). A sink refused at its adoption is closed before it
+	// admit, adopt, activate, resume, write or cut, and refuses that step
+	// (B674 round 3): step names it ("start", "open", "admit", "adopt",
+	// "activate", a successor's sink's activation, B728 B9 round 3,
+	// "resume", "write", "cut"). A sink refused at its adoption is closed before it
 	// runs; one refused at its check after open is closed by the sink after
 	// it. It must not call the backend.
 	Fenced func(step string)
@@ -129,11 +137,76 @@ type Seams struct {
 	// predecessor's window, is handed to the producer, before the call waits
 	// for its answer.
 	Converting func(step string, o engine.OccurrenceID)
+	// Deciding runs on the producer in the decision of a converted occurrence
+	// o's join window (holdLocked), once it has read the choice's write
+	// pending and before it reads the set published, under the session's
+	// lock (B728 B9 round 18): the window in which a write publishes, or lets
+	// its pending go, between the decision's two reads. It may block, holding
+	// the producer there with that lock held, so nothing that takes the lock (a
+	// reconciliation, the reporter's step, a write's classification) goes on
+	// until it returns; it must not call the backend.
+	Deciding func(o engine.OccurrenceID)
 	// Activation runs on the activating goroutine as an occurrence's output
 	// is about to be activated, before the activation decides anything of
 	// the occurrence (B728 B11 round 2): a test holds it there while a
 	// refresh reconciles the occurrence. It may block.
 	Activation func(o engine.OccurrenceID)
+	// ChoicePending runs in a choice write (ChooseDSD, B728 B9) once the set
+	// the write would publish is pending and what it would interrupt is
+	// classified, before the state is written: the window in which an
+	// occurrence is admitted beside a write. It may block.
+	ChoicePending func()
+	// ChoiceWritten runs in a choice write once the state's write has
+	// returned, err its answer, before the set is published: the window in
+	// which the published epoch trails the state. It may block.
+	ChoiceWritten func(err error)
+	// ChoiceQueued runs in a choice write that finds another write's turn
+	// under way, before it waits for it. It must not block.
+	ChoiceQueued func()
+	// ChoiceAwaited runs where a step of occurrence o's waits for a pending
+	// choice write that plays its rate otherwise to settle, its session's
+	// lock let go: the step that ends its open, the producer's (a sink's
+	// adoption or its activation, a join window's hold, a transport's open,
+	// a gapless join) and a resume's open between transports. It must not
+	// block.
+	ChoiceAwaited func(o engine.OccurrenceID)
+	// ChoiceWoke runs where a step that waited for a pending choice write
+	// (ChoiceAwaited) has seen it settle, before it asks again whether a
+	// write is pending, its session's lock let go (B728 B9 round 2). It may
+	// block, holding that goroutine there.
+	ChoiceWoke func(o engine.OccurrenceID)
+	// Unjudged runs where a step of occurrence o's waits for the
+	// reconciliation of a set published since o was admitted to judge it
+	// (unjudgedLocked, B728 B9 round 17): the producer's transition before it
+	// opens o's own sink, its gapless join and a converted join window above
+	// the sink's floor, and a resume's open between transports, its session's
+	// lock let go, before the wait. It may block, holding that goroutine
+	// there.
+	Unjudged func(o engine.OccurrenceID)
+	// Opened runs on an opener's goroutine once occurrence o's open, of
+	// ref's content, has returned, its admission made or refused, before the
+	// step that ends the open takes the session's lock (B728 B9 round 2): the
+	// window in which a choice's write publishes beside an open whose
+	// admission read the set before it. It may block.
+	Opened func(o engine.OccurrenceID, ref engine.Reference)
+	// Admitting runs on an opener's goroutine as DSD occurrence o's admission
+	// under the effective policy begins (admitDSD), before it reads the set
+	// published or asks whether that set is stale, which takes the refreshes'
+	// lock (B728 B9 round 18): a test knows by it that an admission a held
+	// refresh keeps from ending has begun. It must not block or call the
+	// backend.
+	Admitting func(o engine.OccurrenceID)
+	// Revoking runs in Backend.Revoke under session s's lock, once the
+	// session is found and before the revocation changes anything (B728 B9
+	// round 19): a test panics there, a Revoke that panics, which must leave
+	// the session's lock free. It must not block or call the backend.
+	Revoking func(s engine.SessionID)
+	// Releasing runs in session s's Release once the session is marked
+	// released and its native sinks have begun their release, before its
+	// life ends, its lock let go (B728 B9 round 2): the window in which a
+	// choice's write classifies what a session being released holds. It may
+	// block.
+	Releasing func(s engine.SessionID)
 	// Probed runs on the silent probe's goroutine once its call has
 	// returned and before its answers are taken (publishProbe): a test holds
 	// it there while a Start takes the slot the probe let go of (B762 round
@@ -152,6 +225,34 @@ type Seams struct {
 	// through a Start, which finds the answers recorded (B762 round 3). It may
 	// block, and must not call the backend.
 	ProbeDecided func()
+}
+
+// releasingSeam is the Releasing seam.
+func (b *Backend) releasingSeam(s engine.SessionID) {
+	if sm := b.cfg.Seams; sm != nil && sm.Releasing != nil {
+		sm.Releasing(s)
+	}
+}
+
+// choiceWoke is the ChoiceWoke seam.
+func (b *Backend) choiceWoke(o engine.OccurrenceID) {
+	if sm := b.cfg.Seams; sm != nil && sm.ChoiceWoke != nil {
+		sm.ChoiceWoke(o)
+	}
+}
+
+// unjudged is the Unjudged seam.
+func (b *Backend) unjudged(o engine.OccurrenceID) {
+	if sm := b.cfg.Seams; sm != nil && sm.Unjudged != nil {
+		sm.Unjudged(o)
+	}
+}
+
+// opened is the Opened seam.
+func (b *Backend) opened(o *occ) {
+	if sm := b.cfg.Seams; sm != nil && sm.Opened != nil {
+		sm.Opened(o.id, o.ref)
+	}
 }
 
 // probed is the Probed seam.
@@ -186,6 +287,27 @@ func (b *Backend) activation(o engine.OccurrenceID) {
 func (b *Backend) converting(step string, o engine.OccurrenceID) {
 	if sm := b.cfg.Seams; sm != nil && sm.Converting != nil {
 		sm.Converting(step, o)
+	}
+}
+
+// deciding is the Deciding seam.
+func (b *Backend) deciding(o engine.OccurrenceID) {
+	if sm := b.cfg.Seams; sm != nil && sm.Deciding != nil {
+		sm.Deciding(o)
+	}
+}
+
+// admitting is the Admitting seam.
+func (b *Backend) admitting(o engine.OccurrenceID) {
+	if sm := b.cfg.Seams; sm != nil && sm.Admitting != nil {
+		sm.Admitting(o)
+	}
+}
+
+// revoking is the Revoking seam.
+func (b *Backend) revoking(s engine.SessionID) {
+	if sm := b.cfg.Seams; sm != nil && sm.Revoking != nil {
+		sm.Revoking(s)
 	}
 }
 
@@ -228,6 +350,17 @@ func (b *Backend) pauseRefused() {
 func (b *Backend) transportDrained() {
 	if sm := b.cfg.Seams; sm != nil && sm.TransportDrained != nil {
 		sm.TransportDrained()
+	}
+}
+
+// producerStep is the ProducerStep seam, for session id's step st.
+func (b *Backend) producerStep(id engine.SessionID, st step) {
+	if sm := b.cfg.Seams; sm != nil && sm.ProducerStep != nil {
+		var o engine.OccurrenceID
+		if st.o != nil {
+			o = st.o.id
+		}
+		sm.ProducerStep(id, st.kind.String(), o)
 	}
 }
 
@@ -298,15 +431,33 @@ type Backend struct {
 	// that set and its read side (B728 B8), swapped right after it, and alone
 	// when the read side alone changes. Neither is nil once New has returned,
 	// for a backend with a DSD policy. dsdMu serializes the refreshes that swap
-	// them, dsdRead is when the last one read the policy, dsdFenceOnce says once
-	// that the state's writes are fenced, and probeState is the silent probe's
-	// bookkeeping (ProbeDSD).
+	// them. Under it: dsdRead is when the last refresh whose reading completed
+	// read the policy; dsdJudged is the set the last reconciliation that
+	// completed judged every session by, or whose retry failed and stopped the
+	// sessions it failed in; dsdTried and dsdTries are the set whose
+	// reconciliation failed and how many of its attempts did; and dsdFails is
+	// the refreshes in a row that panicked outside their reconciliation (B728
+	// B9 rounds 18 and 19: reconcileOrStop, refreshFailedLocked). dsdFenceOnce
+	// says once that the state's writes are fenced, and probeState is the
+	// silent probe's bookkeeping (ProbeDSD).
 	dsd          atomic.Pointer[dsdSet]
 	dsdPub       atomic.Pointer[dsdPublished]
 	dsdMu        sync.Mutex
 	dsdRead      time.Time
+	dsdJudged    *dsdSet
+	dsdTried     *dsdSet
+	dsdTries     int
+	dsdFails     int
 	dsdFenceOnce sync.Once
 	probeState   dsdProbe
+	// choiceTurn is the writes' turn: one choice write at a time (B728 B9,
+	// ChooseDSD); pending is the write between its reading and its settle, nil
+	// while none is; landedChoice is the state a choice's write left in the
+	// state's file, landed and not known to be durable, which every refresh
+	// holds the set to until the next start (setOver), nil while there is none.
+	choiceTurn   chan struct{}
+	pending      atomic.Pointer[pendingChoice]
+	landedChoice atomic.Pointer[dsdstate.State]
 
 	policyMu   sync.Mutex
 	policy     PlayerPolicy
@@ -408,7 +559,8 @@ func New(cfg Config) (*Backend, error) {
 	if cfg.Authorization == nil {
 		reason = string(ReasonDSD)
 	}
-	b := &Backend{policy: PlayerPolicy{BootID: fmt.Sprintf("%x", randomBoot()), Generation: 1, Reason: reason}, cfg: cfg, log: cfg.Log, sessions: map[engine.SessionID]*session{}, took: map[packKey]format.ALSAFormat{}, zero: zero, wzero: zero}
+	b := &Backend{policy: PlayerPolicy{BootID: fmt.Sprintf("%x", randomBoot()), Generation: 1, Reason: reason}, cfg: cfg, log: cfg.Log, sessions: map[engine.SessionID]*session{}, took: map[packKey]format.ALSAFormat{}, zero: zero, wzero: zero,
+		choiceTurn: make(chan struct{}, 1)}
 	if cfg.DSD != nil {
 		// Its read side the state's warnings of the bridge's already, a state
 		// that did not read among them, before the first refresh reads the box.
@@ -416,6 +568,8 @@ func New(cfg Config) (*Backend, error) {
 		set.gen = 1
 		b.dsd.Store(set)
 		b.dsdPub.Store(&dsdPublished{set: set, view: view})
+		// No session yet, so nothing for a reconciliation to judge by it.
+		b.dsdJudged = set
 	}
 	return b, nil
 }
@@ -425,7 +579,8 @@ type Stats struct {
 	// Goroutines is the goroutines the backend started that have not
 	// returned: each session's producer, reporter and openers, a release's
 	// teardown, a call waiting on its sink for its caller, the writes of the
-	// player's DSD state, and the silent probe's and the refresh's that the
+	// player's DSD state (a choice's, made on its caller's goroutine, counted
+	// as one: dsdWrite), and the silent probe's and the refresh's that the
 	// supervisor asks for (RequestProbeDSD, RequestRefreshDSD). A device the
 	// kernel holds in a call that never returns keeps the sink's writer in
 	// it, and with it the teardown that closes that sink and any call that
@@ -515,9 +670,30 @@ func (b *Backend) spawnWrite(what string, f func()) bool {
 	return true
 }
 
+// dsdWrite runs f, a write of the player's DSD state made on its caller's
+// goroutine (a choice's, ChooseDSD, B728 B9), counted as a write spawnWrite
+// starts is (DSDWrites, Running, Wait) until it returns, a panic's way out
+// included, so serve's player's stop keeps its share of the data directory's
+// lock until it ends and says so as it says a write left running. It reports
+// whether f ran: once the writes are closed (CloseDSDWrites) it runs nothing,
+// said once as spawnWrite says it.
+func (b *Backend) dsdWrite(what string, f func()) bool {
+	b.gmu.Lock()
+	if b.wclosed {
+		b.gmu.Unlock()
+		b.wrefused.Do(func() { b.dsdLog().Warn(dsdWriteRefused, "what", what) })
+		return false
+	}
+	b.startLocked(true)
+	b.gmu.Unlock()
+	b.counted(true, f)
+	return true
+}
+
 // Running is how many of the goroutines the backend started have not
 // returned, and how many of those are writes of the player's DSD state or may
-// start one (spawnWrite), from one reading: serve's player's stop says what
+// start one (spawnWrite), a choice's write on its caller's goroutine counted
+// among both (dsdWrite), from one reading: serve's player's stop says what
 // each kind left past its bound (B762 round 2).
 func (b *Backend) Running() (goroutines, writes int) {
 	b.gmu.Lock()

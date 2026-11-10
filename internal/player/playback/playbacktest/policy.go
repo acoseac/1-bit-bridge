@@ -203,6 +203,12 @@ type MemStore struct {
 	changed chan struct{}
 	// fail, when set, is what every Update answers, changing nothing.
 	fail error
+	// land, when set, is what the next Update answers once its change is
+	// made, as dsdstate.Store answers a write whose rename landed and whose
+	// barrier failed: the change is not held (landed keeps it, as the file
+	// would), and every later Update is fenced (dsdstate.ErrLandedNotHeld).
+	land   error
+	landed *dsdstate.State
 }
 
 // NewMemStore holds st.
@@ -222,14 +228,53 @@ func (m *MemStore) Update(fn func(*dsdstate.State) error) error {
 	if m.fail != nil {
 		return m.fail
 	}
+	if m.landed != nil {
+		return dsdstate.ErrLandedNotHeld
+	}
 	next := m.state.Clone()
 	if err := fn(&next); err != nil {
 		return err
+	}
+	if err := m.land; err != nil {
+		m.land, m.landed = nil, &next
+		return fmt.Errorf("playbacktest: the state's write failed: %w", err)
 	}
 	m.state = next
 	m.writes++
 	m.changedLocked()
 	return nil
+}
+
+// Land makes the next Update answer err, which wraps atomicwrite.ErrLanded,
+// once its change is made, as a write whose rename landed and whose barrier
+// failed: the store keeps the state as it was, the change is what the file
+// holds (LandedState), and every Update after it is fenced (Landed).
+func (m *MemStore) Land(err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.land = err
+}
+
+// LandedState is the state a landed write left in the file, false while
+// none did.
+func (m *MemStore) LandedState() (dsdstate.State, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.landed == nil {
+		return dsdstate.State{}, false
+	}
+	return m.landed.Clone(), true
+}
+
+// Landed is the fence a landed write left, as dsdstate.Store.Landed says it:
+// dsdstate.ErrLandedNotHeld once a write landed, nil while none did.
+func (m *MemStore) Landed() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.landed == nil {
+		return nil
+	}
+	return dsdstate.ErrLandedNotHeld
 }
 
 // Set replaces the state, as another writer's write does.

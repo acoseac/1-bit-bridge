@@ -79,6 +79,26 @@ type occ struct {
 	leading    bool
 	stale      bool
 	observed   bool
+	// handedOff, under the session's lock, is a stale occurrence whose
+	// hand-off a reconciliation asked of the engine and saw return
+	// (reconcileDSD): a reconciliation tried once more asks only the hand-offs
+	// that did not (B728 B9 round 19).
+	handedOff bool
+	// refusedUnder is the set whose plan refused the occurrence's DSD at its
+	// open, a rate the policy decides (B728 B9 round 2): the step that ends
+	// its open asks again where a choice's write would lift the refusal, or
+	// a set published since does (settleOpen). nil for any other refusal.
+	refusedUnder *dsdSet
+	// claimed, under the session's lock, is an open of the occurrence's own
+	// sink under way, from the step that found no choice's write pending
+	// that plays its rate otherwise (the producer's transition, a resume
+	// between transports) to the end of its sink's activation, or of an open
+	// that failed (B728 B9 round 2, point 1): a write's classification counts
+	// it as reaching its sink (judgeDSDLocked). A session's first occurrence
+	// is claimed in its Start from its sink's adoption to the end of its
+	// activation; with its output adopted, a claimed occurrence's revocation
+	// records its fault in the reconciliation's step (reconcileDSD, round 6).
+	claimed bool
 	conversion
 	reservation *engine.OccurrenceReservation
 	id          engine.OccurrenceID

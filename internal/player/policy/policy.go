@@ -113,6 +113,14 @@ type Inputs struct {
 	Mixer Mixer
 }
 
+// WithState is in over st, every other input as it is: one reading of the box
+// computed against more than one state (B728 B9: a choice write's set beside
+// the one the state gives without it).
+func (in Inputs) WithState(st dsdstate.State) Inputs {
+	in.State = st
+	return in
+}
+
 // Tuple is a native or DoP plan: the transport, the format, the rate and
 // the timing, what reconciliation compares (the design's section 3.5).
 type Tuple struct {

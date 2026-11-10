@@ -39,6 +39,11 @@ const (
 	TimeSeekUnknown     = "unknown"
 )
 
+// BridgeOutputID is the id of the element of the player whose UUID is uuid:
+// the one GET /v1/outputs lists it under, and PUT /v1/outputs/{id}/dsd names
+// it by (B728 B9).
+func BridgeOutputID(uuid string) string { return bridgeOutputIDPrefix + uuid }
+
 // TimeSeekWords is every word bridge.timeSeek sends or names, in
 // PROTOCOL.md's order.
 func TimeSeekWords() []string {
@@ -204,7 +209,7 @@ func (s *Server) bridgeElement(ctx context.Context) (OutputInfo, bool) {
 		b.TimeSeek = &OutputTimeSeek{PCM: f.TimeSeekPCM, DSD: f.TimeSeekDSD}
 	}
 	return OutputInfo{
-		ID:        bridgeOutputIDPrefix + f.UUID,
+		ID:        BridgeOutputID(f.UUID),
 		Kind:      OutputKindBridge,
 		Player:    OutputPlayer{Software: bridgePlayerSoftware, Version: version.ServerVersion},
 		PathRules: []OutputPathRule{},

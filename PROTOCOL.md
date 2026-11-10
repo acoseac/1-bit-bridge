@@ -1085,8 +1085,9 @@ for a DAC the database does not know. A caveat says what the bridge cannot see:
 `choice` is the choice that applies: `mode`, as `dsdMode` says it; `maxBitRate`,
 the rate above which native and DoP are not played (0 for no cap, else 2822400,
 5644800 or 11289600); `revision`, the revision of the DAC's own choice, 0 while it
-has none and `mode` is the bridge's default; and `dopConfirmed`, whether the DAC's
-DoP confirmation counts on its current firmware.
+has none and `mode` is the bridge's default, which a write of the choice sends back
+as its `baseRevision` (`PUT /v1/outputs/{id}/dsd`, below); and `dopConfirmed`,
+whether the DAC's DoP confirmation counts on its current firmware.
 
 `options` are four, one each for `native`, `dop`, `convert` and `off`, in that
 order, each with its `mode` and `offered`, whether the DAC offers the mode at some
@@ -1147,7 +1148,7 @@ The current token vocabularies are exact and case-sensitive:
 | `dsdPlayback.tuples[].evidence` | `reported`, `driver_accepted`, `streaming_observed`, `listener_confirmed` |
 | `dsdPlayback.converted[].dither` | `none`, `tpdf` |
 | `dsdPlayback.converted[].filter` | `dsdconv-1` |
-| `dsdPlayback.refused[].reason` | `dsd_off_by_choice`, `native_not_offered`, `dop_not_offered`, `dop_gain_not_unity`, `dop_gain_unverifiable`, `dop_confirmation_required`, `dsd_rate_above_choice`, `first_use_pending`, `listener_rejected`, `conversion_not_offered`, `dsd_state_unreadable`, `dsd_dac_unread` |
+| `dsdPlayback.refused[].reason` | `dsd_off_by_choice`, `native_not_offered`, `dop_not_offered`, `dop_gain_not_unity`, `dop_gain_unverifiable`, `dop_confirmation_required`, `dsd_rate_above_choice`, `first_use_pending`, `listener_rejected`, `conversion_not_offered`, `dsd_state_unreadable`, `dsd_choice_uncertain`, `dsd_dac_unread` |
 | `dsdPlayback.warnings[].code` | `migration_record_refused`, `migration_record_missing`, `migrated_off`, `state_unreadable` |
 | `dsdPlayback.warnings[].reason` | `stale_version`, `identity_mismatch`, `hash_mismatch`, `unreadable` |
 | `playback.state` | `open`, `released`, `revoked` |
@@ -1202,7 +1203,9 @@ the lowest rate with (`internal/player/policy/policy.go`,
 `dop_not_offered`, `dop_gain_not_unity`, `dop_gain_unverifiable`,
 `dop_confirmation_required`, `dsd_rate_above_choice`, `first_use_pending`,
 `listener_rejected`, `conversion_not_offered`, `dsd_state_unreadable`,
-`rate_not_supported`, `dsd_not_in_this_release` (an earlier bridge's word for a rate the
+`dsd_choice_uncertain` (a choice's write reached the state's file and is not known to
+be durable: **`PUT /v1/outputs/{id}/dsd`**, below), `rate_not_supported`,
+`dsd_not_in_this_release` (an earlier bridge's word for a rate the
 policy would convert to PCM, which the player now converts), or `dsd_dac_unread` (no set could be
 computed: the bridge has no fresh reading of the bound DAC). An engineering harness's
 backend sends its approval's words instead. The field has always been free text, so a
@@ -1250,6 +1253,68 @@ A change of the set publishes it at the next `policyGeneration` and is reconcile
 The bridge independently inspects content at its open and refuses invalid DSF/DFF, or a rate the set does not play, before hardware writes. An edge between occurrences of different transports (native DSD, DoP, PCM) is a drain, a close and a reopen, an honest gap; the owner-approved transition reports of the engineering harness are no part of the player since the DSD cutover. Same-carrier PCM and DoP never join: the device is closed and reopened between them. The outgoing occurrence follows its own release.
 
 **iOS I1–I3 companion PRs remain pending:** stored Track migration, QueueItem propagation, and checking the entire insertion window before DeleteAll/Insert belong to iOS. Bridge Insert cannot inspect a controller's future window. These bridge changes do not claim zero controller mutations or completion of that cross-repository gate; mirror this contract and its fixtures in those PRs.
+
+### `PUT /v1/outputs/{id}/dsd` (additive; `bridgeDSDChoice`)
+
+Gate on the **`bridgeDSDChoice`** feature flag. It sorts between `booklets` and `bridgeOutput`, and it is present exactly while the player's gate holds (`bridgeOutput`, under `GET /v1/outputs` above) on a bridge whose player takes a choice. The route writes the DSD choice of the DAC the player's DSD set was computed for, the one the player's element publishes as `dsdDAC`. A public bridge never serves it: a request there gets the plain `404` of a path no route serves. Every other bridge serves it, and answers `404` `local_outputs_not_supported` while neither of `GET /v1/outputs`' gates holds, and `404` `output_not_found` for an `{id}` that is not the `id` of the player's element now, which every `{id}` is while the player's gate is shut. The route is bearer-authenticated and draws from the write bucket (**Write rate limit**, below). `ProtocolVersion` stays `1`.
+
+`{id}` is the player's element's `id`, `bridge:` and its UUID. The body is one JSON object of at most 4 KiB, read whole before it is parsed:
+
+```json
+{
+  "dacKey": "d1-0123456789abcdef",
+  "baseRevision": 3,
+  "mode": "native",
+  "maxBitRate": 5644800,
+  "confirmDoP": false,
+  "firstUseAcknowledged": true,
+  "interrupt": false
+}
+```
+
+| Member | Required | Value |
+|---|---|---|
+| `dacKey` | yes | `dsdDAC.dacKey` as `GET /v1/outputs` published it |
+| `baseRevision` | yes | `dsdDAC.choice.revision` as `GET /v1/outputs` published it: 0 for a DAC with no choice of its own, and while the player's DSD state does not read |
+| `mode` | yes | `auto`, `native`, `dop`, `convert` or `off` |
+| `maxBitRate` | no | the rate above which native and DoP are not played: 0 (the default, no cap), 2822400, 5644800 or 11289600 |
+| `confirmDoP` | no | `true` confirms that the DAC decodes DoP; `false` by default |
+| `firstUseAcknowledged` | no | `true` acknowledges the first use of what the write plays; `false` by default |
+| `interrupt` | no | `true` lets the write interrupt what the player plays; `false` by default |
+
+The checks, in this order, each answered with its word and changing nothing:
+
+1. The body is that object: no other member, every member of its type, the required ones present, a mode and a cap the table names (`400` `bad_request`). `null` is no member's value: an optional member is left out, never sent as `null`. A body past its bound is refused before it is parsed.
+2. The player has a fresh reading of a bound DAC now (`409` `dac_unavailable`).
+3. `dacKey` is that DAC's key as `GET /v1/outputs` publishes it now (`409` `dac_changed`): a key of another model, one published before another DAC took the binding's place, or one of another bridge's.
+
+While an earlier write's sync failed (`persist_uncertain`, below) every write is answered `500` `persist_uncertain` here, after the first three checks and before the rest, none of which a write that cannot be made is put to.
+
+4. `baseRevision` is the DAC's choice's revision as `GET /v1/outputs` publishes it (`409` `stale`). The body carries `dsdDAC` as the player publishes it once any write in flight before this one has been published, so its revision is the one to write from, and no later write's.
+5. The DAC offers the mode at some rate, whatever the cap (`409` `mode_not_offered`): `native`, `dop` and `convert` where their option is offered (`dsdDAC.options`); `auto` and `off` always.
+6. `dop` carries `confirmDoP` where DoP's option needs the user's confirmation, at a rate the DAC list neither heard nor states DoP at and that the DAC's confirmation does not cover on its current firmware (`409` `dop_confirmation_required`).
+7. `native` or `dop` carries `firstUseAcknowledged` unless that transport's first use is acknowledged at every rate on the DAC's current firmware (`firstUse[].state` not `pending`, no `bitRates`) and no listener's latest answer there rejects the transport at any rate (`409` `first_use_unacknowledged`). A rejection re-arms first use, so choosing a rejected transport again always carries it.
+8. The write interrupts nothing the player plays, or carries `interrupt` (`409` `would_interrupt`), judged against the set the player publishes: where the player's reading of the DAC for the write gives another set (a reading that failed, or the DAC's own change), the player publishes that reading first, as any change of the set is published, and reads again. It interrupts where, against the set the write would publish, the player would stop an occurrence heard, one whose DSD reached the DAC, a session's first DSD occurrence once its content has opened, or an occurrence of a session being released; or would hand off again an occurrence whose frames are already in a sink, or any while its engine hands nothing off again. A write that changes only what plays at a rate nothing plays at (a cap above the rate heard, a mode no occurrence uses) interrupts nothing, and neither does one that changes nothing that plays. A change of the set that is no write (a gain stage leaving unity, another DAC in the binding's place, the state no longer reading) never asks.
+
+Then the bridge writes the player's DSD state, and answers only once it is durable: the file replaced and its directory synced. It makes the silent probe due, which the player runs once no session holds the DAC, never inside the request; it publishes the set the state gives and reconciles each occurrence as any change of the set is reconciled (above); and it answers. A written choice always moves `choice.revision`; `policyGeneration` moves only when what plays changes (above), so a write that changes the choice and nothing that plays is published under the same generation. A write that fails answers:
+
+| Status | `error` | The state |
+|---|---|---|
+| `500` | `persist_failed` | the write failed, or could not begin within the request's time, before it replaced the state's file; or the player's DSD state or its reading of the DAC changed under the write each time it was read, too often for it to be made: nothing changed. A client need not tell these apart: either way the choice is as it was, and it may write again from the revision `GET /v1/outputs` publishes, which is not behind (never `stale`); the bridge's log says which |
+| `500` | `persist_uncertain` | the write replaced the file and its sync then failed: the file holds the new choice, which is not known to be durable, and the player holds the old one; until the bridge next starts the player plays a rate only where the two play it the same way, refusing the rest as `dsd_choice_uncertain`, and every later write of the player's DSD state is refused `persist_uncertain` too, changing nothing. Nothing is rolled back |
+| `409` | `state_unreadable` | the state's file could not be read or set aside and stays where it is, refusing every rate; nothing is written over it until it is moved |
+
+A stop or a crash before the state's file is replaced leaves the choice as it was; one after it leaves the new choice, which the next start reads and publishes, answered or not. A client that got no answer reads `GET /v1/outputs` again.
+
+**Response** (`200`): `{"dsdDAC": {…}, "dsdPlayback": {…}}`, the player's `dsdDAC` and `dsdPlayback` as it published them once the write had been published, member for member what `GET /v1/outputs` sends in the player's element until something else changes (their members are in the table above): the effective choice, refusals included where the mode does not play a rate (native at a rate the DAC offers no native format at).
+
+What a written choice records:
+
+- The DAC's choice: its `mode` and `maxBitRate`, its `revision` one more than its own, never one it had before, set by the app.
+- `confirmDoP`, on a `dop` or `auto` write, records the DAC's DoP confirmation on its current firmware, which every later write keeps, a change of mode included. A DAC whose DAC list entry heard or states DoP at every rate DoP is offered at needs none; on `native`, `convert` and `off` it records nothing.
+- `firstUseAcknowledged` records an acknowledgement of every rate, on the DAC's current firmware, of each transport the write plays once acknowledged: an explicit `native` or `dop` its own transport; `auto` each transport its set would play at some rate once both are acknowledged (native first, DoP where the DAC list claims it or a confirmation counts, the write's own included, under the cap, every listener's rejection kept); `convert` and `off` none, so a client may send it there. It replaces an acknowledgement of some rates (a migrated owner's approval), one of another firmware, and, for an explicit `native` or `dop`, one a listener's rejection re-armed; it keeps one of every rate as it is, its observation with it. An explicit `native` or `dop` that carries it clears that transport's rejections on the current firmware; `auto` clears none.
+- A DAC whose firmware does not read takes the choice and records neither consent.
+- Every write clears the DAC's warnings and `state_unreadable`. `migrated_off` stays while the bridge's default applies to a DAC with no choice of its own.
 
 ### `GET /v1/outputs/{id}/reading` (additive; `outputReading`)
 
@@ -2412,16 +2477,23 @@ Errors are JSON, with the exceptions listed under the table:
 |    404 | `pairing_code_not_supported` | Bridge doesn't issue pairing-link codes (`POST /v1/pairing/redeem`) |
 |    404 | `events_not_supported`   | `GET /v1/events` on a demo bridge, or either event stream with no event broker running (`serve` always starts one); iOS falls back to polling |
 |    404 | `smart_playlists_not_supported` | `smartPlaylists.enabled` is off (no `smartPlaylists` flag) — no `/v1/smart-playlists` |
-|    404 | `local_outputs_not_supported` | `GET /v1/outputs` when `localOutputs` is absent (neither the MPD gate, `output.mpd` resolving on on a Linux host, nor the bridge's own player's gate holds), or `GET /v1/outputs/{id}/reading` when `outputReading` is absent (`output.mpd` resolves off, or this host is not Linux) |
-|    404 | `output_not_found`       | `GET /v1/outputs/{id}/reading`: `{id}` names no output of this bridge now, or names the bridge's own player (kind `bridge`) |
+|    404 | `local_outputs_not_supported` | `GET /v1/outputs` and `PUT /v1/outputs/{id}/dsd` when `localOutputs` is absent (neither the MPD gate, `output.mpd` resolving on on a Linux host, nor the bridge's own player's gate holds), or `GET /v1/outputs/{id}/reading` when `outputReading` is absent (`output.mpd` resolves off, or this host is not Linux) |
+|    404 | `output_not_found`       | `GET /v1/outputs/{id}/reading`: `{id}` names no output of this bridge now, or names the bridge's own player (kind `bridge`); `PUT /v1/outputs/{id}/dsd`: `{id}` is not the bridge's own player's element now |
 |    404 | `playlist_files_not_supported` | No playlist-file index (no `playlistFiles` flag) — no `GET /v1/playlist-files`; `serve` wires it on every bridge |
 |    404 | `favorites_not_supported` | No favorites store, as on a demo bridge (no `favorites` flag) — no `/v1/favorites` |
 |    404 | `playlist_backup_not_supported` | No playlist store, as on a demo bridge (no `playlistBackup` flag) — no `/v1/playlists` route |
 |    404 | `playback_history_not_supported` | No history store, as on a demo bridge (no `playbackHistory` flag) — no `POST /v1/history/batch` or `GET /v1/history` |
 |    404 | `atlas_not_supported`    | `atlas.enabled` is off (no `atlasEnrichment` flag) — no `POST /v1/atlas-ingest` or `GET /v1/atlas-meta/*` |
 |    404 | `harvest_not_supported`  | `POST /v1/atlas-harvest/credential` on a bridge that takes no harvest credential (harvest needs both `atlas.enabled` and `atlas.harvestEnabled`); the `DELETE` answers `204` there |
-|    409 | `stale`                  | PUT `/v1/playlists/{id}` (no `baseLastModifiedAt`) or a whole-document PUT `/v1/favorites` (a bridge without `favoritesRevisions`) carried a `lastModifiedAt` strictly older than the stored copy, or a revisioned PUT `/v1/favorites` carried a `baseRevision` that is not the stored revision with a different body; body includes the full server copy when the bridge can re-read it (a tombstoned playlist has none). A playlist client accepts this and does not replace the row |
+|    409 | `stale`                  | PUT `/v1/playlists/{id}` (no `baseLastModifiedAt`) or a whole-document PUT `/v1/favorites` (a bridge without `favoritesRevisions`) carried a `lastModifiedAt` strictly older than the stored copy, or a revisioned PUT `/v1/favorites` carried a `baseRevision` that is not the stored revision with a different body; body includes the full server copy when the bridge can re-read it (a tombstoned playlist has none). A playlist client accepts this and does not replace the row. `PUT /v1/outputs/{id}/dsd` carried a `baseRevision` that is not the DAC's choice's revision; the body carries the current `dsdDAC` |
 |    409 | `base_mismatch`          | PUT `/v1/playlists/{id}` carried a `baseLastModifiedAt` that is not the stored stamp, and the body differs. An identical body is `200` and writes nothing. The bridge did not write. `server` is the stored playlist, possibly a tombstoned row; `server.deleted` is `true` then. Distinct from `stale` by the `error` string |
+|    409 | `dac_unavailable`        | `PUT /v1/outputs/{id}/dsd`: the player has no fresh reading of a bound DAC now |
+|    409 | `dac_changed`            | `PUT /v1/outputs/{id}/dsd`: `dacKey` is not the bound DAC's key as `GET /v1/outputs` publishes it now |
+|    409 | `mode_not_offered`       | `PUT /v1/outputs/{id}/dsd`: the DAC offers the mode at no rate |
+|    409 | `dop_confirmation_required` | `PUT /v1/outputs/{id}/dsd`: `dop` at a rate that needs the user's confirmation, without `confirmDoP` |
+|    409 | `first_use_unacknowledged` | `PUT /v1/outputs/{id}/dsd`: `native` or `dop` whose first use is not acknowledged at every rate on the DAC's firmware, or which a listener rejected there, without `firstUseAcknowledged` |
+|    409 | `would_interrupt`        | `PUT /v1/outputs/{id}/dsd`: the write would stop or hand off again what the player plays, without `interrupt` |
+|    409 | `state_unreadable`       | `PUT /v1/outputs/{id}/dsd`: the player's DSD state file could not be read or set aside, and nothing is written over it until it is moved |
 |    410 | `pairing_code_invalid`   | Pairing-link code unknown, already redeemed or expired, or its token revoked or expired since |
 |    410 | `variant_stale`          | `?variant=`: the source's mtime (beyond 2 s) or size changed since the rendition was made |
 |    410 | `variant_missing_on_disk` | `?variant=`: the rendition's row exists but its file is gone, is not a regular file, or is still arriving |
@@ -2433,7 +2505,8 @@ Errors are JSON, with the exceptions listed under the table:
 |    410 | `lyrics_stale`           | `GET /v1/lyrics`: the lyrics source changed since extraction (a network-tier document never answers it) |
 |    429 | `rate_limited`           | Per-IP pairing rate-limit (a join request or a code redemption), or a per-token `/v1/manifest`, write or search rate-limit tripped |
 |    500 | `internal`               | Server-side failure                               |
-|    500 | `persist_failed`         | The bridge could not write a harvest credential change (`POST /v1/atlas-harvest/credential` or `DELETE /v1/atlas-harvest/credential`) or the token a pairing code redeems (`POST /v1/pairing/redeem`) |
+|    500 | `persist_failed`         | The bridge could not write a harvest credential change (`POST /v1/atlas-harvest/credential` or `DELETE /v1/atlas-harvest/credential`), the token a pairing code redeems (`POST /v1/pairing/redeem`), or a DSD choice (`PUT /v1/outputs/{id}/dsd`: the write failed before it replaced the state's file, could not begin within the request's time, or found the state or the DAC changed under it each time it was read; nothing changed) |
+|    500 | `persist_uncertain`      | `PUT /v1/outputs/{id}/dsd`: the write replaced the player's DSD state file and its sync failed, so it is not known to be durable; and every write of that state after it until the bridge next starts, which changes nothing |
 |    502 | `upnp_bad_res_url`       | `/v1/read` / `/v1/download` of a track proxied from an upstream UPnP server whose `<res>` URL could not be built |
 |    502 | `upnp_upstream_unreachable` | `/v1/read` / `/v1/download` of a UPnP-proxied track: the request to the upstream server failed before it answered |
 |    503 | `scan_in_progress`       | `/v1/manifest`, the artwork and artist-image routes or a cover route on a server built without its manifest provider, artwork cache or config; `serve` wires all three before it listens, so a running bridge never sends it, mid-scan included |
@@ -2465,7 +2538,7 @@ Operators can disable the limiter by setting `limits.manifest.requestsPerMinute:
 
 Every **mutating** `/v1` route draws from a second per-token bucket, sized via `limits.write.requestsPerMinute` (default `120`) and `limits.write.burst` (default `300`). The routes covered are:
 
-`POST /v1/upscale` · `POST /v1/upscale/batch` · `DELETE /v1/upscale/batches/{id}` · `DELETE /v1/upscale/variants` · `PUT /v1/playlists/{id}` · `DELETE /v1/playlists/{id}` · `PUT /v1/favorites` · `POST /v1/history/batch` · `POST /v1/atlas-ingest` · `POST /v1/atlas-harvest/credential` · `DELETE /v1/atlas-harvest/credential`
+`POST /v1/upscale` · `POST /v1/upscale/batch` · `DELETE /v1/upscale/batches/{id}` · `DELETE /v1/upscale/variants` · `PUT /v1/playlists/{id}` · `DELETE /v1/playlists/{id}` · `PUT /v1/favorites` · `POST /v1/history/batch` · `POST /v1/atlas-ingest` · `POST /v1/atlas-harvest/credential` · `DELETE /v1/atlas-harvest/credential` · `PUT /v1/outputs/{id}/dsd`
 
 Pairing routes are excluded: they are unauthenticated (no token to key a bucket on) and carry their own per-IP limiter. **Read routes are deliberately unlimited** — the artwork sweep legitimately issues hundreds of requests in a burst, and a bucket there would break it.
 

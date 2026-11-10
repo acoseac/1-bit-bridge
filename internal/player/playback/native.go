@@ -268,7 +268,7 @@ func (s *session) activateOutput(ctx context.Context, o *occ, out *output) error
 			// them turns a converted occurrence into another kind. Its set and
 			// plan are read in checkDSDActivation alone, under s.mu: read here
 			// they raced a reconciliation's Keep (round 2).
-			if err := s.checkDSDActivation(o); err != nil {
+			if err := s.checkDSDActivation(ctx, o); err != nil {
 				return err
 			}
 		}
@@ -278,10 +278,19 @@ func (s *session) activateOutput(ctx context.Context, o *occ, out *output) error
 	}
 	s.mu.Lock()
 	fenced := s.releasing || s.nativeRevoked || o.dropped || s.cur != out
+	// A successor dropped while its sink was adopted and its activation began
+	// (its replacement, an edit's, a cut) is taken back from its sink
+	// unwritten, its decoder closed, and the session goes on (errReplanned,
+	// unadopt), never a fault (B728 B9 round 3, point 1); a session being
+	// released or whose DSD was revoked ends at the fence.
+	replanned := o.dropped && !o.leading && !s.releasing && !s.nativeRevoked
 	paused := s.paused
 	s.mu.Unlock()
 	if fenced {
 		out.native.Revoke()
+		if replanned {
+			return errReplanned
+		}
 		return errors.New("native activation fenced")
 	}
 	if o.permission != nil {
@@ -292,8 +301,9 @@ func (s *session) activateOutput(ctx context.Context, o *occ, out *output) error
 	if out.dsdAdmitted() != nil {
 		// Every activation reads the effective policy again (B728 B7): an
 		// occurrence its change did not keep is refused, never played another
-		// way.
-		if err := s.checkDSDActivation(o); err != nil {
+		// way; one a choice's write pending would change waits for it first
+		// (B728 B9 round 2).
+		if err := s.checkDSDActivation(ctx, o); err != nil {
 			out.native.Revoke()
 			return err
 		}
@@ -435,13 +445,24 @@ func (b *Backend) EscalateNative(r engine.ReleaseRequest) {
 // prepared converted occurrence is dropped with the native ones, and a PCM
 // sink holding a converted occurrence's frames that it has not played is
 // dropped at once, as a native sink is released, the session faulting; a PCM
-// sink holds no such frames while it plays PCM alone, and plays on.
+// sink holds no such frames while it plays PCM alone, and plays on. The fault
+// is the session's one: a fault there already, a reconciliation's own record
+// of this revocation among them (B728 B9 round 6), is never replaced. What it
+// drops was judged by the reconciliation that revoked it: what waited for that
+// verdict (unjudgedLocked, round 17) asks again. Its locked section is held
+// through a lockHold (round 19): a panic in it lets the session's lock go, so
+// the reconciliation that called it, which contains the panic, and the stop
+// that follows that reconciliation's retry (stopDSD), which never calls Revoke
+// again, find the lock free.
 func (b *Backend) Revoke(r engine.RevokeInput) {
 	s := b.known(r.Session)
 	if s == nil {
 		return
 	}
-	s.mu.Lock()
+	l := s.hold()
+	defer l.release()
+	l.lock()
+	b.revoking(r.Session)
 	s.nativeRevoked = true
 	if s.permission != nil {
 		s.permission.revoked.Store(true)
@@ -473,7 +494,9 @@ func (b *Backend) Revoke(r engine.RevokeInput) {
 	if active && s.fault == nil {
 		s.fault = &engine.Fault{Reason: "native_revoked", Detail: r.Reason}
 	}
-	s.mu.Unlock()
+	close(s.judged)
+	s.judged = make(chan struct{})
+	l.unlock()
 	for _, sink := range sinks {
 		sink.Revoke()
 		sink.BeginRelease(alsapcm.Immediate)

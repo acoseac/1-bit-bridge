@@ -1978,8 +1978,8 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	//     upscale gate says.
 	//
 	// Alpha-sort stays correct by construction: each conditional
-	// appends in lex order. Capacity 40 covers the current maximum
-	// (atlasEnrichment + booklets + bridgeOutput + carPlayOptimize + deleteVariants +
+	// appends in lex order. Capacity 41 covers the current maximum
+	// (atlasEnrichment + booklets + bridgeDSDChoice + bridgeOutput + carPlayOptimize + deleteVariants +
 	// demoMode + diagnosticsSummary + dlnaArtwork + dlnaServer + dsdRender +
 	// dsdSilence +
 	// favorites + favoritesRevisions + firstIndexedAt + keyTempo + localOutputs +
@@ -1995,7 +1995,7 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	// count — until 2026-08-16; keep the list and the number in step when
 	// adding a flag, since the list is the only thing that makes the
 	// number checkable.
-	feats := make([]string, 0, 40)
+	feats := make([]string, 0, 41)
 	// `atlasEnrichment` advertises the rich-tier Atlas metadata surface
 	// (cfg.Atlas.Enabled): the bridge accepts POST /v1/atlas-ingest from the
 	// closed-source app and serves GET /v1/atlas-meta/{release,artist}/{mbid}.
@@ -2011,14 +2011,22 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	if s.bookletStore != nil && s.bookletDir != "" {
 		feats = append(feats, "booklets")
 	}
+	bridgeOn := s.bridgeOutputOn()
+	// `bridgeDSDChoice` advertises PUT /v1/outputs/{id}/dsd, the bound DAC's
+	// DSD choice for the bridge's own player (B728 B9): exactly while the
+	// player's gate holds and serve's player writes a choice (dsdChooser), on
+	// a bridge that serves the route, never a public one. Alpha-sorted
+	// between `booklets` and `bridgeOutput` (bo < bridgeD < bridgeO).
+	if bridgeOn && !cfg.IsPublic() && s.dsdChooser() != nil {
+		feats = append(feats, "bridgeDSDChoice")
+	}
 	// `bridgeOutput` advertises that GET /v1/outputs lists the bridge's own
 	// player, an element of kind bridge, whenever the player has an
 	// identity (B470 PR 5b): serve's boot decision that the player is
 	// enabled and serve holds its data directory's lock (bridgeOutputOn),
 	// which probes, dials and starts nothing. A client tells a bridge older
 	// than the element from one whose player has no identity yet by it.
-	// Alpha-sorted between `booklets` and `carPlayOptimize` (bo < br < c).
-	bridgeOn := s.bridgeOutputOn()
+	// Alpha-sorted between `bridgeDSDChoice` and `carPlayOptimize` (br < c).
 	if bridgeOn {
 		feats = append(feats, "bridgeOutput")
 	}

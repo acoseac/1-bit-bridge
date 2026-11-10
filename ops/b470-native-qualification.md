@@ -1,6 +1,6 @@
 # B470 native qualification — owner approval and provisional evidence
 
-QualificationVersion is **47**. All older evidence must be rerun for the harness, native included. The
+QualificationVersion is **60**. All older evidence must be rerun for the harness, native included. The
 harness never creates approval. Since B728 no production path reads an approval record or a candidate:
 the player plays DSD by its effective policy (`ops/plan-b728-dsd-capability-design.md`). This runbook
 is the engineering harness's. Its evidence binds `qualificationVersion`, whose guard covers the DSD byte
@@ -249,7 +249,7 @@ GOTOOLCHAIN=go1.27.3 go test -race -tags ts_omit_webclient,ts_omit_debugeventbus
 
 ## Round 3 evidence rules
 
-Historical round 3 used qualificationVersion 4; current version is **47**. A native contact's
+Historical round 3 used qualificationVersion 4; current version is **60**. A native contact's
 Contact.SchemaVersion remains **2**; a DoP contact's is **3**. All older
 contacts are invalid; repeat contact on this build. Required Device and Subdevice
 fields bind the configured PCM endpoint, including a nonzero subdevice, before
@@ -338,7 +338,7 @@ still resolve inside it). `dsdMode: native` or `auto` enables only approved nati
 
 The Go contracts are `qualification.Approval`, `ApprovalBody`, `ApprovedPolicy`, `Edge`
 and `Evidence` in `internal/player/qualification/approval.go`. JSON uses those exact
-exported field names. SchemaVersion=1, or 2 with Transitions and QualifiedOn (2d.2, below); QualificationVersion=47; Revision is the owner's
+exported field names. SchemaVersion=1, or 2 with Transitions and QualifiedOn (2d.2, below); QualificationVersion=60; Revision is the owner's
 revision; Identity is the observed VID/ProductID/manufacturer/product/bcdDevice,
 anchored controller/port, interface, device and subdevice. No serial or card number is
 persistent identity. Unchanged descriptors may retain approval after replug/restart;
@@ -386,7 +386,7 @@ At least one native fixture must finish with measured playback of that tuple.
 NativeTuple and NativeCompleted record that execution; PCM-only lists or completion
 cannot qualify it. LifecycleActions count observed native outcomes: pause/resume,
 release/reopen, navigation between native occurrences, Stop, and natural completion.
-An admitted command alone is insufficient. Version 47 invalidates older evidence.
+An admitted command alone is insufficient. Version 60 invalidates older evidence.
 List all candidate directional edges explicitly. No command generates that record.
 
 ```sh
@@ -425,7 +425,7 @@ or evidence names resolving to the state directory itself before any ancestor
 walk. Native monitoring remains fail-closed without a grace period. The overlay
 generator requires both integration suites before publishing its overlay.
 Guarded API, config, extractor, output-play and approval paths changed; rerun
-qualification with version 47. ExtractorVersion 30 retains the first parsed DFF
+qualification with version 60. ExtractorVersion 30 retains the first parsed DFF
 PROP's known format facts when a later PROP makes compression unsupported.
 
 Version 13 also covers the deterministic PCM trace capture test. It changes no
@@ -911,6 +911,19 @@ reads an owner's record of 35 to 43 (`LegacyVersion` stays 35). For owners: noth
 the harness runs or records changes, and nothing plays differently from version 41.
 Every earlier version's harness evidence is stale to the harness, as at every bump.
 
+Version 44 covers B728's B9, under the `internal/alsapcm/` prefix alone: the backend's
+tests over the fake kernel gain two, a write of the DAC's DSD choice beside what plays
+(`TestOnlyAWriteThatInterruptsNeedsTheGoAhead`) and an occurrence that starts beside a
+write in flight (`TestAnOccurrenceBesideAWriteIsNotRevoked`). No sink, packer, plan or
+harness reader changes, and no DSD byte a native or DoP occurrence sends: the write,
+`PUT /v1/outputs/{id}/dsd`, is the player's backend (`internal/player/playback`) and
+its route, outside the guard. B11 held 42 and B8 43 on their branches then, so the check
+against main alone would have reported 42 free; this took 44. The harness's approval
+admission reads a record of version 44 alone; the migration reads an owner's record
+of 35 to 44 (`LegacyVersion` stays 35). For owners: nothing the harness runs or
+records changes, and nothing plays differently from version 41. Every earlier
+version's harness evidence is stale to the harness, as at every bump.
+
 Version 45 covers B762's second round, under the `internal/alsapcm/` prefix alone:
 the backend's tests over the fake kernel gain one, a native open the kernel holds
 past the player's stop that writes nothing of the player's DSD state once it lands
@@ -918,11 +931,65 @@ past the player's stop that writes nothing of the player's DSD state once it lan
 harness reader changes, and no DSD byte a native or DoP occurrence sends: the fix is
 the player's backend closing the writes of the DSD state once serve's player has
 stopped its engine (`CloseDSDWrites`), in `internal/player/playback`, outside the
-guard. B9 holds 44 on its branch, so this takes 45. The harness's approval admission
+guard. B9's first round held 44 on its branch then, so this takes 45. The harness's approval admission
 reads a record of version 45 alone; the migration reads an owner's record of 35 to 45
 (`LegacyVersion` stays 35). For owners: nothing the harness runs or records changes,
 and nothing plays differently from version 41. Every earlier version's harness
 evidence is stale to the harness, as at every bump.
+
+Version 46 covers B728's B9 round 2, under the guarded `internal/player/playback/native.go`
+(a DSD occurrence's activation passes its context to its check, `checkDSDActivation`,
+which waits there, no lock held, for a pending choice's write that would change what the
+occurrence plays) and the `internal/alsapcm/` prefix (the backend's tests over the fake
+kernel gain twelve, in `playback_dsd_choice_round2_test.go`: an open, an activation, a
+resume, a join window and a gapless successor beside a write in flight, and a write beside
+a session being released, among them; and their rig its seams). No sink, packer, plan or
+harness reader changes, and no DSD byte a native or DoP occurrence sends. B762 took 45 on
+main while that round was under way, so it took 46; the merge of main into B9 touches no
+guarded path beyond these, so it stays 46. B9's round 3, unmerged like the rest, changes the
+same two and stays 46 too: the activation's fence in `native.go` takes a successor dropped
+while its sink was adopted back unwritten (`errReplanned`), where it faulted the session, and
+the backend's tests over the fake kernel gain two
+(`TestASuccessorDroppedAtItsActivationIsTakenBackUnwritten`,
+`TestAReleaseWhileASuccessorsAdoptionWaitsLetsGoOfTheDevice`), round 2's adoption cases now
+requiring the adoption's own wait; again no DSD byte a native or DoP occurrence sends changes.
+B9's round 4, unmerged too, changes the `internal/alsapcm/` prefix alone and stays 46: the
+native sink's activation answers its own fence as `ErrActivationFenced` (the sink revoked,
+released or paused before the activation ran, at its admission's end, or its prefill cut
+short by an Immediate release), which the backend tells from the device's answer, and one of
+a sink that failed before it is refused (`native activation refused`); the sink's tests gain
+one (`TestTheActivationsOwnFenceIsErrActivationFenced`) and the backend's over the fake
+kernel three (`TestASuccessorDroppedAtItsSinksAdmissionIsTakenBackUnwritten`,
+`TestASuccessorDroppedWhileItsSinkWritesItsPrefillIsTakenBack`,
+`TestAnActivationsFailureBesideADropIsJudgedByItsCause`), with their rig's holds; again no
+DSD byte a native or DoP occurrence sends changes. B9's round 5, unmerged too, stays 46, and
+did not change that prefix's tests alone, as this record said until round 6: outside the
+guard (`internal/player/playback/dsd_policy.go`) it changed when a session's sinks are fenced
+during a revocation. A reconciliation that revoked the session's DSD no longer revoked the
+sink an occurrence's activation was under way for, leaving every sink to `Backend.Revoke`,
+after the fault Revoke records; so a revocation during a held activation let the activation
+answer in the window between the reconciliation and Revoke and give its node the prefill,
+DSD silence at the rate the change had taken away, until Revoke stopped the sink (round 4 had
+sent that node nothing, and lost the fault instead when the activation was taken back before
+Revoke ran). Under the prefix its tests gain
+`TestARevocationWhileASuccessorsSinkActivatesKeepsItsFault` and two cases of a node whose
+close is unconfirmed beside a drop, the fake kernel `FailDrops`; no sink, packer, plan or
+harness reader changes. B9's round 6, unmerged too, stays 46: outside the guard, the
+reconciliation records the revocation's fault on the session in its own step, before the
+occurrence is marked stale, for an occurrence whose own sink's activation is under way (a
+successor's in the producer's transition, and now a session's first occurrence's in its
+Start, `session.go`), and revokes that native sink there as a re-plan's is, so the
+activation answers the sink's own fence and the node is given nothing, the fault standing in
+every order of the activation's answer, its take-back and Revoke; a converted occurrence's
+PCM sink records the fault the same way. The guarded `native.go` changes a comment alone
+(Revoke keeps a fault already there). Under the prefix the backend's tests over the fake
+kernel gain four (`playback_dsd_choice_round6_test.go`) and round 5's case requires the node
+given nothing; no sink, packer, plan or harness reader changes.
+The harness's approval admission reads a record
+of version 46 alone; the migration reads an owner's record of 35 to 46 (`LegacyVersion`
+stays 35). For owners: nothing the harness runs or records changes, and nothing plays
+differently from version 41. Every earlier version's harness evidence is stale to the
+harness, as at every bump.
 
 Version 47 covers B765, under the `internal/alsapcm/` prefix and the dsd-test files: a
 Stop inside a native track change's release, and (round 2) inside an activation or a
@@ -942,7 +1009,7 @@ WriteDSD once the life has ended. A seam, `nativeSeams.lifeEnded`, nil outside a
 parks the life's watcher in the tests. The harness's TrackChange wait
 (`nativeTrackRelease`) takes no context a Stop ends, so its answer is the sink's own
 outcome. The real-sink integration tests print the report's End and Error and the run's
-diagnostics on an exit they did not want. B9 holds 46 on its branch, so this takes 47.
+diagnostics on an exit they did not want. B9 held 46 on its branch, so this took 47.
 The harness's approval admission reads a record of version 47 alone; the migration reads
 an owner's record of 35 to 47 (`LegacyVersion` stays 35). For owners: Stop or quit
 pressed while a navigation's release plays its tail or drains, while the native sink
@@ -954,3 +1021,336 @@ Stop is pressed is reported, exit 1, where the run could end as a clean stop. No
 plays differently, and serve's player, whose sinks' lives end only after their release,
 is unaffected. Every earlier version's harness evidence is stale to the harness, as at
 every bump.
+
+Version 48 is the merge of main into B728's B9 (#1434): B9 held 46 on its branch (its
+rounds 2 to 6, above) and B765 took 47 on main, both under the guard, so the merge takes
+the higher plus one. The merged native sink keeps both. While the sink's life runs, an
+activation its own fence ends answers `ErrActivationFenced` (B9's round 4), the prefill an
+Immediate release cuts short among them, and an activation of a sink that failed before it,
+or beside one already asked, `native activation refused`; once that life has ended, each of
+them answers the life's cancellation (B765's `fenced`, `lifeCancelled`). The writer's
+classification of an activation's error is B765's, its `lifeCaused` reading B9's
+`ErrActivationFenced` where B765 had an unexported sentinel of the same words, and its reply
+to an activation it ends without running is B9's (the fence, or the failure that ended it)
+through B765's `fenced`. Serve's player, whose sinks' lives end only after their release,
+answers as each did before. B9's round 7, after the merge, stays 48: outside the guard, a
+session's Start fails naming a revocation the reconciliation recorded whether or not its first
+occurrence's activation succeeded first, launching nothing (`session.go`); and a converted
+occurrence's PCM sink, which admits its node only at its open, before its output is adopted,
+and at a resume's reopen, and writes nothing of its own, is not fenced, the producer that
+alone writes it stopping on the recorded fault. Under the prefix the backend's tests gain two
+(`playback_dsd_choice_round7_test.go`); no sink, packer, plan or harness reader changes. The
+harness's approval admission reads a record of version 48
+alone; the migration reads an owner's record of 35 to 48 (`LegacyVersion` stays 35). For
+owners: what 46 and 47 say, and nothing more plays differently. Every earlier version's
+harness evidence is stale to the harness, as at every bump.
+
+Version 49 is B728 B9's round 8: a failure the native sink recorded survives every answer
+its ended life gives. The writer and its release record a device's failure (a STATUS that
+returns EIO in a pause's watch) or a close at the writer's end that fails
+(`ErrReleaseUnconfirmed`); until 49, once the sink's life had ended, the writer's reply to
+a request it never ran and the refusals of Activate, Resume, ActivatePaused, Pause and
+WriteDSD answered that life's cancellation alone (`fenced`), and a request whose caller's
+context is that life, as the harness's is, answered its plain cancellation at once, before
+the release had recorded anything. Now `fenced` joins a recorded failure to the command's
+own refusal, the life running or ended, the life's cancellation answering only where none
+was recorded; and a request whose caller's context ends (`await`) answers that end with the
+recorded failure joined, waiting for the writer's end within the release's budget once the
+sink's life has ended too (`abandoned`). Under the prefix the sink's tests gain two cases
+and ten failure rows of the five commands (`sink_dsd_life_test.go`), and the backend's
+converted install-held case holds Revoke until its producer has stopped
+(`playback_dsd_choice_round7_test.go`, over the backend's new `Seams.ProducerStep`, outside
+the guard). No packer, plan, harness reader or record changes. The harness's approval
+admission reads a record of version 49 alone; the migration reads an owner's record of 35
+to 49 (`LegacyVersion` stays 35). For owners: a Stop pressed while the DAC fails a STATUS,
+or while its node's close fails, ends the run reporting that failure, exit 1, as the
+harness's own release reported it before, and a command answered beside that Stop (an
+activation, a pause or a resume) now carries the failure too; a clean Stop still ends the
+run as stopped, exit 0, and nothing plays differently.
+Serve's player, whose sinks' lives end only after their release, answers as before, but
+that a refusal of a sink that failed carries the failure beside its own words. Every
+earlier version's harness evidence is stale to the harness, as at every bump.
+
+Version 50 is B728 B9's round 9: a cleanup failure after an answer reaches the caller.
+Until 50 a request could be answered before its device's cleanup failed, and the failure
+then never reached the caller: an Activate whose own context had ended answered that end
+straight after its revocation; a reply the writer sent, the life's cancellation, a success
+or an independent error, reached its caller whatever the Immediate release then recorded; a
+caller off the life whose request the writer had not answered waited past the release's
+deadline for the writer's close; and a fence a reopened node met whose own close failed
+answered `ErrActivationFenced` beside the failure. 49's record said a command answered
+beside a Stop carries the failure: that held for a request the writer never ran and for a
+refusal once the writer had ended. Now, once the sink's life has ended, every answer of
+Activate, Resume and ActivatePaused carries the cleanup's verdict: its caller waits for the
+writer's end, within the release's shared budget (`settled`, `abandoned`, `endOfLife`); a
+clean cleanup keeps the answer, the life's typed cancellation among them, and a failed one
+answers the failure (`ErrReleaseUnconfirmed`), keeping a fault of the answer's own and
+dropping a success, a cancellation or the sink's fence; past the deadline the release is
+answered unconfirmed, to a caller on the life and off it alike (`await`), the cleanup still
+the writer's. A reopened node's fence whose close failed answers that failure. Pause's and
+WriteDSD's own waits stay outside this, as they were, answering their caller's context.
+Under the prefix the sink's tests gain four cases (`sink_dsd_cleanup_test.go`) and a test
+seam on a request's caller (`nativeSeams.awaiting`, nil outside a test). No packer, plan,
+harness reader or record changes. The harness's approval admission reads a record of
+version 50 alone; the migration reads an owner's record of 35 to 50 (`LegacyVersion` stays
+35). For owners: a Stop pressed while the DAC's node fails to close has that failure in the
+stopped activation's or resume's own answer as in the run's report; a clean Stop still ends
+the run as stopped, exit 0, and nothing plays differently. Serve's player, whose sinks'
+lives end only after their release, answers as before. Every earlier version's harness
+evidence is stale to the harness, as at every bump.
+
+Version 51 is B728 B9's round 10: one verdict for every arm that answers a request whose
+life ended. 50's record said a failed cleanup's answer drops a cancellation and the sink's
+fence: that held on the writer's reply and its end, not on the caller's own context's arm,
+which answered the failure beside its context's cancellation and lost a refusal the writer
+had held; not where the writer had recorded the fence, an activation's own context having
+ended it, which every arm answered; and not for a TrackChange drain the release's deadline
+cut, recorded beside `ErrReleaseUnconfirmed`, whose cancellation every arm answered with its
+chain. And a refusal the writer held was answered as it was where nothing was recorded,
+though the ended life answers what it fenced as its cancellation (B765). Now one function
+(`verdict`) decides every answer once the sink's life has ended, from what the request was
+answered (a success, a fault of its own, a refusal held, the fence, a request never run,
+none) and the cleanup's record, in four states: nothing recorded, a success stays one and a
+fault itself, the rest the life's typed cancellation; a device's failure, the release
+confirmed, that failure beside the request's own fault or held refusal, with no
+`ErrReleaseUnconfirmed` it does not carry; a close that failed, that failure with
+`ErrReleaseUnconfirmed`; the release's budget passed, the writer still in its cleanup,
+`ErrReleaseUnconfirmed` beside the request's own fault or held refusal and what is recorded
+by then. A failure answered carries no cancellation and not the sink's fence: those a record
+holds keep their words and lose their chain, and a record of nothing but those is nothing
+recorded. Every arm of a request's wait (the writer's reply, its end, the request's own
+context's end, the release's deadline) reads the reply the writer sent, and the entries of
+Activate, Resume and ActivatePaused answer by the same verdict. Under the prefix the sink's
+tests gain the verdict's table and five cases over the arms and the entries
+(`sink_dsd_verdict_test.go`, `sink_dsd_entry_test.go`), and a test seam that fixes the arm a
+request's wait takes (`nativeSeams.arm`, nil outside a test); the writer's reply carries
+what it is beside its error (`nativeAnswer`). No packer, plan, harness reader or record
+changes. The harness's approval admission reads a record of version 51 alone; the migration
+reads an owner's record of 35 to 51 (`LegacyVersion` stays 35). For owners: a resume the
+DAC's check refused while the run played, beside a Stop that came before its answer was
+taken, now answers the stop, so the run ends as stopped, exit 0, whichever way its wait took
+the answer (50 answered the refusal, exit 1, on all but its context's arm); a Stop while the
+DAC's node fails to close still ends the run reporting that failure, exit 1, the stopped
+command's own answer carrying it without a cancellation whichever way its wait took it; and
+nothing plays differently. Serve's player, whose sinks' lives end only after their release,
+answers as before. Every earlier version's harness evidence is stale to the harness, as at
+every bump.
+
+Version 52 is B728 B9's round 11: a reply the wait took is judged with the record read
+again, and a request's answer names its own command. 51's record said a Stop while the DAC's
+node fails to close leaves that failure in the stopped command's own answer whichever way
+its wait took it: on its context's arm and the deadline's, a request the writer never ran
+was answered `ErrReleaseUnconfirmed` alone where the close failed, and the writer answered,
+after the wait had read the cleanup's record and before it read the reply, the record it
+was judged with read before that failure; and so too where the close confirmed there, when
+the life's cancellation was due. Now the record is read after the reply (`record`), the wait
+for the writer's end alone before it (`endOfLife`), and a request the writer never ran,
+whose answer the writer sends after its close and just before its end, waits for that end
+within a fixed 100 ms (`nativeEndAfterReply`) before the record is read. And every answer
+and admission the writer builds for a request names the command that asked, which the
+request carries (`nativeRequest.op`): a resume "native resume", through ActivatePaused's
+hand-off to Resume too, an activation and ActivatePaused's first activation "native
+activation"; until 52 the writer named every one "native activation". Under the prefix the
+sink's tests gain three cases (`sink_dsd_reread_test.go`, the third a pin of that bounded
+wait), a check of the command in the held-refusal case, and two test seams, nil outside a
+test: one on a request's caller after its wait (`nativeSeams.recorded`) and one on the
+writer between its last answer and its end (`nativeSeams.ending`). No packer, plan, harness
+reader or record changes. The harness's approval admission reads a record of version 52 alone; the migration
+reads an owner's record of 35 to 52 (`LegacyVersion` stays 35). For owners: a Stop while the
+DAC's node fails to close past the release's budget leaves that failure in the stopped
+command's own answer whichever way its wait took it; one whose close confirms late ends the
+run as stopped, exit 0, where 51 could answer the release unconfirmed, exit 1; a stopped
+resume's answer, or its refusal, names the resume; and nothing plays differently. Serve's
+player, whose sinks' lives end only after their release, answers as before. Every earlier
+version's harness evidence is stale to the harness, as at every bump.
+
+Version 53 is B728 B9's round 12: the words say what round 11 built, and no code path
+changes. 52's record said a Stop while the DAC's node fails to close past the release's
+budget leaves that failure in the stopped command's own answer whichever way its wait took
+it, and that one whose close confirms late ends the run as stopped, exit 0: that held only
+where the close landed after the caller's wait was over and before its record was read. A
+Stop past the release's budget is answered by what the cleanup's record shows once the wait
+has taken the writer's reply, or none: a close that failed by then answers that failure,
+`ErrReleaseUnconfirmed` with it, exit 1; one confirmed by then, with nothing recorded, the
+life's cancellation, a stopped run, exit 0; one still under way `ErrReleaseUnconfirmed`
+alone, exit 1, whatever the close does after the caller has answered, as when a close that
+hangs for 3 s meets the deadline's arm at 2 s. And no caller waits past the release's
+deadline but one that took the writer's answer to a request it never ran: its record waits
+for the writer's end up to `nativeEndAfterReply` (100 ms) more, counted from when it begins,
+not from the deadline, which the caller can be past by then. Under the prefix the sink's
+comments say so, and the bound's test registers the clock's deadline before it signals it,
+an ordering cleanup (the fake clock answers a deadline already passed with a closed
+channel), not a fix. No packer, plan, harness reader or record changes. The harness's
+approval admission reads a record of version 53 alone; the migration reads an owner's record
+of 35 to 53 (`LegacyVersion` stays 35). For owners: nothing plays or ends differently from
+52, whose claim of a late close is narrowed here to what it does. Serve's player, whose
+sinks' lives end only after their release, answers as before. Every earlier version's
+harness evidence is stale to the harness, as at every bump.
+
+Version 54 is B728 B9's round 13: a case of the backend's tests that could hang on a loaded
+runner, and no code path changes. CI's macOS run of
+`TestAnOccurrenceBesideAWriteIsNotRevoked`'s first case waited out the package's 30
+minutes: the occurrence it started beside a parked write played out and its session was
+released, the track heard cleared, before the case first looked for it; its look waited out
+the watchdog, and its cleanup then waited on the seam's Once, which the parked write held
+until that cleanup let it go, after. Under the prefix the case takes its orderings by
+barriers alone: its first case is heard with the fake DAC held, and a fourth, played out
+before it looks, reads only what stays (the engine's track count, the backend's events and
+Details, the sinks opened); each case's write is parked through `parkedWrite`, whose cleanup
+lets it go asking nothing of the seam, which `TestACaseEndingWithItsWriteParkedLetsItGo`
+pins; and the rig's engine commands wait at most the watchdog. No production file, packer,
+plan, harness reader or record changes, and nothing plays differently. The harness's
+approval admission reads a record of version 54 alone; the migration reads an owner's record
+of 35 to 54 (`LegacyVersion` stays 35). Every earlier version's harness evidence is stale to
+the harness, as at every bump.
+
+Version 55 is B728 B9's round 14: the backend's tests again, and no code path changes. Under
+the prefix `TestACaseEndingWithItsWriteParkedLetsItGo`, round 13's pin of a case that ends
+with its write parked, follows that case phase by phase, each within a bound of its own,
+where one bound from the case's start had timed its setup and its body as its cleanup's: the
+body until a mark its cleanups run first, within the sum of its waits' bounds and one of
+margin; the property, the write's gate closed by the cleanup (`parkedWrite.letGo`) within one
+watchdog of the mark, past which the test frees the write through `parkedWrite`'s new
+`abort`, an escape no Once guards; and the case's end, within its rig's stop's bounds and one
+of margin, past which the test panics naming the phase that holds it, since a stuck case
+cannot be failed. The rig's `insert` gives each ref's command a watchdog of its own, and
+`TestOnlyAWriteThatInterruptsNeedsTheGoAhead` waits for each write's answer within one. No
+production file, packer, plan, harness reader or record changes, and nothing plays
+differently. The harness's approval admission reads a record of version 55 alone; the
+migration reads an owner's record of 35 to 55 (`LegacyVersion` stays 35). Every earlier
+version's harness evidence is stale to the harness, as at every bump.
+
+Version 56 is B728 B9's round 15: the backend's tests again, and no code path changes. Under
+the prefix `TestACaseEndingWithItsWriteParkedLetsItGo` times its case's body by the body's own
+exit, which a call the body defers before its rig's setup signals before any of its cleanups
+runs, with the time it exited, where the case's end, after every cleanup, had stood in for it:
+a case that failed before its write parked and was slow to clean up drew a parent error and a
+goroutine dump as a body that overran. After the exit the case is classified by what it
+signalled and when, never by which of two ready channels a select took: exited past its bound,
+or not by it, is the overrun; ended before the cleanup under test was registered keeps its skip
+or its failure with nothing reported; registered goes to the property and the shutdown, as in
+55. The timeline is written out beside it, its longest path within the package's timeout at
+the watchdog CI runs it with. No production file, packer, plan, harness reader or record
+changes, and nothing plays differently. The harness's approval admission reads a record of
+version 56 alone; the migration reads an owner's record of 35 to 56 (`LegacyVersion` stays
+35). Every earlier version's harness evidence is stale to the harness, as at every bump.
+
+Version 57 is B728 B9's round 16: two tests' orderings forced, and two seams that are nil
+outside a test. The native sink's watcher, the goroutine that revokes the sink once its life
+ends, runs `nativeSeams.watching` as it begins and `watched` as it returns, both nil in
+production, beside a comment that where the life's end reaches the writer first the writer can
+end the sink before the watcher looks, the watcher's select then taking either end, and that a
+Revoke of a sink done records nothing and closes nothing. Under the prefix, the three tests
+whose writer ends the sink on its own once its life ends (the prefill's, the reopen's whose
+Locate the life ends, and the resume's whose STATUS fails after it) run in both orders their
+watcher can meet that end in, by barriers, and judge the sink again once the watcher has
+returned; `TestAGaplessSuccessorWaitsForAWriteNoLongerThanTheSinksLookahead` holds the producer
+in its first occurrence until the write is pending, and forces the DAC's time to the sink's
+floor before the sink's measurement of it (`ParkStatusAfterPlayed`, which parks a STATUS of the
+fake kernel by the frames its DAC has played), and ends in two orders, each forced: the write
+answered before the DAC lets the drain for b's transport end, where no sink opens for b, and
+the drain ending with the write held between its publish and its reconciliation
+(`playback.Seams.Published`), where b's own sink opens and its activation takes it back
+unwritten; every wait at a forced ordering is bounded by a few seconds. No packer, plan,
+harness reader or record changes, and nothing plays differently.
+The harness's approval admission reads a record of version 57 alone; the migration reads an
+owner's record of 35 to 57 (`LegacyVersion` stays 35). Every earlier version's harness evidence
+is stale to the harness, as at every bump.
+
+Version 58 is B728 B9's round 17: a wait for a reconciliation's verdict, and the tests that force
+its orderings. In `internal/player/playback/native.go`, Revoke closes the session's `judged`
+once it has dropped what a revocation takes, as the reconciliation's own step does, which wakes
+a wait for that verdict (`unjudgedLocked`): an occurrence admitted under a set a publish has
+replaced, a choice's write's once it has published among them, waits for the reconciliation to
+judge it before its own sink opens and before a resume opens it, and, while the sink before it
+holds more than its floor, before it joins that sink or a converted window it follows is
+decided. Under the prefix, `TestAGaplessSuccessorWaitsForAWriteNoLongerThanTheSinksLookahead`
+and `TestAConvertedJoinWindowWaitsForAWriteThatChangesItsSuccessor` force the orderings around
+that wait: the drain ending between a write's publish and its reconciliation, which now opens no
+sink for the successor; the reconciliation held above the floor, and run with the producer held
+at its wait, and the engine's stop while it is held; the reconciliation held where it has asked
+the engine to hand an occurrence off again; a successor handed into its predecessor's sink
+before the write; and a reporter's step that comes once the floor's measurement is
+established. Every gate a case makes before its rig is let go before the rig stops, and every
+wait at a forced ordering is bounded by a few seconds. No packer, plan, harness reader or record
+changes. What plays changes in two ways, each between a publish and its reconciliation, after
+any refresh's publish and not only a choice's write (this sentence corrected with version 59's
+record, round 18: it named the first alone). A successor's own sink no longer opens there, to
+be taken back unwritten. And `next()`'s gapless join: a successor, native, DoP or converted (a
+converted one's transport is PCM), admitted under the set the publish replaced, was held out
+of the sink it would join until the reconciliation woke the producer, with no floor, however
+long the sink ran on what it held; it now waits only while that sink holds more than its floor,
+and at the floor the sink drains and the successor's own sink opens once the reconciliation has
+judged it: an honest gap where a gapless join was meant. Apart from both, a converted join
+window waiting for that verdict ends at the floor, zero-padded, as one waiting for a successor
+that has not settled always did, and its successor, once judged and settled, abuts it in the
+same sink, with no drain or reopen, where the transport is the same. The harness's approval
+admission reads a record of version 58 alone; the migration reads an owner's record of 35 to 58
+(`LegacyVersion` stays 35). Every earlier version's harness evidence is stale to the harness,
+as at every bump.
+
+Version 59 is B728 B9's round 18: the converted join window's decision, the reconciliation of a
+set whose refresh did not return, and the tests that force both. In
+`internal/player/playback/convert.go` the window's decision (`holdLocked`) reads the choice's
+write pending first and the set published once after it, for every check: it read the set first
+and asked about the write after, which read the set again, so a decision whose reads fell on
+either side of a write's publish (the publish takes no session's lock) found the write's set
+published and nothing pending for its successor and continued the window into the successor's
+bits, the reconciliation then revoking the session's DSD. In `dsd_policy.go` a refresh that finds
+the set the same reconciles it once more where no reconciliation of it returned (`dsdJudged`): a
+refresh that published and panicked before its reconciliation returned (a choice's write's among
+them) left an occurrence admitted under the set it replaced unjudged, playing on until the set
+changed again or the session ended; the next refresh judges it now, keeping it, handing it off
+again or revoking its session's DSD. (Corrected with version 60's record, round 19: version 59
+recorded the set judged before that reconciliation ran, so one that panicked again was never
+tried after it and the occurrence it failed on played on unjudged; a panic in a session's
+reconciliation reached the refresh's caller, an admission, an activation or the monitor, and
+left every session after it in the loop unjudged; a panic in the monitor's own refresh ended the
+monitor, whose recover was outside its loop, so "the next refresh, the session monitor's at most
+100 ms later" held only until a refresh panicked; and a panic in a reading of the policy was
+bounded by nothing. Version 60 contains and bounds each.) Two test
+seams are nil in production (`Seams.Deciding`, `Seams.Admitting`). Under the prefix,
+`TestAConvertedJoinWindowWaitsForAWriteThatChangesItsSuccessor` forces the write's publish, and its
+panic at its publish, between the decision's two reads, the sink's lookahead above its floor;
+the panic at the publish then the monitor's unchanged refresh; the decision made before the write,
+which the write's reconciliation answers by revoking the session's DSD; the floor ending a wait no
+write ends, at the first reporter step after the floor's measurement; and the replacement's
+admission seen to begin while a reconciliation is held. `TestAGaplessSuccessorWaitsForAWriteNoLongerThanTheSinksLookahead`
+holds the producer at its wait across the floor's measurement, so each order of a reporter's step
+and the case's look is forced and asserted. No packer, plan, harness reader or record changes.
+What plays changes in two windows: a converted window decided between a write's publish and its
+reconciliation waits for the verdict instead, and ends at the floor as before if none comes; and
+an occurrence a lost reconciliation left unjudged is judged by the next refresh. The harness's
+approval admission reads a record of version 59 alone; the migration reads an owner's record of
+35 to 59 (`LegacyVersion` stays 35). Every earlier version's harness evidence is stale to the
+harness, as at every bump.
+
+Version 60 is B728 B9's round 19: a reconciliation or a reading of the effective DSD policy that
+panics is contained and bounded, the session's monitor goes on past a panic, and the tests that
+force the converted window's floor and its straddles. In `internal/player/playback/native.go`,
+Revoke holds the session's lock through a lockHold, so a panic in its locked section lets the
+lock go, and a test seam nil in production (`Seams.Revoking`) runs there. In `dsd_policy.go` and
+`dsd_contain.go`, each session's reconciliation is contained, its judgement under a lockHold: a
+panic in its judgement, the engine's hand-off or Revoke is logged and every other session is
+judged. A set is recorded judged only once every session's reconciliation against it has
+completed; the next refresh tries a failed one once more, judging only the sessions it failed in
+and asking only the hand-offs that did not return; that retry's failure is terminal (two
+attempts): each session it failed in stops with its fault (backend_failed), its DSD revoked
+unless Revoke is what panicked, and the set is recorded judged. A panic in a reading of the
+policy (the binding, the box, the controls, the state) or in a publish reaches only a choice's
+write; every other caller (a session's admission and activation, its monitor, the supervisor's
+refresh, the silent probe's) contains it: the first of a run is logged, and from the second in a
+row until a reading completes every session that holds DSD stops with its fault, its DSD
+revoked, and an admission or an activation whose reading failed refuses. The monitor recovers
+each tick's panic within these bounds and takes its next tick; a panic outside them stops its
+session with its fault. Under the prefix,
+`TestAConvertedJoinWindowWaitsForAWriteThatChangesItsSuccessor`'s straddle cases are decided by
+the reporter's tick or the decision reaching its gate, whichever comes first, and its floor cases
+park the sink's 400 ms STATUS before granting the time, hold the producer at its wait across
+that measurement, and hold what the kernel was given of the track to its conversion alone,
+zero-padded. No packer, plan, harness reader or record changes. What plays changes only where a
+panic comes: a reconciliation's no longer leaves the sessions after it unjudged, and stops its
+own session if it comes again on the retry; a reading's, twice in a row, stops every session
+that holds DSD; and the monitor no longer ends at one. The harness's approval admission reads a
+record of version 60 alone; the migration reads an owner's record of 35 to 60 (`LegacyVersion`
+stays 35). Every earlier version's harness evidence is stale to the harness, as at every bump.

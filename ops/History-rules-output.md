@@ -559,7 +559,8 @@ pin it.
 starts the player; read `ready` before `eng` and `id`, the surface's pointer
 under `p.mu`, and the identity file afresh until the engine runs. Never read
 `playerOutput`, make or cache the identity, or let the view start, probe MPD,
-dial or write anything.**
+dial or write anything but the bound DAC's DSD choice, which its PUT writes
+through the player's backend (B728 B9).**
 
 `newBridgeOutput(plan, player, cfg)` is installed with
 `api.Server.WithBridgeOutput` right after `startServePlayer` returns, long
@@ -584,6 +585,15 @@ B17 removes the wiring).
 
 B543 adds a bounded hardware read for the boot binding's DAC, with at most
 one in flight per view; it reads neither MPD nor the supervisor's state.
+
+B728's B9 makes the view the choice's route's chooser too
+(`api.BridgeDSDChooser`, `serve_player_dsd_choice.go`): `OwnsOutput` reads the
+identity as the element does, and `ChooseDSD` writes the bound DAC's choice,
+the app's, through the player's backend (`playback.Backend.ChooseDSD`) and
+answers from the epoch the backend published once the write ended, read as
+GET reads it (`bridgeDSDFacts`); a player not running yet, or a backend that
+is not the bridge's, has no bound DAC to write for (`dac_unavailable`). GET's
+path writes nothing, as before.
 
 ### What stays MPD's
 
@@ -692,9 +702,10 @@ occurrence of it has since played 5 s of its content with no fault), with
 `bitRates` the rates a migrated acknowledgement covers, absent for every
 rate. On `playback`: `evidence` and `evidenceOn`, a native or DoP
 occurrence's, and `converted`, a converted one's plan and its count of
-samples saturated. The section's `check` member is B12's, and the write route
-and its health flag (`bridgeDSDChoice`) are B9's: `/v1/health` advertises no
-flag before its route (`TestNoHealthFlagBeforeItsRoute`). Every word is in a
+samples saturated. The section's `check` member is B12's; the write route and
+its health flag (`bridgeDSDChoice`) are B9's, which advertises the flag with its
+route (`TestTheChoiceFlagArrivesWithItsRoute`), and no flag comes before its
+route (`TestNoHealthFlagBeforeItsRoute`). Every word is in a
 closed list of PROTOCOL.md's, and the source-derived token guard reads each
 from its definitions (`TestDSDOutputProtocolTokens`).
 
@@ -844,3 +855,641 @@ nothing else is normalized. `BRIDGE_WRITE_DSD_GOLDENS` alone rewrites them
 (`TestEachKindOfDACsWholeResponseIsItsGolden`), and the iOS mirror's
 `dsd_dac_outputs.json` is exported from the same cases (wire.md's exporter
 bullet).
+
+## B728 B9 — the write of the bound DAC's DSD choice (2026-11-07)
+
+The long form of `output.md`'s bullet under "The player's DSD choice: its
+write (B728 B9)"; the record is in `ops/engineering-log.md` under that date,
+and the route's wire half is `wire.md`'s bullet on `PUT /v1/outputs/{id}/dsd`,
+whose long form is `History-b470-native.md`'s "The write side (B728 B9)".
+
+**A choice's write (`playback.Backend.ChooseDSD`) checks the state inside the
+store's one write, one write at a time, and asks first, by the classification
+reconciliation acts by, what the set it would publish interrupts; that set is
+pending from before the question until the write settles, and an occurrence
+whose open ends, or that the producer would hand a sink, at a rate the pending
+set plays otherwise waits for it; a write that landed and is not known to be
+durable holds the set to what both states play alike until the next start; a
+written choice owes a probe and drops none of its answers. Don't read the
+compare-and-set, the confirmation, first use or a rejection outside
+`dsdstate.Store.Update`'s closure, decide `would_interrupt` but by
+`judgeDSDLocked` against the set the write would publish and the one the state
+gives without it, take a session's lock under the store's or the store's under
+a lock of the backend's, hold a lock an admission takes across the fsync,
+publish before the state is durable or answer before the publish, let an
+evidence write move a choice's revision, roll a landed write back, drop the
+probe's answers at a choice's write, or leave a set pending past the write's
+end, a panic's included.**
+
+The checks that read the state, the compare-and-set, the mode offered, DoP's
+confirmation and first use (a listener's rejection re-arming it), are
+`policy.Choose`, pure, and `ChooseDSD` runs them inside the store's one write,
+on the state that write is made from, so no other writer of the state (the
+migration's part for a DAC, which writes a choice; playback's evidence) comes
+between the check and the write: a negative control that read the
+compare-and-set before the store's write let a write land over a revision the
+migration had moved with what plays as it was. Writes are one at a time, end
+to end (the writes' turn, `choiceTurn`, its wait bounded by the request's
+context): a write that finds the revision moved answers `stale` only once the
+write that moved it has published, a stale answer reads the policy again
+first, and the revision it carries is the one the next write compares with, a
+revision a client read from `GET` between another write's durable write and
+its publish included (`TestAWriteBackOfARevisionReadInTheWindowIsAnsweredWithTheDurableOne`).
+A state that does not read publishes revision 0: a write-back of 0 over the
+fresh state that replaced a damaged file lands and clears its refusal, and one
+over a file refused in memory answers `state_unreadable` and writes nothing.
+
+`would_interrupt` is classified before the write, from one reading of the
+box, and, since round 2 (below), answered inside the store's closure after
+the state's checks: the set the write would publish and the one the state
+gives without it, and an
+occurrence interrupts where `judgeDSDLocked`, the one classification
+`reconcileDSD` acts by too, says it interrupts against the first and not
+against the second, so what a change of the box does anyway is no interruption
+of the write's. The judgement is `policy.Reconcile` and the backend's rest: a
+re-plan of a session's first occurrence, or of an occurrence of a session
+being released, is a revocation, and so is one where the engine hands nothing
+off again; a re-plan interrupts where frames of the occurrence are in a sink,
+and also for the occurrence the producer writes and one whose first bits are
+in its predecessor's join window, whose frames can reach the sink before the
+write publishes; an occurrence played out, still opening, dropped or PCM is
+not judged. The store's closure makes the two sets again from its own state
+and sends the write round again where either moved (`errChoiceRound`, at most
+eight rounds, then, since round 2, `persist_failed`), so the decision holds at
+the commit.
+
+The set the write would publish is pending (`Backend.pending`) from before the
+classification until the write settles. The step that ends an occurrence's
+open, start's and `openSuccessor`'s, takes its session's lock through
+`lockSettled`, which waits, the lock let go, while the pending set plays the
+occurrence's rate otherwise than the set published; the producer holds back
+from a sink an opened occurrence at such a rate (`next`, `transition` before
+its open, a converted join's window in `holdLocked`), and a resume between two
+transports waits as well and opens nothing for an occurrence the write left
+being handed off again. The pending set is stored before the classification
+takes each session's lock, so an occurrence either ended its open before it,
+and was judged, or sees the pending set. The brief suggested admitting only
+what both sets play while a write is pending; waiting was chosen instead: the
+intersection would refuse, and skip, a track at a rate the write changes that
+starts in the window, where the wait, bounded by the write's fsync, admits it
+under what the write leaves. A write that fails clears the pending set and
+leaves the set as it was. One that landed and whose sync failed
+(`atomicwrite.ErrLanded`) keeps the state it left in the file
+(`landedChoice`), and every refresh holds the set to what the two states play
+alike (`policy.Intersect`, the rest refused as `dsd_choice_uncertain`) until
+the next start reads the file; the store's fence refuses every later write
+(`dsdstate.ErrLandedNotHeld`, `persist_uncertain`). Nothing is rolled back. A
+session whose release begins between the classification and the publish has
+its DSD revoked by the publish, as reconciliation revokes a releasing
+session's, which the write did not count: the session was ending already.
+Every end of a write settles what it left pending, once, before the writes'
+turn is given back, a panic's included (the API's recoverer answers it): a
+negative control that removed the deferred settle left the set pending after
+a panic, where an occurrence at a rate the write changes waits for a write
+that will never publish (the producer's until its session ends); what a
+panic after the state's write left in the state the next refresh publishes
+(`TestAWriteThatPanicsLeavesNothingPending`).
+
+Lock order: the writes' turn, then the refreshes' (`dsdMu`), then the
+backend's, then each session's, then a sink's; the store's lock is taken
+alone and its closure is pure, so no lock an admission takes spans the fsync,
+and playback's own writes of the state (`recordDSD`) run on goroutines of
+their own, under no lock. Since the merge with B762 (2026-11-07) the
+choice's own write is one of the writes of the player's DSD state the
+player's stop closes (`dsdWrite`, `CloseDSDWrites`): refused once they are
+closed (persist_failed, nothing written), and counted while it runs, so the
+stop keeps its share of the data directory's lock until it ends. A written
+choice owes the silent probe (`oweProbe`, `ProbeDSDPending`), which serve's
+supervisor asks at its next policy tick and which runs, on a goroutine of the
+backend's since B762, once the device slot is free, never inside the
+request; it drops none of the probe's answers and moves no generation
+(`player.md`'s bullet on the silent probe), so a write that changes the
+choice and nothing that plays publishes no new set, and a probe under way as
+it is written keeps what it asks.
+What playback observes (a driver's acceptance, streaming observed, first use
+observed) never moves a choice's revision: a negative control that moved it
+at each such write made every write of a session's base stale.
+`TestTwoWritesOfOneRevisionLandOnce`,
+`TestARevisionMovedBeforeTheStoresWriteIsStale`,
+`TestAWriteBackOfARevisionReadInTheWindowIsAnsweredWithTheDurableOne`,
+`TestTheWriteAsksWhatReconciliationDoes`,
+`TestAnOccurrenceWhoseRateTheWriteChangesWaitsAtTheEndOfItsOpen`,
+`TestTheProducerHoldsAnOccurrenceAPendingWriteWouldReplan`,
+`TestTheChoiceWritesLockOrderHolds`,
+`TestALandedWriteIsUncertainAndPublishesWhatBothStatesPlay`,
+`TestAWrittenChoiceOwesAProbeAndKeepsTheProbesAnswers`,
+`TestOnlyAWriteThatInterruptsNeedsTheGoAhead`,
+`TestAnOccurrenceBesideAWriteIsNotRevoked` and
+`TestAWriteThatPanicsLeavesNothingPending` pin it.
+
+## B728 B9 round 2 — the write beside what plays (2026-11-07)
+
+The long form of `output.md`'s second bullet under "The player's DSD choice:
+its write (B728 B9)"; the record is the engineering log's round 2 entry of
+that date.
+
+**Beside what plays (B728 B9 round 2), a write counts an occurrence whose own
+sink an open is under way for as reaching it (`occ.claimed`, taken in the step
+that found no write pending and kept to the end of its activation), and that
+open's adoption and activation wait for a write pending, an occurrence it
+handed off again by then, or dropped for its replacement, taken back from its
+sink unwritten (`errReplanned`, `unadopt`), and so is one dropped as its
+activation begins, by whatever dropped it, its decoder and content closed as it
+is taken back, a release then ending the session with no fault (round 3), and
+one dropped or handed off again while its sink's own activation admits its node
+or writes its prefill is taken back with none of it written, the drop or the
+hand-off revoking that sink, whose activation answers its own fence
+(`alsapcm.ErrActivationFenced`, never the device's answer), a failed activation
+judged by its cause in this order: a release ends the session, a revocation of
+the session's DSD keeps its fault, the drop's own answer (the sink's fence,
+`errReplanned`) is taken back, and anything else is the fault it was (round 4);
+a take-back's close waits for the sink's end, a release the sink cannot
+confirm the session's fault (round 5); a revocation of an occurrence whose own
+sink's activation is under way (claimed, its output adopted: a successor's, or
+a session's first occurrence's in its Start, which then fails saying so)
+records its fault on the session in the reconciliation's own step, before
+anything is marked stale, for the reason `Backend.Revoke` is given, Revoke
+adding none where a fault is there, and that native sink is fenced there as a
+hand-off's is, so its node is given nothing and no answer, take-back or close
+of it comes before the fault, and one with no output of its own records none,
+Revoke dropping it (round 6); a Start whose session's DSD such a revocation
+reached fails naming it whether or not its activation succeeded first, launching
+nothing (round 7); a converted occurrence's PCM sink, which admits its node only
+at its open, before its output is adopted, and at a resume's reopen, and writes
+nothing of its own, is not fenced: revoked once its activation completed, the
+occurrence claimed with its output adopted, its fault is recorded and the
+producer's next step is its stop on that fault, which keeps its bytes off the
+node before Revoke drops the sink (round 8), and revoked at its open's admission
+it has no output of its own, so no fault is recorded, its adoption closes the
+sink unwritten and Revoke drops the occurrence (round 7); a resume waits in a
+loop; a refusal
+of the policy's that a write or a later set lifts is asked again where the open
+ends, the content's checks with it (`settleOpen`, `refusedUnder`), a
+successor's DSD monitor starting once it is admitted; a gapless successor waits
+out of its sink only while that sink holds more than its floor; an occurrence
+admitted under a set a publish has replaced, a write's once it has published
+among them, waits for that publish's reconciliation to judge it
+(`unjudgedLocked`, the session's `judged`, closed in the reconciliation's step
+and by Revoke) before its own sink opens, a resume's open included, and before
+it joins a sink or a converted window it follows is decided only while that
+sink holds more than its floor, the wait woken, taken under neither the
+session's lock nor the refreshes', and ended by the session's stop or release
+(round 17); the write
+decides `would_interrupt` inside the store's closure, after the state's checks,
+from a classification made before it, answers an earlier landed write's fence
+first, and goes round at most eight times, then `persist_failed`; its answer's
+epoch is read inside its turn; and it is judged against the set published, a
+reading of the DAC that gives another set published and reconciled first. Don't
+open, adopt or activate an occurrence's own sink beside a write that has not
+counted it, wait for a write with an `if` where another may follow, fault a
+successor handed off again or dropped at its activation, at its fence too, take
+a dropped one back with its decoder open, fault a session whose release came
+during an activation, let a test of the adoption's wait pass on the activation's
+own, take an activation's failure beside a drop for the drop's but by the drop's
+own answer, judge a drop before a release, mark an activating occurrence stale
+or fence its sink before its revocation's fault is the session's, record that
+fault but as the session's one fault for the reason Revoke is given, replace a
+fault there, fault a session for a revoked occurrence with no output of its
+own, leave a revoked activating native sink to `Backend.Revoke`, read a Start's
+recorded revocation beside an activation's error alone or launch its producer or
+reporter beside one, let the producer take a step past a recorded revocation's
+fault but its stop, let a take-back
+go on past a release its sink could not confirm, leave to its
+activation the sink of an occurrence a reconciliation handed off again, answer a
+device's failure as the native sink's own fence or that fence by a bare error,
+ask a decoder's
+refusal again or a policy's without the content's checks, compare a pending set
+with any set but the one published, hold a gapless successor past its sink's
+floor, take a write's publish for its verdict on an occurrence the publish's
+reconciliation has not judged, wait for that verdict under a lock the
+reconciliation takes or past the sink's floor, take a session's lock inside
+the store's closure or answer
+`would_interrupt` before the state's checks, answer a write the state or the
+DAC kept moving under `stale`, read an answer's epoch after its turn, or judge
+a write on a reading the set published does not agree with.**
+
+The producer's transition, and a resume between transports, open the next
+occurrence's own sink outside the session's lock, and a write that classified
+meanwhile saw an occurrence opened and in no sink, a re-plan that interrupts
+nothing, while the open went on to adopt and activate the sink before the
+publish: a write told it interrupted nothing put b's frames on its node, and
+one with the go-ahead stranded b, the engine's replacement refused because
+b's frames were the kernel's. The step that finds no write pending now claims
+the occurrence in the same lock, and the classification counts a claimed one
+as reaching its sink. The claim's adoption waits while a write is pending and
+closes the sink unwritten where the occurrence is being handed off again;
+its activation waits too, no lock held (`checkDSDActivation`, `awaitWrite`),
+for a write that became pending after the adoption, and an occurrence handed
+off again by then, or dropped for its replacement (a cut of a successor with
+no frame written drops it at once, which the check took for a refusal and
+faulted the session on: a control that removed it went red in 4 of 5 runs),
+is taken back from its sink unwritten. Of the two waits, round 2's tests held
+the activation's alone: a control that removed the adoption's alone stayed green
+there, and one that removed both went red. Since round 3 the adoption cases
+require the adoption's own wait, the occurrence's activation unreached while the
+write is held (`waitedUnactivated`), and a control that removes the adoption's
+wait alone goes red in each of them. A resume asks again under
+the lock each time a write settles, since another write may be pending by
+then. Each wait is bounded by the write's own, which settles at every end of
+it, and ends with the session's life, which a release ends, a resume's with
+the call's context too.
+
+A successor the set refused by its word was refused for good though the write
+that lifts the refusal was pending as it was made, or published before the
+open ended. The set it was refused under is kept, the pending fence counts it,
+and the step that ends the open asks again, outside the lock, an admission
+refused under a set that is no longer the one published, through
+`openNativeContent`, its reservation charged once, so the content's checks
+are made with it (an empty content refused as that); a decoder's refusal is
+never asked again. The fence compares the pending set with the set published,
+never with the one the write was made from: a session's start that reads the
+durable state before the write's own publish has published what the write
+would, and the first try, comparing with the write's own, made an occurrence
+admitted under it wait for a publish the test held
+(`TestAnOccurrenceBesideAWriteIsNotRevoked`).
+
+The producer held a successor at a rate a write changes in `next()`, whatever
+its transport, with no bound, so a write whose fsync outlasted the sink's
+lookahead ran the sink dry; a gapless successor now waits only while the sink
+it would join holds more than its floor (100 ms, `windowFloor`, the reporter
+waking the producer at each measurement), and at the floor, like any other,
+takes the transport's step, which drains the sink before it and opens none for
+the successor until the write settles: an honest gap, never an xrun. A
+converted join window's hold is the same wait, bounded the same way.
+
+`would_interrupt` is the write's last check: classified before the store's
+write, under the pending set, with no lock of the store's held, and answered
+inside its closure after the policy's checks and the two sets' consistency,
+so a write that would interrupt and finds the revision moved is `stale`.
+Classifying inside the closure would take each session's lock under the
+store's, which a control showed deadlocking `TestTheChoiceWritesLockOrderHolds`
+once it held a reader that takes the store's lock under a session's. The
+store's fence, checked before the closure, then answers a fenced write first
+anyway, and the backend answers it before reading the state as well
+(`choiceFenced`), so a fenced write whose reading of the DAC drifts does not go
+round to its bound and answer `persist_failed`. Past eight rounds the write is
+`persist_failed`; its line is a warning that the write was not made, with why,
+never that it was not made durable, which says it landed. The epoch an answer
+carries is read by a defer registered after the turn's, at every return
+inside the turn: read after it, the next write could publish first, and a
+stale answer carry a revision that write moved past. Stale says the base was
+not the state's revision at the compare-and-set; the migration's part for a
+DAC takes no turn and can move the revision after the answer, which the next
+write's compare-and-set answers stale with the newer one.
+
+A write is judged against the set published. Where its reading of the DAC
+gives another set than the one published, a reading that glitched or the
+DAC's own change, it publishes and reconciles that reading first, a refresh of
+its own that reads the box again, and goes another round, sharing the bound:
+judged on its own reading, a gain read that glitched in it alone made the DoP
+occurrence heard look revoked anyway, so the write was told it interrupted
+nothing and its publish, from a reading that did not glitch, revoked DoP. The
+other option, publishing exactly the write's own reading, was not taken: what
+the box shows is published by a refresh, and the write's publish is one. The
+classification also counts a session being released, and an engine that
+hands nothing off again, as revocations (`TestAWriteBesideASessionBeingReleasedIsTold`,
+`TestAWriteBesideAnEngineThatHandsNothingOffAgainIsTold`, the rig's
+`noReplan`). `TestASuccessorsOpenBesideAWriteIsCountedAndWaitsForIt`, `TestAnActivationBesideAWriteWaitsForIt`, `TestASuccessorDroppedAtItsActivationIsTakenBackUnwritten`, `TestAReleaseWhileASuccessorsAdoptionWaitsLetsGoOfTheDevice`, `TestASuccessorDroppedAtItsSinksAdmissionIsTakenBackUnwritten`, `TestASuccessorDroppedWhileItsSinkWritesItsPrefillIsTakenBack`, `TestAnActivationsFailureBesideADropIsJudgedByItsCause`, `TestTheActivationsOwnFenceIsErrActivationFenced`, `TestARevocationWhileASuccessorsSinkActivatesKeepsItsFault`, `TestARevocationAtASuccessorsActivationCheckKeepsItsFault`, `TestARevocationThatRunsDuringATakeBackKeepsItsOneFault`, `TestARevocationOfAPreparedSuccessorLetsThePCMPlayOn`, `TestARevocationAtTheFirstOccurrencesActivationFencesItsSink`, `TestARevocationsFaultIsTheSessionsOneFault`, `TestARevocationOnceTheFirstOccurrencesSinkActivatedFailsItsStart`, `TestARevocationOfAConvertedSuccessorGivesItsNodeNothing`, `TestAResumesOpenBetweenTransportsBesideAWriteIsCounted`, `TestAResumeWaitsForEveryWriteThatChangesWhatItOpens`, `TestAResumeBetweenTransportsWaitsForTheReconciliationsVerdict`, `TestAPolicyRefusalAWriteLiftsIsAskedAgain`, `TestASuccessorWhoseOpenEndsBesideAWriteWaitsForIt`, `TestNoSinkOpensForASuccessorWhileAWriteChangesItsRate`, `TestAConvertedJoinWindowWaitsForAWriteThatChangesItsSuccessor`, `TestAGaplessSuccessorWaitsForAWriteNoLongerThanTheSinksLookahead`, `TestAWriteBesideAnEngineThatHandsNothingOffAgainIsTold`, `TestAWriteBesideASessionBeingReleasedIsTold`, `TestTheWritesChecksAreAnsweredInTheirOrder`, `TestAWriteTheStateKeepsMovingUnderIsNotMade`, `TestAStaleAnswerNeverCarriesARevisionAnotherWriteHasPassed`, `TestAWriteIsJudgedAgainstTheSetPublished` and `TestAWriteWhoseReadingNeverAgreesWithTheSetPublishedIsNotMade` pin it.
+
+Round 3 (2026-11-08, the reviews of round 2 and of the merge). The activation's
+fence (`activateOutput`) answered a successor dropped while its sink was
+adopted, by its replacement once a write the go-ahead let land took its rate, by
+an edit that deleted its entry or by a cut, with `native activation fenced`,
+which `transition` took for a failed open: the session faulted, `device_error`.
+A drop there is `errReplanned` now, where the session is neither being released
+nor revoked (those keep the fence, and the session ends), and the sink is taken
+back unwritten as at the activation's check. The drop leaves the decoder and
+content of the occurrence the producer writes to the producer (`dropLocked`),
+which closes a dropped one at its next step; `unadopt` cleared the occurrence
+it writes first, so nothing closed them until the session's end (a retirement
+or the teardown), and `unadopt` closes a dropped one now. A release that came
+while the activation ran, before the session's life ended (between `release`'s
+marking and its cancel), had the fence's answer taken for a failed open too: a
+Stop there recorded a `device_error`, which the teardown's last report delivered
+(the reporter sends nothing while a session is released); `transition` takes a
+failed activation of a released session for the release's now
+(`fenced("activate")`), and the session ends with no fault. A release while a
+successor's own sink waits to be adopted (for a write pending, or in the pause
+call its sink takes first, the session having paused while it opened) leaves
+the sink to the teardown, which owns every sink opened (the session's outputs),
+begins each native one's release and ends each PCM one's life at the release,
+and closes it after the files and before it acknowledges: once the release is
+acknowledged the node is closed, every content closed and the device free for a
+Start. The producer's exits there close nothing of their own, and no code
+changed for it: the cases stay as guards. The engine replaces a successor not
+yet submitted through Prepare and cuts only a submitted one, which a successor
+whose activation is held is not, so the cut case calls the backend's Cut, as
+the engine's call reaches it. `TestASuccessorDroppedAtItsActivationIsTakenBackUnwritten`
+(the write landing and the replacement made before the activation goes on, and
+after it begins to wait for the write; an edit; a cut; a release) and
+`TestAReleaseWhileASuccessorsAdoptionWaitsLetsGoOfTheDevice` pin it.
+
+Round 4 (2026-11-08, the reviews of round 3 and of its brief). Past the
+activation's own checks, the native sink's activation (`DSDSink.Activate`, on
+its writer) makes its check after open of the node, then its fence, then writes
+the run's prefill, the profile's DSD silence (up to 5 s), as fast as the DAC
+plays it, before it answers. A successor dropped there (by an edit that deleted
+its entry, its replacement once a write took its rate, or a cut, which drops a
+successor with no frame written at once while the producer is in no Write) had
+its unwritten sink revoked by the drop (`dropLocked`), and the activation
+answered `native activation fenced`, or in the prefill the write's
+cancellation, which `transition` took for a failed open: the session faulted.
+One a write handed off again with its replacement still to come (stale, not yet
+dropped) had nothing revoke its sink, and the activation wrote its prefill to
+the node for an occurrence the set no longer plays. The native sink now answers
+its own fence as `alsapcm.ErrActivationFenced` (revoked, released, being
+released or paused before the activation was asked, at its admission's end,
+with its writer ending before it ran it, or its prefill cut short by an
+Immediate release, the cancellation joined to it), never as the device's
+answer: an admission the check refused and a write that failed are returned as
+they are, and a sink that failed before the activation refuses it (`native
+activation refused`). `transition` judges a failed activation by its cause, in
+this order: a release ends the session with no fault; a revocation of the
+session's DSD keeps its fault; an occurrence dropped or handed off again whose
+activation answered `errReplanned` or the sink's own fence is taken back
+(`unadopt`) and the session goes on; anything else, a device's refusal beside a
+drop among them, is the fault it was. A reconciliation that hands off again an
+occurrence whose own sink an activation is under way for (`occ.claimed`)
+revokes that sink as a drop does. Only a release and a drop together whose
+activation answers the sink's own fence tell the release's place before the
+drop's apart, a release while the dropped successor's prefill is written; the
+fault of a revocation `Backend.Revoke` records itself while the sink is
+registered, so no order of the classification reddens its case, which pins the
+outcome. A cut reaches the window through the backend's Cut alone: the engine
+replaces a successor it has not submitted through Prepare, so after a cut the
+cases tell the engine by the edit that deletes the entry, and check that the
+session goes on. `TestASuccessorDroppedAtItsSinksAdmissionIsTakenBackUnwritten`
+(an edit, a write's replacement, a write's hand-off with its replacement held, a
+cut), `TestASuccessorDroppedWhileItsSinkWritesItsPrefillIsTakenBack`,
+`TestAnActivationsFailureBesideADropIsJudgedByItsCause` (a release at the
+admission, a release in the prefill, a revocation, a device's refusal) and
+`TestTheActivationsOwnFenceIsErrActivationFenced` (the sink's answers) pin it.
+
+Round 5 (2026-11-08, the reviews of round 4). Round 4's early cancellation in
+`reconcileDSD` revoked the sink an activation is under way for whenever the
+occurrence was held back, a revocation of the session's DSD included, which is
+what a re-plan is where the engine hands nothing off again: the activation
+could then answer the sink's own fence, and `transition` take the occurrence
+back and close its output before `Backend.Revoke` ran, which found no sink of
+the session's open and recorded no fault, so the occurrence and what followed
+it were refused and the queue played on. The cancellation now runs only for a
+hand-off; a revocation's sinks are `Backend.Revoke`'s, stopped after the fault
+it records, and the activation meanwhile may complete. A release the sink
+cannot confirm is never taken back as the drop's: the fence joined with
+`ErrReleaseUnconfirmed` comes only from a reopen, which only a resume's
+activation of a sink whose node a pause's release let go makes, answered to
+the resume, and where a node's close fails after a take-back, `unadopt`'s
+close waits for the sink's end (`nativeStream.Close` waits for `Done`) and
+`closeOutput` makes the sink's result, where the writer records an unconfirmed
+release, the session's fault before the producer's next step. Excluding
+`ErrReleaseUnconfirmed` from the take-back was the other option, and would
+have been unreachable. The order of a revocation and a drop is not
+observable: judged either way the session ends with `Backend.Revoke`'s fault
+and opens nothing more, the two differing only in whether the take-back or
+the teardown closes the sink and the decoder, both before the release is
+acknowledged; so the rule holds a drop to be judged after a release, which the
+release cases pin, and the code's order stays, its comment saying why. The cut
+case at the sink's admission checks the cut alone before the engine is told.
+`TestARevocationWhileASuccessorsSinkActivatesKeepsItsFault` (the engine handing
+nothing off again, the reconciliation held between its judgement and its call
+to Revoke) and `TestAnActivationsFailureBesideADropIsJudgedByItsCause` (a
+node's close failing beside a drop, at the take-back and at a resume's reopen)
+pin it.
+
+Round 6 (2026-11-08, the reviews of round 5). Round 5 left a revocation's
+sinks to `Backend.Revoke` and still marked the occurrence stale in the
+reconciliation's step, so two orders remained. With the occurrence's
+activation held at its check, once its read of the policy had returned
+(Codex), the check found it stale and answered `errReplanned`, and
+`transition` took it back and closed its output before Revoke ran, which found
+no sink open and recorded no fault: the session played on, to the end of its
+queue or to the PCM after it. With it held at its sink's admission (Claude),
+nothing fenced the sink, so the activation completed in the window and gave the
+node its prefill, DSD silence at the rate the change had taken away, until
+Revoke stopped it. The reconciliation now judges every occurrence first, then,
+before anything is marked stale, records the revocation's fault on the session
+for an occurrence whose own sink's activation is under way (claimed, its output
+adopted), for the reason Revoke is then given (`revoke[0]`, which the first
+pass orders), and fences that native sink as a hand-off's is. The fault is the
+one the producer's next step stops on, set once, Revoke adding none (its
+`s.fault == nil`); a converted occurrence's PCM sink records it too, its
+activation's check answering `errReplanned` as a native one's does, and a
+session being released records none, its release ending it. Recorded after the
+reconciliation's lock, as Revoke records its own while a sink is open, the
+fault was lost in every order the tests hold (a control); recorded for an
+occurrence with no output, it faulted the PCM a prepared DSD successor sat
+behind (a control). A session's first occurrence is claimed in its Start for
+its activation, so a revocation there fences its sink too, and the Start fails
+saying the session's DSD was revoked (a native Start's failure is the engine's
+`backend_error`); round 5 let that activation give the node its prefill in the
+same window. A second record of the one fault cannot be told from the first
+through the real paths (one field, one reason, sent once), so the rule's own
+case calls Revoke for another reason with the sink open
+(`TestARevocationsFaultIsTheSessionsOneFault`).
+`TestARevocationAtASuccessorsActivationCheckKeepsItsFault` (Codex's hold: a
+native successor, one with PCM after it, and a converted one),
+`TestARevocationThatRunsDuringATakeBackKeepsItsOneFault` (the take-back held in
+its close while the warning and Revoke run),
+`TestARevocationOfAPreparedSuccessorLetsThePCMPlayOn`,
+`TestARevocationAtTheFirstOccurrencesActivationFencesItsSink` and round 5's
+case, which now requires the node given nothing, pin it.
+
+Round 7 (2026-11-08, the reviews of round 6, with main merged). A session's
+first occurrence stayed claimed after its activation succeeded until its Start
+locked again, so a reconciliation in that window recorded the revocation and
+fenced the live sink, and the Start, which read the fault beside an
+activation's error alone, launched its producer, which stopped on the fault
+before its first frames, and its reporter: the engine took the Start's failure
+in the producer's words, which named no revocation, or the reporter's fault,
+whichever came first. The Start now reads the recorded revocation in the step
+that gives the claim up, whether or not the activation erred, and fails naming
+it before anything is launched; giving the claim up as the activation completes
+was the other way, and would have left the Start's answer to the producer's race
+with Revoke. A converted occurrence's PCM sink is not fenced, and needs none: it
+admits its node at its open, before its output is adopted, where no fault is
+recorded and its adoption closes it unwritten once the occurrence is stale, and
+at a resume's reopen, after the claim is given up; it writes nothing of its own;
+and the producer, which alone writes it, stops at its next step on the recorded
+fault. The internal case of the one fault reads the fault while the
+reconciliation is held before Revoke: read after, it was Revoke's own record too,
+and a reconciliation that recorded nothing passed.
+`TestARevocationOnceTheFirstOccurrencesSinkActivatedFailsItsStart` (the install
+held, the fault's delivery held),
+`TestARevocationOfAConvertedSuccessorGivesItsNodeNothing` (held at its PCM sink's
+admission, and at its activation's install) and
+`TestARevocationsFaultIsTheSessionsOneFault` pin it.
+
+Round 8 (2026-11-08, the reviews of round 7). The install-held case of
+`TestARevocationOfAConvertedSuccessorGivesItsNodeNothing` let the reconciliation
+go on to `Backend.Revoke` with the install, and Revoke's drop of b's PCM sink
+could come before the producer's next step, so b's node stayed unwritten with
+both of the producer's checks removed, its stop on the session's fault and its
+wait on a stale occurrence (round 7's control K3). The case now holds the
+reconciliation before Revoke until the producer has decided its next step, which
+a per-backend seam reports from the producer's own goroutine
+(`Seams.ProducerStep`; the reporter's fault, which `holdNextFault` holds, says
+nothing of the producer), the kernel free so a write would land: that step must
+be the stop on the recorded fault, b's node given nothing then, and a write is
+followed until the node grows, which fails the case. With both checks removed it
+fails so, b's node given 24,576 bytes; with the stop on the fault alone removed
+it fails at once, the step a wait: a successor whose revocation an activation
+under way records is a re-plan the engine does not take (`judgeDSDLocked`), so it
+is stale too and the wait would keep its bytes off as well, but the case pins the
+stop. Held at its open's admission the occurrence has no output of its own: no
+fault is recorded, its adoption closes the sink unwritten and Revoke drops it,
+so the producer's stop is not what keeps that node unwritten, and the line says
+which guarantee holds where. `TestARevocationOfAConvertedSuccessorGivesItsNodeNothing`
+pins both.
+
+Round 17 (2026-11-09, the reviews of round 16). A choice's write is pending for
+an occurrence only until it publishes: `pendingFor` compares the set published,
+and the write's publish makes it play the occurrence's rate as the pending set
+does, while `pendingChoice.done` closes only once the reconciliation and Revoke
+have run. In that window nothing held an occurrence admitted under the set the
+write replaced, and round 16's case pinned the result as correct: the drain for
+a successor's own transport ending there, its own sink opened and its
+activation took it back. The set published alone cannot say whether the
+occurrence is kept, handed off again or its session's DSD revoked, so a wait
+re-judged at the publish was not taken; the reconciliation's step decides,
+under the session's lock, and closes `judged`, and Revoke closes it again once
+it has dropped what a revocation takes (an occurrence judged revoked is neither
+kept nor stale until then). The producer's transition waits for that verdict
+before it claims the occurrence's own sink, its sink before it drained, the
+session's stop or release then the bound; its gapless join and a converted join
+window wait only while the sink holds more than its floor, the reporter waking
+the producer at each measurement, so the floor still ends them and the sink
+never runs dry; a resume between transports waits in its loop beside a write's.
+Each wait takes `judged` under the session's lock and waits with the lock let
+go, never on the refreshes' lock, which the reconciliation holds, so the
+reconciliation never waits on the producer. A revocation's fault recorded in
+the reconciliation's own step wherever a sink plays the session's DSD was tried
+against CI's red on round 16's head and taken out: f's replacement cannot be
+judged before Revoke (its admission takes the refreshes' lock), and no test
+but its own needed it. That red's branch was not found (the engineering log's
+round 17 entry). `TestAGaplessSuccessorWaitsForAWriteNoLongerThanTheSinksLookahead`
+(the drain between the publish and the reconciliation, the reconciliation held
+above the floor, run beside a producer held at its wait and beside the engine's
+stop, b handed into a's sink before the write),
+`TestAConvertedJoinWindowWaitsForAWriteThatChangesItsSuccessor` (the
+reconciliation held above the floor, and held where it has asked the engine to
+hand f off again), `TestAResumeBetweenTransportsWaitsForTheReconciliationsVerdict`
+and `TestAnOccurrenceBesideAWriteIsNotRevoked` (no wait for an occurrence
+admitted under the set published) pin it.
+
+Round 18 (2026-11-09, the reviews of round 17). The converted join window's
+decision (`holdLocked`) read the set published first, its settled check, and
+the choice's write pending after it (`pendingFor`, which read the set again).
+A write registers its pending set, publishes with no session's lock held, has
+every session reconciled and only then lets its pending go, so a decision
+whose reads fell on either side of the publish found the write's set
+published and nothing pending for its successor, the write still registered
+or, past a panic between its publish and its reconciliation, let go, and
+continued the window into the successor's bits above the floor, the
+reconciliation then revoking the session's DSD (Codex's review). Reading the
+set once was not enough (Claude's review of the brief): the decision reads the
+write pending first and the set published once after it, for the settled
+check, the write's change and the verdict's wait. A publish before the second
+read leaves the successor admitted under the set it replaced, and the verdict
+is waited for; a write registered before the first read is waited for; one
+registered after it publishes after the decision, its classification waiting
+for the session's lock. Making the publish and the unregister atomic with
+respect to the session's lock was the other way, not taken: the publish would
+take every session's lock under the refreshes', for one reader. `next()`, the
+transition and the resume read the write pending first (`pendingFor`) and the
+set after (`unjudgedLocked`) already. A decision made just before a publish is
+the accepted order: the write's reconciliation finds the predecessor's frames
+the kernel's at the rate the write takes away and revokes the session's DSD
+(`policy.Reconcile`'s Revoke), the window decided, and asks no cut through it.
+A refresh that published and panicked before its reconciliation returned left
+its set published and unjudged, and the next refresh, finding the set the
+same, returned: a wait for the verdict ended only at the floor or the
+session's end, and the occurrence played on under a set that no longer played
+it. The backend keeps the set its last reconciliation that returned judged by
+(`dsdJudged`, under the refreshes' lock), and a refresh that finds the set the
+same reconciles it once more when it is not that one, a verdict and never a
+channel closed with nothing judged: the session monitor's next tick, at most
+100 ms later while a session holds DSD, gives it. That reconciliation is
+recorded before it runs: one that panics every time (a hand-off or Revoke
+that panics) is run twice, not by every refresh after it, where every new
+session's first admission would meet it.
+`TestAConvertedJoinWindowWaitsForAWriteThatChangesItsSuccessor` forces the
+publish, and a panic at the publish, between the decision's reads
+(`Seams.Deciding`), the lookahead above the floor, each red at round 17's head
+and at round 16's, where CI's red was (run 42619003055); the panic then the
+monitor's unchanged refresh, red at round 17's head; the decision made before
+the write; and a wait no write ends (the write held before its publish, or
+between its publish and its reconciliation) ending at the floor at the first
+reporter step after the floor's measurement. Round 17's boundary case guards
+an ordering, and says which: the replacement's admission seen to begin while
+the revocation is held (`Seams.Admitting`), its open not ended, no end named
+after the predecessor and its window undecided then; a lock-free admission
+failed it 20 times in 20. `TestAWriteThatPanicsLeavesNothingPending` (after its
+publish) pins the record, and `TestALostReconciliationIsTriedOnceMore` the
+reconciliation once more and no more.
+
+Round 19 (2026-11-10, the reviews of round 18 and of round 19's brief). A
+reconciliation that panicked reached the refresh's caller: an admission (a
+Start), an activation (the producer's transition), the monitor, the
+supervisor's refresh, the silent probe's. Round 18 recorded the set judged
+before its second reconciliation ran, so one whose hand-off panicked again was
+never tried after it, and the occurrence it failed on played on unjudged; and
+every session after the panicking one in the backend's loop, a map, was never
+judged, a session whose occurrence the set revokes among them, playing a plan
+the set took away (Codex and Claude on round 18). Each session's reconciliation
+is contained now (`session.reconcileDSD`): its judgement under a `lockHold`
+(`judgeDSDStep`), each hand-off, and Revoke, whose locked section holds the
+lock through a `lockHold` too, so a panic there lets the lock go. A panic is
+logged with its stack where it is recovered, and the step it came in is
+answered to the loop, which judges every other session. The set is recorded
+judged only once every reconciliation against it has completed; a session's
+own record (`session.dsdJudged`) keeps the retry from judging a session whose
+reconciliation completed, and a hand-off that returned is marked (`handedOff`)
+and not asked again. The retry is the next refresh's, which finds the set the
+same, and its failure is terminal (`dsdAttempts`, two): each session it failed
+in is stopped, its fault recorded (`backend_failed`, as for any panic of the
+backend's) and its DSD revoked through Revoke, unless Revoke is what panicked,
+where the fault alone stops it; the stop hands nothing off. One more attempt
+and no more: a panic that does not come back changes nothing, and one that
+does stops only the sessions it is in. A reading of the policy that panics
+(the binding, the box's unit, its controls or its mixer table, the state), or a
+publish that does, reaches only a choice's write, whose request's recoverer
+answers it, its pending set settled (round 18's
+`TestAWriteThatPanicsLeavesNothingPending`). Every other caller asks
+`tryRefreshDSD`, which recovers it under the refreshes' lock and counts it in
+the run of such failures that the next refresh to complete ends. The run's
+first is logged once, with its stack, never at every tick; from its second in a
+row (the same bound) every session that holds DSD, an opened occurrence
+admitted under the policy and not played out, is stopped the same way, and an
+admission refuses its occurrence's DSD (`dsd_dac_unread`, as a set that does
+not read refuses it) and an activation refuses: a reading that does not
+complete judges nothing, so an unjudged set's retry never comes while the run
+lasts (Codex on round 19's brief), and what plays is no longer read against
+the policy. A failed reading leaves `dsdRead` as it was, so the next
+admission reads again. The monitor recovered outside its loop, so one panic
+ended it while its session held DSD: each tick's refresh is contained now and
+the monitor takes its next tick, and a panic outside that containment stops
+its session with its fault. Six cases, each red at round 18's head (a copy
+with `Seams.Revoking` as a names-only shim) and red again with its part of the
+fix reverted (fifteen controls, each predicted in writing before its run): a
+hand-off that panics in one session beside eight whose occurrence heard the
+set revokes, in eight backends, so the map's order reaches it first in one
+(`TestAHandOffThatPanicsStopsItsSessionAndTheOthersAreJudged`); Revoke
+panicking under its lock (`TestARevocationThatPanicsStopsTheSession`); the
+retry taken by an activation, which answers and does not panic
+(`TestAnActivationThatTakesTheRetryDoesNotPanic`); a hand-off that recovers,
+each occurrence's returning once, nothing revoked, the set judged and a
+further refresh asking nothing
+(`TestAHandOffThatRecoversIsAskedOnceAndJudgesTheSet`); an unjudged set and
+readings that panic in the binding or the state
+(`TestReadsThatPanicOverAnUnjudgedSetStopWhatHoldsDSD`); and the monitor's
+next tick after a panic in the box's reading of the unit's model
+(`TestTheMonitorTakesItsNextTickAfterAPanic`). Round 18's rule forbade reading
+the set published twice in any decision that asks both; `next()`, the
+transition and the resume read the write pending (`pendingFor`, which loads
+the set itself) and the set again (`unjudgedLocked`), and their order is safe
+(Claude's review of round 18): a write registered after the pending read
+cannot publish while the session's lock is held, its classification taking
+it, and a publish between the two reads moves the set the second finds, which
+is a wait for the verdict. The rule is scoped to the converted window's
+decision (`holdLocked`), whose single read of the set the round-18 defect
+needed; the three keep their shape.

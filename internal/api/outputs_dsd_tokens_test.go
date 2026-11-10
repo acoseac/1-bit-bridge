@@ -230,9 +230,14 @@ func dsdReadSideTokens(t *testing.T, root string) dsdReadTokens {
 		firstUse:       r.named(t, "playback", "FirstUse"),
 		blocked:        r.keyed(t, "policy", "gain.go", "Gain", "Reason"),
 	}
-	// The policy decides DSD64 to DSD256 in Effective and decide; At's own
-	// refusal is of a rate it does not decide, which no refused entry is.
+	// The policy decides DSD64 to DSD256 in Effective and decide, and refuses
+	// in Intersect what a choice's write that landed uncertain leaves playing
+	// two ways (B728 B9); At's own refusal is of a rate it does not decide,
+	// which no refused entry is.
 	out.refusals = r.refusalsOf(t, "policy", "policy.go", "Effective", "decide")
+	for v := range r.refusalsOf(t, "policy", "choice.go", "Intersect") {
+		out.refusals[v] = true
+	}
 	for v := range r.keyed(t, "policy", "policy.go", "Plan", "Reason", "Effective", "decide") {
 		out.refusals[v] = true
 	}

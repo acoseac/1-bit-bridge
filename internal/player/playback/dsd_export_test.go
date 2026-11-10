@@ -28,6 +28,10 @@ func (b *Backend) AdmitDSDForTest(f format.NativeDSD, leading bool) (engine.Nati
 	return plan, o.admitted.gen, err
 }
 
+// SetSeamsForTest gives b the seams s, before anything asks them: a test of
+// a backend another test's helper built.
+func SetSeamsForTest(b *Backend, s *Seams) { b.cfg.Seams = s }
+
 // AdmitDSDPlanForTest is AdmitDSDForTest with the effective set's plan the
 // occurrence was admitted under, and whether it converts (B728 B11): a
 // converted rate's admission has no native plan.
