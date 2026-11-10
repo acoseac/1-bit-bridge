@@ -650,7 +650,11 @@ var Ext = map[string]bool{
 // rows re-expand as on every bump. What a client that does not declare the
 // formats sees is unchanged (X-Bridge-Formats, PROTOCOL.md). ProtocolVersion
 // stays 1.
-const ExtractorVersion = 32
+//
+// v33 — M4A work atoms (©wrk) and freeform WORK under any mean are read by
+// the ilst walk (B428). Existing work answers keep their precedence; newly
+// populated rows join the delta, unchanged rows only stamp. Protocol stays 1.
+const ExtractorVersion = 33
 
 // Extract reads as much metadata as it can from the file at absPath and
 // fills in the Track at t. Path, Size, ModTime on t MUST already be set by
@@ -882,6 +886,17 @@ func extractMP4WithContext(absPath string, t *Track, ec *ExtractContext) error {
 	}
 	if err := extractViaDhowdenFromReader(f, absPath, t, ec); err != nil {
 		return err
+	}
+	// Preserve every work already selected by populateFromTagMetadata. This
+	// supplemental read also runs when dhowden could not parse the metadata,
+	// just like the genre and advisory walks below.
+	if t.Work == "" {
+		if raw, err := extractMP4WorkTags(f); err != nil {
+			scanLogger.Warn("mp4 work walk failed; manifest will carry no work",
+				"path", trackLogPath(absPath, t), "err", walkErrReason(err))
+		} else if work, ok := workOf(tag.MP4, raw, nil); ok {
+			t.Work = work
+		}
 	}
 	// The iTunes predefined genre (`gnre`), which dhowden does not read —
 	// see extractMP4PredefinedGenre. Only when no text genre was found: a

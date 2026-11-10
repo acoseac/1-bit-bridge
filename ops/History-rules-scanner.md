@@ -2126,9 +2126,9 @@
   never read before (the app's ID3v2Parser reads TT1). **Don't put TIT1 back in
   front**, and **don't change the reading on one side alone**: the app's ID3v2Parser
   must read the work the same way (its paired PR), or one file is two works. A Vorbis
-  comment's WORK is unchanged. The `©wrk` alias never answers an M4A's work atom,
-  which dhowden's MP4 reader does not keep, so an M4A's work has never been read
-  (measured; not this rule's). **v26 changes only the rows whose work changes**: a
+  comment's WORK is unchanged. At v26 the `©wrk` alias did not answer an M4A's
+  work atom, which dhowden does not keep; freeform iTunes WORK was already read.
+  B428 (v33, below) supplies the missing atom through the ilst walk. **v26 changes only the rows whose work changes**: a
   tag whose TXXX:WORK differs from its TIT1 or stands alone, and a version 2.2 tag
   holding TT1 or TXX:WORK. They take the full-upsert leg (their enrichment is
   re-queued once) and are the iOS delta; every other row is stamped, and SACD ISO
@@ -2138,6 +2138,41 @@
   (`TestTXXXWorkIsTheWorkAndTIT1OnlyWhenThereIsNone`,
   `TestPicardsWorkIsReadInEveryContainerAnID3v2TagReaches`,
   `TestScanner_V26_ATXXXWorkJoinsTheDelta_AWorkThatStaysOnlyStamps`.)
+
+- **An M4A work already read keeps its answer; otherwise the ilst walk supplies freeform WORK under any mean before ©wrk, only non-empty class-1 UTF-8 values up to 64 KiB, with oversized values absent, never truncated or replaced by a sentinel** (ExtractorVersion 33, B428).
+  **Don’t change workOf’s precedence: conflicting non-empty WORK and ©wrk can differ from the app’s item-order winner; trimming is not the app’s display cleaning.**
+  `extractMP4WorkTags` runs only when `populateFromTagMetadata` supplied no work,
+  preserving every previous answer, including dhowden's handling of repeated
+  freeform values and raw-key aliases. It supplies `workOf(tag.MP4, raw, nil)`
+  with `work` and `©wrk`; `workOf` itself is unchanged. The new walk reads the
+  first non-empty valid data value of each kind, in physical order, matching
+  freeform names through `normaliseRawTagKey`, under every mean. Empty and
+  whitespace-only values supply no candidate, so neither source suppresses
+  the other. No other format's extraction or precedence changes.
+  The 64 KiB value bound leaves ample room for long classical titles and
+  catalogue/movement detail while bounding allocation. It applies to the
+  supplemental reader alone, not existing dhowden values. Larger values,
+  non-class-1 data, invalid UTF-8 and short payloads are absent. Never reuse
+  the advisory reader's 256-byte limit and NUL stand-in for work text.
+  EOF/UnexpectedEOF is absence at the walk; genuine read/seek errors and walk
+  budget failures propagate to the caller's path-redacted Warn. The extractor's
+  existing read-fault handling remains in force. Like genre/advisory/rating,
+  this walk still runs when dhowden cannot parse metadata: its parse failure
+  is swallowed by `readDhowdenTags`, not a reason to skip the independent walk.
+  Ordinary single-source values agree with the app's work reading; conflicts
+  do not promise parity because its writes follow AVFoundation's item order.
+  Nor does trimming promise parity with `MetadataNormalizer.cleanDisplayName`.
+  The supplied iOS main 77cb4529 classifier recognizes `itsk/%A9wrk` and iTunes
+  freeform WORK, but strips arbitrary means only for advisory fields; despite
+  the task premise, that copy does not establish any-mean WORK parity.
+  Version 33 re-reads v32 rows once: new work advances `indexed_at` and resets
+  enrichment, while unchanged work only stamps. The existing protocol coverage
+  already names `©wrk`, so PROTOCOL.md and the wire schema stay unchanged.
+  `TestExtractMP4Work`, `TestExtractMP4Work_TruncatedPayload`,
+  `TestExtractMP4Work_DhowdenFailureStillWalks`, `TestReadMP4WorkText`,
+  `TestExtractMP4WorkTags_PropagatesIOFailure` and
+  `TestScanner_V33_MP4WorkReReadsV32Rows` pin this; the existing
+  `TestAnMP4WalkThatCannotReadItsFileNamesNoAbsolutePath` includes the work Warn.
 
 - **Every dhowden read goes through `dhowdenReadBuffer`, a page at a time**
   (2026-09-29, backlog B117). dhowden's `unsynchroniser.Read` reads its stream ONE BYTE

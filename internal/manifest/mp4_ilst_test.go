@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"path/filepath"
@@ -416,4 +417,196 @@ func withLeadingMdat(t *testing.T, mp4 []byte, size int) []byte {
 	out := append([]byte{}, mp4[:ftypSize]...)
 	out = append(out, atomBytes("mdat", make([]byte, size))...)
 	return append(out, mp4[ftypSize:]...)
+}
+
+// B428: use the actual four-byte atom name, never the five UTF-8 bytes of ©wrk.
+func TestExtractMP4Work(t *testing.T) {
+	work := func(v string) []byte { return ilstText("\xa9wrk", v) }
+	free := func(v string) []byte { return ilstFreeform("com.apple.iTunes", "WORK", v) }
+	long := strings.TrimSpace(strings.Repeat("Symphony in D minor — complete work; ", 12))
+	cases := []struct {
+		name  string
+		items [][]byte
+		want  string
+	}{
+		{"atom alone", [][]byte{work("  Requiem \n")}, "Requiem"},
+		{"iTunes WORK alone", [][]byte{free(" Mass ")}, "Mass"},
+		{"other mean WORK alone", [][]byte{ilstFreeform("org.example.tags", "WORK", " Mass ")}, "Mass"},
+		{"blank atom beside WORK", [][]byte{work(" \t\n"), free("Mass")}, "Mass"},
+		{"empty atom beside WORK", [][]byte{work(""), free("Mass")}, "Mass"},
+		{"atom beside blank WORK", [][]byte{work("Requiem"), free(" \n")}, "Requiem"},
+		{"atom beside empty WORK", [][]byte{work("Requiem"), free("")}, "Requiem"},
+		{"equal atom first", [][]byte{work("Mass"), free("Mass")}, "Mass"},
+		{"equal WORK first", [][]byte{free("Mass"), work("Mass")}, "Mass"},
+		{"conflict atom first", [][]byte{work("Requiem"), free("Mass")}, "Mass"},
+		{"conflict WORK first", [][]byte{free("Mass"), work("Requiem")}, "Mass"},
+		{"other mean wins atom first", [][]byte{work("Requiem"), ilstFreeform("org.example.tags", "WORK", "Mass")}, "Mass"},
+		{"other mean wins WORK first", [][]byte{ilstFreeform("org.example.tags", "WORK", "Mass"), work("Requiem")}, "Mass"},
+		{"existing WORK beats other mean", [][]byte{free("Mass"), ilstFreeform("org.example.tags", "WORK", "New")}, "Mass"},
+		{"longer than advisory limit", [][]byte{work(long)}, long},
+		{"at work limit", [][]byte{work(strings.Repeat("w", 64<<10))}, strings.Repeat("w", 64<<10)},
+		{"over work limit", [][]byte{work(strings.Repeat("w", (64<<10)+1))}, ""},
+		{"over limit beside WORK", [][]byte{work(strings.Repeat("w", (64<<10)+1)), free("Mass")}, "Mass"},
+		{"other mean over limit", [][]byte{ilstFreeform("org.example.tags", "WORK", strings.Repeat("w", (64<<10)+1)), work("Requiem")}, "Requiem"},
+		{"non-text data", [][]byte{atomBytes("\xa9wrk", dataAtom(21, []byte("Mass")))}, ""},
+		{"no data", [][]byte{atomBytes("\xa9wrk", nil)}, ""},
+		{"neither", nil, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			items := append([][]byte{ilstText("\xa9nam", "Movement")}, tc.items...)
+			raw := buildMP4WithILST(true, items...)
+			// Absence is part of the contract even when WORK would outrank
+			// an erroneously present blank candidate at final selection.
+			if tc.name == "blank atom beside WORK" || tc.name == "empty atom beside WORK" {
+				tags, err := extractMP4WorkTags(bytes.NewReader(raw))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, present := tags["©wrk"]; present {
+					t.Error("blank ©wrk supplied a candidate beside WORK")
+				}
+			}
+			tr := extractBytesAsM4A(t, raw)
+			if tr.Title != "Movement" || tr.Codec != "ALAC" {
+				t.Fatalf("fixture not parsed: title %q codec %q", tr.Title, tr.Codec)
+			}
+			if tr.Work != tc.want {
+				t.Errorf("Work length %d = %.100q, want length %d = %.100q", len(tr.Work), tr.Work, len(tc.want), tc.want)
+			}
+		})
+	}
+}
+
+func TestExtractMP4Work_TruncatedPayload(t *testing.T) {
+	raw := buildMP4WithILST(true, ilstText("\xa9wrk", "Requiem"))
+	// Keep every declared size; only the work's value is cut short.
+	end := bytes.Index(raw, []byte("Requiem")) + len("Requiem")
+	raw = raw[:end-2]
+	if got := extractBytesAsM4A(t, raw).Work; got != "" {
+		t.Fatalf("truncated work = %q, want absent", got)
+	}
+}
+
+func TestExtractMP4Work_DhowdenFailureStillWalks(t *testing.T) {
+	// A malformed title makes dhowden discard its metadata; the independent
+	// walks still read structurally sound sibling fields.
+	raw := buildMP4WithILST(true, ilstText("\xa9wrk", "Requiem"), ilstGnre(18), atomBytes("\xa9nam", dataAtom(99, []byte("bad"))))
+	if _, err := tag.ReadFrom(bytes.NewReader(raw)); err == nil {
+		t.Fatal("premise: dhowden accepted the malformed title")
+	}
+	tr := extractBytesAsM4A(t, raw)
+	if tr.Work != "Requiem" || tr.Genre != "Rock" {
+		t.Fatalf("Work/Genre = %q/%q, want Requiem/Rock despite dhowden failure", tr.Work, tr.Genre)
+	}
+}
+
+// The v26 scan proof's two legs: changed rows join the delta, unchanged rows
+// only stamp. Rewind the database alone so size and mtime cannot trigger a read.
+func TestScanner_V33_MP4WorkReReadsV32Rows(t *testing.T) {
+	root := t.TempDir()
+	rows := []struct {
+		name, old, want string
+		items           [][]byte
+	}{
+		{"atom.m4a", "", "Requiem", [][]byte{ilstText("\xa9wrk", "Requiem")}},
+		{"other.m4a", "", "Mass", [][]byte{ilstFreeform("org.example.tags", "WORK", "Mass")}},
+		{"existing.m4a", "Mass", "Mass", [][]byte{ilstFreeform("com.apple.iTunes", "WORK", "Mass"), ilstText("\xa9wrk", "Requiem")}},
+		{"plain.m4a", "", "", nil},
+	}
+	for _, row := range rows {
+		if err := os.WriteFile(filepath.Join(root, row.name), buildMP4WithILST(true, row.items...), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	store, sc := newScanFixture(t, root)
+	scanOnce(t, sc, "initial")
+	before := map[string]int64{}
+	for _, row := range rows {
+		if _, err := store.db.Exec(`UPDATE tracks SET extractor_version = 32, enriched_at = 1,
+			tags_json = json_remove(tags_json, '$.work') WHERE path = ?`, row.name); err != nil {
+			t.Fatal(err)
+		}
+		if row.old != "" {
+			if _, err := store.db.Exec(`UPDATE tracks SET tags_json = json_set(tags_json, '$.work', ?) WHERE path = ?`, row.old, row.name); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if got := storedTrack(t, store, row.name).Work; got != row.old {
+			t.Fatalf("rewind %s: %q", row.name, got)
+		}
+		before[row.name] = trackIndexedAt(t, store, row.name)
+	}
+	scanOnce(t, sc, "v33")
+	for _, row := range rows {
+		if got := storedTrack(t, store, row.name).Work; got != row.want {
+			t.Errorf("%s: Work = %q, want %q", row.name, got, row.want)
+		}
+		if got := trackColumn(t, store, row.name, "extractor_version"); got != int64(ExtractorVersion) {
+			t.Errorf("%s: version = %d", row.name, got)
+		}
+		after := trackIndexedAt(t, store, row.name)
+		enriched := trackColumn(t, store, row.name, "enriched_at")
+		if row.old != row.want {
+			if after <= before[row.name] || enriched != 0 {
+				t.Errorf("%s: changed row did not join delta/reset enrichment: %d -> %d, enriched %d", row.name, before[row.name], after, enriched)
+			}
+		} else if after != before[row.name] || enriched != 1 {
+			t.Errorf("%s: unchanged row was rewritten", row.name)
+		}
+	}
+	scanOnce(t, sc, "unchanged")
+	for _, row := range rows {
+		if got := storedTrack(t, store, row.name).Work; got != row.want {
+			t.Errorf("%s: later scan work = %q", row.name, got)
+		}
+	}
+}
+
+// mp4WorkReadFailure allows seeks to succeed and fails the value read itself.
+type mp4WorkReadFailure struct {
+	*bytes.Reader
+	err error
+}
+
+func (r mp4WorkReadFailure) Read([]byte) (int, error) { return 0, r.err }
+
+func TestReadMP4WorkText(t *testing.T) {
+	raw := dataAtom(1, []byte("Requiem"))
+	box := mp4Box{header: 8, size: uint64(len(raw))}
+	boom := errors.New("work read failed")
+	for _, tc := range []struct {
+		name    string
+		r       io.ReadSeeker
+		wantErr error
+	}{
+		{"truncated", bytes.NewReader(raw[:len(raw)-1]), nil},
+		{"EOF", bytes.NewReader(raw[:8]), nil},
+		{"read failure", mp4WorkReadFailure{bytes.NewReader(raw), boom}, boom},
+		{"seek failure", failingReadSeeker{err: boom}, boom},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			value, ok, err := readMP4WorkText(tc.r, box)
+			if value != "" || ok || !errors.Is(err, tc.wantErr) {
+				t.Fatalf("got %q, %v, %v", value, ok, err)
+			}
+		})
+	}
+	for _, class := range []uint32{0, 2, 21} {
+		raw := dataAtom(class, []byte("Mass"))
+		if _, ok, err := readMP4WorkText(bytes.NewReader(raw), mp4Box{header: 8, size: uint64(len(raw))}); ok || err != nil {
+			t.Errorf("class %d: %v, %v", class, ok, err)
+		}
+	}
+	invalid := dataAtom(1, []byte{0xff})
+	if _, ok, err := readMP4WorkText(bytes.NewReader(invalid), mp4Box{header: 8, size: uint64(len(invalid))}); ok || err != nil {
+		t.Errorf("invalid UTF-8: %v, %v", ok, err)
+	}
+}
+
+func TestExtractMP4WorkTags_PropagatesIOFailure(t *testing.T) {
+	boom := errors.New("disk failure")
+	if _, err := extractMP4WorkTags(failingReadSeeker{err: boom}); !errors.Is(err, boom) {
+		t.Fatalf("got %v, want %v", err, boom)
+	}
 }

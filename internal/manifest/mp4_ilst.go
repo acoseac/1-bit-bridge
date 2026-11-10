@@ -31,6 +31,7 @@ import (
 	"errors"
 	"io"
 	"strings"
+	"unicode/utf8"
 )
 
 // id3v1Genres is dhowden/tag's `id3v2Genres` VERBATIM — the table its ID3
@@ -147,6 +148,99 @@ func extractMP4PredefinedGenre(r io.ReadSeeker) (string, error) {
 		return "", err
 	}
 	return id3v1GenreName(value), nil
+}
+
+// maxMP4WorkText bounds a work value at 64 KiB: ample room for a long
+// classical title and its catalogue/movement detail, without allocating an
+// arbitrary declared atom size. Larger values are absent, never truncated or
+// replaced by the advisory reader's non-empty sentinel. Existing dhowden
+// values are left alone; this bound applies only to this supplemental walk.
+const maxMP4WorkText = 64 << 10
+
+// extractMP4WorkTags supplies the existing workOf aliases: WORK from any mean
+// before ©wrk. The first non-empty valid value of each kind wins. Malformed
+// structure and truncated values are absent; real I/O and walk-budget errors
+// propagate, as in the genre and advisory walks.
+func extractMP4WorkTags(r io.ReadSeeker) (map[string]any, error) {
+	ilst, found, err := findMP4Ilst(r)
+	if err != nil || !found {
+		return nil, err
+	}
+	raw := make(map[string]any, 2)
+	for _, kind := range []string{"----", "\xa9wrk"} {
+		for cursor := ilst.payloadStart(); cursor < ilst.end(); {
+			box, found, err := findMP4Child(r, kind, cursor, ilst)
+			if err != nil {
+				return nil, err
+			}
+			if !found {
+				break
+			}
+			key := "©wrk"
+			if kind == "----" {
+				name, ok, err := readMP4FreeformName(r, box)
+				if err != nil {
+					return nil, err
+				}
+				if !ok || normaliseRawTagKey(name) != "work" {
+					cursor = box.end()
+					continue
+				}
+				key = "work"
+			}
+			value, ok, err := readMP4WorkValue(r, box)
+			if err != nil {
+				return nil, err
+			}
+			if ok {
+				raw[key] = value
+				break
+			}
+			cursor = box.end()
+		}
+	}
+	return raw, nil
+}
+
+// readMP4WorkValue reads the first usable text data child of a work atom.
+func readMP4WorkValue(r io.ReadSeeker, box mp4Box) (string, bool, error) {
+	for cursor := box.payloadStart(); cursor < box.end(); {
+		data, found, err := findMP4Child(r, "data", cursor, box)
+		if err != nil || !found {
+			return "", false, err
+		}
+		value, ok, err := readMP4WorkText(r, data)
+		if err != nil || ok {
+			return value, ok, err
+		}
+		cursor = data.end()
+	}
+	return "", false, nil
+}
+
+// readMP4WorkText accepts only class-1 UTF-8, skipping the type and locale.
+// EOF/UnexpectedEOF means absent; other read and seek failures propagate.
+func readMP4WorkText(r io.ReadSeeker, data mp4Box) (string, bool, error) {
+	const valueOffset = 8
+	payload := data.size - data.header
+	if payload < valueOffset || payload-valueOffset > maxMP4WorkText {
+		return "", false, nil
+	}
+	if _, err := r.Seek(int64(data.payloadStart()), io.SeekStart); err != nil {
+		return "", false, err
+	}
+	buf := make([]byte, int(payload))
+	if _, err := io.ReadFull(r, buf); err != nil {
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	if binary.BigEndian.Uint32(buf[:4])&0x00FFFFFF != 1 || !utf8.Valid(buf[valueOffset:]) {
+		return "", false, nil
+	}
+	value := strings.TrimSpace(string(buf[valueOffset:]))
+	return value, value != "", nil
 }
 
 // findMP4Ilst locates `moov/udta/meta/ilst`. `found` is false — no error —

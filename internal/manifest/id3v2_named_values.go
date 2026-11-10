@@ -245,8 +245,9 @@ func id3v2NamedValue(named []id3v2Named, name string) (string, bool) {
 // change): read on one side alone, one file is two works.
 //
 // Every other format has no named values, and its aliases answer as they
-// always did: a Vorbis comment's WORK. The ©wrk alias never answers an MP4
-// file's work atom, which dhowden's MP4 reader does not keep.
+// always did: a Vorbis comment's WORK, an MP4 freeform WORK. The supplemental
+// MP4 ilst walk supplies WORK under any mean and ©wrk when dhowden gave no
+// work; freeform WORK stays ahead of ©wrk regardless of physical atom order.
 func workOf(format tag.Format, raw map[string]any, named []id3v2Named) (string, bool) {
 	if v, ok := id3v2NamedValue(named, "work"); ok {
 		return v, true

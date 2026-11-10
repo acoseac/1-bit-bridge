@@ -93629,3 +93629,62 @@ admission and recovery-signal coverage in
 `TestRecoveryStepsKeepFreshSignalsAfterTheHoldIsGivenUp`.
 Round 13/14's descriptor-mode, doctor advice, console cache expiry and
 startup replacement cases are unchanged and must remain green too.
+
+
+## 2026-11-10 — B428: read the M4A work atom (ExtractorVersion 33)
+
+B127's observation still held at d6dd1c3b: dhowden drops the four-byte
+`0xA9 w r k` atom; iTunes freeform WORK already works after locale stripping.
+The synthetic ilst fixtures use `"\xa9wrk"`, not the five UTF-8 bytes of `©wrk`.
+The initial red-first command (Go 1.27.3 on PATH, GOTOOLCHAIN=local,
+TMPDIR outside the checkout) was:
+
+```sh
+go test -tags ts_omit_webclient,ts_omit_debugeventbus -timeout 30m -count=1 ./internal/manifest -run 'TestExtractMP4Work|TestScanner_V33'
+```
+
+It built and failed on nine missing-work table cases (atom alone, other-mean
+WORK alone, atom beside blank/empty WORK, other-mean conflicts in both orders,
+longer than 256 bytes, the 64 KiB boundary, oversized other-mean WORK beside
+valid ©wrk), on the independent read after dhowden's parse failure, and on
+v32 rows keeping empty work and not entering the delta/resetting enrichment.
+Existing iTunes WORK and its precedence cases passed. A preliminary malformed
+fixture assumed plain QuickTime meta made dhowden error; it actually returned
+success without tags. The red-first fixture instead uses an unsupported title
+class, asserting dhowden's error before checking the independent work/genre.
+During green verification two fixture expectations were corrected: the long
+value is trimmed, and a truncated value must end inside the work text, not in
+the codec boxes after it. Supplemental reader tests assert EOF, UnexpectedEOF,
+real read/seek errors, invalid UTF-8 and non-text classes directly.
+
+The MP4 fallback runs only when the existing work is empty, supplies `workOf`
+with WORK ahead of ©wrk and changes neither that selector nor another format.
+It reads WORK under any mean, first non-empty valid value per kind. Empty or
+whitespace-only values supply no candidate. Class 1 and valid UTF-8 are required.
+A separate reader caps values at 64 KiB (ample space for classical titles with
+catalogue/movement detail); larger values are absent, never truncated and never
+represented by the advisory reader's NUL stand-in. Existing dhowden values keep
+their behavior and are not subjected to this supplemental bound. Malformed
+structure/truncation is absent at the walk; actual I/O and walk-budget failures
+propagate to a path-redacted Warn, with existing extraction fault tracking intact.
+Like the other ilst fields it still runs after dhowden fails to parse metadata.
+
+The v33 scan proof follows B127's
+`TestScanner_V26_ATXXXWorkJoinsTheDelta_AWorkThatStaysOnlyStamps`: scan real
+fixtures, rewind only database version/work to v32 (size/mtime untouched), scan
+again, and check new work, indexed_at advancement, enrichment reset, and the
+stamp-only behavior of unchanged iTunes WORK and no-work rows.
+
+Known limits: conflicts between non-empty WORK and ©wrk retain the bridge's
+freeform-first precedence, whereas iOS writes follow AVFoundation item order.
+Only trimming is shared; no app display-name cleaning is added. The supplied
+AVTagClassifier at iOS 77cb4529 actually strips arbitrary means only for advisory
+fields, not WORK, contrary to the task premise. Any-mean WORK is supported here,
+but parity with that iOS copy is not claimed. Also measured: dhowden's unsupported
+mean path consumes its freeform and then seeks again, potentially skipping later
+siblings. The new walk recovers work; the dependency's other metadata is unchanged.
+PROTOCOL.md's classical coverage already names ©wrk and now matches this reader;
+no protocol edit, schema change, or mirror is required for this fix.
+
+Focused green: six new top-level tests plus the extended existing MP4 log-path
+test pass. Negative controls and full-check results follow in the validation entry.
