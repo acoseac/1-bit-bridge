@@ -38,8 +38,8 @@ import (
 // The sweep reads one function at a time: a helper that is handed the path
 // by a caller in another function, and writes it, is a writer it does not
 // see, since the helper names no config path and the caller writes nothing
-// (copyFile and writeFrom are listed by name for that reason). That is its
-// one known blind spot.
+// (copyFile and writeFrom, and their hashing twins, are listed by name for
+// that reason). That is its one known blind spot.
 var configWriters = map[string]string{
 	"cmd/bridge/library.go:libraryAddCmd":                                     "config.Edit",
 	"cmd/bridge/library.go:libraryRemoveCmd":                                  "config.Edit",
@@ -117,7 +117,7 @@ var comparedSaves = map[string]string{
 // instead. The sweep requires each to still be one of those, so an entry
 // cannot outlive the reason it was written for.
 var notConfigWriters = map[string]string{
-	"internal/backup/backup.go:Snapshot": "reads bridge.yaml into a snapshot, and writes the snapshot's own files",
+	"internal/backup/backup.go:captureInto": "reads bridge.yaml into a snapshot, and writes the snapshot's own files",
 }
 
 // configPathNames are the names this tree gives a config file's path: a
@@ -131,9 +131,10 @@ var configPathNames = map[string]bool{
 
 // fileWriteCalls are the calls, besides the ones fileWriteCall knows by their
 // shape, that write a file's bytes or put a file in place, as the sweep
-// renders them (callChain): this tree's own helpers that do (restore's copy).
+// renders them (callChain): this tree's own helpers that do (restore's copy,
+// and the snapshot's copies, which hash what they write: backlog B653).
 var fileWriteCalls = map[string]bool{
-	"copyFile": true, "writeFrom": true,
+	"copyFile": true, "writeFrom": true, "copyFileHashed": true, "writeFromHashed": true,
 }
 
 // fileWriteMethods are the names of the methods and functions that write a

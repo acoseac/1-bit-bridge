@@ -327,6 +327,7 @@ func TestSnapshotAndRestoreAsRootKeepThePlayerUUID(t *testing.T) {
 	assertGivenAway(t, changes(), []string{
 		filepath.Join(dataDir, backup.BackupsDirName),
 		snap,
+		filepath.Join(snap, backup.OwnerLockName),
 		filepath.Join(snap, backup.ManifestDBFileName),
 		filepath.Join(snap, "tokens.json"),
 		filepath.Join(snap, "server.crt"),

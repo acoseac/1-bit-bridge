@@ -347,6 +347,9 @@ func buildDoctorDepsWith(cfgPath string, absentIsPreSetup bool, dacHost dacAcces
 			// B660), from the marker in that data dir, for the CLI and the
 			// console alike.
 			d.InstallProbation = doctorInstallProbation(cfg.DataDir)
+			// The newest snapshot written and the newest whose database is
+			// verified, from their manifests (backlog B653).
+			d.Backups = doctorBackups(cfg)
 			// The cert pair `bridge serve` would load — an explicit
 			// `tlsCertPath` included, which the cert checks used to
 			// ignore in favour of the DataDir defaults and so graded a

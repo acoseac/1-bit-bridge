@@ -30,7 +30,7 @@ func TestSnapshotAndRestoreAsRootKeepTheInstallOwner(t *testing.T) {
 		t.Skip("a file takes its directory's ACL on Windows; these helpers change no owner there")
 	}
 	dataDir := resolvedTempDir(t)
-	src := primeLiveState(t, dataDir)
+	src := primePreLadderLiveState(t, dataDir)
 	changes, restore := fsutil.SimulateRootForTest(4242, 4243)
 	defer restore()
 
@@ -41,6 +41,9 @@ func TestSnapshotAndRestoreAsRootKeepTheInstallOwner(t *testing.T) {
 	wantSnapshot := []string{
 		filepath.Join(dataDir, backup.BackupsDirName),
 		snap,
+		// The capture's owner lock (backlog B653's second round): left
+		// root's, the service's prune could not ask it.
+		filepath.Join(snap, backup.OwnerLockName),
 		filepath.Join(snap, backup.ManifestDBFileName),
 		filepath.Join(snap, "tokens.json"),
 		filepath.Join(snap, "server.crt"),
@@ -103,7 +106,7 @@ func TestSnapshotAndRestoreAsRootKeepTheConsoleAccountAndHarvestState(t *testing
 		t.Skip("a file takes its directory's ACL on Windows; these helpers change no owner there")
 	}
 	dataDir := resolvedTempDir(t)
-	src := primeLiveState(t, dataDir)
+	src := primePreLadderLiveState(t, dataDir)
 	src.AdminAuth = filepath.Join(dataDir, backup.AdminAuthFileName)
 	src.AtlasHarvest = filepath.Join(dataDir, backup.AtlasHarvestFileName)
 	if err := os.WriteFile(src.AdminAuth, []byte("{}\n"), 0o600); err != nil {
@@ -122,6 +125,7 @@ func TestSnapshotAndRestoreAsRootKeepTheConsoleAccountAndHarvestState(t *testing
 	wantSnapshot := []string{
 		filepath.Join(dataDir, backup.BackupsDirName),
 		snap,
+		filepath.Join(snap, backup.OwnerLockName),
 		filepath.Join(snap, backup.ManifestDBFileName),
 		filepath.Join(snap, "tokens.json"),
 		filepath.Join(snap, "server.crt"),

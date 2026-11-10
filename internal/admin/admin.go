@@ -1571,6 +1571,12 @@ type Server struct {
 	// grace as the HTTP listener.
 	bgScans sync.WaitGroup
 
+	// bgBackups tracks every snapshot verification the console's create
+	// started (verifyInBackground), joined in the same drain as bgScans: the
+	// job runs on ScanCtx, which the shutdown cancels, and writes its
+	// INCOMPLETE within backup.StopWriteBound (backlog B653).
+	bgBackups sync.WaitGroup
+
 	// artistImages caches the "which artists have a cached portrait"
 	// set for the player's artist grid. One ReadDir behind a short TTL;
 	// see cachedArtistImages for why it is neither uncached nor
@@ -1607,21 +1613,28 @@ type Server struct {
 	// publishes only if it still matches. (CodeRabbit on #947.)
 	analysisCoverageGen uint64
 
-	// lastBackupAt caches the newest snapshot's timestamp for the jobs
-	// card. Same TTL + singleflight shape as analysisCoverage above,
-	// for the same reason: /api/jobs is polled every 10s per open tab,
-	// and the underlying backup.List walks every snapshot directory
-	// reading a manifest out of each — filesystem work that has no
-	// business happening once per poll per tab.
+	// lastBackup caches what the jobs card shows of the backups folder:
+	// the newest snapshot written, the newest whose database is verified,
+	// and the newest's two verdicts (backupCard). Same TTL + singleflight
+	// shape as analysisCoverage above, for the same reason: /api/jobs is
+	// polled every 10s per open tab, and the underlying backup.ListContext
+	// walks every snapshot directory reading a manifest out of each —
+	// filesystem work that has no business happening once per poll per tab.
 	//
-	// invalidateLastBackup() clears it so an operator-triggered snapshot
-	// shows up immediately rather than up to a TTL later; waiting would
-	// just move the confusion from "why is this slow" to "did my backup
-	// work", and produce the refresh-spam this cache exists to remove.
+	// A poll asks the backups folder's modification time first, one stat,
+	// and lists again when it moved (backlog B653): a snapshot made or
+	// removed moves it, and so does a verdict's write (backup's
+	// stampChange), so a snapshot `bridge backup` takes in another process,
+	// and the verdict serve's own verification writes, show at the next
+	// poll. invalidateLastBackup() clears the entry too, for an
+	// operator-triggered snapshot.
 	lastBackupMu    sync.Mutex
 	lastBackupAt    time.Time // when the cache was filled
-	lastBackupAtVal *time.Time
+	lastBackupStamp time.Time // the backups folder's modification time then
+	lastBackupCard  backupCard
 	lastBackupSF    singleflight.Group
+	// lastBackupListings counts the listings the card has made, for a test.
+	lastBackupListings atomic.Int64
 
 	// enrichment cache (dashboard enrichment-progress breakdown). Same shape
 	// and rationale as the composition cache above: EnrichmentBreakdown is a
@@ -2268,6 +2281,7 @@ func (s *Server) ServeListener(ctx context.Context, lis net.Listener) error {
 		go func() {
 			s.bgScans.Wait()
 			s.WaitForCatalogRefresh()
+			s.WaitForBackupJobs()
 			close(drained)
 		}()
 		select {

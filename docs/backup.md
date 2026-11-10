@@ -5,6 +5,218 @@ database, pairing tokens, TLS pair, configuration, console account, harvest
 state and player identity with its counter floor, when present. A running
 service can be backed up. Protect snapshots: they contain credentials.
 
+## Verified snapshots
+
+Each snapshot is checked as it is taken. The snapshot records every file's
+size and SHA-256 as it writes it, and its `manifest.json` says the check is
+pending until the check has run. The check compares the snapshot with those
+records, never replacing them, and records two verdicts in the manifest:
+
+- **the database's**: the copy has the size and SHA-256 it was written with;
+  SQLite's `quick_check`, run over a read-only open that creates nothing in
+  the snapshot, answers exactly `ok` (its pages and records well formed, no
+  NULL where a column is NOT NULL); and its `user_version` is one this
+  bridge's migrations reach, with that version's tables and columns there.
+  `quick_check` does not compare an index with its table:
+  `bridge backup --verify <snapshot-dir> --full` runs SQLite's
+  `integrity_check` and `foreign_key_check` as well.
+- **the other files'** (the configuration, the token store, the TLS pair,
+  the console account, the harvest state and the player's files): each is
+  there, a regular file, with the size and SHA-256 it was written with.
+
+A verdict is `VERIFIED`, `FAILED` with a reason code (`hash-mismatch`,
+`quick-check`, `schema-newer` and so on), or `INCOMPLETE` when the check did
+not finish (the bridge stopped, or the check ran past its deadline). A
+snapshot whose check is still to come, or under way, reads `PENDING`; one
+whose bridge stopped before its check ended reads `INCOMPLETE`. A snapshot
+taken by an earlier version records no sizes or hashes and reads
+`UNVERIFIED`: neither verified nor known to be damaged, its files are checked
+for presence only.
+
+One check runs at a time, at the lowest priority the platform gives a
+thread, its reads paced. A check removes nothing, whatever it finds.
+
+`bridge backup` says what it kept and both verdicts, and exits 0 only when
+both are `VERIFIED` (for an install with no database yet, when its files
+are). `bridge backup [--config bridge.yaml] --verify <snapshot-dir> [--full]`
+checks a snapshot already taken in the backups folder of the install the
+configuration names, however the path is written (`.` inside the snapshot, a
+link to it), and records its verdict; a copy of a snapshot kept elsewhere is
+refused, so copy it back into that folder to check it. A quick check never
+replaces the verdict of a full one unless it finds the snapshot worse.
+`bridge doctor` and the console (Jobs, and Settings → Backups) show the
+newest snapshot written and the newest whose database is verified, apart,
+with both verdicts; they read the snapshots' manifests and run no check. A
+command the doctor suggests gives the configuration as `<bridge.yaml>`: use
+the one the doctor read.
+
+A snapshot already verified is marked, durably, as being checked again
+before its check begins, and until that check's verdict is written and
+durable no reader takes the snapshot for verified, whatever happens to the
+write. Only a check that finishes clears that mark: one that is stopped,
+runs past its deadline or fails on an error of the bridge's own leaves it,
+and so does one given up (below), subject to an operation that already
+passed its last check for give-up. Each removal, rename attempt and creation
+of a veto checks immediately before its call. Both the step and its hold
+are checked before each veto creation attempt, even its existence lookup;
+the fallback in the backups folder is attempted only if the bundle attempt
+failed. The check
+and call are not atomic: a give-up between them still lets the call run.
+A removal, rename attempt or mark creation already begun when the give-up
+lands finishes afterward. Removal of the last effective mark exposes what
+the finished check found and wrote. Where the storage cannot keep that mark, the snapshot is not checked again: `bridge backup --verify`
+says so, and what its earlier check found. If that refusal is cleaning up
+a mark it created when it is given up, a removal already begun can finish
+after the caller has answered. Successful removal of the last effective
+mark restores the earlier check's record as it stood before the recheck;
+another mark or a failed removal keeps the conservative reading. The
+reported read-back is what was read then. When a verdict cannot be
+written, `bridge backup --verify` says what the check found and, apart, what
+the record reads. When the record cannot be read back once the check has
+written it, or written nothing, `bridge backup --verify`, `bridge backup` and
+the scheduled snapshot say so and what the write did, and never take what
+the check found for the record; the command then exits 1.
+
+On Windows no folder can be synced, so a re-verification of a snapshot
+already verified does not replace its manifest's verdict. The check still
+runs and reports what it found separately from what readers now read. If a
+component check finishes FAILED where the record held it VERIFIED, even
+when the other component is INCOMPLETE, it puts a veto in the snapshot,
+or beside it in the backups folder. All readers,
+including the doctor, console, startup decision and future prunes, then read
+the old VERIFIED as INCOMPLETE (`unsynced`). The console's cached reading is
+invalidated by a separate stamp of the backups folder. That stamp also
+checks give-up first: if skipped, the error says the record is vetoed but
+the console may retain its cached reading until its cache expires or the
+backups folder changes. This is not a failed veto. An INCOMPLETE component
+disproves nothing; it does not negate a completed failure of the other one.
+The veto cannot be made crash-durable on Windows. If both placement
+attempts fail, the error explicitly says the disproved record could not be vetoed
+and this verification skips its prune; a later process can still trust the
+stale VERIFIED. If give-up stops the attempts before every location was
+tried, the error instead says "the veto could not be confirmed": an
+uninspected location may already hold one. This also skips the prune.
+A recheck that records no new verdict is followed by no prune. After a successful veto, later prunes apply the usual retention policy
+below, protecting the older trustworthy recovery point without keeping every
+intermediate failure.
+
+A FAILED database keeps the doctor's damaged-database advice first, even
+when the files read `unsynced`. Otherwise, on a platform without folder
+sync, the doctor's advice for `unsynced` is to take a fresh snapshot with `bridge backup --config <bridge.yaml>`, using the
+config the doctor read. The record cannot be trusted or re-recorded here.
+`unsynced` alone does not prove damage: a successful check can leave a veto
+when its removal fails or its process ends, and a failed veto lookup also
+makes readers conservative.
+
+A failure while reading the schema's tables or columns is `open-failed`,
+not a finding that a column is missing. Cancellation leaves the check
+INCOMPLETE. The doctor's advice blames the database only when its verdict
+is FAILED; apart from the no-folder-sync `unsynced` case above, an unfinished
+database or files check gets retry advice. Failed files in a snapshot
+with no database are described without claiming
+a database recovery point.
+
+When no lock is granted, the backups are busy, or an earlier check still
+holds them, a verification that never started says so with its reason in
+the command, scheduled snapshot and console log. A cancellation that wrote
+INCOMPLETE still reports that write's actual outcome.
+
+The staged manifests and copied files have their permissions set through
+their open files before sync and close. SQLite's captured database is opened
+without following a final-component symbolic link or reparse point and
+validated as a regular file before its permissions are changed through
+that descriptor. On Windows, directories, directory symlinks and junctions
+are opened as entries and refused as "not a regular file".
+
+This protects the staged and vacuum files' permission changes against
+final-component symlink or reparse-point redirection. It does not protect
+against replacement with another regular file or a hard link, a parent
+directory replaced with a link, or SQLite's own `VACUUM INTO` write, which
+uses a path. A root-run backup or restore over a tree an untrusted account
+can rename is outside this protection. A stuck-check marker removes an
+existing entry and creates a new file exclusively, refusing a racing
+replacement at that final entry; its parent traversal is not anchored.
+
+Every step a check takes while it holds the backups folder (marking a
+snapshot as being checked again, the check, writing its verdict, the prune
+after it, reading the record back, and letting go of the snapshot and of
+the folder's lock) has a bound, counted from the moment the check took the
+folder's lock, and so does a prune run on its own. A step that does not
+answer within it (storage that stops answering) is given up, and nothing
+more is checked or pruned. Each further write attempt checks for give-up
+as described above; an operation that passed its check may still finish.
+A check given up before its verdict's write is admitted writes no completed
+verdict. A separate recovery step writes INCOMPLETE over a pending or
+incomplete record, then reads it back. Its own give-up signal controls the
+cache update: the earlier give-up does not prevent that update. If the
+recovery step itself is given up after its write and sync finish, and
+the publication's result is received, its record is still reported as
+written, with a separate warning that the
+console may retain its cached reading until expiry or a backups-folder
+change. A failed sync still means the write is not known to survive a crash.
+A completed verdict stays. If either component is VERIFIED and the merge
+would change the other, recovery needs a veto; the earlier give-up prevents
+that veto from being confirmed or created, even if one already exists.
+Recovery then writes nothing and reports that refusal beside the read-back.
+`bridge backup --verify` and the scheduled snapshot say how far that write
+went (it wrote nothing, it wrote its record, or its write did not finish)
+and what the record reads, or that it could not be read back, or that its
+read-back was given up. If the caller stops waiting before the write's
+outcome arrives, it says that the write outcome is unknown: a record may
+have been written, or may still be: the verdict, or INCOMPLETE once the
+stalled step ends. During shutdown, the scheduled snapshot silences a
+cancellation-only error only when the check's verdict is unknown, passing,
+or cancellation alone. An outer expiry's cancellation wrapper stays silent
+when no verdict has arrived; any accompanying error is reported. A known
+`aborted`, `deadline` or FAILED verdict is reported with the write's outcome
+and the stop's own error. Without an error, a stopped context silences only
+a record whose non-passing verdicts are cancellation alone: the database
+must be VERIFIED, UNVERIFIED with only `no-database`, or INCOMPLETE with only
+`cancelled`; the files must be VERIFIED or INCOMPLETE with only `cancelled`;
+and at least one must be INCOMPLETE with only `cancelled`. The same predicate
+decides whether a found verdict beside an error is cancellation alone.
+A step that is slow and keeps within its bound changes nothing.
+
+Until a step given up ends, no other check or prune of those snapshots runs
+and no scheduled snapshot is taken. In the bridge that runs it they are
+refused at once, and `bridge doctor`'s `backup-check` line names the
+snapshot, or the prune, and its step, whatever the storage answers. Another
+process cannot read that it was given up from storage that does not take
+writes: it waits for the folder's lock and answers that the snapshots are
+busy. Restarting the bridge, or stopping the `bridge backup --verify` that
+runs it, ends the step (backlog B653).
+
+When the bridge starts, it takes no snapshot when one from the last day has
+a verified database. Nor does it take one when the newest snapshot from the
+last day is still waiting for its check: it runs that check instead, and
+takes a new snapshot whenever the check finds the database FAILED, whether
+or not its record could be written. A recheck that cannot record a verdict
+on this platform also takes a replacement when the read-back remains vetoed
+and its own finding has a FAILED component, including VERIFIED database /
+FAILED files. A leftover veto
+alone, with a passing check, takes no replacement: failed veto removal
+must not add a snapshot at every start. A bridge that keeps
+restarting before its check ends keeps one snapshot, not
+one per start, and the first start that lasts long enough verifies it.
+
+With retention on (`backup.keep` above 0), the prune after each snapshot
+keeps the `keep` newest, and beside them, even when older: the newest
+snapshot whose database is `VERIFIED`; while none is, the newest one taken
+by an earlier version; the newest whose database check `FAILED` or did not
+finish, as evidence, one at most; and every snapshot whose check is still to
+come or under way, however long it waits its turn. Every other snapshot is
+kept or removed by `keep`, as before. The prune runs after every snapshot
+taken, whatever its verdict. With retention off, every snapshot stays.
+
+Checks and prunes take a lock in the backups folder, and none runs where
+the storage grants no file lock: there the bridge checks and prunes nothing,
+takes no scheduled snapshot while the newest one waits for its check, and
+`bridge doctor`'s `backup-lock` line says so. Put the data directory on
+storage that grants file locks (a local disk, or a network share whose lock
+service runs).
+
+## Restore
+
 Stop the service, then run
 `bridge restore --config /path/to/bridge.yaml /path/to/snapshot`.
 Restore holds the data directory's exclusive lock and refuses while the
