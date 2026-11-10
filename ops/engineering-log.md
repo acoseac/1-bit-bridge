@@ -93045,7 +93045,11 @@ throughout, inside a 3 s step bound on the resolved snapshot. The console
 passes its resolved capture directory to every hook and the verification.
 The handoff seam documents its caller-form exception: expiry may precede
 resolution. Five deferred cancels paired with joined callers became earlier
-cleanup registrations, preserving release-before-cancel ordering on failure.
+cleanup registrations. Four, already derived from `context.Background()`,
+preserved release-before-cancel ordering on failure. The fifth,
+`TestAStopWithABlockedSyncReturnsWithinItsBound`, still derived from
+`t.Context()`, which testing cancels before cleanups, so its registration
+change alone did not fix the ordering; round 10 corrects that parent.
 
 Windows claims remain code inspection only: `ResolveLinks` uses
 `GetFinalPathNameByHandle`, falling back to `EvalSymlinks`; fresh INCOMPLETE
@@ -93099,3 +93103,56 @@ Windows path resolution, no-directory-sync outcomes and sharing behavior,
 and Linux lock/prune and thread-priority behavior still need native CI.
 No production implementation was changed, no commit amended or rebased,
 and nothing was pushed.
+
+
+## 2026-11-10 — B653 PR 1 round 10: report non-cancellation verdicts at shutdown
+
+Starting HEAD: `99d1bdfe`. The error branch in `verifyHeld` could return
+cancellation alone after a check panic, hiding its INCOMPLETE (aborted)
+verdict when shutdown arrived through the after-check seam. It now joins
+the non-cancellation verdict to the context error, preserving cancellation's
+identity while keeping the verdict reportable. The ticker's no-error branch
+uses `Verification.CancelledOnly`: neither state FAILED, at least one
+INCOMPLETE, and every INCOMPLETE carrying only `ReasonCancelled`.
+`ReasonAborted` and `ReasonDeadline` are never silenced by that branch.
+The public backup guide and CLI rule state the same conditions.
+
+Production-backed cases in `TestTheTickerReportsAPanickedCheckAtShutdown`
+require both database and files INCOMPLETE: aborted on stderr, with nothing
+on stdout, for cancellation through `SetAfterCheckForTest` and after the
+worker's answer. Both are expected red on `99d1bdfe`.
+`TestTheTickerSilencesOnlyCancelledRecordsAtShutdown` covers the no-error
+path, including cancelled database beside failed or aborted files (expected
+red there), deadlines, absent and extra reasons, and cancellation alone.
+Database cancellation alone and both verdicts cancelled are silent passing
+contrasts on that head; files-only cancellation (with a verified or absent
+database) is expected red there because the old branch reports it.
+
+The outer-expiration reporter row now uses `VerifyExpiryErrorForTest`, a
+seam over production's `verifyExpiryError` constructor, also used by
+`verifyAndThen`'s expiry branch. This extraction is behavior-preserving;
+there is no baseline-red claim for it. Its control must add a
+non-cancellation cause to the shared constructor, making the row's
+empty-output assertion fail. Reverting the extraction proves nothing.
+
+The remaining held test context derived from `t.Context()` now derives
+from `context.Background()`, with `t.Cleanup(cancel)` registered before
+`joinBackupCallers`. The History rule explains that testing cancels
+`t.Context()` before cleanups. Round 9's log now counts four effective
+ordering fixes then, and identifies the fifth completed here. This is
+checked by source and text inspection, with no new cleanup meta-test.
+
+The build/test History now has a round-9 section for the handoff-seam
+exception, deferred-cancel guidance, slow-step bound and Windows
+`WriteRecorded` paragraph. Both round-9 rule bullets are tagged round 9;
+round 10 has separate bullets and History entries. Placement and content
+inspection, not a behavioral control, checks this correction.
+
+Validation handoff: no builds, tests, negative controls or state-changing
+git commands ran in this edit-only round. For item 1, restore the error
+branch's bare cancellation return and the no-error branch's database-only
+silence separately: respectively the before-publication panic case and
+the after-answer panic / failed-or-aborted-files cases must fail their stderr
+assertions. For item 2, mutate the shared constructor as above. Items 3 and
+4 have only the stated source/text checks. The orchestrator runs all gates
+and records their results separately.

@@ -1649,18 +1649,13 @@ bytes with a fresh generation, for both published image architectures.
 
 ## B653 PR 1 round 8: resolved fixtures and joined verification callers (2026-11-10)
 
-`VerifySnapshot` resolves directories before calling snapshot-path hooks,
-except `SetVerifyHandoffForTest`: its hooks keep the caller's `dir` as passed,
-because outer expiry may precede the worker's resolution. The console test
-passes its once-resolved `capture.Dir` into the caller and compares that one
-form in every hook. Fixtures resolve directories through `fsutil.ResolveLinks`
-before deriving hook paths. This fixes the measured macOS `/var` alias.
-On Windows, that resolver uses `GetFinalPathNameByHandle`, with
-`EvalSymlinks` as fallback (`internal/fsutil/resolve_windows.go`); no Windows
-execution of these fixtures has been verified yet. The stopped-write, staging/rename/sync, veto and
-late-removal fixtures had compared the resolved hook argument with the raw
-temporary directory; the hook never parked or injected its failure. An
-unbounded wait for that park could time out the whole test binary.
+`VerifySnapshot` resolves directories before calling snapshot-path hooks.
+Fixtures resolve directories through `fsutil.ResolveLinks` before deriving
+hook paths. This fixes the measured macOS `/var` alias. The stopped-write,
+staging/rename/sync, veto and late-removal fixtures had compared the resolved
+hook argument with the raw temporary directory; the hook never parked or
+injected its failure. An unbounded wait for that park could time out the
+whole test binary.
 
 An outer verification result precedes its worker's release of the slot and
 folder lock. A claim also answers before its hold has finished releasing.
@@ -1672,9 +1667,7 @@ For cleanup, release all stalls and cancel, join each outer caller through
 a completion channel, then await retained holds before restoring seams or
 closing fixtures. Apply this to `VerifySnapshot`, `FinishCapture`, console
 jobs and tickers alike. Register this cleanup after the seams it protects:
-LIFO runs it first. Do not pair this with a deferred cancel, which runs
-before cleanup releases the stalls: put cancellation in the release callback,
-or register `t.Cleanup(cancel)` before the joining cleanup. `ActiveHoldsForTest` counts even a cancellation handoff
+LIFO runs it first. `ActiveHoldsForTest` counts even a cancellation handoff
 with no verification slot or overrun mark; a zero count alone is not a
 caller join. `backuptest.AwaitIdle` must follow that join.
 
@@ -1688,12 +1681,67 @@ The post-answer release window is pinned by
 `TestAnAnsweredVerificationOrClaimCanStillHoldTheFolder`. Keep fixture
 creation outside shortened verification deadlines. Tests aimed at a write
 stall use `SetStepBoundForTest` for that snapshot and the named steps,
-leaving the real check its normal deadline. The slow-step case parks until
-another caller is demonstrably waiting, then polls `StuckCheckHere` for at
-least 1.2 s inside an explicit 3 s bound on the resolved snapshot's veto
-step. A threshold below that duration must fail the test.
+leaving the real check its normal deadline.
 
-A fresh INCOMPLETE publication keeps its `WriteRecorded` expectation on
-Windows: `SyncParentDir` returns nil. The `SyncsParentDir` branch in the
-sibling recheck test concerns an existing VERIFIED record, not this fresh
+## B653 PR 1 round 9: handoff paths, cancellation cleanup and slow-step bounds (2026-11-10)
+
+`SetVerifyHandoffForTest` is the exception to resolved snapshot-path hooks:
+its hooks keep the caller's `dir` as passed, because outer expiry may precede
+the worker's resolution. The console test passes its once-resolved
+`capture.Dir` into the caller and compares that one form in every hook.
+
+Do not pair joined-caller cleanup with a deferred cancel, which runs before
+cleanup releases the stalls: put cancellation in the release callback, or
+register `t.Cleanup(cancel)` before the joining cleanup. The release callback
+releases stalls before cancelling, then the cleanup joins callers and drains
+retained holds before restoring seams.
+
+The slow-step case parks until another caller is demonstrably waiting, then
+polls `StuckCheckHere` for at least 1.2 s inside an explicit 3 s bound on the
+resolved snapshot's veto step. A threshold below that duration must fail the
+test.
+
+On Windows, `fsutil.ResolveLinks` uses `GetFinalPathNameByHandle`, with
+`EvalSymlinks` as fallback (`internal/fsutil/resolve_windows.go`); no Windows
+execution of these fixtures has been verified yet. A fresh INCOMPLETE
+publication keeps its `WriteRecorded` expectation on Windows:
+`SyncParentDir` returns nil. The `SyncsParentDir` branch in the sibling
+recheck test concerns an existing VERIFIED record, not this fresh
 publication. These are code-inspection findings, not Windows runtime results.
+
+## B653 PR 1 round 10: production errors and release before cancellation (2026-11-10)
+
+The testing package cancels `t.Context()` before any cleanup runs. A child
+of that context therefore cannot enforce release-before-cancel ordering
+through cleanup registration. Derive a held caller's context from
+`context.Background()` and register `t.Cleanup(cancel)` before
+`joinBackupCallers`, whose release callback releases stalls before cancelling.
+`TestAStopWithABlockedSyncReturnsWithinItsBound` now follows that rule;
+round 9 changed five registrations, but only the four already derived from
+`context.Background()` gained the intended failure-path ordering then.
+No new cleanup meta-test is required: inspect the parent and registration
+order, including the release callback, directly.
+
+The outer-expiration row of
+`TestTheTickerSilencesOnlyCancellationWithoutAnotherFailure` takes
+`VerifyExpiryErrorForTest(context.Canceled)`, which calls the same
+`verifyExpiryError` constructor as production's expiry branch. A hand-built
+wrapper cannot pin changes to production's error shape. Its negative control
+adds a non-cancellation cause to the shared constructor: the empty-output
+assertion must fail. Reverting the extraction alone changes no behavior.
+
+`TestTheTickerReportsAPanickedCheckAtShutdown` drives a real check panic,
+with cancellation through `SetAfterCheckForTest` before publication and,
+separately, after the worker answer. Both require database and files
+INCOMPLETE: aborted on stderr, with no stdout. The no-error table in
+`TestTheTickerSilencesOnlyCancelledRecordsAtShutdown` checks both states,
+absent and additional reasons, deadlines and aborts, and cancellation alone.
+Restore the error-branch cancellation alone and the old database-only
+no-error silence separately to exercise each regression. These controls
+and all test execution are left to the orchestrator in this edit-only round.
+
+Round 9's handoff exception, deferred-cancel guidance, slow-step bound and
+Windows publication notes belong under round 9, not round 8. Their placement
+and the round tags in the two rules files are text checks, not behavioral
+negative controls. Round 10 has its own rule and History entries, with the
+supporting record in `ops/engineering-log.md`.

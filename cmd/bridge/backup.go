@@ -701,7 +701,9 @@ func runBackupTicker(ctx context.Context, src backup.Sources, keep func() int, i
 // reportTickerVerdict says what the pass's kept snapshot's verification
 // found: on stdout when both its verdicts are VERIFIED (or the install had
 // no database to capture and its files are), on stderr otherwise, and
-// nothing for a verification the shutdown stopped, which wrote INCOMPLETE.
+// nothing for cancellation alone: neither verdict FAILED, at least one
+// INCOMPLETE, and every INCOMPLETE due only to cancellation. Aborts and
+// deadlines are reported.
 // A verification given up is said by how far its write went and what its
 // record reads as read back, and that its step still holds the snapshots; a
 // kept snapshot whose verification answered an error once its check had run,
@@ -742,7 +744,7 @@ func reportTickerVerdict(ctx context.Context, stdout, stderr io.Writer, triggere
 			backup.StateWords(v.DatabaseState, v.DatabaseReasons), backup.FilesWords(v))
 		return
 	}
-	if ctx.Err() != nil && v.DatabaseState == backup.StateIncomplete {
+	if ctx.Err() != nil && v.CancelledOnly() {
 		return
 	}
 	fmt.Fprintf(stderr, "backup (%s): %s was kept, and it is not a verified recovery point: database %s, files %s\n",

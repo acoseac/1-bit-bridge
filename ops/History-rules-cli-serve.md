@@ -4814,3 +4814,30 @@ are in `TestTheTickerSilencesOnlyCancellationWithoutAnotherFailure`.
 `abandonPending`'s actual shape (INCOMPLETE Found, WriteRecorded, RecordRead
 false, ReadErr nil): it says "its record was not read back", never "could
 not be read back". No reporter behavior changes in this round.
+
+
+*The tenth round* (2026-11-10). A shutdown that overlaps an INCOMPLETE
+result must not turn an aborted check into cancellation alone. `verifyHeld`
+joins a non-cancellation verdict to its context error, retaining the context
+error's identity and the database/files verdicts. The ticker's error filter
+then keeps that verdict. `TestTheTickerReportsAPanickedCheckAtShutdown`
+reproduces the overlap by panicking in the real database check and cancelling
+through `SetAfterCheckForTest`, and requires INCOMPLETE: aborted on stderr.
+Its second case stops after the worker answer, exercising the no-error path.
+
+For a non-passing record returned without an error, the ticker's shutdown
+silence requires neither database nor files FAILED, at least one INCOMPLETE,
+and every INCOMPLETE carrying `ReasonCancelled` as its only reason
+(`Verification.CancelledOnly`). `ReasonAborted` and `ReasonDeadline` are
+always reported. `TestTheTickerSilencesOnlyCancelledRecordsAtShutdown`
+includes a cancelled database beside failed or aborted files, along with
+cancellation-only contrasts, missing reasons and extra reasons. Never decide
+silence from the database's state alone or from the context ending alone.
+
+The expiry error is built by `verifyExpiryError` in production and exposed
+through `VerifyExpiryErrorForTest` for the outer-expiration reporter case.
+A change in its wrapped causes must reach that case; its control adds a
+non-cancellation cause to the constructor and requires silence to fail.
+The supporting record and expected controls are in `ops/engineering-log.md`;
+no validation was run by this edit-only worker. The round-9 rule is tagged
+round 9, and this changed shutdown rule is recorded separately as round 10.

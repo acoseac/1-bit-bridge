@@ -99,11 +99,13 @@ and what the record reads, or that it could not be read back, or that its
 read-back was given up. If the caller stops waiting before the write's
 outcome arrives, it says that the write outcome is unknown: a record may
 have been written, or may still be: the verdict, or INCOMPLETE once the
-stalled step ends. During shutdown, the scheduled snapshot is silent only
-for a cancellation-only outcome, including the outer expiry's cancellation
-wrapper. An accompanying failure (a step given up, a record not read back,
-or a write failure) is still reported. A step that is slow and keeps within
-its bound changes nothing.
+stalled step ends. During shutdown, cancellation alone is silent, including
+the outer expiry's cancellation wrapper; any accompanying error is reported.
+For a non-passing record returned without an error, silence requires neither
+the database nor the files to be FAILED, at least one to be INCOMPLETE, and
+every INCOMPLETE to have `cancelled` as its only reason. An `aborted` or
+`deadline` verdict is always reported, even when shutdown overlaps the check's
+answer. A step that is slow and keeps within its bound changes nothing.
 
 Until a step given up ends, no other check or prune of those snapshots runs
 and no scheduled snapshot is taken. In the bridge that runs it they are

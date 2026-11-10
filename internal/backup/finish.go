@@ -308,14 +308,20 @@ func verifyAndThen(ctx context.Context, dir string, o VerifyOptions, after func(
 			if hook := onVerifyExpired.Load(); hook != nil {
 				(*hook)(dir)
 			}
-			why, when := ctx.Err(), "its stop"
-			if why == nil {
-				why, when = context.DeadlineExceeded, "its deadline"
-			}
-			return res, fmt.Errorf("the verification was left to end on its own %s after %s, holding the snapshots' lock until it does: %w",
-				StopWriteBound, when, why), true
+			return res, verifyExpiryError(ctx.Err()), true
 		}
 	}
+}
+
+// verifyExpiryError is the outer caller's error when no worker answer arrived.
+// A nil stop error means its watchdog, rather than its context, expired.
+func verifyExpiryError(why error) error {
+	when := "its stop"
+	if why == nil {
+		why, when = context.DeadlineExceeded, "its deadline"
+	}
+	return fmt.Errorf("the verification was left to end on its own %s after %s, holding the snapshots' lock until it does: %w",
+		StopWriteBound, when, why)
 }
 
 // ErrCheckGivenUp marks a verification one of whose steps under the backups
@@ -576,6 +582,12 @@ func verifyHeld(ctx context.Context, dir string, o VerifyOptions, after func(con
 		return answer(pub.err)
 	}
 	if err := ctx.Err(); err != nil && found.DatabaseState == StateIncomplete {
+		// A stop after the check ended must not turn an aborted check (or
+		// a files failure beside cancellation) into cancellation alone.
+		if !found.CancelledOnly() {
+			err = errors.Join(err, fmt.Errorf("the check found database %s, files %s",
+				StateWords(found.DatabaseState, found.DatabaseReasons), FilesWords(found)))
+		}
 		return answer(err)
 	}
 	if err := checkCtx.Err(); err != nil && found.DatabaseState == StateIncomplete {

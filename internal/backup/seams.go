@@ -289,6 +289,10 @@ func SetVerifyHandoffForTest(answer, expired func(string)) func() {
 // Tests join their callers before waiting for this count to reach zero.
 func ActiveHoldsForTest() int64 { return activeHolds.Load() }
 
+// VerifyExpiryErrorForTest returns the outer expiry's production error for
+// stopErr (nil for watchdog expiry), so reporter tests use its actual wrapper.
+func VerifyExpiryErrorForTest(stopErr error) error { return verifyExpiryError(stopErr) }
+
 // stepBoundFixture shortens only named steps of one snapshot in a test;
 // setup and the real SQLite check keep their normal deadline.
 type stepBoundFixture struct {

@@ -40,3 +40,21 @@ func (v Verification) Passes() bool {
 	noDatabase := v.DatabaseState == StateUnverified && len(v.DatabaseReasons) == 1 && v.DatabaseReasons[0] == ReasonNoDatabase
 	return (v.DatabaseState == StateVerified || noDatabase) && v.FilesState == StateVerified
 }
+
+// CancelledOnly reports whether neither verdict failed, at least one is
+// INCOMPLETE, and every INCOMPLETE has cancellation as its only reason.
+// An aborted check or an expired deadline must still be reported at shutdown.
+func (v Verification) CancelledOnly() bool {
+	if v.DatabaseState == StateFailed || v.FilesState == StateFailed {
+		return false
+	}
+	databaseIncomplete := v.DatabaseState == StateIncomplete
+	filesIncomplete := v.FilesState == StateIncomplete
+	if databaseIncomplete && (len(v.DatabaseReasons) != 1 || v.DatabaseReasons[0] != ReasonCancelled) {
+		return false
+	}
+	if filesIncomplete && (len(v.FilesReasons) != 1 || v.FilesReasons[0] != ReasonCancelled) {
+		return false
+	}
+	return databaseIncomplete || filesIncomplete
+}

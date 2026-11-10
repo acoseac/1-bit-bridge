@@ -743,7 +743,7 @@ func TestAStopWithABlockedSyncReturnsWithinItsBound(t *testing.T) {
 					t.Error("the verdict's write never reached its sync")
 				}
 			}()
-			ctx, cancel := context.WithCancel(t.Context())
+			ctx, cancel := context.WithCancel(context.Background())
 			t.Cleanup(cancel)
 			var callers *backupCallers
 			if stopDuring == "the check" {

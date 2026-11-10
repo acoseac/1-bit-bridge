@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"fmt"
 	"strings"
 	"testing"
 
@@ -57,7 +56,7 @@ func TestTheTickerSilencesOnlyCancellationWithoutAnotherFailure(t *testing.T) {
 		want string
 	}{
 		{"cancellation alone", context.Canceled, ""},
-		{"outer expiration", fmt.Errorf("the verification was left to end on its own: %w", context.Canceled), ""},
+		{"outer expiration", backup.VerifyExpiryErrorForTest(context.Canceled), ""},
 		{"given-up step", errors.Join(context.Canceled, backup.ErrCheckGivenUp), "was given up"},
 		{"unread record", errors.Join(context.Canceled, backup.ErrRecordNotReadBack), "record could not be read back"},
 		{"write failure", errors.Join(context.Canceled, errors.New("injected write failure")), "injected write failure"},
