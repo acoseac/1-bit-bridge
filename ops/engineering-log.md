@@ -91602,3 +91602,63 @@ Pause, on the context its Stop ended, still answers the life's cancellation,
 now through `stopped`), and the backend's, 29 of 29; `TestEveryCitedTestNameExists`
 ok. `make docs-check` clean; `verify_moves.py --base a262adb4` passes with the
 output.md line declared an edit.
+
+## 2026-11-10 — B728 B9 PR 1 round 6: Pause rechecks its context at every point it may wait
+
+The rules are in `output.md` (Native lifecycle and policy containment) and
+`ops/History-b470-native.md` ("Round 6", which lists every point Pause may wait
+at and the read after it); this is the evidence. macOS arm64, Go 1.27.3, the
+fake kernel. The last round, by the owner's rule.
+
+### The regressions
+
+Codex (P2): a Pause that reached its success with its own context running and
+the sink's life ended waited in settle's cleanup wait (`endOfLife`, then
+`releaseOutcome(nil)`, which reads no context), and a context that ended there
+answered nil, the verdict of a clean cleanup. The brief's reviews added three
+things. The refusal over the writer's clean end (the wait's done arm) answered
+nil the same way, and a release under way at the entry answered its fence,
+wherever the context ended after settle's read of its stop (Codex's review).
+A seam before settle's live wait cannot show this, since `releaseOutcome`
+reads the stop after its select (Argon's). And the loop took the lock again
+and waited once more with its context ended (Argon's).
+
+The Claude API (Low): a Pause whose context ended while it waited for the
+sink's lock paused the sink, moved its epoch and interrupted the writer, then
+answered its stop. That window regressed in round 5.
+
+The fix (10ca8810) reads the context under the lock once Pause has it, before
+anything changes, and again in the loop (`pauseEnded`). It also reads it after
+every settle (`pauseSettled`). Round 5's read after the loop is gone: it
+followed a read under the lock with no wait between.
+
+### Red-first on 3a860847
+
+A scratch extract of 3a860847 under the ignored `.tmp/`, with only the
+`pauseLocking` seam added at its position (between the entry's read and the
+lock), and this round's test file. Each case failed at its predicted
+assertion:
+
+- `TestNativeAPauseStoppedInItsEndedLifesCleanupNeverAnswersSuccess`, its close
+  confirmed: nil. The row with its close failing passed there, as it does now:
+  the cleanup's failure wins both ways, a positive control.
+- `TestNativeAPauseStoppedInSettleAnswersItsStop`: nil for the writer's clean
+  end, "native releasing" for a release under way at the entry.
+- `TestNativeAPauseWhoseContextEndsWhileItWaitsForTheLockChangesNothing`, both
+  rows: the answer was its stop, but the pause was registered at epoch 1, and
+  the writer's changed channel was closed, kicked and its wait cancelled.
+- `TestNativeAPauseWhoseContextEndsInItsWaitDoesNotWaitAgain`: waited twice.
+
+### Controls on round 6
+
+Each ran on the committed tree (10ca8810). One recheck was reverted alone,
+matched by its surrounding lines (the two `pauseEnded` calls read the same).
+The whole `alsapcm` package was run, then the file was restored with
+`git restore` and checked with `git diff --quiet HEAD` (`.tmp/controls6.py`):
+
+- C1, no read under the first lock: exactly the lock case's two rows went red.
+- C2, no read under the loop's lock: exactly the case that waited again.
+- C3, no read after settle: exactly the ended-life cleanup's confirmed row and
+  settle's two exits. The failing row stayed green.
+- C0, for the record (not a round-6 read): with round 5's entry read removed,
+  the package stays green. The read under the lock answers its cases.

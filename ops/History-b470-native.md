@@ -609,7 +609,7 @@ a test begin a release just before a command's revocation. The queue-cut
 integration case (`TestNativeIntegrationSuccessfulCutReplacement`, under the
 native overlay) is the guard that a write's own stop leaves the sink usable.
 
-### Round 5: a cancelled Pause never answers success, and the rule says "while the life runs"
+### Round 5: a Pause on an ended context changes nothing, and the rule says "while the life runs"
 
 Pause read its context only in its wait's select. On an inert sink, or one
 whose pause was applied already, it skipped the wait, and `settle` reads the
@@ -638,3 +638,73 @@ has ended: `stopped` then answers through `settled`, whose `endOfLife`
 revokes, so escalating a TrackChange still under way, and waits within the
 budget. It now reads "while the life runs" in the clause itself, and the ended
 life's cleanup verdict, as before, after it.
+
+This subsection's first title, the rule and Pause's comment claimed that a
+cancelled Pause never answers success. That held only for a context that had
+ended at Pause's entry or beside its wait's change: one that ended while Pause
+waited for the sink's lock, or in settle's waits, was read after neither, and
+round 6 corrects the claim.
+
+### Round 6: Pause reads its context again after every point it may wait at
+
+Round 5 read Pause's context at its entry and once its wait for the writer was
+done. Two waits went unread. The sink's lock, which the writer or another
+command can hold as Pause is called: a Pause whose context ended while it
+waited for the lock paused the sink, moved the epoch (which fences an
+activation or a Resume under way) and interrupted the writer, then answered
+its stop (the Claude API, Low). And settle's waits: a Pause that reached its
+success with its own context running and the sink's life ended waited in the
+cleanup that life's end begins (`endOfLife`: `Revoke`, then
+`releaseOutcome(nil)`, which reads no context); its context ended there, and
+the clean verdict answered nil (Codex, P2). A refusal over the writer's clean
+end answered nil the same way, and a release under way at Pause's entry its
+fence ("native releasing"), wherever the context ended after settle's read of
+its stop.
+
+Every point Pause may wait at, and the read after it:
+
+- Its entry waits for nothing. Round 5's read there is now a fast path: the
+  read under the lock answers the same, and with it removed the package stays
+  green.
+- The sink's lock (`s.mu.Lock`), which the writer and every command take: read
+  under it, before anything changes, the lock let go before `stopped`, whose
+  snapshot takes it (`pauseEnded`); before the release under way is looked at,
+  as the entry's read is.
+- A release under way at the entry settles its refusal: settle's waits, below.
+- The wait for the writer to apply the pause (its select): the context's end
+  answers through `stopped`; the writer's end takes the lock for its result
+  (`result`) and settles; a change takes the lock again.
+- The lock again, after a change: read under it (`pauseEnded`), so a Pause
+  whose context ended never waits twice. Every way out of the wait but the
+  context's end and the writer's passes through it, so round 5's read after
+  the wait is this one now, and its own read after the loop, which followed
+  a read under the lock with no wait between, is gone.
+- settle's waits, on each of its three exits (the refusal of a release under
+  way at the entry, the refusal over the writer's end, the success): the
+  lock `releaseBegun` and the snapshot take, a release met
+  (`releaseOutcome(stop)`, which ends on the context and reads it after its
+  select), and with the life ended the cleanup it waits for (`endOfLife`: the
+  revocation's lock and `releaseOutcome(nil)`, deaf to the context) and the
+  record (its lock, and a reply's grace for a request). Read once settle has
+  answered (`pauseSettled`), the last read: an end found there answers through
+  `stopped`, so a recorded cleanup failure or a release past its budget still
+  wins, and once the life has ended the cleanup verdict answers, the ended
+  life's typed cancellation where the cleanup was clean.
+- `stopped`'s own waits (its snapshot's lock, and with the life ended
+  `settled`'s): nothing is read after them, since what `stopped` answers is
+  a stop already, the cancellation or the cleanup verdict, never success.
+
+So a Pause whose context ended before it took the sink's lock changes nothing,
+its pause, epoch and moment as they were and the writer not interrupted; one
+whose context ended before its read after settle never answers success; and
+one whose context ends after its pause is registered leaves it registered and
+answers that end. An end after the last read is not read: the answer is
+decided there.
+
+`pauseLocking`, nil but in a test, holds Pause between its entry's read and
+its lock, where a test holds the lock and ends the context. The ended life's
+cleanup wait is held at the release's close (`cleanupFault`), Pause seen
+waiting in it by `meeting`; settle's other exits, the lock again after a
+change, and the lock's wait are staged on a sink no goroutine owns, the
+context's Done never ready where the case says the wait took another arm
+(`verdictWaitContext`).
