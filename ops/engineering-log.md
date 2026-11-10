@@ -93760,7 +93760,7 @@ This supersedes round 1's any-mean WORK rule without rewriting its record.
 The app reads ©wrk and freeform WORK only under `com.apple.iTunes`; arbitrary
 means are an advisory-only rule. The supplemental work walk now requires the
 mean's raw bytes after the four-byte version/flags header to equal that string.
-Only an exact-length payload can match, bounding the read to 15 bytes, without
+Only an exact-length payload can match, bounding the read to 16 bytes (corrected from 15 at review: `com.apple.iTunes` is 16 bytes, and the code reads `len(want)`), without
 trimming or case folding. Missing, padded, case-changed, oversized and truncated
 means are absent. Advisory behavior, workOf precedence and the `t.Work == ""`
 guard stay unchanged. ExtractorVersion remains 33, which has not been released.

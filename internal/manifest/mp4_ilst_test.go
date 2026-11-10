@@ -697,6 +697,10 @@ func TestExtractMP4Work_MeanMustBeExact(t *testing.T) {
 		{"missing", "", true, false},
 		{"oversized", strings.Repeat("m", 1024), false, false},
 		{"truncated", "com.apple.iTunes", false, true},
+		// An exact prefix is not the mean: only the exact length matches.
+		{"suffixed", "com.apple.iTunes.x", false, false},
+		{"nul-terminated", "com.apple.iTunes\x00", false, false},
+		{"short", "com.apple.iTune", false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			// Put mean last so cutting it leaves both values and the name intact.

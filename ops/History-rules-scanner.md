@@ -2148,7 +2148,7 @@
   first non-empty valid data value of each kind, in physical order, matching
   freeform names through `normaliseRawTagKey`, only when the mean's raw bytes
   after its four-byte version/flags header equal `com.apple.iTunes`. The mean
-  must have exactly that length: the read is bounded to 15 bytes, with no
+  must have exactly that length: the read is bounded to 16 bytes, with no
   trimming or case folding. Padded, case-changed, missing, oversized or
   truncated means supply no candidate. The advisory reader is unchanged.
   Empty and

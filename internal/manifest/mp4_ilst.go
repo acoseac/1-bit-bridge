@@ -211,7 +211,7 @@ func extractMP4WorkTags(r io.ReadSeeker) (map[string]any, error) {
 }
 
 // mp4WorkHasITunesMean compares the raw mean after its version/flags header.
-// Only an exact-length payload can match, bounding the read to 15 bytes.
+// Only an exact-length payload can match, bounding the read to 16 bytes.
 // Do not use readMP4FreeformText: its trimming would admit padded means.
 func mp4WorkHasITunesMean(r io.ReadSeeker, box mp4Box) (bool, error) {
 	mean, found, err := findMP4Child(r, "mean", box.payloadStart(), box)
