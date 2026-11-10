@@ -149,8 +149,9 @@ A check given up before its verdict's write is admitted writes no completed
 verdict. A separate recovery step writes INCOMPLETE over a pending or
 incomplete record, then reads it back. Its own give-up signal controls the
 cache update: the earlier give-up does not prevent that update. If the
-recovery step itself is given up after its write and sync finish, its
-record is still reported as written, with a separate warning that the
+recovery step itself is given up after its write and sync finish, and
+the publication's result is received, its record is still reported as
+written, with a separate warning that the
 console may retain its cached reading until expiry or a backups-folder
 change. A failed sync still means the write is not known to survive a crash.
 A completed verdict stays. If either component is VERIFIED and the merge
