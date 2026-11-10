@@ -15,6 +15,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/alsactl"
 	"github.com/acoseac/1-bit-bridge/internal/alsapcm"
 	"github.com/acoseac/1-bit-bridge/internal/player/decode"
+	"github.com/acoseac/1-bit-bridge/internal/player/dsdconv"
 	"github.com/acoseac/1-bit-bridge/internal/player/dsdstate"
 	"github.com/acoseac/1-bit-bridge/internal/player/engine"
 	"github.com/acoseac/1-bit-bridge/internal/player/format"
@@ -1149,9 +1150,33 @@ func TestNoSinkOpensForASuccessorWhileAWriteChangesItsRate(t *testing.T) {
 // held before its publish, or between its publish and its reconciliation)
 // ends at the floor, zero-padded, at the first reporter step after the
 // sink's measurement shows the floor.
+//
+// Round 19 (both reviews of round 18, both of round 19's brief): the two
+// cases that hold the decision after its first read have it decided by
+// whichever comes first, the reporter taking the tick or the decision
+// reaching its gate, and log which, since a decision held at its gate keeps
+// the session's lock, which a reporter's step under way waits for before it
+// takes another tick (decide). The floor's cases park the sink's STATUS at
+// 400 ms before granting the time, the first measurement under the floor
+// (88,128 frames given before a's window, 70,560 played), have the producer
+// read the 350 ms measurement before it and wait again, hold it at that wait
+// while the floor's measurement is let go, then let it go and send one tick;
+// and hold what the kernel was given of a to a converted alone, its window
+// zero-padded, computed apart from the backend: the decided step fires for a
+// window continued into f's bits too, which only the samples tell from one
+// ended (atFloorEnded).
 func TestAConvertedJoinWindowWaitsForAWriteThatChangesItsSuccessor(t *testing.T) {
-	// floorFrames is the sink's floor: 100 ms of convPlan's 176.4 kHz.
-	const floorFrames = uint64(176400 / 10)
+	// floorFrames is the sink's floor: 100 ms of convPlan's 176.4 kHz; aFrames
+	// is a's 500 ms converted, its window's frames included; and floorPlayed
+	// is 400 ms of it, the first measurement at which what a gave the sink
+	// before its window and the DAC has not played is under the floor (round
+	// 19: 88,128 given, 70,560 played, 17,568 left, against the 350 ms
+	// measurement's 26,388).
+	const (
+		floorFrames = uint64(176400 / 10)
+		aFrames     = uint64(176400 / 2)
+		floorPlayed = uint64(4 * 176400 / 10)
+	)
 	// holdingOpts are start's: the policy's log, whose line saying the
 	// session's DSD stops a case can hold (stopsLog), and the publish a case can
 	// hold or make panic (publishHold).
@@ -1161,14 +1186,17 @@ func TestAConvertedJoinWindowWaitsForAWriteThatChangesItsSuccessor(t *testing.T)
 	}
 	// window is a rig whose converted a, DSD64, is at its window point, its
 	// successor f prepared, with the seams the cases hold and the marks they
-	// read; and, once holding has made it, the write of DSD off with the
-	// go-ahead, held at its pending window until let go (stop), its answer or
-	// its panic.
+	// read, the producer's steps (p, which holds no write: round 19's floor
+	// cases hold it at a wait) and a's file; and, once holding has made it, the
+	// write of DSD off with the go-ahead, held at its pending window until let
+	// go (stop), its answer or its panic.
 	type window struct {
 		d        *dsdRig
 		w        *writeSeams
 		steps    *convSteps
 		marks    *windowMarks
+		p        *producerHold
+		fileA    []byte
 		oa, of   engine.OccurrenceID
 		stop     *gate
 		res      <-chan playback.ChoiceResult
@@ -1176,14 +1204,15 @@ func TestAConvertedJoinWindowWaitsForAWriteThatChangesItsSuccessor(t *testing.T)
 	}
 	start := func(t *testing.T, ho holdingOpts) *window {
 		t.Helper()
-		h := &window{w: newWriteSeams(), steps: newConvSteps(t, "holding"), marks: newWindowMarks()}
+		h := &window{w: newWriteSeams(), steps: newConvSteps(t, "holding"), marks: newWindowMarks(), p: newProducerHold(t)}
+		h.p.gate.letGo()
 		h.d = newDSDRigWith(t, dsdstate.Defaults(), func(p *playback.DSDPolicy) {
 			p.Profiles = nil
 			if ho.log != nil {
 				p.Log = ho.log
 			}
 		}, func(o *rigOptions) {
-			o.seams = h.w.seams(&playback.Seams{Converting: h.steps.seam})
+			o.seams = h.w.seams(&playback.Seams{Converting: h.steps.seam, ProducerStep: h.p.note})
 			if ho.pub != nil {
 				o.seams.Published = ho.pub.seam
 			}
@@ -1193,7 +1222,8 @@ func TestAConvertedJoinWindowWaitsForAWriteThatChangesItsSuccessor(t *testing.T)
 		// the rig stops: the cleanup newConvSteps registered, before the rig's,
 		// runs after it (round 17).
 		t.Cleanup(h.steps.letGo)
-		h.d.files.add("a", track(playbacktest.DSD64, 0.5, noise(1)))
+		h.fileA = track(playbacktest.DSD64, 0.5, noise(1))
+		h.d.files.add("a", h.fileA)
 		h.d.files.add("f", track(playbacktest.DSD64, 0.5, noise(2)))
 		ids := h.d.insert("a", "f")
 		h.d.play()
@@ -1298,19 +1328,81 @@ func TestAConvertedJoinWindowWaitsForAWriteThatChangesItsSuccessor(t *testing.T)
 			t.Fatalf("a's window was decided above the floor %s: a decision from a read the write's publish made stale; marks %v", what, h.marks.list())
 		}
 	}
-	// atFloorEnded has the DAC play a down past the sink's floor, the writer
-	// measuring it, and judges the bound of a's window's wait, which nothing
-	// else ends: the window ends at the floor by the first reporter step after
-	// that measurement, one tick, within alsapcm.Ordered (round 18). f has not
-	// settled, so the window ends zero-padded (End).
+	// atFloorEnded has the DAC play a down past the sink's floor and judges the
+	// bound of a's window's wait, which nothing else ends: the window ends at
+	// the floor by the first reporter step after the sink's measurement that
+	// shows it, within alsapcm.Ordered (round 18), and ends zero-padded (End),
+	// f not settled: never continued into f's bits, which the decided step
+	// shows alike (round 19). The measurement is the sink's, never the DAC's
+	// time (round 16), so the case parks the STATUS at 400 ms before it grants
+	// the time, has the producer, woken by a reporter's step, read the
+	// measurement before it (350 ms, above the floor) and wait again, holds it
+	// at that wait while the floor's measurement is let go and the writer is
+	// back on the DAC, then lets it go and sends one tick (both reviews of
+	// round 18 and both of round 19's brief).
 	atFloorEnded := func(t *testing.T, h *window, held string) {
 		t.Helper()
 		awaitOrdered(t, h.d.k.When(runningAndWaiting), "the writer to fill the hardware buffer and wait on the DAC")
-		// 450 ms of a's 500 played, the writer back on the DAC once it has
-		// measured it: the lookahead below its floor.
-		h.d.k.Play(t, 450*time.Millisecond)
+		wantA, _ := converted(t, h.fileA, convPlan)
+		c, err := dsdconv.New(dsdOf(t, h.fileA), convPlan, dsdconv.Options{Hold: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		given := aFrames - uint64(c.Window())
+		_ = c.Close()
+		if len(wantA) != 2*int(aFrames) {
+			t.Fatalf("a converted alone is %d frames, want %d (the case's premise)", len(wantA)/2, aFrames)
+		}
+		statusing, status := h.d.k.ParkStatusAfterPlayed(floorPlayed)
+		defer status()
+		h.d.k.Grant(400 * time.Millisecond)
+		awaitOrdered(t, statusing, "the sink's STATUS once the DAC played 400 ms of a")
+		if v := h.d.k.View(); v.Consumed != floorPlayed || v.Appl != given || given-floorPlayed > floorFrames || given-(floorPlayed-floorPlayed/8) <= floorFrames {
+			t.Fatalf("the DAC had played %d of the %d frames written at the STATUS held; want %d of the %d a gave before its window, under the floor %d there and above it at the measurement before (the case's premise)", v.Consumed, v.Appl, floorPlayed, given, floorFrames)
+		}
+		waitHeld := h.p.holdWait(t)
+		h.d.tickOnce(alsapcm.Ordered())
+		awaitOrdered(t, waitHeld.in, "the producer at its wait again, the measurement at 350 ms read, held there")
+		if h.marks.decided(h.oa) {
+			t.Fatalf("a's window was decided at the measurement before the floor's, above it; marks %v", h.marks.list())
+		}
+		// The floor's measurement established, the writer back on the DAC once
+		// it has; the producer, held, has read nothing since.
+		status()
+		awaitOrdered(t, h.d.k.When(runningAndWaiting), "the writer back on the DAC, the floor's measurement established")
+		if h.marks.decided(h.oa) {
+			t.Fatalf("a's window was decided while the producer was held at its wait; marks %v", h.marks.list())
+		}
+		waitHeld.letGo()
 		h.d.tickOnce(alsapcm.Ordered())
 		waitOrdered(t, "a's window ended at the first reporter step after the floor's measurement, "+held, h.marks.ch, func() bool { return h.marks.decided(h.oa) })
+		// Ended, not continued: what the kernel was given of a is a converted
+		// alone, its window zero-padded, computed apart from the backend
+		// (converted). Continued into f, the window's frames would carry f's
+		// first bits.
+		awaitOrdered(t, h.d.k.When(func(v alsapcm.KernelView) bool { return v.Appl >= aFrames }), "a's window's frames given to the kernel")
+		got := unpack(t, h.d.k.Given(), format.S243LE, 24)
+		same(t, "what the kernel was given of a, against a converted alone, its window zero-padded", got[:len(wantA)], wantA)
+	}
+	// decide has a's window decided again, its decision held after its read
+	// of the write pending (holdDeciding), and says what got it there (round
+	// 19): the reporter taking the tick, whose step wakes the producer, or the
+	// decision reaching its gate first, from a wake that came before the tick.
+	// Held there the decision keeps the session's lock, which a reporter's
+	// step under way waits for before it takes another tick, so the tick's send
+	// is never the one way on.
+	decide := func(t *testing.T, h *window, dec *gate) {
+		t.Helper()
+		select {
+		case h.d.ticks <- time.Time{}:
+			awaitOrdered(t, dec.in, "a's window's decision held after its read of the write pending")
+			t.Log("the decision's trigger: the reporter took the tick")
+		case <-dec.in:
+			t.Log("the decision's trigger: the decision reached its gate before a reporter took the tick")
+		case <-time.After(alsapcm.Ordered()):
+			alsapcm.LogGoroutines(t)
+			t.Fatalf("within %v no reporter took the tick and a's window's decision did not reach its gate", alsapcm.Ordered())
+		}
 	}
 	// noXrun frees the DAC, takes the session's end and fails t where the
 	// sink ran dry.
@@ -1347,8 +1439,7 @@ func TestAConvertedJoinWindowWaitsForAWriteThatChangesItsSuccessor(t *testing.T)
 		pub := &publishHold{}
 		h := holding(t, holdingOpts{pub: pub})
 		dec := h.marks.holdDeciding(t)
-		h.d.tickOnce(alsapcm.Ordered())
-		awaitOrdered(t, dec.in, "a's window's decision held after its read of the write pending")
+		decide(t, h, dec)
 		g := pub.arm(t)
 		h.stop.letGo()
 		awaitOrdered(t, g.in, "the write's set published, its reconciliation held")
@@ -1370,8 +1461,7 @@ func TestAConvertedJoinWindowWaitsForAWriteThatChangesItsSuccessor(t *testing.T)
 		pub := &publishHold{}
 		h := holding(t, holdingOpts{pub: pub})
 		dec := h.marks.holdDeciding(t)
-		h.d.tickOnce(alsapcm.Ordered())
-		awaitOrdered(t, dec.in, "a's window's decision held after its read of the write pending")
+		decide(t, h, dec)
 		pub.armPanic()
 		h.stop.letGo()
 		panicked(t, h)
