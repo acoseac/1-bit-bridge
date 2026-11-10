@@ -90153,3 +90153,146 @@ twin and the pointer. The guard passes on that copy too.
 Not run here: the console's node-run tests, which skip without node; the
 mode-000 marker cases on Windows, where they skip and the directory cases
 run (CI's windows leg); the iOS mirror of PROTOCOL.md, the orchestrator's.
+
+## 2026-11-10 — B761 PR 1 round 5: an unreadable marker with no backup lets the off through; B831 stands apart from the stop
+
+Round 5 of #1446 on `feat/b761-update-switch`, worker b761u on legion0
+(go1.27.3, `GOTOOLCHAIN=local`, `GOPROXY=off`), from the PR's head aa28f704,
+round 4 and its rules. The findings were the Claude review's Low and Codex's
+P2 on round 4, with the two reviews of this round's brief folded into it.
+Commits: the marker beside the backup 9e1601f5; B831 apart from the stop
+5b9f59cd; and this record. The rules go into `config-lifecycle.md` and its
+History file, `cli-serve.md` and `admin-console.md` through
+`rules-b761-r5.patch`.
+
+### No backup, no refusal; an unknown backup still refuses
+
+The Claude review's Low: `ChecksOffRefused` refused an off over an install
+marker it could not read before it asked whether a backup stands beside the
+binary, so with no `bridge.bak` (a root-run `bridge update --yes` that
+failed before its swap, its root-owned 0600 marker unreadable to serve) the
+off was refused though no crash rollback could put anything back. Codex's
+review of the brief: `backupBeside` answers false for a lookup that fails
+(a permission, EIO) as for nothing there, so asking it first would let an
+off through beside a backup this user cannot see.
+
+`backupAt` is `backupBeside`'s lookup, three ways: a regular file at the
+binary's path and `.bak` is a backup; nothing there (`fs.ErrNotExist`), an
+entry that is no regular file, or a binary path that is not absolute is
+none, with no error; any other `Lstat` failure is none with its error, where
+whether a backup stands cannot be told. `backupBeside` reads through it and
+answers as before, so `ProbationHolds` and the decision's later check over
+a marker it read are unchanged. Over a marker it cannot read, the decision
+saves the off where no backup stands, and refuses it in the marker's words
+beside a backup or a failed lookup, the lookup's failure in the refusal's
+`Detail` without a path and among its causes (`errors.Join`). A backup
+appears only through a later install, which waits for the decision's hold
+of the install marker's lock, writes a fresh marker of its own and backs up
+the bridge installed then, a release with the switch that takes the key, so
+the no-backup case keeps nothing from a rollback. The docs of
+`ChecksOffRefused` and `ChecksOffMarkerError`, PROTOCOL.md's
+`update-checks-off-unchecked` sentence (the answer only narrows: no
+protocol version change) and the settings matrix say so.
+
+The tests read a marker no user can read as one, root included: a
+directory in its place. `TestTheBackupsLookupTellsWhatIsNotThereFromWhatCannotBeLookedUp`
+walks the backup's six places (none, a directory, a binary path that is not
+absolute, a backup, a backup in a directory this user may not search,
+skipped on Windows and as root, and a link loop on the way, skipped on
+Windows) through `backupAt` and `backupBeside`;
+`TestAnUnreadableMarkerRefusesTheOffOnlyWhereABackupMayStand` takes the
+decision over each; and the real serve's
+`TestTheConsolesOffOverAMarkerItCannotReadIsSavedWhereNoBackupStands` saves
+the off with no backup (the file writes the key false and the live switch
+is off) and refuses it beside one. Of the round's marker tests, the
+updater's `TestAnOffOverAnInstallMarkerThatCannotBeReadIsRefused` expects
+the marker's refusal and already ran beside a backup (`newOffCase`'s);
+cmd/bridge's `TestTheConsolesOffOverAnInstallMarkerThatCannotBeReadIsRefused`
+and `TestTheOffsAskSaysWhatRefusedItInTheLog` take the marker path (a 0600
+marker made unreadable, `ChecksOffMarkerError`) and expect its refusal and
+its log line, so each now runs beside a backup (`runningAs`, a `.bak`).
+
+### B831 apart from the stop
+
+Codex's P2: `LockForChecksOff`'s doc named backlog B831 in a clause of the
+sentence that gave the stop's generic contract. That contract, a stop of
+serve ending the wait as it ends every request of the console's and a save
+it ends saving nothing, has a sentence of its own now. B831 is named apart,
+only where it applies: "What stays open here, for the bridge's Windows
+service, is backlog B831." README, PROTOCOL.md, the
+Settings page's hint, `updateChecksOffLost`'s comment,
+`writeUpdateChecksOffRefusal`'s doc and the settings matrix's row take the
+same sentence, and this log's records of rounds 3 and 4 are recast to
+match. `TestASwapThatStopsTheWindowsServiceIsNamedOnlyAsB831` keeps its
+round-4 checks, reads the settings matrix's row too, and fails a sentence
+that names B831 and says what a stop does to a save (a save's fate, its
+wait ending, the 503: a semicolon or a colon joins clauses of one
+sentence).
+
+### Reds and negative controls
+
+Fifteen runs, predicted by name in `.tmp/_b761u/controls_r5.py` before the
+first ran (a baseline with no mutation, then fourteen), at 5b9f59cd, run as
+round 4's were (each literal edit's text found exactly once; item 2's
+restorations taken hunk by hunk with git from round 4's texts at aa28f704;
+the named tests of each named package, the bytes put back in a `finally`;
+`git status` clean after): all fifteen as predicted.
+
+| Control | Mutation | Red, and what it showed |
+|---|---|---|
+| BASE | none | every run green |
+| RED-1a | round 4's branch: any unreadable marker refuses | the decision's three no-backup places (refused) and both failed lookups (no lookup in the detail); serve's no-backup case (409) |
+| RED-1b | the review's first sketch: `backupBeside` before the marker | the decision's two failed lookups, saved |
+| CTL-1c | failing open: an unreadable marker always saves | the decision beside a backup and over failed lookups; the updater's marker test; serve's backup case, its 0600 case and the ask's log case |
+| CTL-1d | `backupAt` takes every failed lookup for nothing there | the lookup's two failure rows; the decision's two, saved |
+| CTL-1e | `backupBeside` takes a failed lookup for a backup | the lookup test's `backupBeside` rows; the six probation-hold tests green beside it |
+| CTL-1f | the detail says nothing of the failed lookup | the decision's two failed lookups |
+| CTL-1g | the causes keep the marker's error alone | the decision's two failed lookups |
+| RED-2a | `LockForChecksOff`'s doc as round 4 left it | the B831 test |
+| RED-2b | README's sentence as round 4 left it | the B831 test |
+| RED-2c | the Settings page's hint as round 4 left it | the B831 test |
+| RED-2d | `updateChecksOffLost`'s comment as round 4 left it | the B831 test |
+| RED-2e | `writeUpdateChecksOffRefusal`'s doc as round 4 left it | the B831 test |
+| RED-2f | the settings matrix's row as round 4 left it | the B831 test |
+| CTL-2g | PROTOCOL.md's paragraph as round 4 left it | none, as predicted: its B831 sentence said nothing of what a stop does to a save; its recast is for one sentence in every text |
+
+Before each fix, its new and changed tests ran against the code as it stood
+and went red as the RED rows show (the decision's three no-backup places
+refused and its two failed lookups unsaid in the detail, the lookup's two
+failure rows answered as nothing there through a names-only `backupAt`;
+serve's no-backup case 409; the B831 test over six of the seven texts).
+
+### The gates
+
+Through the shared build lock, on go1.27.3, with TMPDIR on this disk, in one
+slot session at 5b9f59cd (`.tmp/_b761u/gate_r5.py`), all green:
+
+- `make test TEST_PKGS='-timeout 60m ./internal/updater/... ./internal/admin/...
+  ./internal/api/... ./cmd/bridge/...'`, the release tags (`GO_TAGS`),
+  `-race`, `-p 4`, and `-timeout 60m` after the Makefile's 30m (the later flag
+  wins), so that cmd/bridge has room: 1418 s in all, cmd/bridge 1407 s,
+  internal/admin 1031 s, internal/api 145 s and internal/updater 36 s.
+- The round's tests by name with `-race -count=20` and the release tags,
+  each passing twenty times: internal/updater's five in 10 s, cmd/bridge's
+  three in 85 s and internal/admin's one in 8 s; `make vet` for linux/amd64,
+  windows, darwin and linux/386; `make build-all`, its build-tag census
+  included; and go1.27.3's gofmt (`go run cmd/gofmt -l`) over `cmd`,
+  `internal` and `scripts`, listing nothing.
+
+The reds and controls were single packages without the race detector,
+outside the lock. This record's commit changes `ops/engineering-log.md`
+alone.
+
+`TestEveryCitedTestNameExists` passes with this record. `rules-b761-r5.patch`,
+applied to a `git archive` copy of the final HEAD, passes `make docs-check`
+(config-lifecycle.md at 99,932 bytes, 99.9%: the next rule there moves an
+entry out first, `move_entry.py --largest`) and `verify_moves.py --base HEAD`
+with its four declared edits, but for the two blocks one `--edit` prefix
+cannot pair, the B761 line of `config-lifecycle.md` and its verbatim History
+twin, rewritten alike: each has its one successor in its file, the line its
+twin and the pointer. The guard passes on that copy too.
+
+Not run here: the console's node-run tests, which skip without node; the
+cases skipped on Windows and as root (a directory this user may not search,
+a link loop, a 0600 marker made unreadable), whose directory-in-place
+siblings run everywhere; the iOS mirror of PROTOCOL.md, the orchestrator's.
