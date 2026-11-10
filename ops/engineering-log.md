@@ -91124,3 +91124,47 @@ the fix. The real reconciliation ordering tests change device capabilities and
 run RefreshDSD, holding the actual judgement/activation/take-back boundaries;
 they do not replace reconciliation with a direct revocation. Negative controls
 and final gate results are recorded below after the committed checkpoint.
+
+Further baseline failures pin containment and the cleanup deadline:
+`TestPolicyReadPanicIsContainedOnItsFirstCall` and
+`TestReconciliationPanicIsContainedOnItsFirstCall` catch the escaping panic and
+observe no stopped/faulted session. `TestRetiringPositionFailureDoesNotStrandTeardown`
+observes the final position panic stranding teardown and its mutex after close.
+`TestNativeQueuedResumeHonorsCleanupDeadline` holds close and advances the fake
+clock two seconds: the baseline does not answer the queued resume at that deadline;
+the fixed sink answers ErrReleaseUnconfirmed while Done remains open. The
+admission deletion, replacement and cut cases also fail on the baseline (a false
+device fault or 1,416 bytes delivered to the replaced node); the prefill deletion
+case fails with a cancellation reported as a device fault.
+
+Committed negative controls at 4830307e ran in an isolated worktree, with -race,
+a 3s fake-hardware watchdog and a 20s package timeout. Each compiled, failed at a
+named regression assertion, and was restored with `git diff --exit-code` before
+the next mutation. The mutations and observed failures were:
+
+- Bypass the cleanup verdict: ended-life entries/queued resume lose failed close.
+- Keep cancellation/fence identities in the verdict: the verdict matrix returns
+  a fence for success or cancellation and violates the expected error identity.
+- Remove the cleanup deadline wait arm: the queued resume exceeds the budget.
+- Replace the writer's typed activation fence: ErrActivationFenced no longer matches.
+- Disable dropped-occurrence take-back: deletion stops before the replacement opens.
+- Remove reconciliation's early fault record: the delayed Revoke sees no fault.
+- Remove activation fencing: the revoked successor's node receives bytes.
+- Ignore revocation after first activation: Start launches the reporter and loses
+  its native_revoked failure detail.
+- Skip the resume verdict wait: a second node opens during held reconciliation.
+- Skip the transport verdict wait: the successor opens before judgement.
+- Remove reporter judgement wake: both floor orderings miss the 350ms step.
+- Disable floor drain: neither ordering transitions at the measured floor.
+- Skip read-failure containment: the first failed policy read leaves DSD running.
+- Skip reconciliation containment: the first failed hand-off/reconciliation leaves
+  its session running.
+- Omit native Immediate release: the retiring node remains open while release's
+  caller is deliberately held.
+- Retry a failed position observer: cleanup calls it three times instead of once.
+- Re-panic at final reporting: teardown remains unacknowledged after close.
+
+Reproduction scripts and complete logs are in the worker scratch directory
+`~/onebit/codex/b9pr1-scratch` (controls.py, controls.json, control-*.log,
+red-*.log). Converted-window floor handling was already correct on the baseline;
+its positive control is not claimed as a newly exposed defect.

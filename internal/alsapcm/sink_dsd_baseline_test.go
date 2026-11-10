@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 )
 
 // An ended life cannot hide a failed close from any command entry point.
@@ -35,6 +36,53 @@ func TestNativeEndedLifePreservesCleanupAtEveryEntry(t *testing.T) {
 			}
 			k.checkClosedEach(t)
 		})
+	}
+}
+
+// A queued command must answer at the existing release deadline even while
+// the device's close is blocked. The late close still owns Done.
+func TestNativeQueuedResumeHonorsCleanupDeadline(t *testing.T) {
+	k := nativeKernel(t)
+	life, end := context.WithCancel(context.Background())
+	defer end()
+	a := &nativeAuditSys{sys: k, t: t, parked: make(chan struct{}), release: make(chan struct{})}
+	s, e := openDSDSink(life, nativeConfig(), nativeSeams{open: func(ep Endpoint, c Config) (*Device, error) { return openNative(a, k.now, ep, c) }, now: k.now, at: k.nativeAt})
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer func() { end(); close(a.release); await(t, s.Done(), "late close") }()
+	if e = s.Activate(context.Background(), 1); e != nil {
+		t.Fatal(e)
+	}
+	held, status := k.parkNextStatus()
+	defer status()
+	paused := make(chan error, 1)
+	go func() { paused <- s.Pause(context.Background()) }()
+	await(t, held, "pause status")
+	polling, poll := k.parkNextPoll()
+	defer poll()
+	status()
+	if e = receive(t, paused, "pause"); e != nil {
+		t.Fatal(e)
+	}
+	await(t, polling, "pause watch")
+	answer := make(chan error, 1)
+	go func() { answer <- s.Resume(context.Background()) }()
+	nativeWait(t, s, "queued resume", func() bool { return s.activation != nil })
+	a.armed.Store(true)
+	end()
+	s.Revoke()
+	poll()
+	await(t, a.parked, "close held")
+	k.advanceNow(2 * time.Second)
+	e = receive(t, answer, "queued resume at the existing cleanup deadline")
+	if !errors.Is(e, ErrReleaseUnconfirmed) || errors.Is(e, context.Canceled) {
+		t.Errorf("queued resume answered %v; want unconfirmed release without cancellation", e)
+	}
+	select {
+	case <-s.Done():
+		t.Error("cleanup was acknowledged before close completed")
+	default:
 	}
 }
 
