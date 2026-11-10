@@ -91528,3 +91528,77 @@ On the final tree (020a71d0 and these docs), in one use of the build lock:
 the player.md, output.md and History lines declared edits. The Backend entry's
 pointer now carries the clauses round 3 dropped, verbatim from its long form
 (player.md 99,798 bytes).
+
+## 2026-11-10 — B728 B9 PR 1 round 5: a cancelled Pause never answers success, and the rule says "while the life runs"
+
+The rules are in `output.md` (Native lifecycle and policy containment) and
+`ops/History-b470-native.md` ("Round 5"); this is the evidence. macOS arm64,
+Go 1.27.3, the fake kernel.
+
+### The regression
+
+Codex (P2): Pause read its context only in its wait's select. On an inert
+sink, or one whose pause was applied already, it skipped the wait, and
+`settle` reads the caller's context only where a release has begun, so a
+Pause on an ended context answered nil, having registered a pause on its way:
+the inert sink paused (a later Activate fenced) and the epoch moved (a Resume
+under way fenced). Its wait could also take the change that applies its pause
+beside its context's end, both ready, and answer nil. Pause now reads its
+context before it takes the sink's lock and again after its wait, and answers
+an end through `stopped` (d1391e1e). `TestNativeResumeStatusFence`'s pause
+fenced its parked Resume with a Pause on an ended context, which this round
+makes inert (it failed, "stale Resume succeeded"); its Pause now runs on a live
+context, registered before the parked STATUS returns, and stays green on
+3505b2b3.
+
+### Red-first on 3505b2b3
+
+A scratch extract of 3505b2b3 under the ignored `.tmp/`, with this round's
+test file and the reworked fence test. Each case failed at its predicted
+assertion:
+
+- `TestNativeAPauseOnItsOwnEndedContextChangesNothing`, all 3: the inert sink
+  and the already-paused one answered nil, the inert sink paused at epoch 1
+  and its Activate then `native activation fenced`, the paused one's epoch
+  moved from 1 to 2; beside the Resume, its STATUS parked, the Pause answered
+  its cancellation (its wait's arm) but paused the sink and moved the epoch,
+  and the Resume answered `native resume fenced after status`, the kernel never
+  unpaused.
+- `TestNativeAPauseWhoseContextEndsBesideItsChangeAnswersTheCancellation`: nil,
+  the staged wait taking the change with the context ended.
+
+### Controls on round 5
+
+Each on the committed tree (d1391e1e), undone with `git restore`, the source
+checked by `git diff --quiet HEAD`:
+
+- C1, Pause without its entry check: all three rows of
+  `TestNativeAPauseOnItsOwnEndedContextChangesNothing`, at the pause marks (the
+  post-wait check now answering the cancellation, the state still changed),
+  the inert sink's activation fenced and the Resume fenced; the both-ready
+  case stayed green.
+- C2, Pause without its check after the wait: the both-ready case alone,
+  answering nil; the three rows stayed green.
+
+### The rule's wording
+
+The Claude API (Low): the bold clause scoped only what followed its colon to a
+running life, so it forbade the ended life's `endOfLife` (its revocation,
+escalating a TrackChange still under way, and its wait within the budget),
+which the line's first rule requires. It now reads "while the life runs" in the
+clause and the cleanup verdict after the life's end.
+
+### The gates
+
+On the final tree (a262adb4 and these docs), in one use of the build lock,
+taken after 3,815 s queued behind another job: `go vet ./...` and
+`GOOS=linux go vet` of `./internal/alsapcm/...` and `./internal/player/...`
+clean; `go test -race` of the same, all 16 packages ok (alsapcm 76 s); this
+round's two cases, the reworked fence test, the staged wait cases, round 4's
+own-stop cases and the entry matrix `-race -count=20`, ok; under the native
+overlay with `-race`, the harness's real-sink integration in `cmd/bridge`, 15
+of 15 (`TestNativeIntegrationStopBesideAPauseOrResume` among them: its held
+Pause, on the context its Stop ended, still answers the life's cancellation,
+now through `stopped`), and the backend's, 29 of 29; `TestEveryCitedTestNameExists`
+ok. `make docs-check` clean; `verify_moves.py --base a262adb4` passes with the
+output.md line declared an edit.

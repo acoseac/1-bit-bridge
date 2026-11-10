@@ -608,3 +608,33 @@ The seams: `meeting` holds a command in its wait while a test ends the life;
 a test begin a release just before a command's revocation. The queue-cut
 integration case (`TestNativeIntegrationSuccessfulCutReplacement`, under the
 native overlay) is the guard that a write's own stop leaves the sink usable.
+
+### Round 5: a cancelled Pause never answers success, and the rule says "while the life runs"
+
+Pause read its context only in its wait's select. On an inert sink, or one
+whose pause was applied already, it skipped the wait, and `settle` reads the
+caller's context only where a release has begun, so `Pause` on an ended context
+answered nil (Codex). It had registered a pause on its way: the inert sink paused,
+so a later Activate was fenced, and the epoch moved, which fences a Resume or a
+paused activation under way. Pause now reads its context first, before it takes
+the sink's lock or changes anything, and answers that end through `stopped`, the
+own stop of round 4: while the life runs, the cancellation at once, revoking and
+waiting for nothing, unless the record holds a cleanup failure or a release past
+its budget, which it answers. A Pause called on an ended context changes nothing. Its wait can take the change
+that applies its pause beside its context's end, both ready, so Pause reads the
+context again once the wait is done and answers the end through `stopped` too.
+A Pause whose context ends during its wait has registered its pause and answers
+that end, as its wait's context arm always has.
+
+`TestNativeResumeStatusFence` fenced its parked Resume with a Pause on an ended
+context, which this round makes inert; its Pause now runs on a live context,
+registered before the parked STATUS returns.
+
+The rule's bold clause read "never let a WriteDSD's or a Pause's own context's
+end revoke the sink, escalate its release or wait for one", with only what
+followed the colon scoped to a running life (the Claude API, Low). Read
+literally it forbade what the same line's first rule requires once the life
+has ended: `stopped` then answers through `settled`, whose `endOfLife`
+revokes, so escalating a TrackChange still under way, and waits within the
+budget. It now reads "while the life runs" in the clause itself, and the ended
+life's cleanup verdict, as before, after it.
