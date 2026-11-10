@@ -4073,3 +4073,274 @@ is left, `errLinkToNothing` only where a link still is (red:
 race on). Five negative controls, each predicted by name, turned their
 tests red. The record is in `ops/engineering-log.md`, 2026-11-08, B741
 round 3.
+
+## B749 — the embedded node's diagnostic-log uploads and its name (2026-11-09)
+
+- **The embedded Tailscale node (tsnet mode) uploads no diagnostic logs unless `tailscale.uploadDiagnosticLogs` is true, keeps the name a registered node has, and a tailnet that requires the logs is said in the bridge's words, at a start and while the node runs** (2026-11-09, backlog B749 part 3, and its rounds 2 to 5): every path that builds a node (serve, `bridge tsnet auth` and `status`, each after its mode gate) builds it through `tsnet.NewServer`, which sets `TS_NO_LOGS_NO_SUPPORT=true` through envknob unless the key is true, over whatever the process wrote there, unread, on the caller's goroutine before anything starts the node (`applyUploadPolicy`), leaves the environment as it is where the key is true, reading what it holds as Tailscale does (a true holds the uploads off, a false holds nothing, one written over an inherited true included), and refuses an inherited value `strconv.ParseBool` refuses, naming the variable and not its value (`tsnet.ErrNoLogsEnvUnreadable`), and, with the key true and nothing set, a value written in the process since that it refuses, in words that blame the process and never its launch environment (`tsnet.ErrNoLogsEnvWrittenUnreadable`); once the policy has set the variable, every later `NewServer` sets it again before anything reads it, until the process exits, so a node a process builds after one it built without the key (the menu's "Start now", and bridge init's start, run serve in their own process) starts with the uploads off whatever its config says, and the setting applies at a process restart; the policy reads what the process inherited once, at its first application whatever the config says (`policyRecord`), and its status (`Server.Uploads`, read live) tells three reasons apart, each in words of its own (`Uploads.HeldOff`): the launch environment held the variable, this process turned the uploads off earlier (quit the bridge, its menu included, and launch it again, or restart its service), or something else in it did (a new launch may restore them), which a tailnet's refusal says and the console's tile shows on a line of its own (`UploadsHeldOff`) whatever the tailnet says; what stays open is backlog B830; a mode-refused command and `tsnet logout` leave the environment alone; the key is process-restart-bound (the console's `tailscaleUploadDiagnosticLogs`, class D in `ops/settings-apply-semantics.md`), and `compose.yaml` forwards its variable empty where it is unset, which the load takes for no override (`TestAnEmptyVariableLeavesTheFilesConsent`). The node's name is `tailscale.hostname`, else what the state says at each start, read read-only through upstream's keys and types, never its store constructor (`readNodeState`: the current profile, listed among the known profiles, its prefs carrying a node ID): a registered node keeps its persisted hostname, a node not registered (no file, an empty one, `{}`, an authentication that never finished) is `tsnet.DefaultHostname` (`1-bit-bridge`), and a state that does not read keeps the library name with one line naming no path. A start the tailnet refuses for the logs (upstream's "tailnet requires logging to be enabled", the one substring matched, pinned to the resolved module source) ends in `tsnet.LogsRequiredError`, kept as the wrapper's last start error under `lifecycleMu`, and the console's tile says it in LastError, from a running node's health too (`Server.LogsRequired`), naming `TS_NO_LOGS_NO_SUPPORT` where an inherited true holds the uploads off; `tsnet.Config.BeforeStart` (`tsnetBeforeStart`, nil in production) is the seam just before the upstream start the tests read the environment and the name through. **Don't set the variable before a path's mode gate, from a refused command or `logout`, or once anything has started the node; let an absent key or an inherited false turn the uploads on, or the bridge turn them on itself; hand the variable back, or unset it, in a process that has set it, or read it in a later `NewServer` before setting it again, read a true something else set as the launch environment's, or a false written over an inherited true as holding the uploads off, refuse a node without the key over a value written in the process, blame the launch environment for a value written in the process, set the variable before reading what the process inherited, give Compose's forwarding of the key's variable a default other than empty, or advise a restart of serve in its process, or a bare restart, for a change of the key; count a node registered by the state file's existence, open the state through upstream's store constructor, or write, create or lock it; derive a new node's name from the library, the host, its user or a path; match the refusal on more than that substring, or show upstream's tailscaled advice; or set the hook in production.** `TestTheUploadPolicyByKeyAndInheritedValue`, `TestEveryPathAppliesTheUploadPolicyBeforeTheUpstreamStart`, `TestTheCommandsThatBuildNoNodeLeaveTheEnvironmentAlone`, `TestTheNodesNameOnEveryStart`, `TestTheTileSaysWhatATailnetThatRequiresLogsNeeds`, `TestAServeRunAgainInTheSameProcessKeepsTheUploadsOff`, `TestTheTileSaysWhatHoldsTheUploadsOff`, `TestTheTileReadsWhatHoldsTheUploadsOffWhenItAsks`, and internal/tsnet's `TestTheNodeNameIsTheRegisteredOneOrTheDefault`, `TestOnceThisProcessTurnsTheUploadsOffTheyStayOff`, `TestTheStateReaderWritesNothing`, `TestARefusedStartSaysWhatTheTailnetRequires` and `TestTheLogsRequirementIsUpstreamsWords` pin it; `scripts/tsnet-uploads/evidence.py` is the evidence from a production binary, confined by port and not by address, an upgraded install included. → History-rules-cli-serve.md
+
+*What uploaded.* tailscale.com v1.104.2's `tsnet.Server.Start` runs
+`startLogger` outside a test binary: it writes `tailscaled.log.conf` and a
+filch buffer in the state dir and builds a logtail logger whose transport
+(`logpolicy.NewLogtailTransport(logtail.DefaultHost, …)`) is a no-op only
+while `envknob.NoLogsNoSupport()` reads `TS_NO_LOGS_NO_SUPPORT` true, live,
+through `os.Getenv`. Network flow logs (`feature/netlog`, linked into the
+bridge) run only while it is false, and `hostinfo.New` tells the
+coordination server which it is. The bridge never set the variable, so every
+tsnet-mode bridge uploaded its node's logs to `log.tailscale.com`; and it
+named its node after the library, so a library rename renamed the node, its
+MagicDNS name and its certificate's, which paired apps hold.
+
+*The policy.* `tsnet.NewServer` applies it (`applyUploadPolicy`), so no path
+that builds a node can skip it: serve's tsnet case, `bridge tsnet auth` and
+`status` build through `newTsnetServer` after their mode gates, on the
+caller's goroutine and before anything starts the node. With the key absent
+or false it sets the variable true through `envknob.SetNoLogsNoSupport`,
+upstream's own setter; with the key true it leaves the environment as
+inherited, so an inherited true still holds the uploads off and an inherited
+false alone never turns them on. An inherited value `strconv.ParseBool`
+refuses is refused before any node is built (`ErrNoLogsEnvUnreadable`, the
+variable named and its value not), where every reader of it in Tailscale's
+code would end the process (`envknob.Bool`'s `log.Fatalf`); an empty value
+is unset, as envknob reads it.
+envknob's comment asks for `Setenv` before goroutines start
+because of its registered knobs' caches; this variable is not one, and every
+reader asks `os.Getenv`, so serve's earlier goroutines (the scanner, the
+enricher), which run no Tailscale code, race nothing. What the policy found
+(`Uploads{Allowed, EnvOff}`) is kept for the refusal's words. A
+mode-refused command and `tsnet logout` build no node and leave the
+environment alone. The key is the console's `tailscaleUploadDiagnosticLogs`,
+class D in `ops/settings-apply-semantics.md`: the variable is the process's,
+and upstream picks the node's log transport as the node starts. In Docker,
+`compose.yaml` forwards the key's variable as
+`${BRIDGE_TAILSCALE_UPLOAD_DIAGNOSTIC_LOGS:-}` (round 4), so a container
+whose `.env` leaves it out gets it set and empty, which the load takes for
+no override, as it takes every empty variable, and `bridge.yaml`'s value
+stands; `TestAnEmptyVariableLeavesTheFilesConsent` pins that for a true and
+a false (round 5, the Claude API's review of round 4).
+A process can build a node again after one it built (round 2, from the
+Claude API's question on #1445 whether anything starts the bridge again
+with the variable this process set: nothing does; every child process serve
+starts is a tool or `serve --validate-config`, which builds no node, and a
+restart is the service manager's, from the unit's environment). The menu's
+"Start now" runs serve in its own process and again after a stop, as bridge
+init's start can before it. Round 2 handed the inherited value back to a
+later node whose config allowed the uploads; round 3 took that out on Codex's
+two P2s on #1445's round 2, one on the hand-back itself, the other that
+upstream's own true, which the coordination server's `DisableLogTail` message
+writes beside a `logtail.Disable` that lasts the process, was taken for the
+policy's and undone. Once the policy has set the variable, every later
+`NewServer` sets it again through envknob before it reads it, until the
+process exits (round 4, the Claude API's review of round 3: round 3 only
+refrained from unsetting it, so a false written in the process after the
+policy's true let a later allowing node start with the uploads on, and a
+value that does not read as a boolean made that node's `NewServer` refuse,
+blaming the launch environment; the variable is set again only there, so
+between such a write and the next `NewServer` it reads as the write left
+it), so a later node whose config allows the uploads starts with them off,
+and the setting applies at a process restart: quit the
+bridge, its menu included, and launch it again, or restart its service. The
+design consult chose this over tracking every node until its teardown, which
+each early return of serve between the node's construction and its shutdown
+defer would have had to release. Before the policy has set the variable, a
+value written in the process since its launch is read as Tailscale reads it
+(round 5, the Claude API's review of round 4 and the two reviews of round
+5's brief): without the key the policy sets the variable over it unread,
+once it has read and parsed what the process inherited, so an inherited
+value it refuses still leaves the environment as it was; with the key a
+true holds the uploads off, the launch environment's (`EnvOff`) only where
+that held a true too and otherwise something else's (`OtherOff`), a false
+lets the node upload, a false written over an inherited true included, and
+a value that does not read as a boolean is refused before any node is built
+(`ErrNoLogsEnvWrittenUnreadable`), in words that blame the process and never
+its launch environment, since Tailscale's code would end the process on it.
+Round 4 parsed that value before either branch, so a node without the key
+was refused over it and a node with the key was refused in the launch
+environment's words, and it took a false written over an inherited true for
+the launch environment's hold. The policy reads what the process inherited
+once, at its first application whatever the config says (`policyRecord`), and
+its status (`Server.Uploads`, read live, so a `DisableLogTail` that comes
+while a node runs shows) tells three reasons apart, all in `Off()`: the
+launch environment held the variable (`EnvOff`: remove it, then launch
+again); this process turned the uploads off earlier (`LatchedOff`: the
+setting applies at the next launch, never at a restart of serve in its
+process, which the menu's Start now and init's start make); something else in
+it did (`OtherOff`: a new launch may restore them, with no promise that the
+coordination server will not turn them off again). `Uploads.HeldOff` says
+each in its own words, which a tailnet's refusal carries and the console's
+tile shows on a line of its own (`admin.TailscaleStatus.UploadsHeldOff`),
+for a node the tailnet accepted, whose badge, backend state and endpoints
+stay as they are, as for one it refused; round 4 pins that the status is
+read when it is asked for, on a node built before upstream's setter runs.
+What stays open is backlog B830.
+`ForgetUploadPolicyForTest` starts a test case as a process that has built
+no node; a test that builds one without the helpers leaves the record to
+the next (round 2's control R05b).
+
+*The name.* An explicit `tailscale.hostname` wins. Otherwise each start
+reads the state read-only (`readNodeState`): `<StateDir>/tailscaled.state`
+opened through `fsutil.OpenAsFile` (a named pipe or a directory refused at
+once) and read to 16 MiB at most, never through upstream's store
+constructor, which writes `{}` over a missing file; the JSON object of state
+keys upstream's file store keeps; the profile key under
+`ipn.CurrentProfileStateKey`; that key listed among the profiles under
+`ipn.KnownProfilesStateKey`, since upstream's start takes an unlisted one
+for none (`profileManager.findProfileByKey`); and its prefs through
+`ipn.PrefsFromBytes`, with a Persist whose attestation key takes any JSON and
+keeps none of it (`ignoredAttestationKey`, the shape of upstream's own
+fallback, a pointer, which encoding/json follows into the interface; a
+non-pointer value there is an unmarshal error). Registered is a node ID in
+those prefs, and the name is then their `Hostname`, which tsnet writes from
+the name every start passes it. Not registered, so `tsnet.DefaultHostname`
+(`1-bit-bridge`): no file; an empty one; `{}`; a machine key alone (an
+abandoned authentication, or a first start that failed); a profile with no
+node ID; one a logout deleted; one not listed. A state that is there and does
+not read (it cannot be opened, it does not parse, a registered profile names
+no hostname) is taken for neither: the start keeps the library name earlier
+versions gave every node and says so in one Warn line naming no path.
+`hasPersistedTsnetState`, the file's existence, is gone, and the
+interactive-auth warning asks the reading too. After `bridge tsnet logout`
+the state is gone and the next node is new. A backup does not carry the
+state (`backup.Snapshot` copies the database, the tokens, the TLS pair,
+bridge.yaml, the console account, the harvest state, and the player's
+identity, its ID floor and its DSD state, never `<dataDir>/tailscale`, and a
+restore writes only what the snapshot holds), so a restore leaves the node
+on that box as it was, its name included, and on a box without the state
+the node is new; the brief's "the restored profile's name" assumed
+otherwise. Upstream's start takes the key the reading takes, on every OS:
+tsnet passes `controlclient.LocalBackendStartKeyOSNeutral`, which
+`ipnlocal.NewLocalBackend` turns into an empty OS for
+`newProfileManagerWithGOOS`, so `readAutoStartKey` takes
+`ipn.CurrentProfileStateKey` on Windows too. Until round 2 this said that
+Windows starts from `ipn.ServerModeStartKey`, from `readAutoStartKey` read
+without tsnet's flag (Codex on #1445). What stays open of the reading is
+backlog B828 and B829.
+
+*The refusal.* Upstream refuses a node with the variable set on a tailnet
+carrying `nodecap.DataPlaneAuditLogs` (ipnlocal's local.go, about line
+2048): `WantRunning` false, the local-log health warning ("The local log is
+misconfigured: …" in `Status.Health`, once the tracker's built-in warnables
+update), and `tsnet.Up`'s error, `tsnet.Up: backend: tailnet requires logging
+to be enabled. Remove --no-logs-no-support from tailscaled command line.`, at
+a start or while the node runs. The match is that substring alone
+(`logsRequiredText`), pinned to the resolved module source by
+`TestTheLogsRequirementIsUpstreamsWords`, which asks `go list -m -f
+{{.Dir}} tailscale.com` (it reads go.mod and the module cache, so it works
+with GOPROXY=off) and reads ipn/ipnlocal/local.go; a literal copied into a
+test could not fail on a bump. A start whose error carries it ends in
+`LogsRequiredError`, kept under `lifecycleMu` as the last start error
+(`LastStartError`, cleared by a start that succeeds); `tsnetAdminStatus`
+puts its words in LastError, since `Status` has no node to ask after a
+refused start, and reads a running node's health through
+`Server.LogsRequired`, beside the Stopped backend state the status reports.
+The words: the tailnet requires Tailscale's logs and the node runs on it only
+with their uploads on; set the key (Settings, Networking, or bridge.yaml) and
+restart, after which the node uploads Tailscale's diagnostic logs; also
+remove an inherited `TS_NO_LOGS_NO_SUPPORT=true` where it holds them off;
+the bridge never turns them on itself. A fourth case covers uploads turned
+off after the start with the key true and nothing inherited (the
+coordination server's `DisableLogTail` debug message can).
+
+*The seam.* `tsnet.Config.BeforeStart` runs on the upstream server just
+before its Start, and an error from it ends the start there, the server
+closed unstarted; nil in production, `tsnetBeforeStart` in cmd/bridge, so the
+tests read the environment and the name each of the three paths hands
+upstream and stop it before anything reaches the network. Serve is driven
+through runServe itself: its node is built in runServe and started on the
+tailnet goroutine runServe starts, so no narrower function does both.
+
+*Evidence from a production binary.* No go test can see an upload:
+`startLogger` returns at once under `testenv.InTest`. The
+`scripts/tsnet-uploads/evidence.py` script runs a release-shaped binary
+(CGO_ENABLED=0, the release tags, -trimpath), each run a throwaway install
+made for it, in three arms: the key true; the key absent; the key true with
+`TS_NO_LOGS_NO_SUPPORT=true` inherited. An unprivileged network namespace,
+which would confine by address, is refused on legion0
+(`kernel.apparmor_restrict_unprivileged_userns=1`: `unshare -rn` fails
+writing uid_map), a user unit's `PrivateNetwork=yes` is not applied there
+(the unit kept the host's network namespace), and a cgroup connect hook
+needs CAP_BPF and CAP_NET_ADMIN. So the script confines the bridge by port,
+not by address: Landlock (ABI 4 or later) lets it connect TCP sockets to the
+proxy's port number alone, at any address, its network rule naming a port
+and never an address, and seccomp refuses every IPv4 and IPv6 socket but
+plain TCP (MPTCP refused, so Go falls back to TCP) and io_uring; HTTP and
+HTTPS go through a proxy on 127.0.0.1 that records every request it receives
+and refuses every one, and the verdict rests on that record. A connection to
+the proxy's port number at another address is not prevented, and would not
+be recorded. `TS_DEBUG_ALWAYS_USE_DERP=1` keeps the node from binding UDP,
+and `GODEBUG=netdns=go` keeps lookups in Go's resolver. Before any run the
+script checks the confinement inside and out (since round 2; round 1 took
+any refusal): inside, another port with a listener, on 127.0.0.1 and on ::1,
+is refused with Landlock's EACCES, every socket but plain TCP with the
+filter's EPERM, and the proxy's port at ::1, where nothing listens, with the
+kernel's ECONNREFUSED, never EACCES; outside, the same connections are made
+and the UDP sockets created. A copy with Landlock not enforced, or with the
+filter not installed, fails the check and runs no bridge. With
+`--previous`, an earlier build, the script checks an upgraded install: the
+earlier build's setup on a fresh install must ask for `log.tailscale.com`
+and leave a non-empty `tailscaled.log*.txt` in the state dir, the earlier
+build run again on a copy of that data dir must ask again (the positive
+control on that state), and this build on the data dir itself, without the
+key, must not ask in its whole window; every check of this build's runs is
+over its runs alone. Round 2, on 2664276c with main's 71f707ab as the earlier
+build, three rounds of 60 s windows: the key true, `CONNECT
+log.tailscale.com:443` first at 2.23 to 2.30 s, two a window; the key absent,
+its second start and the inherited true, none; the earlier build asked at
+2.22 s and left 22,304 bytes of buffer, asked again at 0.11 s on the copy,
+and this build on its data dir never asked in 60 s, leaving 92 bytes; the
+coordination server's CONNECTs came in every run (25 to 27 a window); every
+start of this build named the node `1-bit-bridge`. Round 1 (891f82d6) saw the
+same for the three arms, and main's binary (9d59c8f6) asked for the log host
+at 2.29 s, and at 0.08 s at its second start, named the node after the
+library, and refused the key at load.
+
+*Red first, and the controls.* Against main's behaviour (a copy of
+9d59c8f6 with the new tests and a names-only shim: the seam, the names,
+main's answers), 16 of the 21 new tests were red; the other five are the
+seam's own test, the two pins of upstream, the clearing of the last start
+error and the no-node commands' environment, which main meets by doing
+nothing, and which controls turn red. 23 negative controls, each predicted
+by name before it ran, were red where predicted (one, the library's name
+restored, also on the unreadable state's line). Round 2's node built again
+in one process was red first, with a names-only shim, on five rows of
+internal/tsnet's later-node table and two of cmd/bridge's serve run twice;
+its seven controls (R01 to R06 and R05b), each predicted, were red where
+predicted but for the two the record names (R02 one row more; R05 green, and
+its re-prediction R05b red). Round 3 rewrote both tests for the latch, as
+`TestOnceThisProcessTurnsTheUploadsOffTheyStayOff` (each inherited value,
+unset, false, true and 1, through no then yes, yes then no then yes, and no
+then no, read through `strconv.ParseBool`, with controls and upstream's
+setter before a node with the key, and before one without and one with it)
+and `TestAServeRunAgainInTheSameProcessKeepsTheUploadsOff`, beside the tile's
+`TestTheTileSaysWhatHoldsTheUploadsOff` and internal/admin's
+`TestTheTailscaleTileShowsWhatHoldsTheUploadsOff`. On round 2's code, under
+a names-only shim, they were red where a later allowing node was handed the
+inherited value back (four rows of each matrix), on every reason and on the
+words; seven controls (L01 to L07), each predicted, were red where predicted.
+Round 4's latch row for a false written after the policy's true, flipped to
+the uploads off, and its new row for a value written there that does not
+read as a boolean were red on round 3's code. The tests read the variable
+right after `NewServer` as well as at the upstream start, through
+`strconv.ParseBool` wherever they read the upload state, exact text only
+where they check the environment is preserved: a policy that writes `1`
+where it writes `true`, which Tailscale reads alike, reddened 13 rows of
+round 3's tests and none of round 4's. Three controls (M01 to M03), each
+predicted, were red where predicted: the setter alone reverted reddens the
+false row on its reads right after `NewServer` and at its upstream start,
+and the unreadable row on its refusal, a status kept from the node's
+construction reddens the live-read cases, and the setter placed after the
+parse reddens the unreadable row alone. Round 5's rows were red on round 4's
+code where they change what it did: a node without the key over an
+unreadable value written in the process (refused), a node with the key over
+one, inherited unset and true (the launch environment's refusal), and a
+false written over an inherited true (held off by the launch environment);
+its pins (a first node without the key with nothing inherited, `EnvOff`
+false; a false written over an unset value; a 0 and a 1 written over an
+inherited false) were green there. Nine controls (R01 to R07, N01, N02),
+each predicted, came out as predicted: each of the policy's readings and
+orders put back as round 4 had it, or made in a wrong order, reddens the
+rows it changes, the refusal taken for the launch environment's or for
+`OtherOff` reddens the two rows with the key, and a loader that reads an
+empty variable as false reddens `TestAnEmptyVariableLeavesTheFilesConsent`,
+while its check of an empty value alone dropped stays green, the parse
+refusing the value. The record is in `ops/engineering-log.md`, 2026-11-09,
+B749 part 3 and its rounds 2 to 5.

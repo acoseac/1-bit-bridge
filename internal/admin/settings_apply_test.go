@@ -370,11 +370,12 @@ func currentValuesForEveryPatchField(t *testing.T, cfg *config.Config) map[strin
 		"fingerprintEnabled":       cfg.Fingerprint.Enabled,
 		// Blank is the documented no-op (the settings form submits this
 		// on every save, so a blank MUST keep the stored key).
-		"fingerprintApiKey": "",
-		"duplicatesFilter":  dupes,
-		"tailscaleMode":     string(mode),
-		"mdnsEnabled":       cfg.EffectiveMDNSEnabled(),
-		"dlnaEnabled":       cfg.DLNA.Enabled,
+		"fingerprintApiKey":             "",
+		"duplicatesFilter":              dupes,
+		"tailscaleMode":                 string(mode),
+		"tailscaleUploadDiagnosticLogs": cfg.Tailscale.UploadDiagnosticLogs,
+		"mdnsEnabled":                   cfg.EffectiveMDNSEnabled(),
+		"dlnaEnabled":                   cfg.DLNA.Enabled,
 		// Raw, not resolved: both default to a literal 0 meaning "keep
 		// everything", and there is no Effective* accessor to disagree
 		// with.
@@ -535,7 +536,7 @@ func differentValueFor(t *testing.T, field string) (any, bool) {
 	// and updateCheckEnabled.
 	case "libraryWatchEnabled", "atlasEnabled", "atlasLyricsEnabled", "analysisEnabled",
 		"fingerprintEnabled", "upscaleEnabled", "autoOptimizeEnabled",
-		"dsdRenderEnabled", "updateAutoInstall", "dlnaEnabled":
+		"dsdRenderEnabled", "updateAutoInstall", "dlnaEnabled", "tailscaleUploadDiagnosticLogs":
 		return true, true
 	case "smartPlaylistsEnabled", "optimizeEnabled", "enrichEnabled", "enrichDeezerEnabled", "updateCheckEnabled":
 		return false, true
