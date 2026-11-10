@@ -196,6 +196,11 @@ type Seams struct {
 	// refresh keeps from ending has begun. It must not block or call the
 	// backend.
 	Admitting func(o engine.OccurrenceID)
+	// Revoking runs in Backend.Revoke under session s's lock, once the
+	// session is found and before the revocation changes anything (B728 B9
+	// round 19): a test panics there, a Revoke that panics, which must leave
+	// the session's lock free. It must not block or call the backend.
+	Revoking func(s engine.SessionID)
 	// Releasing runs in session s's Release once the session is marked
 	// released and its native sinks have begun their release, before its
 	// life ends, its lock let go (B728 B9 round 2): the window in which a
@@ -296,6 +301,13 @@ func (b *Backend) deciding(o engine.OccurrenceID) {
 func (b *Backend) admitting(o engine.OccurrenceID) {
 	if sm := b.cfg.Seams; sm != nil && sm.Admitting != nil {
 		sm.Admitting(o)
+	}
+}
+
+// revoking is the Revoking seam.
+func (b *Backend) revoking(s engine.SessionID) {
+	if sm := b.cfg.Seams; sm != nil && sm.Revoking != nil {
+		sm.Revoking(s)
 	}
 }
 
@@ -419,18 +431,23 @@ type Backend struct {
 	// that set and its read side (B728 B8), swapped right after it, and alone
 	// when the read side alone changes. Neither is nil once New has returned,
 	// for a backend with a DSD policy. dsdMu serializes the refreshes that swap
-	// them, dsdRead is when the last one read the policy, dsdJudged is the set
-	// the last reconciliation that returned judged every session by, or the
-	// one a refresh reconciles once more, under dsdMu (B728 B9 round 18: a set
-	// published whose reconciliation did not return, its refresh having
-	// panicked, is reconciled once more by the next refresh, which finds it the
-	// same), dsdFenceOnce says once that the state's writes are fenced, and
-	// probeState is the silent probe's bookkeeping (ProbeDSD).
+	// them. Under it: dsdRead is when the last refresh whose reading completed
+	// read the policy; dsdJudged is the set the last reconciliation that
+	// completed judged every session by, or whose retry failed and stopped the
+	// sessions it failed in; dsdTried and dsdTries are the set whose
+	// reconciliation failed and how many of its attempts did; and dsdFails is
+	// the refreshes in a row that panicked outside their reconciliation (B728
+	// B9 rounds 18 and 19: reconcileOrStop, refreshFailedLocked). dsdFenceOnce
+	// says once that the state's writes are fenced, and probeState is the
+	// silent probe's bookkeeping (ProbeDSD).
 	dsd          atomic.Pointer[dsdSet]
 	dsdPub       atomic.Pointer[dsdPublished]
 	dsdMu        sync.Mutex
 	dsdRead      time.Time
 	dsdJudged    *dsdSet
+	dsdTried     *dsdSet
+	dsdTries     int
+	dsdFails     int
 	dsdFenceOnce sync.Once
 	probeState   dsdProbe
 	// choiceTurn is the writes' turn: one choice write at a time (B728 B9,

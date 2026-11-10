@@ -79,6 +79,11 @@ type occ struct {
 	leading    bool
 	stale      bool
 	observed   bool
+	// handedOff, under the session's lock, is a stale occurrence whose
+	// hand-off a reconciliation asked of the engine and saw return
+	// (reconcileDSD): a reconciliation tried once more asks only the hand-offs
+	// that did not (B728 B9 round 19).
+	handedOff bool
 	// refusedUnder is the set whose plan refused the occurrence's DSD at its
 	// open, a rate the policy decides (B728 B9 round 2): the step that ends
 	// its open asks again where a choice's write would lift the refusal, or

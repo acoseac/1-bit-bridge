@@ -95,6 +95,11 @@ type session struct {
 	// dsdMonitor is the session's monitor of the effective DSD policy
 	// started (startDSDMonitor), once it holds a DSD occurrence.
 	dsdMonitor bool
+	// dsdJudged is the set the session's last reconciliation that completed
+	// judged it by, under the backend's dsdMu: the retry of a set's
+	// reconciliation judges only the sessions it failed in (B728 B9 round 19,
+	// Backend.reconcileDSD).
+	dsdJudged *dsdSet
 
 	paused bool
 	// pausedFlag is paused as a reader that may not take the session's lock

@@ -616,12 +616,14 @@ func (r *panicReplans) Replan(s engine.SessionID, o engine.OccurrenceID, why str
 	panic("the test's panic in a reconciliation's hand-off")
 }
 
-// TestALostReconciliationIsTriedOnceMore (B728 B9 round 18): a refresh whose
-// reconciliation does not return, here a hand-off that panics inside it once
-// the session's lock is let go, leaves its set published and the occurrence
-// it was judging unjudged; the next refresh, finding the set the same,
-// reconciles it once more, recording it judged first, so a reconciliation
-// that panics again is not run by every refresh after it.
+// TestALostReconciliationIsTriedOnceMore (B728 B9 rounds 18 and 19): a
+// refresh whose reconciliation does not complete, here a hand-off that panics
+// inside it once the session's lock is let go, leaves its set published and
+// the occurrence it was judging unjudged, and panics into no caller; the next
+// refresh, finding the set the same, reconciles it once more, and that
+// retry's failure stops the session (backend_failed) and records the set
+// judged, so a reconciliation that panics again is not run by every refresh
+// after it.
 func TestALostReconciliationIsTriedOnceMore(t *testing.T) {
 	b, store := choiceSessionBackend(t)
 	s := b.session(1)
@@ -644,11 +646,14 @@ func TestALostReconciliationIsTriedOnceMore(t *testing.T) {
 	for range 3 {
 		got = append(got, refresh())
 	}
-	if want := []bool{true, true, false}; fmt.Sprint(got) != fmt.Sprint(want) {
-		t.Errorf("the refreshes panicked %v, want %v: the publish's reconciliation, once more, then nothing", got, want)
+	if want := []bool{false, false, false}; fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("the refreshes panicked %v, want %v: a reconciliation's panic reaches no refresh's caller", got, want)
 	}
 	if n := len(ev.asked()); n != 2 {
 		t.Errorf("the occurrence was handed off again %d times, want 2: the publish's reconciliation and the next refresh's", n)
+	}
+	if f, _ := faultOf(s); f == nil || f.Reason != ReasonFailed {
+		t.Errorf("the session's fault once the retry failed: %+v, want backend_failed", f)
 	}
 }
 

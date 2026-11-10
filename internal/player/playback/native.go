@@ -449,13 +449,20 @@ func (b *Backend) EscalateNative(r engine.ReleaseRequest) {
 // is the session's one: a fault there already, a reconciliation's own record
 // of this revocation among them (B728 B9 round 6), is never replaced. What it
 // drops was judged by the reconciliation that revoked it: what waited for that
-// verdict (unjudgedLocked, round 17) asks again.
+// verdict (unjudgedLocked, round 17) asks again. Its locked section is held
+// through a lockHold (round 19): a panic in it lets the session's lock go, so
+// the reconciliation that called it, which contains the panic, and the stop
+// that follows that reconciliation's retry (stopDSD), which never calls Revoke
+// again, find the lock free.
 func (b *Backend) Revoke(r engine.RevokeInput) {
 	s := b.known(r.Session)
 	if s == nil {
 		return
 	}
-	s.mu.Lock()
+	l := s.hold()
+	defer l.release()
+	l.lock()
+	b.revoking(r.Session)
 	s.nativeRevoked = true
 	if s.permission != nil {
 		s.permission.revoked.Store(true)
@@ -489,7 +496,7 @@ func (b *Backend) Revoke(r engine.RevokeInput) {
 	}
 	close(s.judged)
 	s.judged = make(chan struct{})
-	s.mu.Unlock()
+	l.unlock()
 	for _, sink := range sinks {
 		sink.Revoke()
 		sink.BeginRelease(alsapcm.Immediate)
