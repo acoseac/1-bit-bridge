@@ -544,7 +544,8 @@ without waiting fails at that wait. The ended budget column calls its entry
 only once the watcher's revocation holds the close: called first, a Pause or a
 WriteDSD went past its refusal to its completion's return. The staged wait
 cases make one arm alone ready: "Pause changed" closes `releaseExpired` rather
-than `done` beside `changed`, which its select took half the time, and the
+than `done` beside `changed`, beside which its select could take `done`, so
+Pause's completion reverted to nil still passed 17 runs in 20 (7c2601a9), and the
 ring wake-up case is named for the refusal it reaches after waking. WriteDSD's
 occurrence budget has a case of its own, the ledger filled while admission is
 open and the new occurrence written once the life has ended with its watcher
@@ -557,3 +558,53 @@ The containment Drop test waited on `SinkCall`'s seam, which runs inside
 refreshes had run. `Seams.ContainCalled` runs on the containment goroutine after
 everything it does, and the test waits on it. `finalNativeReport` reads `s.ev`
 under the session's lock, as every write of it is made.
+
+### Round 4: every answer is decided after its wait, and a command's own stop never waits
+
+Round 3 read the sink's life before a command's wait and classified the
+answer by that read afterwards. A life that ended during the wait, its cleanup
+clean, then answered what was read before: an activation's `ErrActivationFenced`
+in place of the ended life's typed cancellation, a Pause's refusal, a zero-bit
+WriteDSD's nil beside a recorded device fault, an abandoned activation's bare
+cancellation joined with that fault. `settle` (which `settled` calls),
+`abandoned` and `overBudget` now take the record and read the life again after
+any wait; ended, the answer is the cleanup's verdict, of the writer's reply to
+a request (`requestVerdict`: `sent(r)` and `record` with its after-reply grace,
+the reply an arm already read carried along) or of the command's refusal, never
+a refusal rebuilt over a bare snapshot. `overBudget` has no wait of its own,
+but the life can end between `await`'s read of it and the record, so it reads
+the life again too.
+
+`found`, whether the release had begun before a command's own revocation, was
+read and its lock let go before `Revoke`: a release begun between the two was
+taken for the command's own and answered at once, with bare cancellation, while
+its record could still take a cleanup failure. `revokeFound` reads it and
+revokes in one hold of the sink's lock.
+
+Round 3's waiting rule had reached WriteDSD and Pause on their own context's
+end, which never revoke and must not: playback ends a write's context to cut a
+queue (`cutFromLocked`'s `wcancel`) and its producer's once a TrackChange has
+begun (`release`, after `BeginRelease`), and a revocation would close the sink
+for good or turn the graceful release into an Immediate one. Waiting held the
+producer for the whole of that release. `stopped` is their own stop: while the
+life runs, the cancellation at once, waiting for nothing and revoking nothing,
+unless the record already holds a cleanup failure or a release past its budget,
+which it answers; once the life has ended, the verdict, as before. Their waits
+for a release met (`settle` with their context) end on that context too, and a
+stop that has come wins over an outcome ready beside it. A WriteDSD of no bits,
+which skips the loop that read the context, reads it first.
+
+Activate and a request's wait still revoke on their own stop, and wait for a
+release found. The verdict is safe while the life runs: `running` calls it only
+for a failed record, where an unconfirmed one (not ended) takes its
+`ErrReleaseUnconfirmed` arm and a recorded one carries it in its fault, so the
+life's cancellation, whose end would be nil, is never built. A TrackChange tail
+or drain its device failed records `ErrReleaseUnconfirmed` beside the error, as
+a deadline-cut one does, so `failed` sees it. Every column of the entry matrix
+now names its expectation, the default failing the case.
+
+The seams: `meeting` holds a command in its wait while a test ends the life;
+`overBudget` holds the deadline arm after its read of the life; `revoking` lets
+a test begin a release just before a command's revocation. The queue-cut
+integration case (`TestNativeIntegrationSuccessfulCutReplacement`, under the
+native overlay) is the guard that a write's own stop leaves the sink usable.

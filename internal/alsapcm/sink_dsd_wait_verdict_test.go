@@ -15,8 +15,8 @@ import (
 // end, the writer's end (done), or a change (changed), the release's budget
 // passed so that the answer can settle with done still open (B728 B9 PR 1
 // round 3: "Pause changed" closed done beside changed, so its select took
-// either, and Pause's completion return reverted to nil still passed about
-// half the runs). A change wakes Pause to its completion's return, and
+// either, and Pause's completion return reverted to nil still passed 17 runs
+// in 20 on 7c2601a9). A change wakes Pause to its completion's return, and
 // WriteDSD to its loop's next turn, whose refusal (admission closed) answers.
 type verdictWaitContext struct {
 	context.Context

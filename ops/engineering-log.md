@@ -91439,7 +91439,92 @@ ok (alsapcm 79 s); the round 2 and round 3 cases `-race -count=20`, ok; `make
 docs-check` clean, and `verify_moves.py --base df4bb12f` passes with the
 output.md line declared an edit. `player.md` was 100,110
 bytes: the state owner's `Backend` contract entry moved to
-`History-rules-player.md` with a pointer that keeps its binding rules beside its
-Don't sentence (99,137 bytes). Linux alone runs `alsapcm`'s real kernel seam;
+`History-rules-player.md` with a pointer meant to keep its binding rules beside
+its Don't sentence (99,137 bytes). It did not (corrected in round 4): it dropped
+that what a late Start acquires is closed at once and never written to, that a
+Release may reach the backend before or while its Start runs, that the engine
+closes `StartRequest.Released` in the step that takes the release, that a
+context derived from a call's has its own `Done` and so never ends `Canceled`,
+and that an answer stamped at or past the deadline is not taken whichever
+message reaches the owner first. Linux alone runs `alsapcm`'s real kernel seam;
 these cases use the fake kernel on every OS, and CI's Linux race leg is their
 Linux evidence.
+
+## 2026-11-10 — B728 B9 PR 1 round 4: every answer is decided after its wait, and a command's own stop never waits
+
+The rules are in `output.md` (Native lifecycle and policy containment) and
+`ops/History-b470-native.md` ("Round 4"); this is the evidence. macOS arm64,
+Go 1.27.3, the fake kernel. Round 3's Argon finding 1 assumed WriteDSD and
+Pause revoke on their context's end; they do not (they settle, then and now),
+and this round keeps it so.
+
+### Red-first on round 3's code
+
+A scratch extract of bdd9011c under the ignored `.tmp/`, with two test seams
+added at their round-3 positions alone (`revoking` between `releaseBegun` and
+`Revoke`, `overBudget` at that function's top; `meeting` was already there),
+and round 4's two test files. Each case failed at its predicted assertion:
+
+- `TestNativeAnAnswerIsReadAfterItsWait`: 7 of 8, each answering what was read
+  before the wait (`native activation fenced`, `native releasing`, a write's
+  nil beside the fault, an abandoned activation's bare `context canceled`); the
+  eighth, a write of no bits with nothing recorded, is the success both rounds
+  answer, a positive control.
+- `TestNativeAWaitsLastArmsAnswerFromTheFinalState`: all 4, the deadline and
+  done arms answering the writer's fence.
+- `TestNativeARevocationKnowsTheReleaseBegunBeforeIt`: both, at the wait for the
+  release's outcome the command never began.
+- `TestNativeAWriteOrAPauseStoppedByItsOwnContextAnswersAtOnce` (4) and
+  `TestNativeAWriteStoppedOnceATrackChangeBeganKeepsItsPrefixAndTail` (2): each
+  waited for the held release until the watchdog.
+- The entry matrix: the own-stop rows of the live budget column (Pause and
+  WriteDSD on an ended context, and the new write of no bits on one), at the
+  watchdog, and that write's ended-life rows with nothing or the fence alone
+  recorded, answering nil.
+
+`TestTheVerdictOfALiveLifeNeedsNoLifeEnd` and
+`TestNativeATrackChangeItsDeviceFailedIsACleanupFailure` passed there: they
+pin what round 3 already did (item 4), and their evidence is C8 and C9.
+
+### Controls on round 4
+
+Each on a committed tree, undone with `git restore`, the source checked by grep
+and `git diff --quiet HEAD`; C1 to C4 and C7 three runs each, the others one:
+
+- C1, `settle` classifying by its read before the wait: exactly its five rows
+  and the done arm's two.
+- C2, `abandoned` the same: exactly the abandoned activation's two rows.
+- C3, `overBudget` without its read after the record: exactly the deadline
+  arm's two.
+- C4, `revokeFound` reading apart from its revocation, round 3's way: both
+  revocation cases, at the wait.
+- C5, `settle`'s wait deaf to the command's context: both Pause cases, WriteDSD
+  and the TrackChange producer stopped while they wait, and the Pause own-stop
+  row; WriteDSD stopped before the call, which needs no wait, stayed green.
+- C6, `stopped` revoking: both TrackChange cases (escalated, the tail lost) and
+  `TestNativePartialRetry`; under the native overlay,
+  `TestNativeIntegrationSuccessfulCutReplacement` alone of the 29, its cut
+  refused (`invalid native cut`).
+- C7, no context check before the loop: the write of no bits on an ended
+  context, ended-life rows and `TestNativeAWriteOfNoBitsChecksItsContext`
+  (answered nil); its live budget row stayed green, `settle`'s wait taking that
+  context too.
+- C8, `verdict`'s unconfirmed arm needing an ended life: the verdict case and
+  every live case that depends on it (ten live budget rows, both revocation
+  cases, round 3's live deadline case).
+- C9, a failed drain recorded without `ErrReleaseUnconfirmed`: the drain case
+  alone, at its record.
+- C10, the live budget column left out of its expectation arm: all 13 of its
+  rows, at "the case has no expectation".
+
+### The gates
+
+On the final tree (020a71d0 and these docs), in one use of the build lock:
+`go vet ./...` and `GOOS=linux go vet` of `./internal/alsapcm/...` and
+`./internal/player/...` clean; `go test -race` of the same, all 16 packages ok
+(alsapcm 77 s); round 4's cases with the entry matrix and round 3's wait cases
+`-race -count=20`, ok; the native overlay's backend integration under `-race`,
+29 of 29. `make docs-check` clean; `verify_moves.py --base 020a71d0` passes with
+the player.md, output.md and History lines declared edits. The Backend entry's
+pointer now carries the clauses round 3 dropped, verbatim from its long form
+(player.md 99,798 bytes).
