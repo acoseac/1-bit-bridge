@@ -92087,3 +92087,131 @@ binary at GOMAXPROCS=3 beside 20 busy processes, every one passing 200 times (20
 that read the tracked docs, `make docs-check` and the qualification check at the head against
 a4028a40 passed. macOS was not run: there is no Mac here, and the loaded run stands in for CI's
 three-core leg. Windows was not run here; the rig skips there as before.
+
+## 2026-11-10 — B728 B9 round 19: a panicking reconciliation or reading is contained and bounded, the monitor survives, and the floor cases measure before they step
+
+Worker b728-b9, legion0 (Ubuntu 26.04, Linux 7.0, Go 1.27.3, 16 cores), branch
+`feat/b728-b9-choice` at 771c403b (round 18, its rules and main merged). The brief, round 18's
+two reviews (Codex: a retry that panics again skips its revocation for good, the straddle
+cases' trigger can block itself, the monitor's recover sits outside its loop; Claude: the floor
+helper steps before the measurement it names, the new rule says more than the tree), and the two
+reviews of the brief's draft (Codex: readings that panic bypass the bound, the floor is at
+400 ms, a decided window is not an ended one; Claude: where the panic is caught, what the
+terminal action may call, the monitor's case, the records, the counts). Commits: ef7827d9
+(items 1 to 5), 131de2ce (items 7 and 8), 645268f0 (qualification 60, version 59's record
+corrected) and this record. The rules are a patch the orchestrator applies
+(`rules-b728-b9-r19.patch`): `output.md`'s second B9 line and its long form, and a bullet in
+`build-ci-tests.md`.
+
+**Items 1 and 2, a reconciliation that panics.** At 771c403b a panic in a session's
+reconciliation (its judgement, the engine's hand-off, Revoke) went up through `refreshDSD` to
+its caller (an admission, an activation, the monitor, `RefreshDSD`, `ProbeDSD`), and the
+backend's loop over its sessions, a map, stopped there, leaving every session after it
+unjudged; and the unchanged-set branch recorded `dsdJudged` before it reconciled, so a retry
+that panicked again was never tried after it. Now each session's reconciliation is contained
+(`session.reconcileDSD`): its judgement runs under a `lockHold` (`judgeDSDStep`), the hand-offs
+and Revoke after it, and a panic in any of them is logged with its stack where it is recovered
+and answered to the loop as the step that failed, the loop judging every other session.
+`Backend.Revoke`'s locked section holds the lock through a `lockHold` too (native.go, a guarded
+path), with a seam nil in production at its entry (`Seams.Revoking`). A set is recorded judged
+only once every reconciliation against it completed. A failed one is tried once more by the next
+refresh, which finds the set the same; the retry judges only the sessions it failed in
+(`session.dsdJudged`, under the refreshes' lock) and asks only the hand-offs that did not return
+(`occ.handedOff`). The bound is two attempts (`dsdAttempts`): the retry's failure is terminal,
+and each session it failed in is stopped, its fault recorded (`faulted`: backend_failed, the
+producer and the reporter woken, the engine releasing the session) and its DSD revoked through a
+contained Revoke unless Revoke is what panicked; the stop hands nothing off, and the set is then
+recorded judged so no refresh tries it again (`reconcileOrStop`, `stopDSD`). Every session the
+set affects is reached: the others were judged by the attempt itself.
+
+**Item 3, a reading that panics.** A panic in the reading (`Bound`, `Box.UnitModel`, the
+controls, the mixer table, `Store.State`) or in the publish reaches only a choice's write, which
+calls `refreshDSD` itself and whose request's recoverer answers it, its pending set settled
+(round 18's `TestAWriteThatPanicsLeavesNothingPending` still passes). Every other caller asks
+`tryRefreshDSD`, which recovers under the refreshes' lock and counts the run of such failures
+that the next refresh to complete ends (`refreshFailedLocked`). The run's first is logged once,
+with its stack; from its second in a row (the same bound, two) every session that holds DSD (an
+opened occurrence admitted under the policy, not dropped and not played out: PCM alone and a DSD
+track played out are left playing) is stopped the same way, and an admission refuses its
+occurrence's DSD (`dsd_dac_unread`, as a set that does not read refuses it) and an activation
+refuses (`errDSDUnread`). Repeating at every tick was rejected: an unjudged set's retry never
+comes while readings fail, and what plays is no longer read against the policy (Codex on the
+brief). A reading that panics leaves `dsdRead` as it was, so the next admission reads again. The
+check after open's own reading (`checkDSDNode`) is the open's, whose panic is the session's fault
+as before (B523).
+
+**Item 4, the monitor.** Its recover sat outside its loop, so one panic ended it while its
+session held DSD. Each tick now asks `tryRefreshDSD`, so the monitor takes its next tick within
+items 1 to 3's bounds; a panic outside that containment stops its session with its fault, so no
+session holds DSD unmonitored.
+
+**Item 5, the cases.** Written before the fix and run at 771c403b in a copy with
+`Seams.Revoking` as a names-only shim (the predictions in writing first): all six red as
+predicted. (a) `TestAHandOffThatPanicsStopsItsSessionAndTheOthersAreJudged`: A's hand-off panics
+at every call beside eight sessions whose occurrence heard the set revokes, in eight backends so
+the map's order reaches A first in one; at the head the first rep's order did ("session 2 ...
+was not revoked"). (b) `TestARevocationThatPanicsStopsTheSession`: at the head the session's
+lock stayed held. (c) `TestAnActivationThatTakesTheRetryDoesNotPanic`: at the head the
+activation panicked. (d) `TestAHandOffThatRecoversIsAskedOnceAndJudgesTheSet`: two hand-offs,
+the second's panicking once; at the head the publish's refresh panicked and the first hand-off
+returned twice. (e) `TestReadsThatPanicOverAnUnjudgedSetStopWhatHoldsDSD` (Bound, Store.State):
+at the head every refresh, the admission and the activation panicked and nothing stopped.
+(f) `TestTheMonitorTakesItsNextTickAfterAPanic`: a panic in `DSDBox.UnitModel` on the monitor's
+first tick; at the head no second tick was taken in 10 s. Round 18's
+`TestALostReconciliationIsTriedOnceMore` now says what round 19 does (no refresh panics, two
+hand-offs, the session stopped). Fifteen controls on ef7827d9, each mutation applied exactly
+once, its prediction written first, the bytes restored from memory: the loop stopping at a
+failure (C1: a red), the retry never terminal (C2: a b c and L red), the stop trying the
+reconciliation again (C3: a b c L), Revoke without its `lockHold` (C4: b, the lock held), the
+stop calling the Revoke that panicked (C5: b, Revoke entered three times), the session's own
+recover removed (C6: a b c e L; d passed, `tryRefreshDSD`'s recover catching the panic as a
+reading's), a returned hand-off asked again (C7: d), the first failure terminal (C8: all six and
+L), the set not recorded judged on completion (C9: d, and round 18's write case), nothing
+recording completion and hand-offs asked again (C10: d a W), the reading's bound inert (C11: e),
+`tryRefreshDSD`'s recover removed (C12: e f), every failure of a run logged (C13: e, three lines
+at the assertion, not the five predicted, which counted the admission's and the activation's
+after it), the monitor's tick uncontained (C14: f), the activation's reading uncontained (C15:
+e; c passed, its retry's panic being the reconciliation's, contained inside). Each assertion of
+(d) is red under its own mutation: one return per occurrence (C7), no Revoke (C8), judged (C9),
+no further hand-off (C10).
+
+**Item 6, the records.** `refreshDSD`'s doc comment says what round 19 does. Version 59's record
+said the set was recorded judged before its reconciliation ran and that the next refresh was at
+most a monitor's tick away; it says now what that left (corrected in place, marked). The
+qualification version is 60, in `version.go`, the runbook's five current-version lines and
+version 60's record; the guard's check passes from 771c403b to the head.
+
+**Item 7, the straddle triggers.** The two cases that hold the decision after its first read
+(`holdDeciding`, under the session's lock) had it decided by a tick sent and taken by a
+reporter, which a reporter's step under way waiting for that lock could never take. `decide` now
+completes on whichever comes first, the reporter taking the tick or the decision reaching its
+gate, and logs which: in the gate's 50 runs of each of the two cases the reporter took the tick
+every time (100 of 100), the decision never reaching its gate first here.
+
+**Item 8, the floor cases.** `atFloorEnded` parks the sink's STATUS at 400 ms (70,560 of a's
+88,200 frames played, 88,128 given before its 72-frame window: 17,568 left, under the floor's
+17,640) before it grants the time, asserts that premise, has the producer read the 350 ms
+measurement (26,388 left) at a reporter's step and wait again, held there (`producerHold`), lets
+the floor's measurement go with the producer held, waits for the writer back on the DAC, lets
+the producer go and sends one tick, and waits for the decision. It then holds what the kernel was
+given of a to a converted alone, its window zero-padded, computed by `dsdconv` apart from the
+backend: the decided step fires for Continue and End alike. A mutation that continues into f at
+the floor (E1, predicted in writing) fails both cases, first differing at frame 88,138, inside
+the window; the same mutation passes round 18's helper (E2, a copy of 771c403b).
+
+**Item 9, the rule.** Scoped: round 18's Don't forbade reading the set published twice in any
+decision that asks both, and `next()`, the transition and the resume read the write pending
+(`pendingFor`, which loads the set) and the set again (`unjudgedLocked`), an order Claude's review
+traced safe (a write registered after the pending read cannot publish while the session's lock is
+held; a publish between the two reads is a wait for the verdict). The Don't now names the
+converted window's decision (`holdLocked`), whose single read the round-18 defect needed.
+
+**Gates.** Through the build slot: `make test TEST_PKGS='./internal/player/... ./internal/alsapcm/...'`
+(the Makefile's release tags, -race, -timeout 30m), 16 packages ok (five cached, unchanged), 121 s;
+the round's changed tests by name under -race -count=50, the seven backend tests (the six cases
+and `TestALostReconciliationIsTriedOnceMore`) 50 of 50 each, and
+`TestAConvertedJoinWindowWaitsForAWriteThatChangesItsSuccessor` with each of its eight subtests 50
+of 50 (168 s). The qualification check passes from 771c403b to the head. The rules patch applied
+to a disposable copy of the head with this record passes `make docs-check` and the guards that
+read the tracked docs (`TestEveryCitedTestNameExists` among them) with
+`TestQualificationRunbookVersion`. Windows was not run here.
