@@ -142,6 +142,12 @@ type Seams struct {
 	Opened func(o engine.OccurrenceID, ref engine.Reference)
 	// Admitting observes pending policy admission outside all locks; it may block.
 	Admitting func(o engine.OccurrenceID)
+	// ContainCalled runs on a PCM containment Drop's goroutine (stopDSD) after
+	// everything else that goroutine does, its call returned and the Drop
+	// possibly still in the sink: a test repeats the containment there, which
+	// must not start a second Drop while the first is held (B728 B9 PR 1 round
+	// 3). It must not block or call the backend.
+	ContainCalled func()
 	// Revoking runs under the session lock before revocation; it must not call the backend.
 	Revoking func(s engine.SessionID)
 	// Releasing runs after release fences every native output, before cancellation.
@@ -170,6 +176,13 @@ type Seams struct {
 func (b *Backend) releasingSeam(s engine.SessionID) {
 	if sm := b.cfg.Seams; sm != nil && sm.Releasing != nil {
 		sm.Releasing(s)
+	}
+}
+
+// containCalled is the ContainCalled seam.
+func (b *Backend) containCalled() {
+	if sm := b.cfg.Seams; sm != nil && sm.ContainCalled != nil {
+		sm.ContainCalled()
 	}
 }
 

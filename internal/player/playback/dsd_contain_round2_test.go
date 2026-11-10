@@ -26,15 +26,19 @@ func (s *heldContainSink) Drop() error {
 	return nil
 }
 
+// TestRepeatedContainmentKeepsOneDropPastCallerCancellation: a containment's
+// PCM Drop held in the sink, its call answered by the session's cancellation,
+// and the goroutine that made the call past everything it does once the call
+// has returned (ContainCalled, B728 B9 PR 1 round 3: the wait was on a seam
+// inside the call, which a guard cleared once the call returned could still
+// pass), 32 more failed readings start no second Drop.
 func TestRepeatedContainmentKeepsOneDropPastCallerCancellation(t *testing.T) {
 	var broken atomic.Bool
 	b, _ := fixtureSessionBackend(t, func(p *DSDPolicy) { p.Box = fixtureBox{broken: &broken} })
 	s := b.session(1)
 	defer s.cancel()
 	returned := make(chan struct{}, 64)
-	b.cfg.Seams = &Seams{SinkCall: func(context.Context) func(error) {
-		return func(error) { returned <- struct{}{} }
-	}}
+	b.cfg.Seams = &Seams{ContainCalled: func() { returned <- struct{}{} }}
 	sink := &heldContainSink{in: make(chan struct{}), gate: make(chan struct{})}
 	var once sync.Once
 	unhold := func() { once.Do(func() { close(sink.gate) }) }
@@ -54,7 +58,7 @@ func TestRepeatedContainmentKeepsOneDropPastCallerCancellation(t *testing.T) {
 	b.RefreshDSD(true)
 	waitContained(t, sink.in)
 	s.cancel()
-	waitContained(t, returned) // call returned, but its Drop is still held
+	waitContained(t, returned) // its caller is done, but its Drop is still held
 	for range 32 {
 		b.RefreshDSD(true)
 	}

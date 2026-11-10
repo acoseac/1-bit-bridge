@@ -8,6 +8,16 @@ import (
 	"testing"
 )
 
+// TestNativeEveryEntryOnAnEndedLifeAnswersByTheVerdict: every return of every
+// native command, its life ended, answers the cleanup's verdict; and, in the
+// columns "the life running" names, a cleanup failure recorded, or a release
+// past its budget, with the life still running answers that failure too,
+// never a cancellation or the sink's fence (B728 B9 PR 1 round 3: a
+// TrackChange drain its deadline cut records ErrReleaseUnconfirmed beside the
+// drain's cancellation without ending the life). A command that meets a
+// release under way waits for its outcome within the release's budget, its
+// life running or ended, so the budget column's answers come only once the
+// budget has passed, the close still held.
 func TestNativeEveryEntryOnAnEndedLifeAnswersByTheVerdict(t *testing.T) {
 	const eio errno = 5 // EIO, asm-generic's: an errno this package does not tell apart
 	ended, cancelled := context.WithCancel(context.Background())
@@ -30,6 +40,17 @@ func TestNativeEveryEntryOnAnEndedLifeAnswersByTheVerdict(t *testing.T) {
 			_, err := s.WriteDSD(ended, 1, []byte{1}, []byte{2}, 0, 8)
 			return err
 		}},
+		// Its bit counts refused before its producer's lock: the first return.
+		{"WriteDSD of planes of different lengths", "native write", false, func(s *DSDSink) error {
+			_, err := s.WriteDSD(context.Background(), 1, []byte{1}, []byte{2, 3}, 0, 8)
+			return err
+		}},
+		// No bits skip the loop: the completion's return, a success where the
+		// sink's cleanup recorded nothing.
+		{"WriteDSD of no bits", "native write", true, func(s *DSDSink) error {
+			_, err := s.WriteDSD(context.Background(), 1, nil, nil, 0, 0)
+			return err
+		}},
 		{"Activate refused at its entry", "native activation", false, func(s *DSDSink) error { return s.Activate(context.Background(), 1) }},
 		{"Activate on a context already ended", "native activation", false, func(s *DSDSink) error { return s.Activate(ended, 1) }},
 		{"Resume refused at its entry", "native resume", false, func(s *DSDSink) error { return s.Resume(context.Background()) }},
@@ -37,7 +58,8 @@ func TestNativeEveryEntryOnAnEndedLifeAnswersByTheVerdict(t *testing.T) {
 		{"ActivatePaused refused at its entry", "native activation", false, func(s *DSDSink) error { return s.ActivatePaused(context.Background()) }},
 		{"ActivatePaused handing an activated sink to Resume", "native resume", true, func(s *DSDSink) error { return s.ActivatePaused(context.Background()) }},
 	} {
-		for _, cleanup := range []string{"nothing recorded", "a device's failure recorded", "the fence alone recorded", "its close failing", "past the release's budget", "a deadline-cut drain"} {
+		for _, cleanup := range []string{"nothing recorded", "a device's failure recorded", "the fence alone recorded", "its close failing", "past the release's budget", "a deadline-cut drain",
+			"past the release's budget, the life running", "a deadline-cut drain, the life running"} {
 			if entry.notPaused && (cleanup == "a device's failure recorded" || cleanup == "the fence alone recorded") {
 				continue
 			}
@@ -72,7 +94,7 @@ func TestNativeEveryEntryOnAnEndedLifeAnswersByTheVerdict(t *testing.T) {
 				}
 				answer := make(chan error, 1)
 				switch cleanup {
-				case "a deadline-cut drain":
+				case "a deadline-cut drain", "a deadline-cut drain, the life running":
 					if !entry.notPaused {
 						if err := s.Activate(context.Background(), 1); err != nil {
 							t.Fatal(err)
@@ -95,8 +117,21 @@ func TestNativeEveryEntryOnAnEndedLifeAnswersByTheVerdict(t *testing.T) {
 					if rec := s.Result(); !errors.Is(rec, context.Canceled) || !errors.Is(rec, ErrReleaseUnconfirmed) {
 						t.Fatalf("record %v; want unconfirmed drain with cancellation, the premise", rec)
 					}
-					end()
+					if cleanup == "a deadline-cut drain" {
+						end()
+					} else if life.Err() != nil {
+						t.Fatal("the drain ended the sink's life; the premise is a life still running")
+					}
 					answer <- entry.call(s)
+				case "past the release's budget, the life running":
+					// The session's own release, its close failing and held,
+					// the life running.
+					f.failing.Store(true)
+					f.hold.Store(true)
+					s.BeginRelease(Immediate)
+					go func() { answer <- entry.call(s) }()
+					await(t, f.held, "the release's close, held")
+					pastBudget(t, k, s)
 				case "a device's failure recorded":
 					// An inert sink's writer makes no call until it is paused,
 					// whose STATUS then fails: the writer ends on it, its release
@@ -170,7 +205,7 @@ func TestNativeEveryEntryOnAnEndedLifeAnswersByTheVerdict(t *testing.T) {
 					if errors.Is(e, ErrReleaseUnconfirmed) {
 						t.Errorf("%s answered %v; the release was confirmed, want no ErrReleaseUnconfirmed", what, e)
 					}
-				case "a deadline-cut drain":
+				case "a deadline-cut drain", "a deadline-cut drain, the life running":
 					theSinksFailure(t, e, ErrReleaseUnconfirmed, what)
 				case "its close failing":
 					theSinksFailure(t, e, ErrReleaseUnconfirmed, what)

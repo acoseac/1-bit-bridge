@@ -526,8 +526,8 @@ func (v retiringEvents) Fault(_ engine.SessionID, f engine.Fault) {
 // callbacks enter the engine mailbox before either acknowledgement path.
 func (s *session) finalNativeReport() {
 	l := s.hold()
-	ev := s.ev
-	reportEv := ev
+	// s.ev is read under the session's lock, as every write of it is made.
+	var ev, reportEv engine.Events
 	defer func() {
 		// Release the lock before recovery: position callbacks run under it.
 		l.release()
@@ -542,6 +542,8 @@ func (s *session) finalNativeReport() {
 		s.mu.Unlock()
 	}()
 	l.lock()
+	ev = s.ev
+	reportEv = ev
 	if s.nativeRelease == nil {
 		l.unlock()
 		return

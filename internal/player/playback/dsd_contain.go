@@ -114,6 +114,8 @@ func (s *session) stopDSD(where string) {
 			out.native.BeginRelease(alsapcm.Immediate)
 		} else {
 			s.b.spawn(func() {
+				// Deferred first, so it runs after all else here.
+				defer s.b.containCalled()
 				_ = s.call(s.ctx, func() error {
 					// call may return on cancellation before Drop does.
 					defer func() {
