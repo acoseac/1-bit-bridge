@@ -84,9 +84,19 @@ func TestNativeEveryEntryOnAnEndedLifeAnswersByTheVerdict(t *testing.T) {
 					}
 				}
 				hold := newCallerHold(t)
+				// The entry's command waiting for the release's outcome.
+				meeting := make(chan struct{}, 1)
 				life, end := context.WithCancel(context.Background())
 				defer end()
-				s, revoking, revoke := lifeSinkOn(t, k, f, c, life, func(h *nativeSeams) { h.awaiting = hold.awaiting })
+				s, revoking, revoke := lifeSinkOn(t, k, f, c, life, func(h *nativeSeams) {
+					h.awaiting = hold.awaiting
+					h.meeting = func() {
+						select {
+						case meeting <- struct{}{}:
+						default:
+						}
+					}
+				})
 				if entry.notPaused {
 					if e := s.Activate(context.Background(), 1); e != nil {
 						t.Fatal(e)
@@ -129,8 +139,11 @@ func TestNativeEveryEntryOnAnEndedLifeAnswersByTheVerdict(t *testing.T) {
 					f.failing.Store(true)
 					f.hold.Store(true)
 					s.BeginRelease(Immediate)
-					go func() { answer <- entry.call(s) }()
 					await(t, f.held, "the release's close, held")
+					go func() { answer <- entry.call(s) }()
+					// Only a command that waits for the release's outcome is
+					// there before its budget passes.
+					receive(t, meeting, "the entry waiting for the release's outcome, its life running")
 					pastBudget(t, k, s)
 				case "a device's failure recorded":
 					// An inert sink's writer makes no call until it is paused,

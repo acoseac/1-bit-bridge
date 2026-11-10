@@ -131,7 +131,11 @@ type nativeSeams struct {
 	// lifeEnded, nil but in a test, runs on the goroutine that revokes the
 	// sink once its life, the open's context, has ended, just before the
 	// revocation: a test parks it there, as a scheduler can leave it (B765).
-	lifeEnded         func()
+	lifeEnded func()
+	// meeting, nil but in a test, runs on a command's goroutine as it begins
+	// to wait for a release's outcome (releaseOutcome): a test passes the
+	// release's budget once the command waits, never before.
+	meeting           func()
 	awaiting          func()
 	arm               func() awaitArm
 	recorded          func()
@@ -494,6 +498,9 @@ func (s *DSDSink) endOfLife() {
 // pass: the release's own bound, within which every command that meets a
 // release waits for its outcome, its life ended or running.
 func (s *DSDSink) releaseOutcome() {
+	if h := s.seams.meeting; h != nil {
+		h()
+	}
 	select {
 	case <-s.done:
 	case <-s.releaseExpired:
