@@ -90845,3 +90845,10 @@ Not run here: the console's node-run tests, which skip without node; the
 cases skipped on Windows and as root (a directory this user may not search,
 a link loop, a 0600 marker made unreadable), whose directory-in-place
 siblings run everywhere; the iOS mirror of PROTOCOL.md, the orchestrator's.
+
+CI on 81e0996d failed `TestATrayCallsOnSavedOnlyAfterASaveTheServerAppliedLive` on every runner that has node (macOS,
+Windows, the Linux admin shard): the tray's failed save now adds `updateChecksOffLost`'s words (round 4), and the test's
+harness runs only the app.js functions it names, so the extracted save threw "updateChecksOffLost is not defined". The
+console was right (the function is a global of app.js); the harness's list was short. `updateChecksOffLost` joins
+`trayHarnessFunctions`: red under node before, in CI's words, green three of three after. The worker's host has no
+JavaScript engine, where the test skips, which is how the round's gates passed.
