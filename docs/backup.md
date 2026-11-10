@@ -74,13 +74,38 @@ written it, or written nothing, `bridge backup --verify`, `bridge backup` and
 the scheduled snapshot say so and what the write did, and never take what
 the check found for the record; the command then exits 1.
 
-On Windows no folder can be synced, so that mark cannot be kept, and a
-re-verification of a snapshot already verified is never recorded there: the
-check still runs, and `bridge backup --verify` says what it found, that it
-was not recorded, and what the record reads, which keeps the earlier
-verdict for the doctor, the console and the prune. A check that records
-nothing over a verified snapshot is followed by no prune; the next
-snapshot's prune runs as usual.
+On Windows no folder can be synced, so a re-verification of a snapshot
+already verified does not replace its manifest's verdict. The check still
+runs and reports what it found separately from what readers now read. If a
+completed check finds a component FAILED that the record held VERIFIED, it
+puts a veto in the snapshot, or beside it in the backups folder. All readers,
+including the doctor, console, startup decision and future prunes, then read
+the old VERIFIED as INCOMPLETE (`unsynced`). The console's cached reading is
+invalidated too. An INCOMPLETE recheck disproves nothing and changes nothing.
+The veto cannot be made crash-durable on Windows. If neither location takes
+the veto, the error explicitly says the disproved record could not be vetoed
+and this verification skips its prune; a later process can still trust the
+stale VERIFIED. A recheck that records no new verdict is followed by no
+prune. After a successful veto, later prunes apply the usual retention policy
+below, protecting the older trustworthy recovery point without keeping every
+intermediate failure.
+
+A failure while reading the schema's tables or columns is `open-failed`,
+not a finding that a column is missing. Cancellation leaves the check
+INCOMPLETE. The doctor's advice blames the database only when its verdict
+is FAILED; an unfinished database or files check gets retry advice, and
+failed files in a snapshot with no database are described without claiming
+a database recovery point.
+
+When no lock is granted, the backups are busy, or an earlier check still
+holds them, a verification that never started says so with its reason in
+the command, scheduled snapshot and console log. A cancellation that wrote
+INCOMPLETE still reports that write's actual outcome.
+
+The staged manifest's permissions are set through its open file before it
+is synced and closed. A stuck-check marker replaces an existing entry by
+removing it and creating a new file exclusively; a racing replacement is
+refused. Neither operation follows a substituted symbolic link.
 
 Every step a check takes while it holds the backups folder (marking a
 snapshot as being checked again, the check, writing its verdict, the prune

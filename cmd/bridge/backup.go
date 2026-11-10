@@ -205,7 +205,7 @@ func verifyCmd(ctx context.Context, configPath, path string, full bool, stdout, 
 // (backup.ErrRecheckRefused), the record an earlier check left, which this
 // one did not repeat; of one checked again where no check over its VERIFIED
 // is recorded (backup.ErrRecheckNotRecorded: Windows), what this check found
-// and the record it leaves as it was; and of a verification given up
+// and the record as readers now read it; and of a verification given up
 // (backup.ErrCheckGivenUp), how far its write went and what its record reads
 // as read back, never what the INCOMPLETE it was given up with would say (its
 // merge keeps a completed verdict, and its write may not have landed), and
@@ -218,6 +218,9 @@ func verifyCmd(ctx context.Context, configPath, path string, full bool, stdout, 
 // B653's sixth round).
 func reportVerdict(stdout, stderr io.Writer, prefix string, res backup.VerifyResult, err error) bool {
 	switch {
+	case res.NotStarted(err):
+		fmt.Fprintf(stderr, "%sthe verification did not start: %v\n", prefix, err)
+		return false
 	case errors.Is(err, backup.ErrCheckGivenUp):
 		fmt.Fprintf(stderr, "%sthe verification was given up, and its step still holds the snapshots until it ends: %v\n", prefix, err)
 		describeRecordRead(stdout, prefix, res)
@@ -225,7 +228,7 @@ func reportVerdict(stdout, stderr io.Writer, prefix string, res backup.VerifyRes
 	case errors.Is(err, backup.ErrRecheckNotRecorded):
 		fmt.Fprintf(stdout, "%sthis check found:\n", prefix)
 		describeVerdictLed(stdout, prefix+"  ", res.Found)
-		describeRecordOr(stdout, prefix, res, "its record, which this check leaves as it was, reads:")
+		describeRecordOr(stdout, prefix, res, "its record reads now:")
 		fmt.Fprintf(stderr, "%swhat this check found was not recorded: %v\n", prefix, err)
 		return false
 	case errors.Is(err, backup.ErrRecheckRefused):
@@ -724,6 +727,8 @@ func reportTickerVerdict(ctx context.Context, stdout, stderr io.Writer, triggere
 			failure = res.VerifyErr
 		}
 		switch {
+		case res.Verify.NotStarted(failure):
+			fmt.Fprintf(stderr, "backup (%s): the verification did not start for %s: %v\n", triggered, res.Dir, failure)
 		case errors.Is(failure, backup.ErrCheckGivenUp):
 			reads := recordWords(res.Verify)
 			if read {

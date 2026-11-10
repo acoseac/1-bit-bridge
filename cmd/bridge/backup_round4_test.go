@@ -93,15 +93,8 @@ func parkChecks(t *testing.T, root string) func() {
 	return release
 }
 
-// TestBridgeBackupVerifySaysWhatARecheckFoundWhereItCannotBeRecorded is
-// backlog B653's fourth round's case for bridge backup --verify where no
-// directory can be synced (Windows, stood in for through its seam): a check of
-// a verified snapshot whose database is damaged since runs, and the command
-// says what it found (its database FAILED), that it was not recorded and why,
-// and what the record it leaves as it was reads (VERIFIED), exits 1, and
-// leaves no veto and the record byte for byte, which every reader reads as
-// before. Red on the round before, which took the no-op barrier for a durable
-// veto and recorded the FAILED.
+// TestBridgeBackupVerifySaysWhatARecheckFoundWhereItCannotBeRecorded checks
+// that the CLI distinguishes the finding from the unchanged, vetoed record.
 func TestBridgeBackupVerifySaysWhatARecheckFoundWhereItCannotBeRecorded(t *testing.T) {
 	cfgPath, _, root := backupInstall(t)
 	dir := verifiedInstallSnapshot(t, cfgPath)
@@ -112,15 +105,16 @@ func TestBridgeBackupVerifySaysWhatARecheckFoundWhereItCannotBeRecorded(t *testi
 		t.Fatal(err)
 	}
 	t.Cleanup(backup.SetSyncsParentDirForTest(false))
+	t.Cleanup(func() { awaitHoldsLetGo(t, root) })
 	var stdout, stderr bytes.Buffer
 	code := backupCmd([]string{"--config", cfgPath, "--verify", dir}, &stdout, &stderr)
 	out, errs := stdout.String(), stderr.String()
 	if code != 1 {
 		t.Errorf("bridge backup --verify = %d, want 1\n%s%s", code, out, errs)
 	}
-	found, record := strings.Index(out, "this check found:"), strings.Index(out, "its record, which this check leaves as it was, reads:")
+	found, record := strings.Index(out, "this check found:"), strings.Index(out, "its record reads now:")
 	if found < 0 || record < found || !strings.Contains(out[found:record], "database: FAILED: hash-mismatch") ||
-		!strings.Contains(out[record:], "database: VERIFIED") {
+		!strings.Contains(out[record:], "database: INCOMPLETE: unsynced") {
 		t.Errorf("the command did not say what its check found, and apart what the record reads:\n%s", out)
 	}
 	if !strings.Contains(errs, "what this check found was not recorded") || !strings.Contains(errs, "no directory can be synced") {
@@ -129,18 +123,16 @@ func TestBridgeBackupVerifySaysWhatARecheckFoundWhereItCannotBeRecorded(t *testi
 	if after, err := os.ReadFile(mpath); err != nil || !bytes.Equal(after, before) {
 		t.Errorf("the record changed: %v", err)
 	}
-	for _, p := range []string{filepath.Join(dir, backup.VetoFileName), backup.RootVetoPath(dir)} {
-		if _, err := os.Lstat(p); !errors.Is(err, os.ErrNotExist) {
-			t.Errorf("a veto was left at %s: %v", filepath.Base(p), err)
-		}
+	if _, err := os.Lstat(filepath.Join(dir, backup.VetoFileName)); err != nil {
+		t.Errorf("the disproved record has no veto: %v", err)
 	}
 	entries, err := backup.List(root)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, e := range entries {
-		if e.DirName == filepath.Base(dir) && (e.Verdict.DatabaseState != backup.StateVerified || e.Verdict.FilesState != backup.StateVerified) {
-			t.Errorf("a reader reads %s/%s, want the VERIFIED it read before", e.Verdict.DatabaseState, e.Verdict.FilesState)
+		if e.DirName == filepath.Base(dir) && (e.Verdict.DatabaseState != backup.StateIncomplete || e.Verdict.FilesState != backup.StateIncomplete) {
+			t.Errorf("a reader reads %s/%s, want the disproved record vetoed", e.Verdict.DatabaseState, e.Verdict.FilesState)
 		}
 	}
 }

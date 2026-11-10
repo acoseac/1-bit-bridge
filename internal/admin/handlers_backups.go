@@ -288,31 +288,7 @@ func (s *Server) verifyInBackground(capture *backup.Capture, backupsRoot string,
 		defer s.invalidateLastBackup()
 		res := backup.FinishCapture(ctx, capture, func() int { return keep }, backup.VerifyOptions{BackupsRoot: backupsRoot})
 		name := filepath.Base(dir)
-		v := res.Verify.Record
-		switch {
-		case res.VerifyErr != nil:
-			var words string
-			switch res.Verify.Write {
-			case backup.WriteNone, backup.WriteFailed:
-				words = "admin: a snapshot's verdict was not recorded"
-			case backup.WriteNotDurable:
-				words = "admin: a snapshot's verdict was written, not known durable"
-			case backup.WriteUnknown:
-				words = "admin: a snapshot's write outcome is unknown"
-			case backup.WriteUnfinished:
-				words = "admin: a snapshot's verdict write did not finish before it was given up"
-			default: // WriteRecorded or WriteUnchanged.
-				words = "admin: a snapshot's verification answered an error once its write had ended"
-			}
-			logger.Warn(words, "snapshot", name,
-				"write", res.Verify.Write.String(), "recordRead", res.Verify.RecordRead, "err", res.VerifyErr)
-		case v.Passes():
-			logger.Info("admin: snapshot verified", "snapshot", name, "database", backup.StateWords(v.DatabaseState, v.DatabaseReasons),
-				"files", backup.FilesWords(v))
-		default:
-			logger.Warn("admin: a snapshot is not a verified recovery point", "snapshot", name,
-				"database", backup.StateWords(v.DatabaseState, v.DatabaseReasons), "files", backup.FilesWords(v))
-		}
+		reportBackupVerification(name, res)
 		if warning := pruneWarningText(res.PruneErr, res.Prune.ReapErr); warning != "" && ctx.Err() == nil {
 			logger.Warn("admin: the prune after a snapshot reported a problem", "snapshot", name, "warning", warning)
 		}
@@ -322,3 +298,35 @@ func (s *Server) verifyInBackground(capture *backup.Capture, backupsRoot string,
 // WaitForBackupJobs waits for every snapshot verification the console
 // started, for a test that reads its verdict.
 func (s *Server) WaitForBackupJobs() { s.bgBackups.Wait() }
+
+// reportBackupVerification reports admission separately from actual write outcomes.
+func reportBackupVerification(name string, res backup.Result) {
+	v := res.Verify.Record
+	switch {
+	case res.Verify.NotStarted(res.VerifyErr):
+		logger.Warn("admin: the verification did not start", "snapshot", name,
+			"write", res.Verify.Write.String(), "recordRead", res.Verify.RecordRead, "err", res.VerifyErr)
+	case res.VerifyErr != nil:
+		var words string
+		switch res.Verify.Write {
+		case backup.WriteNone, backup.WriteFailed:
+			words = "admin: a snapshot's verdict was not recorded"
+		case backup.WriteNotDurable:
+			words = "admin: a snapshot's verdict was written, not known durable"
+		case backup.WriteUnknown:
+			words = "admin: a snapshot's write outcome is unknown"
+		case backup.WriteUnfinished:
+			words = "admin: a snapshot's verdict write did not finish before it was given up"
+		default: // WriteRecorded or WriteUnchanged.
+			words = "admin: a snapshot's verification answered an error once its write had ended"
+		}
+		logger.Warn(words, "snapshot", name,
+			"write", res.Verify.Write.String(), "recordRead", res.Verify.RecordRead, "err", res.VerifyErr)
+	case v.Passes():
+		logger.Info("admin: snapshot verified", "snapshot", name, "database", backup.StateWords(v.DatabaseState, v.DatabaseReasons),
+			"files", backup.FilesWords(v))
+	default:
+		logger.Warn("admin: a snapshot is not a verified recovery point", "snapshot", name,
+			"database", backup.StateWords(v.DatabaseState, v.DatabaseReasons), "files", backup.FilesWords(v))
+	}
+}

@@ -1767,3 +1767,15 @@ Windows publication notes belong under round 9, not round 8. Their placement
 and the round tags in the two rules files are text checks, not behavioral
 negative controls. Round 10 has its own rule and History entries, with the
 supporting record in `ops/engineering-log.md`.
+
+## B653 PR 1 round 12: backup fixture teardown
+
+Verification answers before its deferred hold release. The CLI fixtures in
+backup_verify_test.go and the doctor's command-hint fixture now register
+a hold drain immediately after creating the install, before any ticker
+cleanup is registered: reverse cleanup order joins the ticker, drains
+holds, then removes the temporary install. The legacy verification subtest
+drains before the next subtest takes the same lock. The startup recheck
+test waits boundedly for its actual prune message on stdout before
+cancelling; observing the earlier verdict on stderr and sleeping 200 ms
+cannot establish that the prune message was written.

@@ -93232,3 +93232,141 @@ negative controls or state-changing git commands ran in round 11's
 edit-only pass. The orchestrator owns those runs and records their outcomes
 after execution; the expected red cases and controls here are a handoff,
 not measured results.
+
+## 2026-11-10 — B653 PR 1 round 12: the remaining bot findings at fb8a6b68
+
+Starting HEAD was read as `fb8a6b687a1e186f2ca6517f99bdaa909dd59957`.
+The brief, all inline comments, the sweep and both brief reviews were read.
+This is an edit-only handoff: formatting ran, but no builds, tests,
+negative controls or state-changing git commands ran. Every red/green
+claim below is an expectation for the orchestrator to measure.
+
+1. **Disproved no-barrier records (4524511211).** A completed recheck that
+   finds FAILED for a previously VERIFIED component puts `putVeto` in place
+   before read-back and stamps the cache's root. Either INCOMPLETE component
+   leaves the record alone. Both veto locations failing is an explicit
+   error and skips this verification's prune; a later process can still
+   trust the stale VERIFIED. Windows cannot make the veto crash-durable.
+   Successful disqualification preserves the existing retention policy.
+
+   Expected red on the starting head:
+   `TestADisprovedNoBarrierRecordCannotAnchorAFreshProcessPrune` (bundle and
+   root-fallback rows) requires an INCOMPLETE read-back, the genuinely
+   verified older bundle as NewestVerified, no startup skip based on the
+   disproved recent snapshot, no VERIFIED in the doctor's newest line, and
+   the older bundle surviving a prune in a fresh child process. An
+   intermediate failed snapshot must be removed, preserving retention.
+   `TestTheConsoleDropsADisprovedNoBarrierRecordFromItsCache` damages the
+   database and, separately, the certificate: both require a primed Jobs
+   cache and GET /api/backups to drop the disproved VERIFIED on their next
+   reads. The revised existing no-barrier recheck and CLI cases now require
+   the veto and INCOMPLETE: unsynced while the manifest stays byte-identical.
+   `TestAFailedNoBarrierVetoIsReportedAndSkipsPruning` requires both veto
+   attempts, the explicit failure in CLI and ticker, and no prune callback.
+   Console logging also carries that failure in its reporter case.
+   `TestAnIncompleteNoBarrierRecheckLeavesItsRecordTrusted` is preservation
+   coverage: cancellation at SQLite open leaves the manifest and veto
+   state unchanged and the old verdict trusted. The internal component
+   table also checks files-only disproof and mixed INCOMPLETE cases.
+
+   Control: remove only the `disproves`/`putVeto` block from the noBarrier
+   branch. The fresh-process anchor survival and cache/read-back assertions
+   must fail. Independently remove only `stampChange(root)` there: the
+   primed Jobs cache assertion must fail. This is not a claim that a failed
+   veto can protect a future process; that residual is explicit in the
+   guide, rule, History and returned error.
+
+2. **No pathname-following privileged writes (4524511243, 4526180639).**
+   The staging mode is set through its open file, before Sync and Close.
+   A stuck marker removes an existing entry then uses O_CREATE|O_EXCL;
+   removal errors other than absence, or racing replacements, stop it.
+   Expected red: `TestTheStagedManifestChmodsItsOpenFile` replaces the exact
+   staged pathname with a symlink and requires its target's mode unchanged.
+   It skips on Windows, where that open temporary file cannot be replaced.
+   `TestTheStuckMarkerNeverFollowsAReplacement` requires target bytes
+   unchanged both for an existing symlink and one inserted at the per-mark
+   removal/create seam. Windows runs these where symlink creation is allowed.
+
+   Controls: move Chmod back after Close and use os.Chmod(tmpName, 0o600),
+   retaining the staging hook; the target-mode assertion must fail. For
+   the marker, keep the removal and hook but replace O_EXCL with O_TRUNC:
+   the racing-replacement target-bytes assertion must fail. Restoring the
+   original marker open with no removal also fails the existing-link row;
+   the racing row requires the seam and removal retained to be reachable.
+
+3. **Schema read errors (4509212205, 4509969919).** `schemaMisses` returns
+   collection errors separately, and `columnsOf` checks query, scan and
+   iteration errors. The caller uses INCOMPLETE for cancellation and
+   open-failed for other errors, as table collection already does.
+   Expected red: `TestSchemaReadErrorsAreNotSchemaVerdicts`' columns/query,
+   columns/scan and columns/iteration rows require FAILED: open-failed and
+   forbid schema-column and VERIFIED. The iteration error arrives after
+   every required column was collected: HEAD can incorrectly say VERIFIED.
+   The table rows, no-fault rows and actual cancellation are preservation
+   coverage and are not claimed red on HEAD.
+
+   Control: in columnsOf return `have, nil` instead of `have, rows.Err()`.
+   The columns/iteration row must fail its open-failed assertion, becoming
+   VERIFIED. Keep the fake driver and all other error handling unchanged.
+
+4. **Doctor advice (4509969926).** The fallback order is database FAILED,
+   either component INCOMPLETE, database VERIFIED/files FAILED,
+   no-database/files FAILED, then neutral advice. No-database files advice
+   claims no database recovery point. Expected red:
+   `TestTheNewestBackupHintBlamesOnlyAFailedDatabase`' files-incomplete,
+   no-database/incomplete-files, no-database/failed-files and neutral rows
+   assert their specific hint and forbid false database-failure/recovery
+   claims. Existing database-failed, database-incomplete and
+   verified-database/failed-files behavior is preservation coverage.
+
+   Control: restore newestLine's prior fallback branches; the no-database
+   failed-files row must fail the files-only hint and no-database-blame
+   assertions. The files-incomplete row also detects branch precedence.
+
+5. **Admission reports (4526180587).** With WriteNone only, the three
+   admission errors say "the verification did not start" and their reason
+   before generic reporting. Non-WriteNone outcomes retain write words.
+   Expected red: all three admission rows of
+   `TestBackupReportersSayWhenVerificationDidNotStart` require that phrase
+   twice (CLI and ticker), the refusal reason and no invented finding.
+   `TestTheConsoleNamesVerificationAdmissionRefusals` requires the phrase
+   and reason at the console's production log site. Their busy plus
+   cancellation/WriteRecorded rows preserve "it wrote its record" and
+   the console's write-ended message, forbidding did-not-start wording.
+
+   Control: make NotStarted return false. All nine surface/admission
+   combinations must fail their did-not-start assertion. Separately omit
+   the WriteNone guard: busy/cancellation/WriteRecorded preservation rows
+   must fail, catching error-only classification.
+
+6. **Drain tests (4524511222, 4526180501, 4526180522, 4527411833).** The
+   startup test waits boundedly for the actual prune line on stdout before
+   cancelling instead of sleeping 200 ms after the verdict on stderr.
+   The CLI success, repeated-failure CLI and ticker fixtures, and the
+   doctor's command-hint fixture register drains just after fixture
+   creation; ticker joining runs first by cleanup order. The legacy
+   verification subtest drains before the subsequent lock-contention case.
+   These fix nondeterministic ordering failures, not a deterministic
+   expected-red test on HEAD. Reverting the stdout wait permits cancellation
+   to suppress the asserted prune message; reverting a drain permits
+   fixture removal or the next lock attempt to race deferred hold release.
+   The orchestrator should retain cleanup ordering when running the suite.
+
+Files changed, grouped by purpose:
+
+- Production: internal/backup/{finish.go,verify_record.go,stuck.go,verify_db.go},
+  internal/doctor/backups.go, cmd/bridge/backup.go,
+  internal/admin/handlers_backups.go.
+- New cases: internal/backup/{verify_round12_internal_test.go,verify_round12_test.go},
+  cmd/bridge/backup_round12_test.go, internal/admin/handlers_backups_round12_test.go,
+  internal/doctor/backups_round12_test.go.
+- Revised cases and their platform explanations:
+  cmd/bridge/{backup_verify_test.go,backup_round2_test.go,backup_round3_test.go,
+  backup_round4_test.go,backup_round5_test.go},
+  internal/backup/{verify_hold_test.go,verify_veto_test.go}.
+- Guide and binding records: docs/backup.md,
+  .claude/rules/{cli-serve.md,admin-console.md,build-ci-tests.md},
+  ops/{History-rules-cli-serve.md,History-rules-build-ci-tests.md,engineering-log.md}.
+
+No pacing change (4509212196, 4509212200), and no rework of the earlier
+capture-bound or ticker write-outcome fixes (4509969905, 4510798630).

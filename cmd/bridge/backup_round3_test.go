@@ -212,7 +212,7 @@ func killedOnceChecked(t *testing.T, cmd *exec.Cmd) {
 // round 2's answer to that fault; and killed, between round 2's check and the
 // veto its write made, left the VERIFIED with none: red on every reader, and
 // on the prune, which removed the older verified snapshot. Where no directory
-// can be synced no veto is made and no check over a VERIFIED is recorded
+// can be synced no veto precedes the check and no new verdict is recorded
 // (TestBridgeBackupVerifySaysWhatARecheckFoundWhereItCannotBeRecorded), so it
 // skips there.
 func TestAFreshProcessReadsNoVerifiedAVerificationCouldNotRecord(t *testing.T) {

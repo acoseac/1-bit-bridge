@@ -28,7 +28,7 @@ import (
 // already begun finishes afterward. A verdict's write is admitted only
 // before its hold is given up (publishOf, hold.go).
 //
-// So a VERIFIED is never in doubt where a reader can read it (backlog B653,
+// A veto disqualifies a VERIFIED that is in doubt (backlog B653,
 // and its second to fourth rounds), by one veto, vetoFileName in the bundle,
 // or beside it in the backups folder (rootVetoPath) where the bundle takes no
 // file, which every reader asks (vetoedAt) and beside which it reads a
@@ -40,9 +40,13 @@ import (
 //     may disprove; where no veto can be put in place durably, the snapshot
 //     is not checked again (ErrRecheckRefused), and its record, which no
 //     check has disproved, stays as it was; and where no directory can be
-//     synced at all (fsutil.SyncsParentDir false: Windows), no veto is made,
-//     the check runs, and what it found is said and never recorded over the
-//     VERIFIED (ErrRecheckNotRecorded);
+//     synced at all (fsutil.SyncsParentDir false: Windows), the check runs
+//     without a prior veto and its verdict is not recorded over the VERIFIED
+//     (ErrRecheckNotRecorded). A completed check that disproves a previously
+//     VERIFIED component leaves a veto before read-back, without a crash
+//     durability promise. If neither location can be written the error says
+//     so; the immediate prune is skipped, but a later process can still
+//     trust the stale VERIFIED. An INCOMPLETE recheck changes nothing;
 //   - a write of a record that holds a VERIFIED, or that replaces one, needs
 //     the veto too, and with none to be had writes nothing;
 //   - the veto goes only once the record that replaces it is durable (the
@@ -184,10 +188,10 @@ var ErrRecheckRefused = errors.New("the snapshot was not checked again: its reco
 
 // ErrRecheckNotRecorded marks a verification of a snapshot whose record holds
 // a VERIFIED where no directory can be synced (syncsParentDir false:
-// Windows), so no veto can be made durable: no veto is made, the check runs,
-// and what it found (VerifyResult.Found, which its caller says) is not
-// recorded, the record left as it was, which no reader then takes for what
-// the check found.
+// Windows), so no veto can be made durable. The check runs and its verdict
+// is not recorded. A completed finding that disproves a VERIFIED component
+// vetoes the unchanged record before read-back; failure to make that veto
+// is reported beside this error. An INCOMPLETE recheck leaves it alone.
 var ErrRecheckNotRecorded = errors.New("no check of a snapshot whose record holds a verified verdict is recorded here: no directory can be synced, so no veto beside the record would be durable")
 
 // setAside puts the veto of the snapshot in dir in place, durably, before a
@@ -462,6 +466,12 @@ var removeVeto = os.Remove
 // give-up skips the attempt; a give-up between the check and call still lets
 // it run, and a rename attempt already begun finishes after the give-up.
 func stageAndRename(given context.Context, path string, data []byte) error {
+	return stageAndRenameWithHook(given, path, data, nil)
+}
+
+// stageAndRenameWithHook exposes the staged pathname before the mode change
+// to a test of replacement at that exact point; production passes nil.
+func stageAndRenameWithHook(given context.Context, path string, data []byte, beforeMode func(string)) error {
 	if failStage != nil {
 		if err := failStage(filepath.Dir(path)); err != nil {
 			return err
@@ -485,13 +495,16 @@ func stageAndRename(given context.Context, path string, data []byte) error {
 	if _, err := tmp.Write(data); err != nil {
 		return err
 	}
+	if beforeMode != nil {
+		beforeMode(tmpName)
+	}
+	if err := tmp.Chmod(0o600); err != nil {
+		return err
+	}
 	if err := tmp.Sync(); err != nil {
 		return err
 	}
 	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Chmod(tmpName, 0o600); err != nil {
 		return err
 	}
 	if failRename != nil {

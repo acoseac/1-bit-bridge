@@ -75,6 +75,13 @@ type VerifyResult struct {
 	Legacy bool
 }
 
+// NotStarted reports an admission refusal with no write outcome. A cancelled
+// wait that wrote INCOMPLETE still needs its actual write outcome reported.
+func (res VerifyResult) NotStarted(err error) bool {
+	return res.Write == WriteNone && (errors.Is(err, ErrBackupsUnlocked) ||
+		errors.Is(err, ErrBackupsBusy) || errors.Is(err, ErrCheckStillRunning))
+}
+
 // ErrRecordNotReadBack marks a verification whose read-back of its record
 // read nothing (VerifyResult.ReadErr says why): what its write did is
 // VerifyResult.Write, which this error never says failed, and what every
@@ -487,10 +494,10 @@ func verifyHeld(ctx context.Context, dir string, o VerifyOptions, after func(con
 	m, prior := op.m, op.m.Verification
 	// The record before the check, which the verdict merges with: a VERIFIED
 	// in it is set aside first, durably, or nothing is checked. Where no
-	// directory can be synced, no veto is made, and what the check finds is
-	// not recorded over it. A recheck that recorded nothing, either way, is
-	// followed by no prune, which would trust the VERIFIED it was to check
-	// (backlog B653's fifth round).
+	// directory can be synced, no veto precedes the check and its verdict is
+	// not recorded over it. A completed check that disproves it leaves a veto
+	// before read-back. A recheck that recorded nothing is followed by no
+	// prune (backlog B653's fifth and twelfth rounds).
 	recheck := holdsVerified(prior) && !m.legacy()
 	noBarrier := recheck && !syncsParentDir
 	if recheck && !noBarrier {
@@ -540,11 +547,25 @@ func verifyHeld(ctx context.Context, dir string, o VerifyOptions, after func(con
 		return answer(nil)
 	}
 	if noBarrier {
+		var vetoErr error
+		if disproves(prior, found) {
+			// This is disqualification of a completed finding, not publication
+			// of a new verdict. Keep the veto even though no crash barrier is
+			// available. Every reader must stop trusting the disproved record.
+			vetoErr, _ = stepOf(h, laterBound(deadline), stepVeto, func(context.Context, context.Context) error {
+				_, err := putVeto(snap)
+				stampChange(root)
+				if err != nil {
+					return fmt.Errorf("the disproved record could not be vetoed; a later process may still trust its VERIFIED verdict: %w", err)
+				}
+				return nil
+			}, nil)
+		}
 		readBack()
 		if h.gaveUp() {
-			return answer(h.givenUp(ctx, nil))
+			return answer(h.givenUp(ctx, vetoErr))
 		}
-		return answer(ErrRecheckNotRecorded)
+		return answer(errors.Join(ErrRecheckNotRecorded, vetoErr))
 	}
 	// The verdict's write is admitted only where the hold was not given up as
 	// its step is registered (publishOf, backlog B653's sixth round): given
@@ -588,6 +609,16 @@ func verifyHeld(ctx context.Context, dir string, o VerifyOptions, after func(con
 		return answer(err)
 	}
 	return answer(nil)
+}
+
+// disproves requires a completed recheck and a FAILED component previously
+// VERIFIED. An interrupted check supplies no evidence against the old record.
+func disproves(prior *Verification, found Verification) bool {
+	if prior == nil || found.DatabaseState == StateIncomplete || found.FilesState == StateIncomplete {
+		return false
+	}
+	return prior.DatabaseState == StateVerified && found.DatabaseState == StateFailed ||
+		prior.FilesState == StateVerified && found.FilesState == StateFailed
 }
 
 // incompleteOf is the verdict of a check ctx stopped.

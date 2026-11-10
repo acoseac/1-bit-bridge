@@ -87,6 +87,8 @@ type stuckMark struct {
 	ref     string
 	mu      sync.Mutex
 	removed bool
+	// beforeCreate is a per-mark test seam after removal, before exclusive creation.
+	beforeCreate func()
 }
 
 // stuck is this process's holds given up, by every key they stand under: the
@@ -159,7 +161,13 @@ func (mark *stuckMark) writeMarker() {
 	if mark.removed {
 		return
 	}
-	f, err := os.OpenFile(mark.marker, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	if err := os.Remove(mark.marker); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return
+	}
+	if mark.beforeCreate != nil {
+		mark.beforeCreate()
+	}
+	f, err := os.OpenFile(mark.marker, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
 	if err != nil {
 		return
 	}

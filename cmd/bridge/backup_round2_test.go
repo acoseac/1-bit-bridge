@@ -519,6 +519,7 @@ func awaitVerificationsEnd(t *testing.T, root string) {
 // the round before that, whose hint put --full first.
 func TestTheDoctorsVerifyHintsAreCommandsTheCLITakes(t *testing.T) {
 	cfgPath, dataDir := backupInstallIn(t, filepath.Join(t.TempDir(), "my bridge's config"))
+	t.Cleanup(func() { awaitHoldsLetGo(t, filepath.Join(dataDir, backup.BackupsDirName)) })
 	src := backup.Sources{DataDir: dataDir, ManifestDB: manifest.DefaultDBPath(dataDir)}
 	dir, err := backup.Snapshot(t.Context(), src)
 	if err != nil {

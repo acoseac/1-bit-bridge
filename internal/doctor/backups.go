@@ -3,6 +3,7 @@ package doctor
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/backup"
@@ -93,15 +94,21 @@ func newestLine(sn backup.SnapshotStatus, now time.Time) Check {
 	case sn.Legacy:
 		return warn(checkNameBackupNewest, summary,
 			"it was written before snapshots were verified; the next snapshot is verified as it is taken")
-	case v.DatabaseState == backup.StateVerified:
+	case v.DatabaseState == backup.StateFailed:
 		return warn(checkNameBackupNewest, summary,
-			"a file of the snapshot is not the one it captured; its database is still a recovery point, and the next snapshot captures the files again")
-	case v.DatabaseState == backup.StateIncomplete:
+			"its database failed its check: the live database may be damaged; run bridge backup --config <bridge.yaml> --verify <snapshot-dir> --full, "+sameConfig+", and keep the snapshots that are verified")
+	case v.DatabaseState == backup.StateIncomplete || v.FilesState == backup.StateIncomplete:
 		return warn(checkNameBackupNewest, summary,
 			"its check did not finish; run bridge backup --config <bridge.yaml> --verify <snapshot-dir> on it, "+sameConfig+", or wait for the next snapshot")
+	case v.DatabaseState == backup.StateVerified && v.FilesState == backup.StateFailed:
+		return warn(checkNameBackupNewest, summary,
+			"a file of the snapshot is not the one it captured; its database is still a recovery point, and the next snapshot captures the files again")
+	case v.DatabaseState == backup.StateUnverified && slices.Contains(v.DatabaseReasons, backup.ReasonNoDatabase) && v.FilesState == backup.StateFailed:
+		return warn(checkNameBackupNewest, summary,
+			"a file of the snapshot is not the one it captured; the next snapshot captures the files again")
 	}
 	return warn(checkNameBackupNewest, summary,
-		"its database failed its check: the live database may be damaged; run bridge backup --config <bridge.yaml> --verify <snapshot-dir> --full, "+sameConfig+", and keep the snapshots that are verified")
+		"run bridge backup --config <bridge.yaml> to take and check a new snapshot, "+sameConfig)
 }
 
 // verifiedLine is backup-verified: ok naming the newest snapshot whose

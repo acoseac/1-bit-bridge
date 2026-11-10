@@ -102,6 +102,7 @@ func recordOf(t *testing.T, dir string) backup.Verification {
 // one.
 func TestBridgeBackupVerifiesWhatItKeepsAndSaysSo(t *testing.T) {
 	cfgPath, _, root := backupInstall(t)
+	t.Cleanup(func() { awaitHoldsLetGo(t, root) })
 	var stdout, stderr bytes.Buffer
 	if code := backupCmd([]string{"--config", cfgPath}, &stdout, &stderr); code != 0 {
 		t.Fatalf("bridge backup = %d; stdout %s stderr %s", code, stdout.String(), stderr.String())
@@ -129,6 +130,7 @@ func TestBridgeBackupVerifiesWhatItKeepsAndSaysSo(t *testing.T) {
 func TestRepeatedFailedVerificationsThroughTheTickerAndBridgeBackupStillPrune(t *testing.T) {
 	t.Run("bridge backup", func(t *testing.T) {
 		cfgPath, dataDir, root := backupInstall(t)
+		t.Cleanup(func() { awaitHoldsLetGo(t, root) })
 		makeStoreNewer(t, manifest.DefaultDBPath(dataDir))
 		for i := 0; i < 4; i++ {
 			var stdout, stderr bytes.Buffer
@@ -148,6 +150,7 @@ func TestRepeatedFailedVerificationsThroughTheTickerAndBridgeBackupStillPrune(t 
 	})
 	t.Run("the ticker", func(t *testing.T) {
 		_, dataDir, root := backupInstall(t)
+		t.Cleanup(func() { awaitHoldsLetGo(t, root) })
 		src := backup.Sources{DataDir: dataDir, ManifestDB: manifest.DefaultDBPath(dataDir)}
 		makeStoreNewer(t, src.ManifestDB)
 		// Three earlier failures, as earlier passes left them.
@@ -254,6 +257,7 @@ func TestBridgeBackupVerifyRecordsAndSaysTheVerdict(t *testing.T) {
 		}
 	})
 	t.Run("a snapshot from before verification", func(t *testing.T) {
+		t.Cleanup(func() { awaitHoldsLetGo(t, root) })
 		legacy := writeSnapshotDir(t, root, time.Now().UTC().Add(-48*time.Hour))
 		before, _ := os.ReadFile(filepath.Join(legacy, backup.ManifestFile))
 		code, out, _ := run("--verify", legacy)

@@ -67,8 +67,12 @@ func TestTheStartupPassSaysWhyARecheckThatRecordedNothingPrunedNothing(t *testin
 			t.Fatalf("the check in place never reported\nstdout %s\nstderr %s", stdout.String(), stderr.String())
 		}
 	}
-	// The report's lines are written together: the prune's follows at once.
-	time.Sleep(200 * time.Millisecond)
+	// The prune is reported on stdout after the verdict on stderr.
+	for deadline := time.Now().Add(2 * time.Minute); !strings.Contains(stdout.String(), "backup (startup): prune skipped: the check of a snapshot whose record holds a verified verdict recorded nothing, so no prune trusts that record"); time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("the prune never reported\nstdout %s\nstderr %s", stdout.String(), stderr.String())
+		}
+	}
 	cancel()
 	waitClosed(t, done, "the backup ticker")
 	out := stdout.String()

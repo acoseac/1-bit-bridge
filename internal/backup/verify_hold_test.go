@@ -639,16 +639,8 @@ func TestAStoppedVerificationsMarkStandsUntilTheWriteItStartedEnds(t *testing.T)
 	awaitClean(t)
 }
 
-// TestARecheckWhereNoDirectoryCanBeSyncedChecksAndRecordsNothing is backlog
-// B653's fourth round's red for a platform with no directory barrier (Codex's
-// P1 and the Claude API's Medium on round 3: Windows, where
-// fsutil.SyncParentDir does nothing and fsutil.SyncsParentDir is false): a
-// recheck of a VERIFIED snapshot makes no veto, leaves no veto file and no
-// stamp on the backups folder, runs its check and says what it found (its
-// database FAILED here), and records nothing over the VERIFIED
-// (ErrRecheckNotRecorded); and a fresh snapshot's check there records its
-// verdict as before. Red on the round before, which took the no-op barrier
-// for a durable veto.
+// TestARecheckWhereNoDirectoryCanBeSyncedChecksAndRecordsNothing keeps the
+// manifest unchanged but disqualifies a completed finding that disproves it.
 func TestARecheckWhereNoDirectoryCanBeSyncedChecksAndRecordsNothing(t *testing.T) {
 	src := storeWithTracks(t, 20)
 	dir := verifiedSnapshot(t, src)
@@ -662,6 +654,7 @@ func TestARecheckWhereNoDirectoryCanBeSyncedChecksAndRecordsNothing(t *testing.T
 	}
 	restore := backup.SetSyncsParentDirForTest(false)
 	t.Cleanup(restore)
+	t.Cleanup(func() { awaitClean(t) })
 	res, err := backup.VerifySnapshot(t.Context(), dir, backup.VerifyOptions{})
 	if !errors.Is(err, backup.ErrRecheckNotRecorded) {
 		t.Fatalf("a recheck with no directory barrier answered %v, want ErrRecheckNotRecorded", err)
@@ -672,13 +665,10 @@ func TestARecheckWhereNoDirectoryCanBeSyncedChecksAndRecordsNothing(t *testing.T
 	if got := readBytes(t, mpath); string(got) != string(before) {
 		t.Error("the recheck wrote the record")
 	}
-	if pathExists(t, filepath.Join(dir, backup.VetoFileName)) || pathExists(t, backup.RootVetoPath(dir)) {
-		t.Error("the recheck left a veto")
+	if !pathExists(t, filepath.Join(dir, backup.VetoFileName)) && !pathExists(t, backup.RootVetoPath(dir)) {
+		t.Error("the disproved record has no veto")
 	}
-	if info, err := os.Stat(root); err != nil || !info.ModTime().Equal(past) {
-		t.Errorf("the backups folder's time moved: %v, %v", info.ModTime(), err)
-	}
-	requireVerdict(t, "the record the recheck left", listed(t, dir), backup.StateVerified, "", backup.StateVerified, "")
+	requireVerdict(t, "the record the recheck left", listed(t, dir), backup.StateIncomplete, backup.ReasonUnsynced, backup.StateIncomplete, backup.ReasonUnsynced)
 	fresh, err := backup.Snapshot(t.Context(), storeWithTracks(t, 5))
 	if err != nil {
 		t.Fatal(err)

@@ -248,7 +248,14 @@ func runChecks(ctx context.Context, db *sql.DB, level CheckLevel) dbCheck {
 		}
 		return failed(ReasonOpenFailed)
 	}
-	if missing := schemaMisses(ctx, conn, required, present); len(missing) > 0 {
+	missing, err := schemaMisses(ctx, conn, required, present)
+	if err != nil {
+		if why, ok := stopped(ctx); ok {
+			return dbCheck{state: StateIncomplete, reasons: []Reason{why}}
+		}
+		return failed(ReasonOpenFailed)
+	}
+	if len(missing) > 0 {
 		if why, ok := stopped(ctx); ok {
 			return dbCheck{state: StateIncomplete, reasons: []Reason{why}}
 		}
@@ -313,10 +320,30 @@ func tablesOf(ctx context.Context, conn *sql.Conn) (map[string]bool, error) {
 	return out, rows.Err()
 }
 
+// columnsOf collects column names, keeping query, scan and iteration errors
+// separate from a schema that actually lacks a required column.
+func columnsOf(ctx context.Context, conn *sql.Conn, table string) (map[string]bool, error) {
+	rows, err := conn.QueryContext(ctx, `SELECT name FROM pragma_table_info(?)`, table)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	have := map[string]bool{}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		have[name] = true
+	}
+	return have, rows.Err()
+}
+
 // schemaMisses is why the database does not hold what its version requires:
 // ReasonSchemaTable for a table that is not there, ReasonSchemaColumn for a
-// column of one that is, each once, or none.
-func schemaMisses(ctx context.Context, conn *sql.Conn, required map[string][]string, present map[string]bool) []Reason {
+// column of one that is, each once, or none. Read errors are returned
+// separately and never interpreted as missing schema.
+func schemaMisses(ctx context.Context, conn *sql.Conn, required map[string][]string, present map[string]bool) ([]Reason, error) {
 	var tableMissing, columnMissing bool
 	names := make([]string, 0, len(required))
 	for t := range required {
@@ -328,19 +355,10 @@ func schemaMisses(ctx context.Context, conn *sql.Conn, required map[string][]str
 			tableMissing = true
 			continue
 		}
-		have := map[string]bool{}
-		rows, err := conn.QueryContext(ctx, `SELECT name FROM pragma_table_info(?)`, table)
+		have, err := columnsOf(ctx, conn, table)
 		if err != nil {
-			columnMissing = true
-			continue
+			return nil, err
 		}
-		for rows.Next() {
-			var c string
-			if rows.Scan(&c) == nil {
-				have[c] = true
-			}
-		}
-		_ = rows.Close()
 		for _, c := range required[table] {
 			if !have[c] {
 				columnMissing = true
@@ -355,7 +373,7 @@ func schemaMisses(ctx context.Context, conn *sql.Conn, required map[string][]str
 	if columnMissing {
 		out = append(out, ReasonSchemaColumn)
 	}
-	return out
+	return out, nil
 }
 
 // filesCheck is the other files' verdict.
