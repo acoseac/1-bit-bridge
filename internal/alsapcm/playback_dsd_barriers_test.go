@@ -201,7 +201,7 @@ func TestNoSinkOpensBeforeReconciliationJudgesItsSuccessor(t *testing.T) {
 	res := d.refreshAfterHotplug(false)
 	reachedGate(t, stop, res, "the publish barrier")
 	drained.letGo()
-	w.waitVerdictWaits(t, ob, 1, "the transport to wait for its verdict")
+	waitOrderedEither(t, "judgement wait or premature open", w.ch, func() <-chan struct{} { return d.k.When(func(v alsapcm.KernelView) bool { return v.Opens > 1 }) }, func() bool { return w.verdictWaits(ob) > 0 || d.k.View().Opens > 1 })
 	if v := d.k.View(); v.Opens != 1 {
 		t.Fatalf("%d opens before reconciliation: a sink opened for b", v.Opens)
 	}

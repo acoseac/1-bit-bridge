@@ -160,8 +160,16 @@ func TestARetiringPositionsPanicStopsAndClosesWithoutAnotherRead(t *testing.T) {
 	checkContained(t, s)
 	waitContained(t, sink.stopped)
 	s.closeAtTeardown(out)
-	_ = out.position()
-	_ = out.position()
+	for range 2 {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Error("cleanup retried the failed position callback")
+				}
+			}()
+			_ = out.position()
+		}()
+	}
 	if sink.positions.Load() != 1 || sink.closes.Load() != 1 {
 		t.Fatalf("position called %d times, closes %d; want one each", sink.positions.Load(), sink.closes.Load())
 	}
