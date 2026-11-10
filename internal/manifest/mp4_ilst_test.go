@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"math"
 	"os"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/logging/loggingtest"
 	"github.com/dhowden/tag"
 )
 
@@ -431,7 +433,7 @@ func TestExtractMP4Work(t *testing.T) {
 	}{
 		{"atom alone", [][]byte{work("  Requiem \n")}, "Requiem"},
 		{"iTunes WORK alone", [][]byte{free(" Mass ")}, "Mass"},
-		{"other mean WORK alone", [][]byte{ilstFreeform("org.example.tags", "WORK", " Mass ")}, "Mass"},
+		{"other mean WORK alone", [][]byte{ilstFreeform("org.example.tags", "WORK", " Mass ")}, ""},
 		{"blank atom beside WORK", [][]byte{work(" \t\n"), free("Mass")}, "Mass"},
 		{"empty atom beside WORK", [][]byte{work(""), free("Mass")}, "Mass"},
 		{"atom beside blank WORK", [][]byte{work("Requiem"), free(" \n")}, "Requiem"},
@@ -440,8 +442,8 @@ func TestExtractMP4Work(t *testing.T) {
 		{"equal WORK first", [][]byte{free("Mass"), work("Mass")}, "Mass"},
 		{"conflict atom first", [][]byte{work("Requiem"), free("Mass")}, "Mass"},
 		{"conflict WORK first", [][]byte{free("Mass"), work("Requiem")}, "Mass"},
-		{"other mean wins atom first", [][]byte{work("Requiem"), ilstFreeform("org.example.tags", "WORK", "Mass")}, "Mass"},
-		{"other mean wins WORK first", [][]byte{ilstFreeform("org.example.tags", "WORK", "Mass"), work("Requiem")}, "Mass"},
+		{"other mean ignored atom first", [][]byte{work("Requiem"), ilstFreeform("org.example.tags", "WORK", "Mass")}, "Requiem"},
+		{"other mean ignored WORK first", [][]byte{ilstFreeform("org.example.tags", "WORK", "Mass"), work("Requiem")}, "Requiem"},
 		{"existing WORK beats other mean", [][]byte{free("Mass"), ilstFreeform("org.example.tags", "WORK", "New")}, "Mass"},
 		{"longer than advisory limit", [][]byte{work(long)}, long},
 		{"at work limit", [][]byte{work(strings.Repeat("w", 64<<10))}, strings.Repeat("w", 64<<10)},
@@ -467,6 +469,15 @@ func TestExtractMP4Work(t *testing.T) {
 					t.Error("blank ©wrk supplied a candidate beside WORK")
 				}
 			}
+			if tc.name == "atom beside blank WORK" || tc.name == "atom beside empty WORK" {
+				tags, err := extractMP4WorkTags(bytes.NewReader(raw))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, present := tags["work"]; present {
+					t.Error("blank WORK supplied a candidate beside ©wrk")
+				}
+			}
 			tr := extractBytesAsM4A(t, raw)
 			if tr.Title != "Movement" || tr.Codec != "ALAC" {
 				t.Fatalf("fixture not parsed: title %q codec %q", tr.Title, tr.Codec)
@@ -483,6 +494,15 @@ func TestExtractMP4Work_TruncatedPayload(t *testing.T) {
 	// Keep every declared size; only the work's value is cut short.
 	end := bytes.Index(raw, []byte("Requiem")) + len("Requiem")
 	raw = raw[:end-2]
+	tags, err := extractMP4WorkTags(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatalf("truncation is absence, got %v", err)
+	}
+	for _, key := range []string{"work", "©wrk"} {
+		if _, present := tags[key]; present {
+			t.Errorf("truncated value supplied %q", key)
+		}
+	}
 	if got := extractBytesAsM4A(t, raw).Work; got != "" {
 		t.Fatalf("truncated work = %q, want absent", got)
 	}
@@ -510,7 +530,7 @@ func TestScanner_V33_MP4WorkReReadsV32Rows(t *testing.T) {
 		items           [][]byte
 	}{
 		{"atom.m4a", "", "Requiem", [][]byte{ilstText("\xa9wrk", "Requiem")}},
-		{"other.m4a", "", "Mass", [][]byte{ilstFreeform("org.example.tags", "WORK", "Mass")}},
+		{"other.m4a", "", "", [][]byte{ilstFreeform("org.example.tags", "WORK", "Mass")}},
 		{"existing.m4a", "Mass", "Mass", [][]byte{ilstFreeform("com.apple.iTunes", "WORK", "Mass"), ilstText("\xa9wrk", "Requiem")}},
 		{"plain.m4a", "", "", nil},
 	}
@@ -608,5 +628,224 @@ func TestExtractMP4WorkTags_PropagatesIOFailure(t *testing.T) {
 	boom := errors.New("disk failure")
 	if _, err := extractMP4WorkTags(failingReadSeeker{err: boom}); !errors.Is(err, boom) {
 		t.Fatalf("got %v, want %v", err, boom)
+	}
+}
+
+func TestExtractMP4Work_PreservesDhowden(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		items [][]byte
+		walk  string
+	}{
+		{"last duplicate", [][]byte{ilstFreeform("com.apple.iTunes", "WORK", "First"), ilstFreeform("com.apple.iTunes", "WORK", "Last")}, "First"},
+		{"mixedinkey", [][]byte{ilstFreeform("com.mixedinkey.mixedinkey", "WORK", "Last")}, ""},
+		{"serato", [][]byte{ilstFreeform("com.serato.dj", "WORK", "Last")}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := buildMP4WithILST(true, tc.items...)
+			old := &Track{}
+			if err := extractViaDhowdenFromReader(bytes.NewReader(raw), "track.m4a", old, nil); err != nil || old.Work != "Last" {
+				t.Fatalf("premise: dhowden Work = %q, err %v", old.Work, err)
+			}
+			if got := extractBytesAsM4A(t, raw).Work; got != old.Work {
+				t.Errorf("Extract Work = %q, must preserve %q", got, old.Work)
+			}
+			tags, err := extractMP4WorkTags(bytes.NewReader(raw))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got, _ := workOf(tag.MP4, tags, nil); got != tc.walk {
+				t.Errorf("supplemental walk = %q, want %q", got, tc.walk)
+			}
+		})
+	}
+}
+
+func TestExtractMP4Work_FallbackOrder(t *testing.T) {
+	work := ilstText("\xa9wrk", "Requiem")
+	free := ilstFreeform("com.apple.iTunes", "WORK", "Mass")
+	for _, tc := range []struct {
+		name  string
+		items [][]byte
+		want  string
+	}{
+		{"atom first", [][]byte{work, free}, "Mass"},
+		{"WORK first", [][]byte{free, work}, "Mass"},
+		{"blank WORK", [][]byte{ilstFreeform("com.apple.iTunes", "WORK", " \n"), work}, "Requiem"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			items := append([][]byte{atomBytes("\xa9nam", dataAtom(99, []byte("bad")))}, tc.items...)
+			raw := buildMP4WithILST(true, items...)
+			if _, err := tag.ReadFrom(bytes.NewReader(raw)); err == nil {
+				t.Fatal("premise: dhowden accepted bad title")
+			}
+			if got := extractBytesAsM4A(t, raw).Work; got != tc.want {
+				t.Errorf("Work = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestExtractMP4Work_MeanMustBeExact(t *testing.T) {
+	for _, tc := range []struct {
+		name, mean         string
+		missing, truncated bool
+	}{
+		{"exact", "com.apple.iTunes", false, false},
+		{"padded", " com.apple.iTunes ", false, false},
+		{"case changed", "com.apple.itunes", false, false},
+		{"missing", "", true, false},
+		{"oversized", strings.Repeat("m", 1024), false, false},
+		{"truncated", "com.apple.iTunes", false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Put mean last so cutting it leaves both values and the name intact.
+			children := append(atomBytes("name", append(make([]byte, 4), []byte("WORK")...)), dataAtom(1, []byte("Mass"))...)
+			if !tc.missing {
+				children = append(children, atomBytes("mean", append(make([]byte, 4), []byte(tc.mean)...))...)
+			}
+			raw := buildMP4WithILST(true, ilstText("\xa9wrk", "Requiem"), atomBytes("----", children))
+			if tc.truncated {
+				end := bytes.Index(raw, []byte(tc.mean)) + len(tc.mean)
+				raw = raw[:end-1]
+			}
+			// Exercise the supplemental contract directly, independent of dhowden.
+			tags, err := extractMP4WorkTags(bytes.NewReader(raw))
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := "Requiem"
+			if tc.name == "exact" {
+				want = "Mass"
+			} else if _, present := tags["work"]; present {
+				t.Error("non-iTunes mean supplied work key")
+			}
+			if got, _ := workOf(tag.MP4, tags, nil); got != want {
+				t.Errorf("Work = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+func TestExtractMP4Work_MultipleDataChildren(t *testing.T) {
+	for _, kind := range []string{"\xa9wrk", "----"} {
+		for _, tc := range []struct {
+			name     string
+			children [][]byte
+			want     string
+		}{
+			{"non-text", [][]byte{dataAtom(21, []byte("Wrong")), dataAtom(1, []byte("First")), dataAtom(1, []byte("Last"))}, "First"},
+			{"empty", [][]byte{dataAtom(1, nil), dataAtom(1, []byte("First")), dataAtom(1, []byte("Last"))}, "First"},
+			{"oversized", [][]byte{dataAtom(1, []byte(strings.Repeat("w", (64<<10)+1))), dataAtom(1, []byte("First")), dataAtom(1, []byte("Last"))}, "First"},
+			{"none usable", [][]byte{dataAtom(21, []byte("Wrong")), dataAtom(1, nil), dataAtom(1, []byte(strings.Repeat("w", (64<<10)+1)))}, ""},
+		} {
+			t.Run(kind+"/"+tc.name, func(t *testing.T) {
+				children := bytes.Join(tc.children, nil)
+				key := "©wrk"
+				if kind == "----" {
+					key = "work"
+					children = append(atomBytes("mean", append(make([]byte, 4), []byte("com.apple.iTunes")...)), children...)
+					children = append(atomBytes("name", append(make([]byte, 4), []byte("WORK")...)), children...)
+				}
+				tags, err := extractMP4WorkTags(bytes.NewReader(buildMP4WithILST(true, atomBytes(kind, children))))
+				if err != nil {
+					t.Fatal(err)
+				}
+				got, present := tags[key]
+				if tc.want == "" {
+					if present {
+						t.Errorf("unusable children supplied %q", key)
+					}
+				} else if got != tc.want {
+					t.Errorf("%s = %q, want %q", key, got, tc.want)
+				}
+			})
+		}
+	}
+}
+
+// mp4WorkPayloadFault fails only operations overlapping the selected payload.
+// Read ranges, not starting offsets, account for dhowden's 4 KiB read-ahead.
+type mp4WorkPayloadFault struct {
+	*os.File
+	start, end int64
+	seek       bool
+	boom       error
+	hits       int
+}
+
+func (r *mp4WorkPayloadFault) Read(p []byte) (int, error) {
+	pos, err := r.File.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return 0, err
+	}
+	if !r.seek && pos < r.end && pos+int64(len(p)) > r.start {
+		r.hits++
+		return 0, r.boom
+	}
+	return r.File.Read(p)
+}
+
+func (r *mp4WorkPayloadFault) Seek(offset int64, whence int) (int64, error) {
+	if r.seek && whence == io.SeekStart && offset >= r.start && offset < r.end {
+		r.hits++
+		return 0, r.boom
+	}
+	return r.File.Seek(offset, whence)
+}
+
+func TestExtractMP4Work_PayloadFaultsPreventPersistence(t *testing.T) {
+	for _, payload := range []string{"data", "mean"} {
+		for _, seek := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/seek=%v", payload, seek), func(t *testing.T) {
+				// Fail dhowden before WORK, keeping its read-ahead short of the
+				// target with padding; the independent walk must reach it.
+				raw := buildMP4WithILST(true, atomBytes("\xa9nam", dataAtom(99, []byte("bad"))), atomBytes("free", make([]byte, 8192)), ilstFreeform("com.apple.iTunes", "WORK", "PayloadWork"))
+				old := &Track{}
+				if err := extractViaDhowdenFromReader(bytes.NewReader(raw), "track.m4a", old, nil); err != nil || old.Work != "" {
+					t.Fatalf("premise: dhowden work %q, err %v", old.Work, err)
+				}
+				start := bytes.Index(raw, []byte("PayloadWork")) - 8
+				end := start + 8 + len("PayloadWork")
+				if payload == "mean" {
+					start = bytes.Index(raw, []byte("com.apple.iTunes"))
+					end = start + len("com.apple.iTunes")
+				}
+				if start < 8192 {
+					t.Fatal("fixture payload not beyond read-ahead")
+				}
+				path := filepath.Join(t.TempDir(), "track.m4a")
+				if err := os.WriteFile(path, raw, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				f, err := os.Open(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = f.Close() })
+				boom := errors.New("injected work payload failure")
+				src := &mp4WorkPayloadFault{File: f, start: int64(start), end: int64(end), seek: seek, boom: boom}
+				logs := loggingtest.Record(t)
+				err = ExtractWithContext(path, &Track{Path: "track.m4a"}, &ExtractContext{openAudio: func(string) (extractSource, error) { return src, nil }})
+				if src.hits == 0 {
+					t.Error("injected failure never reached the selected payload")
+				}
+				if !errors.Is(readFault(err), boom) {
+					t.Errorf("readFault(%v) = %v, want injected error", err, readFault(err))
+				}
+				warnings := 0
+				for _, rec := range logs.Records() {
+					if rec.Message == "mp4 work walk failed; manifest will carry no work" {
+						warnings++
+						if rec.Level != slog.LevelWarn {
+							t.Errorf("work log level = %v", rec.Level)
+						}
+					}
+				}
+				if warnings != 1 {
+					t.Errorf("work walk warnings = %d, want 1", warnings)
+				}
+			})
+		}
 	}
 }

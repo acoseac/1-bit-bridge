@@ -93753,3 +93753,67 @@ run is claimed; ordinary fuzz seeds and cross-platform vet are counted above.
 All six new top-level tests passed under race. PROTOCOL.md, wire types and
 ProtocolVersion are unchanged. The branch is committed locally; no push, PR,
 `gh`, or deployment was performed.
+
+## 2026-11-10 — B428 round 2: exact iTunes mean and extraction proofs
+
+This supersedes round 1's any-mean WORK rule without rewriting its record.
+The app reads ©wrk and freeform WORK only under `com.apple.iTunes`; arbitrary
+means are an advisory-only rule. The supplemental work walk now requires the
+mean's raw bytes after the four-byte version/flags header to equal that string.
+Only an exact-length payload can match, bounding the read to 15 bytes, without
+trimming or case folding. Missing, padded, case-changed, oversized and truncated
+means are absent. Advisory behavior, workOf precedence and the `t.Work == ""`
+guard stay unchanged. ExtractorVersion remains 33, which has not been released.
+
+The restriction belongs only to the supplemental walk. Dhowden also accepts
+`com.mixedinkey.mixedinkey` and `com.serato.dj`, drops the mean and supplies WORK
+before the walk. Those existing answers are preserved, a known pre-existing
+difference from the app. Fixtures pin both production answers and their absence
+from the supplemental map. The existing item-order/precedence and display-cleaning
+differences remain unchanged, as does dhowden's unsupported-mean sibling skip.
+No wire/schema change or iOS edit is needed.
+
+### Red first at a9035b58
+
+Only tests were changed for the first run. All Go/make commands use
+`TMPDIR=$HOME/onebit/codex/b428-scratch/tmp`, `GOTOOLCHAIN=local`, and the tags
+`ts_omit_webclient,ts_omit_debugeventbus`. The focused run used `-timeout 30m
+-count=1 -json`, package `./internal/manifest`, and pattern
+`TestExtractMP4Work|TestReadMP4WorkText|TestScanner_V33`. It built and exited 1:
+44 passed, 17 failed test/subtest events (parent failures included), no skips.
+
+- `TestExtractMP4Work`: other mean WORK alone now expects absence; other mean
+  ignored atom first and other mean ignored WORK first expect Requiem. All
+  three failed, still returning Mass. The other mean over limit case stayed
+  green: its foreign WORK was already rejected by the value-size bound.
+- `TestScanner_V33_MP4WorkReReadsV32Rows`: other.m4a failed both the no-work and
+  stamp-only expectations; the other rows kept their expected behavior.
+- `TestExtractMP4Work_MeanMustBeExact`: padded, case changed, missing, oversized
+  and truncated all failed, supplying WORK instead of falling back to ©wrk;
+  exact passed. The direct walk isolates this contract from dhowden.
+- `TestExtractMP4Work_PreservesDhowden`: the conflicting iTunes duplicate passed
+  (production Last, independent walk First), proving the existing guard's
+  behavior. Both mixedinkey and serato production answers also passed; their
+  new supplemental-absence assertions failed under the unrestricted walk.
+- `TestExtractMP4Work_FallbackOrder`: both physical orders returned WORK and a
+  blank WORK returned ©wrk, all green. Each fixture proves dhowden's bad-title
+  parse failure, so these exercise the existing walk's precedence itself.
+- `TestExtractMP4Work_PayloadFaultsPreventPersistence`: data read and seek faults
+  passed, proving round 1 already propagates them. Mean read and seek faults
+  failed because no mean payload was read, no work warning appeared and no
+  readFault was returned. A real fixture and the openAudio seam exercise
+  ExtractWithContext, with byte-range fault injection (including read-ahead),
+  reached-payload assertions, exactly one work-specific Warn and
+  `errors.Is(readFault(err), boom)`. Padding places the target beyond dhowden's
+  buffered read before its bad-title failure, leaving the walk to reach it.
+- `TestExtractMP4Work_TruncatedPayload`: the added direct-walk nil-error and
+  absent work/©wrk key checks passed, proving truncation already means absence.
+- `TestExtractMP4Work`'s blank/empty WORK beside ©wrk cases: the added absent
+  `work` key assertions passed, as the existing reader rejects blank values.
+- `TestExtractMP4Work_MultipleDataChildren`: all eight cases passed. In each
+  kind of work box, non-text, empty and oversized first data children are
+  skipped, First wins over Last, and all-unusable children supply no key.
+
+With the exact-mean check implemented, the same selection plus
+`TestAnMP4Walk` passed: 64 test/subtest events, no skips or failures (12 top-level
+tests). Raw JSON run evidence is in the worker scratch directory's r2 folder.

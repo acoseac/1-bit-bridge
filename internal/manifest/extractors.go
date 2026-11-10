@@ -651,9 +651,10 @@ var Ext = map[string]bool{
 // formats sees is unchanged (X-Bridge-Formats, PROTOCOL.md). ProtocolVersion
 // stays 1.
 //
-// v33 — M4A work atoms (©wrk) and freeform WORK under any mean are read by
-// the ilst walk (B428). Existing work answers keep their precedence; newly
-// populated rows join the delta, unchanged rows only stamp. Protocol stays 1.
+// v33 — M4A work atoms (©wrk) and freeform WORK only under the exact
+// com.apple.iTunes mean are read by the ilst walk (B428). Existing work answers
+// keep their precedence; newly populated rows join the delta, unchanged rows
+// only stamp. Protocol stays 1.
 const ExtractorVersion = 33
 
 // Extract reads as much metadata as it can from the file at absPath and

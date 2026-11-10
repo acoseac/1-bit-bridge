@@ -157,10 +157,10 @@ func extractMP4PredefinedGenre(r io.ReadSeeker) (string, error) {
 // values are left alone; this bound applies only to this supplemental walk.
 const maxMP4WorkText = 64 << 10
 
-// extractMP4WorkTags supplies the existing workOf aliases: WORK from any mean
-// before ©wrk. The first non-empty valid value of each kind wins. Malformed
-// structure and truncated values are absent; real I/O and walk-budget errors
-// propagate, as in the genre and advisory walks.
+// extractMP4WorkTags supplies the existing workOf aliases: WORK only under
+// the exact com.apple.iTunes mean, before ©wrk. The first non-empty valid value
+// of each kind wins. Malformed structure and truncated values are absent; real
+// I/O and walk-budget errors propagate, as in the genre and advisory walks.
 func extractMP4WorkTags(r io.ReadSeeker) (map[string]any, error) {
 	ilst, found, err := findMP4Ilst(r)
 	if err != nil || !found {
@@ -186,6 +186,14 @@ func extractMP4WorkTags(r io.ReadSeeker) (map[string]any, error) {
 					cursor = box.end()
 					continue
 				}
+				iTunes, err := mp4WorkHasITunesMean(r, box)
+				if err != nil {
+					return nil, err
+				}
+				if !iTunes {
+					cursor = box.end()
+					continue
+				}
 				key = "work"
 			}
 			value, ok, err := readMP4WorkValue(r, box)
@@ -200,6 +208,32 @@ func extractMP4WorkTags(r io.ReadSeeker) (map[string]any, error) {
 		}
 	}
 	return raw, nil
+}
+
+// mp4WorkHasITunesMean compares the raw mean after its version/flags header.
+// Only an exact-length payload can match, bounding the read to 15 bytes.
+// Do not use readMP4FreeformText: its trimming would admit padded means.
+func mp4WorkHasITunesMean(r io.ReadSeeker, box mp4Box) (bool, error) {
+	mean, found, err := findMP4Child(r, "mean", box.payloadStart(), box)
+	if err != nil || !found {
+		return false, err
+	}
+	const want = "com.apple.iTunes"
+	const flagsSize = 4
+	if mean.size-mean.header != flagsSize+uint64(len(want)) {
+		return false, nil
+	}
+	if _, err := r.Seek(int64(mean.payloadStart()+flagsSize), io.SeekStart); err != nil {
+		return false, err
+	}
+	var buf [len(want)]byte
+	if _, err := io.ReadFull(r, buf[:]); err != nil {
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return false, nil
+		}
+		return false, err
+	}
+	return string(buf[:]) == want, nil
 }
 
 // readMP4WorkValue reads the first usable text data child of a work atom.

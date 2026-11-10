@@ -246,8 +246,9 @@ func id3v2NamedValue(named []id3v2Named, name string) (string, bool) {
 //
 // Every other format has no named values, and its aliases answer as they
 // always did: a Vorbis comment's WORK, an MP4 freeform WORK. The supplemental
-// MP4 ilst walk supplies WORK under any mean and ©wrk when dhowden gave no
-// work; freeform WORK stays ahead of ©wrk regardless of physical atom order.
+// MP4 ilst walk supplies ©wrk and WORK only under the exact com.apple.iTunes
+// mean when dhowden gave no work; freeform WORK stays ahead of ©wrk regardless
+// of physical atom order.
 func workOf(format tag.Format, raw map[string]any, named []id3v2Named) (string, bool) {
 	if v, ok := id3v2NamedValue(named, "work"); ok {
 		return v, true
