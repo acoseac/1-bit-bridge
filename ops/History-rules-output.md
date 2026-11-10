@@ -1426,3 +1426,70 @@ after the predecessor and its window undecided then; a lock-free admission
 failed it 20 times in 20. `TestAWriteThatPanicsLeavesNothingPending` (after its
 publish) pins the record, and `TestALostReconciliationIsTriedOnceMore` the
 reconciliation once more and no more.
+
+Round 19 (2026-11-10, the reviews of round 18 and of round 19's brief). A
+reconciliation that panicked reached the refresh's caller: an admission (a
+Start), an activation (the producer's transition), the monitor, the
+supervisor's refresh, the silent probe's. Round 18 recorded the set judged
+before its second reconciliation ran, so one whose hand-off panicked again was
+never tried after it, and the occurrence it failed on played on unjudged; and
+every session after the panicking one in the backend's loop, a map, was never
+judged, a session whose occurrence the set revokes among them, playing a plan
+the set took away (Codex and Claude on round 18). Each session's reconciliation
+is contained now (`session.reconcileDSD`): its judgement under a `lockHold`
+(`judgeDSDStep`), each hand-off, and Revoke, whose locked section holds the
+lock through a `lockHold` too, so a panic there lets the lock go. A panic is
+logged with its stack where it is recovered, and the step it came in is
+answered to the loop, which judges every other session. The set is recorded
+judged only once every reconciliation against it has completed; a session's
+own record (`session.dsdJudged`) keeps the retry from judging a session whose
+reconciliation completed, and a hand-off that returned is marked (`handedOff`)
+and not asked again. The retry is the next refresh's, which finds the set the
+same, and its failure is terminal (`dsdAttempts`, two): each session it failed
+in is stopped, its fault recorded (`backend_failed`, as for any panic of the
+backend's) and its DSD revoked through Revoke, unless Revoke is what panicked,
+where the fault alone stops it; the stop hands nothing off. One more attempt
+and no more: a panic that does not come back changes nothing, and one that
+does stops only the sessions it is in. A reading of the policy that panics
+(the binding, the box's unit, its controls or its mixer table, the state), or a
+publish that does, reaches only a choice's write, whose request's recoverer
+answers it, its pending set settled (round 18's
+`TestAWriteThatPanicsLeavesNothingPending`). Every other caller asks
+`tryRefreshDSD`, which recovers it under the refreshes' lock and counts it in
+the run of such failures that the next refresh to complete ends. The run's
+first is logged once, with its stack, never at every tick; from its second in a
+row (the same bound) every session that holds DSD, an opened occurrence
+admitted under the policy and not played out, is stopped the same way, and an
+admission refuses its occurrence's DSD (`dsd_dac_unread`, as a set that does
+not read refuses it) and an activation refuses: a reading that does not
+complete judges nothing, so an unjudged set's retry never comes while the run
+lasts (Codex on round 19's brief), and what plays is no longer read against
+the policy. A failed reading leaves `dsdRead` as it was, so the next
+admission reads again. The monitor recovered outside its loop, so one panic
+ended it while its session held DSD: each tick's refresh is contained now and
+the monitor takes its next tick, and a panic outside that containment stops
+its session with its fault. Six cases, each red at round 18's head (a copy
+with `Seams.Revoking` as a names-only shim) and red again with its part of the
+fix reverted (fifteen controls, each predicted in writing before its run): a
+hand-off that panics in one session beside eight whose occurrence heard the
+set revokes, in eight backends, so the map's order reaches it first in one
+(`TestAHandOffThatPanicsStopsItsSessionAndTheOthersAreJudged`); Revoke
+panicking under its lock (`TestARevocationThatPanicsStopsTheSession`); the
+retry taken by an activation, which answers and does not panic
+(`TestAnActivationThatTakesTheRetryDoesNotPanic`); a hand-off that recovers,
+each occurrence's returning once, nothing revoked, the set judged and a
+further refresh asking nothing
+(`TestAHandOffThatRecoversIsAskedOnceAndJudgesTheSet`); an unjudged set and
+readings that panic in the binding or the state
+(`TestReadsThatPanicOverAnUnjudgedSetStopWhatHoldsDSD`); and the monitor's
+next tick after a panic in the box's reading of the unit's model
+(`TestTheMonitorTakesItsNextTickAfterAPanic`). Round 18's rule forbade reading
+the set published twice in any decision that asks both; `next()`, the
+transition and the resume read the write pending (`pendingFor`, which loads
+the set itself) and the set again (`unjudgedLocked`), and their order is safe
+(Claude's review of round 18): a write registered after the pending read
+cannot publish while the session's lock is held, its classification taking
+it, and a publish between the two reads moves the set the second finds, which
+is a wait for the verdict. The rule is scoped to the converted window's
+decision (`holdLocked`), whose single read of the set the round-18 defect
+needed; the three keep their shape.
