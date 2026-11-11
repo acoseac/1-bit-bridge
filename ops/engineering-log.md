@@ -91662,3 +91662,24 @@ The whole `alsapcm` package was run, then the file was restored with
   settle's two exits. The failing row stayed green.
 - C0, for the record (not a round-6 read): with round 5's entry read removed,
   the package stays green. The read under the lock answers its cases.
+
+### The gates
+
+These ran on the committed tree (6b1d32f7), in one use of the build lock taken
+at 03:49 after the night's queue, its wrapper restarted three times before its
+two-hour cap while it held nothing. `go vet ./...` was clean, and so was
+`GOOS=linux go vet` of `./internal/alsapcm/...`, `./internal/player/...` and
+`./cmd/bridge/...`. `make test` with `TEST_PKGS` set to `./internal/alsapcm/...`,
+`./internal/player/...`, `./internal/api/...` and `./cmd/bridge/...` (the full
+packages, `-race`): all 18 packages ok (alsapcm 73 s, api 130 s, cmd/bridge
+1,346 s). This round's four cases, round 5's, the fence test, the staged wait
+cases, round 4's own-stop cases and the entry matrix, under `-race -count=20`:
+ok. Under the native overlay with `-race`:
+
+- the harness's real-sink integration in `cmd/bridge`, 15 of 15, among them
+  `TestNativeIntegrationStopBesideAPauseOrResume` and every name CI requires;
+- the backend's, 29 of 29;
+- no skips.
+
+`make docs-check` was clean. `verify_moves.py --base 3a860847` passes with the
+output.md line declared an edit and round 5's History heading renamed.
