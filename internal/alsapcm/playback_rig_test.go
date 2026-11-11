@@ -38,7 +38,18 @@ var bg = context.Background()
 // closes, under the watchdog.
 func waitOn(t *testing.T, what string, changed func() <-chan struct{}, cond func() bool) {
 	t.Helper()
-	timer := time.NewTimer(alsapcm.Watchdog())
+	waitWithin(t, alsapcm.Watchdog(), what, changed, cond)
+}
+
+func waitOrdered(t *testing.T, what string, changed func() <-chan struct{}, cond func() bool) {
+	t.Helper()
+	waitWithin(t, alsapcm.Ordered(), what, changed, cond)
+}
+
+// waitWithin is waitOn within bound.
+func waitWithin(t *testing.T, bound time.Duration, what string, changed func() <-chan struct{}, cond func() bool) {
+	t.Helper()
+	timer := time.NewTimer(bound)
 	defer timer.Stop()
 	for {
 		ch := changed()
@@ -49,8 +60,20 @@ func waitOn(t *testing.T, what string, changed func() <-chan struct{}, cond func
 		case <-ch:
 		case <-timer.C:
 			alsapcm.LogGoroutines(t)
-			t.Fatalf("waited %v for %s", alsapcm.Watchdog(), what)
+			t.Fatalf("waited %v for %s", bound, what)
 		}
+	}
+}
+
+func awaitOrdered(t *testing.T, ch <-chan struct{}, what string) {
+	t.Helper()
+	timer := time.NewTimer(alsapcm.Ordered())
+	defer timer.Stop()
+	select {
+	case <-ch:
+	case <-timer.C:
+		alsapcm.LogGoroutines(t)
+		t.Fatalf("waited %v for %s", alsapcm.Ordered(), what)
 	}
 }
 
@@ -421,15 +444,23 @@ type recorder struct {
 	// the delivery holdAfterNext waits to hold.
 	opened int
 	hold   *heldDelivery
-	// release, start and cut are the engine's next call of each kind to hold
-	// short of the backend (holdNextRelease, holdNextStart, holdNextCut).
-	release, start, cut *heldCall
+	// release, start, cut and prepare are the engine's next call of each kind
+	// to hold short of the backend (holdNextRelease, holdNextStart,
+	// holdNextCut, holdNextPrepare).
+	release, start, cut, prepare *heldCall
+	// fault is the next fault a session reports to hold short of the engine
+	// (holdNextFault).
+	fault   *heldCall
+	resumed *heldCall
 	// fenced is the steps the backend refused for a session released
 	// (playback.Seams.Fenced), in order.
 	fenced []string
 	// native is the rig's native option: each session's events pass its
 	// native events on (nativeRecEvents).
 	native bool
+	// noReplan is the rig's noReplan option: each session's events hide
+	// Replan (noReplanEvents).
+	noReplan bool
 }
 
 // heldCall is a call the engine made, held short of the backend: held is
@@ -478,6 +509,18 @@ func (r *recorder) holdNextStart() (held <-chan struct{}, letGo func()) { return
 // holdNextCut holds the engine's next Cut call short of the backend until
 // letGo (B674 round 3).
 func (r *recorder) holdNextCut() (held <-chan struct{}, letGo func()) { return r.holdCall(&r.cut) }
+
+func (r *recorder) holdNextPrepare() (held <-chan struct{}, letGo func()) {
+	return r.holdCall(&r.prepare)
+}
+
+func (r *recorder) holdNextResumeAnswer() (held <-chan struct{}, letGo func()) {
+	return r.holdCall(&r.resumed)
+}
+
+func (r *recorder) holdNextFault() (held <-chan struct{}, letGo func()) {
+	return r.holdCall(&r.fault)
+}
 
 // fencedSteps is the steps the backend refused for a session released.
 func (r *recorder) fencedSteps() []string {
@@ -622,6 +665,7 @@ func (v *recEvents) Position(s engine.SessionID, p engine.Position) {
 
 func (v *recEvents) Fault(s engine.SessionID, f engine.Fault) {
 	h := v.add(event{kind: "fault", s: s, o: f.Occurrence, fault: f})
+	v.r.take(&v.r.fault)
 	v.next.Fault(s, f)
 	h.wait()
 }
@@ -686,6 +730,35 @@ func (v nativeRecEvents) CurrentOccurrence(s engine.SessionID, o engine.Occurren
 	}
 }
 
+// noReplanEvents is a session's events with every event the engine takes but
+// Replan: an engine that hands nothing off again (engine.ReplanEvents
+// absent), the backend's every other event passed on as it is.
+type noReplanEvents struct{ engine.Events }
+
+func (v noReplanEvents) Details(s engine.SessionID, o engine.OccurrenceID, d engine.Details) {
+	if de, ok := v.Events.(engine.DetailsEvents); ok {
+		de.Details(s, o, d)
+	}
+}
+
+func (v noReplanEvents) NativePlan(s engine.SessionID, o engine.OccurrenceID, p engine.NativePlan) {
+	if pe, ok := v.Events.(engine.NativePlanEvents); ok {
+		pe.NativePlan(s, o, p)
+	}
+}
+
+func (v noReplanEvents) Retiring(t engine.ReleaseToken, n engine.NativeEvent) {
+	if re, ok := v.Events.(engine.NativeReleaseEvents); ok {
+		re.Retiring(t, n)
+	}
+}
+
+func (v noReplanEvents) CurrentOccurrence(s engine.SessionID, o engine.OccurrenceID, p *engine.NativePlan) {
+	if ce, ok := v.Events.(engine.CurrentOccurrenceEvents); ok {
+		ce.CurrentOccurrence(s, o, p)
+	}
+}
+
 // tee is the backend as the engine sees it: every call recorded, and every
 // session's events through the recorder.
 type tee struct {
@@ -700,6 +773,9 @@ func (b tee) Start(ctx context.Context, req engine.StartRequest) error {
 	} else {
 		req.Events = &recEvents{r: b.r, next: req.Events}
 	}
+	if b.r.noReplan {
+		req.Events = noReplanEvents{req.Events}
+	}
 	err := b.Backend.Start(ctx, req)
 	b.r.note(func() {
 		b.r.calls = append(b.r.calls, call{kind: "start", s: req.Session, err: err, first: req.First.ID, at: req.From})
@@ -708,6 +784,7 @@ func (b tee) Start(ctx context.Context, req engine.StartRequest) error {
 }
 
 func (b tee) Prepare(ctx context.Context, s engine.SessionID, after engine.OccurrenceID, next *engine.Occurrence) error {
+	b.r.take(&b.r.prepare)
 	err := b.Backend.Prepare(ctx, s, after, next)
 	var n *engine.Occurrence
 	if next != nil {
@@ -732,10 +809,12 @@ func (b tee) Release(ctx context.Context, s engine.SessionID) error {
 	return b.Backend.Release(ctx, s)
 }
 
-// Resume is the backend's, its answer recorded.
+// Resume is the backend's, its answer recorded, then held short of the engine
+// when a test holds it (holdNextResumeAnswer).
 func (b tee) Resume(ctx context.Context, s engine.SessionID) (engine.ResumeResult, error) {
 	how, err := b.Backend.Resume(ctx, s)
 	b.r.note(func() { b.r.calls = append(b.r.calls, call{kind: "resume", s: s, how: how, err: err}) })
+	b.r.take(&b.r.resumed)
 	return how, err
 }
 
@@ -871,7 +950,8 @@ type rigOptions struct {
 	edit func(r *rig, cfg *playback.Config)
 	// native passes the native events a session reports on to the engine
 	// (nativeRecEvents), as serve's engine takes them.
-	native bool
+	native   bool
+	noReplan bool
 }
 
 // newRig starts an engine with the backend over a fresh fake kernel, and
@@ -933,7 +1013,7 @@ func newRig(t *testing.T, opts ...func(*rigOptions)) *rig {
 	if o.edit != nil {
 		o.edit(r, &cfg)
 	}
-	r.rec.native = o.native
+	r.rec.native, r.rec.noReplan = o.native, o.noReplan
 	be, err := playback.New(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -984,11 +1064,17 @@ func (r *rig) stop() {
 	r.k.CheckClosedEach(r.t)
 }
 
+func within() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(bg, alsapcm.Watchdog())
+}
+
 // available reports the output available, as the adapter does.
 func (r *rig) available() {
 	r.t.Helper()
 	r.outGen++
-	if err := r.eng.ReportOutput(bg, engine.OutputReport{Generation: r.outGen, Available: true}); err != nil {
+	ctx, cancel := within()
+	defer cancel()
+	if err := r.eng.ReportOutput(ctx, engine.OutputReport{Generation: r.outGen, Available: true}); err != nil {
 		r.t.Fatal(err)
 	}
 }
@@ -1006,20 +1092,29 @@ func (r *rig) insert(refs ...string) []uint32 {
 		if err != nil {
 			r.t.Fatal(err)
 		}
-		id, err := r.eng.InsertAfter(bg, after, rf, nil)
-		if err != nil {
-			r.t.Fatalf("insert %s: %v", ref, err)
-		}
+		id := func() uint32 {
+			r.t.Helper()
+			ctx, cancel := within()
+			defer cancel()
+			id, err := r.eng.InsertAfter(ctx, after, rf, nil)
+			if err != nil {
+				r.t.Fatalf("insert %s: %v", ref, err)
+			}
+			return id
+		}()
 		ids = append(ids, id)
 		after = id
 	}
 	return ids
 }
 
-// play plays and fails the test unless the engine took it.
+// play plays and fails the test unless the engine took it, within the
+// watchdog.
 func (r *rig) play() {
 	r.t.Helper()
-	if err := r.eng.Play(bg); err != nil {
+	ctx, cancel := within()
+	defer cancel()
+	if err := r.eng.Play(ctx); err != nil {
 		r.t.Fatalf("play: %v", err)
 	}
 }
@@ -1047,7 +1142,12 @@ func (r *rig) waitStopped(why engine.Reason) *engine.Snapshot {
 // not for another reporter receive: the measurement can end the reporter.
 func (r *rig) tickUntilStopped(why engine.Reason) *engine.Snapshot {
 	r.t.Helper()
-	timer := time.NewTimer(alsapcm.Watchdog())
+	return r.tickUntilStoppedWithin(alsapcm.Watchdog(), why)
+}
+
+func (r *rig) tickUntilStoppedWithin(bound time.Duration, why engine.Reason) *engine.Snapshot {
+	r.t.Helper()
+	timer := time.NewTimer(bound)
 	defer timer.Stop()
 	for {
 		changed := r.eng.Changed()
@@ -1060,7 +1160,7 @@ func (r *rig) tickUntilStopped(why engine.Reason) *engine.Snapshot {
 		case r.ticks <- time.Time{}:
 		case <-timer.C:
 			alsapcm.LogGoroutines(r.t)
-			r.t.Fatalf("waited %v for playback to stop: %s", alsapcm.Watchdog(), why)
+			r.t.Fatalf("waited %v for playback to stop: %s", bound, why)
 		}
 	}
 }
@@ -1068,15 +1168,25 @@ func (r *rig) tickUntilStopped(why engine.Reason) *engine.Snapshot {
 // waitEvents waits until the events reported satisfy cond.
 func (r *rig) waitEvents(what string, cond func([]event) bool) []event {
 	r.t.Helper()
-	waitOn(r.t, what, r.rec.ch, func() bool { return cond(r.rec.events()) })
+	return r.waitEventsWithin(alsapcm.Watchdog(), what, cond)
+}
+
+func (r *rig) waitEventsWithin(bound time.Duration, what string, cond func([]event) bool) []event {
+	r.t.Helper()
+	waitWithin(r.t, bound, what, r.rec.ch, func() bool { return cond(r.rec.events()) })
 	return r.rec.events()
 }
 
 // waitCall waits until the engine has made a call that satisfies cond.
 func (r *rig) waitCall(what string, cond func(call) bool) call {
 	r.t.Helper()
+	return r.waitCallWithin(alsapcm.Watchdog(), what, cond)
+}
+
+func (r *rig) waitCallWithin(bound time.Duration, what string, cond func(call) bool) call {
+	r.t.Helper()
 	var got call
-	waitOn(r.t, what, r.rec.ch, func() bool {
+	waitWithin(r.t, bound, what, r.rec.ch, func() bool {
 		for _, c := range r.rec.callList() {
 			if cond(c) {
 				got = c
@@ -1093,13 +1203,23 @@ func (r *rig) waitCall(what string, cond func(call) bool) call {
 // asked (the barrier).
 func (r *rig) tick() {
 	r.t.Helper()
+	r.tickWithin(alsapcm.Watchdog())
+}
+
+func (r *rig) tickWithin(bound time.Duration) {
+	r.t.Helper()
 	for range 2 {
-		select {
-		case r.ticks <- time.Time{}:
-		case <-time.After(alsapcm.Watchdog()):
-			alsapcm.LogGoroutines(r.t)
-			r.t.Fatalf("no reporter took a tick within %v", alsapcm.Watchdog())
-		}
+		r.tickOnce(bound)
+	}
+}
+
+func (r *rig) tickOnce(bound time.Duration) {
+	r.t.Helper()
+	select {
+	case r.ticks <- time.Time{}:
+	case <-time.After(bound):
+		alsapcm.LogGoroutines(r.t)
+		r.t.Fatalf("no reporter took a tick within %v", bound)
 	}
 }
 

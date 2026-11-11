@@ -1,0 +1,282 @@
+package alsapcm_test
+
+import (
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/alsapcm"
+	"github.com/acoseac/1-bit-bridge/internal/player/dsdstate"
+	"github.com/acoseac/1-bit-bridge/internal/player/engine"
+	"github.com/acoseac/1-bit-bridge/internal/player/format"
+	"github.com/acoseac/1-bit-bridge/internal/player/playback"
+	"github.com/acoseac/1-bit-bridge/internal/player/playback/playbacktest"
+)
+
+type heldGate struct {
+	mu   sync.Mutex
+	next *gate
+}
+
+func (h *heldGate) arm(g *gate) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.next = g
+}
+
+func (h *heldGate) pass() {
+	h.mu.Lock()
+	g := h.next
+	h.next = nil
+	h.mu.Unlock()
+	if g != nil {
+		g.pass()
+	}
+}
+
+func revokeRig(t *testing.T, st dsdstate.State, w *lifecycleSeams, hold *heldGate, log *stopsLog) *dsdRig {
+	t.Helper()
+	return newDSDRigWith(t, st, func(p *playback.DSDPolicy) { p.Log = log }, func(o *rigOptions) {
+		o.seams, o.noReplan = w.seams(nil), true
+		o.seams.Activating = hold.pass
+	})
+}
+
+func wantRevoked(t *testing.T, d *dsdRig, s *engine.Snapshot, log *stopsLog) {
+	t.Helper()
+	why := log.reasons()
+	if f := s.Faults(); len(f) != 1 || f[0].Reason != "native_revoked" || len(why) != 1 || f[0].Detail != why[0] {
+		t.Errorf("faults %+v, the revocations' reasons %q; want one fault, native_revoked, for the one reason Backend.Revoke was given", f, why)
+	}
+	if evs := d.rec.events(); count(evs, "fault", 0) != 1 {
+		t.Errorf("the backend reported %d faults: %s; want the revocation's, once", count(evs, "fault", 0), kinds(evs))
+	}
+}
+
+func wantUnwritten(t *testing.T, d *dsdRig, opens int, whose string) {
+	t.Helper()
+	v := d.k.View()
+	if len(v.OpenAt) != opens || v.GivenBytes != v.OpenAt[len(v.OpenAt)-1] || v.Open || v.Closes != v.Opens {
+		t.Errorf("once the rig stopped: opens at bytes %v, %d bytes given, open %v, %d of %d opens closed; want %d opens, %s node given nothing, every node closed",
+			v.OpenAt, v.GivenBytes, v.Open, v.Closes, v.Opens, opens, whose)
+	}
+}
+
+func (d *dsdRig) heldOrGiven(held <-chan struct{}, what string) bool {
+	d.t.Helper()
+	given := d.k.When(func(v alsapcm.KernelView) bool { return len(v.OpenAt) >= 2 && v.GivenBytes > v.OpenAt[1] })
+	select {
+	case <-held:
+		return true
+	case <-given:
+		return false
+	case <-time.After(alsapcm.Watchdog()):
+		alsapcm.LogGoroutines(d.t)
+		d.t.Fatalf("waited %v for %s", alsapcm.Watchdog(), what)
+	}
+	return false
+}
+
+type closeHold struct {
+	mu sync.Mutex
+	o  engine.OccurrenceID
+	g  *gate
+}
+
+func (c *closeHold) arm(t *testing.T, o engine.OccurrenceID) *gate {
+	g := newGate(t)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.o, c.g = o, g
+	return g
+}
+
+func (c *closeHold) note(n playback.Note) {
+	if n.Kind != playback.NoteClosed {
+		return
+	}
+	c.mu.Lock()
+	g := c.g
+	if g == nil || n.Occurrence != c.o {
+		c.mu.Unlock()
+		return
+	}
+	c.g = nil
+	c.mu.Unlock()
+	g.pass()
+}
+
+func revokedAtTheCheck(t *testing.T, d *dsdRig, act *gate, hold *heldGate, log *stopsLog, ob engine.OccurrenceID, all bool) *engine.Snapshot {
+	t.Helper()
+	checking := newGate(t)
+	hold.arm(checking)
+	act.letGo()
+	awaitHeld(t, "b's activation's check, its read of the policy returned", checking.in)
+	_, letFault := d.rec.holdNextFault()
+	t.Cleanup(letFault)
+	stops := newGate(t)
+	log.arm(stops)
+	res := d.refreshAfterHotplug(all)
+	reachedGate(t, stops, res, "the reconciliation's revocation of the session's DSD, before its call to Revoke")
+	checking.letGo()
+	d.closedOrGiven(ob, "b's check answered and b taken back")
+	stops.letGo()
+	refreshed(t, res)
+	letFault()
+	d.stoppedOrOpenedC("the revocation's fault was not the session's before b was taken back")
+	s := d.tickUntilStopped(engine.ReasonFault)
+	d.rig.stop()
+	return s
+}
+
+func TestARevocationAtASuccessorsActivationCheckKeepsItsFault(t *testing.T) {
+	t.Run("a native successor", func(t *testing.T) {
+		w, hold, log := newLifecycleSeams(), &heldGate{}, &stopsLog{}
+		d := revokeRig(t, initialPolicy(dsdstate.ModeNative), w, hold, log)
+		_, ob, act := heldSuccessorOn(t, d, w)
+		s := revokedAtTheCheck(t, d, act, hold, log, ob, false)
+		wantRevoked(t, d, s, log)
+		wantUnwritten(t, d, 2, "b's")
+	})
+	t.Run("a native successor, PCM after it", func(t *testing.T) {
+		w, hold, log := newLifecycleSeams(), &heldGate{}, &stopsLog{}
+		d := revokeRig(t, initialPolicy(dsdstate.ModeNative), w, hold, log)
+		d.files.add("a", dsd(playbacktest.DSD64, 0.25))
+		d.files.add("b", dsd(playbacktest.DSD128, 0.25))
+		d.files.add("c", wav(44100, 16, pattern(1, 4410, 16)))
+		ids := d.insert("a", "b", "c")
+		d.play()
+		ob := d.occurrenceOf(ids[1])
+		act := w.holdActivation(t, ob)
+		d.k.Free()
+		awaitHeld(t, "b's activation, its sink adopted", act.in)
+		d.k.Hold()
+		s := revokedAtTheCheck(t, d, act, hold, log, ob, false)
+		wantRevoked(t, d, s, log)
+		wantUnwritten(t, d, 2, "b's")
+	})
+	t.Run("a converted successor", func(t *testing.T) {
+		w, hold, log := newLifecycleSeams(), &heldGate{}, &stopsLog{}
+		d := revokeRig(t, initialPolicy(dsdstate.ModeConvert), w, hold, log)
+		d.files.add("a", wav(44100, 16, pattern(1, 4410, 16)))
+		d.files.add("b", dsd(playbacktest.DSD128, 0.25))
+		d.files.add("c", dsd(playbacktest.DSD64, 0.25))
+		ids := d.insert("a", "b", "c")
+		d.play()
+		ob := d.occurrenceOf(ids[1])
+		act := w.holdActivation(t, ob)
+		d.k.Free()
+		awaitHeld(t, "b's activation, its own PCM sink adopted", act.in)
+		d.k.Hold()
+		s := revokedAtTheCheck(t, d, act, hold, log, ob, true)
+		wantRevoked(t, d, s, log)
+		wantUnwritten(t, d, 2, "b's")
+	})
+}
+
+func TestARevocationThatRunsDuringATakeBackKeepsItsOneFault(t *testing.T) {
+	w, log, closing := newLifecycleSeams(), &stopsLog{}, &closeHold{}
+	d := newDSDRigWith(t, initialPolicy(dsdstate.ModeNative), func(p *playback.DSDPolicy) { p.Log = log }, func(o *rigOptions) {
+		o.seams, o.noReplan, o.notify = w.seams(nil), true, closing.note
+	})
+	_, ob, letAdmit := heldAdmissionOn(t, d, w)
+	_, letFault := d.rec.holdNextFault()
+	t.Cleanup(letFault)
+	held := closing.arm(t, ob)
+	stops := newGate(t)
+	log.arm(stops)
+	res := d.refreshAfterHotplug(false)
+	reachedGate(t, stops, res, "the reconciliation's revocation of the session's DSD, before its call to Revoke")
+	letAdmit()
+	d.heldOrGiven(held.in, "b's take-back held in its close, or a byte given to b's node")
+	stops.letGo()
+	refreshed(t, res)
+	held.letGo()
+	letFault()
+	d.stoppedOrOpenedC("the revocation's fault was not the session's once b's take-back went on")
+	s := d.tickUntilStopped(engine.ReasonFault)
+	d.rig.stop()
+	wantRevoked(t, d, s, log)
+	wantUnwritten(t, d, 2, "b's")
+}
+
+func TestARevocationOfAPreparedSuccessorLetsThePCMPlayOn(t *testing.T) {
+	w, log := newLifecycleSeams(), &stopsLog{}
+	d := revokeRig(t, initialPolicy(dsdstate.ModeNative), w, &heldGate{}, log)
+	pcm := pattern(1, 22050, 16)
+	d.files.add("p", wav(44100, 16, pcm))
+	d.files.add("b", dsd(playbacktest.DSD128, 0.25))
+	ids := d.insert("p", "b")
+	d.play()
+	ob := d.preparedOcc(ids[1])
+	refreshed(t, d.refreshAfterHotplug(false))
+	d.waitEvents("b refused once the session's DSD was revoked", func(evs []event) bool { return count(evs, "refused", ob) > 0 })
+	d.k.Free()
+	s := d.waitStopped(engine.ReasonEndOfQueue)
+	d.rig.stop()
+	evs := d.rec.events()
+	if len(s.Faults()) != 0 || count(evs, "fault", 0) != 0 {
+		t.Errorf("the revocation of a prepared successor faulted the PCM: %+v; events %s", s.Faults(), kinds(evs))
+	}
+	if sk, ok := s.Skipped(ids[1]); !ok || sk.Reason != "native_revoked" {
+		t.Errorf("b's entry was %+v (skipped %v), want it refused native_revoked", sk, ok)
+	}
+	if why := log.reasons(); len(why) != 1 {
+		t.Errorf("the session's DSD was revoked for %q, want once", why)
+	}
+	if v := d.k.View(); v.Opens != 1 {
+		t.Errorf("%d opens, want the PCM's alone", v.Opens)
+	}
+	same(t, "the DAC heard", unpack(t, d.k.Heard(), format.S16LE, 16), pcm)
+}
+
+func TestARevocationAtTheFirstOccurrencesActivationFencesItsSink(t *testing.T) {
+	w, log := newLifecycleSeams(), &stopsLog{}
+	d := newDSDRigWith(t, initialPolicy(dsdstate.ModeNative), func(p *playback.DSDPolicy) { p.Log = log },
+		func(o *rigOptions) { o.seams = w.seams(nil) })
+	d.files.add("a", dsd(playbacktest.DSD128, 0.25))
+	d.insert("a")
+	opened, letOpen := d.unit.holdNextAdmit()
+	t.Cleanup(letOpen)
+	played := make(chan error, 1)
+	go func() { played <- d.eng.Play(bg) }()
+	awaitHeld(t, "the check after open of a's node", opened)
+	admit, letAdmit := d.unit.holdNextAdmit()
+	t.Cleanup(letAdmit)
+	letOpen()
+	awaitHeld(t, "the admission a's sink's activation makes", admit)
+	if v := d.k.View(); d.rec.openedSinks() != 1 || v.Opens != 1 || !v.Open || v.GivenBytes != 0 {
+		t.Fatalf("the check held: %d sinks noted opened, %d opens, open %v, %d bytes given; want the activation's admission of a's node, open and given nothing",
+			d.rec.openedSinks(), v.Opens, v.Open, v.GivenBytes)
+	}
+	stops := newGate(t)
+	log.arm(stops)
+	res := d.refreshAfterHotplug(false)
+	reachedGate(t, stops, res, "the reconciliation's revocation of the session's DSD, before its call to Revoke")
+	letAdmit()
+	d.waitSnap("the Start's answer, or playback stopped", func(s *engine.Snapshot) bool {
+		return s.LastAttempt().Seq > 0 || s.State() == engine.Stopped && s.LastStop().Reason != ""
+	})
+	stops.letGo()
+	refreshed(t, res)
+	s := d.waitEnded()
+	select {
+	case <-played:
+	case <-time.After(alsapcm.Watchdog()):
+		alsapcm.LogGoroutines(t)
+		t.Fatalf("the play was not answered within %v", alsapcm.Watchdog())
+	}
+	d.rig.stop()
+	why, evs := log.reasons(), d.rec.events()
+	if a := s.LastAttempt(); !a.Failed {
+		t.Errorf("the play attempt %+v: want the Start failed", a)
+	}
+	if f := s.Faults(); len(f) != 1 || f[0].Reason != engine.ReasonBackend || len(why) != 1 || !strings.Contains(f[0].Detail, "native_revoked: "+why[0]) {
+		t.Errorf("faults %+v, the revocations' reasons %q; want the Start's failure, naming the revocation for the one reason Backend.Revoke was given", f, why)
+	}
+	if count(evs, "fault", 0) != 0 || count(evs, "audible", 0) != 0 {
+		t.Errorf("events %s: want none heard and no fault of the session's own, its Start failed", kinds(evs))
+	}
+	wantUnwritten(t, d, 1, "a's")
+}

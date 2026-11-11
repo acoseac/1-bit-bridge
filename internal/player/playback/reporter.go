@@ -97,7 +97,7 @@ func (s *session) reportStep() bool {
 	posOf := func(out *output) alsapcm.Position {
 		p, ok := positions[out]
 		if !ok {
-			p = out.sink.Position()
+			p = out.position()
 			positions[out] = p
 		}
 		return p
@@ -228,10 +228,7 @@ func (s *session) reportStep() bool {
 	// What this step reported of the occurrences before the one heard was
 	// the last of them.
 	s.retireLocked(heard)
-	// A converted occurrence's join window held for what follows (B728 B11):
-	// the producer reads the sink's lookahead again at each measurement, so
-	// the window ends at its floor.
-	holding := s.holdingLocked()
+	holding := s.holdingLocked() || s.awaitingJudgement
 	l.unlock()
 	if holding {
 		wake(s.wakeP)

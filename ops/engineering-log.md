@@ -93939,3 +93939,605 @@ Codex's review of round 1 (PR #1450, head 7ea25637) found one P2 and one Low; Ar
 | `-race -count=20 -run '^TestAnAbandonedCheckKeepsItsHoldsUntilItsCheckerEnds$'` at 4a0fdf17's code | 20 of 20 passed, no race |
 | cmd/bridge's `TestEveryCitedTestNameExists`, `TestNoDocblockNamesAnotherDeclaration` and `TestNoBlankKeepers` under `-race`, over this record | 3 passed, exit 0; 33.4 s |
 | `make docs-check` | Its four stages passed (CLAUDE.md 82.1%; rules-for's 49 checks) |
+
+## 2026-11-10 — native lifecycle fences and first-failure containment
+
+Base: fa5fec545fa8062de465686a0235cc9cd865cdd7. Extracted the native sink's
+structured command/cleanup verdict, activation/drop fencing, fault preservation,
+and playback reconciliation barriers. Policy reads and per-session reconciliation
+now stop affected DSD immediately on their first panic; no retry bookkeeping.
+Retiring outputs really stop. A failed position observer is never called again,
+and a final-report panic no longer strands teardown after close. Qualification
+version advances 47 to 48; the runbook and subsystem rules travel with the fix.
+
+Baseline checks use an archive of that exact commit, with the regression tests
+and passive test observation seams overlaid, without lifecycle fixes. All runs
+use Go 1.27.3, the Makefile's ts_omit_webclient,ts_omit_debugeventbus tags, and
+-race. Compiler failures are not counted as evidence. Named baseline failures:
+
+- TestNativeEndedLifePreservesCleanupAtEveryEntry: all four entries returned
+  cancellation instead of the recorded failed close.
+- TestNativeQueuedResumePreservesCleanup: both independent and life-bound
+  callers lost the queued request's failed close; the latter returned plain
+  context.Canceled.
+- TestASuccessorDroppedAtItsActivationIsTakenBackUnwritten: deletion and cut
+  faulted with native activation fenced instead of continuing to the successor.
+- TestARevocationAtASuccessorsActivationCheckKeepsItsFault: native, native
+  followed by PCM, and converted cases failed at the bounded take-back barrier.
+- TestARevocationThatRunsDuringATakeBackKeepsItsOneFault: the revoked second
+  node received bytes; it must remain unwritten.
+- TestAResumeBetweenTransportsWaitsForTheReconciliationsVerdict: the resume
+  opened the second node while reconciliation was held.
+- TestNoSinkOpensBeforeReconciliationJudgesItsSuccessor: the producer did not
+  wait for judgement before opening the successor.
+- TestAGaplessSuccessorWaitsForJudgementOnlyAboveTheSinksFloor: neither reporter
+  ordering woke the waiting producer at the next measurement. The baseline
+  overlay observes its existing wait without changing the wait predicate.
+- The converted-window floor case also runs against the baseline as a positive
+  control: its old floor handling was already correct. The extracted case adds
+  the explicit judgement notification and retains the independent sample check.
+
+The portable lifecycle, sink-verdict, barrier and containment suites pass after
+the fix. The real reconciliation ordering tests change device capabilities and
+run RefreshDSD, holding the actual judgement/activation/take-back boundaries;
+they do not replace reconciliation with a direct revocation. Negative controls
+and final gate results are recorded below after the committed checkpoint.
+
+Further baseline failures pin containment and the cleanup deadline:
+`TestPolicyReadPanicIsContainedOnItsFirstCall` and
+`TestFirstReconciliationPanicIsContainedAndStopsItsSession` catch the escaping panic and
+observe no stopped/faulted session. `TestRetiringPositionFailureDoesNotStrandTeardown`
+observes the final position panic stranding teardown and its mutex after close.
+`TestNativeQueuedResumeHonorsCleanupDeadline` holds close and advances the fake
+clock two seconds: the baseline does not answer the queued resume at that deadline;
+the fixed sink answers ErrReleaseUnconfirmed while Done remains open. The
+admission deletion, replacement and cut cases also fail on the baseline (a false
+device fault or 1,416 bytes delivered to the replaced node); the prefill deletion
+case fails with a cancellation reported as a device fault.
+
+Committed negative controls at 4830307e ran in an isolated worktree, with -race,
+a 3s fake-hardware watchdog and a 20s package timeout. Each compiled, failed at a
+named regression assertion, and was restored with `git diff --exit-code` before
+the next mutation. The mutations and observed failures were:
+
+- Bypass the cleanup verdict: ended-life entries/queued resume lose failed close.
+- Keep cancellation/fence identities in the verdict: the verdict matrix returns
+  a fence for success or cancellation and violates the expected error identity.
+- Remove the cleanup deadline wait arm: the queued resume exceeds the budget.
+- Replace the writer's typed activation fence: ErrActivationFenced no longer matches.
+- Disable dropped-occurrence take-back: deletion stops before the replacement opens.
+- Remove reconciliation's early fault record: the delayed Revoke sees no fault.
+- Remove activation fencing: the revoked successor's node receives bytes.
+- Ignore revocation after first activation: Start launches the reporter and loses
+  its native_revoked failure detail.
+- Skip the resume verdict wait: a second node opens during held reconciliation.
+- Skip the transport verdict wait: the successor opens before judgement.
+- Remove reporter judgement wake: both floor orderings miss the 350ms step.
+- Disable floor drain: neither ordering transitions at the measured floor.
+- Skip read-failure containment: the first failed policy read leaves DSD running.
+- Skip reconciliation containment: the first failed hand-off/reconciliation leaves
+  its session running.
+- Omit native Immediate release: the retiring node remains open while release's
+  caller is deliberately held.
+- Retry a failed position observer: cleanup calls it three times instead of once.
+- Re-panic at final reporting: teardown remains unacknowledged after close.
+
+Reproduction scripts and complete logs are in the worker scratch directory
+`~/onebit/codex/b9pr1-scratch` (controls.py, controls.json, control-*.log,
+red-*.log). Converted-window floor handling was already correct on the baseline;
+its positive control is not claimed as a newly exposed defect.
+
+The baseline's first-occurrence success-then-revocation case reports a successful
+Start and non-silent writes; the fixed case fails Start before workers launch.
+The successor activation case delivers 1,416 bytes to the revoked node on the
+baseline. The converted-successor case takes a producer wait instead of its first
+fault-stop step, or misses the held-adoption close. These are the named assertions
+in `red-activation.log`.
+
+The public queued-resume deadline regression was committed at 9b2ca75d before
+its additional control. Removing only endOfLife's release-expired wait arm makes
+it fail at the same bounded answer assertion; restoring the file leaves
+`git diff --exit-code` clean. This is an eighteenth negative-control run.
+
+Linux-only handoff for the touched packages and their dependents:
+
+- internal/alsapcm: sys_linux_test.go, probe_linux_test.go.
+- internal/player/hotplug: source_linux_test.go, source_cred_linux_test.go.
+- internal/api: outputs_hint_r5_linux_test.go.
+- cmd/bridge: doctor_player_dac_linux_test.go, snapshot_hold_linux_test.go.
+
+All other new sink and playback lifecycle tests use fake hardware and run here
+on Darwin with -race; no Linux exemption applies to them.
+
+The extraction inventory was compared by test function against the source tip:
+every lifecycle test from the source's rounds 3–7 and every native sink test is
+retained. Later reconciliation-barrier cases use policy changes with no pending
+write. Containment cases replace first-failure grace/retry expectations with
+immediate-stop assertions. The required runbook test caught two missed current
+version references (header and schema); both now name 48 and the qualification
+package's full race suite passes.
+
+The full dependent race run found one source-census incompatibility:
+TestDSDOutputProtocolTokens mistook lastPosition.State's numeric SinkEnded value
+for a wire string. The guard already excludes alsapcm.Sink* assignments to the
+adapter's lowercase state; it now applies that same numeric-only exclusion to
+State fields. Every string observation still has to resolve and match PROTOCOL.md.
+No DTO, endpoint, protocol text or emitted token changed. CLI (1,554s), admin
+(1,300s), ALSA (69s), and every other dependent package passed that run; API was
+rerun in full after this test-only correction.
+
+Final checks on Darwin/arm64, Go 1.27.3, using
+`-tags ts_omit_webclient,ts_omit_debugeventbus` throughout:
+
+- `go vet ./...`: PASS.
+- `go test -race -p 2 -timeout 30m` for all touched packages and their reverse
+  import dependents: PASS after the runbook and census corrections above.
+  Packages: cmd/bridge; internal/admin, alsapcm, api, backup, config;
+  internal/player/binding, dsdstate, hotplug, library, playback, playback/playbacktest,
+  policy, qualification; scripts/qualification/listening-verify and qualification-version.
+  The two packages with no test files compile. API's full rerun passed in 124.883s;
+  the final touched-package checks passed ALSA in 91.027s, playback in 6.773s and
+  qualification in 20.917s. Complete outputs: race-final.log,
+  race-api-final.log, race-touched-final.log and race-qualification-final.log.
+- `make docs-check`, changed-file gofmt check and `git diff --check`: PASS.
+- `go run ./scripts/qualification-version -base fa5fec54 -head HEAD`: PASS,
+  qualification 47 to 48.
+
+An earlier `./...` race run was stopped after the final production checkpoint
+changed, to avoid duplicating expensive tests on the loaded host. It is not
+claimed as a completed full-repository gate. The required final dependency run
+above completed, and only the listed Linux-tagged cases remain for orchestration.
+
+
+## 2026-11-10 — B728 B9 PR 1 round 2: containment and final answers
+
+File-editing pass only; no builds, tests, negative controls, commits or other
+state-changing git commands run. Go 1.27.3 gofmt formatted the edited Go files.
+The rules in output.md and player.md, History-b470-native.md's lifecycle section,
+and History-rules-player.md's pause entry describe the changes with their code.
+The DECISIONS require nonblocking pending admission, a guard around the actual
+Drop, fault routing across cutoff, and cleanup failures taking precedence on all
+Pause/WriteDSD exits. No wire or choice machinery changed.
+
+Expected negative controls for orchestration (not measured results):
+
+- `TestRepeatedContainmentKeepsOneDropPastCallerCancellation`: on round 1,
+  repeated failed refreshes accumulate more than two backend goroutines around
+  the held Drop; after unblocking and joining, Drop's count exceeds one. Restore
+  stopDSD's unconditional spawn, or clear the guard when call returns rather
+  than in its inner sink closure. Both must fail these assertions.
+- `TestContainmentFencesAnAdmissionWithoutWaitingForIt`: the external-refresh
+  case must find a fault and nativeRevoked while admission is parked, then
+  refuse its completion without publishing admitted. The inside-admission case
+  must return its unread-policy refusal and contain both its own session and
+  the other DSD holder. On round 1 the pending session is skipped. Remove pending
+  admission from holdsDSD and remove the completion fence separately. Run the
+  admission/containment cases under the race detector as well; their explicit
+  barriers pin the containment behavior, not a race-detector scheduling outcome.
+  An admission-wait mutation must time out at the named refresh/admission wait.
+- `TestFinalReportRecoveryReachesTheEngineOnBothSidesOfCutoff`: on round 1 the
+  engine never records the worker's original xrun, before or after cutoff.
+  Restore the old record-only recovery; separately force fallback to ordinary
+  events (after-cutoff case loses it) or token events (before-cutoff case loses
+  it). These are engine snapshot assertions, not observer counts.
+- `TestFinalReportRecoveryContainsItsFaultCallback`: before/after-cutoff and
+  new-backend-fault cases expect exactly one attempted fallback; round 1 makes
+  none. The fault-callback-itself case expects the original event object and
+  finalReport=false restored; round 1 leaves temporary routing installed.
+  Remove finalFault's recovery separately: the panicking callback must leave
+  down open and the reservation charged. Remove its faultSent check separately:
+  the callback-itself case must count two attempts. The first worker fault must
+  remain unchanged; without one the recovered report panic is backend_failed.
+- `TestNativeEveryEntryOnAnEndedLifeAnswersByTheVerdict`: new Pause/WriteDSD
+  fence-only rows must match typed cancellation and no activation fence; their
+  real deadline-cut drain rows must match ErrReleaseUnconfirmed and no
+  cancellation identity. WriteDSD with an already-ended command context must
+  retain the recorded device or close failure. Those assertions fail on round
+  1. Restore each command's old refusal/context returns separately. Other
+  existing rows remain positive controls and are not all claimed red.
+- `TestNativeWaitingCommandsAnswerTheEndedLifesFailure`: ring context and Pause
+  context, done and changed/completion cases must return ErrReleaseUnconfirmed
+  without cancellation identity. Round 1 returns raw context cancellation, the
+  cancellation-bearing record, or nil. Restore each matching return separately;
+  for the changed case repeat with -count=20 because done is also ready. These
+  are deterministic record/select fixtures apart from that disclosed select,
+  while the entry matrix uses actual fake-kernel cleanup.
+- `TestNativePausedInitialActivationKeepsItsOwnFence`: the refused initial
+  paused activation must match ErrActivationFenced; round 1 returns the unnamed
+  initial paused fence. Restore that refusal to its old errors.New value.
+- `TestFailedResumeClosesTheOutputItCouldNotHandOff`: with no engine to release
+  on the fault, Resume must answer the timer-stop fault with both fake device
+  opens already closed. Round 1 leaves its second output open. Remove the
+  unpausedLocked-failure branch's claim clear and close to reproduce it.
+- `TestOrderedWaitHonorsALargerWatchdog`: a 17-second watchdog must produce a
+  17-second ordering bound. Restore min(5s, watchdog): it reports five seconds.
+
+Review findings verified against the code: faulted records under the mutex and
+never invokes Events, so stopDSD itself does not synchronously call a panicking
+Fault callback. The missing final fallback is now protected explicitly. The
+resume already defers wg.Done; its defect was the claim/output retained after
+unpausedLocked failed. Initial ActivatePaused can meet its entry fence, now the
+shared sentinel; its alleged post-STATUS path cannot run until the sink was
+active, by which point ActivatePaused delegates to Resume. No change to that
+writer branch was warranted. The stale/replanned take-back rule is corrected to
+match producer.transition. All five referenced reviews were read in full.
+
+The engine-routing test needs directory fsync and explicitly skips Windows,
+matching the existing engine integration storage requirement. It opens no audio
+node. All other added cases are portable, using fake hardware or staged state;
+no new Linux-only test was added. Qualification remains 48 within this PR.
+
+## 2026-11-10 — B728 B9 PR 1 round 3: a recorded clean-up failure wins while the life runs, and the red-first runs rounds 2 and 3 owed
+
+The rule and its reasoning are in `output.md` (Native lifecycle and policy
+containment) and `ops/History-b470-native.md` ("Round 3"). This entry is the
+evidence. Every run below is on macOS arm64, Go 1.27.3, the fake kernel.
+
+### Where the record holds a cleanup failure while the life runs
+
+From `sink_dsd_writer.go`: a TrackChange tail write or drain the release's
+deadline cut (`releaseCancel` at expiry, mode still TrackChange, so not an
+expected cancellation: `ErrReleaseUnconfirmed` joined with the cut's
+`ReasonCancelled`/`context.Canceled`); a TrackChange with no time left for its
+drain (with `context.DeadlineExceeded`); a tail or drain its device failed; the
+writer's final close failing after any release (`setNativeError` beside
+`cleanupErr`); a pause's 30-second release whose close failed (`pauseNative`);
+and a refused reopen whose close failed (the activation's terminal error). Every
+`cleanupErr` is mirrored into `err`, so the record's `err` is the one place
+`nativeRecord.failed` reads, beside a release past its budget and not ended.
+
+### Red-first: round 2's cases on round 1's code
+
+The scratch worktree prepared at 4cd0fa90 was outside this session's sandbox (a
+`cd` or read there was refused), so the same tree was built under the ignored
+`.tmp/` of this worktree: round 2's tree with round 1's production files and
+`fake_test.go` written back from 4cd0fa90 by `git show`, `diff -rq` against a
+4cd0fa90 extract showing only round 2's five test files differ. Everything
+compiled there. Each case went red at its predicted assertion:
+
+- `TestNativeWaitingCommandsAnswerTheEndedLifesFailure`: all four at
+  `theSinksFailure` (ring and Pause context: bare `context canceled`; Pause done
+  and changed: the record with the drain's cancellation).
+- `TestNativeEveryEntryOnAnEndedLifeAnswersByTheVerdict`'s new rows: 15 of the
+  24 Pause and WriteDSD rows red (the fence alone at `theLifesCancellation` and
+  "not the sink's fence"; past the budget and the drain at `theSinksFailure`;
+  every WriteDSD row on an ended context, raw cancellation). The other nine
+  (nothing recorded, a device's failure, a failing close, for the entry
+  refusals) and the other entries' drain rows passed: `fenced` already answered
+  them, so they are positive controls, as the round-2 entry said.
+- `TestNativePausedInitialActivationKeepsItsOwnFence`: "answered native initial
+  paused activation fenced". `TestOrderedWaitHonorsALargerWatchdog`: "5s with
+  watchdog 17s". `TestFailedResumeClosesTheOutputItCouldNotHandOff`: two opens,
+  one close, the node open.
+- `TestRepeatedContainmentKeepsOneDropPastCallerCancellation`: 33 goroutines and
+  33 Drops. `TestContainmentFencesAnAdmissionWithoutWaitingForIt`: both cases at
+  `checkContained` (the pending session skipped).
+  `TestFinalReportRecoveryReachesTheEngineOnBothSidesOfCutoff`: both sides lost
+  the worker's fault. `TestFinalReportRecoveryContainsItsFaultCallback`: no
+  fallback attempted in three cases, temporary routing left in the fourth.
+
+### Red-first: round 3's cases on round 2's code
+
+7c2601a9's tree with round 3's two alsapcm test files (before the `meeting`
+seam, which round 2 has not): exactly the 24 live-life rows (12 entries in the
+two live columns) and both `TestNativeAWaitOnALiveLifeAnswersItsReleasesFailure`
+cases failed, all at `theSinksFailure`; every ended-life row, the staged wait
+cases and the occurrence-budget case passed there, round 2 already settling
+those returns, so their evidence is the controls below.
+
+### Controls on round 3
+
+Each mutation was made on a committed tree, run, and undone with `git restore`,
+the source text checked by grep and `git diff --quiet HEAD`:
+
+- `settled`'s live path answering `a.err` again: exactly the 22 live rows that
+  settle through it (all but the abandoned activation's).
+- `abandoned` back to round 2's form: exactly its three cases (the live budget
+  row at its wait for the command, the live drain row and the live wait's
+  context arm at `theSinksFailure`).
+- `overBudget` back to the raw reply: exactly the live wait's deadline arm
+  (it answered the writer's fence).
+- `settled`'s live wait removed: exactly the 11 live budget rows through it, at
+  "waited 5s for the entry waiting for the release's outcome" (`-watchdog=5s`).
+  `abandoned`'s wait removed: exactly its one row there.
+- Pause's completion back to `nil`: "Pause changed" failed 20 of 20 at
+  `answered <nil>` (`-count=20`). Round 2's own case, which closed `done` beside
+  `changed`, passed the same mutation 17 times in 20 (7c2601a9's tree).
+- WriteDSD's completion back to `nil`: exactly the six zero-bit rows, five of
+  five each (five at the answer; "nothing recorded" at the sink's end, since the
+  unsettled write never releases the ended sink). Its first run also turned
+  "WriteDSD refused at its entry, past the release's budget" red two runs in
+  five: that column called the entry beside the watcher's revocation, so a
+  write could pass its refusal to its completion. The column now calls the
+  entry once the revocation holds the close (df4bb12f); five more runs then
+  turned only the zero-bit rows red.
+- The invalid counts back to a raw `errors.New`: exactly the eight
+  different-lengths rows. The occurrence budget raw: exactly
+  `TestNativeAWriteOverItsOccurrenceBudgetAnswersTheCleanup`, at the answer and
+  the close's failure.
+- The Drop guard cleared once `call` returns: 20 of 20 at the Drop count (16 also
+  at the goroutine count). Round 2's test failed that mutation 20 of 20 on this
+  host too, but only by the scheduler: with 50 ms slept between `call`'s return
+  and the clearing (a scheduler's delay), round 2's test passed 20 of 20 and
+  round 3's failed 20 of 20 at both assertions (scratch trees of 7c2601a9 and
+  df4bb12f).
+
+### Round 2's listed controls, run on round 3
+
+- Pause's entry refusal raw: its ten rows in the fence, budget and drain
+  columns, ended and live. Pause's context arm raw: "Pause context" alone; its
+  done arm raw: "Pause done" alone. WriteDSD's context check raw: the eight
+  ended-context rows; its admission refusal raw: its five refusal rows and
+  "WriteDSD ring woken, then refused"; the ring's context arm raw: "WriteDSD ring
+  context" alone. Each three of three.
+- Initial ActivatePaused's unnamed fence: its case alone. `min(5s, watchdog)`:
+  "5s with watchdog 17s". The failed resume without its claim clear and close:
+  two opens, one close.
+- stopDSD's unconditional spawn: five of five at both assertions.
+- `holdsDSD` without the pending admission: both cases at `checkContained`. The
+  completion fence removed: the pending case alone (answered nil, published a
+  set); the inside case's refusal is its own refresh's. Containment waiting for
+  the admission: the pending case at the refresh's wait ("containment did not
+  stop the sink"), the inside case at "containment waited for its own
+  admission".
+- The final report recording only: both engine cases, and three callback cases
+  at no attempt ("fault callback itself" stays green: its one attempt is the
+  worker's). Ordinary events forced: after cutoff alone. Token events forced:
+  before cutoff alone. `finalFault` without its recovery: three cases with down
+  open and the reservation charged. Without `faultSent`: "fault callback itself"
+  at two attempts. The recovery overwriting the worker's fault: both engine cases
+  and three callback cases ("report panic replaced the worker's fault").
+
+### The gates
+
+On the final tree (df4bb12f and these docs), through the build lock: `go vet
+./...` clean, `GOOS=linux go vet` of `./internal/alsapcm/...` and
+`./internal/player/...` clean, and `go test -race` of the same, all 16 packages
+ok (alsapcm 79 s); the round 2 and round 3 cases `-race -count=20`, ok; `make
+docs-check` clean, and `verify_moves.py --base df4bb12f` passes with the
+output.md line declared an edit. `player.md` was 100,110
+bytes: the state owner's `Backend` contract entry moved to
+`History-rules-player.md` with a pointer meant to keep its binding rules beside
+its Don't sentence (99,137 bytes). It did not (corrected in round 4): it dropped
+that what a late Start acquires is closed at once and never written to, that a
+Release may reach the backend before or while its Start runs, that the engine
+closes `StartRequest.Released` in the step that takes the release, that a
+context derived from a call's has its own `Done` and so never ends `Canceled`,
+and that an answer stamped at or past the deadline is not taken whichever
+message reaches the owner first. Linux alone runs `alsapcm`'s real kernel seam;
+these cases use the fake kernel on every OS, and CI's Linux race leg is their
+Linux evidence.
+
+## 2026-11-10 — B728 B9 PR 1 round 4: every answer is decided after its wait, and a command's own stop never waits
+
+The rules are in `output.md` (Native lifecycle and policy containment) and
+`ops/History-b470-native.md` ("Round 4"); this is the evidence. macOS arm64,
+Go 1.27.3, the fake kernel. Round 3's Argon finding 1 assumed WriteDSD and
+Pause revoke on their context's end; they do not (they settle, then and now),
+and this round keeps it so.
+
+### Red-first on round 3's code
+
+A scratch extract of bdd9011c under the ignored `.tmp/`, with two test seams
+added at their round-3 positions alone (`revoking` between `releaseBegun` and
+`Revoke`, `overBudget` at that function's top; `meeting` was already there),
+and round 4's two test files. Each case failed at its predicted assertion:
+
+- `TestNativeAnAnswerIsReadAfterItsWait`: 7 of 8, each answering what was read
+  before the wait (`native activation fenced`, `native releasing`, a write's
+  nil beside the fault, an abandoned activation's bare `context canceled`); the
+  eighth, a write of no bits with nothing recorded, is the success both rounds
+  answer, a positive control.
+- `TestNativeAWaitsLastArmsAnswerFromTheFinalState`: all 4, the deadline and
+  done arms answering the writer's fence.
+- `TestNativeARevocationKnowsTheReleaseBegunBeforeIt`: both, at the wait for the
+  release's outcome the command never began.
+- `TestNativeAWriteOrAPauseStoppedByItsOwnContextAnswersAtOnce` (4) and
+  `TestNativeAWriteStoppedOnceATrackChangeBeganKeepsItsPrefixAndTail` (2): each
+  waited for the held release until the watchdog.
+- The entry matrix: the own-stop rows of the live budget column (Pause and
+  WriteDSD on an ended context, and the new write of no bits on one), at the
+  watchdog, and that write's ended-life rows with nothing or the fence alone
+  recorded, answering nil.
+
+`TestTheVerdictOfALiveLifeNeedsNoLifeEnd` and
+`TestNativeATrackChangeItsDeviceFailedIsACleanupFailure` passed there: they
+pin what round 3 already did (item 4), and their evidence is C8 and C9.
+
+### Controls on round 4
+
+Each on a committed tree, undone with `git restore`, the source checked by grep
+and `git diff --quiet HEAD`; C1 to C4 and C7 three runs each, the others one:
+
+- C1, `settle` classifying by its read before the wait: exactly its five rows
+  and the done arm's two.
+- C2, `abandoned` the same: exactly the abandoned activation's two rows.
+- C3, `overBudget` without its read after the record: exactly the deadline
+  arm's two.
+- C4, `revokeFound` reading apart from its revocation, round 3's way: both
+  revocation cases, at the wait.
+- C5, `settle`'s wait deaf to the command's context: both Pause cases, WriteDSD
+  and the TrackChange producer stopped while they wait, and the Pause own-stop
+  row; WriteDSD stopped before the call, which needs no wait, stayed green.
+- C6, `stopped` revoking: both TrackChange cases (escalated, the tail lost) and
+  `TestNativePartialRetry`; under the native overlay,
+  `TestNativeIntegrationSuccessfulCutReplacement` alone of the 29, its cut
+  refused (`invalid native cut`).
+- C7, no context check before the loop: the write of no bits on an ended
+  context, ended-life rows and `TestNativeAWriteOfNoBitsChecksItsContext`
+  (answered nil); its live budget row stayed green, `settle`'s wait taking that
+  context too.
+- C8, `verdict`'s unconfirmed arm needing an ended life: the verdict case and
+  every live case that depends on it (ten live budget rows, both revocation
+  cases, round 3's live deadline case).
+- C9, a failed drain recorded without `ErrReleaseUnconfirmed`: the drain case
+  alone, at its record.
+- C10, the live budget column left out of its expectation arm: all 13 of its
+  rows, at "the case has no expectation".
+
+### The gates
+
+On the final tree (020a71d0 and these docs), in one use of the build lock:
+`go vet ./...` and `GOOS=linux go vet` of `./internal/alsapcm/...` and
+`./internal/player/...` clean; `go test -race` of the same, all 16 packages ok
+(alsapcm 77 s); round 4's cases with the entry matrix and round 3's wait cases
+`-race -count=20`, ok; the native overlay's backend integration under `-race`,
+29 of 29. `make docs-check` clean; `verify_moves.py --base 020a71d0` passes with
+the player.md, output.md and History lines declared edits. The Backend entry's
+pointer now carries the clauses round 3 dropped, verbatim from its long form
+(player.md 99,798 bytes).
+
+## 2026-11-10 — B728 B9 PR 1 round 5: a cancelled Pause never answers success, and the rule says "while the life runs"
+
+The rules are in `output.md` (Native lifecycle and policy containment) and
+`ops/History-b470-native.md` ("Round 5"); this is the evidence. macOS arm64,
+Go 1.27.3, the fake kernel.
+
+### The regression
+
+Codex (P2): Pause read its context only in its wait's select. On an inert
+sink, or one whose pause was applied already, it skipped the wait, and
+`settle` reads the caller's context only where a release has begun, so a
+Pause on an ended context answered nil, having registered a pause on its way:
+the inert sink paused (a later Activate fenced) and the epoch moved (a Resume
+under way fenced). Its wait could also take the change that applies its pause
+beside its context's end, both ready, and answer nil. Pause now reads its
+context before it takes the sink's lock and again after its wait, and answers
+an end through `stopped` (d1391e1e). `TestNativeResumeStatusFence`'s pause
+fenced its parked Resume with a Pause on an ended context, which this round
+makes inert (it failed, "stale Resume succeeded"); its Pause now runs on a live
+context, registered before the parked STATUS returns, and stays green on
+3505b2b3.
+
+### Red-first on 3505b2b3
+
+A scratch extract of 3505b2b3 under the ignored `.tmp/`, with this round's
+test file and the reworked fence test. Each case failed at its predicted
+assertion:
+
+- `TestNativeAPauseOnItsOwnEndedContextChangesNothing`, all 3: the inert sink
+  and the already-paused one answered nil, the inert sink paused at epoch 1
+  and its Activate then `native activation fenced`, the paused one's epoch
+  moved from 1 to 2; beside the Resume, its STATUS parked, the Pause answered
+  its cancellation (its wait's arm) but paused the sink and moved the epoch,
+  and the Resume answered `native resume fenced after status`, the kernel never
+  unpaused.
+- `TestNativeAPauseWhoseContextEndsBesideItsChangeAnswersTheCancellation`: nil,
+  the staged wait taking the change with the context ended.
+
+### Controls on round 5
+
+Each on the committed tree (d1391e1e), undone with `git restore`, the source
+checked by `git diff --quiet HEAD`:
+
+- C1, Pause without its entry check: all three rows of
+  `TestNativeAPauseOnItsOwnEndedContextChangesNothing`, at the pause marks (the
+  post-wait check now answering the cancellation, the state still changed),
+  the inert sink's activation fenced and the Resume fenced; the both-ready
+  case stayed green.
+- C2, Pause without its check after the wait: the both-ready case alone,
+  answering nil; the three rows stayed green.
+
+### The rule's wording
+
+The Claude API (Low): the bold clause scoped only what followed its colon to a
+running life, so it forbade the ended life's `endOfLife` (its revocation,
+escalating a TrackChange still under way, and its wait within the budget),
+which the line's first rule requires. It now reads "while the life runs" in the
+clause and the cleanup verdict after the life's end.
+
+### The gates
+
+On the final tree (a262adb4 and these docs), in one use of the build lock,
+taken after 3,815 s queued behind another job: `go vet ./...` and
+`GOOS=linux go vet` of `./internal/alsapcm/...` and `./internal/player/...`
+clean; `go test -race` of the same, all 16 packages ok (alsapcm 76 s); this
+round's two cases, the reworked fence test, the staged wait cases, round 4's
+own-stop cases and the entry matrix `-race -count=20`, ok; under the native
+overlay with `-race`, the harness's real-sink integration in `cmd/bridge`, 15
+of 15 (`TestNativeIntegrationStopBesideAPauseOrResume` among them: its held
+Pause, on the context its Stop ended, still answers the life's cancellation,
+now through `stopped`), and the backend's, 29 of 29; `TestEveryCitedTestNameExists`
+ok. `make docs-check` clean; `verify_moves.py --base a262adb4` passes with the
+output.md line declared an edit.
+
+## 2026-11-10 — B728 B9 PR 1 round 6: Pause rechecks its context at every point it may wait
+
+The rules are in `output.md` (Native lifecycle and policy containment) and
+`ops/History-b470-native.md` ("Round 6", which lists every point Pause may wait
+at and the read after it); this is the evidence. macOS arm64, Go 1.27.3, the
+fake kernel. The last round, by the owner's rule.
+
+### The regressions
+
+Codex (P2): a Pause that reached its success with its own context running and
+the sink's life ended waited in settle's cleanup wait (`endOfLife`, then
+`releaseOutcome(nil)`, which reads no context), and a context that ended there
+answered nil, the verdict of a clean cleanup. The brief's reviews added three
+things. The refusal over the writer's clean end (the wait's done arm) answered
+nil the same way, and a release under way at the entry answered its fence,
+wherever the context ended after settle's read of its stop (Codex's review).
+A seam before settle's live wait cannot show this, since `releaseOutcome`
+reads the stop after its select (Argon's). And the loop took the lock again
+and waited once more with its context ended (Argon's).
+
+The Claude API (Low): a Pause whose context ended while it waited for the
+sink's lock paused the sink, moved its epoch and interrupted the writer, then
+answered its stop. The window predates round 5; round 5's entry read did not cover it.
+
+The fix (10ca8810) reads the context under the lock once Pause has it, before
+anything changes, and again in the loop (`pauseEnded`). It also reads it after
+every settle (`pauseSettled`). Round 5's read after the loop is gone: it
+followed a read under the lock with no wait between.
+
+### Red-first on 3a860847
+
+A scratch extract of 3a860847 under the ignored `.tmp/`, with only the
+`pauseLocking` seam added at its position (between the entry's read and the
+lock), and this round's test file. Each case failed at its predicted
+assertion:
+
+- `TestNativeAPauseStoppedInItsEndedLifesCleanupNeverAnswersSuccess`, its close
+  confirmed: nil. The row with its close failing passed there, as it does now:
+  the cleanup's failure wins both ways, a positive control.
+- `TestNativeAPauseStoppedInSettleAnswersItsStop`: nil for the writer's clean
+  end, "native releasing" for a release under way at the entry.
+- `TestNativeAPauseWhoseContextEndsWhileItWaitsForTheLockChangesNothing`, both
+  rows: the answer was its stop, but the pause was registered at epoch 1, and
+  the writer's changed channel was closed, kicked and its wait cancelled.
+- `TestNativeAPauseWhoseContextEndsInItsWaitDoesNotWaitAgain`: waited twice.
+
+### Controls on round 6
+
+Each ran on the committed tree (10ca8810). One recheck was reverted alone,
+matched by its surrounding lines (the two `pauseEnded` calls read the same).
+The whole `alsapcm` package was run, then the file was restored with
+`git restore` and checked with `git diff --quiet HEAD` (`.tmp/controls6.py`):
+
+- C1, no read under the first lock: exactly the lock case's two rows went red.
+- C2, no read under the loop's lock: exactly the case that waited again.
+- C3, no read after settle: exactly the ended-life cleanup's confirmed row and
+  settle's two exits. The failing row stayed green.
+- C0, for the record (not a round-6 read): with round 5's entry read removed,
+  the package stays green. The read under the lock answers its cases.
+
+### The gates
+
+These ran on the committed tree (6b1d32f7), in one use of the build lock taken
+at 03:49 after the night's queue, its wrapper restarted three times before its
+two-hour cap while it held nothing. `go vet ./...` was clean, and so was
+`GOOS=linux go vet` of `./internal/alsapcm/...`, `./internal/player/...` and
+`./cmd/bridge/...`. `make test` with `TEST_PKGS` set to `./internal/alsapcm/...`,
+`./internal/player/...`, `./internal/api/...` and `./cmd/bridge/...` (the full
+packages, `-race`): all 18 packages ok (alsapcm 73 s, api 130 s, cmd/bridge
+1,346 s). This round's four cases, round 5's, the fence test, the staged wait
+cases, round 4's own-stop cases and the entry matrix, under `-race -count=20`:
+ok. Under the native overlay with `-race`:
+
+- the harness's real-sink integration in `cmd/bridge`, 15 of 15, among them
+  `TestNativeIntegrationStopBesideAPauseOrResume` and every name CI requires;
+- the backend's, 29 of 29;
+- no skips.
+
+`make docs-check` was clean. `verify_moves.py --base 3a860847` passes with the
+output.md line declared an edit and round 5's History heading renamed.

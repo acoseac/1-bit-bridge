@@ -99,10 +99,10 @@ func TestDSDOutputProtocolTokens(t *testing.T) {
 						name = x.Sel.Name
 					}
 					if (name == "state" || name == "State") && len(a.Rhs) == len(a.Lhs) {
-						// The nativeStream adapter has a separate numeric sink
-						// state. Every string observation assignment must resolve;
+						// The nativeStream adapter and cached sink positions have
+						// numeric states. Every string observation must resolve;
 						// a new expression must not silently escape the census.
-						if sel, ok := a.Rhs[i].(*ast.SelectorExpr); ok && name == "state" {
+						if sel, ok := a.Rhs[i].(*ast.SelectorExpr); ok {
 							if pkg, ok := sel.X.(*ast.Ident); ok && pkg.Name == "alsapcm" && strings.HasPrefix(sel.Sel.Name, "Sink") {
 								continue
 							}

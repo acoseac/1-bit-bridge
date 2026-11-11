@@ -388,3 +388,323 @@ and reasons, the modes and the transports (`dsdstate`), the modes an option
 is listed for (`optionModes`), the caveat codes and the transports the lint
 lets a caveat name (`dacprofile`), the gain check's words that block DoP and
 first use's states.
+
+## Native lifecycle fences and containment — 2026-11-10
+
+A queue deletion or cut can reach a successor after its output was adopted but
+before activation completed. The backend takes that occurrence back only for
+`errReplanned` or `ErrActivationFenced`, closes its content and sink, and continues
+with the replacement. A device refusal or unconfirmed close remains a fault.
+Release wins over take-back. Reconciliation records `native_revoked` before it
+fences an activating output, while the occurrence is still claimed; delayed
+`Revoke` cannot lose or replace that fault after take-back closes the output.
+The same claim covers the first occurrence through the activation answer: a
+successful activation followed by revocation still fails Start before workers run.
+Converted output is kept unwritten by the producer's first fault check.
+
+`nativeAnswer` distinguishes a command's own failure, held refusal, success,
+fence, and request never run. After the sink's life ends, `verdict` reads that
+answer together with a fresh `nativeRecord`: device and cleanup failures retain
+their error identities but cannot match cancellation or the activation fence.
+Successful requests remain successful only after confirmed fault-free cleanup;
+other clean stops carry the named command's typed cancellation. The release
+budget is established once, including when its caller abandons a wait. A reply
+sent before writer completion is not proof of completion: `Done` owns that proof.
+The writer's final close failure reaches both its outcome and pending requests.
+
+An occurrence admitted under an older published set waits on the session's
+`judged` channel before opening its own output, resuming between transports, or
+joining its predecessor. Reconciliation and revocation each notify judgement.
+A gapless join waits only above the sink's measured 100 ms floor; at the floor it
+drains for an honest transport gap. A converted join window ends zero-padded at
+the floor. Positions use logical bits for native DSD, PCM frames otherwise.
+
+`refreshDSD` contains the first policy-read or publish panic and returns
+`errDSDUnread`; every session holding DSD, including a retiring native tail, is
+stopped immediately. A session reconciliation contains its own judgement,
+hand-off, and revocation callbacks; its first failure stops that session while
+other sessions receive their verdict. There is no retry counter or grace period.
+Containment does not call a failed Revoke again or read positions to discover
+which outputs need stopping. Native outputs begin Immediate release; PCM outputs
+are dropped through counted calls. Teardown still joins real writer completion.
+An output remembers its first position-callback panic, retaining only its last
+measured prefix and an error thereafter. Cleanup never calls that observer again;
+a failed final report cannot strand teardown after the outputs have closed.
+
+The portable fake-kernel suites cover activation/admission/prefill deletions,
+release and failure precedence, first and successor activation, converted output,
+revocation before and during take-back, all native command verdict/wait arms,
+re-read records, watcher-first and writer-first endings, fixed release deadlines,
+and reconciliation waits at resume, transport, gapless and converted-window
+boundaries. Hotplug capability changes run through the real refresh and
+reconciliation; ordering tests retain the barriers before delayed Revoke. The
+floor tests check the 350/400 ms measurement boundary and compare the converted
+window's samples with an independently converted zero-padded ending.
+Qualification version 48 invalidates earlier harness evidence; LegacyVersion
+remains 35. Test and negative-control evidence is in `ops/engineering-log.md`.
+
+### Round 2: admission, containment and final answers
+
+The DECISIONS for this round are nonblocking admission containment, one actual
+PCM Drop per output in flight, event routing at the cutoff, and cleanup failures
+preceding cancellation on every Pause/WriteDSD return. Confirmed, fault-free
+cleanup still answers a refused or cancelled command with its life's typed
+cancellation. Successful commands remain successful only after fault-free cleanup.
+
+An occurrence keeps its owning session. Before any admission callback or policy
+read, it marks admission pending under that session's mutex; the initial set and
+plan are published under the same mutex used by holdsDSD and stopDSD. Containment
+counts a pending admission and fences its session. Admission completion refuses
+that fence even if a later reading succeeds. Containment never waits for an
+opener: refreshDSD owns dsdMu, which the opener itself needs, including when the
+failed refresh originated inside that admission. Reconciliation still waits for
+the ordinary completed-open publication before reading decoder-owned fields.
+
+The per-output containment Drop guard is set before spawning and cleared inside
+the sink-operation closure, after Drop returns or panics. Clearing it when call
+returns would allow another Drop while its abandoned goroutine remains in the
+kernel. Further failed readings preserve the first fault and wake waiters without
+starting another operation against that output. The guard does not pretend the
+writer or Close completed: teardown still joins actual ownership release.
+
+The final report owns its recovery. It records a cleanup fault before reading
+positions, leaves ordinary events installed until cutoff publication returns,
+and then uses token-bearing retiring events. Recovery sends an unattempted fault
+through whichever channel is valid at that boundary without invoking the failed
+observer again. The fault attempt is marked before its callback, so even a Fault
+callback that panics is attempted only once. A separate recovery contains that
+callback; reporter state is restored, reservations are released, and down closes.
+The engine accepts ordinary retiring faults only before cutoff and token faults
+only after it; callback counts alone cannot establish delivery. The routing case
+uses the real engine and checks its recorded worker fault on both sides.
+
+Pause and WriteDSD settle their entry refusals, command-context cancellation,
+wait-loop returns and completion outside mu. The existing verdict strips
+cancellation and activation-fence identities from a real cleanup failure. The
+entry matrix includes both commands with a fence-only record and a real
+TrackChange drain cut by its deadline; select-arm unit cases isolate the ring
+context, Pause context, Pause done, and Pause's changed/completion paths with a
+staged cleanup record. These unit cases model the record and the chosen select
+arm, not hardware progress; the entry matrix establishes that record with the
+fake kernel.
+
+Initial ActivatePaused refuses with ErrActivationFenced, so a stale or dropped
+successor can be taken back under the same rule as Activate. The claimed
+post-STATUS initial-activation path is unreachable: activateNative enters that
+block only for wasActive, while an initial paused activation has never been
+active; once generation is nonzero ActivatePaused delegates to Resume. Its
+errNativeResumeFenced remains correct there. Take-back also covers errReplanned
+and stale successors, with release and real failures retaining precedence.
+
+The ordering watchdog now follows -watchdog without a five-second ceiling.
+The failed resume handoff clears its claim and closes the newly acquired output;
+its case checks closure before session release can hide a leak. Qualification
+version remains 48 for this PR (the base is 47); LegacyVersion stays 35.
+
+No builds, tests or negative controls were run by this editing worker. The
+regression assertions and exact negative-control mutations are handed to the
+orchestrator in the round-2 engineering-log entry.
+
+### Round 3: a recorded cleanup failure wins while the life runs too
+
+Round 2 gave the verdict to the ended life alone: `settled` answered `a.err`
+while the sink's life ran, `abandoned` joined the command's cancellation with
+the record, and `await`'s deadline arm answered the writer's reply as sent.
+The record can hold a cleanup failure with the life running: a TrackChange
+tail or drain its deadline cut (`ErrReleaseUnconfirmed` beside the cut's
+cancellation), one with no time left for its drain (beside
+`context.DeadlineExceeded`) or one its device failed, the writer's last close
+failing after any release, a pause's 30-second release whose close failed, and
+a refused reopen whose close failed. The first is a natural track end or a
+session's TrackChange release that a stalled DAC holds past two seconds, and
+Pause, WriteDSD on an ended context and Activate then answered the drain's
+cancellation, which a caller takes for its own stop.
+
+While the life runs, `settled`, `abandoned` and `await`'s live arms now read a
+snapshot of the record (`nativeRecord.failed`: `ErrReleaseUnconfirmed` in the
+record, or a release whose budget passed before it ended) and answer by the
+verdict when it fails: the failure, without cancellation or activation-fence
+identity, on every return of Activate, ActivatePaused, Resume, Pause and
+WriteDSD. A command that meets a release under way waits for its outcome within
+the release's budget (`releaseOutcome`, the bound the ended life already waited
+within) and answers by the same rule. A command whose own cancellation revokes
+the sink waits only for a release begun before its revocation (`found`): an
+activation abandoned on an inert sink still answers its own cancellation at
+once, its close held, and `Done` stays the fence. A release past its budget and
+still unconfirmed answers `ErrReleaseUnconfirmed` where it answered the writer's
+fence. A confirmed release with nothing failed in its record leaves every live
+answer as it was.
+
+The entry matrix gains two live-life columns, the deadline-cut drain and the
+session's own release past its budget, and two WriteDSD entries, planes of
+different lengths (the first return) and no bits (the completion's return).
+The live budget column waits, through `nativeSeams.meeting`, until its command
+waits on the release before passing the budget, so a command that answered
+without waiting fails at that wait. The ended budget column calls its entry
+only once the watcher's revocation holds the close: called first, a Pause or a
+WriteDSD went past its refusal to its completion's return. The staged wait
+cases make one arm alone ready: "Pause changed" closes `releaseExpired` rather
+than `done` beside `changed`, beside which its select could take `done`, so
+Pause's completion reverted to nil still passed 17 runs in 20 (7c2601a9), and the
+ring wake-up case is named for the refusal it reaches after waking. WriteDSD's
+occurrence budget has a case of its own, the ledger filled while admission is
+open and the new occurrence written once the life has ended with its watcher
+held, so the budget's settle begins the release and answers its close's
+failure. `TestNativeAWaitOnALiveLifeAnswersItsReleasesFailure` takes `await`'s
+deadline and context arms with the life running.
+
+The containment Drop test waited on `SinkCall`'s seam, which runs inside
+`call`; a guard cleared once `call` returned could clear after the test's 32
+refreshes had run. `Seams.ContainCalled` runs on the containment goroutine after
+everything it does, and the test waits on it. `finalNativeReport` reads `s.ev`
+under the session's lock, as every write of it is made.
+
+### Round 4: every answer is decided after its wait, and a command's own stop never waits
+
+Round 3 read the sink's life before a command's wait and classified the
+answer by that read afterwards. A life that ended during the wait, its cleanup
+clean, then answered what was read before: an activation's `ErrActivationFenced`
+in place of the ended life's typed cancellation, a Pause's refusal, a zero-bit
+WriteDSD's nil beside a recorded device fault, an abandoned activation's bare
+cancellation joined with that fault. `settle` (which `settled` calls),
+`abandoned` and `overBudget` now take the record and read the life again after
+any wait; ended, the answer is the cleanup's verdict, of the writer's reply to
+a request (`requestVerdict`: `sent(r)` and `record` with its after-reply grace,
+the reply an arm already read carried along) or of the command's refusal, never
+a refusal rebuilt over a bare snapshot. `overBudget` has no wait of its own,
+but the life can end between `await`'s read of it and the record, so it reads
+the life again too.
+
+`found`, whether the release had begun before a command's own revocation, was
+read and its lock let go before `Revoke`: a release begun between the two was
+taken for the command's own and answered at once, with bare cancellation, while
+its record could still take a cleanup failure. `revokeFound` reads it and
+revokes in one hold of the sink's lock.
+
+Round 3's waiting rule had reached WriteDSD and Pause on their own context's
+end, which never revoke and must not: playback ends a write's context to cut a
+queue (`cutFromLocked`'s `wcancel`) and its producer's once a TrackChange has
+begun (`release`, after `BeginRelease`), and a revocation would close the sink
+for good or turn the graceful release into an Immediate one. Waiting held the
+producer for the whole of that release. `stopped` is their own stop: while the
+life runs, the cancellation at once, waiting for nothing and revoking nothing,
+unless the record already holds a cleanup failure or a release past its budget,
+which it answers; once the life has ended, the verdict, as before. Their waits
+for a release met (`settle` with their context) end on that context too, and a
+stop that has come wins over an outcome ready beside it. A WriteDSD of no bits,
+which skips the loop that read the context, reads it first.
+
+Activate and a request's wait still revoke on their own stop, and wait for a
+release found. The verdict is safe while the life runs: `running` calls it only
+for a failed record, where an unconfirmed one (not ended) takes its
+`ErrReleaseUnconfirmed` arm and a recorded one carries it in its fault, so the
+life's cancellation, whose end would be nil, is never built. A TrackChange tail
+or drain its device failed records `ErrReleaseUnconfirmed` beside the error, as
+a deadline-cut one does, so `failed` sees it. Every column of the entry matrix
+now names its expectation, the default failing the case.
+
+The seams: `meeting` holds a command in its wait while a test ends the life;
+`overBudget` holds the deadline arm after its read of the life; `revoking` lets
+a test begin a release just before a command's revocation. The queue-cut
+integration case (`TestNativeIntegrationSuccessfulCutReplacement`, under the
+native overlay) is the guard that a write's own stop leaves the sink usable.
+
+### Round 5: a Pause on an ended context changes nothing, and the rule says "while the life runs"
+
+Pause read its context only in its wait's select. On an inert sink, or one
+whose pause was applied already, it skipped the wait, and `settle` reads the
+caller's context only where a release has begun, so `Pause` on an ended context
+answered nil (Codex). It had registered a pause on its way: the inert sink paused,
+so a later Activate was fenced, and the epoch moved, which fences a Resume or a
+paused activation under way. Pause now reads its context first, before it takes
+the sink's lock or changes anything, and answers that end through `stopped`, the
+own stop of round 4: while the life runs, the cancellation at once, revoking and
+waiting for nothing, unless the record holds a cleanup failure or a release past
+its budget, which it answers. A Pause called on an ended context changes nothing. Its wait can take the change
+that applies its pause beside its context's end, both ready, so Pause reads the
+context again once the wait is done and answers the end through `stopped` too.
+A Pause whose context ends during its wait has registered its pause and answers
+that end, as its wait's context arm always has.
+
+`TestNativeResumeStatusFence` fenced its parked Resume with a Pause on an ended
+context, which this round makes inert; its Pause now runs on a live context,
+registered before the parked STATUS returns.
+
+The rule's bold clause read "never let a WriteDSD's or a Pause's own context's
+end revoke the sink, escalate its release or wait for one", with only what
+followed the colon scoped to a running life (the Claude API, Low). Read
+literally it forbade what the same line's first rule requires once the life
+has ended: `stopped` then answers through `settled`, whose `endOfLife`
+revokes, so escalating a TrackChange still under way, and waits within the
+budget. It now reads "while the life runs" in the clause itself, and the ended
+life's cleanup verdict, as before, after it.
+
+This subsection's first title, the rule and Pause's comment claimed that a
+cancelled Pause never answers success. That held only for a context that had
+ended at Pause's entry or beside its wait's change: one that ended while Pause
+waited for the sink's lock, or in settle's waits, was read after neither, and
+round 6 corrects the claim.
+
+### Round 6: Pause reads its context again after every point it may wait at
+
+Round 5 read Pause's context at its entry and once its wait for the writer was
+done. Two waits went unread. The sink's lock, which the writer or another
+command can hold as Pause is called: a Pause whose context ended while it
+waited for the lock paused the sink, moved the epoch (which fences an
+activation or a Resume under way) and interrupted the writer, then answered
+its stop (the Claude API, Low). And settle's waits: a Pause that reached its
+success with its own context running and the sink's life ended waited in the
+cleanup that life's end begins (`endOfLife`: `Revoke`, then
+`releaseOutcome(nil)`, which reads no context); its context ended there, and
+the clean verdict answered nil (Codex, P2). A refusal over the writer's clean
+end answered nil the same way, and a release under way at Pause's entry its
+fence ("native releasing"), wherever the context ended after settle's read of
+its stop.
+
+Every point Pause may wait at, and the read after it:
+
+- Its entry waits for nothing. Round 5's read there is now a fast path: the
+  read under the lock answers the same, and with it removed the package stays
+  green.
+- The sink's lock (`s.mu.Lock`), which the writer and every command take: read
+  under it, before anything changes, the lock let go before `stopped`, whose
+  snapshot takes it (`pauseEnded`); before the release under way is looked at,
+  as the entry's read is.
+- A release under way at the entry settles its refusal: settle's waits, below.
+- The wait for the writer to apply the pause (its select): the context's end
+  answers through `stopped`; the writer's end takes the lock for its result
+  (`result`) and settles; a change takes the lock again.
+- The lock again, after a change: read under it (`pauseEnded`), so a Pause
+  whose context ended never waits twice. Every way out of the wait but the
+  context's end and the writer's passes through it, so round 5's read after
+  the wait is this one now, and its own read after the loop, which followed
+  a read under the lock with no wait between, is gone.
+- settle's waits, on each of its three exits (the refusal of a release under
+  way at the entry, the refusal over the writer's end, the success): the
+  lock `releaseBegun` and the snapshot take, a release met
+  (`releaseOutcome(stop)`, which ends on the context and reads it after its
+  select), and with the life ended the cleanup it waits for (`endOfLife`: the
+  revocation's lock and `releaseOutcome(nil)`, deaf to the context) and the
+  record (its lock, and a reply's grace for a request). Read once settle has
+  answered (`pauseSettled`), the last read: an end found there answers through
+  `stopped`, so a recorded cleanup failure or a release past its budget still
+  wins, and once the life has ended the cleanup verdict answers, the ended
+  life's typed cancellation where the cleanup was clean.
+- `stopped`'s own waits (its snapshot's lock, and with the life ended
+  `settled`'s): nothing is read after them, since what `stopped` answers is
+  a stop already, the cancellation or the cleanup verdict, never success.
+
+So a Pause whose context ended before it took the sink's lock changes nothing,
+its pause, epoch and moment as they were and the writer not interrupted; one
+whose context ended before its read after settle never answers success; and
+one whose context ends after its pause is registered leaves it registered and
+answers that end. An end after the last read is not read: the answer is
+decided there.
+
+`pauseLocking`, nil but in a test, holds Pause between its entry's read and
+its lock, where a test holds the lock and ends the context. The ended life's
+cleanup wait is held at the release's close (`cleanupFault`), Pause seen
+waiting in it by `meeting`; settle's other exits, the lock again after a
+change, and the lock's wait are staged on a sink no goroutine owns, the
+context's Done never ready where the case says the wait took another arm
+(`verdictWaitContext`).

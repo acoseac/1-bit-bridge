@@ -72,16 +72,29 @@ func TestNativeResumeStatusFence(t *testing.T) {
 			answer := make(chan error, 1)
 			go func() { answer <- s.Resume(context.Background()) }()
 			await(t, parked, "resume STATUS")
-			ctx, cancel := context.WithCancel(context.Background())
-			cancel()
+			paused := make(chan error, 1)
 			if action == "pause" {
-				_ = s.Pause(ctx)
+				// The Pause registers at once, its epoch moved, and waits for
+				// the writer to apply it once the parked STATUS returns. Its
+				// context runs: a Pause on an ended context changes nothing
+				// (B728 B9 PR 1 round 5), so it fences no Resume.
+				s.mu.Lock()
+				before := s.pauseEpoch
+				s.mu.Unlock()
+				go func() { paused <- s.Pause(context.Background()) }()
+				nativeWait(t, s, "the pause registered", func() bool { return s.pauseEpoch > before })
 			} else {
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
 				_ = s.Release(ctx, Immediate)
+				paused <- nil
 			}
 			close(release)
-			if e := <-answer; e == nil {
+			if e := receive(t, answer, "the stale Resume's answer"); e == nil {
 				t.Error("stale Resume succeeded")
+			}
+			if e := receive(t, paused, "the Pause's answer"); e != nil {
+				t.Errorf("the Pause that fenced the Resume answered %v", e)
 			}
 			_ = s.Release(context.Background(), Immediate)
 			k.inspect(func(k *fakeKernel) {

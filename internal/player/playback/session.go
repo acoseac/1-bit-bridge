@@ -58,6 +58,10 @@ type session struct {
 
 	chain   []*occ
 	writing *occ // the occurrence the producer writes, nil between occurrences
+	// The reporter wakes a waiting join to recheck the measured lookahead floor.
+	awaitingJudgement bool
+	// Closed and renewed under mu after judgement, revocation or containment.
+	judged chan struct{}
 	// endAfter is the occurrence nothing follows (a Prepare with no
 	// successor), 0 for none.
 	endAfter engine.OccurrenceID
@@ -119,20 +123,24 @@ type session struct {
 
 // output is one sink a session opened, for one transport.
 type output struct {
-	occurrence   engine.OccurrenceID
-	plan         *engine.NativePlan
-	permission   *permission
-	s            *session
-	sink         streamSink
-	native       *alsapcm.DSDSink
-	adapter      *nativeStream
-	nativeCancel context.CancelFunc
-	policyID     string
-	transport    alsapcm.Transport
+	occurrence     engine.OccurrenceID
+	plan           *engine.NativePlan
+	permission     *permission
+	s              *session
+	posMu          sync.Mutex
+	lastPosition   alsapcm.Position
+	positionFailed bool
+	sink           streamSink
+	native         *alsapcm.DSDSink
+	adapter        *nativeStream
+	nativeCancel   context.CancelFunc
+	policyID       string
+	transport      alsapcm.Transport
 	// Under the session's lock.
-	submitted int64 // content frames handed to the sink, less those a cut dropped
-	drained   bool  // a drain played everything submitted
-	closed    bool  // its Close was called
+	submitted   int64 // content frames handed to the sink, less those a cut dropped
+	drained     bool  // a drain played everything submitted
+	closed      bool  // its Close was called
+	containDrop bool  // a containment Drop is still inside the sink
 
 	umu  sync.Mutex
 	unit Unit // where it is open: Locate moves it at a reopen
@@ -273,7 +281,7 @@ func newSession(b *Backend, id engine.SessionID) *session {
 	return &session{
 		b: b, id: id, ctx: ctx, cancel: cancel,
 		startDone: make(chan struct{}), down: make(chan struct{}), firstIn: make(chan struct{}),
-		wakeP: make(chan struct{}, 1), wakeR: make(chan struct{}, 1),
+		wakeP: make(chan struct{}, 1), wakeR: make(chan struct{}, 1), judged: make(chan struct{}),
 	}
 }
 
@@ -400,7 +408,7 @@ func (s *session) call(ctx context.Context, f func() error) (err error) {
 
 // newOccLocked appends an occurrence to the chain. s.mu is held.
 func (s *session) newOccLocked(eo engine.Occurrence) *occ {
-	o := &occ{permission: s.permission, dsdRefusal: s.dsdRefusal, reservation: eo.Reservation, id: eo.ID, entry: eo.Entry, ref: eo.Ref, pos: len(s.chain), done: make(chan struct{})}
+	o := &occ{owner: s, permission: s.permission, dsdRefusal: s.dsdRefusal, reservation: eo.Reservation, id: eo.ID, entry: eo.Entry, ref: eo.Ref, pos: len(s.chain), done: make(chan struct{})}
 	s.chain = append(s.chain, o)
 	return o
 }
@@ -504,6 +512,7 @@ func (s *session) start(ctx context.Context, req engine.StartRequest) (err error
 		s.monitorPermission()
 	}
 	s.b.open(cctx, first)
+	s.b.opened(first)
 	// Admitted under a set a refresh may have replaced while its first chunk
 	// was read, which no reconciliation reaches while the open is under way:
 	// admitted again under the set published now, in the step that ends the
@@ -516,7 +525,7 @@ func (s *session) start(ctx context.Context, req engine.StartRequest) (err error
 	s.readmitDSDLocked(first)
 	s.makeConverterLocked(first)
 	close(first.done)
-	monitor, refused := first.admitted != nil, first.refused
+	monitor, refused := first.admitted != nil && first.refused == nil, first.refused
 	if refused != nil {
 		first.dropped = true
 	}
@@ -582,9 +591,22 @@ func (s *session) start(ctx context.Context, req engine.StartRequest) (err error
 	s.cur = out
 	s.currentNative = out.native != nil
 	first.out, first.start, first.transport = out, 0, out.transport
+	first.claimed = true
 	s.writing = first
 	s.mu.Unlock()
-	if err := s.activateOutput(cctx, first, out); err != nil {
+	err = s.activateOutput(cctx, first, out)
+	s.mu.Lock()
+	first.claimed = false
+	f := s.fault
+	s.mu.Unlock()
+	if f != nil && f.Reason == "native_revoked" {
+		why := fmt.Sprintf("player backend: the session's DSD was revoked as its first occurrence's sink activated (%s: %s)", f.Reason, f.Detail)
+		if err != nil {
+			return fmt.Errorf("%s: %w", why, err)
+		}
+		return errors.New(why)
+	}
+	if err != nil {
 		return err
 	}
 	s.mu.Lock()
@@ -781,7 +803,7 @@ func (s *session) drainOutput(out *output) error {
 		case err == nil:
 			return nil
 		case alsapcm.ReasonOf(err) == alsapcm.ReasonBadState:
-			st := out.sink.Position().State
+			st := out.position().State
 			select {
 			case <-changed:
 				continue
@@ -873,13 +895,15 @@ func (s *session) callableLocked() error {
 func (s *session) openSuccessor(ctx context.Context, o *occ) {
 	defer o.cancel()
 	s.b.open(ctx, o)
-	if o.admitted != nil {
-		s.startDSDMonitor()
-	}
+	s.b.opened(o)
 	s.mu.Lock()
+	monitor := false
 	defer func() {
 		close(o.done)
 		s.mu.Unlock()
+		if monitor {
+			s.startDSDMonitor()
+		}
 		wake(s.wakeP)
 		wake(s.wakeR)
 	}()
@@ -892,6 +916,7 @@ func (s *session) openSuccessor(ctx context.Context, o *occ) {
 	if s.nativeRevoked && (o.plan != nil || o.converts()) && o.refused == nil {
 		o.refused = &engine.Unplayable{Reason: "native_revoked", Detail: "DSD permission revoked"}
 	}
+	monitor = o.admitted != nil && o.refused == nil && !o.dropped
 	if o.dropped {
 		// Dropped while it opened: nothing of it plays or is reported, and
 		// it leaves the chain with its opener, which retirement passed over
@@ -1210,7 +1235,7 @@ func (s *session) pause(ctx context.Context) (err error) {
 		}
 		// Anything but a sink playing out its last frames or done with them is
 		// the pause's refusal.
-		st := out.sink.Position().State
+		st := out.position().State
 		if !(st == alsapcm.SinkDraining && alsapcm.ReasonOf(err) == alsapcm.ReasonBadState) && st != alsapcm.SinkStopped {
 			return err
 		}
@@ -1387,7 +1412,7 @@ func (s *session) resume(ctx context.Context) (how engine.ResumeResult, err erro
 	}
 	l.unlock()
 	if out != nil {
-		released := out.sink.Position().State == alsapcm.SinkReleased
+		released := out.position().State == alsapcm.SinkReleased
 		err := s.call(ctx, func() error {
 			// Asked here, where the command runs, which can be after a Stop
 			// the engine took once this Resume was called: a session released
@@ -1416,7 +1441,7 @@ func (s *session) resume(ctx context.Context) (how engine.ResumeResult, err erro
 				if pauseErr := s.call(rollback, func() error { return out.pause(rollback) }); pauseErr != nil {
 					// The kernel's final drain refuses Pause: only Drop can
 					// stop those last frames. Keep both refusals if it fails too.
-					if alsapcm.ReasonOf(pauseErr) == alsapcm.ReasonBadState && out.sink.Position().State == alsapcm.SinkDraining {
+					if alsapcm.ReasonOf(pauseErr) == alsapcm.ReasonBadState && out.position().State == alsapcm.SinkDraining {
 						return 0, errors.Join(err, pauseErr, s.call(rollback, out.sink.Drop))
 					}
 					return 0, errors.Join(err, pauseErr)
@@ -1437,7 +1462,7 @@ func (s *session) resume(ctx context.Context) (how engine.ResumeResult, err erro
 		// A sink playing out its last frames, or done with them, held no
 		// pause (pause): the session was paused with no device, and resumes
 		// as one.
-		st := out.sink.Position().State
+		st := out.position().State
 		if !(st == alsapcm.SinkDraining && alsapcm.ReasonOf(err) == alsapcm.ReasonBadState) && st != alsapcm.SinkStopped {
 			return 0, resumeError(err)
 		}
@@ -1463,6 +1488,36 @@ func (s *session) resume(ctx context.Context) (how engine.ResumeResult, err erro
 		l.unlock()
 		return 0, err
 	}
+	for {
+		if !s.unjudgedLocked(between) {
+			break
+		}
+		judged := s.judged
+		l.unlock()
+		s.b.unjudged(between.id)
+		select {
+		case <-judged:
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		case <-s.ctx.Done():
+			return 0, errReleased
+		}
+		l.lock()
+		if err := s.callableLocked(); err != nil {
+			l.unlock()
+			return 0, err
+		}
+	}
+	if between.stale || between.dropped || s.between != between {
+		if err := s.unpausedLocked(); err != nil {
+			return 0, err
+		}
+		l.unlock()
+		wake(s.wakeP)
+		wake(s.wakeR)
+		return engine.ResumeContinued, nil
+	}
+	between.claimed = true
 	s.wg.Add(1)
 	l.unlock()
 	defer s.wg.Done()
@@ -1475,6 +1530,11 @@ func (s *session) resume(ctx context.Context) (how engine.ResumeResult, err erro
 		}
 		var te *transportError
 		if !errors.As(err, &te) {
+			// Refused, the session left paused: nothing opens for it until a
+			// resume claims it again.
+			l.lock()
+			between.claimed = false
+			l.unlock()
 			return 0, resumeError(err)
 		}
 		l.lock()
@@ -1501,6 +1561,7 @@ func (s *session) resume(ctx context.Context) (how engine.ResumeResult, err erro
 		return 0, errReleased
 	}
 	if s.between != between || between.dropped {
+		between.claimed = false
 		l.unlock()
 		s.closeOutput(next)
 		l.lock()
@@ -1512,8 +1573,13 @@ func (s *session) resume(ctx context.Context) (how engine.ResumeResult, err erro
 		return engine.ResumeContinued, nil
 	}
 	if err := s.unpausedLocked(); err != nil {
+		between.claimed = false
+		l.unlock()
+		s.closeOutput(next)
 		return 0, err
 	}
+	// The claim stays with the sink handed to the producer, whose adoption and
+	// activation of it give it up (transition).
 	s.handed = next
 	l.unlock()
 	wake(s.wakeP)
@@ -1549,6 +1615,9 @@ func (s *session) release(ctx context.Context) error {
 		return nil
 	}
 	s.mu.Unlock()
+	if first {
+		s.b.releasingSeam(s.id)
+	}
 	// The session's life ends: its sinks drop their streams and close their
 	// devices on their own, and its goroutines return.
 	s.cancel()
@@ -1646,9 +1715,19 @@ func (s *session) closeAtTeardown(out *output) {
 			return
 		}
 		s.b.logPanic("the teardown", r)
+		if out.native != nil {
+			out.native.BeginRelease(alsapcm.Immediate)
+			<-out.native.Done()
+			if err := out.native.CleanupResult(); err != nil {
+				s.mu.Lock()
+				s.releaseErr = errors.Join(s.releaseErr, engine.ErrReleaseUnconfirmed, err)
+				s.mu.Unlock()
+			}
+			return
+		}
 		for {
 			changed := out.sink.Changed()
-			if st := out.sink.Position().State; st == alsapcm.SinkStopped || st == alsapcm.SinkEnded {
+			if st := out.position().State; st == alsapcm.SinkStopped || st == alsapcm.SinkEnded {
 				return
 			}
 			<-changed

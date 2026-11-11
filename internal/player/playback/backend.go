@@ -87,6 +87,8 @@ type Seams struct {
 	// one, before the producer closes it and records the occurrence it opens
 	// a sink for next.
 	TransportDrained func()
+	// ProducerStep observes the producer's next step with no session lock held.
+	ProducerStep func(s engine.SessionID, step string, o engine.OccurrenceID)
 	// Fenced runs where the backend finds the session released, by its
 	// Release or by the engine's taking it before that Release came
 	// (engine.StartRequest.Released), at a step that would acquire, open,
@@ -134,6 +136,22 @@ type Seams struct {
 	// the occurrence (B728 B11 round 2): a test holds it there while a
 	// refresh reconciles the occurrence. It may block.
 	Activation func(o engine.OccurrenceID)
+	// Unjudged runs before waiting for reconciliation, with the session lock released.
+	Unjudged func(o engine.OccurrenceID)
+	// Opened runs after content admission and before the opener takes the session lock.
+	Opened func(o engine.OccurrenceID, ref engine.Reference)
+	// Admitting observes pending policy admission outside all locks; it may block.
+	Admitting func(o engine.OccurrenceID)
+	// ContainCalled runs on a PCM containment Drop's goroutine (stopDSD) after
+	// everything else that goroutine does, its call returned and the Drop
+	// possibly still in the sink: a test repeats the containment there, which
+	// must not start a second Drop while the first is held (B728 B9 PR 1 round
+	// 3). It must not block or call the backend.
+	ContainCalled func()
+	// Revoking runs under the session lock before revocation; it must not call the backend.
+	Revoking func(s engine.SessionID)
+	// Releasing runs after release fences every native output, before cancellation.
+	Releasing func(s engine.SessionID)
 	// Probed runs on the silent probe's goroutine once its call has
 	// returned and before its answers are taken (publishProbe): a test holds
 	// it there while a Start takes the slot the probe let go of (B762 round
@@ -152,6 +170,34 @@ type Seams struct {
 	// through a Start, which finds the answers recorded (B762 round 3). It may
 	// block, and must not call the backend.
 	ProbeDecided func()
+}
+
+// releasingSeam is the Releasing seam.
+func (b *Backend) releasingSeam(s engine.SessionID) {
+	if sm := b.cfg.Seams; sm != nil && sm.Releasing != nil {
+		sm.Releasing(s)
+	}
+}
+
+// containCalled is the ContainCalled seam.
+func (b *Backend) containCalled() {
+	if sm := b.cfg.Seams; sm != nil && sm.ContainCalled != nil {
+		sm.ContainCalled()
+	}
+}
+
+// unjudged is the Unjudged seam.
+func (b *Backend) unjudged(o engine.OccurrenceID) {
+	if sm := b.cfg.Seams; sm != nil && sm.Unjudged != nil {
+		sm.Unjudged(o)
+	}
+}
+
+// opened is the Opened seam.
+func (b *Backend) opened(o *occ) {
+	if sm := b.cfg.Seams; sm != nil && sm.Opened != nil {
+		sm.Opened(o.id, o.ref)
+	}
 }
 
 // probed is the Probed seam.
@@ -186,6 +232,20 @@ func (b *Backend) activation(o engine.OccurrenceID) {
 func (b *Backend) converting(step string, o engine.OccurrenceID) {
 	if sm := b.cfg.Seams; sm != nil && sm.Converting != nil {
 		sm.Converting(step, o)
+	}
+}
+
+// admitting is the Admitting seam.
+func (b *Backend) admitting(o engine.OccurrenceID) {
+	if sm := b.cfg.Seams; sm != nil && sm.Admitting != nil {
+		sm.Admitting(o)
+	}
+}
+
+// revoking is the Revoking seam.
+func (b *Backend) revoking(s engine.SessionID) {
+	if sm := b.cfg.Seams; sm != nil && sm.Revoking != nil {
+		sm.Revoking(s)
 	}
 }
 
@@ -228,6 +288,17 @@ func (b *Backend) pauseRefused() {
 func (b *Backend) transportDrained() {
 	if sm := b.cfg.Seams; sm != nil && sm.TransportDrained != nil {
 		sm.TransportDrained()
+	}
+}
+
+// producerStep is the ProducerStep seam, for session id's step st.
+func (b *Backend) producerStep(id engine.SessionID, st step) {
+	if sm := b.cfg.Seams; sm != nil && sm.ProducerStep != nil {
+		var o engine.OccurrenceID
+		if st.o != nil {
+			o = st.o.id
+		}
+		sm.ProducerStep(id, st.kind.String(), o)
 	}
 }
 
@@ -301,10 +372,12 @@ type Backend struct {
 	// them, dsdRead is when the last one read the policy, dsdFenceOnce says once
 	// that the state's writes are fenced, and probeState is the silent probe's
 	// bookkeeping (ProbeDSD).
-	dsd          atomic.Pointer[dsdSet]
-	dsdPub       atomic.Pointer[dsdPublished]
-	dsdMu        sync.Mutex
-	dsdRead      time.Time
+	dsd     atomic.Pointer[dsdSet]
+	dsdPub  atomic.Pointer[dsdPublished]
+	dsdMu   sync.Mutex
+	dsdRead time.Time
+	// dsdJudged is the last set reconciled or contained for every session, under dsdMu.
+	dsdJudged    *dsdSet
 	dsdFenceOnce sync.Once
 	probeState   dsdProbe
 
@@ -416,6 +489,8 @@ func New(cfg Config) (*Backend, error) {
 		set.gen = 1
 		b.dsd.Store(set)
 		b.dsdPub.Store(&dsdPublished{set: set, view: view})
+		// No session yet, so nothing for a reconciliation to judge by it.
+		b.dsdJudged = set
 	}
 	return b, nil
 }

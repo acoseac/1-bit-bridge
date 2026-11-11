@@ -191,11 +191,15 @@ func (a *afterFirst) ReadDSD(ctx context.Context, dst [][]byte) (int, error) {
 // while nothing has settled, ends the window zero-padded (End). s.mu is held.
 func (s *session) holdLocked(a *occ) step {
 	f := s.followingLocked(a)
-	settled := f != nil && f.opened() && !f.stale && (f.admitted == nil || f.admitted == s.b.dsd.Load())
+	cur := s.b.dsd.Load()
+	settled := f != nil && f.opened() && !f.stale && (f.admitted == nil || f.admitted == cur)
 	switch {
 	case f == nil && s.endAfter == a.id:
 	case !settled:
 		if !s.floorLocked(a) {
+			if f != nil && unjudgedAt(f, cur) {
+				return step{kind: stepWait, wait: s.judged, verdict: f}
+			}
 			return step{kind: stepWait}
 		}
 	case f.conv != nil && a.out != nil && a.out.transport.Join(f.transport).Gapless &&
@@ -217,15 +221,19 @@ func (s *session) holdLocked(a *occ) step {
 }
 
 // floorLocked reports whether the sink a plays in has at most windowFloor of
-// lookahead left: what was handed to it and is not played. A sink that is
-// gone has none. s.mu is held.
-func (s *session) floorLocked(a *occ) bool {
-	out := a.out
+// lookahead left. s.mu is held.
+func (s *session) floorLocked(a *occ) bool { return outFloorLocked(a.out) }
+
+// outFloorLocked reports whether out has at most windowFloor of lookahead
+// left: what was handed to it and is not played, in its own positions'
+// unit (a native sink's count logical bits). A sink that is gone has none.
+// s.mu is held.
+func outFloorLocked(out *output) bool {
 	if out == nil || out.closed || out.drained {
 		return true
 	}
-	p := out.sink.Position()
-	return p.Submitted-p.Played <= int64(out.transport.RateHz)*int64(windowFloor)/int64(time.Second)
+	p := out.position()
+	return p.Submitted-p.Played <= int64(out.logicalRate())*int64(windowFloor)/int64(time.Second)
 }
 
 // holdingLocked reports whether the producer holds a converted occurrence's
@@ -271,7 +279,7 @@ func (s *session) windowCutLocked(a, o *occ) (bool, error) {
 		return true, nil
 	}
 	out := a.out
-	if out == nil || out != s.cur || out.drained || out.closed || out.sink.Position().State == alsapcm.SinkDraining {
+	if out == nil || out != s.cur || out.drained || out.closed || out.position().State == alsapcm.SinkDraining {
 		return false, nil
 	}
 	at := a.start + a.window

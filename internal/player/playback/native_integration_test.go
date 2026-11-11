@@ -1203,6 +1203,12 @@ func TestNativeIntegrationBetweenTransportPauseDeadline(t *testing.T) {
 	}
 }
 
+// TestNativeIntegrationSuccessfulCutReplacement: the cut lands while the
+// producer's WriteDSD waits on the full ring, which the session ends through
+// the write's context (wcancel); the write answers its own stop at once and
+// leaves the sink as it was, so the cut succeeds and the replacement plays
+// (B728 B9 PR 1 round 4: a write that revoked on its own stop refused this
+// cut).
 func TestNativeIntegrationSuccessfulCutReplacement(t *testing.T) {
 	k := alsapcm.NewFakeKernel(t)
 	k.HardwareFormats(49, 50, 52)

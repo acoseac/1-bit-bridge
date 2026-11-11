@@ -25,18 +25,6 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/player/playback/playbacktest"
 )
 
-// The player's DSD converted to PCM (B728 B11; the design's sections 4.1,
-// 4.3, 4.7 and 4.8) through the engine's Run, the backend and the real PCM
-// sink over the fake kernel. A DAC the profile database does not know, with
-// no choice of its own, converts every rate under the bridge's auto, whatever
-// controller queued the track: the engine's commands are every controller's.
-// What the DAC is given is held, byte for byte, to an oracle the converter
-// computes apart from the backend: each occurrence alone, zero-padded, where
-// a join abuts, and the two occurrences' bits concatenated where it is
-// continuous, which at 24 bits is one converter over both tracks' bits and at
-// 16 bits the converter's own chain, whose dither starts again at each
-// occurrence's first frame.
-
 // convPlan is the test DAC's conversion plan: its altsets take S24_3LE to
 // 176.4 kHz with 24 significant bits, the table's first packing.
 var convPlan = dsdconv.Plan{RateHz: 176400, ValidBits: 24}
@@ -235,7 +223,12 @@ func rateName(r int) string {
 // (Prepare), the first it named.
 func (d *dsdRig) occurrenceOf(entry uint32) engine.OccurrenceID {
 	d.t.Helper()
-	c := d.waitCall("the engine to hand off the entry", func(c call) bool { return c.kind == "prepare" && c.next != nil && c.next.Entry == entry })
+	return d.occurrenceOfWithin(entry, alsapcm.Watchdog())
+}
+
+func (d *dsdRig) occurrenceOfWithin(entry uint32, bound time.Duration) engine.OccurrenceID {
+	d.t.Helper()
+	c := d.waitCallWithin(bound, "the engine to hand off the entry", func(c call) bool { return c.kind == "prepare" && c.next != nil && c.next.Entry == entry })
 	return c.next.ID
 }
 
@@ -243,8 +236,13 @@ func (d *dsdRig) occurrenceOf(entry uint32) engine.OccurrenceID {
 // occurrence Prepared, its open done, and returns it.
 func (d *dsdRig) preparedOcc(entry uint32) engine.OccurrenceID {
 	d.t.Helper()
-	o := d.occurrenceOf(entry)
-	d.waitEvents("the successor prepared", func(evs []event) bool { return count(evs, "prepared", o) > 0 })
+	return d.preparedOccWithin(entry, alsapcm.Watchdog())
+}
+
+func (d *dsdRig) preparedOccWithin(entry uint32, bound time.Duration) engine.OccurrenceID {
+	d.t.Helper()
+	o := d.occurrenceOfWithin(entry, bound)
+	d.waitEventsWithin(bound, "the successor prepared", func(evs []event) bool { return count(evs, "prepared", o) > 0 })
 	return o
 }
 
@@ -319,11 +317,16 @@ func (c *convSteps) wait(t *testing.T, step string, o engine.OccurrenceID) {
 // heldNow waits until the producer is held at the step asked.
 func (c *convSteps) heldNow(t *testing.T) {
 	t.Helper()
+	c.heldWithin(t, alsapcm.Watchdog())
+}
+
+func (c *convSteps) heldWithin(t *testing.T, bound time.Duration) {
+	t.Helper()
 	select {
 	case <-c.held:
-	case <-time.After(alsapcm.Watchdog()):
+	case <-time.After(bound):
 		alsapcm.LogGoroutines(t)
-		t.Fatalf("the producer did not reach the step it is to be held at within %v", alsapcm.Watchdog())
+		t.Fatalf("the producer did not reach the step it is to be held at within %v", bound)
 	}
 }
 

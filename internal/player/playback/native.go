@@ -278,10 +278,14 @@ func (s *session) activateOutput(ctx context.Context, o *occ, out *output) error
 	}
 	s.mu.Lock()
 	fenced := s.releasing || s.nativeRevoked || o.dropped || s.cur != out
+	replanned := o.dropped && !o.leading && !s.releasing && !s.nativeRevoked
 	paused := s.paused
 	s.mu.Unlock()
 	if fenced {
 		out.native.Revoke()
+		if replanned {
+			return errReplanned
+		}
 		return errors.New("native activation fenced")
 	}
 	if o.permission != nil {
@@ -441,7 +445,10 @@ func (b *Backend) Revoke(r engine.RevokeInput) {
 	if s == nil {
 		return
 	}
-	s.mu.Lock()
+	l := s.hold()
+	defer l.release()
+	l.lock()
+	b.revoking(r.Session)
 	s.nativeRevoked = true
 	if s.permission != nil {
 		s.permission.revoked.Store(true)
@@ -465,7 +472,7 @@ func (b *Backend) Revoke(r engine.RevokeInput) {
 			continue
 		}
 		if out := o.out; o.conv != nil && out.native == nil && !out.closed && !out.drained && !slices.Contains(pcm, out) &&
-			!(o.eof && out.sink.Position().Played >= o.start+o.written) {
+			!(o.eof && out.position().Played >= o.start+o.written) {
 			active = true
 			pcm = append(pcm, out)
 		}
@@ -473,7 +480,9 @@ func (b *Backend) Revoke(r engine.RevokeInput) {
 	if active && s.fault == nil {
 		s.fault = &engine.Fault{Reason: "native_revoked", Detail: r.Reason}
 	}
-	s.mu.Unlock()
+	close(s.judged)
+	s.judged = make(chan struct{})
+	l.unlock()
 	for _, sink := range sinks {
 		sink.Revoke()
 		sink.BeginRelease(alsapcm.Immediate)
@@ -516,10 +525,31 @@ func (v retiringEvents) Fault(_ engine.SessionID, f engine.Fault) {
 // native writer has accounted its accepted prefix and finished cleanup. Its
 // callbacks enter the engine mailbox before either acknowledgement path.
 func (s *session) finalNativeReport() {
-	s.mu.Lock()
-	if s.nativeRelease == nil {
+	l := s.hold()
+	// s.ev is read under the session's lock, as every write of it is made.
+	var ev, reportEv engine.Events
+	defer func() {
+		// Release the lock before recovery: position callbacks run under it.
+		l.release()
+		if r := recover(); r != nil {
+			s.b.logPanic("the final native report", r)
+			s.faulted("the final native report")
+			s.finalFault(reportEv)
+		}
+		s.mu.Lock()
+		s.ev = ev
+		s.finalReport = false
 		s.mu.Unlock()
+	}()
+	l.lock()
+	ev = s.ev
+	reportEv = ev
+	if s.nativeRelease == nil {
+		l.unlock()
 		return
+	}
+	if s.releaseErr != nil && s.fault == nil {
+		s.fault = &engine.Fault{Reason: faultReason(s.releaseErr), Detail: s.releaseErr.Error()}
 	}
 	token := s.nativeRelease.Token
 	if s.cur != nil && s.cur.native != nil {
@@ -530,28 +560,49 @@ func (s *session) finalNativeReport() {
 		if o.dropped || o.out == nil {
 			continue
 		}
-		end := min(o.start+o.written, o.out.sink.Position().Written)
+		end := min(o.start+o.written, o.out.position().Written)
 		if end > o.start {
 			prefixes = append(prefixes, engine.NativePrefix{Occurrence: o.id, Start: o.start, End: end})
 		}
 	}
-	ev := s.ev
-	if to, ok := ev.(engine.NativeReleaseEvents); ok {
-		s.ev = retiringEvents{Events: ev, to: to, token: token}
-	}
 	s.finalReport = true
-	if s.releaseErr != nil && s.fault == nil {
-		s.fault = &engine.Fault{Reason: faultReason(s.releaseErr), Detail: s.releaseErr.Error()}
-	}
-	s.mu.Unlock()
+	l.unlock()
 	if to, ok := ev.(engine.NativeReleaseEvents); ok {
 		to.Retiring(token, engine.NativeEvent{Kind: "cutoff", Prefixes: prefixes})
+		// The engine accepts token events only after the cutoff was posted.
+		// Before that point recovery must use ordinary events.
+		reportEv = retiringEvents{Events: ev, to: to, token: token}
 	}
+	l.lock()
+	s.ev = reportEv
+	l.unlock()
 	s.reportStep()
+}
+
+// finalFault delivers the unreached fault without consulting the observer that
+// failed. Both workers have joined. An attempted callback is never retried, and
+// even a broken Fault callback cannot prevent reservations and down releasing.
+func (s *session) finalFault(ev engine.Events) {
+	defer func() {
+		if r := recover(); r != nil {
+			s.b.logPanic("the final report's report of its fault", r)
+		}
+	}()
 	s.mu.Lock()
-	s.ev = ev
-	s.finalReport = false
+	if s.fault == nil || s.faultSent || ev == nil {
+		s.mu.Unlock()
+		return
+	}
+	f := *s.fault
+	if f.Occurrence == 0 {
+		f.Occurrence, f.Frames = s.posOcc, s.posFrames
+		if f.Occurrence == 0 && len(s.chain) > 0 {
+			f.Occurrence = s.chain[0].id
+		}
+	}
+	s.faultSent = true
 	s.mu.Unlock()
+	ev.Fault(s.id, f)
 }
 
 func (o *output) activate(ctx context.Context) error {
