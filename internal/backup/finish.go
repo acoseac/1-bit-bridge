@@ -307,11 +307,20 @@ func verifyAndThen(ctx context.Context, dir string, o VerifyOptions, after func(
 	done := make(chan outcome, 1)
 	go func() {
 		// Last, once all of it is let go: the hook a test waits on for that
-		// (SetOnVerifyEndForTest), never the answer, which comes first.
+		// (SetOnVerifyEndForTest), never the answer, which comes first; run
+		// inside a test's wrapper of this step where one is set
+		// (SetAroundVerifyEndForTest).
 		defer func() {
-			if hook := onVerifyEnd.Load(); hook != nil {
-				(*hook)(dir)
+			end := func() {
+				if hook := onVerifyEnd.Load(); hook != nil {
+					(*hook)(dir)
+				}
 			}
+			if around := aroundVerifyEnd.Load(); around != nil {
+				(*around)(dir, end)
+				return
+			}
+			end()
 		}()
 		defer h.drop()
 		defer releaseSlot()

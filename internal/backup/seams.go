@@ -307,6 +307,26 @@ func SetOnVerifyEndForTest(fn func(dir string)) (restore func()) {
 	return func() { onVerifyEnd.Store(prev) }
 }
 
+// aroundVerifyEnd, nil in production, runs a verification worker's last step
+// (SetAroundVerifyEndForTest).
+var aroundVerifyEnd atomic.Pointer[func(dir string, end func())]
+
+// SetAroundVerifyEndForTest installs fn in place of a verification worker's
+// last step, given the caller's dir as passed and that step, end (the call of
+// the end hook SetOnVerifyEndForTest sets), which fn must call once; and
+// returns the restore. The worker comes to it once it has dropped its hold,
+// which is all ActiveHoldsForTest counts, so a test parks a worker there, past
+// every drain, and knows when its end hook has had its turn (backlog B849's
+// second round).
+func SetAroundVerifyEndForTest(fn func(dir string, end func())) (restore func()) {
+	var p *func(string, func())
+	if fn != nil {
+		p = &fn
+	}
+	prev := aroundVerifyEnd.Swap(p)
+	return func() { aroundVerifyEnd.Store(prev) }
+}
+
 // ActiveHoldsForTest counts workers still retaining a hold, including a
 // cancellation handoff that has neither a slot nor an overrun mark yet.
 // Tests join their callers before waiting for this count to reach zero.

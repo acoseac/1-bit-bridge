@@ -307,6 +307,89 @@ func TestAnAbandonedCheckKeepsItsHoldsUntilItsCheckerEnds(t *testing.T) {
 	}
 }
 
+// TestAVerificationBegunBeforeItsEndHookNeverRunsIt is backlog B849's second
+// round (Codex's P2 on its first): a worker drops its hold, which is all a
+// test's drain waits for, before it runs the end hook (SetOnVerifyEndForTest),
+// so a worker that stood between the two while a test set that hook for a
+// later verification of the same snapshot ran it once it went on, and the
+// test's wait could pass on the earlier verification's end. Here the worker
+// is parked there (SetAroundVerifyEndForTest), the hook is set, and the
+// worker goes on: it runs no hook, since none stood when its verification
+// began; a verification begun once the hook is set runs it. Red on the round
+// before, which read the hook as the worker ended.
+func TestAVerificationBegunBeforeItsEndHookNeverRunsIt(t *testing.T) {
+	c := captureT(t, storeWithTracks(t, 5))
+	c.Release()
+	dir := c.Dir
+	p := newParking()
+	passed := make(chan struct{})
+	var parkedOne atomic.Bool
+	t.Cleanup(backup.SetAroundVerifyEndForTest(func(d string, end func()) {
+		if d != dir || !parkedOne.CompareAndSwap(false, true) {
+			end()
+			return
+		}
+		p.park()
+		end()
+		close(passed)
+	}))
+	t.Cleanup(func() {
+		p.release()
+		select {
+		case <-p.entered:
+		default:
+			return
+		}
+		select {
+		case <-passed:
+		case <-time.After(30 * time.Second):
+			t.Error("the parked worker never passed its last step")
+		}
+	})
+	if _, err := backup.VerifySnapshot(t.Context(), dir, backup.VerifyOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-p.entered:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the verification's worker never came to its last step")
+	}
+	if n := backup.ActiveHoldsForTest(); n != 0 {
+		t.Fatalf("%d holds active with the worker at its last step; want its hold dropped, as a test's drain finds it", n)
+	}
+	ran := make(chan struct{}, 2)
+	t.Cleanup(backup.SetOnVerifyEndForTest(func(d string) {
+		if d == dir {
+			select {
+			case ran <- struct{}{}:
+			default:
+			}
+		}
+	}))
+	p.release()
+	select {
+	case <-passed:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the parked worker never passed its last step")
+	}
+	select {
+	case <-ran:
+		t.Error("a verification begun before the end hook was set ran it as its worker ended")
+	default:
+	}
+	// Where no directory can be synced, a recheck of a VERIFIED records
+	// nothing, which is that answer.
+	if _, err := backup.VerifySnapshot(t.Context(), dir, backup.VerifyOptions{}); err != nil &&
+		(fsutil.SyncsParentDir || !errors.Is(err, backup.ErrRecheckNotRecorded)) {
+		t.Fatal(err)
+	}
+	select {
+	case <-ran:
+	case <-time.After(30 * time.Second):
+		t.Fatal("a verification begun once the end hook was set never ran it")
+	}
+}
+
 // TestAVerificationWaitingItsTurnHearsOfACheckGivenUp: a verification that
 // began to wait for this process's slot behind another, whose check is then
 // given up, answers ErrCheckStillRunning as soon as it is given up, not once
