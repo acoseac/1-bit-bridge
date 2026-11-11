@@ -93864,6 +93864,82 @@ cleaning difference are unchanged; no adjacent implementation was altered.
 Only new local commits were made, with no amend, rebase, push, PR operation,
 `gh` invocation or deployment.
 
+## 2026-11-11 — B849: the last prune of TestAnAbandonedCheckKeepsItsHoldsUntilItsCheckerEnds waits for the verification's worker to end
+
+Backlog B849, on `fix/b849-abandoned-check-release` from 6ac2f3e0.
+
+**The failure.** CI's `test (windows-latest)` failed `TestAnAbandonedCheckKeepsItsHoldsUntilItsCheckerEnds` on both attempts of run 42958279106 (PR #1448's head, the test taking 5.43 s and 6.13 s), and once before that. Each time it failed one assertion alone, `verify_stuck_test.go:189`: "the prune once the check ended: {Deleted:0 Reaped:0 ReapErr:<nil> Skipped:true SkippedFor:another verification or prune of these snapshots holds their lock}". That word is `ErrBackupsBusy`. macOS and Linux passed. Every assertion before it passed on Windows: the check no longer read as one still running, its marker was gone, a verification made as another process took the lock, and the capture's owner lock was free.
+
+**The production order** (file:line at 6ac2f3e0). The brief asked whether the abandoned check's end, as the test reads it, comes before its holds are let go. It comes after.
+
+- The test waits for that check through `awaitVerificationEnd`, which begins with `awaitClean`: `ActiveHoldsForTest` at zero.
+- The worker lets go in `hold.release` (hold.go:254-288). It waits for the steps it gave up, the check's `finished` among them (hold.go:255; tracked at finish.go:551), lets the capture's ownership go (hold.go:260-265), then removes the marker and unlocks (hold.go:272-279, verify_lock.go:191-197). It then lets the slot go (verify_lock.go:274-277; corrected in round 2: where the unlock overruns `releaseBound`, `hold.release` returns with it under way and the slot goes first, the hold's mark standing until it ends), and only then runs `hold.drop` (hold.go:303-321), whose `activeHolds.Add(-1)` (hold.go:320) is the last thing it does.
+- The mark of the hold given up stands until that drop, and `PruneContext` asks it first (backup.go:1041). A prune behind that hold therefore answers `ErrCheckStillRunning`, never `ErrBackupsBusy`.
+- The hold the prune met was that of the verification of `older` the test had just made as another process (line 180). Its worker hands over its answer (finish.go:318) before its deferred `h.release` (finish.go:308) unlocks. The prune tries the lock once (backup.go:1102); with the token free, no mark and no marker, a lock held by another open is `ErrBackupsBusy` (backup.go:1103-1104).
+- Answering first is production's design (verifyAndThen's doc, finish.go:263-268), recorded in B653's round 8 and pinned by `TestAnAnsweredVerificationOrClaimCanStillHoldTheFolder`. Round 8 drained the two prune cases it found; this was a third.
+- No production path prunes on a verification's answer. Every snapshot's prune runs under the verification's own hold (`Finish`'s `after`: cmd/bridge/backup.go:100, 602 and 642, internal/admin/handlers_backups.go:289). `bridge backup --verify` (cmd/bridge/backup.go:170) exits once answered. A later verification in the process waits on the slot, which is let go after the lock (corrected in round 2: or, where the lock's let-go overran `releaseBound`, while the hold's mark, standing until that let-go ends, refuses it with `ErrCheckStillRunning`). Production is unchanged.
+- Why Windows, read from the code and not measured there: `fsutil.SyncsParentDir` is false, so `older`'s recheck records nothing (finish.go:574-588). Its worker goes from the check's verdict to its answer with no write between, and its release first waits for the check's goroutine to close `finished` (finish.go:795). That goroutine runs on a thread put in background mode (priority_windows.go:20). On macOS the veto, the rename and the sync come between the verdict and the answer.
+
+**The discriminating run.** A disposable test file, deleted after, ran 6ac2f3e0's test body with a one-shot one-second delay in `SetOnLockReleaseForTest` at the next unlock of the backups folder's lock. Armed before the abandoned check's release, the test passed 3 of 3. Armed before the verification of `older` as another process, it failed 3 of 3 in CI's words; that verification answered 184 to 206 ms after it was asked.
+
+**The fix**, the test's, with one test seam:
+
+- `verifyAndThen`'s worker runs `onVerifyEnd` last, after `h.drop` (`SetOnVerifyEndForTest`, seams.go; nil in production).
+- `unlockHold` (verify_stuck_test.go) holds the next unlock of root's lock once armed (`SetOnLockReleaseForTest`). Its `requireHeld` requires the hold, which shows the window open: the verification has answered and its worker holds the lock. Its `letGoAndAwaitEnd` lets the unlock go and waits for the end hook of `older`'s verification. That hook asks the lock as another process, on the worker's goroutine, and the test requires it free there.
+- `awaitVerificationEnd`'s comment said the ownership is let go after the lock. It is let go before; the helper was right only because it drains every hold first.
+
+**Red first.** At 5cd2fdb4, with the hold armed and the test's wait as it was (none): red 20 of 20 under `-race`, each at `verify_stuck_test.go:239` in CI's words, exit 1. At bdfbd6a1, with the wait: green 20 of 20, no race, exit 0.
+
+**Negative controls.** Each ran from committed bdfbd6a1 with a scratch script that asserted its anchor once before and its result after, was restored with `git checkout --`, and was followed by an empty `git status --porcelain`.
+
+| Mutation | Runs | Result |
+|---|---|---|
+| C1: `unlock.letGoAndAwaitEnd(t)` deleted, the hold kept | `-count=10` | Red 10 of 10 at the prune, line 305, in CI's words |
+| C2: the end hook's defer moved below `defer releaseSlot()` and `defer h.release()`, so it runs before the release | `-count=10` | Red 10 of 10 at line 300, "ended with the backups folder's lock still held"; the prune itself passed in all ten, so the check at the end is what catches it |
+| C3: `arm` no longer holds the unlock | `-count=2` | Red 2 of 2 at line 298, `requireHeld`'s 30 s bound (36.5 s each) |
+| C4: the end hook removed from the worker | `-count=2` | Red 2 of 2 at line 300, the wait's 30 s bound (36.5 s each) |
+
+**Census.** A script read the tree's 42 test calls to `backup.Prune` or `PruneContext`, with the nearest earlier verification, claim or prune in the same function and any drain between them. Two more in `internal/backup` read a prune's effect after a `VerifySnapshot` answer with no drain, checking only its error: `TestASyncFailureAfterTheVerdictsRenameReadsAsNotVerified` (verify_test.go:867) and `TestAVerifiedRecordLeftForAFailedOneIsVetoedWhereItsBundleTakesNoFile` (verify_veto_unix_test.go:53). Where the window opens there, the prune is skipped and the anchor they assert survived is there anyway: blind, not red. They are not changed here and are left for the backlog. Every other call expects a skip, follows a drain (`awaitClean`, `verifiedSnapshot`, `verifyT`, `awaitVerificationEnd`, cmd/bridge's `awaitHoldsLetGo`), follows a holder that gave its token back before it answered (a prune or verification refused at the lock), or follows a child process that has exited.
+
+**Checks.** Every command ran on go1.27.3 (the pinned toolchain first on PATH, `GOTOOLCHAIN=local`), with the tags `ts_omit_webclient,ts_omit_debugeventbus` and `TMPDIR` outside the worktree.
+
+| Check | Result |
+|---|---|
+| `gofmt -l .` | Nothing listed |
+| `go vet -tags … ./...`, and with `GOOS=windows` and `GOOS=linux` | No diagnostics, exit 0 each (arm64; compile and vet only for the other OSes) |
+| `go test -tags … -race -timeout 30m -count=1 -json ./internal/backup/...` at bdfbd6a1 | 263 top-level tests passed (21,304 with subtests), 0 failed, 0 skipped, no race; 481.7 s; `backuptest` has no tests |
+| `-race -count=20 -run '^TestAnAbandonedCheckKeepsItsHoldsUntilItsCheckerEnds$' ./internal/backup/` | 20 of 20 passed at bdfbd6a1's code, 6.46 to 6.61 s each, no race; 132.3 s |
+| cmd/bridge's `TestEveryCitedTestNameExists`, `TestNoDocblockNamesAnotherDeclaration` and `TestNoBlankKeepers` under `-race`, over this record | 3 passed, exit 0; 33.1 s |
+| `make docs-check` | Its four stages passed: the budgets' self-test, the budgets (CLAUDE.md 82.1%), rules-for's 49 checks, and the split tool's self-test |
+
+## 2026-11-11 — B849 round 2: a worker runs the end hook that stood as its verification began
+
+Codex's review of round 1 (PR #1450, head 7ea25637) found one P2 and one Low; Argon's and the Claude API's found nothing.
+
+**The P2.** A worker drops its hold (`hold.drop`, whose count is all `awaitClean` and `ActiveHoldsForTest` read) before its last step, and round 1's last step read the end hook (`SetOnVerifyEndForTest`) only then. The worker of the test's earlier verification of `older` (`verifiedSnapshot`), past the drain but not yet at that step, could read a hook the test set later for the verification it meant, run it for the same `dir`, find the lock free, and close the wait's channel. The test's wait would then pass on that end, and the prune could race the right worker's unlock again. Codex found it by reading the interleavings, not by a run.
+
+**The fix.** `verifyAndThen` reads the end hook as it begins, and its worker runs that one at its end (finish.go), so no worker begun earlier runs a hook set later. The B849 test sets its hook when it arms (`unlockHold.arm`), just before the verification it waits for. Production is unchanged; both seams are nil there. Rejected: handing the hook an identity (the caller's context), which every call of the seam would have to carry, for no case the read at the start leaves open.
+
+**Red first, deterministically.** `SetAroundVerifyEndForTest` (seams.go, nil in production) wraps the worker's last step. `TestAVerificationBegunBeforeItsEndHookNeverRunsIt` parks a verification's worker there and requires `ActiveHoldsForTest` at 0, which is what a test's drain finds. It then sets the end hook, lets the worker go on, waits for it to pass the step, and requires that it ran no hook. Last, it requires that a verification begun once the hook is set runs it.
+
+- At 41cc6d50, with the hook still read at the end: red 10 of 10 under `-race`, at `verify_stuck_test.go:377`, "a verification begun before the end hook was set ran it as its worker ended".
+- At 4a0fdf17, with the fix: green 10 of 10, and `TestAnAbandonedCheckKeepsItsHoldsUntilItsCheckerEnds` green 20 of 20, no race.
+
+**Negative control.** C5 ran from committed 4a0fdf17: the worker read the hook at its end again (`_ = endHook` kept the capture compiling). It was red 10 of 10 at line 381, in those words; restored with `git checkout --`, `git status --porcelain` empty. Its first attempt applied nothing: its script's post-check counted `(*hook)(dir)`, which the answer and expiry hooks also call, so the script stopped before writing. The run after it was the unmutated tree's, green, and counts for nothing.
+
+**The Low.** Round 1 wrote that the worker lets the slot go after the lock. Where the lock's let-go overruns `releaseBound`, `hold.release` returns with it under way (hold.go:280-287), and the slot goes before it ends. The hold's mark, given up at `stepRelease`, stands until it ends (`keepMarkUntil`), so a verification or prune in the process answers `ErrCheckStillRunning` meanwhile. `drop` waits for the let-go, and the end hook runs after `drop`. `SetOnVerifyEndForTest`'s doc, the History's long form and round 1's entry above now say so.
+
+**Checks** (go1.27.3, `GOTOOLCHAIN=local`, the Makefile's tags, `TMPDIR` outside the worktree).
+
+| Check | Result |
+|---|---|
+| `gofmt -l .` | Nothing listed |
+| `go vet -tags … ./...`, and with `GOOS=windows` and `GOOS=linux` | No diagnostics, exit 0 each |
+| `go test -tags … -race -timeout 30m -count=1 -json ./internal/backup/...` at 4a0fdf17 | 264 top-level tests passed (21,305 with subtests), 0 failed, 0 skipped, no race; 480.5 s |
+| `-race -count=20 -run '^TestAnAbandonedCheckKeepsItsHoldsUntilItsCheckerEnds$'` at 4a0fdf17's code | 20 of 20 passed, no race |
+| cmd/bridge's `TestEveryCitedTestNameExists`, `TestNoDocblockNamesAnotherDeclaration` and `TestNoBlankKeepers` under `-race`, over this record | 3 passed, exit 0; 33.4 s |
+| `make docs-check` | Its four stages passed (CLAUDE.md 82.1%; rules-for's 49 checks) |
+
 ## 2026-11-10 — native lifecycle fences and first-failure containment
 
 Base: fa5fec545fa8062de465686a0235cc9cd865cdd7. Extracted the native sink's

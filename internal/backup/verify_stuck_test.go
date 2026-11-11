@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -68,6 +69,115 @@ func parkCheck(t *testing.T, owed string) (entered <-chan struct{}, release func
 	return in, release
 }
 
+// unlockHold holds the next unlock of a backups folder's lock once armed
+// (SetOnLockReleaseForTest) until the test lets it go, and hears the end of
+// the worker of the verification it is armed for (SetOnVerifyEndForTest). A
+// verification answers its caller before its worker lets go of that lock
+// (verifyAndThen), so the window between the answer and the unlock is held
+// open, on every platform, and a step the test takes once the verification
+// has answered is shown to wait for the worker's end, never the answer
+// (backlog B849).
+type unlockHold struct {
+	root  string
+	armed atomic.Bool
+	p     *parking
+	heard sync.Once
+	ended chan struct{}
+	// held and heldErr are what the end found of the folder's lock, written
+	// before ended closes.
+	held    bool
+	heldErr error
+}
+
+// holdUnlockOf installs an unlockHold on the backups folder at root, not
+// armed. It is installed before the verifications whose unlock it may hold
+// start, since SetOnLockReleaseForTest's seam is read without a lock, and
+// that seam is put back once every hold has ended: joinBackupCallers'
+// cleanup, registered after it, runs first.
+func holdUnlockOf(t *testing.T, root string) *unlockHold {
+	t.Helper()
+	u := &unlockHold{root: root, p: newParking(), ended: make(chan struct{})}
+	t.Cleanup(backup.SetOnLockReleaseForTest(func(dir string) {
+		if dir == u.root && u.armed.CompareAndSwap(true, false) {
+			u.p.park()
+		}
+	}))
+	return u
+}
+
+// arm holds the next unlock of the folder's lock, and sets the end hook for
+// the verification of snapshot, the dir its caller passes. A worker runs the
+// hook that stood as its verification began, so only a verification begun
+// from here on can run it, never an earlier one of the same snapshot whose
+// worker has yet to end (backlog B849's second round). The hook's restore,
+// registered here, may run before such a worker calls the hook it took,
+// which touches this hold's own state alone.
+func (u *unlockHold) arm(t *testing.T, snapshot string) {
+	t.Helper()
+	t.Cleanup(backup.SetOnVerifyEndForTest(func(dir string) {
+		if dir == snapshot {
+			u.heard.Do(func() {
+				// Asked where the end happens, on the worker's goroutine.
+				u.held, u.heldErr = backupsLockHeld(u.root)
+				close(u.ended)
+			})
+		}
+	}))
+	u.armed.Store(true)
+}
+
+// requireHeld waits until the unlock is held: the verification has answered,
+// and its worker holds the lock still.
+func (u *unlockHold) requireHeld(t *testing.T) {
+	t.Helper()
+	select {
+	case <-u.p.entered:
+	case <-time.After(30 * time.Second):
+		t.Fatal("no holder of the backups folder's lock came to let it go")
+	}
+}
+
+// letGoAndAwaitEnd lets the unlock go and waits for the verification's worker
+// to have let go of everything it held, the folder's lock free as its end is
+// heard.
+func (u *unlockHold) letGoAndAwaitEnd(t *testing.T) {
+	t.Helper()
+	u.p.release()
+	select {
+	case <-u.ended:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the verification's worker never let go of what it held")
+	}
+	if u.heldErr != nil {
+		t.Fatalf("asking the backups folder's lock as the verification's worker ended: %v", u.heldErr)
+	}
+	if u.held {
+		t.Error("the verification's worker ended with the backups folder's lock still held")
+	}
+}
+
+// release lets the unlock go: a cleanup's, for a test that ends early.
+func (u *unlockHold) release() { u.p.release() }
+
+// backupsLockHeld reports whether the lock of the backups folder at root is
+// held, asked as another process asks it: an exclusive try through an open of
+// its own, let go at once.
+func backupsLockHeld(root string) (bool, error) {
+	f, err := os.OpenFile(filepath.Join(root, backup.LockFileName), os.O_RDWR, 0)
+	if err != nil {
+		return false, err
+	}
+	defer f.Close()
+	switch err := fsutil.TryLock(f); {
+	case err == nil:
+		return false, fsutil.Unlock(f)
+	case errors.Is(err, fsutil.ErrLocked):
+		return true, nil
+	default:
+		return false, err
+	}
+}
+
 // TestAnAbandonedCheckKeepsItsHoldsUntilItsCheckerEnds is backlog B653's
 // third round's red for a check given up past its deadline (Codex's first
 // finding on round 2): the verification answers its caller within its bound,
@@ -83,9 +193,12 @@ func parkCheck(t *testing.T, owed string) (entered <-chan struct{}, release func
 // verified snapshot is still there. The doctor names the check
 // (StuckCheckOf). Once the check ends each hold is let go and taken again,
 // the check's own result dropped (its record is as it was given up, never
-// the VERIFIED it found), and the next prune removes the oldest snapshot.
-// Red on the round before, which let all of it go once its caller had its
-// answer, and pruned under it.
+// the VERIFIED it found), and the next prune removes the oldest snapshot,
+// once the verification that took the folder's lock again as another
+// process has ended: it answers before its worker lets go of that lock, whose
+// unlock is held from the answer until the test waits for the worker's end
+// (unlockHold, backlog B849). Red on the round before, which let all of it go
+// once its caller had its answer, and pruned under it.
 func TestAnAbandonedCheckKeepsItsHoldsUntilItsCheckerEnds(t *testing.T) {
 	src := storeWithTracks(t, 5)
 	oldest := verifiedSnapshot(t, src)
@@ -102,9 +215,10 @@ func TestAnAbandonedCheckKeepsItsHoldsUntilItsCheckerEnds(t *testing.T) {
 	const deadline = 300 * time.Millisecond
 	restoreDeadline := backup.SetVerifyDeadlineForTest(deadline)
 	t.Cleanup(restoreDeadline)
+	unlock := holdUnlockOf(t, root)
 	entered, release := parkCheck(t, c.Dir)
 
-	callers := joinBackupCallers(t, release)
+	callers := joinBackupCallers(t, func() { release(); unlock.release() })
 	done := make(chan backup.Result, 1)
 	start := time.Now()
 	callers.start(func() { done <- backup.FinishCapture(context.Background(), c, keepOne, backup.VerifyOptions{}) })
@@ -176,17 +290,107 @@ func TestAnAbandonedCheckKeepsItsHoldsUntilItsCheckerEnds(t *testing.T) {
 		t.Errorf("a verification in another backups folder once the check ended: %v", err)
 	}
 	// older's record holds a VERIFIED: where no directory can be synced, its
-	// check runs and records nothing, which is that answer.
+	// check runs and records nothing, which is that answer. It answers before
+	// its worker lets go of the snapshots' lock (verifyAndThen), whose unlock
+	// is held here from the answer on, so the prune below waits for that
+	// worker's end, never the answer (backlog B849: on Windows' CI the prune
+	// that followed the answer found the lock still held).
+	unlock.arm(t, older)
 	if _, err := backup.VerifySnapshotAsAnotherProcessForTest(t.Context(), older, backup.VerifyOptions{}); err != nil &&
 		(fsutil.SyncsParentDir || !errors.Is(err, backup.ErrRecheckNotRecorded)) {
 		t.Errorf("a verification as another process once the check ended: %v", err)
 	}
+	unlock.requireHeld(t)
+	unlock.letGoAndAwaitEnd(t)
 	if backup.OwnerHeldAsAnotherProcessForTest(c.Dir) {
 		t.Error("the capture's owner lock is still held once its check ended")
 	}
 	pr, err = backup.Prune(root, 1)
 	if err != nil || pr.Skipped || pathExists(t, oldest) {
 		t.Errorf("the prune once the check ended: %+v, %v; want it run, the oldest verified snapshot gone", pr, err)
+	}
+}
+
+// TestAVerificationBegunBeforeItsEndHookNeverRunsIt is backlog B849's second
+// round (Codex's P2 on its first): a worker drops its hold, which is all a
+// test's drain waits for, before it runs the end hook (SetOnVerifyEndForTest),
+// so a worker that stood between the two while a test set that hook for a
+// later verification of the same snapshot ran it once it went on, and the
+// test's wait could pass on the earlier verification's end. Here the worker
+// is parked there (SetAroundVerifyEndForTest), the hook is set, and the
+// worker goes on: it runs no hook, since none stood when its verification
+// began; a verification begun once the hook is set runs it. Red on the round
+// before, which read the hook as the worker ended.
+func TestAVerificationBegunBeforeItsEndHookNeverRunsIt(t *testing.T) {
+	c := captureT(t, storeWithTracks(t, 5))
+	c.Release()
+	dir := c.Dir
+	p := newParking()
+	passed := make(chan struct{})
+	var parkedOne atomic.Bool
+	t.Cleanup(backup.SetAroundVerifyEndForTest(func(d string, end func()) {
+		if d != dir || !parkedOne.CompareAndSwap(false, true) {
+			end()
+			return
+		}
+		p.park()
+		end()
+		close(passed)
+	}))
+	t.Cleanup(func() {
+		p.release()
+		select {
+		case <-p.entered:
+		default:
+			return
+		}
+		select {
+		case <-passed:
+		case <-time.After(30 * time.Second):
+			t.Error("the parked worker never passed its last step")
+		}
+	})
+	if _, err := backup.VerifySnapshot(t.Context(), dir, backup.VerifyOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-p.entered:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the verification's worker never came to its last step")
+	}
+	if n := backup.ActiveHoldsForTest(); n != 0 {
+		t.Fatalf("%d holds active with the worker at its last step; want its hold dropped, as a test's drain finds it", n)
+	}
+	ran := make(chan struct{}, 2)
+	t.Cleanup(backup.SetOnVerifyEndForTest(func(d string) {
+		if d == dir {
+			select {
+			case ran <- struct{}{}:
+			default:
+			}
+		}
+	}))
+	p.release()
+	select {
+	case <-passed:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the parked worker never passed its last step")
+	}
+	select {
+	case <-ran:
+		t.Error("a verification begun before the end hook was set ran it as its worker ended")
+	default:
+	}
+	// Where no directory can be synced, a recheck of a VERIFIED records
+	// nothing, which is that answer.
+	if _, err := backup.VerifySnapshot(t.Context(), dir, backup.VerifyOptions{}); err != nil &&
+		(fsutil.SyncsParentDir || !errors.Is(err, backup.ErrRecheckNotRecorded)) {
+		t.Fatal(err)
+	}
+	select {
+	case <-ran:
+	case <-time.After(30 * time.Second):
+		t.Fatal("a verification begun once the end hook was set never ran it")
 	}
 }
 

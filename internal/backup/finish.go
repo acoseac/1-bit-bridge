@@ -265,12 +265,19 @@ const watchdogSlack = 2 * StopWriteBound
 // up waited for, the ownership (onEnd) let go as a step of its own, bounded,
 // the marker removed and the lock let go, bounded too, then the slot, and
 // last the mark of a hold given up, which stands until all of them are let go
-// (stuck.go). A panic in the check is recorded as its INCOMPLETE
-// (ReasonAborted), one in the worker's own steps answers an error, and
-// either lets go of all the same. A verification of a folder a hold given up
+// (stuck.go). Its caller, and whatever its caller does next, can therefore
+// find any of them still held: a test that needs them let go waits for the
+// worker's end (SetOnVerifyEndForTest, backlog B849), never the answer. A
+// panic in the check is recorded as its INCOMPLETE (ReasonAborted), one in
+// the worker's own steps answers an error, and either lets go of all the
+// same. A verification of a folder a hold given up
 // still holds is refused at once, asking no filesystem, the ownership let go
 // within StopWriteBound (letGoWithin).
 func verifyAndThen(ctx context.Context, dir string, o VerifyOptions, after func(context.Context, string), onEnd func()) (res VerifyResult, err error, abandoned bool) {
+	// The end hook as this verification begins, which its worker runs at its
+	// end: never one set later, for a later verification (backlog B849's
+	// second round). Nil in production.
+	endHook := onVerifyEnd.Load()
 	if o.Level == "" {
 		o.Level = CheckQuick
 	}
@@ -303,6 +310,22 @@ func verifyAndThen(ctx context.Context, dir string, o VerifyOptions, after func(
 	h.alsoLetGo(onEnd)
 	done := make(chan outcome, 1)
 	go func() {
+		// Last, once all of it is let go: the hook a test waits on for that
+		// (SetOnVerifyEndForTest), never the answer, which comes first; run
+		// inside a test's wrapper of this step where one is set
+		// (SetAroundVerifyEndForTest).
+		defer func() {
+			end := func() {
+				if endHook != nil {
+					(*endHook)(dir)
+				}
+			}
+			if around := aroundVerifyEnd.Load(); around != nil {
+				(*around)(dir, end)
+				return
+			}
+			end()
+		}()
 		defer h.drop()
 		defer releaseSlot()
 		defer h.release()
