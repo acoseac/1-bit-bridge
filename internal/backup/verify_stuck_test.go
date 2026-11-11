@@ -68,6 +68,51 @@ func parkCheck(t *testing.T, owed string) (entered <-chan struct{}, release func
 	return in, release
 }
 
+// unlockHold holds the next unlock of a backups folder's lock once armed
+// (SetOnLockReleaseForTest) until the test lets it go. A verification answers
+// its caller before its worker lets go of that lock (verifyAndThen), so the
+// window between the answer and the unlock is held open, on every platform,
+// for a step the test takes once the verification has answered (backlog
+// B849).
+type unlockHold struct {
+	root  string
+	armed atomic.Bool
+	p     *parking
+}
+
+// holdUnlockOf installs an unlockHold on the backups folder at root, not
+// armed. It is installed before the verifications whose unlock it may hold
+// start, since that seam is read without a lock, and its seam is put back
+// once every hold has ended: joinBackupCallers' cleanup, registered after it,
+// runs first.
+func holdUnlockOf(t *testing.T, root string) *unlockHold {
+	t.Helper()
+	u := &unlockHold{root: root, p: newParking()}
+	t.Cleanup(backup.SetOnLockReleaseForTest(func(dir string) {
+		if dir == u.root && u.armed.CompareAndSwap(true, false) {
+			u.p.park()
+		}
+	}))
+	return u
+}
+
+// arm holds the next unlock of the folder's lock.
+func (u *unlockHold) arm() { u.armed.Store(true) }
+
+// requireHeld waits until the unlock is held: the verification has answered,
+// and its worker holds the lock still.
+func (u *unlockHold) requireHeld(t *testing.T) {
+	t.Helper()
+	select {
+	case <-u.p.entered:
+	case <-time.After(30 * time.Second):
+		t.Fatal("no holder of the backups folder's lock came to let it go")
+	}
+}
+
+// release lets the unlock go: a cleanup's, for a test that ends early.
+func (u *unlockHold) release() { u.p.release() }
+
 // TestAnAbandonedCheckKeepsItsHoldsUntilItsCheckerEnds is backlog B653's
 // third round's red for a check given up past its deadline (Codex's first
 // finding on round 2): the verification answers its caller within its bound,
@@ -102,9 +147,10 @@ func TestAnAbandonedCheckKeepsItsHoldsUntilItsCheckerEnds(t *testing.T) {
 	const deadline = 300 * time.Millisecond
 	restoreDeadline := backup.SetVerifyDeadlineForTest(deadline)
 	t.Cleanup(restoreDeadline)
+	unlock := holdUnlockOf(t, root)
 	entered, release := parkCheck(t, c.Dir)
 
-	callers := joinBackupCallers(t, release)
+	callers := joinBackupCallers(t, func() { release(); unlock.release() })
 	done := make(chan backup.Result, 1)
 	start := time.Now()
 	callers.start(func() { done <- backup.FinishCapture(context.Background(), c, keepOne, backup.VerifyOptions{}) })
@@ -176,11 +222,15 @@ func TestAnAbandonedCheckKeepsItsHoldsUntilItsCheckerEnds(t *testing.T) {
 		t.Errorf("a verification in another backups folder once the check ended: %v", err)
 	}
 	// older's record holds a VERIFIED: where no directory can be synced, its
-	// check runs and records nothing, which is that answer.
+	// check runs and records nothing, which is that answer. It answers before
+	// its worker lets go of the snapshots' lock (verifyAndThen), and that
+	// unlock is held here from the answer on (backlog B849).
+	unlock.arm()
 	if _, err := backup.VerifySnapshotAsAnotherProcessForTest(t.Context(), older, backup.VerifyOptions{}); err != nil &&
 		(fsutil.SyncsParentDir || !errors.Is(err, backup.ErrRecheckNotRecorded)) {
 		t.Errorf("a verification as another process once the check ended: %v", err)
 	}
+	unlock.requireHeld(t)
 	if backup.OwnerHeldAsAnotherProcessForTest(c.Dir) {
 		t.Error("the capture's owner lock is still held once its check ended")
 	}
