@@ -284,6 +284,29 @@ func SetVerifyHandoffForTest(answer, expired func(string)) func() {
 	return func() { onVerifyAnswer.Store(oldAnswer); onVerifyExpired.Store(oldExpired) }
 }
 
+// onVerifyEnd, nil in production, runs once a verification's worker has let
+// go of everything it held (SetOnVerifyEndForTest).
+var onVerifyEnd atomic.Pointer[func(string)]
+
+// SetOnVerifyEndForTest installs the hook a verification's worker runs last,
+// once it has let go of everything it held, in verifyAndThen's order: the
+// steps it gave up ended, the snapshot's ownership, the backups folder's
+// marker and lock, this process's slot, then the mark of a hold given up;
+// and returns the restore. The hook receives the caller's dir as passed, as
+// SetVerifyHandoffForTest's do. A worker answers its caller before it lets go
+// of any of it, so a test whose next step needs the lock, the slot or the
+// ownership free waits for this, never for the answer (backlog B849). A
+// verification refused before its worker starts runs none. Its callback must
+// return, and ignore every dir but its test's.
+func SetOnVerifyEndForTest(fn func(dir string)) (restore func()) {
+	var p *func(string)
+	if fn != nil {
+		p = &fn
+	}
+	prev := onVerifyEnd.Swap(p)
+	return func() { onVerifyEnd.Store(prev) }
+}
+
 // ActiveHoldsForTest counts workers still retaining a hold, including a
 // cancellation handoff that has neither a slot nor an overrun mark yet.
 // Tests join their callers before waiting for this count to reach zero.

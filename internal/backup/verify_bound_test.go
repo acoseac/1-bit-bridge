@@ -37,8 +37,11 @@ func requireReturnedWithin[T any](t *testing.T, done <-chan T, from time.Time, b
 }
 
 // awaitVerificationEnd waits until the verification that owes the captured
-// snapshot in dir its check has ended, its capture's ownership let go (which
-// comes after its lock is), failing the test past a deadline.
+// snapshot in dir its check has ended, failing the test past a deadline:
+// every hold dropped (awaitClean), which a worker does last, once its lock,
+// its slot and the capture's ownership are let go (hold.release lets the
+// ownership go before the lock, backlog B849), and then the ownership taken
+// and let go as its next taker would.
 func awaitVerificationEnd(t *testing.T, dir string) {
 	t.Helper()
 	awaitClean(t)
