@@ -81,7 +81,6 @@ type unlockHold struct {
 	root  string
 	armed atomic.Bool
 	p     *parking
-	of    atomic.Pointer[string]
 	heard sync.Once
 	ended chan struct{}
 	// held and heldErr are what the end found of the folder's lock, written
@@ -92,9 +91,9 @@ type unlockHold struct {
 
 // holdUnlockOf installs an unlockHold on the backups folder at root, not
 // armed. It is installed before the verifications whose unlock it may hold
-// start, since SetOnLockReleaseForTest's seam is read without a lock, and its
-// seams are put back once every hold has ended: joinBackupCallers' cleanup,
-// registered after it, runs first.
+// start, since SetOnLockReleaseForTest's seam is read without a lock, and
+// that seam is put back once every hold has ended: joinBackupCallers'
+// cleanup, registered after it, runs first.
 func holdUnlockOf(t *testing.T, root string) *unlockHold {
 	t.Helper()
 	u := &unlockHold{root: root, p: newParking(), ended: make(chan struct{})}
@@ -103,8 +102,20 @@ func holdUnlockOf(t *testing.T, root string) *unlockHold {
 			u.p.park()
 		}
 	}))
+	return u
+}
+
+// arm holds the next unlock of the folder's lock, and sets the end hook for
+// the verification of snapshot, the dir its caller passes. A worker runs the
+// hook that stood as its verification began, so only a verification begun
+// from here on can run it, never an earlier one of the same snapshot whose
+// worker has yet to end (backlog B849's second round). The hook's restore,
+// registered here, may run before such a worker calls the hook it took,
+// which touches this hold's own state alone.
+func (u *unlockHold) arm(t *testing.T, snapshot string) {
+	t.Helper()
 	t.Cleanup(backup.SetOnVerifyEndForTest(func(dir string) {
-		if of := u.of.Load(); of != nil && dir == *of {
+		if dir == snapshot {
 			u.heard.Do(func() {
 				// Asked where the end happens, on the worker's goroutine.
 				u.held, u.heldErr = backupsLockHeld(u.root)
@@ -112,13 +123,6 @@ func holdUnlockOf(t *testing.T, root string) *unlockHold {
 			})
 		}
 	}))
-	return u
-}
-
-// arm holds the next unlock of the folder's lock, and hears the end of the
-// verification of snapshot, the dir its caller passes.
-func (u *unlockHold) arm(snapshot string) {
-	u.of.Store(&snapshot)
 	u.armed.Store(true)
 }
 
@@ -291,7 +295,7 @@ func TestAnAbandonedCheckKeepsItsHoldsUntilItsCheckerEnds(t *testing.T) {
 	// is held here from the answer on, so the prune below waits for that
 	// worker's end, never the answer (backlog B849: on Windows' CI the prune
 	// that followed the answer found the lock still held).
-	unlock.arm(older)
+	unlock.arm(t, older)
 	if _, err := backup.VerifySnapshotAsAnotherProcessForTest(t.Context(), older, backup.VerifyOptions{}); err != nil &&
 		(fsutil.SyncsParentDir || !errors.Is(err, backup.ErrRecheckNotRecorded)) {
 		t.Errorf("a verification as another process once the check ended: %v", err)

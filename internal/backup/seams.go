@@ -291,10 +291,15 @@ var onVerifyEnd atomic.Pointer[func(string)]
 // SetOnVerifyEndForTest installs the hook a verification's worker runs last,
 // once it has let go of everything it held, in verifyAndThen's order: the
 // steps it gave up ended, the snapshot's ownership, the backups folder's
-// marker and lock, this process's slot, then the mark of a hold given up;
-// and returns the restore. The hook receives the caller's dir as passed, as
-// SetVerifyHandoffForTest's do. A worker answers its caller before it lets go
-// of any of it, so a test whose next step needs the lock, the slot or the
+// marker and lock, this process's slot, then the mark of a hold given up
+// (where the lock's let-go overran releaseBound, the slot goes while it is
+// still under way, the mark standing until it ends, and the hook runs after
+// that); and returns the restore. The hook receives the caller's dir as
+// passed, as SetVerifyHandoffForTest's do. A worker runs the hook that stood
+// as its verification began, never one set later: so a test sets it before
+// the verification it waits for begins, and no worker begun earlier runs it
+// (backlog B849's second round). A worker answers its caller before it lets
+// go of any of it, so a test whose next step needs the lock, the slot or the
 // ownership free waits for this, never for the answer (backlog B849). A
 // verification refused before its worker starts runs none. Its callback must
 // return, and ignore every dir but its test's.

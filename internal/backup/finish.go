@@ -274,6 +274,10 @@ const watchdogSlack = 2 * StopWriteBound
 // still holds is refused at once, asking no filesystem, the ownership let go
 // within StopWriteBound (letGoWithin).
 func verifyAndThen(ctx context.Context, dir string, o VerifyOptions, after func(context.Context, string), onEnd func()) (res VerifyResult, err error, abandoned bool) {
+	// The end hook as this verification begins, which its worker runs at its
+	// end: never one set later, for a later verification (backlog B849's
+	// second round). Nil in production.
+	endHook := onVerifyEnd.Load()
 	if o.Level == "" {
 		o.Level = CheckQuick
 	}
@@ -312,8 +316,8 @@ func verifyAndThen(ctx context.Context, dir string, o VerifyOptions, after func(
 		// (SetAroundVerifyEndForTest).
 		defer func() {
 			end := func() {
-				if hook := onVerifyEnd.Load(); hook != nil {
-					(*hook)(dir)
+				if endHook != nil {
+					(*endHook)(dir)
 				}
 			}
 			if around := aroundVerifyEnd.Load(); around != nil {
