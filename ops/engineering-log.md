@@ -94407,7 +94407,7 @@ and waited once more with its context ended (Argon's).
 
 The Claude API (Low): a Pause whose context ended while it waited for the
 sink's lock paused the sink, moved its epoch and interrupted the writer, then
-answered its stop. That window regressed in round 5.
+answered its stop. The window predates round 5; round 5's entry read did not cover it.
 
 The fix (10ca8810) reads the context under the lock once Pause has it, before
 anything changes, and again in the loop (`pauseEnded`). It also reads it after
