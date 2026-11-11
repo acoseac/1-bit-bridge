@@ -4344,3 +4344,770 @@ empty variable as false reddens `TestAnEmptyVariableLeavesTheFilesConsent`,
 while its check of an empty value alone dropped stays green, the parse
 refusing the value. The record is in `ops/engineering-log.md`, 2026-11-09,
 B749 part 3 and its rounds 2 to 5.
+
+## B653 — each snapshot is verified, its verdicts kept with it and shown; the prune keeps what recovery needs (2026-11-09)
+
+- **A snapshot records each captured file's size and SHA-256 in its manifest (`baselines`, the database's read once `VACUUM INTO` has written it) and publishes it with its verification record already `PENDING`; a verification (`backup.VerifySnapshot`) never replaces a baseline and records two verdicts, the database's (`databaseState`: its baseline; a regular file with no `-wal`, `-shm` or `-journal` beside it, of any kind, both asked before SQLite opens; then a read-only open of that same file on a connection of its own, `mode=ro&immutable=1` through modernc's read-only VFS over a filesystem that serves that one file, never `manifest.OpenStore`; `quick_check` answering exactly one `ok`, or with `--full` `integrity_check` and `foreign_key_check`; a `user_version` the ladder reaches, with the tables and columns `manifest.RequiredSchema` says that version holds; the bundle's entries unchanged after the close) and the other files' (`filesState`: there, a regular file, its size and SHA-256), each `PENDING`, `VERIFIED`, `FAILED` or `INCOMPLETE` with reason codes from `backup.Reasons`, which name no path; every reader takes `readVerdict`, which reads a manifest with neither, one written before verification, as `UNVERIFIED` (`no-baseline`; `--verify` checks its files' presence and records nothing), a `PENDING` by its owner (the kernel's lock on `.verification.lock` in the snapshot, which its capture takes right after it makes the folder, or a claim under the backups folder's lock, and holds until its verification ends, and which a dead process lets go): as one under way while the owner holds it, however old, and as `INCOMPLETE` (`interrupted`) at once once it is gone, and a `PENDING` with no owner lock to ask, written before owners were kept, by its age, past `PendingBound` `INCOMPLETE`; and a `VERIFIED` beside its veto, in the bundle or beside it in the backups folder, as `INCOMPLETE` (`unsynced`); and the record names the folder it was written for (`snapshot`), a reader reading one of another folder, a manifest copied there, as `UNVERIFIED` (`other-snapshot`)** (2026-11-09, backlog B653 PR 1; its second round for the owner, its third for the folder). **Don't open a snapshot's database through `manifest.OpenStore`, without `immutable=1` or beside a sidecar, replace a baseline with what a check found, read a stale `PENDING` as under way, or one whose owner is gone however young, say that `quick_check` checks an index against its table or a foreign key (only `--full` does), or take a record written for another folder for this one's.** `TestADamagedDatabasePageFails`, `TestACheckThatAnswersAnythingButOkFails`, `TestAFileWithOneByteChangedFailsTheFilesVerdict`, `TestABundleThatChangesWhileItIsCheckedFails`, `TestASidecarBesideTheDatabaseFailsBeforeSQLiteOpens`, `TestALinkInTheBundleFailsBeforeSQLiteOpens`, `TestVerifyingAWALHeaderDatabaseTwiceCreatesNoFile`, `TestTheDatabaseMustBeASchemaThisBridgeKnows`, `TestTheFullCheckEvaluatesTheExpressionIndexes`, `TestALegacyManifestReadsUnverified`, `TestAStalePendingReadsIncompleteAndAYoungOneSurvivesAPrune`, `TestADeadCaptureIsPrunedAndALiveOneIsKept` and `TestARecordCopiedIntoAnotherFolderReadsUnverified` pin it. → History-rules-cli-serve.md
+
+- **…and every verification, `bridge backup --verify`, the startup pass's claim and the prune with its orphan sweep take one lock, `.backups.lock` in the backups folder where it resolves (`resolveSnapshotIn`, `resolveDir`: `.` in a snapshot, a relative path, a link to a snapshot and a backups folder reached through a link all name one folder, compared by `os.SameFile`; a snapshot outside the install's backups folder is refused, `ErrOutsideBackups`, and `--verify` loads the install's config to know it, exit 2), in every process (`fsutil.OpenLockFile`, `fsutil.TryLock`, taken behind this process's one holder of the folder, `folderTokens`): a verification from before it reads the manifest until its verdict is written and its prune has run, behind this process's one verification at a time, waiting for the lock within `AutoLockWait` (`VerifyCmdLockWait` for `--verify`) and then answering `ErrBackupsBusy`; the prune tried once, a round that finds it held skipped (`PruneResult.Skipped`, `SkippedFor`); and where the try is answered as no lock granted (`fsutil.KeepsNoLocks`, ENOLCK included), nothing protected runs: a verification answers `ErrBackupsUnlocked` and writes nothing, a prune and its sweep are skipped, a claim is refused; a verdict merges into the record under it (`mergeVerdict`: an `INCOMPLETE` replaces only a `PENDING` or an `INCOMPLETE`, and a database `VERIFIED` no completed check of a higher level) and is renamed into place through `atomicwrite.RenameWithRetryUnsyncedCtx`, which asks before every attempt whether the write was given up, behind a veto (`.verdict-unsynced`) wherever the record it replaces or the one it writes holds a `VERIFIED`, in the bundle or, where the bundle takes no file, beside it in the backups folder (`rootVetoPath`), kept where its owner cannot be given, and removed only once the folder's sync (`fsutil.SyncParentDir`) has answered, and only where a check that ended earns it (`earnsClear`: never for an `INCOMPLETE`, a stop's, a deadline's or a panic's; where what it found replaced both verdicts; or, where no veto stood before the verification began, over a `VERIFIED` carried over that it matched with one), each removal checking its write's and hold's give-up immediately before the call (`publishVerdict`'s `publication`, the unchanged record's after its veto lookup); these checks and calls have no atomic admission: a give-up between check and call still lets that operation run, and a removal or rename attempt already begun finishes after the give-up; removal of the last effective veto exposes what the completed check found and the write made durable, so a veto a failed write left stays over a `VERIFIED` a later verification carries over: a check of a snapshot whose record holds a `VERIFIED` puts its veto in place and syncs its folder before the check begins (`setAside`), and where none can be had durably checks nothing and writes nothing (`ErrRecheckRefused`), each veto creation attempt (bundle then root) and cleanup removal checking its step's and hold's give-up immediately before the call, including when its step registered after abandonment; a veto creation or removal that passed its check may finish after the give-up, and successful removal of the last effective veto restores the earlier check's record as it stood before the recheck, while another veto or a failed removal keeps the conservative reading, and where no directory can be synced at all (`fsutil.SyncsParentDir` false: Windows) runs its check without a prior veto and records no new verdict (`ErrRecheckNotRecorded`), but a completed FAILED component previously VERIFIED puts `putVeto` in place before read-back even beside an INCOMPLETE component; each attempt checks the step and hold before any filesystem call, and the cache stamp separately checks give-up; a successful veto with a skipped stamp is reported as vetoed with the console cache possibly stale until expiry or a folder change; an INCOMPLETE component disproves nothing; a veto there is not crash-durable, and if both attempts fail the error says it could not be vetoed; give-up before every location was tried instead says the veto could not be confirmed, and either skips its prune, with a later process still able to trust the stale VERIFIED; `abandonPending` writes nothing over a VERIFIED there; a recheck that recorded nothing, there or refused, is followed by no prune (`Result.PruneSkipped`, the reporters saying why); and any other write of a `VERIFIED` with no veto to be had writes nothing; its making and an ordinary write each move the backups folder's modification time (`stampChange`) while the step and hold permit the stamp; the recovery INCOMPLETE registered after refused publication admission stamps while its own fresh step permits it, with the hold still guarding every veto operation; a skipped stamp is a cache warning, never by itself a durability failure, and is reported separately from veto presence, and the console can retain its cached reading until expiry or a folder change; where no directory can be synced (Windows) the write is atomic and not known to be durable; every step of a verification that can wait on a filesystem (its paths' resolution, the lock's open and wait, every read of the manifest, the check, the write, the prune, the read-back) runs on one worker, which holds the slot, the lock and the snapshot's ownership until it ends; its caller answers within `StopWriteBound` of a stop, or of its own bound past its lock wait and its deadline, the abandoned worker keeping its hold until it ends and letting go at once a lock it takes after the stop, and every step under the lock, a verification's, the write of `INCOMPLETE` for one stopped before it began (`abandonPending`), a claim's (`backup.Claim`) and a prune's (`PruneContext`, on a goroutine of its own, its caller's wait bounded as a verification's), bounded from the moment the lock was taken (`hold.go`, `stepOf`: the steps before the check and the check's own give-up half of `StopWriteBound` past the deadline, `VerifyDeadline`; each step after it as long after the later of the deadline and its own start; `abandonPending`'s and a claim's `StopWriteBound` from the lock; a prune's `VerifyDeadline` from it), and so is a holder's let-go of the snapshot's ownership, a step of the hold before the lock goes (`alsoLetGo`, whatever took it: a capture, a claim its caller did not take, a step that took it late), and of the lock itself (`releaseBound`), begun in the section that takes the mark, after which a give-up marks this process alone and writes no marker; a step past its bound given up, its own give-up ended (never by its caller's stop, after which its `INCOMPLETE` is still written), so the next rename or removal whose check observes the give-up is skipped, and a verdict's write is admitted only where its hold was not given up before it, the give-up's check and the step's registration one section of the hold's lock with no I/O in it (`publishOf`), its holder writing its `INCOMPLETE` in a step of its own where it is not: its holder answers `ErrCheckGivenUp` naming the step, runs no check and no prune, writes nothing but its `INCOMPLETE` (`deadline`, merged, so a completed verdict stays), drops what a step answers late, and keeps the slot, the lock and the ownership until every step it gave up has ended, each let go once, on a panic too (a check's recorded `INCOMPLETE`, `aborted`), `VerifyResult.Recorded` saying only that what it wrote landed; the folder is marked by an overrun alone, never at the lock nor for a wait that overran nothing (a stopped verification's worker that handed its `INCOMPLETE` to `abandonPending`, whose own hold marks once its own step overruns: its caller's give-up of that worker marks nothing from the hand-off on, its release included, while a step of its own that overruns marks as any does), with no filesystem asked (the key resolved at the lock, and each spelling the folder was reached by, made absolute against the working directory read once as the process started), and the mark stands until every hold is let go (two holds given up under one key each until its own end): meanwhile a verification, a claim or a prune behind it answers `ErrCheckStillRunning` at once, naming the snapshot, or the prune, and the step, in this process by its mark, asked before any filesystem, and in another by the marker beside the lock (`.check-still-running`), which counts only while the lock is held, another process on storage that takes no writes waiting its lock wait out (`ErrBackupsBusy`); the doctor asks this process's mark first and bounds its reads of the folder (`doctorBackupsBound`), one read of a folder out at a time; a shutdown does not wait for it, the process's end ending it (what stays open is backlog B653's)** (2026-11-09, backlog B653 PR 1, and its second to seventh rounds). **Don't write a verdict, prune or reap without the lock, go on where none is granted, take the lock in a folder a path's spelling names, check a snapshot whose record holds a `VERIFIED` before its veto is durable, write over a `VERIFIED`, or write one, without its veto, remove the veto before the sync has answered, let a check that did not end, or a lower level's `VERIFIED`, replace a completed verdict, run a verification's filesystem step on its caller's goroutine, let an abandoned step's hold go before it ends, run a step under the lock with no bound, let a hold given up go of the slot, the lock or the ownership before every step it gave up has ended, start a check, prune or verdict write after observing a give-up (the recovery `INCOMPLETE` and read-back still run), record what a step answers late, wait behind it, mark a hold at its lock or ask a filesystem to mark one or to read the mark, drop the mark before the holds are let go, clear a veto that stood before the verification over a `VERIFIED` it carries, or any veto for an `INCOMPLETE`, omit the give-up check immediately before each rename attempt or veto removal, promise atomic admission of those calls, admit a verdict's write once its hold was given up or check that give-up apart from the step's registration, ask a removal only its write's step whether it was given up, let a recheck attempt a veto creation or cleanup removal without checking both its step and hold immediately beforehand, give a write its caller's stop for its give-up, recheck a `VERIFIED` behind a veto where no directory can be synced or write `INCOMPLETE` over one there, prune after a recheck that recorded nothing, let an ownership or the lock go unbounded or after the lock, write a marker once the lock's let-go has begun, mark a wait that overran nothing, ask the working directory at a key's use, or leave a read of the folder behind for every doctor run.** `TestAPrunerRacingAVerificationSkipsItsRound`, `TestTwoVerificationsOfOneSnapshotWriteOneAtATime`, `TestVerifyBesideTheTickersVerificationOfOneSnapshot`, `TestAQuickCheckNeverUndoesAFullOne`, `TestAStoppedCheckNeverReplacesACompletedVerdict`, `TestASyncFailureAfterTheVerdictsRenameReadsAsNotVerified`, `TestAnUnsyncedVerdictReadsAsNotVerifiedEverywhere`, `TestAVerifiedRecordLeftForAFailedOneIsVetoedWhenItsWriteFails`, `TestAVerifiedRecordLeftForAFailedOneIsVetoedWhereItsBundleTakesNoFile`, `TestALeftVerifiedThatCannotBeRecordedReadsAsNotVerifiedEverywhere`, `TestAVerdictWrittenByAnotherCallerShowsOnTheJobsCardAtTheNextPoll`, `TestACancelledVerificationWritesIncomplete`, `TestAStopWithABlockedSyncReturnsWithinItsBound`, `TestATickerStoppedWhileItsVerdictsSyncHangsReturnsWithinItsBound`, `TestAStopWhileTheManifestReadHangsReturnsWithinItsBoundAndKeepsTheLock`, `TestAStopWhileTheLocksOpenHangsReturnsWithinItsBoundAndTakesNoLockLate`, `TestAVerificationPastItsDeadlineReturnsWithItsCallerStillWaiting`, `TestAClaimStoppedWhileItsLockOpenHangsReturnsWithinItsBound`, `TestATickerStoppedWhileAVerificationsStepHangsReturnsWithinItsBound`, `TestNoLockNoProtectedWork`, `TestBridgeBackupVerifyTakesTheBackupsFoldersLockWhateverPathItIsGiven`, `TestBridgeBackupVerifyRefusesWhatIsNotInItsInstallsBackupsFolder`, `TestARecheckWithNoDurableVetoIsRefusedBeforeItsCheck`, `TestANewVerifiedIsNotWrittenWhereNoVetoCanBeHad`, `TestAFreshProcessReadsNoVerifiedAVerificationCouldNotRecord`, `TestAnAbandonedCheckKeepsItsHoldsUntilItsCheckerEnds`, `TestAVerificationWaitingItsTurnHearsOfACheckGivenUp`, `TestAPanicInAVerificationLetsGoOfWhatItHolds`, `TestACheckThatDidNotEndInAnotherProcessHoldsTheFolderUntilItEnds`, `TestEveryStepUnderTheLockIsBoundedAndMarked`, `TestASlowStepWithinItsBoundLeavesNoMark`, `TestAVetoThatStoodBeforeAVerificationStaysOverTheVERIFIEDItCarries`, `TestARecheckGivenUpLeavesTheVetoItMade`, `TestARecheckWhereNoDirectoryCanBeSyncedChecksAndRecordsNothing`, `TestAGivenUpVerificationReadsItsRecordBack`, `TestTwoHoldsGivenUpUnderOneKeyEachStandsUntilItsOwnEnd`, `TestAStoppedVerificationsMarkStandsUntilTheWriteItStartedEnds`, `TestAStoppedVerificationMarksNothingUntilTheWriteItStartedOverruns`, `TestBridgeBackupVerifySaysWhatARecheckFoundWhereItCannotBeRecorded`, `TestTheDoctorNamesAHoldGivenUpWhileTheBackupsFolderDoesNotAnswer`, `TestRenameWithRetryUnsyncedCtxRenamesNothingOnceItsContextEnds`, `TestAWriteGivenUpLandsNothingOnceItResumes`, `TestAnUnchangedRecordKeepsItsVetoOnceItsWriteIsGivenUp`, `TestARecheckThatDidNotEndLeavesTheVetoItMade`, `TestAVetoGoesOnlyWithACheckThatEndedAndEarnsIt`, `TestARecheckThatRecordedNothingIsFollowedByNoPrune`, `TestAStoppedVerificationRecordsNothingOverAVERIFIEDWhereNoDirectoryCanBeSynced`, `TestAPruneThatDoesNotEndIsGivenUpAndMarked`, `TestALockThatDoesNotLetGoIsMarkedUntilItDoes`, `TestAGiveUpOnceTheLocksLetGoBeganWritesNoMarker`, `TestAnOwnershipIsLetGoBeforeTheLock`, `TestASpellingIsKeyedAgainstTheDirectoryTheProcessStartedIn`, `TestAHoldsContextEndsWithIt`, `TestACallersGiveUpAfterAHandOffMarksNothing`, `TestTheDoctorKeepsOneReadOfABackupsFolderThatDoesNotAnswer`, `TestTheTickerAndTheDoctorNameAPruneGivenUp`, `TestTheVerdictsWriteIsAdmittedInOneSectionWithTheGiveUp`, `TestAVerdictsWriteIsAdmittedOnlyBeforeAGiveUp`, `TestNoVetoRemovalBeginsOnceItsHoldIsGivenUp`, `TestNoVetoRemovalBeginsAfterItsWriteIsGivenUp`, `TestAVetoSetAsideIsKeptOnceItsStepIsGivenUp`, `TestARecordNotReadBackIsSaidApartFromItsWrite`, `TestSetAsideAsksItsHoldBeforeEachVetoAttempt`, `TestSetAsideRemovalFinishesAfterGiveUp` and `TestRecoveryStepsKeepFreshSignalsAfterTheHoldIsGivenUp` pin it. → History-rules-cli-serve.md
+
+- **…and every snapshot takes one path, `backup.SnapshotAndVerify` (the capture, `CaptureSnapshot`, which owns its snapshot from right after it makes the folder until its verification has ended, then `FinishCapture`: the verification and, under the same hold of the lock, the prune after it whatever the verdict), whose `Result` tells a failed capture from a kept bundle whose verification failed or did not finish: the ticker and `bridge backup` take it and say what was kept, `bridge backup` exiting 1 for a kept snapshot that is not a verified recovery point, and where a verdict was not recorded each (`--verify` too) says what the check found and, apart, what the record reads, of a snapshot not checked again the record an earlier check left, and of a verification given up how far its write went (`VerifyResult.Write`: "it wrote nothing" only where no write began, "its write did not finish" where one began and was given up) and what its record reads as read back, or that it could not be read back (`RecordRead`), and in every case a record not read back is said so, and why (`VerifyResult.ReadErr`: its read failed, or its read-back was given up), never printed and never stood in for by what the check found, how far the write went said from its outcome (`VerifyResult.Write`) apart from it, so a durable write whose read-back failed says it wrote its record and exits 1 (`ErrRecordNotReadBack`, joined to any other error, each keeping its identity), and the console's job logs one with its write's outcome, never as a verdict not recorded, and of a prune a recheck that recorded nothing skipped, that cause; the console's create takes the capture, answers once it is written, and runs `FinishCapture` as a job on the server's own context; with retention on the prune keeps the `keep` newest and beside them, beyond `keep` if it must, the newest snapshot whose database is `VERIFIED`, while none is the newest written before verification, the newest whose database is `FAILED` or `INCOMPLETE`, one at most, and every snapshot a reader reads `PENDING` (`keptByRecovery`), and removes none whose owner holds it as it is removed (`ownedNow`), and with it off nothing changes; the orphan sweep spares a capture under way; the startup pass is one rule (`decideStartupPass`): no snapshot where one from the last day has a database `VERIFIED`, nor where the newest from the last day owes its check (its database `PENDING` or `INCOMPLETE`), which it leaves to the live owner that holds it, or else claims (`backup.Claim`) and verifies in place, taking a snapshot after it where that check finds the database `FAILED`, whether or not its record could be written, or answers `ErrRecheckNotRecorded` with a vetoed read-back and a FAILED component in its own finding (`Found`), never from a leftover veto alone; otherwise a snapshot; so a restart loop keeps one snapshot, which the first start that lives verifies; where the backups folder grants no lock (`backup.ProbeBackupsLock`) the ticker takes none while the newest snapshot owes its check, nor while a check that did not end holds the folder (`backup.StuckCheckOf`), each read of the folder before a capture, its startup listing's too, bounded by the stop (`readBounded`), and `bridge doctor`'s `backup-lock` and `backup-check` lines say why; the check runs on a thread of its own at the lowest priority, its reads paced; `bridge doctor`'s `backup-newest` and `backup-verified` (their hints commands the CLI takes as worded, `--full` after the snapshot, the config given as `--config <bridge.yaml>`, the one the doctor read), `GET /api/backups` and the Jobs and Settings views read the manifests alone (`backup.ReadStatus`), never a verification or the live database, and name no path** (2026-11-09, backlog B653 PR 1, and its second to seventh rounds). **Don't prune the newest database-`VERIFIED` snapshot or one whose owner still owes it its check, keep a `PENDING` whose owner is gone by its age, decide the prune, the startup pass or the newest verified by the files' verdict, capture at a start beside a snapshot from the last day that owes its check, skip the prune after a kept snapshot for its verdict, verify a console snapshot on the request's context or leave it `PENDING` with no job to finish it, capture on a cadence where no lock is granted while the newest owes its check, or beside a check that did not end, decide the check in place on its record, read the folder before a capture on the ticker's own goroutine, advise a bridge backup command with no `--config`, say a verification given up recorded what its record does not read, say it wrote nothing of a write that began, print a record it did not read back or what a check found in its place, word a write from the error rather than its outcome, say a durable write whose read-back failed was not recorded, or let a reader run a verification.** `TestThePruneKeepsWhatRecoveryNeeds`, `TestACertificateThatDoesNotMatchItsBaselineStillAnchorsRecovery`, `TestADeadCaptureIsPrunedAndALiveOneIsKept`, `TestAQueuedVerificationKeepsItsCaptureFromThePrune`, `TestAClaimedSnapshotIsKeptFromThePrune`, `TestTheReaperSparesACaptureUnderWay`, `TestAClaimTakesOnlyWhatNoLiveOwnerHolds`, `TestRepeatedFailedVerificationsThroughTheTickerAndBridgeBackupStillPrune`, `TestRepeatedFailedVerificationsThroughTheConsolesCreateStillPrune`, `TestACancelledCreateRequestLeavesTheVerdictToCome`, `TestBridgeBackupVerifiesWhatItKeepsAndSaysSo`, `TestBridgeBackupVerifyRecordsAndSaysTheVerdict`, `TestTheStartupPassFollowsTheNewestRecentSnapshot`, `TestARestartLoopTakesOneSnapshotAndTheFirstBootThatSurvivesVerifiesIt`, `TestABackupsFolderGrantingNoLockGrowsByOneSnapshotAndTheDoctorSaysWhy`, `TestTheDoctorTheAPIAndThePrunerAgreeOnEveryState`, `TestTheDoctorsVerifyHintsAreCommandsTheCLITakes`, `TestBothDoctorsCarryTheBackupLines`, `TestTheReadsArePaced`, `TestTheVerificationRunsOnAThreadOfItsOwn`, `TestAStartupCheckThatFindsTheDatabaseFailedTakesASnapshotWhetherOrNotItsRecordIsWritten`, `TestATickerStoppedWhileItsStartupListingReadsANamedPipeReturnsWithinItsBound`, `TestATickerStoppedWhileItsProbeOfTheLockHangsReturnsWithinItsBound`, `TestTheTickerTakesNoSnapshotWhileACheckThatDidNotEndHoldsTheFolder`, `TestBridgeBackupVerifySaysWhatAGivenUpVerificationsRecordReads`, `TestTheTickerSaysWhatAGivenUpVerificationsRecordReads`, `TestTheStartupPassSaysWhyARecheckThatRecordedNothingPrunedNothing`, `TestBridgeBackupVerifySaysTheWriteAndTheReadBackApart` and `TestTheTickerSaysTheWriteAndTheReadBackApart` pin it, and the console's `TestTheConsoleSaysARecordNotReadBackApartFromItsWrite`. → History-rules-cli-serve.md
+
+*Why here.* `internal/backup` and the backup commands load `cli-serve.md`
+(and `config-lifecycle.md`, at its budget), beside B745's bullet on the
+player's files in a snapshot, and the doctor's backup lines are
+`internal/doctor`'s, which loads this file too. The console's half is
+`admin-console.md`'s B653 bullet, and the generated schema `scanner.md`'s.
+
+*What main did.* A snapshot's manifest named its files and said nothing of
+their bytes, and nothing read a snapshot back, so a copy damaged on its way
+to the disk, or since, was found by the restore that needed it. The prune
+kept the `keep` newest by time and deleted the rest whatever they held, so a
+run of bad snapshots pruned the last good one; the startup snapshot was
+skipped for any snapshot younger than a day.
+
+*The database's check.* `mode=ro` alone, over a database whose header says
+WAL, as the live store's does, makes a `-shm` and a `-wal` in the bundle
+(measured 2026-11-08 with the module's SQLite, modernc.org/sqlite v1.61.0),
+and a second verification would then refuse its own leftovers as sidecars.
+`immutable=1` makes nothing. The
+open goes through modernc's read-only VFS over a filesystem that serves the
+file the verification already opened, under one name, every other name
+answered as not there, so SQLite cannot open or create a journal, and the
+bytes it reads are the ones the baseline was compared with, the same open
+(`os.SameFile` against the Lstat before it). Every read, the hash's and
+SQLite's, goes through one pacer that asks the check's context first, which
+is how a stop reaches a statement SQLite is in. The functions the expression
+indexes call are registered for every connection by internal/manifest, so
+`--full`'s `integrity_check` evaluates them. A check that ends in an error
+(a page SQLite cannot read) fails, and so does one that answers anything but
+exactly one `ok`: a NULL in a NOT NULL column, written while the schema said
+otherwise, is answered as a row (`NULL value in scan_state.v`) and no error
+(measured 2026-11-09), and the damaged-page test alone, whose damage ends in
+an error, passed a check that took any answer but an error (B653's control
+A4). `quick_check` does not compare an index with its table, which is why
+the public page says so and `--full` exists. The schema a `user_version` requires is generated from the ladder
+(scanner.md's B653 bullet), never written by hand.
+
+*One writer.* The lock is the kernel's on the open file (flock,
+LockFileEx), so two opens in one process exclude each other as two
+processes do, and a crash drops it; the file stays and means nothing
+without the lock on it. Before the lock a verification takes this
+process's one slot, so the bridge runs one verifier at a time and a second
+waits its turn. The bridge's own verifications wait for the lock as long as
+another process's may run (`AutoLockWait` is `VerifyDeadline`, 30 min), so a
+fresh snapshot's check waits behind a `--verify --full` at a terminal
+rather than leave its snapshot `PENDING`; `--verify` waits 15 s and says
+the folder is busy. Where the try's answer is one `fsutil.KeepsNoLocks`
+reads, nothing protected runs (the second round, below); the first round
+went on without the lock there.
+The merge keeps what a record says that a later check could only weaken: a
+check that did not end replaces only a `PENDING` or an `INCOMPLETE`, a quick
+`VERIFIED` never a completed full check, and a `FAILED` replaces anything.
+
+*Publication.* Once the manifest's rename has landed every reader reads the
+new record, so a folder sync that fails after it cannot be taken back by an
+error: a `VERIFIED` read after that error would be a recovery point nobody
+knows survives a crash. The veto is a separate entry whose presence alone
+vetoes, put before the rename and removed after the sync, so whichever step
+fails, the veto's own removal included, every reader (the doctor, the
+console, the pruner, the startup skip) reads `INCOMPLETE` (`unsynced`); a
+crash meanwhile leaves the old record or the new, with or without the veto,
+and each reads `VERIFIED` only from a check that passed. Rejected: writing
+`VERIFIED` only after a sync, since the rename is what publishes it and the
+sync comes after; a second state rewritten once synced, which has the same
+window at its own rename. Where no directory can be synced (Windows), the
+write is atomic and not known to be durable: a crash can leave the previous
+record, a `PENDING` among them, which reads `INCOMPLETE` once `PendingBound`
+has passed, subject to round 12's no-barrier recheck residual when disqualification
+cannot be written or survives no crash. The veto takes the manifest's owner (`fsutil.KeepOwner`, the job writers' rule
+in `config-lifecycle.md`), so a `--verify` run as root leaves the service a
+veto it can make and remove as its own, and one there already, of any
+owner, is kept, its presence alone being the veto: a root-owned veto the
+service could not open would have kept it from recording any `VERIFIED` of
+that snapshot again (`TestJobWritersKeepTheInstallOwner` found it).
+
+*A stop.* One bound, counted from the first wait that sees the stop and
+shared by the check's return and the write, so a stopped verification
+returns within `StopWriteBound` (2 s) of seeing it whatever it was doing, a
+read a hung mount holds included; serve's wait for the backup ticker
+(`backupShutdownWait`, 45 s) is far longer. A verification stopped before it
+began, in the slot's queue or the lock's wait, writes `INCOMPLETE` over its
+`PENDING` within the same bound. `PendingBound` is `VerifyDeadline` plus
+`AutoLockWait` plus ten minutes; since the second round it reads only a
+`PENDING` with no owner lock to ask, and one this bridge captures is read by
+its owner. The first round's bound covered the check and the write alone,
+and the second puts every step that can wait on a filesystem under it.
+
+*The prune.* Every decision reads the database's verdict alone: a snapshot
+whose files failed (a certificate rotated by hand into it, say) and whose
+database is `VERIFIED` is still the recovery point. The newest verified one
+stays however many failed ones come after it; while none is, the newest
+written before verification stays, which is all an upgraded bridge has
+until its first check passes; the newest that failed or did not finish
+stays as evidence, one at most, so a run of failures neither fills the disk
+nor erases what they found. The prune runs after every kept snapshot,
+whatever its verdict: a bridge whose every check fails still prunes. Inside
+`Finish` it runs under the verification's own hold of the lock, so no other
+process's prune runs between the verdict and it.
+
+*Readers.* `backup.ReadStatus` reads the manifests and nothing else: no
+surface runs a verification or opens the live database to say what a
+snapshot is. A snapshot is named by its folder's name, a time stamp, and no
+line or body names a path. The record is in `ops/engineering-log.md`,
+2026-11-09, B653.
+
+*The second round* (Codex's and the Claude API's review of the first, and
+both reviews of its brief). **A restart loop.** On an upgrade every
+snapshot is legacy and none is `VERIFIED`, so the first round's startup
+skip no longer held, and a boot that died before its verification ended
+(an OOM kill, a panic loop under `Restart=always`) captured again at every
+start, each capture a `PENDING` younger than `PendingBound` that every prune
+kept: hundreds of database copies before the first prune could drop one. A
+capture now owns its snapshot from right after it makes the folder until its
+verification ends, through the kernel's lock on `.verification.lock` in it
+(`owner.go`), which a dead process lets go; a reader reads a `PENDING` whose
+owner is gone as `INCOMPLETE` at once, and the prune keeps a `PENDING` only
+while a reader reads it so. The startup pass is one rule,
+`decideStartupPass`: where the newest snapshot from the last day owes its
+check and no live owner holds it, the boot claims it under the folder's lock
+and verifies it in place, capturing only where that check finds the
+database `FAILED`, so a restart loop keeps one snapshot and the first boot
+that lives verifies it (a recent `FAILED` is no reason to skip: it is not a
+recovery point). Rejected: one hold of the folder's lock across the capture
+and its verification, which blocks every other process's check and prune for
+a whole capture and still says nothing of the snapshots it does not hold;
+and protection by age, which the queue's own wait outlasts (five captures
+queued behind one 25-minute check passed `PendingBound` before their turn).
+The lock file is the per-snapshot marker the review asked for: keyed by its
+owner, released when its owner dies. Where a lock is carried out as a POSIX
+record lock (a Linux NFS mount), a second open of a lock file in the
+owning process takes the owner's lock again and its close lets it go, so
+this process asks its own records first (`ownedHere`, `folderTokens`) and
+never opens a lock file it holds.
+
+**A `VERIFIED` left behind.** The first round's veto covered a record that
+would hold a `VERIFIED`, and a verified snapshot whose check then failed
+both verdicts, its write failing before the rename, kept a `VERIFIED` every
+reader read. The veto now goes in place wherever either record holds one,
+beside the bundle where the bundle takes no file, and stays where its owner
+cannot be given; where neither can be made the write goes on, since landing
+the `FAILED` is the better outcome, and only a write that fails then too
+keeps the old record, `ErrRecordKept` saying so to its caller. The veto's
+making moves the backups folder's modification time as the write does, so
+the console's Jobs card, which caches what the folder holds by that time,
+reads the folder again.
+
+**The lock's name, and no lock.** `bridge backup --verify .` inside a
+snapshot made `.backups.lock` in the snapshot, and a link to a snapshot in
+the link's folder, so a verification and a prune could run side by side.
+The snapshot and the backups folder are resolved now and compared by
+`os.SameFile` (a spelled comparison refused every snapshot on macOS, whose
+temporary folders are reached through `/var`), the install's config names
+the folder, and a snapshot outside it is refused. Where the try is answered
+as no lock granted nothing protected runs, since ENOLCK does not show that
+no other process is checking or pruning: the verification answers
+`ErrBackupsUnlocked`, the prune and its orphan sweep are skipped (the sweep
+ran before the lock in the first round), and, so that a folder that never
+grants a lock does not grow by a snapshot a pass, the ticker takes none
+while the newest owes its check, and the doctor's `backup-lock` line says
+why.
+
+**The bound.** The first round's stop bound covered the check and the
+write; the manifest's reads, the lock file's open and its wait ran on the
+caller's goroutine, and a check its context could not reach was given up on
+the caller's stop alone, never on the deadline. Every step now runs on one
+worker that holds the slot, the lock and the ownership until it ends, so an
+abandoned step keeps its hold and nothing protected runs beside it, in this
+process or another; a lock taken after the stop is let go at once, and the
+deadline frees a hung check. The record is in `ops/engineering-log.md`,
+2026-11-09, B653 PR 1 round 2.
+
+*The third round* (Codex's and the Claude API's review of the second, and
+both reviews of its brief). **A check given up.** The second round gave a
+check its context could not reach up past its deadline, and let go of the
+slot, the folder's lock and the capture's ownership as its worker returned,
+the check's goroutine still reading the bundle, and pruned after it: another
+verification or a prune could run beside a check with the snapshot's files
+open. The worker now answers its caller first and lets go of each hold,
+once, only when the check's goroutine has ended; it runs no prune, records
+the `INCOMPLETE` it gave up with and drops what the check answers later, and
+marks the folder, so a verification, a claim or a prune behind it answers
+`ErrCheckStillRunning` at once rather than wait (in this process by the mark,
+in another by the marker it writes beside the lock, read only while the lock
+is held and removed by the next holder), and the doctor says so
+(`backup-check`). A shutdown does not wait for it: the process's end ends it.
+A check that panics records `INCOMPLETE` (`aborted`), and a panic in the
+worker's own steps answers an error; either lets go of all the same.
+Rejected: deferring the prune until the check ends, which needs a holder for
+it once its caller has gone; and ending the goroutine at the deadline, which
+Go cannot do. What stays open here is backlog B653's.
+
+**No `VERIFIED` survives a failed write.** Where no veto could be made, the
+second round wrote over a `VERIFIED` all the same, or, for mixed verdicts,
+returned before its rename with the database still read `VERIFIED` beside a
+check that found it `FAILED`; and its veto, made just before the write and
+synced best effort, left the time between the check and the write, and a
+rename the folder's sync did not make durable, with nothing durable beside
+the old record. A check of a snapshot whose record holds a `VERIFIED` now
+puts the veto in place, and syncs its folder, before it begins (`setAside`),
+and where that cannot be had checks nothing (`ErrRecheckRefused`, which the
+CLI says apart from a check whose write failed, with the record an earlier
+check left): a crash or a failed write at any point after leaves the old
+record behind a durable veto. Any other write of a `VERIFIED` with no veto
+writes nothing. The record names its folder, and a reader reads a record of
+another folder as `UNVERIFIED` (`other-snapshot`); a record has no
+generation of its own, since a crash that brings an old record back finds the
+durable veto beside it. Rejected: removing the record before the check,
+which leaves a bundle with no manifest for the orphan sweep to reap; and two
+records, which moves the question to which of them a reader trusts.
+`bridge backup --verify` and the ticker say what a check found and, apart,
+what the record reads, and the startup check in place decides on what the
+check found.
+
+**The ticker's reads, and the doctor's hints.** The ticker read the backups
+folder before a capture (its startup listing, the lock's probe) on its own
+goroutine, so a hung mount, or a named pipe where a manifest goes, held its
+stop past every bound: each read runs bounded by the stop now
+(`readBounded`). The doctor's hints named no config, and their test put one
+in front of each; they give `--config <bridge.yaml>`, the one the doctor
+read, and the test runs each as worded. The record is in
+`ops/engineering-log.md`, 2026-11-09, B653 PR 1 round 3.
+
+*The fourth round* (Codex's and the Claude API's review of the third, and
+both reviews of its brief). **Every hold bounded from its lock.** The third
+round bounded the check alone: putting the veto in place (its folder's
+sync), the verdict's write, the prune after it and the read-back ran under
+the lock with no bound and no mark, and so did `abandonPending`'s write of
+`INCOMPLETE`, so storage that answered reads and not writes held this
+process's slot, the folder's lock and the capture's ownership while the
+verification's caller lived (for the ticker, serve's whole life), other
+verifications waiting their turn, prunes answering busy and the doctor
+saying nothing; and a step that answered after its caller had been answered
+went on to a fresh check and a prune. Each step under the lock runs on a
+goroutine of its own now, bounded from the moment the lock was taken
+(`hold.go`), and a step past its bound is given up: its holder answers, runs
+no check and no prune, writes nothing but its `INCOMPLETE`, and keeps all it
+holds until every step it gave up has ended; the folder is marked by the
+overrun alone, with no filesystem asked, and the mark, which every reader
+asks before any filesystem or bounds, stands until every hold is let go.
+Rejected: a mark at the lock, which would refuse every healthy concurrent
+run and show the doctor a stuck check for each; and a watchdog in the
+caller alone, which cannot tell a slow step from a hung one, nor keep the
+worker from its next step. Across processes the marker cannot land on
+storage that takes no writes, and another process answers `ErrBackupsBusy`.
+Run twenty times under the race detector, the step test then found two
+holds of one folder given up at once, a stopped verification's worker and
+the write of `INCOMPLETE` it started, whose marks shared a key: the later
+overwrote the earlier and its end erased the key while the other hold
+stood, and the worker's mark named its wait for the lock and went with the
+worker while the write, within its own bound still, had none yet. A key
+keeps every mark now, and the worker names the write and keeps its mark
+until the write has ended, though its slot goes as it ends. Rejected:
+keeping the slot until the write ends, which leaves this process's other
+verifications waiting behind a hung write wherever the worker's caller
+took its answer before giving it up.
+
+**No veto cleared over a `VERIFIED` carried over.** The third round removed
+every veto once a write landed, so a retry beside the veto a failed write
+left (stopped before it began, past its deadline, given up, panicking, or a
+quick `VERIFIED` over a full one) cleared it over the `VERIFIED` the merge
+carried over, and the pruner, the doctor and the console took for a
+recovery point a snapshot a completed check had found damaged. A veto goes
+now only where the record is wholly what the check found, or where none
+stood before the verification began. Each removal checks the give-up just
+before its call; the seventh round below states the check/call window and
+the late-removal exception for a recheck too. Rejected: never clearing
+a veto beside a `VERIFIED` carried over, which keeps the veto a completed
+quick check made over a full `VERIFIED` nobody doubted, so a routine recheck
+would leave the snapshot read `INCOMPLETE` until the next full check.
+
+**No recheck recorded where no directory can be synced.** On Windows
+`fsutil.SyncParentDir` is a no-op that answers nil, and the third round took
+a veto not known durable for a durable one. Where `fsutil.SyncsParentDir` is
+false a recheck runs, says what it found and records no new verdict
+(`ErrRecheckNotRecorded`). Round 12 supersedes the original no-veto rule:
+a completed finding that disproves a VERIFIED component vetoes the record
+before read-back, while an INCOMPLETE leaves it alone; see round 12 below. Rejected: refusing the check as well, which would
+leave a Windows operator no way to learn of damage.
+
+**What the record reads.** `VerifyResult.Recorded` was true for a give-up
+whose merge kept a completed verdict and wrote nothing, and the CLI and the
+ticker said "not recorded" of an `INCOMPLETE` that was written; `Recorded`
+says now that what was written landed, and both say whether a give-up wrote
+its record and what that record reads as read back. The round-3
+fresh-process test's header claimed round 2 red on every reader; it says
+now what round 2 did, case by case, and pins the refusal by the check the
+process began. Codex's fourth finding on round 3, in code this PR does not
+change, is backlog B826. The record is in `ops/engineering-log.md`,
+2026-11-09, B653 PR 1 round 4.
+
+*The fifth round* (Codex's and the Claude API's review of the fourth, and
+both reviews of its brief). **Each rename attempt checks the give-up.** The fourth
+round gave a step up and answered its caller, and the step's write went on:
+once a stall inside its staging or before its rename ended, it renamed its
+`VERIFIED` into place and removed the veto, so a caller told the
+verification was given up, with nothing recorded, was followed by a record
+every reader took for verified; and so did `abandonPending`'s `INCOMPLETE`.
+Each step under a hold has a give-up of its own now, which only that step's
+give-up ends (its bound, or its caller's abandon of the hold while it runs),
+and a write asks it before every attempt at its rename and before it removes
+a veto. The check and call are not atomic: an attempt that passed its check
+can still run if the give-up arrives before the syscall, and a rename
+attempt already begun finishes afterward. The reporters say a write given up did not
+finish, never that it wrote nothing. Rejected: the caller's context as that
+signal, which a plain stop ends too, after which the worker must still write
+its `INCOMPLETE`.
+
+**A veto only for a check that ended.** The fourth round let a recheck that
+ended `INCOMPLETE` within its bound (past its deadline, stopped, or on a
+panic) remove the veto it had made wherever none stood before, so the
+`VERIFIED` its record carried over read verified though the recheck never
+finished. A veto goes now only where every verdict the record carries over
+was matched by a `VERIFIED` in what the check found (a quick check over a
+full one, where no veto stood before), and never for an `INCOMPLETE`.
+
+**No prune on a record a recheck could not keep.** Where no directory can be
+synced, round 4 left a disproved `VERIFIED` readable, and the prune under
+the same hold trusted it and could remove the older good snapshot. Round 12
+also vetoes that record for later readers and prunes, subject to its stated
+write-failure and crash residuals. A recheck that recorded nothing, there or refused for
+want of a durable veto, is followed by no prune; the next snapshot's prune
+runs as usual. `abandonPending` keeps the platform rule: no write over a
+`VERIFIED` where no directory can be synced.
+
+**Every holder and every step bounded.** The prune run on its own held the
+lock with its removals unbounded; letting go of the lock and of the
+snapshot's ownership had no bound; and an ownership a claim took late, or
+that its caller never took, was let go on goroutines nothing waited for,
+after the lock. The prune holds the folder as every holder does; the hold
+lets go of the ownership before its lock, as a bounded step, and of the lock
+within a bound too, its let-go begun in the section that takes the mark, so
+a give-up after it writes no marker beside a lock no longer held. A stopped
+verification's worker that handed its `INCOMPLETE` to `abandonPending` marks
+nothing while it waits, and the write's own hold marks once its own step
+overruns. Rejected: the fourth round's mark there, which named a wait that
+had overrun nothing. Run twenty times under the race detector, the first
+form of that quiet, which ended as the worker's release began, let the
+caller's give-up, landing as the worker answered, mark the folder at the
+worker's wait for the lock once in twenty; the quiet holds now for the
+caller's give-up for the hold's whole life after its hand-off, and a step of
+its release that overruns marks as before. A spelling's key is made
+absolute against the working directory read once as the process starts, a
+hold's context ends with it, and the doctor keeps one read of a folder out
+at a time. Restore's lock on its source snapshot is backlog B826. The record
+is in `ops/engineering-log.md`, 2026-11-09, B653 PR 1 round 5.
+
+*The sixth round* (Codex's and the Claude API's review of the fifth, and
+both reviews of its brief). **No write admitted after a give-up.** The
+fifth round handed each step a fresh signal of its own, which only that
+step's give-up ended, so a give-up between a verification's last check of
+its hold and the registration of its verdict's write found no step of the
+write's to end, and the write admitted then ran on a live signal: it
+published the check that had ended, and cleared the veto, after its caller
+was told the verification was given up. The check of the give-up and the
+registration of the write's step are one section of the hold's lock now,
+with no I/O in it: a give-up before it refuses the write, which never runs,
+and the worker writes its `INCOMPLETE` in a step of its own; a give-up after
+it ends the signal the write was registered with. Rejected: running the
+write on a signal ended at its admission, which lands nothing, the
+`INCOMPLETE` it must still write included.
+
+**Each veto removal checks the give-up.** The fifth round asked the
+write's signal once before its removals, and the unchanged record's branch
+before its lookup of the veto, so a stall in the first removal, or in the
+lookup, let the next removal run after the give-up. Every removal asks now,
+immediately before it, the write's signal and its hold's give-up, since a
+write begun after the hold was given up, the `INCOMPLETE`'s, has a signal
+no earlier give-up ended. The check and removal are not one atomic
+admission: a give-up between them still lets that removal run, and a
+removal already begun finishes after the give-up. Only successful removal
+of the last effective veto exposes what the completed check found and the
+write made durable. Rejected: keeping the veto until that removal settles,
+which would mean a removal no give-up can interrupt and a write that waits
+on it past its bound. `setAside`, putting a veto in place before a recheck,
+checks both its step's signal and its hold before each creation attempt
+and cleanup removal, including if its step registered after abandonment.
+A veto creation or removal that passed its check may finish after the
+give-up. Successful removal of the last effective veto restores the earlier
+check's record as it stood before the recheck. A second veto or failed
+removal keeps the conservative reading; read-back reports its observation
+at that time, not the eventual result of an in-flight call.
+
+**The read-back said apart from the write.** The fifth round's read-back
+answered only whether it read the record, and the CLI printed what the check
+found in its place: a quick check that found `VERIFIED` over a record whose
+full check had `FAILED`, its read-back failing, printed `VERIFIED` and
+exited 0. The read-back says why it read nothing (its read's failure, or its
+own give-up), the verification answers `ErrRecordNotReadBack` beside
+whatever else it answers, each error keeping its identity, and the CLI, the
+ticker and the console say what the write did from its outcome and, apart,
+that the record could not be read back, or that its read-back was given up:
+never what the check found as the record, and never that a durable write
+failed or was not recorded. The record is in `ops/engineering-log.md`,
+2026-11-09, B653 PR 1 round 6.
+
+
+*The seventh round* (2026-11-10). The lock-free checks directly before each
+removal, rename attempt and pre-recheck veto creation remain deliberate:
+no new `h.mu` admission and no I/O under it. The check/call gap permits the
+operation to run after a give-up, and each operation already begun when the
+give-up lands finishes afterward. `setAside` asks the hold as well as its
+step before both candidates and cleanup; ordinary `stepOf` still starts
+`stepIncomplete`, `stepReadBack` and `abandonPending`'s INCOMPLETE after a
+give-up with fresh signals. The admission pin injects abandonment after
+lock acquisition but before the check, rejecting a check moved immediately
+before `h.mu.Lock`, and observes an abandonment blocked on the mutex in the
+registration case instead of assuming a 200 ms wait proved it tried.
+
+The refused-recheck fixture parks bundle-veto removal after failed syncs.
+It covers one veto (the late removal restores the earlier record) and two
+(the root veto survives and the record still reads INCOMPLETE). The console
+switches on every error's `Write`: only none/failed say not recorded;
+not-durable says written, not known durable; unfinished says the write did
+not finish before give-up. Every branch logs `write` and `recordRead`,
+including shutdown errors. Its sync-failure case injects the directory
+barrier with `SetSyncVerdictForTest`, observes FAILED already published,
+and checks the log and subsequent console read. Validation is delegated to
+the orchestrator; this edit-only round ran no builds, tests or docs checks.
+The record is in `ops/engineering-log.md`, 2026-11-10, B653 PR 1 round 7.
+
+
+*The eighth round* (2026-11-10). A caller that stops waiting cannot infer
+that nothing was written. `verifyAndThen` returns `WriteUnknown` when its
+outer expiration wins, or a recovered worker panic leaves no outcome.
+`abandonPending` returns its completed INCOMPLETE publication's outcome to
+both cancellation handoffs (slot queue and folder-lock wait); a missing
+answer is unknown. These handoffs do not invent a record read-back. Every
+consumer uses `Write`, including CLI and ticker errors with empty `Found`.
+The console logs shutdown errors with `write` and `recordRead`, and calls an
+unknown outcome unknown. Its deterministic outer-expiration case parks the
+worker answer and asserts the expiration hook; a separate uncancelled case
+lets the worker report its unfinished write. Both observe FAILED already
+published before the directory sync stalls. Additional cases cancel
+`ScanCtx` during the check and give up a staged write.
+
+Pins: `TestAStopBeforeVerificationReportsItsIncompleteWrite`,
+`TestTheConsoleReportsCancellationAndEveryWriteHandoff`, and
+`TestTheReportersKeepWriteProgressWithoutAFoundVerdict`. The fixture and
+cleanup invariants are in `History-rules-build-ci-tests.md`'s eighth-round
+entry; the supporting record is in `ops/engineering-log.md`.
+
+
+*The ninth round* (2026-11-10). An outer expiry remains `WriteUnknown`:
+a record may have been written, or may still be: the verdict, or INCOMPLETE
+once the stalled step ends. Rejected publication falls back to
+`stepIncomplete` with a fresh signal, and a blocked lock attempt can still
+hand off to `abandonPending`. Never infer `WriteNone` from the absence of an
+admitted verdict write at expiry.
+
+`TestAVerificationPastItsDeadlineReturnsWithItsCallerStillWaiting` now also
+parks recovery before publication and independently parks the worker answer,
+asserts the outer-expiry hook and Unknown while the record is PENDING, then
+releases recovery and reads INCOMPLETE from disk before releasing the answer.
+The original worker-answer case still proves the shorter check deadline.
+
+The ticker suppresses an outer expiry's shutdown error when
+`ctxerr.WithoutCancellation` leaves nothing and `Found` is empty: its verdict
+is unknown. Round 11 below supplies the rule when a verdict is known.
+A step given up, a record not read back, or a write failure accompanying
+cancellation is still reported. The contrasting cases
+are in `TestTheTickerSilencesOnlyCancellationWithoutAnotherFailure`.
+`TestTheReportersSayWhenAnIncompletePublicationWasNeverReadBack` uses
+`abandonPending`'s actual shape (INCOMPLETE Found, WriteRecorded, RecordRead
+false, ReadErr nil): it says "its record was not read back", never "could
+not be read back". No reporter behavior changes in this round.
+
+
+*The tenth and eleventh rounds* (2026-11-10). The ticker decides shutdown
+silence from the verdict. Round 10 joined a non-cancellation verdict to the
+context error in one `verifyHeld` stop branch. Round 11 removes that join:
+both stop branches return the stop's own error, preserving CLI and console
+behavior and covering a stop that arrives between those branches.
+
+With an error, the ticker is silent only when `ctxerr.WithoutCancellation`
+leaves nothing AND `Found` is empty, passing or `CancelledOnly`. An empty
+`Found` at outer expiry means the verdict is unknown, even if the worker
+later publishes an aborted or expired verdict. A known non-cancellation
+verdict is reported by the found-verdict branch with its write words; when
+no other failure remains, the line ends with `res.VerifyErr`, never `<nil>`.
+With no error, silence requires a stopped context and a `CancelledOnly`
+read-back `Record`; passing records still use the normal success output.
+
+`Verification.CancelledOnly` requires the database to be VERIFIED,
+UNVERIFIED with only `ReasonNoDatabase`, or INCOMPLETE with only
+`ReasonCancelled`; the files must be VERIFIED or INCOMPLETE with only
+`ReasonCancelled`; at least one must be that cancelled INCOMPLETE. Anything
+else is reported, including PENDING or any other UNVERIFIED beside a
+cancelled verdict. Never decide silence from the database's state alone,
+from the context ending alone, or from the error without its found verdict.
+
+`TestTheTickerReportsAPanickedCheckAtShutdown` reproduces the overlap by
+panicking in the real database check and cancelling through
+`SetAfterCheckForTest`, requires bare `context.Canceled` (not merely
+`errors.Is`) and database/files INCOMPLETE: aborted on stderr. Its second
+case stops after the worker answer, exercising the no-error path.
+`TestTheTickerReportsFoundVerdictsBesideCancellation` requires aborted,
+deadline and FAILED found verdicts beside bare cancellation to reach stderr
+with the write/read-back words and the stop's own error; cancelled, empty
+and passing found verdicts stay silent.
+`TestTheTickerSilencesOnlyCancelledRecordsAtShutdown` includes a cancelled
+database beside failed or aborted files, cancellation-only contrasts,
+missing and extra reasons, and round 11's database PENDING, no-baseline,
+unknown-record or other-snapshot beside cancelled files, plus files PENDING
+or UNVERIFIED beside a cancelled database. Each non-cancellation row requires
+its verdict on stderr with no stdout.
+
+The expiry error is built by `verifyExpiryError` in production and exposed
+through `VerifyExpiryErrorForTest` for the outer-expiration reporter case.
+A change in its wrapped causes must reach that case; its control adds a
+non-cancellation cause to the constructor and requires silence to fail.
+The supporting record, round-10 orchestrator validation and round-11
+control handoff are in `ops/engineering-log.md`. Round 11's controls restore
+only the shared join, only the old ticker error branch, and loosen each side
+of `CancelledOnly` separately. No round-11 execution is claimed by the
+edit-only worker.
+
+## B653 PR 1 round 12: disproved records and precise verification reports
+
+A no-barrier recheck (Windows, or `SetSyncsParentDirForTest(false)`) still
+leaves the manifest byte-identical and answers `ErrRecheckNotRecorded`.
+A completed component check disproves it when that component was VERIFIED
+and is now FAILED, even beside an INCOMPLETE component (round 13).
+Before read-back, `verifyHeld` runs `putVeto` in a bounded step and stamps the
+backups root while step and hold permit it. Round 13 guards both attempts
+and stamping, reporting a skipped stamp separately from veto presence. The existing bundle veto, or its root fallback, makes shared
+`readVerdict` downgrade the old VERIFIED to INCOMPLETE: unsynced for List,
+NewestVerified, doctor, console, startup and subsequent prunes. The Jobs
+cache sees that stamp on its next poll. A files-only disproof also vetoes
+the record: the veto is of the record, not just the prune's anchor choice.
+
+This cannot promise crash durability where directories cannot be synced.
+If neither veto location can be written, the error explicitly says the
+disproved record could not be vetoed and a later process may still trust
+its stale VERIFIED. The current verification skips its prune, as every
+recheck that records no new verdict does. Skipping that prune is not a
+persistent solution to failed disqualification, and the guide says so.
+After a successful veto, `keptByRecovery` is unchanged: configured newest,
+older trustworthy anchor, one evidence snapshot, and pending snapshots;
+intermediate failures still go. An INCOMPLETE component itself disproves
+nothing; a completed failure of its sibling can still require a veto.
+
+The staged manifest uses `tmp.Chmod(0o600)` on its open descriptor before
+sync and close. Its test replaces the exact staged pathname at a per-call
+seam before that mode change, asserting the target's mode, not just bytes.
+The stuck marker removes an existing entry (ignoring only not-exist), then
+creates with O_EXCL. A nonempty directory that cannot be removed ends the
+attempt; a racing replacement ends exclusive creation without following
+it. A per-mark seam pins the removal/create window. The Unix staging race
+is skipped on Windows, which does not permit replacing that open file;
+marker symlinks are exercised where the Windows account can create them.
+
+Schema table and column collection distinguish missing names from query,
+Scan and iteration errors. `columnsOf` checks `rows.Err()` after the loop,
+even when every required name arrived. The caller reports cancellation as
+INCOMPLETE and other read failures as open-failed. The tests use a
+per-connection SQL driver, injecting the three failures separately into
+real database/sql machinery; table errors and cancellation are preservation
+coverage. No production global seam is needed.
+
+The doctor's fallback advice tests database FAILED first, then INCOMPLETE
+in either component, then VERIFIED database with FAILED files, then
+UNVERIFIED no-database with FAILED files, otherwise neutral advice. The
+files-only no-database hint makes no recovery-point claim. Existing passing,
+pending and legacy handling remains ahead of these fallback cases.
+
+`VerifyResult.NotStarted` recognizes ErrBackupsUnlocked, ErrBackupsBusy and
+ErrCheckStillRunning only with WriteNone. CLI, ticker and console report
+that verification did not start, with the error's reason. Busy plus a
+cancellation write still reports its actual outcome; error identity alone
+cannot decide the wording. The console's production job calls
+`reportBackupVerification`, so direct reporter cases use the same log site.
+The CLI's no-barrier read-back lead is neutral ("its record reads now"),
+since a failed veto may have left the old VERIFIED readable.
+
+Regression cases and independent controls, not yet executed by the
+edit-only worker, are recorded in the engineering log's round-12 entry.
+The test teardown changes are in History-rules-build-ci-tests.md's round 12.
+
+
+## B653 PR 1 round 13: component disproof, descriptor modes and guarded vetoes
+
+`disproves` compares each component with its own prior state. FAILED over
+VERIFIED is conclusive even while the other component is INCOMPLETE; the
+latter component supplies no disproof of its own. The mixed database case
+expires only the files phase's internal context, after real database damage
+has been found, without stopping the verification caller (round 14), and
+runs retention in a fresh process. The older genuinely
+verified anchor must survive, and the intermediate failure must be removed.
+
+The staged and vacuum permission changes use descriptors. `writeManifest` and
+`writeFromHashed` chmod the still-open staged file before sync and close.
+`vacuumInto` opens SQLite's output with no-follow semantics, then requires
+a regular descriptor before chmod. Unix uses O_NOFOLLOW and O_NONBLOCK;
+Windows opens the final reparse entry itself, with BACKUP_SEMANTICS so
+directories, directory symlinks and junctions reach the non-regular refusal.
+Only final-component symlink/reparse redirection of the permission change
+is protected: replacement by another regular file or hard link, a parent
+replaced by a link, and SQLite's own pathname VACUUM INTO write are outside
+this guarantee. Root-run backup or restore over a tree an untrusted account
+can rename is out of scope; no parent handle anchoring is added here.
+The three per-call hooks replace the exact pathname before mode handling;
+each regression asserts that the symlink target's MODE remains 0644.
+
+`putVeto` is shared by the no-barrier disqualification (`vetoDisproved`)
+and publication. Each bundle/root attempt checks the step and hold before
+`writeVeto`, including its Lstat; there is no unguarded preflight lookup.
+Only a failed bundle attempt reaches the root fallback, which checks again.
+An already-existing veto or a created one is success, even when close or
+ownership handling did not complete normally. Presence and cache stamping
+are separate outcomes. Both give-ups are checked again before best-effort
+sync and before the stamp; a skipped stamp says the record IS vetoed, with
+the console's cached reading possibly retained until TTL expiry or a folder
+change. A root veto creation itself changes the root's mtime. A bundle veto
+does not. Both attempts failing is reported as "could not be vetoed";
+give-up before all candidates were tried is "the veto could not be
+confirmed", since an uninspected root may already hold one. Both callers
+use the explicit unconfirmed flag, never an error-identity inference.
+Either outcome skips the immediate prune.
+These guards do not revoke a filesystem call that already passed its guard.
+Recovery-INCOMPLETE admission and merging remain unchanged. Its round-13
+post-rename stamp nevertheless checked the abandoned hold too, incorrectly
+skipping recovery's stamp and turning its cache warning into a durability
+failure; round 15 below separates those outcomes. Recovery that changes a
+mixed record holding VERIFIED remains refused at the veto guard.
+
+The direct caller tests inject step and hold give-up independently before
+the first attempt, after a failed bundle, and after a created or existing
+bundle or created root veto. They require exact lookup/create counts,
+veto presence, an unsynced read-back and separate skipped-stamp wording.
+They plant an old root stamp to require no change after bundle give-up.
+The console regression exercises that resulting unstamped bundle state:
+its list rejects VERIFIED immediately, its card retains the cached reading,
+and forcing the cache's age beyond its TTL makes the card read the veto.
+The cache test preserves an existing limitation, not a baseline-red claim.
+
+`unsynced` is neutral evidence. A disproof, a successful verification whose
+veto removal failed, an interrupted process, or a veto lookup error can
+produce it. With no directory barrier, the doctor's package seam defaults
+to fsutil.SyncsParentDir and, after FAILED-database advice, chooses
+fresh-snapshot advice: the record
+cannot be trusted or re-recorded here. Its tests cover both disproof and
+successful checking with a leftover veto, and keep retry advice where a
+barrier exists. The startup pass's in-place check takes a fresh snapshot
+when ErrRecheckNotRecorded accompanies a FAILED component in its own
+Found, including VERIFIED database / FAILED files. A leftover veto with
+a passing check causes no capture across repeated starts, even with
+retention off and veto removal persistently failing. A FAILED database
+always triggers replacement whether or not recording succeeds. A subsequent
+start skips the fresh verified database as before. No new wire fields or states are introduced.
+
+## B653 PR 1 round 14: advice precedence, replacement evidence and unconfirmed vetoes
+
+A FAILED database keeps the damaged-database advice even when the files
+read INCOMPLETE (`unsynced`). The neutral no-barrier advice is selected
+only afterward. `TestTheDoctorKeepsDatabaseDamageAdviceBesideUnsyncedFiles`
+requires the damage warning, full-check command and advice to keep verified
+snapshots, and rejects fresh-snapshot advice for this combination.
+
+Startup's existing database-FAILED replacement remains unconditional on
+recording. Only the additional `ErrRecheckNotRecorded` branch is narrowed:
+its own `VerifyResult.Found` must contain a FAILED component, alongside
+the existing vetoed-read-back requirement. The read-back
+`Record` cannot supply that evidence, since a passing check whose initial
+veto removal failed also reads unsynced. The real ticker tests run two
+complete boot passes, waiting for the shared loop's next interval request
+before cancelling. Retention is off so it cannot hide extra captures.
+`TestStartupReplacesAVetoedSnapshotEvenWhenItsDatabasePasses` requires one
+replacement across both starts; `TestStartupKeepsALeftoverVetoWithoutAddingSnapshots`
+requires none with persistent veto-removal failure and VERIFIED findings.
+
+`vetoPlacement.unconfirmed` is set only when give-up prevents an attempt
+from starting. It is not inferred from ErrCheckGivenUp inside an attempt's
+error. No filesystem call is added after give-up. Both `vetoDisproved` and
+`publishVerdict` report "the veto could not be confirmed" when no presence
+was established before that stop. Only two attempted, failed locations
+justify "could not be vetoed". Neither permits a prune. The direct callers
+and the no-barrier worker cover failed bundle/give-up with and without an
+existing root veto; the latter still reads INCOMPLETE (`unsynced`). Exact
+lookup and creation counts prove the root was not inspected by placement.
+The direct callers also try and fail both locations with an error carrying
+ErrCheckGivenUp, requiring definitive failure words despite that identity.
+
+`SetFilesCheckIncompleteForTest(dir)` takes a resolved snapshot path, like
+the other snapshot-specific seams. It expires a child context for that
+snapshot's files check and gives its pacer that context, leaving the
+VerifySnapshot caller live. Restore it only after callers and holds end.
+The mixed fresh-process-prune fixture awaits the worker and requires
+FAILED database / INCOMPLETE files with only ReasonDeadline, a vetoed
+read-back and listing, the old verified anchor, and removal of the
+intermediate failure. Restoring the either-INCOMPLETE early return in
+`disproves` must break these assertions; cancelling the outer verification
+is not a valid way to arrange the fixture.
+
+Windows combines FILE_FLAG_BACKUP_SEMANTICS with
+FILE_FLAG_OPEN_REPARSE_POINT when reopening the vacuum output. A directory,
+directory symlink or junction reaches the descriptor's non-regular check
+and says "vacuum output is not a regular file" rather than access denied.
+The directory case needs no symlink privilege; the symlink case runs where
+the OS permits creation, and the Windows junction fixture uses mklink /J.
+All assert refusal and unchanged target mode.
+
+The permission guarantee is limited to final-component symlink/reparse
+redirection of staged and vacuum files' chmod. It excludes replacement by
+another regular file or hard link, parent directories replaced with links,
+and SQLite's own pathname-based VACUUM INTO write. Root-run backup or
+restore over a tree an untrusted account can rename is out of scope. No
+parent anchoring is added; the orchestrator owns the follow-up backlog item.
+The existing deferred closes in both staged-file helpers already close
+before removal, including on a chmod error; no leak fix is needed.
+
+## B653 PR 1 round 15: recovery stamps and write durability
+
+Round 13's post-rename cache-stamp guard checked `p.givenUp()`, including
+the already-abandoned hold, so a recovery PENDING-to-INCOMPLETE write that
+renamed and synced successfully returned `errCacheStampSkipped`.
+`published.outcome` classified every written result with an error as
+`WriteNotDurable`, making `Recorded` false even though this path never
+entered `putVeto`.
+
+Only the recovery publication registered after `publishOf` refuses admission
+sets `publication.recovery`. Its post-rename stamp checks its own fresh
+`p.given`; an ordinary publication still checks both step and hold.
+The step is fresh because it is registered after abandonment, not because
+recovery ignores later give-up: abandonment during recovery still ends that
+step's signal. Veto creation, confirmation and removal always keep both
+guards. Admission, rename guards and the bounded step's late-answer handling
+are unchanged. `TestBothVetoCallersGuardEveryAttemptAndReportSkippedStamps`
+continues to require no ordinary-publication stamp after hold-only give-up.
+
+`published.outcome` treats a written record with only `errCacheStampSkipped`
+as `WriteRecorded`, preserving the error for reporters. Wrappers and joins
+of that warning alone have the same meaning; a joined sync or other failure
+still means `WriteNotDurable`, an unanswered step still means
+`WriteUnfinished`, and no warning turns an unwritten record into a write.
+A skipped stamp is not a failed durability barrier. The console can still
+retain its old reading until its cache expires or the backups folder changes,
+which CLI and ticker retain as a separate warning.
+
+Recovery over a mixed record remains deliberately limited: if either stored
+or merged component is VERIFIED, `putVeto` must confirm a veto before the
+record changes. The abandoned hold refuses that attempt before lookup,
+even if a veto already exists. No recovery record is written, its outcome
+is `WriteFailed` and `Recorded` false, and the error says the veto could not
+be confirmed. The record and any existing veto stay as they were; read-back
+still observes that veto. This is not a restoration of all recovery writes.
+
+`TestRecoveryPublicationSeparatesItsCacheStampFromDurability` drives the
+real worker through abandonment at the existing after-check seam and checks
+a live recovery's planted root stamp, a fresh step given up at the existing
+sync seam, sync failure alone and beside skipped stamping, and mixed records
+with and without an existing veto. It requires no prune or post-abandonment
+veto lookup and checks write outcome, error identity and read-back.
+`TestACacheWarningNeverHidesAPublicationFailure` pins nested error mapping;
+`TestTheReportersKeepARecordedRecoveryAndItsCacheWarning` pins both reporters.
+The four earlier regression cases also reject a skipped-stamp warning for
+a live recovery. Restoring only the post-rename guard to `p.givenUp()` must
+fail all four on that new assertion even while the warning-only outcome
+mapping remains fixed; with both production changes reverted, their original
+recording/reporting assertions fail too. No new test seam is needed.

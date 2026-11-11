@@ -135,6 +135,9 @@ func newTestServer(t *testing.T) (*Server, *config.Config, string) {
 		if !srvBgScansJoin(srv, bgScansWaitBound) {
 			t.Errorf("the server's background scans did not finish within %v of the test's end", bgScansWaitBound)
 		}
+		// And the snapshot verifications the console's create started,
+		// which the cancel ends within backup.StopWriteBound (backlog B653).
+		srv.WaitForBackupJobs()
 	})
 	return srv, cfg, cfgPath
 }

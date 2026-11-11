@@ -1645,3 +1645,137 @@ with runtime.Version(), not merely a compatible major.minor. check-go-version
 compares full versions, and check-build-tags requires the generator, final-stage
 COPY and full toolchain pin. Release validation compares the image's notice
 bytes with a fresh generation, for both published image architectures.
+
+
+## B653 PR 1 round 8: resolved fixtures and joined verification callers (2026-11-10)
+
+`VerifySnapshot` resolves directories before calling snapshot-path hooks.
+Fixtures resolve directories through `fsutil.ResolveLinks` before deriving
+hook paths. This fixes the measured macOS `/var` alias. The stopped-write,
+staging/rename/sync, veto and late-removal fixtures had compared the resolved
+hook argument with the raw temporary directory; the hook never parked or
+injected its failure. An unbounded wait for that park could time out the
+whole test binary.
+
+An outer verification result precedes its worker's release of the slot and
+folder lock. A claim also answers before its hold has finished releasing.
+The dead-capture and claimed-snapshot prune cases must drain those holds
+before asking a prune to run, and assert that the prune was not skipped.
+Skipping for a busy folder is valid production behavior, not a prune error.
+
+For cleanup, release all stalls and cancel, join each outer caller through
+a completion channel, then await retained holds before restoring seams or
+closing fixtures. Apply this to `VerifySnapshot`, `FinishCapture`, console
+jobs and tickers alike. Register this cleanup after the seams it protects:
+LIFO runs it first. `ActiveHoldsForTest` counts even a cancellation handoff
+with no verification slot or overrun mark; a zero count alone is not a
+caller join. `backuptest.AwaitIdle` must follow that join.
+
+Admission hooks receive `*hold`, live in atomic pointers and return unless
+the hold is their test's. The admission test observes a failed `TryLock`
+through `onAbandonBlocked`, proving contention without matching runtime
+stack strings. The production path still acquires the same mutex and runs
+no filesystem operation inside admission.
+
+The post-answer release window is pinned by
+`TestAnAnsweredVerificationOrClaimCanStillHoldTheFolder`. Keep fixture
+creation outside shortened verification deadlines. Tests aimed at a write
+stall use `SetStepBoundForTest` for that snapshot and the named steps,
+leaving the real check its normal deadline.
+
+## B653 PR 1 round 9: handoff paths, cancellation cleanup and slow-step bounds (2026-11-10)
+
+`SetVerifyHandoffForTest` is the exception to resolved snapshot-path hooks:
+its hooks keep the caller's `dir` as passed, because outer expiry may precede
+the worker's resolution. The console test passes its once-resolved
+`capture.Dir` into the caller and compares that one form in every hook.
+
+Do not pair joined-caller cleanup with a deferred cancel, which runs before
+cleanup releases the stalls: put cancellation in the release callback, or
+register `t.Cleanup(cancel)` before the joining cleanup. The release callback
+releases stalls before cancelling, then the cleanup joins callers and drains
+retained holds before restoring seams.
+
+The slow-step case parks until another caller is demonstrably waiting, then
+polls `StuckCheckHere` for at least 1.2 s inside an explicit 3 s bound on the
+resolved snapshot's veto step. A threshold below that duration must fail the
+test.
+
+On Windows, `fsutil.ResolveLinks` uses `GetFinalPathNameByHandle`, with
+`EvalSymlinks` as fallback (`internal/fsutil/resolve_windows.go`); no Windows
+execution of these fixtures has been verified yet. A fresh INCOMPLETE
+publication keeps its `WriteRecorded` expectation on Windows:
+`SyncParentDir` returns nil. The `SyncsParentDir` branch in the sibling
+recheck test concerns an existing VERIFIED record, not this fresh
+publication. These are code-inspection findings, not Windows runtime results.
+
+## B653 PR 1 round 10: production errors and release before cancellation (2026-11-10)
+
+The testing package cancels `t.Context()` before any cleanup runs. A child
+of that context therefore cannot enforce release-before-cancel ordering
+through cleanup registration. Derive a held caller's context from
+`context.Background()` and register `t.Cleanup(cancel)` before
+`joinBackupCallers`, whose release callback releases stalls before cancelling.
+`TestAStopWithABlockedSyncReturnsWithinItsBound` now follows that rule;
+round 9 changed five registrations, but only the four already derived from
+`context.Background()` gained the intended failure-path ordering then.
+No new cleanup meta-test is required: inspect the parent and registration
+order, including the release callback, directly.
+
+The outer-expiration row of
+`TestTheTickerSilencesOnlyCancellationWithoutAnotherFailure` takes
+`VerifyExpiryErrorForTest(context.Canceled)`, which calls the same
+`verifyExpiryError` constructor as production's expiry branch. A hand-built
+wrapper cannot pin changes to production's error shape. Its negative control
+adds a non-cancellation cause to the shared constructor: the empty-output
+assertion must fail. Reverting the extraction alone changes no behavior.
+
+`TestTheTickerReportsAPanickedCheckAtShutdown` drives a real check panic,
+with cancellation through `SetAfterCheckForTest` before publication and,
+separately, after the worker answer. Both require database and files
+INCOMPLETE: aborted on stderr, with no stdout. The no-error table in
+`TestTheTickerSilencesOnlyCancelledRecordsAtShutdown` checks both states,
+absent and additional reasons, deadlines and aborts, and cancellation alone.
+Round 10's controls restored the shared error's bare cancellation and the
+old database-only no-error silence separately. The orchestrator ran those
+controls and the expiry-constructor control: each turned red, including
+the files-only cancellation rows under the database-only control. The full
+race runs and prune tests ×30 passed, recorded in `ops/engineering-log.md`.
+
+The wait added in `bc5b95a8` to
+`TestAClaimedSnapshotIsKeptFromThePrune` drains the first prune's hold:
+`PruneContext` sends its answer before its deferred `h.release` finishes.
+The earlier `awaitClean` already drains the claim's folder-lock hold, and
+`claimed.Release()` synchronously releases ownership. Round 11 corrects the
+second wait's comment; no new behavioral test is needed for that text.
+
+Round 11 removes the shared error join and tests the ticker's verdict-aware
+error branch directly. The before-publication panic case requires exactly
+`context.Canceled`, so restoring only the join fails even with the ticker
+fixed. Restoring only the old ticker error silence fails the aborted,
+deadline and FAILED found-verdict rows in
+`TestTheTickerReportsFoundVerdictsBesideCancellation`. The record table
+adds database PENDING or UNVERIFIED (no-baseline, unknown-record,
+other-snapshot) beside cancelled files, and files PENDING or UNVERIFIED
+beside a cancelled database. Loosen the database and files restrictions in
+`CancelledOnly` independently: each side's rows must fail their stderr
+assertions. These round-11 controls and execution remain the orchestrator's
+handoff, not measured results from the edit-only worker.
+
+Round 9's handoff exception, deferred-cancel guidance, slow-step bound and
+Windows publication notes belong under round 9, not round 8. Their placement
+and the round tags in the two rules files are text checks, not behavioral
+negative controls. Round 10 has its own rule and History entries, with the
+supporting record in `ops/engineering-log.md`.
+
+## B653 PR 1 round 12: backup fixture teardown
+
+Verification answers before its deferred hold release. The CLI fixtures in
+backup_verify_test.go and the doctor's command-hint fixture now register
+a hold drain immediately after creating the install, before any ticker
+cleanup is registered: reverse cleanup order joins the ticker, drains
+holds, then removes the temporary install. The legacy verification subtest
+drains before the next subtest takes the same lock. The startup recheck
+test waits boundedly for its actual prune message on stdout before
+cancelling; observing the earlier verdict on stderr and sleeping 200 ms
+cannot establish that the prune message was written.

@@ -38,6 +38,12 @@ func SimulateRootForTest(int, int) (changes func() []OwnerChange, restore func()
 	return func() []OwnerChange { return nil }, func() {}
 }
 
+// SimulateRootRefusingForTest is a no-op on Windows, as SimulateRootForTest
+// is. See the POSIX version.
+func SimulateRootRefusingForTest(int, int, func(string) bool, error) (restore func()) {
+	return func() {}
+}
+
 // SimulateRootOwnersForTest is a no-op on Windows, as SimulateRootForTest
 // is. See the POSIX version.
 func SimulateRootOwnersForTest(func(string) (int, int)) (changes func() []OwnerChange, restore func()) {

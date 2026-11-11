@@ -364,6 +364,14 @@ type Deps struct {
 	// nil func skips it.
 	OutputChecklist func(ctx context.Context) []Check
 
+	// Backups is the backups' lines (backlog B653: BackupChecks), from the
+	// snapshots' manifests alone, never a verification and never the live
+	// database: cmd/bridge's doctorBackups, one source for bridge doctor and
+	// the console's doctor. Run places them after its own checks and before
+	// the player's lines. A nil func skips them, as `bridge init`'s preflight
+	// does: an install it is about to write has no snapshot to grade.
+	Backups func(ctx context.Context) []Check
+
 	// LogPath is the file the service unit redirects this bridge's stderr
 	// to — packaging.DefaultLogPath(). Empty (a foreground `bridge serve`,
 	// which logs to its terminal) makes checkLogSize a no-op rather than a
@@ -498,6 +506,9 @@ func Run(ctx context.Context, d Deps) Report {
 	}
 	for _, fn := range checks {
 		out = append(out, fn(ctx, d))
+	}
+	if d.Backups != nil {
+		out = append(out, d.Backups(ctx)...)
 	}
 	if d.PlayerStorage != nil {
 		out = append(out, d.PlayerStorage(ctx)...)

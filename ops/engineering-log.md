@@ -91082,6 +91082,2788 @@ passes, and `TestEveryCitedTestNameExists` passes there and fails, naming
 it, on a ghost citation planted in the patched History bullet. `git status`
 clean after.
 
+## 2026-11-09 — B653 PR 1: each snapshot is verified, its verdicts kept with it and shown; pruning keeps what recovery needs
+
+Backlog B653's first PR of three, on `feat/b653-snapshot-verify` from main
+3d0a0d05; worker b653 on legion0 (Ubuntu 26.04, linux/amd64, go1.27.3,
+`GOTOOLCHAIN=local`, `GOPROXY=off`). The other two (a consented offline
+database-only restore that keeps the original files; serve's recovery hint
+after a database it cannot open) are not built here, and nothing here offers
+them. Commits: the store's tables and columns at each ladder version
+67acaeec, the verification and its callers b281790e, the keep-policy's table
+a6393428, the lock's line in words that claim nothing of the filesystem
+729b06c7, then this record and `docs/backup.md`. The rules go through
+`rules-b653.patch`: three lines in cli-serve.md with their long form in
+History-rules-cli-serve.md, admin-console.md's B604 bullet corrected and a
+line for the console's backups, and scanner.md's glob for
+`internal/manifest/ladder_schema*.go` with a line on the generated schema.
+
+Its second round, the entry after this one, changes what this one says of a
+backups folder that grants no lock, of what keeps a `PENDING` from the
+prune, of the startup snapshot's skip, of the path `bridge backup --verify`
+locks, of a write that leaves a `VERIFIED` behind, and of the console's
+create; where the two differ, the second is what is built.
+
+### What main did
+
+`Snapshot` copied the database by `VACUUM INTO` and the other files by a
+read and a write, and published a manifest that named the files and said
+nothing of their bytes. Nothing read a snapshot back, so a copy damaged on
+its way to the disk, or since, was found by the restore that needed it. The
+prune kept the `keep` newest by `CreatedAt` and deleted the rest whatever
+they held, so a run of bad snapshots pruned the last good one; the startup
+snapshot was skipped for any snapshot younger than a day; `bridge doctor`
+said nothing of the backups; `GET /api/backups` answered the names and the
+backups folder's path.
+
+### The record
+
+`Snapshot` hashes each file as it copies it and the database by one read
+once `VACUUM INTO` has written it, and publishes the manifest with
+`baselines` (name, size, SHA-256) and a `verification` record already
+`PENDING` (`pendingSince`), so no bundle it keeps is without one. The record
+holds two verdicts, `databaseState` and `filesState`, each `PENDING`,
+`VERIFIED`, `FAILED` or `INCOMPLETE` (and `UNVERIFIED` for a database the
+install did not have, `no-database`), each with reason codes from a closed
+list (`backup.Reasons`) that names no path; the database's with the check's
+level, time and duration, the `user_version` read and the core tables'
+counts (tracks, folders, playlists, playlist_items; information, 0 a valid
+count); the files' with the names, in the bundle, of the files that failed.
+The keys are camelCase, as every manifest key and console field is; the
+brief wrote `database_state` and `files_state`. A verification never touches
+`baselines`. A manifest with neither, one written before this, reads
+`UNVERIFIED` (`no-baseline`): `--verify` checks its files for presence and
+records nothing. A reader (`readVerdict`, the one every reader takes) reads
+a `PENDING` older than `PendingBound` as `INCOMPLETE` (`interrupted`), a
+record of a newer format or a state it does not know as `UNVERIFIED`
+(`unknown-record`), and a `VERIFIED` beside the bundle's veto as
+`INCOMPLETE` (`unsynced`, below).
+
+### The database's check
+
+In order: a `-wal`, `-shm` or `-journal` beside the database, of any kind,
+fails it (`sidecar`) before anything is opened; the database must be a
+regular file by Lstat (`not-regular`, `missing`) of its baseline's size; the
+bundle's entries are listed (kind, size, modification time); the file is
+opened and must be the file Lstat saw (`os.SameFile`, else
+`bundle-changed`); its SHA-256, read through the pacer, must be the
+baseline's (`size-mismatch`, `hash-mismatch`); then SQLite reads that same
+open through modernc's read-only VFS (`modernc.org/sqlite/vfs`, in the
+module already, v1.61.0: no dependency added) over a filesystem that serves
+that one file under one name and answers every other as not there (`dbFS`),
+with `mode=ro&immutable=1&_pragma=temp_store(2)`, on a connection of its
+own, never `manifest.OpenStore`; `PRAGMA quick_check` must answer exactly
+one `ok` (`--full`: `integrity_check`, and `foreign_key_check` with no row);
+`user_version` must be one the ladder reaches (`schema-version` below its
+first step, `schema-newer` past its top), with every table and column that
+version requires (`schema-table`, `schema-column`), from
+`manifest.RequiredSchema`; and once the database and the VFS are closed the
+bundle's entries must be as they were (`bundle-changed`). The expression
+indexes' functions (`unicode_lower`, `mix_week_hash`) are registered for
+every connection by internal/manifest, which internal/backup imports, so
+`--full`'s `integrity_check` evaluates them
+(`TestTheFullCheckEvaluatesTheExpressionIndexes`).
+
+Measured with the module's SQLite (2026-11-08, re-run 2026-11-09, a
+throwaway probe): a live store's header says WAL (bytes 18 and 19: 2, 2) and
+`VACUUM INTO`'s output says rollback (1, 1); a copy of the WAL-header file
+alone in a folder, opened `mode=ro`, answers `quick_check` `ok` and leaves
+`bridge.db-shm` and `bridge.db-wal` beside it after the close, and opened
+`mode=ro&immutable=1` leaves nothing. Through the VFS over one file of a
+500-track store: `quick_check` and `integrity_check` `ok`,
+`foreign_key_check` no row, a write refused (`attempt to write a readonly
+database`), a statement whose reads fail ending with the context's error,
+and the folder holding `bridge.db` alone after. A snapshot's database is
+never WAL-headed as `VACUUM INTO` writes it, so
+`TestVerifyingAWALHeaderDatabaseTwiceCreatesNoFile` flips the header to WAL
+and records it as the baseline.
+
+`manifest.RequiredSchema(v)` is a table generated from the ladder itself
+(`ladder_schema_gen.go`: 267 columns, each with the first and last version
+that holds it, up to version 61), which `TestTheLadderSchemaIsTheLadders`
+writes by running the steps one at a time over an empty database, as
+`migrate` runs them, and compares on every run; `BRIDGE_UPDATE_LADDER_SCHEMA=1`
+writes it again. It says what must be there, never all that may be, so a
+store holding a table a rolled-back binary's step added still passes.
+
+### The other files
+
+Presence, a regular file inside the bundle (a name with a separator, `.` or
+`..` is `bad-name`; a link or another kind `not-regular`), its size and its
+SHA-256 against its baseline, read through the same pacer. Nothing more: a
+file of the wrong content with the right hash is not this check's concern.
+
+### One lock, one writer
+
+`.backups.lock` in the backups folder, opened through `fsutil.OpenLockFile`
+and taken with `fsutil.TryLock` (flock, LockFileEx: the open file's, so two
+opens in one process exclude each other too), is taken by every
+verification from before it reads the manifest it checks until its verdict
+is written (so it is the record's one writer), by `bridge backup --verify`,
+and by the prune's keep-policy across its listing and its deletions. A
+verification waits for it, polling every 50 ms, for `AutoLockWait` (the
+bridge's own: `VerifyDeadline`, 30 min, so a fresh snapshot's check waits
+behind another process's rather than leave it `PENDING`) or
+`VerifyCmdLockWait` (`--verify`, 15 s), then answers `ErrBackupsBusy`; the
+prune tries it once and skips the round (`PruneResult.Skipped`). Before the
+lock a verification takes this process's one slot, in the order the waits
+began, so the bridge runs one verifier at a time. Where the try is answered
+as a filesystem or a platform that gives no lock answers
+(`fsutil.KeepsNoLocks`), both go on without it, as before the lock, said
+once in words that claim nothing of the filesystem, since ENOLCK does not
+show that it keeps none. `List` and the orphan sweep pass over the lock file: neither looks
+at anything but folders.
+
+A verdict merges into the record under the lock (`mergeVerdict`): an
+`INCOMPLETE` replaces only a `PENDING` or an `INCOMPLETE`; a `FAILED`
+replaces anything; a database `VERIFIED` replaces anything but a completed
+check (`VERIFIED` or `FAILED`) of a higher level, so a quick check never
+undoes a full one unless it fails; the files' check, the same at every
+level, replaces a completed one with the latest. `pendingSince` goes once
+nothing in the record is pending.
+
+### Publication
+
+The manifest is staged beside itself (the replaced file's owner kept), synced,
+and renamed over itself through `atomicwrite.RenameWithRetryUnsynced`, then
+its folder synced (`fsutil.SyncParentDir`). Once the rename has landed every
+reader reads the new record, so a sync that fails after it cannot be undone
+by an error return, and a `VERIFIED` read after that error would be a
+recovery point nobody knows survives a crash. So a record holding a
+`VERIFIED` state is written behind a veto: `.verdict-unsynced` is put in the
+bundle before the rename and removed only once the sync has answered, and
+while it stands every reader reads that `VERIFIED` as `INCOMPLETE`
+(`unsynced`). Whichever step fails, the veto's own removal included, the
+write answers an error and no reader, the doctor, the console or the pruner,
+reads `VERIFIED` (`TestASyncFailureAfterTheVerdictsRenameReadsAsNotVerified`,
+and `TestAnUnsyncedVerdictReadsAsNotVerifiedEverywhere` through the API, the
+doctor and the prune). A crash meanwhile leaves the previous record or the
+new one, with or without the veto, and each reads `VERIFIED` only from a
+check that passed. Where no directory can be synced (Windows, where
+`SyncParentDir` does nothing), the write is atomic and not known to be
+durable: a crash can leave the previous record, a `PENDING` among them,
+which reads `INCOMPLETE` once `PendingBound` has passed, and never a
+`VERIFIED` from a check that did not pass. A merge that changes nothing
+writes nothing. Each write moves the backups folder's modification time
+(`stampChange`), which a verdict written inside a bundle does not, so the
+console's Jobs card, which caches what the folder holds, sees it.
+
+Rejected: writing `VERIFIED` only after a sync, since the rename is what
+makes it visible and the sync comes after it; a second state (`VERIFIED`
+not yet durable) rewritten once synced, which needs a second rename and a
+second sync and has the same window; a sync of the staged file alone, which
+says nothing of the folder's entry.
+
+### A stop
+
+A verification has a deadline (`VerifyDeadline`) and every read asks its
+context (the pacer's `admit`, before each read of the hash and of SQLite), so
+a stop is seen at the next read. Stopped, it has one bound, `StopWriteBound`
+(2 s), counted from the first wait that sees the stop and shared by the
+check's return and the verdict's write: within it the check's verdict, or
+`INCOMPLETE` (`cancelled`, `deadline`), is written; past it the write is
+abandoned to land or not, and the verification returns. Serve's wait for
+the backup ticker (`backupShutdownWait`, 45 s) is far longer, and the
+console's jobs are joined in `ServeListener`'s drain. A verification stopped
+before it began (in the slot's queue, or waiting for the lock) writes
+`INCOMPLETE` over its `PENDING` within the same bound (`abandonPending`).
+`PendingBound` is `VerifyDeadline` plus `AutoLockWait` plus ten minutes
+(70 min), so a check under way, or one waiting its turn behind another
+process's, is never read as interrupted, and a `PENDING` younger than it is
+never pruned.
+
+### One path, every caller
+
+`backup.SnapshotAndVerify` is the capture and then, for a kept bundle,
+`Finish`: its verification and, under the same hold of the lock, the prune
+after it, whatever the verdict; its `Result` tells a failed capture (no
+bundle, `CaptureErr`) from a kept bundle whose verification failed or did
+not finish (`Dir`, `Verify`, `VerifyErr`), and a prune the lock refused
+(`PruneSkipped`). The ticker and `bridge backup` take it; the console's
+create takes `Snapshot`, answers 201 once it is written, and runs `Finish`
+as a job on the server's own context (`verifyInBackground`, `Deps.ScanCtx`),
+never the request's, queued behind the slot, joined at shutdown, so no
+console snapshot is left `PENDING` with no one to finish it. Each says what
+it kept: `bridge backup` prints the snapshot, then both verdicts, and exits
+0 only where both are `VERIFIED` (the database's `UNVERIFIED` where the
+install had none), 1 for a kept snapshot that is not a verified recovery
+point, saying it was kept; `bridge backup --verify <snapshot> [--full]`
+exits 0, 1 (not verified, not recorded, or busy past its wait, saying so)
+or 2 (no snapshot there). The check runs on a goroutine locked to an OS
+thread it never unlocks, so the thread ends with it, whose priority it
+lowers first: Linux `setpriority` to nice 19 and `ioprio_set` to the idle
+class by thread ID, Darwin `PRIO_DARWIN_BG`, Windows
+`THREAD_MODE_BACKGROUND_BEGIN`, best effort. Its reads, the hash's and
+SQLite's, are paced at 32 MiB/s by one pacer (`verifyReadRate`).
+
+### The keep-policy
+
+Retention off (`keep <= 0`): nothing changes, every snapshot stays and the
+orphans are reaped. On (`keptByRecovery`): the `keep` newest stay, and
+beside them, beyond `keep` if they must, the newest snapshot whose database
+is `VERIFIED`; while none is, the newest legacy one; the newest whose
+database is `FAILED` or `INCOMPLETE`, as evidence, one at most; and every
+`PENDING` its bound has not passed. Everything else is kept or pruned by
+`keep` as before. Every decision reads the database's verdict alone: a
+snapshot whose files failed and whose database is `VERIFIED` is a recovery
+point (`TestACertificateThatDoesNotMatchItsBaselineStillAnchorsRecovery`).
+
+### The readers
+
+`backup.ReadStatus` reads the manifests and nothing else, and every surface
+reads it: `bridge doctor` (and the console's doctor) has two lines,
+`backup-newest` (the newest snapshot written, its age, both verdicts with
+their reasons; ok while its check is under way or it passes, a warn naming
+what failed otherwise) and `backup-verified` (the newest whose database is
+`VERIFIED`, its age and level; a fail where none is and one has `FAILED`, a
+warn where none is otherwise); `GET /api/backups` answers each snapshot's
+two verdicts with their reasons, level and check time, the files that
+failed by their names in the bundle, and apart `newest` and
+`newestVerified`; the Jobs card shows the newest's two verdicts and the
+newest verified's age; the Settings page's Backups panel the same. No line
+or body names a path: a snapshot is named by its folder's name, a time
+stamp. `startupSnapshotShouldSkip` skips only for a snapshot younger than a
+day whose database is `VERIFIED`.
+
+### Where this departs from what was there
+
+- `GET /api/backups` no longer answers `backupsRoot`, and the create's 201
+  answers `dirName`, `verification` (`PENDING`) and `sensitivity`, where it
+  answered `snapshotDir`, or a 200 with `pruneWarning`: the prune runs in
+  the job now, and its warning goes to the log. admin-console.md's B604
+  bullet, which kept those paths in success bodies, is corrected in the
+  patch.
+- `bridge backup` exits 1 for a snapshot it kept that is not a verified
+  recovery point, which it says, where it exited 0 for any snapshot written.
+
+### The tests
+
+In internal/backup: `TestASnapshotRecordsItsBaselinesAndPublishesPending`,
+`TestAVerifiedSnapshotRecordsItsCheck`, `TestADamagedDatabasePageFails`,
+`TestAFileWithOneByteChangedFailsTheFilesVerdict`,
+`TestACertificateThatDoesNotMatchItsBaselineStillAnchorsRecovery`,
+`TestASidecarBesideTheDatabaseFailsBeforeSQLiteOpens`,
+`TestALinkInTheBundleFailsBeforeSQLiteOpens`,
+`TestVerifyingAWALHeaderDatabaseTwiceCreatesNoFile`,
+`TestTheDatabaseMustBeASchemaThisBridgeKnows` (a newer `user_version`, a
+missing core table, and an empty library passing),
+`TestTheFullCheckEvaluatesTheExpressionIndexes`,
+`TestAQuickCheckNeverUndoesAFullOne`,
+`TestACancelledVerificationWritesIncomplete`,
+`TestAStopWithABlockedSyncReturnsWithinItsBound`,
+`TestAStalePendingReadsIncompleteAndAYoungOneSurvivesAPrune`,
+`TestASyncFailureAfterTheVerdictsRenameReadsAsNotVerified`,
+`TestALegacyManifestReadsUnverified`, `TestTheReadsArePaced`,
+`TestTheVerificationRunsOnAThreadOfItsOwn` (and, on Linux,
+`priority_linux_test.go`'s check of the thread's nice value),
+`TestAPrunerRacingAVerificationSkipsItsRound` (through the lock, the
+verification parked under it at `SetAfterCheckForTest`),
+`TestTwoVerificationsOfOneSnapshotWriteOneAtATime`, a test that a
+verification granted no lock still verified (the second round made it the
+refusal's, `TestNoLockNoProtectedWork`) and
+`TestThePruneKeepsWhatRecoveryNeeds` (retention off, keep 1, several newer
+`FAILED` bundles, only legacy ones beside more new `FAILED` ones than
+`keep`, a files `FAILED` beside a verified database, young and stale
+`PENDING` ones). In internal/manifest: `TestTheLadderSchemaIsTheLadders`.
+In internal/admin: `TestTheDoctorTheAPIAndThePrunerAgreeOnEveryState`,
+`TestAnUnsyncedVerdictReadsAsNotVerifiedEverywhere`,
+`TestACancelledCreateRequestLeavesTheVerdictToCome`,
+`TestTheCreateAnswersWithTheSnapshotsNameAndNoPath` and
+`TestRepeatedFailedVerificationsThroughTheConsolesCreateStillPrune`. In
+cmd/bridge: the startup skip's table (the second round's
+`TestTheStartupPassFollowsTheNewestRecentSnapshot`),
+`TestBridgeBackupVerifiesWhatItKeepsAndSaysSo`,
+`TestRepeatedFailedVerificationsThroughTheTickerAndBridgeBackupStillPrune`,
+`TestBridgeBackupVerifyRecordsAndSaysTheVerdict`,
+`TestVerifyBesideTheTickersVerificationOfOneSnapshot` (one writer, no
+verdict lost or downgraded),
+`TestATickerStoppedWhileItsVerdictsSyncHangsReturnsWithinItsBound` and
+`TestBothDoctorsCarryTheBackupLines`. Existing tests that took a snapshot
+for a prune now verify it as every caller does (a `PENDING` younger than its
+bound is never pruned); `primeLiveState` makes a real store now, so a
+snapshot of it passes the schema check, and the two root-owner tests keep
+the database that predates the ladder (`primePreLadderLiveState`), whose
+restore makes the ladder's and the install marker's locks they count.
+
+### After the record: four more tests, and a seam for a wait
+
+Writing the controls found three refusals no test went red without, each
+given a test since this record was first committed (774e8f34): 1ed70204,
+`TestAStoppedCheckNeverReplacesACompletedVerdict` (a
+verified database and failed files keep both verdicts through a
+verification stopped before it began) and
+`TestABundleThatChangesWhileItIsCheckedFails` (an entry that appears while
+SQLite has the database open fails it, `bundle-changed`); c5f55129,
+`TestACheckThatAnswersAnythingButOkFails`, since `TestADamagedDatabasePageFails`'s
+damage ends SQLite's check in an error and a check that took any answer but
+an error passed it (control A4, below). Its fixture is a NULL in
+`scan_state.v`, a NOT NULL column, written while the schema said otherwise
+(`writable_schema`), which `quick_check` and `integrity_check` both answer
+as the row `NULL value in scan_state.v` with no error (measured 2026-11-09
+with a throwaway probe: a trailing page nothing references, the other
+candidate, both checks answered `ok`). 79f3d52b and d4f9c4cf:
+`TestVerifyBesideTheTickersVerificationOfOneSnapshot` slept 100 ms for
+`--verify` to reach its wait behind the ticker's verification; that wait is
+this process's slot, not the lock file, and a verification that finds the
+slot held now says so through `SetOnSlotWaitForTest` before it waits, which
+the test waits for, failing at once (and letting the ticker's park go
+first) where `--verify` returns before it waited its turn. 02f84ace
+corrects the table's comment on which of its rows main passes, and bd613325
+the page's word for what `quick_check` answers.
+
+The first full `make test` over the five package groups failed in
+cmd/bridge on three of the tree's own sweeps, which no package run of the
+change had reached (0d9142d0 fixes all three, and each sweep red on the
+commit before it is that fix's control):
+`TestJobWritersKeepTheInstallOwner`, because `writeVeto` made its file with
+no owner step, so a `bridge backup --verify` run as root left a root-owned
+0600 veto in a service's snapshot, which the service could not open again
+for its next `VERIFIED` (the veto takes the manifest's owner now through
+`fsutil.KeepOwner`, and one there already, of any owner, is kept, its
+presence alone being the veto); `TestEveryConfigWriterTakesTheConfigLock`,
+because the sweep knows this tree's write helpers by name and the
+snapshot's copies now go through `copyFileHashed` and `writeFromHashed`, so
+it no longer saw `Snapshot` write and called its excuse stale (both are
+listed now, and the excuse holds again); and
+`TestEveryStoreTheBridgeOpensIsItsDataDirsDatabase`, because
+`backuptest.WriteSource` opened a store at the path it was handed (it
+requires that path to be a data dir's database now, and opens it as
+`manifest.DefaultDBPath` of its folder).
+
+### The measurement
+
+One verification of the largest fixture built here: a store of 1,000,000
+synthetic tracks (each with a path, title, artist, album artist, album,
+genre, numbers and a duration; built by `UpsertTrackBatch` in 2 min 10 s),
+whose snapshot's database is 1,601,323,008 bytes (`Snapshot`, the copy and
+its baseline's hash, in 4.5 s; the live file 1,675,710,464). Each verification ran in a process of its own,
+inside the build slot, on legion0 (16 threads, 30 GB, the worktree on an
+ext-family filesystem over LVM: statfs gives the family's magic, which does
+not tell ext4 apart); peak memory is the process's VmHWM, which stood at about 13.6 MB
+before the verification began:
+
+- the default check (`quick_check`) at the production pace, 32 MiB/s: 2 min
+  38 s (157.8 s), VmHWM 24.2 MB, `VERIFIED`, `tracks 1000000`;
+- the same unpaced (`SetVerifyReadRateForTest(0)`): 7.2 s, VmHWM 21.8 MB;
+- `--full` (`integrity_check` and `foreign_key_check`) at the production
+  pace: 2 min 51 s (170.6 s), VmHWM 26.2 MB.
+
+Those are 0d9142d0's; the same three on bd613325, before the veto's owner
+step, gave 157.8 s and 24.9 MB, 7.1 s and 22.5 MB, 170.7 s and 26.4 MB.
+
+At 32 MiB/s the hash alone takes 47.7 s of that by arithmetic; the rest is
+SQLite's reads through the same pacer (the check, the schema's reads and
+the core tables' counts), not measured apart. Memory hardly grows with the
+database: the 32 MB database of a 20,000-track trial peaked at 22 MB at the
+same pace, with SQLite's default page cache and the hash reading 1 MiB at a
+time.
+
+### The reds at main
+
+On a copy of main (`git archive 3d0a0d05`) with the new tests in it.
+`TestThePruneKeepsWhatRecoveryNeeds` builds on main as it is and fails seven
+of its nine rows (main kept the `keep` newest and nothing else: `kept
+[bundle-00], want [bundle-00 bundle-01]` for keep 1 over FAILED, VERIFIED,
+VERIFIED, legacy); the two it passes, retention off and keep 1 over verified
+snapshots alone, are the halves the rule leaves as they were. Every other
+new test names what main does not have, so a scratch shim, never committed,
+gave main the names and none of the behaviour: HEAD's `verify.go`,
+`words.go` and `status.go` (types, constants and words nothing at main calls
+but the tests), the test seams as variables nothing reads, `VerifySnapshot`
+verifying nothing, `SnapshotAndVerify` and `Finish` as main's callers did
+(the snapshot, then the prune), the manifest's, the listing's and the
+prune's new fields set by nothing, the console's payload fields set by
+nothing, `WaitForBackupJobs` waiting for nothing (main's create ran no job),
+`doctor.BackupChecks` saying nothing and `Deps.Backups` set by nothing, and
+`backupCmdContext` main's `backupCmd`. On it every new test fails, each run
+alone under a timeout of its own: internal/backup's 25 (`0 baselines for 5
+files`; `VerifySnapshot recorded nothing`; a stopped verification
+`answered <nil>, want the stop`; `TestAStopWithABlockedSyncReturnsWithinItsBound`
+by its deadline, the sync it holds never reached), cmd/bridge's 7 (the
+startup skip's `skip = true (err <nil>), want false`, main skipping for a
+recent snapshot whose database is not verified; `run 0: exit 0`, `bridge
+backup` exiting 0 over a database that fails its check; `--verify --full =
+2`, a flag main does not have; `TestVerifyBesideTheTickersVerificationOfOneSnapshot`
+by its deadline, at a park main never reaches) and internal/admin's 5 (the
+create answering `snapshotDir`, a path; the API's database verdict `""`;
+`TestACancelledCreateRequestLeavesTheVerdictToCome` by its deadline).
+`TestTheLadderSchemaIsTheLadders` pins a generated file main does not have,
+and is no red.
+
+### Negative controls
+
+Each mutates one site of the committed tree, runs the tests named, and puts
+the committed bytes back, compared with HEAD's blob before each mutation and
+after each restore (a runner in a scratch folder; the predictions written
+to a file before the first run). All 31 went red:
+
+- the check's refusals: the sidecar refusal removed (A1: `a -wal beside the
+  database: database VERIFIED`); the database's not-regular refusal removed
+  (A2: a link at the database FAILS by its size instead, `size-mismatch`,
+  want `not-regular`); `immutable=1` dropped (A3: through the one-file VFS
+  the WAL-headed database's check answers `quick-check`, want `VERIFIED`);
+  quick_check's answer taken whatever it says but an error (A4: green on
+  `TestADamagedDatabasePageFails` alone, and red on the test written for
+  it, `a NULL where the schema says NOT NULL: database VERIFIED`); the
+  database's hash not compared (A5: the damage is then quick_check's,
+  `quick-check`, want `hash-mismatch`); a newer `user_version` taken (A6);
+  a missing table taken (A7); the other files' hash not compared (A8); the
+  bundle not compared after the close (A9); a legacy manifest read as
+  verified (A10); the check's thread not lowered (A11: `nice 0, want 19`);
+  the reads not paced (A12: 626,825 bytes at 1 MiB/s in 19 ms). A4 and A5
+  first deleted a variable's only use and did not build; each was rewritten
+  to keep it read.
+- the record, the lock and the prune: no veto before the rename (B1) and
+  the veto not read (B2), each `List's reading: database VERIFIED, want
+  INCOMPLETE "unsynced"`; a quick `VERIFIED` replacing a full one (B3); an
+  `INCOMPLETE` replacing anything (B4); a stale `PENDING` read as under way
+  (B5); the newest verified snapshot not kept (B6), a young `PENDING` not
+  kept (B7), no evidence kept (B8); the prune taking no lock (B9) and a
+  verification taking none (B10), each a prune beside a held verification
+  that did not skip; a stopped write waited for whatever it takes (B11:
+  `Finish did not return after the stop while its write was held in a
+  sync`); the newest verified read off both verdicts (B12).
+- the callers and the readers: the startup snapshot skipped for any recent
+  snapshot (C1); `bridge backup` exiting 0 for an unverified snapshot (C2);
+  no prune after a verdict that does not pass (C3: `four failed snapshots at
+  --keep 2 left 4, want 2`, through `bridge backup` and the console's
+  create); the console verifying on the request's context (C4: by the
+  test's deadline, the handler parked in the check the test lets go only
+  once the create has answered); the create naming the snapshot's path
+  (C5); the API's database verdict the files' (C6); and no slot, this
+  process's verifications beside each other (D1: `--verify returned 1
+  before it waited its turn`, busy on the lock the parked ticker holds).
+- and the three sweeps 0d9142d0 answers, each red on bd613325, the tree
+  before its fix (the full `make test` above).
+
+### The gates
+
+On 0d9142d0, go1.27.3, each run inside the build slot (`buildslot.py b653`,
+22 and 35 minutes in its queue):
+
+- `make test TEST_PKGS='./internal/backup/... ./internal/doctor/...
+  ./internal/admin/... ./internal/atomicwrite/... ./cmd/bridge/...'` with
+  `TMPDIR` on disk (under the worktree's `.tmp`), the race detector, `-p 4`,
+  `-timeout 30m`: ok, internal/backup 380.5 s, internal/doctor 6.8 s,
+  internal/admin 1036.0 s, internal/atomicwrite 20.0 s, cmd/bridge 1294.3 s
+  (backuptest has no tests). The run before it, on bd613325, failed on the
+  three sweeps above, every package else ok.
+- the 38 new tests by name, `-race -count=1`: all pass (internal/backup
+  66.4 s, internal/manifest 8.4 s, internal/admin 23.0 s, cmd/bridge 20.5
+  s), the Linux priority check among them reading the thread's nice value
+  as 19.
+- `make vet`, `GOOS=linux GOARCH=386 make vet`, and `go vet` of the six
+  package trees the branch touches for windows and darwin: nothing
+  reported. `make build-all`: the six targets built, the build-site census
+  first (`check-build-tags`: OK).
+- the pinned gofmt (`go run cmd/gofmt -l`) over every Go file the branch
+  changed: nothing listed.
+- `rules-b653.patch` applied to a copy of HEAD: `make docs-check` passes
+  there (cli-serve.md 56,946 bytes, admin-console.md 87,262, scanner.md
+  40,291; the worst load 67.7%), the census passes there, every test name
+  it cites is declared, and `rules-for.py` names scanner.md for
+  `internal/manifest/ladder_schema*.go`.
+
+### Follow-ups
+
+The backlog file is not on legion0, so these go to the PR's report: a
+restore reads no snapshot's verdict yet (the next two PRs' ground); and no
+test runs `bridge backup --verify` in a process of its own beside serve's
+verification, the cross-process lock being pinned through the pruner and
+`--verify`'s busy answer. A third, the review's, is the second round's
+first point.
+
+## 2026-11-09 — B653 PR 1 round 2: one snapshot per restart loop, the backups folder's lock resolved and always taken, no VERIFIED left that a check did not find
+
+The second round of backlog B653's first PR, on `feat/b653-snapshot-verify`
+(PR #1444) from the first round with main merged in (d3216d39); worker b653
+on legion0 (Ubuntu 26.04, linux/amd64, go1.27.3, `GOTOOLCHAIN=local`,
+`GOPROXY=off`). It answers Codex's and the Claude API's review of the first
+round and both reviews of its brief. Commits: the code and its tests 3525c819, the page and round 1's record d4e812c3, then the tests the controls and the reds asked for (02fe7715, 9100ae00, a5e49f05, e79b830e, e4eeb910), and this record. The rules go through
+`rules-b653-r2.patch`: cli-serve.md's three B653 lines and their long form in
+History-rules-cli-serve.md, with a paragraph of the second round's, and
+admin-console.md's B653 bullet.
+
+### The six points, as built
+
+1. **A restart loop takes one snapshot.** A capture owns its snapshot from
+   right after it makes the folder until its verification ends
+   (`backup.CaptureSnapshot`, `owner.go`): the kernel's lock on
+   `.verification.lock` in the snapshot (`fsutil.OpenLockFile`, which gives
+   it the folder's owner as root, and `fsutil.TryLock`), which a dead
+   process lets go. A reader asks it of a record holding a `PENDING`
+   (`probeOwner`, a shared try, which another reader's probe does not
+   refuse): held, the `PENDING` is under way however old; there and held by
+   nobody, it reads `INCOMPLETE` (`interrupted`) at once; not there (a
+   snapshot written before owners were kept, or by `Snapshot`, which owes no
+   verification) it reads by its age as before. The prune keeps every
+   snapshot a reader reads `PENDING`, and just before each removal asks the
+   owner again with an exclusive try (`ownedNow`), which keeps a claimed
+   snapshot whose record holds no `PENDING`; the orphan sweep spares a
+   capture under way. The startup pass is one rule (`decideStartupPass`):
+   no snapshot where one from the last day has a database `VERIFIED`; nor
+   where the newest from the last day owes its check (its database
+   `PENDING` or `INCOMPLETE`), which it leaves to the live owner that holds
+   it, or else claims under the folder's lock (`backup.Claim`) and verifies
+   in place (`FinishCapture`), taking a snapshot after it only where that
+   check finds the database `FAILED`; otherwise a snapshot (none from the
+   last day, or the newest `FAILED`, legacy, or of a record this bridge
+   cannot read). The end state of a loop whose boots die before their
+   check ends: one snapshot, verified by the first boot that lives, not
+   pruned.
+2. **No `VERIFIED` a check did not find.** A write goes behind its veto
+   wherever the record it replaces or the one it writes holds a
+   `VERIFIED`; the veto is made in the bundle, or beside it in the backups
+   folder (`.verdict-unsynced-<snapshot>`) where the bundle takes no file,
+   which every reader asks too, and is kept where its owner cannot be given
+   (root_squash). Where neither can be made, a record that held a
+   `VERIFIED` is written over all the same, and only a write that fails
+   then too keeps it: the one case a reader still reads it, said to the
+   caller as `ErrRecordKept`, and only on a folder that takes no new file
+   in the bundle or beside it and no manifest's replacement.
+3. **The lock is the backups folder's, resolved.** `resolveSnapshotIn`
+   resolves the snapshot (`filepath.Abs`, `fsutil.ResolveLinks`) and the
+   configured backups folder and compares the snapshot's parent with it by
+   `os.SameFile`; the lock is taken in the resolved folder, the prune's
+   too, and an in-process token per resolved folder comes first.
+   `bridge backup --verify` loads the install's config (`loadCLIConfig`,
+   `refuseDataDirAway`) and refuses, exit 2, a snapshot outside its backups
+   folder (`ErrOutsideBackups`): a copy elsewhere is copied back to be
+   checked. A config that does not load is exit 2, as for every other
+   subcommand.
+4. **No lock, no protected work.** A try answered as no lock granted
+   (`fsutil.KeepsNoLocks`, ENOLCK included) gives `ErrBackupsUnlocked`:
+   the verification writes nothing, a claim is refused, and the prune with
+   its orphan sweep, which now runs under the lock, keep<=0 included, is
+   skipped (`PruneResult.SkippedFor`). A capture needs no folder lock (it
+   takes its own owner lock); so that a folder that never grants one does
+   not grow by a snapshot a pass, the ticker takes none while the folder
+   grants no lock (`backup.ProbeBackupsLock`, which opens only a lock file
+   there already and makes nothing) and the newest snapshot owes its check,
+   and `bridge doctor` warns (`backup-lock`).
+5. **Everything inside the bound.** One worker goroutine runs every step
+   that can wait on a filesystem, holding the slot, the lock and the
+   ownership until it ends; its caller answers within `StopWriteBound` of
+   a stop, or past its own bound (its lock wait, its deadline and twice
+   `StopWriteBound`). The choice of folded item 4: an abandoned step keeps
+   its hold until it ends, so nothing protected runs beside it; a lock
+   opened or taken after the stop is let go at once. `runCheck` gives a
+   check up half of `StopWriteBound` past its context's end, the deadline
+   included, and records `INCOMPLETE` (`deadline`). The startup claim runs
+   under the same bound.
+6. **The tests pin what they claim.** Below.
+
+### The reds at the round before
+
+On a copy of d3216d39 (`git archive`) with the second round's tests in it
+and a scratch shim, never committed, giving the round before the names and
+none of the behaviour: `Capture` over `Snapshot`, `FinishCapture` over
+`Finish`, a `Claim` that claims nothing, the new seams as no-ops, the new
+errors, `PruneResult.SkippedFor`, `SnapshotStatus.Owned` and
+`VerifyOptions.BackupsRoot` set by nothing, `decideStartupPass` as the
+round before decided (the skip for a recent verified database, else a
+capture), and `doctor.BackupChecks` called with its four arguments.
+Predictions written first; each test run alone under a timeout of its own.
+
+Every result was as predicted:
+
+- internal/backup: `TestADeadCaptureIsPrunedAndALiveOneIsKept` (`a capture
+  whose owner is gone: database PENDING [], want INCOMPLETE "interrupted"`);
+  `TestAQueuedVerificationKeepsItsCaptureFromThePrune` (the first prune
+  removed a queued capture, whose verification then answered `read the
+  snapshot's manifest`); `TestTheReaperSparesACaptureUnderWay` (`reaped 1`);
+  `TestThePruneKeepsWhatRecoveryNeeds` on its owners' row alone (`kept
+  [bundle-00 bundle-01 bundle-02 bundle-03], want [bundle-00 bundle-01
+  bundle-03]`, a dead capture kept by its age); `TestNoLockNoProtectedWork`
+  for each of its three answers (`a verification granted no lock answered
+  <nil>, recorded true`);
+  `TestAStopWhileTheManifestReadHangsReturnsWithinItsBoundAndKeepsTheLock`
+  (`did not return within 13s of its stop`, the caller reading the manifest
+  itself); `TestAVerificationPastItsDeadlineReturnsWithItsCallerStillWaiting`
+  (`did not return within 12.3s`: the round before gave a check up on its
+  caller's stop alone, and its deadline is a constant no test can shorten);
+  and `TestAVerifiedRecordLeftForAFailedOneIsVetoedWhereItsBundleTakesNoFile`,
+  with no seam (`after the error, the pruner reads VERIFIED/VERIFIED; the
+  console's reading takes it for the newest verified; the doctor's newest
+  line reads it verified`).
+- cmd/bridge: `TestARestartLoopTakesOneSnapshotAndTheFirstBootThatSurvivesVerifiesIt`
+  (`after 2 boots that died: 2 snapshots, want 1`);
+  `TestTheStartupPassFollowsTheNewestRecentSnapshot` on the four rows whose
+  newest snapshot owes its check;
+  `TestBridgeBackupVerifyTakesTheBackupsFoldersLockWhateverPathItIsGiven` on
+  `.` (the prune beside it ran, and `.backups.lock` was made in the
+  snapshot) and on the link (`.backups.lock` made beside the link);
+  `TestBridgeBackupVerifyRefusesWhatIsNotInItsInstallsBackupsFolder`
+  (`--verify of a copy elsewhere = 0`);
+  `TestABackupsFolderGrantingNoLockGrowsByOneSnapshotAndTheDoctorSaysWhy`
+  (its first pass verified with no lock granted); and
+  `TestTheDoctorsVerifyHintsAreCommandsTheCLITakes` (`backup: unexpected
+  argument`, exit 2).
+- internal/admin: `TestALeftVerifiedThatCannotBeRecordedReadsAsNotVerifiedEverywhere`'s
+  case with no seam (the API, the doctor and the cached Jobs card all
+  reading `VERIFIED` after the error).
+
+Not reds, as predicted, and why: a relative path and a data dir reached
+through a link took the pruner's lock at the round before too (`Skipped:
+true`, their failure there the `SkippedFor` the shim leaves unset), since a
+relative path's parent is the backups folder however it is spelled and a
+link reaches the same lock file; they pin the resolution point 3's refusal
+needs, and the control comparing spellings is their red.
+`TestAStopWhileTheLocksOpenHangsReturnsWithinItsBoundAndTakesNoLockLate`,
+`TestAClaimStoppedWhileItsLockOpenHangsReturnsWithinItsBound` and the
+ticker's bound test wait at seams the round before had not got: no object
+on a local disk hangs a lock file's open, and the manifest read's red is the
+named pipe's above, so theirs are the controls.
+`TestTwoVerificationsOfOneSnapshotWriteOneAtATime` passes in one process
+there (its slot held), and point 6's red is its controls;
+`TestAVerdictWrittenByAnotherCallerShowsOnTheJobsCardAtTheNextPoll` passes
+there (the round before stamped a write that landed), and its red is the
+stamp's control; and the claim's tests name an API the round before had
+not got.
+
+### Negative controls
+
+Each mutates one site of the committed tree, runs the tests named, and puts
+the committed bytes back, compared with HEAD's blob before each mutation and
+after each restore (a runner in the scratch folder; the predictions written
+to a file before the first run). All 28 went red:
+
+- one snapshot per restart loop: the startup pass capturing beside a
+  snapshot that owes its check (P1a: `after 2 boots that died: 2 snapshots,
+  want 1`, and the table's four rows; its first form deleted a variable's
+  only use and did not build, and was rewritten to keep it read); a
+  `PENDING` whose owner is gone read by its age (P1b); one its owner holds
+  read by its age (P1c: `a capture whose owner holds it: database
+  INCOMPLETE [interrupted], want PENDING`); the capture taking no owner lock
+  (P1d); the orphan sweep asking no owner (P1e: `reaped 1`); the
+  keep-policy asking no owner before a removal (P1f: `the prune removed a
+  snapshot claimed for its check`, the test 9100ae00 wrote when the list of
+  controls found none for that ask).
+- no `VERIFIED` left: a veto only over a record that would hold one, the
+  round before's rule (P2a: the pruner, the console, the doctor and the API
+  reading `VERIFIED` after the error); no veto beside the bundle (P2b); a
+  veto whose owner cannot be given dropped (P2c: the veto then beside the
+  bundle, want in it); a write that keeps the `VERIFIED` not saying so
+  (P2d); no write where no veto can be made (P2e); the veto's making
+  stamping nothing (P2f: the Jobs card still reading `VERIFIED`).
+- the lock resolved: the snapshot's path not resolved (P3a: `--verify .`
+  refused as outside, and the link); the backups folder compared by its
+  spelling (P3b: the data dir reached through a link refused); `--verify`
+  given no backups folder (P3c: the copy elsewhere verified, exit 0).
+- no lock, no protected work: a try granted no lock going on (P4a, in both
+  packages); the orphan sweep before the lock (P4b: the orphan reaped); the
+  ticker capturing whatever the lock says (P4c: `2 snapshots, want 1`); the
+  doctor saying nothing (P4d).
+- the bound: the manifest's read on the caller (P5a) and the lock's open on
+  the caller (P5b), each red in internal/backup and at the ticker (`the
+  ticker did not return while its manifest's read hung`, by its 300 s
+  timeout there); the worker never letting the lock go (P5c: a prune once
+  the abandoned verification ended still skipped); the check with no
+  deadline (P5d); the claim on its caller's goroutine (P5e).
+- the tests' pins: no slot (P6a: `the second verification waited at the
+  wrong place while the first held its turn; want its wait at the slot`); no
+  kernel lock, a held one taken all the same (P6b: `the second verification
+  ended … while the first was parked holding its turn`); a verdict's write
+  stamping nothing (P6c: `the next poll after another caller's verdict reads
+  "PENDING", want FAILED`); and the doctor's hint putting `--full` first
+  (P7).
+
+Three of them found tests that did not pin what they said, each fixed
+before its control ran again: P6b went red by its timeout alone, its second
+verification waiting inside the first's `sync.Once` in the park hook rather
+than at a lock (a5e49f05: the park is a compare-and-swap); P6c stayed green
+twice over, first because a verdict that passes is stamped when its veto is
+made (a5e49f05 adds a failing verdict), then because a verification's first
+take of the folder's lock makes `.backups.lock`, which moves the folder's
+time (e79b830e makes it first), and a database that fails beside files that
+pass still holds a `VERIFIED`, whose write takes a veto (e4eeb910 fails
+both).
+
+### The gates
+
+go1.27.3, each run inside the build slot (`buildslot.py b653`, its queue 0
+and 2 minutes), `TMPDIR` on disk under the worktree's `.tmp`:
+
+- `make test TEST_PKGS='./internal/backup/... ./internal/doctor/...
+  ./internal/admin/... ./internal/atomicwrite/... ./cmd/bridge/...'`, the
+  race detector, `-p 4`, `-timeout 30m`, on a9d488c4: internal/doctor ok
+  6.9 s, internal/atomicwrite ok 20.0 s, internal/admin ok 1053.0 s;
+  internal/backup failed 440.7 s on one test,
+  `TestAVerificationPastItsDeadlineReturnsWithItsCallerStillWaiting`, a
+  race between the hung check's read of its seam and the test's restore of
+  it (9a5235dc makes the restore wait for the read); cmd/bridge failed
+  1402.6 s on `TestEveryCitedTestNameExists` alone, which names exactly the
+  two tests this round renames, cited only by cli-serve.md and
+  History-rules-cli-serve.md, which the rules patch rewrites: on a copy of
+  HEAD with the patch applied it passes. The first launch of this gate was
+  stopped five minutes in, after a run of cmd/bridge's sweeps alone found
+  two of them failing over this round's moves (a9d488c4 answers both).
+- `make test TEST_PKGS=./internal/backup/...` again on 9a5235dc: ok,
+  428.2 s.
+- the 33 new and changed tests by name, `-race -count=1`: all pass (77 s).
+- `make vet`, `GOOS=linux GOARCH=386 make vet`, and `go vet` of the six
+  package trees the branch touches for windows and darwin: nothing reported.
+  `make build-all`: the six targets built, the build-site census first
+  (`check-build-tags: OK`).
+- the pinned gofmt (`go run cmd/gofmt -l`) over every Go file the round
+  changed: nothing listed.
+- `rules-b653-r2.patch` applied to a copy of HEAD: `make docs-check` passes
+  there (cli-serve.md 68,967 bytes, History-rules-cli-serve.md 330,302,
+  admin-console.md 87,574; the worst load 67.5%), the census passes there,
+  and every test name it cites is declared.
+
+### Follow-ups
+
+The backlog file is not on legion0, so these go to the PR's report: a
+restore reads no snapshot's verdict yet (the next two PRs' ground); a case
+of two processes is a second open of the lock file in this one (flock and
+LockFileEx exclude it as another process's open would), but the restart
+loop's boots are processes of their own, killed; and no case runs on a
+network mount, where a lock is a POSIX record lock, which this process's
+own records of what it holds stand in for.
+
+## 2026-11-09 — B653 PR 1 round 3: a check given up holds the folder until it ends, a recheck sets its VERIFIED aside first, no VERIFIED survives a failed write
+
+The third round of backlog B653's first PR, on `feat/b653-snapshot-verify`
+(PR #1444) from round 2's tip with its rules applied (49c9e873); worker b653
+on legion0 (Ubuntu 26.04, linux/amd64, go1.27.3, `GOTOOLCHAIN=local`,
+`GOPROXY=off`). It answers Codex's four findings and the Claude API's three
+on round 2, and both reviews of the round's brief, taken together as one
+binding set. Commits: the code and its tests c5bcaea1, the page e6d8547d,
+the pins the controls asked for 71b0ccae and 728969a3, and this record. The
+rules go through `rules-b653-r3.patch`: cli-serve.md's three B653 lines and
+their verbatim copies in History-rules-cli-serve.md, each changed alike, and
+a paragraph of the third round's there.
+
+### The findings, as built
+
+- **A check given up keeps its holds until it ends** (Codex P1; the brief
+  reviews on delivery, exclusivity and fail-fast). The worker answers its
+  caller first, then lets go of what it holds, each once (`held.release`):
+  the folder's lock only once the check's goroutine has ended
+  (`runLowPriority` answers a channel that closes then), then this process's
+  slot, then the capture's ownership. A check given up records the
+  `INCOMPLETE` it was given up with, runs no prune (the own prune is skipped,
+  not deferred: nothing would hold it once the caller has gone), drops what
+  the check answers later, and answers `ErrCheckGivenUp`, wrapping the stop's
+  or the deadline's error. While it runs the folder is marked (`stuck.go`): a
+  wait for the slot, the token or the kernel's lock answers
+  `ErrCheckStillRunning` at once, a wait for the slot that began before the
+  give-up included (the mark closes a notice the waiters select on), in this
+  process by the mark and in another by a marker beside the lock
+  (`.check-still-running`, written on a goroutine of its own, read only while
+  the lock is held, asked once a second during a wait, and removed by the
+  next holder of the lock); a prune behind it is skipped for it, and both
+  doctors' `backup-check` line names it. A shutdown does not wait: the
+  verification has answered already, and the process's end ends the check
+  and lets the kernel's locks go. A panic in the check is recovered into
+  `INCOMPLETE` (`aborted`), one in the worker's own steps answers an error,
+  and either lets go of all the same. What stays open is backlog B653's.
+- **No `VERIFIED` survives a failed write** (the Claude API's Medium; Codex P1
+  on mixed verdicts; the brief reviews' durable invalidation). Before a check
+  of a snapshot whose record holds a `VERIFIED`, its veto is put in place and
+  its folder synced (`setAside`: in the bundle, or beside it where that cannot
+  be had); where neither is durable the verification checks nothing and
+  writes nothing (`ErrRecheckRefused`), removing a veto it made, so the
+  record reads as it did. A write of a record that holds or replaces a
+  `VERIFIED` needs the veto or writes nothing; `ErrRecordKept` is gone. The
+  veto goes only once the rename and its folder's sync have answered. The
+  record names its folder (`snapshot`) and a reader reads one of another
+  folder as `UNVERIFIED` (`other-snapshot`); a record has no generation of its
+  own, since a crash that brings an old one back finds the durable veto beside
+  it. Mixed verdicts take the same path: refused where no veto can be had,
+  recorded behind one where it can. The pruner, the startup rule and the
+  doctor all read through `readVerdict`, so a record behind a veto, of another
+  folder, missing or unreadable is never the recovery point; the console's
+  cache moves with the folder's stamp, which the veto's making and its
+  removal both move.
+- **What the check found, apart from what the record reads** (Codex P1's
+  second half). `bridge backup --verify` and the ticker say, where a verdict
+  was not recorded, what the check found and, apart, what every reader reads
+  of the record; of a refused recheck, that nothing was checked, and the
+  record an earlier check left; of a write not known durable, that it was
+  written.
+- **The ticker's reads before a capture are bounded** (Codex P2): its startup
+  listing (`ReadStatus`), the lock's probe (`ProbeBackupsLock`, whose open is
+  a seam now) and the stuck check's read each run on a goroutine of its own
+  (`readBounded`), waited for until they answer or `StopWriteBound` past the
+  stop. The ticker also takes no snapshot while a check that did not end
+  holds the folder, since its verification would be refused and nothing
+  pruned.
+- **Public text names the open weakness by its id alone** (Codex P2):
+  verify_record.go's header and the veto test were rewritten, and the code no
+  longer has the case they described.
+- **The startup check in place decides on what it found** (the Claude API's
+  Low): `res.Verify.Found`, whether or not its record could be written.
+- **The doctor's hints are commands as worded** (the Claude API's Low; the
+  brief review's placeholder): `bridge backup --config <bridge.yaml> --verify
+  <snapshot-dir> [--full]`, and the two that advise a snapshot, each saying
+  `<bridge.yaml>` is the config the doctor read; the test fills each
+  placeholder as one argument, in an install whose folder's name has spaces
+  and an apostrophe, and adds nothing.
+
+### The reds at the round before
+
+On a copy of 49c9e873 (`git archive`) with this round's new and changed
+tests in it, and a scratch shim, never committed, giving it the names and
+none of the behaviour: the three new errors, the two new reasons,
+`StuckCheck` and a `StuckCheckOf` that finds none, the marker's name, and the
+two new seams as no-ops; `doctor.BackupChecks` called with its five
+arguments. Predictions written first; every result was as predicted:
+
+- internal/backup: `TestAnAbandonedCheckKeepsItsHoldsUntilItsCheckerEnds`
+  (`the verification's own prune ran beside the check it gave up:
+  {Deleted:1 …}`, `a verification in another backups folder beside the check
+  that runs on answered <nil>`, no marker); `TestAVerificationWaitingItsTurnHearsOfACheckGivenUp`;
+  `TestAPanicInAVerificationLetsGoOfWhatItHolds`, each case alone, by a
+  crash of the test binary (`panic: injected`);
+  `TestAVerificationPastItsDeadlineReturnsWithItsCallerStillWaiting` on its
+  error alone; `TestARecheckWithNoDurableVetoIsRefusedBeforeItsCheck` in all
+  four cases (the round before checked, and over mixed verdicts answered
+  `the verdict was not written: put its veto in place` with the database
+  still read `VERIFIED`); and `TestARecordCopiedIntoAnotherFolderReadsUnverified`
+  (`the copy: database VERIFIED`).
+- cmd/bridge: `TestAFreshProcessReadsNoVerifiedAVerificationCouldNotRecord`
+  in all five cases, its killed recheck with every reader (`the pruner reads
+  VERIFIED/VERIFIED after a check whose record was not written`, the console's
+  newest verified the damaged one, the doctor's newest line) and the prune,
+  which removed the older verified snapshot; the four others on the CLI's
+  words, and the veto's sync on its seam;
+  `TestACheckThatDidNotEndInAnotherProcessHoldsTheFolderUntilItEnds` and
+  `TestTheTickerTakesNoSnapshotWhileACheckThatDidNotEndHoldsTheFolder` (no
+  check given up); `TestAStartupCheckThatFindsTheDatabaseFailedTakesASnapshotWhetherOrNotItsRecordIsWritten`
+  (`left 1 snapshots, want 2`);
+  `TestATickerStoppedWhileItsStartupListingReadsANamedPipeReturnsWithinItsBound`
+  (`the ticker did not return`, a real object); and
+  `TestTheDoctorsVerifyHintsAreCommandsTheCLITakes` (every hint with no
+  `--config` and no word of which config).
+
+Not reds, as predicted, and why:
+`TestAVerifiedRecordLeftForAFailedOneIsVetoedWhenItsWriteFails` passes at
+the round before, whose veto covered each of its cases (a pin of what this
+round keeps; its reds are its controls), and so does
+`TestANewVerifiedIsNotWrittenWhereNoVetoCanBeHad`, which the round before
+refused as well; `TestATickerStoppedWhileItsProbeOfTheLockHangsReturnsWithinItsBound`
+is red there only through the shim (no object on a local disk hangs a lock
+file's open), and its red is its control.
+
+### Negative controls
+
+Each mutates one site of the committed tree, runs the tests named, and puts
+the committed bytes back, compared with HEAD's blob before each mutation and
+after each restore (a runner in the scratch folder, the predictions written
+to a file before the first run). All 29 went red as predicted:
+
+- the holds (each asked apart): the release as round 2 made it, at the
+  answer (Q1a: in internal/backup and at another process's `--verify`); the
+  slot alone let go at the answer (Q1b: the other folder's verification
+  proceeds, and nothing else is red); the lock alone (Q1c: a verification as
+  another process proceeds, and the prune); the ownership alone (Q1d: the
+  owner lock let go); the own prune beside a check given up (Q1e:
+  `{Deleted:1 …}`); a slot's wait that hears no notice (Q1f); a slot held by
+  a check given up waited for (Q1g: the other folder's verification waits out
+  its ten seconds); another process's marker never asked (Q1h:
+  `ErrBackupsBusy`, both); and the check's late result recorded (Q1i).
+- the records: no veto set aside before a recheck (Q2a); a refused recheck
+  leaving the veto it made (Q2b); the recheck's veto taken unsynced (Q2c);
+  the veto removed where the write is not durable (Q2d: the lost renames read
+  `VERIFIED`, and the fresh process's prune let the anchor go) or where it
+  fails before its rename (Q2e: and the console's); a `VERIFIED` written with
+  no veto to be had (Q2f); and a record bound to no folder (Q2g).
+- the ticker, the CLI and the doctor: the startup listing (Q3a) and the
+  lock's probe (Q3b) on the ticker's own goroutine; a capture beside a check
+  that did not end (Q3c: `2 snapshots, want 1`); the check in place decided
+  on its record and no error (Q4: `left 1 snapshots, want 2`); a hint with
+  no `--config` (Q5a) or not saying which (Q5b); what the check found not said
+  apart (Q6a) and a refusal said as a failed write (Q6b); and the doctor
+  saying nothing of a check that did not end (Q7a, both tests) or of another
+  process's (Q7b).
+- a panic in the check (Q8a) or in the worker (Q8b) not recovered: the
+  binary crashes; and the give-up's error not saying it (Q9).
+
+Q3b went red first by the test's deadline alone: its drain waited for a
+ticker still held in the probe, which the test let go only after the drain
+(728969a3 lets the drain go of the probe first; red again in 20 s).
+
+### The gates
+
+go1.27.3, each run inside the build slot (`buildslot.py b653`, its queue 5
+minutes and 0), `TMPDIR` on disk under the worktree's `.tmp`:
+
+- `make test TEST_PKGS='./internal/backup/... ./internal/doctor/...
+  ./internal/admin/... ./internal/atomicwrite/... ./cmd/bridge/...'`, the
+  race detector, `-p 4`, `-timeout 30m`, on 728969a3: ok, 1475 s
+  (internal/backup 482.8 s, internal/doctor 6.8 s, internal/admin 1068.0 s,
+  internal/atomicwrite 20.1 s, cmd/bridge 1449.6 s).
+- the 18 new and changed tests by name, `-race -count=1`: all pass (60 s).
+- `make vet`, `GOOS=linux GOARCH=386 make vet`, and `go vet` of the six
+  package trees the branch touches for windows and darwin: nothing reported.
+  `make build-all`: the six targets built, the build-site census first
+  (`check-build-tags: OK`).
+- the pinned gofmt (`go run cmd/gofmt -l`) over every Go file the round
+  changed: nothing listed.
+- `rules-b653-r3.patch` applied to a copy of HEAD: it matches the
+  generator's files, `make docs-check` passes there (cli-serve.md 71,762
+  bytes, History-rules-cli-serve.md 336,547; the worst load 67.7%), the
+  census passes there, and each of the 65 test names it cites is declared.
+
+### Follow-ups
+
+The backlog file is not on legion0, so these go to the PR's report, and what
+stays open of a check given up is named here by its id alone: backlog B653.
+
+## 2026-11-09 — B653 PR 1 round 4: every hold of the backups folder bounded from its lock, a mark only past its bound, no veto lost to a VERIFIED carried over or to Windows
+
+The fourth round of backlog B653's first PR, on `feat/b653-snapshot-verify`
+(PR #1444) from round 3's tip with its rules applied (2cdce735); worker b653
+on legion0 (Ubuntu 26.04, linux/amd64, go1.27.3, `GOTOOLCHAIN=local`,
+`GOPROXY=off`). It answers round 3's two reviews (Codex's four findings, the
+Claude API's two Mediums and three Lows) and both reviews of the round's
+brief, taken together as one binding set. Commits: the code and its tests
+51c1d9bb, the page 988ed6b5, the pins the controls asked for 2dde2515, the
+mid-prune cancel test the first gate failed d64625fb, what twenty runs under
+the race detector found d21defe1 and its deterministic test 29cc051e, the
+merge test's pin of where this departs from the brief 087e9bf4, and this
+record. The rules go through `rules-b653-r4.patch`: cli-serve.md's two
+B653 lines that changed and their verbatim copies in
+History-rules-cli-serve.md, each changed alike, and a paragraph of the
+fourth round's there.
+
+### The findings, as built
+
+- **Every holder of the folder's lock is bounded, from the lock to its end**
+  (the Claude API's Medium, Codex P2, both brief reviews). A hold
+  (`hold.go`) is one tenure of the lock: each step its holder takes under
+  it runs on a goroutine of its own through `stepOf`, waited for until its
+  bound, which counts from the moment the lock was taken: the record's read,
+  putting the veto in place and the check's own give-up end half of
+  `StopWriteBound` past the lock and `VerifyDeadline`; the verdict's write,
+  the prune after it and the read-back as long past the later of that
+  deadline and their own start; every step `StopWriteBound` past its
+  caller's stop. The write of `INCOMPLETE` for a verification stopped before
+  it began (`abandonPending`) and a claim (`backup.Claim`) are holds too,
+  their step bounded `StopWriteBound` from the lock. A step past its bound is
+  given up: the hold's context ends (a prune stops at its next removal), the
+  step's goroutine is tracked, and the holder answers `ErrCheckGivenUp`
+  naming the step; it runs no check and no prune, writes nothing but its
+  `INCOMPLETE` (merged, so a completed verdict stays), reads the record
+  back, and lets go of the lock, the slot and the ownership only once every
+  step it gave up has ended. A step that resumes runs nothing further, and
+  what it answers late is dropped (a claim's late owner let go at once).
+- **A mark only for an overrun, published with no filesystem asked** (both
+  brief reviews). `markStuck` takes the key resolved at the lock, the folder
+  as resolved and each spelling the hold was reached by (`spellingKey`:
+  absolute and clean, no link resolved); the marker file is written on a
+  goroutine of its own, under the mark's mutex, and not at all once it has
+  been removed. A step that is slow and keeps within its bound marks nothing. The
+  holds are let go in one order: the steps given up waited for, the marker
+  removed and the lock let go, then the slot, then the ownership, and the
+  mark dropped last (round 3 dropped it before the marker file), so the
+  notice stands until every hold is let go; a key keeps every mark that
+  stands under it, and a stopped verification's worker keeps its mark until
+  the write of `INCOMPLETE` it started has ended (below, what twenty runs
+  found).
+- **The mark's readers ask it first, or are bounded.** First, asking no
+  filesystem, by the spellings they were given: a verification
+  (`verifyAndThen`), a claim and a prune (`PruneContext`), each before its
+  first read of the folder; the wait for the folder's token; the wait for
+  the slot, by its holder's mark (`slotHolder`), so a hold that has no slot
+  (`abandonPending`'s) refuses no verification of another folder; and
+  `StuckCheckHere`. `StuckCheckOf` asks the spelling first, then the
+  resolved key and another process's marker, which ask the folder, and is
+  bounded by its callers (the ticker's `readBounded`, the doctor's bound).
+  The doctor asks `StuckCheckHere` first and runs `ReadStatus`, the lock's
+  probe and `StuckCheckOf` on a goroutine of its own waited for
+  `doctorBackupsBound` (5 s), saying past it that the folder did not
+  answer. Across processes, on storage that takes no writes, the marker
+  cannot land, and another process waits its lock wait out and answers
+  `ErrBackupsBusy`; docs/backup.md says so.
+- **No veto cleared over a `VERIFIED` the record carries** (Codex P1, the
+  Claude API's High on the brief). `publishVerdict` clears the veto, once
+  the write is durable, only where no step was given up (`mayClear`) and the
+  record is wholly what the check found (`mergeVerdict`'s `fresh`: both
+  verdicts replaced) or no veto stood before the verification began
+  (`doubted`, read with the record under the hold; `abandonPending` reads it
+  too). A veto a failed write left stays over a `VERIFIED` a retry carries
+  over: stopped before it began, past its deadline, given up, panicking, or
+  a quick `VERIFIED` over a full one. A recheck given up keeps the veto it
+  made, until a check of the snapshot finishes.
+- **No recheck recorded where no directory can be synced** (both reviews).
+  `fsutil.SyncsParentDir` was there already (false on Windows, since B470
+  PR 4b1); backup reads it through a seam (`syncsParentDir`,
+  `SetSyncsParentDirForTest`). Where it is false, a check of a snapshot
+  whose record holds a `VERIFIED` makes no veto and stamps nothing, runs its
+  check, and answers `ErrRecheckNotRecorded` with what it found, the record
+  as it was; a fresh `PENDING` verifies and records as before. The ten tests
+  that recheck a `VERIFIED` (found by a sweep of internal/backup,
+  internal/admin and cmd/bridge) skip there, or expect the answer where
+  their coverage holds without the record (the WAL-header database's second
+  run, the one-writer test's second verification, the stuck test's
+  verification as another process).
+- **The reporters say what the record reads** (the Claude API's Low, both
+  brief reviews). `VerifyResult.Recorded` says that what was written landed
+  (the write made, no error), so a give-up over a completed verdict, whose
+  merge changes nothing, writes nothing and is not recorded. `bridge backup
+  --verify` and the ticker say of a verification given up whether it wrote
+  its record and what that record reads as read back, and that its step
+  still holds the snapshots; `--verify` of a recheck not recorded says what
+  the check found, that it was not recorded and why, and the record it
+  leaves as it was.
+- **The round-3 test's header claims what was true** (the Claude API's Low).
+  `TestAFreshProcessReadsNoVerifiedAVerificationCouldNotRecord` says what
+  round 2 did, case by case, measured on its tip with this round's version
+  of the test: stage and unsynced red on the words alone (round 2's veto
+  stood, so every reader was green), noveto red on the words and on the
+  check its refused process began, vetosync red only through the shim's
+  no-op seam, killed red on every reader and on the prune. The refusal is
+  pinned behaviourally now: a process that put no veto in place never begins
+  its check (its check's thread says when it does), nor says what a check
+  found.
+- **The open weakness by its id** (the Claude API's Low): docs/backup.md's
+  paragraph on a step given up, and the doctor's `backup-check` hint, name
+  backlog B653.
+- **Out of scope**: Codex's fourth finding on round 3, in code this PR does
+  not change, is backlog B826.
+
+Where this departs from the brief: the brief's rule for a veto was never to
+clear one beside a `VERIFIED` carried over. That keeps the veto a completed
+quick check made over a full `VERIFIED` nobody doubted (no veto stood before
+it), so a routine `--verify` after `--full` left the snapshot read
+`INCOMPLETE` until the next full check: under that rule
+`TestBridgeBackupVerifyRecordsAndSaysTheVerdict` goes red (`--verify after
+--full = 1`), and so does `TestAQuickCheckNeverUndoesAFullOne` since it
+asks what a reader reads of the record (087e9bf4; Q9a below). The rule as
+built keeps every case the brief names, and adds `doubted`. The
+brief asked that `fsutil.SyncsParentDir` be added; it was there. And a claim
+is a hold as well, bounded alike.
+
+### The reds at the round before
+
+On a copy of 2cdce735 (`git archive`) with this round's new and changed
+tests in it, and a scratch shim, never committed, giving it the names and
+none of the behaviour: `ErrRecheckNotRecorded`, a `StuckCheckHere` that
+finds none, `StuckCheck.Step` (a field nobody sets), `SetSyncsParentDirForTest`,
+`SetMetadataForTest` and `SetOnPruneForTest` as no-ops, the listing's seam
+moved where this round moves it, `StuckAnywhereForTest` as the base's own
+`stuckHere("")`, and in cmd/bridge the doctor's bound and its read's hook as
+variables nothing reads. Predictions written first; every result was as
+predicted:
+
+- internal/backup: `TestEveryStepUnderTheLockIsBoundedAndMarked`'s veto's
+  sync and verdict's write (`did not return within 15.3s of its stop`: the
+  round before ran both unbounded), its write of `INCOMPLETE` (`the hold that
+  hangs was never marked`), and its prune only through the shim (the base
+  has no seam there, so the test waited to its timeout);
+  `TestAVetoThatStoodBeforeAVerificationStaysOverTheVERIFIEDItCarries` in all
+  five cases (the veto removed, every reader reading `VERIFIED`, the prune
+  letting the anchor go); `TestARecheckGivenUpLeavesTheVetoItMade` on all
+  four of its assertions; `TestARecheckWhereNoDirectoryCanBeSyncedChecksAndRecordsNothing`
+  (`answered <nil>`: the base vetoes, checks and records the `FAILED`);
+  `TestAGivenUpVerificationReadsItsRecordBack` over a `FAILED` (`recorded
+  true` with nothing written); and
+  `TestAStopWhileTheManifestReadHangsReturnsWithinItsBoundAndKeepsTheLock`,
+  whose prune the base skipped for the lock held, a read it never marked.
+- cmd/bridge: `TestBridgeBackupVerifySaysWhatARecheckFoundWhereItCannotBeRecorded`
+  (the record changed, read `FAILED/VERIFIED`);
+  `TestBridgeBackupVerifySaysWhatAGivenUpVerificationsRecordReads` in all
+  three (the base said of an `INCOMPLETE` it had written `what this check
+  found was not recorded`); `TestTheTickerSaysWhatAGivenUpVerificationsRecordReads`
+  in both; and `TestTheDoctorNamesAHoldGivenUpWhileTheBackupsFolderDoesNotAnswer`
+  (`the verification whose write hangs was never given up`).
+
+Not reds, as predicted, and why: `TestASlowStepWithinItsBoundLeavesNoMark`
+(the base marked no step within its bound either; its red is its control,
+a mark at the lock); `TestAGivenUpVerificationReadsItsRecordBack` over a
+`PENDING` and with its write failing; the tests changed for a platform with
+no directory sync, which change nothing on Linux; and the round-3
+fresh-process test, whose new assertions pin round 3's refusal (red at
+round 2, above).
+
+### Negative controls
+
+Each mutates one site of the committed tree, runs the tests named, and puts
+the committed bytes back, compared with HEAD's blob before each mutation and
+after each restore (a runner in the scratch folder, the predictions written
+to a file before the first run). Two (Q2a, Q2c) did not build in their first
+form, whose expression left `fresh` unused, and were written again keeping
+it (`clears, _ := …, fresh`) before they ran; then all 34 went as
+predicted but half of Q9a's first run (below):
+
+- the holds: the veto's step with no bound (Q1a: `did not return within
+  15.3s of its stop`), the write's (Q1b, and the doctor's test: `never given
+  up`), the prune's (Q1c) and `abandonPending`'s (Q1d: `never marked`); a mark
+  at the lock (Q1e: `a step within its bound was marked`); the mark dropped
+  before the holds are let go (Q1f: gone as the worker answered, so never
+  seen); the prune (Q1g: `a prune did not answer within 2s: it asked the
+  stalled filesystem`) and a verification (Q1h: in `abandonPending`'s case,
+  where no slot holds the mark; green, as predicted, where the slot's holder
+  refuses it) asking the filesystem before the mark; a slot whose holder was
+  given up waited for (Q1i: the waiter, and the other folder's verification
+  `waited 10.03s to be refused`); a check after the veto's step was given up
+  (Q1j: `1 checks ran`); the prune after a give-up (Q1k: the own prune ran,
+  `PruneSkipped` false; green in the hold test, as predicted, the hold's
+  ended context stopping that prune before it removed anything); the mark
+  asking the filesystem (Q1l: all four cases); and the doctor's reading
+  resolving before the mark (Q1m).
+- the vetoes: every veto cleared after a write, round 3's (Q2a: all five
+  cases, and the recheck given up's own veto); the give-up's own veto
+  cleared (Q2b: red on the recheck given up, green in the five, as
+  predicted, a veto that stood kept by `doubted`); a check wholly its own
+  clearing no veto that stood (Q2c: the eight cases of the veto test whose
+  next check finds the veto standing); a veto that stood not seen (Q2d: past
+  its deadline, panicking, quick over full; green, as predicted, stopped
+  before it began, which `abandonPending` reads itself, and given up, which
+  clears nothing); and `abandonPending`'s own reading (Q2e).
+- the barrier: its absence ignored (Q3a: both tests); a veto made where none
+  can be durable (Q3b: `the recheck left a veto`).
+- the reporters: `Recorded` as round 3 set it (Q4a: over a `FAILED`, in
+  internal/backup and at the CLI); the CLI's (Q4c: all three) and the
+  ticker's (Q4d: both) words for a give-up swapped; a recheck not recorded
+  said as any verdict not recorded (Q4e).
+- the doctor: this process's mark asked only inside the bounded read (Q5a:
+  no `backup-check` line, the read timing out first); the read unbounded
+  (Q5b: `the doctor's backups lines did not answer while the folder did
+  not`).
+- the refusal: a recheck with no durable veto checking anyway (Q6a: the
+  refused process `began its check`, and the in-package refusal answered the
+  write's error).
+- after the first gate (below): the prune asking no context between its
+  removals (Q7a: `TestABackupCancelledMidPruneReportsWhatItDeleted` red, all
+  three snapshots removed and `pruned 3` said), so its new cancel still
+  needs that check.
+- after the twenty runs (below): one mark per key (Q8a: the later ends
+  first, the earlier's mark gone); a mark's end taking every mark under its
+  key (Q8b: both orders); the worker's mark not kept until the write it
+  started ends (Q8c: `once the worker had ended, the folder reads … false`);
+  the worker naming no step for that write (Q8d: the mark names `its wait for
+  the snapshots' lock`); and the worker keeping the slot until the write
+  ends, the alternative rejected (Q8e: `the worker never let go of the
+  slot`).
+- the brief's own rule for a veto, cleared only where the record is wholly
+  what the check found (Q9a): red at `bridge backup --verify` after
+  `--full`; green, against its prediction, in
+  `TestAQuickCheckNeverUndoesAFullOne`, which asked the level and the time
+  the record keeps and not what a reader reads of it; it asks that too now
+  (087e9bf4), and Q9a is red there (`database INCOMPLETE [unsynced], want
+  VERIFIED`).
+
+### A test the hold's context changed
+
+The first `make test` failed one test of cmd/bridge's,
+`TestABackupCancelledMidPruneReportsWhatItDeleted` (#998), which put its
+cancel between two removals through a context of its own whose `Err`
+cancelled it once the first snapshot had gone. The prune runs on its hold's
+context since this round, derived from the pass's, and a derived context's
+`Err` asks no parent's, so the cancel never came and the prune removed all
+three. A real stop still reaches it, through `Done`. The test cancels now
+where the prune asks, just before each removal, whether the snapshot is
+owned (the resolution of its path, through `SetMetadataForTest`), as it asks
+it of the first snapshot it deletes; its assertions are as they were, and
+its control is Q7a (d64625fb).
+
+### What twenty runs under the race detector found
+
+The new tests run twenty times under the race detector (the gate below)
+failed the step test's `abandonPending` case three times in twelve: `the
+hold that hangs was never marked`. A verification stopped before it took
+the lock hands its `INCOMPLETE` to `abandonPending`, whose hold takes the
+lock and is marked once its step overruns, while the worker waits for that
+write, and the worker's caller, its own bound reached at the same moment,
+gives the worker's hold up too: two holds of one folder, given up under one
+key. The record of marks kept one mark per key, so whichever came later
+overwrote the other, and the worker's end, which drops its own mark, then
+erased the key while the write's hold stood. Fixed: a key keeps every mark
+(`stuck` is a map of key to marks, under a mutex never held across a
+filesystem's call), and a mark's end takes its own alone
+(`TestTwoHoldsGivenUpUnderOneKeyEachStandsUntilItsOwnEnd`, red before the
+fix: `the later ends first`). Run twenty times again, the case failed
+three times in another way: the doctor's reading named the worker's step,
+`its wait for the snapshots' lock`, which is not where the worker was; and,
+that named, once in twenty in a third: the worker's mark went as the worker
+ended while the write, still within its own bound, had raised none, so a
+second verification was not refused. The
+worker now names the step it waits in (`hold.in`), the write of
+`INCOMPLETE`, and keeps a mark it raises until that write has ended
+(`keepMarkUntil`, which `drop` waits for), though its slot goes as it ends:
+keeping the slot too, tried first, would leave this process's other
+verifications waiting behind a hung write wherever the worker's caller took
+its answer before its own bound, a select between two ready channels.
+`TestAStoppedVerificationsMarkStandsUntilTheWriteItStartedEnds` pins both
+deterministically (another holder keeps the lock 1.5 s, so the write's bound
+ends late; the worker's lock open answers half a second late, so its caller
+gives it up first). The case then passed 40 of 40 under the race detector.
+
+### The gates
+
+go1.27.3, each run inside the build slot (`buildslot.py b653`), `TMPDIR` on
+disk under the worktree's `.tmp`:
+
+- `make test TEST_PKGS='./internal/backup/... ./internal/doctor/...
+  ./internal/admin/... ./internal/atomicwrite/... ./internal/fsutil/...
+  ./cmd/bridge/...'`, the race detector, `-p 4`, `-timeout 30m`: on
+  2dde2515 every package ok but cmd/bridge, which failed
+  `TestABackupCancelledMidPruneReportsWhatItDeleted` (above); on 29cc051e
+  ok, 1488 s (internal/backup 544.3 s, internal/doctor 6.8 s,
+  internal/admin 1064.9 s, internal/atomicwrite 19.9 s, internal/fsutil
+  3.4 s, cmd/bridge 1455.9 s).
+- the round's new tests by name, `-race -count=20`, on 29cc051e:
+  internal/backup's eight (440 passes, 1331 s) and cmd/bridge's four (180
+  passes, 349 s), no failure and no race. On d64625fb the backup run failed
+  the step test's `abandonPending` case three times in twelve, and was
+  stopped (above).
+- `make vet`, `GOOS=linux GOARCH=386 make vet`, and `go vet` of the seven
+  package trees the branch touches for windows and darwin, on 29cc051e:
+  nothing reported. `make build-all`: the six targets built, the
+  build-site census first (`check-build-tags: OK`).
+- the pinned gofmt (`go run cmd/gofmt -l`) over every Go file the round
+  changed: nothing listed.
+- after the gates, 087e9bf4 adds one assertion to
+  `TestAQuickCheckNeverUndoesAFullOne` and changes no other file: the test
+  passed three times under the race detector, and the pinned gofmt lists
+  nothing.
+- `rules-b653-r4.patch` applied to a copy of HEAD: it matches the
+  generator's files, `make docs-check` passes there (cli-serve.md 74,628
+  bytes, History-rules-cli-serve.md 343,855; the worst load 68.3%), the
+  census passes there, and each of the 65 test names it cites is declared.
+
+### Follow-ups
+
+The backlog file is not on legion0, so these go to the PR's report:
+`PruneContext` alone, which no production code calls (every prune runs
+under a verification's hold), holds the lock with no bound on its steps; a
+claim's step is bounded and no test hangs one; and what stays open of a
+hold given up is named here by its id alone, backlog B653.
+
+## 2026-11-09 — B653 PR 1 round 5: nothing lands after a give-up, no veto goes without a check that ended and earns it, no prune after a recheck that recorded nothing, every holder and every step bounded
+
+The fifth round of backlog B653's first PR, on `feat/b653-snapshot-verify`
+(PR #1444) from round 4's tip with its rules and `main` merged (56eb3bde);
+worker b653 on legion0 (Ubuntu 26.04, linux/amd64, go1.27.3,
+`GOTOOLCHAIN=local`, `GOPROXY=off`). It answers round 4's two reviews
+(Codex's findings and the Claude API's) and both reviews of the round's
+brief, which the brief folds in and decides between. Commits: atomicwrite's
+rename that asks a context 893e3503, the backup package's work and its
+tests 3958d77d, the reporters, the doctor and their tests 1725bb7e, the page
+c424489d, two comments ebeb6a30, what twenty runs under the race detector
+found 465186f7, the round-4 test name the citation guard asked to keep
+de0efc0d, and this record. The rules go through
+`rules-b653-r5.patch`: cli-serve.md's two B653 lines that changed and their
+verbatim copies in History-rules-cli-serve.md, each changed alike, and a
+paragraph of the fifth round's there.
+
+### The findings, as built
+
+- **A give-up stops the write; a stop does not** (Codex's P1, the Claude
+  API's Medium, both brief reviews). Each step under a hold has a give-up of
+  its own (`stepSignal`, made by `stepOf` and handed to the step beside the
+  hold's context), which only that step's give-up ends: its own bound, or its
+  holder's caller abandoning the hold while the step runs (`giveUp` ends the
+  step the hold is in). A verdict's write asks it before every attempt at its
+  rename, the first included (`atomicwrite.RenameWithRetryUnsyncedCtx`,
+  `stageAndRename`), and before it removes a veto, the unchanged record's
+  branch included (`publishVerdict`); `verifyHeld`'s write and
+  `abandonPending`'s each pass their own step's. A stop of the caller ends
+  the hold's context and not that signal, so the `INCOMPLETE` a stop leads to
+  is still written (`TestACancelledVerificationWritesIncomplete`, whose
+  control below makes the signal the caller's context). A rename already in
+  the kernel is not taken back: a write whose rename landed before its sync
+  stalled keeps its veto once the sync answers, and the reporters say the
+  write did not finish.
+- **A veto goes only with a check that ended and earns it** (Codex's P2, the
+  Claude API's Medium). `earnsClear` replaces round 4's `fresh || !doubted`:
+  never where what was found holds an `INCOMPLETE`; where what was found
+  replaced both verdicts; and where the record carries a verdict over, only
+  where no veto stood before the verification began and each verdict carried
+  over is a `VERIFIED` that what was found matched with one (a quick check
+  over a full one). `mergeVerdict` says which of the two verdicts it
+  replaced. `publishVerdict`'s `mayClear` went: a write after a give-up
+  writes the `INCOMPLETE` it was given up with, which never clears.
+- **No prune after a recheck that recorded nothing** (the Claude API's
+  High). Where no directory can be synced, a recheck that finds damage leaves
+  the `VERIFIED` by design, and round 4 pruned after it under the same hold,
+  trusting that `VERIFIED`: at `keep` 1 the older verified snapshot, the only
+  good one, went. Neither that branch nor a recheck refused for want of a
+  durable veto runs the prune now; `Result.PruneSkipped`'s doc names the
+  cause, and the ticker's and the CLI's skip line says it
+  (`pruneSkipWords`). The next snapshot's prune runs as usual.
+- **`abandonPending` keeps the platform rule** (Codex's P2): where no
+  directory can be synced it writes nothing over a record that holds a
+  `VERIFIED`; round 4 merged its `INCOMPLETE` into a mixed record and made a
+  veto there.
+- **Every holder and every step bounded** (Codex's P2s, the Claude API's
+  Mediums and Lows, the brief reviews).
+  - The prune run on its own (`PruneContext`) is a hold: its folder's
+    resolution, its lock and its step run on a goroutine of its own, its
+    caller's wait bounded as a verification's; the marker's clearing and the
+    removals are one step bounded `VerifyDeadline` from the lock, given up
+    past it (`ErrPruneGivenUp`), the folder marked as a prune's
+    (`StuckCheck.Pruning`), which the doctor's `backup-check` line and the
+    ticker's reason name as a prune.
+  - The release: a hold lets go of what `alsoLetGo` added (a snapshot's
+    ownership) after the steps it gave up have ended and before its lock,
+    each a step bounded `releaseBound`; then the lock, its let-go begun in
+    the section that takes the mark and the lock's release (`releasing`),
+    and bounded `releaseBound` too, past which the hold is given up
+    (`stepRelease`) and its mark stands in this process until the let-go
+    has ended. A give-up after the let-go began writes no marker.
+  - Ownership's let-go, every path: a capture's (`FinishCapture`'s onEnd)
+    by the worker's hold before the lock, rather than after the slot as in
+    round 4; a claim's that its caller stopped waiting for, handed over
+    through an unbuffered channel, the hold taking it where the caller is
+    gone; one a claim's step took once it was given up, through the step's
+    late answer, which the hold now waits for; and a verification refused
+    at once, holding nothing, lets its capture's ownership go within
+    `StopWriteBound` (`letGoWithin`).
+  - A stopped verification's worker that handed its `INCOMPLETE` to
+    `abandonPending` is marked by no give-up of its caller's from then on
+    (`handOff`, `abandon` through `giveUpAs`): round 4's mark there named a
+    wait that had overrun nothing. The write's own hold marks once its own
+    step overruns, and a step of the worker's release that overruns its
+    bound marks too: a hold raises its one mark at its first give-up that
+    marks, rather than at its first give-up.
+  - `spellingKey` makes a relative spelling absolute against the working
+    directory read once as the process started (`workDir`), never asking
+    `os.Getwd`, which stats the directory, at a key's use.
+  - `drop` ends the hold's context, and `verifyAndThen`'s early returns
+    drop their hold.
+  - The doctor keeps one read of a backups folder out at a time
+    (`backupsReadOf`): a run while one is out waits for it, and says the
+    folder did not answer where it still has not.
+- **The reporters say what happened** (Codex's P2). `VerifyResult.Write`
+  says how far the write went (none began, unchanged, recorded, written and
+  not known durable, failed, or did not finish), and `RecordRead` whether
+  the record was read back. A verification given up is said as "it wrote
+  nothing" only where no write began, "its write did not finish" where one
+  began and was given up, and a record not read back is said so after the
+  write's words, with nothing printed of it.
+- **Out of scope**: restore's lock on its source snapshot is backlog B826.
+
+Where this departs from the brief, or reads it:
+
+- The brief's rule for the prune is a recheck that recorded nothing; it
+  names the branch where no directory can be synced. The rule is applied
+  to a recheck refused for want of a durable veto too, which also recorded
+  nothing. It costs that round's prune on a folder that cannot keep a veto,
+  and a fresh snapshot, never a recheck, prunes as before.
+- The ownership's let-go comes after the steps given up have ended, within
+  the release, rather than as a step before the release, so a hold given up
+  keeps the ownership, as round 3 decided, until every step it gave up has
+  ended.
+- Where nothing was read back, the reporters say how far the write went,
+  which is the write step's own answer and no conclusion from the read.
+- The doctor's shared read is bounded by `doctorBackupsBound` and not by a
+  run's context, so a run that stops waiting ends no read another run waits
+  for.
+- "An `INCOMPLETE` never clears" is the brief's rule, and a record whose
+  database is `VERIFIED` beside files a check did not end, met by the same,
+  is the one case where only it refuses; no end-to-end path arranges that
+  case, so a table test of `earnsClear` pins it (and the control R2b).
+- A caller's abandon of a hold while its write runs ends that write's
+  signal: it is a give-up of that step.
+
+### The reds at the round before
+
+On a copy of 56eb3bde (`git archive`) with this round's new and changed
+tests in it, and a scratch shim, never committed, giving it the names and
+none of the behaviour: `ErrPruneGivenUp`, `StuckCheck.Pruning`, `workDir`,
+the setters of the new seams with each hook called where this round calls
+it (the folder lock's let-go, an owner's let-go, a claim's answer),
+`SetReleaseBoundForTest` over a value nothing reads, and in atomicwrite the
+base's unsynced rename under this round's name, asking no context.
+Predictions written first; every result was as predicted:
+
+- internal/backup: `TestAWriteGivenUpLandsNothingOnceItResumes` in all four
+  cases (the record changed, the veto removed, every reader reading
+  `VERIFIED`; `abandonPending`'s `INCOMPLETE` landed);
+  `TestARecheckThatDidNotEndLeavesTheVetoItMade` in all three (the veto
+  removed, the readers reading `VERIFIED`, the anchor pruned);
+  `TestARecheckThatRecordedNothingIsFollowedByNoPrune` in both (`prune
+  skipped false, deleted 1`);
+  `TestAStoppedVerificationRecordsNothingOverAVERIFIEDWhereNoDirectoryCanBeSynced`;
+  `TestAPruneThatDoesNotEndIsGivenUpAndMarked` (`did not return within
+  13.3s`); `TestALockThatDoesNotLetGoIsMarkedUntilItDoes` (no mark within
+  3 s); `TestAnOwnershipIsLetGoBeforeTheLock` in all four (the lock let go
+  while the ownership's let-go hung, no mark; the refused-at-once case did
+  not answer within 13 s);
+  `TestAStoppedVerificationMarksNothingUntilTheWriteItStartedOverruns`
+  (marked at once, naming the write);
+  `TestAGiveUpOnceTheLocksLetGoBeganWritesNoMarker` in both (a marker
+  written; the racing case red in its first round),
+  `TestASpellingIsKeyedAgainstTheDirectoryTheProcessStartedIn` and
+  `TestAHoldsContextEndsWithIt`.
+- internal/atomicwrite: `TestRenameWithRetryUnsyncedCtxRenamesNothingOnceItsContextEnds`
+  before the first attempt (renamed) and between attempts (five tried).
+- cmd/bridge: `TestBridgeBackupVerifySaysWhatAGivenUpVerificationsRecordReads`
+  in its four new or changed cases (`it wrote nothing` of a write that
+  began; no write's words before `could not be read back`);
+  `TestTheTickerSaysWhatAGivenUpVerificationsRecordReads` in its two;
+  `TestTheStartupPassSaysWhyARecheckThatRecordedNothingPrunedNothing` (no
+  skip line); `TestTheDoctorKeepsOneReadOfABackupsFolderThatDoesNotAnswer`
+  (`3 reads`); `TestTheTickerAndTheDoctorNameAPruneGivenUp` (`never given
+  up`).
+
+Not reds, as predicted: the two give-up reporters over a `PENDING`, whose
+words did not change, and the atomicwrite case with a live context.
+`TestAnUnchangedRecordKeepsItsVetoOnceItsWriteIsGivenUp` and
+`TestAVetoGoesOnlyWithACheckThatEndedAndEarnsIt` call the package's own
+functions, whose signatures the round changed, and were not run there;
+their controls are R1d and R2b to R2d.
+
+### Negative controls
+
+Each mutates one site of the committed tree, runs the tests named, and puts
+the committed bytes back, compared with HEAD's blob before each mutation and
+after each restore (a runner in the scratch folder, the predictions written
+to a file before the first run). All 33 went as predicted, two of them red
+by another path than the one predicted (R5d, R5n):
+
+- the give-up and the write: the write's signal taken from its caller's
+  context (R1a: red in `TestACancelledVerificationWritesIncomplete`, `a
+  stopped check: database PENDING`, the stop ending the write; green in the
+  write test, as predicted, the hold's context ending at a give-up too); the
+  rename asking no give-up (R1b: staging, rename and `abandonPending`'s write
+  landed); the veto removed after a write given up had landed (R1c: the sync
+  case); the unchanged record's veto (R1d); `abandonPending`'s write given no
+  signal (R1e); a give-up that ends no step's signal (R1f: all four).
+- the veto: round 4's clear (R2a: all three cases; green, as predicted, in
+  the table test, which asks `earnsClear` itself); an `INCOMPLETE` that
+  clears where the merge allows (R2b: the table's two cases; green end to
+  end, as predicted, the matched rule refusing there too); a veto that stood
+  before cleared over a match (R2c: the table, and the round-4 veto test's
+  quick-over-full case); a carried-over `FAILED` counted as matched (R2d).
+- the prune: after a recheck not recorded (R3a: in internal/backup, and the
+  startup pass's words), after a refused one (R3b), and the reporters naming
+  no such cause (R3c).
+- the platform rule: `abandonPending` writing over a `VERIFIED` where no
+  directory can be synced (R4a).
+- the bounds: the prune's removals run with no step (R5a: `returned 6.3s
+  after its stop; its bound is 3.3s`, and the doctor's line naming another
+  step); the lock's let-go with no bound (R5b: no mark within 3 s); a give-up
+  during the let-go writing a marker (R5c: both tests); a step's late answer
+  not waited for (R5d: red, though not where predicted: the hold read what it
+  lets go of before the late answer added the ownership, so that ownership
+  was never let go at all, `the ownership was never let go`, rather than let
+  go after the lock); the claim's answer left in a buffer (R5e: never let
+  go); the capture's ownership let go after the lock (R5f); a verification
+  refused at once letting its ownership go unbounded (R5g: `did not return
+  within 13s`); the ownership let go with no step (R5h: no mark); a wait that
+  overran nothing marking (R5i); the hand-off's quiet ending as the release
+  begins, the first fix (R5m); the release waiting for no step given up
+  (R5n: red, though not where predicted: the write's mark went at once, so
+  the test never saw it, `no hold given up held the backups folder within
+  7s`, rather than while it watched); `spellingKey` asking the working
+  directory (R5j); `drop` leaving the hold's context (R5k); the doctor
+  reading anew at each run (R5l: `3 reads`).
+- the reporters: a write that did not finish said to have written nothing
+  (R6a: the CLI's and the ticker's), an unchanged write (R6b), a failed one
+  (R6c: both), a record not read back printed (R6d), and a record read back
+  said not read (R6e).
+
+### What twenty runs under the race detector found
+
+The round's new and changed tests, run twenty times under the race detector
+(the gates, below), passed in atomicwrite (80 passes) and cmd/bridge (260,
+five tests), and in internal/backup failed once in 760:
+`TestAWriteGivenUpLandsNothingOnceItResumes`'s `abandonPending` case, `the
+folder is marked at "its wait for the snapshots' lock", want "its write of
+INCOMPLETE"`. A stopped verification's worker answers as its wait for
+`abandonPending` ends, and its caller's own bound, `StopWriteBound` after the
+stop, falls at the same moment, so the caller's select can find both ready
+and give the worker up while it is letting go of what it holds. The first
+form of the hand-off's quiet (3958d77d) ended as the release began, so that
+give-up marked the folder at the worker's last step, its wait for the lock,
+which had overrun nothing, and the test read that mark before the write's
+own. The quiet holds now for the caller's give-up alone (`abandon`, through
+`giveUpAs`), for the hold's whole life after its hand-off, and a step of its
+release that overruns marks the folder as before (465186f7).
+`TestACallersGiveUpAfterAHandOffMarksNothing` pins both deterministically:
+red on 3958d77d's `hold.go` in a copy of HEAD (`marked the folder:
+{Snapshot:snap Step:letting go of its snapshot's ownership …}`), green
+here, and R5m is its control. Run twenty times again, with that test among
+them: internal/backup 820 passes, cmd/bridge 260, no failure and no race.
+
+### A test name the citation guard kept
+
+The first `make test` failed one test of cmd/bridge's,
+`TestEveryCitedTestNameExists`: this round had renamed round 4's
+`TestAStoppedVerificationsMarkStandsUntilTheWriteItStartedEnds`, which
+cli-serve.md, its History and this log cite. A dated record is not
+rewritten, and the name still says something true: the write's own mark,
+once that write overruns its bound, stands while it hangs and goes as it
+ends. That test keeps the name, beside the new one for the quiet before the
+mark, both over one setup (`stopWithItsWriteParked`, de0efc0d); its control
+is R5n. Both passed twenty runs under the race detector (40 passes).
+
+### The gates
+
+go1.27.3, `TMPDIR` on disk under the worktree's `.tmp`:
+
+- `make test TEST_PKGS='./internal/backup/... ./internal/doctor/...
+  ./internal/admin/... ./internal/atomicwrite/... ./internal/fsutil/...
+  ./cmd/bridge/...'`, the race detector, `-p 4`, `-timeout 30m`, inside the
+  build slot (`buildslot.py b653`): on 465186f7 every package ok but
+  cmd/bridge, which failed `TestEveryCitedTestNameExists` (above); on
+  de0efc0d ok, 1524 s (internal/backup 604.2 s, internal/doctor 6.8 s,
+  internal/admin 1053.7 s, internal/atomicwrite 19.9 s, internal/fsutil
+  3.5 s, cmd/bridge 1507.6 s).
+- the round's new and changed tests by name, `-race -count=20`: as above,
+  the first run inside the build slot, the reruns beside it (single
+  packages): internal/atomicwrite 80 passes, internal/backup 820 and the
+  two tests de0efc0d split 40, cmd/bridge 260; no failure and no race but
+  the one the first run found.
+- `make vet`, `GOOS=linux GOARCH=386 make vet`, and `go vet` of the seven
+  package trees the branch touches for windows and darwin, on 465186f7:
+  nothing reported; de0efc0d changes one test file, vetted alone after it.
+  `make build-all` on 465186f7: the six targets built, the build-site census
+  first (`check-build-tags: OK`).
+- the pinned gofmt (`go run cmd/gofmt -l`) over every Go file the round
+  changed, on de0efc0d: nothing listed.
+- `rules-b653-r5.patch` applied to a copy of HEAD: it matches the
+  generator's files, `make docs-check` passes there (cli-serve.md 77,813
+  bytes, History-rules-cli-serve.md 350,662; the worst load 69.3%), the
+  census passes there, and each of the 83 test names it cites is declared.
+
+### Follow-ups
+
+The backlog file is not on legion0, so these go to the PR's report: the
+unchanged record's removal of a veto is reached with a clear only by a
+verdict equal to the record to its times, which no check produces, so its
+give-up gate has a unit test and no path; `RecordRead` tells apart no record
+a give-up can read back that `DatabaseState == ""` did not, and is kept
+explicit; and what stays open of a hold given up is named here by its id
+alone, backlog B653.
+
+## 2026-11-09 — B653 PR 1 round 6: a verdict's write admitted only before a give-up, no removal of a veto begun after one, the read-back said apart from the write
+
+The sixth round of backlog B653's first PR, on `feat/b653-snapshot-verify`
+(PR #1444) from round 5's tip with its rules (30ce9e29); worker b653 on
+legion0 (Ubuntu 26.04, linux/amd64, go1.27.3, `GOTOOLCHAIN=local`,
+`GOPROXY=off`). It answers round 5's two reviews (Codex's findings and the
+Claude API's) and both reviews of the round's brief. Commits: the backup
+package's work and its tests f0e5539b, the reporters and the console's log
+a1eb4ce9, the page 76532ea6, the admission test's bounded wait 15ddb078, the
+setAside test's question of what it tried c74c18ee, and this record. The
+rules go through `rules-b653-r6.patch`: cli-serve.md's two B653 lines and
+their verbatim copies in History-rules-cli-serve.md, each changed alike, a
+paragraph of the sixth round's there, and admin-console.md's backups bullet.
+
+### The findings, as built
+
+- **A verdict's write is admitted only before its hold's give-up** (Codex's
+  P1, the Claude API's High on the brief, Codex's review of the brief). The
+  fifth round's write took a fresh signal at its registration, which only a
+  give-up of that step ended, so a give-up between `verifyHeld`'s last
+  `gaveUp()` and the write's `stepOf` found no step of the write's to end:
+  the write ran on a live signal, published the check that had ended and
+  cleared the veto, after its caller was told the verification was given up.
+  `publishOf` (through `runStep`) reads `h.given` and registers the write's
+  step in one section of the hold's lock, with no I/O in it: given up
+  before, the write is not admitted and never runs, and the worker writes its
+  `INCOMPLETE` in a step of its own (`stepIncomplete`, whose fresh signal no
+  earlier give-up ended); given up after, `giveUpAs` ends the signal the
+  write was registered with. `stepOf` is `runStep` with no admission:
+  `stepIncomplete`, `stepReadBack` and every other step are unchanged.
+  `onAdmission`, nil in production, runs inside that section, so a test can
+  park a give-up against it. `stepSignal`'s doc no longer says "by nothing
+  else".
+- **No removal of a veto begins after a give-up** (Codex's P1, the Claude
+  API's Low, both brief reviews). `publishVerdict` takes a `publication`:
+  its step's signal, which its rename asks before every attempt, and its
+  hold's give-up (`hold.gaveUp`), which every removal of a veto asks beside
+  the signal, immediately before it (`removeVetoes`, `errVetoKept`), since a
+  write begun after the hold was given up, the `INCOMPLETE`'s, has a signal
+  no earlier give-up ended. The unchanged record's branch asks before its
+  lookup of the veto and again before each removal after it (`vetoedAt`'s
+  `Lstat` can wait on the folder). Never the hold's context. A removal
+  already inside the filesystem's when the give-up comes finishes, and the
+  record then reads what the check that ended found and the write made
+  durable; the rule and its History say so, and a lone veto's case pins what
+  the record reads (`VERIFIED`).
+- **setAside keeps what it made once its step is given up** (the Claude
+  API's Low, Codex's review of the brief). `setAside` takes its step's
+  signal (`stepVeto`'s, which a give-up of its hold ends while it runs, since
+  `giveUpAs` ends the step the hold is in): once it has ended, it tries no
+  further candidate and removes none it made, whatever a sync answers then.
+- **The read-back said apart from the write** (Codex's two P2s, the Claude
+  API's Low, Codex's review of the brief). The read-back says why it read
+  nothing (`VerifyResult.ReadErr`: its read's failure, or
+  `ErrReadBackGivenUp`), and the verification answers
+  `ErrRecordNotReadBack` beside whatever else it answers (`fmt.Errorf` with
+  two `%w`, so each keeps its identity), while `Write` still says what the
+  write did. `reportVerdict` no longer prints what the check found as the
+  record: a record not read back is said so, and why (`readWords`: "its
+  record could not be read back", or "its read-back was given up, so its
+  record was not read"), in the given-up, refused, not-recorded and
+  found-but-not-recorded cases alike, and the command exits 1; the
+  found-but-not-recorded arm words the write from its outcome
+  (`keptWords`), so a durable write whose read-back failed says "it wrote
+  its record; its record could not be read back" and never that it failed
+  or was not recorded. The ticker says the same in its one line
+  (`tickerKeptWords`), and the console's job logs a verification whose write
+  ended (recorded, or nothing to change) with an error as "answered an error
+  once its write had ended", with `write` (`WriteOutcome.String`) and
+  `recordRead`, never as a verdict not recorded.
+
+Where this departs from the brief, or reads it:
+
+- The brief's per-step flag "pre-cancels its signal" where the hold was
+  given up; a write run on that signal lands nothing, the `INCOMPLETE` its
+  case requires included. The flag refuses the write instead, which then
+  never runs, and the worker writes the `INCOMPLETE` in its own step; the
+  signal is ended all the same.
+- The removal already under way is the exception the brief allows to state,
+  not a design that keeps the veto until it settles: that would need a
+  removal no give-up can interrupt, and a write that waits on it past its
+  bound.
+- The CLI's arm for what a check found and did not record words the write
+  from its outcome in every case, not only where the read-back failed: a
+  check past its deadline whose `INCOMPLETE` was written now says it wrote
+  its record, where the fifth round said what it found was not recorded.
+  The ticker's line likewise.
+- The console's job, which the brief does not name, logs a write that ended
+  apart from one that did not, so a durable write whose read-back failed is
+  never logged as a verdict not recorded.
+- `ErrRecordNotReadBack`'s words do not say the verification had written,
+  since the refused and the not-recorded cases write nothing.
+- The ticker's cases beyond its own pass are a table over
+  `reportTickerVerdict` with the results built by hand, beside one real
+  pass through `runBackupTicker`.
+
+### The reds at the round before
+
+On a copy of 30ce9e29 (`git archive`) with this round's new and changed
+tests in it, and a scratch shim, never committed, giving it the names and
+none of the behaviour: the two new errors, `VerifyResult.ReadErr` as a field
+nothing sets, `WriteOutcome.String`, the setters of the three new seams with
+each hook called where the base does what it stands in for (`removeVetoes`'
+`os.Remove`, `vetoedAt`'s `os.Lstat`, the read-back's step, which reads
+nothing where the hook fails it, as the base's own failed read does),
+`publishOf` as the base's `stepOf` of the write, admitting it whatever the
+hold says, an `onAdmission` nothing calls, and `publishOver` over the
+base's `publishVerdict`, which asks its step's signal alone. Predictions
+written first; every result was as predicted:
+
+- internal/backup: `TestTheVerdictsWriteIsAdmittedInOneSectionWithTheGiveUp`
+  in both cases (`admitted true, answered true, ran true`; `the give-up
+  parked against the admission never ran`);
+  `TestNoVetoRemovalBeginsOnceItsHoldIsGivenUp` in both (the veto removed);
+  `TestAVerdictsWriteIsAdmittedOnlyBeforeAGiveUp` in both (`database
+  VERIFIED`, want `INCOMPLETE "cancelled"`; over the `VERIFIED` the record
+  rewritten and the veto removed; every reader reading it verified);
+  `TestNoVetoRemovalBeginsAfterItsWriteIsGivenUp`'s two removals (`the
+  removal of the veto beside the bundle began after the write was given
+  up`); `TestAVetoSetAsideIsKeptOnceItsStepIsGivenUp` (the veto removed,
+  the veto beside the bundle tried, every reader reading it verified: its
+  question of what was tried was added after the first run at the base, and
+  run there again); `TestARecordNotReadBackIsSaidApartFromItsWrite` in all
+  three (`<nil>`; the staging's error alone; `ErrCheckGivenUp` alone).
+- cmd/bridge: `TestBridgeBackupVerifySaysTheWriteAndTheReadBackApart` in all
+  six (the durable write, the quick check over a full `FAILED` and bridge
+  backup's own snapshot exited 0, printing what the check found as the
+  record; the refused, the not-recorded and the failed write never said the
+  record was not read back); `TestTheTickerSaysTheWriteAndTheReadBackApart`
+  in the pass's own snapshot (never said, 60 s: the base read the record it
+  had not read as no verified recovery point, with empty verdicts), and the
+  not-recorded, failed-write, durable-write and given-up cases;
+  `TestBridgeBackupVerifySaysWhatAGivenUpVerificationsRecordReads`'s
+  read-back given up (its new words).
+- internal/admin: `TestTheConsoleSaysARecordNotReadBackApartFromItsWrite`
+  (the base logged `a snapshot is not a verified recovery point` with
+  `database= files=`).
+
+Not reds, as predicted: `TestAnUnchangedRecordKeepsItsVetoOnceItsWriteIsGivenUp`
+(round 5's), the lone veto's removal under way (the exception holds at the
+base too), the ticker's refused recheck (the base had its words), and the
+other given-up cases.
+
+### Negative controls
+
+Each mutates one file of the committed tree at one site or two, runs the
+tests named, and puts the committed bytes back, compared with HEAD's blob
+before each mutation and after each restore (a runner in the scratch folder,
+the predictions written to a file before the first run). All sixteen went as
+predicted; B3 and B4's first form left `database` and `files` unused and did
+not build, which reads as no control, and they ran again with
+`earnsClear`'s call kept beside the forced value:
+
+- the admission: refusing nothing, item 1 reverted (A1: red in the section
+  test's give-up before the registration and in both end-to-end cases,
+  where the completed check landed; green, as predicted, in its give-up
+  during the registration); the check apart from the registration, unlocked
+  around the hook (A2: red in the give-up during the registration, `the
+  write's signal stayed live`; green elsewhere); no `INCOMPLETE` once the
+  write is refused (A3: red over a `PENDING`, which stayed `PENDING`; green
+  over a `VERIFIED`, whose `INCOMPLETE` changes nothing).
+- the removals: `removeVetoes` asking nothing before each removal (B1: red
+  in the two removals and the give-up during the lookup; green in the lone
+  veto and the hold's give-up, asked before the lookup); the hold's give-up
+  not asked (B2: red in the hold given up; green end to end, where the
+  step's own signal ends with the give-up); the `INCOMPLETE`'s path with
+  `clears` forced (B3: green in `TestARecheckGivenUpLeavesTheVetoItMade` and
+  the end-to-end case over a `VERIFIED`, the hold's give-up alone keeping
+  the veto) and with the hold's give-up not asked as well (B4: red in both).
+- `setAside`: its cleanup ignoring its signal (B5: the veto it made
+  removed, every reader reading it verified); its loop ignoring it (B6: the
+  veto beside the bundle tried after the give-up, the veto it made kept).
+- the read-back and the reporters: the read-back saying nothing of why (C1:
+  red in the backup test's three cases, the CLI's six, the given-up words
+  and the console's line); the verification's other error dropped (C2: red
+  in the failed write's and the given-up read-back's identities, and the
+  CLI's refused recheck and failed write; green in the durable writes and
+  the recheck not recorded, whose words coincide); the CLI wording the write
+  from the error (C3: the three durable writes); one word for both causes
+  (C4: the CLI's and the ticker's given-up read-back); the ticker printing a
+  record it did not read (C5: not recorded, the failed write, the durable
+  write); the CLI printing one (C6: all six); the console's line saying not
+  recorded (C7).
+
+### What twenty runs under the race detector found
+
+Nothing. The round's new and changed tests, twenty times each under the
+race detector, single packages beside the build slot: internal/backup 140
+passes (seven tests), cmd/bridge 60 (three), internal/admin 20 (one); no
+failure and no race.
+
+### The gates
+
+go1.27.3, `TMPDIR` on disk under the worktree's `.tmp`:
+
+- `make test TEST_PKGS='./internal/backup/... ./internal/doctor/...
+  ./internal/admin/... ./internal/atomicwrite/... ./internal/fsutil/...
+  ./cmd/bridge/...'`, the race detector, `-p 4`, `-timeout 30m`, inside the
+  build slot (`buildslot.py b653`, 37 min in its queue), on c74c18ee: ok,
+  1536 s (internal/backup 624.9 s, internal/doctor 6.9 s, internal/admin
+  1049.8 s, internal/atomicwrite 20.0 s, internal/fsutil 3.4 s, cmd/bridge
+  1506.4 s).
+- the round's new and changed tests by name, `-race -count=20`: as above.
+- `make vet`, `GOOS=linux GOARCH=386 make vet`, and `go vet` of the seven
+  package trees the branch touches for windows and darwin, inside the slot
+  (54 min in its queue), on c74c18ee: nothing reported; the three changed
+  packages had been vetted alone for windows, darwin and linux/386 before
+  it, with the same answer. `make build-all` there: the six targets built,
+  the build-site census first (`check-build-tags: OK`).
+- the pinned gofmt (`go run cmd/gofmt -l`) over every Go file the round
+  changed: nothing listed.
+- `rules-b653-r6.patch` applied to a copy of HEAD: it matches the
+  generator's files, `make docs-check` passes there (cli-serve.md 79,874
+  bytes, admin-console.md 87,853, History-rules-cli-serve.md 355,626; the
+  worst load 69.7%), the census passes there, and each of the 93 test names
+  it cites is declared.
+- cmd/bridge's `TestEveryCitedTestNameExists`, which reads this record, on
+  its commit: ok.
+
+### Follow-ups
+
+The backlog file is not on legion0, so these go to the PR's report: the
+console's job still logs a write not known durable as a verdict not
+recorded (its error says which), as it did before this round; and the
+unchanged record's removal of a veto is still reached with a clear only by
+a verdict equal to the record to its times. What stays open of a hold given
+up is named here by its id alone, backlog B653.
+
+
+## 2026-11-10 — B653 PR 1 round 7: hold-aware veto attempts, explicit late-operation limits, and accurate console write outcomes
+
+This is an edit-only round. No builds, tests, negative controls, race runs or
+`make docs-check` were run; validation and commits belong to the orchestrator.
+No validation result is claimed below.
+
+The round's DECISIONS keep the checks immediately before filesystem calls,
+with no new `h.mu` admission for removal, rename or veto creation. The code
+comments, CLI rule and its History, and `docs/backup.md` now state the actual
+limit: check and call are separate; a give-up between them still lets that
+operation run. A removal, rename attempt or veto creation already begun
+when the give-up lands finishes afterward. This corrects the stronger
+filesystem-start promises in earlier rounds' records. In a refused recheck,
+only successful removal of the last effective veto restores the earlier
+check's record as it stood before the recheck. Another veto or failed
+removal preserves the conservative reading; read-back reports what it read
+at that time.
+
+`setAside` takes the step and hold signals through `publication`, asking
+both before each candidate (bundle then root) and cleanup removal. This
+covers a hold abandoned before the veto step registered with a fresh
+signal. `stepOf` itself is unchanged: `stepIncomplete`, `stepReadBack` and
+`abandonPending`'s INCOMPLETE write remain runnable after a give-up.
+
+The admission test adds `onAdmissionLocked`, a nil production seam before
+the protected check. The case lets abandonment take the actual lock there
+and reacquires it before proceeding: moving the check to `h.gaveUp()`
+immediately before `h.mu.Lock()` samples false too early and should fail.
+The registration case observes the abandonment blocked on the mutex through
+its goroutine stack, replacing the 200 ms wait that did not prove it tried.
+No I/O was added under the production admission lock.
+
+The console switches on `Verify.Write` for every verification error,
+including shutdown. Only none/failed say not recorded; not-durable says
+written, not known durable; unfinished says it did not finish before
+give-up; recorded/unchanged retain the write-ended message. Every branch
+logs `write` and `recordRead`.
+
+Cases added or extended, awaiting orchestrator validation:
+
+- `TestTheVerdictsWriteIsAdmittedInOneSectionWithTheGiveUp`: the check under
+  the lock and the blocked abandonment during registration.
+- `TestSetAsideAsksItsHoldBeforeEachVetoAttempt`: abandonment before a fresh
+  veto step, before the root candidate, and before cleanup, isolating the
+  hold's check from the step's signal; a creation that passes its check
+  before abandonment still creates its veto.
+- `TestRecoveryStepsKeepFreshSignalsAfterTheHoldIsGivenUp`: recovery steps
+  still run with live signals.
+- `TestSetAsideRemovalFinishesAfterGiveUp`: parks bundle-veto cleanup after
+  failed syncs; one veto restores the old VERIFIED, two keep INCOMPLETE.
+- `TestTheConsoleSaysAVerdictWasWrittenButNotDurable`: damages both captured
+  verdicts over PENDING, injects `SetSyncVerdictForTest`, observes FAILED
+  already published at the directory sync, then requires
+  `write=not-durable`, `recordRead=true`, no “not recorded”, and FAILED from
+  the console's read.
+- `TestRenameWithRetryUnsyncedCtxRenamesNothingOnceItsContextEnds`: existing
+  cases cover before the first attempt and between retries; the added case
+  ends the context after the check, before the syscall, and expects the
+  admitted attempt to land. Only this helper's documentation changed.
+
+The pending gates include `internal/atomicwrite` alongside backup, admin
+and cmd/bridge, named regressions under `-race -count=20`, the requested
+negative controls, and docs-check. Rules and History were edited directly;
+no patch artifact or git state change was made.
+
+## 2026-11-10 — B653 PR 1 round 8: outcome handoffs and portable verification fixtures
+
+The outer expiration in `verifyAndThen` returned `WriteNone` even after a
+verdict's rename. Round 7's shutdown logging exposed that older empty-result
+handoff as “not recorded.” It now returns `WriteUnknown`; the recovered
+worker-panic handoff does too. Both pre-verification cancellations (slot
+queue and folder-lock wait) return `abandonPending`'s completed INCOMPLETE
+publication outcome, or unknown if it has not answered. Console, CLI and
+ticker distinguish that uncertainty from a write that never began, even
+with empty `Found`, and do not imply that the record was read back.
+
+`TestTheConsoleReportsCancellationAndEveryWriteHandoff` observes FAILED
+already on disk before sync stalls, parks read-back and the worker's answer,
+and asserts the outer expiration seam. Its separate worker-answer case
+asserts that expiration did not win; the other cases cancel `ScanCtx`
+during the check and give up a write. `TestAStopBeforeVerificationReportsItsIncompleteWrite`
+checks both cancellation handoffs; `TestTheReportersKeepWriteProgressWithoutAFoundVerdict`
+checks the CLI and ticker's empty-found branches.
+
+The missed hooks were fixture defects in this PR: macOS temporary paths
+under `/var` were compared with the verifier's `/private/var` paths.
+`storeWithTracks`, `captureT`, `verifiedSnapshot` and `backupInstall` now
+resolve fixture directories through `fsutil.ResolveLinks` before deriving
+hook paths. This repairs the stopped-write marks, staged/renamed/synced
+writes, veto creation/removal, and round 7's one/two-veto late-removal case.
+The verdict-write case of `TestEveryStepUnderTheLockIsBoundedAndMarked`
+also now bounds its wait for the hook, so a missed hook names its failure
+instead of hanging the binary. Windows short names and junctions can cause
+the same mismatch in the startup-check and two CLI given-up-write cases;
+the fixture resolution uses the same Windows path implementation as the
+verifier: `fsutil.ResolveLinks` uses `GetFinalPathNameByHandle`, with
+`EvalSymlinks` as fallback. No Windows run of these fixtures has been
+verified; the statement is from reading `resolve_windows.go`. Existing no-directory-sync refusal and admitted rename behavior
+remain covered; no new Windows production fault was isolated locally.
+
+The Linux prune failures were another PR fixture race: verification and
+claim deliver their result before releasing the backups-folder lock. A
+following prune can validly skip with no error. The dead-capture and
+claimed-snapshot cases now wait for retained holds and assert that the
+prune actually ran. `TestAnAnsweredVerificationOrClaimCanStillHoldTheFolder`
+deterministically parks release after each answer, observes the skipped
+prune, then releases the hold and observes a prune that runs.
+
+Cleanup now releases stalls, cancels and joins outer callers, and drains
+retained holds before restoring hooks, including older `FinishCapture`,
+console and ticker cases. `activeHolds` counts even a pending cancellation
+handoff with no slot or mark. Atomic admission hooks receive their hold and
+ignore others; `onAbandonBlocked` observes failed mutex acquisition in place
+of runtime stack-text polling.
+
+Repeated race testing under host contention also exposed fixture timing
+assumptions: a third verified snapshot was built under a 300 ms deadline,
+and one-second checks could expire before the intended write stall. Setup
+now precedes the short deadline. Increasing write-stall cases to five
+seconds still let a stressed SQLite check expire first, so
+`SetStepBoundForTest` scopes an atomic fixture to one resolved snapshot and
+its named steps: only the parked step gets a short bound, from admission.
+The real check keeps its normal deadline. The slow-step case uses an
+explicit waiter and release instead of repeated sleeps under a four-second
+deadline. `TestAnAbandonedCheckKeepsItsHoldsUntilItsCheckerEnds` also
+restores its normal deadline, after joining the abandoned caller and
+retained work, before verifying the follow-up snapshots. Its old 300 ms
+deadline could turn that normal verification INCOMPLETE and change the
+prune anchor. Production bounds are unchanged.
+
+The ladder failure is this PR's integration debt: merge `56eb3bde` brought
+main's migration v62 (`71f707ab`, waveform regeneration failures), while
+B653's generated schema still described v61. Regeneration through
+`BRIDGE_UPDATE_LADDER_SCHEMA=1` adds the eight `waveform_regen_failures`
+columns and advances the generated top to 62. The existing
+`TestTheLadderSchemaIsTheLadders` failed before regeneration and passes
+after it; the scanner rule now explicitly covers integrating ladder changes.
+
+Overlay negative controls restore the old zero-result handoffs without
+changing the worktree. Both queued-slot and folder-lock cancellation cases
+then fail with `Write:none`; the forced outer-expiration console case fails
+with the old “not recorded” line despite observing the published verdict.
+These are assertion failures, not compile failures.
+
+Final validation on macOS arm64, Go 1.27.3, with `-race` and a 30-minute
+package timeout (counts are top-level test runs): the full `internal/backup`
+package passed 251 tests in 540.067 s; the full `internal/atomicwrite`
+package passed 91. The affected console backup suite passed 11 tests and
+the CLI backup suite plus its cleanup guard passed 49. Thirteen backup
+regressions passed three repetitions each (39 runs); three admission,
+cancellation and release-window tests passed 20 each (60 runs). The new
+console handoff test passed 20 repetitions, and three CLI regression/report
+cases passed 20 each (60 runs). The manifest ladder test passed 20
+repetitions. The three overlay negative controls failed at their intended
+assertions. `go vet ./...`, formatting and `make docs-check` passed.
+All five packages' test binaries compile for Windows/amd64 and Linux/amd64;
+no native Windows or Linux runtime was available, so those CI executions
+remain to be confirmed. The exploratory runs that exposed fixture timing
+failures were superseded by these passes; unrelated broad admin, CLI and
+manifest runs were stopped in favor of the affected suites above.
+
+
+## 2026-11-10 — B653 PR 1 round 9: precise shutdown and expiry claims
+
+The ticker's shutdown silence is only for an error from which
+`ctxerr.WithoutCancellation` removes everything, including an outer-expiry
+wrapper around cancellation. New contrasting reporter cases retain an
+accompanying given-up step, unread record or write failure. The real
+`abandonPending` shape says the record was not read back, claiming no failed
+read. Production behavior is unchanged.
+
+Outer expiry stays `WriteUnknown`: a rejected publication can still write
+recovery INCOMPLETE through `stepIncomplete`, and a late lock failure can
+hand off to `abandonPending`. The deadline regression now forces and asserts
+outer expiry, parks recovery and the worker answer independently, observes
+Unknown and the still-PENDING record, then releases recovery and reads its
+INCOMPLETE before allowing the answer through.
+
+The slow veto sync remains parked for at least 1.2 s, polling for a mark
+throughout, inside a 3 s step bound on the resolved snapshot. The console
+passes its resolved capture directory to every hook and the verification.
+The handoff seam documents its caller-form exception: expiry may precede
+resolution. Five deferred cancels paired with joined callers became earlier
+cleanup registrations. Four, already derived from `context.Background()`,
+preserved release-before-cancel ordering on failure. The fifth,
+`TestAStopWithABlockedSyncReturnsWithinItsBound`, still derived from
+`t.Context()`, which testing cancels before cleanups, so its registration
+change alone did not fix the ordering; round 10 corrects that parent.
+
+Windows claims remain code inspection only: `ResolveLinks` uses
+`GetFinalPathNameByHandle`, falling back to `EvalSymlinks`; fresh INCOMPLETE
+publication returns `WriteRecorded` because `SyncParentDir` returns nil.
+The existing-VERIFIED recheck's `SyncsParentDir` branch is a different case.
+No native Windows or Linux execution was performed in this round.
+
+
+Round 9 controls were run only after commit `e8bab780`, through Go overlays
+stored outside the worktree. All six compiled and failed at the intended
+assertions: a 500 ms step-mark threshold marked the parked veto during its
+1.2 s poll; `WriteNone` at outer expiry lost Unknown; suppressing the
+`stepIncomplete` publication left PENDING after recovery was released;
+bypassing cancellation filtering printed both cancellation-only cases;
+silencing every shutdown error dropped the given-up step, unread record and
+write failure; and replacing the no-read wording with a failed-read claim
+failed both reporters and both wording helpers. No control altered the
+committed source. These are regression-test repairs and documentation
+corrections, so there was no production bug fix with a failing baseline;
+the red evidence is those six mutations, followed by clean-tree greens.
+
+After the red controls, the two backup regressions, two reporter tests and
+console handoff test each passed three race-enabled repetitions (15
+top-level runs). The initial focused backup and reporter runs also passed.
+
+
+Final full-package validation: macOS arm64, Go 1.27.3, with the repository's
+`ts_omit_webclient,ts_omit_debugeventbus` build tags and `-race -json`.
+Backup and atomicwrite used `-count=2`; the others `-count=1`. The package
+timeout was 30 minutes, except admin's requested 40 minutes. Counts below
+are top-level executions; manifest includes 24 fuzz seed runners (no fuzz
+campaign), so its 1,549 passes comprise 1,525 ordinary tests and those 24.
+
+| Package | Repetitions | Passed | Skipped | Seconds |
+|---|---:|---:|---:|---:|
+| `internal/backup` | 2 | 502 | 0 | 952.111 |
+| `internal/atomicwrite` | 2 | 182 | 0 | 30.989 |
+| `internal/admin` | 1 | 951 | 0 | 1108.151 |
+| `cmd/bridge` | 1 | 1,504 | 6 | 1439.101 |
+| `internal/manifest` | 1 | 1,549 | 8 | 1412.568 |
+
+All five full packages passed, with no assertion failures or races. The
+backup runs are 251 tests each, atomicwrite 91 each. The CLI's six skips
+require sox, root or an explicitly configured case-folding-directory fixture.
+Manifest's eight concern case/composition-distinct folders, real SACD images,
+a kqueue watch that remained after unmount, or a remount that kept the same
+device and inode (B777). These skips are not passing evidence for those cases.
+`go vet ./...` with the same tags, pinned-toolchain formatting and
+`make docs-check` passed. No Windows or Linux runtime was available: native
+Windows path resolution, no-directory-sync outcomes and sharing behavior,
+and Linux lock/prune and thread-priority behavior still need native CI.
+No production implementation was changed, no commit amended or rebased,
+and nothing was pushed.
+
+
+## 2026-11-10 — B653 PR 1 round 10: report non-cancellation verdicts at shutdown
+
+Starting HEAD: `99d1bdfe`. The error branch in `verifyHeld` could return
+cancellation alone after a check panic, hiding its INCOMPLETE (aborted)
+verdict when shutdown arrived through the after-check seam. It now joins
+the non-cancellation verdict to the context error, preserving cancellation's
+identity while keeping the verdict reportable. The ticker's no-error branch
+uses `Verification.CancelledOnly`: neither state FAILED, at least one
+INCOMPLETE, and every INCOMPLETE carrying only `ReasonCancelled`.
+`ReasonAborted` and `ReasonDeadline` are never silenced by that branch.
+The public backup guide and CLI rule state the same conditions.
+
+Production-backed cases in `TestTheTickerReportsAPanickedCheckAtShutdown`
+require both database and files INCOMPLETE: aborted on stderr, with nothing
+on stdout, for cancellation through `SetAfterCheckForTest` and after the
+worker's answer. Both are expected red on `99d1bdfe`.
+`TestTheTickerSilencesOnlyCancelledRecordsAtShutdown` covers the no-error
+path, including cancelled database beside failed or aborted files (expected
+red there), deadlines, absent and extra reasons, and cancellation alone.
+Database cancellation alone and both verdicts cancelled are silent passing
+contrasts on that head; files-only cancellation (with a verified or absent
+database) is expected red there because the old branch reports it.
+
+The outer-expiration reporter row now uses `VerifyExpiryErrorForTest`, a
+seam over production's `verifyExpiryError` constructor, also used by
+`verifyAndThen`'s expiry branch. This extraction is behavior-preserving;
+there is no baseline-red claim for it. Its control must add a
+non-cancellation cause to the shared constructor, making the row's
+empty-output assertion fail. Reverting the extraction proves nothing.
+
+The remaining held test context derived from `t.Context()` now derives
+from `context.Background()`, with `t.Cleanup(cancel)` registered before
+`joinBackupCallers`. The History rule explains that testing cancels
+`t.Context()` before cleanups. Round 9's log now counts four effective
+ordering fixes then, and identifies the fifth completed here. This is
+checked by source and text inspection, with no new cleanup meta-test.
+
+The build/test History now has a round-9 section for the handoff-seam
+exception, deferred-cancel guidance, slow-step bound and Windows
+`WriteRecorded` paragraph. Both round-9 rule bullets are tagged round 9;
+round 10 has separate bullets and History entries. Placement and content
+inspection, not a behavioral control, checks this correction.
+
+The edit-only worker ran no builds, tests, negative controls or
+state-changing git commands. The orchestrator subsequently validated the
+rows against the old behavior and all three controls; each turned red:
+
+- Control A restored `verifyHeld`'s bare cancellation return: the
+  before-publication panic case failed its stderr assertion.
+- Control B restored the no-error branch's database-only shutdown silence:
+  the after-answer panic, aborted/deadline/absent/extra-reason rows and the
+  cancelled database beside failed or aborted files failed their stderr
+  assertions. The files-only cancellation rows (verified or no-database
+  database) also turned red, because the old branch reported them instead
+  of remaining silent. The original handoff understated that control's rows.
+- Control C added a non-cancellation cause to the shared expiry constructor:
+  the outer-expiration row failed its empty-output assertion.
+
+The orchestrator's full race runs passed. The prune tests passed ×30 after
+the additional wait in `TestAClaimedSnapshotIsKeptFromThePrune`, committed
+as `bc5b95a8`. The first `awaitClean` drains the claim's folder-lock hold;
+the second drains the first prune's hold, because `PruneContext` sends its
+answer before its deferred `h.release` completes. Round 11 corrects the
+comment that incorrectly attributed the second wait to the claim. Cleanup
+ordering and History placement received source/text checks only.
+
+
+## 2026-11-10 — B653 PR 1 round 11: the ticker decides shutdown silence from the verdict
+
+Starting HEAD: `bc5b95a8`. Both `verifyHeld` stop branches again return their
+own context error. Round 10's joined verdict text changed the shared error
+seen by CLI and console callers and covered only the first stop branch.
+The ticker now decides silence itself: with an error,
+`ctxerr.WithoutCancellation` must leave nothing and `Found` must be empty,
+passing or `CancelledOnly`. An empty found verdict at outer expiry is
+unknown; shutdown still silences that cancellation-only wrapper. Otherwise
+the found verdict is reported with its write/read-back words, ending with
+`res.VerifyErr` when no other failure remains, never `<nil>`. Without an
+error, silence still requires a stopped context and a `CancelledOnly`
+read-back record.
+
+`CancelledOnly` now admits only database VERIFIED, UNVERIFIED with only
+`no-database`, or INCOMPLETE with only `cancelled`; files VERIFIED or
+INCOMPLETE with only `cancelled`; and at least one cancelled INCOMPLETE.
+PENDING and other UNVERIFIED states cannot hide beside cancellation.
+The guide, short CLI rules and their binding History state both branches,
+the unknown-verdict exception and the same stricter predicate together.
+
+Cases expected red on `bc5b95a8`, not executed in this edit-only round:
+
+- `TestTheTickerReportsFoundVerdictsBesideCancellation`: bare cancellation
+  beside database INCOMPLETE: aborted, INCOMPLETE: deadline or FAILED:
+  hash-mismatch must print those found verdicts on stderr, with files
+  VERIFIED, unknown-write and unread-record words, and end with the stop's
+  own error. Stdout must stay empty; `<nil>` is forbidden. Cancelled, empty
+  and passing found verdicts are silent contrasts expected green on that head.
+- `TestTheTickerReportsAPanickedCheckAtShutdown`'s before-publication case
+  now requires `verifyErr == context.Canceled`, not just `errors.Is`, while
+  retaining both aborted-verdict stderr assertions. Round 10's join fails
+  that exact-error assertion.
+- `TestTheTickerSilencesOnlyCancelledRecordsAtShutdown`: database PENDING,
+  UNVERIFIED: no-baseline, unknown-record or other-snapshot beside cancelled
+  files, and files PENDING or UNVERIFIED: no-baseline beside a cancelled
+  database. Each must name its non-cancellation verdict on stderr, with no
+  stdout. All six are expected red on the starting head.
+
+Controls for the orchestrator, each independent with the other fixes kept:
+
+- Restore only round 10's join in `verifyHeld`: the before-publication panic
+  case must fail its bare-error assertion even though the ticker reports it.
+- Restore only the ticker's old `case failure == nil` silence, removing the
+  new verdict-aware pre-switch block: the aborted, deadline and FAILED
+  error-table rows and before-publication panic stderr assertions must fail.
+- Loosen only the database guard in `CancelledOnly` to reject FAILED and
+  non-cancelled INCOMPLETE, accepting other database states: the four new
+  database rows must fail their stderr assertions.
+- Loosen only the files guard the same way, keeping the database guard
+  strict: the two new files rows must fail their stderr assertions.
+
+The prune-wait comment now names the first prune's deferred release, and
+round 10's record includes the orchestrator validation and `bc5b95a8` above.
+These and the aligned guide/rules/History receive text checks only (items 3
+and 4); no new behavioral test is claimed for them. No builds, tests,
+negative controls or state-changing git commands ran in round 11's
+edit-only pass. The orchestrator owns those runs and records their outcomes
+after execution; the expected red cases and controls here are a handoff,
+not measured results.
+
+## 2026-11-10 — B653 PR 1 round 12: the remaining bot findings at fb8a6b68
+
+Starting HEAD was read as `fb8a6b687a1e186f2ca6517f99bdaa909dd59957`.
+The brief, all inline comments, the sweep and both brief reviews were read.
+This is an edit-only handoff: formatting ran, but no builds, tests,
+negative controls or state-changing git commands ran. Every red/green
+claim below is an expectation for the orchestrator to measure.
+
+1. **Disproved no-barrier records (4524511211).** A completed recheck that
+   finds FAILED for a previously VERIFIED component puts `putVeto` in place
+   before read-back and stamps the cache's root. Either INCOMPLETE component
+   leaves the record alone. Both veto locations failing is an explicit
+   error and skips this verification's prune; a later process can still
+   trust the stale VERIFIED. Windows cannot make the veto crash-durable.
+   Successful disqualification preserves the existing retention policy.
+
+   Expected red on the starting head:
+   `TestADisprovedNoBarrierRecordCannotAnchorAFreshProcessPrune` (bundle and
+   root-fallback rows) requires an INCOMPLETE read-back, the genuinely
+   verified older bundle as NewestVerified, no startup skip based on the
+   disproved recent snapshot, no VERIFIED in the doctor's newest line, and
+   the older bundle surviving a prune in a fresh child process. An
+   intermediate failed snapshot must be removed, preserving retention.
+   `TestTheConsoleDropsADisprovedNoBarrierRecordFromItsCache` damages the
+   database and, separately, the certificate: both require a primed Jobs
+   cache and GET /api/backups to drop the disproved VERIFIED on their next
+   reads. The revised existing no-barrier recheck and CLI cases now require
+   the veto and INCOMPLETE: unsynced while the manifest stays byte-identical.
+   `TestAFailedNoBarrierVetoIsReportedAndSkipsPruning` requires both veto
+   attempts, the explicit failure in CLI and ticker, and no prune callback.
+   Console logging also carries that failure in its reporter case.
+   `TestAnIncompleteNoBarrierRecheckLeavesItsRecordTrusted` is preservation
+   coverage: cancellation at SQLite open leaves the manifest and veto
+   state unchanged and the old verdict trusted. The internal component
+   table also checks files-only disproof and mixed INCOMPLETE cases.
+
+   Control: remove only the `disproves`/`putVeto` block from the noBarrier
+   branch. The fresh-process anchor survival and cache/read-back assertions
+   must fail. Independently remove only `stampChange(root)` there: the
+   primed Jobs cache assertion must fail. This is not a claim that a failed
+   veto can protect a future process; that residual is explicit in the
+   guide, rule, History and returned error.
+
+2. **No pathname-following privileged writes (4524511243, 4526180639).**
+   The staging mode is set through its open file, before Sync and Close.
+   A stuck marker removes an existing entry then uses O_CREATE|O_EXCL;
+   removal errors other than absence, or racing replacements, stop it.
+   Expected red: `TestTheStagedManifestChmodsItsOpenFile` replaces the exact
+   staged pathname with a symlink and requires its target's mode unchanged.
+   It skips on Windows, where that open temporary file cannot be replaced.
+   `TestTheStuckMarkerNeverFollowsAReplacement` requires target bytes
+   unchanged both for an existing symlink and one inserted at the per-mark
+   removal/create seam. Windows runs these where symlink creation is allowed.
+
+   Controls: move Chmod back after Close and use os.Chmod(tmpName, 0o600),
+   retaining the staging hook; the target-mode assertion must fail. For
+   the marker, keep the removal and hook but replace O_EXCL with O_TRUNC:
+   the racing-replacement target-bytes assertion must fail. Restoring the
+   original marker open with no removal also fails the existing-link row;
+   the racing row requires the seam and removal retained to be reachable.
+
+3. **Schema read errors (4509212205, 4509969919).** `schemaMisses` returns
+   collection errors separately, and `columnsOf` checks query, scan and
+   iteration errors. The caller uses INCOMPLETE for cancellation and
+   open-failed for other errors, as table collection already does.
+   Expected red: `TestSchemaReadErrorsAreNotSchemaVerdicts`' columns/query,
+   columns/scan and columns/iteration rows require FAILED: open-failed and
+   forbid schema-column and VERIFIED. The iteration error arrives after
+   every required column was collected: HEAD can incorrectly say VERIFIED.
+   The table rows, no-fault rows and actual cancellation are preservation
+   coverage and are not claimed red on HEAD.
+
+   Control: in columnsOf return `have, nil` instead of `have, rows.Err()`.
+   The columns/iteration row must fail its open-failed assertion, becoming
+   VERIFIED. Keep the fake driver and all other error handling unchanged.
+
+4. **Doctor advice (4509969926).** The fallback order is database FAILED,
+   either component INCOMPLETE, database VERIFIED/files FAILED,
+   no-database/files FAILED, then neutral advice. No-database files advice
+   claims no database recovery point. Expected red:
+   `TestTheNewestBackupHintBlamesOnlyAFailedDatabase`' files-incomplete,
+   no-database/incomplete-files, no-database/failed-files and neutral rows
+   assert their specific hint and forbid false database-failure/recovery
+   claims. Existing database-failed, database-incomplete and
+   verified-database/failed-files behavior is preservation coverage.
+
+   Control: restore newestLine's prior fallback branches; the no-database
+   failed-files row must fail the files-only hint and no-database-blame
+   assertions. The files-incomplete row also detects branch precedence.
+
+5. **Admission reports (4526180587).** With WriteNone only, the three
+   admission errors say "the verification did not start" and their reason
+   before generic reporting. Non-WriteNone outcomes retain write words.
+   Expected red: all three admission rows of
+   `TestBackupReportersSayWhenVerificationDidNotStart` require that phrase
+   twice (CLI and ticker), the refusal reason and no invented finding.
+   `TestTheConsoleNamesVerificationAdmissionRefusals` requires the phrase
+   and reason at the console's production log site. Their busy plus
+   cancellation/WriteRecorded rows preserve "it wrote its record" and
+   the console's write-ended message, forbidding did-not-start wording.
+
+   Control: make NotStarted return false. All nine surface/admission
+   combinations must fail their did-not-start assertion. Separately omit
+   the WriteNone guard: busy/cancellation/WriteRecorded preservation rows
+   must fail, catching error-only classification.
+
+6. **Drain tests (4524511222, 4526180501, 4526180522, 4527411833).** The
+   startup test waits boundedly for the actual prune line on stdout before
+   cancelling instead of sleeping 200 ms after the verdict on stderr.
+   The CLI success, repeated-failure CLI and ticker fixtures, and the
+   doctor's command-hint fixture register drains just after fixture
+   creation; ticker joining runs first by cleanup order. The legacy
+   verification subtest drains before the subsequent lock-contention case.
+   These fix nondeterministic ordering failures, not a deterministic
+   expected-red test on HEAD. Reverting the stdout wait permits cancellation
+   to suppress the asserted prune message; reverting a drain permits
+   fixture removal or the next lock attempt to race deferred hold release.
+   The orchestrator should retain cleanup ordering when running the suite.
+
+Files changed, grouped by purpose:
+
+- Production: internal/backup/{finish.go,verify_record.go,stuck.go,verify_db.go},
+  internal/doctor/backups.go, cmd/bridge/backup.go,
+  internal/admin/handlers_backups.go.
+- New cases: internal/backup/{verify_round12_internal_test.go,verify_round12_test.go},
+  cmd/bridge/backup_round12_test.go, internal/admin/handlers_backups_round12_test.go,
+  internal/doctor/backups_round12_test.go.
+- Revised cases and their platform explanations:
+  cmd/bridge/{backup_verify_test.go,backup_round2_test.go,backup_round3_test.go,
+  backup_round4_test.go,backup_round5_test.go},
+  internal/backup/{verify_hold_test.go,verify_veto_test.go}.
+- Guide and binding records: docs/backup.md,
+  .claude/rules/{cli-serve.md,admin-console.md,build-ci-tests.md},
+  ops/{History-rules-cli-serve.md,History-rules-build-ci-tests.md,engineering-log.md}.
+
+No pacing change (4509212196, 4509212200), and no rework of the earlier
+capture-bound or ticker write-outcome fixes (4509969905, 4510798630).
+
+
+## 2026-11-10 — B653 PR 1 round 13: independent disproofs and guarded veto outcomes
+
+Starting HEAD was read as `275a3a21d5715b74bacce85026aa9f34c36a6abc`.
+This round is edit-only. No builds, tests, formatting tools, negative
+controls or state-changing git commands were run. All expected-red claims
+below await the orchestrator's execution, with test seams retained when
+restoring earlier production behavior. No protocol shape changes.
+
+1. `disproves` now judges database and files independently. Both existing
+   FAILED-beside-INCOMPLETE rows in
+   `TestOnlyACompletedFailureDisprovesAVerifiedComponent` expect true.
+   `TestADisprovedNoBarrierRecordCannotAnchorAFreshProcessPrune` adds
+   "database failed beside incomplete files": real database damage is
+   detected, then `SetBeforeFilesCheckForTest` cancels before the files
+   phase. It requires FAILED/INCOMPLETE findings, an INCOMPLETE read-back
+   and listing, the older genuine NewestVerified, no startup skip for the
+   disputed record, and, after pruning in a new process, the older anchor
+   present and the intermediate FAILED snapshot gone. Expected red at
+   `275a3a21`: both predicate rows and those mixed-case trust/retention
+   assertions. Control: restore the early return when either found
+   component is INCOMPLETE, leaving the new cancellation seam and tests.
+
+2. `writeManifest` and `writeFromHashed` chmod their open temp files before
+   sync/close. `vacuumInto` uses a no-follow output open and descriptor
+   regular-file validation, then descriptor chmod. Unix's nonblocking
+   open also avoids waiting on a substituted pipe; Windows opens the
+   reparse entry itself. `TestEverySnapshotWriterChmodsOnlyItsOwnFile`
+   has manifest/copy/vacuum rows. At a seam immediately before mode
+   handling each removes the exact output pathname and installs a symlink
+   to a 0644 target; its MODE must remain 0644. Vacuum must refuse the
+   substituted link. All three MODE assertions are expected red with
+   `275a3a21`'s pathname chmods and the seams transplanted. These Unix-mode
+   replacement cases explicitly skip Windows; native Windows open/handle
+   semantics still require CI. `TestVacuumModeRefusesANonRegularOutput`
+   additionally requires refusal without changing a directory's mode.
+   Control: replace the three descriptor-mode operations with pathname
+   `os.Chmod` at their test seams. A further focused control for vacuum is
+   to replace its no-follow open with `os.Open`, preserving the fstat;
+   the symlink target then looks regular and the MODE assertion must fail.
+
+3. Both veto callers use guarded `putVeto`: the no-barrier worker through
+   `vetoDisproved`, and `publishVerdict`. The step and hold are checked
+   before each bundle/root lookup/create, and the root is tried only after
+   bundle failure. Successful creation or existing presence is independent
+   of the cache stamp. The latter checks give-up separately and, if skipped,
+   says the record is vetoed and the console may retain its cached reading
+   until expiry or a backups-folder change. A failed veto remains reported
+   and skips the immediate prune. Recovery-INCOMPLETE still follows the
+   existing admission and merge rules.
+
+   `TestBothVetoCallersGuardEveryAttemptAndReportSkippedStamps` exercises
+   each caller with independent step/hold signals, before its first
+   attempt, after a failed bundle, after a created or existing bundle,
+   and after a created root. It requires zero lookup/create calls after
+   initial give-up, exactly one bundle attempt with no root after its
+   failure/give-up, veto presence after success, unsynced read-back,
+   skipped-stamp words without a false failed-veto claim, and no movement
+   of a planted old root stamp for the bundle cases. The root-created
+   case intentionally does not claim an unchanged root mtime.
+   `TestTheNoBarrierWorkerReportsAVetoAcrossGiveUp` also drives the actual
+   `verifyHeld` worker through its bounded veto step, abandons its real hold
+   at the attempt seam, and requires one attempt, no prune, correct
+   read-back and the successful-veto/skipped-stamp or failed-veto words in
+   the worker's returned error. The hold is marked as handed off solely
+   to keep the overrun marker's I/O out of this cache-stamp fixture.
+   These guard and reporting assertions are expected red on the earlier
+   unguarded implementation with seams retained.
+
+   `TestTheConsoleCacheExpiresAfterAnUnstampedBundleVeto` drives the real
+   list and card over the resulting unstamped bundle-veto disk state. The
+   list must reject VERIFIED immediately, the card must retain its primed
+   reading before expiry, and, with its age moved beyond the TTL, reject
+   VERIFIED too. This pins the existing cache consequence, not a claim of
+   baseline-red behavior. Control for item 3: bypass putVeto's give-up
+   checks for attempts and stamping while leaving publication's later
+   guards intact; the fallback count, old-stamp and skipped-stamp assertions
+   must fail. Removing only the attempt guard isolates the forbidden root
+   creation; removing only the stamp guard isolates the false cache claim.
+
+4. Doctor's platform seam defaults to `fsutil.SyncsParentDir`. On a
+   no-barrier platform a record carrying `ReasonUnsynced` gets neutral
+   fresh-snapshot advice, not a claim of damage or an unfinished check.
+   `TestTheDoctorReplacesAnUnsyncedRecordWithoutInferringDamage` creates
+   both a files disproof and a successful initial verification whose veto
+   removal fails. Each must advise `bridge backup --config <bridge.yaml>`,
+   say the record cannot be trusted or re-recorded here, and contain none
+   of "did not finish", "disproved", "damaged" or "--verify". The same
+   record on a barrier platform keeps recheck advice. Both no-barrier hints
+   are expected red at `275a3a21`.
+
+   The startup rule's in-place result now triggers a fresh capture when
+   ErrRecheckNotRecorded accompanies an unsynced read-back, as well as for
+   a FAILED database. `TestStartupReplacesAVetoedSnapshotEvenWhenItsDatabasePasses`
+   damages the snapshot's config only, asserts VERIFIED database / FAILED
+   files, vetoes it, and drives the real ticker. It requires two snapshots,
+   the mixed finding in its report, and a subsequent startup decision that
+   skips the fresh verified snapshot. Expected red at `275a3a21`: no second
+   snapshot arrives. Control: remove the new ErrRecheckNotRecorded arm from
+   the in-place result and the doctor's no-barrier unsynced branch; retain
+   the tests and platform seam. Database-FAILED replacement remains the
+   passing contrast.
+
+The public guide, CLI and console rules, and History-rules-cli-serve.md
+now carry the component rule, all descriptor-mode sites, guarded veto and
+stamp outcomes with the cache limitation, and neutral replacement advice.
+The changed production files are internal/backup/{backup,finish,seams,
+verify_db,verify_record,vacuum,vacuum_open_unix,vacuum_open_windows}.go,
+internal/doctor/backups.go and cmd/bridge/backup.go. Regression additions
+are verify_round13_internal_test.go, backups_round13_test.go,
+backup_round13_test.go and handlers_backups_round13_test.go in their
+respective packages; the round-12 predicate and fresh-process tests were
+updated in place. The orchestrator must format, run the gates and controls,
+and supply native-platform results before recording validation as passed.
+
+## 2026-11-10 — B653 PR 1 round 14: replacement evidence and veto uncertainty
+
+Edit-only round based on 29bf1e6f. No builds, tests or negative controls were
+run by this worker; the orchestrator owns validation and the root-run
+follow-up backlog item. The public guide, CLI rules and their History long
+form state the resulting behavior and the permission boundary.
+
+1. The doctor checks database FAILED before no-barrier unsynced advice.
+   `TestTheDoctorKeepsDatabaseDamageAdviceBesideUnsyncedFiles` is expected
+   red on 29bf1e6f: it requires "the live database may be damaged", the
+   full-check command and keeping verified snapshots, and rejects "take a
+   fresh snapshot". Negative control: restore the unsynced branch ahead
+   of the database-FAILED branch. The existing passing-database neutral
+   advice cases remain preservation coverage.
+
+2. Startup retains unconditional replacement for its own FAILED database.
+   The ErrRecheckNotRecorded arm now requires a FAILED component in Found,
+   not an unsynced read-back. The real ticker's two-start cases use keep 0
+   and wait for the next interval request after the complete boot pass.
+   `TestStartupKeepsALeftoverVetoWithoutAddingSnapshots` is expected red
+   on 29bf1e6f: persistent veto-removal failure must leave only the initial
+   snapshot after each start, with VERIFIED/VERIFIED findings reported.
+   The disproof case requires exactly one replacement across two starts
+   and is preservation coverage at this baseline. Negative control:
+   remove only the added Found-component condition, restoring the
+   original RecordRead/unsynced branch; extra snapshots must fail the count. Keep the existing unconditional
+   database-failure test as a separate guard against over-narrowing.
+
+3. putVeto records unconfirmed explicitly if give-up skips a candidate.
+   Both callers and the real no-barrier worker have existing-root cases:
+   failed bundle, give-up at afterVetoAttempt, one lookup/creation attempt,
+   no root placement lookup, "the veto could not be confirmed", and root
+   veto read-back still INCOMPLETE/unsynced. The existing no-root stopped
+   case requires the same words. These wording assertions are expected
+   red on 29bf1e6f; skipped calls and conservative read-back are preserved.
+   Both-attempts-failed rows retain definitive "could not be vetoed"
+   words even with ErrCheckGivenUp carried by the injected error. The
+   worker and existing failed-veto Finish case require no prune. Negative
+   control: stop assigning unconfirmed in putVeto's give-up branch; both
+   callers and worker must fail their uncertainty-word assertions.
+
+4. The mixed disproof fixture uses SetFilesCheckIncompleteForTest on its
+   resolved snapshot. Only the files phase gets an expired internal
+   context/pacer; VerifySnapshot's caller stays live and awaits the worker.
+   It requires ErrRecheckNotRecorded, FAILED database, INCOMPLETE files
+   with only deadline, vetoed read-back/listing, no startup skip, the older
+   verified anchor and removal of the intermediate failure by a fresh
+   process. This corrects a timing-dependent test at 29bf1e6f, not a new
+   deterministic production failure on that baseline. Negative control:
+   restore disproves' early return when either found component is
+   INCOMPLETE, retaining the seam; the read-back and anchor assertions
+   must fail. Cancelling the caller is not a valid control fixture.
+
+5. Windows vacuum reopen adds BACKUP_SEMANTICS. The directory, directory
+   symlink (where permitted) and junction tests require the explicit
+   "vacuum output is not a regular file" refusal and unchanged mode.
+   Expected red on native Windows at 29bf1e6f: access denied instead of
+   the explicit refusal. Negative control: remove only BACKUP_SEMANTICS;
+   retain OPEN_REPARSE_POINT. Unix remains preservation coverage.
+
+6. The documented permission guarantee is only final-component symlink or
+   reparse redirection during chmod. Another regular file or hard link,
+   a parent replaced by a link and SQLite's pathname VACUUM INTO are
+   explicitly outside it; root-run backup/restore over an untrusted
+   renameable tree is out of scope. Documentation correction only, with
+   no baseline-red runtime claim or new anchoring. Both staged helpers
+   already defer Close before removal; the leak finding requires no edit.
+
+
+## 2026-11-10 — B653 PR 1 round 15: restore recovery publication and separate cache warnings
+
+Starting HEAD was checked as `802a641936ccb33ce1ceab6b2fb66838070f1dd4`.
+The brief and its two reviews were read in full; its DECISIONS govern this
+round. This worker edited files only and formatted the changed Go files
+with the installed go1.27.3 gofmt. No builds, tests, negative controls or
+state-changing git commands were run; the orchestrator owns validation.
+
+Cause: round 13's post-rename stamp used `p.givenUp()`, which includes the
+already-abandoned hold, so PENDING-to-INCOMPLETE recovery returned
+`errCacheStampSkipped` even after its rename and sync succeeded.
+`published.outcome` mapped every written result with an error to
+`WriteNotDurable`, making `Recorded` false, though this recovery never
+entered `putVeto`.
+
+The recovery call after refused `publishOf` admission now sets
+`publication.recovery`: only that publication's post-rename stamp uses its
+fresh step's give-up alone. Ordinary publications still guard their stamp
+with both step and hold. This explicit distinction preserves round 13's
+hold-only give-up cases; changing every publication's stamp to step-only
+would break them. Every veto guard and ordinary publication admission stay
+unchanged. A recovery step subsequently given up skips its stamp too.
+
+A written record whose only error is the skipped-stamp warning remains
+`WriteRecorded`; its error is preserved for the reporters' separate console
+cache warning. Wrapped/joined warnings are recognized without hiding a
+joined sync or other error. Real sync failure is still `WriteNotDurable`.
+An unanswered step is still `WriteUnfinished`, and a warning never makes an
+unwritten record recorded. Recovery changing a record holding a VERIFIED
+component still needs a veto, which the abandoned hold refuses to confirm
+or create even when one exists. It writes nothing, returns `WriteFailed`
+and `Recorded` false, says the veto could not be confirmed, and reads back
+what stands. Rules, the public guide and History state that limit.
+
+Added `TestRecoveryPublicationSeparatesItsCacheStampFromDurability` drives
+`verifyHeld` and its actual fallback with the existing after-check and sync
+seams: live recovery invalidates the planted old root stamp; give-up of the
+fresh step skips it but keeps a synced write recorded with the warning;
+sync failure alone or joined to that warning remains not durable; and
+mixed records with and without a veto refuse without a placement lookup
+past abandonment. No prune runs in any row. The planted stamp is an hour
+old, avoiding clock-granularity assumptions; retained holds are drained
+before seams are restored. No new seam was added.
+`TestACacheWarningNeverHidesAPublicationFailure` covers error trees and the
+unanswered/unwritten cases. `TestTheReportersKeepARecordedRecoveryAndItsCacheWarning`
+requires both CLI and ticker to retain recorded-write words and the full
+cache warning without claiming lost durability.
+
+The original four regression cases must pass:
+- `TestAGivenUpVerificationReadsItsRecordBack/over_a_PENDING`;
+- `TestBridgeBackupVerifySaysWhatAGivenUpVerificationsRecordReads/over_a_PENDING`;
+- `TestBridgeBackupVerifySaysWhatAGivenUpVerificationsRecordReads/whose_record_was_not_read_back`;
+- `TestTheTickerSaysWhatAGivenUpVerificationsRecordReads/over_a_PENDING`.
+They now also reject a skipped-stamp warning for their live recovery step.
+Negative control for the orchestrator: replace only the post-rename stamp
+condition in `publishVerdict` with `p.givenUp()`. All four must fail their
+new no-skipped-stamp assertions, and the live-stamp worker case must fail.
+With the warning-only outcome fix retained, the four's original recording
+assertions alone would no longer be red; reverting both production changes
+reproduces their original failures. Leave the tests and all seams in place.
+
+Preservation coverage that must stay green includes round 13/14's
+`TestBothVetoCallersGuardEveryAttemptAndReportSkippedStamps` (especially the
+ordinary publication's hold-only give-up and existing-root cases),
+`TestTheNoBarrierWorkerReportsAVetoAcrossGiveUp`,
+`TestOnlyACompletedFailureDisprovesAVerifiedComponent` and
+`TestADisprovedNoBarrierRecordCannotAnchorAFreshProcessPrune`, plus ordinary
+admission and recovery-signal coverage in
+`TestTheVerdictsWriteIsAdmittedInOneSectionWithTheGiveUp`,
+`TestAVerdictsWriteIsAdmittedOnlyBeforeAGiveUp`,
+`TestNoVetoRemovalBeginsOnceItsHoldIsGivenUp` and
+`TestRecoveryStepsKeepFreshSignalsAfterTheHoldIsGivenUp`.
+Round 13/14's descriptor-mode, doctor advice, console cache expiry and
+startup replacement cases are unchanged and must remain green too.
+
+
+## 2026-11-10 — B428: read the M4A work atom (ExtractorVersion 33)
+
+B127's observation still held at d6dd1c3b: dhowden drops the four-byte
+`0xA9 w r k` atom; iTunes freeform WORK already works after locale stripping.
+The synthetic ilst fixtures use `"\xa9wrk"`, not the five UTF-8 bytes of `©wrk`.
+The initial red-first command (Go 1.27.3 on PATH, GOTOOLCHAIN=local,
+TMPDIR outside the checkout) was:
+
+```sh
+go test -tags ts_omit_webclient,ts_omit_debugeventbus -timeout 30m -count=1 ./internal/manifest -run 'TestExtractMP4Work|TestScanner_V33'
+```
+
+It built and failed on nine missing-work table cases (atom alone, other-mean
+WORK alone, atom beside blank/empty WORK, other-mean conflicts in both orders,
+longer than 256 bytes, the 64 KiB boundary, oversized other-mean WORK beside
+valid ©wrk), on the independent read after dhowden's parse failure, and on
+v32 rows keeping empty work and not entering the delta/resetting enrichment.
+Existing iTunes WORK and its precedence cases passed. A preliminary malformed
+fixture assumed plain QuickTime meta made dhowden error; it actually returned
+success without tags. The red-first fixture instead uses an unsupported title
+class, asserting dhowden's error before checking the independent work/genre.
+During green verification two fixture expectations were corrected: the long
+value is trimmed, and a truncated value must end inside the work text, not in
+the codec boxes after it. Supplemental reader tests assert EOF, UnexpectedEOF,
+real read/seek errors, invalid UTF-8 and non-text classes directly.
+
+The MP4 fallback runs only when the existing work is empty, supplies `workOf`
+with WORK ahead of ©wrk and changes neither that selector nor another format.
+It reads WORK under any mean, first non-empty valid value per kind. Empty or
+whitespace-only values supply no candidate. Class 1 and valid UTF-8 are required.
+A separate reader caps values at 64 KiB (ample space for classical titles with
+catalogue/movement detail); larger values are absent, never truncated and never
+represented by the advisory reader's NUL stand-in. Existing dhowden values keep
+their behavior and are not subjected to this supplemental bound. Malformed
+structure/truncation is absent at the walk; actual I/O and walk-budget failures
+propagate to a path-redacted Warn, with existing extraction fault tracking intact.
+Like the other ilst fields it still runs after dhowden fails to parse metadata.
+
+The v33 scan proof follows B127's
+`TestScanner_V26_ATXXXWorkJoinsTheDelta_AWorkThatStaysOnlyStamps`: scan real
+fixtures, rewind only database version/work to v32 (size/mtime untouched), scan
+again, and check new work, indexed_at advancement, enrichment reset, and the
+stamp-only behavior of unchanged iTunes WORK and no-work rows.
+
+Known limits: conflicts between non-empty WORK and ©wrk retain the bridge's
+freeform-first precedence, whereas iOS writes follow AVFoundation item order.
+Only trimming is shared; no app display-name cleaning is added. The supplied
+AVTagClassifier at iOS 77cb4529 actually strips arbitrary means only for advisory
+fields, not WORK, contrary to the task premise. Any-mean WORK is supported here,
+but parity with that iOS copy is not claimed. Also measured: dhowden's unsupported
+mean path consumes its freeform and then seeks again, potentially skipping later
+siblings. The new walk recovers work; the dependency's other metadata is unchanged.
+PROTOCOL.md's classical coverage already names ©wrk and now matches this reader;
+no protocol edit, schema change, or mirror is required for this fix.
+
+Focused green: six new top-level tests plus the extended existing MP4 log-path
+test pass. Negative controls and full-check results follow in the validation entry.
+
+### B428 validation: negative controls
+
+Baseline committed as `4a7d513a` before **each** control. Every replacement
+asserted exactly one original occurrence before writing; `rg -c` then counted
+the mutated line. Every test command used `-count=1`, built successfully and
+exited 1 on assertions. Each source file was restored from that commit and
+`test -z "$(git status --porcelain)"` passed before the next control.
+
+All commands used Go 1.27.3 on PATH, `GOTOOLCHAIN=local`, and
+`TMPDIR=$HOME/onebit/codex/b428-scratch/tmp`:
+
+- **A, no ©wrk read:** the kinds list became `[]string{"----"}` (one match).
+  `go test -tags ts_omit_webclient,ts_omit_debugeventbus -timeout 30m -count=1 ./internal/manifest -run 'TestExtractMP4Work|TestScanner_V33'`
+  failed six table cases: atom alone, atom beside blank/empty WORK, long title,
+  exactly 64 KiB, and oversized other-mean WORK beside the atom. Also red:
+  `TestExtractMP4Work_DhowdenFailureStillWalks` and the atom row in
+  `TestScanner_V33_MP4WorkReReadsV32Rows` (missing work/delta/enrichment reset).
+- **B, no version bump:** `const ExtractorVersion = 32` (one match).
+  `go test -tags ts_omit_webclient,ts_omit_debugeventbus -timeout 30m -count=1 ./internal/manifest -run TestScanner_V33`
+  failed `TestScanner_V33_MP4WorkReReadsV32Rows`: both newly supported sources
+  stayed empty and neither row advanced indexed_at or reset enrichment.
+- **C, a blank counts as present:** the work reader returned
+  `return value, true, nil` instead of testing non-empty (two matching lines
+  after mutation: this one and the pre-existing integer reader's return).
+  `go test -tags ts_omit_webclient,ts_omit_debugeventbus -timeout 30m -count=1 ./internal/manifest -run TestExtractMP4Work`
+  failed `TestExtractMP4Work/blank_atom_beside_WORK` and
+  `TestExtractMP4Work/empty_atom_beside_WORK`, on the explicit no-candidate
+  assertion. The final work remains correct through freeform precedence;
+  testing only that final value would miss this presence-policy violation.
+
+The local backlog file named by CLAUDE.md is absent on this host; the adjacent
+findings above are recorded here for handoff, with no substitute backlog made.
+
+### B428 validation: final checks
+
+Every Go/make invocation used `/opt/homebrew/bin/go` (1.27.3),
+`GOTOOLCHAIN=local`, and `TMPDIR=$HOME/onebit/codex/b428-scratch/tmp`.
+The race run used the restored implementation at `4a7d513a`; only this record
+changed afterward. No other package's tests directly read ExtractorVersion
+(the matches outside manifest are comments); the repository guards ran too.
+
+| Command | Result / tally |
+|---|---|
+| `gofmt -l .` | Exit 0, zero files listed across the repository; the five changed Go files were also checked separately. |
+| `make vet` | Exit 0; host-wide `go vet -tags ts_omit_webclient,ts_omit_debugeventbus ./...`. |
+| `GOOS=windows go vet -tags ts_omit_webclient,ts_omit_debugeventbus ./...` | Exit 0, no diagnostics (arm64, compile/vet only). |
+| `GOOS=linux go vet -tags ts_omit_webclient,ts_omit_debugeventbus ./...` | Exit 0, no diagnostics (arm64, compile/vet only). |
+| `go test -tags ts_omit_webclient,ts_omit_debugeventbus -timeout 30m -count=1 ./internal/manifest -run 'TestExtractMP4Work\|TestReadMP4WorkText\|TestScanner_V33\|TestAnMP4Walk'` | Focused green, exit 0, 7 top-level tests including the existing warning-path test, 0.577 s. |
+| `go test -tags ts_omit_webclient,ts_omit_debugeventbus -race -timeout 30m -count=1 -json ./internal/manifest/...` | Full, unfiltered race suite: exit 0, one package, 1299.044 s. 1,531 top-level tests and 24 fuzz targets' ordinary seed runs passed; 8 top-level tests skipped. Including subtests/seeds: 3,638 pass, 10 skip, 0 fail. |
+| `go test -tags ts_omit_webclient,ts_omit_debugeventbus -race -timeout 30m -count=1 -json ./cmd/bridge -run 'TestEveryCitedTestNameExists\|TestNoDocblockNamesAnotherDeclaration\|TestNoBlankKeepers'` | Exit 0, 3 tests passed, 0 skipped/failed. |
+| `make docs-check` | Exit 0, all four stages pass (budget self-test, budgets, rules-for's 49 checks, split-tool self-test); rerun after this record. |
+| `git diff --check` | Exit 0. |
+| `python3 scripts/rules-for.py --changed` | Required scanner/build-ci-tests rules read; final change is this log alone. No origin/main ref in this worker, so the tool lists uncommitted paths. |
+
+The ten skip entries are seven cases requiring case- or composition-sensitive
+folder names this volume cannot stage, the optional real-SACD test (fixture
+paths unset), the watcher test whose lost-watch premise does not hold on
+kqueue, and a remount watcher fixture whose root kept the same device/inode
+(B777 item 3). None is a new M4A test. No fuzz campaign or cross-platform runtime
+run is claimed; ordinary fuzz seeds and cross-platform vet are counted above.
+
+All six new top-level tests passed under race. PROTOCOL.md, wire types and
+ProtocolVersion are unchanged. The branch is committed locally; no push, PR,
+`gh`, or deployment was performed.
+
+## 2026-11-10 — B428 round 2: exact iTunes mean and extraction proofs
+
+This supersedes round 1's any-mean WORK rule without rewriting its record.
+The app reads ©wrk and freeform WORK only under `com.apple.iTunes`; arbitrary
+means are an advisory-only rule. The supplemental work walk now requires the
+mean's raw bytes after the four-byte version/flags header to equal that string.
+Only an exact-length payload can match, bounding the read to 16 bytes (corrected from 15 at review: `com.apple.iTunes` is 16 bytes, and the code reads `len(want)`), without
+trimming or case folding. Missing, padded, case-changed, oversized and truncated
+means are absent. Advisory behavior, workOf precedence and the `t.Work == ""`
+guard stay unchanged. ExtractorVersion remains 33, which has not been released.
+
+The restriction belongs only to the supplemental walk. Dhowden also accepts
+`com.mixedinkey.mixedinkey` and `com.serato.dj`, drops the mean and supplies WORK
+before the walk. Those existing answers are preserved, a known pre-existing
+difference from the app. Fixtures pin both production answers and their absence
+from the supplemental map. The existing item-order/precedence and display-cleaning
+differences remain unchanged, as does dhowden's unsupported-mean sibling skip.
+No wire/schema change or iOS edit is needed.
+
+### Red first at a9035b58
+
+Only tests were changed for the first run. All Go/make commands use
+`TMPDIR=$HOME/onebit/codex/b428-scratch/tmp`, `GOTOOLCHAIN=local`, and the tags
+`ts_omit_webclient,ts_omit_debugeventbus`. The focused run used `-timeout 30m
+-count=1 -json`, package `./internal/manifest`, and pattern
+`TestExtractMP4Work|TestReadMP4WorkText|TestScanner_V33`. It built and exited 1:
+44 passed, 17 failed test/subtest events (parent failures included), no skips.
+
+- `TestExtractMP4Work`: other mean WORK alone now expects absence; other mean
+  ignored atom first and other mean ignored WORK first expect Requiem. All
+  three failed, still returning Mass. The other mean over limit case stayed
+  green: its foreign WORK was already rejected by the value-size bound.
+- `TestScanner_V33_MP4WorkReReadsV32Rows`: other.m4a failed both the no-work and
+  stamp-only expectations; the other rows kept their expected behavior.
+- `TestExtractMP4Work_MeanMustBeExact`: padded, case changed, missing, oversized
+  and truncated all failed, supplying WORK instead of falling back to ©wrk;
+  exact passed. The direct walk isolates this contract from dhowden.
+- `TestExtractMP4Work_PreservesDhowden`: the conflicting iTunes duplicate passed
+  (production Last, independent walk First), proving the existing guard's
+  behavior. Both mixedinkey and serato production answers also passed; their
+  new supplemental-absence assertions failed under the unrestricted walk.
+- `TestExtractMP4Work_FallbackOrder`: both physical orders returned WORK and a
+  blank WORK returned ©wrk, all green. Each fixture proves dhowden's bad-title
+  parse failure, so these exercise the existing walk's precedence itself.
+- `TestExtractMP4Work_PayloadFaultsPreventPersistence`: data read and seek faults
+  passed, proving round 1 already propagates them. Mean read and seek faults
+  failed because no mean payload was read, no work warning appeared and no
+  readFault was returned. A real fixture and the openAudio seam exercise
+  ExtractWithContext, with byte-range fault injection (including read-ahead),
+  reached-payload assertions, exactly one work-specific Warn and
+  `errors.Is(readFault(err), boom)`. Padding places the target beyond dhowden's
+  buffered read before its bad-title failure, leaving the walk to reach it.
+- `TestExtractMP4Work_TruncatedPayload`: the added direct-walk nil-error and
+  absent work/©wrk key checks passed, proving truncation already means absence.
+- `TestExtractMP4Work`'s blank/empty WORK beside ©wrk cases: the added absent
+  `work` key assertions passed, as the existing reader rejects blank values.
+- `TestExtractMP4Work_MultipleDataChildren`: all eight cases passed. In each
+  kind of work box, non-text, empty and oversized first data children are
+  skipped, First wins over Last, and all-unusable children supply no key.
+
+With the exact-mean check implemented, the same selection plus
+`TestAnMP4Walk` passed: 64 test/subtest events, no skips or failures (12 top-level
+tests). Raw JSON run evidence is in the worker scratch directory's r2 folder.
+
+### Round-2 negative controls
+
+Each control started from committed `8817721f` with a clean tree. The mutation
+script asserted exactly one source occurrence before replacing it and checked
+the resulting occurrence count. All runs used the same environment/tags above
+and `-timeout 30m -count=1 -json`; each built and exited 1 on assertions. After
+each, the mutated file was restored from HEAD and an empty `git status
+--porcelain` was asserted before continuing.
+
+| Mutation | Selection in ./internal/manifest | Result |
+|---|---|---|
+| Remove the exact-mean check block once | `TestExtractMP4Work/other_mean\|TestScanner_V33` | Three other-mean cases return Mass again; other.m4a gains work and is rewritten instead of only stamped. Oversized foreign WORK remains green. 10 pass, 5 fail events including parents. |
+| Remove the work-preservation guard once | `^TestExtractMP4Work_PreservesDhowden$/last_duplicate` | Production returns First instead of dhowden's Last. 2 fail events including parent. |
+| Return on the first data child unconditionally once | `^TestExtractMP4Work_MultipleDataChildren$` | Non-text, empty and oversized leading children hide the later valid value in both ©wrk and freeform WORK: six child failures plus parent; both all-unusable cases still pass. |
+
+The implementation and tests were restored before the unfiltered race suite.
+
+### Round-2 final checks
+
+The full race run used restored implementation/test commit `8817721f`; only this
+validation record changed afterward. Every Go/make invocation kept the scratch
+TMPDIR, local toolchain and Makefile tags stated above. All checks exited 0.
+
+| Check | Result / tally |
+|---|---|
+| `make fmt`; `gofmt -l .` | No formatting changes; zero files listed across the repository. |
+| `make vet` | Host-wide tagged vet, no diagnostics. |
+| `GOOS=windows go vet -tags ts_omit_webclient,ts_omit_debugeventbus ./...` | No diagnostics; arm64, compile/vet only. |
+| `GOOS=linux go vet -tags ts_omit_webclient,ts_omit_debugeventbus ./...` | No diagnostics; arm64, compile/vet only. |
+| Focused green selection above, `-count=1` | 12 top-level tests, 64 total test/subtest passes, no skips or failures. |
+| `go test -tags ts_omit_webclient,ts_omit_debugeventbus -race -timeout 30m -count=1 -json ./internal/manifest/...` | Full unfiltered suite, one package, 1306.629 s: 1,536 top-level tests and 24 fuzz targets' ordinary seed runs passed; 8 top-level tests skipped. Including subtests/seeds: 3,667 pass, 10 skip, 0 fail. No race reported. |
+| `go test -tags ts_omit_webclient,ts_omit_debugeventbus -race -timeout 30m -count=1 -json ./cmd/bridge -run 'TestEveryCitedTestNameExists\|TestNoDocblockNamesAnotherDeclaration\|TestNoBlankKeepers'` | 3 tests passed, no skips/failures; also rerun over this final record. |
+| `make docs-check` | Four stages passed: budget self-test, budgets, rules-for's 49 checks, split-tool self-test; rerun over this final record. |
+| `git diff --check` | No whitespace errors. |
+| `python3 scripts/rules-for.py --changed` | Required scanner/build-ci-tests rules read before edits and before the implementation commit; final change is this log alone. No origin/main ref in this worker, so the tool lists uncommitted paths. |
+
+The ten skip entries are seven case/composition-sensitive filesystem cases this
+volume cannot stage, the optional real-SACD fixture with paths unset, and two
+watcher premises absent on this host (kqueue's retained watches and a remount
+retaining device/inode). No M4A test skipped. Cross-platform runtime and fuzz
+campaigns are not claimed. The pre-existing dhowden mean/duplicate answers,
+unsupported-mean sibling skip, workOf item-order difference and app display
+cleaning difference are unchanged; no adjacent implementation was altered.
+Only new local commits were made, with no amend, rebase, push, PR operation,
+`gh` invocation or deployment.
+
 ## 2026-11-10 — native lifecycle fences and first-failure containment
 
 Base: fa5fec545fa8062de465686a0235cc9cd865cdd7. Extracted the native sink's

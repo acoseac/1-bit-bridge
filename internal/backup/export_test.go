@@ -2,9 +2,64 @@ package backup
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
+	"path/filepath"
+
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 )
+
+// VerifySnapshotAsAnotherProcessForTest is VerifySnapshot as another
+// process's verification runs: outside this process's slot and its holder
+// of the backups folder, so the kernel's lock on LockFileName alone keeps it
+// from this process's.
+func VerifySnapshotAsAnotherProcessForTest(ctx context.Context, dir string, o VerifyOptions) (VerifyResult, error) {
+	o.asAnotherProcess = true
+	return VerifySnapshot(ctx, dir, o)
+}
+
+// OwnerHeldAsAnotherProcessForTest reports whether the owner lock of the
+// snapshot in dir is held, asked as another process asks it: an exclusive try
+// on a file of its own, never this process's record (ownedHere).
+func OwnerHeldAsAnotherProcessForTest(dir string) bool {
+	f, err := os.OpenFile(filepath.Join(dir, ownerLockName), os.O_RDWR, 0)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	switch err := fsutil.TryLock(f); {
+	case err == nil:
+		_ = fsutil.Unlock(f)
+		return false
+	case errors.Is(err, fsutil.ErrLocked):
+		return true
+	}
+	return false
+}
+
+// StuckMarkerName is the marker a check that did not end leaves in its
+// backups folder.
+const StuckMarkerName = stuckMarkerName
+
+// StuckAnywhereForTest reports whether any hold given up in this process is
+// marked still.
+func StuckAnywhereForTest() bool {
+	_, held := stuckAnywhere()
+	return held
+}
+
+// SlotHeldForTest reports whether a verification holds this process's slot:
+// a try on it, given back at once.
+func SlotHeldForTest() bool {
+	select {
+	case verifySlot <- struct{}{}:
+		<-verifySlot
+		return false
+	default:
+		return true
+	}
+}
 
 // SetAfterIdentityCopyForTest sets the hook Snapshot calls between copying
 // the player's UUID and reading its floor, and returns the restore.
@@ -25,14 +80,6 @@ func SetTryLockForTest(fn func(*os.File) error) (restore func()) {
 // ErrNotADirectory is what a listing of the backups folder answers when
 // something that is not a folder stands where it goes.
 var ErrNotADirectory = errNotADirectory
-
-// SetReadDirForTest replaces the listing of the backups folder List and the
-// orphan sweep take, and returns the restore.
-func SetReadDirForTest(fn func(name string) ([]os.DirEntry, error)) (restore func()) {
-	prev := readDir
-	readDir = fn
-	return func() { readDir = prev }
-}
 
 // CompletePlayerSeal is completePlayerSeal, driven directly where a backup's
 // lock open would fail first.

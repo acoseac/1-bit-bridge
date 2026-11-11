@@ -492,6 +492,32 @@ func RenameWithRetryUnsynced(src, dst string) error {
 	return renameRetry(context.Background(), src, dst)
 }
 
+// RenameWithRetryUnsyncedCtx is RenameWithRetryUnsynced asking ctx immediately
+// before every attempt, the first included, and in each wait between them.
+// If the check observes ctx ended it skips the attempt (renameStopped wraps
+// the last failure). The check and rename have no atomic admission: ctx can
+// end between them and that attempt still runs. A rename attempt already
+// begun when cancellation lands finishes afterward; it is not taken back.
+// A backup verdict's write passes its step's give-up as ctx.
+func RenameWithRetryUnsyncedCtx(ctx context.Context, src, dst string) error {
+	var err error
+	for _, d := range renameBackoff {
+		if d > 0 {
+			select {
+			case <-ctx.Done():
+			case <-time.After(d):
+			}
+		}
+		if ctx.Err() != nil {
+			return renameStopped(ctx, err)
+		}
+		if err = renameFunc(src, dst); err == nil {
+			return nil
+		}
+	}
+	return err
+}
+
 // RenameWithRetryIf is RenameWithRetryCtx for a rename that is right only
 // while a condition holds, a config save's comparison with the file its turn
 // found: before runs ahead of every attempt, the first included, and an error

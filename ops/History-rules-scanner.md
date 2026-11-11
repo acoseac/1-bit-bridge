@@ -2126,9 +2126,9 @@
   never read before (the app's ID3v2Parser reads TT1). **Don't put TIT1 back in
   front**, and **don't change the reading on one side alone**: the app's ID3v2Parser
   must read the work the same way (its paired PR), or one file is two works. A Vorbis
-  comment's WORK is unchanged. The `©wrk` alias never answers an M4A's work atom,
-  which dhowden's MP4 reader does not keep, so an M4A's work has never been read
-  (measured; not this rule's). **v26 changes only the rows whose work changes**: a
+  comment's WORK is unchanged. At v26 the `©wrk` alias did not answer an M4A's
+  work atom, which dhowden does not keep; freeform iTunes WORK was already read.
+  B428 (v33, below) supplies the missing atom through the ilst walk. **v26 changes only the rows whose work changes**: a
   tag whose TXXX:WORK differs from its TIT1 or stands alone, and a version 2.2 tag
   holding TT1 or TXX:WORK. They take the full-upsert leg (their enrichment is
   re-queued once) and are the iOS delta; every other row is stamped, and SACD ISO
@@ -2138,6 +2138,54 @@
   (`TestTXXXWorkIsTheWorkAndTIT1OnlyWhenThereIsNone`,
   `TestPicardsWorkIsReadInEveryContainerAnID3v2TagReaches`,
   `TestScanner_V26_ATXXXWorkJoinsTheDelta_AWorkThatStaysOnlyStamps`.)
+
+- **An M4A work already read keeps its answer; otherwise the ilst walk reads ©wrk and freeform WORK only under the exact com.apple.iTunes mean, WORK first, with non-empty class-1 UTF-8 values up to 64 KiB; oversized values are absent, never truncated or replaced by a sentinel** (ExtractorVersion 33, B428).
+  **Don’t trim or fold the mean, change workOf’s precedence, or replace an existing answer: dhowden also reads com.mixedinkey.mixedinkey and com.serato.dj WORK, a pre-existing difference from the app. Conflicting WORK and ©wrk can differ from the app’s item-order winner; trimming is not its display cleaning.**
+  `extractMP4WorkTags` runs only when `populateFromTagMetadata` supplied no work,
+  preserving every previous answer, including dhowden's handling of repeated
+  freeform values and raw-key aliases. It supplies `workOf(tag.MP4, raw, nil)`
+  with `work` and `©wrk`; `workOf` itself is unchanged. The new walk reads the
+  first non-empty valid data value of each kind, in physical order, matching
+  freeform names through `normaliseRawTagKey`, only when the mean's raw bytes
+  after its four-byte version/flags header equal `com.apple.iTunes`. The mean
+  must have exactly that length: the read is bounded to 16 bytes, with no
+  trimming or case folding. Padded, case-changed, missing, oversized or
+  truncated means supply no candidate. The advisory reader is unchanged.
+  Empty and
+  whitespace-only values supply no candidate, so neither source suppresses
+  the other. No other format's extraction or precedence changes.
+  The 64 KiB value bound leaves ample room for long classical titles and
+  catalogue/movement detail while bounding allocation. It applies to the
+  supplemental reader alone, not existing dhowden values. Larger values,
+  non-class-1 data, invalid UTF-8 and short payloads are absent. Never reuse
+  the advisory reader's 256-byte limit and NUL stand-in for work text.
+  EOF/UnexpectedEOF is absence at the walk; genuine read/seek errors and walk
+  budget failures propagate to the caller's path-redacted Warn. The extractor's
+  existing read-fault handling remains in force. Like genre/advisory/rating,
+  this walk still runs when dhowden cannot parse metadata: its parse failure
+  is swallowed by `readDhowdenTags`, not a reason to skip the independent walk.
+  Ordinary single-source values agree with the app's work reading; conflicts
+  do not promise parity because its writes follow AVFoundation's item order.
+  Nor does trimming promise parity with `MetadataNormalizer.cleanDisplayName`.
+  The app reads ©wrk and freeform WORK only under `com.apple.iTunes`;
+  arbitrary means apply only to advisory fields. The supplemental walk follows
+  that restriction. Existing dhowden answers are preserved even under
+  `com.mixedinkey.mixedinkey` and `com.serato.dj`: dhowden accepts those means,
+  drops the mean and supplies WORK before the walk. This is a known pre-existing
+  difference from the app, pinned through production Extract for both means.
+  Conflicting duplicate iTunes WORK atoms pin preservation independently:
+  dhowden keeps the last while the walk would select the first.
+  Version 33 re-reads v32 rows once: new work advances `indexed_at` and resets
+  enrichment, while unchanged work only stamps. The existing protocol coverage
+  already names `©wrk`, so PROTOCOL.md and the wire schema stay unchanged.
+  `TestExtractMP4Work`, `TestExtractMP4Work_TruncatedPayload`,
+  `TestExtractMP4Work_DhowdenFailureStillWalks`, `TestReadMP4WorkText`,
+  `TestExtractMP4WorkTags_PropagatesIOFailure`,
+  `TestExtractMP4Work_PreservesDhowden`, `TestExtractMP4Work_FallbackOrder`,
+  `TestExtractMP4Work_MeanMustBeExact`, `TestExtractMP4Work_MultipleDataChildren`,
+  `TestExtractMP4Work_PayloadFaultsPreventPersistence` and
+  `TestScanner_V33_MP4WorkReReadsV32Rows` pin this; the existing
+  `TestAnMP4WalkThatCannotReadItsFileNamesNoAbsolutePath` includes the work Warn.
 
 - **Every dhowden read goes through `dhowdenReadBuffer`, a page at a time**
   (2026-09-29, backlog B117). dhowden's `unsynchroniser.Read` reads its stream ONE BYTE

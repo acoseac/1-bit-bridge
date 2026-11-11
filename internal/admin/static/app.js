@@ -966,21 +966,37 @@ function renderCoverageBar(matched, missing) {
   });
 }
 
-// refreshBackups fetches /api/backups and renders the latest count +
-// most-recent timestamp into the dashboard's Backups panel. Errors
-// degrade gracefully — the panel just shows the placeholder dashes.
+// backupVerdict is a snapshot's verdict with its reason codes, as every
+// surface words it (backup.StateWords on the Go side): "VERIFIED", or
+// "FAILED: hash-mismatch".
+function backupVerdict(state, reasons) {
+  const codes = Array.isArray(reasons) ? reasons : [];
+  return codes.length ? `${state}: ${codes.join(", ")}` : String(state || "—");
+}
+
+// refreshBackups fetches /api/backups and renders into the Settings page's
+// Backups panel the count, the newest snapshot with its two verdicts, and
+// apart the newest whose database is verified (backlog B653). The payload
+// names no path. Errors degrade gracefully — the panel just shows the
+// placeholder dashes.
 async function refreshBackups() {
   try {
     const data = await API.get("/api/backups");
     const list = data.backups || [];
     setText("backup-count", String(list.length));
-    setText("backup-root", data.backupsRoot || "—");
     if (list.length > 0) {
       const latest = list[0]; // newest-first
+      let files = backupVerdict(latest.filesState, latest.filesReasons);
+      if ((latest.filesFailed || []).length) files += ` (${latest.filesFailed.join(", ")})`;
       setText("backup-latest", `${latest.dirName} · ${latest.bridgeVersion}`);
+      setText("backup-latest-check",
+        `database ${backupVerdict(latest.databaseState, latest.databaseReasons)}, files ${files}`);
     } else {
       setText("backup-latest", "no snapshots yet");
+      setText("backup-latest-check", "—");
     }
+    const verified = data.newestVerified;
+    setText("backup-verified", verified ? `${verified.dirName} · ${agoOrDash(verified.createdAt)}` : "none yet");
   } catch {
     // Quietly leave the placeholders alone.
   }
@@ -6817,6 +6833,10 @@ function renderJobCards(j) {
     ? `scheduled every ${bk.intervalHours} h`
     : "scheduler off — on-demand only");
   setText("job-backup-last", agoOrDash(bk.lastBackupAt));
+  setText("job-backup-check", bk.newestDatabase
+    ? `database ${bk.newestDatabase}, files ${bk.newestFiles || "—"}`
+    : "—");
+  setText("job-backup-verified", bk.lastVerifiedAt ? agoOrDash(bk.lastVerifiedAt) : "none yet");
   setText("job-backup-next", bk.run ? formatInFuture(bk.run.nextDueAt) : "—");
   setText("job-backup-keep", bk.keep > 0 ? `keep last ${bk.keep}` : "keep all");
 
