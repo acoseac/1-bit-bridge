@@ -93629,3 +93629,237 @@ admission and recovery-signal coverage in
 `TestRecoveryStepsKeepFreshSignalsAfterTheHoldIsGivenUp`.
 Round 13/14's descriptor-mode, doctor advice, console cache expiry and
 startup replacement cases are unchanged and must remain green too.
+
+
+## 2026-11-10 — B428: read the M4A work atom (ExtractorVersion 33)
+
+B127's observation still held at d6dd1c3b: dhowden drops the four-byte
+`0xA9 w r k` atom; iTunes freeform WORK already works after locale stripping.
+The synthetic ilst fixtures use `"\xa9wrk"`, not the five UTF-8 bytes of `©wrk`.
+The initial red-first command (Go 1.27.3 on PATH, GOTOOLCHAIN=local,
+TMPDIR outside the checkout) was:
+
+```sh
+go test -tags ts_omit_webclient,ts_omit_debugeventbus -timeout 30m -count=1 ./internal/manifest -run 'TestExtractMP4Work|TestScanner_V33'
+```
+
+It built and failed on nine missing-work table cases (atom alone, other-mean
+WORK alone, atom beside blank/empty WORK, other-mean conflicts in both orders,
+longer than 256 bytes, the 64 KiB boundary, oversized other-mean WORK beside
+valid ©wrk), on the independent read after dhowden's parse failure, and on
+v32 rows keeping empty work and not entering the delta/resetting enrichment.
+Existing iTunes WORK and its precedence cases passed. A preliminary malformed
+fixture assumed plain QuickTime meta made dhowden error; it actually returned
+success without tags. The red-first fixture instead uses an unsupported title
+class, asserting dhowden's error before checking the independent work/genre.
+During green verification two fixture expectations were corrected: the long
+value is trimmed, and a truncated value must end inside the work text, not in
+the codec boxes after it. Supplemental reader tests assert EOF, UnexpectedEOF,
+real read/seek errors, invalid UTF-8 and non-text classes directly.
+
+The MP4 fallback runs only when the existing work is empty, supplies `workOf`
+with WORK ahead of ©wrk and changes neither that selector nor another format.
+It reads WORK under any mean, first non-empty valid value per kind. Empty or
+whitespace-only values supply no candidate. Class 1 and valid UTF-8 are required.
+A separate reader caps values at 64 KiB (ample space for classical titles with
+catalogue/movement detail); larger values are absent, never truncated and never
+represented by the advisory reader's NUL stand-in. Existing dhowden values keep
+their behavior and are not subjected to this supplemental bound. Malformed
+structure/truncation is absent at the walk; actual I/O and walk-budget failures
+propagate to a path-redacted Warn, with existing extraction fault tracking intact.
+Like the other ilst fields it still runs after dhowden fails to parse metadata.
+
+The v33 scan proof follows B127's
+`TestScanner_V26_ATXXXWorkJoinsTheDelta_AWorkThatStaysOnlyStamps`: scan real
+fixtures, rewind only database version/work to v32 (size/mtime untouched), scan
+again, and check new work, indexed_at advancement, enrichment reset, and the
+stamp-only behavior of unchanged iTunes WORK and no-work rows.
+
+Known limits: conflicts between non-empty WORK and ©wrk retain the bridge's
+freeform-first precedence, whereas iOS writes follow AVFoundation item order.
+Only trimming is shared; no app display-name cleaning is added. The supplied
+AVTagClassifier at iOS 77cb4529 actually strips arbitrary means only for advisory
+fields, not WORK, contrary to the task premise. Any-mean WORK is supported here,
+but parity with that iOS copy is not claimed. Also measured: dhowden's unsupported
+mean path consumes its freeform and then seeks again, potentially skipping later
+siblings. The new walk recovers work; the dependency's other metadata is unchanged.
+PROTOCOL.md's classical coverage already names ©wrk and now matches this reader;
+no protocol edit, schema change, or mirror is required for this fix.
+
+Focused green: six new top-level tests plus the extended existing MP4 log-path
+test pass. Negative controls and full-check results follow in the validation entry.
+
+### B428 validation: negative controls
+
+Baseline committed as `4a7d513a` before **each** control. Every replacement
+asserted exactly one original occurrence before writing; `rg -c` then counted
+the mutated line. Every test command used `-count=1`, built successfully and
+exited 1 on assertions. Each source file was restored from that commit and
+`test -z "$(git status --porcelain)"` passed before the next control.
+
+All commands used Go 1.27.3 on PATH, `GOTOOLCHAIN=local`, and
+`TMPDIR=$HOME/onebit/codex/b428-scratch/tmp`:
+
+- **A, no ©wrk read:** the kinds list became `[]string{"----"}` (one match).
+  `go test -tags ts_omit_webclient,ts_omit_debugeventbus -timeout 30m -count=1 ./internal/manifest -run 'TestExtractMP4Work|TestScanner_V33'`
+  failed six table cases: atom alone, atom beside blank/empty WORK, long title,
+  exactly 64 KiB, and oversized other-mean WORK beside the atom. Also red:
+  `TestExtractMP4Work_DhowdenFailureStillWalks` and the atom row in
+  `TestScanner_V33_MP4WorkReReadsV32Rows` (missing work/delta/enrichment reset).
+- **B, no version bump:** `const ExtractorVersion = 32` (one match).
+  `go test -tags ts_omit_webclient,ts_omit_debugeventbus -timeout 30m -count=1 ./internal/manifest -run TestScanner_V33`
+  failed `TestScanner_V33_MP4WorkReReadsV32Rows`: both newly supported sources
+  stayed empty and neither row advanced indexed_at or reset enrichment.
+- **C, a blank counts as present:** the work reader returned
+  `return value, true, nil` instead of testing non-empty (two matching lines
+  after mutation: this one and the pre-existing integer reader's return).
+  `go test -tags ts_omit_webclient,ts_omit_debugeventbus -timeout 30m -count=1 ./internal/manifest -run TestExtractMP4Work`
+  failed `TestExtractMP4Work/blank_atom_beside_WORK` and
+  `TestExtractMP4Work/empty_atom_beside_WORK`, on the explicit no-candidate
+  assertion. The final work remains correct through freeform precedence;
+  testing only that final value would miss this presence-policy violation.
+
+The local backlog file named by CLAUDE.md is absent on this host; the adjacent
+findings above are recorded here for handoff, with no substitute backlog made.
+
+### B428 validation: final checks
+
+Every Go/make invocation used `/opt/homebrew/bin/go` (1.27.3),
+`GOTOOLCHAIN=local`, and `TMPDIR=$HOME/onebit/codex/b428-scratch/tmp`.
+The race run used the restored implementation at `4a7d513a`; only this record
+changed afterward. No other package's tests directly read ExtractorVersion
+(the matches outside manifest are comments); the repository guards ran too.
+
+| Command | Result / tally |
+|---|---|
+| `gofmt -l .` | Exit 0, zero files listed across the repository; the five changed Go files were also checked separately. |
+| `make vet` | Exit 0; host-wide `go vet -tags ts_omit_webclient,ts_omit_debugeventbus ./...`. |
+| `GOOS=windows go vet -tags ts_omit_webclient,ts_omit_debugeventbus ./...` | Exit 0, no diagnostics (arm64, compile/vet only). |
+| `GOOS=linux go vet -tags ts_omit_webclient,ts_omit_debugeventbus ./...` | Exit 0, no diagnostics (arm64, compile/vet only). |
+| `go test -tags ts_omit_webclient,ts_omit_debugeventbus -timeout 30m -count=1 ./internal/manifest -run 'TestExtractMP4Work\|TestReadMP4WorkText\|TestScanner_V33\|TestAnMP4Walk'` | Focused green, exit 0, 7 top-level tests including the existing warning-path test, 0.577 s. |
+| `go test -tags ts_omit_webclient,ts_omit_debugeventbus -race -timeout 30m -count=1 -json ./internal/manifest/...` | Full, unfiltered race suite: exit 0, one package, 1299.044 s. 1,531 top-level tests and 24 fuzz targets' ordinary seed runs passed; 8 top-level tests skipped. Including subtests/seeds: 3,638 pass, 10 skip, 0 fail. |
+| `go test -tags ts_omit_webclient,ts_omit_debugeventbus -race -timeout 30m -count=1 -json ./cmd/bridge -run 'TestEveryCitedTestNameExists\|TestNoDocblockNamesAnotherDeclaration\|TestNoBlankKeepers'` | Exit 0, 3 tests passed, 0 skipped/failed. |
+| `make docs-check` | Exit 0, all four stages pass (budget self-test, budgets, rules-for's 49 checks, split-tool self-test); rerun after this record. |
+| `git diff --check` | Exit 0. |
+| `python3 scripts/rules-for.py --changed` | Required scanner/build-ci-tests rules read; final change is this log alone. No origin/main ref in this worker, so the tool lists uncommitted paths. |
+
+The ten skip entries are seven cases requiring case- or composition-sensitive
+folder names this volume cannot stage, the optional real-SACD test (fixture
+paths unset), the watcher test whose lost-watch premise does not hold on
+kqueue, and a remount watcher fixture whose root kept the same device/inode
+(B777 item 3). None is a new M4A test. No fuzz campaign or cross-platform runtime
+run is claimed; ordinary fuzz seeds and cross-platform vet are counted above.
+
+All six new top-level tests passed under race. PROTOCOL.md, wire types and
+ProtocolVersion are unchanged. The branch is committed locally; no push, PR,
+`gh`, or deployment was performed.
+
+## 2026-11-10 — B428 round 2: exact iTunes mean and extraction proofs
+
+This supersedes round 1's any-mean WORK rule without rewriting its record.
+The app reads ©wrk and freeform WORK only under `com.apple.iTunes`; arbitrary
+means are an advisory-only rule. The supplemental work walk now requires the
+mean's raw bytes after the four-byte version/flags header to equal that string.
+Only an exact-length payload can match, bounding the read to 16 bytes (corrected from 15 at review: `com.apple.iTunes` is 16 bytes, and the code reads `len(want)`), without
+trimming or case folding. Missing, padded, case-changed, oversized and truncated
+means are absent. Advisory behavior, workOf precedence and the `t.Work == ""`
+guard stay unchanged. ExtractorVersion remains 33, which has not been released.
+
+The restriction belongs only to the supplemental walk. Dhowden also accepts
+`com.mixedinkey.mixedinkey` and `com.serato.dj`, drops the mean and supplies WORK
+before the walk. Those existing answers are preserved, a known pre-existing
+difference from the app. Fixtures pin both production answers and their absence
+from the supplemental map. The existing item-order/precedence and display-cleaning
+differences remain unchanged, as does dhowden's unsupported-mean sibling skip.
+No wire/schema change or iOS edit is needed.
+
+### Red first at a9035b58
+
+Only tests were changed for the first run. All Go/make commands use
+`TMPDIR=$HOME/onebit/codex/b428-scratch/tmp`, `GOTOOLCHAIN=local`, and the tags
+`ts_omit_webclient,ts_omit_debugeventbus`. The focused run used `-timeout 30m
+-count=1 -json`, package `./internal/manifest`, and pattern
+`TestExtractMP4Work|TestReadMP4WorkText|TestScanner_V33`. It built and exited 1:
+44 passed, 17 failed test/subtest events (parent failures included), no skips.
+
+- `TestExtractMP4Work`: other mean WORK alone now expects absence; other mean
+  ignored atom first and other mean ignored WORK first expect Requiem. All
+  three failed, still returning Mass. The other mean over limit case stayed
+  green: its foreign WORK was already rejected by the value-size bound.
+- `TestScanner_V33_MP4WorkReReadsV32Rows`: other.m4a failed both the no-work and
+  stamp-only expectations; the other rows kept their expected behavior.
+- `TestExtractMP4Work_MeanMustBeExact`: padded, case changed, missing, oversized
+  and truncated all failed, supplying WORK instead of falling back to ©wrk;
+  exact passed. The direct walk isolates this contract from dhowden.
+- `TestExtractMP4Work_PreservesDhowden`: the conflicting iTunes duplicate passed
+  (production Last, independent walk First), proving the existing guard's
+  behavior. Both mixedinkey and serato production answers also passed; their
+  new supplemental-absence assertions failed under the unrestricted walk.
+- `TestExtractMP4Work_FallbackOrder`: both physical orders returned WORK and a
+  blank WORK returned ©wrk, all green. Each fixture proves dhowden's bad-title
+  parse failure, so these exercise the existing walk's precedence itself.
+- `TestExtractMP4Work_PayloadFaultsPreventPersistence`: data read and seek faults
+  passed, proving round 1 already propagates them. Mean read and seek faults
+  failed because no mean payload was read, no work warning appeared and no
+  readFault was returned. A real fixture and the openAudio seam exercise
+  ExtractWithContext, with byte-range fault injection (including read-ahead),
+  reached-payload assertions, exactly one work-specific Warn and
+  `errors.Is(readFault(err), boom)`. Padding places the target beyond dhowden's
+  buffered read before its bad-title failure, leaving the walk to reach it.
+- `TestExtractMP4Work_TruncatedPayload`: the added direct-walk nil-error and
+  absent work/©wrk key checks passed, proving truncation already means absence.
+- `TestExtractMP4Work`'s blank/empty WORK beside ©wrk cases: the added absent
+  `work` key assertions passed, as the existing reader rejects blank values.
+- `TestExtractMP4Work_MultipleDataChildren`: all eight cases passed. In each
+  kind of work box, non-text, empty and oversized first data children are
+  skipped, First wins over Last, and all-unusable children supply no key.
+
+With the exact-mean check implemented, the same selection plus
+`TestAnMP4Walk` passed: 64 test/subtest events, no skips or failures (12 top-level
+tests). Raw JSON run evidence is in the worker scratch directory's r2 folder.
+
+### Round-2 negative controls
+
+Each control started from committed `8817721f` with a clean tree. The mutation
+script asserted exactly one source occurrence before replacing it and checked
+the resulting occurrence count. All runs used the same environment/tags above
+and `-timeout 30m -count=1 -json`; each built and exited 1 on assertions. After
+each, the mutated file was restored from HEAD and an empty `git status
+--porcelain` was asserted before continuing.
+
+| Mutation | Selection in ./internal/manifest | Result |
+|---|---|---|
+| Remove the exact-mean check block once | `TestExtractMP4Work/other_mean\|TestScanner_V33` | Three other-mean cases return Mass again; other.m4a gains work and is rewritten instead of only stamped. Oversized foreign WORK remains green. 10 pass, 5 fail events including parents. |
+| Remove the work-preservation guard once | `^TestExtractMP4Work_PreservesDhowden$/last_duplicate` | Production returns First instead of dhowden's Last. 2 fail events including parent. |
+| Return on the first data child unconditionally once | `^TestExtractMP4Work_MultipleDataChildren$` | Non-text, empty and oversized leading children hide the later valid value in both ©wrk and freeform WORK: six child failures plus parent; both all-unusable cases still pass. |
+
+The implementation and tests were restored before the unfiltered race suite.
+
+### Round-2 final checks
+
+The full race run used restored implementation/test commit `8817721f`; only this
+validation record changed afterward. Every Go/make invocation kept the scratch
+TMPDIR, local toolchain and Makefile tags stated above. All checks exited 0.
+
+| Check | Result / tally |
+|---|---|
+| `make fmt`; `gofmt -l .` | No formatting changes; zero files listed across the repository. |
+| `make vet` | Host-wide tagged vet, no diagnostics. |
+| `GOOS=windows go vet -tags ts_omit_webclient,ts_omit_debugeventbus ./...` | No diagnostics; arm64, compile/vet only. |
+| `GOOS=linux go vet -tags ts_omit_webclient,ts_omit_debugeventbus ./...` | No diagnostics; arm64, compile/vet only. |
+| Focused green selection above, `-count=1` | 12 top-level tests, 64 total test/subtest passes, no skips or failures. |
+| `go test -tags ts_omit_webclient,ts_omit_debugeventbus -race -timeout 30m -count=1 -json ./internal/manifest/...` | Full unfiltered suite, one package, 1306.629 s: 1,536 top-level tests and 24 fuzz targets' ordinary seed runs passed; 8 top-level tests skipped. Including subtests/seeds: 3,667 pass, 10 skip, 0 fail. No race reported. |
+| `go test -tags ts_omit_webclient,ts_omit_debugeventbus -race -timeout 30m -count=1 -json ./cmd/bridge -run 'TestEveryCitedTestNameExists\|TestNoDocblockNamesAnotherDeclaration\|TestNoBlankKeepers'` | 3 tests passed, no skips/failures; also rerun over this final record. |
+| `make docs-check` | Four stages passed: budget self-test, budgets, rules-for's 49 checks, split-tool self-test; rerun over this final record. |
+| `git diff --check` | No whitespace errors. |
+| `python3 scripts/rules-for.py --changed` | Required scanner/build-ci-tests rules read before edits and before the implementation commit; final change is this log alone. No origin/main ref in this worker, so the tool lists uncommitted paths. |
+
+The ten skip entries are seven case/composition-sensitive filesystem cases this
+volume cannot stage, the optional real-SACD fixture with paths unset, and two
+watcher premises absent on this host (kqueue's retained watches and a remount
+retaining device/inode). No M4A test skipped. Cross-platform runtime and fuzz
+campaigns are not claimed. The pre-existing dhowden mean/duplicate answers,
+unsupported-mean sibling skip, workOf item-order difference and app display
+cleaning difference are unchanged; no adjacent implementation was altered.
+Only new local commits were made, with no amend, rebase, push, PR operation,
+`gh` invocation or deployment.
