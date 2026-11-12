@@ -2,6 +2,7 @@ package manifest
 
 import (
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -82,8 +83,52 @@ func openStoreClock() (now func() time.Time, sleep func(time.Duration)) {
 	return openStoreNow, openStoreSleep
 }
 
-// openStoreDB opens the database at path through uri and pings it, which
-// opens the first connection and runs the DSN's pragmas. While SQLite
+// storeConnectors holds, by the cleaned path of a store's database, the wrap
+// a test set for the connector every store opened there opens its
+// connections through (SetConnectorForTest). Empty in production.
+var (
+	storeConnectorsMu sync.Mutex
+	storeConnectors   = map[string]func(driver.Connector) driver.Connector{}
+)
+
+func setStoreConnector(path string, wrap func(driver.Connector) driver.Connector) func() {
+	key := filepath.Clean(path)
+	storeConnectorsMu.Lock()
+	prev, had := storeConnectors[key]
+	storeConnectors[key] = wrap
+	storeConnectorsMu.Unlock()
+	return func() {
+		storeConnectorsMu.Lock()
+		defer storeConnectorsMu.Unlock()
+		if had {
+			storeConnectors[key] = prev
+		} else {
+			delete(storeConnectors, key)
+		}
+	}
+}
+
+// openSQLite opens the database at path through uri as sql.Open("sqlite", uri)
+// does, or, where a test has set a wrap for path, through that wrap of the
+// registered driver's connector for uri (sqlite.NewConnector: the same
+// driver, with every function, collation and connection hook registered on
+// it), which database/sql then asks for each connection.
+func openSQLite(path, uri string) (*sql.DB, error) {
+	storeConnectorsMu.Lock()
+	wrap := storeConnectors[filepath.Clean(path)]
+	storeConnectorsMu.Unlock()
+	if wrap == nil {
+		return sql.Open("sqlite", uri)
+	}
+	base, err := sqlite.NewConnector(uri)
+	if err != nil {
+		return nil, err
+	}
+	return sql.OpenDB(wrap(base)), nil
+}
+
+// openStoreDB opens the database at path through uri (openSQLite) and pings
+// it, which opens the first connection and runs the DSN's pragmas. While SQLite
 // answers that with SQLITE_BUSY (isSQLiteBusy), it closes that *sql.DB and
 // tries again, pausing openStoreBusyPause, then twice as long each time up
 // to openStoreBusyPauseMax, until openStoreBusyBudget has passed since the
@@ -114,7 +159,7 @@ func openStoreDB(path, uri string) (*sql.DB, error) {
 	var giveUp time.Time
 	pause, said := openStoreBusyPause, false
 	for {
-		db, err := sql.Open("sqlite", uri)
+		db, err := openSQLite(path, uri)
 		if err != nil {
 			return nil, fmt.Errorf("open sqlite: %w", err)
 		}
