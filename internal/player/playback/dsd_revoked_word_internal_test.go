@@ -168,9 +168,23 @@ func (r *revocationRig) panicReconciliation() string {
 	return r.heldAfter("the contained reconciliation")
 }
 
-// revoke is an ordinary revocation (Backend.Revoke).
-func (r *revocationRig) revoke(*testing.T) {
+// revoke is an ordinary revocation (Backend.Revoke). It fails the case where
+// the session's lock is held once the revocation returned (revoked); it is the
+// case's goroutine's alone.
+func (r *revocationRig) revoke(t *testing.T) {
+	t.Helper()
+	if why := r.revoked(); why != "" {
+		t.Fatal(why)
+	}
+}
+
+// revoked is revoke, saying what went wrong, "" for nothing: a seam that runs
+// on another goroutine than the case's says it with t.Error (round 5: the
+// revocation's lock was not asked after it, and a seam on the admission's
+// goroutine called the failing form).
+func (r *revocationRig) revoked() string {
 	r.b.Revoke(engine.RevokeInput{Session: r.s.id, Reason: revocationReason})
+	return r.heldAfter("the revocation")
 }
 
 // dsd64Entry is the DSD the tests' entries carry.
@@ -189,7 +203,10 @@ func refusesDSD64(t *testing.T, b *Backend) {
 // goroutine of its own and awaited within handMadeBound, so an admission that
 // a lock the case's causes leaked blocks fails the case, where it waited to
 // the package's timeout (round 4). Its seams run on that goroutine: a case's
-// seam says a failure with t.Error, never t.Fatal.
+// seam says a failure with t.Error, never t.Fatal. Once it answered, the
+// session's lock is asserted free at once (heldAfter), so a lock the admission
+// kept fails the case there, where it went unseen until the rig's cleanup
+// (round 5).
 func (r *revocationRig) admitted(t *testing.T) engine.Unplayable {
 	t.Helper()
 	answer := make(chan error, 1)
@@ -202,6 +219,9 @@ func (r *revocationRig) admitted(t *testing.T) engine.Unplayable {
 	case err = <-answer:
 	case <-time.After(handMadeBound):
 		t.Fatalf("the admission did not answer within %v: the session's lock is held", handMadeBound)
+	}
+	if why := r.heldAfter("the admission"); why != "" {
+		t.Fatal(why)
 	}
 	var u *engine.Unplayable
 	if !errors.As(err, &u) {
@@ -257,7 +277,11 @@ func TestAnEntryAfterTheSessionsDSDStoppedIsRefusedForTheCause(t *testing.T) {
 // the revocation's own word and reason.
 func TestARevocationDuringAnAdmissionIsItsRefusal(t *testing.T) {
 	r := newRevocationRig(t)
-	r.b.cfg.Seams.Admitting = func(engine.OccurrenceID) { r.revoke(t) }
+	r.b.cfg.Seams.Admitting = func(engine.OccurrenceID) {
+		if why := r.revoked(); why != "" {
+			t.Error(why)
+		}
+	}
 	if got := r.admitted(t); got != revocationRefusal {
 		t.Errorf("an entry whose admission a revocation came beside was refused %+v; want %+v", got, revocationRefusal)
 	}
@@ -323,6 +347,9 @@ func successorOf(t *testing.T, s *session, id engine.OccurrenceID) (*occ, contex
 func TestASuccessorWhoseOpenEndsAfterARevocationIsRefusedForIt(t *testing.T) {
 	r := newRevocationRig(t)
 	r.b.cfg.Resolver = readGoldenDSD(t)
+	// The seam runs on the case's goroutine (openSuccessor is called here),
+	// before the open's end would wait for a lock the revocation kept: the
+	// failing form is safe and stops the case there.
 	r.b.cfg.Seams.Opened = func(engine.OccurrenceID, engine.Reference) { r.revoke(t) }
 	o, ctx := successorOf(t, r.s, 3)
 	r.s.openSuccessor(ctx, o)
