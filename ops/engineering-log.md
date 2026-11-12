@@ -94836,7 +94836,7 @@ case's later entry under the first, which stayed green: the containment revokes 
 the selector admits that entry and `refuseRevokedLocked` refuses it at its open's end, a second
 layer. Left, named for the backlog: a revocation after the first occurrence's open has ended and
 before its native open still makes the Start fail at `openNativeOutput` ("DSD permission revoked",
-native.go 196), a device's failure, not the recorded cause.
+native.go 207 at 8faf8930), a device's failure, not the recorded cause.
 
 **Item 3: three tests that would wait instead of failing.** `TestAStartDuringAWritePlaysByTheChoiceItWrote`
 registered its gate's release before the rig, so the rig's stop, which waits for the parked write,
