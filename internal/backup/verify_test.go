@@ -838,7 +838,11 @@ func TestAStalePendingReadsIncompleteAndAYoungOneSurvivesAPrune(t *testing.T) {
 // ReadStatus (the doctor's and the console's) read INCOMPLETE (unsynced),
 // and the prune takes the snapshot for evidence, not the anchor.
 // internal/admin's TestAnUnsyncedVerdictReadsAsNotVerifiedEverywhere reads it
-// through the doctor and the console's API too.
+// through the doctor and the console's API too. The prune runs once the
+// verification's worker has ended: the verification answers before that
+// worker lets go of the backups folder's lock, whose unlock is held here from
+// the answer until the test waits for its end (unlockHold, backlog B851), and
+// a prune skipped for that lock kept the anchor whatever it read.
 func TestASyncFailureAfterTheVerdictsRenameReadsAsNotVerified(t *testing.T) {
 	src := storeWithTracks(t, 5)
 	anchor := verifiedSnapshot(t, src)
@@ -847,12 +851,17 @@ func TestASyncFailureAfterTheVerdictsRenameReadsAsNotVerified(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	unlock := holdUnlockOf(t, filepath.Dir(dir))
+	joinBackupCallers(t, unlock.release)
 	restore := backup.SetSyncVerdictForTest(func(string) error { return errors.New("injected: the directory would not sync") })
+	unlock.arm(t, dir)
 	_, err = backup.VerifySnapshot(t.Context(), dir, backup.VerifyOptions{})
 	restore()
 	if !errors.Is(err, backup.ErrVerdictNotDurable) {
 		t.Fatalf("VerifySnapshot answered %v, want ErrVerdictNotDurable", err)
 	}
+	unlock.requireHeld(t)
+	unlock.letGoAndAwaitEnd(t)
 	if m := readManifestT(t, dir); m.Verification.DatabaseState != backup.StateVerified {
 		t.Fatalf("the rename did not land (the record holds %s): the test did not reach the window", m.Verification.DatabaseState)
 	}
@@ -864,8 +873,8 @@ func TestASyncFailureAfterTheVerdictsRenameReadsAsNotVerified(t *testing.T) {
 	if nv, ok := st.NewestVerified(); !ok || nv.DirName != filepath.Base(anchor) {
 		t.Errorf("the newest database-verified snapshot is %q, want the older anchor %q", nv.DirName, filepath.Base(anchor))
 	}
-	if _, err := backup.Prune(filepath.Dir(dir), 1); err != nil {
-		t.Fatal(err)
+	if pr, err := backup.Prune(filepath.Dir(dir), 1); err != nil || pr.Skipped {
+		t.Fatalf("the prune answered %+v, %v; want it run: a skipped prune keeps the anchor whatever it reads", pr, err)
 	}
 	if !pathExists(t, anchor) {
 		t.Error("the prune let the anchor go for a snapshot whose verdict is not durable")
