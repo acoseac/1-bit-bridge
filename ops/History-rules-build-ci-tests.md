@@ -539,10 +539,11 @@
 - **…and the window between a transaction's last statement and its commit
   is held at a seam of the store's there, and the rollback a stop makes is
   waited for at the driver, on the held transaction's own connection, taken
-  before the stop (`RollbackWatch.RollbackOf`) and run once SQLite has
-  rolled the transaction back inside the driver's ROLLBACK there; a park
-  inside the last statement reproduces the cancellation instead**
-  (2026-11-06, backlog B662; B869). A cancel that reaches a statement
+  before the stop (`RollbackWatch.RollbackOf`, on a store opened through
+  the watch's `Connector` by `manifest.SetConnectorForTest`) and run once
+  the driver's Rollback there has returned no error; a park inside the last
+  statement reproduces the cancellation instead** (2026-11-06, backlog
+  B662; B869). A cancel that reaches a statement
   parked in the collation comes back from it as `ctx.Err()`: modernc's
   interrupt goroutine sees the context end, and the driver then answers
   `ctx.Err()` for the statement, completed or not. So the seed test above,
@@ -557,22 +558,42 @@
   the driver's last call would not do: database/sql's rollback waits for
   the statement under way (`closemu`), so it cannot fire before that call
   returns. The rollback is waited for where it happens, on the held
-  transaction's own connection: `sqlitetest` installs on every connection
-  in `init` (modernc's `Driver.Open` reads its hook list without a lock) a
-  rollback hook (`sqlite3_rollback_hook`) and an authorizer
-  (`sqlite3_set_authorizer`) that allows every statement.
-  `WatchRollbacks` (`WatchRollbacksUntil` for a serve) counts the
-  rollbacks on the connections to one database file, named by its DSN or
-  its path, and hands out the rollback of one transaction there
-  (`RollbackOf`), taken before the stop: the transaction runs a PRAGMA
-  SQLite does not know, whose authorization names the test's expectation
-  to the transaction's connection; the driver's Rollback, which
-  database/sql calls once it has marked the transaction done, prepares a
-  ROLLBACK there, which the authorizer sees (the boundary, where
-  `HoldRollbackOf` holds it); and the rollback has run once SQLite's
-  rollback hook fires on that connection inside that ROLLBACK. One that
-  runs before the wait begins is kept, and a BEGIN or a COMMIT on the
-  connection first ends the expectation. Only then is the hold let go, so
+  transaction's own connection, and that takes a connection the test can
+  see into: a store opened with `sql.Open("sqlite", …)` alone
+  (`openStoreDB`), a connection hook cannot replace the connection, and
+  registering "sqlite" again panics. So `manifest.SetConnectorForTest`
+  sets, for one store path, a wrap of the registered driver's connector
+  (`sqlite.NewConnector`: the same driver, with every function, collation
+  and connection hook registered on it), and `sqlitetest`'s
+  `RollbackWatch.Connector` is that wrap: each connection is the driver's,
+  passing on every interface database/sql asks of a connection that
+  modernc's implements and no other (so database/sql keeps a connection a
+  cancelled transaction rolled back: `driver.SessionResetter` and
+  `driver.Validator`), with a rollback hook (`sqlite3_rollback_hook`) of
+  its own in place of the counting one `sqlitetest` installs on every
+  connection in `init` (modernc's `Driver.Open` reads its hook list
+  without a lock). `WatchRollbacks` (`WatchRollbacksUntil` for a serve)
+  counts the rollbacks on the connections to one database file, named by
+  its DSN or its path, and hands out the rollback of one transaction there
+  (`RollbackOf`), taken before the stop: the transaction runs a PRAGMA the
+  watch's connection takes before the driver sees it, binding the test's
+  expectation to that connection while the context the transaction began
+  on is not done (the one database/sql hands the driver's BeginTx, which
+  the connection keeps; database/sql hands the driver no other). The
+  wrap's transaction's Rollback, which database/sql calls once it has
+  marked the transaction done, is the boundary (`HoldRollbackOf` holds it
+  there); SQLite's rollback hook fires inside its ROLLBACK's step, after
+  which SQLite still sets the connection's autocommit state and halts the
+  statement, and the driver then finalizes it and returns (`HoldReturnOf`
+  holds it in the hook); and the rollback has run once that Rollback has
+  returned no error, SQLite having rolled the transaction back inside it,
+  and has failed, keeping the driver's error, where it returned one. One
+  that comes to an end before its wait begins is kept, and a COMMIT, an
+  error that rolls the transaction back before its ROLLBACK (an
+  `ON CONFLICT ROLLBACK`, `SQLITE_FULL`, a COMMIT that failed: the hook
+  outside that Rollback) and the connection's close each end the
+  expectation at once; a savepoint's `ROLLBACK TO` fires no hook and ends
+  nothing. Only then is the hold let go, so
   the commit finds the transaction done every time
   (`TestAServeStoppedAtItsUpscaleSeedsCommitExitsCleanly`, red on every
   run without the fix; with the stop and no wait for the rollback, the
@@ -584,28 +605,43 @@
   transaction, and go1.27.3's `Tx.rollback` marks the transaction done
   before it calls the driver's Rollback, so a reader's rollback on another
   connection, beside a ROLLBACK not yet run, released the wait
-  (`TestErrTxDoneAnswersBeforeTheDriverRollsBack`). The driver's return
-  from that Rollback is not observable without wrapping the driver serve
-  opens, so the wait ends at SQLite's rollback inside it, after which the
-  driver only finalizes the statement. Each wait has a case that holds the
-  ROLLBACK at its boundary beside a reader's (`sqlitetest`'s `WaitProof`):
-  the re-queue test's third case,
+  (`TestErrTxDoneAnswersBeforeTheDriverRollsBack`). B869's second round
+  ended the wait at SQLite's rollback hook, inside the driver's ROLLBACK,
+  before that statement ended and the Rollback returned
+  (`TestARollbackHasRunOnlyOnceTheDriversRollbackReturns`), and proved it
+  by giving the wait 100 ms and then 500 ms to answer wrongly, which a wait
+  that answered wrongly and was descheduled before it said so could pass.
+  Each wait has a case under `sqlitetest`'s `WaitProof` (`WaitProofOf`):
+  the rollback held at its boundary while a reader's transaction rolls
+  back on another connection to the file, then in SQLite's hook before the
+  driver returns, each hold let go only once the wait under proof has
+  answered an ask made after what came before (every wait of the package,
+  `Rollback.WaitUnless` and `WaitPast`, reads the ask before what it waits
+  on and answers it each time it decides to wait on). No time decides
+  anything, and a wait that answers too early fails in every run
+  (`TestTheProofFailsAWaitThatTakesAReadersRollbackForItsOwn`,
+  `TestTheProofFailsAWaitThatAnswersOnSQLitesRollback`): the re-queue
+  test's third case,
   `TestAStopAtTheUpscaleTargetsCommitWaitsForItsOwnRollback` and
   `TestAServeStoppedAtItsUpscaleSeedsCommitWaitsForTheSeedsOwnRollback`.
   `TestARollbackWatchCountsTheRollbacksOnItsFileAlone`,
   `TestWaitPastAnswersTheWorksEndAndGivesUpAtItsInstant`,
   `TestARollbackOfIsTheTransactionsOwnAtTheDriver`,
-  `TestARollbackThatRanBeforeItsWaitIsKept` and
+  `TestARollbackThatRanBeforeItsWaitIsKept`,
+  `TestAStoreOpensThroughTheConnectorATestSetForItsPathAlone` and
   `TestAStopAfterTheUpscaleTargetsLastStatementIsErrTxDoneAtItsCommit`
   pin the watch and the store's half. **Don't stand a park inside the last
   statement in for a stop after it, release the hold before the rollback
   has come (the context's Done is not the rollback: a cancel closes it
   before it cancels the transaction's context database/sql derives from
-  it, and a commit made in between lands, backlog B844), or take a
-  rollback counted on the file, or the transaction's `sql.ErrTxDone`, for
-  the held transaction's: another connection's rollback counts on the
-  file, and database/sql marks a transaction done before it calls the
-  driver's Rollback (backlog B869).**
+  it, and a commit made in between lands, backlog B844), take a rollback
+  counted on the file, the transaction's `sql.ErrTxDone` or SQLite's
+  rollback hook for the held transaction's (another connection's rollback
+  counts on the file, database/sql marks a transaction done before it
+  calls the driver's Rollback, and the hook fires inside that Rollback,
+  before it returns), or prove such a wait by giving it time to answer
+  wrongly: let a hold go only on the wait's answer to an ask made after
+  what came before (backlog B869).**
 
 - **A test handler that holds a request until the client gives up must
   DRAIN a POST's body first** (#1003). net/http notices a client hanging up
