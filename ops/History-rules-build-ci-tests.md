@@ -574,8 +574,11 @@
   `TestAStopAfterTheUpscaleTargetsLastStatementIsErrTxDoneAtItsCommit`
   pin the watch and the store's half. **Don't stand a park inside the last
   statement in for a stop after it, release the hold before the rollback
-  has come, or take a rollback on the file for the held transaction's
-  without asking the transaction.**
+  has come (the context's Done is not the rollback: a cancel closes it
+  before it cancels the transaction's context database/sql derives from
+  it, and a commit made in between lands, backlog B844), or take a
+  rollback on the file for the held transaction's without asking the
+  transaction.**
 
 - **A test handler that holds a request until the client gives up must
   DRAIN a POST's body first** (#1003). net/http notices a client hanging up
