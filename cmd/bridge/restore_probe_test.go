@@ -77,11 +77,29 @@ func staleMarkerBesideAFreeLock(t *testing.T, root string) (string, []byte) {
 // requireMarkerAsItWas fails the test where the marker at p is not stale:
 // a probe's release marks its own process alone. A marker's write would be on
 // a goroutine of its own, after the answer that read it may precede, so the
-// cases read it again once the release has ended.
+// cases read it again once the release has ended, and ask the marks
+// themselves (requireMarksWriteNoMarker), which settles it.
 func requireMarkerAsItWas(t *testing.T, p string, stale []byte) {
 	t.Helper()
 	if got, err := os.ReadFile(p); err != nil || !bytes.Equal(got, stale) {
 		t.Errorf("the marker beside the lock reads %q, %v; want it as it was, %q", got, err, stale)
+	}
+}
+
+// requireMarksWriteNoMarker fails the test where no mark of this process
+// stands on the backups folder at root, or where one writes a marker beside
+// its lock: asked of the marks themselves (backup.MarkersForTest) while the
+// release they name has not ended.
+func requireMarksWriteNoMarker(t *testing.T, root string) {
+	t.Helper()
+	markers := backup.MarkersForTest(root)
+	if len(markers) == 0 {
+		t.Error("no mark stands on the backups folder while the probe's release does not answer")
+	}
+	for _, m := range markers {
+		if m != "" {
+			t.Errorf("the mark of the probe's release writes a marker beside the lock, at %s", m)
+		}
 	}
 }
 
@@ -136,6 +154,7 @@ func TestBridgeRestoreNamesItsLooksStalledReleaseBeforeItsPrompt(t *testing.T) {
 				t.Errorf("bridge restore asked for its confirmation beside its look's stalled release:\n%s%s", stdout.String(), msg)
 			}
 			requireInstallUntouched(t, cfgB, dataB, before)
+			requireMarksWriteNoMarker(t, root)
 			requireMarkerAsItWas(t, marker, stale)
 		})
 	}
@@ -192,6 +211,7 @@ func TestTheDoctorAndTheTickerNameTheirOwnProbesStalledRelease(t *testing.T) {
 						t.Errorf("the ticker's reason = %q, %v; want it naming %s, and no restore", why, held, words)
 					}
 				}
+				requireMarksWriteNoMarker(t, root)
 				requireMarkerAsItWas(t, marker, stale)
 			})
 		}

@@ -5567,9 +5567,12 @@ by the spelling given meeting the resolved folder's check instead
 (`captureT` resolves a capture's folder, so the check given up marked that
 folder alone): the case now gives its check the spelling the restore is
 given, and meets `SourceStillHeld`, which no case had reached through a link,
-and which its own control alone turns red. The probe's marker is asked of the
-mark itself (`MarkersOfForTest`), its write being on a goroutine of its own,
-which a read of the file made as the probe answers can precede.
+and which its own control alone turns red. Whether a probe's release writes
+a marker is asked of the marks themselves (`backup.MarkersForTest`, by the
+unit case and the command's, the doctor's and the ticker's cases), the
+marker's write being on a goroutine of its own (`markStuck`), which a read of
+the file, at the case's end or once the release has ended, can precede: two
+rounds of its control found such reads green.
 
 **Left open, named for the backlog:** `CleanSnapshotPath` takes the
 separator off a root as well (`E:\` becomes `E:`, a drive's working

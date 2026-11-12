@@ -114,10 +114,10 @@ func requireNoMarkerWritten(t *testing.T, path string, stale []byte) {
 
 // requireMarksWriteNoMarker fails the test where no mark stands on the folder
 // at root, or where one would write a marker beside its lock: asked of the
-// marks themselves (MarkersOfForTest), once what raised them has answered.
+// marks themselves (MarkersForTest), once what raised them has answered.
 func requireMarksWriteNoMarker(t *testing.T, root string) {
 	t.Helper()
-	markers := backup.MarkersOfForTest(root)
+	markers := backup.MarkersForTest(root)
 	if len(markers) == 0 {
 		t.Error("no mark stands on the folder while the probe's release does not answer")
 	}

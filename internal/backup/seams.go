@@ -438,6 +438,25 @@ func SetOnProbeReleaseForTest(fn func(dir, step string)) (restore func()) {
 	return func() { onProbeRelease.Store(prev) }
 }
 
+// MarkersForTest is the marker each mark this process holds on the backups
+// folder at root, by the spelling given, writes beside the folder's lock (""
+// for a mark that writes none), each read under its mark's own lock: a test
+// asks the marks whether a probe's release past its bound writes a marker
+// (backlog B871), which a read of the file cannot settle, the write being on
+// a goroutine of its own (markStuck) that the read may precede.
+func MarkersForTest(root string) []string {
+	stuckMu.Lock()
+	marks := append([]*stuckMark(nil), stuck[spellingKey(root)]...)
+	stuckMu.Unlock()
+	out := make([]string, 0, len(marks))
+	for _, m := range marks {
+		m.mu.Lock()
+		out = append(out, m.marker)
+		m.mu.Unlock()
+	}
+	return out
+}
+
 // SetReadSourceManifestForTest replaces CheckRestoreSource's read of the
 // snapshot's manifest (os.ReadFile), given its path, and returns the restore:
 // a test stands a read that fails with a permission or an I/O error in for it

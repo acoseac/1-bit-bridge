@@ -59,23 +59,6 @@ func FolderTokenHeldForTest(root string) bool {
 	}
 }
 
-// MarkersOfForTest is the marker each mark this process holds on the backups
-// folder at root, by the spelling given, writes beside the folder's lock (""
-// for a mark that writes none), each read under its mark's own lock: asked of
-// the mark, so a marker its write has not reached yet counts as written.
-func MarkersOfForTest(root string) []string {
-	stuckMu.Lock()
-	marks := append([]*stuckMark(nil), stuck[spellingKey(root)]...)
-	stuckMu.Unlock()
-	out := make([]string, 0, len(marks))
-	for _, m := range marks {
-		m.mu.Lock()
-		out = append(out, m.marker)
-		m.mu.Unlock()
-	}
-	return out
-}
-
 // SlotHeldForTest reports whether a verification holds this process's slot:
 // a try on it, given back at once.
 func SlotHeldForTest() bool {
