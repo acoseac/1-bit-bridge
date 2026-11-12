@@ -95401,3 +95401,73 @@ checked on a copy of the tree: it applies to the branch, the budgets hold (CLAUD
 load 78.7%), `verify_moves.py --base HEAD` misses only the B853 line's two edited copies, each with
 its successor, and `TestEveryCitedTestNameExists` caught a ghost citation planted in the copy and
 passed without it.
+
+## 2026-11-12 — B728 B9 PR 2 round 4: a case that would hang on a leaked lock fails at once, and the records say the writers' order
+
+Base: f3cc1eab (`orch/b9p2`: round 3, its rules commit and main merged in), PR #1453. Tests and
+`ops/` markdown only.
+
+**Item 1: the containment case, and the sweep.**
+`TestAPanicInTheAuthorizationsReconciliationIsContainedAndRecorded` took the session's lock
+unconditionally once the contained reconciliation returned and asserted it free with `TryLock` only
+after: with the recovery handler's final `s.mu.Unlock()` removed from `reconcilePermission`'s
+containment, the case waited at that `Lock` to the package's timeout (at f3cc1eab, a copy, `-timeout
+60s`: "panic: test timed out after 1m0s" at `dsd_revoked_harness_internal_test.go:418`, 61.8 s). Its
+first acquisition after the containment is now the `TryLock`, nothing else holding the lock there,
+and the record, the fault and the permission are read in that hold; under the same mutation it fails
+at once, "the session's lock is held once the contained panic's caller has gone on", and the binary
+exits in 0.05 s, its cleanups included. A hand-made session is ended as a release ends it, each wait
+bounded (`handmade_internal_test.go`): its end closed once under its lock, taken at once where free,
+at once said held where the case failed already, otherwise within 5 s (`lockWithin`: a goroutine
+that hands the lock over or lets go of it, no poll and no sleep), then the backend's goroutines
+joined within 5 s; no cleanup calls a production stop that takes the lock.
+
+The sweep, of `internal/player/playback`'s tests for a session's or the backend's lock taken
+unconditionally after a containment, a recovered panic or a stop that one removed unlock leaks,
+fixed these, each proved by its mutation alone under `-timeout 60s` (its own message, cleanups
+included, then green with the unlock back):
+
+- `stopDSD`'s final unlock: the revocation rig's cases
+  (`TestASuccessorWhoseOpenEndsAfterAPanickedReconciliationIsRefusedForIt`,
+  `TestARevocationDropsAPreparedEntryForTheCauseRecordedFirst`,
+  `TestAnEntryAfterTheSessionsDSDStoppedIsRefusedForTheCause`) fail in 0.01 to 0.02 s, the rig's
+  cause helpers asserting the lock free as their containment returns, before a call that waits for
+  it (the open's end, the revocation, the admission); the rig parks its session's DSD monitor (a
+  tick that never comes), the barrier that makes the prepared-entry case quiescent;
+  `TestAReconciliationThatPanicsDuringAnAdmissionIsItsRefusal`, whose admission itself waits, runs
+  it on a goroutine awaited within 5 s (5.0 s); `TestPolicyReadPanicIsContainedOnItsFirstCall` and
+  `TestFirstReconciliationPanicIsContainedAndStopsItsSession` assert at once (0.01 s);
+  `TestTheMonitorTakesItsNextTickAfterAPanic`, whose live monitor's next reading takes the lock a
+  moment, checks with a bounded acquisition (5.0 s), where a failed `TryLock` proves no leak.
+- `next()`'s deferred unlock: both gapless cases (0.04 and 0.07 s).
+- `letLease`'s unlock: `TestTheWritesChecksAreAnsweredInTheirOrder` and
+  `TestAWriteThatPanicsLetsGoOfItsLeaseAndItsTurn` at once;
+  `TestAStartIsAdmittedAfterAWriteThatDidNotLand` through `ChoiceHeldForTest`, which takes the
+  backend's lock within a bound and says when it stayed held (5.0 s a subcase).
+- `hold()`'s give-up unlock: `TestAStartWaitsForTheProbeThatHoldsTheSlot`'s give-ups (0.01 s).
+
+Checked and left: lock sites before any such path (rig setups, `successorOf`, a seam before its
+containment); sites after `Revoke`, the replaced authorization's reconciliation or a judgement step,
+whose holds are lockHolds with both an explicit unlock and a deferred release, so no single removed
+unlock leaves the lock held; `dsd_final_report_round2_test.go:161`, after a stop whose teardown ends
+in a lockHold and whose bounded wait on `down` fails first on any earlier leak;
+`dsd_contain_round2_test.go:137`, after `checkContained`'s `TryLock`; the lock-order case's readers,
+awaited within its bound; the native integration overlay's sites, each after a start, a transition
+or a resume; and the test doubles' own mutexes. In `internal/alsapcm` no test can take a playback
+session's or backend's lock (playback's export helpers compile into its own tests alone); its DSD
+sink tests take the sink's own lock after a release or a writer's end in several places, outside
+this sweep and named for the backlog.
+
+**Item 2: the records' atomicity.** `ops/History-b470-native.md`'s round 3 and the B853 long form
+said every writer records its cause and revokes the permission in one step under the session's lock;
+`Revoke` and `reconcilePermission` do, the containment records in `stopDSD`'s hold and revokes in
+its own, and a start that finds a cause revokes in its own: both, and round 3's log entry, say that
+order now. `refuseAfterSelection`'s comment (`session.go`) says the same of "a revocation" and is
+code, left to a round that admits it.
+
+**Item 3: the gapless cases' sessions.** Both end their hand-made sessions with the shared end, and
+their hand-made backends get `New`'s completion bookkeeping (`handMadeBackend`: `zero` and `wzero`
+closed); without it their bounded join failed at its 5 s bound, "0 goroutines still run ... context
+deadline exceeded", where `Wait` read a nil `zero`; with it both clean up at once, no goroutine
+started. The harness rig and round 2's
+`TestAnAuthorizationReplacedAsASuccessorOpensRefusesItForItsOwnReason` end theirs so too.
