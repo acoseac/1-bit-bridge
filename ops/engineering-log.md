@@ -94704,3 +94704,13 @@ New cases, beside those above: `TestARollbackHasRunOnlyOnceTheDriversRollbackRet
 | K6: every return taken for success | `TestARollbackWhoseDriverReturnsAnErrorFailsItsWait` red 50 of 50 (no failure with the driver's error; "answered as run") |
 | K7: `openStoreDB` back to `sql.Open` | the seam case red 10 of 10; the three proof cases red 5 of 5 each: "the transaction runs on a connection the watch on … did not make" |
 | K8: the wrapper's `ResetSession` removed | `TestTheConnectorsConnectionsAreTheDriversToDatabaseSQL` red 50 of 50: `driver.SessionResetter` missing, and one connection more once the transaction's context rolled it back |
+
+**Checks** (legion0, go1.27.3, the Makefile's tags, TMPDIR on disk; the gate inside the build slot at a25c5934, the tree clean).
+
+| Check | Result |
+|---|---|
+| gofmt (the toolchain's) on every changed Go file | nothing listed |
+| `go vet` of ./cmd/bridge/, ./internal/manifest/ and ./internal/sqlitetest/ for linux/amd64, windows/amd64, darwin/amd64 and linux/386 | exit 0 each |
+| `-race -count=50` from prebuilt race binaries, in four lanes: every sqlitetest test (21), the four touched manifest tests (the seam's, both upscale-target stop cases, the re-queue's provenance), the re-queue sweep test and the five serve tests that hold the seed | 31 tests, 50 of 50 each, no race, nothing skipped |
+| `go test -race -count=1 -p 4 -timeout 120m` of ./cmd/bridge/, ./internal/manifest/, ./internal/sqlitetest/ and, as round 2 ran them, ./internal/backup/, ./internal/admin/ and ./internal/doctor/, whose tests import sqlitetest through backuptest | ok each: 1638.9 s, 1665.2 s, 3.4 s, 652.1 s, 1121.4 s, 7.4 s |
+| the rules patch (`rules-b869-r3.patch`) applied to the tree: `scripts/check-doc-budgets.py` and `TestEveryCitedTestNameExists` | ok; ok |
