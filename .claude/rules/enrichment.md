@@ -583,6 +583,73 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   harvest's release set, so an app that declares them receives them
   enriched. **Don't leave them out of an enrichment or harvest query.**
   `TestWavPackAndMonkeysAudioRowsTakePartInEnrichment` pins it.
+- **A portrait lookup `enrich.deezerEnabled` refused is kept in the row, and
+  fetched once enrichment and Deezer are both on** (2026-11-12, backlog B761
+  PR 2). The stamp of a pass whose Deezer lookup the switch refused says
+  nothing at `enriched_at`, and Deezer's answers lived in the process alone,
+  so until then such a portrait came back only through a changed file or
+  "Retry missing", which re-runs MusicBrainz and the Cover Art Archive for
+  nothing. `tracks.deezer_pending_query` (v63, column-only,
+  `idx_tracks_deezer_pending` partial on its non-NULL rows) keeps the name the
+  lookup would have asked by, MusicBrainz's canonical name for the row's
+  `artistMBID`, which no later read could recover and a restart keeps. **One
+  outcome rule for every path** (the ordinary pass, the fingerprint path and
+  the portrait batch: `portraitOutcome`, `portraits.go`): a portrait held,
+  cached or fetched, or Deezer's answer that it has none (a no-match, a 404,
+  an empty picture, each negative-cached) clears it; Deezer's own refusal
+  keeps it (`Track.PortraitRefused`; enrich.enabled's still stops the stamp);
+  a transient failure, a cancellation or any other error keeps it and puts the
+  artist's next attempt off (`portraitRetry`: a minute, doubling to six
+  hours); a pass that makes no attempt leaves it. `MarkEnriched` writes it in
+  the stamp's own statement, so `markSkipped`, which a release-search miss
+  reaches after `resolveArtist`, writes it too; a changed file's upsert drops
+  it with the rest of the enrichment, and "Retry missing" and an unchanged
+  scan keep it. While both switches are on, each turn of `Run` takes one page
+  of the enriched rows that carry one (`runPortraits`: `PortraitBatchLimit`
+  rows in path order past a cursor, so failing rows at the head starve none
+  behind them), beside the ordinary batch whatever that found, asks Deezer
+  once per artist by the row's artist MBID and kept name, with no MusicBrainz
+  or Cover Art Archive request and no `enriched_at` reset, and clears each row
+  only at the version it read (`ClearPendingPortraits`, B187's
+  compare-and-set: a row retagged and enriched again since keeps its own
+  query); a pass that found no artist due rests until the earliest retry, ten
+  minutes at most, unless a refused lookup is kept meanwhile; and `Run`'s wait
+  between turns ends within a second of enrichment turning on, or Deezer
+  turning on while enrichment is on (`idle`). `/v1/artist-image` is 202 while
+  one of the artist's rows keeps a query and both switches are on, and
+  `no_image` while either is off (`artistImagePending`; serve hands the server
+  the live switch, `WithDeezerEnabled`, so `manifest` imports nothing of
+  `enrich`). Rows enriched before v63 keep no query: "Retry missing" stays
+  their way. **Don't clear a pending query for a request that settled nothing
+  (a refusal, a transient failure, a cancellation, an error), negative-cache a
+  refusal or a failure, clear one at any version but the one read, write one
+  apart from the stamp's statement, leave the portrait batch to the turns the
+  ordinary batch finds work, ask MusicBrainz or the Cover Art Archive for a
+  pending portrait, or answer a pending artist's miss 202 while either switch
+  is off.** `TestARefusedPortraitIsFetchedOnceDeezerIsOn`,
+  `TestARefusedPortraitSurvivesARestartAndIsAskedByItsCanonicalName`,
+  `TestTheFingerprintPathsRefusedPortraitIsFetchedOnceDeezerIsOn`,
+  `TestAPortraitTheSwitchCutOffIsFetchedOnceItIsOnAgain`,
+  `TestTurningDeezerOnWakesAnIdleEnricher`,
+  `TestTurningEnrichmentOnWakesAnIdleEnricher`,
+  `TestOneFetchServesAnAlbumsTwelveRows`,
+  `TestAPortraitAlreadyCachedIsSettledWithNoRequest`,
+  `TestATerminalMissIsSettledAndNotAskedAgain`,
+  `TestATransientFailureKeepsThePortraitAndPacesItsRetries`,
+  `TestAQueryOutlivesRetryMissingAndATransientFailure`,
+  `TestFailingRowsAtTheHeadDoNotStarveTheRest`,
+  `TestPortraitsAndOrdinaryWorkBothProgress`,
+  `TestAPassThatFindsNoArtistDueRestsAndReadsNothing`,
+  `TestARefusalKeptWhileTheBatchRestsEndsTheRest`,
+  `TestAStaleClearLeavesTheReplacementsQuery`, manifest's
+  `TestMigrationV63KeepsAPortraitTheSwitchRefused`,
+  `TestAStampWritesThePortraitItsPassLearnt`,
+  `TestRetryMissingKeepsAPendingPortrait`,
+  `TestAChangedFileDropsThePendingPortraitAndAnUnchangedScanKeepsIt`,
+  `TestAPendingPortraitIsClearedOnlyAtTheVersionItWasRead` and
+  `TestThePendingPortraitReadUsesItsPartialIndex`, api's
+  `TestARefusedPortraitIsPendingWhileBothSwitchesAreOn` and serve's
+  `TestServeAsksDeezerForTheRefusedPortraitsOnceItIsOn` pin it.
 
 ## Duplicates and the served set
 
