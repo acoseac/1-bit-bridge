@@ -46,12 +46,16 @@ type session struct {
 	// nil, never closed, for a request without one.
 	released <-chan struct{}
 
-	mu              sync.Mutex
-	started         bool
-	releasing       bool
-	nativeRelease   *engine.ReleaseRequest
-	finalReport     bool
+	mu            sync.Mutex
+	started       bool
+	releasing     bool
+	nativeRelease *engine.ReleaseRequest
+	finalReport   bool
+	// nativeRevoked is the session's DSD stopped, and revokedFor why: the word
+	// and the detail every DSD entry of the session is refused with from then
+	// on (backlog B853). Both are set by revokeDSDLocked alone.
 	nativeRevoked   bool
+	revokedFor      engine.Unplayable
 	nativeEscalated bool
 	releaseErr      error
 	lateAck         bool // Release answered its context's error: the teardown acknowledges
@@ -340,6 +344,32 @@ func (s *session) faulted(where string) error {
 	wake(s.wakeP)
 	wake(s.wakeR)
 	return err
+}
+
+// revokeDSDLocked stops the session's DSD (nativeRevoked) and records why,
+// the word and the detail every DSD entry of the session is refused with from
+// then on (dsdRevokedLocked; backlog B853): the policy's reading that failed
+// (ReasonDACUnread), a reconciliation's contained panic (ReasonFailed, the
+// fault it records), an ordinary revocation (native_revoked, for its reason)
+// or, on the harness's path, an authorization replaced (native_revoked). The
+// first cause stands, but for the reading's failure, which stands once it
+// comes, whatever came first, its detail with it, so no entry is refused with
+// one cause's word and another's detail. Until B853 every cause refused an
+// entry at its admission as a policy that did not read: the set did read
+// after an ordinary revocation. s.mu is held.
+func (s *session) revokeDSDLocked(why engine.Unplayable) {
+	s.nativeRevoked = true
+	if s.revokedFor.Reason == "" || why.Reason == ReasonDACUnread {
+		s.revokedFor = why
+	}
+}
+
+// dsdRevokedLocked is the refusal of a DSD entry of a session whose DSD was
+// stopped, for the cause recorded (revokeDSDLocked), a copy of its own.
+// s.mu is held.
+func (s *session) dsdRevokedLocked() *engine.Unplayable {
+	u := s.revokedFor
+	return &u
 }
 
 // recoverFault is deferred last by the producer: a panic on it is recovered,
@@ -914,7 +944,9 @@ func (s *session) openSuccessor(ctx context.Context, o *occ) {
 	s.readmitDSDLocked(o)
 	s.makeConverterLocked(o)
 	if s.nativeRevoked && (o.plan != nil || o.converts()) && o.refused == nil {
-		o.refused = &engine.Unplayable{Reason: "native_revoked", Detail: "DSD permission revoked"}
+		// Admitted before the session's DSD stopped: refused for the cause
+		// recorded, as its admission would refuse it now (B853).
+		o.refused = s.dsdRevokedLocked()
 	}
 	monitor = o.admitted != nil && o.refused == nil && !o.dropped
 	if o.dropped {

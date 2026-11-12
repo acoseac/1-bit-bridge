@@ -611,14 +611,18 @@ func (s *session) reconcilePermission(next *permission, err error) {
 			active = true
 		}
 	}
+	ineligible := engine.Unplayable{Reason: "native_revoked", Detail: "selected DSD policy is no longer eligible"}
 	for _, o := range s.chain {
 		if o.opened() && o.plan != nil && o.out == nil && (replaced || next.unavailable[edgeKey(o.transport, o.plan)]) {
 			o.dropped = true
-			o.refused = &engine.Unplayable{Reason: "native_revoked", Detail: "selected DSD policy is no longer eligible"}
+			u := ineligible
+			o.refused = &u
 		}
 	}
 	if replaced {
-		s.nativeRevoked = true
+		// With no native output active no Revoke follows: a successor still
+		// opening is refused at its open's end for this cause (B853).
+		s.revokeDSDLocked(ineligible)
 		if prior != nil {
 			prior.revoked.Store(true)
 		}

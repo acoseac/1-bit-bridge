@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/alsapcm"
+	"github.com/acoseac/1-bit-bridge/internal/player/engine"
 )
 
 var errDSDUnread = errors.New("player backend: the effective DSD policy did not read; the bridge's log has why")
@@ -34,7 +35,7 @@ func (b *Backend) refreshDSD(where string) (d *dsdSet, err error) {
 			b.mu.Unlock()
 			for _, s := range ss {
 				if s.holdsDSD() {
-					s.stopDSD("the effective DSD policy's reading")
+					s.stopDSD("the effective DSD policy's reading", true)
 				}
 			}
 			b.dsdJudged = b.dsd.Load()
@@ -87,10 +88,20 @@ func (s *session) holdsDSD() bool {
 // stopDSD records one fault and stops the actual outputs, including retiring
 // tails. It does not re-enter Revoke or read a sink: either may be the callback
 // that failed. The ordinary teardown still joins the writers and their close.
-func (s *session) stopDSD(where string) {
-	s.faulted(where)
+// It records why the session's DSD stopped (revokeDSDLocked, backlog B853):
+// unread, the policy's reading failed, dsd_dac_unread; otherwise a
+// reconciliation's contained panic, which judged no occurrence against the
+// set that did read, and is the backend's own failure, as the fault recorded
+// here is: backend_failed, with that fault's words (checkDSDActivation
+// answers an activation from the same fault).
+func (s *session) stopDSD(where string, unread bool) {
+	err := s.faulted(where)
+	why := engine.Unplayable{Reason: ReasonFailed, Detail: err.Error()}
+	if unread {
+		why = engine.Unplayable{Reason: ReasonDACUnread, Detail: errDSDUnread.Error()}
+	}
 	s.mu.Lock()
-	s.nativeRevoked = true
+	s.revokeDSDLocked(why)
 	var outs []*output
 	for _, out := range s.outs {
 		if out.native == nil {

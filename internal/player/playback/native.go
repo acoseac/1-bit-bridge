@@ -449,7 +449,10 @@ func (b *Backend) Revoke(r engine.RevokeInput) {
 	defer l.release()
 	l.lock()
 	b.revoking(r.Session)
-	s.nativeRevoked = true
+	// A DSD entry of the session is refused from now on as the successor
+	// dropped below is, for this revocation's reason (B853), unless an earlier
+	// cause stands.
+	s.revokeDSDLocked(engine.Unplayable{Reason: "native_revoked", Detail: r.Reason})
 	if s.permission != nil {
 		s.permission.revoked.Store(true)
 	}

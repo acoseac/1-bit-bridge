@@ -545,15 +545,17 @@ func (b *Backend) logDSDSet(d *dsdSet) {
 // the content's rate or its refusal. The occurrence keeps the set and the
 // plan it was admitted under, which the check after open, its activation and
 // reconciliation compare with. A converted rate answers no native plan: the
-// occurrence converts (occ.converts, B728 B11).
+// occurrence converts (occ.converts, B728 B11). A session whose DSD was
+// stopped, before the admission or while it read the policy, refuses it for
+// the cause recorded (revokeDSDLocked, backlog B853).
 func (b *Backend) admitDSD(o *occ, f format.NativeDSD) (engine.NativePlan, error) {
 	// Mark before a refresh: refreshDSD contains failures while holding
 	// dsdMu, so it must never wait for this admission to finish.
 	if s := o.owner; s != nil {
 		s.mu.Lock()
 		if s.nativeRevoked {
-			s.mu.Unlock()
-			return engine.NativePlan{}, &engine.Unplayable{Reason: ReasonDACUnread, Detail: errDSDUnread.Error()}
+			defer s.mu.Unlock()
+			return engine.NativePlan{}, s.dsdRevokedLocked()
 		}
 		o.admitting = true
 		s.mu.Unlock()
@@ -579,7 +581,7 @@ func (b *Backend) admitDSD(o *occ, f format.NativeDSD) (engine.NativePlan, error
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		if s.nativeRevoked {
-			return engine.NativePlan{}, &engine.Unplayable{Reason: ReasonDACUnread, Detail: errDSDUnread.Error()}
+			return engine.NativePlan{}, s.dsdRevokedLocked()
 		}
 	}
 	o.admitted, o.policyPlan = cur, pp
@@ -688,7 +690,7 @@ func (b *Backend) reconcileDSD(next *dsdSet) {
 	b.mu.Unlock()
 	for _, s := range ss {
 		if step := s.reconcileDSD(next); step != "" {
-			s.stopDSD("the effective DSD set's reconciliation (" + step + ")")
+			s.stopDSD("the effective DSD set's reconciliation ("+step+")", false)
 		}
 	}
 	b.dsdJudged = next
