@@ -330,6 +330,37 @@ func (c *convSteps) heldWithin(t *testing.T, bound time.Duration) {
 	}
 }
 
+// undecidedAtLook waits for the producer's look held at its wait (looked) and
+// fails the test unless o's window is undecided then; a decision fails it at
+// once, whenever it comes. A producer that decided early has gone on to wait
+// for what follows, which no reporter's step wakes (it wakes a producer
+// holding a window), so the look would never come, and a wait for it alone
+// would run the watchdog out and fail in other words (backlog B872's second
+// round).
+func undecidedAtLook(t *testing.T, steps *convSteps, o engine.OccurrenceID, looked <-chan struct{}) {
+	t.Helper()
+	decided := func() {
+		if steps.has("decided", o) {
+			t.Fatal("a's window was decided while the lookahead the sink measured was above its floor")
+		}
+	}
+	timer := time.NewTimer(alsapcm.Ordered())
+	defer timer.Stop()
+	for {
+		changed := steps.ch()
+		decided()
+		select {
+		case <-looked:
+			decided()
+			return
+		case <-changed:
+		case <-timer.C:
+			alsapcm.LogGoroutines(t)
+			t.Fatalf("waited %v for the producer's look at a's window, held at its wait", alsapcm.Ordered())
+		}
+	}
+}
+
 // firstOcc is the occurrence the session's Start began with.
 func (d *dsdRig) firstOcc() engine.OccurrenceID {
 	d.t.Helper()
@@ -668,10 +699,7 @@ func TestConvertedTracksJoinContinuouslyAtOneRate(t *testing.T) {
 				d.k.Play(t, 300*time.Millisecond)
 				look := p.holdWait(t)
 				d.tickOnce(alsapcm.Ordered())
-				awaitOrdered(t, look.in, "the producer's look at a's window once the DAC played 300 ms of a, held at its wait")
-				if steps.has("decided", oa) {
-					t.Fatal("a's window was decided while the lookahead the sink measured was above its floor")
-				}
+				undecidedAtLook(t, steps, oa, look.in)
 				look.letGo()
 				// 150 ms more: below the floor, and the next look decides.
 				d.k.Play(t, 150*time.Millisecond)
