@@ -21,7 +21,9 @@ import (
 
 // harnessRig is a backend on the harness's path over the approved fixture,
 // its record published, with one session (1) holding a permission of that
-// record, whose every entry is decode's DSD64 golden.
+// record, whose every entry is decode's DSD64 golden. The session is made by
+// hand and ended as a release ends it (endSession: round 4, where its context
+// alone was cancelled).
 type harnessRig struct {
 	b   *Backend
 	s   *session
@@ -39,7 +41,7 @@ func newHarnessRig(t *testing.T, construct func(Config) (*Backend, error)) *harn
 	ctx := context.Background()
 	b.RefreshAuthorization(ctx)
 	s := b.session(1)
-	t.Cleanup(s.cancel)
+	t.Cleanup(func() { endSession(t, b, s) })
 	s.ev = plainEvents{}
 	p, err := b.readPermission(ctx)
 	if err != nil {
@@ -224,7 +226,10 @@ func TestOnTheHarnesssPathAnEntryAfterARevocationIsRefusedForIt(t *testing.T) {
 // replaces neither the record nor the successor's refusal, which it rebuilt
 // from the check's error until round 2. With nothing recorded before the
 // check failed, the successor is refused for the check's own error, as it
-// was.
+// was. Its session and backend are made by hand, the backend with New's
+// completion bookkeeping (handMadeBackend), and the session ended as a
+// release ends it (endSession), where its context alone was cancelled until
+// round 4.
 func TestAGaplessSuccessorsRefusalIsTheCauseRecordedBeforeItsCheckFailed(t *testing.T) {
 	for _, tc := range []struct {
 		name         string
@@ -235,7 +240,7 @@ func TestAGaplessSuccessorsRefusalIsTheCauseRecordedBeforeItsCheckFailed(t *test
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg, _ := approvedBackendFixture(t)
-			b := &Backend{cfg: cfg, sessions: map[engine.SessionID]*session{}}
+			b := handMadeBackend(cfg)
 			ctx := context.Background()
 			p, err := b.readPermission(ctx)
 			if err != nil {
@@ -248,7 +253,7 @@ func TestAGaplessSuccessorsRefusalIsTheCauseRecordedBeforeItsCheckFailed(t *test
 			tr := nativeTransport(plan)
 			s := newSession(b, 1)
 			b.sessions[1] = s
-			t.Cleanup(s.cancel)
+			t.Cleanup(func() { endSession(t, b, s) })
 			s.permission = p
 			s.cur = &output{transport: tr, policyID: plan.PolicyID}
 			done := make(chan struct{})
@@ -274,7 +279,13 @@ func TestAGaplessSuccessorsRefusalIsTheCauseRecordedBeforeItsCheckFailed(t *test
 				want = engine.Unplayable{Reason: "native_revoked", Detail: check.Error()}
 			}
 			st := s.next()
-			s.mu.Lock()
+			// The first acquisition after the producer's step and its
+			// revocation, which nothing else can hold (no goroutine runs here):
+			// asserted free at once, so a lock the step kept fails the case
+			// (round 4).
+			if !s.mu.TryLock() {
+				t.Fatal("the session's lock is held once the producer's step returned")
+			}
 			refused, dropped := o.refused, o.dropped
 			s.mu.Unlock()
 			if st.kind == stepWrite || !dropped {
@@ -295,10 +306,11 @@ func TestAGaplessSuccessorsRefusalIsTheCauseRecordedBeforeItsCheckFailed(t *test
 // that revocation recorded (Backend.revoke), never by the cause's words, which
 // until round 3 took the earlier cause for its own and answered the check's
 // error, "DSD permission revoked". The case where nothing was recorded before
-// the check failed is the round 2 case's, unchanged.
+// the check failed is the round 2 case's, unchanged. Its session is ended as
+// a release ends it, its backend made as the round 2 case's is (round 4).
 func TestAnEarlierRevocationInTheGaplessChecksOwnWordsIsTheSuccessorsRefusal(t *testing.T) {
 	cfg, _ := approvedBackendFixture(t)
-	b := &Backend{cfg: cfg, sessions: map[engine.SessionID]*session{}}
+	b := handMadeBackend(cfg)
 	p, err := b.readPermission(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -310,7 +322,7 @@ func TestAnEarlierRevocationInTheGaplessChecksOwnWordsIsTheSuccessorsRefusal(t *
 	tr := nativeTransport(plan)
 	s := newSession(b, 1)
 	b.sessions[1] = s
-	t.Cleanup(s.cancel)
+	t.Cleanup(func() { endSession(t, b, s) })
 	s.permission = p
 	s.cur = &output{transport: tr, policyID: plan.PolicyID}
 	done := make(chan struct{})
@@ -324,7 +336,10 @@ func TestAnEarlierRevocationInTheGaplessChecksOwnWordsIsTheSuccessorsRefusal(t *
 		return true
 	}
 	st := s.next()
-	s.mu.Lock()
+	// As the round 2 case's: asserted free at once (round 4).
+	if !s.mu.TryLock() {
+		t.Fatal("the session's lock is held once the producer's step returned")
+	}
 	refused, dropped := o.refused, o.dropped
 	s.mu.Unlock()
 	if st.kind == stepWrite || !dropped {
@@ -415,8 +430,15 @@ func TestAPanicInTheAuthorizationsReconciliationIsContainedAndRecorded(t *testin
 		t.Fatalf("the reconciliation's panic reached its caller: %v", escaped)
 	}
 	want := engine.Unplayable{Reason: ReasonFailed, Detail: "player backend: the DSD authorization's reconciliation panicked; the bridge's log has why"}
-	r.s.mu.Lock()
-	stopped, record, fault := r.s.nativeRevoked, *r.s.dsdRevokedLocked(), r.s.fault
+	// The first acquisition after the containment, which nothing else can hold
+	// here (the rig starts no goroutine, and the session has no output for the
+	// containment's stop to drop): asserted free at once, so a lock the
+	// containment kept fails the case here, where a Lock waited to the
+	// package's timeout (round 4). What the case reads is read in that hold.
+	if !r.s.mu.TryLock() {
+		t.Fatal("the session's lock is held once the contained panic's caller has gone on")
+	}
+	stopped, record, fault, p := r.s.nativeRevoked, *r.s.dsdRevokedLocked(), r.s.fault, r.s.permission
 	r.s.mu.Unlock()
 	if !stopped || record != want {
 		t.Errorf("the session's record is %+v (stopped %v); want %+v", record, stopped, want)
@@ -424,11 +446,6 @@ func TestAPanicInTheAuthorizationsReconciliationIsContainedAndRecorded(t *testin
 	if fault == nil || fault.Reason != ReasonFailed || fault.Detail != want.Detail {
 		t.Errorf("the session's fault is %+v; want the backend's own failure, %q", fault, want.Detail)
 	}
-	if !r.s.mu.TryLock() {
-		t.Fatal("the session's lock is held once the contained panic's caller has gone on")
-	}
-	p := r.s.permission
-	r.s.mu.Unlock()
 	switch {
 	case p == nil:
 		t.Fatal("the session holds no authorization: the case needs the one the reconciliation was replacing")
