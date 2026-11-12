@@ -20,8 +20,9 @@ import (
 // console's doctor alike. And backup-lock, a warn shown only where the backups
 // folder grants no lock (backup.ProbeBackupsLock answers ErrBackupsUnlocked),
 // where nothing is verified or pruned (backlog B653's second round); and
-// backup-check, a warn shown only while a check, or a prune, that did not end
-// holds the backups folder (backup.StuckCheckOf, its third and fifth rounds).
+// backup-check, a warn shown only while a check, a prune or a restore that did
+// not end holds the backups folder (backup.StuckCheckOf, its third and fifth
+// rounds; a restore's since backlog B826's second round).
 // A hint that advises a bridge backup command gives its config as the
 // placeholder <bridge.yaml>, and says to use the config this doctor read: the
 // doctor names no path.
@@ -57,13 +58,20 @@ func BackupChecks(st backup.Status, err, lockErr error, stuck *backup.StuckCheck
 			step = " (" + stuck.Step + ")"
 		}
 		what := "a verification of snapshot " + stuck.Snapshot
-		if stuck.Pruning() {
+		hint := "the end of the process that runs it ends it: restart the bridge, or stop the backup --verify command that runs it; if it comes back, the data directory's storage is not answering (backlog B653)"
+		switch {
+		case stuck.Restoring():
+			// A restore's (backlog B826): the bridge restore command that runs
+			// it ends it, never a restart of the bridge, which runs none.
+			what = "a restore of snapshot " + stuck.Snapshot
+			hint = "the end of the bridge restore command that runs it ends it: stop that command; if it comes back, the storage that holds the snapshots is not answering"
+		case stuck.Pruning():
 			what = "a prune of the snapshots"
 		}
 		out = append(out, warn(checkNameBackupCheck,
 			fmt.Sprintf("%s did not end%s and was given up %s, and still holds the backups folder: no snapshot there is verified or pruned until it ends, and the scheduled snapshot waits",
 				what, step, agoWords(now.Sub(stuck.Since))),
-			"the end of the process that runs it ends it: restart the bridge, or stop the backup --verify command that runs it; if it comes back, the data directory's storage is not answering (backlog B653)"))
+			hint))
 	}
 	if err != nil {
 		return append(out, warn(checkNameBackupNewest,

@@ -40,9 +40,17 @@ type hold struct {
 	given     bool
 	// markless: a give-up of the hold by its caller (abandon) raises no mark,
 	// since the holder waits for a write it handed to a hold of its own
-	// (handOff), or has ended its wait; a step of the hold that overruns marks
+	// (handOff), or has ended its wait, or, a restore's, holds no lock yet
+	// (newRestoreHold, marksFromNow); a step of the hold that overruns marks
 	// all the same.
 	markless bool
+	// restore: the hold is a restore's (holdSource), which its mark says
+	// (StuckCheck.Restore).
+	restore bool
+	// clearing, once set, closes as the removal of a marker left beside the
+	// lock ends (clearStale): a mark raised after it was registered writes its
+	// marker only then (markStuckAfter).
+	clearing <-chan struct{}
 	// releasing: the hold has begun to let its lock go (release); a give-up
 	// after it marks the folder in this process alone, writing no marker.
 	releasing bool
@@ -80,6 +88,9 @@ const (
 	stepPruning    = "its removals"
 	stepOwnership  = "letting go of its snapshot's ownership"
 	stepRelease    = "letting go of the snapshots' lock"
+	// A restore's steps under the lock (holdSource).
+	stepClearMarker  = "its removal of a marker left beside the snapshots' lock"
+	stepReadSnapshot = "its read of the snapshot it restores"
 )
 
 // releaseBound is how long letting a hold's lock go may take (release)
@@ -105,12 +116,62 @@ func newHold(ctx context.Context, snapshot string, spellings ...string) *hold {
 	return h
 }
 
+// newRestoreHold is a restore's hold of the folder that holds its snapshot
+// (holdSource): marked as a restore's when it is given up, and raising no mark
+// at its caller's give-up until it holds the lock (marksFromNow), since before
+// it holds nothing a mark would say it holds.
+func newRestoreHold(ctx context.Context, snapshot string, spellings ...string) *hold {
+	h := newHold(ctx, snapshot, spellings...)
+	h.restore, h.markless = true, true
+	return h
+}
+
 // held records the folder's lock taken now, on root, resolved, whose key is
 // key, for the snapshot named.
 func (h *hold) held(unlock func(), root, key, snapshot string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.unlock, h.root, h.key, h.snapshot, h.locked = unlock, root, key, snapshot, time.Now()
+}
+
+// marksFromNow lets a give-up of the hold by its caller mark the folder from
+// now on: a restore's hold, once it holds the lock (newRestoreHold).
+func (h *hold) marksFromNow() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.markless = false
+}
+
+// enter records the step the holder is in, which a give-up by its caller
+// names (abandon), for a holder whose steps under the lock run on its own
+// goroutine rather than stepOf's: a restore's.
+func (h *hold) enter(step string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.at = step
+}
+
+// clearStale removes a marker its holder's process left beside the lock
+// (clearStaleMarker), unless the hold was given up before: the check of the
+// give-up and the removal's registration are one section of the hold's lock,
+// so a give-up after it writes its marker only once the removal has ended
+// (markStuckAfter), and that removal never removes it, while a give-up before
+// it keeps the marker it writes, nothing removed. It reports whether it
+// removed. The give-up itself waits for nothing: the marker is written on a
+// goroutine of its own.
+func (h *hold) clearStale() bool {
+	h.mu.Lock()
+	if h.given {
+		h.mu.Unlock()
+		return false
+	}
+	done := make(chan struct{})
+	h.clearing = done
+	root := h.root
+	h.mu.Unlock()
+	defer close(done)
+	clearStaleMarker(root)
+	return true
 }
 
 // handOff records that the holder now waits for a write it handed to a hold
@@ -177,7 +238,8 @@ func (h *hold) giveUpAs(done <-chan struct{}, step string, byCaller bool) {
 	if h.releasing {
 		root = ""
 	}
-	h.mark = markStuck(keys, root, StuckCheck{Snapshot: h.snapshot, Step: step, Since: time.Now().UTC()})
+	h.mark = markStuckAfter(keys, root, StuckCheck{Snapshot: h.snapshot, Step: step, Since: time.Now().UTC(), Restore: h.restore},
+		h.clearing)
 }
 
 // abandon is the caller's give-up of a holder it stopped waiting for, at the
@@ -294,6 +356,21 @@ func (h *hold) keepMarkUntil(done <-chan struct{}) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.markWaits = append(h.markWaits, done)
+}
+
+// dropSoon drops the hold (drop) at once where nothing keeps its mark
+// standing (keepMarkUntil), and otherwise on a goroutine of its own once that
+// has ended, so its caller never waits on the folder: a restore's, which
+// answers once it has begun to let the lock go (sourceHold.letGo).
+func (h *hold) dropSoon() {
+	h.mu.Lock()
+	waiting := len(h.markWaits) > 0
+	h.mu.Unlock()
+	if waiting {
+		go h.drop()
+		return
+	}
+	h.drop()
 }
 
 // drop takes the hold's mark out of this process's record, once whatever

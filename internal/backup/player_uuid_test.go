@@ -346,5 +346,8 @@ func TestSnapshotAndRestoreAsRootKeepThePlayerUUID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertGivenAway(t, changes()[before:], []string{filepath.Join(realDir, "player-initialized"), filepath.Join(realDir, "player-ids.json"), src.PlayerUUID})
+	// The lock of the folder that holds the snapshot, which the restore takes
+	// first and makes where none is (backlog B826), takes the owner too.
+	assertGivenAway(t, changes()[before:], []string{filepath.Join(realDir, "player-initialized"), filepath.Join(realDir, "player-ids.json"), src.PlayerUUID,
+		filepath.Join(realDir, backup.BackupsDirName, backup.LockFileName)})
 }
