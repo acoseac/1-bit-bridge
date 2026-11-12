@@ -26,10 +26,10 @@ import (
 // install armed, arms r's marker again, and drops the deletion journal, so
 // v61, the first step the next open runs, adds its column and then fails
 // looking for gated-format rows, user_version unmoved: a migration begun and
-// not finished. At v60, not a step behind the ladder's end, since B652: v62,
-// the last step, is one CREATE TABLE, which changes nothing before it can
-// fail, and a store a version skipped meets every step after its own, as one
-// a version behind meets the last.
+// not finished. At v60, not a step behind the ladder's end, since B652: v61
+// is the step this obstacle stops (v62, B652's, is one CREATE TABLE, which
+// changes nothing before it can fail), and a store a version skipped meets
+// every step after its own, as one a version behind meets the last.
 func (r *refusedInstall) withAStepThatFailsMidway(t *testing.T) {
 	t.Helper()
 	if latest := latestStoreVersion(t); latest < 61 {
