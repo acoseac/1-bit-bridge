@@ -272,9 +272,13 @@ func TestTheLookBeforeThePromptKeepsTheCauseOfAReadThatFailed(t *testing.T) {
 			l := tc.stand(t)
 			ended := checkWorkerEnd(t, l.given)
 			if l.failLookup != nil {
+				// As a lookup that fails past a link says it: where it led, so
+				// that only the refusal's own prefix names the path given
+				// (backlog B871's item 12).
+				led := filepath.Join(resolvedTestDir(t, t.TempDir()), "where-it-led")
 				t.Cleanup(backup.SetMetadataForTest(func(p string) (string, error) {
 					if p == l.given {
-						return "", &fs.PathError{Op: "lstat", Path: p, Err: l.failLookup}
+						return "", &fs.PathError{Op: "lstat", Path: led, Err: l.failLookup}
 					}
 					return fsutil.ResolveLinks(p)
 				}, nil))

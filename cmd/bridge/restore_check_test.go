@@ -392,9 +392,12 @@ func TestBridgeRestoreSaysWhatItsLookCouldNotRead(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
+				// As a lookup that fails past a link says it: where it led, so
+				// that only the refusal's own prefix names the path typed.
+				led := filepath.Join(t.TempDir(), "where-it-led")
 				t.Cleanup(backup.SetMetadataForTest(func(p string) (string, error) {
 					if p == abs {
-						return "", &fs.PathError{Op: "lstat", Path: p, Err: tc.failLookup}
+						return "", &fs.PathError{Op: "lstat", Path: led, Err: tc.failLookup}
 					}
 					return fsutil.ResolveLinks(p)
 				}, nil))
