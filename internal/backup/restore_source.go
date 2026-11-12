@@ -4,13 +4,18 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 )
 
 // A restore's source (backlog B826). A restore reads the snapshot it restores
@@ -89,13 +94,17 @@ import (
 // where it leads, and the operator looks for the path typed. Each refusal of
 // the admission names the snapshot by the path given (bridge restore's
 // argument, cleaned: CleanSnapshotPath), and every path below the snapshot
-// that a read's error names is spelled below that path (spelledAsGiven).
+// that a read's error names is spelled below that path (spelledAsGiven), at
+// the read that failed, never a destination's path (backlog B871's item 13).
 // Where the snapshot resolves may follow the path given in a failed call's own
 // words alone: the lock's file, in the folder the snapshot resolves into, and
-// a lookup that found the snapshot gone, which names where it led. A hold
-// given up that refuses the restore keeps its own name, its snapshot's folder
-// name as the marker beside the lock holds it for every process
-// (StuckCheck.Snapshot), which names no path: the marker is unchanged.
+// a lookup of the snapshot that failed, which names where it led, whether it
+// found the snapshot gone or failed otherwise, in the restore's admission
+// (takeSource) and in bridge restore's look before its prompt (checkSource)
+// alike, each after the path given (backlog B871's item 12). A hold given up
+// that refuses the restore keeps its own name, its snapshot's folder name as
+// the marker beside the lock holds it for every process (StuckCheck.Snapshot),
+// which names no path: the marker is unchanged.
 
 // ErrSnapshotGone is a restore's refusal of a snapshot that is no longer
 // there, or whose manifest is no longer there, once the restore holds the
@@ -190,8 +199,11 @@ type sourceHold struct {
 	err   error
 }
 
-// asGiven is err, what the restore answers once it holds its snapshot, in
-// words that name the snapshot as the restore was given it (spelledAsGiven).
+// asGiven is err, what a read of the snapshot where it resolves answered once
+// the restore holds it, in words that name the snapshot as the restore was
+// given it (spelledAsGiven). The restore asks it of its reads of the snapshot
+// alone, at each read, never of a write of its destination (backlog B871's
+// item 13).
 func (s *sourceHold) asGiven(err error) error {
 	return spelledAsGiven(err, s.snap, s.given)
 }
@@ -199,23 +211,131 @@ func (s *sourceHold) asGiven(err error) error {
 // spelledAsGiven is err, a restore's refusal or failure that a read of the
 // snapshot where it resolves (snap) answered, in words that name the snapshot
 // as the restore was given it (given): each path below snap spelled below
-// given, as filepath.Join(given, name) spells it. errors.Is and errors.As
-// read err through it, so every advice chosen from it is chosen as before;
-// where its words name nothing below snap, or the snapshot was given as it
-// resolves, it is err itself.
+// given, as filepath.Join(given, name) spells it, a path the words quote (%q,
+// which doubles a Windows path's separators) spelled as %q writes the given
+// one (backlog B871's item 11). errors.Is and errors.As read err through it,
+// so every advice chosen from it is chosen as before; where its words name
+// nothing below snap, or the snapshot was given as it resolves, it is err
+// itself. A snapshot at a root (E:\, /) is spelled so too (item 13): each
+// prefix ends in exactly one separator, and a match counts only where a path
+// begins (pathStart), so that one inside another path, or inside words such
+// as "input/output", is left as it is. Its caller hands it the errors of the
+// snapshot's reads alone, never a destination's, whose paths can begin as the
+// snapshot's do (a snapshot at a volume root, a destination on that volume).
 func spelledAsGiven(err error, snap, given string) error {
-	if err == nil || snap == "" || filepath.Dir(snap) == snap {
+	if err == nil || snap == "" {
 		return err
 	}
-	below := snap + string(filepath.Separator)
-	// The given path's own spelling of a name below it: filepath.Join's,
-	// which a given "." spells as the name alone.
-	as := strings.TrimSuffix(filepath.Join(given, "x"), "x")
+	from, to := spelledBelow(snap), spelledBelow(given)
+	if from == to {
+		return err
+	}
 	words := err.Error()
-	if as == below || !strings.Contains(words, below) {
+	respelled := respellPaths(words, from, to)
+	if respelled == words {
 		return err
 	}
-	return &givenSpelling{err: err, words: strings.ReplaceAll(words, below, as)}
+	return &givenSpelling{err: err, words: respelled}
+}
+
+// spelledBelow is a path below p as filepath.Join(p, name) spells it, the
+// name aside: p with exactly one separator after it, a root's own included,
+// or nothing for a p of ".", which spells the name alone.
+func spelledBelow(p string) string {
+	return strings.TrimSuffix(filepath.Join(p, "x"), "x")
+}
+
+// respellPaths is words with every path that begins with from begun with to
+// instead, in one pass over words, so that nothing it writes is read again:
+// written as it is, or as %q writes it, where a quote comes just before it
+// (quotedInner), each in its own form. A path begins where words do, or
+// after a character no path ends in before it (pathStart).
+func respellPaths(words, from, to string) string {
+	qFrom, qTo := quotedInner(from), quotedInner(to)
+	var b strings.Builder
+	for i := 0; i < len(words); {
+		if pathStart(words, i) {
+			quoted := i > 0 && words[i-1] == '"'
+			switch {
+			case quoted && strings.HasPrefix(words[i:], qFrom):
+				b.WriteString(qTo)
+				i += len(qFrom)
+				continue
+			case strings.HasPrefix(words[i:], from):
+				b.WriteString(to)
+				i += len(from)
+				continue
+			}
+		}
+		b.WriteByte(words[i])
+		i++
+	}
+	return b.String()
+}
+
+// quotedInner is s as %q writes it, its quotes aside.
+func quotedInner(s string) string {
+	q := strconv.Quote(s)
+	return q[1 : len(q)-1]
+}
+
+// pathStart reports whether a path can begin at words[i]: at the start of
+// words, or after white space, a quote or an opening bracket, '=' or ','.
+func pathStart(words string, i int) bool {
+	if i == 0 {
+		return true
+	}
+	switch words[i-1] {
+	case ' ', '\t', '\n', '"', '\'', '`', '(', '[', '{', '<', '=', ',':
+		return true
+	}
+	return false
+}
+
+// failSourceOpen, nil in production, stands in for a failed open of a file
+// the restore copies out of its snapshot, given its path where the snapshot
+// resolves: a non-nil answer is the open's error (SetFailSourceOpenForTest).
+var failSourceOpen atomic.Pointer[func(path string) error]
+
+// copyOut copies the snapshot's file at srcPath, where the snapshot resolves,
+// to target, as copyFile does: the errors of the source's open and of its
+// every read in words that name the snapshot as the restore was given it
+// (asGiven), and the destination's as they are, since a destination's paths
+// can begin as the snapshot's do (backlog B871's item 13).
+func (s *sourceHold) copyOut(srcPath, target string, mode os.FileMode) error {
+	if fail := failSourceOpen.Load(); fail != nil {
+		if err := (*fail)(srcPath); err != nil {
+			return s.asGiven(err)
+		}
+	}
+	var in *os.File
+	err := atomicwrite.ReadWithRetryCtx(context.Background(), func() error {
+		var err error
+		in, _, err = fsutil.OpenAsFile(srcPath)
+		return err
+	})
+	if err != nil {
+		return s.asGiven(err)
+	}
+	defer in.Close()
+	_, _, err = writeFromHashed(target, givenReader{r: in, s: s}, mode)
+	return err
+}
+
+// givenReader is a snapshot's file as a restore copies it out (copyOut): its
+// read's errors but io.EOF in words that name the snapshot as the restore was
+// given it.
+type givenReader struct {
+	r io.Reader
+	s *sourceHold
+}
+
+func (g givenReader) Read(p []byte) (int, error) {
+	n, err := g.r.Read(p)
+	if err != nil && err != io.EOF {
+		err = g.s.asGiven(err)
+	}
+	return n, err
 }
 
 // givenSpelling is err in the words spelledAsGiven gives it.

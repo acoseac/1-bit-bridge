@@ -251,6 +251,19 @@ func SetOnSourceStepForTest(fn func(dir, step string)) (restore func()) {
 	return func() { onSourceStep.Store(prev) }
 }
 
+// SetFailSourceOpenForTest installs fn as the open of every file a restore
+// copies out of its snapshot, given its path where the snapshot resolves: a
+// non-nil answer is that open's error, nil lets the open run; and returns the
+// restore.
+func SetFailSourceOpenForTest(fn func(path string) error) (restore func()) {
+	var p *func(string) error
+	if fn != nil {
+		p = &fn
+	}
+	prev := failSourceOpen.Swap(p)
+	return func() { failSourceOpen.Store(prev) }
+}
+
 // SetOnSourceWorkerEndForTest installs the hook a restore's source worker
 // runs last, given the snapshot as the restore was given it, once it has
 // handed its hold over or let go of what it took, and returns the restore.

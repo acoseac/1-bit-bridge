@@ -161,13 +161,12 @@ func floorlessSnapshotBound(snap engine.Reservation, marked bool, m Manifest) (e
 
 // restorePlayerReservation preflights both counters, draws its jump (after a
 // UUID-only destination's adoption has drawn first), then makes the new
-// floor durable before the caller writes any identity file.
-func restorePlayerReservation(snapshotDir, target, id string, m Manifest, opts RestoreOptions) error {
-	snap, marked, err := snapshotReservationFloor(snapshotDir, id, m)
+// floor durable before the caller writes any identity file. snap and marked
+// are what snapshotReservationFloor read of the snapshot, its caller's read,
+// whose errors are the snapshot's (backlog B871's item 13).
+func restorePlayerReservation(target, id string, m Manifest, snap engine.Reservation, marked bool, opts RestoreOptions) error {
+	snap, err := floorlessSnapshotBound(snap, marked, m)
 	if err != nil {
-		return err
-	}
-	if snap, err = floorlessSnapshotBound(snap, marked, m); err != nil {
 		return err
 	}
 	dataDir := filepath.Dir(target)
