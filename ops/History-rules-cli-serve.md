@@ -5510,9 +5510,12 @@ may name as still running, or no marker at all, where it waits for the lock:
 busy is not promised there.
 
 **Test hygiene (items 7 to 10).** The restore goroutine of
-`TestBridgeRestoreRefusesASnapshotPrunedWhileItAsked` is joined in a cleanup,
-bounded, on every exit path (`newRestoreRun`), the join registered before the
-cleanups that let it go on (the prompt's stdin), which run first; the look's
+`TestBridgeRestoreRefusesASnapshotPrunedWhileItAsked` is drained on every exit
+path, until just before the test binary's deadline (`newRestoreRun`, which
+launches it and registers its `drainLoopOnCleanup` beside the launch, as the
+package's `TestEveryBackgroundGoroutineDrainsOnCleanup` requires; the
+goroutine waits for `start` to hand it the run), the drain registered before
+the cleanups that let it go on (the prompt's stdin), which run first; the look's
 worker of the Unix stalled-manifest case, which outlives the command's answer,
 is fed and its end observed (`lookWorkerEnd`, over
 `SetOnCheckSourceEndForTest`) before the seams go back and the fixtures go,
@@ -5559,7 +5562,14 @@ snapshot resolves but its lock file. Their controls are split by what each
 piece does (the engineering log's B871 record): the admission's naming
 (`heldRefusal` and `sourceLockRefusal` handed the resolved snapshot) and the
 source reads' respelling (`asGiven` taking out its replacement) each turn red
-their own cases alone.
+their own cases alone. The admission's control showed its case of a hold met
+by the spelling given meeting the resolved folder's check instead
+(`captureT` resolves a capture's folder, so the check given up marked that
+folder alone): the case now gives its check the spelling the restore is
+given, and meets `SourceStillHeld`, which no case had reached through a link,
+and which its own control alone turns red. The probe's marker is asked of the
+mark itself (`MarkersOfForTest`), its write being on a goroutine of its own,
+which a read of the file made as the probe answers can precede.
 
 **Left open, named for the backlog:** `CleanSnapshotPath` takes the
 separator off a root as well (`E:\` becomes `E:`, a drive's working

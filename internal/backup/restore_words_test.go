@@ -325,6 +325,12 @@ func TestEveryAdmissionRefusalNamesTheSnapshotAsItWasGiven(t *testing.T) {
 			if given == other {
 				t.Fatalf("premise: the snapshot %s is named as it resolves", given)
 			}
+			// The check given up through the link too, so that its mark stands
+			// by the spelling the restore is given (captureT resolves the
+			// capture's folder, and a mark there alone is met where the snapshot
+			// resolves): the restore meets it before it resolves anything
+			// (SourceStillHeld; backlog B871's controls).
+			c.Dir = filepath.Join(data, backup.BackupsDirName, filepath.Base(c.Dir))
 			givenUpCheckOf(t, c)
 			return refusal{given: given, resolved: other, carries: heldBy(filepath.Base(c.Dir))}
 		}, true},

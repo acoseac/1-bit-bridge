@@ -75,7 +75,9 @@ func staleMarkerBesideAFreeLock(t *testing.T, root string) (string, []byte) {
 }
 
 // requireMarkerAsItWas fails the test where the marker at p is not stale:
-// a probe's release marks its own process alone.
+// a probe's release marks its own process alone. A marker's write would be on
+// a goroutine of its own, after the answer that read it may precede, so the
+// cases read it again once the release has ended.
 func requireMarkerAsItWas(t *testing.T, p string, stale []byte) {
 	t.Helper()
 	if got, err := os.ReadFile(p); err != nil || !bytes.Equal(got, stale) {
@@ -110,6 +112,9 @@ func TestBridgeRestoreNamesItsLooksStalledReleaseBeforeItsPrompt(t *testing.T) {
 			marker, stale := staleMarkerBesideAFreeLock(t, root)
 			before := readInstallState(t, cfgB, dataB)
 			ended := lookWorkerEnd(t, snapA)
+			// Registered before the stall, so it runs once the stall's cleanup
+			// has seen the release end.
+			t.Cleanup(func() { requireMarkerAsItWas(t, marker, stale) })
 			s := stallTheProbesRelease(t, root, step)
 			run := newRestoreRun(t)
 			t.Cleanup(func() {
@@ -156,6 +161,9 @@ func TestTheDoctorAndTheTickerNameTheirOwnProbesStalledRelease(t *testing.T) {
 					t.Fatal(err)
 				}
 				marker, stale := staleMarkerBesideAFreeLock(t, root)
+				// Registered before the stall, so it runs once the stall's
+				// cleanup has seen the release end.
+				t.Cleanup(func() { requireMarkerAsItWas(t, marker, stale) })
 				s := stallTheProbesRelease(t, root, step)
 				words := who + "'s probe of the snapshots' lock"
 				if who == "the doctor" {

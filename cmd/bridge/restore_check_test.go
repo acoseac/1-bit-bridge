@@ -67,42 +67,47 @@ func lookWorkerEnd(t *testing.T, dir string) <-chan struct{} {
 	return ended
 }
 
-// restoreRun is a bridge restore run on a goroutine of its own (start), its
-// exit code sent on done once it returns. Its join, which newRestoreRun
-// registers, waits for that return at the test's end, bounded, on every exit
-// path: make it before registering the cleanups that let the run go on (its
-// context's cancel, its stdin's close, a stalled hook's release), which then
-// run first, cleanups running last-registered-first.
+// restoreRun is a bridge restore run on a goroutine of its own, its exit code
+// sent on done once it returns. newRestoreRun launches that goroutine, which
+// waits for start to hand it the run, and registers its drain beside the
+// launch (drainLoopOnCleanup), which waits for its end at the test's end on
+// every exit path: make it before registering the cleanups that let the run
+// go on (its context's cancel, its stdin's close, a stalled hook's release),
+// which then run first, cleanups running last-registered-first.
 type restoreRun struct {
 	done    chan int
 	ended   chan struct{}
+	runs    chan func() int
 	started atomic.Bool
 }
 
-// newRestoreRun makes a restoreRun and registers its join.
+// newRestoreRun makes a restoreRun, launches its goroutine and registers that
+// goroutine's drain, whose cancel ends a wait for a start that never came.
 func newRestoreRun(t *testing.T) *restoreRun {
 	t.Helper()
-	r := &restoreRun{done: make(chan int, 1), ended: make(chan struct{})}
-	t.Cleanup(func() {
-		if !r.started.Load() {
-			return
-		}
+	r := &restoreRun{done: make(chan int, 1), ended: make(chan struct{}), runs: make(chan func() int, 1)}
+	waiting, stop := context.WithCancel(context.Background())
+	go func() {
+		defer close(r.ended)
 		select {
-		case <-r.ended:
-		case <-time.After(restoreWaitWithin(t, 30*time.Second)):
-			t.Error("bridge restore never returned")
+		case run := <-r.runs:
+			r.done <- run()
+		case <-waiting.Done():
+			select {
+			case run := <-r.runs:
+				r.done <- run()
+			default:
+			}
 		}
-	})
+	}()
+	drainLoopOnCleanup(t, stop, r.ended, "bridge restore")
 	return r
 }
 
-// start runs bridge restore on ctx with args.
+// start runs bridge restore on ctx with args, on the run's goroutine.
 func (r *restoreRun) start(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) {
 	r.started.Store(true)
-	go func() {
-		defer close(r.ended)
-		r.done <- restoreCmd(ctx, args, stdin, stdout, stderr)
-	}()
+	r.runs <- func() int { return restoreCmd(ctx, args, stdin, stdout, stderr) }
 }
 
 // code is the run's exit code, failing the test past its wait.

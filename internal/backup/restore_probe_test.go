@@ -98,7 +98,9 @@ func requireMarkedAs(t *testing.T, root string, within time.Duration, what strin
 
 // requireNoMarkerWritten fails the test where the marker beside the lock at
 // path is not what it was (stale, nil for none): a probe's release past its
-// bound marks its own process alone.
+// bound marks its own process alone. A read of the file can come before a
+// marker's write, made on a goroutine of its own (markStuck), so
+// requireMarksWriteNoMarker asks the mark itself.
 func requireNoMarkerWritten(t *testing.T, path string, stale []byte) {
 	t.Helper()
 	got, err := os.ReadFile(path)
@@ -107,6 +109,22 @@ func requireNoMarkerWritten(t *testing.T, path string, stale []byte) {
 		t.Errorf("a marker was written beside the lock: %q, %v", got, err)
 	case stale != nil && (err != nil || !bytes.Equal(got, stale)):
 		t.Errorf("the marker beside the lock reads %q, %v; want it as it was, %q", got, err, stale)
+	}
+}
+
+// requireMarksWriteNoMarker fails the test where no mark stands on the folder
+// at root, or where one would write a marker beside its lock: asked of the
+// marks themselves (MarkersOfForTest), once what raised them has answered.
+func requireMarksWriteNoMarker(t *testing.T, root string) {
+	t.Helper()
+	markers := backup.MarkersOfForTest(root)
+	if len(markers) == 0 {
+		t.Error("no mark stands on the folder while the probe's release does not answer")
+	}
+	for _, m := range markers {
+		if m != "" {
+			t.Errorf("the mark of the probe's release writes a marker beside the lock, at %s", m)
+		}
 	}
 }
 
@@ -120,10 +138,11 @@ func requireNoMarkerWritten(t *testing.T, path string, stale []byte) {
 // prompt names the stalled release; the doctor's and the scheduled snapshot's
 // as their own probes, never a restore's. This process's holder of the folder
 // is kept until the release ends, no marker is written beside the lock (once
-// the unlock has answered another process may hold it), and once the release
-// ends the mark, the holder and the lock are all let go. Before the fix the
-// release blocked its probe until it ended, unmarked, and bridge restore's
-// refusal was the folder's that did not answer.
+// the unlock has answered another process may hold it; asked of the mark
+// itself as well as of the file, whose write would be on a goroutine of its
+// own), and once the release ends the mark, the holder and the lock are all
+// let go. Before the fix the release blocked its probe until it ended,
+// unmarked, and bridge restore's refusal was the folder's that did not answer.
 func TestAProbesReleasePastItsBoundIsMarkedInItsCallersName(t *testing.T) {
 	type answer struct {
 		check backup.StuckCheck
@@ -191,6 +210,7 @@ func TestAProbesReleasePastItsBoundIsMarkedInItsCallersName(t *testing.T) {
 				requireNoMarkerWritten(t, markerPath, stale)
 
 				a := requireReturnedWithin(t, done, asked, bound+2*time.Second, "a probe whose release does not answer")
+				requireMarksWriteNoMarker(t, root)
 				switch by {
 				case restoreLook:
 					var held *backup.StillRunningError
