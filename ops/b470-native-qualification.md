@@ -978,9 +978,14 @@ cause first at every boundary: before the policy's refusal at an admission and a
 both opens' ends, and on the harness's path before the selectors
 (`openNativeContent` in `playback/native.go`), the producer's gapless check and the
 authorization's reconciliation, whose panic is contained and recorded; `Revoke`
-drops a prepared successor for the cause recorded. No byte a DAC is given changes;
-the guarded files changed (`Revoke` and `openNativeContent`, the probe cache's
-words, `internal/alsapcm`'s tests), so older harness evidence is invalid all the
-same, as at every bump. The harness admits version 49 records alone; legacy
-migration accepts versions 35 through 49 (`LegacyVersion` remains 35). No hardware
-check was run.
+drops a prepared successor for the cause recorded. Round 3 asks that cause again
+where the harness's selection refuses an entry (`openNativeContent`), so a
+revocation between the first ask and the selector is the entry's refusal, and
+`Revoke`'s body (`revoke`) answers whether the cause it recorded stands, by which
+the producer's gapless check tells its own revocation from an earlier one in the
+same words; the contained reconciliation revokes the authorization it was replacing.
+No byte a DAC is given changes; the guarded files changed (`Revoke` and
+`openNativeContent`, the probe cache's words, `internal/alsapcm`'s tests), so older
+harness evidence is invalid all the same, as at every bump. The harness admits
+version 49 records alone; legacy migration accepts versions 35 through 49
+(`LegacyVersion` remains 35). No hardware check was run.
