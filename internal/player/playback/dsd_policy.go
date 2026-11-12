@@ -437,44 +437,67 @@ func (b *Backend) probeUnit(key dacprofile.Key, bcd string, bd BoundDAC) alsapcm
 
 // readDSD computes the effective set from what it reads now (the design's
 // section 3.1), and its read side: the state, once, which the set and its
-// read side are both made from; the bound DAC from a fresh reading, its
-// unit's model read from sysfs while it is still the unit that reading
-// resolved, its PCM device's playback altsets, the DoP gain check's mixer,
-// the probe's answers, the profiles and the kernel; then the unit read again,
-// so a card renumbered while its files were read is never taken. What does
-// not read leaves no set, and DSD refused (ReasonDACUnread), its read side
-// the state's warnings of the bridge's all the same (noView).
+// read side are both made from, then the box (readBox), the set held to what
+// a landed choice's state plays alike while there is one (setOver). What does
+// not read leaves no set, and DSD refused (ReasonDACUnread), its read side the
+// state's warnings of the bridge's all the same (noView).
 func (b *Backend) readDSD() (*dsdSet, DSDView) {
-	p := b.cfg.DSD
 	st := b.dsdState()
+	r, why := b.readBox()
+	if r == nil {
+		return noSet(why, st)
+	}
+	return b.setOver(r, st)
+}
+
+// dsdReading is what one reading of the box establishes of the bound DAC
+// (readBox): the effective policy's inputs but the state, and what a set
+// made from them is computed for. A refresh makes its set from it and the
+// state; a choice's write checks its choice against it, on the state its
+// write is made from (B728 B9).
+type dsdReading struct {
+	m    alsa.UnitModel
+	key  dacprofile.Key
+	in   policy.Inputs
+	tmpl dsdSet
+}
+
+// readBox reads the bound DAC from a fresh reading of the box: its unit's
+// model read from sysfs while it is still the unit that reading resolved,
+// its PCM device's playback altsets, the DoP gain check's mixer, the probe's
+// answers, the profiles and the kernel; then the unit read again, so a card
+// renumbered while its files were read is never taken. It answers why not
+// where nothing could be read.
+func (b *Backend) readBox() (*dsdReading, string) {
+	p := b.cfg.DSD
 	if p.Bound == nil || p.Box == nil {
-		return noSet("the player has no reading of the box", st)
+		return nil, "the player has no reading of the box"
 	}
 	bd, ok := p.Bound()
 	if !ok {
-		return noSet("the box's reading of the bound DAC is stale, or the binding names no unit now", st)
+		return nil, "the box's reading of the bound DAC is stale, or the binding names no unit now"
 	}
 	same := func(u alsa.USBIdentity) bool {
 		return binding.SameUnit(u, bd.Identity) && u.DevNum > 0 && u.DevNum == bd.Identity.DevNum
 	}
 	m, err := p.Box.UnitModel(bd.Card)
 	if err != nil {
-		return noSet("the bound DAC's identity did not read: "+err.Error(), st)
+		return nil, "the bound DAC's identity did not read: " + err.Error()
 	}
 	if !same(m.USB) {
-		return noSet("the bound card is no longer the unit the box's reading resolved", st)
+		return nil, "the bound card is no longer the unit the box's reading resolved"
 	}
 	key, err := dsdstate.KeyOf(m.USB, m.Product)
 	if err != nil {
-		return noSet("the bound DAC's model does not key: "+err.Error(), st)
+		return nil, "the bound DAC's model does not key: " + err.Error()
 	}
 	alts, err := p.Box.PlaybackAltsets(bd.Card, bd.Device)
 	if err != nil {
-		return noSet("the bound PCM device's stream did not read: "+err.Error(), st)
+		return nil, "the bound PCM device's stream did not read: " + err.Error()
 	}
 	mixer := readMixer(p.Box, bd.Card, m)
 	if u, ok := p.Box.CardUnit(bd.Card); !ok || !same(u) {
-		return noSet("the bound card changed while it was read", st)
+		return nil, "the bound card changed while it was read"
 	}
 	unit := dacprofile.Unit{Key: key, BCDDevice: m.BCDDevice}
 	var answers []alsapcm.ProbeResult
@@ -484,16 +507,42 @@ func (b *Backend) readDSD() (*dsdSet, DSDView) {
 			answers = append(answers, p.Probes.Answer(pu, c))
 		}
 	}
-	d := &dsdSet{computed: true, card: bd.Card, device: bd.Device, subdevice: bd.Subdevice, enumeration: bd.Enumeration,
-		model: unitText(strings.TrimSpace(strings.TrimSpace(m.Manufacturer)+" "+strings.TrimSpace(m.Product)), m.USB)}
+	r := &dsdReading{m: m, key: key, in: policy.Inputs{Unit: unit, Profiles: p.Profiles, Kernel: p.Kernel, Altsets: alts, Probe: answers, Mixer: mixer},
+		tmpl: dsdSet{computed: true, card: bd.Card, device: bd.Device, subdevice: bd.Subdevice, enumeration: bd.Enumeration,
+			model: unitText(strings.TrimSpace(strings.TrimSpace(m.Manufacturer)+" "+strings.TrimSpace(m.Product)), m.USB)}}
 	if p.Profiles != nil {
 		if prof, ok := p.Profiles.Match(unit); ok {
-			d.profile = &prof
+			r.tmpl.profile = &prof
 		}
 	}
-	d.set = policy.Effective(policy.Inputs{Unit: unit, Profiles: p.Profiles, State: st, Kernel: p.Kernel,
-		Altsets: alts, Probe: answers, Mixer: mixer})
-	return d, viewOf(d, st, m.USB)
+	return r, ""
+}
+
+// inputs are the effective policy's inputs of r over st.
+func (r *dsdReading) inputs(st dsdstate.State) policy.Inputs { return r.in.WithState(st) }
+
+// setFor is the set r makes with st, and its read side.
+func (r *dsdReading) setFor(st dsdstate.State) (*dsdSet, DSDView) {
+	d := r.tmpl
+	d.set = policy.Effective(r.inputs(st))
+	return &d, viewOf(&d, st, r.m.USB)
+}
+
+// setOver is the set the backend publishes from r over st, and its read side:
+// r's set, held, while a choice's write that landed is not known to be durable
+// (landedChoice), to what the state it left in the file plays alike
+// (policy.Intersect, the rest refused as dsd_choice_uncertain), so what plays
+// until the next start plays under either state that start may read (B728
+// B9). Every reading holds it so, the supervisor's idle refresh among them, so
+// the state as it was before the write is never published again in this run.
+func (b *Backend) setOver(r *dsdReading, st dsdstate.State) (*dsdSet, DSDView) {
+	d, v := r.setFor(st)
+	if l := b.landedChoice.Load(); l != nil {
+		ld, _ := r.setFor(*l)
+		d.set = policy.Intersect(d.set, ld.set)
+		v = viewOf(d, st, r.m.USB)
+	}
+	return d, v
 }
 
 // RefreshDSD is the supervisor's refresh (the design's section 3.5): it
@@ -545,15 +594,20 @@ func (b *Backend) logDSDSet(d *dsdSet) {
 // the content's rate or its refusal. The occurrence keeps the set and the
 // plan it was admitted under, which the check after open, its activation and
 // reconciliation compare with. A converted rate answers no native plan: the
-// occurrence converts (occ.converts, B728 B11).
+// occurrence converts (occ.converts, B728 B11). A session whose DSD was
+// stopped, before the admission or while it read the policy, refuses it for
+// the cause recorded (revokeDSDLocked, backlog B853), before anything the
+// policy answers: a refresh whose reconciliation stopped the session while
+// the admission read the set refuses it for that, never for what the set it
+// published says of the rate (round 2).
 func (b *Backend) admitDSD(o *occ, f format.NativeDSD) (engine.NativePlan, error) {
 	// Mark before a refresh: refreshDSD contains failures while holding
 	// dsdMu, so it must never wait for this admission to finish.
 	if s := o.owner; s != nil {
 		s.mu.Lock()
 		if s.nativeRevoked {
-			s.mu.Unlock()
-			return engine.NativePlan{}, &engine.Unplayable{Reason: ReasonDACUnread, Detail: errDSDUnread.Error()}
+			defer s.mu.Unlock()
+			return engine.NativePlan{}, s.dsdRevokedLocked()
 		}
 		o.admitting = true
 		s.mu.Unlock()
@@ -565,22 +619,29 @@ func (b *Backend) admitDSD(o *occ, f format.NativeDSD) (engine.NativePlan, error
 	}
 	b.admitting(o.id)
 	cur := b.dsd.Load()
+	var (
+		plan engine.NativePlan
+		pp   policy.Plan
+		err  error
+	)
 	if o.leading || b.dsdStale() {
-		var err error
-		if cur, err = b.refreshDSD("an admission"); err != nil {
-			return engine.NativePlan{}, &engine.Unplayable{Reason: ReasonDACUnread, Detail: err.Error()}
+		var read error
+		if cur, read = b.refreshDSD("an admission"); read != nil {
+			err = &engine.Unplayable{Reason: ReasonDACUnread, Detail: read.Error()}
 		}
 	}
-	plan, pp, err := cur.selectFor(f)
-	if err != nil {
-		return engine.NativePlan{}, err
+	if err == nil {
+		plan, pp, err = cur.selectFor(f)
 	}
 	if s := o.owner; s != nil {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		if s.nativeRevoked {
-			return engine.NativePlan{}, &engine.Unplayable{Reason: ReasonDACUnread, Detail: errDSDUnread.Error()}
+			return engine.NativePlan{}, s.dsdRevokedLocked()
 		}
+	}
+	if err != nil {
+		return engine.NativePlan{}, err
 	}
 	o.admitted, o.policyPlan = cur, pp
 	return plan, nil
@@ -594,6 +655,23 @@ func (b *Backend) dsdStale() bool {
 	b.dsdMu.Lock()
 	defer b.dsdMu.Unlock()
 	return b.dsdRead.IsZero() || b.dsdNow().Sub(b.dsdRead) >= dsdTick
+}
+
+// refuseRevokedLocked refuses o, whose open is ending, for the cause its
+// session recorded where its DSD stopped (revokeDSDLocked, backlog B853) when
+// it was admitted as DSD, a plan or a conversion, and nothing has refused it
+// yet: the condition admitDSD's first check refuses by. Each open asks it
+// before the readmission (readmitDSDLocked) and the converter
+// (makeConverterLocked), whose refusals are a policy's, so a set a refresh
+// published while the open ran never refuses in the cause's place, and asks
+// it whatever the set, the set unchanged included, where the readmission
+// returns at once (round 2: a session's first occurrence was not asked, and a
+// successor was asked after its readmission). A refusal the open made, the
+// content's or the admission's own, stands. s.mu is held.
+func (s *session) refuseRevokedLocked(o *occ) {
+	if s.nativeRevoked && o.refused == nil && (o.plan != nil || o.converts()) {
+		o.refused = s.dsdRevokedLocked()
+	}
 }
 
 // readmitDSDLocked admits o again under the set published now, when it was
@@ -659,6 +737,7 @@ func (s *session) startDSDMonitor() {
 	}
 	ticks, stop := tick()
 	s.b.spawn(func() {
+		defer s.b.monitorEnded(s.id)
 		defer stop()
 		defer func() {
 			if r := recover(); r != nil {
@@ -688,7 +767,7 @@ func (b *Backend) reconcileDSD(next *dsdSet) {
 	b.mu.Unlock()
 	for _, s := range ss {
 		if step := s.reconcileDSD(next); step != "" {
-			s.stopDSD("the effective DSD set's reconciliation (" + step + ")")
+			s.stopDSD("the effective DSD set's reconciliation ("+step+")", false)
 		}
 	}
 	b.dsdJudged = next
@@ -1038,31 +1117,37 @@ func observedFrames(p *engine.NativePlan) int64 {
 }
 
 // probeSlotSkips are the probe's refusals by the device slot (Probe's
-// reserveProbe): a probe due then stays due, and the supervisor asks it again
-// once the slot is free (ProbeDSD).
-var probeSlotSkips = []ProbeSkip{ProbeSessionHolds, ProbeSessionPaused, ProbeReleasePending, ProbeReleaseUnconfirmed, ProbeRunning}
+// reserveProbe), a choice's write's configuration lease among them (B728 B9
+// PR 2): a probe due then stays due, and the supervisor asks it again once
+// the slot is free (ProbeDSD).
+var probeSlotSkips = []ProbeSkip{ProbeSessionHolds, ProbeSessionPaused, ProbeReleasePending, ProbeReleaseUnconfirmed, ProbeRunning, ProbeChoiceWrite}
 
 // dsdProbe is the probe's bookkeeping: the unit last probed; a probe asked
-// for anew (ForgetDSDProbe), and the generation each such ask moves, which a
-// probe's answers are checked against (publishProbe); a probe owed that only
-// the supervisor's next ask makes (ProbeDSDPending); and the goroutine its
-// asks run on (RequestProbeDSD, B762).
+// for anew (forced: a migration's part, ForgetDSDProbe, or a choice written,
+// oweProbe) and the count of those asks (asked), which a run's end checks
+// before it clears what is owed (settled, publishProbe); the generation,
+// which the migration's part alone moves, in the step that drops the answers,
+// and a probe's answers are checked against (publishProbe); a probe owed that
+// only the supervisor's next ask makes (ProbeDSDPending); and the goroutine
+// its asks run on (RequestProbeDSD, B762).
 type dsdProbe struct {
 	mu      sync.Mutex
 	probed  alsapcm.ProbeUnit
 	done    bool
 	forced  bool
+	asked   uint64
 	gen     uint64
 	pending bool
 	run     coalesced
 }
 
-// settled says a run of the probe owes nothing, unless a choice was written
-// since it began (gen moved), whose probe is still owed.
-func (ps *dsdProbe) settled(gen uint64) {
+// settled says a run of the probe owes nothing, unless a probe was asked
+// anew since it began (asked moved: a migration's part, or a choice written
+// for the DAC), which is still owed.
+func (ps *dsdProbe) settled(asked uint64) {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
-	if ps.gen == gen {
+	if ps.asked == asked {
 		ps.pending = false
 	}
 }
@@ -1078,13 +1163,14 @@ func (ps *dsdProbe) owe() {
 // design's section 5), on the caller's goroutine, and answers whether one is
 // still owed (ProbeDSDPending): at the player's start once the output is
 // available, when the unit's model, firmware, kernel or enumeration changes
-// (a replug, a reset, a firmware update), and after a choice was written for
-// it (ForgetDSDProbe), never on a timer. A probe the device slot refuses, a
-// session holding the device (playing, opening it, paused, releasing), a
-// Start waiting for it, or a release unconfirmed, stays due, opens nothing and
-// waits for nothing: it answers owed, and the supervisor asks again at its
-// next tick, so the probe runs once the slot is free, B4's preconditions
-// unchanged. One that ran, or met a busy node (MPD's), or found no unit, is
+// (a replug, a reset, a firmware update), after a migration's part for it
+// (ForgetDSDProbe) and after a choice was written for it (oweProbe), never on
+// a timer. A probe the device slot refuses, a session holding the device
+// (playing, opening it, paused, releasing), a Start waiting for it, a release
+// unconfirmed, or a choice's write holding the configuration lease, stays
+// due, opens nothing and waits for nothing: it answers owed, and the
+// supervisor asks again at its next tick, so the probe runs once the slot is
+// free, B4's preconditions unchanged. One that ran, or met a busy node (MPD's), or found no unit, is
 // done for that unit. Its answers are kept (alsapcm.ProbeCache), each
 // accepted native format and DoP carrier recorded as the tuple's
 // driver_accepted under the kernel, and the policy read again, all under the
@@ -1113,14 +1199,16 @@ func (b *Backend) probeDSD(ctx context.Context, cond ProbeConditions) (pending, 
 	ps := &b.probeState
 	// What its answers are checked against before they change anything
 	// (publishProbe), read before anything else: the probe's generation,
-	// which a choice written for the DAC moves, and the Starts that took the
-	// device slot.
+	// which a migration's part for the DAC moves, and the Starts that took the
+	// device slot; and the asks for a probe anew so far, which a choice
+	// written moves too, so a run that ends owing nothing, or publishes after
+	// the write, clears no ask made after it began (settled, publishProbe).
 	ps.mu.Lock()
-	gen := ps.gen
+	gen, asked := ps.gen, ps.asked
 	ps.mu.Unlock()
 	starts := b.starts.Load()
 	settled := func() (bool, bool) {
-		ps.settled(gen)
+		ps.settled(asked)
 		return false, false
 	}
 	bd, ok := p.Bound()
@@ -1160,7 +1248,7 @@ func (b *Backend) probeDSD(ctx context.Context, cond ProbeConditions) (pending, 
 	if ctx.Err() != nil {
 		return false, false
 	}
-	if why := b.publishProbe(ctx, gen, starts, bd, unit, epoch, rep); why != "" {
+	if why := b.publishProbe(ctx, gen, asked, starts, bd, unit, epoch, rep); why != "" {
 		b.dsdLog().Info("player: the silent probe's answers are dropped, and a probe is owed", "why", why)
 		return true, false
 	}
@@ -1178,12 +1266,18 @@ func (b *Backend) probeDSD(ctx context.Context, cond ProbeConditions) (pending, 
 }
 
 // publishProbe takes a probe's answers as current, in one step under the
-// probe's lock, which ForgetDSDProbe takes too: its report kept in the
-// probe's cache, its unit done, a probe asked anew satisfied. It answers ""
-// once it has taken them, and otherwise why they are dropped, nothing of them
-// kept and a probe owed: its context ended (its supervisor has gone); a
-// choice was written for the DAC since it began (gen, ForgetDSDProbe), whose
-// probe is owed; or, decided in one step under the backend's lock (takeProbe),
+// probe's lock, which ForgetDSDProbe and oweProbe take too: its report kept
+// in the probe's cache, its unit done, and a probe asked anew satisfied only
+// where none was asked since it began (asked): a choice written meanwhile
+// owes a probe of its own, which this one, begun before the write, never
+// settles, even where the write took the configuration lease in the window
+// between this probe's end of the device slot (endProbe) and this step (B728
+// B9 PR 2); its answers, the kernel's and the descriptors', which a choice
+// does not change, are kept all the same. It answers "" once it has taken
+// them, and otherwise why they are dropped, nothing of them kept and a probe
+// owed: its context ended (its supervisor has gone); a migration's part for
+// the DAC was made since it began (gen, ForgetDSDProbe), whose probe is owed;
+// or, decided in one step under the backend's lock (takeProbe),
 // a Start took the device slot since (starts), which a session holds or held,
 // the binding no longer resolves to the unit it probed (bd: a replug, a
 // reset, the DAC gone, a reading gone stale), or the cache refused the
@@ -1198,7 +1292,7 @@ func (b *Backend) probeDSD(ctx context.Context, cond ProbeConditions) (pending, 
 // session's lock or gmu under b.mu, and nothing takes b.mu under the cache's
 // lock (the cache calls nothing back); nothing under any of them blocks: they
 // compare what is in memory, and Record writes the cache's map.
-func (b *Backend) publishProbe(ctx context.Context, gen, starts uint64, bd BoundDAC, unit alsapcm.ProbeUnit, epoch alsapcm.ProbeEpoch, rep alsapcm.ProbeReport) string {
+func (b *Backend) publishProbe(ctx context.Context, gen, asked, starts uint64, bd BoundDAC, unit alsapcm.ProbeUnit, epoch alsapcm.ProbeEpoch, rep alsapcm.ProbeReport) string {
 	p := b.cfg.DSD
 	ps := &b.probeState
 	ps.mu.Lock()
@@ -1209,7 +1303,7 @@ func (b *Backend) publishProbe(ctx context.Context, gen, starts uint64, bd Bound
 	case ctx.Err() != nil:
 		why = "its supervisor has gone"
 	case ps.gen != gen:
-		why = "a choice was written for the DAC while it ran"
+		why = "a migration's part for the DAC was made while it ran"
 	default:
 		why = b.takeProbe(starts, bd, now, ok, epoch, rep)
 	}
@@ -1217,7 +1311,10 @@ func (b *Backend) publishProbe(ctx context.Context, gen, starts uint64, bd Bound
 		ps.pending = true
 		return why
 	}
-	ps.probed, ps.done, ps.forced, ps.pending = unit, true, false, false
+	ps.probed, ps.done = unit, true
+	if ps.asked == asked {
+		ps.forced, ps.pending = false, false
+	}
 	return ""
 }
 
@@ -1316,12 +1413,13 @@ func (b *Backend) noteProbed(key dacprofile.Key, bcd string, rep alsapcm.ProbeRe
 }
 
 // ForgetDSDProbe drops the probe's answers for key's model and makes a probe
-// due, as a choice written for the DAC does (the design's section 5): the
-// migration's part for a DAC, and B9's write. The probe is owed
-// (ProbeDSDPending), which the supervisor asks at its next tick, since no
-// snapshot comes of an unchanged DAC, and the probe's generation moves, in the
+// due: the migration's part for a DAC (the design's section 5). The probe is
+// owed (ProbeDSDPending), which the supervisor asks at its next tick, since
+// no snapshot comes of an unchanged DAC, and asked anew (asked), so a run
+// begun before it leaves it owed; and the probe's generation moves, in the
 // step the answers are dropped, so a probe under way keeps nothing of what it
-// asked before the write (publishProbe).
+// asked before the part was made (publishProbe). A choice written for the DAC
+// (B9) makes a probe due and owed too, and drops nothing (oweProbe).
 func (b *Backend) ForgetDSDProbe(key dacprofile.Key) {
 	ps := &b.probeState
 	ps.mu.Lock()
@@ -1330,6 +1428,7 @@ func (b *Backend) ForgetDSDProbe(key dacprofile.Key) {
 		p.Probes.Forget(key.Canonical())
 	}
 	ps.gen++
+	ps.asked++
 	ps.forced, ps.pending = true, true
 }
 

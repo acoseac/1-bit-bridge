@@ -95027,3 +95027,500 @@ before the fix). `go test -race -count=1 -timeout 120m -p 2
 the brief asked for the packages. The rules patch applies at the round's
 commit, and `scripts/check-doc-budgets.py` is clean on a copy with it applied
 (`cli-serve.md` 97,290 bytes). Windows is the PR's CI windows job's to show.
+
+## 2026-11-12 — B728 B9 PR 2: a DAC's DSD choice written only while the player is stopped, and B853
+
+Base: main at 3a6b924e (B9 PR 1, #1448, at 4b21e2ce); branch `feat/b728-b9-pr2`. The owner
+(2026-11-10): "Stop playback to change DSD". A DAC's choice is written only while the player is
+quiescent; #1434's write beside what plays (19 review rounds, its tip 0df60ade) is withdrawn, PR 1
+moved its lifecycle fixes to main, and this PR rebuilds the write in the backend, stop-only, with
+B853's fix. The route `PUT /v1/outputs/{id}/dsd`, `bridgeDSDChoice`, serve's adapter, PROTOCOL.md
+and its iOS mirror are PR 3's; the console is B13's, the app I4's. No hardware check was run.
+
+**What came back from #1434, by behaviour, never by cherry-pick.** `policy/choice.go`,
+`Inputs.WithState` and `choice_test.go`'s 16 cases, as they were (`Choose`: the four checks that
+read the state, in order, then the write; `StoredRevision`; `Intersect`; `dsd_choice_uncertain`).
+In the backend: the outcomes, `would_interrupt` dropped and `playback_not_stopped` added;
+`ChoiceRequest` without `Interrupt`; `ChoiceResult`; the log line (the key and the modes, no
+serial or port); the writes' turn, taken before the lease, so a second write waits within its
+context and answers `stale` with the revision the first made durable; `choiceFenced`;
+`dsdWrite`; `readBox` and `setOver`, `landedChoice` and the intersection; `oweProbe`, with
+`dsdProbe.asked` split from the generation; `playbacktest.MemStore`'s `Land`, `LandedState` and
+`Landed`, and `SetSeamsForTest`. #1434's `dsd_choice_test.go` (its 14 cases, adapted, beside the
+new `TestARefreshAfterALandedWriteKeepsTheIntersection`), its `dsd_choice_work_test.go`'s two
+(`…AChoiceWrittenBesideAProbeDropsNothingAndStaysAsked` became
+`TestAWriteWaitsForAProbeUnderWayAndOwesItsOwn`: the probe is now waited for, never run beside
+the write; `TestAChoiceWriteIsAWriteOfTheDSDState`), and from its internal file the checks' order,
+the lock order and the panic case (`…AWriteThatPanicsLeavesNothingPending` became
+`TestAWriteThatPanicsLetsGoOfItsLeaseAndItsTurn`). Main's probe words that said a choice forgets
+the probe's answers (`dsd_policy.go`, `dsd_work.go`, `internal/alsapcm/probe_cache.go`, and
+`dsd_work_test.go`'s two subtests, now a migration's part) are worded as #1434 worded them.
+
+**What did not come back.** `pendingChoice`, `pendingFor`, `changes`, `planAt`,
+`writeInterrupts`, `settleChoice`, `lockSettled`, `awaitWrite`, `settleOpen`, `reaskDSD`,
+`refusedUnder`, `dsdJudgement.interrupts`, `handedOff`, `maxChoiceRounds`, `errChoiceRound`,
+`errWouldInterrupt`, and every choice wait in the session, open, native, producer, convert and
+reporter code: nothing waits for, classifies or re-asks a pending write. Retired with them: the
+rest of #1434's internal file (`…TheWriteAsksWhatReconciliationDoes`,
+`…AWriteCountsWhatItInterruptsNotWhatTheBoxDoes`,
+`…AnOccurrenceWhoseRateTheWriteChangesWaitsAtTheEndOfItsOpen`,
+`…TheProducerHoldsAnOccurrenceAPendingWriteWouldReplan`, `…ALostReconciliationIsTriedOnceMore`),
+its `dsd_choice_round2_test.go` and `internal/alsapcm/playback_dsd_choice*_test.go`.
+
+**B853.** `admitDSD` refused every DSD entry of a session with `nativeRevoked` set as
+`dsd_dac_unread`, and `openSuccessor` a successor whose open ended after it as `native_revoked`,
+"DSD permission revoked", whatever set the flag. Four paths set it: `stopDSD` from
+`refreshDSD`'s containment of a policy reading (the word right) and from `reconcileDSD`'s
+contained panic (its only caller there; the reconciliation's ordinary revocations call `Revoke`),
+`Revoke` itself, and the qualification path's `reconcilePermission`, which sets the flag directly
+and calls `Revoke` only where a native output is active (Codex's review of the brief, finding 4).
+The reconciliation's contained panic records the session's fault (`faulted`, `ReasonFailed`),
+which `checkDSDActivation` answers as `backend_failed` with its words: the set did read, and the
+session's occurrences were never judged against it, so neither `native_revoked` nor
+`dsd_dac_unread` says what happened; that path's word is `backend_failed`. The cause is now
+recorded where the flag is set (`revokeDSDLocked`, under the session's lock); a failed reading
+replaces any earlier cause, word and detail, and nothing replaces it; otherwise the first stands.
+Both of `admitDSD`'s refusals and `openSuccessor`'s answer the record (`dsdRevokedLocked`). Red on
+main (a1b08bde's tests over bc236545's code):
+
+- the rig, `TestADSDEntryAfterAnOrdinaryRevocationIsRefusedForIt` (the queue of
+  `TestARevocationOfAPreparedSuccessorLetsThePCMPlayOn` extended past `b` with a PCM entry and
+  a DSD one): the DSD entry skipped `dsd_dac_unread`, "the effective DSD policy did not read",
+  where the revocation's reason is "an occurrence's DSD plan left the effective set, and the
+  engine hands nothing off again";
+- `TestAnEntryAfterTheSessionsDSDStoppedIsRefusedForTheCause`: a reconciliation that panicked,
+  an ordinary revocation, and the two in either order each refused `dsd_dac_unread` (the
+  unread-only case and the pairs with an unread reading passed on main, as they should);
+- `TestARevocationDuringAnAdmissionIsItsRefusal` (admitDSD's second check): `dsd_dac_unread`,
+  want `native_revoked`;
+- `TestASuccessorWhoseOpenEndsAfterARevocationIsRefusedForIt`: `native_revoked`, "DSD
+  permission revoked", want the revocation's reason;
+- `TestAnAuthorizationReplacedAsASuccessorOpensRefusesItForItsOwnReason`: the same, want
+  "selected DSD policy is no longer eligible".
+
+Controls, each committed first, restored from memory after, `git status` clean: the two words
+swapped (red: the rig, three internal cases and PR 1's
+`TestContainmentFencesAnAdmissionWithoutWaitingForIt`); no cause recorded (red: the rig and five
+internal tests, PR 1's containment case among them); a failed reading that does not stand over an earlier cause, and the last cause
+standing whatever it is (each red in `TestAnEntryAfterTheSessionsDSDStoppedIsRefusedForTheCause`).
+The other reads of the flag (the native open's error, the activation's fence, the producer's
+take-back) answer no entry's refusal and were left: `openSuccessor` refuses before the native
+open is reached.
+
+**The policy's half.** Ported verbatim; controls: the compare-and-set removed (red:
+`TestTheChecksThatReadTheStateRunInTheirOrder` answered `dop_confirmation_required` for
+`stale`, and `TestAStaleBaseIsRefusedAndAMatchingOneMovesTheRevision`), and the warnings left
+uncleared (red: `TestAWriteClearsItsDACsWarnings`,
+`TestAWriteOverAStateThatDidNotReadSeesTheDACsOffers`).
+
+**The configuration lease and the write.** `Backend.lease`, beside `holder`, `probing`,
+`waiters` and `terminalUnconfirmed`, taken under the backend's lock in the step that finds no
+session record, no holder and no release unconfirmed, else `playback_not_stopped` at once. A
+Start waits for it before it registers (`admitStart`, with no lock held), giving the wait up at
+its context's end or its release, holding nothing; it then meets its Release in either order
+(`session.abandon`), letting its occurrence's reservation go, so no record is left to refuse
+every later write (Codex's finding 1). `reserveProbe` refuses the slot while the lease is held
+(`ProbeChoiceWrite`, in `probeSlotSkips`); a write that finds a probe holding the slot claims the
+lease first, waits for the probe within its context, then reads the DAC. A probe begun before the
+write never settles the probe the write owes (`oweProbe` moves `asked`, which a run reads as it
+begins), a run parked between `endProbe` and `publishProbe` included. The write answers in the
+order the brief gives: `bad_request`, the turn, the writes closed by the player's stop
+(`persist_failed`), `playback_not_stopped`, no DSD policy (`state_unreadable`, before the DAC's
+reading, which is that policy's: Codex's finding 6), `dac_unavailable`, `dac_changed`, no state
+(`state_unreadable`), the fence (`persist_uncertain`), then one `Store.Update` running
+`policy.Choose`. A `policy.ChoiceRefusal` keeps its word, a stale one reading the policy again
+before it answers (Codex's finding 3); `ErrNotWritable` is `state_unreadable`, `ErrLandedNotHeld`
+`persist_uncertain`, `atomicwrite.ErrLanded` `persist_uncertain` with `landedChoice` recorded,
+which every later reading applies, so the supervisor's refresh keeps the intersection for the
+rest of the run; anything else `persist_failed`. `dsd_choice_uncertain` stays off the wire until
+PR 3 publishes it: serve's adapter sends it as `dsd_state_unreadable` (`wireDSDReason`; Codex's
+finding 5), which `TestAnUncertainChoiceGoesOutAsAWordTheProtocolNames` asks of the serialized
+GET after an `ErrLanded` write and again after `RefreshDSD`. The engine's gap is a precondition:
+between a release the engine acknowledged and the Start that follows it the backend holds no
+record, so PR 3's adapter asks the engine's owner goroutine, which checks the transport is stopped
+and grants the reservation in one step, the persistence off that goroutine, with a test that
+parks a Play between the check and its backend registration (Codex's finding 2). A crash after
+the rename and before the directory's sync may leave either choice.
+
+The lease and write cases drive an API main does not have (`ChooseDSD`), so what each pins is
+shown by the controls the brief names, each committed first, run with the tests it names, and
+restored (`git status` clean after each batch); every one went red as predicted:
+
+| Control | Red |
+|---|---|
+| the busy check dropped | `TestEachStateThePlayerIsNotStoppedInRefusesTheWrite` (PCM playing written, the state written, the revision moved), `TestAStartBetweenItsRegistrationAndItsHoldRefusesTheWrite`, `TestEveryRefusalChangesNothing`, `TestTheWritesChecksAreAnsweredInTheirOrder` |
+| the holder alone checked | `TestAStartBetweenItsRegistrationAndItsHoldRefusesTheWrite`, `TestEveryRefusalChangesNothing`, `TestTheWritesChecksAreAnsweredInTheirOrder` |
+| a Start skips the lease | `TestAWriteWaitsForAProbeUnderWayAndOwesItsOwn` (registered without waiting), `TestAProbeAskedDuringAWriteIsRefusedAndStaysOwed`, `TestAStartGivingUpItsWaitForTheLeaseLeavesNoRecord`; the rig's `TestAStartDuringAWritePlaysByTheChoiceItWrote` |
+| the lease let go before the publish | `TestAProbeAskedDuringAWriteIsRefusedAndStaysOwed` (the probe asked the DAC, a Start answered without waiting) |
+| `reserveProbe` ignores the lease | `TestAProbeAskedDuringAWriteIsRefusedAndStaysOwed` |
+| an abandoned Start returns with no rendezvous | `TestAStartGivingUpItsWaitForTheLeaseLeavesNoRecord` (its reservation held, a record left, the next write `playback_not_stopped`) |
+| the fence removed | `TestTheBackendsOwnFenceRefusesEveryLaterWrite`, `TestTheWritesChecksAreAnsweredInTheirOrder` |
+| the epoch read after the turn | `TestAStaleAnswerNeverCarriesARevisionAnotherWriteHasPassed` (revision 2, want 1) |
+| `settled` keyed on the generation | `TestAWriteWaitsForAProbeUnderWayAndOwesItsOwn`, `TestAProbeEndingAsAWriteTakesTheLeaseLeavesTheWritesProbeOwed` |
+| the uncertain word's mapping removed | `TestAnUncertainChoiceGoesOutAsAWordTheProtocolNames`, after the write and after the refresh |
+| a reading that does not hold the set to the intersection | `TestALandedWriteIsUncertainAndPublishesWhatBothStatesPlay`, `TestARefreshAfterALandedWriteKeepsTheIntersection` |
+| a stale answer that reads nothing again | `TestARevisionMovedBeforeTheStoresWriteIsStale`, `TestAStaleAnswerNeverCarriesARevisionAnotherWriteHasPassed` |
+| no DSD policy answered after the DAC's reading | `TestTheWritesChecksAreAnsweredInTheirOrder` |
+
+The first run of "a Start skips the lease" in the playback package went red only at go test's
+ten-minute deadline: `TestAWriteWaitsForAProbeUnderWayAndOwesItsOwn` waited in a select with no
+watchdog for the Start's wait for the lease, which the control skipped, while the write and the
+probe stayed parked. The select now fails as the Start registers without waiting, and on the
+watchdog, and every other wait of the choice's tests is bounded (20f22bea, ae4716f6); rerun, the
+control went red in under a second, three tests naming it.
+
+**Qualification version 49.** The guarded files changed (`playback/native.go`'s `Revoke`
+records its cause; `internal/alsapcm`'s probe cache words and tests); no byte a DAC is given
+changes. The runbook names 49 in its five current places and says what it covers;
+`ops/History-b470-native.md` records it beside 48.
+
+The runs, at 72e4673e, in one build-slot session on legion0 (Linux, Go 1.27.3, the Makefile's
+tags, `TMPDIR` on disk):
+
+| Run | Result |
+|---|---|
+| `make fmt`, then `git status --porcelain` | exit 0, the tree clean; the pinned gofmt lists none of the branch's Go files (and lists a misformatted probe, so it ran) |
+| `make vet`; `GOOS=windows make vet`; `GOOS=linux GOARCH=386 make vet` | exit 0 each |
+| `make docs-check` | exit 0 (the rules patch's budgets measured on a patched copy: CLAUDE.md 83.5%, worst load 77.8%) |
+| `go run ./scripts/qualification-version -base 3a6b924e -head HEAD` | qualification version OK |
+| `-race -count=50 -v`, the branch's 31 new or changed playback tests | 4,500 PASS, 0 FAIL, 0 SKIP; 10.0 s |
+| the same, alsapcm's 5 (the rig's busy states, the Start during a write, B853's rig case, the probe cache's two) | 550 PASS, 0 FAIL, 0 SKIP; 27.0 s |
+| the same, policy's 16 | 1,750 PASS, 0 FAIL, 0 SKIP; 2.6 s |
+| the same, `TestAnUncertainChoiceGoesOutAsAWordTheProtocolNames` and `TestQualificationRunbookVersion` | 50 and 300 PASS, 0 FAIL, 0 SKIP |
+| `go test -race ./internal/player/... ./internal/alsapcm/` | 16 packages ok; 87.2 s |
+| `go test ./internal/api/...` (the vocabulary guards) | ok; 38.1 s |
+| `go test ./cmd/bridge/` | ok; 536.4 s |
+
+The rules patch (output.md's new section and its B853 bullet, player.md's silent-probe entry
+with "Samples reach the DAC" moved to its History to make room, the eight build-ci-tests
+entries, CLAUDE.md's rows, and their long forms) was checked on a copy of the tree: it applies
+to the branch (`git apply --check`), `verify_moves.py --base HEAD` passes on the move alone and,
+on the whole patch, misses only the silent-probe entry's two edited copies, each with its
+successor; `TestEveryCitedTestNameExists` caught a ghost citation planted in the copy and passed
+without it.
+
+## 2026-11-12 — B728 B9 PR 2 round 2: B853's cause at every boundary, and the choice's tests fail instead of hanging
+
+Base: 4c63bfab (`orch/b9p2`: round 1 and its rules commit), PR #1453. Each item was checked against
+the code before it was fixed.
+
+**Item 1: the cause before the policy's refusal, at the admission and both opens.** At 4c63bfab
+`admitDSD` returned `selectFor`'s error before its second check of the cause (dsd_policy.go
+625-627); `openSuccessor` ran `readmitDSDLocked` before its check (session.go 975-981), so a
+readmission under a replaced set refused first; and `start` had no check, `readmitDSDLocked`
+returning at once while the set is unchanged (session.go 556, dsd_policy.go 664). Red, the new
+cases over that code:
+
+- `TestAReconciliationThatPanicsDuringAnAdmissionIsItsRefusal` (at `Seams.Admitting`, a refresh
+  that removes the DAC's native DSD and whose reconciliation panics): refused `native_not_offered`,
+  "the DAC offers no native DSD format at this rate", for `backend_failed`;
+- `TestASuccessorWhoseOpenEndsAfterAPanickedReconciliationIsRefusedForIt` (at `Seams.Opened`, the
+  successor holding its old admission): the same;
+- `TestARevocationAsTheFirstOccurrenceOpensIsItsStartsRefusal`: the set unchanged, the Start
+  answered "the device could not be opened: DSD permission revoked", reported one native plan and
+  started a DSD monitor; the set replaced as it opened, refused `native_not_offered`; each for
+  `native_revoked` with the revocation's reason.
+
+The fix: `admitDSD` asks the cause after the set is read and before anything the policy answers,
+the refresh's refusal included (the same words where the refresh's own containment stopped the
+session); and each open's end asks it first (`refuseRevokedLocked`), with the condition
+`admitDSD`'s first check refuses by (admitted as DSD, a plan or a conversion, and nothing refused
+yet), whatever the set. How the brief's "a DoP fallback or an unrelated format refusal must behave as
+it does today when only native transport is revoked" was read: the check keys on `nativeRevoked`,
+the session-wide stop, which a tuple made unavailable on the harness's path (`next.unavailable`,
+where a DoP plan may stand in) does not set, and a refusal the open made (the budget, DSD512, an
+empty decode, a transport) stands. Controls, predicted before the runs: the policy's return first
+again at the admission, the readmission first again at a successor's open and at the first
+occurrence's, and the first occurrence's check removed: each red, its own case alone, eleven of
+the twelve B853 cases green (the third control the replaced-set subcase alone, the fourth both).
+
+**Item 2: the harness's path (`cfg.DSD` nil, an Authorization).** Traced through the three sites
+the brief names, and a fourth found on the way, each red over the code before its fix:
+
+- the selectors (`selectNative`, `selectTransition`) answered a revoked permission as no approval
+  (`dsd_not_in_this_release`, "native DSD here needs an owner-approved plan, and this backend holds
+  none") for an entry after an ordinary revocation: `openNativeContent` (guarded) now asks the
+  cause first on that path (`occ.stoppedCause`);
+- the producer's gapless check, a revocation coming while it read the record (through the
+  Authorization's `Healthy`), rebuilt the dropped successor's refusal from its error, "DSD
+  permission revoked": the cause recorded before its own revocation now stands;
+- the authorization's reconciliation dropped a successor an earlier revocation had dropped, again,
+  "selected DSD policy is no longer eligible", and dropped before it recorded: it records first,
+  leaves what is dropped and drops for the cause recorded; and later entries answered no approval
+  (the selectors' fix);
+- a panic in that reconciliation reached its caller (the session's monitor runs it on a goroutine
+  `spawn` recovers nothing on; `RefreshAuthorization` on its caller's) and recorded nothing: it is
+  contained as a policy reconciliation's is, `stopDSD` recording `backend_failed` and the fault,
+  the session's lock taken through `lockHold`; the case makes it panic at a seam only a test sets
+  (`Seams.ReconcilingPermission`), the only callback inside it being `Revoke` with an active native
+  output, which no test here can build outside the native-integration overlay;
+- `Revoke` (guarded) dropped a prepared successor for its own reason whatever stood: after a failed
+  reading it gave `native_revoked` for `dsd_dac_unread`, after a reconciliation that panicked the
+  same for `backend_failed`; it drops for the cause recorded, its own where nothing stood.
+
+With nothing recorded each answers as it did (the nothing-recorded subcases, green before and after:
+a session with no permission keeps no approval; a gapless check that fails with no earlier cause
+keeps its error; a reconciliation with no earlier cause drops for its own word). Controls: the
+harness's check removed, the producer's earlier-cause branch removed, the containment removed and
+`Revoke`'s drop back to its own reason: each red as predicted, but for one line, the containment
+case's later entry under the first, which stayed green: the containment revokes no permission, so
+the selector admits that entry and `refuseRevokedLocked` refuses it at its open's end, a second
+layer. Left, named for the backlog: a revocation after the first occurrence's open has ended and
+before its native open still makes the Start fail at `openNativeOutput` ("DSD permission revoked",
+native.go 207 at 8faf8930), a device's failure, not the recorded cause.
+
+**Item 3: three tests that would wait instead of failing.** `TestAStartDuringAWritePlaysByTheChoiceItWrote`
+registered its gate's release before the rig, so the rig's stop, which waits for the parked write,
+ran first; `TestAWriteBackOfARevisionReadInTheWindowIsAnsweredWithTheDurableOne` parked its write
+inside a Once only the body released; `TestAStartIsAdmittedAfterAWriteThatDidNotLand` made a
+synchronous Start and a synchronous write that a leaked lease or turn would hold to the package's
+timeout. The release is registered after the rig; the write parks outside its mark (`heldOnce`),
+its gate let go on cleanup apart from what it holds and the writes joined within a bound
+(`joinWithin`, 10 s); and before each synchronous call the case asserts that no write holds the
+lease or the turn (`playback.ChoiceHeldForTest`). Proofs, temporary mutations restored from memory:
+a failure injected while the write is parked ended the first case in 0.06 s, and in 60.10 s, the
+rig's watchdog, with round 1's order; a failure injected before the gate's release ended the second
+in 0.00 s, and with the writer kept blocked past its release the join said so after 10.01 s; round
+1's lease release removed failed the third at once (0.00 s) "before the Start: ... the configuration
+lease (true) or the writes' turn (false)", and the turn's release removed, the same naming the turn.
+
+Version 49 covers round 2's guarded changes; its records say so.
+
+The runs, at c1eb858a, on legion0 (Linux, Go 1.27.3, the Makefile's tags, `TMPDIR` on disk), the
+gate in one build-slot session and CI's two native-integration invocations in a second:
+
+| Run | Result |
+|---|---|
+| `make fmt`, then `git status --porcelain` | exit 0, the tree clean; the pinned gofmt lists none of the round's twelve Go files |
+| `go vet` with the tags: linux/amd64, windows/amd64, linux/386 | exit 0 each |
+| `make docs-check` | exit 0 |
+| `go run ./scripts/qualification-version -base 3a6b924e -head HEAD` | qualification version OK |
+| `-race -count=50 -v`, the round's ten new or edited playback tests and six whose code it changed (round 1's four B853 cases, `TestGaplessNativeRechecksPermission`, `TestRevokeKeepsPCMWithPreparedDSD`) | each 50 times; 2,000 PASS with their subtests, 0 FAIL, 0 SKIP; 15.5 s |
+| the same, alsapcm's 3 (the Start during a write, B853's rig case, the states that refuse a write) | 450 PASS, 0 FAIL, 0 SKIP; 24.4 s |
+| the same, `TestQualificationRunbookVersion` | 300 PASS, 0 FAIL, 0 SKIP |
+| `go test -race -timeout 120m ./internal/player/...` | 15 packages ok; 44.7 s |
+| `go test -race -timeout 120m ./internal/alsapcm/` | ok; 77.3 s |
+| `go test -race -timeout 120m ./cmd/bridge/` | ok; 1,560.6 s |
+| CI's native-integration invocations (`scripts/native-integration-overlay.py`, `-race`) | cmd/bridge 83 of 83, playback 79 of 79, every case the job names |
+
+The rules patch (output.md's B853 line and its long form, and one build-ci-tests entry) was
+checked on a copy of the tree: it applies to the branch, the budgets hold (CLAUDE.md 83.5%, worst
+load 78.3%), `verify_moves.py --base HEAD` misses only the B853 line's two edited copies, each with
+its successor, and `TestEveryCitedTestNameExists` caught a ghost citation planted in the copy and
+passed without it.
+
+## 2026-11-12 — B728 B9 PR 2 round 3: a cause recorded during selection still wins, and the round-2 tests leave nothing running
+
+Base: fe8068c9 (`orch/b9p2`: round 2 and its rules commit), PR #1453. Each item was checked
+against the code before it was fixed, and each fix's case was red first (82fe1f40, two inert
+seams with it: `Seams.Selecting` and `Seams.MonitorEnded`).
+
+**Item 1: a revocation between the cause's ask and the harness's selector.** `openNativeContent`
+asked `o.stoppedCause()` and let go of the session's lock before `selectNative`, `selectTransition`
+or the session's cached refusal (`o.dsdRefusal`, an approval that did not read at its start)
+answered. A revocation in that gap (an ordinary `Revoke`, or the authorization replaced: its record
+gone, `RefreshAuthorization` and `reconcilePermission`) records its cause and revokes the
+permission; the selector answered no approval, `dsd_not_in_this_release`, and the cached path its
+own refusal, `dsd_approval_unavailable`; `refuseRevokedLocked` passes over an entry refused already.
+Red, a writer parked in the gap (`Seams.Selecting`), each of the three paths and each writer: no
+approval where `native_revoked` "the test's revocation" or "selected DSD policy is no longer
+eligible" was wanted, and the cached refusal on its path. The fix: a selector's refusal and the
+cached one are set in the step that asks the cause again, under the session's lock
+(`refuseAfterSelection`). Every writer records its cause before it revokes the permission: `Revoke`
+and `reconcilePermission` in one hold of the session's lock, the containment of a panic in
+`reconcilePermission` in `stopDSD`'s hold and then the revocation in a hold of its own, a session's
+start that finds a cause recorded in its own hold (round 4's correction: this said one step under
+that lock for every writer), so a selector that found the permission revoked finds the cause there,
+and no window remains after the re-ask: a refusal set before a later revocation was made before it.
+With nothing recorded each path answers as it did (admitted; the cached refusal). Production's
+admission asks the cause under the lock it decides in (`admitDSD`) and is unchanged.
+
+**Item 2: the prepared-entry test's monitors.** Each prepared successor's open
+(`TestARevocationDropsAPreparedEntryForTheCauseRecordedFirst`) started the session's DSD monitor,
+which ends with the session's `down`, never its context; the rig cancelled the context alone, so
+each subcase left one refreshing the policy every 100 ms for the life of the process. The rig's
+cleanup now closes `down` once, under the session's lock (a release of a session that never
+started closes it first, which a case pins), joins the monitor by its end (`Seams.MonitorEnded`,
+deferred first in its goroutine) and then every goroutine of the backend's (`Wait`), each within
+10 s; the prepared-entry case asserts that it started the monitor. Red before the close: each
+subcase failed at its cleanup after 20.00 s, "the session's DSD monitor did not end within 10s of
+the session's end" and "1 goroutines still run". The rig's cases add their seams to the rig's
+rather than replace them.
+
+**Item 3: an earlier revocation in the gapless check's own words.** The producer's gapless check
+answered its check's error wherever the cause recorded read as its own revocation's words
+(`gaplessRevoked`), so an ordinary revocation given those words during the check lost to the
+check's error. Red: "DSD permission revoked" where the earlier revocation's "gapless DSD
+authorization changed" was wanted. The fix: `revokeDSDLocked` answers the count of the cause it
+recorded (`revokedSeq`), 0 where an earlier cause stood; `Revoke` delegates to `revoke`, which
+passes it on; the producer keeps the check's error only where its own revocation recorded the
+cause and it still stands, decided in the step that records it, never by words or by a reading
+before the call. Round 2's case (nothing recorded before the check failed: the check's error)
+is unchanged and green.
+
+**Item 4: the contained reconciliation's authorization.** The containment of a panic in
+`reconcilePermission` recorded `backend_failed` with the fault's words and the fault (`stopDSD`)
+and left the session's permission live: both selectors admitted under it after the containment,
+which round 2's case could not see, the fault stopping the producer. Red: "the authorization ...
+is live", both selectors answering nil. The fix: once the cause is recorded, the containment
+revokes the permission the reconciliation was replacing, as a failed reading of it does. It holds
+nothing: the hold's deferred release lets go of the session's lock before the recover runs (a
+panic before the hold took nothing), which the case checks (`TryLock`); the cause recorded is
+round 2's, `backend_failed` with "player backend: the DSD authorization's reconciliation
+panicked; the bridge's log has why".
+
+Controls, predicted before the runs, each restored from memory: the selectors' re-ask dropped
+turned the four selector cases red alone; the cached refusal's re-ask, its two cases; the rig's
+close of `down` removed, the prepared-entry case's three subcases, 20.00 s each; the close's guard
+removed, a panic "close of closed channel" in the guard's case; the producer deciding by the
+cause's words again, the identical-words case alone, round 2's control green; the containment's
+revocation removed, the containment case alone. Not run: the containment revoking before it
+records, which no seam parks between; the order keeps the invariant item 1's re-ask rests on.
+
+Version 49 covers round 3's guarded changes (`openNativeContent`, `Revoke`); its records say so.
+
+The runs, at 8b6abad5, in one build-slot session on legion0 (Linux, Go 1.27.3, the Makefile's
+tags, `TMPDIR` on disk):
+
+| Run | Result |
+|---|---|
+| `make fmt`, then `git status --porcelain` | exit 0, the tree clean |
+| `go vet` with the tags: linux/amd64, windows/amd64, linux/386 | exit 0 each |
+| `make docs-check` | exit 0 |
+| `go run ./scripts/qualification-version -base 3a6b924e -head HEAD` | qualification version OK |
+| `-race -count=50 -v`, the round's three new playback tests, the seven it edited or whose rig it changed, and seven beside them whose code it changed | each 50 times; 2,350 PASS with their subtests, 0 FAIL, 0 SKIP; 27.8 s |
+| the same, alsapcm's B853 rig case (`Revoke` through the backend) | 50 PASS, 0 FAIL, 0 SKIP |
+| the same, `TestQualificationRunbookVersion` | 300 PASS, 0 FAIL, 0 SKIP |
+| `go test -race -timeout 120m ./internal/player/...` | 15 packages ok; 48.5 s |
+| `go test -race -timeout 120m ./internal/alsapcm/` | ok; 77.6 s |
+| `go test -race -timeout 120m ./cmd/bridge/` | ok; 1,558.1 s |
+| CI's native-integration invocations (`scripts/native-integration-overlay.py`, `-race`) | cmd/bridge 83 of 83, playback 79 of 79, every case the job names |
+
+The rules patch (output.md's B853 line and its long form, and one build-ci-tests entry) was
+checked on a copy of the tree: it applies to the branch, the budgets hold (CLAUDE.md 83.5%, worst
+load 78.7%), `verify_moves.py --base HEAD` misses only the B853 line's two edited copies, each with
+its successor, and `TestEveryCitedTestNameExists` caught a ghost citation planted in the copy and
+passed without it.
+
+## 2026-11-12 — B728 B9 PR 2 round 4: a case that would hang on a leaked lock fails at once, and the records say the writers' order
+
+Base: f3cc1eab (`orch/b9p2`: round 3, its rules commit and main merged in), PR #1453. Tests and
+`ops/` markdown only.
+
+**Item 1: the containment case, and the sweep.**
+`TestAPanicInTheAuthorizationsReconciliationIsContainedAndRecorded` took the session's lock
+unconditionally once the contained reconciliation returned and asserted it free with `TryLock` only
+after: with the recovery handler's final `s.mu.Unlock()` removed from `reconcilePermission`'s
+containment, the case waited at that `Lock` to the package's timeout (at f3cc1eab, a copy, `-timeout
+60s`: "panic: test timed out after 1m0s" at `dsd_revoked_harness_internal_test.go:418`, 61.8 s). Its
+first acquisition after the containment is now the `TryLock`, nothing else holding the lock there,
+and the record, the fault and the permission are read in that hold; under the same mutation it fails
+at once, "the session's lock is held once the contained panic's caller has gone on", and the binary
+exits in 0.05 s, its cleanups included. A hand-made session is ended as a release ends it, each wait
+bounded (`handmade_internal_test.go`): its end closed once under its lock, taken at once where free,
+at once said held where the case failed already, otherwise within 5 s (`lockWithin`: a goroutine
+that hands the lock over or lets go of it, no poll and no sleep), then the backend's goroutines
+joined within 5 s; no cleanup calls a production stop that takes the lock.
+
+The sweep, of `internal/player/playback`'s tests for a session's or the backend's lock taken
+unconditionally after a containment, a recovered panic or a stop that one removed unlock leaks,
+fixed these, each proved by its mutation alone under `-timeout 60s` (its own message, cleanups
+included, then green with the unlock back):
+
+- `stopDSD`'s final unlock: the revocation rig's cases
+  (`TestASuccessorWhoseOpenEndsAfterAPanickedReconciliationIsRefusedForIt`,
+  `TestARevocationDropsAPreparedEntryForTheCauseRecordedFirst`,
+  `TestAnEntryAfterTheSessionsDSDStoppedIsRefusedForTheCause`) fail in 0.01 to 0.02 s, the rig's
+  cause helpers asserting the lock free as their containment returns, before a call that waits for
+  it (the open's end, the revocation, the admission); the rig parks its session's DSD monitor (a
+  tick that never comes), the barrier that makes the prepared-entry case quiescent;
+  `TestAReconciliationThatPanicsDuringAnAdmissionIsItsRefusal`, whose admission itself waits, runs
+  it on a goroutine awaited within 5 s (5.0 s); `TestPolicyReadPanicIsContainedOnItsFirstCall` and
+  `TestFirstReconciliationPanicIsContainedAndStopsItsSession` assert at once (0.01 s);
+  `TestTheMonitorTakesItsNextTickAfterAPanic`, whose live monitor's next reading takes the lock a
+  moment, checks with a bounded acquisition (5.0 s), where a failed `TryLock` proves no leak.
+- `next()`'s deferred unlock: both gapless cases (0.04 and 0.07 s).
+- `letLease`'s unlock: `TestTheWritesChecksAreAnsweredInTheirOrder` and
+  `TestAWriteThatPanicsLetsGoOfItsLeaseAndItsTurn` at once;
+  `TestAStartIsAdmittedAfterAWriteThatDidNotLand` through `ChoiceHeldForTest`, which takes the
+  backend's lock within a bound and says when it stayed held (5.0 s a subcase).
+- `hold()`'s give-up unlock: `TestAStartWaitsForTheProbeThatHoldsTheSlot`'s give-ups (0.01 s).
+
+Checked and left: lock sites before any such path (rig setups, `successorOf`, a seam before its
+containment); sites after `Revoke`, the replaced authorization's reconciliation or a judgement step,
+whose holds are lockHolds with both an explicit unlock and a deferred release, so no single removed
+unlock leaves the lock held; `dsd_final_report_round2_test.go:161`, after a stop whose teardown ends
+in a lockHold and whose bounded wait on `down` fails first on any earlier leak;
+`dsd_contain_round2_test.go:137`, after `checkContained`'s `TryLock`; the lock-order case's readers,
+awaited within its bound; the native integration overlay's sites, each after a start, a transition
+or a resume; and the test doubles' own mutexes. In `internal/alsapcm` no test can take a playback
+session's or backend's lock (playback's export helpers compile into its own tests alone); its DSD
+sink tests take the sink's own lock after a release or a writer's end in several places, outside
+this sweep and named for the backlog.
+
+**Item 2: the records' atomicity.** `ops/History-b470-native.md`'s round 3 and the B853 long form
+said every writer records its cause and revokes the permission in one step under the session's lock;
+`Revoke` and `reconcilePermission` do, the containment records in `stopDSD`'s hold and revokes in
+its own, and a start that finds a cause revokes in its own: both, and round 3's log entry, say that
+order now. `refuseAfterSelection`'s comment (`session.go`) says the same of "a revocation" and is
+code, left to a round that admits it.
+
+**Item 3: the gapless cases' sessions.** Both end their hand-made sessions with the shared end, and
+their hand-made backends get `New`'s completion bookkeeping (`handMadeBackend`: `zero` and `wzero`
+closed); without it their bounded join failed at its 5 s bound, "0 goroutines still run ... context
+deadline exceeded", where `Wait` read a nil `zero`; with it both clean up at once, no goroutine
+started. The harness rig and round 2's
+`TestAnAuthorizationReplacedAsASuccessorOpensRefusesItForItsOwnReason` end theirs so too.
+
+The runs, at b7e7a38f, in one build-slot session on legion0 (Linux, Go 1.27.3, the Makefile's
+tags, `TMPDIR` on disk):
+
+| Run | Result |
+|---|---|
+| `make fmt`, then `git status --porcelain` | exit 0, the tree clean |
+| `go vet` with the tags: linux/amd64, windows/amd64, linux/386 | exit 0 each |
+| `make docs-check` | exit 0 |
+| `go run ./scripts/qualification-version -base 4678b983 -head HEAD` (main's tip, the merge base now) | qualification version OK |
+| `-race -count=50 -v`, the round's 21 new or touched playback tests | each 50 times; 3,400 PASS with their subtests, 0 FAIL, 0 SKIP; 27.4 s |
+| `go test -race -timeout 120m ./internal/player/...` | 15 packages ok; 44.7 s |
+| `go test -race -timeout 120m ./internal/alsapcm/` | ok; 77.2 s |
+| `go test -race -timeout 120m ./cmd/bridge/` | ok; 1,642.4 s |
+| CI's native-integration invocations (`scripts/native-integration-overlay.py`, `-race`) | cmd/bridge 83 of 83, playback 79 of 79, every case the job names |
+
+## 2026-11-12 — B728 B9 PR 2 round 5: two containment assertions beside a Drop's clean-up, and the rig's admission and revocation ask the lock
+
+Base: dab9af3a (`orch/b9p2`, round 4), PR #1453. Tests only.
+
+**Item 1: the containment checks beside a PCM Drop.** `TestARevocationThatPanicsStopsTheSession` and
+`TestARetiringPositionsPanicStopsAndClosesWithoutAnotherRead` asserted the session's lock free with
+an immediate `TryLock` right after the refresh that contained their failure. Both sessions have a
+PCM output, which the containment drops on two counted goroutines (the worker and its `call`), and
+the call's deferred clean-up takes the lock to clear `containDrop` once the sink's `Drop` returned,
+after `sink.stopped` closes: a legitimate holder the `TryLock` could meet. Both take the lock within
+the bound now (`checkContainedWithin`) and join both goroutines within it (`joinBackend`), their
+real end, since `ContainCalled` alone is not it under cancellation.
+`TestTheContainmentCheckWaitsOutABriefHolderOfTheLock` is the contention case: a test goroutine
+holds the lock a moment, an immediate `TryLock` fails on it, and the bounded check waits it out; its
+teardown lets the holder go and joins it whatever an assertion did. Controls (uncommitted edits to
+ca0d3b55, restored with `git checkout --`): the case's bounded check replaced by the old immediate
+one, red at once, "containment left the session lock held" (binary 0.01 s); the holder's release
+taken away, red at the bound, "containment left the session lock held 5s", the teardown letting it
+go (binary 5.02 s).
+
+**Item 2: the rig's admission and revocation.** `r.admitted` returned as soon as `admitDSD`
+answered, so a lock the admission kept went unseen: with the early `nativeRevoked` branch's deferred
+unlock removed (dab9af3a), every subcase of
+`TestAnEntryAfterTheSessionsDSDStoppedIsRefusedForTheCause` passed its own assertions and only the
+rig's cleanup said the lock was held, 5 s a subcase, 45 s in all. It asks `heldAfter("the
+admission")` before returning now; `r.revoke` gets the string form its siblings have (`revoked`),
+fails on the case's goroutine alone, and the Admitting seam, on the admission's goroutine, says a
+failure with `t.Error`. Under the same control at 8c02a947 every subcase fails at once, "the
+session's lock is held once the admission returned" (binary 0.02 s). With the later deferred unlock
+removed instead, the earlier deferred clean-up deadlocks retaking the lock, the admission never
+answers, and the rig's watchdog fires, "the admission did not answer within 5s"
+(`TestARevocationDuringAnAdmissionIsItsRefusal`, binary 5.02 s). `refusesDSD64` takes no session
+lock.
+
+Runs at 8c02a947: `go vet` with the tags on linux/amd64, windows and linux/386, clean; `-race
+-count=50 -v` of the ten touched tests, 1,100 PASS with their subtests, 0 FAIL, 0 SKIP; `go test
+-race -timeout 120m ./internal/player/playback/`, ok (3.2 s).

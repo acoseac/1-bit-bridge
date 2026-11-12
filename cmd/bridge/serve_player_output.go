@@ -14,6 +14,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/player/engine"
 	"github.com/acoseac/1-bit-bridge/internal/player/openhome"
 	"github.com/acoseac/1-bit-bridge/internal/player/playback"
+	"github.com/acoseac/1-bit-bridge/internal/player/policy"
 )
 
 // GET /v1/outputs lists serve's player as an element of kind bridge (B470 PR
@@ -201,7 +202,7 @@ func (b *bridgeOutput) facts(ctx context.Context) (api.BridgeOutputFacts, engine
 // list, a hash, a date or hexadecimal digits, which a serial is not.
 func bridgeDSDFacts(policy playback.PlayerPolicy, live *playback.PlaybackFacts, device config.PlayerDevice) (*api.OutputDSDPlayback, *api.OutputDSDDAC, *api.OutputPlayback) {
 	v := policy.DSD
-	dsd := &api.OutputDSDPlayback{BootID: policy.BootID, PolicyGeneration: policy.Generation, Reason: policy.Reason, Tuples: []api.OutputDSDTuple{},
+	dsd := &api.OutputDSDPlayback{BootID: policy.BootID, PolicyGeneration: policy.Generation, Reason: wireDSDReason(policy.Reason), Tuples: []api.OutputDSDTuple{},
 		Converted: []api.OutputDSDConverted{}, Refused: []api.OutputDSDRefused{}, Warnings: []api.OutputDSDWarning{},
 		Model: playerText(policy.Model, device), BCDDevice: policy.BCDDevice}
 	for i, p := range policy.Tuples {
@@ -219,7 +220,7 @@ func bridgeDSDFacts(policy playback.PlayerPolicy, live *playback.PlaybackFacts, 
 	var dac *api.OutputDSDDAC
 	if v != nil {
 		for _, r := range v.Refused {
-			dsd.Refused = append(dsd.Refused, api.OutputDSDRefused{BitRate: r.BitRate, Reason: r.Reason})
+			dsd.Refused = append(dsd.Refused, api.OutputDSDRefused{BitRate: r.BitRate, Reason: wireDSDReason(r.Reason)})
 		}
 		for _, w := range v.Warnings {
 			dsd.Warnings = append(dsd.Warnings, api.OutputDSDWarning{Code: w.Code, Reason: w.Reason})
@@ -227,6 +228,24 @@ func bridgeDSDFacts(policy playback.PlayerPolicy, live *playback.PlaybackFacts, 
 		dac = bridgeDSDDAC(v.DAC, device)
 	}
 	return dsd, dac, bridgePlayback(policy, live)
+}
+
+// wireDSDReason is the word a rate's refusal goes out with, its own but for
+// dsd_choice_uncertain (policy.ReasonChoiceUncertain: a choice's write that
+// reached the state's file and is not known to be durable holds the set to
+// what the two states play alike, B728 B9), which no client knows until PR 3
+// adds it to PROTOCOL.md's table with the route that can make it: until then
+// it goes out as dsd_state_unreadable, the table's word for a player's DSD
+// state the bridge cannot vouch for, so no word the table does not name
+// reaches the wire. The source-derived token guard reads the policy's
+// Effective and decide, not choice.go's Intersect, so it would not see the
+// word go out (TestAnUncertainChoiceGoesOutAsAWordTheProtocolNames does). A
+// temporary mapping: PR 3 removes it with the word's row.
+func wireDSDReason(r string) string {
+	if r == string(policy.ReasonChoiceUncertain) {
+		return string(policy.ReasonStateUnreadable)
+	}
+	return r
 }
 
 // bridgeDSDDAC is the element's dsdDAC from the backend's read side of the

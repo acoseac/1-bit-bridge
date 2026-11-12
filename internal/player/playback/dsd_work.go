@@ -95,9 +95,10 @@ func (b *Backend) RequestProbeDSD(ctx context.Context, cond ProbeConditions) {
 }
 
 // ProbeDSDPending reports whether a probe is owed that only the supervisor's
-// next ask makes: one the device slot refused, one a choice written for the
-// DAC made due (ForgetDSDProbe), one whose answers were dropped
-// (publishProbe). A snapshot of the watcher's asks one anyway.
+// next ask makes: one the device slot refused, one a migration's part for the
+// DAC (ForgetDSDProbe) or a choice written for it (oweProbe, B728 B9) made
+// due, one whose answers were dropped (publishProbe). A snapshot of the
+// watcher's asks one anyway.
 func (b *Backend) ProbeDSDPending() bool {
 	b.probeState.mu.Lock()
 	defer b.probeState.mu.Unlock()

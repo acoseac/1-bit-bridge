@@ -23,6 +23,10 @@ const (
 	stepFinish                     // play out the last content: finished, or the decode failure's fault
 )
 
+// gaplessRevoked is the reason of the revocation the producer makes when a
+// gapless DSD successor's permission fails its check (the harness's path).
+const gaplessRevoked = "gapless DSD authorization changed"
+
 // String names k as the ProducerStep seam says it.
 func (k stepKind) String() string {
 	switch k {
@@ -179,12 +183,25 @@ func (s *session) next() step {
 		if o.plan != nil && o.permission != nil {
 			s.mu.Unlock()
 			err := s.b.checkPermission(s.ctx, o.permission, nil, edgeKey(o.transport, o.plan))
+			var mine uint64
 			if err != nil {
-				s.b.Revoke(engine.RevokeInput{Session: s.id, Reason: "gapless DSD authorization changed"})
+				mine = s.b.revoke(engine.RevokeInput{Session: s.id, Reason: gaplessRevoked})
 			}
 			s.mu.Lock()
 			if err != nil {
-				o.refused = &engine.Unplayable{Reason: "native_revoked", Detail: err.Error()}
+				// The check's error where this revocation recorded the
+				// session's cause and it stands; otherwise the cause recorded:
+				// an earlier one (a revocation that came while the permission
+				// was checked dropped o for it), which stands as it does in the
+				// record, or a failed reading's, which replaced this one. Told by
+				// what this revocation recorded (revoke), never by the cause's
+				// words, which another revocation may share (backlog B853,
+				// rounds 2 and 3).
+				u := engine.Unplayable{Reason: "native_revoked", Detail: err.Error()}
+				if s.nativeRevoked && s.revokedSeq != mine {
+					u = *s.dsdRevokedLocked()
+				}
+				o.refused = &u
 				o.dropped = true
 				wake(s.wakeR)
 				return step{kind: stepStop}
