@@ -156,10 +156,13 @@ func TestTheDoctorKeepsOneReadOfABackupsFolderThatDoesNotAnswer(t *testing.T) {
 // backups folder (backlog B653's fifth round: the prune holds the folder as
 // every holder does, PruneContext) is named as a prune, never as a check of a
 // snapshot with no name, by the ticker's reason for taking no snapshot and by
-// the doctor's backup-check line.
+// the doctor's backup-check line. The prune runs once the snapshot's
+// verification has ended (endedInstallSnapshot, backlog B869): one run on its
+// answer could meet the lock its worker had yet to let go, and a prune that
+// meets it is skipped with no error, never given up.
 func TestTheTickerAndTheDoctorNameAPruneGivenUp(t *testing.T) {
 	cfgPath, _, root := backupInstall(t)
-	verifiedInstallSnapshot(t, cfgPath)
+	endedInstallSnapshot(t, cfgPath, root)
 	t.Cleanup(backup.SetVerifyDeadlineForTest(300 * time.Millisecond))
 	stalled := make(chan struct{})
 	var letGo sync.Once
@@ -171,16 +174,20 @@ func TestTheTickerAndTheDoctorNameAPruneGivenUp(t *testing.T) {
 		waitClosed(t, callerDone, "backup prune")
 		awaitHoldsLetGo(t, root)
 	})
-	pruned := make(chan error, 1)
+	type answer struct {
+		res backup.PruneResult
+		err error
+	}
+	pruned := make(chan answer, 1)
 	go func() {
 		defer close(callerDone)
-		_, err := backup.Prune(root, 1)
-		pruned <- err
+		res, err := backup.Prune(root, 1)
+		pruned <- answer{res, err}
 	}()
 	select {
-	case err := <-pruned:
-		if !errors.Is(err, backup.ErrPruneGivenUp) {
-			t.Fatalf("the prune answered %v, want it given up", err)
+	case a := <-pruned:
+		if !errors.Is(a.err, backup.ErrPruneGivenUp) {
+			t.Fatalf("the prune answered %+v, %v; want it given up", a.res, a.err)
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("the prune whose removals hang was never given up")
