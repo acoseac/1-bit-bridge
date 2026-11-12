@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
@@ -48,35 +49,79 @@ import (
 // ErrCheckStillRunning is the answer of a verification, a claim and a prune
 // behind a hold given up that still holds the backups folder, and of a
 // restore of a snapshot in that folder (holdSource): until its step ends, or
-// until the process that runs it does.
-var ErrCheckStillRunning = errors.New("a verification or prune of these snapshots that did not end still holds them, until it ends or its process does")
+// until the process that runs it does. The hold given up is a verification's,
+// a claim's, a prune's or, since backlog B826's second round, a restore's
+// (StuckCheck.Restore), which StillRunningError names.
+var ErrCheckStillRunning = errors.New("a verification, a prune or a restore of these snapshots that did not end still holds them, until it ends or its process does")
 
 // StuckCheck is a hold given up that still holds a backups folder: its
 // snapshot's folder name, "" for a prune's (Pruning), the step it did not
-// end, in words (Step), and when it was given up.
+// end, in words (Step), when it was given up, and whether it is a restore's
+// (Restore, Restoring), whose snapshot is the one it restores. A marker
+// written before restores were marked holds no restore, and reads as a
+// verification's or a prune's, as it always did; an older bridge reading a
+// restore's marker passes over the field and reads it as its snapshot's
+// verification, the step's words saying what it was doing.
 type StuckCheck struct {
 	Snapshot string    `json:"snapshot"`
 	Step     string    `json:"step,omitempty"`
 	Since    time.Time `json:"since"`
+	Restore  bool      `json:"restore,omitempty"`
 }
 
 // Pruning reports whether the hold given up is a prune's (PruneContext),
 // which names no snapshot.
-func (c StuckCheck) Pruning() bool { return c.Snapshot == "" }
+func (c StuckCheck) Pruning() bool { return c.Snapshot == "" && !c.Restore }
+
+// Restoring reports whether the hold given up is a restore's (holdSource),
+// which the bridge restore command that runs it ends.
+func (c StuckCheck) Restoring() bool { return c.Restore }
+
+// What names the hold given up: a restore of its snapshot, a prune, or a
+// verification of its snapshot.
+func (c StuckCheck) What() string {
+	switch {
+	case c.Restoring():
+		return "a restore of snapshot " + c.Snapshot
+	case c.Pruning():
+		return "a prune"
+	}
+	return "snapshot " + c.Snapshot
+}
+
+// StillRunningError is ErrCheckStillRunning for the hold given up that Check
+// is, which errors.Is reads as ErrCheckStillRunning: its words name what it is
+// (a verification's snapshot, a prune, a restore of its snapshot) and its step,
+// and a caller that advises its operator asks Check what ends it
+// (errors.As).
+type StillRunningError struct {
+	Check StuckCheck
+}
+
+func (e *StillRunningError) Error() string {
+	step := ""
+	if e.Check.Step != "" {
+		step = " in " + e.Check.Step
+	}
+	return fmt.Sprintf("%s (%s, given up%s at %s)", ErrCheckStillRunning.Error(), e.Check.What(), step,
+		e.Check.Since.Format(time.RFC3339))
+}
+
+// Is reads the error as ErrCheckStillRunning.
+func (e *StillRunningError) Is(target error) bool { return target == ErrCheckStillRunning }
 
 // stillRunning is ErrCheckStillRunning for the hold given up that check is,
-// naming its snapshot, or the prune it is, and its step.
+// naming its snapshot, the prune it is, or the restore it is, and its step.
 func stillRunning(check StuckCheck) error {
-	step := ""
-	if check.Step != "" {
-		step = " in " + check.Step
-	}
-	what := "snapshot " + check.Snapshot
-	if check.Pruning() {
-		what = "a prune"
-	}
-	return fmt.Errorf("%w (%s, given up%s at %s)", ErrCheckStillRunning, what, step,
-		check.Since.Format(time.RFC3339))
+	return &StillRunningError{Check: check}
+}
+
+// HeldByRestore reports whether err is ErrCheckStillRunning for a restore's
+// hold given up (StillRunningError), whose end is the end of the bridge
+// restore command that runs it, never of a serving bridge.
+func HeldByRestore(err error) bool {
+	var held *StillRunningError
+	return errors.As(err, &held) && held.Check.Restoring()
 }
 
 // stuckMark is a hold given up as this process keeps it: what it says, the
@@ -89,6 +134,10 @@ type stuckMark struct {
 	ref     string
 	mu      sync.Mutex
 	removed bool
+	// after, when not nil, closes once a removal of a marker left beside the
+	// lock (hold.clearStale) has ended: the marker is written only then, so
+	// that removal, begun before the hold was given up, never removes it.
+	after <-chan struct{}
 	// beforeCreate is a per-mark test seam after removal, before exclusive creation.
 	beforeCreate func()
 }
@@ -129,7 +178,16 @@ func stuckNotice() <-chan struct{} {
 // of before it lets the lock go (removeMarker) and drops once every hold is
 // let go (drop).
 func markStuck(keys []string, root string, check StuckCheck) *stuckMark {
-	mark := &stuckMark{check: check}
+	return markStuckAfter(keys, root, check, nil)
+}
+
+// markStuckAfter is markStuck whose marker is written once after closes (nil:
+// at once): the end of a removal of a marker its holder's process left, under
+// way as the hold was given up (hold.clearStale), which would otherwise remove
+// this one. The mark itself stands at once, its marker's write waiting on its
+// own goroutine, so nothing that marks waits on the folder.
+func markStuckAfter(keys []string, root string, check StuckCheck, after <-chan struct{}) *stuckMark {
+	mark := &stuckMark{check: check, after: after}
 	for _, k := range keys {
 		if !slices.Contains(mark.keys, k) {
 			mark.keys = append(mark.keys, k)
@@ -152,11 +210,19 @@ func markStuck(keys []string, root string, check StuckCheck) *stuckMark {
 }
 
 // writeMarker writes the mark into its marker, with the owner of its backups
-// folder, unless its holder has removed it already.
+// folder, unless its holder has removed it already: once a removal of a
+// marker left beside the lock that was under way as the hold was given up has
+// ended (after), outside mu, so its holder's removal never waits for it.
 func (mark *stuckMark) writeMarker() {
 	data, err := json.Marshal(mark.check)
 	if err != nil {
 		return
+	}
+	if mark.after != nil {
+		if hook := onMarkerWrite.Load(); hook != nil {
+			(*hook)("waits", mark.marker)
+		}
+		<-mark.after
 	}
 	mark.mu.Lock()
 	defer mark.mu.Unlock()
@@ -176,7 +242,15 @@ func (mark *stuckMark) writeMarker() {
 	_ = fsutil.KeepOwner(f, mark.ref)
 	_, _ = f.Write(data)
 	_ = f.Close()
+	if hook := onMarkerWrite.Load(); hook != nil {
+		(*hook)("writes", mark.marker)
+	}
 }
+
+// onMarkerWrite, nil in production, hears a marker's write: "waits" as it
+// begins to wait for a removal under way (after), "writes" once it has
+// written the marker, each with its path (SetOnMarkerWriteForTest).
+var onMarkerWrite atomic.Pointer[func(event, marker string)]
 
 // removeMarker removes the mark's marker, once its write has ended, and keeps
 // any write after it from making one; a nil mark, or one with none, does
@@ -269,10 +343,15 @@ func stuckAnywhere() (StuckCheck, bool) {
 
 // clearStaleMarker removes a marker left in the backups folder at root, which
 // its holder's first step runs: held here, the lock holds no hold given up,
-// so a marker there is a process's that has ended.
+// so a marker there is a process's that has ended. A restore's holder runs it
+// through hold.clearStale, which a mark of its own waits for.
 func clearStaleMarker(root string) {
-	_ = os.Remove(filepath.Join(root, stuckMarkerName))
+	_ = removeStaleMarker(filepath.Join(root, stuckMarkerName))
 }
+
+// removeStaleMarker is clearStaleMarker's removal (os.Remove), and a test's
+// stand-in for one that does not answer (SetRemoveStaleMarkerForTest).
+var removeStaleMarker = os.Remove
 
 // readStuckMarker is the read of a marker (fsutil.ReadAsFile), and a test's
 // stand-in for a read that does not answer (SetReadStuckMarkerForTest).

@@ -94683,3 +94683,88 @@ those packages, openhome's `TestARestoredIdentityHandsOutValuesPastItsSnapshot`,
 ok under `-race`. `scripts/check-doc-budgets.py` clean on the tree, and on a
 copy with the rules line applied (`cli-serve.md` 98,370 bytes). `make test`
 and `make build-all` were not run: the brief asked for the two packages.
+
+## 2026-11-12 — B826 round 2: a restore given up while it holds the lock marks the folder, and bridge restore's first read is bounded
+
+The rule is `cli-serve.md`'s B826 line, condensed this round, and its long
+form in `ops/History-rules-cli-serve.md` ("B826"); this is the evidence.
+Linux amd64 (legion0), Go 1.27.3, the Makefile's tags, TMPDIR on disk.
+
+### The findings, checked against the code
+
+- **A stalled read under the lock kept the lock with no mark** (Codex's P2 on
+  #1452). Held: round 1's worker took the lock and the folder's token, then
+  removed a stale marker and read the manifest on the worker; a stop or the
+  watchdog answered the restore with a refusal while the worker stayed in its
+  read, and only its end let the lock go. Nothing marked the folder, so every
+  other holder waited its lock wait and answered busy.
+- **bridge restore's first read was unbounded** (Codex's P2). Held:
+  `restoreCmd` called `LooksLikeSnapshotDir` (`os.ReadFile`) on its own
+  goroutine before any bounded work, and `SourceStillHeld` sees only this
+  process's marks, never a serving bridge's.
+- **The docs claimed more than the code** (the Claude API's Low). Held: a
+  worker given up could still make the lock file (an open under way) and
+  finish a stale marker's removal; "lets go at once, writing nothing" and
+  "removes nothing" were false of the source folder, true of the destination.
+- The brief's review (Codex): a marker counted only while its lock is held,
+  through the resolved parent, inside the bound (1); a restore identity every
+  consumer words (2); no marker lost between the stale removal and the
+  publication (3); the mark kept until the unlock and the token's release end,
+  the hand-over's refusal included (4); every contradicting passage reworded
+  (5). Each held against the code: `StuckCheck` named a snapshot or a prune
+  only; the doctor and the CLI's advice said "restart the bridge, or stop the
+  backup --verify"; `writeMarker` raced an uncoordinated `clearStaleMarker`;
+  the hand-over's refusal called `letGoWithin`, which answered with the unlock
+  under way and no mark.
+
+### Red first
+
+`TestAGivenUpRestoreThatHoldsTheLockMarksTheFolderUntilItLetsGo`, written to
+build at round 1 (f55f63ad) and run there before any change: the manifest a
+named pipe, the restore stopped once its worker held the lock and read the
+pipe.
+
+```
+restore_source_unix_test.go:159: another restore beside the restore given up answered another verification or prune of these snapshots holds their lock, in …/backups, for all of the restore's wait (10s); nothing was restored, want ErrCheckStillRunning naming "a restore of snapshot 2026-11-12T06-05-36Z"
+restore_source_unix_test.go:163: a prune beside the restore given up: {… Skipped:true SkippedFor:another verification or prune of these snapshots holds their lock}, <nil>; want it skipped for ErrCheckStillRunning naming "a restore of snapshot …"
+restore_source_unix_test.go:166: the restore and the prune beside the restore given up waited 10.001414261s to be refused
+restore_source_unix_test.go:168: no marker of the check that did not end was written
+--- FAIL: TestAGivenUpRestoreThatHoldsTheLockMarksTheFolderUntilItLetsGo (42.72s)
+```
+
+`TestBridgeRestoreAnswersAStalledSnapshotWithinItsBoundBeforeItsPrompt` is
+red at round 1 by construction (its first read waits on the pipe); its control
+below puts that read back.
+
+### The fix
+
+- The restore's admission runs under a hold of the folder
+  (`newRestoreHold`), `markless` until it holds the lock (`marksFromNow`), its
+  step named as it goes (`enter`): the caller's give-up (`abandon`) marks the
+  folder as a restore's from then on, in this process and in the marker beside
+  the lock, until the worker, its read answered, lets the lock go
+  (`hold.release`, `drop`). A give-up before the lock marks nothing.
+- `StuckCheck.Restore` (`omitempty`), `Restoring`, `What`, and a typed
+  `StillRunningError` (`errors.Is` reads it as `ErrCheckStillRunning`, whose
+  words now name a verification, a prune or a restore), `HeldByRestore`; the
+  doctor's backup-check line, the ticker's reason, the prune's words,
+  `bridge backup --verify` and `bridge restore` name a restore's and say the
+  bridge restore that runs it ends it.
+- `hold.clearStale`: the give-up's check and the stale removal's
+  registration in one section of the hold's lock; a mark raised after it
+  writes its marker once the removal has ended (`markStuckAfter`, the write
+  waiting on its own goroutine), and a removal not yet begun at a give-up is
+  skipped.
+- The restore's let-go through the hold (`sourceHold.letGo`): bounded by
+  `releaseBound`, past which the folder stays marked in this process until
+  the unlock, the close and the token's release end (`keepMarkUntil`), the
+  hold dropped then (`dropSoon`); the hand-over's refusal takes the same path.
+- `CheckRestoreSource`: `restoreCmd`'s look before its prompt, bounded as the
+  admission is (`awaitSourceWorker`, shared): this process's marks, then on a
+  worker the resolution, `StuckCheckOf` on the resolved parent (a marker
+  counted only while another open holds the lock), and the manifest;
+  `ErrNotASnapshot` keeps the command's exit 2.
+- Reworded: the package comment, `takeSource`'s, the expiry and stop
+  refusals' words, the History entry ("Stalls", the prompt's window, the
+  words), docs/backup.md, and the rules line (a patch, condensed so the file
+  stays within its budget: 98,370 to 96,883 bytes).

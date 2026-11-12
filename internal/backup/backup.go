@@ -538,9 +538,9 @@ func RestoreWithOptions(snapshotDir string, dst Targets, opts RestoreOptions) er
 	if err != nil {
 		return err
 	}
-	// Its unlock can wait on the folder's filesystem: bounded, the lock let go
-	// on its own past the bound.
-	defer letGoWithin(src.release)
+	// Its unlock can wait on the folder's filesystem: bounded, the folder
+	// marked in this process past the bound until the unlock has ended.
+	defer src.letGo()
 	snapshotDir, m := src.snap, src.m
 	if opts.sourceHeld != nil {
 		opts.sourceHeld()

@@ -202,6 +202,41 @@ func SetReadStuckMarkerForTest(fn func(path string) ([]byte, error)) (restore fu
 // to fall back on.
 func ReadStuckMarkerBytes(path string) ([]byte, error) { return fsutil.ReadAsFile(path) }
 
+// SetRemoveStaleMarkerForTest replaces the removal of a marker a process that
+// ended left beside a backups folder's lock (os.Remove), given its path, and
+// returns the restore.
+func SetRemoveStaleMarkerForTest(fn func(path string) error) (restore func()) {
+	prev := removeStaleMarker
+	removeStaleMarker = fn
+	return func() { removeStaleMarker = prev }
+}
+
+// SetOnMarkerWriteForTest installs the hook a marker's write runs, given
+// "waits" as it begins to wait for a removal of a stale marker under way and
+// "writes" once it has written the marker, each with its path, and returns
+// the restore. Its callback must return, and ignore every path but its test's.
+func SetOnMarkerWriteForTest(fn func(event, marker string)) (restore func()) {
+	var p *func(string, string)
+	if fn != nil {
+		p = &fn
+	}
+	prev := onMarkerWrite.Swap(p)
+	return func() { onMarkerWrite.Store(prev) }
+}
+
+// SetOnSourceStepForTest installs the hook a restore's source worker runs as
+// it passes a step under the lock ("cleared", "read"), given the snapshot as
+// the restore was given it, and returns the restore. Its callback must return
+// once its test lets it, and ignore every snapshot but its test's.
+func SetOnSourceStepForTest(fn func(dir, step string)) (restore func()) {
+	var p *func(string, string)
+	if fn != nil {
+		p = &fn
+	}
+	prev := onSourceStep.Swap(p)
+	return func() { onSourceStep.Store(prev) }
+}
+
 // SetOnSourceWorkerEndForTest installs the hook a restore's source worker
 // runs last, given the snapshot as the restore was given it, once it has
 // handed its hold over or let go of what it took, and returns the restore.

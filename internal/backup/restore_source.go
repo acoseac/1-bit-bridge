@@ -32,32 +32,53 @@ import (
 // ErrBackupsUnlocked, nothing restored, and a copy is restored from a folder
 // that grants the lock.
 //
-// Before anything asks a filesystem, this process's marks are asked by the
-// spelling given (SourceStillHeld): a hold given up there refuses the restore
-// at once, ErrCheckStillRunning, its folder never resolved, since the
-// resolution can hang on the very mount the hold's step stalled on. Then the
-// snapshot is resolved, the resolved folder's marks are asked, and its lock is
-// taken (lockBackupsWith): waited for within the restore's wait while another
-// holder has it, ErrBackupsBusy past it, and ErrCheckStillRunning at once
-// where that holder is a hold given up (this process's mark, or another
-// process's marker beside the lock). Held, a marker that a process which has
-// ended left there is removed (clearStaleMarker), and the manifest is read
-// again: the snapshot its caller read before its prompt may have been pruned
-// meanwhile (ErrSnapshotGone).
+// Its admission, before anything is written: this process's marks are asked
+// by the spelling given (SourceStillHeld), asking no filesystem, and a hold
+// given up there refuses the restore at once, ErrCheckStillRunning, its
+// folder never resolved, since the resolution can hang on the very mount the
+// hold's step stalled on. Then the snapshot is resolved, the resolved folder's
+// marks are asked, and its lock is taken (lockBackupsWith): waited for within
+// the restore's wait while another holder has it, ErrBackupsBusy past it, and
+// ErrCheckStillRunning at once where that holder is a hold given up (this
+// process's mark, or another process's marker beside the lock). Held, a marker
+// that a process which has ended left there is removed (hold.clearStale), and
+// the manifest is read again: the snapshot its caller read before its prompt
+// may have been pruned meanwhile (ErrSnapshotGone).
 //
-// All of that runs on a worker of its own, since the lock's wait bounds its
-// polling alone: a resolution, the lock file's open or a marker's read can
-// hang on a mount that stopped answering. The restore waits for the worker
-// until its context ends or its wait and watchdogSlack have passed, then
-// StopWriteBound more, and is then refused, nothing restored, the worker left
-// to end on its own: its context ended, what it takes from then on it lets go
-// at once, writing nothing. The restore writes the destination on its
-// caller's goroutine alone, once the worker has handed the lock over, so
-// nothing is written there once it has answered. Once it holds the lock its
+// The admission runs on a worker of its own, under a hold of the folder
+// (newRestoreHold), since the lock's wait bounds its polling alone: the
+// resolution, the lock file's open, a marker's read, the stale marker's
+// removal and the manifest's read can each hang on a mount that stopped
+// answering. The restore waits for the worker until its context ends or its
+// wait and watchdogSlack have passed, then StopWriteBound more
+// (awaitSourceWorker), and is then refused, nothing restored, the worker given
+// up (hold.abandon) and left to end on its own. A worker given up keeps no
+// lock it takes late: its hold's context ends with the give-up, and the lock
+// taken on it is let go at once (lockBackupsWith asks it after the try). It
+// still touches the snapshot's folder, never the destination: an open of the
+// lock file under way may make that file (as root, with the folder's owner),
+// and a removal of a stale marker under way may finish. A worker given up
+// while it holds the lock (in the stale marker's removal or the manifest's
+// read) marks the folder as a restore's (StuckCheck.Restore), in this process
+// and in the marker beside the lock, until it has let the lock go; that marker
+// is written only once a removal of a stale marker under way has ended, so the
+// removal never takes it away. One given up before it holds the lock marks
+// nothing, holding nothing a mark would say it holds.
+//
+// The restore writes the destination on its caller's goroutine alone, once
+// the worker has handed the hold over, so nothing is written there once it
+// has answered. A context that ends as the hold is handed over still refuses
+// the restore, the lock let go; once the restore has begun its writes its
 // context no longer stops it, since a restore stopped between its writes would
-// leave the install half restored; and its tenure is not bounded as a hold's
+// leave the install half restored, and its tenure is not bounded as a hold's
 // steps are (hold.go): a restore is a command of its own, whose end, however
-// it comes, lets the kernel's lock go.
+// it comes, lets the kernel's lock go. Its let-go of the lock is bounded
+// (hold.release): past releaseBound the folder is marked in this process,
+// naming the restore, until the unlock, the close and this process's holder
+// of the folder are let go, and the restore answers meanwhile.
+//
+// bridge restore looks at the snapshot before its prompt, bounded alike
+// (CheckRestoreSource), and takes the lock only once the prompt is answered.
 
 // ErrSnapshotGone is a restore's refusal of a snapshot that is no longer
 // there, or whose manifest is no longer there, once the restore holds the
@@ -65,19 +86,50 @@ import (
 // restore's caller asked for confirmation. Nothing was restored.
 var ErrSnapshotGone = errors.New("the snapshot is no longer there")
 
+// ErrNotASnapshot is bridge restore's refusal, before its prompt, of a path
+// that holds no snapshot (CheckRestoreSource): nothing there, or no
+// manifest.json that reads with a schema. One of a schema this bridge does not
+// take reads as a snapshot here, and the restore refuses it in its own words.
+var ErrNotASnapshot = errors.New("not a recognized snapshot directory (no readable manifest.json with a supported schema)")
+
 // onSourceWorkerEnd, nil in production, runs last on a restore's source
 // worker, given the snapshot as the restore was given it, once the worker has
-// handed its hold over or let go of what it took (SetOnSourceWorkerEndForTest).
+// handed its hold over, or let go of what it took and dropped its hold's mark
+// (SetOnSourceWorkerEndForTest).
 var onSourceWorkerEnd atomic.Pointer[func(string)]
 
+// onSourceStep, nil in production, runs on a restore's source worker as it
+// passes a step under the lock, given the snapshot as the restore was given
+// it: "cleared" once a stale marker's removal has ended, "read" once the
+// manifest is read, before the hold is handed over (SetOnSourceStepForTest).
+var onSourceStep atomic.Pointer[func(dir, step string)]
+
+// sourceStep runs onSourceStep's hook, if any.
+func sourceStep(snapshotDir, step string) {
+	if hook := onSourceStep.Load(); hook != nil {
+		(*hook)(snapshotDir, step)
+	}
+}
+
 // sourceHold is the lock of the folder that holds a restore's snapshot, taken
-// (holdSource): the snapshot where it resolves, its manifest as read under
-// the lock, and the lock's release; or why none was taken.
+// (holdSource): the hold that holds it, the snapshot where it resolves and its
+// manifest as read under the lock; or why none was taken.
 type sourceHold struct {
-	snap    string
-	m       Manifest
-	release func()
-	err     error
+	h    *hold
+	snap string
+	m    Manifest
+	err  error
+}
+
+// letGo lets the lock go once the restore is done with it, or refuses to
+// begin: the hold's release, bounded by releaseBound, past which the folder
+// stays marked in this process until the unlock, the close and this process's
+// holder of the folder are let go (hold.release), and the mark dropped once
+// they are, on a goroutine of its own where they have not (hold.dropSoon), so
+// the restore answers meanwhile.
+func (s *sourceHold) letGo() {
+	s.h.release()
+	s.h.dropSoon()
 }
 
 // sourceSpelling is the folder the snapshot at snapshotDir is in as this
@@ -90,7 +142,7 @@ func sourceSpelling(snapshotDir string) string {
 // snapshot at snapshotDir: ErrCheckStillRunning where a hold given up in this
 // process still holds the folder the snapshot is in, by the spelling given,
 // asking no filesystem (stuckBy); nil otherwise. RestoreWithOptions asks it
-// first, and bridge restore before its first read of the snapshot.
+// first, and CheckRestoreSource.
 func SourceStillHeld(snapshotDir string) error {
 	if check, held := stuckBy(sourceSpelling(snapshotDir)); held {
 		return fmt.Errorf("%w; nothing was restored", stillRunning(check))
@@ -100,14 +152,13 @@ func SourceStillHeld(snapshotDir string) error {
 
 // holdSource takes the lock of the folder that holds the snapshot at
 // snapshotDir, waiting for another holder within wait, and answers the hold,
-// whose release its caller runs once the restore has ended; or the restore's
-// refusal, nothing restored.
+// which its caller lets go once the restore has ended (letGo); or the
+// restore's refusal, nothing restored.
 func holdSource(ctx context.Context, snapshotDir string, wait time.Duration) (*sourceHold, error) {
 	if err := SourceStillHeld(snapshotDir); err != nil {
 		return nil, err
 	}
-	work, cancel := context.WithCancel(ctx)
-	defer cancel()
+	h := newRestoreHold(ctx, filepath.Base(spellingKey(snapshotDir)), sourceSpelling(snapshotDir))
 	// out is handed over, never left in a buffer: the hold is its caller's,
 	// or, once gone is closed, the worker's to let go.
 	out := make(chan *sourceHold)
@@ -118,31 +169,57 @@ func holdSource(ctx context.Context, snapshotDir string, wait time.Duration) (*s
 				(*hook)(snapshotDir)
 			}
 		}()
-		h := takeSource(work, snapshotDir, wait)
-		select {
-		case out <- h:
-		case <-gone:
-			if h.release != nil {
-				h.release()
+		s := takeSource(h, snapshotDir, wait)
+		if s.err != nil {
+			// Nothing to hand over: what the hold holds is let go here,
+			// bounded, before the answer, and its mark once that has ended.
+			h.release()
+			select {
+			case out <- s:
+			case <-gone:
 			}
+			h.drop()
+			return
+		}
+		select {
+		case out <- s:
+		case <-gone:
+			// Given up while it held the lock: the folder is marked, naming
+			// the restore, until the lock is let go.
+			h.release()
+			h.drop()
 		}
 	}()
+	s, answered := awaitSourceWorker(ctx, wait, out)
+	if !answered {
+		h.abandon()
+		close(gone)
+		return nil, sourceExpiryError(snapshotDir, ctx.Err())
+	}
+	if s.err != nil {
+		return nil, s.err
+	}
+	if err := ctx.Err(); err != nil {
+		// Stopped as the lock came: the restore has not begun.
+		s.letGo()
+		return nil, sourceStopped(snapshotDir, err)
+	}
+	return s, nil
+}
+
+// awaitSourceWorker waits for a restore's source worker to answer on out
+// (holdSource, CheckRestoreSource) until ctx ends or wait and watchdogSlack
+// have passed, then StopWriteBound more, and answers false past that, the
+// worker left to end on its own.
+func awaitSourceWorker[T any](ctx context.Context, wait time.Duration, out <-chan T) (v T, answered bool) {
 	watchdog := time.NewTimer(wait + watchdogSlack)
 	defer watchdog.Stop()
 	stop := ctx.Done()
 	var expire <-chan time.Time
 	for {
 		select {
-		case h := <-out:
-			if h.err != nil {
-				return nil, h.err
-			}
-			if err := ctx.Err(); err != nil {
-				// Stopped as the lock came: the restore has not begun.
-				letGoWithin(h.release)
-				return nil, sourceStopped(snapshotDir, err)
-			}
-			return h, nil
+		case v = <-out:
+			return v, true
 		case <-stop:
 			stop = nil
 			if expire == nil {
@@ -153,18 +230,19 @@ func holdSource(ctx context.Context, snapshotDir string, wait time.Duration) (*s
 				expire = time.After(StopWriteBound)
 			}
 		case <-expire:
-			close(gone)
-			return nil, sourceExpiryError(snapshotDir, ctx.Err())
+			return v, false
 		}
 	}
 }
 
-// takeSource is holdSource's work, on its worker: the snapshot resolved, the
-// resolved folder's marks asked, its lock taken, a stale marker removed and
-// the manifest read again, ctx asked before the lock and once it is taken, so
-// that once its caller has given up (which ends ctx) it takes no lock it
-// keeps and removes nothing.
-func takeSource(ctx context.Context, snapshotDir string, wait time.Duration) *sourceHold {
+// takeSource is holdSource's work, on its worker, under h: the snapshot
+// resolved, the resolved folder's marks asked, its lock taken on h's context,
+// which a give-up ends (a lock taken once it has ended is let go at once), a
+// stale marker removed unless h was given up first (hold.clearStale), and the
+// manifest read again. h marks the folder at a give-up only once it holds
+// the lock (marksFromNow), naming its step (enter); a give-up seen between the
+// steps ends the work, h then let go by its worker.
+func takeSource(h *hold, snapshotDir string, wait time.Duration) *sourceHold {
 	snap, root, err := resolveSnapshotIn(snapshotDir, "")
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
@@ -175,20 +253,32 @@ func takeSource(ctx context.Context, snapshotDir string, wait time.Duration) *so
 	if check, held := stuckBy(root); held {
 		return &sourceHold{err: fmt.Errorf("%w; nothing was restored", stillRunning(check))}
 	}
-	if err := ctx.Err(); err != nil {
+	if err := h.ctx.Err(); err != nil {
 		return &sourceHold{err: sourceStopped(snapshotDir, err)}
 	}
-	unlock, err := lockBackupsWith(ctx, root, wait, folderToken(ownerKey(root)))
+	key := ownerKey(root)
+	unlock, err := lockBackupsWith(h.ctx, root, wait, folderToken(key))
 	if err != nil {
-		return &sourceHold{err: sourceLockRefusal(ctx, snapshotDir, root, wait, err)}
+		return &sourceHold{err: sourceLockRefusal(h.ctx, snapshotDir, root, wait, err)}
 	}
-	if err := ctx.Err(); err != nil {
-		unlock()
-		return &sourceHold{err: sourceStopped(snapshotDir, err)}
+	h.held(unlock, root, key, filepath.Base(snap))
+	h.marksFromNow()
+	given := func() *sourceHold {
+		if !h.gaveUp() {
+			return nil
+		}
+		return &sourceHold{err: sourceStopped(snapshotDir, h.ctx.Err())}
 	}
-	// The lock held, a marker beside it is a process's that has ended, which
-	// would read as a check still running to whoever waits for the lock.
-	clearStaleMarker(root)
+	if s := given(); s != nil {
+		return s
+	}
+	h.enter(stepClearMarker)
+	h.clearStale()
+	sourceStep(snapshotDir, "cleared")
+	if s := given(); s != nil {
+		return s
+	}
+	h.enter(stepReadSnapshot)
 	m, err := readManifest(filepath.Join(snap, ManifestFile))
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
@@ -199,10 +289,59 @@ func takeSource(ctx context.Context, snapshotDir string, wait time.Duration) *so
 		err = fmt.Errorf("snapshot schema v%d not supported (this bridge supports v%d)", m.SchemaVersion, SchemaVersion)
 	}
 	if err != nil {
-		unlock()
 		return &sourceHold{err: err}
 	}
-	return &sourceHold{snap: snap, m: m, release: unlock}
+	sourceStep(snapshotDir, "read")
+	if s := given(); s != nil {
+		return s
+	}
+	return &sourceHold{h: h, snap: snap, m: m}
+}
+
+// CheckRestoreSource is bridge restore's look at the snapshot at snapshotDir
+// before its prompt (backlog B826's second round), bounded as the restore's
+// admission is (awaitSourceWorker, the same wait, sourceExpiryError's words
+// past it): this process's marks by the spelling given first, asking no
+// filesystem (SourceStillHeld); then, on a worker, the snapshot resolved, the
+// folder it resolves into asked whether a hold given up holds it (StuckCheckOf:
+// this process's mark, then another process's marker there, counted only
+// while another open holds the folder's lock, since a marker beside a lock
+// nobody holds is one a process that ended left, which the restore removes
+// once it holds the lock), and its manifest read. It answers
+// ErrCheckStillRunning, ErrNotASnapshot, sourceExpiryError's refusal, or nil.
+// It writes nothing, and holds nothing past its return: the lock it tries to
+// ask whether another holds it, it lets go at once, and a worker given up
+// holds nothing.
+func CheckRestoreSource(ctx context.Context, snapshotDir string, wait time.Duration) error {
+	if err := SourceStillHeld(snapshotDir); err != nil {
+		return err
+	}
+	out := make(chan error, 1)
+	go func() { out <- checkSource(snapshotDir) }()
+	err, answered := awaitSourceWorker(ctx, wait, out)
+	if !answered {
+		return sourceExpiryError(snapshotDir, ctx.Err())
+	}
+	return err
+}
+
+// checkSource is CheckRestoreSource's look, on its worker.
+func checkSource(snapshotDir string) error {
+	snap, root, err := resolveSnapshotIn(snapshotDir, "")
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrNotASnapshot, err)
+	}
+	if check, held := StuckCheckOf(root); held {
+		return fmt.Errorf("%w; nothing was restored", stillRunning(check))
+	}
+	m, err := readManifest(filepath.Join(snap, ManifestFile))
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrNotASnapshot, err)
+	}
+	if m.SchemaVersion <= 0 {
+		return ErrNotASnapshot
+	}
+	return nil
 }
 
 // sourceLockRefusal is the restore's refusal for err, what the lock of root,
@@ -265,21 +404,24 @@ func snapshotGone(snapshotDir string, err error) error {
 }
 
 // sourceStopped is the refusal of a restore stopped, why its context's error,
-// before it held the lock of the folder that holds its snapshot.
+// during its admission (holdSource), before it wrote anything: while it took
+// the lock of the folder that holds its snapshot and read the snapshot, or as
+// the lock came.
 func sourceStopped(snapshotDir string, why error) error {
-	return fmt.Errorf("the restore was stopped while it waited for the lock of the folder that holds the snapshot %s: %w; nothing was restored",
+	return fmt.Errorf("the restore was stopped before it wrote anything, while it took the lock of the folder that holds the snapshot %s and read it: %w; nothing was restored",
 		snapshotDir, why)
 }
 
 // sourceExpiryError is a restore's refusal once it stopped waiting for the
-// worker that takes its source's lock (holdSource): StopWriteBound past its
-// stop, why being its context's error, or past its own bound where nothing
-// stopped it (why nil).
+// worker that takes its source's lock (holdSource), or that looks at the
+// snapshot before bridge restore's prompt (CheckRestoreSource):
+// StopWriteBound past its stop, why being its context's error, or past its own
+// bound where nothing stopped it (why nil).
 func sourceExpiryError(snapshotDir string, why error) error {
 	when := "its stop"
 	if why == nil {
-		why, when = context.DeadlineExceeded, "the end of its wait for the lock"
+		why, when = context.DeadlineExceeded, "the end of its wait"
 	}
-	return fmt.Errorf("the folder that holds the snapshot %s did not answer within %s of %s, and nothing was restored: what the restore takes of it from now on it lets go at once (%w)",
+	return fmt.Errorf("the folder that holds the snapshot %s did not answer within %s of %s, and nothing was restored (%w)",
 		snapshotDir, StopWriteBound, when, why)
 }

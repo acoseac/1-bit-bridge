@@ -184,7 +184,9 @@ snapshot, or the prune, and its step, whatever the storage answers. Another
 process cannot read that it was given up from storage that does not take
 writes: it waits for the folder's lock and answers that the snapshots are
 busy. Restarting the bridge, or stopping the `bridge backup --verify` that
-runs it, ends the step (backlog B653).
+runs it, ends the step (backlog B653). A `bridge restore` given up while it
+holds the snapshots' lock holds them the same way, and is named a restore of
+its snapshot: stopping that command ends it.
 
 When the bridge starts, it takes no snapshot when one from the last day has
 a verified database. Nor does it take one when the newest snapshot from the
@@ -225,22 +227,36 @@ it makes a data directory that is not there yet, and refuses one it cannot
 make or use (a regular file or a link to nothing where it goes, or above it),
 naming the path, before it writes anything.
 
+Before it asks you to confirm, restore looks at the snapshot. It refuses at
+once, with nothing restored, while a check, a prune or a restore of those
+snapshots that did not end still holds them, and it refuses a snapshot whose
+storage does not answer within about 20 seconds.
+
 Once you have confirmed, restore also takes the lock of the folder that holds
 the snapshot, the lock the bridge that keeps those snapshots checks and prunes
 them under, and holds it until it ends, so no prune removes the snapshot while
 it is restored. It does not hold it across the prompt. Before it writes
 anything, it waits up to 15 seconds for a check or prune of those snapshots
 to end, and refuses past that with nothing restored. It refuses at once while
-a check that did not end still holds them: restart the bridge that keeps
-them, or stop the `bridge backup --verify` that runs it, then restore again.
-Under that lock it reads the snapshot again, and refuses one that a prune
-removed while you were asked to confirm. A copy of a snapshot kept elsewhere
-restores the same way: nothing tells a copy from a live backups folder for
-certain, so its folder is locked as a backups folder is, with the lock file
-made there if it is missing. A snapshot on read-only media, on storage that
-grants no file locks, or in a folder you cannot write is refused with nothing
-restored: copy the snapshot's folder to a local disk, and restore from the
-copy.
+a check or a prune that did not end still holds them: restart the bridge that
+keeps them, or stop the `bridge backup --verify` that runs it, then restore
+again. A restore that did not end holds them the same way, and is named as
+one: stop that `bridge restore`, then restore again. Under that lock it reads
+the snapshot again, and refuses one that a prune removed while you were asked
+to confirm. A copy of a snapshot kept elsewhere restores the same way: nothing
+tells a copy from a live backups folder for certain, so its folder is locked
+as a backups folder is, with the lock file made there if it is missing. A
+snapshot on read-only media, on storage that grants no file locks, or in a
+folder you cannot write is refused with nothing restored: copy the snapshot's
+folder to a local disk, and restore from the copy.
+
+A restore that you stop, or whose snapshot's storage stops answering, before
+it begins to write is refused with nothing restored, the destination as it
+was. If the snapshot's storage stopped answering once restore held its
+folder's lock, the folder stays locked until that read answers or the
+`bridge restore` process ends, and meanwhile the snapshots read as held by a
+restore that did not end. Once restore has begun to write, it runs to its
+end.
 
 The snapshot's player UUID makes the restored player the device controllers
 already know. Without a player UUID, restore leaves the destination's player
