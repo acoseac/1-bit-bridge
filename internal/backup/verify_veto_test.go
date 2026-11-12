@@ -225,8 +225,8 @@ func TestAVerifiedRecordLeftForAFailedOneIsVetoedWhenItsWriteFails(t *testing.T)
 			if inBundle := pathExists(t, filepath.Join(dir, backup.VetoFileName)); inBundle == tc.beside {
 				t.Errorf("the veto in the bundle there %v, want %v", inBundle, !tc.beside)
 			}
-			if _, err := backup.Prune(filepath.Dir(dir), 1); err != nil {
-				t.Fatal(err)
+			if pr, err := backup.Prune(filepath.Dir(dir), 1); err != nil || pr.Skipped {
+				t.Fatalf("the prune answered %+v, %v; want it run: a skipped prune keeps the anchor whatever it reads", pr, err)
 			}
 			if !pathExists(t, anchor) {
 				t.Error("the prune let the older verified snapshot go for one no reader may read verified")

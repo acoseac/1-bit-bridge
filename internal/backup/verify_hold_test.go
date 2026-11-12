@@ -450,8 +450,8 @@ func TestAVetoThatStoodBeforeAVerificationStaysOverTheVERIFIEDItCarries(t *testi
 			if got := readersVerified(t, dir); len(got) > 0 {
 				t.Errorf("after the retry, %s", strings.Join(got, "; "))
 			}
-			if _, err := backup.Prune(filepath.Dir(dir), 1); err != nil {
-				t.Fatal(err)
+			if pr, err := backup.Prune(filepath.Dir(dir), 1); err != nil || pr.Skipped {
+				t.Fatalf("the prune answered %+v, %v; want it run: a skipped prune keeps the anchor whatever it reads", pr, err)
 			}
 			if !pathExists(t, anchor) {
 				t.Error("the prune let the older verified snapshot go for one whose VERIFIED is in doubt")
@@ -502,8 +502,8 @@ func TestARecheckGivenUpLeavesTheVetoItMade(t *testing.T) {
 	if got := readersVerified(t, dir); len(got) > 0 {
 		t.Errorf("after the recheck given up, %s", strings.Join(got, "; "))
 	}
-	if _, err := backup.Prune(filepath.Dir(dir), 1); err != nil {
-		t.Fatal(err)
+	if pr, err := backup.Prune(filepath.Dir(dir), 1); err != nil || pr.Skipped {
+		t.Fatalf("the prune answered %+v, %v; want it run: a skipped prune keeps the anchor whatever it reads", pr, err)
 	}
 	if !pathExists(t, anchor) {
 		t.Error("the prune let the older verified snapshot go for one whose recheck did not finish")

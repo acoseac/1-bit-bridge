@@ -822,8 +822,8 @@ func TestAStalePendingReadsIncompleteAndAYoungOneSurvivesAPrune(t *testing.T) {
 	writeManifestT(t, young, m)
 	time.Sleep(1100 * time.Millisecond)
 	newer := verifiedSnapshot(t, src)
-	if _, err := backup.Prune(filepath.Dir(newer), 1); err != nil {
-		t.Fatal(err)
+	if pr, err := backup.Prune(filepath.Dir(newer), 1); err != nil || pr.Skipped {
+		t.Fatalf("the prune answered %+v, %v; want it run: a skipped prune keeps the young PENDING whatever it reads", pr, err)
 	}
 	if !pathExists(t, young) {
 		t.Error("a PENDING younger than its bound was pruned")
