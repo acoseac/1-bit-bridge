@@ -94945,3 +94945,26 @@ revocation removed, the containment case alone. Not run: the containment revokin
 records, which no seam parks between; the order keeps the invariant item 1's re-ask rests on.
 
 Version 49 covers round 3's guarded changes (`openNativeContent`, `Revoke`); its records say so.
+
+The runs, at 8b6abad5, in one build-slot session on legion0 (Linux, Go 1.27.3, the Makefile's
+tags, `TMPDIR` on disk):
+
+| Run | Result |
+|---|---|
+| `make fmt`, then `git status --porcelain` | exit 0, the tree clean |
+| `go vet` with the tags: linux/amd64, windows/amd64, linux/386 | exit 0 each |
+| `make docs-check` | exit 0 |
+| `go run ./scripts/qualification-version -base 3a6b924e -head HEAD` | qualification version OK |
+| `-race -count=50 -v`, the round's three new playback tests, the seven it edited or whose rig it changed, and seven beside them whose code it changed | each 50 times; 2,350 PASS with their subtests, 0 FAIL, 0 SKIP; 27.8 s |
+| the same, alsapcm's B853 rig case (`Revoke` through the backend) | 50 PASS, 0 FAIL, 0 SKIP |
+| the same, `TestQualificationRunbookVersion` | 300 PASS, 0 FAIL, 0 SKIP |
+| `go test -race -timeout 120m ./internal/player/...` | 15 packages ok; 48.5 s |
+| `go test -race -timeout 120m ./internal/alsapcm/` | ok; 77.6 s |
+| `go test -race -timeout 120m ./cmd/bridge/` | ok; 1,558.1 s |
+| CI's native-integration invocations (`scripts/native-integration-overlay.py`, `-race`) | cmd/bridge 83 of 83, playback 79 of 79, every case the job names |
+
+The rules patch (output.md's B853 line and its long form, and one build-ci-tests entry) was
+checked on a copy of the tree: it applies to the branch, the budgets hold (CLAUDE.md 83.5%, worst
+load 78.7%), `verify_moves.py --base HEAD` misses only the B853 line's two edited copies, each with
+its successor, and `TestEveryCitedTestNameExists` caught a ghost citation planted in the copy and
+passed without it.
