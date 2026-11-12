@@ -461,9 +461,18 @@ func (b *Backend) EscalateNative(r engine.ReleaseRequest) {
 // dropped at once, as a native sink is released, the session faulting; a PCM
 // sink holds no such frames while it plays PCM alone, and plays on.
 func (b *Backend) Revoke(r engine.RevokeInput) {
+	b.revoke(r)
+}
+
+// revoke is Revoke, answering the count of the cause it recorded where it
+// stopped the session's DSD (revokeDSDLocked), 0 where an earlier cause stood
+// or the session is unknown: the producer's gapless check tells by it, in the
+// step that records it, whether its own revocation is the cause recorded
+// (B853 round 3).
+func (b *Backend) revoke(r engine.RevokeInput) uint64 {
 	s := b.known(r.Session)
 	if s == nil {
-		return
+		return 0
 	}
 	l := s.hold()
 	defer l.release()
@@ -472,7 +481,7 @@ func (b *Backend) Revoke(r engine.RevokeInput) {
 	// A DSD entry of the session is refused from now on as the successor
 	// dropped below is, for this revocation's reason (B853), unless an earlier
 	// cause stands.
-	s.revokeDSDLocked(engine.Unplayable{Reason: "native_revoked", Detail: r.Reason})
+	recorded := s.revokeDSDLocked(engine.Unplayable{Reason: "native_revoked", Detail: r.Reason})
 	if s.permission != nil {
 		s.permission.revoked.Store(true)
 	}
@@ -526,6 +535,7 @@ func (b *Backend) Revoke(r engine.RevokeInput) {
 	b.policyMu.Unlock()
 	wake(s.wakeP)
 	wake(s.wakeR)
+	return recorded
 }
 
 type retiringEvents struct {

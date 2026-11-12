@@ -183,18 +183,22 @@ func (s *session) next() step {
 		if o.plan != nil && o.permission != nil {
 			s.mu.Unlock()
 			err := s.b.checkPermission(s.ctx, o.permission, nil, edgeKey(o.transport, o.plan))
+			var mine uint64
 			if err != nil {
-				s.b.Revoke(engine.RevokeInput{Session: s.id, Reason: gaplessRevoked})
+				mine = s.b.revoke(engine.RevokeInput{Session: s.id, Reason: gaplessRevoked})
 			}
 			s.mu.Lock()
 			if err != nil {
-				// The check's error, unless the session's DSD was stopped for
-				// another cause first (a revocation that came while the
-				// permission was checked dropped o for it): that cause stands,
-				// as it does in the record this revocation left as it was
-				// (backlog B853, round 2).
+				// The check's error where this revocation recorded the
+				// session's cause and it stands; otherwise the cause recorded:
+				// an earlier one (a revocation that came while the permission
+				// was checked dropped o for it), which stands as it does in the
+				// record, or a failed reading's, which replaced this one. Told by
+				// what this revocation recorded (revoke), never by the cause's
+				// words, which another revocation may share (backlog B853,
+				// rounds 2 and 3).
 				u := engine.Unplayable{Reason: "native_revoked", Detail: err.Error()}
-				if own := (engine.Unplayable{Reason: "native_revoked", Detail: gaplessRevoked}); s.nativeRevoked && *s.dsdRevokedLocked() != own {
+				if s.nativeRevoked && s.revokedSeq != mine {
 					u = *s.dsdRevokedLocked()
 				}
 				o.refused = &u

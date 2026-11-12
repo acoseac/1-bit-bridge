@@ -53,9 +53,12 @@ type session struct {
 	finalReport   bool
 	// nativeRevoked is the session's DSD stopped, and revokedFor why: the word
 	// and the detail every DSD entry of the session is refused with from then
-	// on (backlog B853). Both are set by revokeDSDLocked alone.
+	// on (backlog B853). revokedSeq counts the causes recorded, each write of
+	// revokedFor, so a revocation tells whether the cause it recorded stands
+	// (round 3). All three are set by revokeDSDLocked alone.
 	nativeRevoked   bool
 	revokedFor      engine.Unplayable
+	revokedSeq      uint64
 	nativeEscalated bool
 	releaseErr      error
 	lateAck         bool // Release answered its context's error: the teardown acknowledges
@@ -356,12 +359,18 @@ func (s *session) faulted(where string) error {
 // comes, whatever came first, its detail with it, so no entry is refused with
 // one cause's word and another's detail. Until B853 every cause refused an
 // entry at its admission as a policy that did not read: the set did read
-// after an ordinary revocation. s.mu is held.
-func (s *session) revokeDSDLocked(why engine.Unplayable) {
+// after an ordinary revocation. It answers the count of the cause where it
+// recorded why (revokedSeq), 0 where an earlier cause stood: who stopped the
+// session's DSD is told by that, never by the cause's words, which two
+// revocations may share (round 3). s.mu is held.
+func (s *session) revokeDSDLocked(why engine.Unplayable) uint64 {
 	s.nativeRevoked = true
 	if s.revokedFor.Reason == "" || why.Reason == ReasonDACUnread {
 		s.revokedFor = why
+		s.revokedSeq++
+		return s.revokedSeq
 	}
+	return 0
 }
 
 // dsdRevokedLocked is the refusal of a DSD entry of a session whose DSD was
