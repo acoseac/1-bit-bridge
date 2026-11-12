@@ -551,8 +551,12 @@ func (s *session) start(ctx context.Context, req engine.StartRequest) (err error
 	// it under that set and a reconciliation after it judges it (B728 B7, round
 	// 2). Once its done is closed, reconciliation repoints its set and a
 	// revocation refuses it, under this lock, so what decides the DSD monitor
-	// and the open's refusal is read in that step too (round 3).
+	// and the open's refusal is read in that step too (round 3). A revocation
+	// that came while it opened, which passed over it, refuses it first, for
+	// the cause recorded, the set unchanged or not (B853 round 2): until then
+	// the Start reported its plan and failed at the native open.
 	s.mu.Lock()
+	s.refuseRevokedLocked(first)
 	s.readmitDSDLocked(first)
 	s.makeConverterLocked(first)
 	close(first.done)
@@ -968,17 +972,17 @@ func (s *session) openSuccessor(ctx context.Context, o *occ) {
 		wake(s.wakeP)
 		wake(s.wakeR)
 	}()
-	// Admitted under a set a refresh has replaced since, which no
-	// reconciliation reaches while the open is under way: admitted again under
-	// the set published now, before its Prepared is reported (B728 B7), and
-	// its converter made for the plan it is admitted under (B11).
+	// Admitted before the session's DSD stopped: refused for the cause
+	// recorded, as its admission would refuse it now (B853), before its
+	// readmission, so a set a refresh published meanwhile never refuses it in
+	// the cause's place (round 2). Admitted under a set a refresh has replaced
+	// since, which no reconciliation reaches while the open is under way:
+	// admitted again under the set published now, before its Prepared is
+	// reported (B728 B7), and its converter made for the plan it is admitted
+	// under (B11).
+	s.refuseRevokedLocked(o)
 	s.readmitDSDLocked(o)
 	s.makeConverterLocked(o)
-	if s.nativeRevoked && (o.plan != nil || o.converts()) && o.refused == nil {
-		// Admitted before the session's DSD stopped: refused for the cause
-		// recorded, as its admission would refuse it now (B853).
-		o.refused = s.dsdRevokedLocked()
-	}
 	monitor = o.admitted != nil && o.refused == nil && !o.dropped
 	if o.dropped {
 		// Dropped while it opened: nothing of it plays or is reported, and

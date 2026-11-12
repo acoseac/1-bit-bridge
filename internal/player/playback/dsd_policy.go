@@ -596,7 +596,10 @@ func (b *Backend) logDSDSet(d *dsdSet) {
 // reconciliation compare with. A converted rate answers no native plan: the
 // occurrence converts (occ.converts, B728 B11). A session whose DSD was
 // stopped, before the admission or while it read the policy, refuses it for
-// the cause recorded (revokeDSDLocked, backlog B853).
+// the cause recorded (revokeDSDLocked, backlog B853), before anything the
+// policy answers: a refresh whose reconciliation stopped the session while
+// the admission read the set refuses it for that, never for what the set it
+// published says of the rate (round 2).
 func (b *Backend) admitDSD(o *occ, f format.NativeDSD) (engine.NativePlan, error) {
 	// Mark before a refresh: refreshDSD contains failures while holding
 	// dsdMu, so it must never wait for this admission to finish.
@@ -616,15 +619,19 @@ func (b *Backend) admitDSD(o *occ, f format.NativeDSD) (engine.NativePlan, error
 	}
 	b.admitting(o.id)
 	cur := b.dsd.Load()
+	var (
+		plan engine.NativePlan
+		pp   policy.Plan
+		err  error
+	)
 	if o.leading || b.dsdStale() {
-		var err error
-		if cur, err = b.refreshDSD("an admission"); err != nil {
-			return engine.NativePlan{}, &engine.Unplayable{Reason: ReasonDACUnread, Detail: err.Error()}
+		var read error
+		if cur, read = b.refreshDSD("an admission"); read != nil {
+			err = &engine.Unplayable{Reason: ReasonDACUnread, Detail: read.Error()}
 		}
 	}
-	plan, pp, err := cur.selectFor(f)
-	if err != nil {
-		return engine.NativePlan{}, err
+	if err == nil {
+		plan, pp, err = cur.selectFor(f)
 	}
 	if s := o.owner; s != nil {
 		s.mu.Lock()
@@ -632,6 +639,9 @@ func (b *Backend) admitDSD(o *occ, f format.NativeDSD) (engine.NativePlan, error
 		if s.nativeRevoked {
 			return engine.NativePlan{}, s.dsdRevokedLocked()
 		}
+	}
+	if err != nil {
+		return engine.NativePlan{}, err
 	}
 	o.admitted, o.policyPlan = cur, pp
 	return plan, nil
@@ -645,6 +655,23 @@ func (b *Backend) dsdStale() bool {
 	b.dsdMu.Lock()
 	defer b.dsdMu.Unlock()
 	return b.dsdRead.IsZero() || b.dsdNow().Sub(b.dsdRead) >= dsdTick
+}
+
+// refuseRevokedLocked refuses o, whose open is ending, for the cause its
+// session recorded where its DSD stopped (revokeDSDLocked, backlog B853) when
+// it was admitted as DSD, a plan or a conversion, and nothing has refused it
+// yet: the condition admitDSD's first check refuses by. Each open asks it
+// before the readmission (readmitDSDLocked) and the converter
+// (makeConverterLocked), whose refusals are a policy's, so a set a refresh
+// published while the open ran never refuses in the cause's place, and asks
+// it whatever the set, the set unchanged included, where the readmission
+// returns at once (round 2: a session's first occurrence was not asked, and a
+// successor was asked after its readmission). A refusal the open made, the
+// content's or the admission's own, stands. s.mu is held.
+func (s *session) refuseRevokedLocked(o *occ) {
+	if s.nativeRevoked && o.refused == nil && (o.plan != nil || o.converts()) {
+		o.refused = s.dsdRevokedLocked()
+	}
 }
 
 // readmitDSDLocked admits o again under the set published now, when it was
