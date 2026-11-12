@@ -259,6 +259,47 @@ func TestASuccessorWhoseOpenEndsAfterAPanickedReconciliationIsRefusedForIt(t *te
 	}
 }
 
+// TestARevocationDropsAPreparedEntryForTheCauseRecordedFirst (backlog B853,
+// round 2): a revocation drops the session's prepared DSD successors for the
+// cause recorded, its own where nothing was recorded before it, and an
+// earlier one where that stands: the policy's reading that failed, or a
+// reconciliation that panicked, as the entries after it are refused. Until
+// round 2 it dropped them for its own reason whatever stood.
+func TestARevocationDropsAPreparedEntryForTheCauseRecordedFirst(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		before func(*revocationRig, *testing.T)
+		want   engine.Unplayable
+	}{
+		{"nothing recorded before it", nil, revocationRefusal},
+		{"the policy's reading failed before it", (*revocationRig).unread, unreadRefusal},
+		{"a reconciliation panicked before it", (*revocationRig).reconcilePanic, panicRefusal},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newRevocationRig(t)
+			r.b.cfg.Resolver = readGoldenDSD(t)
+			o, ctx := successorOf(t, r.s, 3)
+			r.s.openSuccessor(ctx, o)
+			r.s.mu.Lock()
+			prepared := o.refused == nil && o.plan != nil && !o.dropped && o.out == nil
+			r.s.mu.Unlock()
+			if !prepared {
+				t.Fatal("the successor was not prepared: the case needs one a revocation drops")
+			}
+			if tc.before != nil {
+				tc.before(r, t)
+			}
+			r.revoke(t)
+			r.s.mu.Lock()
+			refused, dropped := o.refused, o.dropped
+			r.s.mu.Unlock()
+			if !dropped || refused == nil || *refused != tc.want {
+				t.Errorf("the prepared successor was dropped %v, refused %+v; want %+v", dropped, refused, tc.want)
+			}
+		})
+	}
+}
+
 // admissionEvents records the native plans a session reports
 // (engine.NativePlanEvents), a first occurrence's its Start's admission.
 type admissionEvents struct {
