@@ -94596,3 +94596,44 @@ Every mutation in both tables was computed in memory, written for its build alon
 | make test of those four again, nothing else of this session running | cmd/bridge, internal/admin and internal/manifest again at the 30-minute timeout; internal/integrity ok (9.1 s) |
 | `go test -race -timeout 120m`, each alone, nothing else of this session running: ./cmd/bridge/, ./internal/admin/, ./internal/manifest/ | ok each: 2536.3 s, 1847.6 s, 3392.1 s (build-ci-tests.md: a timeout is not a failure) |
 | make build-all | exit 0 |
+
+## 2026-11-12 — B869: B851's class beyond its two sites, and the re-queue's hold asks its transaction
+
+Backlog B869, on `fix/b869-prune-waits` from 3a6b924e. Test-only, but for one test seam's signature.
+
+**1. `TestTheTickerAndTheDoctorNameAPruneGivenUp`** (cmd/bridge) pruned right after `verifiedInstallSnapshot`, which returns on `SnapshotAndVerify`'s answer. The verification answers before its worker lets go of the backups folder's lock (`verifyAndThen`), and a prune that meets that lock is skipped with no error (`pruneUnder`), never given up: the "the prune answered <nil>, want it given up" of two loaded make test runs (B851's record). The test now takes its snapshot through `endedInstallSnapshot` (backup_round3_test.go): an `unlockHold` of cmd/bridge's own, internal/backup's being private to `backup_test`, installed before the snapshot and armed, its end hook set, in `SnapshotOptions.OnKept`, which `SnapshotAndVerify` calls with the bundle before `FinishCapture` begins the verification whose worker takes that hook (finish.go:280). The unlock is held from the answer, then let go, and the end awaited with the folder's lock asked there. Its cleanup, registered before the snapshot, lets a held unlock go and waits up to 30 s for that end, so a fixture that fails drains its worker before its folders go and before the next test's hooks. The prune's failure prints its `PruneResult` now.
+
+**2. Five prunes that checked their error alone** (verify_test.go:825, verify_hold_test.go:453 and 505, verify_round5_test.go:250, verify_veto_test.go:228 at 3a6b924e) require `!Skipped` too, B851's assertion. Each follows `awaitClean` or `verifiedSnapshot`, so B849's window does not reach them; a skip for any other cause passed them blind.
+
+**3. The re-queue's hold gets its transaction.** `SetResetEnrichedBeforeCommitForTest` hands its hook the reset's context and its `*sql.Tx`, with the field in store.go and its call in acoustid_store.go. `TestAMatchWhoseReQueueDidNotLandIsReQueuedByTheNextSweep` keeps the driver's rollback (`RollbackWatch.WaitPast`) as the hold's release and asks the transaction whether that rollback was its own, B662's rule: `waitForTheRollbackOf`, a copy of internal/manifest's, waits past the next rollback while the transaction still answers a SELECT, and returns once it answers `sql.ErrTxDone`. `TestTheReQueueRecordsEachMatchsProvenanceInItsTransaction`'s cancelled case waits the same way instead of on the reset's Done.
+
+**The reds and controls** (legion0, go1.27.3, the Makefile's tags, non-race binaries, each test alone, TMPDIR on disk; every mutation computed in memory from the committed bytes, written for its build alone and put back from memory, each path compared with its HEAD blob afterwards, `git status` empty). "The delay" is a temporary `time.Sleep(time.Second)` in internal/backup/verify_lock.go's release closure, line 195, after `onLockRelease(dir)` and before `fsutil.Unlock(f)`, so the lock is held past `SnapshotAndVerify`'s return.
+
+| Run | Result |
+|---|---|
+| R1: item 1 as at 3a6b924e, with the delay | red 3 of 3 at backup_round5_test.go:183, "the prune answered <nil>, want it given up" |
+| G1: the fix, with the delay | green 3 of 3 |
+| C1: the fix without `requireHeld` and `letGoAndAwaitEnd` | red 3 of 3 at backup_round5_test.go:190, "Skipped:true SkippedFor:another verification or prune of these snapshots holds their lock" |
+| C1b: the end's ask made while another open holds the folder's lock | red 3 of 3, "the verification's worker ended with the backups folder's lock still held" |
+| C1c: the hold installed on another folder than the snapshot's | red 3 of 3, "no holder of the backups folder's lock came to let it go" |
+| S1 to S5: each site's prune run while the folder's lock is held through an open of its own, a skip with no error | red 3 of 3 at each new assertion: verify_test.go:826, verify_hold_test.go:454 (5 of 5 subtests) and 506, verify_round5_test.go:251 (3 of 3), verify_veto_test.go:229 (8 of 9: "mixed verdicts whose write lands" returns before its prune) |
+| B1 to B5: the same skip with the `pr.Skipped` term taken out | green 3 of 3 each: the skip passes blind |
+| R3: item 3 as at 3a6b924e, a reader's rollback after the baseline and before the switch-off | red 20 of 20, "the first sweep's re-queue landed: the case tests nothing" |
+| G3: the fix, the same reader, the reset's transaction asked after it (still open) | green 20 of 20 |
+| C3: G3 with the transaction's check dropped (`WaitPast` alone) | red 19 of 20, the same words |
+| R6: the manifest case as at 3a6b924e, every rollback at the driver 200 ms late (a sleep in sqlitetest's rollback hook) | green 20 of 20, the reset answering `context canceled` |
+| G6: the fix, the same delay | green 20 of 20, the reset answering `sql.ErrTxDone` |
+
+The reader is a second connection to the store's file: a read-only transaction (modernc's plain BEGIN) reads `tracks` beside the held write transaction, which WAL lets it do, and rolls back. The watch counted that rollback alone (baseline 0, then 1) in all 60 runs, and in G3 and C3 the reset's transaction still answered a SELECT after it.
+
+**The manifest case cannot be made red.** Its hook calls `cancel()` on its own goroutine, and the transaction's context, which database/sql derives from the reset's (sql.go:1920), is registered with it as a child (context.go:502), which the cancel cancels before it returns (568-573). So `Tx.Commit`, which asks that context first (2298), refuses whatever the rollback's timing (R6). B844's window needs the cancel on another goroutine, the switch's poller there. The case waits for the rollback and asks the transaction all the same, as B662's rule has it.
+
+**Checks** (go1.27.3, the Makefile's tags, TMPDIR on disk).
+
+| Check | Result |
+|---|---|
+| gofmt (the toolchain's, `go run cmd/gofmt -l`) on the eleven files | nothing listed |
+| `go vet` of ./cmd/bridge/, ./internal/backup/, ./internal/manifest/ and ./internal/sqlitetest/ | exit 0 |
+| the same vet of the first three for windows/amd64, darwin/amd64 and linux/386 | exit 0 each |
+| `-race -count=50`, each touched test alone from a prebuilt race binary, in four lanes inside the build slot (the veto test as two runs of 25) | 50 of 50 each, no race, nothing skipped: TestTheTickerAndTheDoctorNameAPruneGivenUp 91 s, TestAMatchWhoseReQueueDidNotLandIsReQueuedByTheNextSweep 106 s, TestAStalePendingReadsIncompleteAndAYoungOneSurvivesAPrune 209 s, TestAVetoThatStoodBeforeAVerificationStaysOverTheVERIFIEDItCarries 914 s, TestARecheckGivenUpLeavesTheVetoItMade 231 s, TestARecheckThatDidNotEndLeavesTheVetoItMade 486 s, TestAVerifiedRecordLeftForAFailedOneIsVetoedWhenItsWriteFails 1530 s, TestTheReQueueRecordsEachMatchsProvenanceInItsTransaction 135 s |
+| `go test -race -count=1 -p 3 -timeout 120m ./cmd/bridge/ ./internal/backup/ ./internal/manifest/`, inside the build slot | ok each: 1612.8 s, 641.8 s, 1637.1 s |
