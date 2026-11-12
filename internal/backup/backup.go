@@ -1774,11 +1774,17 @@ func writeManifestWithHook(path string, m Manifest, beforeMode func(string)) err
 }
 
 func readManifest(path string) (Manifest, error) {
-	var m Manifest
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return m, err
+		return Manifest{}, err
 	}
+	return decodeManifest(path, data)
+}
+
+// decodeManifest is the manifest at path whose bytes are data, or why they
+// are none: the decoder's error, named by path.
+func decodeManifest(path string, data []byte) (Manifest, error) {
+	var m Manifest
 	if err := json.Unmarshal(data, &m); err != nil {
 		return m, fmt.Errorf("decode %s: %w", path, err)
 	}

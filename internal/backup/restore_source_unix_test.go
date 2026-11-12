@@ -50,10 +50,11 @@ func newFIFOManifest(t *testing.T, dir string) *fifoManifest {
 
 // awaitReader waits until a reader has the pipe open, the read of the
 // manifest under way: an open of the pipe's write end that does not wait
-// succeeds only then, and is kept for the feed.
+// succeeds only then, and is kept for the feed. It waits 30 s at most, capped
+// by the test binary's deadline (waitWithin).
 func (f *fifoManifest) awaitReader(t *testing.T) {
 	t.Helper()
-	deadline := time.Now().Add(30 * time.Second)
+	deadline := time.Now().Add(waitWithin(t, 30*time.Second))
 	for {
 		w, err := os.OpenFile(f.path, os.O_WRONLY|syscall.O_NONBLOCK, 0)
 		if err == nil {

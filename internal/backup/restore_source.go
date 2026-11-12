@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -103,10 +104,33 @@ import (
 var ErrSnapshotGone = errors.New("the snapshot is no longer there")
 
 // ErrNotASnapshot is bridge restore's refusal, before its prompt, of a path
-// that holds no snapshot (CheckRestoreSource): nothing there, or no
-// manifest.json that reads with a schema. One of a schema this bridge does not
-// take reads as a snapshot here, and the restore refuses it in its own words.
-var ErrNotASnapshot = errors.New("not a recognized snapshot directory (no readable manifest.json with a supported schema)")
+// that holds no snapshot (CheckRestoreSource), invalid input, its exit 2:
+// nothing there (a missing path, a link to nothing), no folder where one goes
+// (a regular file given), or no manifest.json there, or one that does not
+// decode or records no schema. A lookup or a read that fails otherwise (a
+// permission, I/O) is no such refusal, and keeps its cause; nor is a schema
+// this bridge does not take, refused in the restore's own words (backlog
+// B871).
+var ErrNotASnapshot = errors.New("not a recognized snapshot directory (nothing there, not a folder, or no manifest.json that reads as a snapshot's)")
+
+// ErrSourceNotAnswering is what a restore's refusal carries when the folder
+// that holds its snapshot did not answer within the restore's bound: its
+// worker, given up, is left to end on its own, holding nothing a restore
+// would take (sourceExpiryError). A restore stopped while its look answered
+// within the bound, which leaves nothing behind, never carries it
+// (CheckStopped).
+var ErrSourceNotAnswering = errors.New("the folder that holds the snapshot did not answer")
+
+// CheckStopped is bridge restore's refusal of a restore stopped before its
+// prompt, why its context's error: while it looked at the snapshot at
+// snapshotDir (CheckRestoreSource), whose look answered within its bound, or
+// just after that look. errors.Is reads it as why, and never as
+// ErrSourceNotAnswering: nothing of the look is left reading. Nothing was
+// asked, and nothing restored.
+func CheckStopped(snapshotDir string, why error) error {
+	return fmt.Errorf("the restore was stopped before its prompt, its look at the snapshot %s ended: %w; nothing was restored",
+		snapshotDir, why)
+}
 
 // onSourceWorkerEnd, nil in production, runs last on a restore's source
 // worker, given the snapshot as the restore was given it, once the worker has
@@ -126,6 +150,32 @@ func sourceStep(snapshotDir, step string) {
 	if hook := onSourceStep.Load(); hook != nil {
 		(*hook)(snapshotDir, step)
 	}
+}
+
+// onCheckAwait, nil in production, runs in CheckRestoreSource once its worker
+// has begun, before it waits for the worker's answer, given the snapshot as
+// bridge restore was given it: a test makes the worker's answer and a stop
+// ready together there (SetOnCheckAwaitForTest).
+var onCheckAwait atomic.Pointer[func(string)]
+
+// onCheckWorkerEnd, nil in production, runs last on CheckRestoreSource's
+// worker, given the snapshot as bridge restore was given it, once its answer
+// is handed over, whether or not its caller still waits for it
+// (SetOnCheckSourceEndForTest).
+var onCheckWorkerEnd atomic.Pointer[func(string)]
+
+// readSourceManifest, nil in production, stands in for CheckRestoreSource's
+// read of the snapshot's manifest (os.ReadFile), given its path
+// (SetReadSourceManifestForTest).
+var readSourceManifest atomic.Pointer[func(string) ([]byte, error)]
+
+// readCheckedManifest is CheckRestoreSource's read of the manifest at path:
+// os.ReadFile, or a test's stand-in.
+func readCheckedManifest(path string) ([]byte, error) {
+	if read := readSourceManifest.Load(); read != nil {
+		return (*read)(path)
+	}
+	return os.ReadFile(path)
 }
 
 // sourceHold is the lock of the folder that holds a restore's snapshot, taken
@@ -356,7 +406,7 @@ func takeSource(h *hold, snapshotDir string, wait time.Duration) *sourceHold {
 	case err != nil:
 		err = fmt.Errorf("read snapshot manifest: %w", err)
 	case m.SchemaVersion < 1 || m.SchemaVersion > SchemaVersion:
-		err = fmt.Errorf("snapshot schema v%d not supported (this bridge supports v%d)", m.SchemaVersion, SchemaVersion)
+		err = schemaNotSupported(m.SchemaVersion)
 	}
 	if err != nil {
 		return &sourceHold{err: err}
@@ -378,40 +428,99 @@ func takeSource(h *hold, snapshotDir string, wait time.Duration) *sourceHold {
 // while another open holds the folder's lock, since a marker beside a lock
 // nobody holds is one a process that ended left, which the restore removes
 // once it holds the lock), and its manifest read. It answers
-// ErrCheckStillRunning, ErrNotASnapshot, sourceExpiryError's refusal, or nil.
-// It writes nothing, and holds nothing past its return: the lock it tries to
-// ask whether another holds it, it lets go at once, and a worker given up
-// holds nothing.
+// ErrCheckStillRunning, ErrNotASnapshot for a path that holds no snapshot, a
+// lookup's or a read's own failure with its cause, a schema this bridge does
+// not take (checkSource), sourceExpiryError's refusal past its bound
+// (ErrSourceNotAnswering), CheckStopped's where its context ended and its
+// worker answered within the bound, whichever answer its wait took (backlog
+// B871), or nil. It writes nothing, and holds nothing past its return: the
+// lock it tries to ask whether another holds it, it lets go at once, and a
+// worker given up holds nothing.
 func CheckRestoreSource(ctx context.Context, snapshotDir string, wait time.Duration) error {
 	if err := SourceStillHeld(snapshotDir); err != nil {
 		return err
 	}
 	out := make(chan error, 1)
-	go func() { out <- checkSource(snapshotDir) }()
+	go func() {
+		defer func() {
+			if hook := onCheckWorkerEnd.Load(); hook != nil {
+				(*hook)(snapshotDir)
+			}
+		}()
+		out <- checkSource(snapshotDir)
+	}()
+	if hook := onCheckAwait.Load(); hook != nil {
+		(*hook)(snapshotDir)
+	}
 	err, answered := awaitSourceWorker(ctx, wait, out)
 	if !answered {
 		return sourceExpiryError(snapshotDir, ctx.Err())
 	}
+	// The stop is asked whichever answer the wait took: the worker's answer
+	// and the stop can be ready together, and the wait's select may take the
+	// worker's, which would lead to the prompt (backlog B871). A worker that
+	// answered left nothing reading, so its stop is a plain one.
+	if why := ctx.Err(); why != nil {
+		return CheckStopped(snapshotDir, why)
+	}
 	return err
 }
 
-// checkSource is CheckRestoreSource's look, on its worker.
+// checkSource is CheckRestoreSource's look, on its worker. ErrNotASnapshot,
+// bridge restore's exit 2, is invalid input alone (notASnapshot): nothing
+// there, at the snapshot's lookup or at its manifest (a missing path, a link
+// to nothing), something that is no folder where a folder goes (a regular
+// file given, or one in the way), or a manifest that does not decode or holds
+// no schema. A lookup or a read that fails otherwise (this user may not make
+// it, I/O, a link that leads round in a loop) keeps its cause, the snapshot
+// named as given, and a schema this bridge does not take is refused in the
+// words the restore refuses it in once confirmed (backlog B871): each exit 1.
 func checkSource(snapshotDir string) error {
 	snap, root, err := resolveSnapshotIn(snapshotDir, "")
 	if err != nil {
-		return fmt.Errorf("%w: %w", ErrNotASnapshot, err)
+		if notASnapshot(err) {
+			return fmt.Errorf("%s: %w: %w", snapshotDir, ErrNotASnapshot, err)
+		}
+		return fmt.Errorf("%s: %w; nothing was restored", snapshotDir, err)
 	}
 	if check, held := StuckCheckOf(root); held {
 		return heldRefusal(snapshotDir, stillRunning(check))
 	}
-	m, err := readManifest(filepath.Join(snap, ManifestFile))
+	path := filepath.Join(snap, ManifestFile)
+	data, err := readCheckedManifest(path)
 	if err != nil {
-		return fmt.Errorf("%w: %w", ErrNotASnapshot, spelledAsGiven(err, snap, snapshotDir))
+		err = spelledAsGiven(err, snap, snapshotDir)
+		if notASnapshot(err) {
+			return fmt.Errorf("%w: %w", ErrNotASnapshot, err)
+		}
+		return fmt.Errorf("read snapshot manifest: %w; nothing was restored", err)
 	}
-	if m.SchemaVersion <= 0 {
-		return ErrNotASnapshot
+	m, err := decodeManifest(path, data)
+	switch {
+	case err != nil:
+		return fmt.Errorf("%w: %w", ErrNotASnapshot, spelledAsGiven(err, snap, snapshotDir))
+	case m.SchemaVersion <= 0:
+		return fmt.Errorf("%s: %w", snapshotDir, ErrNotASnapshot)
+	case m.SchemaVersion > SchemaVersion:
+		return schemaNotSupported(m.SchemaVersion)
 	}
 	return nil
+}
+
+// notASnapshot reports whether err, what the lookup of a snapshot or the read
+// of its manifest answered, says that the path holds no snapshot: nothing
+// there (fs.ErrNotExist: a missing path, a link to nothing, and on Windows a
+// path through a regular file), or no folder where one goes (ENOTDIR: a
+// regular file given, or in the way). Every other failure is the read's own.
+func notASnapshot(err error) bool {
+	return errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR)
+}
+
+// schemaNotSupported is the refusal of a snapshot whose manifest records the
+// schema v, which this bridge does not take: before bridge restore's prompt
+// (checkSource) and under the restore's lock (takeSource) alike.
+func schemaNotSupported(v int) error {
+	return fmt.Errorf("snapshot schema v%d not supported (this bridge supports v%d)", v, SchemaVersion)
 }
 
 // sourceLockRefusal is the restore's refusal for err, what the lock of the
@@ -495,6 +604,20 @@ func sourceExpiryError(snapshotDir string, why error) error {
 	if why == nil {
 		why, when = context.DeadlineExceeded, "the end of its wait"
 	}
-	return fmt.Errorf("the folder that holds the snapshot %s did not answer within %s of %s, and nothing was restored (%w)",
-		snapshotDir, StopWriteBound, when, why)
+	return &sourceNotAnsweringError{err: fmt.Errorf("the folder that holds the snapshot %s did not answer within %s of %s, and nothing was restored (%w)",
+		snapshotDir, StopWriteBound, when, why)}
 }
+
+// sourceNotAnsweringError is sourceExpiryError's refusal, which errors.Is
+// reads as ErrSourceNotAnswering and as the context's error it carries.
+type sourceNotAnsweringError struct {
+	err error
+}
+
+func (e *sourceNotAnsweringError) Error() string { return e.err.Error() }
+
+// Is reads the refusal as ErrSourceNotAnswering.
+func (e *sourceNotAnsweringError) Is(target error) bool { return target == ErrSourceNotAnswering }
+
+// Unwrap is the refusal's words, which carry the context's error.
+func (e *sourceNotAnsweringError) Unwrap() error { return e.err }

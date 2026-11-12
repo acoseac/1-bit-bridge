@@ -390,3 +390,47 @@ func SetFilesCheckIncompleteForTest(dir string) (restore func()) {
 	prev := filesCheckIncompleteForTest.Swap(&dir)
 	return func() { filesCheckIncompleteForTest.Store(prev) }
 }
+
+// SetOnCheckAwaitForTest installs the hook CheckRestoreSource runs once its
+// worker has begun and before it waits for the worker's answer, given the
+// snapshot as bridge restore was given it, and returns the restore: a test
+// makes the worker's answer and a stop ready together there (backlog B871).
+// Its callback must return, and ignore every snapshot but its test's.
+func SetOnCheckAwaitForTest(fn func(dir string)) (restore func()) {
+	var p *func(string)
+	if fn != nil {
+		p = &fn
+	}
+	prev := onCheckAwait.Swap(p)
+	return func() { onCheckAwait.Store(prev) }
+}
+
+// SetOnCheckSourceEndForTest installs the hook CheckRestoreSource's worker
+// runs last, given the snapshot as bridge restore was given it, once its
+// answer is handed over, whether or not its caller still waits for it, and
+// returns the restore: a test whose look at a snapshot it stalled waits for
+// that worker's end before it puts its seams back or removes its fixtures
+// (backlog B871). Its callback must return, and ignore every snapshot but its
+// test's.
+func SetOnCheckSourceEndForTest(fn func(dir string)) (restore func()) {
+	var p *func(string)
+	if fn != nil {
+		p = &fn
+	}
+	prev := onCheckWorkerEnd.Swap(p)
+	return func() { onCheckWorkerEnd.Store(prev) }
+}
+
+// SetReadSourceManifestForTest replaces CheckRestoreSource's read of the
+// snapshot's manifest (os.ReadFile), given its path, and returns the restore:
+// a test stands a read that fails with a permission or an I/O error in for it
+// (backlog B871). Its stand-in must pass every path but its test's to
+// os.ReadFile.
+func SetReadSourceManifestForTest(fn func(path string) ([]byte, error)) (restore func()) {
+	var p *func(string) ([]byte, error)
+	if fn != nil {
+		p = &fn
+	}
+	prev := readSourceManifest.Swap(p)
+	return func() { readSourceManifest.Store(prev) }
+}

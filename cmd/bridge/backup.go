@@ -385,6 +385,11 @@ func describeVerdictLed(w io.Writer, prefix string, v backup.Verification) {
 // and puts it back in t.Cleanup; nothing else sets it.
 var restoreRandom io.Reader
 
+// onRestoreChecked, nil in production, runs once bridge restore's look at the
+// snapshot before its prompt has answered nil (backup.CheckRestoreSource),
+// before the command asks its stop: a test lands a stop there (backlog B871).
+var onRestoreChecked func()
+
 // restoreCmd is `bridge restore [--config X] [--yes] <snapshot-dir>`
 // — copies files from `<snapshot-dir>` back into the live data dir.
 //
@@ -442,12 +447,23 @@ func restoreCmd(ctx context.Context, args []string, stdin io.Reader, stdout, std
 	// prompt. The restore asks again, under the folder's lock, once confirmed.
 	switch err := backup.CheckRestoreSource(ctx, snapshotDir, verifyCmdLockWait); {
 	case errors.Is(err, backup.ErrNotASnapshot):
-		fmt.Fprintf(stderr, "restore: %q is not a recognized snapshot directory (no readable manifest.json with a supported schema)\n", snapshotDir)
+		fmt.Fprintf(stderr, "restore: %q is not a recognized snapshot directory (nothing there, not a folder, or no manifest.json that reads as a snapshot's)\n", snapshotDir)
 		return 2
 	case err != nil:
 		if !sayRestoreRefusal(stderr, err) {
 			fmt.Fprintf(stderr, "restore: %v\n", err)
 		}
+		return 1
+	}
+	if onRestoreChecked != nil {
+		onRestoreChecked()
+	}
+	// The stop is asked once more, before the path that asks for confirmation
+	// and --yes split, so a Ctrl-C that lands just after the look stops both
+	// alike, before the config is read, the data dir's lock taken or the prompt
+	// shown (backlog B871). It exits 1, as the restore's other stops do.
+	if why := ctx.Err(); why != nil {
+		fmt.Fprintf(stderr, "restore: %v\n", backup.CheckStopped(snapshotDir, why))
 		return 1
 	}
 
