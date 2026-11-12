@@ -95251,3 +95251,132 @@ Two follow-ups from the census, not changed here: "a retry given up" in
 under a deadline before its hash), and "past its deadline" in
 `TestARecheckThatDidNotEndLeavesTheVetoItMade` (a 400 ms sleep against a
 1.15 s give-up).
+
+## 2026-11-12 — B872 round 2: tests that fail instead of hanging, and the native timeouts' evidence
+
+Worker b872, legion0, branch `fix/b872-ci-reds` from `orch/b872` (e4efc8c9,
+round 1 with its rules). Commits: cb1a6906 (item 1), e507a019 (items 2 and
+3), then this record. The round's review files (round 1's three reviews and
+the brief's two) were not on this host: each item was taken from the brief's
+words and checked against the code. Every run: Go 1.27.3, the Makefile's
+tags, TMPDIR `~/onebit/tmp`; controls are uncommitted edits, the race test
+binary built, the files restored with `git checkout --` before the run, each
+predicted in writing (`.tmp/_b872/predictions-r2.txt`).
+
+### Item 1: the converted join's undecided window waited out the watchdog on failure
+
+"looking as the DAC plays" (e4efc8c9, `playback_convert_test.go:668-674`)
+armed a hold on the producer's next wait, ticked, waited for that hold
+(`awaitOrdered`, the watchdog's minute) and only then asked whether a's window
+was decided. A window decided early, the failure the check is there for,
+lets the producer write a's window, end a and wait for b's open, which the
+test holds; no reporter's step wakes it, since a step wakes only a producer
+that holds a window or awaits a successor's judgement (`reporter.go:231-235`),
+so no wait comes for the hold. Red line, K1-red: e4efc8c9's case with production's `floorLocked`
+answering true (the window decided at the producer's first look): the case waited out the watchdog, 60.34 s, and failed in other words, "waited 1m0s for the producer's look at a's window once the DAC played 300 ms of a, held at its wait"; the other order green.
+The fix: `undecidedAtLook` waits for the look or the decision, whichever comes
+first, and fails at once on the decision. Control K1, the same production
+edit at the fix: red in 0.34 s, "a's window was decided while the lookahead the sink measured was above its floor"; the other order green.
+
+### Item 2: a verification waiting its turn could pass without the notice
+
+`takeSlot` ran `onSlotWait` before it asked whether the slot's holder was
+given up (`verify_lock.go:291-300` at e4efc8c9), so a verification arriving
+after a give-up signalled a wait it never made and was refused at once, with
+the same `ErrCheckStillRunning`; round 1's premise check (`StuckCheckHere`,
+asked while the test still held the first's lock) could not fail. The seam
+now runs once, after the waiter's first look found the holder not given up,
+the notice of the next give-up in hand (`takeSlot`), so a give-up after it
+reaches the waiter as that notice; the case holds the first's lock until
+then and fails at once on an answer before the wait. The seam is nil in
+production; its five other users (`TestTwoVerificationsOfOneSnapshotWriteOneAtATime`,
+`TestAStopBeforeVerificationReportsItsIncompleteWrite`,
+`TestASlowStepWithinItsBoundLeavesNoMark`,
+`TestAQueuedVerificationKeepsItsCaptureFromThePrune`, cmd/bridge's
+`TestVerifyBesideTheTickersVerificationOfOneSnapshot`) wait behind holders not
+given up and pass. Controls: K2a, the old order (the lock let go at once, the
+second started 2 s after the first's park): red in 4.45 s, 2 s of it the edit's own delay, "the second verification answered … before it waited its turn: refused as it arrived, never told"; K2b, production's
+`takeSlot` given a notice nothing closes: red in 16.0 s, at the 12 s bound on the second's answer, "the verification waiting its turn did not return within 12s of its stop".
+
+### Item 3: the given-up checks awaited with no bound, and the file's sweep
+
+`TestARecheckGivenUpLeavesTheVetoItMade` called the verification on the
+test's goroutine, waited for no park, and had no bound of the test's (the
+verification's own is its lock wait and deadline, an hour). It now awaits the
+park and the answer in either order, bounded, failing at once on an answer
+that came with no check parked (`awaitParkedAndGivenUp`, generic over the
+answer since this round). The sweep of `verify_hold_test.go`:
+`TestAGivenUpVerificationReadsItsRecordBack` had the same shape (fixed the
+same way); the retry given up of
+`TestAVetoThatStoodBeforeAVerificationStaysOverTheVERIFIEDItCarries` still
+parked at SQLite's open behind 300 ms, round 1's blind follow-up (it parks
+before it reads the snapshot now, awaited the same way and required given
+up); and `TestASlowStepWithinItsBoundLeavesNoMark` received its two answers
+with no bound (`receiveWithin`, a minute). The file's other parks
+(`TestEveryStepUnderTheLockIsBoundedAndMarked`, `stopWithItsWriteParked`'s
+callers) wait for them within 30 s already. Controls: K3a, the recheck parked at SQLite's open, its hash forced to end at its deadline (rate 1 B/s): red in 3.33 s, "the verification answered context deadline exceeded before its check reached its park … no check was left to give up"; K3a2, the recheck's park signal withheld (it still parks): red in 36.3 s, "the check given up never reached its park"; K3b, the record-back case parked at SQLite's open, forced: each of its three subtests red in 1.5 to 1.7 s, in the same words; K3c, the retry given up in round 1's configuration, forced: red in 3.46 s, its four sibling retries green; K3d, the slow step's first answer held at its hand-off (`SetVerifyHandoffForTest`): red in 64.0 s, "the slow verification, its sync let go did not answer within 1m0s". `git status` was empty after every control.
+
+### Item 4: the native `-race` timeouts, each CI stack beside 4b21e2ce
+
+Round 1 found them fixed by #1448 (4b21e2ce) and changed no code; its record
+holds the reproduction (84cd19a5 under load, 19 of 600 failed in these two
+waits; an instrumented copy, all 18 failures, and no passing run, had the
+watcher take the sink's end; main 200 of 200 per order subtest, unloaded and
+loaded). The stacks against the commit's lines:
+
+- Run 42738827053 (84cd19a5), `TestNativeResumeErrorAfterItsLifeEndsIsTheSinksFault`,
+  60.05 s: `sink_dsd_life_test.go:376: goroutines at watchdog:` …
+  `alsapcm.receive[...](0xc00022a908?, 0xc000113500, {0xb94a8c, 0x4a})` at
+  `fake_test.go:796`. The string is 0x4a, 74 bytes: "the life ended right
+  after the resume's fence read it, its revocation held", line 376 at
+  84cd19a5, `await(t, revoking, …)`. 4b21e2ce's hunk `@@ -356,36 +478,43 @@`
+  removes that line and runs the case in both orders (`lifeOrders`) through
+  `h.ended` (line 503 at main).
+- Run 42709386274 (f0ba3d3c), `TestNativePrefillCancelledByItsEndedLifeIsNoFailure`,
+  60.06 s: `sink_dsd_life_test.go:250: goroutines at watchdog:` …
+  `alsapcm.receive[...](0xc0001a0488?, 0xc0000921c0, {0xb7bccc, 0x23})` at
+  `fake_test.go:796`. 0x23, 35 bytes: "the life's end, its revocation held",
+  line 250 at f0ba3d3c (`internal/alsapcm` there is 84cd19a5's),
+  `await(t, revoking, …)`. 4b21e2ce's hunk `@@ -237,24 +351,28 @@` removes it;
+  the case runs in both orders through `h.ended` (line 368 at main).
+- What changed what they waited for: `revoking` closes only in the watcher's
+  `ctx.Done()` arm (its `lifeEnded` seam), and in both tests the ended life
+  has the writer release and close `s.done` itself, so a watcher run late finds
+  both arms ready and Go's `select` may take `s.done` (`sink_dsd.go:233-242` at
+  84cd19a5, `:308-315` at main, the arms unchanged). 4b21e2ce's hunk
+  `@@ -225,12 +296,15 @@` in `sink_dsd.go` adds the `watching` (before that
+  select) and `watched` (deferred) seams, and `lifeHold`
+  (`sink_dsd_life_test.go:47-117` at main) uses them: watcher first, it holds
+  the writer at its end (`s.ending`, line 65), so `s.done` cannot close first,
+  and waits for `revoking` (line 95); writer first, it holds the watcher before
+  its select (`s.watching`, line 67) and waits for its return (`h.gone`, closed
+  by `watched`, line 69), never for `revoking`, only reading whether it closed
+  (line 110). Production's watcher is as it was: the tests stopped requiring
+  the arm a scheduler need not take.
+
+### Runs
+
+In one use of the build lock (23:19 to 23:47), at e507a019, nothing else of
+b872's in it, unloaded: each touched test, and every user of the moved seam,
+`-race -count=50` in four lanes, 50 of 50 each, no race reported:
+`TestAVetoThatStoodBeforeAVerificationStaysOverTheVERIFIEDItCarries` (910 s),
+`TestAGivenUpVerificationReadsItsRecordBack` (395 s),
+`TestAnAbandonedCheckKeepsItsHoldsUntilItsCheckerEnds` (367 s),
+`TestConvertedTracksJoinContinuouslyAtOneRate` (325 s),
+`TestARecheckGivenUpLeavesTheVetoItMade` (229 s),
+`TestAQueuedVerificationKeepsItsCaptureFromThePrune` (226 s),
+`TestASlowStepWithinItsBoundLeavesNoMark` (215 s),
+`TestAStopBeforeVerificationReportsItsIncompleteWrite` (197 s),
+`TestAVerificationWaitingItsTurnHearsOfACheckGivenUp` (193 s),
+`TestARestoreRefusesASnapshotAGivenUpCheckHolds` (178 s),
+`TestTwoVerificationsOfOneSnapshotWriteOneAtATime` (171 s) and cmd/bridge's
+`TestVerifyBesideTheTickersVerificationOfOneSnapshot` (156 s). Then
+`go test -race -count=1 -timeout 120m -p 2 ./internal/backup/
+./internal/alsapcm/`: both ok (746.8 s and 81.4 s). `go vet` with the tags of
+`internal/backup`, `internal/alsapcm` and `cmd/bridge` clean for linux/amd64,
+windows/amd64, darwin/arm64 and linux/386; go1.27.3's gofmt lists none of
+the files changed. This record: `TestEveryCitedTestNameExists`,
+`TestNoDocblockNamesAnotherDeclaration` and `TestNoBlankKeepers` ran over it.
+The rule change is `rules-b872-r2.patch`: round 1's two B872 bullets in
+`build-ci-tests.md`, the first's account of `takeSlot` (now false) replaced,
+the second given the fail-fast wait; the budgets check is clean with it.
