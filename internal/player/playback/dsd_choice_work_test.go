@@ -240,6 +240,7 @@ func TestAProbeAskedDuringAWriteIsRefusedAndStaysOwed(t *testing.T) {
 				case <-waiting.ch:
 				case err := <-started:
 					t.Errorf("a Start asked during the write answered %v without waiting for its lease", err)
+					started <- err
 				case <-time.After(watchdog):
 					t.Errorf("waited %v for the Start's wait for the lease", watchdog)
 				}
@@ -347,7 +348,13 @@ func TestAStartGivingUpItsWaitForTheLeaseLeavesNoRecord(t *testing.T) {
 			defer cancel()
 			started := make(chan error, 1)
 			go func() { started <- r.b.Start(ctx, req) }()
-			within(t, waiting.ch, "the Start's wait for the lease")
+			select {
+			case <-waiting.ch:
+			case err := <-started:
+				t.Fatalf("a Start asked while the write held the lease answered %v without waiting for it", err)
+			case <-time.After(watchdog):
+				t.Fatalf("waited %v for the Start's wait for the lease", watchdog)
+			}
 			release := func() {
 				t.Helper()
 				if err := r.b.Release(context.Background(), 1); err != nil {
