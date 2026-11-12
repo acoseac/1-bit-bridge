@@ -482,6 +482,12 @@ func TestAVerificationWaitingItsTurnHearsOfACheckGivenUp(t *testing.T) {
 		secondDone <- err
 	})
 	awaitEntered(t, waiting, "the second verification's wait for its turn")
+	// The case's premise: the second waits while the first's check is not
+	// given up, so it is told of the give-up, never refused as it arrives,
+	// which a wait's start does not tell apart (takeSlot signals it first).
+	if s, held := backup.StuckCheckHere(filepath.Dir(first)); held {
+		t.Fatalf("the second verification began to wait once the first's check had been given up (%+v): it was refused as it arrived, never told", s)
+	}
 	// The first takes its lock at its next try, its deadline counted from it.
 	unlocked := time.Now()
 	unlock()
