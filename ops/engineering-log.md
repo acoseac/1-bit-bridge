@@ -94596,3 +94596,67 @@ Every mutation in both tables was computed in memory, written for its build alon
 | make test of those four again, nothing else of this session running | cmd/bridge, internal/admin and internal/manifest again at the 30-minute timeout; internal/integrity ok (9.1 s) |
 | `go test -race -timeout 120m`, each alone, nothing else of this session running: ./cmd/bridge/, ./internal/admin/, ./internal/manifest/ | ok each: 2536.3 s, 1847.6 s, 3392.1 s (build-ci-tests.md: a timeout is not a failure) |
 | make build-all | exit 0 |
+
+## 2026-11-12 — B761 PR 2: a portrait the Deezer switch refused is fetched once it is on
+
+Backlog B761, PR 2, on `feat/b761-deezer-requeue` from 3a6b924e (migration v63, the next after v62).
+
+**The defect.** `enrich.deezerEnabled` off made `ensureArtistImageCached` answer `errDeezerOff`, which `resolveArtist` absorbed, and the track was stamped like any other: `MarkEnriched` set `enriched_at`, `UnenrichedTracks` takes only `enriched_at = 0`, and Deezer's answers lived in the process alone. Turning the switch back on changed the live predicate and nothing else: every track enriched meanwhile kept no portrait until its file changed or the operator pressed "Retry missing", which re-runs MusicBrainz and the Cover Art Archive for nothing, and `/v1/artist-image` answered the terminal `no_image` for those artists throughout.
+
+**The design** (the 2026-11-09 study's, as the brief gave it).
+
+- *What is kept.* `tracks.deezer_pending_query` (v63, nullable TEXT, `idx_tracks_deezer_pending ON tracks(path) WHERE deezer_pending_query IS NOT NULL`): non-NULL means the switch refused the lookup, and the value is the name it would have asked Deezer by, MusicBrainz's canonical name for the row's `artistMBID`. A boolean or a settings epoch could keep neither the name, which a restart's empty `artistCache` cannot recover (the tag is not that name: a multi-credit tag is narrowed by the artist ladder), nor which rows were refused. Column-only; `ladder_schema_gen.go` regenerated (`BRIDGE_UPDATE_LADDER_SCHEMA=1`, then the test passes without it).
+- *One outcome rule.* `portraitOutcome` (`internal/enrich/portraits.go`) is held (cached or fetched), none (a no-match, a 404, an empty picture: Deezer answered), refused (`errDeezerOff` or enrich.enabled's `ErrOff`), or failed (a transient failure, a cancellation, any other error). The ordinary pass (`resolveArtist`), the fingerprint path (`fetchRecoveredArtistImage`) and the portrait batch all read it: held and none settle (clear), Deezer's refusal is kept (set), failed and no attempt leave the column as it was. No memo records a refusal or a failure as a miss: `deezerNegCache` takes none (now a 404 too, beside a no-match), and a failure is paced per artist (`portraitRetry`: 1 min, doubling to 6 h), never cached as an answer.
+- *The writes that could clobber it.* `MarkEnriched` writes it in the stamp's own statement (`CASE ? WHEN 1 THEN ? WHEN 2 THEN NULL ELSE deezer_pending_query END`), so a stamp over a changed row (`ErrTrackChanged`) writes no query either. `markSkipped` IS reachable after a refusal with an artist MBID and its canonical name: a release search that finds nothing runs `resolveArtist` before the `no_mb_match` skip (serve's boot test goes that way), and it writes through the same `MarkEnriched`. The "Retry missing" resets touch `enriched_at` alone, so they keep it; the upsert's conflict arm (a changed file) drops it with `enriched_at = 0`; the skip gate and the version-stale stamp leg do not touch it. A refusal for a Track with no valid artist MBID or a blank name writes nothing (`portraitColumn`).
+- *The re-queue.* `Run` takes, after each ordinary batch whatever it found and while both switches are on, one page of the enriched rows that keep a query (`runPortraits`; `PortraitBatchLimit`, default 50): path order past a cursor, so failing rows at the head cannot starve the rows behind them; one lookup per artist per page (`ensureArtistImageCached` with the row's artist MBID and kept name: no MusicBrainz or Cover Art Archive request, no `enriched_at` reset); rows cleared at the version they were read at (`ClearPendingPortraits`, B187's compare-and-set: a row retagged or deleted and inserted again, and enriched again with a query of its own, keeps it), asking enrich.enabled again at the write; a page stopped by a refusal leaves its rows. A pass that found every artist waiting for its retry rests until the earliest retry, ten minutes at most, unless a refused lookup is kept meanwhile (`portraitRefusals`), so a large pending set whose artists keep failing costs no store reads in between.
+- *The wake.* `Run`'s wait between turns (`idle`) asks the switches every `switchEvery` (a second) while its pause is longer, and ends when enrich.enabled turns on, or Deezer turns on with enrichment on: a switch turned on in the console takes effect within a second, with no scan and no poll's end. A wait no longer than a second is the plain sleep it was, so the turn counts the switch tests make stay as they were.
+- *What clients are told.* `/v1/artist-image` asks, after the enrichment probe and only while Deezer is on, `ArtistMBIDPortraitPending` (per artist: any row of the artist keeping a query): 202 while both switches are on, `no_image` while either is off (`artistImagePending`; serve hands the server the live switch, `WithDeezerEnabled`, so `manifest` imports nothing of `enrich`). A fault of the new probe fails open to 202 as the others do. PROTOCOL.md's 202 and Deezer paragraphs say so (no field or code is new, so no protocol version change; the orchestrator mirrors it). Rows enriched before v63 keep no query and are not classified: "Retry missing" stays their way, which the console's hint, the tray, the config comments, the example config and the switch's log lines now say.
+
+**Red first.** Every case below failed on 3a6b924e, the new API names given by a names-only shim (no-op methods, the new fields and constants), never committed: on the worktree before the implementation for the first 26, and on a copy of 3a6b924e's tree (`git show` of every changed file) for the three added after.
+
+| Package | Case | Red at 3a6b924e |
+|---|---|---|
+| manifest | `TestMigrationV63KeepsAPortraitTheSwitchRefused` | user_version 62 after the open |
+| manifest | `TestAStampWritesThePortraitItsPassLearnt`, `TestRetryMissingKeepsAPendingPortrait` (3 subtests), `TestAChangedFileDropsThePendingPortraitAndAnUnchangedScanKeepsIt` | no such column: deezer_pending_query |
+| manifest | `TestPendingPortraitsAreTheEnrichedRowsThatCarryAQuery`, `TestAPendingPortraitIsClearedOnlyAtTheVersionItWasRead` (2), `TestAClearMovesNoDeltaCursor`, `TestArtistMBIDPortraitPendingIsPerArtist` | nothing kept, nothing read |
+| manifest | `TestThePendingPortraitReadUsesItsPartialIndex` | SEARCH tracks USING COVERING INDEX sqlite_autoindex_tracks_1 |
+| enrich | `TestARefusedPortraitIsFetchedOnceDeezerIsOn`, `TestARefusedPortraitSurvivesARestartAndIsAskedByItsCanonicalName`, `TestTheFingerprintPathsRefusedPortraitIsFetchedOnceDeezerIsOn`, `TestOneFetchServesAnAlbumsTwelveRows`, `TestAPortraitAlreadyCachedIsSettledWithNoRequest`, `TestATerminalMissIsSettledAndNotAskedAgain`, `TestAQueryOutlivesRetryMissingAndATransientFailure`, `TestTurningDeezerOnWakesAnIdleEnricher`, `TestTurningEnrichmentOnWakesAnIdleEnricher`, `TestAPassThatFindsNoArtistDueRestsAndReadsNothing`, `TestARefusalKeptWhileTheBatchRestsEndsTheRest` | no query kept for the refused lookup |
+| enrich | `TestAPortraitTheSwitchCutOffIsFetchedOnceItIsOnAgain` | pass: the cut-off lookup not kept; batch: no search sent |
+| enrich | `TestATransientFailureKeepsThePortraitAndPacesItsRetries` | Deezer asked 0 times, want 1 |
+| enrich | `TestFailingRowsAtTheHeadDoNotStarveTheRest`, `TestPortraitsAndOrdinaryWorkBothProgress` | the portrait never arrives (5 s) |
+| enrich | `TestAStaleClearLeavesTheReplacementsQuery` | the batch never reached its clear |
+| api | `TestARefusedPortraitIsPendingWhileBothSwitchesAreOn`, `TestARefusedPortraitSettledWithNoneIsTerminal`, `TestARefusedPortraitsProbeFaultIsPending` | 404 no_image, want 202 pending |
+| cmd/bridge | `TestServeAsksDeezerForTheRefusedPortraitsOnceItIsOn` | Deezer never asked once the console turned it on (gave up at the binary's deadline, 870 s) |
+
+**Controls.** Each mutation computed in memory (its text matched exactly once), written, run, and put back from memory, checked by SHA-256, with `git status` empty after each; the predictions were written before the first run, and every one held.
+
+| Control | Red | Green beside it |
+|---|---|---|
+| C1 `resolveArtist` keeps no refusal | 6 enrich cases (the pass's, the restart's, the cut-off pass, the Deezer wake, Retry missing's sequence, the rest's lift) and serve's | the fingerprint path's, the batch's cut-off, the twelve rows |
+| C1b the fingerprint path keeps no refusal | `TestTheFingerprintPathsRefusedPortraitIsFetchedOnceDeezerIsOn` | `TestARefusedPortraitIsFetchedOnceDeezerIsOn` |
+| C2 the clear without its version (`WHERE path = ? AND ? IS NOT NULL AND …`) | `TestAStaleClearLeavesTheReplacementsQuery`; `TestAPendingPortraitIsClearedOnlyAtTheVersionItWasRead`, both subtests | the twelve rows; the clear moves no cursor |
+| C3 a failed request settles (both paths) | `TestAQueryOutlivesRetryMissingAndATransientFailure`, `TestATransientFailureKeepsThePortraitAndPacesItsRetries`, `TestFailingRowsAtTheHeadDoNotStarveTheRest`, `TestAPassThatFindsNoArtistDueRestsAndReadsNothing` | the terminal miss |
+| C4 `Run`'s wait a plain sleep | both wake cases | the ordinary fetch (1 ms poll) |
+| C5 a refusal does not end the rest | `TestARefusalKeptWhileTheBatchRestsEndsTheRest` | the rest's own case |
+| C6 the batch never rests | `TestAPassThatFindsNoArtistDueRestsAndReadsNothing` | the lift's case |
+| C7 the route ignores the Deezer switch | `TestARefusedPortraitIsPendingWhileBothSwitchesAreOn` | the terminal case |
+| C8 the upsert keeps the query | `TestAChangedFileDropsThePendingPortraitAndAnUnchangedScanKeepsIt` | Retry missing's three resets |
+| C9 a refusal negative-cached | the cut-off pass; `TestDeezerOffAsksDeezerNothingAndStillFetchesCovers` | the batch's cut-off; the terminal miss |
+
+**Runs** (legion0, Linux, go1.27.3, the Makefile's tags, TMPDIR on disk).
+
+| Check | Result |
+|---|---|
+| `go vet ./...` (the tags) | exit 0 |
+| `-race -count=50`, the 16 new enrich cases, the wiring pin and 4 switch cases beside them, `./internal/enrich/` | ok, 1090.8 s |
+| `-race -count=50`, the 9 new manifest cases and `TestTheLadderSchemaIsTheLadders`, `./internal/manifest/` | ok, 1016.6 s |
+| `-race -count=50`, the 3 new api cases and the artwork and artist-image cases, `./internal/api/` | ok, 224.6 s |
+| `-race -count=50 -run TestServeAsksDeezerForTheRefusedPortraitsOnceItIsOn ./cmd/bridge/` | ok, 77.4 s |
+| `go test -race -timeout 120m ./internal/enrich/` | ok, 120.5 s |
+| `go test -race -timeout 120m ./internal/api/` | ok, 141.4 s |
+
+**Left.**
+
+- Deezer's search answers some errors with HTTP 200 and an `error` object (a quota, for one), which `SearchArtist` decodes as an empty `data` list: a no-match, so a terminal miss, negative-cached, and since this PR the clear of a pending query. Not verified against the live API from here (no network on this host); a backlog candidate.
+- A persistent failure (a picture on a host the client refuses, an answer that is no image) keeps its query and is asked again every six hours at most, and `/v1/artist-image` answers 202 for that artist meanwhile: the brief's rule (only a held portrait or a terminal answer clears). Serve's boot test runs that shape on purpose.
+- A transient portrait failure on a row that keeps no query (Deezer on throughout) still stamps with no retry, as before: only a refusal is kept.
