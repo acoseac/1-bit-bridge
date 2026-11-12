@@ -525,7 +525,12 @@ func Restore(snapshotDir string, dst Targets) error {
 // it were copied, or a name repointed meanwhile, is left as it is, and the
 // restore says which files it restored and that running it again finishes it
 // (partialRestoreError).
-func RestoreWithOptions(snapshotDir string, dst Targets, opts RestoreOptions) error {
+//
+// What it says names the snapshot as it was given it, snapshotDir, which for
+// bridge restore is its argument cleaned (CleanSnapshotPath), and never as it
+// resolves, which it reads (backlog B826's third round: Windows' 8.3 temporary
+// folder, a link).
+func RestoreWithOptions(snapshotDir string, dst Targets, opts RestoreOptions) (err error) {
 	ctx := opts.Context
 	if ctx == nil {
 		ctx = context.Background()
@@ -541,7 +546,10 @@ func RestoreWithOptions(snapshotDir string, dst Targets, opts RestoreOptions) er
 	// Its unlock can wait on the folder's filesystem: bounded, the folder
 	// marked in this process past the bound until the unlock has ended.
 	defer src.letGo()
-	snapshotDir, m := src.snap, src.m
+	// The snapshot is read where it resolves, in the folder whose lock is
+	// held (snap); what the restore answers names it as it was given.
+	defer func() { err = src.asGiven(err) }()
+	snap, m := src.snap, src.m
 	if opts.sourceHeld != nil {
 		opts.sourceHeld()
 	}
@@ -582,7 +590,7 @@ func RestoreWithOptions(snapshotDir string, dst Targets, opts RestoreOptions) er
 	var account []byte
 	accountRead := false
 	if dst.AdminAuth != "" && slices.Contains(m.Files, AdminAuthFileName) {
-		account, accountRead, err = signedOutAdminAuth(filepath.Join(snapshotDir, AdminAuthFileName))
+		account, accountRead, err = signedOutAdminAuth(filepath.Join(snap, AdminAuthFileName))
 		if err != nil {
 			return err
 		}
@@ -592,7 +600,7 @@ func RestoreWithOptions(snapshotDir string, dst Targets, opts RestoreOptions) er
 	var playerUUID string
 	playerUUIDRead := false
 	if dst.PlayerUUID != "" && slices.Contains(m.Files, PlayerUUIDFileName) {
-		playerUUID, playerUUIDRead, err = snapshotPlayerUUID(filepath.Join(snapshotDir, PlayerUUIDFileName))
+		playerUUID, playerUUIDRead, err = snapshotPlayerUUID(filepath.Join(snap, PlayerUUIDFileName))
 		if err != nil {
 			return err
 		}
@@ -606,7 +614,7 @@ func RestoreWithOptions(snapshotDir string, dst Targets, opts RestoreOptions) er
 	var dsdState []byte
 	dsdStateRead := false
 	if dst.PlayerDSD != "" && slices.Contains(m.Files, PlayerDSDFileName) {
-		data, err := readSnapshotFile(filepath.Join(snapshotDir, PlayerDSDFileName))
+		data, err := readSnapshotFile(filepath.Join(snap, PlayerDSDFileName))
 		switch {
 		case errors.Is(err, os.ErrNotExist):
 		case err != nil:
@@ -633,7 +641,7 @@ func RestoreWithOptions(snapshotDir string, dst Targets, opts RestoreOptions) er
 	if (playerUUIDRead || dsdStateRead) && !atomicwrite.HasDirectoryBarrier() {
 		return playerFilesNeedABarrier(m, playerUUIDRead, dsdStateRead)
 	}
-	if err := restoreMigrationHeld(snapshotDir, dst.ManifestDB, m.Files); err != nil {
+	if err := restoreMigrationHeld(snap, dst.ManifestDB, m.Files); err != nil {
 		return err
 	}
 	// restored names what has been written, for a refusal at bridge.yaml's
@@ -643,7 +651,7 @@ func RestoreWithOptions(snapshotDir string, dst Targets, opts RestoreOptions) er
 		if completionErr != nil {
 			return completionErr
 		}
-		if err := restorePlayerReservation(snapshotDir, dst.PlayerUUID, playerUUID, m, opts); err != nil {
+		if err := restorePlayerReservation(snap, dst.PlayerUUID, playerUUID, m, opts); err != nil {
 			return err
 		}
 		// A replacement identity must never expose this box's old entries,
@@ -682,7 +690,7 @@ func RestoreWithOptions(snapshotDir string, dst Targets, opts RestoreOptions) er
 		if !ok || target == "" {
 			continue
 		}
-		srcPath := filepath.Join(snapshotDir, name)
+		srcPath := filepath.Join(snap, name)
 		if _, err := os.Stat(srcPath); errors.Is(err, os.ErrNotExist) {
 			continue
 		} else if err != nil {

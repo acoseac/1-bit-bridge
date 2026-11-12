@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/fs"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -79,6 +80,21 @@ import (
 //
 // bridge restore looks at the snapshot before its prompt, bounded alike
 // (CheckRestoreSource), and takes the lock only once the prompt is answered.
+//
+// The restore reads the snapshot where it resolves, in the folder whose lock
+// it holds, and says what it says of it as it was given it, never as it
+// resolves (backlog B826's third round): Windows gives a temporary folder in
+// its 8.3 spelling, which resolves to the long one, and a link resolves to
+// where it leads, and the operator looks for the path typed. Each refusal of
+// the admission names the snapshot by the path given (bridge restore's
+// argument, cleaned: CleanSnapshotPath), and every path below the snapshot
+// that a read's error names is spelled below that path (spelledAsGiven).
+// Where the snapshot resolves may follow the path given in a failed call's own
+// words alone: the lock's file, in the folder the snapshot resolves into, and
+// a lookup that found the snapshot gone, which names where it led. A hold
+// given up that refuses the restore keeps its own name, its snapshot's folder
+// name as the marker beside the lock holds it for every process
+// (StuckCheck.Snapshot), which names no path: the marker is unchanged.
 
 // ErrSnapshotGone is a restore's refusal of a snapshot that is no longer
 // there, or whose manifest is no longer there, once the restore holds the
@@ -113,13 +129,63 @@ func sourceStep(snapshotDir, step string) {
 }
 
 // sourceHold is the lock of the folder that holds a restore's snapshot, taken
-// (holdSource): the hold that holds it, the snapshot where it resolves and its
-// manifest as read under the lock; or why none was taken.
+// (holdSource): the hold that holds it, the snapshot where it resolves, which
+// the restore reads, the snapshot as the restore was given it, which its words
+// name, and its manifest as read under the lock; or why none was taken.
 type sourceHold struct {
-	h    *hold
-	snap string
-	m    Manifest
-	err  error
+	h     *hold
+	snap  string
+	given string
+	m     Manifest
+	err   error
+}
+
+// asGiven is err, what the restore answers once it holds its snapshot, in
+// words that name the snapshot as the restore was given it (spelledAsGiven).
+func (s *sourceHold) asGiven(err error) error {
+	return spelledAsGiven(err, s.snap, s.given)
+}
+
+// spelledAsGiven is err, a restore's refusal or failure that a read of the
+// snapshot where it resolves (snap) answered, in words that name the snapshot
+// as the restore was given it (given): each path below snap spelled below
+// given, as filepath.Join(given, name) spells it. errors.Is and errors.As
+// read err through it, so every advice chosen from it is chosen as before;
+// where its words name nothing below snap, it is err itself.
+func spelledAsGiven(err error, snap, given string) error {
+	if err == nil || snap == "" || filepath.Dir(snap) == snap {
+		return err
+	}
+	below := snap + string(filepath.Separator)
+	words := err.Error()
+	if !strings.Contains(words, below) {
+		return err
+	}
+	// The given path's own spelling of a name below it: filepath.Join's,
+	// which a given "." spells as the name alone.
+	as := strings.TrimSuffix(filepath.Join(given, "x"), "x")
+	return &givenSpelling{err: err, words: strings.ReplaceAll(words, below, as)}
+}
+
+// givenSpelling is err in the words spelledAsGiven gives it.
+type givenSpelling struct {
+	err   error
+	words string
+}
+
+func (e *givenSpelling) Error() string { return e.words }
+
+// Unwrap is the error whose words these are.
+func (e *givenSpelling) Unwrap() error { return e.err }
+
+// heldRefusal is the refusal of a restore of the snapshot at snapshotDir, as
+// the restore was given it, whose folder a hold given up still holds, held:
+// ErrCheckStillRunning for that hold (a StillRunningError), which keeps its
+// own name, a verification's, a prune's or another restore's, by its
+// snapshot's folder name, so the snapshot refused and the hold that refuses
+// it are each named.
+func heldRefusal(snapshotDir string, held error) error {
+	return fmt.Errorf("%s: %w; nothing was restored", snapshotDir, held)
 }
 
 // letGo lets the lock go once the restore is done with it, or refuses to
@@ -142,11 +208,11 @@ func sourceSpelling(snapshotDir string) string {
 // SourceStillHeld is a restore's first check, made before anything reads the
 // snapshot at snapshotDir: ErrCheckStillRunning where a hold given up in this
 // process still holds the folder the snapshot is in, by the spelling given,
-// asking no filesystem (stuckBy); nil otherwise. RestoreWithOptions asks it
-// first, and CheckRestoreSource.
+// asking no filesystem (stuckBy), naming the snapshot so (heldRefusal); nil
+// otherwise. RestoreWithOptions asks it first, and CheckRestoreSource.
 func SourceStillHeld(snapshotDir string) error {
 	if check, held := stuckBy(sourceSpelling(snapshotDir)); held {
-		return fmt.Errorf("%w; nothing was restored", stillRunning(check))
+		return heldRefusal(snapshotDir, stillRunning(check))
 	}
 	return nil
 }
@@ -249,10 +315,10 @@ func takeSource(h *hold, snapshotDir string, wait time.Duration) *sourceHold {
 	case errors.Is(err, fs.ErrNotExist):
 		return &sourceHold{err: snapshotGone(snapshotDir, err)}
 	case err != nil:
-		return &sourceHold{err: fmt.Errorf("%w; nothing was restored", err)}
+		return &sourceHold{err: fmt.Errorf("%s: %w; nothing was restored", snapshotDir, err)}
 	}
 	if check, held := stuckBy(root); held {
-		return &sourceHold{err: fmt.Errorf("%w; nothing was restored", stillRunning(check))}
+		return &sourceHold{err: heldRefusal(snapshotDir, stillRunning(check))}
 	}
 	if err := h.ctx.Err(); err != nil {
 		return &sourceHold{err: sourceStopped(snapshotDir, err)}
@@ -260,7 +326,7 @@ func takeSource(h *hold, snapshotDir string, wait time.Duration) *sourceHold {
 	key := ownerKey(root)
 	unlock, err := lockBackupsWith(h.ctx, root, wait, folderToken(key))
 	if err != nil {
-		return &sourceHold{err: sourceLockRefusal(h.ctx, snapshotDir, root, wait, err)}
+		return &sourceHold{err: sourceLockRefusal(h.ctx, snapshotDir, wait, err)}
 	}
 	h.held(unlock, root, key, filepath.Base(snap))
 	h.marksFromNow()
@@ -282,6 +348,7 @@ func takeSource(h *hold, snapshotDir string, wait time.Duration) *sourceHold {
 	}
 	h.enter(stepReadSnapshot)
 	m, err := readManifest(filepath.Join(snap, ManifestFile))
+	err = spelledAsGiven(err, snap, snapshotDir)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		err = snapshotGone(snapshotDir, err)
@@ -297,7 +364,7 @@ func takeSource(h *hold, snapshotDir string, wait time.Duration) *sourceHold {
 	if s := given(); s != nil {
 		return s
 	}
-	return &sourceHold{h: h, snap: snap, m: m}
+	return &sourceHold{h: h, snap: snap, given: snapshotDir, m: m}
 }
 
 // CheckRestoreSource is bridge restore's look at the snapshot at snapshotDir
@@ -334,11 +401,11 @@ func checkSource(snapshotDir string) error {
 		return fmt.Errorf("%w: %w", ErrNotASnapshot, err)
 	}
 	if check, held := StuckCheckOf(root); held {
-		return fmt.Errorf("%w; nothing was restored", stillRunning(check))
+		return heldRefusal(snapshotDir, stillRunning(check))
 	}
 	m, err := readManifest(filepath.Join(snap, ManifestFile))
 	if err != nil {
-		return fmt.Errorf("%w: %w", ErrNotASnapshot, err)
+		return fmt.Errorf("%w: %w", ErrNotASnapshot, spelledAsGiven(err, snap, snapshotDir))
 	}
 	if m.SchemaVersion <= 0 {
 		return ErrNotASnapshot
@@ -346,26 +413,28 @@ func checkSource(snapshotDir string) error {
 	return nil
 }
 
-// sourceLockRefusal is the restore's refusal for err, what the lock of root,
-// the folder that holds the snapshot at snapshotDir, answered: a hold given up
-// that holds it, another holder for all of wait, no lock to be had there (one
-// the filesystem keeps none of, or a lock file it cannot make: read-only
-// media, a folder this user cannot write), the folder gone, the restore's
-// stop, or another failure of the folder's own.
-func sourceLockRefusal(ctx context.Context, snapshotDir, root string, wait time.Duration, err error) error {
+// sourceLockRefusal is the restore's refusal for err, what the lock of the
+// folder that holds the snapshot at snapshotDir (as the restore was given it)
+// answered: a hold given up that holds it, another holder for all of wait, no
+// lock to be had there (one the filesystem keeps none of, or a lock file it
+// cannot make: read-only media, a folder this user cannot write), the folder
+// gone, the restore's stop, or another failure of the folder's own. Each names
+// the snapshot as it was given; a failed call's own words, which may follow,
+// name the lock file where the snapshot resolves.
+func sourceLockRefusal(ctx context.Context, snapshotDir string, wait time.Duration, err error) error {
 	switch {
 	case errors.Is(err, ErrCheckStillRunning):
-		return fmt.Errorf("%w; nothing was restored", err)
+		return heldRefusal(snapshotDir, err)
 	case errors.Is(err, ErrBackupsBusy):
-		return fmt.Errorf("%w, in %s, for all of the restore's wait (%s); nothing was restored", err, root, wait)
+		return fmt.Errorf("%w, in the folder that holds the snapshot %s, for all of the restore's wait (%s); nothing was restored", err, snapshotDir, wait)
 	case ctx.Err() != nil && errors.Is(err, ctx.Err()):
 		return sourceStopped(snapshotDir, err)
 	case errors.Is(err, ErrBackupsUnlocked), errors.Is(err, syscall.EROFS), errors.Is(err, fs.ErrPermission):
-		return &sourceUnlockedError{folder: root, cause: lockCause(err)}
+		return &sourceUnlockedError{snapshot: snapshotDir, cause: lockCause(err)}
 	case errors.Is(err, fs.ErrNotExist):
 		return snapshotGone(snapshotDir, err)
 	}
-	return fmt.Errorf("take the lock of %s, the folder that holds the snapshot: %w; nothing was restored", root, err)
+	return fmt.Errorf("take the lock of the folder that holds the snapshot %s: %w; nothing was restored", snapshotDir, err)
 }
 
 // lockCause is what a lock's failure says of its file, past the words of a
@@ -383,14 +452,15 @@ func lockCause(err error) error {
 // the folder that holds its snapshot: a filesystem that keeps none, or a lock
 // file it could not make there (read-only media, a folder this user cannot
 // write). errors.Is reads it as ErrBackupsUnlocked; its words are a
-// restore's, its cause the failed call's.
+// restore's, naming the snapshot as the restore was given it, its cause the
+// failed call's.
 type sourceUnlockedError struct {
-	folder string
-	cause  error
+	snapshot string
+	cause    error
 }
 
 func (e *sourceUnlockedError) Error() string {
-	return fmt.Sprintf("no lock could be had on %s, the folder that holds the snapshot (%v); nothing was restored", e.folder, e.cause)
+	return fmt.Sprintf("no lock could be had on the folder that holds the snapshot %s (%v); nothing was restored", e.snapshot, e.cause)
 }
 
 // Is reads the refusal as ErrBackupsUnlocked.
