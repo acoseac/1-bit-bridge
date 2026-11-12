@@ -480,8 +480,11 @@ func (b *Backend) Revoke(r engine.RevokeInput) {
 			continue
 		}
 		if o.out == nil {
+			// Dropped for the cause recorded: this revocation's, unless an
+			// earlier one stands (B853 round 2: it was this one's whatever
+			// stood).
 			o.dropped = true
-			o.refused = &engine.Unplayable{Reason: "native_revoked", Detail: r.Reason}
+			o.refused = s.dsdRevokedLocked()
 			continue
 		}
 		if out := o.out; o.conv != nil && out.native == nil && !out.closed && !out.drained && !slices.Contains(pcm, out) &&
