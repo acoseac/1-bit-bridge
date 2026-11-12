@@ -310,30 +310,58 @@ func TestTwoWritesOfOneRevisionLandOnce(t *testing.T) {
 	wantChoice(t, b.ChooseDSD(bg, choiceOf(t, b, dsdstate.ModeOff, 1)), playback.ChoiceWritten)
 }
 
+// joinBound is how long a case's cleanup waits for the writes it started once
+// the gate that held them is let go: they end at once then, so a wait past it
+// is a write that did not.
+const joinBound = 10 * time.Second
+
+// joinWithin waits for the goroutines wg counts at most joinBound, and says so
+// where they did not end: a cleanup's bounded join.
+func joinWithin(t *testing.T, wg *sync.WaitGroup, what string) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(joinBound):
+		t.Errorf("%s did not end within %v of their gate's release", what, joinBound)
+	}
+}
+
 // TestAWriteBackOfARevisionReadInTheWindowIsAnsweredWithTheDurableOne (binding
 // note 2): between the state's write and the publish the published epoch
 // trails the state; a write made from a revision read in that window waits
 // for the write in flight, and answers stale with the revision it made
 // durable, which a write-back then takes; a write-back straight after a read
-// of the published epoch lands.
+// of the published epoch lands. The write in flight parks outside the mark
+// that it came (heldOnce), and its gate is let go on cleanup too, apart from
+// what it holds (the writes' turn, the lease), the writes the case started
+// joined within a bound: until round 2 it parked inside a Once its release
+// was the case's alone, so a failure before that release stranded it, its
+// turn and its lease, and the write queued behind it.
 func TestAWriteBackOfARevisionReadInTheWindowIsAnsweredWithTheDurableOne(t *testing.T) {
-	inWindow, release, queued := make(chan struct{}), make(chan struct{}), make(chan struct{}, 4)
-	var once sync.Once
+	queued := make(chan struct{}, 4)
 	b, store, _ := choiceBackend(t, dsdstate.Defaults())
+	window := newHeldOnce()
+	var writers sync.WaitGroup
+	t.Cleanup(func() {
+		window.let()
+		joinWithin(t, &writers, "the writes the case started")
+	})
 	seams := &playback.Seams{
-		ChoiceWritten: func(error) {
-			once.Do(func() {
-				close(inWindow)
-				<-release
-			})
-		},
-		ChoiceQueued: func() { queued <- struct{}{} },
+		ChoiceWritten: func(error) { window.reach() },
+		ChoiceQueued:  func() { queued <- struct{}{} },
 	}
 	playback.SetSeamsForTest(b, seams)
 	first := make(chan playback.ChoiceResult, 1)
-	go func() { first <- b.ChooseDSD(bg, choiceOf(t, b, dsdstate.ModeConvert, 0)) }()
+	req := choiceOf(t, b, dsdstate.ModeConvert, 0)
+	writers.Add(1)
+	go func() {
+		defer writers.Done()
+		first <- b.ChooseDSD(bg, req)
+	}()
 	select {
-	case <-inWindow:
+	case <-window.came:
 	case res := <-first:
 		t.Fatalf("the write ended (%s) without coming to the window between its state's write and its publish", res.Outcome)
 	case <-time.After(watchdog):
@@ -347,13 +375,18 @@ func TestAWriteBackOfARevisionReadInTheWindowIsAnsweredWithTheDurableOne(t *test
 		t.Fatalf("the state in the window holds %s, want convert, written", mode)
 	}
 	second := make(chan playback.ChoiceResult, 1)
-	go func() { second <- b.ChooseDSD(bg, choiceOf(t, b, dsdstate.ModeOff, revisionOf(t, read))) }()
+	back := choiceOf(t, b, dsdstate.ModeOff, revisionOf(t, read))
+	writers.Add(1)
+	go func() {
+		defer writers.Done()
+		second <- b.ChooseDSD(bg, back)
+	}()
 	select {
 	case <-queued:
 	case <-time.After(watchdog):
 		t.Fatal("a write made in the window did not wait for the write in flight")
 	}
-	close(release)
+	window.let()
 	wantChoice(t, within(t, first, "the write in flight's answer"), playback.ChoiceWritten)
 	res := within(t, second, "the answer of the write made in the window")
 	wantChoice(t, res, playback.ChoiceStale)

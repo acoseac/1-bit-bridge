@@ -40,3 +40,14 @@ func (b *Backend) AdmitDSDPlanForTest(f format.NativeDSD, leading bool) (engine.
 // SetSeamsForTest gives b the seams s, before anything asks them: a test of
 // the backend's external package holds a goroutine at one of them.
 func SetSeamsForTest(b *Backend, s *Seams) { b.cfg.Seams = s }
+
+// ChoiceHeldForTest says whether a choice's write holds the configuration
+// lease, and whether one holds the writes' turn, now: a write that has
+// returned holds neither (B728 B9 PR 2 round 2), and a test asks before a
+// call that would wait for either, so a leak fails it at once.
+func ChoiceHeldForTest(b *Backend) (lease, turn bool) {
+	b.mu.Lock()
+	lease = b.lease != nil
+	b.mu.Unlock()
+	return lease, len(b.choiceTurn) != 0
+}

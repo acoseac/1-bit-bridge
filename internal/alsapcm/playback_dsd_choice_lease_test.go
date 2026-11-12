@@ -214,10 +214,12 @@ func (h *rigHeldStore) let() { h.once.Do(func() { close(h.gate) }) }
 // for the configuration lease before it registers, opening nothing, and once
 // the write has published plays by the choice it wrote: a DSD64 track the
 // state as it was plays natively is given to the DAC converted to PCM, no
-// native sink opened.
+// native sink opened. The write's gate is let go on cleanup, registered once
+// the rig is built, so it runs before the rig's stop, which waits for the
+// write: registered before the rig (until round 2), a failure while the write
+// was parked waited out the rig's watchdog.
 func TestAStartDuringAWritePlaysByTheChoiceItWrote(t *testing.T) {
 	held := &rigHeldStore{came: make(chan struct{}), gate: make(chan struct{})}
-	t.Cleanup(held.let)
 	var waitOnce sync.Once
 	waiting := make(chan struct{})
 	d := newDSDRigWith(t, initialPolicy(dsdstate.ModeNative), func(p *playback.DSDPolicy) {
@@ -226,6 +228,7 @@ func TestAStartDuringAWritePlaysByTheChoiceItWrote(t *testing.T) {
 	}, func(o *rigOptions) {
 		o.seams = &playback.Seams{Leased: func(engine.SessionID) { waitOnce.Do(func() { close(waiting) }) }}
 	})
+	t.Cleanup(held.let)
 	d.files.add("a", dsd(playbacktest.DSD64, 0.5))
 	d.insert("a")
 	req := d.choiceOf(dsdstate.ModeConvert)

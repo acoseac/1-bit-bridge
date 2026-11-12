@@ -427,11 +427,24 @@ func TestAStartBetweenItsRegistrationAndItsHoldRefusesTheWrite(t *testing.T) {
 	r.idle(t)
 }
 
+// freeForTheNextCall fails the case at once, naming what is held, unless no
+// choice's write holds the configuration lease or the writes' turn: the call
+// that comes next would wait for what a write that ended leaked, to the
+// package's timeout, where a bound like within's would still reach the
+// watchdog (round 2).
+func freeForTheNextCall(t *testing.T, b *playback.Backend, next string) {
+	t.Helper()
+	if lease, turn := playback.ChoiceHeldForTest(b); lease || turn {
+		t.Fatalf("before %s: a write that ended still holds the configuration lease (%v) or the writes' turn (%v)", next, lease, turn)
+	}
+}
+
 // TestAStartIsAdmittedAfterAWriteThatDidNotLand (B728 B9 PR 2): the
 // configuration lease is let go on every way out of a write, so a Start that
 // follows a refused write, a write whose state's write failed and a write
 // whose store panicked registers at once, waiting for nothing, and the next
-// write takes the writes' turn.
+// write takes the writes' turn. The Start and the next write are synchronous,
+// so each is asked only once the lease and the turn are seen free (round 2).
 func TestAStartIsAdmittedAfterAWriteThatDidNotLand(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -465,6 +478,7 @@ func TestAStartIsAdmittedAfterAWriteThatDidNotLand(t *testing.T) {
 			if _, writes := r.b.Running(); writes != 0 {
 				t.Errorf("%d writes of the state counted once the write ended", writes)
 			}
+			freeForTheNextCall(t, r.b, "the Start")
 			if err := r.b.Start(context.Background(), startOf(t, 1)); err == nil {
 				t.Fatal("the Start answered nil: the test's DAC refuses every open")
 			}
@@ -477,6 +491,7 @@ func TestAStartIsAdmittedAfterAWriteThatDidNotLand(t *testing.T) {
 			if err := r.b.Release(context.Background(), 1); err != nil {
 				t.Fatal(err)
 			}
+			freeForTheNextCall(t, r.b, "the next write")
 			wantChoice(t, r.b.ChooseDSD(bg, choiceOf(t, r.b, dsdstate.ModeConvert, 1)), playback.ChoiceWritten)
 			r.idle(t)
 		})
