@@ -94897,3 +94897,133 @@ ok under `-race`. `scripts/check-doc-budgets.py` clean on a copy with the rules
 patch applied (`cli-serve.md` 96,883 bytes), and the patch applies at
 90498960. `make test` and `make build-all` were not run: the brief asked for
 the packages.
+
+## 2026-11-12 — B826 round 3: a restore names its snapshot as it was given it
+
+The rule is `cli-serve.md`'s B826 line (round 3's patch) and its long form in
+`ops/History-rules-cli-serve.md` ("B826", "The snapshot's name in the words",
+which holds the inventory of the messages); this is the evidence. Linux amd64
+(legion0), Go 1.27.3, the Makefile's tags, TMPDIR on disk.
+
+### The regression
+
+CI on 75aedb53, the round's merge with main 3a6b924e: on Windows,
+`TestRestoreRefusesAPlayerUUIDThatIsNotOneUUIDBeforeWritingAnyFile` (its ten
+subtests) and `TestARestoreRefusesAPlayerUUIDThatIsNotOneUUIDAndSaysWhatToDo`
+failed every run. `RestoreWithOptions` replaced the snapshot path it was given
+with the one `holdSource` resolved (`snapshotDir, m := src.snap, src.m`), and
+every message after it named the resolved path; Windows gives CI's temporary
+folder in its 8.3 spelling, which resolves to the long one. With TMPDIR
+reached through a symlink the first failed on macOS too, and passed on main.
+
+### Red first
+
+At 75aedb53 on Linux, TMPDIR reached through a symlink
+(`~/onebit/tmp/b826-link`, leading to `b826-real/deeper`,
+`.tmp/_b826/gotest_link.py`): both tests red,
+and `TestRestoreRefusesANamedPipeForThePlayerUUIDAtOnce` (Unix) as well. The
+whole of `internal/backup` through the link failed those two alone (451 s).
+
+```
+player_uuid_test.go:284: the refusal does not name …/b826-link/…/backups/2026-11-12T09-18-37Z/player-uuid and the way through: restore player-uuid: …/b826-real/deeper/…/backups/2026-11-12T09-18-37Z/player-uuid does not hold one UUID, so the player cannot have the identity it had; …
+backup_player_uuid_test.go:171: the refusal does not name the snapshot's file and the way through:
+    restore: restore player-uuid: …/b826-real/deeper/…/data/backups/2026-11-12T09-18-52Z-1/player-uuid does not hold one UUID, …
+player_uuid_unix_test.go:75: Restore with a named pipe for the snapshot's player-uuid: restore player-uuid: open …/b826-real/deeper/…/player-uuid: named pipe is not a file; nothing was restored (refused as "named pipe"); want it refused as a named pipe, naming …/b826-link/…/player-uuid, with nothing restored
+```
+
+The committed case that needs no host's temporary folder, a snapshot reached
+through a link to the folder that holds it, refused for its player-uuid, run
+against 75aedb53's production code (`.tmp/_b826/red_at_head_r3.py`: HEAD's
+`restore_source.go` and `backup.go` put back from memory, the new cases kept,
+each outcome predicted in writing before the run, every one as predicted):
+
+```
+restore_words_test.go:89: the refusal of the snapshot's player-uuid does not name …/002/linked-backups/2026-11-12T09-41-02Z/player-uuid, as the restore was given it: restore player-uuid: …/001/backups/2026-11-12T09-41-02Z/player-uuid does not hold one UUID, …
+--- FAIL: TestARestoreNamesTheSnapshotAsItWasGiven
+```
+
+At the same code: the admission's table red in eight of its eleven ways (the
+three holds given up, which named no snapshot requested; the lock held past
+the wait, no lock to be had and the lock's file failing, which named the
+resolved folder; the manifest gone and not reading, which named it where it
+resolves), green where the words were right already (the snapshot gone at its
+lookup, the restore stopped; and the lookup failing otherwise, whose stand-in
+named the path given, so that a refusal dropping that path would still name
+it: the round's second commit makes the stand-in name where the snapshot
+resolves, as a lookup failing past a link does, once planning its control, C8
+below, showed that; not run at the first commit); A's given-up restore
+blocking B's, and the CLI's case, red; the reads and the shared lock green,
+both right already.
+
+### The fix
+
+The lock and every read stay where the snapshot resolves (`snap` in
+`RestoreWithOptions`); the words name it as the restore was given it, bridge
+restore's argument cleaned. The admission's refusals name the given path
+themselves (`heldRefusal` beside a hold given up, which keeps its own name;
+the lock held past the wait; no lock to be had; the lock's file failing; the
+lookup failing). A read's error is given words with each path below the
+resolved snapshot spelled below the given one (`spelledAsGiven`,
+`givenSpelling`, whose `Unwrap` keeps the chain): the admission's read of the
+manifest, and every error `RestoreWithOptions` answers once admitted
+(`sourceHold.asGiven`, deferred). An error whose words would not change (the
+snapshot given as it resolves) stays itself. The marker is unchanged.
+
+### Controls
+
+On 77feeff5, predicted by name before the run
+(`.tmp/_b826/controls-r3.predictions.txt`), each a production mutation made
+from memory and restored in a `finally` (`git diff --quiet` clean after every
+one), the test binaries built once per control and each case run alone
+(`.tmp/_b826/controls_r3.py`): the round's seven new cases in
+`internal/backup`, the two that the regression broke there, the CLI's new
+case, the CLI's
+player-uuid case, and round 1's and round 2's CLI cases that read the
+refusals' words. The baseline ran first: all thirteen green.
+
+- C1, the reads through the path supplied (`snap, m := snapshotDir, src.m`):
+  exactly the repointed link's case red, B holding the second snapshot's
+  token store, TLS pair and config.
+- C2, the swap put back for the words only (the deferred words naming
+  `src.snap`): exactly the linked player-uuid's case red; the shared lock's
+  case, the exclusion, green.
+- C3, `heldRefusal` naming no snapshot requested: the table's three holds
+  given up, A's restore blocking B's, and the CLI's case red.
+- C4, `heldRefusal` breaking the chain (`%v` for `%w`): the table's three
+  holds (what they carry), A blocking B, the CLI's case (no advice to stop the
+  restore), round 2's commands case both ways and round 1's held row red.
+- C5, `givenSpelling` without `Unwrap`: the linked player-uuid's case
+  (`config.ErrNotOnePlayerUUID` lost), the table's manifest not reading
+  (`json.SyntaxError` lost) and the unit test red; and, not predicted, the
+  table's manifest gone: the admission classifies the manifest's error after
+  respelling it, and without `Unwrap` a manifest gone read as a manifest that
+  does not read, not `ErrSnapshotGone`. The chain carries the admission's own
+  classification too.
+- C6, the admission's manifest read not respelled: the table's manifest gone
+  and not reading red.
+- C7, the lock's refusals given the resolved snapshot: the table's other
+  process's hold, the lock held past the wait, no lock to be had and the
+  lock's file failing red.
+- C8, the lookup's failure without the path given: the table's lookup failing
+  otherwise red.
+
+### The gates
+
+On 77feeff5, in two uses of the build lock (09:58 to 10:37, and 11:06 to
+11:33), nothing else in either, TMPDIR `~/onebit/tmp`: `go vet ./...` with the
+Makefile's tags clean for linux/amd64 and linux/386, and `go vet` of
+`./internal/backup/`, `./internal/doctor/` and `./cmd/bridge/` clean for
+windows/amd64, darwin/arm64 and linux/arm; go1.27.3's gofmt lists none of the
+six Go files the round changed. Under `-race -count=50 -run '^Name$'`, five
+lanes side by side: the round's eight new cases, the eight earlier restore
+cases that read the refusals' words this round changed, and the three cases
+the regression broke, run with TMPDIR reached through the symlink: all 19 ok,
+no race reported (the admission's table 1,422 s for its 50 rounds, the linked
+player-uuid's ten subtests 639 s). The whole of `internal/backup` through the
+symlink, once without `-race`: ok in 462 s (two of its tests failed there
+before the fix). `go test -race -count=1 -timeout 120m -p 2
+./internal/backup/ ./cmd/bridge/`: both ok, `internal/backup` in 767 s and
+`cmd/bridge` in 1,608 s, which holds `TestEveryCitedTestNameExists`. `make test` and `make build-all` were not run:
+the brief asked for the packages. The rules patch applies at the round's
+commit, and `scripts/check-doc-budgets.py` is clean on a copy with it applied
+(`cli-serve.md` 97,290 bytes). Windows is the PR's CI windows job's to show.
