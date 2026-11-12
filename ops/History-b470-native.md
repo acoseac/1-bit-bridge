@@ -708,3 +708,34 @@ waiting in it by `meeting`; settle's other exits, the lock again after a
 change, and the lock's wait are staged on a sink no goroutine owns, the
 context's Done never ready where the case says the wait took another arm
 (`verdictWaitContext`).
+
+## A DAC's DSD choice written while the player is stopped, and the revocation's word (B853) — 2026-11-12
+
+B728 B9 PR 2 (the owner, 2026-11-10: "Stop playback to change DSD"). The
+player's backend writes a DAC's choice (`playback.Backend.ChooseDSD`) only
+under its configuration lease, which it takes under the backend's lock in the
+step that finds no session record, nothing holding the device and no release
+unconfirmed. While the lease is held a Start waits before it registers and
+`reserveProbe` refuses the device slot (`ProbeChoiceWrite`, one of
+`probeSlotSkips`, so the probe stays owed); a probe that held the slot as the
+lease was claimed is waited for. The write reads the DAC, writes the state,
+publishes and reads its answer's epoch under the lease, so a Start admitted
+after it plays by the set it published. No native or DoP byte changes, and no
+native sink, activation or release changes its rules: nothing of #1434's
+write beside what plays (its pending set, the waits for it in the open, the
+producer, an activation or a resume) came back.
+
+The guarded files changed for B853. `Revoke` (`playback/native.go`) records
+its cause where it stops the session's DSD (`revokeDSDLocked`:
+`native_revoked` with the revocation's reason), as `stopDSD` does for a failed
+reading of the policy (`dsd_dac_unread` with `errDSDUnread`'s words, which
+stands whatever came first) and for a contained reconciliation panic
+(`backend_failed` with the session's fault), and the qualification path's
+`reconcilePermission` does (`native_revoked`, the selected policy no longer
+eligible). Both refusals in `admitDSD`, and `openSuccessor`'s, answer that
+record, where `admitDSD`'s answered `dsd_dac_unread` and `openSuccessor`'s
+`native_revoked`, whatever the cause. `internal/alsapcm`'s probe cache says a
+choice forgets none of a probe's answers (`Forget` is the migration's part
+alone), and its tests gain the rig's revocation-word and lease cases.
+Qualification version 49 invalidates earlier harness evidence; LegacyVersion
+remains 35. Test and negative-control evidence is in `ops/engineering-log.md`.
