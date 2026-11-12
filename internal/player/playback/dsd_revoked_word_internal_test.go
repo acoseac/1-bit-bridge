@@ -63,13 +63,22 @@ func newRevocationRig(t *testing.T) *revocationRig {
 	return r
 }
 
-// stop is the rig's cleanup: the session's life ends (its context); a DSD
-// monitor a case started is joined by its end (Seams.MonitorEnded), and then
-// every goroutine of the backend's (Wait), each within rigStopBound.
+// stop is the rig's cleanup: the session's life ends (its context) and so
+// does the session (down, which ends its DSD monitor: startDSDMonitor),
+// closed once, as a release or its teardown would, under the session's lock;
+// a monitor a case started is joined by its end (Seams.MonitorEnded), and then
+// every goroutine of the backend's (Wait), each within rigStopBound. Until
+// round 3 the rig cancelled the context alone, and each monitor a case started
+// refreshed the policy every 100 ms for the life of the process.
 func (r *revocationRig) stop(t *testing.T) {
 	r.s.cancel()
 	r.s.mu.Lock()
 	started := r.s.dsdMonitor
+	select {
+	case <-r.s.down:
+	default:
+		close(r.s.down)
+	}
 	r.s.mu.Unlock()
 	if started {
 		select {
@@ -82,6 +91,23 @@ func (r *revocationRig) stop(t *testing.T) {
 	defer cancel()
 	if err := r.b.Wait(ctx); err != nil {
 		t.Errorf("the rig's backend: %v", err)
+	}
+}
+
+// TestTheRevocationRigsCleanupClosesTheSessionsEndOnce (backlog B853, round
+// 3): the rig's cleanup (stop) closes the session's end only where nothing
+// has: the release of a session that never started closes it itself
+// (session.release), and the cleanup leaves it as it is, where a second close
+// would panic.
+func TestTheRevocationRigsCleanupClosesTheSessionsEndOnce(t *testing.T) {
+	r := newRevocationRig(t)
+	if err := r.b.Release(context.Background(), r.s.id); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-r.s.down:
+	default:
+		t.Fatal("the release of a session that never started left its end open: the case needs one the cleanup finds closed")
 	}
 }
 
