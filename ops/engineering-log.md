@@ -94617,3 +94617,69 @@ refused, `ErrBackupsUnlocked` in a restore's words, with the advice to copy
 the snapshot to a local disk. The brief's case "a standalone copy (no lock
 file) restores unlocked" is therefore `TestAStandaloneCopyIsRestoredUnderItsOwnFoldersLock`:
 it restores, under its own folder's lock, let go after.
+
+### Controls
+
+On the committed tree (e65cbe9c), predicted by name before the run
+(`.tmp/_b826/controls.predictions.txt`, untracked), each a production
+mutation made from memory and restored in a `finally` (`git diff --quiet`
+clean after every one), the two test binaries built once per control and
+every new test run alone (`.tmp/_b826/controls.py`). The baseline, no
+mutation, ran first: all 17 green.
+
+- C1, the given spelling's marks never asked (`SourceStillHeld` refusing
+  nothing): `TestARestoreRefusedByTheSpellingItIsGivenResolvesNothing` red
+  ("resolved 1 paths beside a mark its spelling names"), and
+  `TestBridgeRestoreRefusesBeforeItsPromptWhileAHoldGivenUpHoldsTheSnapshot`
+  red (it asked for its confirmation). `TestARestoreRefusesASnapshotAGivenUpCheckHolds`
+  stayed green, as predicted: the resolved folder's marks and
+  `lockBackupsWith`'s own check of a busy token refuse it after the
+  resolution, a second and a third layer.
+- C2, no lock taken (contention alone, another process's open holding the
+  kernel's lock, no mark): every case that holds or asks the lock red, the
+  busy case among them ("answered <nil>, want ErrBackupsBusy", B written),
+  the cross-process marker, the span, the link, the linked backups folder,
+  the live folder with no lock file, the copy, the unlocked media, the prune
+  during the lock's wait, three of the four stalls (never entered) and the
+  CLI's three words; and, not predicted, the self-restore's check that the
+  lock is free after it (no lock file to ask). The in-process given-up check
+  stayed green (its marks refuse it first).
+- C3, the lock let go as soon as the manifest is read: the copies' case red
+  (the prune ran beside the copies and the restore then failed on a file the
+  prune removed), and the live folder's, the copy's and the stale marker's
+  cases, which ask the lock during the restore.
+- C4, the stale marker never cleared: exactly
+  `TestARestoreClearsAMarkerItsHolderLeftBehind` red, its competitor
+  answering `ErrCheckStillRunning` for a checker that had ended.
+- C5, the manifest read after `completePlayerSeal` and none under the lock:
+  exactly the case pruned during the lock's wait red, `player-initialized`
+  written in B before the read failed. The case pruned during the prompt, and
+  the CLI's, stayed green: the resolution finds the folder gone first.
+- C6, the caller never giving its worker up: all four stalls red, none
+  returned within its bound.
+- C7a, the worker on the caller's context rather than one its give-up ends:
+  the stalled try's case red, the late lock kept long enough to clear the
+  marker after the give-up. C7b, the hand-over's release dropped alone:
+  green, `lockBackupsWith` letting a lock taken on an ended context go
+  itself. C7ab, both: red, the lock kept, the marker removed and the next
+  restore refused busy.
+- C8, bridge restore's refusal words dropped: the CLI's three cases red.
+- C9, the resolved folder's marks dropped alone: green, as predicted (the
+  given spelling's marks and the token's check cover it).
+
+### The gates
+
+On e65cbe9c, in one use of the build lock (03:25 to 04:41, nothing else in
+it): `go vet ./...` with the Makefile's tags clean, and `go vet` of
+`./internal/backup/` and `./cmd/bridge/` clean for windows/amd64,
+darwin/arm64, linux/386 and linux/arm as well. Every new or touched test
+under `-race -count=50 -run '^Name$'`, in four lanes side by side: all 20 ok,
+no race reported (the stalls' case 1,870 s for its 50 rounds, the CLI's
+refusal words 595 s, the root-owner three about 105 s each). `go test -race
+-count=1 -timeout 120m -p 2 ./internal/backup/ ./cmd/bridge/`: both ok,
+`internal/backup` in 919 s and `cmd/bridge` in 2,131 s, which holds
+`TestEveryCitedTestNameExists`. The one caller of `backup.Restore` outside
+those packages, openhome's `TestARestoredIdentityHandsOutValuesPastItsSnapshot`,
+ok under `-race`. `scripts/check-doc-budgets.py` clean on the tree, and on a
+copy with the rules line applied (`cli-serve.md` 98,370 bytes). `make test`
+and `make build-all` were not run: the brief asked for the two packages.
