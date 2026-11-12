@@ -596,11 +596,32 @@ func NewTransitionQualificationBackend(cfg Config, plans TransitionPlans) (*Back
 	return b, nil
 }
 
+// permissionReconciliation names the authorization's reconciliation where a
+// panic in it is contained.
+const permissionReconciliation = "the DSD authorization's reconciliation"
+
 // reconcilePermission drops only ineligible prepared occurrences; an invalid
-// open native output (including a retiring tail) is fenced immediately.
+// open native output (including a retiring tail) is fenced immediately. An
+// authorization replaced stops the session's DSD for its cause, recorded
+// before anything is dropped, so an earlier cause stands (backlog B853): what
+// it drops carries the cause recorded, and an occurrence dropped already
+// keeps its refusal (round 2: a prepared successor an ordinary revocation had
+// dropped was dropped again for this word). A panic in it is contained as a
+// policy reconciliation's is (reconcileDSD): logged, and the session's DSD
+// stopped with the backend's own failure recorded as its cause and its fault
+// (stopDSD), so its caller, the session's monitor or RefreshAuthorization,
+// goes on (round 2: it reached the caller, and nothing was recorded).
 func (s *session) reconcilePermission(next *permission, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			s.b.logPanic(permissionReconciliation, r)
+			s.stopDSD(permissionReconciliation, false)
+		}
+	}()
 	s.b.reconcilingPermission(s.id)
-	s.mu.Lock()
+	l := s.hold()
+	defer l.release()
+	l.lock()
 	prior := s.permission
 	replaced := err != nil || next == nil || prior == nil || prior.revoked.Load()
 	if !replaced {
@@ -613,13 +634,6 @@ func (s *session) reconcilePermission(next *permission, err error) {
 		}
 	}
 	ineligible := engine.Unplayable{Reason: "native_revoked", Detail: "selected DSD policy is no longer eligible"}
-	for _, o := range s.chain {
-		if o.opened() && o.plan != nil && o.out == nil && (replaced || next.unavailable[edgeKey(o.transport, o.plan)]) {
-			o.dropped = true
-			u := ineligible
-			o.refused = &u
-		}
-	}
 	if replaced {
 		// With no native output active no Revoke follows: a successor still
 		// opening is refused at its open's end for this cause (B853).
@@ -628,7 +642,19 @@ func (s *session) reconcilePermission(next *permission, err error) {
 			prior.revoked.Store(true)
 		}
 	}
-	s.mu.Unlock()
+	for _, o := range s.chain {
+		if o.opened() && !o.dropped && o.plan != nil && o.out == nil && (replaced || next.unavailable[edgeKey(o.transport, o.plan)]) {
+			o.dropped = true
+			u := ineligible
+			if s.nativeRevoked {
+				// The session's DSD is stopped: the cause recorded, this
+				// replacement's or an earlier one, which stands.
+				u = *s.dsdRevokedLocked()
+			}
+			o.refused = &u
+		}
+	}
+	l.unlock()
 	if active {
 		s.b.Revoke(engine.RevokeInput{Session: s.id, Reason: "selected DSD authorization changed"})
 	}

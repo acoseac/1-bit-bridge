@@ -30,6 +30,16 @@ func (b *Backend) openNativeContent(ctx context.Context, o *occ, d decode.DSDDec
 		return
 	}
 	admit := b.nativeAdmission
+	if admit == nil && b.cfg.DSD == nil {
+		// The harness's path: a session whose DSD was stopped refuses the
+		// entry for the cause recorded, as admitDSD does first, before a
+		// selector answers its revoked permission as no approval (backlog
+		// B853, round 2).
+		if u := o.stoppedCause(); u != nil {
+			o.refused = u
+			return
+		}
+	}
 	switch {
 	case admit != nil:
 	case b.cfg.DSD != nil:

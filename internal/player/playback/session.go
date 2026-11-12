@@ -372,6 +372,23 @@ func (s *session) dsdRevokedLocked() *engine.Unplayable {
 	return &u
 }
 
+// stoppedCause is the refusal o's session gives a DSD entry once its DSD was
+// stopped, for the cause recorded (dsdRevokedLocked), or nil while it was not
+// or for an occurrence of no session. It takes the session's lock, which its
+// caller does not hold.
+func (o *occ) stoppedCause() *engine.Unplayable {
+	s := o.owner
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.nativeRevoked {
+		return nil
+	}
+	return s.dsdRevokedLocked()
+}
+
 // recoverFault is deferred last by the producer: a panic on it is recovered,
 // logged once, and is the session's fault (faulted).
 func (s *session) recoverFault(where string) {
