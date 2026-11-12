@@ -778,6 +778,11 @@ func TestARestoreWhoseSourceDoesNotAnswerIsRefusedWithinItsBound(t *testing.T) {
 				t.Errorf("the restore answered %v, want a refusal wrapping %v, nothing restored", err, why)
 			}
 			b.requireUntouched(t, "the restore whose source did not answer")
+			// Given up before it held the lock, it holds nothing a mark would
+			// say it holds, and marks nothing (backlog B826's second round).
+			if s, held := backup.StuckCheckHere(root); held {
+				t.Errorf("a restore given up before it held the lock marked the folder: %+v", s)
+			}
 
 			p.release()
 			awaitSourceWorkerEnd(t, ends, snap)

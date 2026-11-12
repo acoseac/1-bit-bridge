@@ -225,7 +225,7 @@ func SetOnMarkerWriteForTest(fn func(event, marker string)) (restore func()) {
 }
 
 // SetOnSourceStepForTest installs the hook a restore's source worker runs as
-// it passes a step under the lock ("cleared", "read"), given the snapshot as
+// it passes a step under the lock ("held", "cleared", "read"), given the snapshot as
 // the restore was given it, and returns the restore. Its callback must return
 // once its test lets it, and ignore every snapshot but its test's.
 func SetOnSourceStepForTest(fn func(dir, step string)) (restore func()) {

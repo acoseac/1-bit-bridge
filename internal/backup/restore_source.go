@@ -100,8 +100,9 @@ var onSourceWorkerEnd atomic.Pointer[func(string)]
 
 // onSourceStep, nil in production, runs on a restore's source worker as it
 // passes a step under the lock, given the snapshot as the restore was given
-// it: "cleared" once a stale marker's removal has ended, "read" once the
-// manifest is read, before the hold is handed over (SetOnSourceStepForTest).
+// it: "held" once the lock is held, before a stale marker's removal,
+// "cleared" once that removal has ended, "read" once the manifest is read,
+// before the hold is handed over (SetOnSourceStepForTest).
 var onSourceStep atomic.Pointer[func(dir, step string)]
 
 // sourceStep runs onSourceStep's hook, if any.
@@ -272,6 +273,7 @@ func takeSource(h *hold, snapshotDir string, wait time.Duration) *sourceHold {
 	if s := given(); s != nil {
 		return s
 	}
+	sourceStep(snapshotDir, "held")
 	h.enter(stepClearMarker)
 	h.clearStale()
 	sourceStep(snapshotDir, "cleared")

@@ -47,87 +47,109 @@ func awaitEvent(t *testing.T, events <-chan string, want ...string) string {
 
 // TestTheStaleMarkersRemovalNeverTakesAwayARestoresMarker is backlog B826's
 // second round (Codex on its brief, finding 3): a restore holds the folder's
-// lock, and its removal of a marker a checker whose process ended left there
-// stops answering; the restore, stopped, is given up and marks the folder. Its
-// marker's write waits for that removal to end, so the removal, once it
-// answers, takes the stale marker away and never the restore's, which is
-// written after it: another process then reads the folder as held by a given-up
-// restore while the worker still holds the lock. The worker, seeing the give-up,
-// reads nothing more and lets the lock go, its marker with it. Its control
-// writes the marker at once: the removal, answering after it, takes it away,
-// and another process reads the lock as held with no marker.
+// lock, beside a marker a checker whose process ended left there, and is
+// stopped and given up, which marks the folder as a restore's. Given up
+// while its removal of the stale marker does not answer, its marker's write
+// waits for that removal to end, so the removal, once it answers, takes the
+// stale marker away and never the restore's, written after it; given up
+// before the removal began, the removal is skipped, the restore's marker
+// standing. Either way another process then reads the folder as held by a
+// given-up restore while the worker still holds the lock, and the worker,
+// seeing the give-up, reads nothing more and lets the lock go, its marker
+// with it. Its controls write the marker at once, which a removal answering
+// after it takes away, and remove the stale marker whatever the give-up.
 func TestTheStaleMarkersRemovalNeverTakesAwayARestoresMarker(t *testing.T) {
-	src := storeWithTracks(t, 5)
-	snap := snapshotOf(t, src)
-	other := snapshotOf(t, src)
-	root := filepath.Dir(snap)
-	marker := writeStuckMarker(t, root, "a check whose process ended")
-	b := newDestinationBox(t)
-	ends := sourceWorkerEnds(t)
+	for _, when := range []string{"during the removal", "before the removal began"} {
+		t.Run(when, func(t *testing.T) {
+			src := storeWithTracks(t, 5)
+			snap := snapshotOf(t, src)
+			other := snapshotOf(t, src)
+			root := filepath.Dir(snap)
+			marker := writeStuckMarker(t, root, "a check whose process ended")
+			b := newDestinationBox(t)
+			ends := sourceWorkerEnds(t)
 
-	removal, cleared := newParking(), newParking()
-	var removing, clearedOnce atomic.Bool
-	t.Cleanup(backup.SetRemoveStaleMarkerForTest(func(p string) error {
-		if p == marker && removing.CompareAndSwap(false, true) {
-			removal.park()
-		}
-		return os.Remove(p)
-	}))
-	events := make(chan string, 8)
-	t.Cleanup(backup.SetOnMarkerWriteForTest(func(event, m string) {
-		if m == marker {
-			select {
-			case events <- event:
-			default:
+			removal, held, cleared := newParking(), newParking(), newParking()
+			var removing, holding, clearedOnce atomic.Bool
+			t.Cleanup(backup.SetRemoveStaleMarkerForTest(func(p string) error {
+				if when == "during the removal" && p == marker && removing.CompareAndSwap(false, true) {
+					removal.park()
+				}
+				return os.Remove(p)
+			}))
+			events := make(chan string, 8)
+			t.Cleanup(backup.SetOnMarkerWriteForTest(func(event, m string) {
+				if m == marker {
+					select {
+					case events <- event:
+					default:
+					}
+				}
+			}))
+			t.Cleanup(backup.SetOnSourceStepForTest(func(dir, step string) {
+				switch {
+				case dir != snap:
+				case step == "held" && when == "before the removal began" && holding.CompareAndSwap(false, true):
+					held.park()
+				case step == "cleared" && clearedOnce.CompareAndSwap(false, true):
+					cleared.park()
+				}
+			}))
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+			callers := joinBackupCallers(t, func() { removal.release(); held.release(); cleared.release() })
+			done := make(chan error, 1)
+			callers.start(func() {
+				done <- backup.RestoreWithOptions(snap, b.targets, backup.RestoreOptions{Context: ctx, LockWait: 20 * time.Second})
+			})
+			if when == "during the removal" {
+				awaitEntered(t, removal.entered, "the stale marker's removal")
+			} else {
+				awaitEntered(t, held.entered, "the worker with the lock, before its removal")
 			}
-		}
-	}))
-	t.Cleanup(backup.SetOnSourceStepForTest(func(dir, step string) {
-		if dir == snap && step == "cleared" && clearedOnce.CompareAndSwap(false, true) {
-			cleared.park()
-		}
-	}))
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	callers := joinBackupCallers(t, func() { removal.release(); cleared.release() })
-	done := make(chan error, 1)
-	callers.start(func() {
-		done <- backup.RestoreWithOptions(snap, b.targets, backup.RestoreOptions{Context: ctx, LockWait: 20 * time.Second})
-	})
-	awaitEntered(t, removal.entered, "the stale marker's removal")
-	cancel()
-	err := requireReturnedWithin(t, done, time.Now(), backup.StopWriteBound+2*time.Second, "a restore whose removal of a stale marker does not answer")
-	if !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "nothing was restored") {
-		t.Fatalf("the stopped restore answered %v, want its stop's refusal, nothing restored", err)
-	}
-	// The restore's marker waits for the removal, or (its control) is written.
-	awaitEvent(t, events, "waits", "writes")
-	removal.release()
-	awaitEntered(t, cleared.entered, "the worker past its removal")
-	awaitEvent(t, events, "writes")
-	if !pathExists(t, marker) {
-		t.Fatal("the stale marker's removal took the restore's marker away")
-	}
-	if s := readStuckMarker(t, root); !s.Restoring() || s.Snapshot != filepath.Base(snap) {
-		t.Errorf("the marker beside the lock reads %+v, want the restore of %s", s, filepath.Base(snap))
-	}
-	words := "a restore of snapshot " + filepath.Base(snap)
-	if _, err := backup.VerifySnapshotAsAnotherProcessForTest(t.Context(), other, backup.VerifyOptions{LockWait: 10 * time.Second}); !errors.Is(err, backup.ErrCheckStillRunning) ||
-		!strings.Contains(err.Error(), words) {
-		t.Errorf("another process's verification beside the restore given up answered %v, want ErrCheckStillRunning naming %q", err, words)
-	}
+			cancel()
+			err := requireReturnedWithin(t, done, time.Now(), backup.StopWriteBound+2*time.Second, "a restore stopped with the lock held")
+			if !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "nothing was restored") {
+				t.Fatalf("the stopped restore answered %v, want its stop's refusal, nothing restored", err)
+			}
+			if when == "during the removal" {
+				// The restore's marker waits for the removal, or (its control)
+				// is written.
+				awaitEvent(t, events, "waits", "writes")
+				removal.release()
+			} else {
+				awaitEvent(t, events, "writes")
+				held.release()
+			}
+			awaitEntered(t, cleared.entered, "the worker past its removal")
+			if when == "during the removal" {
+				awaitEvent(t, events, "writes")
+			}
+			if !pathExists(t, marker) {
+				t.Fatal("the stale marker's removal took the restore's marker away")
+			}
+			if s := readStuckMarker(t, root); !s.Restoring() || s.Snapshot != filepath.Base(snap) {
+				t.Errorf("the marker beside the lock reads %+v, want the restore of %s", s, filepath.Base(snap))
+			}
+			words := "a restore of snapshot " + filepath.Base(snap)
+			if _, err := backup.VerifySnapshotAsAnotherProcessForTest(t.Context(), other, backup.VerifyOptions{LockWait: 10 * time.Second}); !errors.Is(err, backup.ErrCheckStillRunning) ||
+				!strings.Contains(err.Error(), words) {
+				t.Errorf("another process's verification beside the restore given up answered %v, want ErrCheckStillRunning naming %q", err, words)
+			}
 
-	cleared.release()
-	awaitSourceWorkerEnd(t, ends, snap)
-	awaitClean(t)
-	if pathExists(t, marker) {
-		t.Error("the restore's marker outlived its lock")
+			cleared.release()
+			awaitSourceWorkerEnd(t, ends, snap)
+			awaitClean(t)
+			if pathExists(t, marker) {
+				t.Error("the restore's marker outlived its lock")
+			}
+			if held, err := backupsLockHeld(root); err != nil || held {
+				t.Errorf("the folder's lock once the restore's worker let go: held %v, %v; want it free", held, err)
+			}
+			b.requireUntouched(t, "the restore given up with the lock held")
+			callers.wait(t)
+		})
 	}
-	if held, err := backupsLockHeld(root); err != nil || held {
-		t.Errorf("the folder's lock once the restore's worker let go: held %v, %v; want it free", held, err)
-	}
-	b.requireUntouched(t, "the restore given up in its removal")
-	callers.wait(t)
 }
 
 // TestARestoresMarkStandsUntilItsUnlockEnds is backlog B826's second round
