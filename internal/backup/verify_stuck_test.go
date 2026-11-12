@@ -450,8 +450,12 @@ func TestAVerificationBegunBeforeItsEndHookNeverRunsIt(t *testing.T) {
 // waits, however late the host runs either, and its check, parked before it
 // reads anything (parkCheck), is given up and does not end. Backlog B872: the
 // second began once the first's check had parked at SQLite's open, a park the
-// first's deadline could cut short, and the give-up could come before the
-// second began to wait; either left a wait with no bound that never ended.
+// first's deadline could cut short, which left a wait with no bound that
+// never ended; and the give-up could come before the second began to wait,
+// which the case could not tell from a wait (takeSlot signals a wait before
+// it asks whether the slot's holder was given up), so a second verification
+// refused as it arrived passed it. It now asks, as the second begins to
+// wait, that the first is not given up yet.
 func TestAVerificationWaitingItsTurnHearsOfACheckGivenUp(t *testing.T) {
 	first, err := backup.Snapshot(t.Context(), storeWithTracks(t, 5))
 	if err != nil {
