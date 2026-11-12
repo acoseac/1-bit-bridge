@@ -94643,6 +94643,8 @@ Backlog B761, PR 2, on `feat/b761-deezer-requeue` from 3a6b924e (migration v63, 
 | C8 the upsert keeps the query | `TestAChangedFileDropsThePendingPortraitAndAnUnchangedScanKeepsIt` | Retry missing's three resets |
 | C9 a refusal negative-cached | the cut-off pass; `TestDeezerOffAsksDeezerNothingAndStillFetchesCovers` | the batch's cut-off; the terminal miss |
 
+**`cmd/bridge`'s checks of the ladder's last step.** The first run of `./cmd/bridge/` (at d23782b0) failed five tests. `TestNoDocblockNamesAnotherDeclaration` found this PR's own doc comment on a const block in `deezer_requeue_test.go` naming the function after it (2aed19bb gives each a doc of its own). The other four, `TestAMigrationWhoseRecordCannotBeWrittenDoesNotRun`, `TestALateFirstStartOfTheInstalledVersionCompletesItsInstall`, `TestATargetWhoseSettingsAreFixedConfirmsAnInterruptedRollback` and `TestALaterCommandOfTheVersionRolledBackRefusesToMigrateOnceThePreviousVersionBoots`, require a store one step behind the ladder (`storeOneMigrationBehind`, at v62 now) to lack what the last step adds, and `latestSchemaPresent` asked for v62's table, which that store holds ("the store has v62's table: true, want false"). 03fa20a5 names v63's column there, as B652 named v62's table there (43d83fa5), and stops the crash rollback's obstacle note calling v62 the last step; the rules patch gives the next migration the line (`scanner.md`).
+
 **Runs** (legion0, Linux, go1.27.3, the Makefile's tags, TMPDIR on disk).
 
 | Check | Result |
@@ -94654,6 +94656,14 @@ Backlog B761, PR 2, on `feat/b761-deezer-requeue` from 3a6b924e (migration v63, 
 | `-race -count=50 -run TestServeAsksDeezerForTheRefusedPortraitsOnceItIsOn ./cmd/bridge/` | ok, 77.4 s |
 | `go test -race -timeout 120m ./internal/enrich/` | ok, 120.5 s |
 | `go test -race -timeout 120m ./internal/api/` | ok, 141.4 s |
+| `go test -race -timeout 120m ./internal/manifest/` | ok, 1604.8 s |
+| `go test -race -timeout 120m ./cmd/bridge/`, at d23782b0 | FAIL, 1565.9 s: the five tests above |
+| those five, `TestAMigrationThatFailsStillRefusesTheRollback`, `TestACommandsMigrationRefusesTheRollbackToo` and `TestEveryCitedTestNameExists`, `-race`, at 2aed19bb | ok, 51.1 s |
+| `go vet ./cmd/bridge/ ./internal/enrich/` (the tags), at 2aed19bb | exit 0 |
+| `go test -race -timeout 120m ./cmd/bridge/`, at 2aed19bb | ok, 1576.2 s |
+| `-race -count=50`, the four tests that ask `latestSchemaPresent`, `./cmd/bridge/` | ok, 1053.2 s |
+| `go test -race -timeout 120m`, each alone: `./internal/admin/` (the console's hint), `./internal/config/` (the switch's comment), `./internal/upnpingest/` (the upstream ingest's upserts), `./internal/backup/` (the snapshot check's schema) | ok each: 1074.4 s, 14.6 s, 18.4 s, 613.5 s |
+| `make docs-check`; the rules patch applied to a copy of the rules | clean; within budget (`enrichment.md` 49,588 bytes, `scanner.md` 46,020, `wire.md` 62,258; the heaviest load 359,113), every test it cites there |
 
 **Left.**
 
