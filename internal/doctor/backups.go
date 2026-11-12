@@ -65,6 +65,12 @@ func BackupChecks(st backup.Status, err, lockErr error, stuck *backup.StuckCheck
 			// it ends it, never a restart of the bridge, which runs none.
 			what = "a restore of snapshot " + stuck.Snapshot
 			hint = "the end of the bridge restore command that runs it ends it: stop that command; if it comes back, the storage that holds the snapshots is not answering"
+		case stuck.Probing():
+			// A probe of the lock whose release did not end (backlog B871): this
+			// process's own, the doctor's or the scheduled snapshot's, marked in
+			// this process alone, never a restore's.
+			what = stuck.Probe
+			hint = "the storage that holds the snapshots stopped answering as the probe let go of the lock it tried: the hold ends when that storage answers or the process that made the probe ends; check that storage (a mount that stopped answering), and restart the bridge if the hold does not end"
 		case stuck.Pruning():
 			what = "a prune of the snapshots"
 		}

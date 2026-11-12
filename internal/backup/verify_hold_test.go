@@ -161,7 +161,7 @@ func requireRefusedNaming(t *testing.T, root, second, name, step string, release
 		}
 	})
 	answersWithin(t, 2*time.Second, "the doctor's reading", release, func() {
-		s, held := backup.StuckCheckOf(root)
+		s, held := backup.StuckCheckOf(root, backup.ProbeByDoctor)
 		if !held || s.Snapshot != name || s.Step != step {
 			t.Errorf("StuckCheckOf = %+v, %v; want %s given up at %q", s, held, name, step)
 		}

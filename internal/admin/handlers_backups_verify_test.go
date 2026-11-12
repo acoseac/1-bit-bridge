@@ -53,10 +53,10 @@ func doctorLines(t *testing.T, dataDir string) []doctor.Check {
 	root := filepath.Join(dataDir, backup.BackupsDirName)
 	st, err := backup.ReadStatus(t.Context(), root)
 	var stuck *backup.StuckCheck
-	if s, held := backup.StuckCheckOf(root); held {
+	if s, held := backup.StuckCheckOf(root, backup.ProbeByDoctor); held {
 		stuck = &s
 	}
-	return doctor.BackupChecks(st, err, backup.ProbeBackupsLock(root), stuck, true, time.Now())
+	return doctor.BackupChecks(st, err, backup.ProbeBackupsLock(root, backup.ProbeByDoctor), stuck, true, time.Now())
 }
 
 // lineNamed is the doctor's line named name.

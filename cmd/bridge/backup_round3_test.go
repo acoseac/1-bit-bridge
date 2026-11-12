@@ -105,7 +105,7 @@ func runStuckCheck() int {
 	<-letGo
 	// Its worker lets the folder go once the check has ended.
 	for deadline := time.Now().Add(30 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
-		if _, held := backup.StuckCheckOf(root); !held {
+		if _, held := backup.StuckCheckOf(root, backup.ProbeByDoctor); !held {
 			break
 		}
 	}
@@ -563,7 +563,7 @@ func TestTheTickerTakesNoSnapshotWhileACheckThatDidNotEndHoldsTheFolder(t *testi
 	release()
 	awaitVerificationsEnd(t, root)
 	for wait := time.Now().Add(30 * time.Second); ; time.Sleep(10 * time.Millisecond) {
-		if _, held := backup.StuckCheckOf(root); !held {
+		if _, held := backup.StuckCheckOf(root, backup.ProbeByDoctor); !held {
 			break
 		}
 		if time.Now().After(wait) {

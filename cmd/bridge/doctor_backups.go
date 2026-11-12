@@ -107,8 +107,8 @@ func backupsReadOf(root string) *backupsRead {
 		bounded, cancel := context.WithTimeout(context.Background(), doctorBackupsBound)
 		defer cancel()
 		st, err := backup.ReadStatus(bounded, root)
-		r := backupsReads{st: st, err: err, lockErr: backup.ProbeBackupsLock(root)}
-		if s, held := backup.StuckCheckOf(root); held {
+		r := backupsReads{st: st, err: err, lockErr: backup.ProbeBackupsLock(root, backup.ProbeByDoctor)}
+		if s, held := backup.StuckCheckOf(root, backup.ProbeByDoctor); held {
 			r.other = &s
 		}
 		backupsReadsMu.Lock()

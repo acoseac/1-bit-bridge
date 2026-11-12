@@ -45,6 +45,20 @@ func StuckAnywhereForTest() bool {
 	return held
 }
 
+// FolderTokenHeldForTest reports whether this process's one holder of the
+// backups folder at root is taken (folderTokens): a try on it, given back at
+// once.
+func FolderTokenHeldForTest(root string) bool {
+	token := folderToken(ownerKey(root))
+	select {
+	case token <- struct{}{}:
+		<-token
+		return false
+	default:
+		return true
+	}
+}
+
 // SlotHeldForTest reports whether a verification holds this process's slot:
 // a try on it, given back at once.
 func SlotHeldForTest() bool {

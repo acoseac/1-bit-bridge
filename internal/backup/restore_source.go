@@ -256,6 +256,15 @@ func sourceSpelling(snapshotDir string) string {
 	return filepath.Dir(spellingKey(snapshotDir))
 }
 
+// restoreProber is the prober of bridge restore's look at the snapshot at
+// snapshotDir, as given, which resolves to snap (checkSource): a probe of its
+// folder's lock whose release does not end is marked as that restore's, by the
+// snapshot's folder name, under the given spelling's folder too, so that the
+// refusal before the prompt names it (backlog B871).
+func restoreProber(snapshotDir, snap string) Prober {
+	return Prober{snapshot: filepath.Base(snap), restore: true, spellings: []string{sourceSpelling(snapshotDir)}}
+}
+
 // SourceStillHeld is a restore's first check, made before anything reads the
 // snapshot at snapshotDir: ErrCheckStillRunning where a hold given up in this
 // process still holds the folder the snapshot is in, by the spelling given,
@@ -483,7 +492,7 @@ func checkSource(snapshotDir string) error {
 		}
 		return fmt.Errorf("%s: %w; nothing was restored", snapshotDir, err)
 	}
-	if check, held := StuckCheckOf(root); held {
+	if check, held := StuckCheckOf(root, restoreProber(snapshotDir, snap)); held {
 		return heldRefusal(snapshotDir, stillRunning(check))
 	}
 	path := filepath.Join(snap, ManifestFile)

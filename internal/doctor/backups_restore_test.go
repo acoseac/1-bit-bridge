@@ -29,6 +29,10 @@ func TestTheBackupCheckLineNamesWhatHoldsTheFolderAndWhatEndsIt(t *testing.T) {
 			"a verification of snapshot S did not end (its check)", "restart the bridge, or stop the backup --verify command that runs it", "bridge restore"},
 		{"a prune", backup.StuckCheck{Step: "its removals", Since: now.Add(-2 * time.Minute)},
 			"a prune of the snapshots did not end (its removals)", "restart the bridge, or stop the backup --verify command that runs it", "bridge restore"},
+		// A probe of the lock whose release did not end (backlog B871's item 3)
+		// is said as the probe it is, never a prune or a restore.
+		{"a probe", backup.StuckCheck{Probe: "the doctor's probe of the snapshots' lock", Step: "letting go of the lock it tried", Since: now.Add(-2 * time.Minute)},
+			"the doctor's probe of the snapshots' lock did not end (letting go of the lock it tried)", "the storage that holds the snapshots", "restore"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			stuck := tc.stuck

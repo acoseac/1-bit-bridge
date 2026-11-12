@@ -317,7 +317,7 @@ func TestAStuckMarkSaysWhatHoldsTheFolder(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer fsutil.Unlock(f)
-			got, held := backup.StuckCheckOf(root)
+			got, held := backup.StuckCheckOf(root, backup.ProbeByDoctor)
 			if !held || got.Restoring() != tc.restoring || got.What() != tc.what {
 				t.Errorf("StuckCheckOf = %+v, %v; want %q", got, held, tc.what)
 			}

@@ -163,7 +163,7 @@ func TestAVerificationPastItsDeadlineReturnsWithItsCallerStillWaiting(t *testing
 		}
 		letGo()
 		awaitSlotFree(t)
-		if _, held := backup.StuckCheckOf(filepath.Dir(dir)); held {
+		if _, held := backup.StuckCheckOf(filepath.Dir(dir), backup.ProbeByDoctor); held {
 			t.Error("the check reads as one still running once its thread has ended")
 		}
 	})

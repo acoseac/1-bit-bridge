@@ -421,6 +421,23 @@ func SetOnCheckSourceEndForTest(fn func(dir string)) (restore func()) {
 	return func() { onCheckWorkerEnd.Store(prev) }
 }
 
+// SetOnProbeReleaseForTest installs the hook a probe of a backups folder's
+// lock (StuckCheckOf, ProbeBackupsLock) runs as it lets go of what it took,
+// given the folder as the probe was given it and the step: "unlock" before
+// its unlock, where its try took the lock, "close" before its lock file's
+// close, and "released" once its release has ended and the mark a release
+// past its bound raised is dropped; and returns the restore: a test stands an
+// unlock or a close that does not answer in (backlog B871). Its callback must
+// return once its test lets it, and ignore every folder but its test's.
+func SetOnProbeReleaseForTest(fn func(dir, step string)) (restore func()) {
+	var p *func(string, string)
+	if fn != nil {
+		p = &fn
+	}
+	prev := onProbeRelease.Swap(p)
+	return func() { onProbeRelease.Store(prev) }
+}
+
 // SetReadSourceManifestForTest replaces CheckRestoreSource's read of the
 // snapshot's manifest (os.ReadFile), given its path, and returns the restore:
 // a test stands a read that fails with a permission or an I/O error in for it

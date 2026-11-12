@@ -264,7 +264,7 @@ func TestAnAbandonedCheckKeepsItsHoldsUntilItsCheckerEnds(t *testing.T) {
 	if !pathExists(t, oldest) {
 		t.Error("a prune ran beside the check that runs on: the oldest verified snapshot is gone")
 	}
-	if s, held := backup.StuckCheckOf(root); !held || s.Snapshot != filepath.Base(c.Dir) {
+	if s, held := backup.StuckCheckOf(root, backup.ProbeByDoctor); !held || s.Snapshot != filepath.Base(c.Dir) {
 		t.Errorf("StuckCheckOf = %+v, %v; want the check of %s", s, held, filepath.Base(c.Dir))
 	}
 
@@ -280,7 +280,7 @@ func TestAnAbandonedCheckKeepsItsHoldsUntilItsCheckerEnds(t *testing.T) {
 	}
 	requireVerdict(t, "the record once the check ended", listed(t, c.Dir), backup.StateIncomplete, backup.ReasonDeadline,
 		backup.StateIncomplete, backup.ReasonDeadline)
-	if _, held := backup.StuckCheckOf(root); held {
+	if _, held := backup.StuckCheckOf(root, backup.ProbeByDoctor); held {
 		t.Error("the check reads as one still running once it ended")
 	}
 	if pathExists(t, filepath.Join(root, backup.StuckMarkerName)) {

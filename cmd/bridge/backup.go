@@ -884,6 +884,8 @@ func pruneSkipWords(verifyErr error) string {
 		return "no lock is granted on the backups folder, so nothing there is verified or pruned (bridge doctor's backup-lock line)"
 	case backup.HeldByRestore(verifyErr):
 		return "a restore that did not end holds the snapshots until it ends; the first snapshot after it prunes (bridge doctor's backup-check line)"
+	case backup.HeldByProbe(verifyErr):
+		return "a probe of the snapshots' lock whose release did not end holds them until it ends; the first snapshot after it prunes (bridge doctor's backup-check line)"
 	case errors.Is(verifyErr, backup.ErrCheckGivenUp), errors.Is(verifyErr, backup.ErrCheckStillRunning):
 		return "a check that did not end holds the snapshots until it ends; the first snapshot after it prunes (bridge doctor's backup-check line)"
 	case errors.Is(verifyErr, backup.ErrRecheckNotRecorded), errors.Is(verifyErr, backup.ErrRecheckRefused):
@@ -1027,7 +1029,7 @@ func captureHeldBack(ctx context.Context, backupsRoot string) (why string, held 
 		held  bool
 	}
 	stuck, answered := readBounded(ctx, func() stuckRead {
-		c, held := backup.StuckCheckOf(backupsRoot)
+		c, held := backup.StuckCheckOf(backupsRoot, backup.ProbeByTicker)
 		return stuckRead{c, held}
 	})
 	switch {
@@ -1038,13 +1040,15 @@ func captureHeldBack(ctx context.Context, backupsRoot string) (why string, held 
 		switch {
 		case stuck.check.Restoring():
 			what = "a restore of " + stuck.check.Snapshot
+		case stuck.check.Probing():
+			what = stuck.check.Probe
 		case stuck.check.Pruning():
 			what = "a prune of the snapshots"
 		}
 		return fmt.Sprintf("%s that did not end still holds the backups folder, so nothing there is verified or pruned; none is taken until it ends (bridge doctor's backup-check line)",
 			what), true
 	}
-	lockErr, answered := readBounded(ctx, func() error { return backup.ProbeBackupsLock(backupsRoot) })
+	lockErr, answered := readBounded(ctx, func() error { return backup.ProbeBackupsLock(backupsRoot, backup.ProbeByTicker) })
 	switch {
 	case !answered:
 		return "", true
