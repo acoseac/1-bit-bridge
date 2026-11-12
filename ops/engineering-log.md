@@ -94877,3 +94877,71 @@ checked on a copy of the tree: it applies to the branch, the budgets hold (CLAUD
 load 78.3%), `verify_moves.py --base HEAD` misses only the B853 line's two edited copies, each with
 its successor, and `TestEveryCitedTestNameExists` caught a ghost citation planted in the copy and
 passed without it.
+
+## 2026-11-12 — B728 B9 PR 2 round 3: a cause recorded during selection still wins, and the round-2 tests leave nothing running
+
+Base: fe8068c9 (`orch/b9p2`: round 2 and its rules commit), PR #1453. Each item was checked
+against the code before it was fixed, and each fix's case was red first (82fe1f40, two inert
+seams with it: `Seams.Selecting` and `Seams.MonitorEnded`).
+
+**Item 1: a revocation between the cause's ask and the harness's selector.** `openNativeContent`
+asked `o.stoppedCause()` and let go of the session's lock before `selectNative`, `selectTransition`
+or the session's cached refusal (`o.dsdRefusal`, an approval that did not read at its start)
+answered. A revocation in that gap (an ordinary `Revoke`, or the authorization replaced: its record
+gone, `RefreshAuthorization` and `reconcilePermission`) records its cause and revokes the
+permission; the selector answered no approval, `dsd_not_in_this_release`, and the cached path its
+own refusal, `dsd_approval_unavailable`; `refuseRevokedLocked` passes over an entry refused already.
+Red, a writer parked in the gap (`Seams.Selecting`), each of the three paths and each writer: no
+approval where `native_revoked` "the test's revocation" or "selected DSD policy is no longer
+eligible" was wanted, and the cached refusal on its path. The fix: a selector's refusal and the
+cached one are set in the step that asks the cause again, under the session's lock
+(`refuseAfterSelection`). Every writer records its cause before it revokes the permission, in one
+step under that lock (`Revoke`, `reconcilePermission` and its containment, a session's start that
+finds a cause), so a selector that found the permission revoked finds the cause there, and no window
+remains after the re-ask: a refusal set before a later revocation was made before it. With nothing
+recorded each path answers as it did (admitted; the cached refusal). Production's admission asks the
+cause under the lock it decides in (`admitDSD`) and is unchanged.
+
+**Item 2: the prepared-entry test's monitors.** Each prepared successor's open
+(`TestARevocationDropsAPreparedEntryForTheCauseRecordedFirst`) started the session's DSD monitor,
+which ends with the session's `down`, never its context; the rig cancelled the context alone, so
+each subcase left one refreshing the policy every 100 ms for the life of the process. The rig's
+cleanup now closes `down` once, under the session's lock (a release of a session that never
+started closes it first, which a case pins), joins the monitor by its end (`Seams.MonitorEnded`,
+deferred first in its goroutine) and then every goroutine of the backend's (`Wait`), each within
+10 s; the prepared-entry case asserts that it started the monitor. Red before the close: each
+subcase failed at its cleanup after 20.00 s, "the session's DSD monitor did not end within 10s of
+the session's end" and "1 goroutines still run". The rig's cases add their seams to the rig's
+rather than replace them.
+
+**Item 3: an earlier revocation in the gapless check's own words.** The producer's gapless check
+answered its check's error wherever the cause recorded read as its own revocation's words
+(`gaplessRevoked`), so an ordinary revocation given those words during the check lost to the
+check's error. Red: "DSD permission revoked" where the earlier revocation's "gapless DSD
+authorization changed" was wanted. The fix: `revokeDSDLocked` answers the count of the cause it
+recorded (`revokedSeq`), 0 where an earlier cause stood; `Revoke` delegates to `revoke`, which
+passes it on; the producer keeps the check's error only where its own revocation recorded the
+cause and it still stands, decided in the step that records it, never by words or by a reading
+before the call. Round 2's case (nothing recorded before the check failed: the check's error)
+is unchanged and green.
+
+**Item 4: the contained reconciliation's authorization.** The containment of a panic in
+`reconcilePermission` recorded `backend_failed` with the fault's words and the fault (`stopDSD`)
+and left the session's permission live: both selectors admitted under it after the containment,
+which round 2's case could not see, the fault stopping the producer. Red: "the authorization ...
+is live", both selectors answering nil. The fix: once the cause is recorded, the containment
+revokes the permission the reconciliation was replacing, as a failed reading of it does. It holds
+nothing: the hold's deferred release lets go of the session's lock before the recover runs (a
+panic before the hold took nothing), which the case checks (`TryLock`); the cause recorded is
+round 2's, `backend_failed` with "player backend: the DSD authorization's reconciliation
+panicked; the bridge's log has why".
+
+Controls, predicted before the runs, each restored from memory: the selectors' re-ask dropped
+turned the four selector cases red alone; the cached refusal's re-ask, its two cases; the rig's
+close of `down` removed, the prepared-entry case's three subcases, 20.00 s each; the close's guard
+removed, a panic "close of closed channel" in the guard's case; the producer deciding by the
+cause's words again, the identical-words case alone, round 2's control green; the containment's
+revocation removed, the containment case alone. Not run: the containment revoking before it
+records, which no seam parks between; the order keeps the invariant item 1's re-ask rests on.
+
+Version 49 covers round 3's guarded changes (`openNativeContent`, `Revoke`); its records say so.
