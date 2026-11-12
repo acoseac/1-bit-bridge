@@ -765,13 +765,17 @@ refusal, answered: a revocation or a replaced authorization in that gap
 recorded its cause and revoked the permission, which the selector answered as
 no approval, and `refuseRevokedLocked` passes over an entry refused already. A
 selector's refusal and the cached one are now set in the step that asks the
-cause again (`refuseAfterSelection`), and every writer records its cause before
-it revokes the permission, in one step under the session's lock. `Revoke`
+cause again (`refuseAfterSelection`), and every writer records its cause
+before it revokes the permission: `Revoke` and `reconcilePermission` in one
+hold of the session's lock, the containment of a panic in
+`reconcilePermission` in `stopDSD`'s hold and then, in a hold of its own, the
+revocation; that order, the cause first, is what the selectors rely on (round
+4: this said one step under the session's lock for every writer). `Revoke`
 (guarded) delegates to `revoke`, which answers the count of the cause it
-recorded (`revokeDSDLocked`, `revokedSeq`), 0 where an earlier cause stood: the
-producer's gapless check keeps its check's error only where its own revocation
-is the cause recorded, told by that and never by the cause's words, which an
-earlier revocation may share. The authorization's contained reconciliation
-revokes the authorization it was replacing once its cause is recorded, as a
-failed reading of it does. No byte a DAC is given changes. Qualification
-version 49 covers the three rounds.
+recorded (`revokeDSDLocked`, `revokedSeq`), 0 where an earlier cause stood:
+the producer's gapless check keeps its check's error only where its own
+revocation is the cause recorded, told by that and never by the cause's words,
+which an earlier revocation may share. The authorization's contained
+reconciliation revokes the authorization it was replacing once its cause is
+recorded, as a failed reading of it does. No byte a DAC is given changes.
+Qualification version 49 covers the three rounds.

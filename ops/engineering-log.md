@@ -95326,12 +95326,14 @@ Red, a writer parked in the gap (`Seams.Selecting`), each of the three paths and
 approval where `native_revoked` "the test's revocation" or "selected DSD policy is no longer
 eligible" was wanted, and the cached refusal on its path. The fix: a selector's refusal and the
 cached one are set in the step that asks the cause again, under the session's lock
-(`refuseAfterSelection`). Every writer records its cause before it revokes the permission, in one
-step under that lock (`Revoke`, `reconcilePermission` and its containment, a session's start that
-finds a cause), so a selector that found the permission revoked finds the cause there, and no window
-remains after the re-ask: a refusal set before a later revocation was made before it. With nothing
-recorded each path answers as it did (admitted; the cached refusal). Production's admission asks the
-cause under the lock it decides in (`admitDSD`) and is unchanged.
+(`refuseAfterSelection`). Every writer records its cause before it revokes the permission: `Revoke`
+and `reconcilePermission` in one hold of the session's lock, the containment of a panic in
+`reconcilePermission` in `stopDSD`'s hold and then the revocation in a hold of its own, a session's
+start that finds a cause recorded in its own hold (round 4's correction: this said one step under
+that lock for every writer), so a selector that found the permission revoked finds the cause there,
+and no window remains after the re-ask: a refusal set before a later revocation was made before it.
+With nothing recorded each path answers as it did (admitted; the cached refusal). Production's
+admission asks the cause under the lock it decides in (`admitDSD`) and is unchanged.
 
 **Item 2: the prepared-entry test's monitors.** Each prepared successor's open
 (`TestARevocationDropsAPreparedEntryForTheCauseRecordedFirst`) started the session's DSD monitor,
