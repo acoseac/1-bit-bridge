@@ -94670,3 +94670,75 @@ Backlog B761, PR 2, on `feat/b761-deezer-requeue` from 3a6b924e (migration v63, 
 - Deezer's search answers some errors with HTTP 200 and an `error` object (a quota, for one), which `SearchArtist` decodes as an empty `data` list: a no-match, so a terminal miss, negative-cached, and since this PR the clear of a pending query. Not verified against the live API from here (no network on this host); a backlog candidate.
 - A persistent failure (a picture on a host the client refuses, an answer that is no image) keeps its query and is asked again every six hours at most, and `/v1/artist-image` answers 202 for that artist meanwhile: the brief's rule (only a held portrait or a terminal answer clears). Serve's boot test runs that shape on purpose.
 - A transient portrait failure on a row that keeps no query (Deezer on throughout) still stamps with no retry, as before: only a refusal is kept.
+
+## 2026-11-12 — B761 PR 2, round 2: a pending portrait bound to its artist, one backoff, and a pending answer that ends
+
+Backlog B761, PR 2's second round, on `feat/b761-deezer-requeue` from 52b2f10e (round 1 and its rules commit); migration v64, the next after v63.
+
+**What the review found, each verified at 52b2f10e.**
+
+1. The kept query was not bound to its artist: `markEnrichedSQL`'s keep arm (`ELSE deezer_pending_query`, store.go:3406) kept it whatever artist the stamp wrote, and `PendingPortraits` (deezer_pending.go:93) paired it with the artist the row's `tags_json` names now. v62's statements write the artist and leave the column, and nothing reconciled at the open.
+2. The ordinary and fingerprint paths asked for a portrait with no backoff (enricher.go:883, acoustic.go:487); only the batch read it (portraits.go:303), and a failed ordinary attempt kept no query (enricher.go:906-913), so nothing came back to it.
+3. `classifyPortrait`'s default kept the query for good (portraits.go:52-66), and the route answered 202 for good (artwork.go:236-242); the backoff was a process-local LRU (enricher.go:245); `groupPortraits` grouped by MBID under its first row's name (portraits.go:265), and `portraitNone` settled and negative-cached the whole MBID.
+4. `Run` took `on` and `portraits = true` before its batches (enricher.go:377, 384), and `idle` woke on a rising edge against them (portraits.go:390): a switch off and on while a batch ran read as on throughout. `runBatch` answers `PollInterval` when its listing is refused (enricher.go:400-405), and `runPortraits` when a refusal stops it (portraits.go:235-240).
+5. The serve test read the route right after the search arrived (serve_deezer_requeue_test.go:78-86).
+
+**The design.**
+
+- *The binding* (v64): `tracks.deezer_pending_mbid`, the artist a query was taken for. `MarkEnriched` keeps a query only while that artist is the one the stamp writes; a pending write (`Track.PortraitPending(mbid, query)`) writes both, and only for the artist the stamp gives the row; `PendingPortraits` and `ArtistMBIDPortraitPending` take a query only beside its own artist; and every open drops a query no longer bound to its row's artist (`reconcilePendingPortraits`), which is what an older binary's stamp leaves. The upsert's conflict arm drops both.
+- *v63's queries are dropped, not bound to the artist the row names now*: none names its artist, and an older binary may have given its row another artist since, so binding would certify that mismatch. They come back as rows enriched before v63 do, through "Retry missing". Round 1 never shipped; such rows are on bridges that ran it.
+- *One backoff for every path*, the store's: `deezer_portrait_attempts` (artist, name, failures in a row, the last), read by the ordinary pass, the fingerprint path and the batch (`portraitWaits`), so a restart or an eviction loses nothing; a minute after the first failure, doubling to six hours. A lookup it holds back, and one that failed, waits for the batch with its name and artist, so none is left with nothing to come back to it.
+- *Outcomes* (`portraitOutcome`): held settles every name of the artist and forgets its attempts; none and rejected end the name, settle its rows, go in `deezerNegCache` keyed by artist and name and forget the name's attempts; refused waits; failed waits and records a failure. Rejected is an answer no wait changes for that name: a picture on a host the client refuses (`refusedHostError`, at its URL or a redirect), not an image (`errNotAnImage`), past the size cap (`errImageTooLarge`), or at a URL that does not parse (`errBadImageURL`). Its query is dropped, as none's is, never parked: the memo keeps the process from asking by that name again, and a later enrichment of the row asks it again after a restart, as for none since before B761. The batch groups by artist and name.
+- *The pending bound*: `manifest.PortraitPendingAttempts`, five. The route is pending while a row of the artist waits by a name with fewer than five failures in a row, about a quarter of an hour of failures; past it `no_image`, which is not final: the row keeps its query, the batch asks again at each retry, and a portrait fetched is served. The count is the attempts table's, so it outlives a restart and an eviction; a held portrait forgets the artist's, an answer that ends a name that name's, and each open those no waiting row names; a restart, "Retry missing" and a switch flip reset nothing.
+- *The wake*: each batch answers the refusal it met (`runBatch`: `ErrOff`; `runPortraits`: `ErrOff` or `errDeezerOff`), and `Run`'s wait takes that switch as off, so a switch back on before the wait asks it wakes the loop within a tick.
+- PROTOCOL.md's 202 and Deezer paragraphs, and its `no_image` row, say what each answer means, the `no_image` that is not final included.
+
+**Red first.** Every case below failed at 52b2f10e under a names-only shim (`PortraitPending` as round 1's `PortraitRefused`, the attempts API as no-ops, the bound a constant, the probe's and the check's SQL as round 1's), never committed: on the worktree before the implementation, and the enrichment pulse's case, reworded after control C10b's first run, again on a copy of 52b2f10e's tree.
+
+| Package | Case | Red at 52b2f10e |
+|---|---|---|
+| manifest | `TestAPendingPortraitIsBoundToTheArtistItWasTakenFor` | a stamp giving the row another artist kept the first artist's name |
+| manifest | `TestAnOlderBinarysArtistChangeDropsThePendingPortraitAtTheOpen` | the moved row kept "Name A", read by the batch as the second artist's; the probe for the second artist true |
+| manifest | `TestTheQueriesV63KeptUnboundAreDroppedAtTheUpgrade` | both rows kept v63's query; the moved one read as the second artist's |
+| manifest | `TestPortraitAttemptsAreKeptPerArtistAndName` | two failures read as none |
+| manifest | `TestArtistMBIDPortraitPendingEndsAtTheBound` | pending at five failures |
+| manifest | `TestThePortraitProbeAndTheOpensCheckReadOnlyThePendingRows` | the probe through `idx_tracks_artist_mbid`; the check a SCAN of tracks |
+| enrich | `TestAReEnrichmentThatResolvesAnotherArtistNeverAsksByTheFirstName` | the row waited for the second artist's portrait by the first artist's name |
+| enrich | `TestTheBackoffHoldsEveryPathThatAsksForAPortrait` | a sibling's enrichment asked Deezer during the backoff |
+| enrich | `TestAFailedAttemptWaitsForTheBatchAndIsFetchedOnceItsBackoffEnds` (both paths) | the row waited for no portrait |
+| enrich | `TestEachPortraitFailureAnswersTheRoutesProbeAsItWillGo` | the refused host and the answer that is no image: kept, pending (the five other classes answer as round 1's did, by design) |
+| enrich | `TestANameThatFailsForGoodLeavesTheArtistsOtherNameToBeAsked` (both) | the second name never asked; no portrait |
+| enrich | `TestAnExhaustedPortraitStaysSoAcrossAReopenAndALaterSuccessServesIt` | pending after five failed attempts |
+| enrich | `TestADeezerPulseThatRefusesThePortraitBatchStillWakesTheLoop` | no portrait within 5 s, the enricher idle for an hour |
+| enrich | `TestAnEnrichmentPulseThatRefusesTheBatchsListingStillWakesTheLoop` | the rows not enriched within 5 s |
+| api | `TestTheArtistImageAnswersEachPortraitStateAsTheProtocolSays` | 202 with Retry-After at the bound, want 404 `no_image` |
+| cmd/bridge | `TestServeAsksDeezerForTheRefusedPortraitsOnceItIsOn` | the 202 while the search was held passed; no 404 `no_image` once Deezer answered (gave up at 210 s under `-timeout 4m`) |
+
+Touched beside them: seven enrich cases ask the memo's emptiness (`deezerNegCache.Len()`) where they asked it by MBID, which a key of artist and name would have made vacuous; `TestArtistCacheHitUsesCanonicalNameForDeezer` relied on a sibling asking again after a failed fetch, which the one backoff forbids, and now asks, beside the search, the name each row waits by (C11); and `cmd/bridge`'s latest-schema helper names v64's table and column, present meaning both and absent neither.
+
+**Controls.** Each an uncommitted edit to the committed tree (51bc9b42, then 2b22f20d), run, and restored with `git checkout --`, `git status` empty after each; the predictions were written before the first run.
+
+| Control | Red | Green beside it |
+|---|---|---|
+| C1 the stamp keeps a query whatever artist it writes | the binding's case | the stamp's, the stale clear's, the re-enrichment's (its failed attempt writes the new pair) |
+| C2 no check at the open | the older binary's case; the attempts' (the unnamed ones survive) | v63's drop (its own step) |
+| C3 v64 binds v63's queries to the artist the row names now | v63's drop | the older binary's |
+| C4 the ordinary and fingerprint paths skip the backoff | the backoff's | the deferral's, the canonical name's |
+| C5 a failed attempt keeps no waiting lookup | the deferral's (both paths), the re-enrichment's, the canonical name's | the backoff's, predicted red: "Retry missing" re-defers its first track inside the backoff, so both rows wait all the same |
+| C6 no rejected outcome | the failure classes' two; the two names' on two pages, predicted green: its third turn ends the pass on an empty page, so the first name's row is never read again from the cache | the two names' on one page |
+| C7 the batch groups by artist alone | the two names' on one page | on two pages; the twelve rows |
+| C8 the probe without its bound | the bound's, the route's, the exhausted case | the failure classes' |
+| C9 every open forgets every attempt | the attempts', the bound's, the exhausted case | |
+| C10b the wait takes enrichment as on after the ordinary batch's refusal | the enrichment pulse's | the Deezer pulse's |
+| C10c the wait takes the portraits as on after the portrait batch's refusal | the Deezer pulse's | the enrichment pulse's |
+| C11 the cache-hit path drops the canonical name | the canonical name's: a search by the tag, a row waiting by it | |
+
+C10b's first run left the enrichment pulse's case green: with Deezer on, the portrait batch that a refused batch skips leaves the portraits' state off, and Deezer's switch then woke the wait by itself. The case runs with Deezer off since 2b22f20d, red at 52b2f10e and under C10b.
+
+**Runs** (legion0, Linux, go1.27.3, the Makefile's tags, TMPDIR on disk).
+
+| Check | Result |
+|---|---|
+| (the gates are running) | |
+
+**Left.** Round 1's note on a Deezer answer of HTTP 200 with an `error` object stands: it reads as no match, so it ends the name, unverified against the live API from here.
