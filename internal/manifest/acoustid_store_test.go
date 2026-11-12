@@ -558,11 +558,9 @@ func TestTheReQueueRecordsEachMatchsProvenanceInItsTransaction(t *testing.T) {
 		}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			s := openTestStore(t)
-			defer s.Close()
+			s, rollbacks := openWatchedStore(t)
 			seedEnrichedTrack(t, s, "a.flac")
 			before := enrichedAt(t, s, "a.flac")
-			rollbacks := sqlitetest.WatchRollbacks(t, s.path)
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			s.SetResetEnrichedBeforeCommitForTest(c.hold(t, cancel, rollbacks))

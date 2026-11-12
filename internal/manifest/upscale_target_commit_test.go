@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -33,13 +34,12 @@ func TestAStopAfterTheUpscaleTargetsLastStatementIsErrTxDoneAtItsCommit(t *testi
 		{"over a target already set", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			s := openTempStore(t)
+			s, rollbacks := openWatchedStore(t)
 			if tc.before {
 				if err := s.SetUpscaleTarget(context.Background(), 96000, 16); err != nil {
 					t.Fatal(err)
 				}
 			}
-			rollbacks := sqlitetest.WatchRollbacks(t, s.path)
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			held := holdUpscaleTargetAtItsCommit(t, s)
@@ -146,14 +146,30 @@ func (h *heldUpscaleTarget) release(err error) {
 	h.once.Do(func() { h.answer <- err })
 }
 
+// openWatchedStore opens a store in a folder of its own whose connections a
+// RollbackWatch armed on its database makes (the store's connector seam, set
+// before the open), so that a test can take the rollback of one of its
+// transactions at the driver (backlog B869). As the test ends the store
+// closes, then the seam is put back and the watch disarmed.
+func openWatchedStore(t *testing.T) (*Store, *sqlitetest.RollbackWatch) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "bridge.db")
+	w := sqlitetest.WatchRollbacks(t, path)
+	t.Cleanup(setStoreConnector(path, w.Connector))
+	return openTestStoreAt(t, path), w
+}
+
 // stopAndWaitForTheRollbackOf stops the transaction tx through stop and waits
 // until database/sql has rolled tx back at the driver, on tx's own
 // connection: the rollback is taken before the stop (RollbackOf), so one that
-// runs before the wait begins is kept, and has run once the driver's ROLLBACK
-// there has rolled tx back. Neither a rollback counted on the store's file,
-// which another connection's makes too, nor tx answering sql.ErrTxDone, which
-// database/sql answers from the moment it marks tx done, before it calls the
-// driver's Rollback, says that tx's own has run (backlog B869).
+// runs before the wait begins is kept, and has run once the driver's
+// Rollback there has returned no error, SQLite having rolled tx back inside
+// it. Neither a rollback counted on the store's file, which another
+// connection's makes too, nor tx answering sql.ErrTxDone, which database/sql
+// answers from the moment it marks tx done, before it calls the driver's
+// Rollback, nor SQLite's own rollback, inside the driver's ROLLBACK before
+// that statement ends and the Rollback returns, says that tx's own has run
+// (backlog B869).
 func stopAndWaitForTheRollbackOf(t *testing.T, w *sqlitetest.RollbackWatch, tx *sql.Tx, stop func()) {
 	t.Helper()
 	rollback := w.RollbackOf(t, tx)
@@ -162,16 +178,16 @@ func stopAndWaitForTheRollbackOf(t *testing.T, w *sqlitetest.RollbackWatch, tx *
 }
 
 // TestAStopAtTheUpscaleTargetsCommitWaitsForItsOwnRollback proves
-// stopAndWaitForTheRollbackOf (backlog B869): with the write's ROLLBACK held
-// at the driver, once database/sql has marked the transaction done and before
-// SQLite rolls it back, the wait does not answer, with nothing else rolled
-// back on the store's file or once a reader's transaction has rolled back on
-// another connection to it (sqlitetest's WaitProof), and answers once the held
-// rollback has run; the commit then answers sql.ErrTxDone and writes neither
-// key.
+// stopAndWaitForTheRollbackOf (backlog B869): with the write's rollback held
+// at the driver, at its boundary while a reader's transaction rolls back on
+// another connection to the store's file, and then once SQLite has rolled it
+// back inside the driver's ROLLBACK, before the driver's Rollback returns,
+// the wait does not answer, and answers once the held rollback has run
+// (sqlitetest's WaitProof, which lets each hold go only once the wait has
+// answered that it waits on); the commit then answers sql.ErrTxDone and
+// writes neither key.
 func TestAStopAtTheUpscaleTargetsCommitWaitsForItsOwnRollback(t *testing.T) {
-	s := openTempStore(t)
-	rollbacks := sqlitetest.WatchRollbacks(t, s.path)
+	s, rollbacks := openWatchedStore(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	held := holdUpscaleTargetAtItsCommit(t, s)
@@ -179,7 +195,7 @@ func TestAStopAtTheUpscaleTargetsCommitWaitsForItsOwnRollback(t *testing.T) {
 	go func() { errc <- s.SetUpscaleTarget(ctx, 192000, 24) }()
 
 	tx := held.reached(t)
-	proof := rollbacks.HoldRollbackOf(t, tx).BesideAReader(t)
+	proof := rollbacks.WaitProofOf(t, tx)
 	stopAndWaitForTheRollbackOf(t, rollbacks, tx, cancel)
 	proof.Returned(t)
 	held.release(nil)

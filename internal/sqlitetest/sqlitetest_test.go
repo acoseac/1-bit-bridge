@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"modernc.org/sqlite"
+
 	"github.com/acoseac/1-bit-bridge/internal/dsn"
 )
 
@@ -182,8 +184,9 @@ func TestWaitUnlessAnswersTheWorksEnd(t *testing.T) {
 // TestARollbackWatchCountsTheRollbacksOnItsFileAlone pins what a
 // RollbackWatch counts: a transaction rolled back on a connection to its
 // file, whether by a Rollback or by database/sql once the transaction's
-// context is done, and whether the file was opened by a DSN or by its path;
-// never a commit, and never a rollback on another file.
+// context is done, and whether the file was opened by a DSN, by its path or
+// through the watch's Connector, whose connections count with a rollback
+// hook of their own; never a commit, and never a rollback on another file.
 func TestARollbackWatchCountsTheRollbacksOnItsFileAlone(t *testing.T) {
 	dir := t.TempDir()
 	watched, other := filepath.Join(dir, "watched.db"), filepath.Join(dir, "other.db")
@@ -196,6 +199,7 @@ func TestARollbackWatchCountsTheRollbacksOnItsFileAlone(t *testing.T) {
 		}
 	}
 	w := WatchRollbacks(t, watched)
+	through := openThrough(t, w, dsn.File(watched, "_pragma=journal_mode(WAL)"))
 	write := func(db *sql.DB, ctx context.Context) *sql.Tx {
 		t.Helper()
 		tx, err := db.BeginTx(ctx, nil)
@@ -216,6 +220,8 @@ func TestARollbackWatchCountsTheRollbacksOnItsFileAlone(t *testing.T) {
 		{"a commit", func() { _ = write(byDSN, context.Background()).Commit() }, 1},
 		{"a rollback on another file", func() { _ = write(elsewhere, context.Background()).Rollback() }, 1},
 		{"a rollback by path", func() { _ = write(byPath, context.Background()).Rollback() }, 2},
+		{"a rollback through the watch's Connector", func() { _ = write(through, context.Background()).Rollback() }, 3},
+		{"a commit through the watch's Connector", func() { _ = write(through, context.Background()).Commit() }, 3},
 	}
 	for _, s := range steps {
 		s.end()
@@ -230,14 +236,14 @@ func TestARollbackWatchCountsTheRollbacksOnItsFileAlone(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	tx := write(byDSN, ctx)
 	cancel()
-	if !w.WaitPast(t, 2, nil) {
+	if !w.WaitPast(t, 3, nil) {
 		t.Fatal("WaitPast answered false with nothing stopped")
 	}
 	if _, err := tx.ExecContext(context.Background(), `SELECT 1`); !errors.Is(err, sql.ErrTxDone) {
 		t.Errorf("the transaction whose rollback the watch saw answers %v, want sql.ErrTxDone", err)
 	}
-	if got := w.Seen(); got != 3 {
-		t.Errorf("the watch saw %d rollbacks, want 3", got)
+	if got := w.Seen(); got != 4 {
+		t.Errorf("the watch saw %d rollbacks, want 4", got)
 	}
 }
 
@@ -276,16 +282,18 @@ func TestWaitPastAnswersTheWorksEndAndGivesUpAtItsInstant(t *testing.T) {
 }
 
 // heldWrite opens a WAL database in a folder of its own, arms a watch on it,
-// and begins a write transaction on ctx that inserts a row, open; the test's
-// end rolls it back, if nothing has, before the database closes.
+// on connections the watch's Connector makes (openThrough), and begins a
+// write transaction on ctx that inserts a row, open; the test's end rolls it
+// back, if nothing has, before the database closes. The table's column is
+// its primary key, so a second insert of the same value conflicts.
 func heldWrite(t *testing.T, ctx context.Context) (*sql.DB, *RollbackWatch, *sql.Tx) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "held.db")
-	db := openWAL(t, dsn.File(path, "_pragma=journal_mode(WAL)"))
-	if _, err := db.Exec(`CREATE TABLE t (n INTEGER)`); err != nil {
+	w := WatchRollbacks(t, path)
+	db := openThrough(t, w, dsn.File(path, "_pragma=journal_mode(WAL)"))
+	if _, err := db.Exec(`CREATE TABLE t (n INTEGER PRIMARY KEY)`); err != nil {
 		t.Fatal(err)
 	}
-	w := WatchRollbacks(t, path)
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -328,8 +336,8 @@ func TestErrTxDoneAnswersBeforeTheDriverRollsBack(t *testing.T) {
 		t.Fatalf("the transaction whose ROLLBACK is held answers %v, want sql.ErrTxDone", err)
 	}
 	select {
-	case <-rollback.ran:
-		t.Fatal("the transaction's rollback ran while its ROLLBACK was held")
+	case <-rollback.ended:
+		t.Fatal("the transaction's rollback came to an end while its ROLLBACK was held")
 	default:
 	}
 	hold.Release()
@@ -340,16 +348,18 @@ func TestErrTxDoneAnswersBeforeTheDriverRollsBack(t *testing.T) {
 }
 
 // TestARollbackOfIsTheTransactionsOwnAtTheDriver: RollbackOf, taken before
-// the stop, answers once the transaction's own rollback has run at the driver,
-// and never while that ROLLBACK is held at its boundary, with nothing else
-// rolled back or once a reader's transaction has rolled back on another
-// connection to the file (WaitProof's schedule). Nothing the transaction
-// wrote lands.
+// the stop, answers once the transaction's own rollback has run at the
+// driver, and never while that rollback is held, at its boundary once a
+// reader's transaction has rolled back on another connection to the file, or
+// once SQLite has rolled it back inside the driver's ROLLBACK, before the
+// driver's Rollback has returned (WaitProof's schedule, which lets each hold
+// go only once the wait has answered that it waits on). Nothing the
+// transaction wrote lands.
 func TestARollbackOfIsTheTransactionsOwnAtTheDriver(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	db, w, tx := heldWrite(t, ctx)
-	proof := w.HoldRollbackOf(t, tx).BesideAReader(t)
+	proof := w.WaitProofOf(t, tx)
 	rollback := w.RollbackOf(t, tx)
 	cancel()
 	rollback.Wait(t)
@@ -365,7 +375,9 @@ func TestARollbackOfIsTheTransactionsOwnAtTheDriver(t *testing.T) {
 
 // TestARollbackThatRanBeforeItsWaitIsKept: a rollback that has run before its
 // wait begins is answered at once, never missed, and first where the wait's
-// stop is ready too.
+// stop is ready too: a hundred waits, each on a stop of its own closed before
+// it, so that a wait that left the choice to a select (which picks at random
+// among the cases ready) fails within one run.
 func TestARollbackThatRanBeforeItsWaitIsKept(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -377,16 +389,14 @@ func TestARollbackThatRanBeforeItsWaitIsKept(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("the transaction's rollback never ran")
 	}
-	stopped := make(chan struct{})
-	close(stopped)
-	start := time.Now()
-	if !rollback.WaitUnless(t, stopped) {
-		t.Error("a rollback that had run was answered as its wait's stop")
+	for i := 1; i <= 100; i++ {
+		stopped := make(chan struct{})
+		close(stopped)
+		if !rollback.WaitUnless(t, stopped) {
+			t.Fatalf("wait %d of 100: a rollback that had run was answered as its wait's stop", i)
+		}
 	}
 	rollback.Wait(t)
-	if took := time.Since(start); took > time.Second {
-		t.Errorf("the waits for a rollback that had run took %v", took)
-	}
 }
 
 // TestATransactionThatCommitsCanNoLongerRollBack: the rollback of a
@@ -418,13 +428,14 @@ func TestATransactionThatCommitsCanNoLongerRollBack(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("the wait for a rollback its transaction committed past was still waiting 5s later")
 	}
-	if want := "its connection prepared a COMMIT first"; !strings.Contains(rec.fatal, want) {
+	if want := "its transaction committed first"; !strings.Contains(rec.fatal, want) {
 		t.Errorf("the wait failed with %q, want it to say %q", rec.fatal, want)
 	}
 }
 
 // TestARollbackOfRefusesATransactionOnAnotherFile: a transaction on another
-// file than the watch's is refused, and its connection holds no expectation.
+// file than the watch's, on a connection the watch's Connector did not make,
+// is refused, and the binding's token is not left pending.
 func TestARollbackOfRefusesATransactionOnAnotherFile(t *testing.T) {
 	_, w, _ := heldWrite(t, context.Background())
 	other := openWAL(t, filepath.Join(t.TempDir(), "other.db"))
@@ -440,8 +451,11 @@ func TestARollbackOfRefusesATransactionOnAnotherFile(t *testing.T) {
 		w.RollbackOf(rec, tx)
 	}()
 	<-ended
-	if want := "not to the watched " + w.path; !strings.Contains(rec.fatal, want) {
+	if want := "the watch on " + w.path + " did not make"; !strings.Contains(rec.fatal, want) {
 		t.Errorf("RollbackOf failed with %q, want it to say %q", rec.fatal, want)
+	}
+	if n := pendingBindings(); n != 0 {
+		t.Errorf("%d bindings were left pending", n)
 	}
 }
 
@@ -457,12 +471,35 @@ func openWAL(t *testing.T, name string) *sql.DB {
 	return db
 }
 
+// openThrough opens the database by name, a DSN or a path, on connections
+// the watch's Connector makes over the registered driver's, closed when the
+// test ends.
+func openThrough(t *testing.T, w *RollbackWatch, name string) *sql.DB {
+	t.Helper()
+	base, err := sqlite.NewConnector(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db := sql.OpenDB(w.Connector(base))
+	t.Cleanup(func() { _ = db.Close() })
+	return db
+}
+
+// pendingBindings counts the bindings no connection has taken and no bindTo
+// has given up yet.
+func pendingBindings() int {
+	pending.Lock()
+	defer pending.Unlock()
+	return len(pending.binds)
+}
+
 // fatalRecorder is a testing.TB whose Fatalf records the message and ends
-// the goroutine calling it, as FailNow would, without failing the test that
-// holds it.
+// the goroutine calling it, as FailNow would, and whose Errorf records the
+// message, without failing the test that holds it.
 type fatalRecorder struct {
 	testing.TB
-	fatal string
+	fatal  string
+	errors []string
 }
 
 func (r *fatalRecorder) Helper() {}
@@ -470,4 +507,8 @@ func (r *fatalRecorder) Helper() {}
 func (r *fatalRecorder) Fatalf(format string, args ...any) {
 	r.fatal = fmt.Sprintf(format, args...)
 	runtime.Goexit()
+}
+
+func (r *fatalRecorder) Errorf(format string, args ...any) {
+	r.errors = append(r.errors, fmt.Sprintf(format, args...))
 }

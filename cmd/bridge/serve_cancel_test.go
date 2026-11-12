@@ -621,16 +621,17 @@ func TestAServeStoppedAtItsUpscaleSeedsCommitExitsCleanly(t *testing.T) {
 }
 
 // TestAServeStoppedAtItsUpscaleSeedsCommitWaitsForTheSeedsOwnRollback proves
-// stopAndWaitForTheRollback (backlog B869): with the seed's ROLLBACK held at
-// the driver, once database/sql has marked the transaction done and before
-// SQLite rolls it back, the wait does not answer, with nothing else rolled
-// back on serve's database or once a reader's transaction has rolled back on
-// another connection to it (sqlitetest's WaitProof), and answers once the
-// held rollback has run; serve then exits 0, reporting no failed seed.
+// stopAndWaitForTheRollback (backlog B869): with the seed's rollback held at
+// the driver, at its boundary while a reader's transaction rolls back on
+// another connection to serve's database, and then once SQLite has rolled it
+// back inside the driver's ROLLBACK, before the driver's Rollback returns,
+// the wait does not answer, and answers once the held rollback has run
+// (sqlitetest's WaitProof, which lets each hold go only once the wait has
+// answered that it waits on); serve then exits 0, reporting no failed seed.
 func TestAServeStoppedAtItsUpscaleSeedsCommitWaitsForTheSeedsOwnRollback(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	h := holdServeAtItsUpscaleSeedsCommit(t, ctx, cancel)
-	proof := h.rollbacks.HoldRollbackOf(t, h.tx).BesideAReader(t)
+	proof := h.rollbacks.WaitProofOf(t, h.tx)
 	h.stopAndWaitForTheRollback(t, cancel)
 	proof.Returned(t)
 	h.release(nil)
@@ -728,6 +729,10 @@ func holdServeAtItsUpscaleSeedsCommit(t *testing.T, ctx context.Context, stop co
 		answer:    make(chan error, 1),
 		exited:    exited, done: done, stderr: stderr,
 	}
+	// Serve's store opens its connections through the watch, so that the
+	// seed's transaction can be watched at the driver (backlog B869);
+	// registered before the drain, so put back after serve has exited.
+	t.Cleanup(manifest.SetConnectorForTest(dbPath, h.rollbacks.Connector))
 	opts := serveOpts{
 		configPath: cfgPath, addrOverride: "127.0.0.1:0", tailscaleCLI: noTailscaleCLI(),
 		upscaleTargetBeforeCommit: func(tx *sql.Tx) error {
@@ -757,15 +762,17 @@ func holdServeAtItsUpscaleSeedsCommit(t *testing.T, ctx context.Context, stop co
 // stopAndWaitForTheRollback stops serve and waits until database/sql has
 // rolled the held seed's transaction back at the driver, on the seed's own
 // connection: the rollback is taken before the stop (RollbackOf), so one that
-// runs before the wait begins is kept, and has run once the driver's ROLLBACK
-// there has rolled the seed back. The seed holding the store's writer lock
-// keeps another write transaction from rolling back meanwhile, not another
-// connection's read transaction, and the seed's transaction answers
-// sql.ErrTxDone from the moment database/sql marks it done, before it calls
-// the driver's Rollback, so neither a rollback counted on serve's database
-// nor that answer says that the seed's own has run (backlog B869). A serve
-// that exits first fails the test, and the wait gives up at the watch's
-// instant.
+// runs before the wait begins is kept, and has run once the driver's Rollback
+// there has returned no error, SQLite having rolled the seed back inside it.
+// The seed holding the store's writer lock keeps another write transaction
+// from rolling back meanwhile, not another connection's read transaction;
+// the seed's transaction answers sql.ErrTxDone from the moment database/sql
+// marks it done, before it calls the driver's Rollback; and SQLite's own
+// rollback comes inside the driver's ROLLBACK, before that statement ends and
+// the Rollback returns: so neither a rollback counted on serve's database,
+// nor that answer, nor SQLite's rollback says that the seed's own has run
+// (backlog B869). A serve that exits first fails the test, and the wait gives
+// up at the watch's instant.
 func (h *heldSeedServe) stopAndWaitForTheRollback(t *testing.T, stop context.CancelFunc) {
 	t.Helper()
 	rollback := h.rollbacks.RollbackOf(t, h.tx)

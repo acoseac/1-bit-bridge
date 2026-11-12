@@ -37,10 +37,12 @@ import (
 // its commit while the test's goroutine takes the case's step, and the hold
 // answers what that step returns. The switch-off's third case proves the
 // wait for the reset's rollback (backlog B869): with that rollback held at
-// the driver, once database/sql has marked the transaction done, the wait
-// answers only once the held rollback has run, not before, with nothing else
-// rolled back on the store's file or once a reader's transaction has rolled
-// back on another connection to it (sqlitetest's WaitProof).
+// the driver, at its boundary while a reader's transaction rolls back on
+// another connection to the store's file, and then once SQLite has rolled it
+// back inside the driver's ROLLBACK, before the driver's Rollback returns,
+// the wait answers only once the held rollback has run, not before
+// (sqlitetest's WaitProof, which lets each hold go only once the wait has
+// answered that it waits on).
 func TestAMatchWhoseReQueueDidNotLandIsReQueuedByTheNextSweep(t *testing.T) {
 	// switchOff is the switch-off's step: off, the switch's poller cancels
 	// the pass's context, and database/sql rolls the reset's transaction back
@@ -70,7 +72,7 @@ func TestAMatchWhoseReQueueDidNotLandIsReQueuedByTheNextSweep(t *testing.T) {
 			return errors.New("injected re-queue failure")
 		}},
 		{name: "cancelled inside the reset by a switch-off, its rollback held at the driver beside a reader's", whileHeld: func(t *testing.T, on *atomic.Bool, rollbacks *sqlitetest.RollbackWatch, tx *sql.Tx) error {
-			proof := rollbacks.HoldRollbackOf(t, tx).BesideAReader(t)
+			proof := rollbacks.WaitProofOf(t, tx)
 			switchOff(t, on, rollbacks, tx)
 			proof.Returned(t)
 			return nil
@@ -80,6 +82,10 @@ func TestAMatchWhoseReQueueDidNotLandIsReQueuedByTheNextSweep(t *testing.T) {
 			ctx := context.Background()
 			root := t.TempDir()
 			dbPath := filepath.Join(t.TempDir(), "bridge.db")
+			// The store's connections are the watch's, so that the re-queue's
+			// transaction can be watched at the driver (backlog B869).
+			rollbacks := sqlitetest.WatchRollbacks(t, dbPath)
+			t.Cleanup(manifest.SetConnectorForTest(dbPath, rollbacks.Connector))
 			store, err := manifest.OpenStore(dbPath)
 			if err != nil {
 				t.Fatal(err)
@@ -105,7 +111,6 @@ func TestAMatchWhoseReQueueDidNotLandIsReQueuedByTheNextSweep(t *testing.T) {
 			})
 			var on atomic.Bool
 			on.Store(true)
-			rollbacks := sqlitetest.WatchRollbacks(t, dbPath)
 			var resets atomic.Int64
 			// held is the first re-queue's transaction, once it is held.
 			var held atomic.Pointer[sql.Tx]
@@ -191,11 +196,13 @@ func requeued(t *testing.T, store *manifest.Store, path string) bool {
 // until database/sql has rolled tx back at the driver, on tx's own
 // connection, as internal/manifest's helper of that name does: the rollback
 // is taken before the stop (RollbackOf), so one that runs before the wait
-// begins is kept, and has run once the driver's ROLLBACK there has rolled tx
-// back. Neither a rollback counted on the store's file, which another
-// connection's makes too, nor tx answering sql.ErrTxDone, which database/sql
-// answers from the moment it marks tx done, before it calls the driver's
-// Rollback, says that tx's own has run (backlog B869).
+// begins is kept, and has run once the driver's Rollback there has returned
+// no error, SQLite having rolled tx back inside it. Neither a rollback
+// counted on the store's file, which another connection's makes too, nor tx
+// answering sql.ErrTxDone, which database/sql answers from the moment it
+// marks tx done, before it calls the driver's Rollback, nor SQLite's own
+// rollback, inside the driver's ROLLBACK before that statement ends and the
+// Rollback returns, says that tx's own has run (backlog B869).
 func stopAndWaitForTheRollbackOf(t *testing.T, w *sqlitetest.RollbackWatch, tx *sql.Tx, stop func()) {
 	t.Helper()
 	rollback := w.RollbackOf(t, tx)
