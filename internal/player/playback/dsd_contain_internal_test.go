@@ -3,6 +3,7 @@ package playback
 import (
 	"context"
 	"errors"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -63,9 +64,11 @@ func checkContained(t *testing.T, s *session) {
 }
 
 // checkContainedWithin is checkContained beside a goroutine that may hold the
-// session's lock a moment (a live monitor's next reading): there a single
-// failed TryLock proves no leak, so the lock is taken within handMadeBound,
-// and one still held then is the containment's (backlog B853, round 4).
+// session's lock a moment (a live monitor's next reading, or the containment's
+// own Drop of a PCM output, whose deferred clean-up takes the lock to clear
+// containDrop after the sink's Drop returned: stopDSD): there a single failed
+// TryLock proves no leak, so the lock is taken within handMadeBound, and one
+// still held then is the containment's (backlog B853, rounds 4 and 5).
 func checkContainedWithin(t *testing.T, s *session) {
 	t.Helper()
 	if !lockWithin(&s.mu, handMadeBound) {
@@ -76,6 +79,55 @@ func checkContainedWithin(t *testing.T, s *session) {
 		t.Fatalf("first failure left session running: fault %+v, revoked %v", s.fault, s.nativeRevoked)
 	}
 }
+
+// TestTheContainmentCheckWaitsOutABriefHolderOfTheLock (backlog B853, round
+// 5): a goroutine that holds the session's lock a moment is a legitimate
+// holder, as the containment's own Drop is, whose deferred clean-up takes the
+// lock once the sink's Drop returned (stopDSD): an immediate TryLock fails on
+// it, the spurious failure checkContained could give beside that clean-up,
+// and checkContainedWithin waits it out. The case's teardown lets the holder
+// go and joins it, whatever an assertion did, before the session's end.
+func TestTheContainmentCheckWaitsOutABriefHolderOfTheLock(t *testing.T) {
+	b, _ := fixtureSessionBackend(t)
+	s := b.session(1)
+	t.Cleanup(func() { endSession(t, b, s) })
+	s.mu.Lock()
+	s.revokeDSDLocked(engine.Unplayable{Reason: ReasonFailed, Detail: "the test's containment"})
+	s.fault = &engine.Fault{Reason: ReasonFailed, Detail: "the test's containment"}
+	s.mu.Unlock()
+	holding, letGo, ended := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	release := func() { once.Do(func() { close(letGo) }) }
+	t.Cleanup(func() {
+		release()
+		select {
+		case <-ended:
+		case <-time.After(handMadeBound):
+			t.Errorf("the holder did not let go of the session's lock within %v of its release", handMadeBound)
+		}
+	})
+	go func() {
+		defer close(ended)
+		s.mu.Lock()
+		close(holding)
+		<-letGo
+		s.mu.Unlock()
+	}()
+	select {
+	case <-holding:
+	case <-time.After(handMadeBound):
+		t.Fatal("the holder did not take the session's lock")
+	}
+	if s.mu.TryLock() {
+		s.mu.Unlock()
+		t.Fatal("an immediate TryLock took the lock the holder holds: the case needs it held")
+	}
+	// The holder lets go a moment after the bounded check has begun.
+	letGoSoon := time.AfterFunc(10*time.Millisecond, release)
+	defer letGoSoon.Stop()
+	checkContainedWithin(t, s)
+}
+
 func TestAHandOffThatPanicsStopsItsSessionAndTheOthersAreJudged(t *testing.T) {
 	var gone atomic.Bool
 	b, _ := fixtureSessionBackend(t, func(p *DSDPolicy) { p.Box = fixtureBox{gone: &gone} })
@@ -127,8 +179,13 @@ func TestARevocationThatPanicsStopsTheSession(t *testing.T) {
 	s.outs = []*output{{sink: sink}}
 	gone.Store(true)
 	b.RefreshDSD(true)
-	checkContained(t, s)
+	// The containment's Drop of the PCM output may still be in its deferred
+	// clean-up, which holds the lock a moment: a bounded check, then both of
+	// its counted goroutines (the worker and its call) joined, their real end
+	// (round 5: an immediate TryLock could meet that clean-up).
+	checkContainedWithin(t, s)
 	waitContained(t, sink.stopped)
+	joinBackend(t, b)
 	b.RefreshDSD(true)
 	if calls.Load() != 1 {
 		t.Fatal("panicking revocation retried")
@@ -172,8 +229,11 @@ func TestARetiringPositionsPanicStopsAndClosesWithoutAnotherRead(t *testing.T) {
 	s.outs = []*output{out}
 	gone.Store(true)
 	b.RefreshDSD(true)
-	checkContained(t, s)
+	// As the revocation's case: the Drop's clean-up may hold the lock a
+	// moment, and its goroutines are joined (round 5).
+	checkContainedWithin(t, s)
 	waitContained(t, sink.stopped)
+	joinBackend(t, b)
 	s.closeAtTeardown(out)
 	for range 2 {
 		func() {
