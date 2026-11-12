@@ -359,6 +359,31 @@ func TestTurningDeezerOnWakesAnIdleEnricher(t *testing.T) {
 	waitFor(t, func() bool { return len(pendingPortraitsOf(t, store)) == 0 }, "both rows to be settled")
 }
 
+// TestTurningEnrichmentOnWakesAnIdleEnricher: with Deezer on and enrichment
+// off, the enricher idles; turning enrichment on wakes it, and the portrait
+// batch fetches the refused portrait with no poll's end.
+func TestTurningEnrichmentOnWakesAnIdleEnricher(t *testing.T) {
+	ups := newSwitchUpstreams(t)
+	e, store, artworkDir := switchEnricher(t, ups)
+	e.PollInterval = time.Hour
+	e.switchEvery = time.Millisecond
+	stampPending(t, store, "Artist/Album/01.flac", switchArtistMBID, "Artist")
+	requirePending(t, store, "Artist/Album/01.flac", "Artist")
+	var on atomic.Bool
+	var asked atomic.Int64
+	e.WithEnabled(func() bool {
+		asked.Add(1)
+		return on.Load()
+	})
+	runEnricher(t, e)
+	waitFor(t, func() bool { return asked.Load() >= 5 }, "the idle enricher to ask its switch")
+
+	on.Store(true)
+	waitFor(t, func() bool { return fileExists(ArtistImagePath(artworkDir, switchArtistMBID)) },
+		"the portrait once enrichment is on, with the enricher idle")
+	waitFor(t, func() bool { return len(pendingPortraitsOf(t, store)) == 0 }, "the row to be settled")
+}
+
 // TestOneFetchServesAnAlbumsTwelveRows: twelve rows of one artist, read five
 // at a time, cost Deezer one search and one image, and all twelve are settled:
 // the rows of a later page find the portrait in the cache.
