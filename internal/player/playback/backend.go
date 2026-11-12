@@ -190,6 +190,18 @@ type Seams struct {
 	// ChoiceQueued runs in a choice's write that finds another write's turn
 	// under way, before it waits for it. It must not block.
 	ChoiceQueued func()
+	// ReconcilingPermission runs as session s's authorization is reconciled
+	// (reconcilePermission, the harness's path), before it reads anything: a
+	// test makes the reconciliation panic there (B853 round 2). It must not
+	// call the backend.
+	ReconcilingPermission func(s engine.SessionID)
+}
+
+// reconcilingPermission is the ReconcilingPermission seam.
+func (b *Backend) reconcilingPermission(s engine.SessionID) {
+	if sm := b.cfg.Seams; sm != nil && sm.ReconcilingPermission != nil {
+		sm.ReconcilingPermission(s)
+	}
 }
 
 // holding is the Holding seam.

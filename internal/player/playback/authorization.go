@@ -599,6 +599,7 @@ func NewTransitionQualificationBackend(cfg Config, plans TransitionPlans) (*Back
 // reconcilePermission drops only ineligible prepared occurrences; an invalid
 // open native output (including a retiring tail) is fenced immediately.
 func (s *session) reconcilePermission(next *permission, err error) {
+	s.b.reconcilingPermission(s.id)
 	s.mu.Lock()
 	prior := s.permission
 	replaced := err != nil || next == nil || prior == nil || prior.revoked.Load()

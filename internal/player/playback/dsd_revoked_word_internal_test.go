@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/player/dsdstate"
 	"github.com/acoseac/1-bit-bridge/internal/player/engine"
@@ -81,10 +82,22 @@ func (r *revocationRig) revoke(*testing.T) {
 	r.b.Revoke(engine.RevokeInput{Session: r.s.id, Reason: revocationReason})
 }
 
+// dsd64Entry is the DSD the tests' entries carry.
+var dsd64Entry = format.NativeDSD{BitRateHz: dsdstate.DSD64, Channels: 2}
+
+// refusesDSD64 fails the case unless the set the backend publishes now
+// refuses DSD64: the premise of a case about a refusal of the policy's.
+func refusesDSD64(t *testing.T, b *Backend) {
+	t.Helper()
+	if _, _, err := b.dsd.Load().selectFor(dsd64Entry); err == nil {
+		t.Fatal("the set the refresh published still plays DSD64: the case needs one that refuses it")
+	}
+}
+
 // admitted is what admitDSD answers a DSD64 entry of the session.
 func (r *revocationRig) admitted(t *testing.T) engine.Unplayable {
 	t.Helper()
-	_, err := r.b.admitDSD(&occ{owner: r.s, id: 9}, format.NativeDSD{BitRateHz: dsdstate.DSD64, Channels: 2})
+	_, err := r.b.admitDSD(&occ{owner: r.s, id: 9}, dsd64Entry)
 	var u *engine.Unplayable
 	if !errors.As(err, &u) {
 		t.Fatalf("a DSD64 entry of a session whose DSD was stopped was admitted: %v", err)
@@ -145,6 +158,22 @@ func TestARevocationDuringAnAdmissionIsItsRefusal(t *testing.T) {
 	}
 }
 
+// TestAReconciliationThatPanicsDuringAnAdmissionIsItsRefusal (backlog B853,
+// round 2): a refresh that comes while an entry's admission is under way,
+// before it reads the set (Seams.Admitting), publishes a set in which the DAC
+// offers no DSD and stops the session's DSD in a reconciliation that panics:
+// the entry is refused for the cause recorded, backend_failed, never for what
+// the new set says of its rate, which admitDSD answered first until round 2.
+func TestAReconciliationThatPanicsDuringAnAdmissionIsItsRefusal(t *testing.T) {
+	r := newRevocationRig(t)
+	r.b.cfg.Seams = &Seams{Admitting: func(engine.OccurrenceID) { r.reconcilePanic(t) }}
+	got := r.admitted(t)
+	refusesDSD64(t, r.b)
+	if got != panicRefusal {
+		t.Errorf("an entry whose admission a reconciliation that panicked came beside was refused %+v; want %+v", got, panicRefusal)
+	}
+}
+
 // goldenDSD serves every reference as decode's DSD64 golden.
 type goldenDSD []byte
 
@@ -196,6 +225,117 @@ func TestASuccessorWhoseOpenEndsAfterARevocationIsRefusedForIt(t *testing.T) {
 	}
 	if refused == nil || *refused != revocationRefusal {
 		t.Errorf("the successor was refused %+v; want %+v", refused, revocationRefusal)
+	}
+}
+
+// TestASuccessorWhoseOpenEndsAfterAPanickedReconciliationIsRefusedForIt
+// (backlog B853, round 2): a successor admitted under the set published,
+// whose open has read its first chunk (Seams.Opened), meets a refresh that
+// publishes a set in which the DAC offers no DSD and stops the session's DSD
+// in a reconciliation that panics: at its open's end it is refused for the
+// cause recorded, backend_failed, before its readmission under the new set
+// could refuse it for that set's own word, as it did until round 2.
+func TestASuccessorWhoseOpenEndsAfterAPanickedReconciliationIsRefusedForIt(t *testing.T) {
+	r := newRevocationRig(t)
+	r.b.cfg.Resolver = readGoldenDSD(t)
+	o, ctx := successorOf(t, r.s, 3)
+	admittedBefore := false
+	r.b.cfg.Seams = &Seams{Opened: func(engine.OccurrenceID, engine.Reference) {
+		r.s.mu.Lock()
+		admittedBefore = o.admitted != nil && o.admitted == r.b.dsd.Load() && o.plan != nil && o.refused == nil
+		r.s.mu.Unlock()
+		r.reconcilePanic(t)
+	}}
+	r.s.openSuccessor(ctx, o)
+	if !admittedBefore {
+		t.Fatal("the successor did not hold its admission under the set published as its open read its first chunk: the case needs one a readmission would refuse")
+	}
+	refusesDSD64(t, r.b)
+	r.s.mu.Lock()
+	refused := o.refused
+	r.s.mu.Unlock()
+	if refused == nil || *refused != panicRefusal {
+		t.Errorf("the successor was refused %+v; want %+v", refused, panicRefusal)
+	}
+}
+
+// admissionEvents records the native plans a session reports
+// (engine.NativePlanEvents), a first occurrence's its Start's admission.
+type admissionEvents struct {
+	engine.Events
+	plans atomic.Int32
+}
+
+func (e *admissionEvents) NativePlan(engine.SessionID, engine.OccurrenceID, engine.NativePlan) {
+	e.plans.Add(1)
+}
+
+// TestARevocationAsTheFirstOccurrenceOpensIsItsStartsRefusal (backlog B853,
+// round 2): a session's first occurrence, admitted as its open began, meets an
+// ordinary revocation once its first chunk is read (Seams.Opened), the set
+// unchanged or a set published meanwhile that refuses its rate: its Start is
+// refused for the revocation's word and reason at the open's end, reports no
+// admission (no native plan) and starts no monitor. Until round 2 the
+// unchanged set's readmission returned at once, and the Start reported its
+// plan and failed at the native open, "DSD permission revoked", a device's
+// failure; the replaced set's refused it for the set's own word.
+func TestARevocationAsTheFirstOccurrenceOpensIsItsStartsRefusal(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		replaced bool
+	}{
+		{"the set unchanged", false},
+		{"a set published as it opened that refuses its rate", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gone := new(atomic.Bool)
+			b, _ := fixtureSessionBackend(t, func(p *DSDPolicy) { p.Box = fixtureBox{gone: gone} })
+			b.cfg.Resolver = readGoldenDSD(t)
+			const id engine.SessionID = 7
+			b.cfg.Seams = &Seams{Opened: func(engine.OccurrenceID, engine.Reference) {
+				b.Revoke(engine.RevokeInput{Session: id, Reason: revocationReason})
+				if tc.replaced {
+					gone.Store(true)
+					b.RefreshDSD(true)
+				}
+			}}
+			ref, err := engine.NewReference("first.dsf")
+			if err != nil {
+				t.Fatal(err)
+			}
+			ev := &admissionEvents{}
+			err = b.Start(context.Background(), engine.StartRequest{Session: id, First: engine.Occurrence{ID: 1, Entry: 1, Ref: ref}, Events: ev})
+			t.Cleanup(func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				if err := b.Release(ctx, id); err != nil {
+					t.Errorf("the session's release: %v", err)
+				}
+				if err := b.Wait(ctx); err != nil {
+					t.Errorf("the backend's goroutines: %v", err)
+				}
+			})
+			if tc.replaced {
+				refusesDSD64(t, b)
+			}
+			var u *engine.Unplayable
+			if !errors.As(err, &u) || *u != revocationRefusal {
+				t.Errorf("the Start answered %v; want the refusal %+v", err, revocationRefusal)
+			}
+			if n := ev.plans.Load(); n != 0 {
+				t.Errorf("the Start reported %d native plans: an admission the revocation had ended", n)
+			}
+			s := b.known(id)
+			if s == nil {
+				t.Fatal("the session's record is gone before its Release")
+			}
+			s.mu.Lock()
+			monitor := s.dsdMonitor
+			s.mu.Unlock()
+			if monitor {
+				t.Error("the session started a DSD monitor for a first occurrence the revocation refused")
+			}
+		})
 	}
 }
 
