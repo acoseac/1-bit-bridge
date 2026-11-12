@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"io"
 	"net/http"
@@ -39,11 +40,12 @@ func TestAMatchWhoseReQueueDidNotLandIsReQueuedByTheNextSweep(t *testing.T) {
 	for _, c := range []struct {
 		name string
 		// whileHeld runs on the test's goroutine while the first re-queue is
-		// held inside its transaction, and answers what the hold returns: on
-		// is the sweep's switch, rollbacks the rollbacks on the store's file.
-		whileHeld func(t *testing.T, on *atomic.Bool, rollbacks *sqlitetest.RollbackWatch) error
+		// held inside its transaction, tx, and answers what the hold returns:
+		// on is the sweep's switch, rollbacks the rollbacks on the store's
+		// file.
+		whileHeld func(t *testing.T, on *atomic.Bool, rollbacks *sqlitetest.RollbackWatch, tx *sql.Tx) error
 	}{
-		{name: "cancelled inside the reset by a switch-off", whileHeld: func(t *testing.T, on *atomic.Bool, rollbacks *sqlitetest.RollbackWatch) error {
+		{name: "cancelled inside the reset by a switch-off", whileHeld: func(t *testing.T, on *atomic.Bool, rollbacks *sqlitetest.RollbackWatch, tx *sql.Tx) error {
 			// Off, the switch's poller cancels the pass's context, and
 			// database/sql rolls the reset's transaction back on a goroutine
 			// of its own once the transaction's context, derived from the
@@ -52,16 +54,17 @@ func TestAMatchWhoseReQueueDidNotLandIsReQueuedByTheNextSweep(t *testing.T) {
 			// it, and a rollback that never comes fails the wait. The pass's
 			// Done is no proof of it: a cancel closes it before it cancels
 			// the contexts derived from the pass's, the transaction's among
-			// them, and a commit made in between lands (backlog B844). The
-			// sweep holds the store's writer lock and nothing else here
-			// opens a transaction meanwhile, so the next rollback on the
-			// store's file is the reset's own.
+			// them, and a commit made in between lands (backlog B844). Nor is
+			// the next rollback on the store's file, which another connection
+			// can make: the transaction says whether that rollback was its
+			// own, and the wait goes on past the next while it is open
+			// (B662's rule, backlog B869).
 			seen := rollbacks.Seen()
 			on.Store(false)
-			rollbacks.WaitPast(t, seen, nil)
+			waitForTheRollbackOf(t, rollbacks, seen, tx)
 			return nil
 		}},
-		{name: "a reset that fails", whileHeld: func(*testing.T, *atomic.Bool, *sqlitetest.RollbackWatch) error {
+		{name: "a reset that fails", whileHeld: func(*testing.T, *atomic.Bool, *sqlitetest.RollbackWatch, *sql.Tx) error {
 			return errors.New("injected re-queue failure")
 		}},
 	} {
@@ -95,12 +98,15 @@ func TestAMatchWhoseReQueueDidNotLandIsReQueuedByTheNextSweep(t *testing.T) {
 			var on atomic.Bool
 			on.Store(true)
 			rollbacks := sqlitetest.WatchRollbacks(t, dbPath)
-			var held atomic.Int64
+			var resets atomic.Int64
+			// held is the first re-queue's transaction, once it is held.
+			var held atomic.Pointer[sql.Tx]
 			answer := make(chan error, 1)
-			store.SetResetEnrichedBeforeCommitForTest(func(context.Context) error {
-				if held.Add(1) > 1 {
+			store.SetResetEnrichedBeforeCommitForTest(func(_ context.Context, tx *sql.Tx) error {
+				if resets.Add(1) > 1 {
 					return nil // the next sweep's re-queue lands
 				}
+				held.Store(tx)
 				return <-answer
 			})
 			cache := acoustid.NewCache(16)
@@ -129,8 +135,8 @@ func TestAMatchWhoseReQueueDidNotLandIsReQueuedByTheNextSweep(t *testing.T) {
 
 			// The first sweep: matched, its re-queue held and let go as the
 			// case says, and not landed.
-			eventually(t, func() bool { return held.Load() >= 1 }, "the first sweep's re-queue")
-			release(c.whileHeld(t, &on, rollbacks))
+			eventually(t, func() bool { return held.Load() != nil }, "the first sweep's re-queue")
+			release(c.whileHeld(t, &on, rollbacks, held.Load()))
 			eventually(t, func() bool {
 				running, _, lastEnd, _, _ := status.snapshot()
 				return !running && !lastEnd.IsZero()
@@ -171,4 +177,20 @@ func requeued(t *testing.T, store *manifest.Store, path string) bool {
 		}
 	}
 	return false
+}
+
+// waitForTheRollbackOf waits until database/sql has rolled tx back at the
+// driver, as internal/manifest's helper of that name does: the watch counts
+// the rollbacks on the store's file, any connection's, and tx's own leaves tx
+// answering sql.ErrTxDone. A probe of a transaction still open runs a SELECT,
+// which changes nothing, and the wait goes on past the next rollback.
+func waitForTheRollbackOf(t *testing.T, w *sqlitetest.RollbackWatch, seen int, tx *sql.Tx) {
+	t.Helper()
+	for {
+		w.WaitPast(t, seen, nil)
+		seen = w.Seen()
+		if _, err := tx.ExecContext(context.Background(), `SELECT 1`); errors.Is(err, sql.ErrTxDone) {
+			return
+		}
+	}
 }

@@ -116,7 +116,7 @@ func (s *Store) ResetEnrichedByPaths(ctx context.Context, matches []AcoustIDMatc
 		return 0, err
 	}
 	if s.resetEnrichedBeforeCommit != nil {
-		if err := s.resetEnrichedBeforeCommit(ctx); err != nil {
+		if err := s.resetEnrichedBeforeCommit(ctx, tx); err != nil {
 			return 0, err
 		}
 	}

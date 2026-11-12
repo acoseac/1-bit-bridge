@@ -75,11 +75,13 @@ func (s *Store) SetAcoustIDMatchForTest(ctx context.Context, path, acoustID stri
 // SetResetEnrichedBeforeCommitForTest makes fn run in every
 // ResetEnrichedByPaths of s once its statements are written and before its
 // transaction commits, under the store's writer lock, with the reset's
-// context: a test's hold on the fingerprint sweep's re-queue, where a cancel
-// of that context rolls the transaction back (backlog B617). An error fn
-// returns is the reset's, and the transaction rolls back. On the store it
-// serves, never a package variable. Call it before s is shared; production
-// code never calls it with a non-nil fn.
-func (s *Store) SetResetEnrichedBeforeCommitForTest(fn func(ctx context.Context) error) {
+// context and its transaction: a test's hold on the fingerprint sweep's
+// re-queue, where a cancel of that context rolls the transaction back
+// (backlog B617), after which the transaction answers sql.ErrTxDone, which
+// tells its rollback from another on the store's file (backlog B869, B662's
+// rule). An error fn returns is the reset's, and the transaction rolls back.
+// On the store it serves, never a package variable. Call it before s is
+// shared; production code never calls it with a non-nil fn.
+func (s *Store) SetResetEnrichedBeforeCommitForTest(fn func(ctx context.Context, tx *sql.Tx) error) {
 	s.resetEnrichedBeforeCommit = fn
 }

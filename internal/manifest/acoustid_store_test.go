@@ -2,10 +2,13 @@ package manifest
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"testing"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/sqlitetest"
 )
 
 func seedEnrichedTrack(t *testing.T, s *Store, path string) {
@@ -534,17 +537,27 @@ func TestTheReQueueRecordsEachMatchsProvenanceInItsTransaction(t *testing.T) {
 	})
 	for _, c := range []struct {
 		name string
-		hold func(cancel context.CancelFunc) func(ctx context.Context) error
+		// hold is the re-queue's, inside its transaction: cancel ends the
+		// reset's context, and rollbacks counts the rollbacks on the store's
+		// file.
+		hold func(t *testing.T, cancel context.CancelFunc, rollbacks *sqlitetest.RollbackWatch) func(context.Context, *sql.Tx) error
 	}{
-		{"cancelled inside its transaction", func(cancel context.CancelFunc) func(ctx context.Context) error {
-			return func(ctx context.Context) error {
+		{"cancelled inside its transaction", func(t *testing.T, cancel context.CancelFunc, rollbacks *sqlitetest.RollbackWatch) func(context.Context, *sql.Tx) error {
+			return func(_ context.Context, tx *sql.Tx) error {
+				// The hold answers once database/sql has rolled the
+				// transaction back on its own goroutine, the transaction
+				// asked whether the rollback the watch saw was its own
+				// (B662's rule, backlog B869), so the commit after it finds
+				// the transaction done. The reset's Done is no proof of that
+				// rollback: it closes before it (backlog B844).
+				seen := rollbacks.Seen()
 				cancel()
-				<-ctx.Done()
+				waitForTheRollbackOf(t, rollbacks, seen, tx)
 				return nil
 			}
 		}},
-		{"failing inside its transaction", func(context.CancelFunc) func(ctx context.Context) error {
-			return func(context.Context) error { return errors.New("injected failure") }
+		{"failing inside its transaction", func(*testing.T, context.CancelFunc, *sqlitetest.RollbackWatch) func(context.Context, *sql.Tx) error {
+			return func(context.Context, *sql.Tx) error { return errors.New("injected failure") }
 		}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -552,9 +565,10 @@ func TestTheReQueueRecordsEachMatchsProvenanceInItsTransaction(t *testing.T) {
 			defer s.Close()
 			seedEnrichedTrack(t, s, "a.flac")
 			before := enrichedAt(t, s, "a.flac")
+			rollbacks := sqlitetest.WatchRollbacks(t, s.path)
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			s.SetResetEnrichedBeforeCommitForTest(c.hold(cancel))
+			s.SetResetEnrichedBeforeCommitForTest(c.hold(t, cancel, rollbacks))
 			if _, err := s.ResetEnrichedByPaths(ctx, matchesFor("a.flac")); err == nil {
 				t.Fatal("a re-queue that did not commit answered no error")
 			}
