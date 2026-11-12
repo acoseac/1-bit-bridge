@@ -95471,3 +95471,18 @@ closed); without it their bounded join failed at its 5 s bound, "0 goroutines st
 deadline exceeded", where `Wait` read a nil `zero`; with it both clean up at once, no goroutine
 started. The harness rig and round 2's
 `TestAnAuthorizationReplacedAsASuccessorOpensRefusesItForItsOwnReason` end theirs so too.
+
+The runs, at b7e7a38f, in one build-slot session on legion0 (Linux, Go 1.27.3, the Makefile's
+tags, `TMPDIR` on disk):
+
+| Run | Result |
+|---|---|
+| `make fmt`, then `git status --porcelain` | exit 0, the tree clean |
+| `go vet` with the tags: linux/amd64, windows/amd64, linux/386 | exit 0 each |
+| `make docs-check` | exit 0 |
+| `go run ./scripts/qualification-version -base 4678b983 -head HEAD` (main's tip, the merge base now) | qualification version OK |
+| `-race -count=50 -v`, the round's 21 new or touched playback tests | each 50 times; 3,400 PASS with their subtests, 0 FAIL, 0 SKIP; 27.4 s |
+| `go test -race -timeout 120m ./internal/player/...` | 15 packages ok; 44.7 s |
+| `go test -race -timeout 120m ./internal/alsapcm/` | ok; 77.2 s |
+| `go test -race -timeout 120m ./cmd/bridge/` | ok; 1,642.4 s |
+| CI's native-integration invocations (`scripts/native-integration-overlay.py`, `-race`) | cmd/bridge 83 of 83, playback 79 of 79, every case the job names |
