@@ -20,7 +20,10 @@ import (
 // verification holds it from before it reads the manifest it checks until
 // its verdict is written, so it is that record's one writer, and the pruner
 // holds it across its orphan sweep, its listing and its deletions, so no
-// snapshot is deleted from under a check. The lock is the kernel's on the
+// snapshot is deleted from under a check. A restore takes it too, in the
+// folder that holds the snapshot it restores, from before it touches its
+// destination until it returns (holdSource, backlog B826), so no snapshot is
+// deleted from under a restore either. The lock is the kernel's on the
 // open file (fsutil.TryLock), which a crash drops; the file itself stays, and
 // only the lock on it means anything. A listing of the backups folder passes
 // over it: it is no snapshot. Where no lock is granted, the protected work is
@@ -28,7 +31,9 @@ import (
 const LockFileName = ".backups.lock"
 
 // ErrBackupsBusy is a verification's answer when another verification or the
-// pruner held the backups folder's lock for all of its wait.
+// pruner held the backups folder's lock for all of its wait, and a restore's
+// when a holder of the lock of the folder that holds its snapshot did
+// (holdSource).
 var ErrBackupsBusy = errors.New("another verification or prune of these snapshots holds their lock")
 
 // ErrBackupsUnlocked is the answer of a verification, a claim and a prune
@@ -37,7 +42,9 @@ var ErrBackupsBusy = errors.New("another verification or prune of these snapshot
 // filesystem that keeps locks and while another open holds one, among
 // them): nothing is verified, recorded or removed then (backlog B653's
 // second round), since nothing would keep another process's prune or check
-// from it.
+// from it. A restore answers it, in words of its own, where no lock can be
+// had on the folder that holds its snapshot, that answer or a lock file it
+// cannot make there (sourceUnlockedError): nothing is restored then.
 var ErrBackupsUnlocked = errors.New("no lock was granted on the backups folder, so nothing was verified or pruned")
 
 // lockPoll is how often a wait for the lock tries it, and markerPoll how

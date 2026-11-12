@@ -5111,3 +5111,249 @@ a live recovery. Restoring only the post-rename guard to `p.givenUp()` must
 fail all four on that new assertion even while the warning-only outcome
 mapping remains fixed; with both production changes reverted, their original
 recording/reporting assertions fail too. No new test seam is needed.
+
+## B826 — a restore holds the lock of its snapshot's folder (2026-11-12)
+
+- **…and a restore takes that lock in the folder that holds its snapshot, where the snapshot resolves, from before it touches its destination, a player seal it completes there included, until it returns (`backup.holdSource`, the data dir's lock before it, bridge.yaml's inside it; backlog B826): its admission asks this process's marks first by the spelling given, no filesystem asked (`backup.SourceStillHeld`), then resolves the snapshot, asks the resolved folder's marks, takes its lock within `RestoreOptions.LockWait` (bridge restore's `verifyCmdLockWait`, after the prompt, never across it), removes a marker a process that ended left there, and reads the manifest again under it (`ErrSnapshotGone`), all on a worker under a hold of the folder (`newRestoreHold`) that the restore waits for until its context ends or that wait and `watchdogSlack` pass, and `StopWriteBound` more; a worker given up keeps no lock it takes late, though an open of the lock file under way may still make that file (as root, with the folder's owner) and a stale marker's removal under way may still finish, and one given up while it holds the lock marks the folder as a restore's (`StuckCheck.Restore`), in this process and beside the lock, until it has let the lock go, its marker written only once that removal has ended (`hold.clearStale`, `markStuckAfter`); a context that ends as the hold is handed over still refuses the restore, and once its writes begin nothing stops it; its let-go is bounded (`hold.release`), the folder marked in this process past `releaseBound` until the unlock, the close and this process's holder of the folder are let go; every folder alike, a copy's included (the lock file made where missing), refused, nothing restored, while a check, a prune or a restore that did not end holds it (`ErrCheckStillRunning`, a `StillRunningError` naming which: the doctor, the ticker and every command name a restore's and say the bridge restore that runs it ends it), past the wait (`ErrBackupsBusy`), or where no lock can be had or made (`ErrBackupsUnlocked`: no locks kept, read-only media, a folder this user cannot write), in bridge backup --verify's words, exit 1; and bridge restore looks at the snapshot before its prompt, bounded alike (`backup.CheckRestoreSource`: the resolved folder's marker counted only while another open holds its lock); and the restore reads the snapshot where it resolves and names it as it was given it (bridge restore's argument, cleaned: `CleanSnapshotPath`), every path below it in a read's error spelled below that path (`spelledAsGiven`, its chain kept), a refusal by a hold given up naming the snapshot so and the hold by its own name (`heldRefusal`)** (2026-11-12, backlog B826; Codex on B653 PR 1's third round; round 2, Codex on #1452 and on its brief; round 3, CI on its merge with main, Windows' 8.3 temporary folder). **Don't touch the destination before the source's lock or let the restore write once it has answered, take a missing lock file for a copy, resolve a spelling this process's marks name, hold the lock across the prompt, wait for the lock or read the snapshot before the prompt on the command's own goroutine, count a marker beside a lock nobody holds, let a stale marker's removal take a restore's marker away, drop a restore's mark before its unlock has ended, name a restore's hold as a check that a restart of the bridge ends, read the snapshot through the path it was given once it has resolved it, name the snapshot in a restore's words where it resolves, or rebuild an error from its text to change its words.** `TestARestoreRefusesASnapshotAGivenUpCheckHolds`, `TestARestoreRefusedByTheSpellingItIsGivenResolvesNothing`, `TestARestoreRefusesASnapshotAnotherProcesssCheckHolds`, `TestARestoreWaitsForTheSnapshotsLockWithinItsWait`, `TestARestoreHoldsTheSnapshotsLockThroughItsCopies`, `TestARestoreLocksALiveFolderThatHoldsNoLockFileYet`, `TestAStandaloneCopyIsRestoredUnderItsOwnFoldersLock`, `TestARestoreThroughALinkTakesTheLockOfTheFolderItLeadsTo`, `TestARestoreTakesTheLockOfABackupsFolderReachedThroughALink`, `TestARestoreFromTheInstallsOwnBackupsFolderCompletes`, `TestARestoreClearsAMarkerItsHolderLeftBehind`, `TestASnapshotPrunedWhileTheRestoreAskedIsRefusedBeforeTheDestinationIsTouched`, `TestARestoreWhoseFolderCanHaveNoLockIsRefused`, `TestARestoreWhoseSourceDoesNotAnswerIsRefusedWithinItsBound`, `TestAGivenUpRestoreThatHoldsTheLockMarksTheFolderUntilItLetsGo` (Unix), `TestTheStaleMarkersRemovalNeverTakesAwayARestoresMarker`, `TestARestoresMarkStandsUntilItsUnlockEnds`, `TestAStuckMarkSaysWhatHoldsTheFolder`, doctor's `TestTheBackupCheckLineNamesWhatHoldsTheFolderAndWhatEndsIt`, `TestBridgeRestoreSaysWhyTheSnapshotsFolderRefusedIt`, `TestBridgeRestoreRefusesBeforeItsPromptWhileAHoldGivenUpHoldsTheSnapshot`, `TestBridgeRestoreRefusesASnapshotPrunedWhileItAsked`, `TestBridgeRestoreAnswersAStalledSnapshotWithinItsBoundBeforeItsPrompt` (Unix), `TestBridgeRestoreAsksTheMarkerAgainstTheLockBeforeItsPrompt`, `TestTheCommandsSayWhatEndsARestoreThatHoldsTheSnapshots`, `TestARestoreNamesTheSnapshotAsItWasGiven`, `TestARestoreReadsTheSnapshotItLocked`, `TestTwoSpellingsOfASnapshotsFolderShareItsLock`, `TestEveryAdmissionRefusalNamesTheSnapshotAsItWasGiven`, `TestARestoreRefusedPastTheStopOfItsWaitNamesTheSnapshotAsItWasGiven`, `TestARestoreRefusedForAnotherRestoreNamesItselfAndThatRestore` (Unix), `TestTheRestoresWordsSpellTheSnapshotAsItWasGiven` and `TestBridgeRestoreNamesTheSnapshotAsItWasTypedBesideARestoreThatHoldsIt` pin it. → History-rules-cli-serve.md
+
+The problem (Codex's fourth finding on B653 PR 1's third round, #1444, in
+code that PR did not change): `restoreCmd` entered `RestoreWithOptions`
+holding only the destination's data-dir lock. A restore of install A's
+snapshot, named in A's backups folder, into a stopped install B went on
+while A's `bridge serve` still held a check given up (`ErrCheckGivenUp`)
+with that snapshot's files open, and nothing kept A's prune from removing
+the snapshot under the copies. The prune already refused in that state
+(`stuckBy`); the restore took no lock of its source's folder and read no
+mark. Red on main through the real path: a verification of A's snapshot
+given up past its deadline, its check parked where SQLite opens the
+snapshot's database, and the restore of that snapshot into B answered nil
+and wrote every one of B's files beside it.
+
+**Where the lock is taken.** At the top of `RestoreWithOptions`, the one path
+every restore takes, before `completePlayerSeal`, which can write the
+destination's markers, and before anything else touches the destination;
+held until the restore returns, through the manifest's read, the player's
+files and every copy. Rejected: the lock in `restoreCmd` alone, which misses
+every other caller, and a lock taken after the seal's completion, which would
+already have changed B.
+
+**Which folder, in verification's order.** This process's marks by the
+spelling given first, which asks no filesystem (`SourceStillHeld`: the
+folder is the parent of the spelling made absolute against the directory the
+process started in, so `.` inside a snapshot names its folder); then the
+snapshot resolved as a verification resolves it (`resolveSnapshotIn`), which
+can hang on the very mount a check was given up on; then the resolved
+folder's marks. Rejected: resolving first, which a spelling the marks name
+would wait on, and, without resolving at all, taking a link elsewhere
+(`/tmp/x` leading to `/dataA/backups/<snap>`) for a copy beside the link.
+
+**A copy of a snapshot.** Copies stay restorable (the restore's own refusals
+advise restoring from a copy), and nothing tells a copy from a live backups
+folder for certain: the manifest records no folder (`verify_paths.go`), and a
+live folder holds no lock file before its first verification, claim or prune
+(a capture takes no backups lock), so a missing lock file is no mark of a
+copy. The rule: every folder is locked alike, the lock file made where it is
+missing (`fsutil.OpenLockFile`, which as root gives it the folder's owner, so
+the service can still open it). Where no lock can be had (a filesystem that
+keeps none) or made (read-only media, a folder this user cannot write), the
+restore is refused, `ErrBackupsUnlocked` in a restore's words
+(`sourceUnlockedError`, whose text is never the verification's), and bridge
+restore says to copy the snapshot's folder to a local disk and restore from
+the copy. Rejected: an unlocked restore wherever no lock file stands (it
+takes a live folder before its first check for a copy); a copy mode on the
+CLI (an operator's word that nothing checks, which removes the protection
+exactly where the operator is wrong); a folder named `backups` taken for a
+live one (a backups folder can be a link to a folder named otherwise, and a
+copy can sit in a folder named so). Its cost: a `.backups.lock` left beside a
+copy, and a copy on read-only media refused until copied.
+
+**Stalls.** The lock's wait bounds its polling for contention alone: the
+resolution, the lock file's open and the read of a marker beside a lock
+another process holds are synchronous, and so, once the lock is held, are the
+removal of a marker left there and the manifest's read; each can hang on a
+mount that stopped answering. So the whole admission runs on a worker of its
+own under a hold of the folder (`holdSource`, `newRestoreHold`), which the
+restore waits for until its context ends or the lock's wait and
+`watchdogSlack` have passed, then `StopWriteBound` more, as a verification's
+caller does (`awaitSourceWorker`); past that it is refused, nothing restored,
+and the hold is given up, its context ended. A worker given up keeps no lock
+it takes late: a resolution that answers late takes none, and a try that
+takes the lock late lets it go at once, `lockBackupsWith` asking the context
+after the try (the hand-over, which a worker given up finds closed, lets go of
+one taken just before). It may still touch the snapshot's folder, never the
+destination: an open of the lock file under way as the restore gave up may
+make that file afterwards, as root with the folder's owner, and a removal of
+a stale marker under way may finish. Neither is atomic with the give-up, and
+neither is made so.
+
+A worker given up before it holds the lock marks nothing (the hold is
+`markless` until then): it holds nothing a mark would say it holds, though an
+open, a marker's read or a try under way keeps this process's holder of the
+folder until it answers. One given up once it holds the lock marks the folder
+as a restore's (round 2, Codex's P2 on #1452), naming the step it was in
+(`hold.enter`: the stale marker's removal, or its read of the snapshot), in
+this process and in the marker beside the lock (`StuckCheck.Restore`), until
+the worker, its step answered, sees the give-up and lets the lock go, removing
+the marker before it unlocks. Another restore, a prune and a verification
+there are then refused at once in a restore's words. Red on round 1, where the
+worker given up kept the lock with no mark, and each of them waited its lock
+wait out and answered `ErrBackupsBusy`. The marker is written only once a
+stale marker's removal under way has ended (Codex's finding 3 on the brief):
+the give-up's check and the removal's registration are one section of the
+hold's lock (`hold.clearStale`), and the marker's write waits for the removal
+on a goroutine of its own (`markStuckAfter`), so the removal, once it answers,
+takes the stale marker away and never the restore's, and a removal not yet
+begun at the give-up is skipped. Nothing that refuses waits on the folder.
+
+The destination is written on the restore's own goroutine alone, after the
+worker has handed the lock over, so nothing is written there once the restore
+has answered and bridge restore has let the data dir's lock go. Admission and
+writing differ: a context that ends as the hold is handed over still refuses
+the restore, the lock let go; once its writes begin the context no longer
+stops it, since a restore stopped between its writes would leave the install
+half restored. Its tenure is not bounded as a hold's steps are: a restore is a
+command of its own, whose end, however it comes, lets the kernel's lock go.
+Its let-go of the lock is bounded (`hold.release`, `releaseBound`): past it
+the restore answers, and the folder stays marked in this process, naming the
+restore, until the unlock, the close and this process's holder of the folder
+are let go (`keepMarkUntil`, and `hold.drop` on a goroutine of its own); no
+marker is written then, the lock being let go (Codex's finding 4 on the brief:
+round 1's `letGoWithin` answered with the unlock still under way and no mark).
+
+**A marker its holder left.** `lockBackupsWith` leaves a crashed checker's
+`.check-still-running` to its caller; a verification, a claim and a prune
+clear it once they hold the lock, and so does the restore, or another process
+waiting for the lock would read a dead checker as still running for as long
+as the restore runs.
+
+**The prompt's window.** `restoreCmd` reads `manifest.json` before its
+prompt (`LooksLikeSnapshotDir`), and a prune can remove the snapshot while
+the prompt waits, or while the restore waits for a prune's lock. Under the
+lock, before the seal's completion, the restore reads the manifest again and
+refuses a snapshot no longer there (`ErrSnapshotGone`) or no longer one, the
+destination untouched, its incomplete seal included; main completed the seal
+first, wrote `player-initialized`, and only then failed on the read.
+Rejected: holding the lock across the prompt, which holds the serving
+bridge's verifications up for as long as the prompt waits (each waits
+`AutoLockWait`, then leaves its snapshot unverified) and its prunes skipped.
+Before its prompt bridge restore looks at the snapshot bounded as the
+admission is (`CheckRestoreSource`; round 2, Codex's P2 on #1452: round 1's
+first read, `LooksLikeSnapshotDir`, ran on the command's own goroutine, and a
+fresh command sees none of a serving bridge's marks): this process's marks
+first, then on a worker the resolution, the marker beside the lock of the
+folder the snapshot resolves into, counted only while another open holds that
+lock (`StuckCheckOf`; Codex's finding 1 on the brief: a marker beside a lock
+nobody holds is one a process that ended left, which refuses nothing and
+which the restore removes once it holds the lock), and the manifest. A folder
+that does not answer is refused within that bound, in the admission's words,
+before any prompt; the lock it tries, to ask its question, it lets go at once.
+
+**Lock order.** The data dir's lock (`restoreCmd`), then the snapshot's
+folder's, then bridge.yaml's (`config.LockFile`), let go the other way. No
+path takes `server.lock` or bridge.yaml's lock inside a backups lock:
+`owner.go`, `verify.go` and `finish.go` take neither, and a capture takes
+`server.lock` (its seal completion, its adoption) before any backups lock.
+The common self-restore, `bridge restore /dataA/backups/<snap>` into
+`/dataA`, takes `/dataA/server.lock` and then `/dataA/backups/.backups.lock`,
+this process's holder of the folder (`folderToken`) taken and given back at
+the restore's end.
+
+**The words.** Each kind in `verifyCmd`'s words and with its exit code, 1:
+a check or a prune that did not end (restart the bridge that keeps those
+snapshots, or stop the `bridge backup --verify` that runs it), another holder
+past the wait (run it again once it ends), no lock to be had (copy the
+snapshot to a local disk). A snapshot gone says it was there when the command
+read it. A restore that did not end is named a restore wherever it is met
+(round 2, Codex's finding 2 on the brief): its error is a `StillRunningError`
+whose check says so (`StuckCheck.Restoring`, `What`, `HeldByRestore`), and the
+doctor's `backup-check` line, the ticker's reason for taking no snapshot, the
+words of a prune it skipped, bridge backup --verify and bridge restore each
+name it, and say that the bridge restore command that runs it ends it, never a
+restart of the bridge, which runs none. The sentinel's own words name a
+verification, a prune or a restore. The field is `omitempty`: a marker written
+before it holds none and reads as it always did, and an older bridge passes
+over it in a restore's marker and names it its snapshot's verification, the
+step's words saying what it was doing.
+
+**The snapshot's name in the words** (round 3; CI on 75aedb53, the round's
+merge with main). Round 1 read the snapshot where it resolves, in the folder
+whose lock it holds, and from the lock on named it there too:
+`RestoreWithOptions` replaced the path it was given with the resolved one
+(`snapshotDir, m := src.snap, src.m`), so every message after it named the
+resolved path. Windows gives CI's temporary folder in its 8.3 spelling
+(`C:\Users\RUNNER~1\…`), which resolves to the long one, and
+`TestRestoreRefusesAPlayerUUIDThatIsNotOneUUIDBeforeWritingAnyFile` (its ten
+subtests) and `TestARestoreRefusesAPlayerUUIDThatIsNotOneUUIDAndSaysWhatToDo`
+failed every run: the refusal did not name the copy the test gave. A temporary
+folder reached through a link fails the same way anywhere (macOS's `/var`; on
+Linux with TMPDIR through a symlink, `TestRestoreRefusesANamedPipeForThePlayerUUIDAtOnce`
+too). The rule: the resolved path stays for what it protects, the lock of the
+folder that really holds the snapshot and every read under it; the words name
+the snapshot as the restore was given it, bridge restore's argument cleaned
+(`CleanSnapshotPath`), as before B826. The admission's refusals name the given
+path themselves. A read's error names a path below the resolved snapshot, and
+`spelledAsGiven` gives it words with each such path spelled below the given
+one, as `filepath.Join` spells it, keeping the error itself for `errors.Is`
+and `errors.As` (`givenSpelling.Unwrap`), so `sayRestoreRefusal`'s advice and
+`HeldByRestore` read the chain as before; every error `RestoreWithOptions`
+answers once admitted passes through it (`sourceHold.asGiven`, deferred).
+Where the snapshot resolves follows the path given only in a failed call's own
+words: the lock's file, in the folder the snapshot resolves into, and a lookup
+that found the snapshot gone, which names where the link led. A refusal by a
+hold given up names the snapshot requested by its path and the hold by its own
+name (`heldRefusal`): its snapshot's folder name, as the marker beside the lock
+holds it for every process (`StuckCheck.Snapshot`), which names no path.
+Naming the holder's own spelling would need its path in the marker, so the
+marker is unchanged. Rejected: reading through the given spelling again, since
+a link repointed once the lock is held would hand the restore another snapshot
+than the one locked (`TestARestoreReadsTheSnapshotItLocked`); and rebuilding an
+error from its text, which drops the chain the CLI chooses its advice by.
+
+The inventory, each site at this round's commit and what it names:
+
+- Admission, `internal/backup/restore_source.go`: a hold given up in this
+  process by the spelling given, :216 (`SourceStillHeld`), by the folder the
+  snapshot resolves into, :322, another process's by its marker beside the
+  lock it holds, :428, and the same before bridge restore's prompt, :405
+  (`CheckRestoreSource`), each through `heldRefusal`: the snapshot as given
+  and the hold by its own name (was: the hold alone). The lock held past the
+  wait, :430: the snapshot as given (was: the resolved folder). No lock to be
+  had there, :464 (`sourceUnlockedError`), and the lock's file failing
+  otherwise, :438: the snapshot as given, then the lock file's call where it
+  resolves (was: the resolved folder). The snapshot's lookup failing otherwise,
+  :319: the snapshot as given, then the lookup's words (was: the lookup's
+  words alone). The manifest gone once the lock is held, :355, and not reading,
+  :357, both respelled at :352, and before the prompt, :409: the manifest below
+  the snapshot as given (was: where it resolves). Unchanged: the snapshot gone
+  at its lookup, :317, or at the lock, :436 (`snapshotGone`: the snapshot as
+  given, then the lookup's words); a schema not supported, :359 (no path, as on
+  main); the restore stopped, :273, :325, :338 and :432 (`sourceStopped`), and
+  its folder not answering past its bound, :265 and :393
+  (`sourceExpiryError`): the snapshot as given.
+- Once admitted, `internal/backup/backup.go`, each through :551
+  (`src.asGiven`): a player-uuid that does not hold one UUID, :1692 (the CI
+  failure), or does not read, :1695; a console account that does not read,
+  :1669; a DSD state that does not read, :621; a snapshot file's stat, :703;
+  bridge.yaml's read, :723; and a copy's source, :775: the file below the
+  snapshot as given (was: where it resolves; a destination's path unchanged).
+  `internal/backup/player_reservation.go`: a listed reservation that does not
+  read, :104, and the check for an unlisted one, :133: likewise. Unchanged, no
+  snapshot path: a console account that does not parse, :1673, or changed
+  during the restore, :743; its write, :746 (the destination);
+  `restoreMigrationHeld`, :819; `playerFilesNeedABarrier`, :922; and
+  `player_reservation.go`'s :112, :129, :157 and :204, which name files by
+  name alone.
+- The given-up mark's words, unchanged: `internal/backup/stuck.go`:85
+  (`What`), the doctor's backup-check line (`internal/doctor/backups.go`:66)
+  and the marker (`internal/backup/hold.go`:241) name a restore's hold by the
+  name it took at the lock (`restore_source.go`:332, its snapshot's folder name
+  where it resolves).
+- bridge restore, `cmd/bridge/backup.go`, unchanged: a path that holds no
+  snapshot, :445, and the prompt, :486, name the argument cleaned;
+  `sayRestoreRefusal`, :541 to :548, and :449 and :523 print the refusal's
+  words above, the advice chosen through its chain.
+
+Forty-nine sites: twenty whose words changed, twenty-nine that named the
+snapshot as given already or name no path in it.
+
+The record is in `ops/engineering-log.md`, 2026-11-12, B826.

@@ -1,6 +1,7 @@
 package backup
 
 import (
+	"context"
 	"crypto/rand"
 	"errors"
 	"fmt"
@@ -29,12 +30,25 @@ type RestoreOptions struct {
 	// the caller read the config from when it worked out the targets: nil
 	// when the caller read none.
 	ConfigAsRead []byte
+	// Context stops the restore while it waits for the lock of the folder
+	// that holds its snapshot (holdSource), and nothing after: once the
+	// restore holds that lock it runs to its end, since a restore stopped
+	// between its writes would leave the install half restored. Nil is
+	// context.Background().
+	Context context.Context
+	// LockWait is how long the restore waits for another holder of that lock
+	// (a verification, a claim, a prune, another restore) to let it go before
+	// it is refused (ErrBackupsBusy); 0 is VerifyCmdLockWait.
+	LockWait time.Duration
 	// beforeWrites, when set, runs once the restore holds its locks and has
 	// read the snapshot, just before its first write; beforeConfig just
 	// before it writes the snapshot's bridge.yaml, in its turn of the file's
-	// lock. They are the windows a test lands another writer in
-	// (WithBeforeWritesForTest, WithBeforeConfigForTest). Nil in production.
-	beforeWrites, beforeConfig func()
+	// lock; sourceHeld once it holds the lock of the folder that holds its
+	// snapshot and has read the manifest there, before it touches the
+	// destination. They are the windows a test lands another writer in
+	// (WithBeforeWritesForTest, WithBeforeConfigForTest,
+	// WithSourceHeldForTest). Nil in production.
+	beforeWrites, beforeConfig, sourceHeld func()
 }
 
 // restoreMargin is the minimum jump and the amount of running room left

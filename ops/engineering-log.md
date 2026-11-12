@@ -94597,6 +94597,437 @@ Every mutation in both tables was computed in memory, written for its build alon
 | `go test -race -timeout 120m`, each alone, nothing else of this session running: ./cmd/bridge/, ./internal/admin/, ./internal/manifest/ | ok each: 2536.3 s, 1847.6 s, 3392.1 s (build-ci-tests.md: a timeout is not a failure) |
 | make build-all | exit 0 |
 
+## 2026-11-12 — B826: a restore holds the lock of its snapshot's folder
+
+The rule is in `cli-serve.md` (the "…and a restore takes that lock" bullet
+after the B653 ones) and its long form in `ops/History-rules-cli-serve.md`
+("B826"); this is the evidence. Linux amd64 (legion0), Go 1.27.3, the
+Makefile's tags.
+
+### The defect
+
+Codex's fourth finding on B653 PR 1's third round (#1444), left to this
+backlog item: `restoreCmd` entered `RestoreWithOptions` holding only the
+destination's data-dir lock, so a restore of install A's snapshot into a
+stopped install B went on while A's serving process held a check given up
+(`ErrCheckGivenUp`) with the snapshot's files open, and nothing kept A's
+prune from removing the snapshot under its copies. The prune refused in that
+state already (`stuckBy(backupsRoot)` in `PruneContext`); the restore took no
+backups lock and read no mark. Every claim of the brief held at main
+(4b21e2ce): `RestoreWithOptions` at `backup.go` 510, `completePlayerSeal`
+first at 513, `restoreCmd` at `cmd/bridge/backup.go` 405 calling it at 485,
+`verifyCmd`'s refusals at 176-185, `lockBackupsWith`'s synchronous open and
+marker read, and the marker left to its caller.
+
+### Red first, on main
+
+`TestARestoreRefusesASnapshotAGivenUpCheckHolds`, written to build at main
+and run there before any production change: A's verification given up past a
+300 ms deadline, its check parked in the seam before SQLite opens the
+snapshot's database (`SetOnDatabaseOpenForTest`), then a restore of that
+snapshot into B. Main answered nil and wrote all of B:
+
+```
+restore_source_test.go:115: a restore of the snapshot a check given up holds answered <nil>, want ErrCheckStillRunning
+restore_source_test.go:120: the restore beside the check given up wrote B's bridge.db
+restore_source_test.go:120: the restore beside the check given up wrote B's tokens.json
+restore_source_test.go:120: the restore beside the check given up wrote B's server.crt
+restore_source_test.go:120: the restore beside the check given up wrote B's server.key
+restore_source_test.go:120: the restore beside the check given up wrote B's bridge.yaml
+restore_source_test.go:120: the restore beside the check given up changed what B's data dir holds
+--- FAIL: TestARestoreRefusesASnapshotAGivenUpCheckHolds (1.89s)
+```
+
+With the fix it is refused at once with `ErrCheckStillRunning`, B as it was.
+`TestASnapshotPrunedWhileTheRestoreAskedIsRefusedBeforeTheDestinationIsTouched`
+and `TestBridgeRestoreRefusesASnapshotPrunedWhileItAsked` are red on main
+too by construction: main completed B's incomplete player seal
+(`player-initialized` written) before it read the snapshot's manifest.
+
+### The fix
+
+`holdSource` (`internal/backup/restore_source.go`), first in
+`RestoreWithOptions`: this process's marks by the spelling given
+(`SourceStillHeld`), then, on a worker, the snapshot's resolution, the
+resolved folder's marks, `lockBackupsWith` within `RestoreOptions.LockWait`,
+the stale marker's clear and the manifest's read under the lock; the restore
+waits for the worker until its context (`RestoreOptions.Context`) ends or the
+wait and `watchdogSlack` pass, then `StopWriteBound` more. The seal's
+completion and every write come after, on the restore's own goroutine, which
+reads the snapshot where it resolves. `restoreCmd` asks `SourceStillHeld`
+before `LooksLikeSnapshotDir`, passes its context and `verifyCmdLockWait`,
+and says each refusal in `verifyCmd`'s words (`sayRestoreRefusal`). Three
+root-owner tests (`TestSnapshotAndRestoreAsRootKeepTheInstallOwner`, its
+console-account sibling and `TestSnapshotAndRestoreAsRootKeepThePlayerUUID`)
+now expect the lock file a root restore makes in the snapshot's folder to
+take the install's owner, as it does (`fsutil.OpenLockFile`).
+
+### Decided
+
+A copy of a snapshot is locked as a live folder is, its lock file made where
+it is missing: nothing tells the two apart for certain, and a missing lock
+file is what a live folder has before its first verification. Read-only
+media, a share that keeps no locks and a folder this user cannot write are
+refused, `ErrBackupsUnlocked` in a restore's words, with the advice to copy
+the snapshot to a local disk. The brief's case "a standalone copy (no lock
+file) restores unlocked" is therefore `TestAStandaloneCopyIsRestoredUnderItsOwnFoldersLock`:
+it restores, under its own folder's lock, let go after.
+
+### Controls
+
+On the committed tree (e65cbe9c), predicted by name before the run
+(`.tmp/_b826/controls.predictions.txt`, untracked), each a production
+mutation made from memory and restored in a `finally` (`git diff --quiet`
+clean after every one), the two test binaries built once per control and
+every new test run alone (`.tmp/_b826/controls.py`). The baseline, no
+mutation, ran first: all 17 green.
+
+- C1, the given spelling's marks never asked (`SourceStillHeld` refusing
+  nothing): `TestARestoreRefusedByTheSpellingItIsGivenResolvesNothing` red
+  ("resolved 1 paths beside a mark its spelling names"), and
+  `TestBridgeRestoreRefusesBeforeItsPromptWhileAHoldGivenUpHoldsTheSnapshot`
+  red (it asked for its confirmation). `TestARestoreRefusesASnapshotAGivenUpCheckHolds`
+  stayed green, as predicted: the resolved folder's marks and
+  `lockBackupsWith`'s own check of a busy token refuse it after the
+  resolution, a second and a third layer.
+- C2, no lock taken (contention alone, another process's open holding the
+  kernel's lock, no mark): every case that holds or asks the lock red, the
+  busy case among them ("answered <nil>, want ErrBackupsBusy", B written),
+  the cross-process marker, the span, the link, the linked backups folder,
+  the live folder with no lock file, the copy, the unlocked media, the prune
+  during the lock's wait, three of the four stalls (never entered) and the
+  CLI's three words; and, not predicted, the self-restore's check that the
+  lock is free after it (no lock file to ask). The in-process given-up check
+  stayed green (its marks refuse it first).
+- C3, the lock let go as soon as the manifest is read: the copies' case red
+  (the prune ran beside the copies and the restore then failed on a file the
+  prune removed), and the live folder's, the copy's and the stale marker's
+  cases, which ask the lock during the restore.
+- C4, the stale marker never cleared: exactly
+  `TestARestoreClearsAMarkerItsHolderLeftBehind` red, its competitor
+  answering `ErrCheckStillRunning` for a checker that had ended.
+- C5, the manifest read after `completePlayerSeal` and none under the lock:
+  exactly the case pruned during the lock's wait red, `player-initialized`
+  written in B before the read failed. The case pruned during the prompt, and
+  the CLI's, stayed green: the resolution finds the folder gone first.
+- C6, the caller never giving its worker up: all four stalls red, none
+  returned within its bound.
+- C7a, the worker on the caller's context rather than one its give-up ends:
+  the stalled try's case red, the late lock kept long enough to clear the
+  marker after the give-up. C7b, the hand-over's release dropped alone:
+  green, `lockBackupsWith` letting a lock taken on an ended context go
+  itself. C7ab, both: red, the lock kept, the marker removed and the next
+  restore refused busy.
+- C8, bridge restore's refusal words dropped: the CLI's three cases red.
+- C9, the resolved folder's marks dropped alone: green, as predicted (the
+  given spelling's marks and the token's check cover it).
+
+### The gates
+
+On e65cbe9c, in one use of the build lock (03:25 to 04:41, nothing else in
+it): `go vet ./...` with the Makefile's tags clean, and `go vet` of
+`./internal/backup/` and `./cmd/bridge/` clean for windows/amd64,
+darwin/arm64, linux/386 and linux/arm as well. Every new or touched test
+under `-race -count=50 -run '^Name$'`, in four lanes side by side: all 20 ok,
+no race reported (the stalls' case 1,870 s for its 50 rounds, the CLI's
+refusal words 595 s, the root-owner three about 105 s each). `go test -race
+-count=1 -timeout 120m -p 2 ./internal/backup/ ./cmd/bridge/`: both ok,
+`internal/backup` in 919 s and `cmd/bridge` in 2,131 s, which holds
+`TestEveryCitedTestNameExists`. The one caller of `backup.Restore` outside
+those packages, openhome's `TestARestoredIdentityHandsOutValuesPastItsSnapshot`,
+ok under `-race`. `scripts/check-doc-budgets.py` clean on the tree, and on a
+copy with the rules line applied (`cli-serve.md` 98,370 bytes). `make test`
+and `make build-all` were not run: the brief asked for the two packages.
+
+## 2026-11-12 — B826 round 2: a restore given up while it holds the lock marks the folder, and bridge restore's first read is bounded
+
+The rule is `cli-serve.md`'s B826 line, condensed this round, and its long
+form in `ops/History-rules-cli-serve.md` ("B826"); this is the evidence.
+Linux amd64 (legion0), Go 1.27.3, the Makefile's tags, TMPDIR on disk.
+
+### The findings, checked against the code
+
+- **A stalled read under the lock kept the lock with no mark** (Codex's P2 on
+  #1452). Held: round 1's worker took the lock and the folder's token, then
+  removed a stale marker and read the manifest on the worker; a stop or the
+  watchdog answered the restore with a refusal while the worker stayed in its
+  read, and only its end let the lock go. Nothing marked the folder, so every
+  other holder waited its lock wait and answered busy.
+- **bridge restore's first read was unbounded** (Codex's P2). Held:
+  `restoreCmd` called `LooksLikeSnapshotDir` (`os.ReadFile`) on its own
+  goroutine before any bounded work, and `SourceStillHeld` sees only this
+  process's marks, never a serving bridge's.
+- **The docs claimed more than the code** (the Claude API's Low). Held: a
+  worker given up could still make the lock file (an open under way) and
+  finish a stale marker's removal; "lets go at once, writing nothing" and
+  "removes nothing" were false of the source folder, true of the destination.
+- The brief's review (Codex): a marker counted only while its lock is held,
+  through the resolved parent, inside the bound (1); a restore identity every
+  consumer words (2); no marker lost between the stale removal and the
+  publication (3); the mark kept until the unlock and the token's release end,
+  the hand-over's refusal included (4); every contradicting passage reworded
+  (5). Each held against the code: `StuckCheck` named a snapshot or a prune
+  only; the doctor and the CLI's advice said "restart the bridge, or stop the
+  backup --verify"; `writeMarker` raced an uncoordinated `clearStaleMarker`;
+  the hand-over's refusal called `letGoWithin`, which answered with the unlock
+  under way and no mark.
+
+### Red first
+
+`TestAGivenUpRestoreThatHoldsTheLockMarksTheFolderUntilItLetsGo`, written to
+build at round 1 (f55f63ad) and run there before any change: the manifest a
+named pipe, the restore stopped once its worker held the lock and read the
+pipe.
+
+```
+restore_source_unix_test.go:159: another restore beside the restore given up answered another verification or prune of these snapshots holds their lock, in …/backups, for all of the restore's wait (10s); nothing was restored, want ErrCheckStillRunning naming "a restore of snapshot 2026-11-12T06-05-36Z"
+restore_source_unix_test.go:163: a prune beside the restore given up: {… Skipped:true SkippedFor:another verification or prune of these snapshots holds their lock}, <nil>; want it skipped for ErrCheckStillRunning naming "a restore of snapshot …"
+restore_source_unix_test.go:166: the restore and the prune beside the restore given up waited 10.001414261s to be refused
+restore_source_unix_test.go:168: no marker of the check that did not end was written
+--- FAIL: TestAGivenUpRestoreThatHoldsTheLockMarksTheFolderUntilItLetsGo (42.72s)
+```
+
+`TestBridgeRestoreAnswersAStalledSnapshotWithinItsBoundBeforeItsPrompt` is
+red at round 1 by construction (its first read waits on the pipe); its control
+below puts that read back.
+
+### The fix
+
+- The restore's admission runs under a hold of the folder
+  (`newRestoreHold`), `markless` until it holds the lock (`marksFromNow`), its
+  step named as it goes (`enter`): the caller's give-up (`abandon`) marks the
+  folder as a restore's from then on, in this process and in the marker beside
+  the lock, until the worker, its read answered, lets the lock go
+  (`hold.release`, `drop`). A give-up before the lock marks nothing.
+- `StuckCheck.Restore` (`omitempty`), `Restoring`, `What`, and a typed
+  `StillRunningError` (`errors.Is` reads it as `ErrCheckStillRunning`, whose
+  words now name a verification, a prune or a restore), `HeldByRestore`; the
+  doctor's backup-check line, the ticker's reason, the prune's words,
+  `bridge backup --verify` and `bridge restore` name a restore's and say the
+  bridge restore that runs it ends it.
+- `hold.clearStale`: the give-up's check and the stale removal's
+  registration in one section of the hold's lock; a mark raised after it
+  writes its marker once the removal has ended (`markStuckAfter`, the write
+  waiting on its own goroutine), and a removal not yet begun at a give-up is
+  skipped.
+- The restore's let-go through the hold (`sourceHold.letGo`): bounded by
+  `releaseBound`, past which the folder stays marked in this process until
+  the unlock, the close and the token's release end (`keepMarkUntil`), the
+  hold dropped then (`dropSoon`); the hand-over's refusal takes the same path.
+- `CheckRestoreSource`: `restoreCmd`'s look before its prompt, bounded as the
+  admission is (`awaitSourceWorker`, shared): this process's marks, then on a
+  worker the resolution, `StuckCheckOf` on the resolved parent (a marker
+  counted only while another open holds the lock), and the manifest;
+  `ErrNotASnapshot` keeps the command's exit 2.
+- Reworded: the package comment, `takeSource`'s, the expiry and stop
+  refusals' words, the History entry ("Stalls", the prompt's window, the
+  words), docs/backup.md, and the rules line (a patch, condensed so the file
+  stays within its budget: 98,370 to 96,883 bytes).
+
+### Controls
+
+On the committed tree (90498960), predicted by name before the run
+(`.tmp/_b826/controls-r2.predictions.txt`, untracked), each a production
+mutation made from memory and restored in a `finally` (`git diff --quiet`
+clean after every one), the test binaries built once per control and each
+case run alone (`.tmp/_b826/controls_r2.py`): round 1's fourteen restore
+cases and round 2's four in `internal/backup`, the doctor's case, and the
+CLI's six. The baseline, no mutation, ran first: all 25 green. Every control
+went red exactly where predicted, and nowhere else.
+
+- R1, the mark dropped (`takeSource` never calls `marksFromNow`, so a
+  restore's hold stays markless): the item's case red as before the fix
+  (another restore and the prune answered busy after the 10 s wait, "no
+  marker of the check that did not end was written"), and the stale removal's
+  case both ways ("none of [waits writes] came"). The unlock-stall case stayed
+  green, as predicted: a let-go past its bound marks by the release's own
+  give-up, not by its caller's.
+- R2, `restoreCmd`'s unbounded first read put back (`LooksLikeSnapshotDir`
+  before `CheckRestoreSource`): exactly the CLI's stalled-snapshot case red,
+  "bridge restore did not answer within 16.1s of a snapshot that does not
+  answer".
+- R3, the marker written at once (`writeMarker`'s wait for a removal under
+  way taken out): exactly the stale removal's case red where the give-up came
+  during the removal ("none of [writes] came"); where it came before the
+  removal began, green.
+- R4, the let-go unmarked (round 1's `letGoWithin` on the unlock, then the
+  drop): the unlock-stall case red both ways, refused as the lock came and at
+  the end of a restore: no mark while the unlock does not answer, another
+  restore waiting its 10 s out, the prune skipped as busy.
+- R5, the CLI's look counting a marker without asking the lock
+  (`stuckMarker`): exactly the stale marker's way of the preflight case red,
+  `bridge restore` exiting 1 beside a marker nobody's lock stands behind.
+- R6, the CLI's look asking the given spelling's parent rather than the
+  resolved one: exactly the link's way red, the confirmation asked beside a
+  held lock's marker.
+- R7a, `stillRunningEnd` never naming a restore: the commands' case red, its
+  restore way, for `bridge restore` and `bridge backup --verify` alike
+  (neither says "The end of the bridge restore that runs it ends it", both
+  say "restart the bridge"). R7b, the doctor never naming one: its case red,
+  its restore way (the line reads "a verification of snapshot S").
+- R8, a restore's hold not markless before the lock: the stalls' case red,
+  its four ways ("a restore given up before it held the lock marked the
+  folder", at "its wait for the snapshots' lock").
+- R9, `clearStale`'s check of the give-up taken out: exactly the stale
+  removal's case red where the give-up came before the removal began ("the
+  stale marker's removal took the restore's marker away"); where it came
+  during the removal, green.
+- R10, the stop at the hand-over not refused: exactly the unlock-stall case's
+  first way red, the restore stopped as the lock came answering nil and
+  writing B's `bridge.yaml`, `bridge.db` and `tokens.json`.
+
+### The gates
+
+On 90498960, in two uses of the build lock (06:38 to 07:04, and 07:04 to
+07:31), nothing else in either, TMPDIR `~/onebit/tmp`: `go vet ./...` with the
+Makefile's tags clean for linux/amd64 and linux/386, and `go vet` of
+`./internal/backup/`, `./internal/doctor/` and `./cmd/bridge/` clean for
+windows/amd64, darwin/arm64 and linux/arm; go1.27.3's gofmt lists none of the
+thirteen Go files the round changed. Every new or touched test, with round
+1's restore cases, whose code this round rewrote, under `-race -count=50 -run
+'^Name$'`, five lanes side by side: all 28 ok, no race reported (the stalls'
+case 1,304 s for its 50 rounds, the stale removal's 442 s, the CLI's stalled
+snapshot 417 s, the unlock stall 378 s, the lock held at the give-up 284 s).
+`go test -race -count=1 -timeout 120m -p 3 ./internal/backup/
+./internal/doctor/ ./cmd/bridge/`: all three ok, `internal/backup` in 723 s,
+`internal/doctor` in 7 s and `cmd/bridge` in 1,604 s, which holds
+`TestEveryCitedTestNameExists`. The one caller of `backup.Restore` outside
+those packages, openhome's `TestARestoredIdentityHandsOutValuesPastItsSnapshot`,
+ok under `-race`. `scripts/check-doc-budgets.py` clean on a copy with the rules
+patch applied (`cli-serve.md` 96,883 bytes), and the patch applies at
+90498960. `make test` and `make build-all` were not run: the brief asked for
+the packages.
+
+## 2026-11-12 — B826 round 3: a restore names its snapshot as it was given it
+
+The rule is `cli-serve.md`'s B826 line (round 3's patch) and its long form in
+`ops/History-rules-cli-serve.md` ("B826", "The snapshot's name in the words",
+which holds the inventory of the messages); this is the evidence. Linux amd64
+(legion0), Go 1.27.3, the Makefile's tags, TMPDIR on disk.
+
+### The regression
+
+CI on 75aedb53, the round's merge with main 3a6b924e: on Windows,
+`TestRestoreRefusesAPlayerUUIDThatIsNotOneUUIDBeforeWritingAnyFile` (its ten
+subtests) and `TestARestoreRefusesAPlayerUUIDThatIsNotOneUUIDAndSaysWhatToDo`
+failed every run. `RestoreWithOptions` replaced the snapshot path it was given
+with the one `holdSource` resolved (`snapshotDir, m := src.snap, src.m`), and
+every message after it named the resolved path; Windows gives CI's temporary
+folder in its 8.3 spelling, which resolves to the long one. With TMPDIR
+reached through a symlink the first failed on macOS too, and passed on main.
+
+### Red first
+
+At 75aedb53 on Linux, TMPDIR reached through a symlink
+(`~/onebit/tmp/b826-link`, leading to `b826-real/deeper`,
+`.tmp/_b826/gotest_link.py`): both tests red,
+and `TestRestoreRefusesANamedPipeForThePlayerUUIDAtOnce` (Unix) as well. The
+whole of `internal/backup` through the link failed those two alone (451 s).
+
+```
+player_uuid_test.go:284: the refusal does not name …/b826-link/…/backups/2026-11-12T09-18-37Z/player-uuid and the way through: restore player-uuid: …/b826-real/deeper/…/backups/2026-11-12T09-18-37Z/player-uuid does not hold one UUID, so the player cannot have the identity it had; …
+backup_player_uuid_test.go:171: the refusal does not name the snapshot's file and the way through:
+    restore: restore player-uuid: …/b826-real/deeper/…/data/backups/2026-11-12T09-18-52Z-1/player-uuid does not hold one UUID, …
+player_uuid_unix_test.go:75: Restore with a named pipe for the snapshot's player-uuid: restore player-uuid: open …/b826-real/deeper/…/player-uuid: named pipe is not a file; nothing was restored (refused as "named pipe"); want it refused as a named pipe, naming …/b826-link/…/player-uuid, with nothing restored
+```
+
+The committed case that needs no host's temporary folder, a snapshot reached
+through a link to the folder that holds it, refused for its player-uuid, run
+against 75aedb53's production code (`.tmp/_b826/red_at_head_r3.py`: HEAD's
+`restore_source.go` and `backup.go` put back from memory, the new cases kept,
+each outcome predicted in writing before the run, every one as predicted):
+
+```
+restore_words_test.go:89: the refusal of the snapshot's player-uuid does not name …/002/linked-backups/2026-11-12T09-41-02Z/player-uuid, as the restore was given it: restore player-uuid: …/001/backups/2026-11-12T09-41-02Z/player-uuid does not hold one UUID, …
+--- FAIL: TestARestoreNamesTheSnapshotAsItWasGiven
+```
+
+At the same code: the admission's table red in eight of its eleven ways (the
+three holds given up, which named no snapshot requested; the lock held past
+the wait, no lock to be had and the lock's file failing, which named the
+resolved folder; the manifest gone and not reading, which named it where it
+resolves), green where the words were right already (the snapshot gone at its
+lookup, the restore stopped; and the lookup failing otherwise, whose stand-in
+named the path given, so that a refusal dropping that path would still name
+it: the round's second commit makes the stand-in name where the snapshot
+resolves, as a lookup failing past a link does, once planning its control, C8
+below, showed that; not run at the first commit); A's given-up restore
+blocking B's, and the CLI's case, red; the reads and the shared lock green,
+both right already.
+
+### The fix
+
+The lock and every read stay where the snapshot resolves (`snap` in
+`RestoreWithOptions`); the words name it as the restore was given it, bridge
+restore's argument cleaned. The admission's refusals name the given path
+themselves (`heldRefusal` beside a hold given up, which keeps its own name;
+the lock held past the wait; no lock to be had; the lock's file failing; the
+lookup failing). A read's error is given words with each path below the
+resolved snapshot spelled below the given one (`spelledAsGiven`,
+`givenSpelling`, whose `Unwrap` keeps the chain): the admission's read of the
+manifest, and every error `RestoreWithOptions` answers once admitted
+(`sourceHold.asGiven`, deferred). An error whose words would not change (the
+snapshot given as it resolves) stays itself. The marker is unchanged.
+
+### Controls
+
+On 77feeff5, predicted by name before the run
+(`.tmp/_b826/controls-r3.predictions.txt`), each a production mutation made
+from memory and restored in a `finally` (`git diff --quiet` clean after every
+one), the test binaries built once per control and each case run alone
+(`.tmp/_b826/controls_r3.py`): the round's seven new cases in
+`internal/backup`, the two that the regression broke there, the CLI's new
+case, the CLI's
+player-uuid case, and round 1's and round 2's CLI cases that read the
+refusals' words. The baseline ran first: all thirteen green.
+
+- C1, the reads through the path supplied (`snap, m := snapshotDir, src.m`):
+  exactly the repointed link's case red, B holding the second snapshot's
+  token store, TLS pair and config.
+- C2, the swap put back for the words only (the deferred words naming
+  `src.snap`): exactly the linked player-uuid's case red; the shared lock's
+  case, the exclusion, green.
+- C3, `heldRefusal` naming no snapshot requested: the table's three holds
+  given up, A's restore blocking B's, and the CLI's case red.
+- C4, `heldRefusal` breaking the chain (`%v` for `%w`): the table's three
+  holds (what they carry), A blocking B, the CLI's case (no advice to stop the
+  restore), round 2's commands case both ways and round 1's held row red.
+- C5, `givenSpelling` without `Unwrap`: the linked player-uuid's case
+  (`config.ErrNotOnePlayerUUID` lost), the table's manifest not reading
+  (`json.SyntaxError` lost) and the unit test red; and, not predicted, the
+  table's manifest gone: the admission classifies the manifest's error after
+  respelling it, and without `Unwrap` a manifest gone read as a manifest that
+  does not read, not `ErrSnapshotGone`. The chain carries the admission's own
+  classification too.
+- C6, the admission's manifest read not respelled: the table's manifest gone
+  and not reading red.
+- C7, the lock's refusals given the resolved snapshot: the table's other
+  process's hold, the lock held past the wait, no lock to be had and the
+  lock's file failing red.
+- C8, the lookup's failure without the path given: the table's lookup failing
+  otherwise red.
+
+### The gates
+
+On 77feeff5, in two uses of the build lock (09:58 to 10:37, and 11:06 to
+11:33), nothing else in either, TMPDIR `~/onebit/tmp`: `go vet ./...` with the
+Makefile's tags clean for linux/amd64 and linux/386, and `go vet` of
+`./internal/backup/`, `./internal/doctor/` and `./cmd/bridge/` clean for
+windows/amd64, darwin/arm64 and linux/arm; go1.27.3's gofmt lists none of the
+six Go files the round changed. Under `-race -count=50 -run '^Name$'`, five
+lanes side by side: the round's eight new cases, the eight earlier restore
+cases that read the refusals' words this round changed, and the three cases
+the regression broke, run with TMPDIR reached through the symlink: all 19 ok,
+no race reported (the admission's table 1,422 s for its 50 rounds, the linked
+player-uuid's ten subtests 639 s). The whole of `internal/backup` through the
+symlink, once without `-race`: ok in 462 s (two of its tests failed there
+before the fix). `go test -race -count=1 -timeout 120m -p 2
+./internal/backup/ ./cmd/bridge/`: both ok, `internal/backup` in 767 s and
+`cmd/bridge` in 1,608 s, which holds `TestEveryCitedTestNameExists`. `make test` and `make build-all` were not run:
+the brief asked for the packages. The rules patch applies at the round's
+commit, and `scripts/check-doc-budgets.py` is clean on a copy with it applied
+(`cli-serve.md` 97,290 bytes). Windows is the PR's CI windows job's to show.
+
 ## 2026-11-12 — B728 B9 PR 2: a DAC's DSD choice written only while the player is stopped, and B853
 
 Base: main at 3a6b924e (B9 PR 1, #1448, at 4b21e2ce); branch `feat/b728-b9-pr2`. The owner
