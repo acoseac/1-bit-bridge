@@ -739,3 +739,20 @@ choice forgets none of a probe's answers (`Forget` is the migration's part
 alone), and its tests gain the rig's revocation-word and lease cases.
 Qualification version 49 invalidates earlier harness evidence; LegacyVersion
 remains 35. Test and negative-control evidence is in `ops/engineering-log.md`.
+
+### Round 2: the cause first at every boundary
+
+A refusal of the policy's no longer answers in the recorded cause's place:
+`admitDSD` asks the cause before `selectFor`'s answer (a reconciliation that
+panicked while it read the set refused the entry `native_not_offered`), and
+each open's end asks it before the readmission (`refuseRevokedLocked`, with
+the condition `admitDSD`'s first check refuses by), the set unchanged
+included, where a session's first occurrence was not asked at all. On the
+harness's path `openNativeContent` (guarded) asks it before the selectors,
+which answered a revoked permission as no approval; the producer's gapless
+check keeps the cause a revocation during the check dropped the successor
+for; the authorization's reconciliation records first, leaves what is dropped
+already and drops for the cause recorded, and contains its panic as a policy
+reconciliation's is (`stopDSD`, `backend_failed`); and `Revoke` (guarded)
+drops a prepared successor for the cause recorded, its own where nothing
+stood. Qualification version 49 covers both rounds.

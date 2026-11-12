@@ -973,8 +973,14 @@ lease is held. A native revocation records its cause where the session's DSD sto
 (`Revoke` in `playback/native.go`), so a later DSD entry of that session is refused
 `native_revoked` with Revoke's reason, and `dsd_dac_unread` only once a reading of
 the policy has failed (B853). The probe cache's `Forget` is a migration's part
-alone: a choice forgets none of a probe's answers. No byte a DAC is given changes;
-the guarded files changed (`Revoke`'s record, the probe cache's words,
-`internal/alsapcm`'s tests), so older harness evidence is invalid all the same, as
-at every bump. The harness admits version 49 records alone; legacy migration accepts
-versions 35 through 49 (`LegacyVersion` remains 35). No hardware check was run.
+alone: a choice forgets none of a probe's answers. Round 2 (the same day) keeps that
+cause first at every boundary: before the policy's refusal at an admission and at
+both opens' ends, and on the harness's path before the selectors
+(`openNativeContent` in `playback/native.go`), the producer's gapless check and the
+authorization's reconciliation, whose panic is contained and recorded; `Revoke`
+drops a prepared successor for the cause recorded. No byte a DAC is given changes;
+the guarded files changed (`Revoke` and `openNativeContent`, the probe cache's
+words, `internal/alsapcm`'s tests), so older harness evidence is invalid all the
+same, as at every bump. The harness admits version 49 records alone; legacy
+migration accepts versions 35 through 49 (`LegacyVersion` remains 35). No hardware
+check was run.
