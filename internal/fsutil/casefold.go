@@ -183,8 +183,11 @@ func absElements(p string) []string {
 	return out
 }
 
-// foldingProbeEntries is how much of a folder's listing FoldingIn reads at
-// most.
+// foldingProbeEntries is how much of a folder's listing FoldingIn reads
+// first, and so how many of its entries it asks at most. A folder its first
+// read was all of is read again for at most one entry more, which tells it
+// still within the bound from one that grew past it; only one its first read
+// was not all of is read whole again (listsSpellings).
 const foldingProbeEntries = 256
 
 // FoldingIn reports how the folder dir compares the names in it, judged in the
@@ -193,19 +196,31 @@ const foldingProbeEntries = 256
 // folder folds case when that finds the same entry, and does not when it finds
 // nothing or another entry. The same file found is one entry only where the
 // swapped spelling is no name of its own in the listing (a hard link's second
-// name, on a case-sensitive volume, is one), read whole for it where the
-// probe's first read was not, and then only from a re-read that still holds
-// the probed name: one that holds the swapped spelling alone, or neither, says
-// the entry changed in between, and the next is asked (B651's tenth round);
-// and an answer comes only from lookups that agree
-// with themselves, the entry still the file first found, so an entry removed
-// or saved over between the lookups, or one os.SameFile cannot open (Windows),
-// passes the question to the next (B651's ninth round). The names in a folder
-// are compared by the volume the folder is on, which is not the volume of the
-// folder's own name where a volume is mounted on it: an exFAT stick mounted on
-// an ext4 folder folds the names in it, while its mount point's name, in the
-// folder above, is compared as ext4 compares (B651's seventh round, Codex on
-// round 6, where the probe looked up the folder's own name in its parent).
+// name, on a case-sensitive volume, is one), by a listing read after that
+// entry's own lookups, never one read before them: neither the probe's first
+// read nor a re-read made for an entry asked earlier holds a second name made
+// since (B738: a hard link FOLDER.JPG made beside folder.jpg between the first
+// read and the lookups made a case-sensitive folder answer case-insensitive).
+// The re-read takes at most foldingProbeEntries+1 entries of a folder its
+// first read was all of, and one that finds more, the folder grown past that
+// bound since, settles nothing, as one that cannot be read; a folder its first
+// read was not all of is read whole again. A re-read answers only where it
+// still holds the probed name: one that holds the swapped spelling alone, or
+// neither, says the entry changed in between, and the next is asked (B651's
+// tenth round), and one that holds the probed name alone answers only once a
+// lookup of the swapped spelling after it still finds the file (B651's
+// eleventh round); and an answer comes only from lookups that agree with
+// themselves, the entry still the file first found, so an entry removed or
+// saved over between the lookups, or one os.SameFile cannot open (Windows),
+// passes the question to the next (B651's ninth round). An entry asked is
+// looked up at most five times and the listing read again for it at most
+// once, so a probe reads the listing at most foldingProbeEntries+1 times,
+// however the folder changes under it. The names in a folder are compared by
+// the volume the folder is on, which is not the volume of the folder's own
+// name where a volume is mounted on it: an exFAT stick mounted on an ext4
+// folder folds the names in it, while its mount point's name, in the folder
+// above, is compared as ext4 compares (B651's seventh round, Codex on round
+// 6, where the probe looked up the folder's own name in its parent).
 //
 // It writes nothing. A folder whose listing offers no such name (an empty one,
 // a bare mount point among them, or one whose names hold no letter), and one
@@ -246,10 +261,9 @@ func (osFolding) sameFile(a, b fs.FileInfo) bool { return os.SameFile(a, b) }
 
 // foldingIn is FoldingIn over fsys.
 func foldingIn(fsys foldingFS, dir string) CaseFolding {
-	// A listing cut short by an error still offers what it read, and is not
-	// the whole of it; one that ends before the batch is full is.
-	entries, err := fsys.readDir(dir, foldingProbeEntries)
-	whole := err == nil && len(entries) < foldingProbeEntries || errors.Is(err, io.EOF)
+	// The entries asked are the first read's, which still offers what it read
+	// where an error cut it short (readListing).
+	entries, whole := readListing(fsys, dir, foldingProbeEntries)
 	for _, e := range entries {
 		name := e.Name()
 		swapped, ok := swapASCIICase(name)
@@ -280,17 +294,21 @@ func foldingIn(fsys foldingFS, dir string) CaseFolding {
 			}
 			// One file under both spellings is one entry unless the other
 			// spelling is a name of its own in the listing, as a hard link's
-			// second name is on a case-sensitive volume. A listing read again
-			// that no longer holds the probed name says the entry changed
-			// since the lookups (renamed to its other spelling, or gone), and
-			// tells nothing either way (B651's tenth round, Codex and Claude
-			// on round 9). One that lacks the swapped spelling answers only
-			// once a lookup of it after the listing still finds the file: on
-			// a case-sensitive volume a hard link's second name unlinked
-			// since the lookups is gone from the listing and from a lookup
-			// alike, where a volume that folds still finds the entry (B651's
-			// eleventh round, Codex and Claude on round 10).
-			hasName, hasSwapped, known := listsSpellings(fsys, dir, entries, whole, name, swapped)
+			// second name is on a case-sensitive volume, and the listing that
+			// says so is read again now, after this entry's lookups: the
+			// first read, and a re-read made for an entry asked before, came
+			// before them and need not hold a second name made since (B738,
+			// Codex on #1397). A listing read again that no longer holds the
+			// probed name says the entry changed since the lookups (renamed
+			// to its other spelling, or gone), and tells nothing either way
+			// (B651's tenth round, Codex and Claude on round 9). One that
+			// lacks the swapped spelling answers only once a lookup of it
+			// after the listing still finds the file: on a case-sensitive
+			// volume a hard link's second name unlinked since the lookups is
+			// gone from the listing and from a lookup alike, where a volume
+			// that folds still finds the entry (B651's eleventh round, Codex
+			// and Claude on round 10).
+			hasName, hasSwapped, known := listsSpellings(fsys, dir, whole, name, swapped)
 			switch {
 			case !known || !hasName:
 				continue
@@ -315,18 +333,21 @@ func stillFound(fsys foldingFS, dir, name string, first fs.FileInfo) bool {
 	return err == nil && fsys.sameFile(first, again)
 }
 
-// listsSpellings reports whether the folder dir's listing holds name and
-// swapped, each byte for byte, and whether that is known: read from the
-// entries the probe read where they are the whole listing (whole), which
-// hold name, else from the whole listing read again, which may no longer, and
-// not known where it cannot be read whole.
-func listsSpellings(fsys foldingFS, dir string, read []fs.DirEntry, whole bool, name, swapped string) (hasName, hasSwapped, known bool) {
+// listsSpellings reports whether the folder dir's listing, read again after
+// the lookups it settles, holds name and swapped, each byte for byte, and
+// whether that is known: read for at most foldingProbeEntries+1 entries where
+// the probe's first read was all of it (small), and known only where it ends
+// before that bound, a folder grown past it since never read further; read
+// whole where the first read was not all of it; and not known where it cannot
+// be read whole.
+func listsSpellings(fsys foldingFS, dir string, small bool, name, swapped string) (hasName, hasSwapped, known bool) {
+	n := -1
+	if small {
+		n = foldingProbeEntries + 1
+	}
+	read, whole := readListing(fsys, dir, n)
 	if !whole {
-		all, err := fsys.readDir(dir, -1)
-		if err != nil {
-			return false, false, false
-		}
-		read = all
+		return false, false, false
 	}
 	for _, e := range read {
 		switch e.Name() {
@@ -337,6 +358,16 @@ func listsSpellings(fsys foldingFS, dir string, read []fs.DirEntry, whole bool, 
 		}
 	}
 	return hasName, hasSwapped, true
+}
+
+// readListing reads at most n entries of the folder dir's listing, all of it
+// where n is not positive, and reports whether they are the whole of it: a
+// listing cut short by an error still offers what it read, and is not the
+// whole of it; one that ends before n entries is, and so is one that ends
+// with io.EOF, where nothing was left to read.
+func readListing(fsys foldingFS, dir string, n int) ([]fs.DirEntry, bool) {
+	entries, err := fsys.readDir(dir, n)
+	return entries, err == nil && (n <= 0 || len(entries) < n) || n > 0 && errors.Is(err, io.EOF)
 }
 
 // swapASCIICase is name with the case of its ASCII letters swapped: upper
