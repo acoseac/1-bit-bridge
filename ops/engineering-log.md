@@ -94742,3 +94742,28 @@ control went red in under a second, three tests naming it.
 records its cause; `internal/alsapcm`'s probe cache words and tests); no byte a DAC is given
 changes. The runbook names 49 in its five current places and says what it covers;
 `ops/History-b470-native.md` records it beside 48.
+
+The runs, at 72e4673e, in one build-slot session on legion0 (Linux, Go 1.27.3, the Makefile's
+tags, `TMPDIR` on disk):
+
+| Run | Result |
+|---|---|
+| `make fmt`, then `git status --porcelain` | exit 0, the tree clean; the pinned gofmt lists none of the branch's Go files (and lists a misformatted probe, so it ran) |
+| `make vet`; `GOOS=windows make vet`; `GOOS=linux GOARCH=386 make vet` | exit 0 each |
+| `make docs-check` | exit 0 (the rules patch's budgets measured on a patched copy: CLAUDE.md 83.5%, worst load 77.8%) |
+| `go run ./scripts/qualification-version -base 3a6b924e -head HEAD` | qualification version OK |
+| `-race -count=50 -v`, the branch's 31 new or changed playback tests | 4,500 PASS, 0 FAIL, 0 SKIP; 10.0 s |
+| the same, alsapcm's 5 (the rig's busy states, the Start during a write, B853's rig case, the probe cache's two) | 550 PASS, 0 FAIL, 0 SKIP; 27.0 s |
+| the same, policy's 16 | 1,750 PASS, 0 FAIL, 0 SKIP; 2.6 s |
+| the same, `TestAnUncertainChoiceGoesOutAsAWordTheProtocolNames` and `TestQualificationRunbookVersion` | 50 and 300 PASS, 0 FAIL, 0 SKIP |
+| `go test -race ./internal/player/... ./internal/alsapcm/` | 16 packages ok; 87.2 s |
+| `go test ./internal/api/...` (the vocabulary guards) | ok; 38.1 s |
+| `go test ./cmd/bridge/` | ok; 536.4 s |
+
+The rules patch (output.md's new section and its B853 bullet, player.md's silent-probe entry
+with "Samples reach the DAC" moved to its History to make room, the eight build-ci-tests
+entries, CLAUDE.md's rows, and their long forms) was checked on a copy of the tree: it applies
+to the branch (`git apply --check`), `verify_moves.py --base HEAD` passes on the move alone and,
+on the whole patch, misses only the silent-probe entry's two edited copies, each with its
+successor; `TestEveryCitedTestNameExists` caught a ghost citation planted in the copy and passed
+without it.
