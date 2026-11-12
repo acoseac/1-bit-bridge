@@ -288,14 +288,21 @@ func takeSlot(ctx context.Context, h *hold) (func(), error) {
 		return release, nil
 	default:
 	}
-	if onSlotWait != nil {
-		onSlotWait()
-	}
+	waited := false
 	for {
 		notice := stuckNotice()
 		if holder := slotHolder.Load(); holder != nil {
 			if check, marked := holder.marked(); marked {
 				return nil, stillRunning(check)
+			}
+		}
+		// The wait's seam runs once the waiter holds the notice of the next
+		// mark and has found the slot's holder not given up, so a give-up
+		// after it reaches the waiter as that notice (backlog B872).
+		if !waited {
+			waited = true
+			if onSlotWait != nil {
+				onSlotWait()
 			}
 		}
 		select {

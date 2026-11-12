@@ -206,7 +206,7 @@ func givenUpCheckOf(t *testing.T, c *backup.Capture) {
 	done := make(chan backup.Result, 1)
 	start := time.Now()
 	callers.start(func() { done <- backup.FinishCapture(context.Background(), c, keepOne, backup.VerifyOptions{}) })
-	res := awaitParkedAndGivenUp(t, entered, done, start, deadline+backup.StopWriteBound/2+2*time.Second)
+	res := awaitParkedAndGivenUp(t, entered, done, finishAnswer, start, deadline+backup.StopWriteBound/2+2*time.Second)
 	if !errors.Is(res.VerifyErr, backup.ErrCheckGivenUp) {
 		t.Fatalf("premise: the verification answered %v, want its check given up", res.VerifyErr)
 	}
