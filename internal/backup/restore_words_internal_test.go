@@ -15,8 +15,9 @@ import (
 // filepath.Join spells it (a given "." as the name alone), keeps the error's
 // chain for errors.Is and errors.As, and answers the error itself where its
 // words name nothing below the snapshot (a neighbour whose name begins with
-// the snapshot's among them), or where the snapshot is a root, below which
-// every path is.
+// the snapshot's among them), where the snapshot was given as it resolves, so
+// that the words would not change, or where the snapshot is a root, below
+// which every path is.
 func TestTheRestoresWordsSpellTheSnapshotAsItWasGiven(t *testing.T) {
 	snap := filepath.FromSlash("/real/backups/2026-11-12T00-00-00Z")
 	given := filepath.FromSlash("/link/2026-11-12T00-00-00Z")
@@ -48,6 +49,11 @@ func TestTheRestoresWordsSpellTheSnapshotAsItWasGiven(t *testing.T) {
 		"no snapshot":                 {pathErr, ""},
 	} {
 		if got := spelledAsGiven(tc.err, tc.snap, given); got != tc.err {
+			t.Errorf("%s: spelledAsGiven answered %v, want the error itself", name, got)
+		}
+	}
+	for name, as := range map[string]string{"as it resolves": snap, "with a separator after it": snap + string(filepath.Separator)} {
+		if got := spelledAsGiven(pathErr, snap, as); got != error(pathErr) {
 			t.Errorf("%s: spelledAsGiven answered %v, want the error itself", name, got)
 		}
 	}

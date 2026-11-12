@@ -151,19 +151,20 @@ func (s *sourceHold) asGiven(err error) error {
 // as the restore was given it (given): each path below snap spelled below
 // given, as filepath.Join(given, name) spells it. errors.Is and errors.As
 // read err through it, so every advice chosen from it is chosen as before;
-// where its words name nothing below snap, it is err itself.
+// where its words name nothing below snap, or the snapshot was given as it
+// resolves, it is err itself.
 func spelledAsGiven(err error, snap, given string) error {
 	if err == nil || snap == "" || filepath.Dir(snap) == snap {
 		return err
 	}
 	below := snap + string(filepath.Separator)
-	words := err.Error()
-	if !strings.Contains(words, below) {
-		return err
-	}
 	// The given path's own spelling of a name below it: filepath.Join's,
 	// which a given "." spells as the name alone.
 	as := strings.TrimSuffix(filepath.Join(given, "x"), "x")
+	words := err.Error()
+	if as == below || !strings.Contains(words, below) {
+		return err
+	}
 	return &givenSpelling{err: err, words: strings.ReplaceAll(words, below, as)}
 }
 

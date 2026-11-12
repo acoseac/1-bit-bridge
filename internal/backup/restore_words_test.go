@@ -335,13 +335,14 @@ func TestEveryAdmissionRefusalNamesTheSnapshotAsItWasGiven(t *testing.T) {
 		{"its lookup failing otherwise", func(t *testing.T) refusal {
 			snap := snapshotOf(t, storeWithTracks(t, 5))
 			given := throughALinkedFolder(t, snap)
+			// As a lookup that fails past the link says it: where it led.
 			t.Cleanup(backup.SetMetadataForTest(func(p string) (string, error) {
 				if p == given {
-					return "", &fs.PathError{Op: "lstat", Path: p, Err: fs.ErrPermission}
+					return "", &fs.PathError{Op: "lstat", Path: snap, Err: fs.ErrPermission}
 				}
 				return fsutil.ResolveLinks(p)
 			}, nil))
-			return refusal{given: given, resolved: snap, carries: is(fs.ErrPermission)}
+			return refusal{given: given, resolved: snap, carries: is(fs.ErrPermission), resolvedFollows: true}
 		}},
 		{"the restore stopped", func(t *testing.T) refusal {
 			snap := snapshotOf(t, storeWithTracks(t, 5))

@@ -5312,23 +5312,23 @@ error from its text, which drops the chain the CLI chooses its advice by.
 The inventory, each site at this round's commit and what it names:
 
 - Admission, `internal/backup/restore_source.go`: a hold given up in this
-  process by the spelling given, :215 (`SourceStillHeld`), by the folder the
-  snapshot resolves into, :321, another process's by its marker beside the
-  lock it holds, :427, and the same before bridge restore's prompt, :404
+  process by the spelling given, :216 (`SourceStillHeld`), by the folder the
+  snapshot resolves into, :322, another process's by its marker beside the
+  lock it holds, :428, and the same before bridge restore's prompt, :405
   (`CheckRestoreSource`), each through `heldRefusal`: the snapshot as given
   and the hold by its own name (was: the hold alone). The lock held past the
-  wait, :429: the snapshot as given (was: the resolved folder). No lock to be
-  had there, :463 (`sourceUnlockedError`), and the lock's file failing
-  otherwise, :437: the snapshot as given, then the lock file's call where it
+  wait, :430: the snapshot as given (was: the resolved folder). No lock to be
+  had there, :464 (`sourceUnlockedError`), and the lock's file failing
+  otherwise, :438: the snapshot as given, then the lock file's call where it
   resolves (was: the resolved folder). The snapshot's lookup failing otherwise,
-  :318: the snapshot as given, then the lookup's words (was: the lookup's
-  words alone). The manifest gone once the lock is held, :354, and not reading,
-  :356, both respelled at :351, and before the prompt, :408: the manifest below
+  :319: the snapshot as given, then the lookup's words (was: the lookup's
+  words alone). The manifest gone once the lock is held, :355, and not reading,
+  :357, both respelled at :352, and before the prompt, :409: the manifest below
   the snapshot as given (was: where it resolves). Unchanged: the snapshot gone
-  at its lookup, :316, or at the lock, :435 (`snapshotGone`: the snapshot as
-  given, then the lookup's words); a schema not supported, :358 (no path, as on
-  main); the restore stopped, :272, :324, :337 and :431 (`sourceStopped`), and
-  its folder not answering past its bound, :264 and :392
+  at its lookup, :317, or at the lock, :436 (`snapshotGone`: the snapshot as
+  given, then the lookup's words); a schema not supported, :359 (no path, as on
+  main); the restore stopped, :273, :325, :338 and :432 (`sourceStopped`), and
+  its folder not answering past its bound, :265 and :393
   (`sourceExpiryError`): the snapshot as given.
 - Once admitted, `internal/backup/backup.go`, each through :551
   (`src.asGiven`): a player-uuid that does not hold one UUID, :1692 (the CI
@@ -5346,7 +5346,7 @@ The inventory, each site at this round's commit and what it names:
 - The given-up mark's words, unchanged: `internal/backup/stuck.go`:85
   (`What`), the doctor's backup-check line (`internal/doctor/backups.go`:66)
   and the marker (`internal/backup/hold.go`:241) name a restore's hold by the
-  name it took at the lock (`restore_source.go`:331, its snapshot's folder name
+  name it took at the lock (`restore_source.go`:332, its snapshot's folder name
   where it resolves).
 - bridge restore, `cmd/bridge/backup.go`, unchanged: a path that holds no
   snapshot, :445, and the prompt, :486, name the argument cleaned;
