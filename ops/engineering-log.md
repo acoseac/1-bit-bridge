@@ -94767,3 +94767,90 @@ to the branch (`git apply --check`), `verify_moves.py --base HEAD` passes on the
 on the whole patch, misses only the silent-probe entry's two edited copies, each with its
 successor; `TestEveryCitedTestNameExists` caught a ghost citation planted in the copy and passed
 without it.
+
+## 2026-11-12 — B728 B9 PR 2 round 2: B853's cause at every boundary, and the choice's tests fail instead of hanging
+
+Base: 4c63bfab (`orch/b9p2`: round 1 and its rules commit), PR #1453. Each item was checked against
+the code before it was fixed.
+
+**Item 1: the cause before the policy's refusal, at the admission and both opens.** At 4c63bfab
+`admitDSD` returned `selectFor`'s error before its second check of the cause (dsd_policy.go
+625-627); `openSuccessor` ran `readmitDSDLocked` before its check (session.go 975-981), so a
+readmission under a replaced set refused first; and `start` had no check, `readmitDSDLocked`
+returning at once while the set is unchanged (session.go 556, dsd_policy.go 664). Red, the new
+cases over that code:
+
+- `TestAReconciliationThatPanicsDuringAnAdmissionIsItsRefusal` (at `Seams.Admitting`, a refresh
+  that removes the DAC's native DSD and whose reconciliation panics): refused `native_not_offered`,
+  "the DAC offers no native DSD format at this rate", for `backend_failed`;
+- `TestASuccessorWhoseOpenEndsAfterAPanickedReconciliationIsRefusedForIt` (at `Seams.Opened`, the
+  successor holding its old admission): the same;
+- `TestARevocationAsTheFirstOccurrenceOpensIsItsStartsRefusal`: the set unchanged, the Start
+  answered "the device could not be opened: DSD permission revoked", reported one native plan and
+  started a DSD monitor; the set replaced as it opened, refused `native_not_offered`; each for
+  `native_revoked` with the revocation's reason.
+
+The fix: `admitDSD` asks the cause after the set is read and before anything the policy answers,
+the refresh's refusal included (the same words where the refresh's own containment stopped the
+session); and each open's end asks it first (`refuseRevokedLocked`), with the condition
+`admitDSD`'s first check refuses by (admitted as DSD, a plan or a conversion, and nothing refused
+yet), whatever the set. How the brief's "a DoP fallback or an unrelated format refusal must behave as
+it does today when only native transport is revoked" was read: the check keys on `nativeRevoked`,
+the session-wide stop, which a tuple made unavailable on the harness's path (`next.unavailable`,
+where a DoP plan may stand in) does not set, and a refusal the open made (the budget, DSD512, an
+empty decode, a transport) stands. Controls, predicted before the runs: the policy's return first
+again at the admission, the readmission first again at a successor's open and at the first
+occurrence's, and the first occurrence's check removed: each red, its own case alone, eleven of
+the twelve B853 cases green (the third control the replaced-set subcase alone, the fourth both).
+
+**Item 2: the harness's path (`cfg.DSD` nil, an Authorization).** Traced through the three sites
+the brief names, and a fourth found on the way, each red over the code before its fix:
+
+- the selectors (`selectNative`, `selectTransition`) answered a revoked permission as no approval
+  (`dsd_not_in_this_release`, "native DSD here needs an owner-approved plan, and this backend holds
+  none") for an entry after an ordinary revocation: `openNativeContent` (guarded) now asks the
+  cause first on that path (`occ.stoppedCause`);
+- the producer's gapless check, a revocation coming while it read the record (through the
+  Authorization's `Healthy`), rebuilt the dropped successor's refusal from its error, "DSD
+  permission revoked": the cause recorded before its own revocation now stands;
+- the authorization's reconciliation dropped a successor an earlier revocation had dropped, again,
+  "selected DSD policy is no longer eligible", and dropped before it recorded: it records first,
+  leaves what is dropped and drops for the cause recorded; and later entries answered no approval
+  (the selectors' fix);
+- a panic in that reconciliation reached its caller (the session's monitor runs it on a goroutine
+  `spawn` recovers nothing on; `RefreshAuthorization` on its caller's) and recorded nothing: it is
+  contained as a policy reconciliation's is, `stopDSD` recording `backend_failed` and the fault,
+  the session's lock taken through `lockHold`; the case makes it panic at a seam only a test sets
+  (`Seams.ReconcilingPermission`), the only callback inside it being `Revoke` with an active native
+  output, which no test here can build outside the native-integration overlay;
+- `Revoke` (guarded) dropped a prepared successor for its own reason whatever stood: after a failed
+  reading it gave `native_revoked` for `dsd_dac_unread`, after a reconciliation that panicked the
+  same for `backend_failed`; it drops for the cause recorded, its own where nothing stood.
+
+With nothing recorded each answers as it did (the nothing-recorded subcases, green before and after:
+a session with no permission keeps no approval; a gapless check that fails with no earlier cause
+keeps its error; a reconciliation with no earlier cause drops for its own word). Controls: the
+harness's check removed, the producer's earlier-cause branch removed, the containment removed and
+`Revoke`'s drop back to its own reason: each red as predicted, but for one line, the containment
+case's later entry under the first, which stayed green: the containment revokes no permission, so
+the selector admits that entry and `refuseRevokedLocked` refuses it at its open's end, a second
+layer. Left, named for the backlog: a revocation after the first occurrence's open has ended and
+before its native open still makes the Start fail at `openNativeOutput` ("DSD permission revoked",
+native.go 196), a device's failure, not the recorded cause.
+
+**Item 3: three tests that would wait instead of failing.** `TestAStartDuringAWritePlaysByTheChoiceItWrote`
+registered its gate's release before the rig, so the rig's stop, which waits for the parked write,
+ran first; `TestAWriteBackOfARevisionReadInTheWindowIsAnsweredWithTheDurableOne` parked its write
+inside a Once only the body released; `TestAStartIsAdmittedAfterAWriteThatDidNotLand` made a
+synchronous Start and a synchronous write that a leaked lease or turn would hold to the package's
+timeout. The release is registered after the rig; the write parks outside its mark (`heldOnce`),
+its gate let go on cleanup apart from what it holds and the writes joined within a bound
+(`joinWithin`, 10 s); and before each synchronous call the case asserts that no write holds the
+lease or the turn (`playback.ChoiceHeldForTest`). Proofs, temporary mutations restored from memory:
+a failure injected while the write is parked ended the first case in 0.06 s, and in 60.10 s, the
+rig's watchdog, with round 1's order; a failure injected before the gate's release ended the second
+in 0.00 s, and with the writer kept blocked past its release the join said so after 10.01 s; round
+1's lease release removed failed the third at once (0.00 s) "before the Start: ... the configuration
+lease (true) or the writes' turn (false)", and the turn's release removed, the same naming the turn.
+
+Version 49 covers round 2's guarded changes; its records say so.
