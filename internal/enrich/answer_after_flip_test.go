@@ -136,7 +136,7 @@ func TestAnAnswerCompletedAfterTheFlipFillsNoNegativeCache(t *testing.T) {
 			track:   manifest.Track{Artist: "Artist", Album: "Album", MusicBrainzAlbumID: releaseMBID, ArtworkMBID: local},
 			write:   func(e *Enricher, ctx context.Context, tr *manifest.Track) error { return e.resolveArtist(ctx, tr) },
 			wantErr: true,
-			cached:  func(e *Enricher, _ manifest.Track) bool { return e.deezerNegCache.Has(clientMBID) },
+			cached:  func(e *Enricher, _ manifest.Track) bool { return e.deezerNegCache.Len() != 0 },
 		},
 		{
 			name:    "fetchRecoveredArtistImage, Deezer's no-match",
@@ -149,7 +149,7 @@ func TestAnAnswerCompletedAfterTheFlipFillsNoNegativeCache(t *testing.T) {
 				e.fetchRecoveredArtistImage(ctx, tr, AcousticMatch{ArtistMBID: clientMBID, ArtistName: "Artist"})
 				return nil
 			},
-			cached: func(e *Enricher, _ manifest.Track) bool { return e.deezerNegCache.Has(clientMBID) },
+			cached: func(e *Enricher, _ manifest.Track) bool { return e.deezerNegCache.Len() != 0 },
 		},
 		{
 			name: "resolveArtist, MusicBrainz's malformed answer",

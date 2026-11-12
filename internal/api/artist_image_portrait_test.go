@@ -62,7 +62,7 @@ func refusedPortraitFixture(t *testing.T) (hs *httptest.Server, token, artDir st
 		}
 		tr.ArtistMBID = row.mbid
 		if row.refused {
-			tr.PortraitRefused("Artist")
+			tr.PortraitPending(row.mbid, "Artist")
 		} else {
 			tr.PortraitSettled()
 		}
@@ -142,6 +142,62 @@ func TestARefusedPortraitSettledWithNoneIsTerminal(t *testing.T) {
 	}
 	if n, err := store.ClearPendingPortraits(context.Background(), rows); err != nil || n != 1 {
 		t.Fatalf("ClearPendingPortraits = %d (%v)", n, err)
+	}
+	wantMiss(t, hs.URL, refused, token, http.StatusNotFound, "no_image")
+}
+
+// TestTheArtistImageAnswersEachPortraitStateAsTheProtocolSays: through the
+// real route over the real store, an artist whose portrait lookup waits
+// answers 202 pending, with its Retry-After, while the name it waits by has
+// failed fewer than manifest.PortraitPendingAttempts times, and the 404
+// no_image, with none, at that bound, though the row still waits for the
+// bridge's own retries; another name of the artist below the bound answers
+// 202 again, and once an answer ends that name too, no_image. On main a
+// lookup that kept failing answered 202 for good.
+func TestTheArtistImageAnswersEachPortraitStateAsTheProtocolSays(t *testing.T) {
+	hs, token, _, store, _, _ := refusedPortraitFixture(t)
+	ctx := context.Background()
+	refused := "/v1/artist-image/" + refusedArtistMBID
+	wantMiss(t, hs.URL, refused, token, http.StatusAccepted, "pending")
+
+	at := time.Unix(1_800_000_000, 0)
+	for i := 1; i < manifest.PortraitPendingAttempts; i++ {
+		if _, err := store.NotePortraitFailure(ctx, refusedArtistMBID, "Artist", at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	wantMiss(t, hs.URL, refused, token, http.StatusAccepted, "pending")
+	if _, err := store.NotePortraitFailure(ctx, refusedArtistMBID, "Artist", at); err != nil {
+		t.Fatal(err)
+	}
+	wantMiss(t, hs.URL, refused, token, http.StatusNotFound, "no_image")
+	if rows, err := store.PendingPortraits(ctx, "", 10); err != nil || len(rows) != 1 {
+		t.Fatalf("PendingPortraits = %+v (%v), want the row still waiting for the bridge's own retries", rows, err)
+	}
+
+	other := manifest.Track{Path: "Refused/Album/02.flac", Size: 1, ModTime: time.Now(), Artist: "Artist", Album: "Album"}
+	if err := store.UpsertTrack(ctx, &other); err != nil {
+		t.Fatal(err)
+	}
+	other.ArtistMBID = refusedArtistMBID
+	other.PortraitPending(refusedArtistMBID, "Another Name")
+	if err := store.MarkEnriched(ctx, &other); err != nil {
+		t.Fatal(err)
+	}
+	wantMiss(t, hs.URL, refused, token, http.StatusAccepted, "pending")
+
+	rows, err := store.PendingPortraits(ctx, "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var answered []manifest.PendingPortrait
+	for _, r := range rows {
+		if r.Query == "Another Name" {
+			answered = append(answered, r)
+		}
+	}
+	if n, err := store.ClearPendingPortraits(ctx, answered); err != nil || n != 1 {
+		t.Fatalf("ClearPendingPortraits = %d (%v), want the other name's row", n, err)
 	}
 	wantMiss(t, hs.URL, refused, token, http.StatusNotFound, "no_image")
 }

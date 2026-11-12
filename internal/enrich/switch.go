@@ -40,8 +40,9 @@ import (
 // caller of ensureArtistImageCached puts it in deezerNegCache, which would
 // outlive the switch for the process's life, or counts it as a failure to
 // pace, and none logs it. The track is stamped with no portrait and keeps the
-// name the lookup would have asked by (manifest.Track.PortraitRefused), which
-// the portrait batch asks Deezer by once both switches are on (backlog B761).
+// name the lookup would have asked by, and its artist
+// (manifest.Track.PortraitPending), which the portrait batch asks Deezer by
+// once both switches are on (backlog B761).
 // A track stamped so before that version keeps no name, and "Retry missing"
 // is its way back.
 var errDeezerOff = enrichgate.ErrDeezerOff

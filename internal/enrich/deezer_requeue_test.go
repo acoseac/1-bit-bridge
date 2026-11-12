@@ -47,7 +47,7 @@ func stampPending(t *testing.T, store *manifest.Store, path, mbid, query string)
 		t.Fatal(err)
 	}
 	tr.ArtistMBID = mbid
-	tr.PortraitRefused(query)
+	tr.PortraitPending(mbid, query)
 	if err := store.MarkEnriched(ctx, &tr); err != nil {
 		t.Fatal(err)
 	}
@@ -317,7 +317,7 @@ func TestAPortraitTheSwitchCutOffIsFetchedOnceItIsOnAgain(t *testing.T) {
 			}
 			waitFor(t, func() bool { return len(unenrichedPaths(t, store)) == 0 }, "every row to be stamped")
 			waitFor(t, func() bool { return len(pendingPortraitsOf(t, store)) > 0 }, "the cut-off lookup to be kept as refused")
-			if e.deezerNegCache.Has(switchArtistMBID) {
+			if e.deezerNegCache.Len() != 0 {
 				t.Fatal("the cut-off search was negative-cached")
 			}
 			if fileExists(ArtistImagePath(artworkDir, switchArtistMBID)) {
@@ -633,8 +633,7 @@ func TestAQueryOutlivesRetryMissingAndATransientFailure(t *testing.T) {
 	e.WithDeezerEnabled(deezerOn.Load)
 	ctx := context.Background()
 
-	for e.runBatch(ctx) != e.PollInterval {
-	}
+	enrichQueued(t, e, store)
 	requireQueries(t, store, "Artist", "the refusal")
 
 	// "Retry missing" hands the rows back to the ordinary pass, whose own
@@ -648,8 +647,7 @@ func TestAQueryOutlivesRetryMissingAndATransientFailure(t *testing.T) {
 
 	failing.Store(true)
 	deezerOn.Store(true)
-	for e.runBatch(ctx) != e.PollInterval {
-	}
+	enrichQueued(t, e, store)
 	if len(unenrichedPaths(t, store)) != 0 {
 		t.Fatal("the re-enrichment left rows unstamped")
 	}

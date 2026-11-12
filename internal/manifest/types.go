@@ -540,15 +540,17 @@ type Track struct {
 	hasRowVersion bool
 	// portrait is what an enrichment pass learnt of its artist's Deezer
 	// portrait (backlog B761), which MarkEnriched writes to the row's
-	// deezer_pending_query in the stamp's own statement: portraitKept (the
-	// zero value, a pass that made no attempt or whose attempt failed)
-	// leaves the column as it is, portraitRefused keeps portraitQuery, the
-	// name the lookup enrich.deezerEnabled refused would have asked by, and
-	// portraitSettled clears it. Set through PortraitRefused and
+	// deezer_pending_query and deezer_pending_mbid in the stamp's own
+	// statement: portraitKept (the zero value, a pass that learnt nothing of
+	// it) leaves them while the artist they were taken for is still the
+	// row's, portraitPending keeps portraitQuery, the name the lookup that
+	// waits would ask by, for portraitMBID, the artist it was taken for, and
+	// portraitSettled clears them. Set through PortraitPending and
 	// PortraitSettled. Unexported, never marshaled (the versionStampOnly
 	// shape).
 	portrait      portraitWrite
 	portraitQuery string
+	portraitMBID  string
 	// carryFirstIndexedNS is the first-indexed instant an INSERT should
 	// record, in Unix nanoseconds. Zero means the insert uses the store
 	// clock. An update ignores it. Never marshaled.

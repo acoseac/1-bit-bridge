@@ -24,34 +24,48 @@ import (
 // that ends with serve's stop, and a confirmation only on the install's own
 // record.
 
-// requireTheLatestSchema checks whether the store in dataDir has what this
-// build's last migration adds, present or not (latestSchemaPresent): a store
-// genuinely older than this build lacks it.
+// requireTheLatestSchema checks that the store in dataDir has everything this
+// build's last migration adds, or nothing of it (latestSchema): a store
+// genuinely older than this build lacks it all.
 func requireTheLatestSchema(t *testing.T, dataDir string, present bool) {
 	t.Helper()
-	if got := latestSchemaPresent(t, dataDir); got != present {
-		t.Errorf("the store has v63's column: %v, want %v", got, present)
+	table, column := latestSchema(t, dataDir)
+	if table != present || column != present {
+		t.Errorf("the store has v64's table: %v and its column: %v, want %v", table, column, present)
 	}
 }
 
-// latestSchemaPresent reports whether the store in dataDir has what this
-// build's last migration adds (v63: tracks.deezer_pending_query, backlog
-// B761; v62's waveform_regen_failures table, backlog B652, until then,
-// v61's tracks.correction_key, backlog B489, before it, and v60's
-// sample-kind stat columns and index before that). A new migration names
-// its own here.
+// latestSchemaPresent reports whether the store in dataDir has anything this
+// build's last migration adds (latestSchema): a step that did not run left
+// none of it.
 func latestSchemaPresent(t *testing.T, dataDir string) bool {
+	t.Helper()
+	table, column := latestSchema(t, dataDir)
+	return table || column
+}
+
+// latestSchema reports whether the store in dataDir has each thing this
+// build's last migration adds (v64: the deezer_portrait_attempts table and
+// tracks.deezer_pending_mbid, backlog B761's second round; v63's
+// tracks.deezer_pending_query, backlog B761, until then, v62's
+// waveform_regen_failures table, backlog B652, before it, v61's
+// tracks.correction_key, backlog B489, before that, and v60's sample-kind
+// stat columns and index before those). A new migration names its own here.
+func latestSchema(t *testing.T, dataDir string) (table, column bool) {
 	t.Helper()
 	raw, err := sql.Open("sqlite", dsn.File(manifest.DefaultDBPath(dataDir), "_pragma=busy_timeout(5000)"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer raw.Close()
-	var columns int
-	if err := raw.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('tracks') WHERE name = 'deezer_pending_query'`).Scan(&columns); err != nil {
+	var tables, columns int
+	if err := raw.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'deezer_portrait_attempts'`).Scan(&tables); err != nil {
 		t.Fatal(err)
 	}
-	return columns == 1
+	if err := raw.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('tracks') WHERE name = 'deezer_pending_mbid'`).Scan(&columns); err != nil {
+		t.Fatal(err)
+	}
+	return tables == 1, columns == 1
 }
 
 // openStoreIn opens dataDir's store on a goroutine of the test's, as a

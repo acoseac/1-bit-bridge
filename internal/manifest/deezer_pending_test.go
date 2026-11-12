@@ -68,7 +68,7 @@ func stampRefused(t *testing.T, s *Store, path, mbid, query string) {
 	t.Helper()
 	tr := upsertForEnrichment(t, s, Track{Path: path, Artist: "Artist", Album: "Album"})
 	tr.ArtistMBID = mbid
-	tr.PortraitRefused(query)
+	tr.PortraitPending(mbid, query)
 	if err := s.MarkEnriched(context.Background(), tr); err != nil {
 		t.Fatal(err)
 	}
@@ -168,11 +168,12 @@ func requirePendingIndex(t *testing.T, s *Store) {
 }
 
 // TestAStampWritesThePortraitItsPassLearnt: MarkEnriched writes the query in
-// the stamp's own statement when the pass's portrait lookup was refused, clears
-// it when the pass settled the portrait (cached, fetched, or Deezer has none),
-// and leaves it as it was when the pass made no portrait attempt or it failed;
-// a refusal with no artist MBID writes none, and a stamp over a row that
-// changed writes nothing at all.
+// the stamp's own statement when the pass's portrait lookup waits (refused,
+// or deferred), clears it when the pass settled the portrait (cached,
+// fetched, or Deezer has none), and leaves it as it was when the pass learnt
+// nothing of the portrait for the row's artist; a pending lookup with no
+// artist MBID writes none, and a stamp over a row that changed writes nothing
+// at all.
 func TestAStampWritesThePortraitItsPassLearnt(t *testing.T) {
 	ctx := context.Background()
 	s := openPendingStore(t)
@@ -182,7 +183,7 @@ func TestAStampWritesThePortraitItsPassLearnt(t *testing.T) {
 		t.Fatalf("a refused portrait's stamp left the query %q (%v), want %q", q, ok, "The Artist")
 	}
 
-	// A pass that made no attempt, or whose attempt failed, leaves it.
+	// A pass that learnt nothing of the portrait leaves it.
 	again, err := s.GetTrack(ctx, p)
 	if err != nil || again == nil {
 		t.Fatalf("GetTrack: %v", err)
@@ -194,8 +195,8 @@ func TestAStampWritesThePortraitItsPassLearnt(t *testing.T) {
 		t.Errorf("a stamp that learnt nothing of the portrait left %q (%v), want it kept", q, ok)
 	}
 
-	// A refusal asked again replaces the name; a settled one clears it.
-	again.PortraitRefused("Another Name")
+	// A lookup that waits again replaces the name; a settled one clears it.
+	again.PortraitPending(pendingArtistMBID, "Another Name")
 	if err := s.MarkEnriched(ctx, again); err != nil {
 		t.Fatal(err)
 	}
@@ -216,7 +217,7 @@ func TestAStampWritesThePortraitItsPassLearnt(t *testing.T) {
 
 	// No artist MBID, no query: the portrait batch asks by an artist's MBID.
 	bare := upsertForEnrichment(t, s, Track{Path: "Nobody/Album/01.flac", Artist: "Nobody"})
-	bare.PortraitRefused("Nobody")
+	bare.PortraitPending(bare.ArtistMBID, "Nobody")
 	if err := s.MarkEnriched(ctx, bare); err != nil {
 		t.Fatal(err)
 	}
@@ -231,7 +232,7 @@ func TestAStampWritesThePortraitItsPassLearnt(t *testing.T) {
 	}
 	upsertForEnrichment(t, s, Track{Path: "Nobody/Album/01.flac", Artist: "Nobody", Size: 2})
 	stale.ArtistMBID = pendingOtherMBID
-	stale.PortraitRefused("Nobody")
+	stale.PortraitPending(pendingOtherMBID, "Nobody")
 	if err := s.MarkEnriched(ctx, stale); !errors.Is(err, ErrTrackChanged) {
 		t.Fatalf("a stamp over a changed row answered %v, want ErrTrackChanged", err)
 	}
@@ -310,7 +311,7 @@ func TestAChangedFileDropsThePendingPortraitAndAnUnchangedScanKeepsIt(t *testing
 		t.Fatalf("GetTrack: %v", err)
 	}
 	tr.ArtistMBID = pendingArtistMBID
-	tr.PortraitRefused("Artist")
+	tr.PortraitPending(pendingArtistMBID, "Artist")
 	if err := s.MarkEnriched(ctx, tr); err != nil {
 		t.Fatal(err)
 	}
@@ -428,7 +429,7 @@ func TestAPendingPortraitIsClearedOnlyAtTheVersionItWasRead(t *testing.T) {
 				t.Fatalf("GetTrack: %v", err)
 			}
 			again.ArtistMBID = pendingArtistMBID
-			again.PortraitRefused("Artist")
+			again.PortraitPending(pendingArtistMBID, "Artist")
 			if err := s.MarkEnriched(ctx, again); err != nil {
 				t.Fatal(err)
 			}

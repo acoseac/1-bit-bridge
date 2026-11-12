@@ -2730,16 +2730,17 @@ var migrations = []migration{
 		// v63 remembers a portrait lookup the Deezer switch refused (backlog
 		// B761): tracks.deezer_pending_query, non-NULL for a row whose
 		// artist's portrait enrich.deezerEnabled did not let the enricher
-		// ask for, holding the name the lookup would have asked Deezer by
-		// (MusicBrainz's canonical name for the row's artistMBID, which
-		// nothing read later could recover). MarkEnriched writes it in the
-		// stamp's statement, the conflict arm of a track upsert drops it with
-		// the rest of the enrichment, and the enricher's portrait batch reads
-		// the rows that carry one through idx_tracks_deezer_pending and
-		// clears each at the version it read (deezer_pending.go). NULL for
-		// every existing row: nothing says which rows enriched before this
-		// version had their lookup refused, and "Retry missing" stays their
-		// way. Column-only: never in tags_json, never on the wire.
+		// ask for (and, since v64, one deferred), holding the name the lookup
+		// would have asked Deezer by (MusicBrainz's canonical name for the
+		// row's artistMBID, which nothing read later could recover).
+		// MarkEnriched writes it in the stamp's statement, the conflict arm
+		// of a track upsert drops it with the rest of the enrichment, and
+		// the enricher's portrait batch reads the rows that carry one through
+		// idx_tracks_deezer_pending and clears each at the version it read
+		// (deezer_pending.go). NULL for every existing row: nothing says
+		// which rows enriched before this version had their lookup refused,
+		// and "Retry missing" stays their way. Column-only: never in
+		// tags_json, never on the wire. v64 binds it to its artist.
 		//
 		// Append-only / idempotent per the ladder contract: the ALTER rides
 		// post(), not `sql` (see the v9 docblock).
@@ -2754,6 +2755,62 @@ var migrations = []migration{
 			}
 			_, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_tracks_deezer_pending
 				ON tracks(path) WHERE deezer_pending_query IS NOT NULL`)
+			return err
+		},
+	},
+	{
+		// v64 binds a pending portrait to the artist it was taken for, and
+		// keeps the failed attempts at each artist's portrait by each name
+		// (backlog B761, its second round; deezer_pending.go).
+		//
+		// tracks.deezer_pending_mbid is the artist a row's
+		// deezer_pending_query was taken for: a query is the row's only while
+		// that artist is the one its tags_json names, which MarkEnriched, the
+		// batch's read, the route's probe and each open's check hold to. The
+		// partial index idx_tracks_deezer_pending_artist is the route's probe
+		// per artist, and the open's check of the attempts no waiting row
+		// names.
+		//
+		// deezer_portrait_attempts keeps, per artist and name, how many
+		// attempts at the portrait failed in a row and when the last did:
+		// the one backoff every path that asks Deezer for a portrait honours,
+		// and the bound past which the route no longer calls it pending. The
+		// enricher kept the failures in memory alone until this step, so a
+		// restart or an eviction lost them.
+		//
+		// The step drops every query v63 kept: none names the artist it was
+		// taken for, and an older binary's stamp may have given its row
+		// another artist since, so binding it to the artist the row names now
+		// could certify that very mismatch. Those rows come back as the rows
+		// enriched before v63 do, through "Retry missing". It moves no
+		// indexed_at and no enriched_at. Column-only and internal: nothing
+		// here reaches the wire.
+		//
+		// Append-only / idempotent per the ladder contract: the ALTER rides
+		// post(), not `sql` (see the v9 docblock).
+		version: 64,
+		name:    "tracks.deezer_pending_mbid and deezer_portrait_attempts (a pending portrait's artist, and its failed attempts)",
+		sql: `
+		CREATE TABLE IF NOT EXISTS deezer_portrait_attempts (
+			artist_mbid    TEXT NOT NULL,
+			query          TEXT NOT NULL,
+			failures       INTEGER NOT NULL,
+			last_failed_at INTEGER NOT NULL,
+			PRIMARY KEY (artist_mbid, query)
+		) WITHOUT ROWID;
+		`,
+		post: func(db *sql.DB) error {
+			if err := addColumnsIfMissing(db, "tracks",
+				tableColumn{name: "deezer_pending_mbid", ddl: `ALTER TABLE tracks ADD COLUMN deezer_pending_mbid TEXT`},
+			); err != nil {
+				return err
+			}
+			if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_tracks_deezer_pending_artist
+				ON tracks(deezer_pending_mbid, deezer_pending_query) WHERE deezer_pending_query IS NOT NULL`); err != nil {
+				return err
+			}
+			_, err := db.Exec(`UPDATE tracks SET deezer_pending_query = NULL
+				 WHERE deezer_pending_query IS NOT NULL AND deezer_pending_mbid IS NULL`)
 			return err
 		},
 	},
@@ -3055,6 +3112,12 @@ func (s *Store) migrate() error {
 	}
 	if err := s.backfillSampleFormatByCodec(ctx); err != nil {
 		return fmt.Errorf("sample_format backfill: %w", err)
+	}
+	// And drops each pending portrait a rolled-back binary's stamp gave
+	// another artist, which its statements write beside the columns they do
+	// not know (backlog B761).
+	if err := s.reconcilePendingPortraits(ctx); err != nil {
+		return fmt.Errorf("pending portraits: %w", err)
 	}
 	return nil
 }
@@ -3390,20 +3453,27 @@ var ErrTrackChanged = errors.New("manifest: track changed since it was read")
 var errTrackNotRead = errors.New("manifest: track was not read from the store, so there is no version to check the write against")
 
 // markEnrichedSQL binds (tags_json, enriched_at, clock, portrait write,
-// portrait query, path, version). The indexed_at expression is
-// indexedAtAdvanceSQL verbatim — see its docblock for why it is not
-// concatenated in. The portrait write is Track.portraitColumn's: 0 keeps
-// deezer_pending_query, 1 sets it to the query, 2 clears it (backlog B761),
-// in the stamp's own statement, so a stamp that writes nothing writes no
-// query either. The version is the row's indexed_at when the Track was read:
-// a row another writer changed since has another, and the statement then
-// updates nothing and returns no row.
+// portrait query, artist, portrait write, artist, artist, path, version),
+// the artist being the one the stamp's tags_json names. The indexed_at
+// expression is indexedAtAdvanceSQL verbatim — see its docblock for why it is
+// not concatenated in. The portrait write is Track.portraitColumns' (backlog
+// B761): 1 sets deezer_pending_query to the query and deezer_pending_mbid to
+// the artist, 2 clears both, and 0 keeps them only while the artist the query
+// was taken for is the one the stamp writes, so a stamp that gives the row
+// another artist drops a query it learnt nothing of; all in the stamp's own
+// statement, so a stamp that writes nothing writes no query either. The
+// version is the row's indexed_at when the Track was read: a row another
+// writer changed since has another, and the statement then updates nothing
+// and returns no row.
 const markEnrichedSQL = `
 		UPDATE tracks
 		   SET tags_json   = ?,
 		       enriched_at = ?,
 		       indexed_at  = MAX(?, COALESCE((SELECT MAX(indexed_at) FROM tracks), 0) + 1, COALESCE((SELECT MAX(deleted_at) FROM manifest_deletions), 0) + 1, COALESCE((SELECT CAST(v AS INTEGER) FROM scan_state WHERE k = 'deletion_journal_coverage_start_ns'), 0) + 1),
-		       deezer_pending_query = CASE ? WHEN 1 THEN ? WHEN 2 THEN NULL ELSE deezer_pending_query END
+		       deezer_pending_query = CASE ? WHEN 1 THEN ? WHEN 2 THEN NULL
+		                              ELSE CASE WHEN deezer_pending_mbid = ? THEN deezer_pending_query END END,
+		       deezer_pending_mbid  = CASE ? WHEN 1 THEN ? WHEN 2 THEN NULL
+		                              ELSE CASE WHEN deezer_pending_mbid = ? THEN deezer_pending_mbid END END
 		 WHERE path = ? AND indexed_at = ?
 		RETURNING indexed_at`
 
@@ -3424,11 +3494,12 @@ const markEnrichedSQL = `
 // success t records the version it wrote.
 //
 // In the same statement it writes what the pass learnt of the artist's Deezer
-// portrait (Track.PortraitRefused, PortraitSettled; backlog B761): a lookup
-// enrich.deezerEnabled refused keeps the name it would have asked by in
-// deezer_pending_query, a portrait cached or one Deezer has none of clears it,
-// and a pass that made no attempt, or whose attempt failed, leaves it as it
-// was, so a transient failure after "Retry missing" loses nothing.
+// portrait (Track.PortraitPending, PortraitSettled; backlog B761): a lookup
+// that waits for the portrait batch (refused by enrich.deezerEnabled, or
+// deferred) keeps the name it asks by in deezer_pending_query and the artist
+// it was taken for in deezer_pending_mbid, a portrait cached or an answer that
+// ends the name clears them, and a pass that learnt nothing leaves them while
+// that artist is the one the stamp writes, and drops them otherwise.
 //
 // Holds `s.mu` for the SQL exec so an in-flight enrichment update never
 // races a `UpsertTrackBatch` from the scanner — both are writers and
@@ -3481,9 +3552,11 @@ func (s *Store) MarkEnriched(ctx context.Context, t *Track) error {
 	// changes sampleRate / bitsPerSample / isDSD / codec — and the tags_json
 	// it writes was read at the version it compares, beside those columns.
 	now := s.now().UnixNano()
-	portraitWrite, portraitQuery := t.portraitColumn()
+	portraitWrite, portraitQuery := t.portraitColumns()
 	var wrote int64
-	err = s.db.QueryRowContext(ctx, markEnrichedSQL, raw, now, now, portraitWrite, portraitQuery, t.Path, t.rowVersion).Scan(&wrote)
+	err = s.db.QueryRowContext(ctx, markEnrichedSQL, raw, now, now,
+		portraitWrite, portraitQuery, t.ArtistMBID, portraitWrite, t.ArtistMBID, t.ArtistMBID,
+		t.Path, t.rowVersion).Scan(&wrote)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrTrackChanged
 	}
@@ -4132,10 +4205,11 @@ func prepareTrackUpsert(ctx context.Context, tx dbTx) (*sql.Stmt, error) {
 			-- arm stores it as it stands.
 			indexed_at    = excluded.indexed_at,
 			enriched_at   = 0,
-			-- v63: a portrait lookup the Deezer switch refused goes with the
-			-- rest of the enrichment: the row is enriched again from what the
-			-- file holds now, and that pass asks again (backlog B761).
+			-- v63, v64: a portrait lookup that waits goes with the rest of the
+			-- enrichment: the row is enriched again from what the file holds
+			-- now, and that pass asks again (backlog B761).
 			deezer_pending_query = NULL,
+			deezer_pending_mbid  = NULL,
 			-- missing_count reset is UNCONDITIONAL on confirm: the row
 			-- being upserted is by definition "seen this scan", which
 			-- is exactly the signal the counter measures. A pure

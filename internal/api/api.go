@@ -458,9 +458,9 @@ type ManifestProvider interface {
 // enricher's IsTransient guard deliberately leaves it 0 on transient
 // upstream failures — so "no track pending + no file on disk" means
 // the enricher took every turn it will ever take. One turn outlives the
-// stamp: a portrait lookup the Deezer switch refused, which the stamp
-// keeps and the enricher's portrait batch takes once enrichment and
-// Deezer are both on, so `/v1/artist-image` also asks
+// stamp: a portrait lookup that waits (refused by the Deezer switch, or
+// deferred), which the stamp keeps and the enricher's portrait batch takes
+// once enrichment and Deezer are both on, so `/v1/artist-image` also asks
 // ArtistMBIDPortraitPending while Deezer is on (backlog B761).
 //
 // **Every method returns `(bool, error)`, and the error is load-bearing.**
@@ -483,11 +483,11 @@ type MBIDProbe interface {
 	ArtworkMBIDEnrichmentPending(ctx context.Context, mbid string) (bool, error)
 	// ArtistMBIDEnrichmentPending mirrors the above for `artistMBID`.
 	ArtistMBIDEnrichmentPending(ctx context.Context, mbid string) (bool, error)
-	// ArtistMBIDPortraitPending reports whether at least one track
-	// carrying the MBID in `artistMBID` keeps a portrait lookup the Deezer
-	// switch refused (backlog B761). Consulted, like the above, only
-	// after HasTrackWithArtistMBID returned true, and only while Deezer is
-	// on.
+	// ArtistMBIDPortraitPending reports whether at least one track of the
+	// artist waits for its portrait by a name that has failed fewer than
+	// manifest.PortraitPendingAttempts times (backlog B761). Consulted,
+	// like the above, only after HasTrackWithArtistMBID returned true, and
+	// only while Deezer is on.
 	ArtistMBIDPortraitPending(ctx context.Context, mbid string) (bool, error)
 	// ResolveArtworkVersionMBID resolves a bare 16-hex artwork
 	// content-version tag (the `artworkVersion` manifest field) to the
@@ -590,10 +590,9 @@ func (s *Server) enrichmentOn() bool {
 
 // WithDeezerEnabled attaches the live predicate for enrich.deezerEnabled,
 // which the artist-image miss reads per request (artistImagePending): while
-// it is on, an artist one of whose rows keeps a portrait lookup the Deezer
-// switch refused answers 202, since the enricher's portrait batch fetches
-// it, and while it is off that miss is the terminal 404 `no_image`, since
-// nothing will (backlog B761). The server holds the switch, never the store,
+// it is on, an artist one of whose rows waits for its portrait answers 202,
+// since the enricher's portrait batch fetches it, and while it is off that
+// miss is the 404 `no_image`, since nothing will (backlog B761). The server holds the switch, never the store,
 // so manifest knows nothing of enrich. Nil (the default) is on.
 func (s *Server) WithDeezerEnabled(f func() bool) *Server {
 	s.deezerEnabled = f

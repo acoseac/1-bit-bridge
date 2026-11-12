@@ -414,7 +414,7 @@ func TestADeezerFlipCancelsDeezersRequestAndNotMusicBrainzs(t *testing.T) {
 	if reqs := ups.deezer.requests(); len(reqs) != 1 {
 		t.Errorf("Deezer was asked %v, want the held search alone", reqs)
 	}
-	if e.deezerNegCache.Has(switchArtistMBID) {
+	if e.deezerNegCache.Len() != 0 {
 		t.Error("the cut-off search was negative-cached")
 	}
 	if fileExists(ArtistImagePath(artworkDir, switchArtistMBID)) {

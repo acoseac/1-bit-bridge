@@ -30,11 +30,18 @@ import (
 // portrait on disk (so `ensureArtistImageCached` returns before the name is
 // read) or Deezer had none (so `deezerNegCache` short-circuits). Neither
 // holds when the sibling's IMAGE fetch failed transiently — no file, no
-// negative entry — so the retry goes out under whatever name this path
+// negative entry — so the lookup goes on under whatever name this path
 // supplies. `pickDeezerArtist` falls through to `list[0]` unconditionally,
 // so a wrong query does not merely miss: it files SOME OTHER artist's
 // portrait under this MBID, and `/v1/artist-image/{mbid}` serves it until
 // the cache is cleared.
+//
+// Since backlog B761's second round the failed fetch puts the canonical
+// name's next attempt off, on every path: the sibling asks nothing by it
+// before its retry, and waits for the portrait batch by the name this path
+// supplied, which the row keeps. So the name shows twice: a lookup by the
+// tag would be a search (the backoff is the canonical name's), and the row
+// would wait by the tag.
 func TestArtistCacheHitUsesCanonicalNameForDeezer(t *testing.T) {
 	const (
 		taggedArtist   = "Rachel Podger, Conductor"
@@ -125,15 +132,27 @@ func TestArtistCacheHitUsesCanonicalNameForDeezer(t *testing.T) {
 	got := append([]string(nil), searchQueries...)
 	mu.Unlock()
 
-	if len(got) < 2 {
-		t.Fatalf("Deezer searched %d time(s), want >= 2 — the fixture's failing image "+
-			"fetch should leave the second track's lookup live (queries: %q)", len(got), got)
+	if len(got) == 0 {
+		t.Fatalf("Deezer was never searched — the first track's lookup should have gone out (queries: %q)", got)
 	}
 	for i, q := range got {
 		if q == taggedArtist {
 			t.Errorf("Deezer search #%d used the raw multi-credit tag %q; want the canonical %q "+
 				"— the artistCache hit path lost the canonical name",
 				i+1, taggedArtist, canonicalName)
+		}
+	}
+	rows, err := store.PendingPortraits(context.Background(), "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("%d row(s) wait for the portrait, want both: the failed fetch defers each (rows: %+v)", len(rows), rows)
+	}
+	for _, r := range rows {
+		if r.Query != canonicalName {
+			t.Errorf("%s waits for the portrait by %q; want the canonical %q — the artistCache hit path lost it",
+				r.Path, r.Query, canonicalName)
 		}
 	}
 }

@@ -208,11 +208,13 @@ type Enricher struct {
 	// artistCacheCap.
 	artistCache *lrucache.Cache[string, string]
 
-	// deezerNegCache remembers "Deezer had no portrait" per artist
-	// MBID so sibling tracks don't each re-query. Lookup is
-	// presence-only via `Has` (a sibling-track read doesn't promote
-	// the negative entry to MRU and outlive a positive Deezer
-	// re-fetch). Bounded at deezerNegCacheCap — highest-fanout of
+	// deezerNegCache remembers "an answer ended this name" per artist
+	// MBID and name (portraitKey: Deezer has no portrait by it, or its
+	// picture is none the cache takes; backlog B761) so sibling tracks
+	// don't each re-query, while another name of the artist is still
+	// asked. Lookup is presence-only via `Has` (a sibling-track read
+	// doesn't promote the negative entry to MRU and outlive a positive
+	// Deezer re-fetch). Bounded at deezerNegCacheCap — highest-fanout of
 	// the four because every artist Deezer doesn't have ends up here.
 	deezerNegCache *lrucache.Cache[string, struct{}]
 
@@ -238,16 +240,12 @@ type Enricher struct {
 	// group) missed. Same exposure plan as caaFallbackHits.
 	itunesFallbackHits atomic.Int64
 
-	// portraitRetry is, per artist MBID, the portrait lookups that failed
-	// in a row and when the artist may be asked again (portraitRetryState,
-	// backlog B761): a failure, never a refusal and never a miss, so the
-	// switch turned on asks at once. Bounded at portraitRetryCap.
-	portraitRetry *lrucache.Cache[string, portraitRetryState]
-	// portraits is the portrait batch's pass over the rows that keep a
-	// refused lookup (portraitPass): each page reads past the last one's
-	// end, so rows whose artist keeps failing at the head of the order
-	// cannot hold back the rows behind them. Run's goroutine alone reads and
-	// writes it.
+	// portraits is the portrait batch's pass over the rows whose lookup
+	// waits (portraitPass): each page reads past the last one's end, so
+	// rows whose artist keeps failing at the head of the order cannot hold
+	// back the rows behind them. Run's goroutine alone reads and writes it.
+	// The failed attempts every path's backoff reads are the store's
+	// (manifest.PortraitAttempts), so a restart keeps them.
 	portraits portraitPass
 	// portraitRefusals counts the refused lookups passes have kept
 	// (notePortraitRefused), which end the portrait batch's rest.
@@ -317,7 +315,6 @@ func NewEnricher(store *manifest.Store, mb *MusicBrainzClient, caa *CoverArtClie
 		releaseGroupCache:  lrucache.New[string, string](releaseGroupCacheCap),
 		artistCache:        lrucache.New[string, string](artistCacheCap),
 		deezerNegCache:     lrucache.New[string, struct{}](deezerNegCacheCap),
-		portraitRetry:      lrucache.New[string, portraitRetryState](portraitRetryCap),
 	}
 	e.reports = newUpstreamReports()
 	e.watchUpstreamAnswers()
@@ -362,12 +359,15 @@ func (e *Enricher) WithPremiumCovers(f PremiumCoverFetcher) *Enricher {
 // enriching stays at enriched_at = 0 for the turn that follows the switch's.
 //
 // While enrich.deezerEnabled is on too, each turn then takes one page of the
-// rows whose portrait lookup that switch refused, whatever the ordinary batch
-// found (runPortraits, backlog B761): the ordinary queue is empty exactly when
-// such portraits wait, and while it is not, each turn gives both their share.
+// rows whose portrait lookup waits, whatever the ordinary batch found
+// (runPortraits, backlog B761): the ordinary queue is empty exactly when such
+// portraits wait, and while it is not, each turn gives both their share.
 // Between turns the loop waits (idle), and a switch turned on ends the wait
-// within switchEvery (a second), so neither the waiting rows nor the refused
-// portraits wait for a scan or the end of PollInterval.
+// within switchEvery (a second), so neither the waiting rows nor the waiting
+// portraits wait for a scan or the end of PollInterval. The wait compares the
+// switches with what the turn found them, but off where a batch met a
+// switch's refusal: a switch off and on again while a batch ran is seen off
+// by the batch alone, and would otherwise read as on throughout.
 func (e *Enricher) Run(ctx context.Context) {
 	var report switchReport
 	for {
@@ -377,23 +377,36 @@ func (e *Enricher) Run(ctx context.Context) {
 		on := e.on()
 		report.note(on, e.deezerOn())
 		pause := e.PollInterval
-		portraits := false
+		waitOn, waitPortraits := on, false
 		if on {
-			pause = e.runBatch(ctx)
-			if e.deezerOn() {
-				portraits = true
-				pause = min(pause, e.runPortraits(ctx))
+			var refused error
+			pause, refused = e.runBatch(ctx)
+			if refused != nil {
+				waitOn = false
+			} else if e.deezerOn() {
+				waitPortraits = true
+				var portraits time.Duration
+				portraits, refused = e.runPortraits(ctx)
+				pause = min(pause, portraits)
+				switch {
+				case errors.Is(refused, enrichgate.ErrOff):
+					waitOn, waitPortraits = false, false
+				case refused != nil:
+					waitPortraits = false
+				}
 			}
 		}
-		if !e.idle(ctx, pause, on, portraits) {
+		if !e.idle(ctx, pause, waitOn, waitPortraits) {
 			return
 		}
 	}
 }
 
 // runBatch enriches one batch on a context the switch cancels, and returns
-// how long Run waits before the next.
-func (e *Enricher) runBatch(ctx context.Context) time.Duration {
+// how long Run waits before the next, and the switch's refusal when one
+// stopped the batch (enrichgate.ErrOff), which Run's wait reads as the switch
+// seen off.
+func (e *Enricher) runBatch(ctx context.Context) (time.Duration, error) {
 	ctx, release := enrichgate.CancelWhenOff(ctx, e.on, e.switchEvery)
 	defer release()
 	batch, err := e.store.UnenrichedTracks(ctx, e.BatchLimit)
@@ -402,10 +415,10 @@ func (e *Enricher) runBatch(ctx context.Context) time.Duration {
 		if failure := ctxerr.WithoutCancellation(ctx, err); failure != nil {
 			logger.Error("list unenriched", "err", failure)
 		}
-		return e.PollInterval
+		return e.PollInterval, enrichgate.Refusal(ctx)
 	}
 	if len(batch) == 0 {
-		return e.PollInterval
+		return e.PollInterval, enrichgate.Refusal(ctx)
 	}
 	for i := range batch {
 		if ctx.Err() != nil {
@@ -423,7 +436,7 @@ func (e *Enricher) runBatch(ctx context.Context) time.Duration {
 	// mirror at SelfHostedMinInterval it is not, and a batch that keeps
 	// failing WITHOUT stamping enriched_at (the transient-error path)
 	// would spin the DB as fast as the loop can turn.
-	return interBatchPause
+	return interBatchPause, enrichgate.Refusal(ctx)
 }
 
 // interBatchPause is the floor on how often Run may re-poll the store. Small
@@ -863,56 +876,19 @@ func (e *Enricher) resolveArtist(ctx context.Context, t *manifest.Track) error {
 	// The portrait fetch is tier-2, like album artwork: any failure is
 	// logged + absorbed (return nil) so an image miss never blocks the
 	// already-resolved ArtistMBID from being committed via MarkEnriched.
-	// Only the tier-1 SearchArtist transient case above propagates.
+	// Only the tier-1 SearchArtist transient case above propagates, and
+	// enrich.enabled's refusal, which stops the pass.
 	//
-	// What the attempt came to rides the Track into the stamp (backlog
-	// B761): a lookup the Deezer switch refused keeps imageName in the row
-	// for the portrait batch, a portrait held or one Deezer has none of
-	// settles the row, and no attempt, or a failed one, leaves the row's
-	// pending query as it was.
+	// What the attempt came to rides the Track into the stamp (askPortrait,
+	// backlog B761): a lookup that waits, refused by the Deezer switch,
+	// failed, or put off by the artist's backoff, keeps imageName in the row
+	// for the portrait batch, a portrait held or an answer that ends the name
+	// settles the row, and no attempt leaves it while the artist it was taken
+	// for is still the row's.
 	if e.deezer == nil || artistMBID == "" {
 		return nil
 	}
-	// Negative-cache Deezer misses so sibling tracks by the same artist
-	// don't each re-query Deezer for a portrait the API doesn't have. The
-	// memo is of an answer, so it settles the row.
-	if e.deezerNegCache.Has(artistMBID) {
-		t.PortraitSettled()
-		return nil
-	}
-	outcome, err := e.artistPortrait(ctx, artistMBID, imageName)
-	switch outcome {
-	case portraitHeld:
-		e.notePortraitSettled(artistMBID)
-		t.PortraitSettled()
-	case portraitNone:
-		e.deezerNegCache.Set(artistMBID, struct{}{})
-		e.notePortraitSettled(artistMBID)
-		t.PortraitSettled()
-		if err != nil && ctx.Err() == nil {
-			// A 404 or an empty picture: Debug through the streak.
-			e.logUpstream(upstreamDeezer, "artist image", err, "artist", t.Artist, "mbid", artistMBID)
-		}
-	case portraitRefused:
-		if r := enrichgate.Refused(err); errors.Is(r, enrichgate.ErrOff) {
-			// enrich.enabled's refusal: no miss to cache, nothing to log,
-			// and no stamp, as at the other requests.
-			return r
-		}
-		// Deezer was not asked: no miss to cache, nothing to log, and the
-		// stamp keeps the name it would have been asked by.
-		t.PortraitRefused(imageName)
-		e.notePortraitRefused()
-	case portraitFailed:
-		// Skip the Error log when the failure is just shutdown cancellation
-		// (ensureArtistImageCached returns ctx.Err() from its pacing
-		// sleepCtx). Mirrors the album/artist tier-1 ctx guard.
-		if ctx.Err() == nil {
-			e.logUpstream(upstreamDeezer, "artist image", err, "artist", t.Artist, "mbid", artistMBID)
-			e.notePortraitFailed(artistMBID)
-		}
-	}
-	return nil
+	return e.askPortrait(ctx, t, artistMBID, imageName, "artist", t.Artist)
 }
 
 // ensureArtistImageCached downloads and caches the artist's Deezer
@@ -934,26 +910,51 @@ func (e *Enricher) resolveArtist(ctx context.Context, t *manifest.Track) error {
 // but doctored ZFS datasets with `xattr=sa` and similar edge cases can
 // refuse `os.Link`), we fall back to a file copy. The dedup on network
 // (no second Deezer call) is preserved either way.
+//
+// It is portraitCached, then fetchPortrait where the cache does not answer.
+// The paths that ask for a portrait (askPortrait, portraitsOf) call
+// portraitCached on its own first, before the backoff they honour, so a
+// portrait in the cache settles a row whose retry is not due.
 func (e *Enricher) ensureArtistImageCached(ctx context.Context, mbid, artistName string) (bool, error) {
-	mbidPath := ArtistImagePath(e.CacheDir, mbid)
-	// Name-hashed canonical path — populated once per unique artist
-	// name regardless of how many MBIDs we see for them.
-	namePath := ArtistImagePathByName(e.CacheDir, artistName)
-	// Both paths stay inside the cache, before anything is read, fetched,
-	// linked or copied (backlog B168, its pre-merge review). Every caller
-	// checks the MBID's shape first, so this is the layer under that check,
-	// as writeArtworkAtomicStream's is for the canonical; it also covers the
-	// hard link and linkOrCopy's copy to the MBID path, which that
-	// primitive never sees. No cache directory refuses first, saying so:
-	// both paths would be relative to the working directory, and the
-	// containment check would call them outside a cache that is not there.
+	if cached, err := e.portraitCached(mbid, artistName); err != nil || cached {
+		return cached, err
+	}
+	return e.fetchPortrait(ctx, mbid, artistName)
+}
+
+// artistImagePaths is the MBID-keyed path of mbid's portrait, which the
+// handler reads, and the name-hashed canonical, populated once per unique
+// artist name regardless of how many MBIDs we see for them.
+//
+// Both paths stay inside the cache, before anything is read, fetched,
+// linked or copied (backlog B168, its pre-merge review). Every caller
+// checks the MBID's shape first, so this is the layer under that check,
+// as writeArtworkAtomicStream's is for the canonical; it also covers the
+// hard link and linkOrCopy's copy to the MBID path, which that
+// primitive never sees. No cache directory refuses first, saying so:
+// both paths would be relative to the working directory, and the
+// containment check would call them outside a cache that is not there.
+func (e *Enricher) artistImagePaths(mbid, artistName string) (mbidPath, namePath string, err error) {
+	mbidPath = ArtistImagePath(e.CacheDir, mbid)
+	namePath = ArtistImagePathByName(e.CacheDir, artistName)
 	if e.CacheDir == "" {
-		return false, errors.New("artist image: no artwork cache directory")
+		return "", "", errors.New("artist image: no artwork cache directory")
 	}
 	for _, p := range []string{mbidPath, namePath} {
 		if fsutil.IsUnderAny(p, []string{e.CacheDir}) == "" {
-			return false, fmt.Errorf("artist image path %q is outside the cache directory", filepath.Base(p))
+			return "", "", fmt.Errorf("artist image path %q is outside the cache directory", filepath.Base(p))
 		}
+	}
+	return mbidPath, namePath, nil
+}
+
+// portraitCached reports whether mbid's portrait is in the artwork cache,
+// at its MBID path, or at the canonical of artistName, which it then links
+// there. It sends nothing.
+func (e *Enricher) portraitCached(mbid, artistName string) (bool, error) {
+	mbidPath, namePath, err := e.artistImagePaths(mbid, artistName)
+	if err != nil {
+		return false, err
 	}
 	if _, err := os.Stat(mbidPath); err == nil {
 		return true, nil
@@ -966,6 +967,18 @@ func (e *Enricher) ensureArtistImageCached(ctx context.Context, mbid, artistName
 			return false, fmt.Errorf("link canonical %q → mbid %q: %w", namePath, mbidPath, err)
 		}
 		return true, nil
+	}
+	return false, nil
+}
+
+// fetchPortrait asks Deezer for mbid's portrait by artistName, and caches
+// the picture its answer names: the canonical, then the MBID path linked to
+// it. (true, nil) once it is cached, (false, nil) where Deezer has no such
+// artist.
+func (e *Enricher) fetchPortrait(ctx context.Context, mbid, artistName string) (bool, error) {
+	mbidPath, namePath, err := e.artistImagePaths(mbid, artistName)
+	if err != nil {
+		return false, err
 	}
 	// enrich.deezerEnabled, asked once a cached file has not answered: off,
 	// Deezer is asked nothing (errDeezerOff). Each of the two requests then
@@ -1597,6 +1610,11 @@ func ArtworkCachePath(cacheDir, mbid string, size int) string {
 	return filepath.Join(cacheDir, fmt.Sprintf("%s-%d.jpg", mbid, size))
 }
 
+// errNotAnImage is a body writeArtworkAtomicStream refuses for its signature:
+// no recognised image. For a Deezer portrait it ends the name it was asked by
+// (backlog B761), since no wait changes that answer.
+var errNotAnImage = errors.New("artwork body is not a recognised image")
+
 // jpegSOI and pngMagic are the two image signatures the artwork cache
 // accepts. Mirrors internal/manifest's jpegSOI (that package cannot be
 // imported from here — the dependency runs enrich -> manifest, and this
@@ -1679,7 +1697,7 @@ func writeArtworkAtomicStream(root, path string, src io.Reader, maxBytes int64) 
 		logger.Warn("artwork upstream served PNG into a .jpg cache path; stored verbatim",
 			"path", filepath.Base(path))
 	default:
-		return fmt.Errorf("artwork body is not a recognised image")
+		return errNotAnImage
 	}
 	src = sniffed
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {

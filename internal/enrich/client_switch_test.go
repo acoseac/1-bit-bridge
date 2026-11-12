@@ -301,7 +301,7 @@ func TestARefusalWithABareContextRecordsNoMiss(t *testing.T) {
 			held: func(svc string, r *http.Request) bool {
 				return svc == "deezer" && strings.HasPrefix(r.URL.Path, "/search/artist")
 			},
-			cached: func(e *Enricher, _ manifest.Track) bool { return e.deezerNegCache.Has(clientMBID) },
+			cached: func(e *Enricher, _ manifest.Track) bool { return e.deezerNegCache.Len() != 0 },
 		},
 	} {
 		t.Run(c.name, func(t *testing.T) {

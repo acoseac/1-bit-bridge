@@ -311,7 +311,7 @@ func TestDeezerOffAsksDeezerNothingAndStillFetchesCovers(t *testing.T) {
 	if fileExists(ArtistImagePath(artworkDir, switchArtistMBID)) {
 		t.Error("a portrait was cached with Deezer off")
 	}
-	if e.deezerNegCache.Has(switchArtistMBID) {
+	if e.deezerNegCache.Len() != 0 {
 		t.Error("the artist was negative-cached although Deezer was never asked")
 	}
 	if got := rec.Lines("artist image"); len(got) != 0 {
@@ -431,7 +431,7 @@ func TestDeezerOffAfterASearchSendsNoFetch(t *testing.T) {
 	if reqs := ups.deezer.requests(); len(reqs) != 1 || !strings.HasPrefix(reqs[0], "GET /search/artist") {
 		t.Errorf("Deezer was asked %v, want the search alone", reqs)
 	}
-	if e.deezerNegCache.Has(switchArtistMBID) {
+	if e.deezerNegCache.Len() != 0 {
 		t.Error("the cut-off search was negative-cached")
 	}
 	if fileExists(ArtistImagePath(artworkDir, switchArtistMBID)) {

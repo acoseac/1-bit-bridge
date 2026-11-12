@@ -103,7 +103,7 @@ func (c *DeezerClient) installRedirectGuard() {
 		}
 		host := req.URL.Hostname()
 		if !hostAllowed(host, c.allowedImageHosts) {
-			return fmt.Errorf("deezer: refusing redirect to non-allowlisted host %q", host)
+			return &refusedHostError{host: host, redirect: true}
 		}
 		if prev != nil {
 			return prev(req, via)
@@ -189,6 +189,31 @@ func (c *DeezerClient) SearchArtist(ctx context.Context, name string) (imageURL 
 // exhaust memory. 20 MB comfortably holds a 1000x1000 JPEG.
 const maxDeezerImageBytes = 20 * 1024 * 1024
 
+// The answers about a picture that no wait changes for the name Deezer was
+// asked by (backlog B761): the enricher ends that name on them, as it does on
+// Deezer's answer that it has none, and goes on asking by the artist's other
+// names.
+var (
+	// errImageTooLarge is a picture past maxDeezerImageBytes.
+	errImageTooLarge = fmt.Errorf("image exceeds %d-byte limit", maxDeezerImageBytes)
+	// errBadImageURL is a picture URL that does not parse.
+	errBadImageURL = errors.New("parse image URL")
+)
+
+// refusedHostError is a picture on a host the client does not fetch from
+// (allowedImageHosts), named by Deezer's answer or by a redirect.
+type refusedHostError struct {
+	host     string
+	redirect bool
+}
+
+func (e *refusedHostError) Error() string {
+	if e.redirect {
+		return fmt.Sprintf("deezer: refusing redirect to non-allowlisted host %q", e.host)
+	}
+	return fmt.Sprintf("deezer: refusing non-Deezer image host %q", e.host)
+}
+
 // deezerAllowedHosts is the SSRF allowlist for FetchImage. The public
 // search API returns picture URLs under these suffixes (verified against
 // live /search/artist responses 2026-04); reject anything else to prevent
@@ -203,10 +228,10 @@ func (c *DeezerClient) FetchImage(ctx context.Context, u string) (buf []byte, er
 	}
 	parsed, err := url.Parse(u)
 	if err != nil {
-		return nil, fmt.Errorf("deezer: parse image URL: %w", err)
+		return nil, fmt.Errorf("deezer: %w: %w", errBadImageURL, err)
 	}
 	if !hostAllowed(parsed.Hostname(), c.allowedImageHosts) {
-		return nil, fmt.Errorf("deezer: refusing non-Deezer image host %q", parsed.Hostname())
+		return nil, &refusedHostError{host: parsed.Hostname()}
 	}
 	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
 	if err != nil {
@@ -242,7 +267,7 @@ func (c *DeezerClient) FetchImage(ctx context.Context, u string) (buf []byte, er
 		return nil, err
 	}
 	if len(buf) > maxDeezerImageBytes {
-		return nil, fmt.Errorf("deezer: image exceeds %d-byte limit", maxDeezerImageBytes)
+		return nil, fmt.Errorf("deezer: %w", errImageTooLarge)
 	}
 	// A 200 OK with an empty body must NOT be written to disk: existence
 	// is checked via os.Stat (size-blind), so a 0-byte file becomes a
