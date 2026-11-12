@@ -143,7 +143,14 @@ func TestTheWritesChecksAreAnsweredInTheirOrder(t *testing.T) {
 			if got := choiceWrite(b, key, tc.mode, tc.base); got != tc.want {
 				t.Errorf("the write answered %s; want %s", got, tc.want)
 			}
-			b.mu.Lock()
+			// The first acquisition after the write let go of its lease
+			// (letLease), which nothing else can hold here (the backend runs
+			// nothing): asserted free at once, so a lock the write kept fails
+			// the case, where a Lock waited to the package's timeout (backlog
+			// B853, round 4).
+			if !b.mu.TryLock() {
+				t.Fatal("the backend's lock is held once the write returned")
+			}
 			lease := b.lease
 			b.mu.Unlock()
 			if lease != nil || len(b.choiceTurn) != 0 {
@@ -227,7 +234,10 @@ func TestAWriteThatPanicsLetsGoOfItsLeaseAndItsTurn(t *testing.T) {
 				choiceWrite(b, key, dsdstate.ModeConvert, 0)
 			}()
 			b.cfg.Seams = nil
-			b.mu.Lock()
+			// As the refused writes' case: asserted free at once (round 4).
+			if !b.mu.TryLock() {
+				t.Fatal("the backend's lock is held once the write that panicked returned")
+			}
 			lease := b.lease
 			b.mu.Unlock()
 			if lease != nil || len(b.choiceTurn) != 0 {

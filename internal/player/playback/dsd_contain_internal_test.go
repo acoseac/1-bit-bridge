@@ -61,6 +61,21 @@ func checkContained(t *testing.T, s *session) {
 		t.Fatalf("first failure left session running: fault %+v, revoked %v", s.fault, s.nativeRevoked)
 	}
 }
+
+// checkContainedWithin is checkContained beside a goroutine that may hold the
+// session's lock a moment (a live monitor's next reading): there a single
+// failed TryLock proves no leak, so the lock is taken within handMadeBound,
+// and one still held then is the containment's (backlog B853, round 4).
+func checkContainedWithin(t *testing.T, s *session) {
+	t.Helper()
+	if !lockWithin(&s.mu, handMadeBound) {
+		t.Fatalf("containment left the session lock held %v", handMadeBound)
+	}
+	defer s.mu.Unlock()
+	if s.fault == nil || !s.nativeRevoked {
+		t.Fatalf("first failure left session running: fault %+v, revoked %v", s.fault, s.nativeRevoked)
+	}
+}
 func TestAHandOffThatPanicsStopsItsSessionAndTheOthersAreJudged(t *testing.T) {
 	var gone atomic.Bool
 	b, _ := fixtureSessionBackend(t, func(p *DSDPolicy) { p.Box = fixtureBox{gone: &gone} })
@@ -217,7 +232,9 @@ func TestTheMonitorTakesItsNextTickAfterAPanic(t *testing.T) {
 	}
 	send()
 	send() // the second receive proves the failed first reading completed
-	checkContained(t, s)
+	// The monitor's second reading runs beside the check and takes the
+	// session's lock a moment (round 4).
+	checkContainedWithin(t, s)
 	close(s.down)
 	waitContained(t, stopped)
 }

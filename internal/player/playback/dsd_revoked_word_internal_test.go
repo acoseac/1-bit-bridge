@@ -36,7 +36,10 @@ const revocationReason = "the test's revocation"
 // (broken), or it loses its altsets (gone), so a refresh re-plans the
 // occurrence through a hand-off that panics (failedHandoff). Its seams are
 // the backend's (Config.Seams): a case adds its own to them, never puts
-// others in their place, since the rig's cleanup counts by one of them.
+// others in their place, since the rig's cleanup counts by one of them. The
+// session's DSD monitor, which an admitted successor's open starts, is parked:
+// its tick never comes, so it never takes the session's lock, and nothing but
+// the code a case calls holds that lock (round 4).
 type revocationRig struct {
 	b            *Backend
 	s            *session
@@ -48,13 +51,13 @@ type revocationRig struct {
 	ended chan struct{}
 }
 
-// rigStopBound bounds each of the rig's cleanup's waits (stop).
-const rigStopBound = 10 * time.Second
-
 func newRevocationRig(t *testing.T) *revocationRig {
 	t.Helper()
 	r := &revocationRig{gone: new(atomic.Bool), broken: new(atomic.Bool), handoff: &failedHandoff{}, ended: make(chan struct{}, 1)}
-	r.b, _ = fixtureSessionBackend(t, func(p *DSDPolicy) { p.Box = fixtureBox{gone: r.gone, broken: r.broken} })
+	r.b, _ = fixtureSessionBackend(t, func(p *DSDPolicy) {
+		p.Box = fixtureBox{gone: r.gone, broken: r.broken}
+		p.Tick = func() (<-chan time.Time, func()) { return nil, func() {} }
+	})
 	r.b.cfg.Seams = &Seams{MonitorEnded: func(engine.SessionID) { r.ended <- struct{}{} }}
 	r.s = r.b.session(1)
 	t.Cleanup(func() { r.stop(t) })
@@ -63,35 +66,41 @@ func newRevocationRig(t *testing.T) *revocationRig {
 	return r
 }
 
-// stop is the rig's cleanup: the session's life ends (its context) and so
-// does the session (down, which ends its DSD monitor: startDSDMonitor),
-// closed once, as a release or its teardown would, under the session's lock;
-// a monitor a case started is joined by its end (Seams.MonitorEnded), and then
-// every goroutine of the backend's (Wait), each within rigStopBound. Until
-// round 3 the rig cancelled the context alone, and each monitor a case started
-// refreshed the policy every 100 ms for the life of the process.
+// stop is the rig's cleanup: the session ended as a release ends it
+// (closeSession: its context, then its end, which ends its DSD monitor,
+// closed once under its lock taken within a bound), a monitor a case started
+// joined by its end (Seams.MonitorEnded), and then every goroutine of the
+// backend's (joinBackend), each within handMadeBound. Until round 3 the rig
+// cancelled the context alone, and each monitor a case started refreshed the
+// policy every 100 ms for the life of the process; until round 4 it took the
+// lock unconditionally, so a lock a containment leaked hung the cleanup.
 func (r *revocationRig) stop(t *testing.T) {
-	r.s.cancel()
-	r.s.mu.Lock()
-	started := r.s.dsdMonitor
-	select {
-	case <-r.s.down:
-	default:
-		close(r.s.down)
+	monitor, ok := closeSession(t, r.s)
+	if !ok {
+		return
 	}
-	r.s.mu.Unlock()
-	if started {
+	if monitor {
 		select {
 		case <-r.ended:
-		case <-time.After(rigStopBound):
-			t.Errorf("the session's DSD monitor did not end within %v of the session's end", rigStopBound)
+		case <-time.After(handMadeBound):
+			t.Errorf("the session's DSD monitor did not end within %v of the session's end", handMadeBound)
 		}
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), rigStopBound)
-	defer cancel()
-	if err := r.b.Wait(ctx); err != nil {
-		t.Errorf("the rig's backend: %v", err)
+	joinBackend(t, r.b)
+}
+
+// heldAfter is "" where the session's lock is free now, and says it held
+// otherwise: the first acquisition after a step that could leak it, at once,
+// since nothing else holds it (the rig's session runs nothing, its monitor
+// parked). A cause's helper asks it once its containment has returned, so a
+// lock the containment kept fails the case there, before a call that would
+// wait for it (round 4).
+func (r *revocationRig) heldAfter(step string) string {
+	if !r.s.mu.TryLock() {
+		return "the session's lock is held once " + step + " returned"
 	}
+	r.s.mu.Unlock()
+	return ""
 }
 
 // TestTheRevocationRigsCleanupClosesTheSessionsEndOnce (backlog B853, round
@@ -112,27 +121,51 @@ func TestTheRevocationRigsCleanupClosesTheSessionsEndOnce(t *testing.T) {
 }
 
 // unread is the policy's reading failing: a refresh whose reading panics,
-// which stops the DSD of every session that holds it (refreshDSD).
+// which stops the DSD of every session that holds it (refreshDSD). It fails
+// the case where the reading was not contained, or where the session's lock
+// is held once it returned (failReading); it is the case's goroutine's alone.
 func (r *revocationRig) unread(t *testing.T) {
 	t.Helper()
+	if why := r.failReading(); why != "" {
+		t.Fatal(why)
+	}
+}
+
+// failReading is unread, saying what went wrong, "" for nothing: a seam that
+// runs on another goroutine than the case's says it with t.Error.
+func (r *revocationRig) failReading() string {
 	r.broken.Store(true)
 	defer r.broken.Store(false)
 	if _, err := r.b.refreshDSD("the test's reading"); !errors.Is(err, errDSDUnread) {
-		t.Fatalf("the reading answered %v; want it contained", err)
+		return fmt.Sprintf("the reading answered %v; want it contained", err)
 	}
+	return r.heldAfter("the contained reading")
 }
 
 // reconcilePanic is a reconciliation that panics: the box's altsets taken
 // away or given back, so the refresh publishes a set that re-plans the
 // session's occurrence, through a hand-off that panics (Backend.reconcileDSD).
+// It fails the case where the hand-off was not asked once, or where the
+// session's lock is held once the refresh returned (panicReconciliation); it
+// is the case's goroutine's alone.
 func (r *revocationRig) reconcilePanic(t *testing.T) {
 	t.Helper()
+	if why := r.panicReconciliation(); why != "" {
+		t.Fatal(why)
+	}
+}
+
+// panicReconciliation is reconcilePanic, saying what went wrong, "" for
+// nothing: a seam that runs on another goroutine than the case's says it with
+// t.Error.
+func (r *revocationRig) panicReconciliation() string {
 	calls := r.handoff.calls.Load()
 	r.gone.Store(!r.gone.Load())
 	r.b.RefreshDSD(true)
 	if got := r.handoff.calls.Load(); got != calls+1 {
-		t.Fatalf("the refresh asked the hand-off %d times; want the one that panics", got-calls)
+		return fmt.Sprintf("the refresh asked the hand-off %d times; want the one that panics", got-calls)
 	}
+	return r.heldAfter("the contained reconciliation")
 }
 
 // revoke is an ordinary revocation (Backend.Revoke).
@@ -152,10 +185,24 @@ func refusesDSD64(t *testing.T, b *Backend) {
 	}
 }
 
-// admitted is what admitDSD answers a DSD64 entry of the session.
+// admitted is what admitDSD answers a DSD64 entry of the session, asked on a
+// goroutine of its own and awaited within handMadeBound, so an admission that
+// a lock the case's causes leaked blocks fails the case, where it waited to
+// the package's timeout (round 4). Its seams run on that goroutine: a case's
+// seam says a failure with t.Error, never t.Fatal.
 func (r *revocationRig) admitted(t *testing.T) engine.Unplayable {
 	t.Helper()
-	_, err := r.b.admitDSD(&occ{owner: r.s, id: 9}, dsd64Entry)
+	answer := make(chan error, 1)
+	go func() {
+		_, err := r.b.admitDSD(&occ{owner: r.s, id: 9}, dsd64Entry)
+		answer <- err
+	}()
+	var err error
+	select {
+	case err = <-answer:
+	case <-time.After(handMadeBound):
+		t.Fatalf("the admission did not answer within %v: the session's lock is held", handMadeBound)
+	}
 	var u *engine.Unplayable
 	if !errors.As(err, &u) {
 		t.Fatalf("a DSD64 entry of a session whose DSD was stopped was admitted: %v", err)
@@ -224,7 +271,11 @@ func TestARevocationDuringAnAdmissionIsItsRefusal(t *testing.T) {
 // the new set says of its rate, which admitDSD answered first until round 2.
 func TestAReconciliationThatPanicsDuringAnAdmissionIsItsRefusal(t *testing.T) {
 	r := newRevocationRig(t)
-	r.b.cfg.Seams.Admitting = func(engine.OccurrenceID) { r.reconcilePanic(t) }
+	r.b.cfg.Seams.Admitting = func(engine.OccurrenceID) {
+		if why := r.panicReconciliation(); why != "" {
+			t.Error(why)
+		}
+	}
 	got := r.admitted(t)
 	refusesDSD64(t, r.b)
 	if got != panicRefusal {
@@ -341,7 +392,13 @@ func TestARevocationDropsAPreparedEntryForTheCauseRecordedFirst(t *testing.T) {
 			r.b.cfg.Resolver = readGoldenDSD(t)
 			o, ctx := successorOf(t, r.s, 3)
 			r.s.openSuccessor(ctx, o)
-			r.s.mu.Lock()
+			// The monitor the open started is parked (the rig's), so nothing
+			// holds the session's lock here but a leak: each read below asserts
+			// it free at once (round 4), and the cause before the revocation,
+			// a containment, asks it as it returns (heldAfter).
+			if !r.s.mu.TryLock() {
+				t.Fatal("the session's lock is held once the successor's open returned")
+			}
 			prepared := o.refused == nil && o.plan != nil && !o.dropped && o.out == nil
 			monitor := r.s.dsdMonitor
 			r.s.mu.Unlock()
@@ -355,7 +412,9 @@ func TestARevocationDropsAPreparedEntryForTheCauseRecordedFirst(t *testing.T) {
 				tc.before(r, t)
 			}
 			r.revoke(t)
-			r.s.mu.Lock()
+			if !r.s.mu.TryLock() {
+				t.Fatal("the session's lock is held once the revocation returned")
+			}
 			refused, dropped := o.refused, o.dropped
 			r.s.mu.Unlock()
 			if !dropped || refused == nil || *refused != tc.want {
@@ -461,7 +520,7 @@ func TestAnAuthorizationReplacedAsASuccessorOpensRefusesItForItsOwnReason(t *tes
 	ctx := context.Background()
 	b.RefreshAuthorization(ctx)
 	s := b.session(1)
-	t.Cleanup(s.cancel)
+	t.Cleanup(func() { endSession(t, b, s) })
 	s.ev = plainEvents{}
 	p, err := b.readPermission(ctx)
 	if err != nil {

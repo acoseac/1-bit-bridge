@@ -431,10 +431,16 @@ func TestAStartBetweenItsRegistrationAndItsHoldRefusesTheWrite(t *testing.T) {
 // choice's write holds the configuration lease or the writes' turn: the call
 // that comes next would wait for what a write that ended leaked, to the
 // package's timeout, where a bound like within's would still reach the
-// watchdog (round 2).
+// watchdog (round 2). The backend's lock, which the lease is read under, is
+// taken within a bound, and one that stays held fails the case too (backlog
+// B853, round 4).
 func freeForTheNextCall(t *testing.T, b *playback.Backend, next string) {
 	t.Helper()
-	if lease, turn := playback.ChoiceHeldForTest(b); lease || turn {
+	lease, turn, locked := playback.ChoiceHeldForTest(b)
+	switch {
+	case !locked:
+		t.Fatalf("before %s: the backend's lock stayed held: a write that ended kept it", next)
+	case lease || turn:
 		t.Fatalf("before %s: a write that ended still holds the configuration lease (%v) or the writes' turn (%v)", next, lease, turn)
 	}
 }
