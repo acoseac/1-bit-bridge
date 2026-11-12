@@ -180,12 +180,14 @@ func TestARevocationThatPanicsStopsTheSession(t *testing.T) {
 	gone.Store(true)
 	b.RefreshDSD(true)
 	// The containment's Drop of the PCM output may still be in its deferred
-	// clean-up, which holds the lock a moment: a bounded check, then both of
-	// its counted goroutines (the worker and its call) joined, their real end
-	// (round 5: an immediate TryLock could meet that clean-up).
-	checkContainedWithin(t, s)
+	// clean-up, which holds the lock a moment: both of its counted goroutines
+	// (the worker and its call) joined first, their real end, then an immediate
+	// TryLock, since no legitimate holder remains (round 5's review: a check
+	// before the join could pass, miss a leak in that clean-up, and leave the
+	// next step to hang).
 	waitContained(t, sink.stopped)
-	joinBackend(t, b)
+	joinBackend(t, b) // bounded: the Drop and its call have ended, so no legitimate holder of s.mu remains
+	checkContained(t, s)
 	b.RefreshDSD(true)
 	if calls.Load() != 1 {
 		t.Fatal("panicking revocation retried")
@@ -229,11 +231,11 @@ func TestARetiringPositionsPanicStopsAndClosesWithoutAnotherRead(t *testing.T) {
 	s.outs = []*output{out}
 	gone.Store(true)
 	b.RefreshDSD(true)
-	// As the revocation's case: the Drop's clean-up may hold the lock a
-	// moment, and its goroutines are joined (round 5).
-	checkContainedWithin(t, s)
+	// As the revocation's case: the Drop's goroutines joined first, then an
+	// immediate check (round 5's review).
 	waitContained(t, sink.stopped)
-	joinBackend(t, b)
+	joinBackend(t, b) // bounded: the Drop and its call have ended, so no legitimate holder of s.mu remains
+	checkContained(t, s)
 	s.closeAtTeardown(out)
 	for range 2 {
 		func() {
