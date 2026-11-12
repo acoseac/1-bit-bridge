@@ -81,8 +81,10 @@ type StuckCheck struct {
 // which names no snapshot.
 func (c StuckCheck) Pruning() bool { return c.Snapshot == "" && !c.Restore && c.Probe == "" }
 
-// Restoring reports whether the hold given up is a restore's (holdSource),
-// which the bridge restore command that runs it ends.
+// Restoring reports whether the hold given up is a restore's (holdSource):
+// a step of a bridge restore left in a process that is still running, which
+// the end of that process or of the storage's stall ends, never a restart of
+// a serving bridge.
 func (c StuckCheck) Restoring() bool { return c.Restore }
 
 // Probing reports whether the hold given up is a probe of the folder's lock
@@ -181,8 +183,10 @@ func stillRunning(check StuckCheck) error {
 }
 
 // HeldByRestore reports whether err is ErrCheckStillRunning for a restore's
-// hold given up (StillRunningError), whose end is the end of the bridge
-// restore command that runs it, never of a serving bridge.
+// hold given up (StillRunningError): a step of a bridge restore left in a
+// process that is still running, or waiting on storage that stopped
+// answering, which ends with that process or with the stall, never with a
+// restart of a serving bridge.
 func HeldByRestore(err error) bool {
 	var held *StillRunningError
 	return errors.As(err, &held) && held.Check.Restoring()

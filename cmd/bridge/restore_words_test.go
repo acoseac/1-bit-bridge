@@ -76,13 +76,13 @@ func TestBridgeRestoreNamesTheSnapshotAsItWasTypedBesideARestoreThatHoldsIt(t *t
 			if saysPath(rest, root+string(filepath.Separator)) {
 				t.Errorf("bridge restore's refusal names a path in %s, where the snapshot resolves:\n%s", root, stderr)
 			}
-			for _, want := range []string{"(a restore of snapshot " + blocker, "The end of the bridge restore that runs it ends it", "stop that command"} {
+			for _, want := range append([]string{"(a restore of snapshot " + blocker}, restoreHoldWords...) {
 				if !strings.Contains(stderr, want) {
 					t.Errorf("bridge restore's refusal does not say %q:\n%s", want, stderr)
 				}
 			}
-			if strings.Contains(stderr, "restart the bridge") {
-				t.Errorf("bridge restore's refusal advises a restart of the bridge, which runs no restore:\n%s", stderr)
+			if strings.Contains(stderr, "restart the bridge") || strings.Contains(stderr, "stop that command") {
+				t.Errorf("bridge restore's refusal advises a restart of the bridge, which runs no restore, or a stop of a command that may have ended:\n%s", stderr)
 			}
 			requireInstallUntouched(t, cfgB, dataB, before)
 		})

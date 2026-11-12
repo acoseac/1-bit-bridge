@@ -569,13 +569,17 @@ func sayRestoreRefusal(stderr io.Writer, err error) bool {
 }
 
 // stillRunningEnd says what ends the hold given up behind err, a refusal for
-// one (backup.ErrCheckStillRunning), for the operator: a restore's is ended by
-// the bridge restore command that runs it (backup.HeldByRestore, backlog
-// B826's second round), which no restart of a bridge ends; a verification's or
-// a prune's by others, the words of the command that answers.
+// one (backup.ErrCheckStillRunning), for the operator: a restore's
+// (backup.HeldByRestore, backlog B826's second round), which no restart of a
+// bridge ends, by what holds the folder, a step of that restore left in a
+// process still running or waiting on storage that stopped answering, and what
+// can be done, never "stop that command", which can name a bridge restore that
+// already printed its refusal and ended (backlog B871's item 6); a
+// verification's or a prune's by others, the words of the command that
+// answers.
 func stillRunningEnd(err error, others string) string {
 	if backup.HeldByRestore(err) {
-		return "The end of the bridge restore that runs it ends it (bridge doctor's backup-check line names its snapshot): stop that command, then run this again."
+		return "It is a step of a bridge restore on the storage that holds them, left in a process that is still running or waiting on storage that stopped answering (a hung mount), and it ends when that storage answers or that process ends (bridge doctor's backup-check line names its snapshot): check that storage, end that bridge restore process if one still runs, then run this again."
 	}
 	return "The end of the process that runs it ends it (bridge doctor's backup-check line names its snapshot): " + others + ", then run this again."
 }

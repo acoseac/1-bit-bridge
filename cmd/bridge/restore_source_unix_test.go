@@ -66,32 +66,45 @@ func TestBridgeRestoreAnswersAStalledSnapshotWithinItsBoundBeforeItsPrompt(t *te
 	_, _, snapA := seedRestorableInstall(t, closedAdminAddr(t))
 	cfgB, dataB, _ := seedRestorableInstall(t, closedAdminAddr(t))
 	before := readInstallState(t, cfgB, dataB)
+	// The look's worker outlives the command's answer, its read of the pipe
+	// under way: it is fed and its end observed (backlog B871's item 7) before
+	// the hook's restore, the pipe's removal and the fixtures' (cleanups
+	// registered before the one that does it, so run after it).
+	ended := lookWorkerEnd(t, snapA)
 	feed := stallManifest(t, snapA)
 	prev := verifyCmdLockWait
 	verifyCmdLockWait = 100 * time.Millisecond
 	t.Cleanup(func() { verifyCmdLockWait = prev })
-
-	var stdout, stderr safeBuffer
-	done := make(chan int, 1)
+	run := newRestoreRun(t)
 	t.Cleanup(func() {
-		feed()
-		select {
-		case <-done:
-		case <-time.After(30 * time.Second):
-			t.Error("bridge restore never returned once its snapshot answered")
+		if !run.started.Load() {
+			return
+		}
+		// The pipe is fed until the worker ends: a worker not at its read
+		// yet when the first feed comes is fed when it gets there.
+		giveUp := time.After(restoreWaitWithin(t, 30*time.Second))
+		for {
+			feed()
+			select {
+			case <-ended:
+				return
+			case <-giveUp:
+				t.Error("the worker of bridge restore's look never ended once its snapshot answered")
+				return
+			case <-time.After(10 * time.Millisecond):
+			}
 		}
 	})
+
+	var stdout, stderr safeBuffer
 	start := time.Now()
-	go func() {
-		done <- restoreCmd(context.Background(), []string{"--config", cfgB, snapA}, strings.NewReader(""), &stdout, &stderr)
-	}()
+	run.start(context.Background(), []string{"--config", cfgB, snapA}, strings.NewReader(""), &stdout, &stderr)
 	// Its bound: the lock wait, the watchdog's slack (twice StopWriteBound),
 	// then StopWriteBound.
 	bound := verifyCmdLockWait + 3*backup.StopWriteBound
 	var code int
 	select {
-	case code = <-done:
-		done <- code
+	case code = <-run.done:
 	case <-time.After(bound + 10*time.Second):
 		t.Fatalf("bridge restore did not answer within %v of a snapshot that does not answer", bound+10*time.Second)
 	}

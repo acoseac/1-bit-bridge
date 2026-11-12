@@ -67,10 +67,14 @@ import (
 // and a removal of a stale marker under way may finish. A worker given up
 // while it holds the lock (in the stale marker's removal or the manifest's
 // read) marks the folder as a restore's (StuckCheck.Restore), in this process
-// and in the marker beside the lock, until it has let the lock go; that marker
-// is written only once a removal of a stale marker under way has ended, so the
-// removal never takes it away. One given up before it holds the lock marks
-// nothing, holding nothing a mark would say it holds.
+// and in the marker beside the lock, until it has let the lock go. The mark in
+// this process stands at once (markStuckAfter); the marker is written only once
+// a removal of a stale marker under way has ended, so the removal never takes
+// it away, and until then another process reads the stale marker, naming the
+// check or the prune it records as still running, or reads none and waits for
+// the lock: the folder reads as busy there only then (backlog B871's item 6).
+// One given up before it holds the lock marks nothing, holding nothing a mark
+// would say it holds.
 //
 // The restore writes the destination on its caller's goroutine alone, once
 // the worker has handed the hold over, so nothing is written there once it

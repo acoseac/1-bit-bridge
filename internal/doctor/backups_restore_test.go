@@ -10,9 +10,12 @@ import (
 
 // TestTheBackupCheckLineNamesWhatHoldsTheFolderAndWhatEndsIt (backlog B826's
 // second round, Codex on its brief): the backup-check line names a restore
-// given up that holds the backups folder as a restore of its snapshot, and
-// says the bridge restore command that runs it ends it, never a restart of
-// the bridge, which runs none; a verification's and a prune's, a marker
+// given up that holds the backups folder as a restore of its snapshot, never
+// a check that a restart of the bridge ends, which runs none, and since
+// backlog B871 (item 6) says what holds the folder, a step of that restore
+// left in a process still running or waiting on storage that stopped
+// answering, and what can be done, never "stop that command", which can name
+// a command that ended already; a verification's and a prune's, a marker
 // written before restores were marked among them, keep their words.
 func TestTheBackupCheckLineNamesWhatHoldsTheFolderAndWhatEndsIt(t *testing.T) {
 	now := time.Date(2026, 11, 12, 6, 0, 0, 0, time.UTC)
@@ -24,7 +27,9 @@ func TestTheBackupCheckLineNamesWhatHoldsTheFolderAndWhatEndsIt(t *testing.T) {
 		notInIt string
 	}{
 		{"a restore", backup.StuckCheck{Snapshot: "S", Step: "its read of the snapshot it restores", Since: now.Add(-2 * time.Minute), Restore: true},
-			"a restore of snapshot S did not end (its read of the snapshot it restores)", "the end of the bridge restore command that runs it ends it", "restart the bridge"},
+			"a restore of snapshot S did not end (its read of the snapshot it restores)", "left in a process that is still running or waiting on storage that stopped answering (a hung mount)", "restart the bridge"},
+		{"a restore, never its command's stop", backup.StuckCheck{Snapshot: "S", Step: "its read of the snapshot it restores", Since: now.Add(-2 * time.Minute), Restore: true},
+			"a restore of snapshot S did not end", "end that bridge restore process if one still runs", "stop that command"},
 		{"a verification", backup.StuckCheck{Snapshot: "S", Step: "its check", Since: now.Add(-2 * time.Minute)},
 			"a verification of snapshot S did not end (its check)", "restart the bridge, or stop the backup --verify command that runs it", "bridge restore"},
 		{"a prune", backup.StuckCheck{Step: "its removals", Since: now.Add(-2 * time.Minute)},

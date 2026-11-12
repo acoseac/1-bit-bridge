@@ -299,8 +299,14 @@ func TestAStuckMarkSaysWhatHoldsTheFolder(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if strings.Contains(string(again), `"restore"`) != tc.restoring {
-				t.Errorf("%+v is written %s", s, again)
+			// The key's presence, read as JSON reads it, never by a substring
+			// of the bytes (omitempty; backlog B871's item 9).
+			var keys map[string]json.RawMessage
+			if err := json.Unmarshal(again, &keys); err != nil {
+				t.Fatal(err)
+			}
+			if _, written := keys["restore"]; written != tc.restoring {
+				t.Errorf("%+v is written %s: its restore key present %v, want %v", s, again, written, tc.restoring)
 			}
 
 			// Another process's marker, read while that process holds the lock.

@@ -227,26 +227,25 @@ func TestBridgeRestoreRefusesASnapshotPrunedWhileItAsked(t *testing.T) {
 	}
 	before := readInstallState(t, cfgB, dataB)
 
+	// The command and its look's worker are joined on every exit path
+	// (backlog B871's item 7): their joins are registered before the prompt's
+	// stdin is, whose close, a cleanup registered later, runs first and lets
+	// the command go on.
+	ended := lookWorkerEnd(t, snapA)
+	t.Cleanup(func() { awaitRestoreEvent(t, ended, "the end of the look's worker") })
+	run := newRestoreRun(t)
 	pr, pw := io.Pipe()
 	t.Cleanup(func() { pw.Close() })
 	var stdout, stderr safeBuffer
-	done := make(chan int, 1)
-	go func() {
-		done <- restoreCmd(context.Background(), []string{"--config", cfgB, snapA}, pr, &stdout, &stderr)
-	}()
-	waitForRestorePrompt(t, &stderr, done)
+	run.start(context.Background(), []string{"--config", cfgB, snapA}, pr, &stdout, &stderr)
+	waitForRestorePrompt(t, &stderr, run.done)
 	if err := os.RemoveAll(snapA); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := pw.Write([]byte("yes\n")); err != nil {
 		t.Fatal(err)
 	}
-	var code int
-	select {
-	case code = <-done:
-	case <-time.After(30 * time.Second):
-		t.Fatal("the restore never answered")
-	}
+	code := run.code(t)
 	if code != 1 || !strings.Contains(stderr.String(), "no longer there") || !strings.Contains(stderr.String(), "choose another snapshot") {
 		t.Errorf("bridge restore of a snapshot removed while it asked = %d\nstdout:\n%s\nstderr:\n%s", code, stdout.String(), stderr.String())
 	}

@@ -61,10 +61,13 @@ func BackupChecks(st backup.Status, err, lockErr error, stuck *backup.StuckCheck
 		hint := "the end of the process that runs it ends it: restart the bridge, or stop the backup --verify command that runs it; if it comes back, the data directory's storage is not answering (backlog B653)"
 		switch {
 		case stuck.Restoring():
-			// A restore's (backlog B826): the bridge restore command that runs
-			// it ends it, never a restart of the bridge, which runs none.
+			// A restore's (backlog B826): never a check a restart of the bridge
+			// ends, which runs none. Said by what holds the folder and what can
+			// be done, never "stop that command", which can name a bridge
+			// restore that already printed its refusal and ended (backlog
+			// B871's item 6).
 			what = "a restore of snapshot " + stuck.Snapshot
-			hint = "the end of the bridge restore command that runs it ends it: stop that command; if it comes back, the storage that holds the snapshots is not answering"
+			hint = "a step of a bridge restore on the storage that holds the snapshots, left in a process that is still running or waiting on storage that stopped answering (a hung mount), holds the folder until that storage answers or that process ends: check that storage, and end that bridge restore process if one still runs"
 		case stuck.Probing():
 			// A probe of the lock whose release did not end (backlog B871): this
 			// process's own, the doctor's or the scheduled snapshot's, marked in
