@@ -94854,3 +94854,26 @@ in 0.00 s, and with the writer kept blocked past its release the join said so af
 lease (true) or the writes' turn (false)", and the turn's release removed, the same naming the turn.
 
 Version 49 covers round 2's guarded changes; its records say so.
+
+The runs, at c1eb858a, on legion0 (Linux, Go 1.27.3, the Makefile's tags, `TMPDIR` on disk), the
+gate in one build-slot session and CI's two native-integration invocations in a second:
+
+| Run | Result |
+|---|---|
+| `make fmt`, then `git status --porcelain` | exit 0, the tree clean; the pinned gofmt lists none of the round's twelve Go files |
+| `go vet` with the tags: linux/amd64, windows/amd64, linux/386 | exit 0 each |
+| `make docs-check` | exit 0 |
+| `go run ./scripts/qualification-version -base 3a6b924e -head HEAD` | qualification version OK |
+| `-race -count=50 -v`, the round's ten new or edited playback tests and six whose code it changed (round 1's four B853 cases, `TestGaplessNativeRechecksPermission`, `TestRevokeKeepsPCMWithPreparedDSD`) | each 50 times; 2,000 PASS with their subtests, 0 FAIL, 0 SKIP; 15.5 s |
+| the same, alsapcm's 3 (the Start during a write, B853's rig case, the states that refuse a write) | 450 PASS, 0 FAIL, 0 SKIP; 24.4 s |
+| the same, `TestQualificationRunbookVersion` | 300 PASS, 0 FAIL, 0 SKIP |
+| `go test -race -timeout 120m ./internal/player/...` | 15 packages ok; 44.7 s |
+| `go test -race -timeout 120m ./internal/alsapcm/` | ok; 77.3 s |
+| `go test -race -timeout 120m ./cmd/bridge/` | ok; 1,560.6 s |
+| CI's native-integration invocations (`scripts/native-integration-overlay.py`, `-race`) | cmd/bridge 83 of 83, playback 79 of 79, every case the job names |
+
+The rules patch (output.md's B853 line and its long form, and one build-ci-tests entry) was
+checked on a copy of the tree: it applies to the branch, the budgets hold (CLAUDE.md 83.5%, worst
+load 78.3%), `verify_moves.py --base HEAD` misses only the B853 line's two edited copies, each with
+its successor, and `TestEveryCitedTestNameExists` caught a ghost citation planted in the copy and
+passed without it.
