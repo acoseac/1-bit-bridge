@@ -95486,3 +95486,41 @@ tags, `TMPDIR` on disk):
 | `go test -race -timeout 120m ./internal/alsapcm/` | ok; 77.2 s |
 | `go test -race -timeout 120m ./cmd/bridge/` | ok; 1,642.4 s |
 | CI's native-integration invocations (`scripts/native-integration-overlay.py`, `-race`) | cmd/bridge 83 of 83, playback 79 of 79, every case the job names |
+
+## 2026-11-12 — B728 B9 PR 2 round 5: two containment assertions beside a Drop's clean-up, and the rig's admission and revocation ask the lock
+
+Base: dab9af3a (`orch/b9p2`, round 4), PR #1453. Tests only.
+
+**Item 1: the containment checks beside a PCM Drop.** `TestARevocationThatPanicsStopsTheSession` and
+`TestARetiringPositionsPanicStopsAndClosesWithoutAnotherRead` asserted the session's lock free with
+an immediate `TryLock` right after the refresh that contained their failure. Both sessions have a
+PCM output, which the containment drops on two counted goroutines (the worker and its `call`), and
+the call's deferred clean-up takes the lock to clear `containDrop` once the sink's `Drop` returned,
+after `sink.stopped` closes: a legitimate holder the `TryLock` could meet. Both take the lock within
+the bound now (`checkContainedWithin`) and join both goroutines within it (`joinBackend`), their
+real end, since `ContainCalled` alone is not it under cancellation.
+`TestTheContainmentCheckWaitsOutABriefHolderOfTheLock` is the contention case: a test goroutine
+holds the lock a moment, an immediate `TryLock` fails on it, and the bounded check waits it out; its
+teardown lets the holder go and joins it whatever an assertion did. Controls (uncommitted edits to
+ca0d3b55, restored with `git checkout --`): the case's bounded check replaced by the old immediate
+one, red at once, "containment left the session lock held" (binary 0.01 s); the holder's release
+taken away, red at the bound, "containment left the session lock held 5s", the teardown letting it
+go (binary 5.02 s).
+
+**Item 2: the rig's admission and revocation.** `r.admitted` returned as soon as `admitDSD`
+answered, so a lock the admission kept went unseen: with the early `nativeRevoked` branch's deferred
+unlock removed (dab9af3a), every subcase of
+`TestAnEntryAfterTheSessionsDSDStoppedIsRefusedForTheCause` passed its own assertions and only the
+rig's cleanup said the lock was held, 5 s a subcase, 45 s in all. It asks `heldAfter("the
+admission")` before returning now; `r.revoke` gets the string form its siblings have (`revoked`),
+fails on the case's goroutine alone, and the Admitting seam, on the admission's goroutine, says a
+failure with `t.Error`. Under the same control at 8c02a947 every subcase fails at once, "the
+session's lock is held once the admission returned" (binary 0.02 s). With the later deferred unlock
+removed instead, the earlier deferred clean-up deadlocks retaking the lock, the admission never
+answers, and the rig's watchdog fires, "the admission did not answer within 5s"
+(`TestARevocationDuringAnAdmissionIsItsRefusal`, binary 5.02 s). `refusesDSD64` takes no session
+lock.
+
+Runs at 8c02a947: `go vet` with the tags on linux/amd64, windows and linux/386, clean; `-race
+-count=50 -v` of the ten touched tests, 1,100 PASS with their subtests, 0 FAIL, 0 SKIP; `go test
+-race -timeout 120m ./internal/player/playback/`, ok (3.2 s).
