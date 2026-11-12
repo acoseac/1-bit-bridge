@@ -94542,6 +94542,61 @@ ok. Under the native overlay with `-race`:
 `make docs-check` was clean. `verify_moves.py --base 3a860847` passes with the
 output.md line declared an edit and round 5's History heading renamed.
 
+## 2026-11-11 — B844 and B851: the re-queue test waits for the rollback, and two backup prunes for the verification's end
+
+Backlog B844 and B851, on `fix/b844-b851-test-flakes` from 4b21e2ce. Test-only.
+
+**B844: the failure.** `TestAMatchWhoseReQueueDidNotLandIsReQueuedByTheNextSweep/cancelled_inside_the_reset_by_a_switch-off` failed 2 in 100 in the backlog's repro (`-race`, CPU hogs) at `fingerprint_requeue_test.go:116`, "the first sweep's re-queue landed: the case tests nothing". Its hold (`SetResetEnrichedBeforeCommitForTest`) turned the switch off, waited for the reset's context to be done or for 10 s, and returned nil, so that the commit after it would fail on the cancellation.
+
+**The mechanism** (go1.27.3's sources). Not the 10 s fallback: every failing case ended in under 2 s (1.37 to 1.77 s here, 1.77 s in the repro). `context.(*cancelCtx).cancel` closes its own Done (context.go:568) before it cancels the contexts derived from it (570-573), all under its mutex. `database/sql` derives the transaction's context from the reset's (`beginDC`, sql.go:1920), and `Tx.Commit` asks that derived context first (2296-2303), then marks the transaction done and commits. The hold woke on the reset's Done; where it returned before the switch's poller (`enrichgate.CancelWhenOff`'s goroutine) had reached the transaction's context in that loop, Commit committed, and `awaitDone`'s rollback then found the transaction done.
+
+**The fix.** The hold only parks (`return <-answer`, line 104). The test's goroutine turns the switch off, waits at the driver for the rollback database/sql makes once the transaction's context is done (`sqlitetest.RollbackWatch.WaitPast`, line 61: B662's wait), and only then lets the hold go (line 133), so the commit answers `sql.ErrTxDone`. No timer decides the premise; a rollback that never comes fails the watch's wait. The seam hands the hold the reset's context alone, so the test cannot ask the transaction which rollback it saw, as B662's rule would have it; the sweep holds the store's writer lock and nothing else in the test opens a transaction during the hold, so the next rollback on the file is the reset's, and a wrong attribution could only fail the case, at line 139.
+
+**B844: runs** (the cancelled subtest alone, `-race`, under a fuzz job holding about 12 of 16 CPUs; from 22:45 a make test ran beside part of the after-run, C1 and C2):
+
+| Run | Result |
+|---|---|
+| 4b21e2ce, `-count 200` | red 8 of 200 at line 116, each 1.37 to 1.77 s |
+| ed1d99d6, `go test -race -count=200 -run …` | green 200 of 200 |
+| C1: the timed fallback put back (the hold turns the switch off, waits for `ctx.Done()` or 10 s, returns nil) | red 17 of 200, the same words, each 2.00 s or less |
+| C2: C1 with no timer | red 18 of 200, each 1.97 s or less |
+| D1b: C2, the window widened (a context derived from the reset's beside the transaction's, carrying 100,000 contexts of its own, made before the switch goes off) | red 5 of 40 |
+| D1tb: the hold as at 4b21e2ce, timer kept, the window widened | red 10 of 40 |
+| D2b: the fix, the window widened the same way | green 100 of 100 |
+
+A first widened pair (green 20 of 20 each) is not counted: it cancelled the widening contexts in a defer before the hold returned, and the last of those cancels removes the widening context from the reset's under the reset's mutex, which the poller holds through its whole loop, so the hold waited until that loop had cancelled the transaction's context too: the very wait that closes the window.
+
+**B851: the failure.** `TestASyncFailureAfterTheVerdictsRenameReadsAsNotVerified` (verify_test.go) and `TestAVerifiedRecordLeftForAFailedOneIsVetoedWhereItsBundleTakesNoFile` (verify_veto_unix_test.go), B849's census's two leftovers, pruned on a verification's answer and checked the prune's error alone. The worker answers before it unlocks the backups folder (`verifyAndThen`), a prune that meets the lock answers `Skipped` with a nil error (`pruneUnder`, backup.go:1102-1104), and both then read an anchor a skipped prune keeps whatever it reads: blind, not red.
+
+**The fix.** Each prune requires it ran (`!pr.Skipped`, verify_test.go:876, verify_veto_unix_test.go:65), and waits first for the verification's worker, B849's way: `unlockHold` armed just before that verification (lines 857 and 46, never before the fixture's), then `requireHeld` and `letGoAndAwaitEnd` (lines 863-864 and 54-55), the lock asked where the end is heard. The unix test's failure stays the folder's own (mode 0500): the hooks hold the unlock and hear the end.
+
+**B851: runs** (both tests alone, `-race`, three runs each, R0 and R1 before the fix and G2 and C1 at 0b1c72c7; "the delay" is a temporary one-second sleep in the backups lock's release, after its release hook and before its unlock, a slow runner's unlock):
+
+| Run | Result |
+|---|---|
+| R0: the sites as on main, with the delay | green 3 of 3 each: the skipped prune passes |
+| R1: `!Skipped` asserted, no wait, with the delay | red 3 of 3 each, "Skipped:true SkippedFor:another verification or prune of these snapshots holds their lock" |
+| G2: the fix, with the delay | green 3 of 3 each |
+| C1: the fix without `requireHeld` and `letGoAndAwaitEnd` | red 3 of 3 each, the same words |
+
+Every mutation in both tables was computed in memory, written for its build alone, and put back from memory, checked by digest; `git status` was empty after each.
+
+**Left.** Five more prunes in internal/backup check the error alone and then a snapshot the prune kept: verify_test.go:825, verify_hold_test.go:453 and 505, verify_round5_test.go:250, verify_veto_test.go:228. Each follows `awaitClean` or `verifiedSnapshot`, and a hold drops only once its unlock has ended (`hold.release`, then `hold.drop`), so B849's window does not reach them; a prune skipped for any other cause would still pass them. And one in cmd/bridge, which both make test runs below failed: `TestTheTickerAndTheDoctorNameAPruneGivenUp` prunes right after `verifiedInstallSnapshot` (backup_round3_test.go), which returns on `SnapshotAndVerify`'s answer with no drain, and wants the prune given up; it failed at backup_round5_test.go:183, "the prune answered <nil>, want it given up". Built with the unlock delayed a second (the delay above), it failed 3 of 3 in those words, and passed 3 of 3 without. It fails rather than passes blind, and B849's census, whose two leftovers are B851's, did not list it.
+
+**Checks** (go1.27.3, the Makefile's tags, TMPDIR on disk under the worktree's scratch).
+
+| Check | Result |
+|---|---|
+| gofmt on the three files; `make fmt` | nothing listed; the tree unchanged |
+| `make vet`, and with GOOS=windows, GOOS=darwin, and GOOS=linux GOARCH=386 | exit 0 each |
+| `-race -count=50 -run '^TestAMatchWhoseReQueueDidNotLandIsReQueuedByTheNextSweep$' ./cmd/bridge/` | 50 of 50 (100 leaves); 215.2 s |
+| `-race -count=50 -run '^TestASyncFailureAfterTheVerdictsRenameReadsAsNotVerified$' ./internal/backup/` | 50 of 50; 240.7 s |
+| `-race -count=50 -run '^TestAVerifiedRecordLeftForAFailedOneIsVetoedWhereItsBundleTakesNoFile$' ./internal/backup/` | 50 of 50, none skipped; 272.8 s |
+| make test | 85 packages ok, internal/backup among them (939.9 s); cmd/bridge, internal/admin and internal/manifest stopped at the 30-minute timeout, and one internal/integrity timing case failed, with this session's stress runs beside them |
+| make test of those four again, nothing else of this session running | cmd/bridge, internal/admin and internal/manifest again at the 30-minute timeout; internal/integrity ok (9.1 s) |
+| `go test -race -timeout 120m`, each alone, nothing else of this session running: ./cmd/bridge/, ./internal/admin/, ./internal/manifest/ | ok each: 2536.3 s, 1847.6 s, 3392.1 s (build-ci-tests.md: a timeout is not a failure) |
+| make build-all | exit 0 |
+
 ## 2026-11-12 — B826: a restore holds the lock of its snapshot's folder
 
 The rule is in `cli-serve.md` (the "…and a restore takes that lock" bullet

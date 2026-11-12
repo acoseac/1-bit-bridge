@@ -14,12 +14,19 @@ import (
 
 // TestAVerifiedRecordLeftForAFailedOneIsVetoedWhereItsBundleTakesNoFile is
 // TestAVerifiedRecordLeftForAFailedOneIsVetoedWhenItsWriteFails over a real
-// failure, no seam: a verified snapshot whose database and files fail when
-// checked again, its folder taking no new file (mode 0500), cannot stage
-// its record, which keeps its VERIFIED; the veto goes beside the bundle, and
-// no reader reads that VERIFIED after the error. Once the folder takes files
-// again the next check writes the record and lets the veto go. Red on the
-// round before, which put no veto over a record that would hold none.
+// failure, no seam making it: a verified snapshot whose database and files
+// fail when checked again, its folder taking no new file (mode 0500), cannot
+// stage its record, which keeps its VERIFIED; the veto goes beside the
+// bundle, and no reader reads that VERIFIED after the error, the prune
+// keeping the older verified snapshot. Once the folder takes files again the
+// next check writes the record and lets the veto go. Red on the round
+// before, which put no veto over a record that would hold none. The prune
+// runs once the verification's worker has ended: the verification answers
+// before that worker lets go of the backups folder's lock, whose unlock is
+// held here from the answer until the test waits for its end (unlockHold,
+// backlog B851), and a prune skipped for that lock kept the older snapshot
+// whatever it read. Those hooks hold the unlock and hear the end; they make
+// no failure and change no verdict.
 func TestAVerifiedRecordLeftForAFailedOneIsVetoedWhereItsBundleTakesNoFile(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("running as root: a folder's mode 0500 refuses root nothing")
@@ -34,6 +41,9 @@ func TestAVerifiedRecordLeftForAFailedOneIsVetoedWhereItsBundleTakesNoFile(t *te
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	unlock := holdUnlockOf(t, filepath.Dir(dir))
+	joinBackupCallers(t, unlock.release)
+	unlock.arm(t, dir)
 	res, err := backup.VerifySnapshot(t.Context(), dir, backup.VerifyOptions{})
 	if res.Found.DatabaseState != backup.StateFailed || res.Found.FilesState != backup.StateFailed {
 		t.Fatalf("the check found %s/%s, want FAILED/FAILED: the test did not reach the case", res.Found.DatabaseState, res.Found.FilesState)
@@ -41,6 +51,8 @@ func TestAVerifiedRecordLeftForAFailedOneIsVetoedWhereItsBundleTakesNoFile(t *te
 	if err == nil {
 		t.Fatal("a verification whose bundle takes no file answered no error")
 	}
+	unlock.requireHeld(t)
+	unlock.letGoAndAwaitEnd(t)
 	if m := readManifestT(t, dir); m.Verification.DatabaseState != backup.StateVerified {
 		t.Fatalf("the record holds %s: the staging did not fail", m.Verification.DatabaseState)
 	}
@@ -50,8 +62,8 @@ func TestAVerifiedRecordLeftForAFailedOneIsVetoedWhereItsBundleTakesNoFile(t *te
 	if !pathExists(t, backup.RootVetoPath(dir)) {
 		t.Error("no veto beside a bundle that takes no file")
 	}
-	if _, err := backup.Prune(filepath.Dir(dir), 1); err != nil {
-		t.Fatal(err)
+	if pr, err := backup.Prune(filepath.Dir(dir), 1); err != nil || pr.Skipped {
+		t.Fatalf("the prune answered %+v, %v; want it run: a skipped prune keeps the anchor whatever it reads", pr, err)
 	}
 	if !pathExists(t, anchor) {
 		t.Error("the prune let the older verified snapshot go")
