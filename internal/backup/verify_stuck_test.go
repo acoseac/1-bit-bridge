@@ -42,17 +42,23 @@ func awaitMarker(t *testing.T, root string) {
 	}
 }
 
-// parkCheck parks the first check that reaches SQLite's open of its
-// snapshot's database (SetOnDatabaseOpenForTest), the database's file open,
-// until release is called; entered closes once one is parked. Its cleanup
-// lets the check go and joins the verification that owes owed its check (a
-// capture's; "" for none) and this process's slot before it puts the seam
-// back.
+// parkCheck parks the first check whose thread begins
+// (SetOnLowPriorityForTest: on the check's own thread, its priority lowered,
+// before it reads anything of the snapshot) until release is called; entered
+// closes once one is parked. Every check comes to it, whatever its deadline:
+// nothing before it asks the check's context, so a check given up before its
+// thread ran (a thread the host runs late) parks there all the same, and
+// what its worker holds stays held until it is let go. A park at SQLite's
+// open came after the paced hash of the database, which a deadline that
+// passed first cuts short, the check answering INCOMPLETE with no park, and
+// a test waiting for that park hung (backlog B872). Its cleanup lets the
+// check go and joins the verification that owes owed its check (a capture's;
+// "" for none) and this process's slot before it puts the seam back.
 func parkCheck(t *testing.T, owed string) (entered <-chan struct{}, release func()) {
 	t.Helper()
 	in, out := make(chan struct{}), make(chan struct{})
 	var parked atomic.Bool
-	t.Cleanup(backup.SetOnDatabaseOpenForTest(func() {
+	t.Cleanup(backup.SetOnLowPriorityForTest(func() {
 		if parked.CompareAndSwap(false, true) {
 			close(in)
 			<-out
@@ -67,6 +73,42 @@ func parkCheck(t *testing.T, owed string) (entered <-chan struct{}, release func
 		awaitSlotFree(t)
 	})
 	return in, release
+}
+
+// awaitParkedAndGivenUp waits for the check parkCheck parks (entered) and for
+// its verification's answer (done), which comes once the check's deadline has
+// given it up, in whichever order the two come: a check whose thread the host
+// runs late is given up before it parks, and parks all the same. The answer
+// is required within bound of start. An answer that comes while no check is
+// parked and is not a check given up (a verification refused before its
+// check began, a check that ran to its end) fails the test at once, saying
+// what it was, and so does either wait past bound and 30 s (backlog B872).
+func awaitParkedAndGivenUp(t *testing.T, entered <-chan struct{}, done <-chan backup.Result, start time.Time, bound time.Duration) backup.Result {
+	t.Helper()
+	var res backup.Result
+	timeout := time.NewTimer(bound + 30*time.Second)
+	defer timeout.Stop()
+	for entered != nil || done != nil {
+		select {
+		case <-entered:
+			entered = nil
+		case res = <-done:
+			done = nil
+			if took := time.Since(start); took > bound {
+				t.Errorf("the verification whose check was given up answered %v after it began; its bound is %v", took, bound)
+			}
+			if entered != nil && !errors.Is(res.VerifyErr, backup.ErrCheckGivenUp) {
+				t.Fatalf("the verification answered %v before its check reached its park, its record %s %v: no check was left to give up",
+					res.VerifyErr, res.Verify.Record.DatabaseState, res.Verify.Record.DatabaseReasons)
+			}
+		case <-timeout.C:
+			if done == nil {
+				t.Fatal("the check given up never reached its park")
+			}
+			t.Fatalf("the verification did not answer within %v (its check parked: %v)", bound+30*time.Second, entered == nil)
+		}
+	}
+	return res
 }
 
 // unlockHold holds the next unlock of a backups folder's lock once armed
@@ -182,8 +224,9 @@ func backupsLockHeld(root string) (bool, error) {
 // third round's red for a check given up past its deadline (Codex's first
 // finding on round 2): the verification answers its caller within its bound,
 // its check given up and recorded INCOMPLETE (deadline), and its worker keeps
-// what it holds until the check's goroutine has ended, the snapshot's
-// database still open, each hold asked apart: this process's slot (a
+// what it holds until the check's goroutine has ended, a check whose thread
+// does not return (parked before it reads the snapshot, parkCheck, as one in
+// a read of a hung mount is), each hold asked apart: this process's slot (a
 // verification in another backups folder, whose lock nobody holds, answers
 // ErrCheckStillRunning at once), the backups folder's kernel lock (a
 // verification of another snapshot there, made as another process makes it,
@@ -197,8 +240,12 @@ func backupsLockHeld(root string) (bool, error) {
 // once the verification that took the folder's lock again as another
 // process has ended: it answers before its worker lets go of that lock, whose
 // unlock is held from the answer until the test waits for the worker's end
-// (unlockHold, backlog B849). Red on the round before, which let all of it go
-// once its caller had its answer, and pruned under it.
+// (unlockHold, backlog B849). The park and the answer are awaited in either
+// order, bounded (awaitParkedAndGivenUp; backlog B872: parked at SQLite's
+// open, the check a deadline cut short in its hash never parked, and the
+// wait for it ran to the package's timeout on macOS's CI). Red on the round
+// before, which let all of it go once its caller had its answer, and pruned
+// under it.
 func TestAnAbandonedCheckKeepsItsHoldsUntilItsCheckerEnds(t *testing.T) {
 	src := storeWithTracks(t, 5)
 	oldest := verifiedSnapshot(t, src)
@@ -222,8 +269,7 @@ func TestAnAbandonedCheckKeepsItsHoldsUntilItsCheckerEnds(t *testing.T) {
 	done := make(chan backup.Result, 1)
 	start := time.Now()
 	callers.start(func() { done <- backup.FinishCapture(context.Background(), c, keepOne, backup.VerifyOptions{}) })
-	<-entered
-	res := requireReturnedWithin(t, done, start, deadline+backup.StopWriteBound/2+2*time.Second, "a verification whose check was given up")
+	res := awaitParkedAndGivenUp(t, entered, done, start, deadline+backup.StopWriteBound/2+2*time.Second)
 	if !errors.Is(res.VerifyErr, backup.ErrCheckGivenUp) || !errors.Is(res.VerifyErr, context.DeadlineExceeded) {
 		t.Errorf("the verification answered %v, want its check given up at the deadline", res.VerifyErr)
 	}
@@ -397,7 +443,15 @@ func TestAVerificationBegunBeforeItsEndHookNeverRunsIt(t *testing.T) {
 // TestAVerificationWaitingItsTurnHearsOfACheckGivenUp: a verification that
 // began to wait for this process's slot behind another, whose check is then
 // given up, answers ErrCheckStillRunning as soon as it is given up, not once
-// its own context ends or the check does (backlog B653's third round).
+// its own context ends or the check does (backlog B653's third round). The
+// first verification's deadline counts from its lock, which the test holds as
+// another process would until the second waits its turn, the first holding
+// the slot meanwhile: so the first's check is given up only once the second
+// waits, however late the host runs either, and its check, parked before it
+// reads anything (parkCheck), is given up and does not end. Backlog B872: the
+// second began once the first's check had parked at SQLite's open, a park the
+// first's deadline could cut short, and the give-up could come before the
+// second began to wait; either left a wait with no bound that never ended.
 func TestAVerificationWaitingItsTurnHearsOfACheckGivenUp(t *testing.T) {
 	first, err := backup.Snapshot(t.Context(), storeWithTracks(t, 5))
 	if err != nil {
@@ -409,30 +463,36 @@ func TestAVerificationWaitingItsTurnHearsOfACheckGivenUp(t *testing.T) {
 	}
 	const deadline = 300 * time.Millisecond
 	t.Cleanup(backup.SetVerifyDeadlineForTest(deadline))
-	waiting := make(chan struct{})
-	var waited sync.Once
+	unlock := holdLockAsAnotherProcess(t, filepath.Dir(first))
+	lockWaiting, waiting := make(chan struct{}), make(chan struct{})
+	var lockWaited, waited sync.Once
+	t.Cleanup(backup.SetOnLockWaitForTest(func() { lockWaited.Do(func() { close(lockWaiting) }) }))
 	t.Cleanup(backup.SetOnSlotWaitForTest(func() { waited.Do(func() { close(waiting) }) }))
 	entered, release := parkCheck(t, "")
-	callers := joinBackupCallers(t, release)
+	callers := joinBackupCallers(t, func() { unlock(); release() })
 	firstDone := make(chan error, 1)
 	callers.start(func() {
 		_, err := backup.VerifySnapshot(context.Background(), first, backup.VerifyOptions{})
 		firstDone <- err
 	})
-	<-entered
+	awaitEntered(t, lockWaiting, "the first verification's wait for its backups folder's lock, this process's slot held")
 	secondDone := make(chan error, 1)
 	callers.start(func() {
 		_, err := backup.VerifySnapshot(context.Background(), other, backup.VerifyOptions{BackupsRoot: filepath.Dir(other)})
 		secondDone <- err
 	})
-	<-waiting
-	err = requireReturnedWithin(t, firstDone, time.Now(), deadline+backup.StopWriteBound/2+2*time.Second, "the verification whose check is given up")
+	awaitEntered(t, waiting, "the second verification's wait for its turn")
+	// The first takes its lock at its next try, its deadline counted from it.
+	unlocked := time.Now()
+	unlock()
+	err = requireReturnedWithin(t, firstDone, unlocked, deadline+backup.StopWriteBound/2+2*time.Second, "the verification whose check is given up")
 	if !errors.Is(err, backup.ErrCheckGivenUp) {
 		t.Fatalf("the first verification answered %v, want its check given up", err)
 	}
 	if err := requireReturnedWithin(t, secondDone, time.Now(), 2*time.Second, "the verification waiting its turn"); !errors.Is(err, backup.ErrCheckStillRunning) {
 		t.Errorf("the verification waiting its turn answered %v, want ErrCheckStillRunning", err)
 	}
+	awaitEntered(t, entered, "the park of the check given up")
 }
 
 // TestAPanicInAVerificationLetsGoOfWhatItHolds: a check that panics (a

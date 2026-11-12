@@ -86,14 +86,19 @@ func runVerifyWithFault() int {
 
 // runStuckCheck is the re-exec'd test binary's whole run as one verification
 // of the snapshot stuckCheckEnv names, in the backups folder after the list
-// separator, whose check parks with the database open until its standard
-// input ends (the test closes it, or ends), past a deadline of 300 ms.
+// separator, whose check parks before it reads the snapshot
+// (SetOnLowPriorityForTest, which every check comes to whatever its deadline)
+// until its standard input ends (the test closes it, or ends), given up past
+// a deadline of 300 ms. A verification that answers anything else ran no
+// check to park, and the run ends at once, exit 1 (backlog B872: parked at
+// SQLite's open, a check its deadline cut short in its hash never parked, and
+// the process waited for that park for good).
 func runStuckCheck() int {
 	dir, root, _ := strings.Cut(os.Getenv(stuckCheckEnv), string(os.PathListSeparator))
 	backup.SetVerifyDeadlineForTest(300 * time.Millisecond)
 	letGo := make(chan struct{})
 	var parked atomic.Bool
-	backup.SetOnDatabaseOpenForTest(func() {
+	backup.SetOnLowPriorityForTest(func() {
 		if parked.CompareAndSwap(false, true) {
 			fmt.Fprintln(os.Stdout, stuckParked)
 			_, _ = io.Copy(io.Discard, os.Stdin)
@@ -102,6 +107,9 @@ func runStuckCheck() int {
 	})
 	_, err := backup.VerifySnapshot(context.Background(), dir, backup.VerifyOptions{BackupsRoot: root})
 	fmt.Fprintln(os.Stdout, stuckGivenUp, err)
+	if !errors.Is(err, backup.ErrCheckGivenUp) {
+		return 1
+	}
 	<-letGo
 	// Its worker lets the folder go once the check has ended.
 	for deadline := time.Now().Add(30 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
@@ -343,7 +351,7 @@ func TestAFreshProcessReadsNoVerifiedAVerificationCouldNotRecord(t *testing.T) {
 
 // TestACheckThatDidNotEndInAnotherProcessHoldsTheFolderUntilItEnds: a
 // verification in a process of its own, whose check is given up past its
-// deadline with the snapshot's database open, holds the backups folder's
+// deadline, its thread parked (runStuckCheck), holds the backups folder's
 // kernel lock until the check ends (backlog B653's third round, the review of
 // its brief: another process for the kernel's lock): meanwhile bridge doctor
 // says so (backup-check, naming the snapshot), bridge backup --verify in this
@@ -490,9 +498,13 @@ func TestTheTickerTakesNoSnapshotWhileACheckThatDidNotEndHoldsTheFolder(t *testi
 		t.Fatal(err)
 	}
 	t.Cleanup(backup.SetVerifyDeadlineForTest(300 * time.Millisecond))
+	// The check parks before it reads the snapshot, where every check comes
+	// whatever its deadline (backlog B872: parked at SQLite's open, a check
+	// its deadline cut short in its hash never parked, and the wait for that
+	// park had no bound).
 	entered, out := make(chan struct{}), make(chan struct{})
 	var parked atomic.Bool
-	t.Cleanup(backup.SetOnDatabaseOpenForTest(func() {
+	t.Cleanup(backup.SetOnLowPriorityForTest(func() {
 		if parked.CompareAndSwap(false, true) {
 			close(entered)
 			<-out
@@ -514,14 +526,24 @@ func TestTheTickerTakesNoSnapshotWhileACheckThatDidNotEndHoldsTheFolder(t *testi
 		_, err := backup.VerifySnapshot(context.Background(), dir, backup.VerifyOptions{BackupsRoot: root})
 		verified <- err
 	}()
-	<-entered
-	select {
-	case err := <-verified:
-		if !errors.Is(err, backup.ErrCheckGivenUp) {
-			t.Fatalf("the verification answered %v, want its check given up", err)
+	// The park and the answer, in whichever order they come: a check whose
+	// thread the host runs late is given up before it parks, and parks all
+	// the same; an answer that is no check given up came with none to park.
+	var parks <-chan struct{} = entered
+	var answers <-chan error = verified
+	timeout := time.After(30 * time.Second)
+	for parks != nil || answers != nil {
+		select {
+		case <-parks:
+			parks = nil
+		case err := <-answers:
+			answers = nil
+			if !errors.Is(err, backup.ErrCheckGivenUp) {
+				t.Fatalf("the verification answered %v (its check parked: %v), want its check given up", err, parks == nil)
+			}
+		case <-timeout:
+			t.Fatalf("waited 30 s: the check parked %v, the verification answered %v", parks == nil, answers == nil)
 		}
-	case <-time.After(30 * time.Second):
-		t.Fatal("the check was never given up")
 	}
 	bootPass := func() (string, string) {
 		ctx, cancel := context.WithCancel(context.Background())

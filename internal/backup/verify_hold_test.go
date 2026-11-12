@@ -466,7 +466,11 @@ func TestAVetoThatStoodBeforeAVerificationStaysOverTheVERIFIEDItCarries(t *testi
 // before its check, though none stood before it began and the record, whose
 // VERIFIED the merge keeps, is as it was: no check that finished has cleared
 // it, so no reader reads the snapshot verified and the prune keeps the older
-// verified one, until a check of it finishes, which lets the veto go.
+// verified one, until a check of it finishes, which lets the veto go. The
+// check parks before it reads the snapshot (SetOnLowPriorityForTest), so its
+// deadline gives it up whenever it passes (backlog B872: parked at SQLite's
+// open, after the veto's sync and the paced hash, a deadline that passed
+// first answered INCOMPLETE, no check given up).
 func TestARecheckGivenUpLeavesTheVetoItMade(t *testing.T) {
 	requireDirectorySync(t)
 	src := storeWithTracks(t, 20)
@@ -482,7 +486,7 @@ func TestARecheckGivenUpLeavesTheVetoItMade(t *testing.T) {
 	restoreDeadline := backup.SetVerifyDeadlineForTest(300 * time.Millisecond)
 	t.Cleanup(restoreDeadline)
 	p := newParking()
-	t.Cleanup(backup.SetOnDatabaseOpenForTest(p.park))
+	t.Cleanup(backup.SetOnLowPriorityForTest(p.park))
 	t.Cleanup(func() {
 		p.release()
 		awaitClean(t)
