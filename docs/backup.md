@@ -195,7 +195,12 @@ marker beside the lock, which other processes read, is written only once a
 removal of an older marker that the restore had begun has answered; until
 then another process reads that older marker, and may say that the check or
 prune it names is still running, or finds no marker it can read and waits for
-the folder's lock.
+the folder's lock. A look at the snapshots' lock (the doctor's, the scheduled
+snapshot's, or `bridge restore`'s before it asks you to confirm) whose letting
+go of that lock does not answer within its bound holds them in its own
+process the same way, named as that look (the restore's as that restore), and
+writes no marker: once its unlock has answered, another process may hold the
+lock.
 
 When the bridge starts, it takes no snapshot when one from the last day has
 a verified database. Nor does it take one when the newest snapshot from the
