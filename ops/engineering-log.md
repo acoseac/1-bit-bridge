@@ -94596,3 +94596,149 @@ Every mutation in both tables was computed in memory, written for its build alon
 | make test of those four again, nothing else of this session running | cmd/bridge, internal/admin and internal/manifest again at the 30-minute timeout; internal/integrity ok (9.1 s) |
 | `go test -race -timeout 120m`, each alone, nothing else of this session running: ./cmd/bridge/, ./internal/admin/, ./internal/manifest/ | ok each: 2536.3 s, 1847.6 s, 3392.1 s (build-ci-tests.md: a timeout is not a failure) |
 | make build-all | exit 0 |
+
+## 2026-11-12 — B728 B9 PR 2: a DAC's DSD choice written only while the player is stopped, and B853
+
+Base: main at 3a6b924e (B9 PR 1, #1448, at 4b21e2ce); branch `feat/b728-b9-pr2`. The owner
+(2026-11-10): "Stop playback to change DSD". A DAC's choice is written only while the player is
+quiescent; #1434's write beside what plays (19 review rounds, its tip 0df60ade) is withdrawn, PR 1
+moved its lifecycle fixes to main, and this PR rebuilds the write in the backend, stop-only, with
+B853's fix. The route `PUT /v1/outputs/{id}/dsd`, `bridgeDSDChoice`, serve's adapter, PROTOCOL.md
+and its iOS mirror are PR 3's; the console is B13's, the app I4's. No hardware check was run.
+
+**What came back from #1434, by behaviour, never by cherry-pick.** `policy/choice.go`,
+`Inputs.WithState` and `choice_test.go`'s 16 cases, as they were (`Choose`: the four checks that
+read the state, in order, then the write; `StoredRevision`; `Intersect`; `dsd_choice_uncertain`).
+In the backend: the outcomes, `would_interrupt` dropped and `playback_not_stopped` added;
+`ChoiceRequest` without `Interrupt`; `ChoiceResult`; the log line (the key and the modes, no
+serial or port); the writes' turn, taken before the lease, so a second write waits within its
+context and answers `stale` with the revision the first made durable; `choiceFenced`;
+`dsdWrite`; `readBox` and `setOver`, `landedChoice` and the intersection; `oweProbe`, with
+`dsdProbe.asked` split from the generation; `playbacktest.MemStore`'s `Land`, `LandedState` and
+`Landed`, and `SetSeamsForTest`. #1434's `dsd_choice_test.go` (its 14 cases, adapted, beside the
+new `TestARefreshAfterALandedWriteKeepsTheIntersection`), its `dsd_choice_work_test.go`'s two
+(`…AChoiceWrittenBesideAProbeDropsNothingAndStaysAsked` became
+`TestAWriteWaitsForAProbeUnderWayAndOwesItsOwn`: the probe is now waited for, never run beside
+the write; `TestAChoiceWriteIsAWriteOfTheDSDState`), and from its internal file the checks' order,
+the lock order and the panic case (`…AWriteThatPanicsLeavesNothingPending` became
+`TestAWriteThatPanicsLetsGoOfItsLeaseAndItsTurn`). Main's probe words that said a choice forgets
+the probe's answers (`dsd_policy.go`, `dsd_work.go`, `internal/alsapcm/probe_cache.go`, and
+`dsd_work_test.go`'s two subtests, now a migration's part) are worded as #1434 worded them.
+
+**What did not come back.** `pendingChoice`, `pendingFor`, `changes`, `planAt`,
+`writeInterrupts`, `settleChoice`, `lockSettled`, `awaitWrite`, `settleOpen`, `reaskDSD`,
+`refusedUnder`, `dsdJudgement.interrupts`, `handedOff`, `maxChoiceRounds`, `errChoiceRound`,
+`errWouldInterrupt`, and every choice wait in the session, open, native, producer, convert and
+reporter code: nothing waits for, classifies or re-asks a pending write. Retired with them: the
+rest of #1434's internal file (`…TheWriteAsksWhatReconciliationDoes`,
+`…AWriteCountsWhatItInterruptsNotWhatTheBoxDoes`,
+`…AnOccurrenceWhoseRateTheWriteChangesWaitsAtTheEndOfItsOpen`,
+`…TheProducerHoldsAnOccurrenceAPendingWriteWouldReplan`, `…ALostReconciliationIsTriedOnceMore`),
+its `dsd_choice_round2_test.go` and `internal/alsapcm/playback_dsd_choice*_test.go`.
+
+**B853.** `admitDSD` refused every DSD entry of a session with `nativeRevoked` set as
+`dsd_dac_unread`, and `openSuccessor` a successor whose open ended after it as `native_revoked`,
+"DSD permission revoked", whatever set the flag. Four paths set it: `stopDSD` from
+`refreshDSD`'s containment of a policy reading (the word right) and from `reconcileDSD`'s
+contained panic (its only caller there; the reconciliation's ordinary revocations call `Revoke`),
+`Revoke` itself, and the qualification path's `reconcilePermission`, which sets the flag directly
+and calls `Revoke` only where a native output is active (Codex's review of the brief, finding 4).
+The reconciliation's contained panic records the session's fault (`faulted`, `ReasonFailed`),
+which `checkDSDActivation` answers as `backend_failed` with its words: the set did read, and the
+session's occurrences were never judged against it, so neither `native_revoked` nor
+`dsd_dac_unread` says what happened; that path's word is `backend_failed`. The cause is now
+recorded where the flag is set (`revokeDSDLocked`, under the session's lock); a failed reading
+replaces any earlier cause, word and detail, and nothing replaces it; otherwise the first stands.
+Both of `admitDSD`'s refusals and `openSuccessor`'s answer the record (`dsdRevokedLocked`). Red on
+main (a1b08bde's tests over bc236545's code):
+
+- the rig, `TestADSDEntryAfterAnOrdinaryRevocationIsRefusedForIt` (the queue of
+  `TestARevocationOfAPreparedSuccessorLetsThePCMPlayOn` extended past `b` with a PCM entry and
+  a DSD one): the DSD entry skipped `dsd_dac_unread`, "the effective DSD policy did not read",
+  where the revocation's reason is "an occurrence's DSD plan left the effective set, and the
+  engine hands nothing off again";
+- `TestAnEntryAfterTheSessionsDSDStoppedIsRefusedForTheCause`: a reconciliation that panicked,
+  an ordinary revocation, and the two in either order each refused `dsd_dac_unread` (the
+  unread-only case and the pairs with an unread reading passed on main, as they should);
+- `TestARevocationDuringAnAdmissionIsItsRefusal` (admitDSD's second check): `dsd_dac_unread`,
+  want `native_revoked`;
+- `TestASuccessorWhoseOpenEndsAfterARevocationIsRefusedForIt`: `native_revoked`, "DSD
+  permission revoked", want the revocation's reason;
+- `TestAnAuthorizationReplacedAsASuccessorOpensRefusesItForItsOwnReason`: the same, want
+  "selected DSD policy is no longer eligible".
+
+Controls, each committed first, restored from memory after, `git status` clean: the two words
+swapped (red: the rig, three internal cases and PR 1's
+`TestContainmentFencesAnAdmissionWithoutWaitingForIt`); no cause recorded (red: the rig and five
+internal tests, PR 1's containment case among them); a failed reading that does not stand over an earlier cause, and the last cause
+standing whatever it is (each red in `TestAnEntryAfterTheSessionsDSDStoppedIsRefusedForTheCause`).
+The other reads of the flag (the native open's error, the activation's fence, the producer's
+take-back) answer no entry's refusal and were left: `openSuccessor` refuses before the native
+open is reached.
+
+**The policy's half.** Ported verbatim; controls: the compare-and-set removed (red:
+`TestTheChecksThatReadTheStateRunInTheirOrder` answered `dop_confirmation_required` for
+`stale`, and `TestAStaleBaseIsRefusedAndAMatchingOneMovesTheRevision`), and the warnings left
+uncleared (red: `TestAWriteClearsItsDACsWarnings`,
+`TestAWriteOverAStateThatDidNotReadSeesTheDACsOffers`).
+
+**The configuration lease and the write.** `Backend.lease`, beside `holder`, `probing`,
+`waiters` and `terminalUnconfirmed`, taken under the backend's lock in the step that finds no
+session record, no holder and no release unconfirmed, else `playback_not_stopped` at once. A
+Start waits for it before it registers (`admitStart`, with no lock held), giving the wait up at
+its context's end or its release, holding nothing; it then meets its Release in either order
+(`session.abandon`), letting its occurrence's reservation go, so no record is left to refuse
+every later write (Codex's finding 1). `reserveProbe` refuses the slot while the lease is held
+(`ProbeChoiceWrite`, in `probeSlotSkips`); a write that finds a probe holding the slot claims the
+lease first, waits for the probe within its context, then reads the DAC. A probe begun before the
+write never settles the probe the write owes (`oweProbe` moves `asked`, which a run reads as it
+begins), a run parked between `endProbe` and `publishProbe` included. The write answers in the
+order the brief gives: `bad_request`, the turn, the writes closed by the player's stop
+(`persist_failed`), `playback_not_stopped`, no DSD policy (`state_unreadable`, before the DAC's
+reading, which is that policy's: Codex's finding 6), `dac_unavailable`, `dac_changed`, no state
+(`state_unreadable`), the fence (`persist_uncertain`), then one `Store.Update` running
+`policy.Choose`. A `policy.ChoiceRefusal` keeps its word, a stale one reading the policy again
+before it answers (Codex's finding 3); `ErrNotWritable` is `state_unreadable`, `ErrLandedNotHeld`
+`persist_uncertain`, `atomicwrite.ErrLanded` `persist_uncertain` with `landedChoice` recorded,
+which every later reading applies, so the supervisor's refresh keeps the intersection for the
+rest of the run; anything else `persist_failed`. `dsd_choice_uncertain` stays off the wire until
+PR 3 publishes it: serve's adapter sends it as `dsd_state_unreadable` (`wireDSDReason`; Codex's
+finding 5), which `TestAnUncertainChoiceGoesOutAsAWordTheProtocolNames` asks of the serialized
+GET after an `ErrLanded` write and again after `RefreshDSD`. The engine's gap is a precondition:
+between a release the engine acknowledged and the Start that follows it the backend holds no
+record, so PR 3's adapter asks the engine's owner goroutine, which checks the transport is stopped
+and grants the reservation in one step, the persistence off that goroutine, with a test that
+parks a Play between the check and its backend registration (Codex's finding 2). A crash after
+the rename and before the directory's sync may leave either choice.
+
+The lease and write cases drive an API main does not have (`ChooseDSD`), so what each pins is
+shown by the controls the brief names, each committed first, run with the tests it names, and
+restored (`git status` clean after each batch); every one went red as predicted:
+
+| Control | Red |
+|---|---|
+| the busy check dropped | `TestEachStateThePlayerIsNotStoppedInRefusesTheWrite` (PCM playing written, the state written, the revision moved), `TestAStartBetweenItsRegistrationAndItsHoldRefusesTheWrite`, `TestEveryRefusalChangesNothing`, `TestTheWritesChecksAreAnsweredInTheirOrder` |
+| the holder alone checked | `TestAStartBetweenItsRegistrationAndItsHoldRefusesTheWrite`, `TestEveryRefusalChangesNothing`, `TestTheWritesChecksAreAnsweredInTheirOrder` |
+| a Start skips the lease | `TestAWriteWaitsForAProbeUnderWayAndOwesItsOwn` (registered without waiting), `TestAProbeAskedDuringAWriteIsRefusedAndStaysOwed`, `TestAStartGivingUpItsWaitForTheLeaseLeavesNoRecord`; the rig's `TestAStartDuringAWritePlaysByTheChoiceItWrote` |
+| the lease let go before the publish | `TestAProbeAskedDuringAWriteIsRefusedAndStaysOwed` (the probe asked the DAC, a Start answered without waiting) |
+| `reserveProbe` ignores the lease | `TestAProbeAskedDuringAWriteIsRefusedAndStaysOwed` |
+| an abandoned Start returns with no rendezvous | `TestAStartGivingUpItsWaitForTheLeaseLeavesNoRecord` (its reservation held, a record left, the next write `playback_not_stopped`) |
+| the fence removed | `TestTheBackendsOwnFenceRefusesEveryLaterWrite`, `TestTheWritesChecksAreAnsweredInTheirOrder` |
+| the epoch read after the turn | `TestAStaleAnswerNeverCarriesARevisionAnotherWriteHasPassed` (revision 2, want 1) |
+| `settled` keyed on the generation | `TestAWriteWaitsForAProbeUnderWayAndOwesItsOwn`, `TestAProbeEndingAsAWriteTakesTheLeaseLeavesTheWritesProbeOwed` |
+| the uncertain word's mapping removed | `TestAnUncertainChoiceGoesOutAsAWordTheProtocolNames`, after the write and after the refresh |
+| a reading that does not hold the set to the intersection | `TestALandedWriteIsUncertainAndPublishesWhatBothStatesPlay`, `TestARefreshAfterALandedWriteKeepsTheIntersection` |
+| a stale answer that reads nothing again | `TestARevisionMovedBeforeTheStoresWriteIsStale`, `TestAStaleAnswerNeverCarriesARevisionAnotherWriteHasPassed` |
+| no DSD policy answered after the DAC's reading | `TestTheWritesChecksAreAnsweredInTheirOrder` |
+
+The first run of "a Start skips the lease" in the playback package went red only at go test's
+ten-minute deadline: `TestAWriteWaitsForAProbeUnderWayAndOwesItsOwn` waited in a select with no
+watchdog for the Start's wait for the lease, which the control skipped, while the write and the
+probe stayed parked. The select now fails as the Start registers without waiting, and on the
+watchdog, and every other wait of the choice's tests is bounded (20f22bea, ae4716f6); rerun, the
+control went red in under a second, three tests naming it.
+
+**Qualification version 49.** The guarded files changed (`playback/native.go`'s `Revoke`
+records its cause; `internal/alsapcm`'s probe cache words and tests); no byte a DAC is given
+changes. The runbook names 49 in its five current places and says what it covers;
+`ops/History-b470-native.md` records it beside 48.
