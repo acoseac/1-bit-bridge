@@ -531,14 +531,17 @@ func TestADeezerPulseThatRefusesThePortraitBatchStillWakesTheLoop(t *testing.T) 
 // enrichment answers off once, to the ordinary batch's own switch as it
 // begins (the second time it is asked, after Run's own ask), and on from then
 // on: the batch's listing is refused, and the enricher, idle for an hour,
-// enriches the waiting rows within a turn of the switch's interval. On main
-// the wait compared the switch with what Run saw before the batch, on, and
-// slept the hour out.
+// enriches the waiting rows within a turn of the switch's interval. Deezer is
+// off, so the portrait batch, which a refused batch skips and whose switch
+// then wakes the wait on its own, takes no part: the wake is the ordinary
+// batch's refusal alone. On main the wait compared the switch with what Run
+// saw before the batch, on, and slept the hour out.
 func TestAnEnrichmentPulseThatRefusesTheBatchsListingStillWakesTheLoop(t *testing.T) {
 	ups := newSwitchUpstreams(t)
 	e, store, _ := switchEnricher(t, ups)
 	e.PollInterval = time.Hour
 	e.switchEvery = 20 * time.Millisecond
+	e.WithDeezerEnabled(func() bool { return false })
 	seedSwitchTracks(t, store)
 	var asks atomic.Int64
 	// The rows that wait at the third ask, the first after the refused
