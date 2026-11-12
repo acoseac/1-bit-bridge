@@ -737,6 +737,7 @@ func (s *session) startDSDMonitor() {
 	}
 	ticks, stop := tick()
 	s.b.spawn(func() {
+		defer s.b.monitorEnded(s.id)
 		defer stop()
 		defer func() {
 			if r := recover(); r != nil {

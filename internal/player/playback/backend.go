@@ -195,12 +195,38 @@ type Seams struct {
 	// test makes the reconciliation panic there (B853 round 2). It must not
 	// call the backend.
 	ReconcilingPermission func(s engine.SessionID)
+	// Selecting runs on occurrence o's opener on the harness's path (an
+	// Authorization, no effective policy: openNativeContent) once the cause
+	// its session recorded has been asked and none found, before a selector or
+	// the session's cached refusal answers, with no lock held: a test revokes
+	// there, in the window the cause is asked again after (B853 round 3). It
+	// may call the backend.
+	Selecting func(o engine.OccurrenceID)
+	// MonitorEnded runs on session s's DSD monitor's goroutine
+	// (startDSDMonitor) as it returns, after everything else it does: a test
+	// counts the monitors its cleanup ended (B853 round 3). It must not block
+	// or call the backend.
+	MonitorEnded func(s engine.SessionID)
 }
 
 // reconcilingPermission is the ReconcilingPermission seam.
 func (b *Backend) reconcilingPermission(s engine.SessionID) {
 	if sm := b.cfg.Seams; sm != nil && sm.ReconcilingPermission != nil {
 		sm.ReconcilingPermission(s)
+	}
+}
+
+// selecting is the Selecting seam.
+func (b *Backend) selecting(o engine.OccurrenceID) {
+	if sm := b.cfg.Seams; sm != nil && sm.Selecting != nil {
+		sm.Selecting(o)
+	}
+}
+
+// monitorEnded is the MonitorEnded seam.
+func (b *Backend) monitorEnded(s engine.SessionID) {
+	if sm := b.cfg.Seams; sm != nil && sm.MonitorEnded != nil {
+		sm.MonitorEnded(s)
 	}
 }
 

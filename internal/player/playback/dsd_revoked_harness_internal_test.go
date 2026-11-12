@@ -2,6 +2,7 @@ package playback
 
 import (
 	"context"
+	"errors"
 	"os"
 	"sync"
 	"testing"
@@ -67,6 +68,108 @@ func (r *harnessRig) entry(t *testing.T, id engine.OccurrenceID) *engine.Unplaya
 
 // noApproval is the selectors' answer to a permission revoked or missing.
 var noApproval = engine.Unplayable{Reason: ReasonDSD, Detail: "native DSD here needs an owner-approved plan, and this backend holds none"}
+
+// transitionOfSuccessor is the transition scenario's backend, whose plans put
+// the successors' reference (successorOf) under the record's policy.
+func transitionOfSuccessor(cfg Config) (*Backend, error) {
+	ref, err := engine.NewReference("successor.dsf")
+	if err != nil {
+		return nil, err
+	}
+	return NewTransitionQualificationBackend(cfg, TransitionPlans{Policies: map[string]string{ref.String(): "p64"}})
+}
+
+// withoutApproval makes the rig's session one whose approval did not read at
+// its start: no permission, and u the refusal it keeps for DSD
+// (session.dsdRefusal), which its entries take in a selector's place.
+func (r *harnessRig) withoutApproval(u engine.Unplayable) {
+	r.s.mu.Lock()
+	r.s.permission, r.s.dsdRefusal = nil, &u
+	r.s.mu.Unlock()
+}
+
+// TestARevocationBetweenTheCausesAskAndTheSelectionIsTheEntrysRefusal
+// (backlog B853, round 3): on the harness's path openNativeContent asks the
+// cause recorded and lets go of the session's lock before a selector
+// (selectNative, selectTransition) or the session's cached refusal (an
+// approval that did not read at its start) answers. A revocation that comes in
+// that gap (Seams.Selecting), an ordinary one (Revoke) or the authorization
+// replaced (its record gone: reconcilePermission), records its cause and
+// revokes the permission, which a selector answers as no approval: the entry
+// is refused for the cause recorded, asked again in the step that sets its
+// refusal. Until round 3 it was refused as no approval, or for the cached
+// refusal, which refuseRevokedLocked passes over at the open's end. With
+// nothing recorded each answers as it did.
+func TestARevocationBetweenTheCausesAskAndTheSelectionIsTheEntrysRefusal(t *testing.T) {
+	cached := engine.Unplayable{Reason: ReasonDSDApproval, Detail: "the approved record does not read: the test's"}
+	ineligible := engine.Unplayable{Reason: "native_revoked", Detail: "selected DSD policy is no longer eligible"}
+	paths := []struct {
+		name      string
+		construct func(Config) (*Backend, error)
+		cached    bool
+	}{
+		{"the record's selection", New, false},
+		{"the transition scenario's selection", transitionOfSuccessor, false},
+		{"the session's cached refusal", New, true},
+	}
+	writers := []struct {
+		name  string
+		write func(*testing.T, *harnessRig)
+		want  engine.Unplayable
+	}{
+		{"an ordinary revocation", func(_ *testing.T, r *harnessRig) {
+			r.b.Revoke(engine.RevokeInput{Session: 1, Reason: revocationReason})
+		}, revocationRefusal},
+		{"the authorization replaced", func(t *testing.T, r *harnessRig) {
+			if err := os.Remove(r.cfg.Authorization.path()); err != nil {
+				t.Fatal(err)
+			}
+			r.b.RefreshAuthorization(context.Background())
+		}, ineligible},
+	}
+	for _, p := range paths {
+		for _, w := range writers {
+			t.Run(p.name+", "+w.name, func(t *testing.T) {
+				r := newHarnessRig(t, p.construct)
+				if p.cached {
+					r.withoutApproval(cached)
+				}
+				inGap := false
+				r.b.cfg.Seams = &Seams{Selecting: func(engine.OccurrenceID) {
+					w.write(t, r)
+					r.s.mu.Lock()
+					inGap = r.s.nativeRevoked
+					r.s.mu.Unlock()
+				}}
+				u := r.entry(t, 2)
+				if !inGap {
+					t.Fatal("no cause was recorded between the cause's ask and the selection: the case needs one there")
+				}
+				if u == nil || *u != w.want {
+					t.Errorf("the entry was refused %+v; want %+v", u, w.want)
+				}
+			})
+		}
+		t.Run(p.name+", nothing recorded", func(t *testing.T) {
+			r := newHarnessRig(t, p.construct)
+			if p.cached {
+				r.withoutApproval(cached)
+			}
+			reached := false
+			r.b.cfg.Seams = &Seams{Selecting: func(engine.OccurrenceID) { reached = true }}
+			u := r.entry(t, 2)
+			if !reached {
+				t.Fatal("the open did not reach the selection: the case needs the path through it")
+			}
+			switch {
+			case p.cached && (u == nil || *u != cached):
+				t.Errorf("the entry was refused %+v; want the session's cached refusal %+v", u, cached)
+			case !p.cached && u != nil:
+				t.Errorf("the entry was refused %+v; want it admitted, as the selection answers", *u)
+			}
+		})
+	}
+}
 
 // TestOnTheHarnesssPathAnEntryAfterARevocationIsRefusedForIt (backlog B853,
 // round 2): an ordinary revocation records its cause and revokes the
@@ -184,6 +287,55 @@ func TestAGaplessSuccessorsRefusalIsTheCauseRecordedBeforeItsCheckFailed(t *test
 	}
 }
 
+// TestAnEarlierRevocationInTheGaplessChecksOwnWordsIsTheSuccessorsRefusal
+// (backlog B853, round 3): an ordinary revocation that comes while the
+// producer checks a gapless DSD successor's permission, given the very words
+// the producer's own revocation is given (gaplessRevoked), drops the successor
+// for its cause, which stands: the producer tells its own revocation by what
+// that revocation recorded (Backend.revoke), never by the cause's words, which
+// until round 3 took the earlier cause for its own and answered the check's
+// error, "DSD permission revoked". The case where nothing was recorded before
+// the check failed is the round 2 case's, unchanged.
+func TestAnEarlierRevocationInTheGaplessChecksOwnWordsIsTheSuccessorsRefusal(t *testing.T) {
+	cfg, _ := approvedBackendFixture(t)
+	b := &Backend{cfg: cfg, sessions: map[engine.SessionID]*session{}}
+	p, err := b.readPermission(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := p.selectNative(dsd64Entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := nativeTransport(plan)
+	s := newSession(b, 1)
+	b.sessions[1] = s
+	t.Cleanup(s.cancel)
+	s.permission = p
+	s.cur = &output{transport: tr, policyID: plan.PolicyID}
+	done := make(chan struct{})
+	close(done)
+	o := &occ{id: 2, owner: s, plan: &plan, permission: p, transport: tr, done: done}
+	s.chain = []*occ{o}
+	b.rememberEdge(tr, &plan, p)
+	var once sync.Once
+	cfg.Authorization.Healthy = func() bool {
+		once.Do(func() { b.Revoke(engine.RevokeInput{Session: 1, Reason: gaplessRevoked}) })
+		return true
+	}
+	st := s.next()
+	s.mu.Lock()
+	refused, dropped := o.refused, o.dropped
+	s.mu.Unlock()
+	if st.kind == stepWrite || !dropped {
+		t.Fatalf("the producer's step was %v and the successor dropped %v: a gapless successor whose permission failed was not stopped", st.kind, dropped)
+	}
+	want := engine.Unplayable{Reason: "native_revoked", Detail: gaplessRevoked}
+	if refused == nil || *refused != want {
+		t.Errorf("the successor was refused %+v; want the earlier revocation's %+v", refused, want)
+	}
+}
+
 // TestAnEarlierRevocationsCauseStandsWhenTheAuthorizationIsReplaced
 // (backlog B853, round 2): an ordinary revocation drops the session's
 // prepared successor for its cause, and the authorization's reconciliation
@@ -244,7 +396,11 @@ func TestAnEarlierRevocationsCauseStandsWhenTheAuthorizationIsReplaced(t *testin
 // stopped with the backend's own failure recorded as its cause and as its
 // fault (stopDSD), and a DSD entry after it is refused for that cause. Until
 // round 2 the panic reached the caller, the monitor's goroutine included, and
-// nothing was recorded.
+// nothing was recorded. The containment holds no lock once it is done, and
+// revokes the authorization the reconciliation was replacing, as one whose
+// reading failed is (round 3): neither selector, the gapless check nor an
+// activation takes it for live, where until round 3 both selectors admitted
+// under it (the fault, which stops the producer, hid it from this case).
 func TestAPanicInTheAuthorizationsReconciliationIsContainedAndRecorded(t *testing.T) {
 	r := newHarnessRig(t, New)
 	r.b.cfg.Seams = &Seams{ReconcilingPermission: func(engine.SessionID) { panic("the test's reconciliation") }}
@@ -267,6 +423,34 @@ func TestAPanicInTheAuthorizationsReconciliationIsContainedAndRecorded(t *testin
 	}
 	if fault == nil || fault.Reason != ReasonFailed || fault.Detail != want.Detail {
 		t.Errorf("the session's fault is %+v; want the backend's own failure, %q", fault, want.Detail)
+	}
+	if !r.s.mu.TryLock() {
+		t.Fatal("the session's lock is held once the contained panic's caller has gone on")
+	}
+	p := r.s.permission
+	r.s.mu.Unlock()
+	switch {
+	case p == nil:
+		t.Fatal("the session holds no authorization: the case needs the one the reconciliation was replacing")
+	case !p.revoked.Load():
+		t.Error("the authorization the reconciliation was replacing is live after its contained panic")
+	}
+	ref, err := engine.NewReference("successor.dsf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	selections := map[string]func() error{
+		"the record's selector": func() error { _, err := p.selectNative(dsd64Entry); return err },
+		"the transition scenario's selector": func() error {
+			_, err := p.selectTransition(ref, dsd64Entry, &TransitionPlans{Policies: map[string]string{ref.String(): "p64"}})
+			return err
+		},
+	}
+	for name, sel := range selections {
+		var u *engine.Unplayable
+		if err := sel(); !errors.As(err, &u) || *u != noApproval {
+			t.Errorf("%s answered %v under the authorization after the contained panic; want %+v", name, err, noApproval)
+		}
 	}
 	if u := r.entry(t, 2); u == nil || *u != want {
 		t.Errorf("an entry after the contained panic was refused %+v; want %+v", u, want)

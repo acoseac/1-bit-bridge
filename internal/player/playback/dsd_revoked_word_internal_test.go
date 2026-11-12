@@ -34,23 +34,55 @@ const revocationReason = "the test's revocation"
 // one session holding a DSD64 occurrence admitted under the set published, and
 // the switches the causes are made with: the box's next reading panics
 // (broken), or it loses its altsets (gone), so a refresh re-plans the
-// occurrence through a hand-off that panics (failedHandoff).
+// occurrence through a hand-off that panics (failedHandoff). Its seams are
+// the backend's (Config.Seams): a case adds its own to them, never puts
+// others in their place, since the rig's cleanup counts by one of them.
 type revocationRig struct {
 	b            *Backend
 	s            *session
 	gone, broken *atomic.Bool
 	handoff      *failedHandoff
+	// ended is the session's DSD monitor's end (Seams.MonitorEnded), which a
+	// case starts by an admitted successor's open: one at most a session
+	// (startDSDMonitor).
+	ended chan struct{}
 }
+
+// rigStopBound bounds each of the rig's cleanup's waits (stop).
+const rigStopBound = 10 * time.Second
 
 func newRevocationRig(t *testing.T) *revocationRig {
 	t.Helper()
-	r := &revocationRig{gone: new(atomic.Bool), broken: new(atomic.Bool), handoff: &failedHandoff{}}
+	r := &revocationRig{gone: new(atomic.Bool), broken: new(atomic.Bool), handoff: &failedHandoff{}, ended: make(chan struct{}, 1)}
 	r.b, _ = fixtureSessionBackend(t, func(p *DSDPolicy) { p.Box = fixtureBox{gone: r.gone, broken: r.broken} })
+	r.b.cfg.Seams = &Seams{MonitorEnded: func(engine.SessionID) { r.ended <- struct{}{} }}
 	r.s = r.b.session(1)
-	t.Cleanup(r.s.cancel)
+	t.Cleanup(func() { r.stop(t) })
 	r.s.ev = r.handoff
 	r.s.chain = []*occ{openedOcc(r.b, 2)}
 	return r
+}
+
+// stop is the rig's cleanup: the session's life ends (its context); a DSD
+// monitor a case started is joined by its end (Seams.MonitorEnded), and then
+// every goroutine of the backend's (Wait), each within rigStopBound.
+func (r *revocationRig) stop(t *testing.T) {
+	r.s.cancel()
+	r.s.mu.Lock()
+	started := r.s.dsdMonitor
+	r.s.mu.Unlock()
+	if started {
+		select {
+		case <-r.ended:
+		case <-time.After(rigStopBound):
+			t.Errorf("the session's DSD monitor did not end within %v of the session's end", rigStopBound)
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), rigStopBound)
+	defer cancel()
+	if err := r.b.Wait(ctx); err != nil {
+		t.Errorf("the rig's backend: %v", err)
+	}
 }
 
 // unread is the policy's reading failing: a refresh whose reading panics,
@@ -152,7 +184,7 @@ func TestAnEntryAfterTheSessionsDSDStoppedIsRefusedForTheCause(t *testing.T) {
 // the revocation's own word and reason.
 func TestARevocationDuringAnAdmissionIsItsRefusal(t *testing.T) {
 	r := newRevocationRig(t)
-	r.b.cfg.Seams = &Seams{Admitting: func(engine.OccurrenceID) { r.revoke(t) }}
+	r.b.cfg.Seams.Admitting = func(engine.OccurrenceID) { r.revoke(t) }
 	if got := r.admitted(t); got != revocationRefusal {
 		t.Errorf("an entry whose admission a revocation came beside was refused %+v; want %+v", got, revocationRefusal)
 	}
@@ -166,7 +198,7 @@ func TestARevocationDuringAnAdmissionIsItsRefusal(t *testing.T) {
 // the new set says of its rate, which admitDSD answered first until round 2.
 func TestAReconciliationThatPanicsDuringAnAdmissionIsItsRefusal(t *testing.T) {
 	r := newRevocationRig(t)
-	r.b.cfg.Seams = &Seams{Admitting: func(engine.OccurrenceID) { r.reconcilePanic(t) }}
+	r.b.cfg.Seams.Admitting = func(engine.OccurrenceID) { r.reconcilePanic(t) }
 	got := r.admitted(t)
 	refusesDSD64(t, r.b)
 	if got != panicRefusal {
@@ -214,7 +246,7 @@ func successorOf(t *testing.T, s *session, id engine.OccurrenceID) (*occ, contex
 func TestASuccessorWhoseOpenEndsAfterARevocationIsRefusedForIt(t *testing.T) {
 	r := newRevocationRig(t)
 	r.b.cfg.Resolver = readGoldenDSD(t)
-	r.b.cfg.Seams = &Seams{Opened: func(engine.OccurrenceID, engine.Reference) { r.revoke(t) }}
+	r.b.cfg.Seams.Opened = func(engine.OccurrenceID, engine.Reference) { r.revoke(t) }
 	o, ctx := successorOf(t, r.s, 3)
 	r.s.openSuccessor(ctx, o)
 	r.s.mu.Lock()
@@ -240,12 +272,12 @@ func TestASuccessorWhoseOpenEndsAfterAPanickedReconciliationIsRefusedForIt(t *te
 	r.b.cfg.Resolver = readGoldenDSD(t)
 	o, ctx := successorOf(t, r.s, 3)
 	admittedBefore := false
-	r.b.cfg.Seams = &Seams{Opened: func(engine.OccurrenceID, engine.Reference) {
+	r.b.cfg.Seams.Opened = func(engine.OccurrenceID, engine.Reference) {
 		r.s.mu.Lock()
 		admittedBefore = o.admitted != nil && o.admitted == r.b.dsd.Load() && o.plan != nil && o.refused == nil
 		r.s.mu.Unlock()
 		r.reconcilePanic(t)
-	}}
+	}
 	r.s.openSuccessor(ctx, o)
 	if !admittedBefore {
 		t.Fatal("the successor did not hold its admission under the set published as its open read its first chunk: the case needs one a readmission would refuse")
@@ -264,7 +296,10 @@ func TestASuccessorWhoseOpenEndsAfterAPanickedReconciliationIsRefusedForIt(t *te
 // cause recorded, its own where nothing was recorded before it, and an
 // earlier one where that stands: the policy's reading that failed, or a
 // reconciliation that panicked, as the entries after it are refused. Until
-// round 2 it dropped them for its own reason whatever stood.
+// round 2 it dropped them for its own reason whatever stood. The prepared
+// successor's open starts the session's DSD monitor, which the rig's cleanup
+// ends and joins (round 3: each case left one refreshing the policy every
+// 100 ms for the life of the process).
 func TestARevocationDropsAPreparedEntryForTheCauseRecordedFirst(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -282,9 +317,13 @@ func TestARevocationDropsAPreparedEntryForTheCauseRecordedFirst(t *testing.T) {
 			r.s.openSuccessor(ctx, o)
 			r.s.mu.Lock()
 			prepared := o.refused == nil && o.plan != nil && !o.dropped && o.out == nil
+			monitor := r.s.dsdMonitor
 			r.s.mu.Unlock()
 			if !prepared {
 				t.Fatal("the successor was not prepared: the case needs one a revocation drops")
+			}
+			if !monitor {
+				t.Fatal("the prepared successor's open started no DSD monitor: the case needs the one the rig's cleanup ends")
 			}
 			if tc.before != nil {
 				tc.before(r, t)

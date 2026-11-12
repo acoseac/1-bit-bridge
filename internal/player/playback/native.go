@@ -39,6 +39,7 @@ func (b *Backend) openNativeContent(ctx context.Context, o *occ, d decode.DSDDec
 			o.refused = u
 			return
 		}
+		b.selecting(o.id)
 	}
 	switch {
 	case admit != nil:
