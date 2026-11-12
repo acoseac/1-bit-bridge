@@ -389,6 +389,31 @@ func (o *occ) stoppedCause() *engine.Unplayable {
 	return s.dsdRevokedLocked()
 }
 
+// refuseAfterSelection refuses o, whose open is under way on the harness's
+// path, with u, a selector's refusal or the session's cached one, unless its
+// session's DSD was stopped: then for the cause recorded (dsdRevokedLocked,
+// backlog B853), asked again in the step that sets the refusal, under the
+// session's lock. A revocation records its cause before it revokes the
+// permission, in one step under that lock, so a selector that found the
+// permission revoked, and answered no approval, finds the cause here (round 3:
+// a revocation after the cause's first ask was refused as no approval, which
+// refuseRevokedLocked passes over). The caller does not hold the session's
+// lock.
+func (o *occ) refuseAfterSelection(u *engine.Unplayable) {
+	s := o.owner
+	if s == nil {
+		o.refused = u
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.nativeRevoked {
+		o.refused = s.dsdRevokedLocked()
+		return
+	}
+	o.refused = u
+}
+
 // recoverFault is deferred last by the producer: a panic on it is recovered,
 // logged once, and is the session's fault (faulted).
 func (s *session) recoverFault(where string) {

@@ -30,7 +30,8 @@ func (b *Backend) openNativeContent(ctx context.Context, o *occ, d decode.DSDDec
 		return
 	}
 	admit := b.nativeAdmission
-	if admit == nil && b.cfg.DSD == nil {
+	harness := admit == nil && b.cfg.DSD == nil
+	if harness {
 		// The harness's path: a session whose DSD was stopped refuses the
 		// entry for the cause recorded, as admitDSD does first, before a
 		// selector answers its revoked permission as no approval (backlog
@@ -47,8 +48,10 @@ func (b *Backend) openNativeContent(ctx context.Context, o *occ, d decode.DSDDec
 		// Production (B728 B7): the effective DSD policy's set, never a record.
 		admit = func(f format.NativeDSD) (engine.NativePlan, error) { return b.admitDSD(o, f) }
 	case o.permission == nil && o.dsdRefusal != nil:
+		// The session's cached refusal, or the cause a revocation since the
+		// first ask recorded (round 3).
 		u := *o.dsdRefusal
-		o.refused = &u
+		o.refuseAfterSelection(&u)
 		return
 	case b.transitions != nil:
 		admit = func(f format.NativeDSD) (engine.NativePlan, error) {
@@ -60,11 +63,17 @@ func (b *Backend) openNativeContent(ctx context.Context, o *occ, d decode.DSDDec
 	plan, err := admit(o.nativeFormat)
 	if err != nil {
 		var u *engine.Unplayable
-		if errors.As(err, &u) {
-			o.refused = u
-		} else {
-			o.refused = &engine.Unplayable{Reason: ReasonDSD, Detail: err.Error()}
+		if !errors.As(err, &u) {
+			u = &engine.Unplayable{Reason: ReasonDSD, Detail: err.Error()}
 		}
+		if harness {
+			// A revocation since the cause's first ask revoked the permission
+			// the selector answered as no approval: the cause recorded is
+			// asked again in the step that refuses the entry (B853 round 3).
+			o.refuseAfterSelection(u)
+			return
+		}
+		o.refused = u
 		return
 	}
 	if o.converts() {
