@@ -3091,7 +3091,9 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 		// the fingerprint gate, the artwork misses and the manifest read both
 		// through serve's live closures, so a switch-off stops the enricher's
 		// batch under way within a second (and Deezer's next request), and a
-		// switch-on resumes at the enricher's next poll. Only off is written:
+		// switch-on resumes within a second, the enricher's wait asking the
+		// switches once a second; Deezer's then fetches the portraits it
+		// refused, which the stamps kept (backlog B761). Only off is written:
 		// on clears the key, so the file goes back to what an older binary
 		// loads.
 		if p.EnrichEnabled != nil {

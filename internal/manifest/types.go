@@ -538,6 +538,17 @@ type Track struct {
 	// Unexported, never marshaled (the versionStampOnly shape).
 	rowVersion    int64
 	hasRowVersion bool
+	// portrait is what an enrichment pass learnt of its artist's Deezer
+	// portrait (backlog B761), which MarkEnriched writes to the row's
+	// deezer_pending_query in the stamp's own statement: portraitKept (the
+	// zero value, a pass that made no attempt or whose attempt failed)
+	// leaves the column as it is, portraitRefused keeps portraitQuery, the
+	// name the lookup enrich.deezerEnabled refused would have asked by, and
+	// portraitSettled clears it. Set through PortraitRefused and
+	// PortraitSettled. Unexported, never marshaled (the versionStampOnly
+	// shape).
+	portrait      portraitWrite
+	portraitQuery string
 	// carryFirstIndexedNS is the first-indexed instant an INSERT should
 	// record, in Unix nanoseconds. Zero means the insert uses the store
 	// clock. An update ignores it. Never marshaled.

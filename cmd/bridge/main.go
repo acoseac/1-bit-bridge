@@ -4673,6 +4673,10 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		// A miss that waits for the enricher is terminal while
 		// enrich.enabled is off: no 202 for a turn that is not coming.
 		WithEnrichmentEnabled(enrichmentOn).
+		// And an artist's portrait the Deezer switch refused is pending
+		// only while Deezer is on too: the enricher's portrait batch
+		// fetches it then, and nothing does while it is off (backlog B761).
+		WithDeezerEnabled(deezerOn).
 		WithUpdater(updAdapter).
 		WithSessionTracker(sessions).
 		WithPairing(pairingStore).

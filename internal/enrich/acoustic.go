@@ -2,6 +2,7 @@ package enrich
 
 import (
 	"context"
+	"errors"
 	"strings"
 
 	"github.com/acoseac/1-bit-bridge/internal/enrichgate"
@@ -455,9 +456,12 @@ func (e *Enricher) applyAlbumHop(ctx context.Context, t *manifest.Track, m Acous
 // — for a junk-tagged file it is "An Unknown Artist" or a folder name.
 //
 // Tier-2 throughout: any failure is logged and absorbed, so a portrait miss
-// never blocks the already-resolved MBIDs from committing.
+// never blocks the already-resolved MBIDs from committing. What the attempt
+// came to rides the Track into the stamp, as resolveArtist's does (backlog
+// B761): a lookup the Deezer switch refused keeps the fingerprint's
+// canonical name for the portrait batch.
 func (e *Enricher) fetchRecoveredArtistImage(ctx context.Context, t *manifest.Track, m AcousticMatch) {
-	if t.ArtistMBID == "" || e.deezer == nil || e.deezerNegCache.Has(t.ArtistMBID) {
+	if t.ArtistMBID == "" || e.deezer == nil {
 		return
 	}
 	// The name and the MBID must describe the SAME entity — the portrait is
@@ -475,20 +479,36 @@ func (e *Enricher) fetchRecoveredArtistImage(ctx context.Context, t *manifest.Tr
 	if t.ArtistMBID != m.ArtistMBID {
 		return
 	}
-	found, err := e.ensureArtistImageCached(ctx, t.ArtistMBID, m.ArtistName)
-	if enrichgate.Refused(err) != nil {
-		// Deezer was not asked, or its answer was not taken (errDeezerOff,
-		// or enrich.enabled's refusal): no miss to cache, nothing to log.
+	if e.deezerNegCache.Has(t.ArtistMBID) {
+		// A miss answered earlier settles the row, as in resolveArtist.
+		t.PortraitSettled()
 		return
 	}
-	if err != nil {
-		if ctx.Err() == nil {
+	outcome, err := e.artistPortrait(ctx, t.ArtistMBID, m.ArtistName)
+	switch outcome {
+	case portraitHeld:
+		e.notePortraitSettled(t.ArtistMBID)
+		t.PortraitSettled()
+	case portraitNone:
+		e.deezerNegCache.Set(t.ArtistMBID, struct{}{})
+		e.notePortraitSettled(t.ArtistMBID)
+		t.PortraitSettled()
+		if err != nil && ctx.Err() == nil {
 			e.logUpstream(upstreamDeezer, "artist image", err, "mbid", t.ArtistMBID)
 		}
-		return
-	}
-	if !found {
-		e.deezerNegCache.Set(t.ArtistMBID, struct{}{})
+	case portraitRefused:
+		// Deezer was not asked, or its answer was not taken: no miss to
+		// cache, nothing to log. Deezer's own refusal keeps the name for
+		// the portrait batch; enrich.enabled's stops the pass, whose stamp
+		// is then not made.
+		if r := enrichgate.Refused(err); !errors.Is(r, enrichgate.ErrOff) {
+			t.PortraitRefused(m.ArtistName)
+		}
+	case portraitFailed:
+		if ctx.Err() == nil {
+			e.logUpstream(upstreamDeezer, "artist image", err, "mbid", t.ArtistMBID)
+			e.notePortraitFailed(t.ArtistMBID)
+		}
 	}
 }
 

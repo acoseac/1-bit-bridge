@@ -266,6 +266,11 @@ func (p *Provider) ArtistMBIDEnrichmentPending(ctx context.Context, mbid string)
 	return p.store.ArtistMBIDEnrichmentPending(ctx, mbid)
 }
 
+// ArtistMBIDPortraitPending satisfies api.MBIDProbe (backlog B761).
+func (p *Provider) ArtistMBIDPortraitPending(ctx context.Context, mbid string) (bool, error) {
+	return p.store.ArtistMBIDPortraitPending(ctx, mbid)
+}
+
 // ResolveArtworkVersionMBID satisfies api.MBIDProbe — the /v1/artwork
 // 16-hex alias resolver (see Store.ResolveArtworkVersionMBID).
 func (p *Provider) ResolveArtworkVersionMBID(ctx context.Context, version string) (string, error) {

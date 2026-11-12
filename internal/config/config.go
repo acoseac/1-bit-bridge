@@ -517,9 +517,11 @@ type EnrichConfig struct {
 	// has. Read through EffectiveEnabled, never directly.
 	Enabled *bool `yaml:"enabled,omitempty"`
 	// DeezerEnabled turns the Deezer artist-portrait lookups on or off, the
-	// same way. Off, a track enriched meanwhile is stamped with no portrait,
-	// and keeps none once Deezer is on again until "Retry missing" queues
-	// it. Read through EffectiveDeezerEnabled, never directly.
+	// same way. Off, a track enriched meanwhile is stamped with no portrait
+	// and keeps the lookup it did not make, which the enricher makes once
+	// Deezer and enrichment are both on again (backlog B761); a track
+	// stamped so before that keeps none, and "Retry missing" is its way
+	// back. Read through EffectiveDeezerEnabled, never directly.
 	DeezerEnabled *bool `yaml:"deezerEnabled,omitempty"`
 	// MusicBrainzBaseURL overrides the MusicBrainz ws/2 API root.
 	// Default (empty): DefaultMusicBrainzBaseURL.

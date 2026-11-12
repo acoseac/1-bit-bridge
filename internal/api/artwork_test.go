@@ -301,6 +301,15 @@ type fakeMBIDProbe struct {
 	// the database-fault arm (must classify as pending, never terminal).
 	versionAliases map[string]string
 	resolveErr     error
+	// portrait is the artists one of whose rows carries a portrait lookup
+	// the Deezer switch refused (backlog B761); portraitErr that probe's
+	// database fault, which classifies as pending too.
+	portrait    map[string]bool
+	portraitErr error
+}
+
+func (f fakeMBIDProbe) ArtistMBIDPortraitPending(ctx context.Context, m string) (bool, error) {
+	return f.portrait[m], f.portraitErr
 }
 
 func (f fakeMBIDProbe) ResolveArtworkVersionMBID(ctx context.Context, version string) (string, error) {

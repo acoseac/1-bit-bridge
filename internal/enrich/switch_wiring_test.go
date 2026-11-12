@@ -40,7 +40,8 @@ func enrichSources(t *testing.T) (*token.FileSet, []*ast.File) {
 	return fset, files
 }
 
-// TestTheEnrichersSendsRunOnTheSwitchsContext: a batch runs on
+// TestTheEnrichersSendsRunOnTheSwitchsContext: a batch, and a page of the
+// portraits the Deezer switch refused (backlog B761), runs on
 // enrichgate.CancelWhenOff over enrich.enabled, each Deezer call on
 // enrichgate.CancelWhenDeezerOff over enrich.deezerEnabled, both at the
 // enricher's switchEvery, which nothing outside a test sets, so production
@@ -95,8 +96,9 @@ func TestTheEnrichersSendsRunOnTheSwitchsContext(t *testing.T) {
 		}
 	}
 	want := map[string][]string{
-		"(*Enricher).runBatch":   {"enrichgate.CancelWhenOff(ctx, e.on, e.switchEvery)"},
-		"(*Enricher).deezerCall": {"enrichgate.CancelWhenDeezerOff(ctx, e.deezerOn, e.switchEvery)"},
+		"(*Enricher).runBatch":     {"enrichgate.CancelWhenOff(ctx, e.on, e.switchEvery)"},
+		"(*Enricher).runPortraits": {"enrichgate.CancelWhenOff(ctx, e.on, e.switchEvery)"},
+		"(*Enricher).deezerCall":   {"enrichgate.CancelWhenDeezerOff(ctx, e.deezerOn, e.switchEvery)"},
 	}
 	var keys []string
 	for k := range gates {

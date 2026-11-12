@@ -28,14 +28,22 @@ import (
 // and turning the switch on resumes it.
 // deezerEnabled stops the Deezer requests alone: each runs on a context of
 // its own (enrichgate.CancelWhenDeezerOff), so a Deezer flip cancels a Deezer
-// request and leaves the batch, and MusicBrainz on it, running.
+// request and leaves the batch, and MusicBrainz on it, running. A track whose
+// portrait lookup it refused is stamped all the same, keeping the name the
+// lookup would have asked by, and the portrait batch asks Deezer for it once
+// both switches are on again (portraits.go, backlog B761); Run's wait between
+// turns ends within a second of either switch turning on, so neither waits
+// for a scan.
 
 // errDeezerOff is a Deezer request enrich.deezerEnabled refused or cut off:
-// Deezer was not asked, or its answer was not taken. It is no miss, so
-// neither caller of ensureArtistImageCached puts it in deezerNegCache, which
-// would outlive the switch for the process's life, and neither logs it. The
-// track is stamped with no portrait, which "Retry missing" queues again once
-// Deezer is on.
+// Deezer was not asked, or its answer was not taken. It is no miss, so no
+// caller of ensureArtistImageCached puts it in deezerNegCache, which would
+// outlive the switch for the process's life, or counts it as a failure to
+// pace, and none logs it. The track is stamped with no portrait and keeps the
+// name the lookup would have asked by (manifest.Track.PortraitRefused), which
+// the portrait batch asks Deezer by once both switches are on (backlog B761).
+// A track stamped so before that version keeps no name, and "Retry missing"
+// is its way back.
 var errDeezerOff = enrichgate.ErrDeezerOff
 
 // WithEnabled attaches the live predicate for enrich.enabled. Nil (the
@@ -98,9 +106,9 @@ const (
 	msgEnrichmentOff         = "enrichment is off (enrich.enabled): nothing is sent to MusicBrainz, the Cover Art Archive or Deezer, and the tracks waiting for it wait"
 	msgEnrichmentSwitchedOff = "enrichment switched off (enrich.enabled): nothing is sent to MusicBrainz, the Cover Art Archive or Deezer until it is on"
 	msgEnrichmentSwitchedOn  = "enrichment switched on (enrich.enabled): the tracks waiting for it are enriched"
-	msgDeezerOff             = "Deezer artist portraits are off (enrich.deezerEnabled): an artist enriched meanwhile gets no portrait"
-	msgDeezerSwitchedOff     = "Deezer artist portraits switched off (enrich.deezerEnabled): an artist enriched meanwhile gets no portrait"
-	msgDeezerSwitchedOn      = "Deezer artist portraits switched on (enrich.deezerEnabled): Retry missing fetches the portraits the artists enriched meanwhile lack"
+	msgDeezerOff             = "Deezer artist portraits are off (enrich.deezerEnabled): an artist enriched meanwhile gets its portrait once they are on"
+	msgDeezerSwitchedOff     = "Deezer artist portraits switched off (enrich.deezerEnabled): an artist enriched meanwhile gets its portrait once they are on again"
+	msgDeezerSwitchedOn      = "Deezer artist portraits switched on (enrich.deezerEnabled): the portraits not asked for while they were off are fetched now"
 )
 
 // switchReport keeps what Run last saw of the two switches, to log the lines

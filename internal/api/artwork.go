@@ -224,11 +224,31 @@ func writeArtworkMiss(w http.ResponseWriter, outcome artworkMissOutcome, noun st
 	}
 }
 
+// artistImagePending is the artist-image miss's pending probe: a track of
+// the artist the enricher has not reached yet, or, while Deezer is on, one
+// that keeps a portrait lookup the Deezer switch refused, which the
+// enricher's portrait batch fetches once enrichment and Deezer are both on
+// (backlog B761). The route is per artist, so either on any of the artist's
+// tracks is pending. classifyArtworkMiss asks enrich.enabled beside it, so
+// with either switch off a refused portrait is the terminal `no_image`:
+// nothing fetches it then. A fault of either probe is no answer, returned for
+// classifyArtworkMiss to fail open to 202.
+func (s *Server) artistImagePending(ctx context.Context, mbid string) (bool, error) {
+	pending, err := s.mbidProbe.ArtistMBIDEnrichmentPending(ctx, mbid)
+	if err != nil || pending || !s.deezerOn() {
+		return pending, err
+	}
+	return s.mbidProbe.ArtistMBIDPortraitPending(ctx, mbid)
+}
+
 // artistImage handles GET /v1/artist-image/{mbid}.
 //
 // Serves the Deezer-sourced artist portrait the enricher cached under
 // <artworkCacheDir>/artist-<mbid>.jpg. Same MBID validation + 404 / 400
-// semantics as /v1/artwork.
+// semantics as /v1/artwork, and a miss is pending while the portrait may
+// still come: the artist's tracks wait for the enricher, or keep a portrait
+// lookup the Deezer switch refused while both switches are on
+// (artistImagePending).
 func (s *Server) artistImage(w http.ResponseWriter, r *http.Request) {
 	if s.artworkDirs == nil {
 		writeError(w, http.StatusServiceUnavailable, "scan_in_progress",
@@ -247,17 +267,20 @@ func (s *Server) artistImage(w http.ResponseWriter, r *http.Request) {
 		if os.IsNotExist(err) {
 			// Three-way miss split (see MBIDProbe): 202 only while
 			// enrichment is genuinely pending — the cold-cache first
-			// scan where the portrait may land any moment. Once every
-			// track carrying the MBID is enriched and there's still no
-			// file, no image exists upstream (Deezer has nothing for
-			// this artist): answer a TERMINAL 404 so clients stop
-			// asking. Pre-fix this state answered 202 forever and iOS
-			// rode a multi-minute retry ladder per imageless artist on
-			// every coverage sweep.
+			// scan where the portrait may land any moment, or a
+			// portrait lookup the Deezer switch refused, which the
+			// portrait batch takes while both switches are on. Once
+			// every track carrying the MBID is enriched and none waits
+			// for its portrait, and there's still no file, no image
+			// exists upstream (Deezer has nothing for this artist), or
+			// nothing will fetch it while a switch is off: answer a
+			// TERMINAL 404 so clients stop asking. Pre-fix this state
+			// answered 202 forever and iOS rode a multi-minute retry
+			// ladder per imageless artist on every coverage sweep.
 			var hasTrack, pending mbidPredicate
 			if s.mbidProbe != nil {
 				hasTrack = s.mbidProbe.HasTrackWithArtistMBID
-				pending = s.mbidProbe.ArtistMBIDEnrichmentPending
+				pending = s.artistImagePending
 			}
 			writeArtworkMiss(w,
 				classifyArtworkMiss(r.Context(), mbid, hasTrack, pending, s.enrichmentOn()),

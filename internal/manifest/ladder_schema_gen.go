@@ -4,7 +4,7 @@ package manifest
 
 // ladderSchemaTop is the ladder's top when ladderColumns was written; the
 // test that writes it fails while it is not LadderTop().
-const ladderSchemaTop = 62
+const ladderSchemaTop = 63
 
 // ladderColumns is every column of every table the ladder makes, with the
 // first and last version that has it (ladderColumn).
@@ -213,6 +213,7 @@ var ladderColumns = []ladderColumn{
 	{"tracks", "codec", 25, 0},
 	{"tracks", "compression", 43, 0},
 	{"tracks", "correction_key", 61, 0},
+	{"tracks", "deezer_pending_query", 63, 0},
 	{"tracks", "dupe_group_id", 31, 0},
 	{"tracks", "dupe_suppressed", 31, 0},
 	{"tracks", "dupe_tier", 31, 0},

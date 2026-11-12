@@ -164,6 +164,12 @@ type Enricher struct {
 	// per wakeup. Keeps the worker responsive to cancellation.
 	BatchLimit int
 
+	// PortraitBatchLimit is how many rows whose portrait lookup the Deezer
+	// switch refused the portrait batch reads per turn (runPortraits,
+	// backlog B761); each artist among them costs one lookup at most. Zero
+	// is defaultPortraitBatchLimit.
+	PortraitBatchLimit int
+
 	// CoverSize is the pixel tier NEW cover fetches request from
 	// CAA/Atlas (250/500/1200 — CAA's native tiers). Zero falls back to
 	// DefaultCoverSize via coverSize(), so an Enricher constructed
@@ -231,6 +237,23 @@ type Enricher struct {
 	// salvaged an artwork fetch that both CAA paths (release + release-
 	// group) missed. Same exposure plan as caaFallbackHits.
 	itunesFallbackHits atomic.Int64
+
+	// portraitRetry is, per artist MBID, the portrait lookups that failed
+	// in a row and when the artist may be asked again (portraitRetryState,
+	// backlog B761): a failure, never a refusal and never a miss, so the
+	// switch turned on asks at once. Bounded at portraitRetryCap.
+	portraitRetry *lrucache.Cache[string, portraitRetryState]
+	// portraitCursor is the path the portrait batch's last page ended on,
+	// "" for the start: each page reads past it, so rows whose artist keeps
+	// failing at the head of the order cannot hold back the rows behind
+	// them. Run's goroutine alone reads and writes it.
+	portraitCursor string
+	// clock is the time the portrait retries are paced by; nil is
+	// time.Now. A test seam.
+	clock func() time.Time
+	// beforePortraitClear, when set, runs just before the portrait batch
+	// clears the rows it settled. A test seam: a case parks it there.
+	beforePortraitClear func()
 }
 
 // albumResolution bundles the release + release-group MBIDs that
@@ -273,22 +296,24 @@ func NewEnricher(store *manifest.Store, mb *MusicBrainzClient, caa *CoverArtClie
 		caaInterval = caa.MinInterval()
 	}
 	e := &Enricher{
-		store:             store,
-		mb:                mb,
-		caa:               caa,
-		deezer:            deezer,
-		CacheDir:          cacheDir,
-		MBMinInterval:     mbInterval,
-		CAAMinInterval:    caaInterval,
-		ITunesMinInterval: 3 * time.Second,
-		DeezerMinInterval: 120 * time.Millisecond,
-		BatchLimit:        100,
-		CoverSize:         DefaultCoverSize,
-		PollInterval:      15 * time.Second,
-		albumCache:        lrucache.New[string, albumResolution](albumCacheCap),
-		releaseGroupCache: lrucache.New[string, string](releaseGroupCacheCap),
-		artistCache:       lrucache.New[string, string](artistCacheCap),
-		deezerNegCache:    lrucache.New[string, struct{}](deezerNegCacheCap),
+		store:              store,
+		mb:                 mb,
+		caa:                caa,
+		deezer:             deezer,
+		CacheDir:           cacheDir,
+		MBMinInterval:      mbInterval,
+		CAAMinInterval:     caaInterval,
+		ITunesMinInterval:  3 * time.Second,
+		DeezerMinInterval:  120 * time.Millisecond,
+		BatchLimit:         100,
+		PortraitBatchLimit: defaultPortraitBatchLimit,
+		CoverSize:          DefaultCoverSize,
+		PollInterval:       15 * time.Second,
+		albumCache:         lrucache.New[string, albumResolution](albumCacheCap),
+		releaseGroupCache:  lrucache.New[string, string](releaseGroupCacheCap),
+		artistCache:        lrucache.New[string, string](artistCacheCap),
+		deezerNegCache:     lrucache.New[string, struct{}](deezerNegCacheCap),
+		portraitRetry:      lrucache.New[string, portraitRetryState](portraitRetryCap),
 	}
 	e.reports = newUpstreamReports()
 	e.watchUpstreamAnswers()
@@ -324,14 +349,21 @@ func (e *Enricher) WithPremiumCovers(f PremiumCoverFetcher) *Enricher {
 // the loop.
 //
 // enrich.enabled is asked before each batch: off, the loop asks the store
-// and the upstreams nothing, and asks the switch again after PollInterval,
-// so turning it on takes effect within one. Each batch runs on the switch's
-// context (enrichgate.CancelWhenOff), so turning it off stops the batch under
-// way as a shutdown would: a request after the flip is refused at its send,
-// an answer whose headers arrive after it is not taken, one on the wire is
+// and the upstreams nothing. Each batch runs on the switch's context
+// (enrichgate.CancelWhenOff), so turning it off stops the batch under way as
+// a shutdown would: a request after the flip is refused at its send, an
+// answer whose headers arrive after it is not taken, one on the wire is
 // cancelled within a second (a cover whose body ended inside that second may
 // be in the cache; nothing further goes out), and what the batch was
 // enriching stays at enriched_at = 0 for the turn that follows the switch's.
+//
+// While enrich.deezerEnabled is on too, each turn then takes one page of the
+// rows whose portrait lookup that switch refused, whatever the ordinary batch
+// found (runPortraits, backlog B761): the ordinary queue is empty exactly when
+// such portraits wait, and while it is not, each turn gives both their share.
+// Between turns the loop waits (idle), and a switch turned on ends the wait
+// within switchEvery (a second), so neither the waiting rows nor the refused
+// portraits wait for a scan or the end of PollInterval.
 func (e *Enricher) Run(ctx context.Context) {
 	var report switchReport
 	for {
@@ -341,10 +373,15 @@ func (e *Enricher) Run(ctx context.Context) {
 		on := e.on()
 		report.note(on, e.deezerOn())
 		pause := e.PollInterval
+		portraits := false
 		if on {
 			pause = e.runBatch(ctx)
+			if e.deezerOn() {
+				portraits = true
+				pause = min(pause, e.runPortraits(ctx))
+			}
 		}
-		if !sleepCtx(ctx, pause) {
+		if !e.idle(ctx, pause, on, portraits) {
 			return
 		}
 	}
@@ -823,35 +860,52 @@ func (e *Enricher) resolveArtist(ctx context.Context, t *manifest.Track) error {
 	// logged + absorbed (return nil) so an image miss never blocks the
 	// already-resolved ArtistMBID from being committed via MarkEnriched.
 	// Only the tier-1 SearchArtist transient case above propagates.
+	//
+	// What the attempt came to rides the Track into the stamp (backlog
+	// B761): a lookup the Deezer switch refused keeps imageName in the row
+	// for the portrait batch, a portrait held or one Deezer has none of
+	// settles the row, and no attempt, or a failed one, leaves the row's
+	// pending query as it was.
 	if e.deezer == nil || artistMBID == "" {
 		return nil
 	}
 	// Negative-cache Deezer misses so sibling tracks by the same artist
-	// don't each re-query Deezer for a portrait the API doesn't have.
+	// don't each re-query Deezer for a portrait the API doesn't have. The
+	// memo is of an answer, so it settles the row.
 	if e.deezerNegCache.Has(artistMBID) {
+		t.PortraitSettled()
 		return nil
 	}
-	found, err := e.ensureArtistImageCached(ctx, artistMBID, imageName)
-	if errors.Is(err, errDeezerOff) {
-		// Deezer was not asked: no miss to cache, nothing to log.
-		return nil
-	}
-	if r := enrichgate.Refused(err); r != nil {
-		// enrich.enabled's refusal: no miss to cache, nothing to log, and
-		// no stamp, as at the other requests.
-		return r
-	}
-	if err != nil {
+	outcome, err := e.artistPortrait(ctx, artistMBID, imageName)
+	switch outcome {
+	case portraitHeld:
+		e.notePortraitSettled(artistMBID)
+		t.PortraitSettled()
+	case portraitNone:
+		e.deezerNegCache.Set(artistMBID, struct{}{})
+		e.notePortraitSettled(artistMBID)
+		t.PortraitSettled()
+		if err != nil && ctx.Err() == nil {
+			// A 404 or an empty picture: Debug through the streak.
+			e.logUpstream(upstreamDeezer, "artist image", err, "artist", t.Artist, "mbid", artistMBID)
+		}
+	case portraitRefused:
+		if r := enrichgate.Refused(err); errors.Is(r, enrichgate.ErrOff) {
+			// enrich.enabled's refusal: no miss to cache, nothing to log,
+			// and no stamp, as at the other requests.
+			return r
+		}
+		// Deezer was not asked: no miss to cache, nothing to log, and the
+		// stamp keeps the name it would have been asked by.
+		t.PortraitRefused(imageName)
+	case portraitFailed:
 		// Skip the Error log when the failure is just shutdown cancellation
 		// (ensureArtistImageCached returns ctx.Err() from its pacing
 		// sleepCtx). Mirrors the album/artist tier-1 ctx guard.
 		if ctx.Err() == nil {
 			e.logUpstream(upstreamDeezer, "artist image", err, "artist", t.Artist, "mbid", artistMBID)
+			e.notePortraitFailed(artistMBID)
 		}
-		return nil
-	}
-	if !found {
-		e.deezerNegCache.Set(artistMBID, struct{}{})
 	}
 	return nil
 }
@@ -1229,6 +1283,14 @@ const msgChangedWhileEnriched = "track changed while it was enriched; the next b
 // (manifest.ErrTrackChanged) records nothing either, for stampEnriched's
 // reason: the verdict is about tags the row no longer holds, and the next
 // batch reads the row again.
+//
+// It is reached after a portrait lookup the Deezer switch refused, with the
+// artist resolved and its canonical name in hand: a release search that
+// found nothing runs resolveArtist before this stamp. So it writes what the
+// pass learnt of the portrait exactly as stampEnriched does, through the one
+// MarkEnriched (backlog B761): the refused lookup's name kept, a settled
+// portrait cleared, and a pending query left as it was by a pass that made
+// no attempt.
 func (e *Enricher) markSkipped(ctx context.Context, t *manifest.Track, reason, detail string) {
 	if !e.stampAdmitted(ctx) {
 		return

@@ -208,8 +208,10 @@
           Artist names go to Deezer for portraits whatever the source below: no
           mirror stands in for it. Off, Deezer is asked nothing new, and a request
           under way is cut off within a second. An artist enriched while this is
-          off gets no photo until it is on again and <em>Retry missing</em> on the
-          Jobs page fetches the missing ones. Where the
+          off gets its photo once this is on again: the bridge remembers the
+          lookups it did not make, and makes them then, with no rescan. An artist
+          enriched with this off by an earlier version is not remembered, and
+          <em>Retry missing</em> on the Jobs page fetches its photo. Where the
           <code>BRIDGE_ENRICH_DEEZER_ENABLED</code> environment variable is set,
           it sets this switch at every start; a save here writes the switch to
           bridge.yaml only when you change it.

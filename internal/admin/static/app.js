@@ -6327,8 +6327,8 @@ function mountJobTrays() {
       {
         field: "enrichDeezerEnabled", type: "switch",
         label: "Artist photos from Deezer",
-        hint: "Off, an artist enriched meanwhile gets no photo until this is on " +
-          "again and Retry missing fetches it.",
+        hint: "Off, an artist enriched meanwhile gets its photo once this is on " +
+          "again; one enriched with it off before this version needs Retry missing.",
       },
       {
         field: "atlasEnabled", type: "switch", restart: true,
