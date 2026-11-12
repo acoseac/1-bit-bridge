@@ -156,14 +156,16 @@ func (f *restartFixture) open(t *testing.T) (*Enricher, *manifest.Store) {
 	return e, store
 }
 
-// canonicalArtistMB is a MusicBrainz that answers an artist search only for
-// the role-truncated rung of podgerTag, with podgerCanonical, the way the
-// ladder narrows a multi-credit tag (TestResolveArtistFetchesPortraitByCanonicalName).
+// podgerTag is a multi-credit artist tag, and podgerCanonical the name
+// MusicBrainz answers for the rung the artist ladder narrows it to.
 const (
 	podgerTag       = "Rachel Podger, Conductor, Brecon Baroque, Ensemble"
 	podgerCanonical = "Rachel Podger"
 )
 
+// canonicalArtistMB is a MusicBrainz that answers an artist search only for
+// the role-truncated rung of podgerTag, with podgerCanonical, the way the
+// ladder narrows a multi-credit tag (TestResolveArtistFetchesPortraitByCanonicalName).
 func canonicalArtistMB(_ *countingUpstream, w http.ResponseWriter, r *http.Request) {
 	q, _ := url.QueryUnescape(r.URL.Query().Get("query"))
 	switch {
