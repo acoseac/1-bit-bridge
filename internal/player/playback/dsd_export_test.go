@@ -36,3 +36,7 @@ func (b *Backend) AdmitDSDPlanForTest(f format.NativeDSD, leading bool) (engine.
 	plan, err := b.admitDSD(o, f)
 	return plan, o.policyPlan, o.converts(), err
 }
+
+// SetSeamsForTest gives b the seams s, before anything asks them: a test of
+// the backend's external package holds a goroutine at one of them.
+func SetSeamsForTest(b *Backend, s *Seams) { b.cfg.Seams = s }

@@ -32,9 +32,11 @@ type ProbeUnit struct {
 // unit, the one a probe was last begun for, each accepted, with its
 // significant bits and its pause flag, or refused (EINVAL); a candidate it
 // keeps no answer for under exactly the unit asked is not probed. Each model
-// has an epoch, which a choice written for it (Forget) and a probe begun for
-// another of its units (Begin) move, and a report is kept only in the epoch
-// its probe was begun in, so nothing from before either ever lands after it.
+// has an epoch, which the migration's part for it (Forget) and a probe begun
+// for another of its units (Begin) move, and a report is kept only in the
+// epoch its probe was begun in, so nothing from before either ever lands after
+// it. A choice written for the model moves nothing (B728 B9): the answers are
+// the kernel's and the descriptors', which a choice does not change.
 // Nothing in it is a rung by itself: B7 reads it per tuple, a native tuple by
 // its format at the frame rate and a DoP tuple by its carrier (S32_LE at the
 // rate over 16, ProbeResult.DoPCarrier). An accepted answer is that tuple's
@@ -92,9 +94,9 @@ func (c *ProbeCache) Begin(u ProbeUnit) ProbeEpoch {
 
 // Record keeps what rep established, under e's unit, while e is still its
 // model's epoch: each accepted and each refused answer, replacing one kept
-// for the candidate before. A choice written for the model since (Forget),
-// or a probe begun since for another of its units (Begin), moved the epoch:
-// the report then predates them, and nothing of it is kept and nothing kept
+// for the candidate before. The migration's part for the model since
+// (Forget), or a probe begun since for another of its units (Begin), moved the
+// epoch: the report then predates them, and nothing of it is kept and nothing kept
 // is dropped. A not-probed answer keeps and changes nothing, so a busy node
 // (EBUSY), or a run beside another of the card's substreams
 // (ProbeReport.Shared), is never kept as a refusal and leaves an earlier
@@ -133,11 +135,12 @@ func (c *ProbeCache) Answer(u ProbeUnit, cand ProbeCandidate) ProbeResult {
 	return ProbeResult{Candidate: cand, Answer: ProbeNotProbed}
 }
 
-// Forget drops every answer kept for model and moves its epoch: a choice
-// written for that DAC (the design's section 7.2), which probes it again
-// where it is free and where it is not leaves it not probed rather than
-// answered from before the write. A probe begun before the write keeps
-// nothing when it ends; the write's own, begun after it, keeps its answers.
+// Forget drops every answer kept for model and moves its epoch: the
+// migration's part for that DAC (playback.Backend.ForgetDSDProbe), which
+// probes it again where it is free and where it is not leaves it not probed
+// rather than answered from before the part. A probe begun before it keeps
+// nothing when it ends; the one begun after it keeps its answers. A choice
+// written for the DAC (B728 B9) forgets nothing: it makes a probe due.
 func (c *ProbeCache) Forget(model string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

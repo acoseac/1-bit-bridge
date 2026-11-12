@@ -515,6 +515,7 @@ func (s *session) start(ctx context.Context, req engine.StartRequest) (err error
 	first.leading = true
 	s.mu.Unlock()
 	defer close(s.startDone)
+	s.b.holding(s.id)
 	if err := s.b.hold(ctx, s); err != nil {
 		return err
 	}
@@ -660,6 +661,36 @@ func (s *session) start(ctx context.Context, req engine.StartRequest) (err error
 	case <-cctx.Done():
 		return cctx.Err()
 	}
+}
+
+// abandon is a Start that gave its wait for the configuration lease up
+// (admitStart), for why: its release taken, or its context ended. It
+// acquires nothing, and leaves its session's record as a Start whose release
+// came first leaves it (start): its occurrence's reservation let go, its
+// Start done, and the record let go here when its Release came first, or by
+// the teardown of the Release still to come, which a Start this record shows
+// as started makes run. So an abandoned Start meets its Release in either
+// order and leaves no record behind, which would refuse every later choice's
+// write as playback_not_stopped (B728 B9 PR 2).
+func (s *session) abandon(req engine.StartRequest, why error) error {
+	s.mu.Lock()
+	if s.started {
+		s.mu.Unlock()
+		return fmt.Errorf("player backend: session %d started twice", s.id)
+	}
+	s.started = true
+	s.ev, s.opts, s.released = req.Events, req.Options, req.Released
+	came := s.releasing
+	s.mu.Unlock()
+	req.First.Reservation.ReleaseBackend()
+	close(s.startDone)
+	switch {
+	case came:
+		s.b.letGo(s, true)
+	case s.releaseTaken():
+		s.b.fenced("start")
+	}
+	return why
 }
 
 // releaseTaken reports whether the engine has taken the session's release
