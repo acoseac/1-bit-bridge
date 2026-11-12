@@ -94768,3 +94768,77 @@ below puts that read back.
   refusals' words, the History entry ("Stalls", the prompt's window, the
   words), docs/backup.md, and the rules line (a patch, condensed so the file
   stays within its budget: 98,370 to 96,883 bytes).
+
+### Controls
+
+On the committed tree (90498960), predicted by name before the run
+(`.tmp/_b826/controls-r2.predictions.txt`, untracked), each a production
+mutation made from memory and restored in a `finally` (`git diff --quiet`
+clean after every one), the test binaries built once per control and each
+case run alone (`.tmp/_b826/controls_r2.py`): round 1's fourteen restore
+cases and round 2's four in `internal/backup`, the doctor's case, and the
+CLI's six. The baseline, no mutation, ran first: all 25 green. Every control
+went red exactly where predicted, and nowhere else.
+
+- R1, the mark dropped (`takeSource` never calls `marksFromNow`, so a
+  restore's hold stays markless): the item's case red as before the fix
+  (another restore and the prune answered busy after the 10 s wait, "no
+  marker of the check that did not end was written"), and the stale removal's
+  case both ways ("none of [waits writes] came"). The unlock-stall case stayed
+  green, as predicted: a let-go past its bound marks by the release's own
+  give-up, not by its caller's.
+- R2, `restoreCmd`'s unbounded first read put back (`LooksLikeSnapshotDir`
+  before `CheckRestoreSource`): exactly the CLI's stalled-snapshot case red,
+  "bridge restore did not answer within 16.1s of a snapshot that does not
+  answer".
+- R3, the marker written at once (`writeMarker`'s wait for a removal under
+  way taken out): exactly the stale removal's case red where the give-up came
+  during the removal ("none of [writes] came"); where it came before the
+  removal began, green.
+- R4, the let-go unmarked (round 1's `letGoWithin` on the unlock, then the
+  drop): the unlock-stall case red both ways, refused as the lock came and at
+  the end of a restore: no mark while the unlock does not answer, another
+  restore waiting its 10 s out, the prune skipped as busy.
+- R5, the CLI's look counting a marker without asking the lock
+  (`stuckMarker`): exactly the stale marker's way of the preflight case red,
+  `bridge restore` exiting 1 beside a marker nobody's lock stands behind.
+- R6, the CLI's look asking the given spelling's parent rather than the
+  resolved one: exactly the link's way red, the confirmation asked beside a
+  held lock's marker.
+- R7a, `stillRunningEnd` never naming a restore: the commands' case red, its
+  restore way, for `bridge restore` and `bridge backup --verify` alike
+  (neither says "The end of the bridge restore that runs it ends it", both
+  say "restart the bridge"). R7b, the doctor never naming one: its case red,
+  its restore way (the line reads "a verification of snapshot S").
+- R8, a restore's hold not markless before the lock: the stalls' case red,
+  its four ways ("a restore given up before it held the lock marked the
+  folder", at "its wait for the snapshots' lock").
+- R9, `clearStale`'s check of the give-up taken out: exactly the stale
+  removal's case red where the give-up came before the removal began ("the
+  stale marker's removal took the restore's marker away"); where it came
+  during the removal, green.
+- R10, the stop at the hand-over not refused: exactly the unlock-stall case's
+  first way red, the restore stopped as the lock came answering nil and
+  writing B's `bridge.yaml`, `bridge.db` and `tokens.json`.
+
+### The gates
+
+On 90498960, in two uses of the build lock (06:38 to 07:04, and 07:04 to
+07:31), nothing else in either, TMPDIR `~/onebit/tmp`: `go vet ./...` with the
+Makefile's tags clean for linux/amd64 and linux/386, and `go vet` of
+`./internal/backup/`, `./internal/doctor/` and `./cmd/bridge/` clean for
+windows/amd64, darwin/arm64 and linux/arm; go1.27.3's gofmt lists none of the
+thirteen Go files the round changed. Every new or touched test, with round
+1's restore cases, whose code this round rewrote, under `-race -count=50 -run
+'^Name$'`, five lanes side by side: all 28 ok, no race reported (the stalls'
+case 1,304 s for its 50 rounds, the stale removal's 442 s, the CLI's stalled
+snapshot 417 s, the unlock stall 378 s, the lock held at the give-up 284 s).
+`go test -race -count=1 -timeout 120m -p 3 ./internal/backup/
+./internal/doctor/ ./cmd/bridge/`: all three ok, `internal/backup` in 723 s,
+`internal/doctor` in 7 s and `cmd/bridge` in 1,604 s, which holds
+`TestEveryCitedTestNameExists`. The one caller of `backup.Restore` outside
+those packages, openhome's `TestARestoredIdentityHandsOutValuesPastItsSnapshot`,
+ok under `-race`. `scripts/check-doc-budgets.py` clean on a copy with the rules
+patch applied (`cli-serve.md` 96,883 bytes), and the patch applies at
+90498960. `make test` and `make build-all` were not run: the brief asked for
+the packages.
