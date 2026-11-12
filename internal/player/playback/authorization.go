@@ -610,12 +610,22 @@ const permissionReconciliation = "the DSD authorization's reconciliation"
 // policy reconciliation's is (reconcileDSD): logged, and the session's DSD
 // stopped with the backend's own failure recorded as its cause and its fault
 // (stopDSD), so its caller, the session's monitor or RefreshAuthorization,
-// goes on (round 2: it reached the caller, and nothing was recorded).
+// goes on (round 2: it reached the caller, and nothing was recorded). The
+// lock is let go of first (the deferred release of the hold, which a panic
+// before the hold never took), so the containment holds nothing, and the
+// authorization it was replacing goes once the cause is recorded, as one
+// whose reading failed does: revoked, so neither selector, the gapless check
+// nor an activation takes it for live (round 3: it was left live).
 func (s *session) reconcilePermission(next *permission, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			s.b.logPanic(permissionReconciliation, r)
 			s.stopDSD(permissionReconciliation, false)
+			s.mu.Lock()
+			if s.permission != nil {
+				s.permission.revoked.Store(true)
+			}
+			s.mu.Unlock()
 		}
 	}()
 	s.b.reconcilingPermission(s.id)
