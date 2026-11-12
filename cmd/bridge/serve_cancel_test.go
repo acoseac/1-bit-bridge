@@ -601,11 +601,11 @@ const msgUpscaleSeedTxDone = msgUpscaleSeed + " " + "sql: transaction has alread
 // Parking inside the seed's INSERT is the stop the test above makes, and
 // comes back as context.Canceled. This one holds the seed between its last
 // statement and its commit (serveOpts.upscaleTargetBeforeCommit), cancels,
-// and waits at the driver for the rollback database/sql's own goroutine
-// makes of the transaction once its context is done (Tx.awaitDone), until
-// the transaction answers sql.ErrTxDone. Only then does the seed reach
-// tx.Commit(), which answers sql.ErrTxDone from its own state, never calling
-// the driver's Commit.
+// and waits at the driver, on the transaction's own connection, for the
+// rollback database/sql's own goroutine makes of the transaction once its
+// context is done (Tx.awaitDone; stopAndWaitForTheRollback). Only then does
+// the seed reach tx.Commit(), which answers sql.ErrTxDone from its own state,
+// never calling the driver's Commit.
 func TestAServeStoppedAtItsUpscaleSeedsCommitExitsCleanly(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	h := holdServeAtItsUpscaleSeedsCommit(t, ctx, cancel)
@@ -613,6 +613,28 @@ func TestAServeStoppedAtItsUpscaleSeedsCommitExitsCleanly(t *testing.T) {
 	h.release(nil)
 	code := h.exitCode(t)
 	if code != 0 {
+		t.Errorf("a serve stopped at its upscale seed's commit exited %d, want 0; stderr=%q", code, h.stderr.String())
+	}
+	if s := h.stderr.String(); strings.Contains(s, msgUpscaleSeed) {
+		t.Errorf("a startup the shutdown stopped reported its upscale seed as failed; stderr=%q", s)
+	}
+}
+
+// TestAServeStoppedAtItsUpscaleSeedsCommitWaitsForTheSeedsOwnRollback proves
+// stopAndWaitForTheRollback (backlog B869): with the seed's ROLLBACK held at
+// the driver, once database/sql has marked the transaction done and before
+// SQLite rolls it back, the wait does not answer, with nothing else rolled
+// back on serve's database or once a reader's transaction has rolled back on
+// another connection to it (sqlitetest's WaitProof), and answers once the
+// held rollback has run; serve then exits 0, reporting no failed seed.
+func TestAServeStoppedAtItsUpscaleSeedsCommitWaitsForTheSeedsOwnRollback(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	h := holdServeAtItsUpscaleSeedsCommit(t, ctx, cancel)
+	proof := h.rollbacks.HoldRollbackOf(t, h.tx).BesideAReader(t)
+	h.stopAndWaitForTheRollback(t, cancel)
+	proof.Returned(t)
+	h.release(nil)
+	if code := h.exitCode(t); code != 0 {
 		t.Errorf("a serve stopped at its upscale seed's commit exited %d, want 0; stderr=%q", code, h.stderr.String())
 	}
 	if s := h.stderr.String(); strings.Contains(s, msgUpscaleSeed) {
@@ -733,24 +755,23 @@ func holdServeAtItsUpscaleSeedsCommit(t *testing.T, ctx context.Context, stop co
 }
 
 // stopAndWaitForTheRollback stops serve and waits until database/sql has
-// rolled the held seed's transaction back at the driver. The watch counts
-// every rollback on serve's database; the seed's leaves its transaction
-// answering sql.ErrTxDone. The seed holds the store's writer lock, so no
-// other write transaction is open to roll back meanwhile, and a probe of a
-// transaction still open runs a SELECT, which changes nothing, before the
-// wait goes on past the next rollback.
+// rolled the held seed's transaction back at the driver, on the seed's own
+// connection: the rollback is taken before the stop (RollbackOf), so one that
+// runs before the wait begins is kept, and has run once the driver's ROLLBACK
+// there has rolled the seed back. The seed holding the store's writer lock
+// keeps another write transaction from rolling back meanwhile, not another
+// connection's read transaction, and the seed's transaction answers
+// sql.ErrTxDone from the moment database/sql marks it done, before it calls
+// the driver's Rollback, so neither a rollback counted on serve's database
+// nor that answer says that the seed's own has run (backlog B869). A serve
+// that exits first fails the test, and the wait gives up at the watch's
+// instant.
 func (h *heldSeedServe) stopAndWaitForTheRollback(t *testing.T, stop context.CancelFunc) {
 	t.Helper()
-	seen := h.rollbacks.Seen()
+	rollback := h.rollbacks.RollbackOf(t, h.tx)
 	stop()
-	for {
-		if !h.rollbacks.WaitPast(t, seen, h.exited) {
-			t.Fatalf("serve exited while its upscale seed was held; stderr=%s", h.stderr.String())
-		}
-		seen = h.rollbacks.Seen()
-		if _, err := h.tx.ExecContext(context.Background(), `SELECT 1`); errors.Is(err, sql.ErrTxDone) {
-			return
-		}
+	if !rollback.WaitUnless(t, h.exited) {
+		t.Fatalf("serve exited while its upscale seed was held; stderr=%s", h.stderr.String())
 	}
 }
 

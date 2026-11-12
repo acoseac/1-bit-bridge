@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -272,6 +273,176 @@ func TestWaitPastAnswersTheWorksEndAndGivesUpAtItsInstant(t *testing.T) {
 			t.Errorf("the wait failed with %q, want %q", rec.fatal, want)
 		}
 	})
+}
+
+// heldWrite opens a WAL database in a folder of its own, arms a watch on it,
+// and begins a write transaction on ctx that inserts a row, open; the test's
+// end rolls it back, if nothing has, before the database closes.
+func heldWrite(t *testing.T, ctx context.Context) (*sql.DB, *RollbackWatch, *sql.Tx) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "held.db")
+	db := openWAL(t, dsn.File(path, "_pragma=journal_mode(WAL)"))
+	if _, err := db.Exec(`CREATE TABLE t (n INTEGER)`); err != nil {
+		t.Fatal(err)
+	}
+	w := WatchRollbacks(t, path)
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = tx.Rollback() })
+	if _, err := tx.ExecContext(ctx, `INSERT INTO t (n) VALUES (1)`); err != nil {
+		t.Fatal(err)
+	}
+	return db, w, tx
+}
+
+// TestErrTxDoneAnswersBeforeTheDriverRollsBack pins why a count of the
+// file's rollbacks and sql.ErrTxDone cannot tell a wait that the held
+// transaction's rollback has run (backlog B869): database/sql's Tx.rollback
+// marks the transaction done before it calls the driver's Rollback, so with
+// that ROLLBACK held at its boundary and a reader's transaction rolled back on
+// another connection, the count has moved and the transaction answers
+// sql.ErrTxDone, while the transaction's own rollback has not run.
+func TestErrTxDoneAnswersBeforeTheDriverRollsBack(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	db, w, tx := heldWrite(t, ctx)
+	hold := w.HoldRollbackOf(t, tx)
+	rollback := w.RollbackOf(t, tx)
+	reader, err := db.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	seen := w.Seen()
+	cancel()
+	hold.Reached(t)
+	if err := readAndRollBack(reader); err != nil {
+		t.Fatal(err)
+	}
+	if !w.WaitPast(t, seen, nil) {
+		t.Fatal("WaitPast answered false with nothing stopped")
+	}
+	if _, err := tx.ExecContext(context.Background(), `SELECT 1`); !errors.Is(err, sql.ErrTxDone) {
+		t.Fatalf("the transaction whose ROLLBACK is held answers %v, want sql.ErrTxDone", err)
+	}
+	select {
+	case <-rollback.ran:
+		t.Fatal("the transaction's rollback ran while its ROLLBACK was held")
+	default:
+	}
+	hold.Release()
+	rollback.Wait(t)
+	if got := w.Seen(); got != seen+2 {
+		t.Errorf("the watch saw %d rollbacks past %d, want the reader's and the transaction's own", got-seen, seen)
+	}
+}
+
+// TestARollbackOfIsTheTransactionsOwnAtTheDriver: RollbackOf, taken before
+// the stop, answers once the transaction's own rollback has run at the driver,
+// and never while that ROLLBACK is held at its boundary, with nothing else
+// rolled back or once a reader's transaction has rolled back on another
+// connection to the file (WaitProof's schedule). Nothing the transaction
+// wrote lands.
+func TestARollbackOfIsTheTransactionsOwnAtTheDriver(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	db, w, tx := heldWrite(t, ctx)
+	proof := w.HoldRollbackOf(t, tx).BesideAReader(t)
+	rollback := w.RollbackOf(t, tx)
+	cancel()
+	rollback.Wait(t)
+	proof.Returned(t)
+	if _, err := tx.ExecContext(context.Background(), `SELECT 1`); !errors.Is(err, sql.ErrTxDone) {
+		t.Errorf("the transaction answers %v once its rollback ran, want sql.ErrTxDone", err)
+	}
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM t`).Scan(&n); err != nil || n != 0 {
+		t.Errorf("the table holds %d rows (%v) after the rollback, want none", n, err)
+	}
+}
+
+// TestARollbackThatRanBeforeItsWaitIsKept: a rollback that has run before its
+// wait begins is answered at once, never missed, and first where the wait's
+// stop is ready too.
+func TestARollbackThatRanBeforeItsWaitIsKept(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	_, w, tx := heldWrite(t, ctx)
+	rollback := w.RollbackOf(t, tx)
+	cancel()
+	select {
+	case <-rollback.ran:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the transaction's rollback never ran")
+	}
+	stopped := make(chan struct{})
+	close(stopped)
+	start := time.Now()
+	if !rollback.WaitUnless(t, stopped) {
+		t.Error("a rollback that had run was answered as its wait's stop")
+	}
+	rollback.Wait(t)
+	if took := time.Since(start); took > time.Second {
+		t.Errorf("the waits for a rollback that had run took %v", took)
+	}
+}
+
+// TestATransactionThatCommitsCanNoLongerRollBack: the rollback of a
+// transaction that commits instead is lost, and a wait for it fails at once,
+// saying so; a later transaction's rollback on the same connection runs none
+// of it.
+func TestATransactionThatCommitsCanNoLongerRollBack(t *testing.T) {
+	db, w, tx := heldWrite(t, context.Background())
+	db.SetMaxOpenConns(1) // the later transaction runs on the same connection
+	rollback := w.RollbackOf(t, tx)
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	later, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := later.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	rec := &fatalRecorder{TB: t}
+	ended := make(chan struct{})
+	go func() { // rec's Fatalf ends the goroutine calling it
+		defer close(ended)
+		rollback.Wait(rec)
+	}()
+	select {
+	case <-ended:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the wait for a rollback its transaction committed past was still waiting 5s later")
+	}
+	if want := "its connection prepared a COMMIT first"; !strings.Contains(rec.fatal, want) {
+		t.Errorf("the wait failed with %q, want it to say %q", rec.fatal, want)
+	}
+}
+
+// TestARollbackOfRefusesATransactionOnAnotherFile: a transaction on another
+// file than the watch's is refused, and its connection holds no expectation.
+func TestARollbackOfRefusesATransactionOnAnotherFile(t *testing.T) {
+	_, w, _ := heldWrite(t, context.Background())
+	other := openWAL(t, filepath.Join(t.TempDir(), "other.db"))
+	tx, err := other.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	rec := &fatalRecorder{TB: t}
+	ended := make(chan struct{})
+	go func() {
+		defer close(ended)
+		w.RollbackOf(rec, tx)
+	}()
+	<-ended
+	if want := "not to the watched " + w.path; !strings.Contains(rec.fatal, want) {
+		t.Errorf("RollbackOf failed with %q, want it to say %q", rec.fatal, want)
+	}
 }
 
 // openWAL opens a WAL database by name, a DSN or a path, closed when the

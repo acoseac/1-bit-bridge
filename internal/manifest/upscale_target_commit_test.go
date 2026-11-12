@@ -17,12 +17,13 @@ import (
 // sql: transaction has already been committed or rolled back". The cancel
 // lands after SetUpscaleTarget's last statement has run at the driver, so
 // neither statement sees it. database/sql's own goroutine then rolls the
-// transaction back (Tx.awaitDone, the rollback the watch sees at the
-// driver), and only then does SetUpscaleTarget reach tx.Commit(), which
-// answers sql.ErrTxDone from its own state without calling the driver's
-// Commit. That error carries no cancellation, so the seed's check, which
-// took only context.Canceled for a stop, called it a failed start. Neither
-// key is written, on a fresh seed or over a target already set.
+// transaction back (Tx.awaitDone, the rollback the test waits for at the
+// driver, on the transaction's own connection), and only then does
+// SetUpscaleTarget reach tx.Commit(), which answers sql.ErrTxDone from its
+// own state without calling the driver's Commit. That error carries no
+// cancellation, so the seed's check, which took only context.Canceled for a
+// stop, called it a failed start. Neither key is written, on a fresh seed or
+// over a target already set.
 func TestAStopAfterTheUpscaleTargetsLastStatementIsErrTxDoneAtItsCommit(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -46,9 +47,7 @@ func TestAStopAfterTheUpscaleTargetsLastStatementIsErrTxDoneAtItsCommit(t *testi
 			go func() { errc <- s.SetUpscaleTarget(ctx, 192000, 24) }()
 
 			tx := held.reached(t)
-			seen := rollbacks.Seen()
-			cancel()
-			waitForTheRollbackOf(t, rollbacks, seen, tx)
+			stopAndWaitForTheRollbackOf(t, rollbacks, tx, cancel)
 			held.release(nil)
 			err := <-errc
 
@@ -147,20 +146,47 @@ func (h *heldUpscaleTarget) release(err error) {
 	h.once.Do(func() { h.answer <- err })
 }
 
-// waitForTheRollbackOf waits until database/sql has rolled tx back at the
-// driver: the watch counts the rollbacks on the store's file, and tx's own
-// leaves tx answering sql.ErrTxDone. A probe of a transaction still open runs
-// a SELECT, which changes nothing, and the wait goes on past the next
-// rollback.
-func waitForTheRollbackOf(t *testing.T, w *sqlitetest.RollbackWatch, seen int, tx *sql.Tx) {
+// stopAndWaitForTheRollbackOf stops the transaction tx through stop and waits
+// until database/sql has rolled tx back at the driver, on tx's own
+// connection: the rollback is taken before the stop (RollbackOf), so one that
+// runs before the wait begins is kept, and has run once the driver's ROLLBACK
+// there has rolled tx back. Neither a rollback counted on the store's file,
+// which another connection's makes too, nor tx answering sql.ErrTxDone, which
+// database/sql answers from the moment it marks tx done, before it calls the
+// driver's Rollback, says that tx's own has run (backlog B869).
+func stopAndWaitForTheRollbackOf(t *testing.T, w *sqlitetest.RollbackWatch, tx *sql.Tx, stop func()) {
 	t.Helper()
-	for {
-		w.WaitPast(t, seen, nil)
-		seen = w.Seen()
-		if _, err := tx.ExecContext(context.Background(), `SELECT 1`); errors.Is(err, sql.ErrTxDone) {
-			return
-		}
+	rollback := w.RollbackOf(t, tx)
+	stop()
+	rollback.Wait(t)
+}
+
+// TestAStopAtTheUpscaleTargetsCommitWaitsForItsOwnRollback proves
+// stopAndWaitForTheRollbackOf (backlog B869): with the write's ROLLBACK held
+// at the driver, once database/sql has marked the transaction done and before
+// SQLite rolls it back, the wait does not answer, with nothing else rolled
+// back on the store's file or once a reader's transaction has rolled back on
+// another connection to it (sqlitetest's WaitProof), and answers once the held
+// rollback has run; the commit then answers sql.ErrTxDone and writes neither
+// key.
+func TestAStopAtTheUpscaleTargetsCommitWaitsForItsOwnRollback(t *testing.T) {
+	s := openTempStore(t)
+	rollbacks := sqlitetest.WatchRollbacks(t, s.path)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	held := holdUpscaleTargetAtItsCommit(t, s)
+	errc := make(chan error, 1)
+	go func() { errc <- s.SetUpscaleTarget(ctx, 192000, 24) }()
+
+	tx := held.reached(t)
+	proof := rollbacks.HoldRollbackOf(t, tx).BesideAReader(t)
+	stopAndWaitForTheRollbackOf(t, rollbacks, tx, cancel)
+	proof.Returned(t)
+	held.release(nil)
+	if err := <-errc; !errors.Is(err, sql.ErrTxDone) {
+		t.Fatalf("SetUpscaleTarget after a stop at its commit = %v, want sql.ErrTxDone", err)
 	}
+	wantTargetUnchanged(t, s, false)
 }
 
 // wantTargetUnchanged requires the target the store held before the write:

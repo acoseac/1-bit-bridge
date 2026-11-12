@@ -538,21 +538,18 @@ func TestTheReQueueRecordsEachMatchsProvenanceInItsTransaction(t *testing.T) {
 	for _, c := range []struct {
 		name string
 		// hold is the re-queue's, inside its transaction: cancel ends the
-		// reset's context, and rollbacks counts the rollbacks on the store's
-		// file.
+		// reset's context, and rollbacks watches the store's file.
 		hold func(t *testing.T, cancel context.CancelFunc, rollbacks *sqlitetest.RollbackWatch) func(context.Context, *sql.Tx) error
 	}{
 		{"cancelled inside its transaction", func(t *testing.T, cancel context.CancelFunc, rollbacks *sqlitetest.RollbackWatch) func(context.Context, *sql.Tx) error {
 			return func(_ context.Context, tx *sql.Tx) error {
-				// The hold answers once database/sql has rolled the
-				// transaction back on its own goroutine, the transaction
-				// asked whether the rollback the watch saw was its own
-				// (B662's rule, backlog B869), so the commit after it finds
-				// the transaction done. The reset's Done is no proof of that
-				// rollback: it closes before it (backlog B844).
-				seen := rollbacks.Seen()
-				cancel()
-				waitForTheRollbackOf(t, rollbacks, seen, tx)
+				// The hold answers once database/sql, on its own
+				// goroutine, has rolled the transaction back at the driver,
+				// on the transaction's own connection (B662's rule, backlog
+				// B869), so the commit after it finds the transaction done.
+				// The reset's Done is no proof of that rollback: it closes
+				// before it (backlog B844).
+				stopAndWaitForTheRollbackOf(t, rollbacks, tx, cancel)
 				return nil
 			}
 		}},
