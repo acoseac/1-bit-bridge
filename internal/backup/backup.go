@@ -27,6 +27,9 @@
 // running is unsafe (the WAL would be inconsistent with the new
 // main file), so `bridge restore` holds the exclusive data-dir lock and
 // refuses a running serve. The confirmation prompt also accepts `--yes`.
+// A restore reads its snapshot holding the lock of the folder that holds it,
+// the one that folder's verifications and prunes take (holdSource), so no
+// prune removes it, and no check that did not end holds it, as it is read.
 //
 // Run as root over an install another user owns (`sudo bridge backup`,
 // and `sudo bridge restore`, the usual form with the service stopped),
@@ -487,6 +490,21 @@ func Restore(snapshotDir string, dst Targets) error {
 // RestoreWithOptions restores with an optional warning sink and random source.
 // Like Restore, its caller must hold the data directory's exclusive lock.
 //
+// First, before it touches the destination, it takes the lock of the folder
+// that holds the snapshot, the one every verification, claim and prune of
+// that folder takes (holdSource, backlog B826), and holds it until it
+// returns: so no prune removes the snapshot under it, and a snapshot that a
+// verification given up still holds, here or in another process, is refused
+// (ErrCheckStillRunning), as is one whose folder another holder keeps past
+// the restore's wait (ErrBackupsBusy, RestoreOptions.LockWait) and one in a
+// folder where no lock can be had (ErrBackupsUnlocked), nothing restored.
+// Under that lock it reads the snapshot's manifest, a snapshot that is no
+// longer there refused (ErrSnapshotGone), and only then completes a player
+// seal the destination left incomplete. It reads the snapshot where it
+// resolves, in the folder whose lock it holds. The data directory's lock, its
+// caller's, comes first, the snapshot's folder's next, and bridge.yaml's
+// last.
+//
 // A restore that writes bridge.yaml, or whose caller read the config to work
 // out the targets (RestoreOptions.ConfigAsRead), takes the config file's lock
 // too (config.LockFile, backlog B506), inside the data dir's, the order every
@@ -508,17 +526,28 @@ func Restore(snapshotDir string, dst Targets) error {
 // restore says which files it restored and that running it again finishes it
 // (partialRestoreError).
 func RestoreWithOptions(snapshotDir string, dst Targets, opts RestoreOptions) error {
+	ctx := opts.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	wait := opts.LockWait
+	if wait == 0 {
+		wait = VerifyCmdLockWait
+	}
+	src, err := holdSource(ctx, snapshotDir, wait)
+	if err != nil {
+		return err
+	}
+	// Its unlock can wait on the folder's filesystem: bounded, the lock let go
+	// on its own past the bound.
+	defer letGoWithin(src.release)
+	snapshotDir, m := src.snap, src.m
+	if opts.sourceHeld != nil {
+		opts.sourceHeld()
+	}
 	var completionErr error
 	if dst.PlayerUUID != "" {
 		completionErr = completePlayerSeal(filepath.Dir(dst.PlayerUUID))
-	}
-	m, err := readManifest(filepath.Join(snapshotDir, ManifestFile))
-	if err != nil {
-		return fmt.Errorf("read snapshot manifest: %w", err)
-	}
-	if m.SchemaVersion < 1 || m.SchemaVersion > SchemaVersion {
-		return fmt.Errorf("snapshot schema v%d not supported (this bridge supports v%d)",
-			m.SchemaVersion, SchemaVersion)
 	}
 	var configTurn *config.FileLock
 	if dst.BridgeYAML != "" && (slices.Contains(m.Files, "bridge.yaml") || opts.ConfigAsRead != nil) {

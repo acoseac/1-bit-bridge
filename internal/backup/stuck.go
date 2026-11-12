@@ -32,8 +32,9 @@ import (
 // resolved key and every spelling it was reached by, and the mark stands
 // until every hold is let go; it is raised only by an overrun, never by a hold
 // that keeps within its bound, nor by a wait that overran nothing. Behind it,
-// a verification, a claim or a prune answers ErrCheckStillRunning at once,
-// naming the snapshot, or the prune: in this process
+// a verification, a claim, a prune or a restore of a snapshot there
+// (holdSource, backlog B826) answers ErrCheckStillRunning at once, naming the
+// snapshot, or the prune: in this process
 // by the mark, which each asks before any filesystem for a spelling the hold
 // was reached by (stuckBy), and in another by the marker the hold writes
 // beside the folder's lock (stuckMarkerName), best effort, which counts only
@@ -45,8 +46,9 @@ import (
 // here is backlog B653's.
 
 // ErrCheckStillRunning is the answer of a verification, a claim and a prune
-// behind a hold given up that still holds the backups folder: until its step
-// ends, or until the process that runs it does.
+// behind a hold given up that still holds the backups folder, and of a
+// restore of a snapshot in that folder (holdSource): until its step ends, or
+// until the process that runs it does.
 var ErrCheckStillRunning = errors.New("a verification or prune of these snapshots that did not end still holds them, until it ends or its process does")
 
 // StuckCheck is a hold given up that still holds a backups folder: its
@@ -272,10 +274,14 @@ func clearStaleMarker(root string) {
 	_ = os.Remove(filepath.Join(root, stuckMarkerName))
 }
 
+// readStuckMarker is the read of a marker (fsutil.ReadAsFile), and a test's
+// stand-in for a read that does not answer (SetReadStuckMarkerForTest).
+var readStuckMarker = fsutil.ReadAsFile
+
 // stuckMarker reads the marker in the backups folder at root, if any: a file,
 // never a named pipe (fsutil.ReadAsFile), of a size a marker has.
 func stuckMarker(root string) (StuckCheck, bool) {
-	data, err := fsutil.ReadAsFile(filepath.Join(root, stuckMarkerName))
+	data, err := readStuckMarker(filepath.Join(root, stuckMarkerName))
 	if err != nil || len(data) > 4096 {
 		return StuckCheck{}, false
 	}

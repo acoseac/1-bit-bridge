@@ -77,6 +77,11 @@ func TestSnapshotAndRestoreAsRootKeepTheInstallOwner(t *testing.T) {
 		// B506), whose file it creates when no writer has yet: left root's,
 		// the service's next console save could not open it.
 		configLockFile(src.BridgeYAML),
+		// And, first, the lock of the folder that holds its snapshot (backlog
+		// B826), whose file it creates when no verification, claim or prune
+		// has yet: left root's, the service's next verification or prune of
+		// that folder could not open it.
+		filepath.Join(dataDir, backup.BackupsDirName, backup.LockFileName),
 	})
 }
 
@@ -153,6 +158,7 @@ func TestSnapshotAndRestoreAsRootKeepTheConsoleAccountAndHarvestState(t *testing
 		src.ManifestDB, src.TokensJSON, src.ServerCert, src.ServerKey, src.BridgeYAML,
 		src.AdminAuth, src.AtlasHarvest, src.ManifestDB + "-migrate.lock", configLockFile(src.BridgeYAML),
 		updater.StateLockPath(filepath.Dir(src.ManifestDB)),
+		filepath.Join(dataDir, backup.BackupsDirName, backup.LockFileName),
 	})
 }
 

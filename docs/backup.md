@@ -177,9 +177,9 @@ and at least one must be INCOMPLETE with only `cancelled`. The same predicate
 decides whether a found verdict beside an error is cancellation alone.
 A step that is slow and keeps within its bound changes nothing.
 
-Until a step given up ends, no other check or prune of those snapshots runs
-and no scheduled snapshot is taken. In the bridge that runs it they are
-refused at once, and `bridge doctor`'s `backup-check` line names the
+Until a step given up ends, no other check or prune of those snapshots runs,
+none of them is restored, and no scheduled snapshot is taken. In the bridge
+that runs it they are refused at once, and `bridge doctor`'s `backup-check` line names the
 snapshot, or the prune, and its step, whatever the storage answers. Another
 process cannot read that it was given up from storage that does not take
 writes: it waits for the folder's lock and answers that the snapshots are
@@ -224,6 +224,23 @@ service runs. `--yes` skips confirmation, not this check. Like `bridge serve`,
 it makes a data directory that is not there yet, and refuses one it cannot
 make or use (a regular file or a link to nothing where it goes, or above it),
 naming the path, before it writes anything.
+
+Once you have confirmed, restore also takes the lock of the folder that holds
+the snapshot, the lock the bridge that keeps those snapshots checks and prunes
+them under, and holds it until it ends, so no prune removes the snapshot while
+it is restored. It does not hold it across the prompt. Before it writes
+anything, it waits up to 15 seconds for a check or prune of those snapshots
+to end, and refuses past that with nothing restored. It refuses at once while
+a check that did not end still holds them: restart the bridge that keeps
+them, or stop the `bridge backup --verify` that runs it, then restore again.
+Under that lock it reads the snapshot again, and refuses one that a prune
+removed while you were asked to confirm. A copy of a snapshot kept elsewhere
+restores the same way: nothing tells a copy from a live backups folder for
+certain, so its folder is locked as a backups folder is, with the lock file
+made there if it is missing. A snapshot on read-only media, on storage that
+grants no file locks, or in a folder you cannot write is refused with nothing
+restored: copy the snapshot's folder to a local disk, and restore from the
+copy.
 
 The snapshot's player UUID makes the restored player the device controllers
 already know. Without a player UUID, restore leaves the destination's player

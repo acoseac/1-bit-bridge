@@ -38,10 +38,6 @@ func OwnerHeldAsAnotherProcessForTest(dir string) bool {
 	return false
 }
 
-// StuckMarkerName is the marker a check that did not end leaves in its
-// backups folder.
-const StuckMarkerName = stuckMarkerName
-
 // StuckAnywhereForTest reports whether any hold given up in this process is
 // marked still.
 func StuckAnywhereForTest() bool {
@@ -184,4 +180,37 @@ func WithBeforeConfigForTest(opts RestoreOptions, fn func()) RestoreOptions {
 func WithBeforeWritesForTest(opts RestoreOptions, fn func()) RestoreOptions {
 	opts.beforeWrites = fn
 	return opts
+}
+
+// WithSourceHeldForTest returns opts with fn as what a restore runs once it
+// holds the lock of the folder that holds its snapshot and has read the
+// manifest there, before it touches the destination.
+func WithSourceHeldForTest(opts RestoreOptions, fn func()) RestoreOptions {
+	opts.sourceHeld = fn
+	return opts
+}
+
+// SetReadStuckMarkerForTest replaces the read of the marker a check that did
+// not end leaves beside the backups folder's lock, and returns the restore.
+func SetReadStuckMarkerForTest(fn func(path string) ([]byte, error)) (restore func()) {
+	prev := readStuckMarker
+	readStuckMarker = fn
+	return func() { readStuckMarker = prev }
+}
+
+// ReadStuckMarkerBytes is the real read of that marker, for a test's stand-in
+// to fall back on.
+func ReadStuckMarkerBytes(path string) ([]byte, error) { return fsutil.ReadAsFile(path) }
+
+// SetOnSourceWorkerEndForTest installs the hook a restore's source worker
+// runs last, given the snapshot as the restore was given it, once it has
+// handed its hold over or let go of what it took, and returns the restore.
+// Its callback must return, and ignore every snapshot but its test's.
+func SetOnSourceWorkerEndForTest(fn func(dir string)) (restore func()) {
+	var p *func(string)
+	if fn != nil {
+		p = &fn
+	}
+	prev := onSourceWorkerEnd.Swap(p)
+	return func() { onSourceWorkerEnd.Store(prev) }
 }

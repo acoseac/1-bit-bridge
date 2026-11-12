@@ -94541,3 +94541,79 @@ ok. Under the native overlay with `-race`:
 
 `make docs-check` was clean. `verify_moves.py --base 3a860847` passes with the
 output.md line declared an edit and round 5's History heading renamed.
+
+## 2026-11-12 — B826: a restore holds the lock of its snapshot's folder
+
+The rule is in `cli-serve.md` (the "…and a restore takes that lock" bullet
+after the B653 ones) and its long form in `ops/History-rules-cli-serve.md`
+("B826"); this is the evidence. Linux amd64 (legion0), Go 1.27.3, the
+Makefile's tags.
+
+### The defect
+
+Codex's fourth finding on B653 PR 1's third round (#1444), left to this
+backlog item: `restoreCmd` entered `RestoreWithOptions` holding only the
+destination's data-dir lock, so a restore of install A's snapshot into a
+stopped install B went on while A's serving process held a check given up
+(`ErrCheckGivenUp`) with the snapshot's files open, and nothing kept A's
+prune from removing the snapshot under its copies. The prune refused in that
+state already (`stuckBy(backupsRoot)` in `PruneContext`); the restore took no
+backups lock and read no mark. Every claim of the brief held at main
+(4b21e2ce): `RestoreWithOptions` at `backup.go` 510, `completePlayerSeal`
+first at 513, `restoreCmd` at `cmd/bridge/backup.go` 405 calling it at 485,
+`verifyCmd`'s refusals at 176-185, `lockBackupsWith`'s synchronous open and
+marker read, and the marker left to its caller.
+
+### Red first, on main
+
+`TestARestoreRefusesASnapshotAGivenUpCheckHolds`, written to build at main
+and run there before any production change: A's verification given up past a
+300 ms deadline, its check parked in the seam before SQLite opens the
+snapshot's database (`SetOnDatabaseOpenForTest`), then a restore of that
+snapshot into B. Main answered nil and wrote all of B:
+
+```
+restore_source_test.go:115: a restore of the snapshot a check given up holds answered <nil>, want ErrCheckStillRunning
+restore_source_test.go:120: the restore beside the check given up wrote B's bridge.db
+restore_source_test.go:120: the restore beside the check given up wrote B's tokens.json
+restore_source_test.go:120: the restore beside the check given up wrote B's server.crt
+restore_source_test.go:120: the restore beside the check given up wrote B's server.key
+restore_source_test.go:120: the restore beside the check given up wrote B's bridge.yaml
+restore_source_test.go:120: the restore beside the check given up changed what B's data dir holds
+--- FAIL: TestARestoreRefusesASnapshotAGivenUpCheckHolds (1.89s)
+```
+
+With the fix it is refused at once with `ErrCheckStillRunning`, B as it was.
+`TestASnapshotPrunedWhileTheRestoreAskedIsRefusedBeforeTheDestinationIsTouched`
+and `TestBridgeRestoreRefusesASnapshotPrunedWhileItAsked` are red on main
+too by construction: main completed B's incomplete player seal
+(`player-initialized` written) before it read the snapshot's manifest.
+
+### The fix
+
+`holdSource` (`internal/backup/restore_source.go`), first in
+`RestoreWithOptions`: this process's marks by the spelling given
+(`SourceStillHeld`), then, on a worker, the snapshot's resolution, the
+resolved folder's marks, `lockBackupsWith` within `RestoreOptions.LockWait`,
+the stale marker's clear and the manifest's read under the lock; the restore
+waits for the worker until its context (`RestoreOptions.Context`) ends or the
+wait and `watchdogSlack` pass, then `StopWriteBound` more. The seal's
+completion and every write come after, on the restore's own goroutine, which
+reads the snapshot where it resolves. `restoreCmd` asks `SourceStillHeld`
+before `LooksLikeSnapshotDir`, passes its context and `verifyCmdLockWait`,
+and says each refusal in `verifyCmd`'s words (`sayRestoreRefusal`). Three
+root-owner tests (`TestSnapshotAndRestoreAsRootKeepTheInstallOwner`, its
+console-account sibling and `TestSnapshotAndRestoreAsRootKeepThePlayerUUID`)
+now expect the lock file a root restore makes in the snapshot's folder to
+take the install's owner, as it does (`fsutil.OpenLockFile`).
+
+### Decided
+
+A copy of a snapshot is locked as a live folder is, its lock file made where
+it is missing: nothing tells the two apart for certain, and a missing lock
+file is what a live folder has before its first verification. Read-only
+media, a share that keeps no locks and a folder this user cannot write are
+refused, `ErrBackupsUnlocked` in a restore's words, with the advice to copy
+the snapshot to a local disk. The brief's case "a standalone copy (no lock
+file) restores unlocked" is therefore `TestAStandaloneCopyIsRestoredUnderItsOwnFoldersLock`:
+it restores, under its own folder's lock, let go after.

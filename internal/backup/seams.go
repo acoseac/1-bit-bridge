@@ -144,6 +144,10 @@ const VetoFileName = vetoFileName
 // OwnerLockName is the file in a snapshot whose lock its owner holds.
 const OwnerLockName = ownerLockName
 
+// StuckMarkerName is the marker a check that did not end leaves in its
+// backups folder, beside the lock it holds.
+const StuckMarkerName = stuckMarkerName
+
 // RootVetoPath is where a verdict's write keeps the veto of the snapshot in
 // dir when it cannot keep it in the bundle.
 func RootVetoPath(dir string) string { return rootVetoPath(dir) }

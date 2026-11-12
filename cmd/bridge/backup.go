@@ -402,6 +402,16 @@ var restoreRandom io.Reader
 // writeServerPIDFile runs from runServe and doctor.go already reads
 // <dataDir>/server.pid. The admin probe is the cheaper signal and the one
 // every sibling CLI mutator already uses.)
+//
+// The snapshot's own side is locked too (backlog B826): once confirmed, the
+// restore takes the lock of the folder that holds the snapshot, the one the
+// bridge that keeps those snapshots verifies and prunes under, inside the
+// data dir's and ahead of bridge.yaml's, waiting for a verification or prune
+// there for verifyCmdLockWait, and is refused, nothing restored, while a
+// check that did not end holds it, past that wait, where no lock can be had
+// there, and where the snapshot is gone by then (sayRestoreRefusal). It is not
+// held across the prompt, which would hold that bridge's checks up for as long
+// as the prompt waits.
 func restoreCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("restore", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -418,6 +428,14 @@ func restoreCmd(ctx context.Context, args []string, stdin io.Reader, stdout, std
 	}
 	snapshotDir := backup.CleanSnapshotPath(fs.Arg(0))
 
+	// A check given up in this process that still holds the snapshot's folder
+	// refuses the restore before anything reads the snapshot, asking no
+	// filesystem: the read below could hang on the mount its step stalled on.
+	// The restore asks again, and asks the folder's lock, once confirmed.
+	if err := backup.SourceStillHeld(snapshotDir); err != nil {
+		sayRestoreRefusal(stderr, err)
+		return 1
+	}
 	if !backup.LooksLikeSnapshotDir(snapshotDir) {
 		fmt.Fprintf(stderr, "restore: %q is not a recognized snapshot directory (no readable manifest.json with a supported schema)\n", snapshotDir)
 		return 2
@@ -480,14 +498,47 @@ func restoreCmd(ctx context.Context, args []string, stdin io.Reader, stdout, std
 		return 1
 	}
 
+	// The restore takes the lock of the folder that holds the snapshot first,
+	// waiting for a verification or prune there as bridge backup --verify
+	// waits (backlog B826), and reads the snapshot again under it, since a
+	// prune can have removed it while the prompt waited. ctx stops that wait
+	// and nothing after it.
 	targets := buildRestoreTargets(cfg, resolvedCfgPath)
-	opts := backup.RestoreOptions{Random: restoreRandom, Warn: func(s string) { fmt.Fprintln(stdout, s) }, ConfigAsRead: cfgRead}
+	opts := backup.RestoreOptions{
+		Random: restoreRandom, Warn: func(s string) { fmt.Fprintln(stdout, s) }, ConfigAsRead: cfgRead,
+		Context: ctx, LockWait: verifyCmdLockWait,
+	}
 	if err := backup.RestoreWithOptions(snapshotDir, targets, opts); err != nil {
-		fmt.Fprintf(stderr, "restore: %v\n", err)
+		if !sayRestoreRefusal(stderr, err) {
+			fmt.Fprintf(stderr, "restore: %v\n", err)
+		}
 		return 1
 	}
 	fmt.Fprintln(stdout, "Restore complete. Start the bridge service.")
 	return 0
+}
+
+// sayRestoreRefusal says on stderr why a restore was refused at the lock of
+// the folder that holds its snapshot (backup.RestoreWithOptions, backlog
+// B826), in the words verifyCmd gives each kind, and reports whether err was
+// such a refusal: a check that did not end still holding that folder,
+// another verification or prune holding it for all of the restore's wait, a
+// folder where no lock can be had, and a snapshot that is no longer there.
+// Each exits 1, as verifyCmd's do; the error says nothing was restored.
+func sayRestoreRefusal(stderr io.Writer, err error) bool {
+	switch {
+	case errors.Is(err, backup.ErrCheckStillRunning):
+		fmt.Fprintf(stderr, "restore: %v. The end of the process that runs it ends it (bridge doctor's backup-check line names its snapshot): restart the bridge that keeps those snapshots, or stop the bridge backup --verify that runs it, then run this again.\n", err)
+	case errors.Is(err, backup.ErrBackupsBusy):
+		fmt.Fprintf(stderr, "restore: %v. It is a serving bridge's, or another command's: run this again once it ends.\n", err)
+	case errors.Is(err, backup.ErrBackupsUnlocked):
+		fmt.Fprintf(stderr, "restore: %v. With no lock nothing would keep a prune from removing the snapshot while it is restored: copy the snapshot, its whole folder, into a folder this user can write on a filesystem that grants file locks (a local disk), and restore from the copy.\n", err)
+	case errors.Is(err, backup.ErrSnapshotGone):
+		fmt.Fprintf(stderr, "restore: %v. It was there when this command read it, and a prune may have removed it since: choose another snapshot.\n", err)
+	default:
+		return false
+	}
+	return true
 }
 
 // buildBackupSources resolves the live state-file paths from a
