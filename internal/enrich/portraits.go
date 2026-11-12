@@ -77,6 +77,13 @@ const (
 	// to portraitRetryMost.
 	portraitRetryFirst = time.Minute
 	portraitRetryMost  = 6 * time.Hour
+	// portraitRestMost bounds how long the batch rests after a pass that
+	// found no artist due (portraitPass.restUntil). The rest ends at the
+	// earliest retry the pass saw, and at once when a pass keeps a refused
+	// lookup; this bound is for a row a re-enrichment hands back with its
+	// query kept and its artist's retry due before the rest ends ("Retry
+	// missing", then a failure), which waits this long at most past it.
+	portraitRestMost = 10 * time.Minute
 	// portraitRetryCap bounds portraitRetry, as the other memos are bounded.
 	portraitRetryCap = 100_000
 	// defaultPortraitBatchLimit is PortraitBatchLimit's zero value.
@@ -90,6 +97,26 @@ type portraitRetryState struct {
 	notBefore time.Time
 }
 
+// portraitPass is the portrait batch's pass over the rows that keep a
+// refused lookup, page by page in path order. Run's goroutine alone reads
+// and writes it.
+type portraitPass struct {
+	// cursor is the path the pass's last page ended on, "" between passes.
+	cursor string
+	// progressed says the pass asked for a portrait, or settled a row.
+	progressed bool
+	// due is the earliest retry among the artists the pass waited for or
+	// saw fail, zero for none.
+	due time.Time
+	// restUntil is when the next pass may start, after one that found no
+	// artist due: until then the batch reads nothing.
+	restUntil time.Time
+	// refusals is portraitRefusals as the pass began: a refused lookup kept
+	// since makes a row due that the pass may not have read, so the pass
+	// then does not rest, and a rest under way ends.
+	refusals int64
+}
+
 // now is the time the portrait retries are paced by.
 func (e *Enricher) now() time.Time {
 	if e.clock != nil {
@@ -98,22 +125,26 @@ func (e *Enricher) now() time.Time {
 	return time.Now()
 }
 
-// portraitDue reports whether mbid's portrait may be asked for at now: no
-// failure is on record for it, or its retry is due.
-func (e *Enricher) portraitDue(mbid string, now time.Time) bool {
+// portraitRetryAt is when mbid's portrait may be asked for again, and
+// whether, at now, it has to wait for that: a failure is on record and its
+// retry is not due.
+func (e *Enricher) portraitRetryAt(mbid string, now time.Time) (time.Time, bool) {
 	if e.portraitRetry == nil {
-		return true
+		return time.Time{}, false
 	}
 	st, ok := e.portraitRetry.Get(mbid)
-	return !ok || st.failures == 0 || !now.Before(st.notBefore)
+	if !ok || st.failures == 0 || !now.Before(st.notBefore) {
+		return time.Time{}, false
+	}
+	return st.notBefore, true
 }
 
 // notePortraitFailed puts mbid's next attempt off: portraitRetryFirst after
 // its first failure, twice as long after each failure after it, and
-// portraitRetryMost at most.
-func (e *Enricher) notePortraitFailed(mbid string) {
+// portraitRetryMost at most. It returns when the attempt is due.
+func (e *Enricher) notePortraitFailed(mbid string) time.Time {
 	if e.portraitRetry == nil {
-		return
+		return time.Time{}
 	}
 	st, _ := e.portraitRetry.Get(mbid)
 	st.failures++
@@ -123,6 +154,23 @@ func (e *Enricher) notePortraitFailed(mbid string) {
 	}
 	st.notBefore = e.now().Add(min(wait, portraitRetryMost))
 	e.portraitRetry.Set(mbid, st)
+	return st.notBefore
+}
+
+// notePortraitRefused counts a refused lookup a pass keeps: the row it
+// stamps is due once both switches are on, so it ends the batch's rest.
+func (e *Enricher) notePortraitRefused() { e.portraitRefusals.Add(1) }
+
+// earliest is the earlier of two instants, the zero time being none.
+func earliest(a, b time.Time) time.Time {
+	switch {
+	case a.IsZero():
+		return b
+	case b.IsZero() || a.Before(b):
+		return a
+	default:
+		return b
+	}
 }
 
 // notePortraitSettled forgets mbid's failures: its portrait is held, or
@@ -142,26 +190,41 @@ func (e *Enricher) portraitBatchLimit() int {
 }
 
 // runPortraits takes one page of the rows that keep a portrait lookup the
-// Deezer switch refused, past where the last page ended, and returns how long
-// Run waits before its next turn: interBatchPause while the page was full, so
-// the next page follows at once, and PollInterval once the pages have reached
-// the end, or a switch stopped the page. Run calls it only while enrichment
-// and Deezer are both on, and it runs on enrich.enabled's context as a batch
-// does; each Deezer request runs on Deezer's own (deezerCall).
+// Deezer switch refused, past where the pass's last page ended, and returns
+// how long Run waits before its next turn: interBatchPause while the page was
+// full, so the next page follows at once, and PollInterval once the pass has
+// reached the end, a switch stopped it, or the batch rests. Run calls it only
+// while enrichment and Deezer are both on, and it runs on enrich.enabled's
+// context as a batch does; each Deezer request runs on Deezer's own
+// (deezerCall).
 //
-// Rotation: each page reads past the last page's end, wrapping to the start
-// once a page comes back short, so rows whose artist keeps failing at the head
-// of the order hold back no row behind them; and a failing artist is asked
-// again only once its retry is due (portraitDue), so they cost no request in
-// between. One page a turn, beside the ordinary batch, keeps both moving.
+// Rotation: each page reads past the last page's end, and a pass that reaches
+// the end starts the next at the beginning, so rows whose artist keeps
+// failing at the head of the order hold back no row behind them; and a
+// failing artist is asked again only once its retry is due
+// (portraitRetryAt), so it costs no request in between. One page a turn,
+// beside the ordinary batch, keeps both moving. A pass that found no artist
+// due, every one waiting for its retry, is not followed by another until the
+// earliest of those retries (portraitRestMost at most), unless a pass keeps a
+// refused lookup meanwhile: the batch reads nothing while it rests.
 func (e *Enricher) runPortraits(ctx context.Context) time.Duration {
 	if e.deezer == nil || e.store == nil {
 		return e.PollInterval
 	}
+	p := &e.portraits
+	now := e.now()
+	if p.cursor == "" {
+		refusals := e.portraitRefusals.Load()
+		if now.Before(p.restUntil) && refusals == p.refusals {
+			return e.PollInterval
+		}
+		// A pass begins.
+		p.restUntil, p.refusals = time.Time{}, refusals
+	}
 	ctx, release := enrichgate.CancelWhenOff(ctx, e.on, e.switchEvery)
 	defer release()
 	limit := e.portraitBatchLimit()
-	rows, err := e.store.PendingPortraits(ctx, e.portraitCursor, limit)
+	rows, err := e.store.PendingPortraits(ctx, p.cursor, limit)
 	if err != nil {
 		// A listing the shutdown or the switch stopped is not a failed one.
 		if failure := ctxerr.WithoutCancellation(ctx, err); failure != nil {
@@ -169,21 +232,24 @@ func (e *Enricher) runPortraits(ctx context.Context) time.Duration {
 		}
 		return e.PollInterval
 	}
-	full := len(rows) == limit
-	if full {
-		e.portraitCursor = rows[len(rows)-1].Path
-	} else {
-		e.portraitCursor = ""
-	}
-	if !e.portraitsOf(ctx, rows) {
+	if !e.portraitsOf(ctx, rows, now) {
 		// A switch refused a lookup, or the pass was stopped: the rows wait
-		// as they were, and the next page starts over.
-		e.portraitCursor = ""
+		// as they were, and the next pass starts over.
+		p.cursor, p.progressed, p.due = "", false, time.Time{}
 		return e.PollInterval
 	}
-	if full {
+	if len(rows) == limit {
+		p.cursor = rows[len(rows)-1].Path
 		return interBatchPause
 	}
+	// The pass has reached the end. One that found no artist due rests
+	// until the earliest retry it saw, unless a refused lookup was kept
+	// since it began, whose row it may not have read.
+	rest := time.Time{}
+	if !p.progressed && !p.due.IsZero() && e.portraitRefusals.Load() == p.refusals {
+		rest = earliest(p.due, now.Add(portraitRestMost))
+	}
+	p.cursor, p.progressed, p.due, p.restUntil = "", false, time.Time{}, rest
 	return e.PollInterval
 }
 
@@ -211,13 +277,14 @@ func groupPortraits(rows []manifest.PendingPortrait) []portraitGroup {
 }
 
 // portraitsOf asks for each artist's portrait the page's rows wait for, once
-// an artist, and clears the rows it settled. It answers false when it stopped
-// before the page's end: a switch refused a lookup, or the pass's context
-// ended. The rows it settled before then are cleared all the same.
-func (e *Enricher) portraitsOf(ctx context.Context, rows []manifest.PendingPortrait) bool {
+// an artist, notes in the pass what it found, and clears the rows it settled.
+// It answers false when it stopped before the page's end: a switch refused a
+// lookup, or the pass's context ended. The rows it settled before then are
+// cleared all the same.
+func (e *Enricher) portraitsOf(ctx context.Context, rows []manifest.PendingPortrait, now time.Time) bool {
+	p := &e.portraits
 	var settled []manifest.PendingPortrait
 	defer func() { e.settlePortraits(ctx, settled) }()
-	now := e.now()
 	for _, g := range groupPortraits(rows) {
 		if ctx.Err() != nil {
 			return false
@@ -230,11 +297,14 @@ func (e *Enricher) portraitsOf(ctx context.Context, rows []manifest.PendingPortr
 			logger.Warn("dropping a pending portrait whose artist is no MBID",
 				"path", g.rows[0].Path, "value", truncateForLog(g.mbid))
 			settled = append(settled, g.rows...)
+			p.progressed = true
 			continue
 		}
-		if !e.portraitDue(g.mbid, now) {
+		if at, wait := e.portraitRetryAt(g.mbid, now); wait {
+			p.due = earliest(p.due, at)
 			continue
 		}
+		p.progressed = true
 		outcome := portraitNone
 		var err error
 		if !e.deezerNegCache.Has(g.mbid) {
@@ -258,7 +328,7 @@ func (e *Enricher) portraitsOf(ctx context.Context, rows []manifest.PendingPortr
 				return false
 			}
 			e.logUpstream(upstreamDeezer, "artist image", err, "mbid", g.mbid)
-			e.notePortraitFailed(g.mbid)
+			p.due = earliest(p.due, e.notePortraitFailed(g.mbid))
 		}
 	}
 	return true

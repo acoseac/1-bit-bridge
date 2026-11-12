@@ -503,6 +503,7 @@ func (e *Enricher) fetchRecoveredArtistImage(ctx context.Context, t *manifest.Tr
 		// is then not made.
 		if r := enrichgate.Refused(err); !errors.Is(r, enrichgate.ErrOff) {
 			t.PortraitRefused(m.ArtistName)
+			e.notePortraitRefused()
 		}
 	case portraitFailed:
 		if ctx.Err() == nil {

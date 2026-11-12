@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/logging/loggingtest"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
@@ -502,6 +503,91 @@ func TestATransientFailureKeepsThePortraitAndPacesItsRetries(t *testing.T) {
 	}
 	if _, ok := pendingPortraitsOf(t, store)[p]; ok {
 		t.Error("the row is still pending once its portrait arrived")
+	}
+}
+
+// TestAPassThatFindsNoArtistDueRestsAndReadsNothing: once a pass has found
+// every pending artist waiting for its retry, the batch reads nothing until
+// the earliest of those retries, however many turns come meanwhile; at that
+// retry it reads again.
+func TestAPassThatFindsNoArtistDueRestsAndReadsNothing(t *testing.T) {
+	ups := newSwitchUpstreams(t)
+	ups.deezer = failingSearchDeezer(t, func(string) bool { return true })
+	e, store, _ := switchEnricher(t, ups)
+	now := time.Unix(1_800_000_000, 0)
+	e.clock = func() time.Time { return now }
+	stampPending(t, store, "Artist/Album/01.flac", switchArtistMBID, "Artist")
+	requirePending(t, store, "Artist/Album/01.flac", "Artist")
+	ctx := context.Background()
+	e.runPortraits(ctx) // asks, and fails
+	e.runPortraits(ctx) // finds the artist waiting: the batch rests
+	if got := ups.deezer.count(); got != 1 {
+		t.Fatalf("Deezer was asked %d time(s), want the one failed search", got)
+	}
+
+	rec := loggingtest.Record(t)
+	_ = store.Close() // any read of the store now fails, and the batch says so
+	for i := 0; i < 5; i++ {
+		e.runPortraits(ctx)
+	}
+	if got := rec.Failures("list pending portraits"); len(got) != 0 {
+		t.Fatalf("the resting batch read the store:\n%s", strings.Join(got, "\n"))
+	}
+	now = now.Add(portraitRetryFirst)
+	e.runPortraits(ctx)
+	if got := rec.Failures("list pending portraits"); len(got) != 1 {
+		t.Errorf("the batch read the store %d time(s) once the retry was due, want once", len(got))
+	}
+}
+
+// TestARefusalKeptWhileTheBatchRestsEndsTheRest: a pass that keeps a refused
+// lookup while the batch rests makes its row due at once: the next turn reads
+// it and fetches its portrait, though the failing artist the rest waits for
+// is still not due.
+func TestARefusalKeptWhileTheBatchRestsEndsTheRest(t *testing.T) {
+	const failingMBID = "99999999-9999-4999-8999-999999999999"
+	ups := newSwitchUpstreams(t)
+	ups.deezer = failingSearchDeezer(t, func(name string) bool { return name == "Failing" })
+	e, store, artworkDir := switchEnricher(t, ups)
+	now := time.Unix(1_800_000_000, 0)
+	e.clock = func() time.Time { return now }
+	var deezerOn atomic.Bool
+	deezerOn.Store(true)
+	e.WithDeezerEnabled(deezerOn.Load)
+	stampPending(t, store, "A Failing/Album/01.flac", failingMBID, "Failing")
+	ctx := context.Background()
+	e.runPortraits(ctx) // asks, and fails
+	e.runPortraits(ctx) // finds the artist waiting: the batch rests
+
+	deezerOn.Store(false)
+	tr := manifest.Track{Path: "B Artist/Album/01.flac", Size: 1, ModTime: time.Now(), Artist: "Artist", Album: "Album",
+		MusicBrainzAlbumID: switchReleaseMBID, ArtworkMBID: "local-" + strings.Repeat("f", 64)}
+	if err := store.UpsertTrack(ctx, &tr); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := store.UnenrichedTracks(ctx, 10)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("UnenrichedTracks = %d rows (%v), want the new one", len(rows), err)
+	}
+	e.enrichOne(ctx, &rows[0])
+	requirePending(t, store, "B Artist/Album/01.flac", "Artist")
+
+	deezerOn.Store(true)
+	e.runPortraits(ctx)
+	if !fileExists(ArtistImagePath(artworkDir, switchArtistMBID)) {
+		t.Fatal("the refused lookup kept during the rest waited for the rest to end")
+	}
+	if _, ok := pendingPortraitsOf(t, store)["B Artist/Album/01.flac"]; ok {
+		t.Error("the fetched portrait's row is still pending")
+	}
+	failed := 0
+	for _, r := range ups.deezer.requests() {
+		if r == "GET /search/artist?q=Failing&limit=5" {
+			failed++
+		}
+	}
+	if failed != 1 {
+		t.Errorf("the failing artist was asked %d time(s), want once: its retry is not due", failed)
 	}
 }
 

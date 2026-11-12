@@ -243,11 +243,15 @@ type Enricher struct {
 	// backlog B761): a failure, never a refusal and never a miss, so the
 	// switch turned on asks at once. Bounded at portraitRetryCap.
 	portraitRetry *lrucache.Cache[string, portraitRetryState]
-	// portraitCursor is the path the portrait batch's last page ended on,
-	// "" for the start: each page reads past it, so rows whose artist keeps
-	// failing at the head of the order cannot hold back the rows behind
-	// them. Run's goroutine alone reads and writes it.
-	portraitCursor string
+	// portraits is the portrait batch's pass over the rows that keep a
+	// refused lookup (portraitPass): each page reads past the last one's
+	// end, so rows whose artist keeps failing at the head of the order
+	// cannot hold back the rows behind them. Run's goroutine alone reads and
+	// writes it.
+	portraits portraitPass
+	// portraitRefusals counts the refused lookups passes have kept
+	// (notePortraitRefused), which end the portrait batch's rest.
+	portraitRefusals atomic.Int64
 	// clock is the time the portrait retries are paced by; nil is
 	// time.Now. A test seam.
 	clock func() time.Time
@@ -898,6 +902,7 @@ func (e *Enricher) resolveArtist(ctx context.Context, t *manifest.Track) error {
 		// Deezer was not asked: no miss to cache, nothing to log, and the
 		// stamp keeps the name it would have been asked by.
 		t.PortraitRefused(imageName)
+		e.notePortraitRefused()
 	case portraitFailed:
 		// Skip the Error log when the failure is just shutdown cancellation
 		// (ensureArtistImageCached returns ctx.Err() from its pacing
