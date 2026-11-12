@@ -9,6 +9,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/player/dsdstate"
 	"github.com/acoseac/1-bit-bridge/internal/player/engine"
@@ -119,6 +120,10 @@ func TestAWriteWaitsForAProbeUnderWayAndOwesItsOwn(t *testing.T) {
 			t.Fatalf("the write answered %s while the probe held the DAC", res.Outcome)
 		case err := <-started:
 			t.Fatalf("a Start asked while the write held the lease answered %v without waiting for it", err)
+		case <-holding.came:
+			t.Fatal("a Start asked while the write held the lease registered without waiting for it")
+		case <-time.After(watchdog):
+			t.Fatalf("waited %v for the Start's wait for the lease", watchdog)
 		}
 		if st := r.b.Stats(); st.Sessions != 0 {
 			t.Fatalf("a Start waiting for the lease registered %d sessions", st.Sessions)
@@ -235,6 +240,8 @@ func TestAProbeAskedDuringAWriteIsRefusedAndStaysOwed(t *testing.T) {
 				case <-waiting.ch:
 				case err := <-started:
 					t.Errorf("a Start asked during the write answered %v without waiting for its lease", err)
+				case <-time.After(watchdog):
+					t.Errorf("waited %v for the Start's wait for the lease", watchdog)
 				}
 			}
 			if after {

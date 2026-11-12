@@ -68,7 +68,11 @@ func TestTheWritesChecksAreAnsweredInTheirOrder(t *testing.T) {
 	}
 	closed := func(t *testing.T, b *Backend) {
 		t.Helper()
-		<-b.CloseDSDWrites()
+		select {
+		case <-b.CloseDSDWrites():
+		case <-time.After(10 * time.Second):
+			t.Fatal("the writes' close with none under way did not end")
+		}
 	}
 	noDSD := func(t *testing.T) *Backend {
 		t.Helper()

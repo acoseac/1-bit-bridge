@@ -285,7 +285,9 @@ func TestTwoWritesOfOneRevisionLandOnce(t *testing.T) {
 		}()
 	}
 	close(start)
-	wg.Wait()
+	all := make(chan struct{})
+	go func() { wg.Wait(); close(all) }()
+	within(t, all, "the writes' answers")
 	written := 0
 	for i, res := range results {
 		switch res.Outcome {
@@ -352,8 +354,8 @@ func TestAWriteBackOfARevisionReadInTheWindowIsAnsweredWithTheDurableOne(t *test
 		t.Fatal("a write made in the window did not wait for the write in flight")
 	}
 	close(release)
-	wantChoice(t, <-first, playback.ChoiceWritten)
-	res := <-second
+	wantChoice(t, within(t, first, "the write in flight's answer"), playback.ChoiceWritten)
+	res := within(t, second, "the answer of the write made in the window")
 	wantChoice(t, res, playback.ChoiceStale)
 	if got := revisionOf(t, res.Policy); got != 1 {
 		t.Fatalf("the stale answer carries revision %d, want 1, the durable one", got)
@@ -429,7 +431,7 @@ func TestAStaleAnswerNeverCarriesARevisionAnotherWriteHasPassed(t *testing.T) {
 			t.Fatal("the next write waited for the stale one's line: a line is written inside the writes' turn")
 		}
 		close(lines.release)
-		res := <-stale
+		res := within(t, stale, "the stale write's answer")
 		wantChoice(t, res, playback.ChoiceStale)
 		if got := revisionOf(t, res.Policy); got != 1 {
 			t.Fatalf("the stale answer carries revision %d, want 1, the state's as its turn ended: the next write's epoch reached it", got)
