@@ -94735,3 +94735,13 @@ Backlog B869's fourth and last round (Codex's and Carbon's Mediums on round 3; t
 | X2: a raw COMMIT ends the expectation | `TestRawTransactionSQLIsOutsideTheContract` red 50 of 50: "came to an end at a raw COMMIT" |
 | X3: the hook outside the driver's Rollback loses nothing | the same test red 50 of 50: "a raw ROLLBACK, which reaches SQLite's rollback hook, left the expectation bound" |
 | X4: `fatalRecorder`'s `Fatal` removed | `TestTheRecorderKeepsFatalOffTheTestsGoroutine` red 50 of 50, the test's own Fatal from the goroutine |
+
+**Checks** (legion0, go1.27.3, the Makefile's tags, TMPDIR on disk; the gate inside the build slot at 3bc67fbc, the tree clean).
+
+| Check | Result |
+|---|---|
+| gofmt (the toolchain's) on every changed Go file | nothing listed |
+| `go vet` of ./cmd/bridge/, ./internal/manifest/ and ./internal/sqlitetest/ for linux/amd64, windows/amd64, darwin/amd64 and linux/386 | exit 0 each |
+| `-race -count=50` from prebuilt race binaries in four lanes: every sqlitetest self-test (24) and every migrated wait (the four manifest tests, the re-queue sweep test and the five serve tests that hold the seed) | 34 tests, 50 of 50 each, no race, nothing skipped |
+| `go test -race -count=1 -p 4 -timeout 120m` of ./cmd/bridge/, ./internal/manifest/ and ./internal/sqlitetest/ | ok each: 1610.0 s, 1649.2 s, 3.9 s |
+| the rules patch (`rules-b869-r4.patch`) applied to the tree: `scripts/check-doc-budgets.py` and `TestEveryCitedTestNameExists` | ok; ok |
