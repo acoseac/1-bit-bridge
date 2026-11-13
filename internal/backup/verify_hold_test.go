@@ -339,12 +339,10 @@ func TestASlowStepWithinItsBoundLeavesNoMark(t *testing.T) {
 	case <-time.After(30 * time.Second):
 		t.Fatal("the slow sync never began")
 	}
-	second := make(chan backup.VerifyResult, 1)
-	secondErr := make(chan error, 1)
+	second := make(chan verifyAnswer, 1)
 	callers.start(func() {
 		res, err := backup.VerifySnapshot(context.Background(), other, backup.VerifyOptions{BackupsRoot: filepath.Dir(other)})
-		second <- res
-		secondErr <- err
+		second <- verifyAnswer{res, err}
 	})
 	select {
 	case <-waiting:
@@ -360,12 +358,27 @@ func TestASlowStepWithinItsBoundLeavesNoMark(t *testing.T) {
 		}
 	}
 	p.release()
-	if err := <-first; err != nil {
+	if err := receiveWithin(t, first, time.Minute, "the slow verification, its sync let go"); err != nil {
 		t.Errorf("the slow verification answered %v", err)
 	}
-	if res, err := <-second, <-secondErr; err != nil || !res.Recorded {
-		t.Errorf("the verification that waited its turn answered %v, recorded %v; want its turn and its verdict", err, res.Recorded)
+	if a := receiveWithin(t, second, time.Minute, "the verification that waited its turn"); a.err != nil || !a.res.Recorded {
+		t.Errorf("the verification that waited its turn answered %v, recorded %v; want its turn and its verdict", a.err, a.res.Recorded)
 	}
+}
+
+// receiveWithin is what ch gives, failing the test past bound: a receive with
+// no bound would wait as long as the verification's own watchdog, its lock
+// wait and its deadline, an hour (backlog B872's second round).
+func receiveWithin[T any](t *testing.T, ch <-chan T, bound time.Duration, what string) T {
+	t.Helper()
+	select {
+	case v := <-ch:
+		return v
+	case <-time.After(bound):
+		t.Fatalf("%s did not answer within %v", what, bound)
+	}
+	var zero T
+	return zero
 }
 
 // TestAVetoThatStoodBeforeAVerificationStaysOverTheVERIFIEDItCarries is
@@ -377,7 +390,11 @@ func TestASlowStepWithinItsBoundLeavesNoMark(t *testing.T) {
 // panics, and a quick VERIFIED over a full one, leaves the veto standing over
 // the VERIFIED the record carries over, so no reader reads it verified and
 // the prune keeps the older verified snapshot. Red on the round before,
-// which removed every veto after any write.
+// which removed every veto after any write. The retry given up parks before
+// it reads the snapshot and is awaited with its answer in either order,
+// bounded, and required given up (backlog B872's second round: parked at
+// SQLite's open behind its deadline, it could end as a retry past its
+// deadline and pass all the same).
 func TestAVetoThatStoodBeforeAVerificationStaysOverTheVERIFIEDItCarries(t *testing.T) {
 	for _, tc := range []string{"a retry stopped before it began", "a retry past its deadline", "a retry given up",
 		"a retry that panics", "a quick VERIFIED over a full one"} {
@@ -409,6 +426,8 @@ func TestAVetoThatStoodBeforeAVerificationStaysOverTheVERIFIEDItCarries(t *testi
 			// The check a given-up retry leaves parked, let go once it has
 			// answered, so its hold can end before the record is read.
 			release := func() {}
+			var parked <-chan struct{}
+			const givenUpDeadline = 300 * time.Millisecond
 			switch tc {
 			case "a retry stopped before it began":
 				stopped, cancel := context.WithCancel(ctx)
@@ -418,14 +437,16 @@ func TestAVetoThatStoodBeforeAVerificationStaysOverTheVERIFIEDItCarries(t *testi
 				t.Cleanup(backup.SetVerifyDeadlineForTest(150 * time.Millisecond))
 				t.Cleanup(backup.SetOnDatabaseOpenForTest(func() { time.Sleep(400 * time.Millisecond) }))
 			case "a retry given up":
-				t.Cleanup(backup.SetVerifyDeadlineForTest(300 * time.Millisecond))
+				t.Cleanup(backup.SetVerifyDeadlineForTest(givenUpDeadline))
 				p := newParking()
-				t.Cleanup(backup.SetOnDatabaseOpenForTest(p.park))
+				// Before it reads the snapshot, where every check comes
+				// whatever its deadline.
+				t.Cleanup(backup.SetOnLowPriorityForTest(p.park))
 				t.Cleanup(func() {
 					p.release()
 					awaitClean(t)
 				})
-				release = p.release
+				release, parked = p.release, p.entered
 			case "a retry that panics":
 				var panicked atomic.Bool
 				t.Cleanup(backup.SetOnDatabaseOpenForTest(func() {
@@ -435,7 +456,23 @@ func TestAVetoThatStoodBeforeAVerificationStaysOverTheVERIFIEDItCarries(t *testi
 				}))
 			}
 			level := backup.CheckQuick
-			res, _ := backup.VerifySnapshot(ctx, dir, backup.VerifyOptions{Level: level})
+			var res backup.VerifyResult
+			if parked != nil {
+				callers := joinBackupCallers(t, release)
+				done := make(chan verifyAnswer, 1)
+				start := time.Now()
+				callers.start(func() {
+					r, err := backup.VerifySnapshot(ctx, dir, backup.VerifyOptions{Level: level})
+					done <- verifyAnswer{r, err}
+				})
+				a := awaitParkedAndGivenUp(t, parked, done, verifyAnswer.read, start, givenUpDeadline+backup.StopWriteBound/2+2*time.Second)
+				if !errors.Is(a.err, backup.ErrCheckGivenUp) {
+					t.Fatalf("the retry answered %v, want its check given up: the test did not reach the case", a.err)
+				}
+				res = a.res
+			} else {
+				res, _ = backup.VerifySnapshot(ctx, dir, backup.VerifyOptions{Level: level})
+			}
 			if tc == "a quick VERIFIED over a full one" && res.Found.DatabaseState != backup.StateVerified {
 				t.Fatalf("the quick check found %s, want VERIFIED: the test did not reach the case", res.Found.DatabaseState)
 			}
@@ -466,7 +503,14 @@ func TestAVetoThatStoodBeforeAVerificationStaysOverTheVERIFIEDItCarries(t *testi
 // before its check, though none stood before it began and the record, whose
 // VERIFIED the merge keeps, is as it was: no check that finished has cleared
 // it, so no reader reads the snapshot verified and the prune keeps the older
-// verified one, until a check of it finishes, which lets the veto go.
+// verified one, until a check of it finishes, which lets the veto go. The
+// check parks before it reads the snapshot (SetOnLowPriorityForTest), so its
+// deadline gives it up whenever it passes (backlog B872: parked at SQLite's
+// open, after the veto's sync and the paced hash, a deadline that passed
+// first answered INCOMPLETE, no check given up), and the park and the answer
+// are awaited in either order, bounded (awaitParkedAndGivenUp, B872's second
+// round: the call was made on the test's goroutine, waited for no park, and
+// had no bound of the test's).
 func TestARecheckGivenUpLeavesTheVetoItMade(t *testing.T) {
 	requireDirectorySync(t)
 	src := storeWithTracks(t, 20)
@@ -479,15 +523,24 @@ func TestARecheckGivenUpLeavesTheVetoItMade(t *testing.T) {
 	if vetoes() {
 		t.Fatal("a veto stands before the recheck: the test did not reach the case")
 	}
-	restoreDeadline := backup.SetVerifyDeadlineForTest(300 * time.Millisecond)
+	const deadline = 300 * time.Millisecond
+	restoreDeadline := backup.SetVerifyDeadlineForTest(deadline)
 	t.Cleanup(restoreDeadline)
 	p := newParking()
-	t.Cleanup(backup.SetOnDatabaseOpenForTest(p.park))
+	t.Cleanup(backup.SetOnLowPriorityForTest(p.park))
 	t.Cleanup(func() {
 		p.release()
 		awaitClean(t)
 	})
-	res, err := backup.VerifySnapshot(context.Background(), dir, backup.VerifyOptions{})
+	callers := joinBackupCallers(t, p.release)
+	done := make(chan verifyAnswer, 1)
+	start := time.Now()
+	callers.start(func() {
+		res, err := backup.VerifySnapshot(context.Background(), dir, backup.VerifyOptions{})
+		done <- verifyAnswer{res, err}
+	})
+	a := awaitParkedAndGivenUp(t, p.entered, done, verifyAnswer.read, start, deadline+backup.StopWriteBound/2+2*time.Second)
+	res, err := a.res, a.err
 	if !errors.Is(err, backup.ErrCheckGivenUp) {
 		t.Fatalf("the recheck answered %v; want it given up", err)
 	}
@@ -688,7 +741,9 @@ func TestARecheckWhereNoDirectoryCanBeSyncedChecksAndRecordsNothing(t *testing.T
 // merge keeps the FAILED, nothing is written and Recorded is false; and where
 // its INCOMPLETE's write fails, Recorded is false and the record reads as it
 // was. Red on the round before, which set Recorded for a write that changed
-// nothing.
+// nothing. The park and the answer are awaited in either order, bounded
+// (awaitParkedAndGivenUp; backlog B872's second round: the call was made on
+// the test's goroutine, waited for no park, and had no bound of the test's).
 func TestAGivenUpVerificationReadsItsRecordBack(t *testing.T) {
 	for _, tc := range []string{"over a PENDING", "over a FAILED", "whose INCOMPLETE is not written"} {
 		t.Run(tc, func(t *testing.T) {
@@ -712,21 +767,28 @@ func TestAGivenUpVerificationReadsItsRecordBack(t *testing.T) {
 			if tc == "whose INCOMPLETE is not written" {
 				t.Cleanup(backup.SetVerdictWriteFailuresForTest(func(string) error { return errors.New("injected: the staging failed") }, nil, nil))
 			}
-			t.Cleanup(backup.SetVerifyDeadlineForTest(300 * time.Millisecond))
+			const deadline = 300 * time.Millisecond
+			t.Cleanup(backup.SetVerifyDeadlineForTest(deadline))
 			p := newParking()
 			t.Cleanup(backup.SetOnLowPriorityForTest(p.park))
 			t.Cleanup(func() {
 				p.release()
 				awaitClean(t)
 			})
-			var res backup.VerifyResult
-			var err error
-			if c != nil {
-				r := backup.FinishCapture(context.Background(), c, nil, backup.VerifyOptions{})
-				res, err = r.Verify, r.VerifyErr
-			} else {
-				res, err = backup.VerifySnapshot(context.Background(), dir, backup.VerifyOptions{})
-			}
+			callers := joinBackupCallers(t, p.release)
+			done := make(chan verifyAnswer, 1)
+			start := time.Now()
+			callers.start(func() {
+				if c != nil {
+					r := backup.FinishCapture(context.Background(), c, nil, backup.VerifyOptions{})
+					done <- verifyAnswer{r.Verify, r.VerifyErr}
+					return
+				}
+				res, err := backup.VerifySnapshot(context.Background(), dir, backup.VerifyOptions{})
+				done <- verifyAnswer{res, err}
+			})
+			a := awaitParkedAndGivenUp(t, p.entered, done, verifyAnswer.read, start, deadline+backup.StopWriteBound/2+2*time.Second)
+			res, err := a.res, a.err
 			if !errors.Is(err, backup.ErrCheckGivenUp) {
 				t.Fatalf("the verification answered %v, want it given up", err)
 			}
