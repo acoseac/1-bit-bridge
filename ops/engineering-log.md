@@ -95027,3 +95027,86 @@ before the fix). `go test -race -count=1 -timeout 120m -p 2
 the brief asked for the packages. The rules patch applies at the round's
 commit, and `scripts/check-doc-budgets.py` is clean on a copy with it applied
 (`cli-serve.md` 97,290 bytes). Windows is the PR's CI windows job's to show.
+
+## 2026-11-13 — B875: the history feed's cursor is pinned
+
+The rule is in `wire.md` (the `GET /v1/history` bullet) and PROTOCOL.md's
+history section; this is the evidence. Linux amd64 (legion0), Go 1.27.3, the
+Makefile's tags, TMPDIR `~/onebit/tmp`. No line of production code changed;
+one comment did.
+
+### What already held
+
+`historyList` (internal/api/history.go) resolves `limit` itself, 200 when it
+is omitted and 1000 when more is asked, hands the store that limit, and
+answers the last event's id exactly when `len(events) == limit`; `ListHistory`
+(internal/manifest/history.go) orders by `h.id DESC`, pages with
+`h.id < after`, and falls back to 200 past 1000 on its own. So a feed whose
+length is a multiple of the limit ends with an empty page answering 0, a
+request for 1001 gets 1000 events and a cursor, and an offline device's later
+upload of older plays comes before newer ones. The handler's lines date from
+#371 (02233c4a, 2026-06-11) and the store's clamp from #336 (f2f689a8), neither
+changed since (`git log -S`; this clone has no tags to name releases by).
+Nothing pinned the rule: `TestHistoryReadCursorPaging` reads two one-event
+pages, and PROTOCOL.md said a cursor is non-zero "while more pages may follow"
+and 0 on a short or empty page, which left a full page with nothing behind it
+open. The comment above the limit's resolution said its short-page
+check emits a definitive 0 "on the last non-empty page", which a feed of a
+multiple of the limit does not get; it now says what the code does.
+
+### The test
+
+`TestEveryFullHistoryPageAnswersItsLastEventsID`
+(internal/api/history_cursor_test.go), seven cases, each over a store of its
+own through the real handler: a multiple of the limit and one past it at
+`limit=3` (three full pages), with no limit (200, two full pages) and at
+`limit=1001` (1000, two full pages), and two past it at `limit=3`. The walk
+starts at `after=0` and passes
+each `nextCursor` back. Each full page's cursor is compared with the id stored
+with its last event, read from `playback_history` by path on a read-only
+connection of the test's own (the wire carries no id, and `ListHistory` is
+what the handler pages with); a short page must answer 0; the last page of a
+multiple must be empty and send `[]`; the walk must visit every stored event
+once, by descending id; and with no limit a bare `GET /v1/history` must be the
+walk's first page. The fixture stores, before every third event, one that
+`ReapPlaybackHistory` then deletes, so the ids have the gaps a retained
+history's have and a cursor that counted events could not match by chance, and
+shuffles `startedAt` against the stored order (a fixed PCG seed); two guards
+fail a case whose fixture lost either property.
+
+### Controls
+
+Each mutation was computed in memory, written for its build alone
+(`go test -c`), and put back from memory, checked by digest, before its binary
+ran; `git status` was clean after them all. The predictions, written first,
+all held.
+
+| Mutation | Result |
+|---|---|
+| C0: none | green, 7 of 7 |
+| C1, the brief's: the store asked for `limit+1`, a cursor answered only when the extra event came back | red, the multiples at 3 and 200 and both 1001 cases: "page 3 of 3 (after=6, 3 events): a full page answers nextCursor 0, want 2, the id of its last event "Kept/0000.flac"" and "the walk took 3 pages, want 4: 3 full, then one holding 0 events and answering 0"; with no limit page 2 of 2 alike; at 1001 the store clamps the 1001 it is asked for to 200, one page of 200 answering 0; the three cases one or two past a multiple at 3 and 200 green |
+| C2: the handler's cap of 1000 removed | red, the two 1001 cases alone: one page of 200 answering 0, "the walk visited 200 events, want each of the 2000 once by descending id" |
+| C3: `ListHistory` ordered by `started_at DESC, id DESC` | red, every case, on the walk's order |
+| C4: the fixture's `startedAt` in the stored order | red, every case: "the fixture's startedAt is sorted along the ids: an order by startedAt would pass" |
+| C5: the fixture's reaped events dated inside the window | red, every case: "the store holds 12 events, want 9" and the like |
+| C5b: no reaped events | red, every case: "the fixture's ids have no gap: a cursor counting events would answer them too" |
+| C6: the handler's events left nil | red, the three multiples: "page 4 of 4 (after=2) is empty and sends events null, want []" |
+
+### The gates
+
+| Check | Result |
+|---|---|
+| go1.27.3's gofmt on the two Go files | nothing listed |
+| `go vet` with the tags, `./internal/api/`, for linux/amd64, linux/386, windows/amd64 and darwin/arm64 | exit 0 each |
+| `go test -race -count=50 -run '^TestEveryFullHistoryPageAnswersItsLastEventsID$' ./internal/api/` | 50 of 50, 350 of 350 subtests, 407.5 s: 8.1 s a run, most of it the seven stores' opening; a 1000-event page took about 55 ms of the route's 2 s deadline |
+| `go test -race -timeout 120m ./internal/api/` | ok, 150.6 s: 780 tests and 510 subtests passed, none failed or skipped |
+| cmd/bridge's `TestNoBlankKeepers`, `TestNoDocblockNamesAnotherDeclaration`, `TestEveryCitedTestNameExists`, `TestEveryOutputReasonIsPassedOn` and `TestEveryBridgeWordIsInTheProtocol`, and the readers of PROTOCOL.md in internal/manifest, internal/player/playback, internal/analyze and internal/admin | ok |
+
+`make vet` over the tree waited for the build lock's one slot, which
+another worker's run held, and was stopped there after twenty minutes, never
+run; vet works package by package, and the one package changed is vetted
+above. `make test` and `make build-all` were not run: the brief asked for the
+package. The rules patch applies at this commit, and
+`scripts/check-doc-budgets.py` is clean on a copy with it applied (`wire.md`
+63,245 bytes). The iOS mirror of PROTOCOL.md (`docs/BridgeProtocol.md` and
+`test_protocolMirrorSHA256`'s pin) is the orchestrator's, in the same cycle.
