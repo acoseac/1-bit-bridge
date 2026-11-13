@@ -407,7 +407,7 @@ func TestVerifyBesideTheTickersVerificationOfOneSnapshot(t *testing.T) {
 // bounds are the test's to fire (backup.SetStopBoundsForTest), never a
 // clock's: its upper bound on the time the ticker took went red under a busy
 // runner's load (backlog B895), and which bound fires first is
-// TestATickerStoppedWhileAStepHangsSaysNothingWhicheverBoundFiresFirst's.
+// TestAStoppedTickerSaysOnlyWhatItsStopAloneDidNotCause's.
 func TestATickerStoppedWhileItsVerdictsSyncHangsReturnsWithinItsBound(t *testing.T) {
 	_, dataDir, root := backupInstall(t)
 	src := backup.Sources{DataDir: dataDir, ManifestDB: manifest.DefaultDBPath(dataDir)}
