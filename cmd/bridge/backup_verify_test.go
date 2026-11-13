@@ -452,7 +452,12 @@ func TestATickerStoppedWhileItsVerdictsSyncHangsReturnsWithinItsBound(t *testing
 func TestBothDoctorsCarryTheBackupLines(t *testing.T) {
 	cfgPath, dataDir, _ := backupInstall(t)
 	src := backup.Sources{DataDir: dataDir, ManifestDB: manifest.DefaultDBPath(dataDir)}
-	if res := backup.SnapshotAndVerify(t.Context(), src, backup.SnapshotOptions{}); !res.Verify.Record.Passes() {
+	res := backup.SnapshotAndVerify(t.Context(), src, backup.SnapshotOptions{})
+	// Its verification answers before its worker lets go: that worker's end
+	// comes before the doctor reads the folder and before it goes (backlog
+	// B871's round 3).
+	awaitBackupHoldsDropped(t, "the snapshot's verification")
+	if !res.Verify.Record.Passes() {
 		t.Fatalf("the snapshot did not verify: %+v %v", res.Verify.Record, res.VerifyErr)
 	}
 	d := buildDoctorDepsWith(cfgPath, false, doctorDACHost())

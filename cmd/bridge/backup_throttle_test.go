@@ -224,7 +224,11 @@ func TestBackupCmdReapsOrphansWithRetentionDisabled(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	if rc := backupCmd([]string{"--config", cfgPath, "--keep", "0"}, &stdout, &stderr); rc != 0 {
+	rc := backupCmd([]string{"--config", cfgPath, "--keep", "0"}, &stdout, &stderr)
+	// Its verification answers before its worker lets go: that worker's end
+	// comes before the folder goes (backlog B871's round 3).
+	awaitBackupHoldsDropped(t, "bridge backup")
+	if rc != 0 {
 		t.Fatalf("backupCmd rc=%d, stderr=%s", rc, stderr.String())
 	}
 

@@ -319,6 +319,10 @@ func TestBridgeBackupVerifyRefusesWhatIsNotInItsInstallsBackupsFolder(t *testing
 	}
 	var stdout, stderr bytes.Buffer
 	code := backupCmd([]string{"--config", cfgPath, "--verify", copyDir}, &stdout, &stderr)
+	// The copy is refused by the verification's worker, which lets go after
+	// its answer: its end comes before the folders go (backlog B871's round
+	// 3).
+	awaitBackupHoldsDropped(t, "bridge backup --verify")
 	if code != 2 || !strings.Contains(stderr.String(), "is not a snapshot in the backups folder") {
 		t.Errorf("--verify of a copy elsewhere = %d\n%s%s", code, stdout.String(), stderr.String())
 	}

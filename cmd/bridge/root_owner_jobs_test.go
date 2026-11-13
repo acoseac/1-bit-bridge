@@ -330,6 +330,9 @@ func TestJobCLIsRunAsRootKeepTheInstallOwner(t *testing.T) {
 		return manifestCmd(ctx, append([]string{"clear-missing", "--yes"}, with()...), strings.NewReader(""), out, errOut)
 	})
 	backupOut := step("backup", func(out, errOut *bytes.Buffer) int { return backupCmd(with(), out, errOut) })
+	// Its verification answers before its worker lets go: that worker's end
+	// comes before the next step (backlog B871's round 3).
+	awaitBackupHoldsDropped(t, "bridge backup")
 	m := snapshotWrittenLine.FindStringSubmatch(backupOut)
 	if m == nil {
 		t.Fatalf("bridge backup printed no snapshot:\n%s", backupOut)

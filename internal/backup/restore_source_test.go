@@ -618,7 +618,12 @@ func TestASnapshotPrunedWhileTheRestoreAskedIsRefusedBeforeTheDestinationIsTouch
 			// goroutine's to fail on (backlog B871's item 8).
 			var removed chan error
 			if during == "the prompt" {
-				if pr, err := backup.Prune(root, 1); err != nil || pr.Deleted != 1 || pathExists(t, old) {
+				pr, err := backup.Prune(root, 1)
+				// Its worker lets go after its answer: its end comes before the
+				// restore and before anything this case removes (backlog B871's
+				// round 3).
+				awaitClean(t)
+				if err != nil || pr.Deleted != 1 || pathExists(t, old) {
 					t.Fatalf("premise: the prune during the prompt: %+v, %v; want the older snapshot removed", pr, err)
 				}
 			} else {

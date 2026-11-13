@@ -225,14 +225,21 @@ func TestAVerifiedRecordLeftForAFailedOneIsVetoedWhenItsWriteFails(t *testing.T)
 			if inBundle := pathExists(t, filepath.Join(dir, backup.VetoFileName)); inBundle == tc.beside {
 				t.Errorf("the veto in the bundle there %v, want %v", inBundle, !tc.beside)
 			}
-			if _, err := backup.Prune(filepath.Dir(dir), 1); err != nil {
+			// The prune and the next check answer before their workers let go:
+			// each worker's end comes before the next step and before anything
+			// this case removes (backlog B871's round 3).
+			_, err = backup.Prune(filepath.Dir(dir), 1)
+			awaitClean(t)
+			if err != nil {
 				t.Fatal(err)
 			}
 			if !pathExists(t, anchor) {
 				t.Error("the prune let the older verified snapshot go for one no reader may read verified")
 			}
 			// The next check writes the record and lets the veto go.
-			if _, err := backup.VerifySnapshot(t.Context(), dir, backup.VerifyOptions{}); err != nil {
+			_, err = backup.VerifySnapshot(t.Context(), dir, backup.VerifyOptions{})
+			awaitClean(t)
+			if err != nil {
 				t.Fatalf("the next check: %v", err)
 			}
 			requireVerdict(t, "the record after the next check", listed(t, dir), backup.StateFailed, backup.ReasonHash, wantFiles, wantFilesWhy)
