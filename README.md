@@ -113,6 +113,38 @@ Stop the service before `bridge restore`. When moving to another box, stop
 the source too: two boxes running one identity at once are unsupported.
 Prefer the newest snapshot; see the [backup guide](docs/backup.md).
 
+## Moving the bridge's files out of a library root
+
+`bridge init`, `bridge doctor` (and the console's Diagnostics page) and the bridge's log warn when `bridge.yaml` or the data directory (`dataDir`) lies inside one of your library roots. A library root is often a network share or a USB disk, and while it stops answering, every bridge command that reads the bridge's own files waits on it, `bridge serve`, `bridge doctor` and `bridge status` among them. The bridge keeps working where it is; these steps move its files out. If the data directory is a library root itself, follow [the steps for that case](#when-the-data-directory-is-a-library-root) instead.
+
+1. **Stop the bridge**, and every other `bridge` command that writes its files (a scan, a backup, a restore, a render). Stop its service, not just its process: a service manager starts the bridge again when its process is killed (systemd's `Restart=always`, launchd's `KeepAlive`, a Windows service's recovery actions, a container's restart policy). `bridge stop` stops the service `bridge init` installed; stop a container with `docker stop` or `docker compose stop`.
+2. **Choose a folder outside every library root**, on a disk that is always there. The platform's own folder is one: `~/.config/1-bit-bridge` on Linux, `~/Library/Application Support/1-bit-bridge` on macOS, `%LOCALAPPDATA%\1-bit-bridge` on Windows.
+3. **Move the files.** Move `bridge.yaml` together with the hidden files beside it whose names begin with `.bridge.yaml` (among them the bridge's record of its data directory), and move the data directory whole, its TLS pair with it. Moving the folder that holds both moves all of it at once.
+4. **Check every path setting in `bridge.yaml`** before the bridge reads it again. Seven settings are paths: `libraryRoots`, `dataDir`, `tlsCertPath`, `tlsKeyPath`, `autocert.cacheDir`, `upscale.variantsDir` and `upscale.tempDir`. A relative one resolves against the folder that holds `bridge.yaml`, so moving `bridge.yaml` moves what it points at. For each one the file sets:
+   - If it points into something that moved with `bridge.yaml` (the data directory moved beside it), a relative path keeps its meaning (`dataDir: data`, `tlsCertPath: data/server.crt`), and an absolute one must be changed to the new place.
+   - If it points at something that stayed where it was (your library, a renditions folder on another disk), an absolute path keeps its meaning, and a relative one must be written as the absolute path of what it pointed at: `libraryRoots: [..]` beside the new `bridge.yaml` would name the new folder's parent.
+
+   And for what the file leaves out:
+   - `dataDir` left out is `./data` beside `bridge.yaml`. If `bridge.yaml` moved and the data directory did not, write `dataDir` as the data directory's absolute path.
+   - `tlsCertPath` and `tlsKeyPath` left out are `server.crt` and `server.key` in the data directory, `autocert.cacheDir` left out is its `acme` folder, and `upscale.variantsDir` left out is its `transcoded` folder: each follows `dataDir` on its own. Only one written out into the data directory needs the step above.
+   - `upscale.variantsDir` and `upscale.tempDir` written out are never inside a library root (the bridge refuses to start with one there), so neither moves with a data directory that was in one; a relative one still needs the step above, since it resolves beside `bridge.yaml` too.
+   - A `BRIDGE_*` environment variable wins over `bridge.yaml` (`BRIDGE_DATA_DIR` over `dataDir`, `BRIDGE_LIBRARY_ROOTS` over `libraryRoots`, and so on), and a relative value resolves beside `bridge.yaml` as well. Change it where it is set: in the service, the container's settings or your shell.
+5. **Keep the TLS pair.** Every paired device pinned the bridge's certificate when it paired. A bridge that finds no certificate where its settings lead makes a new one, and every paired device then refuses it until you pair it again.
+6. **Check the files where they are now**: `bridge doctor --config /new/folder/bridge.yaml`. It should say nothing of `install-layout`, its `tls-cert` line should say `present` (`absent (init will mint)` means the settings do not lead to the pair you moved), and its `data-dir` and `library-roots` lines should be ok.
+7. **Point the service at the new place.** The service starts `bridge serve --config` with the old path, and under systemd and launchd it starts it in the old data directory. Run `bridge init --dir /new/folder` and answer no when it asks whether to overwrite the config file (it asks for a music folder first: the config it keeps keeps its own), or `bridge init --dir /new/folder --yes --library /path/to/your/music`, which keeps a config that is there. Either registers the service again for the new place, and on Linux and macOS starts it; for a Windows service, add `--service` and run it from an elevated PowerShell. A container's volumes, its `--config` and its `BRIDGE_*` variables change in its own settings, and the container is created again (`docker compose up -d`).
+8. **Check that the bridge running is the one you moved**: `bridge status --config /new/folder/bridge.yaml` should answer with your library, and your paired devices should connect as before.
+
+### When the data directory is a library root
+
+If `dataDir` names one of your library roots, the bridge's files and your music share one folder, and moving the data directory would move the music with it. Leave that folder where it is:
+
+- If it holds none of your music (a library root set to the bridge's own data directory by mistake), take it out of `libraryRoots` instead, on the console's Library page or with `bridge library remove`, and add your music's folder.
+- Otherwise, give the bridge a new data directory and move its files into it:
+  1. Stop the bridge, as in step 1 above, and take a snapshot first, so that nothing a paired device needs can be lost: `bridge backup --config /path/to/bridge.yaml` (the [backup guide](docs/backup.md) says what it holds).
+  2. Make an empty folder outside every library root, and set `dataDir` in `bridge.yaml` to its absolute path. If `bridge.yaml` is inside a library root too, move it out first, as in steps 3 and 4 above.
+  3. Move the bridge's own files and folders from the library root into the new folder, and leave your music where it is. The bridge's are the files whose names begin with `bridge.db`, `server.`, `serve-start-`, `update-state.`, `player-` or `adminauth`, the files `tokens.json`, `data-dir-id.json` and `atlas-harvest.json`, and the folders `artwork`, `booklets`, `playlist-covers`, `transcoded`, `waveforms`, `backups`, `acme`, `tls` and `tailscale`; not every bridge has every one.
+  4. Check, point the service at the new place and start, as in steps 6 to 8 above.
+
 ## Updates
 
 The bridge checks GitHub for a newer release, on by default: one request to

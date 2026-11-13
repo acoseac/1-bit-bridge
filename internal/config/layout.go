@@ -108,74 +108,68 @@ func (l InstallLayout) Summary(byPath bool) string {
 const layoutRisk = "a library root is often a mount, and while one stops answering, every bridge command " +
 	"that reads what is inside it waits on it, serve, doctor and status among them"
 
-// layoutPathSettings are the settings Load resolves against the config file's
-// directory (resolvePaths), spelled as the config spells them and in that
-// order: a move of bridge.yaml changes where each of them points that is
-// relative. TestTheAdviceToMoveBridgeYAMLKeepsEveryRelativePathsMeaning reads
-// resolvePaths for the list the words must name.
-const layoutPathSettings = "libraryRoots, dataDir, tlsCertPath, tlsKeyPath, autocert.cacheDir, upscale.variantsDir and upscale.tempDir"
+// layoutDoc and layoutDocSection are where the steps to move the bridge's own
+// files out of a library root are written: a section of the bridge's
+// README.md, which TestTheAdviceToMoveBridgeYAMLKeepsEveryRelativePathsMeaning
+// holds to its title and to every setting Load resolves beside the config.
+const (
+	layoutDoc        = "README.md"
+	layoutDocSection = "Moving the bridge's files out of a library root"
+)
 
-// Advice is why the layout Summary names is a risk, and what to do, "" where
-// nothing lies inside a root: the doctor's hint. The fix is for what lies
-// inside: the config file is moved, keeping where its relative paths point,
-// since dataDir is DefaultDataDir beside it unless set; the data directory is
-// moved, and dataDir set to it. defaultDir, the platform's default config
-// directory or "", is offered as one place to move to (the data directory's
-// default below it), where it lies outside every root; a suggestion, never a
-// promise that it fixes anything.
-//
-// Where it says to move bridge.yaml, the CLI's words (byPath) name every
-// setting Load resolves beside it, to be set to an absolute path first where
-// it is relative, and what a BRIDGE_* variable that gives one does
-// (keepingRelativePaths, backlog B884's round 2): which of them are relative
-// is not asked, since init's kept config and the environment each say it
-// differently, so the list is the whole fixed one. The journal's words, which
-// name no value (B505), are as they were.
-func (l InstallLayout) Advice(byPath bool, defaultDir string) string {
-	var fix string
-	switch {
-	case l.configIn >= 0 && l.dataIn >= 0 && byPath:
-		fix = "move bridge.yaml and the data directory outside every library root" + l.suggestion(defaultDir, "") +
-			"; before you move bridge.yaml, " + keepingRelativePaths("dataDir to the data directory's new path: it moves "+
-			"with the data directory and is not pinned to where it is now")
-	case l.configIn >= 0 && l.dataIn >= 0:
-		fix = "move bridge.yaml and the data directory outside every library root" + l.suggestion(defaultDir, "") +
-			", keeping dataDir pointed at the data directory: a relative dataDir (" + DefaultDataDir +
-			" unless set) resolves beside bridge.yaml"
-	case l.configIn >= 0 && byPath:
-		fix = "move bridge.yaml outside every library root" + l.suggestion(defaultDir, "") +
-			"; before you move it, " + keepingRelativePaths("dataDir to "+l.dataDir+", where the data directory is now")
-	case l.configIn >= 0:
-		fix = "move bridge.yaml outside every library root" + l.suggestion(defaultDir, "") +
-			", first setting dataDir in it to the data directory's absolute path" + l.pathIf(byPath, l.dataDir) +
-			": a relative dataDir resolves beside bridge.yaml"
-	case l.dataIn >= 0:
-		fix = "move the data directory outside every library root" + l.suggestion(defaultDir, "data") +
-			", and set dataDir in bridge.yaml to its new path"
-	default:
-		return ""
-	}
-	return layoutRisk + "; " + fix
-}
+// layoutFix is what the CLI's words say to do, whatever lies inside which
+// root: one fixed sentence, and where the steps are (backlog B884's round 3).
+// What a move must change depends on what each path setting points at,
+// relative or not, into what moves or at what stays, which the steps say how
+// to tell. The first two rounds' words generated those steps, and each met a
+// layout they broke (round 1's kept dataDir's meaning alone, round 2's pinned
+// a setting pointing into the data directory to its old place), so the words
+// generate none. It ends with no period, which bridge init's line adds.
+const layoutFix = "move bridge.yaml and the data directory out of every library root, and check every path setting in " +
+	"bridge.yaml; see \"" + layoutDocSection + "\" in the bridge's " + layoutDoc
 
-// keepingRelativePaths is the sentence of the CLI's advice to move
-// bridge.yaml that keeps where each of its relative paths points: every
-// setting Load resolves beside it named, the place dataDir is set to said by
-// dataDir, and a value its BRIDGE_* variable gives, which Load resolves the
-// same way, changed where that variable is set.
-func keepingRelativePaths(dataDir string) string {
-	return "set each of " + layoutPathSettings + " that is relative in it to an absolute path, since each resolves " +
-		"beside bridge.yaml (" + dataDir + "); a value its BRIDGE_* environment variable gives resolves the same way, " +
-		"and is changed where that variable is set"
-}
-
-// Line is the layout's one line, Summary and Advice: what bridge init prints
-// and serve logs. "" where nothing lies inside a root.
-func (l InstallLayout) Line(byPath bool, defaultDir string) string {
+// Hint is why the layout Summary names is a risk, and what to do, in the
+// CLI's words, "" where nothing lies inside a root: both doctors' hint, and
+// bridge init's line after its summary. It is the same for every layout:
+// Summary says what lies inside.
+func (l InstallLayout) Hint() string {
 	if !l.Inside() {
 		return ""
 	}
-	return l.Summary(byPath) + ": " + l.Advice(byPath, defaultDir)
+	return layoutRisk + "; " + layoutFix
+}
+
+// Warning is the CLI's one line, Summary by path and then Hint: what bridge
+// init prints. "" where nothing lies inside a root.
+func (l InstallLayout) Warning() string {
+	if !l.Inside() {
+		return ""
+	}
+	return l.Summary(true) + ": " + l.Hint()
+}
+
+// JournalLine is serve's one line in its journal, "" where nothing lies inside
+// a root: Summary by setting, why it is a risk, and what to do in words of the
+// journal's own, which name no value (B505) and no doc, and are as backlog
+// B884's first two rounds left them.
+func (l InstallLayout) JournalLine() string {
+	if !l.Inside() {
+		return ""
+	}
+	return l.Summary(false) + ": " + layoutRisk + "; " + l.journalFix()
+}
+
+// journalFix is what the journal says to do for what lies inside.
+func (l InstallLayout) journalFix() string {
+	switch {
+	case l.configIn >= 0 && l.dataIn >= 0:
+		return "move bridge.yaml and the data directory outside every library root, keeping dataDir pointed at the " +
+			"data directory: a relative dataDir (" + DefaultDataDir + " unless set) resolves beside bridge.yaml"
+	case l.configIn >= 0:
+		return "move bridge.yaml outside every library root, first setting dataDir in it to the data directory's " +
+			"absolute path: a relative dataDir resolves beside bridge.yaml"
+	}
+	return "move the data directory outside every library root, and set dataDir in bridge.yaml to its new path"
 }
 
 func (l InstallLayout) configNamed(byPath bool) string {
@@ -204,30 +198,6 @@ func (l InstallLayout) pathIf(byPath bool, p string) string {
 		return ""
 	}
 	return " " + p
-}
-
-// suggestion offers dir, or the entry below it named below, as one place to
-// move to, where it is an absolute path outside every root, and nothing
-// otherwise.
-func (l InstallLayout) suggestion(dir, below string) string {
-	f := l.forms
-	if dir == "" || !f.isAbs(dir) {
-		return ""
-	}
-	place := f.clean(dir)
-	if below != "" {
-		place = f.join(place, below)
-	}
-	base := ""
-	if f.isAbs(l.configFile) {
-		base = f.dir(f.clean(l.configFile))
-	}
-	for _, r := range l.roots {
-		if root, ok := f.absolute(base, r); ok && f.within(place, root) {
-			return ""
-		}
-	}
-	return ", to " + place + " for example (the platform's default)"
 }
 
 // pathForms is how one OS spells paths and compares names, parsed here from

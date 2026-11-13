@@ -30,26 +30,31 @@ import (
 // which root, as the CLI names them.
 const layoutInside = "inside library root "
 
-// layoutMoveKeys and layoutMoveEnv are what the CLI's words say wherever they
-// say to move bridge.yaml (backlog B884's round 2): before it moves, set each
-// setting Load resolves beside it that is relative to an absolute path, and
-// what a BRIDGE_* variable that gives one does. Serve's journal says neither.
+// layoutRiskWords is why a layout is a risk, in every surface's words.
+const layoutRiskWords = "a library root is often a mount, and while one stops answering, every bridge command that " +
+	"reads what is inside it waits on it, serve, doctor and status among them"
+
+// layoutCLIHint is what the CLI's words say of every layout, bridge init's
+// line, both doctors' hint (backlog B884's round 3): why it is a risk, one
+// fixed sentence of what to do, and the section of the bridge's README.md
+// that has the steps, with no period at its end.
+const layoutCLIHint = layoutRiskWords + "; move bridge.yaml and the data directory out of every library root, and " +
+	"check every path setting in bridge.yaml; see \"Moving the bridge's files out of a library root\" in the bridge's README.md"
+
+// Serve's journal line for each layout, byte for byte as B884's first two
+// rounds left it: named by its settings, no path (B505), no doc.
 const (
-	layoutMoveKeys = "set each of libraryRoots, dataDir, tlsCertPath, tlsKeyPath, autocert.cacheDir, upscale.variantsDir " +
-		"and upscale.tempDir that is relative in it to an absolute path"
-	layoutMoveEnv = "a value its BRIDGE_* environment variable gives resolves the same way, and is changed where that variable is set"
+	journalDataFix   = "move the data directory outside every library root, and set dataDir in bridge.yaml to its new path"
+	journalConfigFix = "move bridge.yaml outside every library root, first setting dataDir in it to the data directory's " +
+		"absolute path: a relative dataDir resolves beside bridge.yaml"
+	journalBothFix = "move bridge.yaml and the data directory outside every library root, keeping dataDir pointed at " +
+		"the data directory: a relative dataDir (./data unless set) resolves beside bridge.yaml"
 )
 
-// platformDirForLayout points the platform's default config directory, which
-// the CLI's words offer as one place to move to, at a directory of the
-// test's own, outside every root it makes.
-func platformDirForLayout(t *testing.T) string {
-	t.Helper()
-	dir := filepath.Join(t.TempDir(), "platform", "1-bit-bridge")
-	prev := defaultConfigDirFn
-	defaultConfigDirFn = func() (string, error) { return dir, nil }
-	t.Cleanup(func() { defaultConfigDirFn = prev })
-	return dir
+// journalLayoutLine is serve's recorded line saying summary, by settings, with
+// fix after the risk.
+func journalLayoutLine(summary, fix string) string {
+	return "WARN " + summary + ": " + layoutRiskWords + "; " + fix + " component=bridge"
 }
 
 // writeLayoutConfig writes the config at cfgPath naming dataDir and roots
@@ -86,57 +91,48 @@ func writeLayoutConfigLeaving(t *testing.T, cfgPath, dataDir string, roots, abse
 // TestBothDoctorsWarnOfTheBridgesFilesInsideALibraryRoot: bridge doctor and
 // the console's doctor carry an install-layout warn, word for word, where the
 // data directory lies inside a library root or is one, where the config file
-// does, and where both do (one line naming both); bridge doctor exits 0 over
-// it, since a layout is never a refusal. None of them had the line before
-// backlog B884.
+// does, and where both do (one line naming both), its hint the one fixed
+// sentence of what to do and where the steps are, the same for every layout
+// (backlog B884's round 3); bridge doctor exits 0 over it, since a layout is
+// never a refusal. None of them had the line before backlog B884.
 func TestBothDoctorsWarnOfTheBridgesFilesInsideALibraryRoot(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		// lay returns the config's path, its data directory and roots, and
-		// the line's summary and a piece of its hint.
-		lay func(base string) (cfg, data string, roots []string, summary, fix string)
+		// the line's summary.
+		lay func(base string) (cfg, data string, roots []string, summary string)
 	}{
-		{"the data directory inside a root", func(base string) (string, string, []string, string, string) {
+		{"the data directory inside a root", func(base string) (string, string, []string, string) {
 			lib, data := filepath.Join(base, "Music"), filepath.Join(base, "Music", ".bridge")
 			return filepath.Join(base, "bridge.yaml"), data, []string{lib},
-				"the data directory " + data + " is " + layoutInside + lib + " (libraryRoots[0])",
-				"move the data directory outside every library root"
+				"the data directory " + data + " is " + layoutInside + lib + " (libraryRoots[0])"
 		}},
-		{"the data directory that is a root", func(base string) (string, string, []string, string, string) {
+		{"the data directory that is a root", func(base string) (string, string, []string, string) {
 			other, lib := filepath.Join(base, "Other"), filepath.Join(base, "Music")
 			return filepath.Join(base, "bridge.yaml"), lib, []string{other, lib},
-				"the data directory " + lib + " is " + layoutInside + lib + " (libraryRoots[1])",
-				"move the data directory outside every library root"
+				"the data directory " + lib + " is " + layoutInside + lib + " (libraryRoots[1])"
 		}},
-		{"the config file inside a root", func(base string) (string, string, []string, string, string) {
+		{"the config file inside a root", func(base string) (string, string, []string, string) {
 			lib, cfg, data := filepath.Join(base, "Music"), filepath.Join(base, "Music", "conf", "bridge.yaml"), filepath.Join(base, "data")
 			return cfg, data, []string{lib},
-				"the config file " + cfg + " is " + layoutInside + lib + " (libraryRoots[0])",
-				"move bridge.yaml outside every library root"
+				"the config file " + cfg + " is " + layoutInside + lib + " (libraryRoots[0])"
 		}},
-		{"both inside one root", func(base string) (string, string, []string, string, string) {
+		{"both inside one root", func(base string) (string, string, []string, string) {
 			lib, cfg, data := filepath.Join(base, "Music"), filepath.Join(base, "Music", "b", "bridge.yaml"), filepath.Join(base, "Music", "b", "data")
 			return cfg, data, []string{lib},
-				"the config file " + cfg + " and the data directory " + data + " are " + layoutInside + lib + " (libraryRoots[0])",
-				"move bridge.yaml and the data directory outside every library root"
+				"the config file " + cfg + " and the data directory " + data + " are " + layoutInside + lib + " (libraryRoots[0])"
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			platform := platformDirForLayout(t)
-			cfg, data, roots, summary, fix := tc.lay(t.TempDir())
+			cfg, data, roots, summary := tc.lay(t.TempDir())
 			writeLayoutConfig(t, cfg, data, roots, "")
 			said := askBothDoctors(t, cfg)
 			c := said.requireLine(t, installLayoutCheckName, doctor.Warn)
 			if c.Summary != summary {
 				t.Errorf("the install-layout line says %q, want %q", c.Summary, summary)
 			}
-			if !strings.Contains(c.Hint, fix) || !strings.Contains(c.Hint, "every bridge command that reads what is inside it waits on it") ||
-				!strings.Contains(c.Hint, platform) {
-				t.Errorf("the install-layout hint %q does not say why, %q and the platform's default %s", c.Hint, fix, platform)
-			}
-			moves := strings.HasPrefix(summary, "the config file")
-			if names := strings.Contains(c.Hint, layoutMoveKeys) && strings.Contains(c.Hint, layoutMoveEnv); names != moves {
-				t.Errorf("the install-layout hint names the settings a move of bridge.yaml must keep: %v, want %v:\n%s", names, moves, c.Hint)
+			if c.Hint != layoutCLIHint {
+				t.Errorf("the install-layout hint is %q\nwant %q", c.Hint, layoutCLIHint)
 			}
 			said.requirePrinted(t, c)
 			if said.code != 0 {
@@ -150,7 +146,6 @@ func TestBothDoctorsWarnOfTheBridgesFilesInsideALibraryRoot(t *testing.T) {
 // a data directory and a config in /x/music2 are not inside the root
 // /x/music, whose name only begins theirs, and no doctor says they are.
 func TestNoDoctorWarnsOfASiblingThatSharesARootsPrefix(t *testing.T) {
-	platformDirForLayout(t)
 	base := t.TempDir()
 	sibling := filepath.Join(base, "music2")
 	writeLayoutConfig(t, filepath.Join(sibling, "bridge.yaml"), filepath.Join(sibling, "data"), []string{filepath.Join(base, "music")}, "")
@@ -173,7 +168,6 @@ func TestNoDoctorWarnsOfASiblingThatSharesARootsPrefix(t *testing.T) {
 // the layout's warn stands right after it: the new line changes no other
 // line's severity or words.
 func TestADataDirectoryThatIsAFileInsideARootFailsAndWarnsBeside(t *testing.T) {
-	platformDirForLayout(t)
 	base := t.TempDir()
 	lib := filepath.Join(base, "Music")
 	data := filepath.Join(lib, "data")
@@ -204,7 +198,6 @@ func TestADataDirectoryThatIsAFileInsideARootFailsAndWarnsBeside(t *testing.T) {
 // (doctor.Deps.Managed), so neither doctor carries the line there; the same
 // layout, unmanaged, has it.
 func TestAManagedBridgesDoctorSaysNothingOfItsLayout(t *testing.T) {
-	platformDirForLayout(t)
 	for _, managed := range []bool{true, false} {
 		base := t.TempDir()
 		lib := filepath.Join(base, "Music")
@@ -234,7 +227,6 @@ func TestAManagedBridgesDoctorSaysNothingOfItsLayout(t *testing.T) {
 // with no layout check wired at all, which is the report before B884, and
 // the console's carries no line either.
 func TestTheDoctorsReportOfAHealthyLayoutIsAsItWas(t *testing.T) {
-	platformDirForLayout(t)
 	for name, lay := range map[string]func(base string) (cfg, data string, roots []string){
 		"apart": func(base string) (string, string, []string) {
 			return filepath.Join(base, "bridge.yaml"), filepath.Join(base, "data"), []string{filepath.Join(base, "Music")}
@@ -284,21 +276,18 @@ func initPorts(t *testing.T) []string {
 		"--admin-address", "127.0.0.1:" + strconv.Itoa(freeLoopbackPort(t))}
 }
 
-// requireOneLayoutWarning requires a run's output to say summary once, as a
-// warning on stderr, with the fix and the platform's default after it, and
-// nothing else inside a library root.
-func requireOneLayoutWarning(t *testing.T, stdout, stderr, summary, fix string) {
+// requireOneLayoutWarning requires a run's output to say summary once, as one
+// line of stderr, exactly: the warning, the CLI's words after it, and the one
+// period bridge init's line ends with (backlog B884's round 3); and nothing
+// else inside a library root.
+func requireOneLayoutWarning(t *testing.T, stdout, stderr, summary string) {
 	t.Helper()
 	if n := strings.Count(stdout+stderr, layoutInside); n != 1 {
 		t.Errorf("the run said a layout %d times, want once; stdout:\n%s\nstderr:\n%s", n, stdout, stderr)
 	}
-	line := "warning: " + summary + ": a library root is often a mount"
-	if !strings.Contains(stderr, line) || !strings.Contains(stderr, fix) {
-		t.Errorf("the run's stderr does not warn %q with %q:\n%s", line, fix, stderr)
-	}
-	moves := strings.HasPrefix(summary, "the config file")
-	if names := strings.Contains(stderr, layoutMoveKeys) && strings.Contains(stderr, layoutMoveEnv); names != moves {
-		t.Errorf("the run's warning names the settings a move of bridge.yaml must keep: %v, want %v:\n%s", names, moves, stderr)
+	line := "warning: " + summary + ": " + layoutCLIHint + ".\n"
+	if n := strings.Count(stderr, line); n != 1 {
+		t.Errorf("the run's stderr carries the warning %d times, want once:\n%s\nstderr:\n%s", n, line, stderr)
 	}
 }
 
@@ -314,7 +303,6 @@ func requireOneLayoutWarning(t *testing.T, stdout, stderr, summary, fix string) 
 // inside it. Every run exits 0. None of them warned before B884.
 func TestBridgeInitWarnsOnceOfTheLayoutItWritesOrKeeps(t *testing.T) {
 	t.Run("a first install whose data directory is the library root", func(t *testing.T) {
-		platform := platformDirForLayout(t)
 		cfgDir := filepath.Join(t.TempDir(), "cfg")
 		lib := filepath.Join(cfgDir, "data")
 		if err := os.MkdirAll(lib, 0o755); err != nil {
@@ -324,12 +312,10 @@ func TestBridgeInitWarnsOnceOfTheLayoutItWritesOrKeeps(t *testing.T) {
 		if code != 0 {
 			t.Fatalf("init exited %d:\n%s\n%s", code, stdout, stderr)
 		}
-		requireOneLayoutWarning(t, stdout, stderr, "the data directory "+lib+" is "+layoutInside+lib+" (libraryRoots[0])",
-			"move the data directory outside every library root, to "+filepath.Join(platform, "data")+" for example")
+		requireOneLayoutWarning(t, stdout, stderr, "the data directory "+lib+" is "+layoutInside+lib+" (libraryRoots[0])")
 	})
 	for _, skip := range []bool{false, true} {
 		t.Run("a first install whose config folder is in the library, preflight skipped "+strconv.FormatBool(skip), func(t *testing.T) {
-			platformDirForLayout(t)
 			lib := filepath.Join(t.TempDir(), "Music")
 			if err := os.MkdirAll(lib, 0o755); err != nil {
 				t.Fatal(err)
@@ -344,12 +330,10 @@ func TestBridgeInitWarnsOnceOfTheLayoutItWritesOrKeeps(t *testing.T) {
 				t.Fatalf("init exited %d:\n%s\n%s", code, stdout, stderr)
 			}
 			requireOneLayoutWarning(t, stdout, stderr, "the config file "+filepath.Join(cfgDir, "bridge.yaml")+" and the data directory "+
-				filepath.Join(cfgDir, "data")+" are "+layoutInside+lib+" (libraryRoots[0])",
-				"move bridge.yaml and the data directory outside every library root")
+				filepath.Join(cfgDir, "data")+" are "+layoutInside+lib+" (libraryRoots[0])")
 		})
 	}
 	t.Run("a run that keeps a config, by the config's own roots", func(t *testing.T) {
-		platformDirForLayout(t)
 		base := t.TempDir()
 		lib, other := filepath.Join(base, "Music"), filepath.Join(base, "Other")
 		cfgDir := filepath.Join(lib, "bridge")
@@ -368,11 +352,9 @@ func TestBridgeInitWarnsOnceOfTheLayoutItWritesOrKeeps(t *testing.T) {
 			t.Fatalf("the second init exited %d, keeping nothing:\n%s\n%s", code, stdout, stderr)
 		}
 		requireOneLayoutWarning(t, stdout, stderr, "the config file "+filepath.Join(cfgDir, "bridge.yaml")+" and the data directory "+
-			filepath.Join(cfgDir, "data")+" are "+layoutInside+lib+" (libraryRoots[0])",
-			"move bridge.yaml and the data directory outside every library root")
+			filepath.Join(cfgDir, "data")+" are "+layoutInside+lib+" (libraryRoots[0])")
 	})
 	t.Run("a --force rewrite, by the roots it writes", func(t *testing.T) {
-		platformDirForLayout(t)
 		base := t.TempDir()
 		lib, cfgDir := filepath.Join(base, "Music"), filepath.Join(base, "cfg")
 		if err := os.MkdirAll(lib, 0o755); err != nil {
@@ -386,11 +368,9 @@ func TestBridgeInitWarnsOnceOfTheLayoutItWritesOrKeeps(t *testing.T) {
 			t.Fatalf("the rewrite exited %d:\n%s\n%s", code, stdout, stderr)
 		}
 		requireOneLayoutWarning(t, stdout, stderr, "the config file "+filepath.Join(cfgDir, "bridge.yaml")+" and the data directory "+
-			filepath.Join(cfgDir, "data")+" are "+layoutInside+base+" (libraryRoots[0])",
-			"move bridge.yaml and the data directory outside every library root")
+			filepath.Join(cfgDir, "data")+" are "+layoutInside+base+" (libraryRoots[0])")
 	})
 	t.Run("a public rewrite that keeps the install's roots", func(t *testing.T) {
-		platformDirForLayout(t)
 		lib := filepath.Join(t.TempDir(), "Music")
 		if err := os.MkdirAll(lib, 0o755); err != nil {
 			t.Fatal(err)
@@ -406,11 +386,9 @@ func TestBridgeInitWarnsOnceOfTheLayoutItWritesOrKeeps(t *testing.T) {
 		}
 		stdout, stderr, _ := strings.Cut(out, "\n--- stderr ---\n")
 		requireOneLayoutWarning(t, stdout, stderr, "the config file "+filepath.Join(cfgDir, "bridge.yaml")+" and the data directory "+
-			filepath.Join(cfgDir, "data")+" are "+layoutInside+lib+" (libraryRoots[0])",
-			"move bridge.yaml and the data directory outside every library root")
+			filepath.Join(cfgDir, "data")+" are "+layoutInside+lib+" (libraryRoots[0])")
 	})
 	t.Run("a rewrite that keeps a data directory outside the root its config is in", func(t *testing.T) {
-		platformDirForLayout(t)
 		base := t.TempDir()
 		lib, data := filepath.Join(base, "Music"), filepath.Join(base, "data")
 		cfgPath := filepath.Join(lib, "conf", "bridge.yaml")
@@ -419,8 +397,7 @@ func TestBridgeInitWarnsOnceOfTheLayoutItWritesOrKeeps(t *testing.T) {
 		if code != 0 {
 			t.Fatalf("the rewrite exited %d:\n%s\n%s", code, stdout, stderr)
 		}
-		requireOneLayoutWarning(t, stdout, stderr, "the config file "+cfgPath+" is "+layoutInside+lib+" (libraryRoots[0])",
-			"(dataDir to "+data+", where the data directory is now)")
+		requireOneLayoutWarning(t, stdout, stderr, "the config file "+cfgPath+" is "+layoutInside+lib+" (libraryRoots[0])")
 	})
 }
 
@@ -431,7 +408,6 @@ func TestBridgeInitWarnsOnceOfTheLayoutItWritesOrKeeps(t *testing.T) {
 // warning, the one line B884 adds to init, writes nothing for the layout the
 // run wrote, or kept.
 func TestBridgeInitSaysNothingOfAHealthyLayout(t *testing.T) {
-	platformDirForLayout(t)
 	base := t.TempDir()
 	lib, sibling := filepath.Join(base, "music"), filepath.Join(base, "music2")
 	if err := os.MkdirAll(lib, 0o755); err != nil {
@@ -504,9 +480,9 @@ func TestServeSaysOnceAtItsStartThatItsDataDirectoryIsInsideALibraryRoot(t *test
 	writeLayoutConfig(t, cfg, data, []string{lib}, "")
 	startLayoutBridge(t, cfg)
 	lines := layoutLines(rec)
-	want := "WARN the data directory (dataDir) is inside library root libraryRoots[0]: a library root is often a mount"
-	if len(lines) != 1 || !strings.HasPrefix(lines[0], want) {
-		t.Fatalf("serve logged %q of its layout, want one line beginning %q", lines, want)
+	want := journalLayoutLine("the data directory (dataDir) is inside library root libraryRoots[0]", journalDataFix)
+	if len(lines) != 1 || lines[0] != want {
+		t.Fatalf("serve logged %q of its layout, want the one line %q", lines, want)
 	}
 	if strings.Contains(lines[0], base) {
 		t.Errorf("serve's layout line names a path: %q", lines[0])
@@ -514,11 +490,12 @@ func TestServeSaysOnceAtItsStartThatItsDataDirectoryIsInsideALibraryRoot(t *test
 }
 
 // TestServeSaysEachLayoutAtItsStart (backlog B884's cases 1 to 3 for serve):
-// each layout is said once, at the start, before anything touches a root, by
-// a serve that goes no further (an --addr it refuses, after the roots' check):
-// the data directory that is the root, the config file inside a root, both;
-// and nothing for a sibling with a shared prefix, or files apart from the
-// roots.
+// each layout is said once, at the start, by a serve that goes no further (an
+// --addr it refuses, after the roots' check), in the journal's words byte for
+// byte as B884's first two rounds left them, no path and no doc (round 3's
+// guard): the data directory that is the root, the config file inside a root,
+// both; and nothing for a sibling with a shared prefix, or files apart from
+// the roots.
 func TestServeSaysEachLayoutAtItsStart(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -527,13 +504,13 @@ func TestServeSaysEachLayoutAtItsStart(t *testing.T) {
 	}{
 		{"the data directory that is a root", func(base string) (string, string, []string) {
 			return filepath.Join(base, "bridge.yaml"), filepath.Join(base, "Music"), []string{filepath.Join(base, "Other"), filepath.Join(base, "Music")}
-		}, "WARN the data directory (dataDir) is inside library root libraryRoots[1]: "},
+		}, journalLayoutLine("the data directory (dataDir) is inside library root libraryRoots[1]", journalDataFix)},
 		{"the config file inside a root", func(base string) (string, string, []string) {
 			return filepath.Join(base, "Music", "conf", "bridge.yaml"), filepath.Join(base, "data"), []string{filepath.Join(base, "Music")}
-		}, "WARN the config file is inside library root libraryRoots[0]: "},
+		}, journalLayoutLine("the config file is inside library root libraryRoots[0]", journalConfigFix)},
 		{"both inside a root", func(base string) (string, string, []string) {
 			return filepath.Join(base, "Music", "b", "bridge.yaml"), filepath.Join(base, "Music", "b", "data"), []string{filepath.Join(base, "Music")}
-		}, "WARN the config file and the data directory (dataDir) are inside library root libraryRoots[0]: "},
+		}, journalLayoutLine("the config file and the data directory (dataDir) are inside library root libraryRoots[0]", journalBothFix)},
 		{"a sibling with a shared prefix", func(base string) (string, string, []string) {
 			return filepath.Join(base, "Music2", "bridge.yaml"), filepath.Join(base, "Music2", "data"), []string{filepath.Join(base, "Music")}
 		}, ""},
@@ -554,10 +531,8 @@ func TestServeSaysEachLayoutAtItsStart(t *testing.T) {
 			switch {
 			case tc.want == "" && len(lines) != 0:
 				t.Errorf("serve logged %q of a healthy layout", lines)
-			case tc.want != "" && (len(lines) != 1 || !strings.HasPrefix(lines[0], tc.want)):
-				t.Errorf("serve logged %q of its layout, want one line beginning %q", lines, tc.want)
-			case tc.want != "" && strings.Contains(lines[0], "tlsCertPath"):
-				t.Errorf("serve's journal line carries the CLI's words for a move of bridge.yaml: %q", lines[0])
+			case tc.want != "" && (len(lines) != 1 || lines[0] != tc.want):
+				t.Errorf("serve logged %q of its layout, want the one line %q", lines, tc.want)
 			}
 			for _, l := range lines {
 				if strings.Contains(l, base) {
@@ -600,7 +575,6 @@ func consoleDoctor(t *testing.T, b *consoleBridge) map[string]doctor.Check {
 // of it.
 func TestTheConsolesDoctorSaysTheLayoutOfARootAddedWhileServeRuns(t *testing.T) {
 	rec := loggingtest.Record(t)
-	platformDirForLayout(t)
 	b := startConsoleBridge(t, "", nil)
 	if c, ok := consoleDoctor(t, b)[installLayoutCheckName]; ok {
 		t.Fatalf("the console's doctor warns of a layout with nothing inside a root: %+v", c)
@@ -620,8 +594,8 @@ func TestTheConsolesDoctorSaysTheLayoutOfARootAddedWhileServeRuns(t *testing.T) 
 	}
 	c, ok := consoleDoctor(t, b)[installLayoutCheckName]
 	want := "the data directory " + b.dataDir + " is " + layoutInside + b.dataDir + " (libraryRoots[1])"
-	if !ok || c.Status != doctor.Warn || c.Summary != want {
-		t.Errorf("the console's doctor says %+v (there: %v) after the root was added, want a warn %q", c, ok, want)
+	if !ok || c.Status != doctor.Warn || c.Summary != want || c.Hint != layoutCLIHint {
+		t.Errorf("the console's doctor says %+v (there: %v) after the root was added, want a warn %q with the hint %q", c, ok, want, layoutCLIHint)
 	}
 	if lines := layoutLines(rec); len(lines) != 0 {
 		t.Errorf("serve's journal says %q, of a layout that was healthy at its start", lines)
@@ -644,18 +618,18 @@ func TestServeWithARelativeConfigInsideARootWarnsOnce(t *testing.T) {
 		t.Fatalf("serve exited %d, not at its --addr refusal: %s", code, stderr)
 	}
 	lines := layoutLines(rec)
-	if want := "WARN the config file is inside library root libraryRoots[0]: "; len(lines) != 1 || !strings.HasPrefix(lines[0], want) {
-		t.Errorf("serve logged %q of its layout, want one line beginning %q", lines, want)
+	if want := journalLayoutLine("the config file is inside library root libraryRoots[0]", journalConfigFix); len(lines) != 1 || lines[0] != want {
+		t.Errorf("serve logged %q of its layout, want the one line %q", lines, want)
 	}
 }
 
 // TestBridgeInitWarnsOfAKeptConfigsDefaultDataDirectory: a kept config that
 // writes no dataDir has the default, ./data beside it (priorInstallFrom
 // substitutes and resolves it), so a run that keeps a config inside a root
-// says its data directory too. A regression case from B884's second review,
-// green from the start.
+// says its data directory too, in the CLI's words. A regression case from
+// B884's second review, green from the start in its summary; its words are
+// round 3's.
 func TestBridgeInitWarnsOfAKeptConfigsDefaultDataDirectory(t *testing.T) {
-	platformDirForLayout(t)
 	base := t.TempDir()
 	lib, other := filepath.Join(base, "Music"), filepath.Join(base, "Other")
 	cfgDir := filepath.Join(lib, "conf")
@@ -672,21 +646,22 @@ func TestBridgeInitWarnsOfAKeptConfigsDefaultDataDirectory(t *testing.T) {
 	if code != 0 || !strings.Contains(stdout, "keeping it") {
 		t.Fatalf("init exited %d, keeping nothing:\n%s\n%s", code, stdout, stderr)
 	}
-	summary := "warning: the config file " + filepath.Join(cfgDir, "bridge.yaml") + " and the data directory " +
-		filepath.Join(cfgDir, "data") + " are " + layoutInside + lib + " (libraryRoots[0]): "
-	if strings.Count(stdout+stderr, layoutInside) != 1 || !strings.Contains(stderr, summary) {
-		t.Errorf("the run did not warn once %q:\nstdout:\n%s\nstderr:\n%s", summary, stdout, stderr)
-	}
+	requireOneLayoutWarning(t, stdout, stderr, "the config file "+filepath.Join(cfgDir, "bridge.yaml")+" and the data directory "+
+		filepath.Join(cfgDir, "data")+" are "+layoutInside+lib+" (libraryRoots[0])")
 }
 
 // TestServeSaysItsLayoutBeforeItTouchesARoot (backlog B884's round 2): serve
-// logs its layout's line before the first step of its start that touches a
-// root, its roots' check, and the case reads the journal as that check is
-// entered (serveOpts.rootsCheck): over roots that answer, serve stopping at
+// logs its layout's line before it enters its roots' check
+// (CheckLibraryRootsAccessible), and the case reads the journal as that check
+// is entered (serveOpts.rootsCheck): over roots that answer, serve stopping at
 // its --addr refusal after the check, and over a root that is not there,
 // which the check refuses on stderr, outside the journal, serve stopping
 // there. Round 1's serve tests read the journal once serve had returned, so a
-// line moved after the check still passed them.
+// line moved after the check still passed them. It proves the order against
+// that check alone, not against every touch of a root (round 3): the config's
+// load validates a non-empty upscale.variantsDir or upscale.tempDir through
+// fsutil.IsUnderAny, which resolves each root's links, before the line, and
+// this config sets neither.
 func TestServeSaysItsLayoutBeforeItTouchesARoot(t *testing.T) {
 	for _, tc := range []struct {
 		name   string

@@ -344,85 +344,62 @@ func TestALayoutJoinedOnlyThroughALinkIsMissed(t *testing.T) {
 	}
 }
 
-// The words of the advice to move bridge.yaml (backlog B884's round 2): the
-// settings Load resolves beside the config, as the config spells them and in
-// resolvePaths' order, what a BRIDGE_* variable that gives one does, and
-// dataDir's place where the data directory moves too.
-const (
-	wantMovedKeys      = "libraryRoots, dataDir, tlsCertPath, tlsKeyPath, autocert.cacheDir, upscale.variantsDir and upscale.tempDir"
-	wantMoveEnv        = "a value its BRIDGE_* environment variable gives resolves the same way, and is changed where that variable is set"
-	wantDataDirFollows = "dataDir to the data directory's new path: it moves with the data directory and is not pinned to where it is now"
-)
+// wantCLIFix is what the CLI's words say to do, for every layout (backlog
+// B884's round 3): one fixed sentence, and the section of the bridge's
+// README.md that has the steps. It ends with no period: bridge init's line
+// adds one.
+const wantCLIFix = "move bridge.yaml and the data directory out of every library root, and check every path setting in " +
+	"bridge.yaml; see \"Moving the bridge's files out of a library root\" in the bridge's README.md"
 
 // TestTheLayoutsWordsNameWhatLiesInsideWhichRoot pins the words bridge init,
 // bridge doctor and serve say a layout in: what lies inside which root, why
-// that is a risk, and what to do, for the config file (moved, keeping where
-// its relative paths point), the data directory (moved, and dataDir set) and
-// both (one warning naming both). The CLI's words name each by its path, the
-// root beside its place in libraryRoots, and offer the platform's default
-// directory only where it lies outside every root; the journal's name each
-// by its setting and carry no path (B505), and keep round 1's words.
+// that is a risk, and what to do, for the data directory, the data directory
+// that is a root, the config file, and both (one warning naming both). The
+// CLI's words name each by its path, the root beside its place in
+// libraryRoots, and say what to do in one fixed sentence that sends the
+// operator to the steps, generating none (backlog B884's round 3); the
+// journal's name each by its setting, carry no path (B505) and no doc, and
+// keep their words byte for byte.
 func TestTheLayoutsWordsNameWhatLiesInsideWhichRoot(t *testing.T) {
-	const home = "/home/u/.config/1-bit-bridge"
 	for _, tc := range []struct {
-		name                string
-		cfg, data, platform string
-		roots               []string
-		summary, byNames    string
-		advice, adviceNames string
+		name             string
+		cfg, data        string
+		roots            []string
+		summary, byNames string
+		journalFix       string
 	}{
 		{
-			name: "the data directory", cfg: "/etc/b/bridge.yaml", data: "/m/.bridge", platform: home, roots: []string{"/m"},
-			summary: "the data directory /m/.bridge is inside library root /m (libraryRoots[0])",
-			byNames: "the data directory (dataDir) is inside library root libraryRoots[0]",
-			advice: layoutRisk + "; move the data directory outside every library root, to " + home +
-				"/data for example (the platform's default), and set dataDir in bridge.yaml to its new path",
-			adviceNames: layoutRisk + "; move the data directory outside every library root, and set dataDir in bridge.yaml to its new path",
+			name: "the data directory", cfg: "/etc/b/bridge.yaml", data: "/m/.bridge", roots: []string{"/m"},
+			summary:    "the data directory /m/.bridge is inside library root /m (libraryRoots[0])",
+			byNames:    "the data directory (dataDir) is inside library root libraryRoots[0]",
+			journalFix: "move the data directory outside every library root, and set dataDir in bridge.yaml to its new path",
 		},
 		{
-			name: "the data directory equal to the root", cfg: "/etc/b/bridge.yaml", data: "/m", platform: home, roots: []string{"/m"},
-			summary: "the data directory /m is inside library root /m (libraryRoots[0])",
-			byNames: "the data directory (dataDir) is inside library root libraryRoots[0]",
-			advice: layoutRisk + "; move the data directory outside every library root, to " + home +
-				"/data for example (the platform's default), and set dataDir in bridge.yaml to its new path",
-			adviceNames: layoutRisk + "; move the data directory outside every library root, and set dataDir in bridge.yaml to its new path",
+			name: "the data directory equal to the root", cfg: "/etc/b/bridge.yaml", data: "/m", roots: []string{"/m"},
+			summary:    "the data directory /m is inside library root /m (libraryRoots[0])",
+			byNames:    "the data directory (dataDir) is inside library root libraryRoots[0]",
+			journalFix: "move the data directory outside every library root, and set dataDir in bridge.yaml to its new path",
 		},
 		{
-			name: "the config file", cfg: "/m/conf/bridge.yaml", data: "/var/lib/b", platform: home, roots: []string{"/x", "/m"},
+			name: "the config file", cfg: "/m/conf/bridge.yaml", data: "/var/lib/b", roots: []string{"/x", "/m"},
 			summary: "the config file /m/conf/bridge.yaml is inside library root /m (libraryRoots[1])",
 			byNames: "the config file is inside library root libraryRoots[1]",
-			advice: layoutRisk + "; move bridge.yaml outside every library root, to " + home + " for example (the platform's default); " +
-				"before you move it, set each of " + wantMovedKeys + " that is relative in it to an absolute path, since each resolves " +
-				"beside bridge.yaml (dataDir to /var/lib/b, where the data directory is now); " + wantMoveEnv,
-			adviceNames: layoutRisk + "; move bridge.yaml outside every library root, first setting dataDir in it to the data " +
+			journalFix: "move bridge.yaml outside every library root, first setting dataDir in it to the data " +
 				"directory's absolute path: a relative dataDir resolves beside bridge.yaml",
 		},
 		{
-			name: "both in one root", cfg: "/m/b/bridge.yaml", data: "/m/b/data", platform: home, roots: []string{"/m", "/m/b"},
+			name: "both in one root", cfg: "/m/b/bridge.yaml", data: "/m/b/data", roots: []string{"/m", "/m/b"},
 			summary: "the config file /m/b/bridge.yaml and the data directory /m/b/data are inside library root /m (libraryRoots[0])",
 			byNames: "the config file and the data directory (dataDir) are inside library root libraryRoots[0]",
-			advice: layoutRisk + "; move bridge.yaml and the data directory outside every library root, to " + home +
-				" for example (the platform's default); before you move bridge.yaml, set each of " + wantMovedKeys + " that is relative " +
-				"in it to an absolute path, since each resolves beside bridge.yaml (" + wantDataDirFollows + "); " + wantMoveEnv,
-			adviceNames: layoutRisk + "; move bridge.yaml and the data directory outside every library root, keeping dataDir " +
+			journalFix: "move bridge.yaml and the data directory outside every library root, keeping dataDir " +
 				"pointed at the data directory: a relative dataDir (./data unless set) resolves beside bridge.yaml",
 		},
 		{
-			name: "both in two roots", cfg: "/a/bridge.yaml", data: "/b/data", platform: "", roots: []string{"/b", "/a"},
+			name: "both in two roots", cfg: "/a/bridge.yaml", data: "/b/data", roots: []string{"/b", "/a"},
 			summary: "the config file /a/bridge.yaml is inside library root /a (libraryRoots[1]), and the data directory /b/data inside library root /b (libraryRoots[0])",
 			byNames: "the config file is inside library root libraryRoots[1], and the data directory (dataDir) inside library root libraryRoots[0]",
-			advice: layoutRisk + "; move bridge.yaml and the data directory outside every library root; before you move " +
-				"bridge.yaml, set each of " + wantMovedKeys + " that is relative in it to an absolute path, since each resolves beside " +
-				"bridge.yaml (" + wantDataDirFollows + "); " + wantMoveEnv,
-			adviceNames: layoutRisk + "; move bridge.yaml and the data directory outside every library root, keeping dataDir " +
+			journalFix: "move bridge.yaml and the data directory outside every library root, keeping dataDir " +
 				"pointed at the data directory: a relative dataDir (./data unless set) resolves beside bridge.yaml",
-		},
-		{
-			name: "a platform default inside a root is offered nowhere", cfg: "/etc/b/bridge.yaml", data: "/home/u/data", platform: home, roots: []string{"/home/u"},
-			summary:     "the data directory /home/u/data is inside library root /home/u (libraryRoots[0])",
-			byNames:     "the data directory (dataDir) is inside library root libraryRoots[0]",
-			advice:      layoutRisk + "; move the data directory outside every library root, and set dataDir in bridge.yaml to its new path",
-			adviceNames: layoutRisk + "; move the data directory outside every library root, and set dataDir in bridge.yaml to its new path",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -433,77 +410,95 @@ func TestTheLayoutsWordsNameWhatLiesInsideWhichRoot(t *testing.T) {
 			if got := l.Summary(false); got != tc.byNames {
 				t.Errorf("Summary(by setting) = %q\nwant %q", got, tc.byNames)
 			}
-			if got := l.Advice(true, tc.platform); got != tc.advice {
-				t.Errorf("Advice(byPath) = %q\nwant %q", got, tc.advice)
+			if got, want := l.Hint(), layoutRisk+"; "+wantCLIFix; got != want {
+				t.Errorf("Hint() = %q\nwant %q", got, want)
 			}
-			if got := l.Advice(false, ""); got != tc.adviceNames {
-				t.Errorf("Advice(by setting) = %q\nwant %q", got, tc.adviceNames)
+			if got, want := l.Warning(), tc.summary+": "+layoutRisk+"; "+wantCLIFix; got != want {
+				t.Errorf("Warning() = %q\nwant %q", got, want)
 			}
-			if got, want := l.Line(true, tc.platform), tc.summary+": "+tc.advice; got != want {
-				t.Errorf("Line(byPath) = %q\nwant %q", got, want)
+			journal := l.JournalLine()
+			if want := tc.byNames + ": " + layoutRisk + "; " + tc.journalFix; journal != want {
+				t.Errorf("JournalLine() = %q\nwant %q, as it was", journal, want)
 			}
-			journal := l.Line(false, "")
-			for _, p := range append(slices.Clone(tc.roots), tc.cfg, tc.data, home) {
+			for _, p := range append(slices.Clone(tc.roots), tc.cfg, tc.data, "README") {
 				if strings.Contains(journal, p) {
-					t.Errorf("the journal's line names the path %s: %q", p, journal)
+					t.Errorf("the journal's line names %s: %q", p, journal)
 				}
 			}
 		})
 	}
 	healthy := layoutOn("linux", "/etc/b/bridge.yaml", "/var/lib/b", []string{"/m"})
-	if healthy.Inside() || healthy.Summary(true) != "" || healthy.Advice(true, home) != "" || healthy.Line(true, home) != "" {
-		t.Errorf("a layout with nothing inside a root says %q, %q, %q", healthy.Summary(true), healthy.Advice(true, home), healthy.Line(true, home))
+	if healthy.Inside() || healthy.Summary(true) != "" || healthy.Hint() != "" || healthy.Warning() != "" || healthy.JournalLine() != "" {
+		t.Errorf("a layout with nothing inside a root says %q, %q, %q, %q", healthy.Summary(true), healthy.Hint(), healthy.Warning(), healthy.JournalLine())
 	}
 }
 
-// TestTheAdviceToMoveBridgeYAMLKeepsEveryRelativePathsMeaning (backlog B884's
-// round 2): wherever the CLI's words say to move bridge.yaml, the config file
-// alone or with the data directory, they say to set, before it moves, each
-// setting Load resolves beside it that is relative to an absolute path, every
-// one of them named as the config spells it and in resolvePaths' own order
-// (read from resolvePaths here, so a setting added there is a setting the
-// words must name), and that a value a BRIDGE_* variable gives resolves the
-// same way and is changed where that variable is set. A config moved alone
-// pins dataDir where the data directory is; one moved with the data directory
-// says dataDir follows it, never that it stays. The journal's words, which
-// name no value (B505), are round 1's.
+// TestTheAdviceToMoveBridgeYAMLKeepsEveryRelativePathsMeaning (backlog
+// B884's rounds 2 and 3): the CLI's advice keeps every relative path's
+// meaning by sending the operator to the steps, never by generating them. For
+// every layout, the config file alone, the data directory alone, the data
+// directory that is the root, both, and a data directory left at its default
+// beside the config, it is the one fixed sentence, which ends with no period
+// (bridge init's line adds one); the section it names is in the bridge's
+// README.md, once, and names each setting Load resolves beside the config
+// (read from resolvePaths here, so a setting added there is one the steps
+// must name) and the BRIDGE_* variables that win over the file. The
+// journal's words name no doc.
 func TestTheAdviceToMoveBridgeYAMLKeepsEveryRelativePathsMeaning(t *testing.T) {
-	keys := settingsResolvedBesideTheConfig(t)
-	list := strings.Join(keys[:len(keys)-1], ", ") + " and " + keys[len(keys)-1]
-	keep := "set each of " + list + " that is relative in it to an absolute path, since each resolves beside bridge.yaml"
-	for _, tc := range []struct {
-		name, cfg, data, journal string
-		both                     bool
-	}{
-		{"the config file alone", "/m/conf/bridge.yaml", "/var/lib/b",
-			"the config file is inside library root libraryRoots[0]: " + layoutRisk + "; move bridge.yaml outside every library " +
-				"root, first setting dataDir in it to the data directory's absolute path: a relative dataDir resolves beside bridge.yaml", false},
-		{"the config file and the data directory", "/m/b/bridge.yaml", "/m/b/data",
-			"the config file and the data directory (dataDir) are inside library root libraryRoots[0]: " + layoutRisk +
-				"; move bridge.yaml and the data directory outside every library root, keeping dataDir pointed at the data " +
-				"directory: a relative dataDir (./data unless set) resolves beside bridge.yaml", true},
+	for _, tc := range []struct{ name, cfg, data string }{
+		{"the config file alone", "/m/conf/bridge.yaml", "/var/lib/b"},
+		{"the data directory alone", "/etc/b/bridge.yaml", "/m/b/data"},
+		{"the data directory that is the root", "/etc/b/bridge.yaml", "/m"},
+		{"both", "/m/b/bridge.yaml", "/m/b/data"},
+		{"the default data directory", "/m/b/bridge.yaml", DefaultDataDir},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			l := layoutOn("linux", tc.cfg, tc.data, []string{"/m"})
-			advice := l.Advice(true, "/home/u/.config/1-bit-bridge")
-			if !strings.Contains(advice, keep) {
-				t.Errorf("the advice to move bridge.yaml does not say %q:\n%s", keep, advice)
+			if !l.Inside() {
+				t.Fatalf("the layout %s, %s is inside no root", tc.cfg, tc.data)
 			}
-			if !strings.Contains(advice, wantMoveEnv) {
-				t.Errorf("the advice to move bridge.yaml does not say what a BRIDGE_* variable that gives one does:\n%s", advice)
+			hint := l.Hint()
+			if want := layoutRisk + "; " + wantCLIFix; hint != want {
+				t.Errorf("the advice is %q\nwant the one fixed sentence %q", hint, want)
 			}
-			pinned := "(dataDir to " + tc.data + ", where the data directory is now)"
-			if got := strings.Contains(advice, wantDataDirFollows); got != tc.both {
-				t.Errorf("the advice says dataDir follows the data directory: %v, want %v:\n%s", got, tc.both, advice)
+			if strings.HasSuffix(hint, ".") {
+				t.Errorf("the advice ends with a period, which bridge init's line doubles: %q", hint)
 			}
-			if got := strings.Contains(advice, pinned); got == tc.both {
-				t.Errorf("the advice pins dataDir where the data directory is: %v, want %v:\n%s", got, !tc.both, advice)
-			}
-			if got := l.Line(false, ""); got != tc.journal {
-				t.Errorf("the journal's line changed:\n%s\nwant round 1's\n%s", got, tc.journal)
+			if j := l.JournalLine(); strings.Contains(j, "README") {
+				t.Errorf("the journal's line names a doc: %q", j)
 			}
 		})
 	}
+	section := readmeSection(t, "Moving the bridge's files out of a library root")
+	for _, key := range settingsResolvedBesideTheConfig(t) {
+		if !strings.Contains(section, "`"+key+"`") {
+			t.Errorf("README.md's steps do not name %s, which Load resolves beside the config", key)
+		}
+	}
+	if !strings.Contains(section, "`BRIDGE_") {
+		t.Errorf("README.md's steps do not say what a BRIDGE_* variable does")
+	}
+}
+
+// readmeSection is the second-level section of the bridge's README.md titled
+// title, from its heading to the next one, failing where the file holds no
+// such heading, or more than one.
+func readmeSection(t *testing.T, title string) string {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("..", "..", "README.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := strings.ReplaceAll(string(raw), "\r\n", "\n")
+	heading := "\n## " + title + "\n"
+	if n := strings.Count(text, heading); n != 1 {
+		t.Fatalf("README.md has %d sections titled %q, want one", n, title)
+	}
+	section := text[strings.Index(text, heading)+len(heading):]
+	if end := strings.Index(section, "\n## "); end >= 0 {
+		section = section[:end]
+	}
+	return section
 }
 
 // settingsResolvedBesideTheConfig is every setting resolvePaths resolves
