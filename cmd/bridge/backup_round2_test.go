@@ -425,7 +425,12 @@ func TestABackupsFolderGrantingNoLockGrowsByOneSnapshotAndTheDoctorSaysWhy(t *te
 // backlog B653's second round's case for serve's backup drain: the ticker,
 // stopped while its verification's read of the manifest, or its open of the
 // backups folder's lock, does not answer (a hung mount), returns within
-// backup.StopWriteBound of the stop, and says nothing of the stop.
+// backup.StopWriteBound of the stop, and says nothing of the stop. Once
+// stopped, the hung read is given up StopWriteBound after the stop, as its
+// caller's wait expires, and the ticker reports the one and silences the
+// other, whichever comes first: the worker's answer waits for that expiry
+// (answerOnceExpired), the order a stop that reaches the caller first gives
+// (backlog B890: on CI the read's give-up came first, and was reported).
 func TestATickerStoppedWhileAVerificationsStepHangsReturnsWithinItsBound(t *testing.T) {
 	for _, step := range []string{"its manifest's read", "its lock's open"} {
 		t.Run(step, func(t *testing.T) {
@@ -448,10 +453,17 @@ func TestATickerStoppedWhileAVerificationsStepHangsReturnsWithinItsBound(t *test
 					return fsutil.OpenLockFile(dir, name)
 				}))
 			}
+			overran, letAnswer := answerOnceExpired(t, root)
 			ctx, cancel := context.WithCancel(context.Background())
 			done := make(chan struct{})
 			drainLoopOnCleanup(t, cancel, done, "the backup ticker")
-			t.Cleanup(func() { letGo(); cancel(); waitClosed(t, done, "the backup ticker"); awaitVerificationsEnd(t, root) })
+			t.Cleanup(func() {
+				letAnswer()
+				letGo()
+				cancel()
+				waitClosed(t, done, "the backup ticker")
+				awaitVerificationsEnd(t, root)
+			})
 			var stdout, stderr safeBuffer
 			go func() {
 				defer close(done)
@@ -477,8 +489,46 @@ func TestATickerStoppedWhileAVerificationsStepHangsReturnsWithinItsBound(t *test
 			}
 			letGo()
 			awaitVerificationsEnd(t, root)
+			select {
+			case <-overran:
+				t.Error("the verification's answer waited past its bound for its caller's expiry")
+			default:
+			}
 		})
 	}
+}
+
+// answerOnceExpired holds the answer of every verification of a snapshot in
+// the backups folder root (SetVerifyHandoffForTest; the ticker's alone in
+// that folder) on its worker, until its caller has stopped waiting for it:
+// the answer hook runs before the worker hands its answer over, so the
+// caller expires with nothing to take. The hold is bounded, closing overran
+// on the worker where it waited out its bound, and let go at the test's end
+// (letGo), before the callers and the workers are joined; the seam is put
+// back once they have ended, a cleanup registered after this one running
+// first. root is resolved, as the ticker's snapshots' folder is.
+func answerOnceExpired(t *testing.T, root string) (overran <-chan struct{}, letGo func()) {
+	t.Helper()
+	expired, over, released := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var expiredOnce, overOnce sync.Once
+	t.Cleanup(backup.SetVerifyHandoffForTest(func(dir string) {
+		if filepath.Dir(dir) != root {
+			return
+		}
+		bound := time.NewTimer(10 * time.Second)
+		defer bound.Stop()
+		select {
+		case <-expired:
+		case <-released:
+		case <-bound.C:
+			overOnce.Do(func() { close(over) })
+		}
+	}, func(dir string) {
+		if filepath.Dir(dir) == root {
+			expiredOnce.Do(func() { close(expired) })
+		}
+	}))
+	return over, sync.OnceFunc(func() { close(released) })
 }
 
 // awaitVerificationsEnd waits until no verification owes a snapshot under
