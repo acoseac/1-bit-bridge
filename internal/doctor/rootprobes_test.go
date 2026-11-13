@@ -115,6 +115,104 @@ func within[T any](t *testing.T, limit time.Duration, what string, fn func() T) 
 	}
 }
 
+// testClock is a runner's clock (RootProbes.now and timer) whose time moves
+// only when the test moves it (advance), firing each timer it passes, so a
+// case reads a wait's end at the instant the bound passes rather than by how
+// long it took: armed hears each timer a wait sets, with what it waits for.
+type testClock struct {
+	mu     sync.Mutex
+	at     time.Time
+	timers []*testTimer
+	armed  chan time.Duration
+}
+
+type testTimer struct {
+	due           time.Time
+	c             chan time.Time
+	fired, halted bool
+}
+
+// clockOf makes c the clock p's runs read, before any run begins.
+func clockOf(p *RootProbes) *testClock {
+	c := &testClock{at: time.Unix(1_800_000_000, 0), armed: make(chan time.Duration, 64)}
+	p.now, p.timer = c.now, c.timer
+	return c
+}
+
+func (c *testClock) now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.at
+}
+
+func (c *testClock) timer(d time.Duration) (<-chan time.Time, func() bool) {
+	c.mu.Lock()
+	tm := &testTimer{due: c.at.Add(d), c: make(chan time.Time, 1)}
+	c.timers = append(c.timers, tm)
+	c.mu.Unlock()
+	select {
+	case c.armed <- d:
+	default:
+	}
+	return tm.c, func() bool {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		live := !tm.fired && !tm.halted
+		tm.halted = true
+		return live
+	}
+}
+
+// advance moves the clock on by d and fires every timer it passes.
+func (c *testClock) advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.at = c.at.Add(d)
+	for _, tm := range c.timers {
+		if !tm.fired && !tm.halted && !tm.due.After(c.at) {
+			tm.fired = true
+			tm.c <- c.at
+		}
+	}
+}
+
+// waitArmed is what the next timer a wait sets waits for, the test failing
+// by its deadline where none is set.
+func (c *testClock) waitArmed(t *testing.T, what string) time.Duration {
+	t.Helper()
+	select {
+	case d := <-c.armed:
+		return d
+	case <-time.After(testDeadline):
+		t.Fatalf("%s set no wait within %s", what, testDeadline)
+		panic("unreachable")
+	}
+}
+
+// settled is the line of a run that sets no further wait on c: the test fails
+// at once where it sets one, or by its deadline where it does not return.
+func (c *testClock) settled(t *testing.T, what string, got <-chan Check) Check {
+	t.Helper()
+	select {
+	case line := <-got:
+		return line
+	case d := <-c.armed:
+		t.Fatalf("%s set a wait of %s", what, d)
+	case <-time.After(testDeadline):
+		t.Fatalf("%s did not return within %s", what, testDeadline)
+	}
+	panic("unreachable")
+}
+
+// runOn begins library-roots for roots as one run of p, on a goroutine of its
+// own, its line on the channel it returns.
+func runOn(ctx context.Context, p *RootProbes, roots ...string) <-chan Check {
+	run := p.BeginRun()
+	got := make(chan Check, 1)
+	go func() { got <- checkLibraryRoots(ctx, Deps{RootProbes: run, LibraryRoots: roots}) }()
+	return got
+}
+
 // libraryRoot is a directory holding one file: a root that answers, healthy.
 func libraryRoot(t *testing.T, name string) string {
 	t.Helper()
@@ -151,27 +249,38 @@ func checkNamed(t *testing.T, r Report, name string) Check {
 
 // TestARunNamesARootThatDoesNotAnswerWithinItsBound is B650's first case
 // through the whole of Run: a root whose stat does not answer is named by
-// library-roots, as configured, in a fail, within the bound and a margin for
-// the run's other checks, and every other check is still reported. Red on
-// main, whose checkLibraryRoots stat'ed the root on the run's goroutine: Run
-// never returned, and the test failed by its own deadline.
+// library-roots, as configured, in a fail, once the bound passes on the run's
+// clock (its one wait, of the bound), and every other check is still
+// reported. Red on main, whose checkLibraryRoots stat'ed the root on the run's
+// goroutine: Run set no wait and never returned, and the test failed by its
+// own deadline.
 func TestARunNamesARootThatDoesNotAnswerWithinItsBound(t *testing.T) {
 	dead := libraryRoot(t, "nas")
 	s := newStallingRoots([]string{dead}, nil)
 	p := probesOver(t, s, testBound)
+	clk := clockOf(p)
 	dir := t.TempDir()
-	report, took := within(t, testDeadline, "Run", func() Report {
-		return Run(context.Background(), Deps{
-			RootProbes:   p.BeginRun(),
-			ConfigDir:    filepath.Join(dir, "cfg"),
-			DataDir:      filepath.Join(dir, "data"),
-			LibraryRoots: []string{dead},
-			APIPort:      mustFreePort(t),
-			AdminPort:    mustFreePort(t),
-		})
-	})
-	if limit := testBound + runMargin; took > limit {
-		t.Errorf("Run took %s, past the bound and a margin for its other checks (%s)", took, limit)
+	deps := Deps{
+		RootProbes:   p.BeginRun(),
+		ConfigDir:    filepath.Join(dir, "cfg"),
+		DataDir:      filepath.Join(dir, "data"),
+		LibraryRoots: []string{dead},
+		APIPort:      mustFreePort(t),
+		AdminPort:    mustFreePort(t),
+	}
+	reports := make(chan Report, 1)
+	go func() { reports <- Run(context.Background(), deps) }()
+	if d := clk.waitArmed(t, "Run"); d != testBound {
+		t.Errorf("Run's wait on the root = %s, want the bound (%s)", d, testBound)
+	}
+	clk.advance(testBound)
+	var report Report
+	select {
+	case report = <-reports:
+	case d := <-clk.armed:
+		t.Fatalf("once the bound passed, Run set another wait of %s", d)
+	case <-time.After(testDeadline):
+		t.Fatalf("Run did not return within %s of its bound passing: a root that does not answer held it", testDeadline)
 	}
 	c := checkNamed(t, report, checkNameLibraryRoots)
 	want := fmt.Sprintf("library root %s did not answer within %s: its mount may be stalled", dead, testBound)
@@ -183,11 +292,6 @@ func TestARunNamesARootThatDoesNotAnswerWithinItsBound(t *testing.T) {
 	}
 	requireEveryCheck(t, report)
 }
-
-// runMargin is what a test of a whole run allows past the bound for the run's
-// other checks: probes of the host's service manager and ports, which answer
-// in well under a second on a host that is not loaded.
-const runMargin = 15 * time.Second
 
 // requireEveryCheck requires report to carry every line Run gives a Deps with
 // none of the optional producers, in Run's order.
@@ -249,16 +353,20 @@ func TestTheSecondOfTwoRootsDoesNotAnswer(t *testing.T) {
 
 // TestRootsThatDoNotAnswerCostOneBoundTogether: the roots are probed together
 // (Carbon's fifth note on the brief), so two that do not answer cost a run one
-// bound, not one each, and both are named.
+// bound, not one each, and both are named: the run sets one wait, of the
+// bound, and returns once that bound passes on its clock, setting no other.
 func TestRootsThatDoNotAnswerCostOneBoundTogether(t *testing.T) {
 	const bound = 2 * time.Second
 	a, b := libraryRoot(t, "nas-a"), libraryRoot(t, "nas-b")
 	s := newStallingRoots([]string{a, b}, nil)
 	p := probesOver(t, s, bound)
-	c, took := rootsLine(t, context.Background(), p, a, b)
-	if took >= bound*175/100 {
-		t.Errorf("two roots that do not answer took the run %s, want one bound (%s), not one each", took, bound)
+	clk := clockOf(p)
+	got := runOn(context.Background(), p, a, b)
+	if d := clk.waitArmed(t, "the run"); d != bound {
+		t.Errorf("the run's first wait = %s, want the bound (%s)", d, bound)
 	}
+	clk.advance(bound)
+	c := clk.settled(t, "once one bound passed, the run", got)
 	for _, r := range []string{a, b} {
 		if !strings.Contains(c.Hint, fmt.Sprintf("library root %s did not answer within %s", r, bound)) {
 			t.Errorf("library-roots does not name %s: %+v", r, c)
@@ -289,17 +397,19 @@ func TestALaterRunFindsTheRootStillNotAnsweringAndAsksItNoMore(t *testing.T) {
 	dead := libraryRoot(t, "nas")
 	s := newStallingRoots([]string{dead}, nil)
 	p := probesOver(t, s, testBound)
-	first, _ := rootsLine(t, context.Background(), p, dead)
+	clk := clockOf(p)
+	got := runOn(context.Background(), p, dead)
+	clk.waitArmed(t, "the first run")
+	clk.advance(testBound)
+	first := clk.settled(t, "the first run", got)
 	if !strings.Contains(first.Hint, "did not answer within") {
 		t.Fatalf("the first run's library-roots = %+v, want the root not answering", first)
 	}
-	second, took := rootsLine(t, context.Background(), p, dead)
+	// The second run, with the probe out past its bound already, sets no wait.
+	second := clk.settled(t, "the second run", runOn(context.Background(), p, dead))
 	want := fmt.Sprintf("library root %s still has not answered", dead)
 	if second.Status != Fail || !strings.Contains(second.Hint, want) {
 		t.Errorf("the second run's library-roots = %+v, want a fail saying %q", second, want)
-	}
-	if took >= testBound {
-		t.Errorf("the second run waited %s for a probe out past its bound already", took)
 	}
 	if n := s.statsOf(dead); n != 1 {
 		t.Errorf("two runs began %d probes of the root that does not answer, want one", n)
@@ -339,23 +449,26 @@ func TestOverlappingRunsShareOneProbeOfARoot(t *testing.T) {
 // context ends before a root's bound (the console's request gone) says the
 // root was not checked because the run was stopped, a warn, never that it did
 // not answer; the probe stays out, and the next run finds it still not
-// answering.
+// answering. The run's clock does not move until it has returned, so it came
+// back at its stop, before its bound.
 func TestARunStoppedByItsCallerSaysSoAndNotThatTheRootIsStuck(t *testing.T) {
 	const bound = 1500 * time.Millisecond
 	dead := libraryRoot(t, "nas")
 	s := newStallingRoots([]string{dead}, nil)
 	p := probesOver(t, s, bound)
+	clk := clockOf(p)
 	ctx, cancel := context.WithCancel(context.Background())
-	time.AfterFunc(100*time.Millisecond, cancel)
-	c, took := rootsLine(t, ctx, p, dead)
-	if took >= bound/2 {
-		t.Errorf("the stopped run took %s, want it back at its stop, well before the bound (%s)", took, bound)
-	}
+	defer cancel()
+	got := runOn(ctx, p, dead)
+	clk.waitArmed(t, "the run")
+	cancel()
+	c := clk.settled(t, "the stopped run", got)
 	want := fmt.Sprintf("library root %s was not checked: the doctor's run was stopped before it answered", dead)
 	if c.Status != Warn || c.Summary != "1 root(s) not checked" || c.Hint != want {
 		t.Errorf("the stopped run's library-roots = %+v, want a warn saying %q", c, want)
 	}
-	next, _ := rootsLine(t, context.Background(), p, dead)
+	clk.advance(bound)
+	next := clk.settled(t, "the next run", runOn(context.Background(), p, dead))
 	if next.Status != Fail || !strings.Contains(next.Hint, "still has not answered") {
 		t.Errorf("the next run's library-roots = %+v, want the probe still out and not answering", next)
 	}
@@ -597,15 +710,31 @@ func TestTheLoadsHaveALimitOfTheirOwn(t *testing.T) {
 	p := probesOver(t, s, testBound)
 	run := p.BeginRun()
 	run.BeginRoots(roots)
-	if got, w := Bounded(context.Background(), run, "a load that touches no root", func() int { return 7 }); !w.Answered() || got != 7 {
-		t.Fatalf("beside %d probes out, a load = %d, %+v; want it answered", rootProbeLimit, got, w)
+	type loads struct {
+		first     int
+		firstWait Wait
+		held      []Wait
+		tooMany   Wait
 	}
-	for i := range otherWorkLimit {
-		if _, w := Bounded(context.Background(), run, fmt.Sprintf("load %d", i), func() int { <-s.release; return i }); w.Answered() {
+	got, _ := within(t, testDeadline, "the loads", func() loads {
+		var l loads
+		l.first, l.firstWait = Bounded(context.Background(), run, "a load that touches no root", func() int { return 7 })
+		for i := range otherWorkLimit {
+			_, w := Bounded(context.Background(), run, fmt.Sprintf("load %d", i), func() int { <-s.release; return i })
+			l.held = append(l.held, w)
+		}
+		_, l.tooMany = Bounded(context.Background(), run, "one load too many", func() int { return 0 })
+		return l
+	})
+	if !got.firstWait.Answered() || got.first != 7 {
+		t.Fatalf("beside %d probes out, a load = %d, %+v; want it answered", rootProbeLimit, got.first, got.firstWait)
+	}
+	for _, w := range got.held {
+		if w.Answered() {
 			t.Fatalf("a load held until its roots answer answered: %+v", w)
 		}
 	}
-	_, w := Bounded(context.Background(), run, "one load too many", func() int { return 0 })
+	w := got.tooMany
 	err := &UnfinishedLoadError{Wait: w}
 	want := fmt.Sprintf("%d earlier loads of the config have not finished yet, and the doctor begins no more until one does", otherWorkLimit)
 	if w.outcome != heldBack || err.Error() != want {

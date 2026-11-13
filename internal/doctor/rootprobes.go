@@ -81,6 +81,12 @@ type RootProbes struct {
 	// countWatches counts what the library watcher would hold under one root,
 	// this platform's countRootWatches, or a test's stand-in.
 	countWatches func(root string, stopAt int) (watchCount, error)
+	// now and timer are the runner's clock: when a run and a work began, and
+	// the timer a wait for a work's bound sets (time.Now and time.NewTimer's
+	// channel and Stop), or a test's, whose time moves only when the test
+	// moves it.
+	now   func() time.Time
+	timer func(d time.Duration) (c <-chan time.Time, stop func() bool)
 
 	mu  sync.Mutex
 	out map[workKey]*rootWork
@@ -95,8 +101,16 @@ func NewRootProbes() *RootProbes {
 		stat:         os.Stat,
 		readDir:      os.ReadDir,
 		countWatches: countRootWatches,
+		now:          time.Now,
+		timer:        realTimer,
 		out:          map[workKey]*rootWork{},
 	}
+}
+
+// realTimer is a timer of the time package's, as RootProbes.timer gives one.
+func realTimer(d time.Duration) (<-chan time.Time, func() bool) {
+	t := time.NewTimer(d)
+	return t.C, t.Stop
 }
 
 // NewRootProbesForTest is NewRootProbes waiting bound for a work and probing a
@@ -148,7 +162,7 @@ type ProbeRun struct {
 
 // BeginRun is a run of p beginning now.
 func (p *RootProbes) BeginRun() *ProbeRun {
-	return &ProbeRun{p: p, began: time.Now(), met: map[workKey]*rootWork{}}
+	return &ProbeRun{p: p, began: p.now(), met: map[workKey]*rootWork{}}
 }
 
 // probeRun is d's run of its runner's RootProbes, or a run of a RootProbes of
@@ -213,7 +227,7 @@ func (p *RootProbes) beginOut(key workKey, fn func() any) *rootWork {
 	if p.outOfKind(key.kind) >= p.limitOf(key.kind) {
 		return nil
 	}
-	w := &rootWork{began: time.Now(), done: make(chan struct{})}
+	w := &rootWork{began: p.now(), done: make(chan struct{})}
 	p.out[key] = w
 	go p.work(key, w, fn)
 	return w
@@ -293,22 +307,22 @@ func (r *ProbeRun) waitFor(ctx context.Context, w *rootWork, kind string) Wait {
 	if w == nil {
 		return Wait{outcome: heldBack, bound: p.bound, limit: p.limitOf(kind)}
 	}
-	if left := time.Until(w.began.Add(p.bound)); left > 0 && !isDone(w) {
-		t := time.NewTimer(left)
+	if left := w.began.Add(p.bound).Sub(p.now()); left > 0 && !isDone(w) {
+		passed, stop := p.timer(left)
 		select {
 		case <-w.done:
-		case <-t.C:
+		case <-passed:
 		case <-ctx.Done():
-			if !isDone(w) && time.Now().Before(w.began.Add(p.bound)) {
-				t.Stop()
+			if !isDone(w) && p.now().Before(w.began.Add(p.bound)) {
+				stop()
 				return Wait{outcome: stopped, bound: p.bound}
 			}
 		}
-		t.Stop()
+		stop()
 	}
 	if !isDone(w) {
 		return Wait{outcome: notAnswered, still: w.began.Before(r.began),
-			since: time.Since(w.began).Round(time.Second), bound: p.bound}
+			since: p.now().Sub(w.began).Round(time.Second), bound: p.bound}
 	}
 	if wp, ok := w.value.(workPanic); ok {
 		panic(wp.v)

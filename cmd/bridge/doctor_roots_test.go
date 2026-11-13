@@ -436,17 +436,26 @@ func TestOverlappingConsoleDoctorRunsShareOneProbeAndOneLoad(t *testing.T) {
 
 // TestACancelledConsoleDoctorRunSaysItWasStopped: a run whose request goes
 // away before a root's bound says the root was not checked because the run
-// was stopped, never that it did not answer, and comes back at once.
+// was stopped, never that it did not answer, and comes back at its stop: no
+// sooner, and within the test's deadline (doctorWithin's), which is long
+// before the root's bound here.
 func TestACancelledConsoleDoctorRunSaysItWasStopped(t *testing.T) {
-	const bound = 2 * time.Second
+	const bound = 10 * time.Minute
 	path, _, dead := rootsInstall(t, false)
 	s := newRootStall(dead)
 	runner := adminDoctorRunnerWith(path, nil, nil, servingDACHost(hostTrees, nil), stallProbes(t, s, bound))
 	ctx, cancel := context.WithCancel(context.Background())
-	time.AfterFunc(150*time.Millisecond, cancel)
-	lines, took := consoleRun(t, ctx, runner)
-	if took >= bound {
-		t.Errorf("the stopped run took %s, want it back before the bound (%s)", took, bound)
+	defer cancel()
+	stopped := make(chan struct{})
+	time.AfterFunc(150*time.Millisecond, func() {
+		close(stopped)
+		cancel()
+	})
+	lines, _ := consoleRun(t, ctx, runner)
+	select {
+	case <-stopped:
+	default:
+		t.Error("the run came back before its request went away")
 	}
 	want := fmt.Sprintf("library root %s was not checked: the doctor's run was stopped before it answered", dead)
 	if c := lines["library-roots"]; c.Status != "warn" || c.Summary != "1 root(s) not checked" || c.Hint != want {
