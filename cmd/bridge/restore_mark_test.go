@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -37,6 +39,23 @@ func writeHoldMarker(t *testing.T, root string, s backup.StuckCheck) string {
 // refusal and ended.
 var restoreHoldWords = []string{"left in a process that is still running", "a hung mount", "end that bridge restore process if one still runs"}
 
+// holdWordsCase is a case of
+// TestTheCommandsSayWhatEndsARestoreThatHoldsTheSnapshots: whether the hold
+// its marker names is a restore's, what every command says of it, and what
+// none says.
+type holdWordsCase struct {
+	name    string
+	restore bool
+	says    []string
+	never   []string
+}
+
+// holdWordsCases are a restore's marker and a verification's.
+var holdWordsCases = []holdWordsCase{
+	{"a restore's", true, append([]string{"(a restore of snapshot "}, restoreHoldWords...), []string{"restart the bridge", "stop that command"}},
+	{"a verification's", false, []string{"(snapshot ", "restart the bridge", "stop the bridge backup --verify that runs it"}, []string{"bridge restore that runs it", "bridge restore process"}},
+}
+
 // TestTheCommandsSayWhatEndsARestoreThatHoldsTheSnapshots (backlog B826's
 // second round, Codex on its brief): a restore given up that holds a backups
 // folder, as the marker its process writes beside the lock it holds says,
@@ -47,70 +66,154 @@ var restoreHoldWords = []string{"left in a process that is still running", "a hu
 // and what can be done, never "stop that command". A verification's marker,
 // as written before restores were marked, keeps its words.
 func TestTheCommandsSayWhatEndsARestoreThatHoldsTheSnapshots(t *testing.T) {
-	for _, tc := range []struct {
-		name    string
-		restore bool
-		says    []string
-		never   []string
-	}{
-		{"a restore's", true, append([]string{"(a restore of snapshot "}, restoreHoldWords...), []string{"restart the bridge", "stop that command"}},
-		{"a verification's", false, []string{"(snapshot ", "restart the bridge", "stop the bridge backup --verify that runs it"}, []string{"bridge restore that runs it", "bridge restore process"}},
-	} {
+	for _, tc := range holdWordsCases {
+		t.Run(tc.name, func(t *testing.T) { commandsSayWhatEndsAHold(t, tc) })
+	}
+}
+
+// commandsSayWhatEndsAHold is a case of
+// TestTheCommandsSayWhatEndsARestoreThatHoldsTheSnapshots, whole, which
+// TestEachHoldWordsCaseWaitsForItsVerificationsEnd runs too.
+func commandsSayWhatEndsAHold(t *testing.T, tc holdWordsCase) {
+	cfgA, _, snapA := seedRestorableInstall(t, closedAdminAddr(t))
+	cfgB, dataB, _ := seedRestorableInstall(t, closedAdminAddr(t))
+	root, err := fsutil.ResolveLinks(filepath.Dir(snapA))
+	if err != nil {
+		t.Fatal(err)
+	}
+	holdBackupsLockElsewhere(t, root)
+	step := "its check"
+	if tc.restore {
+		step = "its read of the snapshot it restores"
+	}
+	writeHoldMarker(t, root, backup.StuckCheck{Snapshot: filepath.Base(snapA), Step: step, Since: time.Now().UTC(), Restore: tc.restore})
+	prev := verifyCmdLockWait
+	verifyCmdLockWait = 5 * time.Second
+	t.Cleanup(func() { verifyCmdLockWait = prev })
+	// bridge backup --verify answers before its verification's worker lets go
+	// of what it held: the case waits for that worker's end before its seam
+	// goes back and its fixtures go (backlog B871's round 3).
+	awaitVerifyEndOnCleanup(t, backup.CleanSnapshotPath(snapA))
+	before := readInstallState(t, cfgB, dataB)
+
+	var out, verr strings.Builder
+	if code := backupCmd([]string{"--config", cfgA, "--verify", snapA}, &out, &verr); code != 1 {
+		t.Errorf("bridge backup --verify beside %s hold = %d\n%s", tc.name, code, verr.String())
+	}
+	code, stdout, rerr := runRestoreYes(t, cfgB, snapA)
+	if code != 1 || strings.Contains(stdout, "Restore complete") {
+		t.Errorf("bridge restore beside %s hold = %d\n%s", tc.name, code, rerr)
+	}
+	for what, stderr := range map[string]string{"bridge backup --verify": verr.String(), "bridge restore": rerr} {
+		for _, want := range tc.says {
+			if !strings.Contains(stderr, want) {
+				t.Errorf("%s beside %s hold does not say %q:\n%s", what, tc.name, want, stderr)
+			}
+		}
+		for _, never := range tc.never {
+			if strings.Contains(stderr, never) {
+				t.Errorf("%s beside %s hold says %q:\n%s", what, tc.name, never, stderr)
+			}
+		}
+	}
+	requireInstallUntouched(t, cfgB, dataB, before)
+
+	why, held := captureHeldBack(context.Background(), root)
+	want := "a check of " + filepath.Base(snapA) + " that did not end still holds the backups folder"
+	if tc.restore {
+		want = "a restore of " + filepath.Base(snapA) + " that did not end still holds the backups folder"
+	}
+	if !held || !strings.Contains(why, want) {
+		t.Errorf("the ticker's reason = %q, %v; want %q", why, held, want)
+	}
+	skip := pruneSkipWords(&backup.StillRunningError{Check: backup.StuckCheck{Snapshot: "S", Restore: tc.restore}})
+	wantSkip := "a check that did not end holds the snapshots"
+	if tc.restore {
+		wantSkip = "a restore that did not end holds the snapshots"
+	}
+	if !strings.HasPrefix(skip, wantSkip) {
+		t.Errorf("the prune's words = %q, want them to begin %q", skip, wantSkip)
+	}
+}
+
+// TestEachHoldWordsCaseWaitsForItsVerificationsEnd is backlog B871's round 3.
+// CI's race on #1457 (run 43370189144, bridge 4/4) was
+// TestTheTickerTakesNoSnapshotWhileItsOwnProbesReleaseDoesNotEnd's
+// backup.SetReleaseBoundForTest beside the release of the verification that
+// bridge backup --verify ran in a case of
+// TestTheCommandsSayWhatEndsARestoreThatHoldsTheSnapshots: the verification
+// answers before its worker lets go of what it held (backup.verifyAndThen),
+// and the case put verifyCmdLockWait back, removed its fixtures and returned
+// while the worker went on. Here each case runs whole with that worker parked
+// between its answer and its end (backup.SetAroundVerifyEndForTest), let go on
+// only once the case's cleanup waits for its end (onVerifyEndAwait): as the
+// worker ends, the case's seam and its snapshot are still as the case made
+// them. Red on the round before, whose cases never waited: each returned with
+// the worker still parked.
+func TestEachHoldWordsCaseWaitsForItsVerificationsEnd(t *testing.T) {
+	for _, tc := range holdWordsCases {
 		t.Run(tc.name, func(t *testing.T) {
-			cfgA, _, snapA := seedRestorableInstall(t, closedAdminAddr(t))
-			cfgB, dataB, _ := seedRestorableInstall(t, closedAdminAddr(t))
-			root, err := fsutil.ResolveLinks(filepath.Dir(snapA))
-			if err != nil {
-				t.Fatal(err)
-			}
-			holdBackupsLockElsewhere(t, root)
-			step := "its check"
-			if tc.restore {
-				step = "its read of the snapshot it restores"
-			}
-			writeHoldMarker(t, root, backup.StuckCheck{Snapshot: filepath.Base(snapA), Step: step, Since: time.Now().UTC(), Restore: tc.restore})
-			prev := verifyCmdLockWait
-			verifyCmdLockWait = 5 * time.Second
-			t.Cleanup(func() { verifyCmdLockWait = prev })
-			before := readInstallState(t, cfgB, dataB)
-
-			var out, verr strings.Builder
-			if code := backupCmd([]string{"--config", cfgA, "--verify", snapA}, &out, &verr); code != 1 {
-				t.Errorf("bridge backup --verify beside %s hold = %d\n%s", tc.name, code, verr.String())
-			}
-			code, stdout, rerr := runRestoreYes(t, cfgB, snapA)
-			if code != 1 || strings.Contains(stdout, "Restore complete") {
-				t.Errorf("bridge restore beside %s hold = %d\n%s", tc.name, code, rerr)
-			}
-			for what, stderr := range map[string]string{"bridge backup --verify": verr.String(), "bridge restore": rerr} {
-				for _, want := range tc.says {
-					if !strings.Contains(stderr, want) {
-						t.Errorf("%s beside %s hold does not say %q:\n%s", what, tc.name, want, stderr)
-					}
+			letGo := make(chan struct{})
+			release := sync.OnceFunc(func() { close(letGo) })
+			parked := make(chan struct{})
+			passed := make(chan struct{})
+			var parkedOne atomic.Bool
+			// What the worker found as it ended, written before passed closes.
+			var (
+				waitAtEnd time.Duration
+				snapAtEnd error
+			)
+			t.Cleanup(backup.SetAroundVerifyEndForTest(func(dir string, end func()) {
+				if !parkedOne.CompareAndSwap(false, true) {
+					end()
+					return
 				}
-				for _, never := range tc.never {
-					if strings.Contains(stderr, never) {
-						t.Errorf("%s beside %s hold says %q:\n%s", what, tc.name, never, stderr)
-					}
+				close(parked)
+				<-letGo
+				waitAtEnd = verifyCmdLockWait
+				_, snapAtEnd = os.Lstat(dir)
+				end()
+				close(passed)
+			}))
+			prevAwait := onVerifyEndAwait
+			onVerifyEndAwait = func(string) { release() }
+			t.Cleanup(func() { onVerifyEndAwait = prevAwait })
+			// A case that does not wait returns with the worker parked: it is
+			// let go here, and waited for.
+			t.Cleanup(func() {
+				release()
+				select {
+				case <-parked:
+				default:
+					return
 				}
+				select {
+				case <-passed:
+				case <-time.After(30 * time.Second):
+					t.Error("the parked worker never passed its end")
+				}
+			})
+			t.Run("case", func(t *testing.T) { commandsSayWhatEndsAHold(t, tc) })
+			select {
+			case <-parked:
+			case <-time.After(30 * time.Second):
+				t.Fatal("no verification's worker came to its end in the case")
 			}
-			requireInstallUntouched(t, cfgB, dataB, before)
-
-			why, held := captureHeldBack(context.Background(), root)
-			want := "a check of " + filepath.Base(snapA) + " that did not end still holds the backups folder"
-			if tc.restore {
-				want = "a restore of " + filepath.Base(snapA) + " that did not end still holds the backups folder"
+			select {
+			case <-letGo:
+			default:
+				t.Fatal("the case returned with its verification's worker parked between its answer and its end: its cleanup put its seams back and removed its fixtures without waiting for that end")
 			}
-			if !held || !strings.Contains(why, want) {
-				t.Errorf("the ticker's reason = %q, %v; want %q", why, held, want)
+			select {
+			case <-passed:
+			case <-time.After(30 * time.Second):
+				t.Fatal("the worker let go never passed its end")
 			}
-			skip := pruneSkipWords(&backup.StillRunningError{Check: backup.StuckCheck{Snapshot: "S", Restore: tc.restore}})
-			wantSkip := "a check that did not end holds the snapshots"
-			if tc.restore {
-				wantSkip = "a restore that did not end holds the snapshots"
+			if waitAtEnd != 5*time.Second {
+				t.Errorf("as the worker ended, verifyCmdLockWait was %v, not the case's 5s: the case put its seam back first", waitAtEnd)
 			}
-			if !strings.HasPrefix(skip, wantSkip) {
-				t.Errorf("the prune's words = %q, want them to begin %q", skip, wantSkip)
+			if snapAtEnd != nil {
+				t.Errorf("as the worker ended, the case's snapshot was gone (%v): the case removed its fixtures first", snapAtEnd)
 			}
 		})
 	}
