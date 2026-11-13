@@ -95028,6 +95028,296 @@ the brief asked for the packages. The rules patch applies at the round's
 commit, and `scripts/check-doc-budgets.py` is clean on a copy with it applied
 (`cli-serve.md` 97,290 bytes). Windows is the PR's CI windows job's to show.
 
+## 2026-11-12 — B738: the folding probe settles by a listing read after its lookups
+
+Backlog B738 (Codex on #1397, 2026-11-05; target 0.2.4, low), on
+`fix/b738-folding-probe-relist` from 4678b983; the code is 12557f3b. The rule
+is the B651 bullet in `scanner.md` (`rules-b738-r1.patch`), whose Don't now
+names a listing read before the lookups it settles, for another entry asked,
+or cut short, and a folder whose first read was all of it read again past
+`foldingProbeEntries` + 1 entries; its long form is in
+`ops/History-rules-scanner.md`. This is the evidence. Linux amd64 (legion0),
+Go 1.27.3, the Makefile's tags, TMPDIR on the home volume (ext4).
+
+**The failure.** `foldingIn` read up to 256 entries first (casefold.go:251-252
+at 4678b983). Where that read was all of the listing (`whole`),
+`listsSpellings` looked for the two spellings in those same entries
+(:323-340), read before the lookups (:259-263); only a folder the first read
+was not all of was read again, whole (`readDir(dir, -1)`, :325). On a
+case-sensitive volume, a hard link `FOLDER.JPG` made beside `folder.jpg` after
+the first read and before the swapped lookup is found by both lookups as one
+file, both re-lookups agree, the entries read before them hold `folder.jpg`
+alone, the lookup of `FOLDER.JPG` after them still finds the file, and the
+folder answered case-insensitive. Rare: it takes a second name differing in
+case alone, made in that window.
+
+**The fix** (casefold.go at 12557f3b). Wherever an entry's two spellings find
+one file, `listsSpellings` reads the listing again after that entry's own
+lookups, never reusing a read made before them: not the first read, and not a
+re-read made for an entry asked earlier, which would be the first read's fault
+again for every entry after it. `readListing` is the one rule for whether a
+read is the whole listing, for the first read and the re-read alike. A folder
+whose first read was all of it is read again for at most
+`foldingProbeEntries` + 1 entries: fewer than that is its whole listing now,
+256 entries included, which the first read could not tell from more; that many
+says the folder grew past the bound since, and the re-read settles nothing (not
+known), so the next entry is asked, as after a re-read that cannot be read, and
+such a folder is never read whole. A folder whose first read was not all of
+it is read whole again, as before. B651's tenth- and eleventh-round checks
+apply to every re-read: one without the probed name tells nothing, and one
+without the swapped spelling answers case-insensitive only once a lookup of it
+after the re-read still finds the file.
+
+**Reads.** An entry asked is looked up at most five times (its name and the
+swapped spelling, each again, and the swapped spelling once more after the
+listing) and the listing is read again for it at most once, only where its
+two spellings found one file. The entries asked are the first read's, at most
+`foldingProbeEntries`, so however the folder changes under it a probe reads
+the listing at most `foldingProbeEntries` + 1 times; each re-read of a folder
+whose first read was all of it takes at most 257 entries. Without churn the
+first entry whose spellings find one file settles the probe, so the cost is
+one more read of a small folder where that happens (a folder that folds, on
+macOS's and Windows' default volumes, or a hard link's two names), and none
+where the swapped lookup finds nothing or another file (a case-sensitive folder
+without such links, Linux's usual answer).
+
+**Why a listing, and not the folder's change time.** A directory's mtime or
+ctime is not exact on every volume the probe runs on: FAT keeps it to two
+seconds and HFS+ to one, so a name made or renamed within one tick of the
+first read leaves it as it was, and a network volume's attributes are cached
+by its client. The brief's review ruled it out on that ground; the listing is
+what the probe already trusts.
+
+**A folder that grew past the bound.** The review asked that such a folder
+answer as a large folder does today, never by an unbounded `readDir(dir, -1)`.
+Its re-read settles nothing, and the next entry is asked, as a large folder's
+entry is when its re-read cannot be read whole; no read of it goes past 257
+entries. A folder that folds and grew past the bound between the probe's first
+read and its re-reads therefore answers Unknown (a verdict the probe cannot
+reach), where a folder that was large at the first read answers from its whole
+re-read. Reading such a folder whole instead would give it a large folder's
+answer, at a large folder's cost; that is `n = -1` in place of the bound in
+`listsSpellings`, and the control C7 below shows what it changes.
+
+**Tests** (casefold_test.go, through the `foldingFS` seam unless named).
+`probeFolder` runs `relist` before every read after the first, not only a
+whole one, answers `io.EOF` for an empty read as os.File.ReadDir does, and
+records each read's size (`reads`).
+
+- `TestASecondNameMadeBeforeTheLookupsIsInTheListingThatSettles`: the second
+  name added to the listing and to the lookups at the probe's first lookup
+  (`change`), `FOLDER.JPG` beside `folder.jpg`, the other way round, and beside
+  names with no letter; case-sensitive wanted. It never skips.
+- `TestEachEntryAskedIsSettledByAListingReadAfterItsOwnLookups`: `Abba` and
+  `ABBA` (one file) and `folder.jpg`; `Abba` gone before its re-read, which so
+  settles nothing, and `FOLDER.JPG` made beside `folder.jpg` before
+  `folder.jpg`'s lookups; case-sensitive wanted, and reads `[256 257 257]`.
+- `TestAFolderReadWholeIsReadAgainForOneEntryMoreAtMost`: a folder grown to 256
+  entries with the second name among them (case-sensitive, reads `[256 257]`);
+  grown past the bound with the second name past it (Unknown); the same with
+  an entry after that tells (case-sensitive); a folder that folds, grown past
+  the bound (Unknown, reads `[256 257 257]`).
+- `TestAListingThatChangedBeforeItsReReadTellsNothing` runs its four cases in a
+  folder the first read is not all of, as before, and in one it is all of.
+- `TestAHardLinkMadeBeforeTheLookupsOnThisHostsVolume`, on this host's volume:
+  `folder.jpg` and its hard link `FOLDER.JPG` (case-sensitive), then
+  `FOLDER.JPG` made at the probe's first lookup by `linkAtFirstLookup`, a
+  `foldingFS` over the os package (case-sensitive). It skips, saying why, where
+  the volume makes no such name: one that folds case (macOS's and Windows'
+  default volumes, so CI's macOS and Windows legs), or one with no hard links.
+  It ran here, ext4.
+
+**Red on main.** The tests above, with casefold.go as at 4678b983:
+
+| Test | Result at 4678b983 |
+|---|---|
+| `TestASecondNameMadeBeforeTheLookupsIsInTheListingThatSettles` | red, all three cases: "the folder answered case-insensitive, want case-sensitive" |
+| `TestAHardLinkMadeBeforeTheLookupsOnThisHostsVolume` | red: "a folder whose FOLDER.JPG was made between the first read and the lookups answered case-insensitive, want case-sensitive"; the pair made before the first read green |
+| `TestEachEntryAskedIsSettledByAListingReadAfterItsOwnLookups` | red on its reads (`[256]`): main settled at `Abba` by its first read, which held both names |
+| `TestAFolderReadWholeIsReadAgainForOneEntryMoreAtMost` | red, all four cases: case-insensitive each, reads `[256]` |
+| `TestAListingThatChangedBeforeItsReReadTellsNothing` | three small cases red: the rename with no other entry (case-insensitive), both names gone and the other name gone (case-sensitive each), since main never read such a folder again and the change made before the re-read never came; the large cases, and the small rename with another entry after it, green |
+| `TestTwoNamesOfOneFileAreNoProofThatAFolderFoldsCase`, `TestAnEntryThatChangesBetweenTheLookupsTellsNothing` | green |
+
+**Negative controls**, each an uncommitted edit to casefold.go at 12557f3b,
+the whole fsutil package run under it, the file put back with `git checkout
+--` and its bytes checked against HEAD's; predicted in writing before the run,
+and each matched its prediction. `git status` was empty after them.
+
+| Control | Red |
+|---|---|
+| C1 the fresh check removed (`listsSpellings` as at 4678b983) | exactly the tests red on main, in the same words; `TestTwoNamesOfOneFileAreNoProofThatAFolderFoldsCase` and the alias tests (casefold_alias_test.go) green |
+| C2 a cut-short re-read of a folder read whole taken for its whole listing | the bound test's three cases past the bound: case-insensitive each, where Unknown, case-sensitive and Unknown are wanted |
+| C3 the bound without the + 1 | the folder grown to 256 entries (Unknown, want case-sensitive), and every re-read's size in two tests |
+| C4 one re-read kept for the probe (the first answered again to every later entry) | `TestEachEntryAskedIsSettledByAListingReadAfterItsOwnLookups` (case-insensitive, want case-sensitive), and the reads of the folding folder grown past the bound |
+| C5 no lookup of the swapped spelling after the re-read | the other name alone removed, in both sizes of folder: case-insensitive, want Unknown |
+| C6 the re-read's probed-name check dropped (`!hasName && false`, which builds) | the renames, in both sizes: case-sensitive where case-insensitive and Unknown are wanted; and the reads of `TestEachEntryAskedIsSettledByAListingReadAfterItsOwnLookups` |
+| C7 a folder read whole read whole again (`n = -1`) | every re-read's size (`-1`); grown past the bound with the second name past it (case-sensitive, want Unknown) and the folding folder grown past it (case-insensitive, want Unknown) |
+| C8 a folder not read whole re-read for 257 entries too | the large folders' answers: the hard link's other name past the first read (Unknown, want case-sensitive), a folder that folds past the first read (Unknown, want case-insensitive), and the large rename with another entry after it |
+
+C6's first form (`case !known:`) did not build, `hasName` left unused, and is
+not counted. C8 shows the large folders' answers still rest on their whole
+re-read, which the fix keeps.
+
+**Checks.**
+
+| Check | Result |
+|---|---|
+| go1.27.3's gofmt on casefold.go and casefold_test.go | nothing listed |
+| `go vet` with the tags on ./internal/fsutil/, native and GOOS=windows, GOOS=darwin, GOOS=linux GOARCH=386 | exit 0 each; the vet tool ran on the package (`-x`) |
+| the probe's twelve tests, `-race -count=50` | 600 of 600 passed, none skipped (the hard-link test ran 50 times on ext4) |
+| `go test -race -count=1 -timeout 120m -p 3` of ./internal/fsutil/ and the packages that call the probe (`git grep FoldingIn`: ./internal/manifest/, ./cmd/bridge/), at 12557f3b, through the build slot | ok each: 3.5 s, 1621.5 s, 1614.8 s |
+| the rules patch applied to a copy of the tree | applies cleanly and gives the files its builder wrote; `make docs-check` ok there (scanner.md 45,205 to 45,403 bytes); the B651 entry's Don't sentences match between the line and its long form both ways (`mdblocks.dropped_donts`, which catches a one-sided edit); `TestEveryCitedTestNameExists` passes there, and reports a ghost citation planted in the patched History |
+
+`make test` and `make build-all` were not run: the brief asked for the
+packages above. On CI's macOS and Windows legs the hard-link test on the
+host's volume skips, their default volumes folding case; the seam cases run on
+every platform.
+
+## 2026-11-13 — B738 round 2: a listing is whole only where its read reached the end
+
+Backlog B738's round 2, on `fix/b738-folding-probe-relist` (#1454) from
+40010cc5 (round 1 and its rules); the code is 9a7fecb7. CodeRabbit's finding on
+#1454, verified, and the brief's review (Codex, Carbon), which set the two
+layers' contracts. The rule is the B651 bullet's Don't in `scanner.md`
+(`rules-b738-r2.patch`), its long form in `ops/History-rules-scanner.md`; this
+is the evidence. Linux amd64 (legion0), Go 1.27.3, the Makefile's tags,
+TMPDIR on the home volume (ext4).
+
+**The finding.** `readListing` took a listing for whole where
+`err == nil && len(entries) < n` (casefold.go:438 at 40010cc5), and
+`os.File.ReadDir(n)` can come back short with no error before the end. Go
+1.27.3's `os/dir_unix.go` decrements n (:135-136) before it builds an entry,
+and leaves out one that `newUnixDirent` (:141-146) finds gone, without giving
+its place back. `newUnixDirent` stats only an entry the listing gives no type
+(`direntType` answers `^FileMode(0)` for DT_UNKNOWN: XFS without ftype, some
+FUSE and network filesystems) or a folder opened in an `os.Root`, which
+`fsutil.OpenDir` is not; so on this host's ext4 no read comes back short, and
+the case needs such a volume. There, a folder its first read was all of, grown
+past the bound, with one entry gone during its re-read, could come back from
+`ReadDir(257)` with 256 entries and no error and `FOLDER.JPG` unread, and the
+probe answered case-insensitive: B738's own failure by another route. The same
+reader also stops a call short, with no error, at a record it cannot parse
+(:101-110, :120-123): a read on goes past it where its length was read
+(`d.bufp` moved on, :106), and where it was not, the next call meets io.EOF at
+once, the end `os.ReadDir` gives there too.
+
+**macOS and Windows** (go1.27.3). `os/dir_darwin.go` loops while the entries
+it kept are fewer than asked (`len(names)+len(dirents)+len(infos) < size`,
+:56): an entry it leaves out (a zero inode, `.` or `..`, one gone before its
+stat, a kqueue descriptor's EBADF) costs nothing, and it comes back short only
+at `readdir_r`'s end (:63) or with an error. `os/dir_windows.go` takes n down
+only after it appends an entry (:210), passes over `.` and `..` before that
+(:180-184), and stats nothing (the listing carries each entry's information),
+so it comes back short only at `ERROR_NO_MORE_FILES` (:128-133), at an empty
+root's `ERROR_FILE_NOT_FOUND` (:134-146), or with an error. Neither answers
+short before the end, and the fix holds on both: the next read answers
+io.EOF.
+
+**The fix** (9a7fecb7). Completeness comes only from reaching the end of the
+same open folder. `readDirUpTo`, over a raw-reader interface (`dirReader`,
+os.File's `ReadDir`), is one listing: where n > 0 it reads on after a batch
+that came back short, each read asking for what is left of n and never for 0
+(which reads all the rest), and answers io.EOF beside what it read once a read
+reached the end, no error once it holds n (the end neither reached nor looked
+for), and a failed read's error beside what it read before it; a batch that
+brings nothing and no error ends it with no error, and one that brings more
+than was asked is cut to the bound, answering no error. Where n <= 0 it is one
+`ReadDir(n)`, which answers no error, not io.EOF, at its end
+(`listsSpellings` passes -1 for a folder its first read was not all of).
+`osFolding.readDir` opens the folder once and reads it through `readDirUpTo`;
+its `open` field lets a test script the raw reader under that readDir.
+`readListing` takes only the end for whole: io.EOF where n > 0, no error where
+n <= 0; never a read that came back short with no error, never one that holds
+n, never one beside a failed read. So a first read of a 256-entry folder stays
+not whole, while a re-read bounded at 257 of a 256-entry folder reads one
+more, meets io.EOF, and is whole. A small folder's first read and re-read each
+make one more `ReadDir` call than before, which meets the end.
+
+**The two layers.** `foldingFS.readDir` is the aggregate: one listing from one
+open, entries with io.EOF once it reached the end, no error where it holds n.
+`probeFolder`, the probe's fake, now answers that contract (its round-1 form
+answered no error beside a short listing, which `readListing` would now read
+as cut short, sending every small folder's re-read through n = -1); `short`
+makes a read of it come back short with no error. The brief's item 2, io.EOF
+only on an empty batch and never beside entries, describes the raw reader, and
+the review withdrew it for the fake. `reads` stays one entry a listing, with
+the n `readListing` asked for, and `relist` fires between listings only, so
+`[256 257 257]` and every round-1 assertion hold unchanged.
+
+**Item 3 dropped.** `git grep "answers as a large"` finds nothing; the
+FoldingIn doc already says a folder grown past the bound settles nothing, and
+so do the rules and the long form.
+
+**Siblings.** The other bounded `ReadDir(n)` loops (manifest's
+`dirHoldsLibraryContent` and `holdsSpellingOrContent`, integrity's
+`scanDirEntries`) read on until io.EOF or an error and take nothing from a
+batch's count: nothing to change there.
+
+**Tests** (casefold_test.go and casefold_listing_test.go).
+
+- `TestAListingThatCameBackShortWithNoErrorIsNotWhole`: a folder its first read
+  was all of, `FOLDER.JPG` made past the bound at the first lookup, its re-read
+  answering 256 of 257 entries and no error (`short`); Unknown wanted, reads
+  `[256 257]`.
+- `TestTheListingReadsOnPastAShortBatchUpToItsBound`: `readDirUpTo` over a
+  scripted reader (`scriptedListing`): short batches then the end, a short batch
+  then the rest of the bound, the bound in one batch, the end beside entries,
+  an empty listing, a failed read after a short batch and at once, a batch that
+  brings nothing, one that brings more than asked, and n = -1 whole and failed;
+  each read's size asserted (what is left, never 0 or less) and the total held
+  to the bound.
+- `TestAListingIsWholeOnlyWhereItsReadReachedTheEnd`: `readListing` over scripted
+  aggregate answers.
+- `TestTheFirstReadReadsOnPastAShortBatch`: the first read through osFolding's own
+  readDir, scripted (`osFolding.open`), the only name with a letter in its
+  second batch; this host's lookups decide the answer, and the reads ask for
+  `[256 255 254]`.
+- `TestTheOSListingEndsWhereItsReaderReachesTheEnd`: osFolding over this host's
+  reader on folders of 0, 255, 256 and 257 entries, read for 256, 257 and -1.
+
+**Red at 40010cc5.** With casefold.go as at 40010cc5 and the new casefold_test.go,
+`go test -tags ts_omit_webclient,ts_omit_debugeventbus -count=1 -v -run
+'^(TestAListingThatCameBackShortWithNoErrorIsNotWhole|…)$' ./internal/fsutil/`:
+"a re-read that came back short with no error, FOLDER.JPG unread, made the
+folder answer case-insensitive, want unknown"; the round-1 probe tests passed
+beside it with the new fake. The other new tests name `readDirUpTo` and
+`osFolding.open`, which 40010cc5 does not have; their reds are the controls'.
+
+**Negative controls**, each an uncommitted edit to casefold.go at 9a7fecb7, the
+whole fsutil package run under it, the file put back with `git checkout --` and
+its bytes checked against HEAD's; predicted in writing before the run, each
+matching its prediction case by case. `git status` was empty after them.
+
+| Control | Red |
+|---|---|
+| R1 `len(entries) < n` back as completeness (round 1's `readListing`) | `TestAListingThatCameBackShortWithNoErrorIsNotWhole` (case-insensitive, want Unknown), and `readListing`'s "short with no error" row |
+| R2 the continuation removed (one `ReadDir(n)` for n > 0) | every multi-step case of the scripted test (each read's size and what was read), the first read (Unknown, want case-sensitive; one read of 256), and the OS listing (255 read for 256 and 256 read for 257 answer no error and read as not whole) |
+| R3 n <= 0 sent through the loop | the scripted test's n = -1 cases (nothing read), and the OS listing's 257 read for -1 (0 entries) |
+| R4 each read asks for n, not for what is left | each read's size in the scripted test (`[5 5 5]`, …) and the first read (`[256 256 256]`); no answer changed |
+| R5 no cap on a batch that brings more than asked | that case: four entries and io.EOF, past the bound of two |
+| R6 a batch that brings nothing does not end the read | that case: io.EOF, one more read |
+| R7 a failed read answered as the end | the failed reads (io.EOF where the EIO is wanted) and the empty batch |
+| R8 a read that holds n answered as the end | the bound cases of the scripted test, and the OS listing's 256 for 256, 257 for 256 and 257 for 257 (io.EOF, whole) |
+
+Under R2 the round-1 probe tests on this host's disk stay green: a first read
+that came back short is not whole, and a re-read of such a folder falls back to
+a whole read, so their answers hold. The scripted and OS tests are what show
+the continuation.
+
+**Checks.**
+
+| Check | Result |
+|---|---|
+| go1.27.3's gofmt on casefold.go, casefold_test.go, casefold_listing_test.go | nothing listed |
+| `go vet` with the tags on ./internal/fsutil/: GOOS=linux, darwin, windows, and GOARCH=arm64 | exit 0 each; the vet tool ran (`-x`) |
+| the probe's 18 tests, `-race -count=200` | 3,600 of 3,600 passed, none skipped, no race |
+| `go test -race -count=1 -timeout 120m -p 3` of ./internal/fsutil/, ./internal/manifest/ and ./cmd/bridge/ (the probe's package and its callers), at 9a7fecb7, through the build slot | ok each: 3.6 s, 1620.1 s, 1620.1 s |
+| the rules patch applied to a copy of the tree | applies cleanly and gives the files its builder wrote; `make docs-check` ok there (scanner.md 45,403 to 45,550 bytes); the B651 entry's Don't sentences match between the line and its long form both ways (`mdblocks.dropped_donts`); `TestEveryCitedTestNameExists` passes there, and reports a ghost citation planted in the patched History |
+
+`make test` and `make build-all` were not run: the brief asked for the
+packages above. A short read cannot be made on this host's ext4 (every entry
+carries its type, so nothing is stat'ed during the listing); the scripted
+reader stands in for one.
 ## 2026-11-13 — B875: the history feed's cursor is pinned
 
 The rule is in `wire.md` (the `GET /v1/history` bullet) and PROTOCOL.md's
