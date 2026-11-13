@@ -1,14 +1,9 @@
 package config
 
 import (
-	"bytes"
-	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
-
-	"gopkg.in/yaml.v3"
 )
 
 // LibraryRootsOf is the library roots Load would give the config at path,
@@ -19,21 +14,18 @@ import (
 // whose load does not finish still names the root that holds it (backlog
 // B650).
 //
-// It is Load's steps for that key and nothing else, as DataDirOf is for
-// dataDir: the key as yaml.v3 decodes it into Config.LibraryRoots, from the
-// file's first document; BRIDGE_LIBRARY_ROOTS where it is set and not empty,
-// split and trimmed as applyEnvOverrides takes it; and each entry resolved
-// against the directory of path as filepath.Abs gives it (resolvePaths).
-// Normalize and Validate change no root, so these are the roots a load that
-// answers gives. A document yaml.v3 cannot decode into the key is an error.
+// It is Load's steps for that key and nothing else: the file decoded as Load
+// decodes it (DecodeFile, so a file Load's decode refuses is refused here
+// too, and a key reached by an alias or a merge is the one Load reaches);
+// BRIDGE_LIBRARY_ROOTS where it is set and not empty, split and trimmed as
+// applyEnvOverrides takes it; and each entry resolved against the directory
+// of path as filepath.Abs gives it (resolvePaths). Normalize and Validate
+// change no root, so these are the roots a load that answers gives.
 func LibraryRootsOf(path string, data []byte) ([]string, error) {
-	var doc struct {
-		LibraryRoots []string `yaml:"libraryRoots"`
-	}
-	if err := yaml.NewDecoder(bytes.NewReader(data)).Decode(&doc); err != nil && !errors.Is(err, io.EOF) {
+	var c Config
+	if err := DecodeFile(data, &c); err != nil {
 		return nil, fmt.Errorf("read libraryRoots from config %q: %w", path, ValueFreeYAMLError(err))
 	}
-	c := Config{LibraryRoots: doc.LibraryRoots}
 	for _, b := range envBindings() {
 		if b.YAMLPath != "libraryRoots" {
 			continue

@@ -47,4 +47,17 @@ func TestLibraryRootsOfIsTheRootsLoadGives(t *testing.T) {
 			}
 		})
 	}
+	// A file Load's decode refuses (a key it does not know) is refused here
+	// too: it reads the file through DecodeFile, as Load does.
+	path := filepath.Join(t.TempDir(), "bridge.yaml")
+	data := []byte("libraryRoots:\n  - " + filepath.Join(base, "Music") + "\nlibraryRoot: typo\n")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("Load took a key it does not know")
+	}
+	if roots, err := LibraryRootsOf(path, data); err == nil {
+		t.Errorf("LibraryRootsOf = %q of a file Load's decode refuses, want it refused", roots)
+	}
 }
