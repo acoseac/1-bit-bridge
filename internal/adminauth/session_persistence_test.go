@@ -9,17 +9,20 @@ import (
 	"time"
 )
 
-func newPersistStore(t *testing.T) (*Store, string) {
+// newPersistStore opens a store with an account in it, and returns it with
+// the file's path and the account's password.
+func newPersistStore(t *testing.T) (*Store, string, string) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "adminauth.json")
 	s, err := OpenStore(path)
 	if err != nil {
 		t.Fatalf("OpenStore: %v", err)
 	}
-	if _, err := s.MintInitial("admin"); err != nil {
+	password, err := s.MintInitial("admin")
+	if err != nil {
 		t.Fatalf("MintInitial: %v", err)
 	}
-	return s, path
+	return s, path, password
 }
 
 // TestSessionSurvivesRestart is the whole point of the change: a
@@ -31,11 +34,8 @@ func newPersistStore(t *testing.T) (*Store, string) {
 // none of which the operator asked for, and after which "you are
 // signed out again" reads as a fault.
 func TestSessionSurvivesRestart(t *testing.T) {
-	s, path := newPersistStore(t)
-	raw, err := s.CreateSession("admin")
-	if err != nil {
-		t.Fatalf("CreateSession: %v", err)
-	}
+	s, path, password := newPersistStore(t)
+	raw := signIn(t, s, "admin", password)
 
 	// Reopen: a new process against the same file.
 	s2, err := OpenStore(path)
@@ -55,8 +55,8 @@ func TestSessionSurvivesRestart(t *testing.T) {
 // if it were only debounced: a revocation left unwritten is UNDONE by
 // a restart, so a logout would silently not be a logout.
 func TestLogoutSurvivesRestart(t *testing.T) {
-	s, path := newPersistStore(t)
-	raw, _ := s.CreateSession("admin")
+	s, path, password := newPersistStore(t)
+	raw := signIn(t, s, "admin", password)
 	s.DeleteSession(raw)
 
 	s2, err := OpenStore(path)
@@ -73,8 +73,8 @@ func TestLogoutSurvivesRestart(t *testing.T) {
 // would let a restart EXTEND a login past its deadline, which is the
 // opposite of what the hard cap exists for.
 func TestExpiredSessionsAreDroppedAtLoad(t *testing.T) {
-	s, path := newPersistStore(t)
-	raw, _ := s.CreateSession("admin")
+	s, path, password := newPersistStore(t)
+	raw := signIn(t, s, "admin", password)
 
 	// Rewrite the file with the session aged past the hard cap, which
 	// is what a store written eight days ago looks like.
@@ -124,7 +124,8 @@ func TestLegacyStoreFileStillLoads(t *testing.T) {
 	// Produce a genuine legacy file by writing what the pre-change
 	// persist() wrote: the bare record, no envelope.
 	seed, _ := OpenStore(path)
-	if _, err := seed.MintInitial("admin"); err != nil {
+	password, err := seed.MintInitial("admin")
+	if err != nil {
 		t.Fatal(err)
 	}
 	blob, _ := os.ReadFile(path)
@@ -149,13 +150,11 @@ func TestLegacyStoreFileStillLoads(t *testing.T) {
 	if !s.IsInitialised() {
 		t.Fatal("legacy credential was not read")
 	}
-	if err := s.Verify("admin", "wrong-password"); err == nil {
+	if _, err := s.Verify("admin", "wrong-password"); err == nil {
 		t.Fatal("Verify accepted a wrong password — the hash did not survive the read")
 	}
 	// And the upgrade: a login rewrites the file in the new shape.
-	if _, err := s.CreateSession("admin"); err != nil {
-		t.Fatal(err)
-	}
+	signIn(t, s, "admin", password)
 	after, _ := os.ReadFile(path)
 	if !strings.Contains(string(after), `"sessions"`) {
 		t.Error("the file was not upgraded to the envelope on the next write")
@@ -171,8 +170,8 @@ func TestLegacyStoreFileStillLoads(t *testing.T) {
 // request on the console — and there are many per page — would write
 // and fsync the credentials file.
 func TestLastUsedIsDebouncedNotWrittenPerRequest(t *testing.T) {
-	s, path := newPersistStore(t)
-	raw, _ := s.CreateSession("admin")
+	s, path, password := newPersistStore(t)
+	raw := signIn(t, s, "admin", password)
 
 	before, err := os.ReadFile(path)
 	if err != nil {
@@ -211,8 +210,8 @@ func TestLastUsedIsDebouncedNotWrittenPerRequest(t *testing.T) {
 // credentials file — to persist timestamps that were just read off disk
 // unchanged.
 func TestFirstValidateAfterStartupDoesNotWrite(t *testing.T) {
-	s, path := newPersistStore(t)
-	raw, _ := s.CreateSession("admin")
+	s, path, password := newPersistStore(t)
+	raw := signIn(t, s, "admin", password)
 
 	s2, err := OpenStore(path)
 	if err != nil {

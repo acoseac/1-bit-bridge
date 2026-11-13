@@ -299,7 +299,7 @@ func TestHashesVerifyAcrossCosts(t *testing.T) {
 	saved := getTestHashCost()
 	SetTestHashCost(0) // pretend the process now ships at cost 12
 	defer SetTestHashCost(saved)
-	if err := s.Verify("admin", "correct horse battery staple"); err != nil {
+	if _, err := s.Verify("admin", "correct horse battery staple"); err != nil {
 		t.Errorf("a hash written at the test cost failed to verify at the shipped cost: %v", err)
 	}
 }

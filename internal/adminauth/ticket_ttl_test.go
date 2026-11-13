@@ -134,7 +134,7 @@ func TestRedeemLoginTicketDistinguishesAnUnwritableStore(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
 
-	user, err := s.RedeemLoginTicket(raw)
+	user, err := redeemed(s.RedeemLoginTicket(raw))
 	if err == nil {
 		t.Fatalf("an unwritable store redeemed a ticket as %q", user)
 	}
@@ -145,7 +145,7 @@ func TestRedeemLoginTicketDistinguishesAnUnwritableStore(t *testing.T) {
 	if err := os.Chmod(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if user, err := s.RedeemLoginTicket(raw); err != nil || user != "admin" {
+	if user, err := redeemed(s.RedeemLoginTicket(raw)); err != nil || user != "admin" {
 		t.Errorf("the ticket once the directory is writable again = (%q, %v), want (admin, nil): "+
 			"the failed redemption spent it", user, err)
 	}

@@ -191,17 +191,25 @@ func (s *Server) apiLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.deps.AdminAuth.Verify(req.Username, req.Password); err != nil {
-		// The attempt was already counted by AllowAndReserve's optimistic
-		// reservation above (B43) — do NOT RecordFailure here, or it
-		// double-counts. Log the SPECIFIC reason server-side; keep the
-		// wire response generic.
-		logger.Warn("admin login failed", "ip", clientIP, "username", req.Username, "err", err)
-		writeError(w, http.StatusUnauthorized, "invalid_credentials", "invalid credentials")
+	admitted, err := s.deps.AdminAuth.Verify(req.Username, req.Password)
+	if err != nil {
+		refuseLogin(w, clientIP, req.Username, err)
 		return
 	}
+	s.afterLoginCheck()
 
-	raw, err := s.deps.AdminAuth.CreateSession(req.Username)
+	raw, err := s.deps.AdminAuth.CreateSession(admitted)
+	if errors.Is(err, adminauth.ErrCredentialsChanged) {
+		// The password matched a credential the file no longer holds, or
+		// was checked before a sign-out (backlog B881): refused as a wrong
+		// password is, in every respect. The same answer, so it says nothing
+		// of the password having been right a moment ago, and the attempt
+		// stays counted (no RecordSuccess), so neither does the limiter.
+		// From the store's side it was a wrong password by the time the
+		// session was made, and the user signs in again with the right one.
+		refuseLogin(w, clientIP, req.Username, err)
+		return
+	}
 	if err != nil {
 		logger.Error("admin create session", "err", err)
 		writeError(w, http.StatusInternalServerError, "internal", "could not create session")
@@ -215,6 +223,25 @@ func (s *Server) apiLogin(w http.ResponseWriter, r *http.Request) {
 		next = req.Next
 	}
 	writeJSON(w, http.StatusOK, loginResponse{Username: req.Username, Next: next})
+}
+
+// refuseLogin answers a login its credentials did not let in: the one 401
+// every such refusal gets, and its one log line, which names the source
+// address and the username, never the password.
+//
+// The attempt was already counted by AllowAndReserve's optimistic
+// reservation (B43) — do NOT RecordFailure here, or it double-counts. Log
+// the SPECIFIC reason server-side; keep the wire response generic.
+func refuseLogin(w http.ResponseWriter, clientIP, username string, err error) {
+	logger.Warn("admin login failed", "ip", clientIP, "username", username, "err", err)
+	writeError(w, http.StatusUnauthorized, "invalid_credentials", "invalid credentials")
+}
+
+// afterLoginCheck runs testAfterLoginCheck, nil in production.
+func (s *Server) afterLoginCheck() {
+	if hook := s.testAfterLoginCheck.Load(); hook != nil {
+		(*hook)()
+	}
 }
 
 // msgAuthNotConfigured is the one wording for "this build has no admin auth",
@@ -423,7 +450,7 @@ func (s *Server) apiRedeemLoginTicket(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, loginStaleLinkRedirect, http.StatusFound)
 		return
 	}
-	username, err := s.deps.AdminAuth.RedeemLoginTicket(ticket)
+	admitted, err := s.deps.AdminAuth.RedeemLoginTicket(ticket)
 	if err != nil {
 		if !errors.Is(err, adminauth.ErrTicketInvalid) {
 			// The ticket's file could not be read or removed, or the
@@ -455,15 +482,21 @@ func (s *Server) apiRedeemLoginTicket(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, loginStaleLinkRedirect, http.StatusFound)
 		return
 	}
-	raw, err := s.deps.AdminAuth.CreateSession(username)
+	s.afterLoginCheck()
+	raw, err := s.deps.AdminAuth.CreateSession(admitted)
 	if err != nil {
 		// The ticket is SPENT by now — RedeemLoginTicket deletes before it
 		// judges — so re-opening this link can never work, and the honest
 		// advice is the stale one: get a fresh link. A bare /login said
-		// nothing, which left the user to try the same link again. (Only a
-		// crypto/rand failure reaches here; a persist failure is logged
-		// inside CreateSession and the session still works.)
-		logger.Error("admin create session from ticket", "err", err)
+		// nothing, which left the user to try the same link again. What
+		// reaches here: a sign-out, or an account replaced, since the
+		// redemption read the file (ErrCredentialsChanged, backlog B881),
+		// the session's write failing, or a crypto/rand failure.
+		if errors.Is(err, adminauth.ErrCredentialsChanged) {
+			logger.Warn("admin login link refused: the credential store changed since it was redeemed", "err", err)
+		} else {
+			logger.Error("admin create session from ticket", "err", err)
+		}
 		http.Redirect(w, r, loginStaleLinkRedirect, http.StatusFound)
 		return
 	}

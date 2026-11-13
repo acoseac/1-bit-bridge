@@ -33,9 +33,12 @@ func TestAWriteAsRootKeepsTheAdminStoreOwners(t *testing.T) {
 	if _, err := s.MintInitial("admin"); err != nil {
 		t.Fatal(err)
 	}
+	// The store file, staged and kept, then the lock its commit takes,
+	// which the first write makes (backlog B881's second round).
 	store := fsutil.OwnerChange{Dst: path, UID: 4242, GID: 4243}
-	if got := changes(); len(got) != 1 || got[0] != store {
-		t.Fatalf("after MintInitial, owner changes = %+v, want exactly %+v", got, store)
+	lock := fsutil.OwnerChange{Dst: filepath.Join(filepath.Dir(path), LockFileName), UID: 4242, GID: 4243}
+	if got := changes(); len(got) != 2 || got[0] != store || got[1] != lock {
+		t.Fatalf("after MintInitial, owner changes = %+v, want exactly %+v then %+v", got, store, lock)
 	}
 
 	raw, err := s.MintLoginTicket("admin")
@@ -43,7 +46,7 @@ func TestAWriteAsRootKeepsTheAdminStoreOwners(t *testing.T) {
 		t.Fatal(err)
 	}
 	ticket := fsutil.OwnerChange{Dst: s.ticketFilePath(hashTicket(raw)), UID: 4242, GID: 4243}
-	if got := changes(); len(got) != 2 || got[1] != ticket {
+	if got := changes(); len(got) != 3 || got[2] != ticket {
 		t.Fatalf("after MintLoginTicket, owner changes = %+v, want %+v last", got, ticket)
 	}
 }

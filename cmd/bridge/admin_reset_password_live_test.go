@@ -342,11 +342,11 @@ func requireCredentialOnDisk(t *testing.T, storePath, want, old, after string) {
 	if err != nil {
 		t.Fatalf("after %s, the credential file does not open: %v", after, err)
 	}
-	if err := s.Verify("admin", want); err != nil {
+	if _, err := s.Verify("admin", want); err != nil {
 		t.Errorf("after %s, the file refuses the current password (%v): the running bridge "+
 			"wrote the credential it held in memory back over the rotation", after, err)
 	}
-	if err := s.Verify("admin", old); !errors.Is(err, adminauth.ErrInvalidCredentials) {
+	if _, err := s.Verify("admin", old); !errors.Is(err, adminauth.ErrInvalidCredentials) {
 		t.Errorf("after %s, the file still accepts the password rotated away from (err=%v)", after, err)
 	}
 }

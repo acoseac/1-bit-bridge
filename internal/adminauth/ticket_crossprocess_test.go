@@ -23,7 +23,7 @@ func requireRedeems(t *testing.T, path, raw, what string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if user, err := c.RedeemLoginTicket(raw); err != nil || user != "admin" {
+	if user, err := redeemed(c.RedeemLoginTicket(raw)); err != nil || user != "admin" {
 		t.Errorf("%s = (%q, %v) in a store opened afterwards, want (admin, nil)", what, user, err)
 	}
 }
@@ -35,7 +35,7 @@ func requireSpent(t *testing.T, path, raw, what string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if user, err := c.RedeemLoginTicket(raw); !errors.Is(err, ErrTicketInvalid) {
+	if user, err := redeemed(c.RedeemLoginTicket(raw)); !errors.Is(err, ErrTicketInvalid) {
 		t.Errorf("%s = (%q, %v) in a store opened afterwards, want ErrTicketInvalid: "+
 			"a ticket spent once redeemed again", what, user, err)
 	}
@@ -135,7 +135,7 @@ func TestARedemptionCannotDropATicketMintedDuringIt(t *testing.T) {
 	}
 	t.Cleanup(func() { beforeTicketSpendHook = nil })
 
-	if user, err := a.RedeemLoginTicket(spent); err != nil || user != "admin" {
+	if user, err := redeemed(a.RedeemLoginTicket(spent)); err != nil || user != "admin" {
 		t.Fatalf("the redemption = (%q, %v), want (admin, nil)", user, err)
 	}
 	if !fired {
