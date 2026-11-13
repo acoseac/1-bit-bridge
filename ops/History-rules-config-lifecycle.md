@@ -3611,6 +3611,10 @@ Round 5's: internal/updater's
 reds and controls are in `ops/engineering-log.md`, 2026-11-10, B761 PR 1
 round 5.
 
+## The Windows rollback's renames made again while their file is in use (backlog B872 part 2, 2026-11-13)
+
+- **…and each of the Windows rollback's renames is made again on its own while another process holds the file (a sharing or lock violation, `inUseByAnotherProcess`): seven attempts over 3.15 s (`rollbackRenameBackoff`), and "(restored)" only of a put-back that landed** (2026-11-13, backlog B872 part 2). On windows-latest both of a start's rollbacks met a sharing violation as they renamed the backup over the binary, and gave up there: the early rollback (`TestServeRollsBackAnInstallWhoseVersionRefusesItsSettings`, its data dir named relative to the settings: serve 2, where 75 was wanted; the "yaml: unmarshal errors" before it is the refusal the case writes on purpose) and the crash rollback (`TestACrashRollbackToAReleaseBeforeTheSwitchNeedsItOn`: "(restored); this start goes on", and the release that crashed served). Each start had just run the backup, an 89 MB copy of the test binary (its `version`, and the crash rollback's settings check), waiting for each process to end; nothing of the test held it after, so another process did, as a scanner holds an executable just written or run, which on a real install is Defender or the search indexer holding the release binary. Until B872 `replaceRunningBinary` made each rename once. Each of its four renames (the backup onto a missing binary, the vacate of the running one, the backup's, the put-back of the aside after a failure) is now made again on its own after each wait of `rollbackRenameBackoff` (0, then 50 ms doubling to 1.6 s: seven attempts, 3.15 s of waits) while Windows answers ERROR_SHARING_VIOLATION or ERROR_LOCK_VIOLATION; any other failure is returned at once, ERROR_ACCESS_DENIED included, which a rename onto a mapped image answers (backlog B202) and a permission does, neither of which a wait changes. Never the rollback whole: a refused rename moved nothing, and each step begins where the one before it left the files. A rename still refused after its attempts says so ("still in use after 7 attempts over 3.15s"), and the rollback ends where that rename leaves the files, as before: the backup kept beside the binary, or the running binary put back from the aside, "(restored)" said only where that put-back landed and "manual recovery needed" where it did not. The bound: atomicwrite's schedule (five attempts over 750 ms) is for the scan-on-close of a small file; the backup is tens of megabytes just run, which a scanner reads whole, and Go's own toolchain waits 2 s on the same refusals (`cmd/internal/robustio`). Three renames at most a rollback, under 10 s, fit beside the SCM's 15 s stop and the marker's two writes inside the 30 s every other taker of the install marker's lock waits for it. **Don't make the rollback again whole, make a rename again for Access is denied or another failure, wait past the bound, or say "(restored)" of a put-back that failed.** `TestEachRollbackRenameIsMadeAgainWhileItsFileIsInUse` (each stage refused twice and refused throughout: what the binary's, the backup's and the aside's places hold, and the renames every stage made), `TestRollbackReplaceRestoresDstWhenTheSecondRenameFails` (a refusal that is no file in use made once), `TestTheRollbacksRenamesFitInsideTheMarkersLockWait` and `TestNoRenameFailureIsAFileInUseOffWindows`, on Windows `TestOnlyWindowsSharingAndLockViolationsAreAFileInUse` and `TestARollbackPutsBackABackupAnotherHandleHeldOnceItIsLetGo` (a real handle that shares no deletion), and cmd/bridge's `TestACrashRollbackPutsBackABackupInUseForAMoment`, `TestACrashRollbackLeavesABackupInUseForGood`, `TestTheEarlyRollbackPutsBackABackupInUseForAMoment` and `TestTheEarlyRollbackLeavesABackupInUseForGood`, which drive both of serve's rollbacks through Windows' put-back on every host (`updater.ReplaceRunningBinaryForTest`), pin it. The record is in `ops/engineering-log.md`, 2026-11-13, B872 part 2.
+
 ## Config, settings and process lifecycle
 
 - **An install of a target already staged on disk is REFUSED, and the refusal
@@ -3880,3 +3884,27 @@ round 5.
   `TestKeepOwnerAsRoot` and `TestCLIRunAsRootKeepsTheInstallOwner`, which CI
   skips and dido's container runs. With the six writers reverted, the
   end-to-end test names exactly those six files.
+
+- **A Windows rollback moves the running exe aside before it renames
+  `.bak` into place** (2026-10-09, backlog B202). `RollbackBinary` on
+  Windows was one `os.Rename` of the backup onto `dst`. Both callers
+  run in this process (`Updater.Rollback`, `maybeRollbackOnBoot`), and
+  `stopServiceIfRunning` returns without stopping when this process is
+  the service, so that rename replaces the mapped image. Windows
+  answers "Access is denied". `swapBinary` already vacates a running
+  exe first (a rename of the image succeeds; a rename onto it does
+  not). The rollback does the same, then renames `.bak` onto the
+  vacated path, and renames the aside file back onto `dst` if that
+  rename fails. The aside file is the image this process still maps.
+  Windows will not delete it. `swapBinary` leaves its leftover on disk
+  as `.bak`, which is the rollback target. The rollback leftover is
+  the build being replaced, so it is not named `.bak`: `canRollback`
+  would stay true and the next rollback would restore the broken
+  build. A best-effort remove drops an earlier leftover when nothing
+  maps it; a refusal leaves `bridge.exe.rollback-<n>` beside the
+  binary, and the next vacate uses a new name so it never replaces
+  that leftover. A missing `dst` stays one rename of the backup onto
+  that path. Unix `RollbackBinary` is still one rename over the live
+  path. (`TestRollbackBinaryReplacesARunningExe`,
+  `TestRollbackReplaceVacatesARunningPathBeforeRenamingBak`,
+  `TestRollbackReplaceRestoresDstWhenTheSecondRenameFails`.)
