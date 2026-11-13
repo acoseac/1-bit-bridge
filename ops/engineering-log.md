@@ -95259,3 +95259,129 @@ the packages. The rules patch applies at the final commit, and
 (`cli-serve.md` 99,124 bytes); `verify_moves.py` passes there with B871's
 edits declared, against the final commit and against main. Windows and macOS
 are the PR's CI jobs to show.
+
+## 2026-11-13 — B871 round 2: the ticker's own probe, the tests' marker reads, and two findings refuted
+
+The rules are `cli-serve.md`'s B871 line (round 2's patch) and
+`build-ci-tests.md`'s line on waiting for a marker's write, with the long
+form in `ops/History-rules-cli-serve.md` ("B871", its "Round 2" paragraph);
+this is the evidence. Linux amd64 (legion0), Go 1.27.3, the Makefile's tags,
+TMPDIR `~/onebit/tmp`. The round's controls are uncommitted edits of committed
+files, put back with `git checkout --` (`.tmp/_b871/r2/ctl.py`), each
+predicted in writing before its run (`.tmp/_b871/r2/predictions.txt`).
+
+### Item 1: the ticker took a snapshot behind its own probe
+
+At 4e4cd01c, with no marker beside the backups folder's lock,
+`captureHeldBack`'s `StuckCheckOf` makes no probe (no marker, no try), and
+`ProbeBackupsLock` takes the free lock; its release, stalled, past
+`releaseBound` marks the folder in this process and answers nil, so the pass
+went on (`case !errors.Is(lockErr, backup.ErrBackupsUnlocked): return "",
+false`). Red, the new case at that code
+(`TestTheTickerTakesNoSnapshotWhileItsOwnProbesReleaseDoesNotEnd`, a boot
+pass of the real ticker due a snapshot, the probe's unlock and separately
+its close stalled), both ways:
+
+```
+restore_probe_test.go:300: a boot pass beside its own probe's stalled release: 2 snapshots, want 1, saying "no snapshot taken: the scheduled snapshot's probe of the snapshots' lock that did not end still holds the backups folder" and no restore
+    stdout backup (startup): wrote …/backups/2026-11-13T02-15-10Z-1
+    backup (startup): prune skipped: a probe of the snapshots' lock whose release did not end holds them until it ends; …
+    stderr backup (startup): the verification did not start for …: … (the scheduled snapshot's probe of the snapshots' lock, given up in letting go of th…
+```
+
+The fix (ea588ca6): `letProbeGo` answers the mark it raised, and
+`ProbeBackupsLock` answers its own stalled release as `ErrCheckStillRunning`
+(a `*StillRunningError` naming its probe), joined to `ErrBackupsUnlocked`
+where both hold; `captureHeldBack` takes it before the unlocked branch and
+says why in the stuck check's words (`stillHoldsTheFolder`, which the first
+branch shares). No read of the folder is added to a healthy tick.
+`StuckCheckOf` asks this process's marks again after its own probe already
+(`return stuckAt(key)`), and the doctor reads `ProbeBackupsLock`'s answer only
+for `ErrBackupsUnlocked` (`doctor.BackupChecks`), so its lines are unchanged;
+the unit case's doctor-lock ways now want its `ErrCheckStillRunning`.
+Controls on ea588ca6: I1, `captureHeldBack`'s branch taken out, the new case
+red both ways, `TestTheDoctorAndTheTickerNameTheirOwnProbesStalledRelease`
+green (its ticker way meets the mark through `StuckCheckOf`'s own probe,
+beside a stale marker); I1b, `ProbeBackupsLock`'s answer turned off, the new
+case red both ways and the unit case's two doctor-lock ways ("answered
+<nil>"), its other six green. As predicted.
+
+### Item 2: the tests' reads of a marker
+
+`writeMarker` makes the marker's file (`O_EXCL`) before it writes its JSON;
+a test that waited for the file could read it empty. Shown at ea588ca6 by
+holding the write 1.5 s after the file's creation (I2W): red, as predicted,
+
+```
+restore_words_unix_test.go:62: the marker does not read: unexpected end of JSON input
+backup_round3_test.go:432: the doctor's backup-check line beside the check that runs on: {Name: Status: Summary: Hint:}, false
+```
+
+the second a stuck check run in a process of its own, whose marker the
+doctor reads once. Not as predicted: `TestAnAbandonedCheckKeepsItsHoldsUntilItsCheckerEnds`
+stayed green, and with the write held 12 s (I2WL) so did it and
+`TestAGivenUpRestoreThatHoldsTheLockMarksTheFolderUntilItLetsGo`: a
+verification "as another process" made in this process is refused by this
+process's mark before it reads anything (`verifyAndThen` asks `stuckBy` first,
+`finish.go:288`), so those two of `awaitMarker`'s three uses could not fail by
+the race; their comments say so now. The fix (9cda4b3f): `awaitMarker` waits
+for the write's `"writes"` hook, which fires after the write and the close
+(`markerWritten`, installed before the give-up), and the stuck check's
+process prints a line of its own from that hook, which the test waits for
+beside its given-up line; `SetOnMarkerWriteForTest` moved from
+`export_test.go` to `seams.go` so that process can install it. Green with
+I2W: all four. Controls on 9cda4b3f, each with I2W: I2F (`awaitMarker` back to
+the file) red at `restore_words_unix_test.go:65`, the same words, the other
+two green; I2Fc (the parent's round-1 loop back) red at
+`backup_round3_test.go:446`, the doctor's line. As predicted.
+
+### Item 3: refuted by audit
+
+No error of the snapshot's that `RestoreWithOptions` returns is left
+unrespelled (backup.go at 4e4cd01c). Between the admission (`holdSource`,
+549) and the console account's read (599) run only the destination's seal
+completion (565) and config lock (569); no database validation or open. The
+source reads respell: the account (602), the identity (612), the DSD state
+(628), the reservation's floor (666), a file's stat (711), bridge.yaml's read
+(731), and each copy's open and reads in `copyOut` (`restore_source.go`
+309-343). The migrations check reads the snapshot's database and drops its
+errors (`restoreMigrationHeld`, 825-827, by design); the epoch reset opens
+the destination (798); `playerFilesNeedABarrier` (649) and
+`floorlessSnapshotBound` name files by name alone; every other return is the
+destination's, never to be respelled. The database's open failing is already
+a case (`TestARestoreSpellsItsSourcesWordsAsGivenAndLeavesItsDestinationsAsTheyAre`,
+its quoted bridge.db). No change.
+
+### Item 4: no gap
+
+Control I4 at 4e4cd01c, `CheckRestoreSource`'s post-wait `ctx.Err()` check
+taken out (`restore_source.go` 596-598):
+`TestARestoreStoppedAsItsLookAnswersIsAPlainStop` red in its two ways where
+the read answers (`restore_check_test.go:149: the look answered <nil>, want a
+plain stop carrying context.Canceled alone`), its abandoned way green, as
+predicted. The command's case stays green by design, its own ask the second
+layer. No case added.
+
+### The gates
+
+On bcb8897e (2026-11-13, 04:12 to 05:03), one use of the build lock, nothing
+else in it, every process pinned to half the cores (CPUs 0 to 7): `go vet
+./...` with the Makefile's tags clean for linux/amd64, and `go vet` of
+`./internal/backup/` and `./cmd/bridge/` clean for darwin/arm64 and
+windows/amd64; go1.27.3's gofmt lists none of the 11 Go files the round
+changed. Under `-race -count=50 -run '^Name$'`, four lanes: the round's new
+and changed cases (the ticker's own probe, the unit probe case, the stuck
+check in a process of its own, and the three of `awaitMarker`) and five
+neighbours that run the code they changed (the stale marker's removal, the
+ticker beside a check that did not end, the doctor's and the ticker's probes,
+a folder granting no lock, a ticker stopped in its probe), all 11 ok, no race
+reported. Each touched package once with `-race -count=1 -timeout 120m`:
+`cmd/bridge` ok in 1,596 s, which holds `TestEveryCitedTestNameExists` and
+`TestEveryBackgroundGoroutineDrainsOnCleanup`, and `internal/backup` ok in
+775 s. `make test` and `make build-all` were not run: the brief asked for the
+packages. The rules patch applies at the final commit, and
+`scripts/check-doc-budgets.py` is clean on a copy with it applied
+(`cli-serve.md` 99,317 bytes, `build-ci-tests.md` 37,446); `verify_moves.py`
+passes there with the B871 line declared edited against the final commit, and
+with round 1's edits declared against main. Windows and macOS are CI's to
+show.
