@@ -176,7 +176,19 @@ var (
 	// read, or no account at all. The handler answers it as a wrong
 	// password, and the user signs in again.
 	ErrCredentialsChanged = errors.New("adminauth: the credential or a sign-out changed since the login was checked")
+	// ErrStoreBusy is a write that waited storeLockWait for the store's lock
+	// (lockStoreLocked) while another writer held it, and wrote nothing.
+	// Each caller answers it as it answers a store it cannot write: a
+	// session write keeps its change pending, a login fails, and a command
+	// prints it.
+	ErrStoreBusy = errors.New("adminauth: another bridge process is writing the console's credentials; try again")
 )
+
+// LockFileName is the lock beside the store (FileName) that every writer
+// of it holds from the re-read that gates its commit through its rename
+// (lockStoreLocked). Hidden, as the staged files beside it are, and never
+// removed: only the lock on it means anything.
+const LockFileName = "." + FileName + ".lock"
 
 // SessionAction says what a password rotation does to the console
 // sessions already signed in.
@@ -270,6 +282,11 @@ const sessionFlushInterval = 30 * time.Second
 // from (commitLocked): staging costs a write and an fsync, milliseconds in
 // which the other process can commit, so each writer re-reads the file
 // just before its rename and rebuilds from the fresh read if it changed.
+// Every writer holds the store's lock (LockFileName, lockStoreLocked) from
+// that re-read through its rename, so no other process's write lands
+// between the two. A writer that takes no lock (a bridge older than it, a
+// storage that keeps none) is left to the re-read and to a command's
+// confirmation (commitAndConfirm).
 //
 // A login's session is admitted on the file as well. Its check and its
 // session are two steps, the first letting go of the mutex for bcrypt, so
@@ -306,6 +323,20 @@ type Store struct {
 	revokedAt         time.Time
 	seen              fileStamp
 	lastUnreadableLog time.Time
+
+	// lockWait bounds a write's wait for the store's lock and tryLock
+	// takes it (lockStoreLocked): storeLockWait and fsutil.TryLock, set
+	// at open. A test shortens the one and stands in for the other.
+	lockWait time.Duration
+	tryLock  func(*os.File) error
+
+	// renameHook, when set, runs in every write between its re-read and
+	// its rename, the store's lock held; lockWaitHook when a write first
+	// finds the lock held by another. Test-only seams, nil in production,
+	// on the store they serve, so a test with two stores on one file parks
+	// one alone.
+	renameHook   atomic.Pointer[func()]
+	lockWaitHook atomic.Pointer[func()]
 }
 
 // OpenStore loads (or initialises as empty) the store at path. A
@@ -317,6 +348,8 @@ func OpenStore(path string) (*Store, error) {
 		path:     path,
 		sessions: make(map[[sha256.Size]byte]*Session),
 		now:      time.Now,
+		lockWait: storeLockWait,
+		tryLock:  fsutil.TryLock,
 	}
 	if err := s.load(); err != nil {
 		return nil, err
@@ -541,21 +574,24 @@ func (s *Store) SignOutEverywhere() error {
 // back to what the commit replaced it commits once more, up to
 // maxConfirmRedos times.
 //
-// The confirmation closes the one window commitLocked's check cannot:
-// a write the running bridge had checked (its own unchangedSince) but not
-// yet renamed when this commit renamed. That write was built from the file
-// before this one, so it carries back exactly the credential and the
-// sign-out marker this replaced, and once it lands the bridge never sees
-// the marker and its later writes carry the old state on. It lands within
-// RenameWithRetry's retry budget of its check (750 ms on Windows, where
-// a scanner holding a fresh file forces the retries; no retry on POSIX),
-// and its check came before this rename, so after confirmSettle it has
-// landed or never will. A newer write by another process carries a newer
-// credential or marker, which reverted does not match, and is left alone.
-// Only a writer stalled for longer than the settle between its check and
-// its rename gets past this, which a kernel lock would close (declined in
-// #1039, for its new failure modes in the bridge's own write path; see
-// ops/engineering-log.md, #1044). CodeRabbit on #1044.
+// The confirmation is for a write the store's lock does not keep out: one
+// by a writer that takes no lock (a bridge older than the lock, or any
+// writer where the storage gives none, warnUnlocked) that it had checked
+// (its own unchangedSince) but not yet renamed when this commit renamed.
+// That write was built from the file before this one, so it carries back
+// exactly the credential and the sign-out marker this replaced, and once
+// it lands the bridge never sees the marker and its later writes carry
+// the old state on. It lands within RenameWithRetry's retry budget of its
+// check (750 ms on Windows, where a scanner holding a fresh file forces
+// the retries; no retry on POSIX), and its check came before this rename,
+// so after confirmSettle it has landed or never will. A newer write by
+// another process carries a newer credential or marker, which reverted
+// does not match, and is left alone. CodeRabbit on #1044. A writer that
+// takes the lock cannot do this at all: it holds the lock from its check
+// through its rename, and this commit's own check waits for it. Before
+// backlog B881's second round no writer took one, and a writer stalled for
+// longer than the settle between its check and its rename got past the
+// confirmation too (the lock was declined in #1039 and #1044).
 //
 // The write already landed, so a confirmation read that fails is not an
 // error; it is logged, since nothing read shows the write held either.
@@ -1085,9 +1121,13 @@ func (s *Store) persistSessionsLocked(now time.Time, admit func(cur storeContent
 // undo it: a rotation put back by the running bridge's session write, or a
 // login or logout the bridge committed dropped by reset-password's. So the
 // file is read once more just before the rename, and a change starts the
-// write again from a fresh read, up to maxCommitAttempts. What remains is
-// the rename itself, and on Windows its retries (a kernel lock would close
-// that and is not taken here; see ops/engineering-log.md, #1039).
+// write again from a fresh read, up to maxCommitAttempts. That re-read and
+// the rename, its retries on Windows included, run under the store's lock
+// (lockStoreLocked), so no other writer of this version commits between
+// them: before backlog B881's second round they did not, and a session
+// write that passed its re-read and stalled before its rename landed after
+// a whole reset-password, putting back the hash and the sign-out marker it
+// replaced (#1039 and #1044 had declined the lock).
 //
 // Each read is taken into this process first (adoptLocked), so a build
 // decides from the file's credential and from memory as a sign-out in the
@@ -1112,7 +1152,7 @@ func (s *Store) commitLocked(build func(cur storeContents) (storeFile, error)) (
 		if err != nil || next.User == nil {
 			return storeFile{}, storeContents{}, err
 		}
-		written, err := s.writeStoreLocked(next, s.unchangedSince(cur))
+		written, err := s.writeStoreLocked(next, cur)
 		if errors.Is(err, errStoreMoved) && attempt < maxCommitAttempts {
 			continue
 		}
@@ -1126,29 +1166,133 @@ func (s *Store) commitLocked(build func(cur storeContents) (storeFile, error)) (
 	}
 }
 
-// unchangedSince is the beforeCommit of a write built from read: it lets
-// the staged file replace the store only while the store is still, byte
-// for byte, the file read was taken from, and answers errStoreMoved
-// otherwise. A missing file reads as nil, as it does in read. Split out of
-// commitLocked for SonarCloud's go:S3776 (cognitive complexity) on #1039.
-func (s *Store) unchangedSince(read storeContents) func() error {
-	return func() error {
-		if beforeCommitHook != nil {
-			beforeCommitHook()
+// unchangedSince is the check of a write built from read, made with the
+// store's lock held: it lets the staged file replace the store only while
+// the store is still, byte for byte, the file read was taken from, and
+// answers errStoreMoved otherwise. A missing file reads as nil, as it does
+// in read. Split out of commitLocked for SonarCloud's go:S3776 (cognitive
+// complexity) on #1039.
+func (s *Store) unchangedSince(read storeContents) error {
+	latest, err := os.ReadFile(s.path)
+	if errors.Is(err, os.ErrNotExist) {
+		latest, err = nil, nil
+	}
+	if err != nil {
+		return fmt.Errorf("re-read adminauth store before the commit: %w", err)
+	}
+	if !bytes.Equal(latest, read.raw) {
+		return errStoreMoved
+	}
+	return nil
+}
+
+// storeLockWait is how long a write waits for the store's lock before it
+// refuses with ErrStoreBusy, having written nothing. A writer holds the
+// lock only from its re-read through its rename: a read and a rename of a
+// small file, milliseconds, but for Windows, where the rename is retried
+// for up to atomicwrite's budget while another process's handle refuses
+// it. So a write that has waited out that budget and a second more waits
+// behind a writer that has stalled with the lock held (SIGSTOP, a paused
+// VM), which waiting longer does not end. And the wait holds the store's
+// mutex, which every console request of the serving bridge takes: the
+// bound is also how long one such stall can hold the console up.
+var storeLockWait = atomicwrite.RenameRetryBudget() + time.Second
+
+// storeLockRetry is how often a write asks again for a lock another holds.
+const storeLockRetry = 10 * time.Millisecond
+
+// lockStoreLocked takes the store's interprocess lock, the exclusive
+// kernel lock (fsutil.TryLock: flock on unix, LockFileEx on Windows) on
+// LockFileName beside the store, and returns what releases it, which
+// unlocks before it closes (Windows' close may let a lock go late).
+// Caller MUST hold s.mu: the order is s.mu, then this lock, everywhere,
+// and a holder of this lock waits for nothing, neither s.mu nor another
+// process, between its re-read and its rename, so no wait can close a
+// cycle. A test's renameHook is the one thing that runs in between.
+//
+// The lock file is opened, and made where it is missing, beside the store
+// through fsutil.OpenLockFileLike, so that one a process run as root makes
+// first (`sudo bridge admin reset-password`) takes the store file's owner,
+// as the store's own writes keep it (KeepOwner), and the service user can
+// still open it. Not on the store file itself: every write replaces that
+// by a rename, which a lock on the old file would not follow.
+//
+// A lock another open holds is asked for again every storeLockRetry, up
+// to s.lockWait, then refused with ErrStoreBusy. A filesystem that gives
+// no lock at all (fsutil.KeepsNoLocks: ENOLCK or EOPNOTSUPP from flock,
+// ERROR_NOT_SUPPORTED from LockFileEx, a platform with none) is no
+// refusal: the write goes on unlocked, as every write did before B881's
+// second round, guarded by the re-read and a command's confirmation, and
+// the first such write of the process says so (warnUnlocked). ENOLCK can
+// also be a Linux kernel out of lock records beside a holder, which this
+// takes the same way: the write is then no worse off than before. Any other
+// failure, to open the lock file or to take its lock, is returned with its
+// own cause, never as a lock someone holds.
+func (s *Store) lockStoreLocked() (release func(), err error) {
+	f, err := fsutil.OpenLockFileLike(filepath.Dir(s.path), s.lockFileName(), s.path)
+	if err != nil {
+		return nil, fmt.Errorf("open the adminauth store's lock: %w", err)
+	}
+	deadline := time.Now().Add(s.lockWait)
+	waited := false
+	for {
+		err := s.tryLock(f)
+		switch {
+		case err == nil:
+			return func() {
+				_ = fsutil.Unlock(f)
+				_ = f.Close()
+			}, nil
+		case errors.Is(err, fsutil.ErrLocked):
+			if !waited {
+				waited = true
+				if hook := s.lockWaitHook.Load(); hook != nil {
+					(*hook)()
+				}
+			}
+			if !time.Now().Before(deadline) {
+				_ = f.Close()
+				return nil, ErrStoreBusy
+			}
+			time.Sleep(storeLockRetry)
+		case fsutil.KeepsNoLocks(err):
+			_ = f.Close()
+			warnUnlocked(s.path, err)
+			return func() {
+				// No lock was taken, so none is released.
+			}, nil
+		default:
+			_ = f.Close()
+			return nil, fmt.Errorf("take the adminauth store's lock: %w", err)
 		}
-		latest, err := os.ReadFile(s.path)
-		if errors.Is(err, os.ErrNotExist) {
-			latest, err = nil, nil
-		}
-		if err != nil {
-			return fmt.Errorf("re-read adminauth store before the commit: %w", err)
-		}
-		if !bytes.Equal(latest, read.raw) {
-			return errStoreMoved
-		}
-		return nil
 	}
 }
+
+// lockFileName is LockFileName for this store's file, so two stores in
+// one directory keep their locks apart, as their tickets are kept apart.
+func (s *Store) lockFileName() string {
+	return "." + filepath.Base(s.path) + ".lock"
+}
+
+// unlockedWarned is set once a write of this process has gone on without
+// the store's lock (warnUnlocked).
+var unlockedWarned atomic.Bool
+
+// warnUnlocked says, once per process, that a write of the store went on
+// without its lock, where the storage gave none: from then on nothing but
+// the re-read and a command's confirmation keeps another process's write
+// out of the window between a writer's check and its rename. It says what
+// the lock answered, never that the filesystem keeps no locks, which an
+// ENOLCK does not show.
+func warnUnlocked(path string, err error) {
+	if unlockedWarned.Swap(true) {
+		return
+	}
+	logger.Warn(msgUnlockedLog, "path", path, "err", err)
+}
+
+// msgUnlockedLog is warnUnlocked's line.
+const msgUnlockedLog = "no lock could be taken beside the admin credential store, so its writes are not kept apart from another bridge process's"
 
 // errStoreMoved is a write finding the file changed between the read it
 // was built from and its commit.
@@ -1163,7 +1307,8 @@ const maxCommitAttempts = 3
 
 // beforeCommitHook is a test-only seam (nil in production), fired in
 // every write between the staging of the file and the re-read that gates
-// its commit: the window another process's commit lands in. Same
+// its commit, before the store's lock is taken: the window another
+// process's commit lands in, which the re-read then finds. Same
 // convention as auth's beforeValidatePersistHook.
 var beforeCommitHook func()
 
@@ -1707,15 +1852,19 @@ func (s *Store) adoptCredentialLocked(u *userRecord) {
 // write, the file's for a write that keeps them, none for a sign-out; and
 // the file's sign-out marker unless it is writing a new one.
 //
-// beforeCommit, when not nil, runs once the new file is staged (written,
-// synced and closed) and before it replaces the old one; an error from
-// it abandons the write and is returned.
+// Once the new file is staged (written, synced and closed) it takes the
+// store's lock (lockStoreLocked), and with it held checks that the store
+// is still the file read was taken from (unchangedSince) and renames the
+// staged file into place; the lock goes once the rename has answered. A
+// lock that cannot be had, or a store that changed, abandons the write
+// and is returned. beforeCommitHook runs before the lock is taken, where
+// a test lands another writer's whole write.
 //
 // It returns the stat of the file it renamed into place, taken once its
 // bytes were synced (the rename keeps the inode, the size and the
 // modification time), or nil when that stat failed. commitLocked records
 // it for the session check's stat gate.
-func (s *Store) writeStoreLocked(f storeFile, beforeCommit func() error) (os.FileInfo, error) {
+func (s *Store) writeStoreLocked(f storeFile, read storeContents) (os.FileInfo, error) {
 	if f.User == nil {
 		return nil, errors.New("adminauth: cannot persist nil user record")
 	}
@@ -1767,10 +1916,19 @@ func (s *Store) writeStoreLocked(f storeFile, beforeCommit func() error) (os.Fil
 	if err := tmp.Close(); err != nil {
 		return nil, fmt.Errorf("close tmp: %w", err)
 	}
-	if beforeCommit != nil {
-		if err := beforeCommit(); err != nil {
-			return nil, err
-		}
+	if beforeCommitHook != nil {
+		beforeCommitHook()
+	}
+	release, err := s.lockStoreLocked()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	if err := s.unchangedSince(read); err != nil {
+		return nil, err
+	}
+	if hook := s.renameHook.Load(); hook != nil {
+		(*hook)()
 	}
 	if err := atomicwrite.RenameWithRetry(tmpName, s.path); err != nil {
 		return nil, fmt.Errorf("rename adminauth store: %w", err)

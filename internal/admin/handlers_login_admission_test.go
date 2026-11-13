@@ -6,10 +6,12 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"sync"
 	"testing"
 
 	"github.com/acoseac/1-bit-bridge/internal/adminauth"
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 )
 
 // The tests in this file drive a console login, and a login link's
@@ -368,6 +370,53 @@ func TestConsoleLoginsRacingNothingButEachOtherSignIn(t *testing.T) {
 		}
 	}
 	requireSessions(t, store, path, 3, "three logins")
+}
+
+// TestAConsoleLoginBesideAHeldStoreLockAnswersAsAStoreFailure: a login whose
+// session's write waited out its bound for the store's lock, which another
+// process holds (adminauth.ErrStoreBusy, backlog B881's second round), is
+// answered as any store failure: the 500 that says no session was made, and
+// no cookie. Once the lock is let go, the same login signs in.
+func TestAConsoleLoginBesideAHeldStoreLockAnswersAsAStoreFailure(t *testing.T) {
+	srv, store, _, path := newPublicTestServerAt(t, signInPassword)
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+	client := consoleClient(ts)
+	lock, err := fsutil.OpenLockFile(filepath.Dir(path), adminauth.LockFileName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fsutil.TryLock(lock); err != nil {
+		lock.Close()
+		t.Fatalf("take the store's lock for the test: %v", err)
+	}
+	var released sync.Once
+	release := func() {
+		released.Do(func() {
+			_ = fsutil.Unlock(lock)
+			_ = lock.Close()
+		})
+	}
+	t.Cleanup(release)
+
+	got := postLogin(client, ts.URL, "admin", signInPassword)
+	var envelope struct{ Error, Message string }
+	if got.err != nil || got.status != http.StatusInternalServerError || json.Unmarshal([]byte(got.body), &envelope) != nil ||
+		envelope.Error != "internal" || envelope.Message != "could not create session" {
+		t.Errorf("a login beside a held store lock = %d %q (%v), want the 500 a store failure gets", got.status, got.body, got.err)
+	}
+	if got.session != "" {
+		t.Error("a login whose session was never written was handed a cookie")
+	}
+	if n := store.SessionCount(); n != 0 {
+		t.Errorf("the serving bridge holds %d sessions after the login that was never written, want none", n)
+	}
+
+	release()
+	again := postLogin(client, ts.URL, "admin", signInPassword)
+	if again.err != nil || again.status != http.StatusOK || again.session == "" {
+		t.Errorf("the login once the lock is let go = %d %v (cookie set: %t), want 200 with a session", again.status, again.err, again.session != "")
+	}
 }
 
 // TestARefusedConsoleLoginIsCountedAsAFailedOne: a login refused because its
