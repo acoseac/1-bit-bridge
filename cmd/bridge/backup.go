@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/adminauth"
@@ -1004,7 +1005,14 @@ type statusRead struct {
 // return.
 func readBounded[T any](ctx context.Context, read func() T) (v T, answered bool) {
 	out := make(chan T, 1)
-	go func() { out <- read() }()
+	end := func() {}
+	if start := readBoundedStart.Load(); start != nil {
+		end = (*start)()
+	}
+	go func() {
+		defer end()
+		out <- read()
+	}()
 	select {
 	case v = <-out:
 		return v, true
@@ -1019,6 +1027,15 @@ func readBounded[T any](ctx context.Context, read func() T) (v T, answered bool)
 		return v, false
 	}
 }
+
+// readBoundedStart, nil in production, runs as readBounded starts a read, on
+// its caller's goroutine, and answers what the read's goroutine runs last,
+// once the read has ended, answered or left to end on its own: a read left to
+// end on its own goes on reading the backup package's seams (the lock's
+// probe, the release's bound) past its caller's answer, and a test whose stop
+// left one waits for that end before it puts seams back or removes fixtures
+// (joinBoundedReadsOnCleanup, backlog B871's round 3).
+var readBoundedStart atomic.Pointer[func() (end func())]
 
 // captureHeldBack reports whether the ticker takes no snapshot this pass,
 // and why, in its log line's words: a check that did not end holds the

@@ -184,6 +184,9 @@ func TestBridgeBackupVerifySaysWhatAGivenUpVerificationsRecordReads(t *testing.T
 				flipBundleByte(t, dir, backup.ManifestDBFileName)
 				flipBundleByte(t, dir, "bridge.yaml")
 				res, err := backup.VerifySnapshot(t.Context(), dir, backup.VerifyOptions{BackupsRoot: root})
+				// Its worker lets go after its answer: its end comes before the
+				// seams below are set (backlog B871's round 3).
+				awaitBackupHoldsDropped(t, "the check before")
 				if err != nil || res.Record.DatabaseState != backup.StateFailed || res.Record.FilesState != backup.StateFailed {
 					t.Fatalf("the check before: %v, %s/%s; want FAILED/FAILED recorded", err, res.Record.DatabaseState, res.Record.FilesState)
 				}

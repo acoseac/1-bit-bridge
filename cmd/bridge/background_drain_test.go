@@ -8,6 +8,9 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/backup"
 )
 
 // drainServeOnCleanup registers the shutdown of a background `serve`
@@ -45,6 +48,11 @@ import (
 // held past the drain, serve cannot exit, and the drain waits until the
 // deadline. Every hold here is released that way.
 //
+// Once serve has returned, the drain waits for the backup workers it left
+// (awaitBackupHoldsDropped): its backup ticker's verification, and the
+// INCOMPLETE a stopped one writes, answer before their workers let go
+// (backlog B871's round 3).
+//
 // t.Errorf, never t.Fatalf: FailNow from a cleanup skips the cleanups
 // that have not run yet, which here are the very directory removals
 // this helper exists to sequence itself against.
@@ -81,7 +89,49 @@ func drainServeOnCleanup(t *testing.T, cancel context.CancelFunc, exited <-chan 
 			}
 		default: // already read by a failure path that reported it
 		}
+		awaitBackupHoldsDropped(t, "serve")
 	})
+}
+
+// backupHoldsBound is how long a drain waits, once what it drained has
+// returned, for the backup workers it left to let go (awaitBackupHoldsDropped).
+const backupHoldsBound = 30 * time.Second
+
+// onBackupHoldsAwait, nil but in TestADrainWaitsForTheBackupWorkerItsLoopLeft,
+// runs as a wait for the backup holds begins (awaitBackupHoldsDropped), given
+// what it waits after: the test lets a worker it parked go on there, and only
+// there.
+var onBackupHoldsAwait func(what string)
+
+// awaitBackupHoldsDropped waits, once what a drain stopped has returned (what
+// names it), until every backup worker in this process has let go of what it
+// held (backup.ActiveHoldsForTest at zero), for backupHoldsBound at most, and
+// reports one that has not with t.Errorf, never t.Fatalf, as a cleanup here
+// must. A verification, a prune, a claim and the INCOMPLETE a stopped
+// verification writes each answer their caller before their worker lets go
+// (backup.verifyAndThen, PruneContext, Claim, abandonPending), so serve, or the
+// backup ticker, returns while its worker still reads the backup package's
+// seams (releaseBound, the lock's and an ownership's release hooks) and still
+// holds the backups folder's lock file under the test's directories: a drain
+// waits for them before the cleanups registered before it put seams back and
+// remove those directories, and before the next test sets the seams (backlog
+// B871's round 3). Past its drop a worker reads no seam but the atomic hook of
+// its last step (backup.SetAroundVerifyEndForTest) and the end hook it took as
+// it began. A test that parks a backup worker lets it go in a cleanup
+// registered after the drain, which runs before it.
+func awaitBackupHoldsDropped(t *testing.T, what string) {
+	t.Helper()
+	if onBackupHoldsAwait != nil {
+		onBackupHoldsAwait(what)
+	}
+	by := time.Now().Add(backupHoldsBound)
+	for backup.ActiveHoldsForTest() != 0 {
+		if time.Now().After(by) {
+			t.Errorf("%d backup workers still held what they took %v after %s returned", backup.ActiveHoldsForTest(), backupHoldsBound, what)
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
 }
 
 // drainLoopOnCleanup is drainServeOnCleanup for the in-process loops —
@@ -90,7 +140,8 @@ func drainServeOnCleanup(t *testing.T, cancel context.CancelFunc, exited <-chan 
 // closes. Same reasoning, same reason it is a cleanup rather than a
 // tail, and the same wait: for the exit, until just before the test's
 // deadline, since a pass the cancel lands in finishes its store write
-// first; see that helper's docblock for all three.
+// first, then for the backup workers the loop left
+// (awaitBackupHoldsDropped); see that helper's docblock for all four.
 //
 // These are in some ways the sharper half. A stranded `serve` writes
 // into a directory that is merely being removed, whereas these loops
@@ -119,7 +170,9 @@ func drainLoopOnCleanup(t *testing.T, cancel context.CancelFunc, done <-chan str
 		case <-done:
 		case <-serveDrainGiveUp(t):
 			t.Errorf("%s did not exit on ctx cancel before the test's deadline", what)
+			return
 		}
+		awaitBackupHoldsDropped(t, what)
 	})
 }
 

@@ -369,7 +369,11 @@ func TestARestoreHoldsTheSnapshotsLockThroughItsCopies(t *testing.T) {
 		oldThere = pathExists(t, old)
 		held, heldErr = backupsLockHeld(root)
 	})
-	if err := backup.RestoreWithOptions(old, b.targets, opts); err != nil {
+	err := backup.RestoreWithOptions(old, b.targets, opts)
+	// The prune made during the restore answers before its worker lets go:
+	// that worker's end comes before the next step (backlog B871's round 3).
+	awaitClean(t)
+	if err != nil {
 		t.Fatalf("the restore answered %v", err)
 	}
 	if prErr != nil || !pr.Skipped || !errors.Is(pr.SkippedFor, backup.ErrBackupsBusy) {
@@ -386,7 +390,9 @@ func TestARestoreHoldsTheSnapshotsLockThroughItsCopies(t *testing.T) {
 	if held, err := backupsLockHeld(root); err != nil || held {
 		t.Errorf("the folder's lock once the restore returned: held %v, %v; want it free", held, err)
 	}
-	if pr, err := backup.Prune(root, 1); err != nil || pr.Skipped || pathExists(t, old) {
+	pr, err = backup.Prune(root, 1)
+	awaitClean(t) // its worker's end, which comes after its answer
+	if err != nil || pr.Skipped || pathExists(t, old) {
 		t.Errorf("the prune once the restore returned: %+v, %v; want it run, the older snapshot gone", pr, err)
 	}
 }
@@ -411,7 +417,12 @@ func TestARestoreLocksALiveFolderThatHoldsNoLockFileYet(t *testing.T) {
 		held, heldErr = backupsLockHeld(root)
 		pr, prErr = backup.Prune(root, 0)
 	})
-	if err := backup.RestoreWithOptions(snap, b.targets, opts); err != nil {
+	err := backup.RestoreWithOptions(snap, b.targets, opts)
+	// The prune made during the restore answers before its worker lets go:
+	// that worker's end comes before anything this test removes (backlog
+	// B871's round 3).
+	awaitClean(t)
+	if err != nil {
 		t.Fatalf("the restore answered %v", err)
 	}
 	if heldErr != nil || !held {

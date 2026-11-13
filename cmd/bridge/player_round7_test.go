@@ -66,7 +66,11 @@ func TestServeAdoptsDisabledPlayerBeforeTLS(t *testing.T) {
 	holdDataDirLock(t, dir)
 	out.Reset()
 	errs.Reset()
-	if code := backupCmd([]string{"--config", cfg}, &out, &errs); code != 0 {
+	code := backupCmd([]string{"--config", cfg}, &out, &errs)
+	// Its verification answers before its worker lets go: that worker's end
+	// comes before the lock and the folders go (backlog B871's round 3).
+	awaitBackupHoldsDropped(t, "bridge backup")
+	if code != 0 {
 		t.Fatalf("backup after boot adoption: %d %s", code, &errs)
 	}
 }

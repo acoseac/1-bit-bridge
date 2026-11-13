@@ -286,6 +286,9 @@ func TestARecheckThatRecordedNothingIsFollowedByNoPrune(t *testing.T) {
 				want = backup.ErrRecheckRefused
 			}
 			res := backup.Finish(context.Background(), dir, keepOne, backup.VerifyOptions{BackupsRoot: filepath.Dir(dir)})
+			// Its worker lets go after its answer: its end comes before the
+			// seams go back (backlog B871's round 3).
+			awaitClean(t)
 			if !errors.Is(res.VerifyErr, want) {
 				t.Fatalf("the recheck answered %v, want %v", res.VerifyErr, want)
 			}
@@ -571,7 +574,12 @@ func TestAnOwnershipIsLetGoBeforeTheLock(t *testing.T) {
 				t.Cleanup(backup.SetVerifyDeadlineForTest(300 * time.Millisecond))
 				checkOut := newParking()
 				t.Cleanup(backup.SetOnLowPriorityForTest(checkOut.park))
-				callers := joinBackupCallers(t, func() { checkOut.release(); ownerOut.release() })
+				// The refused verification lets the ownership go on a goroutine
+				// of its own (letGoWithin), which holds no hold for a drain to
+				// wait on, and outlives its answer: its release, once let go, is
+				// waited for through the capture's own once, before the seams go
+				// back (backlog B871's round 3).
+				callers := joinBackupCallers(t, func() { checkOut.release(); ownerOut.release(); c.Release() })
 				if _, err := backup.VerifySnapshot(context.Background(), blocker, backup.VerifyOptions{BackupsRoot: root}); !errors.Is(err, backup.ErrCheckGivenUp) {
 					t.Fatalf("the blocking verification answered %v, want it given up", err)
 				}

@@ -195,6 +195,10 @@ func TestThePruneKeepsWhatRecoveryNeeds(t *testing.T) {
 				names[i] = writeBundle(t, root, i, time.Duration(i+1)*time.Minute, kind)
 			}
 			res, err := backup.Prune(root, tc.keep)
+			// The prune answers before its worker lets go of the lock: that
+			// worker's end comes before anything this case removes (backlog
+			// B871's round 3).
+			awaitClean(t)
 			if err != nil {
 				t.Fatalf("Prune(keep=%d): %v", tc.keep, err)
 			}

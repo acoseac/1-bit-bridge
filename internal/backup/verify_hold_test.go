@@ -450,7 +450,12 @@ func TestAVetoThatStoodBeforeAVerificationStaysOverTheVERIFIEDItCarries(t *testi
 			if got := readersVerified(t, dir); len(got) > 0 {
 				t.Errorf("after the retry, %s", strings.Join(got, "; "))
 			}
-			if _, err := backup.Prune(filepath.Dir(dir), 1); err != nil {
+			_, err := backup.Prune(filepath.Dir(dir), 1)
+			// The prune answers before its worker lets go of the lock: that
+			// worker's end comes before the seams go back (backlog B871's
+			// round 3).
+			awaitClean(t)
+			if err != nil {
 				t.Fatal(err)
 			}
 			if !pathExists(t, anchor) {
@@ -502,7 +507,11 @@ func TestARecheckGivenUpLeavesTheVetoItMade(t *testing.T) {
 	if got := readersVerified(t, dir); len(got) > 0 {
 		t.Errorf("after the recheck given up, %s", strings.Join(got, "; "))
 	}
-	if _, err := backup.Prune(filepath.Dir(dir), 1); err != nil {
+	_, err = backup.Prune(filepath.Dir(dir), 1)
+	// The prune answers before its worker lets go of the lock: that worker's
+	// end comes before the deadline's seam goes back (backlog B871's round 3).
+	awaitClean(t)
+	if err != nil {
 		t.Fatal(err)
 	}
 	if !pathExists(t, anchor) {

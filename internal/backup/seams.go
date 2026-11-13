@@ -10,8 +10,14 @@ import (
 // Test seams for packages that drive a verification through their own
 // callers (cmd/bridge's ticker and CLI, the console). Each is process-global:
 // a test that uses one MUST NOT call t.Parallel(), and puts it back in a
-// t.Cleanup once every verification it started has returned. Production
-// code never calls them.
+// t.Cleanup once every worker it started has ended, never once its call has
+// returned: a verification, a prune, a claim and the INCOMPLETE a stopped
+// verification writes answer before their workers let go, reading seams as
+// they do (releaseBound, onLockRelease, onOwnerRelease), so a test waits for
+// a verification's end (SetOnVerifyEndForTest) or for every hold to drop
+// (ActiveHoldsForTest at zero) first, and so does every test that starts one,
+// before the next test sets a seam (backlog B871's round 3). Production code
+// never calls them.
 
 // afterCheck, nil in production, runs once a verification's check has
 // ended, before its verdict is written, with the backups folder's lock

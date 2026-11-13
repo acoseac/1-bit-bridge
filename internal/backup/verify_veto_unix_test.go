@@ -62,7 +62,12 @@ func TestAVerifiedRecordLeftForAFailedOneIsVetoedWhereItsBundleTakesNoFile(t *te
 	if !pathExists(t, backup.RootVetoPath(dir)) {
 		t.Error("no veto beside a bundle that takes no file")
 	}
-	if pr, err := backup.Prune(filepath.Dir(dir), 1); err != nil || pr.Skipped {
+	// The prune and the next check answer before their workers let go: each
+	// worker's end comes before the next step and before the hooks go back
+	// (backlog B871's round 3).
+	pr, err := backup.Prune(filepath.Dir(dir), 1)
+	awaitClean(t)
+	if err != nil || pr.Skipped {
 		t.Fatalf("the prune answered %+v, %v; want it run: a skipped prune keeps the anchor whatever it reads", pr, err)
 	}
 	if !pathExists(t, anchor) {
@@ -71,7 +76,9 @@ func TestAVerifiedRecordLeftForAFailedOneIsVetoedWhereItsBundleTakesNoFile(t *te
 	if err := os.Chmod(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := backup.VerifySnapshot(t.Context(), dir, backup.VerifyOptions{}); err != nil {
+	_, err = backup.VerifySnapshot(t.Context(), dir, backup.VerifyOptions{})
+	awaitClean(t)
+	if err != nil {
 		t.Fatalf("the next check: %v", err)
 	}
 	requireVerdict(t, "the record after the next check", listed(t, dir), backup.StateFailed, backup.ReasonHash, backup.StateFailed, backup.ReasonHash)

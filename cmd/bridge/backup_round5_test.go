@@ -31,7 +31,11 @@ func TestTheStartupPassSaysWhyARecheckThatRecordedNothingPrunedNothing(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res, err := backup.VerifySnapshot(t.Context(), dir, backup.VerifyOptions{BackupsRoot: root}); err != nil || !res.Record.Passes() {
+	res, err := backup.VerifySnapshot(t.Context(), dir, backup.VerifyOptions{BackupsRoot: root})
+	// Its worker lets go after its answer: its end comes before the seams
+	// below are set (backlog B871's round 3).
+	awaitBackupHoldsDropped(t, "the snapshot's check")
+	if err != nil || !res.Record.Passes() {
 		t.Fatalf("the snapshot's check: %v, %+v", err, res.Record)
 	}
 	// Its database's check did not end since: its files stay VERIFIED, so

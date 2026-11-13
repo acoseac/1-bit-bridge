@@ -430,6 +430,10 @@ func TestPruneKeepsMostRecent(t *testing.T) {
 	}
 
 	res, err := backup.Prune(backupsRoot, 3)
+	// The prune answers before its worker lets go of the lock: that worker's
+	// end, its hold dropped, comes before anything this test removes (backlog
+	// B871's round 3).
+	awaitClean(t)
 	if err != nil {
 		t.Fatalf("Prune: %v", err)
 	}
@@ -474,6 +478,7 @@ func TestPruneNonPositiveKeepIsNoOp(t *testing.T) {
 	}
 	for _, keep := range []int{0, -1, -100} {
 		res, err := backup.Prune(backupsRoot, keep)
+		awaitClean(t) // its worker's end, which comes after its answer
 		if err != nil {
 			t.Fatalf("Prune(keep=%d): %v", keep, err)
 		}
@@ -516,6 +521,7 @@ func TestPruneIsBestEffortPastALockedDir(t *testing.T) {
 	t.Cleanup(func() { _ = os.Chmod(locked, 0o700) })
 
 	res, err := backup.Prune(backupsRoot, 1)
+	awaitClean(t) // its worker's end, which comes after its answer
 
 	// Root bypasses the perm bits — if the removal succeeded anyway the
 	// failure injection didn't take; skip rather than assert falsely (same
@@ -720,7 +726,9 @@ func TestPruneReapsCrashOrphans(t *testing.T) {
 
 	// keep=5 (> the single valid snapshot) so the keep-policy deletes
 	// nothing — the orphan reclamation is entirely ReapOrphans's doing.
-	if _, err := backup.Prune(backupsRoot, 5); err != nil {
+	_, err = backup.Prune(backupsRoot, 5)
+	awaitClean(t) // its worker's end, which comes after its answer
+	if err != nil {
 		t.Fatalf("Prune: %v", err)
 	}
 	if pathExists(t, orphan) {
@@ -773,6 +781,7 @@ func TestPruneReportsOrphanSweepFailureSeparately(t *testing.T) {
 	// keep=5 (> the one valid snapshot) so the keep-policy has nothing to
 	// do and the only possible error source is the orphan sweep.
 	res, err := backup.Prune(backupsRoot, 5)
+	awaitClean(t) // its worker's end, which comes after its answer
 	if err != nil {
 		t.Fatalf("Prune must not fail over a directory the orphan sweep can't classify; "+
 			"that error is permanent and would fail every future `bridge backup`: %v", err)
@@ -820,6 +829,7 @@ func TestPruneReapsOrphansWhenRetentionDisabled(t *testing.T) {
 
 	for _, keep := range []int{0, -1} {
 		res, err := backup.Prune(backupsRoot, keep)
+		awaitClean(t) // its worker's end, which comes after its answer
 		if err != nil {
 			t.Fatalf("Prune(keep=%d): %v", keep, err)
 		}

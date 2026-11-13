@@ -130,6 +130,9 @@ func verifiedInstallSnapshot(t *testing.T, cfgPath string) string {
 		t.Fatal(err)
 	}
 	res := backup.SnapshotAndVerify(t.Context(), buildBackupSources(cfg, resolved), backup.SnapshotOptions{})
+	// The verification answers before its worker lets go: that worker's end
+	// comes before the caller's next step (backlog B871's round 3).
+	awaitBackupHoldsDropped(t, "the snapshot's verification")
 	if !res.Kept() || res.VerifyErr != nil || !res.Verify.Record.Passes() {
 		t.Fatalf("the snapshot: kept %v, %v, %+v", res.Kept(), res.VerifyErr, res.Verify.Record)
 	}
@@ -340,7 +343,12 @@ func TestAFreshProcessReadsNoVerifiedAVerificationCouldNotRecord(t *testing.T) {
 			if strings.Contains(newest, "database VERIFIED") || strings.Contains(newest, "files VERIFIED") {
 				t.Errorf("the doctor reads the snapshot verified: %q", newest)
 			}
-			if _, err := backup.Prune(root, 1); err != nil {
+			_, err = backup.Prune(root, 1)
+			// The prune answers before its worker lets go of the lock: that
+			// worker's end comes before anything this case removes (backlog
+			// B871's round 3).
+			awaitBackupHoldsDropped(t, "the prune")
+			if err != nil {
 				t.Fatal(err)
 			}
 			if _, err := os.Stat(anchor); err != nil {
@@ -674,6 +682,10 @@ func TestATickerStoppedWhileItsProbeOfTheLockHangsReturnsWithinItsBound(t *testi
 		}
 		return os.OpenFile(path, os.O_RDWR, 0)
 	}))
+	// The probe the stop left goes on past its open, to the lock's try and its
+	// release: run after the cleanups below let it go, this waits for its end
+	// before the seam goes back (backlog B871's round 3).
+	joinBoundedReadsOnCleanup(t)
 	var letGo sync.Once
 	release := func() { letGo.Do(func() { close(out) }) }
 	// Registered after the seam, so run before its restore: the probe has

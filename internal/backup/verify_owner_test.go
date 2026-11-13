@@ -62,7 +62,12 @@ func TestADeadCaptureIsPrunedAndALiveOneIsKept(t *testing.T) {
 
 	time.Sleep(1100 * time.Millisecond)
 	newest := verifiedSnapshot(t, src)
-	if pr, err := backup.Prune(filepath.Dir(newest), 1); err != nil || pr.Skipped {
+	pr, err := backup.Prune(filepath.Dir(newest), 1)
+	// The prune answers before its worker lets go of the lock: that worker's
+	// end, its hold dropped, comes before anything this test removes (backlog
+	// B871's round 3).
+	awaitClean(t)
+	if err != nil || pr.Skipped {
 		t.Fatal(err)
 	}
 	for i, dir := range dead {
@@ -176,16 +181,23 @@ func TestAClaimTakesOnlyWhatNoLiveOwnerHolds(t *testing.T) {
 	src := storeWithTracks(t, 5)
 	c := captureT(t, src)
 	root := filepath.Dir(c.Dir)
-	if _, err := backup.Claim(t.Context(), c.Dir, root); !errors.Is(err, backup.ErrClaimedElsewhere) {
+	// A claim and a verification answer before their workers let go of the
+	// lock: each worker's end, its hold dropped, comes before the next step
+	// and before anything this test removes (backlog B871's round 3).
+	_, err := backup.Claim(t.Context(), c.Dir, root)
+	awaitClean(t)
+	if !errors.Is(err, backup.ErrClaimedElsewhere) {
 		t.Fatalf("a claim of a snapshot its owner holds answered %v, want ErrClaimedElsewhere", err)
 	}
 	c.Release()
 	claimed, err := backup.Claim(t.Context(), c.Dir, root)
+	awaitClean(t)
 	if err != nil {
 		t.Fatalf("a claim of a snapshot whose owner is gone: %v", err)
 	}
 	requireVerdict(t, "a claimed snapshot", listed(t, c.Dir), backup.StatePending, "", backup.StatePending, "")
 	res := backup.FinishCapture(t.Context(), claimed, func() int { return 1 }, backup.VerifyOptions{BackupsRoot: root})
+	awaitClean(t)
 	if res.VerifyErr != nil || !res.Verify.Record.Passes() {
 		t.Fatalf("the claimed snapshot's check: %+v, %v", res.Verify.Record, res.VerifyErr)
 	}
@@ -234,7 +246,11 @@ func TestAClaimedSnapshotIsKeptFromThePrune(t *testing.T) {
 	// go of the folder's lock. Drain that hold before pruning again
 	// (Linux race CI, 2026-11-10); the earlier awaitClean drained the claim.
 	awaitClean(t)
-	if pr, err := backup.Prune(root, 1); err != nil || pr.Skipped {
+	pr, err := backup.Prune(root, 1)
+	// The second prune's worker lets go after its answer too: its end comes
+	// before anything this test removes (backlog B871's round 3).
+	awaitClean(t)
+	if err != nil || pr.Skipped {
 		t.Fatalf("prune: %+v, %v; want it run", pr, err)
 	}
 	if pathExists(t, stopped.Dir) {

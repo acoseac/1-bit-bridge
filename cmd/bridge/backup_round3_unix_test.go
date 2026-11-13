@@ -57,6 +57,10 @@ func TestATickerStoppedWhileItsStartupListingReadsANamedPipeReturnsWithinItsBoun
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
+	// The listing the stop left reads on once its pipe ends: run after that
+	// end and the drain, this waits for it before the folder goes (backlog
+	// B871's round 3).
+	joinBoundedReadsOnCleanup(t)
 	drainLoopOnCleanup(t, cancel, done, "the backup ticker")
 	var stdout, stderr safeBuffer
 	go func() {

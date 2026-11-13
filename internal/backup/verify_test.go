@@ -374,7 +374,9 @@ func TestACertificateThatDoesNotMatchItsBaselineStillAnchorsRecovery(t *testing.
 	if nv, ok := st.NewestVerified(); !ok || nv.DirName != filepath.Base(dir) {
 		t.Errorf("the newest database-verified snapshot is %q (%v), want %q", nv.DirName, ok, filepath.Base(dir))
 	}
-	if _, err := backup.Prune(filepath.Dir(dir), 1); err != nil {
+	_, err = backup.Prune(filepath.Dir(dir), 1)
+	awaitClean(t) // its worker's end, which comes after its answer
+	if err != nil {
 		t.Fatal(err)
 	}
 	if !pathExists(t, dir) || pathExists(t, older) {
@@ -683,7 +685,12 @@ func TestAStoppedCheckNeverReplacesACompletedVerdict(t *testing.T) {
 	verifyT(t, dir, backup.CheckQuick)
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	if _, err := backup.VerifySnapshot(ctx, dir, backup.VerifyOptions{}); !errors.Is(err, context.Canceled) {
+	_, err = backup.VerifySnapshot(ctx, dir, backup.VerifyOptions{})
+	// Its worker, and the write of INCOMPLETE a stop before the lock hands to
+	// one of its own (abandonPending), answer before they let go: their ends
+	// come before anything this test removes (backlog B871's round 3).
+	awaitClean(t)
+	if !errors.Is(err, context.Canceled) {
 		t.Errorf("a verification stopped before it began answered %v, want the stop", err)
 	}
 	requireVerdict(t, "the verdicts after a stopped check", listed(t, dir), backup.StateVerified, "", backup.StateFailed, backup.ReasonHash)
@@ -822,7 +829,9 @@ func TestAStalePendingReadsIncompleteAndAYoungOneSurvivesAPrune(t *testing.T) {
 	writeManifestT(t, young, m)
 	time.Sleep(1100 * time.Millisecond)
 	newer := verifiedSnapshot(t, src)
-	if _, err := backup.Prune(filepath.Dir(newer), 1); err != nil {
+	_, err = backup.Prune(filepath.Dir(newer), 1)
+	awaitClean(t) // its worker's end, which comes after its answer
+	if err != nil {
 		t.Fatal(err)
 	}
 	if !pathExists(t, young) {
@@ -873,7 +882,9 @@ func TestASyncFailureAfterTheVerdictsRenameReadsAsNotVerified(t *testing.T) {
 	if nv, ok := st.NewestVerified(); !ok || nv.DirName != filepath.Base(anchor) {
 		t.Errorf("the newest database-verified snapshot is %q, want the older anchor %q", nv.DirName, filepath.Base(anchor))
 	}
-	if pr, err := backup.Prune(filepath.Dir(dir), 1); err != nil || pr.Skipped {
+	pr, err := backup.Prune(filepath.Dir(dir), 1)
+	awaitClean(t) // its worker's end, which comes after its answer
+	if err != nil || pr.Skipped {
 		t.Fatalf("the prune answered %+v, %v; want it run: a skipped prune keeps the anchor whatever it reads", pr, err)
 	}
 	if !pathExists(t, anchor) {
@@ -898,6 +909,7 @@ func TestALegacyManifestReadsUnverified(t *testing.T) {
 	requireVerdict(t, "a legacy snapshot", listed(t, dir), backup.StateUnverified, backup.ReasonNoBaseline,
 		backup.StateUnverified, backup.ReasonNoBaseline)
 	res, err := backup.VerifySnapshot(t.Context(), dir, backup.VerifyOptions{Level: backup.CheckFull})
+	awaitClean(t) // its worker's end, which comes after its answer
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -913,6 +925,7 @@ func TestALegacyManifestReadsUnverified(t *testing.T) {
 		t.Fatal(err)
 	}
 	res, err = backup.VerifySnapshot(t.Context(), dir, backup.VerifyOptions{})
+	awaitClean(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1151,6 +1164,10 @@ func TestNoLockNoProtectedWork(t *testing.T) {
 			}
 			before := readBytes(t, filepath.Join(dir, backup.ManifestFile))
 			t.Cleanup(backup.SetTryLockBackupsForTest(func(*os.File) error { return tc.err }))
+			// Registered after the seam, so run before it goes back: a
+			// verification, a prune and a claim answer before their workers let
+			// go (backlog B871's round 3).
+			t.Cleanup(func() { awaitClean(t) })
 
 			res, err := backup.VerifySnapshot(t.Context(), dir, backup.VerifyOptions{})
 			if !errors.Is(err, backup.ErrBackupsUnlocked) || res.Recorded {

@@ -309,6 +309,13 @@ func TestARecordNotReadBackIsSaidApartFromItsWrite(t *testing.T) {
 			if tc == "a write that failed" {
 				t.Cleanup(backup.SetVerdictWriteFailuresForTest(func(string) error { return stageFailed }, nil, nil))
 			}
+			if tc != "a read-back given up" {
+				// Registered after every seam, so run before they go back: the
+				// verification answers before its worker lets go (backlog B871's
+				// round 3). A read-back given up is let go and waited for by its
+				// own cleanup, which a wait here would run before.
+				t.Cleanup(func() { awaitClean(t) })
+			}
 			res, err := backup.VerifySnapshot(context.Background(), dir, backup.VerifyOptions{BackupsRoot: root})
 			if res.RecordRead || !errors.Is(err, backup.ErrRecordNotReadBack) || res.ReadErr == nil {
 				t.Fatalf("the verification answered %v, read back %v (%v); want its read-back said to have read nothing, and why", err, res.RecordRead, res.ReadErr)

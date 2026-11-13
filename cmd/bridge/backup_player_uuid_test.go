@@ -20,11 +20,15 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/player/engine"
 )
 
-// runBackup runs bridge backup on cfgPath and returns the snapshot it wrote.
+// runBackup runs bridge backup on cfgPath and returns the snapshot it wrote,
+// once the verification it made has let go of what it held: it answers
+// before its worker lets go (backlog B871's round 3).
 func runBackup(t *testing.T, cfgPath string) string {
 	t.Helper()
 	var stdout, stderr strings.Builder
-	if code := backupCmd([]string{"--config", cfgPath}, &stdout, &stderr); code != 0 {
+	code := backupCmd([]string{"--config", cfgPath}, &stdout, &stderr)
+	awaitBackupHoldsDropped(t, "bridge backup")
+	if code != 0 {
 		t.Fatalf("bridge backup = %d\nstdout:\n%s\nstderr:\n%s", code, stdout.String(), stderr.String())
 	}
 	_, rest, ok := strings.Cut(stdout.String(), "Snapshot written: ")

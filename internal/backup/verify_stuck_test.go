@@ -310,7 +310,11 @@ func TestAnAbandonedCheckKeepsItsHoldsUntilItsCheckerEnds(t *testing.T) {
 	if pathExists(t, filepath.Join(root, backup.StuckMarkerName)) {
 		t.Error("the check's marker outlived it")
 	}
-	if _, err := backup.VerifySnapshot(t.Context(), other, backup.VerifyOptions{BackupsRoot: otherRoot}); err != nil {
+	_, err = backup.VerifySnapshot(t.Context(), other, backup.VerifyOptions{BackupsRoot: otherRoot})
+	// Its worker lets go after its answer: its end comes before the next
+	// hook is set (backlog B871's round 3).
+	awaitClean(t)
+	if err != nil {
 		t.Errorf("a verification in another backups folder once the check ended: %v", err)
 	}
 	// older's record holds a VERIFIED: where no directory can be synced, its
@@ -330,6 +334,8 @@ func TestAnAbandonedCheckKeepsItsHoldsUntilItsCheckerEnds(t *testing.T) {
 		t.Error("the capture's owner lock is still held once its check ended")
 	}
 	pr, err = backup.Prune(root, 1)
+	// Its worker's end, which comes after its answer, before the seams go back.
+	awaitClean(t)
 	if err != nil || pr.Skipped || pathExists(t, oldest) {
 		t.Errorf("the prune once the check ended: %+v, %v; want it run, the oldest verified snapshot gone", pr, err)
 	}
@@ -493,10 +499,16 @@ func TestAPanicInAVerificationLetsGoOfWhatItHolds(t *testing.T) {
 			}
 			awaitVerificationEnd(t, c.Dir)
 			awaitSlotFree(t)
-			if pr, err := backup.Prune(filepath.Dir(c.Dir), 7); err != nil || pr.Skipped {
+			// The prune and the verification answer before their workers let
+			// go: each worker's end comes before the next step and before the
+			// seams go back (backlog B871's round 3).
+			pr, err := backup.Prune(filepath.Dir(c.Dir), 7)
+			awaitClean(t)
+			if err != nil || pr.Skipped {
 				t.Errorf("a prune after the panic: %+v, %v; want it run, the lock let go", pr, err)
 			}
 			res2, err := backup.VerifySnapshot(t.Context(), c.Dir, backup.VerifyOptions{})
+			awaitClean(t)
 			if err != nil || res2.Record.DatabaseState != backup.StateVerified {
 				t.Errorf("the next verification after the panic: %s, %v; want it run and VERIFIED", res2.Record.DatabaseState, err)
 			}

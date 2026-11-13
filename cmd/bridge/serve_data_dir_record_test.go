@@ -46,7 +46,8 @@ func recordedDataDir(t *testing.T, cfg string) string {
 	return r.DataDir
 }
 
-// stopServed stops a serve bootServe started and waits for it to exit 0.
+// stopServed stops a serve bootServe started, waits for it to exit 0, and
+// then for the backup workers it left to let go (awaitBackupHoldsDropped).
 func stopServed(t *testing.T, b servedBridge) {
 	t.Helper()
 	b.stop()
@@ -58,6 +59,7 @@ func stopServed(t *testing.T, b servedBridge) {
 	case <-serveGiveUp(t):
 		t.Fatalf("serve did not stop; stderr=%s\nserve's goroutines:\n%s", b.stderr.String(), serveStacks())
 	}
+	awaitBackupHoldsDropped(t, "serve")
 }
 
 // dataDirGoneLine is what serve's refusal of dataDir says first.

@@ -206,10 +206,13 @@ func TestBridgeBackupVerifyRecordsAndSaysTheVerdict(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Each run names the install's config, whose backups folder the
-	// snapshot must be in (backlog B653's second round).
+	// snapshot must be in (backlog B653's second round), and returns once the
+	// verification it made has let go of what it held: it answers before its
+	// worker lets go (backlog B871's round 3).
 	run := func(args ...string) (int, string, string) {
 		var stdout, stderr bytes.Buffer
 		code := backupCmd(append([]string{"--config", cfgPath}, args...), &stdout, &stderr)
+		awaitBackupHoldsDropped(t, "bridge backup --verify")
 		return code, stdout.String(), stderr.String()
 	}
 	if code, out, errs := run("--verify", dir, "--full"); code != 0 || !strings.Contains(out, "database: VERIFIED (full check") {
