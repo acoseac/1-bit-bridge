@@ -168,10 +168,12 @@ func TestFoldingInAnswersAsThisHostsVolumeLooksNamesUp(t *testing.T) {
 // os.SameFile could not open a lookup by (on Windows it opens the path the
 // lookup was asked for, and answers false where it cannot), what happens to
 // it before each lookup (change, handed the name looked up) and before each
-// read of its listing after the first (relist, the probe's re-reads), so that
-// a test can change it between the probe's lookups, or between them and a
-// re-read, and how many entries each read of its listing asked for (reads,
-// each n as readDir was handed it).
+// read of its listing after the first (relist, the probe's re-reads, never
+// within one), so that a test can change it between the probe's lookups, or
+// between them and a re-read, the reads that come back short with no error
+// (short: how many names the read of that index answers, the first read's
+// index 0), and how many entries each read of its listing asked for (reads,
+// each n as readDir was handed it, one a listing).
 type probeFolder struct {
 	listing    []string
 	ids        map[string]int
@@ -179,6 +181,7 @@ type probeFolder struct {
 	cannotOpen map[string]bool
 	change     func(f *probeFolder, name string)
 	relist     func(f *probeFolder)
+	short      map[int]int
 	reads      []int
 }
 
@@ -196,26 +199,32 @@ func (probeInfo) ModTime() (t time.Time) { return t }
 func (probeInfo) IsDir() bool            { return false }
 func (probeInfo) Sys() any               { return nil }
 
-// readDir answers the listing, n names of it at most where n > 0, as
-// os.File.ReadDir does: fewer than n only at its end, and none there with
-// io.EOF.
+// readDir answers the listing as osFolding's readDir does, one listing a
+// call: where n > 0, its first n names at most, with io.EOF where it ends
+// before n and no error where it holds n or more; where n <= 0, all of it,
+// with no error. A read short holds a count for answers that many names and
+// no error, whatever follows them, as a reader that came back short does.
 func (f *probeFolder) readDir(_ string, n int) ([]fs.DirEntry, error) {
 	if len(f.reads) > 0 && f.relist != nil {
 		f.relist(f)
 	}
+	read := len(f.reads)
 	f.reads = append(f.reads, n)
-	names := f.listing
-	if n > 0 && len(names) > n {
+	names, err := f.listing, error(nil)
+	switch {
+	case n > 0 && len(names) < n:
+		err = io.EOF
+	case n > 0:
 		names = names[:n]
 	}
-	if n > 0 && len(names) == 0 {
-		return nil, io.EOF
+	if m, ok := f.short[read]; ok && m < len(names) {
+		names, err = names[:m], nil
 	}
 	out := make([]fs.DirEntry, len(names))
 	for i, name := range names {
 		out[i] = fs.FileInfoToDirEntry(probeInfo{name: name})
 	}
-	return out, nil
+	return out, err
 }
 
 func (f *probeFolder) lstat(p string) (fs.FileInfo, error) {
@@ -502,6 +511,37 @@ func TestAFolderReadWholeIsReadAgainForOneEntryMoreAtMost(t *testing.T) {
 		if !slices.Equal(c.f.reads, c.reads) {
 			t.Errorf("%s: the reads of the listing asked for %v entries, want %v", c.name, c.f.reads, c.reads)
 		}
+	}
+}
+
+// TestAListingThatCameBackShortWithNoErrorIsNotWhole: a listing is whole only
+// where its read reached the end, never because it came back with fewer
+// entries than it asked for (B738's round 2, CodeRabbit on #1454). On Linux
+// os.File's ReadDir counts an entry before it stats it, and leaves out one gone
+// in between without giving its place back, so a folder its first read was
+// all of, grown past the bound, can come back from its re-read with 256 of the
+// 257 entries asked for and no error, the hard link FOLDER.JPG made beside
+// folder.jpg past them unread: the probe took that for the whole listing and
+// answered case-insensitive. Here the re-read comes back short so (short).
+func TestAListingThatCameBackShortWithNoErrorIsNotWhole(t *testing.T) {
+	f := &probeFolder{
+		listing: []string{"folder.jpg"},
+		ids:     map[string]int{"folder.jpg": 1},
+		short:   map[int]int{1: foldingProbeEntries},
+	}
+	done := false
+	f.change = func(f *probeFolder, _ string) {
+		if !done {
+			done = true
+			f.listing = append(append(f.listing, caseless(foldingProbeEntries)...), "FOLDER.JPG")
+			f.ids["FOLDER.JPG"] = 1
+		}
+	}
+	if got := foldingIn(f, "/music"); got != CaseUnknown {
+		t.Errorf("a re-read that came back short with no error, FOLDER.JPG unread, made the folder answer %s, want %s", got, CaseUnknown)
+	}
+	if want := []int{foldingProbeEntries, foldingProbeEntries + 1}; !slices.Equal(f.reads, want) {
+		t.Errorf("the reads of the listing asked for %v entries, want %v", f.reads, want)
 	}
 }
 
