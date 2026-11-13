@@ -568,6 +568,77 @@ func TestAKeptConfigThatDoesNotLoadInstallsNoService(t *testing.T) {
 	}
 }
 
+// TestAKeptConfigWhoseDataDirThisUserCannotMakeInstallsNoService: the exit
+// policy's half for a permission. A data directory that is not there, below a
+// parent this user may not write, is one serve's preparation cannot make as
+// this user, and the service init installs runs as this user: the run exits 1
+// in the preparation's words, saying to run init as the bridge's user or to
+// set dataDir to a directory that user can make or use, and makes and installs
+// nothing, kept each way. On main the run installed the service on a working
+// directory that was not there.
+func TestAKeptConfigWhoseDataDirThisUserCannotMakeInstallsNoService(t *testing.T) {
+	for _, run := range keepRuns {
+		t.Run(run.name, func(t *testing.T) {
+			skipUnlessModeBitsDeny(t, "root makes a directory in a parent whose mode bits deny it")
+			calls := standInForInitHost(t)
+			k := newKeptInstall(t)
+			parent := filepath.Join(k.base, "locked")
+			mkdirs(t, parent)
+			chmodForTest(t, parent, 0o500)
+			t.Cleanup(func() { _ = os.Chmod(parent, 0o700) })
+			dataDir := filepath.Join(parent, "bridge")
+			k.writeConfig(t, "dataDir: "+dataDir+"\n", "")
+			before := entriesUnder(t, k.base)
+
+			code, out := k.keep(t, run.stdin, run.flags...)
+			defer logRunOnFailure(t, out)
+			if code != 1 {
+				t.Errorf("a run keeping a config whose data directory this user cannot make exited %d, want 1", code)
+			}
+			for _, want := range []string{"init: the data directory " + dataDir + " cannot be used: it could not be made: ",
+				"this user cannot make it", "run init as the user the bridge runs as", keptConfigWords} {
+				if !strings.Contains(out, want) {
+					t.Errorf("the run does not say %q", want)
+				}
+			}
+			requireNoServiceWork(t, calls)
+			if after := entriesUnder(t, k.base); !slices.Equal(before, after) {
+				t.Errorf("the run changed what is there:\nbefore %q\nafter  %q", before, after)
+			}
+		})
+	}
+}
+
+// TestAKeptConfigsDataDirThisUserCannotWriteIsTaken (a guard): a data
+// directory that is there and that this user may not write is taken, as
+// serve's preparation takes it, which asks nothing of what can be written there
+// (B659): the run installs the service on it and changes nothing in it or of
+// it, its mode included. Green on main too.
+func TestAKeptConfigsDataDirThisUserCannotWriteIsTaken(t *testing.T) {
+	skipUnlessModeBitsDeny(t, "root writes a directory whose mode bits deny it")
+	calls := standInForInitHost(t)
+	k := newKeptInstall(t)
+	dataDir := filepath.Join(k.base, "disk", "bridge")
+	mkdirs(t, dataDir)
+	chmodForTest(t, dataDir, 0o500)
+	t.Cleanup(func() { _ = os.Chmod(dataDir, 0o700) })
+	k.writeConfig(t, "dataDir: "+dataDir+"\n", "")
+	before := entriesUnder(t, k.base)
+
+	code, out := k.keep(t, "", "--yes")
+	defer logRunOnFailure(t, out)
+	if code != 0 {
+		t.Fatalf("a run keeping a config whose data directory this user may not write exited %d", code)
+	}
+	requireInstalledOn(t, calls, dataDir)
+	if info, err := os.Stat(dataDir); err != nil || info.Mode().Perm() != 0o500 {
+		t.Errorf("the run changed the data directory it takes (stat: %v, %v)", info, err)
+	}
+	if after := entriesUnder(t, k.base); !slices.Equal(before, after) {
+		t.Errorf("the run changed what is there:\nbefore %q\nafter  %q", before, after)
+	}
+}
+
 // TestAKeptConfigWithAGoodDataDirIsKeptAsItIs (case 3, a guard): over an
 // install a serve has served from, its data directory there and holding the
 // identity its record holds, a run that keeps the config installs the service
