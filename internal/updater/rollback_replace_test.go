@@ -236,6 +236,17 @@ const (
 	stagePutBack     = "the aside put back"
 )
 
+// theSchedule is the waits between one rename's seven attempts that
+// rollbackRenameBackoff's doc gives: 50 ms doubling to 1.6 s, 3.15 s.
+var theSchedule = []time.Duration{50 * time.Millisecond, 100 * time.Millisecond, 200 * time.Millisecond,
+	400 * time.Millisecond, 800 * time.Millisecond, 1600 * time.Millisecond}
+
+// waitsBefore is what theSchedule waits before a rename's attempts after
+// the first, of n.
+func waitsBefore(n int) []time.Duration {
+	return theSchedule[:max(0, min(n-1, len(theSchedule)))]
+}
+
 // rollbackStage is the stage of the rename oldpath to newpath in a rollback
 // of dst to bak; missing says dst was not there as the rollback began.
 func rollbackStage(dst, bak string, missing bool, oldpath, newpath string) string {
@@ -268,7 +279,7 @@ func rollbackStage(dst, bak string, missing bool, oldpath, newpath string) strin
 // refused once for good, as a mapped image's is.
 func TestEachRollbackRenameIsMadeAgainWhileItsFileIsInUse(t *testing.T) {
 	inUse := inUseFailure(t)
-	every := len(rollbackRenameBackoff)
+	every := len(theSchedule) + 1
 	for _, tc := range []struct {
 		stage string
 		// refused is how many attempts at the stage meet the file in use,
@@ -353,7 +364,7 @@ func TestEachRollbackRenameIsMadeAgainWhileItsFileIsInUse(t *testing.T) {
 			if !maps.Equal(attempts, tc.attempts) {
 				t.Errorf("the renames each stage made = %v, want %v: the refused one made again, every other once", attempts, tc.attempts)
 			}
-			if want := rollbackRenameBackoff[1:tc.attempts[tc.stage]]; !slices.Equal(*waits, want) {
+			if want := waitsBefore(tc.attempts[tc.stage]); !slices.Equal(*waits, want) {
 				t.Errorf("the rollback waited %v, want %v", *waits, want)
 			}
 			for _, place := range []struct{ name, path, want string }{{"binary", dst, tc.dst}, {"backup", bak, tc.bak}} {
@@ -381,8 +392,9 @@ func TestEachRollbackRenameIsMadeAgainWhileItsFileIsInUse(t *testing.T) {
 // waits RenameWithRetry's budget at most, and every other taker of the lock
 // waits defaultStateLockWait for it.
 func TestTheRollbacksRenamesFitInsideTheMarkersLockWait(t *testing.T) {
-	if got := rollbackRenameBudget(); got != 3150*time.Millisecond || len(rollbackRenameBackoff) != 7 {
-		t.Errorf("one rename's waits = %s over %d attempts, want 3.15s over 7, as its doc says", got, len(rollbackRenameBackoff))
+	if want := append([]time.Duration{0}, theSchedule...); !slices.Equal(rollbackRenameBackoff, want) || rollbackRenameBudget() != 3150*time.Millisecond {
+		t.Errorf("one rename's schedule = %v, %s of waits, want %v, 3.15s over 7 attempts, as its doc says",
+			rollbackRenameBackoff, rollbackRenameBudget(), want)
 	}
 	held := scmStopWait + 3*rollbackRenameBudget() + 2*atomicwrite.RenameRetryBudget()
 	if held >= defaultStateLockWait {
