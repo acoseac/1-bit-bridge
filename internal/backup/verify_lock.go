@@ -288,9 +288,7 @@ func takeSlot(ctx context.Context, h *hold) (func(), error) {
 		return release, nil
 	default:
 	}
-	if onSlotWait != nil {
-		onSlotWait()
-	}
+	waited := false
 	for {
 		notice := stuckNotice()
 		if holder := slotHolder.Load(); holder != nil {
@@ -298,11 +296,25 @@ func takeSlot(ctx context.Context, h *hold) (func(), error) {
 				return nil, stillRunning(check)
 			}
 		}
+		// The wait's seam runs once the waiter holds the notice of the next
+		// mark and has found the slot's holder not given up, so a give-up
+		// after it reaches the waiter as that notice (backlog B872).
+		if !waited {
+			waited = true
+			if onSlotWait != nil {
+				onSlotWait()
+			}
+		}
 		select {
 		case verifySlot <- struct{}{}:
 			slotHolder.Store(h)
 			return release, nil
 		case <-notice:
+			// A hold was given up: the next look asks whether it holds the
+			// slot.
+			if onSlotNotice != nil {
+				onSlotNotice()
+			}
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}

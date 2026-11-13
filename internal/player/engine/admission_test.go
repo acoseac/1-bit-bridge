@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -184,6 +185,7 @@ func TestAParkedEditIsAnsweredWithinReserveTimeoutOfItsPark(t *testing.T) {
 	ids := h.insert("a", "b")
 	_, calls := h.hangReservations()
 	mark := h.appliedMark()
+	edits := mark
 	first := async(func() error { _, err := h.eng.InsertAfter(bg, 0, ref("x"), nil); return err })
 	h.waitApplied("admitted insert", mark)
 	h.files.waitFor(t, "the reservation write the insert waits for", func() bool { return h.files.reserveCalls > calls })
@@ -200,13 +202,25 @@ func TestAParkedEditIsAnsweredWithinReserveTimeoutOfItsPark(t *testing.T) {
 	// answers after that step.
 	h.must("a command after the delete", h.eng.SetRepeat(bg, false))
 	h.clk.Advance(ReserveTimeout - later - time.Nanosecond)
-	h.must("a command a nanosecond before the bound", h.eng.SetRepeat(bg, false))
-	select {
-	case err := <-first:
-		t.Fatalf("the first edit answered %v before ReserveTimeout passed", err)
-	case err := <-second:
-		t.Fatalf("the second edit answered %v before the first's bound", err)
-	default:
+	// Had the advance fired the bound, its message would be handled before
+	// this position of no session, which changes nothing: messages reach the
+	// owner in order, where a command's reply is no barrier for a timer's
+	// message, since the owner can take the command first (B605, B834). An
+	// edit is read as answered by the owner's note of it, which the step that
+	// answers a parked edit makes, never by its answer, which reaches the
+	// test through the edit's own goroutine, perhaps later than this read.
+	mark = h.appliedMark()
+	h.eng.evts.Position(0, Position{})
+	h.waitApplied("handled position", mark)
+	h.appliedMu.Lock()
+	insertRan := slices.Contains(h.appliedOps[edits:], "insert")
+	deleteRan := slices.Contains(h.appliedOps[edits:], "delete")
+	h.appliedMu.Unlock()
+	if insertRan {
+		t.Fatal("the first edit was answered before ReserveTimeout passed")
+	}
+	if deleteRan {
+		t.Fatal("the second edit was answered before the first's bound")
 	}
 	h.clk.Advance(time.Nanosecond)
 	h.refused("the first edit, ReserveTimeout after it parked", h.result("first", first), ReasonReservation)
