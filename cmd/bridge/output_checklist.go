@@ -105,11 +105,52 @@ func outputChecklist(ctx context.Context, src outputChecklistSource) ([]outputch
 // errOutputsNotWired is a checklist source with no outputs body to read.
 var errOutputsNotWired = errors.New("the outputs are not wired")
 
+// outputsReadBound is how long the checklist waits for the outputs body
+// (backlog B650): the builder's own limit, 15 s (api's outputBuildLimit), by
+// which a build that can answer has answered, and five seconds more. The
+// build proves each library root's path rule (mpd.ProveRoots), whose stat of
+// a root whose mount does not answer holds it in the kernel with no end, on
+// the goroutine of the call that began it, so bridge doctor on a player box
+// printed nothing and the console's doctor never answered. A body not read in
+// time is the input of a box that could not be read, whose Player line says
+// so; the build left holding the stat is the builder's one flight, which a
+// later call joins and leaves with its own context. A test shortens it.
+var outputsReadBound = 20 * time.Second
+
 func readOutputs(ctx context.Context, src outputChecklistSource) (api.OutputsResponse, error) {
 	if src.Outputs == nil {
 		return api.OutputsResponse{}, errOutputsNotWired
 	}
-	return src.Outputs(ctx)
+	type read struct {
+		resp api.OutputsResponse
+		err  error
+	}
+	// Buffered: a read that answers after the wait keeps its answer here and
+	// blocks no one.
+	got := make(chan read, 1)
+	go func() {
+		resp, err := src.Outputs(ctx)
+		got <- read{resp, err}
+	}()
+	bound := outputsReadBound
+	t := time.NewTimer(bound)
+	defer t.Stop()
+	select {
+	case r := <-got:
+		return r.resp, r.err
+	case <-t.C:
+	case <-ctx.Done():
+	}
+	// An answer ready as the wait ended is still the answer.
+	select {
+	case r := <-got:
+		return r.resp, r.err
+	default:
+	}
+	if err := ctx.Err(); err != nil {
+		return api.OutputsResponse{}, err
+	}
+	return api.OutputsResponse{}, fmt.Errorf("it did not answer within %s: a library root, or MPD's music directory, may be on a mount that does not answer", bound)
 }
 
 // unreadInput is the input when the outputs body could not be read: the

@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -10,6 +12,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/admin"
@@ -251,12 +255,32 @@ func buildDoctorDepsFor(cfgPath string, absentIsPreSetup bool) doctor.Deps {
 	return buildDoctorDepsWith(cfgPath, absentIsPreSetup, doctorDACHost())
 }
 
+// cliRootProbes is the CLI's works on the library roots (backlog B650): one
+// for the process, so the runs one process makes (bridge doctor --fix's two,
+// the launcher's doctor row and its Setup's preflight, as often as they run)
+// find a root that never answered still out, rather than each leaving a
+// goroutine of its own behind. The console's runner keeps one of its own
+// (adminDoctorRunnerWith). A test that stands in for a root replaces it, and
+// puts it back once every work it held has ended.
+var cliRootProbes = doctor.NewRootProbes()
+
 // buildDoctorDepsWith is buildDoctorDepsFor with the host the player-dac line
 // reads (B676): bridge doctor's own process beside the running bridge
 // (doctorDACHost), or, for the console's doctor, the serving process
-// (servingDACHost, adminDoctorRunnerFor).
+// (servingDACHost, adminDoctorRunnerFor). It is a run of the CLI's works on
+// the library roots (cliRootProbes) that no caller stops.
 func buildDoctorDepsWith(cfgPath string, absentIsPreSetup bool, dacHost dacAccessHost) doctor.Deps {
+	return buildDoctorDepsRun(context.Background(), cfgPath, absentIsPreSetup, dacHost, cliRootProbes.BeginRun())
+}
+
+// buildDoctorDepsRun is buildDoctorDepsWith as run, a run of a runner's works
+// on the library roots, which ctx stops: the console's runner passes its
+// request's context and a run of the RootProbes it keeps. The config's load
+// is one of those works (loadDoctorConfig), and the Deps carry the run, so
+// every check that touches a root waits on the same runner's works.
+func buildDoctorDepsRun(ctx context.Context, cfgPath string, absentIsPreSetup bool, dacHost dacAccessHost, run *doctor.ProbeRun) doctor.Deps {
 	d := doctor.Deps{
+		RootProbes: run,
 		// The ports `bridge init` writes, which a run that finds no config
 		// grades. A config that loads replaces them below. One that was
 		// named or found and did not load leaves them here, and the port
@@ -325,8 +349,10 @@ func buildDoctorDepsWith(cfgPath string, absentIsPreSetup bool, dacHost dacAcces
 		// the link and graded another file (B506's third round).
 		d.ConfigFile.Path = asWrittenOrAsGiven(path)
 		// Loaded by its absolute name so a load error spells the path the
-		// way the report does (config.Load absolutizes it anyway).
-		cfg, err := config.Load(d.ConfigFile.Path)
+		// way the report does (config.Load absolutizes it anyway), as a work
+		// of the run's works on the roots, which its validation may wait on
+		// (backlog B650).
+		cfg, unfinished, err := loadDoctorConfig(ctx, run, d.ConfigFile.Path)
 		// One that is there and does not load is REPORTED, never graded
 		// as though it were absent. Every command that reads it refuses
 		// it, so an "all clear" beside it would describe an install
@@ -335,6 +361,11 @@ func buildDoctorDepsWith(cfgPath string, absentIsPreSetup bool, dacHost dacAcces
 		// platform config is fine, because it is what `bridge status`
 		// and `bridge serve` run from there would read.
 		d.ConfigFile.LoadErr = err
+		// A load that gave no answer sets nothing the report can trust but
+		// the roots the file names, read without touching them, which are
+		// what it waits on: library-roots probes them, and names the one
+		// that does not answer.
+		d.LibraryRoots = unfinished
 		if err == nil {
 			d.DataDir = cfg.DataDir
 			// Whether serve can prepare that data directory, the player on or
@@ -571,6 +602,60 @@ func asWrittenOrAsGiven(p string) string {
 		return abs
 	}
 	return p
+}
+
+// loadDoctorConfig is the doctor's load of the config at path (backlog B650):
+// config.Load as a work of run's runner, waited for as a probe of a library
+// root is, since its validation of upscale.variantsDir and upscale.tempDir
+// resolves each root, and a root whose mount does not answer holds it in the
+// kernel with no end, before any check has run. The roots the file names,
+// read without touching them (config.LibraryRootsOf), are probed from now,
+// beside the load, so a load that does not finish costs the run one bound,
+// and the run still names the root that holds it. Where the load gave the run
+// no answer, err is a *doctor.UnfinishedLoadError and unfinished is those
+// roots; it is nil otherwise.
+func loadDoctorConfig(ctx context.Context, run *doctor.ProbeRun, path string) (cfg *config.Config, unfinished []string, err error) {
+	data, readErr := os.ReadFile(path)
+	var roots []string
+	if readErr == nil {
+		if named, rootsErr := config.LibraryRootsOf(path, data); rootsErr == nil {
+			roots = named
+			run.BeginRoots(roots)
+		}
+	}
+	type loaded struct {
+		cfg *config.Config
+		err error
+	}
+	got, wait := doctor.Bounded(ctx, run, doctorConfigKey(path, data), func() loaded {
+		cfg, err := config.Load(path)
+		return loaded{cfg, err}
+	})
+	if !wait.Answered() {
+		return nil, roots, &doctor.UnfinishedLoadError{Wait: wait}
+	}
+	return got.cfg, nil, got.err
+}
+
+// doctorConfigKey is the key of the doctor's load of the config at path,
+// whose bytes are data, among its runner's works: the path, and a digest of
+// what config.Load reads, the bytes and every BRIDGE_ variable (any case: the
+// names Windows takes for them). A load out over the file as it was, one a
+// root that does not answer holds, is never taken for the file as it is now:
+// once the console's operator has removed that root, the next run loads the
+// file as edited.
+func doctorConfigKey(path string, data []byte) string {
+	h := sha256.New()
+	h.Write(data)
+	env := os.Environ()
+	slices.Sort(env)
+	for _, kv := range env {
+		if strings.HasPrefix(strings.ToUpper(kv), "BRIDGE_") {
+			h.Write([]byte{0})
+			h.Write([]byte(kv))
+		}
+	}
+	return "config\x00" + path + "\x00" + hex.EncodeToString(h.Sum(nil))
 }
 
 // errStoreOfARefusedDataDir and errStoreNotChecked are a store probe's answer
@@ -1016,8 +1101,20 @@ func adminDoctorRunner(cfgPath string, ownedPorts []int, checklist func(context.
 // (servingDACHost): the serving process's credentials, and the binding its
 // player started with, which the line tells the config's apart from.
 func adminDoctorRunnerFor(cfgPath string, ownedPorts []int, checklist func(context.Context) []doctor.Check, dacHost dacAccessHost) func(context.Context) *admin.DoctorReport {
+	return adminDoctorRunnerWith(cfgPath, ownedPorts, checklist, dacHost, doctor.NewRootProbes())
+}
+
+// adminDoctorRunnerWith is adminDoctorRunnerFor over probes, the runner's
+// works on the library roots (backlog B650): made once, with the runner, and
+// kept across its runs, whose Deps it rebuilds every time, so a root whose
+// mount does not answer holds one goroutine however often the console's
+// doctor runs (GET /api/doctor runs on every settings render, unserialised),
+// and a later run says it still has not answered rather than asking it again.
+// Each run is stopped by its request's context. A test hands it probes whose
+// roots it stands in for.
+func adminDoctorRunnerWith(cfgPath string, ownedPorts []int, checklist func(context.Context) []doctor.Check, dacHost dacAccessHost, probes *doctor.RootProbes) func(context.Context) *admin.DoctorReport {
 	return func(ctx context.Context) *admin.DoctorReport {
-		d := buildDoctorDepsWith(cfgPath, false, dacHost)
+		d := buildDoctorDepsRun(ctx, cfgPath, false, dacHost, probes.BeginRun())
 		d.OwnedPorts = ownedPorts
 		// The player checklist from the serving process's own source, the
 		// one the dashboard's panel shows, rather than the one-shot outputs
