@@ -99,9 +99,15 @@ const backupHoldsBound = 30 * time.Second
 
 // onBackupHoldsAwait, nil but in TestADrainWaitsForTheBackupWorkerItsLoopLeft,
 // runs as a wait for the backup holds begins (awaitBackupHoldsDropped), given
-// what it waits after: the test lets a worker it parked go on there, and only
-// there.
+// what it waits after.
 var onBackupHoldsAwait func(what string)
+
+// onBackupHoldsPoll, nil but in TestADrainWaitsForTheBackupWorkerItsLoopLeft,
+// runs at each poll of that wait that finds a hold still active, given what
+// it waits after: the test lets a worker it parked go on there, and only
+// there, so the worker goes on only once the polling has begun (backlog
+// B871's round 4).
+var onBackupHoldsPoll func(what string)
 
 // awaitBackupHoldsDropped waits, once what a drain stopped has returned (what
 // names it), until every backup worker in this process has let go of what it
@@ -115,10 +121,12 @@ var onBackupHoldsAwait func(what string)
 // holds the backups folder's lock file under the test's directories: a drain
 // waits for them before the cleanups registered before it put seams back and
 // remove those directories, and before the next test sets the seams (backlog
-// B871's round 3). Past its drop a worker reads no seam but the atomic hook of
-// its last step (backup.SetAroundVerifyEndForTest) and the end hook it took as
-// it began. A test that parks a backup worker lets it go in a cleanup
-// registered after the drain, which runs before it.
+// B871's round 3). Past its drop a worker reads no seam but the atomic hooks
+// of its last step (backup.SetOnVerifyDroppedForTest,
+// backup.SetAroundVerifyEndForTest) and the end hook it took as it began, so
+// no active hold is what the wait guarantees. A test that parks a backup
+// worker lets it go in a cleanup registered after the drain, which runs
+// before it.
 func awaitBackupHoldsDropped(t *testing.T, what string) {
 	t.Helper()
 	if onBackupHoldsAwait != nil {
@@ -126,6 +134,9 @@ func awaitBackupHoldsDropped(t *testing.T, what string) {
 	}
 	by := time.Now().Add(backupHoldsBound)
 	for backup.ActiveHoldsForTest() != 0 {
+		if onBackupHoldsPoll != nil {
+			onBackupHoldsPoll(what)
+		}
 		if time.Now().After(by) {
 			t.Errorf("%d backup workers still held what they took %v after %s returned", backup.ActiveHoldsForTest(), backupHoldsBound, what)
 			return

@@ -95,6 +95,13 @@ func joinBoundedReadsOnCleanup(t *testing.T) {
 // (onBackupHoldsAwait): a drain that returned once the loop had would end the
 // subtest with the worker still parked. Red on the round before, whose drains
 // waited for the loop alone.
+//
+// Since round 4 the worker is let go only from the drain's polling, once a
+// poll has found its hold still active (onBackupHoldsPoll), and the drain's
+// return is held to what it guarantees, asked before the cleanup below lets
+// anything go: no backup hold active. Without the polling the worker is still
+// parked there, every time; round 3 let it go as the wait began, before any
+// poll, so a drain that never polled passed.
 func TestADrainWaitsForTheBackupWorkerItsLoopLeft(t *testing.T) {
 	_, dataDir, root := backupInstall(t)
 	src := backup.Sources{DataDir: dataDir, ManifestDB: manifest.DefaultDBPath(dataDir)}
@@ -115,12 +122,10 @@ func TestADrainWaitsForTheBackupWorkerItsLoopLeft(t *testing.T) {
 		}
 	}))
 	var waited atomic.Bool
-	prevAwait := onBackupHoldsAwait
-	onBackupHoldsAwait = func(string) {
-		waited.Store(true)
-		release()
-	}
-	t.Cleanup(func() { onBackupHoldsAwait = prevAwait })
+	prevAwait, prevPoll := onBackupHoldsAwait, onBackupHoldsPoll
+	onBackupHoldsAwait = func(string) { waited.Store(true) }
+	onBackupHoldsPoll = func(string) { release() }
+	t.Cleanup(func() { onBackupHoldsAwait, onBackupHoldsPoll = prevAwait, prevPoll })
 	// A drain that does not wait leaves the worker parked: it is let go here,
 	// and its end waited for, before the hooks and the folder go.
 	t.Cleanup(func() {
@@ -143,5 +148,8 @@ func TestADrainWaitsForTheBackupWorkerItsLoopLeft(t *testing.T) {
 	})
 	if !waited.Load() {
 		t.Fatal("the drain returned with the loop's verification worker parked as it let the lock go: it never waited for the backup holds")
+	}
+	if n := backup.ActiveHoldsForTest(); n != 0 {
+		t.Fatalf("the drain returned with %d backup hold(s) active, the loop's verification worker still parked as it lets the lock go: it never polled the holds down", n)
 	}
 }
