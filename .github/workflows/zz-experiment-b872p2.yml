@@ -1,9 +1,7 @@
 # EXPERIMENT (not for merge; B872 part 2). Runs only on a push to its own
-# branch. Two questions, each with and without CI's Defender exclusion of
-# Go's temp tree:
-#   realexe: the hold on a fresh, real-sized bridge binary, and after it is
-#            executed as the crash rollback executes its backup;
-#   stress:  how often the two Windows reds fail, run 20 times each.
+# branch. Second run: the real-binary hold experiment UNDER LOAD, beside a
+# whole ./cmd/bridge package run, as CI's Windows job runs it, with CI's
+# Defender exclusion of Go's temp tree.
 name: experiment-b872p2
 
 on:
@@ -14,15 +12,14 @@ permissions:
   contents: read
 
 jobs:
-  probe:
-    name: ${{ matrix.job }} (${{ matrix.variant }})
+  underload:
+    name: realexe under load (${{ matrix.try }})
     runs-on: windows-latest
-    timeout-minutes: 170
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
-        job: [realexe, stress]
-        variant: [default, excluded]
+        try: [1, 2, 3]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -33,36 +30,25 @@ jobs:
           check-latest: true
           cache: false
       - name: Exclude the Go temp tree from Defender (as gate.yml does)
-        if: matrix.variant == 'excluded'
         shell: bash
         run: |
           GOTMP=$(go run ./.github/scripts/printtmpdir 2>/dev/null || echo "$TEMP")
           echo "Go os.TempDir() = $GOTMP"
-          pwsh -Command "Add-MpPreference -ExclusionPath '$GOTMP'"
-          pwsh -Command "(Get-MpPreference).ExclusionPath"
-      - name: Defender's state
-        shell: pwsh
-        run: Get-MpComputerStatus | Select-Object RealTimeProtectionEnabled, OnAccessProtectionEnabled, BehaviorMonitorEnabled, IoavProtectionEnabled | Format-List
-      - name: realexe
-        if: matrix.job == 'realexe'
-        shell: bash
-        run: go test -tags ts_omit_webclient,ts_omit_debugeventbus -run '^TestExperimentRealExeHold$' -count 1 -v -timeout 150m ./internal/updater
-      - name: stress
-        if: matrix.job == 'stress'
+          pwsh -Command "Add-MpPreference -ExclusionPath '$GOTMP'" || true
+      - name: realexe beside the cmd/bridge package
         shell: bash
         run: |
-          start=$(date +%s)
           set +e
-          go test -tags ts_omit_webclient,ts_omit_debugeventbus \
-            -run '^(TestACrashRollbackToAReleaseBeforeTheSwitchNeedsItOn|TestACrashRollbackWithTheVariableOffPutsAReleaseBeforeTheSwitchBack)$' \
-            -count 20 -v -timeout 150m ./cmd/bridge > stress.log 2>&1
-          rc=$?
-          set -e
-          echo "go test exit $rc after $(( $(date +%s) - start )) s"
-          echo "--- results by test"
-          grep -E '^\s*--- (PASS|FAIL)' stress.log | sed -E 's/ \([0-9.]+s\)//' | sort | uniq -c
-          echo "--- durations (s) by test"
-          grep -E '^\s*--- (PASS|FAIL)' stress.log | sed -E 's/^\s*--- (PASS|FAIL): ([^ ]+) \(([0-9.]+)s\)/\2 \1 \3/' | sort | awk '{print}' | head -200
-          echo "--- failure lines"
-          grep -nE 'rollback|in use|being used|Access is denied|sharing' stress.log | head -80
+          go test -tags ts_omit_webclient,ts_omit_debugeventbus -timeout 60m ./cmd/bridge > load.log 2>&1 &
+          LOAD=$!
+          sleep 90
+          go test -tags ts_omit_webclient,ts_omit_debugeventbus -run '^TestExperimentRealExeHold$' -count 1 -v -timeout 60m ./internal/updater > realexe.log 2>&1
+          echo "realexe exit $?"
+          wait $LOAD
+          echo "load exit $?"
+          grep -E 'SUMMARY|built the bridge' realexe.log
+          grep -E 'rename bak->dst: [^<]' realexe.log | head -20
+          grep -cE 'probe after: [^<]' realexe.log
+          grep -E '^(ok|FAIL)|^--- FAIL' load.log | head -20
+          grep -nE 'being used by another process|Access is denied' load.log | head -20
           exit 0
