@@ -29,7 +29,13 @@ func TestNativeEarlyReleaseStopsTimer(t *testing.T) {
 		t.Fatal("early failed release left timer armed")
 	}
 	h.clk.Advance(ReleaseTimeout)
-	h.must("barrier", h.eng.SetRepeat(bg, false))
+	// The deadline's message, had the advance fired one, is handled before
+	// this position, which changes nothing: messages reach the owner in
+	// order, where a command's reply is no barrier for a timer's message,
+	// since the owner can take the command first (B605, B834).
+	m = h.appliedMark()
+	s.ev.Position(s.id, Position{})
+	h.waitApplied("handled position", m)
 	if len(h.snap().Faults()) != 1 {
 		t.Fatal("release failure recorded more than once")
 	}
@@ -58,21 +64,38 @@ func (pcmBudgetBackend) OwnsOccurrenceReservations() bool { return true }
 
 // TestPCMLookaheadHasNoNativeBudget pins a PCM session's lookahead past the
 // native occurrence budget: eight successors handed off under a limit of
-// four, and no fault. The one entry plays with repeat off, so the first
-// Prepare after its occurrence names the end, and repeat comes on while it
-// plays, which names the successor in a second Prepare after the same
-// occurrence: the lookahead waits for that one. A read of the first Prepare
-// after the occurrence took the end's nil when the second had not reached
-// the fake yet, and panicked (CI on #1362, under -race). The held row keeps
-// that second Prepare short of the fake until the read waits for it, the
-// latest a scheduler could leave it (B579).
+// four, the ninth named once the eighth is submitted, and no fault. The one
+// entry plays with repeat off, so the first Prepare after its occurrence
+// names the end, and repeat comes on while it plays, which names the
+// successor in a second Prepare after the same occurrence: the lookahead
+// waits for that one. A read of the first Prepare after the occurrence took
+// the end's nil when the second had not reached the fake yet, and panicked
+// (CI on #1362, under -race). The held row keeps that second Prepare short of
+// the fake until the read waits for it, the latest a scheduler could leave it
+// (B579).
+//
+// The faults are read once the owner has noted the eighth Submitted and the
+// answer of the Prepare that named the eighth successor: the ninth is handed
+// off in the later of the two steps, the Submitted's or, while that Prepare
+// is still under way, its answer's, since reconcile names nothing while a
+// Prepare is under way. The
+// Submitteds are counted from one mark taken before the first: a mark taken
+// before the eighth can come before the seventh's note and take it for the
+// eighth's. A command's reply orders no message posted before it, since the
+// owner can take the command first, and SetRepeat(false), the barrier here
+// until B834, then also turned off what names the ninth, so repeat stays on.
+// The late row answers the Prepare that named the eighth successor only once
+// the eighth Submitted is noted, so the ninth is handed off in that answer's
+// step (B834, from B827's census).
 func TestPCMLookaheadHasNoNativeBudget(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		hold bool
+		late bool
 	}{
-		{"as it comes", false},
-		{"the second Prepare held until the read waits", true},
+		{"as it comes", false, false},
+		{"the second Prepare held until the read waits", true, false},
+		{"the Prepare that named the eighth successor answered after its Submitted", false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newHarness(t)
@@ -100,6 +123,24 @@ func TestPCMLookaheadHasNoNativeBudget(t *testing.T) {
 					}
 				})
 			}
+			late := newGate()
+			if tc.late {
+				h.be.script(func() {
+					named := 0
+					h.be.onPrepare = func(ctx context.Context, _ *fakeSession, _ OccurrenceID, next *Occurrence) error {
+						h.be.mu.Lock()
+						if next != nil {
+							named++
+						}
+						eighth := next != nil && named == 8
+						h.be.mu.Unlock()
+						if eighth {
+							return late.wait(ctx, h.be, false)
+						}
+						return nil
+					}
+				})
+			}
 			_, s := h.playing(0, "pcm")
 			h.must("repeat", h.eng.SetRepeat(bg, true))
 			h.must("pause PCM", h.eng.Pause(bg))
@@ -113,6 +154,7 @@ func TestPCMLookaheadHasNoNativeBudget(t *testing.T) {
 			// occurrence has one.
 			after := s.first.ID
 			next := s.successor(after)
+			mark := h.appliedMark()
 			for i := range 8 {
 				if i > 0 {
 					next = s.prepared(after, 1)
@@ -120,7 +162,13 @@ func TestPCMLookaheadHasNoNativeBudget(t *testing.T) {
 				s.submitted(next.ID)
 				after = next.ID
 			}
-			h.must("barrier", h.eng.SetRepeat(bg, false))
+			h.waitAppliedTimes("handled submitted", mark, 8)
+			if tc.late {
+				late.open()
+			}
+			// Nine Prepares answered: the end's, named before repeat came on,
+			// and one naming each of the eight successors.
+			h.waitAppliedTimes("handled call prepare", 0, 9)
 			if len(h.snap().Faults()) != 0 {
 				t.Fatal("PCM lookahead acquired native refusal")
 			}
