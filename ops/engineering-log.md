@@ -95177,7 +95177,10 @@ TMPDIR `~/onebit/tmp`, the release tags): the four changed tests `-race
 56 s; `internal/player/engine` `-race -count=1 -timeout 120m`, ok in 26.2 s;
 `go vet` of the package for linux, darwin and windows (the last two
 `CGO_ENABLED=0`), clean; go1.27.3's gofmt lists none of the three changed
-files. `rules-b834-r1.patch` applies at this record's commit, and on a copy of
+files. Inside the build lock, the four tests' race binary in four lanes at
+GOMAXPROCS 1 and 2, beside eight busy processes, all pinned to CPUs 0 to 7:
+300 of 300 each, and each of the PCM test's rows, at both settings, in 71 s.
+`rules-b834-r1.patch` applies at this record's commit, and on a copy of
 the tracked tree with it applied `make docs-check` passes (`player.md` 98,265
 bytes) and `verify_moves.py --base HEAD` passes, the moved entry verbatim and
 the test-ordering line declared as an edit; `TestEveryCitedTestNameExists`
