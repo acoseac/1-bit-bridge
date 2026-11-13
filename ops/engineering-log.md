@@ -95604,7 +95604,7 @@ an assertion could skip (lines at 76fa0536):
 Each is joined right after the call (7e2a46aa). The second unjoined direct
 call Carbon named in verify_test.go was not there: the file's platform
 branches at 76fa0536 are a `t.Skip` before any worker (:435), an assertion
-after `verifyT` (:976) and `TestTwoVerificationsOfOneSnapshotWriteOneAtATime`'s
+after `verifyT` (:972) and `TestTwoVerificationsOfOneSnapshotWriteOneAtATime`'s
 outcomes (:1115), whose calls run in callers `joinBackupCallers` (:1075)
 joins, and every other call in it is joined right after it or by a cleanup
 registered before it. Not counted as unjoined: calls refused before any
