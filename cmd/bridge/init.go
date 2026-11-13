@@ -1161,6 +1161,32 @@ func promptLaunchMode(in *bufio.Reader, stdout io.Writer) launchChoice {
 	}
 }
 
+// initHostOps is what finishInit asks of the host to leave the bridge
+// running: a service's install and start (launchd's agent and systemd's user
+// unit through install, the Startup-folder launcher through installStartup,
+// the SCM service through installSCM), a bridge started detached, and the
+// console opened in a browser.
+type initHostOps struct {
+	install, installStartup, installSCM func(packaging.Params) (string, error)
+	spawnDetached                       func(binary, cfgPath, logPath string) error
+	openBrowser                         func(url string)
+}
+
+// initHost is finishInit's host. A test puts a stand-in in its place to run
+// init's launch path, and see the unit it would install, its working
+// directory included, without registering one with the host's service
+// manager, starting a bridge or opening a browser; the suite's TestMain puts
+// one that refuses. A package var for the reason uninstallService is one:
+// init runs on its caller's goroutine, and nothing reads it once initCmd has
+// returned.
+var initHost = initHostOps{
+	install:        packaging.Install,
+	installStartup: packaging.InstallStartup,
+	installSCM:     packaging.InstallWindowsService,
+	spawnDetached:  packaging.SpawnDetached,
+	openBrowser:    openInBrowser,
+}
+
 // finishInit installs the service (or tells the user how to run manually)
 // and prints the admin console URL. Separated from the main init path so
 // the "keep existing config" branch can reach it without rebuilding the
@@ -1223,7 +1249,7 @@ func finishInit(in *bufio.Reader, nonInteractive bool, stdout, stderr io.Writer,
 		}
 		fmt.Fprintf(stdout, "\nAdmin console: %s\n", browseURL)
 		if serverIsLive {
-			openInBrowser(browseURL)
+			initHost.openBrowser(browseURL)
 		}
 		fmt.Fprintf(stdout, "\nDone. Open the admin console to add library folders and pair iOS devices.\n")
 	}
@@ -1307,7 +1333,7 @@ func finishInit(in *bufio.Reader, nonInteractive bool, stdout, stderr io.Writer,
 	if choice.useService {
 		// SCM install. Requires admin; fails otherwise with a clear
 		// "access denied" from the SCM layer.
-		unitPath, err = packaging.InstallWindowsService(params)
+		unitPath, err = initHost.installSCM(params)
 		if err != nil {
 			fmt.Fprintf(stderr, "Windows Service install: %v\n", err)
 			fmt.Fprintf(stderr, "If the error mentions \"access\" or \"denied\", re-run init from an elevated PowerShell.\n")
@@ -1334,9 +1360,9 @@ func finishInit(in *bufio.Reader, nonInteractive bool, stdout, stderr io.Writer,
 		// (CodeRabbit / Gemini on PR #73 — first cut tied this to
 		// `choice.spawnNow` and missed the non-interactive default.)
 		if runtime.GOOS == "windows" {
-			unitPath, err = packaging.InstallStartup(params)
+			unitPath, err = initHost.installStartup(params)
 		} else {
-			unitPath, err = packaging.Install(params)
+			unitPath, err = initHost.install(params)
 		}
 		if err != nil {
 			fmt.Fprintf(stderr, "service install: %v\n", err)
@@ -1389,7 +1415,7 @@ func spawnNowOrWarn(stdout, stderr io.Writer, binary, cfgPath, logPath, adminAdd
 		fmt.Fprintf(stdout, "A bridge is already running on %s:%d; skipping auto-start.\n", host, port)
 		return true
 	}
-	if err := packaging.SpawnDetached(binary, cfgPath, logPath); err != nil {
+	if err := initHost.spawnDetached(binary, cfgPath, logPath); err != nil {
 		fmt.Fprintf(stderr, "auto-start failed: %v\n", err)
 		fmt.Fprintln(stderr, "Launcher is installed — the bridge will start at next logon. Or run:")
 		fmt.Fprint(stderr, shellHandoff(binary, cfgPath))

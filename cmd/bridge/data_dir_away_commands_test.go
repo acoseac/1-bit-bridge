@@ -90,8 +90,9 @@ func runCLI(t *testing.T, args ...string) (int, string) {
 // awayCommand is one command over an away install, its confirmation skipped
 // and any input given.
 type awayCommand struct {
-	// name is the command as its refusal names it.
-	name string
+	// name is the command as its refusal names it, and label, where it is
+	// not "", tells a run of it from another run of it in the test's name.
+	name, label string
 	// roots and extra shape the install (newAwayDataDir).
 	roots int
 	extra string
@@ -163,7 +164,12 @@ func awayCommands(snap, dacRoot string) []awayCommand {
 		{name: "tsnet logout", extra: "tailscale:\n    mode: tsnet\n", run: cli("tsnet", "logout", "CFG", "--force")},
 		{name: "tsnet auth", extra: "tailscale:\n    mode: tsnet\n", run: tsnetWithoutItsServer("auth")},
 		{name: "tsnet status", extra: "tailscale:\n    mode: tsnet\n", run: tsnetWithoutItsServer("status")},
-		{name: "init", run: cli("init", "--dir", "BASE", "--yes", "--force", "--library", "LIB", "--no-service", "--skip-doctor")},
+		{name: "init", label: "rewriting the config",
+			run: cli("init", "--dir", "BASE", "--yes", "--force", "--library", "LIB", "--no-service", "--skip-doctor")},
+		// A run that keeps the config prepares the data dir its service needs
+		// (backlog B664), so it asks first, as a rewrite does.
+		{name: "init", label: "keeping the config",
+			run: cli("init", "--dir", "BASE", "--yes", "--library", "LIB", "--no-service", "--skip-doctor")},
 	}
 }
 
@@ -226,7 +232,11 @@ func TestEveryCommandThatWritesTheDataDirRefusesItWhileItsVolumeIsAway(t *testin
 	_, _, snap := seedRestorableInstall(t, closedAdminAddr(t))
 	dacRoot := dacTree(t)
 	for _, c := range awayCommands(snap, dacRoot) {
-		t.Run(c.name, func(t *testing.T) {
+		name := c.name
+		if c.label != "" {
+			name += " " + c.label
+		}
+		t.Run(name, func(t *testing.T) {
 			roots := c.roots
 			if roots == 0 {
 				roots = 1
@@ -252,14 +262,15 @@ func TestEveryCommandThatWritesTheDataDirRefusesItWhileItsVolumeIsAway(t *testin
 }
 
 // TestTheDiagnosticsStayAvailableWhileTheDataDirsVolumeIsAway: what only
-// reads the data dir, and init's run that keeps the config, refuse nothing
-// and make nothing there: token list, cert info, status, logs (a log of the
-// test's own), update --check (its release check asked of a server of the
-// test's own) and init keeping the config. bridge doctor, --fix or not, fails
-// its data-dir line in serve's words and makes nothing there either: every
-// open of the store it makes asks first whether the database is there
-// (TestBothDoctorsFailADataDirItsRecordNamesWhileItsVolumeIsAway reads the
-// line itself).
+// reads the data dir refuses nothing and makes nothing there: token list,
+// cert info, status, logs (a log of the test's own) and update --check (its
+// release check asked of a server of the test's own). bridge doctor, --fix or
+// not, fails its data-dir line in serve's words and makes nothing there
+// either: every open of the store it makes asks first whether the database is
+// there (TestBothDoctorsFailADataDirItsRecordNamesWhileItsVolumeIsAway reads
+// the line itself). init's run that keeps the config was one of these until
+// backlog B664: it prepares the data dir its service needs now, and is one of
+// awayCommands.
 func TestTheDiagnosticsStayAvailableWhileTheDataDirsVolumeIsAway(t *testing.T) {
 	cli := func(args ...string) func(t *testing.T, a awayDataDir) (int, string) {
 		return func(t *testing.T, a awayDataDir) (int, string) {
@@ -291,8 +302,6 @@ func TestTheDiagnosticsStayAvailableWhileTheDataDirsVolumeIsAway(t *testing.T) {
 		{name: "token list", run: cli("token", "list", "--config", "CFG"), code: 0},
 		{name: "cert info", run: cli("cert", "info", "--config", "CFG"), code: 1},
 		{name: "status", run: cli("status", "--config", "CFG"), code: 1},
-		{name: "init keeping the config", code: 0,
-			run: cli("init", "--dir", "BASE", "--yes", "--library", "LIB", "--no-service", "--skip-doctor")},
 		{name: "doctor", run: cli("doctor", "--config", "CFG"), code: 1,
 			says: "bridge serve will not start: the data directory "},
 		{name: "doctor --fix", run: cli("doctor", "--fix", "--config", "CFG"), code: 1,
