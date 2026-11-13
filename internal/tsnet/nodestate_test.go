@@ -407,19 +407,22 @@ func TestAStateFileThatHoldsNothingRefusesTheStart(t *testing.T) {
 			}
 			t.Cleanup(func() { _ = s.Close() })
 
+			// Every assertion reports, so a start that went on, or one that
+			// moved the file aside, shows each thing it did.
 			err = s.Start(context.Background())
 			if err == nil {
-				t.Fatal("Start over a state file that holds nothing brought the node up")
-			}
-			mustSayTheStateHoldsNothing(t, err.Error(), c.holds, dir)
-			var empty *EmptyStateError
-			if !errors.As(err, &empty) || empty.WhiteSpace != (c.body != "") {
-				t.Errorf("Start = %#v, want an *EmptyStateError with WhiteSpace %v", err, c.body != "")
-			} else if want := empty.Error(); err.Error() != want {
-				t.Errorf("Start says %q, want the refusal's words alone: %q", err, want)
-			}
-			if last := s.LastStartError(); last == nil || last.Error() != err.Error() {
-				t.Errorf("LastStartError = %v, want the refusal Start returned", last)
+				t.Error("Start over a state file that holds nothing brought the node up")
+			} else {
+				mustSayTheStateHoldsNothing(t, err.Error(), c.holds, dir)
+				var empty *EmptyStateError
+				if !errors.As(err, &empty) || empty.WhiteSpace != (c.body != "") {
+					t.Errorf("Start = %#v, want an *EmptyStateError with WhiteSpace %v", err, c.body != "")
+				} else if want := empty.Error(); err.Error() != want {
+					t.Errorf("Start says %q, want the refusal's words alone: %q", err, want)
+				}
+				if last := s.LastStartError(); last == nil || last.Error() != err.Error() {
+					t.Errorf("LastStartError = %v, want the refusal Start returned", last)
+				}
 			}
 			for _, n := range built {
 				if n.startCalls() != 0 {
@@ -575,7 +578,8 @@ func (n *upstreamOverState) Start() error {
 }
 
 // stateDirAsItIs is what a test compares to see that nothing changed the
-// node's state dir: each entry's name and mode, and the state file's bytes.
+// node's state dir: each entry's name and mode, and the state file's bytes,
+// or that it is not there.
 func stateDirAsItIs(t *testing.T, dir string) string {
 	t.Helper()
 	entries, err := os.ReadDir(dir)
@@ -590,11 +594,14 @@ func stateDirAsItIs(t *testing.T, dir string) string {
 		}
 		fmt.Fprintf(&b, "%s %v\n", e.Name(), info.Mode())
 	}
-	state, err := os.ReadFile(filepath.Join(dir, stateFileName))
-	if err != nil {
+	switch state, err := os.ReadFile(filepath.Join(dir, stateFileName)); {
+	case errors.Is(err, os.ErrNotExist):
+		fmt.Fprintf(&b, "%s is not there\n", stateFileName)
+	case err != nil:
 		t.Fatal(err)
+	default:
+		fmt.Fprintf(&b, "%s holds %q\n", stateFileName, state)
 	}
-	fmt.Fprintf(&b, "%s holds %q\n", stateFileName, state)
 	return b.String()
 }
 

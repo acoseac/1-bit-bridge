@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -38,7 +39,8 @@ func writeTsnetStateFile(t *testing.T, dataDir, body string) string {
 }
 
 // tsnetStateDirAsItIs is what a test compares to see that nothing changed the
-// node's state dir: each entry's name and mode, and the state file's bytes.
+// node's state dir: each entry's name and mode, and the state file's bytes,
+// or that it is not there.
 func tsnetStateDirAsItIs(t *testing.T, dir string) string {
 	t.Helper()
 	entries, err := os.ReadDir(dir)
@@ -53,11 +55,14 @@ func tsnetStateDirAsItIs(t *testing.T, dir string) string {
 		}
 		fmt.Fprintf(&b, "%s %v\n", e.Name(), info.Mode())
 	}
-	state, err := os.ReadFile(filepath.Join(dir, "tailscaled.state"))
-	if err != nil {
+	switch state, err := os.ReadFile(filepath.Join(dir, "tailscaled.state")); {
+	case errors.Is(err, os.ErrNotExist):
+		b.WriteString("tailscaled.state is not there\n")
+	case err != nil:
 		t.Fatal(err)
+	default:
+		fmt.Fprintf(&b, "tailscaled.state holds %q\n", state)
 	}
-	fmt.Fprintf(&b, "tailscaled.state holds %q\n", state)
 	return b.String()
 }
 
