@@ -95172,3 +95172,149 @@ re-read, which the fix keeps.
 packages above. On CI's macOS and Windows legs the hard-link test on the
 host's volume skips, their default volumes folding case; the seam cases run on
 every platform.
+
+## 2026-11-13 — B738 round 2: a listing is whole only where its read reached the end
+
+Backlog B738's round 2, on `fix/b738-folding-probe-relist` (#1454) from
+40010cc5 (round 1 and its rules); the code is 9a7fecb7. CodeRabbit's finding on
+#1454, verified, and the brief's review (Codex, Carbon), which set the two
+layers' contracts. The rule is the B651 bullet's Don't in `scanner.md`
+(`rules-b738-r2.patch`), its long form in `ops/History-rules-scanner.md`; this
+is the evidence. Linux amd64 (legion0), Go 1.27.3, the Makefile's tags,
+TMPDIR on the home volume (ext4).
+
+**The finding.** `readListing` took a listing for whole where
+`err == nil && len(entries) < n` (casefold.go:438 at 40010cc5), and
+`os.File.ReadDir(n)` can come back short with no error before the end. Go
+1.27.3's `os/dir_unix.go` decrements n (:135-136) before it builds an entry,
+and leaves out one that `newUnixDirent` (:141-146) finds gone, without giving
+its place back. `newUnixDirent` stats only an entry the listing gives no type
+(`direntType` answers `^FileMode(0)` for DT_UNKNOWN: XFS without ftype, some
+FUSE and network filesystems) or a folder opened in an `os.Root`, which
+`fsutil.OpenDir` is not; so on this host's ext4 no read comes back short, and
+the case needs such a volume. There, a folder its first read was all of, grown
+past the bound, with one entry gone during its re-read, could come back from
+`ReadDir(257)` with 256 entries and no error and `FOLDER.JPG` unread, and the
+probe answered case-insensitive: B738's own failure by another route. The same
+reader also stops a call short, with no error, at a record it cannot parse
+(:101-110, :120-123): a read on goes past it where its length was read
+(`d.bufp` moved on, :106), and where it was not, the next call meets io.EOF at
+once, the end `os.ReadDir` gives there too.
+
+**macOS and Windows** (go1.27.3). `os/dir_darwin.go` loops while the entries
+it kept are fewer than asked (`len(names)+len(dirents)+len(infos) < size`,
+:56): an entry it leaves out (a zero inode, `.` or `..`, one gone before its
+stat, a kqueue descriptor's EBADF) costs nothing, and it comes back short only
+at `readdir_r`'s end (:63) or with an error. `os/dir_windows.go` takes n down
+only after it appends an entry (:210), passes over `.` and `..` before that
+(:180-184), and stats nothing (the listing carries each entry's information),
+so it comes back short only at `ERROR_NO_MORE_FILES` (:128-133), at an empty
+root's `ERROR_FILE_NOT_FOUND` (:134-146), or with an error. Neither answers
+short before the end, and the fix holds on both: the next read answers
+io.EOF.
+
+**The fix** (9a7fecb7). Completeness comes only from reaching the end of the
+same open folder. `readDirUpTo`, over a raw-reader interface (`dirReader`,
+os.File's `ReadDir`), is one listing: where n > 0 it reads on after a batch
+that came back short, each read asking for what is left of n and never for 0
+(which reads all the rest), and answers io.EOF beside what it read once a read
+reached the end, no error once it holds n (the end neither reached nor looked
+for), and a failed read's error beside what it read before it; a batch that
+brings nothing and no error ends it with no error, and one that brings more
+than was asked is cut to the bound, answering no error. Where n <= 0 it is one
+`ReadDir(n)`, which answers no error, not io.EOF, at its end
+(`listsSpellings` passes -1 for a folder its first read was not all of).
+`osFolding.readDir` opens the folder once and reads it through `readDirUpTo`;
+its `open` field lets a test script the raw reader under that readDir.
+`readListing` takes only the end for whole: io.EOF where n > 0, no error where
+n <= 0; never a read that came back short with no error, never one that holds
+n, never one beside a failed read. So a first read of a 256-entry folder stays
+not whole, while a re-read bounded at 257 of a 256-entry folder reads one
+more, meets io.EOF, and is whole. A small folder's first read and re-read each
+make one more `ReadDir` call than before, which meets the end.
+
+**The two layers.** `foldingFS.readDir` is the aggregate: one listing from one
+open, entries with io.EOF once it reached the end, no error where it holds n.
+`probeFolder`, the probe's fake, now answers that contract (its round-1 form
+answered no error beside a short listing, which `readListing` would now read
+as cut short, sending every small folder's re-read through n = -1); `short`
+makes a read of it come back short with no error. The brief's item 2, io.EOF
+only on an empty batch and never beside entries, describes the raw reader, and
+the review withdrew it for the fake. `reads` stays one entry a listing, with
+the n `readListing` asked for, and `relist` fires between listings only, so
+`[256 257 257]` and every round-1 assertion hold unchanged.
+
+**Item 3 dropped.** `git grep "answers as a large"` finds nothing; the
+FoldingIn doc already says a folder grown past the bound settles nothing, and
+so do the rules and the long form.
+
+**Siblings.** The other bounded `ReadDir(n)` loops (manifest's
+`dirHoldsLibraryContent` and `holdsSpellingOrContent`, integrity's
+`scanDirEntries`) read on until io.EOF or an error and take nothing from a
+batch's count: nothing to change there.
+
+**Tests** (casefold_test.go and casefold_listing_test.go).
+
+- `TestAListingThatCameBackShortWithNoErrorIsNotWhole`: a folder its first read
+  was all of, `FOLDER.JPG` made past the bound at the first lookup, its re-read
+  answering 256 of 257 entries and no error (`short`); Unknown wanted, reads
+  `[256 257]`.
+- `TestTheListingReadsOnPastAShortBatchUpToItsBound`: `readDirUpTo` over a
+  scripted reader (`scriptedListing`): short batches then the end, a short batch
+  then the rest of the bound, the bound in one batch, the end beside entries,
+  an empty listing, a failed read after a short batch and at once, a batch that
+  brings nothing, one that brings more than asked, and n = -1 whole and failed;
+  each read's size asserted (what is left, never 0 or less) and the total held
+  to the bound.
+- `TestAListingIsWholeOnlyWhereItsReadReachedTheEnd`: `readListing` over scripted
+  aggregate answers.
+- `TestTheFirstReadReadsOnPastAShortBatch`: the first read through osFolding's own
+  readDir, scripted (`osFolding.open`), the only name with a letter in its
+  second batch; this host's lookups decide the answer, and the reads ask for
+  `[256 255 254]`.
+- `TestTheOSListingEndsWhereItsReaderReachesTheEnd`: osFolding over this host's
+  reader on folders of 0, 255, 256 and 257 entries, read for 256, 257 and -1.
+
+**Red at 40010cc5.** With casefold.go as at 40010cc5 and the new casefold_test.go,
+`go test -tags ts_omit_webclient,ts_omit_debugeventbus -count=1 -v -run
+'^(TestAListingThatCameBackShortWithNoErrorIsNotWhole|…)$' ./internal/fsutil/`:
+"a re-read that came back short with no error, FOLDER.JPG unread, made the
+folder answer case-insensitive, want unknown"; the round-1 probe tests passed
+beside it with the new fake. The other new tests name `readDirUpTo` and
+`osFolding.open`, which 40010cc5 does not have; their reds are the controls'.
+
+**Negative controls**, each an uncommitted edit to casefold.go at 9a7fecb7, the
+whole fsutil package run under it, the file put back with `git checkout --` and
+its bytes checked against HEAD's; predicted in writing before the run, each
+matching its prediction case by case. `git status` was empty after them.
+
+| Control | Red |
+|---|---|
+| R1 `len(entries) < n` back as completeness (round 1's `readListing`) | `TestAListingThatCameBackShortWithNoErrorIsNotWhole` (case-insensitive, want Unknown), and `readListing`'s "short with no error" row |
+| R2 the continuation removed (one `ReadDir(n)` for n > 0) | every multi-step case of the scripted test (each read's size and what was read), the first read (Unknown, want case-sensitive; one read of 256), and the OS listing (255 read for 256 and 256 read for 257 answer no error and read as not whole) |
+| R3 n <= 0 sent through the loop | the scripted test's n = -1 cases (nothing read), and the OS listing's 257 read for -1 (0 entries) |
+| R4 each read asks for n, not for what is left | each read's size in the scripted test (`[5 5 5]`, …) and the first read (`[256 256 256]`); no answer changed |
+| R5 no cap on a batch that brings more than asked | that case: four entries and io.EOF, past the bound of two |
+| R6 a batch that brings nothing does not end the read | that case: io.EOF, one more read |
+| R7 a failed read answered as the end | the failed reads (io.EOF where the EIO is wanted) and the empty batch |
+| R8 a read that holds n answered as the end | the bound cases of the scripted test, and the OS listing's 256 for 256, 257 for 256 and 257 for 257 (io.EOF, whole) |
+
+Under R2 the round-1 probe tests on this host's disk stay green: a first read
+that came back short is not whole, and a re-read of such a folder falls back to
+a whole read, so their answers hold. The scripted and OS tests are what show
+the continuation.
+
+**Checks.**
+
+| Check | Result |
+|---|---|
+| go1.27.3's gofmt on casefold.go, casefold_test.go, casefold_listing_test.go | nothing listed |
+| `go vet` with the tags on ./internal/fsutil/: GOOS=linux, darwin, windows, and GOARCH=arm64 | exit 0 each; the vet tool ran (`-x`) |
+| the probe's 18 tests, `-race -count=200` | 3,600 of 3,600 passed, none skipped, no race |
+| `go test -race -count=1 -timeout 120m -p 3` of ./internal/fsutil/, ./internal/manifest/ and ./cmd/bridge/ (the probe's package and its callers), at 9a7fecb7, through the build slot | ok each: 3.6 s, 1620.1 s, 1620.1 s |
+| the rules patch applied to a copy of the tree | applies cleanly and gives the files its builder wrote; `make docs-check` ok there (scanner.md 45,403 to 45,550 bytes); the B651 entry's Don't sentences match between the line and its long form both ways (`mdblocks.dropped_donts`); `TestEveryCitedTestNameExists` passes there, and reports a ghost citation planted in the patched History |
+
+`make test` and `make build-all` were not run: the brief asked for the
+packages above. A short read cannot be made on this host's ext4 (every entry
+carries its type, so nothing is stat'ed during the listing); the scripted
+reader stands in for one.
