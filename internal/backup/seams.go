@@ -43,6 +43,19 @@ func SetOnSlotWaitForTest(fn func()) (restore func()) {
 	return func() { onSlotWait = prev }
 }
 
+// onSlotNotice, nil in production, runs when a verification waiting its turn
+// for this process's slot hears the notice of a hold given up (takeSlot),
+// before it looks again at whether the slot's holder is that hold.
+var onSlotNotice func()
+
+// SetOnSlotNoticeForTest sets the function a verification waiting its turn
+// runs when it hears the notice of a hold given up, and returns the restore.
+func SetOnSlotNoticeForTest(fn func()) (restore func()) {
+	prev := onSlotNotice
+	onSlotNotice = fn
+	return func() { onSlotNotice = prev }
+}
+
 // SetSyncVerdictForTest replaces the barrier a verdict's write runs once its
 // rename has landed (fsutil.SyncParentDir), and returns the restore.
 func SetSyncVerdictForTest(fn func(path string) error) (restore func()) {

@@ -310,6 +310,11 @@ func takeSlot(ctx context.Context, h *hold) (func(), error) {
 			slotHolder.Store(h)
 			return release, nil
 		case <-notice:
+			// A hold was given up: the next look asks whether it holds the
+			// slot.
+			if onSlotNotice != nil {
+				onSlotNotice()
+			}
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}

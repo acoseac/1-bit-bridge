@@ -459,17 +459,21 @@ func TestAVerificationBegunBeforeItsEndHookNeverRunsIt(t *testing.T) {
 // its own context ends or the check does (backlog B653's third round). The
 // first verification's deadline counts from its lock, which the test holds as
 // another process would until the second waits its turn, the first holding
-// the slot meanwhile; and the second's wait is signalled only once it holds
-// the notice of the next give-up and has found the first not given up
-// (SetOnSlotWaitForTest), so the give-up comes after that and reaches it as
-// that notice, however late the host runs either. The first's check, parked
-// before it reads anything (parkCheck), is given up and does not end. An
-// answer from the second before its wait is a refusal as it arrived, which
-// fails the case at once. Backlog B872: the second began once the first's
-// check had parked at SQLite's open, a park the first's deadline could cut
-// short, which left a wait with no bound that never ended; and the wait was
-// signalled before takeSlot asked whether the slot's holder was given up, so
-// a second verification refused as it arrived passed the case.
+// the slot meanwhile. The second is held where its wait is signalled
+// (SetOnSlotWaitForTest) until the first has answered its check given up, its
+// hold marked, so the give-up comes while the second waits, whatever the
+// host's pace, and is to reach it as the notice of that give-up, which it must
+// have heard (SetOnSlotNoticeForTest) when it answers. The first's check,
+// parked before it reads anything (parkCheck), is given up and does not end.
+// An answer from the second before its wait is a refusal as it arrived, which
+// fails the case at once. The hold is bounded, and let go at the test's end
+// before the callers are joined, whatever the first did. Backlog B872: the
+// second began once the first's check had parked at SQLite's open, a park the
+// first's deadline could cut short, which left a wait with no bound that
+// never ended; and takeSlot signalled the wait before it asked whether the
+// slot's holder was given up, so a second refused as it looked, never told,
+// passed the case. With that order put back, the hold makes the second find
+// the first given up with no notice heard, and the case fails saying so.
 func TestAVerificationWaitingItsTurnHearsOfACheckGivenUp(t *testing.T) {
 	first, err := backup.Snapshot(t.Context(), storeWithTracks(t, 5))
 	if err != nil {
@@ -483,11 +487,32 @@ func TestAVerificationWaitingItsTurnHearsOfACheckGivenUp(t *testing.T) {
 	t.Cleanup(backup.SetVerifyDeadlineForTest(deadline))
 	unlock := holdLockAsAnotherProcess(t, filepath.Dir(first))
 	lockWaiting, waiting := make(chan struct{}), make(chan struct{})
-	var lockWaited, waited sync.Once
+	// The second's wait is held until the first has answered its check given
+	// up (firstGivenUp) or the test ends (abort), at most holdBound, past which
+	// it goes on and says so to the test's goroutine (heldTooLong): a hook on
+	// the verification's goroutine never fails the case itself.
+	const holdBound = time.Minute
+	firstGivenUp, abort := make(chan struct{}), make(chan struct{})
+	heldTooLong, heard := make(chan struct{}, 1), make(chan struct{})
+	var lockWaited, waited, noticed sync.Once
 	t.Cleanup(backup.SetOnLockWaitForTest(func() { lockWaited.Do(func() { close(lockWaiting) }) }))
-	t.Cleanup(backup.SetOnSlotWaitForTest(func() { waited.Do(func() { close(waiting) }) }))
+	t.Cleanup(backup.SetOnSlotWaitForTest(func() {
+		waited.Do(func() {
+			close(waiting)
+			bound := time.NewTimer(holdBound)
+			defer bound.Stop()
+			select {
+			case <-firstGivenUp:
+			case <-abort:
+			case <-bound.C:
+				heldTooLong <- struct{}{}
+			}
+		})
+	}))
+	t.Cleanup(backup.SetOnSlotNoticeForTest(func() { noticed.Do(func() { close(heard) }) }))
 	entered, release := parkCheck(t, "")
-	callers := joinBackupCallers(t, func() { unlock(); release() })
+	letGo := sync.OnceFunc(func() { close(abort) })
+	callers := joinBackupCallers(t, func() { letGo(); unlock(); release() })
 	firstDone := make(chan error, 1)
 	callers.start(func() {
 		_, err := backup.VerifySnapshot(context.Background(), first, backup.VerifyOptions{})
@@ -499,9 +524,8 @@ func TestAVerificationWaitingItsTurnHearsOfACheckGivenUp(t *testing.T) {
 		_, err := backup.VerifySnapshot(context.Background(), other, backup.VerifyOptions{BackupsRoot: filepath.Dir(other)})
 		secondDone <- err
 	})
-	// The case's premise: the second waits its turn, the first not given up
-	// and the notice of its give-up in hand; an answer before that is a
-	// refusal as it arrived, never a notice heard.
+	// The case's premise: the second waits its turn, the first not given up;
+	// an answer before that is a refusal as it arrived, never a notice heard.
 	select {
 	case <-waiting:
 	case err := <-secondDone:
@@ -509,14 +533,30 @@ func TestAVerificationWaitingItsTurnHearsOfACheckGivenUp(t *testing.T) {
 	case <-time.After(30 * time.Second):
 		t.Fatal("the second verification never waited its turn")
 	}
-	// The first takes its lock at its next try, its deadline counted from it.
+	// The first takes its lock at its next try, its deadline counted from it,
+	// and is given up while the second is held at its wait.
 	unlocked := time.Now()
 	unlock()
 	err = requireReturnedWithin(t, firstDone, unlocked, deadline+backup.StopWriteBound/2+2*time.Second, "the verification whose check is given up")
 	if !errors.Is(err, backup.ErrCheckGivenUp) {
 		t.Fatalf("the first verification answered %v, want its check given up", err)
 	}
-	if err := requireReturnedWithin(t, secondDone, time.Now(), 2*time.Second, "the verification waiting its turn"); !errors.Is(err, backup.ErrCheckStillRunning) {
+	if _, marked := backup.StuckCheckHere(filepath.Dir(first)); !marked {
+		t.Fatal("the first verification answered its check given up with no mark of it standing")
+	}
+	close(firstGivenUp)
+	err = requireReturnedWithin(t, secondDone, time.Now(), 2*time.Second, "the verification waiting its turn")
+	select {
+	case <-heldTooLong:
+		t.Fatalf("the second verification's wait was let go after %v, the first not given up", holdBound)
+	default:
+	}
+	select {
+	case <-heard:
+	default:
+		t.Fatalf("the second verification answered %v without hearing the notice of the first's give-up: it found the first given up as it looked, refused, never told", err)
+	}
+	if !errors.Is(err, backup.ErrCheckStillRunning) {
 		t.Errorf("the verification waiting its turn answered %v, want ErrCheckStillRunning", err)
 	}
 	awaitEntered(t, entered, "the park of the check given up")
