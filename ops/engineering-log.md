@@ -95251,3 +95251,205 @@ of the changed files. The rules patch applies at this commit, and
 `scripts/check-doc-budgets.py` is clean on a copy with it applied
 (`auth-tls.md` 62,468 bytes). `make test` and `make build-all` were not run:
 the brief asked for the two packages.
+
+## 2026-11-13 — B881 round 2: a reset that has returned can't be undone by another process's session write
+
+The rule is the bullet on the store's lock in `auth-tls.md` (round 2's rules
+patch), with three sentences corrected that called the lock declined; this
+is the evidence. Linux amd64 (legion0), Go 1.27.3, the Makefile's tags.
+
+### The finding
+
+Codex on round 1, confirmed at 8938398d: no lock kept the store's writers
+apart across processes. `s.mu` is one process's, and `bridge admin
+reset-password` writes through a `Store` of its own. A serving bridge's
+`CreateSession` that passed its admission and its write's re-read
+(`unchangedSince`, `store.go` 1146) and stalled before its rename (1775) let
+the reset commit (486), sleep its settle, find nothing reverted (590) and
+report success; the stalled rename then landed over it, the old hash, the old
+marker and the new session, which `s.seen` kept, while `Verify` took the old
+password again. The same gap was every writer's, `writeStoreLocked` being
+theirs alike.
+
+### Step 0
+
+- **The writers of `adminauth.json`**, all through `commitLocked` and
+  `writeStoreLocked` (at 8938398d): in serve, `CreateSession` (835, a
+  login), `ValidateSession`'s activity write (1263), `EndOtherSessions`
+  (1381), `FlushSessions` (1414, the shutdown flush), `DeleteSession` (1441,
+  a logout), and at its start, before it serves, `SeedFromEnv` through
+  `SetInitialPassword` (995) and `installInitialLocked` (397); in the CLI,
+  `ResetPassword` (439) and `SignOutEverywhere` (522), both through
+  `commitAndConfirm` (562), and `bridge init`'s `MintInitial` (364). Login
+  tickets are files of their own (`writeTicketFileLocked`), not this file.
+  Outside `Store`, a restore writes it whole, the snapshot's account signed
+  out (`SignedOutFile`; `internal/backup/backup.go` 738-748, `writeFrom`),
+  holding the data dir's lock from before its first write
+  (`holdDataDirForMutation`, `cmd/bridge/backup.go` 472), which a live
+  serve holds, so it refuses beside one; reset-password takes no data-dir
+  lock (`cmd/bridge/admin.go` 99-132), so a restore can meet only another
+  command, and stays offline, outside the new lock. A snapshot only reads it.
+- **The CLI call sites**: `adminResetPasswordCmd` (`admin.go` 132) prints
+  `reset password: %v` and exits 1; `adminSignOutEverywhereCmd` (186) says
+  its own words for `ErrNotInitialised` and `sign out everywhere: %v`
+  otherwise; `keepOrMintAdminCredentials` (`init.go` 1064) prints
+  `adminauth: %v`; serve's `SeedFromEnv` (`main.go` 6130) prints
+  `adminauth: seed from …: %v` and refuses to start. A new sentinel's text
+  reaches each as it stands.
+- **Why the lock was declined.** #1039 (19795): "it would be the repo's
+  first interprocess lock, with platform code (flock / LockFileEx on a
+  stable lock file, since the store is replaced by rename) and a bounded
+  wait so a hung holder cannot wedge `s.mu`"; #1043 (20518) the same; and
+  #1044 (21080): "the repo's first interprocess lock, in the bridge's own
+  write path (every login, logout and activity flush), with a lock file a
+  `sudo` run would leave root-owned … and `flock` not honoured on every
+  network filesystem. The confirmation adds no new failure mode to the
+  bridge." Answered: the repo has had several kernel locks since, through
+  `fsutil`'s platform code (`server.lock`, the config's, the migration's,
+  the backups'); the wait is bounded, and it holds `s.mu` for at most that
+  bound; the lock is held only from the re-read through the rename, never
+  across bcrypt, the network or the confirmation's settle, and uncontended
+  it is an open and a flock; `OpenLockFileLike` gives a lock file a root run
+  makes the store file's owner; a filesystem without locks is written as
+  before, the confirmation kept for it; and the new failure modes are each
+  answered as the store's existing write failures are. #1039's own note
+  (19729) had already said the "stale lockfile" reason is about lock files,
+  which a kernel lock is not. No reason still held.
+- **`fsutil`'s lock as its callers use it.** `TryLock` never waits; its
+  callers loop to a deadline (`config`'s `lockFile`: every 25 ms up to
+  `LockWait`, 5 s). `OpenLockFileLike` (`lock.go` 118) makes the file with
+  `Precreate` under the owner of `like` (its entry, or its directory while
+  it has none) and opens it through `os.OpenRoot`, so a link out of the
+  directory is refused. `Unlock` comes before `Close` (79): on Windows a
+  close may let the lock go late. `KeepsNoLocks` reads ENOLCK, EOPNOTSUPP,
+  ENOTSUP, `ERROR_NOT_SUPPORTED`, `ERROR_INVALID_FUNCTION` and
+  `errors.ErrUnsupported`; `config` takes the turn unlocked on those, said
+  once per file (`warnUnlocked`), but asks again on ENOLCK
+  (`noLockToGive`), refusing with `NoLockManagerError` past its wait.
+
+### Red first, at 8938398d
+
+HEAD's tests against round 1's `store.go`, given only the new names and the
+seam between the re-read and the rename (`renameHook`), with no lock
+(`.tmp/_b881/redcopy2.py`, untracked, which refuses a production file
+changed since 8938398d that it does not cover); predicted by name before the
+run. Case 1, the reproducer, `go test -C <copy> -count=1 -v -run
+'^TestAResetBesideASessionWriteParkedBeforeItsRenameIsNotUndone$'
+./internal/adminauth/`:
+
+```
+storelock_test.go:110: the reset answered (<nil>) while a session's write was stopped between its re-read and its rename: it never met the store's lock
+storelock_test.go:138: after a reset beside a session write parked before its rename, the file refuses the rotated password (adminauth: invalid credentials): the running bridge wrote the credential it held in memory back over the rotation
+storelock_test.go:138: after a reset beside a session write parked before its rename, the file still accepts the leaked password (err=<nil>)
+storelock_test.go:140: the file holds no sign-out: the reset's marker was written over
+storelock_test.go:144: the parked login's session on the running bridge after the reset = <nil>, want ErrSessionNotFound
+storelock_test.go:149: the running bridge accepts the leaked password after the reset (err=<nil>)
+```
+
+Red there too, as predicted: the held lock's case (every write answered in
+about 23 ms and landed), the root-made lock's and the lock file's permission
+cases (no lock file is made), the no-lock warning (no line), the lock's
+permission error (the login signed in), the updated owner guard (one owner
+change, not two), the CLI's sentence (both commands exit 0) and the console
+login beside a held lock (200 with a cookie). Green there, as it must be:
+case 3, the write parked before the lock, which the re-read already caught.
+
+### The fix
+
+`writeStoreLocked` takes an exclusive kernel lock (`fsutil.TryLock`) on
+`.adminauth.json.lock` beside the store (`LockFileName`) once its file is
+staged and `beforeCommitHook` has run, re-reads with it held
+(`unchangedSince`), renames (its Windows retries included) and lets it go
+(`fsutil.Unlock`, then `Close`): `lockStoreLocked`, in `store.go`, no new
+file. The lock file is opened, and made, by
+`fsutil.OpenLockFileLike(dir, name, s.path)`, and never removed. The order
+is `s.mu`, then the lock, and a holder waits for nothing between its re-read
+and its rename. A write waits for a held lock every 10 ms up to
+`storeLockWait` (`atomicwrite.RenameRetryBudget()` and a second, 1.75 s),
+then writes nothing and answers `ErrStoreBusy`, which no caller needed new
+code for: each already answers a write that failed (the activity write
+logs, a logout and `EndOtherSessions` keep the change pending, the second
+returning `ErrSessionsNotSaved`, `CreateSession` returns it and the login
+answers 500, the commands print it). `fsutil.KeepsNoLocks` goes on
+unlocked, said once per process (`warnUnlocked`); any other error is the
+write's own. Two per-store seams, atomic pointers: `renameHook`, inside the
+lock between the re-read and the rename, and `lockWaitHook`, at a write's
+first find of a held lock; `lockWait` and `tryLock` are per-store fields a
+test shortens or stands in for. The CLI needed no change: `reset password:
+%v` prints the sentinel's sentence.
+
+### Decided
+
+- **ENOLCK is taken for storage without locks**, as the brief asked and as
+  serve's data-dir lock and the migration lock take it, not as the config's
+  lock does (which asks again and refuses): a store that refused every write
+  on an NFS mount with no lock manager would refuse every login there. The
+  cost is the kernel's own ENOLCK beside a holder, which leaves that one
+  write where it was before this round.
+- **The bound** is `atomicwrite.RenameRetryBudget()` and a second: a holder
+  holds the lock through one rename and its Windows retries, and the waiter
+  holds `s.mu`, which every console request takes.
+- **`docs/` is not changed**: the public site names the command alone, and
+  CLAUDE.md keeps unfixed limits (an older binary, storage without locks)
+  off it; the rule, the package docs and this record say them.
+- **`confirmSettle` stays.** It is now only for a writer that takes no lock.
+  Dropping it once every supported binary takes the lock is a proposal for
+  the report, not this change.
+
+### Controls
+
+On the committed tree (da82e8fe), predicted by name before the run
+(`.tmp/_b881/controls2.predictions.txt`, untracked), each a mutation of
+`store.go` made from memory and restored in a `finally`, the three test
+binaries (adminauth, admin, cmd/bridge) built once per control and every
+lock test, the owner guard and the three in-hook writer tables run alone
+(`.tmp/_b881/controls2.py`). The baseline ran first: all green. Every control
+landed as predicted.
+
+- D1, no lock taken in the writer (the brief's): case 2 red as at 8938398d
+  (the reset never met the lock, the undo), and every case that needs the
+  lock: the held lock's, the root-made lock's, the no-lock warning, both
+  permission rows, the owner guard, the CLI's and the console's. Case 3 and
+  the in-hook writers green.
+- D2, the bound zeroed (the brief's): the held lock's case red, each write
+  answering in microseconds, and case 2 too, its reset unable to wait out the
+  parked write (`ErrStoreBusy`).
+- D3, the lock let go after the re-read, before the rename: exactly case 2.
+- D4, contention taken for storage without locks: case 2, the held lock's
+  case, the console's and the CLI's.
+- D5, a permission error from the lock taken for no lock: exactly the seam's
+  permission row.
+- D6, the warning at every write: exactly the no-lock case.
+- D7, contention answered with another error: the held lock's case and the
+  CLI's sentence.
+- D8, the lock file made with its directory's owner: exactly the root-made
+  lock's case.
+- D9, the staging hook run inside the lock: case 3 (its reset waited out the
+  parked write) and both rows of each of the three tables that call another
+  writer from inside that hook (`TestARotationDuringASessionWriteIsNotUndone`,
+  `TestARotationDoesNotCommitOverASessionChangeMadeDuringItsWrite`,
+  `TestASignOutDuringASessionWriteIsNotUndone`): why the hook stays outside.
+
+### The gates
+
+On b4accafb, in one use of the build lock (11:05 to 12:25, nothing else
+in it), TMPDIR `~/onebit/tmp`: `go vet -printf=true ./...` with the
+Makefile's tags clean for GOOS linux, darwin and windows. Under `-race
+-count=50`, from prebuilt race binaries in six lanes side by side, all ok,
+no race reported: `./internal/adminauth` whole, as three lanes (everything
+but its two write-heavy tests, 13 min; `TestCreateSessionEvictsOldestAtCap`,
+32 min; `TestConcurrentLoginsDoNotRace`, 12 min); `./internal/fsutil` whole
+(2 min); and `./internal/admin`'s console login and store tests (the two B881
+tables, 15 min; the lock's, the guards', the limiter's, the refusal log's and
+every `TestLogin*`, `TestSignOutOther*` and `TestPublicMode*`, 50 min), not
+the whole package fifty times, which at its 20 min a run would take 16 hours.
+`go test -race -count=1 -timeout 120m -p 3 ./cmd/bridge/ ./internal/backup/
+./internal/admin/`: all ok, 1,704 s, 859 s and 1,183 s; cmd/bridge holds
+`TestEveryCitedTestNameExists` and the live reset and sign-out tests against
+a real serve. go1.27.3's gofmt lists none of the changed files. The rules
+patch applies at this commit, `scripts/check-doc-budgets.py` is clean on a
+copy with it applied, and `TestEveryCitedTestNameExists` is green on that
+copy (red with a planted ghost citation, so it read the copy). The Windows
+lock (LockFileEx) runs only on CI's Windows job: here it is vetted for
+windows alone. `make test` and `make build-all` were not run: the brief named
+the packages.
