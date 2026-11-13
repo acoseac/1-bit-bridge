@@ -95542,3 +95542,149 @@ brief asked for the packages. The rules patch applies at the final commit,
 and `scripts/check-doc-budgets.py` and `verify_moves.py --base HEAD` are clean
 on a copy with it applied (`build-ci-tests.md` 39,310 bytes). Windows and
 macOS are CI's to show.
+
+## 2026-11-13 — B871 round 4: joined before any assertion, a wrapper of its own case's worker, a drain held to what it guarantees
+
+The rule is `build-ci-tests.md`'s line that a test joins each backup worker
+it starts before any assertion can end the test (round 4's patch, which
+also makes round 3's line say "the atomic hooks of its last step"), its long
+form in `ops/History-rules-build-ci-tests.md` ("B871 round 4"); this is the
+evidence. Linux amd64 (legion0), Go 1.27.3, the Makefile's tags, TMPDIR
+`~/onebit/tmp`, the controls and the gates pinned to CPUs 0 to 7. The
+controls' predictions were written before them
+(`.tmp/_b871/r4/predictions.txt`); the controls are uncommitted edits of
+committed files, put back with `git checkout --` (`.tmp/_b871/r4/ctl_r4.py`),
+and the reds that needed another version of a test ran in scratch copies of
+the tree, never the worktree (`probe1.py`, `probe2.py`, `probe3.py`).
+
+### The Windows branch (Codex, Medium)
+
+`TestVerifyingAWALHeaderDatabaseTwiceCreatesNoFile` (verify_test.go:503 at
+76fa0536) calls `VerifySnapshot` itself on its second run where
+`fsutil.SyncsParentDir` is false: `verifyT` (verify_test.go:109) requires a
+nil error and `Recorded`, and that recheck answers `ErrRecheckNotRecorded`.
+The review's binding note kept the direct call and asked for `awaitClean`
+right after it; 7e2a46aa puts it there, ahead of the check of the answer.
+
+`fsutil.SyncsParentDir` is a constant (fsync_unix.go:16), so the branch never
+runs here. The probe (`probe1.py 5`) copied the tree twice, with the test as
+at 76fa0536 and as joined, and in each set `SetSyncsParentDirForTest(false)`
+(the package's own reading of the barrier, verify_record.go:84), replaced
+the branch's condition by one that arms the probe for run 2, parked run 2's
+worker in `onLockRelease` (after its answer, before its drop) until
+`awaitClean` begins (the probe's hook, first in `awaitClean`), and counted
+the holds as the test's body ends. At 76fa0536, red 5 of 5:
+`zz_probe_r4_test.go:45: PROBE RED: 1 verification worker(s) still held
+what they took as the test's body ended: nothing joined run 2's (the
+Windows branch's) worker`. Joined, green 5 of 5, every assertion of the
+branch passing under the package's Windows reading. `GOOS=windows go vet`
+compiles the branch (the gates).
+
+### The search
+
+`sites.py` listed every direct call that starts a backup worker
+(`VerifySnapshot`, `VerifySnapshotAsAnotherProcessForTest`, `Finish`,
+`FinishCapture`, `SnapshotAndVerify`, `Prune`, `PruneContext`, `Claim`, and
+`RestoreWithOptions` with what its held-source hook starts) in
+internal/backup's and cmd/bridge's tests, and classed each: a join right
+after it before anything that can end the test, a call inside
+`joinBackupCallers`' callers, a cleanup join in its test, or open.
+`before.py` found every cleanup join registered before the call it covers
+(38 calls), `order.py` no seam's restore registered after its join (four
+flags, each with a second join registered after the seam), and
+`platform.py` listed the calls under a platform condition. Read by hand,
+the open calls and the branches gave eight calls in five tests whose join
+an assertion could skip (lines at 76fa0536):
+
+- verify_stuck_test.go:383 and :416, `TestAVerificationBegunBeforeItsEndHookNeverRunsIt`: the first call's `t.Fatal`, whose cleanup joins only a worker already parked at its last step, and the second call's.
+- restore_source_test.go:571, `TestARestoreClearsAMarkerItsHolderLeftBehind`, and restore_words_test.go:247, `TestTwoSpellingsOfASnapshotsFolderShareItsLock`: the restore's `t.Fatalf`, before the `awaitClean` that joins the workers their held-source hooks start.
+- verify_owner_test.go:220, :230 and :238, `TestAClaimedSnapshotIsKeptFromThePrune`: a stopped verification (its `abandonPending`), the claim and the first prune, each before a fatal; the second stopped verification (:226), which `verifiedSnapshot`'s `awaitClean` covered, is joined at the call too.
+- verify_hold_test.go:438, `TestAVetoThatStoodBeforeAVerificationStaysOverTheVERIFIEDItCarries`: two "did not reach the case" fatals before its `awaitClean`, in the four cases without the given-up retry's cleanup.
+
+Each is joined right after the call (7e2a46aa). The second unjoined direct
+call Carbon named in verify_test.go was not there: the file's platform
+branches at 76fa0536 are a `t.Skip` before any worker (:435), an assertion
+after `verifyT` (:976) and `TestTwoVerificationsOfOneSnapshotWriteOneAtATime`'s
+outcomes (:1115), whose calls run in callers `joinBackupCallers` (:1075)
+joins, and every other call in it is joined right after it or by a cleanup
+registered before it. Not counted as unjoined: calls refused before any
+hold (`requireRefusedNaming`), `PruneContext` on a stopped context (no
+worker), the stuck check's child process (`runStuckCheck`), and the tests
+whose goroutine's call a last-registered cleanup joins. The touched tests
+passed once under `-race` before the commit.
+
+### The wrapper (Codex, Medium; Carbon's handle and seam)
+
+`TestEachHoldWordsCaseWaitsForItsVerificationsEnd`'s wrapper
+(restore_mark_test.go:166 at 76fa0536) took the first worker that came to
+it, and was installed before `commandsSayWhatEndsAHold` made its snapshot
+(`seedRestorableInstall`, :78). `verifyAndThen`'s worker runs `h.drop`
+before its last deferred step loads `aroundVerifyEnd` (finish.go:329 and
+:323 at 76fa0536), so a worker a test before joined to its drop alone can
+come to a wrapper installed later. d69b8312 installs the wrapper in the
+case's `onSnapshot` callback, called right after the snapshot is made and
+before anything verifies it, keyed on `backup.CleanSnapshotPath(snapA)`,
+the key the case's own wait uses: a folder in the case's own `t.TempDir`,
+which no other test's verification names, and which only the case's
+`bridge backup --verify` verifies (its `bridge restore` takes the folder's
+lock through `holdSource`). The seam is `backup.SetOnVerifyDroppedForTest`
+(`onVerifyDropped`, an atomic pointer, nil in production), read first in
+that last deferred step (finish.go:320 at d69b8312), after `h.drop` and
+before `aroundVerifyEnd`'s load (:328). The test parks an earlier
+verification's worker there (`parkAnEarlierWorker`: a snapshot of its own,
+its end heard through `SetOnVerifyEndForTest`, no hold active while it is
+parked), lets it go once the wrapper stands, and requires it to pass
+through before the case verifies anything.
+
+Red first (`probe2.py 3`): round 3's test, its wrapper installed before the
+case and taking the first worker, with the earlier worker parked across
+that installation and let go after it, red in 6 subtests of 6:
+`restore_mark_test.go:217: the case's wrapper parked the worker of an
+earlier verification, of …/backups/<snapshot>, as its own`. With the fix,
+green. Control C2, the wrapper back to the first worker (its condition
+`if _ = want; !parkedOne.CompareAndSwap(false, true)`), `-race -count=3`:
+red in 6 of 6 as predicted, restore_mark_test.go:207 (the case's line) and
+:239 (the outer's: its worker was never let go by the case's wait), no
+race.
+
+### The drain (Codex and Claude, Low)
+
+At d69b8312 the polling loop of `awaitBackupHoldsDropped` removed, its
+opening callback kept (`probe3.py 5`): `TestADrainWaitsForTheBackupWorkerItsLoopLeft`
+passed 5 of 5, its callback letting the worker go before any poll and the
+parent cleanup's `AwaitIdle` doing the wait, as the review said. 77bad0da
+lets the worker go from the polling alone (`onBackupHoldsPoll`, called at
+each poll that finds a hold still active) and holds the drain's return to
+what it guarantees, no backup hold active, asked before that cleanup. The
+end hook was not added to the drain: a drain does not know which
+verifications its loop began, and past its drop a worker reads only the
+atomic hooks of its last step and the end hook it took as it began. Control
+C3, the polling removed and the callback kept, `-race -count=5`: red 5 of 5
+as predicted, `backup_join_test.go:153: the drain returned with 1 backup
+hold(s) active, the loop's verification worker still parked as it lets the
+lock go: it never polled the holds down`, no race.
+
+### The gates
+
+On 2efb1fff, in two sessions of the build slot (`.tmp/_b871/r4/gates_r4.py`,
+its log `.tmp/_b871/r4/gates.log`): `go vet -tags
+ts_omit_webclient,ts_omit_debugeventbus ./...` as linux/amd64, darwin/arm64
+and windows/amd64, all clean, and go1.27.3's gofmt over the 11 Go files the
+round changed, none listed; the touched tests at `-race -count=50` from one
+race binary per package in three lanes, 450 runs, every one passing and no
+race (`TestAVetoThatStoodBeforeAVerificationStaysOverTheVERIFIEDItCarries`
+928 s; `TestAClaimedSnapshotIsKeptFromThePrune`,
+`TestARestoreClearsAMarkerItsHolderLeftBehind` and
+`TestTwoSpellingsOfASnapshotsFolderShareItsLock` 515 s;
+`TestEachHoldWordsCaseWaitsForItsVerificationsEnd` 338 s;
+`TestTheCommandsSayWhatEndsARestoreThatHoldsTheSnapshots` 228 s;
+`TestVerifyingAWALHeaderDatabaseTwiceCreatesNoFile` and
+`TestAVerificationBegunBeforeItsEndHookNeverRunsIt` 174 s;
+`TestADrainWaitsForTheBackupWorkerItsLoopLeft` 78 s); and `go test -race
+-count=1 -timeout 120m` of `./internal/backup/`, ok in 786 s, and of
+`./cmd/bridge/`, ok in 1,645 s. The rules patch applies at the final
+commit, and on a copy with it applied `check-doc-budgets.py` passes and
+`verify_moves.py --base HEAD --edit '- **No test hands a running backup
+worker to the next'` passes, its one edit "hook" to "hooks". Windows and
+macOS are CI's to run: the Windows branch ran here only as the probe runs
+it.
