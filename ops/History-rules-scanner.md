@@ -3178,7 +3178,8 @@
   not hold the identity the record holds (cli-serve.md's B741 bullet)**
   (2026-11-04, backlog B651; Codex's and Argon's notes on the brief; B727,
   2026-11-07; B776 and B777, 2026-11-07, the two entries after this one;
-  B741, 2026-11-08, the entry after them). What stays open is named by
+  B741, 2026-11-08, the entry after them; B738, 2026-11-12, and its round 2,
+  2026-11-13). What stays open is named by
   backlog B776, B777 and B813. On a NAS reboot systemd or Docker can start the
   bridge before a USB, RAID or network volume is mounted, so a path on it is
   not there (a directory on the volume) or reads as the bare mount point,
@@ -3316,7 +3317,37 @@
   still finds the file: a hard link's other name removed before the re-read,
   on a case-sensitive volume, leaves the listing a folder that folds would
   give, so the next is asked (round 11, Codex and Claude on round 10: the
-  probe answered case-insensitive there). The probe never writes, where the decisions
+  probe answered case-insensitive there). A listing that settles is read after
+  that entry's own lookups, each entry asked its own: a folder whose first read
+  was all of it is read again for at most `foldingProbeEntries` + 1 entries,
+  past which it settles nothing and is never read whole, and one whose first
+  read was not, whole (B738, 2026-11-12, Codex on #1397: the probe settled a
+  folder its first read took whole by that read, so a hard link `FOLDER.JPG`
+  made beside `folder.jpg` between that read and the lookups, which both
+  lookups found as one file, made a case-sensitive folder answer
+  case-insensitive; one re-read kept for the probe would repeat the fault for
+  every entry after the first, and a re-read cut short taken for the whole
+  listing would miss a second name past it). An entry asked costs at most five
+  lookups and one re-read, so a probe reads the listing at most
+  `foldingProbeEntries` + 1 times however the folder changes under it, and a
+  probe where an entry's two spellings find one file (a folder that folds, or
+  a hard link's two names) reads a small folder once more than it did. The
+  folder's own change time stands in for no re-read: it is not exact on every
+  platform the probe runs on (FAT keeps it to two seconds, and a network
+  volume's attributes are cached). A listing is whole only where its read
+  reached the end, `io.EOF`, never because it came back short with no error,
+  nor where it holds its bound (B738's round 2, 2026-11-13, CodeRabbit on
+  #1454: Go 1.27.3's Linux reader, `os/dir_unix.go`, counts an entry before it
+  builds it and leaves out one gone before its stat, an entry the listing gives
+  no type, without giving its place back, so `ReadDir(257)` could answer 256
+  entries and no error with `FOLDER.JPG` unread, and the probe answered
+  case-insensitive). `osFolding.readDir` reads one open of the folder on to
+  its bound or its end (`readDirUpTo`), asking each time for what is left and
+  never for 0, which reads the rest, and keeps a failed read's error beside
+  what it read; one read of all of it, n not positive, stays one `ReadDir`
+  call, which ends with no error. Go's macOS and Windows readers count only
+  what they keep, and come back short only at the end. The probe never
+  writes, where the decisions
   allowed a temporary name in a writable folder: every folder the scanner
   asks about is in a library root, or above one where two roots spell a
   folder in two cases, the volume may be read-only, and the watcher would see
@@ -3462,8 +3493,13 @@
   which may never reach its folder), judge how a folder compares names by
   anything but the names in it (not its own name in the folder above, not one
   folder for a whole path, not a write, not one file under two names its
-  listing holds, not lookups or a listing read again that do not agree with
-  themselves or with each other), fold a case-only difference for which root a
+  listing holds, not a listing read before the lookups it settles, for another
+  entry asked, or cut short (one that came back short with no error, or holds
+  its bound, is cut short: only a read that reached the end is whole), not
+  lookups or a listing read again that do not agree with themselves or with
+  each other), read a folder whose first read
+  was all of it again past `foldingProbeEntries` + 1 entries, fold a
+  case-only difference for which root a
   path is where its
   folder is not established to fold, a lookup there failed otherwise than for
   a name not being there, or one spelling was found alone, or keep one exact
@@ -3522,6 +3558,15 @@
   `TestTwoNamesOfOneFileAreNoProofThatAFolderFoldsCase` and
   `TestAnEntryThatChangesBetweenTheLookupsTellsNothing`,
   `TestAListingThatChangedBeforeItsReReadTellsNothing`,
+  `TestASecondNameMadeBeforeTheLookupsIsInTheListingThatSettles`,
+  `TestEachEntryAskedIsSettledByAListingReadAfterItsOwnLookups`,
+  `TestAFolderReadWholeIsReadAgainForOneEntryMoreAtMost`,
+  `TestAHardLinkMadeBeforeTheLookupsOnThisHostsVolume` (B738),
+  `TestAListingThatCameBackShortWithNoErrorIsNotWhole`,
+  `TestTheListingReadsOnPastAShortBatchUpToItsBound`,
+  `TestAListingIsWholeOnlyWhereItsReadReachedTheEnd`,
+  `TestTheFirstReadReadsOnPastAShortBatch`,
+  `TestTheOSListingEndsWhereItsReaderReachesTheEnd` (B738's round 2),
   `TestANestedRootInAnotherCaseIsWatchedOnceOnAVolumeThatFoldsCase` and
   `TestAReplacedNestedRootIsWatchedAgainOnItsCreate`,
   `TestAReplacedRootsCreateLeavesItsLookToTheFlush` (macOS, kqueue),
