@@ -95027,3 +95027,191 @@ before the fix). `go test -race -count=1 -timeout 120m -p 2
 the brief asked for the packages. The rules patch applies at the round's
 commit, and `scripts/check-doc-budgets.py` is clean on a copy with it applied
 (`cli-serve.md` 97,290 bytes). Windows is the PR's CI windows job's to show.
+
+## 2026-11-13 — B567: every sweep from the root skips make test's TMPDIR
+
+Backlog B567, on `fix/b567-census-skips-test-tmp` from main 4678b983, worker
+b567 on legion0 (Linux, amd64, go1.27.3, `GOTOOLCHAIN=local`,
+`GOPROXY=off`, 16 cores, so `-p 8` and `-parallel 8`). Commits: the red tests
+ad2002f7, the fix 9dff8f6f, fsutil's table of tree walks e2d9afe0 (the
+gates below), then this record. The rule's line goes into
+`.claude/rules/build-ci-tests.md`, after B740's, through
+`rules-b567-r1.patch`, its long form under B567 in
+`ops/History-rules-build-ci-tests.md`, where the patch also corrects B740's
+long form.
+
+**What was wrong.** B740 made the build-site census skip `.tmp`, the TMPDIR
+make test and make test-fast give every package's tests when the caller sets
+none, and its record said the Go-file sweeps (the citation guard, the
+hash-cost, flac-handle and blank-keeper guards) skipped it already, as every
+name the go tool ignores. Listing every walk in the repository's tests and
+scripts that starts at the checkout root, with its rule for a directory:
+
+- Three rules read `.tmp`, each because it reads dot-directories on purpose
+  (`.github` holds a Go program and docs these guards read):
+  `skipsForCitations` (`cmd/bridge/cited_test_names_test.go`), which two
+  walks share, the citation guard's (`scanTestCitationsIn`, under
+  `TestEveryCitedTestNameExists`) and `productionCalls`
+  (`cmd/bridge/itunes_unwired_test.go`, under
+  `TestTheWireManifestIsTheProvidersAlone` and
+  `TestNoProductionPathAsksITunes`); `hashCostDirRule`
+  (`internal/adminauth/hashcost_test.go`, under
+  `TestNoProductionCodeLowersTheHashCost`); and `flacDirRule`
+  (`internal/manifest/flac_handle_discipline_test.go`, under
+  `TestNoLeakyFlacConstructors`), which the brief had not named.
+- These skip it: the census, by `makeTestTmpDir`; the blank-keeper guard's
+  rule (`moduleDirRule`, over `goToolIgnores`) and the five sweeps of
+  `cmd/bridge` that share it; the docblock-subject and server-error-log walks,
+  `internal/fsutil`'s tree-walk sweep and `internal/player/dsdconv`'s served
+  sweep, which skip every dot-directory.
+- These start at the root and walk no tree there: the embed-pattern guard
+  (`go list`, then one package directory each), the serial-DTO walk (named
+  package directories), the job-writer sweep (listed directories), the
+  qualification-constructor walk (`../../internal` and its own package), the
+  licence generator's notices (one level a directory), and the Python
+  doc-split and budget scripts (one-level globs and named folders, or a
+  staging directory outside the repository).
+
+While make test ran, every package's tests kept their temporary trees in
+`.tmp` and the go command its work directories, so the three rules met
+another package's files mid-walk: a test defined there satisfied a citation
+this tree does not back, a comment there cited a test nothing defines, a
+setter call or a leaky flac call there was reported as this module's, a file
+in mid-edit failed the walk, and a directory removed between its listing and
+its own failed it outright.
+
+**Red first.** At the red tests (ad2002f7: the cases and the walk seams, no
+skip), each package alone, TMPDIR on disk (`.tmp/_b567/gotmp`), every row in
+make test's TMPDIR red and every look-alike row green:
+
+```
+hashcost_test.go:328: offenders = [".../checkout/.tmp/…/001/cmd/tool/main.go" ".../checkout/cmd/tool/main.go"] after reading 2 files, want [".../checkout/cmd/tool/main.go"] after reading 1
+hashcost_test.go:328: offenders = [".../checkout/.tmp/…/001/half.go: could not parse: …/half.go:3:27: expected ')', found 'EOF'" ".../checkout/cmd/tool/main.go"] after reading 2 files, want [".../checkout/cmd/tool/main.go"] after reading 1
+hashcost_test.go:364: the sweep failed: open .../checkout/.tmp/go-build123/b001: no such file or directory
+flac_handle_discipline_test.go:324: found [".tmp/…/001/p/probe.go:5: flac.ParseFile — use os.Open + flac.Parse + defer f.Close()" "p/probe.go:5: flac.ParseFile — use …"] after parsing 2 non-test and 1 test files (2 importing the package), want ["p/probe.go:5: …"] after 1, 0 and 1
+flac_handle_discipline_test.go:361: the sweep failed: open .../checkout/.tmp/go-build123/b001: no such file or directory
+sweeps_tmpdir_test.go:131: the walk found ["cites …ATemporaryTreeCites in .tmp/…/001/main.go" "cites …ATemporaryTreeCites in .tmp/…/001/x_test.go" "cites …ParkedNeverRuns in prod.go" … "defines …ParkedNeverRuns" …], want ["cites …ParkedNeverRuns in prod.go" …]
+sweeps_tmpdir_test.go:130: …/.tmp/…/001/half_test.go:5:31: expected '}', found 'EOF'
+sweeps_tmpdir_test.go:131: the walk found ["calls g in prod.go" "calls leftOver in .tmp/…/001/main.go"], want ["calls g in prod.go"]
+sweeps_tmpdir_test.go:130: …/.tmp/…/001/half.go:3:12: expected ')', found 'EOF'
+sweeps_tmpdir_test.go:162: open …/.tmp/go-build123/b001: no such file or directory
+```
+
+The last line stands for the four removal cases of the citation guard's two
+walks, the `open` lines above it for the two of each other sweep: each sweep
+failed on the directory it had just listed, removed by `sweeptest.Removal` at
+that moment of the walk.
+
+In the real checkout, with a leftover tree planted at `.tmp/b567-leftover/`
+(a non-test file calling `adminauth.SetTestHashCost`,
+`manifest.BuildManifest` and `enrich.NewITunesClient`, a leaky
+`flac.ParseFile`, and a test file whose comment cites a test nothing defines;
+`.tmp/_b567/leftover.py`) and the red commit's three predicates put back
+from git, the five whole-tree guards failed, and B740's census passed:
+
+```
+cited_test_names_test.go:74: no test function of this name exists: …ALeftoverTreeCites  (cited by .tmp/b567-leftover/…/001/x_test.go)
+itunes_unwired_test.go:89: a production path calls a builder that carries enrichmentProgress whatever enrich.enabled says:
+itunes_unwired_test.go:124: a production path wires the iTunes fallback, which no text names as a service enrichment asks:
+hashcost_test.go:74: non-test files call SetTestHashCost, which would weaken password hashing in production: [../../.tmp/b567-leftover/…/001/cmd/tool/main.go]
+flac_handle_discipline_test.go:89: mewkiz/flac path-taking constructors leak the file handle (Stream.Close cannot close a *bufio.Reader), which blocks deletion on Windows:
+```
+
+At 9dff8f6f, the same tree planted: all five ok, and the census's two.
+
+**The fix.** `skipsForCitations`, `hashCostDirRule` and `flacDirRule` skip
+the root's own `.tmp` by `sweeptest.IsMakeTestTmpDir`, decided by its name
+before the walk lists it, as the census skips it by `makeTestTmpDir`. One
+definition, `sweeptest.MakeTestTmpDir`, serves the three test packages. The
+census keeps its constant: it is a program and sweeptest is imported by tests
+alone, and a test package cannot reach a program's unexported constant, so
+`TestTheSweepsSkipTheDirectoryTheCensusSkips` (beside the census) holds the
+two to one name, as B740's `TestTheCensusSkipsTheMakefilesTMPDIR` holds the
+census's to the Makefile. Only the root's is skipped: a `.tmp` below the root,
+`.tmpfoo` and `.github`'s Go program stay read (the look-alike rows). Not
+renamed: `tags_test.go`'s rows and `.dockerignore` name `.tmp`. A directory
+removed mid-walk is stood in for, never raced, by `sweeptest.Removal`, a walk
+that removes its directory as the walk reaches it, after the directory above
+it was listed and before it is listed itself, taken through a walk seam of
+each package (`sweepWalkDir`, `hashCostWalkDir`, `flacWalkDir`), which the
+sweeps call on the test's own goroutine and each case puts back in its
+cleanup; `productionCalls` gained a root (`productionCallsIn`) so a fixture
+can be walked.
+
+**Negative controls**, at 9dff8f6f, predicted before the run in
+`.tmp/_b567/controls.predictions.txt` (`.tmp/_b567/controls.py`: exact-once
+replacements, the test binaries built per control, the named tests run, the
+bytes put back from memory; `git status` clean after), every one as
+predicted, every test run beside them green:
+
+| Mutation | Red |
+|---|---|
+| C1 `skipsForCitations` without the skip | both walks' rows in the TMPDIR (4), both walks' removals (4) |
+| C2 `hashCostDirRule` without the skip | its two TMPDIR rows, its two removals |
+| C3 `flacDirRule` without the skip | its TMPDIR row, its two removals |
+| C4 `IsMakeTestTmpDir` at any depth | `TestIsMakeTestTmpDir` ("one further down"), the row below the root in all four walks |
+| C5 `IsMakeTestTmpDir` for any name beginning `.tmp` | `TestIsMakeTestTmpDir` (".tmpfoo", ".tmp.old"), the `.tmpfoo` row in all four walks |
+| C6 `MakeTestTmpDir` renamed `.scratch` | the pin alone (the cases follow the constant) |
+| C7 the hash-cost seam unwired | its two removals ("did not walk through the stand-in") |
+| C8 `Removal` that removes nothing | `TestARemovalRemovesWhatTheWalkReaches`, the walk that reads it |
+
+**The gates**, through the build lock, nothing else of this worker's in it
+(`.tmp/_b567/gates.py`, under `guard.py`). `make test` was given `P=8` and
+`TEST_PKGS='-count=1 -parallel 8 ./...'`, so its recipe ran `go test -tags …
+-p 8 -race -timeout 30m -count=1 -parallel 8 ./...`, uncached, and TMPDIR was
+unset, so the Makefile's fallback was in force (the recipe line reads
+`TMPDIR="…/b567/.tmp"`), every package's tests and the go command's work
+directories in the checkout's `.tmp` while the sweeps walked the checkout.
+
+At 9dff8f6f: `go vet ./...` for linux, darwin and windows, each with the
+Makefile's tags and without them, clean; the 25 new and touched tests under
+`go test -race -count=50 -p 5 -parallel 8`, ok; `make build-all P=8` ok. The
+first make test failed one package: `internal/fsutil`'s
+`TestEveryWalkOfALibraryRootStartsFromWalkableRoot`, which reads every
+production Go file for a tree walk, found `sweeptest.go`'s `(*Removal).WalkDir`
+in neither of its tables (sweeptest is imported by tests alone, but its file
+is no test file). Every other package was ok. The second run, already under
+way, was stopped and what it left in `.tmp` removed; e2d9afe0 lists the
+stand-in in `otherTreeWalks`.
+
+At e2d9afe0: the six vets clean again (answered mostly from the build
+cache, which keeps clean results alone); the 26 tests (the 25 and fsutil's
+sweep) under `-race -count=50`, ok, no race reported (`cmd/bridge` 644 s,
+`internal/manifest` 259 s, `internal/adminauth` 95 s, `internal/fsutil`
+87 s, `scripts/third-party-licenses` 38 s, `internal/sweeptest` 1 s); `make
+build-all P=8` ok (`check-build-tags: OK`). make test with the checkout's
+`.tmp`:
+
+- run 1 (10:04 to 10:34): 89 packages ok, none failed (`cmd/bridge` 1708 s,
+  `internal/manifest` 1689 s);
+- run 2 (10:34 to 11:05): 88 ok, and `cmd/bridge` failed
+  `TestTransientRepairFailuresEarnNoStrikeThroughTheLookup`, two subtests,
+  "the analysis pool never settled", within a second each, at 1781 s of the
+  binary's 1800 while another worker's `bridge.test` ran outside the lock.
+  That wait gives up at the binary's deadline less 30 s (`serveGiveUpTime`),
+  so this is the package meeting its 30-minute cap, not the assertion; alone
+  under `-race -count=3` the test passed 3 of 3, a second a subtest;
+- run 3 (13:12 to 13:42): 89 ok, none failed (`cmd/bridge` 1717 s);
+- run 4 (14:13 to 14:43), the third whole run: 89 ok, none failed
+  (`cmd/bridge` 1711 s, `internal/manifest` 1695 s).
+
+At P=8 on this host `cmd/bridge` runs within about 90 s of its cap; the two
+runs that met it ran 1781 s and 1791 s.
+
+With TMPDIR outside the checkout (`~/onebit/jobs/b567/ext-tmp`, the recipe
+line naming it) and a leftover tree in the checkout's `.tmp`
+(`.tmp/b567-leftover/`: the five guards' plants above and a file in
+mid-edit): the first run (13:42 to 14:13) had 88 packages ok, and
+`cmd/bridge` met its cap as run 2 had, at 1791 s:
+`TestMixedCaseConcurrentLookupsEnqueueOnce` and
+`TestTransientRepairFailuresEarnNoStrikeThroughTheLookup`, every case "the
+analysis pool never settled" within a second; the guards that read the
+checkout, the five the leftover turned red at the red commit among them,
+passed. Run again (15:10 to 15:40): 89 ok, none failed (`cmd/bridge`
+1733 s), the leftover unread.
+
+The rules patch applies at this record's commit; `make docs-check`'s
+scripts are clean on a copy with it applied (`build-ci-tests.md` 37,355
+bytes), and `TestEveryCitedTestNameExists` passes there, and fails on a
+citation planted in that copy's History file, so it read the copy.
+
