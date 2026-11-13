@@ -95150,3 +95150,64 @@ the B749 bullet's two copies alone, each replaced by its successor with the one 
 cannot pair a line edited with its verbatim twin), and `TestEveryCitedTestNameExists` is green there and red with a
 ghost citation planted in the patched History. `make test` and `make build-all` were not run: the brief asked for the
 packages. Windows and macOS are CI's to run.
+
+## 2026-11-13 — B828 round 2: white space past the read's bound refuses the start too
+
+Worker b828, legion0, branch `fix/b828-empty-tsnet-state` at `orch/b828` 88b06153 (round 1 and its rules), against
+the finding Codex (Medium) and Claude (Low) agreed on, and the brief's review of the fix. Commits 381776bd (the tests,
+red first), ca79df9f (the fix) and the one that carries this record. The rules ship as `rules-b828-r2.patch`.
+
+### The finding
+
+`readNodeState` reads `maxStateBytes` (16 MiB) and one byte more, and its size guard ran before round 1's white-space
+check, so a `tailscaled.state` of 16 MiB and one byte of JSON white space was "larger than the 16777216 bytes it is read
+to", a state that does not read: `nodeName` took the library's name and said so, `startUnlocked` built the upstream
+node, and upstream's `store.New` refused the file in its TPM words after its logger had written into the state dir; the
+console's tile fell back to "Status called before Start". It held, at 88b06153.
+
+### As built
+
+The white-space check comes first, of the same bounded read (`io.LimitReader` at `maxStateBytes + 1`, its errors and
+its sanitised paths as they were; a chunked read would lift the cap, which the brief's review ruled out): where every
+byte read is JSON white space, the file holds nothing, `*EmptyStateError` with `Oversized` set where the read passed
+`maxStateBytes`, and nothing more is read. The words for that file say it holds no state in its first 16 MiB, which is
+as far as the bridge reads it, and that the bridge does not start the node from it; they leave out round 1's "Tailscale
+does not start from it", since of such a file the bridge knows only what it read. The words for an empty file and for
+white space alone are round 1's, byte for byte. The edge, in the comment and the History: a file with JSON past its
+first 16 MiB of white space, which Tailscale might start from, is refused with it, where it reached upstream before; a
+state file is a few KiB, so that file is broken anyway. Anything else in what was read keeps a larger file a state that
+does not read, in the same words as before.
+
+### Red first
+
+At 381776bd, the tests on 88b06153's code, `go test -count=1 -v -run '^(…)$' ./internal/tsnet/` with the release tags
+and TMPDIR `~/onebit/tmp`, the four named `TestOnlyJSONWhiteSpaceIsAStateThatHoldsNothing`,
+`TestAStateFileThatHoldsNothingRefusesTheStart`, `TestAStateFileThatIsNotThereStillStartsANewNode` and
+`TestTheStateReaderWritesNothing`: the one red row,
+"white space past the bound" (16,777,217 bytes cycling through space, tab, carriage return and line feed), with
+"readNodeState = {registered:false hostname:}, the node's state is larger than the 16777216 bytes it is read to: a
+state that holds nothing false, want true", then "the upstream node's Start ran over a state file that holds nothing",
+"the start built 1 upstream node(s) over a state file that holds nothing, want none", "the start reached the hook
+before the upstream start" and "the start changed the state dir" (`tailscaled.log.conf` after, the state file's 16,777,217
+bytes and SHA-256 unchanged), and Start's words upstream's. Green there: the row at the bound (16,777,216 bytes of white
+space), the row past it with an `x` in its first 16 MiB ("is larger than …", as before) and round 1's rows. Every row of
+the reader's table that holds nothing now drives a start too (`startRefused`, factored out of
+`TestAStateFileThatHoldsNothingRefusesTheStart` with its assertions), which the state dir's comparison reads as a length
+and a SHA-256 past 64 bytes.
+
+### Negative controls
+
+Predicted before any ran (`.tmp/_b828/controls2.predictions.txt`, not committed), at ca79df9f, each an uncommitted edit
+put back with `git checkout --`, internal/tsnet's five tests run from a test binary built for it: no mutation, 43
+verdicts green; the white-space check asked only of a read within the bound, as at 88b06153 (the brief's control), red
+on "white space past the bound" alone, on the reader, the upstream start, the hook, the state dir and the words;
+`Oversized` set at the bound, red on "white space to the bound" alone; the words without `Oversized`, red on "white
+space past the bound" alone, on its words.
+
+### The runs
+
+At ca79df9f, outside the build lock (one package each): go1.27.3's gofmt lists neither changed file; `go test -race
+-count=50 ./internal/tsnet/` ok in 134.7 s and `-race -count=1 -timeout 120m` once ok (122 verdicts, none skipped, no
+race); cmd/bridge's two B828 tests, which compare the refusal's words, under `-race -count=50` ok in 132.6 s (100 runs,
+350 subtests); `go vet -printf=true` of internal/tsnet and cmd/bridge with the release tags clean for linux, darwin and
+windows (amd64). The rest of the tree is round 1's, vetted then.
