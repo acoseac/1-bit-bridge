@@ -4816,7 +4816,8 @@ The ticker suppresses an outer expiry's shutdown error when
 `ctxerr.WithoutCancellation` leaves nothing and `Found` is empty: its verdict
 is unknown. Round 11 below supplies the rule when a verdict is known.
 A step given up, a record not read back, or a write failure accompanying
-cancellation is still reported. The contrasting cases
+cancellation is still reported (since B895 a step the stop gave up alone is
+the stop: the B895 section below). The contrasting cases
 are in `TestTheTickerSilencesOnlyCancellationWithoutAnotherFailure`.
 `TestTheReportersSayWhenAnIncompletePublicationWasNeverReadBack` uses
 `abandonPending`'s actual shape (INCOMPLETE Found, WriteRecorded, RecordRead
@@ -5477,3 +5478,60 @@ predicted, were red where predicted: the check asked only within the bound
 (the row past it), `Oversized` set at the bound (the row at it), and the words
 without `Oversized` (the row past it). The record is in
 `ops/engineering-log.md`, 2026-11-13, B828 round 2.
+
+## B895 — a give-up the stop made alone is the stop (2026-11-13)
+
+#1460's run 43470491773, `test (macos-latest)`, failed
+`TestATickerStoppedWhileItsVerdictsSyncHangsReturnsWithinItsBound` on its
+stderr check: `backup (startup): the verification of <snap> was given up, and
+its step still holds the snapshots until it ends; its write did not finish,
+and its record reads database INCOMPLETE: unsynced, files INCOMPLETE:
+unsynced: a step of the verification did not end and was given up, and holds
+the snapshots until it does: its verdict's write did not end wit…`. The test
+alone, 100 times under `-race` on an unloaded Mac, had passed.
+
+A ticker stopped while its verdict's write hangs in its sync arms two
+`StopWriteBound` timers at the stop. `verifyAndThen`'s expiry abandons the
+worker and answers `verifyExpiryError`, a cancellation with nothing found,
+which the ticker says nothing of. `runStep`'s bound on the write, reset to
+`StopWriteBound` at the stop since its own (`laterBound`) is half a bound
+past the 30-minute deadline, gives the write up; the worker reads its record
+back and answers `ErrCheckGivenUp` beside `context.Canceled`, which
+`ctxerr.WithoutCancellation` keeps whole, so the ticker printed it.
+Whichever answer reached `verifyAndThen`'s select first decided what the
+ticker said. What CI did, as far as its line shows: it names the write,
+which only the worker's answer carries, and the write's own bound is more
+than 30 minutes past the lock while the test fails elsewhere within about 40
+seconds of starting the ticker, so the stop's bound gave the write up and
+the worker's answer was taken; whether its timer fired first or both were
+ready at the select, no log says. The words alone prove no order:
+`givenUp` read its cause from `ctx.Err()` as it made the answer, so a step
+its own bound gave up read as cancelled once a stop came before the answer.
+
+The rule. A hold records each give-up's cause as it happens: `giveUp`, a
+bound of its own (`context.DeadlineExceeded`); `giveUpAtStop`, the bound the
+caller's stop set (`runStep`'s once the stop reset it, the check's half of
+`StopWriteBound` past a context the stop ended), and with no stop a bound of
+its own; `abandon`, the caller's stop, or its watchdog's deadline. `givenUp`
+names the first. A give-up every one of whose steps the stop gave up, with no
+write's error beside it (the INCOMPLETE's, a veto's), is a `*givenUpAtStop`;
+a read-back the stop gave up beside it keeps it one, and a read of the record
+that failed does not (`verifyHeld`'s answer). `backup.AsTheStop(ctx, err)`
+answers ctx's own error for one, ctx cancelled and its cause the
+cancellation, and err itself otherwise. The ticker asks it before
+`ctxerr.WithoutCancellation`, so a give-up the stop made alone is silent
+whichever bound fires first, while the rule for a verdict found beside the
+stop (B653 PR 1, rounds 10 and 11) still says a FAILED finding, and a write
+or a read of the record that failed, and a step given up at a bound of its
+own, whenever its answer comes, are still said. The CLI and the console say
+a give-up as they did. The tests fire the two bounds through
+`SetStopBoundsForTest` (nil in production, where the timers are as they
+were); the check's own half bound is B886's seam.
+`TestATickerStoppedWhileAStepHangsSaysNothingWhicheverBoundFiresFirst` (the
+verdict's write and the read-back, each bound first),
+`TestATickerStoppedWhileItsCheckHangsSaysNothing`,
+`TestATickerStoppedBesideAFailureStillSaysIt` (a FAILED finding, a read-back
+that failed, an INCOMPLETE whose write failed, a write given up at its own
+bound and answered once stopped) and internal/backup's
+`TestAGiveUpIsTheStopOnlyWhereTheStopMadeItAlone` pin it; the record is in
+`ops/engineering-log.md`, 2026-11-13, B895.

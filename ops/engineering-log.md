@@ -96184,3 +96184,172 @@ the tree with this record. The rule change is `rules-b872-r3.patch`: round
 2's first B872 bullet in `build-ci-tests.md`, which named the wait's seam,
 now names the notice's seam, the held wait and its abort; the budgets check
 is clean with it.
+
+## 2026-11-13 — B895: a stopped ticker's give-up is the stop's, whichever of its two bounds fires first
+
+Worker b895, legion0, branch `fix/b895-ticker-stop-report` from main 2bebca26.
+Commits: c6144763 (backup: a give-up keeps its cause; `AsTheStop`; the seam on
+the two bounds a stop arms) and f8fc6011 (the ticker asks `AsTheStop`; the
+tests). Every run: Go 1.27.3, tags `ts_omit_webclient,ts_omit_debugeventbus`,
+TMPDIR `~/onebit/tmp`; controls are uncommitted production mutations of the
+committed tree, each predicted in writing first
+(`.tmp/_b895/controls.predictions.txt`), the bytes put back from memory.
+
+### The red
+
+#1460's run 43470491773, `test (macos-latest)`:
+`TestATickerStoppedWhileItsVerdictsSyncHangsReturnsWithinItsBound` (then
+`cmd/bridge/backup_verify_test.go:399-443`) failed at :441, "a stopped
+verification was reported: backup (startup): the verification of <snap> was
+given up, and its step still holds the snapshots until it ends; its write did
+not finish, and its record reads database INCOMPLETE: unsynced, files
+INCOMPLETE: unsynced: a step of the verification did not end and was given
+up, and holds the snapshots until it does: its verdict's write did not end
+wit…". Alone ×100 under `-race` on an unloaded Mac: 0 failures at 2bebca26
+and at 85f6ad1c. #1460's diff cannot reach it.
+
+### Step 0, at 2bebca26
+
+1. The ways a verification the ticker starts is given up. Its own deadline:
+   `verifyDeadline` (`finish.go:23`, `VerifyDeadline` 30 min,
+   `verify.go:246`; `SetVerifyDeadlineForTest` its seam, which this test does
+   not set) from the lock (`finish.go:460`): the record's read and a veto by
+   `early`, half a `StopWriteBound` past it (:461), the check on `checkCtx`
+   (:571) and `runCheck`'s half bound after (:784-790), each step after the
+   check by `laterBound` (`hold.go:521-527`), and the caller's watchdog,
+   `LockWait + verifyDeadline + watchdogSlack` (`finish.go:344`, slack
+   2 × StopWriteBound :237), then its expiry. The stop: `verifyAndThen`'s
+   `case <-stop` arms `expire = time.After(StopWriteBound)` (:351-355), and
+   its firing abandons the worker (`h.abandon()`) and answers
+   `verifyExpiryError` (:360-366, :373-380), "the verification was left to
+   end on its own 2s after its stop, …: context canceled", `Write` unknown,
+   nothing found; and `runStep`'s `case <-stop` resets the step's timer to
+   `StopWriteBound` wherever its own bound is further (`hold.go:496-500`),
+   whose firing gives the step up (:501-513), after which the worker reads
+   its record back (`finish.go:637`, :475-504) and answers `givenUp`
+   (:638-643, :393-408): `ErrCheckGivenUp` naming the step, its cause
+   `ctx.Err()` as the answer is made (:399). The check given up at the stop
+   answers the same, a second sooner (`runCheck`'s half bound).
+2. The report: `runBackupTicker` (`cmd/bridge/backup.go:629`) →
+   `SnapshotAndVerify` (:676) → `report` (:633) → `reportTickerVerdict`
+   (:796-843). It asks its context only through
+   `ctxerr.WithoutCancellation` (:798), which takes out an error that IS the
+   cancellation: the expiry's one `%w` around `context.Canceled` goes, and
+   with `Found` empty the ticker is silent (:800-803). The give-up's two-`%w`
+   wrapper (`ErrCheckGivenUp` and the cancellation) is reported whole
+   (`ctxerr.go:97-100`), and printed at :811-818. So yes: a give-up the
+   ticker's own stop caused was printed whenever the worker's answer reached
+   `verifyAndThen`'s select (:347-368) before the expiry fired.
+3. Which order: neither of the brief's (a) nor (b) as alternatives, but the
+   race inside (b) the brief's review named. (a) cannot be: the test
+   shortens no deadline. The line is the ErrCheckGivenUp branch with
+   `WriteUnfinished` and a record read back ("its write did not finish, and
+   its record reads"), naming the write: only the worker's answer carries
+   it, the expiry answering its own error. The write's own bound is
+   `laterBound`, 30 min and 1 s past the lock, and the test fails elsewhere
+   within about 42 s of starting the ticker (30 s at :428, 12 s at :438), so
+   the stop's reset gave the write up and the worker's answer was taken. CI's
+   log shows nothing of the timing: whether the worker's timer was armed
+   first, the caller's goroutine late, or both ready at the select. The
+   truncated "(context canceled)" would prove no order either, `givenUp`
+   reading `ctx.Err()` at the answer.
+
+### The fix
+
+A hold records each give-up's cause when it happens (`giveUp`, a bound of its
+own; `giveUpAtStop`, the bound the caller's stop set, `runStep`'s or the
+check's, and with no stop a bound of its own; `abandon`, the caller's stop or
+its watchdog), and `givenUp` names the first. A give-up whose every step the
+stop gave up, with no write's error beside it, is a `*givenUpAtStop`, and a
+read-back the stop gave up keeps it one, while a read of the record that
+failed does not. `backup.AsTheStop` answers ctx's own error for one, ctx
+cancelled and the cause the cancellation, and err itself otherwise; the
+ticker asks it before `ctxerr.WithoutCancellation`, the found-verdict rule
+deciding the rest. `SetStopBoundsForTest` (nil in production) stands in for
+the expiry and a step's stop bound, given the snapshot, the step ("" for the
+expiry) and the length as armed. `runCheck`'s own half bound is B886's seam,
+not taken here.
+
+### Red first, then green (`.tmp/_b895/red-prefix.log`)
+
+The seam and the tests at 2bebca26 without the classification (the hold's
+causes recorded, `givenUp` still reading `ctx.Err()`):
+`go test -race -count=1 -v -tags … -run
+'^(TestATickerStoppedWhileItsVerdictsSyncHangsReturnsWithinItsBound|TestATickerStoppedWhileAStepHangsSaysNothingWhicheverBoundFiresFirst|TestATickerStoppedWhileItsCheckHangsSaysNothing|TestATickerStoppedBesideAFailureStillSaysIt)$'
+./cmd/bridge`: `backup_stop_test.go:249: a stopped verification was reported:
+backup (startup): the verification of …/backups/2026-11-13T19-03-13Z was
+given up, and its step still holds the snapshots until it ends; its write did
+not finish, and its record reads database INCOMPLETE: unsynced, files
+INCOMPLETE: unsynced: a step of the verification did not end and was given
+up, and holds the snapshots until it does: its verdict's write did not end
+within its bound (context canceled)`, CI's line whole, in the case "its
+verdict's write, the worker's bound first"; red too the read-back's worker
+case, the check's case (:279) and "a write given up at its own bound" (:417,
+"(context canceled)" where its cause was its bound); green the two expiry
+cases, the shutdown bound and the three other "still said" cases. With the
+fix all green.
+
+### Controls (`.tmp/_b895/controls.py`), each red exactly where predicted
+
+Nine production mutations of f8fc6011, the four cmd/bridge tests and, where
+internal/backup changed, its unit test run from binaries built without
+`-race`, 15 to 20 s a control; every red line below was predicted by name,
+every test not named stayed green, and `git status` was empty after each.
+
+- The review's control: the ticker's `AsTheStop` taken out, the seams'
+  schedule kept: red at `backup_stop_test.go:249` in "its verdict's write,
+  the worker's bound first" (CI's line again) and "its read of the record
+  after it, the worker's bound first", and at :279 (the check given up at
+  the stop); the two expiry cases, the shutdown bound and the four that stay
+  said green.
+- `givenUp` deciding the stop by `ctx.Err()` as the answer is made, a fix that
+  asks the context: red at :417 ("a write given up at its own bound" said
+  nothing) and four rows of `TestAGiveUpIsTheStopOnlyWhereTheStopMadeItAlone`
+  (`stop_cause_internal_test.go:68` three times, :81 once).
+- A write's error kept inside `*givenUpAtStop`: red at :370 (the INCOMPLETE
+  whose write failed said nothing) and the unit row beside a write that failed
+  (:81).
+- A read of the record that failed kept inside it: red at :343.
+- The ticker's found-verdict rule skipped: red at :328 (the FAILED finding
+  said nothing).
+- A step's stop bound, then the caller's expiry, armed at twice
+  `StopWriteBound`: red at `backup_verify_test.go:429`, "the bound at "its
+  verdict's write" is 4s long" and "the bound at "" is 4s long".
+- The check's give-up at the stop recorded as its own bound's: red at :279.
+- A step's give-up at the stop recorded as its own bound's: red at :249 in
+  both worker cases.
+
+### Runs
+
+At f8fc6011, in the build slot, `-race -count=200` of the touched tests, one
+lane per test or case (`.tmp/_b895/lanes.py`: race binaries built once, every
+lane pinned to CPUs 0-7, half the cores, at GOMAXPROCS=2):
+
+- Unloaded: each of the eleven lanes (the shutdown bound, the four ordering
+  cases, the check, the four that stay said, the unit test) 200 of 200, no
+  failure, no race; 616 s wall, a run 1.6 to 3.8 s.
+- Loaded, beside one busy loop pinned to each of the 16 CPUs: each lane 200
+  of 200, no failure, no race; 2226 s wall, a run 4.6 to 14.3 s.
+
+No case waits a real `StopWriteBound`: what a run costs is the fixture's
+SQLite under the race detector (a store built through the migration ladder,
+a capture and a check), and the check's two cases wait its own half bound on
+its clock (B886's seam is for that one).
+
+Then in one slot session (`.tmp/_b895/pkgs.py`), side by side and pinned to
+CPUs 0-7 at `-parallel 4`, `go test -race -count=1 -timeout 120m`:
+`./cmd/bridge` ok (1639.9 s), `./internal/backup` ok (766.0 s); and `go vet
+-tags … ./...` as GOOS linux, darwin and windows, each clean. go1.27.3's
+gofmt lists none of the files changed. The rule change is
+`rules-b895-r1.patch`: a "…and" bullet after the ticker's shutdown-silence
+bullet in `cli-serve.md`, its long form in `History-rules-cli-serve.md`
+(round 9's "a step given up … is still reported" now says a step the stop
+gave up alone is the stop), and a bullet on firing the stop's bounds in
+`build-ci-tests.md`.
+
+Left open: the console's create job and `bridge backup` still say a give-up
+the stop made, as they did (their rules log every error); `runCheck`'s half
+bound waits on its clock in the two check cases until B886's seam; B886
+edits `runStep`'s select and `seams.go` too, so the two branches meet there,
+its gate case giving a step up at a bound of its own (`giveUp`), which is
+said, as it should be.
