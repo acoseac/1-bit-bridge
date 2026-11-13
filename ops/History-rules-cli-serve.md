@@ -5370,7 +5370,7 @@ The record is in `ops/engineering-log.md`, 2026-11-12, B826.
 
 ## B871 — B826's Lows: the look before the prompt, a probe's release, and the words (2026-11-12)
 
-- **…and bridge restore's look before its prompt (`backup.CheckRestoreSource`) asks its stop whichever answer its wait took, a look whose read answered refused as a plain stop (`backup.CheckStopped`), never `ErrSourceNotAnswering`, and the command asks its stop once more before the path that asks and `--yes` split, exit 1; refuses there a schema this bridge does not take, exit 1, and as a path that holds no snapshot (`ErrNotASnapshot`, exit 2) invalid input alone, a lookup or a manifest's read that fails otherwise keeping its cause, exit 1; a probe of a backups folder's lock (`backup.Prober`) lets go of the lock, the file and this process's holder of the folder on a goroutine of its own, and past `releaseBound` answers and marks the folder in this process alone, in the name of the caller that asked, until the release ends; a restore's hold is said by what holds it and what can be done; and the restore respells its source's words at each read of the snapshot, a quoted path and a root included, never a destination's** (2026-11-12, backlog B871, B826's Lows). **Don't take the look's answer without asking its stop, reach the prompt or the restore after a stop, refuse a newer schema as no snapshot or after the prompt, call a permission or I/O failure no snapshot, release a probe's lock unbounded on its caller's goroutine, write a marker for any release, name the doctor's or the ticker's probe as a restore's, tell an operator to stop a command that may have ended, or respell a destination's words.** `TestARestoreStoppedAsItsLookAnswersIsAPlainStop`, `TestBridgeRestoreStoppedDuringItsLookExitsBeforeItsPrompt`, `TestBridgeRestoreStoppedJustAfterItsLookExitsBeforeItsPrompt`, `TestTheLookBeforeThePromptRefusesASchemaThisBridgeDoesNotTake`, `TestBridgeRestoreRefusesANewerSchemaBeforeItsPrompt`, `TestTheLookBeforeThePromptKeepsTheCauseOfAReadThatFailed`, `TestBridgeRestoreSaysWhatItsLookCouldNotRead`, `TestAProbesReleasePastItsBoundIsMarkedInItsCallersName`, `TestBridgeRestoreNamesItsLooksStalledReleaseBeforeItsPrompt`, `TestTheDoctorAndTheTickerNameTheirOwnProbesStalledRelease`, `TestTheCommandsSayWhatEndsARestoreThatHoldsTheSnapshots`, doctor's `TestTheBackupCheckLineNamesWhatHoldsTheFolderAndWhatEndsIt`, `TestTheRestoresWordsSpellAQuotedPathAndARootAsGiven`, `TestARestoreSpellsItsSourcesWordsAsGivenAndLeavesItsDestinationsAsTheyAre`, `TestEveryAdmissionRefusalNamesTheSnapshotAsItWasGiven`, `TestARestoreNamesTheSnapshotAsItWasGiven` and `TestBridgeRestoreNamesTheSnapshotAsItWasTypedBesideARestoreThatHoldsIt` pin it. → History-rules-cli-serve.md
+- **…and bridge restore's look before its prompt (`backup.CheckRestoreSource`) asks its stop whichever answer its wait took, a look whose read answered refused as a plain stop (`backup.CheckStopped`), never `ErrSourceNotAnswering`, and the command asks its stop once more before the path that asks and `--yes` split, exit 1; refuses there a schema this bridge does not take, exit 1, and as a path that holds no snapshot (`ErrNotASnapshot`, exit 2) invalid input alone, a lookup or a manifest's read that fails otherwise keeping its cause, exit 1; a probe of a backups folder's lock (`backup.Prober`) lets go of the lock, the file and this process's holder of the folder on a goroutine of its own, and past `releaseBound` answers and marks the folder in this process alone, in the name of the caller that asked, until the release ends, `ProbeBackupsLock` answering so (`ErrCheckStillRunning`) and the ticker taking no snapshot behind it; a restore's hold is said by what holds it and what can be done; and the restore respells its source's words at each read of the snapshot, a quoted path and a root included, never a destination's** (2026-11-12, backlog B871, B826's Lows; round 2, 2026-11-13). **Don't take the look's answer without asking its stop, reach the prompt or the restore after a stop, refuse a newer schema as no snapshot or after the prompt, call a permission or I/O failure no snapshot, release a probe's lock unbounded on its caller's goroutine, answer a lock granted where the probe's own release holds the folder, write a marker for any release, name the doctor's or the ticker's probe as a restore's, tell an operator to stop a command that may have ended, or respell a destination's words.** `TestARestoreStoppedAsItsLookAnswersIsAPlainStop`, `TestBridgeRestoreStoppedDuringItsLookExitsBeforeItsPrompt`, `TestBridgeRestoreStoppedJustAfterItsLookExitsBeforeItsPrompt`, `TestTheLookBeforeThePromptRefusesASchemaThisBridgeDoesNotTake`, `TestBridgeRestoreRefusesANewerSchemaBeforeItsPrompt`, `TestTheLookBeforeThePromptKeepsTheCauseOfAReadThatFailed`, `TestBridgeRestoreSaysWhatItsLookCouldNotRead`, `TestAProbesReleasePastItsBoundIsMarkedInItsCallersName`, `TestBridgeRestoreNamesItsLooksStalledReleaseBeforeItsPrompt`, `TestTheDoctorAndTheTickerNameTheirOwnProbesStalledRelease`, `TestTheTickerTakesNoSnapshotWhileItsOwnProbesReleaseDoesNotEnd`, `TestTheCommandsSayWhatEndsARestoreThatHoldsTheSnapshots`, doctor's `TestTheBackupCheckLineNamesWhatHoldsTheFolderAndWhatEndsIt`, `TestTheRestoresWordsSpellAQuotedPathAndARootAsGiven`, `TestARestoreSpellsItsSourcesWordsAsGivenAndLeavesItsDestinationsAsTheyAre`, `TestEveryAdmissionRefusalNamesTheSnapshotAsItWasGiven`, `TestARestoreNamesTheSnapshotAsItWasGiven` and `TestBridgeRestoreNamesTheSnapshotAsItWasTypedBesideARestoreThatHoldsIt` pin it. → History-rules-cli-serve.md
 
 The Lows of B826's reviews (#1452: CodeRabbit, and round 3's Carbon, Claude
 and Codex), one backlog item.
@@ -5573,6 +5573,39 @@ unit case and the command's, the doctor's and the ticker's cases), the
 marker's write being on a goroutine of its own (`markStuck`), which a read of
 the file, at the case's end or once the release has ended, can precede: two
 rounds of its control found such reads green.
+
+**Round 2 (2026-11-13; Codex, Carbon and Claude on the round).** The
+ticker took a snapshot behind its own probe's stalled release: with no marker
+beside the lock, `captureHeldBack`'s `StuckCheckOf` makes no probe, and
+`ProbeBackupsLock`'s probe, its release past `releaseBound`, marked the
+folder and answered nil, so the pass captured a snapshot whose verification
+the mark refused (the boot pass's "did not start"). `ProbeBackupsLock` now
+answers its own stalled release as `ErrCheckStillRunning`, a
+`*StillRunningError` naming its probe (`letProbeGo` answers the mark it
+raised), joined to `ErrBackupsUnlocked` where both hold, and the ticker takes
+it before the unlocked branch, saying why in the stuck check's words
+(`stillHoldsTheFolder`). Rejected: asking `StuckCheckOf` again after the
+probe, a read of the folder on every healthy tick. `StuckCheckOf` asks this
+process's marks again after its own probe already (`return stuckAt(key)`),
+and the doctor reads `ProbeBackupsLock`'s answer only for
+`ErrBackupsUnlocked`, so its lines are as they were. The tests' reads of a
+marker waited for its file alone, which `writeMarker` makes before it writes
+its JSON, so a read could find it empty: a test now waits for the write's
+`"writes"` hook, after the write and the close (`SetOnMarkerWriteForTest`, in
+`seams.go` since then so that a check run in a process of its own can say
+so). A verification "as another process" in this process reads no marker
+beside this process's own hold: `verifyAndThen` asks this process's marks
+first, so only `readStuckMarker` and a real process of its own met the empty
+file. Two findings were refuted. An audit of `RestoreWithOptions` found no
+error of the snapshot's that is not respelled: between the admission and the
+console account's read only the destination's seal completion and config
+lock run, the migrations check drops the snapshot's read errors, the epoch
+reset opens the destination, every copy goes through `copyOut`, and
+`playerFilesNeedABarrier` names its files by name alone. And the look's own
+ask of its stop was pinned already: its control reddens
+`TestARestoreStoppedAsItsLookAnswersIsAPlainStop`'s two ways where the read
+answers, the command's case staying green by design, its own ask the second
+layer.
 
 **Left open, named for the backlog:** `CleanSnapshotPath` takes the
 separator off a root as well (`E:\` becomes `E:`, a drive's working
