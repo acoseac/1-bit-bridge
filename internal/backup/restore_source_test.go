@@ -568,10 +568,13 @@ func TestARestoreClearsAMarkerItsHolderLeftBehind(t *testing.T) {
 		markerLeft = pathExists(t, marker)
 		_, competitor = backup.VerifySnapshotAsAnotherProcessForTest(t.Context(), other, backup.VerifyOptions{LockWait: 300 * time.Millisecond})
 	})
-	if err := backup.RestoreWithOptions(snap, b.targets, opts); err != nil {
+	err := backup.RestoreWithOptions(snap, b.targets, opts)
+	// The competitor's worker answers before it lets go: its end comes before
+	// an assertion can end the test (backlog B871's round 4).
+	awaitClean(t)
+	if err != nil {
 		t.Fatalf("the restore answered %v", err)
 	}
-	awaitClean(t)
 	if markerLeft {
 		t.Error("the marker of a holder whose process ended stood once the restore held the lock")
 	}

@@ -436,14 +436,16 @@ func TestAVetoThatStoodBeforeAVerificationStaysOverTheVERIFIEDItCarries(t *testi
 			}
 			level := backup.CheckQuick
 			res, _ := backup.VerifySnapshot(ctx, dir, backup.VerifyOptions{Level: level})
+			// Its workers let go after its answer: their ends come before an
+			// assertion can end the test (backlog B871's round 4).
+			release()
+			awaitClean(t)
 			if tc == "a quick VERIFIED over a full one" && res.Found.DatabaseState != backup.StateVerified {
 				t.Fatalf("the quick check found %s, want VERIFIED: the test did not reach the case", res.Found.DatabaseState)
 			}
 			if tc != "a quick VERIFIED over a full one" && tc != "a retry stopped before it began" && res.Found.DatabaseState != backup.StateIncomplete {
 				t.Fatalf("the retry found %s, want INCOMPLETE: the test did not reach the case", res.Found.DatabaseState)
 			}
-			release()
-			awaitClean(t)
 			if !pathExists(t, filepath.Join(dir, backup.VetoFileName)) {
 				t.Error("the veto an earlier write left was removed over the VERIFIED the record carries")
 			}

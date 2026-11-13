@@ -381,6 +381,11 @@ func TestAVerificationBegunBeforeItsEndHookNeverRunsIt(t *testing.T) {
 		}
 	})
 	if _, err := backup.VerifySnapshot(t.Context(), dir, backup.VerifyOptions{}); err != nil {
+		// Its worker lets go of what it holds after its answer, and that
+		// ends before the test does (backlog B871's round 4). Past its drop
+		// it touches nothing the test removes, and the cleanup lets its
+		// last step go.
+		awaitClean(t)
 		t.Fatal(err)
 	}
 	select {
@@ -412,9 +417,11 @@ func TestAVerificationBegunBeforeItsEndHookNeverRunsIt(t *testing.T) {
 	default:
 	}
 	// Where no directory can be synced, a recheck of a VERIFIED records
-	// nothing, which is that answer.
-	if _, err := backup.VerifySnapshot(t.Context(), dir, backup.VerifyOptions{}); err != nil &&
-		(fsutil.SyncsParentDir || !errors.Is(err, backup.ErrRecheckNotRecorded)) {
+	// nothing, which is that answer. Its worker lets go after its answer: its
+	// end comes before an assertion can end the test (backlog B871's round 4).
+	_, err := backup.VerifySnapshot(t.Context(), dir, backup.VerifyOptions{})
+	awaitClean(t)
+	if err != nil && (fsutil.SyncsParentDir || !errors.Is(err, backup.ErrRecheckNotRecorded)) {
 		t.Fatal(err)
 	}
 	select {

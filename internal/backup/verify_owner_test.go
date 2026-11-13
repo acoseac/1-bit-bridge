@@ -217,36 +217,43 @@ func TestAClaimedSnapshotIsKeptFromThePrune(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	// A check stopped before it began writes INCOMPLETE over the PENDING.
+	// Its worker, and the write it hands to one of its own (abandonPending),
+	// answer before they let go: each call's end comes before an assertion
+	// can end the test (backlog B871's round 4).
 	_, _ = backup.VerifySnapshot(ctx, stopped.Dir, backup.VerifyOptions{})
+	awaitClean(t)
 	requireVerdict(t, "the stopped one", listed(t, stopped.Dir), backup.StateIncomplete, backup.ReasonCancelled,
 		backup.StateIncomplete, backup.ReasonCancelled)
 	time.Sleep(1100 * time.Millisecond)
 	newer := captureT(t, src)
 	newer.Release()
 	_, _ = backup.VerifySnapshot(ctx, newer.Dir, backup.VerifyOptions{})
+	awaitClean(t)
 	time.Sleep(1100 * time.Millisecond)
 	newest := verifiedSnapshot(t, src)
 	root := filepath.Dir(newest)
 	claimed, err := backup.Claim(t.Context(), stopped.Dir, root)
+	awaitClean(t)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(claimed.Release)
-	awaitClean(t)
 	// keep 1: the newest stays, and the newer INCOMPLETE is the evidence;
 	// the claimed one is neither.
-	if pr, err := backup.Prune(root, 1); err != nil || pr.Skipped {
+	pr, err := backup.Prune(root, 1)
+	// The prune sends its answer before its deferred h.release lets go of the
+	// folder's lock. Drain that hold before an assertion can end the test,
+	// and before pruning again (Linux race CI, 2026-11-10; backlog B871's
+	// round 4).
+	awaitClean(t)
+	if err != nil || pr.Skipped {
 		t.Fatalf("prune: %+v, %v; want it run", pr, err)
 	}
 	if !pathExists(t, stopped.Dir) {
 		t.Fatal("the prune removed a snapshot claimed for its check")
 	}
 	claimed.Release()
-	// The first prune sends its answer before its deferred h.release lets
-	// go of the folder's lock. Drain that hold before pruning again
-	// (Linux race CI, 2026-11-10); the earlier awaitClean drained the claim.
-	awaitClean(t)
-	pr, err := backup.Prune(root, 1)
+	pr, err = backup.Prune(root, 1)
 	// The second prune's worker lets go after its answer too: its end comes
 	// before anything this test removes (backlog B871's round 3).
 	awaitClean(t)

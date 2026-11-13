@@ -244,7 +244,12 @@ func TestTwoSpellingsOfASnapshotsFolderShareItsLock(t *testing.T) {
 		pr, prErr = backup.Prune(root, 0)
 		_, verifyErr = backup.VerifySnapshotAsAnotherProcessForTest(t.Context(), other, backup.VerifyOptions{LockWait: 300 * time.Millisecond})
 	})
-	if err := backup.RestoreWithOptions(given, b.targets, opts); err != nil {
+	err := backup.RestoreWithOptions(given, b.targets, opts)
+	// The prune's worker and the verification's answer before they let go:
+	// their ends come before an assertion can end the test (backlog B871's
+	// round 4).
+	awaitClean(t)
+	if err != nil {
 		t.Fatalf("the restore through the linked folder answered %v", err)
 	}
 	if heldErr != nil || !held {
@@ -257,7 +262,6 @@ func TestTwoSpellingsOfASnapshotsFolderShareItsLock(t *testing.T) {
 		t.Errorf("another process's verification of a snapshot there by the folder's own path answered %v, want ErrBackupsBusy", verifyErr)
 	}
 	b.requireRestored(t, snap)
-	awaitClean(t)
 	if held, err := backupsLockHeld(root); err != nil || held {
 		t.Errorf("the folder's lock once the restore returned: held %v, %v; want it free", held, err)
 	}

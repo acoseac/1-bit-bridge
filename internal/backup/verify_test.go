@@ -502,6 +502,10 @@ func TestVerifyingAWALHeaderDatabaseTwiceCreatesNoFile(t *testing.T) {
 	for run := 1; run <= 2; run++ {
 		if run == 2 && !fsutil.SyncsParentDir {
 			res, err := backup.VerifySnapshot(t.Context(), dir, backup.VerifyOptions{Level: backup.CheckQuick})
+			// Its worker answers before it lets go, as verifyT's does: its end
+			// comes before an assertion can end the test (backlog B871's
+			// round 4).
+			awaitClean(t)
 			if !errors.Is(err, backup.ErrRecheckNotRecorded) {
 				t.Fatalf("run 2 answered %v, want ErrRecheckNotRecorded where no directory can be synced", err)
 			}
