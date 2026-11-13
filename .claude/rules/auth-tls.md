@@ -170,11 +170,12 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   from a fresh read if it changed at all, byte for byte. Comparing the
   credential alone covered the running bridge's writes and missed
   reset-password's, whose rename dropped a login or brought back a logout
-  committed while it staged (CodeRabbit on #1039). The rename itself (on
-  Windows, with its retries) is what remains. A kernel lock (flock / LockFileEx)
-  would close that, and the "stale lockfile" reason this file gives for
-  declining interprocess locks is about lockFILES: the kernel drops those locks
-  with the process. **A rotation ends the sessions by default, and a restart
+  committed while it staged (CodeRabbit on #1039). The window between that
+  re-read and the rename (on Windows, with its retries) was left open until
+  B881's second round, which closes it with a kernel lock every writer holds
+  across it (the bullet on the store's lock, below); the "stale lockfile"
+  reason this file gave for declining interprocess locks is about lockFILES:
+  the kernel drops those locks with the process. **A rotation ends the sessions by default, and a restart
   does not** (they persist, #800): the next bullet. reset-password said a
   restart ended them until 2026-09-27. **`tokens.json` had the same window** (a
   `bridge pair` beside a running bridge) and closes it the same way, #1043,
@@ -236,9 +237,11 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   re-reads after that budget and a margin (about a second), and commits
   again only when the file is back to exactly what it replaced: a newer
   write carries something else, and the naive "not what I wrote" rule makes
-  two concurrent rotations undo each other until they give up. Only a writer
-  stalled past the settle between its check and its rename gets through; a
-  kernel lock would close that, and #1039 declined one. Open: a bridge still
+  two concurrent rotations undo each other until they give up. Since B881's
+  second round a writer holds the store's lock from its check through its
+  rename, so the confirmation is left for a writer that takes no lock: a
+  bridge older than the lock, or any writer where the storage gives none.
+  Open: a bridge still
   running the OLD binary drops the unknown field and writes its sessions
   back, so restart first, then sign out. A `sudo bridge admin
   reset-password` left a root-owned file the service could not read, which
@@ -278,10 +281,9 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   moves neither the credential nor the marker and is left out on purpose:
   the password it leaves working signs that browser in again at once, so a
   login checked before it and admitted after is the one a login begun after
-  it would be. What remains is the rename of the session's write itself:
-  the command whose write it replaced writes again (`commitAndConfirm`), a
-  sign-out then ends the session at its next request, and a
-  `--keep-sessions` rotation keeps it with the rest. The admin `Server`'s
+  it would be. The rename of the session's write itself was left open until
+  B881's second round, which holds the store's lock across it (the next
+  bullet). The admin `Server`'s
   `testAfterLoginCheck` (an atomic pointer, nil in production) parks a login
   or a redemption between its check and its session. **Don't make a session
   from a username or from anything but an `Admission`, check it before or
@@ -297,6 +299,60 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   `TestALoginTicketRedeemedBeforeARotationThatKeepsTheSessionsSignsIn`,
   `TestALoginWhoseWriteDoesNotLandIsRefused` and
   `TestConsoleLoginsRacingNothingButEachOtherSignIn` pin it.
+- **Every writer of `adminauth.json` holds the store's interprocess lock from
+  the re-read that gates its commit through its rename, so a reset that has
+  returned cannot be undone by another process's write** (2026-11-13,
+  backlog B881's second round, Codex on its first). Nothing kept the
+  processes apart: a serving bridge's session write that passed its re-read
+  and stalled before its rename landed after a whole `bridge admin
+  reset-password`, which had committed, confirmed and said success, putting
+  back the old hash, the old sign-out marker and its session, which a
+  matching stat kept, while `Verify` took the leaked password again (red at
+  round 1 through a seam between the re-read and the rename).
+  `writeStoreLocked` takes an exclusive kernel lock (`fsutil.TryLock`: flock,
+  LockFileEx) on `.adminauth.json.lock` beside the store (`LockFileName`)
+  after its staging and its `beforeCommitHook`, re-reads with it held
+  (`unchangedSince`), renames, and lets it go (`fsutil.Unlock` before
+  `Close`). The file is opened, and made, by `fsutil.OpenLockFileLike(dir,
+  name, s.path)`, so one a root run makes takes the store file's owner, and
+  is never removed. The order is `s.mu`, then the lock; a holder waits for
+  nothing between its re-read and its rename, so no wait closes a cycle. A
+  write waits up to `storeLockWait` (`atomicwrite.RenameRetryBudget()` and a
+  second: a holder holds it through a rename and its Windows retries, and
+  the waiter holds `s.mu`, which every console request takes), then writes
+  nothing and answers `ErrStoreBusy`, which each caller answers as a store
+  it cannot write: the activity write is logged and its check still
+  answers, a logout and `EndOtherSessions` keep their change pending (the
+  second says `ErrSessionsNotSaved`), a login is the 500, and
+  `reset-password` and `sign-out-everywhere` print "another bridge process
+  is writing the console's credentials; try again"; what was pending lands
+  at the next write once the lock is free. Storage that gives no lock
+  (`fsutil.KeepsNoLocks`, ENOLCK among them, where the config's lock refuses
+  on ENOLCK instead) is written as before, unlocked, and the first such write
+  of the process says so once (`warnUnlocked`), without claiming the
+  filesystem keeps none; any other failure of the lock, a permission error
+  included, keeps its own cause. Outside the guarantee: a restore (it holds
+  the data dir's lock and refuses beside a live serve, so only another
+  command can race it), a bridge still running a binary older than the lock,
+  and storage without locks; `commitAndConfirm` and its settle stay for
+  those. The lock #1039, #1043 and #1044 declined is no longer the repo's
+  first (`server.lock`, the config's, the migration's and the backups' are
+  kernel locks through `fsutil`), the bound answers a hung holder,
+  `OpenLockFileLike` the root-owned file, and the fallback a filesystem
+  without locks; the bridge and its commands share a host, where a local
+  lock holds. **Don't take the lock before the staging hook or let it go
+  before the rename, hold it across bcrypt, the network or the
+  confirmation's settle, take contention or a permission error for storage
+  without locks, report a failure of the lock as `ErrStoreBusy`, wait for it
+  without the bound, open it any other way, or remove it.**
+  `TestAResetBesideASessionWriteParkedBeforeItsRenameIsNotUndone`,
+  `TestASessionWriteParkedBeforeTheLockFindsTheResetAndWritesNothing`,
+  `TestAStoreLockHeldPastItsWaitLeavesEveryWriteAsAStoreThatCannotBeWritten`,
+  `TestTheStoresLockMadeAsRootTakesTheStoreFilesOwner`,
+  `TestAStorageThatGivesNoLockIsWrittenUnlockedAndSaidOnce`,
+  `TestALockThatCannotBeTakenKeepsItsCause`,
+  `TestAConsoleLoginBesideAHeldStoreLockAnswersAsAStoreFailure` and
+  `TestTheAdminCommandsSayWhenAnotherProcessHoldsTheStoresLock` pin it.
 - **A console login ticket is PERSISTED, because the two halves are different
   PROCESSES, and each ticket is a FILE OF ITS OWN, because both processes write
   tickets** (2026-09-28). `bridge admin login-link` mints and the serving bridge
