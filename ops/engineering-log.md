@@ -95380,3 +95380,93 @@ the files changed. This record: `TestEveryCitedTestNameExists`,
 The rule change is `rules-b872-r2.patch`: round 1's two B872 bullets in
 `build-ci-tests.md`, the first's account of `takeSlot` (now false) replaced,
 the second given the fail-fast wait; the budgets check is clean with it.
+
+## 2026-11-13 — B872 round 3: the waiter case goes red for the fault it names
+
+Worker b872, legion0, branch `fix/b872-ci-reds` from `orch/b872` (675acc8a,
+round 2 with its rules). Commits: f72d9993 (the seam and the case), then this
+record. Every run: Go 1.27.3, the Makefile's tags, TMPDIR `~/onebit/tmp`;
+controls are uncommitted edits to the committed tree, the race test binary
+built, the files restored with `git checkout --` before the run, each
+predicted in writing first (`.tmp/_b872/predictions-r3.txt`).
+
+### The finding
+
+Round 2's review (Claude, Medium): `TestAVerificationWaitingItsTurnHearsOfACheckGivenUp`
+failed only on an answer that came before the wait's signal. With round 2's
+reorder of `takeSlot` reverted, the wait's seam ran before the loop, so the
+signal always came first; a second verification run late past it, the first
+given up by the time it looked, took a fresh notice, found the slot's holder
+marked and answered `ErrCheckStillRunning` with no wait, the answer a waiter
+the notice woke gives. Round 1's defect was argued in comments and the rule,
+not shown red.
+
+### The fix (f72d9993)
+
+The wait's hook holds the second until the first has answered its check
+given up: the test closes `firstGivenUp` once `firstDone` says
+`ErrCheckGivenUp` and `StuckCheckHere` finds the first's mark, and the hook
+waits on that, never polling. The order is the code's: a check given up is
+marked (`giveUpAs`, `markStuckAfter`: the record kept and the notice closed,
+under the hold's lock) before its worker writes its INCOMPLETE and answers
+(`verifyHeld`), so the hook lets the second go only after the mark. With the
+reorder in place the second holds the notice from before the mark, which the
+mark closed, and the slot stays the first's (its worker lets it go only once
+its parked check has ended), so the notice is its select's one ready case;
+with the reorder reverted the second's first look comes after the mark, with
+a fresh notice, and finds the holder marked. A seam on the notice branch,
+`SetOnSlotNoticeForTest` (nil in production, checked as the wait's seam is),
+says the second heard it, and the case requires that before the second's
+answer. The hold waits for `firstGivenUp` or an abort, at most a minute, its
+overrun said to the test's goroutine (no `t.Fatal` in the hook);
+`joinBackupCallers`' release closes the abort (`sync.OnceFunc`) with the
+unlock and the park's release, before the callers are joined, and both seams
+are put back after the callers and their holds have drained (their restores
+registered before `joinBackupCallers`).
+
+### The red and the controls (`.tmp/_b872/controls_r3.py`)
+
+- The red, R: `takeSlot`'s reorder reverted (the wait's seam before the loop,
+  as at e4efc8c9; the notice's seam kept), `R.test -test.run
+  '^TestAVerificationWaitingItsTurnHearsOfACheckGivenUp$' -test.count 50`: 50
+  of 50 red, each in 3.74 to 4.09 s, every one `verify_stuck_test.go:557: the
+  second verification answered … (snapshot …, given up in its check at …)
+  without hearing the notice of the first's give-up: it found the first given
+  up as it looked, refused, never told`, and nothing else. Restored, the case
+  is green (the runs below).
+- The control, C: R with the case's requirement on the notice taken out: 50 of
+  50 green (3.75 to 4.11 s). The reverted code passes again: the requirement
+  is what tells the two paths apart.
+- The review's control, K: the first ending with no give-up mark (its park let
+  go at once, its deadline 30 s): 3 of 3 red in 2.88 to 2.99 s, `the first
+  verification answered <nil>, want its check given up` and nothing else, no
+  caller or hold left and no race.
+- K-abort: K with the abort taken out of the release: the same line, then
+  `verify_hold_test.go:837: the verification caller did not end` at 32.8 s,
+  the second still held: the abort is what ends the teardown at once.
+
+`git status` was empty after every control.
+
+### Runs
+
+At f72d9993, unloaded, six lanes at once (`.tmp/_b872/lanes_r3.py`), each a
+`go test -race -timeout 120m -v` of its own. The review's `-count=200 -run
+'TestAVerificationWaitingItsTurnHearsOfACheckGivenUp|Slot'` in
+`internal/backup`, which matches the case alone (no other top-level test's
+name holds `Slot`, `-list` says): 200 of 200 (822 s, each run 3.87 to
+4.68 s). Every other user of `SetOnSlotWaitForTest` there at the same count,
+200 of 200 each: `TestASlowStepWithinItsBoundLeavesNoMark` (905 s),
+`TestAQueuedVerificationKeepsItsCaptureFromThePrune` (940 s),
+`TestAStopBeforeVerificationReportsItsIncompleteWrite` (854 s) and
+`TestTwoVerificationsOfOneSnapshotWriteOneAtATime` (725 s). cmd/bridge's
+`TestVerifyBesideTheTickersVerificationOfOneSnapshot` once: ok (4.8 s). No
+race reported in any. Then `go test -race -count=1 -timeout 120m
+./internal/backup/`: ok (789.5 s). `go vet` with the tags of
+`internal/backup` and `cmd/bridge` clean for linux/amd64, windows/amd64,
+darwin/arm64 and linux/386; go1.27.3's gofmt lists none of the files
+changed; cmd/bridge's `TestEveryCitedTestNameExists`,
+`TestNoDocblockNamesAnotherDeclaration` and `TestNoBlankKeepers` pass over
+the tree with this record. The rule change is `rules-b872-r3.patch`: round
+2's first B872 bullet in `build-ci-tests.md`, which named the wait's seam,
+now names the notice's seam, the held wait and its abort; the budgets check
+is clean with it.
