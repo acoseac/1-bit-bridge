@@ -5477,3 +5477,102 @@ predicted, were red where predicted: the check asked only within the bound
 (the row past it), `Oversized` set at the bound (the row at it), and the words
 without `Oversized` (the row past it). The record is in
 `ops/engineering-log.md`, 2026-11-13, B828 round 2.
+
+## B618 — on Windows, bridge logs reads the file the installed bridge writes (2026-11-13)
+
+- **On Windows `bridge logs` reads the file the installed bridge writes: the service's log (`WindowsLogDirs.ServiceLog`, which `redirectServiceIO` opens) while `packaging.CheckWindowsInstall` finds the service registered, running or not, the user's (DefaultLogPath's) otherwise, one line on stderr naming the one read where both are there; where the check cannot tell, the service's log where it is there, else the user's, either said; and the console's log (`consoleLogPath`) takes that choice with "this process is the service" for the check** (2026-11-13, backlog B618). **Don't ask the service manager for more than `SC_MANAGER_CONNECT` and `SERVICE_QUERY_STATUS`, read any failure but `ERROR_SERVICE_DOES_NOT_EXIST` as no service, choose by modification time, read the user's log in silence where the check cannot tell, make the service log's path but through `WindowsLogDirs`, name `bridge serve`, `start` or `status` as what writes or checks it, or change macOS's and Linux's words.** → History-rules-cli-serve.md
+
+*What was true.* A bridge run as the Windows service writes
+`%PROGRAMDATA%\1-bit-bridge\bridge.log`: `main` calls `redirectServiceIO` once
+`isWindowsService` says the service manager started it, before serve parses a
+flag, and the service runs as LocalSystem, whose `%LOCALAPPDATA%` is under
+`C:\Windows\System32\config\systemprofile`. A bridge the Startup-folder
+launcher starts at sign-in, or `bridge init`'s start of one (`SpawnDetached`),
+writes DefaultLogPath, `%LOCALAPPDATA%\1-bit-bridge\bridge.log`, through
+`start … 1>>"<log>" 2>&1`. A bridge run in the foreground, the menu's "Start
+now" and init's run in its terminal included, writes neither: it logs to its
+terminal. `bridge logs` read DefaultLogPath alone, so on a service install it
+said the file did not exist and to run `bridge start` or `bridge serve`, or
+showed a file an earlier install left; and the console's log export
+(`adminLogPath`, and with it the support bundle's tail and the console's
+doctor's `log-file-size` line) offered DefaultLogPath inside the service,
+which there is LocalSystem's. `packaging.InstalledKind`, which `bridge start`,
+`stop` and `restart` and the menu ask, connects with `mgr.Connect` and opens
+with `OpenService`, which ask `SC_MANAGER_ALL_ACCESS` and `SERVICE_ALL_ACCESS`
+(x/sys v0.49.0, `svc/mgr/mgr.go` lines 43 and 195): a standard user's connect
+is refused, and the probe falls through to the Startup folder, and any failure
+of the open reads as no service. `bridge status` reads the invoking user's
+config and asks its admin port: it never asks the service.
+
+*The install check.* `packaging.CheckWindowsInstall` connects with
+`SC_MANAGER_CONNECT` alone and opens the bridge's service
+(`com.acoseac.1-bit-bridge`) with `SERVICE_QUERY_STATUS` alone, which a
+standard user holds under the default security Windows gives the manager and a
+service `CreateService` registers (Microsoft's "Service Security and Access
+Rights"). A service it opens is registered, running or not;
+`ERROR_SERVICE_DOES_NOT_EXIST` is not registered; any other failure, a connect
+refused or out of reach, a service whose security refuses the open, cannot
+tell, and says why. It finds the Startup-folder launcher by its path. The
+rights are Microsoft's documentation: legion0 has no Windows and CI's runner
+is elevated, so a stand-in that grants a standard user's rights and refuses
+more, as Windows does, carries the cases on every host, and windows-latest
+holds its constants to x/sys/windows's and asks the real manager.
+`InstalledKind` is left as it was: its callers are other commands' (B618's
+report names it).
+
+*As built.* `chooseWindowsLog` decides from the registration and the
+directories alone: the service's log while the service is registered, the
+user's otherwise, the service's first where the check cannot tell; choosing
+the service's needs nothing of the user's path, so a home that cannot be read
+leaves only the other unnamed. `openWindowsLog` reads it, names the other in
+one line on stderr where that is there too, reads the user's where the check
+cannot tell and the service's is not there, saying so, and where it finds no
+log names the path it looked at, or both, and what writes it: Services (where
+the service shows as `1-bit-bridge`) or `sc.exe query com.acoseac.1-bit-bridge`
+for the service, the sign-in launcher, or a foreground run's terminal. The
+paths come from `WindowsLogDirs`, `C:\ProgramData` where `PROGRAMDATA` is
+empty, as the service took it, and the home's `AppData\Local` where
+`LOCALAPPDATA` is, as DefaultLogPath took it; `redirectServiceIO` and
+`InstallWindowsService` take the service's folder and file from it and the
+service's open from `OpenServiceLog`, and DefaultLogPath's Windows answer is
+its `UserLog`. Off Windows `bridge logs` is unchanged, word for word.
+
+*The console.* `consoleLogPath` takes `chooseWindowsLog` with whether its
+process runs as the service (`isWindowsService`) for the check: the service's
+log inside the service, the user's otherwise, DefaultLogPath off Windows. The
+console's doctor builds its report in the serving process, so its
+`log-file-size` line grades the service's log inside the service; `bridge
+doctor` run from a shell is no service, so on a service install it still
+grades the user's log (B618's report names it).
+
+*The tests.* cmd/bridge's
+`TestBridgeLogsReadsTheServicesLogWhileTheServiceIsRegistered`,
+`TestBridgeLogsReadsTheUserLogOfAStartupFolderInstall`,
+`TestBridgeLogsSaysWhichLogItReadsWhereTheServiceIsNotRegistered`,
+`TestBridgeLogsSaysWhereTheServicesLogWillBe`,
+`TestBridgeLogsSaysWhatWritesTheUserLog`,
+`TestBridgeLogsReadsTheServicesLogWhereTheCheckCannotTell`,
+`TestBridgeLogsChoosesTheServicesLogWithoutTheHome`,
+`TestBridgeLogsReadsTheServicesLogWhileTheServiceHoldsIt`,
+`TestBridgeLogsOffWindowsIsAsItWas`,
+`TestBridgeLogsReadsTheHostsLogThroughItsEntryPoint`,
+`TestTheConsolesLogIsTheFileItsProcessWrites` and
+`TestTheWindowsLogChoiceInWindowsPaths`, and internal/packaging's
+`TestTheWindowsLogsAreMadeFromTheirDirectories`,
+`TestTheUserLogNeedsTheHomeOnlyWithoutLocalAppData`,
+`TestTheInstallCheckAsksOnlyWhatAStandardUserHolds`,
+`TestTheInstallCheckTellsNotRegisteredFromCannotTell`,
+`TestAStoppedServiceIsRegistered`, `TestBothInstallArtifactsAreReported`,
+`TestOpenServiceLogAppendsAsTheServiceWrites` and, on Windows alone,
+`TestTheStandInsRightsAreWindowsOwn`,
+`TestTheServiceManagerAnswersTheInstallCheck` and
+`TestTheWindowsLogsAreTheHostsOwn` pin it.
+
+*Red first and the controls.* At 779bdfc3, the tests over main's selection,
+every case where the selection changes was red, the first on "bridge logs
+printed "a line of a bridge its sign-in launcher started\n" want "the
+service's first line\nthe service's last line\n"", and the Startup-folder,
+macOS and Linux and host entry-point guards were green. Eleven controls, each
+predicted before it ran, were red where predicted and nowhere else, among
+them the brief's: `openLog`'s Windows call site back to DefaultLogPath alone.
+The record is in `ops/engineering-log.md`, 2026-11-13, B618.
