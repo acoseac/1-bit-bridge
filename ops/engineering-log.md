@@ -95187,3 +95187,817 @@ the test-ordering line declared as an edit; `TestEveryCitedTestNameExists`
 passes there with this record in it, and fails naming a ghost citation planted
 in the patched History. `make test` and `make build-all` were not run: the
 brief asked for the package.
+## 2026-11-12 — B738: the folding probe settles by a listing read after its lookups
+
+Backlog B738 (Codex on #1397, 2026-11-05; target 0.2.4, low), on
+`fix/b738-folding-probe-relist` from 4678b983; the code is 12557f3b. The rule
+is the B651 bullet in `scanner.md` (`rules-b738-r1.patch`), whose Don't now
+names a listing read before the lookups it settles, for another entry asked,
+or cut short, and a folder whose first read was all of it read again past
+`foldingProbeEntries` + 1 entries; its long form is in
+`ops/History-rules-scanner.md`. This is the evidence. Linux amd64 (legion0),
+Go 1.27.3, the Makefile's tags, TMPDIR on the home volume (ext4).
+
+**The failure.** `foldingIn` read up to 256 entries first (casefold.go:251-252
+at 4678b983). Where that read was all of the listing (`whole`),
+`listsSpellings` looked for the two spellings in those same entries
+(:323-340), read before the lookups (:259-263); only a folder the first read
+was not all of was read again, whole (`readDir(dir, -1)`, :325). On a
+case-sensitive volume, a hard link `FOLDER.JPG` made beside `folder.jpg` after
+the first read and before the swapped lookup is found by both lookups as one
+file, both re-lookups agree, the entries read before them hold `folder.jpg`
+alone, the lookup of `FOLDER.JPG` after them still finds the file, and the
+folder answered case-insensitive. Rare: it takes a second name differing in
+case alone, made in that window.
+
+**The fix** (casefold.go at 12557f3b). Wherever an entry's two spellings find
+one file, `listsSpellings` reads the listing again after that entry's own
+lookups, never reusing a read made before them: not the first read, and not a
+re-read made for an entry asked earlier, which would be the first read's fault
+again for every entry after it. `readListing` is the one rule for whether a
+read is the whole listing, for the first read and the re-read alike. A folder
+whose first read was all of it is read again for at most
+`foldingProbeEntries` + 1 entries: fewer than that is its whole listing now,
+256 entries included, which the first read could not tell from more; that many
+says the folder grew past the bound since, and the re-read settles nothing (not
+known), so the next entry is asked, as after a re-read that cannot be read, and
+such a folder is never read whole. A folder whose first read was not all of
+it is read whole again, as before. B651's tenth- and eleventh-round checks
+apply to every re-read: one without the probed name tells nothing, and one
+without the swapped spelling answers case-insensitive only once a lookup of it
+after the re-read still finds the file.
+
+**Reads.** An entry asked is looked up at most five times (its name and the
+swapped spelling, each again, and the swapped spelling once more after the
+listing) and the listing is read again for it at most once, only where its
+two spellings found one file. The entries asked are the first read's, at most
+`foldingProbeEntries`, so however the folder changes under it a probe reads
+the listing at most `foldingProbeEntries` + 1 times; each re-read of a folder
+whose first read was all of it takes at most 257 entries. Without churn the
+first entry whose spellings find one file settles the probe, so the cost is
+one more read of a small folder where that happens (a folder that folds, on
+macOS's and Windows' default volumes, or a hard link's two names), and none
+where the swapped lookup finds nothing or another file (a case-sensitive folder
+without such links, Linux's usual answer).
+
+**Why a listing, and not the folder's change time.** A directory's mtime or
+ctime is not exact on every volume the probe runs on: FAT keeps it to two
+seconds and HFS+ to one, so a name made or renamed within one tick of the
+first read leaves it as it was, and a network volume's attributes are cached
+by its client. The brief's review ruled it out on that ground; the listing is
+what the probe already trusts.
+
+**A folder that grew past the bound.** The review asked that such a folder
+answer as a large folder does today, never by an unbounded `readDir(dir, -1)`.
+Its re-read settles nothing, and the next entry is asked, as a large folder's
+entry is when its re-read cannot be read whole; no read of it goes past 257
+entries. A folder that folds and grew past the bound between the probe's first
+read and its re-reads therefore answers Unknown (a verdict the probe cannot
+reach), where a folder that was large at the first read answers from its whole
+re-read. Reading such a folder whole instead would give it a large folder's
+answer, at a large folder's cost; that is `n = -1` in place of the bound in
+`listsSpellings`, and the control C7 below shows what it changes.
+
+**Tests** (casefold_test.go, through the `foldingFS` seam unless named).
+`probeFolder` runs `relist` before every read after the first, not only a
+whole one, answers `io.EOF` for an empty read as os.File.ReadDir does, and
+records each read's size (`reads`).
+
+- `TestASecondNameMadeBeforeTheLookupsIsInTheListingThatSettles`: the second
+  name added to the listing and to the lookups at the probe's first lookup
+  (`change`), `FOLDER.JPG` beside `folder.jpg`, the other way round, and beside
+  names with no letter; case-sensitive wanted. It never skips.
+- `TestEachEntryAskedIsSettledByAListingReadAfterItsOwnLookups`: `Abba` and
+  `ABBA` (one file) and `folder.jpg`; `Abba` gone before its re-read, which so
+  settles nothing, and `FOLDER.JPG` made beside `folder.jpg` before
+  `folder.jpg`'s lookups; case-sensitive wanted, and reads `[256 257 257]`.
+- `TestAFolderReadWholeIsReadAgainForOneEntryMoreAtMost`: a folder grown to 256
+  entries with the second name among them (case-sensitive, reads `[256 257]`);
+  grown past the bound with the second name past it (Unknown); the same with
+  an entry after that tells (case-sensitive); a folder that folds, grown past
+  the bound (Unknown, reads `[256 257 257]`).
+- `TestAListingThatChangedBeforeItsReReadTellsNothing` runs its four cases in a
+  folder the first read is not all of, as before, and in one it is all of.
+- `TestAHardLinkMadeBeforeTheLookupsOnThisHostsVolume`, on this host's volume:
+  `folder.jpg` and its hard link `FOLDER.JPG` (case-sensitive), then
+  `FOLDER.JPG` made at the probe's first lookup by `linkAtFirstLookup`, a
+  `foldingFS` over the os package (case-sensitive). It skips, saying why, where
+  the volume makes no such name: one that folds case (macOS's and Windows'
+  default volumes, so CI's macOS and Windows legs), or one with no hard links.
+  It ran here, ext4.
+
+**Red on main.** The tests above, with casefold.go as at 4678b983:
+
+| Test | Result at 4678b983 |
+|---|---|
+| `TestASecondNameMadeBeforeTheLookupsIsInTheListingThatSettles` | red, all three cases: "the folder answered case-insensitive, want case-sensitive" |
+| `TestAHardLinkMadeBeforeTheLookupsOnThisHostsVolume` | red: "a folder whose FOLDER.JPG was made between the first read and the lookups answered case-insensitive, want case-sensitive"; the pair made before the first read green |
+| `TestEachEntryAskedIsSettledByAListingReadAfterItsOwnLookups` | red on its reads (`[256]`): main settled at `Abba` by its first read, which held both names |
+| `TestAFolderReadWholeIsReadAgainForOneEntryMoreAtMost` | red, all four cases: case-insensitive each, reads `[256]` |
+| `TestAListingThatChangedBeforeItsReReadTellsNothing` | three small cases red: the rename with no other entry (case-insensitive), both names gone and the other name gone (case-sensitive each), since main never read such a folder again and the change made before the re-read never came; the large cases, and the small rename with another entry after it, green |
+| `TestTwoNamesOfOneFileAreNoProofThatAFolderFoldsCase`, `TestAnEntryThatChangesBetweenTheLookupsTellsNothing` | green |
+
+**Negative controls**, each an uncommitted edit to casefold.go at 12557f3b,
+the whole fsutil package run under it, the file put back with `git checkout
+--` and its bytes checked against HEAD's; predicted in writing before the run,
+and each matched its prediction. `git status` was empty after them.
+
+| Control | Red |
+|---|---|
+| C1 the fresh check removed (`listsSpellings` as at 4678b983) | exactly the tests red on main, in the same words; `TestTwoNamesOfOneFileAreNoProofThatAFolderFoldsCase` and the alias tests (casefold_alias_test.go) green |
+| C2 a cut-short re-read of a folder read whole taken for its whole listing | the bound test's three cases past the bound: case-insensitive each, where Unknown, case-sensitive and Unknown are wanted |
+| C3 the bound without the + 1 | the folder grown to 256 entries (Unknown, want case-sensitive), and every re-read's size in two tests |
+| C4 one re-read kept for the probe (the first answered again to every later entry) | `TestEachEntryAskedIsSettledByAListingReadAfterItsOwnLookups` (case-insensitive, want case-sensitive), and the reads of the folding folder grown past the bound |
+| C5 no lookup of the swapped spelling after the re-read | the other name alone removed, in both sizes of folder: case-insensitive, want Unknown |
+| C6 the re-read's probed-name check dropped (`!hasName && false`, which builds) | the renames, in both sizes: case-sensitive where case-insensitive and Unknown are wanted; and the reads of `TestEachEntryAskedIsSettledByAListingReadAfterItsOwnLookups` |
+| C7 a folder read whole read whole again (`n = -1`) | every re-read's size (`-1`); grown past the bound with the second name past it (case-sensitive, want Unknown) and the folding folder grown past it (case-insensitive, want Unknown) |
+| C8 a folder not read whole re-read for 257 entries too | the large folders' answers: the hard link's other name past the first read (Unknown, want case-sensitive), a folder that folds past the first read (Unknown, want case-insensitive), and the large rename with another entry after it |
+
+C6's first form (`case !known:`) did not build, `hasName` left unused, and is
+not counted. C8 shows the large folders' answers still rest on their whole
+re-read, which the fix keeps.
+
+**Checks.**
+
+| Check | Result |
+|---|---|
+| go1.27.3's gofmt on casefold.go and casefold_test.go | nothing listed |
+| `go vet` with the tags on ./internal/fsutil/, native and GOOS=windows, GOOS=darwin, GOOS=linux GOARCH=386 | exit 0 each; the vet tool ran on the package (`-x`) |
+| the probe's twelve tests, `-race -count=50` | 600 of 600 passed, none skipped (the hard-link test ran 50 times on ext4) |
+| `go test -race -count=1 -timeout 120m -p 3` of ./internal/fsutil/ and the packages that call the probe (`git grep FoldingIn`: ./internal/manifest/, ./cmd/bridge/), at 12557f3b, through the build slot | ok each: 3.5 s, 1621.5 s, 1614.8 s |
+| the rules patch applied to a copy of the tree | applies cleanly and gives the files its builder wrote; `make docs-check` ok there (scanner.md 45,205 to 45,403 bytes); the B651 entry's Don't sentences match between the line and its long form both ways (`mdblocks.dropped_donts`, which catches a one-sided edit); `TestEveryCitedTestNameExists` passes there, and reports a ghost citation planted in the patched History |
+
+`make test` and `make build-all` were not run: the brief asked for the
+packages above. On CI's macOS and Windows legs the hard-link test on the
+host's volume skips, their default volumes folding case; the seam cases run on
+every platform.
+
+## 2026-11-13 — B738 round 2: a listing is whole only where its read reached the end
+
+Backlog B738's round 2, on `fix/b738-folding-probe-relist` (#1454) from
+40010cc5 (round 1 and its rules); the code is 9a7fecb7. CodeRabbit's finding on
+#1454, verified, and the brief's review (Codex, Carbon), which set the two
+layers' contracts. The rule is the B651 bullet's Don't in `scanner.md`
+(`rules-b738-r2.patch`), its long form in `ops/History-rules-scanner.md`; this
+is the evidence. Linux amd64 (legion0), Go 1.27.3, the Makefile's tags,
+TMPDIR on the home volume (ext4).
+
+**The finding.** `readListing` took a listing for whole where
+`err == nil && len(entries) < n` (casefold.go:438 at 40010cc5), and
+`os.File.ReadDir(n)` can come back short with no error before the end. Go
+1.27.3's `os/dir_unix.go` decrements n (:135-136) before it builds an entry,
+and leaves out one that `newUnixDirent` (:141-146) finds gone, without giving
+its place back. `newUnixDirent` stats only an entry the listing gives no type
+(`direntType` answers `^FileMode(0)` for DT_UNKNOWN: XFS without ftype, some
+FUSE and network filesystems) or a folder opened in an `os.Root`, which
+`fsutil.OpenDir` is not; so on this host's ext4 no read comes back short, and
+the case needs such a volume. There, a folder its first read was all of, grown
+past the bound, with one entry gone during its re-read, could come back from
+`ReadDir(257)` with 256 entries and no error and `FOLDER.JPG` unread, and the
+probe answered case-insensitive: B738's own failure by another route. The same
+reader also stops a call short, with no error, at a record it cannot parse
+(:101-110, :120-123): a read on goes past it where its length was read
+(`d.bufp` moved on, :106), and where it was not, the next call meets io.EOF at
+once, the end `os.ReadDir` gives there too.
+
+**macOS and Windows** (go1.27.3). `os/dir_darwin.go` loops while the entries
+it kept are fewer than asked (`len(names)+len(dirents)+len(infos) < size`,
+:56): an entry it leaves out (a zero inode, `.` or `..`, one gone before its
+stat, a kqueue descriptor's EBADF) costs nothing, and it comes back short only
+at `readdir_r`'s end (:63) or with an error. `os/dir_windows.go` takes n down
+only after it appends an entry (:210), passes over `.` and `..` before that
+(:180-184), and stats nothing (the listing carries each entry's information),
+so it comes back short only at `ERROR_NO_MORE_FILES` (:128-133), at an empty
+root's `ERROR_FILE_NOT_FOUND` (:134-146), or with an error. Neither answers
+short before the end, and the fix holds on both: the next read answers
+io.EOF.
+
+**The fix** (9a7fecb7). Completeness comes only from reaching the end of the
+same open folder. `readDirUpTo`, over a raw-reader interface (`dirReader`,
+os.File's `ReadDir`), is one listing: where n > 0 it reads on after a batch
+that came back short, each read asking for what is left of n and never for 0
+(which reads all the rest), and answers io.EOF beside what it read once a read
+reached the end, no error once it holds n (the end neither reached nor looked
+for), and a failed read's error beside what it read before it; a batch that
+brings nothing and no error ends it with no error, and one that brings more
+than was asked is cut to the bound, answering no error. Where n <= 0 it is one
+`ReadDir(n)`, which answers no error, not io.EOF, at its end
+(`listsSpellings` passes -1 for a folder its first read was not all of).
+`osFolding.readDir` opens the folder once and reads it through `readDirUpTo`;
+its `open` field lets a test script the raw reader under that readDir.
+`readListing` takes only the end for whole: io.EOF where n > 0, no error where
+n <= 0; never a read that came back short with no error, never one that holds
+n, never one beside a failed read. So a first read of a 256-entry folder stays
+not whole, while a re-read bounded at 257 of a 256-entry folder reads one
+more, meets io.EOF, and is whole. A small folder's first read and re-read each
+make one more `ReadDir` call than before, which meets the end.
+
+**The two layers.** `foldingFS.readDir` is the aggregate: one listing from one
+open, entries with io.EOF once it reached the end, no error where it holds n.
+`probeFolder`, the probe's fake, now answers that contract (its round-1 form
+answered no error beside a short listing, which `readListing` would now read
+as cut short, sending every small folder's re-read through n = -1); `short`
+makes a read of it come back short with no error. The brief's item 2, io.EOF
+only on an empty batch and never beside entries, describes the raw reader, and
+the review withdrew it for the fake. `reads` stays one entry a listing, with
+the n `readListing` asked for, and `relist` fires between listings only, so
+`[256 257 257]` and every round-1 assertion hold unchanged.
+
+**Item 3 dropped.** `git grep "answers as a large"` finds nothing; the
+FoldingIn doc already says a folder grown past the bound settles nothing, and
+so do the rules and the long form.
+
+**Siblings.** The other bounded `ReadDir(n)` loops (manifest's
+`dirHoldsLibraryContent` and `holdsSpellingOrContent`, integrity's
+`scanDirEntries`) read on until io.EOF or an error and take nothing from a
+batch's count: nothing to change there.
+
+**Tests** (casefold_test.go and casefold_listing_test.go).
+
+- `TestAListingThatCameBackShortWithNoErrorIsNotWhole`: a folder its first read
+  was all of, `FOLDER.JPG` made past the bound at the first lookup, its re-read
+  answering 256 of 257 entries and no error (`short`); Unknown wanted, reads
+  `[256 257]`.
+- `TestTheListingReadsOnPastAShortBatchUpToItsBound`: `readDirUpTo` over a
+  scripted reader (`scriptedListing`): short batches then the end, a short batch
+  then the rest of the bound, the bound in one batch, the end beside entries,
+  an empty listing, a failed read after a short batch and at once, a batch that
+  brings nothing, one that brings more than asked, and n = -1 whole and failed;
+  each read's size asserted (what is left, never 0 or less) and the total held
+  to the bound.
+- `TestAListingIsWholeOnlyWhereItsReadReachedTheEnd`: `readListing` over scripted
+  aggregate answers.
+- `TestTheFirstReadReadsOnPastAShortBatch`: the first read through osFolding's own
+  readDir, scripted (`osFolding.open`), the only name with a letter in its
+  second batch; this host's lookups decide the answer, and the reads ask for
+  `[256 255 254]`.
+- `TestTheOSListingEndsWhereItsReaderReachesTheEnd`: osFolding over this host's
+  reader on folders of 0, 255, 256 and 257 entries, read for 256, 257 and -1.
+
+**Red at 40010cc5.** With casefold.go as at 40010cc5 and the new casefold_test.go,
+`go test -tags ts_omit_webclient,ts_omit_debugeventbus -count=1 -v -run
+'^(TestAListingThatCameBackShortWithNoErrorIsNotWhole|…)$' ./internal/fsutil/`:
+"a re-read that came back short with no error, FOLDER.JPG unread, made the
+folder answer case-insensitive, want unknown"; the round-1 probe tests passed
+beside it with the new fake. The other new tests name `readDirUpTo` and
+`osFolding.open`, which 40010cc5 does not have; their reds are the controls'.
+
+**Negative controls**, each an uncommitted edit to casefold.go at 9a7fecb7, the
+whole fsutil package run under it, the file put back with `git checkout --` and
+its bytes checked against HEAD's; predicted in writing before the run, each
+matching its prediction case by case. `git status` was empty after them.
+
+| Control | Red |
+|---|---|
+| R1 `len(entries) < n` back as completeness (round 1's `readListing`) | `TestAListingThatCameBackShortWithNoErrorIsNotWhole` (case-insensitive, want Unknown), and `readListing`'s "short with no error" row |
+| R2 the continuation removed (one `ReadDir(n)` for n > 0) | every multi-step case of the scripted test (each read's size and what was read), the first read (Unknown, want case-sensitive; one read of 256), and the OS listing (255 read for 256 and 256 read for 257 answer no error and read as not whole) |
+| R3 n <= 0 sent through the loop | the scripted test's n = -1 cases (nothing read), and the OS listing's 257 read for -1 (0 entries) |
+| R4 each read asks for n, not for what is left | each read's size in the scripted test (`[5 5 5]`, …) and the first read (`[256 256 256]`); no answer changed |
+| R5 no cap on a batch that brings more than asked | that case: four entries and io.EOF, past the bound of two |
+| R6 a batch that brings nothing does not end the read | that case: io.EOF, one more read |
+| R7 a failed read answered as the end | the failed reads (io.EOF where the EIO is wanted) and the empty batch |
+| R8 a read that holds n answered as the end | the bound cases of the scripted test, and the OS listing's 256 for 256, 257 for 256 and 257 for 257 (io.EOF, whole) |
+
+Under R2 the round-1 probe tests on this host's disk stay green: a first read
+that came back short is not whole, and a re-read of such a folder falls back to
+a whole read, so their answers hold. The scripted and OS tests are what show
+the continuation.
+
+**Checks.**
+
+| Check | Result |
+|---|---|
+| go1.27.3's gofmt on casefold.go, casefold_test.go, casefold_listing_test.go | nothing listed |
+| `go vet` with the tags on ./internal/fsutil/: GOOS=linux, darwin, windows, and GOARCH=arm64 | exit 0 each; the vet tool ran (`-x`) |
+| the probe's 18 tests, `-race -count=200` | 3,600 of 3,600 passed, none skipped, no race |
+| `go test -race -count=1 -timeout 120m -p 3` of ./internal/fsutil/, ./internal/manifest/ and ./cmd/bridge/ (the probe's package and its callers), at 9a7fecb7, through the build slot | ok each: 3.6 s, 1620.1 s, 1620.1 s |
+| the rules patch applied to a copy of the tree | applies cleanly and gives the files its builder wrote; `make docs-check` ok there (scanner.md 45,403 to 45,550 bytes); the B651 entry's Don't sentences match between the line and its long form both ways (`mdblocks.dropped_donts`); `TestEveryCitedTestNameExists` passes there, and reports a ghost citation planted in the patched History |
+
+`make test` and `make build-all` were not run: the brief asked for the
+packages above. A short read cannot be made on this host's ext4 (every entry
+carries its type, so nothing is stat'ed during the listing); the scripted
+reader stands in for one.
+## 2026-11-13 — B875: the history feed's cursor is pinned
+
+The rule is in `wire.md` (the `GET /v1/history` bullet) and PROTOCOL.md's
+history section; this is the evidence. Linux amd64 (legion0), Go 1.27.3, the
+Makefile's tags, TMPDIR `~/onebit/tmp`. No line of production code changed;
+one comment did.
+
+### What already held
+
+`historyList` (internal/api/history.go) resolves `limit` itself, 200 when it
+is omitted and 1000 when more is asked, hands the store that limit, and
+answers the last event's id exactly when `len(events) == limit`; `ListHistory`
+(internal/manifest/history.go) orders by `h.id DESC`, pages with
+`h.id < after`, and falls back to 200 past 1000 on its own. So a feed whose
+length is a multiple of the limit ends with an empty page answering 0, a
+request for 1001 gets 1000 events and a cursor, and an offline device's later
+upload of older plays comes before newer ones. The handler's lines date from
+#371 (02233c4a, 2026-06-11) and the store's clamp from #336 (f2f689a8), neither
+changed since (`git log -S`; this clone has no tags to name releases by).
+Nothing pinned the rule: `TestHistoryReadCursorPaging` reads two one-event
+pages, and PROTOCOL.md said a cursor is non-zero "while more pages may follow"
+and 0 on a short or empty page, which left a full page with nothing behind it
+open. The comment above the limit's resolution said its short-page
+check emits a definitive 0 "on the last non-empty page", which a feed of a
+multiple of the limit does not get; it now says what the code does.
+
+### The test
+
+`TestEveryFullHistoryPageAnswersItsLastEventsID`
+(internal/api/history_cursor_test.go), seven cases, each over a store of its
+own through the real handler: a multiple of the limit and one past it at
+`limit=3` (three full pages), with no limit (200, two full pages) and at
+`limit=1001` (1000, two full pages), and two past it at `limit=3`. The walk
+starts at `after=0` and passes
+each `nextCursor` back. Each full page's cursor is compared with the id stored
+with its last event, read from `playback_history` by path on a read-only
+connection of the test's own (the wire carries no id, and `ListHistory` is
+what the handler pages with); a short page must answer 0; the last page of a
+multiple must be empty and send `[]`; the walk must visit every stored event
+once, by descending id; and with no limit a bare `GET /v1/history` must be the
+walk's first page. The fixture stores, before every third event, one that
+`ReapPlaybackHistory` then deletes, so the ids have the gaps a retained
+history's have and a cursor that counted events could not match by chance, and
+shuffles `startedAt` against the stored order (a fixed PCG seed); two guards
+fail a case whose fixture lost either property.
+
+### Controls
+
+Each mutation was computed in memory, written for its build alone
+(`go test -c`), and put back from memory, checked by digest, before its binary
+ran; `git status` was clean after them all. The predictions, written first,
+all held.
+
+| Mutation | Result |
+|---|---|
+| C0: none | green, 7 of 7 |
+| C1, the brief's: the store asked for `limit+1`, a cursor answered only when the extra event came back | red, the multiples at 3 and 200 and both 1001 cases: "page 3 of 3 (after=6, 3 events): a full page answers nextCursor 0, want 2, the id of its last event "Kept/0000.flac"" and "the walk took 3 pages, want 4: 3 full, then one holding 0 events and answering 0"; with no limit page 2 of 2 alike; at 1001 the store clamps the 1001 it is asked for to 200, one page of 200 answering 0; the three cases one or two past a multiple at 3 and 200 green |
+| C2: the handler's cap of 1000 removed | red, the two 1001 cases alone: one page of 200 answering 0, "the walk visited 200 events, want each of the 2000 once by descending id" |
+| C3: `ListHistory` ordered by `started_at DESC, id DESC` | red, every case, on the walk's order |
+| C4: the fixture's `startedAt` in the stored order | red, every case: "the fixture's startedAt is sorted along the ids: an order by startedAt would pass" |
+| C5: the fixture's reaped events dated inside the window | red, every case: "the store holds 12 events, want 9" and the like |
+| C5b: no reaped events | red, every case: "the fixture's ids have no gap: a cursor counting events would answer them too" |
+| C6: the handler's events left nil | red, the three multiples: "page 4 of 4 (after=2) is empty and sends events null, want []" |
+
+### The gates
+
+| Check | Result |
+|---|---|
+| go1.27.3's gofmt on the two Go files | nothing listed |
+| `go vet` with the tags, `./internal/api/`, for linux/amd64, linux/386, windows/amd64 and darwin/arm64 | exit 0 each |
+| `go test -race -count=50 -run '^TestEveryFullHistoryPageAnswersItsLastEventsID$' ./internal/api/` | 50 of 50, 350 of 350 subtests, 407.5 s: 8.1 s a run, most of it the seven stores' opening; a 1000-event page took about 55 ms of the route's 2 s deadline |
+| `go test -race -timeout 120m ./internal/api/` | ok, 150.6 s: 780 tests and 510 subtests passed, none failed or skipped |
+| cmd/bridge's `TestNoBlankKeepers`, `TestNoDocblockNamesAnotherDeclaration`, `TestEveryCitedTestNameExists`, `TestEveryOutputReasonIsPassedOn` and `TestEveryBridgeWordIsInTheProtocol`, and the readers of PROTOCOL.md in internal/manifest, internal/player/playback, internal/analyze and internal/admin | ok |
+
+`make vet` over the tree waited for the build lock's one slot, which
+another worker's run held, and was stopped there after twenty minutes, never
+run; vet works package by package, and the one package changed is vetted
+above. `make test` and `make build-all` were not run: the brief asked for the
+package. The rules patch applies at this commit, and
+`scripts/check-doc-budgets.py` is clean on a copy with it applied (`wire.md`
+63,245 bytes). The iOS mirror of PROTOCOL.md (`docs/BridgeProtocol.md` and
+`test_protocolMirrorSHA256`'s pin) is the orchestrator's, in the same cycle.
+## 2026-11-12 — B872: main's CI reds, part 1 (a hang, two native timeouts, a converted join's window)
+
+Worker b872, legion0 (Linux amd64, 16 CPUs), branch `fix/b872-ci-reds` from
+main 4678b983. Commits: 435cd725 (the backup parks), b9669ad4 (the converted
+join's window), e38fceb8 (the waiting verification's premise), d32cfce7 (its
+docblock), then this record. The rules go through `rules-b872-r1.patch`
+(two bullets in `build-ci-tests.md`). Every run: Go 1.27.3, the Makefile's
+tags, TMPDIR `~/onebit/tmp` (disk). The scripts are in `.tmp/_b872/`; every
+prediction was written to a file before its run.
+
+### Red 1: the hang (macOS, run 42928902860 at 6ac2f3e0) — the test's race
+
+`TestAnAbandonedCheckKeepsItsHoldsUntilItsCheckerEnds` ran 26m41s to the
+package's 30-minute timeout, its stack at `verify_stuck_test.go:111`, which at
+6ac2f3e0 is `<-entered`: the wait, with no bound, for the check's park. B849
+(#1450) changed the same test's last prune, not this wait (the same wait is
+line 225 at main).
+
+The park was `SetOnDatabaseOpenForTest`, which runs in `checkSQLite`
+(`verify_db.go:163`) after the database's hash (`hashPaced`, `:127`); the
+deadline, 300 ms in the test, counts from the lock (`finish.go:437` at
+6ac2f3e0, `:460` at main). The hash runs on the check's own thread at the
+lowest priority (`PRIO_DARWIN_BG`; nice 19 and the idle I/O class on Linux),
+and its pacer's first read waits about 31 ms (1 MiB at 32 MiB/s,
+`verify_pace.go`). A deadline that passes before the hash has ended makes
+the pacer answer the context's end: the check answers INCOMPLETE (deadline)
+with no park (`verify_db.go:128-131`), the verification answers
+`context.DeadlineExceeded`, prunes, and ends, and the test waits for the park
+for good.
+
+**Red first** (`.tmp/_b872/overlay.py`, set `base-red`, on a `git archive`
+copy of 4678b983): the hash held until its deadline ends it
+(`SetVerifyReadRateForTest(1)`, set once the park is installed, the
+precedent `TestACancelledVerificationWritesIncomplete` uses). Hung, `-timeout
+60s`, the test goroutine `[chan receive]` at `verify_stuck_test.go:226`
+(main's 225, one line inserted): CI's frame.
+
+**The census** (`.tmp/_b872/census_dbopen.py`): the same park behind the same
+deadline stood in five more places, each broken the same way under the same
+forcing at 4678b983:
+
+| case | at 4678b983, forced |
+|---|---|
+| `TestAVerificationWaitingItsTurnHearsOfACheckGivenUp` (shares `parkCheck`) | hung at its `<-entered` (`-timeout 45s`) |
+| `TestARecheckGivenUpLeavesTheVetoItMade` | failed in 3.3 s, "the recheck answered context deadline exceeded; want it given up" |
+| B826's `givenUpCheckOf` (`TestARestoreRefusesASnapshotAGivenUpCheckHolds`) | failed after 32 s, "the check was never entered" |
+| cmd/bridge `TestTheTickerTakesNoSnapshotWhileACheckThatDidNotEndHoldsTheFolder` | hung at its `<-entered` (`-timeout 60s`) |
+| cmd/bridge `runStuckCheck` (`TestACheckThatDidNotEndInAnotherProcessHoldsTheFolderUntilItEnds`) | failed, "the check's process said "stuck check given up: context deadline exceeded"", then its cleanup waited on a child that never ends (it waits for the park) until `-timeout 90s` |
+
+Left as they are: `TestAVetoThatStoodBeforeAVerificationStaysOverTheVERIFIEDItCarries`'s
+"a retry given up" parks there too, and a deadline before the hash makes it
+a retry past its deadline whose assertions hold all the same: blind, not
+red. `TestARecheckThatDidNotEndLeavesTheVetoItMade`'s "past its deadline"
+sleeps 400 ms at SQLite's open against a give-up at 1.15 s, a bound of
+another kind. Both are follow-ups.
+
+**The fix**: `parkCheck` parks the check's thread where every check comes,
+before it reads anything (`SetOnLowPriorityForTest`, which runs in
+`runLowPriority` ahead of `checkBundle`; nothing before it asks the check's
+context), so the deadline gives the check up whenever it passes; the
+package's other deadline tests already park there
+(`TestAVerificationPastItsDeadlineReturnsWithItsCallerStillWaiting`,
+`TestAGivenUpVerificationReadsItsRecordBack`). `awaitParkedAndGivenUp` waits
+for the park and the answer in either order (a thread the host runs late is
+given up before it parks, and parks all the same), the answer within the
+old bound, both within 30 s more, and fails at once on an answer that came
+with no check parked. `givenUpCheckOf` and the ticker's test wait the same
+way; `TestARecheckGivenUpLeavesTheVetoItMade` and `runStuckCheck` park there,
+and the child ends at once, exit 1, on any answer but its check given up.
+
+The waiting verification's case had a second window: its second
+verification began only once the first's check had parked, and the first's
+give-up came 1.3 s after its lock whatever the test was doing. It now holds
+the first's lock as another process would until the second waits its turn,
+so the first's deadline begins after that. And its premise was invisible:
+`takeSlot` signals a wait's start (`onSlotWait`, `verify_lock.go:291`) before
+it asks whether the slot's holder was given up (`:296-300`), so a second
+verification arriving after the give-up signals its wait, is refused at
+once, and answers the same `ErrCheckStillRunning`. Control C3's first run
+(below) stayed green for that reason; e38fceb8 requires, as the second
+begins to wait, that the first holds no mark (`StuckCheckHere`).
+
+The fixed tests under the same forcing (set `fixed-red`, on a copy of
+b9669ad4): all six ok.
+
+**Controls** on the committed fix (`.tmp/_b872/controls.py`; each mutation
+applied once from memory, the race test binary built, the source put back
+before the run, `git status` empty after; predictions in
+`predictions-controls.txt`), every one as predicted:
+
+- C1, `parkCheck`'s park put back at SQLite's open, the hash forced: red in
+  5.9 s, "the verification answered context deadline exceeded before its
+  check reached its park, its record INCOMPLETE [deadline]: no check was
+  left to give up"; the cleanup ran, no timeout.
+- C2, the park's signal withheld (it still parks): red after 38.8 s, "the
+  check given up never reached its park"; the cleanup ran.
+- C3, the waiting case in the old order (the lock let go at once, the
+  second started 2 s after the park): first green (the premise above), then,
+  at e38fceb8, red, "the second verification began to wait once the first's
+  check had been given up (…): it was refused as it arrived, never told";
+  C3-fixed (the fixed order, the same 2 s after the first's lock wait) green.
+- C4, the recheck's park put back, the hash forced: red, "want it given up".
+- C5, the ticker's park put back, the hash forced: red in 1.6 s, "the
+  verification answered context deadline exceeded (its check parked: false),
+  want its check given up".
+- C6, `runStuckCheck`'s park put back, the hash forced in the child: red,
+  "want its check given up", and the child ended by itself (1.7 s).
+
+### Red 2: the native timeouts (Linux `-race`, runs 42738827053 at 84cd19a5 and 42709386274 at f0ba3d3c) — already fixed by #1448
+
+Both stacks are `receive[...]` at `fake_test.go:796` under the watchdog, and
+its third argument is the wait's words by length: 0x4a, 74 bytes, "the life
+ended right after the resume's fence read it, its revocation held"
+(`sink_dsd_life_test.go:376` at 84cd19a5), and 0x23, 35 bytes, "the life's
+end, its revocation held" (`:250`; `internal/alsapcm` is the same at
+f0ba3d3c). Both tests waited, unconditionally, for `revoking`, which closes
+only in the `lifeEnded` hook of the watcher's `ctx.Done()` arm
+(`sink_dsd.go:233-242` at 84cd19a5). In both, the ended life makes the
+writer begin its own Immediate release and close `s.done`; a watcher the
+scheduler runs after that finds both arms ready, and Go's `select` may take
+`s.done`, so the hook never runs and the wait ran to its 60 s. The stacks
+show each test in that wait, before it asks for the command's answer: no
+resume or prefill hung on its life's end, and the wait was the wrong one.
+4b21e2ce (#1448, B728 B9 PR 1) runs both tests in both orders (`lifeHold`,
+`sink_dsd_life_test.go:47-117`, over the `ending`, `watching` and `watched`
+seams, `sink_dsd.go:301-316`): watcher first, it holds the writer at its end
+and waits for `revoking`; writer first, it holds the watcher before its
+select and waits for the watcher's return, never for `revoking`, and logs
+which arm it took.
+
+At main, unloaded, `-race -count=200`: each of the four order subtests 200
+of 200, no race; in the 400 writer-first runs the watcher took the sink's
+end 210 times, each a run in which the old wait never ends.
+
+### Red 3: the converted join's window (macOS, run 43149148517 at 3a6b924e) — the test's measurement
+
+`TestConvertedTracksJoinContinuouslyAtOneRate`'s case "a successor that
+settles after the floor abuts" failed in 0.07 s, "a's window was decided
+before the lookahead fell to its floor": the case's ordering assertion
+(`playback_convert_test.go:632`, `t.Fatal` after `d.k.Play(t, 450ms)`),
+never its sample oracle or its open count, which come after it.
+`internal/alsapcm` and `internal/player/playback` are the same at 3a6b924e
+and 4678b983, and darwin and linux build the same files for the case (the
+fake kernel; the platform files are the real device's).
+
+The reporter steps on its tick, on a change of the sink and on a wake
+(`reporter.go:16-39`); the producer's every write leaves it a wake
+(`producer.go:428-431`); and each step wakes a producer that holds a
+window (`reporter.go:231-235`), which reads the sink's lookahead itself at
+each look (`holdLocked`, `outFloorLocked`, `convert.go:192-237`). A step left
+from the producer's last write that the scheduler runs after the DAC's 450
+ms has the producer decide the window below the floor, before the test's
+tick: the backend's behaviour, not a gap.
+
+**Red first**, at 4678b983 (set `base-red`): the producer held at a's window
+point until the DAC has played 450 ms, let go, its decision awaited, then the
+old check: "a's window was decided before the lookahead fell to its floor"
+(CI's words), deterministic.
+
+**The fix** (b9669ad4): the case asserts the window undecided only at a look
+of the producer's held at its wait (`producerHold.holdWait`, over
+`ProducerStep`) once the DAC has played 300 ms, the lookahead the sink
+measured above the floor, then plays 150 ms more and waits for the decision;
+a second order holds the producer at a's window point until the DAC has
+played 450 ms, CI's order made deterministic, and it decides at its first
+look with no reporter's step. Both keep the sample oracle (a converted alone,
+zero-padded, then b afresh) and the one open, so the forced CI order is shown
+to keep the samples continuous.
+
+**Controls**: C7, the old check restored after the forced order's decision:
+red in CI's words; C8, production's `windowFloor` raised from 100 ms to 300
+ms: the held look at 300 ms red, "a's window was decided while the lookahead
+the sink measured was above its floor", the forced order green.
+
+### Loaded loops
+
+One use of the build lock (`.tmp/_b872/session.py`, 17:40 to 19:16),
+nothing else of b872's in it: race test binaries built once, then eight
+lanes side by side, each a binary at `GOMAXPROCS=1` pinned to CPUs 0-7,
+beside eight busy processes pinned there too (half the host's 16 CPUs; the
+other eight left to other workers), `-test.count` and `-test.v`, every
+count read from the `--- PASS` lines:
+
+| case | runs, under that load |
+|---|---|
+| `TestAnAbandonedCheckKeepsItsHoldsUntilItsCheckerEnds` | 200 of 200 (two lanes of 100, ~28 s a run, 2,870 s and 2,892 s) |
+| `TestAVerificationWaitingItsTurnHearsOfACheckGivenUp` | 200 of 200 (1,495 s) |
+| `TestARestoreRefusesASnapshotAGivenUpCheckHolds` (`givenUpCheckOf`) | 200 of 200 (1,397 s) |
+| `TestARecheckGivenUpLeavesTheVetoItMade` | 200 of 200 (4,102 s) |
+| cmd/bridge `TestTheTickerTakesNoSnapshotWhileACheckThatDidNotEndHoldsTheFolder` | 200 of 200 (1,109 s) |
+| cmd/bridge `TestACheckThatDidNotEndInAnotherProcessHoldsTheFolderUntilItEnds` | 200 of 200 (1,184 s) |
+| the converted join's two floor cases | 200 of 200 each (1,382 s) |
+| red 2's four order subtests at main | 200 of 200 each (4 s); the watcher took the sink's end in 220 of the 400 writer-first runs |
+| red 2's two tests at 84cd19a5, `-watchdog 5s` | resume 5 and prefill 14 failed of 300 each, every one in its wait for `revoking`, in CI's words |
+| the same at 84cd19a5 with the watcher's arm logged (a `println` in its `s.done` arm when the life had ended) | 2 and 16 failed of 300; all 18 failed runs, and no passing one, logged the watcher taking the sink's end |
+
+No race was reported, no run timed out.
+
+### Gates
+
+In the same use of the lock, once the busy processes had stopped, at
+e38fceb8: `go test -race -count=1 -timeout 120m -p 3 ./internal/backup/
+./internal/alsapcm/ ./cmd/bridge/`, all ok (769.9 s, 83.6 s and 1,607.9 s).
+`go vet` with the tags of the three packages clean for linux/amd64,
+windows/amd64, darwin/arm64 and linux/386; go1.27.3's gofmt lists none of the
+five Go files the branch changed. The two later commits change a docblock
+and this record: `TestEveryCitedTestNameExists`,
+`TestNoDocblockNamesAnotherDeclaration` and `TestNoBlankKeepers` ran over
+them. `make test` and `make build-all` were not run: the brief asked for the
+touched packages. The rules patch applies at the branch's head, and
+`scripts/check-doc-budgets.py` is clean on a copy with it applied
+(`build-ci-tests.md` 38,683 bytes).
+
+### Left
+
+The two Windows reds (`internal/updater`'s
+`TestAWakeAndAnOldTickReadyTogetherAskNothing`, cmd/bridge's
+`TestServeRollsBackAnInstallWhoseVersionRefusesItsSettings`) are part 2's.
+Two follow-ups from the census, not changed here: "a retry given up" in
+`TestAVetoThatStoodBeforeAVerificationStaysOverTheVERIFIEDItCarries` (blind
+under a deadline before its hash), and "past its deadline" in
+`TestARecheckThatDidNotEndLeavesTheVetoItMade` (a 400 ms sleep against a
+1.15 s give-up).
+
+## 2026-11-12 — B872 round 2: tests that fail instead of hanging, and the native timeouts' evidence
+
+Worker b872, legion0, branch `fix/b872-ci-reds` from `orch/b872` (e4efc8c9,
+round 1 with its rules). Commits: cb1a6906 (item 1), e507a019 (items 2 and
+3), then this record. The round's review files (round 1's three reviews and
+the brief's two) were not on this host: each item was taken from the brief's
+words and checked against the code. Every run: Go 1.27.3, the Makefile's
+tags, TMPDIR `~/onebit/tmp`; controls are uncommitted edits, the race test
+binary built, the files restored with `git checkout --` before the run, each
+predicted in writing (`.tmp/_b872/predictions-r2.txt`).
+
+### Item 1: the converted join's undecided window waited out the watchdog on failure
+
+"looking as the DAC plays" (e4efc8c9, `playback_convert_test.go:668-674`)
+armed a hold on the producer's next wait, ticked, waited for that hold
+(`awaitOrdered`, the watchdog's minute) and only then asked whether a's window
+was decided. A window decided early, the failure the check is there for,
+lets the producer write a's window, end a and wait for b's open, which the
+test holds; no reporter's step wakes it, since a step wakes only a producer
+that holds a window or awaits a successor's judgement (`reporter.go:231-235`),
+so no wait comes for the hold. Red line, K1-red: e4efc8c9's case with production's `floorLocked`
+answering true (the window decided at the producer's first look): the case waited out the watchdog, 60.34 s, and failed in other words, "waited 1m0s for the producer's look at a's window once the DAC played 300 ms of a, held at its wait"; the other order green.
+The fix: `undecidedAtLook` waits for the look or the decision, whichever comes
+first, and fails at once on the decision. Control K1, the same production
+edit at the fix: red in 0.34 s, "a's window was decided while the lookahead the sink measured was above its floor"; the other order green.
+
+### Item 2: a verification waiting its turn could pass without the notice
+
+`takeSlot` ran `onSlotWait` before it asked whether the slot's holder was
+given up (`verify_lock.go:291-300` at e4efc8c9), so a verification arriving
+after a give-up signalled a wait it never made and was refused at once, with
+the same `ErrCheckStillRunning`; round 1's premise check (`StuckCheckHere`,
+asked while the test still held the first's lock) could not fail. The seam
+now runs once, after the waiter's first look found the holder not given up,
+the notice of the next give-up in hand (`takeSlot`), so a give-up after it
+reaches the waiter as that notice; the case holds the first's lock until
+then and fails at once on an answer before the wait. The seam is nil in
+production; its five other users (`TestTwoVerificationsOfOneSnapshotWriteOneAtATime`,
+`TestAStopBeforeVerificationReportsItsIncompleteWrite`,
+`TestASlowStepWithinItsBoundLeavesNoMark`,
+`TestAQueuedVerificationKeepsItsCaptureFromThePrune`, cmd/bridge's
+`TestVerifyBesideTheTickersVerificationOfOneSnapshot`) wait behind holders not
+given up and pass. Controls: K2a, the old order (the lock let go at once, the
+second started 2 s after the first's park): red in 4.45 s, 2 s of it the edit's own delay, "the second verification answered … before it waited its turn: refused as it arrived, never told"; K2b, production's
+`takeSlot` given a notice nothing closes: red in 16.0 s, at the 12 s bound on the second's answer, "the verification waiting its turn did not return within 12s of its stop".
+
+### Item 3: the given-up checks awaited with no bound, and the file's sweep
+
+`TestARecheckGivenUpLeavesTheVetoItMade` called the verification on the
+test's goroutine, waited for no park, and had no bound of the test's (the
+verification's own is its lock wait and deadline, an hour). It now awaits the
+park and the answer in either order, bounded, failing at once on an answer
+that came with no check parked (`awaitParkedAndGivenUp`, generic over the
+answer since this round). The sweep of `verify_hold_test.go`:
+`TestAGivenUpVerificationReadsItsRecordBack` had the same shape (fixed the
+same way); the retry given up of
+`TestAVetoThatStoodBeforeAVerificationStaysOverTheVERIFIEDItCarries` still
+parked at SQLite's open behind 300 ms, round 1's blind follow-up (it parks
+before it reads the snapshot now, awaited the same way and required given
+up); and `TestASlowStepWithinItsBoundLeavesNoMark` received its two answers
+with no bound (`receiveWithin`, a minute). The file's other parks
+(`TestEveryStepUnderTheLockIsBoundedAndMarked`, `stopWithItsWriteParked`'s
+callers) wait for them within 30 s already. Controls: K3a, the recheck parked at SQLite's open, its hash forced to end at its deadline (rate 1 B/s): red in 3.33 s, "the verification answered context deadline exceeded before its check reached its park … no check was left to give up"; K3a2, the recheck's park signal withheld (it still parks): red in 36.3 s, "the check given up never reached its park"; K3b, the record-back case parked at SQLite's open, forced: each of its three subtests red in 1.5 to 1.7 s, in the same words; K3c, the retry given up in round 1's configuration, forced: red in 3.46 s, its four sibling retries green; K3d, the slow step's first answer held at its hand-off (`SetVerifyHandoffForTest`): red in 64.0 s, "the slow verification, its sync let go did not answer within 1m0s". `git status` was empty after every control.
+
+### Item 4: the native `-race` timeouts, each CI stack beside 4b21e2ce
+
+Round 1 found them fixed by #1448 (4b21e2ce) and changed no code; its record
+holds the reproduction (84cd19a5 under load, 19 of 600 failed in these two
+waits; an instrumented copy, all 18 failures, and no passing run, had the
+watcher take the sink's end; main 200 of 200 per order subtest, unloaded and
+loaded). The stacks against the commit's lines:
+
+- Run 42738827053 (84cd19a5), `TestNativeResumeErrorAfterItsLifeEndsIsTheSinksFault`,
+  60.05 s: `sink_dsd_life_test.go:376: goroutines at watchdog:` …
+  `alsapcm.receive[...](0xc00022a908?, 0xc000113500, {0xb94a8c, 0x4a})` at
+  `fake_test.go:796`. The string is 0x4a, 74 bytes: "the life ended right
+  after the resume's fence read it, its revocation held", line 376 at
+  84cd19a5, `await(t, revoking, …)`. 4b21e2ce's hunk `@@ -356,36 +478,43 @@`
+  removes that line and runs the case in both orders (`lifeOrders`) through
+  `h.ended` (line 503 at main).
+- Run 42709386274 (f0ba3d3c), `TestNativePrefillCancelledByItsEndedLifeIsNoFailure`,
+  60.06 s: `sink_dsd_life_test.go:250: goroutines at watchdog:` …
+  `alsapcm.receive[...](0xc0001a0488?, 0xc0000921c0, {0xb7bccc, 0x23})` at
+  `fake_test.go:796`. 0x23, 35 bytes: "the life's end, its revocation held",
+  line 250 at f0ba3d3c (`internal/alsapcm` there is 84cd19a5's),
+  `await(t, revoking, …)`. 4b21e2ce's hunk `@@ -237,24 +351,28 @@` removes it;
+  the case runs in both orders through `h.ended` (line 368 at main).
+- What changed what they waited for: `revoking` closes only in the watcher's
+  `ctx.Done()` arm (its `lifeEnded` seam), and in both tests the ended life
+  has the writer release and close `s.done` itself, so a watcher run late finds
+  both arms ready and Go's `select` may take `s.done` (`sink_dsd.go:233-242` at
+  84cd19a5, `:308-315` at main, the arms unchanged). 4b21e2ce's hunk
+  `@@ -225,12 +296,15 @@` in `sink_dsd.go` adds the `watching` (before that
+  select) and `watched` (deferred) seams, and `lifeHold`
+  (`sink_dsd_life_test.go:47-117` at main) uses them: watcher first, it holds
+  the writer at its end (`s.ending`, line 65), so `s.done` cannot close first,
+  and waits for `revoking` (line 95); writer first, it holds the watcher before
+  its select (`s.watching`, line 67) and waits for its return (`h.gone`, closed
+  by `watched`, line 69), never for `revoking`, only reading whether it closed
+  (line 110). Production's watcher is as it was: the tests stopped requiring
+  the arm a scheduler need not take.
+
+### Runs
+
+In one use of the build lock (23:19 to 23:47), at e507a019, nothing else of
+b872's in it, unloaded: each touched test, and every user of the moved seam,
+`-race -count=50` in four lanes, 50 of 50 each, no race reported:
+`TestAVetoThatStoodBeforeAVerificationStaysOverTheVERIFIEDItCarries` (910 s),
+`TestAGivenUpVerificationReadsItsRecordBack` (395 s),
+`TestAnAbandonedCheckKeepsItsHoldsUntilItsCheckerEnds` (367 s),
+`TestConvertedTracksJoinContinuouslyAtOneRate` (325 s),
+`TestARecheckGivenUpLeavesTheVetoItMade` (229 s),
+`TestAQueuedVerificationKeepsItsCaptureFromThePrune` (226 s),
+`TestASlowStepWithinItsBoundLeavesNoMark` (215 s),
+`TestAStopBeforeVerificationReportsItsIncompleteWrite` (197 s),
+`TestAVerificationWaitingItsTurnHearsOfACheckGivenUp` (193 s),
+`TestARestoreRefusesASnapshotAGivenUpCheckHolds` (178 s),
+`TestTwoVerificationsOfOneSnapshotWriteOneAtATime` (171 s) and cmd/bridge's
+`TestVerifyBesideTheTickersVerificationOfOneSnapshot` (156 s). Then
+`go test -race -count=1 -timeout 120m -p 2 ./internal/backup/
+./internal/alsapcm/`: both ok (746.8 s and 81.4 s). `go vet` with the tags of
+`internal/backup`, `internal/alsapcm` and `cmd/bridge` clean for linux/amd64,
+windows/amd64, darwin/arm64 and linux/386; go1.27.3's gofmt lists none of
+the files changed. This record: `TestEveryCitedTestNameExists`,
+`TestNoDocblockNamesAnotherDeclaration` and `TestNoBlankKeepers` ran over it.
+The rule change is `rules-b872-r2.patch`: round 1's two B872 bullets in
+`build-ci-tests.md`, the first's account of `takeSlot` (now false) replaced,
+the second given the fail-fast wait; the budgets check is clean with it.
+
+## 2026-11-13 — B872 round 3: the waiter case goes red for the fault it names
+
+Worker b872, legion0, branch `fix/b872-ci-reds` from `orch/b872` (675acc8a,
+round 2 with its rules). Commits: f72d9993 (the seam and the case), then this
+record. Every run: Go 1.27.3, the Makefile's tags, TMPDIR `~/onebit/tmp`;
+controls are uncommitted edits to the committed tree, the race test binary
+built, the files restored with `git checkout --` before the run, each
+predicted in writing first (`.tmp/_b872/predictions-r3.txt`).
+
+### The finding
+
+Round 2's review (Claude, Medium): `TestAVerificationWaitingItsTurnHearsOfACheckGivenUp`
+failed only on an answer that came before the wait's signal. With round 2's
+reorder of `takeSlot` reverted, the wait's seam ran before the loop, so the
+signal always came first; a second verification run late past it, the first
+given up by the time it looked, took a fresh notice, found the slot's holder
+marked and answered `ErrCheckStillRunning` with no wait, the answer a waiter
+the notice woke gives. Round 1's defect was argued in comments and the rule,
+not shown red.
+
+### The fix (f72d9993)
+
+The wait's hook holds the second until the first has answered its check
+given up: the test closes `firstGivenUp` once `firstDone` says
+`ErrCheckGivenUp` and `StuckCheckHere` finds the first's mark, and the hook
+waits on that, never polling. The order is the code's: a check given up is
+marked (`giveUpAs`, `markStuckAfter`: the record kept and the notice closed,
+under the hold's lock) before its worker writes its INCOMPLETE and answers
+(`verifyHeld`), so the hook lets the second go only after the mark. With the
+reorder in place the second holds the notice from before the mark, which the
+mark closed, and the slot stays the first's (its worker lets it go only once
+its parked check has ended), so the notice is its select's one ready case;
+with the reorder reverted the second's first look comes after the mark, with
+a fresh notice, and finds the holder marked. A seam on the notice branch,
+`SetOnSlotNoticeForTest` (nil in production, checked as the wait's seam is),
+says the second heard it, and the case requires that before the second's
+answer. The hold waits for `firstGivenUp` or an abort, at most a minute, its
+overrun said to the test's goroutine (no `t.Fatal` in the hook);
+`joinBackupCallers`' release closes the abort (`sync.OnceFunc`) with the
+unlock and the park's release, before the callers are joined, and both seams
+are put back after the callers and their holds have drained (their restores
+registered before `joinBackupCallers`).
+
+### The red and the controls (`.tmp/_b872/controls_r3.py`)
+
+- The red, R: `takeSlot`'s reorder reverted (the wait's seam before the loop,
+  as at e4efc8c9; the notice's seam kept), `R.test -test.run
+  '^TestAVerificationWaitingItsTurnHearsOfACheckGivenUp$' -test.count 50`: 50
+  of 50 red, each in 3.74 to 4.09 s, every one `verify_stuck_test.go:557: the
+  second verification answered … (snapshot …, given up in its check at …)
+  without hearing the notice of the first's give-up: it found the first given
+  up as it looked, refused, never told`, and nothing else. Restored, the case
+  is green (the runs below).
+- The control, C: R with the case's requirement on the notice taken out: 50 of
+  50 green (3.75 to 4.11 s). The reverted code passes again: the requirement
+  is what tells the two paths apart.
+- The review's control, K: the first ending with no give-up mark (its park let
+  go at once, its deadline 30 s): 3 of 3 red in 2.88 to 2.99 s, `the first
+  verification answered <nil>, want its check given up` and nothing else, no
+  caller or hold left and no race.
+- K-abort: K with the abort taken out of the release: the same line, then
+  `verify_hold_test.go:837: the verification caller did not end` at 32.8 s,
+  the second still held: the abort is what ends the teardown at once.
+
+`git status` was empty after every control.
+
+### Runs
+
+At f72d9993, unloaded, six lanes at once (`.tmp/_b872/lanes_r3.py`), each a
+`go test -race -timeout 120m -v` of its own. The review's `-count=200 -run
+'TestAVerificationWaitingItsTurnHearsOfACheckGivenUp|Slot'` in
+`internal/backup`, which matches the case alone (no other top-level test's
+name holds `Slot`, `-list` says): 200 of 200 (822 s, each run 3.87 to
+4.68 s). Every other user of `SetOnSlotWaitForTest` there at the same count,
+200 of 200 each: `TestASlowStepWithinItsBoundLeavesNoMark` (905 s),
+`TestAQueuedVerificationKeepsItsCaptureFromThePrune` (940 s),
+`TestAStopBeforeVerificationReportsItsIncompleteWrite` (854 s) and
+`TestTwoVerificationsOfOneSnapshotWriteOneAtATime` (725 s). cmd/bridge's
+`TestVerifyBesideTheTickersVerificationOfOneSnapshot` once: ok (4.8 s). No
+race reported in any. Then `go test -race -count=1 -timeout 120m
+./internal/backup/`: ok (789.5 s). `go vet` with the tags of
+`internal/backup` and `cmd/bridge` clean for linux/amd64, windows/amd64,
+darwin/arm64 and linux/386; go1.27.3's gofmt lists none of the files
+changed; cmd/bridge's `TestEveryCitedTestNameExists`,
+`TestNoDocblockNamesAnotherDeclaration` and `TestNoBlankKeepers` pass over
+the tree with this record. The rule change is `rules-b872-r3.patch`: round
+2's first B872 bullet in `build-ci-tests.md`, which named the wait's seam,
+now names the notice's seam, the held wait and its abort; the budgets check
+is clean with it.

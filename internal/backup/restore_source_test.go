@@ -193,9 +193,10 @@ func awaitEntered(t *testing.T, entered <-chan struct{}, what string) {
 }
 
 // givenUpCheckOf gives a verification of the captured snapshot c up past its
-// deadline, its check parked where SQLite opens the snapshot's database (a
-// mount that stopped answering), so its hold keeps the backups folder marked
-// until the test's end, which lets the check go and joins it.
+// deadline, its check parked before it reads the snapshot (parkCheck, as a
+// check in a read of a mount that stopped answering is), so its hold keeps
+// the backups folder marked until the test's end, which lets the check go and
+// joins it.
 func givenUpCheckOf(t *testing.T, c *backup.Capture) {
 	t.Helper()
 	const deadline = 300 * time.Millisecond
@@ -205,8 +206,7 @@ func givenUpCheckOf(t *testing.T, c *backup.Capture) {
 	done := make(chan backup.Result, 1)
 	start := time.Now()
 	callers.start(func() { done <- backup.FinishCapture(context.Background(), c, keepOne, backup.VerifyOptions{}) })
-	awaitEntered(t, entered, "the check")
-	res := requireReturnedWithin(t, done, start, deadline+backup.StopWriteBound/2+2*time.Second, "a verification whose check was given up")
+	res := awaitParkedAndGivenUp(t, entered, done, finishAnswer, start, deadline+backup.StopWriteBound/2+2*time.Second)
 	if !errors.Is(res.VerifyErr, backup.ErrCheckGivenUp) {
 		t.Fatalf("premise: the verification answered %v, want its check given up", res.VerifyErr)
 	}
@@ -214,9 +214,9 @@ func givenUpCheckOf(t *testing.T, c *backup.Capture) {
 
 // TestARestoreRefusesASnapshotAGivenUpCheckHolds is backlog B826's red
 // (Codex on B653 PR 1's third round): install A's verification of its
-// snapshot is given up past its deadline, its check parked where SQLite opens
-// the snapshot's database (a mount that stopped answering), so its hold keeps
-// A's backups folder, the snapshot's files open; a restore of that snapshot
+// snapshot is given up past its deadline, its check parked before it reads
+// the snapshot (as one in a read of a mount that stopped answering is), so its
+// hold keeps A's backups folder; a restore of that snapshot
 // into install B, stopped, is refused at once with ErrCheckStillRunning, B's
 // files and its data dir as they were. Red on main, where a restore took no
 // lock of the folder its snapshot is in and read no mark: it restored A's
