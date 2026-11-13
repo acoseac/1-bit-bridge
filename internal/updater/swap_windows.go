@@ -280,7 +280,8 @@ func waitServiceStopped(s *mgr.Service, timeout time.Duration) error {
 // coordination as swapBinary. The restore itself is not the Unix
 // rename: Windows refuses to replace a mapped running image, and both
 // callers run inside the process that maps dst. replaceRunningBinary
-// moves that image aside first.
+// moves that image aside first, and makes each of its renames again
+// while another process holds the file (backlog B872).
 func RollbackBinary(dst, backupExt string) error {
 	bak := dst + backupExt
 	if _, err := os.Stat(bak); err != nil {

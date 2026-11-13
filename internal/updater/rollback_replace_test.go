@@ -2,11 +2,16 @@ package updater
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
+	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
 )
 
 // runningPathRename is the rename Windows gives a rollback that
@@ -28,6 +33,39 @@ func useRename(t *testing.T, fn func(string, string) error) {
 	prev := renameFunc
 	t.Cleanup(func() { renameFunc = prev })
 	renameFunc = fn
+}
+
+// recordWaits makes the rollback's waits between its attempts return at
+// once, each recorded, until the test ends.
+func recordWaits(t *testing.T) *[]time.Duration {
+	t.Helper()
+	var waits []time.Duration
+	prev := rollbackWait
+	t.Cleanup(func() { rollbackWait = prev })
+	rollbackWait = func(d time.Duration) { waits = append(waits, d) }
+	return &waits
+}
+
+// asidesOf lists the rollback's leftovers beside dst, each with what it
+// holds.
+func asidesOf(t *testing.T, dst string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(filepath.Dir(dst))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var asides []string
+	for _, e := range entries {
+		if !strings.HasPrefix(e.Name(), filepath.Base(dst)+".rollback-") {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(filepath.Dir(dst), e.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		asides = append(asides, string(b))
+	}
+	return asides
 }
 
 func TestRollbackReplaceVacatesARunningPathBeforeRenamingBak(t *testing.T) {
@@ -74,6 +112,11 @@ func TestRollbackReplaceVacatesARunningPathBeforeRenamingBak(t *testing.T) {
 	}
 }
 
+// TestRollbackReplaceRestoresDstWhenTheSecondRenameFails: the backup's
+// rename refused for good, as a mapped image's is (Access is denied, which
+// no wait changes), is made once and not again; the running binary is put
+// back from the aside, the error says "(restored)", and the backup stays
+// beside it, no aside left.
 func TestRollbackReplaceRestoresDstWhenTheSecondRenameFails(t *testing.T) {
 	dir := t.TempDir()
 	dst := filepath.Join(dir, "bridge.exe")
@@ -97,13 +140,17 @@ func TestRollbackReplaceRestoresDstWhenTheSecondRenameFails(t *testing.T) {
 		}
 		return os.Rename(oldpath, newpath)
 	})
+	waits := recordWaits(t)
 
 	err := replaceRunningBinary(dst, bak)
-	if err == nil {
-		t.Fatal("expected the second rename to fail")
+	if err == nil || !strings.HasSuffix(err.Error(), "(restored)") || !errors.Is(err, syscall.EACCES) {
+		t.Fatalf("replaceRunningBinary = %v, want the backup's refusal, the binary restored", err)
 	}
-	if len(calls) != 3 || calls[2][0] != calls[0][1] || calls[2][1] != dst {
-		t.Fatalf("renames = %v, want the aside renamed back onto dst", calls)
+	if len(calls) != 3 || calls[1][0] != bak || calls[1][1] != dst || calls[2][0] != calls[0][1] || calls[2][1] != dst {
+		t.Fatalf("renames = %v, want the vacate, the backup's rename once, and the aside renamed back onto dst", calls)
+	}
+	if len(*waits) != 0 {
+		t.Errorf("the rollback waited %v over a refusal that is not a file in use, want no wait", *waits)
 	}
 	got, err := os.ReadFile(dst)
 	if err != nil {
@@ -118,6 +165,9 @@ func TestRollbackReplaceRestoresDstWhenTheSecondRenameFails(t *testing.T) {
 	}
 	if string(got) != "KNOWN-GOOD" {
 		t.Fatalf("backup = %q, want it left in place", got)
+	}
+	if asides := asidesOf(t, dst); len(asides) != 0 {
+		t.Errorf("asides left beside the binary: %v", asides)
 	}
 }
 
@@ -174,5 +224,166 @@ func TestRollbackReplaceLeavesALeftoverItCannotRemove(t *testing.T) {
 	}
 	if string(got) != "KNOWN-GOOD" {
 		t.Fatalf("dst = %q", got)
+	}
+}
+
+// The rollback's four renames, by the stage each makes.
+const (
+	stageOntoMissing = "the backup onto a missing binary"
+	stageAside       = "the running binary moved aside"
+	stageBackup      = "the backup put in place"
+	stagePutBack     = "the aside put back"
+)
+
+// rollbackStage is the stage of the rename oldpath to newpath in a rollback
+// of dst to bak; missing says dst was not there as the rollback began.
+func rollbackStage(dst, bak string, missing bool, oldpath, newpath string) string {
+	aside := filepath.Base(dst) + ".rollback-"
+	switch {
+	case oldpath == bak && newpath == dst && missing:
+		return stageOntoMissing
+	case oldpath == dst && strings.HasPrefix(filepath.Base(newpath), aside):
+		return stageAside
+	case oldpath == bak && newpath == dst:
+		return stageBackup
+	case strings.HasPrefix(filepath.Base(oldpath), aside) && newpath == dst:
+		return stagePutBack
+	}
+	return ""
+}
+
+// TestEachRollbackRenameIsMadeAgainWhileItsFileIsInUse: each of the
+// rollback's four renames, refused because another process holds its file
+// (a sharing violation on Windows: Defender holding the backup the start
+// has just run, backlog B872), is made again on its own after each of the
+// schedule's waits. Refused twice, it lands at its third attempt and the
+// rollback goes on from where it is. Refused at every attempt, after seven
+// attempts and 3.15 s of waits, the rollback ends where that rename leaves
+// the files, which the case asserts at the binary's place, the backup's
+// and the aside's: the backup kept beside the binary, or the running
+// binary put back from the aside, and "(restored)" said only where that
+// put-back landed. The put-back's own stage is reached by the backup's
+// rename refused once for good, as a mapped image's is.
+func TestEachRollbackRenameIsMadeAgainWhileItsFileIsInUse(t *testing.T) {
+	inUse := inUseFailure(t)
+	every := len(rollbackRenameBackoff)
+	for _, tc := range []struct {
+		stage string
+		// refused is how many attempts at the stage meet the file in use,
+		// every one where it is the schedule's length.
+		refused int
+		// says is what the error says, none where the rollback lands.
+		says []string
+		// dst, bak and aside are what the binary's place, the backup's and
+		// the aside's hold after, "" for nothing.
+		dst, bak, aside string
+	}{
+		{stage: stageOntoMissing, refused: 2, dst: "KNOWN-GOOD"},
+		{stage: stageOntoMissing, refused: every, says: []string{"rollback rename", "still in use after 7 attempts over 3.15s"},
+			bak: "KNOWN-GOOD"},
+		{stage: stageAside, refused: 2, dst: "KNOWN-GOOD"},
+		{stage: stageAside, refused: every, says: []string{"rollback move", "aside", "still in use after 7 attempts over 3.15s"},
+			dst: "RUNNING", bak: "KNOWN-GOOD"},
+		{stage: stageBackup, refused: 2, dst: "KNOWN-GOOD"},
+		{stage: stageBackup, refused: every, says: []string{"still in use after 7 attempts over 3.15s", "(restored)"},
+			dst: "RUNNING", bak: "KNOWN-GOOD"},
+		{stage: stagePutBack, refused: 2, says: []string{"(restored)"}, dst: "RUNNING", bak: "KNOWN-GOOD"},
+		{stage: stagePutBack, refused: every, says: []string{"restore also failed", "still in use after 7 attempts over 3.15s",
+			"manual recovery needed"}, bak: "KNOWN-GOOD", aside: "RUNNING"},
+	} {
+		name := fmt.Sprintf("%s, refused %d of %d attempts", tc.stage, min(tc.refused, every), every)
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			dst := filepath.Join(dir, "bridge.exe")
+			bak := dst + ".bak"
+			missing := tc.stage == stageOntoMissing
+			if !missing {
+				if err := os.WriteFile(dst, []byte("RUNNING"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.WriteFile(bak, []byte("KNOWN-GOOD"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			attempts := map[string]int{}
+			useRename(t, func(oldpath, newpath string) error {
+				stage := rollbackStage(dst, bak, missing, oldpath, newpath)
+				attempts[stage]++
+				refuse := func(why error) error { return &os.LinkError{Op: "rename", Old: oldpath, New: newpath, Err: why} }
+				switch {
+				case stage == tc.stage && attempts[stage] <= tc.refused:
+					return refuse(inUse)
+				case tc.stage == stagePutBack && stage == stageBackup:
+					// Refused for good, as a mapped image's rename is.
+					return refuse(syscall.EACCES)
+				}
+				if _, err := os.Stat(newpath); err == nil {
+					return refuse(syscall.EACCES)
+				}
+				return os.Rename(oldpath, newpath)
+			})
+			waits := recordWaits(t)
+
+			err := replaceRunningBinary(dst, bak)
+			if len(tc.says) == 0 && err != nil {
+				t.Fatalf("the rollback = %v, want the backup put back", err)
+			}
+			if len(tc.says) > 0 {
+				if err == nil {
+					t.Fatalf("the rollback landed, want it to say %q", tc.says)
+				}
+				for _, s := range tc.says {
+					if !strings.Contains(err.Error(), s) {
+						t.Errorf("the rollback = %v, want it to say %q", err, s)
+					}
+				}
+				if restored, want := strings.Contains(err.Error(), "(restored)"), slices.Contains(tc.says, "(restored)"); restored != want {
+					t.Errorf("the rollback = %v: it says (restored) %v, want %v: only where the put-back landed", err, restored, want)
+				}
+				if tc.refused == every && tc.stage != stagePutBack && !errors.Is(err, inUse) {
+					t.Errorf("the rollback = %v, want it to carry the refusal of the file in use", err)
+				}
+			}
+			wantAttempts := min(tc.refused+1, every)
+			if attempts[tc.stage] != wantAttempts {
+				t.Errorf("attempts at %s = %d, want %d; all: %v", tc.stage, attempts[tc.stage], wantAttempts, attempts)
+			}
+			if tc.stage == stagePutBack && attempts[stageBackup] != 1 {
+				t.Errorf("attempts at the backup's rename refused for good = %d, want 1: only a file in use is waited for", attempts[stageBackup])
+			}
+			if want := rollbackRenameBackoff[1:wantAttempts]; !slices.Equal(*waits, want) {
+				t.Errorf("the rollback waited %v, want %v", *waits, want)
+			}
+			for _, place := range []struct{ name, path, want string }{{"binary", dst, tc.dst}, {"backup", bak, tc.bak}} {
+				got, err := os.ReadFile(place.path)
+				switch {
+				case place.want == "" && !errors.Is(err, os.ErrNotExist):
+					t.Errorf("the %s's place holds %q (%v), want nothing there", place.name, got, err)
+				case place.want != "" && (err != nil || string(got) != place.want):
+					t.Errorf("the %s's place holds %q (%v), want %q", place.name, got, err, place.want)
+				}
+			}
+			asides := asidesOf(t, dst)
+			if (tc.aside == "" && len(asides) != 0) || (tc.aside != "" && !slices.Equal(asides, []string{tc.aside})) {
+				t.Errorf("the asides beside the binary hold %q, want %q", asides, tc.aside)
+			}
+		})
+	}
+}
+
+// TestTheRollbacksRenamesFitInsideTheMarkersLockWait: one of the rollback's
+// renames waits 3.15 s at most between its seven attempts, and a rollback
+// makes three at most (the vacate, the backup's, the put-back). An
+// operator's rollback holds the install marker's lock through the SCM's
+// stop, those renames and the marker's two writes, each a rename that
+// waits RenameWithRetry's budget at most, and every other taker of the lock
+// waits defaultStateLockWait for it.
+func TestTheRollbacksRenamesFitInsideTheMarkersLockWait(t *testing.T) {
+	if got := rollbackRenameBudget(); got != 3150*time.Millisecond || len(rollbackRenameBackoff) != 7 {
+		t.Errorf("one rename's waits = %s over %d attempts, want 3.15s over 7, as its doc says", got, len(rollbackRenameBackoff))
+	}
+	held := scmStopWait + 3*rollbackRenameBudget() + 2*atomicwrite.RenameRetryBudget()
+	if held >= defaultStateLockWait {
+		t.Errorf("a rollback holds the install marker's lock up to %s, past the %s another taker waits for it", held, defaultStateLockWait)
 	}
 }
