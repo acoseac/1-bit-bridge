@@ -95470,3 +95470,256 @@ the tree with this record. The rule change is `rules-b872-r3.patch`: round
 2's first B872 bullet in `build-ci-tests.md`, which named the wait's seam,
 now names the notice's seam, the held wait and its abort; the budgets check
 is clean with it.
+
+## 2026-11-13 — B872 part 2: the Windows reds (a rollback a held file defeated, and a seam that published before it held)
+
+Worker b872p2, legion0 (Linux amd64, 16 CPUs), branch `fix/b872-windows-reds`
+from main 502aa6c1 (part 1, #1456). Commits: 3bc67bb9 (the rollback's
+renames), f80d171f and 5f779d0e (its stage test: every stage's renames, the
+documented schedule), 99a7fe68 (the tick seam), 20506fc9 (the in-use tests
+on a host whose scanner waits too), then this record. The rules go through
+`rules-b872p2-r1.patch`. Every run: Go 1.27.3, the release tags, TMPDIR
+`~/onebit/tmp`; the scripts are in `.tmp/_b872p2/`, and every prediction was
+written to a file before its run. This host is Linux: the Windows reds are
+shown through seams here, and windows-latest is their proof (below).
+
+### Item 1: the crash rollback a held backup defeated (run on #1453's head 29641b98) — production
+
+CI: `TestACrashRollbackToAReleaseBeforeTheSwitchNeedsItOn/the_key_gone`, 0.87 s,
+`update_switch_test.go:708`: the start after three crashes served (0, where 75
+was wanted), its updater line "could not put the backup back: rollback rename
+…\bin\bridge.exe.bak -> …\bin\bridge.exe: … The process cannot access the file
+because it is being used by another process. (restored); this start goes on".
+
+Step 0, at 502aa6c1:
+- The rename: Windows' `RollbackBinary` (`swap_windows.go:284-304`) ends in
+  `replaceRunningBinary` (`rollback_replace.go:36-59`), four renames through
+  `renameFunc`: the backup onto a missing binary (:38), the vacate (:46), the
+  backup's (:49), the put-back of the aside after a failure (:50). Each error
+  was returned at its first refusal; no retry anywhere. "(restored)" (:53) is
+  said only where the put-back landed, "manual recovery needed" (:51)
+  otherwise. Unix's `RollbackBinary` (`swap_unix.go:223-233`) is one
+  `os.Rename`, which is why no Linux or macOS run could meet this.
+- What the test runs: `newRefusedInstall` copies the test binary as the backup
+  and closes it (`run_as_bridge_test.go:148-169`); three in-process starts that
+  panic (`serve_probation_test.go:164-177`); then the start whose crash
+  rollback (`serve_crashed_install.go:66-186`) runs the backup twice, its
+  version (:125, `updater.ProbeVersionWithin`) and its settings check (:135,
+  `updater.CheckConfig`), each through `runCandidate`
+  (`configcheck.go:199-238`), whose `cmd.Run` (:211) waits for the process and
+  its pipes; the copy answers both by itself and starts no process
+  (`run_as_bridge_test.go:54-90`). Then the record and the restore (:171).
+  Nothing of the test holds the backup at the rename, so (b) is ruled out: the
+  holder is another process, as a scanner holds an 89 MB executable just
+  written and run. On a real install that is Defender or the search indexer,
+  and the release binary has just been run by the same two probes.
+- The existing helpers: `atomicwrite.RenameWithRetry` (`atomicwrite.go:443`,
+  `renameRetry` :573) retries every error on every platform over
+  `renameBackoff` (0, 50, 100, 200, 400 ms), through atomicwrite's own seam,
+  and syncs the directory; `ReadWithRetryCtx` (`read.go:21`) retries Windows'
+  ERROR_SHARING_VIOLATION and ERROR_ACCESS_DENIED for a read that mutates
+  nothing (`read_windows.go:9-11`). Neither fits whole: the first would retry
+  ERROR_ACCESS_DENIED, B202's refusal of a rename onto a mapped image, and the
+  updater's tests could not reach it; the second is a read's. The fix takes
+  the read helper's semantics (Windows' transient refusals alone, nothing
+  elsewhere, other errors at once, a bounded schedule), minus Access is
+  denied and plus ERROR_LOCK_VIOLATION, through the updater's `renameFunc`.
+
+The fix (3bc67bb9): each of the four renames is made again on its own
+(`rollbackRenames.try`) while Windows answers a sharing or a lock violation
+(`inUseByAnotherProcess`, `rollback_inuse_windows.go`; false elsewhere), after
+each wait of `rollbackRenameBackoff`: 0, then 50 ms doubling to 1.6 s, seven
+attempts, 3.15 s of waits a rename. Never the transaction: a refused rename
+moved nothing, and each step starts where the last left the files. Exhausted,
+it says "still in use after 7 attempts over 3.15s" and the rollback ends as
+before. The bound: atomicwrite's 750 ms is for the scan-on-close of a small
+file; this is tens of megabytes just run, and Go's toolchain waits 2 s on
+the same refusals (`cmd/internal/robustio`, `isEphemeralError`:
+ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND, ERROR_SHARING_VIOLATION,
+`arbitraryTimeout`). Three renames at most a rollback, under 10 s, fit beside
+the SCM's 15 s stop and the marker's two writes inside the install marker's
+lock's 30 s (`TestTheRollbacksRenamesFitInsideTheMarkersLockWait`).
+`updater.ReplaceRunningBinaryForTest` runs that put-back on any host through
+a test's renames, for cmd/bridge's serve tests (`serveOpts.restoreBackup`).
+
+### Item 5: the early rollback, the same refusal (run on f0ba3d3c) — production, not the settings' YAML
+
+CI: `TestServeRollsBackAnInstallWhoseVersionRefusesItsSettings/the_data_dir_named_relative_to_the_settings`,
+`serve_refused_install_test.go:234`, serve 2 where 75 was wanted. Its stderr
+(`ci-item5-full.log`, kept whole in the test's message already) has two
+parts: "config load failed: … line 7: a whole number is written with a
+leading zero", the refusal the case writes on purpose (`scanIntervalSec:
+010`, `serve_refused_install_test.go:200-203`; `writeSettings`, :75-86,
+writes unquoted scalars, and no Windows path is quoted anywhere), then
+"updater: not rolling back the install of 0.0.1: could not put the backup
+back: rollback rename …\bin\bridge.exe.bak -> …\bin\bridge.exe: … being used
+by another process. (restored)". So `config.DataDirOf` found the data dir
+named relative to the settings, the marker was read and proved, both locks
+taken, the backup answered its version (`serve_refused_install.go:184`, which
+had just run it); the restore (:219-233) met item 1's sharing violation. The
+case named in CI is the one that happened to meet it; every case of the test
+renames the same way. Item 1's fix is item 5's.
+
+### Red first for items 1 and 5
+
+On a `git archive` copy of 502aa6c1 with the new tests and a names-only shim
+of the new API (`base_red.py`: main's `replaceRunningBinary`, its seam
+swapped for the call), as predicted (`predictions-red-base.txt`):
+- internal/updater: all eight subtests of
+  `TestEachRollbackRenameIsMadeAgainWhileItsFileIsInUse` red (each stage
+  refused twice: the rollback gave up at the first refusal, "… The process
+  cannot access the file …, want the backup put back", and for the put-back's
+  stage "restore also failed … manual recovery needed" where "(restored)" was
+  wanted, the binary's place empty and the aside holding it; refused
+  throughout: no "still in use after 7 attempts", one rename where seven were
+  wanted, no waits); the updated
+  `TestRollbackReplaceRestoresDstWhenTheSecondRenameFails` green (a refusal
+  that is no file in use is made once at main too).
+- cmd/bridge: `TestACrashRollbackPutsBackABackupInUseForAMoment` red in CI's
+  words, "= 0 (served true), want 75 before it served; stderr=updater: not
+  rolling back … (restored); this start goes on, and counts itself";
+  `TestTheEarlyRollbackPutsBackABackupInUseForAMoment` red in both cases,
+  "serve = 2, want 75 … could not put the backup back: … (restored)" (item 5's
+  words); the two guards red on the retry's words and counts alone.
+
+### Controls for items 1 and 5 (`controls_r1.py`; predictions in `predictions-controls-r1.txt`)
+
+Each an uncommitted mutation of the committed fix, the race test binaries
+built with it, the bytes restored before the run, `git diff --quiet` after:
+- C1, one attempt a rename: all eight stage subtests red; cmd/bridge's
+  "for a moment" tests red in CI's words (crash: served true; early: serve 2),
+  the guards red on "still in use after 7 attempts" and one rename of seven.
+- C2, the rollback retried whole and each rename once: the stage cases whose
+  refused rename is the rollback's first (onto a missing binary, the vacate)
+  green where refused twice (a refused first rename moved nothing, so a
+  whole retry is that rename's), and red where refused throughout, on the
+  words alone (my prediction had them green: the whole retry returns the bare
+  refusal, without try's note); the backup's and the put-back's cases red on
+  the renames every stage made (the vacate made three or seven times).
+- C3, "(restored)" said where the put-back failed: the put-back refused
+  throughout red ("says (restored) true, want false", no "manual recovery
+  needed"); everything else green.
+- C4, the schedule cut by its last step (six attempts, 1.55 s): first run,
+  the stage test panicked on a slice bound (it sliced the production
+  schedule by the attempts it expected); 5f779d0e gave the test the
+  documented schedule of its own, and C4 then ran as predicted: the bound's
+  pin red ("want 3.15s over 7 attempts"), the four stage cases refused
+  throughout red, the twice-refused ones green; cmd/bridge's guards red, its
+  "for a moment" tests green.
+- C5, off Windows every failure a file in use:
+  `TestNoRenameFailureIsAFileInUseOffWindows` red for each of its five errors,
+  and, unpredicted, `TestRollbackReplaceRestoresDstWhenTheSecondRenameFails`
+  red ("= <nil>, want the backup's refusal"): the Access-is-denied stand-in
+  was made again and landed, which is the case's point.
+
+### Item 3: the tick seam published an arming before it took its hold (run on 3a6b924e) — the test's seam
+
+CI: `TestAWakeAndAnOldTickReadyTogetherAskNothing`, 60.00 s,
+`check_switch_test.go:544: the poll loop never asked for its next wait`. No
+goroutine dump: the failure is the wait's own `t.Fatal`. The file is the same
+at 3a6b924e and 502aa6c1 (only #1446 touched it).
+
+Step 0, at 502aa6c1: `installTickSeam` (`check_switch_test.go:190-201`) sent
+the arming to the test (`s.asked <- w`, :194) and only then took its hold
+(`s.hold.Swap(nil)`, :195). The test takes the first arming (:541), sets its
+hold (`holdNext`, :542), fires the tick (:543) and waits for the next arming
+(:544). The send wakes the test's goroutine, which can run before the loop's
+reaches :195; then the first arming takes the hold meant for the second and
+waits before its select, the tick it was handed is never read, and :544 runs
+out its minute. The second `holdNext` (:549) had the same window: stored
+before the second arming's swap, it replaced the first hold (`Store`), the
+second arming took it, `release()` (:550) freed nothing, and :551 ran out.
+No timer is involved: Windows' scheduler ran the woken receiver first. The
+production loop (`updater.go:526-541`, the schedule armed before the timer,
+one select) loses no wake: nothing in it changed.
+
+Red first: CI's order made certain on a `git archive` copy of 502aa6c1, the
+test file's seam alone overlaid (`force_tick.py`): the arming whose place is
+`B872P2_FORCE_ARMING` parks right after its publication until the test's
+`holdNext` has set that many holds. The unmodified test failed at FORCE 1
+after 60.06 s, "check_switch_test.go:548: the poll loop never asked for its
+next wait" (CI's :544, four lines lower for the overlay's), and at FORCE 2
+after 60.06 s at :555 (:551). The same overlay on the fix: both green.
+
+The fix (99a7fe68): the seam takes an arming's hold before it publishes the
+arming, and hands the hold the arming that took it (`heldArming.took`); the
+test waits for the taker and fails at once on the wrong one (`waitHeld`),
+both holds included, and `holdNext` refuses to set a hold over one no arming
+has taken. `TestAHoldSetOnceAnArmingIsSeenHoldsTheNext` keeps CI's order
+certain in the suite: the loop's goroutine parks after publishing its first
+arming until the test has set its hold (`afterPublish`).
+
+Controls (predictions in `predictions-item3.txt`): K1, the seam's old order
+(the hold taken after `afterPublish`): the new case red at once, "the hold set
+once arming 1 was seen was taken by arming 1, want 2", the old case green
+(its waits for the taker leave the old order no window); K2, K1 with
+`waitHeld`'s check removed: the new case red after 60.05 s in CI's words
+("the poll loop never asked for its next wait"): the check is what makes the
+failure immediate.
+
+### Runs
+
+Outside the build slot, single packages one `go test` each (the brief puts
+`make` and multi-package runs through the lock; the slot went to other
+workers for over an hour), at 20506fc9, each process at `GOMAXPROCS=4`
+(`outside.py`), the first two lanes side by side: `./internal/updater` once
+with `-race -timeout 120m`, ok (38.5 s), then its touched tests and every
+user of the tick seam, 29 tests, `-race -count=50`, 50 of 50 each (18.3 s);
+cmd/bridge's four new serve tests `-race -count=50`, 50 of 50 each (644.0 s);
+`TestACrashRollbackToAReleaseBeforeTheSwitchNeedsItOn` and
+`TestServeRollsBackAnInstallWhoseVersionRefusesItsSettings` `-race
+-count=50`, 50 of 50 each (1,128.9 s). No race reported in any.
+
+In the build slot (`session.py`, 15:41 to 16:07, its first eight minutes
+beside the last outside lane), `./cmd/bridge` once with `-race -timeout 120m
+-p 2 -parallel 4`: FAIL (1,599.0 s) for one test,
+`TestATickerStoppedWhileAVerificationsStepHangsReturnsWithinItsBound/its_manifest's_read`
+(`backup_round2_test.go:476`, "a stopped verification was reported: backup
+(startup): the verification of … was given up, and its step still holds the
+snapshots until it ends; it wrote nothing; its record was not read back: …
+its read of the snapshot's record did not end within its bound (context
+canceled)"); every other test passed. The flake is main's: alone at this
+branch's head, `-race -count=50`, 1 of 50 failed in those words; at main (a
+`git archive` copy of 502aa6c1), 0 of 50; then race binaries of the two run
+side by side, so both met the same load (`ticker_ab.py`, stopped once the
+answer was plain), 4 of 88 failed at main and 3 of 88 at this head, each at
+:476 in the same words. Nothing this branch changes is reached by it (the
+backup ticker's stop; the branch adds a test file to cmd/bridge and package
+variables to internal/updater). The ticker reports a verification answered
+`ErrCheckGivenUp`, its record's read over its bound with the stop's
+cancellation inside, where the test wants the silence of a plain stop
+(`reportTickerVerdict`, `backup.go:796-830`): a race between the stop and the
+step's own bound, B653's.
+
+`go vet` with the tags of `./internal/updater/` and `./cmd/bridge/` clean for
+linux/amd64, windows/amd64 and darwin/arm64; go1.27.3's gofmt lists none of
+the branch's Go files; cmd/bridge's `TestEveryCitedTestNameExists`,
+`TestNoDocblockNamesAnotherDeclaration` and `TestNoBlankKeepers` pass over the
+tree with this record.
+
+### What only windows-latest shows
+
+This host runs the rollback's loop, its stages and serve's two rollbacks
+through a stand-in refusal; it cannot run Windows' predicate on a real error,
+nor a real held file. windows-latest runs: the CI tests that went red
+(`TestACrashRollbackToAReleaseBeforeTheSwitchNeedsItOn`,
+`TestServeRollsBackAnInstallWhoseVersionRefusesItsSettings`) over the real
+`RollbackBinary`, whose renames now wait out a scanner's hold up to 3.15 s;
+`TestOnlyWindowsSharingAndLockViolationsAreAFileInUse` (the real errnos) and
+`TestARollbackPutsBackABackupAnotherHandleHeldOnceItIsLetGo` (a real handle
+that shares no deletion, let go at the first wait or never); the stage test
+and the serve tests with the real `ERROR_SHARING_VIOLATION`; and
+`TestAWakeAndAnOldTickReadyTogetherAskNothing` under Windows' scheduler. A
+scanner's hold longer than 3.15 s would still fail those CI tests, as it
+would leave a real install's rollback to its next start, which asks again.
+
+### Left
+
+A sibling, not changed here (outside the brief's scope): an install on
+Windows runs the verified candidate beside the binary (`stageForCheck`, its
+settings check) and then renames it with no retry (`stageIntoDir`'s
+`renameFunc`, then `swapBinary`'s two `os.Rename`s,
+`swap_windows.go:125-149`), the same just-run executable a scanner may hold;
+a refusal there fails the install, the binary left as it was (put back from
+the backup where the second rename failed). And the ticker's stop above, a
+flake at main.
