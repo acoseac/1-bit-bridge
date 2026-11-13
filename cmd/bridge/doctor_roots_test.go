@@ -573,6 +573,376 @@ func TestTheChecklistSaysABoxThatDoesNotAnswerWasNotRead(t *testing.T) {
 	}
 }
 
+// setOutputsReadBound makes the checklist's wait for the outputs body d for
+// the rest of the test. A test that calls it does not call t.Parallel.
+func setOutputsReadBound(t *testing.T, d time.Duration) {
+	t.Helper()
+	prev := outputsReadBound
+	outputsReadBound = d
+	t.Cleanup(func() { outputsReadBound = prev })
+}
+
+// standInCLIOutputs makes a table of its own the one this process's bridge
+// doctor gathers read the box through (cliOutputsReads) for the rest of the
+// test, and puts the process's back once every read it holds has answered.
+// joined hears each gather that waits on a read another gather began. A box
+// stall the test makes after it (newBoxStall) lets its reads go first. A test
+// that calls it does not call t.Parallel.
+func standInCLIOutputs(t *testing.T) (reads *outputsReads, joined <-chan struct{}) {
+	t.Helper()
+	prev := cliOutputsReads
+	heard := make(chan struct{}, 64)
+	reads = &outputsReads{joined: func() {
+		select {
+		case heard <- struct{}{}:
+		default:
+		}
+	}}
+	cliOutputsReads = reads
+	t.Cleanup(func() {
+		for deadline := time.Now().Add(30 * time.Second); reads.inFlight() > 0; time.Sleep(5 * time.Millisecond) {
+			if time.Now().After(deadline) {
+				t.Error("a read of the box was still out 30s after the box answered")
+				break
+			}
+		}
+		cliOutputsReads = prev
+	})
+	return reads, heard
+}
+
+// boxStall stands in for a player box (linuxBoxSeam) where the one-shot
+// builder's build first touches the library: its read of the indexed tracks
+// (api's pathRules), which it makes before it proves each root's path rule,
+// and which it holds until letGo for a config naming a root in held, as a
+// root whose mount does not answer holds the proof. It counts the reads of
+// the box that reached it, by the roots their config names: each one held
+// is a goroutine stranded until the root answers. Its cleanup lets the roots
+// answer.
+type boxStall struct {
+	held    map[string]bool
+	release chan struct{}
+	once    sync.Once
+	mu      sync.Mutex
+	reads   map[string]int
+	began   chan struct{}
+}
+
+func newBoxStall(t *testing.T, held ...string) *boxStall {
+	t.Helper()
+	b := &boxStall{held: map[string]bool{}, release: make(chan struct{}), reads: map[string]int{}, began: make(chan struct{}, 64)}
+	for _, r := range held {
+		b.held[r] = true
+	}
+	t.Cleanup(b.letGo)
+	return b
+}
+
+// seam is the builder's config on that box, MPD's music folder music.
+func (b *boxStall) seam(music string) func(*api.LocalOutputsConfig) {
+	box := linuxBoxSeam(music)
+	return func(c *api.LocalOutputsConfig) {
+		box(c)
+		roots := c.Roots()
+		c.Tracks = func(context.Context) ([]string, error) {
+			b.mu.Lock()
+			b.reads[strings.Join(roots, " ")]++
+			b.mu.Unlock()
+			select {
+			case b.began <- struct{}{}:
+			default:
+			}
+			for _, r := range roots {
+				if b.held[r] {
+					<-b.release
+					break
+				}
+			}
+			return nil, nil
+		}
+	}
+}
+
+func (b *boxStall) letGo() { b.once.Do(func() { close(b.release) }) }
+
+// readsOver is the number of reads of the box that reached it over a config
+// naming roots.
+func (b *boxStall) readsOver(roots ...string) int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.reads[strings.Join(roots, " ")]
+}
+
+// launcherDoctorDeps is what one use of the launcher's doctor row in this
+// process builds (actDoctor): Deps built anew over the config at path, loaded
+// anew, whose checklist is the one bridge doctor gathers
+// (doctorOutputChecklist) on the box seam stands in for.
+func launcherDoctorDeps(t *testing.T, path string, seam func(*api.LocalOutputsConfig)) doctor.Deps {
+	t.Helper()
+	d := buildDoctorDepsFor(path, true)
+	if d.OutputChecklist == nil {
+		t.Fatalf("the doctor run over %s gathers no player checklist", path)
+	}
+	d.OutputChecklist = doctorOutputChecklist(d.ConfigFile.Path, mustLoadConfig(t, path), seam)
+	return d
+}
+
+// launcherReport runs and prints the report over d, as the launcher's row
+// does (runDoctorReport).
+func launcherReport(d doctor.Deps) doctorPrinted {
+	var out, errOut strings.Builder
+	code := runDoctorReport(d, false, false, &out, &errOut)
+	return doctorPrinted{code, stripANSI(out.String() + errOut.String())}
+}
+
+// drained empties ch of what it has heard so far.
+func drained(ch <-chan struct{}) {
+	for {
+		select {
+		case <-ch:
+		default:
+			return
+		}
+	}
+}
+
+// boxNotRead and boxRead are the Player line's words for a checklist whose
+// outputs body was not read within the bound, and for one read from this
+// box, whose MPD does not answer.
+func boxNotRead() string { return fmt.Sprintf("it did not answer within %s", doctorRootsBound) }
+
+const boxRead = "Volumio is installed, but MPD is not answering on port 6600"
+
+// TestDoctorRunsInOneProcessShareOneReadOfTheBox is B650's second round
+// through what the launcher's doctor row does at each use, in a process that
+// runs for as long as its menu does: Deps built anew over the config loaded
+// anew, and the report. On a player box whose library root does not answer,
+// every run says the box did not answer within the bound, and the runs begin
+// one read of the box between them, the later ones waiting on the read the
+// first one began; once the root answers, a run still waiting on that read,
+// which the first run's builder began and closed as that run ended, is
+// answered by it. Red at 336a61aa, where every run began a read of its own
+// and stranded its goroutine.
+func TestDoctorRunsInOneProcessShareOneReadOfTheBox(t *testing.T) {
+	path, music := writePlayerConfig(t)
+	_, joined := standInCLIOutputs(t)
+	box := newBoxStall(t, music)
+	setOutputsReadBound(t, doctorRootsBound)
+	const runs = 3
+	for i := range runs {
+		d := launcherDoctorDeps(t, path, box.seam(music))
+		got, _ := doctorWithin(t, "the launcher's doctor run", func() doctorPrinted { return launcherReport(d) })
+		if line := reportLine(got.out, "player"); !strings.HasPrefix(line, "[FAIL]") || !strings.Contains(line, boxNotRead()) {
+			t.Fatalf("run %d's player line = %q, want the box not read\n%s", i+1, line, got.out)
+		}
+	}
+	if n := box.readsOver(music); n != 1 {
+		t.Fatalf("%d doctor runs in one process began %d reads of the box, want one", runs, n)
+	}
+	setOutputsReadBound(t, doctorRootsDeadline)
+	drained(joined)
+	drained(box.began)
+	d := launcherDoctorDeps(t, path, box.seam(music))
+	last, ran := make(chan doctorPrinted, 1), make(chan struct{})
+	go func() {
+		defer close(ran)
+		last <- launcherReport(d)
+	}()
+	// After the bound's cleanup, so before it: the run ends before the bound
+	// it read is put back.
+	t.Cleanup(func() {
+		box.letGo()
+		select {
+		case <-ran:
+		case <-time.After(doctorRootsDeadline):
+			t.Error("the last run was still out after the box answered")
+		}
+	})
+	select {
+	case <-joined:
+	case <-box.began:
+		t.Fatal("a run began a read of its own while the first run's read was out")
+	case <-time.After(doctorRootsDeadline):
+		t.Fatalf("the last run did not wait on the first run's read within %s", doctorRootsDeadline)
+	}
+	box.letGo()
+	var got doctorPrinted
+	select {
+	case got = <-last:
+	case <-time.After(doctorRootsDeadline):
+		t.Fatalf("the last run did not return within %s of the root answering", doctorRootsDeadline)
+	}
+	if line := reportLine(got.out, "player"); !strings.Contains(line, boxRead) {
+		t.Errorf("once the root answers, the waiting run's player line = %q, want the box read (%q)\n%s", line, boxRead, got.out)
+	}
+	if n := box.readsOver(music); n != 1 {
+		t.Errorf("%d doctor runs began %d reads of the box, want one", runs+1, n)
+	}
+}
+
+// TestADoctorRunTakesOnlyTheReadOfItsOwnConfig: a run in that process over a
+// config edited since the read out began, a root another, reads the box
+// itself and is answered by its own read, never the one out; a run over the
+// first config again, while its read is out, waits on it; and a run after
+// that read has answered reads the box afresh.
+func TestADoctorRunTakesOnlyTheReadOfItsOwnConfig(t *testing.T) {
+	path, held := writePlayerConfig(t)
+	other := filepath.Join(filepath.Dir(held), "Songs")
+	if err := os.MkdirAll(other, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	setRoot := func(root string) {
+		if err := os.WriteFile(path, []byte(strings.Replace(string(data), held, root, 1)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	reads, _ := standInCLIOutputs(t)
+	box := newBoxStall(t, held)
+	setOutputsReadBound(t, doctorRootsBound)
+	gather := func() []doctor.Check {
+		checks, _ := doctorWithin(t, "the checklist", func() []doctor.Check {
+			return doctorOutputChecklist(path, mustLoadConfig(t, path), box.seam(held))(context.Background())
+		})
+		return checks
+	}
+	line := func(checks []doctor.Check, name string) string {
+		for _, c := range checks {
+			if c.Name == name {
+				return c.Summary
+			}
+		}
+		return ""
+	}
+	if got := line(gather(), "player"); !strings.Contains(got, boxNotRead()) {
+		t.Fatalf("the player line over the held root = %q, want the box not read", got)
+	}
+	setRoot(other)
+	edited := gather()
+	if got := line(edited, "player"); !strings.Contains(got, boxRead) {
+		t.Errorf("over the edited config, the player line = %q, want its own read (%q)", got, boxRead)
+	}
+	if got, want := line(edited, "music"), "Songs is not in MPD's music directory"; !strings.HasPrefix(got, want) {
+		t.Errorf("over the edited config, the music line = %q, want its read's rule for the edited config's root (%q)", got, want)
+	}
+	if n := box.readsOver(other); n != 1 {
+		t.Errorf("the edited config's run began %d reads, want its own one", n)
+	}
+	setRoot(held)
+	if got := line(gather(), "player"); !strings.Contains(got, boxNotRead()) {
+		t.Errorf("over the first config again, the player line = %q, want its read still out", got)
+	}
+	if n := box.readsOver(held); n != 1 {
+		t.Errorf("the first config's runs began %d reads, want one while it is out", n)
+	}
+	box.letGo()
+	for deadline := time.Now().Add(doctorRootsDeadline); reads.inFlight() > 0; time.Sleep(5 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("the read was still out once its root answered")
+		}
+	}
+	if got := line(gather(), "player"); !strings.Contains(got, boxRead) {
+		t.Errorf("after the read answered, the player line = %q, want a read of its own (%q)", got, boxRead)
+	}
+	if n := box.readsOver(held); n != 2 {
+		t.Errorf("after the read answered, the first config's runs began %d reads, want a second", n)
+	}
+}
+
+// TestAWaitOnASharedReadEndsAloneWithItsContext: two gathers wait on one read
+// of the box; the first one's context ends, and that gather answers its
+// context's end at once, while the read goes on, its context not ended, and
+// answers the second gather, which waited for it. Red at 336a61aa, where the
+// second gather began a read of its own.
+func TestAWaitOnASharedReadEndsAloneWithItsContext(t *testing.T) {
+	setOutputsReadBound(t, doctorRootsDeadline)
+	release := make(chan struct{})
+	var once sync.Once
+	letGo := func() { once.Do(func() { close(release) }) }
+	ctx, cancel := context.WithCancel(context.Background())
+	var readers sync.WaitGroup
+	// After the bound's cleanup, so before it: the gathers, and the reads
+	// they began, end before the bound they read is put back.
+	t.Cleanup(func() {
+		letGo()
+		cancel()
+		ended := make(chan struct{})
+		go func() { readers.Wait(); close(ended) }()
+		select {
+		case <-ended:
+		case <-time.After(30 * time.Second):
+			t.Error("a gather was still waiting 30s after its read was let go")
+		}
+	})
+	began := make(chan context.Context, 4)
+	joined := make(chan struct{}, 4)
+	src := outputChecklistSource{
+		Outputs: func(ctx context.Context) (api.OutputsResponse, error) {
+			began <- ctx
+			select {
+			case <-release:
+				return api.OutputsResponse{Outputs: []api.OutputInfo{{Kind: "mpd"}}}, nil
+			case <-ctx.Done():
+				return api.OutputsResponse{}, ctx.Err()
+			}
+		},
+		Reads:   &outputsReads{joined: func() { joined <- struct{}{} }},
+		ReadKey: "one config",
+	}
+	type answer struct {
+		resp api.OutputsResponse
+		err  error
+	}
+	read := func(ctx context.Context) <-chan answer {
+		out := make(chan answer, 1)
+		readers.Add(1)
+		go func() {
+			defer readers.Done()
+			resp, err := readOutputs(ctx, src)
+			out <- answer{resp, err}
+		}()
+		return out
+	}
+	wait := func(what string, ch <-chan answer) answer {
+		select {
+		case a := <-ch:
+			return a
+		case <-time.After(doctorRootsDeadline):
+			t.Fatalf("%s did not answer within %s", what, doctorRootsDeadline)
+			panic("unreachable")
+		}
+	}
+	first := read(ctx)
+	var readCtx context.Context
+	select {
+	case readCtx = <-began:
+	case <-time.After(doctorRootsDeadline):
+		t.Fatal("the first gather's read did not begin")
+	}
+	second := read(context.Background())
+	select {
+	case <-joined:
+	case <-began:
+		t.Fatal("the second gather began a read of its own while the first one's was out")
+	case <-time.After(doctorRootsDeadline):
+		t.Fatal("the second gather did not wait on the first one's read")
+	}
+	cancel()
+	if a := wait("the first gather", first); !errors.Is(a.err, context.Canceled) {
+		t.Errorf("the first gather, its context ended, answered %v, want its context's end", a.err)
+	}
+	if err := readCtx.Err(); err != nil {
+		t.Errorf("the read's context ended with the first gather's: %v", err)
+	}
+	letGo()
+	if a := wait("the second gather", second); a.err != nil || len(a.resp.Outputs) != 1 {
+		t.Errorf("the second gather answered %+v, %v; want the read's body", a.resp, a.err)
+	}
+}
+
 // TestBridgeDoctorPrintsHealthyRootsAsBefore is B650's guard through the CLI:
 // over roots that all answer, with the library watcher on, the lines that
 // touch them print what main printed for this fixture, word for word (the

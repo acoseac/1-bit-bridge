@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +15,8 @@ import (
 	"strconv"
 	"sync"
 	"time"
+
+	"gopkg.in/yaml.v3"
 
 	"github.com/acoseac/1-bit-bridge/internal/admin"
 	"github.com/acoseac/1-bit-bridge/internal/advertise"
@@ -56,6 +60,15 @@ type outputChecklistSource struct {
 	// serve, tokens.json in the doctor. The Phone line counts the ones a
 	// phone can use (usablePhones).
 	Tokens func() []auth.Token
+	// Reads, where it is not nil, is the table Outputs is read through, and
+	// ReadKey the identity of the config the source reads the box over in
+	// it (outputsReadKey): bridge doctor's, whose every gather builds a
+	// builder of its own (cliOutputsReads). Serve's source has none: its
+	// builder is the serving process's own, whose one flight every read
+	// joins (api's localOutputs.Response), and a read there leaves that
+	// flight with its request's context, which ends with the request.
+	Reads   *outputsReads
+	ReadKey string
 }
 
 // usablePhones is the number of device tokens a phone can use now: not
@@ -113,37 +126,29 @@ var errOutputsNotWired = errors.New("the outputs are not wired")
 // the goroutine of the call that began it, so bridge doctor on a player box
 // printed nothing and the console's doctor never answered. A body not read in
 // time is the input of a box that could not be read, whose Player line says
-// so; the build left holding the stat is the builder's one flight, which a
-// later call joins and leaves with its own context. A test shortens it.
+// so. The read left holding the stat is waited on by every later read of the
+// same source: in serve the builder's one flight, which a later call joins
+// and leaves with its own context, and in bridge doctor the read its table
+// keeps for the config (outputsReads). A test shortens it.
 var outputsReadBound = 20 * time.Second
 
 func readOutputs(ctx context.Context, src outputChecklistSource) (api.OutputsResponse, error) {
 	if src.Outputs == nil {
 		return api.OutputsResponse{}, errOutputsNotWired
 	}
-	type read struct {
-		resp api.OutputsResponse
-		err  error
-	}
-	// Buffered: a read that answers after the wait keeps its answer here and
-	// blocks no one.
-	got := make(chan read, 1)
-	go func() {
-		resp, err := src.Outputs(ctx)
-		got <- read{resp, err}
-	}()
+	r := src.Reads.begin(ctx, src.ReadKey, src.Outputs)
 	bound := outputsReadBound
 	t := time.NewTimer(bound)
 	defer t.Stop()
 	select {
-	case r := <-got:
+	case <-r.done:
 		return r.resp, r.err
 	case <-t.C:
 	case <-ctx.Done():
 	}
 	// An answer ready as the wait ended is still the answer.
 	select {
-	case r := <-got:
+	case <-r.done:
 		return r.resp, r.err
 	default:
 	}
@@ -152,6 +157,101 @@ func readOutputs(ctx context.Context, src outputChecklistSource) (api.OutputsRes
 	}
 	return api.OutputsResponse{}, fmt.Errorf("it did not answer within %s: a library root, or MPD's music directory, may be on a mount that does not answer", bound)
 }
+
+// outputsRead is one read of the outputs body, on a goroutine of its own:
+// resp and err are its answer once done is closed, which a read that answers
+// after every wait on it has ended keeps there and blocks no one.
+type outputsRead struct {
+	done chan struct{}
+	resp api.OutputsResponse
+	err  error
+}
+
+// outputsReads is the reads of the outputs body one process's bridge doctor
+// gathers make (backlog B650's second round): at most one in flight for a
+// config (outputsReadKey), which every gather over that config waits on, each
+// for its own bound (outputsReadBound) and on its own context, a gather that
+// stops waiting ending neither the read nor another's wait. A gather builds a
+// one-shot builder of its own (doctorOutputChecklist), so a read that a root
+// whose mount does not answer holds stays in its builder's flight with no
+// end, which no later gather's builder joins: the launcher's doctor row
+// gathers in one process for as long as its menu runs, and until this began
+// a read, and stranded its goroutine, at every use. A read leaves the table
+// as it answers, so a gather after that reads the config it loaded then.
+type outputsReads struct {
+	mu  sync.Mutex
+	out map[string]*outputsRead
+	// joined, when not nil, is told each time a gather waits on a read
+	// another gather began: a test's hook.
+	joined func()
+}
+
+// begin is the read a wait for the outputs body waits on: the read in flight
+// over key where rs is a table that holds one, or one it begins there on a
+// context no gather's end cancels; without a table, or a key, one of this
+// call's own, on its context.
+func (rs *outputsReads) begin(ctx context.Context, key string, read func(context.Context) (api.OutputsResponse, error)) *outputsRead {
+	r := &outputsRead{done: make(chan struct{})}
+	if rs == nil || key == "" {
+		go func() {
+			r.resp, r.err = read(ctx)
+			close(r.done)
+		}()
+		return r
+	}
+	rs.mu.Lock()
+	if out := rs.out[key]; out != nil {
+		joined := rs.joined
+		rs.mu.Unlock()
+		if joined != nil {
+			joined()
+		}
+		return out
+	}
+	if rs.out == nil {
+		rs.out = map[string]*outputsRead{}
+	}
+	rs.out[key] = r
+	rs.mu.Unlock()
+	go func() {
+		resp, err := read(context.WithoutCancel(ctx))
+		rs.mu.Lock()
+		delete(rs.out, key)
+		r.resp, r.err = resp, err
+		close(r.done)
+		rs.mu.Unlock()
+	}()
+	return r
+}
+
+// inFlight is the number of reads rs holds that have not answered.
+func (rs *outputsReads) inFlight() int {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	return len(rs.out)
+}
+
+// outputsReadKey is the identity of the config a doctor gather reads the box
+// over: the file it was loaded from and every setting it holds, as yaml.v3
+// encodes them, the encoding a save of bridge.yaml writes (MPD's password
+// included, which encoding/json leaves out), so two gathers share a read only
+// over the same file and the same settings, and a config edited since reads
+// the box afresh. "" where the settings do not encode: that gather reads
+// alone.
+func outputsReadKey(cfgFile string, cfg *config.Config) string {
+	data, err := yaml.Marshal(cfg)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(append([]byte(cfgFile+"\x00"), data...))
+	return hex.EncodeToString(sum[:])
+}
+
+// cliOutputsReads is the reads of the outputs body this process's bridge
+// doctor gathers share (outputsReads). A test stands in a table of its own
+// for it before it builds a gather, and puts this one back once its reads
+// have answered.
+var cliOutputsReads = &outputsReads{}
 
 // unreadInput is the input when the outputs body could not be read: the
 // error, and what does not come from that body. The configured roots are
@@ -263,7 +363,13 @@ func doctorChecks(lines []outputcheck.Line) []doctor.Check {
 // test stands in for Linux and for the box's MPD and cards there.
 // Production passes nil. cfgFile is the file cfg was loaded from, beside
 // which the record of its data dir is ("" for none).
+//
+// Its body is read through this process's table (cliOutputsReads, as it
+// stands when the gather is built), so a gather over a config whose read
+// another gather began and a root still holds waits on that read rather
+// than beginning one of its own.
 func doctorOutputChecklist(cfgFile string, cfg *config.Config, seam func(*api.LocalOutputsConfig)) func(context.Context) []doctor.Check {
+	reads := cliOutputsReads
 	return func(ctx context.Context) []doctor.Check {
 		route := &loopbackAnswer{ask: func() (string, error) {
 			return probeLoopbackRoute(ctx, cfg.Output.EffectiveLoopbackPort())
@@ -305,8 +411,19 @@ func doctorOutputChecklist(cfgFile string, cfg *config.Config, seam func(*api.Lo
 			seam(&lcfg)
 		}
 		lo := api.NewLocalOutputs(lcfg)
+		// Closed as the gather ends, though a read this builder began may
+		// still be inside its Response, held by a root, with a later gather
+		// waiting on it. Close waits for none of it: it takes the builder's
+		// lock, which no holder keeps across I/O, closes the session
+		// without taking its turn, and leaves the flight alone. The build
+		// keeps the session it took, whose next command fails and dials
+		// once more, and the idle close the flight's end arms closes that
+		// one within a minute; so the body it answers reaches every gather
+		// still waiting on it.
 		defer lo.Close()
-		lines, ok := outputChecklist(ctx, doctorChecklistSource(cfg, lo, route))
+		src := doctorChecklistSource(cfg, lo, route)
+		src.Reads, src.ReadKey = reads, outputsReadKey(cfgFile, cfg)
+		lines, ok := outputChecklist(ctx, src)
 		if !ok {
 			return nil
 		}
