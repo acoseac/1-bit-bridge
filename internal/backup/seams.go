@@ -304,6 +304,31 @@ func SetVerifyHandoffForTest(answer, expired func(string)) func() {
 	return func() { onVerifyAnswer.Store(oldAnswer); onVerifyExpired.Store(oldExpired) }
 }
 
+// stopBounds, nil in production, stands in for the bounds a stop arms on a
+// verification (SetStopBoundsForTest).
+var stopBounds atomic.Pointer[func(dir, step string, after time.Duration) <-chan time.Time]
+
+// SetStopBoundsForTest installs fn in place of the two timers a stop arms on
+// a verification, each StopWriteBound long: its caller's expiry (step ""),
+// past which the caller answers that the verification was abandoned, armed
+// by its watchdog too (verifyAndThen), and the bound on the step its worker
+// is in (step its words, hold.go), past which the worker gives that step up,
+// its cause the stop (runStep). fn is given the snapshot (the caller's dir
+// as passed for the expiry, as SetVerifyHandoffForTest's hooks are, and
+// where it resolves for a step), the step and the bound's length as armed,
+// and answers the channel that fires the bound, or nil for its timer; it
+// must not block, and answers nil for every snapshot but its test's. It
+// returns the restore, to run once every verification it stood in for has
+// ended (backlog B895).
+func SetStopBoundsForTest(fn func(dir, step string, after time.Duration) <-chan time.Time) (restore func()) {
+	var p *func(string, string, time.Duration) <-chan time.Time
+	if fn != nil {
+		p = &fn
+	}
+	prev := stopBounds.Swap(p)
+	return func() { stopBounds.Store(prev) }
+}
+
 // onVerifyEnd, nil in production, runs once a verification's worker has let
 // go of everything it held (SetOnVerifyEndForTest).
 var onVerifyEnd atomic.Pointer[func(string)]

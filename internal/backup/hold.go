@@ -2,6 +2,7 @@ package backup
 
 import (
 	"context"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -19,10 +20,12 @@ import (
 type hold struct {
 	// ctx is the holder's caller's, ended at a give-up and at the hold's end
 	// too, so a step still running that asks it stops at its next ask (the
-	// prune, between its removals); stop is the caller's own stop.
+	// prune, between its removals); stop is the caller's own stop, and caller
+	// its context, whose error is the cause of a give-up that stop made.
 	ctx    context.Context
 	cancel context.CancelFunc
 	stop   <-chan struct{}
+	caller context.Context
 
 	mu        sync.Mutex
 	spellings []string
@@ -38,6 +41,15 @@ type hold struct {
 	waits     []<-chan struct{}
 	markWaits []<-chan struct{}
 	given     bool
+	// why is the cause of the hold's first give-up, which its holder's answer
+	// names (givenUp), as it stood then: context.DeadlineExceeded for a bound
+	// of the hold's own, or its caller's stop's error where the bound that
+	// stop set gave a step up (giveUpAtStop) or its caller gave the hold up
+	// once stopped (abandon). otherCause is set once any give-up of the hold
+	// had another cause than its caller's stop, so its answer is taken for
+	// that stop only where none had (onlyAtStop, AsTheStop: backlog B895).
+	why        error
+	otherCause bool
 	// markless: a give-up of the hold by its caller (abandon) raises no mark,
 	// since the holder waits for a write it handed to a hold of its own
 	// (handOff), or has ended its wait, or, a restore's, holds no lock yet
@@ -106,7 +118,7 @@ var activeHolds atomic.Int64
 // yet (held).
 func newHold(ctx context.Context, snapshot string, spellings ...string) *hold {
 	activeHolds.Add(1)
-	h := &hold{snapshot: snapshot, at: stepLockWait, stop: ctx.Done()}
+	h := &hold{snapshot: snapshot, at: stepLockWait, stop: ctx.Done(), caller: ctx}
 	h.ctx, h.cancel = context.WithCancel(ctx)
 	for _, s := range spellings {
 		if s != "" {
@@ -201,20 +213,34 @@ func (h *hold) track(done <-chan struct{}) {
 	h.waits = append(h.waits, done)
 }
 
-// giveUp gives the hold up at the step named, done (when not nil) closing as
-// that step's goroutine ends, which the hold then waits for: the step it is
-// in given up with it (its stepSignal ended), the hold's context ended, and
-// the folder marked, once, with no filesystem asked (markStuck), unless every
-// hold is let go already; once the hold has begun to let its lock go, the
-// mark is this process's alone, with no marker written.
+// giveUp gives the hold up at the step named, a bound of its own past (its
+// cause context.DeadlineExceeded), done (when not nil) closing as that step's
+// goroutine ends, which the hold then waits for: the step it is in given up
+// with it (its stepSignal ended), the hold's context ended, and the folder
+// marked, once, with no filesystem asked (markStuck), unless every hold is
+// let go already; once the hold has begun to let its lock go, the mark is
+// this process's alone, with no marker written.
 func (h *hold) giveUp(done <-chan struct{}, step string) {
-	h.giveUpAs(done, step, false)
+	h.giveUpAs(done, step, false, context.DeadlineExceeded, false)
+}
+
+// giveUpAtStop is giveUp where the bound the hold's caller's stop set gave
+// the step up (stepOf's, StopWriteBound past the stop, or the check's, half
+// of it past the end of its context): its cause is the stop, its caller's
+// context's error, and with no stop (a check whose context the hold's own
+// give-up ended) a bound of its own.
+func (h *hold) giveUpAtStop(done <-chan struct{}, step string) {
+	if why := h.caller.Err(); why != nil {
+		h.giveUpAs(done, step, false, why, true)
+		return
+	}
+	h.giveUp(done, step)
 }
 
 // giveUpAs is giveUp, byCaller saying the give-up is the holder's caller's
 // (abandon), which raises no mark where the holder handed its write off
-// (handOff).
-func (h *hold) giveUpAs(done <-chan struct{}, step string, byCaller bool) {
+// (handOff), why its cause and atStop whether its caller's stop made it.
+func (h *hold) giveUpAs(done <-chan struct{}, step string, byCaller bool, why error, atStop bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if done != nil {
@@ -223,8 +249,12 @@ func (h *hold) giveUpAs(done <-chan struct{}, step string, byCaller bool) {
 	if h.step != nil {
 		h.step.cancel()
 	}
+	if !atStop {
+		h.otherCause = true
+	}
 	if !h.given {
 		h.given = true
+		h.why = why
 		h.cancel()
 	}
 	if h.mark != nil || h.ended || (byCaller && h.markless) {
@@ -243,7 +273,8 @@ func (h *hold) giveUpAs(done <-chan struct{}, step string, byCaller bool) {
 }
 
 // abandon is the caller's give-up of a holder it stopped waiting for, at the
-// step it is in.
+// step it is in: its cause the caller's stop, or where its caller was not
+// stopped its own bound (a watchdog's), a deadline.
 func (h *hold) abandon() {
 	if !h.mu.TryLock() {
 		if hook := onAbandonBlocked.Load(); hook != nil {
@@ -253,7 +284,11 @@ func (h *hold) abandon() {
 	}
 	step := h.at
 	h.mu.Unlock()
-	h.giveUpAs(nil, step, true)
+	if why := h.caller.Err(); why != nil {
+		h.giveUpAs(nil, step, true, why, true)
+		return
+	}
+	h.giveUpAs(nil, step, true, context.DeadlineExceeded, false)
 }
 
 // gaveUp reports whether the hold was given up.
@@ -261,6 +296,15 @@ func (h *hold) gaveUp() bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.given
+}
+
+// givenFor is the cause of the hold's first give-up (why), nil where it was
+// not given up, and whether every give-up of it was its caller's stop's
+// (onlyAtStop).
+func (h *hold) givenFor() (why error, onlyAtStop bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.why, h.given && !h.otherCause
 }
 
 // marked is the hold's mark, if one was raised.
@@ -399,9 +443,10 @@ func (h *hold) drop() {
 
 // stepOf runs step under h on a goroutine of its own, the step named words,
 // and waits for its answer until by, or StopWriteBound past the caller's stop
-// where that comes first. The step is handed the hold's context and its own
-// give-up (stepSignal), which only a give-up of this step ends. A step that
-// has not answered then is given up (giveUp) and answered false, left to end
+// where that comes first (stopBound). The step is handed the hold's context
+// and its own give-up (stepSignal), which only a give-up of this step ends. A
+// step that has not answered then is given up and answered false, its cause
+// the bound that passed (giveUp, or giveUpAtStop for the stop's), left to end
 // on its own while h waits for it before it lets the lock go; what it answers
 // late is dropped, or handed to late where that is set, which h waits for
 // too. A panic in the step is raised again on the caller's goroutine.
@@ -479,7 +524,9 @@ func runStep[T any](h *hold, by time.Time, words string, publish bool, step func
 	}()
 	timer := time.NewTimer(time.Until(by))
 	defer timer.Stop()
-	stop := h.stop
+	// bound is by's until the caller's stop sets a nearer one (atStop), the
+	// cause of the step's give-up then (backlog B895).
+	stop, bound, atStop := h.stop, timer.C, false
 	for {
 		select {
 		case a := <-out:
@@ -496,9 +543,9 @@ func runStep[T any](h *hold, by time.Time, words string, publish bool, step func
 		case <-stop:
 			stop = nil
 			if time.Until(by) > StopWriteBound {
-				timer.Reset(StopWriteBound)
+				bound, atStop = h.stopBound(timer, words), true
 			}
-		case <-timer.C:
+		case <-bound:
 			if late != nil {
 				lateDone := make(chan struct{})
 				go func() {
@@ -509,10 +556,33 @@ func runStep[T any](h *hold, by time.Time, words string, publish bool, step func
 				}()
 				h.track(lateDone)
 			}
-			h.giveUp(done, words)
+			if atStop {
+				h.giveUpAtStop(done, words)
+			} else {
+				h.giveUp(done, words)
+			}
 			return v, true, false
 		}
 	}
+}
+
+// stopBound arms the bound the hold's caller's stop sets on the step named
+// words, StopWriteBound from now: timer, reset to it, or the channel a test
+// stands in for it (SetStopBoundsForTest), given the step's snapshot as it
+// resolves.
+func (h *hold) stopBound(timer *time.Timer, words string) <-chan time.Time {
+	after := StopWriteBound
+	if fn := stopBounds.Load(); fn != nil {
+		h.mu.Lock()
+		dir := filepath.Join(h.root, h.snapshot)
+		h.mu.Unlock()
+		if c := (*fn)(dir, words, after); c != nil {
+			timer.Stop()
+			return c
+		}
+	}
+	timer.Reset(after)
+	return timer.C
 }
 
 // laterBound is the bound of a step after a check: half of StopWriteBound
