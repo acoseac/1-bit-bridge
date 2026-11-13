@@ -5,6 +5,7 @@ import (
 	"go/parser"
 	"go/token"
 	"os"
+	"path"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -104,7 +105,7 @@ type flacSweep struct {
 // leakyFlacCalls walks the Go files under root for calls of the
 // leakyFlacConstructors entries.
 func leakyFlacCalls(root string) (sweep flacSweep, err error) {
-	err = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+	err = flacWalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -118,6 +119,11 @@ func leakyFlacCalls(root string) (sweep flacSweep, err error) {
 	})
 	return sweep, err
 }
+
+// flacWalkDir is the walk leakyFlacCalls makes: filepath.WalkDir, which a
+// test replaces with a sweeptest.Removal to stand in for another process
+// removing a directory while the sweep is under way.
+var flacWalkDir = filepath.WalkDir
 
 // flacDirRule is leakyFlacCalls' answer for a directory: SkipDir for one
 // whose code is not this checkout's, nil to descend.
@@ -238,6 +244,131 @@ func TestFlacSweepSkipsOtherCheckouts(t *testing.T) {
 		t.Errorf("found %q after parsing %d non-test and %d test files (%d importing the package), "+
 			"want %q after parsing 1 non-test file — the sweep read another checkout, or stopped "+
 			"reading this one", sweep.calls, sweep.nonTest, sweep.test, sweep.importers, want)
+	}
+}
+
+// leakyFlacProbe is a production file that calls a leakyFlacConstructors
+// entry on its fifth line.
+const leakyFlacProbe = "package p\n\nimport \"github.com/mewkiz/flac\"\n\n" +
+	"func probe(path string) { s, _ := flac.ParseFile(path); _ = s }\n"
+
+// writeFlacSweepTree writes each file in files, named by its slash path
+// below root, creating the directories it needs.
+func writeFlacSweepTree(t *testing.T, root string, files map[string]string) {
+	t.Helper()
+	for rel, body := range files {
+		path := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// TestFlacSweepSkipsMakeTestsTMPDIRAtTheRoot plants, one per row, what make
+// test leaves in the directory it gives every package's tests as TMPDIR when
+// the caller sets none (sweeptest.MakeTestTmpDir, at the root), and the same
+// call where the sweep must still find it.
+//
+// The suite runs every package's tests at once, so while the whole-tree pin
+// walked the checkout, another package's temporary Go files sat in that
+// directory: a leaky call there was reported as this module's, and a file
+// there was counted as one of its own (B567). The row in that directory
+// leaves the sweep's answer as it is without it. The rows in a directory of
+// the same name below the root, in one whose name begins with it, and beside
+// the Go program .github holds are found as before: the sweep skips that
+// directory at the root alone, as the build-tag census does (B740).
+func TestFlacSweepSkipsMakeTestsTMPDIRAtTheRoot(t *testing.T) {
+	tmp := path.Join(sweeptest.MakeTestTmpDir, "TestSomething123", "001")
+	for _, row := range []struct {
+		name  string
+		files map[string]string // slash paths below the root
+		found string            // the file whose call the sweep must report, or "" for none
+	}{
+		{"a leaky call and a test file in make test's TMPDIR", map[string]string{
+			path.Join(tmp, "p", "probe.go"):      leakyFlacProbe,
+			path.Join(tmp, "p", "probe_test.go"): "package p\n",
+		}, ""},
+		{"a leaky call in a directory of that name below the root", map[string]string{
+			path.Join("internal", "x", sweeptest.MakeTestTmpDir, "probe.go"): leakyFlacProbe,
+		}, path.Join("internal", "x", sweeptest.MakeTestTmpDir, "probe.go")},
+		{"a leaky call in a directory whose name begins with it", map[string]string{
+			path.Join(sweeptest.MakeTestTmpDir+"foo", "probe.go"): leakyFlacProbe,
+		}, path.Join(sweeptest.MakeTestTmpDir+"foo", "probe.go")},
+		{"a leaky call beside the Go program .github holds", map[string]string{
+			path.Join(".github", "scripts", "tool", "probe.go"): leakyFlacProbe,
+		}, path.Join(".github", "scripts", "tool", "probe.go")},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			root := filepath.Join(t.TempDir(), "checkout")
+			writeFlacSweepTree(t, root, map[string]string{".git/HEAD": "ref: refs/heads/main\n", "p/probe.go": leakyFlacProbe})
+			want, err := leakyFlacCalls(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeFlacSweepTree(t, root, row.files)
+			if row.found != "" {
+				want.calls = append(want.calls, filepath.FromSlash(row.found)+":5: flac.ParseFile — use "+leakyFlacConstructors["ParseFile"])
+				want.nonTest++
+				want.importers++
+			}
+			sweep, err := leakyFlacCalls(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			slices.Sort(want.calls)
+			slices.Sort(sweep.calls)
+			if !slices.Equal(sweep.calls, want.calls) || sweep.nonTest != want.nonTest || sweep.test != want.test || sweep.importers != want.importers {
+				t.Errorf("found %q after parsing %d non-test and %d test files (%d importing the package), "+
+					"want %q after %d, %d and %d", sweep.calls, sweep.nonTest, sweep.test, sweep.importers,
+					want.calls, want.nonTest, want.test, want.importers)
+			}
+		})
+	}
+}
+
+// TestFlacSweepFinishesWhileMakeTestsTMPDIRChanges: a directory in make
+// test's TMPDIR that another process removes while the sweep is under way,
+// as go test removes a test's temporary directory and the go command a work
+// directory, is one the sweep never lists, so it finishes with the answer
+// the tree gives without it. Reading that directory, the sweep failed on the
+// directory it had just listed (B567). A sweeptest.Removal stands in for the
+// other process at that moment of the walk.
+func TestFlacSweepFinishesWhileMakeTestsTMPDIRChanges(t *testing.T) {
+	for _, gone := range []struct{ name, dir string }{
+		{"a test's temporary directory", "TestSomething123"},
+		{"the go command's work directory", "go-build123/b001"},
+	} {
+		t.Run(gone.name, func(t *testing.T) {
+			root := filepath.Join(t.TempDir(), "checkout")
+			writeFlacSweepTree(t, root, map[string]string{".git/HEAD": "ref: refs/heads/main\n", "p/probe.go": leakyFlacProbe})
+			want, err := leakyFlacCalls(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			dir := filepath.Join(root, sweeptest.MakeTestTmpDir, filepath.FromSlash(gone.dir))
+			writeFlacSweepTree(t, dir, map[string]string{"probe.go": leakyFlacProbe})
+			removal := &sweeptest.Removal{Dir: dir}
+			flacWalkDir = removal.WalkDir
+			t.Cleanup(func() { flacWalkDir = filepath.WalkDir })
+			sweep, err := leakyFlacCalls(root)
+			if !removal.Walked {
+				t.Fatal("the sweep did not walk through the stand-in, so this case proves nothing")
+			}
+			if err != nil {
+				t.Fatalf("the sweep failed: %v", err)
+			}
+			if removal.Reached {
+				t.Errorf("the sweep reached %s, in make test's TMPDIR", dir)
+			}
+			if !slices.Equal(sweep.calls, want.calls) || sweep.nonTest != want.nonTest || sweep.test != want.test || sweep.importers != want.importers {
+				t.Errorf("found %q after parsing %d non-test and %d test files (%d importing the package), "+
+					"want %q after %d, %d and %d", sweep.calls, sweep.nonTest, sweep.test, sweep.importers,
+					want.calls, want.nonTest, want.test, want.importers)
+			}
+		})
 	}
 }
 

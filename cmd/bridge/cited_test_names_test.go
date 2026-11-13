@@ -692,7 +692,7 @@ func scanTestCitationsIn(t *testing.T, root string, trackedMD map[string]bool) (
 	t.Helper()
 	cited, defined = map[string][]string{}, map[string]bool{}
 	mdCitations := map[string]bool{}
-	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+	err := sweepWalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -733,6 +733,12 @@ func scanTestCitationsIn(t *testing.T, root string, trackedMD map[string]bool) (
 	// shared mutable state between them is a seam nobody asked for.
 	return cited, defined, len(mdCitations)
 }
+
+// sweepWalkDir is how the walks that skip by skipsForCitations
+// (scanTestCitationsIn, productionCallsIn) walk a tree: filepath.WalkDir,
+// which a test replaces with a sweeptest.Removal to stand in for another
+// process removing a directory while the walk is under way.
+var sweepWalkDir = filepath.WalkDir
 
 // skipsForCitations reports whether the walk leaves a directory below the
 // root unread: the repository's metadata, and build output or vendored code,
