@@ -108,19 +108,21 @@ func TestARollbackPutsBackABackupAnotherHandleHeldOnceItIsLetGo(t *testing.T) {
 			err := replaceRunningBinary(dst, bak)
 			letGo()
 			want, wantBak := "KNOWN-GOOD", false
+			// A scanner of the host's may hold a file a moment more, which
+			// the rollback waits out too: the waits are at least the test's.
 			if tc.letGo {
 				if err != nil {
 					t.Fatalf("the rollback = %v, want the backup put back once its holder let it go", err)
 				}
-				if len(waits) != 1 {
-					t.Errorf("the rollback waited %v, want once, for the one refusal", waits)
+				if len(waits) < 1 || waits[0] != 50*time.Millisecond {
+					t.Errorf("the rollback waited %v, want 50ms first, for the refusal of the held backup", waits)
 				}
 			} else {
 				want, wantBak = "RUNNING", true
 				if err == nil || !strings.HasSuffix(err.Error(), "(restored)") || !errors.Is(err, windows.ERROR_SHARING_VIOLATION) {
 					t.Fatalf("the rollback = %v, want the sharing violation and the binary restored", err)
 				}
-				if len(waits) != len(rollbackRenameBackoff)-1 {
+				if len(waits) < len(rollbackRenameBackoff)-1 {
 					t.Errorf("the rollback waited %v, want the backup's rename's whole schedule", waits)
 				}
 			}

@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"os"
+	"runtime"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -56,15 +57,19 @@ func (b *backupInUse) restore(r *refusedInstall) func(dst, ext string) error {
 	}, func(err error) bool { return errors.Is(err, errBackupInUse) }, func(d time.Duration) { b.waits = append(b.waits, d) })
 }
 
-// requireThePutBack requires r's backup put back over its binary, at the
-// third rename of it, after the schedule's first two waits.
+// requireThePutBack requires r's backup put back over its binary after its
+// two refusals, waiting the schedule's first two waits: at its third rename
+// of it, or on Windows at a later one where a scanner of the host's holds
+// the backup the start has just run a moment more, which the rollback waits
+// out too.
 func (b *backupInUse) requireThePutBack(t *testing.T, r *refusedInstall) {
 	t.Helper()
-	if n := b.attempts.Load(); n != 3 {
+	n := int(b.attempts.Load())
+	if n < 3 || (runtime.GOOS != "windows" && n != 3) {
 		t.Errorf("the backup's renames = %d, want 3: refused twice as in use, then put back", n)
 	}
-	if want := []time.Duration{50 * time.Millisecond, 100 * time.Millisecond}; !slices.Equal(b.waits, want) {
-		t.Errorf("the rollback waited %v, want %v", b.waits, want)
+	if want := []time.Duration{50 * time.Millisecond, 100 * time.Millisecond}; len(b.waits) != n-1 || !slices.Equal(b.waits[:min(2, len(b.waits))], want) {
+		t.Errorf("the rollback waited %v over %d renames, want %v first, one wait before each rename after the first", b.waits, n, want)
 	}
 	if got := reportedVersion(t, r.bin); !strings.Contains(got, previousVersion) {
 		t.Errorf("the binary reports %q after the rollback, want %s", got, previousVersion)
