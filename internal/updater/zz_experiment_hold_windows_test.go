@@ -140,7 +140,8 @@ func TestExperimentHoldAfterExec(t *testing.T) {
 		}
 		t.Logf("round %d: write hold %v; probe after exec: %v; rename bak->dst: %v; held for %v more", i, writeHold.Round(time.Millisecond), perr, rerr, held.Round(time.Millisecond))
 	}
-	t.Logf("SUMMARY: %d rounds; probe saw a hold %d; rename refused %d; probe agreed with the rename %d; longest hold after a refusal %v",
+	// Fails on purpose so CI prints the rounds (go test hides a passing test's log).
+	t.Errorf("SUMMARY (fails on purpose to print): %d rounds; probe saw a hold %d; rename refused %d; probe agreed with the rename %d; longest hold after a refusal %v",
 		rounds, probeHeld, renameRefused, agree, longest.Round(time.Millisecond))
 }
 
