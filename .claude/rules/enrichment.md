@@ -585,16 +585,17 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   `TestWavPackAndMonkeysAudioRowsTakePartInEnrichment` pins it.
 - **A portrait lookup that waits is kept in the row with the artist it was
   taken for, and fetched once enrichment and Deezer are both on and its retry
-  is due** (2026-11-12, backlog B761 PR 2, and its round 2). A lookup waits
-  when `enrich.deezerEnabled` refused it, when it failed, or when the backoff
-  of its artist and name put it off. Its pass stamps the track like any other,
-  so nothing at `enriched_at` says the portrait is missing, and the enricher's
-  memory does not outlive a restart: until then a refused portrait came back
-  only through a changed file or "Retry missing", which re-runs MusicBrainz
-  and the Cover Art Archive for nothing. `tracks.deezer_pending_query` (v63)
-  keeps the name the lookup asks Deezer by, MusicBrainz's canonical name for
-  the row's `artistMBID`, and `deezer_pending_mbid` (v64) the artist it was
-  taken for, both column-only, with partial indexes on the rows that carry one
+  is due** (2026-11-12, backlog B761 PR 2, and its rounds 2 and 3). A lookup
+  waits when `enrich.deezerEnabled` refused it, when it failed, or when the
+  backoff of its artist and name put it off. Its pass stamps the track like
+  any other, so nothing at `enriched_at` says the portrait is missing, and the
+  enricher's memory does not outlive a restart: until then a refused portrait
+  came back only through a changed file or "Retry missing", which re-runs
+  MusicBrainz and the Cover Art Archive for nothing.
+  `tracks.deezer_pending_query` (v63) keeps the name the lookup asks Deezer
+  by, MusicBrainz's canonical name for the row's `artistMBID`, and
+  `deezer_pending_mbid` (v64) the artist it was taken for, both column-only,
+  with partial indexes on the rows that carry one
   (`idx_tracks_deezer_pending`, `idx_tracks_deezer_pending_artist`). **The
   binding**: `MarkEnriched` writes a waiting lookup (`Track.PortraitPending`)
   in the stamp's own statement and only for the artist the stamp writes, and
@@ -612,42 +613,57 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   changes for that name: on a host the client refuses, not an image, past the
   size cap, at a URL that does not parse) settles that name's rows alone, goes
   in `deezerNegCache` keyed by the artist and the name, and forgets that
-  name's attempts; a refusal waits (enrich.enabled's still stops the stamp);
-  any other failure waits and adds one to that artist and name's failures in
-  `deezer_portrait_attempts`, the store's, which a restart and an eviction
-  keep. **One backoff for every path**: each reads those failures before it
-  asks (`portraitWaits`: a minute after the first, doubling to six hours), and
-  a lookup it holds back waits for the batch with no request. A changed file's
-  upsert drops a waiting lookup with the rest of the enrichment; "Retry
-  missing" and an unchanged scan keep it. While both switches are on, each
-  turn of `Run` takes one page of the waiting rows (`runPortraits`:
-  `PortraitBatchLimit` rows in path order past a cursor, so failing rows at
-  the head starve none behind them), grouped by artist and name, beside the
-  ordinary batch whatever that found, asks Deezer once a group, with no
-  MusicBrainz or Cover Art Archive request and no `enriched_at` reset, and
-  clears each row only at the version it read (`ClearPendingPortraits`, B187's
-  compare-and-set: a row retagged and enriched again since keeps its own
-  query); a pass that found no name due rests until the earliest retry, ten
-  minutes at most, unless a refused lookup is kept meanwhile; and `Run`'s wait
-  between turns ends within a second of enrichment turning on, or Deezer
-  turning on while enrichment is on, a batch that met a switch's refusal
-  leaving that switch read as off (`idle`). `/v1/artist-image` is 202 while
-  one of the artist's rows waits by a name with fewer than
-  `manifest.PortraitPendingAttempts` (five) failures in a row and both
-  switches are on, and `no_image` otherwise, which is not final while the
-  batch keeps asking (`artistImagePending`; serve hands the server the live
-  switch, `WithDeezerEnabled`, so `manifest` imports nothing of `enrich`).
-  Rows enriched before v63, and the queries v64 dropped, keep nothing: "Retry
-  missing" stays their way. **Don't clear a waiting lookup for a request that
-  settled nothing, keep one for an artist no longer its row's, bind an unbound
+  name's attempts, and a stamp clears a row's lookup only where it waits by a
+  name its pass ended (`Track.PortraitNameEnded`, whose names
+  `markEnrichedSQL`'s keep arm reads as a JSON array: a stamp from a fresh
+  read, after "Retry missing", knows nothing of the row's lookup), and a
+  pass's first lookup that waits stays over a later name's; a refusal waits
+  (enrich.enabled's still stops the stamp); any other failure waits and adds
+  one to that artist and name's failures in `deezer_portrait_attempts`, the
+  store's, which a restart and an eviction keep, timed when it is noted; and a
+  redirect to a host the client refuses is such a failure until the name's
+  fifth in a row (`manifest.PortraitPendingAttempts`), which ends the name as
+  an answer does (`redirectCapped`, on every path; round 3). **One backoff for
+  every path**: each reads those failures before it asks (`portraitWaits`,
+  weighed by the clock as it reaches the name: a minute after the first,
+  doubling to six hours), and a lookup it holds back waits for the batch with
+  no request; an open forgets the failures no waiting row names only once the
+  last is more than a day old (`portraitAttemptsKept`, strictly), so a backoff
+  still running outlives a changed file and a restart, and never forgets a
+  count a waiting row names (round 3). A changed file's upsert drops a waiting
+  lookup with the rest of the enrichment; "Retry missing" and an unchanged
+  scan keep it. While both switches are on, each turn of `Run` takes one page
+  of the waiting rows (`runPortraits`: `PortraitBatchLimit` rows in path order
+  past a cursor, so failing rows at the head starve none behind them), grouped
+  by artist and name, beside the ordinary batch whatever that found, asks
+  Deezer once a group, with no MusicBrainz or Cover Art Archive request and no
+  `enriched_at` reset, and clears each row only at the version it read
+  (`ClearPendingPortraits`, B187's compare-and-set: a row retagged and
+  enriched again since keeps its own query); a pass that found no name due
+  rests until the earliest retry, ten minutes at most from the pass's end,
+  unless a refused lookup is kept meanwhile; and `Run`'s wait between turns
+  ends within a second of enrichment turning on, or Deezer turning on while
+  enrichment is on, a batch that met a switch's refusal leaving that switch
+  read as off (`idle`). `/v1/artist-image` is 202 while one of the artist's
+  rows waits by a name with fewer than `manifest.PortraitPendingAttempts`
+  (five) failures in a row and both switches are on, and `no_image` otherwise,
+  which is not final while the batch keeps asking (`artistImagePending`; serve
+  hands the server the live switch, `WithDeezerEnabled`, so `manifest` imports
+  nothing of `enrich`). Rows enriched before v63, and the queries v64 dropped,
+  keep nothing: "Retry missing" stays their way. **Don't clear a waiting
+  lookup for a request that settled nothing or for an answer that ended
+  another name, keep one for an artist no longer its row's, bind an unbound
   one to the artist its row names now, let one name's answer settle the
   artist's other names, negative-cache a refusal or a failure, keep failures
-  in memory alone, let any path ask Deezer by a name inside its backoff or
-  hold a lookup back without recording it, answer 202 past the bound or while
-  either switch is off, clear a lookup at any version but the one read, write
-  one apart from the stamp's statement, leave the portrait batch to the turns
-  the ordinary batch finds work, take a batch's refusal for its switch on, or
-  ask MusicBrainz or the Cover Art Archive for a waiting portrait.**
+  in memory alone, time a failure, a retry or a rest by a page's or an
+  attempt's start, end a name at a refused redirect before the cap or ask by
+  one past it, forget a count a waiting row names or one a day old or less,
+  let any path ask Deezer by a name inside its backoff or hold a lookup back
+  without recording it, answer 202 past the bound or while either switch is
+  off, clear a lookup at any version but the one read, write one apart from
+  the stamp's statement, leave the portrait batch to the turns the ordinary
+  batch finds work, take a batch's refusal for its switch on, or ask
+  MusicBrainz or the Cover Art Archive for a waiting portrait.**
   `TestARefusedPortraitIsFetchedOnceDeezerIsOn`,
   `TestARefusedPortraitSurvivesARestartAndIsAskedByItsCanonicalName`,
   `TestTheFingerprintPathsRefusedPortraitIsFetchedOnceDeezerIsOn`,
@@ -671,7 +687,15 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   `TestPortraitsAndOrdinaryWorkBothProgress`,
   `TestAPassThatFindsNoArtistDueRestsAndReadsNothing`,
   `TestARefusalKeptWhileTheBatchRestsEndsTheRest`,
-  `TestAStaleClearLeavesTheReplacementsQuery`, manifest's
+  `TestAStaleClearLeavesTheReplacementsQuery`,
+  `TestAMissUnderAnotherNameKeepsTheLookupThatWaits`,
+  `TestEachFailureOnAPageStartsItsBackoffWhenItHappens`,
+  `TestAnArtistWhoseRetryFallsDueDuringThePageIsAsked`,
+  `TestTheBatchRestsFromTheEndOfThePass`,
+  `TestAPassTimesAPortraitFailureWhenItHappens`,
+  `TestARefusedRedirectWaitsUntilTheCapAndThenEndsItsName`,
+  `TestTheOrdinaryPassWaitsOnARefusedRedirectUntilTheCap`,
+  `TestARestartKeepsABackoffNoRowWaitsFor`, manifest's
   `TestMigrationV63KeepsAPortraitTheSwitchRefused`,
   `TestTheQueriesV63KeptUnboundAreDroppedAtTheUpgrade`,
   `TestAStampWritesThePortraitItsPassLearnt`,
@@ -682,7 +706,11 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   `TestAPendingPortraitIsClearedOnlyAtTheVersionItWasRead`,
   `TestPortraitAttemptsAreKeptPerArtistAndName`,
   `TestArtistMBIDPortraitPendingEndsAtTheBound`,
-  `TestThePendingPortraitReadUsesItsPartialIndex`, api's
+  `TestThePendingPortraitReadUsesItsPartialIndex`,
+  `TestAStampClearsOnlyTheLookupOfTheNameItsPassEnded`,
+  `TestAPassKeepsTheFirstLookupThatWaits`,
+  `TestAnOpenKeepsTheAttemptsOfABackoffStillRunning`,
+  `TestAnExhaustedLookupStaysSoAcrossADayAndAReopen`, api's
   `TestARefusedPortraitIsPendingWhileBothSwitchesAreOn` and
   `TestTheArtistImageAnswersEachPortraitStateAsTheProtocolSays`, and serve's
   `TestServeAsksDeezerForTheRefusedPortraitsOnceItIsOn` pin it.
