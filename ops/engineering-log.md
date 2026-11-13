@@ -95385,3 +95385,160 @@ packages. The rules patch applies at the final commit, and
 passes there with the B871 line declared edited against the final commit, and
 with round 1's edits declared against main. Windows and macOS are CI's to
 show.
+
+## 2026-11-13 — B871 round 3: no test hands a running backup worker to the next
+
+The rule is `build-ci-tests.md`'s line on joining a backup worker (round 3's
+patch), its long form in `ops/History-rules-build-ci-tests.md` ("B871 round
+3"); this is the evidence. Linux amd64 (legion0), Go 1.27.3, the Makefile's
+tags, TMPDIR `~/onebit/tmp`, every run pinned to CPUs 0 to 7. Each run's
+prediction was written before it (`.tmp/_b871/r3/predictions.txt`); the
+controls are uncommitted edits of committed files, put back with
+`git checkout --` (`.tmp/_b871/r3/ctl_r3.py`).
+
+### The red
+
+CI's `test -race (bridge 4/4)` on #1457 (run 43370189144),
+`TestTheTickerTakesNoSnapshotWhileItsOwnProbesReleaseDoesNotEnd/its_unlock_stalled`:
+"race detected during execution of test", the write
+`backup.SetReleaseBoundForTest` (seams.go:228 at 50ef8818) from
+restore_probe_test.go:238, the previous read `(*hold).release` (hold.go:344)
+deferred in `verifyAndThen`'s worker (finish.go:331), that goroutine
+finished, created by `VerifySnapshot` from `verifyCmd` from
+`TestTheCommandsSayWhatEndsARestoreThatHoldsTheSnapshots`
+(restore_mark_test.go:78). The worker sends its answer (finish.go:341)
+before its deferred `h.release`, `releaseSlot`, `h.drop` and end hook; the
+case returned on the answer. CI's shard takes every fourth name of the race
+listing (`.github/scripts/test-shard.sh`, `NR % 4 == 3` for 4/4): the two
+tests are 895 and 899 of cmd/bridge's 1,535 names and 224 and 225 of the
+shard's 384. In the whole package's order three tests stand between them.
+
+Reproduced at 50ef8818: `go test -race -count=20 -run
+'^(TestTheCommandsSayWhatEndsARestoreThatHoldsTheSnapshots|TestTheTickerTakesNoSnapshotWhileItsOwnProbesReleaseDoesNotEnd)$'
+./cmd/bridge`, 186 s: one report, CI's two stacks (seams.go:228 beside
+hold.go:344, the worker created at restore_mark_test.go:78). The detector
+reports a pair of stacks once, so how many of the 20 iterations raced is not
+known.
+
+### The 5 s wait
+
+The case's subtests took 0.46 s and 0.44 s (2.2 s each under `-race`): the
+backups folder's lock is held by another process with the marker beside it,
+so the verification's first try reads the marker (`lockBackupsWith`,
+`askedMarker` zero, verify_lock.go:214) and answers `ErrCheckStillRunning`,
+and bridge restore's look answers as fast. The 5 s is never waited out; it
+bounds a regression alone, and stays.
+
+### The audit
+
+In a copy of the tree (`.tmp/_b871/r3/audit_build.py`), each worker that can
+read a seam after its caller's answer reads a canary of its own just after
+its last such read (the end of `hold.release`, which every verification,
+prune, claim, `abandonPending` and restore hold runs; `CheckRestoreSource`'s
+worker before its answer; `letGoWithin`'s goroutine after its end;
+cmd/bridge's `readBounded` goroutine and the doctor's read before their
+answers), registered on its creator's goroutine; every `Set*ForTest` and its
+restore write all canaries, and so does a probe test named to run last in
+each package, under a mutex no worker takes after its read. A logging run without
+`-race` listed the tests during which a worker was created: 189 in
+internal/backup, 400 in cmd/bridge (that run's one failure,
+`TestATickerStoppedWhileItsVerdictsSyncHangsReturnsWithinItsBound`, "a stopped
+verification was reported", came beside three other loaded lanes and is
+watched in the gates below). Each ran alone then the probe (one
+`-test.run` pattern naming the two), `-race`, GORACE
+`suppress_equal_stacks=0 suppress_equal_addresses=0 halt_on_error=0`
+(checked first on a toy: with the defaults one of four races on one write
+site was reported, with these four). Flagged: 24 of internal/backup's 189
+(reads in `PruneContext`'s release 21 times, `verifyAndThen`'s 11,
+`abandonPending`'s and `letGoWithin`'s once), 40 of cmd/bridge's 400
+(`verifyAndThen` 39, `abandonPending` 19, `PruneContext` 1, `readBounded`
+1): 30 through serve's ticker, one through the ticker's loop, one a read the
+ticker's stop left, eight direct calls or helpers. The probe is a lower
+bound: the hold-words test was not flagged in the audit's run, and run with
+the probe at `-count=3` in the instrumented build its worker was flagged in
+the second iteration alone. The CI pair in order there flagged the canary at
+the ticker test's first `SetReleaseBoundForTest`, and in that run the
+detector did not report the `releaseBound` race itself; likely its read was
+gone from the variable's shadow cells, which keep four accesses, with other
+goroutines reading `releaseBound` between the two tests (the look's probe,
+the ticker's reads). Not measured further.
+
+A reading of every test body of both packages (`static2.py`: the last start
+of a worker with no join after it; `static3.py`: a seam set while a worker the
+body started is not yet joined) found nine the probe had not flagged, listed
+in the History; the rest of what it listed is joined otherwise, starts no
+worker, parks a worker on purpose, or crosses a subtest or a branch.
+
+### The seams
+
+By kind, with the reads after an answer: the History's paragraph. An
+answered worker reads `releaseBound` (hold.go:325, 344), `onLockRelease`
+(verify_lock.go:200) and `onOwnerRelease` (owner.go:78); a read `readBounded`
+left to end on its own reads `tryLockBackups`, `openProbe`,
+`readStuckMarker`, `resolveLinks`, `lstat`, `readDir` and `releaseBound` past
+its caller's answer, and no hook heard its end. No seam was made atomic:
+`readBounded` takes a join point (`readBoundedStart`).
+
+### The fix and its tests
+
+a18e8867: the hold-words case hears its verification's end
+(`awaitVerifyEndOnCleanup`, `SetOnVerifyEndForTest` set before `backupCmd`,
+its wait registered after the seam), the cases moved into
+`commandsSayWhatEndsAHold`, and
+`TestEachHoldWordsCaseWaitsForItsVerificationsEnd` runs each case whole with
+the worker parked at its last step (`SetAroundVerifyEndForTest`), let go only
+by the case's wait (`onVerifyEndAwait`). Red first (P1), the refactor and the
+test without the join: both cases failed at restore_mark_test.go:201, "the
+case returned with its verification's worker parked between its answer and
+its end", the inner cases passing, no race. With the join (P2): both pass.
+
+7a79d112: the drains, `stopServed`, the helpers, the flagged tests' joins,
+`readBoundedStart` and `joinBoundedReadsOnCleanup`, `letGoWithin`'s join
+through `Capture.Release`, seams.go's note, and
+`TestADrainWaitsForTheBackupWorkerItsLoopLeft`. Its message says 35 of
+cmd/bridge's 40 went through serve; it is 30. c1f30648: the reading's joins;
+its message says the reading found seven more, and it lists nine.
+
+After the joins, the probe in a copy of 7a79d112's tree, each test run twice
+(`-count=2`): cmd/bridge 0 of 401 flagged, internal/backup 1 of 189,
+`TestAnOwnershipIsLetGoBeforeTheLock`'s "a capture's, refused at once"
+twice: `letGoWithin`'s goroutine reads its canary after `end()` returns,
+past the capture's once its test joins through, where it reads no seam (the
+canary's place is the audit's). Every test of both packages that the probe
+ran passed.
+
+### Controls
+
+On 7a79d112, each predicted in writing first. C1a, `awaitVerifyEndOnCleanup`'s
+call taken out of `commandsSayWhatEndsAHold`:
+`TestEachHoldWordsCaseWaitsForItsVerificationsEnd` red, both cases at
+restore_mark_test.go:201, no race. C1b, the same edit, the CI pair in order at
+`-race -count=10`: one report, the write seams.go:234
+(`SetReleaseBoundForTest`) from restore_probe_test.go:238, the previous read
+hold.go:344 in the worker created through restore_mark_test.go:96 (the case's
+`backupCmd`). C2, `awaitBackupHoldsDropped`'s call taken out of
+`drainLoopOnCleanup`: `TestADrainWaitsForTheBackupWorkerItsLoopLeft` red at
+backup_join_test.go:145, "the drain returned with the loop's verification
+worker parked as it let the lock go", no race. As predicted, each file put
+back clean. No atomic landed, so there is no control of one.
+
+### The gates
+
+On 5c4f600f (2026-11-13, 12:25 to 13:12), one use of the build lock, nothing
+else of this round's in it, every process pinned to CPUs 0 to 7: `go vet
+./...` with the Makefile's tags clean for linux/amd64, and `go vet` of
+`./internal/backup/` and `./cmd/bridge/` clean for darwin/arm64 and
+windows/amd64; go1.27.3's gofmt lists none of the 27 Go files the round
+changed. Under `-race -count=50`, three lanes: the CI pair in order (`-run`
+naming the two, 382 s), `TestEachHoldWordsCaseWaitsForItsVerificationsEnd`,
+`TestADrainWaitsForTheBackupWorkerItsLoopLeft` and the two ticker tests that
+wait for a read their stop left, all ok, no race reported. Each package once
+with `-race -count=1 -timeout 120m`: `internal/backup` ok in 777 s,
+`cmd/bridge` ok in 1,626 s, which holds `TestEveryCitedTestNameExists`,
+`TestEveryBackgroundGoroutineDrainsOnCleanup` and
+`TestATickerStoppedWhileItsVerdictsSyncHangsReturnsWithinItsBound` (green
+here, beside nothing else). `make test` and `make build-all` were not run: the
+brief asked for the packages. The rules patch applies at the final commit,
+and `scripts/check-doc-budgets.py` and `verify_moves.py --base HEAD` are clean
+on a copy with it applied (`build-ci-tests.md` 39,310 bytes). Windows and
+macOS are CI's to show.
