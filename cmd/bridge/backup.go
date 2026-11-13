@@ -784,8 +784,11 @@ func runBackupTicker(ctx context.Context, src backup.Sources, keep func() int, i
 // found: on stdout when both its verdicts are VERIFIED (or the install had
 // no database to capture and its files are), on stderr otherwise, and
 // nothing at shutdown for a cancellation-only error whose found verdict is
-// unknown, passing or CancelledOnly. Without an error, a stopped context
-// silences only a CancelledOnly record. Known aborts and deadlines are reported.
+// unknown, passing or CancelledOnly, a give-up the stop made alone being
+// that stop (backup.AsTheStop: the outcome is one whichever of the two
+// bounds the stop arms fires first, backlog B895). Without an error, a
+// stopped context silences only a CancelledOnly record. Known aborts and
+// deadlines are reported, a step given up at a bound of its own among them.
 // A verification given up is said by how far its write went and what its
 // record reads as read back, and that its step still holds the snapshots; a
 // kept snapshot whose verification answered an error once its check had run,
@@ -795,7 +798,7 @@ func runBackupTicker(ctx context.Context, src backup.Sources, keep func() int, i
 // (backlog B653's sixth round).
 func reportTickerVerdict(ctx context.Context, stdout, stderr io.Writer, triggered string, res backup.Result) {
 	if res.VerifyErr != nil {
-		failure := ctxerr.WithoutCancellation(ctx, res.VerifyErr)
+		failure := ctxerr.WithoutCancellation(ctx, backup.AsTheStop(ctx, res.VerifyErr))
 		found, rec, read := res.Verify.Found, res.Verify.Record, res.Verify.RecordRead
 		if failure == nil {
 			if found.DatabaseState == "" || found.Passes() || found.CancelledOnly() {

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -399,43 +400,47 @@ func TestVerifyBesideTheTickersVerificationOfOneSnapshot(t *testing.T) {
 // TestATickerStoppedWhileItsVerdictsSyncHangsReturnsWithinItsBound is the
 // brief's shutdown red at serve's ticker, which serve's backup join waits
 // for: stopped while the verdict's write is held in a sync that never
-// answers, the ticker returns within backup.StopWriteBound of the stop,
-// abandoning the write, and says nothing of the stop.
+// answers, the ticker arms the two bounds its stop sets, each
+// backup.StopWriteBound long, a length that ends inside serve's wait for it
+// (backupShutdownWait), waits for them, returns once its caller's expiry
+// fires, its write's sync still held, and says nothing of the stop. The
+// bounds are the test's to fire (backup.SetStopBoundsForTest), never a
+// clock's: its upper bound on the time the ticker took went red under a busy
+// runner's load (backlog B895), and which bound fires first is
+// TestATickerStoppedWhileAStepHangsSaysNothingWhicheverBoundFiresFirst's.
 func TestATickerStoppedWhileItsVerdictsSyncHangsReturnsWithinItsBound(t *testing.T) {
 	_, dataDir, root := backupInstall(t)
 	src := backup.Sources{DataDir: dataDir, ManifestDB: manifest.DefaultDBPath(dataDir)}
-	release := make(chan struct{})
-	entered := make(chan struct{})
-	var enter sync.Once
-	letGo := sync.OnceFunc(func() { close(release) })
+	bounds := holdStopBounds(t, root)
+	held := newStopPark()
+	var answered atomic.Bool
 	t.Cleanup(backup.SetSyncVerdictForTest(func(string) error {
-		enter.Do(func() { close(entered) })
-		<-release
+		held.park()
+		answered.Store(true)
 		return nil
 	}))
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	drainLoopOnCleanup(t, cancel, done, "the backup ticker")
-	t.Cleanup(func() { letGo(); cancel(); waitClosed(t, done, "the backup ticker"); awaitVerificationsEnd(t, root) })
 	var stdout, stderr safeBuffer
-	go func() {
-		defer close(done)
-		runBackupTicker(ctx, src, func() int { return 7 }, staticInterval(24*time.Hour), nil, &stdout, &stderr, nil)
-	}()
-	select {
-	case <-entered:
-	case <-time.After(30 * time.Second):
-		t.Fatal("the verdict's write never reached its sync")
+	stop, done := runStoppableTicker(t, src, root, bounds, &stdout, &stderr, held.letGo)
+	awaitGuarded(t, held.entered, "the verdict's write did not reach its sync")
+	stop()
+	expiry, write := bounds.await(t, ""), bounds.await(t, stepWriteWords)
+	for _, b := range []*heldBound{expiry, write} {
+		if b.after != backup.StopWriteBound {
+			t.Errorf("the bound at %q is %v long, want backup.StopWriteBound, %v", b.step, b.after, backup.StopWriteBound)
+		}
 	}
-	stoppedAt := time.Now()
-	cancel()
+	if backup.StopWriteBound >= backupShutdownWait {
+		t.Errorf("backup.StopWriteBound, %v, does not end inside serve's wait for the ticker, %v", backup.StopWriteBound, backupShutdownWait)
+	}
 	select {
 	case <-done:
-		if took := time.Since(stoppedAt); took > backup.StopWriteBound+time.Second {
-			t.Errorf("the ticker returned %v after the stop; the bound is %v", took, backup.StopWriteBound)
-		}
-	case <-time.After(backup.StopWriteBound + 10*time.Second):
-		t.Fatal("the ticker did not return while its verdict's write was held in a sync")
+		t.Fatal("the ticker returned before either bound its stop armed fired")
+	default:
+	}
+	expiry.fire()
+	awaitGuarded(t, done, "the ticker did not return once its expiry fired, its verdict's write held in a sync")
+	if answered.Load() {
+		t.Error("the verdict's sync answered before the ticker returned, which was to return while it hangs")
 	}
 	if got := stderr.String(); got != "" {
 		t.Errorf("a stopped verification was reported: %s", got)
