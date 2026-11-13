@@ -264,8 +264,11 @@ func buildDoctorDepsWith(cfgPath string, absentIsPreSetup bool, dacHost dacAcces
 		// pid file behind it (doctor's ungradedConfigPortCheck).
 		APIPort:   7788,
 		AdminPort: 7789,
-		// Same resolution the console's export and `bridge logs` use, so all
-		// three agree on which file is the log.
+		// The console export's resolution (adminLogPath), so the console's
+		// doctor grades the file its bridge writes. On Windows `bridge logs`
+		// asks what is installed instead, and so reads the service's log
+		// where a doctor run from a shell grades the user's
+		// (consoleLogPath).
 		LogPath: adminLogPath(),
 		// Whether this runs in a container, which skips the two checks
 		// whose advice is for a host shell (doctor.Deps.InContainer). It

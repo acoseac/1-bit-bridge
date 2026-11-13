@@ -115,12 +115,18 @@ func logsCmdWith(ctx context.Context, args []string, stdout, stderr io.Writer, h
 }
 
 // openLog opens the log `bridge logs` reads, or says on stderr why there is
-// none and answers the exit code: DefaultLogPath, on every platform.
+// none and answers the exit code: on Windows the file the installed bridge
+// writes (openWindowsLog), elsewhere DefaultLogPath, which the launchd and
+// systemd units point the bridge's output at.
 func openLog(host logsHost, stderr io.Writer) (*os.File, int) {
+	if host.goos == "windows" {
+		return openWindowsLog(host, stderr)
+	}
 	return openDefaultLog(host, stderr)
 }
 
-// openDefaultLog opens DefaultLogPath, in the words `bridge logs` says.
+// openDefaultLog opens DefaultLogPath, in the words `bridge logs` said on
+// every platform before backlog B618, and still says off Windows.
 func openDefaultLog(host logsHost, stderr io.Writer) (*os.File, int) {
 	logPath, err := host.defaultLogPath()
 	if err != nil {
@@ -138,6 +144,115 @@ func openDefaultLog(host logsHost, stderr io.Writer) (*os.File, int) {
 		return nil, 1
 	}
 	return f, 0
+}
+
+// The second line of what `bridge logs` says where it finds no log on
+// Windows: what writes the file it looked for.
+var (
+	serviceLogWriter = "  the bridge's Windows service writes it once it starts; see whether the service runs in Services, " +
+		"where it is \"" + packaging.ServiceDisplayName + "\", or with `sc.exe query " + packaging.ServiceLabel + "`."
+	launcherLogWriter = "  the bridge's sign-in launcher, " + packaging.ServiceLabel + ".cmd in your Startup folder, " +
+		"writes it once it starts the bridge, at sign-in."
+	noLogWriter = "  neither the bridge's Windows service nor its sign-in launcher is installed to write it; " +
+		"a bridge run in the foreground logs to its terminal."
+)
+
+// openWindowsLog opens the log the installed bridge writes on Windows
+// (backlog B618): the service's, %PROGRAMDATA%\1-bit-bridge\bridge.log, while
+// the service is registered, running or not, and the user's, DefaultLogPath,
+// otherwise (chooseWindowsLog). Where both files are there it says which it
+// reads, in one line on stderr; where the install check could not tell it
+// reads the service's log where that is there and the user's otherwise, and
+// says so in one line, never choosing the user's in silence; and where it
+// finds no log it names the path it looked at, or both, and what writes it,
+// never `bridge serve`, whose foreground run logs to its terminal and writes
+// no file.
+func openWindowsLog(host logsHost, stderr io.Writer) (*os.File, int) {
+	inst := host.windowsInstall()
+	files := chooseWindowsLog(inst.Service, host.dirs)
+	switch inst.Service {
+	case packaging.ServiceRegistered:
+		f, err := os.Open(files.read)
+		if err != nil {
+			return nil, sayNoLog(stderr, files.read, err, "does not exist (yet)", serviceLogWriter)
+		}
+		if logIsThere(files.other) {
+			fmt.Fprintf(stderr, "logs: reading the Windows service's log, %s; %s, the log of a bridge its sign-in launcher starts, is there too\n",
+				files.read, files.other)
+		}
+		return f, 0
+	case packaging.ServiceNotRegistered:
+		if files.readErr != nil {
+			fmt.Fprintf(stderr, "logs: resolve path: %v\n", files.readErr)
+			return nil, 1
+		}
+		f, err := os.Open(files.read)
+		if err != nil {
+			if inst.Startup {
+				return nil, sayNoLog(stderr, files.read, err, "does not exist (yet)", launcherLogWriter)
+			}
+			return nil, sayNoLog(stderr, files.read, err, "does not exist", noLogWriter)
+		}
+		if logIsThere(files.other) {
+			fmt.Fprintf(stderr, "logs: reading %s, as the bridge's Windows service is not installed; %s, the service's log, is there too\n",
+				files.read, files.other)
+		}
+		return f, 0
+	}
+	return openUncertainWindowsLog(inst.ServiceErr, files, stderr)
+}
+
+// openUncertainWindowsLog is openWindowsLog where the install check could not
+// tell whether the service is registered, for the reason why gives: the
+// service's log where it is there, the user's where it is not, each said in
+// one line, and both paths named where neither is there.
+func openUncertainWindowsLog(why error, files windowsLogFiles, stderr io.Writer) (*os.File, int) {
+	uncertain := fmt.Sprintf("cannot tell whether the bridge's Windows service is installed (%v)", why)
+	f, err := os.Open(files.read)
+	if err == nil {
+		if logIsThere(files.other) {
+			fmt.Fprintf(stderr, "logs: %s; reading its log, %s, which is there; %s, the log of a bridge its sign-in launcher starts, is there too\n",
+				uncertain, files.read, files.other)
+		} else {
+			fmt.Fprintf(stderr, "logs: %s; reading its log, %s, which is there\n", uncertain, files.read)
+		}
+		return f, 0
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		fmt.Fprintf(stderr, "logs: %s, and its log, %s, cannot be opened: %v\n", uncertain, files.read, err)
+		return nil, 1
+	}
+	if files.otherErr != nil {
+		fmt.Fprintf(stderr, "logs: %s does not exist, and the other log's path cannot be made: %v (%s)\n",
+			files.read, files.otherErr, uncertain)
+		return nil, 1
+	}
+	f, err = os.Open(files.other)
+	if err == nil {
+		fmt.Fprintf(stderr, "logs: %s; its log, %s, is not there, so reading %s\n", uncertain, files.read, files.other)
+		return f, 0
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		fmt.Fprintf(stderr, "logs: open %s: %v\n", files.other, err)
+		return nil, 1
+	}
+	fmt.Fprintf(stderr, "logs: neither %s nor %s exists (%s)\n", files.read, files.other, uncertain)
+	fmt.Fprintln(stderr, "  the service writes the first once it starts, and a bridge its sign-in launcher starts the second; "+
+		"a bridge run in the foreground logs to its terminal.")
+	return nil, 1
+}
+
+// sayNoLog says on stderr why path could not be opened and answers the exit
+// code: where it is not there, that it does not exist, by missing's words,
+// and what writes it, by writer's line; any other failure as the open's.
+func sayNoLog(stderr io.Writer, path string, err error, missing, writer string) int {
+	if !errors.Is(err, os.ErrNotExist) {
+		fmt.Fprintf(stderr, "logs: open %s: %v\n", path, err)
+		return 1
+	}
+	fmt.Fprintf(stderr, "logs: %s %s\n", path, missing)
+	fmt.Fprintln(stderr, writer)
+	return 1
 }
 
 // windowsLogFiles are the files `bridge logs` looks at on Windows: the one
@@ -166,6 +281,15 @@ func chooseWindowsLog(service packaging.ServiceRegistration, dirs packaging.Wind
 		return windowsLogFiles{read: user, readErr: userErr, other: dirs.ServiceLog()}
 	}
 	return windowsLogFiles{read: dirs.ServiceLog(), other: user, otherErr: userErr}
+}
+
+// logIsThere says whether path names an entry that is there; "" names none.
+func logIsThere(path string) bool {
+	if path == "" {
+		return false
+	}
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 const (
@@ -327,10 +451,31 @@ func adminLogPath() string {
 	return consoleLogPath(hostLogs())
 }
 
-// consoleLogPath is the log file the console offers: DefaultLogPath, which
-// the launchd and systemd units and the Windows sign-in launcher point the
-// bridge's output at.
+// consoleLogPath is the file the process asking writes its log to, as far as
+// it can know. On Windows that is `bridge logs`' own choice
+// (chooseWindowsLog) with whether this process runs as the service in place
+// of the install check, since the console asks of the bridge it is part of:
+// the service's log inside the service, where DefaultLogPath is LocalSystem's
+// under C:\Windows\System32\config\systemprofile while the service writes
+// %PROGRAMDATA% (backlog B618), and the user's otherwise. Elsewhere it is
+// DefaultLogPath, which the launchd and systemd units point the bridge's
+// output at. So the console and `bridge logs` read one file wherever the
+// console runs inside the installed bridge. They part where they ask of two
+// bridges, a console of a bridge run another way beside a registered service;
+// and on Windows `bridge doctor` run from a shell, which is no service,
+// grades the user's log, where `bridge logs` reads the service's.
 func consoleLogPath(host logsHost) string {
+	if host.goos == "windows" {
+		service := packaging.ServiceNotRegistered
+		if host.isService != nil && host.isService() {
+			service = packaging.ServiceRegistered
+		}
+		files := chooseWindowsLog(service, host.dirs)
+		if files.readErr != nil {
+			return ""
+		}
+		return files.read
+	}
 	p, err := host.defaultLogPath()
 	if err != nil {
 		return ""

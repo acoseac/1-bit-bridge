@@ -373,7 +373,9 @@ type Deps struct {
 	Backups func(ctx context.Context) []Check
 
 	// LogPath is the file the service unit redirects this bridge's stderr
-	// to — packaging.DefaultLogPath(). Empty (a foreground `bridge serve`,
+	// to — cmd/bridge's adminLogPath: packaging.DefaultLogPath(), or,
+	// inside the Windows service, the service's own log under
+	// %PROGRAMDATA% (backlog B618). Empty (a foreground `bridge serve`,
 	// which logs to its terminal) makes checkLogSize a no-op rather than a
 	// complaint about a file that does not exist.
 	LogPath string
