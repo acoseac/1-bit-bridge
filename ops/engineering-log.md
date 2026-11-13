@@ -96001,3 +96001,170 @@ the tree with this record. The rule change is `rules-b872-r3.patch`: round
 2's first B872 bullet in `build-ci-tests.md`, which named the wait's seam,
 now names the notice's seam, the held wait and its abort; the budgets check
 is clean with it.
+
+## 2026-11-13 — B884 step 1: bridge init, the doctors and serve warn of the bridge's own files inside a library root
+
+The rule is `cli-serve.md`'s B884 line, and its long form is in
+`ops/History-rules-cli-serve.md` ("B884 — the bridge's own files inside a
+library root"); this is the evidence. Linux amd64 (legion0), Go 1.27.3, the
+Makefile's tags, TMPDIR on disk (`~/onebit/tmp`). B650 (#1461) is not on
+main and this step does not build on it: on b9f50244 the doctor still loads
+the config on its own goroutine and stats each root unbounded.
+
+### Step 0, read-only, at b9f50244
+
+1. How Load resolves the paths: `internal/config/config.go` 3008 `Load` ->
+   3018 `LoadFile` -> 3177 `loadData`: 3181 the decode, 3187 `applyDefaults`
+   (a dataDir left empty is `DefaultDataDir`, `./data`, 3260-3261), 3188
+   `applyEnvOverrides` (`env.go` 239: BRIDGE_DATA_DIR, and BRIDGE_LIBRARY_ROOTS
+   split on the OS's list separator, `env.go` 134-142), 3189 `filepath.Abs` of
+   the config's name, 3193 `resolvePaths(filepath.Dir(abs))`, 3289-3299: each
+   root and the data directory through `ResolvePath` (3329: empty stays empty,
+   an absolute path is cleaned, a relative one joined to the config's
+   directory). Load expands no `~` (init's `expandHome`, `init.go` 1795,
+   expands its own `--dir` and `--library` alone). Serve's boot read is
+   `LoadFileAt` (3099), over the name made absolute as written
+   (`cmd/bridge/main.go` 3428-3432, `configpath.go` 128); `DataDirOf`
+   (`refused.go` 72) repeats the dataDir key's three steps for a config Load
+   refuses.
+2. Where each surface can say it, the config loaded, touching nothing new:
+   init after its save (`cmd/bridge/init.go` 935-946, `cfg` holding the saved
+   data directory and roots, absolute) and at its keep (721-730, `prior`,
+   read at 466-467 from the bytes `readConfigAsIs` read, its paths resolved
+   by `config.ResolvePath`, `init_rewrite.go` 317-351), never in the preflight
+   (651-674), which grades `namedRoots` (538-546: a public run's kept roots are
+   left out on purpose) and runs only without `--skip-doctor`; the doctor in
+   `buildDoctorDepsWith` (`cmd/bridge/doctor.go` 258), inside the arm of a
+   config that loaded (329) beside `DataDirPreparation` (345), and in
+   `doctor.Run` right after that line (`internal/doctor/doctor.go` 501-503);
+   the console's doctor rebuilds those Deps at each run
+   (`adminDoctorRunnerFor`, 1018-1044); serve in `runServe` after its boot
+   read (`main.go` 3458), the config's refusals (3482) and the managed-controls
+   warning (3514-3518), before the roots' stat (3520,
+   `CheckLibraryRootsAccessible`), the record's check (3576) and the data
+   directory's preparation (3589).
+3. Every caller of `fsutil.IsUnderAny` (14 calls in 11 files), none of which
+   could take the lexical check: `internal/config/config.go` 4215 and 4247
+   (`upscale.variantsDir`, `upscale.tempDir`), `internal/admin/handlers_variants_dir.go`
+   246 and `cmd/bridge/variants.go` 130 (the same refusal, kept in lockstep):
+   refusals that keep writes out of a root, which a link into one would pass
+   lexically; `internal/dlna/loopback.go` 170 and 195 and
+   `internal/player/library/library.go` 603 and 616: containment of a file
+   opened for a client, before and after the open; `internal/upload/paths.go`
+   261, `internal/trash/trash.go` 403 and `internal/trash/restore.go` 62:
+   containment of writes and moves under a root (the primary defense on
+   Windows); `internal/enrich/enricher.go` 895 and 1584: the artwork cache's
+   writes; `internal/admin/player_audio.go` 396: a sidecar served only from
+   the variants directory; `cmd/bridge/main.go` 456: the artwork reaper's
+   unlinks; `cmd/bridge/output_play.go` 341: `--state-dir` against serve's data
+   directory, links resolved as the kernel resolves them. Each decides a
+   write, a read, an unlink or a refusal, where a link must be seen through;
+   the lexical check is for an advisory line that must touch nothing.
+
+### The Windows forms against Go's own
+
+The check parses each OS's forms itself, so the host's filepath proves
+nothing of Windows on Linux. On legion0 a scratch program (not committed)
+put a copy of `layout.go` beside Go 1.27.3's Windows source, copied from
+`internal/filepathlite/path_windows.go`, `path.go` and
+`path/filepath/path_windows.go` (renamed so it builds on Linux), and compared
+volumeLen, isAbs, clean, dir, join and the resolution against ResolvePath's
+Windows twin over every string of an eight-symbol alphabet up to six long and
+400,000 seeded token strings, against ten absolute bases: 699,593 inputs, 0
+mismatches. Mutations of the copy showed the run reads what it claims:
+postClean's `\??` rule dropped, 2,973 mismatches; postClean reading only what
+was written (Go reads its whole buffer), 4; the device UNC prefix's length cut
+by one, 16,790; Join's `\.\` before `??`, 0, since that branch needs a base of
+a single separator, which is never absolute, so no layout reaches it. On
+CI's windows leg `TestTheLayoutsFormsAreThisHostsFilepath` holds the port to
+Go's own there.
+
+### Red first
+
+At b9f50244, in a copy (`~/onebit/tmp/b884-red`) of the tree with every
+production file B884 changed put back, every one it added left out, the new
+tests from 72b98e96, and a shim of names alone that keeps main's behaviour
+(no check, no words, no doctor line, no init line, no journal line; the
+Deps field added and never asked):
+
+```
+$ go test -C <red> -count=1 -v -run '<B884 tests>' ./internal/config/ ./internal/doctor/ ./cmd/bridge/   (one package at a time)
+--- FAIL: TestThePredicateComparesEachOSsFormsByTheirNames
+    layout_test.go:91: linux: "/music/data" inside or equal to "/music" = false, want true
+--- FAIL: TestRunPrintsTheInstallLayoutLineAfterTheDataDirLine
+    install_layout_test.go:28: the install-layout line was asked 0 times, want once
+--- FAIL: TestBothDoctorsWarnOfTheBridgesFilesInsideALibraryRoot (all four subtests)
+    install_layout_test.go:106: bridge doctor has a install-layout line: false, the console's doctor: false, want one in each
+--- FAIL: TestBridgeInitWarnsOnceOfTheLayoutItWritesOrKeeps (all seven subtests)
+    install_layout_test.go:296: the run said a layout 0 times, want once
+--- FAIL: TestServeSaysOnceAtItsStartThatItsDataDirectoryIsInsideALibraryRoot
+    install_layout_test.go:478: serve logged [] of its layout, want one line beginning "WARN the data directory (dataDir) is inside library root libraryRoots[0]: a library root is often a mount"
+--- FAIL: TestServeSaysEachLayoutAtItsStart (the three inside subtests)
+--- FAIL: TestTheConsolesDoctorSaysTheLayoutOfARootAddedWhileServeRuns
+    install_layout_test.go:591: the console's doctor says {...} (there: false) after the root was added, want a warn "the data directory ... is inside library root ... (libraryRoots[1])"
+--- FAIL: TestADataDirectoryThatIsAFileInsideARootFailsAndWarnsBeside, TestAManagedBridgesDoctorSaysNothingOfItsLayout (its unmanaged half)
+--- PASS: TestNoDoctorWarnsOfASiblingThatSharesARootsPrefix
+--- PASS: TestBridgeInitSaysNothingOfAHealthyLayout
+--- PASS: TestServeSaysEachLayoutAtItsStart/a_sibling_with_a_shared_prefix, /apart
+```
+
+The guards pass at the base: a sibling with a shared prefix and a layout
+apart say nothing there either, and init's stderr over a healthy layout is
+empty at the base as on the branch (its byte-for-byte guard). The doctor's
+guard (`TestTheDoctorsReportOfAHealthyLayoutIsAsItWas`) fails at the base only
+on its wiring check ("bridge doctor wires no layout check"), since it
+compares the report with the check wired against the report without it.
+
+### Controls
+
+Each an uncommitted mutation of the committed tree (72b98e96), predicted in
+writing before the run (`controls.predictions.txt`), the test binaries built
+once per control, the files restored from memory and `git status` clean
+after. Every one as predicted:
+
+- C1, the brief's: the predicate a string prefix. Red: "linux: "/music2"
+  inside or equal to "/music" = true, want false", the doctors' sibling
+  guard ("bridge doctor warns of a sibling that shares the root's prefix"),
+  the doctor's healthy guard on its sibling, init's healthy guard and
+  serve's sibling subtest; the inside cases stayed green.
+- C2, the brief's: `filepath.EvalSymlinks(root)` in the predicate, its answer
+  discarded. Red: "layout.go imports path/filepath: the layout check runs on
+  strings alone, and reaches no filesystem" and "layout.go calls
+  filepath.EvalSymlinks: the layout check stats, resolves and opens nothing";
+  every answer unchanged, the link limit's test included.
+- C3, init's preflight carrying the line: the five subtests with the
+  preflight on and the run's roots inside said it twice; the skipped and
+  the keep (its run's roots apart) stayed green.
+- C4, the written layout's roots the preflight's: the public rewrite said
+  nothing. C5, the kept layout's roots the run's: the keep said nothing.
+- C6, the managed skip removed: the doctor's ordering test and the managed
+  test red.
+- C7, an ok line over a healthy layout: the doctor's healthy guard (both
+  subtests), the sibling guard and the console's test (its first run has a
+  line). C8, init's warning writing over a healthy layout: init's healthy
+  guard alone.
+- C9, serve logging twice: the start test and the three inside subtests.
+  C10, serve's journal naming paths: the same.
+- C11, Windows' names compared exactly: the case rows and the UNC row. C12,
+  device paths read as they are: the device rows.
+- C13, the doctor's check not wired: every doctor and console test.
+
+### The gates
+
+On 72b98e96, in one hold of the build lock (16:23 to 16:54, `gate.py`), with
+`-p` and `-parallel` at 8, half legion0's cores: `go vet ./...` with the
+Makefile's tags as GOOS linux, darwin and windows, clean; under `-race
+-count=50`, the new tests of internal/config (the six of `layout_test.go`) ok
+in 11 s, of internal/doctor (`TestRunPrintsTheInstallLayoutLineAfterTheDataDirLine`)
+ok in 2 s, and of cmd/bridge (the ten of `install_layout_test.go`, two full
+serve boots among them) ok in 160 s; and `go test -race -count=1 -timeout
+120m` of `./cmd/bridge/` (1,589 s, which holds `TestEveryCitedTestNameExists`),
+`./internal/doctor/` (7 s) and `./internal/config/` (16 s): all ok.
+go1.27.3's gofmt lists none of the Go files the change touches. The rules
+patch applies at 72b98e96 (`git apply --check`), and on a copy with it
+applied `scripts/check-doc-budgets.py` is clean (`cli-serve.md` 98,564 bytes),
+`verify_moves.py --base HEAD` passes, `rules-for.py` names `cli-serve.md` for
+`internal/config/layout.go`, and `TestEveryCitedTestNameExists` passes (and
+fails on a ghost citation planted in the copy's History file, so it read the
+copy). `make test` and `make build-all` were not run: the brief asked for the
+packages. The Windows forms run on CI's windows leg as on legion0's Linux.

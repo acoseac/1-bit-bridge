@@ -5357,3 +5357,132 @@ Forty-nine sites: twenty whose words changed, twenty-nine that named the
 snapshot as given already or name no path in it.
 
 The record is in `ops/engineering-log.md`, 2026-11-12, B826.
+
+## B884 — the bridge's own files inside a library root (2026-11-13)
+
+- **bridge init, bridge doctor and serve warn, and never refuse, where the config file or the data directory lies inside a library root: one check that touches nothing (`config.LayoutOf`: each path made absolute as Load makes it, against the config file's directory, and compared name by name in the OS's own forms, which it parses from strings, so `/music2` is not inside `/music` and a layout joined only through a link is missed) and one set of words (`config.InstallLayout`); init says it once, on stderr, for the layout it wrote or kept, its preflight carrying no such line; both doctors a warn-only `install-layout` line right after data-dir, none over a healthy layout or on a managed bridge, the console's from the config it loads at each run; serve one Warn at each start, before anything touches a root, naming the root `libraryRoots[i]` and no path** (2026-11-13, backlog B884). **Don't let the check stat, resolve or open anything or call what may, compare by a string prefix, refuse a layout, give a healthy layout a doctor line, let init say it twice, or name a path in serve's line; and don't move `upscale.variantsDir`'s or `upscale.tempDir`'s refusal onto it: they resolve links on purpose.** → History-rules-cli-serve.md
+
+*The hazard.* A library root is often a network or removable mount, and while
+one stops answering, a stat of anything under it waits in the kernel for as
+long as the mount does, with nothing to cancel it. `bridge doctor`, `bridge
+status` and `bridge serve` read their own files first: the config file, and
+the data directory (the database, the install marker, the player's storage,
+the tokens). B650 bounded every step of the doctor that touches a root, but
+these are the commands' own files, which every one of them must read, so a
+config file or a data directory inside a root takes them all down with the
+mount. Nothing said so: Validate checks `upscale.variantsDir` and
+`upscale.tempDir` against the roots, through `fsutil.IsUnderAny`, which
+resolves every root (a touch a dead mount can hold itself), and nothing
+checked the data directory or the config file. The whole fix is about eight
+places (backlog B884); this step makes the layout visible.
+
+*The check* (`internal/config/layout.go`). One predicate: is path P inside, or
+equal to, root R. Both are made absolute as Load makes them, against the
+config file's directory (`ResolvePath`'s rule: an absolute path cleaned, a
+relative one joined to that directory, Windows' joins included, so a path
+rooted with no drive, `\data`, and one relative to another drive, `D:data`,
+land where `filepath.Join` puts them), then compared by their names below
+their volumes, never as strings: `/music2` is not inside `/music`. The check
+takes an explicit OS and parses its forms itself (`pathForms`): POSIX's, one
+root and the slash, names compared byte for byte; and Windows', volume names
+(a drive letter, a UNC share, a device path), both slashes, a device path of
+a drive or a share read as that drive or share (`\\?\C:`, `\\.\C:`, `\??\C:`,
+`\\?\UNC\host\share`), and names compared without regard to case, each
+character of the Basic Multilingual Plane upper-cased by Unicode's simple
+mapping, as NTFS's table maps a code unit (so the Kelvin sign is not k). The
+forms are a port of go1.27.3's own IsAbs, Clean (its postClean included, and
+the lazy buffer that postClean reads past what was written, as Go's does),
+Dir and Join; the production wrapper, `LayoutOf`, passes runtime.GOOS, and the
+table runs every OS's forms on any host. Proved three ways: the table, hand
+written; `TestTheLayoutsFormsAreThisHostsFilepath`, which holds the port to the
+host's own filepath and to `ResolvePath` (POSIX on Linux and macOS, Windows'
+on the windows leg); and, on legion0, a scratch copy of the port against Go's
+Windows source compiled on Linux (the record has the run). It touches
+nothing: no stat, no link resolved, no open, so a root whose mount does not
+answer cannot hold it. `TestTheLayoutCheckRunsOnStringsAlone` reads
+layout.go's source and refuses any import but runtime (GOOS alone), strconv,
+strings, unicode and unicode/utf8, and any call but a builtin, a function or
+method the file declares, strings.Builder's, and those packages' own; it
+fails on the import and on the call, whatever the answer.
+
+*What it does not see.* What it does not resolve: a layout joined only
+through a symbolic link, a Windows junction or short name, a bind mount, or a
+case a macOS volume folds (darwin compares as POSIX does: whether a volume
+folds case is the volume's to say, and asking it is a touch), and Windows'
+own trimming of a name's trailing dots and spaces, which Load does not do
+either. `TestALayoutJoinedOnlyThroughALinkIsMissed` says so with a real link.
+
+*The words.* One set, `InstallLayout`'s: what lies inside which root, the
+first root in libraryRoots order that holds each, both named in one line
+where both lie inside; why it is a risk ("a library root is often a mount,
+and while one stops answering, every bridge command that reads what is
+inside it waits on it, serve, doctor and status among them"); and what to do
+for what lies inside. The config file: moved outside every root, first
+setting dataDir to the data directory's absolute path, since a relative
+dataDir resolves beside bridge.yaml. The data directory: moved, and dataDir
+set to its new path. Both: moved, keeping dataDir pointed at the data
+directory, since a relative one (./data unless set) resolves beside
+bridge.yaml. The CLI names each by its path, the root beside its place in
+libraryRoots: B505's rule takes a path the operator configured
+(`LibraryRootError` and init's directory errors name the path the operator
+must find and fix), and the doctor's library-roots and data-dir lines print
+paths already. It offers the platform's default config directory
+(`packaging.DefaultConfigDir`, the data directory's place below it) as one
+place to move to, only where that lies outside every root, worded as an
+example and never as a fix. The journal names each by its setting alone (the
+config file; the data directory (dataDir); library root libraryRoots[i]), as
+every line about the config there does, and offers no place.
+
+*Where each surface says it.* bridge init, on stderr, once, for the layout it
+actually wrote (the roots it saved, a public rewrite's kept roots included,
+which its preflight deliberately does not grade, `namedRoots`) or kept (the
+kept config's own data directory and roots as its file says them,
+`priorInstallFile`, whatever the run named; a config that does not read names
+none), after the save or at the keep. Its preflight carries no such line
+(`initPreflightDeps` leaves `doctor.Deps.InstallLayout` nil), so a run says it
+once whether the preflight runs or `--skip-doctor` passes it. bridge doctor
+and the console's doctor carry a new warn-only line, install-layout, right
+after data-dir (`doctor.Deps.InstallLayout`, from `doctorInstallLayout` in
+`buildDoctorDepsWith`, for a config that loads), omitted where neither file
+lies inside a root, so a healthy report is byte for byte what it was, and
+skipped on a managed bridge (`Deps.Managed`): its files are the host's to
+move, and its reader has no shell to move them with (the rule on advice that
+needs a shell, `config-lifecycle.md`). A line of its own rather than a warn
+on data-dir, which keeps its fails and their words: a data directory that is
+a regular file inside a root fails data-dir as before, the layout's warn
+beside it. The console's doctor builds its Deps from the config it loads at
+each run, so a root added through POST /api/roots is in its next report.
+serve logs one Warn at each start, right after the config's own refusals and
+before the first step that touches a root (the roots' stat,
+`CheckLibraryRootsAccessible`) or the data directory, so the journal holds the
+line from every start before a mount stops answering; a root added while
+serve runs is the doctor's to say. No surface refuses: an install keeps
+working whatever its layout.
+
+*What it leaves.* `upscale.variantsDir` and `upscale.tempDir` keep their
+refusals through `fsutil.IsUnderAny`, and should not follow: a refusal there
+keeps writes out of a root, and a lexical check would let a link into a root
+through (CodeRabbit's Major on PR D1, why the resolution is there). Of the
+other callers of `fsutil.IsUnderAny`, none should either: each decides a
+write, a read, an unlink or a refusal, where a link must be seen through
+(the record lists them). Not checked here: tlsCertPath and tlsKeyPath,
+autocert.cacheDir, the log file. The rest of B884's places, bounding the
+commands' own reads, are its later steps.
+
+*The tests.* In internal/config: `TestThePredicateComparesEachOSsFormsByTheirNames`,
+`TestTheLayoutResolvesRelativePathsAsLoadDoes`,
+`TestTheLayoutsFormsAreThisHostsFilepath`, `TestTheLayoutCheckRunsOnStringsAlone`,
+`TestALayoutJoinedOnlyThroughALinkIsMissed` and
+`TestTheLayoutsWordsNameWhatLiesInsideWhichRoot`; in internal/doctor,
+`TestRunPrintsTheInstallLayoutLineAfterTheDataDirLine`; in cmd/bridge,
+`TestBothDoctorsWarnOfTheBridgesFilesInsideALibraryRoot`,
+`TestNoDoctorWarnsOfASiblingThatSharesARootsPrefix`,
+`TestADataDirectoryThatIsAFileInsideARootFailsAndWarnsBeside`,
+`TestAManagedBridgesDoctorSaysNothingOfItsLayout`,
+`TestTheDoctorsReportOfAHealthyLayoutIsAsItWas`,
+`TestBridgeInitWarnsOnceOfTheLayoutItWritesOrKeeps`,
+`TestBridgeInitSaysNothingOfAHealthyLayout`,
+`TestServeSaysOnceAtItsStartThatItsDataDirectoryIsInsideALibraryRoot`,
+`TestServeSaysEachLayoutAtItsStart` and
+`TestTheConsolesDoctorSaysTheLayoutOfARootAddedWhileServeRuns`. The record is
+in `ops/engineering-log.md`, 2026-11-13, B884.
