@@ -251,12 +251,12 @@ func TestTheSecondOfTwoRootsDoesNotAnswer(t *testing.T) {
 // (Carbon's fifth note on the brief), so two that do not answer cost a run one
 // bound, not one each, and both are named.
 func TestRootsThatDoNotAnswerCostOneBoundTogether(t *testing.T) {
-	const bound = time.Second
+	const bound = 2 * time.Second
 	a, b := libraryRoot(t, "nas-a"), libraryRoot(t, "nas-b")
 	s := newStallingRoots([]string{a, b}, nil)
 	p := probesOver(t, s, bound)
 	c, took := rootsLine(t, context.Background(), p, a, b)
-	if took >= bound*18/10 {
+	if took >= bound*175/100 {
 		t.Errorf("two roots that do not answer took the run %s, want one bound (%s), not one each", took, bound)
 	}
 	for _, r := range []string{a, b} {
