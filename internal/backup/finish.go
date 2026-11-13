@@ -313,8 +313,13 @@ func verifyAndThen(ctx context.Context, dir string, o VerifyOptions, after func(
 		// Last, once all of it is let go: the hook a test waits on for that
 		// (SetOnVerifyEndForTest), never the answer, which comes first; run
 		// inside a test's wrapper of this step where one is set
-		// (SetAroundVerifyEndForTest).
+		// (SetAroundVerifyEndForTest), read only once the hook a test parks
+		// a worker with between the drop and that read has run
+		// (SetOnVerifyDroppedForTest).
 		defer func() {
+			if hook := onVerifyDropped.Load(); hook != nil {
+				(*hook)(dir)
+			}
 			end := func() {
 				if endHook != nil {
 					(*endHook)(dir)

@@ -342,6 +342,28 @@ func SetAroundVerifyEndForTest(fn func(dir string, end func())) (restore func())
 	return func() { aroundVerifyEnd.Store(prev) }
 }
 
+// onVerifyDropped, nil in production, runs on a verification's worker once
+// it has dropped its hold, before its last step reads aroundVerifyEnd
+// (SetOnVerifyDroppedForTest).
+var onVerifyDropped atomic.Pointer[func(dir string)]
+
+// SetOnVerifyDroppedForTest installs fn, which a verification's worker runs
+// once it has dropped its hold and before its last step reads the wrapper
+// SetAroundVerifyEndForTest installs, given the caller's dir as passed; and
+// returns the restore. A worker that a drain let go at its drop can stand
+// there while a later test installs that wrapper, which the worker then
+// runs: a test parks a worker there to show that its wrapper takes only its
+// own (backlog B871's round 4). Its callback must return, and ignore every
+// dir but its test's.
+func SetOnVerifyDroppedForTest(fn func(dir string)) (restore func()) {
+	var p *func(string)
+	if fn != nil {
+		p = &fn
+	}
+	prev := onVerifyDropped.Swap(p)
+	return func() { onVerifyDropped.Store(prev) }
+}
+
 // ActiveHoldsForTest counts workers still retaining a hold, including a
 // cancellation handoff that has neither a slot nor an overrun mark yet.
 // Tests join their callers before waiting for this count to reach zero.

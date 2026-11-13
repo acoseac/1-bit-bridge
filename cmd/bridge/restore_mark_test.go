@@ -67,15 +67,20 @@ var holdWordsCases = []holdWordsCase{
 // as written before restores were marked, keeps its words.
 func TestTheCommandsSayWhatEndsARestoreThatHoldsTheSnapshots(t *testing.T) {
 	for _, tc := range holdWordsCases {
-		t.Run(tc.name, func(t *testing.T) { commandsSayWhatEndsAHold(t, tc) })
+		t.Run(tc.name, func(t *testing.T) { commandsSayWhatEndsAHold(t, tc, nil) })
 	}
 }
 
 // commandsSayWhatEndsAHold is a case of
 // TestTheCommandsSayWhatEndsARestoreThatHoldsTheSnapshots, whole, which
-// TestEachHoldWordsCaseWaitsForItsVerificationsEnd runs too.
-func commandsSayWhatEndsAHold(t *testing.T, tc holdWordsCase) {
+// TestEachHoldWordsCaseWaitsForItsVerificationsEnd runs too, its snapshot
+// handed to onSnapshot, where that is set, as soon as it is made and before
+// anything verifies it.
+func commandsSayWhatEndsAHold(t *testing.T, tc holdWordsCase, onSnapshot func(t *testing.T, snap string)) {
 	cfgA, _, snapA := seedRestorableInstall(t, closedAdminAddr(t))
+	if onSnapshot != nil {
+		onSnapshot(t, snapA)
+	}
 	cfgB, dataB, _ := seedRestorableInstall(t, closedAdminAddr(t))
 	root, err := fsutil.ResolveLinks(filepath.Dir(snapA))
 	if err != nil {
@@ -150,9 +155,18 @@ func commandsSayWhatEndsAHold(t *testing.T, tc holdWordsCase) {
 // worker ends, the case's seam and its snapshot are still as the case made
 // them. Red on the round before, whose cases never waited: each returned with
 // the worker still parked.
+//
+// Since round 4 the wrapper is installed once the case knows its snapshot,
+// and parks the worker of that snapshot's verification alone: a worker of an
+// earlier verification, parked between its drop and its read of the wrapper
+// across the wrapper's installation (parkAnEarlierWorker), where a worker a
+// test before let go at its drop can stand, passes through it, and the case
+// still parks and joins its own. Red on round 3's wrapper, installed before
+// the case and parking the first worker that came to it.
 func TestEachHoldWordsCaseWaitsForItsVerificationsEnd(t *testing.T) {
 	for _, tc := range holdWordsCases {
 		t.Run(tc.name, func(t *testing.T) {
+			earlier := parkAnEarlierWorker(t)
 			letGo := make(chan struct{})
 			release := sync.OnceFunc(func() { close(letGo) })
 			parked := make(chan struct{})
@@ -163,18 +177,38 @@ func TestEachHoldWordsCaseWaitsForItsVerificationsEnd(t *testing.T) {
 				waitAtEnd time.Duration
 				snapAtEnd error
 			)
-			t.Cleanup(backup.SetAroundVerifyEndForTest(func(dir string, end func()) {
-				if !parkedOne.CompareAndSwap(false, true) {
+			// The wrapper, installed as soon as the case's snapshot is made:
+			// it parks the worker of that snapshot's verification, keyed as
+			// the case's wait keys it (awaitVerifyEndOnCleanup), a folder in
+			// the case's own t.TempDir that no other test's verification
+			// names, and which only the case's bridge backup --verify
+			// verifies (its bridge restore takes the folder's lock, and runs
+			// no verification). Every other worker passes through.
+			wrap := func(t *testing.T, snap string) {
+				want := backup.CleanSnapshotPath(snap)
+				t.Cleanup(backup.SetAroundVerifyEndForTest(func(dir string, end func()) {
+					if dir != want || !parkedOne.CompareAndSwap(false, true) {
+						end()
+						return
+					}
+					close(parked)
+					<-letGo
+					waitAtEnd = verifyCmdLockWait
+					_, snapAtEnd = os.Lstat(dir)
 					end()
-					return
+					close(passed)
+				}))
+				// The earlier worker, let go once the wrapper stands, runs it
+				// and passes through, before the case verifies anything.
+				earlier.letGo()
+				select {
+				case <-earlier.ended:
+				case <-parked:
+					t.Fatalf("the case's wrapper parked the worker of an earlier verification, of %s, as its own", earlier.dir)
+				case <-time.After(30 * time.Second):
+					t.Fatal("the earlier verification's worker never passed the case's wrapper")
 				}
-				close(parked)
-				<-letGo
-				waitAtEnd = verifyCmdLockWait
-				_, snapAtEnd = os.Lstat(dir)
-				end()
-				close(passed)
-			}))
+			}
 			prevAwait := onVerifyEndAwait
 			onVerifyEndAwait = func(string) { release() }
 			t.Cleanup(func() { onVerifyEndAwait = prevAwait })
@@ -193,7 +227,7 @@ func TestEachHoldWordsCaseWaitsForItsVerificationsEnd(t *testing.T) {
 					t.Error("the parked worker never passed its end")
 				}
 			})
-			t.Run("case", func(t *testing.T) { commandsSayWhatEndsAHold(t, tc) })
+			t.Run("case", func(t *testing.T) { commandsSayWhatEndsAHold(t, tc, wrap) })
 			select {
 			case <-parked:
 			case <-time.After(30 * time.Second):
@@ -217,6 +251,60 @@ func TestEachHoldWordsCaseWaitsForItsVerificationsEnd(t *testing.T) {
 			}
 		})
 	}
+}
+
+// earlierWorker is the worker of a verification of a snapshot of its own
+// (dir), parked once it has dropped its hold, until letGo; ended closes as
+// it runs its end hook.
+type earlierWorker struct {
+	dir   string
+	letGo func()
+	ended <-chan struct{}
+}
+
+// parkAnEarlierWorker verifies a snapshot of its own and parks its worker
+// between its drop and its read of the wrapper of its last step
+// (backup.SetOnVerifyDroppedForTest): where a worker stands that a test
+// before let go at its drop, all a drain waits for, as the next test installs
+// its wrapper (backlog B871's round 4). Its cleanup lets the worker go and
+// waits for its end, before the seams go back.
+func parkAnEarlierWorker(t *testing.T) earlierWorker {
+	t.Helper()
+	_, _, snap := seedRestorableInstall(t, closedAdminAddr(t))
+	dir := backup.CleanSnapshotPath(snap)
+	entered, out, ended := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	enter, letGo, end := sync.OnceFunc(func() { close(entered) }), sync.OnceFunc(func() { close(out) }), sync.OnceFunc(func() { close(ended) })
+	t.Cleanup(backup.SetOnVerifyEndForTest(func(d string) {
+		if d == dir {
+			end()
+		}
+	}))
+	t.Cleanup(backup.SetOnVerifyDroppedForTest(func(d string) {
+		if d == dir {
+			enter()
+			<-out
+		}
+	}))
+	t.Cleanup(func() {
+		letGo()
+		select {
+		case <-ended:
+		case <-time.After(30 * time.Second):
+			t.Errorf("the earlier verification's worker, of %s, never ended", dir)
+		}
+	})
+	if _, err := backup.VerifySnapshot(context.Background(), dir, backup.VerifyOptions{}); err != nil {
+		t.Fatalf("the earlier verification: %v", err)
+	}
+	select {
+	case <-entered:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the earlier verification's worker never dropped its hold")
+	}
+	if n := backup.ActiveHoldsForTest(); n != 0 {
+		t.Fatalf("%d holds active with the earlier worker past its drop; want none, as a drain finds it", n)
+	}
+	return earlierWorker{dir: dir, letGo: letGo, ended: ended}
 }
 
 // TestBridgeRestoreAsksTheMarkerAgainstTheLockBeforeItsPrompt (backlog B826's
