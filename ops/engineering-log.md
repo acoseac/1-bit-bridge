@@ -95137,3 +95137,16 @@ of internal/tsnet and cmd/bridge with the release tags clean; `go test -race -co
 and `-race -count=1 -timeout 120m` once ok (119 verdicts, none skipped); cmd/bridge's ten touched tests (the two new
 ones, `TestTheNodesNameOnEveryStart`, the three tile tests and the four `TestTailscaleAdminSource…` tests) under
 `-race -count=50 -p 8 -parallel 8` ok in 120 s (500 runs, 1,400 subtests, none failed or skipped, no race reported).
+
+### The gates at the record's commit
+
+At 095a5d0f, in one use of the build lock (06:11 to 06:38), TMPDIR `~/onebit/tmp`: `go vet ./...` with the release
+tags clean for linux/amd64, darwin/amd64 and windows/amd64, and of internal/tsnet and cmd/bridge for linux/386;
+`check-build-tags` OK and the census's tests ok (21 s); `go test -race -count=1 -p 8 -parallel 8 -timeout 120m
+./cmd/bridge/` ok in 1,586 s, which holds `TestEveryCitedTestNameExists` and the drain audit. The rules patch applies
+to HEAD (`git apply --check`); on a git-archive copy of HEAD with it applied, the copy's `check-doc-budgets.py` is
+clean (`cli-serve.md` 98,615 bytes), `verify_moves.py --base HEAD --edit '*The name.* An explicit'` reports MISSING
+the B749 bullet's two copies alone, each replaced by its successor with the one clause the patch edits (the tool
+cannot pair a line edited with its verbatim twin), and `TestEveryCitedTestNameExists` is green there and red with a
+ghost citation planted in the patched History. `make test` and `make build-all` were not run: the brief asked for the
+packages. Windows and macOS are CI's to run.
