@@ -11,9 +11,17 @@ import (
 // three entries: the selection moves on each audible report, never when the
 // successor is handed off, and the end of the queue stops on the last entry,
 // which Play then replays.
+//
+// The Prepare a hand-off's Submitted step makes reaches the fake before that
+// step publishes its snapshot, so each read of the selection after a hand-off
+// waits for the owner's note of its Submitted, counted from one mark taken
+// before the first: read at the fake's record, a selection the hand-off moved
+// was not published yet, and the read passed whatever the step did (B834,
+// from B827's census).
 func TestAdvanceFollowsAudibleReportsNotHandOff(t *testing.T) {
 	h := startHarness(t)
 	ids, s := h.playing(0, "a", "b", "c")
+	mark := h.appliedMark()
 	a := s.first.ID
 	b := s.prepared(a, 1)
 	if b == nil || b.Entry != ids[1] {
@@ -25,6 +33,7 @@ func TestAdvanceFollowsAudibleReportsNotHandOff(t *testing.T) {
 	if c == nil || c.Entry != ids[2] {
 		t.Fatalf("the successor of b is %+v, want c", c)
 	}
+	h.waitAppliedTimes("handled submitted", mark, 1)
 	if sel := h.snap().Selected(); sel != ids[0] {
 		t.Fatalf("handing b off selected %d: the selection moves on the audible report", sel)
 	}
@@ -34,6 +43,7 @@ func TestAdvanceFollowsAudibleReportsNotHandOff(t *testing.T) {
 	if end := s.prepared(c.ID, 1); end != nil {
 		t.Fatalf("the successor of the last entry with repeat off is %+v, want none", end)
 	}
+	h.waitAppliedTimes("handled submitted", mark, 2)
 	if sel := h.snap().Selected(); sel != ids[1] {
 		t.Fatalf("handing c off selected %d", sel)
 	}
