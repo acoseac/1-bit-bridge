@@ -781,6 +781,14 @@ var sweepWalkDir = filepath.WalkDir
 // holding a `.git` entry (sweeptest.IsOtherCheckout). A checkout git is
 // still writing has no go.mod yet, since cmd/ comes before go.mod in index
 // order, and while it had none its tests satisfied this tree's citations.
+//
+// Nor does it read make test's TMPDIR, the root's own `.tmp`
+// (sweeptest.IsMakeTestTmpDir), where every package's tests keep their
+// temporary files while the suite runs: a test there satisfied a citation
+// this tree does not back, a comment there was collected as this tree's, a
+// file there in mid-edit failed the guard, and so did a directory there
+// removed between its listing and its own (B567). Only that one: a `.tmp`
+// further down is the tree's, as `.github` is.
 func skipsForCitations(root, path, name string) bool {
 	if path == root {
 		return false
@@ -789,6 +797,9 @@ func skipsForCitations(root, path, name string) bool {
 		return true
 	}
 	if strings.HasPrefix(name, "_") {
+		return true
+	}
+	if sweeptest.IsMakeTestTmpDir(root, path) {
 		return true
 	}
 	if sweeptest.IsOtherCheckout(root, path) {

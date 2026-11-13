@@ -133,6 +133,15 @@ func hashCostDirRule(root, path, name string) error {
 	if strings.HasPrefix(name, "_") {
 		return filepath.SkipDir
 	}
+	// Nor make test's TMPDIR, the root's own .tmp (sweeptest.IsMakeTestTmpDir),
+	// where every package's tests keep their temporary files while the suite
+	// runs, this package's fixtures among them: a call there was reported as
+	// production code, a file there in mid-edit as one that does not parse,
+	// and a directory there removed between its listing and its own failed
+	// the walk (B567). Only that one: a .tmp further down is the tree's.
+	if sweeptest.IsMakeTestTmpDir(root, path) {
+		return filepath.SkipDir
+	}
 	// Nor another checkout inside this one (sweeptest.IsOtherCheckout), such
 	// as Claude Code's worktrees of other branches: none of it is this
 	// checkout's production code, and a half-written file there failed this

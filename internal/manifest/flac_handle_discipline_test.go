@@ -139,9 +139,14 @@ func flacDirRule(root, path, name string) error {
 	// `go ./...`). And another checkout inside this one
 	// (sweeptest.IsOtherCheckout), such as Claude Code's worktrees of other
 	// branches: none of it is this checkout's code, and a call in progress
-	// there failed this checkout's run.
+	// there failed this checkout's run. And make test's TMPDIR, the root's
+	// own .tmp (sweeptest.IsMakeTestTmpDir), where every package's tests keep
+	// their temporary files while the suite runs: a leaky call there was
+	// reported as this module's, and a directory there removed between its
+	// listing and its own failed the walk (B567). A .tmp further down is the
+	// tree's.
 	if name == ".git" || name == "vendor" || strings.HasPrefix(name, "_") ||
-		sweeptest.IsOtherCheckout(root, path) {
+		sweeptest.IsMakeTestTmpDir(root, path) || sweeptest.IsOtherCheckout(root, path) {
 		return filepath.SkipDir
 	}
 	return nil
