@@ -94823,6 +94823,15 @@ Green at 447ff87c by design, each a guard a control turns red: `TestAnExhaustedL
 
 | Check | Result |
 |---|---|
-| The round-3 cases and the B761 cases beside them, `./internal/manifest/`; the whole of `./internal/enrich/`; no race | ok |
+| `go vet ./...` (the tags), `GOOS` linux, darwin and windows | exit 0 each |
+| `make docs-check`; the round-3 rules patch measured over the tree (`enrichment.md` as the patch makes it) | clean; within budget (`enrichment.md` 53,890 bytes; the heaviest load 359,113, unchanged; the heaviest pulling `enrichment.md` 291,587) |
+| `-race -count=50`, `GOMAXPROCS=8`: the 8 new enrich cases and the 33 beside them (round 2's set), `./internal/enrich/` | ok, 3375.6 s |
+| `-race -count=50`, `GOMAXPROCS=8`: the 4 new manifest cases, the attempts case they change, and the 15 beside them (round 2's set), `./internal/manifest/` | ok, 1716.8 s |
+| `-race -count=50`, `GOMAXPROCS=8`: round 2's api set (the artwork and artist-image cases), `./internal/api/` | ok, 280.4 s |
+| `-race -count=50`, `GOMAXPROCS=8`: the serve case, `./cmd/bridge/` | ok, 85.0 s |
+| `go test -race -timeout 120m ./internal/enrich/` | ok, 153.4 s |
+| `go test -race -timeout 120m ./internal/api/` | ok, 145.4 s |
+| `go test -race -timeout 120m ./internal/manifest/` | ok, 1660.2 s |
+| `go test -race -timeout 120m ./cmd/bridge/` | ok, 1621.8 s |
 
 **Left.** One track failing under two names keeps one of them: in a pass the first, across passes the latest pass's; the other is asked again only when a pass re-enriches the row. A name the redirect cap ended is asked again by such a pass from zero, at most five attempts at the backoff's pace.
