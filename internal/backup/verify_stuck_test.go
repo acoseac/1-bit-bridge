@@ -75,6 +75,28 @@ func parkCheck(t *testing.T, owed string) (entered <-chan struct{}, release func
 	return in, release
 }
 
+// checkGraceOf holds the grace a check of the snapshot in dir is given once
+// its context has ended (SetCheckGraceForTest) until pass is called; begun
+// closes as that grace begins, the check's deadline (or its caller's stop)
+// passed. A check that answers within the grace is taken, so a test that
+// passes it only once the verification has answered gives no check up past
+// its deadline, however late the host runs the check's thread (backlog
+// B886). The seam is put back at the test's end, once every verification has
+// returned: a cleanup registered after this one passes the grace first.
+func checkGraceOf(t *testing.T, dir string) (begun <-chan struct{}, pass func()) {
+	t.Helper()
+	in, out := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	t.Cleanup(backup.SetCheckGraceForTest(func(d string) <-chan struct{} {
+		if d != dir {
+			return nil
+		}
+		once.Do(func() { close(in) })
+		return out
+	}))
+	return in, sync.OnceFunc(func() { close(out) })
+}
+
 // awaitParkedAndGivenUp waits for a check parked to be given up (entered,
 // parkCheck's or a parking's) and for its verification's answer (done), which
 // read reads, and which comes once the check's deadline has given it up, in

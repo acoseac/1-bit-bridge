@@ -197,6 +197,20 @@ func TestAWriteGivenUpLandsNothingOnceItResumes(t *testing.T) {
 // (TestARecheckGivenUpLeavesTheVetoItMade). Red on the round before, which
 // let the veto go for any verdict over a VERIFIED where none stood before, an
 // INCOMPLETE included.
+//
+// Past its deadline, the check is parked on its thread before it reads
+// anything (parkCheck) until its 150 ms deadline has passed and its grace has
+// begun, then let go, and answers INCOMPLETE (deadline) within a grace the
+// test ends only once the verification has answered (checkGraceOf), while
+// every other step the deadline bounds (the record's read and the veto, the
+// write, its INCOMPLETE and the read-back) is held at its gate, never given
+// up (SetStepGateForTest): so the deadline decides the check's verdict alone,
+// whatever the host's pace (backlog B886: on macOS's CI a 400 ms sleep at the
+// database's open, on the check's background-priority thread, outlasted the
+// second's grace past the deadline, and the recheck was given up). In every
+// case the prune runs once the verification's worker has ended, its unlock
+// held from the answer until the test waits for that end (unlockHold,
+// backlog B849), and must run.
 func TestARecheckThatDidNotEndLeavesTheVetoItMade(t *testing.T) {
 	for _, tc := range []string{"past its deadline", "stopped by its caller", "on a panic of its check"} {
 		t.Run(tc, func(t *testing.T) {
@@ -205,14 +219,25 @@ func TestARecheckThatDidNotEndLeavesTheVetoItMade(t *testing.T) {
 			anchor := verifiedSnapshot(t, src)
 			time.Sleep(1100 * time.Millisecond)
 			dir := verifiedSnapshot(t, src)
+			root := filepath.Dir(dir)
 			if vetoed(t, dir) {
 				t.Fatal("a veto stands before the recheck: the test did not reach the case")
 			}
 			ctx := context.Background()
+			// What the test's end lets go, before it joins the verification.
+			var letGo []func()
+			var parked, graceBegun <-chan struct{}
+			letCheckGo := func() {}
 			switch tc {
 			case "past its deadline":
 				t.Cleanup(backup.SetVerifyDeadlineForTest(150 * time.Millisecond))
-				t.Cleanup(backup.SetOnDatabaseOpenForTest(func() { time.Sleep(400 * time.Millisecond) }))
+				entered, release := parkCheck(t, "")
+				begun, pass := checkGraceOf(t, dir)
+				gate, restoreGate := backup.SetStepGateForTest(root, filepath.Base(dir), "its read of the snapshot's record",
+					"putting its veto in place", "its verdict's write", "its write of INCOMPLETE", "its read of the record after it")
+				t.Cleanup(restoreGate)
+				parked, graceBegun, letCheckGo = entered, begun, release
+				letGo = append(letGo, release, pass, gate.FireAll)
 			case "stopped by its caller":
 				// One byte a second: the check's first read waits, and the stop
 				// finds it there (TestACancelledVerificationWritesIncomplete).
@@ -232,29 +257,103 @@ func TestARecheckThatDidNotEndLeavesTheVetoItMade(t *testing.T) {
 					}
 				}))
 			}
-			t.Cleanup(func() { awaitClean(t) })
-			res, err := backup.VerifySnapshot(ctx, dir, backup.VerifyOptions{})
+			// The verification answers before its worker lets go of the
+			// snapshots' lock (verifyAndThen), whose unlock is held from the
+			// answer on, so the prune below waits for that worker's end, never
+			// the answer (backlog B849). Registered after every seam, so the
+			// callers' cleanup runs first: every stand-in let go, then the
+			// verification and its holds joined.
+			unlock := holdUnlockOf(t, root)
+			callers := joinBackupCallers(t, func() {
+				for _, f := range letGo {
+					f()
+				}
+				unlock.release()
+			})
+			unlock.arm(t, dir)
+			done := make(chan verifyAnswer, 1)
+			callers.start(func() {
+				res, err := backup.VerifySnapshot(ctx, dir, backup.VerifyOptions{})
+				done <- verifyAnswer{res, err}
+			})
+			var a verifyAnswer
+			if kept, ok := awaitParkedPastItsDeadline(t, parked, graceBegun, done); ok {
+				a = kept
+			} else {
+				letCheckGo()
+				a = awaitVerifyAnswer(t, done, "the recheck")
+			}
+			res, err := a.res, a.err
 			if errors.Is(err, backup.ErrCheckGivenUp) {
 				t.Fatalf("the recheck was given up (%v): the test did not reach the case", err)
 			}
 			if res.Found.DatabaseState != backup.StateIncomplete {
 				t.Fatalf("the recheck found %s, want INCOMPLETE: the test did not reach the case", res.Found.DatabaseState)
 			}
-			awaitClean(t)
+			unlock.requireHeld(t)
+			unlock.letGoAndAwaitEnd(t)
 			if !vetoed(t, dir) {
 				t.Error("the veto the recheck made before its check was removed, though its check did not end")
 			}
 			if got := readersVerified(t, dir); len(got) > 0 {
 				t.Errorf("after the recheck that did not end, %s", strings.Join(got, "; "))
 			}
-			if _, err := backup.Prune(filepath.Dir(dir), 1); err != nil {
+			pr, err := backup.Prune(root, 1)
+			if err != nil {
 				t.Fatal(err)
+			}
+			if pr.Skipped {
+				t.Fatalf("the prune once the recheck's worker had ended was skipped (%v): it kept every snapshot, and read nothing", pr.SkippedFor)
 			}
 			if !pathExists(t, anchor) {
 				t.Error("the prune let the older verified snapshot go for one whose recheck did not end")
 			}
 		})
 	}
+}
+
+// awaitParkedPastItsDeadline waits, bounded, for a check parked before it
+// read anything (parked) and for its grace to have begun, its deadline
+// passed (graceBegun), in whichever order the two come; with neither given
+// (nil, nil) it waits for nothing. An answer before the grace began is a
+// verification its deadline never reached (one refused before its check,
+// say), and fails the test at once; one after it, a check given up at its
+// grace, is answered (ok) once the park has come too, as it does whatever
+// the deadline did (parkCheck), for the test to judge.
+func awaitParkedPastItsDeadline(t *testing.T, parked, graceBegun <-chan struct{}, done <-chan verifyAnswer) (kept verifyAnswer, ok bool) {
+	t.Helper()
+	timeout := time.NewTimer(30 * time.Second)
+	defer timeout.Stop()
+	for parked != nil || graceBegun != nil {
+		select {
+		case <-parked:
+			parked = nil
+		case <-graceBegun:
+			graceBegun = nil
+		case kept = <-done:
+			if graceBegun != nil {
+				t.Fatalf("the verification answered %v, its record %s %v, before its check's deadline had passed: the test did not reach the case",
+					kept.err, kept.res.Record.DatabaseState, kept.res.Record.DatabaseReasons)
+			}
+			ok, done = true, nil
+		case <-timeout.C:
+			t.Fatalf("within 30 s the check was not parked (%v) or its grace had not begun (%v)", parked != nil, graceBegun != nil)
+		}
+	}
+	return kept, ok
+}
+
+// awaitVerifyAnswer waits for a verification's answer, handed on by its
+// caller, failing the test where none comes within a minute.
+func awaitVerifyAnswer(t *testing.T, done <-chan verifyAnswer, what string) verifyAnswer {
+	t.Helper()
+	select {
+	case a := <-done:
+		return a
+	case <-time.After(time.Minute):
+		t.Fatalf("%s did not answer within a minute", what)
+	}
+	return verifyAnswer{}
 }
 
 // TestARecheckThatRecordedNothingIsFollowedByNoPrune is backlog B653's fifth
