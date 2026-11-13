@@ -587,13 +587,29 @@
   statement, and the driver then finalizes it and returns (`HoldReturnOf`
   holds it in the hook); and the rollback has run once that Rollback has
   returned no error, SQLite having rolled the transaction back inside it,
-  and has failed, keeping the driver's error, where it returned one. One
-  that comes to an end before its wait begins is kept, and a COMMIT, an
+  and has failed, keeping the driver's error, where it returned one. What
+  it came to is published once, written and then `ended` closed, the one
+  signal every reader waits on: until B869's fourth round a success closed
+  a second signal, `ran`, before `ended`, and a test that synchronized on
+  `ran` met a wait that answered its stop for a rollback that had
+  succeeded, held between the two closes in every run
+  (`TestARollbackComesToAnEndInOnePublication`). One that comes to an end
+  before its wait begins is kept, and the transaction's own Commit, an
   error that rolls the transaction back before its ROLLBACK (an
   `ON CONFLICT ROLLBACK`, `SQLITE_FULL`, a COMMIT that failed: the hook
   outside that Rollback) and the connection's close each end the
   expectation at once; a savepoint's `ROLLBACK TO` fires no hook and ends
-  nothing. Only then is the hold let go, so
+  nothing. The expectation is bound to a `*sql.Tx`, and that is the
+  contract: transaction-control SQL run directly on a watched connection
+  (a raw `BEGIN`, `COMMIT`, `ROLLBACK` or `END`) is outside it and not
+  tracked, a raw COMMIT ending nothing and a raw ROLLBACK reaching the
+  hook outside the driver's Rollback, which takes it for an error's
+  (`TestRawTransactionSQLIsOutsideTheContract`). Every wait B869 migrated
+  watches a `*sql.Tx`; the store's raw-SQL transactions (`beginImmediate`,
+  ended by `execEnd`) bind no expectation, and refusing raw transaction
+  SQL would take a statement classifier over every way a statement reaches
+  the driver, savepoints, comments and `END` among them. Only then is the
+  hold let go, so
   the commit finds the transaction done every time
   (`TestAServeStoppedAtItsUpscaleSeedsCommitExitsCleanly`, red on every
   run without the fix; with the stop and no wait for the rollback, the
@@ -639,9 +655,13 @@
   rollback hook for the held transaction's (another connection's rollback
   counts on the file, database/sql marks a transaction done before it
   calls the driver's Rollback, and the hook fires inside that Rollback,
-  before it returns), or prove such a wait by giving it time to answer
-  wrongly: let a hold go only on the wait's answer to an ask made after
-  what came before (backlog B869).**
+  before it returns), prove such a wait by giving it time to answer
+  wrongly (let a hold go only on the wait's answer to an ask made after
+  what came before), give a rollback's end a second signal beside its one
+  publication, or count on the watch for transaction-control SQL run
+  directly on a watched connection: an expectation is bound to a
+  `*sql.Tx`, and a raw BEGIN, COMMIT, ROLLBACK or END is outside that
+  (backlog B869).**
 
 - **A test handler that holds a request until the client gives up must
   DRAIN a POST's body first** (#1003). net/http notices a client hanging up
