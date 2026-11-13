@@ -95027,3 +95027,120 @@ before the fix). `go test -race -count=1 -timeout 120m -p 2
 the brief asked for the packages. The rules patch applies at the round's
 commit, and `scripts/check-doc-budgets.py` is clean on a copy with it applied
 (`cli-serve.md` 97,290 bytes). Windows is the PR's CI windows job's to show.
+
+## 2026-11-13 — B664: a `bridge init` run that keeps the config prepares the data dir serve will use
+
+The rule is `cli-serve.md`'s new B664 line (the rules patch,
+`rules-b664-r1.patch`) and its long form in `ops/History-rules-cli-serve.md`
+("B664"), with B727's line, whose list of the reads that ask the record
+nothing loses init keeping the config; this is the evidence. Linux amd64
+(legion0), Go 1.27.3, the Makefile's tags, TMPDIR `~/onebit/tmp` on disk,
+umask 022.
+
+### What the run did
+
+`initCmd` decides to keep the config at `init.go` 565-575 (main 4678b983):
+`--yes` without `--force`, or a no at "Overwrite?". From there the keep path
+asked nothing of the data directory: the rewrite's `refuseDataDirAway` is
+asked `if replace` alone (583), the posture warning returns at once for a run
+that keeps (226-228), the preflight (unless `--skip-doctor`, 651-674) grades
+the install's ports and certificate and has no data-dir line (B659), and the
+keep branch (721-730) printed "keeping it" and returned `finishInit`, which
+loads the config for the admin address alone, its error ignored, makes the
+log's directory, and installs and starts the unit with `WorkingDirectory` the
+data dir `priorInstallFrom` read from the file, with no environment, or
+init's own `<dir>/data` where the file did not read or parse (466-472). A run
+that kept the config returned 0 having made no data directory: systemd then
+fails the unit at its chdir (200/CHDIR, `Restart=always` every 2 s to its
+start limit), launchd likewise; Windows' SCM service and Startup launcher set
+no working directory.
+
+Serve's own order, for comparison (`main.go` 3575-3593): the record's check
+(`checkServeDataDirRecord`, beside the file its boot read was of), then
+`prepareServeDataDir` (`fsutil.MkdirAll` at 0700, owner-preserving as root,
+then a directory required there), then the lock. The doctor's data-dir line
+(`dataDirCheck`) reads the same record (beside the file the name opens now)
+and the same walk (`fsutil.BlockingEntry`), and differs where a read run by
+anyone must: a record or a marker this user may not read is a warn where
+serve refuses; a path it cannot walk is a warn where serve's MkdirAll fails
+and serve refuses; a data directory not there below a parent this user may
+not write is ok to it and refused by serve; it makes nothing. init's first
+install makes its data dir with `os.MkdirAll` at 0700 and `os.Chmod` 0700,
+owned by whoever runs it.
+
+### Red first
+
+At e1478b23, main's code with a behaviour-neutral seam over `finishInit`'s
+host calls (`initHost`: the three installs, the detached start, the browser;
+the suite's TestMain puts one that refuses and fails the suite on any ask),
+the round's tests and the away-volume tables (25 s): 61 subtests red, each as
+predicted, the two guards green.
+
+```
+init_keep_data_dir_test.go:348: init installed the unit with the working directory …/002/disk/bridge, which was not a directory: systemd and launchd fail the unit at its chdir, before serve can make it
+init_keep_data_dir_test.go:348: init installed the unit with the working directory …/002/disk/bridge, want the data directory serve uses, …/002/env/bridge
+init_keep_data_dir_test.go:392: a run keeping a config whose data directory serve refuses exited 0, want 1
+init_keep_data_dir_test.go:490: a run keeping a config whose data directory its record refuses exited 0, want 1
+init_keep_data_dir_test.go:552: a run keeping a config that does not load exited 0, want 1
+data_dir_away_commands_test.go:250: init over a data dir whose volume is away exited 0, want 1:
+```
+
+- `TestAKeptConfigsDataDirIsMadeBeforeItsServiceIsInstalled`, 7 of 7 (case
+  1): an absolute `dataDir` kept by `--yes`, by a no at "Overwrite?" and by
+  `--yes --skip-doctor`, a relative one, none, `BRIDGE_DATA_DIR` over the
+  file's (the unit installed on the file's), and a `dataDir` set on purpose to
+  a new directory while the record names the old.
+- `TestAKeptConfigWhoseDataDirServeRefusesInstallsNoService`, 18 of 18 (case
+  2): serve's six shapes (`unusableDataDirs`), each kept three ways.
+- `TestAKeptConfigWhoseDataDirsRecordRefusesItInstallsNoService`, 18 of 18:
+  the volume away, the identity missing, another identity, a marker and a
+  record that do not read, and a record this user may not read, each kept
+  three ways; the 12 runs with the preflight graded it first too.
+- `TestAKeptConfigThatDoesNotLoadInstallsNoService`, 12 of 12: a misspelt key,
+  a fraction where a whole number goes, text that is not YAML, and a config
+  this user cannot read, each kept three ways.
+- `TestEveryCommandThatWritesTheDataDirRefusesItWhileItsVolumeIsAway`'s new
+  row, init keeping the config, moved from
+  `TestTheDiagnosticsStayAvailableWhileTheDataDirsVolumeIsAway`.
+- Green before and after, the guards: `TestAKeptConfigWithAGoodDataDirIsKeptAsItIs`
+  (case 3) and `TestANewConfigsDataDirIsMadeBeforeItsServiceIsInstalled`
+  (case 4).
+
+### The fix
+
+c2de2e13: `prepareKeptDataDir` (`init_keep.go`), right after the keep
+decision, before the posture warning, the preflight, the launch choice and any
+service work: serve's load (`loadServeConfigFile`, the environment included),
+`refuseDataDirAway("init", …)`, then `prepareServeDataDir`; the unit is
+installed on that data dir. Each refusal exits 1 and ends "the config was NOT
+changed, and no service was installed or started."; a permission error says to
+run init as the user the bridge runs as. `--skip-doctor` skips the preflight
+alone. The run says it keeps the config before it says what it made or why it
+refuses. Chosen over reporting alone: serve makes a data dir that is not there,
+so a refusal of one would be a rule stronger than serve's, and a warning would
+leave the unit failing at its chdir. The 61 are green, and so are all 375
+subtests of every `TestInit*` test and the round's tests together (21 s).
+
+### Controls
+
+On c2de2e13, predicted by name before the run
+(`.tmp/_b664/controls.predictions.txt`), each a mutation of the committed tree
+restored with `git checkout --` (`.tmp/_b664/controls.py`; the tree clean after
+every one), the test binary built once a control, the round's six tests and the
+away-volume table run:
+
+- C1, the brief's control, the gate's call removed from the keep path: 56 red
+  (7, 18, 18 and 12, and the moved row); the guards green.
+- C2, the record's check dropped: the 18 record rows and the moved row red (the
+  volume away and the record that does not read had the data dir made under the
+  mount point); every other row green.
+- C3, serve's preparation replaced by a bare `os.MkdirAll(dataDir, 0700)`: the
+  18 shape rows red, refused in other words than serve's; every other row green,
+  case 1 included (the mode is 0700 either way).
+- C4, the data dir the gate prepared not handed to the unit: the
+  `BRIDGE_DATA_DIR` row alone red.
+- C5, the gate moved after the preflight: the 12 record rows that run the
+  preflight red (it graded first); the shape rows green, the preflight passing
+  over each shape before the gate refused it.
+- C6, `--skip-doctor` skipping the gate: the 22 rows run with it red, every
+  other green.
