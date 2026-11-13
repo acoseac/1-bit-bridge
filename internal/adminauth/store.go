@@ -850,12 +850,13 @@ func (a Admission) holdsIn(cur storeContents) bool {
 // process. A rotation or a sign-out from another process refuses it
 // (ErrCredentialsChanged), however it reached this process, and so does a
 // file with no account. A file that changes again while the write is
-// staging is read again and checked again (commitLocked). What is left is
-// the rename of the session's write itself, the window every writer here
-// leaves: the command whose write that rename replaced writes it again
+// staging is read again and checked again (commitLocked), and that last
+// read and the rename run under the store's lock (lockStoreLocked), so no
+// other process's write lands between them. Only a writer that takes no
+// lock (an older bridge, storage that gives none) can still rename in that
+// window; the command whose write it replaced then writes it again
 // (commitAndConfirm), and a sign-out written again ends this session at its
-// next request, while a rotation that keeps the sessions keeps it with the
-// rest it finds in the file.
+// next request.
 //
 // A login is rare, so this writes synchronously rather than riding the
 // debounce: the whole point is that the session survives a restart.
