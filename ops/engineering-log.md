@@ -94739,6 +94739,16 @@ C10b's first run left the enrichment pulse's case green: with Deezer on, the por
 
 | Check | Result |
 |---|---|
-| (the gates are running) | |
+| `go vet ./...` (the tags) | exit 0 |
+| `-race -count=50`, the 8 new enrich cases, the 25 touched or beside them (round 1's 16, the wiring pin, the switch cases, the cache-name case and the four whose memo checks moved), `./internal/enrich/` | ok, 2668.2 s |
+| `-race -count=50`, the 6 new manifest cases, round 1's 9 and `TestTheLadderSchemaIsTheLadders`, `./internal/manifest/` | ok, 1433.0 s |
+| `-race -count=50`, the new api case, round 1's 3 and the artwork and artist-image cases, `./internal/api/` (40 tests) | ok, 281.1 s |
+| `-race -count=50`, the serve case and the four that ask the latest schema, `./cmd/bridge/` | ok, 1155.2 s |
+| `go test -race -timeout 120m ./internal/enrich/` | ok, 138.6 s |
+| `go test -race -timeout 120m ./internal/api/` | ok, 145.1 s |
+| `go test -race -timeout 120m ./internal/manifest/` | ok, 1672.8 s |
+| `go test -race -timeout 120m ./cmd/bridge/` | ok, 1603.8 s |
+| `go test -race -timeout 120m`, each alone: `./internal/upnpingest/` (the upsert's conflict arm), `./internal/backup/` (the snapshot check's schema) | ok each: 18.7 s, 617.5 s |
+| `make docs-check`; the round-2 rules patch applied to a copy of the rules | clean; within budget (`enrichment.md` 52,106 bytes, `scanner.md` 46,051, `wire.md` 62,386; the heaviest load 359,113), every test its bullet names there |
 
 **Left.** Round 1's note on a Deezer answer of HTTP 200 with an `error` object stands: it reads as no match, so it ends the name, unverified against the live API from here.
