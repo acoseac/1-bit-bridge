@@ -254,7 +254,9 @@ const watchdogSlack = 2 * StopWriteBound
 // ended. Its caller waits for it until it answers, or, once the stop (ctx) or
 // the verification's own bound (watchdogSlack past its lock wait and
 // deadline) has come, for StopWriteBound more, then answers that the
-// verification was abandoned (abandoned true), the worker then given up where
+// verification was abandoned (abandoned true), with what the worker had
+// published before the step it is in (expired: its check's finding, its errors
+// of its own, a give-up its own bound made), the worker then given up where
 // it is (a step before the lock, which no hold bounds): an abandoned worker
 // keeps its hold until it ends, so nothing protected runs beside it, in this
 // process or another, and a lock it takes once its context has ended it lets
@@ -359,11 +361,13 @@ func verifyAndThen(ctx context.Context, dir string, o VerifyOptions, after func(
 			}
 		case <-expire:
 			h.abandon()
-			res.Write = WriteUnknown
 			if hook := onVerifyExpired.Load(); hook != nil {
 				(*hook)(dir)
 			}
-			return res, verifyExpiryError(ctx.Err()), true
+			// What the worker had published, its own errors and its finding, and
+			// a give-up its own bound made: news whatever the stop.
+			res, err = h.expired(ctx)
+			return res, err, true
 		}
 	}
 }
@@ -401,20 +405,16 @@ func verifyExpiryError(why error) error {
 // the stop's or the deadline's too, whichever gave it up.
 var ErrCheckGivenUp = errors.New("a step of the verification did not end and was given up, and holds the snapshots until it does")
 
-// givenUp is ErrCheckGivenUp for the hold given up, naming its step and the
-// cause of its give-up as it was then (givenFor): never what ctx says by the
-// time the answer is made, which names a stop that came only after a bound of
-// the hold's own had passed (backlog B895). The error of the INCOMPLETE's
-// write is joined where it failed; a give-up its caller's stop made alone, by
-// every step it gave up and with no such error, is a *givenUpAtStop
-// (AsTheStop).
-func (h *hold) givenUp(ctx context.Context, werr error) error {
-	check, _ := h.marked()
-	step := check.Step
-	if step == "" {
-		step = "a step"
-	}
-	why, atStop := h.givenFor()
+// givenUp is ErrCheckGivenUp for the hold given up, naming the give-up
+// givenFor names, its step and its cause as it was then: never what ctx says
+// by the time the answer is made, which names a stop that came only after a
+// bound of the hold's own had passed (backlog B895). Every error of its own
+// the holder published before it (know) is joined; a give-up its caller's
+// stop made alone, by every step it gave up and with none of those, is a
+// *givenUpAtStop (AsTheStop).
+func (h *hold) givenUp(ctx context.Context) error {
+	c := h.givenFor()
+	why := c.why
 	if why == nil {
 		// A hold not given up: what its caller's context says.
 		why = ctx.Err()
@@ -422,11 +422,12 @@ func (h *hold) givenUp(ctx context.Context, werr error) error {
 			why = context.DeadlineExceeded
 		}
 	}
-	err := fmt.Errorf("%w: %s did not end within its bound (%w)", ErrCheckGivenUp, step, why)
-	switch {
-	case werr != nil:
-		err = fmt.Errorf("%w; and its write: %w", err, werr)
-	case atStop:
+	err := givenUpError(c.step, why)
+	errs := h.knownErrs()
+	for _, e := range errs {
+		err = fmt.Errorf("%w; and %w", err, e)
+	}
+	if c.onlyAtStop && len(errs) == 0 {
 		err = &givenUpAtStop{err: err}
 	}
 	return err
@@ -434,9 +435,11 @@ func (h *hold) givenUp(ctx context.Context, werr error) error {
 
 // givenUpAtStop is the answer of a verification given up by its caller's stop
 // alone (givenUp): every step it gave up was given up by the bound that stop
-// set, no write failed, and a record not read back was not read because the
-// stop gave its read-back up too (verifyHeld's answer). It says what err
-// says, and is that error to errors.Is and errors.As.
+// set, it published no error of its own (a read of the record that failed, a
+// recheck refused or not recorded, a veto or a write that failed), and a
+// record not read back was not read because the stop gave its read-back up
+// too (verifyHeld's answer). It says what err says, and is that error to
+// errors.Is and errors.As.
 type givenUpAtStop struct{ err error }
 
 func (e *givenUpAtStop) Error() string { return e.err.Error() }
@@ -447,9 +450,12 @@ func (e *givenUpAtStop) Unwrap() error { return e.err }
 // give-up the stop caused alone (a *givenUpAtStop, its cause the
 // cancellation), which is no news but the stop, as the caller's own expiry
 // at the stop is (verifyExpiryError), so ctxerr.WithoutCancellation takes it
-// out; and err itself otherwise: a give-up beside a write that failed or a
-// read of its record that failed, a give-up by a bound of the hold's own (a
-// deadline) whenever its answer comes, and any other error (backlog B895).
+// out; and err itself otherwise: a give-up beside an error of the
+// verification's own (a read that failed, a recheck refused or not recorded,
+// a write that failed), a give-up by a bound of the hold's own (a deadline)
+// whenever its answer comes, and any other error (backlog B895). Its caller's
+// expiry answers what the worker had published (expired), never a
+// *givenUpAtStop.
 func AsTheStop(ctx context.Context, err error) error {
 	g, ok := err.(*givenUpAtStop)
 	if !ok || !errors.Is(ctx.Err(), context.Canceled) || !errors.Is(g, context.Canceled) {
@@ -508,7 +514,7 @@ func verifyHeld(ctx context.Context, dir string, o VerifyOptions, after func(con
 	h.held(unlock, root, key, filepath.Base(snap))
 	if h.gaveUp() {
 		// Its caller gave it up while it waited for the lock: nothing runs.
-		return res, h.givenUp(ctx, nil)
+		return res, h.givenUp(ctx)
 	}
 	deadline := h.lockedAt().Add(verifyDeadline)
 	early := deadline.Add(StopWriteBound / 2)
@@ -551,6 +557,9 @@ func verifyHeld(ctx context.Context, dir string, o VerifyOptions, after func(con
 			res.ReadErr = ErrReadBackGivenUp
 		case r.err != nil:
 			res.ReadErr = r.err
+			// Before the worker's answer, for its caller's expiry to say
+			// (backlog B895).
+			h.knowRead(r.err)
 		default:
 			res.Record, res.RecordRead = r.v, true
 		}
@@ -591,14 +600,18 @@ func verifyHeld(ctx context.Context, dir string, o VerifyOptions, after func(con
 		return opened{m: m, err: err, doubted: vetoedAt(snap)}
 	}, nil)
 	if !ok || h.gaveUp() {
-		return res, h.givenUp(ctx, nil)
+		return res, h.givenUp(ctx)
 	}
 	if op.err != nil {
+		// Published before the prune, a step that can block: a give-up of it,
+		// or its caller's expiry, says it too (backlog B895).
+		readErr := fmt.Errorf("read the snapshot's manifest: %w", op.err)
+		h.know(readErr)
 		thenUnder()
 		if h.gaveUp() {
-			return res, h.givenUp(ctx, nil)
+			return res, h.givenUp(ctx)
 		}
-		return res, fmt.Errorf("read the snapshot's manifest: %w", op.err)
+		return res, readErr
 	}
 	m, prior := op.m, op.m.Verification
 	// The record before the check, which the verdict merges with: a VERIFIED
@@ -620,11 +633,12 @@ func verifyHeld(ctx context.Context, dir string, o VerifyOptions, after func(con
 			// No check: its INCOMPLETE, merged over the VERIFIED, changes
 			// nothing, so nothing is written.
 			readBack()
-			return answer(h.givenUp(ctx, nil))
+			return answer(h.givenUp(ctx))
 		case refused != nil:
+			h.know(refused)
 			readBack()
 			if h.gaveUp() {
-				return answer(h.givenUp(ctx, nil))
+				return answer(h.givenUp(ctx))
 			}
 			return answer(refused)
 		}
@@ -648,6 +662,9 @@ func verifyHeld(ctx context.Context, dir string, o VerifyOptions, after func(con
 		found = incompleteOf(checkCtx)
 	}
 	res.Found = found
+	// What it found, published before the steps after it, each of which can
+	// block, for its caller's expiry to say (backlog B895).
+	h.knowFound(found, m.legacy())
 	if afterCheck != nil {
 		afterCheck(snap)
 	}
@@ -657,11 +674,16 @@ func verifyHeld(ctx context.Context, dir string, o VerifyOptions, after func(con
 		readBack()
 		thenUnder()
 		if h.gaveUp() {
-			return answer(h.givenUp(ctx, nil))
+			return answer(h.givenUp(ctx))
 		}
 		return answer(nil)
 	}
 	if noBarrier {
+		if !h.gaveUp() {
+			// What the check found is not recorded over the VERIFIED: said
+			// whatever the stop (backlog B895).
+			h.know(ErrRecheckNotRecorded)
+		}
 		var vetoErr error
 		if disproves(prior, found) {
 			// This is disqualification of a completed finding, not publication
@@ -670,10 +692,13 @@ func verifyHeld(ctx context.Context, dir string, o VerifyOptions, after func(con
 			vetoErr, _ = stepOf(h, laterBound(deadline), stepVeto, func(_, given context.Context) error {
 				return vetoDisproved(snap, publication{given: given, held: h.gaveUp})
 			}, nil)
+			if vetoErr != nil {
+				h.know(vetoErr)
+			}
 		}
 		readBack()
 		if h.gaveUp() {
-			return answer(h.givenUp(ctx, vetoErr))
+			return answer(h.givenUp(ctx))
 		}
 		return answer(errors.Join(ErrRecheckNotRecorded, vetoErr))
 	}
@@ -697,17 +722,18 @@ func verifyHeld(ctx context.Context, dir string, o VerifyOptions, after func(con
 	}
 	res.Write = pub.outcome(wrote)
 	res.Recorded = res.Write == WriteRecorded
+	if wrote && pub.err != nil {
+		// Published before the prune and the read-back, each of which can
+		// block (backlog B895).
+		h.know(fmt.Errorf("its write: %w", pub.err))
+	}
 	// Whatever the write answered: a kept bundle is followed by its prune,
 	// which reads the record as it now stands; but never once a step was
 	// given up.
 	thenUnder()
 	readBack()
 	if h.gaveUp() {
-		var werr error
-		if wrote {
-			werr = pub.err
-		}
-		return answer(h.givenUp(ctx, werr))
+		return answer(h.givenUp(ctx))
 	}
 	if pub.err != nil {
 		return answer(pub.err)

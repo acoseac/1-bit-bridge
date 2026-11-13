@@ -41,15 +41,25 @@ type hold struct {
 	waits     []<-chan struct{}
 	markWaits []<-chan struct{}
 	given     bool
-	// why is the cause of the hold's first give-up, which its holder's answer
-	// names (givenUp), as it stood then: context.DeadlineExceeded for a bound
-	// of the hold's own, or its caller's stop's error where the bound that
-	// stop set gave a step up (giveUpAtStop) or its caller gave the hold up
-	// once stopped (abandon). otherCause is set once any give-up of the hold
-	// had another cause than its caller's stop, so its answer is taken for
-	// that stop only where none had (onlyAtStop, AsTheStop: backlog B895).
+	// why and whyStep are the cause and the step of the hold's first give-up,
+	// as they stood then: context.DeadlineExceeded for a bound of the hold's
+	// own, or its caller's stop's error where the bound that stop set gave a
+	// step up (giveUpAtStop) or its caller gave the hold up once stopped
+	// (abandon). otherCause is set once any give-up of the hold had another
+	// cause than its caller's stop, so its answer is taken for that stop only
+	// where none had (AsTheStop); other and otherStep are the first give-up a
+	// step's own bound made (its caller's give-up aside), which an answer
+	// names before the stop's, whichever came first (givenFor, expired:
+	// backlog B895).
 	why        error
+	whyStep    string
 	otherCause bool
+	other      error
+	otherStep  string
+	// established is what the holder has established, published before each
+	// of its steps that can block (know), which its caller's expiry answers
+	// with (expired) and a give-up of it keeps (givenUp).
+	established established
 	// markless: a give-up of the hold by its caller (abandon) raises no mark,
 	// since the holder waits for a write it handed to a hold of its own
 	// (handOff), or has ended its wait, or, a restore's, holds no lock yet
@@ -251,10 +261,13 @@ func (h *hold) giveUpAs(done <-chan struct{}, step string, byCaller bool, why er
 	}
 	if !atStop {
 		h.otherCause = true
+		if !byCaller && h.other == nil {
+			h.other, h.otherStep = why, step
+		}
 	}
 	if !h.given {
 		h.given = true
-		h.why = why
+		h.why, h.whyStep = why, step
 		h.cancel()
 	}
 	if h.mark != nil || h.ended || (byCaller && h.markless) {
@@ -298,13 +311,29 @@ func (h *hold) gaveUp() bool {
 	return h.given
 }
 
-// givenFor is the cause of the hold's first give-up (why), nil where it was
-// not given up, and whether every give-up of it was its caller's stop's
-// (onlyAtStop).
-func (h *hold) givenFor() (why error, onlyAtStop bool) {
+// givenCause is the give-up a hold's answer names (givenFor).
+type givenCause struct {
+	// why and step are the cause and the step named: the first give-up a
+	// step's own bound made where one did, whatever its caller's stop gave up
+	// before it, else the hold's first give-up; why is nil where it was not
+	// given up.
+	why  error
+	step string
+	// onlyAtStop: the hold was given up, and every give-up of it was its
+	// caller's stop's.
+	onlyAtStop bool
+}
+
+// givenFor is the give-up the hold's answer names, its cause as it stood
+// when it was made (backlog B895: a step its own bound gave up stays the news
+// it is when its stop comes after it, or gave another step up before it).
+func (h *hold) givenFor() givenCause {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	return h.why, h.given && !h.otherCause
+	if h.other != nil {
+		return givenCause{why: h.other, step: h.otherStep}
+	}
+	return givenCause{why: h.why, step: h.whyStep, onlyAtStop: h.given && !h.otherCause}
 }
 
 // marked is the hold's mark, if one was raised.

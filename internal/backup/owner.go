@@ -306,7 +306,7 @@ func claim(ctx context.Context, dir, backupsRoot string, h *hold) (*Capture, err
 	}
 	for try := 1; ; try++ {
 		if h.gaveUp() {
-			return nil, h.givenUp(ctx, nil)
+			return nil, h.givenUp(ctx)
 		}
 		t, ok := stepOf(h, by, stepClaim, func(context.Context, context.Context) took {
 			if try == 1 {
@@ -322,12 +322,12 @@ func claim(ctx context.Context, dir, backupsRoot string, h *hold) (*Capture, err
 			}
 		})
 		if !ok {
-			return nil, h.givenUp(ctx, nil)
+			return nil, h.givenUp(ctx)
 		}
 		switch {
 		case t.err == nil && h.gaveUp():
 			h.alsoLetGo(t.o.release)
-			return nil, h.givenUp(ctx, nil)
+			return nil, h.givenUp(ctx)
 		case t.err == nil:
 			return &Capture{Dir: snap, owner: t.o}, nil
 		case !errors.Is(t.err, ErrClaimedElsewhere) || try == claimTries:
