@@ -46,11 +46,19 @@ func consoleRequest(t *testing.T, ts *httptest.Server, origin, method, path, ses
 	return resp.StatusCode, string(body)
 }
 
-// signIn mints a console session the way a login does, without the login's
-// rate limiter or its bcrypt compare.
+// signInPassword is the password every public test server signIn is used
+// with was made with (newPublicTestServer).
+const signInPassword = "test-password-123"
+
+// signIn mints a console session the way a login does, its check and the
+// session it admits, without the login's rate limiter or its route.
 func signIn(t *testing.T, store *adminauth.Store) string {
 	t.Helper()
-	raw, err := store.CreateSession("admin")
+	checked, err := store.Verify("admin", signInPassword)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := store.CreateSession(checked)
 	if err != nil {
 		t.Fatal(err)
 	}

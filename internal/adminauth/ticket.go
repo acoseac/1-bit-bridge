@@ -114,7 +114,7 @@ func (s *Store) MintLoginTicketTTL(username string, ttl time.Duration) (string, 
 	defer s.mu.Unlock()
 	// The account is the FILE's (the Store docblock's first rule), so read
 	// it rather than trust what was there when this process opened.
-	if err := s.refreshCredentialLocked(); err != nil {
+	if _, err := s.refreshCredentialLocked(); err != nil {
 		return "", err
 	}
 	if s.user == nil || s.user.Username != username {
@@ -151,9 +151,17 @@ func (s *Store) MintLoginTicketTTL(username string, ttl time.Duration) (string, 
 	return raw, nil
 }
 
-// RedeemLoginTicket consumes a ticket and returns the account it authenticates.
-// A ticket is spent whether or not it turned out to be valid for this caller, so
-// a redemption can never be retried.
+// RedeemLoginTicket consumes a ticket and returns the Admission of the account
+// it authenticates, taken from the read its account check is made on, which
+// the session the ticket signs in is admitted under (CreateSession). A ticket
+// is spent whether or not it turned out to be valid for this caller, so a
+// redemption can never be retried.
+//
+// The admission binds the ticket's account and the sign-out marker that read
+// found, never the password: a ticket minted before a rotation redeems after
+// it, and one redeemed before a rotation that keeps the sessions is not refused
+// for it either. An account replaced, or a sign-out written, between the
+// redemption and its session refuses the session (ErrCredentialsChanged).
 //
 // It reads and removes that ticket's own file and nothing else, so it can
 // neither drop a ticket minted meanwhile nor bring back one spent meanwhile.
@@ -170,9 +178,9 @@ func (s *Store) MintLoginTicketTTL(username string, ttl time.Duration) (string, 
 // or the ticket could not be removed — and leaves the ticket unspent, so the
 // same link works once the fault is fixed. The admin handler answers the
 // first with the stale-link page and the second with a 500.
-func (s *Store) RedeemLoginTicket(raw string) (string, error) {
+func (s *Store) RedeemLoginTicket(raw string) (Admission, error) {
 	if raw == "" {
-		return "", ErrTicketInvalid
+		return Admission{}, ErrTicketInvalid
 	}
 	path := s.ticketFilePath(hashTicket(raw))
 	s.mu.Lock()
@@ -187,16 +195,16 @@ func (s *Store) RedeemLoginTicket(raw string) (string, error) {
 		// not parse was never a mint's (a hand edit, a damaged disk). It
 		// redeems nothing; remove it so it stops being asked about.
 		if rmErr := os.Remove(path); rmErr != nil && !ticketAbsent(rmErr, runtime.GOOS) {
-			return "", fmt.Errorf("remove a damaged login ticket: %w", rmErr)
+			return Admission{}, fmt.Errorf("remove a damaged login ticket: %w", rmErr)
 		}
-		return "", ErrTicketInvalid
+		return Admission{}, ErrTicketInvalid
 	case err != nil && ticketAbsent(err, runtime.GOOS):
-		return "", ErrTicketInvalid
+		return Admission{}, ErrTicketInvalid
 	case err != nil:
 		// The record may be there and live. Nothing is established about it,
 		// so this is a store fault, never ErrTicketInvalid, whose stale-link
 		// page would send the holder for a fresh link while this one waits.
-		return "", fmt.Errorf("read login ticket: %w", err)
+		return Admission{}, fmt.Errorf("read login ticket: %w", err)
 	}
 	// The account check below reads the credential from the FILE: the process
 	// that replaces an account is never the one redeeming, and this one's copy
@@ -205,8 +213,9 @@ func (s *Store) RedeemLoginTicket(raw string) (string, error) {
 	// spent, so a credential this process cannot read establishes nothing
 	// about the ticket and leaves it on disk, as a ticket file that cannot be
 	// removed does.
-	if err := s.refreshCredentialLocked(); err != nil {
-		return "", err
+	read, err := s.refreshCredentialLocked()
+	if err != nil {
+		return Admission{}, err
 	}
 	if beforeTicketSpendHook != nil {
 		beforeTicketSpendHook()
@@ -219,26 +228,27 @@ func (s *Store) RedeemLoginTicket(raw string) (string, error) {
 		if ticketAbsent(err, runtime.GOOS) {
 			// Removed since the read: spent by another redemption, or pruned
 			// as expired by a mint in another process.
-			return "", ErrTicketInvalid
+			return Admission{}, ErrTicketInvalid
 		}
 		// A Windows sharing violation, a directory this process may read and
 		// not write: the ticket is still there, and pressing Continue again
 		// can redeem it.
-		return "", fmt.Errorf("spend login ticket: %w", err)
+		return Admission{}, fmt.Errorf("spend login ticket: %w", err)
 	}
 	if !ticketLive(t, now) {
-		return "", ErrTicketInvalid
+		return Admission{}, ErrTicketInvalid
 	}
 	// Re-assert the account under the lock we already hold, against the file
 	// read above. MintLoginTicket checks this, but the two happen in
-	// different PROCESSES with up to MaxLoginTicketTTL between them, and
-	// CreateSession validates nothing — so an account replaced inside the
-	// window would otherwise mint a fully-privileged session for a username
-	// the store no longer has.
-	if s.user == nil || s.user.Username != t.Username {
-		return "", ErrTicketInvalid
+	// different PROCESSES with up to MaxLoginTicketTTL between them, so an
+	// account replaced inside the window would otherwise mint a
+	// fully-privileged session for a username the store no longer has. The
+	// window after this, until the session is made, is the admission's:
+	// CreateSession holds the file to this read.
+	if read.user == nil || read.user.Username != t.Username {
+		return Admission{}, ErrTicketInvalid
 	}
-	return t.Username, nil
+	return Admission{user: read.user, ticket: true, revokedAt: read.revokedAt}, nil
 }
 
 // persistedTicket is one ticket's file. The file's NAME carries the hex

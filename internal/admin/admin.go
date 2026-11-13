@@ -1551,6 +1551,15 @@ type Server struct {
 	// anything, as the fields above are.
 	testNow func() time.Time
 
+	// testAfterLoginCheck, when set, runs in a login (apiLogin) and a login
+	// link's redemption (apiRedeemLoginTicket) between the check that let
+	// it in and the session it admits (afterLoginCheck): the window a
+	// rotation or a sign-out written by another process lands in
+	// (adminauth.Admission). Tests only: nil in production. An atomic
+	// pointer, as the scanner's hooks are, so a test may set or clear it
+	// while the server serves.
+	testAfterLoginCheck atomic.Pointer[func()]
+
 	// pageTmpls is one template bundle per page. Each bundle pre-parses
 	// layout.html + the page's own .html file so rendering is a single
 	// ExecuteTemplate("layout", …) call.

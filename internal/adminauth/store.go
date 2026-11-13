@@ -169,6 +169,13 @@ var (
 	// restart before a later write lands the change would sign them back
 	// in. The count it returns beside this is still how many it ended.
 	ErrSessionsNotSaved = errors.New("adminauth: the sessions were ended but not yet saved")
+	// ErrCredentialsChanged is CreateSession refusing a session that the
+	// check which let its login in no longer admits (Admission): the file
+	// holds another credential than the one the password was compared with
+	// (for a login ticket, another account), a sign-out that check did not
+	// read, or no account at all. The handler answers it as a wrong
+	// password, and the user signs in again.
+	ErrCredentialsChanged = errors.New("adminauth: the credential or a sign-out changed since the login was checked")
 )
 
 // SessionAction says what a password rotation does to the console
@@ -263,6 +270,12 @@ const sessionFlushInterval = 30 * time.Second
 // from (commitLocked): staging costs a write and an fsync, milliseconds in
 // which the other process can commit, so each writer re-reads the file
 // just before its rename and rebuilds from the fresh read if it changed.
+//
+// A login's session is admitted on the file as well. Its check and its
+// session are two steps, the first letting go of the mutex for bcrypt, so
+// the session is made only on a read that still holds what the check read
+// (Admission): a rotation or a sign-out another process wrote in between
+// refuses it.
 //
 // Before these rules, `persist()` wrote this process's copy of both, so a
 // running bridge's next session write (a login, the 30 s activity flush,
@@ -687,7 +700,8 @@ func (s *Store) tookOwnSignOutLocked(at time.Time) {
 	s.sessionsDirty = false
 }
 
-// Verify checks the credentials and returns nil on match.
+// Verify checks the credentials and, on a match, returns the Admission
+// the session they sign in takes (CreateSession).
 // ErrInvalidCredentials covers both wrong-user and wrong-password
 // cases — never disclose which one failed to the caller (handler
 // reports a single generic "invalid credentials" to the wire).
@@ -701,32 +715,124 @@ func (s *Store) tookOwnSignOutLocked(at time.Time) {
 // process's copy is the credential as it was, which after a rotation
 // is the one rotated away from. The read is small beside the bcrypt
 // compare that follows it, and a login attempt is already rate-limited.
-func (s *Store) Verify(username, password string) error {
+//
+// The compare runs with s.mu released, since holding it there would
+// serialise every login and stall every console request behind one, and
+// so the file can change between the read and the session: the
+// Admission records what the read found, for CreateSession to hold the
+// file to.
+func (s *Store) Verify(username, password string) (Admission, error) {
 	s.mu.Lock()
-	err := s.refreshCredentialLocked()
-	user := s.user
+	read, err := s.refreshCredentialLocked()
 	s.mu.Unlock()
 	if err != nil {
 		logger.Error("could not read the admin credential; refusing the login", "err", err)
-		return err
+		return Admission{}, err
 	}
+	user := read.user
 	if user == nil {
-		return ErrNotInitialised
+		return Admission{}, ErrNotInitialised
 	}
 	if user.Username != username {
-		return ErrInvalidCredentials
+		return Admission{}, ErrInvalidCredentials
 	}
 	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password)); err != nil {
-		return ErrInvalidCredentials
+		return Admission{}, ErrInvalidCredentials
 	}
-	return nil
+	return Admission{user: user, revokedAt: read.revokedAt}, nil
 }
 
-// CreateSession mints a new session token for the given username.
-// Returns the RAW token (43-char base64url) for the caller to set
-// as a cookie value; the Store keeps only the hash. Caller MUST
-// have already verified credentials via Verify.
-func (s *Store) CreateSession(username string) (string, error) {
+// Admission is what the check that let a login in read of the store: the
+// credential the password was compared with, or for a login ticket the
+// account it named, and the sign-out marker beside it. CreateSession admits
+// the login's session only while the file still holds them (holdsIn). Only
+// Verify and RedeemLoginTicket make one, and the zero value admits nothing.
+//
+// The check and the session are two steps. Verify lets go of s.mu for
+// bcrypt's compare, about 250 ms at cost 12, and a login ticket's
+// redemption returns before its session is made; `bridge admin
+// reset-password` and `sign-out-everywhere` write the file from a process
+// of their own, which takes no lock this one holds. A rotation or a
+// sign-out landing between the two steps reached this process at its next
+// read: when that read was another request's, it took the sign-out with the
+// sessions held then, and the session made after it was written under the
+// new marker, which every later check took for one made after the sign-out.
+// A login checked against the password the reset rotated away from
+// outlived the reset (backlog B881).
+type Admission struct {
+	// user is the credential the check read, never changed in place (every
+	// writer swaps in a fresh record); nil in the zero value.
+	user *userRecord
+	// ticket marks a login ticket's admission, which the account named
+	// holds and the password does not: a ticket minted before a rotation
+	// redeems after it.
+	ticket bool
+	// revokedAt is the file's sign-out marker at the check, zero for none.
+	revokedAt time.Time
+}
+
+// Username is the account the admission signs in, "" for the zero value.
+func (a Admission) Username() string {
+	if a.user == nil {
+		return ""
+	}
+	return a.user.Username
+}
+
+// holdsIn reports whether cur, a read of the file, still holds what the
+// check that made a read: the credential it compared (for a login ticket,
+// the account it named) and the sign-out marker it read. A file with no
+// account holds nothing. It is the one check a session is admitted by
+// (CreateSession).
+//
+// The credential is compared by its hash, which bcrypt salts, so every
+// rotation moves it, to the same password included (sameCredential); the
+// marker moves at every sign-out (nextSignOut). A store ends the sessions
+// it holds when it reads a marker it has not taken, and keeps every session
+// made after that read (adoptSignOutLocked: the marker is an event, never a
+// filter), so a session the sign-out must end cannot be made after it.
+func (a Admission) holdsIn(cur storeContents) bool {
+	switch {
+	case a.user == nil, cur.user == nil:
+		return false
+	case a.ticket && cur.user.Username != a.user.Username:
+		return false
+	case !a.ticket && !sameCredential(cur.user, a.user):
+		return false
+	}
+	return cur.revokedAt.Equal(a.revokedAt)
+}
+
+// CreateSession mints a session for the login a check let in (a, from
+// Verify or RedeemLoginTicket), and returns the RAW token (43-char
+// base64url) for the caller to set as a cookie value; the Store keeps only
+// the hash.
+//
+// The session is admitted only on a read of the FILE that still holds what
+// the check read (Admission.holdsIn), and that read is the one its own
+// write is built from, under s.mu, so nothing can change in between in this
+// process. A rotation or a sign-out from another process refuses it
+// (ErrCredentialsChanged), however it reached this process, and so does a
+// file with no account. A file that changes again while the write is
+// staging is read again and checked again (commitLocked). What is left is
+// the rename of the session's write itself, the window every writer here
+// leaves: the command whose write that rename replaced writes it again
+// (commitAndConfirm), and a sign-out written again ends this session at its
+// next request, while a rotation that keeps the sessions keeps it with the
+// rest it finds in the file.
+//
+// A login is rare, so this writes synchronously rather than riding the
+// debounce: the whole point is that the session survives a restart.
+//
+// Every failure is returned, and the session it would have made is not
+// kept. Until B881 a write that failed did not fail the login: the session
+// stayed live in memory, pending until a later write landed it. But a
+// session is admitted against the read its write is built from, and a write
+// refused because the file changed after that read (errStoreMoved, past
+// maxCommitAttempts) was refused for the very change that could be a
+// rotation; a read that fails admits nothing either. The cost is a login
+// refused when the disk refuses the write, which the caller logs.
+func (s *Store) CreateSession(a Admission) (string, error) {
 	raw, err := generateRandomToken(rawSessionBytes)
 	if err != nil {
 		return "", fmt.Errorf("generate session: %w", err)
@@ -734,47 +840,54 @@ func (s *Store) CreateSession(username string) (string, error) {
 	digest := sha256.Sum256([]byte(raw))
 	now := s.now()
 	s.mu.Lock()
-	// Opportunistic cleanup: drop any sessions past their idle timeout
-	// or hard cap. Nothing sweeps sessions in the background (see the
-	// maxSessions doc), so doing it on each new login keeps the map
-	// proportional to live sessions rather than to lifetime logins.
-	// Cheap — bounded by maxSessions, so the O(N) scan is trivial.
-	s.sweepExpiredSessionsLocked(now)
-	// Hard cap: if the map is still at the ceiling after the sweep (all
-	// sessions genuinely live), evict the least-recently-used one so a
-	// login stream can't grow it without bound.
-	// Evict in a LOOP, not a single conditional: if the map ever exceeds the
-	// ceiling (a lowered cap, or a future path that inserts in bulk) one
-	// eviction wouldn't bring it back under and the bound would silently stop
-	// holding (Gemini, post-merge review of #531). The no-progress guard makes
-	// the loop terminate even if a future evict implementation can no-op, so it
-	// can never spin while holding s.mu.
-	for len(s.sessions) >= maxSessions {
-		before := len(s.sessions)
-		s.evictOldestSessionLocked()
-		if len(s.sessions) >= before {
-			break
+	defer s.mu.Unlock()
+	evicted := false
+	err = s.persistSessionsLocked(now, func(cur storeContents) error {
+		// What an earlier attempt of this write put in goes first, so each
+		// attempt decides from what its own read left.
+		delete(s.sessions, digest)
+		if !a.holdsIn(cur) {
+			return ErrCredentialsChanged
 		}
+		// Opportunistic cleanup: drop any sessions past their idle timeout
+		// or hard cap. Nothing sweeps sessions in the background (see the
+		// maxSessions doc), so doing it on each new login keeps the map
+		// proportional to live sessions rather than to lifetime logins.
+		// Cheap — bounded by maxSessions, so the O(N) scan is trivial.
+		s.sweepExpiredSessionsLocked(now)
+		// Hard cap: if the map is still at the ceiling after the sweep (all
+		// sessions genuinely live), evict the least-recently-used one so a
+		// login stream can't grow it without bound.
+		// Evict in a LOOP, not a single conditional: if the map ever exceeds the
+		// ceiling (a lowered cap, or a future path that inserts in bulk) one
+		// eviction wouldn't bring it back under and the bound would silently stop
+		// holding (Gemini, post-merge review of #531). The no-progress guard makes
+		// the loop terminate even if a future evict implementation can no-op, so it
+		// can never spin while holding s.mu.
+		for len(s.sessions) >= maxSessions {
+			before := len(s.sessions)
+			s.evictOldestSessionLocked()
+			if len(s.sessions) >= before {
+				break
+			}
+			evicted = true
+		}
+		s.sessions[digest] = &Session{
+			Username:   a.user.Username,
+			IssuedAt:   now,
+			LastUsedAt: now,
+		}
+		return nil
+	})
+	if err != nil {
+		delete(s.sessions, digest)
+		if evicted {
+			// An attempt the commit then refused evicted a session in
+			// memory; the next write lands that.
+			s.sessionsDirty = true
+		}
+		return "", err
 	}
-	s.sessions[digest] = &Session{
-		Username:   username,
-		IssuedAt:   now,
-		LastUsedAt: now,
-	}
-	// A login is rare, so this one writes synchronously rather than
-	// riding the debounce: the whole point is that the session survives
-	// a restart, and a login that is not durable until the next
-	// validate has a window where it is not.
-	//
-	// A write failure does NOT fail the login. The session is live in
-	// this process and works, and it stays pending (the dirty flag), so a
-	// later activity write or the shutdown flush lands it. Refusing a
-	// valid login because the disk hiccuped would be the worse trade.
-	s.sessionsDirty = true
-	if err := s.persistSessionsLocked(now); err != nil {
-		logger.Error("persist session on login", "err", err)
-	}
-	s.mu.Unlock()
 	return raw, nil
 }
 
@@ -926,9 +1039,19 @@ func (s *Store) SetInitialPassword(username, password string) error {
 // session write must not recreate with the credential it replaced), and
 // the sessions stay pending: they are this process's, and go down
 // beside whichever credential the file holds next.
-func (s *Store) persistSessionsLocked(now time.Time) error {
+//
+// admit is nil but in CreateSession, whose admission it decides: it runs on
+// each read the write is built from, once commitLocked has taken it, before
+// the set is built, and an error from it ends the write with nothing
+// written.
+func (s *Store) persistSessionsLocked(now time.Time, admit func(cur storeContents) error) error {
 	s.lastSessionFlush = now
 	written, _, err := s.commitLocked(func(cur storeContents) (storeFile, error) {
+		if admit != nil {
+			if err := admit(cur); err != nil {
+				return storeFile{}, err
+			}
+		}
 		// The set is built HERE, from memory as it is after commitLocked
 		// took the read: a sign-out found in it has just ended sessions this
 		// process held, and a set built before the read would write them
@@ -1137,7 +1260,7 @@ func (s *Store) ValidateSession(raw string) (*Session, error) {
 	s.sessionsDirty = true
 	due := now.Sub(s.lastSessionFlush) >= sessionFlushInterval
 	if due {
-		if err := s.persistSessionsLocked(now); err != nil {
+		if err := s.persistSessionsLocked(now, nil); err != nil {
 			logger.Error("persist session activity", "err", err)
 		}
 	}
@@ -1220,6 +1343,12 @@ const msgStoreUnreadableLog = "could not read the admin credential store; refusi
 // returning the write's error, which a caller would report as "could not
 // sign out"). A sign-out another process wrote is taken first
 // (ErrStoreUnreadable when the file cannot be read, as ValidateSession).
+//
+// It moves neither the credential nor the sign-out marker, so a login whose
+// check came before it and whose session comes after is admitted
+// (Admission), deliberately: the password it leaves working signs that
+// browser in again at once, so the session is the one a login begun just
+// after it would make, and refusing it would protect nothing (backlog B881).
 func (s *Store) EndOtherSessions(raw string) (int, error) {
 	if raw == "" {
 		return 0, ErrSessionNotFound
@@ -1249,7 +1378,7 @@ func (s *Store) EndOtherSessions(raw string) (int, error) {
 		return 0, nil
 	}
 	s.sessionsDirty = true
-	if err := s.persistSessionsLocked(now); err != nil {
+	if err := s.persistSessionsLocked(now, nil); err != nil {
 		return ended, fmt.Errorf("%w: %w", ErrSessionsNotSaved, err)
 	}
 	return ended, nil
@@ -1282,7 +1411,7 @@ func (s *Store) FlushSessions() error {
 	if !s.sessionsDirty {
 		return nil
 	}
-	return s.persistSessionsLocked(s.now())
+	return s.persistSessionsLocked(s.now(), nil)
 }
 
 // DeleteSession invalidates a session by raw token. Idempotent —
@@ -1309,7 +1438,7 @@ func (s *Store) DeleteSession(raw string) {
 	// Before, a failed write left nothing pending, and with no other
 	// session active the flush found nothing to land.
 	s.sessionsDirty = true
-	if err := s.persistSessionsLocked(s.now()); err != nil {
+	if err := s.persistSessionsLocked(s.now(), nil); err != nil {
 		logger.Error("persist session revocation", "err", err)
 	}
 	s.mu.Unlock()
@@ -1497,15 +1626,16 @@ func parseStoreBytes(raw []byte) (storeContents, error) {
 // refreshCredentialLocked re-reads the file and takes what it holds
 // (adoptLocked): the credential, whatever this process held (see the
 // Store docblock for why the file's is always the one to use), and a
-// sign-out. On an error nothing changes, and the caller must neither
-// decide from the credential nor write the file. Caller MUST hold s.mu.
-func (s *Store) refreshCredentialLocked() error {
+// sign-out. It returns the read, which a check records as its Admission.
+// On an error nothing changes, and the caller must neither decide from the
+// credential nor write the file. Caller MUST hold s.mu.
+func (s *Store) refreshCredentialLocked() (storeContents, error) {
 	c, err := readStoreFile(s.path)
 	if err != nil {
-		return err
+		return storeContents{}, err
 	}
 	s.adoptLocked(c)
-	return nil
+	return c, nil
 }
 
 // adoptLocked takes a read of the file into this process: the credential,

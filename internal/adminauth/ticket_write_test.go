@@ -198,7 +198,7 @@ func TestAnUnreadableTicketIsAStoreFaultNotAStaleLink(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chmod(path, 0o600) })
 
-	user, err := s.RedeemLoginTicket(raw)
+	user, err := redeemed(s.RedeemLoginTicket(raw))
 	if err == nil {
 		t.Fatalf("an unreadable ticket redeemed as %q", user)
 	}
@@ -212,7 +212,7 @@ func TestAnUnreadableTicketIsAStoreFaultNotAStaleLink(t *testing.T) {
 	if err := os.Chmod(path, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if user, err := s.RedeemLoginTicket(raw); err != nil || user != "admin" {
+	if user, err := redeemed(s.RedeemLoginTicket(raw)); err != nil || user != "admin" {
 		t.Errorf("the ticket once its file reads again = (%q, %v), want (admin, nil)", user, err)
 	}
 }

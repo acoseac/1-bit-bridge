@@ -22,6 +22,12 @@ func ticketStore(t *testing.T) *Store {
 	return s
 }
 
+// redeemed is a redemption's answer as the account it signs in: the
+// Admission's username beside its error.
+func redeemed(a Admission, err error) (string, error) {
+	return a.Username(), err
+}
+
 // ticketFiles returns every ticket file in s's directory, by name, with its
 // bytes: the files ticketDigestFromName recognises, which are the ones a mint
 // writes and a prune may remove.
@@ -55,7 +61,7 @@ func TestLoginTicketRoundTrip(t *testing.T) {
 	if len(raw) < 40 {
 		t.Errorf("ticket is only %d chars — too little entropy", len(raw))
 	}
-	user, err := s.RedeemLoginTicket(raw)
+	user, err := redeemed(s.RedeemLoginTicket(raw))
 	if err != nil {
 		t.Fatalf("redeem: %v", err)
 	}
@@ -166,7 +172,7 @@ func TestLiveTicketsAreBounded(t *testing.T) {
 		t.Errorf("%d ticket files after the refused mints, want %d", n, maxLiveTickets)
 	}
 	for i, raw := range minted {
-		if user, err := s.RedeemLoginTicket(raw); err != nil || user != "admin" {
+		if user, err := redeemed(s.RedeemLoginTicket(raw)); err != nil || user != "admin" {
 			t.Errorf("ticket %d of %d after the refused mints = (%q, %v), want (admin, nil): "+
 				"a refused mint evicted it", i+1, maxLiveTickets, user, err)
 		}
@@ -208,7 +214,7 @@ func TestAnEntryThatIsNotAFileIsNeverALiveTicket(t *testing.T) {
 				t.Fatalf("mint beside %d entries named like tickets that are not files: %v "+
 					"(they were counted as live tickets)", maxLiveTickets, err)
 			}
-			if user, err := s.RedeemLoginTicket(raw); err != nil || user != "admin" {
+			if user, err := redeemed(s.RedeemLoginTicket(raw)); err != nil || user != "admin" {
 				t.Fatalf("redeem = (%q, %v), want (admin, nil)", user, err)
 			}
 		})
@@ -240,7 +246,7 @@ func TestTicketCrossesProcesses(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	user, err := serving.RedeemLoginTicket(raw)
+	user, err := redeemed(serving.RedeemLoginTicket(raw))
 	if err != nil {
 		t.Fatalf("a ticket minted by another process did not redeem: %v", err)
 	}

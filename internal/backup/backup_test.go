@@ -989,7 +989,11 @@ func TestRestoreBringsTheConsoleAccountBackSignedOut(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.CreateSession("operator"); err != nil {
+	checked, err := store.Verify("operator", password)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateSession(checked); err != nil {
 		t.Fatal(err)
 	}
 	if store.SessionCount() != 1 {
@@ -1029,7 +1033,7 @@ func TestRestoreBringsTheConsoleAccountBackSignedOut(t *testing.T) {
 	if !restored.IsInitialised() || restored.Username() != "operator" {
 		t.Fatalf("restored account %q initialised %v", restored.Username(), restored.IsInitialised())
 	}
-	if err := restored.Verify("operator", password); err != nil {
+	if _, err := restored.Verify("operator", password); err != nil {
 		t.Fatalf("restored password: %v", err)
 	}
 	if restored.SessionCount() != 0 {
