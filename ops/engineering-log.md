@@ -95027,3 +95027,227 @@ before the fix). `go test -race -count=1 -timeout 120m -p 2
 the brief asked for the packages. The rules patch applies at the round's
 commit, and `scripts/check-doc-budgets.py` is clean on a copy with it applied
 (`cli-serve.md` 97,290 bytes). Windows is the PR's CI windows job's to show.
+
+## 2026-11-13 — B881: a console login checked against the old password never outlives a reset
+
+The rule is the bullet after the sign-out marker's in `auth-tls.md` (the
+rules patch beside this branch); this is the evidence. Linux amd64
+(legion0), Go 1.27.3, the Makefile's tags.
+
+### The defect
+
+Checked against main (4678b983). `apiLogin` called `Verify`
+(`internal/admin/handlers_login.go` 194), which read the file under the
+store's mutex, let go of it and ran bcrypt (`store.go` 704), then
+`CreateSession` (204), which inserted the session and wrote it (775: a
+failed write only logged) and decided nothing. `bridge admin reset-password`
+(`cmd/bridge/admin.go` 99, 132) and `sign-out-everywhere` (180, 186) each
+open a `Store` of their own, so nothing the serving store holds orders them
+against the login. A reset landing between the two steps reached the serving
+store at its next read. With nothing in between, that read was the
+session's own write (`commitLocked` 981, `adoptSignOutLocked` 1537): it took
+the new marker and ended the session it had just inserted, while
+`CreateSession` answered success, a cookie that signed nothing in. When
+another request read the file first (a session check whose stat saw the
+change, `refreshIfChangedLocked` 1164), it took the sign-out with the
+sessions held then, and the login's session, made after that read, was
+written under the new marker and kept by every later check, a restart
+included. The login link had the same window: `RedeemLoginTicket` returned
+the account after its check under the mutex, and `CreateSession` (458)
+followed it.
+
+The brief's two corrections held: the console is reachable in public mode
+by session (`middleware_auth.go` 28, 95), not loopback-only there, and there
+is no console reset handler (the console has `EndOtherSessions`).
+
+### Step 0
+
+- Callers. `Verify`: `apiLogin` alone (`handlers_login.go` 194).
+  `CreateSession`: `apiLogin` (204) and `apiRedeemLoginTicket` (458), which
+  reaches it after `RedeemLoginTicket` (426) found a live ticket file, spent
+  it, and found the file's account to be the ticket's.
+- Writers that rotate the credential: `ResetPassword` (`store.go` 426), by
+  `bridge admin reset-password` alone, on a `Store` of its own.
+  `MintInitial`, `SetInitialPassword` and `SeedFromEnv` install only where
+  the file holds no account (`installInitialLocked` 384), where `Verify`
+  refuses anyway. A restore writes the snapshot's account signed out
+  (`SignedOutFile`, `internal/backup/backup.go` 1671) holding the data dir's
+  lock, with no serving store beside it.
+- Writers that clear sessions: `ResetPassword` with `EndSessions` and
+  `SignOutEverywhere` (509) by moving the marker (`nextSignOut` 641), which
+  the serving store takes at its next read; `EndOtherSessions` (1223, the
+  console's sign-out-others) deletes in memory and writes, moving neither,
+  and returns early when it ended none (1248); a logout, the expiry sweep and
+  the cap's eviction end one session each.
+- What can be the revision. The password hash: bcrypt salts every hash, so
+  every rotation changes it, to the same password included
+  (`sameCredential` 1050), and no session clear does. The sign-out marker:
+  every sign-out moves it (an `EndSessions` reset, sign-out-everywhere, a
+  restore), a `--keep-sessions` reset, `EndOtherSessions` and a logout do
+  not. No counter exists; `passwordChangedAt` is a timestamp the store never
+  compares (#1039), and the file's bytes change at every session write, an
+  activity flush included. So every reset changes the hash, every sign-out
+  from another process moves the marker, and nothing records
+  `EndOtherSessions`.
+
+### Red first, on main
+
+HEAD's tests (e1fe1952) against main's code: a copy of HEAD whose four
+production files are main's (`store.go`, `ticket.go`, `admin.go`,
+`handlers_login.go`) under a names-only shim, the new names with main's
+behaviour: `Admission` carries the username and is checked by nothing,
+`Verify` and `RedeemLoginTicket` return one with main's logic,
+`CreateSession(a)` is main's `CreateSession(a.Username())`, and the seam
+field is HEAD's, called where HEAD calls it (`.tmp/_b881/redcopy.py`,
+untracked, which refuses a production file changed since main that it does
+not cover). Predicted by name before the run. `go test -C <copy> -count=1
+-v -run '<the cases>' ./internal/adminauth/` and the same for
+`./internal/admin/`. Every case red, the guards green:
+
+```
+admission_test.go:92: the session of a login checked before reset-password, then another request = <nil>, want ErrCredentialsChanged
+admission_test.go:94: after reset-password, then another request, the running bridge holds 1 sessions, want none
+admission_test.go:94: after reset-password, then another request, the file holds 1 sessions, which a restart signs in; want none
+admission_test.go:126: the session of a login checked against the password a rotation replaced = <nil>, want ErrCredentialsChanged
+admission_test.go:169: the session of a ticket redeemed before sign-out-everywhere = <nil>, want ErrCredentialsChanged
+handlers_login_admission_test.go:245: a login checked before bridge admin reset-password = 200 "{\"username\":\"admin\",\"next\":\"/\"}\n", want what a wrong password gets, 401 "{\"error\":\"invalid_credentials\",\"message\":\"invalid credentials\"}\n"
+handlers_login_admission_test.go:258: after bridge admin reset-password, the file holds 1 sessions, which a restart signs in; want 0
+handlers_login_admission_test.go:320: a link redeemed before bridge admin reset-password = 302 to "/", want 302 to /login?link=stale
+handlers_login_admission_test.go:398: a login checked before a reset = 200 "{\"username\":\"admin\",\"next\":\"/\"}\n", want 401
+```
+
+In all: the four rows of `TestALoginCheckedBeforeAResetDoesNotOutliveIt`
+(the two "then another request" rows with the session in the bridge and in
+the file; the two where the login's write reads first with the session gone
+and a token handed out), the `--keep-sessions` case, both ticket rows, the
+account replaced after a redemption, the file that cannot be read and the
+write that never lands (each answered with a token), the zero `Admission`
+(a session for no account), the login rows of the four session-write tables
+(`TestAWriteByTheRunningBridgeKeepsARotationMadeElsewhere`,
+`TestAWriteByTheRunningBridgeDoesNotBringBackSignedOutSessions`,
+`TestARotationDuringASessionWriteIsNotUndone`,
+`TestASignOutDuringASessionWriteIsNotUndone`), the three login rows and the
+two link rows through the public console, and the limiter's case. Green on
+main, as they must be: `TestLoginsRacingNothingButEachOtherAreAdmitted`,
+`TestConsoleLoginsRacingNothingButEachOtherSignIn`,
+`TestALoginTicketRedeemedBeforeARotationThatKeepsTheSessionsSignsIn` and the
+link's `--keep-sessions` row.
+
+### The fix
+
+`Verify` and `RedeemLoginTicket` return an `Admission` (`store.go` 762):
+the credential the password was compared with (for a ticket, the account it
+named) and the sign-out marker, both from the read their check made
+(`refreshCredentialLocked` now returns it). `CreateSession(a Admission)`
+(835) admits the session inside the build of its own write
+(`persistSessionsLocked`'s `admit`, 1047), under the mutex, on the read
+`commitLocked` took for that attempt and on every retry's:
+`Admission.holdsIn` (794) is the one check, and a credential, account or
+marker moved, or a file with no account, is `ErrCredentialsChanged`. A read
+that fails refuses, and every failure of the write is returned with no
+session kept (it was logged and the session kept). The sweep and the cap's
+eviction run only once admitted. `apiLogin` answers `ErrCredentialsChanged`
+through `refuseLogin`, the one 401 and log line a wrong password gets, and
+records no success; `apiRedeemLoginTicket` answers it with the stale-link
+redirect, at Warn. `testAfterLoginCheck` (`admin.go` 1561), an atomic
+pointer on the `Server`, nil in production, runs between each handler's
+check and its `CreateSession`.
+
+### Decided
+
+- **The token, not `VerifyAndCreateSession`.** One check in one place
+  covers both callers: the login and the ticket route, whose redemption
+  returns no password to verify again. The type makes the evidence
+  mandatory: `CreateSession` takes nothing a caller could make from a
+  username, and the zero value admits nothing. And the store-level window
+  is between two calls a test makes, so only the HTTP cases need a seam.
+- **The check reads the file, on the read the session's write is built
+  from**, not memory: the CLI's writers take no mutex this process holds.
+  Run in the build, it sees a change `commitLocked` finds on a retry.
+- **A ticket binds its account and the marker, never the hash**: a ticket
+  minted before a rotation redeems after it
+  (`TestARotationLeavesLoginTicketsAlone`), so one redeemed before a
+  `--keep-sessions` rotation signs in too.
+- **`EndOtherSessions` is out.** It moves neither the credential nor the
+  marker; the password it leaves working signs that browser in again at
+  once, so a login checked before it and admitted after is the session a
+  login begun after it would make, and an admission generation for it would
+  protect nothing. Its doc says so.
+- **`CreateSession` stops swallowing its write's failures**, reversing the
+  old trade ("refusing a valid login because the disk hiccuped would be the
+  worse trade"): a write refused past `maxCommitAttempts` was refused for a
+  change after the read the session was admitted on, which could be the
+  rotation, and a session kept in memory then was one no read admitted.
+- **The answer and the limiter.** `ErrCredentialsChanged` is answered
+  byte for byte as a wrong password and stays counted (the reservation
+  `AllowAndReserve` made, no `RecordSuccess`): any other answer, or a
+  cleared bucket, would tell the caller that the password had been right a
+  moment ago. A store fault in `CreateSession` stays the 500 it was.
+- **What remains** is the rename of the session's write itself, every
+  writer's window here: the command whose write it replaced writes again
+  (`commitAndConfirm`); a sign-out then ends the session at its next
+  request, and a `--keep-sessions` rotation keeps it with the rest.
+
+### Controls
+
+On the committed tree (e1fe1952), predicted by name before the run
+(`.tmp/_b881/controls.predictions.txt`, untracked), each a production
+mutation made from memory and restored in a `finally`, the two test
+binaries built once per control and every B881 test run alone
+(`.tmp/_b881/controls.py`). The baseline, no mutation, ran first: all green.
+Every control landed as predicted.
+
+- C1, the revision check removed (the brief's control): 19 leaves red, every
+  case 1 to 3 at both levels, the limiter's case, and the zero `Admission`
+  (a nil dereference, now that nothing refuses it before the insert).
+- C2, only the credential comparison removed (the review's): exactly the
+  four `--keep-sessions` login cases red (`TestALoginCheckedBeforeARotationThatKeepsTheSessionsIsRefused`,
+  the rotation table's login row, the login refused inside a rotation's
+  write, the console's `--keep-sessions` row); every reset that signs out
+  stayed green, the marker refusing it.
+- C3, only the marker comparison removed: the sign-out-everywhere rows, the
+  sign-out tables' login rows, and both ticket rows (a ticket binds no hash,
+  so the marker is all that refuses it), at both levels.
+- C4, a ticket bound to the hash: exactly the two `--keep-sessions` ticket
+  guards red.
+- C5, a ticket's account not compared: exactly
+  `TestALoginTicketWhoseAccountIsReplacedBeforeItsSessionIsRefused`.
+- C6, `apiLogin`'s branch for the refusal skipped (to the 500): the three
+  console login rows and the limiter's case.
+- C7, a success recorded for the refusal: exactly
+  `TestARefusedConsoleLoginIsCountedAsAFailedOne`.
+- C8, the write's failures swallowed again: exactly the unreadable file and
+  the write that never lands.
+- C9, the check on the write's first attempt only: exactly the two logins
+  refused inside a rotation's and a sign-out's write, found on the retry.
+
+### The gates
+
+On e1fe1952, in one use of the build lock (06:43 to 07:52, nothing else in
+it), TMPDIR `~/onebit/tmp`: `go vet ./...` with the Makefile's tags clean for
+GOOS linux, darwin and windows (the unchanged packages answered from the
+shared vet cache, which keeps clean results only). Every new or touched
+B881 test under `-race -count=200`, from prebuilt race binaries in five
+lanes side by side: all ok, no race reported. The console's login table
+(`TestAConsoleLoginCheckedBeforeAResetIsRefused`) and the link's
+(`TestALoginLinkRedeemedBeforeAResetIsRefused`) about 31 minutes each, each
+row paying the CLI-side store's confirmation settle (about a second, which
+only adminauth's own TestMain zeroes); the two guards beside the limiter's
+case 17 minutes; `TestAConsoleLoginRefusalLogsItsSourceAndNothingElseOfTheRequest`,
+whose line `refuseLogin` now writes, 23 minutes; the store's seventeen
+(the nine new tests, the six session-write tables and refusal tests this
+change rewrote, `TestConcurrentLoginsDoNotRace` and
+`TestResetPasswordConcurrentWithVerify`) 3,006 s. `go test -race -count=1
+-timeout 120m -p 2 ./internal/adminauth/ ./internal/admin/`: both ok,
+`internal/adminauth` in 68 s and `internal/admin` in 1,088 s. Without
+`-race`: `internal/adminauth` whole, the touched cmd/bridge tests
+(`TestResetPasswordTakesOnARunningPublicBridge`,
+`TestSignOutEverywhereOnARunningPublicBridge` and the public re-init six),
+backup's `TestRestoreBringsTheConsoleAccountBackSignedOut`, and
+cmd/bridge's tree-wide guards (`TestNoDocblockNamesAnotherDeclaration`,
+`TestNoBlankKeepers`, `TestEveryCitedTestNameExists`,
+`TestNoTestSetsTheDefaultLoggerByHand`), all ok. go1.27.3's gofmt lists none
+of the changed files. The rules patch applies at this commit, and
+`scripts/check-doc-budgets.py` is clean on a copy with it applied
+(`auth-tls.md` 62,468 bytes). `make test` and `make build-all` were not run:
+the brief asked for the two packages.
