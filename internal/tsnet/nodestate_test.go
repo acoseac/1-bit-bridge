@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -373,46 +374,27 @@ func TestALibraryRenameDoesNotRenameARegisteredNode(t *testing.T) {
 // the state file's bytes and the state dir's entries are as they were. The
 // node stood in for does what upstream's start does there (upstreamOverState).
 func TestAStateFileThatHoldsNothingRefusesTheStart(t *testing.T) {
+	const tailscaleRefuses = ", and Tailscale does not start from it"
 	for _, c := range []struct {
 		name, body, hostname, authKey string
-		holds                         string // what the words say the file holds
+		holds                         string // what the words say the file holds, and why no node starts
 	}{
-		{"an empty file", "", "", "", "is empty"},
-		{"an empty file, tailscale.hostname set", "", "Chosen Name", "", "is empty"},
-		{"an empty file beside an auth key", "", "", "tskey-auth-b828", "is empty"},
-		{"a line feed alone", "\n", "", "", "holds only white space"},
-		{"white space alone, tailscale.hostname set", " \t\r\n", "Chosen Name", "", "holds only white space"},
+		{"an empty file", "", "", "", "is empty" + tailscaleRefuses},
+		{"an empty file, tailscale.hostname set", "", "Chosen Name", "", "is empty" + tailscaleRefuses},
+		{"an empty file beside an auth key", "", "", "tskey-auth-b828", "is empty" + tailscaleRefuses},
+		{"a line feed alone", "\n", "", "", "holds only white space" + tailscaleRefuses},
+		{"white space alone, tailscale.hostname set", " \t\r\n", "Chosen Name", "", "holds only white space" +
+			tailscaleRefuses},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			keepNoLogsEnv(t)
 			dir := filepath.Join(t.TempDir(), "tailscale")
 			if err := os.MkdirAll(dir, 0o700); err != nil {
 				t.Fatal(err)
 			}
 			writeRaw(t, dir, c.body)
-			before := stateDirAsItIs(t, dir)
-			var logs bytes.Buffer
-			hooked := false
-			s, err := NewServer(Config{StateDir: dir, Hostname: c.hostname, AuthKey: c.authKey,
-				UnreadableStateHostname: "Living Room", Logger: captureLogger(&logs),
-				BeforeStart: func(*tsnet.Server) error { hooked = true; return nil }})
+			logs, err := startRefused(t, Config{StateDir: dir, Hostname: c.hostname, AuthKey: c.authKey,
+				UnreadableStateHostname: "Living Room"})
 			if err != nil {
-				t.Fatalf("NewServer: %v", err)
-			}
-			var built []*upstreamOverState
-			s.newNode = func(ts *tsnet.Server) node {
-				n := &upstreamOverState{fakeNode: &fakeNode{}, dir: ts.Dir}
-				built = append(built, n)
-				return n
-			}
-			t.Cleanup(func() { _ = s.Close() })
-
-			// Every assertion reports, so a start that went on, or one that
-			// moved the file aside, shows each thing it did.
-			err = s.Start(context.Background())
-			if err == nil {
-				t.Error("Start over a state file that holds nothing brought the node up")
-			} else {
 				mustSayTheStateHoldsNothing(t, err.Error(), c.holds, dir)
 				var empty *EmptyStateError
 				if !errors.As(err, &empty) || empty.WhiteSpace != (c.body != "") {
@@ -420,32 +402,66 @@ func TestAStateFileThatHoldsNothingRefusesTheStart(t *testing.T) {
 				} else if want := empty.Error(); err.Error() != want {
 					t.Errorf("Start says %q, want the refusal's words alone: %q", err, want)
 				}
-				if last := s.LastStartError(); last == nil || last.Error() != err.Error() {
-					t.Errorf("LastStartError = %v, want the refusal Start returned", last)
-				}
 			}
-			for _, n := range built {
-				if n.startCalls() != 0 {
-					t.Error("the upstream node's Start ran over a state file that holds nothing")
-				}
-			}
-			if len(built) != 0 {
-				t.Errorf("the start built %d upstream node(s) over a state file that holds nothing, want none", len(built))
-			}
-			if hooked {
-				t.Error("the start reached the hook before the upstream start")
-			}
-			if after := stateDirAsItIs(t, dir); after != before {
-				t.Errorf("the start changed the state dir:\nbefore:\n%s\nafter:\n%s", before, after)
-			}
-			mustNotBeStarted(t, s)
 			for _, line := range []string{unreadableLine, "interactive auth required"} {
-				if strings.Contains(logs.String(), line) {
-					t.Errorf("a refused start logged %q beside its refusal: %s", line, logs.String())
+				if strings.Contains(logs, line) {
+					t.Errorf("a refused start logged %q beside its refusal: %s", line, logs)
 				}
 			}
 		})
 	}
+}
+
+// startRefused runs one Start of a server built from cfg, its upstream node
+// stood in for (upstreamOverState), and fails the test unless that start was
+// refused before anything was built: an error kept as the last start error,
+// no upstream node built or started, the hook before the upstream start never
+// run, the state dir's entries and the state file's bytes as they were, and
+// nothing running. Every assertion reports, so a start that went on, or one
+// that moved the file aside, shows each thing it did. It returns what the
+// server logged and the error Start returned.
+func startRefused(t *testing.T, cfg Config) (string, error) {
+	t.Helper()
+	keepNoLogsEnv(t)
+	before := stateDirAsItIs(t, cfg.StateDir)
+	var logs bytes.Buffer
+	hooked := false
+	cfg.Logger = captureLogger(&logs)
+	cfg.BeforeStart = func(*tsnet.Server) error { hooked = true; return nil }
+	s, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	var built []*upstreamOverState
+	s.newNode = func(ts *tsnet.Server) node {
+		n := &upstreamOverState{fakeNode: &fakeNode{}, dir: ts.Dir}
+		built = append(built, n)
+		return n
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	err = s.Start(context.Background())
+	if err == nil {
+		t.Error("Start over a state file that holds nothing brought the node up")
+	} else if last := s.LastStartError(); last == nil || last.Error() != err.Error() {
+		t.Errorf("LastStartError = %v, want the refusal Start returned", last)
+	}
+	for _, n := range built {
+		if n.startCalls() != 0 {
+			t.Error("the upstream node's Start ran over a state file that holds nothing")
+		}
+	}
+	if len(built) != 0 {
+		t.Errorf("the start built %d upstream node(s) over a state file that holds nothing, want none", len(built))
+	}
+	if hooked {
+		t.Error("the start reached the hook before the upstream start")
+	}
+	if after := stateDirAsItIs(t, cfg.StateDir); after != before {
+		t.Errorf("the start changed the state dir:\nbefore:\n%s\nafter:\n%s", before, after)
+	}
+	mustNotBeStarted(t, s)
+	return logs.String(), err
 }
 
 // TestAStateFileThatIsNotThereStillStartsANewNode: no state file, and the {}
@@ -509,23 +525,45 @@ func TestAStateFileThatIsNotThereStillStartsANewNode(t *testing.T) {
 // JSON's decoder skips (space, tab, carriage return, line feed) and nothing
 // else, which is where Tailscale's start answers "unexpected end of JSON
 // input"; any other byte is a state that does not parse, and an object
-// with white space around it is the {} it holds.
+// with white space around it is the {} it holds. Its bounded read
+// (maxStateBytes and one byte more) decides a file larger than that too:
+// white space alone there holds nothing, read no further, and anything else
+// there is a file too large, as before. A start over each file that holds
+// nothing is refused before anything is built (startRefused), in the
+// reader's words.
 func TestOnlyJSONWhiteSpaceIsAStateThatHoldsNothing(t *testing.T) {
+	const (
+		skipped          = " \t\r\n" // the bytes JSON's decoder skips
+		tailscaleRefuses = ", and Tailscale does not start from it"
+		notParsed        = "the node's state does not parse as Tailscale's state file"
+	)
+	pastTheBound := strings.Repeat(skipped, maxStateBytes/len(skipped)+1)[:maxStateBytes+1]
+	xInside := pastTheBound[:maxStateBytes/2] + "x" + pastTheBound[maxStateBytes/2+1:]
 	for _, c := range []struct {
 		name, body string
-		empty      bool // *EmptyStateError
-		whiteSpace bool
-		unreadable bool // errStateUnreadable
+		empty      bool   // *EmptyStateError
+		whiteSpace bool   // its WhiteSpace
+		holds      string // what its words say the file holds, and why no node starts
+		unreadable string // errStateUnreadable's words, where the reader answers one
 	}{
-		{"no byte", "", true, false, false},
-		{"a line feed", "\n", true, true, false},
-		{"each byte JSON skips", " \t\r\n", true, true, false},
-		{"a vertical tab", "\v", false, false, true},
-		{"a form feed", "\f", false, false, true},
-		{"a no-break space", "\u00a0", false, false, true},
-		{"a byte order mark", "\ufeff", false, false, true},
-		{"NUL bytes", "\x00\x00\x00\x00", false, false, true},
-		{"{} between white space", " \n{}\n ", false, false, false},
+		{name: "no byte", body: "", empty: true, holds: "is empty" + tailscaleRefuses},
+		{name: "a line feed", body: "\n", empty: true, whiteSpace: true, holds: "holds only white space" +
+			tailscaleRefuses},
+		{name: "each byte JSON skips", body: skipped, empty: true, whiteSpace: true, holds: "holds only white space" +
+			tailscaleRefuses},
+		{name: "white space to the bound", body: pastTheBound[:maxStateBytes], empty: true, whiteSpace: true,
+			holds: "holds only white space" + tailscaleRefuses},
+		{name: "white space past the bound", body: pastTheBound, empty: true, whiteSpace: true,
+			holds: "holds no state in its first 16 MiB, only white space, which is as far as the bridge reads it, " +
+				"and the bridge does not start the node from it"},
+		{name: "white space past the bound, an x in its first 16 MiB", body: xInside,
+			unreadable: fmt.Sprintf("the node's state is larger than the %d bytes it is read to", maxStateBytes)},
+		{name: "a vertical tab", body: "\v", unreadable: notParsed},
+		{name: "a form feed", body: "\f", unreadable: notParsed},
+		{name: "a no-break space", body: "\u00a0", unreadable: notParsed},
+		{name: "a byte order mark", body: "\ufeff", unreadable: notParsed},
+		{name: "NUL bytes", body: "\x00\x00\x00\x00", unreadable: notParsed},
+		{name: "{} between white space", body: " \n{}\n "},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -533,17 +571,33 @@ func TestOnlyJSONWhiteSpaceIsAStateThatHoldsNothing(t *testing.T) {
 			st, err := readNodeState(dir)
 			var empty *EmptyStateError
 			if got := errors.As(err, &empty); got != c.empty {
-				t.Fatalf("readNodeState = %+v, %v: a state that holds nothing %v, want %v", st, err, got, c.empty)
-			}
-			if c.empty && empty.WhiteSpace != c.whiteSpace {
+				t.Errorf("readNodeState = %+v, %v: a state that holds nothing %v, want %v", st, err, got, c.empty)
+			} else if c.empty && empty.WhiteSpace != c.whiteSpace {
 				t.Errorf("WhiteSpace = %v, want %v", empty.WhiteSpace, c.whiteSpace)
 			}
 			var unreadable errStateUnreadable
-			if got := errors.As(err, &unreadable); got != c.unreadable {
-				t.Errorf("readNodeState = %v: a state that does not read %v, want %v", err, got, c.unreadable)
+			switch got := errors.As(err, &unreadable); {
+			case got != (c.unreadable != ""):
+				t.Errorf("readNodeState = %v: a state that does not read %v, want %v", err, got, c.unreadable != "")
+			case got && err.Error() != c.unreadable:
+				t.Errorf("readNodeState says %q, want %q", err, c.unreadable)
 			}
-			if !c.empty && !c.unreadable && (err != nil || st.registered) {
+			if !c.empty && c.unreadable == "" && (err != nil || st.registered) {
 				t.Errorf("readNodeState = %+v, %v, want no registered node", st, err)
+			}
+			if !c.empty {
+				return
+			}
+			logs, refusal := startRefused(t, Config{StateDir: dir, UnreadableStateHostname: "Living Room"})
+			if refusal == nil {
+				return
+			}
+			mustSayTheStateHoldsNothing(t, refusal.Error(), c.holds, dir)
+			if err != nil && refusal.Error() != err.Error() {
+				t.Errorf("Start says %q, want the reader's words: %q", refusal, err)
+			}
+			if strings.Contains(logs, unreadableLine) {
+				t.Errorf("a refused start logged the line on a state that does not read: %s", logs)
 			}
 		})
 	}
@@ -578,8 +632,8 @@ func (n *upstreamOverState) Start() error {
 }
 
 // stateDirAsItIs is what a test compares to see that nothing changed the
-// node's state dir: each entry's name and mode, and the state file's bytes,
-// or that it is not there.
+// node's state dir: each entry's name and mode, and the state file's bytes
+// (past 64 of them, their length and SHA-256), or that it is not there.
 func stateDirAsItIs(t *testing.T, dir string) string {
 	t.Helper()
 	entries, err := os.ReadDir(dir)
@@ -599,6 +653,8 @@ func stateDirAsItIs(t *testing.T, dir string) string {
 		fmt.Fprintf(&b, "%s is not there\n", stateFileName)
 	case err != nil:
 		t.Fatal(err)
+	case len(state) > 64:
+		fmt.Fprintf(&b, "%s holds %d bytes, SHA-256 %x\n", stateFileName, len(state), sha256.Sum256(state))
 	default:
 		fmt.Fprintf(&b, "%s holds %q\n", stateFileName, state)
 	}
@@ -606,13 +662,14 @@ func stateDirAsItIs(t *testing.T, dir string) string {
 }
 
 // mustSayTheStateHoldsNothing fails the test unless words are the bridge's
-// refusal of a state file that holds nothing: the file by its name and what
-// it holds (holds), what keeps the node, what to move aside and what a new
-// device costs, that the bridge does neither itself, none of upstream's words,
-// and no path (stateDir's, or anything below it).
+// refusal of a state file that holds nothing: the file by its name, what it
+// holds and why no node starts from it (holds), what keeps the node, what to
+// move aside and what a new device costs, that the bridge does neither
+// itself, none of upstream's words, and no path (stateDir's, or anything
+// below it).
 func mustSayTheStateHoldsNothing(t *testing.T, words, holds, stateDir string) {
 	t.Helper()
-	for _, want := range []string{stateFileName, holds, "Tailscale does not start from it",
+	for _, want := range []string{stateFileName, holds,
 		"put back a copy of the file", "move the file aside", "new device", "authenticates as on a first run",
 		"new tailnet address", "MagicDNS name", "moves and replaces nothing"} {
 		if !strings.Contains(words, want) {
