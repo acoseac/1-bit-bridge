@@ -96378,3 +96378,124 @@ Controls at 3d6be0e8 (`-count=3`, no `-race`, `.tmp/_b886/controls.py`):
 
 The backlog file is not on legion0: these are named for the orchestrator to
 file.
+
+## 2026-11-13 — B886 round 2: two waits left on time, the ticker test left to B895, the version
+
+Worker b886, legion0, branch `fix/b886-timing-flakes` from round 1's 75defae8
+(its rules, r1). Commits: 67c32992 (the ticker test back to main's), c63ba178
+(the Locate awaited), 3555aa81 (the recheck's park by path), 71859211
+(qualificationVersion 50), then this record. Same toolchain, tags and
+TMPDIR as round 1; controls predicted in writing first
+(`.tmp/_b886/controls-r2.predictions.txt`), restored with `git checkout --`,
+`git status` empty after each. The brief's review moved the B871 carry (its
+item 4) out of this round: `parkAnEarlierWorker` and the helpers the carry
+leans on exist only on B871's unmerged branch.
+
+### The ticker test, back to main's (67c32992)
+
+Round 1's `answerOnceExpired` held the worker's answer until its caller had
+expired, so `TestATickerStoppedWhileAVerificationsStepHangsReturnsWithinItsBound`
+passed whichever of the two `StopWriteBound` timers a stop arms came first in
+production: it forced the silent order, and hid the race that is its subject,
+which B895 fixes on its own branch. The file is main's again, byte for byte;
+`answerOnceExpired` went with it, and the rule round 1 wrote for it goes
+with the r2 rules patch. `SetVerifyHandoffForTest` predates round 1 and
+stays (`verify_bound_test.go` and the console's round 8 test use it); so does
+the step gate (the recheck's and the console's tests), its any-snapshot key
+("" for the snapshot) now used by no committed test. The test is left out of
+the `-count=50` runs, where main's flake (B872p2: about 4 in 100 under
+`-race`) is expected until B895.
+
+### The Locate awaited (c63ba178)
+
+Through its context a cancelled Resume answers from `abandoned` with no wait
+for its writer (`found` false: nothing waits on the release it began), so the
+reopen's Locate it cancelled ends whenever the writer next runs, after the
+answer as often as not. The test gave it one second from the answer and
+called a later end "resume context did not cancel locator", in `armContext`
+and in `armAny` when the select took the context. It now awaits the end
+under the package's watchdog (`-watchdog`, fake_test.go:788: a minute),
+which fails naming what it waited for.
+
+### The recheck's park, by its snapshot's path (3555aa81)
+
+`parkCheck`'s hook (`SetOnLowPriorityForTest`) takes no path and parks the
+first check it sees, so in "past its deadline" a stray check of another
+snapshot would take the park and leave the recheck's own check unparked.
+`SetOnCheckEntryForTest` (internal/backup/seams.go, nil in production) runs on
+every check's thread once its priority is lowered, before it reads anything,
+given the snapshot's resolved path (runCheck, finish.go); `parkCheckOf` parks
+the first check of one snapshot there and lets every other go by. The case
+parks its own snapshot's check with it and first verifies a snapshot of
+another store, in a backups folder of its own, as another process would
+(`aCheckOfAnotherSnapshotGoesBy`): that check must answer with its verdict
+recorded and the park untouched. It returns once that verification's worker
+has ended (`SetOnVerifyEndForTest`), never at its answer: at the answer
+alone, the first run under `-race` reported `holdUnlockOf`'s install of
+`SetOnLockReleaseForTest` against the worker's late read of it as it let its
+lock go (backlog B849). The end is reordered as the review asked: the check
+let go, its answer awaited, then its grace ended; the callers' release still
+ends it for a case that fails earlier.
+
+### qualificationVersion (71859211)
+
+The branch changes `internal/alsapcm/sink_dsd_engine_test.go` and
+`sink_dsd_test.go`, under the guarded prefix `internal/alsapcm/`
+(`guardedPrefixes`), so the version moves from main's 49 to 50, with the
+runbook's five current references (`TestQualificationRunbookVersion`). At
+71859211's parent, `go run ./scripts/qualification-version -base 2bebca26
+-head HEAD` (CI's step) answered "guarded code changed without
+qualificationVersion increase (49 -> 49)", exit 1; at 71859211, "qualification
+version OK: 2bebca26..HEAD".
+
+### Reds and controls
+
+- The Locate: at round 1's head (a copy, `redcopy.py`), the test's Locate made
+  to end 1.5 s after the cancel: sink_dsd_engine_test.go:203 "resume context
+  did not cancel locator", `armContext` 3 of 3 and `armAny` 3 of 3 (the select
+  took the context each time), `armReply` green. Controls at 71859211:
+  R2C1a, the timer back with the same late end: :205, the same 3 of 3;
+  R2C1g, the fix with the late end: green 3 of 3, every arm; R2C1b, the
+  timer back with no forcing, `-race -count=50` beside 16 busy loops:
+  green 200 of 200 (7.6 s): beside the busy loops alone the writer always ran within the
+  second, so the forced late end (R2C1a) is the control that shows the defect.
+- The park: R2C3, the global park back (`parkCheck(t, "")`): "past its
+  deadline" fails at once at verify_round5_test.go:235, "the park of this
+  snapshot's check took a check of another snapshot", 3 of 3; R2C3b, the
+  grace ended before the check is let go: :295, "the recheck was given up",
+  3 of 3.
+
+### Runs
+
+- `-race -count=50`, three single-package lanes at once outside the slot,
+  GOMAXPROCS 4 (21:01 to 21:10): internal/backup 538.2 s (200 PASS lines),
+  internal/alsapcm 3.8 s (200), internal/player/qualification whole, the
+  version gate's own tests among it, 136.3 s (11,950); no FAIL, SKIP or race.
+  The reverted ticker test is not among them: it is main's, and its flake is
+  B895's.
+- In slot1, taken at once at 21:10:42: `go vet` with the tags over `./...`
+  for linux, darwin and windows, exit 0 each; `go test -race -count=1 -p 8
+  -parallel 8 -timeout 120m`, all ok: internal/backup 808.3 s,
+  internal/alsapcm 86.5 s, internal/admin 1121.0 s, cmd/bridge 1680.3 s (the
+  reverted ticker test passing in it), internal/player/qualification 4.3 s.
+- Loaded, in the same session, 21:39:19 to 22:10:57, legion0 (Linux
+  7.0.0-38-generic): 16 busy loops (`getconf _NPROCESSORS_ONLN`), killed by
+  their captured PIDs after, beside the same three lanes at `-race
+  -count=50`, GOMAXPROCS 16, and R2C1b's lane: internal/backup 1896.0 s
+  (200), internal/alsapcm 8.7 s (200), internal/player/qualification 384.3 s
+  (11,950), R2C1b 7.6 s (200); no FAIL, SKIP or race.
+- CI's version step at 71859211: "qualification version OK:
+  2bebca26..HEAD". The rules patch (`rules-b886-r2.patch`): `make
+  docs-check`'s steps over a patched copy pass, and cmd/bridge's
+  `TestEveryCitedTestNameExists` there failed on a ghost citation planted in
+  the patched History, naming it, and passed without it. go1.27.3's gofmt
+  lists none of the changed files.
+
+### Left
+
+- The B871 carry (`unlockHold.release` waiting for the end hook,
+  `parkAnEarlierWorker` waiting only for a worker that started, a
+  completeness pin for unjoined verification calls), once B871 merges.
+- `parkCheck`'s other users (B872's cases) still park the first check they
+  see; `parkCheckOf` is there for them.
+- Round 1's follow-ups stand.
