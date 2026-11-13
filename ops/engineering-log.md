@@ -96184,3 +96184,197 @@ the tree with this record. The rule change is `rules-b872-r3.patch`: round
 2's first B872 bullet in `build-ci-tests.md`, which named the wait's seam,
 now names the notice's seam, the held wait and its abort; the budgets check
 is clean with it.
+
+## 2026-11-13 — B886, B887, B890: the CI timing flakes wait on seams, never on time
+
+Worker b886, legion0 (Ubuntu 26.04, Linux 7.0.0-38-generic, x86-64, 16
+CPUs), branch `fix/b886-timing-flakes` from main 2bebca26. Commits: 0c2de7a4
+(the two seams), e788a843 (B886), bd301b02 and 2b5124a2 (B890), 3d6be0e8
+(B887), then this record. Every run: Go 1.27.3, the Makefile's tags, TMPDIR
+`~/onebit/tmp/b886`. The reds ran at copies of main, each mutation made
+exactly once and keeping main's line numbers (`.tmp/_b886/redcopy.py`); the
+controls are uncommitted edits to the committed tree, predicted in writing
+first (`.tmp/_b886/controls.predictions.txt`), restored with `git checkout
+--`, `git status` empty after each.
+
+### Step 0
+
+- B887: `<-s.Done()` (sink_dsd_engine_test.go:171 at main) waits for the
+  revocation the round that wrote the test meant: "cancelling an in-flight
+  activation still revokes it so the abandoned caller cannot authorize sound
+  later" (`ops/History-rules-player.md`, the native engine hand-off's review
+  round 2, #1356). `Done` closes only once the sink's writer ends, which
+  nothing but a release begins here, and of the Resume's wait (`await`) only
+  the context's arm begins one (`abandoned`, `revokeFound`). Its reply arm
+  answers the held refusal of a paused sink's reopen (sink_dsd_writer.go:108,
+  :119, :122), and the sink stays paused and alive. So each arm asserts its
+  own outcome.
+- B890, the console: run 43428379048's log could not be read here (`gh` is
+  refused by this sandbox, and no copy of it, or of #1462's, is on legion0).
+  The code's reading: the case bounded only the write and the read-back,
+  300 ms from their admission (hold.go:465-467), and its stall is the
+  manifest's sync after the rename (verify_record.go:357); a case that never
+  reached it had its write given up in its staging, which fsyncs (:565)
+  before the rename asks the give-up (:576), and the write renamed nothing.
+- B890, the ticker: yes. `SetOnManifestReadForTest`'s hook runs in
+  `readRecord` (finish.go:220-226), whose first call in the ticker's
+  verification is the worker's `stepReadRecord`, "its read of the snapshot's
+  record" (finish.go:527-531); the boot pass lists the folder through
+  `ReadStatus` (`readManifest`), which the hook does not see.
+
+### The seams (0c2de7a4)
+
+`SetStepGateForTest(root, snapshot, steps...)` (internal/backup/seams.go),
+a sibling of `SetStepBoundForTest`, holds named steps of the holds on one
+resolved backups folder, of one snapshot or ("") of any: such a step is
+given up when the test fires its gate (`StepGate.Fire`; `gateOf`, looked up
+as `runStep` registers the step, its case beside the timer's), and by
+nothing else, its bound and its caller's stop both ignored. Its restore fires
+every gate, and a test fires them all (`FireAll`) before it joins its
+callers. `SetCheckGraceForTest(fn)` is run by `runCheck` once a check's
+context has ended, given the snapshot, and answers the channel whose close
+ends that check's grace in the timer's place (nil keeps the timer). Both are
+nil in production; `SetStepBoundForTest`'s five other callers keep their
+durations.
+
+### B886 (e788a843)
+
+`TestARecheckThatDidNotEndLeavesTheVetoItMade/past_its_deadline` slept
+400 ms at the database's open behind a 150 ms deadline, on the check's
+thread, which runs at the lowest priority (`PRIO_DARWIN_BG` on macOS), and
+`runCheck` gives a check whose context has ended a second more. The check is
+now parked before it reads anything (`parkCheck`) until its deadline has
+passed and its grace has begun (`checkGraceOf`), then let go, and answers
+INCOMPLETE (deadline) within a grace the test ends at its end; the record's
+read, the veto, the write, its INCOMPLETE and the read-back are held at
+their gates, never fired. The verification runs under `joinBackupCallers`,
+whose release lets the park, the grace and the gates go first; an answer
+before the grace began fails at once (`awaitParkedPastItsDeadline`). In all
+three cases the prune follows the worker's end, its unlock held from the
+answer until the test waits (`unlockHold`, backlog B849), and asserts
+`!Skipped`, saying `SkippedFor`: B869's item 2 loses this site.
+
+### B890, the console (bd301b02)
+
+`TestTheConsoleReportsCancellationAndEveryWriteHandoff`'s two worker modes
+hold the write and the read-back at their gates: the write is fired once it
+has stalled (`entered`), and in "published then worker answer" the read-back
+once its hook says it has begun. "given-up write" moves too: held at an
+unfired gate its write would wait in its stage hook until the test's end.
+The two waits for the console's jobs, a bare `Wait`, are bounded
+(`awaitBackupJobs`, a minute).
+
+### B890, the ticker (2b5124a2)
+
+At the stop `runStep` resets the hung read's timer to `StopWriteBound`
+(hold.go:496-500 at main) and the caller arms its expiry for the same
+(finish.go:351-355); the ticker silences the expiry's cancellation and
+reports a step given up (cmd/bridge/backup.go:811-818). `answerOnceExpired`
+holds, on the worker, the answer of the ticker's verification (`filepath.Dir(dir)
+== root`, resolved) until the caller's expiry hook has run, at most 10 s,
+its overrun said on the test's goroutine, and let go at the test's end; the
+answer hook runs before `done <- outcome` (finish.go:338-341), so nothing
+waits on the worker. The bound check on the ticker's return stays.
+
+### B887 (3d6be0e8)
+
+`nativeSink` takes `lifeSinkOn`'s hooks, and a one-shot `armPick` set just
+before the Resume forces its wait: `armReply`, `armContext`, and `armAny`,
+the select's own pick, which asserts whichever outcome it took (the sink's
+`revoked`, read under its lock). Through the context the sink is revoked and
+its writer ends with no release from the test; through the reply it is
+paused and released, its writer alive, until the test's
+`BeginRelease(Immediate)`. Every wait is under the package's watchdog, and a
+cleanup registered after the sink's cancels, lets the Locate go and joins
+the Resume before the sink is released.
+
+### Reds and controls
+
+At main:
+
+- B886, `parkCheck` for the sleep and the join for the cleanup at :235:
+  verify_round5_test.go:238 "the recheck was given up (… its check did not
+  end within its bound (context deadline exceeded))", 3 of 3 under `-race`.
+- B890, the console, the write parked at its staging until the test's end:
+  handlers_backups_round8_test.go:103 "verification never reached its
+  stall", 3 of 3, each after its 30 s.
+- B890, the ticker, main with the step gate added: the read given up at its
+  gate once it hung, the ticker's report awaited on stderr, then the stop:
+  backup_round2_test.go:476 "a stopped verification was reported: … was
+  given up … its read of the snapshot's record did not end within its
+  bound", 3 of 3.
+- B887, only an `armPick` set to `armReply`: `go test -race -run
+  '^TestNativeResumeCancelsLocate$' -count=1 -timeout 2m ./internal/alsapcm`,
+  `panic: test timed out after 2m0s`, the test at sink_dsd_engine_test.go:171.
+
+Controls at 3d6be0e8 (`-count=3`, no `-race`, `.tmp/_b886/controls.py`):
+
+- C1, the grace fired at once and the check parked until the answer:
+  verify_round5_test.go:288 "the recheck was given up", 3 of 3.
+- C1b, the wait for the worker's end removed, its unlock still held: every
+  case at :306, "the prune once the recheck's worker had ended was skipped
+  (another verification or prune of these snapshots holds their lock)", 3 of
+  3.
+- C2, `armReply` with its release removed, `-watchdog 5s`:
+  sink_dsd_engine_test.go:227 "waited 5s for the sink's end", 3 of 3.
+- C3, the write parked at its staging, its gate fired, the read-back's hook
+  seen, then the staging let go: the rename refused,
+  handlers_backups_round8_test.go:117 "verification never reached its
+  stall", 3 of 3 (30.3 s each).
+- C4, the answer's wait removed, under the ticker's red forcing:
+  backup_round2_test.go:488, 3 of 3.
+- C4b, the read's gate fired just after the stop, the worker's give-up first
+  as on CI, the wait removed: :488 "(context canceled)", 3 of 3; C4g, the
+  same with the wait kept: green 3 of 3 (2.4 s each).
+
+### Runs
+
+- `-race -count=50`, four single-package lanes at once outside the build slot,
+  GOMAXPROCS 4 each (17:41 to 17:50): backup 483.9 s (200 PASS lines, 50
+  runs of the test and its three cases), admin 509.8 s (250), cmd/bridge
+  347.9 s (150), alsapcm 3.6 s (200); no FAIL, SKIP or race.
+- In slot1, taken at 18:32:11 by a guard that waited behind two other
+  workers' gates: `go vet` with the tags over `./...` for linux, darwin and
+  windows, exit 0 each; `go test -race -count=1 -p 8 -parallel 8 -timeout
+  120m` of the four packages, ok: backup 777.9 s, alsapcm 85.9 s, admin
+  1099.6 s, cmd/bridge 1633.9 s.
+- Loaded, in the same slot session, 18:59:45 to 19:11:29, legion0 (Linux
+  7.0.0-38-generic): 16 busy loops (`python3 -c "while True: pass"`, as many
+  as `getconf _NPROCESSORS_ONLN` says), killed by their captured PIDs after,
+  beside the four tests at `-race -count=20`, GOMAXPROCS 16, four lanes at
+  once: backup 701.6 s (80 PASS lines), admin 361.7 s (100), cmd/bridge
+  187.1 s (60), alsapcm 4.9 s (80); no FAIL, SKIP or race. The ticker's bound
+  check, its return within `StopWriteBound` and a second of the stop, held in
+  every run.
+- The rules patch (`rules-b886-r1.patch`): `make docs-check`'s steps over a
+  patched copy of the tracked tree pass (worst load 76.3%), and cmd/bridge's
+  `TestEveryCitedTestNameExists` there failed on a ghost citation planted in
+  the patched History, naming it, and passed without it. go1.27.3's gofmt
+  lists none of the changed files.
+
+### Left
+
+- A cancelled Resume revokes the sink or keeps it paused, at random (the
+  select of its wait); `Drop` or `Close` ends either, so nothing leaks. Which
+  it should do is the product's choice.
+- At a stop, the ticker reports a verification whose step hangs given up, or
+  says nothing, by which of the two `StopWriteBound` timers the stop arms
+  comes first; production keeps that race. Whether a stop should ever report
+  a step given up is the product's choice.
+- "stopped by its caller" (verify_round5_test.go:241) and the console's
+  "cancelled check" (handlers_backups_round8_test.go:73): the stop arms the
+  caller's 2 s expiry (finish.go:351-355), and a worker slower than that,
+  its check on the lowest-priority thread, answers after it, an unknown
+  write. The same class; neither failed in these runs.
+- `SetStepBoundForTest`'s callers `TestAWriteGivenUpLandsNothingOnceItResumes`
+  (verify_round5_test.go:83), `TestNoVetoRemovalBeginsAfterItsWriteIsGivenUp`
+  (verify_round6_test.go:138) and `TestEveryStepUnderTheLockIsBoundedAndMarked`
+  (verify_hold_test.go:229) bound a write 300 ms from its admission and wait
+  for a park it reaches only past fsyncs (the veto's, the staging's): B890's
+  class, candidates for the gate.
+- internal/admin's other bare waits for the console's jobs
+  (`WaitForBackupJobs`: handlers_backups_verify_test.go, round6, round7,
+  admin_test.go).
+
+The backlog file is not on legion0: these are named for the orchestrator to
+file.
