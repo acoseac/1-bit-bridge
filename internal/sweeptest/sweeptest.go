@@ -8,6 +8,7 @@
 package sweeptest
 
 import (
+	"io/fs"
 	"os"
 	"path/filepath"
 )
@@ -54,4 +55,63 @@ func IsOtherCheckout(root, dir string) bool {
 	}
 	_, err := os.Lstat(filepath.Join(dir, ".git"))
 	return err == nil
+}
+
+// MakeTestTmpDir is the directory below the root that make test and make
+// test-fast give go test as TMPDIR when the caller sets none (the
+// Makefile's TMPDIR line). While the suite runs, every package's tests make
+// and remove their temporary files there, and the go command its work
+// directories, so a sweep that read it took another package's temporary Go
+// files for this tree's, and failed on a directory removed between its
+// listing and its own (B567). Nothing there is the repository's: both
+// ignore files exclude it.
+//
+// The build-tag census skips the same directory by a constant of its own,
+// makeTestTmpDir in scripts/third-party-licenses (B740). It cannot share
+// this one: the census is a program, and this package is imported by tests
+// alone. Nor can this package reach a program's constant. So
+// TestTheSweepsSkipTheDirectoryTheCensusSkips, beside the census, holds the
+// two to one name, and TestTheCensusSkipsTheMakefilesTMPDIR holds the
+// census's to the Makefile.
+const MakeTestTmpDir = ".tmp"
+
+// IsMakeTestTmpDir reports whether dir, a directory a walk from root has
+// reached, is make test's TMPDIR: root's own MakeTestTmpDir. A sweep skips
+// it by that name before listing it, as the census does. Only that one: a
+// directory of the same name further down, or one whose name merely begins
+// with it, is the tree's like any other, and the root itself never is,
+// whatever it is called.
+func IsMakeTestTmpDir(root, dir string) bool {
+	return filepath.Clean(dir) == filepath.Join(root, MakeTestTmpDir)
+}
+
+// Removal stands in for another process removing a directory while a sweep
+// walks the tree that holds it, as go test removes a test's temporary
+// directory and the go command a work directory. Its WalkDir walks as
+// filepath.WalkDir does, and at the moment the walk reaches Dir, after the
+// directory above it was listed and before Dir is, it removes Dir and
+// everything under it. A sweep that reads Dir then fails to list it; one
+// that skips what holds Dir never reaches it. The removal happens at that
+// point of the walk, on the walk's own goroutine, never on a race's time.
+type Removal struct {
+	Dir string
+	// Walked is whether a walk went through this Removal at all, so a test
+	// can tell a sweep that never reached Dir from one that never used it.
+	Walked bool
+	// Reached is whether the walk reached Dir, and so removed it.
+	Reached bool
+}
+
+// WalkDir is filepath.WalkDir but for removing r.Dir as the walk reaches it.
+func (r *Removal) WalkDir(root string, fn fs.WalkDirFunc) error {
+	r.Walked = true
+	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err == nil && d.IsDir() && !r.Reached && filepath.Clean(path) == filepath.Clean(r.Dir) {
+			r.Reached = true
+			if err := os.RemoveAll(r.Dir); err != nil {
+				return err
+			}
+		}
+		return fn(path, d, err)
+	})
 }
