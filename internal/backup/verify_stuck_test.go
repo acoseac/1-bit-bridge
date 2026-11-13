@@ -75,6 +75,33 @@ func parkCheck(t *testing.T, owed string) (entered <-chan struct{}, release func
 	return in, release
 }
 
+// parkCheckOf parks the check of the snapshot in dir, resolved, where every
+// check comes (SetOnCheckEntryForTest: on the check's own thread, its
+// priority lowered, before it reads anything of the snapshot), until release
+// is called; entered closes once it is parked. Only the first check of that
+// snapshot parks: the check of any other snapshot goes by, so no other
+// verification's check, a stray one's included, takes the park (B886's
+// second round: parkCheck parks the first check it sees, whatever its
+// snapshot). Its cleanup lets the check go and waits until no verification
+// holds this process's slot before it puts the seam back.
+func parkCheckOf(t *testing.T, dir string) (entered <-chan struct{}, release func()) {
+	t.Helper()
+	in, out := make(chan struct{}), make(chan struct{})
+	var parked atomic.Bool
+	t.Cleanup(backup.SetOnCheckEntryForTest(func(d string) {
+		if d == dir && parked.CompareAndSwap(false, true) {
+			close(in)
+			<-out
+		}
+	}))
+	release = sync.OnceFunc(func() { close(out) })
+	t.Cleanup(func() {
+		release()
+		awaitSlotFree(t)
+	})
+	return in, release
+}
+
 // checkGraceOf holds the grace a check of the snapshot in dir is given once
 // its context has ended (SetCheckGraceForTest) until pass is called; begun
 // closes as that grace begins, the check's deadline (or its caller's stop)

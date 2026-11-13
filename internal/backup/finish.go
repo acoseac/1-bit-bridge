@@ -776,7 +776,12 @@ func letGoWithin(end func()) {
 // (ReasonAborted).
 func runCheck(checkCtx context.Context, dir string, m Manifest, level CheckLevel) (v Verification, gaveUp bool, finished <-chan struct{}) {
 	out := make(chan Verification, 1)
-	finished = runLowPriority(func() { out <- checkBundle(checkCtx, dir, m, level) }, func(any) { out <- abortedVerdict() })
+	finished = runLowPriority(func() {
+		if hook := onCheckEntry.Load(); hook != nil {
+			(*hook)(dir)
+		}
+		out <- checkBundle(checkCtx, dir, m, level)
+	}, func(any) { out <- abortedVerdict() })
 	select {
 	case v = <-out:
 		return v, false, finished

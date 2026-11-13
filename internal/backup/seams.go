@@ -147,6 +147,25 @@ func SetOnLowPriorityForTest(fn func()) (restore func()) {
 	return func() { onLowPriority = prev }
 }
 
+// onCheckEntry, nil in production, runs on a check's own thread once its
+// priority is lowered, before it reads anything of the snapshot, given the
+// snapshot's resolved path (SetOnCheckEntryForTest).
+var onCheckEntry atomic.Pointer[func(dir string)]
+
+// SetOnCheckEntryForTest sets the function every check runs on its own
+// thread, its priority lowered, before it reads anything of the snapshot,
+// given the snapshot's resolved path, and returns the restore: a test parks
+// the check of its own snapshot there and lets every other go by. The
+// function must return for every other snapshot.
+func SetOnCheckEntryForTest(fn func(dir string)) (restore func()) {
+	var p *func(string)
+	if fn != nil {
+		p = &fn
+	}
+	prev := onCheckEntry.Swap(p)
+	return func() { onCheckEntry.Store(prev) }
+}
+
 // SetOnDatabaseOpenForTest sets the function a verification runs just
 // before SQLite opens the snapshot's database, and returns the restore.
 func SetOnDatabaseOpenForTest(fn func()) (restore func()) {
