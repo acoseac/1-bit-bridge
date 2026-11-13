@@ -29,7 +29,13 @@ func TestNativeEarlyReleaseStopsTimer(t *testing.T) {
 		t.Fatal("early failed release left timer armed")
 	}
 	h.clk.Advance(ReleaseTimeout)
-	h.must("barrier", h.eng.SetRepeat(bg, false))
+	// The deadline's message, had the advance fired one, is handled before
+	// this position, which changes nothing: messages reach the owner in
+	// order, where a command's reply is no barrier for a timer's message,
+	// since the owner can take the command first (B605, B834).
+	m = h.appliedMark()
+	s.ev.Position(s.id, Position{})
+	h.waitApplied("handled position", m)
 	if len(h.snap().Faults()) != 1 {
 		t.Fatal("release failure recorded more than once")
 	}

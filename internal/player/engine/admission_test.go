@@ -200,7 +200,13 @@ func TestAParkedEditIsAnsweredWithinReserveTimeoutOfItsPark(t *testing.T) {
 	// answers after that step.
 	h.must("a command after the delete", h.eng.SetRepeat(bg, false))
 	h.clk.Advance(ReserveTimeout - later - time.Nanosecond)
-	h.must("a command a nanosecond before the bound", h.eng.SetRepeat(bg, false))
+	// Had the advance fired the bound, its message would be handled before
+	// this position of no session, which changes nothing: messages reach the
+	// owner in order, where a command's reply is no barrier for a timer's
+	// message, since the owner can take the command first (B605, B834).
+	mark = h.appliedMark()
+	h.eng.evts.Position(0, Position{})
+	h.waitApplied("handled position", mark)
 	select {
 	case err := <-first:
 		t.Fatalf("the first edit answered %v before ReserveTimeout passed", err)
