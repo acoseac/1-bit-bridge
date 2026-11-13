@@ -3,6 +3,7 @@ package updater
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -256,14 +257,15 @@ func rollbackStage(dst, bak string, missing bool, oldpath, newpath string) strin
 // rollback's four renames, refused because another process holds its file
 // (a sharing violation on Windows: Defender holding the backup the start
 // has just run, backlog B872), is made again on its own after each of the
-// schedule's waits. Refused twice, it lands at its third attempt and the
-// rollback goes on from where it is. Refused at every attempt, after seven
-// attempts and 3.15 s of waits, the rollback ends where that rename leaves
-// the files, which the case asserts at the binary's place, the backup's
-// and the aside's: the backup kept beside the binary, or the running
-// binary put back from the aside, and "(restored)" said only where that
-// put-back landed. The put-back's own stage is reached by the backup's
-// rename refused once for good, as a mapped image's is.
+// schedule's waits, every other rename once: never the rollback whole.
+// Refused twice, it lands at its third attempt and the rollback goes on
+// from where it is. Refused at every attempt, after seven attempts and
+// 3.15 s of waits, the rollback ends where that rename leaves the files,
+// which the case asserts at the binary's place, the backup's and the
+// aside's: the backup kept beside the binary, or the running binary put
+// back from the aside, and "(restored)" said only where that put-back
+// landed. The put-back's own stage is reached by the backup's rename
+// refused once for good, as a mapped image's is.
 func TestEachRollbackRenameIsMadeAgainWhileItsFileIsInUse(t *testing.T) {
 	inUse := inUseFailure(t)
 	every := len(rollbackRenameBackoff)
@@ -272,24 +274,28 @@ func TestEachRollbackRenameIsMadeAgainWhileItsFileIsInUse(t *testing.T) {
 		// refused is how many attempts at the stage meet the file in use,
 		// every one where it is the schedule's length.
 		refused int
+		// attempts is how many renames each stage makes.
+		attempts map[string]int
 		// says is what the error says, none where the rollback lands.
 		says []string
 		// dst, bak and aside are what the binary's place, the backup's and
 		// the aside's hold after, "" for nothing.
 		dst, bak, aside string
 	}{
-		{stage: stageOntoMissing, refused: 2, dst: "KNOWN-GOOD"},
-		{stage: stageOntoMissing, refused: every, says: []string{"rollback rename", "still in use after 7 attempts over 3.15s"},
-			bak: "KNOWN-GOOD"},
-		{stage: stageAside, refused: 2, dst: "KNOWN-GOOD"},
-		{stage: stageAside, refused: every, says: []string{"rollback move", "aside", "still in use after 7 attempts over 3.15s"},
-			dst: "RUNNING", bak: "KNOWN-GOOD"},
-		{stage: stageBackup, refused: 2, dst: "KNOWN-GOOD"},
-		{stage: stageBackup, refused: every, says: []string{"still in use after 7 attempts over 3.15s", "(restored)"},
-			dst: "RUNNING", bak: "KNOWN-GOOD"},
-		{stage: stagePutBack, refused: 2, says: []string{"(restored)"}, dst: "RUNNING", bak: "KNOWN-GOOD"},
-		{stage: stagePutBack, refused: every, says: []string{"restore also failed", "still in use after 7 attempts over 3.15s",
-			"manual recovery needed"}, bak: "KNOWN-GOOD", aside: "RUNNING"},
+		{stage: stageOntoMissing, refused: 2, attempts: map[string]int{stageOntoMissing: 3}, dst: "KNOWN-GOOD"},
+		{stage: stageOntoMissing, refused: every, attempts: map[string]int{stageOntoMissing: 7},
+			says: []string{"rollback rename", "still in use after 7 attempts over 3.15s"}, bak: "KNOWN-GOOD"},
+		{stage: stageAside, refused: 2, attempts: map[string]int{stageAside: 3, stageBackup: 1}, dst: "KNOWN-GOOD"},
+		{stage: stageAside, refused: every, attempts: map[string]int{stageAside: 7},
+			says: []string{"rollback move", "aside", "still in use after 7 attempts over 3.15s"}, dst: "RUNNING", bak: "KNOWN-GOOD"},
+		{stage: stageBackup, refused: 2, attempts: map[string]int{stageAside: 1, stageBackup: 3}, dst: "KNOWN-GOOD"},
+		{stage: stageBackup, refused: every, attempts: map[string]int{stageAside: 1, stageBackup: 7, stagePutBack: 1},
+			says: []string{"still in use after 7 attempts over 3.15s", "(restored)"}, dst: "RUNNING", bak: "KNOWN-GOOD"},
+		{stage: stagePutBack, refused: 2, attempts: map[string]int{stageAside: 1, stageBackup: 1, stagePutBack: 3},
+			says: []string{"(restored)"}, dst: "RUNNING", bak: "KNOWN-GOOD"},
+		{stage: stagePutBack, refused: every, attempts: map[string]int{stageAside: 1, stageBackup: 1, stagePutBack: 7},
+			says: []string{"restore also failed", "still in use after 7 attempts over 3.15s", "manual recovery needed"},
+			bak:  "KNOWN-GOOD", aside: "RUNNING"},
 	} {
 		name := fmt.Sprintf("%s, refused %d of %d attempts", tc.stage, min(tc.refused, every), every)
 		t.Run(name, func(t *testing.T) {
@@ -344,14 +350,10 @@ func TestEachRollbackRenameIsMadeAgainWhileItsFileIsInUse(t *testing.T) {
 					t.Errorf("the rollback = %v, want it to carry the refusal of the file in use", err)
 				}
 			}
-			wantAttempts := min(tc.refused+1, every)
-			if attempts[tc.stage] != wantAttempts {
-				t.Errorf("attempts at %s = %d, want %d; all: %v", tc.stage, attempts[tc.stage], wantAttempts, attempts)
+			if !maps.Equal(attempts, tc.attempts) {
+				t.Errorf("the renames each stage made = %v, want %v: the refused one made again, every other once", attempts, tc.attempts)
 			}
-			if tc.stage == stagePutBack && attempts[stageBackup] != 1 {
-				t.Errorf("attempts at the backup's rename refused for good = %d, want 1: only a file in use is waited for", attempts[stageBackup])
-			}
-			if want := rollbackRenameBackoff[1:wantAttempts]; !slices.Equal(*waits, want) {
+			if want := rollbackRenameBackoff[1:tc.attempts[tc.stage]]; !slices.Equal(*waits, want) {
 				t.Errorf("the rollback waited %v, want %v", *waits, want)
 			}
 			for _, place := range []struct{ name, path, want string }{{"binary", dst, tc.dst}, {"backup", bak, tc.bak}} {
