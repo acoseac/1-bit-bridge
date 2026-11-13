@@ -144,8 +144,9 @@ func TestNativePausedInitialActivation(t *testing.T) {
 // Each arm is forced (armPick), and the select's own pick (armAny) asserts
 // whichever outcome it took: left to the select alone, the test waited on
 // Done beside a sink kept paused, until the package's timeout (backlog
-// B887). Which outcome a cancelled Resume should have is the product's
-// question, left open.
+// B887). Every wait is on the package's watchdog, the Locate's end too.
+// Which outcome a cancelled Resume should have is the product's question,
+// left open.
 func TestNativeResumeCancelsLocate(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -195,13 +196,13 @@ func TestNativeResumeCancelsLocate(t *testing.T) {
 			await(t, entered, "the reopen's Locate")
 			cancel()
 			err := receive(t, done, "the cancelled Resume's answer")
-			select {
-			case <-exited:
-			case <-time.After(time.Second):
-				letLocateGo()
-				await(t, exited, "the reopen's Locate, let go")
-				t.Error("resume context did not cancel locator")
-			}
+			// The Locate ends on the Resume's own context. Through that
+			// context the Resume answers without waiting for its writer
+			// (abandoned), so the Locate ends whenever the writer next runs,
+			// after the answer as often as not: awaited under the package's
+			// watchdog (-watchdog, a minute), never on a timer a writer
+			// scheduled late outlasts (B886's second round).
+			await(t, exited, "the reopen's Locate to end on the Resume's cancel (the resume context did not cancel the locator)")
 			if !errors.Is(err, context.Canceled) {
 				t.Errorf("the cancelled Resume answered %v, want its cancellation", err)
 			}
