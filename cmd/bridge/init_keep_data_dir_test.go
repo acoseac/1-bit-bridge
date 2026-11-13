@@ -346,6 +346,9 @@ func TestAKeptConfigsDataDirIsMadeBeforeItsServiceIsInstalled(t *testing.T) {
 				t.Fatalf("a run keeping the config exited %d", code)
 			}
 			requireInstalledOn(t, calls, dataDir)
+			if want := "made the data directory " + dataDir; !strings.Contains(out, want) {
+				t.Errorf("the run does not say it made the data directory: no %q", want)
+			}
 			if info, err := os.Stat(dataDir); err != nil || !info.IsDir() {
 				t.Fatalf("the data directory %s is not a directory after the run (stat: %v)", dataDir, err)
 			} else if runtime.GOOS != "windows" && info.Mode().Perm() != 0o700 {

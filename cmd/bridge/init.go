@@ -300,7 +300,10 @@ func portsARewriteAbandons(installAPI, installAdmin, runAPI, runAdmin int) []int
 // rotating the pair breaks every paired client's pin — and so a public
 // install's admin account, which `bridge admin reset-password` rotates
 // (init_rewrite.go says what else it keeps, and what it refuses to
-// rewrite). Every refusal is decided before bridge.yaml is written.
+// rewrite). A run that keeps the config prepares the data dir serve will use
+// as serve does, refusing what serve would refuse, before it installs the
+// service (init_keep.go). Every refusal is decided before bridge.yaml is
+// written.
 func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("init", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -579,9 +582,30 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	// the data dir and mint a TLS pair under the bare mount point. Asked
 	// before the preflight, which grades a certificate it cannot see there. A
 	// first install has no config whose record it would be, and a run that
-	// keeps the config writes nothing there.
+	// keeps the config asks it below.
 	if replace && refuseDataDirAway("init", cfgPath, dataDir, stderr) {
 		return 1
+	}
+	// A run that keeps the config installs and starts the service on it, which
+	// needs its data directory: the data directory serve uses, checked against
+	// its record and prepared as serve prepares it, or the run refuses, as
+	// serve would, before the preflight grades a certificate in a data
+	// directory serve refuses and before any service work (prepareKeptDataDir,
+	// backlog B664). --skip-doctor skips the preflight alone: serve takes no
+	// flag past its own refusals, and a unit installed past one fails at every
+	// start.
+	if keep {
+		if *nonInteractive {
+			fmt.Fprintf(stdout, "config file already exists at %s; keeping it\n", cfgPath)
+			fmt.Fprintf(stdout, "pass --force to overwrite non-interactively\n")
+		} else {
+			fmt.Fprintf(stdout, "keeping existing config\n")
+		}
+		kept, ok := prepareKeptDataDir(cfgPath, stdout, stderr)
+		if !ok {
+			return 1
+		}
+		dataDir = kept
 	}
 
 	// A posture flag the run would not write (warnIgnoredPostureFlags). A
@@ -717,14 +741,9 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 
 	// A run that keeps the config (the decision above) installs the service
-	// against it and writes nothing.
+	// against it, on the data directory prepareKeptDataDir prepared, and
+	// writes nothing of it.
 	if keep {
-		if *nonInteractive {
-			fmt.Fprintf(stdout, "config file already exists at %s; keeping it\n", cfgPath)
-			fmt.Fprintf(stdout, "pass --force to overwrite non-interactively\n")
-		} else {
-			fmt.Fprintf(stdout, "keeping existing config\n")
-		}
 		keepChoice := resolveLaunchChoice(in, stdout, *nonInteractive, *skipService, *windowsService, *startNow)
 		return finishInit(in, *nonInteractive, stdout, stderr, cfgPath, dataDir, keepChoice)
 	}
