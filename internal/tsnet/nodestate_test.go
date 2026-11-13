@@ -412,6 +412,12 @@ func TestAStateFileThatHoldsNothingRefusesTheStart(t *testing.T) {
 				t.Fatal("Start over a state file that holds nothing brought the node up")
 			}
 			mustSayTheStateHoldsNothing(t, err.Error(), c.holds, dir)
+			var empty *EmptyStateError
+			if !errors.As(err, &empty) || empty.WhiteSpace != (c.body != "") {
+				t.Errorf("Start = %#v, want an *EmptyStateError with WhiteSpace %v", err, c.body != "")
+			} else if want := empty.Error(); err.Error() != want {
+				t.Errorf("Start says %q, want the refusal's words alone: %q", err, want)
+			}
 			if last := s.LastStartError(); last == nil || last.Error() != err.Error() {
 				t.Errorf("LastStartError = %v, want the refusal Start returned", last)
 			}
@@ -490,6 +496,51 @@ func TestAStateFileThatIsNotThereStillStartsANewNode(t *testing.T) {
 			}
 			if got := s.MetricsState(); got != 2 {
 				t.Errorf("MetricsState = %d, want 2 (running)", got)
+			}
+		})
+	}
+}
+
+// TestOnlyJSONWhiteSpaceIsAStateThatHoldsNothing: the reader takes a file for
+// one that holds nothing exactly where it holds no JSON value, the bytes
+// JSON's decoder skips (space, tab, carriage return, line feed) and nothing
+// else, which is where Tailscale's start answers "unexpected end of JSON
+// input"; any other byte is a state that does not parse, and an object
+// with white space around it is the {} it holds.
+func TestOnlyJSONWhiteSpaceIsAStateThatHoldsNothing(t *testing.T) {
+	for _, c := range []struct {
+		name, body string
+		empty      bool // *EmptyStateError
+		whiteSpace bool
+		unreadable bool // errStateUnreadable
+	}{
+		{"no byte", "", true, false, false},
+		{"a line feed", "\n", true, true, false},
+		{"each byte JSON skips", " \t\r\n", true, true, false},
+		{"a vertical tab", "\v", false, false, true},
+		{"a form feed", "\f", false, false, true},
+		{"a no-break space", "\u00a0", false, false, true},
+		{"a byte order mark", "\ufeff", false, false, true},
+		{"NUL bytes", "\x00\x00\x00\x00", false, false, true},
+		{"{} between white space", " \n{}\n ", false, false, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeRaw(t, dir, c.body)
+			st, err := readNodeState(dir)
+			var empty *EmptyStateError
+			if got := errors.As(err, &empty); got != c.empty {
+				t.Fatalf("readNodeState = %+v, %v: a state that holds nothing %v, want %v", st, err, got, c.empty)
+			}
+			if c.empty && empty.WhiteSpace != c.whiteSpace {
+				t.Errorf("WhiteSpace = %v, want %v", empty.WhiteSpace, c.whiteSpace)
+			}
+			var unreadable errStateUnreadable
+			if got := errors.As(err, &unreadable); got != c.unreadable {
+				t.Errorf("readNodeState = %v: a state that does not read %v, want %v", err, got, c.unreadable)
+			}
+			if !c.empty && !c.unreadable && (err != nil || st.registered) {
+				t.Errorf("readNodeState = %+v, %v, want no registered node", st, err)
 			}
 		})
 	}

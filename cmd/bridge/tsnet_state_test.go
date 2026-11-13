@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/tsnet"
 )
 
 // A state file that holds nothing (backlog B828), on every path that starts
@@ -128,7 +130,11 @@ func TestTheCommandsRefuseAStateFileThatHoldsNothingInTheBridgesWords(t *testing
 			if len(seen) != 0 {
 				t.Errorf("bridge tsnet %s reached its node's upstream start; stderr=%s", c.cmd, stderr.String())
 			}
-			mustSayTheTsnetStateHoldsNothing(t, "bridge tsnet "+c.cmd, saidAfter(stderr.String(), c.said), c.holds, dataDir)
+			said := saidAfter(stderr.String(), c.said)
+			mustSayTheTsnetStateHoldsNothing(t, "bridge tsnet "+c.cmd, said, c.holds, dataDir)
+			if want := (&tsnet.EmptyStateError{WhiteSpace: c.body != ""}).Error(); said != want {
+				t.Errorf("bridge tsnet %s says %q, want the refusal's words alone: %q", c.cmd, said, want)
+			}
 			if stdout.Len() != 0 {
 				t.Errorf("bridge tsnet %s printed on stdout: %q", c.cmd, stdout.String())
 			}
@@ -199,6 +205,10 @@ func TestServeRefusesAStateFileThatHoldsNothingInTheBridgesWords(t *testing.T) {
 			}
 			words := strings.TrimSuffix(strings.TrimPrefix(line, tsnetStartEndedLine), lanGoesOn)
 			mustSayTheTsnetStateHoldsNothing(t, "serve's tailnet line", words, "is empty", dataDir)
+			refusal := (&tsnet.EmptyStateError{}).Error()
+			if words != refusal {
+				t.Errorf("serve's tailnet line says %q, want the refusal's words alone: %q", words, refusal)
+			}
 			if len(seen) != 0 {
 				t.Errorf("serve reached its node's upstream start; its line: %q", line)
 			}
@@ -207,6 +217,9 @@ func TestServeRefusesAStateFileThatHoldsNothingInTheBridgesWords(t *testing.T) {
 			}
 			getJSON(t, &http.Client{Timeout: 30 * time.Second}, "http://"+admin.addr+"/api/tailscale/status", "", &tile)
 			mustSayTheTsnetStateHoldsNothing(t, "the console's tile", tile.LastError, "is empty", dataDir)
+			if tile.LastError != refusal {
+				t.Errorf("the console's tile says %q, want the refusal's words alone: %q", tile.LastError, refusal)
+			}
 			select {
 			case <-exited:
 				t.Error("serve exited once its node's start was refused, where its LAN listener goes on")

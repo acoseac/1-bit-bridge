@@ -1,6 +1,7 @@
 package tsnet
 
 import (
+	"bytes"
 	"crypto"
 	"encoding/json"
 	"errors"
@@ -47,16 +48,55 @@ type errStateUnreadable struct{ why string }
 
 func (e errStateUnreadable) Error() string { return "the node's state " + e.why }
 
+// EmptyStateError is a start the bridge refused, before it built the node,
+// because the node's state file holds no state: it is empty, or holds JSON's
+// white space and nothing else, which a truncation leaves. Tailscale's start
+// refuses such a file, in words about a TPM-sealed state (store.New checks
+// the file's JSON before the file store, which alone takes an empty file for
+// none), and the file is the node's identity, which the bridge never moves or
+// replaces: the error says what keeps the node, what to move aside instead
+// and what a new device costs. Its text names no path, so the console's tile
+// can show it as it is (backlog B828).
+type EmptyStateError struct {
+	// WhiteSpace is set where the file holds white space, and clear where it
+	// holds no byte at all.
+	WhiteSpace bool
+}
+
+// Error is the refusal's words: what the file holds, that Tailscale does not
+// start from it, what keeps the node, and what to move aside instead and what
+// the new device that follows costs.
+func (e *EmptyStateError) Error() string {
+	holds := "is empty"
+	if e.WhiteSpace {
+		holds = "holds only white space"
+	}
+	return "the embedded Tailscale node's state file (" + stateFileName + ", in the tailscale folder of the bridge's " +
+		"data directory) " + holds + ", and Tailscale does not start from it: it holds none of the node's keys, so " +
+		"the node can come back only from a copy of the file or as a new device, and the bridge moves and replaces " +
+		"nothing itself. To keep the node, put back a copy of the file from before it was emptied. To start a new " +
+		"device, move the file aside, keeping it, and restart the bridge: the new device authenticates as on a first " +
+		"run (bridge tsnet auth, or tailscale.authKey or TS_AUTHKEY), takes a new tailnet address, and can take a new " +
+		"MagicDNS name, which paired apps hold"
+}
+
+// jsonSpace is the white space JSON allows between its tokens (RFC 8259,
+// section 2): a file that holds nothing else holds no JSON value, which is
+// what Tailscale's start refuses as "unexpected end of JSON input".
+const jsonSpace = " \t\r\n"
+
 // readNodeState reads the node's state from stateDir as upstream's file store
 // keeps it (a JSON object of state keys to their bytes) and as its profile
 // manager reads it at a start: the current profile's key
 // (ipn.CurrentProfileStateKey), that profile in the known profiles
 // (ipn.KnownProfilesStateKey), and its prefs (ipn.PrefsFromBytes). The node
-// is registered where those prefs carry a node ID. A missing or empty file,
-// one that holds no current profile ("{}", which upstream writes before any
+// is registered where those prefs carry a node ID. A missing file, one that
+// holds no current profile ("{}", which upstream writes before any
 // authentication), a current profile the known profiles do not list (one a
 // logout deleted), and prefs with no node ID (an authentication that never
-// finished) are no registered node.
+// finished) are no registered node. A file that holds no JSON value at all,
+// empty or white space alone, is no state either way: *EmptyStateError,
+// which refuses the start (nodeName).
 //
 // It opens the file for reading and nothing else: it never creates, writes
 // or locks it, and never goes through upstream's store constructor, which
@@ -78,9 +118,11 @@ func readNodeState(stateDir string) (nodeState, error) {
 	if len(raw) > maxStateBytes {
 		return nodeState{}, errStateUnreadable{fmt.Sprintf("is larger than the %d bytes it is read to", maxStateBytes)}
 	}
-	if len(raw) == 0 {
-		// Upstream's store takes an empty file for none.
-		return nodeState{}, nil
+	if len(bytes.Trim(raw, jsonSpace)) == 0 {
+		// Tailscale's start refuses this file: store.New unmarshals it to
+		// tell a TPM-sealed file from a plain one, and fails before the file
+		// store, which alone takes an empty file for none, is reached.
+		return nodeState{}, &EmptyStateError{WhiteSpace: len(raw) > 0}
 	}
 	var keys map[ipn.StateKey][]byte
 	if err := json.Unmarshal(raw, &keys); err != nil {
