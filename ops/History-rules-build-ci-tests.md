@@ -1317,11 +1317,63 @@ same files. The name is a constant, not the environment's TMPDIR: a bare
 `.tmp`, and a skip of the environment's directory passed under
 `make test-fast` and failed under a bare run (the record's control C740-3).
 Not every dot-directory: `.github` and `.claude` hold sites the census must
-read, where the Go-file sweeps skip every name the go tool ignores.
+read. (This said until 2026-11-13 that the Go-file sweeps skip every name
+the go tool ignores, which held for the blank-keeper guard alone of the
+four the record named: the citation guard's walks and the hash-cost and
+flac-handle guards read `.github` on purpose, and `.tmp` with it, until
+B567, below.)
 `TestTheCensusSkipsTheMakefilesTMPDIRAtTheRoot` plants in a fixture's
 `.tmp`, read from the Makefile, what the suite leaves there, and keeps a
 link at the root, in a `.tmp` below it and in a look-alike `.tmp.old`
 failing the census. Record: `ops/engineering-log.md`, B740.
+
+### B567 — every sweep from the root skips make test's TMPDIR (2026-11-13)
+
+- **…and so does every other sweep from the root that reads this checkout's files, by `sweeptest.IsMakeTestTmpDir`: the citation guard's walks (`skipsForCitations`, which `productionCalls` shares), the hash-cost guard and the flac-handle guard, which read dot-directories on purpose, while a sweep that skips every name the go tool ignores skips it already; `TestTheSweepsSkipTheDirectoryTheCensusSkips` holds `sweeptest.MakeTestTmpDir` to the census's constant, which the census, a program, cannot share with a package only tests import** (2026-11-13, backlog B567). **Don't give a sweep from the root a check of its own for that directory, rename either copy of its name alone, or skip a `.tmp` below the root or a name that only begins with it.**
+
+B740's record said the Go-file sweeps (the citation guard, the hash-cost,
+flac-handle and blank-keeper guards) already skip every name the go tool
+ignores, `.tmp` among them, so that the census was the one sweep that read
+it. Of the four, only the blank-keeper guard's rule (`moduleDirRule`, over
+`goToolIgnores`) did, with the sweeps that share it and the few that skip
+every dot-directory of their own. The citation guard's walk
+(`scanTestCitationsIn`) and `productionCalls`, both over
+`skipsForCitations`, the hash-cost guard (`hashCostDirRule`) and the
+flac-handle guard (`flacDirRule`) read `.github` on purpose, and read `.tmp`
+with it. While make test ran with its TMPDIR there, every package's tests
+kept their temporary trees in it, and the go command its work directories,
+so a Go file there changed these sweeps' answers (a test defined there
+satisfied a citation this tree does not back, a comment there cited a test
+nothing defines, a setter call or a leaky flac call there was reported as
+this module's, a file there in mid-edit failed the walk), and a directory
+removed between its listing and its own failed the walk outright. A
+leftover tree in a worktree's `.tmp` turned the five whole-tree guards built
+on them red, and none once they skipped it.
+
+Each of the three predicates skips the root's own `.tmp` by
+`sweeptest.IsMakeTestTmpDir`, decided by the name before the walk lists it,
+as the census skips it by `makeTestTmpDir`. The three test packages share
+that one definition, `sweeptest.MakeTestTmpDir`. The census keeps its own:
+it is a program, and sweeptest is imported by tests alone, nor can a test
+package reach a program's unexported constant. So
+`TestTheSweepsSkipTheDirectoryTheCensusSkips`, beside the census, holds the
+two to one name, as `TestTheCensusSkipsTheMakefilesTMPDIR` holds the
+census's to the Makefile. Only the root's: a `.tmp` further down, a name
+that begins with `.tmp` and the Go program under `.github` are read as
+before. A sweep that skips every name the go tool ignores needs nothing: it
+never reaches `.tmp`. A directory removed mid-walk is stood in for, never
+raced, by `sweeptest.Removal`, a walk that removes its directory at the
+moment the walk reaches it, after the directory above it was listed and
+before it is listed itself, which each sweep takes through its package's
+walk seam (`sweepWalkDir`, `hashCostWalkDir`, `flacWalkDir`).
+`TestTheCitationGuardsWalksSkipMakeTestsTMPDIRAtTheRoot`,
+`TestTheCitationGuardsWalksFinishWhileMakeTestsTMPDIRChanges`,
+`TestHashCostSweepSkipsMakeTestsTMPDIRAtTheRoot`,
+`TestHashCostSweepFinishesWhileMakeTestsTMPDIRChanges`,
+`TestFlacSweepSkipsMakeTestsTMPDIRAtTheRoot`,
+`TestFlacSweepFinishesWhileMakeTestsTMPDIRChanges`, `TestIsMakeTestTmpDir`
+and `TestARemovalRemovesWhatTheWalkReaches` pin it. Record:
+`ops/engineering-log.md`, B567.
 
 ### B520 — self-dial candidate search (2026-10-26)
 
