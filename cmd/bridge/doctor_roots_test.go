@@ -757,16 +757,9 @@ func TestDoctorRunsInOneProcessShareOneReadOfTheBox(t *testing.T) {
 		defer close(ran)
 		last <- launcherReport(d)
 	}()
-	// After the bound's cleanup, so before it: the run ends before the bound
-	// it read is put back.
-	t.Cleanup(func() {
-		box.letGo()
-		select {
-		case <-ran:
-		case <-time.After(doctorRootsDeadline):
-			t.Error("the last run was still out after the box answered")
-		}
-	})
+	// After the bound's cleanup, so before it: the box answers and the run
+	// ends before the bound it read is put back.
+	drainLoopOnCleanup(t, box.letGo, ran, "the last doctor run")
 	select {
 	case <-joined:
 	case <-box.began:
