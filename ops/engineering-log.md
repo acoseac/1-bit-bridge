@@ -96184,3 +96184,169 @@ the tree with this record. The rule change is `rules-b872-r3.patch`: round
 2's first B872 bullet in `build-ci-tests.md`, which named the wait's seam,
 now names the notice's seam, the held wait and its abort; the budgets check
 is clean with it.
+
+## 2026-11-13 — B618: on Windows, bridge logs reads the file the installed bridge writes
+
+Worker b618, legion0, branch `fix/b618-windows-logs-path` from main 2bebca26. Commits 779bdfc3 (the seams, the
+two Windows logs' paths, the install check and every case, red where the selection changes), 56347aff (the
+selection, for `bridge logs` and the console), and the one that carries this record. The rules line and its long
+form ship as `rules-b618-r1.patch` (`cli-serve.md`, which gains `internal/packaging/logpath*.go` and
+`internal/packaging/scm_*.go` among its paths, and `ops/History-rules-cli-serve.md`).
+
+### What was true (Step 0, at 2bebca26)
+
+Where each Windows install's bridge writes its log:
+
+- The service. `bridge init --service` (`init.go` 1307 to 1318) registers it through `InstallWindowsService`
+  (`internal/packaging/service_windows.go` 26 to 120) as `com.acoseac.1-bit-bridge`, display name `1-bit-bridge`,
+  `bridge.exe serve --config <cfg>` run as LocalSystem, and prepares `%PROGRAMDATA%\1-bit-bridge` (73 to 82). The
+  service's `main` calls `redirectServiceIO` first (`main.go` 2698 to 2699), which opens
+  `%PROGRAMDATA%\1-bit-bridge\bridge.log`, `C:\ProgramData` where `PROGRAMDATA` is empty
+  (`cmd/bridge/service_io_windows.go` 29 to 56), `O_CREATE|O_APPEND|O_WRONLY`, 0644, and points the std handles at
+  it. LocalSystem's `%LOCALAPPDATA%` is under `C:\Windows\System32\config\systemprofile`.
+- The Startup-folder install. `bridge init` without `--service` (`InstallStartup`, `init.go` 1336 to 1337; the
+  menu's `packaging.Install`, which tries the service manager first, `menu.go` 465 to 485) writes
+  `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\com.acoseac.1-bit-bridge.cmd` (`windows_startup.go` 19
+  to 52), whose line runs `start "1-bit-bridge" /min "<bridge.exe>" serve --config "<cfg>" 1>>"<LogPath>" 2>&1`
+  (`startup.cmd.tmpl` 6), LogPath DefaultLogPath (`init.go` 1284 to 1298): `%LOCALAPPDATA%\1-bit-bridge\bridge.log`,
+  the home's `AppData\Local` where `LOCALAPPDATA` is empty (`packaging.go` 517 to 525). Init's start of it
+  (`spawnNowOrWarn`, `init.go` 1356 to 1357 and 1386 to 1399) runs the same line through `cmd /c`
+  (`spawn_windows.go` 30 to 49).
+- A foreground `bridge serve`, the menu's "Start now" (`menu.go` 141 and 407) and init's run in its terminal
+  (`init.go` 1269) included: `logging.Init(os.Stderr)` and serve's output go to the terminal (`main.go` 2725 to
+  2733), and no file is made.
+
+`bridge logs` opened DefaultLogPath alone (`logs.go` 35), so on a service install it said "does not exist (yet)"
+and "run `bridge start` (or `bridge serve` in the foreground)" to an operator whose service was running, or
+printed a file an earlier install left.
+
+Telling the kind without elevation: `packaging.InstalledKind` (`state.go` 77 to 79, `state_windows.go` 23 to 48),
+which `bridge start`, `stop` and `restart` ask (`lifecycle.go` 75 and 82 to 96) and the menu shows, connects with
+`mgr.Connect` (x/sys v0.49.0 `svc/mgr/mgr.go` 43, `SC_MANAGER_ALL_ACCESS`) and opens with `OpenService` (195,
+`SERVICE_ALL_ACCESS`). A standard user's connect answers access denied, which falls through to the Startup-folder
+probe (`state_windows.go` 35), and any failure of the open reads as no service (32 to 34). `bridge status`
+(`status.go` 39 to 68) reads the invoking user's config and asks its admin port: it says nothing of the service. A
+query without elevation is allowed: by Microsoft's "Service Security and Access Rights" a local authenticated user
+holds `SC_MANAGER_CONNECT` (with `ENUMERATE_SERVICE`, `QUERY_LOCK_STATUS` and read control) of the manager, and
+`SERVICE_QUERY_STATUS` (with `QUERY_CONFIG`, `ENUMERATE_DEPENDENTS`, `INTERROGATE`, `USER_DEFINED_CONTROL` and
+read control) of a service `CreateService` registers with the default security, as `InstallWindowsService` does.
+legion0 has no Windows, so that is the documentation's word, which the tests' stand-in models; the query asks the
+local manager and nothing of the network.
+
+The other readers of DefaultLogPath on Windows:
+
+- `adminLogPath` (`logs.go` 226 to 232), into `admin.Deps.LogPath` (`main.go` 6345): the console's log status,
+  export and the support bundle's tail (`internal/admin/handlers_logs.go` 61 to 89, 178 to 206 and 366 to 391).
+  Inside the service it was LocalSystem's DefaultLogPath, while the service writes `%PROGRAMDATA%`'s: the same
+  mismatch, fixed here (the brief's review, Carbon 1).
+- `adminLogPath` into `doctor.Deps.LogPath` (`doctor.go` 269), for `log-file-size` (`internal/doctor/logsize.go`
+  44 to 84). The console's doctor builds it in the serving process (`adminDoctorRunnerFor`, `doctor.go` 1021 to
+  1023), so it shares the console's path and is fixed with it. `bridge doctor` run from a shell is no service and
+  grades the user's log, which on a service install is not the log: left, and named in the report.
+- `init.go` 1284 and `menu.go` 465: the launcher's and init's start's redirect target, right for them. But
+  `bridge init --service` prints `Logs:` with it (`init.go` 1361) after installing the service, which never
+  writes it: left, and named in the report.
+
+### The choice, as built
+
+`packaging.CheckWindowsInstall` connects with `SC_MANAGER_CONNECT` alone and opens the service with
+`SERVICE_QUERY_STATUS` alone: a service it opens is registered, running or not; `ERROR_SERVICE_DOES_NOT_EXIST` is
+not registered; any other failure (the connect refused or out of reach, the service's security refusing the open)
+cannot tell, and keeps its error. It finds the Startup-folder launcher by its path. Its calls are a struct of the
+service manager's three calls (`serviceManager`), Windows's own in `scm_windows.go`, so a stand-in carries every
+case on any host. It is not `InstalledKind`, whose callers are other commands', left as they were.
+
+`chooseWindowsLog` decides from the registration and the directories alone: the service's log while the service
+is registered, the user's otherwise, the service's first where the check cannot tell. Choosing the service's needs
+nothing of the user's path: a home that cannot be read leaves only the other unnamed. `openWindowsLog` reads it;
+where the other is there too it says so in one line on stderr; where the check cannot tell it reads the service's
+log where that is there and the user's otherwise, each said in one line with the check's error, so the user's is
+never chosen in silence; where it finds no log it names the path it looked at, or both, and what writes it:
+Services (the service shows there as `1-bit-bridge`) or `sc.exe query com.acoseac.1-bit-bridge` for the service,
+the sign-in launcher, `com.acoseac.1-bit-bridge.cmd` in the Startup folder, for its log, and, with nothing
+installed, that a bridge run in the foreground logs to its terminal; never `bridge serve`, `bridge start` or
+`bridge status` (the brief's review, Codex 4 and 5). The paths are `packaging.WindowsLogDirs`'s: `C:\ProgramData`
+where `PROGRAMDATA` is empty, as the service took it, and the home's `AppData\Local` where `LOCALAPPDATA` is, as
+DefaultLogPath took it, the home asked only then. `redirectServiceIO` and `InstallWindowsService` take the
+service's folder and file from it and the service's open from `packaging.OpenServiceLog`, and DefaultLogPath's
+Windows answer is its `UserLog` (home first, as before, so its errors are as they were). Off Windows, `bridge logs`
+reads DefaultLogPath in its words of before, byte for byte.
+
+The console's path, `consoleLogPath`, takes `chooseWindowsLog` with whether its process runs as the service
+(`isWindowsService`) for the check: the service's log inside the service, the user's otherwise, DefaultLogPath off
+Windows, `""` where the path cannot be made, as before. The comments that said the console, the doctor and
+`bridge logs` read one file (`adminLogPath`'s, `admin.Deps.LogPath`'s and the `LogPath:` line's in `doctor.go`)
+say where they part, and `doctor.Deps.LogPath`'s and the log handlers' name the service's own log.
+
+### Red first
+
+At 779bdfc3 (the cases over main's selection, DefaultLogPath alone), `go test -count=1 -v -run '…' ./cmd/bridge/`
+with the release tags and TMPDIR `~/onebit/tmp`, predictions written first (`.tmp/_b618/red.predictions.txt`, not
+committed), every top-level verdict as predicted:
+
+- red: `TestBridgeLogsReadsTheServicesLogWhileTheServiceIsRegistered` (its 3 rows; the first "bridge logs printed
+  "a line of a bridge its sign-in launcher started\n" want "the service's first line\nthe service's last line\n""
+  and the stderr line missing), `TestBridgeLogsSaysWhichLogItReadsWhereTheServiceIsNotRegistered` (2 rows, the
+  line missing), `TestBridgeLogsSaysWhereTheServicesLogWillBe` (2: main's words name the user's path),
+  `TestBridgeLogsSaysWhatWritesTheUserLog` (2: "bridge logs offered a command as the way to make the file"),
+  `TestBridgeLogsReadsTheServicesLogWhereTheCheckCannotTell` (5), `TestBridgeLogsChoosesTheServicesLogWithoutTheHome`
+  (its registered row: "logs: resolve path"), `TestBridgeLogsReadsTheServicesLogWhileTheServiceHoldsIt`,
+  `TestTheConsolesLogIsTheFileItsProcessWrites` ("inside the service the console's log is "…/AppData/Local/1-bit-
+  bridge/bridge.log", want the service's") and `TestTheWindowsLogChoiceInWindowsPaths` (the console's half of its
+  4 registered rows);
+- green, the guards: `TestBridgeLogsReadsTheUserLogOfAStartupFolderInstall`, `TestBridgeLogsOffWindowsIsAsItWas`,
+  `TestBridgeLogsReadsTheHostsLogThroughItsEntryPoint`, and the existing
+  `TestTheDiagnosticsStayAvailableWhileTheDataDirsVolumeIsAway`.
+
+internal/packaging's new tests are of new code and green there. At 56347aff every test is green.
+
+### Negative controls
+
+Each predicted before any ran (`.tmp/_b618/controls.predictions.txt`, not committed), at 56347aff, an uncommitted
+edit of the clean tree restored with `git checkout --` and its bytes compared with HEAD's, the touched tests run
+from test binaries built for it (`.tmp/_b618/controls.py`). The run with no mutation was green (63 verdicts). Each
+was red where predicted and nowhere else, and `git status` was clean after:
+
+| | mutation | red |
+|---|---|---|
+| C1 | the brief's: `openLog`'s Windows call site back to the old selection (`openDefaultLog`, DefaultLogPath alone) | the service, not-registered, no-file, cannot-tell, held-log and registered-without-home rows (22 verdicts); the Startup-folder, off-Windows and entry-point guards and the console green |
+| C2 | `consoleLogPath`'s Windows branch removed (`adminLogPath` as at main) | `TestTheConsolesLogIsTheFileItsProcessWrites`, the 4 registered rows' console half |
+| C3 | the check connects with `SC_MANAGER_ALL_ACCESS` (`InstalledKind`'s) | the standard user and administrator rows, three of the cannot-tell table's, the stopped service, every both-artifacts row |
+| C3b | the service opened with `SERVICE_ALL_ACCESS` | both access rows, the stopped service, the three both-artifacts rows with a service |
+| C4 | every open failure read as not registered (`InstalledKind`'s shape) | the two rows whose failure is not a missing service |
+| C5 | a check that cannot tell read as not registered (the user's log in silence) | every cannot-tell row |
+| C6 | the line naming both logs dropped where the service is registered | the two rows with both logs |
+| C9 | the choice needs the user's path | the registered row without a home, the two no-home path rows, the console's |
+| C9b | `UserLog` asks the home first | the two path rows with `LOCALAPPDATA` set |
+| C10 | no `C:\ProgramData` where `PROGRAMDATA` is empty | the path rows with no `PROGRAMDATA` (both packages) |
+| C11 | the home's fallback without `AppData\Local` | the path rows with no `LOCALAPPDATA` (both packages) |
+
+### The gates
+
+At 56347aff, TMPDIR `~/onebit/tmp` and the release tags on every command. In one use of the build lock (19:16:04
+to 19:16:19): `go vet ./...` clean for linux/amd64, darwin/amd64 and windows/amd64, and of cmd/bridge,
+internal/packaging, internal/admin and internal/doctor for linux/386 (cached results of this session's own vets of
+the same sources). go1.27.3's gofmt lists none of the changed Go files. Outside the lock, one package per
+`go test`, `-p 8 -parallel 8`: `-race -count=50` of internal/packaging's 9 touched tests ok (450 runs, 900 subtest
+passes, none failed or skipped) and of cmd/bridge's 13 (the 12 new and
+`TestTheDiagnosticsStayAvailableWhileTheDataDirsVolumeIsAway`; 650 runs, 1,650 subtest passes); `go test -race
+-count=1 -timeout 120m` of internal/packaging ok (1.4 s) and of cmd/bridge ok (2,456 s, under a load near 26 from
+the host's other workers), which holds `TestEveryCitedTestNameExists`, `TestNoDocblockNamesAnotherDeclaration` and
+`TestNoBlankKeepers`; no race reported anywhere. The rules patch applies to HEAD (`git apply --check`); on a copy
+of the tracked tree with it applied, outside any checkout, the copy's `make docs-check` steps are clean
+(`cli-serve.md` 99,859 bytes), and `TestEveryCitedTestNameExists` passes there and fails with a ghost citation
+planted in the patched History. `make test` and `make build-all` were not run: the brief asked for the packages.
+Windows and macOS are CI's to run.
+
+### What only windows-latest shows
+
+internal/packaging's `TestTheStandInsRightsAreWindowsOwn` (the stand-in's access values against x/sys/windows's),
+`TestTheServiceManagerAnswersTheInstallCheck` (the real manager: `EventLog` registered, a made-up name not) and
+`TestTheWindowsLogsAreTheHostsOwn` (DefaultLogPath equal to `UserLog`, and the service's log under `PROGRAMDATA`
+or `C:\ProgramData`) build only there. `TestBridgeLogsReadsTheServicesLogWhileTheServiceHoldsIt` reads the log
+while a handle holds it with the service's own open, whose subject is Windows's sharing modes (Go opens with
+`FILE_SHARE_READ|FILE_SHARE_WRITE` both ways, go1.27.3 `syscall/syscall_windows.go` 395); on legion0 nothing
+refuses it. `TestTheWindowsLogChoiceInWindowsPaths` and `TestTheWindowsLogsAreMadeFromTheirDirectories` run with
+Windows's own `filepath.Join` there beside the tests' joiner, and `TestBridgeLogsReadsTheHostsLogThroughItsEntryPoint`
+runs `bridge logs` over the real install check there. A standard user's rights are shown by neither host: CI's
+runner is elevated.
