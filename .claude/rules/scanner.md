@@ -134,9 +134,10 @@ lost my library."
 - **Column-only columns must never gain `json:` tags or be spliced onto wire
   output**: the v25 format facts, `acoustid_match` (v28), `dupe_*` (v31),
   `audio_md5` (v32), `booklet_tag`, `artwork_version`, `deezer_pending_query`
-  (v63, backlog B761). `tags_json` stays the Go readers' truth; the columns are
-  query accelerators. `marshalForStorage` zeroes the spliced fields
-  (`Enriched`, `BPMEstimated`, `Variants`) on the way in.
+  (v63, backlog B761), `deezer_pending_mbid` (v64). `tags_json` stays the Go
+  readers' truth; the columns are query accelerators. `marshalForStorage`
+  zeroes the spliced fields (`Enriched`, `BPMEstimated`, `Variants`) on the way
+  in.
 - **Bump `manifest.ExtractorVersion` on EVERY extraction-logic change** (const, must stay ≥ 1 — at 0 the `stored >= current` gate never re-extracts) → History-rules-scanner.md
 - **A string stored in `tags_json` is valid UTF-8, decoded where the format says what the bytes are** (2026-10-14, backlog B181) → History-rules-scanner.md
 - **`plausibleDuration` has BOTH ends, and "empty" has three spellings** (ExtractorVersion 13, #966) → History-rules-scanner.md

@@ -392,9 +392,11 @@ Audited PR-by-PR; verified clean at the time of this section's introduction. Re-
   `pending` only while enrichment is genuinely pending, terminal 404 `no_image`
   once it has run. Fail OPEN to pending on a DB fault; no `Retry-After` on
   `no_image`; don't collapse it back to two states. On `/v1/artist-image` an
-  artist one of whose rows keeps a portrait lookup the Deezer switch refused is
-  pending while enrichment and Deezer are both on, and `no_image` while either
-  is off (2026-11-12, backlog B761; `enrichment.md`).
+  artist one of whose rows waits for its portrait by a name that has failed
+  fewer than five times in a row (`manifest.PortraitPendingAttempts`) is pending
+  while enrichment and Deezer are both on, and `no_image` otherwise, which is
+  not final while the bridge keeps asking (2026-11-12, backlog B761, and its
+  round 2; `enrichment.md`).
 - **Don't assume byte-wise client consumption.** The iOS client once used
   `URLSession.bytes(for:)`, which yields one `UInt8` per async step — 20M yields
   for a 20 MB file stalled the pipeline and surfaced as "Network connection lost"
