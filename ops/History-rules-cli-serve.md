@@ -4179,8 +4179,11 @@ the next (round 2's control R05b).
 *The name.* An explicit `tailscale.hostname` wins. Otherwise each start
 reads the state read-only (`readNodeState`): `<StateDir>/tailscaled.state`
 opened through `fsutil.OpenAsFile` (a named pipe or a directory refused at
-once) and read to 16 MiB at most, never through upstream's store
-constructor, which writes `{}` over a missing file; the JSON object of state
+once) and read to 16 MiB and one byte at most, nothing past them read (a
+larger file is a state that does not read, unless all that was read is white
+space, which refuses the start as a file that holds nothing: B828's round 2),
+never through upstream's store constructor, which writes `{}` over a missing
+file; the JSON object of state
 keys upstream's file store keeps; the profile key under
 `ipn.CurrentProfileStateKey`; that key listed among the profiles under
 `ipn.KnownProfilesStateKey`, since upstream's start takes an unlisted one
@@ -5362,7 +5365,7 @@ The record is in `ops/engineering-log.md`, 2026-11-12, B826.
 
 ## B828 — a state file that holds nothing refuses the start in the bridge's words (2026-11-13)
 
-- **…and a state file that holds nothing, empty or JSON's white space alone, refuses the node's start before the node is built, whatever `tailscale.hostname` or the auth key says, in the bridge's words (`tsnet.EmptyStateError`, naming no path: a copy of the file keeps the node; moved aside, a new device follows, and what that costs), which serve's tailnet line and `bridge tsnet auth` and `status` (exit 1) print and the console's tile shows in LastError (`tsnetAdminStatus`, from `LastStartError`); Tailscale's own start refuses that file, in words about a TPM-sealed state, and the bridge moves and replaces nothing** (2026-11-13, backlog B828, and the review of its brief). **Don't take a state file that holds nothing for no node, build or start the upstream node over it, ask `tailscale.hostname` before it, move, replace or write the file, name a path in its words, or count a byte JSON does not skip as nothing.** `TestAStateFileThatHoldsNothingRefusesTheStart`, `TestAStateFileThatIsNotThereStillStartsANewNode`, `TestOnlyJSONWhiteSpaceIsAStateThatHoldsNothing`, and cmd/bridge's `TestTheCommandsRefuseAStateFileThatHoldsNothingInTheBridgesWords` and `TestServeRefusesAStateFileThatHoldsNothingInTheBridgesWords` pin it. → History-rules-cli-serve.md
+- **…and a state file that holds nothing, empty or JSON's white space alone (of a file larger than the 16 MiB and one byte it is read to, all that was read, nothing past it read), refuses the node's start before the node is built, whatever `tailscale.hostname` or the auth key says, in the bridge's words (`tsnet.EmptyStateError`, naming no path: a copy of the file keeps the node; moved aside, a new device follows, and what that costs), which serve's tailnet line and `bridge tsnet auth` and `status` (exit 1) print and the console's tile shows in LastError (`tsnetAdminStatus`, from `LastStartError`); Tailscale's own start refuses that file, in words about a TPM-sealed state, and the bridge moves and replaces nothing** (2026-11-13, backlog B828, the review of its brief, and its round 2). **Don't take a state file that holds nothing for no node, build or start the upstream node over it, ask `tailscale.hostname` before it, move, replace or write the file, name a path in its words, count a byte JSON does not skip as nothing, or read past the bound to decide it.** `TestAStateFileThatHoldsNothingRefusesTheStart`, `TestAStateFileThatIsNotThereStillStartsANewNode`, `TestOnlyJSONWhiteSpaceIsAStateThatHoldsNothing`, and cmd/bridge's `TestTheCommandsRefuseAStateFileThatHoldsNothingInTheBridgesWords` and `TestServeRefusesAStateFileThatHoldsNothingInTheBridgesWords` pin it. → History-rules-cli-serve.md
 
 *What upstream does.* tailscale.com v1.104.2's `tsnet.Server.Start`
 (tsnet/tsnet.go, 556 to 559; `doInit`, 709 to 714) runs `start` (805), which
@@ -5446,3 +5449,31 @@ alone), the line drawn at `bytes.TrimSpace` (the vertical tab, form feed and
 no-break space rows) and the upstream node built though never started (the
 refusal rows' count of nodes alone). The record is in
 `ops/engineering-log.md`, 2026-11-13, B828.
+
+*Round 2: white space past the read's bound.* The reading reads 16 MiB and one
+byte at most, and its size guard ran before its white-space check, so a file
+of 16 MiB and one byte of white space was "larger than the 16777216 bytes it
+is read to", a state that does not read: the start took the library's name,
+said so, built the upstream node and ended in upstream's TPM-worded failure,
+its logger's file written into the state dir (Codex and Claude on round 1).
+The check now comes first, of the same bounded read, its errors and its cap as
+they were (a chunked read would lift the cap, which the brief's review ruled
+out): where all that was read is white space, the file holds nothing,
+`Oversized` set where it is larger than the read, and nothing past it is read.
+Its words say the file holds no state in its first 16 MiB, which is as far as
+the bridge reads it, and that the bridge does not start the node from it; they
+leave out "Tailscale does not start from it", since of such a file the bridge
+knows only what it read. The edge: a file with JSON past its first 16 MiB of
+white space, which Tailscale might start from, is refused with it, where it
+reached upstream before; a state file is a few KiB, so that file is broken
+anyway. Anything else in what was read keeps a larger file a state that does
+not read, as before. `TestOnlyJSONWhiteSpaceIsAStateThatHoldsNothing`'s rows
+at the bound, past it, and past it with an x in its first 16 MiB pin it, each
+row that holds nothing driving a start that must be refused before anything is
+built (`startRefused`). The row past the bound was red at 88b06153 on the
+reader's "is larger than the 16777216 bytes it is read to", the upstream node
+built and started and the logger's file in the state dir; three controls, each
+predicted, were red where predicted: the check asked only within the bound
+(the row past it), `Oversized` set at the bound (the row at it), and the words
+without `Oversized` (the row past it). The record is in
+`ops/engineering-log.md`, 2026-11-13, B828 round 2.
