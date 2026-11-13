@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -318,6 +319,35 @@ func TestBridgeDoctorBoundsTheLoadOfAConfigThatSetsItsSidecarDirectories(t *test
 	}
 	if n := s.loadsOf(dead); n != 1 {
 		t.Errorf("%d loads met the root, want one", n)
+	}
+}
+
+// TestTheDoctorProbesTheRootsBesideItsLoadOfTheConfig: the roots a config
+// names, read without touching them, are probed from the moment its load
+// begins (loadDoctorConfig), so a load a root holds and the root's own probe
+// cost a run one bound between them, and a load that does not finish hands
+// the run those roots to name.
+func TestTheDoctorProbesTheRootsBesideItsLoadOfTheConfig(t *testing.T) {
+	path, healthy, dead := rootsInstall(t, true)
+	s := newRootStall(dead)
+	run := stallProbes(t, s, doctorRootsBound).BeginRun()
+	type loaded struct {
+		roots []string
+		err   error
+	}
+	got, _ := doctorWithin(t, "the doctor's load of the config", func() loaded {
+		_, roots, err := loadDoctorConfig(context.Background(), run, path)
+		return loaded{roots, err}
+	})
+	var unfinished *doctor.UnfinishedLoadError
+	if !errors.As(got.err, &unfinished) || strings.Join(got.roots, " ") != healthy+" "+dead {
+		t.Fatalf("the load = %v with roots %q; want it unfinished, with the roots %q and %q", got.err, got.roots, healthy, dead)
+	}
+	for deadline := time.Now().Add(10 * time.Second); s.statsOf(healthy) != 1 || s.statsOf(dead) != 1; time.Sleep(5 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("after the load, the roots were probed %d and %d times; want each once, beside the load",
+				s.statsOf(healthy), s.statsOf(dead))
+		}
 	}
 }
 
