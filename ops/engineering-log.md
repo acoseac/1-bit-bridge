@@ -95144,3 +95144,47 @@ away-volume table run:
   over each shape before the gate refused it.
 - C6, `--skip-doctor` skipping the gate: the 22 rows run with it red, every
   other green.
+
+### The permission half, pinned
+
+cc629f97 adds two tests for the exit policy's permission half, each written
+after the fix: `TestAKeptConfigWhoseDataDirThisUserCannotMakeInstallsNoService`
+(a data dir that is not there, below a parent this user may not write:
+refused in the preparation's words, saying to run init as the bridge's user,
+nothing made, kept each of three ways) and the guard
+`TestAKeptConfigsDataDirThisUserCannotWriteIsTaken` (a data dir that is there
+and that this user may not write is taken, as serve's preparation takes it;
+B659). Run against e1478b23's code (a `git archive` copy with the new test
+file, `.tmp/_b664/redcopy.py`): the first red in its three rows ("a run
+keeping a config whose data directory this user cannot make exited 0, want
+1", a unit installed), the guard green. The six controls run again over
+cc629f97, predicted first (the predictions file's round 2): every earlier row
+as before, the new test red under C1 and C3 (three rows each) and in its
+`--skip-doctor` row under C6, the guard green under all six.
+
+### The gates
+
+On cc629f97, in one use of the build lock (07:52 to 08:26, nothing else in
+it), TMPDIR `~/onebit/tmp`, `-p 8`: `go vet ./...` with the Makefile's tags
+clean for linux, darwin and windows (cache hits on unchanged sources; `go vet
+-printf=true ./cmd/bridge/` then ran the vet tool afresh for each of the
+three, clean). From one race-built test binary, four lanes side by side,
+`-test.count 50`: the round's eight tests, the away-volume and diagnostics
+tables, and the seven keep-path tests that were there before
+(`TestInitInteractiveSkipOnExistingConfig`,
+`TestInitRunThatKeepsTheConfigIsNotRefused`,
+`TestInitInteractiveKeepAsksForNoName`,
+`TestInitSaysNothingOfTheRunsPortsWhereTheInstallsConfigLoads`,
+`TestInitInteractiveKeepGradesTheInstallsPorts`,
+`TestInitRefusesToRewriteAConfigItDoesNotMake`,
+`TestInitInteractiveRewriteRefusesAPublicOnlyFlagWithoutPublic`): every lane
+PASS, no race reported, in 373 s. `go test -race -count=1 -timeout 120m
+./cmd/bridge/`: ok in 1,606 s, with `TestEveryCitedTestNameExists` and the
+TestMain guard on init's host. On a `git archive` copy with the rules patch's
+two files written in, `TestEveryCitedTestNameExists` ok, and failing on a
+ghost citation planted in the copy's History alone, which shows it read the
+copy; `scripts/check-doc-budgets.py` clean there (`cli-serve.md` 98,976
+bytes), and over budget with the copy's file padded by 1,500 bytes. go1.27.3's
+gofmt lists none of the round's Go files. `make test` and `make build-all` were
+not run: the brief asked for the package. Windows' and macOS' runtime cases are
+the PR's CI legs'.
