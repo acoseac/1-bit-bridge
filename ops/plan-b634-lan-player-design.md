@@ -7,9 +7,10 @@ Design, round 1. Docs only: this file is the round's one change. Base: main at 4
 brief's review (Codex and Carbon, 2026-11-13, ten points, each settled below and indexed in §15),
 `ops/plan-b728-dsd-capability-design.md` §6, §7.2 and §11, and B9 PR 2.
 
-**B9 PR 2's commit 29641b98 (#1453) is not on the build host this round ran on**: neither of its
-clones of the bridge holds it (no ref names it, and no loose object is there). This design reads
-B9 PR 2 at the tip of `feat/b728-b9-pr2` that both stores hold, e4493648 (round 5), whose
+**B9 PR 2's commit 29641b98 (#1453) is not on the build host this round ran on**: the bridge's
+object store there does not hold it (no ref names it, no loose object is there, and `git log`
+does not know it). This design reads B9 PR 2 at the tip of `feat/b728-b9-pr2` that the store holds,
+e4493648 (round 5), whose
 `internal/player/playback/dsd_choice.go` carries the configuration lease's paragraph at lines 26-33
 and `takeLease` at line 308, the lines the brief cites, and §7.2 of the B728 design as that branch
 rewrote it (8b3c4278, "the design says a choice is written only while the player is stopped"). It
