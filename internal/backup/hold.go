@@ -91,6 +91,8 @@ const (
 	// A restore's steps under the lock (holdSource).
 	stepClearMarker  = "its removal of a marker left beside the snapshots' lock"
 	stepReadSnapshot = "its read of the snapshot it restores"
+	// A probe's release of the lock it tried (letProbeGo, backlog B871).
+	stepProbeRelease = "letting go of the lock it tried"
 )
 
 // releaseBound is how long letting a hold's lock go may take (release)

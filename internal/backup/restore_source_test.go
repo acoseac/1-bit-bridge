@@ -602,6 +602,10 @@ func TestASnapshotPrunedWhileTheRestoreAskedIsRefusedBeforeTheDestinationIsTouch
 				t.Fatal("premise: the snapshot does not read as one before the prompt")
 			}
 
+			// removed hears the removal the prune's stand-in makes on the
+			// restore's worker, in the lock's wait: its error is the test
+			// goroutine's to fail on (backlog B871's item 8).
+			var removed chan error
 			if during == "the prompt" {
 				if pr, err := backup.Prune(root, 1); err != nil || pr.Deleted != 1 || pathExists(t, old) {
 					t.Fatalf("premise: the prune during the prompt: %+v, %v; want the older snapshot removed", pr, err)
@@ -610,22 +614,26 @@ func TestASnapshotPrunedWhileTheRestoreAskedIsRefusedBeforeTheDestinationIsTouch
 				// Another process's prune holds the lock as the restore asks
 				// for it, removes the snapshot, and lets go.
 				release := holdLockAsAnotherProcess(t, root)
-				var removed atomic.Bool
+				removed = make(chan error, 1)
+				var once atomic.Bool
 				t.Cleanup(backup.SetOnLockWaitForTest(func() {
-					if removed.CompareAndSwap(false, true) {
-						if err := os.RemoveAll(old); err != nil {
-							t.Error(err)
-						}
+					if once.CompareAndSwap(false, true) {
+						removed <- os.RemoveAll(old)
 						release()
 					}
 				}))
-				defer func() {
-					if !removed.Load() {
-						t.Error("premise: the restore never waited for the prune's lock")
-					}
-				}()
 			}
 			err := backup.RestoreWithOptions(old, b.targets, backup.RestoreOptions{LockWait: 20 * time.Second})
+			if removed != nil {
+				select {
+				case rerr := <-removed:
+					if rerr != nil {
+						t.Fatalf("premise: the prune's removal of the snapshot: %v", rerr)
+					}
+				default:
+					t.Fatal("premise: the restore never waited for the prune's lock")
+				}
+			}
 			if !errors.Is(err, backup.ErrSnapshotGone) || !strings.Contains(err.Error(), "nothing was restored") {
 				t.Errorf("a restore of a snapshot pruned since it was read answered %v, want ErrSnapshotGone, nothing restored", err)
 			}

@@ -45,6 +45,20 @@ func StuckAnywhereForTest() bool {
 	return held
 }
 
+// FolderTokenHeldForTest reports whether this process's one holder of the
+// backups folder at root is taken (folderTokens): a try on it, given back at
+// once.
+func FolderTokenHeldForTest(root string) bool {
+	token := folderToken(ownerKey(root))
+	select {
+	case token <- struct{}{}:
+		<-token
+		return false
+	default:
+		return true
+	}
+}
+
 // SlotHeldForTest reports whether a verification holds this process's slot:
 // a try on it, given back at once.
 func SlotHeldForTest() bool {
@@ -211,19 +225,6 @@ func SetRemoveStaleMarkerForTest(fn func(path string) error) (restore func()) {
 	return func() { removeStaleMarker = prev }
 }
 
-// SetOnMarkerWriteForTest installs the hook a marker's write runs, given
-// "waits" as it begins to wait for a removal of a stale marker under way and
-// "writes" once it has written the marker, each with its path, and returns
-// the restore. Its callback must return, and ignore every path but its test's.
-func SetOnMarkerWriteForTest(fn func(event, marker string)) (restore func()) {
-	var p *func(string, string)
-	if fn != nil {
-		p = &fn
-	}
-	prev := onMarkerWrite.Swap(p)
-	return func() { onMarkerWrite.Store(prev) }
-}
-
 // SetOnSourceStepForTest installs the hook a restore's source worker runs as
 // it passes a step under the lock ("held", "cleared", "read"), given the snapshot as
 // the restore was given it, and returns the restore. Its callback must return
@@ -235,6 +236,19 @@ func SetOnSourceStepForTest(fn func(dir, step string)) (restore func()) {
 	}
 	prev := onSourceStep.Swap(p)
 	return func() { onSourceStep.Store(prev) }
+}
+
+// SetFailSourceOpenForTest installs fn as the open of every file a restore
+// copies out of its snapshot, given its path where the snapshot resolves: a
+// non-nil answer is that open's error, nil lets the open run; and returns the
+// restore.
+func SetFailSourceOpenForTest(fn func(path string) error) (restore func()) {
+	var p *func(string) error
+	if fn != nil {
+		p = &fn
+	}
+	prev := failSourceOpen.Swap(p)
+	return func() { failSourceOpen.Store(prev) }
 }
 
 // SetOnSourceWorkerEndForTest installs the hook a restore's source worker

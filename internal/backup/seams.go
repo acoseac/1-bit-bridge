@@ -390,3 +390,100 @@ func SetFilesCheckIncompleteForTest(dir string) (restore func()) {
 	prev := filesCheckIncompleteForTest.Swap(&dir)
 	return func() { filesCheckIncompleteForTest.Store(prev) }
 }
+
+// SetOnCheckAwaitForTest installs the hook CheckRestoreSource runs once its
+// worker has begun and before it waits for the worker's answer, given the
+// snapshot as bridge restore was given it, and returns the restore: a test
+// makes the worker's answer and a stop ready together there (backlog B871).
+// Its callback must return, and ignore every snapshot but its test's.
+func SetOnCheckAwaitForTest(fn func(dir string)) (restore func()) {
+	var p *func(string)
+	if fn != nil {
+		p = &fn
+	}
+	prev := onCheckAwait.Swap(p)
+	return func() { onCheckAwait.Store(prev) }
+}
+
+// SetOnCheckSourceEndForTest installs the hook CheckRestoreSource's worker
+// runs last, given the snapshot as bridge restore was given it, once its
+// answer is handed over, whether or not its caller still waits for it, and
+// returns the restore: a test whose look at a snapshot it stalled waits for
+// that worker's end before it puts its seams back or removes its fixtures
+// (backlog B871). Its callback must return, and ignore every snapshot but its
+// test's.
+func SetOnCheckSourceEndForTest(fn func(dir string)) (restore func()) {
+	var p *func(string)
+	if fn != nil {
+		p = &fn
+	}
+	prev := onCheckWorkerEnd.Swap(p)
+	return func() { onCheckWorkerEnd.Store(prev) }
+}
+
+// SetOnProbeReleaseForTest installs the hook a probe of a backups folder's
+// lock (StuckCheckOf, ProbeBackupsLock) runs as it lets go of what it took,
+// given the folder as the probe was given it and the step: "unlock" before
+// its unlock, where its try took the lock, "close" before its lock file's
+// close, and "released" once its release has ended and the mark a release
+// past its bound raised is dropped; and returns the restore: a test stands an
+// unlock or a close that does not answer in (backlog B871). Its callback must
+// return once its test lets it, and ignore every folder but its test's.
+func SetOnProbeReleaseForTest(fn func(dir, step string)) (restore func()) {
+	var p *func(string, string)
+	if fn != nil {
+		p = &fn
+	}
+	prev := onProbeRelease.Swap(p)
+	return func() { onProbeRelease.Store(prev) }
+}
+
+// SetOnMarkerWriteForTest installs the hook a marker's write runs, given
+// "waits" as it begins to wait for a removal of a stale marker under way and
+// "writes" once it has written the marker and closed it, each with its path,
+// and returns the restore: a reader waits for "writes", never for the file,
+// which the writer makes before it writes (backlog B871's round 2; here, not
+// in export_test.go, so that another package's test, a stuck check run in a
+// process of its own, can say so). Its callback must return, and ignore every
+// path but its test's.
+func SetOnMarkerWriteForTest(fn func(event, marker string)) (restore func()) {
+	var p *func(string, string)
+	if fn != nil {
+		p = &fn
+	}
+	prev := onMarkerWrite.Swap(p)
+	return func() { onMarkerWrite.Store(prev) }
+}
+
+// MarkersForTest is the marker each mark this process holds on the backups
+// folder at root, by the spelling given, writes beside the folder's lock (""
+// for a mark that writes none), each read under its mark's own lock: a test
+// asks the marks whether a probe's release past its bound writes a marker
+// (backlog B871), which a read of the file cannot settle, the write being on
+// a goroutine of its own (markStuck) that the read may precede.
+func MarkersForTest(root string) []string {
+	stuckMu.Lock()
+	marks := append([]*stuckMark(nil), stuck[spellingKey(root)]...)
+	stuckMu.Unlock()
+	out := make([]string, 0, len(marks))
+	for _, m := range marks {
+		m.mu.Lock()
+		out = append(out, m.marker)
+		m.mu.Unlock()
+	}
+	return out
+}
+
+// SetReadSourceManifestForTest replaces CheckRestoreSource's read of the
+// snapshot's manifest (os.ReadFile), given its path, and returns the restore:
+// a test stands a read that fails with a permission or an I/O error in for it
+// (backlog B871). Its stand-in must pass every path but its test's to
+// os.ReadFile.
+func SetReadSourceManifestForTest(fn func(path string) ([]byte, error)) (restore func()) {
+	var p *func(string) ([]byte, error)
+	if fn != nil {
+		p = &fn
+	}
+	prev := readSourceManifest.Swap(p)
+	return func() { readSourceManifest.Store(prev) }
+}

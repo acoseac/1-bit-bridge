@@ -29,23 +29,32 @@ func writeHoldMarker(t *testing.T, root string, s backup.StuckCheck) string {
 	return p
 }
 
+// restoreHoldWords are what bridge restore and bridge backup --verify say of a
+// restore given up that holds the snapshots (stillRunningEnd, backlog B871's
+// item 6): what holds them, a step left in a process still running or waiting
+// on storage that stopped answering, and what the operator can do; never
+// "stop that command", which can name a command that already printed its
+// refusal and ended.
+var restoreHoldWords = []string{"left in a process that is still running", "a hung mount", "end that bridge restore process if one still runs"}
+
 // TestTheCommandsSayWhatEndsARestoreThatHoldsTheSnapshots (backlog B826's
 // second round, Codex on its brief): a restore given up that holds a backups
 // folder, as the marker its process writes beside the lock it holds says,
-// is named a restore by every command that meets it, and what ends it is the
-// bridge restore command that runs it, never a restart of the bridge, which
-// runs none: bridge backup --verify, bridge restore, the backup ticker's
-// reason for taking no snapshot and a prune's words. A verification's marker,
+// is named a restore by every command that meets it, never as a check that a
+// restart of the bridge ends, which runs none: bridge backup --verify, bridge
+// restore, the backup ticker's reason for taking no snapshot and a prune's
+// words. Since backlog B871 (item 6) the commands say what holds the folder
+// and what can be done, never "stop that command". A verification's marker,
 // as written before restores were marked, keeps its words.
 func TestTheCommandsSayWhatEndsARestoreThatHoldsTheSnapshots(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		restore bool
 		says    []string
-		never   string
+		never   []string
 	}{
-		{"a restore's", true, []string{"(a restore of snapshot ", "The end of the bridge restore that runs it ends it", "stop that command"}, "restart the bridge"},
-		{"a verification's", false, []string{"(snapshot ", "restart the bridge", "stop the bridge backup --verify that runs it"}, "bridge restore that runs it"},
+		{"a restore's", true, append([]string{"(a restore of snapshot "}, restoreHoldWords...), []string{"restart the bridge", "stop that command"}},
+		{"a verification's", false, []string{"(snapshot ", "restart the bridge", "stop the bridge backup --verify that runs it"}, []string{"bridge restore that runs it", "bridge restore process"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfgA, _, snapA := seedRestorableInstall(t, closedAdminAddr(t))
@@ -79,8 +88,10 @@ func TestTheCommandsSayWhatEndsARestoreThatHoldsTheSnapshots(t *testing.T) {
 						t.Errorf("%s beside %s hold does not say %q:\n%s", what, tc.name, want, stderr)
 					}
 				}
-				if strings.Contains(stderr, tc.never) {
-					t.Errorf("%s beside %s hold says %q:\n%s", what, tc.name, tc.never, stderr)
+				for _, never := range tc.never {
+					if strings.Contains(stderr, never) {
+						t.Errorf("%s beside %s hold says %q:\n%s", what, tc.name, never, stderr)
+					}
 				}
 			}
 			requireInstallUntouched(t, cfgB, dataB, before)

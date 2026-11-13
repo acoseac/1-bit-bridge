@@ -46,7 +46,7 @@ func readersVerified(t *testing.T, dir string) []string {
 	if nv, ok := st.NewestVerified(); ok && nv.DirName == filepath.Base(dir) {
 		out = append(out, "the console's reading takes it for the newest verified")
 	}
-	for _, c := range doctor.BackupChecks(st, nil, backup.ProbeBackupsLock(root), nil, true, time.Now()) {
+	for _, c := range doctor.BackupChecks(st, nil, backup.ProbeBackupsLock(root, backup.ProbeByDoctor), nil, true, time.Now()) {
 		switch {
 		case c.Name == "backup-newest" && strings.Contains(c.Summary, filepath.Base(dir)) &&
 			(strings.Contains(c.Summary, "database VERIFIED") || strings.Contains(c.Summary, "files VERIFIED")):

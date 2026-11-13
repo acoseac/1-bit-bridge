@@ -26,7 +26,13 @@ import (
 // /var resolve elsewhere. It skips where no link can be made.
 func throughALinkedFolder(t *testing.T, snap string) string {
 	t.Helper()
-	link := filepath.Join(resolvedTestDir(t, t.TempDir()), "linked-backups")
+	return throughALinkedFolderNamed(t, snap, "linked-backups")
+}
+
+// throughALinkedFolderNamed is throughALinkedFolder with the link named name.
+func throughALinkedFolderNamed(t *testing.T, snap, name string) string {
+	t.Helper()
+	link := filepath.Join(resolvedTestDir(t, t.TempDir()), name)
 	if err := os.Symlink(filepath.Dir(snap), link); err != nil {
 		t.Skipf("no symbolic link can be made here: %v", err)
 	}
@@ -37,6 +43,47 @@ func throughALinkedFolder(t *testing.T, snap string) string {
 	return given
 }
 
+// throughALinkToTheSnapshot is the snapshot at snap, a resolved path, named
+// through a link made elsewhere to the snapshot itself: the other spelling a
+// restore can be given that resolves to snap, its folder another than the
+// folder that holds snap (backlog B871's item 14). It skips where no link can
+// be made.
+func throughALinkToTheSnapshot(t *testing.T, snap string) string {
+	t.Helper()
+	return throughALinkToTheSnapshotNamed(t, snap, "latest")
+}
+
+// throughALinkToTheSnapshotNamed is throughALinkToTheSnapshot with the link
+// named name.
+func throughALinkToTheSnapshotNamed(t *testing.T, snap, name string) string {
+	t.Helper()
+	link := filepath.Join(resolvedTestDir(t, t.TempDir()), name)
+	if err := os.Symlink(snap, link); err != nil {
+		t.Skipf("no symbolic link can be made here: %v", err)
+	}
+	if got := resolvedTestDir(t, link); got != snap {
+		t.Fatalf("premise: %s resolves to %s, want %s", link, got, snap)
+	}
+	return link
+}
+
+// spelling is a way a restore is given its snapshot otherwise than as it
+// resolves, each of which would show the spelling where it resolves in words
+// that leaked it (backlog B871's item 14): through a link to the folder that
+// holds it, and through a link to the snapshot itself. named makes the link
+// named as given.
+type spelling struct {
+	name    string
+	through func(t *testing.T, snap string) string
+	named   func(t *testing.T, snap, name string) string
+}
+
+// spellings are the two ways a restore is given its snapshot through a link.
+var spellings = []spelling{
+	{"through a linked folder", throughALinkedFolder, throughALinkedFolderNamed},
+	{"through a link to the snapshot", throughALinkToTheSnapshot, throughALinkToTheSnapshotNamed},
+}
+
 // says reports whether msg names the path p, written as it is or as %q
 // writes it (a Windows path's backslashes doubled).
 func says(msg, p string) bool {
@@ -45,20 +92,29 @@ func says(msg, p string) bool {
 }
 
 // requireNamedAsGiven fails the test where what err says does not name given,
-// the snapshot (or a file in it) as the restore was given it, or names
-// resolved, where it resolves ("" where the words may name it after the
-// path given).
+// the snapshot (or a file in it) as the restore was given it, or names a path
+// in the folder that holds resolved, the snapshot where it resolves, but the
+// lock's file there, which the lock's own words name where the snapshot
+// resolves (backlog B871's item 12). resolved is "" where the words may name
+// where the snapshot resolves after the path given: a lookup's own words.
 func requireNamedAsGiven(t *testing.T, what string, err error, given, resolved string) {
 	t.Helper()
 	if err == nil {
 		t.Errorf("%s answered nil", what)
 		return
 	}
-	if !says(err.Error(), given) {
+	msg := err.Error()
+	if !says(msg, given) {
 		t.Errorf("%s does not name %s, as the restore was given it: %v", what, given, err)
 	}
-	if resolved != "" && says(err.Error(), resolved) {
-		t.Errorf("%s names %s, where the snapshot resolves: %v", what, resolved, err)
+	if resolved == "" {
+		return
+	}
+	lock := filepath.Join(filepath.Dir(resolved), backup.LockFileName)
+	q := strconv.Quote(lock)
+	rest := strings.ReplaceAll(strings.ReplaceAll(msg, lock, ""), q[1:len(q)-1], "")
+	if folder := filepath.Dir(resolved) + string(filepath.Separator); says(rest, folder) {
+		t.Errorf("%s names a path in %s, where the snapshot resolves, other than its lock's file: %v", what, folder, err)
 	}
 }
 
@@ -70,25 +126,30 @@ func requireNamedAsGiven(t *testing.T, what string, err error, given, resolved s
 // no UUID is refused naming that copy below the path given, never below where
 // it resolves, still config.ErrNotOnePlayerUUID, with the way through, and
 // nothing restored. Red on round 2, which named every path in the snapshot
-// where it resolves once it held the lock.
+// where it resolves once it held the lock. Since backlog B871 it runs both ways
+// a snapshot is given through a link (spellings), its folder linked and the
+// snapshot itself.
 func TestARestoreNamesTheSnapshotAsItWasGiven(t *testing.T) {
-	src := storeWithTracks(t, 5)
-	withPlayerUUID(t, &src, snapshotPlayerUUID+"\n", 0o600)
-	snap := snapshotOf(t, src)
-	given := throughALinkedFolder(t, snap)
-	if err := os.WriteFile(filepath.Join(snap, backup.PlayerUUIDFileName), []byte("not-a-uuid\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	b := newDestinationBox(t)
-	keepConfigsLock(t, b)
+	for _, sp := range spellings {
+		t.Run(sp.name, func(t *testing.T) {
+			src := storeWithTracks(t, 5)
+			withPlayerUUID(t, &src, snapshotPlayerUUID+"\n", 0o600)
+			snap := snapshotOf(t, src)
+			given := sp.through(t, snap)
+			if err := os.WriteFile(filepath.Join(snap, backup.PlayerUUIDFileName), []byte("not-a-uuid\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			b := newDestinationBox(t)
+			keepConfigsLock(t, b)
 
-	err := backup.RestoreWithOptions(given, b.targets, backup.RestoreOptions{})
-	if !errors.Is(err, config.ErrNotOnePlayerUUID) || err == nil || !strings.Contains(err.Error(), "remove it from the snapshot") {
-		t.Errorf("the restore of a snapshot whose player-uuid holds no UUID answered %v, want config.ErrNotOnePlayerUUID and the way through", err)
+			err := backup.RestoreWithOptions(given, b.targets, backup.RestoreOptions{})
+			if !errors.Is(err, config.ErrNotOnePlayerUUID) || err == nil || !strings.Contains(err.Error(), "remove it from the snapshot") {
+				t.Errorf("the restore of a snapshot whose player-uuid holds no UUID answered %v, want config.ErrNotOnePlayerUUID and the way through", err)
+			}
+			requireNamedAsGiven(t, "the refusal of the snapshot's player-uuid", err, filepath.Join(given, backup.PlayerUUIDFileName), snap)
+			b.requireUntouched(t, "the restore of a player-uuid that holds no UUID")
+		})
 	}
-	requireNamedAsGiven(t, "the refusal of the snapshot's player-uuid", err,
-		filepath.Join(given, backup.PlayerUUIDFileName), filepath.Join(snap, backup.PlayerUUIDFileName))
-	b.requireUntouched(t, "the restore of a player-uuid that holds no UUID")
 }
 
 // keepConfigsLock makes the lock file beside B's bridge.yaml, which a restore
@@ -247,9 +308,11 @@ func is(target error) func(error) bool {
 func TestEveryAdmissionRefusalNamesTheSnapshotAsItWasGiven(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
-		stand func(t *testing.T) refusal
+		stand func(t *testing.T, through func(*testing.T, string) string) refusal
+		// shapeless: the case makes the spelling it is given itself.
+		shapeless bool
 	}{
-		{"a hold given up in this process, by the spelling given", func(t *testing.T) refusal {
+		{"a hold given up in this process, by the spelling given", func(t *testing.T, through func(*testing.T, string) string) refusal {
 			real := resolvedTestDir(t, t.TempDir())
 			data := filepath.Join(resolvedTestDir(t, t.TempDir()), "data")
 			if err := os.Symlink(real, data); err != nil {
@@ -262,30 +325,36 @@ func TestEveryAdmissionRefusalNamesTheSnapshotAsItWasGiven(t *testing.T) {
 			if given == other {
 				t.Fatalf("premise: the snapshot %s is named as it resolves", given)
 			}
+			// The check given up through the link too, so that its mark stands
+			// by the spelling the restore is given (captureT resolves the
+			// capture's folder, and a mark there alone is met where the snapshot
+			// resolves): the restore meets it before it resolves anything
+			// (SourceStillHeld; backlog B871's controls).
+			c.Dir = filepath.Join(data, backup.BackupsDirName, filepath.Base(c.Dir))
 			givenUpCheckOf(t, c)
 			return refusal{given: given, resolved: other, carries: heldBy(filepath.Base(c.Dir))}
-		}},
-		{"a hold given up in this process, by the folder the snapshot resolves into", func(t *testing.T) refusal {
+		}, true},
+		{"a hold given up in this process, by the folder the snapshot resolves into", func(t *testing.T, through func(*testing.T, string) string) refusal {
 			src := storeWithTracks(t, 5)
 			c := captureT(t, src)
 			other := snapshotOf(t, src)
 			givenUpCheckOf(t, c)
-			return refusal{given: throughALinkedFolder(t, other), resolved: other, carries: heldBy(filepath.Base(c.Dir))}
-		}},
-		{"another process's hold given up, by its marker beside the lock it holds", func(t *testing.T) refusal {
+			return refusal{given: through(t, other), resolved: other, carries: heldBy(filepath.Base(c.Dir))}
+		}, false},
+		{"another process's hold given up, by its marker beside the lock it holds", func(t *testing.T, through func(*testing.T, string) string) refusal {
 			src := storeWithTracks(t, 5)
 			blocker := snapshotOf(t, src)
 			snap := snapshotOf(t, src)
 			holdLockAsAnotherProcess(t, filepath.Dir(snap))
 			writeStuckMarker(t, filepath.Dir(snap), filepath.Base(blocker))
-			return refusal{given: throughALinkedFolder(t, snap), resolved: snap, wait: 20 * time.Second, carries: heldBy(filepath.Base(blocker))}
-		}},
-		{"the lock held past the wait", func(t *testing.T) refusal {
+			return refusal{given: through(t, snap), resolved: snap, wait: 20 * time.Second, carries: heldBy(filepath.Base(blocker))}
+		}, false},
+		{"the lock held past the wait", func(t *testing.T, through func(*testing.T, string) string) refusal {
 			snap := snapshotOf(t, storeWithTracks(t, 5))
 			holdLockAsAnotherProcess(t, filepath.Dir(snap))
-			return refusal{given: throughALinkedFolder(t, snap), resolved: snap, wait: 300 * time.Millisecond, carries: is(backup.ErrBackupsBusy)}
-		}},
-		{"no lock to be had there", func(t *testing.T) refusal {
+			return refusal{given: through(t, snap), resolved: snap, wait: 300 * time.Millisecond, carries: is(backup.ErrBackupsBusy)}
+		}, false},
+		{"no lock to be had there", func(t *testing.T, through func(*testing.T, string) string) refusal {
 			snap := snapshotOf(t, storeWithTracks(t, 5))
 			root := filepath.Dir(snap)
 			t.Cleanup(backup.SetOpenBackupsLockForTest(func(dir, name string) (*os.File, error) {
@@ -294,9 +363,9 @@ func TestEveryAdmissionRefusalNamesTheSnapshotAsItWasGiven(t *testing.T) {
 				}
 				return fsutil.OpenLockFile(dir, name)
 			}))
-			return refusal{given: throughALinkedFolder(t, snap), resolved: snap, carries: is(backup.ErrBackupsUnlocked)}
-		}},
-		{"the lock's file failing otherwise", func(t *testing.T) refusal {
+			return refusal{given: through(t, snap), resolved: snap, carries: is(backup.ErrBackupsUnlocked)}
+		}, false},
+		{"the lock's file failing otherwise", func(t *testing.T, through func(*testing.T, string) string) refusal {
 			snap := snapshotOf(t, storeWithTracks(t, 5))
 			root := filepath.Dir(snap)
 			t.Cleanup(backup.SetOpenBackupsLockForTest(func(dir, name string) (*os.File, error) {
@@ -305,36 +374,36 @@ func TestEveryAdmissionRefusalNamesTheSnapshotAsItWasGiven(t *testing.T) {
 				}
 				return fsutil.OpenLockFile(dir, name)
 			}))
-			return refusal{given: throughALinkedFolder(t, snap), resolved: snap, carries: is(syscall.EIO)}
-		}},
-		{"the snapshot gone before it resolves", func(t *testing.T) refusal {
+			return refusal{given: through(t, snap), resolved: snap, carries: is(syscall.EIO)}
+		}, false},
+		{"the snapshot gone before it resolves", func(t *testing.T, through func(*testing.T, string) string) refusal {
 			snap := snapshotOf(t, storeWithTracks(t, 5))
-			given := throughALinkedFolder(t, snap)
+			given := through(t, snap)
 			if err := os.RemoveAll(snap); err != nil {
 				t.Fatal(err)
 			}
 			return refusal{given: given, resolved: snap, carries: is(backup.ErrSnapshotGone), resolvedFollows: true}
-		}},
-		{"its manifest gone once the lock is held", func(t *testing.T) refusal {
+		}, false},
+		{"its manifest gone once the lock is held", func(t *testing.T, through func(*testing.T, string) string) refusal {
 			snap := snapshotOf(t, storeWithTracks(t, 5))
 			if err := os.Remove(filepath.Join(snap, backup.ManifestFile)); err != nil {
 				t.Fatal(err)
 			}
-			return refusal{given: throughALinkedFolder(t, snap), resolved: snap, carries: is(backup.ErrSnapshotGone)}
-		}},
-		{"its manifest not reading once the lock is held", func(t *testing.T) refusal {
+			return refusal{given: through(t, snap), resolved: snap, carries: is(backup.ErrSnapshotGone)}
+		}, false},
+		{"its manifest not reading once the lock is held", func(t *testing.T, through func(*testing.T, string) string) refusal {
 			snap := snapshotOf(t, storeWithTracks(t, 5))
 			if err := os.WriteFile(filepath.Join(snap, backup.ManifestFile), []byte("{not json"), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			return refusal{given: throughALinkedFolder(t, snap), resolved: snap, says: "read snapshot manifest", carries: func(err error) bool {
+			return refusal{given: through(t, snap), resolved: snap, says: "read snapshot manifest", carries: func(err error) bool {
 				var syntax *json.SyntaxError
 				return errors.As(err, &syntax)
 			}}
-		}},
-		{"its lookup failing otherwise", func(t *testing.T) refusal {
+		}, false},
+		{"its lookup failing otherwise", func(t *testing.T, through func(*testing.T, string) string) refusal {
 			snap := snapshotOf(t, storeWithTracks(t, 5))
-			given := throughALinkedFolder(t, snap)
+			given := through(t, snap)
 			// As a lookup that fails past the link says it: where it led.
 			t.Cleanup(backup.SetMetadataForTest(func(p string) (string, error) {
 				if p == given {
@@ -343,35 +412,40 @@ func TestEveryAdmissionRefusalNamesTheSnapshotAsItWasGiven(t *testing.T) {
 				return fsutil.ResolveLinks(p)
 			}, nil))
 			return refusal{given: given, resolved: snap, carries: is(fs.ErrPermission), resolvedFollows: true}
-		}},
-		{"the restore stopped", func(t *testing.T) refusal {
+		}, false},
+		{"the restore stopped", func(t *testing.T, through func(*testing.T, string) string) refusal {
 			snap := snapshotOf(t, storeWithTracks(t, 5))
 			ctx, cancel := context.WithCancel(context.Background())
 			cancel()
-			return refusal{given: throughALinkedFolder(t, snap), resolved: snap, ctx: ctx, carries: is(context.Canceled)}
-		}},
+			return refusal{given: through(t, snap), resolved: snap, ctx: ctx, carries: is(context.Canceled)}
+		}, false},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			r := tc.stand(t)
-			b := newDestinationBox(t)
-			says := r.says
-			if says == "" {
-				says = "nothing was restored"
+		for _, sp := range spellings {
+			if tc.shapeless && sp.name != spellings[0].name {
+				continue
 			}
-			err := backup.RestoreWithOptions(r.given, b.targets, backup.RestoreOptions{Context: r.ctx, LockWait: r.wait})
-			if !r.carries(err) {
-				t.Errorf("the restore answered %v, which does not carry what the refusal of %s carries", err, tc.name)
-			}
-			if err == nil || !strings.Contains(err.Error(), says) {
-				t.Errorf("the restore answered %v, want a refusal that says %q", err, says)
-			}
-			resolved := r.resolved
-			if r.resolvedFollows {
-				resolved = ""
-			}
-			requireNamedAsGiven(t, "the refusal", err, r.given, resolved)
-			b.requireUntouched(t, "the refused restore")
-		})
+			t.Run(tc.name+", "+sp.name, func(t *testing.T) {
+				r := tc.stand(t, sp.through)
+				b := newDestinationBox(t)
+				says := r.says
+				if says == "" {
+					says = "nothing was restored"
+				}
+				err := backup.RestoreWithOptions(r.given, b.targets, backup.RestoreOptions{Context: r.ctx, LockWait: r.wait})
+				if !r.carries(err) {
+					t.Errorf("the restore answered %v, which does not carry what the refusal of %s carries", err, tc.name)
+				}
+				if err == nil || !strings.Contains(err.Error(), says) {
+					t.Errorf("the restore answered %v, want a refusal that says %q", err, says)
+				}
+				resolved := r.resolved
+				if r.resolvedFollows {
+					resolved = ""
+				}
+				requireNamedAsGiven(t, "the refusal", err, r.given, resolved)
+				b.requireUntouched(t, "the refused restore")
+			})
+		}
 	}
 }
 

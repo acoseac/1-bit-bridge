@@ -50,10 +50,11 @@ func newFIFOManifest(t *testing.T, dir string) *fifoManifest {
 
 // awaitReader waits until a reader has the pipe open, the read of the
 // manifest under way: an open of the pipe's write end that does not wait
-// succeeds only then, and is kept for the feed.
+// succeeds only then, and is kept for the feed. It waits 30 s at most, capped
+// by the test binary's deadline (waitWithin).
 func (f *fifoManifest) awaitReader(t *testing.T) {
 	t.Helper()
-	deadline := time.Now().Add(30 * time.Second)
+	deadline := time.Now().Add(waitWithin(t, 30*time.Second))
 	for {
 		w, err := os.OpenFile(f.path, os.O_WRONLY|syscall.O_NONBLOCK, 0)
 		if err == nil {
@@ -133,6 +134,7 @@ func TestAGivenUpRestoreThatHoldsTheLockMarksTheFolderUntilItLetsGo(t *testing.T
 	snap := snapshotOf(t, src)
 	other := snapshotOf(t, src)
 	root := filepath.Dir(snap)
+	written := markerWritten(t, root)
 	name := filepath.Base(snap)
 	b, c := newDestinationBox(t), newDestinationBox(t)
 	ends := sourceWorkerEnds(t)
@@ -165,7 +167,12 @@ func TestAGivenUpRestoreThatHoldsTheLockMarksTheFolderUntilItLetsGo(t *testing.T
 	if took := time.Since(asked); took > 5*time.Second {
 		t.Errorf("the restore and the prune beside the restore given up waited %v to be refused", took)
 	}
-	awaitMarker(t, root)
+	// Once the marker is written whole (backlog B871's round 2). In this
+	// process the restore's mark refuses the verification first
+	// (verifyAndThen asks this process's marks before any filesystem);
+	// another process's read of the marker is
+	// TestACheckThatDidNotEndInAnotherProcessHoldsTheFolderUntilItEnds's.
+	awaitMarker(t, root, written)
 	if _, err := backup.VerifySnapshotAsAnotherProcessForTest(t.Context(), other, backup.VerifyOptions{LockWait: 10 * time.Second}); !errors.Is(err, backup.ErrCheckStillRunning) ||
 		!strings.Contains(err.Error(), words) {
 		t.Errorf("another process's verification beside the restore given up answered %v, want ErrCheckStillRunning naming %q", err, words)

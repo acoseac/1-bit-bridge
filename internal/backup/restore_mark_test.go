@@ -27,10 +27,30 @@ func readStuckMarker(t *testing.T, root string) backup.StuckCheck {
 	return s
 }
 
-// awaitEvent waits for event on events, failing the test past a deadline.
+// waitReserve is what a capped wait leaves of the test binary's deadline for
+// the cleanups that run after it (waitWithin).
+const waitReserve = 10 * time.Second
+
+// waitWithin is how long a test's wait for an event may take: limit, the
+// wait's own maximum, capped by the test binary's deadline less waitReserve,
+// so that a missed event fails its case while the cleanups after it still have
+// time to run, never at the package's deadline; with no deadline (-timeout 0)
+// the maximum alone applies (backlog B871).
+func waitWithin(t *testing.T, limit time.Duration) time.Duration {
+	t.Helper()
+	if deadline, ok := t.Deadline(); ok {
+		if left := time.Until(deadline) - waitReserve; left < limit {
+			return max(left, 0)
+		}
+	}
+	return limit
+}
+
+// awaitEvent waits for event on events, failing the test past its wait: 30
+// s, capped by the test binary's deadline (waitWithin).
 func awaitEvent(t *testing.T, events <-chan string, want ...string) string {
 	t.Helper()
-	deadline := time.After(30 * time.Second)
+	deadline := time.After(waitWithin(t, 30*time.Second))
 	for {
 		select {
 		case ev := <-events:
@@ -279,8 +299,14 @@ func TestAStuckMarkSaysWhatHoldsTheFolder(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if strings.Contains(string(again), `"restore"`) != tc.restoring {
-				t.Errorf("%+v is written %s", s, again)
+			// The key's presence, read as JSON reads it, never by a substring
+			// of the bytes (omitempty; backlog B871's item 9).
+			var keys map[string]json.RawMessage
+			if err := json.Unmarshal(again, &keys); err != nil {
+				t.Fatal(err)
+			}
+			if _, written := keys["restore"]; written != tc.restoring {
+				t.Errorf("%+v is written %s: its restore key present %v, want %v", s, again, written, tc.restoring)
 			}
 
 			// Another process's marker, read while that process holds the lock.
@@ -297,7 +323,7 @@ func TestAStuckMarkSaysWhatHoldsTheFolder(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer fsutil.Unlock(f)
-			got, held := backup.StuckCheckOf(root)
+			got, held := backup.StuckCheckOf(root, backup.ProbeByDoctor)
 			if !held || got.Restoring() != tc.restoring || got.What() != tc.what {
 				t.Errorf("StuckCheckOf = %+v, %v; want %q", got, held, tc.what)
 			}

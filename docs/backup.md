@@ -186,7 +186,21 @@ writes: it waits for the folder's lock and answers that the snapshots are
 busy. Restarting the bridge, or stopping the `bridge backup --verify` that
 runs it, ends the step (backlog B653). A `bridge restore` given up while it
 holds the snapshots' lock holds them the same way, and is named a restore of
-its snapshot: stopping that command ends it.
+its snapshot. What holds them is a step of that restore, left in a
+`bridge restore` process that is still running, or waiting on storage that
+stopped answering (a hung mount): it ends when that storage answers or that
+process ends. Check that storage, and end that `bridge restore` process if
+one still runs. In the restore's own process the mark stands at once. The
+marker beside the lock, which other processes read, is written only once a
+removal of an older marker that the restore had begun has answered; until
+then another process reads that older marker, and may say that the check or
+prune it names is still running, or finds no marker it can read and waits for
+the folder's lock. A look at the snapshots' lock (the doctor's, the scheduled
+snapshot's, or `bridge restore`'s before it asks you to confirm) whose letting
+go of that lock does not answer within its bound holds them in its own
+process the same way (the scheduled snapshot takes none while its own look's
+does), named as that look (the restore's as that restore), and writes no
+marker: once its unlock has answered, another process may hold the lock.
 
 When the bridge starts, it takes no snapshot when one from the last day has
 a verified database. Nor does it take one when the newest snapshot from the
@@ -230,7 +244,11 @@ naming the path, before it writes anything.
 Before it asks you to confirm, restore looks at the snapshot. It refuses at
 once, with nothing restored, while a check, a prune or a restore of those
 snapshots that did not end still holds them, and it refuses a snapshot whose
-storage does not answer within about 20 seconds.
+storage does not answer within about 20 seconds, and one of a schema this
+bridge does not take. A path that holds no snapshot (nothing there, not a
+folder, or no `manifest.json` that reads as a snapshot's) exits 2; a snapshot
+you may not read, or whose storage fails in I/O, exits 1 with that cause. A
+stop (Ctrl-C) while it looks, or just after, ends it before it asks, exit 1.
 
 Once you have confirmed, restore also takes the lock of the folder that holds
 the snapshot, the lock the bridge that keeps those snapshots checks and prunes
@@ -241,7 +259,9 @@ to end, and refuses past that with nothing restored. It refuses at once while
 a check or a prune that did not end still holds them: restart the bridge that
 keeps them, or stop the `bridge backup --verify` that runs it, then restore
 again. A restore that did not end holds them the same way, and is named as
-one: stop that `bridge restore`, then restore again. Under that lock it reads
+one: a step of it is left in a `bridge restore` process that is still
+running, or waits on storage that stopped answering. Check that storage, end
+that process if it still runs, then restore again. Under that lock it reads
 the snapshot again, and refuses one that a prune removed while you were asked
 to confirm. A copy of a snapshot kept elsewhere restores the same way: nothing
 tells a copy from a live backups folder for certain, so its folder is locked
@@ -250,13 +270,18 @@ snapshot on read-only media, on storage that grants no file locks, or in a
 folder you cannot write is refused with nothing restored: copy the snapshot's
 folder to a local disk, and restore from the copy.
 
-A restore that you stop, or whose snapshot's storage stops answering, before
-it begins to write is refused with nothing restored, the destination as it
-was. If the snapshot's storage stopped answering once restore held its
+A restore that you stop, or whose snapshot's storage stops answering, while
+it takes the lock of the folder that holds the snapshot and reads the
+snapshot's manifest there, is refused with nothing restored, the destination
+as it was. If the snapshot's storage stopped answering once restore held its
 folder's lock, the folder stays locked until that read answers or the
 `bridge restore` process ends, and meanwhile the snapshots read as held by a
-restore that did not end. Once restore has begun to write, it runs to its
-end.
+restore that did not end. Past the manifest's read, restore reads the
+snapshot's other files (the console account, the player's identity, its DSD
+state and its reservation, the database's migrations, the files it copies)
+without that bound, and a stop no longer refuses it: storage that stops
+answering there holds the restore until it answers. Once restore has begun to
+write, it runs to its end.
 
 The snapshot's player UUID makes the restored player the device controllers
 already know. Without a player UUID, restore leaves the destination's player

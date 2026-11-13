@@ -50,9 +50,11 @@ import (
 // behind a hold given up that still holds the backups folder, and of a
 // restore of a snapshot in that folder (holdSource): until its step ends, or
 // until the process that runs it does. The hold given up is a verification's,
-// a claim's, a prune's or, since backlog B826's second round, a restore's
-// (StuckCheck.Restore), which StillRunningError names.
-var ErrCheckStillRunning = errors.New("a verification, a prune or a restore of these snapshots that did not end still holds them, until it ends or its process does")
+// a claim's, a prune's, since backlog B826's second round a restore's
+// (StuckCheck.Restore), and since backlog B871 a probe's of the folder's lock
+// whose release did not end, in this process (StuckCheck.Probe), which
+// StillRunningError names.
+var ErrCheckStillRunning = errors.New("a verification, a prune, a restore or a probe of these snapshots that did not end still holds them, until it ends or its process does")
 
 // StuckCheck is a hold given up that still holds a backups folder: its
 // snapshot's folder name, "" for a prune's (Pruning), the step it did not
@@ -67,26 +69,90 @@ type StuckCheck struct {
 	Step     string    `json:"step,omitempty"`
 	Since    time.Time `json:"since"`
 	Restore  bool      `json:"restore,omitempty"`
+	// Probe, set, is a probe of the folder's lock whose release did not end
+	// within its bound (letProbeGo), named as its prober names it (Prober):
+	// the doctor's or the scheduled snapshot's, never a restore's, whose
+	// probe is that restore's own (Restore). Such a hold marks its own
+	// process alone, so it is never written to a marker (backlog B871).
+	Probe string `json:"-"`
 }
 
 // Pruning reports whether the hold given up is a prune's (PruneContext),
 // which names no snapshot.
-func (c StuckCheck) Pruning() bool { return c.Snapshot == "" && !c.Restore }
+func (c StuckCheck) Pruning() bool { return c.Snapshot == "" && !c.Restore && c.Probe == "" }
 
-// Restoring reports whether the hold given up is a restore's (holdSource),
-// which the bridge restore command that runs it ends.
+// Restoring reports whether the hold given up is a restore's (holdSource):
+// a step of a bridge restore left in a process that is still running, which
+// the end of that process or of the storage's stall ends, never a restart of
+// a serving bridge.
 func (c StuckCheck) Restoring() bool { return c.Restore }
 
-// What names the hold given up: a restore of its snapshot, a prune, or a
-// verification of its snapshot.
+// Probing reports whether the hold given up is a probe of the folder's lock
+// that did not let it go within its bound, the doctor's or the scheduled
+// snapshot's (Prober).
+func (c StuckCheck) Probing() bool { return c.Probe != "" }
+
+// What names the hold given up: a restore of its snapshot, a probe of the
+// snapshots' lock, a prune, or a verification of its snapshot.
 func (c StuckCheck) What() string {
 	switch {
 	case c.Restoring():
 		return "a restore of snapshot " + c.Snapshot
+	case c.Probing():
+		return c.Probe
 	case c.Pruning():
 		return "a prune"
 	}
 	return "snapshot " + c.Snapshot
+}
+
+// Prober is who probes a backups folder's lock: StuckCheckOf asks whether
+// another open holds it, ProbeBackupsLock whether a lock is granted there at
+// all. A probe whose release of the lock file it tried does not end within
+// releaseBound marks the folder in this process alone, in its prober's name
+// (letProbeGo): the doctor's (ProbeByDoctor), the scheduled snapshot's
+// (ProbeByTicker), or bridge restore's look at its snapshot before its
+// prompt (CheckRestoreSource), which names that restore. No other prober's
+// mark names a restore (backlog B871).
+type Prober struct {
+	// what is the probe as its mark names it (StuckCheck.Probe), "" for a
+	// restore's.
+	what string
+	// snapshot and restore: a restore's look at its snapshot, its mark the
+	// restore's, by the snapshot's folder name.
+	snapshot string
+	restore  bool
+	// spellings are more spellings of the folder, which its mark stands
+	// under too (spellingKey's).
+	spellings []string
+}
+
+// The probers of the doctor's backups lines and of the scheduled snapshot's
+// pass.
+var (
+	ProbeByDoctor = Prober{what: "the doctor's probe of the snapshots' lock"}
+	ProbeByTicker = Prober{what: "the scheduled snapshot's probe of the snapshots' lock"}
+)
+
+// mark is the hold given up a probe whose release overran its bound is
+// marked as, at step: its prober's, a restore's for a restore's look.
+func (p Prober) mark(step string) StuckCheck {
+	now := time.Now().UTC()
+	if p.restore {
+		return StuckCheck{Snapshot: p.snapshot, Step: step, Since: now, Restore: true}
+	}
+	what := p.what
+	if what == "" {
+		what = "a probe of the snapshots' lock"
+	}
+	return StuckCheck{Probe: what, Step: step, Since: now}
+}
+
+// keys are the keys a probe of the folder at backupsRoot, whose resolved key
+// is key, marks it under: the spelling it was given, its resolved key, and
+// its prober's spellings.
+func (p Prober) keys(backupsRoot, key string) []string {
+	return append([]string{spellingKey(backupsRoot), key}, p.spellings...)
 }
 
 // StillRunningError is ErrCheckStillRunning for the hold given up that Check
@@ -117,11 +183,22 @@ func stillRunning(check StuckCheck) error {
 }
 
 // HeldByRestore reports whether err is ErrCheckStillRunning for a restore's
-// hold given up (StillRunningError), whose end is the end of the bridge
-// restore command that runs it, never of a serving bridge.
+// hold given up (StillRunningError): a step of a bridge restore left in a
+// process that is still running, or waiting on storage that stopped
+// answering, which ends with that process or with the stall, never with a
+// restart of a serving bridge.
 func HeldByRestore(err error) bool {
 	var held *StillRunningError
 	return errors.As(err, &held) && held.Check.Restoring()
+}
+
+// HeldByProbe reports whether err is ErrCheckStillRunning for a probe of the
+// snapshots' lock whose release did not end, the doctor's or the scheduled
+// snapshot's (StuckCheck.Probing), which this process made: it ends when the
+// storage answers or this process does.
+func HeldByProbe(err error) bool {
+	var held *StillRunningError
+	return errors.As(err, &held) && held.Check.Probing()
 }
 
 // stuckMark is a hold given up as this process keeps it: what it says, the
@@ -382,46 +459,119 @@ func StuckCheckHere(backupsRoot string) (StuckCheck, bool) {
 // backupsRoot, if one does: this process's own (StuckCheckHere, then by the
 // folder as resolved), or another's whose marker is there while the folder's
 // lock is held (a marker beside a lock nobody holds is a process's that has
-// ended). Past this process's own by the spelling given, it asks the folder,
-// which may not answer: the doctor bounds it. It makes nothing, and lets go
-// at once of the lock it tries.
-func StuckCheckOf(backupsRoot string) (StuckCheck, bool) {
+// ended), or, where its probe's release of that lock does not end within its
+// bound, that release, marked in by's name (letProbeGo, backlog B871). Past
+// this process's own by the spelling given, it asks the folder, which may not
+// answer: the doctor bounds it. It makes nothing, and lets go at once of the
+// lock it tries.
+func StuckCheckOf(backupsRoot string, by Prober) (StuckCheck, bool) {
 	if check, held := stuckBy(backupsRoot); held {
 		return check, true
 	}
-	if check, held := stuckAt(ownerKey(backupsRoot)); held {
+	key := ownerKey(backupsRoot)
+	if check, held := stuckAt(key); held {
 		return check, true
 	}
 	mark, ok := stuckMarker(backupsRoot)
 	if !ok {
 		return StuckCheck{}, false
 	}
-	return mark, lockHeldElsewhere(backupsRoot)
+	if lockHeldElsewhere(backupsRoot, key, by) {
+		return mark, true
+	}
+	// The probe's own release, past its bound, holds the folder now, marked
+	// in by's name (letProbeGo): the hold given up that holds it.
+	return stuckAt(key)
 }
 
 // lockHeldElsewhere reports whether another open holds the backups folder's
 // lock now: a try on its lock file, made nowhere, opened for writing as an
-// exclusive lock on a network mount wants, let go at once. This process's
-// own holder is no other (folderTokens).
-func lockHeldElsewhere(backupsRoot string) bool {
-	token := folderToken(ownerKey(backupsRoot))
+// exclusive lock on a network mount wants, let go at once (letProbeGo). This
+// process's own holder is no other (folderTokens). key is the folder's
+// resolved key, by who asks.
+func lockHeldElsewhere(backupsRoot, key string, by Prober) bool {
+	token := folderToken(key)
 	select {
 	case token <- struct{}{}:
 	default:
 		return false
 	}
-	defer func() { <-token }()
 	f, err := openProbe(filepath.Join(backupsRoot, LockFileName))
 	if err != nil {
+		<-token
 		return false
 	}
-	defer f.Close()
-	switch err := tryLockBackups(f); {
-	case err == nil:
-		_ = fsutil.Unlock(f)
-		return false
-	case errors.Is(err, fsutil.ErrLocked):
-		return true
+	err = tryLockBackups(f)
+	letProbeGo(backupsRoot, f, err == nil, token, by.keys(backupsRoot, key), by)
+	return errors.Is(err, fsutil.ErrLocked)
+}
+
+// letProbeGo lets go of what a probe of the lock of the backups folder at
+// backupsRoot took, in this order: the lock, where its try took it (locked),
+// the lock file, then this process's holder of the folder (token), so the
+// holder is kept through the unlock and the close. It does so on a goroutine
+// of its own, and waits for it within releaseBound. Past the bound the probe
+// answers, the release left to end on its own, and the folder is marked in
+// this process alone, under keys, in by's name, naming the release
+// (stepProbeRelease), until the release has ended, the holder given back
+// included: a verification, a claim, a prune or a restore here then meets the
+// mark rather than waiting its lock wait out behind the holder, and a restore's
+// look refuses before bridge restore's prompt in words that name it. No marker
+// is written beside the lock for a release, whoever probed: once the unlock
+// has answered another process may hold the lock, and a marker written then
+// would stand beside that holder's lock as this probe's, or take its place
+// (backlog B871). It answers the mark's check where it raised one, so that
+// its caller can say so (ProbeBackupsLock; backlog B871's round 2).
+func letProbeGo(backupsRoot string, f *os.File, locked bool, token chan struct{}, keys []string, by Prober) (StuckCheck, bool) {
+	var (
+		mu    sync.Mutex
+		ended bool
+		mark  *stuckMark
+	)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if locked {
+			probeReleaseStep(backupsRoot, "unlock")
+			_ = fsutil.Unlock(f)
+		}
+		probeReleaseStep(backupsRoot, "close")
+		_ = f.Close()
+		<-token
+		mu.Lock()
+		ended = true
+		m := mark
+		mu.Unlock()
+		m.drop()
+		probeReleaseStep(backupsRoot, "released")
+	}()
+	t := time.NewTimer(releaseBound)
+	defer t.Stop()
+	select {
+	case <-done:
+		return StuckCheck{}, false
+	case <-t.C:
 	}
-	return false
+	mu.Lock()
+	defer mu.Unlock()
+	if ended {
+		return StuckCheck{}, false
+	}
+	check := by.mark(stepProbeRelease)
+	mark = markStuck(keys, "", check)
+	return check, true
+}
+
+// onProbeRelease, nil in production, runs as a probe of a backups folder's
+// lock lets go of what it took, given the folder as the probe was given it:
+// "unlock" before its unlock, where its try took the lock, "close" before
+// its lock file's close, "released" once its release has ended and its mark,
+// if one stood, is dropped (SetOnProbeReleaseForTest).
+var onProbeRelease atomic.Pointer[func(dir, step string)]
+
+// probeReleaseStep runs onProbeRelease's hook, if any.
+func probeReleaseStep(dir, step string) {
+	if hook := onProbeRelease.Load(); hook != nil {
+		(*hook)(dir, step)
+	}
 }

@@ -529,8 +529,15 @@ func Restore(snapshotDir string, dst Targets) error {
 // What it says names the snapshot as it was given it, snapshotDir, which for
 // bridge restore is its argument cleaned (CleanSnapshotPath), and never as it
 // resolves, which it reads (backlog B826's third round: Windows' 8.3 temporary
-// folder, a link).
-func RestoreWithOptions(snapshotDir string, dst Targets, opts RestoreOptions) (err error) {
+// folder, a link), but in a failed call's own words where its admission met
+// them: the lock's file, in the folder the snapshot resolves into, and a
+// lookup of the snapshot that failed, which names where it led (backlog
+// B871's item 12). Each read of the snapshot's files answers in words
+// respelled so where it is made (sourceHold.asGiven, copyOut), and every
+// write of the destination in its own words, whose paths can begin as the
+// snapshot's do where it resolves (a snapshot at a volume root, a destination
+// on that volume: backlog B871's item 13).
+func RestoreWithOptions(snapshotDir string, dst Targets, opts RestoreOptions) error {
 	ctx := opts.Context
 	if ctx == nil {
 		ctx = context.Background()
@@ -547,8 +554,8 @@ func RestoreWithOptions(snapshotDir string, dst Targets, opts RestoreOptions) (e
 	// marked in this process past the bound until the unlock has ended.
 	defer src.letGo()
 	// The snapshot is read where it resolves, in the folder whose lock is
-	// held (snap); what the restore answers names it as it was given.
-	defer func() { err = src.asGiven(err) }()
+	// held (snap); each of its reads answers in words that name it as it was
+	// given (src.asGiven), and nothing else is respelled.
 	snap, m := src.snap, src.m
 	if opts.sourceHeld != nil {
 		opts.sourceHeld()
@@ -592,7 +599,7 @@ func RestoreWithOptions(snapshotDir string, dst Targets, opts RestoreOptions) (e
 	if dst.AdminAuth != "" && slices.Contains(m.Files, AdminAuthFileName) {
 		account, accountRead, err = signedOutAdminAuth(filepath.Join(snap, AdminAuthFileName))
 		if err != nil {
-			return err
+			return src.asGiven(err)
 		}
 	}
 	// The player's identity is read before the loop for the same reason:
@@ -602,7 +609,7 @@ func RestoreWithOptions(snapshotDir string, dst Targets, opts RestoreOptions) (e
 	if dst.PlayerUUID != "" && slices.Contains(m.Files, PlayerUUIDFileName) {
 		playerUUID, playerUUIDRead, err = snapshotPlayerUUID(filepath.Join(snap, PlayerUUIDFileName))
 		if err != nil {
-			return err
+			return src.asGiven(err)
 		}
 	}
 	// The player's DSD state is read before the loop as well, and written
@@ -618,7 +625,7 @@ func RestoreWithOptions(snapshotDir string, dst Targets, opts RestoreOptions) (e
 		switch {
 		case errors.Is(err, os.ErrNotExist):
 		case err != nil:
-			return fmt.Errorf("restore %s: %w; nothing was restored", PlayerDSDFileName, err)
+			return src.asGiven(fmt.Errorf("restore %s: %w; nothing was restored", PlayerDSDFileName, err))
 		default:
 			dsdState, dsdStateRead = data, true
 		}
@@ -651,7 +658,14 @@ func RestoreWithOptions(snapshotDir string, dst Targets, opts RestoreOptions) (e
 		if completionErr != nil {
 			return completionErr
 		}
-		if err := restorePlayerReservation(snap, dst.PlayerUUID, playerUUID, m, opts); err != nil {
+		// The snapshot's floor is read first, as the reservation's first
+		// step: its errors are the snapshot's, the reservation's the
+		// destination's.
+		floor, marked, err := snapshotReservationFloor(snap, playerUUID, m)
+		if err != nil {
+			return src.asGiven(err)
+		}
+		if err := restorePlayerReservation(dst.PlayerUUID, playerUUID, m, floor, marked, opts); err != nil {
 			return err
 		}
 		// A replacement identity must never expose this box's old entries,
@@ -694,6 +708,7 @@ func RestoreWithOptions(snapshotDir string, dst Targets, opts RestoreOptions) (e
 		if _, err := os.Stat(srcPath); errors.Is(err, os.ErrNotExist) {
 			continue
 		} else if err != nil {
+			err = src.asGiven(err)
 			// A non-ErrNotExist stat error (permission flap, transient
 			// I/O, symlink loop) MUST abort here — NOT fall through to
 			// the bridge.db block below, which removes the live -wal/-shm
@@ -712,7 +727,9 @@ func RestoreWithOptions(snapshotDir string, dst Targets, opts RestoreOptions) (e
 				opts.beforeConfig()
 			}
 			data, err := readSnapshotFile(srcPath)
-			if err == nil {
+			if err != nil {
+				err = src.asGiven(err)
+			} else {
 				err = configTurn.SaveBytes(data)
 			}
 			if configMovedOn(err) {
@@ -771,7 +788,7 @@ func RestoreWithOptions(snapshotDir string, dst Targets, opts RestoreOptions) (e
 				}
 			}
 		}
-		if err := copyFile(srcPath, target, mode); err != nil {
+		if err := src.copyOut(srcPath, target, mode); err != nil {
 			return fmt.Errorf("restore %s: %w", name, err)
 		}
 		if name == ManifestDBFileName {
@@ -1774,11 +1791,17 @@ func writeManifestWithHook(path string, m Manifest, beforeMode func(string)) err
 }
 
 func readManifest(path string) (Manifest, error) {
-	var m Manifest
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return m, err
+		return Manifest{}, err
 	}
+	return decodeManifest(path, data)
+}
+
+// decodeManifest is the manifest at path whose bytes are data, or why they
+// are none: the decoder's error, named by path.
+func decodeManifest(path string, data []byte) (Manifest, error) {
+	var m Manifest
 	if err := json.Unmarshal(data, &m); err != nil {
 		return m, fmt.Errorf("decode %s: %w", path, err)
 	}

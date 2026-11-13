@@ -95027,3 +95027,361 @@ before the fix). `go test -race -count=1 -timeout 120m -p 2
 the brief asked for the packages. The rules patch applies at the round's
 commit, and `scripts/check-doc-budgets.py` is clean on a copy with it applied
 (`cli-serve.md` 97,290 bytes). Windows is the PR's CI windows job's to show.
+
+## 2026-11-12 — B871: B826's Lows, the look before the prompt, a probe's release, and the words
+
+The rules are `cli-serve.md`'s B826 line and B871's line beside it (B871's
+rules patch) and their long forms in `ops/History-rules-cli-serve.md` ("B871
+— B826's Lows", which holds the reasoning, the exit decision and the table of
+what the look meets); this is the evidence. Linux amd64 (legion0), Go 1.27.3,
+the Makefile's tags, TMPDIR `~/onebit/tmp` on disk unless said.
+
+### The claims, checked at 4678b983
+
+Every item of the backlog entry was checked against the code before it was
+changed, and held as stated but two. Item 11 held in part: no error the
+restore's source reads give quotes a path today (the package's one `%q` is
+`player_reservation.go`'s UUID), so the quoted form is defensive, pinned
+through a seam that quotes, and on Windows by every path. Item 1 asked for the
+exit `cli-serve.md` gives a cancelled command: it gives none (its one rule on
+a stop is serve's, `stoppedBeforeServing`), and this log's 130 (PR #108) is
+the batch commands'; the stop exits 1, as the restore's other stops and its
+prompt's "no" do (the History's "The stop exits 1", an owner's call). Item 4's
+"~339" is round 2's line: at the merge the lookup's wrap is :402 and the
+manifest's read :407 and :409.
+
+### Red first
+
+Each red run on the tree with the new cases and their seams in and the fix
+out, single packages without the build lock (`.tmp/_b871/gotest.py`); A to C
+predicted in writing before the run (`.tmp/_b871/red-{a,b,c}.predictions.txt`),
+every outcome as predicted; D's, the words of a restore's hold, run without a
+written prediction.
+
+A, items 1, 2 and 4: the look's three stop cases red (a read answering after
+the stop and the answer ready with it, "answered <nil>"; past the grace, no
+`ErrSourceNotAnswering`), schema 3 red and schemas 1 and 2 green, the four
+injected failures red and the eight invalid inputs green; and the CLI's:
+
+```
+restore_check_test.go:197: bridge restore stopped = 1, want 1 in the words of a plain stop before its prompt
+    stdout: Restore from …/001/data/backups/2026-11-12T17-01-11Z into …/002/data? … Aborted.
+    stderr: Type 'yes' to continue:
+restore_check_test.go:299: bridge restore asked for its confirmation of a snapshot of schema 3: …
+restore_check_test.go:302: bridge restore made the data dir before it refused a snapshot of schema 3: <nil>
+restore_check_test.go:431: bridge restore whose the snapshot's lookup refused = 2, want 1 with its cause's words ("permission denied") and …/001/2026-11-12T00-00-00Z as typed
+    stderr: restore: "…/2026-11-12T00-00-00Z" is not a recognized snapshot directory (no readable manifest.json with a supported schema)
+```
+
+`--yes` was refused there in the admission's words ("stopped before it wrote
+anything, while it took the lock"), after the config was read and the data
+dir locked.
+
+B, item 3, the API and seams in, the release still on its caller's goroutine:
+all eight ways (the restore's look, the doctor's two probes and the ticker's,
+each with its unlock and then its close stalled) red twice, unmarked and held
+past the stop:
+
+```
+restore_probe_test.go:187: while the probe's release does not answer the folder reads {Snapshot: Step: Since:0001-01-01 00:00:00 +0000 UTC Restore:false Probe:}, held false; want it marked as the doctor's probe of the snapshots' lock
+restore_probe_test.go:193: a probe whose release does not answer did not return within 12.3s of its stop
+```
+
+The CLI's look refused in a folder's generic words ("did not answer within
+2s of the end of its wait"), the doctor's backup-check line came back empty
+(its read did not answer within 5 s), the ticker's reason empty, and the
+doctor's probe line read as "a verification of snapshot  did not end".
+
+C, items 11 and 13 (the copy's seam in, the old `spelledAsGiven` and the
+deferred `asGiven`): a quoted path kept resolved, a snapshot at the root left
+as it was, a path holding the snapshot's spelling inside it respelled, and a
+destination below the snapshot's own spelling respelled, both ways a link can
+lead to the snapshot:
+
+```
+restore_words_internal_test.go:107: a snapshot at the root "/" given as "/recovery": read /player-uuid: input/output error; open "/player-uuid", want "read /recovery/player-uuid: input/output error; open \"/recovery/player-uuid\""
+restore_words_internal_test.go:114: a path that holds the snapshot's spelling inside it was spelled again: open /elsewhere/link/le\ft/2026-11-12T00-00-00Z/player-uuid: file does not exist
+restore_respell_test.go:87: the restore says remove stale sidecar …/002/latest/destination/bridge.db-wal: …, want the destination's sidecar as it is, …/001/backups/2026-11-12T17-29-36Z/destination/bridge.db-wal, never respelled through …/002/latest
+```
+
+The admission's table (21 ways, both spellings) and the typed-path case were
+green there, as predicted: round 3's words were right already, and the
+stricter check (nothing named where the snapshot resolves but its lock file)
+held of them.
+
+D, item 6: the commands' case and the typed-path case red on the words of a
+restore's hold ("stop that command", none of the new), the doctor's two
+restore ways red on its hint, the verification's, the prune's and the probe's
+green.
+
+Item 12's prefix at the lookup (:402) came after: its cases' lookup seam
+answered an error naming the path asked about, so a refusal without the path
+given still named it; a real lookup through a link names where it led, and
+the seam now does (a9f5a3cc), which is what C21 below turns red.
+
+### The fix
+
+As the History says: the look asks its stop whichever answer its wait took
+and refuses a plain stop (`CheckStopped`), the command asks once more before
+it splits; a newer schema refused before the prompt; `ErrNotASnapshot` for
+invalid input alone; a probe's release on its own goroutine, marked past
+`releaseBound` in this process alone and in its caller's name
+(`backup.Prober`), never a marker; the hold's words by what holds it; the
+respelling with one separator a prefix, a quoted form and a path's start, at
+each read of the snapshot and never a destination's.
+
+### Controls
+
+Each a production mutation made from memory and restored in a `finally`
+(`git status` clean after every run), its outcome predicted by name before the
+run (`.tmp/_b871/controls.predictions.txt`, `controls-r2.predictions.txt`);
+the three test binaries (`internal/backup`, `cmd/bridge`, `internal/doctor`)
+built per control and nineteen cases run alone, in four lanes
+(`.tmp/_b871/controls.py`), under the build lock; the baseline first, all
+nineteen green. Round 1, twenty-one controls on a9f5a3cc (19:51 to 20:03):
+
+- C1, the look's stop not asked once its wait answered: the unit case's two
+  ways where the read answers (after the stop, and with it) red; the CLI's
+  stop during the look green, the command's own ask the second layer.
+- C2, the command's ask after the look removed: the CLI's stop just after the
+  look red, both paths. C1 with C2: both CLI stop cases red, both paths, and
+  C1's unit ways.
+- C3, the plain stop given the words of a folder that did not answer
+  (`CheckStopped` for `sourceExpiryError`): the unit's two plain ways and the
+  CLI's stop during the look, both paths.
+- C4, a newer schema let through the look: schema 3 red, unit and CLI (both
+  paths); schemas 1 and 2 green.
+- C5 and C6, every failure of the lookup, and of the manifest's read,
+  `ErrNotASnapshot`: each its two injected ways (refused, I/O), unit and CLI.
+- C7, a probe's release unbounded (its timer an hour): the unit's eight ways,
+  the CLI's look case (both) and the doctor's and the ticker's (all four).
+- C8, every probe's mark a restore's: the unit's six ways of the doctor's and
+  the ticker's probes and the CLI's four; the restore's look green.
+- C9, a marker written for a probe's release (`markStuck` handed the folder):
+  the unit's eight ways, the CLI's look case (both) and the doctor's two
+  ways; **the ticker's two green, against the prediction**: `markStuck` writes
+  its marker on a goroutine of its own, and the case read the marker as
+  `captureHeldBack` answered, before that write. The unit case's reads of the
+  file caught it in all eight, but such a read can come before the write too.
+- C10, the holder given back before the close: the unit's four close-stalled
+  ways; the unlock-stalled green.
+- C11, `StuckCheckOf` not counting its own probe's stalled release: the unit's
+  restore look, the doctor's hold and the ticker's hold ways (six), the CLI's
+  look case (both) and the ticker's two; the doctor's lock probe green, its
+  `ProbeBackupsLock` marking by itself.
+- C12 and C13, the hold's hint back to "stop that command", the command's and
+  the doctor's: the commands' restore case and the typed-path case (both);
+  the doctor's two restore ways.
+- C14, the quoted form never taken: the quoted-and-root unit test and the
+  respelling case's quoted ways (both). C15, a match counted anywhere
+  (`pathStart` always true): the quoted-and-root unit test. C16, the prefix
+  built as the path and a separator: both words unit tests (the root, a
+  trailing separator, `.`).
+- C17, the deferred respelling of every error put back: the respelling case's
+  destination ways (both).
+- C18, the admission's naming handed the resolved snapshot (`takeSource`'s
+  hold and lock refusals, `checkSource`'s hold refusal): eleven admission ways,
+  A's restore blocking B's, the CLI's typed-path case (both); the respelling's
+  cases green. **One more than predicted**, the case of a hold met by the
+  spelling given: `captureT` resolves a capture's folder, so the check given
+  up marked that folder alone, and the restore met it at the resolved
+  folder's check (`takeSource`'s `stuckBy(root)`), never at `SourceStillHeld`,
+  the check its name says.
+- C19, the source reads' respelling taken out (`asGiven` answering its error
+  as it is): the respelling case's quoted ways and the player-uuid case, both
+  spellings; the admission's cases green.
+- C21, `checkSource`'s lookup failure without the path given before it: the
+  lookup refused and failing in I/O, unit and CLI.
+
+C18 and C19, the admission's naming and the source reads' respelling, each
+turned red its own cases alone: item 14's split.
+
+Round 2, C9, C18 and a new C22 on 751c9667 (22:05 to 22:07), after the
+round's two surprises were taken into the tests: the unit case asks the
+probe's mark whether it writes a marker once the probe has answered, the
+command's two probe cases read the marker again once the release has ended,
+and the admission case met by the spelling given gives its check that
+spelling:
+
+- C9: the unit's eight ways, the CLI's look case (both) and the ticker's two
+  red; **the doctor's unlock way green, red in round 1**: its two reads of the
+  file, at the case's end and once the release had ended, read it as it was,
+  both racing the marker's write on `markStuck`'s goroutine.
+- C18: ten admission ways, the case met by the spelling given green now, A
+  blocking B and the typed-path case (both), as predicted.
+- C22, `SourceStillHeld` naming the folder it asked rather than the snapshot:
+  the case met by the spelling given alone, as predicted.
+
+Round 3, C9 on 35124f66, the marks asked in every package's tests while the
+release is stalled (`backup.MarkersForTest`, a seam beside the others, in
+place of the unit tests' own copy, `controls-r3.predictions.txt`), on
+2026-11-13 at 00:53: the unit's eight ways, the CLI's look case (both) and the
+doctor's and the ticker's four, every one red, as predicted.
+
+### The gates
+
+Three uses of the build lock, nothing else in any of them.
+
+On a9f5a3cc (2026-11-12, 20:03 to 20:51): `go vet ./...` with the Makefile's
+tags clean for linux/amd64, and `go vet` of `./internal/backup/`,
+`./cmd/bridge/`, `./internal/doctor/` and `./internal/admin/` clean for
+windows/amd64, darwin/arm64 and linux/386; go1.27.3's gofmt lists none of the
+32 Go files the branch changed. Under `-race -count=50 -run '^Name$'`, four
+lanes side by side: the 25 tests the branch added or changed (the admission
+table in two halves, by spelling: 1,428 s and 1,236 s for their 50 rounds) and
+three neighbours that read the marks and words it changed, all 29 ok, no race
+reported. The two packages with TMPDIR reached through a symlink
+(`~/onebit/tmp/b871-link`, leading one folder deeper), without `-race`:
+`internal/backup` ok in 549 s, and `cmd/bridge` failed
+`TestEveryBackgroundGoroutineDrainsOnCleanup`, the package's sweep:
+`restoreRun.start` launched bridge restore with its join registered in
+`newRestoreRun`, not beside the launch. 751c9667 makes `newRestoreRun` launch
+it, waiting for `start` to hand it the run, with its `drainLoopOnCleanup`
+beside the launch, still before the cleanups that let the run go on.
+
+On 751c9667 (22:05 to 22:28): round 2's controls; `-race -count=50` of the
+seven tests that commit touched (the probe's unit case and the CLI's two, the
+admission case met by the spelling given, and the three other cases that run
+bridge restore through `restoreRun`), all ok; the two packages through the symlink, both ok
+(`internal/backup` 552 s, `cmd/bridge` 626 s); `internal/doctor` under
+`-race`, ok (7 s), and `internal/admin` without it, ok (212 s), whose doctor
+helper's call the branch changed; vet and gofmt clean.
+
+On 35124f66 (2026-11-13, 00:53 to 01:38): round 3's control;
+`-race -count=50` of the three probe cases, all ok;
+`go test -race -count=1 -timeout 120m -p 2 ./internal/backup/ ./cmd/bridge/`:
+both ok, `internal/backup` in 845 s and `cmd/bridge` in 1,749 s, which holds
+`TestEveryCitedTestNameExists` and `TestEveryBackgroundGoroutineDrainsOnCleanup`;
+the two packages through the symlink again, both ok (570 s, 640 s); vet and
+gofmt clean. `make test` and `make build-all` were not run: the brief asked for
+the packages. The rules patch applies at the final commit, and
+`scripts/check-doc-budgets.py` is clean on a copy with it applied
+(`cli-serve.md` 99,124 bytes); `verify_moves.py` passes there with B871's
+edits declared, against the final commit and against main. Windows and macOS
+are the PR's CI jobs to show.
+
+## 2026-11-13 — B871 round 2: the ticker's own probe, the tests' marker reads, and two findings refuted
+
+The rules are `cli-serve.md`'s B871 line (round 2's patch) and
+`build-ci-tests.md`'s line on waiting for a marker's write, with the long
+form in `ops/History-rules-cli-serve.md` ("B871", its "Round 2" paragraph);
+this is the evidence. Linux amd64 (legion0), Go 1.27.3, the Makefile's tags,
+TMPDIR `~/onebit/tmp`. The round's controls are uncommitted edits of committed
+files, put back with `git checkout --` (`.tmp/_b871/r2/ctl.py`), each
+predicted in writing before its run (`.tmp/_b871/r2/predictions.txt`).
+
+### Item 1: the ticker took a snapshot behind its own probe
+
+At 4e4cd01c, with no marker beside the backups folder's lock,
+`captureHeldBack`'s `StuckCheckOf` makes no probe (no marker, no try), and
+`ProbeBackupsLock` takes the free lock; its release, stalled, past
+`releaseBound` marks the folder in this process and answers nil, so the pass
+went on (`case !errors.Is(lockErr, backup.ErrBackupsUnlocked): return "",
+false`). Red, the new case at that code
+(`TestTheTickerTakesNoSnapshotWhileItsOwnProbesReleaseDoesNotEnd`, a boot
+pass of the real ticker due a snapshot, the probe's unlock and separately
+its close stalled), both ways:
+
+```
+restore_probe_test.go:300: a boot pass beside its own probe's stalled release: 2 snapshots, want 1, saying "no snapshot taken: the scheduled snapshot's probe of the snapshots' lock that did not end still holds the backups folder" and no restore
+    stdout backup (startup): wrote …/backups/2026-11-13T02-15-10Z-1
+    backup (startup): prune skipped: a probe of the snapshots' lock whose release did not end holds them until it ends; …
+    stderr backup (startup): the verification did not start for …: … (the scheduled snapshot's probe of the snapshots' lock, given up in letting go of th…
+```
+
+The fix (ea588ca6): `letProbeGo` answers the mark it raised, and
+`ProbeBackupsLock` answers its own stalled release as `ErrCheckStillRunning`
+(a `*StillRunningError` naming its probe), joined to `ErrBackupsUnlocked`
+where both hold; `captureHeldBack` takes it before the unlocked branch and
+says why in the stuck check's words (`stillHoldsTheFolder`, which the first
+branch shares). No read of the folder is added to a healthy tick.
+`StuckCheckOf` asks this process's marks again after its own probe already
+(`return stuckAt(key)`), and the doctor reads `ProbeBackupsLock`'s answer only
+for `ErrBackupsUnlocked` (`doctor.BackupChecks`), so its lines are unchanged;
+the unit case's doctor-lock ways now want its `ErrCheckStillRunning`.
+Controls on ea588ca6: I1, `captureHeldBack`'s branch taken out, the new case
+red both ways, `TestTheDoctorAndTheTickerNameTheirOwnProbesStalledRelease`
+green (its ticker way meets the mark through `StuckCheckOf`'s own probe,
+beside a stale marker); I1b, `ProbeBackupsLock`'s answer turned off, the new
+case red both ways and the unit case's two doctor-lock ways ("answered
+<nil>"), its other six green. As predicted.
+
+### Item 2: the tests' reads of a marker
+
+`writeMarker` makes the marker's file (`O_EXCL`) before it writes its JSON;
+a test that waited for the file could read it empty. Shown at ea588ca6 by
+holding the write 1.5 s after the file's creation (I2W): red, as predicted,
+
+```
+restore_words_unix_test.go:62: the marker does not read: unexpected end of JSON input
+backup_round3_test.go:432: the doctor's backup-check line beside the check that runs on: {Name: Status: Summary: Hint:}, false
+```
+
+the second a stuck check run in a process of its own, whose marker the
+doctor reads once. Not as predicted: `TestAnAbandonedCheckKeepsItsHoldsUntilItsCheckerEnds`
+stayed green, and with the write held 12 s (I2WL) so did it and
+`TestAGivenUpRestoreThatHoldsTheLockMarksTheFolderUntilItLetsGo`: a
+verification "as another process" made in this process is refused by this
+process's mark before it reads anything (`verifyAndThen` asks `stuckBy` first,
+`finish.go:288`), so those two of `awaitMarker`'s three uses could not fail by
+the race; their comments say so now. The fix (9cda4b3f): `awaitMarker` waits
+for the write's `"writes"` hook, which fires after the write and the close
+(`markerWritten`, installed before the give-up), and the stuck check's
+process prints a line of its own from that hook, which the test waits for
+beside its given-up line; `SetOnMarkerWriteForTest` moved from
+`export_test.go` to `seams.go` so that process can install it. Green with
+I2W: all four. Controls on 9cda4b3f, each with I2W: I2F (`awaitMarker` back to
+the file) red at `restore_words_unix_test.go:65`, the same words, the other
+two green; I2Fc (the parent's round-1 loop back) red at
+`backup_round3_test.go:446`, the doctor's line. As predicted.
+
+### Item 3: refuted by audit
+
+No error of the snapshot's that `RestoreWithOptions` returns is left
+unrespelled (backup.go at 4e4cd01c). Between the admission (`holdSource`,
+549) and the console account's read (599) run only the destination's seal
+completion (565) and config lock (569); no database validation or open. The
+source reads respell: the account (602), the identity (612), the DSD state
+(628), the reservation's floor (666), a file's stat (711), bridge.yaml's read
+(731), and each copy's open and reads in `copyOut` (`restore_source.go`
+309-343). The migrations check reads the snapshot's database and drops its
+errors (`restoreMigrationHeld`, 825-827, by design); the epoch reset opens
+the destination (798); `playerFilesNeedABarrier` (649) and
+`floorlessSnapshotBound` name files by name alone; every other return is the
+destination's, never to be respelled. The database's open failing is already
+a case (`TestARestoreSpellsItsSourcesWordsAsGivenAndLeavesItsDestinationsAsTheyAre`,
+its quoted bridge.db). No change.
+
+### Item 4: no gap
+
+Control I4 at 4e4cd01c, `CheckRestoreSource`'s post-wait `ctx.Err()` check
+taken out (`restore_source.go` 596-598):
+`TestARestoreStoppedAsItsLookAnswersIsAPlainStop` red in its two ways where
+the read answers (`restore_check_test.go:149: the look answered <nil>, want a
+plain stop carrying context.Canceled alone`), its abandoned way green, as
+predicted. The command's case stays green by design, its own ask the second
+layer. No case added.
+
+### The gates
+
+On bcb8897e (2026-11-13, 04:12 to 05:03), one use of the build lock, nothing
+else in it, every process pinned to half the cores (CPUs 0 to 7): `go vet
+./...` with the Makefile's tags clean for linux/amd64, and `go vet` of
+`./internal/backup/` and `./cmd/bridge/` clean for darwin/arm64 and
+windows/amd64; go1.27.3's gofmt lists none of the 11 Go files the round
+changed. Under `-race -count=50 -run '^Name$'`, four lanes: the round's new
+and changed cases (the ticker's own probe, the unit probe case, the stuck
+check in a process of its own, and the three of `awaitMarker`) and five
+neighbours that run the code they changed (the stale marker's removal, the
+ticker beside a check that did not end, the doctor's and the ticker's probes,
+a folder granting no lock, a ticker stopped in its probe), all 11 ok, no race
+reported. Each touched package once with `-race -count=1 -timeout 120m`:
+`cmd/bridge` ok in 1,596 s, which holds `TestEveryCitedTestNameExists` and
+`TestEveryBackgroundGoroutineDrainsOnCleanup`, and `internal/backup` ok in
+775 s. `make test` and `make build-all` were not run: the brief asked for the
+packages. The rules patch applies at the final commit, and
+`scripts/check-doc-budgets.py` is clean on a copy with it applied
+(`cli-serve.md` 99,317 bytes, `build-ci-tests.md` 37,446); `verify_moves.py`
+passes there with the B871 line declared edited against the final commit, and
+with round 1's edits declared against main. Windows and macOS are CI's to
+show.
