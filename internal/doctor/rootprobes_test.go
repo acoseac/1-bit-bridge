@@ -204,6 +204,19 @@ func (c *testClock) settled(t *testing.T, what string, got <-chan Check) Check {
 	panic("unreachable")
 }
 
+// probesBegun is how many probes of root p's runs began, read once s has let
+// every root answer and p's probes have all ended: a probe that has ended has
+// made its one stat, which s counts, while one a run on the test clock has
+// stopped waiting for may not have made it yet.
+func probesBegun(t *testing.T, s *stallingRoots, p *RootProbes, root string) int {
+	t.Helper()
+	s.letGo()
+	if !p.DrainForTest(testDeadline) {
+		t.Fatalf("a probe was still out %s after its roots answered", testDeadline)
+	}
+	return s.statsOf(root)
+}
+
 // runOn begins library-roots for roots as one run of p, on a goroutine of its
 // own, its line on the channel it returns.
 func runOn(ctx context.Context, p *RootProbes, roots ...string) <-chan Check {
@@ -411,7 +424,7 @@ func TestALaterRunFindsTheRootStillNotAnsweringAndAsksItNoMore(t *testing.T) {
 	if second.Status != Fail || !strings.Contains(second.Hint, want) {
 		t.Errorf("the second run's library-roots = %+v, want a fail saying %q", second, want)
 	}
-	if n := s.statsOf(dead); n != 1 {
+	if n := probesBegun(t, s, p, dead); n != 1 {
 		t.Errorf("two runs began %d probes of the root that does not answer, want one", n)
 	}
 }
@@ -472,7 +485,7 @@ func TestARunStoppedByItsCallerSaysSoAndNotThatTheRootIsStuck(t *testing.T) {
 	if next.Status != Fail || !strings.Contains(next.Hint, "still has not answered") {
 		t.Errorf("the next run's library-roots = %+v, want the probe still out and not answering", next)
 	}
-	if n := s.statsOf(dead); n != 1 {
+	if n := probesBegun(t, s, p, dead); n != 1 {
 		t.Errorf("the runs began %d probes, want one", n)
 	}
 }
