@@ -95028,6 +95028,189 @@ the brief asked for the packages. The rules patch applies at the round's
 commit, and `scripts/check-doc-budgets.py` is clean on a copy with it applied
 (`cli-serve.md` 97,290 bytes). Windows is the PR's CI windows job's to show.
 
+## 2026-11-13 — B828: a tsnet state file that holds nothing refuses the start in the bridge's words
+
+Worker b828, legion0, branch `fix/b828-empty-tsnet-state` from main 4678b983. Commits a2a3d3fe (the tests, red
+first), ce3cf633 (the refusal and the tile), bda8e234 (the refusal's tests report every assertion), and the one that
+carries this record, the README's sentence and the release note. The rules line and its long form ship as
+`rules-b828-r1.patch` (`cli-serve.md`, `ops/History-rules-cli-serve.md`).
+
+### What was true
+
+Read in the module cache, tailscale.com v1.104.2: `tsnet.Server.Start` (tsnet/tsnet.go, 556 to 559) runs `doInit`
+(709 to 714) and `start` (805), which starts its logger (875), its network monitor (879), its userspace engine (887)
+and netstack (907) and then opens its store, `store.New(tsLogf, <Dir>/tailscaled.state)` (956 to 963). `store.New`
+(ipn/store/stores.go, 59 to 82) calls `maybeMigrateLocalStateFile` (78 to 80) before `NewFileStore`, and that function
+(259 to 273) reads the file and unmarshals it into a `map[string]any` to tell a TPM-sealed file from a plain one: an
+empty file fails there, `unexpected end of JSON input`, wrapped `failed to unmarshal %q: %w` (272) and `failed to
+migrate existing TPM-sealed state file to plaintext format: %w` (79). `NewFileStore`'s "Treat an empty file as a
+missing file" (166 to 171, Tailscale's issue 895) is reached only by a direct call, as the tests' fixtures make one;
+B749's comment in `readNodeState` ("Upstream's store takes an empty file for none") had read it as the start's answer.
+
+A throwaway program at main (`.tmp/_b828/probe`, not committed) showed it. `store.New` over an empty file, over a line
+feed and over ` \t\r\n` answered that error; over `{}` it opened. The bridge's own `Start` over an empty file logged
+"tsnet: no registered node in the state dir and no AuthKey — interactive auth required", then failed `tsnet: server
+start: tsnet: failed to migrate existing TPM-sealed state file to plaintext format: failed to unmarshal "<state
+dir>/tailscaled.state": unexpected end of JSON input`, which serve prints as `tsnet: bring node up: <that> (LAN
+listener still active)`; the state dir held `tailscaled.state` alone before and `tailscaled.log.conf`,
+`tailscaled.log1.txt` and `tailscaled.log2.txt` beside it after, the logger's files, written outside a test binary.
+Over a line feed it logged the library-name line ("the node's state does not parse as Tailscale's state file, so
+this start cannot tell which name the node has …") first, then failed alike. Upstream's writer syncs the file before
+its rename (atomicfile/atomicfile.go, line 45), so an empty file comes from outside it: a truncation by hand, a copy,
+a sync tool, a filesystem's repair.
+
+`readNodeState`'s one caller is `Server.nodeName`, whose one caller is `startUnlocked`, whose one caller is
+`Server.Start`, which serve (`bringTsnetUp`, from `tsnetFront.run`), `bridge tsnet auth` and `bridge tsnet status`
+call. A node not registered was named `tsnet.DefaultHostname` unless `tailscale.hostname` was set and, with no auth
+key, logged the interactive-auth line; a state that does not read was named after the library with one line, and no
+line under `tailscale.hostname`, whose return came first; in both the upstream start ran. The console's tile showed
+`LastStartError` for a `LogsRequiredError` alone, and otherwise `tsnet status: tsnet: Status called before Start`.
+`bridge tsnet logout` reads no state: it removes the state's folder.
+
+### The choice, and as built
+
+The brief's review bound option (a) as a refusal of the start in the bridge's words, not a warning (a state that does
+not read changes the name alone and leaves upstream's start to fail), independent of the hostname, and ruled option
+(b) out: a new registration is a new device, whose MagicDNS name and certificate can change, against B749's rules that
+the node keeps its identity and that the reading changes nothing. `readNodeState` answers a file whose bytes are all
+JSON's white space (space, tab, carriage return, line feed: what Go's decoder skips), none at all included, with
+`*tsnet.EmptyStateError` (`WhiteSpace` set where it holds any); `nodeName` returns it before it asks
+`tailscale.hostname`; `startUnlocked` returns it before it builds the upstream server, so neither the hook before the
+upstream start nor the upstream start runs, whatever the hostname or the auth key; `Start` keeps it as the last start
+error. Its words name the file, and its folder by its role, and no path, and say that Tailscale does not start from
+it, that a copy of the file keeps the node, that moving the file aside and restarting the bridge gives a new device,
+which authenticates as on a first run, takes a new tailnet address and can take a new MagicDNS name, which paired apps
+hold, and that the bridge moves and replaces nothing. Serve prints them on its tailnet line, `bridge tsnet auth` and
+`status` print them and exit 1, and `tsnetAdminStatus` reads them from `LastStartError` beside `LogsRequiredError`.
+
+### The other states
+
+A missing file and `{}` are a new node, before and after (`TestAStateFileThatIsNotThereStillStartsANewNode`, green at
+main and since). White space alone was a state that does not parse: the library's name, its line, then upstream's
+failure; it is refused with the empty file now. Any other byte, a vertical tab, a form feed, a no-break space, a
+byte-order mark or NUL bytes among them, is a state that does not parse, as before
+(`TestOnlyJSONWhiteSpaceIsAStateThatHoldsNothing`). What stays open of the reading is backlog B829 and the follow-ups
+this job's report names.
+
+### Red first
+
+At a2a3d3fe, the tests on main's code, `go test -count=1 -run '…' ./internal/tsnet/` and `./cmd/bridge/` with the
+release tags and TMPDIR `~/onebit/tmp`: every row of `TestAStateFileThatHoldsNothingRefusesTheStart` red, the first
+row's lines "the refusal does not say "move the file aside": "tsnet: server start: tsnet: failed to migrate existing
+TPM-sealed state file to plaintext format: failed to unmarshal \"…/tailscale/tailscaled.state\": unexpected end of
+JSON input"", "the start built 1 upstream node(s) over a state file that holds nothing, want none", "the start
+reached the hook before the upstream start" and "the start changed the state dir" (`tailscaled.log.conf` after);
+every row of `TestTheCommandsRefuseAStateFileThatHoldsNothingInTheBridgesWords` red ("bridge tsnet auth reached its
+node's upstream start", its words "tsnet: before start: the test stopped the node before its upstream start"); both
+rows of `TestServeRefusesAStateFileThatHoldsNothingInTheBridgesWords` red ("serve reached its node's upstream start;
+its line: "tsnet: bring node up: tsnet: before start: the test stopped the node before its upstream start (LAN
+listener still active)"", and the tile's "tsnet status: tsnet: Status called before Start"); and
+`TestAStateFileThatIsNotThereStillStartsANewNode` and `TestTheNodeNameIsTheRegisteredOneOrTheDefault` green. The node
+internal/tsnet stands in for does what upstream's start did in the probe (`upstreamOverState`: the logger's file, then
+upstream's words), since a test binary's own upstream start skips the logger; the cmd/bridge tests stop every start
+that reaches the hook before the upstream start (`stopTsnetStarts`), so nothing reaches the network. At ce3cf633
+every test is green.
+
+### Negative controls
+
+Each predicted before any ran (`.tmp/_b828/controls.predictions.txt`, not committed), at bda8e234, an uncommitted edit
+of the clean tree put back with `git checkout --` and found equal to HEAD, internal/tsnet's five tests and cmd/bridge's
+four (the two new ones, `TestTheNodesNameOnEveryStart` and `TestTheTileSaysWhatATailnetThatRequiresLogsNeeds`) run
+from test binaries built for it, each subtest's verdict read. The run with no mutation was green (60 verdicts). Each
+was red where predicted and nowhere else:
+
+| | mutation | red |
+|---|---|---|
+| C1 | the fix removed: an empty file no state, white space a state that does not parse, as main | the five refusal rows (upstream's words, the node built and started, the hook, the logger's file in the state dir), the reader's three rows that hold nothing, the five commands rows, serve's two |
+| C2 | `nodeName` takes the refusal for a state that does not read | the five refusal rows, the five commands rows, serve's two; the reader's table green |
+| C3 | the refusal asked only without `tailscale.hostname` | the two refusal rows with a hostname, the three commands rows with one, serve's row with one |
+| C4 | the tile without the refusal | serve's two rows, on the tile alone |
+| C5 | the brief's (b): the reader moves the file aside and answers no state | the five refusal rows (the node up, built, the hook, the state dir's comparison), the reader's three rows, the commands and serve rows |
+| C6 | the refusal wrapped, `tsnet: %w` | the five refusal rows, the five commands rows and serve's two, on the exact words alone |
+| C7 | the line drawn at `bytes.TrimSpace` | the reader's vertical tab, form feed and no-break space rows |
+| C9 | the upstream node built though never started | the five refusal rows, on the count of nodes alone |
+
+### The gates so far
+
+At bda8e234, outside the build lock (single packages): go1.27.3's gofmt lists none of the changed Go files; `go vet`
+of internal/tsnet and cmd/bridge with the release tags clean; `go test -race -count=50 ./internal/tsnet/` ok in 24.5 s,
+and `-race -count=1 -timeout 120m` once ok (119 verdicts, none skipped); cmd/bridge's ten touched tests (the two new
+ones, `TestTheNodesNameOnEveryStart`, the three tile tests and the four `TestTailscaleAdminSource…` tests) under
+`-race -count=50 -p 8 -parallel 8` ok in 120 s (500 runs, 1,400 subtests, none failed or skipped, no race reported).
+
+### The gates at the record's commit
+
+At 095a5d0f, in one use of the build lock (06:11 to 06:38), TMPDIR `~/onebit/tmp`: `go vet ./...` with the release
+tags clean for linux/amd64, darwin/amd64 and windows/amd64, and of internal/tsnet and cmd/bridge for linux/386;
+`check-build-tags` OK and the census's tests ok (21 s); `go test -race -count=1 -p 8 -parallel 8 -timeout 120m
+./cmd/bridge/` ok in 1,586 s, which holds `TestEveryCitedTestNameExists` and the drain audit. The rules patch applies
+to HEAD (`git apply --check`); on a git-archive copy of HEAD with it applied, the copy's `check-doc-budgets.py` is
+clean (`cli-serve.md` 98,615 bytes), `verify_moves.py --base HEAD --edit '*The name.* An explicit'` reports MISSING
+the B749 bullet's two copies alone, each replaced by its successor with the one clause the patch edits (the tool
+cannot pair a line edited with its verbatim twin), and `TestEveryCitedTestNameExists` is green there and red with a
+ghost citation planted in the patched History. `make test` and `make build-all` were not run: the brief asked for the
+packages. Windows and macOS are CI's to run.
+
+## 2026-11-13 — B828 round 2: white space past the read's bound refuses the start too
+
+Worker b828, legion0, branch `fix/b828-empty-tsnet-state` at `orch/b828` 88b06153 (round 1 and its rules), against
+the finding Codex (Medium) and Claude (Low) agreed on, and the brief's review of the fix. Commits 381776bd (the tests,
+red first), ca79df9f (the fix) and the one that carries this record. The rules ship as `rules-b828-r2.patch`.
+
+### The finding
+
+`readNodeState` reads `maxStateBytes` (16 MiB) and one byte more, and its size guard ran before round 1's white-space
+check, so a `tailscaled.state` of 16 MiB and one byte of JSON white space was "larger than the 16777216 bytes it is read
+to", a state that does not read: `nodeName` took the library's name and said so, `startUnlocked` built the upstream
+node, and upstream's `store.New` refused the file in its TPM words after its logger had written into the state dir; the
+console's tile fell back to "Status called before Start". It held, at 88b06153.
+
+### As built
+
+The white-space check comes first, of the same bounded read (`io.LimitReader` at `maxStateBytes + 1`, its errors and
+its sanitised paths as they were; a chunked read would lift the cap, which the brief's review ruled out): where every
+byte read is JSON white space, the file holds nothing, `*EmptyStateError` with `Oversized` set where the read passed
+`maxStateBytes`, and nothing more is read. The words for that file say it holds no state in its first 16 MiB, which is
+as far as the bridge reads it, and that the bridge does not start the node from it; they leave out round 1's "Tailscale
+does not start from it", since of such a file the bridge knows only what it read. The words for an empty file and for
+white space alone are round 1's, byte for byte. The edge, in the comment and the History: a file with JSON past its
+first 16 MiB of white space, which Tailscale might start from, is refused with it, where it reached upstream before; a
+state file is a few KiB, so that file is broken anyway. Anything else in what was read keeps a larger file a state that
+does not read, in the same words as before.
+
+### Red first
+
+At 381776bd, the tests on 88b06153's code, `go test -count=1 -v -run '^(…)$' ./internal/tsnet/` with the release tags
+and TMPDIR `~/onebit/tmp`, the four named `TestOnlyJSONWhiteSpaceIsAStateThatHoldsNothing`,
+`TestAStateFileThatHoldsNothingRefusesTheStart`, `TestAStateFileThatIsNotThereStillStartsANewNode` and
+`TestTheStateReaderWritesNothing`: the one red row,
+"white space past the bound" (16,777,217 bytes cycling through space, tab, carriage return and line feed), with
+"readNodeState = {registered:false hostname:}, the node's state is larger than the 16777216 bytes it is read to: a
+state that holds nothing false, want true", then "the upstream node's Start ran over a state file that holds nothing",
+"the start built 1 upstream node(s) over a state file that holds nothing, want none", "the start reached the hook
+before the upstream start" and "the start changed the state dir" (`tailscaled.log.conf` after, the state file's 16,777,217
+bytes and SHA-256 unchanged), and Start's words upstream's. Green there: the row at the bound (16,777,216 bytes of white
+space), the row past it with an `x` in its first 16 MiB ("is larger than …", as before) and round 1's rows. Every row of
+the reader's table that holds nothing now drives a start too (`startRefused`, factored out of
+`TestAStateFileThatHoldsNothingRefusesTheStart` with its assertions), which the state dir's comparison reads as a length
+and a SHA-256 past 64 bytes.
+
+### Negative controls
+
+Predicted before any ran (`.tmp/_b828/controls2.predictions.txt`, not committed), at ca79df9f, each an uncommitted edit
+put back with `git checkout --`, internal/tsnet's five tests run from a test binary built for it: no mutation, 43
+verdicts green; the white-space check asked only of a read within the bound, as at 88b06153 (the brief's control), red
+on "white space past the bound" alone, on the reader, the upstream start, the hook, the state dir and the words;
+`Oversized` set at the bound, red on "white space to the bound" alone; the words without `Oversized`, red on "white
+space past the bound" alone, on its words.
+
+### The runs
+
+At ca79df9f, outside the build lock (one package each): go1.27.3's gofmt lists neither changed file; `go test -race
+-count=50 ./internal/tsnet/` ok in 134.7 s and `-race -count=1 -timeout 120m` once ok (122 verdicts, none skipped, no
+race); cmd/bridge's two B828 tests, which compare the refusal's words, under `-race -count=50` ok in 132.6 s (100 runs,
+350 subtests); `go vet -printf=true` of internal/tsnet and cmd/bridge with the release tags clean for linux, darwin and
+windows (amd64). The rest of the tree is round 1's, vetted then.
 ## 2026-11-13 — B834: two engine tests wait for the step they read, and two siblings for a timer's message
 
 Backlog B834 on `fix/b834-engine-test-barriers`, from 4678b983, by worker

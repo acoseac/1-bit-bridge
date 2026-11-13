@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"crypto"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -166,8 +168,10 @@ func startForName(t *testing.T, cfg Config) (string, string) {
 
 const unreadableLine = "so this start cannot tell which name the node has"
 
-// TestTheNodeNameIsTheRegisteredOneOrTheDefault: every state a start can
-// find, and the name the upstream server is built with.
+// TestTheNodeNameIsTheRegisteredOneOrTheDefault: every state a start names
+// the node from, and the name the upstream server is built with. A state file
+// that holds nothing names none: it refuses the start
+// (TestAStateFileThatHoldsNothingRefusesTheStart, backlog B828).
 func TestTheNodeNameIsTheRegisteredOneOrTheDefault(t *testing.T) {
 	const library = "Living Room"
 	for _, c := range []struct {
@@ -179,9 +183,6 @@ func TestTheNodeNameIsTheRegisteredOneOrTheDefault(t *testing.T) {
 	}{
 		{"no state dir yet", "", nil, DefaultHostname, false},
 		{"no state file", "", func(t *testing.T, dir string) {}, DefaultHostname, false},
-		{"an empty state file", "", func(t *testing.T, dir string) {
-			writeRaw(t, dir, "")
-		}, DefaultHostname, false},
 		{"the {} a first start writes", "", func(t *testing.T, dir string) {
 			newStateFixture(t, dir)
 		}, DefaultHostname, false},
@@ -355,6 +356,335 @@ func TestALibraryRenameDoesNotRenameARegisteredNode(t *testing.T) {
 		if got, _ := startForName(t, Config{StateDir: dir, UnreadableStateHostname: library}); got != "Living Room" {
 			t.Errorf("library %q: the registered node registers as %q, want the name it has", library, got)
 		}
+	}
+}
+
+// A state file that holds nothing (backlog B828): empty, or white space
+// alone, which a truncation leaves. Tailscale's start refuses it in its own
+// words, about a TPM-sealed state (store.New, whose JSON check comes before
+// the file store that would take an empty file for none), and the file is the
+// node's identity, which the bridge never replaces: the start refuses it
+// first, in the bridge's words, before the node is built.
+
+// TestAStateFileThatHoldsNothingRefusesTheStart: over a state file that holds
+// nothing, with tailscale.hostname set or not and an auth key or not, Start
+// returns the bridge's words, which say what to move aside, what that costs
+// and what keeps the node, and name no path, and keeps them as the last start
+// error; no upstream node is built, the hook before its start never runs, and
+// the state file's bytes and the state dir's entries are as they were. The
+// node stood in for does what upstream's start does there (upstreamOverState).
+func TestAStateFileThatHoldsNothingRefusesTheStart(t *testing.T) {
+	const tailscaleRefuses = ", and Tailscale does not start from it"
+	for _, c := range []struct {
+		name, body, hostname, authKey string
+		holds                         string // what the words say the file holds, and why no node starts
+	}{
+		{"an empty file", "", "", "", "is empty" + tailscaleRefuses},
+		{"an empty file, tailscale.hostname set", "", "Chosen Name", "", "is empty" + tailscaleRefuses},
+		{"an empty file beside an auth key", "", "", "tskey-auth-b828", "is empty" + tailscaleRefuses},
+		{"a line feed alone", "\n", "", "", "holds only white space" + tailscaleRefuses},
+		{"white space alone, tailscale.hostname set", " \t\r\n", "Chosen Name", "", "holds only white space" +
+			tailscaleRefuses},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			dir := filepath.Join(t.TempDir(), "tailscale")
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			writeRaw(t, dir, c.body)
+			logs, err := startRefused(t, Config{StateDir: dir, Hostname: c.hostname, AuthKey: c.authKey,
+				UnreadableStateHostname: "Living Room"})
+			if err != nil {
+				mustSayTheStateHoldsNothing(t, err.Error(), c.holds, dir)
+				var empty *EmptyStateError
+				if !errors.As(err, &empty) || empty.WhiteSpace != (c.body != "") {
+					t.Errorf("Start = %#v, want an *EmptyStateError with WhiteSpace %v", err, c.body != "")
+				} else if want := empty.Error(); err.Error() != want {
+					t.Errorf("Start says %q, want the refusal's words alone: %q", err, want)
+				}
+			}
+			for _, line := range []string{unreadableLine, "interactive auth required"} {
+				if strings.Contains(logs, line) {
+					t.Errorf("a refused start logged %q beside its refusal: %s", line, logs)
+				}
+			}
+		})
+	}
+}
+
+// startRefused runs one Start of a server built from cfg, its upstream node
+// stood in for (upstreamOverState), and fails the test unless that start was
+// refused before anything was built: an error kept as the last start error,
+// no upstream node built or started, the hook before the upstream start never
+// run, the state dir's entries and the state file's bytes as they were, and
+// nothing running. Every assertion reports, so a start that went on, or one
+// that moved the file aside, shows each thing it did. It returns what the
+// server logged and the error Start returned.
+func startRefused(t *testing.T, cfg Config) (string, error) {
+	t.Helper()
+	keepNoLogsEnv(t)
+	before := stateDirAsItIs(t, cfg.StateDir)
+	var logs bytes.Buffer
+	hooked := false
+	cfg.Logger = captureLogger(&logs)
+	cfg.BeforeStart = func(*tsnet.Server) error { hooked = true; return nil }
+	s, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	var built []*upstreamOverState
+	s.newNode = func(ts *tsnet.Server) node {
+		n := &upstreamOverState{fakeNode: &fakeNode{}, dir: ts.Dir}
+		built = append(built, n)
+		return n
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	err = s.Start(context.Background())
+	if err == nil {
+		t.Error("Start over a state file that holds nothing brought the node up")
+	} else if last := s.LastStartError(); last == nil || last.Error() != err.Error() {
+		t.Errorf("LastStartError = %v, want the refusal Start returned", last)
+	}
+	for _, n := range built {
+		if n.startCalls() != 0 {
+			t.Error("the upstream node's Start ran over a state file that holds nothing")
+		}
+	}
+	if len(built) != 0 {
+		t.Errorf("the start built %d upstream node(s) over a state file that holds nothing, want none", len(built))
+	}
+	if hooked {
+		t.Error("the start reached the hook before the upstream start")
+	}
+	if after := stateDirAsItIs(t, cfg.StateDir); after != before {
+		t.Errorf("the start changed the state dir:\nbefore:\n%s\nafter:\n%s", before, after)
+	}
+	mustNotBeStarted(t, s)
+	return logs.String(), err
+}
+
+// TestAStateFileThatIsNotThereStillStartsANewNode: no state file, and the {}
+// upstream's store writes before any authentication, are a new node, as they
+// were before B828: the start builds the upstream node, starts it, names it
+// tailscale.hostname or DefaultHostname, and keeps no error.
+func TestAStateFileThatIsNotThereStillStartsANewNode(t *testing.T) {
+	for _, c := range []struct {
+		name, hostname, want string
+		state                func(t *testing.T, dir string)
+	}{
+		{"no state dir yet", "", DefaultHostname, nil},
+		{"no state file", "", DefaultHostname, func(*testing.T, string) {}},
+		{"no state file, tailscale.hostname set", "Chosen Name", "Chosen Name", func(*testing.T, string) {}},
+		{"the {} a first start writes", "", DefaultHostname, func(t *testing.T, dir string) { newStateFixture(t, dir) }},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			keepNoLogsEnv(t)
+			dir := filepath.Join(t.TempDir(), "tailscale")
+			if c.state != nil {
+				if err := os.MkdirAll(dir, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				c.state(t, dir)
+			}
+			var name string
+			s, err := NewServer(Config{StateDir: dir, Hostname: c.hostname, UnreadableStateHostname: "Living Room",
+				Logger:      silentLogger(),
+				BeforeStart: func(ts *tsnet.Server) error { name = ts.Hostname; return nil }})
+			if err != nil {
+				t.Fatalf("NewServer: %v", err)
+			}
+			var built []*upstreamOverState
+			s.newNode = func(ts *tsnet.Server) node {
+				n := &upstreamOverState{fakeNode: &fakeNode{}, dir: ts.Dir}
+				built = append(built, n)
+				return n
+			}
+			t.Cleanup(func() { _ = s.Close() })
+			if err := s.Start(context.Background()); err != nil {
+				t.Fatalf("Start = %v, want the new node up", err)
+			}
+			if len(built) != 1 || built[0].startCalls() != 1 {
+				t.Fatalf("the start built %d upstream node(s), want one, started once", len(built))
+			}
+			if name != c.want {
+				t.Errorf("the new node registers as %q, want %q", name, c.want)
+			}
+			if err := s.LastStartError(); err != nil {
+				t.Errorf("LastStartError = %v after a start that succeeded", err)
+			}
+			if got := s.MetricsState(); got != 2 {
+				t.Errorf("MetricsState = %d, want 2 (running)", got)
+			}
+		})
+	}
+}
+
+// TestOnlyJSONWhiteSpaceIsAStateThatHoldsNothing: the reader takes a file for
+// one that holds nothing exactly where it holds no JSON value, the bytes
+// JSON's decoder skips (space, tab, carriage return, line feed) and nothing
+// else, which is where Tailscale's start answers "unexpected end of JSON
+// input"; any other byte is a state that does not parse, and an object
+// with white space around it is the {} it holds. Its bounded read
+// (maxStateBytes and one byte more) decides a file larger than that too:
+// white space alone there holds nothing, read no further, and anything else
+// there is a file too large, as before. A start over each file that holds
+// nothing is refused before anything is built (startRefused), in the
+// reader's words.
+func TestOnlyJSONWhiteSpaceIsAStateThatHoldsNothing(t *testing.T) {
+	const (
+		skipped          = " \t\r\n" // the bytes JSON's decoder skips
+		tailscaleRefuses = ", and Tailscale does not start from it"
+		notParsed        = "the node's state does not parse as Tailscale's state file"
+	)
+	pastTheBound := strings.Repeat(skipped, maxStateBytes/len(skipped)+1)[:maxStateBytes+1]
+	xInside := pastTheBound[:maxStateBytes/2] + "x" + pastTheBound[maxStateBytes/2+1:]
+	for _, c := range []struct {
+		name, body string
+		empty      bool   // *EmptyStateError
+		whiteSpace bool   // its WhiteSpace
+		oversized  bool   // its Oversized
+		holds      string // what its words say the file holds, and why no node starts
+		unreadable string // errStateUnreadable's words, where the reader answers one
+	}{
+		{name: "no byte", body: "", empty: true, holds: "is empty" + tailscaleRefuses},
+		{name: "a line feed", body: "\n", empty: true, whiteSpace: true, holds: "holds only white space" +
+			tailscaleRefuses},
+		{name: "each byte JSON skips", body: skipped, empty: true, whiteSpace: true, holds: "holds only white space" +
+			tailscaleRefuses},
+		{name: "white space to the bound", body: pastTheBound[:maxStateBytes], empty: true, whiteSpace: true,
+			holds: "holds only white space" + tailscaleRefuses},
+		{name: "white space past the bound", body: pastTheBound, empty: true, whiteSpace: true, oversized: true,
+			holds: "holds no state in its first 16 MiB, only white space, which is as far as the bridge reads it, " +
+				"and the bridge does not start the node from it"},
+		{name: "white space past the bound, an x in its first 16 MiB", body: xInside,
+			unreadable: fmt.Sprintf("the node's state is larger than the %d bytes it is read to", maxStateBytes)},
+		{name: "a vertical tab", body: "\v", unreadable: notParsed},
+		{name: "a form feed", body: "\f", unreadable: notParsed},
+		{name: "a no-break space", body: "\u00a0", unreadable: notParsed},
+		{name: "a byte order mark", body: "\ufeff", unreadable: notParsed},
+		{name: "NUL bytes", body: "\x00\x00\x00\x00", unreadable: notParsed},
+		{name: "{} between white space", body: " \n{}\n "},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeRaw(t, dir, c.body)
+			st, err := readNodeState(dir)
+			var empty *EmptyStateError
+			if got := errors.As(err, &empty); got != c.empty {
+				t.Errorf("readNodeState = %+v, %v: a state that holds nothing %v, want %v", st, err, got, c.empty)
+			} else if c.empty && (empty.WhiteSpace != c.whiteSpace || empty.Oversized != c.oversized) {
+				t.Errorf("WhiteSpace, Oversized = %v, %v, want %v, %v", empty.WhiteSpace, empty.Oversized, c.whiteSpace,
+					c.oversized)
+			}
+			var unreadable errStateUnreadable
+			switch got := errors.As(err, &unreadable); {
+			case got != (c.unreadable != ""):
+				t.Errorf("readNodeState = %v: a state that does not read %v, want %v", err, got, c.unreadable != "")
+			case got && err.Error() != c.unreadable:
+				t.Errorf("readNodeState says %q, want %q", err, c.unreadable)
+			}
+			if !c.empty && c.unreadable == "" && (err != nil || st.registered) {
+				t.Errorf("readNodeState = %+v, %v, want no registered node", st, err)
+			}
+			if !c.empty {
+				return
+			}
+			logs, refusal := startRefused(t, Config{StateDir: dir, UnreadableStateHostname: "Living Room"})
+			if refusal == nil {
+				return
+			}
+			mustSayTheStateHoldsNothing(t, refusal.Error(), c.holds, dir)
+			if err != nil && refusal.Error() != err.Error() {
+				t.Errorf("Start says %q, want the reader's words: %q", refusal, err)
+			}
+			if strings.Contains(logs, unreadableLine) {
+				t.Errorf("a refused start logged the line on a state that does not read: %s", logs)
+			}
+		})
+	}
+}
+
+// upstreamOverState is an upstream node whose Start does what
+// tailscale.com v1.104.2's does with the state file in its Dir, as far as
+// these tests ask: outside a test binary that start writes its logger's
+// configuration into Dir (startLogger) before it opens its store, and its
+// store (store.New) refuses a state file that holds no JSON value, in words
+// about a TPM-sealed state. Both were seen on a real start (B828's record in
+// ops/engineering-log.md); a test binary's own upstream start skips the
+// logger, so a stand-in is what shows it here.
+type upstreamOverState struct {
+	*fakeNode
+	dir string
+}
+
+func (n *upstreamOverState) Start() error {
+	if err := n.fakeNode.Start(); err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(n.dir, "tailscaled.log.conf"), []byte("{}\n"), 0o600); err != nil {
+		return err
+	}
+	state := filepath.Join(n.dir, stateFileName)
+	if b, err := os.ReadFile(state); err == nil && len(bytes.Trim(b, " \t\r\n")) == 0 {
+		return fmt.Errorf("tsnet: failed to migrate existing TPM-sealed state file to plaintext format: "+
+			"failed to unmarshal %q: unexpected end of JSON input", state)
+	}
+	return nil
+}
+
+// stateDirAsItIs is what a test compares to see that nothing changed the
+// node's state dir: each entry's name and mode, and the state file's bytes
+// (past 64 of them, their length and SHA-256), or that it is not there.
+func stateDirAsItIs(t *testing.T, dir string) string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var b strings.Builder
+	for _, e := range entries {
+		info, err := e.Info()
+		if err != nil {
+			t.Fatal(err)
+		}
+		fmt.Fprintf(&b, "%s %v\n", e.Name(), info.Mode())
+	}
+	switch state, err := os.ReadFile(filepath.Join(dir, stateFileName)); {
+	case errors.Is(err, os.ErrNotExist):
+		fmt.Fprintf(&b, "%s is not there\n", stateFileName)
+	case err != nil:
+		t.Fatal(err)
+	case len(state) > 64:
+		fmt.Fprintf(&b, "%s holds %d bytes, SHA-256 %x\n", stateFileName, len(state), sha256.Sum256(state))
+	default:
+		fmt.Fprintf(&b, "%s holds %q\n", stateFileName, state)
+	}
+	return b.String()
+}
+
+// mustSayTheStateHoldsNothing fails the test unless words are the bridge's
+// refusal of a state file that holds nothing: the file by its name, what it
+// holds and why no node starts from it (holds), what keeps the node, what to
+// move aside and what a new device costs, that the bridge does neither
+// itself, none of upstream's words, and no path (stateDir's, or anything
+// below it).
+func mustSayTheStateHoldsNothing(t *testing.T, words, holds, stateDir string) {
+	t.Helper()
+	for _, want := range []string{stateFileName, holds,
+		"put back a copy of the file", "move the file aside", "new device", "authenticates as on a first run",
+		"new tailnet address", "MagicDNS name", "moves and replaces nothing"} {
+		if !strings.Contains(words, want) {
+			t.Errorf("the refusal does not say %q: %q", want, words)
+		}
+	}
+	for _, not := range []string{"TPM", "failed to migrate", "unexpected end of JSON input"} {
+		if strings.Contains(words, not) {
+			t.Errorf("the refusal carries upstream's %q: %q", not, words)
+		}
+	}
+	if strings.Contains(words, stateDir) {
+		t.Errorf("the refusal names the state dir's path: %q", words)
 	}
 }
 
