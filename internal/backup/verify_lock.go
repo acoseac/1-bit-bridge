@@ -238,7 +238,11 @@ func lockBackupsWith(ctx context.Context, dir string, wait time.Duration, token 
 // not there yet or cannot be opened. It makes nothing, opens nothing this
 // process holds (a holder's own lock, the token), and lets go at once of what
 // it takes (letProbeGo, bounded: past its bound the folder is marked in
-// this process alone, in by's name, until the release ends).
+// this process alone, in by's name, until the release ends). A release that
+// does not end within that bound holds the folder, and it says so:
+// ErrCheckStillRunning (a *StillRunningError naming by's probe and its
+// release), joined to ErrBackupsUnlocked where that holds too, so that the
+// ticker takes no snapshot behind its own probe (backlog B871's round 2).
 func ProbeBackupsLock(backupsRoot string, by Prober) error {
 	key := ownerKey(backupsRoot)
 	token := folderToken(key)
@@ -253,11 +257,15 @@ func ProbeBackupsLock(backupsRoot string, by Prober) error {
 		return nil
 	}
 	err = tryLockBackups(f)
-	letProbeGo(backupsRoot, f, err == nil, token, by.keys(backupsRoot, key), by)
+	check, held := letProbeGo(backupsRoot, f, err == nil, token, by.keys(backupsRoot, key), by)
+	var unlocked error
 	if fsutil.KeepsNoLocks(err) {
-		return fmt.Errorf("%w (%s)", ErrBackupsUnlocked, fsutil.ErrorWithoutPath(err))
+		unlocked = fmt.Errorf("%w (%s)", ErrBackupsUnlocked, fsutil.ErrorWithoutPath(err))
 	}
-	return nil
+	if held {
+		return errors.Join(stillRunning(check), unlocked)
+	}
+	return unlocked
 }
 
 // openProbe opens a lock file there already for a probe's try, making none:

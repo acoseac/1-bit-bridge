@@ -520,8 +520,9 @@ func lockHeldElsewhere(backupsRoot, key string, by Prober) bool {
 // is written beside the lock for a release, whoever probed: once the unlock
 // has answered another process may hold the lock, and a marker written then
 // would stand beside that holder's lock as this probe's, or take its place
-// (backlog B871).
-func letProbeGo(backupsRoot string, f *os.File, locked bool, token chan struct{}, keys []string, by Prober) {
+// (backlog B871). It answers the mark's check where it raised one, so that
+// its caller can say so (ProbeBackupsLock; backlog B871's round 2).
+func letProbeGo(backupsRoot string, f *os.File, locked bool, token chan struct{}, keys []string, by Prober) (StuckCheck, bool) {
 	var (
 		mu    sync.Mutex
 		ended bool
@@ -548,14 +549,17 @@ func letProbeGo(backupsRoot string, f *os.File, locked bool, token chan struct{}
 	defer t.Stop()
 	select {
 	case <-done:
-		return
+		return StuckCheck{}, false
 	case <-t.C:
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if !ended {
-		mark = markStuck(keys, "", by.mark(stepProbeRelease))
+	if ended {
+		return StuckCheck{}, false
 	}
+	check := by.mark(stepProbeRelease)
+	mark = markStuck(keys, "", check)
+	return check, true
 }
 
 // onProbeRelease, nil in production, runs as a probe of a backups folder's

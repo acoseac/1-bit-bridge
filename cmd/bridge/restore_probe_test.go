@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,6 +17,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/doctor"
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
+	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
 // cliProbeStall parks, once armed, the release of a probe of the lock of the
@@ -215,5 +218,89 @@ func TestTheDoctorAndTheTickerNameTheirOwnProbesStalledRelease(t *testing.T) {
 				requireMarkerAsItWas(t, marker, stale)
 			})
 		}
+	}
+}
+
+// TestTheTickerTakesNoSnapshotWhileItsOwnProbesReleaseDoesNotEnd is backlog
+// B871's round 2 (Codex): with no marker beside the backups folder's lock, the
+// ticker's look for a check that did not end makes no probe
+// (backup.StuckCheckOf), and its probe of the lock (backup.ProbeBackupsLock)
+// takes it, its release does not end (its unlock, or separately its close,
+// stalled), and past its bound it marks the folder in this process and
+// answers that a lock is granted. The boot pass, due a snapshot, asks this
+// process's marks again then (backup.StuckCheckHere, which asks no
+// filesystem), takes none, and says why in its probe's own words, never a
+// restore's. Red on round 1, whose pass went on to a capture whose
+// verification its own probe's mark refused.
+func TestTheTickerTakesNoSnapshotWhileItsOwnProbesReleaseDoesNotEnd(t *testing.T) {
+	for _, step := range []string{"unlock", "close"} {
+		t.Run("its "+step+" stalled", func(t *testing.T) {
+			t.Cleanup(backup.SetReleaseBoundForTest(300 * time.Millisecond))
+			_, dataDir, root := backupInstall(t)
+			src := backup.Sources{DataDir: dataDir, ManifestDB: manifest.DefaultDBPath(dataDir)}
+			dir, err := backup.Snapshot(t.Context(), src)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Two days old, so the boot pass would take a snapshot.
+			raw, err := os.ReadFile(filepath.Join(dir, backup.ManifestFile))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var mf backup.Manifest
+			if err := json.Unmarshal(raw, &mf); err != nil {
+				t.Fatal(err)
+			}
+			mf.CreatedAt = time.Now().UTC().Add(-48 * time.Hour)
+			if raw, err = json.Marshal(mf); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, backup.ManifestFile), raw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			// The folder's lock file, which nobody holds, and no marker beside it.
+			f, err := fsutil.OpenLockFile(root, backup.LockFileName)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := f.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Lstat(filepath.Join(root, backup.StuckMarkerName)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("premise: a marker stands beside the lock: %v", err)
+			}
+			// Registered before the stall, so it runs once the release has
+			// ended: every hold and mark let go before the folder goes.
+			t.Cleanup(func() { awaitHoldsLetGo(t, root) })
+			stallTheProbesRelease(t, root, step)
+
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan struct{})
+			drainLoopOnCleanup(t, cancel, done, "the backup ticker")
+			var stdout, stderr safeBuffer
+			status := &sweepStatus[struct{}]{}
+			go func() {
+				defer close(done)
+				runBackupTicker(ctx, src, func() int { return 7 }, staticInterval(24*time.Hour), nil, &stdout, &stderr, status)
+			}()
+			giveUp := time.Now().Add(restoreWaitWithin(t, 60*time.Second))
+			for {
+				if _, _, lastEnd, _, _ := status.snapshot(); !lastEnd.IsZero() || strings.Contains(stderr.String(), "no snapshot taken") {
+					break
+				}
+				if time.Now().After(giveUp) {
+					t.Fatalf("the boot pass did not end\nstdout %s\nstderr %s", stdout.String(), stderr.String())
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
+			cancel()
+			waitClosed(t, done, "the backup ticker")
+			want := "no snapshot taken: the scheduled snapshot's probe of the snapshots' lock that did not end still holds the backups folder"
+			if n := len(snapshotDirs(t, root)); n != 1 || !strings.Contains(stderr.String(), want) || strings.Contains(stderr.String(), "restore") {
+				t.Errorf("a boot pass beside its own probe's stalled release: %d snapshots, want 1, saying %q and no restore\nstdout %s\nstderr %s",
+					n, want, stdout.String(), stderr.String())
+			}
+			requireMarksWriteNoMarker(t, root)
+		})
 	}
 }

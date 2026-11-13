@@ -1023,10 +1023,13 @@ func readBounded[T any](ctx context.Context, read func() T) (v T, answered bool)
 // captureHeldBack reports whether the ticker takes no snapshot this pass,
 // and why, in its log line's words: a check that did not end holds the
 // backups folder still (backup.StuckCheckOf), so nothing there is verified or
-// pruned until it ends; or no lock is granted on the folder
-// (backup.ProbeBackupsLock), so nothing there is verified or pruned, and its
-// newest snapshot still owes its check. Each read is bounded by the stop
-// (readBounded); one the stop came first to holds the pass back, why "".
+// pruned until it ends, its own probe of the folder's lock included, whose
+// release did not end within its bound (backup.ProbeBackupsLock's
+// ErrCheckStillRunning, backlog B871's round 2); or no lock is granted on
+// the folder (backup.ProbeBackupsLock), so nothing there is verified or
+// pruned, and its newest snapshot still owes its check. Each read is bounded
+// by the stop (readBounded); one the stop came first to holds the pass back,
+// why "".
 func captureHeldBack(ctx context.Context, backupsRoot string) (why string, held bool) {
 	type stuckRead struct {
 		check backup.StuckCheck
@@ -1040,22 +1043,15 @@ func captureHeldBack(ctx context.Context, backupsRoot string) (why string, held 
 	case !answered:
 		return "", true
 	case stuck.held:
-		what := "a check of " + stuck.check.Snapshot
-		switch {
-		case stuck.check.Restoring():
-			what = "a restore of " + stuck.check.Snapshot
-		case stuck.check.Probing():
-			what = stuck.check.Probe
-		case stuck.check.Pruning():
-			what = "a prune of the snapshots"
-		}
-		return fmt.Sprintf("%s that did not end still holds the backups folder, so nothing there is verified or pruned; none is taken until it ends (bridge doctor's backup-check line)",
-			what), true
+		return stillHoldsTheFolder(stuck.check), true
 	}
 	lockErr, answered := readBounded(ctx, func() error { return backup.ProbeBackupsLock(backupsRoot, backup.ProbeByTicker) })
+	var still *backup.StillRunningError
 	switch {
 	case !answered:
 		return "", true
+	case errors.Is(lockErr, backup.ErrCheckStillRunning) && errors.As(lockErr, &still):
+		return stillHoldsTheFolder(still.Check), true
 	case !errors.Is(lockErr, backup.ErrBackupsUnlocked):
 		return "", false
 	}
@@ -1074,6 +1070,23 @@ func captureHeldBack(ctx context.Context, backupsRoot string) (why string, held 
 			newest.DirName), true
 	}
 	return "", false
+}
+
+// stillHoldsTheFolder is the ticker's reason for taking no snapshot while
+// check, a hold that did not end, holds the backups folder: a verification of
+// its snapshot, a restore of it, a probe of the folder's lock or a prune, in
+// the log line's words.
+func stillHoldsTheFolder(check backup.StuckCheck) string {
+	what := "a check of " + check.Snapshot
+	switch {
+	case check.Restoring():
+		what = "a restore of " + check.Snapshot
+	case check.Probing():
+		what = check.Probe
+	case check.Pruning():
+		what = "a prune of the snapshots"
+	}
+	return fmt.Sprintf("%s that did not end still holds the backups folder, so nothing there is verified or pruned; none is taken until it ends (bridge doctor's backup-check line)", what)
 }
 
 // buildRestoreTargets is the inverse of buildBackupSources — points

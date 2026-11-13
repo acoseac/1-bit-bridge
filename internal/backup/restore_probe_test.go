@@ -136,13 +136,15 @@ func requireMarksWriteNoMarker(t *testing.T, root string) {
 // release, in the name of the caller that asked: bridge restore's look at its
 // snapshot (CheckRestoreSource), as that restore, whose refusal before the
 // prompt names the stalled release; the doctor's and the scheduled snapshot's
-// as their own probes, never a restore's. This process's holder of the folder
-// is kept until the release ends, no marker is written beside the lock (once
-// the unlock has answered another process may hold it; asked of the mark
-// itself as well as of the file, whose write would be on a goroutine of its
-// own), and once the release ends the mark, the holder and the lock are all
-// let go. Before the fix the release blocked its probe until it ended,
-// unmarked, and bridge restore's refusal was the folder's that did not answer.
+// as their own probes, never a restore's, ProbeBackupsLock answering
+// ErrCheckStillRunning for its own (round 2). This process's holder of the
+// folder is kept until the release ends, no marker is written beside the
+// lock (once the unlock has answered another process may hold it; asked of
+// the mark itself as well as of the file, whose write would be on a goroutine
+// of its own), and once the release ends the mark, the holder and the lock
+// are all let go. Before the fix the release blocked its probe until it
+// ended, unmarked, and bridge restore's refusal was the folder's that did not
+// answer.
 func TestAProbesReleasePastItsBoundIsMarkedInItsCallersName(t *testing.T) {
 	type answer struct {
 		check backup.StuckCheck
@@ -221,8 +223,12 @@ func TestAProbesReleasePastItsBoundIsMarkedInItsCallersName(t *testing.T) {
 						t.Errorf("bridge restore's look says %v, want the stalled release named, and the snapshot as given", a.err)
 					}
 				case doctorLock:
-					if a.err != nil {
-						t.Errorf("the doctor's probe of a lock granted answered %v", a.err)
+					// Its own release holds the folder, and it says so: no
+					// caller takes a lock granted for a folder free (backlog
+					// B871's round 2).
+					var held *backup.StillRunningError
+					if !errors.Is(a.err, backup.ErrCheckStillRunning) || !errors.As(a.err, &held) || !want(held.Check) || errors.Is(a.err, backup.ErrBackupsUnlocked) {
+						t.Errorf("the doctor's probe of a lock granted, its release not ending, answered %v; want ErrCheckStillRunning naming its own release", a.err)
 					}
 				default:
 					if !a.held || !want(a.check) {
