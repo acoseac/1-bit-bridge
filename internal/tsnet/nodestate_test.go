@@ -543,6 +543,7 @@ func TestOnlyJSONWhiteSpaceIsAStateThatHoldsNothing(t *testing.T) {
 		name, body string
 		empty      bool   // *EmptyStateError
 		whiteSpace bool   // its WhiteSpace
+		oversized  bool   // its Oversized
 		holds      string // what its words say the file holds, and why no node starts
 		unreadable string // errStateUnreadable's words, where the reader answers one
 	}{
@@ -553,7 +554,7 @@ func TestOnlyJSONWhiteSpaceIsAStateThatHoldsNothing(t *testing.T) {
 			tailscaleRefuses},
 		{name: "white space to the bound", body: pastTheBound[:maxStateBytes], empty: true, whiteSpace: true,
 			holds: "holds only white space" + tailscaleRefuses},
-		{name: "white space past the bound", body: pastTheBound, empty: true, whiteSpace: true,
+		{name: "white space past the bound", body: pastTheBound, empty: true, whiteSpace: true, oversized: true,
 			holds: "holds no state in its first 16 MiB, only white space, which is as far as the bridge reads it, " +
 				"and the bridge does not start the node from it"},
 		{name: "white space past the bound, an x in its first 16 MiB", body: xInside,
@@ -572,8 +573,9 @@ func TestOnlyJSONWhiteSpaceIsAStateThatHoldsNothing(t *testing.T) {
 			var empty *EmptyStateError
 			if got := errors.As(err, &empty); got != c.empty {
 				t.Errorf("readNodeState = %+v, %v: a state that holds nothing %v, want %v", st, err, got, c.empty)
-			} else if c.empty && empty.WhiteSpace != c.whiteSpace {
-				t.Errorf("WhiteSpace = %v, want %v", empty.WhiteSpace, c.whiteSpace)
+			} else if c.empty && (empty.WhiteSpace != c.whiteSpace || empty.Oversized != c.oversized) {
+				t.Errorf("WhiteSpace, Oversized = %v, %v, want %v, %v", empty.WhiteSpace, empty.Oversized, c.whiteSpace,
+					c.oversized)
 			}
 			var unreadable errStateUnreadable
 			switch got := errors.As(err, &unreadable); {

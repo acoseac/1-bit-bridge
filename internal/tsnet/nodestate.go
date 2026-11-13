@@ -27,7 +27,11 @@ const DefaultHostname = "1-bit-bridge"
 const stateFileName = "tailscaled.state"
 
 // maxStateBytes bounds what readNodeState reads of the state file. A real one
-// holds a few keys and one or two profiles' prefs, a few KiB.
+// holds a few keys and one or two profiles' prefs, a few KiB. It reads one
+// byte more, which tells it a larger file: one whose bytes read are JSON's
+// white space alone holds no state there and refuses the start as a file that
+// holds nothing (EmptyStateError's Oversized), read no further whatever
+// follows, and any other is a state that does not read.
 const maxStateBytes = 16 << 20
 
 // nodeState is what the state dir says of the node, read read-only.
@@ -61,19 +65,31 @@ type EmptyStateError struct {
 	// WhiteSpace is set where the file holds white space, and clear where it
 	// holds no byte at all.
 	WhiteSpace bool
+	// Oversized is set where the file is larger than readNodeState reads
+	// (maxStateBytes, and the one byte more that tells it so) and what it read
+	// is white space alone: no state in what a state file holds, and nothing
+	// past it is read.
+	Oversized bool
 }
 
-// Error is the refusal's words: what the file holds, that Tailscale does not
-// start from it, what keeps the node, and what to move aside instead and what
-// the new device that follows costs.
+// Error is the refusal's words: what the file holds, and why no node starts
+// from it (Tailscale's start refuses a file that holds nothing; of a file
+// larger than it reads, the bridge knows only what it read), what keeps the
+// node, and what to move aside instead and what the new device that follows
+// costs.
 func (e *EmptyStateError) Error() string {
-	holds := "is empty"
-	if e.WhiteSpace {
+	holds, refused, there := "is empty", "Tailscale does not start from it", ""
+	switch {
+	case e.Oversized:
+		holds = fmt.Sprintf("holds no state in its first %d MiB, only white space, which is as far as the bridge "+
+			"reads it", maxStateBytes>>20)
+		refused, there = "the bridge does not start the node from it", " there"
+	case e.WhiteSpace:
 		holds = "holds only white space"
 	}
 	return "the embedded Tailscale node's state file (" + stateFileName + ", in the tailscale folder of the bridge's " +
-		"data directory) " + holds + ", and Tailscale does not start from it: it holds none of the node's keys, so " +
-		"the node can come back only from a copy of the file or as a new device, and the bridge moves and replaces " +
+		"data directory) " + holds + ", and " + refused + ": it holds none of the node's keys" + there + ", so the " +
+		"node can come back only from a copy of the file or as a new device, and the bridge moves and replaces " +
 		"nothing itself. To keep the node, put back a copy of the file from before it was emptied. To start a new " +
 		"device, move the file aside, keeping it, and restart the bridge: the new device authenticates as on a first " +
 		"run (bridge tsnet auth, or tailscale.authKey or TS_AUTHKEY), takes a new tailnet address, and can take a new " +
@@ -96,7 +112,8 @@ const jsonSpace = " \t\r\n"
 // logout deleted), and prefs with no node ID (an authentication that never
 // finished) are no registered node. A file that holds no JSON value at all,
 // empty or white space alone, is no state either way: *EmptyStateError,
-// which refuses the start (nodeName).
+// which refuses the start (nodeName); and so is a file larger than the read
+// whose bytes read are white space alone, its Oversized set.
 //
 // It opens the file for reading and nothing else: it never creates, writes
 // or locks it, and never goes through upstream's store constructor, which
@@ -115,14 +132,19 @@ func readNodeState(stateDir string) (nodeState, error) {
 	if err != nil {
 		return nodeState{}, errStateUnreadable{"cannot be read (" + fsutil.ErrorWithoutPath(err) + ")"}
 	}
-	if len(raw) > maxStateBytes {
-		return nodeState{}, errStateUnreadable{fmt.Sprintf("is larger than the %d bytes it is read to", maxStateBytes)}
-	}
 	if len(bytes.Trim(raw, jsonSpace)) == 0 {
 		// Tailscale's start refuses this file: store.New unmarshals it to
 		// tell a TPM-sealed file from a plain one, and fails before the file
-		// store, which alone takes an empty file for none, is reached.
-		return nodeState{}, &EmptyStateError{WhiteSpace: len(raw) > 0}
+		// store, which alone takes an empty file for none, is reached. Asked
+		// before the size guard, of the same bounded read, so a file larger
+		// than the read is refused here too where all of it read is white
+		// space, nothing more read. One with JSON past its first 16 MiB of
+		// white space, which Tailscale might start from, is refused with it:
+		// a state file is a few KiB, so that file is broken anyway.
+		return nodeState{}, &EmptyStateError{WhiteSpace: len(raw) > 0, Oversized: len(raw) > maxStateBytes}
+	}
+	if len(raw) > maxStateBytes {
+		return nodeState{}, errStateUnreadable{fmt.Sprintf("is larger than the %d bytes it is read to", maxStateBytes)}
 	}
 	var keys map[ipn.StateKey][]byte
 	if err := json.Unmarshal(raw, &keys); err != nil {
