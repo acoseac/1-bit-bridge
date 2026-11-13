@@ -28,16 +28,32 @@ func SetAfterCheckForTest(fn func(dir string)) (restore func()) {
 }
 
 // onSlotWait, nil in production, runs when a verification finds this
-// process's slot held and begins to wait its turn.
+// process's slot held and begins to wait its turn: once, after its first look
+// at whether the slot's holder was given up found it not, with the notice of
+// the next give-up in hand (takeSlot), so a give-up from then on reaches it
+// as that notice, and one before it refuses it without this running.
 var onSlotWait func()
 
 // SetOnSlotWaitForTest sets the function a verification runs when it begins
-// to wait its turn behind another of this process's verifications, and
-// returns the restore.
+// to wait its turn behind another of this process's verifications, one not
+// given up, holding the notice of the next give-up, and returns the restore.
 func SetOnSlotWaitForTest(fn func()) (restore func()) {
 	prev := onSlotWait
 	onSlotWait = fn
 	return func() { onSlotWait = prev }
+}
+
+// onSlotNotice, nil in production, runs when a verification waiting its turn
+// for this process's slot hears the notice of a hold given up (takeSlot),
+// before it looks again at whether the slot's holder is that hold.
+var onSlotNotice func()
+
+// SetOnSlotNoticeForTest sets the function a verification waiting its turn
+// runs when it hears the notice of a hold given up, and returns the restore.
+func SetOnSlotNoticeForTest(fn func()) (restore func()) {
+	prev := onSlotNotice
+	onSlotNotice = fn
+	return func() { onSlotNotice = prev }
 }
 
 // SetSyncVerdictForTest replaces the barrier a verdict's write runs once its
