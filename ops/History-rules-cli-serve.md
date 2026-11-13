@@ -2282,6 +2282,10 @@ mentions across the four `ops/audit-*.md` files.
 
 - **Serve installs the console's view of its player (`newConsolePlayer`, `admin.Deps.PlayerOutput`) beside GET /v1/outputs' view, over the same boot plan, `bridgePlayer` and `bridgeOutput`, the boot snapshot, whether it holds the data dir's lock and its player-state preflight, so the page's pending changes are `planServePlayer`'s answer on the live config** (B601, 2026-10-31). `runServe` builds it right after `apiSrv.WithBridgeOutput(playerView)`, from `playerPlan`, `player`, `playerView`, `cfg`, `opts.playerGOOS`, `lockErr == nil`, `playerStateErr`, `opts.playerTrees` (the zero value is `hostTrees`) and the manifest store, and hands it to the console as `Deps.PlayerOutput`. Its status reads the boot plan, `bridgeOutput.Facts` (the element's facts: one engine snapshot and the bounded DAC read), the engine's snapshot after `ready` (the transport, the occurrence heard and its position), the hotplug feed's latest resolution of the boot binding, and the live config the console hands it; the next start's decision is `planServePlayer` on that config (or the boot's player-state refusal again, which only a start can find gone), and the pending list is its difference from the boot plan. The track heard is named through `bridgePlayer.res` (`library.Resolver.StoredPath`, then the store's row), looked up once an occurrence within 500 ms. A DAC listing is one reading of the box at a time (`consolePlayer.read`: 3 s, its slot let go only when the reading returns, so a read stuck in the kernel holds the next back rather than doubling it), bracketed by a reading of sysfs's identities before /proc as `readPlayerDACObserved` is (a card whose unit or devnum moved between the two is set aside as transient, and so is one whose devnum either reading could not read, saying so; a transient card's /proc id and name, which the list shows, are redacted of both readings' serials and ports, as a USB row's are of its own), and refused whole when it is not whole (`CardsComplete`, `Partial`); each USB card's playback endpoint gets a token (128 random bits, 10 minutes, the newest 64 kept) for the unit as that reading read it, its devnum included, and the binding each kind builds there (`binding.For`), and a choice reads the box again, in the write's config turn just before the save, and requires the same unit (`binding.SameUnit`) at the same devnum building the same binding (`hotplug.SameBinding`). A transport row plays only while the player's output is open (`outputOpen`: the live config withholding nothing, GET /v1/outputs' element not unavailable, the engine's output report available): the engine runs on after the player is turned off, another DAC is chosen or its DAC is unplugged, and plays nothing then (Codex on the PR). **Never let the view write the config, start, dial or probe MPD, hand a serial out but as its label, read `eng` or `res` before `ready`, read the box but through its one bounded, bracketed reading at a time, or call a transport playable while the output is withheld or gone.** `TestTheConsoleShowsTheRunningPlayer`, `TestTheConsoleSaysNothingPlaysOnceTheDACIsUnplugged`, `TestTheConsoleTurnsAPlayerOnForTheNextStart`, `TestTheConsoleOffersNoPlayerOffLinux`, `TestTheConsoleListsEachPlaybackEndpointOfTheBox`, `TestAUnitSwappedWhileTheBoxIsReadIsNotOffered`, `TestAUnitWhoseEnumerationCannotBeReadIsOfferedNoToken` and `TestTheTokensAreBounded` pin it.
 
+- **Serve's player starts its OpenHome surface after launching its engine, when the boot snapshot's `output.player.openhome` is on, and its shutdown stops the surface first, before the engine and the backend** (B470 PR 5a2a): `planServePlayer` decides it with the player's gates (`servePlayerPlan.openhome`; the opt-in on and the player simply off is `openhomeOff`, one Warn at boot and nothing started); `bridgePlayer.startOpenHome` runs `openhome.Start` with the player's UUID for its UDN, the boot snapshot's room and port and the bridge's version, over `lan.Look(hostLAN)`, and a surface that cannot start leaves the player running without it and tells `start`, which stops the library index's build; `stopOpenHome` comes first in `bridgePlayer.shutdown`, after only the cancel of the library index's build, which `warmLibrary` starts just before the surface and the shutdown waits for last (`openhome.md`, the write actions), and the player's stop adds the discovery allowance (`servePlayerBounds.discovery`), the surface's HTTP bound (`servePlayerBounds.surface`, `openhome.Limits.StopBound`) and the build's (`servePlayerBounds.warm`) to its own. `hostLAN` is the one name in `cmd/bridge` for the host's interfaces, which the suite's TestMain points at a box with no interface before any test runs; `serveOpts.playerOpenHome` hands a boot test its box (`lantest`), its limits and seams, and the surface once started. `TestServeRunsTheOpenHomeSurfaceOnlyWithItsOptInAndThePlayer` pins the wiring, and serve's gate row "an OpenHome port serve binds already" the port clash. Rules in `openhome.md`.
+
+- **Serve starts the player's hotplug watcher on Linux once the live config holder exists, and its teardown cancels and joins it** (B470 PR 4a2): `startPlayerHotplug` runs the `hotplug.Service` on the holder's `Load` and `Changed`, reading the box through `hostTrees` (a boot test's `serveOpts.playerTrees` in their place), so the player turned on or off, or its binding changed, while serve runs starts, stops or re-reads the watch; the service runs on a context its stop alone cancels (since B470 PR 4b3: on serve's own it stopped as the shutdown began, before the player its reports feed), the stop waits for it within `shutdownGrace`, and the service itself returns within its watch's stop deadline. Off Linux nothing starts. `serveOpts.playerGOOS`, `hotplugSource` and `hotplugBoot` let a boot test stand in for Linux, run the watcher on a source that hears nothing, and wait on the decision; `hotplugObserve` and `hotplugTiming` hold its readings and stretch its stop. The watcher reads the player block through `livePlayerSettings`, which serve's player reads too, with the OpenHome port clash judged on serve's boot snapshot (`playerHotplugWiring.BootConfig`, `config.PlayerEnabledAsBooted`; B612's second round), so neither the opt-in nor a listener's address reaches the watch before the next start. The console's Player page changes `output.player` while serve runs (B601: its switch and its DAC choice, and B612's OpenHome switch, through the holder). `TestServeRunsThePlayersWatcherWhileThePlayerIsOn`, `TestServeStartsNoPlayerWatcherOffLinux`, `TestServeStartsThePlayersWatcherWhenTheConfigTurnsItOn`, `TestThePlayersWatcherStopJoinsItsService` and `TestALiveClashWithTheOpenHomePortLeavesTheRunningPlayerAsItIs` pin the wiring. Rules in `player.md`.
+
 ## Scanner, deletion passes, and manifest writes
 
 - **Shutdown joins every background writer**, and the wait must be written
@@ -3732,7 +3736,7 @@ non-durable as well (C745-2) every row does, with the DSD state's own
 refusal tests. The record is in `ops/engineering-log.md`, 2026-11-07, B745.
 ## B727 — every command asks the data dir's record, and serve says its refusal once (2026-11-07)
 
-- **Every command but serve that makes, opens or writes the data dir asks the check serve makes of the record beside its config, right after its config loads (`refuseDataDirAway`: the record beside the file the config's name opens, as bridge doctor reads it, and `checkServeDataDirRecord`), and refuses a data dir the record names that holds neither `bridge.db` nor `server.lock` (and since B741 every other cause of the check's, the next bullet), exit 1, in serve's first sentence under its own name, saying that it makes and writes nothing there, to mount the volume and run it again, and how to go on from a data dir moved on purpose (set `dataDir` to where it is now, which the record does not name) or removed on purpose (remove the record): scan, the render commands, analyze, variants move, artwork, enrichment misses and retry, duplicates, library add and remove, pair, token rotate, expire and revoke, admin reset-password, sign-out-everywhere and login-link, cert rotate, backup, tsnet auth, status and logout, update but under `--check`, init's rewrite before its preflight, and, through `holdDataDirForMutation` before it prepares and locks, restore, reset-player, manifest clear-missing and the DAC bind; and serve says its own refusal once per state: a note beside the record (`.bridge.yaml.datadir.refused`), written only into the directory the record was read from (`atomicwrite.WriteBytesInExisting`), names the data dir refused, its cause and the identity its record held (B741), and when it was said, a start says the refusal where the note names another data dir, cause or identity, or none, or is a day old, and always to a terminal, and the first start after it that gets past the data dir's preparation and its lock removes the note and says at Info how the refusal ended: that the data dir is back where the note names the data dir its config names and that data dir held before the preparation the identity the refusal was of, or, for a record that held none, its database or its lock file (`dataDirBack`), and otherwise that the refusal no longer applies** (2026-11-07, backlog B727 items 2 and 5, and its round 2). **Don't let a command make, open or write the data dir before the check, ask it of a read (doctor, status, logs, token list, cert info, update --check, init keeping the config), ask it in `manifest.OpenStore`, tell the operator of a data dir moved on purpose to remove the record, keep the note in the data dir or write it through a writer that makes its directory, let the note's write decide what serve refuses or how it exits, say how a refusal ended before the data dir is prepared and its lock taken, or say a data dir is back that the note does not name or that held neither file, or since B741 not the refused identity, before the preparation.** `TestEveryCommandThatWritesTheDataDirRefusesItWhileItsVolumeIsAway` (tsnet auth and status run whole, their tsnet server stood in for: `tsnetCommandServer`), `TestTheDiagnosticsStayAvailableWhileTheDataDirsVolumeIsAway`, `TestACommandOverAnInstallWithNoRecordMakesItsDataDirAsBefore`, `TestUpdateAsksTheRecordBeforeItAsksForARelease`, `TestServeSaysItsRefusalOncePerState`, `TestServeSaysTheRefusalOfADataDirItsNoteDoesNotName`, `TestServeSaysItsRefusalToATerminalAtEveryStart` (Linux), `TestAStartThatCannotRemoveTheNoteSaysSo`, `TestServeSaysItsRefusalAtEveryStartWhereItCannotKeepTheNote`, `TestTheRefusalsNoteMakesNoDirectory`, `TestTheEndOfARefusalIsSaidAsItIs` and `TestTheEndOfARefusalCallsBackOnlyTheDataDirItRefused` pin it.
+- **Every command but serve that makes, opens or writes the data dir asks the check serve makes of the record beside its config, right after its config loads (`refuseDataDirAway`: the record beside the file the config's name opens, as bridge doctor reads it, and `checkServeDataDirRecord`), and refuses a data dir the record names that holds neither `bridge.db` nor `server.lock` (and since B741 every other cause of the check's, the next bullet), exit 1, in serve's first sentence under its own name, saying that it makes and writes nothing there, to mount the volume and run it again, and how to go on from a data dir moved on purpose (set `dataDir` to where it is now, which the record does not name) or removed on purpose (remove the record): scan, the render commands, analyze, variants move, artwork, enrichment misses and retry, duplicates, library add and remove, pair, token rotate, expire and revoke, admin reset-password, sign-out-everywhere and login-link, cert rotate, backup, tsnet auth, status and logout, update but under `--check`, init's rewrite before its preflight, init's run that keeps the config before it prepares the data dir (since B664), and, through `holdDataDirForMutation` before it prepares and locks, restore, reset-player, manifest clear-missing and the DAC bind; and serve says its own refusal once per state: a note beside the record (`.bridge.yaml.datadir.refused`), written only into the directory the record was read from (`atomicwrite.WriteBytesInExisting`), names the data dir refused, its cause and the identity its record held (B741), and when it was said, a start says the refusal where the note names another data dir, cause or identity, or none, or is a day old, and always to a terminal, and the first start after it that gets past the data dir's preparation and its lock removes the note and says at Info how the refusal ended: that the data dir is back where the note names the data dir its config names and that data dir held before the preparation the identity the refusal was of, or, for a record that held none, its database or its lock file (`dataDirBack`), and otherwise that the refusal no longer applies** (2026-11-07, backlog B727 items 2 and 5, and its round 2). **Don't let a command make, open or write the data dir before the check, ask it of a read (doctor, status, logs, token list, cert info, update --check), ask it in `manifest.OpenStore`, tell the operator of a data dir moved on purpose to remove the record, keep the note in the data dir or write it through a writer that makes its directory, let the note's write decide what serve refuses or how it exits, say how a refusal ended before the data dir is prepared and its lock taken, or say a data dir is back that the note does not name or that held neither file, or since B741 not the refused identity, before the preparation.** `TestEveryCommandThatWritesTheDataDirRefusesItWhileItsVolumeIsAway` (tsnet auth and status run whole, their tsnet server stood in for: `tsnetCommandServer`), `TestTheDiagnosticsStayAvailableWhileTheDataDirsVolumeIsAway`, `TestACommandOverAnInstallWithNoRecordMakesItsDataDirAsBefore`, `TestUpdateAsksTheRecordBeforeItAsksForARelease`, `TestServeSaysItsRefusalOncePerState`, `TestServeSaysTheRefusalOfADataDirItsNoteDoesNotName`, `TestServeSaysItsRefusalToATerminalAtEveryStart` (Linux), `TestAStartThatCannotRemoveTheNoteSaysSo`, `TestServeSaysItsRefusalAtEveryStartWhereItCannotKeepTheNote`, `TestTheRefusalsNoteMakesNoDirectory`, `TestTheEndOfARefusalIsSaidAsItIs` and `TestTheEndOfARefusalCallsBackOnlyTheDataDirItRefused` pin it.
 
 *The gap* (B727's second item). B651 gave serve the refusal and left every
 other command as it was. Over an install whose record names its data dir,
@@ -3761,8 +3765,9 @@ check: a fresh install, init's first run and an install no serve has run on
 are refused nothing, and a record of another data dir (one moved on purpose
 and set where it is now) refuses nothing either. Init has three paths kept
 apart: a first install has no config whose record it could ask, a run that
-keeps the config writes nothing in the data dir and asks nothing, and a
-rewrite (`--force`, or yes at the prompt) asks before its preflight, which
+keeps the config wrote nothing in the data dir and asked nothing (until
+B664, which has it ask before it prepares the data dir: B664's entry), and
+a rewrite (`--force`, or yes at the prompt) asks before its preflight, which
 would grade a certificate it cannot see there. `bridge update` asks it but
 under `--check`, which reads, and before it asks GitHub for a release, since
 its install writes its marker in the data dir. The reads ask nothing:
@@ -5363,6 +5368,129 @@ snapshot as given already or name no path in it.
 
 The record is in `ops/engineering-log.md`, 2026-11-12, B826.
 
+## B664 — a `bridge init` run that keeps the config prepares the data dir serve will use (2026-11-13)
+
+- **A `bridge init` run that keeps the config (`--yes` without `--force`, or a no at "Overwrite?") prepares the data dir serve will use before its preflight and any service work, and installs the unit on it: the config loaded as serve loads it (`loadServeConfigFile`, `BRIDGE_DATA_DIR` and a relative or default `dataDir` included), the record's check (`refuseDataDirAway`), then serve's preparation (`prepareServeDataDir`), the two steps serve takes before its lock; a config that does not load, a data dir its record refuses and one serve cannot make or use exit 1 with nothing made or installed, a permission error saying to run init as the bridge's user (`prepareKeptDataDir`)** (2026-11-13, backlog B664). **Don't make the data dir before the record's check, take it from the file without the environment or from init's own default, make one for a config that does not load, ask what serve's preparation does not ask (whether it can be written), let `--skip-doctor` skip it, or install the unit on another directory than the one prepared.** `TestAKeptConfigsDataDirIsMadeBeforeItsServiceIsInstalled`, `TestAKeptConfigWhoseDataDirServeRefusesInstallsNoService`, `TestAKeptConfigWhoseDataDirsRecordRefusesItInstallsNoService`, `TestAKeptConfigThatDoesNotLoadInstallsNoService`, `TestAKeptConfigWhoseDataDirThisUserCannotMakeInstallsNoService`, `TestAKeptConfigsDataDirThisUserCannotWriteIsTaken`, `TestAKeptConfigWithAGoodDataDirIsKeptAsItIs` and `TestANewConfigsDataDirIsMadeBeforeItsServiceIsInstalled` pin it, through a stand-in for init's host (`initHost`, which the suite's TestMain refuses). → History-rules-cli-serve.md
+
+*The gap.* `bridge init` run again over a config it keeps (`--yes` without
+`--force`, or a no at "Overwrite?": the re-run after an upgrade, after the
+data directory moved, or the install guide followed twice) said "keeping it",
+installed the service on that config and started it, and said it was done,
+with no look at the data directory: the keep branch went from the preflight to
+`finishInit`. The unit systemd and launchd run has the data directory for its
+working directory (`WorkingDirectory` in `internal/packaging`'s templates), so
+one that was not there failed the unit at its chdir (systemd's 200/CHDIR,
+`Restart=always` then its start limit) before serve, which makes a data
+directory that is not there, could run; and the data directory init handed the
+unit was `priorInstallFrom`'s, the file's `dataDir` without the environment,
+or init's own `<dir>/data` where the file did not read or parse. A data
+directory serve refuses (B606's shapes; the record's refusals, B651 and B741)
+and a config serve does not load were installed all the same. Red at e1478b23,
+main's code and the seam below: 64 subtests (the permission test's three,
+written after, run against that commit's code), each run answering 0 with a
+unit installed on a working directory that was not there, on the file's
+`dataDir` where `BRIDGE_DATA_DIR` named another, over each shape serve
+refuses, each refusal of the record, each config that does not load and a data
+directory this user cannot make.
+
+*Prepare, as serve would (the brief's choice (a)).* Serve does not refuse a
+data directory that is not there: its preparation makes it, and the doctor's
+data-dir line calls it ok. Reporting alone, the brief's (b), would have had
+init refuse what serve takes, a rule stronger than serve's, or warn and leave
+the unit failing at its chdir. So the run makes it with serve's own function
+(`prepareServeDataDir`: `fsutil.MkdirAll` at 0700, which run as root gives
+each directory it makes its parent's owner, then a directory required there;
+never `os.MkdirAll` and a chmod, which init's first install keeps for the data
+directory it makes beside a new config), and only once the record's check has
+taken the data directory, since one that is not there may be a volume not
+mounted yet (B651). These are the two steps serve takes before its lock, and
+the two `holdDataDirForMutation` takes for restore, reset-player,
+clear-missing and the DAC bind: no third copy of the rules, and nothing
+stronger, since whether the data directory can be written is not asked, as
+serve's preparation does not ask it (B659).
+
+*Serve's data directory, not init's guess.* The config is loaded as serve
+loads it (`loadServeConfigFile`, over `config.LoadFileAt`): the BRIDGE_
+variables apply, `BRIDGE_DATA_DIR` among them, and a relative or missing
+`dataDir` resolves against the config's directory. The unit is installed on
+the data directory the gate prepared. A config that does not load (a misspelt
+key, a value Load refuses, text that is not YAML, a file this user cannot
+read) is refused in the load's words, and no data directory is made, init's
+own `<dir>/data` least of all: serve stops at the same load. In a container
+init and serve share an environment; a service manager whose environment lacks
+a variable init's shell sets runs serve on the file's `dataDir`, which serve
+checks and prepares itself as it starts.
+
+*The exit policy.* Every refusal exits 1 before the preflight and any service
+work, the config not changed and no unit installed or started, each saying how
+to go on. Definite blockers, which serve refuses for any user: a config that
+does not load; the record's refusals (the volume away, B651; the identity
+missing or another's, a marker or a record that does not read, B741); an entry
+in the data directory's way (a regular file, a link to one or a link to
+nothing, at it or above it, B606). Permission uncertainty, which the doctor
+reports as not checked because it may run as anyone: a record or a marker this
+user may not read is refused as every command refuses it
+(`refuseDataDirAway`), saying to run init as the user the service runs as; a
+data directory this user cannot make (a parent it may not write or search) is
+refused in the preparation's words, saying to run init as the bridge's user or
+to set `dataDir` to a directory that user can make or use; and a data
+directory that is there is taken whatever this user may do in it, as serve's
+preparation takes it: what can be written there is the lock's fallback and the
+player's preflight's to say (B606), and the doctor's (B659). Init installs a
+unit that runs as the user who runs it (systemd's and launchd's user units,
+Windows' Startup launcher), so what this user cannot read or make, that unit's
+serve cannot either; one this user may not search fails that unit at its
+chdir, which init does not ask either, being no check serve's preparation
+makes (a follow-up).
+
+*Where it sits.* Right after the keep decision, beside the rewrite's own
+`refuseDataDirAway`: before the posture warning, before the preflight, which
+would grade a certificate in a data directory serve refuses ("absent (init
+will mint)" of a volume away, from a run that mints nothing), and before the
+launch choice and any service work, so a refusal leaves nothing installed or
+started. `--skip-doctor` skips the preflight alone: serve takes no flag past
+its own refusals, and a unit installed past one fails at every start. The run
+says that it keeps the config first, then the data directory it made, or why
+it refuses.
+
+*Windows.* The SCM service and the Startup-folder launcher set no working
+directory, so a data directory that was not there never failed the launch
+there, and serve made it as it started. The run checks and prepares the same
+data directory there, the loaded config's (`%PROGRAMDATA%\1-bit-bridge` holds
+the SCM service's log alone), and refuses what serve refuses: a junction to a
+directory is taken, and one whose target is gone stands in the way, by
+fsutil's walk (`TestNotADirectoryTakesAJunctionToADirectory`, Windows only).
+The round's tests ran on Linux (legion0); macOS's and Windows' runs are CI's,
+and here `go vet` for both, which shows they build and nothing of their
+runtime.
+
+*B727's reads.* B727 listed init keeping the config among the reads that ask
+the record nothing, since it wrote nothing in the data directory. It makes the
+data directory now, so it asks first:
+`TestEveryCommandThatWritesTheDataDirRefusesItWhileItsVolumeIsAway` holds it,
+its row moved there from
+`TestTheDiagnosticsStayAvailableWhileTheDataDirsVolumeIsAway`, and B727's line
+lists it with the commands that ask.
+
+*The seam.* `finishInit`'s host calls (the installs, the detached start and
+the browser) go through `initHost`, which a test replaces to see the unit init
+would install and whether its working directory was a directory then, as
+systemd and launchd change into it when the unit starts; the suite's TestMain
+puts one that refuses, and fails the suite on any ask, so no test reaches the
+host's service manager.
+
+*Not taken.* Reporting alone, for the reason above. Making the data directory
+before the record's check: a volume not mounted. A probe of whether it can be
+written: B659. Asking `serveConfigRefusal` and the roots' reach
+(`CheckLibraryRootsAccessible`), which serve refuses at its start too, before
+its data directory: beyond the data directory, and named as a follow-up.
+
+Pinned by the tests the line names; six negative controls, each predicted by
+name, turned their rows red (the gate's call removed, the record's check
+dropped, serve's preparation replaced by `os.MkdirAll`, the prepared data
+directory not handed to the unit, the gate moved after the preflight,
+`--skip-doctor` skipping it). The record is in `ops/engineering-log.md`,
+2026-11-13, B664.
 ## B828 — a state file that holds nothing refuses the start in the bridge's words (2026-11-13)
 
 - **…and a state file that holds nothing, empty or JSON's white space alone (of a file larger than the 16 MiB and one byte it is read to, all that was read, nothing past it read), refuses the node's start before the node is built, whatever `tailscale.hostname` or the auth key says, in the bridge's words (`tsnet.EmptyStateError`, naming no path: a copy of the file keeps the node; moved aside, a new device follows, and what that costs), which serve's tailnet line and `bridge tsnet auth` and `status` (exit 1) print and the console's tile shows in LastError (`tsnetAdminStatus`, from `LastStartError`); Tailscale's own start refuses that file, in words about a TPM-sealed state, and the bridge moves and replaces nothing** (2026-11-13, backlog B828, the review of its brief, and its round 2). **Don't take a state file that holds nothing for no node, build or start the upstream node over it, ask `tailscale.hostname` before it, move, replace or write the file, name a path in its words, count a byte JSON does not skip as nothing, or read past the bound to decide it.** `TestAStateFileThatHoldsNothingRefusesTheStart`, `TestAStateFileThatIsNotThereStillStartsANewNode`, `TestOnlyJSONWhiteSpaceIsAStateThatHoldsNothing`, and cmd/bridge's `TestTheCommandsRefuseAStateFileThatHoldsNothingInTheBridgesWords` and `TestServeRefusesAStateFileThatHoldsNothingInTheBridgesWords` pin it. → History-rules-cli-serve.md

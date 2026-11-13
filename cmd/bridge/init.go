@@ -300,7 +300,10 @@ func portsARewriteAbandons(installAPI, installAdmin, runAPI, runAdmin int) []int
 // rotating the pair breaks every paired client's pin — and so a public
 // install's admin account, which `bridge admin reset-password` rotates
 // (init_rewrite.go says what else it keeps, and what it refuses to
-// rewrite). Every refusal is decided before bridge.yaml is written.
+// rewrite). A run that keeps the config prepares the data dir serve will use
+// as serve does, refusing what serve would refuse, before it installs the
+// service (init_keep.go). Every refusal is decided before bridge.yaml is
+// written.
 func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("init", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -579,9 +582,30 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	// the data dir and mint a TLS pair under the bare mount point. Asked
 	// before the preflight, which grades a certificate it cannot see there. A
 	// first install has no config whose record it would be, and a run that
-	// keeps the config writes nothing there.
+	// keeps the config asks it below.
 	if replace && refuseDataDirAway("init", cfgPath, dataDir, stderr) {
 		return 1
+	}
+	// A run that keeps the config installs and starts the service on it, which
+	// needs its data directory: the data directory serve uses, checked against
+	// its record and prepared as serve prepares it, or the run refuses, as
+	// serve would, before the preflight grades a certificate in a data
+	// directory serve refuses and before any service work (prepareKeptDataDir,
+	// backlog B664). --skip-doctor skips the preflight alone: serve takes no
+	// flag past its own refusals, and a unit installed past one fails at every
+	// start.
+	if keep {
+		if *nonInteractive {
+			fmt.Fprintf(stdout, "config file already exists at %s; keeping it\n", cfgPath)
+			fmt.Fprintf(stdout, "pass --force to overwrite non-interactively\n")
+		} else {
+			fmt.Fprintf(stdout, "keeping existing config\n")
+		}
+		kept, ok := prepareKeptDataDir(cfgPath, stdout, stderr)
+		if !ok {
+			return 1
+		}
+		dataDir = kept
 	}
 
 	// A posture flag the run would not write (warnIgnoredPostureFlags). A
@@ -717,14 +741,9 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 
 	// A run that keeps the config (the decision above) installs the service
-	// against it and writes nothing.
+	// against it, on the data directory prepareKeptDataDir prepared, and
+	// writes nothing of it.
 	if keep {
-		if *nonInteractive {
-			fmt.Fprintf(stdout, "config file already exists at %s; keeping it\n", cfgPath)
-			fmt.Fprintf(stdout, "pass --force to overwrite non-interactively\n")
-		} else {
-			fmt.Fprintf(stdout, "keeping existing config\n")
-		}
 		keepChoice := resolveLaunchChoice(in, stdout, *nonInteractive, *skipService, *windowsService, *startNow)
 		return finishInit(in, *nonInteractive, stdout, stderr, cfgPath, dataDir, keepChoice)
 	}
@@ -1161,6 +1180,32 @@ func promptLaunchMode(in *bufio.Reader, stdout io.Writer) launchChoice {
 	}
 }
 
+// initHostOps is what finishInit asks of the host to leave the bridge
+// running: a service's install and start (launchd's agent and systemd's user
+// unit through install, the Startup-folder launcher through installStartup,
+// the SCM service through installSCM), a bridge started detached, and the
+// console opened in a browser.
+type initHostOps struct {
+	install, installStartup, installSCM func(packaging.Params) (string, error)
+	spawnDetached                       func(binary, cfgPath, logPath string) error
+	openBrowser                         func(url string)
+}
+
+// initHost is finishInit's host. A test puts a stand-in in its place to run
+// init's launch path, and see the unit it would install, its working
+// directory included, without registering one with the host's service
+// manager, starting a bridge or opening a browser; the suite's TestMain puts
+// one that refuses. A package var for the reason uninstallService is one:
+// init runs on its caller's goroutine, and nothing reads it once initCmd has
+// returned.
+var initHost = initHostOps{
+	install:        packaging.Install,
+	installStartup: packaging.InstallStartup,
+	installSCM:     packaging.InstallWindowsService,
+	spawnDetached:  packaging.SpawnDetached,
+	openBrowser:    openInBrowser,
+}
+
 // finishInit installs the service (or tells the user how to run manually)
 // and prints the admin console URL. Separated from the main init path so
 // the "keep existing config" branch can reach it without rebuilding the
@@ -1223,7 +1268,7 @@ func finishInit(in *bufio.Reader, nonInteractive bool, stdout, stderr io.Writer,
 		}
 		fmt.Fprintf(stdout, "\nAdmin console: %s\n", browseURL)
 		if serverIsLive {
-			openInBrowser(browseURL)
+			initHost.openBrowser(browseURL)
 		}
 		fmt.Fprintf(stdout, "\nDone. Open the admin console to add library folders and pair iOS devices.\n")
 	}
@@ -1307,7 +1352,7 @@ func finishInit(in *bufio.Reader, nonInteractive bool, stdout, stderr io.Writer,
 	if choice.useService {
 		// SCM install. Requires admin; fails otherwise with a clear
 		// "access denied" from the SCM layer.
-		unitPath, err = packaging.InstallWindowsService(params)
+		unitPath, err = initHost.installSCM(params)
 		if err != nil {
 			fmt.Fprintf(stderr, "Windows Service install: %v\n", err)
 			fmt.Fprintf(stderr, "If the error mentions \"access\" or \"denied\", re-run init from an elevated PowerShell.\n")
@@ -1334,9 +1379,9 @@ func finishInit(in *bufio.Reader, nonInteractive bool, stdout, stderr io.Writer,
 		// (CodeRabbit / Gemini on PR #73 — first cut tied this to
 		// `choice.spawnNow` and missed the non-interactive default.)
 		if runtime.GOOS == "windows" {
-			unitPath, err = packaging.InstallStartup(params)
+			unitPath, err = initHost.installStartup(params)
 		} else {
-			unitPath, err = packaging.Install(params)
+			unitPath, err = initHost.install(params)
 		}
 		if err != nil {
 			fmt.Fprintf(stderr, "service install: %v\n", err)
@@ -1389,7 +1434,7 @@ func spawnNowOrWarn(stdout, stderr io.Writer, binary, cfgPath, logPath, adminAdd
 		fmt.Fprintf(stdout, "A bridge is already running on %s:%d; skipping auto-start.\n", host, port)
 		return true
 	}
-	if err := packaging.SpawnDetached(binary, cfgPath, logPath); err != nil {
+	if err := initHost.spawnDetached(binary, cfgPath, logPath); err != nil {
 		fmt.Fprintf(stderr, "auto-start failed: %v\n", err)
 		fmt.Fprintln(stderr, "Launcher is installed — the bridge will start at next logon. Or run:")
 		fmt.Fprint(stderr, shellHandoff(binary, cfgPath))
