@@ -377,7 +377,8 @@ func TestARollbackOfIsTheTransactionsOwnAtTheDriver(t *testing.T) {
 // wait begins is answered at once, never missed, and first where the wait's
 // stop is ready too: a hundred waits, each on a stop of its own closed before
 // it, so that a wait that left the choice to a select (which picks at random
-// among the cases ready) fails within one run.
+// among the cases ready) fails within one run. The test synchronizes on the
+// rollback's one publication of its end, as its waits do.
 func TestARollbackThatRanBeforeItsWaitIsKept(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -385,9 +386,12 @@ func TestARollbackThatRanBeforeItsWaitIsKept(t *testing.T) {
 	rollback := w.RollbackOf(t, tx)
 	cancel()
 	select {
-	case <-rollback.ran:
+	case <-rollback.ended:
 	case <-time.After(10 * time.Second):
-		t.Fatal("the transaction's rollback never ran")
+		t.Fatal("the transaction's rollback never came to an end")
+	}
+	if !rollback.hasRun {
+		t.Fatalf("the transaction's rollback came to an end without running: %v%s", rollback.err, rollback.why)
 	}
 	for i := 1; i <= 100; i++ {
 		stopped := make(chan struct{})
@@ -493,9 +497,11 @@ func pendingBindings() int {
 	return len(pending.binds)
 }
 
-// fatalRecorder is a testing.TB whose Fatalf records the message and ends
-// the goroutine calling it, as FailNow would, and whose Errorf records the
-// message, without failing the test that holds it.
+// fatalRecorder is a testing.TB whose Fatal and Fatalf record the message
+// and end the goroutine calling it, as FailNow would, and whose Errorf
+// records the message, without failing the test that holds it, so that code
+// run under it on a goroutine of its own never calls the test's own Fatal
+// there: the test's goroutine reads what it recorded.
 type fatalRecorder struct {
 	testing.TB
 	fatal  string
@@ -503,6 +509,11 @@ type fatalRecorder struct {
 }
 
 func (r *fatalRecorder) Helper() {}
+
+func (r *fatalRecorder) Fatal(args ...any) {
+	r.fatal = fmt.Sprint(args...)
+	runtime.Goexit()
+}
 
 func (r *fatalRecorder) Fatalf(format string, args ...any) {
 	r.fatal = fmt.Sprintf(format, args...)

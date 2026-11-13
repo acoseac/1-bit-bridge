@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -112,6 +113,62 @@ func TestARollbackHasRunOnlyOnceTheDriversRollbackReturns(t *testing.T) {
 	}
 }
 
+// TestARollbackComesToAnEndInOnePublication (backlog B869's fourth round):
+// what a rollback came to is published once, after the driver's Rollback has
+// returned: written, and then ended closed, its one completion signal. Held
+// just before that publication, with a stop ready, nothing a test or a wait
+// synchronizes on says that the rollback has run, and the wait answers its
+// stop; once ended is closed, the wait answers that the rollback ran, a
+// hundred times over with the stop ready. Until this round a success closed
+// a second signal, ran, before ended, and a test that synchronized on ran,
+// as TestARollbackThatRanBeforeItsWaitIsKept did, met a wait that answered
+// its stop for a rollback that had succeeded, held between the two closes in
+// every run (the record's red at 49fab8d5).
+func TestARollbackComesToAnEndInOnePublication(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	_, w, tx := heldWrite(t, ctx)
+	rollback := w.RollbackOf(t, tx)
+	held, release := make(chan struct{}), make(chan struct{})
+	var letGo sync.Once
+	t.Cleanup(func() { letGo.Do(func() { close(release) }) })
+	w.beforeEnded = func(r *Rollback) {
+		if r == rollback {
+			close(held)
+			<-release
+		}
+	}
+	cancel()
+	select {
+	case <-held:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the transaction's rollback never reached its publication")
+	}
+	stopped := make(chan struct{})
+	close(stopped)
+	select {
+	case <-rollback.ended:
+		if !rollback.WaitUnless(t, stopped) {
+			t.Fatal("a wait answered its stop for a rollback whose success was signalled")
+		}
+	default:
+		if rollback.WaitUnless(t, stopped) {
+			t.Fatal("a wait answered that the rollback had run before its end was published")
+		}
+	}
+	letGo.Do(func() { close(release) })
+	select {
+	case <-rollback.ended:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the rollback's end was never published")
+	}
+	for i := 1; i <= 100; i++ {
+		if !rollback.WaitUnless(t, stopped) {
+			t.Fatalf("wait %d of 100: a rollback published as run was answered as its wait's stop", i)
+		}
+	}
+}
+
 // TestARollbackWhoseDriverReturnsAnErrorFailsItsWait: the driver's Rollback
 // returning is not its succeeding. A Rollback that returns an error (here its
 // ROLLBACK finds no transaction, one a COMMIT the driver's Rollback never saw
@@ -141,11 +198,70 @@ func TestARollbackWhoseDriverReturnsAnErrorFailsItsWait(t *testing.T) {
 	if want := "returned an error: " + err.Error(); !strings.Contains(rec.fatal, want) {
 		t.Errorf("the wait failed with %q, want it to say %q", rec.fatal, want)
 	}
-	select {
-	case <-rollback.ran:
-		t.Error("a rollback whose driver returned an error was answered as run")
-	default:
+	<-rollback.ended // published, as the wait found it
+	if rollback.hasRun {
+		t.Error("a rollback whose driver returned an error was published as run")
 	}
+}
+
+// TestRawTransactionSQLIsOutsideTheContract pins the limit of what a watch
+// tracks (backlog B869's fourth round): an expectation is bound to a *sql.Tx
+// and ends with that transaction's Commit or Rollback, an error's rollback of
+// it, or its connection's close, and transaction-control SQL run directly on
+// a watched connection is outside that. A raw COMMIT, run through the
+// transaction, commits its write and ends nothing: the rollback expected of
+// it stays bound, not begun and not ended, until the transaction's own
+// Commit, which the driver then refuses, ends it. A raw ROLLBACK reaches
+// SQLite's rollback hook outside the driver's Rollback, which takes it for an
+// error's rollback. Nothing refuses either statement.
+func TestRawTransactionSQLIsOutsideTheContract(t *testing.T) {
+	t.Run("a raw COMMIT leaves the expectation bound", func(t *testing.T) {
+		db, w, tx := heldWrite(t, context.Background())
+		rollback := w.RollbackOf(t, tx)
+		if _, err := tx.ExecContext(context.Background(), `COMMIT`); err != nil {
+			t.Fatal(err)
+		}
+		var n int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM t`).Scan(&n); err != nil || n != 1 {
+			t.Fatalf("the table holds %d rows (%v) after the raw COMMIT, want the transaction's one", n, err)
+		}
+		for _, c := range []struct {
+			what string
+			ch   chan struct{}
+		}{{"began", rollback.began}, {"came to an end", rollback.ended}} {
+			select {
+			case <-c.ch:
+				t.Fatalf("the rollback expected of the transaction %s at a raw COMMIT", c.what)
+			default:
+			}
+		}
+		if err := tx.Commit(); err == nil {
+			t.Fatal("the transaction's own Commit, after a raw COMMIT, returned no error")
+		}
+		select {
+		case <-rollback.ended:
+		default:
+			t.Fatal("the transaction's own Commit did not end the rollback expected of it")
+		}
+		if want := "its transaction's COMMIT failed"; rollback.hasRun || !strings.Contains(rollback.why, want) {
+			t.Errorf("the rollback ended as run %v, why %q; want it lost, saying %q", rollback.hasRun, rollback.why, want)
+		}
+	})
+	t.Run("a raw ROLLBACK is taken for an error's", func(t *testing.T) {
+		_, w, tx := heldWrite(t, context.Background())
+		rollback := w.RollbackOf(t, tx)
+		if _, err := tx.ExecContext(context.Background(), `ROLLBACK`); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case <-rollback.ended:
+		default:
+			t.Fatal("a raw ROLLBACK, which reaches SQLite's rollback hook, left the expectation bound")
+		}
+		if want := "its transaction rolled back by an error before its ROLLBACK"; rollback.hasRun || rollback.why != want {
+			t.Errorf("the rollback ended as run %v, why %q; want it lost, saying %q", rollback.hasRun, rollback.why, want)
+		}
+	})
 }
 
 // TestAnErrorThatRollsTheTransactionBackLosesItsRollbackAtOnce: a statement
@@ -244,9 +360,12 @@ func TestAConnectionAnErrorRolledBackCompletesNoOldRollbackWhenReused(t *testing
 		}
 	}
 	select {
-	case <-rollback.ran:
-		t.Fatal("a rollback on the reused connection answered the rollback of the transaction an error rolled back")
+	case <-rollback.ended:
+		if rollback.hasRun {
+			t.Fatal("a rollback on the reused connection answered the rollback of the transaction an error rolled back")
+		}
 	default:
+		t.Fatal("the rollback of the transaction an error rolled back was never published as ended")
 	}
 	rec := &fatalRecorder{TB: t}
 	ended := make(chan struct{})

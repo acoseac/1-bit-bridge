@@ -83,6 +83,10 @@ type RollbackWatch struct {
 	// runs as a connection binds an expectation, just before the binding asks
 	// the transaction's context: a cancel made during a binding.
 	beforeBind func(*conn)
+	// beforeEnded, when a test of this package sets it before any rollback
+	// comes to an end, runs as each does, its outcome written and its
+	// publication (ended's close) not yet made: a rollback held there.
+	beforeEnded func(*Rollback)
 }
 
 // WatchRollbacks arms a RollbackWatch on the database file at path whose
@@ -286,7 +290,8 @@ func (c *conn) BeginTx(ctx context.Context, opts driver.TxOptions) (driver.Tx, e
 }
 
 // ExecContext takes a binding's bindPragma itself, and passes every other
-// statement on to the driver.
+// statement on to the driver, transaction-control SQL among them, which the
+// watch does not track (RollbackOf).
 func (c *conn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
 	if token, ok := bindingToken(query); ok {
 		return driver.RowsAffected(0), c.bind(token)
@@ -525,8 +530,10 @@ func (w *RollbackWatch) bindTo(t testing.TB, tx *sql.Tx, attach func(*conn)) {
 // Rollback, which database/sql calls only once it has marked the transaction
 // done, has returned no error, SQLite having rolled the transaction back
 // inside it; it has failed where that Rollback returned an error, which it
-// keeps; and it can no longer come where the transaction committed, an error
-// rolled it back before its ROLLBACK, or its connection closed first. One
+// keeps; and it can no longer come where the transaction's Commit ended it,
+// an error rolled it back before its ROLLBACK, or its connection closed
+// first. What it came to is published once (end): written, and then ended
+// closed, its one completion signal, which every reader waits on alone. One
 // that came to an end before its wait began is kept. Another connection's
 // rollback, a reader's on the same file included, is none of these.
 type Rollback struct {
@@ -534,10 +541,13 @@ type Rollback struct {
 
 	began    chan struct{} // closed once the driver's Rollback was called
 	inSQLite chan struct{} // closed once SQLite rolled the transaction back inside it
-	ran      chan struct{} // closed once it has run, and on no other end
-	ended    chan struct{} // closed once it has run, failed or can no longer come, what it came to written first
-	err      error         // the driver's error, where its Rollback returned one
-	why      string        // why it can no longer come, where it cannot
+	// ended is closed once the rollback has run, failed or can no longer
+	// come, after what it came to is written: hasRun, err and why are read
+	// once ended is closed, and never before.
+	ended  chan struct{}
+	hasRun bool   // it has run
+	err    error  // the driver's error, where its Rollback returned one
+	why    string // why it can no longer come, where it cannot
 
 	beginning, rolling, ending sync.Once
 }
@@ -547,6 +557,17 @@ type Rollback struct {
 // that makes it. It runs a statement in tx that changes nothing (bindTo), and
 // fails the test where tx does not run on a connection the watch's Connector
 // made.
+//
+// The expectation is bound to tx, a *sql.Tx, and ends with that transaction's
+// Commit or Rollback, which database/sql calls on the driver, with an error
+// that rolls it back inside SQLite before its ROLLBACK, or with its
+// connection's close. Transaction-control SQL run directly on a watched
+// connection, a raw BEGIN, COMMIT, ROLLBACK or END, is outside that contract
+// and is not tracked: a raw COMMIT ends nothing, so the expectation stays
+// bound past the SQLite transaction it ended until tx's own Commit or
+// Rollback, and a raw ROLLBACK reaches SQLite's rollback hook outside the
+// driver's Rollback, which takes it for an error's
+// (TestRawTransactionSQLIsOutsideTheContract).
 func (w *RollbackWatch) RollbackOf(t testing.TB, tx *sql.Tx) *Rollback {
 	t.Helper()
 	r := newRollback(w)
@@ -555,10 +576,7 @@ func (w *RollbackWatch) RollbackOf(t testing.TB, tx *sql.Tx) *Rollback {
 }
 
 func newRollback(w *RollbackWatch) *Rollback {
-	return &Rollback{
-		w: w, began: make(chan struct{}), inSQLite: make(chan struct{}),
-		ran: make(chan struct{}), ended: make(chan struct{}),
-	}
+	return &Rollback{w: w, began: make(chan struct{}), inSQLite: make(chan struct{}), ended: make(chan struct{})}
 }
 
 func (r *Rollback) begin()            { r.beginning.Do(func() { close(r.began) }) }
@@ -570,23 +588,24 @@ func (r *Rollback) rollBackInSQLite() { r.rolling.Do(func() { close(r.inSQLite) 
 func (r *Rollback) returned(err error, inSQLite bool) {
 	switch {
 	case err != nil:
-		r.ending.Do(func() {
-			r.err = err
-			close(r.ended)
-		})
+		r.end(false, err, "")
 	case !inSQLite:
 		r.lose("the driver's Rollback returned no error, with SQLite having rolled nothing back inside it")
 	default:
-		r.ending.Do(func() {
-			close(r.ran)
-			close(r.ended)
-		})
+		r.end(true, nil, "")
 	}
 }
 
-func (r *Rollback) lose(why string) {
+func (r *Rollback) lose(why string) { r.end(false, nil, why) }
+
+// end publishes what the rollback came to, once: written, and then ended
+// closed, so that a reader that finds ended closed reads all of it.
+func (r *Rollback) end(hasRun bool, err error, why string) {
 	r.ending.Do(func() {
-		r.why = why
+		r.hasRun, r.err, r.why = hasRun, err, why
+		if seam := r.w.beforeEnded; seam != nil {
+			seam(r)
+		}
 		close(r.ended)
 	})
 }
@@ -629,14 +648,12 @@ func (r *Rollback) WaitUnless(t testing.TB, stopped <-chan struct{}) bool {
 	}
 }
 
-// answer is what a wait answers for a rollback that has come to an end: true
-// where it has run, and a failure where it failed or can no longer come.
+// answer is what a wait answers for a rollback whose end it found published:
+// true where it has run, and a failure where it failed or can no longer come.
 func (r *Rollback) answer(t testing.TB) bool {
 	t.Helper()
-	select {
-	case <-r.ran:
+	if r.hasRun {
 		return true
-	default:
 	}
 	if r.err != nil {
 		t.Fatalf("sqlitetest: the driver's Rollback of the transaction on %s returned an error: %v", r.w.path, r.err)
