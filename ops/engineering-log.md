@@ -95027,3 +95027,156 @@ before the fix). `go test -race -count=1 -timeout 120m -p 2
 the brief asked for the packages. The rules patch applies at the round's
 commit, and `scripts/check-doc-budgets.py` is clean on a copy with it applied
 (`cli-serve.md` 97,290 bytes). Windows is the PR's CI windows job's to show.
+
+## 2026-11-13 — B650: bridge doctor bounds every wait on a library root, and names the root that did not answer
+
+The rule is `cli-serve.md`'s B650 line, with `output.md`'s line on the
+checklist's read, and its long form in `ops/History-rules-cli-serve.md` ("B650
+— the doctor's bound on a library root"); this is the evidence. Linux amd64
+(legion0), Go 1.27.3, the Makefile's tags, TMPDIR on disk (`~/onebit/tmp`).
+The brief was rescoped from b650-v1 (the scanner recording the root a stalled
+scan is in), whose review showed that cannot be attributed reliably and found
+this: the doctor itself waited on a root with no end.
+
+### Step 0: the doctor's steps that touch a root
+
+At 4678b983:
+
+- `checkLibraryRoots` (`internal/doctor/doctor.go` 1258-1298): `os.Stat` and
+  `os.ReadDir` of each root on the run's goroutine; its context ignored
+  (`_ context.Context`).
+- `checkWatchLimit`: Linux's `countDirs` (`inotify_linux.go` 42-72, 104-142:
+  `fsutil.WalkableRoot`, then `WalkConfigured` over every folder below each
+  root) and kqueue's `manifest.CountWatchSet` (`watchbudget_kqueue.go` 32-69,
+  `manifest/watcher_fds.go` 159, `walkWatchTree`). Both ignore their context,
+  and their cap is a count, not a time.
+- Before any check ran: `buildDoctorDepsWith` → `config.Load`
+  (`cmd/bridge/doctor.go` 329) → `Validate` → `validateVariantsDir` and
+  `validateRenderTempDir` (`internal/config/config.go` 4075-4078, 4215, 4247)
+  → `fsutil.IsUnderAny` (`internal/fsutil/symlink.go` 157-187):
+  `EvalSymlinksOrClean` (an Lstat of each component) and `caseInsensitiveFS`
+  (a Stat) of every root, where `upscale.variantsDir` or `upscale.tempDir` is
+  set. No context.
+- On a player box (the MPD gate open), the checklist's outputs body
+  (`output_checklist.go` `readOutputs` → `LocalOutputs.Response` → `build` →
+  `pathRules` → `mpd.ProveRoots` → `musicPrefix`, `internal/mpd/paths.go`
+  119-179): a Stat and an EvalSymlinks of each root and Stats of the music
+  directory's entries. The context reaches MPD's `find` alone, and the build
+  runs on the goroutine of the call that began it
+  (`internal/api/outputs.go` 649-696).
+- Nothing else in a doctor run touches a root: the data dir's, the player's,
+  the store's and the sidecars' probes do not, and the backups folder's reads
+  are bounded since B653.
+
+The console: GET /api/doctor (`internal/admin/handlers_doctor.go` 58-79)
+calls `DoctorRun(r.Context())`, `adminDoctorRunnerFor`'s closure
+(`cmd/bridge/doctor.go` 1018-1044), on the request's goroutine, which rebuilds
+Deps (`config.Load` again) and runs `doctor.Run` there. A stat the kernel held
+kept that goroutine past the browser's disconnect (the admin server sets no
+write timeout) and wrote no response. The handler is not serialised, and the
+Settings page asks it at every render (`renderSettingsPrereqs`), so each
+render left one more goroutine on the stat. The other in-process callers are
+the CLI's: `bridge doctor` (`runDoctorReport`, twice with `--fix`), the
+launcher's doctor row (`menu.go` `actDoctor`) and its Setup's preflight
+(`actSetup` → `initCmd` → `ensureDoctorClean`); init's second port pass
+touches no root.
+
+### Red first
+
+The case tests, copied verbatim from the branch into a copy of 4678b983's tree
+(`maintree.py`: the worktree copied, each file B650 changed put back by `git
+show 4678b983:<path>`, each file it added removed), through a shim that routes
+main's own calls on the roots through the tests' stand-ins and changes nothing
+of when they run (`shim.py`: `checkLibraryRoots`' `os.Stat` and `os.ReadDir`
+through the run's, `countDirs` through the stand-in count, `IsUnderAny` in
+`Validate` through a seam, the console's runner over the given probes; every
+call still on the run's goroutine, with no bound), their own deadline
+shortened to 10 s for the run (main never returns, so any deadline shows it):
+
+```
+$ go test -C <main-tree> -count=1 -p 8 -v -run '<the cases>' ./internal/doctor/   (the --- and message lines)
+    b650_red_linux_test.go:40: inotify-watch-limit did not return within 10s: a root that does not answer held it
+--- FAIL: TestACountBelowARootThatAnswersIsNotReadAsALowOne (10.01s)
+--- PASS: TestAHealthyLibrarysWatchLineIsAsItWas (0.00s)
+    b650_red_test.go:157: Run did not return within 10s: a root that does not answer held it
+--- FAIL: TestARunNamesARootThatDoesNotAnswerWithinItsBound (10.01s)
+    b650_red_test.go:231: library-roots did not return within 10s: a root that does not answer held it
+--- FAIL: TestTheSecondOfTwoRootsDoesNotAnswer (10.01s)
+    b650_red_test.go:252: library-roots did not return within 10s: a root that does not answer held it
+--- FAIL: TestRootsThatDoNotAnswerCostOneBoundTogether (10.01s)
+    b650_red_test.go:273: library-roots did not return within 10s: a root that does not answer held it
+--- FAIL: TestARootWhoseListingDoesNotAnswerIsNamed (10.01s)
+    b650_red_test.go:286: library-roots did not return within 10s: a root that does not answer held it
+--- FAIL: TestALaterRunFindsTheRootStillNotAnsweringAndAsksItNoMore (10.00s)
+    b650_red_test.go:320: the overlapping runs did not return within 10s: a root that does not answer held it
+--- FAIL: TestOverlappingRunsShareOneProbeOfARoot (10.01s)
+--- PASS: TestHealthyRootsReadAsTheyAlwaysDid (0.00s)
+FAIL	github.com/acoseac/1-bit-bridge/internal/doctor	70.073s
+
+$ go test -C <main-tree> -count=1 -p 8 -v -timeout 20m -run '<the cases>' ./cmd/bridge/
+    b650_red_test.go:255: bridge doctor did not return within 10s: a root that does not answer held it
+--- FAIL: TestBridgeDoctorNamesARootThatDoesNotAnswerAndGoesOn (10.00s)
+    b650_red_test.go:294: bridge doctor did not return within 10s: a root that does not answer held it
+--- FAIL: TestBridgeDoctorBoundsTheLoadOfAConfigThatSetsItsSidecarDirectories (10.01s)
+    b650_red_test.go:327: the console's doctor did not return within 10s: a root that does not answer held it
+--- FAIL: TestTheConsolesDoctorAsksARootThatDoesNotAnswerOnce (10.01s)
+    b650_red_test.go:368: the checklist did not return within 10s: a root that does not answer held it
+--- FAIL: TestTheChecklistSaysABoxThatDoesNotAnswerWasNotRead (10.00s)
+--- PASS: TestBridgeDoctorPrintsHealthyRootsAsBefore (0.01s)
+FAIL	github.com/acoseac/1-bit-bridge/cmd/bridge	40.082s
+```
+
+Every case fails by its own deadline, none by hanging the suite, and the three
+guards pass on main's tree: over roots that answer, library-roots, the inotify
+line and config-file print what main printed, word for word. The branch's
+first commit, b4f83ae5, turns every case green.
+
+### Controls
+
+Each an uncommitted edit to the committed tree, its prediction written down
+before the run (`control-predictions.txt`, `controls-predictions.txt`),
+restored with `git checkout --` (`git status` clean after each):
+
+- C1, the brief's: the bound removed (`waitFor`'s timer `left + 1000h`):
+  `TestARunNamesARootThatDoesNotAnswerWithinItsBound` "Run did not return
+  within 1m0s" and `TestBridgeDoctorNamesARootThatDoesNotAnswerAndGoesOn`
+  "bridge doctor did not return within 1m30s", each by its own deadline.
+- C2, one work a key (`beginOut` never joins the work out): the later run, the
+  overlapping runs and the console's second run red, "two runs began 2
+  probes", "8 overlapping runs began 8 probes", no "still".
+- C3, a run's works kept (`ProbeRun.met` not asked): "the root was probed 4
+  times, want twice".
+- C4, no limit: no warn past it, at both levels, and the fifth load answered.
+- C5, one limit for both kinds (`outOfKind` counting every work): the load
+  beside sixteen probes held back, and the console's config-file "was not
+  checked: 4 earlier loads" past the probes' limit. Its first edit (`if true`)
+  did not compile, left as no control and run again.
+- C6, a work never let go (its delete removed): "the probe that answered late
+  is still out", and the console's recovered root never probed afresh.
+- C7, a stop said as a stall (`waitFor`'s stopped return removed): both
+  stopped runs "did not answer within", a fail.
+- C8, no probes beside the load (`loadDoctorConfig`'s `BeginRoots` removed):
+  "after the load, the roots were probed 0 and 0 times".
+- C10, the fold assigning in place of adding: the healthy inotify line "2
+  directories", want 3, and the fold's table red.
+
+Each as predicted.
+
+### The gates
+
+On 8ead962b, in one hold of the build lock (08:26 to 09:04, `gate.py`), `-p 8
+-parallel 8`: under `-race -count=50`, the touched tests of internal/doctor
+(the 16 cases of `rootprobes_test.go` and `rootprobes_linux_test.go`, and the
+earlier ones over the code they changed: `TestRun_FullReportShape`, the
+library-roots, config-file, port and tls-cert "not checked" tests, the count
+through a linked root) ok in 413 s; of cmd/bridge (the 11 of
+`doctor_roots_test.go`, the checklist's 10 over the changed read, and
+`TestDoctorAndInitCarryTheContainerVerdict` over `initPreflightDeps`) ok in
+252 s; `TestLibraryRootsOfIsTheRootsLoadGives` ok. `go test -race -count=1
+-timeout 120m` of `./internal/doctor/` (15 s), `./internal/config/` (14 s) and
+`./cmd/bridge/` (1,574 s, which holds `TestEveryCitedTestNameExists`): all ok.
+`go vet ./...` with the Makefile's tags for GOOS linux, darwin and windows:
+clean. go1.27.3's gofmt lists none of the Go files the change touches. The
+macOS-only case (`rootprobes_kqueue_test.go`) is vetted here and runs on CI's
+macOS leg; `make test` and `make build-all` were not run: the brief asked for
+the packages.
