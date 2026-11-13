@@ -4077,7 +4077,7 @@ round 3.
 
 ## B749 — the embedded node's diagnostic-log uploads and its name (2026-11-09)
 
-- **The embedded Tailscale node (tsnet mode) uploads no diagnostic logs unless `tailscale.uploadDiagnosticLogs` is true, keeps the name a registered node has, and a tailnet that requires the logs is said in the bridge's words, at a start and while the node runs** (2026-11-09, backlog B749 part 3, and its rounds 2 to 5): every path that builds a node (serve, `bridge tsnet auth` and `status`, each after its mode gate) builds it through `tsnet.NewServer`, which sets `TS_NO_LOGS_NO_SUPPORT=true` through envknob unless the key is true, over whatever the process wrote there, unread, on the caller's goroutine before anything starts the node (`applyUploadPolicy`), leaves the environment as it is where the key is true, reading what it holds as Tailscale does (a true holds the uploads off, a false holds nothing, one written over an inherited true included), and refuses an inherited value `strconv.ParseBool` refuses, naming the variable and not its value (`tsnet.ErrNoLogsEnvUnreadable`), and, with the key true and nothing set, a value written in the process since that it refuses, in words that blame the process and never its launch environment (`tsnet.ErrNoLogsEnvWrittenUnreadable`); once the policy has set the variable, every later `NewServer` sets it again before anything reads it, until the process exits, so a node a process builds after one it built without the key (the menu's "Start now", and bridge init's start, run serve in their own process) starts with the uploads off whatever its config says, and the setting applies at a process restart; the policy reads what the process inherited once, at its first application whatever the config says (`policyRecord`), and its status (`Server.Uploads`, read live) tells three reasons apart, each in words of its own (`Uploads.HeldOff`): the launch environment held the variable, this process turned the uploads off earlier (quit the bridge, its menu included, and launch it again, or restart its service), or something else in it did (a new launch may restore them), which a tailnet's refusal says and the console's tile shows on a line of its own (`UploadsHeldOff`) whatever the tailnet says; what stays open is backlog B830; a mode-refused command and `tsnet logout` leave the environment alone; the key is process-restart-bound (the console's `tailscaleUploadDiagnosticLogs`, class D in `ops/settings-apply-semantics.md`), and `compose.yaml` forwards its variable empty where it is unset, which the load takes for no override (`TestAnEmptyVariableLeavesTheFilesConsent`). The node's name is `tailscale.hostname`, else what the state says at each start, read read-only through upstream's keys and types, never its store constructor (`readNodeState`: the current profile, listed among the known profiles, its prefs carrying a node ID): a registered node keeps its persisted hostname, a node not registered (no file, an empty one, `{}`, an authentication that never finished) is `tsnet.DefaultHostname` (`1-bit-bridge`), and a state that does not read keeps the library name with one line naming no path. A start the tailnet refuses for the logs (upstream's "tailnet requires logging to be enabled", the one substring matched, pinned to the resolved module source) ends in `tsnet.LogsRequiredError`, kept as the wrapper's last start error under `lifecycleMu`, and the console's tile says it in LastError, from a running node's health too (`Server.LogsRequired`), naming `TS_NO_LOGS_NO_SUPPORT` where an inherited true holds the uploads off; `tsnet.Config.BeforeStart` (`tsnetBeforeStart`, nil in production) is the seam just before the upstream start the tests read the environment and the name through. **Don't set the variable before a path's mode gate, from a refused command or `logout`, or once anything has started the node; let an absent key or an inherited false turn the uploads on, or the bridge turn them on itself; hand the variable back, or unset it, in a process that has set it, or read it in a later `NewServer` before setting it again, read a true something else set as the launch environment's, or a false written over an inherited true as holding the uploads off, refuse a node without the key over a value written in the process, blame the launch environment for a value written in the process, set the variable before reading what the process inherited, give Compose's forwarding of the key's variable a default other than empty, or advise a restart of serve in its process, or a bare restart, for a change of the key; count a node registered by the state file's existence, open the state through upstream's store constructor, or write, create or lock it; derive a new node's name from the library, the host, its user or a path; match the refusal on more than that substring, or show upstream's tailscaled advice; or set the hook in production.** `TestTheUploadPolicyByKeyAndInheritedValue`, `TestEveryPathAppliesTheUploadPolicyBeforeTheUpstreamStart`, `TestTheCommandsThatBuildNoNodeLeaveTheEnvironmentAlone`, `TestTheNodesNameOnEveryStart`, `TestTheTileSaysWhatATailnetThatRequiresLogsNeeds`, `TestAServeRunAgainInTheSameProcessKeepsTheUploadsOff`, `TestTheTileSaysWhatHoldsTheUploadsOff`, `TestTheTileReadsWhatHoldsTheUploadsOffWhenItAsks`, and internal/tsnet's `TestTheNodeNameIsTheRegisteredOneOrTheDefault`, `TestOnceThisProcessTurnsTheUploadsOffTheyStayOff`, `TestTheStateReaderWritesNothing`, `TestARefusedStartSaysWhatTheTailnetRequires` and `TestTheLogsRequirementIsUpstreamsWords` pin it; `scripts/tsnet-uploads/evidence.py` is the evidence from a production binary, confined by port and not by address, an upgraded install included. → History-rules-cli-serve.md
+- **The embedded Tailscale node (tsnet mode) uploads no diagnostic logs unless `tailscale.uploadDiagnosticLogs` is true, keeps the name a registered node has, and a tailnet that requires the logs is said in the bridge's words, at a start and while the node runs** (2026-11-09, backlog B749 part 3, and its rounds 2 to 5): every path that builds a node (serve, `bridge tsnet auth` and `status`, each after its mode gate) builds it through `tsnet.NewServer`, which sets `TS_NO_LOGS_NO_SUPPORT=true` through envknob unless the key is true, over whatever the process wrote there, unread, on the caller's goroutine before anything starts the node (`applyUploadPolicy`), leaves the environment as it is where the key is true, reading what it holds as Tailscale does (a true holds the uploads off, a false holds nothing, one written over an inherited true included), and refuses an inherited value `strconv.ParseBool` refuses, naming the variable and not its value (`tsnet.ErrNoLogsEnvUnreadable`), and, with the key true and nothing set, a value written in the process since that it refuses, in words that blame the process and never its launch environment (`tsnet.ErrNoLogsEnvWrittenUnreadable`); once the policy has set the variable, every later `NewServer` sets it again before anything reads it, until the process exits, so a node a process builds after one it built without the key (the menu's "Start now", and bridge init's start, run serve in their own process) starts with the uploads off whatever its config says, and the setting applies at a process restart; the policy reads what the process inherited once, at its first application whatever the config says (`policyRecord`), and its status (`Server.Uploads`, read live) tells three reasons apart, each in words of its own (`Uploads.HeldOff`): the launch environment held the variable, this process turned the uploads off earlier (quit the bridge, its menu included, and launch it again, or restart its service), or something else in it did (a new launch may restore them), which a tailnet's refusal says and the console's tile shows on a line of its own (`UploadsHeldOff`) whatever the tailnet says; what stays open is backlog B830; a mode-refused command and `tsnet logout` leave the environment alone; the key is process-restart-bound (the console's `tailscaleUploadDiagnosticLogs`, class D in `ops/settings-apply-semantics.md`), and `compose.yaml` forwards its variable empty where it is unset, which the load takes for no override (`TestAnEmptyVariableLeavesTheFilesConsent`). The node's name is `tailscale.hostname`, else what the state says at each start, read read-only through upstream's keys and types, never its store constructor (`readNodeState`: the current profile, listed among the known profiles, its prefs carrying a node ID): a registered node keeps its persisted hostname, a node not registered (no file, `{}`, an authentication that never finished) is `tsnet.DefaultHostname` (`1-bit-bridge`), a state file that holds nothing refuses the start (B828, the next bullet), and a state that does not read keeps the library name with one line naming no path. A start the tailnet refuses for the logs (upstream's "tailnet requires logging to be enabled", the one substring matched, pinned to the resolved module source) ends in `tsnet.LogsRequiredError`, kept as the wrapper's last start error under `lifecycleMu`, and the console's tile says it in LastError, from a running node's health too (`Server.LogsRequired`), naming `TS_NO_LOGS_NO_SUPPORT` where an inherited true holds the uploads off; `tsnet.Config.BeforeStart` (`tsnetBeforeStart`, nil in production) is the seam just before the upstream start the tests read the environment and the name through. **Don't set the variable before a path's mode gate, from a refused command or `logout`, or once anything has started the node; let an absent key or an inherited false turn the uploads on, or the bridge turn them on itself; hand the variable back, or unset it, in a process that has set it, or read it in a later `NewServer` before setting it again, read a true something else set as the launch environment's, or a false written over an inherited true as holding the uploads off, refuse a node without the key over a value written in the process, blame the launch environment for a value written in the process, set the variable before reading what the process inherited, give Compose's forwarding of the key's variable a default other than empty, or advise a restart of serve in its process, or a bare restart, for a change of the key; count a node registered by the state file's existence, open the state through upstream's store constructor, or write, create or lock it; derive a new node's name from the library, the host, its user or a path; match the refusal on more than that substring, or show upstream's tailscaled advice; or set the hook in production.** `TestTheUploadPolicyByKeyAndInheritedValue`, `TestEveryPathAppliesTheUploadPolicyBeforeTheUpstreamStart`, `TestTheCommandsThatBuildNoNodeLeaveTheEnvironmentAlone`, `TestTheNodesNameOnEveryStart`, `TestTheTileSaysWhatATailnetThatRequiresLogsNeeds`, `TestAServeRunAgainInTheSameProcessKeepsTheUploadsOff`, `TestTheTileSaysWhatHoldsTheUploadsOff`, `TestTheTileReadsWhatHoldsTheUploadsOffWhenItAsks`, and internal/tsnet's `TestTheNodeNameIsTheRegisteredOneOrTheDefault`, `TestOnceThisProcessTurnsTheUploadsOffTheyStayOff`, `TestTheStateReaderWritesNothing`, `TestARefusedStartSaysWhatTheTailnetRequires` and `TestTheLogsRequirementIsUpstreamsWords` pin it; `scripts/tsnet-uploads/evidence.py` is the evidence from a production binary, confined by port and not by address, an upgraded install included. → History-rules-cli-serve.md
 
 *What uploaded.* tailscale.com v1.104.2's `tsnet.Server.Start` runs
 `startLogger` outside a test binary: it writes `tailscaled.log.conf` and a
@@ -4180,8 +4180,11 @@ the next (round 2's control R05b).
 *The name.* An explicit `tailscale.hostname` wins. Otherwise each start
 reads the state read-only (`readNodeState`): `<StateDir>/tailscaled.state`
 opened through `fsutil.OpenAsFile` (a named pipe or a directory refused at
-once) and read to 16 MiB at most, never through upstream's store
-constructor, which writes `{}` over a missing file; the JSON object of state
+once) and read to 16 MiB and one byte at most, nothing past them read (a
+larger file is a state that does not read, unless all that was read is white
+space, which refuses the start as a file that holds nothing: B828's round 2),
+never through upstream's store constructor, which writes `{}` over a missing
+file; the JSON object of state
 keys upstream's file store keeps; the profile key under
 `ipn.CurrentProfileStateKey`; that key listed among the profiles under
 `ipn.KnownProfilesStateKey`, since upstream's start takes an unlisted one
@@ -4192,12 +4195,14 @@ fallback, a pointer, which encoding/json follows into the interface; a
 non-pointer value there is an unmarshal error). Registered is a node ID in
 those prefs, and the name is then their `Hostname`, which tsnet writes from
 the name every start passes it. Not registered, so `tsnet.DefaultHostname`
-(`1-bit-bridge`): no file; an empty one; `{}`; a machine key alone (an
+(`1-bit-bridge`): no file; `{}`; a machine key alone (an
 abandoned authentication, or a first start that failed); a profile with no
 node ID; one a logout deleted; one not listed. A state that is there and does
 not read (it cannot be opened, it does not parse, a registered profile names
 no hostname) is taken for neither: the start keeps the library name earlier
 versions gave every node and says so in one Warn line naming no path.
+An empty file was a node not registered here until backlog B828: Tailscale's
+start refuses it, so it refuses the start (B828's section).
 `hasPersistedTsnetState`, the file's existence, is gone, and the
 interactive-auth warning asks the reading too. After `bridge tsnet logout`
 the state is gone and the next node is new. A backup does not carry the
@@ -4214,7 +4219,7 @@ tsnet passes `controlclient.LocalBackendStartKeyOSNeutral`, which
 `ipn.CurrentProfileStateKey` on Windows too. Until round 2 this said that
 Windows starts from `ipn.ServerModeStartKey`, from `readAutoStartKey` read
 without tsnet's flag (Codex on #1445). What stays open of the reading is
-backlog B828 and B829.
+backlog B829; B828, the empty file, is closed (B828's section).
 
 *The refusal.* Upstream refuses a node with the variable set on a tailnet
 carrying `nodecap.DataPlaneAuditLogs` (ipnlocal's local.go, about line
@@ -5482,3 +5487,117 @@ dropped, serve's preparation replaced by `os.MkdirAll`, the prepared data
 directory not handed to the unit, the gate moved after the preflight,
 `--skip-doctor` skipping it). The record is in `ops/engineering-log.md`,
 2026-11-13, B664.
+## B828 — a state file that holds nothing refuses the start in the bridge's words (2026-11-13)
+
+- **…and a state file that holds nothing, empty or JSON's white space alone (of a file larger than the 16 MiB and one byte it is read to, all that was read, nothing past it read), refuses the node's start before the node is built, whatever `tailscale.hostname` or the auth key says, in the bridge's words (`tsnet.EmptyStateError`, naming no path: a copy of the file keeps the node; moved aside, a new device follows, and what that costs), which serve's tailnet line and `bridge tsnet auth` and `status` (exit 1) print and the console's tile shows in LastError (`tsnetAdminStatus`, from `LastStartError`); Tailscale's own start refuses that file, in words about a TPM-sealed state, and the bridge moves and replaces nothing** (2026-11-13, backlog B828, the review of its brief, and its round 2). **Don't take a state file that holds nothing for no node, build or start the upstream node over it, ask `tailscale.hostname` before it, move, replace or write the file, name a path in its words, count a byte JSON does not skip as nothing, or read past the bound to decide it.** `TestAStateFileThatHoldsNothingRefusesTheStart`, `TestAStateFileThatIsNotThereStillStartsANewNode`, `TestOnlyJSONWhiteSpaceIsAStateThatHoldsNothing`, and cmd/bridge's `TestTheCommandsRefuseAStateFileThatHoldsNothingInTheBridgesWords` and `TestServeRefusesAStateFileThatHoldsNothingInTheBridgesWords` pin it. → History-rules-cli-serve.md
+
+*What upstream does.* tailscale.com v1.104.2's `tsnet.Server.Start`
+(tsnet/tsnet.go, 556 to 559; `doInit`, 709 to 714) runs `start` (805), which
+starts its logger (875: outside a test binary it writes `tailscaled.log.conf`
+and its log buffers into the state dir), its network monitor, its userspace
+engine and netstack before it opens its store, `store.New(tsLogf,
+<Dir>/tailscaled.state)` (956 to 963). `store.New` (ipn/store/stores.go, 59 to
+82) first runs `maybeMigrateLocalStateFile` (259 to 273), which reads the file
+and unmarshals it into a map to tell a TPM-sealed file from a plain one: an
+empty file, or one of white space alone, fails there with "unexpected end of
+JSON input", and the start with `failed to migrate existing TPM-sealed state
+file to plaintext format: failed to unmarshal "<the file's path>": unexpected
+end of JSON input`. The file store's own tolerance of an empty file
+(`NewFileStore`, 157 to 183, Tailscale's issue 895) is never reached that way,
+and B749's reading had taken it for upstream's answer ("Upstream's store takes
+an empty file for none"). On main a throwaway program ran the bridge's own
+Start over an empty file: `tsnet: server start: tsnet: failed to migrate
+existing TPM-sealed state file to plaintext format: …`, which serve prints
+after `tsnet: bring node up:`, and the state dir gained `tailscaled.log.conf`,
+`tailscaled.log1.txt` and `tailscaled.log2.txt`. Upstream's writer syncs the
+file before its rename (atomicfile.go, line 45), so an empty file comes from
+outside it: a truncation by hand, a copy, a sync tool, a filesystem's repair.
+
+*The choice.* The brief offered (a), the empty file a state that does not
+read, and (b), serve moving it aside and starting a new node. Its review bound
+(a) as a refusal of the start, not a warning, since a state that does not read
+changes only the name and leaves upstream's start to fail, and ruled (b) out:
+a new registration is a new device, whose MagicDNS name and certificate can
+change, against B749's rules that the node keeps its identity and that the
+reading changes nothing. So the start refuses, its words say how to recover
+and what that costs, and the bridge does none of it.
+
+*As built.* `readNodeState` answers a file whose bytes are all JSON's white
+space (space, tab, carriage return and line feed, what Go's decoder skips; RFC
+8259, section 2), none at all included, with `*tsnet.EmptyStateError`
+(`WhiteSpace` set where it holds any). `nodeName` returns it before it asks
+`tailscale.hostname`, and `startUnlocked` returns it before it builds the
+upstream server, so neither the hook before the upstream start nor the
+upstream start runs, whatever the hostname or the auth key, and `Start` keeps
+it as the last start error. Its words name the file, and its folder by its
+role, and say that Tailscale does not start from it, that a copy of the file
+keeps the node, that moving the file aside and restarting the bridge gives a
+new device, which authenticates as on a first run, takes a new tailnet address
+and can take a new MagicDNS name, which paired apps hold, and that the bridge
+moves and replaces nothing. They name no path, so the console's tile shows
+them as they are (`auth-tls.md`: a console error body names no path). Serve
+prints them on its tailnet line (`tsnet: bring node up: … (LAN listener still
+active)`), `bridge tsnet auth` and `status` print them and exit 1, and
+`tsnetAdminStatus` reads them from `LastStartError` beside
+`LogsRequiredError`, where the tile said `tsnet status: tsnet: Status called
+before Start`.
+
+*The other states.* A missing file and `{}` are a new node, before and after.
+White space alone was a state that does not parse, so the start took the
+library's name, said so, and failed in upstream's words as an empty file did;
+it is refused with it now. Any other byte, a vertical tab, a form feed, a
+no-break space or a byte-order mark among them, is a state that does not
+parse, as before (`TestOnlyJSONWhiteSpaceIsAStateThatHoldsNothing` pins the
+line). What stays open of the reading is backlog B829 and the follow-ups
+B828's report names.
+
+*Red first and the controls.* At a2a3d3fe, main's code under the new tests:
+every row of `TestAStateFileThatHoldsNothingRefusesTheStart` red (upstream's
+words with the file's path, the node built and started, the hook reached,
+`tailscaled.log.conf` in the state dir; the white space rows the library-name
+line too), every row of the two cmd/bridge tests red (`tsnet: before start:
+the test stopped the node before its upstream start` on each path, and the
+tile's `tsnet status: tsnet: Status called before Start`), and
+`TestAStateFileThatIsNotThereStillStartsANewNode` green. The node
+internal/tsnet stands in for does what upstream's start did there
+(`upstreamOverState`), since a test binary's own upstream start skips the
+logger. Eight controls, each predicted before it ran, were red where predicted
+and nowhere else: the fix removed (every refusal row, the reader's three rows
+that hold nothing, every cmd/bridge row), the refusal taken for a state that
+does not read (the refusal rows and cmd/bridge's), the refusal asked only
+without `tailscale.hostname` (the hostname rows alone), the tile without it
+(serve's two rows, on the tile alone), the file moved aside and a new node
+started, the brief's (b) (the refusal rows, the state dir's comparison among
+their assertions, and cmd/bridge's), the refusal wrapped (the exact words
+alone), the line drawn at `bytes.TrimSpace` (the vertical tab, form feed and
+no-break space rows) and the upstream node built though never started (the
+refusal rows' count of nodes alone). The record is in
+`ops/engineering-log.md`, 2026-11-13, B828.
+
+*Round 2: white space past the read's bound.* The reading reads 16 MiB and one
+byte at most, and its size guard ran before its white-space check, so a file
+of 16 MiB and one byte of white space was "larger than the 16777216 bytes it
+is read to", a state that does not read: the start took the library's name,
+said so, built the upstream node and ended in upstream's TPM-worded failure,
+its logger's file written into the state dir (Codex and Claude on round 1).
+The check now comes first, of the same bounded read, its errors and its cap as
+they were (a chunked read would lift the cap, which the brief's review ruled
+out): where all that was read is white space, the file holds nothing,
+`Oversized` set where it is larger than the read, and nothing past it is read.
+Its words say the file holds no state in its first 16 MiB, which is as far as
+the bridge reads it, and that the bridge does not start the node from it; they
+leave out "Tailscale does not start from it", since of such a file the bridge
+knows only what it read. The edge: a file with JSON past its first 16 MiB of
+white space, which Tailscale might start from, is refused with it, where it
+reached upstream before; a state file is a few KiB, so that file is broken
+anyway. Anything else in what was read keeps a larger file a state that does
+not read, as before. `TestOnlyJSONWhiteSpaceIsAStateThatHoldsNothing`'s rows
+at the bound, past it, and past it with an x in its first 16 MiB pin it, each
+row that holds nothing driving a start that must be refused before anything is
+built (`startRefused`). The row past the bound was red at 88b06153 on the
+reader's "is larger than the 16777216 bytes it is read to", the upstream node
+built and started and the logger's file in the state dir; three controls, each
+predicted, were red where predicted: the check asked only within the bound
+(the row past it), `Oversized` set at the bound (the row at it), and the words
+without `Oversized` (the row past it). The record is in
+`ops/engineering-log.md`, 2026-11-13, B828 round 2.
