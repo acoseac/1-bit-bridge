@@ -94752,3 +94752,77 @@ C10b's first run left the enrichment pulse's case green: with Deezer on, the por
 | `make docs-check`; the round-2 rules patch applied to a copy of the rules | clean; within budget (`enrichment.md` 52,106 bytes, `scanner.md` 46,051, `wire.md` 62,386; the heaviest load 359,113), every test its bullet names there |
 
 **Left.** Round 1's note on a Deezer answer of HTTP 200 with an `error` object stands: it reads as no match, so it ends the name, unverified against the live API from here.
+
+## 2026-11-13 — B761 PR 2, round 3: a miss under another name keeps the lookup, each failure timed when it happens, a refused redirect capped, a backoff a restart keeps
+
+Backlog B761, PR 2's third round, on `feat/b761-deezer-requeue` from 447ff87c (round 2 and its rules commit). No migration: v63 and v64 stay as they are.
+
+**What the review found, each verified at 447ff87c.**
+
+1. An answer that ended one name erased a lookup that waited by another. `askPortrait`'s memo arm and its none/rejected arm called `t.PortraitSettled()` (portraits.go:265, 286), and `markEnrichedSQL`'s write 2 cleared both columns whatever name they held (store.go:3473-3476). `UnenrichedTracks` reads `tags_json` and `indexed_at` alone (store.go:3161-3170), so a pass after "Retry missing" knew nothing of the kept name. The in-pass sequence: `enrichOne`'s no-release branch runs `resolveArtist` (enricher.go:631), whose lookup by MusicBrainz's name fails, then the fingerprint path (acoustic.go:484) misses by AcoustID's.
+2. `runPortraits` read the clock once (portraits.go:340) and handed it to `portraitsOf` (:360), which weighed every name's retry (:443) and timed every failure (:466) by it, and the rest counted from it (:378). `askPortrait` timed its failure (:310) at the time it read before its attempt (:272). The ordinary pass reaches that failure through `resolveArtist`'s call (enricher.go:891), and the fingerprint path through `fetchRecoveredArtistImage`'s (acoustic.go:484).
+3. `portraitRejectedAnswer` took every `refusedHostError` (portraits.go:90-92), the redirect guard's included (deezer.go:106), so a redirect ended the name at once; `PortraitPendingAttempts` (deezer_pending.go:202) gated the route's probe alone.
+4. `unnamedPortraitAttemptsSQL` (deezer_pending.go:315-320) forgot, at every open, each count no waiting row named. A changed file's upsert drops the row's lookup, so a restart after one forgot a backoff still running. It does not read `enriched_at`: "Retry missing" keeps the lookup, and so its count.
+
+**The design.**
+
+- *An answer ends its own name's lookup alone.* `Track.PortraitNameEnded(mbid, name)` records an answer that ends a name (none, rejected, the memo's hit) where `PortraitSettled` did; `PortraitSettled` is now a portrait held or cached, which settles every name. The Track keeps the names its pass ended, and `markEnrichedSQL`'s keep arm keeps a stored lookup only while its artist is the stamp's and its name is none of them (`NOT EXISTS (SELECT 1 FROM json_each(?) ...)`, a JSON array, `[]` for none), so a stamp from a fresh read, which knows nothing of the stored name, cannot erase it. Within a pass the first lookup that waits stays: a later answer ending another name, or a later wait by one, records nothing over it, so one track failing under two names keeps the first (a Low). Across passes, a lookup that waits replaces the stored one, as `TestAStampWritesThePortraitItsPassLearnt` pins since round 1. An artist that changes during the pass: what the Track records is of one artist, the last the pass asked about (`portraitFor` drops another artist's), the stamp keeps a stored lookup only for the artist it writes, and a row another writer changed since the read is not stamped (B187).
+- *Each time read where it is.* `notePortraitFailed` reads the clock as it notes the failure, on every path; `portraitsOf` reads it as it reaches each name; `runPortraits` reads it at a turn's start for the rest under way, and at the pass's end for the rest it begins.
+- *A refused redirect is a failure, and capped.* `portraitRejectedAnswer` leaves out the redirect guard's refusal (`refusedRedirect`). `redirectCapped`, asked in `askPortrait` and `portraitsOf` alike, makes the attempt a rejected answer, through the existing name-ended branch, when the redirect is the name's fifth failure in a row (`PortraitPendingAttempts`) by the store's count; no new outcome case. The cap's scope: the count is the attempts table's, so a restart between the failures keeps it; once the cap ends the name its count is forgotten and its memo is the process's, so a later pass that re-enriches the row ("Retry missing", a changed file) asks again from zero, as for any name an answer ended. Every other failure goes on past the count.
+- *The open prunes by age and by reference.* An open forgets a count only when no waiting row names it and its last failure is older than `portraitAttemptsKept`, a day, past the longest retry (six hours): `last_failed_at < ?`, bound to the store's clock less a day in Unix nanoseconds, strict, so a count exactly a day old is kept. A count a waiting row names is never forgotten by age: the route's probe reads it, so an exhausted lookup stays so across any pause. The store's clock reaches the open (`openStoreWithClock`, which `OpenStoreAdmitted` calls with `time.Now`).
+- PROTOCOL.md's Deezer paragraph names the redirect among the failures that keep `202`, and the fifth in a row among the answers that end a name.
+
+**Red first.** Every case failed at 447ff87c, on a copy of its tree (`git archive`) with round 3's tests and a names-only shim never committed (`PortraitNameEnded` as 447ff87c's `PortraitSettled`, `openStoreWithClock` opening on the host's clock and then writing on the test's, `portraitAttemptsKept` a constant).
+
+| Package | Case | Red at 447ff87c |
+|---|---|---|
+| manifest | `TestAStampClearsOnlyTheLookupOfTheNameItsPassEnded` | the batch does not read the row, want it waiting by "Name A" |
+| manifest | `TestAPassKeepsTheFirstLookupThatWaits` | an answer ending another name after it: no lookup; another name waiting after it: "Name B" (an answer before it: green, by design) |
+| manifest | `TestAnOpenKeepsTheAttemptsOfABackoffStillRunning` | no failure after the reopen, want one at its time |
+| manifest | `TestPortraitAttemptsAreKeptPerArtistAndName` | the count a day old to the nanosecond forgotten |
+| enrich | `TestAMissUnderAnotherNameKeepsTheLookupThatWaits` | the miss in the same pass: no lookup; the other name waiting too: "Artist B"; the later pass after "Retry missing": no lookup |
+| enrich | `TestEachFailureOnAPageStartsItsBackoffWhenItHappens` | both failures timed at the page's start, want three and six minutes on |
+| enrich | `TestAnArtistWhoseRetryFallsDueDuringThePageIsAsked` | the second artist asked 0 times on the page |
+| enrich | `TestTheBatchRestsFromTheEndOfThePass` | the batch read the store twelve minutes after the pass began |
+| enrich | `TestAPassTimesAPortraitFailureWhenItHappens` (both paths) | the failure timed at its attempt's start, want three minutes on |
+| enrich | `TestARefusedRedirectWaitsUntilTheCapAndThenEndsItsName` (the search, the picture) | the row settled at the first redirect |
+| enrich | `TestTheOrdinaryPassWaitsOnARefusedRedirectUntilTheCap` (its first failure) | the row kept no lookup |
+| enrich | `TestARestartKeepsABackoffNoRowWaitsFor` (after a changed file) | no failure after the restart; the re-enrichment asked Deezer inside the backoff |
+
+Green at 447ff87c by design, each a guard a control turns red: `TestAnExhaustedLookupStaysSoAcrossADayAndAReopen` (C4b, P3), the redirect case's 503 (kept asking past the count), the ordinary pass's cap (C3b), and the restart case after "Retry missing" (P2).
+
+**Controls.** Each an uncommitted edit to the committed tree (c960ef9e), run, and restored with `git checkout --`, `git status` empty after each; the predictions were written before the first run, and none missed.
+
+| Control | Red | Green beside it |
+|---|---|---|
+| C1a `askPortrait`'s ended arm settles the row (the old line) | the miss in the same pass, the later pass | the other name waiting too |
+| C1b the keep arm ignores the names the pass ended (the old arm) | an ended own name keeps its lookup | the pass's first lookup (3), the round-1 stamp case, the enrich case (3) |
+| C1c `PortraitPending` without its guard | another name waiting after it, in manifest and in enrich | the rest |
+| C1d `PortraitNameEnded` clears a lookup of any name | an answer ending another name after it, in manifest and in enrich | the fresh read's, the later pass |
+| C2a the batch times its failures at the page's start | each failure on a page | the ordinary pass's, the retry due during the page |
+| C2b the batch weighs retries at the page's start | the retry due during the page | each failure on a page, the ordinary pass's, the rest |
+| C2c the rest counts from the turn's start | the rest from the pass's end | the rest that reads nothing |
+| C2d `askPortrait` times its failure at its attempt's start | both paths' | each failure on a page |
+| C3a a refused redirect is a rejected answer (the old line) | the batch's search and picture, the ordinary pass's first failure | the 503, the cap, the failure classes |
+| C3b no cap in `askPortrait` | the ordinary pass's cap | its first failure, the batch's three |
+| C3c no cap in `portraitsOf` | the batch's search and picture: asked 7 times in 7 turns, want 5 | the 503, the ordinary pass's two |
+| C4a every open forgets every unnamed count (the old prune) | the backoff still running, the count a day old, the restart after a changed file | the exhausted lookup, the restart after "Retry missing" |
+| C4b an age-only prune | the exhausted lookup, the referenced count past a day | the backoff still running, the restart case (2), the exhausted portrait across a reopen |
+| C4c the prune on the host's clock | the unnamed count older than a day kept | the backoff still running, the exhausted lookup |
+
+**Pins.** Round 1's three fixes, made in round 2 (the binding, one backoff for every path, the pending bound), each with a case a regression turns red, and the wake beside them:
+
+| Pin | Red | Green beside it |
+|---|---|---|
+| P1 the stamp's keep arm without the binding | `TestAPendingPortraitIsBoundToTheArtistItWasTakenFor` | the round-1 stamp case, the re-enrichment's |
+| P2 `askPortrait` ignores the backoff | `TestTheBackoffHoldsEveryPathThatAsksForAPortrait`, the restart case (both) | |
+| P3 the route's probe without its bound | `TestArtistMBIDPortraitPendingEndsAtTheBound`, `TestAnExhaustedLookupStaysSoAcrossADayAndAReopen`, `TestTheArtistImageAnswersEachPortraitStateAsTheProtocolSays`, `TestAnExhaustedPortraitStaysSoAcrossAReopenAndALaterSuccessServesIt` | |
+| P4 `Run`'s wait takes enrichment as on after the batch's refusal | `TestAnEnrichmentPulseThatRefusesTheBatchsListingStillWakesTheLoop` | the Deezer pulse's |
+
+**Runs** (legion0, Linux, go1.27.3, the Makefile's tags, TMPDIR on disk).
+
+| Check | Result |
+|---|---|
+| The round-3 cases and the B761 cases beside them, `./internal/manifest/`; the whole of `./internal/enrich/`; no race | ok |
+
+**Left.** One track failing under two names keeps one of them: in a pass the first, across passes the latest pass's; the other is asked again only when a pass re-enriches the row. A name the redirect cap ended is asked again by such a pass from zero, at most five attempts at the backoff's pace.
