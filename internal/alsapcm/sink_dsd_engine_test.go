@@ -3,6 +3,7 @@ package alsapcm
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 	"unsafe"
@@ -132,43 +133,108 @@ func TestNativePausedInitialActivation(t *testing.T) {
 	}
 }
 
+// TestNativeResumeCancelsLocate: a Resume cancelled while its reopen's
+// Locate runs cancels that Locate, whose context is the request's, and
+// answers its cancellation. Its wait (await) then finds the writer's reply
+// and its own context's end ready together. Through its context, the Resume
+// revokes the sink, so the abandoned caller cannot authorize sound later
+// (revokeFound), and the sink's writer ends with no other release; through
+// the writer's reply, a refused reopen held for the next resume, the sink
+// stays paused, its writer alive, until a release ends it, here the test's.
+// Each arm is forced (armPick), and the select's own pick (armAny) asserts
+// whichever outcome it took: left to the select alone, the test waited on
+// Done beside a sink kept paused, until the package's timeout (backlog
+// B887). Which outcome a cancelled Resume should have is the product's
+// question, left open.
 func TestNativeResumeCancelsLocate(t *testing.T) {
-	k := nativeKernel(t)
-	c := nativeConfig()
-	entered, exited := make(chan struct{}), make(chan struct{})
-	abandon := make(chan struct{})
-	c.Locate = func(ctx context.Context) (Endpoint, error) {
-		close(entered)
-		select {
-		case <-ctx.Done():
-		case <-abandon:
-		}
-		close(exited)
-		return Endpoint{}, ctx.Err()
+	for _, tc := range []struct {
+		name string
+		arm  awaitArm
+	}{{"through the writer's reply", armReply}, {"through its caller's context", armContext}, {"through either, as the select picks", armAny}} {
+		t.Run(tc.name, func(t *testing.T) {
+			k := nativeKernel(t)
+			c := nativeConfig()
+			entered, exited := make(chan struct{}), make(chan struct{})
+			abandon := make(chan struct{})
+			letLocateGo := sync.OnceFunc(func() { close(abandon) })
+			c.Locate = func(ctx context.Context) (Endpoint, error) {
+				close(entered)
+				select {
+				case <-ctx.Done():
+				case <-abandon:
+				}
+				close(exited)
+				return Endpoint{}, ctx.Err()
+			}
+			pick := &armPick{}
+			s := nativeSink(t, k, c, pick.hook)
+			if err := s.Activate(context.Background(), 1); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.Pause(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			k.grant(31 * time.Second)
+			nativeWait(t, s, "released", func() bool { return s.released })
+			ctx, cancel := context.WithCancel(context.Background())
+			done, resumed := make(chan error, 1), make(chan struct{})
+			// Registered after the sink's release, so it runs first: the
+			// Resume and its Locate let go, and the Resume joined.
+			t.Cleanup(func() {
+				cancel()
+				letLocateGo()
+				await(t, resumed, "the Resume's return at the test's end")
+			})
+			// The arm of the Resume's wait alone: Activate's, whose context
+			// never ends, would wait on nil channels under armContext.
+			pick.set(tc.arm)
+			go func() {
+				defer close(resumed)
+				done <- s.Resume(ctx)
+			}()
+			await(t, entered, "the reopen's Locate")
+			cancel()
+			err := receive(t, done, "the cancelled Resume's answer")
+			select {
+			case <-exited:
+			case <-time.After(time.Second):
+				letLocateGo()
+				await(t, exited, "the reopen's Locate, let go")
+				t.Error("resume context did not cancel locator")
+			}
+			if !errors.Is(err, context.Canceled) {
+				t.Errorf("the cancelled Resume answered %v, want its cancellation", err)
+			}
+			revoked := nativeRevoked(s)
+			switch {
+			case tc.arm == armContext && !revoked:
+				t.Fatal("through its context, the cancelled Resume did not revoke the sink")
+			case tc.arm == armReply && revoked:
+				t.Fatal("through the writer's reply, the cancelled Resume revoked the sink")
+			}
+			if !revoked {
+				if p := s.Position(); !p.Paused || !p.Released {
+					t.Errorf("the sink a cancelled Resume kept reads %+v, want it paused and released", p)
+				}
+				select {
+				case <-s.Done():
+					t.Fatal("the sink a cancelled Resume kept ended with no release")
+				default:
+				}
+				// Only a release ends it.
+				s.BeginRelease(Immediate)
+			}
+			await(t, s.Done(), "the sink's end")
+		})
 	}
-	s := nativeSink(t, k, c)
-	if err := s.Activate(context.Background(), 1); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.Pause(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	k.grant(31 * time.Second)
-	nativeWait(t, s, "released", func() bool { return s.released })
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() { done <- s.Resume(ctx) }()
-	<-entered
-	cancel()
-	<-done
-	select {
-	case <-exited:
-	case <-time.After(time.Second):
-		close(abandon)
-		<-exited
-		t.Error("resume context did not cancel locator")
-	}
-	<-s.Done()
+}
+
+// nativeRevoked says whether s has been revoked, read under the sink's lock,
+// where its revocation is made.
+func nativeRevoked(s *DSDSink) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.revoked
 }
 
 func TestNativeTailHasNoOccurrenceTime(t *testing.T) {
