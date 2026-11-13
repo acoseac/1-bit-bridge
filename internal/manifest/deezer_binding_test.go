@@ -293,8 +293,11 @@ func rerunMigration(t *testing.T, s *Store, version int) {
 // TestPortraitAttemptsAreKeptPerArtistAndName: each failed attempt at an
 // artist's portrait by a name adds one to that name's count and records
 // when, apart from the artist's other names; forgetting a name forgets its
-// count alone, forgetting the artist every one of its names; and the counts
-// a pending row names outlive a reopen, where those no row names do not.
+// count alone, forgetting the artist every one of its names; and across a
+// reopen the counts a pending row names stay whatever their age, and one no
+// row names stays for portraitAttemptsKept past its last failure, a day to
+// the nanosecond included, and goes once older (B761's third round: until
+// then the reopen forgot it at once).
 func TestPortraitAttemptsAreKeptPerArtistAndName(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "bridge.db")
@@ -334,27 +337,37 @@ func TestPortraitAttemptsAreKeptPerArtistAndName(t *testing.T) {
 	requireAttempts(t, s, pendingArtistMBID, "Name A", 0)
 	requireAttempts(t, s, pendingArtistMBID, "Name A2", 0)
 
-	// Across a reopen: the count a pending row names stays, one no row
-	// names goes.
+	// Across a reopen a day and a nanosecond after second: the count a
+	// pending row names stays, older though it is; of those no row names,
+	// the one older than a day goes, and the one a day old to the
+	// nanosecond and a later one stay.
 	stampRefused(t, s, "Artist/Album/01.flac", pendingArtistMBID, "Name A")
 	for i := 0; i < 3; i++ {
 		if _, err := s.NotePortraitFailure(ctx, pendingArtistMBID, "Name A", second); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if _, err := s.NotePortraitFailure(ctx, pendingOtherMBID, "Nobody Waits", second); err != nil {
-		t.Fatal(err)
+	reopenAt := second.Add(portraitAttemptsKept + time.Nanosecond)
+	for _, a := range []struct {
+		name string
+		at   time.Time
+	}{
+		{"Nobody Waits", second},
+		{"A Day Ago", second.Add(time.Nanosecond)},
+		{"Lately", reopenAt.Add(-time.Hour)},
+	} {
+		if _, err := s.NotePortraitFailure(ctx, pendingOtherMBID, a.name, a.at); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
-	reopened, err := OpenStore(dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = reopened.Close() })
+	reopened := openPortraitStoreAt(t, dbPath, func() time.Time { return reopenAt })
 	requireAttempts(t, reopened, pendingArtistMBID, "Name A", 3)
 	requireAttempts(t, reopened, pendingOtherMBID, "Nobody Waits", 0)
+	requireAttempts(t, reopened, pendingOtherMBID, "A Day Ago", 1)
+	requireAttempts(t, reopened, pendingOtherMBID, "Lately", 1)
 }
 
 // requireAttempts fails unless the store keeps failures failed attempts at

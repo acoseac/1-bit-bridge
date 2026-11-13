@@ -34,10 +34,14 @@ import (
 // no wait changes for that name: on a host the client refuses, no image, too
 // large) settles the rows that wait by that name alone, and goes in
 // deezerNegCache under the artist and the name, so another name of the artist
-// is still asked; a refusal keeps the rows waiting; and a failure (any other
-// error) keeps them waiting and adds to the store's failed attempts, which put
-// the next attempt off. Each row is cleared only at the version the page read
-// it at.
+// is still asked, and a row's lookup by another name stays
+// (manifest.Track.PortraitNameEnded); a refusal keeps the rows waiting; and a
+// failure (any other error) keeps them waiting and adds to the store's failed
+// attempts, timed when it happened, which put the next attempt off. A
+// redirect to a host the client refuses is such a failure until it comes on
+// the name's PortraitPendingAttempts'th attempt in a row, which it ends
+// (redirectCapped). Each row is cleared only at the version the page read it
+// at.
 
 // portraitOutcome is what one attempt at an artist's portrait came to.
 type portraitOutcome int
@@ -52,7 +56,8 @@ const (
 	portraitNone
 	// portraitRejected: Deezer's answer named a picture no wait changes for
 	// this name: on a host the client refuses, at a URL that does not
-	// parse, past the size cap, or not an image (portraitRejectedAnswer).
+	// parse, past the size cap, or not an image (portraitRejectedAnswer);
+	// and the attempt a refused redirect failed at the cap (redirectCapped).
 	// Ends the name, as portraitNone does, and the artist's other names are
 	// still asked.
 	portraitRejected
@@ -61,8 +66,10 @@ const (
 	// enrich.enabled's ErrOff). No answer: never a miss.
 	portraitRefused
 	// portraitFailed: no answer that settles anything: a transient failure,
-	// a cancellation, or any other error (a decode error, a write that
-	// failed, no artwork cache). Asked again once its retry is due.
+	// a cancellation, a redirect to a host the client refuses, which
+	// Deezer's next answer may not make, or any other error (a decode error,
+	// a write that failed, no artwork cache). Asked again once its retry is
+	// due.
 	portraitFailed
 )
 
@@ -85,11 +92,20 @@ func classifyPortrait(found bool, err error) portraitOutcome {
 }
 
 // portraitRejectedAnswer reports whether err is Deezer's answer naming a
-// picture no wait changes for the name it was asked by.
+// picture no wait changes for the name it was asked by. A redirect to a host
+// the client refuses is not one (refusedRedirect): a failure, which the cap
+// ends (redirectCapped).
 func portraitRejectedAnswer(err error) bool {
 	var host *refusedHostError
-	return errors.As(err, &host) || errors.Is(err, errNotAnImage) ||
+	return (errors.As(err, &host) && !host.redirect) || errors.Is(err, errNotAnImage) ||
 		errors.Is(err, errImageTooLarge) || errors.Is(err, errBadImageURL)
+}
+
+// refusedRedirect reports whether err is a redirect to a host the client
+// refuses (installRedirectGuard), of the search or of the picture.
+func refusedRedirect(err error) bool {
+	var host *refusedHostError
+	return errors.As(err, &host) && host.redirect
 }
 
 // artistPortrait asks for mbid's portrait by name (ensureArtistImageCached)
@@ -181,9 +197,12 @@ func (e *Enricher) portraitWaits(ctx context.Context, mbid, name string, now tim
 	return at, now.Before(at)
 }
 
-// notePortraitFailed adds a failed attempt at mbid's portrait by name, at
-// now, to the store's, and returns when the next attempt is due.
-func (e *Enricher) notePortraitFailed(ctx context.Context, mbid, name string, now time.Time) time.Time {
+// notePortraitFailed adds a failed attempt at mbid's portrait by name to the
+// store's, timed now, as the failure is noted: never when its attempt or its
+// page began, since a request takes up to the client's timeout and a page
+// many (B761's third round). It returns when the next attempt is due.
+func (e *Enricher) notePortraitFailed(ctx context.Context, mbid, name string) time.Time {
+	now := e.now()
 	if e.store == nil {
 		return now.Add(portraitRetryFirst)
 	}
@@ -228,6 +247,28 @@ func (e *Enricher) notePortraitNameEnded(ctx context.Context, mbid, name string)
 // stamps is due once both switches are on, so it ends the batch's rest.
 func (e *Enricher) notePortraitRefused() { e.portraitRefusals.Add(1) }
 
+// redirectCapped reports whether the failed attempt at mbid's portrait by
+// name that err answered is the cap on a refused redirect: a redirect to a
+// host the client refuses (refusedRedirect), on the name's
+// manifest.PortraitPendingAttempts'th attempt in a row by the store's count,
+// which a restart keeps, as it keeps the backoff. That attempt ends the name,
+// as an answer naming a picture no wait changes does (portraitRejected); one
+// before it waits as any failure does, and every other failure goes on
+// waiting past the count. A count the store cannot read caps nothing.
+func (e *Enricher) redirectCapped(ctx context.Context, mbid, name string, err error) bool {
+	if !refusedRedirect(err) || e.store == nil || ctx.Err() != nil {
+		return false
+	}
+	a, rerr := e.store.PortraitAttemptsOf(ctx, mbid, name)
+	if rerr != nil {
+		if failure := ctxerr.WithoutCancellation(ctx, rerr); failure != nil {
+			logger.Error("read portrait attempts", "mbid", mbid, "err", failure)
+		}
+		return false
+	}
+	return a.Failures+1 >= manifest.PortraitPendingAttempts
+}
+
 // earliest is the earlier of two instants, the zero time being none.
 func earliest(a, b time.Time) time.Time {
 	switch {
@@ -249,41 +290,45 @@ func (e *Enricher) portraitBatchLimit() int {
 }
 
 // askPortrait is one pass's attempt at mbid's portrait by name, the ordinary
-// pass's and the fingerprint path's alike, and records on t what the stamp
-// writes of it (manifest.Track.PortraitPending, PortraitSettled). It answers
-// enrich.enabled's refusal, which stops the pass and its stamp, and nil
-// otherwise: a portrait is tier 2, so no failure of it blocks the stamp. A
-// name an answer ended settles the row with no request; a portrait in the
-// cache settles it; a name whose retry is not due leaves the row waiting with
-// no request; and an attempt's outcome does as portraitOutcome says.
-// logArgs are the log lines' attributes before the MBID.
+// pass's (resolveArtist's call) and the fingerprint path's
+// (fetchRecoveredArtistImage's) alike, and records on t what the stamp writes
+// of it (manifest.Track.PortraitPending, PortraitNameEnded, PortraitSettled).
+// It answers enrich.enabled's refusal, which stops the pass and its stamp,
+// and nil otherwise: a portrait is tier 2, so no failure of it blocks the
+// stamp. A name an answer ended settles the row's lookup by that name with no
+// request, and leaves one by another name; a portrait in the cache settles the
+// row; a name whose retry is not due leaves the row waiting with no request;
+// and an attempt's outcome does as portraitOutcome says, a failure timed when
+// it is noted. logArgs are the log lines' attributes before the MBID.
 func (e *Enricher) askPortrait(ctx context.Context, t *manifest.Track, mbid, name string, logArgs ...any) error {
 	logArgs = append(logArgs, "mbid", mbid)
 	if e.deezerNegCache.Has(portraitKey(mbid, name)) {
-		// The memo is of an answer, so it settles the row, and sibling
-		// tracks of the artist ask nothing again by that name.
-		t.PortraitSettled()
+		// The memo is of an answer, so it settles the name, and sibling
+		// tracks of the artist ask nothing again by it.
+		t.PortraitNameEnded(mbid, name)
 		return nil
 	}
 	if cached, err := e.portraitCached(mbid, name); err == nil && cached {
 		t.PortraitSettled()
 		return nil
 	}
-	now := e.now()
-	if _, wait := e.portraitWaits(ctx, mbid, name, now); wait {
+	if _, wait := e.portraitWaits(ctx, mbid, name, e.now()); wait {
 		// The name's last attempt failed and its retry is not due: no
 		// request, and the row waits for the batch, which asks once it is.
 		t.PortraitPending(mbid, name)
 		return nil
 	}
 	outcome, err := e.artistPortrait(ctx, mbid, name)
+	if outcome == portraitFailed && e.redirectCapped(ctx, mbid, name, err) {
+		outcome = portraitRejected
+	}
 	switch outcome {
 	case portraitHeld:
 		e.notePortraitFetched(ctx, mbid)
 		t.PortraitSettled()
 	case portraitNone, portraitRejected:
 		e.notePortraitNameEnded(ctx, mbid, name)
-		t.PortraitSettled()
+		t.PortraitNameEnded(mbid, name)
 		if err != nil && ctx.Err() == nil {
 			// A 404 or an empty picture is Debug through the streak; a
 			// picture no wait changes is said as the failure it is.
@@ -307,7 +352,7 @@ func (e *Enricher) askPortrait(ctx context.Context, t *manifest.Track, mbid, nam
 			return nil
 		}
 		e.logUpstream(upstreamDeezer, "artist image", err, logArgs...)
-		e.notePortraitFailed(ctx, mbid, name, now)
+		e.notePortraitFailed(ctx, mbid, name)
 		t.PortraitPending(mbid, name)
 	}
 	return nil
@@ -330,17 +375,20 @@ func (e *Enricher) askPortrait(ctx context.Context, t *manifest.Track, mbid, nam
 // costs no request in between. One page a turn, beside the ordinary batch,
 // keeps both moving. A pass that found no name due, every one waiting for its
 // retry, is not followed by another until the earliest of those retries
-// (portraitRestMost at most), unless a pass keeps a refused lookup meanwhile:
-// the batch reads nothing while it rests.
+// (portraitRestMost at most, from the pass's end), unless a pass keeps a
+// refused lookup meanwhile: the batch reads nothing while it rests. The clock
+// is read where each time is: as a turn begins for the rest, as each name is
+// reached for its retry, as a failure is noted, and as the pass ends for the
+// rest it begins, never once for a page whose requests take minutes (B761's
+// third round).
 func (e *Enricher) runPortraits(ctx context.Context) (time.Duration, error) {
 	if e.deezer == nil || e.store == nil {
 		return e.PollInterval, nil
 	}
 	p := &e.portraits
-	now := e.now()
 	if p.cursor == "" {
 		refusals := e.portraitRefusals.Load()
-		if now.Before(p.restUntil) && refusals == p.refusals {
+		if e.now().Before(p.restUntil) && refusals == p.refusals {
 			return e.PollInterval, nil
 		}
 		// A pass begins.
@@ -357,7 +405,7 @@ func (e *Enricher) runPortraits(ctx context.Context) (time.Duration, error) {
 		}
 		return e.PollInterval, enrichgate.Refusal(ctx)
 	}
-	if ok, refused := e.portraitsOf(ctx, rows, now); !ok {
+	if ok, refused := e.portraitsOf(ctx, rows); !ok {
 		// A switch refused a lookup, or the pass was stopped: the rows wait
 		// as they were, and the next pass starts over.
 		p.cursor, p.progressed, p.due = "", false, time.Time{}
@@ -375,7 +423,7 @@ func (e *Enricher) runPortraits(ctx context.Context) (time.Duration, error) {
 	// began, whose row it may not have read.
 	rest := time.Time{}
 	if !p.progressed && !p.due.IsZero() && e.portraitRefusals.Load() == p.refusals {
-		rest = earliest(p.due, now.Add(portraitRestMost))
+		rest = earliest(p.due, e.now().Add(portraitRestMost))
 	}
 	p.cursor, p.progressed, p.due, p.restUntil = "", false, time.Time{}, rest
 	return e.PollInterval, nil
@@ -410,8 +458,10 @@ func groupPortraits(rows []manifest.PendingPortrait) []portraitGroup {
 // artist and name, notes in the pass what it found, and clears the rows it
 // settled. It answers false when it stopped before the page's end: a switch
 // refused a lookup, whose refusal it answers too, or the pass's context
-// ended. The rows it settled before then are cleared all the same.
-func (e *Enricher) portraitsOf(ctx context.Context, rows []manifest.PendingPortrait, now time.Time) (bool, error) {
+// ended. The rows it settled before then are cleared all the same. A name's
+// retry is weighed against the clock as the page reaches it, and a failure is
+// timed as it is noted.
+func (e *Enricher) portraitsOf(ctx context.Context, rows []manifest.PendingPortrait) (bool, error) {
 	p := &e.portraits
 	var settled []manifest.PendingPortrait
 	defer func() { e.settlePortraits(ctx, settled) }()
@@ -440,12 +490,15 @@ func (e *Enricher) portraitsOf(ctx context.Context, rows []manifest.PendingPortr
 			p.progressed = true
 			continue
 		}
-		if at, wait := e.portraitWaits(ctx, g.mbid, g.query, now); wait {
+		if at, wait := e.portraitWaits(ctx, g.mbid, g.query, e.now()); wait {
 			p.due = earliest(p.due, at)
 			continue
 		}
 		p.progressed = true
 		outcome, err := e.artistPortrait(ctx, g.mbid, g.query)
+		if outcome == portraitFailed && e.redirectCapped(ctx, g.mbid, g.query, err) {
+			outcome = portraitRejected
+		}
 		switch outcome {
 		case portraitHeld:
 			e.notePortraitFetched(ctx, g.mbid)
@@ -463,7 +516,7 @@ func (e *Enricher) portraitsOf(ctx context.Context, rows []manifest.PendingPortr
 				return false, nil
 			}
 			e.logUpstream(upstreamDeezer, "artist image", err, "mbid", g.mbid)
-			p.due = earliest(p.due, e.notePortraitFailed(ctx, g.mbid, g.query, now))
+			p.due = earliest(p.due, e.notePortraitFailed(ctx, g.mbid, g.query))
 		}
 	}
 	return true, nil

@@ -313,6 +313,13 @@ func OpenStore(path string) (*Store, error) {
 // it migrates the store whatever the install's count, since the start the
 // count is for is this one.
 func OpenStoreAdmitted(path string, permit updater.MigrationPermit) (*Store, error) {
+	return openStoreWithClock(path, permit, time.Now)
+}
+
+// openStoreWithClock is OpenStoreAdmitted on the clock now, which the store's
+// writes read (Store.now) and so does the open's check of the pending
+// portraits (reconcilePendingPortraits): time.Now but in a test.
+func openStoreWithClock(path string, permit updater.MigrationPermit, now func() time.Time) (*Store, error) {
 	if err := fsutil.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("mkdir store dir: %w", err)
 	}
@@ -353,7 +360,7 @@ func OpenStoreAdmitted(path string, permit updater.MigrationPermit) (*Store, err
 	if err != nil {
 		return nil, err
 	}
-	s := &Store{db: db, now: time.Now, path: path, migrationPermit: permit}
+	s := &Store{db: db, now: now, path: path, migrationPermit: permit}
 	if err := s.migrate(); err != nil {
 		db.Close()
 		return nil, storeOpenErr(path, "", err)
@@ -3453,14 +3460,18 @@ var ErrTrackChanged = errors.New("manifest: track changed since it was read")
 var errTrackNotRead = errors.New("manifest: track was not read from the store, so there is no version to check the write against")
 
 // markEnrichedSQL binds (tags_json, enriched_at, clock, portrait write,
-// portrait query, artist, portrait write, artist, artist, path, version),
-// the artist being the one the stamp's tags_json names. The indexed_at
-// expression is indexedAtAdvanceSQL verbatim — see its docblock for why it is
-// not concatenated in. The portrait write is Track.portraitColumns' (backlog
-// B761): 1 sets deezer_pending_query to the query and deezer_pending_mbid to
-// the artist, 2 clears both, and 0 keeps them only while the artist the query
-// was taken for is the one the stamp writes, so a stamp that gives the row
-// another artist drops a query it learnt nothing of; all in the stamp's own
+// portrait query, artist, ended names, portrait write, artist, artist, ended
+// names, path, version), the artist being the one the stamp's tags_json
+// names. The indexed_at expression is indexedAtAdvanceSQL verbatim — see its
+// docblock for why it is not concatenated in. The portrait write and the
+// ended names are Track.portraitColumns' (backlog B761): 1 sets
+// deezer_pending_query to the query and deezer_pending_mbid to the artist, 2
+// clears both, and 0 keeps them only while the artist the query was taken for
+// is the one the stamp writes and the query is none of the names the pass
+// ended (a JSON array, B761's third round), so a stamp that gives the row
+// another artist drops a query it learnt nothing of, and an answer that ended
+// one name of the artist leaves the lookup by another, which the read that
+// handed the stamp its Track does not carry; all in the stamp's own
 // statement, so a stamp that writes nothing writes no query either. The
 // version is the row's indexed_at when the Track was read: a row another
 // writer changed since has another, and the statement then updates nothing
@@ -3471,9 +3482,13 @@ const markEnrichedSQL = `
 		       enriched_at = ?,
 		       indexed_at  = MAX(?, COALESCE((SELECT MAX(indexed_at) FROM tracks), 0) + 1, COALESCE((SELECT MAX(deleted_at) FROM manifest_deletions), 0) + 1, COALESCE((SELECT CAST(v AS INTEGER) FROM scan_state WHERE k = 'deletion_journal_coverage_start_ns'), 0) + 1),
 		       deezer_pending_query = CASE ? WHEN 1 THEN ? WHEN 2 THEN NULL
-		                              ELSE CASE WHEN deezer_pending_mbid = ? THEN deezer_pending_query END END,
+		                              ELSE CASE WHEN deezer_pending_mbid = ?
+		                                         AND NOT EXISTS (SELECT 1 FROM json_each(?) WHERE value = deezer_pending_query)
+		                                        THEN deezer_pending_query END END,
 		       deezer_pending_mbid  = CASE ? WHEN 1 THEN ? WHEN 2 THEN NULL
-		                              ELSE CASE WHEN deezer_pending_mbid = ? THEN deezer_pending_mbid END END
+		                              ELSE CASE WHEN deezer_pending_mbid = ?
+		                                         AND NOT EXISTS (SELECT 1 FROM json_each(?) WHERE value = deezer_pending_query)
+		                                        THEN deezer_pending_mbid END END
 		 WHERE path = ? AND indexed_at = ?
 		RETURNING indexed_at`
 
@@ -3494,12 +3509,14 @@ const markEnrichedSQL = `
 // success t records the version it wrote.
 //
 // In the same statement it writes what the pass learnt of the artist's Deezer
-// portrait (Track.PortraitPending, PortraitSettled; backlog B761): a lookup
-// that waits for the portrait batch (refused by enrich.deezerEnabled, or
-// deferred) keeps the name it asks by in deezer_pending_query and the artist
-// it was taken for in deezer_pending_mbid, a portrait cached or an answer that
-// ends the name clears them, and a pass that learnt nothing leaves them while
-// that artist is the one the stamp writes, and drops them otherwise.
+// portrait (Track.PortraitPending, PortraitNameEnded, PortraitSettled; backlog
+// B761): a lookup that waits for the portrait batch (refused by
+// enrich.deezerEnabled, or deferred) keeps the name it asks by in
+// deezer_pending_query and the artist it was taken for in
+// deezer_pending_mbid, a portrait cached clears them, an answer that ended the
+// name they wait by clears them, and a pass that learnt nothing of that name
+// leaves them while that artist is the one the stamp writes, and drops them
+// otherwise.
 //
 // Holds `s.mu` for the SQL exec so an in-flight enrichment update never
 // races a `UpsertTrackBatch` from the scanner — both are writers and
@@ -3552,10 +3569,11 @@ func (s *Store) MarkEnriched(ctx context.Context, t *Track) error {
 	// changes sampleRate / bitsPerSample / isDSD / codec — and the tags_json
 	// it writes was read at the version it compares, beside those columns.
 	now := s.now().UnixNano()
-	portraitWrite, portraitQuery := t.portraitColumns()
+	portraitWrite, portraitQuery, portraitEnded := t.portraitColumns()
 	var wrote int64
 	err = s.db.QueryRowContext(ctx, markEnrichedSQL, raw, now, now,
-		portraitWrite, portraitQuery, t.ArtistMBID, portraitWrite, t.ArtistMBID, t.ArtistMBID,
+		portraitWrite, portraitQuery, t.ArtistMBID, portraitEnded,
+		portraitWrite, t.ArtistMBID, t.ArtistMBID, portraitEnded,
 		t.Path, t.rowVersion).Scan(&wrote)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrTrackChanged

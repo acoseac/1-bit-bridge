@@ -3,6 +3,7 @@ package manifest
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"strings"
 	"time"
@@ -24,19 +25,24 @@ import (
 // drops the ones an older binary's stamp gave another artist, since its
 // statements write the artist and leave these columns
 // (reconcilePendingPortraits). MarkEnriched writes them in the stamp's own
-// statement; a changed file's upsert drops them with the rest of the
-// enrichment; "Retry missing" leaves them; and the enricher's portrait batch
-// reads the rows that carry one (PendingPortraits) and clears each only at
-// the version it read (ClearPendingPortraits), once the portrait is in the
-// artwork cache or an answer ends the name.
+// statement, and clears them for a portrait held, or where an answer of its
+// pass ended the name they wait by, never for an answer that ended another
+// name of the artist (B761's third round); a changed file's upsert drops them
+// with the rest of the enrichment; "Retry missing" leaves them; and the
+// enricher's portrait batch reads the rows that carry one (PendingPortraits)
+// and clears each only at the version it read (ClearPendingPortraits), once
+// the portrait is in the artwork cache or an answer ends the name.
 //
 // deezer_portrait_attempts (v64) keeps, per artist and name, the attempts that
 // failed in a row and when the last did: the one backoff every path that asks
 // Deezer for a portrait honours, and the bound past which the route no longer
 // calls the portrait pending (PortraitPendingAttempts). It outlives a restart;
 // a portrait held forgets the artist's attempts, an answer that ends a name
-// that name's, and each open the ones no waiting row names. Never on the wire:
-// a client learns of all this through /v1/artist-image's pending answer
+// that name's, and an open the ones no waiting row names whose last failure is
+// more than portraitAttemptsKept old: a backoff still running outlives a
+// changed file, whose upsert drops the row's lookup, and a restart, and the
+// count of a lookup a row still waits by stays whatever its age. Never on the
+// wire: a client learns of all this through /v1/artist-image's pending answer
 // (ArtistMBIDPortraitPending).
 
 // portraitWrite is what MarkEnriched writes of a row's pending portrait
@@ -45,14 +51,14 @@ type portraitWrite uint8
 
 const (
 	// portraitKept leaves the row's query and its artist as they are while
-	// that artist is the one the stamp writes, and drops them otherwise: the
-	// pass learnt nothing of the portrait (it made no attempt).
+	// that artist is the one the stamp writes and the name is none an
+	// answer of the pass ended (Track.portraitEnded), and drops them
+	// otherwise: the pass made no attempt by that name.
 	portraitKept portraitWrite = iota
 	// portraitPending keeps the name the lookup that waits would ask by, and
 	// the artist it was taken for.
 	portraitPending
-	// portraitSettled clears both: the portrait is in the cache, or an
-	// answer ended the name.
+	// portraitSettled clears both: the portrait is in the cache.
 	portraitSettled
 )
 
@@ -60,35 +66,78 @@ const (
 // waits for the portrait batch: enrich.deezerEnabled refused it, or it was
 // deferred (its attempt failed, or the artist's retry by that name was not
 // due). The next MarkEnriched keeps query and mbid in the row, for the batch
-// to ask by once enrichment and Deezer are both on and the retry is due.
-// Nothing is written for an mbid that is no MBID or not the artist the stamp
-// gives the row, or for a name that is blank: the stamp then keeps the row's
-// columns as a pass that learnt nothing would.
+// to ask by once enrichment and Deezer are both on and the retry is due. The
+// pass's first lookup that waits stays: a later one of the same artist, by
+// another name, records nothing, so one track failing under two names keeps
+// the first. Nothing is written for an mbid that is no MBID or not the artist
+// the stamp gives the row, or for a name that is blank: the stamp then keeps
+// the row's columns as a pass that learnt nothing would.
 func (t *Track) PortraitPending(mbid, query string) {
-	t.portrait, t.portraitQuery, t.portraitMBID = portraitPending, query, mbid
+	t.portraitFor(mbid)
+	if t.portrait == portraitPending {
+		return
+	}
+	t.portrait, t.portraitQuery = portraitPending, query
+}
+
+// PortraitNameEnded records on t that an answer ended the lookup of mbid's
+// portrait by query: Deezer has no such artist or picture, or names one no
+// wait changes for that name. The next MarkEnriched clears the row's lookup
+// only where it waits by a name the pass ended: a lookup of the artist by
+// another name stays, the one the pass recorded (PortraitPending) and the one
+// the row kept from an earlier pass alike, which the stamp's read did not
+// hand t; and a portrait the pass holds (PortraitSettled) still clears the
+// row.
+func (t *Track) PortraitNameEnded(mbid, query string) {
+	if t.portrait == portraitSettled {
+		return
+	}
+	t.portraitFor(mbid)
+	if t.portrait == portraitPending && t.portraitQuery == query {
+		t.portrait, t.portraitQuery = portraitKept, ""
+	}
+	t.portraitEnded = append(t.portraitEnded, query)
 }
 
 // PortraitSettled records on t that its artist's portrait is in the artwork
-// cache, found there or fetched, or that an answer ended the name it waits by:
-// the next MarkEnriched clears the row's pending query and its artist.
+// cache, found there or fetched: the next MarkEnriched clears the row's
+// pending query and its artist, whatever name they wait by.
 func (t *Track) PortraitSettled() {
-	t.portrait, t.portraitQuery, t.portraitMBID = portraitSettled, "", ""
+	t.portrait, t.portraitQuery, t.portraitMBID, t.portraitEnded = portraitSettled, "", "", nil
+}
+
+// portraitFor makes what t records of a portrait the one of mbid's: what it
+// recorded of another artist's is dropped, since the stamp writes one artist,
+// the one the pass asked about last.
+func (t *Track) portraitFor(mbid string) {
+	if t.portraitMBID != mbid {
+		t.portrait, t.portraitQuery, t.portraitMBID, t.portraitEnded = portraitKept, "", mbid, nil
+	}
 }
 
 // portraitColumns is what MarkEnriched binds for the row's pending portrait:
 // the write (markEnrichedSQL's CASE: 1 sets the query and its artist, 2 clears
-// them, 0 keeps them while their artist is the stamp's) and the query.
-func (t *Track) portraitColumns() (write int, query any) {
+// them, 0 keeps them while their artist is the stamp's and their name is none
+// the pass ended), the query, and the names the pass ended of the stamp's
+// artist, a JSON array of names as the store keeps them, empty for none.
+func (t *Track) portraitColumns() (write int, query any, ended string) {
 	switch t.portrait {
 	case portraitPending:
-		if !IsValidMBID(t.portraitMBID) || t.portraitMBID != t.ArtistMBID || strings.TrimSpace(t.portraitQuery) == "" {
-			return 0, nil
+		if IsValidMBID(t.portraitMBID) && t.portraitMBID == t.ArtistMBID && strings.TrimSpace(t.portraitQuery) != "" {
+			return 1, portraitName(t.portraitQuery), "[]"
 		}
-		return 1, portraitName(t.portraitQuery)
 	case portraitSettled:
-		return 2, nil
+		return 2, nil, "[]"
 	}
-	return 0, nil
+	if t.portraitMBID != t.ArtistMBID || len(t.portraitEnded) == 0 {
+		return 0, nil, "[]"
+	}
+	names := make([]string, len(t.portraitEnded))
+	for i, q := range t.portraitEnded {
+		names[i] = portraitName(q)
+	}
+	raw, _ := json.Marshal(names) // a slice of strings always encodes
+	return 0, nil, string(raw)
 }
 
 // portraitName is a name as the store keeps it, in a row and as an attempts
@@ -310,11 +359,27 @@ const strayPendingPortraitsSQL = `
 		   AND (deezer_pending_mbid IS NULL
 		        OR deezer_pending_mbid IS NOT json_extract(tags_json, '$.artistMBID'))`
 
-// unnamedPortraitAttemptsSQL forgets the failed attempts no waiting row names
-// any more: its rows were settled, retagged or deleted.
+// portraitAttemptsKept is how long past its last failure an open keeps the
+// count of a name no waiting row names any more: a day, past the longest
+// retry the enricher waits (six hours, portraitRetryMost in internal/enrich),
+// so a backoff still running outlives the changed file whose upsert dropped
+// the last row's lookup, and a restart, and the name's next ask honours it.
+// Past a day the backoff has ended, and what an open forgets is the count a
+// later failure would double from. The count of a name a row still waits by
+// is never forgotten by age: the route's probe reads it
+// (PortraitPendingAttempts), so an exhausted lookup stays so across any
+// pause (B761's third round).
+const portraitAttemptsKept = 24 * time.Hour
+
+// unnamedPortraitAttemptsSQL binds (cutoff), the open's clock less
+// portraitAttemptsKept, in Unix nanoseconds. It forgets the failed attempts
+// whose last failure is older than that, strictly (one exactly a day old is
+// kept), and that no waiting row names any more: its rows were settled,
+// retagged or deleted.
 const unnamedPortraitAttemptsSQL = `
 		DELETE FROM deezer_portrait_attempts
-		 WHERE NOT EXISTS (SELECT 1 FROM tracks
+		 WHERE last_failed_at < ?
+		   AND NOT EXISTS (SELECT 1 FROM tracks
 		                    WHERE deezer_pending_mbid = deezer_portrait_attempts.artist_mbid
 		                      AND deezer_pending_query = deezer_portrait_attempts.query
 		                      AND deezer_pending_query IS NOT NULL)`
@@ -324,12 +389,13 @@ const unnamedPortraitAttemptsSQL = `
 // of this one writes a row's artist and leaves the columns it does not know,
 // so a query kept for one artist would stand beside another, which the batch
 // would ask Deezer by and file under the other. It drops those, and the failed
-// attempts no waiting row names. Every reader asks the binding as well, so a
-// row that slips past here is still no lookup.
+// attempts no waiting row names whose last failure is older than
+// portraitAttemptsKept by the store's clock. Every reader asks the binding as
+// well, so a row that slips past here is still no lookup.
 func (s *Store) reconcilePendingPortraits(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, strayPendingPortraitsSQL); err != nil {
 		return err
 	}
-	_, err := s.db.ExecContext(ctx, unnamedPortraitAttemptsSQL)
+	_, err := s.db.ExecContext(ctx, unnamedPortraitAttemptsSQL, s.now().Add(-portraitAttemptsKept).UnixNano())
 	return err
 }
