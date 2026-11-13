@@ -95027,3 +95027,160 @@ before the fix). `go test -race -count=1 -timeout 120m -p 2
 the brief asked for the packages. The rules patch applies at the round's
 commit, and `scripts/check-doc-budgets.py` is clean on a copy with it applied
 (`cli-serve.md` 97,290 bytes). Windows is the PR's CI windows job's to show.
+
+## 2026-11-13 — B834: two engine tests wait for the step they read, and two siblings for a timer's message
+
+Backlog B834 on `fix/b834-engine-test-barriers`, from 4678b983, by worker
+b834 on legion0 (Ubuntu 26.04, linux/amd64, go1.27.3, `GOTOOLCHAIN=local`,
+`GOPROXY=off`), from B827's census (its entry of 2026-11-09) and the review
+of the brief (Codex, Carbon). Test-only. Commits: the advance test, d8981680;
+the PCM lookahead test, eaa8a09a; two siblings, 69027b3d; the parked-edit
+test's read of its edits, f47d8469; and this record. The rule goes into
+`.claude/rules/player.md` and its History through `rules-b834-r1.patch`,
+which also moves the largest entry that can move (the backend's packing,
+`move_entry.py --line 138`) to the History file, to keep `player.md` inside
+its budget (99,798 bytes at main, 98,265 with the patch).
+
+### The instruments, never committed
+
+Each run below is of a test binary built with instruments written into the
+package for that build and taken out after it, every byte put back and
+checked by its hash (`.tmp/_b834/runner.py`, `zz_b834_instr.go`). The hold
+is B827's wider one, rebuilt: armed as a step spawns a backend call or admits
+a command, the owner waits at it just before the step's first
+`publishIfDirty`, so a call the step spawned reaches the fake while the
+published snapshot is still the one before the step. It lets go when the
+test waits for the owner (a snapshot not yet as it wants, a note it has not
+got, an answer), when a command is sent, at the harness's shutdown or after
+1.5 s, and holds nothing while a command waits for its reply. The stash
+forces an order the owner's `select` allows: the n-th message of a kind (a
+Submitted the test posts, a Prepare's answer, a release's deadline, the
+reservation's overdue) is taken from the channel and handled only once the
+test waits for its note, a snapshot or an answer, or waits while messages
+stand behind it, or at the shutdown. Commands are taken meanwhile, as the
+`select` may take a command before a message waiting for it; the messages
+posted after it stay behind it, as the channel keeps them. No hold or stash
+in the runs below was let go by its bound. Each run is `-race -count=20` of
+one test, GOMAXPROCS 8; counts are of cases.
+
+### TestAdvanceFollowsAudibleReportsNotHandOff
+
+It read the selection right after `s.prepared`, the fake's record of the
+Prepare a hand-off's Submitted step made, to assert that the hand-off did
+not move it; the fake records the call before that step publishes. With a
+bug that moves the selection on a Submitted (`selectEntry` in `handle`),
+main's test caught it 20 of 20 without the hold (`advance_test.go:29`,
+"handing b off selected 4098") and missed it 20 of 20 under the hold, with
+the bug on both hand-offs, the first alone or the second alone; in each run
+both reads were made while the Submitted's step stood (40 of 40). The fix
+takes a mark once `playing` has noted a's report and waits for the first and
+then the second `handled submitted` note from it before each read. Under the
+hold it catches the bug 20 of 20 (`:38` for the first hand-off, `:48` for
+the second), with no read while a hold stands, and passes 20 of 20 with no
+bug. Controls under the hold: without the first wait the first hand-off's
+bug passes 20 of 20, read while the hold stood, and the second's is caught
+(`:47`); without the second, the second's passes 20 of 20 and the first's is
+caught.
+
+### TestPCMLookaheadHasNoNativeBudget
+
+It posted the eighth Submitted and read the faults behind `SetRepeat(false)`'s
+reply. The fault the read must not miss, an isolated mutation: the hand-off
+of the tenth occurrence, the ninth successor, which the eighth Submitted's
+step or the answer after it makes, refused as the occurrence budget refuses
+one (`handOff` gives nil, so `prepare` raises `occurrence_budget_exceeded`).
+Main's test, as it comes, caught it in 22 cases of 40 and missed it in 18,
+and in none of the 18 was the fault raised at all: the barrier, taken
+first, turned repeat off and named the end instead of the ninth (Codex on
+the brief). With the eighth Submitted stashed, the owner took SetRepeat
+before it 40 of 40 (24 while it stood stashed, the rest before the owner had
+taken it from the channel), the read came before its step 40 of 40, and the
+fault was missed 40 of 40; with no fault the same runs pass, which shows the
+order alone.
+
+The fix, the review's points 1 to 3: one mark before the first Submitted and
+`waitAppliedTimes("handled submitted", mark, 8)`, then
+`waitAppliedTimes("handled call prepare", 0, 9)`, the end's Prepare and one
+naming each of the eight successors: the ninth is handed off in the later of
+the eighth Submitted's step and the answer of the Prepare that named the
+eighth, since `reconcile` names nothing while a Prepare is under way. Repeat
+stays on. A third row answers that Prepare only once the eighth Submitted is
+noted, so the ninth is handed off in the answer's step. The fixed test fails
+at its fault assertion 60 of 60 as it comes, 60 of 60 with the eighth
+Submitted stashed (`native_round2_test.go:173`), and 20 of 20 in the late row
+with the Prepare's answer stashed; with no fault it passes in each.
+
+Controls, each with the fault: both waits taken out, 60 of 60 pass, each read
+before the eighth Submitted's step; the Submitted wait taken out, with the
+Prepare naming the eighth answered before the eighth Submitted (the order in
+which that Submitted's step names the ninth), 40 of 40 pass stashed and 40
+of 40 as it comes; the Prepare wait taken out of the late row, its answer
+stashed, 20 of 20 pass. The seventh's note held (the review's control): the
+seventh Submitted's step names the eighth successor, its note is held until a
+mark is taken, and the eighth Submitted is stashed. The old wait, from that
+fresh mark, returned on the seventh's note (the trace names occurrence 8) and
+the read missed the fault 40 of 40; the count from one mark returned on the
+notes of occurrences 2 to 9 and caught it 40 of 40.
+
+### The siblings
+
+A static scan of the engine's tests (`.tmp/_b834/scan.py`, which flags both
+cases above at main) for a read after an event the test posts, a clock
+advance or a gate, with a command's reply, a fake's record or nothing
+between, each hit read by hand:
+
+- Fixed, B605's shape ("read a checkpoint after an advance behind a session
+  event, never a command's reply"): `TestNativeEarlyReleaseStopsTimer` moved
+  the clock past the release's deadline and
+  `TestAParkedEditIsAnsweredWithinReserveTimeoutOfItsPark` to a nanosecond
+  before the reservation's bound, each reading behind a SetRepeat's reply.
+  Each now posts a position the owner takes for nothing and waits for its
+  note; the parked-edit test has no session, so its position names none. With
+  the early unconfirmed release leaving its timer running (the field cleared)
+  and a late deadline recording the failure again, main's first test catches
+  it 20 of 20 as it comes and misses it 20 of 20 with the deadline's message
+  stashed; the fixed one catches it 20 of 20 either way, and misses it 20 of
+  20 with its barrier taken out. With the bound armed a nanosecond early, main's
+  second test misses the early answers in 5 of 20 as it comes and 20 of 20
+  stashed. The position barrier alone (69027b3d) still missed them in 29 of
+  100 as it comes and 25 of 100 stashed: the owner had refused both edits
+  before the barrier's note, but each answer reaches the test through the
+  edit's own goroutine, which had not yet handed it on. The test now reads
+  the owner's note of each edit, made in the step that answers it, and catches
+  it 20 of 20 either way; with the barrier taken out it misses it 20 of 20.
+- Not this shape, named: the admission tests' SetRepeat after
+  `release.open()` (the gate frees the owner inside the insert's own step, so
+  the command is taken after it) and the parked-edit test's two SetRepeats
+  after an edit's admission (B605's, ordering the owner's own step);
+  `TestSeveralShortEntriesCrossedInOneUpdate` (B827's finding: a stale
+  generation there is the same across a touched step, or makes the count
+  stricter); `TestRenewalKeepsAHold` (no timer is due in its advances, a
+  renewal re-arms under a new sequence, and `maintenanceExpiry` checks the
+  current expiry again); `TestTheReleasedSessionsEventsAreNotTheTracks` (a
+  seek may overtake the Submitted posted before it, and no read depends on
+  that step); the busy and denied start tests' `LastStop` read after a posted
+  Audible (what it asserts is the start's own step, which PlayID's reply
+  orders); and the scan's false hits (a gate in a cleanup, a restart's boot, a
+  seam's signal, an answer the read follows).
+- Another shape, not fixed, a follow-up: `TestAFailingReservationWriteRefusesEdits`
+  (`reserve_test.go:51-58`) and `TestAPanicInTheQueueWritersLoopEndsTheWriter`
+  (`panic_test.go:290-296`) assert, right after a clock advance and with no
+  barrier, that no write began; a write the owner starts from a timer's
+  message runs on a goroutine of its own, which a message barrier does not
+  order.
+
+### The gates
+
+On f47d8469, outside the build lock (single package, `-p 8 -parallel 8`,
+TMPDIR `~/onebit/tmp`, the release tags): the four changed tests `-race
+-count=200 -v`, 200 of 200 each and each of the PCM test's three rows, in
+56 s; `internal/player/engine` `-race -count=1 -timeout 120m`, ok in 26.2 s;
+`go vet` of the package for linux, darwin and windows (the last two
+`CGO_ENABLED=0`), clean; go1.27.3's gofmt lists none of the three changed
+files. `rules-b834-r1.patch` applies at this record's commit, and on a copy of
+the tracked tree with it applied `make docs-check` passes (`player.md` 98,265
+bytes) and `verify_moves.py --base HEAD` passes, the moved entry verbatim and
+the test-ordering line declared as an edit; `TestEveryCitedTestNameExists`
+passes there with this record in it, and fails naming a ghost citation planted
+in the patched History. `make test` and `make build-all` were not run: the
+brief asked for the package.
