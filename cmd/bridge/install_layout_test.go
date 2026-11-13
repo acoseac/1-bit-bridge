@@ -4,14 +4,18 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
 
+	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/doctor"
 	"github.com/acoseac/1-bit-bridge/internal/logging/loggingtest"
 )
@@ -25,6 +29,16 @@ import (
 // layoutInside is the words every surface's warning shares, what lies inside
 // which root, as the CLI names them.
 const layoutInside = "inside library root "
+
+// layoutMoveKeys and layoutMoveEnv are what the CLI's words say wherever they
+// say to move bridge.yaml (backlog B884's round 2): before it moves, set each
+// setting Load resolves beside it that is relative to an absolute path, and
+// what a BRIDGE_* variable that gives one does. Serve's journal says neither.
+const (
+	layoutMoveKeys = "set each of libraryRoots, dataDir, tlsCertPath, tlsKeyPath, autocert.cacheDir, upscale.variantsDir " +
+		"and upscale.tempDir that is relative in it to an absolute path"
+	layoutMoveEnv = "a value its BRIDGE_* environment variable gives resolves the same way, and is changed where that variable is set"
+)
 
 // platformDirForLayout points the platform's default config directory, which
 // the CLI's words offer as one place to move to, at a directory of the
@@ -43,11 +57,20 @@ func platformDirForLayout(t *testing.T) string {
 // output off, and tail after it.
 func writeLayoutConfig(t *testing.T, cfgPath, dataDir string, roots []string, tail string) {
 	t.Helper()
+	writeLayoutConfigLeaving(t, cfgPath, dataDir, roots, nil, tail)
+}
+
+// writeLayoutConfigLeaving is writeLayoutConfig making every root but those in
+// absent, which a case needs not there.
+func writeLayoutConfigLeaving(t *testing.T, cfgPath, dataDir string, roots, absent []string, tail string) {
+	t.Helper()
 	var b strings.Builder
 	b.WriteString("libraryRoots:\n")
 	for _, r := range roots {
-		if err := os.MkdirAll(r, 0o755); err != nil {
-			t.Fatal(err)
+		if !slices.Contains(absent, r) {
+			if err := os.MkdirAll(r, 0o755); err != nil {
+				t.Fatal(err)
+			}
 		}
 		b.WriteString("  - " + r + "\n")
 	}
@@ -110,6 +133,10 @@ func TestBothDoctorsWarnOfTheBridgesFilesInsideALibraryRoot(t *testing.T) {
 			if !strings.Contains(c.Hint, fix) || !strings.Contains(c.Hint, "every bridge command that reads what is inside it waits on it") ||
 				!strings.Contains(c.Hint, platform) {
 				t.Errorf("the install-layout hint %q does not say why, %q and the platform's default %s", c.Hint, fix, platform)
+			}
+			moves := strings.HasPrefix(summary, "the config file")
+			if names := strings.Contains(c.Hint, layoutMoveKeys) && strings.Contains(c.Hint, layoutMoveEnv); names != moves {
+				t.Errorf("the install-layout hint names the settings a move of bridge.yaml must keep: %v, want %v:\n%s", names, moves, c.Hint)
 			}
 			said.requirePrinted(t, c)
 			if said.code != 0 {
@@ -269,6 +296,10 @@ func requireOneLayoutWarning(t *testing.T, stdout, stderr, summary, fix string) 
 	if !strings.Contains(stderr, line) || !strings.Contains(stderr, fix) {
 		t.Errorf("the run's stderr does not warn %q with %q:\n%s", line, fix, stderr)
 	}
+	moves := strings.HasPrefix(summary, "the config file")
+	if names := strings.Contains(stderr, layoutMoveKeys) && strings.Contains(stderr, layoutMoveEnv); names != moves {
+		t.Errorf("the run's warning names the settings a move of bridge.yaml must keep: %v, want %v:\n%s", names, moves, stderr)
+	}
 }
 
 // TestBridgeInitWarnsOnceOfTheLayoutItWritesOrKeeps (backlog B884's cases 1
@@ -389,7 +420,7 @@ func TestBridgeInitWarnsOnceOfTheLayoutItWritesOrKeeps(t *testing.T) {
 			t.Fatalf("the rewrite exited %d:\n%s\n%s", code, stdout, stderr)
 		}
 		requireOneLayoutWarning(t, stdout, stderr, "the config file "+cfgPath+" is "+layoutInside+lib+" (libraryRoots[0])",
-			"first setting dataDir in it to the data directory's absolute path "+data)
+			"(dataDir to "+data+", where the data directory is now)")
 	})
 }
 
@@ -525,6 +556,8 @@ func TestServeSaysEachLayoutAtItsStart(t *testing.T) {
 				t.Errorf("serve logged %q of a healthy layout", lines)
 			case tc.want != "" && (len(lines) != 1 || !strings.HasPrefix(lines[0], tc.want)):
 				t.Errorf("serve logged %q of its layout, want one line beginning %q", lines, tc.want)
+			case tc.want != "" && strings.Contains(lines[0], "tlsCertPath"):
+				t.Errorf("serve's journal line carries the CLI's words for a move of bridge.yaml: %q", lines[0])
 			}
 			for _, l := range lines {
 				if strings.Contains(l, base) {
@@ -592,5 +625,109 @@ func TestTheConsolesDoctorSaysTheLayoutOfARootAddedWhileServeRuns(t *testing.T) 
 	}
 	if lines := layoutLines(rec); len(lines) != 0 {
 		t.Errorf("serve's journal says %q, of a layout that was healthy at its start", lines)
+	}
+}
+
+// TestServeWithARelativeConfigInsideARootWarnsOnce: serve makes a relative
+// --config absolute before anything reads it (fsutil.AbsAsWritten in
+// runServe), so run from inside a root with --config bridge.yaml, the layout
+// check sees the config file where it is and serve warns once. A regression
+// case from B884's second review, green from the start.
+func TestServeWithARelativeConfigInsideARootWarnsOnce(t *testing.T) {
+	rec := loggingtest.Record(t)
+	base := t.TempDir()
+	lib := filepath.Join(base, "Music")
+	writeLayoutConfig(t, filepath.Join(lib, "bridge.yaml"), filepath.Join(base, "data"), []string{lib}, "")
+	t.Chdir(lib)
+	_, stderr, code := runCapture(t, "serve", "--config", "bridge.yaml", "--addr", "notaport")
+	if code != 2 || !strings.Contains(stderr, "invalid --addr") {
+		t.Fatalf("serve exited %d, not at its --addr refusal: %s", code, stderr)
+	}
+	lines := layoutLines(rec)
+	if want := "WARN the config file is inside library root libraryRoots[0]: "; len(lines) != 1 || !strings.HasPrefix(lines[0], want) {
+		t.Errorf("serve logged %q of its layout, want one line beginning %q", lines, want)
+	}
+}
+
+// TestBridgeInitWarnsOfAKeptConfigsDefaultDataDirectory: a kept config that
+// writes no dataDir has the default, ./data beside it (priorInstallFrom
+// substitutes and resolves it), so a run that keeps a config inside a root
+// says its data directory too. A regression case from B884's second review,
+// green from the start.
+func TestBridgeInitWarnsOfAKeptConfigsDefaultDataDirectory(t *testing.T) {
+	platformDirForLayout(t)
+	base := t.TempDir()
+	lib, other := filepath.Join(base, "Music"), filepath.Join(base, "Other")
+	cfgDir := filepath.Join(lib, "conf")
+	for _, d := range []string{cfgDir, other} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	body := "libraryRoots:\n  - " + lib + "\nlistenAddress: \"127.0.0.1:0\"\nadminAddress: \"127.0.0.1:0\"\noutput:\n  mpd: off\n"
+	if err := os.WriteFile(filepath.Join(cfgDir, "bridge.yaml"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, stdout, stderr := initLayoutRun(t, "--skip-doctor", "--dir", cfgDir, "--library", other)
+	if code != 0 || !strings.Contains(stdout, "keeping it") {
+		t.Fatalf("init exited %d, keeping nothing:\n%s\n%s", code, stdout, stderr)
+	}
+	summary := "warning: the config file " + filepath.Join(cfgDir, "bridge.yaml") + " and the data directory " +
+		filepath.Join(cfgDir, "data") + " are " + layoutInside + lib + " (libraryRoots[0]): "
+	if strings.Count(stdout+stderr, layoutInside) != 1 || !strings.Contains(stderr, summary) {
+		t.Errorf("the run did not warn once %q:\nstdout:\n%s\nstderr:\n%s", summary, stdout, stderr)
+	}
+}
+
+// TestServeSaysItsLayoutBeforeItTouchesARoot (backlog B884's round 2): serve
+// logs its layout's line before the first step of its start that touches a
+// root, its roots' check, and the case reads the journal as that check is
+// entered (serveOpts.rootsCheck): over roots that answer, serve stopping at
+// its --addr refusal after the check, and over a root that is not there,
+// which the check refuses on stderr, outside the journal, serve stopping
+// there. Round 1's serve tests read the journal once serve had returned, so a
+// line moved after the check still passed them.
+func TestServeSaysItsLayoutBeforeItTouchesARoot(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		absent bool
+		stop   string
+	}{
+		{"roots that answer", false, "invalid --addr"},
+		{"a root that is not there", true, "config: "},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := loggingtest.Record(t)
+			base := t.TempDir()
+			lib := filepath.Join(base, "Music")
+			cfgPath := filepath.Join(base, "bridge.yaml")
+			var absent []string
+			if tc.absent {
+				absent = []string{lib}
+			}
+			writeLayoutConfigLeaving(t, cfgPath, filepath.Join(lib, ".bridge"), []string{lib}, absent, "")
+			if _, err := os.Stat(lib); errors.Is(err, fs.ErrNotExist) != tc.absent {
+				t.Fatalf("the root %s is there: %v, want %v", lib, err == nil, !tc.absent)
+			}
+			entered := 0
+			var said []string
+			opts := serveOpts{configPath: cfgPath, addrOverride: "notaport",
+				rootsCheck: func(c *config.Config) []*config.LibraryRootError {
+					entered++
+					said = layoutLines(rec)
+					return c.CheckLibraryRootsAccessible()
+				}}
+			var stdout, stderr bytes.Buffer
+			if code := runServe(context.Background(), opts, &stdout, &stderr); code != 2 || !strings.Contains(stderr.String(), tc.stop) {
+				t.Fatalf("serve exited %d, not where the case stops it (%q): %s", code, tc.stop, stderr.String())
+			}
+			const want = "WARN the data directory (dataDir) is inside library root libraryRoots[0]: "
+			switch {
+			case entered != 1:
+				t.Errorf("serve entered its roots' check %d times, want once", entered)
+			case len(said) != 1 || !strings.HasPrefix(said[0], want):
+				t.Errorf("as serve entered its roots' check it had logged %q of its layout, want its one line beginning %q", said, want)
+			}
+		})
 	}
 }

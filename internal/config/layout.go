@@ -108,6 +108,13 @@ func (l InstallLayout) Summary(byPath bool) string {
 const layoutRisk = "a library root is often a mount, and while one stops answering, every bridge command " +
 	"that reads what is inside it waits on it, serve, doctor and status among them"
 
+// layoutPathSettings are the settings Load resolves against the config file's
+// directory (resolvePaths), spelled as the config spells them and in that
+// order: a move of bridge.yaml changes where each of them points that is
+// relative. TestTheAdviceToMoveBridgeYAMLKeepsEveryRelativePathsMeaning reads
+// resolvePaths for the list the words must name.
+const layoutPathSettings = "libraryRoots, dataDir, tlsCertPath, tlsKeyPath, autocert.cacheDir, upscale.variantsDir and upscale.tempDir"
+
 // Advice is why the layout Summary names is a risk, and what to do, "" where
 // nothing lies inside a root: the doctor's hint. The fix is for what lies
 // inside: the config file is moved, keeping where its relative paths point,
@@ -116,13 +123,28 @@ const layoutRisk = "a library root is often a mount, and while one stops answeri
 // directory or "", is offered as one place to move to (the data directory's
 // default below it), where it lies outside every root; a suggestion, never a
 // promise that it fixes anything.
+//
+// Where it says to move bridge.yaml, the CLI's words (byPath) name every
+// setting Load resolves beside it, to be set to an absolute path first where
+// it is relative, and what a BRIDGE_* variable that gives one does
+// (keepingRelativePaths, backlog B884's round 2): which of them are relative
+// is not asked, since init's kept config and the environment each say it
+// differently, so the list is the whole fixed one. The journal's words, which
+// name no value (B505), are as they were.
 func (l InstallLayout) Advice(byPath bool, defaultDir string) string {
 	var fix string
 	switch {
+	case l.configIn >= 0 && l.dataIn >= 0 && byPath:
+		fix = "move bridge.yaml and the data directory outside every library root" + l.suggestion(defaultDir, "") +
+			"; before you move bridge.yaml, " + keepingRelativePaths("dataDir to the data directory's new path: it moves "+
+			"with the data directory and is not pinned to where it is now")
 	case l.configIn >= 0 && l.dataIn >= 0:
 		fix = "move bridge.yaml and the data directory outside every library root" + l.suggestion(defaultDir, "") +
 			", keeping dataDir pointed at the data directory: a relative dataDir (" + DefaultDataDir +
 			" unless set) resolves beside bridge.yaml"
+	case l.configIn >= 0 && byPath:
+		fix = "move bridge.yaml outside every library root" + l.suggestion(defaultDir, "") +
+			"; before you move it, " + keepingRelativePaths("dataDir to "+l.dataDir+", where the data directory is now")
 	case l.configIn >= 0:
 		fix = "move bridge.yaml outside every library root" + l.suggestion(defaultDir, "") +
 			", first setting dataDir in it to the data directory's absolute path" + l.pathIf(byPath, l.dataDir) +
@@ -134,6 +156,17 @@ func (l InstallLayout) Advice(byPath bool, defaultDir string) string {
 		return ""
 	}
 	return layoutRisk + "; " + fix
+}
+
+// keepingRelativePaths is the sentence of the CLI's advice to move
+// bridge.yaml that keeps where each of its relative paths points: every
+// setting Load resolves beside it named, the place dataDir is set to said by
+// dataDir, and a value its BRIDGE_* variable gives, which Load resolves the
+// same way, changed where that variable is set.
+func keepingRelativePaths(dataDir string) string {
+	return "set each of " + layoutPathSettings + " that is relative in it to an absolute path, since each resolves " +
+		"beside bridge.yaml (" + dataDir + "); a value its BRIDGE_* environment variable gives resolves the same way, " +
+		"and is changed where that variable is set"
 }
 
 // Line is the layout's one line, Summary and Advice: what bridge init prints

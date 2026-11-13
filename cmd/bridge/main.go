@@ -2936,6 +2936,14 @@ type serveOpts struct {
 	// name there, a thousand lines before the holder is told what was read
 	// (B506's fourth round). Per invocation for tailscaleCLI's reason.
 	afterConfigRead func()
+	// rootsCheck stands in for serve's check of its library roots
+	// (config.Config.CheckLibraryRootsAccessible), the first step of the
+	// start that touches a root, and is entered where that check is. Nil
+	// (the config's own) everywhere but the boot tests: one records what
+	// serve had logged as the check was entered, the layout's line among it
+	// (backlog B884's round 2), and runs the check itself. Per invocation for
+	// tailscaleCLI's reason.
+	rootsCheck func(*config.Config) []*config.LibraryRootError
 	// tailscaleCLI stands in for the host's Tailscale CLI in the cli-mode
 	// auto-pilot. Nil (the host's CLI) everywhere but the boot tests,
 	// which pass a fake so a mint can be held open across a shutdown
@@ -3524,7 +3532,11 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	// a refusal.
 	logInstallLayout(*configPath, cfg)
 
-	if rootErrs := cfg.CheckLibraryRootsAccessible(); len(rootErrs) > 0 {
+	checkRoots := (*config.Config).CheckLibraryRootsAccessible
+	if opts.rootsCheck != nil {
+		checkRoots = opts.rootsCheck
+	}
+	if rootErrs := checkRoots(cfg); len(rootErrs) > 0 {
 		if cfg.IsPublic() {
 			for _, e := range rootErrs {
 				logger.Warn("library root not accessible at startup — scan will retry, manifest will reflect what's currently visible",
