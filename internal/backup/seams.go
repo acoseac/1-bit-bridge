@@ -438,6 +438,23 @@ func SetOnProbeReleaseForTest(fn func(dir, step string)) (restore func()) {
 	return func() { onProbeRelease.Store(prev) }
 }
 
+// SetOnMarkerWriteForTest installs the hook a marker's write runs, given
+// "waits" as it begins to wait for a removal of a stale marker under way and
+// "writes" once it has written the marker and closed it, each with its path,
+// and returns the restore: a reader waits for "writes", never for the file,
+// which the writer makes before it writes (backlog B871's round 2; here, not
+// in export_test.go, so that another package's test, a stuck check run in a
+// process of its own, can say so). Its callback must return, and ignore every
+// path but its test's.
+func SetOnMarkerWriteForTest(fn func(event, marker string)) (restore func()) {
+	var p *func(string, string)
+	if fn != nil {
+		p = &fn
+	}
+	prev := onMarkerWrite.Swap(p)
+	return func() { onMarkerWrite.Store(prev) }
+}
+
 // MarkersForTest is the marker each mark this process holds on the backups
 // folder at root, by the spelling given, writes beside the folder's lock (""
 // for a mark that writes none), each read under its mark's own lock: a test

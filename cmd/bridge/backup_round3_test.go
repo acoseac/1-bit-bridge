@@ -36,15 +36,18 @@ const (
 	stuckCheckEnv  = "CMDBRIDGE_TEST_STUCK_CHECK"
 )
 
-// The lines a stuck check's process prints once its check is parked, and
-// once its verification has answered; the line a verification's process
-// prints once its check has ended, before its verdict is written; and the
-// one it prints as its check begins, on its thread.
+// The lines a stuck check's process prints once its check is parked, once
+// its verification has answered, and once the marker its hold given up
+// leaves beside the lock is written whole (its write's "writes" hook, after
+// the write and the close); the line a verification's process prints once
+// its check has ended, before its verdict is written; and the one it prints
+// as its check begins, on its thread.
 const (
-	stuckParked   = "stuck check parked"
-	stuckGivenUp  = "stuck check given up:"
-	verifyChecked = "verification checked"
-	verifyBegan   = "verification began its check"
+	stuckParked        = "stuck check parked"
+	stuckGivenUp       = "stuck check given up:"
+	stuckMarkerWritten = "stuck check's marker written"
+	verifyChecked      = "verification checked"
+	verifyBegan        = "verification began its check"
 )
 
 // runVerifyWithFault is the re-exec'd test binary's whole run as one bridge
@@ -90,6 +93,12 @@ func runVerifyWithFault() int {
 // input ends (the test closes it, or ends), past a deadline of 300 ms.
 func runStuckCheck() int {
 	dir, root, _ := strings.Cut(os.Getenv(stuckCheckEnv), string(os.PathListSeparator))
+	marker := filepath.Join(root, backup.StuckMarkerName)
+	backup.SetOnMarkerWriteForTest(func(event, m string) {
+		if event == "writes" && m == marker {
+			fmt.Fprintln(os.Stdout, stuckMarkerWritten)
+		}
+	})
 	backup.SetVerifyDeadlineForTest(300 * time.Millisecond)
 	letGo := make(chan struct{})
 	var parked atomic.Bool
@@ -396,28 +405,27 @@ func TestACheckThatDidNotEndInAnotherProcessHoldsTheFolderUntilItEnds(t *testing
 			}
 		}
 	}()
+	// The check given up, and the marker its worker writes on a goroutine of
+	// its own written whole, which its process says once the write and its
+	// close have ended, in either order: the file alone, there from before
+	// its write, was read empty by the doctor's one read of it (backlog B871's
+	// round 2).
 	deadline := time.After(2 * time.Minute)
-	for given := false; !given; {
+	for given, written := false, false; !given || !written; {
 		select {
 		case line, ok := <-lines:
 			if !ok {
-				t.Fatalf("the check's process ended before its check was given up: %s", stderr.String())
+				t.Fatalf("the check's process ended before its check was given up and its marker written: %s", stderr.String())
 			}
-			given = strings.HasPrefix(line, stuckGivenUp)
-			if given && !strings.Contains(line, backup.ErrCheckGivenUp.Error()) {
-				t.Fatalf("the check's process said %q, want its check given up", line)
+			if strings.HasPrefix(line, stuckGivenUp) {
+				given = true
+				if !strings.Contains(line, backup.ErrCheckGivenUp.Error()) {
+					t.Fatalf("the check's process said %q, want its check given up", line)
+				}
 			}
+			written = written || line == stuckMarkerWritten
 		case <-deadline:
-			t.Fatalf("the check was never given up: %s", stderr.String())
-		}
-	}
-	// The marker its worker writes on a goroutine of its own.
-	for wait := time.Now().Add(30 * time.Second); ; time.Sleep(10 * time.Millisecond) {
-		if _, err := os.Stat(filepath.Join(root, ".check-still-running")); err == nil {
-			break
-		}
-		if time.Now().After(wait) {
-			t.Fatal("the check's process wrote no marker")
+			t.Fatalf("the check was never given up, or its marker never written: %s", stderr.String())
 		}
 	}
 	line := func(name string) (doctor.Check, bool) {

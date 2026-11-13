@@ -134,6 +134,7 @@ func TestAGivenUpRestoreThatHoldsTheLockMarksTheFolderUntilItLetsGo(t *testing.T
 	snap := snapshotOf(t, src)
 	other := snapshotOf(t, src)
 	root := filepath.Dir(snap)
+	written := markerWritten(t, root)
 	name := filepath.Base(snap)
 	b, c := newDestinationBox(t), newDestinationBox(t)
 	ends := sourceWorkerEnds(t)
@@ -166,7 +167,7 @@ func TestAGivenUpRestoreThatHoldsTheLockMarksTheFolderUntilItLetsGo(t *testing.T
 	if took := time.Since(asked); took > 5*time.Second {
 		t.Errorf("the restore and the prune beside the restore given up waited %v to be refused", took)
 	}
-	awaitMarker(t, root)
+	awaitMarker(t, root, written)
 	if _, err := backup.VerifySnapshotAsAnotherProcessForTest(t.Context(), other, backup.VerifyOptions{LockWait: 10 * time.Second}); !errors.Is(err, backup.ErrCheckStillRunning) ||
 		!strings.Contains(err.Error(), words) {
 		t.Errorf("another process's verification beside the restore given up answered %v, want ErrCheckStillRunning naming %q", err, words)

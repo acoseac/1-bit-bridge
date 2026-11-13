@@ -28,6 +28,7 @@ func TestARestoreRefusedForAnotherRestoreNamesItselfAndThatRestore(t *testing.T)
 	snapA := snapshotOf(t, src)
 	snapB := snapshotOf(t, src)
 	root := filepath.Dir(snapA)
+	written := markerWritten(t, root)
 	givenB := throughALinkedFolder(t, snapB)
 	b, c := newDestinationBox(t), newDestinationBox(t)
 	ends := sourceWorkerEnds(t)
@@ -58,7 +59,9 @@ func TestARestoreRefusedForAnotherRestoreNamesItselfAndThatRestore(t *testing.T)
 	requireNamedAsGiven(t, "the refusal of B's restore", err, givenB, snapB)
 	c.requireUntouched(t, "the restore of B refused beside A's restore given up")
 
-	awaitMarker(t, root)
+	// Read once written whole, never once it is there (backlog B871's round
+	// 2: the writer makes the file before it writes it).
+	awaitMarker(t, root, written)
 	if s := readStuckMarker(t, root); !s.Restoring() || s.Snapshot != filepath.Base(snapA) {
 		t.Errorf("the marker beside the lock reads %+v, want A's restore", s)
 	}
