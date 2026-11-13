@@ -94740,7 +94740,7 @@ C10b's first run left the enrichment pulse's case green: with Deezer on, the por
 | Check | Result |
 |---|---|
 | `go vet ./...` (the tags) | exit 0 |
-| `-race -count=50`, the 8 new enrich cases, the 25 touched or beside them (round 1's 16, the wiring pin, the switch cases, the cache-name case and the four whose memo checks moved), `./internal/enrich/` | ok, 2668.2 s |
+| `-race -count=50`, the 8 new enrich cases and 25 beside them (round 1's 21: its 16, the wiring pin and four switch cases; the cache-name case; three more whose memo checks moved), `./internal/enrich/` | ok, 2668.2 s |
 | `-race -count=50`, the 6 new manifest cases, round 1's 9 and `TestTheLadderSchemaIsTheLadders`, `./internal/manifest/` | ok, 1433.0 s |
 | `-race -count=50`, the new api case, round 1's 3 and the artwork and artist-image cases, `./internal/api/` (40 tests) | ok, 281.1 s |
 | `-race -count=50`, the serve case and the four that ask the latest schema, `./cmd/bridge/` | ok, 1155.2 s |
