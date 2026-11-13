@@ -497,6 +497,33 @@ func pendingBindings() int {
 	return len(pending.binds)
 }
 
+// TestTheRecorderKeepsFatalOffTheTestsGoroutine: code run under a
+// fatalRecorder on a goroutine of its own that calls Fatal or Fatalf, as a
+// proof's Returned calls Fatal when its schedule never ends, has its message
+// recorded and that goroutine ended, and never calls the test's own Fatal
+// there (B869's fourth round); the test's goroutine reads what was recorded.
+func TestTheRecorderKeepsFatalOffTheTestsGoroutine(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		fail func(testing.TB)
+	}{
+		{"Fatal", func(tb testing.TB) { tb.Fatal("a fatal ", "failure") }},
+		{"Fatalf", func(tb testing.TB) { tb.Fatalf("a %s failure", "fatal") }},
+	} {
+		rec := &fatalRecorder{TB: t}
+		ended, after := make(chan struct{}), false
+		go func() { // rec's Fatal and Fatalf end the goroutine calling them
+			defer close(ended)
+			c.fail(rec)
+			after = true
+		}()
+		<-ended
+		if rec.fatal != "a fatal failure" || after {
+			t.Errorf("%s under the recorder recorded %q and went on: %v; want %q recorded and the goroutine ended", c.name, rec.fatal, after, "a fatal failure")
+		}
+	}
+}
+
 // fatalRecorder is a testing.TB whose Fatal and Fatalf record the message
 // and end the goroutine calling it, as FailNow would, and whose Errorf
 // records the message, without failing the test that holds it, so that code
