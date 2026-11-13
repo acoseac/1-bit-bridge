@@ -245,6 +245,58 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   refused every console request until it was chowned; since #1048 the
   write keeps the file's owner (the KeepOwner bullet under Config, settings
   and process lifecycle).
+- **A console login's session is admitted against what its check read of the
+  FILE, on the read its own write is built from: a rotation or a sign-out
+  landing between the check and the session refuses it** (2026-11-13,
+  backlog B881). `Verify` lets go of the store's mutex for bcrypt's compare,
+  and a login ticket's redemption returns before its session is made, while
+  `bridge admin reset-password` and `sign-out-everywhere` write the file from
+  a store of their own, which takes no lock the serving bridge holds. When
+  another request took the reset's sign-out in that window, the session made
+  after it was written under the new marker, and every later check kept it:
+  on main, through the public console, a login checked against the password
+  the reset rotated away from answered 200 with a cookie, its session in the
+  bridge and in the file. `Verify` and `RedeemLoginTicket` return an
+  `Admission` (the credential compared, for a ticket the account it named,
+  and the marker that read found), and `CreateSession` takes one, so no
+  session is made from a username. `Admission.holdsIn` is the one check, run
+  in the session write's build on every attempt `commitLocked` makes, after
+  that attempt's read is taken: a credential, account or marker moved, or no
+  account, is `ErrCredentialsChanged`; a read that fails refuses too; and
+  `CreateSession` returns every failure of its write and keeps no session
+  for it. Until B881 it logged them and kept the session, and a write
+  refused because the file changed past `maxCommitAttempts` was refused for
+  a change that could be the rotation. A `--keep-sessions` rotation moves no
+  marker, which is what proves the credential's half on its own. The login
+  answers `ErrCredentialsChanged` as a wrong password, byte for byte,
+  through the one `refuseLogin`, and records no success, so the limiter
+  counts it as a failed attempt and answers the next ones as after a wrong
+  password; the login link answers it with the stale-link page, as any spent
+  link. **A ticket's admission binds its account and the marker, never the
+  hash**: a ticket minted before a rotation redeems after it, and one
+  redeemed before a `--keep-sessions` rotation signs in. `EndOtherSessions`
+  moves neither the credential nor the marker and is left out on purpose:
+  the password it leaves working signs that browser in again at once, so a
+  login checked before it and admitted after is the one a login begun after
+  it would be. What remains is the rename of the session's write itself:
+  the command whose write it replaced writes again (`commitAndConfirm`), a
+  sign-out then ends the session at its next request, and a
+  `--keep-sessions` rotation keeps it with the rest. The admin `Server`'s
+  `testAfterLoginCheck` (an atomic pointer, nil in production) parks a login
+  or a redemption between its check and its session. **Don't make a session
+  from a username or from anything but an `Admission`, check it before or
+  apart from the read the session's write is built from or on the write's
+  first attempt alone, hold the mutex across bcrypt, bind a ticket to the
+  password, answer `ErrCredentialsChanged` but as a wrong password, record
+  it as a success, or keep a session whose write failed.**
+  `TestAConsoleLoginCheckedBeforeAResetIsRefused`,
+  `TestALoginLinkRedeemedBeforeAResetIsRefused`,
+  `TestARefusedConsoleLoginIsCountedAsAFailedOne`,
+  `TestALoginCheckedBeforeAResetDoesNotOutliveIt`,
+  `TestALoginCheckedBeforeARotationThatKeepsTheSessionsIsRefused`,
+  `TestALoginTicketRedeemedBeforeARotationThatKeepsTheSessionsSignsIn`,
+  `TestALoginWhoseWriteDoesNotLandIsRefused` and
+  `TestConsoleLoginsRacingNothingButEachOtherSignIn` pin it.
 - **A console login ticket is PERSISTED, because the two halves are different
   PROCESSES, and each ticket is a FILE OF ITS OWN, because both processes write
   tickets** (2026-09-28). `bridge admin login-link` mints and the serving bridge
