@@ -96168,3 +96168,142 @@ applied `scripts/check-doc-budgets.py` is clean (`cli-serve.md` 98,564 bytes),
 fails on a ghost citation planted in the copy's History file, so it read the
 copy). `make test` and `make build-all` were not run: the brief asked for the
 packages. The Windows forms run on CI's windows leg as on legion0's Linux.
+
+## 2026-11-13 — B884 round 2: the move advice keeps every relative path's meaning, and serve's order is pinned
+
+The rule is `cli-serve.md`'s B884 line, and its long form is in
+`ops/History-rules-cli-serve.md` (its *Round 2* paragraph); this is the
+evidence. Linux amd64 (legion0), Go 1.27.3, the Makefile's tags, TMPDIR on
+disk (`~/onebit/tmp`). The review of step 1 (72b98e96, its rules 8ec96ef6),
+Codex's and Carbon's, raised two items, each checked against the code before
+it was fixed; the code is 38c089d2. Nothing new touches the filesystem and
+nothing refuses: the advice changes only its words, and the seam is a test's.
+
+### The items, as found
+
+1. The advice to move bridge.yaml kept one setting's meaning of seven.
+   `internal/config/config.go` 3289, `resolvePaths`, resolves against the
+   config file's directory each library root (3297), dataDir (3299),
+   tlsCertPath (3300), tlsKeyPath (3301), autocert.cacheDir (3309),
+   upscale.variantsDir (3318) and upscale.tempDir (3319); step 1's words
+   named dataDir alone, so a config at /srv/music/conf with
+   `libraryRoots: [..]`, moved to /etc/bridge as advised, would serve /etc.
+   Fixed in the CLI's words alone: `internal/config/layout.go` 116
+   (`layoutPathSettings`, the seven in resolvePaths' order), 134 (`Advice`,
+   its two byPath branches that move bridge.yaml) and 166
+   (`keepingRelativePaths`: the seven, dataDir's place, and a `BRIDGE_*`
+   variable's value resolved the same way and changed where it is set);
+   the journal's branches are as they were (B505).
+2. Nothing held serve's line before its roots' check: step 1's serve tests
+   read the journal once `runServe` had returned, and the check's refusal of
+   a loopback install goes to stderr (`cmd/bridge/main.go` 3546-3549),
+   outside the journal, so a line logged after the check passed them.
+   Fixed with a seam: `serveOpts.rootsCheck` (`main.go` 2946, nil in
+   production, `(*config.Config).CheckLibraryRootsAccessible` then), taken
+   where serve enters the check (3535-3539), right after
+   `logInstallLayout` (3533). Step 1's order was right; the gap was the
+   test, so the new case passes on step 1's order and goes red under the
+   brief's control (D2 below).
+
+Two cases the review asked for passed from the start, on step 1's code, and
+stay as guards: serve run by `t.Chdir` into a root with `--config
+bridge.yaml` logs one Warn, the config file inside libraryRoots[0]
+(`TestServeWithARelativeConfigInsideARootWarnsOnce`); and init keeping a
+config with no dataDir, in a folder inside a root, warns once, naming
+`<that folder>/data` (`TestBridgeInitWarnsOfAKeptConfigsDefaultDataDirectory`).
+
+Of the review's lows, init's `prior.DataDir` is resolved by the time its
+line reads it: `priorInstallFrom` (`cmd/bridge/init_rewrite.go` 317, called
+at `init.go` 467) defaults it (335-337) and resolves it against the config
+file's absolute directory (330-334, 344), as it does the roots (347-349),
+before `init.go` 471 takes it and 732 hands it to `warnInstallLayout`; a
+`BRIDGE_*` variable is not applied there, since init keeps the file's own
+values. The other two lows (canonicalVolume's `/`, the AST guard's flat
+declared set) were left as the brief asked.
+
+### Red first
+
+In the worktree, on 8ec96ef6's code with round 2's item-1 tests and the two
+regression cases (before `layout.go` changed; the order case came with its
+seam, and its red is control D2):
+
+```
+$ go test -tags ts_omit_webclient,ts_omit_debugeventbus -count=1 -v -run '^(TestTheLayoutsWordsNameWhatLiesInsideWhichRoot|TestTheAdviceToMoveBridgeYAMLKeepsEveryRelativePathsMeaning)$' ./internal/config/
+--- FAIL: TestTheAdviceToMoveBridgeYAMLKeepsEveryRelativePathsMeaning (both subtests)
+    layout_test.go:490: the advice to move bridge.yaml does not say "set each of libraryRoots, dataDir, tlsCertPath, tlsKeyPath, autocert.cacheDir, upscale.variantsDir and upscale.tempDir that is relative in it to an absolute path, since each resolves beside bridge.yaml"
+    layout_test.go:493: the advice to move bridge.yaml does not say what a BRIDGE_* variable that gives one does
+    layout_test.go:500: the advice pins dataDir where the data directory is: false, want true   (the config file alone)
+    layout_test.go:497: the advice says dataDir follows the data directory: false, want true   (both)
+--- FAIL: TestTheLayoutsWordsNameWhatLiesInsideWhichRoot (the_config_file, both_in_one_root, both_in_two_roots)
+$ go test ... -run '^(TestBothDoctorsWarnOfTheBridgesFilesInsideALibraryRoot|TestBridgeInitWarnsOnceOfTheLayoutItWritesOrKeeps|TestServeSaysEachLayoutAtItsStart|TestServeWithARelativeConfigInsideARootWarnsOnce|TestBridgeInitWarnsOfAKeptConfigsDefaultDataDirectory)$' ./cmd/bridge/
+--- FAIL: TestBothDoctorsWarnOfTheBridgesFilesInsideALibraryRoot (the config file, both)
+    install_layout_test.go:126: the install-layout hint names the settings a move of bridge.yaml must keep: false, want true
+--- FAIL: TestBridgeInitWarnsOnceOfTheLayoutItWritesOrKeeps (the six subtests that move bridge.yaml)
+    install_layout_test.go:333 (:357, :375, :395, :409): the run's warning names the settings a move of bridge.yaml must keep: false, want true
+--- PASS: TestServeSaysEachLayoutAtItsStart (the journal's words, unchanged)
+--- PASS: TestServeWithARelativeConfigInsideARootWarnsOnce
+--- PASS: TestBridgeInitWarnsOfAKeptConfigsDefaultDataDirectory
+```
+
+The data directory's own cases stayed green, as the words for them did not
+change. After the fix, every B884 test passes: internal/config's seven,
+internal/doctor's one and cmd/bridge's thirteen.
+
+### Controls
+
+Each an uncommitted mutation of 38c089d2, predicted in writing before the
+run (`controls2.predictions.txt`), the test binaries built once per control,
+the files put back with `git checkout --` and checked against HEAD's bytes,
+`git status` clean after. Every one as predicted:
+
+- D1, the brief's: the sentence removed from both branches that move
+  bridge.yaml. Red: `TestTheAdviceToMoveBridgeYAMLKeepsEveryRelativePathsMeaning`
+  (both subtests, layout_test.go:490, :493, :497, :500), the words test's
+  three subtests that move bridge.yaml, both doctors' config and both
+  subtests, and init's six that move bridge.yaml; green: the kept config's
+  default data directory and serve's journal.
+- D2, the brief's: `logInstallLayout` moved to just after the check
+  returns, before its errors are handled. Red: both subtests of
+  `TestServeSaysItsLayoutBeforeItTouchesARoot` ("install_layout_test.go:729:
+  as serve entered its roots' check it had logged [] of its layout"); green:
+  step 1's serve tests and the relative `--config` case, which read the
+  journal after serve returned, the gap item 2 names.
+- D3, the journal given the CLI's sentence (the byPath branches taken by
+  setting too): the advice test (the journal changed), the words test's
+  three subtests that move bridge.yaml, and the config and both subtests
+  of `TestServeSaysEachLayoutAtItsStart` (install_layout_test.go:560,
+  "serve's journal line carries the CLI's words for a move of
+  bridge.yaml", and :564, a path).
+- D4, an eighth setting resolved beside the config (autocert.email through
+  `ResolvePath` in `resolvePaths`), the words unchanged: the advice test red
+  in both subtests, its want read from resolvePaths ("... upscale.tempDir and
+  autocert.email ..."); the words test green.
+- D5, the order case's fixture making the root it was told to leave absent:
+  "install_layout_test.go:710: the root ... is there: true, want false" in
+  the absent subtest alone.
+
+### The gates
+
+On 38c089d2, in one hold of the build lock (18:02 to 18:32, `gate.py`), with
+`-p` and `-parallel` at 8, half legion0's cores: `go vet ./...` with the
+Makefile's tags as GOOS linux, darwin and windows, clean; under `-race
+-count=50`, the B884 tests of internal/config (the seven of `layout_test.go`)
+ok in 13 s, of internal/doctor
+(`TestRunPrintsTheInstallLayoutLineAfterTheDataDirLine`, untouched this
+round) ok in 2 s, and of cmd/bridge (the thirteen of
+`install_layout_test.go`) ok in 153 s; and `go test -race -count=1 -timeout
+120m` of `./cmd/bridge/` (1,577 s, which holds
+`TestEveryCitedTestNameExists`), `./internal/doctor/` (7 s) and
+`./internal/config/` (15 s): all ok. go1.27.3's gofmt lists none of the Go
+files B884 touches. The rules patch applies at 38c089d2 (`git apply
+--check`), and on a copy with it applied `scripts/check-doc-budgets.py` is
+clean (`cli-serve.md` 98,684 bytes, and 99,905 with B650's open rules patch
+beside it, which applies in either order), `rules-for.py` names
+`cli-serve.md` for `internal/config/layout.go` and `cmd/bridge/main.go`, and
+`TestEveryCitedTestNameExists` passes there (and fails on a ghost citation
+planted in the copy's History file, so it read the copy).
+`verify_moves.py --base HEAD`, the two History paragraphs and the line
+named as edits, fails on one block alone, the line's verbatim History twin:
+an edit accounts for one copy and the base held two. With the twin put back
+it passes, and the twin in the patch is the new line byte for byte. `make
+test` and `make build-all` were not run: the brief asked for the packages.

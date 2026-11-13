@@ -5360,7 +5360,7 @@ The record is in `ops/engineering-log.md`, 2026-11-12, B826.
 
 ## B884 — the bridge's own files inside a library root (2026-11-13)
 
-- **bridge init, bridge doctor and serve warn, and never refuse, where the config file or the data directory lies inside a library root: one check that touches nothing (`config.LayoutOf`: each path made absolute as Load makes it, against the config file's directory, and compared name by name in the OS's own forms, which it parses from strings, so `/music2` is not inside `/music` and a layout joined only through a link is missed) and one set of words (`config.InstallLayout`); init says it once, on stderr, for the layout it wrote or kept, its preflight carrying no such line; both doctors a warn-only `install-layout` line right after data-dir, none over a healthy layout or on a managed bridge, the console's from the config it loads at each run; serve one Warn at each start, before anything touches a root, naming the root `libraryRoots[i]` and no path** (2026-11-13, backlog B884). **Don't let the check stat, resolve or open anything or call what may, compare by a string prefix, refuse a layout, give a healthy layout a doctor line, let init say it twice, or name a path in serve's line; and don't move `upscale.variantsDir`'s or `upscale.tempDir`'s refusal onto it: they resolve links on purpose.** → History-rules-cli-serve.md
+- **bridge init, bridge doctor and serve warn, and never refuse, where the config file or the data directory lies inside a library root: one check that touches nothing (`config.LayoutOf`: each path made absolute as Load makes it and compared name by name in the OS's own forms, parsed from strings, so `/music2` is not inside `/music` and a layout joined only through a link is missed) and one set of words (`config.InstallLayout`); init says it once, on stderr, for the layout it wrote or kept, its preflight carrying no such line; both doctors a warn-only `install-layout` line right after data-dir, none over a healthy layout or on a managed bridge, the console's from the config it loads at each run; serve one Warn at each start, before anything touches a root, naming the root `libraryRoots[i]` and no path** (2026-11-13, backlog B884). **Don't let the check stat, resolve or open anything or call what may, compare by a string prefix, refuse a layout, give a healthy layout a doctor line, let init say it twice, let the CLI's advice to move bridge.yaml leave out a setting `resolvePaths` resolves (`layoutPathSettings`), or name a path in serve's line or log it after the roots' check (`serveOpts.rootsCheck`); and don't move `upscale.variantsDir`'s or `upscale.tempDir`'s refusal onto it: they resolve links on purpose.** → History-rules-cli-serve.md
 
 *The hazard.* A library root is often a network or removable mount, and while
 one stops answering, a stat of anything under it waits in the kernel for as
@@ -5417,21 +5417,30 @@ first root in libraryRoots order that holds each, both named in one line
 where both lie inside; why it is a risk ("a library root is often a mount,
 and while one stops answering, every bridge command that reads what is
 inside it waits on it, serve, doctor and status among them"); and what to do
-for what lies inside. The config file: moved outside every root, first
-setting dataDir to the data directory's absolute path, since a relative
-dataDir resolves beside bridge.yaml. The data directory: moved, and dataDir
-set to its new path. Both: moved, keeping dataDir pointed at the data
-directory, since a relative one (./data unless set) resolves beside
-bridge.yaml. The CLI names each by its path, the root beside its place in
-libraryRoots: B505's rule takes a path the operator configured
-(`LibraryRootError` and init's directory errors name the path the operator
-must find and fix), and the doctor's library-roots and data-dir lines print
-paths already. It offers the platform's default config directory
-(`packaging.DefaultConfigDir`, the data directory's place below it) as one
-place to move to, only where that lies outside every root, worded as an
-example and never as a fix. The journal names each by its setting alone (the
-config file; the data directory (dataDir); library root libraryRoots[i]), as
-every line about the config there does, and offers no place.
+for what lies inside. The data directory: moved, and dataDir set to its new
+path. The config file, alone or with the data directory: moved outside every
+root. In the CLI's words (since round 2), before bridge.yaml moves, each
+setting Load resolves beside it that is relative in it is set to an absolute
+path, all seven named (`layoutPathSettings`: libraryRoots, dataDir,
+tlsCertPath, tlsKeyPath, autocert.cacheDir, upscale.variantsDir and
+upscale.tempDir), a value its `BRIDGE_*` variable gives resolving the same
+way and changed where that variable is set; dataDir is set to where the data
+directory is now, named, when the config file moves alone, and to the data
+directory's new path when the two move together, since it moves with the
+data directory. In the journal's, step 1's words: the config file moved with
+dataDir first set to the data directory's absolute path, and both moved
+keeping dataDir pointed at the data directory, since a relative dataDir
+(./data unless set) resolves beside bridge.yaml. The CLI names each by its
+path, the root beside its place in libraryRoots: B505's rule takes a path
+the operator configured (`LibraryRootError` and init's directory errors name
+the path the operator must find and fix), and the doctor's library-roots and
+data-dir lines print paths already. It offers the platform's default config
+directory (`packaging.DefaultConfigDir`, the data directory's place below
+it) as one place to move to, only where that lies outside every root, worded
+as an example and never as a fix. The journal names each by its setting
+alone (the config file; the data directory (dataDir); library root
+libraryRoots[i]), as every line about the config there does, and offers no
+place.
 
 *Where each surface says it.* bridge init, on stderr, once, for the layout it
 actually wrote (the roots it saved, a public rewrite's kept roots included,
@@ -5469,20 +5478,51 @@ write, a read, an unlink or a refusal, where a link must be seen through
 autocert.cacheDir, the log file. The rest of B884's places, bounding the
 commands' own reads, are its later steps.
 
+*Round 2* (the review of step 1). Load resolves seven settings against the
+config file's directory (`resolvePaths`), and step 1's advice to move
+bridge.yaml kept dataDir's meaning alone: a config at /srv/music/conf with
+`libraryRoots: [..]`, moved to /etc/bridge as advised, would serve /etc.
+Wherever the CLI's words say to move bridge.yaml (init's line, both
+doctors' hint), they now name all seven, in resolvePaths' order, to be set
+to an absolute path first where relative, and say what a `BRIDGE_*`
+variable that gives one does: Load resolves it the same way, so it is
+changed where it is set. Which of them are relative is not asked: the advice
+changes only its words, and init's kept config, the environment and the file
+each say it differently, so the list is the whole fixed one, and
+`TestTheAdviceToMoveBridgeYAMLKeepsEveryRelativePathsMeaning` reads
+resolvePaths' source for the settings the words must name, so an eighth
+resolved there fails it until they name it. The journal's words are step
+1's: they name no value (B505), and the round kept them as they were.
+Nothing held serve's line before its roots' check either: step 1's serve
+tests read the journal once `runServe` had returned, and the check's refusal
+of a loopback install goes to stderr, outside the journal.
+`serveOpts.rootsCheck`, nil in production, stands in for the check where
+serve enters it, and `TestServeSaysItsLayoutBeforeItTouchesARoot` reads the
+journal there, over roots that answer and over a root that is not there
+(`writeLayoutConfigLeaving` makes every root but that one), so a line
+logged after the check fails it. Two cases the review asked for passed from
+the start and stay as guards: serve run from inside a root with a relative
+`--config` warns once, and a kept config with no dataDir names its default
+data directory inside a root.
+
 *The tests.* In internal/config: `TestThePredicateComparesEachOSsFormsByTheirNames`,
 `TestTheLayoutResolvesRelativePathsAsLoadDoes`,
 `TestTheLayoutsFormsAreThisHostsFilepath`, `TestTheLayoutCheckRunsOnStringsAlone`,
-`TestALayoutJoinedOnlyThroughALinkIsMissed` and
-`TestTheLayoutsWordsNameWhatLiesInsideWhichRoot`; in internal/doctor,
-`TestRunPrintsTheInstallLayoutLineAfterTheDataDirLine`; in cmd/bridge,
-`TestBothDoctorsWarnOfTheBridgesFilesInsideALibraryRoot`,
+`TestALayoutJoinedOnlyThroughALinkIsMissed`,
+`TestTheLayoutsWordsNameWhatLiesInsideWhichRoot` and
+`TestTheAdviceToMoveBridgeYAMLKeepsEveryRelativePathsMeaning`; in
+internal/doctor, `TestRunPrintsTheInstallLayoutLineAfterTheDataDirLine`; in
+cmd/bridge, `TestBothDoctorsWarnOfTheBridgesFilesInsideALibraryRoot`,
 `TestNoDoctorWarnsOfASiblingThatSharesARootsPrefix`,
 `TestADataDirectoryThatIsAFileInsideARootFailsAndWarnsBeside`,
 `TestAManagedBridgesDoctorSaysNothingOfItsLayout`,
 `TestTheDoctorsReportOfAHealthyLayoutIsAsItWas`,
 `TestBridgeInitWarnsOnceOfTheLayoutItWritesOrKeeps`,
+`TestBridgeInitWarnsOfAKeptConfigsDefaultDataDirectory`,
 `TestBridgeInitSaysNothingOfAHealthyLayout`,
 `TestServeSaysOnceAtItsStartThatItsDataDirectoryIsInsideALibraryRoot`,
-`TestServeSaysEachLayoutAtItsStart` and
+`TestServeSaysEachLayoutAtItsStart`,
+`TestServeWithARelativeConfigInsideARootWarnsOnce`,
+`TestServeSaysItsLayoutBeforeItTouchesARoot` and
 `TestTheConsolesDoctorSaysTheLayoutOfARootAddedWhileServeRuns`. The record is
-in `ops/engineering-log.md`, 2026-11-13, B884.
+in `ops/engineering-log.md`, 2026-11-13, B884 step 1 and its round 2.
