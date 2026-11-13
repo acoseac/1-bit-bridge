@@ -5566,8 +5566,8 @@ their own cases alone. The admission's control showed its case of a hold met
 by the spelling given meeting the resolved folder's check instead
 (`captureT` resolves a capture's folder, so the check given up marked that
 folder alone): the case now gives its check the spelling the restore is
-given, and meets `SourceStillHeld`, which no case had reached through a link,
-and which its own control alone turns red. Whether a probe's release writes
+given, and meets `SourceStillHeld`, the check its name says, which its own
+control turns red, alone of the cases the controls run. Whether a probe's release writes
 a marker is asked of the marks themselves (`backup.MarkersForTest`, by the
 unit case and the command's, the doctor's and the ticker's cases), the
 marker's write being on a goroutine of its own (`markStuck`), which a read of
