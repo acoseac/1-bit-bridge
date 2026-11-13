@@ -325,6 +325,19 @@ type Deps struct {
 	// holds by default.
 	DataDirPreparation func(ctx context.Context) Check
 
+	// InstallLayout is the line on the bridge's own files inside a library
+	// root (backlog B884; cmd/bridge's doctorInstallLayout, over
+	// config.LayoutOf): a warn naming the config file or the data directory
+	// that lies inside a root, why a mount there that stops answering takes
+	// every command that reads them down with it, and what to move; and no
+	// line at all where neither lies inside one, so a healthy report is as it
+	// was. It never fails a run. A nil func skips it, as `bridge init`'s
+	// preflight does (init says it once, in a line of its own), and a managed
+	// bridge skips it too: its files are the host's to move, and its reader
+	// has no shell to move them with (Managed). Run places it right after the
+	// data-dir line.
+	InstallLayout func(ctx context.Context) []Check
+
 	// InstallProbation is the line on an install of this version that awaits
 	// its confirmation, named install-probation (cmd/bridge's
 	// doctorInstallProbation over updater.ProbationStatus, backlog B660, one
@@ -500,6 +513,9 @@ func Run(ctx context.Context, d Deps) Report {
 	}
 	if d.DataDirPreparation != nil {
 		out = append(out, d.DataDirPreparation(ctx))
+	}
+	if d.InstallLayout != nil && !d.Managed {
+		out = append(out, d.InstallLayout(ctx)...)
 	}
 	if d.InstallProbation != nil {
 		out = append(out, d.InstallProbation(ctx)...)

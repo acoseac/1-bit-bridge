@@ -725,6 +725,12 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		} else {
 			fmt.Fprintf(stdout, "keeping existing config\n")
 		}
+		// The layout the run keeps, the config's own as its file says it
+		// (backlog B884), whatever this run named; a config that does not
+		// read names no roots to compare.
+		if prior != nil {
+			warnInstallLayout(stderr, cfgPath, prior.DataDir, prior.LibraryRoots)
+		}
 		keepChoice := resolveLaunchChoice(in, stdout, *nonInteractive, *skipService, *windowsService, *startNow)
 		return finishInit(in, *nonInteractive, stdout, stderr, cfgPath, dataDir, keepChoice)
 	}
@@ -944,6 +950,10 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		warnEnrichNotKept(stderr, prior.Enrich)
 		warnUpdateNotKept(stderr, prior.Update)
 	}
+	// The layout the run wrote (backlog B884): the roots it saved, a public
+	// install's kept ones included, which the preflight does not grade
+	// (namedRoots), and the data directory it saved.
+	warnInstallLayout(stderr, cfgPath, cfg.DataDir, cfg.LibraryRoots)
 
 	if !*publicMode {
 		// Box the fingerprint so it stands out from the surrounding

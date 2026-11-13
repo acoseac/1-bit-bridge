@@ -3516,6 +3516,13 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 			"entries", strings.Join(unknown, ", "),
 			"known", strings.Join(config.KnownManagedControls(), ", "))
 	}
+	// The config file or the data directory inside a library root (backlog
+	// B884), said once at each start, before the first step that touches a
+	// root (the stat below) or the data directory: the check touches nothing,
+	// so a mount that does not answer cannot hold it, and the journal holds
+	// the line from every start before such a mount stopped answering. Never
+	// a refusal.
+	logInstallLayout(*configPath, cfg)
 
 	if rootErrs := cfg.CheckLibraryRootsAccessible(); len(rootErrs) > 0 {
 		if cfg.IsPublic() {

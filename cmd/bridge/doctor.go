@@ -343,6 +343,10 @@ func buildDoctorDepsWith(cfgPath string, absentIsPreSetup bool, dacHost dacAcces
 			// refuses it first, as one its record beside the config names
 			// that holds neither its database nor its lock file (B651).
 			d.DataDirPreparation = doctorDataDir(d.ConfigFile.Path, cfg.DataDir)
+			// The config file and that data directory against the library
+			// roots, lexically and touching nothing (backlog B884): a line
+			// only where one of them lies inside a root.
+			d.InstallLayout = doctorInstallLayout(d.ConfigFile.Path, cfg)
 			// An install of this version that awaits its confirmation (backlog
 			// B660), from the marker in that data dir, for the CLI and the
 			// console alike.
