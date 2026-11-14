@@ -4,6 +4,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,15 +17,17 @@ import (
 // name, or a bare name) and the file's slash path below the root.
 func productionCalls(t *testing.T, match func(call *ast.CallExpr, rel string)) {
 	t.Helper()
-	productionCallsIn(t, repoRootForCitations(t), match)
+	productionCallsIn(t, filepath.WalkDir, repoRootForCitations(t), match)
 }
 
-// productionCallsIn is productionCalls over the tree at root, which a test
-// gives a fixture of its own.
-func productionCallsIn(t *testing.T, root string, match func(call *ast.CallExpr, rel string)) {
+// productionCallsIn is productionCalls over the tree at root, walked by walk,
+// which a test gives a fixture of its own, and a sweeptest.Removal's WalkDir
+// for filepath.WalkDir where it stands in for another process removing a
+// directory mid-walk.
+func productionCallsIn(t *testing.T, walk func(root string, fn fs.WalkDirFunc) error, root string, match func(call *ast.CallExpr, rel string)) {
 	t.Helper()
 	fset := token.NewFileSet()
-	err := sweepWalkDir(root, func(path string, d os.DirEntry, err error) error {
+	err := walk(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}

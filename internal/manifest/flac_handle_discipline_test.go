@@ -4,6 +4,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
@@ -65,7 +66,7 @@ var leakyFlacConstructors = map[string]string{
 // import alias rather than assuming the local name is `flac`.
 func TestNoLeakyFlacConstructors(t *testing.T) {
 	root := moduleRoot(t)
-	sweep, err := leakyFlacCalls(root)
+	sweep, err := leakyFlacCalls(filepath.WalkDir, root)
 	if err != nil {
 		t.Fatalf("walk %s: %v", root, err)
 	}
@@ -103,9 +104,11 @@ type flacSweep struct {
 }
 
 // leakyFlacCalls walks the Go files under root for calls of the
-// leakyFlacConstructors entries.
-func leakyFlacCalls(root string) (sweep flacSweep, err error) {
-	err = flacWalkDir(root, func(path string, d os.DirEntry, err error) error {
+// leakyFlacConstructors entries. It walks with walk: filepath.WalkDir, or in
+// a test a sweeptest.Removal's WalkDir, which stands in for another process
+// removing a directory while the sweep is under way.
+func leakyFlacCalls(walk func(root string, fn fs.WalkDirFunc) error, root string) (sweep flacSweep, err error) {
+	err = walk(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -119,11 +122,6 @@ func leakyFlacCalls(root string) (sweep flacSweep, err error) {
 	})
 	return sweep, err
 }
-
-// flacWalkDir is the walk leakyFlacCalls makes: filepath.WalkDir, which a
-// test replaces with a sweeptest.Removal to stand in for another process
-// removing a directory while the sweep is under way.
-var flacWalkDir = filepath.WalkDir
 
 // flacDirRule is leakyFlacCalls' answer for a directory: SkipDir for one
 // whose code is not this checkout's, nil to descend.
@@ -240,7 +238,7 @@ func TestFlacSweepSkipsOtherCheckouts(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	sweep, err := leakyFlacCalls(root)
+	sweep, err := leakyFlacCalls(filepath.WalkDir, root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -309,7 +307,7 @@ func TestFlacSweepSkipsMakeTestsTMPDIRAtTheRoot(t *testing.T) {
 		t.Run(row.name, func(t *testing.T) {
 			root := filepath.Join(t.TempDir(), "checkout")
 			writeFlacSweepTree(t, root, map[string]string{".git/HEAD": "ref: refs/heads/main\n", "p/probe.go": leakyFlacProbe})
-			want, err := leakyFlacCalls(root)
+			want, err := leakyFlacCalls(filepath.WalkDir, root)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -319,7 +317,7 @@ func TestFlacSweepSkipsMakeTestsTMPDIRAtTheRoot(t *testing.T) {
 				want.nonTest++
 				want.importers++
 			}
-			sweep, err := leakyFlacCalls(root)
+			sweep, err := leakyFlacCalls(filepath.WalkDir, root)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -349,16 +347,14 @@ func TestFlacSweepFinishesWhileMakeTestsTMPDIRChanges(t *testing.T) {
 		t.Run(gone.name, func(t *testing.T) {
 			root := filepath.Join(t.TempDir(), "checkout")
 			writeFlacSweepTree(t, root, map[string]string{".git/HEAD": "ref: refs/heads/main\n", "p/probe.go": leakyFlacProbe})
-			want, err := leakyFlacCalls(root)
+			want, err := leakyFlacCalls(filepath.WalkDir, root)
 			if err != nil {
 				t.Fatal(err)
 			}
 			dir := filepath.Join(root, sweeptest.MakeTestTmpDir, filepath.FromSlash(gone.dir))
 			writeFlacSweepTree(t, dir, map[string]string{"probe.go": leakyFlacProbe})
 			removal := &sweeptest.Removal{Dir: dir}
-			flacWalkDir = removal.WalkDir
-			t.Cleanup(func() { flacWalkDir = filepath.WalkDir })
-			sweep, err := leakyFlacCalls(root)
+			sweep, err := leakyFlacCalls(removal.WalkDir, root)
 			if !removal.Walked {
 				t.Fatal("the sweep did not walk through the stand-in, so this case proves nothing")
 			}
