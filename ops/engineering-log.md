@@ -97813,3 +97813,261 @@ report run on the CLI's works. 09409933's comment at that line says so.
   `TestEveryCitedTestNameExists` fails on a ghost citation planted in the
   copy's History and passes without it.
 - go1.27.3's gofmt lists none of the Go files round 2 touches.
+## 2026-11-14 — B903: a fault during a Write under way freezes what the sink played
+
+Worker b903, legion0, branch `fix/b903-xrun-fault-test`. Its base is main at
+0ddfda75: the brief's `BASE` is `origin/main` after a fetch, and this clone
+has no `origin` remote and `git fetch` needs an approval a headless session
+cannot give, so it is the local `main`, which `orch/b903` names too, at the
+brief's floor. Commits: dd6d642e (the four tests, red), c5f0321f (the
+reporter), 8400ce75 (the tests' rig checks what each session left, as
+`rig.stop` does), then this record. Every run: Go 1.27.3, the tags
+`ts_omit_webclient,ts_omit_debugeventbus`, TMPDIR `~/onebit/tmp`, 8 of the
+host's 16 cores. Controls are uncommitted edits to the committed tree, each
+predicted in writing first (`.tmp/_b903/controls.predictions.txt`), the
+edited file's bytes put back from memory once its binary was built. Round 1
+left no commits; its control patch (made at 92288694, a `Wrote` seam in
+`producer.go` and tests in `internal/alsapcm`) was a reference only: both
+are outside this round's budget, `internal/alsapcm` being guarded.
+
+### The hazard
+
+All four failures of `TestPlaybackFaultsOnAnXrunAndNeverRecovers` on
+`test (macos-latest)` (runs 42282368171 and 42290588523 on 11-06,
+43462407127 on 11-13 and 43587635348 on main on 11-14, as the brief lists
+them; `gh` is refused here) read `Occurrence:1 Frames:28672 … Entry:4097`:
+one track whose fault came at seven chunks of `chunkFrames` (4096,
+`open.go` 58) against 30080 to 31200 written. At 0ddfda75 the producer hands
+the sink a chunk in a Write and counts it only once the Write has returned,
+under the session's lock (`producer.go` 420-426: `inWrite` set, the lock let
+go, `out.sink.Write`, the lock taken, `inWrite` cleared, `o.written += n`;
+the native writes alike, `native.go` 357-363). The sink takes and publishes
+the frames inside the Write (`internal/alsapcm/sink.go` 634-646, `ring.sub +=
+n`), and its writer may hand them to the kernel, and the DAC play them,
+before that count. The reporter capped the occurrence heard at the count
+(`reporter.go` 141, `min(max(p.Played-heard.start, 0), heard.written)`) and
+froze the fault there (183-190). So a fault in the window between a later
+Write's publish and its count froze the position up to a Write short of what
+played: at an xrun the sink counts every frame it wrote played (`Sink.xrun`,
+`sink_writer.go` 360-371, `Played = ring.wr`), 30080 to 31200 there, and the
+cap said 28672.
+
+### Why Played bounds it, in production
+
+- PCM: `s.pos.Played = min(max(s.pos.Played, played), s.ring.wr)`
+  (`internal/alsapcm/sink_writer.go` 349, `establish`), and every other write
+  of it sets it to `ring.wr` (366 at an xrun, 595 at a pause's release, 804
+  at a drain's end); `ring.wr` never passes `ring.sub`, the writer writing
+  only what was submitted (`sink_ring.go` 10-12, `pending` 32), and
+  `Position` reports the two as Written and Submitted (`sink.go` 797-806).
+- Native DSD: `s.played = max(s.played, min(played*int64(s.word),
+  s.submitted))` (`sink_dsd_writer.go` 387, `measureNative`), `submitted`
+  growing inside `WriteDSD` as it takes bits (`sink_dsd.go` 892) and
+  `Position` reporting it (1157-1161).
+
+A sink never counts played more than it took, the frames of a Write under way
+that it took already counted. And for the occurrence the producer writes,
+every frame its sink took past the occurrence's start is the occurrence's:
+the producer writes in play order and no other occurrence before that Write
+returns. `s.writing` and `inWrite` move on the producer's goroutine alone
+(`producer.go` 139, 207, 297, 320, 369, 420, 424, 615, 638; `native.go` 357,
+361, 386; `convert.go` 301, in `serveLocked`, which only the producer runs;
+Start's at `session.go` 595, before the producer exists), and a converted
+occurrence's join window counts as its own (`convert.go` 262).
+
+### The fix (c5f0321f)
+
+`reporter.go` 137-162 (line numbers from here on are c5f0321f's): for the
+occurrence heard while its Write is under way (`s.inWrite && s.writing ==
+heard`) the frames played are `max(Played - start, 0)` with no cap, so its
+position, and the fault frozen from it (`f.Frames = s.posFrames`, 203), is
+`from + max(Played - start, 0)`; every other occurrence keeps `min(…,
+written)`. Two other caps stay as they were. The native crossing position
+(131) is followed, in the same step, by the heard position, which for the
+occurrence written is the exact one, and the engine takes the later
+(`engine/events.go` 167-175). The observation's threshold (190) is a lower
+bound that delays `streaming_observed` by less than a Write and never claims
+it early. The crossing test (115), the submission gate (91), the producer,
+the sinks and `native.go` are unchanged.
+
+### The same quantity at the bookkeeping
+
+A report step holds the session's lock from its first read of the session to
+its last (`reporter.go` 53 to 247), and the producer's count is one hold of
+it (`producer.go` 423-427), so a step sees the Write under way or counted,
+never half of it. At the count `n` is every frame the Write took
+(`sink.go` 587-595: Write returns the frames it took, each counted once
+published, 638-646), so `start + written` is then all the sink took of the
+occurrence, which Played does not pass: `min(Played - start, written)` is
+`Played - start`, the frame the step before reported for the same Played.
+The position neither steps back nor moves at the count, and Played only rises
+(349's `max`). Under the old cap the count was a jump, which a test that only
+asks "never back" accepts:
+`TestNativeIntegrationThePositionIsOneQuantityAcrossAWritesBookkeeping` holds
+playback with 9600 frames played, 8192 counted and 12192 taken; before the
+fix the position read 8192, then 9600 once the Write was counted; with it,
+9600 both times.
+
+### A panic inside a later Write
+
+A panic in `out.sink.Write` (`producer.go` 422) unwinds past 423-426, so
+`inWrite` stays set and `s.writing` stays the occurrence: on the way out
+`producerExit` (105-114) sets `producerDone` and serves the cuts, and
+`recoverFault` (`session.go` 347-352) records the session's fault,
+`backend_failed` (`faulted`, 333-343); neither touches them. The producer is
+gone, so nothing more is submitted, and the frames the sink holds past the
+occurrence's start are those its Writes took, the panicked one's taken part
+among them (published before the panic). Played is at most them (the clamps
+above), so `Played - start` is exactly the occurrence's content the kernel
+established played, and the fault names it; the cap named the count before
+that Write while the sink's writer went on playing what it took.
+`TestNativeIntegrationAPanicInALaterWriteFreezesWhatTheSinkPlayed` reads the
+session after the fault, the Write still under way, and the fault at 9600
+(8192 before the fix).
+
+### Not this round: a fault inside an occurrence's first Write
+
+The crossing test still refuses an occurrence with nothing counted
+(`reporter.go` 115, `o.written == 0`), so during an occurrence's first Write
+the occurrence heard is its predecessor, if any, and a fault there names the
+predecessor at its own end, or the first occurrence (204-205), a panic in
+that Write included. That, and the gapless attribution, are backlog B903G's.
+`TestNativeIntegrationAPredecessorsPositionStopsAtItsOwnEnd` holds a gapless
+successor's first Write with the DAC 1408 frames into it: the predecessor is
+heard at its own 8192 frames, and stays capped.
+
+### The tests and the injection route
+
+`Config.OpenSink` returns `*alsapcm.Sink` (`backend.go` 46) and cannot hand
+the session a wrapper, but `output.sink` is the `streamSink` interface
+(`session.go` 133, `native.go` 112-123). The tests' `heldWrite` wraps it as
+the sink opens, in `Config.Notify`'s `NoteOpened` (`session.go` 747), on the
+goroutine that opened it, before the session makes it current or starts the
+producer and the reporter (Start spawns them after, 612-624). It delegates
+everything to the real Sink over the fake kernel; its one held Write is the
+first a predicate names, the sink taking the first `take` of its frames
+before the hold, and it returns, or panics, only once released. The
+producer's bookkeeping is the real one: `writeAll` calls the wrapper's Write.
+The fake kernel is `internal/alsapcm`'s `export_test.go`, which a playback
+test reaches only through the native-integration overlay
+(`scripts/native-integration-overlay.py`), so the tests are in
+`internal/player/playback/native_integration_test.go`, the file the overlay
+builds, named `TestNativeIntegration…` so that CI's native-qualification job
+runs them (`.github/workflows/gate.yml` 651-659, `-run '^TestNativeIntegration'`,
+ubuntu only); `make test` and the other CI legs do not build that file. It
+and `reporter.go` are outside the qualification gate's `GuardedPaths` and
+`guardedPrefixes` (`internal/player/qualification/version_gate.go` 20-36), so
+nothing is bumped. `internal/alsapcm/playback_fault_test.go`, guarded, stays
+as it is: its `[30000, Total]` window keeps passing (below), and C1 is the
+exact pin. The rig's `stop`, registered with `t.Cleanup`, lets every hold go
+first, then releases the session, joins the backend (the teardown joins the
+producer before it closes anything, `session.go` 1672) and checks what the
+session left, as `rig.stop` does: no overlap, every goroutine joined, every
+content closed, every open of the node closed once. The reporter is ticked by
+hand, a second send the barrier.
+
+- C1, `TestNativeIntegrationAFaultInALaterWriteFreezesWhatTheSinkPlayed`:
+  the fake DAC free and an xrun at 30000 frames written, as the alsapcm test
+  has it; held is the first Write after one counted whose frames take the
+  sink past 30000, the eighth, taken whole and held before it returns. The
+  fault is an xrun in occurrence 1 at the frames the kernel was given
+  (31200), the last position before it the same, none after it.
+- `TestNativeIntegrationThePositionIsOneQuantityAcrossAWritesBookkeeping`:
+  the third Write held with 4000 of its 4096 frames taken, the DAC played
+  200 ms (9600 frames, at 50 ms periods) and then given no time, the sink's
+  next STATUS parked so nothing it counts played can move. The position is
+  9600, red before the fix (8192). Then the producer counts the Write and
+  holds at its next step, no Write under way (`Seams.ProducerStep`), and the
+  position is still 9600, green before the fix too, the cap now covering
+  what played. Each assertion's comment says which it is.
+- `TestNativeIntegrationAPredecessorsPositionStopsAtItsOwnEnd` and
+  `TestNativeIntegrationAPanicInALaterWriteFreezesWhatTheSinkPlayed`: above.
+
+### Red, green, red again; the controls
+
+At dd6d642e, the tests over 0ddfda75's production code (`-race`): C1 red
+(`fault {Reason:xrun … Frames:28672 …}; want an xrun in occurrence 1 at the
+31200 frames the kernel was given`), the bookkeeping case red before the
+count (8192 against 9600) and green after it, the panic case red (8192
+against 9600), the predecessor case green, every other overlay test green,
+no data race. At c5f0321f the four green. The controls
+(`.tmp/_b903/controls.py`) at 8400ce75, 5 of 5 as predicted:
+
+- K0, the committed tree: the four green.
+- K1, the fix reverted: C1, the bookkeeping case (its before-count assertion
+  alone) and the panic case red, with the messages above; the predecessor
+  green. Red again.
+- K2, the heard position's cap removed for every occurrence: the predecessor
+  red (its position 9600, past its own 8192 frames), the other three green.
+- K3, the cap removed whenever a Write is under way, `s.writing == heard` not
+  asked: the predecessor red the same way, the others green. The occurrence
+  asked is load-bearing.
+- K4, the cap removed for the occurrence the producer writes, `inWrite` not
+  asked: the four green, as predicted: outside a Write, Played never passes
+  what the producer counted of the occurrence it writes, so the `inWrite`
+  conjunct changes no value; it keeps the change to the window it is for.
+
+`git status` was empty after each batch.
+
+### Runs
+
+At 8400ce75 (`.tmp/_b903/r50.py`, `.tmp/_b903/slot.py`):
+
+- `-race -count=50`, each test alone from one prebuilt binary, GOMAXPROCS 8,
+  outside the build slot: the four new tests 50 of 50 each, no data race;
+  `TestPlaybackFaultsOnAnXrunAndNeverRecovers` (`./internal/alsapcm`) 50 of
+  50 with 0ddfda75's `reporter.go` (its bytes from `git show`, put back once
+  the binary was built; the two binaries' hashes differ) and 50 of 50 at the
+  fix, no data race, no skip.
+- The same test from the same two binaries, 300 runs each at GOMAXPROCS 1
+  beside 8 busy loops, all pinned to CPUs 0-7, in the slot: 300 of 300 at the
+  base and at the fix. The window CI's macOS runner met (the producer
+  descheduled between a Write's publish and its count while the writer
+  reaches the xrun and the reporter its step) did not open on this host;
+  the sightings and the held Write are the evidence, and C1 the pin.
+- `go test -race -count=1 -timeout 120m -p 2 ./internal/player/...`
+  (GOMAXPROCS 4), in the slot: every package ok, in 91 s (dsdconv 43 s,
+  openhome 38 s, engine 24 s, library 20 s, playback 2.5 s).
+- `go vet` with the tags as linux, darwin and windows: `./...` clean, and
+  `./internal/player/playback` with the overlay, which `./...` does not
+  build, clean, each run again on an empty build cache to rule out a cached
+  answer.
+- `./internal/alsapcm` under `-race` once, at the fix's content (8400ce75
+  changes a playback test file alone): ok, 80 s; `./internal/player/playback`
+  under `-race` once, and every `TestNativeIntegration…` test with the
+  overlay under `-race`: ok.
+- go1.27.3's gofmt lists neither touched file. Over a copy of the tree with
+  this record and the rules patch laid in, cmd/bridge's
+  `TestEveryCitedTestNameExists`, `TestNoDocblockNamesAnotherDeclaration`
+  and `TestNoBlankKeepers` pass, and a ghost citation planted in that copy's
+  log turns the first red, the only name it reports; `check-doc-budgets.py`
+  (`player.md` from 98,265 to 98,534 bytes of 100,000) and
+  `scripts/doc-split/verify_moves.py --base HEAD` are clean there.
+
+The rule is `rules-b903-r2.patch`, uncommitted: one line in `player.md`
+after the fault bullet, its long form in `ops/History-rules-player.md` at the
+end of "Player backend (B470 PR 4b2)"; `git apply --check` takes it. For a
+re-run on a Mac: from the branch, the overlay made again after every checkout
+(`python3 scripts/native-integration-overlay.py "$TMPDIR/b903.json"`, then
+`go test -tags ts_omit_webclient,ts_omit_debugeventbus -overlay
+"$TMPDIR/b903.json" -race -run '^TestNativeIntegrationAFaultInALaterWriteFreezesWhatTheSinkPlayed$'
+./internal/player/playback`), red with 0ddfda75's `reporter.go` checked out
+over the head's, green ×50 at the head.
+
+### Left
+
+- B903G: a fault inside an occurrence's first Write (above).
+- No deterministic native test: the native write is `o.out.native.WriteDSD`
+  on the concrete `*alsapcm.DSDSink` (`native.go` 359), which no wrapper
+  reaches, and holding it needs a seam in `native.go`, which is guarded. The
+  change covers that path by the same reasoning, the native clamp above.
+- After a panic inside a native `WriteDSD` that took bits (a defect in the
+  sink's own code: no seam reaches it), the final native report's accepted
+  prefix stays the producer's count (`native.go` 559-567), so the engine
+  drops a retiring position past it (`engine/native.go` 217) while the
+  fault keeps the sink's Played. No test reaches it; noted for B903G.
+- The rule on the backend's tests (`History-rules-player.md`, "The
+  backend's tests run…") says `internal/alsapcm` is "the one place that can
+  reach the fake kernel"; the native-integration overlay reaches it too, as
+  `native_integration_test.go` did before this round. Not corrected here,
+  beside this round's rule.
