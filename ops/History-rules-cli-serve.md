@@ -5507,7 +5507,16 @@ it. `bridge doctor` keeps the player checklist's read of the outputs body
 the same way since round 2 (`output.md`'s line): a read the process keeps for
 each config (`cliOutputsReads`), which every gather over that config waits
 on, so a root that holds it holds one goroutine however often the
-launcher's doctor row runs.
+launcher's doctor row runs; and since round 3 its builders' MPD inspections
+(`output.md`'s next line): one in flight for what it reads
+(`cliMPDInspections`, `api.MPDInspections`), which every gather's probe,
+the gate's or a build's, waits on rather than begin another. No use of the
+launcher's doctor row begins a runner or a config's load of its own: the
+runner is the process's (`cliRootProbes`), each use beginning a run of it,
+and the load a work of it keyed by the file's path, its bytes and the
+`BRIDGE_` variables (`doctorConfigKey`), which a later use joins while it
+is out; what each use still reads with no bound is the config file itself,
+its stat and its read, backlog B884's.
 
 *What it does not do.* No work is cancelled, nothing is unmounted, and no
 probe runs in another process: a stat the kernel holds is let go by the
@@ -5556,23 +5565,37 @@ run's goroutine (`tokenFile`).
 `TestTheChecklistSaysABoxThatDoesNotAnswerWasNotRead`,
 `TestDoctorRunsInOneProcessShareOneReadOfTheBox`,
 `TestADoctorRunTakesOnlyTheReadOfItsOwnConfig`,
-`TestAWaitOnASharedReadEndsAloneWithItsContext` and
-`TestBridgeDoctorPrintsHealthyRootsAsBefore` in cmd/bridge; and
+`TestAWaitOnASharedReadEndsAloneWithItsContext`,
+`TestDoctorRunsInOneProcessShareOneMPDInspection` and
+`TestBridgeDoctorPrintsHealthyRootsAsBefore` in cmd/bridge;
+`TestBuildersSharingATableBeginOneInspection`,
+`TestAProbeWaitingOnASharedInspectionStopsWithItsOwnContext`,
+`TestAnEditedConfigurationBeginsAnInspectionOfItsOwn`,
+`TestASharedInspectionThatPanicsLetsItsKeyGo` and
+`TestTheBuildsProbeSharesTheTableToo` in internal/api; and
 `TestLibraryRootsOfIsTheRootsLoadGives` in internal/config. No filesystem a
 test can make stops answering, so each stands a root that does not answer in
 where the step touches it: the probe's `stat` and `readDir`
 (`doctor.NewRootProbesForTest`), the count (`RootProbes.countWatches`),
-`Validate`'s containment check (`config.SetRootContainmentForTest`), and the
+`Validate`'s containment check (`config.SetRootContainmentForTest`), the
 checklist's build (`boxStall`: its read of the indexed tracks held), whose
-reads it counts. A run's time is its runner's (`RootProbes.now` and
-`timer`: `time.Now` and `time.NewTimer`'s in production), and since round 2
-the four cases that held a run to how long it took read its waits on a
-test clock that moves only when the case moves it (`clockOf`): the wait a
-run sets, the instant its bound passes, and a wait it should not set, none
-of which a loaded host's scheduling moves; cmd/bridge's stopped console run
-keeps a lower bound instead, its return after its stop, under its 90 s
-deadline, below its root's ten-minute bound. The record is in
-`ops/engineering-log.md`, 2026-11-13, B650 and B650 round 2.
+reads it counts, and MPD's inspection (`mpdConfHeld`, `heldInspection`),
+whose inspections begun they count. A run's time is its runner's
+(`RootProbes.now` and `timer`: `time.Now` and `time.NewTimer`'s in
+production), and since round 2 the four cases that held a run to how long
+it took read its waits on a test clock that moves only when the case moves
+it (`clockOf`): the wait a run sets, the instant its bound passes, and a
+wait it should not set, none of which a loaded host's scheduling moves.
+Since round 3 cmd/bridge's stopped console run is stopped once it waits on
+the root that does not answer (`RootProbes.SetOnRootWaitForTest`) and the
+other root's probe has made its stat and its listing (`rootStall.probed`),
+under its 90 s deadline, below its root's ten-minute bound; a case that
+gives a wait on the checklist's read up does so through the wait's timer
+(`outputsReads.timer`, `readTimers`) once the read it waits on is held at
+the box, every other wait keeping bridge doctor's bound; and the shared
+inspection's cases read its deadline on the builder's clock
+(`lockedClock`). The record is in `ops/engineering-log.md`: B650 on
+2026-11-13, and its rounds 2 and 3 on 2026-11-14.
 ## B828 — a state file that holds nothing refuses the start in the bridge's words (2026-11-13)
 
 - **…and a state file that holds nothing, empty or JSON's white space alone (of a file larger than the 16 MiB and one byte it is read to, all that was read, nothing past it read), refuses the node's start before the node is built, whatever `tailscale.hostname` or the auth key says, in the bridge's words (`tsnet.EmptyStateError`, naming no path: a copy of the file keeps the node; moved aside, a new device follows, and what that costs), which serve's tailnet line and `bridge tsnet auth` and `status` (exit 1) print and the console's tile shows in LastError (`tsnetAdminStatus`, from `LastStartError`); Tailscale's own start refuses that file, in words about a TPM-sealed state, and the bridge moves and replaces nothing** (2026-11-13, backlog B828, the review of its brief, and its round 2). **Don't take a state file that holds nothing for no node, build or start the upstream node over it, ask `tailscale.hostname` before it, move, replace or write the file, name a path in its words, count a byte JSON does not skip as nothing, or read past the bound to decide it.** `TestAStateFileThatHoldsNothingRefusesTheStart`, `TestAStateFileThatIsNotThereStillStartsANewNode`, `TestOnlyJSONWhiteSpaceIsAStateThatHoldsNothing`, and cmd/bridge's `TestTheCommandsRefuseAStateFileThatHoldsNothingInTheBridgesWords` and `TestServeRefusesAStateFileThatHoldsNothingInTheBridgesWords` pin it. → History-rules-cli-serve.md
