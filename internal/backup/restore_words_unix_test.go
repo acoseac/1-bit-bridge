@@ -58,10 +58,12 @@ func TestARestoreRefusedForAnotherRestoreNamesItselfAndThatRestore(t *testing.T)
 	requireNamedAsGiven(t, "the refusal of B's restore", err, givenB, snapB)
 	c.requireUntouched(t, "the restore of B refused beside A's restore given up")
 
-	awaitMarker(t, root)
-	if s := readStuckMarker(t, root); !s.Restoring() || s.Snapshot != filepath.Base(snapA) {
-		t.Errorf("the marker beside the lock reads %+v, want A's restore", s)
-	}
+	// Read until it decodes as A's restore, never taken once it is there
+	// (backlog B899): no hold before A's was given up in root, and B's
+	// restore, refused by this process's mark, held nothing.
+	awaitMarker(t, root, "A's restore", func(s backup.StuckCheck) bool {
+		return s.Restoring() && s.Snapshot == filepath.Base(snapA)
+	})
 	if _, err := backup.VerifySnapshotAsAnotherProcessForTest(t.Context(), snapB, backup.VerifyOptions{LockWait: 10 * time.Second}); !errors.Is(err, backup.ErrCheckStillRunning) ||
 		!strings.Contains(err.Error(), blocker) {
 		t.Errorf("another process's verification of B beside A's restore given up answered %v, want ErrCheckStillRunning naming %q", err, blocker)

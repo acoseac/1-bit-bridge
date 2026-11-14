@@ -96686,3 +96686,160 @@ version OK: 2bebca26..HEAD".
 - `parkCheck`'s other users (B872's cases) still park the first check they
   see; `parkCheckOf` is there for them.
 - Round 1's follow-ups stand.
+## 2026-11-14 — B899: the stuck marker is waited for until it decodes, not until it exists
+
+Worker b899t, legion0, branch `fix/b899-await-marker-decodes` from main
+fe5e331d. Commits: cbd6544d (the helper, its three callers and its cases),
+then this record. Every run: Go 1.27.3, the tags
+`ts_omit_webclient,ts_omit_debugeventbus`, TMPDIR `~/onebit/tmp`, 8 of the
+host's 16 cores; controls are uncommitted edits to the committed tree, each
+predicted in writing first (`.tmp/_b899t/controls.predictions.txt`), the
+edited files' bytes put back from memory once their binary was built.
+
+### The hazard
+
+Main's gate run 43527630159 (fe5e331d, `test (macos-latest)`) failed
+`TestARestoreRefusedForAnotherRestoreNamesItselfAndThatRestore` with "the
+marker does not read: unexpected end of JSON input". The marker's writer
+creates it (`os.OpenFile` with `O_CREATE|O_EXCL`, `internal/backup/stuck.go`
+238) and writes it only after (243), and the tests' `awaitMarker`
+(`verify_stuck_test.go` 32-43 at fe5e331d) waited only until the file was
+there; `readStuckMarker` (`restore_mark_test.go` 21-28) then decoded it, so a
+read between the create and the write met an empty file. Production is not
+affected: a marker that does not parse reads as none (`stuckMarker`,
+`stuck.go` 362-372), so another process's admission goes on waiting for the
+folder's lock and asks the marker again a second later (`verify_lock.go`
+212-230, `markerPoll`), answering `ErrBackupsBusy` only past its wait, never a
+hold that is not there. The change is to tests alone; `internal/backup` is
+outside the qualification gate's `guardedPrefixes` and `GuardedPaths`
+(`internal/player/qualification/version_gate.go` 20-36), so nothing is bumped.
+
+### The port
+
+The helper is B871's round 5's (PR #1457). The brief names its source as
+6191017c, which this clone does not hold (`git cat-file -t 6191017c`: not a
+valid object). The local `fix/b871-restore-lows` at 53170036 (round 5's test
+commit is c37d4c95) matches every line the brief cites of it: `awaitMarker`'s
+count of reads (`verify_stuck_test.go` 46), `waitWithin`
+(`restore_mark_test.go` 39), `parkCheck` on `SetOnDatabaseOpenForTest`
+(`verify_stuck_test.go` 80: the branch began before B872 part 1 merged, so its
+diff from fe5e331d reverts that fix inside the same hunk) and
+`StuckCheckOf(root, backup.ProbeByDoctor)` (`restore_mark_test.go` 326,
+which does not build at fe5e331d). So it was taken from there by function,
+never by hunk: `awaitMarker` with its imports (`encoding/json`, `fmt`),
+`waitReserve` and `waitWithin` verbatim, and the three call sites
+(`TestAnAbandonedCheckKeepsItsHoldsUntilItsCheckerEnds`,
+`TestAGivenUpRestoreThatHoldsTheLockMarksTheFolderUntilItLetsGo`,
+`TestARestoreRefusedForAnotherRestoreNamesItselfAndThatRestore`, whose
+`readStuckMarker` after the wait goes, the helper answering the marker), their
+comments citing B899 where round 5's cite B871's rounds 2 and 5. `parkCheck`,
+`awaitParkedAndGivenUp`, `awaitEvent`, `awaitReader` and the rest stay as main
+has them. A grep at fe5e331d found no other caller of `awaitMarker` in
+`internal/backup`'s tests.
+
+### Where main's helper differs from round 5's
+
+- Its bound holds. Round 5 computed its number of reads once,
+  `max(int(waitWithin(t, 30*time.Second)/every), 1)`, so the reads' own time,
+  a hook's and a host that runs it late added up past 30 s. Main's
+  `awaitMarkerWithin` takes an absolute deadline from `waitWithin`, asks it
+  after every read, and cuts each pause to what is left of it;
+  `awaitMarker(t, root, what, want)` is `awaitMarkerWithin(t, root, what, want,
+  30*time.Second, t.Fatalf)`, and only the case that exhausts the budget
+  injects a limit and a `fatalf` of its own.
+- The hook is one call: `onMarkerRead(data, err)` after each `os.ReadFile`
+  returns and before the decode, on the helper's goroutine. `onMarkerRead` is
+  a package-level func in the test file, nil but in the helper's own cases,
+  set by `setOnMarkerRead`, which registers the cleanup that puts the
+  previous one back as it sets it; those cases are not parallel and start no
+  goroutine. No production hook is touched. #1457's round 6 takes main's
+  version.
+
+### The cases and the red
+
+- `TestTheMarkerWaitReadsAnEmptyMarkerUntilItDecodes`: the marker planted
+  empty, as the writer's `O_EXCL` create leaves it, and written whole inside
+  the hook once the helper has read it empty: the helper answers the written
+  hold, having read the empty file at least once and the marker at least
+  twice.
+- `TestTheMarkerWaitReadsAnotherHoldsMarkerUntilItsOwnReplacesIt`: snapshot
+  A's verification's marker, which a wait for A's restore refuses, replaced
+  inside the hook by A's restore's once read.
+- `TestTheMarkerWaitFailsAtItsDeadlineNamingWhatItsLastReadMet`: a 200 ms
+  limit and an injected `fatalf` that records, over no marker, a marker cut
+  short, another hold's marker, and a first read that answers once the whole
+  limit has passed (the hook sleeps the limit): each fails once, never before
+  its limit, with the helper's message naming its reads and what the last
+  met, and the slow read is its last.
+
+Red first, before the port, with a temporary adapter of the new signature
+that ran main's existence wait and then `readStuckMarker`: the empty-marker
+case failed 20 runs of 20, each at once, `verify_stuck_test.go:709: the marker
+does not read: unexpected end of JSON input`, which is `readStuckMarker`'s
+`t.Fatalf` (`restore_mark_test.go` 25) on its decode (24), reported at the
+case's call since the adapter, `awaitMarker` and `readStuckMarker` are
+helpers. The other two were red as well: the other hold's case answered the
+earlier hold's marker, its hook never called; in the exhausting case the
+no-marker row waited main's 30 s and failed through the test's own `t`, the
+cut and slow rows failed at the decode, and the other hold's row answered B's
+verification with no failure recorded. Then the port, and all three green.
+
+### Controls (`.tmp/_b899t/controls.py`; 10 of 10 as predicted)
+
+- C0, the committed tree: the three cases green.
+- C1, round 5's count of reads in place of the deadline: the exhausting case
+  red, its slow row reading 20 times ("its first read answered past the
+  limit, so it was its last") and its other rows failing at 194 to 196 ms,
+  "before its limit of 200ms"; the other two cases green.
+- C2, the hook's call taken out: the empty-marker case red after its 30 s (in
+  2922 reads, "the last met 0 bytes that do not decode"), the other hold's
+  case too (2919 reads, "the last met another hold's marker"), and every row
+  of the exhausting case (the hook's count, 0, against the message's 21).
+- C3, `want` not asked: the other hold's case red (A's verification answered
+  after one read) and that row of the exhausting case (B's verification
+  answered, no failure recorded); the empty-marker case green.
+- C4, the deadline asked one limit late: the slow row red (21 reads); the
+  other rows green, failing at 400 ms.
+- C5, the deadline at half the limit: the first three rows red, failing at 100
+  to 101 ms; the slow row green.
+- C6, the pause not cut to what is left of the deadline: green throughout, as
+  predicted. That cut shortens one pause by 10 ms at most, and no case pins
+  it.
+- C7, the message without what the last read met: every row of the
+  exhausting case red.
+- C8 to C10, each call site's `want` turned to refuse the marker its own hold
+  writes: each test red after the 30 s wait, naming the marker it met
+  (`TestAnAbandonedCheckKeepsItsHoldsUntilItsCheckerEnds`: 2915 reads, "the
+  last met another hold's marker", the check's, `Restore:false`; the given-up
+  restore's: 2916 reads, `Restore:true`; A's restore's: 2907 reads,
+  `Restore:true`): each wait asserts the hold its marker names, which in
+  `restore_words_unix_test.go` main's check after the wait asserted.
+
+`git status` was empty after the batch.
+
+### Runs
+
+At cbd6544d, the twelve tests of the four touched files, the three new among
+them, from one `-race` test binary in four lanes at once, GOMAXPROCS 2 each,
+`-test.count 50` (`.tmp/_b899t/lanes.py`):
+
+- quiet, outside the build slot (load 2 to 4, another worker's run in the
+  slot): every test 50 of 50, no data race; the lanes took 370, 453, 559 and
+  851 s;
+- beside 16 python busy loops, in the slot (load about 17): every test 50 of
+  50, no data race; the lanes took 769, 1003, 1276 and 3073 s.
+
+In the same slot session (`.tmp/_b899t/slot_session.py`): `go vet ./...` with
+the tags as linux/amd64, darwin/arm64 (`CGO_ENABLED=0`) and windows/amd64,
+clean. The windows leg does not compile `restore_source_unix_test.go` or
+`restore_words_unix_test.go` (`//go:build unix`; `go list` names them ignored
+there), so their coverage is the linux and darwin legs' and every run here.
+Then `go test -race -count=1 -timeout 120m ./internal/backup/`: ok (735.3 s).
+go1.27.3's gofmt lists none of the four files, and cmd/bridge's
+`TestEveryCitedTestNameExists`, `TestNoDocblockNamesAnotherDeclaration` and
+`TestNoBlankKeepers` pass over the tree with this record. The rule is
+`rules-b899t.patch`, uncommitted: one bullet in `build-ci-tests.md`, after
+B872's bullet on a check given up (wait for the marker until it decodes as the
+hold awaited, bounded by a deadline asked after every read); `git apply
+--check` takes it, and the budgets check is clean with it (the worst load from
+76.1% to 76.3%).
