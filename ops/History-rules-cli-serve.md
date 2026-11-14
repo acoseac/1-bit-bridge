@@ -4902,6 +4902,8 @@ attempt; a racing replacement ends exclusive creation without following
 it. A per-mark seam pins the removal/create window. The Unix staging race
 is skipped on Windows, which does not permit replacing that open file;
 marker symlinks are exercised where the Windows account can create them.
+Since B871's round 5 the marker is published from a temporary file through
+a link ("B871 round 5" below).
 
 Schema table and column collection distinguish missing names from query,
 Scan and iteration errors. `columnsOf` checks `rows.Err()` after the loop,
@@ -5615,3 +5617,21 @@ during the admin port's probe (`refuseIfBridgeMayBeRunning`) reads as a bridge
 answering there.
 
 The record is in `ops/engineering-log.md`, 2026-11-12, B871.
+
+## B871 round 5: the stuck marker published whole (2026-11-14)
+
+The B653 PR 1 round 12 line's marker clause since this round: a stuck marker is published whole once the old entry is removed, its bytes in a temporary file created exclusively beside it, written and closed with both errors checked, then linked to the marker's name, which refuses a racing replacement, the temporary file removed on every path; never written in place, or published by a rename, which replaces a racing entry.
+
+Backlog B899: main's CI on macOS (run 43527630159, `test (macos-latest)`, attempt 1) failed `TestARestoreRefusedForAnotherRestoreNamesItselfAndThatRestore` with "the marker does not read: unexpected end of JSON input". `writeMarker` removed the old marker, created the new one with `O_CREATE|O_EXCL`, wrote it and closed it, so a read between the creation and the write met an empty file, and main's `awaitMarker` waited only for the file to exist. Production's reader (`stuckMarker`) takes a marker that does not decode for none, so another process reading in that window waited its lock wait out and answered `ErrBackupsBusy` without naming what held the folder: a worse message, not data integrity.
+
+`writeMarker` now writes the marker's bytes to `.check-still-running.tmp` (`stuckMarkerTmpName`), created exclusively once the old marker is removed, with the folder's owner (`fsutil.KeepOwner`), checks the write's and the close's errors, and publishes it with `os.Link(tmp, marker)`, which fails where anything stands at the marker's name, as the exclusive creation of the marker did, so round 12's refusal of a racing replacement stands (`TestTheStuckMarkerNeverFollowsAReplacement`: a symlink planted after the removal is left untouched, and now nothing is said of it). The temporary file is removed on every path once it is made, "writes" (`SetOnMarkerWriteForTest`) is said only once a marker is published, and `removeMarker` and `clearStaleMarker` remove the temporary name with the marker. The best-effort contract and the removal ordering with `after` stand: the write still waits for a removal of a stale marker under way, then takes its mark's lock, then removes the old marker. A marker is written only for a hold that holds the folder's lock, one hold of a folder holds it at a time in a process, and a releasing hold writes none, so no two writes of one folder's marker meet at the temporary name.
+
+Windows. `os.Link` is `syscall.CreateHardLink(n, o, 0)` (go1.27.3, `src/os/file_windows.go:321`), which fails where the new name exists: Go's own hard-link test (`src/os/os_test.go:900-915`) requires a second `Link` onto an existing name to answer a `*LinkError` whose `Err` is `IsExist`, on every platform that has links. The temporary file's exclusive creation is `CREATE_NEW`, not following a reparse point (`src/syscall/syscall_windows.go:436-438`). A reader opens the marker with `FILE_SHARE_READ | FILE_SHARE_WRITE` and no `FILE_SHARE_DELETE` (`syscall_windows.go:395`; `fsutil.ReadAsFile` opens through `os.Open` there, `internal/fsutil/notafile_other.go:13`), so a reader that holds the old marker makes its removal fail, and the write gives up, as before. It cannot refuse the link: no marker stands at the name once the old one is removed, and no reader opens the temporary file. A reader that opens the new marker before the temporary name is removed keeps that removal from landing (one file, two names): the marker is published and the temporary file stays, until the hold's own `removeMarker` or the next holder's `clearStaleMarker` removes it; meanwhile a later hold of this process writes no marker of that folder (best effort). Nothing new is logged.
+
+A filesystem that makes no hard link (FAT, exFAT) refuses the link, so no marker is published there, as where a marker cannot be written: another process's wait ends `ErrBackupsBusy`.
+
+Rejected:
+
+- A rename into place (`os.Rename`), which replaces a racing entry at the marker's name, the round 12 test's planted symlink among them.
+- A temporary name of its own for each write, which a removal could not name: one hold of a folder writes at a time.
+- Writing in place where the link fails, which brings back the read that meets an empty marker on exactly those filesystems.

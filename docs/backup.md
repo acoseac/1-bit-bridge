@@ -134,8 +134,11 @@ against replacement with another regular file or a hard link, a parent
 directory replaced with a link, or SQLite's own `VACUUM INTO` write, which
 uses a path. A root-run backup or restore over a tree an untrusted account
 can rename is outside this protection. A stuck-check marker removes an
-existing entry and creates a new file exclusively, refusing a racing
-replacement at that final entry; its parent traversal is not anchored.
+existing entry, writes its bytes to a file created exclusively beside it and
+links that file into place, refusing a racing replacement at that final
+entry, so another process reads the marker whole or not at all; its parent
+traversal is not anchored. A filesystem that makes no hard links (FAT,
+exFAT) takes no marker: another process then waits for the lock.
 
 Every step a check takes while it holds the backups folder (marking a
 snapshot as being checked again, the check, writing its verdict, the prune
