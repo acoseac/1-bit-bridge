@@ -74,6 +74,9 @@ func TestAnIncompleteNoBarrierRecheckLeavesItsRecordTrusted(t *testing.T) {
 	})
 	a := awaitRecheckAnswer(t, begun, done)
 	pass()
+	// A check whose grace never began is still held at the open: let go, so
+	// the drain below and the assertion after it say so.
+	letGo()
 	awaitClean(t)
 	select {
 	case <-begun:
