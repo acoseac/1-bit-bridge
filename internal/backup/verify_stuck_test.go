@@ -3,7 +3,9 @@ package backup_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -29,37 +31,40 @@ func awaitSlotFree(t *testing.T) {
 	}
 }
 
-// markerWritten answers a channel closed once the marker of a check that did
-// not end has been written whole beside the lock of the backups folder at
-// root: its write's "writes" event, which comes once the write and its close
-// have ended (SetOnMarkerWriteForTest). Install it before anything there is
-// given up.
-func markerWritten(t *testing.T, root string) <-chan struct{} {
+// awaitMarker reads the marker of a hold given up beside the lock of the
+// backups folder at root, which the hold writes on a goroutine of its own,
+// until it decodes as the hold want takes (what names it), and answers it: a
+// read every 10 ms, as many as its wait holds (30 s, capped by the test
+// binary's deadline: waitWithin), touching no hook, so a write that ended
+// before the wait began is found as one under way is (backlog B871's round
+// 5). A marker not there yet, one that does not decode, and another hold's,
+// left by an earlier one, are read again; past the last read the test fails,
+// naming what that read met.
+func awaitMarker(t *testing.T, root, what string, want func(backup.StuckCheck) bool) backup.StuckCheck {
 	t.Helper()
+	const every = 10 * time.Millisecond
+	reads := max(int(waitWithin(t, 30*time.Second)/every), 1)
 	marker := filepath.Join(root, backup.StuckMarkerName)
-	written := make(chan struct{})
-	var once sync.Once
-	t.Cleanup(backup.SetOnMarkerWriteForTest(func(event, m string) {
-		if event == "writes" && m == marker {
-			once.Do(func() { close(written) })
+	last := ""
+	for i := range reads {
+		if i > 0 {
+			time.Sleep(every)
 		}
-	}))
-	return written
-}
-
-// awaitMarker waits until the marker of a check that did not end, which its
-// worker writes on a goroutine of its own, has been written whole beside the
-// lock of the backups folder at root (written, markerWritten's), failing the
-// test past its wait: 30 s, capped by the test binary's deadline
-// (waitWithin). A wait for the file alone let a reader meet it empty, as its
-// writer makes it before it writes (backlog B871's round 2).
-func awaitMarker(t *testing.T, root string, written <-chan struct{}) {
-	t.Helper()
-	select {
-	case <-written:
-	case <-time.After(waitWithin(t, 30*time.Second)):
-		t.Fatalf("no marker of the check that did not end was written beside the lock of %s", root)
+		data, err := os.ReadFile(marker)
+		var s backup.StuckCheck
+		switch {
+		case err != nil:
+			last = err.Error()
+		case json.Unmarshal(data, &s) != nil:
+			last = fmt.Sprintf("%d bytes that do not decode", len(data))
+		case !want(s):
+			last = fmt.Sprintf("another hold's marker, %+v", s)
+		default:
+			return s
+		}
 	}
+	t.Fatalf("no marker of %s was read beside the lock of %s in %d reads; the last met %s", what, root, reads, last)
+	return backup.StuckCheck{}
 }
 
 // parkCheck parks the first check that reaches SQLite's open of its
@@ -227,7 +232,6 @@ func TestAnAbandonedCheckKeepsItsHoldsUntilItsCheckerEnds(t *testing.T) {
 	time.Sleep(1100 * time.Millisecond)
 	c := captureT(t, src)
 	root := filepath.Dir(c.Dir)
-	written := markerWritten(t, root)
 	other, err := backup.Snapshot(t.Context(), storeWithTracks(t, 5))
 	if err != nil {
 		t.Fatal(err)
@@ -268,11 +272,15 @@ func TestAnAbandonedCheckKeepsItsHoldsUntilItsCheckerEnds(t *testing.T) {
 		t.Errorf("the verification in another backups folder waited %v to be refused", took)
 	}
 	// The kernel's lock: a verification as another process makes it, once
-	// the check's marker is written whole. In this process the check's mark
+	// the check's marker reads whole. No hold before the check's was given up
+	// in root (the earlier verifications there ended), so the marker read is
+	// the check's, which its words say. In this process the check's mark
 	// refuses it first (verifyAndThen asks this process's marks before any
 	// filesystem); another process's read of the marker is
 	// TestACheckThatDidNotEndInAnotherProcessHoldsTheFolderUntilItEnds's.
-	awaitMarker(t, root, written)
+	awaitMarker(t, root, "the check given up", func(s backup.StuckCheck) bool {
+		return !s.Restoring() && s.Snapshot == filepath.Base(c.Dir)
+	})
 	if _, err := backup.VerifySnapshotAsAnotherProcessForTest(t.Context(), older, backup.VerifyOptions{LockWait: time.Second}); !errors.Is(err, backup.ErrCheckStillRunning) {
 		t.Errorf("a verification as another process beside the check that runs on answered %v, want ErrCheckStillRunning", err)
 	}
