@@ -56,10 +56,15 @@ type hold struct {
 	otherCause bool
 	other      error
 	otherStep  string
-	// established is what the holder has established, published before each
-	// of its steps that can block (know), which its caller's expiry answers
-	// with (expired) and a give-up of it keeps (givenUp).
+	// established is what the holder has established, published as each of
+	// its steps answers (knowIn), which its caller's expiry answers with
+	// (expired) and a give-up of it keeps (givenUp).
 	established established
+	// check is its check's answer (takeFinding), set once, outside the lock:
+	// what the check answered, or checkClosed where a give-up of the hold
+	// (giveUpAs, under the lock) or its caller's give-up of the check
+	// (dropCheck) came first.
+	check atomic.Pointer[checkAnswer]
 	// markless: a give-up of the hold by its caller (abandon) raises no mark,
 	// since the holder waits for a write it handed to a hold of its own
 	// (handOff), or has ended its wait, or, a restore's, holds no lock yet
@@ -270,6 +275,9 @@ func (h *hold) giveUpAs(done <-chan struct{}, step string, byCaller bool, why er
 		h.why, h.whyStep = why, step
 		h.cancel()
 	}
+	// A check that had not answered by now answers too late to be taken
+	// (takeFinding, backlog B895's third round).
+	h.check.CompareAndSwap(nil, checkClosed)
 	if h.mark != nil || h.ended || (byCaller && h.markless) {
 		return
 	}
@@ -480,7 +488,19 @@ func (h *hold) drop() {
 // late is dropped, or handed to late where that is set, which h waits for
 // too. A panic in the step is raised again on the caller's goroutine.
 func stepOf[T any](h *hold, by time.Time, words string, step func(ctx, given context.Context) T, late func(T)) (T, bool) {
-	v, _, answered := runStep(h, by, words, false, step, late)
+	v, _, answered := runStep(h, by, words, false, step, late, nil)
+	return v, answered
+}
+
+// stepKnowing is stepOf for a step of a verification whose answer says an
+// error of its own (outcome): published to h as the step answers, on its own
+// goroutine, unless the step was given up first (knowIn), so its caller's
+// expiry and a give-up after it say it whichever comes; and, where a give-up
+// of the hold ended the step's signal as it answered and its worker took the
+// answer all the same, kept for the worker's own answer (keep; backlog B895's
+// third round).
+func stepKnowing[T any](h *hold, by time.Time, words string, step func(ctx, given context.Context) T, outcome func(T) error) (T, bool) {
+	v, _, answered := runStep(h, by, words, false, step, nil, outcome)
 	return v, answered
 }
 
@@ -492,9 +512,9 @@ func stepOf[T any](h *hold, by time.Time, words string, step func(ctx, given con
 // admitted (admitted false: write never runs, and its holder writes its
 // INCOMPLETE in a step of its own), or after it, and ends the write's signal
 // (giveUpAs), which write asks before its rename and before each removal of a
-// veto.
-func publishOf[T any](h *hold, by time.Time, write func(given context.Context) T) (v T, admitted, answered bool) {
-	return runStep(h, by, stepWrite, true, func(_, given context.Context) T { return write(given) }, nil)
+// veto. Its failure (outcome, nil for none) is published as stepKnowing's.
+func publishOf[T any](h *hold, by time.Time, write func(given context.Context) T, outcome func(T) error) (v T, admitted, answered bool) {
+	return runStep(h, by, stepWrite, true, func(_, given context.Context) T { return write(given) }, nil, outcome)
 }
 
 // onAdmission, nil in production, runs while a verdict's write is admitted,
@@ -514,12 +534,14 @@ var onAdmissionLocked atomic.Pointer[func(*hold)]
 var onAbandonBlocked atomic.Pointer[func(*hold)]
 
 // runStep is stepOf, and publishOf where publish is set: a verdict's write,
-// admitted only where the hold is not given up as its step is registered.
-func runStep[T any](h *hold, by time.Time, words string, publish bool, step func(ctx, given context.Context) T, late func(T)) (v T, admitted, answered bool) {
+// admitted only where the hold is not given up as its step is registered; and
+// stepKnowing where outcome is set.
+func runStep[T any](h *hold, by time.Time, words string, publish bool, step func(ctx, given context.Context) T, late func(T), outcome func(T) error) (v T, admitted, answered bool) {
 	type answer struct {
 		v        T
 		panicked any
 		ok       bool
+		known    bool
 	}
 	sig := &stepSignal{}
 	sig.ctx, sig.cancel = context.WithCancel(context.Background())
@@ -549,7 +571,18 @@ func runStep[T any](h *hold, by time.Time, words string, publish bool, step func
 				out <- answer{panicked: r}
 			}
 		}()
-		out <- answer{v: step(h.ctx, sig.ctx), ok: true}
+		v := step(h.ctx, sig.ctx)
+		known := false
+		if outcome != nil {
+			known = h.knowIn(sig.ctx, outcome(v))
+		}
+		if hook := onStepAnswered.Load(); hook != nil {
+			h.mu.Lock()
+			dir := filepath.Join(h.root, h.snapshot)
+			h.mu.Unlock()
+			(*hook)(dir, words)
+		}
+		out <- answer{v: v, ok: true, known: known}
 	}()
 	timer := time.NewTimer(time.Until(by))
 	defer timer.Stop()
@@ -567,6 +600,12 @@ func runStep[T any](h *hold, by time.Time, words string, publish bool, step func
 			sig.cancel()
 			if !a.ok {
 				panic(a.panicked)
+			}
+			if outcome != nil && !a.known {
+				// Its signal ended by a give-up of the hold as it answered: no
+				// late answer, since its worker takes it (backlog B895's third
+				// round).
+				h.keep(outcome(a.v))
 			}
 			return a.v, true, true
 		case <-stop:

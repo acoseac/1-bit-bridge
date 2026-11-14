@@ -45,7 +45,7 @@ func TestTheVerdictsWriteIsAdmittedInOneSectionWithTheGiveUp(t *testing.T) {
 		_, admitted, answered := publishOf(h, time.Now().Add(time.Minute), func(context.Context) bool {
 			ran = true
 			return true
-		})
+		}, nil)
 		if admitted || !answered || ran {
 			t.Errorf("a write after its hold's give-up: admitted %v, answered %v, ran %v; want it refused at once, never run", admitted, answered, ran)
 		}
@@ -75,7 +75,7 @@ func TestTheVerdictsWriteIsAdmittedInOneSectionWithTheGiveUp(t *testing.T) {
 		_, admitted, answered := publishOf(h, time.Now().Add(time.Minute), func(context.Context) bool {
 			ran = true
 			return true
-		})
+		}, nil)
 		if admitted || !answered || ran {
 			t.Errorf("the check sampled before the admission lock: admitted %v, answered %v, ran %v", admitted, answered, ran)
 		}
@@ -127,7 +127,7 @@ func TestTheVerdictsWriteIsAdmittedInOneSectionWithTheGiveUp(t *testing.T) {
 			case <-time.After(5 * time.Second):
 				return false
 			}
-		})
+		}, nil)
 		select {
 		case <-gaveUp:
 		case <-time.After(10 * time.Second):

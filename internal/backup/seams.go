@@ -329,6 +329,29 @@ func SetStopBoundsForTest(fn func(dir, step string, after time.Duration) <-chan 
 	return func() { stopBounds.Store(prev) }
 }
 
+// onStepAnswered, nil in production, runs on a step's own goroutine once the
+// step has answered and published what it found, before its worker takes the
+// answer (SetOnStepAnsweredForTest).
+var onStepAnswered atomic.Pointer[func(dir, step string)]
+
+// SetOnStepAnsweredForTest installs fn as the hook a step of a verification,
+// or of any hold of a backups folder's lock, runs once it has answered,
+// before its worker takes the answer: on the step's own goroutine (the check
+// on its own thread), after the step has published what it found (knowIn,
+// takeFinding), given the snapshot where it resolves and the step's words;
+// and returns the restore, to run once every hold it stood in has ended. A
+// test parks a verification there, its step's answer made and not yet taken
+// (backlog B895's third round). It must return at once for every snapshot but
+// its test's.
+func SetOnStepAnsweredForTest(fn func(dir, step string)) (restore func()) {
+	var p *func(string, string)
+	if fn != nil {
+		p = &fn
+	}
+	prev := onStepAnswered.Swap(p)
+	return func() { onStepAnswered.Store(prev) }
+}
+
 // onVerifyEnd, nil in production, runs once a verification's worker has let
 // go of everything it held (SetOnVerifyEndForTest).
 var onVerifyEnd atomic.Pointer[func(string)]
